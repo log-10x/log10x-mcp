@@ -65,23 +65,40 @@ Same pattern — add an `mcpServers` entry with `"command": "npx"`, `"args": ["-
 
 ## Multi-environment setup
 
-To query multiple Log10x environments from a single MCP client, use `LOG10X_ENVS` instead of the single-env variables:
+To query multiple Log10x environments (prod, staging, etc.), register one MCP server per environment with a distinct name:
 
 ```json
 {
   "mcpServers": {
-    "log10x": {
+    "log10x-prod": {
       "command": "npx",
       "args": ["-y", "log10x-mcp"],
       "env": {
-        "LOG10X_ENVS": "[{\"nickname\":\"prod\",\"apiKey\":\"...\",\"envId\":\"...\"},{\"nickname\":\"staging\",\"apiKey\":\"...\",\"envId\":\"...\"}]"
+        "LOG10X_API_KEY": "prod-api-key",
+        "LOG10X_ENV_ID": "prod-env-id"
+      }
+    },
+    "log10x-staging": {
+      "command": "npx",
+      "args": ["-y", "log10x-mcp"],
+      "env": {
+        "LOG10X_API_KEY": "staging-api-key",
+        "LOG10X_ENV_ID": "staging-env-id"
       }
     }
   }
 }
 ```
 
-Then ask "check prod costs" or "what's spiking in staging?" — the AI routes to the right environment via the `environment` parameter.
+Ask "check prod costs" and your AI assistant routes to the `log10x-prod` server automatically. Each environment gets its own toolset namespaced by server name — no param juggling, no footguns.
+
+### Advanced: single-process multi-env (for 10+ environments)
+
+If you need to query many environments from a single process, use `LOG10X_ENVS` with a JSON array of `{nickname, apiKey, envId}` objects. Queries accept an `environment` parameter to route by nickname. This is more complex but avoids spawning N subprocesses.
+
+```bash
+LOG10X_ENVS='[{"nickname":"prod","apiKey":"...","envId":"..."},{"nickname":"staging","apiKey":"...","envId":"..."}]'
+```
 
 ## Usage
 
