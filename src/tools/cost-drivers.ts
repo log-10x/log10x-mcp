@@ -1,0 +1,183 @@
+/**
+ * log10x_cost_drivers — the core attribution tool.
+ *
+ * Finds patterns whose cost increase exceeds both the dollar floor
+ * and contribution gate, ranked by delta. Equivalent to `/log10x {service}`.
+ *
+ * Algorithm (ported from SlackPatternService.java):
+ * 1. Query current window bytes per pattern
+ * 2. Query 3 baseline windows (offset N, 2N, 3N days)
+ * 3. Compute delta = current cost - avg baseline cost
+ * 4. Filter: delta > $500/wk AND delta/totalDelta > 5%
+ * 5. Sort by delta descending
+ */
+
+import { z } from 'zod';
+import type { EnvConfig } from '../lib/environments.js';
+import { queryInstant } from '../lib/api.js';
+import * as pql from '../lib/promql.js';
+import { LABELS } from '../lib/promql.js';
+import { bytesToCost, parsePrometheusValue } from '../lib/cost.js';
+import { applyCostDriverGates, DEFAULT_GATES } from '../lib/gates.js';
+import { resolveMetricsEnv, resolveMetricsEnvFiltered } from '../lib/resolve-env.js';
+import {
+  fmtDollar, fmtPattern, fmtSeverity, fmtCount,
+  parseTimeframe, costPeriodLabel, type Timeframe
+} from '../lib/format.js';
+
+export const costDriversSchema = {
+  service: z.string().optional().describe("Service name to filter (e.g., 'checkout'). Omit for all services."),
+  timeRange: z.enum(['1d', '7d', '30d']).default('7d').describe('Time range to analyze'),
+  limit: z.number().min(1).max(20).default(10).describe('Max patterns to return'),
+  analyzerCost: z.number().optional().describe('SIEM ingestion cost in $/GB. Auto-detected from your profile if omitted.'),
+  environment: z.string().optional().describe('Environment nickname (for multi-env setups)'),
+};
+
+interface Pattern {
+  hash: string;
+  service: string;
+  severity: string;
+  costNow: number;
+  costBaseline: number;
+  delta: number;
+  isNew: boolean;
+  events: number;
+}
+
+export async function executeCostDrivers(
+  args: {
+    service?: string;
+    timeRange: string;
+    limit: number;
+    analyzerCost: number;
+  },
+  env: EnvConfig
+): Promise<string> {
+  const tf = parseTimeframe(args.timeRange);
+  const costPerGb = args.analyzerCost;
+  const period = costPeriodLabel(tf.days);
+
+  const filters: Record<string, string> = {};
+  if (args.service) filters[LABELS.service] = args.service;
+
+  // Resolve edge vs cloud
+  const metricsEnv = Object.keys(filters).length > 0
+    ? await resolveMetricsEnvFiltered(env, filters)
+    : await resolveMetricsEnv(env);
+
+  // Query 1: current window
+  const currentRes = await queryInstant(env, pql.bytesPerPattern(filters, metricsEnv, tf.range));
+  if (currentRes.status !== 'success' || currentRes.data.result.length === 0) {
+    return 'No pattern data available. Patterns appear after the first 24h of data collection.';
+  }
+
+  const currentByHash = new Map<string, { service: string; severity: string; bytes: number }>();
+  for (const r of currentRes.data.result) {
+    const hash = r.metric[LABELS.pattern];
+    if (!hash) continue;
+    currentByHash.set(hash, {
+      service: r.metric[LABELS.service] || '',
+      severity: r.metric[LABELS.severity] || '',
+      bytes: parsePrometheusValue(r),
+    });
+  }
+
+  // Queries 2-4: baseline windows (3 prior periods)
+  const baselineByHash = new Map<string, number[]>();
+  for (const offsetDays of tf.baselineOffsets) {
+    const baseRes = await queryInstant(env, pql.bytesPerPattern(filters, metricsEnv, tf.range, offsetDays));
+    if (baseRes.status === 'success') {
+      for (const r of baseRes.data.result) {
+        const hash = r.metric[LABELS.pattern];
+        if (!hash) continue;
+        const arr = baselineByHash.get(hash) || [];
+        arr.push(parsePrometheusValue(r));
+        baselineByHash.set(hash, arr);
+      }
+    }
+  }
+
+  // Query 5: event counts
+  const eventsRes = await queryInstant(env, pql.eventsPerPattern(filters, metricsEnv, tf.range));
+  const eventsByHash = new Map<string, number>();
+  if (eventsRes.status === 'success') {
+    for (const r of eventsRes.data.result) {
+      const hash = r.metric[LABELS.pattern];
+      if (hash) eventsByHash.set(hash, parsePrometheusValue(r));
+    }
+  }
+
+  // Build patterns with cost + delta
+  const allPatterns: Pattern[] = [];
+  let totalPositiveDelta = 0;
+
+  for (const [hash, row] of currentByHash) {
+    const costNow = bytesToCost(row.bytes, costPerGb);
+    const baseWeeks = baselineByHash.get(hash) || [];
+    const isNew = baseWeeks.length === 0;
+    const costBaseline = isNew ? 0 : bytesToCost(
+      baseWeeks.reduce((a, b) => a + b, 0) / baseWeeks.length,
+      costPerGb
+    );
+    const delta = costNow - costBaseline;
+
+    allPatterns.push({
+      hash, service: row.service, severity: row.severity,
+      costNow, costBaseline, delta, isNew,
+      events: eventsByHash.get(hash) || 0,
+    });
+
+    if (delta > 0) totalPositiveDelta += delta;
+  }
+
+  // Sort by delta descending
+  allPatterns.sort((a, b) => b.delta - a.delta);
+
+  // Apply cost driver gates
+  const drivers = applyCostDriverGates(allPatterns, totalPositiveDelta, DEFAULT_GATES);
+
+  // Format output
+  const lines: string[] = [];
+  const displayName = args.service || 'all services';
+
+  if (drivers.length > 0) {
+    const driversCost = drivers.reduce((s, d) => s + d.costNow, 0);
+    const baselineCost = drivers.reduce((s, d) => s + d.costBaseline, 0);
+    lines.push(`${displayName} — ${fmtDollar(baselineCost)} → ${fmtDollar(driversCost)}${period} (${drivers.length} cost driver${drivers.length > 1 ? 's' : ''})`);
+    lines.push('');
+
+    for (let i = 0; i < Math.min(drivers.length, args.limit); i++) {
+      const d = drivers[i];
+      const name = fmtPattern(d.hash).padEnd(35);
+      const costStr = `${fmtDollar(d.costBaseline)} → ${fmtDollar(d.costNow)}${period}`;
+      const sev = fmtSeverity(d.severity);
+      const newFlag = d.isNew ? '  NEW' : '';
+      const evtStr = d.events > 0 ? `  ${fmtCount(d.events)} events` : '';
+      lines.push(`#${i + 1}  ${name} ${costStr}   ${sev}${newFlag}${evtStr}`);
+    }
+
+    // Summary line
+    const driverPct = totalPositiveDelta > 0
+      ? Math.round((drivers.reduce((s, d) => s + d.delta, 0) / totalPositiveDelta) * 100)
+      : 0;
+    const stableCount = allPatterns.length - drivers.length;
+    lines.push('');
+    lines.push(`${drivers.length} driver${drivers.length > 1 ? 's' : ''} = ${driverPct}% of increase · ${stableCount} other pattern${stableCount !== 1 ? 's' : ''}`);
+  } else {
+    // No drivers — show top patterns by current cost
+    lines.push(`${displayName} — no cost drivers detected (${tf.label})`);
+    lines.push(`All ${allPatterns.length} patterns are within normal range.`);
+    lines.push('');
+    lines.push(`Top patterns by current cost:`);
+
+    const top = allPatterns
+      .sort((a, b) => b.costNow - a.costNow)
+      .slice(0, Math.min(5, args.limit));
+
+    for (const p of top) {
+      lines.push(`  ${fmtPattern(p.hash).padEnd(35)} ${fmtDollar(p.costNow)}${period}   ${fmtSeverity(p.severity)}`);
+    }
+  }
+
+  return lines.join('\n');
+}

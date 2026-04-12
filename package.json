@@ -1,0 +1,56 @@
+{
+  "name": "log10x-mcp",
+  "version": "1.0.0",
+  "description": "Log10x MCP Server — per-pattern log cost attribution for AI assistants (Claude, Cursor, Claude Desktop)",
+  "type": "module",
+  "main": "build/index.js",
+  "bin": {
+    "log10x-mcp": "build/index.js"
+  },
+  "files": [
+    "build",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc && chmod +x build/index.js",
+    "start": "node build/index.js",
+    "dev": "tsc --watch",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "log10x",
+    "observability",
+    "cost-attribution",
+    "logs",
+    "claude",
+    "anthropic",
+    "ai-tools"
+  ],
+  "author": "Log10x",
+  "license": "MIT",
+  "homepage": "https://log10x.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/log-10x/log10x-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/log-10x/log10x-mcp/issues"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "zod": "^3.24.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.17",
+    "typescript": "^5.8.3"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
