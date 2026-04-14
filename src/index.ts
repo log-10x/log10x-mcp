@@ -35,6 +35,19 @@ import { log } from './lib/log.js';
 import { describeToolError } from './lib/tool-errors.js';
 import { streamerQuerySchema, executeStreamerQuery } from './tools/streamer-query.js';
 import { backfillMetricSchema, executeBackfillMetric } from './tools/backfill-metric.js';
+import {
+  customerMetricsQuerySchema,
+  executeCustomerMetricsQuery,
+} from './tools/customer-metrics-query.js';
+import { discoverJoinSchema, executeDiscoverJoin } from './tools/discover-join.js';
+import {
+  correlateCrossPillarSchema,
+  executeCorrelateCrossPillar,
+} from './tools/correlate-cross-pillar.js';
+import {
+  translateMetricToPatternsSchema,
+  executeTranslateMetricToPatterns,
+} from './tools/translate-metric-to-patterns.js';
 import { getStatus } from './resources/status.js';
 
 // ── Environment + cost cache ──
@@ -105,7 +118,7 @@ async function getAnalyzerCost(env: EnvConfig, override?: number): Promise<numbe
 // ── Server ──
 
 const server = new McpServer(
-  { name: 'log10x', version: '1.3.2' },
+  { name: 'log10x', version: '1.4.0' },
   {
     instructions: `Log10x is the observability memory for the user's logs. Every log line the pipeline
 has ever seen is fingerprinted into a stable pattern identity (field-set) that stays constant across
@@ -382,9 +395,57 @@ server.tool(
 
 server.tool(
   'log10x_doctor',
-  'Run a startup health check on the Log10x MCP installation. Probes: environment configuration validity, prometheus.log10x.com reachability and auth, Reporter tier detection (Edge / Cloud / none), Storage Streamer endpoint configuration (informational), Datadog destination credentials (informational), paste endpoint reachability. Returns a markdown report with pass / warn / fail per check and remediation hints. Call this once at the start of a session to verify the install, or any time a tool returns an unexpected error and you want to isolate whether the problem is configuration or transient. **Tier prerequisites**: none. Doctor checks tier presence; it does not require any specific tier to be present.',
+  'Run a startup health check on the Log10x MCP installation. Probes: environment configuration validity, prometheus.log10x.com reachability and auth, Reporter tier detection (Edge / Cloud / none), Storage Streamer endpoint configuration (informational), Datadog destination credentials (informational), paste endpoint reachability, cross-pillar enrichment floor (v1.4, when LOG10X_CUSTOMER_METRICS_URL is set). Returns a markdown report with pass / warn / fail per check and remediation hints. Call this once at the start of a session to verify the install, or any time a tool returns an unexpected error and you want to isolate whether the problem is configuration or transient. **Tier prerequisites**: none. Doctor checks never block; missing components produce warnings with remediation hints.',
   doctorSchema,
   (args) => wrap('log10x_doctor', async () => executeDoctor(args))
+);
+
+// ── Tool: log10x_customer_metrics_query (v1.4) ──
+
+server.tool(
+  'log10x_customer_metrics_query',
+  'Low-level PromQL passthrough to the customer metric backend configured via LOG10X_CUSTOMER_METRICS_URL. Returns the raw Prometheus response shape plus metadata about which backend served the query. This is the escape hatch for cross-pillar investigations the higher-level tools don\'t cover — use it to explore the customer backend\'s label universe, run a one-off PromQL expression, or verify that a specific metric exists before correlating against it. For typical cross-pillar workflows, prefer `log10x_translate_metric_to_patterns` (customer metric → log patterns) or `log10x_correlate_cross_pillar` (bidirectional). **Tier prerequisites**: requires LOG10X_CUSTOMER_METRICS_URL configured (grafana_cloud, amp, datadog_prom, or generic_prom backend type). This tool issues exactly 1 PromQL query against the customer backend. **Example**: `{"promql": "apm_request_duration_p99{service=\\"payments-svc\\"}", "mode": "instant"}`.',
+  customerMetricsQuerySchema,
+  (args) => wrap('log10x_customer_metrics_query', async () => executeCustomerMetricsQuery(args))
+);
+
+// ── Tool: log10x_discover_join (v1.4) ──
+
+server.tool(
+  'log10x_discover_join',
+  'Auto-discover the structural join label between Log10x pattern metrics and the customer metric backend. Runs Jaccard similarity on label value sets across candidate label pairs, returns the best pair above the 0.7 threshold plus runner-ups above 0.5. The result is cached per-session keyed by (environment, customer-backend-endpoint) so the higher-level cross-pillar correlation tools can auto-run this once at session start and reuse the cached join without re-probing. Agents should normally NOT need to call this tool directly — `log10x_correlate_cross_pillar` and `log10x_translate_metric_to_patterns` call it internally. The explicit tool exists for power users who want to inspect the join universe or force a re-discovery after backend changes. When no pair crosses the threshold, returns a structured `no_join_available` response with the full probed-label matrix and recommended next actions. **Tier prerequisites**: requires LOG10X_CUSTOMER_METRICS_URL configured. This tool issues up to 12 PromQL queries (6 Log10x-side + 6 customer-side label value fetches) on first call; subsequent calls in the same session return the cached result. **Example**: `{"minimum_jaccard": 0.7}`.',
+  discoverJoinSchema,
+  (args) =>
+    wrap('log10x_discover_join', async () => {
+      const env = resolveEnv(getEnvs(), args.environment);
+      return executeDiscoverJoin(args, env);
+    })
+);
+
+// ── Tool: log10x_correlate_cross_pillar (v1.4) ──
+
+server.tool(
+  'log10x_correlate_cross_pillar',
+  'Bidirectional cross-pillar correlation with structural validation. Takes an anchor that\'s either a Log10x pattern (`anchor_type: "log10x_pattern"`) OR a customer metric expression (`anchor_type: "customer_metric"`) and returns ranked co-movers from the OTHER pillar, tiered by structural validation confidence. **Four output tiers**: `joined` (full structural overlap on join key + at least one additional label — highest confidence), `structurally_validated` (join key match but partial overlap — service-level issue affecting all instances), `validation_unavailable` (temporal match but required Log10x enrichment labels missing — unknown causality, do not drill autonomously), `temporal_coincidence` (temporal match with NO structural overlap despite having both sides\' labels — this is coincidence, not causation, and the tool explicitly flags it as such). **The structural validation phase is the differentiating capability vs every other agent observability tool in 2026.** Every temporal Pearson ranker produces false positives on workloads that share a daily cycle; cross-pillar bridge filters these out by checking whether the candidate\'s metadata labels could plausibly overlap with the anchor\'s labels. When no structural join exists at all (e.g., node-level anchors against v1.4\'s service/pod/namespace/container label set), the tool returns a structured `no_join_available` refusal with probed-label diagnostics and recommended next actions — never a fall-through to temporal-only ranking. Refusal is a feature, not a failure. **Tier prerequisites**: requires LOG10X_CUSTOMER_METRICS_URL configured AND Reporter tier with k8s_pod / k8s_container / k8s_namespace / tenx_user_service enrichments (defaults on any fluent-k8s or filebeat-k8s install). This tool issues 4-12 PromQL queries for join discovery + candidate generation + up to 8 candidate range queries for temporal scoring. **Example**: `{"anchor_type": "customer_metric", "anchor": "apm_request_duration_p99{service=\\"payments-svc\\"}", "window": "1h"}`.',
+  correlateCrossPillarSchema,
+  (args) =>
+    wrap('log10x_correlate_cross_pillar', async () => {
+      const env = resolveEnv(getEnvs(), args.environment);
+      return executeCorrelateCrossPillar(args, env);
+    })
+);
+
+// ── Tool: log10x_translate_metric_to_patterns (v1.4) ──
+
+server.tool(
+  'log10x_translate_metric_to_patterns',
+  'Preset wrapper for the customer-metric-to-log-patterns direction of cross-pillar correlation. Given a customer APM / infra / business metric, return the Log10x patterns whose rate curves correspond to the metric\'s movements, with the same four-tier structural validation as `log10x_correlate_cross_pillar`. This is the "agent looking at an APM metric asks what logs correspond" workflow, which is the most common cross-pillar direction and worth routing via a descriptively-named tool rather than through the generic bidirectional primitive. Output is identical to `correlate_cross_pillar`: joined / structurally_validated / validation_unavailable / temporal_coincidence tiers with per-candidate confidence sub-scores. **Tier prerequisites**: same as correlate_cross_pillar. Identical query cost. **Example**: `{"customer_metric": "apm_request_duration_p99{service=\\"payments-svc\\"}", "window": "1h"}`.',
+  translateMetricToPatternsSchema,
+  (args) =>
+    wrap('log10x_translate_metric_to_patterns', async () => {
+      const env = resolveEnv(getEnvs(), args.environment);
+      return executeTranslateMetricToPatterns(args, env);
+    })
 );
 
 // ── Resource: log10x://status ──
@@ -418,14 +479,18 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_resolve_batch', intent: 'Pasted-batch triage — per-pattern variable concentration + next actions' },
   { name: 'log10x_streamer_query', intent: 'Direct archive retrieval by templateHash with JS filter expressions' },
   { name: 'log10x_backfill_metric', intent: 'Create a new Datadog / Prometheus metric backfilled from Streamer archive' },
-  { name: 'log10x_doctor', intent: 'Startup health check — env config, gateway, tier, freshness, Streamer, paste endpoint' },
+  { name: 'log10x_doctor', intent: 'Startup health check — env config, gateway, tier, freshness, Streamer, paste endpoint, cross-pillar enrichment floor' },
+  { name: 'log10x_customer_metrics_query', intent: 'Direct PromQL passthrough to the customer metric backend (escape hatch for cross-pillar investigations)' },
+  { name: 'log10x_discover_join', intent: 'Auto-discover the join label between Log10x pattern metrics and the customer metric backend via Jaccard similarity' },
+  { name: 'log10x_correlate_cross_pillar', intent: 'Bidirectional cross-pillar correlation with structural validation — joined / structurally validated / temporal coincidence / validation unavailable tiering' },
+  { name: 'log10x_translate_metric_to_patterns', intent: 'Given a customer APM metric, return the Log10x patterns whose rate curves correspond — with structural validation' },
 ];
 
 async function handleCliFlags(): Promise<boolean> {
   const args = process.argv.slice(2);
   if (args.includes('--version') || args.includes('-v')) {
     // eslint-disable-next-line no-console
-    console.log('log10x-mcp 1.3.2');
+    console.log('log10x-mcp 1.4.0');
     return true;
   }
   if (args.includes('--list-tools')) {
@@ -502,7 +567,7 @@ async function main() {
     }
     throw e;
   }
-  log.info('mcp.boot', { version: '1.3.2', tools: REGISTERED_TOOLS.length });
+  log.info('mcp.boot', { version: '1.4.0', tools: REGISTERED_TOOLS.length });
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
