@@ -1,6 +1,6 @@
 {
   "name": "log10x-mcp",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "description": "Log10x MCP Server — per-pattern log cost attribution, root-cause investigation, pasted-batch triage, and archive query/backfill for AI assistants (Claude, Cursor, Claude Desktop)",
   "type": "module",
   "main": "build/index.js",

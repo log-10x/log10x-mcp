@@ -58,17 +58,32 @@ const COST_REFRESH_MS = 3_600_000; // 1 hour
  * suggestions via `describeToolError(toolName, e)`. Every tool callback
  * goes through this helper instead of the raw try/catch idiom so error
  * surfaces are uniform and self-coaching for the model.
+ *
+ * Also instruments every call with `timed()` for free observability — ops
+ * can set LOG10X_MCP_LOG_LEVEL=info to get per-tool call counts and
+ * durations on stderr without any new endpoints or resources. On errors,
+ * the raw error message is logged at debug level before `describeToolError`
+ * rewrites it, so ops can see the original text when hunting root causes.
  */
 function wrap(
   toolName: string,
   fn: () => Promise<string>
 ): Promise<{ content: { type: 'text'; text: string }[]; isError?: boolean }> {
+  const started = Date.now();
   return fn()
-    .then((text) => ({ content: [{ type: 'text' as const, text }] }))
-    .catch((e) => ({
-      content: [{ type: 'text' as const, text: describeToolError(toolName, e) }],
-      isError: true,
-    }));
+    .then((text) => {
+      log.info(`tool.${toolName}.ok`, { ms: Date.now() - started });
+      return { content: [{ type: 'text' as const, text }] };
+    })
+    .catch((e) => {
+      const raw = e instanceof Error ? e.message : String(e);
+      log.debug(`tool.${toolName}.raw_err`, { msg: raw });
+      log.warn(`tool.${toolName}.err`, { ms: Date.now() - started, msg: raw });
+      return {
+        content: [{ type: 'text' as const, text: describeToolError(toolName, e) }],
+        isError: true,
+      };
+    });
 }
 
 async function getAnalyzerCost(env: EnvConfig, override?: number): Promise<number> {
@@ -90,7 +105,7 @@ async function getAnalyzerCost(env: EnvConfig, override?: number): Promise<numbe
 // ── Server ──
 
 const server = new McpServer(
-  { name: 'log10x', version: '1.3.0' },
+  { name: 'log10x', version: '1.3.2' },
   {
     instructions: `Log10x is the observability memory for the user's logs. Every log line the pipeline
 has ever seen is fingerprinted into a stable pattern identity (field-set) that stays constant across
@@ -310,7 +325,7 @@ server.tool(
 
 server.tool(
   'log10x_investigate',
-  'Single-call root-cause investigation for any log line, pattern, service, or environment. Returns a complete causal chain (for acute spikes) or co-drifter cohort (for gradual drift) with confidence scores derived mechanically from data signal quality, plus ready-to-run verification commands. Call whenever the user asks "what is going on with X", "why is X spiking", "investigate X", "what is causing this alert", "why is X creeping", or pastes a log line / alert and asks for diagnosis. Input is the user\'s natural-language target — pass their words verbatim. The tool detects whether the input is a raw log line, pattern identity, service name, or "environment" and runs the appropriate flow. It also detects whether the trajectory is an acute spike or gradual drift and renders a different report shape for each. **Structural wedge**: surfaces log-only signals (connection pool saturation, cache eviction storms, feature-flag cache flushes, retry amplification) that APM does NOT see because they manifest as slow-success traces rather than errors — this is why the tool catches causal chains that Datadog APM, Splunk APM, and OpenTelemetry tracing structurally cannot catch. Show the entire markdown report to the user without modification. Confidence percentages decompose into named sub-scores (stat × lag × chain for acute; slope_sig × cohort for drift) — walk the user through the decomposition when asked. **Tier prerequisites**: requires Reporter pipeline (Cloud or Edge). Drift detection requires continuous historical metrics — the CLI-only mode cannot do slope-similarity correlation. For direct forensic retrieval of specific historical events, use log10x_streamer_query instead. For metric backfill from the archive, use log10x_backfill_metric instead.',
+  'Single-call root-cause investigation for any log line, pattern, service, or environment. Returns a complete causal chain (for acute spikes) or co-drifter cohort (for gradual drift) with confidence scores derived mechanically from data signal quality, plus ready-to-run verification commands. Call whenever the user asks "what is going on with X", "why is X spiking", "investigate X", "what is causing this alert", "why is X creeping", or pastes a log line / alert and asks for diagnosis. Input is the user\'s natural-language target — pass their words verbatim. The tool detects whether the input is a raw log line, pattern identity, service name, or "environment" and runs the appropriate flow. It also detects whether the trajectory is an acute spike or gradual drift and renders a different report shape for each. **Structural wedge**: surfaces log-only signals (connection pool saturation, cache eviction storms, feature-flag cache flushes, retry amplification) that APM does NOT see because they manifest as slow-success traces rather than errors — this is why the tool catches causal chains that Datadog APM, Splunk APM, and OpenTelemetry tracing structurally cannot catch. Show the entire markdown report to the user without modification. Confidence percentages decompose into named sub-scores (stat × lag × chain for acute; slope_sig × cohort for drift) — walk the user through the decomposition when asked. **Tier prerequisites**: requires Reporter pipeline (Cloud or Edge). Drift detection requires continuous historical metrics — the CLI-only mode cannot do slope-similarity correlation. For direct forensic retrieval of specific historical events, use log10x_streamer_query instead. For metric backfill from the archive, use log10x_backfill_metric instead. **Example**: `{"starting_point": "payments-svc", "window": "1h", "depth": "normal"}` for a service-mode acute-spike investigation, or `{"starting_point": "environment", "window": "7d"}` for an env-wide audit.',
   investigateSchema,
   (args) =>
     wrap('log10x_investigate', async () => {
@@ -332,7 +347,7 @@ server.tool(
 
 server.tool(
   'log10x_resolve_batch',
-  'Templatize a batch of log events and return structured per-pattern triage with variable concentrations and next-action suggestions. Call whenever the user provides a batch of events to analyze: a pasted Datadog/Splunk/Elastic query result, a Slack incident with attached log lines, kubectl logs output, any raw log text dump, or when the user asks "what patterns are in these events" / "triage this batch". Input is the events themselves (file path, inline array, or raw text). The templater runs via the Log10x paste endpoint; the response structures the batch by stable templateHash, per-pattern frequency and severity, full template structure, and per-slot variable value distribution (answering "for whom is this happening" within the batch). Each pattern in the output carries next_actions suggesting log10x_investigate (for historical correlation), log10x_streamer_query (for archive retrieval), and native SIEM commands with the dominant variable filter pre-constructed. Do NOT call for single-line resolution — use log10x_event_lookup for that. Variable naming honest: structured-log slots get high-confidence names from JSON/logfmt keys; free-text slots with natural-language tokens get medium-confidence inferred names with "(inferred)" annotation; positional-only slots get "slot N" with no hallucinated name. **Tier prerequisites**: works at any tier including CLI-only. Runs via the Log10x paste endpoint by default (raw log text leaves the caller\'s machine); set privacy_mode=true to route through a locally-installed tenx CLI instead (local-only processing, CLI install required).',
+  'Templatize a batch of log events and return structured per-pattern triage with variable concentrations and next-action suggestions. Call whenever the user provides a batch of events to analyze: a pasted Datadog/Splunk/Elastic query result, a Slack incident with attached log lines, kubectl logs output, any raw log text dump, or when the user asks "what patterns are in these events" / "triage this batch". Input is the events themselves (file path, inline array, or raw text). The templater runs via the Log10x paste endpoint; the response structures the batch by stable templateHash, per-pattern frequency and severity, full template structure, and per-slot variable value distribution (answering "for whom is this happening" within the batch). Each pattern in the output carries next_actions suggesting log10x_investigate (for historical correlation), log10x_streamer_query (for archive retrieval), and native SIEM commands with the dominant variable filter pre-constructed. Do NOT call for single-line resolution — use log10x_event_lookup for that. Variable naming honest: structured-log slots get high-confidence names from JSON/logfmt keys; free-text slots with natural-language tokens get medium-confidence inferred names with "(inferred)" annotation; positional-only slots get "slot N" with no hallucinated name. **Tier prerequisites**: works at any tier including CLI-only. Runs via the Log10x paste endpoint by default (raw log text leaves the caller\'s machine); set privacy_mode=true to route through a locally-installed tenx CLI instead (local-only processing, CLI install required). **Example**: `{"source": "text", "text": "2026-04-13 ERROR checkout-svc ...\\n2026-04-13 INFO ..."}` for a pasted Slack dump, or `{"source": "file", "path": "/tmp/incident.log", "top_n_patterns": 10}` for a local file.',
   resolveBatchSchema,
   (args) => wrap('log10x_resolve_batch', async () => executeResolveBatch(args))
 );
@@ -341,7 +356,7 @@ server.tool(
 
 server.tool(
   'log10x_streamer_query',
-  'Direct retrieval of historical events from the Log10x Storage Streamer archive (customer\'s S3 bucket) by stable pattern identity, with optional JavaScript filter expressions over event payloads. Call when: (a) the user asks for specific events matching a pattern over a time window that is OUTSIDE the SIEM\'s retention, (b) the user asks to retrieve events filtered by a variable value that is NOT a faceted dimension in their SIEM (e.g., "all payment_retry events for customer acme-corp from 90 days ago"), (c) compliance, legal, audit, or forensic workflows need exact event retrieval with stable identity. Do NOT call when the events are in the SIEM\'s current retention and can be queried natively faster, or when the user wants aggregated metrics over time instead of specific events (use log10x_backfill_metric or log10x_investigate instead). No re-ingestion. No proprietary format. The archive is in the customer\'s own S3 bucket and queries are scoped to the matching templateHash via pre-computed Bloom filters so only relevant byte ranges are fetched. Three output formats: events (raw with metadata), count (distribution summary), aggregated (bucketed time series). **Tier prerequisites**: requires Storage Streamer component deployed. Does NOT require Reporter. Returns a graceful "Streamer not configured" message when LOG10X_STREAMER_URL is unset.',
+  'Direct retrieval of historical events from the Log10x Storage Streamer archive (customer\'s S3 bucket) by stable pattern identity, with optional JavaScript filter expressions over event payloads. Call when: (a) the user asks for specific events matching a pattern over a time window that is OUTSIDE the SIEM\'s retention, (b) the user asks to retrieve events filtered by a variable value that is NOT a faceted dimension in their SIEM (e.g., "all payment_retry events for customer acme-corp from 90 days ago"), (c) compliance, legal, audit, or forensic workflows need exact event retrieval with stable identity. Do NOT call when the events are in the SIEM\'s current retention and can be queried natively faster, or when the user wants aggregated metrics over time instead of specific events (use log10x_backfill_metric or log10x_investigate instead). No re-ingestion. No proprietary format. The archive is in the customer\'s own S3 bucket and queries are scoped to the matching templateHash via pre-computed Bloom filters so only relevant byte ranges are fetched. Three output formats: events (raw with metadata), count (distribution summary), aggregated (bucketed time series). **Tier prerequisites**: requires Storage Streamer component deployed. Does NOT require Reporter. Returns a graceful "Streamer not configured" message when LOG10X_STREAMER_URL is unset. **Example**: `{"pattern": "payment_retry_attempt", "from": "now-90d", "to": "now-15d", "filters": ["event.customer_id === \\"acme-corp-inc\\""], "format": "events", "limit": 10000}` for a 90-day legal forensic retrieval.',
   streamerQuerySchema,
   (args) =>
     wrap('log10x_streamer_query', async () => {
@@ -354,7 +369,7 @@ server.tool(
 
 server.tool(
   'log10x_backfill_metric',
-  'Define a new metric (Datadog, Prometheus remote_write) backfilled with historical data from the Log10x Streamer archive, with optional forward-emission handoff to the live Reporter for continuous population going forward. Call when: (a) the user wants to define a new SLO, alert, or dashboard metric that needs historical context from day one, (b) the customer did not pre-instrument the metric in their TSDB and cannot backfill it from the TSDB\'s own data, (c) historical events are available in the Streamer archive (typically 90-180 days back), (d) the user specifies a pattern, grouping dimensions, aggregation, and destination TSDB. Do NOT call when the metric already exists in the destination TSDB. **This is the single highest-value Log10x-only capability**: Datadog log-based metrics only work on currently-indexed data; Splunk log-based metrics only work over indexed retention; Cribl can emit forward but cannot backfill from archive; Athena + remote-write Lambda is possible but represents 2-4 weeks of data-engineering per metric. This tool collapses that to ~15 minutes of config. Tool runs the Streamer query, aggregates events into bucketed time series (count / sum_bytes / unique_values / rate_per_second), emits to the destination with historical timestamps preserved, and returns a view URL. Datadog and Prometheus (via remote_write adapter) are wired today; CloudWatch/Elastic/SignalFx return "not yet implemented". **Tier prerequisites**: requires Streamer component deployed. Reporter required only when emit_forward=true (default false in this build — the Reporter config update path for forward-emission handoff is not yet wired, so current usage is one-time historical backfill).',
+  'Define a new metric (Datadog, Prometheus remote_write) backfilled with historical data from the Log10x Streamer archive, with optional forward-emission handoff to the live Reporter for continuous population going forward. Call when: (a) the user wants to define a new SLO, alert, or dashboard metric that needs historical context from day one, (b) the customer did not pre-instrument the metric in their TSDB and cannot backfill it from the TSDB\'s own data, (c) historical events are available in the Streamer archive (typically 90-180 days back), (d) the user specifies a pattern, grouping dimensions, aggregation, and destination TSDB. Do NOT call when the metric already exists in the destination TSDB. **This is the single highest-value Log10x-only capability**: Datadog log-based metrics only work on currently-indexed data; Splunk log-based metrics only work over indexed retention; Cribl can emit forward but cannot backfill from archive; Athena + remote-write Lambda is possible but represents 2-4 weeks of data-engineering per metric. This tool collapses that to ~15 minutes of config. Tool runs the Streamer query, aggregates events into bucketed time series (count / sum_bytes / unique_values / rate_per_second), emits to the destination with historical timestamps preserved, and returns a view URL. Datadog and Prometheus (via remote_write adapter) are wired today; CloudWatch/Elastic/SignalFx return "not yet implemented". **Tier prerequisites**: requires Streamer component deployed. Reporter required only when emit_forward=true (default false in this build — the Reporter config update path for forward-emission handoff is not yet wired, so current usage is one-time historical backfill). **Example**: `{"pattern": "db_query_timeout", "metric_name": "log10x.db_query_timeout_by_tenant", "destination": "datadog", "bucket_size": "5m", "aggregation": "count", "from": "now-90d", "to": "now", "group_by": ["tenant_id"]}` for a 90-day Datadog backfill grouped by tenant.',
   backfillMetricSchema,
   (args) =>
     wrap('log10x_backfill_metric', async () => {
@@ -387,35 +402,38 @@ server.resource(
 
 // ── CLI flag handlers ──
 
-const REGISTERED_TOOLS = [
-  'log10x_cost_drivers',
-  'log10x_event_lookup',
-  'log10x_savings',
-  'log10x_pattern_trend',
-  'log10x_services',
-  'log10x_exclusion_filter',
-  'log10x_dependency_check',
-  'log10x_discover_labels',
-  'log10x_top_patterns',
-  'log10x_list_by_label',
-  'log10x_investigate',
-  'log10x_investigation_get',
-  'log10x_resolve_batch',
-  'log10x_streamer_query',
-  'log10x_backfill_metric',
-  'log10x_doctor',
+const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
+  { name: 'log10x_cost_drivers', intent: 'Why did log costs spike this week — dollar-ranked patterns with week-over-week deltas' },
+  { name: 'log10x_event_lookup', intent: 'What is this single log line — resolve to stable identity + cost + AI classification' },
+  { name: 'log10x_savings', intent: 'Pipeline ROI — how much regulator / optimizer / streamer are saving in dollars' },
+  { name: 'log10x_pattern_trend', intent: 'Time series for a pattern — volume + cost history, spike detection, sparkline' },
+  { name: 'log10x_services', intent: 'List all monitored services ranked by cost' },
+  { name: 'log10x_exclusion_filter', intent: 'Generate mute file entry or SIEM drop rule for a pattern' },
+  { name: 'log10x_dependency_check', intent: 'Scan SIEM + dashboards + alerts for refs to a pattern before muting / deleting it' },
+  { name: 'log10x_discover_labels', intent: 'List available labels and their values for filter / group-by queries' },
+  { name: 'log10x_top_patterns', intent: 'Top N patterns by current cost (no baseline comparison)' },
+  { name: 'log10x_list_by_label', intent: 'Rank any label dimension by cost — "cost by namespace / tenant / severity"' },
+  { name: 'log10x_investigate', intent: 'Single-call root-cause — causal chain for acute spikes or cohort for drift' },
+  { name: 'log10x_investigation_get', intent: 'Retrieve a prior investigation by id or list recent investigations' },
+  { name: 'log10x_resolve_batch', intent: 'Pasted-batch triage — per-pattern variable concentration + next actions' },
+  { name: 'log10x_streamer_query', intent: 'Direct archive retrieval by templateHash with JS filter expressions' },
+  { name: 'log10x_backfill_metric', intent: 'Create a new Datadog / Prometheus metric backfilled from Streamer archive' },
+  { name: 'log10x_doctor', intent: 'Startup health check — env config, gateway, tier, freshness, Streamer, paste endpoint' },
 ];
 
 async function handleCliFlags(): Promise<boolean> {
   const args = process.argv.slice(2);
   if (args.includes('--version') || args.includes('-v')) {
     // eslint-disable-next-line no-console
-    console.log('log10x-mcp 1.3.1');
+    console.log('log10x-mcp 1.3.2');
     return true;
   }
   if (args.includes('--list-tools')) {
-    // eslint-disable-next-line no-console
-    console.log(REGISTERED_TOOLS.join('\n'));
+    const maxNameLen = Math.max(...REGISTERED_TOOLS.map((t) => t.name.length));
+    for (const t of REGISTERED_TOOLS) {
+      // eslint-disable-next-line no-console
+      console.log(`${t.name.padEnd(maxNameLen)}  ${t.intent}`);
+    }
     return true;
   }
   if (args.includes('--doctor')) {
@@ -484,7 +502,7 @@ async function main() {
     }
     throw e;
   }
-  log.info('mcp.boot', { version: '1.3.1', tools: REGISTERED_TOOLS.length });
+  log.info('mcp.boot', { version: '1.3.2', tools: REGISTERED_TOOLS.length });
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }

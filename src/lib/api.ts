@@ -16,7 +16,8 @@ import { log } from './log.js';
 const DEFAULT_BASE = 'https://prometheus.log10x.com';
 const DEFAULT_COST_PER_GB = 2.50;
 const RETRY_ATTEMPTS = 3;
-const RETRY_BASE_MS = 250;
+/** Base backoff in ms. Override via LOG10X_RETRY_BASE_MS (tests set to 1). */
+const RETRY_BASE_MS = parseInt(process.env.LOG10X_RETRY_BASE_MS || '250', 10) || 250;
 
 function getBase(): string {
   return process.env.LOG10X_API_BASE || DEFAULT_BASE;
@@ -37,7 +38,7 @@ function authHeader(env: EnvConfig): string {
  * Surfaces immediately on 4xx (other than 429) — these are caller errors
  * (auth, malformed query) and retrying won't help.
  */
-async function fetchWithRetry(url: string, init: RequestInit, label: string): Promise<Response> {
+export async function fetchWithRetry(url: string, init: RequestInit, label: string): Promise<Response> {
   let lastErr: Error | undefined;
   for (let attempt = 0; attempt < RETRY_ATTEMPTS; attempt++) {
     try {
