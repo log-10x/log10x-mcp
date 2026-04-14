@@ -271,6 +271,42 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
     }
   }
 
+  // Cross-pillar enrichment floor (v1.4).
+  // Only runs when a customer metric backend is configured. Verifies that
+  // the labels needed for structural validation are actually present on
+  // Log10x pattern metrics. Never fails — always degrades gracefully.
+  if (process.env.LOG10X_CUSTOMER_METRICS_URL) {
+    const required = ['tenx_user_service', 'k8s_namespace', 'k8s_pod', 'k8s_container'];
+    const missing: string[] = [];
+    for (const label of required) {
+      try {
+        const q = `count(all_events_summaryBytes_total{${label}!=""}) > 0`;
+        const res = await queryInstant(env, q);
+        if (res.status !== 'success' || res.data.result.length === 0) {
+          missing.push(label);
+        }
+      } catch {
+        missing.push(label);
+      }
+    }
+    if (missing.length === 0) {
+      checks.push({
+        name: 'cross_pillar_enrichment_floor',
+        status: 'pass',
+        message:
+          'All v1.4 enrichment labels present (tenx_user_service, k8s_namespace, k8s_pod, k8s_container). Structural validation will work for service, namespace, pod, and container-level anchors. Node-level correlation is deferred to v1.4.1.',
+      });
+    } else {
+      checks.push({
+        name: 'cross_pillar_enrichment_floor',
+        status: 'warn',
+        message: `Missing enrichment labels: ${missing.join(', ')}. Cross-pillar correlation will still work for anchor types whose required labels ARE present; affected anchor types will return validation_unavailable instead of joined confidence. Typical on non-k8s deployments or non-fluent/filebeat input formats.`,
+        fix:
+          'For k8s deployments: verify run/initialize/k8s is included in the Reporter config (it is by default) and that the forwarder passes kubernetes.pod_name / kubernetes.container_name / kubernetes.namespace_name metadata. For non-k8s deployments: no action required, the bridge operates in a narrower scope.',
+      });
+    }
+  }
+
   return checks;
 }
 

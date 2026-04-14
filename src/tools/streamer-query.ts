@@ -51,9 +51,9 @@ export const streamerQuerySchema = {
     .default(10_000)
     .describe('Max events to return. Default 10000. Queries that exceed the limit surface a truncation flag in the output.'),
   format: z
-    .enum(['events', 'count', 'aggregated'])
+    .enum(['events', 'count', 'aggregated', 'ephemeral_series'])
     .default('events')
-    .describe('`events` (raw events with metadata), `count` (total + distributions only), `aggregated` (events bucketed into a time series — use with bucket_size).'),
+    .describe('`events` (raw events with metadata), `count` (total + distributions only), `aggregated` (events bucketed into a time series — use with bucket_size), `ephemeral_series` (NEW in v1.4: returns the bucketed time series inline in Prometheus range-query shape so downstream cross-pillar correlation tools can treat it as a first-class metric without writing to a TSDB).'),
   bucket_size: z
     .string()
     .default('5m')
@@ -70,7 +70,7 @@ export async function executeStreamerQuery(
     filters?: string[];
     target?: string;
     limit: number;
-    format: 'events' | 'count' | 'aggregated';
+    format: 'events' | 'count' | 'aggregated' | 'ephemeral_series';
     bucket_size: string;
     environment?: string;
   },
@@ -88,6 +88,14 @@ export async function executeStreamerQuery(
     throw new Error(`Invalid time window: ${(e as Error).message}`);
   }
 
+  // `ephemeral_series` is a v1.4 tool-level mode that maps to the Streamer's
+  // `aggregated` format at the API level. The difference is purely in the
+  // rendering: aggregated produces a histogram bar chart for humans,
+  // ephemeral_series wraps the same buckets into a Prometheus range-query
+  // response shape for downstream tool chains.
+  const backendFormat =
+    args.format === 'ephemeral_series' ? 'aggregated' : args.format;
+
   const req: StreamerQueryRequest = {
     pattern: args.pattern,
     from: args.from,
@@ -96,7 +104,7 @@ export async function executeStreamerQuery(
     filters: args.filters,
     target: args.target,
     limit: args.limit,
-    format: args.format,
+    format: backendFormat,
     bucketSize: args.bucket_size,
   };
 
@@ -150,6 +158,49 @@ export async function executeStreamerQuery(
     } else {
       lines.push('_No count summary returned by the Streamer — the deployment may not support count-only responses._');
     }
+    return lines.join('\n');
+  }
+
+  if (args.format === 'ephemeral_series') {
+    // Tool-level ephemeral_series mode: wrap the Streamer's aggregated
+    // buckets into a Prometheus range-query response shape so downstream
+    // correlation tools can treat the result as a first-class metric.
+    // No TSDB write, no destination credentials, no backdated-ingestion
+    // concerns — the series lives in this response only.
+    lines.push(`### Ephemeral series (Prometheus range-query shape)`);
+    lines.push('');
+    const buckets = resp.buckets || [];
+    if (buckets.length === 0) {
+      lines.push('_No buckets returned. The anchor pattern may have no events in this window._');
+      return lines.join('\n');
+    }
+    const values: Array<[number, string]> = buckets.map((b) => [
+      Math.floor(new Date(b.timestamp).getTime() / 1000),
+      String(b.count),
+    ]);
+    const promResponse = {
+      status: 'success' as const,
+      data: {
+        resultType: 'matrix' as const,
+        result: [
+          {
+            metric: {
+              __name__: 'log10x_ephemeral',
+              pattern: resp.pattern,
+              source: 'streamer_archive',
+            },
+            values,
+          },
+        ],
+      },
+    };
+    lines.push('```json');
+    lines.push(JSON.stringify(promResponse, null, 2));
+    lines.push('```');
+    lines.push('');
+    lines.push(
+      `**${values.length} data points** over the window. The series is addressable as a Prometheus range-query response — pass it into \`log10x_correlate_cross_pillar\` with an anchor that's a customer metric expression, and the correlation tool will treat this ephemeral series as a candidate.`
+    );
     return lines.join('\n');
   }
 
