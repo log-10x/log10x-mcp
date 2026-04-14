@@ -199,7 +199,7 @@ export async function executeStreamerQuery(
     lines.push('```');
     lines.push('');
     lines.push(
-      `**${values.length} data points** over the window. The series is addressable as a Prometheus range-query response — pass it into \`log10x_correlate_cross_pillar\` with an anchor that's a customer metric expression, and the correlation tool will treat this ephemeral series as a candidate.`
+      `**${values.length} data points** over the window. The series is in Prometheus range-query format (resultType: "matrix"), suitable for archival or ingestion into an external TSDB. To correlate this pattern against your customer metrics, call \`log10x_correlate_cross_pillar\` with \`anchor_type: "log10x_pattern"\` and the pattern name — the correlation tool fetches the pattern's rate series directly.`
     );
     return lines.join('\n');
   }
