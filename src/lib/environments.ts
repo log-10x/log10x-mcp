@@ -3,7 +3,13 @@
  *
  * Supports single-env (LOG10X_API_KEY + LOG10X_ENV_ID) or multi-env
  * (LOG10X_ENVS JSON array with nicknames), matching the Slack bot pattern.
+ *
+ * Validation runs at startup with structured errors that name the
+ * specific env var or JSON path that failed, so a misconfigured Claude
+ * Desktop install fails fast at boot instead of crashing on first tool call.
  */
+
+import { z } from 'zod';
 
 export interface EnvConfig {
   nickname: string;
@@ -18,9 +24,17 @@ export interface Environments {
   default: EnvConfig;
 }
 
+const EnvEntrySchema = z.object({
+  nickname: z.string().min(1, 'nickname is required and cannot be empty'),
+  apiKey: z.string().min(1, 'apiKey is required and cannot be empty'),
+  envId: z.string().min(1, 'envId is required and cannot be empty'),
+});
+
+const EnvsArraySchema = z.array(EnvEntrySchema).min(1, 'LOG10X_ENVS must contain at least one environment');
+
 /**
  * Parses environment configuration from process.env.
- * Throws if no environments are configured.
+ * Throws a structured EnvironmentValidationError on misconfiguration.
  */
 export function loadEnvironments(): Environments {
   const envsJson = process.env.LOG10X_ENVS;
@@ -28,31 +42,54 @@ export function loadEnvironments(): Environments {
   let envs: EnvConfig[];
 
   if (envsJson) {
-    const parsed = JSON.parse(envsJson);
-    if (!Array.isArray(parsed) || parsed.length === 0) {
-      throw new Error('LOG10X_ENVS must be a non-empty JSON array');
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(envsJson);
+    } catch (e) {
+      throw new EnvironmentValidationError(
+        `LOG10X_ENVS is not valid JSON: ${(e as Error).message}. ` +
+          `Expected a JSON array like '[{"nickname":"prod","apiKey":"...","envId":"..."}]'.`
+      );
     }
-    envs = parsed.map((e: Record<string, string>) => {
-      if (!e.nickname || !e.apiKey || !e.envId) {
-        throw new Error(`Each env entry requires nickname, apiKey, envId. Got: ${JSON.stringify(e)}`);
-      }
-      return { nickname: e.nickname, apiKey: e.apiKey, envId: e.envId };
-    });
+    const result = EnvsArraySchema.safeParse(parsed);
+    if (!result.success) {
+      throw new EnvironmentValidationError(
+        `LOG10X_ENVS failed validation:\n` +
+          result.error.issues.map((i) => `  - ${i.path.join('.') || '<root>'}: ${i.message}`).join('\n')
+      );
+    }
+    envs = result.data;
   } else {
     const apiKey = process.env.LOG10X_API_KEY;
     const envId = process.env.LOG10X_ENV_ID;
     if (!apiKey || !envId) {
-      throw new Error('Set LOG10X_API_KEY + LOG10X_ENV_ID, or LOG10X_ENVS for multi-env');
+      throw new EnvironmentValidationError(
+        'Set LOG10X_API_KEY + LOG10X_ENV_ID for single-environment mode, ' +
+          'or LOG10X_ENVS for multi-environment mode. Get credentials from console.log10x.com → Profile → API Settings.'
+      );
     }
     envs = [{ nickname: 'default', apiKey, envId }];
   }
 
   const byNickname = new Map<string, EnvConfig>();
   for (const env of envs) {
-    byNickname.set(env.nickname.toLowerCase(), env);
+    const key = env.nickname.toLowerCase();
+    if (byNickname.has(key)) {
+      throw new EnvironmentValidationError(
+        `Duplicate environment nickname "${env.nickname}" in LOG10X_ENVS. Each nickname must be unique.`
+      );
+    }
+    byNickname.set(key, env);
   }
 
   return { all: envs, byNickname, default: envs[0] };
+}
+
+export class EnvironmentValidationError extends Error {
+  constructor(msg: string) {
+    super(msg);
+    this.name = 'EnvironmentValidationError';
+  }
 }
 
 /** Resolves an environment by nickname, or returns the default. */
