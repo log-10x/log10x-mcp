@@ -32,6 +32,106 @@ Log10x fingerprints every log line into a stable `templateHash` — a structural
 
 All tools query `prometheus.log10x.com` (for Reporter-tier tools) over HTTPS, with the same `X-10X-Auth` header used by the rest of the Log10x stack. No log scanning; sub-second at any scale.
 
+## ROI examples — three real flows
+
+These are real round-trips against the Log10x demo environment, captured during development. Every tool call below is verbatim what the model would produce; outputs are abbreviated for the README.
+
+### 1. "Why is checkout-svc cost up?" (`log10x_cost_drivers`)
+
+**Prompt**: *"Why did checkout cost spike this week?"*
+
+**Tool call**: `log10x_cost_drivers({ service: "cart", timeRange: "7d" })`
+
+**Output** (abbreviated):
+
+```
+cart — $137 → $38K/wk (4 cost drivers)
+
+#1  cart cartstore ValkeyCartStore     $51 → $13K/wk   INFO  13.3B events
+#2  shipping service Post shipping...  $34 → $12K/wk   CRIT  1.6B events
+#3  GetCartAsync called with userId    $34 → $8.7K/wk        8.7B events
+#4  AddItemAsync called with...        $18 → $4.6K/wk        4.2B events
+
+4 drivers = 49% of increase · 2442 other patterns
+
+**Next actions**:
+  - call `log10x_investigate({ starting_point: 'cart_cartstore_ValkeyCartStore' })` to trace the cause of the $13K delta on this pattern.
+  - call `log10x_dependency_check({ pattern: '...' })` before muting or dropping — blast-radius safety.
+```
+
+The next-action hints in the output literally tell the model what to do next. No prompt engineering required.
+
+### 2. "What's broken in payments-svc?" (`log10x_investigate`)
+
+**Prompt**: *"Investigate kafka — there's an alert firing."*
+
+**Tool call**: `log10x_investigate({ starting_point: "kafka", window: "1h" })`
+
+**Output** (abbreviated 8-link causal chain):
+
+```
+## Investigation: kafka, last 1h
+
+**Anchor**: cluster_metadata_Wrote_producer_snapshot... (resolved from service_name)
+**Service**: kafka
+**Inflection**: 2026-04-14T00:19:52Z UTC
+**Shape**: acute spike
+**Reporter tier**: edge
+
+### Most likely root cause
+
+Pattern: cluster_metadata_dir_tmp_kafka_logs_Rolled_new_segment...
+Confidence: 43% (stat:1.00 lag:0.43 chain:1.00)
+Why: peaked 300s before the anchor, magnitude 1.4× baseline.
+
+### Causal chain
+
+1. cluster_metadata_dir_tmp_kafka_logs_Rolled... — peaked T-300s
+2. Successfully_wrote_snapshot_org_apache_kafka...  — peaked T-300s
+3. opentelemetry_javaagent_shaded_instrumentation... — peaked T-300s
+... (8 links total, each with stat × lag × chain confidence sub-scores)
+
+### Suggested verification commands
+
+gh api /repos/<owner>/kafka/commits?since=...&until=...
+kubectl get events -n kafka --since=Xm
+dog metric query "avg:trace.kafka.requests{*} by {resource_name}" --from ...
+```
+
+The full causal chain comes back in one tool call. The model doesn't need to compose. The verification commands are pre-substituted with the inflection timestamp so the user can paste them directly.
+
+### 3. "Triage this Slack paste" (`log10x_resolve_batch`)
+
+**Prompt**: *"My teammate dumped these 12 lines from order-processing-svc into Slack — what's happening?"*
+
+**Tool call**: `log10x_resolve_batch({ source: "text", text: "..." })`
+
+**Output** (abbreviated):
+
+```
+## Batch Triage
+
+12 events, resolved into 3 distinct patterns. Templater wall time: 6.4s. Execution: Log10x paste endpoint.
+
+**Severity mix**: INFO: 7 · ERROR: 4 · WARN: 1
+
+### Top 3 patterns by interestingness
+
+**#1  checkout_svc_tenant_acme_corp_order_status_failed_reason_payment_gateway**  · 4 events (33% of batch) · interestingness 0.47
+severity: ERROR
+
+Variable concentration (top values within this batch):
+  - timestamp · 4 distinct · `1776067923000` 25%, `1776067925000` 25%, `1776067928000` 25%
+  - order · 4 distinct · `12347` 25%, `12349` 25%, `12352` 25%
+
+**Next actions**:
+  - call `log10x_investigate({ starting_point: '...' })` for historical correlation (requires Reporter tier).
+  - call `log10x_streamer_query({ pattern: '...', filters: ["event.order === \"12347\""] })` to retrieve all historical events concentrated on order=12347 (requires Streamer tier).
+  - native Datadog follow-up: `dog log search '@order:"12347"' --from now-24h` — filters to the dominant variable concentration directly in the SIEM.
+```
+
+Every pattern is ranked by an interestingness score (severity-weighted); the dominant variable is identified; ready-to-paste next-action commands are pre-constructed for both Log10x tools and the customer's SIEM. The model just needs to relay the output and ask which path the user wants to take.
+
 ## Install
 
 ### Claude Desktop

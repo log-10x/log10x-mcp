@@ -93,5 +93,17 @@ export async function executeListByLabel(
   lines.push('');
   lines.push(`  ${rows.length} row${rows.length !== 1 ? 's' : ''} · ${fmtBytes(totalBytes)} total · ${fmtDollar(totalCost)}${period}`);
 
+  if (shown[0]) {
+    lines.push('');
+    lines.push('**Next actions**:');
+    const top = shown[0];
+    if (args.label === LABELS.service || args.label === 'tenx_user_service') {
+      lines.push(`  - Drill into the top service: \`log10x_cost_drivers({ service: '${top.value}' })\` for week-over-week deltas.`);
+      lines.push(`  - Or investigate it: \`log10x_investigate({ starting_point: '${top.value}' })\`.`);
+    } else {
+      lines.push(`  - Filter cost_drivers to the top dimension: pass \`${args.label}\` value into a cost_drivers query, or call \`log10x_top_patterns\` scoped to the relevant service.`);
+    }
+  }
+
   return lines.join('\n');
 }

@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: ['18.x', '20.x', '22.x']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Unit tests
+        run: npm test
+        env:
+          # Integration tests are gated behind LOG10X_INTEGRATION_TESTS=1.
+          # CI runs unit tests only — integration tests skip cleanly.
+          LOG10X_INTEGRATION_TESTS: '0'
+
+      - name: Boot smoke (server starts and exits cleanly)
+        run: |
+          timeout 3 node build/index.js < /dev/null || code=$?
+          if [ "${code:-0}" != "0" ] && [ "${code:-0}" != "124" ]; then
+            echo "Server exited with unexpected code $code"
+            exit 1
+          fi
+        env:
+          LOG10X_API_KEY: 'ci-test-key'
+          LOG10X_ENV_ID: 'ci-test-env'
