@@ -149,8 +149,17 @@ export async function runCrossPillarCorrelation(
   if (opts.anchor.type === 'log10x_pattern') log10xQueries += 1;
   else customerQueries += 1;
 
+  // For log10x_pattern anchors, probe the pattern's metadata labels once
+  // so candidate generation can extract the join key value and structural
+  // validation can score against real anchor label values.
+  let resolvedLog10xAnchorLabels: Record<string, string> | undefined;
+  if (opts.anchor.type === 'log10x_pattern') {
+    resolvedLog10xAnchorLabels = await probeLog10xPatternLabels(opts, metric);
+    log10xQueries += 1;
+  }
+
   // ── Phase 3 — Candidate generation ──
-  const candidateNames = await generateCandidateNames(opts, metric);
+  const candidateNames = await generateCandidateNames(opts, metric, resolvedLog10xAnchorLabels);
 
   // ── Phase 4 — Temporal correlation per candidate ──
   const candidates: CrossPillarCandidate[] = [];
@@ -173,7 +182,7 @@ export async function runCrossPillarCorrelation(
     if (Math.abs(r) < minimumConfidence) continue;
 
     // ── Phase 5 — Structural validation ──
-    const structural = computeStructuralScore(opts.anchor, candidate.labels);
+    const structural = computeStructuralScore(opts.anchor, candidate.labels, resolvedLog10xAnchorLabels);
 
     const subScores: CandidateSubScores = {
       temporal: Math.abs(r),
@@ -295,9 +304,16 @@ interface CandidateNameAndLabels {
 
 async function generateCandidateNames(
   opts: CorrelateOptions,
-  metric: string
+  metric: string,
+  resolvedAnchorLabels?: Record<string, string>
 ): Promise<CandidateNameAndLabels[]> {
-  const joinValue = extractAnchorLabelValue(opts.anchor, opts.joinKey);
+  let joinValue: string | undefined;
+  if (opts.anchor.type === 'log10x_pattern') {
+    // Join value comes from the probed metadata labels.
+    joinValue = resolvedAnchorLabels?.[opts.joinKey.log10xSide];
+  } else {
+    joinValue = extractCustomerMetricLabelValue(opts.anchor, opts.joinKey);
+  }
   if (!joinValue) return [];
 
   if (opts.anchor.type === 'customer_metric') {
@@ -340,18 +356,35 @@ async function generateCandidateNames(
   return results;
 }
 
-function extractAnchorLabelValue(anchor: AnchorSpec, joinKey: JoinPair): string | undefined {
-  // Parse the anchor's PromQL expression for the join label, or for a log10x pattern anchor
-  // use the anchor name itself as the value (since it IS the pattern identity).
-  if (anchor.type === 'log10x_pattern') {
-    // When the anchor is a log10x pattern, the "value" of the join is the pattern's
-    // tenx_user_service / k8s_pod / etc. We can't know that from the pattern name alone;
-    // caller should pre-resolve it via a metadata probe, or we do a best-effort
-    // query and extract the first match. For the MVP, we probe with queryInstant.
-    return undefined; // will be resolved by caller via probeAnchorMetadata
+/**
+ * Probe a log10x pattern's metadata labels by running an instant query and
+ * reading the first series' label set. Returns the label map, or undefined
+ * if the pattern has no active series.
+ */
+async function probeLog10xPatternLabels(
+  opts: CorrelateOptions,
+  metric: string
+): Promise<Record<string, string> | undefined> {
+  const promql = `sum by (tenx_user_service, k8s_namespace, k8s_pod, k8s_container) (rate(${metric}{message_pattern="${escape(opts.anchor.value)}"}[5m]))`;
+  try {
+    const res = await queryInstant(opts.env, promql);
+    if (res.status !== 'success' || !res.data.result[0]) return undefined;
+    return res.data.result[0].metric;
+  } catch {
+    return undefined;
   }
-  // Parse PromQL label matchers from the expression.
-  const match = anchor.value.match(new RegExp(`${joinKey.customerSide}="([^"]+)"`));
+}
+
+/**
+ * Extract the join key value from a customer_metric anchor's PromQL expression.
+ *
+ * Escapes regex metacharacters in the label name and anchors on a label
+ * separator character ([{,\s]) to avoid matching a suffix like `user_service`
+ * when the join key is `service`.
+ */
+function extractCustomerMetricLabelValue(anchor: AnchorSpec, joinKey: JoinPair): string | undefined {
+  const escapedLabel = joinKey.customerSide.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = anchor.value.match(new RegExp(`(?:[{,\\s]|^)${escapedLabel}="([^"]+)"`));
   return match?.[1];
 }
 
@@ -370,12 +403,17 @@ interface StructuralScore {
  *   score = 0.5  → join key match only (partial overlap)
  *   score = 0.0  → no structural overlap despite temporal match
  *   score = null → validation couldn't run because required labels missing
+ *
+ * For `log10x_pattern` anchors, `resolvedAnchorLabels` must be supplied from the
+ * metadata probe — parsing labels from a pattern name alone is not possible.
  */
 function computeStructuralScore(
   anchor: AnchorSpec,
-  candidateLabels: Record<string, string>
+  candidateLabels: Record<string, string>,
+  resolvedAnchorLabels?: Record<string, string>
 ): StructuralScore {
-  const anchorLabels = parseAnchorLabels(anchor);
+  const anchorLabels =
+    anchor.type === 'log10x_pattern' ? resolvedAnchorLabels : parseAnchorLabels(anchor);
   if (!anchorLabels) {
     return {
       score: null,

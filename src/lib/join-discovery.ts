@@ -248,6 +248,9 @@ export async function getOrDiscoverJoin(
   const key = cacheKey(env, backend);
   const cached = sessionCache.get(key);
   if (cached) {
+    // Move to end so the LRU eviction front stays at the least-recently-used entry.
+    sessionCache.delete(key);
+    sessionCache.set(key, cached);
     return { ...cached.result, cachedForSession: true };
   }
 
