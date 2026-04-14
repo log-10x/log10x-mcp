@@ -12,7 +12,7 @@ import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { fmtDollar, fmtBytes, fmtPct, parseTimeframe, costPeriodLabel } from '../lib/format.js';
 
 export const servicesSchema = {
-  timeRange: z.enum(['1d', '7d']).default('7d').describe('Time range'),
+  timeRange: z.enum(['1d', '7d', '30d']).default('7d').describe('Time range'),
   analyzerCost: z.number().optional().describe('SIEM ingestion cost in $/GB'),
   environment: z.string().optional().describe('Environment nickname'),
 };

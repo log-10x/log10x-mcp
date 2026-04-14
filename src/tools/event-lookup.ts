@@ -168,5 +168,14 @@ async function formatResults(
   lines.push('');
   lines.push(`${rows.length} service${rows.length !== 1 ? 's' : ''} · ${fmtCount(totalEvents)} events`);
 
+  // next_action hint — if this pattern is elevated vs its own baseline, nudge toward investigate.
+  if (totalCostBase > 0 && totalCostNow > totalCostBase * 2) {
+    const pctChange = Math.round(((totalCostNow - totalCostBase) / totalCostBase) * 100);
+    lines.push('');
+    lines.push('**Next actions**:');
+    lines.push(`  - This pattern is up ${pctChange}% vs its baseline — call \`log10x_investigate({ starting_point: '${pattern}' })\` to trace the cause.`);
+    lines.push(`  - Or call \`log10x_pattern_trend({ pattern: '${pattern}' })\` for the time series.`);
+  }
+
   return lines.join('\n');
 }

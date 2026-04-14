@@ -7,6 +7,10 @@
 
 const BYTES_METRIC = 'all_events_summaryBytes_total';
 const VOLUME_METRIC = 'all_events_summaryVolume_total';
+const EMITTED_METRIC = 'emitted_events_summaryBytes_total';
+const EMITTED_OPT_METRIC = 'emitted_events_summaryOptimizedBytes_total';
+const INDEXED_METRIC = 'indexed_events_summaryBytes_total';
+const STREAMED_METRIC = 'streamed_events_summaryBytes_total';
 
 export const LABELS = {
   pattern: 'message_pattern',
@@ -120,24 +124,49 @@ export function distinctServices(range: string): string {
   return `count(count by (${LABELS.service}) (increase(${BYTES_METRIC}[${range}]) > 0))`;
 }
 
-// ── Savings queries (regulator, optimizer, streamer) ──
+// ── Savings queries — port of Grafana ROI analytics dashboard ──
+// See backend/grafana/dashboards/roi_analytics.json. Metric names MATTER.
 
-export function regulatorInput(range: string): string {
-  return `sum(increase(${BYTES_METRIC}{tenx_app="regulator",${LABELS.env}="edge"}[${range}]))`;
+/** Bytes entering the edge pipeline (reporter + regulator + optimizer input). */
+export function edgeInputBytes(range: string): string {
+  return `sum(increase(${BYTES_METRIC}{tenx_app=~"reporter|regulator|optimizer",${LABELS.env}="edge"}[${range}]))`;
 }
 
-export function regulatorOutput(range: string): string {
-  return `sum(increase(${BYTES_METRIC}{tenx_app=~"regulator|optimizer",${LABELS.env}="edge"}[${range}]))`;
+/** Bytes emitted from the edge pipeline — regulator output + optimizer compact output. */
+export function edgeEmittedBytes(range: string): string {
+  return `(sum(increase(${EMITTED_OPT_METRIC}{tenx_app="optimizer",${LABELS.env}="edge"}[${range}])) or vector(0)) + (sum(increase(${EMITTED_METRIC}{tenx_app="regulator",${LABELS.env}="edge"}[${range}])) or vector(0))`;
 }
 
-export function optimizerInput(range: string): string {
-  return `sum(increase(${BYTES_METRIC}{tenx_app="optimizer",tenx_env="edge",tenx_stage="input"}[${range}]))`;
+/** Bytes indexed into the customer's S3 by the Storage Streamer. */
+export function streamerIndexedBytes(range: string): string {
+  return `sum(increase(${INDEXED_METRIC}{tenx_app="streamer",${LABELS.env}="cloud"}[${range}]))`;
 }
 
-export function optimizerOutput(range: string): string {
-  return `sum(increase(${BYTES_METRIC}{tenx_app="optimizer",tenx_env="edge",tenx_stage="output"}[${range}]))`;
+/** Bytes actually streamed back out (i.e., served to a SIEM or dashboard). */
+export function streamerStreamedBytes(range: string): string {
+  return `sum(increase(${STREAMED_METRIC}{tenx_app="streamer",${LABELS.env}="cloud"}[${range}]))`;
 }
 
-export function streamerIndexed(range: string): string {
-  return `sum(increase(${BYTES_METRIC}{tenx_app="streamer",${LABELS.env}="cloud"}[${range}]))`;
+// ── Top patterns + list-by-label ──
+
+/** Top N patterns by bytes with service + severity labels retained. */
+export function topPatternsFull(
+  filters: Record<string, string>,
+  env: string,
+  range: string,
+  limit: number
+): string {
+  const selector = buildSelector(filters, env);
+  return `topk(${limit}, sum by (${LABELS.pattern}, ${LABELS.service}, ${LABELS.severity}) (increase(${BYTES_METRIC}{${selector}}[${range}])))`;
+}
+
+/** Bytes grouped by an arbitrary label, ranked. */
+export function bytesByLabel(
+  label: string,
+  filters: Record<string, string>,
+  env: string,
+  range: string
+): string {
+  const selector = buildSelector(filters, env);
+  return `sort_desc(sum by (${label}) (increase(${BYTES_METRIC}{${selector}}[${range}])))`;
 }
