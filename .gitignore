@@ -1,6 +1,8 @@
 node_modules/
 build/
+test-build/
 *.log
 .DS_Store
 .env
 .npmrc
+smoke-test.mjs

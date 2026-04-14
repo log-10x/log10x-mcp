@@ -105,6 +105,19 @@ export async function executeTrend(
     lines.push(`  ${renderSparkline(points)}`);
   }
 
+  // next_action hint — shape depends on what we saw.
+  const elevated = baselineCost > 0 && recentCost > baselineCost * 1.5;
+  const sustainedSlope = baselineCost > 0 && recentCost > baselineCost * 1.2 && !spikePoint;
+  if (spikePoint || elevated) {
+    lines.push('');
+    lines.push('**Next action**:');
+    lines.push(`  - Inflection or spike detected — call \`log10x_investigate({ starting_point: '${args.pattern}', window: '${args.timeRange}' })\` to trace the cause.`);
+  } else if (sustainedSlope) {
+    lines.push('');
+    lines.push('**Next action**:');
+    lines.push(`  - This pattern shows gradual drift (no discrete inflection). Call \`log10x_investigate({ starting_point: '${args.pattern}', window: '30d' })\` for slope-similarity cohort analysis and historical investigation guidance.`);
+  }
+
   return lines.join('\n');
 }
 

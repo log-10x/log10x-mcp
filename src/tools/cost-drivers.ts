@@ -163,6 +163,14 @@ export async function executeCostDrivers(
     const stableCount = allPatterns.length - drivers.length;
     lines.push('');
     lines.push(`${drivers.length} driver${drivers.length > 1 ? 's' : ''} = ${driverPct}% of increase · ${stableCount} other pattern${stableCount !== 1 ? 's' : ''}`);
+
+    // next_action hints — nudge the model toward investigate for each top driver.
+    lines.push('');
+    lines.push('**Next actions**:');
+    for (const d of drivers.slice(0, 3)) {
+      lines.push(`  - call \`log10x_investigate({ starting_point: '${d.hash}' })\` to trace the cause of the ${fmtDollar(d.delta)} delta on this pattern.`);
+    }
+    lines.push(`  - call \`log10x_dependency_check({ pattern: '${drivers[0].hash}' })\` before muting or dropping — blast-radius safety.`);
   } else {
     // No drivers — show top patterns by current cost
     lines.push(`${displayName} — no cost drivers detected (${tf.label})`);

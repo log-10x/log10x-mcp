@@ -1,22 +1,36 @@
 # Log10x MCP Server
 
-Per-pattern log cost attribution for AI assistants. Ask Claude (or any MCP-compatible AI) "why did our log costs spike this week?" and get an instant, dollar-ranked answer powered by pre-aggregated Prometheus metrics.
+Observability memory for your logs, exposed to AI assistants. Ask Claude (or any MCP-compatible AI) *"why did our log costs spike this week?"*, *"triage these 3000 events"*, *"what's causing the payments-svc error spike"*, or *"pull all payment_retry events for acme-corp from Jan 15 through Apr 15"* — and get structured answers backed by stable per-pattern identity, not best-effort clustering.
 
 ## What it does
 
-Log10x pre-aggregates per-pattern byte metrics inline, before logs hit any SIEM. This MCP server exposes that data to AI assistants as a set of tools:
+Log10x fingerprints every log line into a stable `templateHash` — a structural identity that stays constant across deploys, restarts, pod names, timestamps, and request IDs. That identity is the key to a per-pattern Prometheus time series (volume + cost) and, optionally, a Bloom-indexed S3 archive of the raw events. This MCP server exposes both surfaces to AI assistants as a set of tools:
 
-| Tool | Answers |
-|---|---|
-| `log10x_cost_drivers` | "Why did our log costs spike?" — dollar-ranked patterns with before→after deltas |
-| `log10x_event_lookup` | "What is this Payment Gateway pattern?" — cost breakdown + AI classification |
-| `log10x_savings` | "How much are we saving?" — per-app savings with annual projection |
-| `log10x_pattern_trend` | "When did this pattern start spiking?" — time series + sparkline |
-| `log10x_services` | "What services are we monitoring?" — volume + cost by service |
-| `log10x_exclusion_filter` | "How do I drop this in Datadog?" — config snippets for 14 vendors |
-| `log10x_dependency_check` | "Anything depending on this before I drop it?" — SIEM dependency scan |
+### Cost attribution and daily-habit tools
 
-The server queries `prometheus.log10x.com` over HTTPS. No log scanning, sub-second at any scale.
+| Tool | Answers | Tier |
+|---|---|---|
+| `log10x_cost_drivers` | "Why did our log costs spike?" — dollar-ranked patterns with before→after deltas, keyed by stable templateHash (Datadog Log Patterns re-cluster per query and can't do this honestly) | Reporter |
+| `log10x_event_lookup` | "What is this single log line?" — cost breakdown + AI classification | Reporter |
+| `log10x_pattern_trend` | "When did this pattern start spiking?" — time series + sparkline | Reporter |
+| `log10x_top_patterns` | "What's expensive right now?" — loudest patterns by current cost | Reporter |
+| `log10x_list_by_label` | "Cost by namespace / severity / tenant?" — group-by ranking | Reporter |
+| `log10x_services` | "What services are we monitoring?" — volume + cost by service | Reporter |
+| `log10x_discover_labels` | "What labels can I filter on?" — label universe for the session | Reporter |
+| `log10x_savings` | "How much are we saving?" — per-app savings with annual projection | Reporter |
+| `log10x_dependency_check` | "Anything depending on this before I drop it?" — SIEM dependency scan | None |
+| `log10x_exclusion_filter` | "How do I drop this in Datadog?" — config snippets for 14 vendors | None |
+
+### Investigation, triage, and archive tools (v1.3)
+
+| Tool | Answers | Tier |
+|---|---|---|
+| `log10x_investigate` | "Why is this spiking?" — single-call root-cause: anchor resolution, trajectory shape detection (acute-spike vs drift), cross-pattern lag correlation, causal chain with stat/lag/chain confidence sub-scores, drift cohort analysis, two-stage Streamer fallback, verification commands. Surfaces log-only signals (pool saturation, cache evictions, retry amplification) that APM structurally cannot see. | Reporter |
+| `log10x_resolve_batch` | "Triage these events" — paste a file / array / text dump of raw log lines and get per-pattern frequency, severity, variable concentration, and next-action suggestions. Runs via the Log10x paste endpoint; works at any tier including CLI-only. | None |
+| `log10x_streamer_query` | "Get me the actual events" — direct retrieval from the Storage Streamer archive by templateHash with JS filter expressions over event payloads. Queries the customer's own S3 via pre-computed Bloom filters. Answers forensic, audit, and out-of-retention retrieval. | Streamer |
+| `log10x_backfill_metric` | "Create a new Datadog metric backfilled with 90 days of history" — pulls historical events from the Streamer, aggregates into a bucketed time series, emits to the destination TSDB with historical timestamps preserved. Datadog + Prometheus remote_write supported today. | Streamer |
+
+All tools query `prometheus.log10x.com` (for Reporter-tier tools) over HTTPS, with the same `X-10X-Auth` header used by the rest of the Log10x stack. No log scanning; sub-second at any scale.
 
 ## Install
 
@@ -140,12 +154,36 @@ cart — $103 → $13K/wk (3 cost drivers)
 
 ## Environment variables
 
+### Reporter-tier (required for cost, trend, and investigate tools)
+
 | Variable | Required | Description |
 |---|---|---|
 | `LOG10X_API_KEY` | Yes (single-env) | Your Log10x API key |
 | `LOG10X_ENV_ID` | Yes (single-env) | Your Log10x environment ID |
 | `LOG10X_ENVS` | Yes (multi-env) | JSON array of `{nickname, apiKey, envId}` |
 | `LOG10X_API_BASE` | No | API base URL (default: `https://prometheus.log10x.com`) |
+
+### Pasted-batch triage (`log10x_resolve_batch`)
+
+| Variable | Required | Description |
+|---|---|---|
+| `LOG10X_PASTE_URL` | No | Override the Log10x paste endpoint (default: `https://meljpepqpd.execute-api.us-east-1.amazonaws.com/paste`). Body limit 100 KB. |
+
+### Storage Streamer (`log10x_streamer_query`, `log10x_backfill_metric`)
+
+| Variable | Required | Description |
+|---|---|---|
+| `LOG10X_STREAMER_URL` | Yes (Streamer tier) | Base URL of the customer's deployed Storage Streamer query endpoint (e.g., `https://streamer.<your-domain>`). When unset, Streamer-dependent tools return a graceful "not configured" message. |
+| `LOG10X_STREAMER_AUTH_HEADER` | No | Override the auth header name (default: `X-10X-Auth`, same as the Prometheus gateway). |
+| `LOG10X_STREAMER_AUTH_VALUE` | No | Override the auth header value. Default is `${apiKey}/${envId}` from the active environment. |
+
+### Metric backfill destinations (`log10x_backfill_metric`)
+
+| Variable | Required | Description |
+|---|---|---|
+| `DATADOG_API_KEY` (or `DD_API_KEY`) | Yes (Datadog destination) | Datadog API key used to POST to `/api/v2/series`. |
+| `DATADOG_SITE` | No | Datadog site (default: `datadoghq.com`, override for `datadoghq.eu`, `us5.datadoghq.com`, etc.) |
+| `PROMETHEUS_REMOTE_WRITE_URL` | Yes (Prometheus destination) | URL of a Prometheus `remote_write`-compatible adapter. The MCP posts JSON; the adapter translates to the native protobuf/Snappy wire format. |
 
 The server fetches your analyzer cost ($/GB) from your Console profile at startup and refreshes it hourly. To change it, update the cost in your profile — the server picks up the new value within an hour.
 

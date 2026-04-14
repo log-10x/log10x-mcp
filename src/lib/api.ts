@@ -91,6 +91,24 @@ export async function queryAi(
   return data.data?.ai || '';
 }
 
+/** Prometheus /api/v1/labels — list all label names in the workspace. */
+export async function fetchLabels(env: EnvConfig): Promise<string[]> {
+  const url = new URL('/api/v1/labels', getBase());
+  const res = await fetch(url.toString(), { headers: { 'X-10X-Auth': authHeader(env) } });
+  if (!res.ok) throw new Error(`Prometheus /labels HTTP ${res.status}`);
+  const data = await res.json() as { status: string; data: string[] };
+  return data.data || [];
+}
+
+/** Prometheus /api/v1/label/{name}/values — list distinct values for a label. */
+export async function fetchLabelValues(env: EnvConfig, labelName: string): Promise<string[]> {
+  const url = new URL(`/api/v1/label/${encodeURIComponent(labelName)}/values`, getBase());
+  const res = await fetch(url.toString(), { headers: { 'X-10X-Auth': authHeader(env) } });
+  if (!res.ok) throw new Error(`Prometheus /label/${labelName}/values HTTP ${res.status}`);
+  const data = await res.json() as { status: string; data: string[] };
+  return data.data || [];
+}
+
 /**
  * Fetches the user's analyzer cost ($/GB) from the Log10x REST API.
  * Stored in Auth0 user_metadata.analyzer_cost, returned by GET /api/v1/user.
