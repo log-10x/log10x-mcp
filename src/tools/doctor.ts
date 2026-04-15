@@ -119,8 +119,12 @@ function addInfrastructureChecks(checks: DoctorCheck[]): void {
       name: 'streamer_endpoint',
       status: 'warn',
       message:
-        'LOG10X_STREAMER_URL is not set. log10x_streamer_query and log10x_backfill_metric will return graceful "not configured" messages.',
-      fix: 'Deploy the Storage Streamer per https://docs.log10x.com/apps/cloud/streamer/ and set LOG10X_STREAMER_URL to its query endpoint.',
+        'Storage Streamer not reachable from this MCP install. Two possibilities: ' +
+        '(a) Streamer is deployed but LOG10X_STREAMER_URL / LOG10X_STREAMER_BUCKET env vars are unset, ' +
+        '(b) Streamer is not deployed for this customer at all. ' +
+        'Either way, log10x_streamer_query and log10x_backfill_metric cannot retrieve raw events from the S3 archive in this session. ' +
+        'For events inside SIEM hot retention (typically <7d), the fastest workaround is direct SIEM query — do not block on streamer setup.',
+      fix: 'If the Streamer is deployed: set LOG10X_STREAMER_URL to the query handler URL (e.g., the NLB) and LOG10X_STREAMER_BUCKET to the archive bucket, then restart the MCP client. If not deployed: https://doc.log10x.com/apps/cloud/streamer/',
     });
   }
 
