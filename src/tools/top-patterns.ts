@@ -61,6 +61,7 @@ export async function executeTopPatterns(
 
   const lines: string[] = [];
   lines.push(`Top ${rows.length} patterns — ${displayName} (${tf.label}) · ${fmtDollar(totalCost)}${period} total`);
+  lines.push(`⚠ These are CURRENT RANK by cost (biggest right now). This is NOT a growth/delta ranking — do not re-label as "cost drivers" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.`);
   lines.push('');
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];

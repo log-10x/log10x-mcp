@@ -21,7 +21,7 @@ import { bytesToCost, parsePrometheusValue } from '../lib/cost.js';
 import { applyCostDriverGates, DEFAULT_GATES } from '../lib/gates.js';
 import { resolveMetricsEnv, resolveMetricsEnvFiltered } from '../lib/resolve-env.js';
 import {
-  fmtDollar, fmtPattern, fmtSeverity, fmtCount,
+  fmtDollar, fmtPattern, fmtSeverity, fmtCount, fmtPct,
   parseTimeframe, costPeriodLabel, type Timeframe
 } from '../lib/format.js';
 
@@ -144,16 +144,24 @@ export async function executeCostDrivers(
     const driversCost = drivers.reduce((s, d) => s + d.costNow, 0);
     const baselineCost = drivers.reduce((s, d) => s + d.costBaseline, 0);
     lines.push(`${displayName} — ${fmtDollar(baselineCost)} → ${fmtDollar(driversCost)}${period} (${drivers.length} cost driver${drivers.length > 1 ? 's' : ''})`);
+    lines.push(`⚠ These are GROWTH deltas (current window vs prior baseline), NOT current ranking. Do not re-rank or merge with log10x_top_patterns output.`);
     lines.push('');
 
     for (let i = 0; i < Math.min(drivers.length, args.limit); i++) {
       const d = drivers[i];
       const name = fmtPattern(d.hash).padEnd(35);
       const costStr = `${fmtDollar(d.costBaseline)} → ${fmtDollar(d.costNow)}${period}`;
+      // Emit the exact delta percentage so agents do not fabricate one from before/after.
+      // NEW patterns have no baseline — show "NEW" instead of a meaningless 100%.
+      const pctStr = d.isNew
+        ? '(NEW)'
+        : d.costBaseline > 0
+          ? `(+${fmtPct(((d.costNow - d.costBaseline) / d.costBaseline) * 100)})`
+          : '(+∞%)';
       const sev = fmtSeverity(d.severity);
       const newFlag = d.isNew ? '  NEW' : '';
       const evtStr = d.events > 0 ? `  ${fmtCount(d.events)} events` : '';
-      lines.push(`#${i + 1}  ${name} ${costStr}   ${sev}${newFlag}${evtStr}`);
+      lines.push(`#${i + 1}  ${name} ${costStr} ${pctStr}   ${sev}${newFlag}${evtStr}`);
     }
 
     // Summary line
