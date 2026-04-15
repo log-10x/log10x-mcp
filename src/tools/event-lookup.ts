@@ -40,18 +40,36 @@ export async function executeEventLookup(
   // up a display form (space-separated) from top_patterns / cost_drivers and
   // passed it back in; normalize to the canonical form so the exact-match
   // selector lands.
+  const rawInput = args.pattern;
   const pattern = normalizePattern(args.pattern);
+  // Detect raw-log-line inputs BEFORE normalization (normalize strips the
+  // punctuation that identifies them). A raw line typically has spaces AND
+  // shell/URL punctuation; a canonical pattern identity has neither.
+  const looksLikeRawLogLine = /\s/.test(rawInput) && /["'{}:/]/.test(rawInput);
 
   // Current window: bytes per service for this pattern
   const currentRes = await queryInstant(env, pql.patternAcrossServices(pattern, metricsEnv, tf.range));
 
   if (currentRes.status !== 'success' || currentRes.data.result.length === 0) {
-    // Try fuzzy match with regex
-    const fuzzyPattern = pattern.replace(/[_ ]+/g, '.*');
-    const fuzzyQuery = `sum by (${LABELS.service}, ${LABELS.severity}) (increase(all_events_summaryBytes_total{${LABELS.pattern}=~"${fuzzyPattern}",${LABELS.env}="${metricsEnv}"}[${tf.range}]))`;
-    const fuzzyRes = await queryInstant(env, fuzzyQuery);
+    // Try fuzzy match with regex. Escape regex special characters AND PromQL
+    // string delimiters before building the query — raw log lines commonly
+    // contain quotes, colons, braces, and URL schemes that blow up the
+    // Prometheus query parser with HTTP 400 if passed through verbatim.
+    // Caught by sub-agent S4 (paste-triage scenario): lines with `"..."` or
+    // `{...}` 400-ed silently, leaving the agent thinking the patterns didn't
+    // exist when they just couldn't be queried.
+    const regexSafe = pattern
+      .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')  // escape regex metacharacters
+      .replace(/[_ :\-]+/g, '.*')              // re-soften separators to wildcards
+      .replace(/"/g, '.')                       // drop literal quotes (can't embed in PromQL string)
+      .slice(0, 200);                           // cap length to keep query size sane
+    const fuzzyQuery = `sum by (${LABELS.service}, ${LABELS.severity}) (increase(all_events_summaryBytes_total{${LABELS.pattern}=~".*${regexSafe}.*",${LABELS.env}="${metricsEnv}"}[${tf.range}]))`;
+    const fuzzyRes = await queryInstant(env, fuzzyQuery).catch(() => null);
 
-    if (fuzzyRes.status !== 'success' || fuzzyRes.data.result.length === 0) {
+    if (!fuzzyRes || fuzzyRes.status !== 'success' || fuzzyRes.data.result.length === 0) {
+      if (looksLikeRawLogLine) {
+        return `No match found for raw log line via pattern matcher.\n\nThis input looks like a raw log line (contains spaces + punctuation). \`log10x_event_lookup\` is for canonical pattern identities (snake_case, no punctuation). For raw-line triage, use \`log10x_resolve_batch({ events: ["<line>"] })\` which templatizes lines into pattern identities first.`;
+      }
       return `No data found for pattern "${pattern}". Check the pattern name (use underscores, e.g., Payment_Gateway_Timeout).`;
     }
     // Use fuzzy results
