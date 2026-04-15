@@ -90,14 +90,27 @@ export async function runAcuteSpikeCorrelation(opts: CorrelationOptions): Promis
   // We compute the current rate over `window` and divide by the baseline
   // (same window, shifted by baselineOffsetSeconds). We rank by magnitude
   // of rate change, anchored by the anchor direction.
+  //
+  // Both sides guarded by a MEANINGFUL absolute floor, not just the
+  // per-series noise floor. Without this guard, a baseline sum of one
+  // sample (~1 event in 1h ≈ 0.0003 events/s) can inflate the relative
+  // change to +9000% even though the absolute rate is trivial. Caught
+  // by Live-S5 sub-agent (GAPS G6): the `environment` audit flagged
+  // several patterns as "+100%" spikes that per-service reruns
+  // immediately contradicted as "nothing crossed the noise floor".
+  //
+  // The meaningful floor is 10× acuteNoiseFloor (0.01 events/s by
+  // default = ~36 events/hour), which is still very small but high
+  // enough that a relative-change ranker can't promote noise.
   const baseOffset = `${opts.baselineOffsetSeconds}s`;
   const noiseFloor = opts.thresholds.acuteNoiseFloor;
+  const meaningfulFloor = noiseFloor * 10;
 
   const topkQuery =
     `topk(20, abs(` +
-    `(sum by (${LABELS.pattern}, ${LABELS.service}, ${LABELS.severity}) (rate(${metric}{${envLabel}${scopeLabel}}[${opts.window}])) ` +
+    `(sum by (${LABELS.pattern}, ${LABELS.service}, ${LABELS.severity}) (rate(${metric}{${envLabel}${scopeLabel}}[${opts.window}])) > ${meaningfulFloor} ` +
     `/ ` +
-    `sum by (${LABELS.pattern}, ${LABELS.service}, ${LABELS.severity}) (rate(${metric}{${envLabel}${scopeLabel}}[${opts.window}] offset ${baseOffset}) > ${noiseFloor})` +
+    `sum by (${LABELS.pattern}, ${LABELS.service}, ${LABELS.severity}) (rate(${metric}{${envLabel}${scopeLabel}}[${opts.window}] offset ${baseOffset}) > ${meaningfulFloor})` +
     `) - 1))`;
 
   let queriesExecuted = 0;
