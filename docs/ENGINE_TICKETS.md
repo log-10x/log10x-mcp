@@ -6,6 +6,46 @@ Each ticket is self-contained — copy the title and body directly into whicheve
 
 ---
 
+## Ticket 0 — Streamer JSONL writer doesn't escape `\n` in the `text` field
+
+**Severity**: high. Produces subtly-broken JSONL that requires client-side workarounds.
+**Affected component**: `IndexQueryWriter` (or whatever writes the stream-worker's JSONL result files to S3 under `tenx/{target}/qr/{queryId}/*.jsonl`).
+**GAPS ID**: G12 (partial, the client-side half is fixed)
+
+### Evidence
+
+Pulled a sample JSONL file from the streamer's result bucket during G12 verification:
+```
+s3://tenx-demo-cloud-streamer-351939435334/indexing-results/tenx/app/qr/ff4ae1fc-b89c-4525-ab95-c1cc2a02d48e/wcZSyGG_nMnwQaNzc98Stg.jsonl
+```
+
+Parsed it in Node with `content.split(/\r?\n/).map(JSON.parse)`:
+- 727 non-empty lines total
+- 685 parse as valid JSON (94%)
+- **42 parse as invalid JSON** (6%) — these are mid-record fragments where the split hit an unescaped newline inside a `text` field
+- Of the 685 valid parses, only some are "real" events; the rest are the fluentd-wrapped inner shape (`{stream, log, docker, kubernetes, tenx_tag}`) which is itself valid JSON by coincidence
+
+The `text` field of real events looks like:
+```
+"text":"{\"stream\":\"stderr\",\"log\":\"2026-04-15T12:08:00.183Z\\tinfo\\tinternal/retry_sender.go:133\\tExporting failed. ..."
+```
+
+Note `\\t` is correctly escaped (because the internal JSON-in-JSON uses `\\` for its own escapes). But the OUTER record's newline escaping is wrong: when the content includes a raw `\n` from the source log, it ends up as a literal `\n` byte in the outer JSONL line, breaking the record into two.
+
+### Required fix
+
+In the writer that serializes `StreamerEvent` → JSONL, escape newlines in string field values as `\\n` before `JSON.stringify`. Or just use a standard JSON library that handles this (most do by default — custom escape logic likely introduced the bug).
+
+Test: emit an event whose `text` field contains `"line1\nline2"`. Read the output file via `split('\n').map(JSON.parse)` and assert both lines of the input appear in the same parsed record's `text` field, not split across two JSON parses.
+
+### MCP-side mitigation shipped
+
+`parseJsonl` in `src/lib/streamer-api.ts` now includes a shape guard that rejects records missing the expected event fields (timestamp, text, tenx_user_service, tenx_user_process, LevelTemplate.severity_level, MessageTemplate.message_pattern). Fluentd-wrapped fragments with only `{stream, log, docker, kubernetes, tenx_tag}` get discarded. Count / aggregated / events renders now work correctly end-to-end.
+
+When the engine writer is fixed, the shape guard becomes a defensive no-op — fragments won't exist anymore, so nothing to discard.
+
+---
+
 ## Ticket 1 — GA BLOCKER: Paste Lambda templatizer silently drops input lines
 
 **Severity**: GA blocker for the paste-triage workflow.
