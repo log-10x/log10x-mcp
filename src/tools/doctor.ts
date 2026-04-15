@@ -20,6 +20,7 @@ import { queryInstant } from '../lib/api.js';
 import { isStreamerConfigured } from '../lib/streamer-api.js';
 import { loadEnvironments, type Environments, type EnvConfig } from '../lib/environments.js';
 import { LABELS } from '../lib/promql.js';
+import { fmtBytes as formatBytes } from '../lib/format.js';
 
 export type CheckStatus = 'pass' | 'warn' | 'fail';
 
@@ -272,6 +273,157 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
         status: 'warn',
         message: `Freshness probe failed: ${(e as Error).message}`,
       });
+    }
+  }
+
+  // Observability-health signals. These run regardless of Reporter tier and
+  // surface structural issues that the agent would otherwise have to discover
+  // by hand each session. Driven by actual findings in customer acceptance
+  // testing — each check has a named source scenario in GAPS.md (C1, C2, C3).
+  //
+  // All three are single-or-double PromQL queries against the existing
+  // `all_events_summaryBytes_total{${LABELS.env}=~"edge|cloud"}` metric, so
+  // they work on any environment — no demo assumptions, no hardcoded service
+  // names, no regex libraries to maintain.
+  if (detectedTier) {
+    const tierSelector = `${LABELS.env}="${detectedTier}"`;
+
+    // C2: severity distribution sanity check.
+    // Flag environments where >99% of log volume is INFO with effectively
+    // zero ERROR/WARN/CRIT/FATAL. Two interpretations: (a) services are
+    // healthy and silent (unlikely at high volume) or (b) services aren't
+    // emitting error-level logs at all (instrumentation gap). The tool
+    // surfaces the question for the user to classify.
+    try {
+      const q = `sum by (${LABELS.severity}) (increase(all_events_summaryBytes_total{${tierSelector}}[30d]))`;
+      const res = await queryInstant(env, q);
+      if (res.status === 'success' && res.data.result.length > 0) {
+        let total = 0;
+        let infoBytes = 0;
+        let errorLikeBytes = 0; // error + warn + crit + fatal
+        for (const r of res.data.result) {
+          if (!r.value) continue;
+          const bytes = parseFloat(r.value[1]);
+          if (!Number.isFinite(bytes)) continue;
+          total += bytes;
+          const sev = (r.metric[LABELS.severity] || '').toLowerCase();
+          if (sev === 'info') infoBytes += bytes;
+          if (sev === 'error' || sev === 'warn' || sev === 'warning' || sev === 'critical' || sev === 'crit' || sev === 'fatal') {
+            errorLikeBytes += bytes;
+          }
+        }
+        if (total > 0) {
+          const infoRatio = infoBytes / total;
+          const errorRatio = errorLikeBytes / total;
+          if (infoRatio > 0.99 && errorRatio < 0.001) {
+            checks.push({
+              name: 'severity_distribution',
+              status: 'warn',
+              message: `Environment is ${Math.round(infoRatio * 100)}% INFO-severity with ${(errorRatio * 100).toFixed(2)}% error-class (ERROR/WARN/CRIT/FATAL). Two possibilities: (a) services are genuinely healthy, or (b) services aren't emitting error-level logs at all — instrumentation gap. If the latter, real problems won't surface until an incident exposes them.`,
+              fix: 'Verify that at least one of your services has emitted an ERROR or WARN in the last 30 days (pick a service you know has had issues). If the count is zero and you expected otherwise, check your logger configuration — log levels below WARN are sometimes filtered at the forwarder.',
+            });
+          } else if (errorRatio === 0 && total > 0) {
+            checks.push({
+              name: 'severity_distribution',
+              status: 'warn',
+              message: `No ERROR/WARN/CRIT/FATAL severity log volume in the last 30 days. Either nothing is failing, or error-level logs are not reaching the pipeline. Worth verifying against your incident history.`,
+            });
+          } else {
+            checks.push({
+              name: 'severity_distribution',
+              status: 'pass',
+              message: `Severity distribution healthy: ${(infoRatio * 100).toFixed(0)}% INFO, ${(errorRatio * 100).toFixed(1)}% error-class (ERROR/WARN/CRIT/FATAL).`,
+            });
+          }
+        }
+      }
+    } catch {
+      // Non-fatal; doctor never blocks on observability-health signals.
+    }
+
+    // C3: cardinality concentration.
+    // If a single pattern is >40% of environment spend, or the top 5 are
+    // >70%, there's a large-dollar opportunity for investigation or
+    // filtering. This turns "drop candidate discovery" from an agent task
+    // into an automatic doctor recommendation.
+    try {
+      const totalQ = `sum(increase(all_events_summaryBytes_total{${tierSelector}}[30d]))`;
+      const topQ = `topk(5, sum by (${LABELS.pattern}) (increase(all_events_summaryBytes_total{${tierSelector}}[30d])))`;
+      const [totalRes, topRes] = await Promise.all([
+        queryInstant(env, totalQ),
+        queryInstant(env, topQ),
+      ]);
+      const total = totalRes.status === 'success' && totalRes.data.result[0]?.value
+        ? parseFloat(totalRes.data.result[0].value[1]) : 0;
+      const topRows = topRes.status === 'success' ? topRes.data.result : [];
+      if (total > 0 && topRows.length > 0) {
+        const topBytes = topRows
+          .map((r) => r.value ? parseFloat(r.value[1]) : NaN)
+          .filter((n) => Number.isFinite(n))
+          .sort((a, b) => b - a);
+        const top1Ratio = topBytes[0] / total;
+        const top5Ratio = topBytes.reduce((s, b) => s + b, 0) / total;
+        if (top1Ratio > 0.4) {
+          checks.push({
+            name: 'cardinality_concentration',
+            status: 'warn',
+            message: `A single pattern is ${Math.round(top1Ratio * 100)}% of your 30-day log spend. If it's a DEBUG/INFO pattern, you have a large filtering opportunity; if it's an ERROR, you have an ongoing incident to investigate.`,
+            fix: 'Call log10x_top_patterns(limit=1) to see which pattern. Then log10x_investigate on it to check whether it is an incident or noise. If it is noise, log10x_dependency_check + log10x_exclusion_filter to cut cost safely.',
+          });
+        } else if (top5Ratio > 0.7) {
+          checks.push({
+            name: 'cardinality_concentration',
+            status: 'warn',
+            message: `The top 5 patterns are ${Math.round(top5Ratio * 100)}% of your 30-day log spend. Your logging cost is concentrated; investigating or filtering the top few has outsized impact.`,
+            fix: 'Call log10x_top_patterns(limit=5) and log10x_cost_drivers to identify which of the top 5 are growing vs stable. Stable-and-high is a filter candidate; growing-and-high is an investigation candidate.',
+          });
+        } else {
+          checks.push({
+            name: 'cardinality_concentration',
+            status: 'pass',
+            message: `Log spend is distributed across patterns (top 1: ${Math.round(top1Ratio * 100)}%, top 5: ${Math.round(top5Ratio * 100)}%). No single pattern dominates.`,
+          });
+        }
+      }
+    } catch {
+      // Non-fatal.
+    }
+
+    // C1: silent service detection.
+    // Find services whose 30d log volume is >100x below the environment
+    // median. Either healthy-and-quiet or instrumentation-not-reaching-pipeline
+    // (Hard-3 payment service case: $0.01/day across 27 boilerplate patterns,
+    // no business events). The check doesn't classify — it surfaces the
+    // question for the user. Uses percentile-ratio rather than a boilerplate
+    // regex so it works on any service naming convention.
+    try {
+      const perSvcQ = `sum by (${LABELS.service}) (increase(all_events_summaryBytes_total{${tierSelector},${LABELS.service}!=""}[30d]))`;
+      const res = await queryInstant(env, perSvcQ);
+      if (res.status === 'success' && res.data.result.length >= 5) {
+        const rows = res.data.result
+          .map((r) => ({
+            service: r.metric[LABELS.service] || '',
+            bytes: r.value ? parseFloat(r.value[1]) : NaN,
+          }))
+          .filter((r) => Number.isFinite(r.bytes) && r.bytes > 0)
+          .sort((a, b) => a.bytes - b.bytes);
+        if (rows.length >= 5) {
+          const medianIdx = Math.floor(rows.length / 2);
+          const median = rows[medianIdx].bytes;
+          const quiet = rows.filter((r) => r.bytes < median / 100);
+          if (quiet.length > 0 && quiet.length <= 5) {
+            const names = quiet.map((q) => `${q.service} (${formatBytes(q.bytes)})`).join(', ');
+            checks.push({
+              name: 'silent_services',
+              status: 'warn',
+              message: `${quiet.length} service${quiet.length === 1 ? ' is' : 's are'} >100× below the environment median log volume: ${names}. Either genuinely healthy and quiet, OR instrumentation is not reaching the log pipeline (the app may be emitting only OTel spans/traces, not log records). Worth verifying whichever interpretation applies.`,
+              fix: 'For each flagged service: call log10x_top_patterns({service: "<name>"}) to see what patterns it emits. If the patterns are only SDK/runtime boilerplate (service.instance.id, process.runtime.*, host.name), the service is instrumented for traces but not logs — add a logger.info/warn call on a business-event code path. If the patterns include application events, the service is genuinely quiet and this is a healthy signal.',
+            });
+          }
+        }
+      }
+    } catch {
+      // Non-fatal.
     }
   }
 
