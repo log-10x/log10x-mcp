@@ -195,21 +195,32 @@ function authHeaders(env: EnvConfig): Record<string, string> {
 export function normalizeTimeExpression(expr: string): string {
   const trimmed = expr.trim();
   if (!trimmed) throw new Error('Empty time expression');
-  if (trimmed === 'now') return 'now()';
+
+  // The engine expects runtime-evaluated JS expressions prefixed with `$=`
+  // (the template-language marker). Without the prefix, the engine treats
+  // the string as a literal and fails to parse. Verified live on the
+  // otel-demo env: CronJob-dispatched query bodies use `$=now("-5m")` /
+  // `$=now()` and run correctly; the same bodies without the prefix get
+  // silently dropped. GAPS G12 root cause (client-side half).
+  if (trimmed === 'now') return '$=now()';
 
   const rel = trimmed.match(/^now\s*([+-])\s*(\d+)\s*([smhdwMy])$/);
   if (rel) {
-    return `now("${rel[1]}${rel[2]}${rel[3]}")`;
+    return `$=now("${rel[1]}${rel[2]}${rel[3]}")`;
   }
 
-  // Already in now("-1h") form — pass through.
-  if (/^now\s*\(/.test(trimmed)) return trimmed;
+  // Already in now("-1h") form — prepend the eval prefix.
+  if (/^now\s*\(/.test(trimmed)) return `$=${trimmed}`;
 
-  // Pure digit string — already epoch millis, pass through.
+  // Already in $=now(...) form — pass through.
+  if (/^\$=now\s*\(/.test(trimmed)) return trimmed;
+
+  // Pure digit string — already epoch millis, pass through as a literal
+  // (no $= prefix — the engine treats plain millis as a value, not JS).
   if (/^\d+$/.test(trimmed)) return trimmed;
 
   // ISO8601 or any other string JavaScript's Date.parse() understands.
-  // Convert to epoch millis to work around the streamer's ISO8601 parser bug.
+  // Convert to epoch millis as a literal string.
   const parsed = Date.parse(trimmed);
   if (Number.isFinite(parsed)) {
     return String(parsed);
@@ -408,26 +419,36 @@ export async function runStreamerQuery(
   const pollMs = parseInt(process.env.LOG10X_STREAMER_POLL_MS || '1500', 10);
   const timeoutMs = parseInt(process.env.LOG10X_STREAMER_TIMEOUT_MS || '90000', 10);
 
+  // Minimal body format — matches the shape the engine's query-handler
+  // actually expects (verified live on the otel-demo env 2026-04-15).
+  // Previously the MCP sent `target`, `readContainer`, `indexContainer`,
+  // `objectStorageName`, `processingTime`, `resultSize` fields which the
+  // engine silently ignored — but the missing `name` field caused the
+  // query-handler to drop the request without any log trace. The `name`
+  // field becomes `queryName` in the engine override chain and is used
+  // as the input stream handle inside the pipeline. GAPS G12.
+  //
+  // Fields that belong in the body:
+  //   name           — logical query name, used as the stream handle
+  //   from / to      — must be `$=now(...)` runtime-eval form or epoch ms
+  //   search         — Bloom-filter-level (fast, index-scoped)
+  //   filters        — JS-expression post-filter (in-memory after decode)
+  //   writeResults   — gates JSONL output to the `qr/{queryId}/` prefix
+  //   id             — correlation key the MCP uses to poll S3 markers
+  //
+  // Fields that MUST NOT be in the body (all defaulted from handler config):
+  //   target, readContainer, indexContainer, objectStorageName,
+  //   processingTime, resultSize — sending these causes the engine to
+  //   reject the query shape and silently drop it.
   const body: Record<string, unknown> = {
     id: queryId,
-    target,
+    name: req.name || `mcp-${queryId.slice(0, 8)}`,
     from: normalizeTimeExpression(req.from),
     to: normalizeTimeExpression(req.to || 'now'),
+    search: req.search || '',
+    filters: req.filters || [],
+    writeResults: true,
   };
-  if (req.name) body.name = req.name;
-  if (req.search) body.search = req.search;
-  if (req.filters && req.filters.length > 0) body.filters = req.filters;
-  if (req.processingTimeMs != null) body.processingTime = String(req.processingTimeMs);
-  if (req.resultSizeBytes != null) body.resultSize = String(req.resultSizeBytes);
-
-  // The MCP is the out-of-band consumer that actually reads the JSONL
-  // results from S3, so it must opt into the results writer. The engine
-  // default is off to avoid paying the extra upload cost on deployments
-  // that only rely on the byte-count marker backstop used by the query
-  // coordinator. Forwarded to stream workers as a
-  // `queryObjectWriteResults=true` bootstrap arg on the stream pipeline
-  // launch via IndexQueryWriter.dispatchStreamRequests.
-  body.writeResults = true;
 
   const started = Date.now();
   await submitQuery(env, body);
