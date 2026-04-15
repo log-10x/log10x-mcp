@@ -2,7 +2,7 @@
 
 **Purpose**: persistent list of known issues, architectural observations, and deferred fixes surfaced during sub-agent acceptance testing. Kept in repo so context isn't lost across sessions or compaction events. Update this file when closing an item or adding a new one.
 
-Last update: session 2026-04-15 (continued). **Fifteen PRs merged (#6–#19)**. Most recent: PR #19 shipped cross-pillar windowed active-label discovery + namespace auto-scoping, validated end-to-end against a real opentelemetry-demo deployment. G2 (demo env is a log replay) is now CLOSED — the demo runs real microservices.
+Last update: session 2026-04-15 (continued). **Nineteen PRs merged (#6–#22) + 2 backend PRs**. Most recent: PR #22 shipped sub-day timeRanges (`15m`/`1h`/`6h`) on five tools after agent scenario 3 identified the gap live. G2 (log replay), F3a (exec_filter format), F3b (fluentd nodeSelector) all CLOSED. Cross-pillar validated end-to-end against real opentelemetry-demo — 5 sub-agent scenarios, all 12/12, one of which found a real upstream bug in the `accounting` service image.
 
 ---
 
