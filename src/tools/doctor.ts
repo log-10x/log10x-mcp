@@ -463,6 +463,99 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
     }
   }
 
+  // G9 mitigation: detect "a service's volume dropped to zero recently vs
+  // steady-state". This is the signature of the tenx-edge subprocess stale
+  // state bug caught 2026-04-15 — after a prolonged remote-write rejection
+  // (G8, now fixed), tenx-edge child processes accumulated poisoned write
+  // state that the exec_filter retry loop did not clear, so metrics stayed
+  // at zero even after the Lambda fix was deployed. Resolved by a fluentd
+  // DaemonSet rollout restart. We can't run kubectl to check for OOO errors,
+  // but we CAN spot the symptom via Prometheus: a service with non-zero
+  // volume in the last 24h but zero volume in the last 15 minutes. This is
+  // a "dark zone" signature that either means the service actually stopped
+  // producing logs OR the forwarder is silently failing.
+  if (detectedTier) {
+    try {
+      const tierSelector = `${LABELS.env}="${detectedTier}"`;
+      // Only consider services with SIGNIFICANT 24h volume (>10 MB). Boot-only
+      // infra services (aws-vpc-cni-init, wait-for-kafka, etc.) and tiny
+      // cronjobs naturally have zero 15m volume and are not "dark zones" in
+      // the incident sense — they're just quiet by design. The 10 MB floor
+      // (~60 KB/h avg) excludes those while still catching a real service
+      // that dropped from MB/h to zero.
+      const MEANINGFUL_24H_FLOOR_BYTES = 10 * 1024 * 1024;
+      const longWindowQ = `sum by (${LABELS.service}) (increase(all_events_summaryBytes_total{${tierSelector}}[24h])) > ${MEANINGFUL_24H_FLOOR_BYTES}`;
+      // Services with zero volume in the last 15m
+      const recentWindowQ = `sum by (${LABELS.service}) (increase(all_events_summaryBytes_total{${tierSelector}}[15m]))`;
+      const [longRes, recentRes] = await Promise.all([
+        queryInstant(env, longWindowQ),
+        queryInstant(env, recentWindowQ),
+      ]);
+      if (longRes.status === 'success' && recentRes.status === 'success') {
+        const longSvcVolume = new Map<string, number>();
+        for (const r of longRes.data.result) {
+          const svc = r.metric[LABELS.service];
+          const v = parseFloat(r.value?.[1] || '0');
+          if (svc) longSvcVolume.set(svc, v);
+        }
+        const recentVol = new Map<string, number>();
+        for (const r of recentRes.data.result) {
+          const svc = r.metric[LABELS.service];
+          const v = parseFloat(r.value?.[1] || '0');
+          if (svc) recentVol.set(svc, v);
+        }
+        const darkZoneServices: string[] = [];
+        for (const svc of longSvcVolume.keys()) {
+          const recent = recentVol.get(svc) || 0;
+          if (recent === 0) darkZoneServices.push(svc);
+        }
+        if (darkZoneServices.length === 0) {
+          checks.push({
+            name: 'forwarder_dark_zones',
+            status: 'pass',
+            message: 'All services with 24h history are still emitting in the last 15 minutes. No forwarder dark zones detected.',
+          });
+        } else if (darkZoneServices.length <= 3) {
+          // A small number of dark zones is normal (e.g. cronjob services, load-gen pauses).
+          checks.push({
+            name: 'forwarder_dark_zones',
+            status: 'pass',
+            message: `${darkZoneServices.length} service(s) with 24h history have zero volume in the last 15 min: ${darkZoneServices.slice(0, 3).join(', ')}. Normal if these are cronjobs / bursty / paused. Worth verifying if unexpected.`,
+          });
+        } else {
+          // Many dark zones simultaneously = forwarder pipeline problem, likely G9.
+          checks.push({
+            name: 'forwarder_dark_zones',
+            status: 'warn',
+            message: `${darkZoneServices.length} services with 24h history have zero volume in the last 15 minutes. This is the signature of a forwarder-level failure — either the fluentd/tenx-edge pipeline is rejecting writes, or the subprocess has stale state from a past remote-write error (GAPS G9). Affected services: ${darkZoneServices.slice(0, 5).join(', ')}${darkZoneServices.length > 5 ? ', ...' : ''}`,
+            fix:
+              'Check forwarder pod logs for "out of order sample" errors (`kubectl logs -n <forwarder-ns> <fluentd-pod> --tail=200 | grep -iE "out of order|400"`). If present, the write path is broken — fix it (see G8 history for the Lambda-side collision). If write errors are absent but volume is still zero, trigger a forwarder restart (`kubectl rollout restart ds/<forwarder-ds>`) to clear any stale tenx-edge subprocess state.',
+          });
+        }
+      }
+    } catch {
+      // non-fatal
+    }
+  }
+
+  // G12 mitigation: detect streamer false-negatives. We cannot run a real
+  // streamer query here without side effects, but we CAN check whether the
+  // streamer endpoint is configured AND whether the paste endpoint's
+  // health probe reports streamer index coverage for recent windows.
+  // Shipping as a placeholder that reminds the user the streamer is
+  // operationally uncertain until the engine-side false-negative and
+  // canonical-name-crash bugs (G12) are fixed.
+  if (detectedTier && process.env.LOG10X_STREAMER_URL) {
+    checks.push({
+      name: 'streamer_forensic_health',
+      status: 'warn',
+      message:
+        'Streamer endpoint is configured, but forensic retrieval has a known engine-side false-negative issue: log10x_streamer_query may return 0 events on windows where log10x_pattern_trend proves events exist, and it may crash with "MCP error -32000: Connection closed" when passed a canonical slash-underscore pattern name. Tracked as GAPS G12.',
+      fix:
+        'Until the engine-side fix lands: (1) use short pattern names or free-text search strings rather than canonical pattern identities when calling log10x_streamer_query, (2) cross-check any zero-event result against log10x_pattern_trend on the same pattern+window before concluding the archive is empty, (3) prefer log10x_event_lookup + log10x_pattern_trend for any incident reconstruction where approximate timing is acceptable.',
+    });
+  }
+
   return checks;
 }
 
