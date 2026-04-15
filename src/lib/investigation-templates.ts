@@ -144,7 +144,7 @@ export function renderAcuteSpikeReport(input: AcuteSpikeReportInput): string {
   const windowStart = Math.max(0, input.inflectionTimestamp - 900);
   const windowEnd = input.inflectionTimestamp + 900;
   lines.push('```bash');
-  lines.push(`gh api /repos/<owner>/${rootService}/commits?since=${new Date(windowStart * 1000).toISOString()}&until=${new Date(windowEnd * 1000).toISOString()}`);
+  lines.push(`gh api /repos/$GH_OWNER/${rootService}/commits?since=${new Date(windowStart * 1000).toISOString()}&until=${new Date(windowEnd * 1000).toISOString()}`);
   lines.push(`kubectl get events -n ${rootService} --since=${infMinsAgo}m`);
   lines.push(`dog metric query "avg:trace.${rootService}.requests{*} by {resource_name}" --from ${windowStart} --to ${windowEnd}`);
   lines.push('```');
@@ -257,8 +257,8 @@ export function renderDriftReport(input: DriftReportInput): string {
   const service = input.service || '<service>';
   const now = new Date();
   const monthsAgo = (n: number) => new Date(now.getTime() - n * 30 * 86400_000).toISOString().slice(0, 10);
-  lines.push(`gh api /repos/<owner>/${service}/commits?since=${monthsAgo(3)}&until=${monthsAgo(1)}`);
-  lines.push(`gh api /repos/<owner>/${service}/releases?per_page=30`);
+  lines.push(`gh api /repos/$GH_OWNER/${service}/commits?since=${monthsAgo(3)}&until=${monthsAgo(1)}`);
+  lines.push(`gh api /repos/$GH_OWNER/${service}/releases?per_page=30`);
   lines.push('# Cross-reference with feature flag changes, config updates, rollouts in the same window.');
   lines.push('```');
   lines.push('');
