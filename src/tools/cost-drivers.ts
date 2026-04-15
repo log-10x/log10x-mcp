@@ -200,8 +200,16 @@ export async function executeCostDrivers(
     }
     lines.push(`  - call \`log10x_dependency_check({ pattern: '${drivers[0].hash}' })\` before muting or dropping — blast-radius safety.`);
   } else {
-    // No drivers — show top patterns by current cost
+    // No drivers — show top patterns by current cost.
+    // Print the comparison that WAS attempted so the agent can report it correctly
+    // rather than inferring. A null result with no comparison label looks like "tool
+    // didn't run"; a null result with an explicit comparison label is an answer.
+    const comparison = args.baselineOffsetDays
+      ? `current ${tf.range} vs ${args.baselineOffsetDays}d-offset baseline`
+      : `current ${tf.range} vs 3-window avg baseline (offsets: ${tf.baselineOffsets.join('d/')}d)`;
     lines.push(`${displayName} — no cost drivers detected (${tf.label})`);
+    lines.push(`Comparison attempted: ${comparison}`);
+    lines.push(`Interpretation: no pattern crossed the delta threshold. The environment is stable vs this baseline. This is a truthful negative result, not a tool failure.`);
     lines.push(`All ${allPatterns.length} patterns are within normal range.`);
     lines.push('');
     lines.push(`Top patterns by current cost:`);
