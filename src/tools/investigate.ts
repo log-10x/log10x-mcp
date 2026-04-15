@@ -52,8 +52,8 @@ export const investigateSchema = {
     .describe('Analysis window. `1h` default for acute-spike cases; `30d` recommended for drift cases. Accepts any PromQL range string.'),
   baseline_offset: z
     .string()
-    .default('24h')
-    .describe('Offset for the baseline comparison. `24h` default (compare current window to same window 24h ago).'),
+    .optional()
+    .describe('Offset for the baseline comparison. Defaults to `24h` for short windows (acute-spike cases) and to the same value as `window` for long windows (≥7d, drift cases). Override only if you need a non-standard comparison.'),
   depth: z
     .enum(['shallow', 'normal', 'deep'])
     .default('normal')
@@ -68,7 +68,7 @@ export async function executeInvestigate(
   args: {
     starting_point: string;
     window: string;
-    baseline_offset: string;
+    baseline_offset?: string;
     depth: 'shallow' | 'normal' | 'deep';
     environment?: string;
     use_bytes: boolean;
@@ -82,9 +82,59 @@ export async function executeInvestigate(
   // directly (e.g. from tests or other tools) without the schema layer.
   // eslint-disable-next-line no-param-reassign
   if (!args.window)           (args as Record<string, unknown>).window = '1h';
-  if (!args.baseline_offset)  (args as Record<string, unknown>).baseline_offset = '24h';
   if (!args.depth)            (args as Record<string, unknown>).depth = 'normal';
   if (args.use_bytes == null) (args as Record<string, unknown>).use_bytes = false;
+  // baseline_offset default depends on window magnitude. For short windows
+  // (<= 1h), 24h-ago is the right incident baseline ("is this hour worse than
+  // yesterday this hour"). For long windows (>= 7d), 24h-ago is WORSE than
+  // useless — it compares "last 30d" to "30d shifted by 1 day" (29 of 30 days
+  // overlap, so any inflection older than the shift is invisible). Caught by
+  // sub-agent S6 (drift scenario): a $30K/mo cart regression 6 days ago was
+  // completely missed by `investigate window=30d` with default 24h baseline,
+  // while `cost_drivers` immediately surfaced it as +28,000%. The investigate
+  // drift flow would have told the user "everything is fine, ±4%".
+  //
+  // Heuristic: default baseline_offset = window for long windows, 24h for
+  // short. Matches the "this month vs last month" / "this week vs last week"
+  // convention that operators actually want.
+  // Heuristic plus backend-limit guard. Prometheus instant queries reject
+  // anything with a total time span > 32 days ("queries with long day range
+  // (32d to 95d) are currently only supported for range type queries"). That
+  // means window + offset must stay under 32d.
+  //
+  //   window  | max useful offset | chosen default
+  //   5m–1h   | 32d               | 24h  (yesterday-same-hour incident compare)
+  //   6h      | 32d               | 24h
+  //   24h     | 31d               | 24h  (yesterday same day)
+  //   7d      | 25d               | 7d   (this week vs last week)
+  //   14d     | 18d               | 14d  (this fortnight vs last)
+  //   16d     | 16d               | 16d  (exactly at the limit)
+  //   >16d    | <16d              | use cost_drivers for drift — guard below
+  //
+  // If window alone is > 16d the user should be using cost_drivers() which
+  // has its own drift-safe query path. Emit a helpful routing message.
+  let effectiveBaselineOffset: string;
+  const windowSecs = parseDurationToSeconds(args.window) || 3600;
+  if (!args.baseline_offset) {
+    const day = 86400;
+    if (windowSecs >= 7 * day && windowSecs <= 16 * day) {
+      effectiveBaselineOffset = args.window;
+    } else if (windowSecs > 16 * day) {
+      // Can't default to window without blowing the 32d limit — use 1d as
+      // best-effort and let the audit-rendering code emit a warning.
+      effectiveBaselineOffset = '1d';
+    } else {
+      effectiveBaselineOffset = '24h';
+    }
+  } else {
+    effectiveBaselineOffset = args.baseline_offset;
+  }
+  // If the combined span would exceed the 32d limit even with an explicit
+  // user offset, clamp and warn via the rendered output (we can't stop the
+  // call, but we can render a clear message on the failed path).
+  const baselineSecs = parseDurationToSeconds(effectiveBaselineOffset) || 86400;
+  const combinedSpanSecs = windowSecs + baselineSecs;
+  const exceedsPromRangeLimit = combinedSpanSecs > 32 * 86400;
 
   // ── Phase 0 — Environment resolution + metric primitive probe ──
   const metricsEnv = await resolveMetricsEnv(env);
@@ -112,10 +162,51 @@ export async function executeInvestigate(
   const metricName = useBytesMetric ? 'all_events_summaryBytes_total' : undefined;
 
   // ── Phase 1 — Anchor resolution ──
-  const resolution = await resolveAnchor(args.starting_point, env, metricsEnv, args.window, args.baseline_offset);
+  const resolution = await resolveAnchor(args.starting_point, env, metricsEnv, args.window, effectiveBaselineOffset);
 
   if (resolution.mode === 'environment') {
-    const report = await renderEnvironmentAudit(args, env, metricsEnv, investigationId, reporterTier);
+    // For windows longer than 16 days, route to cost_drivers. Two reasons:
+    //   1. Prometheus instant-query 32-day span limit makes it IMPOSSIBLE to
+    //      compare "last 30d" to "30d ago" (60d total span) in one query.
+    //   2. Even with a shorter offset like 1d, the ratio is meaningless — 29
+    //      of 30 days overlap, so any real inflection returns ≈0% change.
+    //      Caught by sub-agent S6: a $30K/mo cart regression 6 days ago was
+    //      reported as "-0%" because the comparison was 30d vs 30d-minus-1d.
+    // The correct tool for multi-week drift is cost_drivers (chunked range
+    // query path). Route explicitly rather than produce a silently-broken
+    // audit.
+    const windowExceedsAuditCapability = windowSecs > 16 * 86400;
+    if (exceedsPromRangeLimit || windowExceedsAuditCapability) {
+      const reason = exceedsPromRangeLimit
+        ? `the combined window + baseline span (${args.window} + ${effectiveBaselineOffset}) exceeds the Prometheus backend's 32-day instant-query limit`
+        : `a ${args.window} window cannot be compared against a prior ${args.window} (60d total span exceeds the backend limit), and a shorter baseline like 24h produces a ≈0% overlap comparison that silently hides multi-week regressions`;
+      const routedReport = [
+        `## Investigation: ${args.starting_point}, last ${args.window}`,
+        '',
+        `**Investigation id**: ${investigationId}`,
+        `**Result**: Routed to \`log10x_cost_drivers\`.`,
+        '',
+        `This question routes better through \`log10x_cost_drivers\`: ${reason}. \`cost_drivers\` uses a chunked range-query path that handles long-window drift correctly and produces per-service week-over-week deltas.`,
+        '',
+        '**Try instead**:',
+        `- \`log10x_cost_drivers({ timeRange: '7d' })\` for global drift ranking (week-over-week)`,
+        `- \`log10x_cost_drivers({ timeRange: '30d' })\` for monthly drift`,
+        `- \`log10x_investigate({ starting_point: 'environment', window: '7d' })\` if you want the audit layout with a backend-safe window`,
+        `- \`log10x_pattern_trend({ pattern: '<specific>', timeRange: '30d', step: '1h' })\` for a single-pattern 30-day time series`,
+      ].join('\n');
+      recordInvestigation({
+        investigationId,
+        createdAt: Date.now(),
+        startingPoint: args.starting_point,
+        environment: env.nickname,
+        reporterTier,
+        shape: 'environment',
+        report: routedReport,
+        patternsReferenced: [],
+      });
+      return routedReport;
+    }
+    const report = await renderEnvironmentAudit(args, env, metricsEnv, investigationId, reporterTier, effectiveBaselineOffset);
     recordInvestigation({
       investigationId,
       createdAt: Date.now(),
@@ -168,7 +259,7 @@ export async function executeInvestigate(
     thresholds,
     resolution.severity,
     metricName,
-    args.baseline_offset
+    effectiveBaselineOffset
   );
 
   if (shape.shape === 'flat') {
@@ -239,7 +330,7 @@ export async function executeInvestigate(
     args.window,
     metricName
   );
-  const baselineOffsetSeconds = parseDurationToSeconds(args.baseline_offset);
+  const baselineOffsetSeconds = parseDurationToSeconds(effectiveBaselineOffset);
 
   const correlation = await runAcuteSpikeCorrelation({
     env,
@@ -506,11 +597,12 @@ async function lookupPatternMeta(
 // ── Environment-wide audit ──
 
 async function renderEnvironmentAudit(
-  args: { window: string; starting_point: string; baseline_offset: string; depth: 'shallow' | 'normal' | 'deep'; environment?: string; use_bytes: boolean },
+  args: { window: string; starting_point: string; baseline_offset?: string; depth: 'shallow' | 'normal' | 'deep'; environment?: string; use_bytes: boolean },
   env: EnvConfig,
   metricsEnv: string,
   investigationId: string,
-  reporterTier: 'edge' | 'cloud' | 'unknown'
+  reporterTier: 'edge' | 'cloud' | 'unknown',
+  effectiveBaselineOffset: string
 ): Promise<string> {
   const lines: string[] = [];
   lines.push(`## Environment audit, last ${args.window}`);
@@ -541,7 +633,7 @@ async function renderEnvironmentAudit(
   const signedChangeExpr =
     `(sum by (${LABELS.pattern}, ${LABELS.service}) (rate(all_events_summaryVolume_total{${LABELS.env}="${metricsEnv}"}[${args.window}])) ` +
     `/ ` +
-    `sum by (${LABELS.pattern}, ${LABELS.service}) (rate(all_events_summaryVolume_total{${LABELS.env}="${metricsEnv}"}[${args.window}] offset ${args.baseline_offset}) > ${meaningfulBaselineFloor})` +
+    `sum by (${LABELS.pattern}, ${LABELS.service}) (rate(all_events_summaryVolume_total{${LABELS.env}="${metricsEnv}"}[${args.window}] offset ${effectiveBaselineOffset}) > ${meaningfulBaselineFloor})` +
     `) - 1`;
   try {
     const [growRes, declineRes] = await Promise.all([
@@ -579,7 +671,7 @@ async function renderEnvironmentAudit(
         const pct = (r.rc * 100).toFixed(0);
         const direction = r.rc >= 0 ? `+${pct}%` : `${pct}%`;
         const label = r.rc >= 0 ? 'grew' : 'declined';
-        lines.push(`- \`${r.pattern}\` (\`${r.service}\`) — ${label} ${direction} vs ${args.baseline_offset} ago`);
+        lines.push(`- \`${r.pattern}\` (\`${r.service}\`) — ${label} ${direction} vs ${effectiveBaselineOffset} ago`);
       }
       lines.push('');
       lines.push('**Next action**: investigate the top mover individually:');
