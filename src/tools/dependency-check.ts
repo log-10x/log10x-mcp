@@ -83,6 +83,8 @@ export function executeDependencyCheck(args: {
   const lines: string[] = [];
   lines.push(`Dependency Check — ${vc.label}`);
   lines.push('');
+  lines.push(`⚠ NO SCAN HAS BEEN RUN. This tool does NOT query your SIEM. It returns a command the user must run locally in their own terminal against their own ${vc.label} credentials. Do not report "zero dependencies" or "safe to drop" based on this output — wait for the user to paste the script's results back.`);
+  lines.push('');
   lines.push(`Check if any dashboards, alerts, or saved searches in your ${vc.label} depend on this pattern before dropping it.`);
   lines.push('');
   lines.push(`Note: ${vc.envNote}`);
