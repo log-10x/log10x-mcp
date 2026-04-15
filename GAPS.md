@@ -7,16 +7,16 @@
 | ID | Title | Owner | Severity | State |
 |---|---|---|---|---|
 | **G1** | Cloud reporter CronJob ~10% OOMKilled failure rate | Demo infra | Material | Not fixed — needs memory-limit bump + engine review |
-| **G3** | Streamer LB wired but undocumented in setup docs | Docs | Cosmetic | Not fixed — one-line README addition |
+| ~~G3~~ | Streamer LB wired but undocumented in setup docs | Docs | — | ✅ **CLOSED** — README now documents the LB URL, demo bucket, all env vars, and G12 known issues |
 | **G4** | upstream opentelemetry-demo missing libgssapi-krb5-2 | External upstream | Demo hygiene | Needs upstream issue filed |
 | **G5** | upstream opentelemetry-demo frontend shipping URL bug | External upstream | Demo hygiene | Needs upstream issue filed |
 | ~~G6~~ | env audit +100% false flags | MCP | — | ✅ **CLOSED** via PRs #25/#26/#27 |
 | **G7** | Cross-agent divergence on crashloop attribution | MCP | Material | **PARTIALLY ADDRESSED** via PRs #32/#34 recency warnings |
 | ~~G8~~ | prometheus-proxy usage metric collision | Backend | — | ✅ **CLOSED** via backend PR #55 (deployed to prod) |
-| **G9** | tenx-edge subprocess stale state after remote-write rejection | Engine | Material | **NOT fixed** — MCP doctor-check mitigation pending (see "Address the issues" section below) |
-| **G10** | Engine fingerprinter leaks high-cardinality vars into pattern identities | Engine | Material | **NOT fixed** — MCP collapse heuristic pending |
-| **G11** | Paste Lambda templatizer silently drops ~70% of input | Engine | **GA blocker** | **NOT fixed** — engine ticket required, MCP mitigation pending |
-| **G12** | Streamer forensic query — false negatives + canonical-name crash | Engine | **GA blocker** | **NOT fixed** — engine ticket required, MCP doctor-check pending |
+| **G9** | tenx-edge subprocess stale state after remote-write rejection | Engine | Material | Engine fix needed. **MCP mitigation shipped (PR #35)**: `forwarder_dark_zones` doctor check detects the signature and emits remediation hint with `kubectl rollout restart` command. |
+| **G10** | Engine fingerprinter leaks high-cardinality vars into pattern identities | Engine | Material | Engine fix needed. **MCP mitigation shipped (PR #35)**: env audit collapses 3+ same-service same-delta variants into one summary row with explanation. |
+| **G11** | Paste Lambda templatizer silently drops ~70% of input | Engine | **GA blocker** | Engine fix required. **MCP mitigation shipped (PR #35)**: `resolve_batch` emits prominent "N input lines not accounted for" warning when the gap is ≥20% of input, with workarounds. |
+| **G12** | Streamer forensic query — false negatives + canonical-name crash | Engine | **GA blocker** | Engine fix required. **MCP mitigation shipped (PR #35)**: `streamer_forensic_health` doctor check permanently warns with 3 practical workarounds until engine fix lands. |
 | **G13** | Investigate ranks historical cost, not current firing | MCP | Material | **PARTIALLY ADDRESSED** via PRs #32/#33/#34 |
 
 **Next steps for GA**:

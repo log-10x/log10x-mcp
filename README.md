@@ -276,6 +276,14 @@ cart — $103 → $13K/wk (3 cost drivers)
 | `LOG10X_STREAMER_URL` | Yes (Streamer tier) | Base URL of the customer's deployed Storage Streamer query endpoint (e.g., `https://streamer.<your-domain>`). When unset, Streamer-dependent tools return a graceful "not configured" message. |
 | `LOG10X_STREAMER_AUTH_HEADER` | No | Override the auth header name (default: `X-10X-Auth`, same as the Prometheus gateway). |
 | `LOG10X_STREAMER_AUTH_VALUE` | No | Override the auth header value. Default is `${apiKey}/${envId}` from the active environment. |
+| `LOG10X_STREAMER_TARGET` | No | Override the default target prefix under which streamer writes indexed objects (default: `app`). |
+| `LOG10X_STREAMER_INDEX_SUBPATH` | No | Override the index subpath inside the bucket (default: `indexing-results`, matching the engine's indexContainer convention). |
+| `LOG10X_STREAMER_POLL_MS` | No | Override the marker-stability poll interval (default: `1500` ms). |
+| `LOG10X_STREAMER_TIMEOUT_MS` | No | Override the query timeout (default: `90000` ms). |
+
+**Demo env streamer LB**: the otel-demo cluster has a pre-provisioned streamer LoadBalancer at `http://a2936089108bb492cb41d18cb5b75f8d-1298006809.us-east-1.elb.amazonaws.com`. Set `LOG10X_STREAMER_URL` to that value for the demo. The demo bucket is `tenx-demo-cloud-streamer-351939435334/indexing-results/`.
+
+**Known engine-side issues (GAPS G12)**: `log10x_streamer_query` has two unresolved engine-side bugs that `log10x_doctor` flags as `streamer_forensic_health` warnings: (1) it may return 0 events on windows where `log10x_pattern_trend` proves events exist, (2) it may crash with `MCP error -32000: Connection closed` when passed a canonical slash-underscore pattern name. Workarounds: use short/free-text pattern names, cross-check any zero result against `log10x_pattern_trend`, prefer `log10x_event_lookup` + `log10x_pattern_trend` for incident reconstruction where approximate timing is acceptable. See `docs/ENGINE_TICKETS.md` for the full engine-team ticket.
 
 ### Metric backfill destinations (`log10x_backfill_metric`)
 
