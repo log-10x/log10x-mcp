@@ -454,31 +454,76 @@ async function renderEnvironmentAudit(
   lines.push(`**Reporter tier**: ${reporterTier}`);
   lines.push('');
 
-  // Top 5 hottest patterns by rate change
+  // Top 5 movers by rate change, preserving direction.
+  //
+  // Previous implementation used topk(5, abs((current/baseline) - 1)) which
+  // correctly ranked by magnitude but LOST THE SIGN. A pattern going from
+  // 87 events/s (baseline) to 0 events/s (current) has rc = -1, abs(rc)=1,
+  // and renders as "+100% vs 24h ago" even though it's a -100% decline.
+  // Caught by production investigation of cart_cartstore_ValkeyCartStore
+  // during the otel-demo swap session — the pattern went to zero because
+  // of an unrelated engine bug (see GAPS G8), and the "+100%" label was
+  // the opposite of what happened. Sign loss makes the output structurally
+  // dishonest.
+  //
+  // Fix: run two separate queries — topk(5, signed_change) for biggest
+  // growths, bottomk(5, signed_change) for biggest declines — then merge
+  // and label each with its actual sign. Baseline guard retained so
+  // near-zero baselines don't amplify spurious +N% flags (GAPS G6).
+  const thresholds = (await import('../lib/thresholds.js')).DEFAULT_THRESHOLDS;
+  const meaningfulBaselineFloor = thresholds.acuteNoiseFloor * 10;
+  const signedChangeExpr =
+    `(sum by (${LABELS.pattern}, ${LABELS.service}) (rate(all_events_summaryVolume_total{${LABELS.env}="${metricsEnv}"}[${args.window}])) ` +
+    `/ ` +
+    `sum by (${LABELS.pattern}, ${LABELS.service}) (rate(all_events_summaryVolume_total{${LABELS.env}="${metricsEnv}"}[${args.window}] offset ${args.baseline_offset}) > ${meaningfulBaselineFloor})` +
+    `) - 1`;
   try {
-    const q =
-      `topk(5, abs(` +
-      `(sum by (${LABELS.pattern}, ${LABELS.service}) (rate(all_events_summaryVolume_total{${LABELS.env}="${metricsEnv}"}[${args.window}])) ` +
-      `/ ` +
-      `sum by (${LABELS.pattern}, ${LABELS.service}) (rate(all_events_summaryVolume_total{${LABELS.env}="${metricsEnv}"}[${args.window}] offset ${args.baseline_offset}))` +
-      `) - 1))`;
-    const res = await queryInstant(env, q);
-    if (res.status === 'success' && res.data.result.length > 0) {
-      lines.push('### Top movers');
-      lines.push('');
-      for (const row of res.data.result) {
+    const [growRes, declineRes] = await Promise.all([
+      queryInstant(env, `topk(5, ${signedChangeExpr})`),
+      queryInstant(env, `bottomk(5, ${signedChangeExpr})`),
+    ]);
+
+    type Row = { pattern: string; service: string; rc: number };
+    const rows: Row[] = [];
+    for (const r of [growRes, declineRes]) {
+      if (r.status !== 'success') continue;
+      for (const row of r.data.result) {
         const rc = parsePrometheusValue(row);
         if (!Number.isFinite(rc)) continue;
         const pattern = row.metric[LABELS.pattern];
-        const service = row.metric[LABELS.service];
-        const pct = (rc * 100).toFixed(0);
-        lines.push(`- \`${pattern}\` (\`${service || 'unknown'}\`) — ${rc >= 0 ? '+' : ''}${pct}% vs ${args.baseline_offset} ago`);
+        const service = row.metric[LABELS.service] || 'unknown';
+        rows.push({ pattern, service, rc });
+      }
+    }
+    // Dedupe by pattern — a row can be in both topk/bottomk if only a handful exist.
+    const seen = new Set<string>();
+    const deduped = rows.filter((r) => {
+      if (seen.has(r.pattern)) return false;
+      seen.add(r.pattern);
+      return true;
+    });
+    // Sort by absolute magnitude so the biggest movers come first.
+    deduped.sort((a, b) => Math.abs(b.rc) - Math.abs(a.rc));
+    const topMovers = deduped.slice(0, 8);
+
+    if (topMovers.length > 0) {
+      lines.push('### Top movers');
+      lines.push('');
+      for (const r of topMovers) {
+        const pct = (r.rc * 100).toFixed(0);
+        const direction = r.rc >= 0 ? `+${pct}%` : `${pct}%`;
+        const label = r.rc >= 0 ? 'grew' : 'declined';
+        lines.push(`- \`${r.pattern}\` (\`${r.service}\`) — ${label} ${direction} vs ${args.baseline_offset} ago`);
       }
       lines.push('');
       lines.push('**Next action**: investigate the top mover individually:');
       lines.push(`\`log10x_investigate({ starting_point: '<top_pattern_name>', window: '${args.window}' })\``);
+      lines.push('');
+      lines.push('_Note: declines (negative %) are real signals — a pattern that stopped firing may indicate a service crashed, a monitor was muted, or a real upstream change. Treat them the same way you treat spikes._');
     } else {
       lines.push('_No significant movement detected across the environment in this window._');
+      lines.push('');
+      lines.push(`_Top-movers pass requires the baseline-window rate to exceed ${meaningfulBaselineFloor} events/s on at least one pattern. If no pattern meets that floor, the environment is either steady-state or too sparse for meaningful delta detection. Try a longer window or investigate individual services directly._`);
     }
   } catch (e) {
     lines.push(`_Environment audit query failed: ${(e as Error).message}_`);
