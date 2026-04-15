@@ -173,11 +173,24 @@ function authHeaders(env: EnvConfig): Record<string, string> {
 }
 
 /**
- * Convert the MCP-level `from`/`to` expressions to the TenX engine syntax.
+ * Convert the MCP-level `from`/`to` expressions to a form the streamer engine
+ * reliably parses.
  *
- * The engine evaluates these as JavaScript on the server via TenXDate, so
- * `now("-1h")` / `now()` / ISO8601 strings / epoch millis all work. The MCP
- * historically accepted `now-1h` (dash form) — we translate that here.
+ * Empirical behavior of the streamer server (tested 2026-04-15 against the
+ * demo env deployment):
+ *   - `now("-1h")` / `now()`    → accepted, matches events
+ *   - epoch millis as a string  → accepted, matches events
+ *   - ISO8601 like `2026-04-15T11:00:00Z` → accepted (HTTP 200), runs the
+ *     query, returns ZERO events even when the wall-clock range should match
+ *     — the server-side TenXDate parser mishandles ISO8601 and silently
+ *     produces a non-matching range.
+ *
+ * To make ISO8601 inputs work reliably, this function converts them to epoch
+ * millis strings before they leave the MCP. `now(...)` expressions are
+ * preserved verbatim (they require server-side evaluation).
+ *
+ * Filed upstream as a streamer engine bug. The client-side conversion below
+ * is the workaround, not the fix.
  */
 export function normalizeTimeExpression(expr: string): string {
   const trimmed = expr.trim();
@@ -189,10 +202,20 @@ export function normalizeTimeExpression(expr: string): string {
     return `now("${rel[1]}${rel[2]}${rel[3]}")`;
   }
 
-  // Already in now("-1h") form.
+  // Already in now("-1h") form — pass through.
   if (/^now\s*\(/.test(trimmed)) return trimmed;
 
-  // ISO8601 or epoch millis — pass through.
+  // Pure digit string — already epoch millis, pass through.
+  if (/^\d+$/.test(trimmed)) return trimmed;
+
+  // ISO8601 or any other string JavaScript's Date.parse() understands.
+  // Convert to epoch millis to work around the streamer's ISO8601 parser bug.
+  const parsed = Date.parse(trimmed);
+  if (Number.isFinite(parsed)) {
+    return String(parsed);
+  }
+
+  // Unknown format — pass through and let the server reject it loudly.
   return trimmed;
 }
 
@@ -277,7 +300,29 @@ function parseJsonl(content: string): StreamerEvent[] {
     const trimmed = line.trim();
     if (!trimmed) continue;
     try {
-      events.push(JSON.parse(trimmed) as StreamerEvent);
+      let parsed: unknown = JSON.parse(trimmed);
+      // Defend against double-encoded events: if the JSONL line parses to
+      // a STRING (not an object), the upstream writer serialized an event
+      // to JSON, then wrapped the result in another string literal. Re-parse
+      // once to recover the real object. Seen in the otel-k8s sample where
+      // events are captured as JSON strings embedded in a fluent-bit
+      // tenx_tag field. Without this guard, downstream code that treats
+      // ev as an object throws `Cannot create property 'enrichedFields' on
+      // string '{...}'`.
+      if (typeof parsed === 'string') {
+        try {
+          const reparsed = JSON.parse(parsed);
+          if (reparsed && typeof reparsed === 'object') {
+            parsed = reparsed;
+          } else {
+            continue; // still not an object — skip this line
+          }
+        } catch {
+          continue; // double-encoded-but-not-valid-JSON; skip
+        }
+      }
+      if (!parsed || typeof parsed !== 'object') continue;
+      events.push(parsed as StreamerEvent);
     } catch {
       // Skip unparseable lines — the worker may have written a partial
       // record on the way down; the next poll will pick up the retry.

@@ -321,15 +321,41 @@ function renderEphemeralSeries(
 }
 
 function formatEvent(ev: StreamerEvent): string {
+  // The streamer returns events in two shapes depending on whether the
+  // query-handler pipeline enriched them:
+  //
+  // 1. **log10x canonical** — `text`, `severity_level`, `tenx_user_service`,
+  //    `k8s_*` fields. Present when the archive was written by a Reporter/
+  //    Regulator pipeline that had tokenization + enrichment enabled.
+  //
+  // 2. **raw fluent-bit** — `log`, `stream`, `kubernetes.namespace_name`,
+  //    `kubernetes.pod_name`, `kubernetes.container_name`. Present when the
+  //    archive holds pre-enrichment events (e.g., a fluent-bit → S3 feed
+  //    that bypassed log10x enrichment).
+  //
+  // Previously this function only handled shape 1, silently rendering
+  // empty rows for shape 2. Caught during streamer end-to-end validation
+  // on the demo env (2026-04-15). Now handles both shapes explicitly.
   const parts: string[] = [];
+  const evRec = ev as unknown as Record<string, unknown>;
+  const kube = (evRec.kubernetes ?? {}) as Record<string, unknown>;
+
   if (ev.timestamp) parts.push(`**${ev.timestamp}**`);
-  if (ev.tenx_user_service) parts.push(`service=${ev.tenx_user_service}`);
+  const service = ev.tenx_user_service
+    ?? (kube.labels && (kube.labels as Record<string, unknown>)['app.kubernetes.io/name'])
+    ?? kube.container_name;
+  if (service) parts.push(`service=${service}`);
   if (ev.severity_level) parts.push(`sev=${ev.severity_level}`);
-  if (ev.k8s_namespace) parts.push(`ns=${ev.k8s_namespace}`);
-  if (ev.k8s_pod) parts.push(`pod=${ev.k8s_pod}`);
+  else if (evRec.stream) parts.push(`stream=${evRec.stream}`);
+  const ns = ev.k8s_namespace ?? kube.namespace_name;
+  if (ns) parts.push(`ns=${ns}`);
+  const pod = ev.k8s_pod ?? kube.pod_name;
+  if (pod) parts.push(`pod=${pod}`);
   if (ev.http_code) parts.push(`http=${ev.http_code}`);
+
   const meta = parts.join(' · ');
-  const text = ev.text ? String(ev.text).replace(/\n/g, ' ').slice(0, 400) : '';
+  const rawText = ev.text ?? evRec.log ?? evRec.message ?? '';
+  const text = rawText ? String(rawText).replace(/\n/g, ' ').slice(0, 400) : '';
   return `- ${meta}\n  ${text}`;
 }
 
