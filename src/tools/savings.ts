@@ -10,6 +10,15 @@
  * The earlier version of this file used all_events_summaryBytes_total as the
  * output metric for every stage, which over-counted by a wide margin because
  * emitted/indexed/streamed are tracked on separate metrics.
+ *
+ * Streamer indexed metric has high per-series cardinality (~12k active series
+ * per env because of the index_file label). A single `sum(increase(...[7d]))`
+ * query blows the Prometheus server's query resource budget and returns 503.
+ * The workaround is to chunk the window into N × 1d queries in parallel and
+ * sum the results client-side — each 1d increase is cheap enough for the
+ * server to complete, and the total is mathematically equivalent so long as
+ * each chunk is computed per-series before summing (which preserves counter
+ * reset handling).
  */
 
 import { z } from 'zod';
@@ -38,20 +47,51 @@ export async function executeSavings(
   const storagePerGb = args.storageCost ?? DEFAULT_STORAGE_COST_PER_GB;
   const period = costPeriodLabel(tf.days);
 
+  // Streamer indexed/streamed metrics need chunked evaluation: the indexed
+  // metric's ~12k series blows a single 7d/30d `increase()` query. Issue
+  // tf.days parallel 1d-chunk queries and sum client-side.
+  const chunkOffsets = Array.from({ length: tf.days }, (_, i) => i);
+  const chunkSum = async (builder: (off: number) => string): Promise<number> => {
+    const results = await Promise.all(
+      chunkOffsets.map((off) => queryInstant(env, builder(off)).catch(() => null))
+    );
+    return results.reduce((total, res) => {
+      const v = res?.data?.result?.[0] ? parsePrometheusValue(res.data.result[0]) : 0;
+      return total + v;
+    }, 0);
+  };
+
+  // For multi-day windows, also fetch 7d in parallel to detect ramp-up
+  // (so we can flag when 7d run-rate projects significantly higher than the trailing average).
+  const fetch7d = tf.days > 7;
+  const sevenDayOffsets = Array.from({ length: 7 }, (_, i) => i);
+  const chunk7dSum = async (builder: (off: number) => string): Promise<number> => {
+    const results = await Promise.all(
+      sevenDayOffsets.map((off) => queryInstant(env, builder(off)).catch(() => null))
+    );
+    return results.reduce((total, res) => {
+      const v = res?.data?.result?.[0] ? parsePrometheusValue(res.data.result[0]) : 0;
+      return total + v;
+    }, 0);
+  };
+
   // Query all savings metrics in parallel
-  const [edgeInRes, edgeOutRes, indexedRes, streamedRes, pipeRes, svcRes] = await Promise.all([
+  const [edgeInRes, edgeOutRes, indexedBytes, streamedBytes, pipeRes, svcRes,
+         edgeIn7dRes, edgeOut7dRes, indexed7d, streamed7d] = await Promise.all([
     queryInstant(env, pql.edgeInputBytes(tf.range)).catch(() => null),
     queryInstant(env, pql.edgeEmittedBytes(tf.range)).catch(() => null),
-    queryInstant(env, pql.streamerIndexedBytes(tf.range)).catch(() => null),
-    queryInstant(env, pql.streamerStreamedBytes(tf.range)).catch(() => null),
+    chunkSum(pql.streamerIndexedBytesChunk),
+    chunkSum(pql.streamerStreamedBytesChunk),
     queryInstant(env, pql.pipelineUp()).catch(() => null),
     queryInstant(env, pql.distinctServices(tf.range)).catch(() => null),
+    fetch7d ? queryInstant(env, pql.edgeInputBytes('7d')).catch(() => null) : Promise.resolve(null),
+    fetch7d ? queryInstant(env, pql.edgeEmittedBytes('7d')).catch(() => null) : Promise.resolve(null),
+    fetch7d ? chunk7dSum(pql.streamerIndexedBytesChunk) : Promise.resolve(0),
+    fetch7d ? chunk7dSum(pql.streamerStreamedBytesChunk) : Promise.resolve(0),
   ]);
 
   const edgeIn = edgeInRes?.data?.result?.[0] ? parsePrometheusValue(edgeInRes.data.result[0]) : 0;
   const edgeEmitted = edgeOutRes?.data?.result?.[0] ? parsePrometheusValue(edgeOutRes.data.result[0]) : 0;
-  const indexedBytes = indexedRes?.data?.result?.[0] ? parsePrometheusValue(indexedRes.data.result[0]) : 0;
-  const streamedBytes = streamedRes?.data?.result?.[0] ? parsePrometheusValue(streamedRes.data.result[0]) : 0;
   const pipeCount = pipeRes?.data?.result?.[0] ? parsePrometheusValue(pipeRes.data.result[0]) : 0;
   const svcCount = svcRes?.data?.result?.[0] ? parsePrometheusValue(svcRes.data.result[0]) : 0;
 
@@ -87,6 +127,25 @@ export async function executeSavings(
   } else {
     lines.push('');
     lines.push(`  Total: ${fmtDollar(totalSaved)}${period} · ${fmtDollar(annualProjection)}/yr projected`);
+
+    // When querying a multi-day window, compare to the 7d run-rate to catch ramp-up environments.
+    // If the 7d projection is >2× the trailing-average projection, flag it.
+    if (fetch7d && edgeIn7dRes) {
+      const edgeIn7d = edgeIn7dRes?.data?.result?.[0] ? parsePrometheusValue(edgeIn7dRes.data.result[0]) : 0;
+      const edgeOut7d = edgeOut7dRes?.data?.result?.[0] ? parsePrometheusValue(edgeOut7dRes.data.result[0]) : 0;
+      const edgeReduced7d = Math.max(0, edgeIn7d - edgeOut7d);
+      const edge7dSavings = bytesToCost(edgeReduced7d, costPerGb);
+      const streamer7dSavings = Math.max(
+        0,
+        bytesToCost(indexed7d as number, costPerGb - storagePerGb) - bytesToCost(streamed7d as number, costPerGb)
+      );
+      const total7d = edge7dSavings + streamer7dSavings;
+      const annual7d = total7d * (365 / 7);
+      if (annual7d > annualProjection * 2) {
+        lines.push('');
+        lines.push(`  **Run-rate note**: The last 7 days project to ${fmtDollar(annual7d)}/yr — ${Math.round(annual7d / annualProjection)}× higher than the ${tf.label} trailing average. Volume has been ramping. Use the 7-day figure for forward-looking projections.`);
+      }
+    }
   }
 
   if (pipeCount > 0 || svcCount > 0) {
@@ -95,6 +154,13 @@ export async function executeSavings(
     if (pipeCount > 0) parts.push(`${Math.round(pipeCount)} pipeline instance${pipeCount !== 1 ? 's' : ''}`);
     if (svcCount > 0) parts.push(`${Math.round(svcCount)} service${svcCount !== 1 ? 's' : ''} monitored`);
     lines.push(`  ${parts.join(' · ')}`);
+  }
+
+  // Warn when Streamer data was present — those chunked queries can take 30–90s
+  // on high-cardinality envs. Let the caller know this is expected.
+  if (indexedBytes > 0) {
+    lines.push('');
+    lines.push('  _Streamer figures use chunked parallel queries (one per day) to avoid server budget limits on high-cardinality indexed metrics. This call may take 30–90s on large deployments._');
   }
 
   return lines.join('\n');

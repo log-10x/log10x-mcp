@@ -142,9 +142,26 @@ export function streamerIndexedBytes(range: string): string {
   return `sum(increase(${INDEXED_METRIC}{tenx_app="streamer",${LABELS.env}="cloud"}[${range}]))`;
 }
 
+/**
+ * Single-day `increase()` chunk for the indexed metric with an optional offset.
+ * The indexed metric's ~12k active series makes a single 7d `increase()` blow
+ * the server's query budget. Summing N × 1d chunks client-side stays per-chunk
+ * small enough to complete.
+ */
+export function streamerIndexedBytesChunk(offsetDays: number): string {
+  const offset = offsetDays > 0 ? ` offset ${offsetDays}d` : '';
+  return `sum(increase(${INDEXED_METRIC}{tenx_app="streamer",${LABELS.env}="cloud"}[1d]${offset}))`;
+}
+
 /** Bytes actually streamed back out (i.e., served to a SIEM or dashboard). */
 export function streamerStreamedBytes(range: string): string {
   return `sum(increase(${STREAMED_METRIC}{tenx_app="streamer",${LABELS.env}="cloud"}[${range}]))`;
+}
+
+/** Single-day `increase()` chunk for the streamed metric. Same chunking rationale as streamerIndexedBytesChunk. */
+export function streamerStreamedBytesChunk(offsetDays: number): string {
+  const offset = offsetDays > 0 ? ` offset ${offsetDays}d` : '';
+  return `sum(increase(${STREAMED_METRIC}{tenx_app="streamer",${LABELS.env}="cloud"}[1d]${offset}))`;
 }
 
 // ── Top patterns + list-by-label ──

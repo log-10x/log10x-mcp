@@ -16,7 +16,7 @@ import { bytesToCost, parsePrometheusValue } from '../lib/cost.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import {
   fmtDollar, fmtPattern, fmtSeverity, fmtCount,
-  parseTimeframe, costPeriodLabel
+  parseTimeframe, costPeriodLabel, normalizePattern
 } from '../lib/format.js';
 
 export const eventLookupSchema = {
@@ -36,23 +36,29 @@ export async function executeEventLookup(
   const period = costPeriodLabel(tf.days);
   const metricsEnv = await resolveMetricsEnv(env);
 
+  // Reporter pattern labels are always snake_case. The agent may have picked
+  // up a display form (space-separated) from top_patterns / cost_drivers and
+  // passed it back in; normalize to the canonical form so the exact-match
+  // selector lands.
+  const pattern = normalizePattern(args.pattern);
+
   // Current window: bytes per service for this pattern
-  const currentRes = await queryInstant(env, pql.patternAcrossServices(args.pattern, metricsEnv, tf.range));
+  const currentRes = await queryInstant(env, pql.patternAcrossServices(pattern, metricsEnv, tf.range));
 
   if (currentRes.status !== 'success' || currentRes.data.result.length === 0) {
     // Try fuzzy match with regex
-    const fuzzyPattern = args.pattern.replace(/[_ ]+/g, '.*');
+    const fuzzyPattern = pattern.replace(/[_ ]+/g, '.*');
     const fuzzyQuery = `sum by (${LABELS.service}, ${LABELS.severity}) (increase(all_events_summaryBytes_total{${LABELS.pattern}=~"${fuzzyPattern}",${LABELS.env}="${metricsEnv}"}[${tf.range}]))`;
     const fuzzyRes = await queryInstant(env, fuzzyQuery);
 
     if (fuzzyRes.status !== 'success' || fuzzyRes.data.result.length === 0) {
-      return `No data found for pattern "${args.pattern}". Check the pattern name (use underscores, e.g., Payment_Gateway_Timeout).`;
+      return `No data found for pattern "${pattern}". Check the pattern name (use underscores, e.g., Payment_Gateway_Timeout).`;
     }
     // Use fuzzy results
-    return formatResults(fuzzyRes.data.result, args.pattern, metricsEnv, tf, costPerGb, period, env);
+    return formatResults(fuzzyRes.data.result, pattern, metricsEnv, tf, costPerGb, period, env);
   }
 
-  return formatResults(currentRes.data.result, args.pattern, metricsEnv, tf, costPerGb, period, env);
+  return formatResults(currentRes.data.result, pattern, metricsEnv, tf, costPerGb, period, env);
 }
 
 async function formatResults(

@@ -1,67 +1,101 @@
 /**
- * Log10x Storage Streamer REST client.
+ * Log10x Storage Streamer REST client + S3 results poller.
  *
- * The Streamer's query API is not yet a public endpoint — it ships with
- * the customer's own Streamer deployment. This client is written against
- * the contract documented in:
- *   config/comsite/tools/mcp/log10x-mcp-streamer-tools-build-spec.md
- *   config/modules/pipelines/run/modules/input/objectStorage/query/
+ * The Streamer's query API is two-phase:
  *
- * Configure with the LOG10X_STREAMER_URL env var. When not set, every
- * call throws a `StreamerNotConfiguredError` which the higher-level tools
- * catch and turn into a graceful "Streamer not configured" message.
+ *   1. POST /streamer/query with a body shaped like QueryRequest.java accepts.
+ *      The body carries a client-generated `id` field which the engine uses
+ *      as the canonical queryId and echoes back in the response.
+ *
+ *   2. The engine dispatches stream workers that buffer matched events to
+ *      disk and upload them to S3 under {basePath}/tenx/{target}/qr/{queryId}/
+ *      as JSONL files. The client polls that prefix via the AWS CLI until
+ *      every expected worker has written its marker (at the sibling
+ *      {basePath}/tenx/{target}/q/{queryId}/ backstop prefix) and the results
+ *      prefix is stable.
+ *
+ * Configure with:
+ *   - LOG10X_STREAMER_URL: base URL of the query handler (e.g., the NLB).
+ *   - LOG10X_STREAMER_BUCKET: S3 bucket holding the streamer index/results.
+ *   - LOG10X_STREAMER_TARGET: default target app prefix (e.g., "app" for
+ *     the otek demo env). Overridable per query.
+ *   - LOG10X_STREAMER_POLL_MS: poll interval, default 1500 ms.
+ *   - LOG10X_STREAMER_TIMEOUT_MS: total poll budget, default 90_000 ms.
  *
  * Authentication piggybacks on the same X-10X-Auth header the Prometheus
- * gateway uses (apiKey/envId), matching the pattern from
- * backend/lambdas/prometheus-proxy. If the Streamer deployment uses a
- * different auth scheme (IAM, mTLS), set LOG10X_STREAMER_AUTH_HEADER to
- * override the header name and LOG10X_STREAMER_AUTH_VALUE to override
- * the value.
+ * gateway uses (apiKey/envId). Override via LOG10X_STREAMER_AUTH_HEADER /
+ * LOG10X_STREAMER_AUTH_VALUE if the deployment uses a different scheme.
  */
 
+import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { promisify } from 'node:util';
 import type { EnvConfig } from './environments.js';
+
+const execFileP = promisify(execFile);
 
 export class StreamerNotConfiguredError extends Error {
   constructor() {
     super(
-      'Streamer endpoint not configured. Set LOG10X_STREAMER_URL to enable archive queries. ' +
-      'Without it, log10x_streamer_query, log10x_backfill_metric, and the Phase 6 Streamer ' +
-      'fallback inside log10x_investigate will degrade gracefully.'
+      'Streamer endpoint not configured. Set LOG10X_STREAMER_URL + LOG10X_STREAMER_BUCKET ' +
+        'to enable archive queries.'
     );
     this.name = 'StreamerNotConfiguredError';
   }
 }
 
 export interface StreamerQueryRequest {
-  /** Template hash (`~xxx`) or symbolMessage to scope the query. */
-  pattern: string;
-  /** Absolute ISO8601 timestamp or relative (`now-90d`). */
+  /** Absolute ISO8601, epoch millis, or relative `now("-1h")`. */
   from: string;
-  /** Absolute ISO8601 or relative (`now`). */
+  /** Absolute ISO8601, epoch millis, or relative `now()`. */
   to: string;
-  /** Optional search expression on enriched fields. */
+  /** Optional Bloom-filter search expression (TenX subset: ==, ||, &&, includes). */
   search?: string;
-  /** Optional JavaScript filter expressions over parsed event payloads. */
+  /** Optional in-memory JS filters applied after the Bloom-scoped fetch. */
   filters?: string[];
-  /** Optional target service/app scope. */
+  /** Target app prefix to scope the index scan. Defaults to LOG10X_STREAMER_TARGET. */
   target?: string;
-  /** Max events to return. Default 10000. */
+  /** Logical query name (appears in PERF metrics). */
+  name?: string;
+  /** Hard cap on total events returned after merging per-worker results. */
   limit?: number;
-  /** `events` (raw), `count` (summary only), `aggregated` (bucketed counts). */
+  /** Max milliseconds the engine has to produce results. */
+  processingTimeMs?: number;
+  /** Max bytes the engine will ship before terminating. */
+  resultSizeBytes?: number;
+
+  // ── Legacy fields kept for call-site compatibility. The engine contract
+  //    no longer uses `pattern` (the Bloom filter uses `search`), and
+  //    `format`/`bucketSize` are now client-side rollups over the events
+  //    stream. These are accepted but ignored by the new client.
+  /** @deprecated use `search` instead */
+  pattern?: string;
+  /** @deprecated format is now a client-side rollup */
   format?: 'events' | 'count' | 'aggregated';
-  /** Bucket size when format=aggregated. Default "5m". */
+  /** @deprecated bucket_size is now a client-side rollup */
   bucketSize?: string;
 }
 
 export interface StreamerEvent {
-  timestamp: string;
+  timestamp?: string;
+  text?: string;
+  severity_level?: string;
+  tenx_user_service?: string;
+  k8s_namespace?: string;
+  k8s_pod?: string;
+  k8s_container?: string;
+  http_code?: string;
+
+  // Legacy fields kept for aggregator/backfill compatibility. Populated
+  // from the canonical enrichment fields inside runStreamerQuery.
   service?: string;
   severity?: string;
-  templateHash: string;
-  text: string;
+  templateHash?: string;
   enrichedFields?: Record<string, string>;
-  /** Variable values extracted from the event in slot order. */
   values?: string[];
+
+  /** Any additional fields returned by the engine. */
+  [key: string]: unknown;
 }
 
 export interface StreamerBucket {
@@ -72,36 +106,48 @@ export interface StreamerBucket {
 
 export interface StreamerQueryResponse {
   queryId: string;
-  pattern: string;
+  target: string;
   from: string;
   to: string;
   execution: {
     wallTimeMs: number;
-    bytesScanned?: string;
     eventsMatched: number;
-    scanWorkersUsed?: number;
-    streamWorkersUsed?: number;
-    truncated?: boolean;
+    workerFiles: number;
+    truncated: boolean;
   };
-  format: 'events' | 'count' | 'aggregated';
-  events?: StreamerEvent[];
+  events: StreamerEvent[];
+
+  // Legacy-compatible fields populated client-side from `events` so that
+  // callers written against the old Streamer contract (investigate, backfill)
+  // keep working without a rewrite.
+  format?: 'events' | 'count' | 'aggregated';
   buckets?: StreamerBucket[];
   countSummary?: {
     total: number;
-    byDay?: Record<string, number>;
     byService?: Record<string, number>;
     bySeverity?: Record<string, number>;
+    byDay?: Record<string, number>;
   };
 }
 
 export function isStreamerConfigured(): boolean {
-  return Boolean(process.env.LOG10X_STREAMER_URL);
+  return Boolean(process.env.LOG10X_STREAMER_URL && process.env.LOG10X_STREAMER_BUCKET);
 }
 
 function getStreamerUrl(): string {
   const url = process.env.LOG10X_STREAMER_URL;
   if (!url) throw new StreamerNotConfiguredError();
   return url.replace(/\/+$/, '');
+}
+
+function getStreamerBucket(): string {
+  const bucket = process.env.LOG10X_STREAMER_BUCKET;
+  if (!bucket) throw new StreamerNotConfiguredError();
+  return bucket;
+}
+
+function getDefaultTarget(): string {
+  return process.env.LOG10X_STREAMER_TARGET || 'app';
 }
 
 function authHeaders(env: EnvConfig): Record<string, string> {
@@ -116,162 +162,386 @@ function authHeaders(env: EnvConfig): Record<string, string> {
   };
 }
 
-/** Build the Streamer request body per the documented contract. */
-export function buildQueryBody(req: StreamerQueryRequest): Record<string, unknown> {
-  const body: Record<string, unknown> = {
-    from: req.from,
-    to: req.to,
-    pattern: req.pattern,
-    limit: req.limit ?? 10000,
-    format: req.format ?? 'events',
-  };
-  if (req.search) body.search = req.search;
-  if (req.filters && req.filters.length > 0) body.filters = req.filters;
-  if (req.target) body.target = req.target;
-  if (req.format === 'aggregated') body.bucketSize = req.bucketSize ?? '5m';
-  return body;
+/**
+ * Convert the MCP-level `from`/`to` expressions to the TenX engine syntax.
+ *
+ * The engine evaluates these as JavaScript on the server via TenXDate, so
+ * `now("-1h")` / `now()` / ISO8601 strings / epoch millis all work. The MCP
+ * historically accepted `now-1h` (dash form) — we translate that here.
+ */
+export function normalizeTimeExpression(expr: string): string {
+  const trimmed = expr.trim();
+  if (!trimmed) throw new Error('Empty time expression');
+  if (trimmed === 'now') return 'now()';
+
+  const rel = trimmed.match(/^now\s*([+-])\s*(\d+)\s*([smhdwMy])$/);
+  if (rel) {
+    return `now("${rel[1]}${rel[2]}${rel[3]}")`;
+  }
+
+  // Already in now("-1h") form.
+  if (/^now\s*\(/.test(trimmed)) return trimmed;
+
+  // ISO8601 or epoch millis — pass through.
+  return trimmed;
 }
 
-/**
- * Submit a query to the Streamer and return the parsed response.
- *
- * The Streamer API is async: POST returns a queryId, and the client polls
- * GET /streamer/query/{id} until the query finishes or the timeout is
- * reached. For the MVP, we call POST and, if the response is synchronous
- * (results in-body), return directly; otherwise we poll once at 500ms and
- * every subsequent second up to the configured timeout.
- */
-export async function runStreamerQuery(
+/** Expose for validation at the tool layer. */
+export function parseTimeExpression(expr: string): string {
+  return normalizeTimeExpression(expr);
+}
+
+interface SubmitResponse {
+  queryId: string;
+}
+
+async function submitQuery(
   env: EnvConfig,
-  req: StreamerQueryRequest,
-  options: { timeoutMs?: number; pollIntervalMs?: number } = {}
-): Promise<StreamerQueryResponse> {
+  body: Record<string, unknown>
+): Promise<SubmitResponse> {
   const base = getStreamerUrl();
-  const timeoutMs = options.timeoutMs ?? 120_000;
-  const pollIntervalMs = options.pollIntervalMs ?? 1_000;
-
-  const started = Date.now();
-  const body = buildQueryBody(req);
-
-  const submit = await fetch(`${base}/streamer/query`, {
+  const resp = await fetch(`${base}/streamer/query`, {
     method: 'POST',
     headers: authHeaders(env),
     body: JSON.stringify(body),
   });
 
-  if (!submit.ok) {
-    const errText = await submit.text().catch(() => '');
-    throw new Error(`Streamer /streamer/query HTTP ${submit.status}: ${errText.slice(0, 500)}`);
+  if (!resp.ok) {
+    const errText = await resp.text().catch(() => '');
+    throw new Error(`Streamer POST /streamer/query HTTP ${resp.status}: ${errText.slice(0, 500)}`);
   }
 
-  const first = (await submit.json()) as StreamerQueryResponse & { status?: string };
-
-  // Synchronous path: results already in-body.
-  if (first.events || first.buckets || first.countSummary) {
-    return normalize(first, req, Date.now() - started);
+  const parsed = (await resp.json()) as SubmitResponse;
+  if (!parsed.queryId) {
+    throw new Error('Streamer response missing queryId');
   }
-
-  // Async path: poll by queryId.
-  const queryId = first.queryId;
-  if (!queryId) {
-    throw new Error('Streamer response missing queryId and no inline results.');
-  }
-
-  while (Date.now() - started < timeoutMs) {
-    await sleep(pollIntervalMs);
-    const poll = await fetch(`${base}/streamer/query/${encodeURIComponent(queryId)}`, {
-      method: 'GET',
-      headers: authHeaders(env),
-    });
-    if (!poll.ok) {
-      const errText = await poll.text().catch(() => '');
-      throw new Error(`Streamer poll HTTP ${poll.status}: ${errText.slice(0, 500)}`);
-    }
-    const state = (await poll.json()) as StreamerQueryResponse & { status?: string; done?: boolean };
-    if (state.done || state.status === 'done' || state.events || state.buckets || state.countSummary) {
-      return normalize(state, req, Date.now() - started);
-    }
-  }
-
-  throw new Error(`Streamer query timed out after ${timeoutMs}ms (queryId=${queryId}).`);
+  return parsed;
 }
 
-function normalize(
-  resp: StreamerQueryResponse & { status?: string },
+interface S3ListEntry {
+  Key: string;
+  Size: number;
+}
+
+async function s3List(bucket: string, prefix: string): Promise<S3ListEntry[]> {
+  try {
+    const { stdout } = await execFileP('aws', [
+      's3api',
+      'list-objects-v2',
+      '--bucket',
+      bucket,
+      '--prefix',
+      prefix,
+      '--output',
+      'json',
+    ], { maxBuffer: 32 * 1024 * 1024 });
+
+    if (!stdout.trim()) return [];
+    const parsed = JSON.parse(stdout) as { Contents?: S3ListEntry[] };
+    return parsed.Contents || [];
+  } catch (e) {
+    // list-objects-v2 returns empty stdout when the prefix has no keys;
+    // only real failures raise.
+    const err = e as { stderr?: string; message?: string };
+    const stderr = err.stderr || err.message || '';
+    if (stderr.includes('NoSuchBucket')) {
+      throw new Error(`Streamer bucket does not exist: ${bucket}`);
+    }
+    throw new Error(`aws s3api list-objects-v2 failed: ${stderr.slice(0, 400)}`);
+  }
+}
+
+async function s3Get(bucket: string, key: string): Promise<string> {
+  const { stdout } = await execFileP('aws', [
+    's3',
+    'cp',
+    `s3://${bucket}/${key}`,
+    '-',
+  ], { maxBuffer: 64 * 1024 * 1024 });
+  return stdout;
+}
+
+function parseJsonl(content: string): StreamerEvent[] {
+  const events: StreamerEvent[] = [];
+  for (const line of content.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      events.push(JSON.parse(trimmed) as StreamerEvent);
+    } catch {
+      // Skip unparseable lines — the worker may have written a partial
+      // record on the way down; the next poll will pick up the retry.
+    }
+  }
+  return events;
+}
+
+function eventTimestampMs(ev: StreamerEvent): number {
+  let ts: unknown = ev.timestamp;
+  // Streamer encodes the TenXObject timestamp as `[<epoch-nanos>]`.
+  if (Array.isArray(ts) && ts.length > 0) {
+    ts = ts[0];
+  }
+  if (typeof ts === 'number') {
+    // Heuristic: >1e15 → nanos, >1e12 → micros, >1e10 → millis, else seconds.
+    if (ts > 1e15) return Math.floor(ts / 1_000_000);
+    if (ts > 1e12) return Math.floor(ts / 1_000);
+    if (ts > 1e10) return ts;
+    return ts * 1000;
+  }
+  if (typeof ts === 'string') {
+    const asNum = Number(ts);
+    if (Number.isFinite(asNum)) {
+      if (asNum > 1e15) return Math.floor(asNum / 1_000_000);
+      if (asNum > 1e12) return Math.floor(asNum / 1_000);
+      if (asNum > 1e10) return asNum;
+      return asNum * 1000;
+    }
+    const asDate = Date.parse(ts);
+    if (Number.isFinite(asDate)) return asDate;
+  }
+  return 0;
+}
+
+/**
+ * Poll the marker prefix until the same set of markers is observed twice in
+ * a row (stability = no new workers landing). Returns the stable list of
+ * marker keys.
+ */
+async function waitForMarkerStability(
+  bucket: string,
+  markerPrefix: string,
+  pollMs: number,
+  timeoutMs: number
+): Promise<S3ListEntry[]> {
+  const started = Date.now();
+  let previous: string[] = [];
+  let stableCount = 0;
+
+  while (Date.now() - started < timeoutMs) {
+    const entries = await s3List(bucket, markerPrefix);
+    const keys = entries.map((e) => e.Key).sort();
+
+    if (keys.length > 0 && keys.length === previous.length && keys.every((k, i) => k === previous[i])) {
+      stableCount++;
+      if (stableCount >= 2) {
+        return entries;
+      }
+    } else {
+      stableCount = keys.length > 0 ? 1 : 0;
+    }
+    previous = keys;
+    await sleep(pollMs);
+  }
+
+  // Timed out — return whatever we saw last so the caller can surface a
+  // partial result rather than a hard failure.
+  return previous.map((key) => ({ Key: key, Size: 0 }));
+}
+
+export async function runStreamerQuery(
+  env: EnvConfig,
   req: StreamerQueryRequest,
-  wallTimeMs: number
-): StreamerQueryResponse {
+  // Legacy options kept for call-site compatibility. The poll interval and
+  // timeout are now taken from environment variables; this argument is
+  // accepted but has no effect.
+  _legacy?: { timeoutMs?: number; pollIntervalMs?: number }
+): Promise<StreamerQueryResponse> {
+  const bucket = getStreamerBucket();
+  const target = req.target || getDefaultTarget();
+  const queryId = randomUUID();
+  const pollMs = parseInt(process.env.LOG10X_STREAMER_POLL_MS || '1500', 10);
+  const timeoutMs = parseInt(process.env.LOG10X_STREAMER_TIMEOUT_MS || '90000', 10);
+
+  const body: Record<string, unknown> = {
+    id: queryId,
+    target,
+    from: normalizeTimeExpression(req.from),
+    to: normalizeTimeExpression(req.to || 'now'),
+  };
+  if (req.name) body.name = req.name;
+  if (req.search) body.search = req.search;
+  if (req.filters && req.filters.length > 0) body.filters = req.filters;
+  if (req.processingTimeMs != null) body.processingTime = String(req.processingTimeMs);
+  if (req.resultSizeBytes != null) body.resultSize = String(req.resultSizeBytes);
+
+  // The MCP is the out-of-band consumer that actually reads the JSONL
+  // results from S3, so it must opt into the results writer. The engine
+  // default is off to avoid paying the extra upload cost on deployments
+  // that only rely on the byte-count marker backstop used by the query
+  // coordinator. Forwarded to stream workers as a
+  // `queryObjectWriteResults=true` bootstrap arg on the stream pipeline
+  // launch via IndexQueryWriter.dispatchStreamRequests.
+  body.writeResults = true;
+
+  const started = Date.now();
+  await submitQuery(env, body);
+
+  // The engine's indexObjectPath builds `tenx/{target}/q(r)/{queryId}/`
+  // under the configured indexContainer. On the otek demo env the
+  // indexContainer is `tenx-demo-cloud-streamer-351939435334/indexing-results/`
+  // so the full S3 key is `indexing-results/tenx/{target}/...`. The
+  // `LOG10X_STREAMER_INDEX_SUBPATH` env var lets deployments configure
+  // their own index sub-prefix; default to `indexing-results` to match
+  // the otek deploy.
+  const indexSubpath = (process.env.LOG10X_STREAMER_INDEX_SUBPATH || 'indexing-results').replace(/^\/+|\/+$/g, '');
+  const basePrefix = indexSubpath ? `${indexSubpath}/` : '';
+  const markerPrefix = `${basePrefix}tenx/${target}/q/${queryId}/`;
+  const resultsPrefix = `${basePrefix}tenx/${target}/qr/${queryId}/`;
+
+  await waitForMarkerStability(bucket, markerPrefix, pollMs, timeoutMs);
+
+  // The results writer only runs on workers that actually matched events, so
+  // the results prefix may have fewer entries than the marker prefix — which
+  // is correct. Truncation markers are siblings ending in `.truncated`.
+  const resultObjects = await s3List(bucket, resultsPrefix);
+
+  let truncated = false;
+  const jsonlKeys: string[] = [];
+  for (const obj of resultObjects) {
+    if (obj.Key.endsWith('.truncated')) {
+      truncated = true;
+      continue;
+    }
+    if (obj.Key.endsWith('.jsonl')) {
+      jsonlKeys.push(obj.Key);
+    }
+  }
+
+  const events: StreamerEvent[] = [];
+  for (const key of jsonlKeys) {
+    const content = await s3Get(bucket, key);
+    events.push(...parseJsonl(content));
+  }
+
+  events.sort((a, b) => eventTimestampMs(a) - eventTimestampMs(b));
+
+  // Backfill legacy event fields from canonical enrichment fields so that
+  // downstream code written against the old shape (aggregator, backfill)
+  // keeps working. This is a shallow rename — we do not clone the event.
+  for (const ev of events) {
+    // The engine emits severity_level as the template-qualified path
+    // `LevelTemplate.severity_level`. Normalize it back to the plain
+    // field name the tool layer and aggregator expect.
+    const levelTemplated = (ev as Record<string, unknown>)['LevelTemplate.severity_level'];
+    if (ev.severity_level == null && typeof levelTemplated === 'string') {
+      ev.severity_level = levelTemplated;
+    }
+    if (ev.service == null && typeof ev.tenx_user_service === 'string') {
+      ev.service = ev.tenx_user_service;
+    }
+    if (ev.severity == null && typeof ev.severity_level === 'string') {
+      ev.severity = ev.severity_level;
+    }
+    if (ev.enrichedFields == null) {
+      const enriched: Record<string, string> = {};
+      for (const [k, v] of Object.entries(ev)) {
+        if (
+          v != null &&
+          typeof v !== 'object' &&
+          k !== 'timestamp' &&
+          k !== 'text' &&
+          k !== 'service' &&
+          k !== 'severity' &&
+          k !== 'templateHash' &&
+          k !== 'values' &&
+          k !== 'enrichedFields'
+        ) {
+          enriched[k] = String(v);
+        }
+      }
+      ev.enrichedFields = enriched;
+    }
+  }
+
+  const limit = req.limit ?? 10_000;
+  let finalEvents = events;
+  if (events.length > limit) {
+    finalEvents = events.slice(0, limit);
+    truncated = true;
+  }
+
+  // Populate legacy aggregation fields from events for old callers.
+  const buckets = computeBuckets(finalEvents, req.bucketSize || '5m');
+  const countSummary = computeCountSummary(finalEvents);
+
   return {
-    queryId: resp.queryId || 'inline',
-    pattern: resp.pattern || req.pattern,
-    from: resp.from || req.from,
-    to: resp.to || req.to,
+    queryId,
+    target,
+    from: String(body.from),
+    to: String(body.to),
     execution: {
-      wallTimeMs: resp.execution?.wallTimeMs ?? wallTimeMs,
-      bytesScanned: resp.execution?.bytesScanned,
-      eventsMatched:
-        resp.execution?.eventsMatched ??
-        (resp.events?.length ?? resp.buckets?.reduce((s, b) => s + b.count, 0) ?? 0),
-      scanWorkersUsed: resp.execution?.scanWorkersUsed,
-      streamWorkersUsed: resp.execution?.streamWorkersUsed,
-      truncated: resp.execution?.truncated,
+      wallTimeMs: Date.now() - started,
+      eventsMatched: events.length,
+      workerFiles: jsonlKeys.length,
+      truncated,
     },
-    format: resp.format || req.format || 'events',
-    events: resp.events,
-    buckets: resp.buckets,
-    countSummary: resp.countSummary,
+    events: finalEvents,
+    format: req.format || 'events',
+    buckets,
+    countSummary,
+  };
+}
+
+function computeBuckets(events: StreamerEvent[], bucketSize: string): StreamerBucket[] {
+  const m = bucketSize.trim().match(/^(\d+)([smhd])$/);
+  let bucketMs = 5 * 60_000;
+  if (m) {
+    const n = parseInt(m[1], 10);
+    switch (m[2]) {
+      case 's':
+        bucketMs = n * 1000;
+        break;
+      case 'm':
+        bucketMs = n * 60_000;
+        break;
+      case 'h':
+        bucketMs = n * 3_600_000;
+        break;
+      case 'd':
+        bucketMs = n * 86_400_000;
+        break;
+    }
+  }
+  const out = new Map<number, number>();
+  for (const ev of events) {
+    const ts = eventTimestampMs(ev);
+    if (!ts) continue;
+    const key = Math.floor(ts / bucketMs) * bucketMs;
+    out.set(key, (out.get(key) || 0) + 1);
+  }
+  return [...out.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([ts, count]) => ({ timestamp: new Date(ts).toISOString(), count }));
+}
+
+function computeCountSummary(events: StreamerEvent[]): StreamerQueryResponse['countSummary'] {
+  const byService: Record<string, number> = {};
+  const bySeverity: Record<string, number> = {};
+  const byDay: Record<string, number> = {};
+
+  for (const ev of events) {
+    const svc = (ev.tenx_user_service as string) || (ev.service as string) || '';
+    if (svc) byService[svc] = (byService[svc] || 0) + 1;
+
+    const sev = (ev.severity_level as string) || (ev.severity as string) || '';
+    if (sev) bySeverity[sev] = (bySeverity[sev] || 0) + 1;
+
+    const ts = eventTimestampMs(ev);
+    if (ts) {
+      const day = new Date(ts).toISOString().slice(0, 10);
+      byDay[day] = (byDay[day] || 0) + 1;
+    }
+  }
+
+  return {
+    total: events.length,
+    byService,
+    bySeverity,
+    byDay,
   };
 }
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-// ── Relative-time parsing ──
-
-/**
- * Parse a time expression like `now`, `now-15d`, `2026-01-15T00:00:00Z`
- * into a JavaScript Date. Used by the higher-level tools to build the
- * Streamer query window.
- */
-export function parseTimeExpression(expr: string, reference: Date = new Date()): Date {
-  const trimmed = expr.trim();
-  if (!trimmed) throw new Error('Empty time expression');
-  if (trimmed === 'now') return new Date(reference.getTime());
-
-  const rel = trimmed.match(/^now\s*([+-])\s*(\d+)\s*([smhdwMy])$/);
-  if (rel) {
-    const sign = rel[1] === '-' ? -1 : 1;
-    const amount = parseInt(rel[2], 10);
-    const unit = rel[3];
-    const ms = sign * amount * unitToMs(unit);
-    return new Date(reference.getTime() + ms);
-  }
-
-  const d = new Date(trimmed);
-  if (isNaN(d.getTime())) {
-    throw new Error(`Invalid time expression: "${expr}"`);
-  }
-  return d;
-}
-
-function unitToMs(unit: string): number {
-  switch (unit) {
-    case 's':
-      return 1000;
-    case 'm':
-      return 60_000;
-    case 'h':
-      return 3_600_000;
-    case 'd':
-      return 86_400_000;
-    case 'w':
-      return 7 * 86_400_000;
-    case 'M':
-      return 30 * 86_400_000;
-    case 'y':
-      return 365 * 86_400_000;
-    default:
-      throw new Error(`Unknown time unit: ${unit}`);
-  }
 }

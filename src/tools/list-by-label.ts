@@ -93,6 +93,26 @@ export async function executeListByLabel(
   lines.push('');
   lines.push(`  ${rows.length} row${rows.length !== 1 ? 's' : ''} · ${fmtBytes(totalBytes)} total · ${fmtDollar(totalCost)}${period}`);
 
+  // Data quality annotation for http_code: flag values outside the valid HTTP range (100–599)
+  // and the "(empty)" dominance pattern, so the reader doesn't accept garbage values as real.
+  if (args.label === 'http_code') {
+    const invalidValues = shown.filter(r => {
+      if (r.value === '(empty)') return false;
+      const n = parseInt(r.value, 10);
+      return isNaN(n) || n < 100 || n > 599;
+    });
+    const emptyRow = shown.find(r => r.value === '(empty)');
+    if (emptyRow && emptyRow.pct > 90) {
+      lines.push('');
+      lines.push(`**Data quality note**: ${fmtPct(emptyRow.pct)} of log volume has no \`http_code\` label — most events are not HTTP requests or the field is not being extracted by the pipeline.`);
+    }
+    if (invalidValues.length > 0) {
+      const vals = invalidValues.map(r => r.value).join(', ');
+      lines.push('');
+      lines.push(`**Anomalous values detected**: \`${vals}\` are outside the valid HTTP status code range (100–599). These likely indicate gRPC status codes (0–16), an internal enum, or a field extraction mismatch. They are not real HTTP codes.`);
+    }
+  }
+
   if (shown[0]) {
     lines.push('');
     lines.push('**Next actions**:');

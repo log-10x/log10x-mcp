@@ -90,11 +90,19 @@ export function renderAcuteSpikeReport(input: AcuteSpikeReportInput): string {
 
   // Root cause
   const chain = input.correlation.chain;
+  // Pre-compute extras so the no-chain message can reference them accurately.
+  const allExtras = input.correlation.coMovers.filter((m) => !chain.find((c) => c.mover.pattern === m.pattern));
+
   lines.push('### Most likely root cause');
   lines.push('');
   if (chain.length === 0) {
-    lines.push('_No co-movers crossed the noise floor. The anchor moved but the correlation engine found no above-threshold candidates in the window and depth scope you specified._');
-    lines.push("_Try widening `window` (e.g., `6h`), switching `depth: \"deep\"`, or verifying the anchor's metric has enough history in this environment._");
+    if (allExtras.length > 0) {
+      lines.push(`_No co-movers exceeded the primary confidence threshold. ${allExtras.length} lower-confidence co-mover${allExtras.length !== 1 ? 's' : ''} are listed below — they moved with the anchor but without enough lead time or magnitude to infer causality._`);
+      lines.push("_Try `depth: \"deep\"` to expand the candidate universe, or paste a specific log line instead of a service name._");
+    } else {
+      lines.push('_No co-movers crossed the noise floor. The anchor moved but the correlation engine found no above-threshold candidates in the window and depth scope you specified._');
+      lines.push("_Try widening `window` (e.g., `6h`), switching `depth: \"deep\"`, or verifying the anchor's metric has enough history in this environment._");
+    }
   } else {
     const lead = chain[0];
     const conf = (lead.confidence * 100).toFixed(0);
@@ -117,8 +125,8 @@ export function renderAcuteSpikeReport(input: AcuteSpikeReportInput): string {
     lines.push('');
   }
 
-  // Co-movers (not chain)
-  const extras = input.correlation.coMovers.filter((m) => !chain.find((c) => c.mover.pattern === m.pattern));
+  // Co-movers (not chain) — allExtras was pre-computed above, reuse here.
+  const extras = allExtras;
   if (extras.length > 0) {
     lines.push('### Co-movers (lower confidence)');
     lines.push('');
@@ -300,17 +308,24 @@ export function collectDriftPatternsReferenced(anchor: string, drift: DriftResul
 }
 
 export function renderEmpty(startingPoint: string, windowLabel: string, investigationId: string, noiseFloor: number): string {
+  // Suggest concrete wider windows based on what was tried.
+  const isShortWindow = /^(5m|15m|30m|1h|2h)$/.test(windowLabel);
+  const nextWindows = isShortWindow
+    ? '`window: "6h"`, `"24h"`, or `"7d"`'
+    : '`window: "30d"`';
+
   return [
     `## Investigation: ${startingPoint}, last ${windowLabel}`,
     '',
     `**Investigation id**: ${investigationId}`,
-    `**Result**: No significant pattern movement detected.`,
+    `**Result**: No significant pattern movement in the last ${windowLabel}. Nothing crossed the noise floor.`,
     '',
     `**Noise floor applied**: ${noiseFloor}`,
     '',
-    'If you expected to see something, try:',
-    '- Widening the window (e.g., `window: "6h"` or `"24h"` for acute-spike, `"30d"` for drift)',
-    '- A more specific anchor (paste a specific log line instead of a service name)',
-    '- Verifying the alert that triggered this investigation actually fired in this window',
+    '**Try next**:',
+    `- Widen the window: \`log10x_investigate({ starting_point: '${startingPoint}', window: '24h' })\`${isShortWindow ? ' — most incident inflections appear within 24h' : ''}`,
+    `- Or for gradual drift: \`log10x_investigate({ starting_point: '${startingPoint}', window: '30d' })\``,
+    `- Check the trend directly: \`log10x_pattern_trend({ pattern: '${startingPoint}' })\``,
+    '- Confirm the anchor exists: use a specific log line or pattern hash rather than a service name',
   ].join('\n');
 }

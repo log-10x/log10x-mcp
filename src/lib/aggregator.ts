@@ -54,6 +54,7 @@ export function aggregate(
   const state = new Map<string, AggregatorState>();
 
   for (const ev of events) {
+    if (ev.timestamp == null) continue;
     const ts = Math.floor(new Date(ev.timestamp).getTime() / 1000);
     if (isNaN(ts) || ts === 0) continue;
     const bucket = Math.floor(ts / bucketSeconds) * bucketSeconds;

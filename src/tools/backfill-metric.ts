@@ -26,7 +26,7 @@ import {
 } from '../lib/streamer-api.js';
 import { aggregate, type AggregationType } from '../lib/aggregator.js';
 import { emitSeries, type Destination } from '../lib/metric-emitters.js';
-import { fmtCount } from '../lib/format.js';
+import { fmtCount, normalizePattern } from '../lib/format.js';
 import { streamerNotConfiguredMessage } from './streamer-query.js';
 
 export const backfillMetricSchema = {
@@ -106,10 +106,14 @@ export async function executeBackfillMetric(
     throw new Error('aggregation=unique_values requires a `unique_field` argument.');
   }
 
+  // Reporter/Streamer pattern labels are snake_case. Normalize in case the
+  // agent re-fed a display form (spaces) from top_patterns / cost_drivers.
+  const pattern = normalizePattern(args.pattern);
+
   // ── 1. Query the Streamer for historical events ──
   const started = Date.now();
   const streamerReq: StreamerQueryRequest = {
-    pattern: args.pattern,
+    pattern,
     from: args.from,
     to: args.to,
     filters: args.filters,
@@ -126,7 +130,7 @@ export async function executeBackfillMetric(
       '',
       `**Result**: Streamer returned **zero events** matching this pattern + filter + window.`,
       '',
-      `**Checked**: pattern=\`${args.pattern}\`, window=${args.from}→${args.to}, filters=${JSON.stringify(args.filters || [])}`,
+      `**Checked**: pattern=\`${pattern}\`, window=${args.from}→${args.to}, filters=${JSON.stringify(args.filters || [])}`,
       '',
       `No points were emitted to ${args.destination}. Verify the pattern identity (call log10x_event_lookup on a raw sample line), check the window, or widen the filter expressions. If the Streamer archive's retention is shorter than the requested window, the missing portion is invisible to this tool.`,
     ].join('\n');
@@ -146,7 +150,7 @@ export async function executeBackfillMetric(
     destination: args.destination,
     metricName: args.metric_name,
     earliestTimestampMs: oldestMs,
-    staticTags: { pattern: args.pattern.replace(/[^A-Za-z0-9_.-]/g, '_'), backfill: 'log10x' },
+    staticTags: { pattern: pattern.replace(/[^A-Za-z0-9_.-]/g, '_'), backfill: 'log10x' },
   });
 
   // ── 4. Forward-emission handoff (stub) ──
@@ -158,7 +162,7 @@ export async function executeBackfillMetric(
   const lines: string[] = [];
   lines.push(`## Backfill: ${args.metric_name}`);
   lines.push('');
-  lines.push(`**Pattern**: \`${args.pattern}\``);
+  lines.push(`**Pattern**: \`${pattern}\``);
   lines.push(`**Destination**: ${args.destination}`);
   lines.push(`**Window**: ${args.from} → ${args.to}`);
   lines.push(`**Bucket**: ${args.bucket_size} · **Aggregation**: ${args.aggregation}`);
