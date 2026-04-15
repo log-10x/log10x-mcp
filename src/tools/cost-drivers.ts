@@ -30,6 +30,15 @@ export const costDriversSchema = {
   timeRange: z.enum(['1d', '7d', '30d']).default('7d').describe('Time range to analyze'),
   limit: z.number().min(1).max(20).default(10).describe('Max patterns to return'),
   analyzerCost: z.number().optional().describe('SIEM ingestion cost in $/GB. Auto-detected from your profile if omitted.'),
+  baselineOffsetDays: z.number().min(1).max(90).optional().describe(
+    'Override the baseline comparison. Default behavior averages three prior windows (offset ' +
+    '= timeRange, 2×timeRange, 3×timeRange days) to smooth noise. ' +
+    'Set this to compare against a single specific offset instead — e.g., ' +
+    '`{timeRange: "1d", baselineOffsetDays: 1}` means "compare today to yesterday" ' +
+    '(deploy-delta pattern). `{timeRange: "7d", baselineOffsetDays: 14}` means ' +
+    '"compare this week to the week two weeks ago" (skip a week). Use when you need ' +
+    'anchor-aligned comparison rather than the default 3-window average.'
+  ),
   environment: z.string().optional().describe('Environment nickname (for multi-env setups)'),
 };
 
@@ -50,12 +59,18 @@ export async function executeCostDrivers(
     timeRange: string;
     limit: number;
     analyzerCost: number;
+    baselineOffsetDays?: number;
   },
   env: EnvConfig
 ): Promise<string> {
   const tf = parseTimeframe(args.timeRange);
   const costPerGb = args.analyzerCost;
   const period = costPeriodLabel(tf.days);
+  // If the caller supplied an explicit baseline offset, use it as the sole comparison window
+  // instead of the 3-window average (tf.baselineOffsets default = [days, 2*days, 3*days]).
+  const baselineOffsets = args.baselineOffsetDays
+    ? [args.baselineOffsetDays]
+    : tf.baselineOffsets;
 
   const filters: Record<string, string> = {};
   if (args.service) filters[LABELS.service] = args.service;
@@ -82,9 +97,9 @@ export async function executeCostDrivers(
     });
   }
 
-  // Queries 2-4: baseline windows (3 prior periods)
+  // Queries 2-4: baseline windows (3 prior periods by default, or 1 explicit offset)
   const baselineByHash = new Map<string, number[]>();
-  for (const offsetDays of tf.baselineOffsets) {
+  for (const offsetDays of baselineOffsets) {
     const baseRes = await queryInstant(env, pql.bytesPerPattern(filters, metricsEnv, tf.range, offsetDays));
     if (baseRes.status === 'success') {
       for (const r of baseRes.data.result) {
@@ -143,7 +158,12 @@ export async function executeCostDrivers(
   if (drivers.length > 0) {
     const driversCost = drivers.reduce((s, d) => s + d.costNow, 0);
     const baselineCost = drivers.reduce((s, d) => s + d.costBaseline, 0);
+    // Describe the exact comparison so the agent can quote it correctly in its answer.
+    const comparison = args.baselineOffsetDays
+      ? `current ${tf.range} vs ${args.baselineOffsetDays}d-offset baseline`
+      : `current ${tf.range} vs 3-window avg baseline (offsets: ${tf.baselineOffsets.join('d/')}d)`;
     lines.push(`${displayName} — ${fmtDollar(baselineCost)} → ${fmtDollar(driversCost)}${period} (${drivers.length} cost driver${drivers.length > 1 ? 's' : ''})`);
+    lines.push(`Comparison: ${comparison}`);
     lines.push(`⚠ These are GROWTH deltas (current window vs prior baseline), NOT current ranking. Do not re-rank or merge with log10x_top_patterns output.`);
     lines.push('');
 
