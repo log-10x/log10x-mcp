@@ -2,7 +2,7 @@
 
 **Purpose**: persistent list of known issues, architectural observations, and deferred fixes surfaced during sub-agent acceptance testing. Kept in repo so context isn't lost across sessions or compaction events. Update this file when closing an item or adding a new one.
 
-Last update: session ending 2026-04-15. Eight PRs merged (#6–#13). Findings below are the things **not** closed by those PRs.
+Last update: session 2026-04-15. **Ten PRs merged (#6–#15)**, including this file's creation (#14) and proactive doctor health checks (#15) that close C1/C2/C3. Findings below are the things **not** closed by those PRs.
 
 ---
 
@@ -95,28 +95,14 @@ This is **demo env infrastructure work**, not MCP code work.
 
 ## Category C: Product opportunities (features, not bugs)
 
-### C1. Proactive "boilerplate-only service" detection in doctor
-**Insight source**: Hard-3 sub-agent ("no-data vs no-occurrence" scenario) caught that the payment service has only OTel-SDK-generated logs and no business events. This is an **architectural anti-pattern** that doctor could detect automatically.
+### ~~C1. Silent service detection in doctor~~ ✅ SHIPPED in PR #15
+Implemented as `silent_services` check in `doctor.ts`. Uses percentile ratio (service volume <100× below environment median) rather than a boilerplate regex, so it works on any service naming convention. Verified on demo env: surfaces 4 services not previously discovered by any sub-agent.
 
-**Proposed check**: for each service in `services` output, count distinct pattern identities with severity ≥ INFO and total events > N (e.g., 1000). If the pattern set is dominated by a small number of boilerplate templates (`process.runtime.*`, `host.*`, `service.instance.id *`, `gRPC server started`), flag the service as "emitting telemetry boilerplate only — business events may be in traces, not logs".
+### ~~C2. Severity distribution sanity check~~ ✅ SHIPPED in PR #15
+Implemented as `severity_distribution` check in `doctor.ts`. Flags environments >99% INFO with ~0 errors. Healthy envs get the PASS path. Verified on demo env: returns PASS with 24% INFO, 9.6% error-class.
 
-**Why it's valuable**: a customer running this doctor check would immediately see which of their services are "silently not logging business events", which is a class of observability gap that's normally invisible until an incident exposes it. **Real product value**, surfaced by a real finding.
-
-**Effort**: low-medium. New doctor check + a small library of known-boilerplate pattern regexes.
-
-### C2. Severity distribution sanity check in doctor
-**Proposed check**: warn if an environment's log volume is >99% INFO with effectively zero ERROR/WARN/CRIT. Two interpretations:
-- (Good): the services are healthy
-- (Bad): the services aren't logging errors at all
-
-The MCP can't distinguish these without the customer's input, but it can flag the pattern and ask the user which interpretation applies. A CFO wants to know if "no errors" means "healthy" or "blind".
-
-**Effort**: low. Leverages existing `list_by_label` on `severity_level` plus a threshold check.
-
-### C3. Cardinality concentration warning in doctor
-**Proposed check**: if the top 1 pattern is >40% of total cost, or the top 5 are >70%, flag as high-concentration and suggest running `cost_drivers` for drop candidates. This turns "which patterns should I consider filtering" into an automatic recommendation rather than an agent discovery task.
-
-**Effort**: low. Single `top_patterns` query + ratio math.
+### ~~C3. Cardinality concentration warning~~ ✅ SHIPPED in PR #15
+Implemented as `cardinality_concentration` check in `doctor.ts`. Flags when top-1 pattern is >40% of spend or top-5 are >70%. Verified on demo env: fires at 54% top-1 (the otelcol DEBUG self-telemetry pattern).
 
 ### C4. Sub-agent bootstrap catch-22
 **Status**: PR #9 documented the fix (prompt prefix) in README; per-prompt hint works reliably. Fundamental fix requires upstream change in Agent SDK / Claude Code that lets sub-agents auto-load parent MCP tools without requiring a ToolSearch call.
