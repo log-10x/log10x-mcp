@@ -148,10 +148,44 @@ export async function executeResolveBatch(args: {
   lines.push(`## Batch Triage`);
   lines.push('');
   const modeLabel = executionMode === 'local_cli' ? 'local tenx CLI (privacy mode — no network egress)' : 'Log10x paste endpoint';
+
+  // G11 mitigation: the engine-side templatizer has a known bug where it
+  // silently drops input lines — up to ~70% of a 30-line batch on the
+  // otel-demo env. The tool previously trusted `concentrations` as the
+  // authoritative count without comparing against `lineCount`. That meant
+  // the header said "30 events, resolved into 7 patterns" even when those
+  // 7 patterns only accounted for 9 events — 21 input lines silently
+  // vanished with no warning. This mitigation compares the sum of pattern
+  // counts against the input line count and surfaces any gap as an
+  // explicit "uncategorized events" number so a caller cannot be misled.
+  // Does NOT fix the underlying templatizer; the engine team owns G11.
+  const accountedEvents = encoded.length;
+  const droppedEvents = Math.max(0, lineCount - accountedEvents);
+  const dropRate = lineCount > 0 ? droppedEvents / lineCount : 0;
+
   lines.push(
     `${fmtCount(lineCount)} events, resolved into ${concentrations.length} distinct pattern${concentrations.length === 1 ? '' : 's'}. ` +
       `Templater wall time: ${cliWallTimeMs}ms. Input size: ${fmtBytes(bytes)}. Execution: ${modeLabel}.`
   );
+  if (droppedEvents > 0) {
+    const pctLabel = `${Math.round(dropRate * 100)}%`;
+    if (dropRate >= 0.2) {
+      lines.push('');
+      lines.push(
+        `> ⚠ **${fmtCount(droppedEvents)} input lines (${pctLabel}) were NOT accounted for by the templatizer.** ` +
+          `The sum of per-pattern event counts (${fmtCount(accountedEvents)}) is less than the input line count (${fmtCount(lineCount)}). ` +
+          `This is a known engine-side bug (GAPS G11) where the paste Lambda templatizer silently drops input lines under certain conditions ` +
+          `(multi-line stack traces, event-boundary crossings, high-cardinality variant overfitting). ` +
+          `**Do not treat this batch as a complete triage** — the dropped lines may contain the most important signals. ` +
+          `Workarounds: (1) resubmit the batch with \`top_n_patterns: 50\` to widen the filter; (2) split the batch into halves and compare; ` +
+          `(3) for incident response, use log10x_event_lookup on any specific line you remember rather than trusting the batch output.`
+      );
+    } else if (dropRate >= 0.05) {
+      lines.push(
+        `_Note: ${fmtCount(droppedEvents)} lines (${pctLabel}) were not accounted for by the templatizer. Minor drop, likely tiny-batch overfitting._`
+      );
+    }
+  }
   lines.push('');
 
   const distByAll = totalSeverityDistribution(concentrations);

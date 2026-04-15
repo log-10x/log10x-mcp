@@ -739,22 +739,82 @@ async function renderEnvironmentAudit(
     });
     // Sort by absolute magnitude so the biggest movers come first.
     deduped.sort((a, b) => Math.abs(b.rc) - Math.abs(a.rc));
-    const topMovers = deduped.slice(0, 8);
+
+    // G10 collapse heuristic: the engine fingerprinter sometimes leaks
+    // high-cardinality variable values (usernames, UUIDs, session IDs) into
+    // pattern identities. When that happens, many "different" patterns from
+    // the same service with near-identical rate changes (±5%) are really
+    // variants of the same structural template rotating as users churn. A
+    // naive top-movers list then shows "5 patterns declined -100%" in one
+    // service which looks like a service incident but is actually just
+    // variant rotation. Collapse them into a single summary row so the
+    // operator sees one signal instead of five phantom ones.
+    //
+    // The collapse is conservative: only triggers when ≥3 patterns from the
+    // same service have rate changes within 5% of each other AND the overall
+    // magnitudes are significant (|rc| >= 0.5). Anything below that stays
+    // uncollapsed so real incidents aren't hidden.
+    interface DisplayRow {
+      pattern: string;
+      service: string;
+      rc: number;
+      collapsedCount?: number; // set if this row represents a collapsed group
+    }
+    const topMovers: DisplayRow[] = [];
+    const usedPatterns = new Set<string>();
+    for (const r of deduped) {
+      if (usedPatterns.has(r.pattern)) continue;
+      if (topMovers.length >= 8) break;
+      // Find all other rows in the same service with rc within ±5% of r.rc
+      if (Math.abs(r.rc) >= 0.5) {
+        const siblings = deduped.filter(
+          (x) =>
+            x.service === r.service &&
+            !usedPatterns.has(x.pattern) &&
+            Math.abs(x.rc - r.rc) / Math.max(Math.abs(r.rc), 0.01) <= 0.05
+        );
+        if (siblings.length >= 3) {
+          // Collapse the group into a single display row
+          for (const s of siblings) usedPatterns.add(s.pattern);
+          topMovers.push({
+            pattern: r.pattern,
+            service: r.service,
+            rc: r.rc,
+            collapsedCount: siblings.length,
+          });
+          continue;
+        }
+      }
+      usedPatterns.add(r.pattern);
+      topMovers.push({ pattern: r.pattern, service: r.service, rc: r.rc });
+    }
 
     if (topMovers.length > 0) {
       lines.push('### Top movers');
       lines.push('');
+      let anyCollapsed = false;
       for (const r of topMovers) {
         const pct = (r.rc * 100).toFixed(0);
         const direction = r.rc >= 0 ? `+${pct}%` : `${pct}%`;
         const label = r.rc >= 0 ? 'grew' : 'declined';
-        lines.push(`- \`${r.pattern}\` (\`${r.service}\`) — ${label} ${direction} vs ${effectiveBaselineOffset} ago`);
+        if (r.collapsedCount && r.collapsedCount > 1) {
+          anyCollapsed = true;
+          lines.push(
+            `- **${r.collapsedCount} high-cardinality variants in \`${r.service}\`** — each ${label} ${direction} vs ${effectiveBaselineOffset} ago (collapsed: same rate change within ±5%, likely variable-value rotation rather than a service incident). Example: \`${r.pattern}\``
+          );
+        } else {
+          lines.push(`- \`${r.pattern}\` (\`${r.service}\`) — ${label} ${direction} vs ${effectiveBaselineOffset} ago`);
+        }
       }
       lines.push('');
       lines.push('**Next action**: investigate the top mover individually:');
       lines.push(`\`log10x_investigate({ starting_point: '<top_pattern_name>', window: '${args.window}' })\``);
       lines.push('');
       lines.push('_Note: declines (negative %) are real signals — a pattern that stopped firing may indicate a service crashed, a monitor was muted, or a real upstream change. Treat them the same way you treat spikes._');
+      if (anyCollapsed) {
+        lines.push('');
+        lines.push('_**Collapsed-variant note**: rows labeled "N high-cardinality variants" represent multiple pattern identities from the same service that are moving by nearly identical magnitudes. This is typically caused by high-cardinality variable values (usernames, UUIDs, session IDs) leaking into the pattern identity — the engine fingerprinter should have tokenized these out but did not. Treat as one signal, not N. If this represents a real service-level incident, drill into any one of the collapsed patterns directly._');
+      }
     } else {
       lines.push('_No significant movement detected across the environment in this window._');
       lines.push('');
