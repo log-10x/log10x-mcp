@@ -2,7 +2,7 @@
 
 **Purpose**: persistent list of known issues, architectural observations, and deferred fixes surfaced during sub-agent acceptance testing. Kept in repo so context isn't lost across sessions or compaction events. Update this file when closing an item or adding a new one.
 
-Last update: session 2026-04-15. **Ten PRs merged (#6–#15)**, including this file's creation (#14) and proactive doctor health checks (#15) that close C1/C2/C3. Findings below are the things **not** closed by those PRs.
+Last update: session 2026-04-15 (continued). **Twelve PRs merged (#6–#17)**. Most recent: PR #17 fixed three streamer end-to-end bugs surfaced during first live validation against the demo env deployment. Findings below are the things **not** closed by those PRs.
 
 ---
 
@@ -103,6 +103,90 @@ Implemented as `severity_distribution` check in `doctor.ts`. Flags environments 
 
 ### ~~C3. Cardinality concentration warning~~ ✅ SHIPPED in PR #15
 Implemented as `cardinality_concentration` check in `doctor.ts`. Flags when top-1 pattern is >40% of spend or top-5 are >70%. Verified on demo env: fires at 54% top-1 (the otelcol DEBUG self-telemetry pattern).
+
+---
+
+## Category F: Streamer engine issues (out of MCP scope, need upstream fixes)
+
+### F1. Streamer server's TenXDate ISO8601 parser is broken
+**Severity**: high. Silently produces wrong query windows on a documented-supported input format.
+
+**Evidence (2026-04-15, demo env deployment)**:
+| Format | HTTP | Events matched (same wall-clock hour) |
+|---|---|---|
+| `now("-1h")` | 200 | 894 |
+| Epoch millis string | 200 | 3400 |
+| `2026-04-15T11:00:00Z` (ISO8601) | 200 | **0** |
+
+**Expected**: ISO8601 should work per streamer-api.ts comment ("The engine evaluates these as JavaScript on the server via TenXDate, so `now("-1h")` / `now()` / ISO8601 strings / epoch millis all work"). Empirically, ISO8601 silently produces a non-matching window.
+
+**MCP workaround**: PR #17 converts any non-`now()`, non-pure-digit input to epoch millis client-side via `Date.parse()` before submitting. After workaround: same ISO8601 query → 685 events.
+
+**Real fix**: the streamer server's TenXDate parser needs to handle ISO8601 strings correctly. Live in `com.log10x.ext.quarkus.streamer.*` — find where `from`/`to` get parsed and see why the ISO8601 path produces a bad range.
+
+### F2. Streamer query API strict-rejects unknown body fields
+**Severity**: medium. Breaks obvious client patterns.
+
+**Evidence**: sending `{"format":"events","limit":3}` in the query body produces HTTP 400 with empty body. The MCP tool works around it by NOT sending these fields (it applies format/limit client-side after reading S3 results).
+
+**Why it matters**: any customer building an integration against `/streamer/query` who passes standard REST-ish fields will hit 400 with no error message. The server should either:
+- Accept unknown fields and ignore them (standard REST behavior)
+- Return HTTP 400 with a descriptive error body explaining which field is invalid
+
+Current behavior is the worst of both: strict rejection AND no diagnostic.
+
+### F3. Streamer aggregation limit (5GB) on bleeding-edge day
+**Severity**: medium. See GAPS A1 for MCP workaround; the root cause is server-side. `streamerIndexedBytesChunk` at offset=0d intermittently hits `HTTP 422: expanding series: the query hit the aggregated data size limit (limit: 5000000000 bytes)` under concurrent load. PR #12 added coverage annotation as client-side safety net, but the real fix is server-side: raise the limit, pre-aggregate the high-cardinality metric, or split the streamer's indexed metric across more scrape targets.
+
+---
+
+## Category G: Demo env infrastructure issues
+
+### G1. Cloud reporter cronjob ~10% failure rate (OOMKilled)
+**Severity**: high. The cloud reporter is the metric producer for the entire MCP experience. A ~10% failure rate means 10% of 5-minute intervals are metric-blind.
+
+**Evidence**: Checked `kubectl get jobs -n demo | grep cloud-reporter` on 2026-04-15. Out of ~28 recent jobs:
+- Job 29603280 (16h ago): 3 pods all OOMKilled
+- Job 29603640 (10h ago): 4 pods all failed
+- Job 29604200 (51m ago): 1 failed pod
+- Remaining jobs: Complete
+
+**Root cause**: the cloud reporter pod has `memory: limits 2Gi, requests 1Gi`. Reading the 500MB / 500k-event / 4min-duration S3 sample through the tokenization + pattern-fingerprinting + enrichment pipeline apparently pushes heap close to 2Gi. GC timing determines whether the job survives. Logs of a failed run show backpressure firing at t+13s (QueuedObjects limit 95000) followed by OOMKill under 2Gi.
+
+**Short-term fix (demo infra)**: raise memory limit in `backend/terraform/demo/values/tenx-cloud-reporter.yaml:62` from `2Gi` to `4Gi`. Two-line change.
+
+**Medium-term fix (engine)**: the engine should stay within bounded memory regardless of batch size. 500k events shouldn't require >2Gi. Investigate why the pipeline heap footprint scales with input rate — likely suspects are (a) `QueuedObjects` buffer sizing, (b) retained pattern fingerprints accumulating, (c) enrichment lookups caching every symbol.
+
+### G2. The "otel-demo" in the demo env is a LOG REPLAY, not a running OTel demo
+**Severity**: product narrative / validation gap.
+
+**Evidence**: the `log-simulator-56b6444567-74d8g` pod is the only source of "application" events. Its container args:
+```
+--source s3 --bucket log10x-public-assets --key samples/otel-k8s/large/input/otel-sample.log --rate 1000
+```
+
+Every service name the MCP tools show (`cart`, `frontend`, `payment`, `opentelemetry-collector`, etc.) is a pattern identity from this **canned S3 sample file**. There are NO running microservices, NO live traces, NO real OTel metrics being produced. `kubectl get pods -A` returns zero OTel collectors, zero Prometheus, zero Grafana, zero opentelemetry-demo.
+
+**Implications**:
+1. Cross-pillar testing is **literally impossible** in this env without standing up new infrastructure
+2. The anti-patterns agents surfaced (Hard-3 payment-service-no-business-logs, validation-run quote-service-only-"Listening on") are **artifacts of the canned sample**, not real architectural findings about a live system
+3. The cardinality_concentration warning (54% = otelcol DEBUG self-telemetry) reflects the **sample's characteristics**, not a live customer's observability pattern
+
+**This does NOT invalidate the MCP fixes** — every bug caught is real regardless of whether the data is live or replayed. But it does mean the "APM wedge" claim (cross-pillar correlation validates log patterns against k8s metrics) is unvalidated against real production-shaped data.
+
+**To actually validate the APM wedge**:
+- **Option A**: deploy `open-telemetry/opentelemetry-demo` into the demo cluster (20+ microservices, real spans, real metrics) → wire its Prometheus to `LOG10X_CUSTOMER_METRICS_URL` → re-run cross-pillar scenarios
+- **Option B**: stand up a minimal `prom-node-exporter` + `kube-state-metrics` + OTel collector alongside the existing log-simulator → wire that Prom to the cross-pillar env var
+- **Option C**: accept that the demo validates log-only operation and mark cross-pillar as "untested against live data, code is ready"
+
+Option A is the correct answer for GA. It's substantial infra work (several hours) but it's the only way to validate the cross-pillar wedge claim on production-shaped data.
+
+### G3. Streamer-wired-but-undocumented in demo env
+**Evidence**: LoadBalancer `tenx-streamer-query-lb` at `a2936089108bb492cb41d18cb5b75f8d-1298006809.us-east-1.elb.amazonaws.com` has been running for 21h but was NOT referenced in any MCP setup docs or env var hint. I found it by `kubectl get svc -A | grep streamer`.
+
+**Impact**: every sub-agent run this session that asked about the streamer got "LOG10X_STREAMER_URL not configured" because nobody had wired the MCP to the already-deployed LB. Hard-1 SOC forensics scenario worked around it by suggesting branches; S6 caveated its answer; etc.
+
+**Action**: document the streamer LB in the demo README so the next contributor knows to wire it. PR #9 documented the general setup; this adds the specific URL.
 
 ### C4. Sub-agent bootstrap catch-22
 **Status**: PR #9 documented the fix (prompt prefix) in README; per-prompt hint works reliably. Fundamental fix requires upstream change in Agent SDK / Claude Code that lets sub-agents auto-load parent MCP tools without requiring a ToolSearch call.
