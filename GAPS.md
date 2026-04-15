@@ -2,7 +2,15 @@
 
 **Purpose**: persistent list of known issues, architectural observations, and deferred fixes surfaced during sub-agent acceptance testing. Kept in repo so context isn't lost across sessions or compaction events. Update this file when closing an item or adding a new one.
 
-Last update: session 2026-04-15 (continued). **29 MCP PRs merged (#6–#29) + 3 backend PRs (#54, #55)**. PR #29 fixed savings credibility bug (emitted=0 no longer counted as realized savings) and `<owner>` placeholder in verification commands. Post-G8 sub-agent battery (3 scenarios) against real otel-demo:
+Last update: session 2026-04-15 (continued). **31 MCP PRs merged (#6–#31) + 3 backend PRs (#54, #55)**. PR #30 fixed event_lookup regex escaping (S4) and investigate long-window routing (S6). PR #31 fixed cross-pillar correlation (S8) — structural passthrough + pod-level candidate filtering, took accounting→Kerberos test from 0 candidates → 16 Tier 1 matches. Second sub-agent battery (S4-S9, 6 scenarios) against live otel-demo:
+- **S4 paste-triage**: found event_lookup 400s on raw lines (fixed #30) + resolve_batch silently drops 70% of input (engine-side templatizer bug, documented G11)
+- **S5 orientation briefing**: 6 tools composed cleanly, totals reconcile across services/top_patterns/list_by_label. Strong positive signal
+- **S6 drift**: caught investigate 30d-window blindness (fixed #30)
+- **S7 streamer forensics**: reproducible false-negative (0 events returned for windows where metrics prove events exist) + MCP -32000 crash on canonical pattern name. Engine/streamer-side issue, documented G12
+- **S8 cross-pillar APM wedge**: 0 candidates on canonical test (fixed #31 — 16 Tier 1 matches now)
+- **S9 resolve_batch stress**: confirmed S4's templatizer bug with detailed failure taxonomy (engine-side)
+
+ PR #29 fixed savings credibility bug (emitted=0 no longer counted as realized savings) and `<owner>` placeholder in verification commands. Post-G8 sub-agent battery (3 scenarios) against real otel-demo:
 - **S1 biggest-grower**: surfaced real top mover with honest 20% low-confidence, caught real floor-amplification interpretation nuance (worth watching; not a bug but the UX could be clearer when absolute rates are near the floor)
 - **S2 cost-cutting**: surfaced $559K/mo in cut candidates, flagged the savings credibility bug — now fixed in PR #29
 - **S3 accounting crashloop**: reached 90% confidence correct Kerberos diagnosis on call #1. Quote: "MCP verdict: the tool chain DID lead to the correct answer on call #1. A textbook SRE who trusts kubectl describe ('OOMKilled') would bump memory and stay broken; top_patterns surfacing the CRIT linker error on the very first call is exactly the structural wedge that prevents the wrong fix." **This is the GA differentiation story, validated by an independent agent with no session memory.**
@@ -377,6 +385,49 @@ Signature detection is a bigger workstream. The simpler short-term fix is #1 —
 **Action**: file engine ticket with full evidence bundle. Block GA on option (1). Add doctor check as MCP-layer mitigation in the interim.
 
 ---
+
+### G11. Paste Lambda templatizer is broken (resolve_batch silently drops ~70% of input)
+**Discovered by**: sub-agents S4 and S9 (paste-triage scenarios), 2026-04-15.
+**Severity**: blocks the paste-triage workflow entirely. `log10x_resolve_batch` is the foundation of that workflow — if it can't reliably templatize a batch, downstream triage is impossible.
+
+**Evidence** (S9 detailed taxonomy):
+- S9 pasted 30 distinct log lines, got back 7 patterns accounting for only ~9 events. **21 of 30 lines silently dropped**. No error, no "uncategorized" bucket, no warning. The header says "30 events, resolved into 7 distinct patterns" — the 30 is trusted, the 7 is misleading.
+- **Cross-event template merge (critical)**: Pattern #1's template literally contained two newline-joined distinct log lines glued together — the libgssapi error AND the shipping URL error in one template. Same bug on pattern #6 (checkpoints + grpc jaeger). The templatizer is sliding a window across event boundaries.
+- **Over-split**: lines 6+7 were byte-identical libgssapi errors but got different pattern identities because line 6 got glued to line 8. Two identical bytes → two identities.
+- **UUID over-segmentation**: UUIDs got split on every `-` into 5 separate slots (`$-$-$-$-$`) rather than treated as one token.
+- **Variable name leakage**: literals like `shipping` and `checkpoints.go` were used as slot names even when there was no `k=v` structure.
+
+**Why this is an engine/paste-Lambda bug, not MCP**: `log10x_resolve_batch` just POSTs events to the paste endpoint and renders the response. The templatization happens server-side in the paste Lambda via the same Log10x engine code used by the main pipeline. The bugs are in the templatizer itself.
+
+**Action**:
+1. Engine team: audit the templatizer for newline-boundary handling — events must NEVER span newlines. Add test coverage for "30 distinct lines produce ≥20 identities (not 7)".
+2. Engine team: fix UUID tokenization to treat `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` as a single slot, not 5.
+3. MCP layer: once the engine fix ships, `resolve_batch` should still emit an "uncategorized events" bucket so the customer can see dropped lines instead of having them silently vanish. Currently the tool trusts the engine output blindly.
+
+**Customer impact**: any customer who pastes a SIEM dump into resolve_batch today gets a report that looks plausible but silently hides 70% of the input. This is the worst possible failure mode for a triage tool.
+
+### G12. Streamer forensic query — false negatives + crash on canonical pattern names
+**Discovered by**: sub-agent S7 (forensic post-mortem scenario), 2026-04-15.
+**Severity**: blocks the forensic retrieval workflow. Storage Streamer is the Tier-4 customer capability and a key GA feature — currently unreliable.
+
+**Evidence** (S7's stress test):
+- **False negative on known-exists data**: `log10x_pattern_trend` confirms ~$11K/wk of the shipping pattern flowing right now (166 data points, 109 GB peak on 2026-04-14). `log10x_streamer_query` with ISO8601, now-expressions, and `last 1h` windows ALL return 0 events. The streamer is submitting queries successfully (92s wall time = full execution), producing marker objects, and reading the results prefix — but the results prefix is empty.
+- **Crash on canonical pattern name**: passing `shipping_service_Post_shipping_get_quote_unsupported_protocol_scheme_shipping` to `name` → `MCP error -32000: Connection closed`. Reproducible, 2 attempts. Short-form (`shipping`) does not crash but returns 0.
+- Two query IDs recorded for false-negative: `ad907b42-e113-463c-86fd-30176dd01db4`, `5ec74e06-75b0-4b4f-855a-a93176fef038`.
+
+**Possible root causes** (not yet diagnosed):
+1. Bloom filter index is not covering the time windows being queried (S3 archive coverage gap?)
+2. Target prefix mismatch — the streamer indexer writes under a different target than `app` or whatever the default is
+3. Name-based filter: canonical slash-underscore name doesn't match the underlying stored event keys
+4. The -32000 crash is specifically on name length / content — maybe a JSON-encoding issue in the backend
+5. The streamer was wired up recently and hasn't ingested historical data yet
+
+**Action**:
+1. **Diagnosis required on engine side**: pull the streamer coordinator logs during a reproduction to see whether the query runs, matches, and writes. The MCP is operating correctly per its contract (submit → wait for marker → read results); the failure is downstream.
+2. **MCP-layer mitigation**: when streamer returns 0 events while `pattern_trend` proves the pattern exists, emit a clear warning ("streamer returned 0 events but live metrics prove this pattern has ~$X/wk of traffic — streamer index may be stale or target mismatch; fall back to `pattern_trend` for trajectory and `event_lookup` for pattern metadata").
+3. **Hard crash fix**: investigate the -32000 error — likely a length cap, special-char escaping, or JSON field handling bug. Check engine-side streamer request handler for input validation.
+
+**Customer impact**: a customer trying to do forensic retrieval on a known-live pattern gets an empty result set with no explanation. If they pass the canonical name, they get an obscure RPC error. The workflow is currently unusable end-to-end.
 
 ### G10. Engine fingerprinter leaks high-cardinality variables into pattern identities
 **Discovered by**: session 2026-04-15 sub-agent S1 and live environment audit review.
