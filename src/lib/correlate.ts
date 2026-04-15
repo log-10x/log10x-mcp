@@ -91,26 +91,32 @@ export async function runAcuteSpikeCorrelation(opts: CorrelationOptions): Promis
   // (same window, shifted by baselineOffsetSeconds). We rank by magnitude
   // of rate change, anchored by the anchor direction.
   //
-  // Both sides guarded by a MEANINGFUL absolute floor, not just the
-  // per-series noise floor. Without this guard, a baseline sum of one
-  // sample (~1 event in 1h ≈ 0.0003 events/s) can inflate the relative
-  // change to +9000% even though the absolute rate is trivial. Caught
-  // by Live-S5 sub-agent (GAPS G6): the `environment` audit flagged
-  // several patterns as "+100%" spikes that per-service reruns
-  // immediately contradicted as "nothing crossed the noise floor".
+  // The BASELINE side is guarded by a meaningful absolute floor (10× the
+  // per-series noise floor). Without this, a baseline sum of ~1 sample
+  // (0.0003 events/s) can inflate the relative change to +9000% even
+  // though the absolute rate is trivial. Caught by Live-S5 sub-agent
+  // (GAPS G6): the `environment` audit flagged several patterns as
+  // "+100%" spikes that per-service reruns immediately contradicted.
   //
-  // The meaningful floor is 10× acuteNoiseFloor (0.01 events/s by
-  // default = ~36 events/hour), which is still very small but high
-  // enough that a relative-change ranker can't promote noise.
+  // The CURRENT side is NOT guarded — a spike from a quiet baseline to
+  // a moderate rate is a real, catchable incident. The tension: a bursty
+  // crashloop (like the accounting pod's Kerberos dlopen failure, 22
+  // restarts, ~8 events/hour averaged) has a real but low absolute rate,
+  // and we want investigate() to catch it. Guarding the current side
+  // would eliminate it as a false negative.
+  //
+  // Net effect: relative-change amplification from near-zero baselines
+  // is suppressed (G6 noise gone), but genuine low-volume incidents
+  // still pass.
   const baseOffset = `${opts.baselineOffsetSeconds}s`;
   const noiseFloor = opts.thresholds.acuteNoiseFloor;
-  const meaningfulFloor = noiseFloor * 10;
+  const meaningfulBaselineFloor = noiseFloor * 10;
 
   const topkQuery =
     `topk(20, abs(` +
-    `(sum by (${LABELS.pattern}, ${LABELS.service}, ${LABELS.severity}) (rate(${metric}{${envLabel}${scopeLabel}}[${opts.window}])) > ${meaningfulFloor} ` +
+    `(sum by (${LABELS.pattern}, ${LABELS.service}, ${LABELS.severity}) (rate(${metric}{${envLabel}${scopeLabel}}[${opts.window}])) ` +
     `/ ` +
-    `sum by (${LABELS.pattern}, ${LABELS.service}, ${LABELS.severity}) (rate(${metric}{${envLabel}${scopeLabel}}[${opts.window}] offset ${baseOffset}) > ${meaningfulFloor})` +
+    `sum by (${LABELS.pattern}, ${LABELS.service}, ${LABELS.severity}) (rate(${metric}{${envLabel}${scopeLabel}}[${opts.window}] offset ${baseOffset}) > ${meaningfulBaselineFloor})` +
     `) - 1))`;
 
   let queriesExecuted = 0;
