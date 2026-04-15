@@ -333,6 +333,32 @@ function parseJsonl(content: string): StreamerEvent[] {
         }
       }
       if (!parsed || typeof parsed !== 'object') continue;
+      // Shape guard: discard records that don't look like real streamer
+      // events. The upstream writer on the demo env has a bug where `text`
+      // field values contain literal unescaped newlines, so our
+      // split(/\r?\n/) breaks real event records into fragments. Some
+      // fragments happen to be valid JSON themselves (e.g. the fluentd
+      // stream/log/docker/kubernetes/tenx_tag shape embedded inside the
+      // `text` field). Without a guard, those get pushed as "events" with
+      // bogus shapes and pollute downstream rollups ("unknown: 9" in the
+      // count summary).
+      //
+      // Real streamer events always have at least one of:
+      //   - `timestamp` (as scalar or [scalar])
+      //   - `text` (the raw content field)
+      //   - `tenx_user_service` or `tenx_user_process` (enrichment labels)
+      //   - `LevelTemplate.severity_level` or `MessageTemplate.message_pattern`
+      // Fluentd-wrapped fragments have NONE of these — they have
+      // `stream`, `log`, `docker`, `kubernetes`, `tenx_tag` instead.
+      const obj = parsed as Record<string, unknown>;
+      const hasRealEventShape =
+        'timestamp' in obj ||
+        'text' in obj ||
+        'tenx_user_service' in obj ||
+        'tenx_user_process' in obj ||
+        'LevelTemplate.severity_level' in obj ||
+        'MessageTemplate.message_pattern' in obj;
+      if (!hasRealEventShape) continue;
       events.push(parsed as StreamerEvent);
     } catch {
       // Skip unparseable lines — the worker may have written a partial
