@@ -60,16 +60,22 @@ export async function classifyTrajectory(
   window: string,
   thresholds: InvestigateThresholds,
   severity?: string,
-  metricName?: string
+  metricName?: string,
+  baselineOffset: string = '7d'
 ): Promise<{ shape: 'acute' | 'drift' | 'flat'; slopePerWeek: number; rateChange: number }> {
   const metric = metricName || EVENT_COUNT_METRIC;
   const envLabel = `${LABELS.env}="${metricsEnv}"`;
 
-  // Compute current rate vs 1-week-ago baseline — large ratio = acute; small stable = drift or flat.
-  const currentVsWeekAgo =
+  // Compare current rate to the user's baseline_offset (default 7d for backward
+  // compat with callers that don't pass it). Previously this was hardcoded to
+  // 7d, which meant a service-mode investigate with window=5m baseline=1h would
+  // still classify "flat" against a 7d-ago bucket, ignoring the user's actual
+  // comparison intent. Downstream: `shape === 'flat'` → tool returns "no
+  // significant movement", so getting this wrong silences real signals.
+  const currentVsBaseline =
     `sum(rate(${metric}{${envLabel},${LABELS.pattern}="${escape(anchor)}"}[${window}])) ` +
     `/ ` +
-    `sum(rate(${metric}{${envLabel},${LABELS.pattern}="${escape(anchor)}"}[${window}] offset 7d))`;
+    `sum(rate(${metric}{${envLabel},${LABELS.pattern}="${escape(anchor)}"}[${window}] offset ${baselineOffset}))`;
 
   // Compute per-week growth rate via derivative over the window.
   const slopeQuery =
@@ -78,7 +84,7 @@ export async function classifyTrajectory(
   let rateChangeRatio = 1;
   let slopePerWeek = 0;
   try {
-    const res = await queryInstant(env, currentVsWeekAgo);
+    const res = await queryInstant(env, currentVsBaseline);
     if (res.status === 'success' && res.data.result[0]) {
       rateChangeRatio = parsePrometheusValue(res.data.result[0]);
     }
@@ -98,8 +104,21 @@ export async function classifyTrajectory(
   const sevKey = (severity || 'default').toLowerCase() as keyof typeof thresholds.driftMinSlopePerWeek;
   const driftFloor = thresholds.driftMinSlopePerWeek[sevKey] ?? thresholds.driftMinSlopePerWeek.default;
 
-  // Acute if |rateChange| > 1.0 (>2x or <0.5x) — a week-over-week doubling/halving.
-  if (Math.abs(rateChange) > 1.0) {
+  // Acute if |rateChange| >= 0.5 (50% deviation in either direction). Previous
+  // threshold was `> 1.0` (week-over-week doubling or halving), which had two
+  // problems:
+  //   1. A pattern that fully stopped has rateChange = -1.0 exactly, which is
+  //      NOT > 1.0 in absolute value — so "stopped firing" incidents (a clear
+  //      operational signal) were classified as "flat" and hidden.
+  //   2. Env-mode already surfaces movers down to a 15% floor, so service-mode
+  //      and env-mode disagreed on the same data: env-mode reported a -73%
+  //      decline, service-mode reported "no significant movement". Customers
+  //      reading both got whiplash.
+  // 0.5 matches the `streamerEscalationThreshold` philosophy (50% confidence
+  // floor) and is halfway between env-mode's 15% surface and the old 100%
+  // threshold, preserving back-compat for most tests while fixing the
+  // stopped-firing and consistency cases.
+  if (Math.abs(rateChange) >= 0.5) {
     return { shape: 'acute', slopePerWeek, rateChange };
   }
   // Drift if the per-week slope exceeds the severity-calibrated floor.
