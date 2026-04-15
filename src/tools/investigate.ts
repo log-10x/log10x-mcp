@@ -112,7 +112,7 @@ export async function executeInvestigate(
   const metricName = useBytesMetric ? 'all_events_summaryBytes_total' : undefined;
 
   // ── Phase 1 — Anchor resolution ──
-  const resolution = await resolveAnchor(args.starting_point, env, metricsEnv);
+  const resolution = await resolveAnchor(args.starting_point, env, metricsEnv, args.window, args.baseline_offset);
 
   if (resolution.mode === 'environment') {
     const report = await renderEnvironmentAudit(args, env, metricsEnv, investigationId, reporterTier);
@@ -167,7 +167,8 @@ export async function executeInvestigate(
     args.window,
     thresholds,
     resolution.severity,
-    metricName
+    metricName,
+    args.baseline_offset
   );
 
   if (shape.shape === 'flat') {
@@ -345,7 +346,13 @@ interface Resolution {
   modeDetection: string;
 }
 
-async function resolveAnchor(startingPoint: string, env: EnvConfig, metricsEnv: string): Promise<Resolution> {
+async function resolveAnchor(
+  startingPoint: string,
+  env: EnvConfig,
+  metricsEnv: string,
+  window: string,
+  baselineOffset: string
+): Promise<Resolution> {
   const sp = startingPoint.trim();
 
   // Environment-wide audit literal
@@ -353,8 +360,14 @@ async function resolveAnchor(startingPoint: string, env: EnvConfig, metricsEnv: 
     return { mode: 'environment', inputType: 'environment_literal', modeDetection: 'environment_audit' };
   }
 
-  // Pattern identity heuristic: templateHash (`~xxx`) or underscore_separated token
-  if (/^~?[A-Za-z0-9_]+$/.test(sp)) {
+  // Pattern identity heuristic: templateHash (`~xxx`), underscore_separated
+  // token, OR dash-separated service name (e.g., `product-reviews`, `ad-service`).
+  // Services in k8s commonly use kebab-case, so the regex must accept dashes
+  // or the resolver falls through to the fuzzy raw-log-line matcher and finds
+  // unrelated patterns with substring hits. Caught live on otel-demo: the
+  // `product-reviews` input was being routed to the `llm` service because the
+  // llm patterns contain "product_reviews" in their body text.
+  if (/^~?[A-Za-z0-9_-]+$/.test(sp)) {
     // Try as pattern first
     const byPattern = await queryInstant(
       env,
@@ -372,10 +385,63 @@ async function resolveAnchor(startingPoint: string, env: EnvConfig, metricsEnv: 
         modeDetection: 'direct',
       };
     }
-    // Try as service — anchor becomes the loudest pattern in the service
+    // Try as service — anchor becomes the pattern with the largest |rate change|
+    // vs the user's baseline_offset, NOT the loudest pattern. Previous behavior
+    // (topk by absolute 1h rate) meant a stable high-volume pattern would shadow
+    // every actually-moving pattern in the service, producing "no significant
+    // movement" reports even when env-mode surfaced clear -73% decliners on the
+    // same data. The resolver must match what the user actually asked — "what
+    // moved in this service" — not "what's loudest in this service".
+    //
+    // We bottom-guard the baseline with meaningfulBaselineFloor=0.01 events/s
+    // to prevent near-zero baselines from inflating relative change to +9000%
+    // on trivial activity (GAPS G6, PR #25 correction).
+    const thresholds = (await import('../lib/thresholds.js')).DEFAULT_THRESHOLDS;
+    const meaningfulBaselineFloor = thresholds.acuteNoiseFloor * 10;
+    const signedChange =
+      `(sum by (${LABELS.pattern}, ${LABELS.severity}) (rate(all_events_summaryVolume_total{${LABELS.env}="${metricsEnv}",${LABELS.service}="${escape(sp)}"}[${window}])) ` +
+      `/ ` +
+      `sum by (${LABELS.pattern}, ${LABELS.severity}) (rate(all_events_summaryVolume_total{${LABELS.env}="${metricsEnv}",${LABELS.service}="${escape(sp)}"}[${window}] offset ${baselineOffset}) > ${meaningfulBaselineFloor})` +
+      `) - 1`;
+    const [growRes, declineRes] = await Promise.all([
+      queryInstant(env, `topk(1, ${signedChange})`),
+      queryInstant(env, `bottomk(1, ${signedChange})`),
+    ]);
+    // Merge, pick the row with the largest |rate change|
+    type Row = { pattern: string; severity: string; rc: number };
+    const rows: Row[] = [];
+    for (const res of [growRes, declineRes]) {
+      if (res.status === 'success') {
+        for (const r of res.data.result) {
+          const rc = parsePrometheusValue(r);
+          if (Number.isFinite(rc)) {
+            rows.push({
+              pattern: r.metric[LABELS.pattern],
+              severity: r.metric[LABELS.severity],
+              rc,
+            });
+          }
+        }
+      }
+    }
+    if (rows.length > 0) {
+      rows.sort((a, b) => Math.abs(b.rc) - Math.abs(a.rc));
+      const top = rows[0];
+      return {
+        mode: 'service',
+        anchor: top.pattern,
+        service: sp,
+        severity: top.severity,
+        inputType: 'service_name',
+        modeDetection: 'direct',
+      };
+    }
+    // Fallback: if no patterns crossed the meaningful baseline floor, fall
+    // back to the loudest pattern so the investigate flow still has something
+    // to classify (will likely hit "flat", which is the honest result).
     const svcPat = await queryInstant(
       env,
-      `topk(1, sum by (${LABELS.pattern}, ${LABELS.severity}) (rate(all_events_summaryVolume_total{${LABELS.env}="${metricsEnv}",${LABELS.service}="${escape(sp)}"}[1h])))`
+      `topk(1, sum by (${LABELS.pattern}, ${LABELS.severity}) (rate(all_events_summaryVolume_total{${LABELS.env}="${metricsEnv}",${LABELS.service}="${escape(sp)}"}[${window}])))`
     );
     if (svcPat.status === 'success' && svcPat.data.result.length > 0) {
       const row = svcPat.data.result[0];
