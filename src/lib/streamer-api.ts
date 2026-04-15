@@ -37,8 +37,18 @@ const execFileP = promisify(execFile);
 export class StreamerNotConfiguredError extends Error {
   constructor() {
     super(
-      'Streamer endpoint not configured. Set LOG10X_STREAMER_URL + LOG10X_STREAMER_BUCKET ' +
-        'to enable archive queries.'
+      'Storage Streamer endpoint not configured for this MCP install. ' +
+        'log10x_streamer_query and log10x_backfill_metric cannot reach the S3 archive in this session.\n\n' +
+        'Two possible causes:\n' +
+        '  1. Streamer IS deployed but MCP env vars are unset. Fix: set LOG10X_STREAMER_URL ' +
+        'to the streamer query handler URL (e.g., the NLB) and LOG10X_STREAMER_BUCKET to the ' +
+        'archive bucket, then restart the MCP client.\n' +
+        '  2. Streamer is NOT deployed for this customer. Fix: deploy per ' +
+        'https://doc.log10x.com/apps/cloud/streamer/\n\n' +
+        'Workaround for the current request: if the events you need are inside SIEM hot retention ' +
+        '(typically <7 days for Datadog/Splunk/Elastic), tell the user to query the SIEM directly ' +
+        'with the relevant service + time filter — that is the fastest path. For events outside ' +
+        'SIEM retention, the only path is enabling the streamer.'
     );
     this.name = 'StreamerNotConfiguredError';
   }

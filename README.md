@@ -287,6 +287,28 @@ cart — $103 → $13K/wk (3 cost drivers)
 
 The server fetches your analyzer cost ($/GB) from your Console profile at startup and refreshes it hourly. To change it, update the cost in your profile — the server picks up the new value within an hour.
 
+## Spawning sub-agents that use this MCP
+
+If you script Claude Code sub-agents (`Agent` tool, OpenAI Agents SDK, custom orchestrators) to call log10x MCP tools, watch out for **deferred-tool bootstrapping**. The sub-agent's static tool list does not always include `mcp__log10x__*` — those tools are loaded on demand via `ToolSearch` (or the equivalent in your client). A sub-agent that reads its tool list and concludes "no MCP tools available" without first calling `ToolSearch({query: "log10x"})` will refuse the task instead of using the tools.
+
+In testing across 17 sub-agent runs, **prompt framing was the deciding factor**:
+
+| Framing | Bootstrap success |
+|---|---|
+| Action-oriented ("pull the events", "build the slide", "investigate this") | 9/9 |
+| Honesty-oriented ("don't fabricate", "refuse if you can't verify") | 0/5 |
+
+The honesty disposition fires too early — the agent applies "be honest about my limits" before trying to discover deferred tools. The fix is one line at the top of every sub-agent prompt:
+
+```
+TOOL BOOTSTRAP: You have log10x MCP tools available, but they are
+deferred-loaded. Before doing anything else, call
+ToolSearch({query: "log10x", max_results: 20}) to load them.
+After that you'll have mcp__log10x__log10x_* tools.
+```
+
+This raised bootstrap success from ~76% to 100% in our test runs and is harmless when MCP tools are already in scope.
+
 ## Development
 
 Build:
