@@ -287,6 +287,25 @@ cart — $103 → $13K/wk (3 cost drivers)
 
 The server fetches your analyzer cost ($/GB) from your Console profile at startup and refreshes it hourly. To change it, update the cost in your profile — the server picks up the new value within an hour.
 
+## Development
+
+Build:
+
+```bash
+npm install
+npm run build   # tsc → build/index.js
+```
+
+**Operational gotcha — restart after rebuild.** MCP clients (Claude Desktop, Claude Code, Cursor) typically launch the server as a long-running child process. Node caches loaded modules in memory, so the running process **will not pick up your `npm run build` output until it is killed and respawned**. After rebuilding, find and kill the stale processes:
+
+```bash
+pgrep -fl "log10x-mcp/build/index.js"   # show running servers + start times
+ps -o pid=,lstart= -p $(pgrep -f log10x-mcp/build/index.js)
+pkill -f "log10x-mcp/build/index.js"    # client will respawn on next tool call
+```
+
+If you ship a tool description change or a routing-hint update and the agent's behavior doesn't seem to reflect it, this is the most likely cause. Verify by `grep`-ing the raw tool output (most clients log it) for any string you added — if it's missing, the server is stale.
+
 ## Security
 
 - All API calls use your personal API key (never exposed in tool output)
