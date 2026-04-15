@@ -2,7 +2,7 @@
 
 **Purpose**: persistent list of known issues, architectural observations, and deferred fixes surfaced during sub-agent acceptance testing. Kept in repo so context isn't lost across sessions or compaction events. Update this file when closing an item or adding a new one.
 
-Last update: session 2026-04-15 (continued). **Nineteen PRs merged (#6–#22) + 2 backend PRs**. Most recent: PR #22 shipped sub-day timeRanges (`15m`/`1h`/`6h`) on five tools after agent scenario 3 identified the gap live. G2 (log replay), F3a (exec_filter format), F3b (fluentd nodeSelector) all CLOSED. Cross-pillar validated end-to-end against real opentelemetry-demo — 5 sub-agent scenarios, all 12/12, one of which found a real upstream bug in the `accounting` service image.
+Last update: session 2026-04-15 (continued). **26 MCP PRs merged (#6–#26) + 3 backend PRs (#54, #55)**. PR #25 added `meaningfulBaselineFloor` guard in correlate.ts. PR #26 fixed sign loss in `renderEnvironmentAudit`. **G8 discovered and CLOSED via backend PR #55**: prometheus-proxy Lambda was emitting `tenx_usage_*` usage series without a per-writer label, causing multi-pod deployments to collide on timestamps and lose entire WriteRequest batches. Fix deployed to all 4 Lambda functions at 16:58 UTC and verified: zero OOO errors post-deploy, cart 5m investigate returns live data. Earlier: PR #22 shipped sub-day timeRanges (`15m`/`1h`/`6h`) on five tools after agent scenario 3 identified the gap live. G2 (log replay), F3a (exec_filter format), F3b (fluentd nodeSelector) all CLOSED. Cross-pillar validated end-to-end against real opentelemetry-demo — 5 sub-agent scenarios, all 12/12, one of which found a real upstream bug in the `accounting` service image.
 
 ---
 
@@ -320,6 +320,58 @@ Both agents had the SAME tool data. The Kerberos agent correctly diagnosed via r
 3. Add a known-signatures lookup for `.NET + Npgsql + libgssapi` → "this is a native library load failure at PostgreSQL connect time"
 
 Signature detection is a bigger workstream. The simpler short-term fix is #1 — a doctor hint. The variance between agents is a real customer concern and worth surfacing in the tool output so users catch the correct interpretation even with a non-expert agent.
+
+### ~~G8. prometheus-proxy usage-metric collision — multi-writer out-of-order rejection~~ ✅ CLOSED 2026-04-15 (backend PR #55, deployed to prod)
+
+**Root cause** was NOT in tenx-edge as initially suspected — it was in the `prometheus-proxy` Lambda at `backend/lambdas/prometheus-proxy/src/main/java/com/log10x/backend/lambda/prometheus/util/PrometheusUtil.java:334`. Every remote-write / query request caused the Lambda to append `tenx_usage_*` usage series labelled only by `{__name__, TENX_Tenant, userId}`. N concurrent writers per tenant → N samples/sec on one series at near-identical `System.currentTimeMillis()` → AMP rejected the **whole** WriteRequest as out-of-order, killing the client's per-pattern metrics as collateral.
+
+**Fix**: added `instance` label sourced from `event.getRequestContext().getHttp().getSourceIp()`. Each writer pod has a distinct egress IP → distinct usage series → no cross-writer collision. Cardinality bounded by (pods × tenants). Zero client changes.
+
+**Files changed**: `PrometheusUtil.java`, `RemoteWriteHandler.java`, `QueryHandler.java`, `QueryAIHandler.java`, `MultiLabelValuesHandler.java`.
+
+**Deployed**: 2026-04-15 16:58 UTC via `aws lambda update-function-code` on all 4 functions (`tenx-prometheus-remote-write`, `tenx-prometheus-query`, `tenx-prometheus-query-ai`, `tenx-prometheus-multi-label-values`). All 4 `LastUpdateStatus=Successful`.
+
+**Verified**:
+- Pre-fix: 4 fluentd pods logging `out of order sample` HTTP 400s (counts: `9ks5j=8, 8pf87=7, pnl2c=3, 6ckbq=1`). Cart volume trajectory 1.3 GB → 0. `investigate cart window=5m` returned "Could not resolve" (zero data).
+- Post-fix (7 min after deploy): **0 OOO errors across all 4 pods** in 5m lookback. `investigate cart window=5m` returned "No significant movement" — tool successfully ran `rate(all_events_summaryVolume_total{service="cart"}[5m])` on live data and reported honest steady-state. Fluentd actively processing 168-185 pods cached per node.
+
+**Residual** (not a blocker): same-pod same-millisecond collisions on variable-value metrics (`write_samples`, `write_bytes`, `write_series`) could still race, but affect only the usage metric itself — client pattern data is safe. Rare in practice. Follow-up if we want it bulletproof: per-sample timestamp offset or per-Lambda-invocation UUID label.
+
+### ~~G8-legacy. (original entry preserved for history)~~
+**Discovered by**: cart-spike validation of PR #25/#26 fixes, 2026-04-15.
+**Severity**: **GA blocker for any multi-node forwarder install**. Silently causes whole-batch metric rejection — customers see "fluentd flowing, tenx-edge running, metrics gone".
+
+**Evidence** (verified live on demo EKS cluster):
+- `kubectl logs` on all 4 tenx-fluentd pods shows repeated HTTP 400 from `prometheus.log10x.com/api/v1/write` with body `out of order sample`. Error counts this session: `9ks5j=8, 8pf87=7, pnl2c=3, 6ckbq=1`.
+- The failing series in the error body is a **tenant-level** metric like `tenx_usage_write_requests` — it has no per-instance label distinguishing the 4 writer processes.
+- Cart volume trajectory on the same window: **6h = 1.3 GB, 2h = 5.9 KB, 1h and shorter = 0 bytes**. The series goes to zero exactly when multiple fluentd/tenx-edge instances start racing each other on writes.
+- Remote-write rejects the WHOLE batch on any out-of-order sample, so pattern metrics (`all_events_summaryVolume_total{…}`) get dropped as collateral damage even though they ARE per-instance labelled.
+
+**Root cause**: tenx-edge emits tenant-level usage metrics (`tenx_usage_write_requests`, etc.) that are identical across all writer instances. With 4 fluentd pods in the demo DaemonSet, 4 tenx-edge processes publish the SAME series concurrently. Prometheus's remote-write receiver treats samples on a single series as strictly monotonic in time — two writers publishing at `t=1000` and `t=999` produces an out-of-order rejection on the second one. Whole batch fails.
+
+**Why this is a silent killer**:
+1. `tenx-edge` logs "running"
+2. `tenx-fluentd` logs "flowing, events shipped"
+3. `prometheus.log10x.com` shows zero events for the affected window
+4. Customer doctor check passes (because the metric backend is reachable)
+5. Only `kubectl logs -n demo tenx-fluentd-… | grep "out of order"` reveals the problem
+
+**Fix options** (all engine-side, out of MCP scope):
+1. **Add per-instance labels** to tenant-level metrics: `tenx_usage_write_requests{instance="$POD_NAME"}` — makes each writer own a distinct series, no collision. Simplest fix.
+2. **Single-coordinator writer**: elect one fluentd/tenx-edge pod per cluster to emit tenant metrics, others stay silent. Brittle under pod churn.
+3. **Configure Mimir/Prom receiver** to tolerate out-of-order samples via `out_of_order_time_window=5m` (receiver-side config, but only works if the backend is Mimir or Prom ≥2.39 with OOO enabled).
+
+**MCP-layer mitigation** (NOT a fix, but makes the bug visible instead of silent):
+- New doctor check: **`remote_write_drops`** — scans a recent window for zero-volume streaks on services that had non-zero volume immediately before. Flags as "possible multi-writer collision, check tenx-edge logs for 'out of order sample'".
+- Alternatively: query Prometheus for `tenx_usage_write_errors_total{reason="out_of_order"}` and fire doctor warning when non-zero.
+
+**How this was discovered**: Ran cart-spike investigation after merging PR #25 (correlate.ts meaningfulBaselineFloor) to validate it catches real low-volume crashloops. Investigation returned "no significant movement" which was unexpected. Queried cart pattern volume directly: 1.3GB → 0 over successively shorter windows — impossible unless the data itself was dropped. `kubectl logs` on tenx-fluentd pods immediately surfaced the HTTP 400 chain. Independent verification via direct Prom query confirmed cart pattern series has no samples in the affected window.
+
+**Why this blocks GA**: every real customer runs multi-node forwarder deployments. The demo only has 4 fluentd pods and we see the rejection chain on every scrape. A 50-node customer cluster would have 50× the collision rate. Silently dropping metrics is the worst possible failure mode for an observability product.
+
+**Action**: file engine ticket with full evidence bundle. Block GA on option (1). Add doctor check as MCP-layer mitigation in the interim.
+
+---
 
 ### G3. Streamer-wired-but-undocumented in demo env
 **Evidence**: LoadBalancer `tenx-streamer-query-lb` at `a2936089108bb492cb41d18cb5b75f8d-1298006809.us-east-1.elb.amazonaws.com` has been running for 21h but was NOT referenced in any MCP setup docs or env var hint. I found it by `kubectl get svc -A | grep streamer`.
