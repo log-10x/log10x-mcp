@@ -155,15 +155,27 @@ Daily-habit / operational:
 - "silence this for N hours" / "mute this pattern"               → log10x_exclusion_filter
 
 Cost investigation:
-- "what's expensive right now" / quick ranking                   → log10x_top_patterns
-- "why did costs spike" / week-over-week deltas                  → log10x_cost_drivers
+- "what's expensive right now" / "top patterns by cost"          → log10x_top_patterns
+- ANY framing of "the bill changed" — "bill jumped", "over forecast", "over budget",
+  "costs spiked", "$N over", "why did costs go up", "who is responsible for the jump",
+  "week-over-week delta"                                         → log10x_cost_drivers
+  (Critical: use cost_drivers NOT top_patterns when the question is about CHANGE over
+   time. top_patterns shows what's big right now; cost_drivers shows what GREW. A
+   surprise bill is always a cost_drivers question first, then drill down.)
 - "cost by namespace / service / severity / country"             → log10x_list_by_label
 - "pipeline savings / ROI"                                       → log10x_savings
 
-Forensic / audit / archive:
+Forensic / audit / archive — ANY request for RAW EVENTS from the S3 archive:
+- "pull the actual log events", "get me the raw events", "retrieve events from S3",
+  "fetch events from the archive", "show me what was in the logs during <time window>",
+  "I need the events themselves, not aggregates"                 → log10x_streamer_query
 - "get me all <pattern> events from 90 days ago"                 → log10x_streamer_query
 - "get all events for customer X filtered by Y, 60d window"      → log10x_streamer_query
 - "backfill a new metric with 90d of history from the archive"   → log10x_backfill_metric
+  (Critical: when a user asks for raw events OR mentions S3 / archive / cold storage
+   explicitly, route to streamer_query even if the framing also mentions an incident.
+   investigate returns aggregate pattern analysis; streamer_query returns actual log
+   lines. "Post-mortem needs the actual log events" = streamer_query, not investigate.)
 
 Root-cause across services (the investigate wedge):
 - user pastes an error, asks "what's causing the upstream"       → log10x_investigate
