@@ -134,14 +134,32 @@ export async function executeSavings(
     bytesToCost(indexedBytes, costPerGb - storagePerGb) - bytesToCost(streamedBytes, costPerGb)
   );
 
-  const totalSaved = edgeSavings + streamerSavings;
+  // Exclude edgeSavings from the headline total if there's no downstream
+  // emission — unshipped potential is not realized savings.
+  const edgeEmissionMissing = edgeIn > 0 && edgeEmitted === 0;
+  const realizedEdgeSavings = edgeEmissionMissing ? 0 : edgeSavings;
+  const totalSaved = realizedEdgeSavings + streamerSavings;
   const annualProjection = totalSaved * (365 / tf.days);
 
   const lines: string[] = [];
   lines.push(`Pipeline Savings (${tf.label}) at ${fmtDollar(costPerGb)}/GB analyzer · ${fmtDollar(storagePerGb)}/GB storage`);
   lines.push('');
 
-  if (edgeReducedBytes > 0) {
+  // If edgeEmitted == 0 while edgeIn > 0, tenx-edge has no configured
+  // downstream SIEM target (or the target has been misconfigured). This is
+  // NOT realized savings — it's unshipped volume. Reporting a "saved" dollar
+  // figure here destroys credibility when the customer realizes nothing was
+  // actually emitted. Instead, show a warning banner and flag it as potential
+  // savings that cannot be attributed to a SIEM the customer is paying for.
+  // Caught by S2 sub-agent: "I cannot reconcile $196K/wk saved against $196K
+  // monitored spend — they are the same number." Was the same number because
+  // emitted=0 in the demo env.
+  if (edgeEmissionMissing) {
+    lines.push(`  Edge:      ${fmtBytes(edgeIn).padEnd(14)} input      → ⚠ no downstream emission detected`);
+    lines.push(`             (input ${fmtBytes(edgeIn)} processed, but 0 B emitted to a SIEM target)`);
+    lines.push(`             _Potential savings if this were routed through the pipeline: ${fmtDollar(edgeSavings)}${period}._`);
+    lines.push(`             _To realize these savings, configure a downstream SIEM output (Splunk, Datadog, etc.) and measurements will populate within 24h._`);
+  } else if (edgeReducedBytes > 0) {
     lines.push(`  Edge:      ${fmtBytes(edgeReducedBytes).padEnd(14)} reduced    → ${fmtDollar(edgeSavings)}${period} saved`);
     lines.push(`             (input ${fmtBytes(edgeIn)} − emitted ${fmtBytes(edgeEmitted)})`);
   }
