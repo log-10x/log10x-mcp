@@ -386,6 +386,32 @@ Signature detection is a bigger workstream. The simpler short-term fix is #1 —
 
 ---
 
+### G13. Investigate ranks by historical cost, not by "is this pattern still firing" (crashloop-diagnosis failure mode)
+**Discovered by**: head-to-head test S11 (kubectl-only) vs S12 (MCP-only) on accounting crashloop, 2026-04-15.
+**Severity**: GA-critical — MCP produces wrong root cause with high confidence on the exact scenario its marketing story uses (crashloop diagnosis).
+
+**Evidence**:
+- S11 (kubectl-only, 3 calls) → correctly diagnosed the CURRENT failure: Postgres `23505 duplicate key violates unique constraint "order_pkey"` on `accounting.order`, triggered by a Kafka poison-pill message that the consumer re-reads after each OOM.
+- S12 (MCP-only, 3 calls) → diagnosed the libgssapi_krb5.so missing-library error based on `top_patterns(service=accounting, timeRange=1d)` ranking that pattern as #1 CRIT.
+- **Independent verification via `kubectl logs accounting --previous`**: the CURRENT restart cycle is failing on the Postgres duplicate-key exception, NOT on the Kerberos dlopen failure. The Kerberos error was from an earlier restart cycle that's now suppressed (likely the libgssapi was installed at some point, or the crash path changed).
+- Both agents reported 90% confidence. Only the kubectl agent was right.
+
+**Root cause of the MCP miss**: `top_patterns` ranks by **total cost over the window**, not by recency. The Kerberos error accumulated enough cost in the 24h window to be #1 even though it's no longer the active failure. The investigate tool + top_patterns have no signal for "is this pattern still firing RIGHT NOW vs was it firing 6 hours ago?".
+
+**What the MCP needed (and didn't have)**:
+1. A "most-recent-error" view that ranks by the *latest sample timestamp* with severity >= ERROR, not by cumulative volume
+2. A "pattern activity flag" on each pattern returned by top_patterns — "last seen: 30s ago" vs "last seen: 4h ago"
+3. For crashloop scenarios specifically: investigate should query the last N minutes of per-severity patterns separately from the total-cost ranking
+
+**Action (MCP-layer fixes that would close this gap)**:
+1. Add a `recency` sort option to `top_patterns` (rank by most-recent sample timestamp rather than total cost)
+2. Annotate each pattern in `top_patterns` output with its last-seen age ("last seen: 30s ago", "last seen: 4h ago") so an agent sees immediately whether a pattern is live
+3. In `investigate` service-mode, if the top cost-ranked pattern has been flat/silent for > 1h but the pod still has recent restarts, emit a warning: "the top-cost pattern for this service may not reflect the current failure — check `top_patterns(recency=true)` for active errors"
+
+**Why this is a GA blocker**: the accounting crashloop is the exact kind of scenario the product's "structural wedge" story is built on. If MCP reaches the wrong diagnosis on it, the pitch ("MCP catches what kubectl misses") inverts — kubectl caught what MCP missed.
+
+**Customer impact**: an SRE using the MCP in a real incident will trust high-confidence output and ship the wrong fix. In the accounting case, installing libgssapi-krb5-2 would NOT resolve the crashloop; the Kafka consumer would still hit the duplicate-key exception on the next restart. The fix would be "ship the wrong thing, feel more confident in the wrong thing".
+
 ### G11. Paste Lambda templatizer is broken (resolve_batch silently drops ~70% of input)
 **Discovered by**: sub-agents S4 and S9 (paste-triage scenarios), 2026-04-15.
 **Severity**: blocks the paste-triage workflow entirely. `log10x_resolve_batch` is the foundation of that workflow — if it can't reliably templatize a batch, downstream triage is impossible.
