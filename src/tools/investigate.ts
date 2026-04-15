@@ -250,6 +250,70 @@ export async function executeInvestigate(
     return report;
   }
 
+  // ── Phase 2a — Recency probe ──
+  // Check whether the resolved anchor has been firing RECENTLY, not just
+  // aggregating cost over the window. For service-mode and crashloop
+  // diagnosis, the top-cost-pattern over 24h may be a historical error that
+  // has been suppressed (e.g. the libgssapi crash that was fixed but still
+  // dominates yesterday's cost), while the CURRENT failure is a different
+  // pattern entirely. Caught by head-to-head test S11/S12: kubectl --previous
+  // correctly surfaced a Postgres duplicate-key bug as the CURRENT crashloop
+  // cause, while the MCP resolved to the Kerberos pattern (90% false
+  // confidence) because it was still the top-cost-pattern for the 24h window.
+  //
+  // Recency check: query the anchor's rate over the last 5 minutes. If it's
+  // near zero while the pattern still accumulates cost in the wider window,
+  // emit a banner warning the user that the tool's answer may be historical.
+  let recencyWarning: string | undefined;
+  if (resolution.mode === 'service' || resolution.mode === 'pattern') {
+    try {
+      const freshnessMetric = metricName || 'all_events_summaryVolume_total';
+      const recencyQ = `sum(rate(${freshnessMetric}{${LABELS.env}="${metricsEnv}",${LABELS.pattern}="${escape(resolution.anchor)}"}[5m]))`;
+      const res = await queryInstant(env, recencyQ);
+      let recentRate = 0;
+      if (res.status === 'success' && res.data.result[0]) {
+        recentRate = parsePrometheusValue(res.data.result[0]);
+      }
+      if (recentRate < thresholds.acuteNoiseFloor) {
+        // Anchor hasn't fired in the last 5 minutes. If this is a service-mode
+        // investigation, also run a most-recent-error probe scoped to the
+        // service to see whether a DIFFERENT pattern is currently active.
+        if (resolution.mode === 'service' && resolution.service) {
+          // Query for ANY pattern currently firing in the service, not just
+          // ERROR/CRIT. The severity label is often empty on multi-line stack
+          // traces (real accounting crashloop case: 71% of logs have
+          // severity="(empty)" because the Npgsql exception trace doesn't
+          // parse into CRITICAL). Rank by rate so the loudest current pattern
+          // surfaces first — we'll let the operator judge which is the live
+          // failure.
+          const activeErrorsQ =
+            `topk(3, sum by (${LABELS.pattern}, ${LABELS.severity}) (rate(${freshnessMetric}{${LABELS.env}="${metricsEnv}",${LABELS.service}="${escape(resolution.service)}"}[5m])) > ${thresholds.acuteNoiseFloor}) unless on (${LABELS.pattern}) (sum by (${LABELS.pattern}) (rate(${freshnessMetric}{${LABELS.env}="${metricsEnv}",${LABELS.pattern}="${escape(resolution.anchor)}"}[5m])))`;
+          const activeRes = await queryInstant(env, activeErrorsQ);
+          if (activeRes.status === 'success' && activeRes.data.result.length > 0) {
+            const activeNames = activeRes.data.result
+              .map((r) => {
+                const p = r.metric[LABELS.pattern];
+                const s = r.metric[LABELS.severity] || 'unknown-severity';
+                return `\`${p}\` (${s})`;
+              })
+              .join(', ');
+            recencyWarning =
+              `⚠ **Anchor may be historical, not current**: The resolved anchor \`${resolution.anchor}\` has not fired in the last 5 minutes (rate near zero) but is still ranked top by 24h cost. For current-crashloop / active-incident scenarios, the 24h cost ranking can surface a pattern that was loud YESTERDAY but has since been fixed or suppressed, while a DIFFERENT pattern is causing the active failure.\n\n` +
+              `**Currently-active patterns in \`${resolution.service}\`** (last 5 min, any severity, excluding the anchor): ${activeNames}. Re-run \`log10x_investigate\` with one of these as \`starting_point\` to diagnose the live issue.`;
+          } else {
+            recencyWarning =
+              `⚠ **Anchor may be historical**: \`${resolution.anchor}\` has not fired in the last 5 minutes. No other patterns currently active in \`${resolution.service}\` either — service may be stable and the anchor is purely historical cost.`;
+          }
+        } else {
+          recencyWarning =
+            `⚠ **Anchor may be historical**: \`${resolution.anchor}\` has not fired in the last 5 minutes (rate near zero). The analysis below reflects cumulative behavior across the window, not current activity.`;
+        }
+      }
+    } catch {
+      // non-fatal
+    }
+  }
+
   // ── Phase 2 — Trajectory shape classification ──
   const shape = await classifyTrajectory(
     env,
@@ -394,7 +458,7 @@ export async function executeInvestigate(
   if (metricWarning) modeDetectionParts.push('metric=bytes_fallback');
   const modeDetection = modeDetectionParts.join(' · ');
 
-  const report = renderAcuteSpikeReport({
+  const baseReport = renderAcuteSpikeReport({
     investigationId,
     anchor: resolution.anchor,
     startingPoint: args.starting_point,
@@ -413,6 +477,10 @@ export async function executeInvestigate(
     depth: args.depth,
     metricWarning,
   });
+  // Prepend the recency warning (if any) so a reader sees it before the
+  // main analysis — historical vs current misattribution is the most
+  // dangerous mis-interpretation for crashloop scenarios.
+  const report = recencyWarning ? `${recencyWarning}\n\n---\n\n${baseReport}` : baseReport;
   recordInvestigation({
     investigationId,
     createdAt: Date.now(),
