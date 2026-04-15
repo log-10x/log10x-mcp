@@ -160,9 +160,34 @@ export async function fetchLabels(env: EnvConfig): Promise<string[]> {
   return data.data || [];
 }
 
-/** Prometheus /api/v1/label/{name}/values — list distinct values for a label. */
-export async function fetchLabelValues(env: EnvConfig, labelName: string): Promise<string[]> {
+/**
+ * Prometheus /api/v1/label/{name}/values — list distinct values for a label.
+ *
+ * Without `opts.windowSeconds`, returns all values ever seen (bounded by
+ * Prometheus retention). That means stale series whose last sample was
+ * minutes-to-hours ago still contribute values.
+ *
+ * **Important**: Prometheus's `start`/`end` params on this endpoint filter
+ * by BLOCK intersection, not by active sample presence. The current 2h
+ * block still contains old label values from services that stopped
+ * emitting, so `windowSeconds` here does NOT produce a truly-live set.
+ *
+ * For a truly-live set (label values with samples in the last N seconds),
+ * use `fetchActiveLabelValues()` below — it runs a PromQL `group by` over
+ * an `increase()` window, which is the correct "currently active"
+ * semantic.
+ */
+export async function fetchLabelValues(
+  env: EnvConfig,
+  labelName: string,
+  opts?: { windowSeconds?: number }
+): Promise<string[]> {
   const url = new URL(`/api/v1/label/${encodeURIComponent(labelName)}/values`, getBase());
+  if (opts?.windowSeconds) {
+    const nowS = Math.floor(Date.now() / 1000);
+    url.searchParams.set('start', String(nowS - opts.windowSeconds));
+    url.searchParams.set('end', String(nowS));
+  }
   const res = await fetchWithRetry(
     url.toString(),
     { headers: { 'X-10X-Auth': authHeader(env) } },
@@ -171,6 +196,49 @@ export async function fetchLabelValues(env: EnvConfig, labelName: string): Promi
   if (!res.ok) throw new Error(`Prometheus /label/${labelName}/values HTTP ${res.status}`);
   const data = (await res.json()) as { status: string; data: string[] };
   return data.data || [];
+}
+
+/**
+ * Returns the distinct label values that have had at least one sample in
+ * the last `windowSeconds` seconds — i.e., currently active, not stale.
+ *
+ * Implementation: `group by (<label>) (increase(all_events_summaryBytes_total[<window>]) > 0)`.
+ * This is the correct semantic for "what labels are alive right now",
+ * because it requires at least one non-zero sample in the window — which
+ * is exactly the staleness filter `/label/values?start=&end=` fails to
+ * provide (see fetchLabelValues docstring).
+ *
+ * Used by join-discovery to compute Jaccard over only active label values,
+ * so stale replay data / decommissioned pods don't drag the similarity
+ * score down and cause false `no_join_available` refusals.
+ */
+export async function fetchActiveLabelValues(
+  env: EnvConfig,
+  labelName: string,
+  windowSeconds: number
+): Promise<string[]> {
+  const range = `${windowSeconds}s`;
+  // Note: requires Log10x pattern metric. If not present (e.g., no Reporter),
+  // this returns empty, which causes join-discovery to fall back naturally.
+  const promql = `group by (${labelName}) (increase(all_events_summaryBytes_total{tenx_env=~"edge|cloud"}[${range}]) > 0)`;
+  const url = new URL('/api/v1/query', getBase());
+  url.searchParams.set('query', promql);
+  const res = await fetchWithRetry(
+    url.toString(),
+    { headers: { 'X-10X-Auth': authHeader(env) } },
+    'fetchActiveLabelValues'
+  );
+  if (!res.ok) return [];
+  const data = (await res.json()) as {
+    status: string;
+    data: { resultType: string; result: Array<{ metric: Record<string, string> }> };
+  };
+  const out = new Set<string>();
+  for (const r of data.data?.result || []) {
+    const v = r.metric?.[labelName];
+    if (v) out.add(v);
+  }
+  return Array.from(out);
 }
 
 /**

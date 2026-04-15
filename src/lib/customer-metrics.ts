@@ -54,8 +54,15 @@ export interface CustomerMetricsBackend {
   /** List all label names present in the backend. */
   listLabels(): Promise<string[]>;
 
-  /** List distinct values for a specific label. */
-  listLabelValues(label: string): Promise<string[]>;
+  /**
+   * List distinct values for a specific label. When `window` is provided,
+   * restrict the result to values observed inside `[now - window, now]`
+   * via Prometheus's `start`/`end` query parameters. This filters out
+   * stale label values from series that stopped receiving samples, which
+   * is essential for join discovery — stale values drag the Jaccard down
+   * and produce false-negative `no_join_available` results.
+   */
+  listLabelValues(label: string, opts?: { windowSeconds?: number }): Promise<string[]>;
 }
 
 export class CustomerMetricsNotConfiguredError extends Error {
@@ -176,11 +183,16 @@ export class GrafanaCloudBackend implements CustomerMetricsBackend {
     return res.data || [];
   }
 
-  async listLabelValues(label: string): Promise<string[]> {
+  async listLabelValues(label: string, opts?: { windowSeconds?: number }): Promise<string[]> {
     const url = new URL(
       `/api/prom/api/v1/label/${encodeURIComponent(label)}/values`,
       this.endpoint
     );
+    if (opts?.windowSeconds) {
+      const nowS = Math.floor(Date.now() / 1000);
+      url.searchParams.set('start', String(nowS - opts.windowSeconds));
+      url.searchParams.set('end', String(nowS));
+    }
     const res = await this.fetchJson<{ status: string; data: string[] }>(url.toString());
     return res.data || [];
   }
@@ -242,8 +254,13 @@ export class GenericPromBackend implements CustomerMetricsBackend {
     return res.data || [];
   }
 
-  async listLabelValues(label: string): Promise<string[]> {
+  async listLabelValues(label: string, opts?: { windowSeconds?: number }): Promise<string[]> {
     const url = new URL(`/api/v1/label/${encodeURIComponent(label)}/values`, this.endpoint);
+    if (opts?.windowSeconds) {
+      const nowS = Math.floor(Date.now() / 1000);
+      url.searchParams.set('start', String(nowS - opts.windowSeconds));
+      url.searchParams.set('end', String(nowS));
+    }
     const res = await this.fetchJson<{ status: string; data: string[] }>(url.toString());
     return res.data || [];
   }
@@ -303,7 +320,9 @@ export class MockBackend implements CustomerMetricsBackend {
     return [...this.labels];
   }
 
-  async listLabelValues(label: string): Promise<string[]> {
+  async listLabelValues(label: string, opts?: { windowSeconds?: number }): Promise<string[]> {
+    void opts; // Mock backend doesn't simulate windowed queries; tests that
+    // need windowed semantics should set up distinct label value sets.
     return [...(this.labelValues[label] || [])];
   }
 }

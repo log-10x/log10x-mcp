@@ -64,6 +64,14 @@ export const correlateCrossPillarSchema = {
     .max(1)
     .default(0.3)
     .describe('Minimum combined confidence for a candidate to be returned. Default 0.3.'),
+  minimum_join_jaccard: z
+    .number()
+    .min(0)
+    .max(1)
+    .optional()
+    .describe(
+      'Override the Jaccard threshold the underlying join-discovery pass uses to accept a primary join key. Default 0.7 (high-confidence structural overlap). Lower to 0.3–0.5 when the join key is legitimate but label value sets include stale data from decommissioned pods or historical replay — the underlying correlation is still structural, just dragged down by orphan values. Pair with `window` to suppress the stale data at probe time and avoid needing this override.'
+    ),
   environment: z.string().optional().describe('Environment nickname (for multi-env setups).'),
 };
 
@@ -75,6 +83,7 @@ export async function executeCorrelateCrossPillar(
     step: string;
     depth: 'shallow' | 'normal' | 'deep';
     minimum_confidence: number;
+    minimum_join_jaccard?: number;
     environment?: string;
   },
   env: EnvConfig
@@ -84,14 +93,25 @@ export async function executeCorrelateCrossPillar(
     throw new CustomerMetricsNotConfiguredError();
   }
 
-  // Auto-discover the join key (cached per session).
-  const joinResult = await getOrDiscoverJoin(env, backend);
+  // Auto-discover the join key. Use the correlation window as the label-value
+  // probe window (matches the data we're about to analyze), and pass through
+  // any caller-specified minimum_join_jaccard override. Bypass the session
+  // cache when either option is provided — the cache key doesn't include
+  // these tunables, so cached results would be wrong.
+  const windowSeconds = parseDuration(args.window);
+  const useCustomOpts = args.minimum_join_jaccard !== undefined;
+  const joinOpts = {
+    minimumJaccard: args.minimum_join_jaccard ?? 0.7,
+    windowSeconds,
+  };
+  const joinResult = useCustomOpts
+    ? await (await import('../lib/join-discovery.js')).discoverJoin(env, backend, joinOpts)
+    : await getOrDiscoverJoin(env, backend, joinOpts);
   if (joinResult.status === 'no_join_available' || !joinResult.joinKey) {
     return renderNoJoinAvailable(joinResult, backend.backendType, backend.endpoint, args.anchor);
   }
 
-  // Parse window and step into UNIX seconds.
-  const windowSeconds = parseDuration(args.window);
+  // Parse step. (windowSeconds already computed above for join discovery.)
   const stepSeconds = parseDuration(args.step);
   const nowSeconds = Math.floor(Date.now() / 1000);
   const fromSeconds = nowSeconds - windowSeconds;
