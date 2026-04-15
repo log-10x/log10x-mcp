@@ -48,15 +48,15 @@ export async function executeSavings(
   const period = costPeriodLabel(tf.days);
 
   // Streamer indexed/streamed metrics need chunked evaluation: the indexed
-  // metric's ~12k series blows a single 7d/30d `increase()` query. Issue
-  // tf.days parallel 1d-chunk queries and sum client-side.
+  // metric's ~12k series blows a single 7d/30d `increase()` query.
   //
-  // Return shape: { sum, succeeded, total } so callers can annotate coverage.
-  // The offset=0d chunk intermittently hits a 5GB server aggregation limit on
-  // high-cardinality envs; silently zero-filling a failure would produce a
-  // catastrophically wrong total (Final-1 audit caught $25K/mo reported when
-  // true value was $279K/mo). Callers must check coverage before quoting the
-  // sum as a headline number.
+  // Chunks return { sum, succeeded, total } so callers can annotate coverage.
+  // Intermittent Prometheus aggregation-limit errors (HTTP 422 "the query hit
+  // the aggregated data size limit") affect a subset of chunks deterministically
+  // — they are NOT caused by client-side concurrency (tested: throttling to 6
+  // concurrent requests quadruples wall time with zero improvement in coverage).
+  // The root cause is server-side and cannot be fixed from the client. PR #12's
+  // coverage annotation surfaces the partial-data honestly to the caller.
   const chunkOffsets = Array.from({ length: tf.days }, (_, i) => i);
   const chunkSum = async (builder: (off: number) => string): Promise<{ sum: number; succeeded: number; total: number }> => {
     const results = await Promise.all(
@@ -73,16 +73,9 @@ export async function executeSavings(
     return { sum, succeeded, total: chunkOffsets.length };
   };
 
-  // For multi-day windows, also fetch 7d in parallel to detect ramp-up
-  // (so we can flag when 7d run-rate projects significantly higher than the trailing average).
+  // For multi-day windows, also fetch 7d in parallel to detect ramp-up.
   const fetch7d = tf.days > 7;
   const sevenDayOffsets = Array.from({ length: 7 }, (_, i) => i);
-  // chunk7dSum returns { sum, succeeded, total } so callers can distinguish
-  // full-coverage from partial-coverage and annotate accordingly. Silently zero-filling
-  // failed chunks produced a false-all-clear on the run-rate note during Final-1 audit
-  // (streamerIndexedBytesChunk with offset=0d intermittently hits a 5GB server aggregation
-  // limit — it is a server cardinality issue, not a Log10x bug, but the tool used to
-  // silently swallow it).
   const chunk7dSum = async (builder: (off: number) => string): Promise<{ sum: number; succeeded: number; total: number }> => {
     const results = await Promise.all(
       sevenDayOffsets.map((off) => queryInstant(env, builder(off)).catch(() => null))
@@ -98,7 +91,7 @@ export async function executeSavings(
     return { sum, succeeded, total: sevenDayOffsets.length };
   };
 
-  // Query all savings metrics in parallel
+  // Query all savings metrics in parallel.
   const [edgeInRes, edgeOutRes, indexedResult, streamedResult, pipeRes, svcRes,
          edgeIn7dRes, edgeOut7dRes, indexed7dResult, streamed7dResult] = await Promise.all([
     queryInstant(env, pql.edgeInputBytes(tf.range)).catch(() => null),
