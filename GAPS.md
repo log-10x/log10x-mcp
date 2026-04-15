@@ -2,7 +2,7 @@
 
 **Purpose**: persistent list of known issues, architectural observations, and deferred fixes surfaced during sub-agent acceptance testing. Kept in repo so context isn't lost across sessions or compaction events. Update this file when closing an item or adding a new one.
 
-Last update: session 2026-04-15 (continued). **Twelve PRs merged (#6–#17)**. Most recent: PR #17 fixed three streamer end-to-end bugs surfaced during first live validation against the demo env deployment. Findings below are the things **not** closed by those PRs.
+Last update: session 2026-04-15 (continued). **Fifteen PRs merged (#6–#19)**. Most recent: PR #19 shipped cross-pillar windowed active-label discovery + namespace auto-scoping, validated end-to-end against a real opentelemetry-demo deployment. G2 (demo env is a log replay) is now CLOSED — the demo runs real microservices.
 
 ---
 
@@ -135,6 +135,42 @@ Implemented as `cardinality_concentration` check in `doctor.ts`. Flags when top-
 
 Current behavior is the worst of both: strict rejection AND no diagnostic.
 
+### F3a. tenx-edge exec_filter `format: single_value` silently breaks on plaintext logs
+**Severity**: high for any customer running the bundled fluentd → tenx-edge forwarder pipeline with real k8s logs (not a JSON-wrapped sample).
+
+**Evidence**: the `00_tenx.conf` fluentd config used by the demo fluentd install has:
+```yaml
+<format>
+  @type "single_value"
+  message_key log
+  add_newline false
+</format>
+```
+This sends ONLY the string value of the `log` field to the tenx-edge child process. That works for the canned S3 log replay sample (`log10x-public-assets/samples/otel-k8s/large/input/otel-sample.log`) because its content IS a JSON blob (`{"stream":"stderr","log":"...","kubernetes":{...}}`), so tenx-edge's JSON extractor parses it recursively and finds the nested fields.
+
+On REAL Kubernetes CRI container logs, the `log` field is plaintext (`info: cart.cartstore.ValkeyCartStore[0]`). tenx-edge's edge optimizer pipeline is configured to run a JSON extractor on the incoming stream, which crashes with:
+```
+jakarta.json.stream.JsonParsingException:
+  Invalid token=NUMBER at (line no=1, column no=7, offset=6).
+  Expected tokens are: [COMMA]
+```
+and the entire batch is dropped. No events reach log10x.
+
+**Workaround** (applied live in demo env during session): change `<format>` to `@type "json"` — fluentd then serializes the full structured record (including the `kubernetes.*` fields injected by the `kubernetes_metadata` filter) and tenx-edge's JSON extractor receives a valid JSON document with the expected shape.
+
+**Real fix** (engine work, out of MCP scope): the tenx-edge edge optimizer's input pipeline should accept plaintext logs directly, not require JSON-formatted input. The current config assumes fluentd's output is JSON-shaped, which is a hidden coupling that breaks silently on any real customer forwarder setup that uses `format: single_value`.
+
+**Customer impact**: any customer who deploys the demo's fluentd helm chart against their own k8s cluster (not the replay sample) will hit this with zero diagnostic signal — fluentd says "flowing", tenx-edge says "running", but `prometheus.log10x.com` shows zero events. **This is a GA blocker for the out-of-box forwarder path**.
+
+### F3b. tenx-fluentd DaemonSet pinned to `workload=edge` nodeSelector
+**Severity**: medium; silently causes partial cluster coverage.
+
+**Evidence**: the tenx-fluentd helm chart sets `nodeSelector: workload=edge` on the DaemonSet. In the demo env, only 1 of 5 nodes has that label, so fluentd runs on only 1 node. Any pods scheduled to the other 4 nodes have their container logs completely ignored (fluentd tails `/var/log/containers/` which is node-local). In the otel-demo swap, 24 of 27 pods were on unfluentd-ed nodes.
+
+**Workaround** (applied live): `kubectl patch ds tenx-fluentd --type=json -p='[{"op":"remove","path":"/spec/template/spec/nodeSelector"}]'`.
+
+**Real fix**: the helm chart default should be no nodeSelector (run on all nodes like any log forwarder DaemonSet). If a customer wants to limit fluentd to specific node pools, that should be a helm value they set explicitly, not a baked-in default.
+
 ### F3. Streamer aggregation limit (5GB) on bleeding-edge day
 **Severity**: medium. See GAPS A1 for MCP workaround; the root cause is server-side. `streamerIndexedBytesChunk` at offset=0d intermittently hits `HTTP 422: expanding series: the query hit the aggregated data size limit (limit: 5000000000 bytes)` under concurrent load. PR #12 added coverage annotation as client-side safety net, but the real fix is server-side: raise the limit, pre-aggregate the high-cardinality metric, or split the streamer's indexed metric across more scrape targets.
 
@@ -157,7 +193,28 @@ Current behavior is the worst of both: strict rejection AND no diagnostic.
 
 **Medium-term fix (engine)**: the engine should stay within bounded memory regardless of batch size. 500k events shouldn't require >2Gi. Investigate why the pipeline heap footprint scales with input rate — likely suspects are (a) `QueuedObjects` buffer sizing, (b) retained pattern fingerprints accumulating, (c) enrichment lookups caching every symbol.
 
-### G2. The "otel-demo" in the demo env is a LOG REPLAY, not a running OTel demo
+### ~~G2. The "otel-demo" in the demo env is a LOG REPLAY~~ ✅ CLOSED 2026-04-15
+Was a log replay. Now replaced with a real `opentelemetry-demo` helm deployment (27 pods in `otel-demo` namespace) — cart, payment, checkout, frontend, kafka, otel-collector, etc. running for real. Log-simulator scaled to 0, cloud-reporter cronjob suspended.
+
+**What the swap took** (in order; each step surfaced a real engine issue):
+1. Deploy `open-telemetry/opentelemetry-demo` helm chart with bundled observability disabled (we use kube-prometheus-stack separately)
+2. Scale `log-simulator` deployment to 0 (stop the replay)
+3. Suspend `tenx-cloud-reporter-cron-10x-cloud-reporter` (stop the S3 sample read)
+4. **Remove `nodeSelector: workload=edge` from tenx-fluentd DaemonSet** — was pinned to 1 node, missed 24 of 27 otel-demo pods
+5. Rewrite fluentd source: tag `kubernetes.*` + route via `@KUBERNETES` label so the `kubernetes_metadata` filter actually injects pod/namespace/container fields
+6. **Engine config fix**: exec_filter `<format>` changed from `single_value, message_key: log` → `json`. The old format sent only the raw log string to tenx-edge; worked for the JSON-wrapped replay sample, silently broke on plaintext CRI logs (crashed with `JsonParsingException: Invalid token=NUMBER at column 7`). With `json`, fluentd sends the full structured record and tenx-edge's JSON extractor has valid input.
+
+**What's running now** (on the demo EKS cluster, 2026-04-15):
+- 27 real opentelemetry-demo pods in `otel-demo` namespace producing live logs and traffic
+- 5 (of 5) tenx-fluentd DaemonSet pods on cluster nodes (4 Running, 1 Pending due to pod density cap on one node)
+- tenx-edge processing real CRI logs via exec_filter
+- log10x `edge` tier metrics flowing to `prometheus.log10x.com` with real k8s_pod/k8s_namespace/k8s_container labels
+- kube-prometheus-stack in `monitoring` namespace scraping the same pods' CPU/memory/HTTP metrics
+- MCP config in `.mcp.json` wired to both: streamer LB + customer metrics via port-forwarded kube-prom
+
+**Live validated** (PR #19): primary cross-pillar join `k8s_namespace ↔ namespace` with Jaccard **1.000**. Both pillars observe the same real pod `kafka-57d6ff9c6c-sgnzv` with identical structural labels.
+
+### G2-OLD. (previous entry preserved for history)
 **Severity**: product narrative / validation gap.
 
 **Evidence**: the `log-simulator-56b6444567-74d8g` pod is the only source of "application" events. Its container args:
