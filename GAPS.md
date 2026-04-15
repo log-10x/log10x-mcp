@@ -2,7 +2,7 @@
 
 **Purpose**: persistent list of known issues, architectural observations, and deferred fixes surfaced during sub-agent acceptance testing. Kept in repo so context isn't lost across sessions or compaction events. Update this file when closing an item or adding a new one.
 
-Last update: session 2026-04-15 (continued). **26 MCP PRs merged (#6–#26) + 3 backend PRs (#54, #55)**. PR #25 added `meaningfulBaselineFloor` guard in correlate.ts. PR #26 fixed sign loss in `renderEnvironmentAudit`. **G8 discovered and CLOSED via backend PR #55**: prometheus-proxy Lambda was emitting `tenx_usage_*` usage series without a per-writer label, causing multi-pod deployments to collide on timestamps and lose entire WriteRequest batches. Fix deployed to all 4 Lambda functions at 16:58 UTC and verified: zero OOO errors post-deploy, cart 5m investigate returns live data. Earlier: PR #22 shipped sub-day timeRanges (`15m`/`1h`/`6h`) on five tools after agent scenario 3 identified the gap live. G2 (log replay), F3a (exec_filter format), F3b (fluentd nodeSelector) all CLOSED. Cross-pillar validated end-to-end against real opentelemetry-demo — 5 sub-agent scenarios, all 12/12, one of which found a real upstream bug in the `accounting` service image.
+Last update: session 2026-04-15 (continued). **28 MCP PRs merged (#6–#28) + 3 backend PRs (#54, #55)**. PR #28 fixed 4 compounding service-mode investigate bugs that caused it to disagree with env-mode on identical data (anchor by absolute rate not delta; kebab-case regex; classifyTrajectory hardcoded 7d baseline; acute threshold too strict at >1.0). PR #27 fixed correlate baseline-only floor. PR #26 fixed sign loss in environment audit. **G8 CLOSED via backend PR #55** (prometheus-proxy Lambda adds instance label to tenx_usage_* metrics) — deployed to prod at 16:58 UTC. **Operational note (G9)**: Lambda fix alone was not sufficient — tenx-edge subprocesses accumulated stale state during the pre-fix OOO rejection period, and a DaemonSet rollout restart was required to resume metric flow. Earlier: PR #22 shipped sub-day timeRanges (`15m`/`1h`/`6h`) on five tools after agent scenario 3 identified the gap live. G2 (log replay), F3a (exec_filter format), F3b (fluentd nodeSelector) all CLOSED. Cross-pillar validated end-to-end against real opentelemetry-demo — 5 sub-agent scenarios, all 12/12, one of which found a real upstream bug in the `accounting` service image.
 
 ---
 
@@ -372,6 +372,23 @@ Signature detection is a bigger workstream. The simpler short-term fix is #1 —
 **Action**: file engine ticket with full evidence bundle. Block GA on option (1). Add doctor check as MCP-layer mitigation in the interim.
 
 ---
+
+### G9. tenx-edge subprocess stale state after prolonged remote-write rejection
+**Discovered by**: follow-up verification after backend PR #55 (G8 fix) was deployed.
+**Severity**: operational — not a code bug, but a customer upgrade gotcha.
+
+**Evidence**: after deploying the prometheus-proxy Lambda fix at 16:58 UTC, OOO errors on the fluentd pods immediately dropped to zero. However, the `log10x_investigate environment window=1h baseline_offset=24h` call continued to show cart patterns as "-100% declined" — not because of a new bug, but because the 40 minutes of current-window data from the pre-fix period WERE genuinely lost from the metric backend AND the tenx-edge subprocesses appeared to have accumulated stale internal state that prevented them from resuming metric emission for a few minutes after the Lambda fix.
+
+A `kubectl rollout restart ds/tenx-fluentd -n demo` resolved it — the fresh tenx-edge subprocesses immediately began shipping metrics again, and the next env audit correctly surfaced real movers (product-reviews -73%, opentelemetry-collector +167%) instead of phantom cart -100%.
+
+**Why this is a customer upgrade gotcha**: any customer who has been running with the pre-fix Lambda + high writer fanout will have been silently losing metrics in a steady-state pattern. Deploying the Lambda fix alone will not restore visibility — they need to either wait for the forwarder's natural restart cycle or trigger a rollout restart. Without this operational step, the "fix deployed but nothing changed" story will look like a failure.
+
+**Action**:
+1. Document in the backend PR #55 release notes: "after upgrading, roll the tenx-fluentd DaemonSet to fully restore metric flow"
+2. Add a doctor check (future) that detects "fluentd pod uptime > 1h AND recent OOO errors in pod logs" and warns "post-upgrade restart recommended"
+3. Investigate the engine side: why does the tenx-edge subprocess not self-recover after remote-write errors clear? Is there a poisoned buffer, a back-pressure flag not being reset, or a circuit breaker stuck open? Worth a 1-2 hour engine review.
+
+**Root cause is not fully diagnosed** — it may be (a) tenx-edge internal queue/buffer that needs flushing, (b) a metric-producer error flag that latches on fatal write errors, or (c) fluentd's exec_filter retry semantics interacting badly with the child process. The restart works; the underlying mechanism deserves engine investigation before GA.
 
 ### G3. Streamer-wired-but-undocumented in demo env
 **Evidence**: LoadBalancer `tenx-streamer-query-lb` at `a2936089108bb492cb41d18cb5b75f8d-1298006809.us-east-1.elb.amazonaws.com` has been running for 21h but was NOT referenced in any MCP setup docs or env var hint. I found it by `kubectl get svc -A | grep streamer`.
