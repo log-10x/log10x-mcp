@@ -2,7 +2,33 @@
 
 **Purpose**: persistent list of known issues, architectural observations, and deferred fixes surfaced during sub-agent acceptance testing. Kept in repo so context isn't lost across sessions or compaction events. Update this file when closing an item or adding a new one.
 
-Last update: session 2026-04-15 (continued). **31 MCP PRs merged (#6–#31) + 3 backend PRs (#54, #55)**. PR #30 fixed event_lookup regex escaping (S4) and investigate long-window routing (S6). PR #31 fixed cross-pillar correlation (S8) — structural passthrough + pod-level candidate filtering, took accounting→Kerberos test from 0 candidates → 16 Tier 1 matches. Second sub-agent battery (S4-S9, 6 scenarios) against live otel-demo:
+## Open-items summary (top-of-file for quick triage)
+
+| ID | Title | Owner | Severity | State |
+|---|---|---|---|---|
+| **G1** | Cloud reporter CronJob ~10% OOMKilled failure rate | Demo infra | Material | Not fixed — needs memory-limit bump + engine review |
+| **G3** | Streamer LB wired but undocumented in setup docs | Docs | Cosmetic | Not fixed — one-line README addition |
+| **G4** | upstream opentelemetry-demo missing libgssapi-krb5-2 | External upstream | Demo hygiene | Needs upstream issue filed |
+| **G5** | upstream opentelemetry-demo frontend shipping URL bug | External upstream | Demo hygiene | Needs upstream issue filed |
+| ~~G6~~ | env audit +100% false flags | MCP | — | ✅ **CLOSED** via PRs #25/#26/#27 |
+| **G7** | Cross-agent divergence on crashloop attribution | MCP | Material | **PARTIALLY ADDRESSED** via PRs #32/#34 recency warnings |
+| ~~G8~~ | prometheus-proxy usage metric collision | Backend | — | ✅ **CLOSED** via backend PR #55 (deployed to prod) |
+| **G9** | tenx-edge subprocess stale state after remote-write rejection | Engine | Material | **NOT fixed** — MCP doctor-check mitigation pending (see "Address the issues" section below) |
+| **G10** | Engine fingerprinter leaks high-cardinality vars into pattern identities | Engine | Material | **NOT fixed** — MCP collapse heuristic pending |
+| **G11** | Paste Lambda templatizer silently drops ~70% of input | Engine | **GA blocker** | **NOT fixed** — engine ticket required, MCP mitigation pending |
+| **G12** | Streamer forensic query — false negatives + canonical-name crash | Engine | **GA blocker** | **NOT fixed** — engine ticket required, MCP doctor-check pending |
+| **G13** | Investigate ranks historical cost, not current firing | MCP | Material | **PARTIALLY ADDRESSED** via PRs #32/#33/#34 |
+
+**Next steps for GA**:
+1. File engine tickets for G11 and G12 with verbatim evidence already captured below
+2. Ship MCP-layer mitigations for G9, G10, G11, G12 (this session)
+3. Raise cloud-reporter memory limit (G1) — 2-line demo infra change
+4. File upstream opentelemetry-demo issues for G4, G5 (public bug reports)
+5. Run the cross-model validation test matrix (`docs/CROSS_MODEL_TEST_SPEC.md`) once engine substrate is stable
+
+Last update: session 2026-04-15 (continued). **34 MCP PRs merged (#6–#34) + 3 backend PRs (#54, #55)**. PR #32 shipped investigate recency warning (G7/G13 partial); PR #33 shipped top_patterns newly-emerged section (addresses S10 canary-miss); PR #34 propagated recency warning to flat-path report (S16 residual). Cross-model test spec written at `docs/CROSS_MODEL_TEST_SPEC.md` with full ground truth and Claude baselines for GPT/Grok/Gemini/DeepSeek comparison.
+
+**Earlier**: PR #31 fixed cross-pillar correlation (S8). PR #30 fixed event_lookup regex escaping (S4) and investigate long-window routing (S6). PR #31 fixed cross-pillar correlation (S8) — structural passthrough + pod-level candidate filtering, took accounting→Kerberos test from 0 candidates → 16 Tier 1 matches. Second sub-agent battery (S4-S9, 6 scenarios) against live otel-demo:
 - **S4 paste-triage**: found event_lookup 400s on raw lines (fixed #30) + resolve_batch silently drops 70% of input (engine-side templatizer bug, documented G11)
 - **S5 orientation briefing**: 6 tools composed cleanly, totals reconcile across services/top_patterns/list_by_label. Strong positive signal
 - **S6 drift**: caught investigate 30d-window blindness (fixed #30)
@@ -301,38 +327,35 @@ So the URL is configured correctly but the frontend code is somehow constructing
 
 **Why this is G5 not just "fix the demo"**: the otel-demo frontend is upstream open-telemetry/opentelemetry-demo code. Filing the bug upstream benefits every customer who uses the demo as an observability POC harness.
 
-### G6. `investigate environment` produces +100% false flags on near-zero baselines
-**Discovered by**: Live-S5 sub-agent (post-mortem leading indicators), 2026-04-15.
-**Severity**: false-positive noise in the env-wide investigate output that a careful agent catches (Live-S5 did) but a hasty one might escalate on.
+### ~~G6. `investigate environment` produces +100% false flags on near-zero baselines~~ ✅ CLOSED 2026-04-15 (PRs #25, #26, #27)
+**Original finding**: Live-S5 ran `log10x_investigate starting_point="environment" window="1h"` and the tool flagged 5 patterns with `+100%` day-over-day deltas that per-service reruns immediately contradicted. Root cause: near-zero baselines inflating relative change to +100% (really +∞%) when dividing `current_rate / ~0_baseline`.
 
-**Evidence**: Live-S5 ran `log10x_investigate` with `starting_point="environment"` and `window="1h"`. The tool flagged 5 patterns with `+100%` day-over-day deltas. Per-service reruns with `window="1h"` on the same pattern immediately contradicted the flag: *"No significant pattern movement in the last 1h. Nothing crossed the noise floor."*
+**Fix landed across three PRs**:
+- **PR #25** — added `meaningfulBaselineFloor = 10 × acuteNoiseFloor = 0.01 events/s` guard on the baseline side of the env audit's `topk(signed_change)` query. Patterns with near-zero baseline now fail the filter and don't surface.
+- **PR #26** — fixed sign loss: the audit was using `topk(abs(...))` which also lost direction. Now runs `topk(signed)` + `bottomk(signed)` separately and merges, so declines render as `-X%` and growths as `+X%`.
+- **PR #27** — narrowed the floor to baseline-side only. The first implementation guarded both sides, which killed real low-volume crashloop signals (accounting's Kerberos pattern at 0.00225 events/s averaged).
 
-Root cause (diagnosed by the agent): the env-wide audit compares the current 1h window to the same 1h **24h ago**. If the 24h-ago bucket is near zero (the load-generator has natural gaps — agent observed 0 B minima at 14:15 UTC for two patterns via `pattern_trend`), a currently-normal rate divides by ~0 and renders as `+100%`.
+**Verified live**: the env audit on the real otel-demo now produces clean output with correct signs. Cart patterns that declined -100% are labeled declined -100%, not +100%. No phantom growth flags on near-zero baselines.
 
-**What would fix it**:
-1. Guard the delta computation: when baseline bucket < N bytes/min, emit "insufficient baseline" instead of a `+100%` flag
-2. OR render `+∞%` and tag as "baseline near zero, treat as no-comparison" so callers can't read it as a growth signal
-3. OR suppress env-wide near-zero-baseline rows entirely from the output
+### G7. Cross-agent divergence on crashloop root-cause attribution (PARTIALLY ADDRESSED via PRs #32/#34)
+**Original finding**: two different Claude sub-agents investigating the same accounting pod reached different conclusions — one correctly diagnosed the libgssapi dlopen failure, the other defaulted to textbook "OOM → bump memory". Both had the same tool data.
 
-**Agent workaround**: Live-S5 cross-checked every env-wide flag against a per-service `window="1h"` rerun, which correctly reported "nothing crossed the noise floor". Users should be told to do this when the env-wide audit shows suspiciously-similar `+100%` flags on multiple unrelated services (that's the signature).
+**Partial resolution (PR #32 + PR #34)**: the investigate tool now runs a **recency probe** after anchor resolution. If the resolved anchor has not fired in the last 5 minutes (rate below noise floor) but is still ranked top by 24h cost, the report prepends a prominent banner:
+> ⚠ **Anchor may be historical, not current**: `<anchor>` has not fired in the last 5 minutes but is still ranked top by 24h cost... Currently-active patterns in `<service>`: `<list>`. Re-run investigate with one of these as starting_point.
 
-### G7. Cross-agent divergence on crashloop root-cause attribution
-**Discovered by**: comparison of Kerberos-scenario agent vs Live-S1 agent, same tool data, same accounting pod, different conclusions.
+This fires on both the acute-spike path (PR #32) and the flat-path (PR #34). Verified on the S16 accounting rerun head-to-head — the agent recognized the historical anchor and found the live poison-pill bug the same session.
 
-**What happened**: two different agents investigated the accounting pod's OOMKilled loop:
-- Kerberos agent: *"OOM is downstream artifact of .NET crash-dump + tight cgroup — bumping memory limit would NOT fix the flap, just relabel to Error. Real cause is `libgssapi_krb5.so.2` dlopen failure."*
-- Live-S1 agent: *"93.5 MiB working set vs 120 MiB limit = 78%, working set curve hitting the ceiling. **The actual killer is memory pressure against a tight 120 MiB limit.** Recommend bump memory 120→256 MiB first."*
+**Full head-to-head scorecard after mitigation** (captured in `docs/CROSS_MODEL_TEST_SPEC.md`):
+- S11 (kubectl-only, 3 calls): found Postgres poison-pill only, missed Kerberos
+- S12 (MCP-only, pre-PR#32, 3 calls): found libgssapi only, **wrong on current crashloop**
+- S16 (MCP-only, post-PR#32/#34, 8 calls): **found both bugs with correct live/historical split — most complete diagnosis of any run**
 
-Both agents had the SAME tool data. The Kerberos agent correctly diagnosed via reasoning about Npgsql's eager `dlopen` + .NET crash-dump behavior + cgroup labeling. The Live-S1 agent defaulted to the textbook "OOM → bump memory" response and relegated Kerberos to "also cleanup".
+**Remaining residual** (tracked in G13): "loudest currently-firing" is still not the same as "most causally important". The Kafka poison-pill that actually OOMs the accounting pod fires below the `acuteNoiseFloor=0.001 events/s` and doesn't surface directly — a competent agent has to reason past the recency pointer and cross-check with `pattern_trend` on lower-ranked patterns. A more complete fix would require:
+1. Cross-pillar correlation with `kube_pod_container_status_restarts_total` to detect which patterns are causally linked to restart cycles
+2. Severity-weighted uncommon-but-severe floor (a rare CRIT is more causally important than a frequent INFO)
+3. Known-signature matching (`.NET + Npgsql + 23505` → poison-pill, `.NET + dlopen + failure` → missing library)
 
-**The textbook response is wrong**: bumping memory alone won't install the missing library, so the crashloop continues — it just relabels the exit reason from OOMKilled to Error.
-
-**What would make the correct interpretation more obvious**:
-1. When `cardinality_concentration` or similar health checks detect a CRIT pattern that correlates with restart counts, include a line like *"the top CRIT log pattern for this pod may be the crash cause, not just noise — verify the termination is not a secondary symptom"*
-2. When `customer_metrics_query` returns `last_terminated_reason=OOMKilled` AND log10x has a CRIT pattern on the same pod, surface a cross-pillar warning: *"OOM label + CRIT log pattern — check whether the crash path allocates a crash dump buffer that trips the cgroup limit after the real error"*
-3. Add a known-signatures lookup for `.NET + Npgsql + libgssapi` → "this is a native library load failure at PostgreSQL connect time"
-
-Signature detection is a bigger workstream. The simpler short-term fix is #1 — a doctor hint. The variance between agents is a real customer concern and worth surfacing in the tool output so users catch the correct interpretation even with a non-expert agent.
+These are in the follow-up backlog (see G13).
 
 ### ~~G8. prometheus-proxy usage-metric collision — multi-writer out-of-order rejection~~ ✅ CLOSED 2026-04-15 (backend PR #55, deployed to prod)
 
@@ -386,9 +409,10 @@ Signature detection is a bigger workstream. The simpler short-term fix is #1 —
 
 ---
 
-### G13. Investigate ranks by historical cost, not by "is this pattern still firing" (crashloop-diagnosis failure mode)
+### G13. Investigate ranks by historical cost, not by "is this pattern still firing" (PARTIALLY MITIGATED via PRs #32/#34)
 **Discovered by**: head-to-head test S11 (kubectl-only) vs S12 (MCP-only) on accounting crashloop, 2026-04-15.
-**Severity**: GA-critical — MCP produces wrong root cause with high confidence on the exact scenario its marketing story uses (crashloop diagnosis).
+**Severity (before mitigation)**: GA-critical — MCP produced wrong root cause with high confidence on the exact scenario its marketing story uses (crashloop diagnosis).
+**Severity (after PRs #32/#34)**: material — MCP now honestly flags when its answer may be historical and points to currently-active alternatives. A competent agent can reach the right answer; a naive one gets a clear warning rather than a silent wrong answer.
 
 **Evidence**:
 - S11 (kubectl-only, 3 calls) → correctly diagnosed the CURRENT failure: Postgres `23505 duplicate key violates unique constraint "order_pkey"` on `accounting.order`, triggered by a Kafka poison-pill message that the consumer re-reads after each OOM.
@@ -403,14 +427,27 @@ Signature detection is a bigger workstream. The simpler short-term fix is #1 —
 2. A "pattern activity flag" on each pattern returned by top_patterns — "last seen: 30s ago" vs "last seen: 4h ago"
 3. For crashloop scenarios specifically: investigate should query the last N minutes of per-severity patterns separately from the total-cost ranking
 
-**Action (MCP-layer fixes that would close this gap)**:
-1. Add a `recency` sort option to `top_patterns` (rank by most-recent sample timestamp rather than total cost)
-2. Annotate each pattern in `top_patterns` output with its last-seen age ("last seen: 30s ago", "last seen: 4h ago") so an agent sees immediately whether a pattern is live
-3. In `investigate` service-mode, if the top cost-ranked pattern has been flat/silent for > 1h but the pod still has recent restarts, emit a warning: "the top-cost pattern for this service may not reflect the current failure — check `top_patterns(recency=true)` for active errors"
+**Mitigation shipped (PRs #32 + #34)**:
+- **PR #32**: `investigate` now runs a recency probe after anchor resolution. If the resolved anchor's last 5-minute rate is below `acuteNoiseFloor`, prepend a warning banner to the acute-spike report pointing to a separate most-currently-firing-pattern probe that's unfiltered by severity (because stack traces often have empty severity). The probe excludes the anchor itself and lists the top 3 actively-firing patterns.
+- **PR #34**: the same warning now also applies to the `renderEmpty` (flat trajectory) path — previously the warning was computed but dropped when the trajectory classifier routed to the empty template. This was caught by S16 on the accounting rerun.
+- **PR #33**: `top_patterns` also got a "newly emerged patterns" section that surfaces high-rate-now-zero-rate-1h-ago patterns. Addresses the freshness issue for open-ended health sweeps.
 
-**Why this is a GA blocker**: the accounting crashloop is the exact kind of scenario the product's "structural wedge" story is built on. If MCP reaches the wrong diagnosis on it, the pitch ("MCP catches what kubectl misses") inverts — kubectl caught what MCP missed.
+**S16 verification** (post-mitigation head-to-head):
+| Run | Access | Calls | Result |
+|---|---|---|---|
+| S11 | kubectl only | 3 | Found poison-pill only |
+| S12 | MCP pre-fix | 3 | Found libgssapi only (wrong about live cause) |
+| S16 | MCP post-fix | 8 | **Found BOTH bugs, correct historical/live split** |
 
-**Customer impact**: an SRE using the MCP in a real incident will trust high-confidence output and ship the wrong fix. In the accounting case, installing libgssapi-krb5-2 would NOT resolve the crashloop; the Kafka consumer would still hit the duplicate-key exception on the next restart. The fix would be "ship the wrong thing, feel more confident in the wrong thing".
+**Remaining residual** (not a GA blocker, but worth tracking):
+- "Loudest currently-firing" ≠ "most causally important". The Kafka poison-pill fires below the 0.001 events/s noise floor because it only triggers on one specific Kafka message per retry loop. An agent has to reason past the recency pointer and cross-check with `pattern_trend` or `event_lookup` to find it.
+- Full fix options (all out of scope for MCP-layer patching, require engine or cross-pillar work):
+  1. Cross-pillar correlation with `kube_pod_container_status_restarts_total` to detect which log patterns are causally linked to restart cycles via temporal co-movement around the restart timestamps
+  2. Severity-weighted uncommon-but-severe floor (a rare CRIT is more causally important than a frequent INFO; the floor should scale by severity level)
+  3. Known-signature matching table (`.NET + Npgsql + 23505` → "Kafka poison-pill with Postgres unique constraint", `.NET + dlopen + failure` → "missing native library at init")
+  4. Pattern novelty detection: patterns with current activity + zero activity before the first restart timestamp are likely the crash cause
+
+**Customer impact after mitigation**: an SRE using the MCP gets a clear warning banner when the anchor is historical, with a specific next-action pointer to currently-active patterns. They will NOT ship a confidently-wrong fix — they may still need 1-2 extra queries to reach the full answer, but they are not misled.
 
 ### G11. Paste Lambda templatizer is broken (resolve_batch silently drops ~70% of input)
 **Discovered by**: sub-agents S4 and S9 (paste-triage scenarios), 2026-04-15.
