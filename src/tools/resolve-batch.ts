@@ -163,6 +163,29 @@ export async function executeResolveBatch(args: {
     lines.push('');
   }
 
+  // Tiny-batch warning: when every event resolves to its own pattern and the
+  // template bodies are mostly the same tokens, the templater saw too few
+  // samples to identify which tokens vary. That's not a bug — the templater
+  // is statistical and needs repeated occurrences per slot to generalize.
+  // With a 5-event batch of 5 distinct templates, one-slot variations (e.g.
+  // user names) stay baked into the template body and inflate pattern count.
+  const overfit = detectOverfittedBatch(concentrations, totalEvents);
+  if (overfit) {
+    lines.push(
+      `> **Tiny-batch note**: ${concentrations.length} distinct templates ` +
+      `across ${totalEvents} events with ~${Math.round(overfit.sharedPct * 100)}% token overlap ` +
+      `between pairs suggests the templater had too few samples to generalize ` +
+      `variable slots. Recurring tokens (usernames, order IDs, short identifiers) ` +
+      `stay in the template body without repeated occurrences to mark them as ` +
+      `variables. For statistically-converged templates on the same events, ` +
+      `use \`log10x_top_patterns\` / \`log10x_event_lookup\` against the live ` +
+      `Reporter — the production pipeline has seen millions of samples and ` +
+      `generalizes cleanly. For one-shot batch triage, pasting ≥50 events tends ` +
+      `to cross the templater's confidence floor.`
+    );
+    lines.push('');
+  }
+
   lines.push(`### Top ${ranked.length} patterns by interestingness`);
   lines.push('');
 
@@ -242,6 +265,44 @@ async function materialize(args: {
 }
 
 // ── Ranking ──
+
+/**
+ * Detect a batch where the templater was statistically under-sampled.
+ *
+ * Signal: N_templates == N_events (every event is its own template) AND the
+ * average pairwise token overlap between template bodies is high (the
+ * templates differ by only one or two tokens — a name, an ID). This is the
+ * classic "I pasted 5 lines and got 5 templates back" case. The templater
+ * correctly preserves identity on small samples; the note is advisory.
+ *
+ * Returns null when the batch doesn't match the signature (so the note is
+ * suppressed). Returns { sharedPct } with the observed pairwise-Jaccard mean
+ * when the note applies.
+ */
+function detectOverfittedBatch(
+  concentrations: PatternConcentration[],
+  totalEvents: number
+): { sharedPct: number } | null {
+  if (concentrations.length < 2) return null;
+  if (concentrations.length !== totalEvents) return null;
+  if (totalEvents > 20) return null;
+
+  const tokenSets = concentrations.map((p) => tokenize(p.template));
+  let pairCount = 0;
+  let totalJaccard = 0;
+  for (let i = 0; i < tokenSets.length; i++) {
+    for (let j = i + 1; j < tokenSets.length; j++) {
+      totalJaccard += jaccard(tokenSets[i], tokenSets[j]);
+      pairCount++;
+    }
+  }
+
+  if (pairCount === 0) return null;
+  const sharedPct = totalJaccard / pairCount;
+  if (sharedPct < 0.5) return null;
+
+  return { sharedPct };
+}
 
 function interestingnessScore(p: PatternConcentration, totalEvents: number): number {
   const volumeScore = Math.min(p.count / totalEvents, 1) * 0.4;

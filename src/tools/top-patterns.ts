@@ -75,7 +75,12 @@ export async function executeTopPatterns(
     lines.push('');
     lines.push('**Next actions**:');
     lines.push(`  - call \`log10x_investigate({ starting_point: '${rows[0].hash}' })\` to trace what\'s driving the top pattern.`);
-    lines.push(`  - call \`log10x_cost_drivers({ service: '${args.service || '<service>'}' })\` for week-over-week deltas with stable identity.`);
+    const svcHint = args.service || rows[0]?.service;
+    if (svcHint) {
+      lines.push(`  - call \`log10x_cost_drivers({ service: '${svcHint}' })\` for week-over-week deltas on the top service.`);
+    } else {
+      lines.push(`  - call \`log10x_cost_drivers()\` for week-over-week deltas across all services.`);
+    }
   }
   return lines.join('\n');
 }

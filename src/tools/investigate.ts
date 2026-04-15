@@ -78,6 +78,14 @@ export async function executeInvestigate(
   const investigationId = randomUUID();
   const thresholds = DEFAULT_THRESHOLDS;
 
+  // Apply Zod-schema defaults defensively so the function works when called
+  // directly (e.g. from tests or other tools) without the schema layer.
+  // eslint-disable-next-line no-param-reassign
+  if (!args.window)           (args as Record<string, unknown>).window = '1h';
+  if (!args.baseline_offset)  (args as Record<string, unknown>).baseline_offset = '24h';
+  if (!args.depth)            (args as Record<string, unknown>).depth = 'normal';
+  if (args.use_bytes == null) (args as Record<string, unknown>).use_bytes = false;
+
   // ── Phase 0 — Environment resolution + metric primitive probe ──
   const metricsEnv = await resolveMetricsEnv(env);
   const reporterTier = metricsEnv === 'edge' ? 'edge' : metricsEnv === 'cloud' ? 'cloud' : 'unknown';

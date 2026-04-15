@@ -42,9 +42,28 @@ export function fmtPattern(pattern: string): string {
   return pattern.replace(/_/g, ' ');
 }
 
-/** Format severity: first 4 chars uppercase. */
+/**
+ * Normalize a pattern name for use in a PromQL `message_pattern="..."` selector.
+ *
+ * Reporter-side pattern labels are always snake_case (word_word_word), but the
+ * display formatter renders them with spaces via `fmtPattern` for readability.
+ * When an agent re-feeds a displayed pattern back into a tool, the spaces
+ * round-trip into PromQL and the exact-match selector fails. This helper
+ * reverses the display transform so round-trip calls land on the canonical
+ * label value.
+ */
+export function normalizePattern(pattern: string): string {
+  return pattern.trim().replace(/\s+/g, '_');
+}
+
+/** Format severity: standard display names (not truncated to 4 chars). */
 export function fmtSeverity(sev: string): string {
-  return sev.toUpperCase().slice(0, 4);
+  const map: Record<string, string> = {
+    trace: 'TRACE', debug: 'DEBUG', info: 'INFO', warn: 'WARN',
+    warning: 'WARN', error: 'ERROR', critical: 'CRIT', fatal: 'FATAL',
+    uncl: '',
+  };
+  return map[sev.toLowerCase()] ?? sev.toUpperCase();
 }
 
 /** Format a percentage. */

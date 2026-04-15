@@ -9,6 +9,7 @@
  */
 
 import { z } from 'zod';
+import { normalizePattern } from '../lib/format.js';
 
 export const dependencyCheckSchema = {
   pattern: z.string().describe('Pattern name (e.g., "Payment_Gateway_Timeout")'),
@@ -55,7 +56,8 @@ export function executeDependencyCheck(args: {
   service?: string;
   severity?: string;
 }): string {
-  const tokens = args.pattern.split('_').filter(t => t.length > 0);
+  const pattern = normalizePattern(args.pattern);
+  const tokens = pattern.split('_').filter(t => t.length > 0);
   const sev = (args.severity || '').toLowerCase();
   const svc = args.service || '';
   const vc = VENDOR_CONFIG[args.vendor];

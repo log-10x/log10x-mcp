@@ -6,6 +6,7 @@
  */
 
 import { z } from 'zod';
+import { normalizePattern } from '../lib/format.js';
 
 export const exclusionFilterSchema = {
   pattern: z.string().describe('Pattern name (e.g., "Payment_Gateway_Timeout")'),
@@ -26,14 +27,18 @@ export function executeExclusionFilter(args: {
   service?: string;
   severity?: string;
 }): string {
-  const tokens = args.pattern.split('_').filter(t => t.length > 0);
-  const patRegex = tokens.join('.*');
+  const pattern = normalizePattern(args.pattern);
+  const tokens = pattern.split('_').filter(t => t.length > 0);
+  // Escape regex metacharacters in each token so dots, brackets, parens, etc.
+  // don't get interpreted as regex syntax by the target vendor's engine.
+  const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const patRegex = tokens.map(escapeRegex).join('.*');
   const svc = args.service || '';
   const sev = (args.severity || '').toLowerCase();
   const vk = args.vendor;
   const mode = args.mode;
 
-  const { label, text } = generateFilter(vk, mode, tokens, patRegex, svc, sev, args.pattern);
+  const { label, text } = generateFilter(vk, mode, tokens, patRegex, svc, sev, pattern);
 
   const lines: string[] = [];
   const vendorLabel = VENDOR_LABELS[vk] || vk;
@@ -63,6 +68,12 @@ const VENDOR_LABELS: Record<string, string> = {
   'promtail': 'Promtail',
 };
 
+// Safe identifier tokens: strip everything that isn't alphanumeric or underscore.
+// Used for stanza names / transform names that must not contain regex metacharacters.
+function safeId(tokens: string[]): string {
+  return tokens.slice(0, 3).map(t => t.replace(/[^a-zA-Z0-9]/g, '')).filter(Boolean).join('_');
+}
+
 function generateFilter(
   vk: string, mode: string,
   tokens: string[], patRegex: string,
@@ -91,7 +102,7 @@ function generateFilter(
   if (vk === 'splunk' && mode === 'config') {
     const lines = [
       `# Add to transforms.conf on your Heavy Forwarder or Indexer`,
-      `[drop_${tokens.slice(0, 3).join('_')}]`,
+      `[drop_${safeId(tokens)}]`,
       `REGEX = ${patRegex}`,
       `DEST_KEY = queue`,
       `FORMAT = nullQueue`,
@@ -102,7 +113,7 @@ function generateFilter(
   if (vk === 'splunk' && mode === 'api') {
     return {
       label: 'Run this curl command to create a transforms extraction via the Splunk REST API.',
-      text: `curl -k -u <USERNAME>:<PASSWORD> \\\n  "https://<SPLUNK_HOST>:8089/servicesNS/nobody/search/data/transforms/extractions" \\\n  -d name=drop_${tokens.slice(0, 3).join('_')} \\\n  -d REGEX="${patRegex}" \\\n  -d DEST_KEY=queue \\\n  -d FORMAT=nullQueue`
+      text: `curl -k -u <USERNAME>:<PASSWORD> \\\n  "https://<SPLUNK_HOST>:8089/servicesNS/nobody/search/data/transforms/extractions" \\\n  -d name=drop_${safeId(tokens)} \\\n  -d REGEX="${patRegex}" \\\n  -d DEST_KEY=queue \\\n  -d FORMAT=nullQueue`
     };
   }
   if (vk === 'elasticsearch' && mode === 'config') {
@@ -141,7 +152,7 @@ function generateFilter(
     lines.push(
       `    log_processing_rules:`,
       `      - type: exclude_at_match`,
-      `        name: drop_${tokens.slice(0, 3).join('_')}`,
+      `        name: drop_${safeId(tokens)}`,
       `        pattern: '${patRegex}'`
     );
     return { label: 'Add this log_processing_rules block to your Datadog Agent config to drop matching events before ingestion.', text: lines.join('\n') };

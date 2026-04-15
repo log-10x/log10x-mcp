@@ -50,12 +50,15 @@ export async function executeServices(
 
   rows.sort((a, b) => b.bytes - a.bytes);
 
+  // Align columns to the longest service name (min 20, max 40)
+  const nameWidth = Math.min(40, Math.max(20, ...rows.map(r => r.name.length)));
+
   const lines: string[] = [];
   lines.push(`Monitored Services (${tf.label})`);
   lines.push('');
 
   for (const r of rows) {
-    const name = r.name.padEnd(20);
+    const name = r.name.padEnd(nameWidth);
     const vol = fmtBytes(r.bytes).padEnd(10);
     const pct = fmtPct(r.pct).padStart(4);
     const cost = `${fmtDollar(r.cost)}${period}`;

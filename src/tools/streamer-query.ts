@@ -1,13 +1,18 @@
 /**
  * log10x_streamer_query — direct retrieval from the Log10x Storage Streamer archive.
  *
- * This is the forensic-retrieval entry point. Call when the user needs
- * specific historical events matching a pattern over a window that is
- * outside the SIEM's retention or filtered on a variable value that is
- * not a faceted dimension in their SIEM.
+ * Forensic-retrieval entry point. Call when the user needs specific historical
+ * events matching a search expression over a window that is outside the SIEM's
+ * retention, or filtered on a variable value that is not a faceted dimension
+ * in their SIEM, or that the SIEM never received because the edge optimizer
+ * dropped it.
  *
- * Requires LOG10X_STREAMER_URL to be set. Falls back gracefully with a
- * clear "Streamer not configured" message otherwise.
+ * Engine contract: POST returns a queryId; results land in S3 as JSONL files
+ * under {bucket}/tenx/{target}/qr/{queryId}/. The client polls the marker
+ * prefix for stability, then reads and merges the JSONL result files.
+ *
+ * Requires LOG10X_STREAMER_URL and LOG10X_STREAMER_BUCKET to be set. Falls
+ * back gracefully with a "not configured" message otherwise.
  */
 
 import { z } from 'zod';
@@ -15,58 +20,66 @@ import type { EnvConfig } from '../lib/environments.js';
 import {
   runStreamerQuery,
   isStreamerConfigured,
-  parseTimeExpression,
+  normalizeTimeExpression,
   type StreamerQueryRequest,
   type StreamerEvent,
 } from '../lib/streamer-api.js';
 import { fmtCount } from '../lib/format.js';
 
 export const streamerQuerySchema = {
-  pattern: z
-    .string()
-    .describe('Pattern to query — either a templateHash (e.g., `~3gTMRPTTYm`) or a symbolMessage field-set string. Use log10x_event_lookup first to resolve a raw log line to its canonical identity.'),
-  from: z
-    .string()
-    .describe('Start of the query window — ISO8601 timestamp (`2026-01-15T00:00:00Z`) or relative expression (`now-90d`).'),
-  to: z
-    .string()
-    .default('now')
-    .describe('End of the query window — ISO8601 or relative. Default `now`.'),
   search: z
     .string()
     .optional()
-    .describe('Optional search expression on enriched fields (severity_level, tenx_user_service, k8s_namespace, http_code, country, etc.).'),
+    .describe(
+      'Bloom-filter search expression using the TenX subset: `==`, `||`, `&&`, `includes(field, "substr")`. Example: `severity_level=="ERROR" && includes(text, "ECONNREFUSED")`. Selective values are dramatically cheaper than open-ended scans. Omit to scan the full window (bounded by limit/processingTime).'
+    ),
+  from: z
+    .string()
+    .describe(
+      'Start of the query window. Accepts ISO8601 (`2026-01-15T00:00:00Z`), epoch millis, or relative (`now-1h`, `now-24h`, `now-7d`). Normalized to the engine\'s `now("-1h")` form before dispatch.'
+    ),
+  to: z
+    .string()
+    .default('now')
+    .describe('End of the query window. Same grammar as `from`. Default `now`.'),
   filters: z
     .array(z.string())
     .optional()
-    .describe('Optional JavaScript filter expressions evaluated against each decoded event. Full TenX JS API available: `event.customer_id === "acme-corp-inc"`, `event.http_code.startsWith("5")`, `event.tenant_id in ["a", "b"]`. Filters are AND-combined.'),
+    .describe(
+      'JavaScript filter expressions evaluated in-memory against each decoded event after the Bloom-scoped fetch. Full TenX JS API: `this.customer_id === "acme-corp"`, `this.http_code.startsWith("5")`. Filters are AND-combined.'
+    ),
   target: z
     .string()
     .optional()
-    .describe('Optional service/app prefix to scope the Bloom filter scan (narrows the byte-range fetch). Defaults to the entire archive.'),
+    .describe(
+      'Target app/service prefix to scope the index scan. Defaults to LOG10X_STREAMER_TARGET (env var). Required if no default is configured.'
+    ),
   limit: z
     .number()
     .min(1)
-    .max(100_000)
-    .default(10_000)
-    .describe('Max events to return. Default 10000. Queries that exceed the limit surface a truncation flag in the output.'),
+    .max(10_000)
+    .default(500)
+    .describe(
+      'Hard cap on events returned after merging per-worker result files. Default 500. Typical conversational queries want 10-100; the LLM will render only the first 50.'
+    ),
   format: z
     .enum(['events', 'count', 'aggregated', 'ephemeral_series'])
     .default('events')
-    .describe('`events` (raw events with metadata), `count` (total + distributions only), `aggregated` (events bucketed into a time series — use with bucket_size), `ephemeral_series` (NEW in v1.4: returns the bucketed time series inline in Prometheus range-query shape so downstream cross-pillar correlation tools can treat it as a first-class metric without writing to a TSDB).'),
+    .describe(
+      '`events` (default: raw events), `count` (total + severity/service rollups, no event bodies), `aggregated` (events bucketed into a time series — use with bucket_size), `ephemeral_series` (bucketed series in Prometheus range-query shape for cross-pillar correlation). All four formats are rolled up client-side from the same events stream.'
+    ),
   bucket_size: z
     .string()
     .default('5m')
-    .describe('Bucket size when format=aggregated. Examples: `1m`, `5m`, `1h`, `1d`.'),
+    .describe('Bucket size when format=aggregated or ephemeral_series. Examples: `1m`, `5m`, `1h`, `1d`.'),
   environment: z.string().optional().describe('Environment nickname — required if multi-env.'),
 };
 
 export async function executeStreamerQuery(
   args: {
-    pattern: string;
+    search?: string;
     from: string;
     to: string;
-    search?: string;
     filters?: string[];
     target?: string;
     limit: number;
@@ -80,191 +93,244 @@ export async function executeStreamerQuery(
     return streamerNotConfiguredMessage();
   }
 
-  // Validate window before hitting the API.
   try {
-    parseTimeExpression(args.from);
-    parseTimeExpression(args.to);
+    normalizeTimeExpression(args.from);
+    normalizeTimeExpression(args.to);
   } catch (e) {
     throw new Error(`Invalid time window: ${(e as Error).message}`);
   }
 
-  // `ephemeral_series` is a v1.4 tool-level mode that maps to the Streamer's
-  // `aggregated` format at the API level. The difference is purely in the
-  // rendering: aggregated produces a histogram bar chart for humans,
-  // ephemeral_series wraps the same buckets into a Prometheus range-query
-  // response shape for downstream tool chains.
-  const backendFormat =
-    args.format === 'ephemeral_series' ? 'aggregated' : args.format;
-
   const req: StreamerQueryRequest = {
-    pattern: args.pattern,
     from: args.from,
     to: args.to,
     search: args.search,
     filters: args.filters,
     target: args.target,
     limit: args.limit,
-    format: backendFormat,
-    bucketSize: args.bucket_size,
   };
 
   const resp = await runStreamerQuery(env, req);
 
-  // ── Render markdown report ──
   const lines: string[] = [];
-  lines.push(`## Streamer Query · \`${resp.pattern}\``);
+  lines.push(`## Streamer Query`);
   lines.push('');
   lines.push(`**Window**: ${args.from} → ${args.to}`);
   if (args.search) lines.push(`**Search**: \`${args.search}\``);
   if (args.filters && args.filters.length > 0) {
     lines.push(`**Filters**: ${args.filters.map((f) => `\`${f}\``).join(' AND ')}`);
   }
-  if (args.target) lines.push(`**Target**: \`${args.target}\``);
+  lines.push(`**Target**: \`${resp.target}\``);
+  lines.push(`**Query ID**: \`${resp.queryId}\``);
   lines.push('');
   lines.push(
     `**Execution**: ${fmtCount(resp.execution.eventsMatched)} events matched · ` +
+      `${resp.execution.workerFiles} worker result files · ` +
       `${resp.execution.wallTimeMs}ms wall time` +
-      (resp.execution.bytesScanned ? ` · ${resp.execution.bytesScanned} scanned` : '') +
       (resp.execution.truncated ? ` · _truncated_` : '')
   );
   lines.push('');
 
-  if (resp.format === 'count') {
-    lines.push(`### Count summary`);
-    if (resp.countSummary) {
-      lines.push(`Total matched: **${fmtCount(resp.countSummary.total)}**`);
-      if (resp.countSummary.byDay) {
-        lines.push('');
-        lines.push('By day:');
-        for (const [day, n] of Object.entries(resp.countSummary.byDay).sort()) {
-          lines.push(`  - ${day}: ${fmtCount(n)}`);
-        }
-      }
-      if (resp.countSummary.byService) {
-        lines.push('');
-        lines.push('By service:');
-        const entries = Object.entries(resp.countSummary.byService).sort((a, b) => b[1] - a[1]).slice(0, 10);
-        for (const [svc, n] of entries) {
-          lines.push(`  - ${svc}: ${fmtCount(n)}`);
-        }
-      }
-      if (resp.countSummary.bySeverity) {
-        lines.push('');
-        lines.push('By severity:');
-        for (const [sev, n] of Object.entries(resp.countSummary.bySeverity)) {
-          lines.push(`  - ${sev}: ${fmtCount(n)}`);
-        }
-      }
-    } else {
-      lines.push('_No count summary returned by the Streamer — the deployment may not support count-only responses._');
-    }
-    return lines.join('\n');
+  if (args.format === 'count') {
+    return renderCount(resp.events, lines).join('\n');
+  }
+
+  if (args.format === 'aggregated') {
+    return renderAggregated(resp.events, args.bucket_size, lines).join('\n');
   }
 
   if (args.format === 'ephemeral_series') {
-    // Tool-level ephemeral_series mode: wrap the Streamer's aggregated
-    // buckets into a Prometheus range-query response shape so downstream
-    // correlation tools can treat the result as a first-class metric.
-    // No TSDB write, no destination credentials, no backdated-ingestion
-    // concerns — the series lives in this response only.
-    lines.push(`### Ephemeral series (Prometheus range-query shape)`);
-    lines.push('');
-    const buckets = resp.buckets || [];
-    if (buckets.length === 0) {
-      lines.push('_No buckets returned. The anchor pattern may have no events in this window._');
-      return lines.join('\n');
-    }
-    const values: Array<[number, string]> = buckets.map((b) => [
-      Math.floor(new Date(b.timestamp).getTime() / 1000),
-      String(b.count),
-    ]);
-    const promResponse = {
-      status: 'success' as const,
-      data: {
-        resultType: 'matrix' as const,
-        result: [
-          {
-            metric: {
-              __name__: 'log10x_ephemeral',
-              pattern: resp.pattern,
-              source: 'streamer_archive',
-            },
-            values,
-          },
-        ],
-      },
-    };
-    lines.push('```json');
-    lines.push(JSON.stringify(promResponse, null, 2));
-    lines.push('```');
-    lines.push('');
-    lines.push(
-      `**${values.length} data points** over the window. The series is in Prometheus range-query format (resultType: "matrix"), suitable for archival or ingestion into an external TSDB. To correlate this pattern against your customer metrics, call \`log10x_correlate_cross_pillar\` with \`anchor_type: "log10x_pattern"\` and the pattern name — the correlation tool fetches the pattern's rate series directly.`
-    );
-    return lines.join('\n');
-  }
-
-  if (resp.format === 'aggregated') {
-    lines.push(`### Time-bucketed (${args.bucket_size})`);
-    const buckets = resp.buckets || [];
-    if (buckets.length === 0) {
-      lines.push('_No buckets returned._');
-      return lines.join('\n');
-    }
-    const max = buckets.reduce((m, b) => Math.max(m, b.count), 0);
-    for (const b of buckets.slice(0, 80)) {
-      const bar = max > 0 ? renderBar(b.count / max, 30) : '';
-      lines.push(`  ${b.timestamp}  ${fmtCount(b.count).padStart(8)}  ${bar}`);
-    }
-    if (buckets.length > 80) {
-      lines.push('');
-      lines.push(`_${buckets.length - 80} additional buckets omitted from the rendering._`);
-    }
-    return lines.join('\n');
+    return renderEphemeralSeries(resp.events, args.bucket_size, args.search, lines).join('\n');
   }
 
   // events format
-  const events = resp.events || [];
-  lines.push(`### Events (${events.length} shown)`);
+  const events = resp.events;
+  lines.push(`### Events (${Math.min(events.length, 50)} of ${events.length} shown)`);
   lines.push('');
   for (let i = 0; i < Math.min(events.length, 50); i++) {
     lines.push(formatEvent(events[i]));
   }
   if (events.length > 50) {
     lines.push('');
-    lines.push(`_${events.length - 50} additional events omitted. Lower the format to \`count\` or \`aggregated\` for a summary view, or narrow the window/filters._`);
+    lines.push(
+      `_${events.length - 50} additional events omitted. Switch to \`format: "aggregated"\` or \`"count"\` for a summary, or narrow the search/filter._`
+    );
   }
   if (events.length === 0) {
     lines.push(
-      '_Streamer returned zero events matching this query. ' +
-        'Verify the pattern identity (use log10x_event_lookup to resolve a raw line), check the window, or widen the filter expressions._'
+      '_Streamer returned zero events. Verify the search expression matches at least one real value, check the window, or widen the filter._'
     );
   }
 
-  lines.push('');
-  lines.push('---');
-  lines.push(
-    '**Next action**: to turn these historical events into a persistent metric in your TSDB, ' +
-      `call \`log10x_backfill_metric({ pattern: '${resp.pattern}', ... })\` with the same window and filters.`
-  );
+  if (resp.execution.truncated) {
+    lines.push('');
+    lines.push(
+      '> **Truncated**: one or more stream workers hit the per-worker result cap. Narrow the search expression or add a more selective filter to see the full match set.'
+    );
+  }
 
   return lines.join('\n');
 }
 
+function renderCount(events: StreamerEvent[], lines: string[]): string[] {
+  lines.push(`### Count summary`);
+  lines.push('');
+  lines.push(`Total matched: **${fmtCount(events.length)}**`);
+
+  const byService = new Map<string, number>();
+  const bySeverity = new Map<string, number>();
+  const byDay = new Map<string, number>();
+
+  for (const ev of events) {
+    const svc = (ev.tenx_user_service as string) || 'unknown';
+    byService.set(svc, (byService.get(svc) || 0) + 1);
+
+    const sev = (ev.severity_level as string) || 'unknown';
+    bySeverity.set(sev, (bySeverity.get(sev) || 0) + 1);
+
+    const ts = ev.timestamp;
+    if (ts) {
+      const d = new Date(typeof ts === 'number' ? ts : String(ts));
+      if (!isNaN(d.getTime())) {
+        const day = d.toISOString().slice(0, 10);
+        byDay.set(day, (byDay.get(day) || 0) + 1);
+      }
+    }
+  }
+
+  if (bySeverity.size > 0) {
+    lines.push('');
+    lines.push('By severity:');
+    for (const [sev, n] of [...bySeverity.entries()].sort((a, b) => b[1] - a[1])) {
+      lines.push(`  - ${sev}: ${fmtCount(n)}`);
+    }
+  }
+  if (byService.size > 0) {
+    lines.push('');
+    lines.push('By service (top 10):');
+    for (const [svc, n] of [...byService.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10)) {
+      lines.push(`  - ${svc}: ${fmtCount(n)}`);
+    }
+  }
+  if (byDay.size > 0) {
+    lines.push('');
+    lines.push('By day:');
+    for (const [day, n] of [...byDay.entries()].sort()) {
+      lines.push(`  - ${day}: ${fmtCount(n)}`);
+    }
+  }
+  return lines;
+}
+
+function bucketEvents(events: StreamerEvent[], bucketSize: string): Array<{ timestamp: string; count: number }> {
+  const bucketMs = parseBucketSize(bucketSize);
+  const buckets = new Map<number, number>();
+
+  for (const ev of events) {
+    const ts = ev.timestamp;
+    if (!ts) continue;
+    const d = new Date(typeof ts === 'number' ? ts : String(ts));
+    if (isNaN(d.getTime())) continue;
+    const key = Math.floor(d.getTime() / bucketMs) * bucketMs;
+    buckets.set(key, (buckets.get(key) || 0) + 1);
+  }
+
+  return [...buckets.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([ts, count]) => ({ timestamp: new Date(ts).toISOString(), count }));
+}
+
+function parseBucketSize(expr: string): number {
+  const m = expr.trim().match(/^(\d+)([smhd])$/);
+  if (!m) return 5 * 60 * 1000;
+  const n = parseInt(m[1], 10);
+  switch (m[2]) {
+    case 's':
+      return n * 1000;
+    case 'm':
+      return n * 60_000;
+    case 'h':
+      return n * 3_600_000;
+    case 'd':
+      return n * 86_400_000;
+    default:
+      return 5 * 60 * 1000;
+  }
+}
+
+function renderAggregated(events: StreamerEvent[], bucketSize: string, lines: string[]): string[] {
+  const buckets = bucketEvents(events, bucketSize);
+  lines.push(`### Time-bucketed (${bucketSize})`);
+  lines.push('');
+  if (buckets.length === 0) {
+    lines.push('_No events with parseable timestamps in the result set._');
+    return lines;
+  }
+  const max = buckets.reduce((m, b) => Math.max(m, b.count), 0);
+  for (const b of buckets.slice(0, 80)) {
+    const bar = max > 0 ? renderBar(b.count / max, 30) : '';
+    lines.push(`  ${b.timestamp}  ${fmtCount(b.count).padStart(8)}  ${bar}`);
+  }
+  if (buckets.length > 80) {
+    lines.push('');
+    lines.push(`_${buckets.length - 80} additional buckets omitted from the rendering._`);
+  }
+  return lines;
+}
+
+function renderEphemeralSeries(
+  events: StreamerEvent[],
+  bucketSize: string,
+  search: string | undefined,
+  lines: string[]
+): string[] {
+  const buckets = bucketEvents(events, bucketSize);
+  lines.push(`### Ephemeral series (Prometheus range-query shape)`);
+  lines.push('');
+  if (buckets.length === 0) {
+    lines.push('_No events with parseable timestamps in the result set._');
+    return lines;
+  }
+  const values: Array<[number, string]> = buckets.map((b) => [
+    Math.floor(new Date(b.timestamp).getTime() / 1000),
+    String(b.count),
+  ]);
+  const promResponse = {
+    status: 'success' as const,
+    data: {
+      resultType: 'matrix' as const,
+      result: [
+        {
+          metric: {
+            __name__: 'log10x_ephemeral',
+            source: 'streamer_archive',
+            search: search || '',
+          },
+          values,
+        },
+      ],
+    },
+  };
+  lines.push('```json');
+  lines.push(JSON.stringify(promResponse, null, 2));
+  lines.push('```');
+  lines.push('');
+  lines.push(
+    `**${values.length} data points** over the window in Prometheus range-query format.`
+  );
+  return lines;
+}
+
 function formatEvent(ev: StreamerEvent): string {
   const parts: string[] = [];
-  parts.push(`**${ev.timestamp}**`);
-  if (ev.service) parts.push(`service=${ev.service}`);
-  if (ev.severity) parts.push(`sev=${ev.severity}`);
-  if (ev.enrichedFields) {
-    const extras = Object.entries(ev.enrichedFields)
-      .slice(0, 4)
-      .map(([k, v]) => `${k}=${v}`)
-      .join(' ');
-    if (extras) parts.push(extras);
-  }
+  if (ev.timestamp) parts.push(`**${ev.timestamp}**`);
+  if (ev.tenx_user_service) parts.push(`service=${ev.tenx_user_service}`);
+  if (ev.severity_level) parts.push(`sev=${ev.severity_level}`);
+  if (ev.k8s_namespace) parts.push(`ns=${ev.k8s_namespace}`);
+  if (ev.k8s_pod) parts.push(`pod=${ev.k8s_pod}`);
+  if (ev.http_code) parts.push(`http=${ev.http_code}`);
   const meta = parts.join(' · ');
-  return `- ${meta}\n  ${ev.text}`;
+  const text = ev.text ? String(ev.text).replace(/\n/g, ' ').slice(0, 400) : '';
+  return `- ${meta}\n  ${text}`;
 }
 
 function renderBar(ratio: number, width: number): string {
@@ -276,14 +342,16 @@ export function streamerNotConfiguredMessage(): string {
   return [
     '## Streamer not configured',
     '',
-    "This MCP server doesn't currently have a Log10x Storage Streamer endpoint configured. The Streamer component is what lets this tool query historical events in the customer's S3 archive by templateHash with Bloom-filter narrowing.",
+    "This MCP server doesn't currently have a Log10x Storage Streamer endpoint configured. The Streamer is what lets this tool query historical events in the customer's S3 archive by Bloom-indexed variable values and template hashes.",
     '',
     '**To enable it**:',
     '',
-    '1. Deploy the Log10x Storage Streamer per https://docs.log10x.com/apps/cloud/streamer/',
-    '2. Set `LOG10X_STREAMER_URL` in the MCP server environment to the deployed query endpoint.',
-    '3. Re-run this tool.',
+    '1. Deploy the Log10x Storage Streamer per https://doc.log10x.com/apps/cloud/streamer/',
+    '2. Set `LOG10X_STREAMER_URL` to the query handler endpoint (e.g., the NLB for the query-handler service).',
+    '3. Set `LOG10X_STREAMER_BUCKET` to the S3 bucket holding the streamer index.',
+    '4. Optionally set `LOG10X_STREAMER_TARGET` to the default target app prefix (e.g., `app`).',
+    '5. Re-run this tool.',
     '',
-    "**Without the Streamer**: for in-retention forensic retrieval, use the customer's SIEM directly (Datadog `dog log search`, Splunk SPL, Elastic `_search`). For long-window retrieval outside SIEM retention, the Streamer is the only supported path.",
+    "**Without the Streamer**: for in-retention retrieval, use the customer's SIEM directly. For long-window retrieval outside SIEM retention, the Streamer is the only supported path.",
   ].join('\n');
 }

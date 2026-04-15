@@ -10,7 +10,7 @@ import { queryRange } from '../lib/api.js';
 import * as pql from '../lib/promql.js';
 import { bytesToCost } from '../lib/cost.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
-import { fmtDollar, fmtPattern, fmtBytes, parseTimeframe, costPeriodLabel } from '../lib/format.js';
+import { fmtDollar, fmtPattern, fmtBytes, parseTimeframe, costPeriodLabel, normalizePattern } from '../lib/format.js';
 
 export const trendSchema = {
   pattern: z.string().describe('Pattern name (e.g., "Payment_Gateway_Timeout")'),
@@ -29,15 +29,19 @@ export async function executeTrend(
   const period = costPeriodLabel(tf.days);
   const metricsEnv = await resolveMetricsEnv(env);
 
+  // Reporter pattern labels are always snake_case. Normalize in case an
+  // agent re-fed a display form from top_patterns / cost_drivers.
+  const pattern = normalizePattern(args.pattern);
+
   const now = Math.floor(Date.now() / 1000);
   const start = now - tf.days * 86400;
   const stepSeconds = parseStep(args.step);
 
-  const query = pql.patternBytesOverTime(args.pattern, metricsEnv, args.step);
+  const query = pql.patternBytesOverTime(pattern, metricsEnv, args.step);
   const res = await queryRange(env, query, start, now, stepSeconds);
 
   if (res.status !== 'success' || res.data.result.length === 0) {
-    return `No trend data for pattern "${args.pattern}" in the ${tf.label}.`;
+    return `No trend data for pattern "${pattern}" in the ${tf.label}.`;
   }
 
   // Extract time series
@@ -48,7 +52,7 @@ export async function executeTrend(
   }
 
   if (points.length === 0) {
-    return `No data points for pattern "${args.pattern}".`;
+    return `No data points for pattern "${pattern}".`;
   }
 
   // Compute stats
@@ -58,9 +62,12 @@ export async function executeTrend(
   const maxPoint = points.reduce((max, p) => p.bytes > max.bytes ? p : max, points[0]);
   const minPoint = points.reduce((min, p) => p.bytes < min.bytes ? p : min, points[0]);
 
-  // Detect spike: find first point that exceeds 3x average
+  // Detect spike: a point > 3x average that appears AFTER the first quarter
+  // (so the spike is not the baseline itself, which would produce a spurious
+  // "spike detected" + "stable/decreasing" contradiction).
   const spikeThreshold = avgBytes * 3;
-  const spikePoint = points.find(p => p.bytes > spikeThreshold);
+  const firstQuarterEnd = Math.floor(points.length / 4);
+  const spikePoint = points.slice(firstQuarterEnd).find(p => p.bytes > spikeThreshold);
 
   // Baseline: first quarter of points
   const baselineSlice = points.slice(0, Math.max(1, Math.floor(points.length / 4)));
@@ -74,7 +81,7 @@ export async function executeTrend(
 
   // Format
   const lines: string[] = [];
-  lines.push(`${fmtPattern(args.pattern)} — ${tf.label} trend`);
+  lines.push(`${fmtPattern(pattern)} — ${tf.label} trend`);
   lines.push('');
 
   lines.push(`  Baseline (first quarter):  ~${fmtDollar(baselineCost)}${period}`);
@@ -111,11 +118,11 @@ export async function executeTrend(
   if (spikePoint || elevated) {
     lines.push('');
     lines.push('**Next action**:');
-    lines.push(`  - Inflection or spike detected — call \`log10x_investigate({ starting_point: '${args.pattern}', window: '${args.timeRange}' })\` to trace the cause.`);
+    lines.push(`  - Inflection or spike detected — call \`log10x_investigate({ starting_point: '${pattern}', window: '${args.timeRange}' })\` to trace the cause.`);
   } else if (sustainedSlope) {
     lines.push('');
     lines.push('**Next action**:');
-    lines.push(`  - This pattern shows gradual drift (no discrete inflection). Call \`log10x_investigate({ starting_point: '${args.pattern}', window: '30d' })\` for slope-similarity cohort analysis and historical investigation guidance.`);
+    lines.push(`  - This pattern shows gradual drift (no discrete inflection). Call \`log10x_investigate({ starting_point: '${pattern}', window: '30d' })\` for slope-similarity cohort analysis and historical investigation guidance.`);
   }
 
   return lines.join('\n');
