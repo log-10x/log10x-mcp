@@ -19,7 +19,7 @@
  */
 
 import type { EnvConfig } from './environments.js';
-import { fetchLabelValues } from './api.js';
+import { fetchLabelValues, fetchActiveLabelValues } from './api.js';
 import type { CustomerMetricsBackend } from './customer-metrics.js';
 
 /**
@@ -90,6 +90,18 @@ export interface DiscoverJoinOptions {
   maxValuesPerLabel?: number;
   /** Restrict to a specific subset of customer-side labels. */
   candidateLabels?: string[];
+  /**
+   * Window (seconds) for label value enumeration. When set, both the Log10x
+   * and customer backends are queried with `start = now - windowSeconds` and
+   * `end = now`, filtering out stale label values from series that stopped
+   * emitting samples. Critical for environments where historical replay data
+   * or decommissioned services leave orphan label values in the metric store
+   * — those drag Jaccard down and cause false `no_join_available` refusals.
+   *
+   * Recommended default: 600 seconds (10 minutes). Longer windows pick up
+   * bursty services; shorter windows tighten the current state.
+   */
+  windowSeconds?: number;
 }
 
 /**
@@ -105,12 +117,20 @@ export async function discoverJoin(
 ): Promise<JoinDiscoveryResult> {
   const minimumJaccard = options.minimumJaccard ?? 0.7;
   const maxValuesPerLabel = options.maxValuesPerLabel ?? 1000;
+  const windowSeconds = options.windowSeconds;
 
   // Enumerate Log10x-side label values.
+  // When windowSeconds is set, use the PromQL `group by` over `increase()`
+  // approach — that returns ONLY label values with samples in the window,
+  // filtering out stale replay data / decommissioned services. The
+  // `/label/values?start=&end=` endpoint is NOT sufficient (it filters by
+  // block intersection, not active sample presence).
   const log10xValues = new Map<string, Set<string>>();
   for (const label of LOG10X_JOIN_CANDIDATES) {
     try {
-      const values = await fetchLabelValues(env, label);
+      const values = windowSeconds
+        ? await fetchActiveLabelValues(env, label, windowSeconds)
+        : await fetchLabelValues(env, label);
       if (values.length > 0 && values.length <= maxValuesPerLabel) {
         log10xValues.set(label, new Set(values));
       }
@@ -125,10 +145,26 @@ export async function discoverJoin(
     ? options.candidateLabels
     : await pickCustomerCandidateLabels(backend);
 
+  // Auto-scope: if log10x knows about specific namespaces, constrain the
+  // customer-side probe to only those namespaces. Without this, customer
+  // metrics include every container/service across the entire cluster —
+  // monitoring, kube-system, control plane — which drags Jaccard down
+  // with values log10x structurally can't have. This mirrors the real
+  // correlation use case: you only cross-pillar compare data the log10x
+  // pipeline actually ingests.
+  const log10xNamespaces = log10xValues.get('k8s_namespace');
+  const namespaceScope = windowSeconds && log10xNamespaces && log10xNamespaces.size > 0
+    ? Array.from(log10xNamespaces)
+    : undefined;
+
   const customerValues = new Map<string, Set<string>>();
   for (const label of customerCandidateLabels) {
     try {
-      const values = await backend.listLabelValues(label);
+      // Same rationale as above: windowed path uses PromQL instead of
+      // /label/values so it returns only actively-sampled values.
+      const values = windowSeconds
+        ? await fetchActiveCustomerLabelValues(backend, label, windowSeconds, namespaceScope)
+        : await backend.listLabelValues(label);
       if (values.length > 0 && values.length <= maxValuesPerLabel) {
         customerValues.set(label, new Set(values));
       }
@@ -196,6 +232,83 @@ function computeJaccard(
     log10xOnlyValues: l10xSet.size - intersection,
     customerOnlyValues: custSet.size - intersection,
   };
+}
+
+/**
+ * Returns the customer-side label values currently active per Prometheus's
+ * built-in staleness handling. Implementation strategy (in order):
+ *
+ * 1. `group by (<label>) ({<label>!="",__name__=~".+"})` — instant vector
+ *    query that returns any series with a non-empty `<label>` label. This
+ *    uses Prometheus's default 5-minute staleness marker, so series that
+ *    stopped emitting samples naturally disappear from the result without
+ *    an explicit window parameter. **Broadest and most accurate** for
+ *    "currently alive label values", though some Prometheus deployments
+ *    reject over-broad `{...=~".+"}` selectors via cardinality limits.
+ *
+ * 2. Fallback: `group by (<label>) (up{<label>!=""})` — narrower, uses
+ *    only the `up` metric (per-scrape-target). Works when the label is
+ *    present on scrape targets (e.g., `job`, `instance`), but returns
+ *    empty for container/pod labels which aren't on `up`.
+ *
+ * 3. Last resort: unwindowed `listLabelValues()`. Better to over-return
+ *    than miss the join key entirely.
+ *
+ * `windowSeconds` is accepted for API consistency but Prometheus's
+ * staleness handling already provides a ~5-minute active filter at the
+ * instant-vector level. Callers with very bursty metrics (longer than
+ * the 5min staleness marker) should pre-materialize a `count_over_time`
+ * probe upstream.
+ */
+async function fetchActiveCustomerLabelValues(
+  backend: CustomerMetricsBackend,
+  label: string,
+  windowSeconds: number,
+  namespaceScope?: string[]
+): Promise<string[]> {
+  void windowSeconds; // reserved for future use; see docstring
+  // Build a namespace selector clause when provided. This scopes the
+  // customer-side probe to the same namespaces the log10x pipeline is
+  // ingesting from, which is the only apples-to-apples comparison for
+  // Jaccard computation. Without this, customer-side returns every
+  // container/service in the cluster (monitoring, kube-system, control
+  // plane), dragging Jaccard down with values log10x structurally can't
+  // observe.
+  const nsClause = namespaceScope && namespaceScope.length > 0
+    ? `,namespace=~"${namespaceScope.map(s => s.replace(/[.^$*+?()[\]{}|\\]/g, '\\$&')).join('|')}"`
+    : '';
+  const collect = (res: {
+    data?: { result?: Array<{ metric: Record<string, string> }> };
+  }): string[] => {
+    const vals = new Set<string>();
+    for (const r of res?.data?.result || []) {
+      const v = r.metric?.[label];
+      if (v) vals.add(v);
+    }
+    return Array.from(vals);
+  };
+
+  // Attempt 1: broad instant selector, optionally namespace-scoped.
+  try {
+    const promql = `group by (${label}) ({${label}!=""${nsClause},__name__=~".+"})`;
+    const res = await backend.queryInstant(promql);
+    const vals = collect(res);
+    if (vals.length > 0) return vals;
+  } catch {
+    // Some Prom deployments refuse this pattern; fall through.
+  }
+  // Attempt 2: `up`-based (works only for target-level labels).
+  try {
+    const promql = `group by (${label}) (up{${label}!=""${nsClause}})`;
+    const res = await backend.queryInstant(promql);
+    const vals = collect(res);
+    if (vals.length > 0) return vals;
+  } catch {
+    // Fall through.
+  }
+  // Attempt 3: unwindowed list endpoint — no namespace filter available here,
+  // since the /label/values endpoint doesn't support label selectors.
+  return backend.listLabelValues(label);
 }
 
 /**

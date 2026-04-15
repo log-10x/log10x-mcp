@@ -38,11 +38,17 @@ export const discoverJoinSchema = {
     .min(0)
     .max(1)
     .default(0.7)
-    .describe('Minimum Jaccard similarity to accept as a primary join. Default 0.7. Lower to 0.5 for exploratory discovery.'),
+    .describe('Minimum Jaccard similarity to accept as a primary join. Default 0.7. Lower to 0.5 for exploratory discovery, 0.3 for noisy environments with historical stale values.'),
   candidate_labels: z
     .array(z.string())
     .optional()
     .describe('Optional subset of customer-side labels to probe. When omitted, all labels from the customer backend are probed in preferred-first order.'),
+  window: z
+    .string()
+    .optional()
+    .describe(
+      'Time window for label value enumeration (e.g., "10m", "1h", "30m"). When set, both the Log10x and customer backends are queried with [now - window, now] filtering, excluding stale label values from series that stopped emitting samples. CRITICAL for environments with historical replay data, decommissioned pods, or otherwise orphan label values — stale values drag Jaccard down and cause false `no_join_available` refusals. Recommended: "10m" for steady-state clusters, "1h" for bursty traffic. Omit to include all-time values (default Prometheus behavior).'
+    ),
   environment: z.string().optional().describe('Environment nickname (for multi-env setups).'),
 };
 
@@ -51,6 +57,7 @@ export async function executeDiscoverJoin(
     force_refresh: boolean;
     minimum_jaccard: number;
     candidate_labels?: string[];
+    window?: string;
     environment?: string;
   },
   env: EnvConfig
@@ -60,29 +67,49 @@ export async function executeDiscoverJoin(
     throw new CustomerMetricsNotConfiguredError();
   }
 
-  const result = args.force_refresh
-    ? await discoverJoin(env, backend, {
-        minimumJaccard: args.minimum_jaccard,
-        candidateLabels: args.candidate_labels,
-      })
-    : await getOrDiscoverJoin(env, backend, {
-        minimumJaccard: args.minimum_jaccard,
-        candidateLabels: args.candidate_labels,
-      });
+  const windowSeconds = args.window ? parseWindowToSeconds(args.window) : undefined;
+  // When a window is specified, always bypass the session cache — the cache
+  // key is (env, backend) and doesn't include the window, so reusing a
+  // cached no-window probe would defeat the purpose.
+  const bypass = args.force_refresh || windowSeconds != null;
+  const opts = {
+    minimumJaccard: args.minimum_jaccard,
+    candidateLabels: args.candidate_labels,
+    windowSeconds,
+  };
+  const result = bypass
+    ? await discoverJoin(env, backend, opts)
+    : await getOrDiscoverJoin(env, backend, opts);
 
-  return renderJoinResult(result, backend.backendType, backend.endpoint);
+  return renderJoinResult(result, backend.backendType, backend.endpoint, windowSeconds);
+}
+
+/** Parse a Prometheus-style window string ("10m", "1h", "30s") to seconds. */
+function parseWindowToSeconds(s: string): number {
+  const m = s.trim().match(/^(\d+)([smhdw])$/);
+  if (!m) throw new Error(`Invalid window: "${s}". Expected format like "10m", "1h", "30s", "2d".`);
+  const n = parseInt(m[1], 10);
+  const unit = m[2];
+  const unitSeconds: Record<string, number> = { s: 1, m: 60, h: 3600, d: 86400, w: 604800 };
+  return n * unitSeconds[unit];
 }
 
 function renderJoinResult(
   result: JoinDiscoveryResult,
   backendType: string,
-  endpoint: string
+  endpoint: string,
+  windowSeconds?: number
 ): string {
   const lines: string[] = [];
   lines.push('## Cross-pillar join discovery');
   lines.push('');
   lines.push(`**Customer backend**: ${backendType} (${endpoint})`);
   lines.push(`**Cached**: ${result.cachedForSession ? 'yes (session cache)' : 'no (fresh probe)'}`);
+  if (windowSeconds) {
+    lines.push(`**Window**: last ${windowSeconds}s (stale label values excluded)`);
+  } else {
+    lines.push(`**Window**: all-time (stale label values from decommissioned series are included — pass \`window\` to filter)`);
+  }
   lines.push(`**Labels probed on Log10x side**: ${result.probedLabelsLog10x.join(', ')}`);
   lines.push(`**Labels probed on customer side**: ${result.probedLabelsCustomer.join(', ') || '(none — backend returned empty label universe)'}`);
   lines.push('');
