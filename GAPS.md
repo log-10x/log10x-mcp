@@ -378,6 +378,32 @@ Signature detection is a bigger workstream. The simpler short-term fix is #1 —
 
 ---
 
+### G10. Engine fingerprinter leaks high-cardinality variables into pattern identities
+**Discovered by**: session 2026-04-15 sub-agent S1 and live environment audit review.
+**Severity**: UX / credibility — not a data-loss bug, but produces phantom "5-pattern decline" alerts that a naive operator will panic about.
+
+**Evidence**: the real otel-demo's `product-reviews` service produces pattern identities like:
+```
+service_name_product_reviews_trace_sampled_True_username_bookworm_astro
+service_name_product_reviews_trace_sampled_True_username_history_buff_description
+service_name_product_reviews_trace_sampled_True_username_ancient_texts_description
+service_name_product_reviews_trace_sampled_True_username_rare_find_description
+service_name_product_reviews_trace_sampled_True_username_celestial_history
+```
+
+Each username variant gets its own pattern identity. When the load generator cycles through a new set of reviewer usernames, the previous set's patterns all drop to zero simultaneously — the env audit then shows 5 patterns "declined -100%" in a single service.
+
+**Why this is an engine problem**: the fingerprinter should tokenize / strip high-cardinality variable values (usernames, UUIDs, request IDs) before computing the pattern identity. Identical log *structure* with different variable values should produce the *same* pattern ID, not 5 different ones.
+
+**MCP-layer mitigation** (would help without an engine fix): add a collapse heuristic to `renderEnvironmentAudit` that detects "≥3 patterns from the same service with rate changes within ±5% of each other" and collapses them into a single summary row like:
+```
+5 high-cardinality variants in `product-reviews` — declined -100% each (likely username rotation, not incident)
+```
+
+This would turn a noisy "5 incidents" output into a single informative row. The operator can still drill down if they want, but the audit doesn't overstate the signal count.
+
+**Action**: file engine ticket for the fingerprinter leak. Ship MCP-layer collapse heuristic as a defensive measure in parallel.
+
 ### G9. tenx-edge subprocess stale state after prolonged remote-write rejection
 **Discovered by**: follow-up verification after backend PR #55 (G8 fix) was deployed.
 **Severity**: operational — not a code bug, but a customer upgrade gotcha.
