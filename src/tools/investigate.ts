@@ -327,7 +327,16 @@ export async function executeInvestigate(
   );
 
   if (shape.shape === 'flat') {
-    const report = renderEmpty(args.starting_point, args.window, investigationId, thresholds.acuteNoiseFloor);
+    const emptyReport = renderEmpty(args.starting_point, args.window, investigationId, thresholds.acuteNoiseFloor);
+    // If the anchor is historical (fired below noise floor in the last 5m)
+    // AND a different pattern is currently active in the service, the flat
+    // "no significant movement" result is dangerously misleading — it means
+    // "the HISTORICAL TOP-COST pattern is flat" not "nothing is happening".
+    // Prepend the recency warning so an operator sees the live pattern
+    // pointer before the empty result. Caught by sub-agent S16 on the
+    // accounting crashloop rerun: the recency probe correctly found the
+    // live bug but the flat-path report dropped the warning.
+    const report = recencyWarning ? `${recencyWarning}\n\n---\n\n${emptyReport}` : emptyReport;
     recordInvestigation({
       investigationId,
       createdAt: Date.now(),
