@@ -158,8 +158,16 @@ export async function runCrossPillarCorrelation(
     log10xQueries += 1;
   }
 
+  // For customer_metric anchors, parse the label matchers directly from
+  // the anchor's PromQL expression so the candidate generator can apply
+  // pod/service/container filters in addition to the join key.
+  const parsedCustomerAnchorLabels =
+    opts.anchor.type === 'customer_metric' ? parseAnchorLabels(opts.anchor) : undefined;
+
   // ── Phase 3 — Candidate generation ──
-  const candidateNames = await generateCandidateNames(opts, metric, resolvedLog10xAnchorLabels);
+  const anchorLabelsForCandidateGen =
+    opts.anchor.type === 'log10x_pattern' ? resolvedLog10xAnchorLabels : parsedCustomerAnchorLabels;
+  const candidateNames = await generateCandidateNames(opts, metric, anchorLabelsForCandidateGen);
 
   // ── Phase 4 — Temporal correlation per candidate ──
   const candidates: CrossPillarCandidate[] = [];
@@ -179,10 +187,28 @@ export async function runCrossPillarCorrelation(
       opts.window.step
     );
 
-    if (Math.abs(r) < minimumConfidence) continue;
-
     // ── Phase 5 — Structural validation ──
     const structural = computeStructuralScore(opts.anchor, candidate.labels, resolvedLog10xAnchorLabels);
+
+    // Gate: a candidate is kept if EITHER (a) temporal correlation crosses
+    // the minimum_confidence floor OR (b) structural validation confirms a
+    // strong label overlap (join-key-only >= 0.5). Previous behavior was a
+    // HARD temporal gate that dropped the candidate before structural ran —
+    // which meant any anchor backed by a cumulative counter (e.g.
+    // `kube_pod_container_status_restarts_total`) over a short window would
+    // have near-zero variance, near-zero Pearson r, and everything would be
+    // dropped. Caught by sub-agent S8 (cross-pillar wedge test): accounting
+    // pod restart counter vs Kerberos log pattern returned 0 candidates in
+    // EVERY tier because the temporal gate killed them before structural
+    // could fire. The wedge claim ("structural validation rescues the
+    // correlation when temporal is noisy") has to actually rescue.
+    //
+    // The temporal score still flows into `combinedConfidence`, so a
+    // structurally-strong but temporally-flat pair surfaces with a small
+    // headline confidence and the decomposition (temporal:0.00 structural:1.00)
+    // tells the reader honestly that this is structure-only.
+    const structuralAllowsPassthrough = structural.score !== null && structural.score >= 0.5;
+    if (Math.abs(r) < minimumConfidence && !structuralAllowsPassthrough) continue;
 
     const subScores: CandidateSubScores = {
       temporal: Math.abs(r),
@@ -191,10 +217,15 @@ export async function runCrossPillarCorrelation(
       volume: 1.0,
     };
 
+    // If temporal correlation is below the minimum but structural passes,
+    // use a structural-only combinedConfidence (temporal = 0 zeroes everything
+    // else, which hides the real signal).
     const combinedConfidence =
       structural.score === null
         ? null
-        : subScores.temporal * subScores.lag * structural.score * subScores.volume;
+        : subScores.temporal >= minimumConfidence
+          ? subScores.temporal * Math.max(0.2, subScores.lag) * structural.score * subScores.volume
+          : structural.score * 0.5; // structure-only: halve to indicate weaker than full overlap
 
     const tier = pickTier(structural.score, structural.reason);
 
@@ -317,12 +348,53 @@ async function generateCandidateNames(
   if (!joinValue) return [];
 
   if (opts.anchor.type === 'customer_metric') {
-    // Candidates are Log10x patterns scoped by join key.
+    // Candidates are Log10x patterns scoped by the join key AND by any
+    // additional structural label the anchor provides. Previously this
+    // scoped ONLY by the join key (typically namespace), then used
+    // `topk(20, rate)` to narrow — which meant crashlooping services with
+    // backoff-limited rate (like `accounting` at $0.01/day because the pod
+    // spends most of its time in CrashLoopBackOff) got excluded entirely
+    // from the candidate universe. The Kerberos log pattern would never
+    // surface no matter the structural score.
+    //
+    // Fix: extract pod/service/container filters from the anchor's parsed
+    // labels and add them as extra PromQL selectors. That way
+    // `kube_pod_container_status_restarts_total{pod=~"accounting.*"}` hunts
+    // only among log10x patterns with `k8s_pod=~"accounting.*"`, regardless
+    // of rate.
     const scopeLabel = opts.joinKey.log10xSide;
-    const promql = `topk(20, sum by (message_pattern, k8s_pod, k8s_namespace, k8s_container, tenx_user_service) (rate(${metric}{${scopeLabel}="${escape(joinValue)}"}[5m])))`;
+    const extraSelectors: string[] = [];
+    if (resolvedAnchorLabels) {
+      // Map customer-side label names to log10x-side names via the alias
+      // table used for structural validation.
+      const aliasMap: Array<[string[], string[]]> = STRUCTURAL_ALIASES;
+      for (const [custAliases, l10xAliases] of aliasMap) {
+        const anchorValue =
+          pickFirst(resolvedAnchorLabels, custAliases) ||
+          pickFirst(resolvedAnchorLabels, l10xAliases);
+        if (!anchorValue) continue;
+        if (anchorValue.length < 3) continue;
+        // Pick the preferred log10x-side label name.
+        const l10xLabel = l10xAliases[0];
+        if (!l10xLabel) continue;
+        // Skip if this is the join key itself (already in the base selector).
+        if (l10xLabel === scopeLabel) continue;
+        extraSelectors.push(`${l10xLabel}=~"${escape(anchorValue)}.*"`);
+      }
+    }
+    const allSelectors = [`${scopeLabel}="${escape(joinValue)}"`, ...extraSelectors];
+    const promql = `topk(20, sum by (message_pattern, k8s_pod, k8s_namespace, k8s_container, tenx_user_service) (rate(${metric}{${allSelectors.join(',')}}[5m])))`;
     try {
-      const res = await queryInstant(opts.env, promql);
-      if (res.status !== 'success') return [];
+      let res = await queryInstant(opts.env, promql);
+      // If the scoped query returns nothing (e.g., the pod filter was too
+      // strict or the service has zero rate in the last 5m), retry without
+      // the extra selectors so we at least return the namespace-scoped
+      // candidates. The structural scorer will still prefer label matches.
+      if (res.status !== 'success' || res.data.result.length === 0) {
+        const fallbackPromql = `topk(20, sum by (message_pattern, k8s_pod, k8s_namespace, k8s_container, tenx_user_service) (rate(${metric}{${scopeLabel}="${escape(joinValue)}"}[5m])))`;
+        res = await queryInstant(opts.env, fallbackPromql);
+        if (res.status !== 'success') return [];
+      }
       return res.data.result.map((r: PrometheusResult) => ({
         name: r.metric['message_pattern'] || '(unknown)',
         labels: r.metric,
@@ -434,7 +506,15 @@ function computeStructuralScore(
 
     if (anchorValue && candidateValue) {
       aliasesChecked += 1;
-      if (anchorValue === candidateValue) {
+      // Exact match OR prefix match (handles anchors derived from regex
+      // matchers like `pod=~"accounting.*"` that got their metachars stripped
+      // to `accounting`, which should match a concrete pod name like
+      // `accounting-76dc9dc54-jfqxm`). Prefix is only applied when the
+      // anchor value is at least 3 chars to avoid noise matches.
+      const exactMatch = anchorValue === candidateValue;
+      const prefixMatch =
+        anchorValue.length >= 3 && candidateValue.startsWith(anchorValue);
+      if (exactMatch || prefixMatch) {
         if (!joinKeyMatch) joinKeyMatch = true;
         else extraStructuralMatches += 1;
       }
@@ -469,14 +549,35 @@ function computeStructuralScore(
 function parseAnchorLabels(anchor: AnchorSpec): Record<string, string> | undefined {
   if (anchor.type !== 'customer_metric') return undefined;
   const labels: Record<string, string> = {};
-  // Very simple PromQL label matcher parser. Handles `metric{key="value",key2="value2"}`.
+  // PromQL label matcher parser. Handles four matcher forms:
+  //   key="value"    exact match
+  //   key=~"regex"   regex match   — stored with regex metachars stripped
+  //   key!="value"   exact non-match — stored (caller decides how to use)
+  //   key!~"regex"   regex non-match — stored with metachars stripped
+  // Previously only `=` was parsed, so anchors like `pod=~"accounting.*"`
+  // silently dropped the pod label and the cross-pillar correlation
+  // couldn't filter candidates to the intended scope. Caught by sub-agent
+  // S8: accounting restart counter couldn't surface the Kerberos pattern
+  // because the pod label wasn't parsed out of the anchor PromQL.
   const braceMatch = anchor.value.match(/\{([^}]*)\}/);
   if (!braceMatch) return labels;
   const body = braceMatch[1];
-  const re = /(\w+)\s*=\s*"([^"]*)"/g;
+  const re = /(\w+)\s*(=~|!~|!=|=)\s*"([^"]*)"/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(body)) !== null) {
-    labels[m[1]] = m[2];
+    const key = m[1];
+    const op = m[2];
+    const raw = m[3];
+    if (op === '=' || op === '=~') {
+      // Strip regex metacharacters so a downstream exact-value compare can
+      // still land. For `accounting.*` this gives `accounting` which matches
+      // the `accounting-76dc9dc54-jfqxm` prefix via startsWith below.
+      const stripped = raw.replace(/[.^$*+?()[\]{}|\\]/g, '');
+      labels[key] = stripped;
+    }
+    // `!=` / `!~` negative matchers are intentionally NOT stored — they'd
+    // need a different comparison semantics. Positive matchers are the
+    // overwhelming majority of cross-pillar anchors.
   }
   return labels;
 }
