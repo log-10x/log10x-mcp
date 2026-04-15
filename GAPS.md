@@ -273,6 +273,54 @@ The .NET accounting service tries to load the GSSAPI/Kerberos library at Postgre
 
 **Why this matters for the session**: validates that cross-pillar investigation with log10x finds real upstream bugs, not just synthetic scenarios. The sub-agent's workflow (restart metric → log pattern discovery → Kerberos ID → OOM-is-symptom diagnosis) is exactly the customer story we want for the product.
 
+### G5. Upstream opentelemetry-demo frontend → shipping URL construction bug
+**Discovered by**: Live-S3 sub-agent (checkout slowness investigation), 2026-04-15.
+**Severity**: real upstream bug in the running otel-demo that a user would hit on any checkout attempt that reaches the shipping-quote step.
+
+**Evidence**:
+- `log10x_pattern_trend` on pattern `shipping_service_Post_shipping_get_quote_unsupported_protocol_scheme_shipping`: flat $6.4/day steady state, 258 data points on a 5m step, marked **stable** (not a spike, continuously firing)
+- `list_by_label` + per-service `top_patterns`: the pattern is the #1 CRIT-severity log in the frontend service
+- `kubectl` independent verification: `SHIPPING_ADDR=http://shipping:8080` on the frontend deployment — **env var is correct**
+
+So the URL is configured correctly but the frontend code is somehow constructing `shipping://...` instead of using the `SHIPPING_ADDR` properly. The bug is in the frontend app code path (likely the shipping-quote HTTP client), NOT in the env var or helm values.
+
+**Agent caveat**: Live-S3 agent's specific diagnosis ("env var is literally shipping://...") was inference from log content, not verification against kubectl. The agent doesn't have kubectl access — it could only reason from log patterns. An enterprise-ready tool flow would cross-check with customer metric labels or allow shelling out to verify a hypothesis before committing to it in a VP report.
+
+**Why this is G5 not just "fix the demo"**: the otel-demo frontend is upstream open-telemetry/opentelemetry-demo code. Filing the bug upstream benefits every customer who uses the demo as an observability POC harness.
+
+### G6. `investigate environment` produces +100% false flags on near-zero baselines
+**Discovered by**: Live-S5 sub-agent (post-mortem leading indicators), 2026-04-15.
+**Severity**: false-positive noise in the env-wide investigate output that a careful agent catches (Live-S5 did) but a hasty one might escalate on.
+
+**Evidence**: Live-S5 ran `log10x_investigate` with `starting_point="environment"` and `window="1h"`. The tool flagged 5 patterns with `+100%` day-over-day deltas. Per-service reruns with `window="1h"` on the same pattern immediately contradicted the flag: *"No significant pattern movement in the last 1h. Nothing crossed the noise floor."*
+
+Root cause (diagnosed by the agent): the env-wide audit compares the current 1h window to the same 1h **24h ago**. If the 24h-ago bucket is near zero (the load-generator has natural gaps — agent observed 0 B minima at 14:15 UTC for two patterns via `pattern_trend`), a currently-normal rate divides by ~0 and renders as `+100%`.
+
+**What would fix it**:
+1. Guard the delta computation: when baseline bucket < N bytes/min, emit "insufficient baseline" instead of a `+100%` flag
+2. OR render `+∞%` and tag as "baseline near zero, treat as no-comparison" so callers can't read it as a growth signal
+3. OR suppress env-wide near-zero-baseline rows entirely from the output
+
+**Agent workaround**: Live-S5 cross-checked every env-wide flag against a per-service `window="1h"` rerun, which correctly reported "nothing crossed the noise floor". Users should be told to do this when the env-wide audit shows suspiciously-similar `+100%` flags on multiple unrelated services (that's the signature).
+
+### G7. Cross-agent divergence on crashloop root-cause attribution
+**Discovered by**: comparison of Kerberos-scenario agent vs Live-S1 agent, same tool data, same accounting pod, different conclusions.
+
+**What happened**: two different agents investigated the accounting pod's OOMKilled loop:
+- Kerberos agent: *"OOM is downstream artifact of .NET crash-dump + tight cgroup — bumping memory limit would NOT fix the flap, just relabel to Error. Real cause is `libgssapi_krb5.so.2` dlopen failure."*
+- Live-S1 agent: *"93.5 MiB working set vs 120 MiB limit = 78%, working set curve hitting the ceiling. **The actual killer is memory pressure against a tight 120 MiB limit.** Recommend bump memory 120→256 MiB first."*
+
+Both agents had the SAME tool data. The Kerberos agent correctly diagnosed via reasoning about Npgsql's eager `dlopen` + .NET crash-dump behavior + cgroup labeling. The Live-S1 agent defaulted to the textbook "OOM → bump memory" response and relegated Kerberos to "also cleanup".
+
+**The textbook response is wrong**: bumping memory alone won't install the missing library, so the crashloop continues — it just relabels the exit reason from OOMKilled to Error.
+
+**What would make the correct interpretation more obvious**:
+1. When `cardinality_concentration` or similar health checks detect a CRIT pattern that correlates with restart counts, include a line like *"the top CRIT log pattern for this pod may be the crash cause, not just noise — verify the termination is not a secondary symptom"*
+2. When `customer_metrics_query` returns `last_terminated_reason=OOMKilled` AND log10x has a CRIT pattern on the same pod, surface a cross-pillar warning: *"OOM label + CRIT log pattern — check whether the crash path allocates a crash dump buffer that trips the cgroup limit after the real error"*
+3. Add a known-signatures lookup for `.NET + Npgsql + libgssapi` → "this is a native library load failure at PostgreSQL connect time"
+
+Signature detection is a bigger workstream. The simpler short-term fix is #1 — a doctor hint. The variance between agents is a real customer concern and worth surfacing in the tool output so users catch the correct interpretation even with a non-expert agent.
+
 ### G3. Streamer-wired-but-undocumented in demo env
 **Evidence**: LoadBalancer `tenx-streamer-query-lb` at `a2936089108bb492cb41d18cb5b75f8d-1298006809.us-east-1.elb.amazonaws.com` has been running for 21h but was NOT referenced in any MCP setup docs or env var hint. I found it by `kubectl get svc -A | grep streamer`.
 
