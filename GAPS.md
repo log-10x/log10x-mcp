@@ -135,8 +135,12 @@ Implemented as `cardinality_concentration` check in `doctor.ts`. Flags when top-
 
 Current behavior is the worst of both: strict rejection AND no diagnostic.
 
-### F3a. tenx-edge exec_filter `format: single_value` silently breaks on plaintext logs
-**Severity**: high for any customer running the bundled fluentd → tenx-edge forwarder pipeline with real k8s logs (not a JSON-wrapped sample).
+### ~~F3a. tenx-edge exec_filter format=single_value~~ ✅ CLOSED 2026-04-15 (backend PR #54)
+**Original characterization was wrong**. On deeper inspection, the `format: single_value, message_key: log` config is NOT an engine default — it lives in the demo env's values file (`backend/terraform/demo/values/tenx-optimizer-demo.yaml`), with a comment explicitly saying *"to directly pass data from the log simulator pod instead of overriding key fields"*. It was a deliberate demo-specific optimization for the JSON-wrapped replay sample. The upstream fluentd chart default does NOT hardcode this — it uses the standard `@KUBERNETES` label routing.
+
+The real issue was that when we swapped the demo from log-simulator to real opentelemetry-demo, the demo values file still carried the replay-era configuration. Fixed in backend PR #54: values now use `format: json`, widen source path to `/var/log/containers/*_otel-demo_*.log`, and route via `@KUBERNETES` so the `kubernetes_metadata` filter actually injects pod/namespace/container fields.
+
+### F3a-legacy. (for history)
 
 **Evidence**: the `00_tenx.conf` fluentd config used by the demo fluentd install has:
 ```yaml
@@ -162,8 +166,10 @@ and the entire batch is dropped. No events reach log10x.
 
 **Customer impact**: any customer who deploys the demo's fluentd helm chart against their own k8s cluster (not the replay sample) will hit this with zero diagnostic signal — fluentd says "flowing", tenx-edge says "running", but `prometheus.log10x.com` shows zero events. **This is a GA blocker for the out-of-box forwarder path**.
 
-### F3b. tenx-fluentd DaemonSet pinned to `workload=edge` nodeSelector
-**Severity**: medium; silently causes partial cluster coverage.
+### ~~F3b. tenx-fluentd nodeSelector workload=edge~~ ✅ CLOSED 2026-04-15 (backend PR #54)
+Same fix — backend PR #54 removes the nodeSelector from the demo values file. DaemonSet now runs on all nodes, matching the upstream chart default. 4 of 5 fluentd pods run in the cluster (5th is Pending due to a pod density cap on one node — that's unrelated to the chart config).
+
+### F3b-legacy. (for history)
 
 **Evidence**: the tenx-fluentd helm chart sets `nodeSelector: workload=edge` on the DaemonSet. In the demo env, only 1 of 5 nodes has that label, so fluentd runs on only 1 node. Any pods scheduled to the other 4 nodes have their container logs completely ignored (fluentd tails `/var/log/containers/` which is node-local). In the otel-demo swap, 24 of 27 pods were on unfluentd-ed nodes.
 
@@ -237,6 +243,35 @@ Every service name the MCP tools show (`cart`, `frontend`, `payment`, `opentelem
 - **Option C**: accept that the demo validates log-only operation and mark cross-pillar as "untested against live data, code is ready"
 
 Option A is the correct answer for GA. It's substantial infra work (several hours) but it's the only way to validate the cross-pillar wedge claim on production-shaped data.
+
+### G4. Upstream opentelemetry-demo `accounting` image has a missing library (libgssapi_krb5.so.2)
+**Discovered by**: sub-agent scenario 4 (pod-restart investigation), 2026-04-15.
+**Severity**: this is a bug in the **upstream opentelemetry-demo repo**, not in log10x. Worth filing upstream and/or surfacing as a "demo hygiene" note for anyone using this repo for observability POCs.
+
+**Evidence** (verified independently via `kubectl`):
+```
+$ kubectl get pod -n otel-demo accounting-76dc9dc54-jfqxm -o jsonpath='{.status.containerStatuses[*].restartCount}'
+19
+
+$ kubectl get pod -n otel-demo accounting-76dc9dc54-jfqxm -o jsonpath='{.status.containerStatuses[*].lastState.terminated.reason}'
+OOMKilled
+
+$ kubectl logs -n otel-demo accounting-76dc9dc54-jfqxm --previous | grep -i krb
+Cannot load library libgssapi_krb5.so.2
+Error: libgssapi_krb5.so.2: cannot open shared object file: No such file or directory
+  Microsoft.EntityFrameworkCore.DbUpdateException: An error occurred while saving the entity changes.
+```
+
+The .NET accounting service tries to load the GSSAPI/Kerberos library at PostgreSQL-connection time (Entity Framework Core's Npgsql driver). The library is missing from the base image, so every container init enters a retry loop, allocates memory, and eventually gets OOMKilled. 19 restarts with OOMKilled hides the real root cause (missing library) unless you read `kubectl logs --previous`.
+
+**The sub-agent diagnosed this from log10x patterns alone** (the #1 CRIT pattern on accounting was exactly `libgssapi_krb.so: cannot open shared object file: No such file or directory`), and correctly identified that OOM is a symptom of the init-path failure retrying, not a memory-sizing issue.
+
+**Fix** (not in scope for this session but worth noting):
+- File upstream issue on https://github.com/open-telemetry/opentelemetry-demo
+- Workaround: add `libgssapi-krb5-2` (Debian/Ubuntu) or `krb5-libs` (RHEL/Alpine) to the accounting container's Dockerfile base layer
+- Or: disable GSSAPI auth in the Npgsql connection string for the demo
+
+**Why this matters for the session**: validates that cross-pillar investigation with log10x finds real upstream bugs, not just synthetic scenarios. The sub-agent's workflow (restart metric → log pattern discovery → Kerberos ID → OOM-is-symptom diagnosis) is exactly the customer story we want for the product.
 
 ### G3. Streamer-wired-but-undocumented in demo env
 **Evidence**: LoadBalancer `tenx-streamer-query-lb` at `a2936089108bb492cb41d18cb5b75f8d-1298006809.us-east-1.elb.amazonaws.com` has been running for 21h but was NOT referenced in any MCP setup docs or env var hint. I found it by `kubectl get svc -A | grep streamer`.
