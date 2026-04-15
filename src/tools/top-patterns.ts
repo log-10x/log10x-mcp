@@ -17,7 +17,7 @@ import { fmtDollar, fmtPattern, fmtSeverity, fmtCount, parseTimeframe, costPerio
 
 export const topPatternsSchema = {
   service: z.string().optional().describe('Service name to scope the result. Omit for all services.'),
-  timeRange: z.enum(['1d', '7d', '30d']).default('7d').describe('Time range to aggregate over.'),
+  timeRange: z.enum(['15m', '1h', '6h', '1d', '7d', '30d']).default('7d').describe('Time range to aggregate over. Sub-day values (`15m`, `1h`, `6h`) are useful for incident investigation; day-level values for cost and trend analysis.'),
   limit: z.number().min(1).max(50).default(10).describe('Number of patterns to return.'),
   analyzerCost: z.number().optional().describe('SIEM ingestion cost in $/GB. Auto-detected from profile if omitted.'),
   environment: z.string().optional().describe('Environment nickname (for multi-env setups).'),

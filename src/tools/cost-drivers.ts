@@ -27,7 +27,7 @@ import {
 
 export const costDriversSchema = {
   service: z.string().optional().describe("Service name to filter (e.g., 'checkout'). Omit for all services."),
-  timeRange: z.enum(['1d', '7d', '30d']).default('7d').describe('Time range to analyze'),
+  timeRange: z.enum(['1d', '7d', '30d']).default('7d').describe('Time range to analyze. For sub-day "what changed in the last hour" questions, use `log10x_pattern_trend` or `log10x_investigate` — cost_drivers baseline math requires day-level offsets.'),
   limit: z.number().min(1).max(20).default(10).describe('Max patterns to return'),
   analyzerCost: z.number().optional().describe('SIEM ingestion cost in $/GB. Auto-detected from your profile if omitted.'),
   baselineOffsetDays: z.number().min(1).max(90).optional().describe(
