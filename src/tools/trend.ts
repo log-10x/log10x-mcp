@@ -14,8 +14,8 @@ import { fmtDollar, fmtPattern, fmtBytes, parseTimeframe, costPeriodLabel, norma
 
 export const trendSchema = {
   pattern: z.string().describe('Pattern name (e.g., "Payment_Gateway_Timeout")'),
-  timeRange: z.enum(['1d', '7d', '30d']).default('7d').describe('Time range'),
-  step: z.enum(['5m', '1h', '6h', '1d']).default('1h').describe('Data point interval'),
+  timeRange: z.enum(['15m', '1h', '6h', '1d', '7d', '30d']).default('7d').describe('Time range. Sub-day values show fine-grained trajectory around an incident.'),
+  step: z.enum(['1m', '5m', '15m', '1h', '6h', '1d']).default('1h').describe('Data point interval. Use `1m`/`5m` for sub-day windows (15m/1h/6h), `1h`/`6h` for day-level, `1d` for week+ windows.'),
   analyzerCost: z.number().optional().describe('SIEM ingestion cost in $/GB'),
   environment: z.string().optional().describe('Environment nickname'),
 };

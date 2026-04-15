@@ -22,7 +22,7 @@ export const listByLabelSchema = {
   label: z.string().describe('Label to group by. Common choices: tenx_user_service, severity_level, k8s_namespace, k8s_container, country, http_code. Call log10x_discover_labels first to see what is queryable.'),
   service: z.string().optional().describe('Scope the result to a single service (sets a tenx_user_service filter).'),
   severity: z.string().optional().describe('Filter by severity_level (e.g., "ERROR").'),
-  timeRange: z.enum(['1d', '7d', '30d']).default('7d').describe('Time range to aggregate over.'),
+  timeRange: z.enum(['15m', '1h', '6h', '1d', '7d', '30d']).default('7d').describe('Time range to aggregate over. Sub-day values available for incident investigation.'),
   limit: z.number().min(1).max(50).default(20).describe('Max rows to return.'),
   analyzerCost: z.number().optional().describe('SIEM ingestion cost in $/GB. Auto-detected from profile if omitted.'),
   environment: z.string().optional().describe('Environment nickname (for multi-env setups).'),
