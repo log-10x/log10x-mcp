@@ -72,10 +72,69 @@ export async function executeTopPatterns(
     lines.push(`#${i + 1}  ${name} ${cost.padEnd(12)} ${sev}${svc}`);
   }
 
+  // ── Newly-emerged-patterns probe ──
+  // The main ranking above is cost-weighted over `tf.range`, which buries
+  // freshly-appearing patterns by design: a pattern that's been firing for
+  // 90 seconds at 6 events/sec has ~540 events total, which is invisible
+  // next to 24h-integrated steady-state patterns with billions of events.
+  // Caught by sub-agent S10 (seeded retry-storm canary): the canary was at
+  // rank #37 and the agent missed it entirely, finding a different
+  // long-running APM-invisible bug instead.
+  //
+  // Fix: ALSO probe for patterns with significant current (5m) rate and
+  // zero rate at 1h-ago. These are "newly emerged" by construction and
+  // deserve a prominent section regardless of their cumulative cost.
+  // Query cost: +1 PromQL query. Returns a small result set (typically 0-3
+  // rows). No-op for steady-state environments.
+  interface NewRow { hash: string; service: string; severity: string; rate: number }
+  const newlyEmerged: NewRow[] = [];
+  try {
+    const scopeFilter = args.service ? `,${LABELS.service}="${args.service.replace(/"/g, '\\"')}"` : '';
+    const newlyEmergedQ =
+      `topk(5, sum by (${LABELS.pattern}, ${LABELS.service}, ${LABELS.severity}) (rate(all_events_summaryVolume_total{${LABELS.env}="${metricsEnv}"${scopeFilter}}[5m])) > 0.001) ` +
+      `unless on (${LABELS.pattern}) ` +
+      `(sum by (${LABELS.pattern}) (rate(all_events_summaryVolume_total{${LABELS.env}="${metricsEnv}"${scopeFilter}}[5m] offset 1h)) > 0)`;
+    const newRes = await queryInstant(env, newlyEmergedQ);
+    if (newRes.status === 'success') {
+      for (const r of newRes.data.result) {
+        const rate = parsePrometheusValue(r);
+        if (!Number.isFinite(rate) || rate <= 0) continue;
+        newlyEmerged.push({
+          hash: r.metric[LABELS.pattern] || '(unknown)',
+          service: r.metric[LABELS.service] || '',
+          severity: r.metric[LABELS.severity] || '',
+          rate,
+        });
+      }
+      newlyEmerged.sort((a, b) => b.rate - a.rate);
+    }
+  } catch {
+    // non-fatal
+  }
+
+  if (newlyEmerged.length > 0) {
+    lines.push('');
+    lines.push('### ⚡ Newly emerged patterns (last 5 min, no activity 1h ago)');
+    lines.push('');
+    lines.push('_These patterns are firing right now but were silent 1h ago. They are likely too fresh to appear in the cost ranking above (which integrates over a longer window). Investigate individually if unexpected._');
+    lines.push('');
+    for (let i = 0; i < newlyEmerged.length; i++) {
+      const r = newlyEmerged[i];
+      const name = fmtPattern(r.hash).padEnd(35);
+      const rateLabel = `${r.rate.toFixed(3)} events/s`;
+      const sev = fmtSeverity(r.severity);
+      const svc = r.service ? `  ${r.service}` : '';
+      lines.push(`  ${name} ${rateLabel.padEnd(18)} ${sev}${svc}`);
+    }
+  }
+
   if (rows[0]) {
     lines.push('');
     lines.push('**Next actions**:');
     lines.push(`  - call \`log10x_investigate({ starting_point: '${rows[0].hash}' })\` to trace what\'s driving the top pattern.`);
+    if (newlyEmerged.length > 0) {
+      lines.push(`  - **Investigate the newly-emerged pattern**: \`log10x_investigate({ starting_point: '${newlyEmerged[0].hash}', window: '15m' })\` — it is not in the cost ranking yet but is firing right now.`);
+    }
     const svcHint = args.service || rows[0]?.service;
     if (svcHint) {
       lines.push(`  - call \`log10x_cost_drivers({ service: '${svcHint}' })\` for week-over-week deltas on the top service.`);
