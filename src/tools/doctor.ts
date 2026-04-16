@@ -17,7 +17,7 @@
 
 import { z } from 'zod';
 import { queryInstant } from '../lib/api.js';
-import { isStreamerConfigured } from '../lib/streamer-api.js';
+import { isStreamerConfigured, runStreamerQuery } from '../lib/streamer-api.js';
 import { loadEnvironments, type Environments, type EnvConfig } from '../lib/environments.js';
 import { LABELS } from '../lib/promql.js';
 import { fmtBytes as formatBytes } from '../lib/format.js';
@@ -542,18 +542,52 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
   // streamer query here without side effects, but we CAN check whether the
   // streamer endpoint is configured AND whether the paste endpoint's
   // health probe reports streamer index coverage for recent windows.
-  // Shipping as a placeholder that reminds the user the streamer is
-  // operationally uncertain until the engine-side false-negative and
-  // canonical-name-crash bugs (G12) are fixed.
+  // Live streamer probe: fire a lightweight count query (limit=1, last
+  // 1h window) and check whether the pipeline responds. Replaces the old
+  // hardcoded G12 WARN that was stale after the body-shape fix (PR #36)
+  // and the demo-env indexer fix (2026-04-16).
   if (detectedTier && process.env.LOG10X_STREAMER_URL) {
-    checks.push({
-      name: 'streamer_forensic_health',
-      status: 'warn',
-      message:
-        'Streamer endpoint is configured, but forensic retrieval has a known engine-side false-negative issue: log10x_streamer_query may return 0 events on windows where log10x_pattern_trend proves events exist, and it may crash with "MCP error -32000: Connection closed" when passed a canonical slash-underscore pattern name. Tracked as GAPS G12.',
-      fix:
-        'Until the engine-side fix lands: (1) use short pattern names or free-text search strings rather than canonical pattern identities when calling log10x_streamer_query, (2) cross-check any zero-event result against log10x_pattern_trend on the same pattern+window before concluding the archive is empty, (3) prefer log10x_event_lookup + log10x_pattern_trend for any incident reconstruction where approximate timing is acceptable.',
-    });
+    try {
+      const probeResult = await runStreamerQuery(env, {
+        from: 'now-1h',
+        to: 'now',
+        search: '',
+        format: 'count',
+        limit: 1,
+      });
+      const matchedCount = probeResult.execution.eventsMatched ?? 0;
+      if (matchedCount > 0) {
+        checks.push({
+          name: 'streamer_forensic_health',
+          status: 'pass',
+          message:
+            `Streamer forensic retrieval is operational. Probe query returned ${matchedCount} event(s) in the last 1h. ` +
+            `Wall time: ${probeResult.execution.wallTimeMs}ms, worker files: ${probeResult.execution.workerFiles}.`,
+        });
+      } else {
+        checks.push({
+          name: 'streamer_forensic_health',
+          status: 'warn',
+          message:
+            `Streamer endpoint responded but returned 0 events in the last 1h (wall time: ${probeResult.execution.wallTimeMs}ms). ` +
+            `This may indicate the S3 index is stale — check that the index-inducer CronJob is running and that new .log files are being written to the streamer S3 bucket.`,
+          fix:
+            'Verify: (1) `kubectl get cronjob -n <streamer-ns>` — is the index-inducer running and not Pending? ' +
+            '(2) `aws s3 ls s3://<streamer-bucket>/app/ | tail -5` — are recent .log files present? ' +
+            '(3) Check SQS index queue depth — if 0 and no recent files, the data pipeline upstream of the indexer is stopped.',
+        });
+      }
+    } catch (e) {
+      const errMsg = (e as Error).message || String(e);
+      checks.push({
+        name: 'streamer_forensic_health',
+        status: 'fail',
+        message:
+          `Streamer probe query failed: ${errMsg.slice(0, 300)}`,
+        fix:
+          'Check streamer endpoint reachability (`curl -s $LOG10X_STREAMER_URL/health`), query-handler pod status, and SQS queue configuration.',
+      });
+    }
   }
 
   return checks;
