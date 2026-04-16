@@ -1,23 +1,20 @@
 /**
  * Local `tenx` dev CLI runner.
  *
- * Spawns the locally-installed tenx CLI with a packaged runtime config
- * (`assets/tenx-mcp-stdin.config.yaml`), pipes the batch to stdin, and
+ * Spawns the locally-installed tenx CLI with a packaged runtime config,
  * reads the resulting templates + encoded rows + aggregated summary
- * from a per-invocation temp dir.
+ * from a per-invocation temp dir. Two modes:
  *
- * The runner is the execution substrate for every MCP tool that needs
- * to templatize events locally — log10x_resolve_batch (stdin batch),
- * log10x_extract_templates (file / directory input), and future
- * validation tools that inject generated tenx.js overlays.
+ *   - stdin: batch piped to stdin (log10x_resolve_batch)
+ *   - file:  reads from a path/glob (log10x_extract_templates)
  *
  * Binary lookup: LOG10X_TENX_PATH env var wins; otherwise `tenx` on PATH.
- * Config lookup: LOG10X_MCP_STDIN_CONFIG_PATH env var wins; otherwise the
- *   packaged config shipped alongside the MCP.
+ * Config lookup: LOG10X_MCP_STDIN_CONFIG_PATH / LOG10X_MCP_FILE_CONFIG_PATH
+ *   wins; otherwise the packaged configs shipped alongside the MCP.
  *
  * Concurrency safety: each invocation gets its own /tmp/log10x-mcp-<uuid>/
- * tempdir. Tempdir + env vars are scoped to the child process; parallel
- * calls don't collide.
+ * tempdir with a shadow template config (empty files list) and isolated
+ * TENX_INCLUDE_PATHS. Parallel calls don't collide.
  */
 
 import { spawn } from 'child_process';
@@ -30,24 +27,20 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-export interface DevCliStdinRunResult {
-  /** templates.json contents (NDJSON, one template per line). */
+// ── Result types ──
+
+export interface DevCliResult {
   templatesJson: string;
-  /** encoded.log contents — one encoded row per input event. */
   encodedLog: string;
-  /** decoded.log contents — one decoded text per event (round-trip check). */
   decodedLog: string;
-  /** aggregated.csv contents — severity / service / volume rollups. */
   aggregatedCsv: string;
-  /** CLI wall time in ms. */
   wallTimeMs: number;
-  /** `tenx --version` output captured at invocation, when available. */
   cliVersion?: string;
-  /** Absolute path to the config yaml that was loaded. */
   configPath: string;
-  /** Absolute path to the tempdir (cleaned up before return). */
   tempDir: string;
 }
+
+// ── Error types ──
 
 export class DevCliNotInstalledError extends Error {
   constructor() {
@@ -61,12 +54,6 @@ export class DevCliNotInstalledError extends Error {
   }
 }
 
-/**
- * Thrown when the CLI runs but exits non-zero. The full stderr is attached
- * unredacted so generation loops can parse parse-error details
- * (`Lexical error at line N, column M`, `could not resolve include: ...`,
- * etc.) and self-correct without a second round-trip.
- */
 export class DevCliRunError extends Error {
   readonly exitCode: number;
   readonly stderr: string;
@@ -86,35 +73,75 @@ export class DevCliRunError extends Error {
   }
 }
 
+// ── Public API ──
+
 /**
- * Run the local tenx CLI against a raw log text blob piped to stdin.
- * Returns the four output artifacts from the MCP's stdin config.
+ * Run the local tenx CLI with batch piped to stdin.
+ * Used by log10x_resolve_batch.
  */
-export async function runDevCliStdin(rawLogText: string): Promise<DevCliStdinRunResult> {
+export async function runDevCliStdin(rawLogText: string): Promise<DevCliResult> {
+  const configPath = resolveConfigPath('LOG10X_MCP_STDIN_CONFIG_PATH', 'tenx-mcp-stdin.config.yaml');
+  return runDevCliCore({ mode: 'stdin', stdinData: rawLogText, configPath });
+}
+
+/**
+ * Run the local tenx CLI reading from a file path/glob.
+ * Used by log10x_extract_templates.
+ */
+export async function runDevCliFile(inputPath: string): Promise<DevCliResult> {
+  const configPath = resolveConfigPath('LOG10X_MCP_FILE_CONFIG_PATH', 'tenx-mcp-file.config.yaml');
+  return runDevCliCore({ mode: 'file', inputPath, configPath });
+}
+
+/**
+ * Legacy alias for resolve-batch.ts backward compatibility.
+ */
+export async function runDevCli(rawLogText: string): Promise<{
+  templatesJson: string;
+  encodedLog: string;
+  aggregatedCsv: string;
+  wallTimeMs: number;
+  cliVersion?: string;
+}> {
+  const r = await runDevCliStdin(rawLogText);
+  return {
+    templatesJson: r.templatesJson,
+    encodedLog: r.encodedLog,
+    aggregatedCsv: r.aggregatedCsv,
+    wallTimeMs: r.wallTimeMs,
+    cliVersion: r.cliVersion,
+  };
+}
+
+// ── Core runner ──
+
+interface RunDevCliOptions {
+  mode: 'stdin' | 'file';
+  stdinData?: string;
+  inputPath?: string;
+  configPath: string;
+  extraOverlays?: string[];
+  timeoutMs?: number;
+}
+
+async function runDevCliCore(opts: RunDevCliOptions): Promise<DevCliResult> {
   const binary = process.env.LOG10X_TENX_PATH || 'tenx';
   if (!(await isBinaryOnPath(binary))) {
     throw new DevCliNotInstalledError();
   }
 
   const cliVersion = await tryGetVersion(binary);
-  const configPath = resolveStdinConfigPath();
 
-  if (!existsSync(configPath)) {
+  if (!existsSync(opts.configPath)) {
     throw new Error(
-      `MCP tenx config not found at: ${configPath}. ` +
-        `Set LOG10X_MCP_STDIN_CONFIG_PATH to override, or reinstall the log10x-mcp package.`
+      `MCP tenx config not found at: ${opts.configPath}. ` +
+        `Reinstall the log10x-mcp package or set the appropriate config path env var.`
     );
   }
 
   const tempDir = await mkdtemp(join(tmpdir(), 'log10x-mcp-'));
 
-  // Shadow the install's template config with one that has an empty
-  // `files` list. Since the tempdir is FIRST in TENX_INCLUDE_PATHS,
-  // the engine loads our empty-files version instead of the install's
-  // (which points at data/templates/*.json, data/sample/output/*.json
-  // — 8000+ cached templates). This makes every template produced
-  // during the run "new", so isNewTemplate() passes and templates.json
-  // gets populated for ALL patterns, not just never-before-seen ones.
+  // Shadow the install's template config with empty files list.
   const templateConfigDir = join(tempDir, 'run', 'template');
   await mkdir(templateConfigDir, { recursive: true });
   await fsWriteFile(
@@ -137,13 +164,6 @@ export async function runDevCliStdin(rawLogText: string): Promise<DevCliStdinRun
 
   const started = Date.now();
   try {
-    // Build TENX_INCLUDE_PATHS: tempdir first (so template-cache globs
-    // resolve here before the install's config dir), then the install's
-    // config and modules dirs WITH their subdirectories. The engine's
-    // normal addDefaultIncludePath / addModulesFolder helpers add
-    // $CONFIG, $CONFIG/pipelines, $MODULES, $MODULES/pipelines,
-    // $MODULES/apps — we replicate that here since TENX_INCLUDE_PATHS
-    // bypasses the normal resolver entirely.
     const tenxConfig = process.env.TENX_CONFIG || '/usr/local/etc/tenx/config';
     const tenxModules = process.env.TENX_MODULES
       || '/usr/local/Cellar/log10x/1.0.4/lib/tenx/modules';
@@ -156,18 +176,34 @@ export async function runDevCliStdin(rawLogText: string): Promise<DevCliStdinRun
       join(tenxModules, 'apps'),
     ].join(';');
 
-    const env = {
+    const env: NodeJS.ProcessEnv = {
       ...process.env,
       TENX_INCLUDE_PATHS: includePaths,
       LOG10X_MCP_OUTPUT_DIR: tempDir,
       LOG10X_MCP_RUNTIME_NAME: `mcp-${Date.now()}`,
     };
 
-    await runCommandWithStdin(binary, [`@${configPath}`], rawLogText, {
-      env,
-      timeoutMs: 120_000,
-      configPath,
-    });
+    if (opts.mode === 'file' && opts.inputPath) {
+      env.LOG10X_MCP_INPUT_PATH = opts.inputPath;
+    }
+
+    const args = [`@${opts.configPath}`];
+    if (opts.extraOverlays) {
+      for (const overlay of opts.extraOverlays) {
+        args.push(`@${overlay}`);
+      }
+    }
+
+    await runCommandWithStdin(
+      binary,
+      args,
+      opts.mode === 'stdin' ? (opts.stdinData ?? '') : null,
+      {
+        env,
+        timeoutMs: opts.timeoutMs ?? 120_000,
+        configPath: opts.configPath,
+      }
+    );
 
     const [templatesJson, encodedLog, decodedLog, aggregatedCsv] = await Promise.all([
       readFile(join(tempDir, 'templates.json'), 'utf8').catch(() => ''),
@@ -179,8 +215,7 @@ export async function runDevCliStdin(rawLogText: string): Promise<DevCliStdinRun
     if (!encodedLog && !templatesJson) {
       throw new Error(
         `Local tenx CLI ran but produced no parseable output. ` +
-          `tempDir=${tempDir}, config=${configPath}. ` +
-          `templates.json bytes=${templatesJson.length}, encoded.log bytes=${encodedLog.length}.`
+          `tempDir=${tempDir}, config=${opts.configPath}.`
       );
     }
 
@@ -191,46 +226,24 @@ export async function runDevCliStdin(rawLogText: string): Promise<DevCliStdinRun
       aggregatedCsv,
       wallTimeMs: Date.now() - started,
       cliVersion,
-      configPath,
+      configPath: opts.configPath,
       tempDir,
     };
   } finally {
-    await rm(tempDir, { recursive: true, force: true }).catch(() => {
-      // best-effort cleanup
-    });
+    await rm(tempDir, { recursive: true, force: true }).catch(() => {});
   }
 }
 
-/**
- * Legacy alias. Earlier callers used `runDevCli`. Kept so existing imports
- * from `resolve-batch.ts` don't break during the refactor. Returns the
- * three artifacts the old interface exposed.
- */
-export async function runDevCli(rawLogText: string): Promise<{
-  templatesJson: string;
-  encodedLog: string;
-  aggregatedCsv: string;
-  wallTimeMs: number;
-  cliVersion?: string;
-}> {
-  const r = await runDevCliStdin(rawLogText);
-  return {
-    templatesJson: r.templatesJson,
-    encodedLog: r.encodedLog,
-    aggregatedCsv: r.aggregatedCsv,
-    wallTimeMs: r.wallTimeMs,
-    cliVersion: r.cliVersion,
-  };
+// ── Config resolution ──
+
+function resolveConfigPath(envVar: string, defaultFilename: string): string {
+  const override = process.env[envVar];
+  if (override) return override;
+  const pkgRoot = resolve(__dirname, '..', '..');
+  return join(pkgRoot, 'assets', defaultFilename);
 }
 
-function resolveStdinConfigPath(): string {
-  const override = process.env.LOG10X_MCP_STDIN_CONFIG_PATH;
-  if (override) return override;
-  // __dirname points at `build/lib/` after tsc compile, or `src/lib/` in dev.
-  // Walk up to the package root and join `assets/...`.
-  const pkgRoot = resolve(__dirname, '..', '..');
-  return join(pkgRoot, 'assets', 'tenx-mcp-stdin.config.yaml');
-}
+// ── Binary helpers ──
 
 async function isBinaryOnPath(binary: string): Promise<boolean> {
   if (binary.startsWith('/') || binary.match(/^[A-Za-z]:\\/)) {
@@ -253,6 +266,8 @@ async function tryGetVersion(binary: string): Promise<string | undefined> {
     return undefined;
   }
 }
+
+// ── Process helpers ──
 
 interface RunOptions {
   env?: NodeJS.ProcessEnv;

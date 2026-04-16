@@ -24,6 +24,7 @@ import { discoverLabelsSchema, executeDiscoverLabels } from './tools/discover-la
 import { topPatternsSchema, executeTopPatterns } from './tools/top-patterns.js';
 import { listByLabelSchema, executeListByLabel } from './tools/list-by-label.js';
 import { resolveBatchSchema, executeResolveBatch } from './tools/resolve-batch.js';
+import { extractTemplatesSchema, executeExtractTemplates } from './tools/extract-templates.js';
 import {
   investigateSchema,
   executeInvestigate,
@@ -395,6 +396,15 @@ server.tool(
   'Templatize a batch of log events and return structured per-pattern triage with variable concentrations and next-action suggestions. Call whenever the user provides a batch of events to analyze: a pasted Datadog/Splunk/Elastic query result, a Slack incident with attached log lines, kubectl logs output, any raw log text dump, or when the user asks "what patterns are in these events" / "triage this batch". Input is the events themselves (file path, inline array, or raw text). The templater runs via the Log10x paste endpoint; the response structures the batch by stable templateHash, per-pattern frequency and severity, full template structure, and per-slot variable value distribution (answering "for whom is this happening" within the batch). Each pattern in the output carries next_actions suggesting log10x_investigate (for historical correlation), log10x_streamer_query (for archive retrieval), and native SIEM commands with the dominant variable filter pre-constructed. Do NOT call for single-line resolution — use log10x_event_lookup for that. Variable naming honest: structured-log slots get high-confidence names from JSON/logfmt keys; free-text slots with natural-language tokens get medium-confidence inferred names with "(inferred)" annotation; positional-only slots get "slot N" with no hallucinated name. **Tier prerequisites**: works at any tier including CLI-only. Runs via the Log10x paste endpoint by default (raw log text leaves the caller\'s machine); set privacy_mode=true to route through a locally-installed tenx CLI instead (local-only processing, CLI install required). **Example**: `{"source": "text", "text": "2026-04-13 ERROR checkout-svc ...\\n2026-04-13 INFO ..."}` for a pasted Slack dump, or `{"source": "file", "path": "/tmp/incident.log", "top_n_patterns": 10}` for a local file.',
   resolveBatchSchema,
   (args) => wrap('log10x_resolve_batch', async () => executeResolveBatch(args))
+);
+
+// ── Tool: log10x_extract_templates ──
+
+server.tool(
+  'log10x_extract_templates',
+  'Extract the structural template library from a log corpus via the local tenx CLI. Returns per-template identity (stable templateHash), template body with variable slots, and event count. Use for: (a) bootstrapping a pattern catalog before wiring up a Reporter, (b) offline auditing of archived log corpora, (c) validating that a config change produces expected template identities (pass `expected` assertions). Input: inline events, raw text, or a file path/glob. The tenx CLI must be installed locally (`brew install log10x/tap/tenx`). **Validation mode**: pass `expected.min_templates`, `expected.required_patterns`, and/or `expected.forbidden_merges` to turn extraction into assertion-checked validation — each assertion reports PASS/FAIL in the output. **Example**: `{"source": "events", "events": ["ERROR checkout-svc ...", "INFO cart-svc ..."], "expected": {"min_templates": 2, "forbidden_merges": [["checkout", "cart"]]}}` to assert the two services produce separate templates.',
+  extractTemplatesSchema,
+  (args) => wrap('log10x_extract_templates', async () => executeExtractTemplates(args))
 );
 
 // ── Tool: log10x_streamer_query ──
