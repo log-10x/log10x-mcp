@@ -21,7 +21,7 @@
  */
 
 import { spawn } from 'child_process';
-import { mkdtemp, readFile, rm } from 'fs/promises';
+import { mkdtemp, readFile, writeFile as fsWriteFile, rm, mkdir } from 'fs/promises';
 import { existsSync } from 'fs';
 import { tmpdir } from 'os';
 import { join, dirname, resolve } from 'path';
@@ -108,10 +108,57 @@ export async function runDevCliStdin(rawLogText: string): Promise<DevCliStdinRun
 
   const tempDir = await mkdtemp(join(tmpdir(), 'log10x-mcp-'));
 
+  // Shadow the install's template config with one that has an empty
+  // `files` list. Since the tempdir is FIRST in TENX_INCLUDE_PATHS,
+  // the engine loads our empty-files version instead of the install's
+  // (which points at data/templates/*.json, data/sample/output/*.json
+  // — 8000+ cached templates). This makes every template produced
+  // during the run "new", so isNewTemplate() passes and templates.json
+  // gets populated for ALL patterns, not just never-before-seen ones.
+  const templateConfigDir = join(tempDir, 'run', 'template');
+  await mkdir(templateConfigDir, { recursive: true });
+  await fsWriteFile(
+    join(templateConfigDir, 'config.yaml'),
+    [
+      'tenx: run',
+      'template:',
+      '  files: []',
+      '  cacheSize: $=parseBytes("10MB")',
+      'var:',
+      '  placeholder: "$"',
+      '  maxRecurIndexes: 10',
+      'timestamp:',
+      '  prefix: (',
+      '  postfix: )',
+      '',
+    ].join('\n'),
+    'utf8'
+  );
+
   const started = Date.now();
   try {
+    // Build TENX_INCLUDE_PATHS: tempdir first (so template-cache globs
+    // resolve here before the install's config dir), then the install's
+    // config and modules dirs WITH their subdirectories. The engine's
+    // normal addDefaultIncludePath / addModulesFolder helpers add
+    // $CONFIG, $CONFIG/pipelines, $MODULES, $MODULES/pipelines,
+    // $MODULES/apps — we replicate that here since TENX_INCLUDE_PATHS
+    // bypasses the normal resolver entirely.
+    const tenxConfig = process.env.TENX_CONFIG || '/usr/local/etc/tenx/config';
+    const tenxModules = process.env.TENX_MODULES
+      || '/usr/local/Cellar/log10x/1.0.4/lib/tenx/modules';
+    const includePaths = [
+      tempDir,
+      tenxConfig,
+      join(tenxConfig, 'pipelines'),
+      tenxModules,
+      join(tenxModules, 'pipelines'),
+      join(tenxModules, 'apps'),
+    ].join(';');
+
     const env = {
       ...process.env,
+      TENX_INCLUDE_PATHS: includePaths,
       LOG10X_MCP_OUTPUT_DIR: tempDir,
       LOG10X_MCP_RUNTIME_NAME: `mcp-${Date.now()}`,
     };

@@ -47,13 +47,12 @@ include:
   # so concurrent invocations don't collide.
   - run/output/event/file
 
-# NOTE: template pre-loading — the engine loads cached templates from
-# data/templates/*.json and data/sample/output/*.json. Templates that
-# already exist in the cache are NOT re-emitted to templates.json (the
-# output filter is `isNewTemplate()`). For batch inputs that match
-# previously-seen patterns, templates.json may be empty even though
-# encoded.log has data. The MCP's parser handles this by extracting
-# unique hashes from encoded.log when templates.json is sparse.
+# Template cache: the engine loads cached templates from
+# data/templates/*.json and data/sample/output/*.json at startup.
+# The MCP's runner sets TENX_INCLUDE_PATHS with the per-invocation
+# tempdir FIRST, so template-file globs resolve to empty directories
+# there before hitting the install's cache. This forces all templates
+# produced during the run to be "new" and written to templates.json.
 
 # ========================== Input options ==========================
 
