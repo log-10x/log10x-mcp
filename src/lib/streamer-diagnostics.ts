@@ -332,23 +332,32 @@ export function explainZeroResults(diag: StreamerQueryDiagnostics): string | nul
     if (diag.scanStats.matched > 0 && (!diag.workerStats || diag.workerStats.totalResultEvents === 0)) {
       if (diag.workerStats && diag.workerStats.complete < diag.workerStats.started) {
         return `The Bloom filter matched ${diag.scanStats.matched} index objects and ${diag.workerStats.started} workers were dispatched, ` +
-          `but only ${diag.workerStats.complete} completed before the poll timed out. Results may still be arriving.`;
+          `but only ${diag.workerStats.complete} completed before the poll timed out. Results may still be arriving — ` +
+          `retry log10x_streamer_query_status with the same queryId, or rerun the query.`;
       }
       return `The Bloom filter matched ${diag.scanStats.matched} index objects, but stream workers decoded 0 matching events. ` +
         'Most likely cause: Bloom filter false positives — the search tokens exist in the index but the actual events do not match the full search expression.';
     }
   }
 
-  // queryPlan present but no scanStats — sub-queries dispatched but none reported scan completion.
+  // queryPlan present but no scanStats. Two very different causes collapse
+  // onto the same signature — disambiguate via partialResults:
+  //   partialResults=true  → MCP poll timed out; CW events may not have flushed yet
+  //   partialResults=false → scan actually completed with nothing to report (likely no index data)
   if (diag.queryPlan && !diag.scanStats) {
-    return 'Query ran but no sub-query reported scan completion. Likely causes (in order of probability): ' +
-      '(a) no index objects exist for the time range — try an older window or verify the indexer is running; ' +
-      '(b) sub-queries are still executing and CW events have not flushed yet — retry status poll; ' +
-      '(c) SQS dispatch failed — check streamer logs.';
+    if (diag.partialResults) {
+      return 'MCP poll timed out before the server query completed. CW scan-completion events ' +
+        'have not arrived yet — the query may still be executing. Retry log10x_streamer_query_status ' +
+        'with the same queryId in a few seconds for an updated view.';
+    }
+    return 'Query completed without any sub-query reporting scan completion. ' +
+      'Most likely cause: no index objects exist for the time range — try an older window, or verify ' +
+      'the indexer is running and processing new data.';
   }
 
   if (diag.partialResults) {
-    return 'MCP poll timeout reached before the server query completed. Some results may still be written to S3.';
+    return 'MCP poll timeout reached before the server query completed. Some results may still be ' +
+      'written to S3. Retry log10x_streamer_query_status with the same queryId for an updated view.';
   }
 
   return null;

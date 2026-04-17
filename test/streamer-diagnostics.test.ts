@@ -168,13 +168,24 @@ test('explainZeroResults: worker timeout (matched>0, complete<started)', () => {
   assert.match(msg, /still be arriving/);
 });
 
-test('explainZeroResults: queryPlan present but scanStats missing → stale indexer hypothesis', () => {
+test('explainZeroResults: queryPlan present, scanStats missing, NOT partial → stale indexer', () => {
   const d: StreamerQueryDiagnostics = {
     queryPlan: { templateHashes: 0, vars: 1, timeslice: 0, dispatch: 'local' },
+    // partialResults intentionally unset — means marker poll reached stability
   };
   const msg = explainZeroResults(d)!;
-  assert.match(msg, /no sub-query reported scan completion/);
+  assert.match(msg, /no index objects exist for the time range/);
   assert.match(msg, /indexer is running/);
+});
+
+test('explainZeroResults: queryPlan present, scanStats missing, partial → poll timeout hypothesis', () => {
+  const d: StreamerQueryDiagnostics = {
+    queryPlan: { templateHashes: 0, vars: 1, timeslice: 0, dispatch: 'local' },
+    partialResults: true,
+  };
+  const msg = explainZeroResults(d)!;
+  assert.match(msg, /MCP poll timed out/);
+  assert.match(msg, /log10x_streamer_query_status/);
 });
 
 test('explainZeroResults: no diagnostic signal returns null', () => {

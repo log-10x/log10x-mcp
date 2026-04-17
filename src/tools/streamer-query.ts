@@ -142,7 +142,10 @@ export async function executeStreamerQuery(
     if (d.partialResults) {
       lines.push(
         `**Partial results**: MCP poll timed out before server query completed. ` +
-          `The server may still be writing results. Diagnostics below are a snapshot.`
+          `The server may still be writing results. Diagnostics below are a snapshot.`,
+      );
+      lines.push(
+        `→ Check progress: \`log10x_streamer_query_status({ queryId: '${resp.queryId}', queryStartedAt: ${resp.queryStartedAt} })\``,
       );
     }
 

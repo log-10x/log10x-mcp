@@ -47,8 +47,9 @@ export const discoverJoinSchema = {
     .string()
     .optional()
     .describe(
-      'Time window for label value enumeration (e.g., "10m", "1h", "30m"). When set, both the Log10x and customer backends are queried with [now - window, now] filtering, excluding stale label values from series that stopped emitting samples. CRITICAL for environments with historical replay data, decommissioned pods, or otherwise orphan label values — stale values drag Jaccard down and cause false `no_join_available` refusals. Recommended: "10m" for steady-state clusters, "1h" for bursty traffic. Omit to include all-time values (default Prometheus behavior).'
+      'Time window for label value enumeration (e.g., "10m", "1h", "30m"). When set, both the Log10x and customer backends are queried with [now - window, now] filtering, excluding stale label values from series that stopped emitting samples. CRITICAL for environments with historical replay data, decommissioned pods, or otherwise orphan label values — stale values drag Jaccard down and cause false `no_join_available` refusals. Recommended: "10m" for steady-state clusters, "1h" for bursty traffic. Omit to include all-time values (default Prometheus behavior). Alias: `timeRange`.'
     ),
+  timeRange: z.string().optional().describe('Alias for `window` for consistency with other Log10x tools.'),
   environment: z.string().optional().describe('Environment nickname (for multi-env setups).'),
 };
 
@@ -58,6 +59,7 @@ export async function executeDiscoverJoin(
     minimum_jaccard: number;
     candidate_labels?: string[];
     window?: string;
+    timeRange?: string;
     environment?: string;
   },
   env: EnvConfig
@@ -67,7 +69,8 @@ export async function executeDiscoverJoin(
     throw new CustomerMetricsNotConfiguredError();
   }
 
-  const windowSeconds = args.window ? parseWindowToSeconds(args.window) : undefined;
+  const effectiveWindow = args.window ?? args.timeRange;
+  const windowSeconds = effectiveWindow ? parseWindowToSeconds(effectiveWindow) : undefined;
   // When a window is specified, always bypass the session cache — the cache
   // key is (env, backend) and doesn't include the window, so reusing a
   // cached no-window probe would defeat the purpose.

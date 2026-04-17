@@ -22,7 +22,8 @@ export const translateMetricToPatternsSchema = {
   customer_metric: z
     .string()
     .describe('Customer PromQL metric expression. Example: `apm_request_duration_p99{service="payments-svc"}` or `container_memory_rss{pod="payments-svc-7f9d-xk2z"}`.'),
-  window: z.string().default('1h').describe('Time window for correlation. `1h` default.'),
+  window: z.string().default('1h').describe('Time window for correlation. `1h` default. Alias: `timeRange`.'),
+  timeRange: z.string().optional().describe('Alias for `window` for consistency with other Log10x tools.'),
   step: z.string().default('60s').describe('Bucket step. Default 60s.'),
   depth: z
     .enum(['shallow', 'normal', 'deep'])
@@ -36,6 +37,7 @@ export async function executeTranslateMetricToPatterns(
   args: {
     customer_metric: string;
     window: string;
+    timeRange?: string;
     step: string;
     depth: 'shallow' | 'normal' | 'deep';
     minimum_confidence: number;
@@ -43,11 +45,12 @@ export async function executeTranslateMetricToPatterns(
   },
   env: EnvConfig
 ): Promise<string> {
+  const window = args.window || args.timeRange || '1h';
   return executeCorrelateCrossPillar(
     {
       anchor_type: 'customer_metric',
       anchor: args.customer_metric,
-      window: args.window,
+      window,
       step: args.step,
       depth: args.depth,
       minimum_confidence: args.minimum_confidence,

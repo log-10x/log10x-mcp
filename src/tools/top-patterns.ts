@@ -11,6 +11,7 @@ import type { EnvConfig } from '../lib/environments.js';
 import { queryInstant } from '../lib/api.js';
 import * as pql from '../lib/promql.js';
 import { LABELS } from '../lib/promql.js';
+import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { bytesToCost, parsePrometheusValue } from '../lib/cost.js';
 import { resolveMetricsEnv, resolveMetricsEnvFiltered } from '../lib/resolve-env.js';
 import { fmtDollar, fmtPattern, fmtSeverity, fmtCount, parseTimeframe, costPeriodLabel } from '../lib/format.js';
@@ -128,19 +129,42 @@ export async function executeTopPatterns(
     }
   }
 
+  const nextActions: NextAction[] = [];
   if (rows[0]) {
     lines.push('');
     lines.push('**Next actions**:');
     lines.push(`  - call \`log10x_investigate({ starting_point: '${rows[0].hash}' })\` to trace what\'s driving the top pattern.`);
+    nextActions.push({
+      tool: 'log10x_investigate',
+      args: { starting_point: rows[0].hash },
+      reason: 'trace what is driving the top pattern',
+    });
     if (newlyEmerged.length > 0) {
       lines.push(`  - **Investigate the newly-emerged pattern**: \`log10x_investigate({ starting_point: '${newlyEmerged[0].hash}', window: '15m' })\` — it is not in the cost ranking yet but is firing right now.`);
+      nextActions.push({
+        tool: 'log10x_investigate',
+        args: { starting_point: newlyEmerged[0].hash, window: '15m' },
+        reason: 'newly-emerged pattern not yet in cost ranking',
+      });
     }
     const svcHint = args.service || rows[0]?.service;
     if (svcHint) {
       lines.push(`  - call \`log10x_cost_drivers({ service: '${svcHint}' })\` for week-over-week deltas on the top service.`);
+      nextActions.push({
+        tool: 'log10x_cost_drivers',
+        args: { service: svcHint },
+        reason: 'week-over-week deltas on the top service',
+      });
     } else {
       lines.push(`  - call \`log10x_cost_drivers()\` for week-over-week deltas across all services.`);
+      nextActions.push({
+        tool: 'log10x_cost_drivers',
+        args: {},
+        reason: 'week-over-week deltas across all services',
+      });
     }
   }
+  const block = renderNextActions(nextActions);
+  if (block) lines.push('', block);
   return lines.join('\n');
 }

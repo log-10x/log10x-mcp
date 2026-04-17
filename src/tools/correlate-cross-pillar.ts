@@ -49,7 +49,8 @@ export const correlateCrossPillarSchema = {
   window: z
     .string()
     .default('1h')
-    .describe('Time window for correlation. `1h` default. Accepts PromQL-style durations: `15m`, `1h`, `6h`, `24h`.'),
+    .describe('Time window for correlation. `1h` default. Accepts PromQL-style durations: `15m`, `1h`, `6h`, `24h`. Alias: `timeRange`.'),
+  timeRange: z.string().optional().describe('Alias for `window` for consistency with other Log10x tools. If both are set, `window` wins.'),
   step: z
     .string()
     .default('60s')
@@ -80,6 +81,7 @@ export async function executeCorrelateCrossPillar(
     anchor_type: 'log10x_pattern' | 'customer_metric';
     anchor: string;
     window: string;
+    timeRange?: string;
     step: string;
     depth: 'shallow' | 'normal' | 'deep';
     minimum_confidence: number;
@@ -88,6 +90,10 @@ export async function executeCorrelateCrossPillar(
   },
   env: EnvConfig
 ): Promise<string> {
+  // Accept `timeRange` as alias for `window`.
+  if (!args.window && args.timeRange) {
+    args.window = args.timeRange;
+  }
   const backend = loadBackendFromEnv();
   if (!backend) {
     throw new CustomerMetricsNotConfiguredError();

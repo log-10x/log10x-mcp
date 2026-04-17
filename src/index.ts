@@ -35,6 +35,7 @@ import { doctorSchema, executeDoctor, runDoctorChecks, renderDoctorReport } from
 import { log } from './lib/log.js';
 import { describeToolError } from './lib/tool-errors.js';
 import { streamerQuerySchema, executeStreamerQuery } from './tools/streamer-query.js';
+import { streamerQueryStatusSchema, executeStreamerQueryStatus } from './tools/streamer-query-status.js';
 import { backfillMetricSchema, executeBackfillMetric } from './tools/backfill-metric.js';
 import {
   customerMetricsQuerySchema,
@@ -422,12 +423,25 @@ server.tool(
 
 server.tool(
   'log10x_streamer_query',
-  'Direct retrieval of historical events from the Log10x Storage Streamer archive (customer\'s S3 bucket) by stable pattern identity, with optional JavaScript filter expressions over event payloads. Call when: (a) the user asks for specific events matching a pattern over a time window that is OUTSIDE the SIEM\'s retention, (b) the user asks to retrieve events filtered by a variable value that is NOT a faceted dimension in their SIEM (e.g., "all payment_retry events for customer acme-corp from 90 days ago"), (c) compliance, legal, audit, or forensic workflows need exact event retrieval with stable identity. Do NOT call when the events are in the SIEM\'s current retention and can be queried natively faster, or when the user wants aggregated metrics over time instead of specific events (use log10x_backfill_metric or log10x_investigate instead). No re-ingestion. No proprietary format. The archive is in the customer\'s own S3 bucket and queries are scoped to the matching templateHash via pre-computed Bloom filters so only relevant byte ranges are fetched. Three output formats: events (raw with metadata), count (distribution summary), aggregated (bucketed time series). **Tier prerequisites**: requires Storage Streamer component deployed. Does NOT require Reporter. Returns a graceful "Streamer not configured" message when LOG10X_STREAMER_URL is unset. **Example**: `{"pattern": "payment_retry_attempt", "from": "now-90d", "to": "now-15d", "filters": ["event.customer_id === \\"acme-corp-inc\\""], "format": "events", "limit": 10000}` for a 90-day legal forensic retrieval.',
+  'Direct retrieval of historical events from the Log10x Storage Streamer archive (customer\'s S3 bucket) by stable pattern identity, with optional JavaScript filter expressions over event payloads. Call when: (a) the user asks for specific events matching a pattern over a time window that is OUTSIDE the SIEM\'s retention, (b) the user asks to retrieve events filtered by a variable value that is NOT a faceted dimension in their SIEM (e.g., "all payment_retry events for customer acme-corp from 90 days ago"), (c) compliance, legal, audit, or forensic workflows need exact event retrieval with stable identity. Do NOT call when the events are in the SIEM\'s current retention and can be queried natively faster, or when the user wants aggregated metrics over time instead of specific events (use log10x_backfill_metric or log10x_investigate instead). No re-ingestion. No proprietary format. The archive is in the customer\'s own S3 bucket and queries are scoped to the matching templateHash via pre-computed Bloom filters so only relevant byte ranges are fetched. Three output formats: events (raw with metadata), count (distribution summary), aggregated (bucketed time series). **If the response reports `partialResults: true`**, the MCP poll timed out before the server finished — call `log10x_streamer_query_status` with the same queryId to check progress, or rerun the query. **Tier prerequisites**: requires Storage Streamer component deployed. Does NOT require Reporter. Returns a graceful "Streamer not configured" message when LOG10X_STREAMER_URL is unset. **Example**: `{"pattern": "payment_retry_attempt", "from": "now-90d", "to": "now-15d", "filters": ["event.customer_id === \\"acme-corp-inc\\""], "format": "events", "limit": 10000}` for a 90-day legal forensic retrieval.',
   streamerQuerySchema,
   (args) =>
     wrap('log10x_streamer_query', async () => {
       const env = resolveEnv(getEnvs(), args.environment);
       return executeStreamerQuery(args, env);
+    })
+);
+
+// ── Tool: log10x_streamer_query_status ──
+
+server.tool(
+  'log10x_streamer_query_status',
+  'Poll the CloudWatch diagnostics for a previously-submitted streamer query by its queryId. Use when a prior log10x_streamer_query returned `partialResults: true` (MCP poll budget hit before the server query finished) and you want to check whether the server query has since completed. Returns the current scan stats, worker completion, error list, and a plain-English interpretation ("complete", "in-flight", "zero events", etc.). Does NOT re-fetch result events from S3 — if the status shows `complete` with results, re-run log10x_streamer_query to retrieve them. **Example**: `{"queryId": "a1b2c3d4-...", "queryStartedAt": 1776412345678}`.',
+  streamerQueryStatusSchema,
+  (args) =>
+    wrap('log10x_streamer_query_status', async () => {
+      const env = resolveEnv(getEnvs(), args.environment);
+      return executeStreamerQueryStatus(args, env);
     })
 );
 
@@ -559,6 +573,7 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_investigation_get', intent: 'Retrieve a prior investigation by id or list recent investigations' },
   { name: 'log10x_resolve_batch', intent: 'Pasted-batch triage — per-pattern variable concentration + next actions' },
   { name: 'log10x_streamer_query', intent: 'Direct archive retrieval by templateHash with JS filter expressions' },
+  { name: 'log10x_streamer_query_status', intent: 'Check status of an in-flight or recently-completed streamer query by queryId' },
   { name: 'log10x_backfill_metric', intent: 'Create a new Datadog / Prometheus metric backfilled from Streamer archive' },
   { name: 'log10x_doctor', intent: 'Startup health check — env config, gateway, tier, freshness, Streamer, paste endpoint, cross-pillar enrichment floor' },
   { name: 'log10x_customer_metrics_query', intent: 'Direct PromQL passthrough to the customer metric backend (escape hatch for cross-pillar investigations)' },

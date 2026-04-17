@@ -10,6 +10,7 @@ import { LABELS } from '../lib/promql.js';
 import { bytesToCost, bytesToGb, parsePrometheusValue } from '../lib/cost.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { fmtDollar, fmtBytes, fmtPct, parseTimeframe, costPeriodLabel } from '../lib/format.js';
+import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 
 export const servicesSchema = {
   timeRange: z.enum(['15m', '1h', '6h', '1d', '7d', '30d']).default('7d').describe('Time range. Sub-day values available for incident-window service ranking.'),
@@ -69,12 +70,20 @@ export async function executeServices(
   lines.push('');
   lines.push(`  ${rows.length} service${rows.length !== 1 ? 's' : ''} · ${fmtBytes(totalBytes)} total · ${fmtDollar(totalCost)}${period} at ${fmtDollar(costPerGb)}/GB`);
 
+  const nextActions: NextAction[] = [];
   if (rows[0]) {
     lines.push('');
     lines.push('**Next actions**:');
     lines.push(`  - Drill into the top service: \`log10x_cost_drivers({ service: '${rows[0].name}' })\` for week-over-week deltas, or \`log10x_top_patterns({ service: '${rows[0].name}' })\` for current top patterns.`);
     lines.push(`  - Investigate any spike: \`log10x_investigate({ starting_point: '${rows[0].name}' })\` for a full causal-chain analysis.`);
+    nextActions.push(
+      { tool: 'log10x_cost_drivers', args: { service: rows[0].name }, reason: 'week-over-week deltas on the top service' },
+      { tool: 'log10x_top_patterns', args: { service: rows[0].name }, reason: 'current top patterns for the top service' },
+      { tool: 'log10x_investigate', args: { starting_point: rows[0].name }, reason: 'causal-chain analysis on the top service' },
+    );
   }
 
+  const block = renderNextActions(nextActions);
+  if (block) lines.push('', block);
   return lines.join('\n');
 }

@@ -20,7 +20,9 @@
  *   - LOG10X_STREAMER_TARGET: default target app prefix (e.g., "app" for
  *     the otek demo env). Overridable per query.
  *   - LOG10X_STREAMER_POLL_MS: poll interval, default 1500 ms.
- *   - LOG10X_STREAMER_TIMEOUT_MS: total poll budget, default 90_000 ms.
+ *   - LOG10X_STREAMER_TIMEOUT_MS: total poll budget, default 60_000 ms.
+ *     Aligned with the streamer's server-side queryLimitProcessingTime (60s) —
+ *     anything shorter cuts the query off before it could complete.
  *
  * Authentication piggybacks on the same X-10X-Auth header the Prometheus
  * gateway uses (apiKey/envId). Override via LOG10X_STREAMER_AUTH_HEADER /
@@ -129,6 +131,8 @@ import { attachDiagnostics } from './streamer-diagnostics.js';
 
 export interface StreamerQueryResponse {
   queryId: string;
+  /** Epoch ms when the query was submitted — pass to log10x_streamer_query_status to scope CW events. */
+  queryStartedAt: number;
   target: string;
   from: string;
   to: string;
@@ -470,7 +474,7 @@ export async function runStreamerQuery(
   const target = req.target || getDefaultTarget();
   const queryId = randomUUID();
   const pollMs = parseInt(process.env.LOG10X_STREAMER_POLL_MS || '1500', 10);
-  const timeoutMs = parseInt(process.env.LOG10X_STREAMER_TIMEOUT_MS || '30000', 10);
+  const timeoutMs = parseInt(process.env.LOG10X_STREAMER_TIMEOUT_MS || '60000', 10);
 
   // Minimal body format — matches the shape the engine's query-handler
   // actually expects (verified live on the otel-demo env 2026-04-15).
@@ -597,6 +601,7 @@ export async function runStreamerQuery(
 
   const response: StreamerQueryResponse = {
     queryId,
+    queryStartedAt: started,
     target,
     from: String(body.from),
     to: String(body.to),
