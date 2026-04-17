@@ -508,7 +508,6 @@ export async function runStreamerQuery(
     filters: req.filters || [],
     writeResults: true,
     logLevels: 'INFO,PERF,ERROR,DEBUG',
-    logGroup: '/tenx/demo-streamer/query',
   };
 
   const started = Date.now();
@@ -605,12 +604,9 @@ export async function runStreamerQuery(
   // Fetch CW diagnostics for the query (best-effort, non-blocking on failure)
   let diagnostics: StreamerQueryDiagnostics | undefined;
   try {
-    const logGroup = (body.logGroup as string) || process.env.LOG10X_STREAMER_LOG_GROUP;
-    if (logGroup) {
-      const cwEvents = await fetchQueryCWEvents(queryId, logGroup);
-      if (cwEvents.length > 0) {
-        diagnostics = buildDiagnostics(cwEvents);
-      }
+    const cwEvents = await fetchQueryCWEvents(queryId);
+    if (cwEvents.length > 0) {
+      diagnostics = buildDiagnostics(cwEvents);
     }
   } catch {
     // CW polling is best-effort — don't fail the query response
