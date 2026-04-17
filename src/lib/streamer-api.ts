@@ -114,7 +114,34 @@ export interface StreamerBucket {
   labels?: Record<string, string>;
 }
 
+/**
+ * Execution diagnostics for a streamer query, built from CloudWatch Logs events.
+ *
+ * Field guide (how to diagnose a 0-event result):
+ *   - queryPlan missing        → query submission failed or CW events not visible yet
+ *   - emptyReason present      → search expression produced no parseable tokens
+ *   - scanStats missing        → no sub-queries reported scan completion (likely no
+ *                                index data for the time range, i.e. stale indexer)
+ *   - scanStats.matched === 0  → Bloom filter rejected every index object
+ *   - scanStats.matched > 0 but
+ *     workerStats.totalResultEvents === 0
+ *                              → Bloom false positives OR workers timed out
+ *   - workerStats.complete < started
+ *                              → some workers still running when MCP polled
+ *   - pollingError present     → CW polling failed; diagnostics are incomplete
+ *   - partialResults === true  → MCP poll timeout hit; server query may still be running
+ */
 export interface StreamerQueryDiagnostics {
+  /** Coordinator's query plan. Present if the main query log stream was readable. */
+  queryPlan?: {
+    templateHashes: number;
+    vars: number;
+    timeslice: number;
+    dispatch: 'local' | 'remote' | 'unknown';
+  };
+  /** Populated when isEmptyQuery() returned true — no parseable search tokens. */
+  emptyReason?: string;
+  /** Aggregated Bloom filter scan stats across all sub-queries. */
   scanStats?: {
     scanned: number;
     matched: number;
@@ -122,28 +149,41 @@ export interface StreamerQueryDiagnostics {
     skippedTemplate: number;
     skippedDuplicate: number;
   };
-  queryPlan?: {
-    templateHashes: number;
-    vars: number;
-    timeslice: number;
-    dispatch: string;
-  };
-  emptyReason?: string;
-  phaseTimingMs?: {
-    total: number;
-  };
+  /**
+   * Coordinator's view of stream dispatch. Represents SQS send() calls, NOT
+   * worker completion. Use workerStats for actual worker execution.
+   */
   streamDispatch?: {
     requests: number;
     objects: number;
     blobs: number;
   };
+  /**
+   * Stream worker execution. `started` and `complete` are counted from CW events,
+   * so they reflect CW visibility, not necessarily ground truth if CW buffer hasn't
+   * flushed. If complete < started, some workers were still running when polled.
+   */
   workerStats?: {
     started: number;
     complete: number;
     totalFetchedBytes: number;
     totalResultEvents: number;
   };
+  /** Main coordinator pipeline elapsed time (NOT full query wall time). */
+  coordinatorElapsedMs?: number;
+  /** ERROR-level CW events from any pipeline component. */
   errors?: string[];
+  /**
+   * True when the MCP's S3 marker poll timed out before the server query finished.
+   * The server query may still be running and writing more results. Call
+   * log10x_streamer_query_status with this queryId for an updated snapshot.
+   */
+  partialResults?: boolean;
+  /**
+   * If CW polling itself failed (AWS CLI missing, access denied, log group wrong),
+   * the reason is reported here. Diagnostics are incomplete when set.
+   */
+  pollingError?: string;
 }
 
 export interface StreamerQueryResponse {
@@ -428,17 +468,22 @@ function eventTimestampMs(ev: StreamerEvent): number {
   return 0;
 }
 
+interface MarkerPollResult {
+  entries: S3ListEntry[];
+  timedOut: boolean;
+}
+
 /**
  * Poll the marker prefix until the same set of markers is observed twice in
  * a row (stability = no new workers landing). Returns the stable list of
- * marker keys.
+ * marker keys along with whether the poll timed out before reaching stability.
  */
 async function waitForMarkerStability(
   bucket: string,
   markerPrefix: string,
   pollMs: number,
   timeoutMs: number
-): Promise<S3ListEntry[]> {
+): Promise<MarkerPollResult> {
   const started = Date.now();
   let previous: string[] = [];
   let stableCount = 0;
@@ -450,7 +495,7 @@ async function waitForMarkerStability(
     if (keys.length > 0 && keys.length === previous.length && keys.every((k, i) => k === previous[i])) {
       stableCount++;
       if (stableCount >= 2) {
-        return entries;
+        return { entries, timedOut: false };
       }
     } else {
       stableCount = keys.length > 0 ? 1 : 0;
@@ -461,7 +506,10 @@ async function waitForMarkerStability(
 
   // Timed out — return whatever we saw last so the caller can surface a
   // partial result rather than a hard failure.
-  return previous.map((key) => ({ Key: key, Size: 0 }));
+  return {
+    entries: previous.map((key) => ({ Key: key, Size: 0 })),
+    timedOut: true,
+  };
 }
 
 export async function runStreamerQuery(
@@ -525,7 +573,7 @@ export async function runStreamerQuery(
   const markerPrefix = `${basePrefix}tenx/${target}/q/${queryId}/`;
   const resultsPrefix = `${basePrefix}tenx/${target}/qr/${queryId}/`;
 
-  await waitForMarkerStability(bucket, markerPrefix, pollMs, timeoutMs);
+  const markerPoll = await waitForMarkerStability(bucket, markerPrefix, pollMs, timeoutMs);
 
   // The results writer only runs on workers that actually matched events, so
   // the results prefix may have fewer entries than the marker prefix — which
@@ -601,18 +649,7 @@ export async function runStreamerQuery(
   const buckets = computeBuckets(finalEvents, req.bucketSize || '5m');
   const countSummary = computeCountSummary(finalEvents);
 
-  // Fetch CW diagnostics for the query (best-effort, non-blocking on failure)
-  let diagnostics: StreamerQueryDiagnostics | undefined;
-  try {
-    const cwEvents = await fetchQueryCWEvents(queryId);
-    if (cwEvents.length > 0) {
-      diagnostics = buildDiagnostics(cwEvents);
-    }
-  } catch {
-    // CW polling is best-effort — don't fail the query response
-  }
-
-  return {
+  const response: StreamerQueryResponse = {
     queryId,
     target,
     from: String(body.from),
@@ -623,12 +660,23 @@ export async function runStreamerQuery(
       workerFiles: jsonlKeys.length,
       truncated,
     },
-    diagnostics,
     events: finalEvents,
     format: req.format || 'events',
     buckets,
     countSummary,
   };
+
+  // Fetch CW diagnostics. Polling errors surface via diagnostics.pollingError.
+  await attachDiagnostics(response, started);
+
+  // If the marker poll timed out, the server query may still be running —
+  // flag that for the caller.
+  if (markerPoll.timedOut) {
+    if (!response.diagnostics) response.diagnostics = {};
+    response.diagnostics.partialResults = true;
+  }
+
+  return response;
 }
 
 function computeBuckets(events: StreamerEvent[], bucketSize: string): StreamerBucket[] {
@@ -703,63 +751,86 @@ interface CWEvent {
   level: string;
   message: string;
   data?: Record<string, number | string>;
+  /** CW event timestamp in ms. */
+  ts: number;
 }
 
-/**
- * Fetch all CloudWatch log events for a given queryId from the streamer's
- * log group. Returns parsed CW events sorted by timestamp.
- */
-export async function fetchQueryCWEvents(
-  queryId: string,
-  logGroup?: string,
-): Promise<CWEvent[]> {
-  const group = logGroup || process.env.LOG10X_STREAMER_LOG_GROUP || '/tenx/demo-streamer/query';
+const CW_POLL_CONCURRENCY = 8;
+const CW_POLL_MAX_STREAMS = 500;
 
-  // List log streams matching the queryId prefix
-  let streams: string[];
-  try {
-    const { stdout } = await execFileP('aws', [
-      'logs', 'describe-log-streams',
-      '--log-group-name', group,
-      '--log-stream-name-prefix', `${queryId}/`,
-      '--no-paginate',
-    ], { maxBuffer: 10 * 1024 * 1024 });
-    const parsed = JSON.parse(stdout);
-    streams = (parsed.logStreams || []).map((s: { logStreamName: string }) => s.logStreamName);
-  } catch {
-    return [];
-  }
+/**
+ * Fetch CloudWatch log events for a given queryId, bounded by an optional
+ * time window. Streams are listed by prefix, events fetched in parallel.
+ *
+ * @throws PollingError when AWS CLI is missing or the log group is inaccessible
+ */
+async function fetchQueryCWEvents(
+  queryId: string,
+  logGroup: string,
+  startTimeMs?: number,
+): Promise<CWEvent[]> {
+  // List log streams matching the queryId prefix (fail loud — caller decides fallback)
+  const listArgs = [
+    'logs', 'describe-log-streams',
+    '--log-group-name', logGroup,
+    '--log-stream-name-prefix', `${queryId}/`,
+    '--no-paginate',
+  ];
+  const { stdout: listOut } = await execFileP('aws', listArgs, { maxBuffer: 10 * 1024 * 1024 });
+  const listed = JSON.parse(listOut);
+  const streams: string[] = (listed.logStreams || [])
+    .map((s: { logStreamName: string }) => s.logStreamName)
+    .slice(0, CW_POLL_MAX_STREAMS);
 
   if (streams.length === 0) return [];
 
-  // Fetch events from all streams
+  // Fetch all streams in bounded parallelism
   const events: CWEvent[] = [];
-  for (const stream of streams) {
-    try {
-      const { stdout } = await execFileP('aws', [
-        'logs', 'get-log-events',
-        '--log-group-name', group,
-        '--log-stream-name', stream,
-        '--no-paginate',
-      ], { maxBuffer: 10 * 1024 * 1024 });
-      const parsed = JSON.parse(stdout);
-      for (const ev of parsed.events || []) {
+  const getArgsBase = [
+    'logs', 'get-log-events',
+    '--log-group-name', logGroup,
+    '--no-paginate',
+    '--start-from-head',
+    ...(startTimeMs ? ['--start-time', String(startTimeMs)] : []),
+  ];
+
+  const queue = [...streams];
+  const workers: Promise<void>[] = [];
+  for (let i = 0; i < Math.min(CW_POLL_CONCURRENCY, queue.length); i++) {
+    workers.push((async () => {
+      while (queue.length > 0) {
+        const stream = queue.shift();
+        if (!stream) break;
         try {
-          events.push(JSON.parse(ev.message) as CWEvent);
+          const { stdout } = await execFileP(
+            'aws',
+            [...getArgsBase, '--log-stream-name', stream],
+            { maxBuffer: 10 * 1024 * 1024 },
+          );
+          const parsed = JSON.parse(stdout);
+          for (const ev of parsed.events || []) {
+            try {
+              const body = JSON.parse(ev.message) as Omit<CWEvent, 'ts'>;
+              events.push({ ...body, ts: ev.timestamp });
+            } catch {
+              // skip non-JSON event bodies
+            }
+          }
         } catch {
-          // skip non-JSON events
+          // per-stream failures are tolerated (stream may be empty or mid-write)
         }
       }
-    } catch {
-      // skip inaccessible streams
-    }
+    })());
   }
+  await Promise.all(workers);
 
+  events.sort((a, b) => a.ts - b.ts);
   return events;
 }
 
 /**
- * Build diagnostics from CW events for a completed or timed-out query.
+ * Build diagnostics from CW events. Deterministic: each event contributes
+ * to exactly one field so aggregation is idempotent across re-polls.
  */
 export function buildDiagnostics(cwEvents: CWEvent[]): StreamerQueryDiagnostics {
   const diag: StreamerQueryDiagnostics = {};
@@ -774,23 +845,17 @@ export function buildDiagnostics(cwEvents: CWEvent[]): StreamerQueryDiagnostics 
     const msg = ev.message;
     const data = ev.data || {};
 
-    // Query plan
     if (msg.startsWith('query plan:')) {
+      const dispatch = data.dispatch as string;
       diag.queryPlan = {
         templateHashes: (data.templateHashes as number) ?? 0,
         vars: (data.vars as number) ?? 0,
         timeslice: (data.timeslice as number) ?? 0,
-        dispatch: (data.dispatch as string) ?? 'unknown',
+        dispatch: (dispatch === 'local' || dispatch === 'remote') ? dispatch : 'unknown',
       };
-    }
-
-    // Query empty
-    if (msg.startsWith('query empty:')) {
+    } else if (msg.startsWith('query empty:')) {
       diag.emptyReason = (data.reason as string) || 'no_template_hashes_or_vars';
-    }
-
-    // Scan complete — aggregate across sub-queries
-    if (msg.startsWith('scan complete:')) {
+    } else if (msg.startsWith('scan complete:')) {
       if (!diag.scanStats) {
         diag.scanStats = { scanned: 0, matched: 0, skippedSearch: 0, skippedTemplate: 0, skippedDuplicate: 0 };
       }
@@ -799,38 +864,28 @@ export function buildDiagnostics(cwEvents: CWEvent[]): StreamerQueryDiagnostics 
       diag.scanStats.skippedSearch += (data.skippedSearch as number) || 0;
       diag.scanStats.skippedTemplate += (data.skippedTemplate as number) || 0;
       diag.scanStats.skippedDuplicate += (data.skippedDuplicate as number) || 0;
-    }
-
-    // Stream dispatch
-    if (msg.startsWith('stream dispatch:')) {
+    } else if (msg.startsWith('stream dispatch:')) {
       if (!diag.streamDispatch) {
         diag.streamDispatch = { requests: 0, objects: 0, blobs: 0 };
       }
       diag.streamDispatch.requests += (data.requests as number) || 0;
       diag.streamDispatch.objects += (data.objects as number) || 0;
       diag.streamDispatch.blobs += (data.blobs as number) || 0;
-    }
-
-    // Query complete — total elapsed
-    if (msg.startsWith('query complete:') && data.elapsedMs) {
-      diag.phaseTimingMs = { total: data.elapsedMs as number };
-    }
-
-    // Stream worker events
-    if (msg.startsWith('stream worker started:')) {
+    } else if (msg.startsWith('query complete:') && data.elapsedMs !== undefined) {
+      // Only record the FIRST (main coordinator) "query complete" we see.
+      // Sub-queries also emit this but with shorter elapsed values.
+      if (diag.coordinatorElapsedMs === undefined) {
+        diag.coordinatorElapsedMs = data.elapsedMs as number;
+      }
+    } else if (msg.startsWith('stream worker started:')) {
       workersStarted++;
-    }
-    if (msg.startsWith('stream worker complete:')) {
+    } else if (msg.startsWith('stream worker complete:')) {
       workersComplete++;
       totalFetchedBytes += (data.fetchedBytes as number) || 0;
-    }
-
-    // Results writer
-    if (msg.startsWith('results writer complete:')) {
+    } else if (msg.startsWith('results writer complete:')) {
       totalResultEvents += (data.resultEvents as number) || 0;
     }
 
-    // Errors
     if (ev.level === 'ERROR') {
       errors.push(msg);
     }
@@ -848,12 +903,69 @@ export function buildDiagnostics(cwEvents: CWEvent[]): StreamerQueryDiagnostics 
 }
 
 /**
- * Generate a human-readable explanation for a zero-result query.
+ * Populate diagnostics into the response object. CW polling failures surface
+ * as `diagnostics.pollingError`, not silent undefined.
  */
-export function explainZeroResults(diag: StreamerQueryDiagnostics): string {
+async function attachDiagnostics(
+  resp: StreamerQueryResponse,
+  queryStartTimeMs: number,
+): Promise<void> {
+  const logGroup = process.env.LOG10X_STREAMER_LOG_GROUP;
+  if (!logGroup) {
+    resp.diagnostics = { pollingError: 'LOG10X_STREAMER_LOG_GROUP not set; diagnostics unavailable.' };
+    return;
+  }
+
+  try {
+    const cwEvents = await fetchQueryCWEvents(resp.queryId, logGroup, queryStartTimeMs);
+    resp.diagnostics = buildDiagnostics(cwEvents);
+  } catch (e) {
+    resp.diagnostics = {
+      pollingError: `CW polling failed: ${(e as Error).message.slice(0, 200)}`,
+    };
+  }
+}
+
+/**
+ * Look up current execution diagnostics for a previously-submitted queryId.
+ * Use this after runStreamerQuery returns `partialResults: true` to check
+ * whether the server query has finished.
+ *
+ * @throws on CW polling failure — caller decides how to handle
+ */
+export async function getStreamerQueryStatus(
+  queryId: string,
+  queryStartTimeMs: number,
+): Promise<StreamerQueryDiagnostics> {
+  const logGroup = process.env.LOG10X_STREAMER_LOG_GROUP;
+  if (!logGroup) {
+    return { pollingError: 'LOG10X_STREAMER_LOG_GROUP not set; diagnostics unavailable.' };
+  }
+  try {
+    const cwEvents = await fetchQueryCWEvents(queryId, logGroup, queryStartTimeMs);
+    return buildDiagnostics(cwEvents);
+  } catch (e) {
+    return { pollingError: `CW polling failed: ${(e as Error).message.slice(0, 200)}` };
+  }
+}
+
+/**
+ * Generate a human-readable explanation for a zero-result query.
+ * Returns null when no specific explanation can be derived — callers should
+ * fall back to a generic message.
+ */
+export function explainZeroResults(diag: StreamerQueryDiagnostics): string | null {
+  if (diag.pollingError) {
+    return `Diagnostics unavailable: ${diag.pollingError}`;
+  }
+
   if (diag.emptyReason) {
     return 'The search expression produced no Bloom filter tokens (0 template hashes, 0 vars). ' +
       'The field names in the search may not match any indexed enrichment fields or text patterns.';
+  }
+
+  if (diag.errors && diag.errors.length > 0) {
+    return `Query encountered ${diag.errors.length} error(s): ${diag.errors[0]}`;
   }
 
   if (diag.scanStats) {
@@ -864,26 +976,34 @@ export function explainZeroResults(diag: StreamerQueryDiagnostics): string {
     if (diag.scanStats.matched === 0) {
       return `The Bloom filter scanned ${diag.scanStats.scanned} index objects and none matched. ` +
         `${diag.scanStats.skippedSearch} skipped by search filter, ${diag.scanStats.skippedTemplate} by template filter. ` +
-        'The search tokens may not exist in the archive for this time range.';
+        'The search tokens do not exist in the archive for this time range.';
     }
+    // Bloom matched but no result events — distinguish timeout from false-positive
     if (diag.scanStats.matched > 0 && (!diag.workerStats || diag.workerStats.totalResultEvents === 0)) {
-      return `The Bloom filter matched ${diag.scanStats.matched} index objects, but stream workers found 0 matching events after decoding. ` +
-        'This means the Bloom filter had false positives — the search tokens exist in the index but the actual events do not match the full search expression.';
+      if (diag.workerStats && diag.workerStats.complete < diag.workerStats.started) {
+        return `The Bloom filter matched ${diag.scanStats.matched} index objects and ${diag.workerStats.started} workers were dispatched, ` +
+          `but only ${diag.workerStats.complete} completed before the poll timed out. Results may still be arriving — ` +
+          'call log10x_streamer_query_status for an updated snapshot.';
+      }
+      return `The Bloom filter matched ${diag.scanStats.matched} index objects, but stream workers decoded 0 matching events. ` +
+        'Most likely cause: Bloom filter false positives — the search tokens exist in the index but the actual events do not match the full search expression.';
     }
   }
 
-  if (diag.errors && diag.errors.length > 0) {
-    return `Query encountered ${diag.errors.length} error(s): ${diag.errors[0]}`;
-  }
-
-  // No scanStats at all — sub-queries never reported scan completion
-  // This typically means no index objects exist for the query time range
+  // queryPlan present but no scanStats — sub-queries dispatched but none reported scan completion.
+  // Note: this inference is weaker than the direct scanStats.scanned===0 case. Possible causes:
+  // no index objects in range, SQS delivery failed, CW buffer not flushed, sub-query crashed.
   if (diag.queryPlan && !diag.scanStats) {
-    return 'Query ran but no scan statistics were reported. ' +
-      'This usually means no index objects exist for the queried time range — ' +
-      'the indexer may not have processed data for this window yet. ' +
-      'Try an older time window, or verify the indexer is running.';
+    return 'Query ran but no sub-query reported scan completion. Likely causes (in order of probability): ' +
+      '(a) no index objects exist for the time range — try an older window or verify the indexer is running; ' +
+      '(b) sub-queries are still executing and CW events have not flushed yet — retry status poll; ' +
+      '(c) SQS dispatch failed — check streamer logs.';
   }
 
-  return 'Query returned 0 events. Check that the search expression, time range, and target match indexed data.';
+  if (diag.partialResults) {
+    return 'MCP poll timeout reached before the server query completed. Some results may still be written to S3. ' +
+      'Call log10x_streamer_query_status for an updated snapshot.';
+  }
+
+  return null;
 }

@@ -130,30 +130,45 @@ export async function executeStreamerQuery(
       (resp.execution.truncated ? ` · _truncated_` : '')
   );
 
-  // Append diagnostics summary if available
+  // Append diagnostics summary. These come from CloudWatch — structural
+  // signals about query execution (Bloom efficiency, worker completion).
   if (resp.diagnostics) {
     const d = resp.diagnostics;
+
+    if (d.pollingError) {
+      lines.push(`**Diagnostics**: _unavailable — ${d.pollingError}_`);
+    }
+
+    if (d.partialResults) {
+      lines.push(
+        `**Partial results**: MCP poll timed out before server query completed. ` +
+          `The server may still be writing results. Diagnostics below are a snapshot.`
+      );
+    }
+
     if (d.scanStats) {
       lines.push(
-        `**Scan**: ${fmtCount(d.scanStats.scanned)} index objects · ` +
+        `**Bloom scan**: ${fmtCount(d.scanStats.scanned)} index objects scanned · ` +
           `${fmtCount(d.scanStats.matched)} matched · ` +
-          `${fmtCount(d.scanStats.skippedSearch)} skipped (search) · ` +
-          `${fmtCount(d.scanStats.skippedTemplate)} skipped (template)`
+          `${fmtCount(d.scanStats.skippedSearch)} skipped by search · ` +
+          `${fmtCount(d.scanStats.skippedTemplate)} by template`
       );
     }
-    if (d.streamDispatch) {
-      lines.push(
-        `**Stream**: ${d.streamDispatch.requests} dispatch requests · ` +
-          `${d.streamDispatch.objects} objects · ` +
-          `${d.streamDispatch.blobs} target blobs`
-      );
-    }
+
     if (d.workerStats) {
       lines.push(
         `**Workers**: ${d.workerStats.complete}/${d.workerStats.started} complete · ` +
           `${fmtCount(d.workerStats.totalFetchedBytes)} bytes fetched · ` +
-          `${fmtCount(d.workerStats.totalResultEvents)} result events`
+          `${fmtCount(d.workerStats.totalResultEvents)} result events decoded`
       );
+    }
+
+    if (d.coordinatorElapsedMs !== undefined) {
+      lines.push(`**Coordinator**: ${d.coordinatorElapsedMs}ms plan+dispatch time`);
+    }
+
+    if (d.errors && d.errors.length > 0) {
+      lines.push(`**Errors**: ${d.errors.length} — first: _${d.errors[0].slice(0, 160)}_`);
     }
   }
   lines.push('');
@@ -184,20 +199,11 @@ export async function executeStreamerQuery(
     );
   }
   if (events.length === 0) {
-    const explanation = resp.diagnostics
-      ? explainZeroResults(resp.diagnostics)
-      : 'Verify the search expression matches at least one real value, check the window, or widen the filter.';
+    const specific = resp.diagnostics ? explainZeroResults(resp.diagnostics) : null;
+    const explanation =
+      specific ||
+      'Verify the search expression matches at least one real value, check the window, or widen the filter.';
     lines.push(`_Streamer returned zero events. ${explanation}_`);
-
-    // Append scan stats if available for transparency
-    if (resp.diagnostics?.scanStats) {
-      const s = resp.diagnostics.scanStats;
-      lines.push(`_Scan: ${s.scanned} index objects scanned, ${s.matched} matched, ${s.skippedSearch} skipped by search, ${s.skippedTemplate} by template_`);
-    }
-    if (resp.diagnostics?.queryPlan) {
-      const p = resp.diagnostics.queryPlan;
-      lines.push(`_Plan: ${p.templateHashes} template hashes, ${p.vars} var sets, dispatch=${p.dispatch}_`);
-    }
   }
 
   if (resp.execution.truncated) {
