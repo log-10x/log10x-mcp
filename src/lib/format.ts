@@ -5,8 +5,17 @@
  * Designed for AI consumption — concise, structured, parseable.
  */
 
-/** Format a dollar amount: $1.2K, $14K, $1.2M, etc. */
-export function fmtDollar(amount: number): string {
+/**
+ * Sentinel for "cost unavailable" — when analyzer cost metric is missing
+ * or the value is otherwise uncomputable. Previously we rendered `$NaN`
+ * literally which looked authoritative and mislead readers. Now we surface
+ * the absence explicitly.
+ */
+const UNAVAILABLE = '_n/a_';
+
+/** Format a dollar amount: $1.2K, $14K, $1.2M, etc. Returns _n/a_ for NaN/undefined. */
+export function fmtDollar(amount: number | undefined | null): string {
+  if (amount === undefined || amount === null || !Number.isFinite(amount)) return UNAVAILABLE;
   const abs = Math.abs(amount);
   const sign = amount < 0 ? '-' : '';
 
@@ -18,8 +27,9 @@ export function fmtDollar(amount: number): string {
   return `${sign}$${(abs / 1000000).toFixed(1)}M`;
 }
 
-/** Format bytes as human-readable: 1.2 GB, 450 MB, etc. */
-export function fmtBytes(bytes: number): string {
+/** Format bytes as human-readable: 1.2 GB, 450 MB, etc. Returns _n/a_ for NaN/undefined. */
+export function fmtBytes(bytes: number | undefined | null): string {
+  if (bytes === undefined || bytes === null || !Number.isFinite(bytes)) return UNAVAILABLE;
   const abs = Math.abs(bytes);
   if (abs < 1024) return `${Math.round(abs)} B`;
   if (abs < 1024 * 1024) return `${(abs / 1024).toFixed(1)} KB`;
@@ -28,8 +38,9 @@ export function fmtBytes(bytes: number): string {
   return `${(abs / (1024 * 1024 * 1024 * 1024)).toFixed(1)} TB`;
 }
 
-/** Format event count: 1.2B, 450M, 12K, etc. */
-export function fmtCount(count: number): string {
+/** Format event count: 1.2B, 450M, 12K, etc. Returns _n/a_ for NaN/undefined. */
+export function fmtCount(count: number | undefined | null): string {
+  if (count === undefined || count === null || !Number.isFinite(count)) return UNAVAILABLE;
   const abs = Math.abs(count);
   if (abs < 1000) return `${Math.round(abs)}`;
   if (abs < 1000000) return `${(abs / 1000).toFixed(abs < 10000 ? 1 : 0)}K`;
@@ -66,8 +77,9 @@ export function fmtSeverity(sev: string): string {
   return map[sev.toLowerCase()] ?? sev.toUpperCase();
 }
 
-/** Format a percentage. */
-export function fmtPct(value: number): string {
+/** Format a percentage. Returns _n/a_ for NaN/undefined. */
+export function fmtPct(value: number | undefined | null): string {
+  if (value === undefined || value === null || !Number.isFinite(value)) return UNAVAILABLE;
   if (value < 1) return `${value.toFixed(1)}%`;
   return `${Math.round(value)}%`;
 }

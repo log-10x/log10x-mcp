@@ -20,7 +20,7 @@ export const trendSchema = {
   environment: z.string().optional().describe('Environment nickname'),
 };
 
-export async function executeTrend(
+export async function executePatternTrend(
   args: { pattern: string; timeRange: string; step: string; analyzerCost: number },
   env: EnvConfig
 ): Promise<string> {

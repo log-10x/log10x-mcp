@@ -16,7 +16,7 @@ import { fetchAnalyzerCost } from './lib/api.js';
 import { costDriversSchema, executeCostDrivers } from './tools/cost-drivers.js';
 import { eventLookupSchema, executeEventLookup } from './tools/event-lookup.js';
 import { savingsSchema, executeSavings } from './tools/savings.js';
-import { trendSchema, executeTrend } from './tools/trend.js';
+import { trendSchema, executePatternTrend } from './tools/trend.js';
 import { servicesSchema, executeServices } from './tools/services.js';
 import { exclusionFilterSchema, executeExclusionFilter } from './tools/exclusion-filter.js';
 import { dependencyCheckSchema, executeDependencyCheck } from './tools/dependency-check.js';
@@ -79,36 +79,12 @@ const COST_REFRESH_MS = 3_600_000; // 1 hour
  * the raw error message is logged at debug level before `describeToolError`
  * rewrites it, so ops can see the original text when hunting root causes.
  */
-// Per-process tool call stats — exposed via log10x_mcp_stats meta tool.
-interface ToolStat {
-  calls: number;
-  errors: number;
-  totalMs: number;
-  maxMs: number;
-  lastErrorMs?: number;
-  lastErrorMsg?: string;
-}
-const toolStats = new Map<string, ToolStat>();
-
-function recordToolCall(toolName: string, ms: number, err?: Error): void {
-  let s = toolStats.get(toolName);
-  if (!s) {
-    s = { calls: 0, errors: 0, totalMs: 0, maxMs: 0 };
-    toolStats.set(toolName, s);
-  }
-  s.calls++;
-  s.totalMs += ms;
-  if (ms > s.maxMs) s.maxMs = ms;
-  if (err) {
-    s.errors++;
-    s.lastErrorMs = Date.now();
-    s.lastErrorMsg = err.message.slice(0, 200);
-  }
-}
-
-export function getToolStats(): Array<{ name: string; stats: ToolStat }> {
-  return Array.from(toolStats.entries()).map(([name, stats]) => ({ name, stats }));
-}
+// Per-process tool call stats live in src/lib/mcp-stats.ts so harnesses
+// can import them without triggering this module's stdio server bootstrap.
+// Re-exported here to preserve the public API (log10x_mcp_stats uses
+// getToolStats() below).
+import { recordToolCall, getToolStats } from './lib/mcp-stats.js';
+export { getToolStats };
 
 function wrap(
   toolName: string,
@@ -325,7 +301,7 @@ server.tool(
     wrap('log10x_pattern_trend', async () => {
       const env = resolveEnv(getEnvs(), args.environment);
       const cost = await getAnalyzerCost(env, args.analyzerCost);
-      return executeTrend({ ...args, analyzerCost: cost }, env);
+      return executePatternTrend({ ...args, analyzerCost: cost }, env);
     })
 );
 
