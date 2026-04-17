@@ -876,5 +876,14 @@ export function explainZeroResults(diag: StreamerQueryDiagnostics): string {
     return `Query encountered ${diag.errors.length} error(s): ${diag.errors[0]}`;
   }
 
+  // No scanStats at all — sub-queries never reported scan completion
+  // This typically means no index objects exist for the query time range
+  if (diag.queryPlan && !diag.scanStats) {
+    return 'Query ran but no scan statistics were reported. ' +
+      'This usually means no index objects exist for the queried time range — ' +
+      'the indexer may not have processed data for this window yet. ' +
+      'Try an older time window, or verify the indexer is running.';
+  }
+
   return 'Query returned 0 events. Check that the search expression, time range, and target match indexed data.';
 }
