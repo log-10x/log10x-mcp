@@ -276,6 +276,15 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
     }
   }
 
+  // Scale & capability context. Converts doctor from "am I healthy" to
+  // "what can an agent ask here" — the agent reads this once on its first
+  // call and sizes its tool-choice strategy appropriately. Especially
+  // load-bearing at high volume, where the agent's strategy differs
+  // materially from a 10 GB/day env.
+  if (detectedTier) {
+    await addScaleAndCapabilityCheck(env, detectedTier, checks);
+  }
+
   // Observability-health signals. These run regardless of Reporter tier and
   // surface structural issues that the agent would otherwise have to discover
   // by hand each session. Driven by actual findings in customer acceptance
@@ -557,6 +566,88 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
   }
 
   return checks;
+}
+
+/**
+ * Scale & capability summary — single check that tells an agent what the env
+ * looks like and which question types this MCP install can answer.
+ */
+async function addScaleAndCapabilityCheck(
+  env: EnvConfig,
+  detectedTier: 'edge' | 'cloud',
+  checks: DoctorCheck[]
+): Promise<void> {
+  const tierSelector = `${LABELS.env}="${detectedTier}"`;
+  try {
+    // One round-trip of parallel probes. All four use a matching 7d window
+    // so the counts agree with what `log10x_services` / `log10x_top_patterns`
+    // would return. An instant-vector count would only see series emitting
+    // right now, which under-counts against the 7d volume framing above.
+    const [bytesRes, patternsRes, servicesRes, eventsRes] = await Promise.all([
+      queryInstant(env, `sum(increase(all_events_summaryBytes_total{${tierSelector}}[7d]))`),
+      queryInstant(env, `count(group by (${LABELS.pattern}) (increase(all_events_summaryBytes_total{${tierSelector}}[7d])))`),
+      queryInstant(env, `count(group by (${LABELS.service}) (increase(all_events_summaryBytes_total{${tierSelector},${LABELS.service}!=""}[7d])))`),
+      queryInstant(env, `sum(increase(all_events_summaryVolume_total{${tierSelector}}[7d]))`),
+    ]);
+    const bytes7d = firstNumber(bytesRes);
+    const patternCount = firstNumber(patternsRes);
+    const serviceCount = firstNumber(servicesRes);
+    const events7d = firstNumber(eventsRes);
+
+    const lines: string[] = [];
+    if (Number.isFinite(bytes7d) && bytes7d > 0) {
+      lines.push(`Volume: ${formatBytes(bytes7d)} / 7d (${detectedTier} tier).`);
+    }
+    if (Number.isFinite(serviceCount) && serviceCount > 0) {
+      lines.push(`Services: ${Math.round(serviceCount)}.`);
+    }
+    if (Number.isFinite(patternCount) && patternCount > 0) {
+      lines.push(`Patterns: ${Math.round(patternCount)}.`);
+      if (Number.isFinite(events7d) && events7d > 0 && patternCount > 0) {
+        const ratio = events7d / patternCount;
+        lines.push(`Compression: ${formatNumber(ratio)} events per pattern (stable identity means comparisons over time are trustworthy at this volume).`);
+      }
+    }
+
+    // Streamer capability enumeration — what this specific install unlocks.
+    lines.push('');
+    if (isStreamerConfigured()) {
+      lines.push('Storage Streamer deployed — this MCP can answer:');
+      lines.push('  - Historical events beyond SIEM retention (compliance, audit, long-window post-mortems)');
+      lines.push('  - Events dropped by the forwarder upstream of the SIEM (visible in log10x metrics but not the SIEM)');
+      lines.push('  - Metrics backfilled from archive that were never collected live');
+      lines.push('  - Sample-reversal verification when SIEM returns sampled results at high volume');
+    } else {
+      lines.push('Storage Streamer NOT deployed — these question types are out of reach:');
+      lines.push('  - Historical events beyond SIEM retention');
+      lines.push('  - Dropped-event recovery (forwarder-dropped, invisible to SIEM)');
+      lines.push('  - Metric backfill from archive');
+      lines.push('  - Sample-reversal verification');
+      lines.push('For questions in these shapes, route to SIEM MCP (hot retention only) or recommend deploying the streamer.');
+    }
+
+    checks.push({
+      name: 'scale_and_capability',
+      status: 'pass',
+      message: lines.join('\n  '),
+    });
+  } catch {
+    // Non-fatal; doctor never blocks on capability surfacing.
+  }
+}
+
+function firstNumber(res: { status: string; data: { result: { value?: [number, string] }[] } }): number {
+  if (res.status !== 'success' || res.data.result.length === 0) return NaN;
+  const v = res.data.result[0].value?.[1];
+  return v ? parseFloat(v) : NaN;
+}
+
+function formatNumber(n: number): string {
+  if (!Number.isFinite(n)) return '?';
+  if (n >= 1e9) return `${(n / 1e9).toFixed(1)}B`;
+  if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
+  if (n >= 1e3) return `${(n / 1e3).toFixed(1)}K`;
+  return `${Math.round(n)}`;
 }
 
 /** Doctor probe on the paste endpoint — global, only runs once regardless of env count. */

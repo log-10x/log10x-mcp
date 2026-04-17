@@ -69,6 +69,17 @@ export async function executeServices(
   lines.push('');
   lines.push(`  ${rows.length} service${rows.length !== 1 ? 's' : ''} · ${fmtBytes(totalBytes)} total · ${fmtDollar(totalCost)}${period} at ${fmtDollar(costPerGb)}/GB`);
 
+  // Coverage line: how concentrated is the volume at the top? Tells the agent
+  // whether a drill-down on the top few services captures the question or
+  // whether the long tail matters. Especially load-bearing at high volume,
+  // where "Top 10 patterns" can mean 90% of cost or 10%.
+  if (rows.length > 1 && totalBytes > 0) {
+    const topN = Math.min(3, rows.length);
+    const topBytes = rows.slice(0, topN).reduce((s, r) => s + r.bytes, 0);
+    const topPct = Math.round((topBytes / totalBytes) * 100);
+    lines.push(`  Top ${topN} service${topN !== 1 ? 's' : ''} = ${topPct}% of volume.`);
+  }
+
   if (rows[0]) {
     lines.push('');
     lines.push('**Next actions**:');

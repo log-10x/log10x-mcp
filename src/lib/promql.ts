@@ -44,6 +44,16 @@ export function bytesPerPattern(
   return `sum by (${LABELS.pattern}, ${LABELS.service}, ${LABELS.severity}) (increase(${BYTES_METRIC}{${selector}}[${range}]${offset}))`;
 }
 
+/** Scope-total bytes for a time window — no grouping. Used by coverage probes. */
+export function totalBytesInScope(
+  filters: Record<string, string>,
+  env: string,
+  range: string
+): string {
+  const selector = buildSelector(filters, env);
+  return `sum(increase(${BYTES_METRIC}{${selector}}[${range}]))`;
+}
+
 /** Event count per pattern for a time window. */
 export function eventsPerPattern(
   filters: Record<string, string>,

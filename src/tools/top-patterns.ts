@@ -57,10 +57,29 @@ export async function executeTopPatterns(
   rows.sort((a, b) => b.cost - a.cost);
 
   const displayName = args.service || 'all services';
-  const totalCost = rows.reduce((s, r) => s + r.cost, 0);
+  const totalTopBytes = rows.reduce((s, r) => s + r.bytes, 0);
+  const totalTopCost = rows.reduce((s, r) => s + r.cost, 0);
+
+  // Coverage probe: one additional PromQL for the total volume in scope,
+  // so the agent can see whether top-N is the iceberg or the tip. At high
+  // volume this is load-bearing — "Top 10 = 18% of total" is a very
+  // different situation from "Top 10 = 92% of total" and changes the
+  // next-action recommendation.
+  let scopeCoveragePct: number | undefined;
+  try {
+    const totalRes = await queryInstant(env, pql.totalBytesInScope(filters, metricsEnv, tf.range));
+    if (totalRes.status === 'success' && totalRes.data.result.length > 0) {
+      const scopeTotalBytes = parsePrometheusValue(totalRes.data.result[0]);
+      if (Number.isFinite(scopeTotalBytes) && scopeTotalBytes > 0) {
+        scopeCoveragePct = (totalTopBytes / scopeTotalBytes) * 100;
+      }
+    }
+  } catch {
+    // non-fatal; skip coverage line if the probe fails
+  }
 
   const lines: string[] = [];
-  lines.push(`Top ${rows.length} patterns — ${displayName} (${tf.label}) · ${fmtDollar(totalCost)}${period} total`);
+  lines.push(`Top ${rows.length} patterns — ${displayName} (${tf.label}) · ${fmtDollar(totalTopCost)}${period} total`);
   lines.push(`⚠ These are CURRENT RANK by cost (biggest right now). This is NOT a growth/delta ranking — do not re-label as "cost drivers" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.`);
   lines.push('');
   for (let i = 0; i < rows.length; i++) {
@@ -70,6 +89,13 @@ export async function executeTopPatterns(
     const sev = fmtSeverity(r.severity);
     const svc = r.service ? `  ${r.service}` : '';
     lines.push(`#${i + 1}  ${name} ${cost.padEnd(12)} ${sev}${svc}`);
+  }
+
+  if (scopeCoveragePct !== undefined) {
+    const shownPct = Math.round(scopeCoveragePct);
+    const tailPct = Math.max(0, 100 - shownPct);
+    lines.push('');
+    lines.push(`Top ${rows.length} = ${shownPct}% of total volume in scope / ${tailPct}% in the long tail.`);
   }
 
   // ── Newly-emerged-patterns probe ──

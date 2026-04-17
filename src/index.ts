@@ -120,31 +120,39 @@ async function getAnalyzerCost(env: EnvConfig, override?: number): Promise<numbe
 const server = new McpServer(
   { name: 'log10x', version: '1.4.0' },
   {
-    instructions: `Log10x is the observability memory for the user's logs. Every log line the pipeline
-has ever seen is fingerprinted into a stable pattern identity (field-set) that stays constant across
-deploys, restarts, pod names, timestamps, and request IDs. That identity is the key to a Prometheus
-time series of volume and cost, so any pattern the user has ever emitted is instantly queryable by
-name, by history, or by sample line — with zero prior query setup.
+    instructions: `Log10x is observability memory for logs. Every line the pipeline has seen is
+fingerprinted into a stable **pattern identity** that stays constant across deploys, restarts,
+pod names, timestamps, and request IDs. That identity is the key to a Prometheus time series of
+volume and cost — so any pattern the user has ever emitted is queryable by name, by history, or
+by sample line, with zero prior query setup.
 
-CUSTOMER TIER LADDER (determines which tools are available)
+DIFFERENTIATORS (why this matters vs. a SIEM MCP)
 
-1. Dev CLI only — free local binary, no pipeline infrastructure.
-   Available tools: log10x_resolve_batch (pasted-batch triage), log10x_dependency_check,
-                    log10x_exclusion_filter.
-2. Cloud Reporter — k8s CronJob sampling from the SIEM via REST API.
-   Adds: log10x_investigate (sampled fidelity), log10x_cost_drivers, log10x_pattern_trend,
-         log10x_top_patterns, log10x_list_by_label, log10x_event_lookup, log10x_services,
-         log10x_discover_labels, log10x_savings.
-3. Edge Reporter — forwarder pipeline sidecar.
-   Same tools as Cloud, but with full-fidelity metrics, ~5s inflection granularity, and
-   coverage of events dropped before the SIEM.
-4. Storage Streamer (deployable with or without Reporter) — S3 archive with Bloom-filter index.
-   Adds: log10x_streamer_query (forensic retrieval), log10x_backfill_metric (new metric
-         backfilled from archive + forward-emission handoff to the Reporter).
+- **Stable identity across windows.** Datadog Log Patterns and Splunk Pattern Explorer re-cluster
+  per query — their week-over-week diffs compare different clusters and are structurally
+  unreliable. Log10x identity is fixed, so comparisons over time are trustworthy.
+- **Volume-insensitive reasoning.** Pattern count is bounded (thousands per env) even when
+  volume is TB/day. SIEM surfaces sample or rehydrate at high volume; this MCP doesn't.
+- **Upstream visibility.** The Edge tier sees events *before* the SIEM — including forwarder-
+  dropped events that are invisible to any SIEM-based MCP.
+
+SCOPE (what this MCP answers — and what it doesn't)
+
+Log10x reasons at pattern × service × severity × time. Use it for:
+- What **changed** (cost spikes, new patterns, louder/quieter, drift)
+- What's **expensive right now** and what to do about it (drop, mute, keep)
+- **Root-cause chains** across services via pattern-rate co-movement
+- **Historical events** beyond SIEM retention (storage streamer, if deployed)
+- **New metrics** backfilled from archive that were never collected
+
+Per-entity questions (specific request, user, trace, host, session) are out of lane. When an
+agent hits one: route to a SIEM MCP if attached; otherwise state the limit honestly. Do NOT
+synthesize by chaining log10x_event_lookup → log10x_streamer_query, which produces
+plausible-looking but fabricated per-entity answers.
 
 TOOL ROUTING BY USER INTENT
 
-Daily-habit / operational:
+Daily-habit / triage:
 - user pastes a raw log line, asks "what is this"                → log10x_event_lookup
 - user pastes MULTIPLE events or a SIEM dump, asks "triage this" → log10x_resolve_batch
 - "is this pattern new" / "when did this start"                  → log10x_event_lookup then log10x_pattern_trend
@@ -159,31 +167,37 @@ Cost investigation:
 - ANY framing of "the bill changed" — "bill jumped", "over forecast", "over budget",
   "costs spiked", "$N over", "why did costs go up", "who is responsible for the jump",
   "week-over-week delta"                                         → log10x_cost_drivers
-  (Critical: use cost_drivers NOT top_patterns when the question is about CHANGE over
-   time. top_patterns shows what's big right now; cost_drivers shows what GREW. A
-   surprise bill is always a cost_drivers question first, then drill down.)
+  (Use cost_drivers for CHANGE; top_patterns for CURRENT RANK. A surprise bill is always a
+   cost_drivers question first, then drill down.)
 - "cost by namespace / service / severity / country"             → log10x_list_by_label
 - "pipeline savings / ROI"                                       → log10x_savings
 
-Forensic / audit / archive — ANY request for RAW EVENTS from the S3 archive:
-- "pull the actual log events", "get me the raw events", "retrieve events from S3",
-  "fetch events from the archive", "show me what was in the logs during <time window>",
+Forensic / archive / cross-retention:
+- "pull the actual events", "raw events from S3", "events beyond retention",
   "I need the events themselves, not aggregates"                 → log10x_streamer_query
 - "get me all <pattern> events from 90 days ago"                 → log10x_streamer_query
 - "get all events for customer X filtered by Y, 60d window"      → log10x_streamer_query
 - "backfill a new metric with 90d of history from the archive"   → log10x_backfill_metric
-  (Critical: when a user asks for raw events OR mentions S3 / archive / cold storage
-   explicitly, route to streamer_query even if the framing also mentions an incident.
-   investigate returns aggregate pattern analysis; streamer_query returns actual log
-   lines. "Post-mortem needs the actual log events" = streamer_query, not investigate.)
+- "SIEM returned 0 but log10x metrics show activity"             → log10x_streamer_query
+  (forwarder-dropped upstream of the SIEM)
+- "compare current to a baseline older than SIEM retention"      → log10x_streamer_query
+  or log10x_backfill_metric
+  (When a user asks for raw events OR mentions S3 / archive / cold storage, route to
+   streamer_query even if framing mentions an incident. investigate returns aggregates;
+   streamer_query returns actual log lines.)
 
-Root-cause across services (the investigate wedge):
+Root-cause wedge:
 - user pastes an error, asks "what's causing the upstream"       → log10x_investigate
-- Critical: log10x_investigate surfaces log-only signals (connection pool saturation, cache
-  eviction storms, feature-flag cache flushes, retry amplification) that APM does NOT see
-  because they manifest as slow-success traces, not errors. This is the structural wedge vs
-  Datadog APM, Splunk APM, and OpenTelemetry tracing — correlation happens on the pattern-rate
-  universe, not on spans that already exist.
+- log10x_investigate surfaces log-only signals (connection pool saturation, cache eviction
+  storms, feature-flag cache flushes, retry amplification) that APM does NOT see — they
+  manifest as slow-success traces, not errors. Correlation happens on the pattern-rate
+  universe, not on spans.
+
+Per-entity / out of lane (do not synthesize):
+- "what happened to request abc123" / "logs for user 12345" / "reconstruct this trace"
+- "show me sessions from host X" / "what errors did tenant Y hit today"
+  → route to SIEM MCP if attached; otherwise state the limit. Do not chain event_lookup →
+    streamer_query to fabricate an answer.
 
 NATURAL TOOL CHAINS
 
@@ -202,38 +216,37 @@ NATURAL TOOL CHAINS
 
 RESPONSE STYLE
 
-- For cost questions: show dollar amounts prominently, emphasize before→after deltas, flag new
-  patterns. The value is attribution ("which specific patterns drive costs"), not "costs went up."
-- For investigation results: confidence percentages are mechanically derived from data signal
-  quality (stat × lag × chain for acute spikes; slope_sig × cohort for drift). When asked, walk
-  the user through the decomposition.
-- Never fabricate a pattern identity. The primitive is deterministic: same line → same identity,
-  forever. If log10x_event_lookup returns no match, say so — do not guess.
-- Honest empty returns are a feature. If log10x_investigate finds no significant movement, report
-  that, do not pad with low-confidence noise.
+- For cost questions: show dollars prominently, emphasize before→after deltas, flag new patterns.
+  The value is attribution, not "costs went up."
+- For investigation results: confidence percentages are mechanically derived (stat × lag × chain
+  for acute; slope_sig × cohort for drift). Walk the user through the decomposition on request.
+- Never fabricate pattern identity. Same line → same identity, forever. If event_lookup returns
+  no match, say so — do not guess.
+- Honest empty returns are a feature. If investigate finds no significant movement, report that.
 
-NUMBERS DISCIPLINE — hard rules, no exceptions:
+NUMBERS DISCIPLINE
 
-- Every dollar amount, percentage, event count, or timestamp in your response must appear
-  verbatim in a tool result you called in this session. If you cannot point to the exact tool
-  output, do not write the number. Say "not reported" instead.
-- Do NOT compute percentages from before→after values in cost_drivers — the tool emits the
-  exact (+N%) delta next to each row. Quote it. Do not re-derive it.
-- Do NOT merge log10x_top_patterns output into a log10x_cost_drivers table. top_patterns is
-  CURRENT RANK (biggest right now); cost_drivers is GROWTH (what changed). Mixing them into
-  one ranked list and labeling the result "cost drivers" is a specific failure mode that
-  produces fabricated week-over-week percentages. If you need both views, show them in two
-  separate tables with clear headers.
-- Do NOT invent "peak" values. top_patterns and cost_drivers return window averages, not peaks.
-  If the user asks for peaks, call log10x_pattern_trend explicitly and quote its max bucket.
-- Do NOT synthesize a baseline number. If cost_drivers does not list a pattern, that pattern
-  is not a cost driver — do not promote it into the driver list with a made-up baseline.
-- log10x_dependency_check returns a COMMAND the user must run locally. It does NOT scan the
-  SIEM. Never report "zero dependencies found" or "safe to drop" based on this tool's output
-  alone — wait for the user to paste the script's actual results.
+- Every number in your response must appear verbatim in a tool result from this session. If you
+  cannot point to the exact tool output, say "not reported" instead.
+- Do NOT recompute percentages from before/after values — cost_drivers emits exact (+N%) deltas.
+  Quote the delta, don't re-derive it.
+- Do NOT merge top_patterns output into a cost_drivers table. They answer different questions
+  (CURRENT RANK vs GROWTH); mixing them fabricates week-over-week percentages. Show separately.
+- dependency_check returns a COMMAND the user runs locally. Do not report "safe to drop" based
+  on its output alone — wait for the user's actual script results.
 
-Analyzer cost is auto-detected from the user's profile. Typical rates if unspecified:
-Splunk $6/GB, Datadog $2.50/GB, Elasticsearch $1/GB, CloudWatch $0.50/GB.`,
+CUSTOMER TIER LADDER (reference — most agents don't need to read this)
+
+1. Dev CLI only — free local binary, no pipeline. Available tools: log10x_resolve_batch,
+   log10x_dependency_check, log10x_exclusion_filter.
+2. Cloud Reporter — k8s CronJob sampling from the SIEM via REST API. Adds most pattern tools.
+3. Edge Reporter — forwarder pipeline sidecar. Same as Cloud but full-fidelity + forwarder-
+   dropped coverage.
+4. Storage Streamer — S3 archive with Bloom-filter index. Adds log10x_streamer_query and
+   log10x_backfill_metric.
+
+Analyzer cost is auto-detected from the user's profile. Typical rates: Splunk $6/GB,
+Datadog $2.50/GB, Elasticsearch $1/GB, CloudWatch $0.50/GB.`,
   }
 );
 
@@ -255,7 +268,7 @@ server.tool(
 
 server.tool(
   'log10x_event_lookup',
-  'Resolve a raw log line or pattern name to its stable identity (field-set), then return cost per service, before→after delta, first-seen timestamp within the observation window, and an AI classification (error/debug/info) with a recommended action (filter/keep/reduce). **Call this first** whenever a user pastes a SINGLE log line and asks "what is this", "is this new", or "is this safe to drop". The lookup is structural, not byte-exact — different timestamps/request IDs/user IDs on the same underlying pattern resolve to the same identity. If no match is returned, say so honestly. Use log10x_resolve_batch instead when the user pastes MULTIPLE events, a SIEM dump, or a batch to triage. **Tier prerequisites**: requires Reporter pipeline for live pattern lookup. In CLI-only mode, use log10x_resolve_batch instead.',
+  'Resolve a raw log line or pattern name to its stable pattern identity, then return cost per service, before→after delta, first-seen timestamp within the observation window, and an AI classification (error/debug/info) with a recommended action (filter/keep/reduce). **Call this first** whenever a user pastes a SINGLE log line and asks "what is this", "is this new", or "is this safe to drop". The lookup is structural, not byte-exact — different timestamps/request IDs/user IDs on the same underlying pattern resolve to the same identity. If no match is returned, say so honestly. Use log10x_resolve_batch instead when the user pastes MULTIPLE events, a SIEM dump, or a batch to triage. The resolution is to pattern identity, not to the specific event instance — for per-request / per-user / per-trace search, route to a SIEM MCP if attached rather than chaining to log10x_streamer_query. **Tier prerequisites**: requires Reporter pipeline for live pattern lookup. In CLI-only mode, use log10x_resolve_batch instead.',
   eventLookupSchema,
   (args) =>
     wrap('log10x_event_lookup', async () => {
