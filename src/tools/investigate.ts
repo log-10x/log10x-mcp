@@ -221,22 +221,37 @@ export async function executeInvestigate(
   }
 
   if (!resolution.anchor) {
-    const report = [
+    const historical = resolution.modeDetection === 'unresolved_historical';
+    const lines: string[] = [
       `## Investigation: ${args.starting_point}, last ${args.window}`,
       '',
       `**Investigation id**: ${investigationId}`,
-      `**Result**: Could not resolve "${args.starting_point}" to a known pattern or service.`,
-      '',
-      '**Supported inputs**:',
-      '- A raw log line (will be templatized and matched by structural identity)',
-      '- A pattern identity (symbolMessage / templateHash)',
-      '- A service name',
-      '- The literal string `"environment"`, `"all"`, or `"audit"` for an env-wide sweep',
-      '',
-      '**Try next**:',
-      `- \`log10x_event_lookup({ pattern: '${args.starting_point}' })\` to search by substring`,
-      `- \`log10x_services()\` to list known services`,
-    ].join('\n');
+    ];
+    if (historical) {
+      lines.push(
+        `**Result**: "${args.starting_point}" is a known pattern but is silent in the requested window (\`${args.window}\`). ` +
+        `It has fired within the last 30d — widen the window to investigate.`,
+        '',
+        '**Try next**:',
+        `- \`log10x_investigate({ starting_point: '${args.starting_point}', window: '7d' })\` — re-run with a wider window`,
+        `- \`log10x_pattern_trend({ pattern: '${args.starting_point}', timeRange: '30d' })\` — see when it last fired`,
+      );
+    } else {
+      lines.push(
+        `**Result**: Could not resolve "${args.starting_point}" to a known pattern or service.`,
+        '',
+        '**Supported inputs**:',
+        '- A raw log line (will be templatized and matched by structural identity)',
+        '- A pattern identity (symbolMessage / templateHash)',
+        '- A service name',
+        '- The literal string `"environment"`, `"all"`, or `"audit"` for an env-wide sweep',
+        '',
+        '**Try next**:',
+        `- \`log10x_event_lookup({ pattern: '${args.starting_point}' })\` to search by substring`,
+        `- \`log10x_services()\` to list known services`,
+      );
+    }
+    const report = lines.join('\n');
     recordInvestigation({
       investigationId,
       createdAt: Date.now(),
@@ -536,14 +551,22 @@ async function resolveAnchor(
   // `product-reviews` input was being routed to the `llm` service because the
   // llm patterns contain "product_reviews" in their body text.
   if (/^~?[A-Za-z0-9_-]+$/.test(sp)) {
-    // Try as pattern first
+    // Try as pattern first.
+    //
+    // Probe window = the user's investigation window. Previously hardcoded to
+    // `[5m]`, which silently rejected any sparse/bursty pattern that didn't
+    // happen to fire in the last 5 minutes — even when it clearly existed in
+    // the investigation's own window. Caught live on otel-demo: a shipping
+    // error pattern emitted by `log10x_cost_drivers({ timeRange: "7d" })` at
+    // ~2430 events/s over the 7d window was unresolvable because it was
+    // silent in the last 5m/1h. Resolution window must align with scope.
     const byPattern = await queryInstant(
       env,
-      `sum(rate(all_events_summaryVolume_total{${LABELS.env}="${metricsEnv}",${LABELS.pattern}="${escape(sp)}"}[5m])) > 0`
+      `sum(rate(all_events_summaryVolume_total{${LABELS.env}="${metricsEnv}",${LABELS.pattern}="${escape(sp)}"}[${window}])) > 0`
     );
     if (byPattern.status === 'success' && byPattern.data.result.length > 0) {
       // Try to pull the severity + service for the anchor.
-      const meta = await lookupPatternMeta(env, metricsEnv, sp);
+      const meta = await lookupPatternMeta(env, metricsEnv, sp, window);
       return {
         mode: 'pattern',
         anchor: sp,
@@ -622,7 +645,21 @@ async function resolveAnchor(
         modeDetection: 'direct',
       };
     }
-    return { mode: 'pattern', inputType: 'pattern_identity', modeDetection: 'unresolved' };
+    // Wide-probe: if the input looks like a pattern identity but isn't active
+    // in the requested window, check whether it's active at 30d. If so, tag
+    // the resolution with a hint so the error message can suggest widening
+    // the window instead of bouncing the user to event_lookup.
+    const widePatternProbe = await queryInstant(
+      env,
+      `sum(rate(all_events_summaryVolume_total{${LABELS.env}="${metricsEnv}",${LABELS.pattern}="${escape(sp)}"}[30d])) > 0`
+    );
+    const existsAtWider =
+      widePatternProbe.status === 'success' && widePatternProbe.data.result.length > 0;
+    return {
+      mode: 'pattern',
+      inputType: 'pattern_identity',
+      modeDetection: existsAtWider ? 'unresolved_historical' : 'unresolved',
+    };
   }
 
   // Raw log line → fuzzy substring match on the pattern label
@@ -654,10 +691,11 @@ async function resolveAnchor(
 async function lookupPatternMeta(
   env: EnvConfig,
   metricsEnv: string,
-  pattern: string
+  pattern: string,
+  window: string
 ): Promise<{ service?: string; severity?: string }> {
   try {
-    const q = `sum by (${LABELS.service}, ${LABELS.severity}) (rate(all_events_summaryVolume_total{${LABELS.env}="${metricsEnv}",${LABELS.pattern}="${escape(pattern)}"}[1h]))`;
+    const q = `sum by (${LABELS.service}, ${LABELS.severity}) (rate(all_events_summaryVolume_total{${LABELS.env}="${metricsEnv}",${LABELS.pattern}="${escape(pattern)}"}[${window}]))`;
     const res = await queryInstant(env, q);
     if (res.status === 'success' && res.data.result[0]) {
       return {
@@ -726,6 +764,13 @@ async function renderEnvironmentAudit(
         const rc = parsePrometheusValue(row);
         if (!Number.isFinite(rc)) continue;
         const pattern = row.metric[LABELS.pattern];
+        // Some series in Prometheus are missing the message_pattern label
+        // (ingest-side artifact — series gets written without it). Previously
+        // we rendered those as `undefined (service)` in the Top movers list,
+        // which is actively misleading: the operator tries to investigate
+        // "undefined" and hits a dead-end. Skip instead. Grok round-2 run
+        // surfaced this live on the otel-demo `payment` service.
+        if (!pattern) continue;
         const service = row.metric[LABELS.service] || 'unknown';
         rows.push({ pattern, service, rc });
       }

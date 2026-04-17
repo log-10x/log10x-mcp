@@ -27,6 +27,16 @@ export async function executeTopPatterns(
   args: { service?: string; timeRange: string; limit: number; analyzerCost: number },
   env: EnvConfig
 ): Promise<string> {
+  // Defensive defaults so the function is safe to call without the zod schema
+  // layer (direct callers, agentic harnesses, programmatic chains). Without
+  // these, `topk(undefined, …)` renders as `topk(, …)` and Prometheus returns
+  // "expected type scalar in aggregation parameter" — caught by Grok round-2
+  // run on otel-demo when it called log10x_top_patterns without `limit`.
+  // eslint-disable-next-line no-param-reassign
+  if (!args.timeRange) (args as Record<string, unknown>).timeRange = '7d';
+  if (!Number.isFinite(args.limit) || args.limit <= 0) {
+    (args as Record<string, unknown>).limit = 10;
+  }
   const tf = parseTimeframe(args.timeRange);
   const costPerGb = args.analyzerCost;
   const period = costPeriodLabel(tf.days);
