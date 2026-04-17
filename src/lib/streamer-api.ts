@@ -114,6 +114,38 @@ export interface StreamerBucket {
   labels?: Record<string, string>;
 }
 
+export interface StreamerQueryDiagnostics {
+  scanStats?: {
+    scanned: number;
+    matched: number;
+    skippedSearch: number;
+    skippedTemplate: number;
+    skippedDuplicate: number;
+  };
+  queryPlan?: {
+    templateHashes: number;
+    vars: number;
+    timeslice: number;
+    dispatch: string;
+  };
+  emptyReason?: string;
+  phaseTimingMs?: {
+    total: number;
+  };
+  streamDispatch?: {
+    requests: number;
+    objects: number;
+    blobs: number;
+  };
+  workerStats?: {
+    started: number;
+    complete: number;
+    totalFetchedBytes: number;
+    totalResultEvents: number;
+  };
+  errors?: string[];
+}
+
 export interface StreamerQueryResponse {
   queryId: string;
   target: string;
@@ -125,6 +157,7 @@ export interface StreamerQueryResponse {
     workerFiles: number;
     truncated: boolean;
   };
+  diagnostics?: StreamerQueryDiagnostics;
   events: StreamerEvent[];
 
   // Legacy-compatible fields populated client-side from `events` so that
@@ -443,7 +476,7 @@ export async function runStreamerQuery(
   const target = req.target || getDefaultTarget();
   const queryId = randomUUID();
   const pollMs = parseInt(process.env.LOG10X_STREAMER_POLL_MS || '1500', 10);
-  const timeoutMs = parseInt(process.env.LOG10X_STREAMER_TIMEOUT_MS || '90000', 10);
+  const timeoutMs = parseInt(process.env.LOG10X_STREAMER_TIMEOUT_MS || '30000', 10);
 
   // Minimal body format — matches the shape the engine's query-handler
   // actually expects (verified live on the otel-demo env 2026-04-15).
@@ -474,6 +507,8 @@ export async function runStreamerQuery(
     search: req.search || '',
     filters: req.filters || [],
     writeResults: true,
+    logLevels: 'INFO,PERF,ERROR,DEBUG',
+    logGroup: '/tenx/demo-streamer/query',
   };
 
   const started = Date.now();
@@ -567,6 +602,20 @@ export async function runStreamerQuery(
   const buckets = computeBuckets(finalEvents, req.bucketSize || '5m');
   const countSummary = computeCountSummary(finalEvents);
 
+  // Fetch CW diagnostics for the query (best-effort, non-blocking on failure)
+  let diagnostics: StreamerQueryDiagnostics | undefined;
+  try {
+    const logGroup = (body.logGroup as string) || process.env.LOG10X_STREAMER_LOG_GROUP;
+    if (logGroup) {
+      const cwEvents = await fetchQueryCWEvents(queryId, logGroup);
+      if (cwEvents.length > 0) {
+        diagnostics = buildDiagnostics(cwEvents);
+      }
+    }
+  } catch {
+    // CW polling is best-effort — don't fail the query response
+  }
+
   return {
     queryId,
     target,
@@ -578,6 +627,7 @@ export async function runStreamerQuery(
       workerFiles: jsonlKeys.length,
       truncated,
     },
+    diagnostics,
     events: finalEvents,
     format: req.format || 'events',
     buckets,
@@ -646,4 +696,189 @@ function computeCountSummary(events: StreamerEvent[]): StreamerQueryResponse['co
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// ---------------------------------------------------------------------------
+// CloudWatch Logs diagnostics — polls the query's CW log streams to extract
+// structured execution metadata (scan stats, query plan, errors, worker stats)
+// ---------------------------------------------------------------------------
+
+interface CWEvent {
+  level: string;
+  message: string;
+  data?: Record<string, number | string>;
+}
+
+/**
+ * Fetch all CloudWatch log events for a given queryId from the streamer's
+ * log group. Returns parsed CW events sorted by timestamp.
+ */
+export async function fetchQueryCWEvents(
+  queryId: string,
+  logGroup?: string,
+): Promise<CWEvent[]> {
+  const group = logGroup || process.env.LOG10X_STREAMER_LOG_GROUP || '/tenx/demo-streamer/query';
+
+  // List log streams matching the queryId prefix
+  let streams: string[];
+  try {
+    const { stdout } = await execFileP('aws', [
+      'logs', 'describe-log-streams',
+      '--log-group-name', group,
+      '--log-stream-name-prefix', `${queryId}/`,
+      '--no-paginate',
+    ], { maxBuffer: 10 * 1024 * 1024 });
+    const parsed = JSON.parse(stdout);
+    streams = (parsed.logStreams || []).map((s: { logStreamName: string }) => s.logStreamName);
+  } catch {
+    return [];
+  }
+
+  if (streams.length === 0) return [];
+
+  // Fetch events from all streams
+  const events: CWEvent[] = [];
+  for (const stream of streams) {
+    try {
+      const { stdout } = await execFileP('aws', [
+        'logs', 'get-log-events',
+        '--log-group-name', group,
+        '--log-stream-name', stream,
+        '--no-paginate',
+      ], { maxBuffer: 10 * 1024 * 1024 });
+      const parsed = JSON.parse(stdout);
+      for (const ev of parsed.events || []) {
+        try {
+          events.push(JSON.parse(ev.message) as CWEvent);
+        } catch {
+          // skip non-JSON events
+        }
+      }
+    } catch {
+      // skip inaccessible streams
+    }
+  }
+
+  return events;
+}
+
+/**
+ * Build diagnostics from CW events for a completed or timed-out query.
+ */
+export function buildDiagnostics(cwEvents: CWEvent[]): StreamerQueryDiagnostics {
+  const diag: StreamerQueryDiagnostics = {};
+  const errors: string[] = [];
+
+  let workersStarted = 0;
+  let workersComplete = 0;
+  let totalFetchedBytes = 0;
+  let totalResultEvents = 0;
+
+  for (const ev of cwEvents) {
+    const msg = ev.message;
+    const data = ev.data || {};
+
+    // Query plan
+    if (msg.startsWith('query plan:')) {
+      diag.queryPlan = {
+        templateHashes: (data.templateHashes as number) ?? 0,
+        vars: (data.vars as number) ?? 0,
+        timeslice: (data.timeslice as number) ?? 0,
+        dispatch: (data.dispatch as string) ?? 'unknown',
+      };
+    }
+
+    // Query empty
+    if (msg.startsWith('query empty:')) {
+      diag.emptyReason = (data.reason as string) || 'no_template_hashes_or_vars';
+    }
+
+    // Scan complete — aggregate across sub-queries
+    if (msg.startsWith('scan complete:')) {
+      if (!diag.scanStats) {
+        diag.scanStats = { scanned: 0, matched: 0, skippedSearch: 0, skippedTemplate: 0, skippedDuplicate: 0 };
+      }
+      diag.scanStats.scanned += (data.scanned as number) || 0;
+      diag.scanStats.matched += (data.matched as number) || 0;
+      diag.scanStats.skippedSearch += (data.skippedSearch as number) || 0;
+      diag.scanStats.skippedTemplate += (data.skippedTemplate as number) || 0;
+      diag.scanStats.skippedDuplicate += (data.skippedDuplicate as number) || 0;
+    }
+
+    // Stream dispatch
+    if (msg.startsWith('stream dispatch:')) {
+      if (!diag.streamDispatch) {
+        diag.streamDispatch = { requests: 0, objects: 0, blobs: 0 };
+      }
+      diag.streamDispatch.requests += (data.requests as number) || 0;
+      diag.streamDispatch.objects += (data.objects as number) || 0;
+      diag.streamDispatch.blobs += (data.blobs as number) || 0;
+    }
+
+    // Query complete — total elapsed
+    if (msg.startsWith('query complete:') && data.elapsedMs) {
+      diag.phaseTimingMs = { total: data.elapsedMs as number };
+    }
+
+    // Stream worker events
+    if (msg.startsWith('stream worker started:')) {
+      workersStarted++;
+    }
+    if (msg.startsWith('stream worker complete:')) {
+      workersComplete++;
+      totalFetchedBytes += (data.fetchedBytes as number) || 0;
+    }
+
+    // Results writer
+    if (msg.startsWith('results writer complete:')) {
+      totalResultEvents += (data.resultEvents as number) || 0;
+    }
+
+    // Errors
+    if (ev.level === 'ERROR') {
+      errors.push(msg);
+    }
+  }
+
+  if (workersStarted > 0 || workersComplete > 0) {
+    diag.workerStats = { started: workersStarted, complete: workersComplete, totalFetchedBytes, totalResultEvents };
+  }
+
+  if (errors.length > 0) {
+    diag.errors = errors;
+  }
+
+  return diag;
+}
+
+/**
+ * Generate a human-readable explanation for a zero-result query.
+ */
+export function explainZeroResults(diag: StreamerQueryDiagnostics): string {
+  if (diag.emptyReason) {
+    return 'The search expression produced no Bloom filter tokens (0 template hashes, 0 vars). ' +
+      'The field names in the search may not match any indexed enrichment fields or text patterns.';
+  }
+
+  if (diag.scanStats) {
+    if (diag.scanStats.scanned === 0) {
+      return 'No index objects found for the target/time range. ' +
+        'The indexer may not have processed data for this time window yet.';
+    }
+    if (diag.scanStats.matched === 0) {
+      return `The Bloom filter scanned ${diag.scanStats.scanned} index objects and none matched. ` +
+        `${diag.scanStats.skippedSearch} skipped by search filter, ${diag.scanStats.skippedTemplate} by template filter. ` +
+        'The search tokens may not exist in the archive for this time range.';
+    }
+    if (diag.scanStats.matched > 0 && (!diag.workerStats || diag.workerStats.totalResultEvents === 0)) {
+      return `The Bloom filter matched ${diag.scanStats.matched} index objects, but stream workers found 0 matching events after decoding. ` +
+        'This means the Bloom filter had false positives — the search tokens exist in the index but the actual events do not match the full search expression.';
+    }
+  }
+
+  if (diag.errors && diag.errors.length > 0) {
+    return `Query encountered ${diag.errors.length} error(s): ${diag.errors[0]}`;
+  }
+
+  return 'Query returned 0 events. Check that the search expression, time range, and target match indexed data.';
 }

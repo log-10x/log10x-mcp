@@ -21,6 +21,7 @@ import {
   runStreamerQuery,
   isStreamerConfigured,
   normalizeTimeExpression,
+  explainZeroResults,
   type StreamerQueryRequest,
   type StreamerEvent,
 } from '../lib/streamer-api.js';
@@ -128,6 +129,33 @@ export async function executeStreamerQuery(
       `${resp.execution.wallTimeMs}ms wall time` +
       (resp.execution.truncated ? ` · _truncated_` : '')
   );
+
+  // Append diagnostics summary if available
+  if (resp.diagnostics) {
+    const d = resp.diagnostics;
+    if (d.scanStats) {
+      lines.push(
+        `**Scan**: ${fmtCount(d.scanStats.scanned)} index objects · ` +
+          `${fmtCount(d.scanStats.matched)} matched · ` +
+          `${fmtCount(d.scanStats.skippedSearch)} skipped (search) · ` +
+          `${fmtCount(d.scanStats.skippedTemplate)} skipped (template)`
+      );
+    }
+    if (d.streamDispatch) {
+      lines.push(
+        `**Stream**: ${d.streamDispatch.requests} dispatch requests · ` +
+          `${d.streamDispatch.objects} objects · ` +
+          `${d.streamDispatch.blobs} target blobs`
+      );
+    }
+    if (d.workerStats) {
+      lines.push(
+        `**Workers**: ${d.workerStats.complete}/${d.workerStats.started} complete · ` +
+          `${fmtCount(d.workerStats.totalFetchedBytes)} bytes fetched · ` +
+          `${fmtCount(d.workerStats.totalResultEvents)} result events`
+      );
+    }
+  }
   lines.push('');
 
   if (args.format === 'count') {
@@ -156,9 +184,20 @@ export async function executeStreamerQuery(
     );
   }
   if (events.length === 0) {
-    lines.push(
-      '_Streamer returned zero events. Verify the search expression matches at least one real value, check the window, or widen the filter._'
-    );
+    const explanation = resp.diagnostics
+      ? explainZeroResults(resp.diagnostics)
+      : 'Verify the search expression matches at least one real value, check the window, or widen the filter.';
+    lines.push(`_Streamer returned zero events. ${explanation}_`);
+
+    // Append scan stats if available for transparency
+    if (resp.diagnostics?.scanStats) {
+      const s = resp.diagnostics.scanStats;
+      lines.push(`_Scan: ${s.scanned} index objects scanned, ${s.matched} matched, ${s.skippedSearch} skipped by search, ${s.skippedTemplate} by template_`);
+    }
+    if (resp.diagnostics?.queryPlan) {
+      const p = resp.diagnostics.queryPlan;
+      lines.push(`_Plan: ${p.templateHashes} template hashes, ${p.vars} var sets, dispatch=${p.dispatch}_`);
+    }
   }
 
   if (resp.execution.truncated) {
