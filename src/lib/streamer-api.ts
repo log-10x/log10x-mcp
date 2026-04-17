@@ -27,12 +27,13 @@
  * LOG10X_STREAMER_AUTH_VALUE if the deployment uses a different scheme.
  */
 
-import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { promisify } from 'node:util';
+import {
+  S3Client,
+  ListObjectsV2Command,
+  GetObjectCommand,
+} from '@aws-sdk/client-s3';
 import type { EnvConfig } from './environments.js';
-
-const execFileP = promisify(execFile);
 
 export class StreamerNotConfiguredError extends Error {
   constructor() {
@@ -114,77 +115,17 @@ export interface StreamerBucket {
   labels?: Record<string, string>;
 }
 
-/**
- * Execution diagnostics for a streamer query, built from CloudWatch Logs events.
- *
- * Field guide (how to diagnose a 0-event result):
- *   - queryPlan missing        → query submission failed or CW events not visible yet
- *   - emptyReason present      → search expression produced no parseable tokens
- *   - scanStats missing        → no sub-queries reported scan completion (likely no
- *                                index data for the time range, i.e. stale indexer)
- *   - scanStats.matched === 0  → Bloom filter rejected every index object
- *   - scanStats.matched > 0 but
- *     workerStats.totalResultEvents === 0
- *                              → Bloom false positives OR workers timed out
- *   - workerStats.complete < started
- *                              → some workers still running when MCP polled
- *   - pollingError present     → CW polling failed; diagnostics are incomplete
- *   - partialResults === true  → MCP poll timeout hit; server query may still be running
- */
-export interface StreamerQueryDiagnostics {
-  /** Coordinator's query plan. Present if the main query log stream was readable. */
-  queryPlan?: {
-    templateHashes: number;
-    vars: number;
-    timeslice: number;
-    dispatch: 'local' | 'remote' | 'unknown';
-  };
-  /** Populated when isEmptyQuery() returned true — no parseable search tokens. */
-  emptyReason?: string;
-  /** Aggregated Bloom filter scan stats across all sub-queries. */
-  scanStats?: {
-    scanned: number;
-    matched: number;
-    skippedSearch: number;
-    skippedTemplate: number;
-    skippedDuplicate: number;
-  };
-  /**
-   * Coordinator's view of stream dispatch. Represents SQS send() calls, NOT
-   * worker completion. Use workerStats for actual worker execution.
-   */
-  streamDispatch?: {
-    requests: number;
-    objects: number;
-    blobs: number;
-  };
-  /**
-   * Stream worker execution. `started` and `complete` are counted from CW events,
-   * so they reflect CW visibility, not necessarily ground truth if CW buffer hasn't
-   * flushed. If complete < started, some workers were still running when polled.
-   */
-  workerStats?: {
-    started: number;
-    complete: number;
-    totalFetchedBytes: number;
-    totalResultEvents: number;
-  };
-  /** Main coordinator pipeline elapsed time (NOT full query wall time). */
-  coordinatorElapsedMs?: number;
-  /** ERROR-level CW events from any pipeline component. */
-  errors?: string[];
-  /**
-   * True when the MCP's S3 marker poll timed out before the server query finished.
-   * The server query may still be running and writing more results. Call
-   * log10x_streamer_query_status with this queryId for an updated snapshot.
-   */
-  partialResults?: boolean;
-  /**
-   * If CW polling itself failed (AWS CLI missing, access denied, log group wrong),
-   * the reason is reported here. Diagnostics are incomplete when set.
-   */
-  pollingError?: string;
-}
+// StreamerQueryDiagnostics, buildDiagnostics, explainZeroResults,
+// getStreamerQueryStatus live in ./streamer-diagnostics. Re-exported below
+// for backward compatibility with existing tool imports.
+export {
+  buildDiagnostics,
+  explainZeroResults,
+  getStreamerQueryStatus,
+} from './streamer-diagnostics.js';
+export type { StreamerQueryDiagnostics } from './streamer-diagnostics.js';
+import type { StreamerQueryDiagnostics } from './streamer-diagnostics.js';
+import { attachDiagnostics } from './streamer-diagnostics.js';
 
 export interface StreamerQueryResponse {
   queryId: string;
@@ -340,42 +281,47 @@ interface S3ListEntry {
   Size: number;
 }
 
+// Lazy S3 client — instantiated on first use so CLI invocations that never
+// touch the streamer don't pay the SDK load cost.
+let _s3Client: S3Client | undefined;
+function s3Client(): S3Client {
+  if (!_s3Client) {
+    _s3Client = new S3Client({
+      region: process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || 'us-east-1',
+    });
+  }
+  return _s3Client;
+}
+
 async function s3List(bucket: string, prefix: string): Promise<S3ListEntry[]> {
   try {
-    const { stdout } = await execFileP('aws', [
-      's3api',
-      'list-objects-v2',
-      '--bucket',
-      bucket,
-      '--prefix',
-      prefix,
-      '--output',
-      'json',
-    ], { maxBuffer: 32 * 1024 * 1024 });
-
-    if (!stdout.trim()) return [];
-    const parsed = JSON.parse(stdout) as { Contents?: S3ListEntry[] };
-    return parsed.Contents || [];
+    const entries: S3ListEntry[] = [];
+    let continuationToken: string | undefined;
+    do {
+      const resp = await s3Client().send(new ListObjectsV2Command({
+        Bucket: bucket,
+        Prefix: prefix,
+        ContinuationToken: continuationToken,
+      }));
+      for (const obj of resp.Contents || []) {
+        if (obj.Key) entries.push({ Key: obj.Key, Size: obj.Size ?? 0 });
+      }
+      continuationToken = resp.IsTruncated ? resp.NextContinuationToken : undefined;
+    } while (continuationToken);
+    return entries;
   } catch (e) {
-    // list-objects-v2 returns empty stdout when the prefix has no keys;
-    // only real failures raise.
-    const err = e as { stderr?: string; message?: string };
-    const stderr = err.stderr || err.message || '';
-    if (stderr.includes('NoSuchBucket')) {
+    const name = (e as { name?: string }).name || '';
+    if (name === 'NoSuchBucket') {
       throw new Error(`Streamer bucket does not exist: ${bucket}`);
     }
-    throw new Error(`aws s3api list-objects-v2 failed: ${stderr.slice(0, 400)}`);
+    throw new Error(`S3 list failed on ${bucket}/${prefix}: ${(e as Error).message.slice(0, 400)}`);
   }
 }
 
 async function s3Get(bucket: string, key: string): Promise<string> {
-  const { stdout } = await execFileP('aws', [
-    's3',
-    'cp',
-    `s3://${bucket}/${key}`,
-    '-',
-  ], { maxBuffer: 64 * 1024 * 1024 });
-  return stdout;
+  const resp = await s3Client().send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+  if (!resp.Body) return '';
+  return await resp.Body.transformToString('utf-8');
 }
 
 function parseJsonl(content: string): StreamerEvent[] {
@@ -742,268 +688,3 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// ---------------------------------------------------------------------------
-// CloudWatch Logs diagnostics — polls the query's CW log streams to extract
-// structured execution metadata (scan stats, query plan, errors, worker stats)
-// ---------------------------------------------------------------------------
-
-interface CWEvent {
-  level: string;
-  message: string;
-  data?: Record<string, number | string>;
-  /** CW event timestamp in ms. */
-  ts: number;
-}
-
-const CW_POLL_CONCURRENCY = 8;
-const CW_POLL_MAX_STREAMS = 500;
-
-/**
- * Fetch CloudWatch log events for a given queryId, bounded by an optional
- * time window. Streams are listed by prefix, events fetched in parallel.
- *
- * @throws PollingError when AWS CLI is missing or the log group is inaccessible
- */
-async function fetchQueryCWEvents(
-  queryId: string,
-  logGroup: string,
-  startTimeMs?: number,
-): Promise<CWEvent[]> {
-  // List log streams matching the queryId prefix (fail loud — caller decides fallback)
-  const listArgs = [
-    'logs', 'describe-log-streams',
-    '--log-group-name', logGroup,
-    '--log-stream-name-prefix', `${queryId}/`,
-    '--no-paginate',
-  ];
-  const { stdout: listOut } = await execFileP('aws', listArgs, { maxBuffer: 10 * 1024 * 1024 });
-  const listed = JSON.parse(listOut);
-  const streams: string[] = (listed.logStreams || [])
-    .map((s: { logStreamName: string }) => s.logStreamName)
-    .slice(0, CW_POLL_MAX_STREAMS);
-
-  if (streams.length === 0) return [];
-
-  // Fetch all streams in bounded parallelism
-  const events: CWEvent[] = [];
-  const getArgsBase = [
-    'logs', 'get-log-events',
-    '--log-group-name', logGroup,
-    '--no-paginate',
-    '--start-from-head',
-    ...(startTimeMs ? ['--start-time', String(startTimeMs)] : []),
-  ];
-
-  const queue = [...streams];
-  const workers: Promise<void>[] = [];
-  for (let i = 0; i < Math.min(CW_POLL_CONCURRENCY, queue.length); i++) {
-    workers.push((async () => {
-      while (queue.length > 0) {
-        const stream = queue.shift();
-        if (!stream) break;
-        try {
-          const { stdout } = await execFileP(
-            'aws',
-            [...getArgsBase, '--log-stream-name', stream],
-            { maxBuffer: 10 * 1024 * 1024 },
-          );
-          const parsed = JSON.parse(stdout);
-          for (const ev of parsed.events || []) {
-            try {
-              const body = JSON.parse(ev.message) as Omit<CWEvent, 'ts'>;
-              events.push({ ...body, ts: ev.timestamp });
-            } catch {
-              // skip non-JSON event bodies
-            }
-          }
-        } catch {
-          // per-stream failures are tolerated (stream may be empty or mid-write)
-        }
-      }
-    })());
-  }
-  await Promise.all(workers);
-
-  events.sort((a, b) => a.ts - b.ts);
-  return events;
-}
-
-/**
- * Build diagnostics from CW events. Deterministic: each event contributes
- * to exactly one field so aggregation is idempotent across re-polls.
- */
-export function buildDiagnostics(cwEvents: CWEvent[]): StreamerQueryDiagnostics {
-  const diag: StreamerQueryDiagnostics = {};
-  const errors: string[] = [];
-
-  let workersStarted = 0;
-  let workersComplete = 0;
-  let totalFetchedBytes = 0;
-  let totalResultEvents = 0;
-
-  for (const ev of cwEvents) {
-    const msg = ev.message;
-    const data = ev.data || {};
-
-    if (msg.startsWith('query plan:')) {
-      const dispatch = data.dispatch as string;
-      diag.queryPlan = {
-        templateHashes: (data.templateHashes as number) ?? 0,
-        vars: (data.vars as number) ?? 0,
-        timeslice: (data.timeslice as number) ?? 0,
-        dispatch: (dispatch === 'local' || dispatch === 'remote') ? dispatch : 'unknown',
-      };
-    } else if (msg.startsWith('query empty:')) {
-      diag.emptyReason = (data.reason as string) || 'no_template_hashes_or_vars';
-    } else if (msg.startsWith('scan complete:')) {
-      if (!diag.scanStats) {
-        diag.scanStats = { scanned: 0, matched: 0, skippedSearch: 0, skippedTemplate: 0, skippedDuplicate: 0 };
-      }
-      diag.scanStats.scanned += (data.scanned as number) || 0;
-      diag.scanStats.matched += (data.matched as number) || 0;
-      diag.scanStats.skippedSearch += (data.skippedSearch as number) || 0;
-      diag.scanStats.skippedTemplate += (data.skippedTemplate as number) || 0;
-      diag.scanStats.skippedDuplicate += (data.skippedDuplicate as number) || 0;
-    } else if (msg.startsWith('stream dispatch:')) {
-      if (!diag.streamDispatch) {
-        diag.streamDispatch = { requests: 0, objects: 0, blobs: 0 };
-      }
-      diag.streamDispatch.requests += (data.requests as number) || 0;
-      diag.streamDispatch.objects += (data.objects as number) || 0;
-      diag.streamDispatch.blobs += (data.blobs as number) || 0;
-    } else if (msg.startsWith('query complete:') && data.elapsedMs !== undefined) {
-      // Only record the FIRST (main coordinator) "query complete" we see.
-      // Sub-queries also emit this but with shorter elapsed values.
-      if (diag.coordinatorElapsedMs === undefined) {
-        diag.coordinatorElapsedMs = data.elapsedMs as number;
-      }
-    } else if (msg.startsWith('stream worker started:')) {
-      workersStarted++;
-    } else if (msg.startsWith('stream worker complete:')) {
-      workersComplete++;
-      totalFetchedBytes += (data.fetchedBytes as number) || 0;
-    } else if (msg.startsWith('results writer complete:')) {
-      totalResultEvents += (data.resultEvents as number) || 0;
-    }
-
-    if (ev.level === 'ERROR') {
-      errors.push(msg);
-    }
-  }
-
-  if (workersStarted > 0 || workersComplete > 0) {
-    diag.workerStats = { started: workersStarted, complete: workersComplete, totalFetchedBytes, totalResultEvents };
-  }
-
-  if (errors.length > 0) {
-    diag.errors = errors;
-  }
-
-  return diag;
-}
-
-/**
- * Populate diagnostics into the response object. CW polling failures surface
- * as `diagnostics.pollingError`, not silent undefined.
- */
-async function attachDiagnostics(
-  resp: StreamerQueryResponse,
-  queryStartTimeMs: number,
-): Promise<void> {
-  const logGroup = process.env.LOG10X_STREAMER_LOG_GROUP;
-  if (!logGroup) {
-    resp.diagnostics = { pollingError: 'LOG10X_STREAMER_LOG_GROUP not set; diagnostics unavailable.' };
-    return;
-  }
-
-  try {
-    const cwEvents = await fetchQueryCWEvents(resp.queryId, logGroup, queryStartTimeMs);
-    resp.diagnostics = buildDiagnostics(cwEvents);
-  } catch (e) {
-    resp.diagnostics = {
-      pollingError: `CW polling failed: ${(e as Error).message.slice(0, 200)}`,
-    };
-  }
-}
-
-/**
- * Look up current execution diagnostics for a previously-submitted queryId.
- * Use this after runStreamerQuery returns `partialResults: true` to check
- * whether the server query has finished.
- *
- * @throws on CW polling failure — caller decides how to handle
- */
-export async function getStreamerQueryStatus(
-  queryId: string,
-  queryStartTimeMs: number,
-): Promise<StreamerQueryDiagnostics> {
-  const logGroup = process.env.LOG10X_STREAMER_LOG_GROUP;
-  if (!logGroup) {
-    return { pollingError: 'LOG10X_STREAMER_LOG_GROUP not set; diagnostics unavailable.' };
-  }
-  try {
-    const cwEvents = await fetchQueryCWEvents(queryId, logGroup, queryStartTimeMs);
-    return buildDiagnostics(cwEvents);
-  } catch (e) {
-    return { pollingError: `CW polling failed: ${(e as Error).message.slice(0, 200)}` };
-  }
-}
-
-/**
- * Generate a human-readable explanation for a zero-result query.
- * Returns null when no specific explanation can be derived — callers should
- * fall back to a generic message.
- */
-export function explainZeroResults(diag: StreamerQueryDiagnostics): string | null {
-  if (diag.pollingError) {
-    return `Diagnostics unavailable: ${diag.pollingError}`;
-  }
-
-  if (diag.emptyReason) {
-    return 'The search expression produced no Bloom filter tokens (0 template hashes, 0 vars). ' +
-      'The field names in the search may not match any indexed enrichment fields or text patterns.';
-  }
-
-  if (diag.errors && diag.errors.length > 0) {
-    return `Query encountered ${diag.errors.length} error(s): ${diag.errors[0]}`;
-  }
-
-  if (diag.scanStats) {
-    if (diag.scanStats.scanned === 0) {
-      return 'No index objects found for the target/time range. ' +
-        'The indexer may not have processed data for this time window yet.';
-    }
-    if (diag.scanStats.matched === 0) {
-      return `The Bloom filter scanned ${diag.scanStats.scanned} index objects and none matched. ` +
-        `${diag.scanStats.skippedSearch} skipped by search filter, ${diag.scanStats.skippedTemplate} by template filter. ` +
-        'The search tokens do not exist in the archive for this time range.';
-    }
-    // Bloom matched but no result events — distinguish timeout from false-positive
-    if (diag.scanStats.matched > 0 && (!diag.workerStats || diag.workerStats.totalResultEvents === 0)) {
-      if (diag.workerStats && diag.workerStats.complete < diag.workerStats.started) {
-        return `The Bloom filter matched ${diag.scanStats.matched} index objects and ${diag.workerStats.started} workers were dispatched, ` +
-          `but only ${diag.workerStats.complete} completed before the poll timed out. Results may still be arriving — ` +
-          'call log10x_streamer_query_status for an updated snapshot.';
-      }
-      return `The Bloom filter matched ${diag.scanStats.matched} index objects, but stream workers decoded 0 matching events. ` +
-        'Most likely cause: Bloom filter false positives — the search tokens exist in the index but the actual events do not match the full search expression.';
-    }
-  }
-
-  // queryPlan present but no scanStats — sub-queries dispatched but none reported scan completion.
-  // Note: this inference is weaker than the direct scanStats.scanned===0 case. Possible causes:
-  // no index objects in range, SQS delivery failed, CW buffer not flushed, sub-query crashed.
-  if (diag.queryPlan && !diag.scanStats) {
-    return 'Query ran but no sub-query reported scan completion. Likely causes (in order of probability): ' +
-      '(a) no index objects exist for the time range — try an older window or verify the indexer is running; ' +
-      '(b) sub-queries are still executing and CW events have not flushed yet — retry status poll; ' +
-      '(c) SQS dispatch failed — check streamer logs.';
-  }
-
-  if (diag.partialResults) {
-    return 'MCP poll timeout reached before the server query completed. Some results may still be written to S3. ' +
-      'Call log10x_streamer_query_status for an updated snapshot.';
-  }
-
-  return null;
-}

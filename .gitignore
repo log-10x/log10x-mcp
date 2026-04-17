@@ -6,3 +6,7 @@ test-build/
 .env
 .npmrc
 smoke-test.mjs
+# Ephemeral debug scratches in the repo root litter git status.
+# Real tests live in test/ (unit) or scripts/ (integration / smoke).
+test-*.mjs
+!test-agent-scorer.mjs

@@ -71,6 +71,16 @@ function evictExpired(): void {
   }
 }
 
+/** Drop a specific investigation from the cache. Returns true if evicted. */
+export function invalidateInvestigation(investigationId: string): boolean {
+  return entries.delete(investigationId);
+}
+
+/** Drop all cached investigations. Use after schema changes, env rotation, etc. */
+export function clearInvestigations(): void {
+  entries.clear();
+}
+
 /** Clear the cache — exposed for tests. */
 export function clearInvestigationsForTest(): void {
   entries.clear();

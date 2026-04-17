@@ -79,6 +79,37 @@ const COST_REFRESH_MS = 3_600_000; // 1 hour
  * the raw error message is logged at debug level before `describeToolError`
  * rewrites it, so ops can see the original text when hunting root causes.
  */
+// Per-process tool call stats — exposed via log10x_mcp_stats meta tool.
+interface ToolStat {
+  calls: number;
+  errors: number;
+  totalMs: number;
+  maxMs: number;
+  lastErrorMs?: number;
+  lastErrorMsg?: string;
+}
+const toolStats = new Map<string, ToolStat>();
+
+function recordToolCall(toolName: string, ms: number, err?: Error): void {
+  let s = toolStats.get(toolName);
+  if (!s) {
+    s = { calls: 0, errors: 0, totalMs: 0, maxMs: 0 };
+    toolStats.set(toolName, s);
+  }
+  s.calls++;
+  s.totalMs += ms;
+  if (ms > s.maxMs) s.maxMs = ms;
+  if (err) {
+    s.errors++;
+    s.lastErrorMs = Date.now();
+    s.lastErrorMsg = err.message.slice(0, 200);
+  }
+}
+
+export function getToolStats(): Array<{ name: string; stats: ToolStat }> {
+  return Array.from(toolStats.entries()).map(([name, stats]) => ({ name, stats }));
+}
+
 function wrap(
   toolName: string,
   fn: () => Promise<string>
@@ -86,13 +117,17 @@ function wrap(
   const started = Date.now();
   return fn()
     .then((text) => {
-      log.info(`tool.${toolName}.ok`, { ms: Date.now() - started });
+      const ms = Date.now() - started;
+      recordToolCall(toolName, ms);
+      log.info(`tool.${toolName}.ok`, { ms });
       return { content: [{ type: 'text' as const, text }] };
     })
     .catch((e) => {
-      const raw = e instanceof Error ? e.message : String(e);
-      log.debug(`tool.${toolName}.raw_err`, { msg: raw });
-      log.warn(`tool.${toolName}.err`, { ms: Date.now() - started, msg: raw });
+      const ms = Date.now() - started;
+      const err = e instanceof Error ? e : new Error(String(e));
+      recordToolCall(toolName, ms, err);
+      log.debug(`tool.${toolName}.raw_err`, { msg: err.message });
+      log.warn(`tool.${toolName}.err`, { ms, msg: err.message });
       return {
         content: [{ type: 'text' as const, text: describeToolError(toolName, e) }],
         isError: true,
@@ -487,6 +522,34 @@ server.tool(
     wrap('log10x_translate_metric_to_patterns', async () => {
       const env = resolveEnv(getEnvs(), args.environment);
       return executeTranslateMetricToPatterns(args, env);
+    })
+);
+
+// ── Tool: log10x_mcp_stats (meta) ──
+
+server.tool(
+  'log10x_mcp_stats',
+  'MCP self-observability. Returns per-tool call count, error count, average and max latency for this MCP server process. No arguments. Use when debugging tool performance, or when the user asks "which tool is slow" / "are any tools erroring". Stats are in-process only — they reset when the MCP server restarts.',
+  {} as Record<string, never>,
+  () =>
+    wrap('log10x_mcp_stats', async () => {
+      const stats = getToolStats();
+      if (stats.length === 0) return 'No tool calls have been made in this MCP server session yet.';
+
+      const lines: string[] = [];
+      lines.push('## MCP tool stats (this process)');
+      lines.push('');
+      lines.push('| Tool | Calls | Errors | Avg ms | Max ms | Last error |');
+      lines.push('|------|------:|-------:|-------:|-------:|------------|');
+      const sorted = [...stats].sort((a, b) => b.stats.calls - a.stats.calls);
+      for (const { name, stats: s } of sorted) {
+        const avg = s.calls > 0 ? Math.round(s.totalMs / s.calls) : 0;
+        const lastErr = s.lastErrorMsg
+          ? `${Math.round((Date.now() - (s.lastErrorMs || 0)) / 1000)}s ago: ${s.lastErrorMsg.slice(0, 60)}`
+          : '—';
+        lines.push(`| ${name} | ${s.calls} | ${s.errors} | ${avg} | ${s.maxMs} | ${lastErr} |`);
+      }
+      return lines.join('\n');
     })
 );
 
