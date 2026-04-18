@@ -48,6 +48,7 @@ import {
   translateMetricToPatternsSchema,
   executeTranslateMetricToPatterns,
 } from './tools/translate-metric-to-patterns.js';
+import { validateSchema, executeValidate } from './tools/validate.js';
 import { getStatus } from './resources/status.js';
 
 // ── Environment + cost cache ──
@@ -478,6 +479,15 @@ server.tool(
       const env = resolveEnv(getEnvs(), args.environment);
       return executeTranslateMetricToPatterns(args, env);
     })
+);
+
+// ── Tool: log10x_validate (v1.4) ──
+
+server.tool(
+  'log10x_validate',
+  'Test-drive a Log10x pipeline config change LOCALLY before deploying. Pipe sample event lines through `tenx @apps/mcp` with caller-supplied JS/YAML modules mounted on top of the shipped config tree. Returns structured output: emitted templates, encoded events, TenXConsole.log lines from the mounted code, and stderr. Use when drafting a new object constructor, a custom groupFilter helper, or any pipeline-config change where you want proof-of-behavior before pushing to a branch or restarting a pod. Runs fully local — no network, no cluster. Requires the `tenx` CLI on PATH and the workspace config tree on disk (set LOG10X_TENX_CONFIG_ROOT / LOG10X_TENX_MODULES_ROOT).',
+  validateSchema,
+  (args) => wrap('log10x_validate', async () => executeValidate(args))
 );
 
 // ── Resource: log10x://status ──
