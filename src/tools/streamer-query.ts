@@ -24,6 +24,7 @@ import {
   type StreamerQueryRequest,
   type StreamerEvent,
 } from '../lib/streamer-api.js';
+import { explainZeroResults, type StreamerQueryDiagnostics } from '../lib/streamer-diagnostics.js';
 import { fmtCount } from '../lib/format.js';
 
 export const streamerQuerySchema = {
@@ -128,6 +129,7 @@ export async function executeStreamerQuery(
       `${resp.execution.wallTimeMs}ms wall time` +
       (resp.execution.truncated ? ` · _truncated_` : '')
   );
+  renderDiagnostics(resp.diagnostics, resp.execution.eventsMatched, lines);
   lines.push('');
 
   if (args.format === 'count') {
@@ -380,4 +382,60 @@ export function streamerNotConfiguredMessage(): string {
     '',
     "**Without the Streamer**: for in-retention retrieval, use the customer's SIEM directly. For long-window retrieval outside SIEM retention, the Streamer is the only supported path.",
   ].join('\n');
+}
+
+/**
+ * Append execution diagnostics (Bloom scan counts, worker stats, classification
+ * reason) to the output. Runs post-response using CloudWatch-sourced events.
+ * Renders nothing when diagnostics were unavailable and the query succeeded —
+ * noisy lines are only useful when something went wrong.
+ */
+function renderDiagnostics(
+  diag: StreamerQueryDiagnostics | undefined,
+  eventsMatched: number,
+  lines: string[],
+): void {
+  if (!diag) return;
+
+  if (diag.pollingError) {
+    lines.push(`**Diagnostics**: _unavailable — ${diag.pollingError}_`);
+    return;
+  }
+
+  const parts: string[] = [];
+  if (diag.scanStats) {
+    parts.push(
+      `scanned=${diag.scanStats.scanned} matched=${diag.scanStats.matched} ` +
+        `skippedSearch=${diag.scanStats.skippedSearch} skippedTemplate=${diag.scanStats.skippedTemplate}`,
+    );
+  }
+  if (diag.streamDispatch) {
+    parts.push(
+      `streamRequests=${diag.streamDispatch.requests} streamObjects=${diag.streamDispatch.objects} streamBlobs=${diag.streamDispatch.blobs}`,
+    );
+  }
+  if (diag.workerStats) {
+    parts.push(
+      `workers=${diag.workerStats.complete}/${diag.workerStats.started} workerEvents=${diag.workerStats.totalResultEvents}`,
+    );
+  }
+  if (diag.partialResults) parts.push('partialResults=true');
+
+  if (parts.length > 0) {
+    lines.push(`**Diagnostics**: ${parts.join(' · ')}`);
+  }
+
+  // On zero-result queries, add a classification sentence derived from the
+  // diagnostics — this is the whole point: distinguish bloom-miss from
+  // stale-indexer from field-not-indexed.
+  if (eventsMatched === 0) {
+    const reason = explainZeroResults(diag);
+    if (reason) {
+      lines.push(`**Why zero events**: ${reason}`);
+    }
+  }
+
+  if (diag.errors && diag.errors.length > 0) {
+    lines.push(`**Errors**: ${diag.errors.length} logged — first: ${diag.errors[0]}`);
+  }
 }

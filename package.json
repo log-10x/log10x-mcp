@@ -42,6 +42,7 @@
     "url": "https://github.com/log-10x/log10x-mcp/issues"
   },
   "dependencies": {
+    "@aws-sdk/client-cloudwatch-logs": "^3.1032.0",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "zod": "^3.24.4"
   },
