@@ -100,24 +100,38 @@ export interface ValidateRunOptions {
   timeout_ms?: number;
 }
 
+// Defaults point at canonical git-clone locations under /git/l1x-co. Each
+// env var can override. The /git clones are the source of truth — the
+// eclipse-workspace copies are legacy mirrors during wean-off and should
+// NOT be referenced by default from a tool that publishes structured
+// diagnostics. Caller env-var override still supported for non-default
+// local checkouts.
 function configRoot(): string {
   return (
     process.env.LOG10X_TENX_CONFIG_ROOT ||
-    '/Users/talweiss/eclipse-workspace/l1x-co/config/config'
+    '/Users/talweiss/git/l1x-co/config'
   );
 }
 
 function modulesRoot(): string {
   return (
     process.env.LOG10X_TENX_MODULES_ROOT ||
-    '/Users/talweiss/eclipse-workspace/l1x-co/config/modules'
+    '/Users/talweiss/git/l1x-co/modules'
   );
 }
 
 function symbolsPath(): string {
+  // Symbol library files (`symbols.csv`, `symbols.10x.json`) are *generated*
+  // by `tenx @apps/compile`, not committed to the config repo — the dir
+  // under /git/.../config/data/shared/symbols/ is .gitignored on purpose.
+  // Default to the eclipse workspace's generated copy at
+  // `/eclipse-workspace/l1x-co/config/config/shared/symbols/` because that
+  // location persists compile output across dev sessions. Override with
+  // LOG10X_TENX_SYMBOLS_PATH if the caller keeps symbols elsewhere, or
+  // run `tenx @apps/compile` first to seed a fresh location.
   return (
     process.env.LOG10X_TENX_SYMBOLS_PATH ||
-    '/Users/talweiss/eclipse-workspace/l1x-co/config/data/shared/symbols'
+    '/Users/talweiss/eclipse-workspace/l1x-co/config/config/shared/symbols'
   );
 }
 
