@@ -73,6 +73,12 @@ export const streamerQuerySchema = {
     .string()
     .default('5m')
     .describe('Bucket size when format=aggregated or ephemeral_series. Examples: `1m`, `5m`, `1h`, `1d`.'),
+  debug: z
+    .boolean()
+    .default(false)
+    .describe(
+      'Escalate CW log level to DEBUG for THIS query only. Enables per-blob Bloom decisions, per-fetch S3 reads, per-event results-writer samples. Use ONLY when diagnostics from a normal run are insufficient to explain a 0-result or truncated outcome — volume is ~100x higher. Default false.'
+    ),
   environment: z.string().optional().describe('Environment nickname — required if multi-env.'),
 };
 
@@ -86,6 +92,7 @@ export async function executeStreamerQuery(
     limit: number;
     format: 'events' | 'count' | 'aggregated' | 'ephemeral_series';
     bucket_size: string;
+    debug?: boolean;
     environment?: string;
   },
   env: EnvConfig
@@ -108,6 +115,7 @@ export async function executeStreamerQuery(
     filters: args.filters,
     target: args.target,
     limit: args.limit,
+    logLevels: args.debug ? 'ERROR,INFO,PERF,DEBUG' : undefined,
   };
 
   const resp = await runStreamerQuery(env, req);

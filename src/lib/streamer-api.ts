@@ -74,6 +74,14 @@ export interface StreamerQueryRequest {
   processingTimeMs?: number;
   /** Max bytes the engine will ship before terminating. */
   resultSizeBytes?: number;
+  /**
+   * Per-query CW log-level filter. Comma-separated subset of
+   * `ERROR,INFO,PERF,DEBUG`. Defaults (undefined) to all-except-DEBUG
+   * server-side. Set to `ERROR,INFO,PERF,DEBUG` to enable per-blob Bloom
+   * decisions, per-fetch S3 reads, and per-event results-writer samples
+   * for root-cause analysis. Maps to the engine's `logLevels` REST body field.
+   */
+  logLevels?: string;
 
   // ── Legacy fields kept for call-site compatibility. The engine contract
   //    no longer uses `pattern` (the Bloom filter uses `search`), and
@@ -483,6 +491,10 @@ export async function runStreamerQuery(
     filters: req.filters || [],
     writeResults: true,
   };
+
+  if (req.logLevels) {
+    body.logLevels = req.logLevels;
+  }
 
   const started = Date.now();
   await submitQuery(env, body);
