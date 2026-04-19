@@ -82,9 +82,21 @@ export async function extractPatterns(
     // Fail fast if tenx isn't installed — don't silently degrade.
     // The DevCliNotInstalledError shape has a user-actionable install hint.
   }
-  const lines = events
-    .map((e) => coerceToLine(e))
-    .filter((l) => l && l.trim().length > 0);
+  // Pair each line with an "enrichment" record extracted from the envelope
+  // before we drop it. Fluent-bit / k8s envelopes carry service and severity
+  // labels the templated text loses, so we keep them alongside for later
+  // aggregation into per-pattern service/severity.
+  const pairs = events
+    .map((e) => {
+      const line = coerceToLine(e);
+      const enrichment = typeof e === 'object' && e !== null
+        ? extractEnrichmentFromEnvelope(e as Record<string, unknown>)
+        : {};
+      return { line, enrichment };
+    })
+    .filter((p) => p.line && p.line.trim().length > 0);
+  const lines = pairs.map((p) => p.line);
+  const enrichments = pairs.map((p) => p.enrichment);
 
   if (lines.length === 0) {
     return {
@@ -149,6 +161,8 @@ export async function extractPatterns(
     sampleEvent: string;
     variables: Map<string, Set<string>>;
     lineIndices: number[];
+    services: Map<string, number>;
+    severities: Map<string, number>;
   }>();
 
   for (let i = 0; i < mergedEncoded.length; i++) {
@@ -159,6 +173,8 @@ export async function extractPatterns(
       sampleEvent: '',
       variables: new Map<string, Set<string>>(),
       lineIndices: [],
+      services: new Map<string, number>(),
+      severities: new Map<string, number>(),
     };
     rec.count += 1;
     // Best-effort: attribute the raw-line bytes to this pattern by index into `lines`.
@@ -168,6 +184,11 @@ export async function extractPatterns(
       if (!rec.sampleEvent) rec.sampleEvent = raw;
       rec.lineIndices.push(i);
     }
+    // Aggregate envelope-derived service/severity for majority voting.
+    const enr = i < enrichments.length ? enrichments[i] : undefined;
+    if (enr?.service) rec.services.set(enr.service, (rec.services.get(enr.service) || 0) + 1);
+    if (enr?.severity) rec.severities.set(enr.severity, (rec.severities.get(enr.severity) || 0) + 1);
+
     const tpl = mergedTemplates.get(ev.templateHash);
     for (let s = 0; s < ev.values.length; s++) {
       const slotName = tpl?.variableSlots?.[s]?.name || `slot_${s}`;
@@ -186,7 +207,12 @@ export async function extractPatterns(
   for (const [hash, rec] of byHash) {
     const tpl = mergedTemplates.get(hash);
     const body = tpl?.template || hash;
-    const severity = tpl?.severity || bestAggregatedMatch(body, aggTokenized)?.row.severity;
+    // Severity priority: envelope majority > template hint > aggregated lookup.
+    const envelopeMajorSeverity = majority(rec.severities);
+    const severity =
+      envelopeMajorSeverity ||
+      tpl?.severity ||
+      bestAggregatedMatch(body, aggTokenized)?.row.severity;
 
     const variables: Record<string, string[]> = {};
     for (const [slot, set] of rec.variables) {
@@ -194,11 +220,15 @@ export async function extractPatterns(
       variables[slot] = Array.from(set).slice(0, 20);
     }
 
+    // Service priority: envelope majority > sample-text regex.
+    const envelopeMajorService = majority(rec.services);
+    const service = envelopeMajorService || inferServiceFromSample(rec.sampleEvent, variables);
+
     patterns.push({
       hash,
       template: body,
       severity: severity ? severity.toUpperCase() : undefined,
-      service: inferServiceFromSample(rec.sampleEvent, variables),
+      service,
       count: rec.count,
       bytes: rec.bytes,
       sampleEvent: rec.sampleEvent,
@@ -220,23 +250,71 @@ export async function extractPatterns(
   };
 }
 
-/** Coerce an unknown value into a single log line, JSON-stringifying objects. */
+/**
+ * Coerce an unknown value into a single log line.
+ *
+ * Log events arrive in three common shapes:
+ *   1. **Raw string** — already a line, just strip newlines.
+ *   2. **Flat JSON with a known text field** — `{message, text, log, body, _raw}`.
+ *      Pull the text field and drop the envelope.
+ *   3. **Fluent-bit / k8s envelope** — the log content is inside `.log`, but
+ *      the envelope also carries `kubernetes.container_name`, service labels,
+ *      etc. CloudWatch messages arriving from a fluent-bit forwarder come in
+ *      this shape. Pulling just the `.log` field keeps the templater focused
+ *      on the actual log content instead of templating the envelope itself.
+ *
+ * If the string at the text field itself looks like JSON (nested structured
+ * log), try parsing it and extracting again. Fluent-bit can wrap JSON-in-JSON
+ * one level deep.
+ */
 function coerceToLine(e: unknown): string {
   if (e == null) return '';
-  if (typeof e === 'string') return e.replace(/\r?\n/g, ' ');
+  if (typeof e === 'string') {
+    // Try parsing as JSON — some connectors return the event as a pre-
+    // stringified blob. If it parses as an object with a known text field,
+    // descend once; otherwise treat as plain text.
+    const trimmed = e.trim();
+    if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (parsed && typeof parsed === 'object') {
+          return coerceObjectToLine(parsed as Record<string, unknown>);
+        }
+      } catch {
+        // fall through — not valid JSON, treat as plain
+      }
+    }
+    return e.replace(/\r?\n/g, ' ');
+  }
   if (typeof e === 'number' || typeof e === 'boolean') return String(e);
   if (typeof e === 'object') {
-    // Prefer common log-line fields over JSON-stringifying the whole thing.
-    const obj = e as Record<string, unknown>;
-    const cand = obj.text || obj.message || obj.log || obj.body || obj._raw;
-    if (typeof cand === 'string') return cand.replace(/\r?\n/g, ' ');
-    try {
-      return JSON.stringify(e).replace(/\r?\n/g, ' ');
-    } catch {
-      return '';
-    }
+    return coerceObjectToLine(e as Record<string, unknown>);
   }
   return String(e);
+}
+
+function coerceObjectToLine(obj: Record<string, unknown>): string {
+  // Common text-field candidates, in priority order. CloudWatch FilteredLogEvent
+  // uses `message`; Datadog uses `attributes.message`; ES/fluent-bit uses `log`.
+  const attrs = (obj.attributes as Record<string, unknown> | undefined) || undefined;
+  const cand =
+    obj.text ||
+    obj.message ||
+    attrs?.message ||
+    obj.log ||
+    obj.body ||
+    obj._raw ||
+    obj.Message; // Azure KQL rows (PascalCase)
+  if (typeof cand === 'string') {
+    return cand.replace(/\r?\n/g, ' ');
+  }
+  // Nothing matched — stringify the whole thing so the templater at least
+  // sees structured key names.
+  try {
+    return JSON.stringify(obj).replace(/\r?\n/g, ' ');
+  } catch {
+    return '';
+  }
 }
 
 /** Split lines into chunks whose serialized form fits in maxBytes. */
@@ -290,6 +368,96 @@ function bestAggregatedMatch(
   }
   if (best && best.similarity >= 0.3) return best;
   return null;
+}
+
+interface EnvelopeEnrichment {
+  service?: string;
+  severity?: string;
+  namespace?: string;
+  pod?: string;
+}
+
+/**
+ * Extract service + severity from a SIEM event envelope BEFORE we strip
+ * it down to the log text. Different SIEMs carry these fields in different
+ * places:
+ *
+ * - Fluent-bit / k8s: `kubernetes.container_name`, `kubernetes.labels["app.kubernetes.io/name"]`
+ * - Datadog: `service`, `status`, plus `attributes.service`
+ * - Splunk: `sourcetype` (often the service), `host`
+ * - CloudWatch: nothing structured — service is inside the JSON `.log` body
+ *   or inside a fluent-bit envelope nested there
+ * - Azure KQL rows: `SeverityLevel`, `AppRoleName`
+ *
+ * Returns partial info; callers aggregate across all events for majority voting.
+ */
+function extractEnrichmentFromEnvelope(obj: Record<string, unknown>): EnvelopeEnrichment {
+  const out: EnvelopeEnrichment = {};
+
+  // Datadog shape
+  if (typeof obj.service === 'string') out.service = obj.service;
+  if (typeof obj.status === 'string') out.severity = obj.status;
+  if (obj.attributes && typeof obj.attributes === 'object') {
+    const attrs = obj.attributes as Record<string, unknown>;
+    if (!out.service && typeof attrs.service === 'string') out.service = attrs.service;
+    if (!out.severity && typeof attrs.status === 'string') out.severity = attrs.status;
+  }
+
+  // Splunk shape (from our connector)
+  if (!out.service && typeof obj.sourcetype === 'string') out.service = obj.sourcetype;
+
+  // Azure KQL rows (PascalCase)
+  if (!out.service && typeof obj.AppRoleName === 'string') out.service = obj.AppRoleName;
+  if (!out.severity && typeof obj.SeverityLevel === 'string') out.severity = obj.SeverityLevel;
+
+  // Fluent-bit / k8s envelope — at the top level OR inside a nested `log`
+  // string that itself is JSON (CloudWatch via fluent-bit).
+  const kube = obj.kubernetes as Record<string, unknown> | undefined;
+  if (kube && typeof kube === 'object') {
+    if (!out.service) {
+      const labels = kube.labels as Record<string, unknown> | undefined;
+      const appName = labels?.['app.kubernetes.io/name'] || labels?.app;
+      out.service =
+        (typeof appName === 'string' ? appName : undefined) ||
+        (typeof kube.container_name === 'string' ? kube.container_name : undefined);
+    }
+    if (!out.namespace && typeof kube.namespace_name === 'string') out.namespace = kube.namespace_name;
+    if (!out.pod && typeof kube.pod_name === 'string') out.pod = kube.pod_name;
+  }
+
+  // CloudWatch events are `{ timestamp, message, ingestionTime }`. If the
+  // message itself is JSON (fluent-bit-shaped), descend into it.
+  if (!out.service && typeof obj.message === 'string') {
+    const msg = obj.message.trim();
+    if (msg.startsWith('{') && msg.endsWith('}')) {
+      try {
+        const inner = JSON.parse(msg) as Record<string, unknown>;
+        const nested = extractEnrichmentFromEnvelope(inner);
+        if (nested.service && !out.service) out.service = nested.service;
+        if (nested.severity && !out.severity) out.severity = nested.severity;
+        if (nested.namespace && !out.namespace) out.namespace = nested.namespace;
+        if (nested.pod && !out.pod) out.pod = nested.pod;
+      } catch {
+        // not JSON — ignore
+      }
+    }
+  }
+
+  return out;
+}
+
+/** Return the majority value in a counting map, or undefined if empty. */
+function majority<K>(counts: Map<K, number>): K | undefined {
+  if (counts.size === 0) return undefined;
+  let best: K | undefined;
+  let bestCount = 0;
+  for (const [k, n] of counts) {
+    if (n > bestCount) {
+      best = k;
+      bestCount = n;
+    }
+  }
+  return best;
 }
 
 /**

@@ -35,8 +35,13 @@ interface Conn {
 function getConn(): Conn | null {
   const envHost = process.env.SPLUNK_HOST;
   const envToken = process.env.SPLUNK_TOKEN;
+  const envUser = process.env.SPLUNK_USERNAME;
+  const envPass = process.env.SPLUNK_PASSWORD;
   if (envHost && envToken) {
     return { host: normalizeHost(envHost), token: envToken, source: 'env' };
+  }
+  if (envHost && envUser && envPass) {
+    return { host: normalizeHost(envHost), username: envUser, password: envPass, source: 'env' };
   }
   // ~/.splunkrc — simple key=value file the Splunk CLI writes
   const rc = join(homedir(), '.splunkrc');
