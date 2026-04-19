@@ -295,7 +295,8 @@ function coerceToLine(e: unknown): string {
 
 function coerceObjectToLine(obj: Record<string, unknown>): string {
   // Common text-field candidates, in priority order. CloudWatch FilteredLogEvent
-  // uses `message`; Datadog uses `attributes.message`; ES/fluent-bit uses `log`.
+  // uses `message`; Datadog uses `attributes.message`; ES/fluent-bit uses `log`;
+  // Splunk surfaces `_raw` which itself is often a JSON envelope.
   const attrs = (obj.attributes as Record<string, unknown> | undefined) || undefined;
   const cand =
     obj.text ||
@@ -306,6 +307,22 @@ function coerceObjectToLine(obj: Record<string, unknown>): string {
     obj._raw ||
     obj.Message; // Azure KQL rows (PascalCase)
   if (typeof cand === 'string') {
+    // If the candidate is itself a JSON envelope (common on Splunk `_raw`
+    // and CloudWatch `message` fields from fluent-bit forwarders), descend
+    // once more to unwrap. Keeps templating focused on the actual log text
+    // instead of paying for 3× byte count through the paste Lambda.
+    const t = cand.trim();
+    if ((t.startsWith('{') && t.endsWith('}')) || (t.startsWith('[') && t.endsWith(']'))) {
+      try {
+        const nested = JSON.parse(t);
+        if (nested && typeof nested === 'object' && !Array.isArray(nested)) {
+          const inner = coerceObjectToLine(nested as Record<string, unknown>);
+          if (inner) return inner;
+        }
+      } catch {
+        // not JSON — fall through
+      }
+    }
     return cand.replace(/\r?\n/g, ' ');
   }
   // Nothing matched — stringify the whole thing so the templater at least
@@ -403,15 +420,10 @@ function extractEnrichmentFromEnvelope(obj: Record<string, unknown>): EnvelopeEn
     if (!out.severity && typeof attrs.status === 'string') out.severity = attrs.status;
   }
 
-  // Splunk shape (from our connector)
-  if (!out.service && typeof obj.sourcetype === 'string') out.service = obj.sourcetype;
-
-  // Azure KQL rows (PascalCase)
-  if (!out.service && typeof obj.AppRoleName === 'string') out.service = obj.AppRoleName;
-  if (!out.severity && typeof obj.SeverityLevel === 'string') out.severity = obj.SeverityLevel;
-
-  // Fluent-bit / k8s envelope — at the top level OR inside a nested `log`
-  // string that itself is JSON (CloudWatch via fluent-bit).
+  // Fluent-bit / k8s envelope — check BEFORE the SIEM-specific fallbacks
+  // (Splunk sourcetype, Azure role name) because when the envelope is
+  // present it's the most specific service identifier — container name +
+  // pod labels are authoritative, sourcetype like `_json` is generic.
   const kube = obj.kubernetes as Record<string, unknown> | undefined;
   if (kube && typeof kube === 'object') {
     if (!out.service) {
@@ -424,6 +436,16 @@ function extractEnrichmentFromEnvelope(obj: Record<string, unknown>): EnvelopeEn
     if (!out.namespace && typeof kube.namespace_name === 'string') out.namespace = kube.namespace_name;
     if (!out.pod && typeof kube.pod_name === 'string') out.pod = kube.pod_name;
   }
+
+  // Splunk shape (from our connector) — sourcetype is a fallback; only
+  // use it if no k8s envelope pinned the service.
+  if (!out.service && typeof obj.sourcetype === 'string' && obj.sourcetype !== '_json') {
+    out.service = obj.sourcetype;
+  }
+
+  // Azure KQL rows (PascalCase)
+  if (!out.service && typeof obj.AppRoleName === 'string') out.service = obj.AppRoleName;
+  if (!out.severity && typeof obj.SeverityLevel === 'string') out.severity = obj.SeverityLevel;
 
   // CloudWatch events are `{ timestamp, message, ingestionTime }`. If the
   // message itself is JSON (fluent-bit-shaped), descend into it.

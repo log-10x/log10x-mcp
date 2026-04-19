@@ -2,11 +2,11 @@
 
 # Log10x POC Report — Elasticsearch
 
-_24h window · scope=`otel-logs` · snapshot_id=`1fdb3a0b-e8fb-42ba-903d-ae4563631403`_
+_24h window · scope=`otel-logs` · snapshot_id=`5dd7d013-2f48-4fb0-ba21-436cfe577323`_
 
 ## 1. Executive Summary
 
-Analyzed **3.3K events** (378.3 KB) from Elasticsearch across the last 24h.
+Analyzed **3.3K events** (377.4 KB) from Elasticsearch across the last 24h.
 
 - **Observed cost (window)**: $0.00
 - **Projected weekly cost**: $0.00
@@ -33,22 +33,22 @@ Analyzed **3.3K events** (378.3 KB) from Elasticsearch across the last 24h.
 | 9 | `info_groupmetadatamanager_brokerid_finished_loading_offsets_and_group_metadata_from_consumer_offsets_in_milliseconds_for` | grafana | INFO | 40 | 1% | $0.00 | $0.00 |  |
 | 10 | `go_reloading_service_iptables_data_ipfamily_ipv4` | kafka | INFO | 33 | 1% | $0.00 | $0.00 |  |
 | 11 | `oteldemo_adservice_no_baggage_found_in_context_trace_id_span_id_trace_flags` | ad | TRACE | 29 | 0.9% | $0.00 | $0.00 |  |
-| 12 | `internal_retry_sender_go_exporting_failed_will_retry_the_request_after_interval_resource_service_instance_id_service_nam` | kafka | — | 13 | 0.4% | $0.00 | $0.00 |  |
-| 13 | `info_producerstatemanager_partition_cluster_metadata_wrote_producer_snapshot_at_offset_with_producer_ids_in_1_ms_org_apa` | grafana | INFO | 13 | 0.4% | $0.00 | $0.00 |  |
-| 14 | `info_snapshotemitter_id_successfully_wrote_snapshot_org_apache_kafka_image_publisher_snapshotemitter` | grafana | INFO | 13 | 0.4% | $0.00 | $0.00 |  |
-| 15 | `info_locallog_partition_cluster_metadata_dir_tmp_kafka_logs_rolled_new_log_segment_at_offset_in_ms_kafka_log_locallog` | grafana | INFO | 17 | 0.5% | $0.00 | $0.00 |  |
-| 16 | `logger_migrator_t_level_info_msg_executing_migration_id_add_unique_index_alert_rule_tag_alert_id_tag_id` | frontend-proxy | INFO | 1 | 0.0% | $0.00 | $0.00 | new? |
-| 17 | `logger_migrator_t_level_info_msg_executing_migration_id_add_dashboard_uid_column_to_annotation_table` | grafana | INFO | 1 | 0.0% | $0.00 | $0.00 | new? |
-| 18 | `logger_migrator_t_level_info_msg_executing_migration_id_add_user_unique_id_to_user_auth` | grafana | INFO | 1 | 0.0% | $0.00 | $0.00 | new? |
-| 19 | `info_snapshotgenerator_id_creating_new_kraft_snapshot_file_snapshot_because_we_have_replayed_at_least_bytes_org_apache_k` | grafana | INFO | 13 | 0.4% | $0.00 | $0.00 |  |
-| 20 | `info_groupmetadatamanager_brokerid_finished_loading_offsets_and_group_metadata_from_consumer_offsets_in_milliseconds_for` | grafana | INFO | 9 | 0.3% | $0.00 | $0.00 |  |
+| 12 | `info_producerstatemanager_partition_cluster_metadata_wrote_producer_snapshot_at_offset_with_producer_ids_in_1_ms_org_apa` | grafana | INFO | 13 | 0.4% | $0.00 | $0.00 |  |
+| 13 | `info_snapshotemitter_id_successfully_wrote_snapshot_org_apache_kafka_image_publisher_snapshotemitter` | grafana | INFO | 13 | 0.4% | $0.00 | $0.00 |  |
+| 14 | `info_locallog_partition_cluster_metadata_dir_tmp_kafka_logs_rolled_new_log_segment_at_offset_in_ms_kafka_log_locallog` | grafana | INFO | 17 | 0.5% | $0.00 | $0.00 |  |
+| 15 | `logger_migrator_t_level_info_msg_executing_migration_id_add_unique_index_alert_rule_tag_alert_id_tag_id` | frontend-proxy | INFO | 1 | 0.0% | $0.00 | $0.00 | new? |
+| 16 | `logger_migrator_t_level_info_msg_executing_migration_id_add_dashboard_uid_column_to_annotation_table` | grafana | INFO | 1 | 0.0% | $0.00 | $0.00 | new? |
+| 17 | `logger_migrator_t_level_info_msg_executing_migration_id_add_user_unique_id_to_user_auth` | grafana | INFO | 1 | 0.0% | $0.00 | $0.00 | new? |
+| 18 | `info_snapshotgenerator_id_creating_new_kraft_snapshot_file_snapshot_because_we_have_replayed_at_least_bytes_org_apache_k` | grafana | INFO | 13 | 0.4% | $0.00 | $0.00 |  |
+| 19 | `scraperhelper_v0_obs_metrics_go_error_scraping_metrics_resource_service_instance_id_service_name_otelcol_contrib_service` | kafka | — | 4 | 0.1% | $0.00 | $0.00 |  |
+| 20 | `internal_retry_sender_go_exporting_failed_will_retry_the_request_after_interval_resource_service_instance_id_service_nam` | kafka | — | 13 | 0.4% | $0.00 | $0.00 |  |
 
 ## 3. Service-Level Breakdown
 
 | service | events | $/window | severity mix |
 |---|---|---|---|
 | grafana | 1.6K | $0.00 | INFO 97%, — 2%, WARN 0.2% |
-| kafka | 511 | $0.00 | INFO 76%, — 20%, WARN 3% |
+| kafka | 507 | $0.00 | INFO 76%, — 19%, WARN 3% |
 | frontend-proxy | 120 | $0.00 | INFO 100% |
 | cart | 322 | $0.00 | INFO 79%, — 16%, ERROR 3% |
 | jaeger | 69 | $0.00 | INFO 97%, — 1%, ERROR 1% |
@@ -79,7 +79,7 @@ Per-pattern recommendations with reasoning, projected savings, and ready-to-past
 - pattern: info_partition_consumer_offsets_broker_log_loaded_for_partition_consumer_offsets2_with_initial_high_watermark_kafka_clus
   action: sample
     sampleRate: 20
-  untilEpochSec: 1779218657   # auto-expires in 30d
+  untilEpochSec: 1779219674   # auto-expires in 30d
   reason: "Moderate-volume INFO pattern — sample 1/20 to retain a trickle for debug."
 ```
 
@@ -95,7 +95,7 @@ Per-pattern recommendations with reasoning, projected savings, and ready-to-past
 - pattern: go_syncing_iptables_rules_ipfamily_ipv4
   action: sample
     sampleRate: 20
-  untilEpochSec: 1779218657   # auto-expires in 30d
+  untilEpochSec: 1779219674   # auto-expires in 30d
   reason: "Moderate-volume INFO pattern — sample 1/20 to retain a trickle for debug."
 ```
 
@@ -111,7 +111,7 @@ Per-pattern recommendations with reasoning, projected savings, and ready-to-past
 - pattern: info_created_log_for_partition_consumer_offsets_in_tmp_kafka_logs_consumer_offsets1_with_properties_cleanup_policy_compa
   action: sample
     sampleRate: 20
-  untilEpochSec: 1779218657   # auto-expires in 30d
+  untilEpochSec: 1779219674   # auto-expires in 30d
   reason: "Moderate-volume INFO pattern — sample 1/20 to retain a trickle for debug."
 ```
 
@@ -127,7 +127,7 @@ Per-pattern recommendations with reasoning, projected savings, and ready-to-past
 - pattern: info_groupmetadatamanager_brokerid_scheduling_loading_of_offsets_and_group_metadata_from_consumer_offsets_for_epoch_kafk
   action: sample
     sampleRate: 20
-  untilEpochSec: 1779218657   # auto-expires in 30d
+  untilEpochSec: 1779219674   # auto-expires in 30d
   reason: "Moderate-volume INFO pattern — sample 1/20 to retain a trickle for debug."
 ```
 
@@ -143,7 +143,7 @@ Per-pattern recommendations with reasoning, projected savings, and ready-to-past
 - pattern: go_complete_ipfamily_ipv4_elapsed
   action: sample
     sampleRate: 20
-  untilEpochSec: 1779218657   # auto-expires in 30d
+  untilEpochSec: 1779219674   # auto-expires in 30d
   reason: "Moderate-volume INFO pattern — sample 1/20 to retain a trickle for debug."
 ```
 
@@ -159,7 +159,7 @@ Per-pattern recommendations with reasoning, projected savings, and ready-to-past
 - pattern: info_groupcoordinator_elected_as_the_group_coordinator_for_partition_in_epoch_kafka_coordinator_group_groupcoordinator
   action: sample
     sampleRate: 20
-  untilEpochSec: 1779218657   # auto-expires in 30d
+  untilEpochSec: 1779219674   # auto-expires in 30d
   reason: "Moderate-volume INFO pattern — sample 1/20 to retain a trickle for debug."
 ```
 
@@ -175,7 +175,7 @@ Per-pattern recommendations with reasoning, projected savings, and ready-to-past
 - pattern: info_partition_consumer_offsets_broker_no_checkpointed_highwatermark_is_found_for_partition_consumer_offsets2_kafka_clus
   action: sample
     sampleRate: 20
-  untilEpochSec: 1779218657   # auto-expires in 30d
+  untilEpochSec: 1779219674   # auto-expires in 30d
   reason: "Moderate-volume INFO pattern — sample 1/20 to retain a trickle for debug."
 ```
 
@@ -191,7 +191,7 @@ Per-pattern recommendations with reasoning, projected savings, and ready-to-past
 - pattern: info_logloader_partition_consumer_offsets_dir_tmp_kafka_logs_loading_producer_state_till_offset_with_message_format_vers
   action: sample
     sampleRate: 20
-  untilEpochSec: 1779218657   # auto-expires in 30d
+  untilEpochSec: 1779219674   # auto-expires in 30d
   reason: "Moderate-volume INFO pattern — sample 1/20 to retain a trickle for debug."
 ```
 
@@ -207,7 +207,7 @@ Per-pattern recommendations with reasoning, projected savings, and ready-to-past
 - pattern: info_groupmetadatamanager_brokerid_finished_loading_offsets_and_group_metadata_from_consumer_offsets_in_milliseconds_for
   action: sample
     sampleRate: 20
-  untilEpochSec: 1779218657   # auto-expires in 30d
+  untilEpochSec: 1779219674   # auto-expires in 30d
   reason: "Moderate-volume INFO pattern — sample 1/20 to retain a trickle for debug."
 ```
 
@@ -223,7 +223,7 @@ Per-pattern recommendations with reasoning, projected savings, and ready-to-past
 - pattern: go_reloading_service_iptables_data_ipfamily_ipv4
   action: sample
     sampleRate: 20
-  untilEpochSec: 1779218657   # auto-expires in 30d
+  untilEpochSec: 1779219674   # auto-expires in 30d
   reason: "Moderate-volume INFO pattern — sample 1/20 to retain a trickle for debug."
 ```
 
@@ -287,7 +287,6 @@ Before applying any drop, run `log10x_dependency_check(pattern: "<identity>")` w
 | `info_groupmetadatamanager_brokerid_finished_loading_offsets_and_group_metadata_from_consumer_offsets_in_milliseconds_for` | 40 | 6.1 KB | INFO | grafana | `logger=migrator t=2025-10-01T20:12:30.843561136Z level=info msg="Migration succ…` |
 | `go_reloading_service_iptables_data_ipfamily_ipv4` | 33 | 5.9 KB | INFO | kafka | `[2025-10-01 20:13:01,945] INFO Registered kafka:type=kafka.Log4jController MBea…` |
 | `oteldemo_adservice_no_baggage_found_in_context_trace_id_span_id_trace_flags` | 29 | 4.7 KB | TRACE | ad | `SLF4J(W): Defaulting to no-operation (NOP) logger implementation` |
-| `internal_retry_sender_go_exporting_failed_will_retry_the_request_after_interval_resource_service_instance_id_service_nam` | 13 | 2.6 KB | — | kafka | ` zookeeper.connect = null` |
 | `info_producerstatemanager_partition_cluster_metadata_wrote_producer_snapshot_at_offset_with_producer_ids_in_1_ms_org_apa` | 13 | 2.6 KB | INFO | grafana | `logger=migrator t=2025-10-01T20:12:31.31388322Z level=info msg="Executing migra…` |
 | `info_snapshotemitter_id_successfully_wrote_snapshot_org_apache_kafka_image_publisher_snapshotemitter` | 13 | 2.5 KB | INFO | grafana | `logger=migrator t=2025-10-01T20:12:28.334129144Z level=info msg="Migration succ…` |
 | `info_locallog_partition_cluster_metadata_dir_tmp_kafka_logs_rolled_new_log_segment_at_offset_in_ms_kafka_log_locallog` | 17 | 2.3 KB | INFO | grafana | `logger=migrator t=2025-10-01T20:12:31.307627616Z level=info msg="Migration succ…` |
@@ -295,16 +294,18 @@ Before applying any drop, run `log10x_dependency_check(pattern: "<identity>")` w
 | `logger_migrator_t_level_info_msg_executing_migration_id_add_dashboard_uid_column_to_annotation_table` | 1 | 1.9 KB | INFO | grafana | `logger=featuremgmt t=2025-10-01T20:12:41.024373277Z level=info msg=FeatureToggl…` |
 | `logger_migrator_t_level_info_msg_executing_migration_id_add_user_unique_id_to_user_auth` | 1 | 1.9 KB | INFO | grafana | `logger=featuremgmt t=2025-10-01T20:12:19.475211233Z level=info msg=FeatureToggl…` |
 | `info_snapshotgenerator_id_creating_new_kraft_snapshot_file_snapshot_because_we_have_replayed_at_least_bytes_org_apache_k` | 13 | 1.7 KB | INFO | grafana | `logger=migrator t=2025-10-01T20:12:28.32954509Z level=info msg="Migration succe…` |
+| `scraperhelper_v0_obs_metrics_go_error_scraping_metrics_resource_service_instance_id_service_name_otelcol_contrib_service` | 4 | 1.5 KB | — | kafka | ` transactional.id.expiration.ms = 604800000` |
+| `internal_retry_sender_go_exporting_failed_will_retry_the_request_after_interval_resource_service_instance_id_service_nam` | 13 | 1.4 KB | — | kafka | ` zookeeper.connect = null` |
 | `info_groupmetadatamanager_brokerid_finished_loading_offsets_and_group_metadata_from_consumer_offsets_in_milliseconds_for` | 9 | 1.3 KB | INFO | grafana | `logger=migrator t=2025-10-01T20:12:30.843409332Z level=info msg="Executing migr…` |
 | `logger_migrator_t_level_info_msg_migration_successfully_executed_id_drop_index_annotation_tag_annotation_id_tag_id_v2_du` | 1 | 1.3 KB | INFO | frontend-proxy | `[2025-10-01 20:11:45.951][8][info][main] [source/server/server.cc:503] request …` |
 | `info_partition_cluster_metadata_nodeid_marking_snapshot_0_offset_epoch3_for_deletion_because_its_timestamp_is_now_older_` | 9 | 1.3 KB | INFO | grafana | `logger=resource-migrator t=2025-10-01T20:12:32.155014512Z level=info msg="Migra…` |
 | `info_unifiedlog_partition_cluster_metadata_dir_tmp_kafka_logs_incremented_log_start_offset_to_due_to_snapshot_generated_` | 9 | 1.2 KB | INFO | grafana | `logger=resource-migrator t=2025-10-01T20:12:32.148804384Z level=info msg="Migra…` |
 | `go_reloading_service_iptables_data_ipfamily_ipv4_4` | 7 | 1.1 KB | INFO | jaeger | `{"level":"info","ts":1759349505.87888,"caller":"grpc@v1.60.0/clientconn.go:1338…` |
-| `info_deleted_offset_index_tmp_kafka_logs_cluster_metadata_index_deleted_org_apache_kafka_storage_internals_log_logsegmen` | 8 | 1.1 KB | INFO | grafana | `logger=infra.usagestats.collector t=2025-10-01T20:12:34.517019386Z level=info m…` |
+| `info_deleted_offset_index_tmp_kafka_logs_cluster_metadata_index_deleted_org_apache_kafka_storage_internals_log_logsegmen` | 8 | 1.0 KB | INFO | grafana | `logger=infra.usagestats.collector t=2025-10-01T20:12:34.517019386Z level=info m…` |
 | `info_deleted_time_index_tmp_kafka_logs_cluster_metadata_timeindex_deleted_org_apache_kafka_storage_internals_log_logsegm` | 8 | 1.0 KB | INFO | grafana | `logger=http.server t=2025-10-01T20:12:34.520709506Z level=info msg="HTTP Server…` |
 | `info_deleted_log_tmp_kafka_logs_cluster_metadata_log_deleted_org_apache_kafka_storage_internals_log_logsegment` | 8 | 1.0 KB | INFO | grafana | `logger=plugin.backgroundinstaller t=2025-10-01T20:12:34.514975679Z level=info m…` |
-| `info_deleted_producer_state_snapshot_tmp_kafka_logs_cluster_metadata_snapshot_deleted_org_apache_kafka_storage_internals` | 7 | 958 B | INFO | grafana | `logger=plugins.update.checker t=2025-10-01T20:12:34.738670347Z level=info msg="…` |
 | `logger_migrator_t_level_info_msg_migration_successfully_executed_id_remove_unique_index_org_id_name_duration` | 1 | 947 B | INFO | frontend-proxy | `[2025-10-01 20:11:45.936][8][info][main] [source/server/server.cc:440] envoy.fi…` |
+| `info_deleted_producer_state_snapshot_tmp_kafka_logs_cluster_metadata_snapshot_deleted_org_apache_kafka_storage_internals` | 7 | 938 B | INFO | grafana | `logger=plugins.update.checker t=2025-10-01T20:12:34.738670347Z level=info msg="…` |
 | `flags_go_flag_cleanup_false` | 1 | 929 B | INFO | image-provider | `{"stream":"stdout","log":"","docker":{"container_id":"df60e2438578bd8ad312b92b9…` |
 | `flags_go_flag_conntrack_udp_timeout` | 1 | 929 B | INFO | image-provider | `{"stream":"stdout","log":"","docker":{"container_id":"df60e2438578bd8ad312b92b9…` |
 | `flags_go_flag_conntrack_udp_timeout_stream` | 1 | 929 B | INFO | image-provider | `{"stream":"stdout","log":"","docker":{"container_id":"df60e2438578bd8ad312b92b9…` |
@@ -314,7 +315,7 @@ Before applying any drop, run `log10x_dependency_check(pattern: "<identity>")` w
 | `flags_go_flag_ipvs_strict_arp_false` | 1 | 929 B | INFO | image-provider | `{"stream":"stdout","log":"","docker":{"container_id":"df60e2438578bd8ad312b92b9…` |
 | `oteldemo_adservice_targeted_ad_request_received_for_trace_id_span_id_trace_flags` | 6 | 918 B | TRACE | ad | `2025-10-01 20:12:34 - oteldemo.AdService - no baggage found in context trace_id…` |
 | `oteldemo_adservice_targeted_ad_request_received_for_travel_trace_id_span_id_trace_flags` | 6 | 918 B | TRACE | ad | `2025-10-01 20:12:55 - oteldemo.AdService - no baggage found in context trace_id…` |
-| `opensearchexporter_v0_logger_go_request_failed_resource_service_instance_id_service_name_otelcol_contrib_service_version` | 6 | 905 B | — | kafka | ` zookeeper.max.in.flight.requests = 10` |
+| `opensearchexporter_v0_logger_go_request_failed_resource_service_instance_id_service_name_otelcol_contrib_service_version` | 6 | 904 B | — | kafka | ` zookeeper.max.in.flight.requests = 10` |
 | `waiting_for_kafka` | 52 | 884 B | — | accounting | `waiting for kafka` |
 | `logger_migrator_t_level_info_msg_migration_successfully_executed_id_create_api_key_table_v2_duration` | 1 | 881 B | INFO | frontend | `{"stream":"stdout","log":"","docker":{"container_id":"55dcf25a8b5e274b978b954c1…` |
 | `logger_migrator_t_level_info_msg_executing_migration_id_add_column_updated_in_star` | 1 | 850 B | INFO | flagd | `{"stream":"stdout","log":"","docker":{"container_id":"ea5de86fdcd5a24ff66aa71e9…` |
@@ -322,12 +323,11 @@ Before applying any drop, run `log10x_dependency_check(pattern: "<identity>")` w
 | `logger_migrator_t_level_info_msg_migration_successfully_executed_id_update_uid_column_values_in_alert_notification_durat` | 1 | 823 B | INFO | frontend-proxy | `[2025-10-01 20:11:45.936][8][info][main] [source/server/server.cc:440] envoy.ma…` |
 | `logger_migrator_t_level_info_msg_executing_migration_id_rename_table_login_attempt_to_login_attempt_tmp_qwerty_v1` | 1 | 822 B | INFO | grafana | `logger=ngalert.state.manager rule_uid=des78nlna99tsf org_id=1 t=2025-10-01T20:1…` |
 | `logger_migrator_t_level_info_msg_executing_migration_id_create_login_attempt_table` | 1 | 821 B | INFO | grafana | `logger=ngalert.state.manager rule_uid=des78nlna99tsf org_id=1 t=2025-10-01T20:1…` |
-| `info_deleted_snapshot_files_for_snapshot_0_offset_epoch_org_apache_kafka_snapshot_snapshots` | 6 | 773 B | INFO | grafana | `logger=provisioning.alerting t=2025-10-01T20:12:34.549537051Z level=info msg="s…` |
 | `logger_migrator_t_level_info_msg_migration_successfully_executed_id_rename_table_annotation_tag_to_annotation_tag_v2_v2_` | 1 | 773 B | INFO | frontend-proxy | `[2025-10-01 20:11:45.951][8][info][main] [source/server/server.cc:503] response…` |
 | `shared_informer_go_waiting_for_caches_to_sync_for_node_config` | 1 | 764 B | INFO | jaeger | `{"level":"info","ts":1759349505.8774333,"caller":"grpc@v1.60.0/resolver_wrapper…` |
 | `flags_go_flag_oom_score_adj` | 1 | 762 B | INFO | jaeger | `{"level":"info","ts":1759349505.8539035,"caller":"grpc@v1.60.0/resolver_wrapper…` |
 
-_2257 additional patterns omitted from the table (see JSON summary)._
+_2254 additional patterns omitted from the table (see JSON summary)._
 
 ### SIEM query used
 
@@ -344,14 +344,14 @@ otel-logs
 
 ### Run metadata
 
-- **snapshot_id**: `1fdb3a0b-e8fb-42ba-903d-ae4563631403`
-- **started**: 2026-04-19T19:23:13.570Z
-- **finished**: 2026-04-19T19:24:17.716Z
+- **snapshot_id**: `5dd7d013-2f48-4fb0-ba21-436cfe577323`
+- **started**: 2026-04-19T19:40:16.172Z
+- **finished**: 2026-04-19T19:41:14.083Z
 - **mcp_version**: 1.4.0
-- **pull_wall_time_ms**: 2779 (templater 61243ms)
+- **pull_wall_time_ms**: 1510 (templater 56400ms)
 - **events_analyzed**: 3.3K / target 5.0K (target_reached)
-- **bytes_analyzed**: 378.3 KB
+- **bytes_analyzed**: 377.4 KB
 - **execution_mode**: paste_lambda
 
 
-_Report saved to: /tmp/log10x-reports/poc_from_siem-2026-04-19T19-24-17.815Z.md_
+_Report saved to: /tmp/log10x-reports/poc_from_siem-2026-04-19T19-41-14.184Z.md_
