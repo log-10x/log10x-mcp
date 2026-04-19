@@ -21,6 +21,7 @@ import { isStreamerConfigured } from '../lib/streamer-api.js';
 import { loadEnvironments, type Environments, type EnvConfig } from '../lib/environments.js';
 import { LABELS } from '../lib/promql.js';
 import { fmtBytes as formatBytes } from '../lib/format.js';
+import { discoverAvailable } from '../lib/siem/index.js';
 
 export type CheckStatus = 'pass' | 'warn' | 'fail';
 
@@ -82,6 +83,7 @@ export async function runDoctorChecks(envNickname?: string): Promise<DoctorRepor
   //    These don't depend on a specific env so they live in globalChecks.
   addInfrastructureChecks(globalChecks);
   await addPasteEndpointCheck(globalChecks);
+  await addSiemDiscoveryCheck(globalChecks);
 
   // 3. Per-environment checks.
   const targets: EnvConfig[] = envNickname
@@ -583,6 +585,59 @@ async function addPasteEndpointCheck(globalChecks: DoctorCheck[]): Promise<void>
       status: 'warn',
       message: `Paste endpoint unreachable: ${(e as Error).message}`,
       fix: 'If the network is locked down, allowlist the LOG10X_PASTE_URL host (default: meljpepqpd.execute-api.us-east-1.amazonaws.com). Or set privacy_mode=true on resolve_batch and install the local tenx CLI.',
+    });
+  }
+}
+
+/**
+ * SIEM-discovery probe for log10x_poc_from_siem.
+ *
+ * Iterates every registered SIEM connector's `discoverCredentials()` and
+ * reports which are reachable. Shows one status line per SIEM so users
+ * can see at a glance whether the POC tool can pull from their stack
+ * with no additional config.
+ */
+async function addSiemDiscoveryCheck(globalChecks: DoctorCheck[]): Promise<void> {
+  try {
+    const results = await discoverAvailable();
+    const detected = results.filter((r) => r.detection.available);
+    if (detected.length === 0) {
+      globalChecks.push({
+        name: 'siem_discovery',
+        status: 'warn',
+        message:
+          `No SIEM credentials detected for log10x_poc_from_siem (probed ${results.length} connectors). ` +
+          `Set credentials for any of: cloudwatch (AWS_*), datadog (DD_API_KEY + DD_APP_KEY), sumo (SUMO_ACCESS_ID + SUMO_ACCESS_KEY + SUMO_ENDPOINT), ` +
+          `gcp-logging (GOOGLE_APPLICATION_CREDENTIALS), elasticsearch (ELASTIC_URL + ELASTIC_API_KEY), azure-monitor (AZURE_LOG_ANALYTICS_WORKSPACE_ID + az login), ` +
+          `splunk (SPLUNK_HOST + SPLUNK_TOKEN), or clickhouse (CLICKHOUSE_URL + CLICKHOUSE_USER + CLICKHOUSE_PASSWORD).`,
+        fix: 'The POC tool requires exactly one SIEM to be reachable. Set the env vars for your SIEM and re-run.',
+      });
+      return;
+    }
+    const lines: string[] = [];
+    for (const r of results) {
+      const status = r.detection.available ? 'DETECTED' : 'not_configured';
+      const src = r.detection.available ? ` (${r.detection.source})` : '';
+      const extra = r.detection.available
+        ? Object.entries(r.detection.details || {})
+            .map(([k, v]) => `${k}=${String(v).slice(0, 80)}`)
+            .join(', ')
+        : '';
+      lines.push(`  - ${r.id} (${r.displayName}): ${status}${src}${extra ? ` — ${extra}` : ''}`);
+    }
+    const ids = detected.map((d) => d.id).join(', ');
+    const overall = detected.length === 1 ? 'pass' : 'warn';
+    globalChecks.push({
+      name: 'siem_discovery',
+      status: overall,
+      message:
+        `${detected.length} SIEM connector${detected.length === 1 ? '' : 's'} reachable: ${ids}. ${detected.length > 1 ? 'Pass `siem=<id>` to disambiguate when calling log10x_poc_from_siem_submit.' : 'log10x_poc_from_siem_submit will auto-target this SIEM.'}\n${lines.join('\n')}`,
+    });
+  } catch (e) {
+    globalChecks.push({
+      name: 'siem_discovery',
+      status: 'warn',
+      message: `SIEM discovery failed: ${(e as Error).message}`,
     });
   }
 }

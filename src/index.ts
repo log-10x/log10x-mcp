@@ -48,6 +48,12 @@ import {
   translateMetricToPatternsSchema,
   executeTranslateMetricToPatterns,
 } from './tools/translate-metric-to-patterns.js';
+import {
+  pocFromSiemSubmitSchema,
+  pocFromSiemStatusSchema,
+  executePocSubmit,
+  executePocStatus,
+} from './tools/poc-from-siem.js';
 import { getStatus } from './resources/status.js';
 
 // ── Environment + cost cache ──
@@ -480,6 +486,45 @@ server.tool(
     })
 );
 
+// ── Tool: log10x_poc_from_siem_submit / _status ──
+//
+// Async pair: submit kicks off a background pull + templatize + render;
+// status polls for progress and returns the final markdown once done.
+// Supports 8 SIEMs (cloudwatch, datadog, sumo, gcp-logging, elasticsearch,
+// azure-monitor, splunk, clickhouse) with auto-discovery of credentials.
+
+server.tool(
+  'log10x_poc_from_siem_submit',
+  'Kick off a full log-cost-optimization POC against the user\'s SIEM. Pulls a representative event sample, templatizes into stable pattern identities, and renders a 9-section markdown report covering top cost drivers, regulator recommendations, ready-to-paste native SIEM exclusion configs, compaction potential, risk/dependency checks, and deployment paths. Supported SIEMs: cloudwatch (AWS CloudWatch Logs via IAM credential chain), datadog (DD_API_KEY + DD_APP_KEY), sumo (Sumo Logic), gcp-logging (GCP Cloud Logging), elasticsearch (Elastic Cloud / self-hosted), azure-monitor (Azure Monitor / Log Analytics), splunk (SPLUNK_HOST + SPLUNK_TOKEN), clickhouse (OpenObserve / SigNoz / custom schemas). Auto-detects the SIEM from env vars when `siem` omitted — explicitly pass `siem` if multiple credential sets exist. `scope` and `query` are SIEM-specific: CloudWatch (log group + filter pattern), Datadog (index + query), Sumo (_sourceCategory + query), GCP (project id + filter), Elasticsearch (index pattern + KQL), Azure (workspace id + KQL), Splunk (index + SPL), ClickHouse (database + SQL WHERE). For ClickHouse, also pass `clickhouse_table` (required) and column-mapping args for custom schemas (OpenObserve/SigNoz auto-detected). Returns a `snapshot_id` — poll via log10x_poc_from_siem_status to retrieve progress and the final report. Report is also written to `${LOG10X_REPORT_DIR:-/tmp/log10x-reports}/poc_from_siem-<timestamp>.md`. Default window is 7d, default target event count is 250k, default max pull time is 5 min — the pull stops at whichever of the two ceilings hits first. **Tier prerequisites**: none. No log10x API key required. Templating routes through the public paste endpoint by default; set `privacy_mode: true` to route through a locally-installed tenx CLI instead.',
+  pocFromSiemSubmitSchema,
+  (args) =>
+    wrap('log10x_poc_from_siem_submit', async () =>
+      executePocSubmit({
+        window: args.window ?? '7d',
+        target_event_count: args.target_event_count ?? 250_000,
+        max_pull_minutes: args.max_pull_minutes ?? 5,
+        privacy_mode: args.privacy_mode ?? false,
+        siem: args.siem,
+        scope: args.scope,
+        query: args.query,
+        analyzer_cost_per_gb: args.analyzer_cost_per_gb,
+        environment: args.environment,
+        clickhouse_table: args.clickhouse_table,
+        clickhouse_timestamp_column: args.clickhouse_timestamp_column,
+        clickhouse_message_column: args.clickhouse_message_column,
+        clickhouse_service_column: args.clickhouse_service_column,
+        clickhouse_severity_column: args.clickhouse_severity_column,
+      })
+    )
+);
+
+server.tool(
+  'log10x_poc_from_siem_status',
+  'Retrieve progress or the final markdown report from a log10x_poc_from_siem_submit run. Pass the `snapshot_id` returned by submit. In-progress responses report status (pulling / templatizing / rendering), progress_pct, step_detail, and elapsed_seconds — poll every ~30s until `status: complete`. Complete responses return the full 9-section markdown report plus a report file path (`${LOG10X_REPORT_DIR:-/tmp/log10x-reports}/poc_from_siem-<timestamp>.md`) and a summary struct with events_analyzed, patterns_found, total_cost_analyzed, projected_savings, and top_3_actions. Failures include partial_report_markdown when any events were successfully pulled before the error, plus a retry_hint. Snapshots live in-memory per MCP process; a restart clears them, so persist the final report path if you need it later. **Tier prerequisites**: none.',
+  pocFromSiemStatusSchema,
+  (args) => wrap('log10x_poc_from_siem_status', async () => executePocStatus(args))
+);
+
 // ── Resource: log10x://status ──
 
 server.resource(
@@ -516,6 +561,8 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_discover_join', intent: 'Auto-discover the join label between Log10x pattern metrics and the customer metric backend via Jaccard similarity' },
   { name: 'log10x_correlate_cross_pillar', intent: 'Bidirectional cross-pillar correlation with structural validation — joined / structurally validated / temporal coincidence / validation unavailable tiering' },
   { name: 'log10x_translate_metric_to_patterns', intent: 'Given a customer APM metric, return the Log10x patterns whose rate curves correspond — with structural validation' },
+  { name: 'log10x_poc_from_siem_submit', intent: 'Pull a sample from the user\'s SIEM, templatize, and render a full cost-optimization POC report (async)' },
+  { name: 'log10x_poc_from_siem_status', intent: 'Poll or retrieve the final report from a log10x_poc_from_siem_submit run' },
 ];
 
 async function handleCliFlags(): Promise<boolean> {
