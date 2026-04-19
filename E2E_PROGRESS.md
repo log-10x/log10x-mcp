@@ -51,11 +51,13 @@ Persistent log of the end-to-end validation runs. Updated as work proceeds.
 - **Resolution**: pivoted to `splunk/splunk:latest` Docker container
 - Confirms the connector is install-shape-agnostic (hits REST API regardless)
 
-### Issue 3: Local `tenx` Homebrew install is broken on this box
-- `privacy_mode: true` failed: `could not resolve include: 'run/bootstrap'`
-- Homebrew 1.0.4 bundle is missing `apps/shared` resources
-- **Resolution**: fell back to `privacy_mode: false` (paste Lambda path)
-- **Affects**: any user whose tenx install is older/corrupt — they must use paste-Lambda mode until they reinstall. The `privacy_mode: true` path works fine when tenx is healthy; this box's tenx is just broken.
+### Issue 3: dev-cli wrapper broke Homebrew 1.0.4 module resolution (REAL BUG — fixed)
+- `privacy_mode: true` failed on Homebrew 1.0.4 with: `could not resolve include: 'run/bootstrap'`
+- **Root cause**: the wrapper overrode `TENX_CONFIG` to a bare temp dir. Homebrew 1.0.4's modules are split — the Cellar at `/usr/local/Cellar/log10x/1.0.4/lib/tenx/modules/` ships `apps/*` but NOT `pipelines/run/bootstrap/`, which lives in the user-config dir at `/usr/local/etc/tenx/config/pipelines/run/bootstrap/`. A bare temp TENX_CONFIG misses both.
+- Also: `--set openBrowser=false --set localOnly=true` that the wrapper passed are no-ops in 1.0.4 (rejected as unmatched args); they were left over from an older tenx version.
+- Also: input/output location collision — the user's real `data/sample/input/sample.log` got templated alongside our batch because tenx reads all `.log` files in the input dir.
+- **Fix (committed)**: rewrote `src/lib/dev-cli.ts` to build a scratch `TENX_CONFIG` in `$TMPDIR` that symlinks the user's real `apps/`, `pipelines/`, `lib/`, `symbols/` (preserving module resolution) but owns `data/sample/input/` and `data/sample/output/` (preserving isolation). Removed the `--set` flags.
+- **Pre-GA implication**: flipped `privacy_mode` default to `true` across both tools. Paste-Lambda is now the explicit opt-out demo fallback, not the quiet default.
 
 ### Issue 4: Connector rejected auth-less Elasticsearch (REAL BUG — fixed)
 - `xpack.security.enabled=false` dev clusters don't require auth, but the connector required `ELASTIC_API_KEY` or `ELASTIC_USERNAME+ELASTIC_PASSWORD` or returned "not configured"

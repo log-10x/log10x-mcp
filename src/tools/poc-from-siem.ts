@@ -83,8 +83,14 @@ export const pocFromSiemSubmitSchema = {
     .describe('Override the $/GB rate for cost calculations. Default is read from vendors.json per detected SIEM.'),
   privacy_mode: z
     .boolean()
-    .default(false)
-    .describe('When true, templating runs through a locally-installed `tenx` CLI (events never leave the machine). Requires the CLI to be installed; errors cleanly otherwise.'),
+    .default(true)
+    .describe(
+      'Default true: templating runs through the locally-installed `tenx` CLI so events never leave the machine. ' +
+        'Requires `tenx` to be installed (brew install log10x/tap/tenx, or see https://docs.log10x.com/apps/dev/); ' +
+        'the tool errors cleanly with an install hint otherwise. ' +
+        'Set to false to route through the public Log10x paste endpoint instead — intended for demo use only, ' +
+        'not production log content (raw events are sent to a shared public Lambda).'
+    ),
   environment: z.string().optional().describe('Optional environment nickname — cosmetic only, for the report header.'),
   // ClickHouse-specific
   clickhouse_table: z.string().optional().describe('[ClickHouse] Required — table name holding log events.'),

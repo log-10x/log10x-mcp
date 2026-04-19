@@ -561,32 +561,98 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
   return checks;
 }
 
-/** Doctor probe on the paste endpoint — global, only runs once regardless of env count. */
+/**
+ * Check the templating backend the tools will actually use by default:
+ * the local `tenx` CLI. Falls back to checking the public paste endpoint
+ * only as a demo-mode fallback status, with an explicit warning so users
+ * don't assume it's production-ready.
+ */
 async function addPasteEndpointCheck(globalChecks: DoctorCheck[]): Promise<void> {
+  // 1. Primary path: local tenx CLI (privacy_mode: true, the default).
+  const tenxBinary = process.env.LOG10X_TENX_PATH || 'tenx';
+  const tenxAvailable = await isTenxAvailable(tenxBinary);
+  if (tenxAvailable.ok) {
+    globalChecks.push({
+      name: 'templater_local_tenx',
+      status: 'pass',
+      message: `Local tenx CLI available (${tenxAvailable.version || 'version unknown'}). Templating will run locally — events never leave the box.`,
+    });
+  } else {
+    globalChecks.push({
+      name: 'templater_local_tenx',
+      status: 'warn',
+      message:
+        'Local tenx CLI is not installed (or not on PATH / LOG10X_TENX_PATH). ' +
+        'privacy_mode: true (the default) will fail until tenx is installed.',
+      fix: installHintForPlatform(),
+    });
+  }
+
+  // 2. Fallback path: paste endpoint — informational only. It's public,
+  // rate-limited, and not intended for production log content. Flag as
+  // warn regardless of reachability so users don't treat it as a green
+  // pass on a production install.
   try {
     const url = process.env.LOG10X_PASTE_URL || 'https://meljpepqpd.execute-api.us-east-1.amazonaws.com/paste';
     const res = await fetch(url, { method: 'OPTIONS' });
-    if (res.ok || res.status === 204 || res.status === 405) {
-      globalChecks.push({
-        name: 'paste_endpoint',
-        status: 'pass',
-        message: 'Log10x paste endpoint reachable. log10x_resolve_batch will route through it by default.',
-      });
-    } else {
-      globalChecks.push({
-        name: 'paste_endpoint',
-        status: 'warn',
-        message: `Paste endpoint returned HTTP ${res.status}. resolve_batch may fail.`,
-      });
-    }
+    const reachable = res.ok || res.status === 204 || res.status === 405;
+    globalChecks.push({
+      name: 'templater_paste_endpoint_fallback',
+      status: 'warn',
+      message:
+        reachable
+          ? 'Paste endpoint reachable (demo fallback for privacy_mode: false). Do NOT use with production log content — events leave the caller\'s machine and hit a shared public Lambda.'
+          : `Paste endpoint returned HTTP ${res.status}. privacy_mode: false calls will fail; install the local tenx CLI and keep privacy_mode: true (the default).`,
+      fix: tenxAvailable.ok
+        ? undefined
+        : 'For production use, install tenx locally (see templater_local_tenx fix) and leave privacy_mode at its default of true.',
+    });
   } catch (e) {
     globalChecks.push({
-      name: 'paste_endpoint',
+      name: 'templater_paste_endpoint_fallback',
       status: 'warn',
-      message: `Paste endpoint unreachable: ${(e as Error).message}`,
-      fix: 'If the network is locked down, allowlist the LOG10X_PASTE_URL host (default: meljpepqpd.execute-api.us-east-1.amazonaws.com). Or set privacy_mode=true on resolve_batch and install the local tenx CLI.',
+      message: `Paste endpoint unreachable: ${(e as Error).message}. privacy_mode: false will fail; this is expected on air-gapped installs and only matters if you intended to use the demo endpoint.`,
     });
   }
+}
+
+function installHintForPlatform(): string {
+  if (process.platform === 'darwin') return 'brew install log10x/tap/tenx';
+  if (process.platform === 'linux') return 'curl -fsSL https://install.log10x.com | sh — or use the apt/yum packages at https://docs.log10x.com/apps/dev/';
+  if (process.platform === 'win32') return 'iwr -useb https://install.log10x.com/install.ps1 | iex';
+  return 'see https://docs.log10x.com/apps/dev/ for install instructions';
+}
+
+async function isTenxAvailable(binary: string): Promise<{ ok: boolean; version?: string }> {
+  // Cheap non-executing check: `which tenx` / `where tenx`. We don't fully
+  // validate module resolution here — that requires running @apps/dev which
+  // takes a few seconds. Doctor is supposed to be fast.
+  const { spawn } = await import('child_process');
+  const lookup = process.platform === 'win32' ? 'where' : 'which';
+  if (binary.startsWith('/') || /^[A-Za-z]:\\/.test(binary)) {
+    const { existsSync } = await import('fs');
+    if (!existsSync(binary)) return { ok: false };
+  } else {
+    const found = await new Promise<boolean>((resolve) => {
+      const p = spawn(lookup, [binary], { stdio: ['ignore', 'ignore', 'ignore'] });
+      p.on('error', () => resolve(false));
+      p.on('close', (c) => resolve(c === 0));
+      setTimeout(() => resolve(false), 3000);
+    });
+    if (!found) return { ok: false };
+  }
+  // Get --version quickly (capped at 3s).
+  const version = await new Promise<string | undefined>((resolve) => {
+    const p = spawn(binary, ['--version'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    p.stdout.on('data', (d) => {
+      out += d.toString();
+    });
+    p.on('error', () => resolve(undefined));
+    p.on('close', () => resolve(out.trim().slice(0, 120) || undefined));
+    setTimeout(() => resolve(undefined), 3000);
+  });
+  return { ok: true, version };
 }
 
 /**

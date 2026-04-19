@@ -36,7 +36,15 @@ export const resolveBatchSchema = {
   top_n_patterns: z.number().min(1).max(50).default(20).describe('How many patterns to return in the ranked triage.'),
   include_next_actions: z.boolean().default(true).describe('Whether to generate next_action suggestions for each top pattern.'),
   environment: z.string().optional().describe('Environment nickname — used to build next_actions that call log10x_investigate.'),
-  privacy_mode: z.boolean().default(false).describe('When true, events are NOT sent to the Log10x paste Lambda. The tool instead attempts to shell out to a locally-installed `tenx` binary. If the binary is not installed, the call errors cleanly with an install hint.'),
+  privacy_mode: z
+    .boolean()
+    .default(true)
+    .describe(
+      'Default true: shell out to a locally-installed `tenx` binary so events never leave the machine. ' +
+        'Requires `tenx` (brew install log10x/tap/tenx, or see https://docs.log10x.com/apps/dev/). Errors cleanly ' +
+        'with an install hint if missing. Set to false to route through the public Log10x paste endpoint — demo ' +
+        'use only, not production log content (raw events are sent to a shared public Lambda).'
+    ),
 };
 
 export async function executeResolveBatch(args: {
