@@ -25,7 +25,7 @@ const VARS = [
   'SUMO_ACCESS_ID', 'SUMO_ACCESS_KEY', 'SUMO_ENDPOINT',
   'ELASTIC_URL', 'ELASTIC_API_KEY', 'ELASTIC_USERNAME', 'ELASTIC_PASSWORD',
   'ELASTICSEARCH_URL', 'ELASTICSEARCH_API_KEY',
-  'SPLUNK_HOST', 'SPLUNK_TOKEN',
+  'SPLUNK_HOST', 'SPLUNK_TOKEN', 'SPLUNK_USERNAME', 'SPLUNK_PASSWORD',
   'CLICKHOUSE_URL', 'CLICKHOUSE_USER', 'CLICKHOUSE_PASSWORD', 'CLICKHOUSE_API_KEY', 'CLICKHOUSE_DATABASE',
   'AZURE_LOG_ANALYTICS_WORKSPACE_ID', 'AZURE_CLIENT_ID', 'AZURE_TENANT_ID', 'AZURE_CLIENT_SECRET',
 ];
@@ -133,6 +133,18 @@ test('elasticsearch not-configured without URL', async () => {
   assert.equal(d.available, false);
 });
 
+test('elasticsearch accepts URL-only (xpack.security.enabled=false dev cluster)', async () => {
+  // Regression test for the bug caught during E2E against a local ES 9.1
+  // container with security disabled. Before the fix the connector
+  // required ELASTIC_API_KEY or ELASTIC_USERNAME+ELASTIC_PASSWORD.
+  snap = snapshotEnv();
+  clearEnv();
+  process.env.ELASTIC_URL = 'http://localhost:9200';
+  const d = await elasticsearchConnector.discoverCredentials();
+  assert.equal(d.available, true);
+  assert.equal((d.details as Record<string, string>).auth, 'none');
+});
+
 // ── Splunk ──
 
 test('splunk detects with host + token', async () => {
@@ -144,6 +156,21 @@ test('splunk detects with host + token', async () => {
   assert.equal(d.available, true);
   assert.equal(d.source, 'env');
   assert.equal((d.details as Record<string, string>).auth, 'bearer_token');
+});
+
+test('splunk detects with host + username + password (env vars)', async () => {
+  // Regression test for the gap caught during E2E: SPLUNK_USERNAME +
+  // SPLUNK_PASSWORD were not read as env vars (only SPLUNK_TOKEN or
+  // ~/.splunkrc were). Dockerized Splunk installs use admin/password auth.
+  snap = snapshotEnv();
+  clearEnv();
+  process.env.SPLUNK_HOST = 'https://localhost:8089';
+  process.env.SPLUNK_USERNAME = 'admin';
+  process.env.SPLUNK_PASSWORD = 'pw';
+  const d = await splunkConnector.discoverCredentials();
+  assert.equal(d.available, true);
+  assert.equal(d.source, 'env');
+  assert.equal((d.details as Record<string, string>).auth, 'basic');
 });
 
 test('splunk not-configured without token', async () => {
