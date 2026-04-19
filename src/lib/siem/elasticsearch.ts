@@ -33,18 +33,22 @@ function getConn(): Conn | null {
   const username = process.env.ELASTIC_USERNAME || process.env.ELASTICSEARCH_USERNAME;
   const password = process.env.ELASTIC_PASSWORD || process.env.ELASTICSEARCH_PASSWORD;
   if (username && password) return { url, username, password };
-  return null;
+  // No auth configured — valid for dev/self-hosted ES with xpack.security.enabled=false.
+  // The SDK will hit the cluster without auth headers; the cluster will reject if it
+  // actually requires auth, and the pullEvents error path surfaces that cleanly.
+  return { url };
 }
 
 async function discoverCredentials(): Promise<CredentialDiscovery> {
   const conn = getConn();
   if (!conn) return { available: false, source: 'none' };
+  const authKind = conn.apiKey ? 'api_key' : conn.username ? 'basic' : 'none';
   return {
     available: true,
     source: 'env',
     details: {
       url: conn.url,
-      auth: conn.apiKey ? 'api_key' : 'basic',
+      auth: authKind,
     },
   };
 }
@@ -59,16 +63,23 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
         truncated: false,
         queryUsed: '',
         reasonStopped: 'error',
-        notes: ['Set ELASTIC_URL + (ELASTIC_API_KEY OR ELASTIC_USERNAME+ELASTIC_PASSWORD).'],
+        notes: [
+          'Set ELASTIC_URL (optionally with ELASTIC_API_KEY, or ELASTIC_USERNAME+ELASTIC_PASSWORD). ' +
+            'URL-only is valid for dev clusters with xpack.security.enabled=false.',
+        ],
       },
     };
   }
 
   const client = new Client({
     node: conn.url,
-    auth: conn.apiKey
-      ? { apiKey: conn.apiKey }
-      : { username: conn.username!, password: conn.password! },
+    // Only pass auth when configured; xpack.security.enabled=false clusters
+    // reject requests with auth headers. Leaving auth undefined is safe.
+    ...(conn.apiKey
+      ? { auth: { apiKey: conn.apiKey } }
+      : conn.username && conn.password
+      ? { auth: { username: conn.username, password: conn.password } }
+      : {}),
   });
 
   const deadline = Date.now() + opts.maxPullMinutes * 60_000;
@@ -96,10 +107,18 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
       break;
     }
     try {
+      // Sort by @timestamp only. ES 9 disallows sorting on `_id`
+      // (indices.id_field_data.enabled=false by default), and `_shard_doc`
+      // requires an open point-in-time (PIT) context. Without PIT, relying
+      // on @timestamp alone is the simplest cross-version-safe option. For
+      // POC triage the rare duplicate/skip at identical timestamps is
+      // acceptable; customers who need strict dedup should open a PIT
+      // themselves and pass the PIT id via a future arg.
       const searchBody: Record<string, unknown> = {
         query: { bool: { must: mustClauses } },
         size: 1000,
-        sort: [{ '@timestamp': 'asc' }, { _id: 'asc' }],
+        sort: [{ '@timestamp': 'asc' }],
+        track_total_hits: false,
       };
       if (searchAfter) searchBody.search_after = searchAfter;
       const resp = await retryWithBackoff(() =>
