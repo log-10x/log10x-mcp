@@ -396,6 +396,76 @@ function eventTimestampMs(ev: StreamerEvent): number {
 }
 
 /**
+ * Wait for the R21 `_DONE.json` coordinator marker to appear. Returns the
+ * parsed body ({queryId, elapsedMs, reason, streamRequests, expectedMarkers,
+ * ...}) if it lands within the deadline, null otherwise. S3 strong
+ * read-after-write consistency means the marker is visible the instant
+ * putObject returns, so we see "done" within one poll cycle (≈1.5s).
+ */
+interface DoneMarkerBody {
+  queryId?: string;
+  completedAt?: number;
+  elapsedMs?: number;
+  reason?: string;
+  scanned?: number;
+  matched?: number;
+  streamRequests?: number;
+  streamBlobs?: number;
+  submittedTasks?: number;
+  expectedMarkers?: number;
+}
+
+async function waitForDoneMarker(
+  bucket: string,
+  key: string,
+  pollMs: number,
+  timeoutMs: number
+): Promise<DoneMarkerBody | null> {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    try {
+      const body = await s3Get(bucket, key);
+      if (body && body.trim().length > 0) {
+        try {
+          return JSON.parse(body) as DoneMarkerBody;
+        } catch {
+          // Partial write seen (shouldn't happen with S3 atomic put, but
+          // defensive). Retry next poll.
+        }
+      }
+    } catch {
+      // NoSuchKey until the coordinator close fires. Normal path.
+    }
+    await sleep(pollMs);
+  }
+  return null;
+}
+
+/**
+ * Poll the marker prefix until `expected` byte-count markers have landed
+ * (or until the budget expires). Used in the deterministic post-_DONE
+ * completion path: the coordinator has already told us how many workers it
+ * dispatched, so we wait for that exact count rather than guessing via a
+ * stability heuristic.
+ */
+async function waitForMarkerCount(
+  bucket: string,
+  markerPrefix: string,
+  expected: number,
+  pollMs: number,
+  timeoutMs: number
+): Promise<S3ListEntry[]> {
+  const started = Date.now();
+  let entries: S3ListEntry[] = [];
+  while (Date.now() - started < timeoutMs) {
+    entries = await s3List(bucket, markerPrefix);
+    if (entries.length >= expected) return entries;
+    await sleep(pollMs);
+  }
+  return entries;
+}
+
+/**
  * Poll the marker prefix until the same set of markers is observed twice in
  * a row (stability = no new workers landing). Returns the stable list of
  * marker keys.
@@ -490,8 +560,25 @@ export async function runStreamerQuery(
   const basePrefix = indexSubpath ? `${indexSubpath}/` : '';
   const markerPrefix = `${basePrefix}tenx/${target}/q/${queryId}/`;
   const resultsPrefix = `${basePrefix}tenx/${target}/qr/${queryId}/`;
+  const doneMarkerKey = `${resultsPrefix}_DONE.json`;
 
-  await waitForMarkerStability(bucket, markerPrefix, pollMs, timeoutMs);
+  // Prefer the deterministic coordinator-written `_DONE.json` marker (R21).
+  // If it appears, we know the coordinator finished and what 'expectedMarkers'
+  // value to wait on before considering results complete. Falls back to the
+  // legacy stability heuristic if the marker is missing (pre-R21 streamers
+  // or when writeResults=false skips the queryResults prefix entirely).
+  const doneInfo = await waitForDoneMarker(bucket, doneMarkerKey, pollMs, timeoutMs);
+  if (doneInfo) {
+    // Coordinator done — now wait for 'expectedMarkers' byte-count markers
+    // to appear (each stream dispatch produces one on worker close). Bounded
+    // by a short tail budget so stragglers don't hold up the MCP call forever.
+    const tailBudgetMs = Math.min(20_000, Math.max(0, timeoutMs - (Date.now() - started)));
+    await waitForMarkerCount(bucket, markerPrefix, doneInfo.expectedMarkers ?? 0, pollMs, tailBudgetMs);
+  } else {
+    // Legacy path — no _DONE marker seen within the budget. Fall back to the
+    // byte-count-marker stability heuristic.
+    await waitForMarkerStability(bucket, markerPrefix, pollMs, timeoutMs);
+  }
 
   // The results writer only runs on workers that actually matched events, so
   // the results prefix may have fewer entries than the marker prefix — which
