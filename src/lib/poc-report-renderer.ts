@@ -85,18 +85,71 @@ type Confidence = 'high' | 'medium' | 'low';
  * Never lose the identity — every machine-pasted reference (regulator
  * YAML, SIEM configs) uses the raw form.
  */
-function displayName(identity: string, aiPrettyNames?: Record<string, string>): string {
-  const pretty = aiPrettyNames?.[identity];
-  if (!pretty) return `\`${identity}\``;
-  return `**${pretty}** (\`${identity}\`)`;
+function displayName(
+  identity: string,
+  template: string,
+  aiPrettyNames?: Record<string, string>
+): string {
+  const name = aiPrettyNames?.[identity] || heuristicName(template, identity);
+  return `**${name}** (\`${identity}\`)`;
 }
 
 /** Compact variant for table cells — pretty name with truncated identity suffix. */
-function displayNameCompact(identity: string, aiPrettyNames?: Record<string, string>): string {
-  const pretty = aiPrettyNames?.[identity];
-  if (!pretty) return `\`${identity}\``;
+function displayNameCompact(
+  identity: string,
+  template: string,
+  aiPrettyNames?: Record<string, string>
+): string {
+  const name = aiPrettyNames?.[identity] || heuristicName(template, identity);
   const short = identity.length > 40 ? identity.slice(0, 38) + '…' : identity;
-  return `**${pretty}**<br>\`${short}\``;
+  return `**${name}**<br>\`${short}\``;
+}
+
+/**
+ * Build a "good enough" human-readable pattern name WITHOUT an LLM.
+ * Used when MCP sampling (AI prettify) isn't available or returned
+ * nothing for this identity. Strictly better than the raw underscored
+ * identity — turns
+ *   `$(ts) ERROR payment_gateway_timeout customer=$ amount=$ provider=$`
+ * into `Payment Gateway Timeout Customer`.
+ *
+ * Heuristic steps:
+ *   1. Strip `$(…)` format specs (timestamps, typed slots).
+ *   2. Strip literal ISO-ish timestamps baked into the text
+ *      (`2025-10-01T21:25:01.539Z`, bare `HH:MM:SS`, etc.).
+ *   3. Strip leading severity keyword.
+ *   4. Collapse `key=$` → `key` (keep the attribute name as a word).
+ *   5. Drop bare `$` placeholders.
+ *   6. Split on non-word, drop short / purely-numeric tokens.
+ *   7. Title-case the first 4 content tokens.
+ */
+function heuristicName(template: string, identity: string): string {
+  let s = template;
+  s = s.replace(/\$\([^)]*\)/g, ' ');
+  s = s.replace(
+    /\b\d{4}[-/]\d{1,2}[-/]\d{1,2}([T\s]\d{1,2}:\d{2}(:\d{2})?(\.\d+)?Z?)?\b/g,
+    ' '
+  );
+  s = s.replace(/\b\d{1,2}:\d{2}(:\d{2})?(\.\d+)?Z?\b/g, ' ');
+  s = s.trim().replace(/^(FATAL|ERROR|WARN(?:ING)?|INFO|DEBUG|TRACE|CRIT(?:ICAL)?)\b\s*/i, '');
+  s = s.replace(/([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\$/g, '$1');
+  s = s.replace(/\$/g, ' ');
+  const tokens = s
+    .split(/[^A-Za-z0-9]+/)
+    .filter((t) => t.length >= 2)
+    .filter((t) => !/^\d+$/.test(t));
+  const picked = tokens.slice(0, 4);
+  if (picked.length === 0) return shortIdentity(identity);
+  return picked.map((t) => t[0].toUpperCase() + t.slice(1).toLowerCase()).join(' ');
+}
+
+/** Resolve a display name: AI > heuristic > spaced identity. */
+function resolveName(
+  identity: string,
+  template: string,
+  aiPrettyNames?: Record<string, string>
+): string {
+  return aiPrettyNames?.[identity] || heuristicName(template, identity);
 }
 
 interface EnrichedPattern extends ExtractedPattern {
@@ -169,7 +222,7 @@ export function renderPocSummary(input: RenderInput, topN = 5): string {
     lines.push('|---|---|---|---|---|---|');
     for (let i = 0; i < top.length; i++) {
       const p = top[i];
-      const name = input.aiPrettyNames?.[p.identity] || shortIdentity(p.identity);
+      const name = resolveName(p.identity, p.template, input.aiPrettyNames);
       const annualSavings = projectBilling(p.projectedSavings, input.windowHours, 24 * 365);
       const flag = needsReview(p) ? ' ⚠' : '';
       lines.push(
@@ -280,7 +333,7 @@ export function renderPocTop(input: RenderInput, topN = 20): string {
   lines.push('|---|---|---|---|---|---|---|---|');
   for (let i = 0; i < top.length; i++) {
     const p = top[i];
-    const name = input.aiPrettyNames?.[p.identity] || shortIdentity(p.identity);
+    const name = resolveName(p.identity, p.template, input.aiPrettyNames);
     const weekly = p.costPerWeek;
     const annual = projectBilling(p.costPerWindow, input.windowHours, 24 * 365);
     const flag = needsReview(p) ? ' ⚠' : '';
@@ -309,7 +362,7 @@ export function renderPocPattern(input: RenderInput, identity: string): string {
     );
   }
   const lines: string[] = [];
-  const name = input.aiPrettyNames?.[p.identity] || shortIdentity(p.identity);
+  const name = resolveName(p.identity, p.template, input.aiPrettyNames);
   const annualSavings = projectBilling(p.projectedSavings, input.windowHours, 24 * 365);
   lines.push(`## ${name}`);
   lines.push('');
@@ -475,7 +528,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
   if (top3.length > 0) {
     lines.push('**Top 3 wins**:');
     for (const p of top3) {
-      const dn = displayName(p.identity, input.aiPrettyNames);
+      const dn = displayName(p.identity, p.template, input.aiPrettyNames);
       const label = p.recommendedAction === 'mute'
         ? `Mute ${dn}`
         : p.recommendedAction === 'sample'
@@ -503,7 +556,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
       const p = patterns[i];
       const newFlag = p.count === 1 && input.extraction.totalEvents > 100 ? 'new?' : '';
       lines.push(
-        `| ${i + 1} | ${displayNameCompact(p.identity, input.aiPrettyNames)} | ${p.service || 'unknown'} | ${p.severity || '—'} | ${fmtCount(p.count)} | ${fmtPct(p.pctOfTotal * 100)} | ${fmtDollar(p.costPerWindow)} | ${fmtDollar(p.costPerWeek)} | ${newFlag} |`
+        `| ${i + 1} | ${displayNameCompact(p.identity, p.template, input.aiPrettyNames)} | ${p.service || 'unknown'} | ${p.severity || '—'} | ${fmtCount(p.count)} | ${fmtPct(p.pctOfTotal * 100)} | ${fmtDollar(p.costPerWindow)} | ${fmtDollar(p.costPerWeek)} | ${newFlag} |`
       );
     }
     lines.push('');
@@ -551,7 +604,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
   const regulatorTopN = Math.min(patterns.length, 10);
   for (let i = 0; i < regulatorTopN; i++) {
     const p = patterns[i];
-    lines.push(`### #${i + 1} — ${displayName(p.identity, input.aiPrettyNames)}  _(${p.confidence} confidence)_`);
+    lines.push(`### #${i + 1} — ${displayName(p.identity, p.template, input.aiPrettyNames)}  _(${p.confidence} confidence)_`);
     lines.push('');
     lines.push(`- **Action**: ${actionLabel(p)}`);
     lines.push(`- **Reasoning**: ${p.reasoning}`);
@@ -610,7 +663,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
       const ratio = p.bytes > 0 ? p.bytes / Math.max(1, afterBytes) : 1;
       const saveCost = costFromBytes(p.bytes - afterBytes, input.analyzerCostPerGb);
       lines.push(
-        `| ${displayNameCompact(p.identity, input.aiPrettyNames)} | ${fmtBytes(p.bytes)} | ${fmtBytes(afterBytes)} (${ratio.toFixed(1)}×) | ${fmtDollar(saveCost)} | \`${truncate(p.sampleEvent, 60)}\` | \`~${truncate(p.template, 60)}\` |`
+        `| ${displayNameCompact(p.identity, p.template, input.aiPrettyNames)} | ${fmtBytes(p.bytes)} | ${fmtBytes(afterBytes)} (${ratio.toFixed(1)}×) | ${fmtDollar(saveCost)} | \`${truncate(p.sampleEvent, 60)}\` | \`~${truncate(p.template, 60)}\` |`
       );
     }
     lines.push('');
@@ -642,7 +695,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
       if (p.count < 10) {
         why.push(`only ${p.count} events in window — low confidence on statistical behavior`);
       }
-      lines.push(`- ${displayName(p.identity, input.aiPrettyNames)} — ${why.join('; ')}`);
+      lines.push(`- ${displayName(p.identity, p.template, input.aiPrettyNames)} — ${why.join('; ')}`);
     }
     lines.push('');
   }
@@ -689,7 +742,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
     lines.push('|---|---|---|---|---|---|');
     for (const p of patterns.slice(0, 50)) {
       lines.push(
-        `| ${displayNameCompact(p.identity, input.aiPrettyNames)} | ${fmtCount(p.count)} | ${fmtBytes(p.bytes)} | ${p.severity || '—'} | ${p.service || '—'} | \`${truncate(p.sampleEvent, 80).replace(/\|/g, '\\|')}\` |`
+        `| ${displayNameCompact(p.identity, p.template, input.aiPrettyNames)} | ${fmtCount(p.count)} | ${fmtBytes(p.bytes)} | ${p.severity || '—'} | ${p.service || '—'} | \`${truncate(p.sampleEvent, 80).replace(/\|/g, '\\|')}\` |`
       );
     }
     if (patterns.length > 50) {
@@ -740,10 +793,12 @@ export function renderPocReport(input: RenderInput): RenderResult {
   }
   if (input.aiPrettyNames && Object.keys(input.aiPrettyNames).length > 0) {
     lines.push(
-      `- **ai_prettify**: ${Object.keys(input.aiPrettyNames).length} pattern(s) renamed via /api/v1/query_ai`
+      `- **naming**: ${Object.keys(input.aiPrettyNames).length} pattern(s) AI-prettified via MCP sampling; remainder use template-based heuristic`
     );
   } else if (input.aiPrettifyErrorNote) {
-    lines.push(`- **ai_prettify**: SKIPPED — ${input.aiPrettifyErrorNote}`);
+    lines.push(`- **naming**: template-based heuristic (AI prettify skipped — ${input.aiPrettifyErrorNote})`);
+  } else {
+    lines.push(`- **naming**: template-based heuristic`);
   }
   if (input.pullNotes && input.pullNotes.length > 0) {
     lines.push('- **pull notes**:');
@@ -760,7 +815,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
       totalCostAnalyzed: totalCost,
       projectedSavings,
       top3Actions: top3.map((p) => {
-        const name = input.aiPrettyNames?.[p.identity] || p.identity;
+        const name = resolveName(p.identity, p.template, input.aiPrettyNames);
         return p.recommendedAction === 'mute'
           ? `Mute ${name} → save ${fmtDollar(p.projectedSavings)}`
           : p.recommendedAction === 'sample'

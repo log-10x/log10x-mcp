@@ -171,3 +171,50 @@ test('full view still works (regression)', () => {
   assert.equal(summary.eventsAnalyzed, 50_000);
   assert.ok(summary.patternsFound > 0);
 });
+
+test('heuristic produces readable names without AI sampling', () => {
+  // No aiPrettyNames at all — every name must come from the template heuristic.
+  const out = renderPocSummary(input());
+  // Heartbeat template: "$(ts) INFO heartbeat every $ seconds from $"
+  // After stripping $(ts), severity, $ placeholders → "heartbeat every seconds from"
+  assert.ok(
+    /Heartbeat\s+Every\s+Seconds/.test(out),
+    `expected title-cased heartbeat tokens in summary; got:\n${out}`
+  );
+  // Slow query template: "$(ts) WARN slow query: $ took $ ms"
+  assert.ok(/Slow\s+Query/.test(out), `expected title-cased "Slow Query"; got:\n${out}`);
+  // None of the raw hashes should leak as the primary display name
+  // (they still appear parenthetically as the identity reference).
+  assert.ok(!/^\s*\|\s*1\s*\|\s*`h_/.test(out), 'raw identity should not be the leading name');
+});
+
+test('heuristic strips literal timestamps baked into templates', () => {
+  const i = input();
+  // Mutate one template to embed a literal timestamp — simulates a pattern
+  // where the templater failed to recognize the timestamp.
+  i.extraction.patterns[0].template =
+    '2025-10-01T21:25:01.539Z INFO heartbeat every $ seconds from $';
+  const out = renderPocSummary(i);
+  assert.ok(
+    !/2025|10[-\s]01|21:25/.test(out.split('Top')[1] ?? out),
+    'literal timestamp tokens must not survive into the pretty name'
+  );
+  assert.ok(/Heartbeat/.test(out), 'content tokens should still be extracted');
+});
+
+test('AI pretty names take priority over heuristic', () => {
+  // Identity is derived from toSnakeCase(template, hash) — not the raw hash.
+  // For template "$(ts) INFO heartbeat every $ seconds from $" that's
+  // "heartbeat_every_seconds_from". We key aiPrettyNames on that.
+  const i = {
+    ...input(),
+    aiPrettyNames: { heartbeat_every_seconds_from: 'Customer Heartbeat' },
+  };
+  const out = renderPocSummary(i);
+  assert.ok(out.includes('Customer Heartbeat'), `AI name should win; got:\n${out}`);
+  // And the other patterns still get heuristic names (no AI entry for them).
+  assert.ok(
+    /Slow\s+Query|Failed\s+To\s+Connect/.test(out),
+    'other patterns still get heuristic names'
+  );
+});
