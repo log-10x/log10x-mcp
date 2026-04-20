@@ -41,6 +41,8 @@ const out = args.out;
 const clickhouseTable = args['ch-table'];
 const clickhouseMessageColumn = args['ch-msg'];
 const clickhouseTimestampColumn = args['ch-ts'];
+const totalDailyGb = args['daily-gb'] !== undefined ? Number(args['daily-gb']) : undefined;
+const aiPrettify = args['ai'] !== 'false';
 
 if (!siem) {
   console.error('--siem is required');
@@ -56,6 +58,8 @@ const submitOut = await executePocSubmit({
   target_event_count: target,
   max_pull_minutes: maxMin,
   privacy_mode: privacy,
+  ai_prettify: aiPrettify,
+  total_daily_gb: totalDailyGb,
   clickhouse_table: clickhouseTable,
   clickhouse_message_column: clickhouseMessageColumn,
   clickhouse_timestamp_column: clickhouseTimestampColumn,

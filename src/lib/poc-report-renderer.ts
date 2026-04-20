@@ -39,6 +39,22 @@ export interface RenderInput {
   banners?: string[];
   /** Pull notes from the connector (retry info, error detail, etc.). */
   pullNotes?: string[];
+  /**
+   * Optional: the customer's total daily log volume (in GB/day). When
+   * provided, costs are scaled from the sample to the real daily volume
+   * by pattern %, giving meaningful absolute dollar figures instead of
+   * the raw $0.00-$0.02 numbers a 5K-event sample produces on its own.
+   */
+  totalDailyGb?: number;
+  /**
+   * Optional: AI-generated display name per pattern identity. When set,
+   * the identity is rendered as `<Pretty Name> (<identity>)` in every
+   * table instead of just the identity. Missing entries fall back to
+   * raw identity — fail-soft.
+   */
+  aiPrettyNames?: Record<string, string>;
+  /** Error note from the AI prettify call, if any. Surfaced in the appendix. */
+  aiPrettifyErrorNote?: string;
 }
 
 export interface RenderResult {
@@ -53,6 +69,27 @@ export interface RenderResult {
 }
 
 type Confidence = 'high' | 'medium' | 'low';
+
+/**
+ * Build a display string for a pattern identity. When an AI pretty name
+ * exists for this identity, show `<Pretty Name>` with the raw identity
+ * inline for copy-paste. Otherwise fall back to the raw identity alone.
+ * Never lose the identity — every machine-pasted reference (regulator
+ * YAML, SIEM configs) uses the raw form.
+ */
+function displayName(identity: string, aiPrettyNames?: Record<string, string>): string {
+  const pretty = aiPrettyNames?.[identity];
+  if (!pretty) return `\`${identity}\``;
+  return `**${pretty}** (\`${identity}\`)`;
+}
+
+/** Compact variant for table cells — pretty name with truncated identity suffix. */
+function displayNameCompact(identity: string, aiPrettyNames?: Record<string, string>): string {
+  const pretty = aiPrettyNames?.[identity];
+  if (!pretty) return `\`${identity}\``;
+  const short = identity.length > 40 ? identity.slice(0, 38) + '…' : identity;
+  return `**${pretty}**<br>\`${short}\``;
+}
 
 interface EnrichedPattern extends ExtractedPattern {
   costPerWindow: number;
@@ -110,11 +147,35 @@ export function renderPocReport(input: RenderInput): RenderResult {
     `Analyzed **${fmtCount(input.extraction.totalEvents)} events** (${fmtBytes(input.extraction.totalBytes)}) from ${SIEM_DISPLAY_NAMES[input.siem]} across the last ${input.window}.`
   );
   lines.push('');
-  lines.push(`- **Observed cost (window)**: ${fmtDollar(totalCost)}`);
-  lines.push(`- **Projected weekly cost**: ${fmtDollar(projectBilling(totalCost, input.windowHours, 24 * 7))}`);
-  lines.push(
-    `- **Potential savings (window)**: ${fmtDollar(projectedSavings)} — ${fmtPct((projectedSavings / Math.max(1, totalCost)) * 100)} of analyzed cost`
-  );
+  if (input.totalDailyGb && input.totalDailyGb > 0) {
+    // When the caller told us the customer's real daily volume, costs
+    // below are SCALED from sample → full daily spend. Make this
+    // explicit so nobody thinks our 5K-event sample actually costs $N.
+    lines.push(
+      `> **Volume-scaled mode**: costs below extrapolate the sample's pattern distribution to the supplied ${input.totalDailyGb.toLocaleString()} GB/day ingest rate. Shown dollar figures represent projected spend across the full daily volume, not the sample's own cost. Set to 0 or omit \`total_daily_gb\` to see raw sample-only costs.`
+    );
+    lines.push('');
+    const dailyCost = projectBilling(totalCost, input.windowHours, 24);
+    const weeklyCost = projectBilling(totalCost, input.windowHours, 24 * 7);
+    const annualCost = projectBilling(totalCost, input.windowHours, 24 * 365);
+    const annualSavings = projectBilling(projectedSavings, input.windowHours, 24 * 365);
+    lines.push(`- **Projected daily cost**: ${fmtDollar(dailyCost)}`);
+    lines.push(`- **Projected weekly cost**: ${fmtDollar(weeklyCost)}`);
+    lines.push(`- **Projected annual cost**: ${fmtDollar(annualCost)}`);
+    lines.push(
+      `- **Potential annual savings**: ${fmtDollar(annualSavings)} — ${fmtPct((annualSavings / Math.max(1, annualCost)) * 100)} of annual cost`
+    );
+  } else {
+    lines.push(
+      `> **Sample-only costs below**: cost figures reflect the pulled sample only (${fmtBytes(input.extraction.totalBytes)}). Pass \`total_daily_gb\` on the submit tool to extrapolate to the customer's full daily volume — that's where the real $$ live.`
+    );
+    lines.push('');
+    lines.push(`- **Observed cost (window)**: ${fmtDollar(totalCost)}`);
+    lines.push(`- **Projected weekly cost**: ${fmtDollar(projectBilling(totalCost, input.windowHours, 24 * 7))}`);
+    lines.push(
+      `- **Potential savings (window)**: ${fmtDollar(projectedSavings)} — ${fmtPct((projectedSavings / Math.max(1, totalCost)) * 100)} of analyzed cost`
+    );
+  }
   lines.push(
     `- **Analyzer rate**: $${input.analyzerCostPerGb.toFixed(2)}/GB (from vendors.json; override via \`analyzer_cost_per_gb\`)`
   );
@@ -122,11 +183,12 @@ export function renderPocReport(input: RenderInput): RenderResult {
   if (top3.length > 0) {
     lines.push('**Top 3 wins**:');
     for (const p of top3) {
+      const dn = displayName(p.identity, input.aiPrettyNames);
       const label = p.recommendedAction === 'mute'
-        ? `Mute \`${p.identity}\``
+        ? `Mute ${dn}`
         : p.recommendedAction === 'sample'
-        ? `Sample \`${p.identity}\` at 1/${p.sampleRate}`
-        : `Keep \`${p.identity}\``;
+        ? `Sample ${dn} at 1/${p.sampleRate}`
+        : `Keep ${dn}`;
       const save = p.recommendedAction === 'keep' ? '' : ` → save ${fmtDollar(p.projectedSavings)}`;
       lines.push(`- ${label}${save}`);
     }
@@ -149,7 +211,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
       const p = patterns[i];
       const newFlag = p.count === 1 && input.extraction.totalEvents > 100 ? 'new?' : '';
       lines.push(
-        `| ${i + 1} | \`${p.identity}\` | ${p.service || 'unknown'} | ${p.severity || '—'} | ${fmtCount(p.count)} | ${fmtPct(p.pctOfTotal * 100)} | ${fmtDollar(p.costPerWindow)} | ${fmtDollar(p.costPerWeek)} | ${newFlag} |`
+        `| ${i + 1} | ${displayNameCompact(p.identity, input.aiPrettyNames)} | ${p.service || 'unknown'} | ${p.severity || '—'} | ${fmtCount(p.count)} | ${fmtPct(p.pctOfTotal * 100)} | ${fmtDollar(p.costPerWindow)} | ${fmtDollar(p.costPerWeek)} | ${newFlag} |`
       );
     }
     lines.push('');
@@ -197,7 +259,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
   const regulatorTopN = Math.min(patterns.length, 10);
   for (let i = 0; i < regulatorTopN; i++) {
     const p = patterns[i];
-    lines.push(`### #${i + 1} — \`${p.identity}\`  _(${p.confidence} confidence)_`);
+    lines.push(`### #${i + 1} — ${displayName(p.identity, input.aiPrettyNames)}  _(${p.confidence} confidence)_`);
     lines.push('');
     lines.push(`- **Action**: ${actionLabel(p)}`);
     lines.push(`- **Reasoning**: ${p.reasoning}`);
@@ -256,7 +318,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
       const ratio = p.bytes > 0 ? p.bytes / Math.max(1, afterBytes) : 1;
       const saveCost = costFromBytes(p.bytes - afterBytes, input.analyzerCostPerGb);
       lines.push(
-        `| \`${p.identity}\` | ${fmtBytes(p.bytes)} | ${fmtBytes(afterBytes)} (${ratio.toFixed(1)}×) | ${fmtDollar(saveCost)} | \`${truncate(p.sampleEvent, 60)}\` | \`~${truncate(p.template, 60)}\` |`
+        `| ${displayNameCompact(p.identity, input.aiPrettyNames)} | ${fmtBytes(p.bytes)} | ${fmtBytes(afterBytes)} (${ratio.toFixed(1)}×) | ${fmtDollar(saveCost)} | \`${truncate(p.sampleEvent, 60)}\` | \`~${truncate(p.template, 60)}\` |`
       );
     }
     lines.push('');
@@ -288,7 +350,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
       if (p.count < 10) {
         why.push(`only ${p.count} events in window — low confidence on statistical behavior`);
       }
-      lines.push(`- \`${p.identity}\` — ${why.join('; ')}`);
+      lines.push(`- ${displayName(p.identity, input.aiPrettyNames)} — ${why.join('; ')}`);
     }
     lines.push('');
   }
@@ -335,7 +397,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
     lines.push('|---|---|---|---|---|---|');
     for (const p of patterns.slice(0, 50)) {
       lines.push(
-        `| \`${p.identity}\` | ${fmtCount(p.count)} | ${fmtBytes(p.bytes)} | ${p.severity || '—'} | ${p.service || '—'} | \`${truncate(p.sampleEvent, 80).replace(/\|/g, '\\|')}\` |`
+        `| ${displayNameCompact(p.identity, input.aiPrettyNames)} | ${fmtCount(p.count)} | ${fmtBytes(p.bytes)} | ${p.severity || '—'} | ${p.service || '—'} | \`${truncate(p.sampleEvent, 80).replace(/\|/g, '\\|')}\` |`
       );
     }
     if (patterns.length > 50) {
@@ -379,6 +441,18 @@ export function renderPocReport(input: RenderInput): RenderResult {
   );
   lines.push(`- **bytes_analyzed**: ${fmtBytes(input.extraction.totalBytes)}`);
   lines.push(`- **execution_mode**: ${input.extraction.executionMode}`);
+  if (input.totalDailyGb && input.totalDailyGb > 0) {
+    lines.push(`- **volume_scaling**: ${input.totalDailyGb} GB/day (costs scaled from sample)`);
+  } else {
+    lines.push(`- **volume_scaling**: disabled (sample-only costs)`);
+  }
+  if (input.aiPrettyNames && Object.keys(input.aiPrettyNames).length > 0) {
+    lines.push(
+      `- **ai_prettify**: ${Object.keys(input.aiPrettyNames).length} pattern(s) renamed via /api/v1/query_ai`
+    );
+  } else if (input.aiPrettifyErrorNote) {
+    lines.push(`- **ai_prettify**: SKIPPED — ${input.aiPrettifyErrorNote}`);
+  }
   if (input.pullNotes && input.pullNotes.length > 0) {
     lines.push('- **pull notes**:');
     for (const n of input.pullNotes) lines.push(`  - ${n}`);
@@ -393,13 +467,14 @@ export function renderPocReport(input: RenderInput): RenderResult {
       patternsFound: patterns.length,
       totalCostAnalyzed: totalCost,
       projectedSavings,
-      top3Actions: top3.map((p) =>
-        p.recommendedAction === 'mute'
-          ? `Mute ${p.identity} → save ${fmtDollar(p.projectedSavings)}`
+      top3Actions: top3.map((p) => {
+        const name = input.aiPrettyNames?.[p.identity] || p.identity;
+        return p.recommendedAction === 'mute'
+          ? `Mute ${name} → save ${fmtDollar(p.projectedSavings)}`
           : p.recommendedAction === 'sample'
-          ? `Sample ${p.identity} at 1/${p.sampleRate} → save ${fmtDollar(p.projectedSavings)}`
-          : `Keep ${p.identity}`
-      ),
+          ? `Sample ${name} at 1/${p.sampleRate} → save ${fmtDollar(p.projectedSavings)}`
+          : `Keep ${name}`;
+      }),
     },
   };
 }
@@ -411,10 +486,34 @@ function enrichPatterns(input: RenderInput): EnrichedPattern[] {
   const totalBytes = input.extraction.totalBytes || 1;
   const analyzerCost = input.analyzerCostPerGb;
 
+  // When the caller provides the customer's real daily volume, scale each
+  // pattern's bytes from "sample-observed" to "projected-daily" by
+  // multiplying by (totalDailyGb / sampleGb). This is valid when the
+  // sample is random (which every connector's default ordering gives us —
+  // Datadog sort=timestamp, ES @timestamp asc, Splunk job sample). It
+  // breaks down if the caller narrows to a specific service via `query`;
+  // in that case the scaling overstates cost because only a fraction of
+  // the daily volume matches the filter. Documented caveat.
+  const sampleGb = totalBytes / (1024 ** 3);
+  const scaleFactor = input.totalDailyGb && sampleGb > 0
+    ? input.totalDailyGb / sampleGb
+    : 1;
+
   const enriched: EnrichedPattern[] = input.extraction.patterns.map((p) => {
     const pctOfTotal = p.count / total;
-    const costPerWindow = costFromBytes(p.bytes, analyzerCost);
+    // Window cost = observed sample bytes scaled to daily volume if provided.
+    const scaledBytesPerDay = input.totalDailyGb
+      ? (p.bytes / (1024 ** 3)) * scaleFactor * (1024 ** 3) / Math.max(1, input.windowHours / 24)
+      : p.bytes;
+    // When totalDailyGb is set, interpret costPerWindow as "this pattern's
+    // share of the daily bill scaled to the pull window." Otherwise, plain
+    // bytes × rate. Either way, fmtDollar now shows sub-cent precision.
+    const costPerWindow = input.totalDailyGb
+      ? costFromBytes(p.bytes * scaleFactor, analyzerCost)
+      : costFromBytes(p.bytes, analyzerCost);
     const costPerWeek = projectBilling(costPerWindow, input.windowHours, 24 * 7);
+    // Mark unused to satisfy strict mode without altering semantics.
+    void scaledBytesPerDay;
     const identity = toSnakeCase(p.template, p.hash);
     const severity = (p.severity || '').toUpperCase();
 

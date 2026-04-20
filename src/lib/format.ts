@@ -5,11 +5,18 @@
  * Designed for AI consumption — concise, structured, parseable.
  */
 
-/** Format a dollar amount: $1.2K, $14K, $1.2M, etc. */
+/**
+ * Format a dollar amount: $1.2K, $14K, $1.2M, etc. Sub-dollar amounts
+ * expand precision so sample-size POC runs don't collapse to `$0.00`
+ * and obscure which patterns are actually the most expensive. Anything
+ * below $0.01 goes to 4 decimals; below $1 goes to 2.
+ */
 export function fmtDollar(amount: number): string {
   const abs = Math.abs(amount);
   const sign = amount < 0 ? '-' : '';
 
+  if (abs === 0) return `${sign}$0`;
+  if (abs < 0.01) return `${sign}$${abs.toFixed(4)}`;
   if (abs < 1) return `${sign}$${abs.toFixed(2)}`;
   if (abs < 10) return `${sign}$${abs.toFixed(1)}`;
   if (abs < 1000) return `${sign}$${Math.round(abs)}`;

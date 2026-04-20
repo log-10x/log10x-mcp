@@ -28,6 +28,8 @@ import type { SiemId } from '../lib/siem/pricing.js';
 import { SIEM_DISPLAY_NAMES, getAnalyzerCostForSiem } from '../lib/siem/pricing.js';
 import { extractPatterns } from '../lib/pattern-extraction.js';
 import { renderPocReport, type RenderInput } from '../lib/poc-report-renderer.js';
+import { prettifyPatterns } from '../lib/ai-prettify.js';
+import type { EnvConfig } from '../lib/environments.js';
 
 const MCP_VERSION = '1.4.0';
 
@@ -81,6 +83,27 @@ export const pocFromSiemSubmitSchema = {
     .positive()
     .optional()
     .describe('Override the $/GB rate for cost calculations. Default is read from vendors.json per detected SIEM.'),
+  total_daily_gb: z
+    .number()
+    .positive()
+    .optional()
+    .describe(
+      'Customer\'s total daily log volume in GB/day. When provided, per-pattern costs are extrapolated ' +
+        'from the pulled sample to the full daily volume — projected annual savings become meaningful ' +
+        'dollar figures instead of the sub-cent numbers a 5K-event sample naturally produces. Leave ' +
+        'unset to see sample-only costs. If the caller narrows the pull via `query` (e.g., one service), ' +
+        'this scaling overstates cost because only a fraction of daily volume matches the filter.'
+    ),
+  ai_prettify: z
+    .boolean()
+    .default(true)
+    .describe(
+      'Default true: call /api/v1/query_ai (Log10x hosted) to batch-generate 3-5-word human-readable ' +
+        'names for the top patterns. Sends pattern identity strings (templated, no variable values) ' +
+        'plus severity and service labels to the Log10x AI endpoint using the same LOG10X_API_KEY + ' +
+        'LOG10X_ENV_ID credentials the rest of the tool uses. Skip by setting false — falls back to ' +
+        'raw snake_case identities. Requires LOG10X_API_KEY to be configured; silently skipped if not.'
+    ),
   privacy_mode: z
     .boolean()
     .default(true)
@@ -154,6 +177,8 @@ export interface PocSubmitArgs {
   target_event_count: number;
   max_pull_minutes: number;
   analyzer_cost_per_gb?: number;
+  total_daily_gb?: number;
+  ai_prettify: boolean;
   privacy_mode: boolean;
   environment?: string;
   clickhouse_table?: string;
@@ -370,6 +395,41 @@ export async function runPipeline(
   const templateWallTimeMs = Date.now() - templStart;
   snapshot.partialPatternsFound = extraction.patterns.length;
 
+  // ── AI prettify (opt-out) ──
+  // Gate on BOTH ai_prettify=true AND the presence of LOG10X_API_KEY /
+  // LOG10X_ENV_ID — skip silently when credentials are absent. This is
+  // NOT gated on privacy_mode: patterns have already been stripped of
+  // variable values by the templater (only field/class/path tokens
+  // remain), and the AI call needs those tokens to produce useful
+  // names. Strict privacy users can still disable via ai_prettify=false.
+  let aiPrettyNames: Record<string, string> | undefined;
+  let aiPrettifyErrorNote: string | undefined;
+  if (args.ai_prettify && process.env.LOG10X_API_KEY && process.env.LOG10X_ENV_ID) {
+    snapshot.stepDetail = 'ai-prettifying pattern names';
+    const topPatterns = extraction.patterns.slice(0, 30);
+    const prettifyInputs = topPatterns.map((p) => ({
+      identity: toSnakeCaseLocal(p.template, p.hash),
+      service: p.service,
+      severity: p.severity,
+      count: p.count,
+      bytes: p.bytes,
+    }));
+    const result = await prettifyPatterns(prettifyInputs, {
+      env: {
+        apiKey: process.env.LOG10X_API_KEY,
+        envId: process.env.LOG10X_ENV_ID,
+        nickname: 'default',
+      } as EnvConfig,
+      apiBase: process.env.LOG10X_API_BASE || 'https://prometheus.log10x.com',
+      costPerGb: getAnalyzerCostForSiem(connector.id as SiemId, args.analyzer_cost_per_gb),
+      timeoutMs: 30_000,
+    });
+    if (Object.keys(result.names).length > 0) aiPrettyNames = result.names;
+    aiPrettifyErrorNote = result.errorNote;
+  } else if (args.ai_prettify) {
+    aiPrettifyErrorNote = 'LOG10X_API_KEY / LOG10X_ENV_ID not set — AI prettify skipped';
+  }
+
   // ── Render ──
   snapshot.status = 'rendering';
   snapshot.stepDetail = 'rendering report';
@@ -404,6 +464,9 @@ export async function runPipeline(
     mcpVersion: MCP_VERSION,
     banners,
     pullNotes: pullResult.metadata.notes,
+    totalDailyGb: args.total_daily_gb,
+    aiPrettyNames,
+    aiPrettifyErrorNote,
   });
 
   // ── Write file ──
@@ -426,6 +489,23 @@ export async function runPipeline(
   snapshot.reportFilePath = reportPath;
   snapshot.summary = render.summary;
   snapshot.finishedAt = new Date().toISOString();
+}
+
+/**
+ * Mirror the snake-case identity derivation the renderer uses. Duplicated
+ * here so we can compute identity once before prettify and the renderer
+ * computes the same value later. Keep in sync with `toSnakeCase` in
+ * `poc-report-renderer.ts`.
+ */
+function toSnakeCaseLocal(template: string, fallbackHash: string): string {
+  let s = template.replace(/\$\([^)]*\)/g, '');
+  s = s.trim().replace(/^(FATAL|ERROR|WARN(?:ING)?|INFO|DEBUG|TRACE|CRIT(?:ICAL)?)\b\s*/i, '');
+  s = s.replace(/([A-Za-z_][A-Za-z0-9_]*)=\$/g, '$1');
+  s = s.replace(/\$/g, '');
+  s = s.replace(/[^A-Za-z0-9]+/g, '_');
+  s = s.toLowerCase().replace(/_+/g, '_').replace(/^_+|_+$/g, '');
+  if (!s) return fallbackHash.slice(0, 16);
+  return s.slice(0, 120);
 }
 
 // Exposed for tests.

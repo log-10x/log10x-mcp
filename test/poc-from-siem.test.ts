@@ -93,7 +93,8 @@ test('runPipeline surfaces templatize failure cleanly when privacy_mode without 
     window: '1h',
     target_event_count: 100,
     max_pull_minutes: 1,
-    privacy_mode: true, // forces the local-tenx path → fail since no tenx
+    privacy_mode: true,
+    ai_prettify: false,
   };
 
   await runPipeline(connector, snap, args);
@@ -125,6 +126,7 @@ test('runPipeline pull-error surfaces failure without crashing', async () => {
     target_event_count: 100,
     max_pull_minutes: 1,
     privacy_mode: false,
+    ai_prettify: false,
   });
   assert.equal(snap.status, 'failed');
   assert.ok(snap.error && /pull_failed/.test(snap.error));
@@ -160,6 +162,7 @@ test('runPipeline zero-event pull is treated as error', async () => {
     target_event_count: 100,
     max_pull_minutes: 1,
     privacy_mode: false,
+    ai_prettify: false,
   });
   assert.equal(snap.status, 'failed');
   assert.ok(snap.error && /pull_errored/.test(snap.error));
