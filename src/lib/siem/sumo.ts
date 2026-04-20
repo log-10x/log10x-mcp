@@ -117,8 +117,14 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
         method: 'POST',
         body: JSON.stringify({
           query: searchQuery,
-          from: from.toISOString(),
-          to: to.toISOString(),
+          // Sumo's Search Job API expects ISO 8601 WITHOUT timezone
+          // suffix and WITHOUT milliseconds, e.g. "2017-07-16T00:00:00".
+          // Supplying `2025-01-01T00:00:00.000Z` (Date.toISOString's
+          // default) returns HTTP 400 searchjob.invalid.timestamp.from.
+          // We strip `.sss` and `Z`, and rely on the explicit timeZone
+          // field below to anchor the value to UTC.
+          from: from.toISOString().replace(/\.\d{3}Z$/, ''),
+          to: to.toISOString().replace(/\.\d{3}Z$/, ''),
           timeZone: 'UTC',
         }),
       })
