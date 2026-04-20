@@ -298,14 +298,19 @@ function coerceObjectToLine(obj: Record<string, unknown>): string {
   // uses `message`; Datadog uses `attributes.message`; ES/fluent-bit uses `log`;
   // Splunk surfaces `_raw` which itself is often a JSON envelope.
   const attrs = (obj.attributes as Record<string, unknown> | undefined) || undefined;
+  // Azure Log Analytics custom tables suffix string columns with `_s`
+  // (e.g., `log` in the source becomes `log_s` in query results). Check
+  // both forms so shipped fluent-bit envelopes unwrap either way.
   const cand =
     obj.text ||
     obj.message ||
     attrs?.message ||
     obj.log ||
+    obj.log_s ||
     obj.body ||
     obj._raw ||
-    obj.Message; // Azure KQL rows (PascalCase)
+    obj.Message || // Azure KQL rows (PascalCase)
+    obj.Message_s;
   if (typeof cand === 'string') {
     // If the candidate is itself a JSON envelope (common on Splunk `_raw`
     // and CloudWatch `message` fields from fluent-bit forwarders), descend
@@ -443,9 +448,12 @@ function extractEnrichmentFromEnvelope(obj: Record<string, unknown>): EnvelopeEn
     out.service = obj.sourcetype;
   }
 
-  // Azure KQL rows (PascalCase)
+  // Azure KQL rows (PascalCase for built-in tables, <name>_s for custom).
   if (!out.service && typeof obj.AppRoleName === 'string') out.service = obj.AppRoleName;
   if (!out.severity && typeof obj.SeverityLevel === 'string') out.severity = obj.SeverityLevel;
+  if (!out.service && typeof obj.container_name_s === 'string') out.service = obj.container_name_s;
+  if (!out.namespace && typeof obj.namespace_name_s === 'string') out.namespace = obj.namespace_name_s;
+  if (!out.pod && typeof obj.pod_name_s === 'string') out.pod = obj.pod_name_s;
 
   // CloudWatch events are `{ timestamp, message, ingestionTime }`. If the
   // message itself is JSON (fluent-bit-shaped), descend into it.

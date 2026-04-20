@@ -74,11 +74,21 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
   const windowMs = parseWindowMs(opts.window);
   const windowSec = Math.max(60, Math.floor(windowMs / 1000));
 
-  // Default table when none specified: AppTraces or Event — we use
-  // `union * | where …` to query across all tables. Callers with a specific
-  // table can pass it via `query`, e.g., `AppTraces | where Message has "..."`.
+  // Pick a base table from the query string. The KQL grammar is strict —
+  // the first statement must be a table or `union`/`search`/`find`. We
+  // accept any of:
+  //   - already-starts-with-union: pass through
+  //   - already-starts-with-a-table name (optionally followed by `|` and
+  //     more operators): pass through. Table names can be:
+  //       * Built-in (AppTraces, AzureDiagnostics, ...) — start with uppercase
+  //       * Custom log10x-ingested tables from HTTP Data Collector
+  //         — always end with `_CL` (e.g., `log10xPoc_CL`)
+  //   - Anything else: prefix with the default `AppTraces |`.
   const userQuery = (opts.query || '').trim();
-  const baseQuery = userQuery.startsWith('union') || /^[A-Z][A-Za-z]*\s*\|/.test(userQuery)
+  const looksLikeTableExpr =
+    /^(union|search|find|range|print)\b/i.test(userQuery) ||
+    /^[A-Za-z_][A-Za-z0-9_]*(_CL)?\s*(\||$)/.test(userQuery);
+  const baseQuery = looksLikeTableExpr
     ? userQuery
     : `AppTraces ${userQuery ? '| ' + userQuery : ''}`;
 
