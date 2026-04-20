@@ -27,7 +27,15 @@ import {
 import type { SiemId } from '../lib/siem/pricing.js';
 import { SIEM_DISPLAY_NAMES, getAnalyzerCostForSiem } from '../lib/siem/pricing.js';
 import { extractPatterns } from '../lib/pattern-extraction.js';
-import { renderPocReport, type RenderInput } from '../lib/poc-report-renderer.js';
+import {
+  renderPocReport,
+  renderPocSummary,
+  renderPocYaml,
+  renderPocConfigs,
+  renderPocTop,
+  renderPocPattern,
+  type RenderInput,
+} from '../lib/poc-report-renderer.js';
 import { prettifyPatterns } from '../lib/ai-prettify.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
@@ -151,6 +159,28 @@ export const pocFromSiemSubmitSchema = {
 
 export const pocFromSiemStatusSchema = {
   snapshot_id: z.string().describe('Snapshot id returned by log10x_poc_from_siem_submit.'),
+  view: z
+    .enum(['summary', 'full', 'yaml', 'configs', 'top', 'pattern'])
+    .default('summary')
+    .describe(
+      "How much detail to render. Default `summary` — a ~30-line exec banner + top-5 table + " +
+        'available-views list. Use `full` for the complete 9-section report (~300 lines). ' +
+        'Use `yaml` for paste-ready regulator mute-file entries; `configs` for native SIEM ' +
+        "exclusion configs (Datadog exclusion filter, Splunk props.conf, etc.); `top` for an " +
+        "expanded N-row drivers table (combine with `top_n`); `pattern` for a deep-dive on " +
+        'one identity (requires `pattern` arg).'
+    ),
+  pattern: z
+    .string()
+    .optional()
+    .describe('Required when view="pattern". The snake_case pattern identity to expand. Pass the raw identity as printed in prior views.'),
+  top_n: z
+    .number()
+    .int()
+    .min(1)
+    .max(100)
+    .optional()
+    .describe('Number of rows for views that accept it (`top`, `yaml`, `configs`, `summary`). Defaults: summary=5, top=20, yaml/configs=5.'),
 };
 
 // ── Async state ──
@@ -167,8 +197,14 @@ interface Snapshot {
   startedAtMs: number;
   finishedAt?: string;
   // Complete state
-  reportMarkdown?: string;
+  reportMarkdown?: string;        // the `full` view; back-compat
   reportFilePath?: string;
+  /**
+   * The full RenderInput the report was built from. Stored so status
+   * calls can render alternate views (`summary`, `yaml`, `configs`,
+   * `top`, `pattern`) on the fly without re-running extraction.
+   */
+  renderInput?: RenderInput;
   summary?: RenderInput extends unknown ? ReturnType<typeof renderPocReport>['summary'] : never;
   // Failure state
   error?: string;
@@ -307,7 +343,14 @@ export async function executePocSubmit(args: PocSubmitArgs): Promise<string> {
 
 // ── Status ──
 
-export async function executePocStatus(args: { snapshot_id: string }): Promise<string> {
+export interface PocStatusArgs {
+  snapshot_id: string;
+  view?: 'summary' | 'full' | 'yaml' | 'configs' | 'top' | 'pattern';
+  pattern?: string;
+  top_n?: number;
+}
+
+export async function executePocStatus(args: PocStatusArgs): Promise<string> {
   const s = SNAPSHOTS.get(args.snapshot_id);
   if (!s) {
     throw new Error(
@@ -317,10 +360,47 @@ export async function executePocStatus(args: { snapshot_id: string }): Promise<s
   const elapsedSec = Math.round((Date.now() - s.startedAtMs) / 1000);
 
   if (s.status === 'complete') {
+    const view = args.view ?? 'summary';
     const lines: string[] = [];
-    lines.push(s.reportMarkdown || '_report missing_');
+    // Dispatch on view. All non-full views need renderInput; fall back
+    // to the stored full markdown for back-compat on old snapshots.
+    const ri = s.renderInput;
+    let body: string;
+    if (!ri) {
+      body = s.reportMarkdown || '_report missing_';
+    } else {
+      switch (view) {
+        case 'full':
+          body = renderPocReport(ri).markdown;
+          break;
+        case 'yaml':
+          body = renderPocYaml(ri, args.top_n ?? 5);
+          break;
+        case 'configs':
+          body = renderPocConfigs(ri, args.top_n ?? 5);
+          break;
+        case 'top':
+          body = renderPocTop(ri, args.top_n ?? 20);
+          break;
+        case 'pattern':
+          if (!args.pattern) {
+            throw new Error(
+              'view="pattern" requires a `pattern` arg — pass the snake_case identity from a prior view (e.g., from the top drivers table).'
+            );
+          }
+          body = renderPocPattern(ri, args.pattern);
+          break;
+        case 'summary':
+        default:
+          body = renderPocSummary(ri, args.top_n ?? 5);
+          break;
+      }
+    }
+    lines.push(body);
     lines.push('');
-    lines.push(`_Report saved to: ${s.reportFilePath}_`);
+    if (s.reportFilePath) {
+      lines.push(`_Full report on disk: ${s.reportFilePath}_`);
+    }
     return lines.join('\n');
   }
 
@@ -481,7 +561,11 @@ export async function runPipeline(
     );
   }
 
-  const render = renderPocReport({
+  // Build the RenderInput once, stash it on the snapshot, and use it
+  // for both the initial full-view render AND any later view-specific
+  // status calls (summary/yaml/configs/top/pattern). This is what
+  // makes view-dispatch free — no re-extraction round-trip.
+  const renderInput: RenderInput = {
     siem: connector.id as SiemId,
     window: args.window,
     scope: args.scope,
@@ -506,7 +590,9 @@ export async function runPipeline(
     volumeDetectErrorNote: volumeResult?.errorNote,
     aiPrettyNames,
     aiPrettifyErrorNote,
-  });
+  };
+  snapshot.renderInput = renderInput;
+  const render = renderPocReport(renderInput);
 
   // ── Write file ──
   const reportDir = process.env.LOG10X_REPORT_DIR || '/tmp/log10x-reports';

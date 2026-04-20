@@ -114,6 +114,255 @@ interface EnrichedPattern extends ExtractedPattern {
   tokens: string[];
 }
 
+/**
+ * ────────── View-specific renderers ──────────
+ *
+ * The MCP tool returns one of six shapes depending on the caller's
+ * `view` arg. The idea is progressive disclosure: the default
+ * `summary` is scannable in a CLI (~30 lines); callers can re-invoke
+ * status with a more verbose view when they need specific artifacts.
+ *
+ * All views share the same `enrichPatterns()` + `displayName()`
+ * helpers so a given RenderInput always produces consistent output
+ * across views — only the level of detail changes.
+ */
+
+/**
+ * Short-form view — the default. Annual savings banner, top-5 table,
+ * risk flags, available views CTA. Intended to be scannable in one
+ * terminal screen.
+ */
+export function renderPocSummary(input: RenderInput, topN = 5): string {
+  const patterns = enrichPatterns(input);
+  const totalCost = patterns.reduce((s, p) => s + p.costPerWindow, 0);
+  const projectedSavings = patterns.reduce((s, p) => s + p.projectedSavings, 0);
+  const lines: string[] = [];
+
+  // Title + one-line verdict.
+  lines.push(`## POC — done. ${SIEM_DISPLAY_NAMES[input.siem]}, ${input.window} window.`);
+  lines.push('');
+
+  if (input.totalDailyGb && input.totalDailyGb > 0) {
+    const annualCost = projectBilling(totalCost, input.windowHours, 24 * 365);
+    const annualSavings = projectBilling(projectedSavings, input.windowHours, 24 * 365);
+    const savingsPct = fmtPct((annualSavings / Math.max(1, annualCost)) * 100);
+    const mode = input.volumeSource === 'auto_detected' ? 'auto-detected' : 'user-supplied';
+    lines.push(
+      `Projected annual cost: **${fmtDollar(annualCost)}** · Potential savings: **${fmtDollar(annualSavings)} (${savingsPct})** at ${fmtGb(input.totalDailyGb)}/day (${mode}).`
+    );
+  } else {
+    // No volume — give the most useful scenario on one line, point to full for the table.
+    const oneHundred = scaleCostToDaily(totalCost, input.extraction.totalBytes, 100, input.windowHours);
+    const oneHundredSavings = scaleCostToDaily(projectedSavings, input.extraction.totalBytes, 100, input.windowHours);
+    lines.push(
+      `No volume specified. At 100 GB/day the top-pattern muting would save **${fmtDollar(oneHundredSavings)}/yr** out of **${fmtDollar(oneHundred)}/yr** total cost. For a precise projection, pass \`total_daily_gb\`, \`total_monthly_gb\`, or \`total_annual_gb\` on submit (or call status with \`view: "full"\` to see the full scenario table).`
+    );
+  }
+  lines.push('');
+
+  // Top-N table.
+  const top = patterns.slice(0, topN);
+  if (top.length > 0) {
+    lines.push(`### Top ${top.length} wins`);
+    lines.push('');
+    lines.push('| # | Pattern | Service | Sev | % | Annual savings |');
+    lines.push('|---|---|---|---|---|---|');
+    for (let i = 0; i < top.length; i++) {
+      const p = top[i];
+      const name = input.aiPrettyNames?.[p.identity] || shortIdentity(p.identity);
+      const annualSavings = projectBilling(p.projectedSavings, input.windowHours, 24 * 365);
+      const flag = needsReview(p) ? ' ⚠' : '';
+      lines.push(
+        `| ${i + 1} | ${name}${flag} | ${p.service || '—'} | ${p.severity || '—'} | ${fmtPct(p.pctOfTotal * 100)} | ${fmtDollar(annualSavings)} |`
+      );
+    }
+    lines.push('');
+  }
+
+  // Risk flags.
+  const flagged = top.filter(needsReview);
+  if (flagged.length > 0) {
+    lines.push(
+      `⚠ ${flagged.length} pattern${flagged.length === 1 ? '' : 's'} flagged (WARN/ERROR severity or low sample confidence). ` +
+        `Run \`log10x_dependency_check\` before muting — they may feed live alerts or dashboards.`
+    );
+    lines.push('');
+  }
+
+  // Views CTA.
+  lines.push('**Available views** — call `log10x_poc_from_siem_status` again with:');
+  lines.push('- `view: "full"` — complete 9-section report');
+  lines.push('- `view: "yaml"` — regulator mute YAML for top patterns, paste-ready');
+  lines.push('- `view: "configs"` — native SIEM exclusion configs (Datadog exclusion filter, Splunk props.conf, etc.)');
+  lines.push('- `view: "pattern", pattern: "<identity>"` — deep dive on a specific pattern');
+  lines.push('- `view: "top", top_n: 20` — expanded drivers table');
+
+  return lines.join('\n');
+}
+
+/**
+ * YAML view — regulator mute-file entries for the top N patterns.
+ * Paste-ready for a GitOps ConfigMap commit. Includes the display
+ * name as a YAML comment so reviewers can scan without decoding the
+ * identity strings.
+ */
+export function renderPocYaml(input: RenderInput, topN = 5): string {
+  const patterns = enrichPatterns(input)
+    .filter((p) => p.recommendedAction !== 'keep')
+    .slice(0, topN);
+  const lines: string[] = [];
+  lines.push('```yaml');
+  lines.push('# regulator mute file — paste into your GitOps ConfigMap');
+  lines.push(`# Generated from snapshot ${input.snapshotId} on ${input.finishedAt}`);
+  lines.push('# Auto-expires 30d from commit. Run log10x_dependency_check on each identity before merging.');
+  lines.push('');
+  if (patterns.length === 0) {
+    lines.push('# No high-confidence mute/sample candidates in this window.');
+  } else {
+    for (const p of patterns) {
+      const name = input.aiPrettyNames?.[p.identity];
+      if (name) lines.push(`# ${name}`);
+      lines.push(regulatorYaml(p));
+      lines.push('');
+    }
+  }
+  lines.push('```');
+  return lines.join('\n');
+}
+
+/**
+ * Native SIEM exclusion-config view — the "I don't want the log10x
+ * regulator, just give me the raw SIEM config" path.
+ */
+export function renderPocConfigs(input: RenderInput, topN = 5): string {
+  const drops = enrichPatterns(input)
+    .filter((p) => p.recommendedAction === 'mute')
+    .slice(0, topN);
+  const lines: string[] = [];
+  lines.push(`## Native ${SIEM_DISPLAY_NAMES[input.siem]} exclusion configs`);
+  lines.push('');
+  if (drops.length === 0) {
+    lines.push('_No high-confidence mute candidates in this window._');
+    return lines.join('\n');
+  }
+  lines.push('Apply these in your SIEM admin console OR via the vendor API. Run `log10x_dependency_check` first.');
+  lines.push('');
+  lines.push(`### ${SIEM_DISPLAY_NAMES[input.siem]}`);
+  lines.push('');
+  lines.push('```');
+  lines.push(nativeConfig(input.siem, drops).trim());
+  lines.push('```');
+  lines.push('');
+  lines.push('### Fluent Bit (universal forwarder)');
+  lines.push('');
+  lines.push('```');
+  lines.push(fluentBitConfig(drops).trim());
+  lines.push('```');
+  return lines.join('\n');
+}
+
+/**
+ * Top-N drivers view — the summary's table, but larger and without
+ * the surrounding banner/CTA. For "show me the top 20."
+ */
+export function renderPocTop(input: RenderInput, topN = 20): string {
+  const patterns = enrichPatterns(input);
+  const top = patterns.slice(0, topN);
+  const lines: string[] = [];
+  lines.push(`## Top ${top.length} cost drivers`);
+  lines.push('');
+  const hasScaledCost = Boolean(input.totalDailyGb && input.totalDailyGb > 0);
+  if (hasScaledCost) {
+    lines.push(`_Scaled to ${fmtGb(input.totalDailyGb!)}/day_`);
+    lines.push('');
+  }
+  lines.push('| # | Pattern | Service | Sev | Events | % | $/week | $/year |');
+  lines.push('|---|---|---|---|---|---|---|---|');
+  for (let i = 0; i < top.length; i++) {
+    const p = top[i];
+    const name = input.aiPrettyNames?.[p.identity] || shortIdentity(p.identity);
+    const weekly = p.costPerWeek;
+    const annual = projectBilling(p.costPerWindow, input.windowHours, 24 * 365);
+    const flag = needsReview(p) ? ' ⚠' : '';
+    lines.push(
+      `| ${i + 1} | ${name}${flag} | ${p.service || '—'} | ${p.severity || '—'} | ${fmtCount(p.count)} | ${fmtPct(p.pctOfTotal * 100)} | ${fmtDollar(weekly)} | ${fmtDollar(annual)} |`
+    );
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Pattern-detail view — one pattern, fully expanded. Sample event,
+ * slot variables, recommended action, regulator YAML, risk context.
+ */
+export function renderPocPattern(input: RenderInput, identity: string): string {
+  const patterns = enrichPatterns(input);
+  const p = patterns.find((x) => x.identity === identity);
+  if (!p) {
+    const suggestions = patterns
+      .slice(0, 5)
+      .map((x) => `  - \`${x.identity}\``)
+      .join('\n');
+    return (
+      `## Pattern not found\n\nNo pattern with identity \`${identity}\` in snapshot ${input.snapshotId}.\n\n` +
+      `Top patterns in this snapshot (any of these work):\n${suggestions}`
+    );
+  }
+  const lines: string[] = [];
+  const name = input.aiPrettyNames?.[p.identity] || shortIdentity(p.identity);
+  const annualSavings = projectBilling(p.projectedSavings, input.windowHours, 24 * 365);
+  lines.push(`## ${name}`);
+  lines.push('');
+  lines.push(`**Identity**: \`${p.identity}\``);
+  lines.push(
+    `**Stats**: ${p.severity || '—'} severity · ${fmtCount(p.count)} events · ${fmtPct(p.pctOfTotal * 100)} of sample volume · ${p.service || 'unknown service'}`
+  );
+  if (p.costPerWindow > 0 || annualSavings > 0) {
+    lines.push(`**Projected cost**: ${fmtDollar(p.costPerWindow)}/window · **Savings if muted**: ${fmtDollar(annualSavings)}/year`);
+  }
+  lines.push(`**Confidence**: ${p.confidence}`);
+  lines.push('');
+  lines.push('### Sample event');
+  lines.push('```');
+  lines.push(truncate(p.sampleEvent, 400));
+  lines.push('```');
+  lines.push('');
+  lines.push('### Template');
+  lines.push('```');
+  lines.push(truncate(p.template, 400));
+  lines.push('```');
+  lines.push('');
+  const topSlots = Object.entries(p.variables).slice(0, 6);
+  if (topSlots.length > 0) {
+    lines.push('### Variable slots (distinct values observed)');
+    for (const [slot, vals] of topSlots) {
+      lines.push(`- \`${slot}\`: ${vals.slice(0, 5).map((v) => `\`${truncate(v, 40)}\``).join(', ')}${vals.length > 5 ? `, … (${vals.length - 5} more)` : ''}`);
+    }
+    lines.push('');
+  }
+  lines.push(`### Recommendation — ${actionLabel(p)}`);
+  lines.push(p.reasoning);
+  lines.push('');
+  if (p.recommendedAction !== 'keep') {
+    lines.push('**Regulator YAML** (paste into GitOps ConfigMap):');
+    lines.push('```yaml');
+    lines.push(regulatorYaml(p));
+    lines.push('```');
+    lines.push('');
+  }
+  if (needsReview(p)) {
+    lines.push(
+      `⚠ **Review before muting**: run \`log10x_dependency_check(pattern: "${p.identity}")\` — this pattern\'s ` +
+        `${p.severity || 'severity'}/${p.confidence} profile means it may feed live alerts or dashboards.`
+    );
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Full view — the original 9-section report. Unchanged; the summary
+ * / yaml / configs / top / pattern views are slices of the same data.
+ */
 export function renderPocReport(input: RenderInput): RenderResult {
   const patterns = enrichPatterns(input);
   const lines: string[] = [];
@@ -820,4 +1069,43 @@ function truncate(s: string, max: number): string {
   if (!s) return '';
   const flat = s.replace(/\s+/g, ' ');
   return flat.length <= max ? flat : flat.slice(0, max - 1) + '…';
+}
+
+/**
+ * Display a raw identity tersely when no AI pretty name is available.
+ * Caps length so a 120-char identity doesn't blow out a CLI table.
+ */
+function shortIdentity(identity: string): string {
+  const spaced = identity.replace(/_/g, ' ');
+  if (spaced.length <= 48) return spaced;
+  return spaced.slice(0, 46) + '…';
+}
+
+/**
+ * Whether a top-N pattern needs a review step before muting. Flags:
+ *   - WARN / ERROR / FATAL severity (may feed alerts)
+ *   - low-confidence (too few sample events to be sure the rate is stable)
+ */
+function needsReview(p: EnrichedPattern): boolean {
+  const sev = (p.severity || '').toUpperCase();
+  if (/ERROR|WARN|CRIT|FATAL/.test(sev)) return true;
+  if (p.confidence === 'low') return true;
+  return false;
+}
+
+/**
+ * Extrapolate a sample-window cost to annual given a hypothetical
+ * daily ingest (GB/day). Shared by the summary view's one-line
+ * "at 100 GB/day" teaser so it matches the scenarios-table numbers.
+ */
+function scaleCostToDaily(
+  sampleCost: number,
+  sampleBytes: number,
+  dailyGbScenario: number,
+  windowHours: number
+): number {
+  if (sampleBytes <= 0) return 0;
+  const sampleGb = sampleBytes / (1024 ** 3);
+  const factor = dailyGbScenario / sampleGb;
+  return projectBilling(sampleCost * factor, windowHours, 24 * 365);
 }

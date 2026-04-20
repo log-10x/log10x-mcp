@@ -526,7 +526,22 @@ server.tool(
 
 server.tool(
   'log10x_poc_from_siem_status',
-  'Retrieve progress or the final markdown report from a log10x_poc_from_siem_submit run. Pass the `snapshot_id` returned by submit. In-progress responses report status (pulling / templatizing / rendering), progress_pct, step_detail, and elapsed_seconds — poll every ~30s until `status: complete`. Complete responses return the full 9-section markdown report plus a report file path (`${LOG10X_REPORT_DIR:-/tmp/log10x-reports}/poc_from_siem-<timestamp>.md`) and a summary struct with events_analyzed, patterns_found, total_cost_analyzed, projected_savings, and top_3_actions. Failures include partial_report_markdown when any events were successfully pulled before the error, plus a retry_hint. Snapshots live in-memory per MCP process; a restart clears them, so persist the final report path if you need it later. **Tier prerequisites**: none.',
+  'Retrieve progress or a view of the report from a log10x_poc_from_siem_submit run. ' +
+    'Pass `snapshot_id`; optionally `view` to select the level of detail. ' +
+    '**In-progress** responses report status (pulling / templatizing / rendering), progress_pct, ' +
+    'step_detail, and elapsed_seconds — poll every ~30s until done. ' +
+    '**Complete** responses render one of six views: ' +
+    '`summary` (default, ~30 lines — exec banner + top-5 wins + views CTA), ' +
+    '`full` (complete 9-section report, ~300 lines), ' +
+    '`yaml` (paste-ready regulator mute-file for the top N patterns), ' +
+    '`configs` (native SIEM exclusion configs — Datadog exclusion filter / Splunk props.conf / etc.), ' +
+    '`top` (expanded N-row drivers table), ' +
+    '`pattern` (deep-dive on one identity — requires `pattern` arg). ' +
+    '**Failures** include partial_report_markdown when any events were successfully pulled before the error. ' +
+    'The full report is also written to ${LOG10X_REPORT_DIR:-/tmp/log10x-reports}/poc_from_siem-<timestamp>.md regardless of which view the caller requested. ' +
+    'Snapshots live in-memory per MCP process; a restart clears them, so persist the final report path if you need it later. ' +
+    '**Tier prerequisites**: none. ' +
+    '**Usage guidance for the calling model**: render the returned markdown AS-IS. The view arg has already picked the right level of detail. Do NOT summarize, paraphrase, or quote selectively — the tool has already done that work. If the user wants different detail, re-call with a different view.',
   pocFromSiemStatusSchema,
   (args) => wrap('log10x_poc_from_siem_status', async () => executePocStatus(args))
 );
