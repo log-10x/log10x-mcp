@@ -14,6 +14,8 @@ import type {
   PullEventsOptions,
   PullEventsResult,
   PullStopReason,
+  VolumeDetectionOptions,
+  VolumeDetectionResult,
 } from './index.js';
 
 import { retryWithBackoff, shouldStop, parseWindowMs } from './_retry.js';
@@ -173,9 +175,82 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
   };
 }
 
+/**
+ * Detect ES daily ingest volume via `_stats` on the scope's index
+ * pattern. Combines `indices.<name>.primaries.docs.count` and
+ * `primaries.store.size_in_bytes` over the indices in scope; divides by
+ * the span of `@timestamp` values (first vs last doc) to estimate daily.
+ *
+ * Simpler alternative we don't use: `GET /_cat/indices?bytes=b` — doesn't
+ * give us time-range info. Using stats + a range aggregation is more
+ * accurate though costs one extra call.
+ */
+async function detectDailyVolumeGb(opts: VolumeDetectionOptions): Promise<VolumeDetectionResult> {
+  const conn = getConn();
+  if (!conn) return { errorNote: 'Elasticsearch: ELASTIC_URL not set' };
+  const client = new Client({
+    node: conn.url,
+    ...(conn.apiKey
+      ? { auth: { apiKey: conn.apiKey } }
+      : conn.username && conn.password
+      ? { auth: { username: conn.username, password: conn.password } }
+      : {}),
+  });
+  const indexPattern = opts.scope || 'logs-*';
+  try {
+    const statsResp = (await client.indices.stats({
+      index: indexPattern,
+      metric: 'store,docs',
+    } as unknown as Parameters<typeof client.indices.stats>[0])) as unknown as {
+      _all?: { primaries?: { store?: { size_in_bytes?: number }; docs?: { count?: number } } };
+    };
+    const bytes = statsResp._all?.primaries?.store?.size_in_bytes ?? 0;
+    const docs = statsResp._all?.primaries?.docs?.count ?? 0;
+    if (bytes === 0 || docs === 0) {
+      return { errorNote: `Elasticsearch index pattern "${indexPattern}" has no primary docs/bytes` };
+    }
+    // Span of @timestamp: min/max aggregation.
+    const spanResp = (await client.search({
+      index: indexPattern,
+      size: 0,
+      aggs: {
+        min_ts: { min: { field: '@timestamp' } },
+        max_ts: { max: { field: '@timestamp' } },
+      },
+    } as unknown as Parameters<typeof client.search>[0])) as unknown as {
+      aggregations?: {
+        min_ts?: { value?: number | null };
+        max_ts?: { value?: number | null };
+      };
+    };
+    const minTs = spanResp.aggregations?.min_ts?.value;
+    const maxTs = spanResp.aggregations?.max_ts?.value;
+    let days: number;
+    let spanNote = '';
+    if (minTs && maxTs && maxTs > minTs) {
+      days = Math.max(1, (maxTs - minTs) / 86_400_000);
+      spanNote = `${Math.round(days)}d observed span`;
+    } else {
+      // No @timestamp aggregation available — assume 7 days.
+      days = 7;
+      spanNote = '@timestamp unavailable, assumed 7d';
+    }
+    const dailyGb = bytes / (1024 ** 3) / days;
+    await client.close().catch(() => undefined);
+    return {
+      dailyGb,
+      source: `Elasticsearch _stats on "${indexPattern}" (${spanNote})`,
+    };
+  } catch (e) {
+    await client.close().catch(() => undefined);
+    return { errorNote: `Elasticsearch volume detection failed: ${(e as Error).message.slice(0, 200)}` };
+  }
+}
+
 export const elasticsearchConnector: SiemConnector = {
   id: 'elasticsearch',
   displayName: 'Elasticsearch',
   discoverCredentials,
   pullEvents,
+  detectDailyVolumeGb,
 };

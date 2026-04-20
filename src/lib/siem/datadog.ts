@@ -18,6 +18,8 @@ import type {
   PullEventsOptions,
   PullEventsResult,
   PullStopReason,
+  VolumeDetectionOptions,
+  VolumeDetectionResult,
 } from './index.js';
 
 import { retryWithBackoff, shouldStop, parseWindowMs } from './_retry.js';
@@ -146,9 +148,130 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
   };
 }
 
+/**
+ * Detect Datadog daily ingest volume.
+ *
+ * Datadog's usage APIs have churned over the years. We try three
+ * endpoints in order:
+ *   1. `/api/v1/usage/logs` — classic byte-level endpoint. Still
+ *      serves most customers. Deprecated on paper but works.
+ *   2. `/api/v1/usage/summary?start_month=…&end_month=…` — monthly
+ *      aggregate across products. Returns `ingested_events_bytes_sum`
+ *      when the account tier exposes it.
+ *   3. `/api/v1/usage/logs_by_index` — event count per index-hour.
+ *      Multiply by 500 B/event (conservative average) to estimate
+ *      bytes. Lowest fidelity but most widely available.
+ *
+ * All three need the app key to have `usage_read` scope.
+ */
+async function detectDailyVolumeGb(opts: VolumeDetectionOptions): Promise<VolumeDetectionResult> {
+  void opts;
+  const { apiKey, appKey, site } = getKeys();
+  if (!apiKey || !appKey) {
+    return { errorNote: 'Datadog: DD_API_KEY/DD_APP_KEY missing' };
+  }
+  const baseHost = site || 'datadoghq.com';
+  const baseUrl = `https://api.${baseHost}`;
+  const headers = { 'DD-API-KEY': apiKey, 'DD-APPLICATION-KEY': appKey };
+
+  const now = new Date();
+  // End at top of current hour; start 7d back.
+  const end = new Date(Math.floor(now.getTime() / 3_600_000) * 3_600_000);
+  const start = new Date(end.getTime() - 7 * 86_400_000);
+  const fmtHr = (d: Date) =>
+    `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}T${String(d.getUTCHours()).padStart(2, '0')}`;
+
+  // Attempt 1 — /api/v1/usage/logs (byte-level, best fidelity).
+  try {
+    const url = `${baseUrl}/api/v1/usage/logs?start_hr=${fmtHr(start)}&end_hr=${fmtHr(end)}`;
+    const res = await fetch(url, { headers });
+    if (res.ok) {
+      const data = (await res.json()) as {
+        usage?: Array<{ billable_ingested_bytes?: number; ingested_events_bytes?: number; logs_ingested_bytes?: number }>;
+      };
+      const usage = data.usage || [];
+      const totalBytes = usage.reduce(
+        (s, u) => s + (u.billable_ingested_bytes ?? u.ingested_events_bytes ?? u.logs_ingested_bytes ?? 0),
+        0
+      );
+      if (totalBytes > 0 && usage.length > 0) {
+        const days = usage.length / 24;
+        return {
+          dailyGb: totalBytes / (1024 ** 3) / Math.max(1, days),
+          source: `Datadog /api/v1/usage/logs (${Math.round(days)}d, ${baseHost})`,
+        };
+      }
+    }
+  } catch {
+    // fall through
+  }
+
+  // Attempt 2 — /api/v1/usage/summary.ingested_events_bytes_sum.
+  try {
+    const monthNow = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+    const url = `${baseUrl}/api/v1/usage/summary?start_month=${monthNow}&end_month=${monthNow}`;
+    const res = await fetch(url, { headers });
+    if (res.ok) {
+      const data = (await res.json()) as {
+        usage?: Array<{
+          orgs?: Array<{ ingested_events_bytes_sum?: number | null }>;
+        }>;
+      };
+      const orgs = data.usage?.[0]?.orgs || [];
+      const totalBytes = orgs.reduce((s, o) => s + (o.ingested_events_bytes_sum ?? 0), 0);
+      if (totalBytes > 0) {
+        const dayOfMonth = now.getUTCDate();
+        return {
+          dailyGb: totalBytes / (1024 ** 3) / Math.max(1, dayOfMonth),
+          source: `Datadog /api/v1/usage/summary (month-to-date avg, ${baseHost})`,
+        };
+      }
+    }
+  } catch {
+    // fall through
+  }
+
+  // Attempt 3 — /api/v1/usage/logs_by_index (events, not bytes).
+  try {
+    const url = `${baseUrl}/api/v1/usage/logs_by_index?start_hr=${fmtHr(start)}&end_hr=${fmtHr(end)}`;
+    const res = await fetch(url, { headers });
+    if (!res.ok) {
+      return { errorNote: `Datadog Usage API HTTP ${res.status} on all 3 endpoints. App key may lack 'usage_read' scope.` };
+    }
+    const data = (await res.json()) as {
+      usage?: Array<{ event_count?: number; live_index_indexed?: number; hour?: string }>;
+    };
+    const usage = data.usage || [];
+    if (usage.length === 0) {
+      return { errorNote: 'Datadog usage_api returned empty — account may have <24h of data' };
+    }
+    const totalEvents = usage.reduce(
+      (s, u) => s + (u.event_count ?? u.live_index_indexed ?? 0),
+      0
+    );
+    if (totalEvents === 0) {
+      return { errorNote: 'Datadog logs_by_index: 0 events over 7d' };
+    }
+    // Events → bytes approximation. 500 B/event is conservative for
+    // structured JSON logs; over-counts will overstate savings by the
+    // same ratio. Surfaced in the source label so users know.
+    const AVG_BYTES_PER_EVENT = 500;
+    const days = usage.reduce((s, u) => s + (u.hour ? 1 : 0), 0) / 24;
+    const dailyEvents = totalEvents / Math.max(1, days);
+    const dailyGb = (dailyEvents * AVG_BYTES_PER_EVENT) / (1024 ** 3);
+    return {
+      dailyGb,
+      source: `Datadog /api/v1/usage/logs_by_index (events × 500 B/event avg — byte endpoint not available on this tier, ${baseHost})`,
+    };
+  } catch (e) {
+    return { errorNote: `Datadog volume detection failed: ${(e as Error).message.slice(0, 200)}` };
+  }
+}
+
 export const datadogConnector: SiemConnector = {
   id: 'datadog',
   displayName: 'Datadog',
   discoverCredentials,
   pullEvents,
+  detectDailyVolumeGb,
 };

@@ -2,53 +2,58 @@
 
 # Log10x POC Report — ClickHouse
 
-_24h window · scope=`default` · snapshot_id=`bd3465dc-4d79-475e-994c-6e6d8d1e0e75`_
+_24h window · scope=`default` · snapshot_id=`9258c0b1-e845-4b03-9224-86c353344643`_
 
 ## 1. Executive Summary
 
 Analyzed **3.6K events** (749.4 KB) from ClickHouse across the last 24h.
 
-- **Observed cost (window)**: $0.00
-- **Projected weekly cost**: $0.00
-- **Potential savings (window)**: $0.00 — 0.0% of analyzed cost
+> **Volume auto-detected**: 0.6 MB/day (ClickHouse system.parts default.logs (1d observed span))
+>
+> Cost figures below extrapolate from the pulled sample (749.4 KB) to the full daily volume by per-pattern %. Pattern rankings + regulator YAML + native exclusion configs are the same regardless of volume; only dollar figures scale.
+
+- **Projected daily cost**: $0.0001
+- **Projected monthly cost**: $0.0027
+- **Projected annual cost**: $0.03
+- **Potential annual savings**: **$0.03** — 3% of annual cost
 - **Analyzer rate**: $0.15/GB (from vendors.json; override via `analyzer_cost_per_gb`)
 
 **Top 3 wins**:
-- Mute `traces_resource_service_instance_id_service_name_otelcol_contrib_service_version_2_otelcol_component_id_debug_otelcol_co` → save $0.00
-- Mute `logs_resource_service_instance_id_service_name_otelcol_contrib_service_version_2_otelcol_component_id_debug_otelcol_comp` → save $0.00
-- Mute `logs_resource_service_instance_id_service_name_otelcol_contrib_service_version_2_otelcol_component_id_debug_otelcol_comp` → save $0.00
+- Mute `traces_resource_service_instance_id_service_name_otelcol_contrib_service_version_2_otelcol_component_id_debug_otelcol_co` → save $0.0000
+- Mute `logs_resource_service_instance_id_service_name_otelcol_contrib_service_version_2_otelcol_component_id_debug_otelcol_comp` → save $0.0000
+- Mute `logs_resource_service_instance_id_service_name_otelcol_contrib_service_version_2_otelcol_component_id_debug_otelcol_comp` → save $0.0000
 
 ## 2. Top Cost Drivers
 
 | # | pattern identity | service | sev | events | % total | $/window | $/wk projected | newly-emerged |
 |---|---|---|---|---|---|---|---|---|
-| 1 | `traces_resource_service_instance_id_service_name_otelcol_contrib_service_version_2_otelcol_component_id_debug_otelcol_co` | unknown | DEBUG | 796 | 22% | $0.00 | $0.00 |  |
-| 2 | `logs_resource_service_instance_id_service_name_otelcol_contrib_service_version_2_otelcol_component_id_debug_otelcol_comp` | unknown | DEBUG | 497 | 14% | $0.00 | $0.00 |  |
-| 3 | `logs_resource_service_instance_id_service_name_otelcol_contrib_service_version_2_otelcol_component_id_debug_otelcol_comp` | unknown | DEBUG | 399 | 11% | $0.00 | $0.00 |  |
-| 4 | `metrics_resource_service_instance_id_service_name_otelcol_contrib_service_version_2_otelcol_component_id_debug_otelcol_c` | unknown | DEBUG | 342 | 9% | $0.00 | $0.00 |  |
-| 5 | `traces_resource_service_instance_id_service_name_otelcol_contrib_service_version_2_otelcol_component_id_debug_otelcol_co` | unknown | DEBUG | 105 | 3% | $0.00 | $0.00 |  |
-| 6 | `oteldemo_adservice_no_baggage_found_in_context_trace_id_span_id_trace_flags` | unknown | TRACE | 83 | 2% | $0.00 | $0.00 |  |
-| 7 | `failed_to_upload_metrics_post_https_otel_collector_v1_metrics_http_server_gave_http_response_to_https_client` | unknown | ERROR | 84 | 2% | $0.00 | $0.00 |  |
-| 8 | `info_deleted_log_tmp_kafka_logs_cluster_metadata_log_deleted_org_apache_kafka_storage_internals_log_logsegment` | unknown | INFO | 66 | 2% | $0.00 | $0.00 |  |
-| 9 | `info_deleted_time_index_tmp_kafka_logs_cluster_metadata_timeindex_deleted_org_apache_kafka_storage_internals_log_logsegm` | unknown | INFO | 66 | 2% | $0.00 | $0.00 |  |
-| 10 | `info_deleted_offset_index_tmp_kafka_logs_cluster_metadata_index_deleted_org_apache_kafka_storage_internals_log_logsegmen` | unknown | INFO | 66 | 2% | $0.00 | $0.00 |  |
-| 11 | `info_locallog_partition_cluster_metadata_dir_tmp_kafka_logs_rolled_new_log_segment_at_offset_in_ms_kafka_log_locallog` | unknown | INFO | 67 | 2% | $0.00 | $0.00 |  |
-| 12 | `info_partition_cluster_metadata_nodeid_marking_snapshot_0_offset_epoch3_for_deletion_because_its_timestamp_is_now_older_` | unknown | INFO | 52 | 1% | $0.00 | $0.00 |  |
-| 13 | `info_producerstatemanager_partition_cluster_metadata_wrote_producer_snapshot_at_offset_with_producer_ids_in_1_ms_org_apa` | unknown | INFO | 55 | 2% | $0.00 | $0.00 |  |
-| 14 | `info_deleted_producer_state_snapshot_tmp_kafka_logs_cluster_metadata_snapshot_deleted_org_apache_kafka_storage_internals` | unknown | INFO | 60 | 2% | $0.00 | $0.00 |  |
-| 15 | `info_deleted_snapshot_files_for_snapshot_0_offset_epoch_org_apache_kafka_snapshot_snapshots` | unknown | INFO | 50 | 1% | $0.00 | $0.00 |  |
-| 16 | `internal_shipping_quote_failure_failed_post_to_shipping_service_post_shipping_get_quote_unsupported_protocol_scheme_ship` | unknown | CRITICAL | 50 | 1% | $0.00 | $0.00 |  |
-| 17 | `info_snapshotemitter_id_successfully_wrote_snapshot_org_apache_kafka_image_publisher_snapshotemitter` | unknown | INFO | 52 | 1% | $0.00 | $0.00 |  |
-| 18 | `main_recommendation_server_py_trace_id_span_id_resource_service_name_recommendation_trace_sampled_true_receive_listrecom` | unknown | TRACE | 47 | 1% | $0.00 | $0.00 |  |
-| 19 | `info_snapshotgenerator_id_creating_new_kraft_snapshot_file_snapshot_because_we_have_replayed_at_least_bytes_org_apache_k` | unknown | INFO | 49 | 1% | $0.00 | $0.00 |  |
-| 20 | `info_unifiedlog_partition_cluster_metadata_dir_tmp_kafka_logs_deleting_segments_due_to_log_start_offset_breach_logsegmen` | unknown | INFO | 36 | 1.0% | $0.00 | $0.00 |  |
+| 1 | `traces_resource_service_instance_id_service_name_otelcol_contrib_service_version_2_otelcol_component_id_debug_otelcol_co` | unknown | DEBUG | 796 | 22% | $0.0000 | $0.0001 |  |
+| 2 | `logs_resource_service_instance_id_service_name_otelcol_contrib_service_version_2_otelcol_component_id_debug_otelcol_comp` | unknown | DEBUG | 497 | 14% | $0.0000 | $0.0001 |  |
+| 3 | `logs_resource_service_instance_id_service_name_otelcol_contrib_service_version_2_otelcol_component_id_debug_otelcol_comp` | unknown | DEBUG | 399 | 11% | $0.0000 | $0.0001 |  |
+| 4 | `metrics_resource_service_instance_id_service_name_otelcol_contrib_service_version_2_otelcol_component_id_debug_otelcol_c` | unknown | DEBUG | 342 | 9% | $0.0000 | $0.0001 |  |
+| 5 | `traces_resource_service_instance_id_service_name_otelcol_contrib_service_version_2_otelcol_component_id_debug_otelcol_co` | unknown | DEBUG | 105 | 3% | $0.0000 | $0.0000 |  |
+| 6 | `oteldemo_adservice_no_baggage_found_in_context_trace_id_span_id_trace_flags` | unknown | TRACE | 83 | 2% | $0.0000 | $0.0000 |  |
+| 7 | `failed_to_upload_metrics_post_https_otel_collector_v1_metrics_http_server_gave_http_response_to_https_client` | unknown | ERROR | 84 | 2% | $0.0000 | $0.0000 |  |
+| 8 | `info_deleted_log_tmp_kafka_logs_cluster_metadata_log_deleted_org_apache_kafka_storage_internals_log_logsegment` | unknown | INFO | 66 | 2% | $0.0000 | $0.0000 |  |
+| 9 | `info_deleted_time_index_tmp_kafka_logs_cluster_metadata_timeindex_deleted_org_apache_kafka_storage_internals_log_logsegm` | unknown | INFO | 66 | 2% | $0.0000 | $0.0000 |  |
+| 10 | `info_deleted_offset_index_tmp_kafka_logs_cluster_metadata_index_deleted_org_apache_kafka_storage_internals_log_logsegmen` | unknown | INFO | 66 | 2% | $0.0000 | $0.0000 |  |
+| 11 | `info_locallog_partition_cluster_metadata_dir_tmp_kafka_logs_rolled_new_log_segment_at_offset_in_ms_kafka_log_locallog` | unknown | INFO | 67 | 2% | $0.0000 | $0.0000 |  |
+| 12 | `info_partition_cluster_metadata_nodeid_marking_snapshot_0_offset_epoch3_for_deletion_because_its_timestamp_is_now_older_` | unknown | INFO | 52 | 1% | $0.0000 | $0.0000 |  |
+| 13 | `info_producerstatemanager_partition_cluster_metadata_wrote_producer_snapshot_at_offset_with_producer_ids_in_1_ms_org_apa` | unknown | INFO | 55 | 2% | $0.0000 | $0.0000 |  |
+| 14 | `info_deleted_producer_state_snapshot_tmp_kafka_logs_cluster_metadata_snapshot_deleted_org_apache_kafka_storage_internals` | unknown | INFO | 60 | 2% | $0.0000 | $0.0000 |  |
+| 15 | `info_deleted_snapshot_files_for_snapshot_0_offset_epoch_org_apache_kafka_snapshot_snapshots` | unknown | INFO | 50 | 1% | $0.0000 | $0.0000 |  |
+| 16 | `internal_shipping_quote_failure_failed_post_to_shipping_service_post_shipping_get_quote_unsupported_protocol_scheme_ship` | unknown | CRITICAL | 50 | 1% | $0.0000 | $0.0000 |  |
+| 17 | `info_snapshotemitter_id_successfully_wrote_snapshot_org_apache_kafka_image_publisher_snapshotemitter` | unknown | INFO | 52 | 1% | $0.0000 | $0.0000 |  |
+| 18 | `main_recommendation_server_py_trace_id_span_id_resource_service_name_recommendation_trace_sampled_true_receive_listrecom` | unknown | TRACE | 47 | 1% | $0.0000 | $0.0000 |  |
+| 19 | `info_snapshotgenerator_id_creating_new_kraft_snapshot_file_snapshot_because_we_have_replayed_at_least_bytes_org_apache_k` | unknown | INFO | 49 | 1% | $0.0000 | $0.0000 |  |
+| 20 | `info_unifiedlog_partition_cluster_metadata_dir_tmp_kafka_logs_deleting_segments_due_to_log_start_offset_breach_logsegmen` | unknown | INFO | 36 | 1.0% | $0.0000 | $0.0000 |  |
 
 ## 3. Service-Level Breakdown
 
 | service | events | $/window | severity mix |
 |---|---|---|---|
-| unknown | 3.6K | $0.00 | DEBUG 60%, INFO 23%, TRACE 7% |
-| Post | 27 | $0.00 | — 100% |
+| unknown | 3.6K | $0.0001 | DEBUG 60%, INFO 23%, TRACE 7% |
+| Post | 27 | $0.0000 | — 100% |
 
 ## 4. Regulator Recommendations
 
@@ -58,14 +63,14 @@ Per-pattern recommendations with reasoning, projected savings, and ready-to-past
 
 - **Action**: mute (drop all events)
 - **Reasoning**: High-volume DEBUG pattern (22% of analyzed volume) — candidate for mute after dependency check.
-- **Projected savings (window)**: $0.00
+- **Projected savings (window)**: $0.0000
 - **Dependency warning**: run `log10x_dependency_check(pattern: "traces_resource_service_instance_id_service_name_otelcol_contrib_service_version_2_otelcol_component_id_debug_otelcol_co")` first to surface alerts/dashboards/saved searches referencing this pattern
 
 ```yaml
 # regulator mute file entry — commit to your GitOps ConfigMap
 - pattern: traces_resource_service_instance_id_service_name_otelcol_contrib_service_version_2_otelcol_component_id_debug_otelcol_co
   action: drop
-  untilEpochSec: 1779285428   # auto-expires in 30d
+  untilEpochSec: 1779295486   # auto-expires in 30d
   reason: "High-volume DEBUG pattern (22% of analyzed volume) — candidate for mute after dependency check."
 ```
 
@@ -73,14 +78,14 @@ Per-pattern recommendations with reasoning, projected savings, and ready-to-past
 
 - **Action**: mute (drop all events)
 - **Reasoning**: High-volume DEBUG pattern (14% of analyzed volume) — candidate for mute after dependency check.
-- **Projected savings (window)**: $0.00
+- **Projected savings (window)**: $0.0000
 - **Dependency warning**: run `log10x_dependency_check(pattern: "logs_resource_service_instance_id_service_name_otelcol_contrib_service_version_2_otelcol_component_id_debug_otelcol_comp")` first to surface alerts/dashboards/saved searches referencing this pattern
 
 ```yaml
 # regulator mute file entry — commit to your GitOps ConfigMap
 - pattern: logs_resource_service_instance_id_service_name_otelcol_contrib_service_version_2_otelcol_component_id_debug_otelcol_comp
   action: drop
-  untilEpochSec: 1779285428   # auto-expires in 30d
+  untilEpochSec: 1779295486   # auto-expires in 30d
   reason: "High-volume DEBUG pattern (14% of analyzed volume) — candidate for mute after dependency check."
 ```
 
@@ -88,14 +93,14 @@ Per-pattern recommendations with reasoning, projected savings, and ready-to-past
 
 - **Action**: mute (drop all events)
 - **Reasoning**: High-volume DEBUG pattern (11% of analyzed volume) — candidate for mute after dependency check.
-- **Projected savings (window)**: $0.00
+- **Projected savings (window)**: $0.0000
 - **Dependency warning**: run `log10x_dependency_check(pattern: "logs_resource_service_instance_id_service_name_otelcol_contrib_service_version_2_otelcol_component_id_debug_otelcol_comp")` first to surface alerts/dashboards/saved searches referencing this pattern
 
 ```yaml
 # regulator mute file entry — commit to your GitOps ConfigMap
 - pattern: logs_resource_service_instance_id_service_name_otelcol_contrib_service_version_2_otelcol_component_id_debug_otelcol_comp
   action: drop
-  untilEpochSec: 1779285428   # auto-expires in 30d
+  untilEpochSec: 1779295486   # auto-expires in 30d
   reason: "High-volume DEBUG pattern (11% of analyzed volume) — candidate for mute after dependency check."
 ```
 
@@ -103,14 +108,14 @@ Per-pattern recommendations with reasoning, projected savings, and ready-to-past
 
 - **Action**: mute (drop all events)
 - **Reasoning**: High-volume DEBUG pattern (9% of analyzed volume) — candidate for mute after dependency check.
-- **Projected savings (window)**: $0.00
+- **Projected savings (window)**: $0.0000
 - **Dependency warning**: run `log10x_dependency_check(pattern: "metrics_resource_service_instance_id_service_name_otelcol_contrib_service_version_2_otelcol_component_id_debug_otelcol_c")` first to surface alerts/dashboards/saved searches referencing this pattern
 
 ```yaml
 # regulator mute file entry — commit to your GitOps ConfigMap
 - pattern: metrics_resource_service_instance_id_service_name_otelcol_contrib_service_version_2_otelcol_component_id_debug_otelcol_c
   action: drop
-  untilEpochSec: 1779285428   # auto-expires in 30d
+  untilEpochSec: 1779295486   # auto-expires in 30d
   reason: "High-volume DEBUG pattern (9% of analyzed volume) — candidate for mute after dependency check."
 ```
 
@@ -118,14 +123,14 @@ Per-pattern recommendations with reasoning, projected savings, and ready-to-past
 
 - **Action**: mute (drop all events)
 - **Reasoning**: High-volume DEBUG pattern (3% of analyzed volume) — candidate for mute after dependency check.
-- **Projected savings (window)**: $0.00
+- **Projected savings (window)**: $0.0000
 - **Dependency warning**: run `log10x_dependency_check(pattern: "traces_resource_service_instance_id_service_name_otelcol_contrib_service_version_2_otelcol_component_id_debug_otelcol_co")` first to surface alerts/dashboards/saved searches referencing this pattern
 
 ```yaml
 # regulator mute file entry — commit to your GitOps ConfigMap
 - pattern: traces_resource_service_instance_id_service_name_otelcol_contrib_service_version_2_otelcol_component_id_debug_otelcol_co
   action: drop
-  untilEpochSec: 1779285428   # auto-expires in 30d
+  untilEpochSec: 1779295486   # auto-expires in 30d
   reason: "High-volume DEBUG pattern (3% of analyzed volume) — candidate for mute after dependency check."
 ```
 
@@ -133,14 +138,14 @@ Per-pattern recommendations with reasoning, projected savings, and ready-to-past
 
 - **Action**: mute (drop all events)
 - **Reasoning**: High-volume TRACE pattern (2% of analyzed volume) — candidate for mute after dependency check.
-- **Projected savings (window)**: $0.00
+- **Projected savings (window)**: $0.0000
 - **Dependency warning**: run `log10x_dependency_check(pattern: "oteldemo_adservice_no_baggage_found_in_context_trace_id_span_id_trace_flags")` first to surface alerts/dashboards/saved searches referencing this pattern
 
 ```yaml
 # regulator mute file entry — commit to your GitOps ConfigMap
 - pattern: oteldemo_adservice_no_baggage_found_in_context_trace_id_span_id_trace_flags
   action: drop
-  untilEpochSec: 1779285428   # auto-expires in 30d
+  untilEpochSec: 1779295486   # auto-expires in 30d
   reason: "High-volume TRACE pattern (2% of analyzed volume) — candidate for mute after dependency check."
 ```
 
@@ -148,14 +153,14 @@ Per-pattern recommendations with reasoning, projected savings, and ready-to-past
 
 - **Action**: keep
 - **Reasoning**: severity=ERROR — keep for incident diagnosis.
-- **Projected savings (window)**: $0.00
+- **Projected savings (window)**: $0
 - **Dependency warning**: —
 
 ### #8 — `info_deleted_log_tmp_kafka_logs_cluster_metadata_log_deleted_org_apache_kafka_storage_internals_log_logsegment`  _(medium confidence)_
 
 - **Action**: sample 1/20
 - **Reasoning**: Moderate-volume INFO pattern — sample 1/20 to retain a trickle for debug.
-- **Projected savings (window)**: $0.00
+- **Projected savings (window)**: $0.0000
 - **Dependency warning**: run `log10x_dependency_check(pattern: "info_deleted_log_tmp_kafka_logs_cluster_metadata_log_deleted_org_apache_kafka_storage_internals_log_logsegment")` first to surface alerts/dashboards/saved searches referencing this pattern
 
 ```yaml
@@ -163,7 +168,7 @@ Per-pattern recommendations with reasoning, projected savings, and ready-to-past
 - pattern: info_deleted_log_tmp_kafka_logs_cluster_metadata_log_deleted_org_apache_kafka_storage_internals_log_logsegment
   action: sample
     sampleRate: 20
-  untilEpochSec: 1779285428   # auto-expires in 30d
+  untilEpochSec: 1779295486   # auto-expires in 30d
   reason: "Moderate-volume INFO pattern — sample 1/20 to retain a trickle for debug."
 ```
 
@@ -171,7 +176,7 @@ Per-pattern recommendations with reasoning, projected savings, and ready-to-past
 
 - **Action**: sample 1/20
 - **Reasoning**: Moderate-volume INFO pattern — sample 1/20 to retain a trickle for debug.
-- **Projected savings (window)**: $0.00
+- **Projected savings (window)**: $0.0000
 - **Dependency warning**: run `log10x_dependency_check(pattern: "info_deleted_time_index_tmp_kafka_logs_cluster_metadata_timeindex_deleted_org_apache_kafka_storage_internals_log_logsegm")` first to surface alerts/dashboards/saved searches referencing this pattern
 
 ```yaml
@@ -179,7 +184,7 @@ Per-pattern recommendations with reasoning, projected savings, and ready-to-past
 - pattern: info_deleted_time_index_tmp_kafka_logs_cluster_metadata_timeindex_deleted_org_apache_kafka_storage_internals_log_logsegm
   action: sample
     sampleRate: 20
-  untilEpochSec: 1779285428   # auto-expires in 30d
+  untilEpochSec: 1779295486   # auto-expires in 30d
   reason: "Moderate-volume INFO pattern — sample 1/20 to retain a trickle for debug."
 ```
 
@@ -187,7 +192,7 @@ Per-pattern recommendations with reasoning, projected savings, and ready-to-past
 
 - **Action**: sample 1/20
 - **Reasoning**: Moderate-volume INFO pattern — sample 1/20 to retain a trickle for debug.
-- **Projected savings (window)**: $0.00
+- **Projected savings (window)**: $0.0000
 - **Dependency warning**: run `log10x_dependency_check(pattern: "info_deleted_offset_index_tmp_kafka_logs_cluster_metadata_index_deleted_org_apache_kafka_storage_internals_log_logsegmen")` first to surface alerts/dashboards/saved searches referencing this pattern
 
 ```yaml
@@ -195,7 +200,7 @@ Per-pattern recommendations with reasoning, projected savings, and ready-to-past
 - pattern: info_deleted_offset_index_tmp_kafka_logs_cluster_metadata_index_deleted_org_apache_kafka_storage_internals_log_logsegmen
   action: sample
     sampleRate: 20
-  untilEpochSec: 1779285428   # auto-expires in 30d
+  untilEpochSec: 1779295486   # auto-expires in 30d
   reason: "Moderate-volume INFO pattern — sample 1/20 to retain a trickle for debug."
 ```
 
@@ -260,14 +265,14 @@ The Log10x optimizer **losslessly compacts** events by storing structure once an
 
 | pattern | current bytes/window | est. compact bytes | est. savings | before sample | after (compact) |
 |---|---|---|---|---|---|
-| `traces_resource_service_instance_id_service_name_otelcol_contrib_service_version_2_otelcol_component_id_debug_otelcol_co` | 167.2 KB | 33.7 KB (5.0×) | $0.00 | `2025-10-01T21:25:01.539Z info Traces {"resource": {"service…` | `~$(yyyy-MM-dd'T'HH:mm:ss.SSS'Z') info Traces {"resource": {"…` |
-| `logs_resource_service_instance_id_service_name_otelcol_contrib_service_version_2_otelcol_component_id_debug_otelcol_comp` | 103.4 KB | 21.0 KB (4.9×) | $0.00 | ` GetCartAsync called with userId=1730a34e-9f0d-11f0-9b9e-a6…` | `~$(yyyy-MM-dd'T'HH:mm:ss.SSS'Z') info Logs {"resource": {"se…` |
-| `logs_resource_service_instance_id_service_name_otelcol_contrib_service_version_2_otelcol_component_id_debug_otelcol_comp` | 79.7 KB | 16.2 KB (4.9×) | $0.00 | `2025-10-01T21:25:00.116Z info Logs {"resource": {"service.i…` | `~$(yyyy-MM-dd'T'HH:mm:ss.SSS'Z') info Logs {"resource": {"se…` |
-| `metrics_resource_service_instance_id_service_name_otelcol_contrib_service_version_2_otelcol_component_id_debug_otelcol_c` | 72.1 KB | 14.7 KB (4.9×) | $0.00 | `2025-10-01T21:24:59.732Z info Traces {"resource": {"service…` | `~$(yyyy-MM-dd'T'HH:mm:ss.SSS'Z') info Metrics {"resource": {…` |
-| `traces_resource_service_instance_id_service_name_otelcol_contrib_service_version_2_otelcol_component_id_debug_otelcol_co` | 21.7 KB | 4.6 KB (4.7×) | $0.00 | `info: cart.cartstore.ValkeyCartStore[0]` | `~$(yyyy-MM-dd'T'HH:mm:ss.SSS'Z') info Traces {"resource": {"…` |
-| `oteldemo_adservice_no_baggage_found_in_context_trace_id_span_id_trace_flags` | 16.8 KB | 3.5 KB (4.8×) | $0.00 | `logger=ngalert.sender.router rule_uid=des78nlna99tsf org_id…` | `~$(yyyy-MM-dd HH:mm:ss) - oteldemo.AdService - no baggage fo…` |
-| `failed_to_upload_metrics_post_https_otel_collector_v1_metrics_http_server_gave_http_response_to_https_client` | 16.1 KB | 3.4 KB (4.8×) | $0.00 | ` GetCartAsync called with userId=` | `~$(yyyy/MM/dd HH:mm:ss) failed to upload metrics: Post "http…` |
-| `info_deleted_log_tmp_kafka_logs_cluster_metadata_log_deleted_org_apache_kafka_storage_internals_log_logsegment` | 14.0 KB | 2.9 KB (4.7×) | $0.00 | `2025-10-01T21:24:19.122Z info Metrics {"resource": {"servic…` | `~[$(yyyy-MM-dd HH:mm:ss,SSS)] INFO Deleted log //tmp//kafka-…` |
+| `traces_resource_service_instance_id_service_name_otelcol_contrib_service_version_2_otelcol_component_id_debug_otelcol_co` | 167.2 KB | 33.7 KB (5.0×) | $0.0000 | `2025-10-01T21:25:01.539Z info Traces {"resource": {"service…` | `~$(yyyy-MM-dd'T'HH:mm:ss.SSS'Z') info Traces {"resource": {"…` |
+| `logs_resource_service_instance_id_service_name_otelcol_contrib_service_version_2_otelcol_component_id_debug_otelcol_comp` | 103.4 KB | 21.0 KB (4.9×) | $0.0000 | ` GetCartAsync called with userId=1730a34e-9f0d-11f0-9b9e-a6…` | `~$(yyyy-MM-dd'T'HH:mm:ss.SSS'Z') info Logs {"resource": {"se…` |
+| `logs_resource_service_instance_id_service_name_otelcol_contrib_service_version_2_otelcol_component_id_debug_otelcol_comp` | 79.7 KB | 16.2 KB (4.9×) | $0.0000 | `2025-10-01T21:25:00.116Z info Logs {"resource": {"service.i…` | `~$(yyyy-MM-dd'T'HH:mm:ss.SSS'Z') info Logs {"resource": {"se…` |
+| `metrics_resource_service_instance_id_service_name_otelcol_contrib_service_version_2_otelcol_component_id_debug_otelcol_c` | 72.1 KB | 14.7 KB (4.9×) | $0.0000 | `2025-10-01T21:24:59.732Z info Traces {"resource": {"service…` | `~$(yyyy-MM-dd'T'HH:mm:ss.SSS'Z') info Metrics {"resource": {…` |
+| `traces_resource_service_instance_id_service_name_otelcol_contrib_service_version_2_otelcol_component_id_debug_otelcol_co` | 21.7 KB | 4.6 KB (4.7×) | $0.0000 | `info: cart.cartstore.ValkeyCartStore[0]` | `~$(yyyy-MM-dd'T'HH:mm:ss.SSS'Z') info Traces {"resource": {"…` |
+| `oteldemo_adservice_no_baggage_found_in_context_trace_id_span_id_trace_flags` | 16.8 KB | 3.5 KB (4.8×) | $0.0000 | `logger=ngalert.sender.router rule_uid=des78nlna99tsf org_id…` | `~$(yyyy-MM-dd HH:mm:ss) - oteldemo.AdService - no baggage fo…` |
+| `failed_to_upload_metrics_post_https_otel_collector_v1_metrics_http_server_gave_http_response_to_https_client` | 16.1 KB | 3.4 KB (4.8×) | $0.0000 | ` GetCartAsync called with userId=` | `~$(yyyy/MM/dd HH:mm:ss) failed to upload metrics: Post "http…` |
+| `info_deleted_log_tmp_kafka_logs_cluster_metadata_log_deleted_org_apache_kafka_storage_internals_log_logsegment` | 14.0 KB | 2.9 KB (4.7×) | $0.0000 | `2025-10-01T21:24:19.122Z info Metrics {"resource": {"servic…` | `~[$(yyyy-MM-dd HH:mm:ss,SSS)] INFO Deleted log //tmp//kafka-…` |
 
 Install: see https://docs.log10x.com/apps/cloud/optimizer/ — the optimizer runs as a forwarder sidecar. Compaction is transparent to downstream queries.
 
@@ -365,14 +370,15 @@ signoz:`default`.`logs`
 
 ### Run metadata
 
-- **snapshot_id**: `bd3465dc-4d79-475e-994c-6e6d8d1e0e75`
-- **started**: 2026-04-20T13:56:58.843Z
-- **finished**: 2026-04-20T13:57:08.388Z
+- **snapshot_id**: `9258c0b1-e845-4b03-9224-86c353344643`
+- **started**: 2026-04-20T16:44:36.785Z
+- **finished**: 2026-04-20T16:44:46.396Z
 - **mcp_version**: 1.4.0
-- **pull_wall_time_ms**: 1433 (templater 8111ms)
+- **pull_wall_time_ms**: 1391 (templater 8219ms)
 - **events_analyzed**: 3.6K / target 5.0K (target_reached)
 - **bytes_analyzed**: 749.4 KB
 - **execution_mode**: local_cli
+- **volume_scaling**: 0.00059322991826067 GB/day (costs scaled from sample)
 
 
-_Report saved to: /tmp/log10x-reports/poc_from_siem-2026-04-20T13-57-08.399Z.md_
+_Report saved to: /tmp/log10x-reports/poc_from_siem-2026-04-20T16-44-46.408Z.md_

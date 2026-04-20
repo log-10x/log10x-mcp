@@ -18,6 +18,8 @@ import type {
   PullEventsOptions,
   PullEventsResult,
   PullStopReason,
+  VolumeDetectionOptions,
+  VolumeDetectionResult,
 } from './index.js';
 
 import { retryWithBackoff, shouldStop, sleep, parseWindowMs } from './_retry.js';
@@ -265,9 +267,120 @@ function jsonSafe(s: string): string {
   return `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 }
 
+/**
+ * Detect Sumo Logic daily ingest via a search job against `_view=_ingest_volume`.
+ *
+ * Sumo's Search Job API is session-stateful: the node that accepts
+ * /jobs POST is the ONLY node that knows about the job id. Follow-up
+ * calls without the JSESSIONID cookie go to a different node and 404
+ * with "Job ID is invalid." We capture the Set-Cookie from create and
+ * replay it on subsequent calls.
+ *
+ * Works on any Sumo plan that exposes the `_view=_ingest_volume`
+ * system view (trial accounts typically do).
+ */
+async function detectDailyVolumeGb(opts: VolumeDetectionOptions): Promise<VolumeDetectionResult> {
+  void opts;
+  const { accessId, accessKey, endpoint } = getKeys();
+  if (!accessId || !accessKey || !endpoint) {
+    return { errorNote: 'Sumo: SUMO_ACCESS_ID/KEY/ENDPOINT missing' };
+  }
+  const auth = authHeader(accessId, accessKey);
+  const to = new Date();
+  const from = new Date(to.getTime() - 7 * 86_400_000);
+  const query = '_view=_ingest_volume | timeslice 1d | sum(bytes) by _timeslice';
+
+  const stickyFetch = async (path: string, init: RequestInit = {}, cookies?: string) => {
+    const url = `${endpoint}${path}`;
+    const headers: Record<string, string> = {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      Authorization: auth,
+      ...(init.headers as Record<string, string> | undefined),
+    };
+    if (cookies) headers.Cookie = cookies;
+    const res = await fetch(url, { ...init, headers });
+    return res;
+  };
+
+  try {
+    const createResp = await stickyFetch('/api/v1/search/jobs', {
+      method: 'POST',
+      body: JSON.stringify({
+        query,
+        from: from.toISOString().replace(/\.\d{3}Z$/, ''),
+        to: to.toISOString().replace(/\.\d{3}Z$/, ''),
+        timeZone: 'UTC',
+      }),
+    });
+    if (!createResp.ok) {
+      const body = await createResp.text().catch(() => '');
+      return { errorNote: `Sumo search job create HTTP ${createResp.status}: ${body.slice(0, 200)}` };
+    }
+    // Capture the session cookie so subsequent calls route to the same node.
+    const setCookie = createResp.headers.get('set-cookie') || '';
+    const sessionCookie = setCookie
+      .split(/,\s*(?=[A-Za-z_]+=)/)
+      .map((c) => c.split(';')[0].trim())
+      .filter((c) => c.includes('='))
+      .join('; ');
+    const job = (await createResp.json()) as { id?: string };
+    if (!job.id) return { errorNote: 'Sumo: search job create returned no id' };
+    const jobId = job.id;
+
+    let recordCount = 0;
+    for (let i = 0; i < 30; i++) {
+      await sleep(2000);
+      const statusResp = await stickyFetch(`/api/v1/search/jobs/${jobId}`, {}, sessionCookie);
+      if (!statusResp.ok) {
+        const body = await statusResp.text().catch(() => '');
+        return { errorNote: `Sumo status HTTP ${statusResp.status}: ${body.slice(0, 160)}` };
+      }
+      const st = (await statusResp.json()) as { state?: string; recordCount?: number };
+      recordCount = st.recordCount ?? 0;
+      if (st.state === 'DONE GATHERING RESULTS') break;
+      if (st.state === 'CANCELLED') {
+        return { errorNote: 'Sumo search job was cancelled' };
+      }
+    }
+    if (recordCount === 0) {
+      await stickyFetch(`/api/v1/search/jobs/${jobId}`, { method: 'DELETE' }, sessionCookie).catch(() => undefined);
+      return { errorNote: 'Sumo _ingest_volume returned 0 records — view may not be available on this tier' };
+    }
+    const recResp = await stickyFetch(
+      `/api/v1/search/jobs/${jobId}/records?offset=0&limit=${Math.min(recordCount, 100)}`,
+      {},
+      sessionCookie
+    );
+    const body = (await recResp.json()) as {
+      records?: Array<{ map?: Record<string, string> }>;
+    };
+    await stickyFetch(`/api/v1/search/jobs/${jobId}`, { method: 'DELETE' }, sessionCookie).catch(() => undefined);
+    const records = body.records || [];
+    if (records.length === 0) return { errorNote: 'Sumo _ingest_volume: no records returned' };
+    let totalBytes = 0;
+    for (const r of records) {
+      const bytes = Number(r.map?._sum ?? r.map?.bytes ?? 0);
+      if (Number.isFinite(bytes)) totalBytes += bytes;
+    }
+    if (totalBytes <= 0) {
+      return { errorNote: 'Sumo _ingest_volume returned 0 bytes' };
+    }
+    const days = records.length;
+    const dailyGb = totalBytes / (1024 ** 3) / days;
+    return {
+      dailyGb,
+      source: `Sumo Logic _view=_ingest_volume (${days}d avg, sticky-session)`,
+    };
+  } catch (e) {
+    return { errorNote: `Sumo volume detection failed: ${(e as Error).message.slice(0, 200)}` };
+  }
+}
+
 export const sumoConnector: SiemConnector = {
   id: 'sumo',
   displayName: 'Sumo Logic',
   discoverCredentials,
   pullEvents,
+  detectDailyVolumeGb,
 };

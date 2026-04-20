@@ -25,6 +25,16 @@ export function fmtDollar(amount: number): string {
   return `${sign}$${(abs / 1000000).toFixed(1)}M`;
 }
 
+/** Format a GB number with a sensible unit: MB < 1, GB < 1000, TB above. */
+export function fmtGb(gb: number): string {
+  if (gb === 0) return '0 GB';
+  const abs = Math.abs(gb);
+  if (abs < 1) return `${(abs * 1024).toFixed(1)} MB`;
+  if (abs < 10) return `${abs.toFixed(1)} GB`;
+  if (abs < 1000) return `${Math.round(abs)} GB`;
+  return `${(abs / 1000).toFixed(1)} TB`;
+}
+
 /** Format bytes as human-readable: 1.2 GB, 450 MB, etc. */
 export function fmtBytes(bytes: number): string {
   const abs = Math.abs(bytes);

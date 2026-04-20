@@ -88,11 +88,35 @@ export const pocFromSiemSubmitSchema = {
     .positive()
     .optional()
     .describe(
-      'Customer\'s total daily log volume in GB/day. When provided, per-pattern costs are extrapolated ' +
-        'from the pulled sample to the full daily volume — projected annual savings become meaningful ' +
-        'dollar figures instead of the sub-cent numbers a 5K-event sample naturally produces. Leave ' +
-        'unset to see sample-only costs. If the caller narrows the pull via `query` (e.g., one service), ' +
-        'this scaling overstates cost because only a fraction of daily volume matches the filter.'
+      'Customer\'s total daily log volume in GB/day. Pick any one of total_daily_gb / total_monthly_gb / ' +
+        'total_annual_gb — whichever unit the user naturally thinks in. The tool normalizes to daily ' +
+        'internally. When any is provided (or auto_detect_volume succeeds), per-pattern costs are ' +
+        'extrapolated from the pulled sample to the full volume, producing meaningful annual-savings ' +
+        'figures instead of sub-cent numbers. Priority: daily > monthly > annual. If the pull was ' +
+        'narrowed via `query` to one service, this overstates cost — only a fraction of daily volume ' +
+        'matches the filter.'
+    ),
+  total_monthly_gb: z
+    .number()
+    .positive()
+    .optional()
+    .describe('Customer\'s total monthly log volume in GB/month. See total_daily_gb for semantics.'),
+  total_annual_gb: z
+    .number()
+    .positive()
+    .optional()
+    .describe('Customer\'s total annual log volume in GB/year. See total_daily_gb for semantics.'),
+  auto_detect_volume: z
+    .boolean()
+    .default(true)
+    .describe(
+      'Default true: when no total_*_gb arg is provided, probe the SIEM\'s usage/metrics API to ' +
+        'auto-detect daily ingest volume. Per-SIEM best-effort: CloudWatch (describeLogGroups ÷ ' +
+        'retention), Datadog (Usage API), Elasticsearch (_stats), Azure (Usage KQL table), GCP ' +
+        '(Cloud Monitoring byte_count), ClickHouse (system.parts), Splunk (license API), Sumo ' +
+        '(Account Usage API). Fails silently and falls back to scenario brackets if the current ' +
+        'creds lack the required scope. Set false to skip the probe and go straight to manual args ' +
+        'or scenarios.'
     ),
   ai_prettify: z
     .boolean()
@@ -180,6 +204,9 @@ export interface PocSubmitArgs {
   max_pull_minutes: number;
   analyzer_cost_per_gb?: number;
   total_daily_gb?: number;
+  total_monthly_gb?: number;
+  total_annual_gb?: number;
+  auto_detect_volume?: boolean;
   ai_prettify: boolean;
   privacy_mode: boolean;
   environment?: string;
@@ -383,11 +410,16 @@ export async function runPipeline(
     return;
   }
 
-  // ── Templatize ──
+  // ── Templatize + parallel volume detection ──
+  // Both are independent of each other's output so we race them.
+  // Volume detection timeout: 15s; never blocks the report.
   snapshot.status = 'templatizing';
   snapshot.stepDetail = `templating ${pullResult.events.length} events`;
   snapshot.progressPct = Math.max(snapshot.progressPct, 60);
   const templStart = Date.now();
+
+  const volumeDetectPromise = resolveVolume(args, connector);
+
   let extraction;
   try {
     extraction = await extractPatterns(pullResult.events, {
@@ -403,6 +435,10 @@ export async function runPipeline(
   }
   const templateWallTimeMs = Date.now() - templStart;
   snapshot.partialPatternsFound = extraction.patterns.length;
+
+  // Await volume detect AFTER templating — the templater is the long pole
+  // and volume detection likely finished during it.
+  const volumeResult = await volumeDetectPromise;
 
   // ── AI prettify via MCP sampling ──
   // Ask the host's LLM (Claude Desktop, Claude Code, Cursor, etc.) to
@@ -464,7 +500,10 @@ export async function runPipeline(
     mcpVersion: MCP_VERSION,
     banners,
     pullNotes: pullResult.metadata.notes,
-    totalDailyGb: args.total_daily_gb,
+    totalDailyGb: volumeResult?.dailyGb,
+    volumeSource: volumeResult?.source ?? 'none',
+    volumeDetectSource: volumeResult?.sourceLabel,
+    volumeDetectErrorNote: volumeResult?.errorNote,
     aiPrettyNames,
     aiPrettifyErrorNote,
   });
@@ -489,6 +528,84 @@ export async function runPipeline(
   snapshot.reportFilePath = reportPath;
   snapshot.summary = render.summary;
   snapshot.finishedAt = new Date().toISOString();
+}
+
+/**
+ * Resolve the customer's total daily log volume for cost projection.
+ *
+ * Priority:
+ *   1. Explicit user arg — `total_daily_gb` > `total_monthly_gb` / 30 >
+ *      `total_annual_gb` / 365. Marked as `user_arg`.
+ *   2. Auto-detect via the connector's `detectDailyVolumeGb` method
+ *      when `auto_detect_volume !== false`. Marked as `auto_detected`.
+ *   3. None — caller will render scenario brackets.
+ *
+ * Fail-soft: returns errorNote rather than throwing.
+ */
+async function resolveVolume(
+  args: PocSubmitArgs,
+  connector: SiemConnector
+): Promise<{
+  dailyGb?: number;
+  source?: 'user_arg' | 'auto_detected';
+  sourceLabel?: string;
+  errorNote?: string;
+} | null> {
+  // User arg wins.
+  if (args.total_daily_gb && args.total_daily_gb > 0) {
+    return { dailyGb: args.total_daily_gb, source: 'user_arg', sourceLabel: 'user-supplied total_daily_gb' };
+  }
+  if (args.total_monthly_gb && args.total_monthly_gb > 0) {
+    return {
+      dailyGb: args.total_monthly_gb / 30,
+      source: 'user_arg',
+      sourceLabel: `user-supplied ${args.total_monthly_gb.toLocaleString()} GB/mo`,
+    };
+  }
+  if (args.total_annual_gb && args.total_annual_gb > 0) {
+    return {
+      dailyGb: args.total_annual_gb / 365,
+      source: 'user_arg',
+      sourceLabel: `user-supplied ${args.total_annual_gb.toLocaleString()} GB/yr`,
+    };
+  }
+  // Auto-detect (default true).
+  if (args.auto_detect_volume === false) return null;
+  if (!connector.detectDailyVolumeGb) {
+    return {
+      errorNote: `${connector.displayName}: auto-detect not implemented for this SIEM`,
+    };
+  }
+  try {
+    const timeout = new Promise<{ errorNote: string }>((resolve) =>
+      setTimeout(() => resolve({ errorNote: 'Volume auto-detect timed out after 20s' }), 20_000)
+    );
+    const result = await Promise.race([
+      connector.detectDailyVolumeGb({
+        scope: args.scope,
+        schemaOverride: args.clickhouse_table
+          ? {
+              timestampColumn: args.clickhouse_timestamp_column,
+              messageColumn: args.clickhouse_message_column,
+              serviceColumn: args.clickhouse_service_column,
+              severityColumn: args.clickhouse_severity_column,
+              table: args.clickhouse_table,
+            }
+          : undefined,
+      }),
+      timeout,
+    ]);
+    if ('dailyGb' in result && result.dailyGb && result.dailyGb > 0) {
+      return {
+        dailyGb: result.dailyGb,
+        source: 'auto_detected',
+        sourceLabel: result.source || 'SIEM usage API',
+      };
+    }
+    return { errorNote: ('errorNote' in result && result.errorNote) || 'Auto-detect returned no value' };
+  } catch (e) {
+    return { errorNote: `Auto-detect threw: ${(e as Error).message.slice(0, 200)}` };
+  }
 }
 
 /**

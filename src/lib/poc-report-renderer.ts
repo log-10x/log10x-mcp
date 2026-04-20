@@ -9,7 +9,7 @@
 import type { ExtractedPattern, ExtractedPatterns } from './pattern-extraction.js';
 import type { SiemId } from './siem/pricing.js';
 import { SIEM_DISPLAY_NAMES } from './siem/pricing.js';
-import { fmtBytes, fmtCount, fmtDollar, fmtPct } from './format.js';
+import { fmtBytes, fmtCount, fmtDollar, fmtGb, fmtPct } from './format.js';
 
 export interface RenderInput {
   siem: SiemId;
@@ -40,12 +40,20 @@ export interface RenderInput {
   /** Pull notes from the connector (retry info, error detail, etc.). */
   pullNotes?: string[];
   /**
-   * Optional: the customer's total daily log volume (in GB/day). When
-   * provided, costs are scaled from the sample to the real daily volume
-   * by pattern %, giving meaningful absolute dollar figures instead of
-   * the raw $0.00-$0.02 numbers a 5K-event sample produces on its own.
+   * The customer's total daily log volume (GB/day). Provided by user
+   * arg OR auto-detected from the SIEM. When set (and positive), per-
+   * pattern costs are scaled from the sample to the full daily volume.
    */
   totalDailyGb?: number;
+  /**
+   * Where the totalDailyGb came from: 'user_arg' | 'auto_detected' |
+   * 'none'. Drives the banner text in the executive summary.
+   */
+  volumeSource?: 'user_arg' | 'auto_detected' | 'none';
+  /** Human-readable label for the detection source (e.g., "Datadog Usage API, 7d avg"). */
+  volumeDetectSource?: string;
+  /** Error note when auto-detect was attempted but failed. Surfaced under the banner. */
+  volumeDetectErrorNote?: string;
   /**
    * Optional: AI-generated display name per pattern identity. When set,
    * the identity is rendered as `<Pretty Name> (<identity>)` in every
@@ -148,32 +156,67 @@ export function renderPocReport(input: RenderInput): RenderResult {
   );
   lines.push('');
   if (input.totalDailyGb && input.totalDailyGb > 0) {
-    // When the caller told us the customer's real daily volume, costs
-    // below are SCALED from sample → full daily spend. Make this
-    // explicit so nobody thinks our 5K-event sample actually costs $N.
+    // Volume known — costs are scaled from sample to real daily spend.
+    const bannerTitle =
+      input.volumeSource === 'auto_detected'
+        ? `**Volume auto-detected**: ${fmtGb(input.totalDailyGb)}/day (${input.volumeDetectSource || 'SIEM usage API'})`
+        : `**Volume-scaled mode**: ${fmtGb(input.totalDailyGb)}/day (user-supplied)`;
+    lines.push(`> ${bannerTitle}`);
+    lines.push('>');
     lines.push(
-      `> **Volume-scaled mode**: costs below extrapolate the sample's pattern distribution to the supplied ${input.totalDailyGb.toLocaleString()} GB/day ingest rate. Shown dollar figures represent projected spend across the full daily volume, not the sample's own cost. Set to 0 or omit \`total_daily_gb\` to see raw sample-only costs.`
+      `> Cost figures below extrapolate from the pulled sample (${fmtBytes(input.extraction.totalBytes)}) to the full daily volume by per-pattern %. Pattern rankings + regulator YAML + native exclusion configs are the same regardless of volume; only dollar figures scale.`
     );
     lines.push('');
     const dailyCost = projectBilling(totalCost, input.windowHours, 24);
     const weeklyCost = projectBilling(totalCost, input.windowHours, 24 * 7);
+    const monthlyCost = projectBilling(totalCost, input.windowHours, 24 * 30);
     const annualCost = projectBilling(totalCost, input.windowHours, 24 * 365);
     const annualSavings = projectBilling(projectedSavings, input.windowHours, 24 * 365);
     lines.push(`- **Projected daily cost**: ${fmtDollar(dailyCost)}`);
-    lines.push(`- **Projected weekly cost**: ${fmtDollar(weeklyCost)}`);
+    lines.push(`- **Projected monthly cost**: ${fmtDollar(monthlyCost)}`);
     lines.push(`- **Projected annual cost**: ${fmtDollar(annualCost)}`);
+    void weeklyCost;
     lines.push(
-      `- **Potential annual savings**: ${fmtDollar(annualSavings)} — ${fmtPct((annualSavings / Math.max(1, annualCost)) * 100)} of annual cost`
+      `- **Potential annual savings**: **${fmtDollar(annualSavings)}** — ${fmtPct((annualSavings / Math.max(1, annualCost)) * 100)} of annual cost`
     );
   } else {
-    lines.push(
-      `> **Sample-only costs below**: cost figures reflect the pulled sample only (${fmtBytes(input.extraction.totalBytes)}). Pass \`total_daily_gb\` on the submit tool to extrapolate to the customer's full daily volume — that's where the real $$ live.`
-    );
+    // Volume unknown — render scenario brackets so the user still sees
+    // dollar magnitudes, plus an explicit call-to-action with whatever
+    // error note we got from auto-detection (if attempted).
+    const detectHeader = input.volumeDetectErrorNote
+      ? `**Volume auto-detection skipped**: ${input.volumeDetectErrorNote}. Showing scenario brackets below.`
+      : `**No volume specified**: showing scenario brackets. Pass \`total_daily_gb\`, \`total_monthly_gb\`, or \`total_annual_gb\` for a precise projection.`;
+    lines.push(`> ${detectHeader}`);
     lines.push('');
-    lines.push(`- **Observed cost (window)**: ${fmtDollar(totalCost)}`);
-    lines.push(`- **Projected weekly cost**: ${fmtDollar(projectBilling(totalCost, input.windowHours, 24 * 7))}`);
+    lines.push('**Projected annual savings by ingest volume** (what the top-pattern muting would save):');
+    lines.push('');
+    lines.push('| Daily ingest | Monthly ingest | Projected annual cost | Projected annual savings |');
+    lines.push('|---|---|---|---|');
+    const scenarios: Array<{ daily: number; label: string }> = [
+      { daily: 10, label: '10 GB/day' },
+      { daily: 50, label: '50 GB/day' },
+      { daily: 100, label: '100 GB/day' },
+      { daily: 500, label: '500 GB/day' },
+      { daily: 2000, label: '2 TB/day' },
+    ];
+    // Scale factor per scenario: scenarioDailyGb / sampleGb. Our totalCost
+    // is over the pulled window — scale up proportionally.
+    const sampleGb = input.extraction.totalBytes / (1024 ** 3);
+    for (const sc of scenarios) {
+      if (sampleGb === 0) continue;
+      const factor = sc.daily / sampleGb;
+      const annualCost = projectBilling(totalCost * factor, input.windowHours, 24 * 365);
+      const annualSavings = projectBilling(projectedSavings * factor, input.windowHours, 24 * 365);
+      const monthlyLabel = `${(sc.daily * 30).toLocaleString()} GB/mo`;
+      lines.push(
+        `| ${sc.label} | ${monthlyLabel} | ${fmtDollar(annualCost)} | **${fmtDollar(annualSavings)}** |`
+      );
+    }
+    lines.push('');
+    lines.push('_Sample-only costs (for reference)_:');
+    lines.push(`- **Observed sample cost (window)**: ${fmtDollar(totalCost)}`);
     lines.push(
-      `- **Potential savings (window)**: ${fmtDollar(projectedSavings)} — ${fmtPct((projectedSavings / Math.max(1, totalCost)) * 100)} of analyzed cost`
+      `- **Sample potential savings (window)**: ${fmtDollar(projectedSavings)} — ${fmtPct((projectedSavings / Math.max(1, totalCost)) * 100)} of analyzed cost`
     );
   }
   lines.push(

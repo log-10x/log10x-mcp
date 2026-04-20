@@ -62,11 +62,49 @@ export interface PullEventsResult {
   };
 }
 
+export interface VolumeDetectionOptions {
+  /** Scope from the POC submit (log group, index, workspace, etc.). */
+  scope?: string;
+  /**
+   * How many days of history to average. Implementations default to 7
+   * when possible, fall back to whatever window the vendor API gives.
+   */
+  lookbackDays?: number;
+  /** ClickHouse-specific — the table to measure. */
+  schemaOverride?: SiemSchemaOverride;
+}
+
+export interface VolumeDetectionResult {
+  /**
+   * Detected daily volume in GB/day. Undefined when detection fails or
+   * isn't supported on this SIEM / install.
+   */
+  dailyGb?: number;
+  /**
+   * Human-readable description of the source, e.g., "CloudWatch
+   * describeLogGroups / 30d retention" — shown in the report banner.
+   */
+  source?: string;
+  /**
+   * Short reason when detection failed or was skipped (e.g., insufficient
+   * scope, API 403, self-hosted install without usage API). Surfaced in
+   * the report so users know what to fix.
+   */
+  errorNote?: string;
+}
+
 export interface SiemConnector {
   id: SiemId;
   displayName: string;
   discoverCredentials(): Promise<CredentialDiscovery>;
   pullEvents(opts: PullEventsOptions): Promise<PullEventsResult>;
+  /**
+   * Optional — best-effort auto-detection of the customer's total daily
+   * log volume. Used to project sample-observed pattern cost to annual
+   * savings. Implementations should fail-soft and return an errorNote
+   * rather than throwing.
+   */
+  detectDailyVolumeGb?(opts: VolumeDetectionOptions): Promise<VolumeDetectionResult>;
 }
 
 export const ALL_CONNECTORS: SiemConnector[] = [

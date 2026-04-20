@@ -22,6 +22,7 @@ import {
   FilterLogEventsCommand,
   DescribeLogGroupsCommand,
   type FilteredLogEvent,
+  type LogGroup,
 } from '@aws-sdk/client-cloudwatch-logs';
 import { fromNodeProviderChain } from '@aws-sdk/credential-providers';
 
@@ -31,6 +32,8 @@ import type {
   PullEventsOptions,
   PullEventsResult,
   PullStopReason,
+  VolumeDetectionOptions,
+  VolumeDetectionResult,
 } from './index.js';
 
 import { shouldStop, sleep, retryWithBackoff, parseWindowMs } from './_retry.js';
@@ -208,9 +211,93 @@ async function _settleMs(ms: number): Promise<void> {
   await sleep(ms);
 }
 
+/**
+ * Detect CloudWatch daily ingest volume.
+ *
+ * Approach: DescribeLogGroups returns `storedBytes` per log group (total
+ * on-disk bytes, INCLUDING historical data across the retention window).
+ * Divide by retention days to get a daily-ingest estimate.
+ *
+ * Caveats:
+ *   - When a log group has retention NEVER_EXPIRE, we fall back to a
+ *     30-day assumption. Reported with a disclaimer in the source label.
+ *   - When scope is narrowed to a single log group (not a wildcard),
+ *     the detected volume is ONLY that log group's ingest, not the
+ *     account's total. Correct for the pattern-extrapolation math
+ *     because the pull also targets that log group.
+ *   - AWS rotates storedBytes lazily; very-recent bursts may undercount.
+ */
+async function detectDailyVolumeGb(opts: VolumeDetectionOptions): Promise<VolumeDetectionResult> {
+  const region = process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || 'us-east-1';
+  const client = new CloudWatchLogsClient({ region, maxAttempts: 3 });
+  try {
+    const scope = opts.scope || '';
+    const prefix = scope.includes('*')
+      ? scope.replace(/\*+$/, '').replace(/\*/g, '')
+      : scope;
+    const groups: LogGroup[] = [];
+    let nextToken: string | undefined;
+    const maxPages = 10;
+    for (let p = 0; p < maxPages; p++) {
+      const resp = await client.send(
+        new DescribeLogGroupsCommand({
+          logGroupNamePrefix: prefix || undefined,
+          nextToken,
+          limit: 50,
+        })
+      );
+      if (resp.logGroups) groups.push(...resp.logGroups);
+      if (!resp.nextToken) break;
+      nextToken = resp.nextToken;
+    }
+    if (groups.length === 0) {
+      return {
+        errorNote: `CloudWatch describeLogGroups returned 0 groups for prefix "${prefix || '(all)'}"`,
+      };
+    }
+    let totalBytes = 0;
+    let weightedRetentionDays = 0;
+    let neverExpireCount = 0;
+    let weightedCount = 0;
+    for (const g of groups) {
+      const bytes = g.storedBytes ?? 0;
+      if (bytes <= 0) continue;
+      totalBytes += bytes;
+      const retention = g.retentionInDays;
+      if (retention && retention > 0) {
+        weightedRetentionDays += retention * bytes;
+        weightedCount += bytes;
+      } else {
+        neverExpireCount++;
+      }
+    }
+    if (totalBytes === 0) {
+      return { errorNote: 'CloudWatch: matching log groups have 0 storedBytes (cold / empty)' };
+    }
+    // Effective retention: bytes-weighted average across groups WITH
+    // retention set. Groups with NEVER_EXPIRE get a 30-day-floor default
+    // so we don't divide by infinity — callers see the disclaimer.
+    const effectiveRetention =
+      weightedCount > 0 ? weightedRetentionDays / weightedCount : 30;
+    const days = Math.max(1, Math.min(365, effectiveRetention));
+    const dailyGb = totalBytes / (1024 ** 3) / days;
+    const neverExpireNote =
+      neverExpireCount > 0 ? ` — ${neverExpireCount} group(s) have NEVER_EXPIRE retention; assumed 30d for that subset` : '';
+    return {
+      dailyGb,
+      source: `CloudWatch DescribeLogGroups (${groups.length} group${groups.length === 1 ? '' : 's'}, ~${Math.round(days)}d retention)${neverExpireNote}`,
+    };
+  } catch (e) {
+    return { errorNote: `CloudWatch volume detection failed: ${(e as Error).message.slice(0, 200)}` };
+  } finally {
+    client.destroy();
+  }
+}
+
 export const cloudwatchConnector: SiemConnector = {
   id: 'cloudwatch',
   displayName: 'Amazon CloudWatch Logs',
   discoverCredentials,
   pullEvents,
+  detectDailyVolumeGb,
 };

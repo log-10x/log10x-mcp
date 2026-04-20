@@ -17,6 +17,8 @@ import type {
   PullEventsOptions,
   PullEventsResult,
   PullStopReason,
+  VolumeDetectionOptions,
+  VolumeDetectionResult,
 } from './index.js';
 
 import { retryWithBackoff, shouldStop, parseWindowMs } from './_retry.js';
@@ -166,9 +168,85 @@ function extractPayloadText(payload: unknown): string {
   return String(payload);
 }
 
+/**
+ * Detect GCP Cloud Logging daily ingest via Cloud Monitoring time series
+ * on `logging.googleapis.com/billing/monthly_bytes_ingested` (the same
+ * metric that drives your Cloud Billing line). That metric is cumulative
+ * for the current month, so we take the latest 7 data points and estimate
+ * daily from the deltas.
+ *
+ * Falls back gracefully if Cloud Monitoring access isn't granted — the
+ * SA needs `roles/monitoring.viewer` in addition to Logging roles.
+ */
+async function detectDailyVolumeGb(opts: VolumeDetectionOptions): Promise<VolumeDetectionResult> {
+  const projectId = opts.scope || process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT;
+  if (!projectId) return { errorNote: 'GCP: project ID not set' };
+  try {
+    // Use google-auth-library via @google-cloud/logging's auth so we get
+    // the same ADC/SA flow without pulling in an extra package.
+    const { GoogleAuth } = await import('google-auth-library');
+    const auth = new GoogleAuth({
+      scopes: ['https://www.googleapis.com/auth/monitoring.read'],
+    });
+    const client = await auth.getClient();
+    const tokenResp = await client.getAccessToken();
+    const accessToken = typeof tokenResp === 'string' ? tokenResp : tokenResp?.token;
+    if (!accessToken) {
+      return { errorNote: 'GCP: could not acquire access token for Cloud Monitoring' };
+    }
+    const now = new Date();
+    const start = new Date(now.getTime() - 7 * 86_400_000);
+    const url =
+      `https://monitoring.googleapis.com/v3/projects/${encodeURIComponent(projectId)}/timeSeries?` +
+      `filter=${encodeURIComponent('metric.type="logging.googleapis.com/billing/monthly_bytes_ingested"')}` +
+      `&interval.startTime=${encodeURIComponent(start.toISOString())}` +
+      `&interval.endTime=${encodeURIComponent(now.toISOString())}` +
+      `&aggregation.alignmentPeriod=86400s` +
+      `&aggregation.perSeriesAligner=ALIGN_MAX`;
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      return {
+        errorNote:
+          `GCP Monitoring HTTP ${res.status} — SA needs roles/monitoring.viewer.${body ? ' ' + body.slice(0, 120) : ''}`,
+      };
+    }
+    const data = (await res.json()) as {
+      timeSeries?: Array<{ points?: Array<{ value?: { int64Value?: string; doubleValue?: number } }> }>;
+    };
+    const series = data.timeSeries || [];
+    if (series.length === 0) {
+      return { errorNote: 'GCP Monitoring: billing/monthly_bytes_ingested returned no data — project may have <24h of logs' };
+    }
+    // Each series is a (resource, metric-label) combination. Sum across
+    // series at the LATEST point, then divide by days-so-far in month.
+    let latestMonthBytes = 0;
+    for (const s of series) {
+      const latest = s.points?.[0];
+      const v = latest?.value?.int64Value ?? latest?.value?.doubleValue ?? 0;
+      latestMonthBytes += Number(v);
+    }
+    if (latestMonthBytes === 0) {
+      return { errorNote: 'GCP Monitoring: latest billing bytes = 0' };
+    }
+    // Metric resets at month start; compute days elapsed in the current
+    // billing month to convert cumulative MTD to daily average.
+    const dayOfMonth = now.getUTCDate();
+    const daysSinceMonthStart = Math.max(1, dayOfMonth);
+    const dailyGb = latestMonthBytes / (1024 ** 3) / daysSinceMonthStart;
+    return {
+      dailyGb,
+      source: `GCP Cloud Monitoring billing/monthly_bytes_ingested (MTD / ${daysSinceMonthStart}d)`,
+    };
+  } catch (e) {
+    return { errorNote: `GCP volume detection failed: ${(e as Error).message.slice(0, 200)}` };
+  }
+}
+
 export const gcpLoggingConnector: SiemConnector = {
   id: 'gcp-logging',
   displayName: 'GCP Cloud Logging',
   discoverCredentials,
   pullEvents,
+  detectDailyVolumeGb,
 };

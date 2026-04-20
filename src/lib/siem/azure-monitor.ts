@@ -17,6 +17,8 @@ import type {
   PullEventsOptions,
   PullEventsResult,
   PullStopReason,
+  VolumeDetectionOptions,
+  VolumeDetectionResult,
 } from './index.js';
 
 import { retryWithBackoff, shouldStop, parseWindowMs } from './_retry.js';
@@ -188,9 +190,51 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
   };
 }
 
+/**
+ * Detect Azure Log Analytics daily ingest via the `Usage` system table.
+ * `Usage | where IsBillable == true | summarize sum(Quantity) by bin(TimeGenerated, 1d)`
+ * returns MB/day per billable table. Average the last 7 days.
+ * Quantity is in MB.
+ */
+async function detectDailyVolumeGb(opts: VolumeDetectionOptions): Promise<VolumeDetectionResult> {
+  const workspaceId = opts.scope || process.env.AZURE_LOG_ANALYTICS_WORKSPACE_ID;
+  if (!workspaceId) return { errorNote: 'Azure: AZURE_LOG_ANALYTICS_WORKSPACE_ID not set' };
+  try {
+    const client = new LogsQueryClient(new DefaultAzureCredential());
+    const kql = `Usage
+| where TimeGenerated > ago(7d)
+| where IsBillable == true
+| summarize TotalMB = sum(Quantity)
+| project DailyMB = TotalMB / 7.0`;
+    const resp = (await client.queryWorkspace(workspaceId, kql, {
+      duration: 'PT604800S', // 7d
+    } as unknown as Parameters<typeof client.queryWorkspace>[2])) as unknown as {
+      status: string;
+      tables?: Array<{ columnDescriptors: Array<{ name: string }>; rows: unknown[][] }>;
+    };
+    const tables = resp.tables || [];
+    const row = tables[0]?.rows?.[0];
+    if (!row) {
+      return { errorNote: 'Azure Usage table empty — workspace may have <7d data or billing not enabled' };
+    }
+    const dailyMb = Number(row[0]);
+    if (!Number.isFinite(dailyMb) || dailyMb <= 0) {
+      return { errorNote: `Azure Usage returned non-positive daily MB: ${row[0]}` };
+    }
+    const dailyGb = dailyMb / 1024;
+    return {
+      dailyGb,
+      source: 'Azure Usage table (7d avg, billable only)',
+    };
+  } catch (e) {
+    return { errorNote: `Azure volume detection failed: ${(e as Error).message.slice(0, 200)}` };
+  }
+}
+
 export const azureMonitorConnector: SiemConnector = {
   id: 'azure-monitor',
   displayName: 'Azure Monitor / Log Analytics',
   discoverCredentials,
   pullEvents,
+  detectDailyVolumeGb,
 };

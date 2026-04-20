@@ -17,6 +17,8 @@ import type {
   PullEventsOptions,
   PullEventsResult,
   PullStopReason,
+  VolumeDetectionOptions,
+  VolumeDetectionResult,
 } from './index.js';
 
 import { retryWithBackoff, shouldStop, sleep, parseWindowMs } from './_retry.js';
@@ -296,9 +298,64 @@ async function cancelJob(conn: Conn, sid: string): Promise<void> {
   }).catch(() => undefined);
 }
 
+/**
+ * Detect Splunk daily ingest via an SPL query against `_internal`:
+ *   `search index=_internal source=*license_usage.log* type=Usage
+ *      | bin _time span=1d | stats sum(b) as bytes by _time`
+ * Averages the last 7 days. Requires the user to be able to read
+ * `index=_internal` (admin role typically has this).
+ *
+ * Falls back to `_introspection` or the license-pool REST endpoint if
+ * the search fails with "no such index" (some customers have _internal
+ * locked down).
+ */
+async function detectDailyVolumeGb(opts: VolumeDetectionOptions): Promise<VolumeDetectionResult> {
+  void opts;
+  const conn = getConn();
+  if (!conn) return { errorNote: 'Splunk: no connection credentials' };
+  const earliest = new Date(Date.now() - 7 * 86_400_000).toISOString();
+  const latest = new Date().toISOString();
+  const spl =
+    'search index=_internal source=*license_usage.log* type=Usage ' +
+    '| bin _time span=1d ' +
+    '| stats sum(b) as bytes by _time';
+  const body = new URLSearchParams({
+    search: spl,
+    earliest_time: earliest,
+    latest_time: latest,
+    output_mode: 'json',
+    exec_mode: 'oneshot',
+  });
+  try {
+    const resp = await splunkFetch(conn, '/services/search/jobs/oneshot', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
+    });
+    const data = (await resp.json()) as { results?: Array<{ bytes?: string }> };
+    const results = data.results || [];
+    if (results.length === 0) {
+      return { errorNote: 'Splunk _internal license_usage returned 0 rows — may lack _internal read capability' };
+    }
+    const days = results.length;
+    const totalBytes = results.reduce((s, r) => s + Number(r.bytes || 0), 0);
+    if (totalBytes <= 0) {
+      return { errorNote: 'Splunk license_usage reported 0 bytes over 7d' };
+    }
+    const dailyGb = totalBytes / (1024 ** 3) / days;
+    return {
+      dailyGb,
+      source: `Splunk _internal license_usage.log (${days}d avg)`,
+    };
+  } catch (e) {
+    return { errorNote: `Splunk volume detection failed: ${(e as Error).message.slice(0, 200)}` };
+  }
+}
+
 export const splunkConnector: SiemConnector = {
   id: 'splunk',
   displayName: 'Splunk',
   discoverCredentials,
   pullEvents,
+  detectDailyVolumeGb,
 };

@@ -20,6 +20,8 @@ import type {
   PullEventsResult,
   PullStopReason,
   SiemSchemaOverride,
+  VolumeDetectionOptions,
+  VolumeDetectionResult,
 } from './index.js';
 
 import { retryWithBackoff, shouldStop, parseWindowMs } from './_retry.js';
@@ -297,9 +299,72 @@ function tsPredicate(col: string, since: Date): string {
   return `${quoteIdent(col)} >= toDateTime(${secs})`;
 }
 
+/**
+ * Detect ClickHouse daily ingest for the configured database + table.
+ * Uses `system.parts.bytes_on_disk` for the target table divided by
+ * the span of the timestamp column (observed from `min()` / `max()`).
+ * Operates on-table; no cluster-wide licensing API is assumed.
+ */
+async function detectDailyVolumeGb(opts: VolumeDetectionOptions): Promise<VolumeDetectionResult> {
+  const conn = getConn();
+  if (!conn) return { errorNote: 'ClickHouse: CLICKHOUSE_URL not set' };
+  const database = opts.scope || conn.database || 'default';
+  const table = opts.schemaOverride?.table;
+  if (!table) {
+    return { errorNote: 'ClickHouse: table name required (pass clickhouse_table)' };
+  }
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(database) || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(table)) {
+    return { errorNote: 'ClickHouse: invalid database/table identifier' };
+  }
+  const client = createClient({
+    url: conn.url,
+    username: conn.username,
+    password: conn.password,
+    database,
+  });
+  try {
+    const partsSql = `SELECT sum(bytes_on_disk) AS bytes FROM system.parts WHERE database = '${database}' AND table = '${table}' AND active`;
+    const partsResp = await client.query({ query: partsSql, format: 'JSONEachRow' });
+    const parts = (await partsResp.json()) as Array<{ bytes: string | number }>;
+    const bytes = parts[0] ? Number(parts[0].bytes) : 0;
+    if (!bytes || bytes <= 0) {
+      await client.close().catch(() => undefined);
+      return { errorNote: `ClickHouse system.parts returned 0 bytes for ${database}.${table}` };
+    }
+    // Detect timestamp column — use schemaOverride OR fall back to
+    // conventional names. Span = max - min in seconds, ÷ 86400 for days.
+    const tsCol = opts.schemaOverride?.timestampColumn;
+    let spanSecs = 7 * 86_400; // default 7d
+    let spanNote = 'assumed 7d (no timestamp column specified)';
+    if (tsCol && /^[A-Za-z_][A-Za-z0-9_]*$/.test(tsCol)) {
+      const spanSql = `SELECT toUnixTimestamp(min(\`${tsCol}\`)) AS minT, toUnixTimestamp(max(\`${tsCol}\`)) AS maxT FROM \`${database}\`.\`${table}\``;
+      try {
+        const spanResp = await client.query({ query: spanSql, format: 'JSONEachRow' });
+        const rows = (await spanResp.json()) as Array<{ minT: number | string; maxT: number | string }>;
+        if (rows[0] && Number(rows[0].maxT) > Number(rows[0].minT)) {
+          spanSecs = Math.max(3600, Number(rows[0].maxT) - Number(rows[0].minT));
+          spanNote = `${Math.round(spanSecs / 86_400)}d observed span`;
+        }
+      } catch {
+        // table schema may lack the column; keep default
+      }
+    }
+    const dailyGb = bytes / (1024 ** 3) / (spanSecs / 86_400);
+    await client.close().catch(() => undefined);
+    return {
+      dailyGb,
+      source: `ClickHouse system.parts ${database}.${table} (${spanNote})`,
+    };
+  } catch (e) {
+    await client.close().catch(() => undefined);
+    return { errorNote: `ClickHouse volume detection failed: ${(e as Error).message.slice(0, 200)}` };
+  }
+}
+
 export const clickhouseConnector: SiemConnector = {
   id: 'clickhouse',
   displayName: 'ClickHouse',
   discoverCredentials,
   pullEvents,
+  detectDailyVolumeGb,
 };
