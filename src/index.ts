@@ -506,6 +506,7 @@ server.tool(
         privacy_mode: args.privacy_mode ?? true,
         ai_prettify: args.ai_prettify ?? true,
         total_daily_gb: args.total_daily_gb,
+        _mcpServer: server,
         siem: args.siem,
         scope: args.scope,
         query: args.query,

@@ -1,38 +1,40 @@
 /**
- * Batch-call the Log10x /api/v1/query_ai endpoint to turn raw snake_case
- * pattern identities into 3-5-word human-readable names.
+ * Batch-prettify raw snake_case pattern identities into 3-5-word
+ * human-readable names via **MCP sampling**.
  *
- * Mirrors the Slack bot's `SlackAiService.java` approach: one HTTP call
- * with all top-N patterns, gets back `INDEX | NAME` per line. Fail-soft:
- * on any error the caller keeps the raw identities and prints a single-
- * line note in the report appendix.
+ * The MCP sampling API (`server.createMessage`) asks the host — the same
+ * chat app the user is already in (Claude Desktop, Cursor, etc.) — to
+ * run the prompt through *its* LLM using the user's existing
+ * credentials. No Log10x-side endpoint, no egress to our infrastructure,
+ * no extra API key. The user's host does whatever privacy + compliance
+ * enforcement they already trust.
  *
- * Respects privacy_mode semantics — the caller should decide whether to
- * invoke this. Templated patterns don't contain variable values (the
- * templater already stripped them), but they DO contain field names /
- * class names / path fragments that identify the customer's app. Strict
- * privacy_mode: true users will want to skip this.
+ * When the host doesn't support sampling (capability probe fails or the
+ * `createMessage` call throws), fail-soft back to raw identities plus a
+ * one-line appendix note. The report still renders — just less pretty.
+ *
+ * Design note: we send templated pattern identities (variable values
+ * already stripped by the templater) along with severity + service.
+ * No raw log content. Far lower sensitivity than the paste Lambda,
+ * which sent raw log lines.
  */
 
-import type { EnvConfig } from './environments.js';
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
-const AI_PATH = '/api/v1/query_ai';
-
-const PROMPT = [
-  'The data below contains log event patterns extracted from production logs.',
-  'Each pattern is a templatized log message where variable parts (IDs, values) are replaced with underscores.',
-  "The 'tenx_user_service' column is the microservice that emitted the log.",
+const PROMPT_HEADER = [
+  'You are generating short human-readable names for log event patterns.',
+  'Each row below is one templatized pattern — variable values have been replaced with underscores.',
+  'Your job: produce a 3-5-word title-case name for each pattern.',
   '',
-  'Generate a short human-readable name (3-5 words, title case) for each pattern.',
-  'Focus on the specific class, method, or operation — not the service name (users already know the service).',
-  'Look for CamelCase class names, method names, HTTP verbs, queue/cache operations, and error types.',
-  'Every pattern MUST get a DIFFERENT name — do not repeat names.',
+  'Rules:',
+  '  - Focus on the specific class, method, or operation. Do NOT use the service name (users already know the service).',
+  '  - Look for CamelCase class names, method names, HTTP verbs, queue/cache operations, error types.',
+  '  - Every pattern MUST get a DIFFERENT name. No repeats.',
+  '  - Respond with EXACTLY one line per data row, numbered from 1, in the form:',
+  '      INDEX | NAME',
+  '  - No header row, no commentary, no markdown — just one `INDEX | NAME` line per pattern.',
   '',
   'Patterns:',
-  '${CSV}',
-  '',
-  'Respond with EXACTLY one line per data row (skip the header), numbered from 1, nothing else:',
-  'INDEX | NAME',
 ].join('\n');
 
 const LINE_RE = /^(\d+)\s*\|\s*(.+)$/;
@@ -41,126 +43,133 @@ export interface PrettifyInput {
   identity: string; // snake_case identity — the key we return against
   service?: string;
   severity?: string;
-  /** Raw event count over the sample window. Used by the model to order by impact. */
   count: number;
   bytes: number;
 }
 
 export interface PrettifyOptions {
-  env: EnvConfig;
-  apiBase: string; // e.g. https://prometheus.log10x.com
-  costPerGb: number;
+  /**
+   * The MCP server instance. Sampling is a server-side capability.
+   * When undefined (e.g., server not yet bound to a transport), the
+   * call fails-soft to "not available."
+   */
+  server?: McpServer;
+  /** Timeout in ms for the sampling round-trip. Default 30s. */
   timeoutMs?: number;
+  /** Max tokens the host is allowed to generate. Default scales with input. */
+  maxTokens?: number;
 }
 
 export interface PrettifyResult {
-  /** identity → pretty name. Missing entries mean the model didn't return one — caller keeps the identity. */
+  /** identity → pretty name. Missing entries mean the model didn't return one. */
   names: Record<string, string>;
-  /** Reason string when the call failed or returned nothing useful. undefined on success. */
+  /** Short reason string when the call failed or returned nothing. */
   errorNote?: string;
 }
 
 /**
- * Returns a map of pattern identity → AI-generated short name. Never throws;
- * on any failure returns an empty map and a human-readable errorNote string
- * the renderer can include in the appendix.
+ * Ask the MCP host's LLM to generate pretty names for a batch of pattern
+ * identities. Always returns; never throws.
  */
 export async function prettifyPatterns(
   patterns: PrettifyInput[],
   opts: PrettifyOptions
 ): Promise<PrettifyResult> {
   if (patterns.length === 0) return { names: {} };
+  if (!opts.server) {
+    return {
+      names: {},
+      errorNote: 'MCP server handle not available — sampling skipped.',
+    };
+  }
+
+  // Cheap capability probe: if the host didn't advertise sampling, bail
+  // fast with a clear note rather than waiting for a request error.
+  const clientCaps = opts.server.server.getClientCapabilities?.();
+  if (clientCaps && !clientCaps.sampling) {
+    return {
+      names: {},
+      errorNote:
+        'MCP host does not advertise the `sampling` capability. ' +
+        'Pattern names remain as raw identities. ' +
+        '(Hosts that support sampling: Claude Desktop, Claude Code. Cursor + others vary.)',
+    };
+  }
+
+  const csv = buildCsv(patterns);
+  const prompt = `${PROMPT_HEADER}\n${csv}\n\nRespond now with ${patterns.length} lines:`;
+
+  // Budget ~20 tokens per pattern (3-5 words × ~3 tokens + formatting).
+  const maxTokens = opts.maxTokens ?? Math.max(256, patterns.length * 25);
 
   try {
-    const queryResult = buildBatchQueryResult(patterns, opts.costPerGb);
-    const url = buildUrl(opts.apiBase, queryResult, opts.costPerGb, patterns.length * 20);
-    const authHeader = `${opts.env.apiKey}/${opts.env.envId}`;
-
     const abort = new AbortController();
     const t = setTimeout(() => abort.abort(), opts.timeoutMs ?? 30_000);
 
-    const res = await fetch(url, {
-      method: 'GET',
-      headers: { 'X-10X-Auth': authHeader },
-      signal: abort.signal,
-    });
+    const res = await opts.server.server.createMessage(
+      {
+        messages: [
+          {
+            role: 'user',
+            content: { type: 'text', text: prompt },
+          },
+        ],
+        maxTokens,
+        // Request a small / fast model if the host lets us pick.
+        modelPreferences: {
+          hints: [{ name: 'claude-3-5-haiku' }, { name: 'haiku' }],
+          speedPriority: 0.7,
+          intelligencePriority: 0.3,
+        },
+        systemPrompt:
+          'You produce concise, task-specific names. Reply with exactly the requested number of `INDEX | NAME` lines and nothing else.',
+      },
+      { signal: abort.signal }
+    );
     clearTimeout(t);
 
-    if (!res.ok) {
-      const body = await res.text().catch(() => '');
-      return {
-        names: {},
-        errorNote: `AI prettify HTTP ${res.status}${body ? ` — ${body.slice(0, 120)}` : ''}`,
-      };
-    }
-
-    const json = (await res.json()) as { ai?: string };
-    const aiText = (json.ai || '').trim();
+    const content = res.content;
+    const aiText = content.type === 'text' ? content.text.trim() : '';
     if (!aiText) {
-      return { names: {}, errorNote: 'AI prettify returned empty response' };
+      return { names: {}, errorNote: 'Sampling returned non-text or empty content.' };
     }
 
     const names: Record<string, string> = {};
     for (const line of aiText.split('\n')) {
       const m = LINE_RE.exec(line.trim());
       if (!m) continue;
-      const idx = parseInt(m[1], 10) - 1; // 1-based → 0-based
+      const idx = parseInt(m[1], 10) - 1;
       const name = m[2].trim();
       if (idx >= 0 && idx < patterns.length && name) {
         names[patterns[idx].identity] = name;
       }
     }
     if (Object.keys(names).length === 0) {
-      return { names: {}, errorNote: 'AI prettify response did not match expected INDEX | NAME format' };
+      return {
+        names: {},
+        errorNote: 'Sampling response did not match the expected `INDEX | NAME` format.',
+      };
     }
     return { names };
   } catch (e) {
+    const msg = (e as Error).message || String(e);
     return {
       names: {},
-      errorNote: `AI prettify error: ${(e as Error).message.slice(0, 200)}`,
+      errorNote: `Sampling call failed: ${msg.slice(0, 200)}`,
     };
   }
 }
 
 /**
- * Build the `query_result` JSON payload that QueryAIHandler expects. The
- * handler expects a Prometheus-shaped vector; `metric.message_pattern`,
- * `metric.severity_level`, `metric.tenx_user_service` are the columns
- * the prompt template references.
+ * CSV-ish serialization the model can scan row-by-row. Columns: INDEX,
+ * pattern (underscores-to-spaces for readability), severity, service.
  */
-function buildBatchQueryResult(patterns: PrettifyInput[], costPerGb: number): string {
-  const result = patterns.map((p) => {
-    // Convert underscored identity back to space-separated for readability.
-    const displayText = p.identity.replace(/_/g, ' ');
-    // Convert bytes → cost (backend divides by this, so we must feed it bytes
-    // consistent with the cost field it'll compute).
-    const bytes = Math.max(0, Math.round(p.bytes));
-    return {
-      metric: {
-        message_pattern: displayText,
-        severity_level: p.severity || '',
-        tenx_user_service: p.service || '',
-      },
-      value: [0, String(bytes)],
-    };
-  });
-  const payload = { status: 'success', data: { resultType: 'vector', result } };
-  return JSON.stringify(payload);
-}
-
-function buildUrl(apiBase: string, queryResult: string, costPerGb: number, maxTokens: number): string {
-  const base = apiBase.replace(/\/+$/, '');
-  const params = new URLSearchParams({
-    query: 'vector(0)',
-    query_result: queryResult,
-    prompt: PROMPT,
-    ingestion_cost: String(costPerGb),
-    total_volume: '0',
-    output_table: 'false',
-    prompt_timeout: '25000',
-  });
-  // `maxTokens` is intentionally unused here — the current QueryAIHandler
-  // defaults the model-side token cap based on input size; we honor that.
-  void maxTokens;
-  return `${base}${AI_PATH}?${params.toString()}`;
+function buildCsv(patterns: PrettifyInput[]): string {
+  const lines = ['INDEX | PATTERN | SEVERITY | SERVICE'];
+  for (let i = 0; i < patterns.length; i++) {
+    const p = patterns[i];
+    const display = p.identity.replace(/_/g, ' ').slice(0, 200);
+    lines.push(`${i + 1} | ${display} | ${p.severity || '-'} | ${p.service || '-'}`);
+  }
+  return lines.join('\n');
 }

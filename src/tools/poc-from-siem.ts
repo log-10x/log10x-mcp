@@ -29,7 +29,7 @@ import { SIEM_DISPLAY_NAMES, getAnalyzerCostForSiem } from '../lib/siem/pricing.
 import { extractPatterns } from '../lib/pattern-extraction.js';
 import { renderPocReport, type RenderInput } from '../lib/poc-report-renderer.js';
 import { prettifyPatterns } from '../lib/ai-prettify.js';
-import type { EnvConfig } from '../lib/environments.js';
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
 const MCP_VERSION = '1.4.0';
 
@@ -98,11 +98,13 @@ export const pocFromSiemSubmitSchema = {
     .boolean()
     .default(true)
     .describe(
-      'Default true: call /api/v1/query_ai (Log10x hosted) to batch-generate 3-5-word human-readable ' +
-        'names for the top patterns. Sends pattern identity strings (templated, no variable values) ' +
-        'plus severity and service labels to the Log10x AI endpoint using the same LOG10X_API_KEY + ' +
-        'LOG10X_ENV_ID credentials the rest of the tool uses. Skip by setting false — falls back to ' +
-        'raw snake_case identities. Requires LOG10X_API_KEY to be configured; silently skipped if not.'
+      'Default true: use MCP sampling to ask the host LLM (the same model the user is already ' +
+        'chatting with — Claude Desktop, Claude Code, Cursor, etc.) to batch-generate 3-5-word ' +
+        'human-readable names for the top patterns. No Log10x-side endpoint, no extra API key — ' +
+        'the host uses whatever model + credentials the user already has. Sends only templated ' +
+        'pattern identities (no variable values, no raw log content). Skipped automatically when ' +
+        'the host does not advertise the `sampling` capability; the report falls back to raw ' +
+        'snake_case identities plus a note. Set false to skip unconditionally.'
     ),
   privacy_mode: z
     .boolean()
@@ -186,6 +188,13 @@ export interface PocSubmitArgs {
   clickhouse_message_column?: string;
   clickhouse_service_column?: string;
   clickhouse_severity_column?: string;
+  /**
+   * Optional MCP server handle — wired by index.ts at registration time.
+   * Used ONLY by the AI-prettify path (MCP sampling via createMessage).
+   * When absent, prettify skips with a clear note in the report appendix;
+   * the report still renders with raw identities.
+   */
+  _mcpServer?: McpServer;
 }
 
 export async function executePocSubmit(args: PocSubmitArgs): Promise<string> {
@@ -395,16 +404,15 @@ export async function runPipeline(
   const templateWallTimeMs = Date.now() - templStart;
   snapshot.partialPatternsFound = extraction.patterns.length;
 
-  // ── AI prettify (opt-out) ──
-  // Gate on BOTH ai_prettify=true AND the presence of LOG10X_API_KEY /
-  // LOG10X_ENV_ID — skip silently when credentials are absent. This is
-  // NOT gated on privacy_mode: patterns have already been stripped of
-  // variable values by the templater (only field/class/path tokens
-  // remain), and the AI call needs those tokens to produce useful
-  // names. Strict privacy users can still disable via ai_prettify=false.
+  // ── AI prettify via MCP sampling ──
+  // Ask the host's LLM (Claude Desktop, Claude Code, Cursor, etc.) to
+  // generate 3-5-word names for the top patterns. No Log10x backend
+  // egress, no extra credentials — the host uses whatever model + auth
+  // the user already has. Fail-soft when the host doesn't advertise
+  // sampling; the report renders with raw identities + an appendix note.
   let aiPrettyNames: Record<string, string> | undefined;
   let aiPrettifyErrorNote: string | undefined;
-  if (args.ai_prettify && process.env.LOG10X_API_KEY && process.env.LOG10X_ENV_ID) {
+  if (args.ai_prettify) {
     snapshot.stepDetail = 'ai-prettifying pattern names';
     const topPatterns = extraction.patterns.slice(0, 30);
     const prettifyInputs = topPatterns.map((p) => ({
@@ -415,19 +423,11 @@ export async function runPipeline(
       bytes: p.bytes,
     }));
     const result = await prettifyPatterns(prettifyInputs, {
-      env: {
-        apiKey: process.env.LOG10X_API_KEY,
-        envId: process.env.LOG10X_ENV_ID,
-        nickname: 'default',
-      } as EnvConfig,
-      apiBase: process.env.LOG10X_API_BASE || 'https://prometheus.log10x.com',
-      costPerGb: getAnalyzerCostForSiem(connector.id as SiemId, args.analyzer_cost_per_gb),
+      server: args._mcpServer,
       timeoutMs: 30_000,
     });
     if (Object.keys(result.names).length > 0) aiPrettyNames = result.names;
     aiPrettifyErrorNote = result.errorNote;
-  } else if (args.ai_prettify) {
-    aiPrettifyErrorNote = 'LOG10X_API_KEY / LOG10X_ENV_ID not set — AI prettify skipped';
   }
 
   // ── Render ──
