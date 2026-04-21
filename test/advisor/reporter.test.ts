@@ -44,7 +44,6 @@ const forwarders: ForwarderKind[] = [
   'fluent-bit',
   'fluentd',
   'filebeat',
-  'vector',
   'logstash',
   'otel-collector',
 ];
@@ -132,19 +131,6 @@ test('forwarder alignment warns when detected differs from requested', async () 
   assert.ok(align?.detail.includes('fluent-bit'));
 });
 
-test('vector plan notes mention upstream-fallback status', async () => {
-  // Chart availability is now LIVE-probed via `helm search repo`, so its
-  // status depends on what's in the test environment's helm cache.
-  // Instead of asserting the preflight status (which can flake), we
-  // assert the plan's notes still flag the WIP chart status.
-  const plan = await buildReporterPlan({
-    snapshot: baseSnapshot(),
-    forwarder: 'vector',
-    apiKey: 'test',
-  });
-  assert.ok(plan.notes.some((n) => n.toLowerCase().includes('work-in-progress')));
-});
-
 test('splunk destination without hec_token blocks', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
@@ -227,10 +213,9 @@ test('values.yaml has no duplicate top-level keys (fluentd regression)', async (
 test('every forwarder values file embeds gitToken (init-container secret mount)', async () => {
   // Every log10x-repackaged chart mounts a tenx-git-token secret in an
   // init container. If gitToken is empty the secret isn't created and
-  // pods hang in FailedMount. Every forwarder (except vector, which
-  // uses extraContainers without the init) must emit a placeholder.
+  // pods hang in FailedMount. Every supported forwarder must emit a
+  // placeholder.
   for (const fw of forwarders) {
-    if (fw === 'vector') continue;
     const plan = await buildReporterPlan({
       snapshot: baseSnapshot(),
       forwarder: fw,
@@ -250,7 +235,6 @@ test('verify probes target the correct container per forwarder', async () => {
     'fluent-bit': 'fluent-bit',
     fluentd: 'fluentd',
     filebeat: 'filebeat',
-    vector: 'tenx',            // sidecar mode
     logstash: 'logstash',
     'otel-collector': 'opentelemetry-collector',
   };
@@ -275,7 +259,6 @@ test('chart refs are the published names (no `-10x` suffix drift)', async () => 
     'fluent-bit': 'log10x-fluent/fluent-bit',
     fluentd: 'log10x-fluent/fluentd',
     filebeat: 'log10x-elastic/filebeat',
-    vector: 'vector/vector',
     logstash: 'log10x-elastic/logstash',
     'otel-collector': 'log10x-otel/opentelemetry-collector',
   };
@@ -296,10 +279,8 @@ test('chart refs are the published names (no `-10x` suffix drift)', async () => 
 
 test('values.yaml content is syntactically close to YAML', async () => {
   // Smoke-test: generated values file has expected shape for each
-  // forwarder. Vector is a sidecar install — it injects tenx via
-  // `extraContainers` + `TENX_API_KEY` env rather than a top-level
-  // `tenx:` block. Every other forwarder uses the embedded-image
-  // pattern with a `tenx:` block.
+  // supported forwarder. All 5 use the embedded-image pattern with
+  // a top-level `tenx:` block.
   for (const fw of forwarders) {
     const plan = await buildReporterPlan({
       snapshot: baseSnapshot(),
@@ -310,14 +291,7 @@ test('values.yaml content is syntactically close to YAML', async () => {
     const writeStep = plan.install.find((s) => s.file);
     assert.ok(writeStep, `${fw} should have a file-write step`);
     const content = writeStep!.file!.contents;
-    if (fw === 'vector') {
-      // Sidecar-mode: no top-level tenx: block; tenx runs as a sidecar.
-      assert.ok(content.includes('extraContainers'), `vector should inject sidecar via extraContainers`);
-      assert.ok(content.includes('TENX_API_KEY'), `vector should pass api key as env var`);
-      assert.ok(content.includes('test-key'), `vector should embed the api key value`);
-    } else {
-      assert.ok(content.includes('tenx:'), `${fw} file should declare tenx block`);
-      assert.ok(content.includes('apiKey: "test-key"'), `${fw} file should embed api key`);
-    }
+    assert.ok(content.includes('tenx:'), `${fw} file should declare tenx block`);
+    assert.ok(content.includes('apiKey: "test-key"'), `${fw} file should embed api key`);
   }
 });

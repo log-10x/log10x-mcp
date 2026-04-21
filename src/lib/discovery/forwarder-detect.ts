@@ -7,11 +7,17 @@
  *   - `cr.fluentbit.io/fluent/fluent-bit:3.2`
  *   - `ghcr.io/log-10x/fluent-bit-10x:1.0.6`
  *   - `docker.elastic.co/beats/filebeat:8.15.0`
- *   - `timberio/vector:0.40.0-debian`
+ *   - `docker.elastic.co/logstash/logstash:8.15.0`
  *   - `otel/opentelemetry-collector-contrib:0.108.0`
  *
  * Returns 'unknown' when nothing matches — callers can still surface the
  * raw image so a human can override.
+ *
+ * Vector is intentionally NOT classified as a forwarder the advisor can
+ * install today: no log10x-repackaged Vector image ships, and the config
+ * repo has no vector input/report modules. If a customer is running
+ * Vector, it surfaces as `unknown` and the advisor falls back to asking
+ * which supported forwarder to install.
  */
 
 import type { ForwarderKind, Log10xAppKind } from './types.js';
@@ -23,7 +29,6 @@ export function classifyForwarderImage(image: string): ForwarderKind {
   if (s.includes('fluent-bit') || s.includes('fluentbit')) return 'fluent-bit';
   if (s.includes('fluentd') || s.includes('fluent/fluentd')) return 'fluentd';
   if (s.includes('filebeat')) return 'filebeat';
-  if (s.includes('timberio/vector') || /\bvector\b/.test(s)) return 'vector';
   if (s.includes('logstash')) return 'logstash';
   if (s.includes('opentelemetry-collector') || s.includes('otel/collector') || s.includes('otel/opentelemetry'))
     return 'otel-collector';

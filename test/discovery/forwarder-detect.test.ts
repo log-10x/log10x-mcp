@@ -38,12 +38,18 @@ test('classifyForwarderImage: fluentd (not confused with fluent-bit)', () => {
 
 test('classifyForwarderImage: other forwarders', () => {
   assert.equal(classifyForwarderImage('docker.elastic.co/beats/filebeat:8.15.0'), 'filebeat');
-  assert.equal(classifyForwarderImage('timberio/vector:0.40.0-debian'), 'vector');
   assert.equal(classifyForwarderImage('docker.elastic.co/logstash/logstash:8.15.0'), 'logstash');
   assert.equal(
     classifyForwarderImage('otel/opentelemetry-collector-contrib:0.108.0'),
     'otel-collector'
   );
+});
+
+test('classifyForwarderImage: vector is NOT supported (returns unknown)', () => {
+  // Vector has no log10x-repackaged image + no config-repo module,
+  // so the advisor doesn't support it today. Discovery surfaces it as
+  // unknown so the advisor falls back to "no existing forwarder".
+  assert.equal(classifyForwarderImage('timberio/vector:0.40.0-debian'), 'unknown');
 });
 
 test('classifyForwarderImage: unknown for random images', () => {

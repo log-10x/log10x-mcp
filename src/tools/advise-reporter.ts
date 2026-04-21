@@ -19,7 +19,7 @@ export const adviseReporterSchema = {
     .string()
     .describe('ID returned by `log10x_discover_env`. The snapshot is cached for 30 min.'),
   forwarder: z
-    .enum(['fluent-bit', 'fluentd', 'filebeat', 'vector', 'logstash', 'otel-collector'])
+    .enum(['fluent-bit', 'fluentd', 'filebeat', 'logstash', 'otel-collector'])
     .optional()
     .describe(
       'Forwarder to target. If omitted, uses the forwarder detected in the snapshot (falls back to fluent-bit when none is detected).'

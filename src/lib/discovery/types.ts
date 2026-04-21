@@ -13,7 +13,6 @@ export type ForwarderKind =
   | 'fluent-bit'
   | 'fluentd'
   | 'filebeat'
-  | 'vector'
   | 'logstash'
   | 'otel-collector'
   | 'unknown';

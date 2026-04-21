@@ -40,7 +40,7 @@ export const discoverEnvSchema = {
       'Substring to match against S3 bucket names. Defaults to "streamer"; also matches "log10x" and "tenx" out of the box.'
     ),
   forwarder_hint: z
-    .enum(['fluent-bit', 'fluentd', 'filebeat', 'vector', 'logstash', 'otel-collector'])
+    .enum(['fluent-bit', 'fluentd', 'filebeat', 'logstash', 'otel-collector'])
     .optional()
     .describe(
       'Override forwarder detection. Use this if multiple forwarders are running and you want the advisor to target a specific one.'

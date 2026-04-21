@@ -30,8 +30,11 @@
  *   - https://github.com/log-10x/fluent-helm-charts
  *   - https://github.com/log-10x/elastic-helm-charts
  *   - https://github.com/log-10x/opentelemetry-helm-charts
- *   - Vector: log10x-repackaged chart is WIP; falls back to upstream
- *     `vector/vector` + a hand-added tenx sidecar via extraContainers.
+ *
+ * Vector is intentionally NOT in this map: no log10x-repackaged Vector
+ * chart, no log10x/vector-10x image, and no vector forwarder modules in
+ * the config repo. If a customer runs Vector, discovery reports it as
+ * `unknown` and the advisor asks them to pick a supported forwarder.
  */
 
 import type { ForwarderKind } from '../discovery/types.js';
@@ -313,101 +316,6 @@ ${indent(outputBlock, 6)}
     },
   },
 
-  vector: {
-    label: 'Vector',
-    integrationMode:
-      'DaemonSet using upstream Vector (chart `vector/vector`) with a hand-added 10x Reporter sidecar. The sidecar reads events from Vector via a Unix domain socket. The log10x-repackaged Vector chart is WIP — this template emits the upstream chart + sidecar wiring.',
-    helmRepo: 'https://helm.vector.dev',
-    helmRepoAlias: 'vector',
-    chartRef: 'vector/vector',
-    chartAvailability: 'upstream-fallback',
-    primaryImageHint: 'timberio/vector:0.40.0-debian',
-    primaryContainerName: 'vector',
-    hasTenxSidecar: true,
-    selectorStyle: 'k8s-recommended',
-    selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ apiKey, releaseName, destination, outputHost }) => {
-      // Pure YAML. Previous version emitted TOML-inline syntax inside
-      // a YAML doc, which helm rejected.
-      // `service.enabled: false` required because role=Agent + custom
-      // sinks yields an empty Service spec otherwise.
-      // `extraContainers` + `extraVolumes` inject the tenx sidecar and
-      // the Unix socket volume Vector writes to.
-      const vectorSinks = renderVectorSinks(destination, outputHost);
-      return `# ${MOCK_OUTPUT_NOTE}
-# NOTE: upstream vector/vector chart with a hand-added tenx sidecar.
-# When the log10x-repackaged Vector chart ships, switch to it.
-
-role: Agent
-
-service:
-  enabled: false
-
-extraVolumes:
-  - name: tenx-ipc
-    emptyDir: {}
-
-extraVolumeMounts:
-  - name: tenx-ipc
-    mountPath: /var/run/tenx
-
-extraContainers:
-  - name: tenx
-    image: ghcr.io/log-10x/tenx-reporter:latest
-    args:
-      - "@run/input/forwarder/vector/report"
-      - "@apps/edge/reporter"
-    env:
-      - name: TENX_API_KEY
-        value: "${apiKey}"
-      - name: TENX_RUNTIME_NAME
-        value: "${releaseName}"
-      - name: TENX_KIND
-        value: "report"
-    volumeMounts:
-      - name: tenx-ipc
-        mountPath: /var/run/tenx
-
-customConfig:
-  data_dir: /vector-data-dir
-  sources:
-    kubernetes_logs:
-      type: kubernetes_logs
-${vectorSinks}
-`;
-    },
-    verifyProbes: ({ releaseName, namespace, destination }) => {
-      const sel = k8sRecommendedSelector(releaseName);
-      const probes = [
-        {
-          name: 'pods-ready',
-          question: 'Are all Vector+Reporter DaemonSet pods Ready?',
-          commands: [`kubectl -n ${namespace} wait --for=condition=Ready pod -l ${sel} --timeout=5m`],
-          expectOutput: 'condition met',
-          timeoutSec: 300,
-        },
-        {
-          name: 'tenx-sidecar-alive',
-          question: 'Is the 10x sidecar (separate container) running and reading from Vector?',
-          commands: [
-            `kubectl -n ${namespace} get pods -l ${sel} -o jsonpath='{range .items[*]}{.status.containerStatuses[?(@.name=="tenx")].ready}{"\\n"}{end}' | head -5`,
-            `kubectl -n ${namespace} logs -l ${sel} -c tenx --tail=200 | grep -iE 'pattern|metric|record|socket' | head -20`,
-          ],
-        },
-      ];
-      if (destination === 'mock') {
-        probes.push({
-          name: 'tenx-mock-events',
-          question: 'Are tagged [TENX-MOCK] events reaching Vector\'s console sink?',
-          commands: [`kubectl -n ${namespace} logs -l ${sel} -c vector --tail=200 | grep -F '[TENX-MOCK]' | head -5`],
-          expectOutput: 'TENX-MOCK',
-          timeoutSec: 120,
-        });
-      }
-      return probes;
-    },
-  },
-
   logstash: {
     label: 'Logstash',
     integrationMode:
@@ -678,44 +586,6 @@ output.elasticsearch:
   return '';
 }
 
-function renderVectorSinks(destination: OutputDestination, outputHost?: string): string {
-  if (destination === 'mock') {
-    return `  transforms:
-    tenx_mock_mark:
-      type: remap
-      inputs: [kubernetes_logs]
-      source: |
-        .message = "[TENX-MOCK] " + string!(.message ?? "")
-  sinks:
-    tenx_socket:
-      type: socket
-      mode: unix
-      inputs: [tenx_mock_mark]
-      path: /var/run/tenx/ingest.sock
-      encoding:
-        codec: json
-    mock_out:
-      type: console
-      inputs: [tenx_mock_mark]
-      encoding:
-        codec: json`;
-  }
-  if (destination === 'elasticsearch') {
-    return `  sinks:
-    tenx_socket:
-      type: socket
-      mode: unix
-      inputs: [kubernetes_logs]
-      path: /var/run/tenx/ingest.sock
-      encoding:
-        codec: json
-    es:
-      type: elasticsearch
-      inputs: [kubernetes_logs]
-      endpoint: "https://${outputHost ?? 'elasticsearch-master'}:9200"`;
-  }
-  return '  sinks: {}';
-}
 
 function renderLogstashOutput(destination: OutputDestination, outputHost?: string): string {
   if (destination === 'mock') {
