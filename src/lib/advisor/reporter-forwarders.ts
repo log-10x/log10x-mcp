@@ -282,6 +282,21 @@ ${indent(outputConfig, 6)}
       enabled: true
       url: "https://github.com/log-10x/config.git"
 
+# The chart's default readiness/liveness probes run \`filebeat test output\`
+# which doesn't support \`output.file\` (used by mock destination). Override
+# to simple \`pgrep filebeat\` so the probes reflect actual process liveness.
+# These are TOP-LEVEL chart values, not under \`daemonset:\`.
+readinessProbe:
+  exec:
+    command: ["sh", "-c", "pgrep -x filebeat >/dev/null"]
+  initialDelaySeconds: 10
+  periodSeconds: 10
+livenessProbe:
+  exec:
+    command: ["sh", "-c", "pgrep -x filebeat >/dev/null"]
+  initialDelaySeconds: 30
+  periodSeconds: 30
+
 daemonset:
   # Avoid chart defaults that hardcode elasticsearch-master-credentials / certs.
   # Override to empty lists for mock/test; add back real refs for production ES.
@@ -572,6 +587,10 @@ function renderFilebeatOutput(destination: OutputDestination, outputHost?: strin
   if (destination === 'mock') {
     // output.console breaks the 10x stdout pipe per chart docs; use
     // output.file into a path only we tail to keep verification clean.
+    // NOTE: the caller must also override the chart's readiness probe
+    // (`filebeat test output` — which doesn't support file output) via
+    // `daemonset.readinessProbe` + `daemonset.livenessProbe`. The advisor's
+    // install steps emit those overrides alongside this config.
     return `filebeat.inputs:
 - type: container
   paths:
@@ -580,7 +599,7 @@ processors:
 - add_fields:
     target: ""
     fields:
-      _tenx_mock_prefix: "[TENX-MOCK]"
+      _tenx_mock_prefix: "TENX-MOCK"
 ${MOCK_OUTPUT_NOTE}
 output.file:
   path: "/tmp"
