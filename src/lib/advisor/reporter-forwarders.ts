@@ -411,10 +411,10 @@ ${indent(output, 4)}
       const exporter = renderOtelExporter(destination, outputHost);
       return `mode: "daemonset"
 
-# Required by the chart — no default.
-image:
-  repository: ghcr.io/log-10x/opentelemetry-collector
-  # tag defaults to chart appVersion; pin here if needed.
+# image.repository defaults in the chart's values.yaml to the upstream
+# contrib image (otel/opentelemetry-collector-contrib), which is
+# public. Override here if you want the log10x-repackaged image and
+# have configured the necessary imagePullSecrets.
 
 tenx:
   enabled: true
