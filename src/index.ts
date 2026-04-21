@@ -49,6 +49,7 @@ import {
   translateMetricToPatternsSchema,
   executeTranslateMetricToPatterns,
 } from './tools/translate-metric-to-patterns.js';
+import { discoverEnvSchema, executeDiscoverEnv } from './tools/discover-env.js';
 import { getStatus } from './resources/status.js';
 
 // ── Environment + cost cache ──
@@ -488,6 +489,15 @@ server.tool(
       const env = resolveEnv(getEnvs(), args.environment);
       return executeTranslateMetricToPatterns(args, env);
     })
+);
+
+// ── Tool: log10x_discover_env (install advisor) ──
+
+server.tool(
+  'log10x_discover_env',
+  'Read-only discovery of the caller\'s Kubernetes cluster + AWS account. Probes kubectl (workloads, DaemonSets, Helm releases, service-account IRSA annotations) and AWS (EKS, S3, SQS, CloudWatch log groups) to detect: which forwarder is running (Fluent Bit, Fluentd, Filebeat, Vector, Logstash, OTel Collector), which log10x apps are already installed (Reporter, Regulator, Streamer), and what infrastructure exists that could host a Streamer install. Returns a terse markdown report + a `snapshot_id` (cached 30 min) the advisor tools consume. Use this tool BEFORE calling `log10x_advise_reporter`, `log10x_advise_regulator`, or `log10x_advise_streamer` — they read the snapshot to tailor their install/verify/teardown commands to the specific cluster state. Every shell call is logged in the snapshot\'s `probeLog` for audit. No writes, no state mutation: only `kubectl get` and `aws ... describe/list` verbs. **Tier prerequisites**: none — this is a pre-install tool and runs against any customer environment.',
+  discoverEnvSchema,
+  (args) => wrap('log10x_discover_env', () => executeDiscoverEnv(args))
 );
 
 // ── Resource: log10x://status ──
