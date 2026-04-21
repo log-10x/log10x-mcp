@@ -17,7 +17,7 @@
     "start": "node build/index.js",
     "dev": "tsc --watch",
     "prepublishOnly": "npm run build",
-    "test": "tsc -p tsconfig.test.json && node --test test-build/test/",
+    "test": "tsc -p tsconfig.test.json && node --test test-build/test/*.test.js test-build/test/**/*.test.js",
     "test:integration": "LOG10X_INTEGRATION_TESTS=1 npm test"
   },
   "keywords": [

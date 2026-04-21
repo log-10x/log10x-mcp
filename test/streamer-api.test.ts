@@ -1,68 +1,69 @@
+/**
+ * Unit tests for streamer-api public helpers.
+ *
+ * parseTimeExpression converts user-friendly time expressions into the
+ * engine-compatible form — the engine expects JS-eval-prefixed `$=now(...)`
+ * for relative expressions and raw epoch millis for absolute times.
+ */
+
 import { test } from 'node:test';
-import assert from 'node:assert/strict';
-import { parseTimeExpression, buildQueryBody, isStreamerConfigured } from '../src/lib/streamer-api.js';
+import { strict as assert } from 'node:assert';
+import { parseTimeExpression, normalizeTimeExpression, isStreamerConfigured } from '../src/lib/streamer-api.js';
 
-test('parseTimeExpression handles `now`', () => {
-  const reference = new Date('2026-04-13T12:00:00Z');
-  const d = parseTimeExpression('now', reference);
-  assert.equal(d.getTime(), reference.getTime());
+test('normalizeTimeExpression: bare `now` becomes $=now()', () => {
+  assert.equal(normalizeTimeExpression('now'), '$=now()');
 });
 
-test('parseTimeExpression handles relative expressions', () => {
-  const reference = new Date('2026-04-13T12:00:00Z');
-  assert.equal(parseTimeExpression('now-1h', reference).getTime(), reference.getTime() - 3_600_000);
-  assert.equal(parseTimeExpression('now-90d', reference).getTime(), reference.getTime() - 90 * 86_400_000);
-  assert.equal(parseTimeExpression('now+15m', reference).getTime(), reference.getTime() + 15 * 60_000);
+test('normalizeTimeExpression: relative expressions get $=now("offset") form', () => {
+  assert.equal(normalizeTimeExpression('now-1h'), '$=now("-1h")');
+  assert.equal(normalizeTimeExpression('now-90d'), '$=now("-90d")');
+  assert.equal(normalizeTimeExpression('now+15m'), '$=now("+15m")');
 });
 
-test('parseTimeExpression handles ISO timestamps', () => {
-  const d = parseTimeExpression('2026-01-15T00:00:00Z');
-  assert.equal(d.toISOString(), '2026-01-15T00:00:00.000Z');
+test('normalizeTimeExpression: already-prefixed forms pass through', () => {
+  assert.equal(normalizeTimeExpression('now(-1h)'), '$=now(-1h)');
+  assert.equal(normalizeTimeExpression('$=now("-1h")'), '$=now("-1h")');
 });
 
-test('parseTimeExpression rejects malformed input', () => {
-  assert.throws(() => parseTimeExpression(''));
-  assert.throws(() => parseTimeExpression('garbage'));
+test('normalizeTimeExpression: epoch millis pass through as literal', () => {
+  assert.equal(normalizeTimeExpression('1776400000000'), '1776400000000');
 });
 
-test('buildQueryBody copies required + optional fields', () => {
-  const body = buildQueryBody({
-    pattern: '~abc',
-    from: 'now-1h',
-    to: 'now',
-    search: 'severity == "ERROR"',
-    filters: ['event.customer_id === "acme"'],
-    limit: 500,
-    format: 'aggregated',
-    bucketSize: '1h',
-  });
-  assert.equal(body.pattern, '~abc');
-  assert.equal(body.from, 'now-1h');
-  assert.equal(body.to, 'now');
-  assert.equal(body.search, 'severity == "ERROR"');
-  assert.deepEqual(body.filters, ['event.customer_id === "acme"']);
-  assert.equal(body.limit, 500);
-  assert.equal(body.format, 'aggregated');
-  assert.equal(body.bucketSize, '1h');
+test('normalizeTimeExpression: ISO8601 converts to epoch millis string', () => {
+  const out = normalizeTimeExpression('2026-01-15T00:00:00Z');
+  assert.equal(out, String(Date.parse('2026-01-15T00:00:00Z')));
 });
 
-test('buildQueryBody defaults limit and format', () => {
-  const body = buildQueryBody({ pattern: '~abc', from: 'now-1h', to: 'now' });
-  assert.equal(body.limit, 10000);
-  assert.equal(body.format, 'events');
-  // bucketSize only applied when format=aggregated
-  assert.equal(body.bucketSize, undefined);
+test('normalizeTimeExpression: unknown format passes through (server rejects loudly)', () => {
+  assert.equal(normalizeTimeExpression('garbage'), 'garbage');
 });
 
-test('isStreamerConfigured reflects LOG10X_STREAMER_URL', () => {
-  const original = process.env.LOG10X_STREAMER_URL;
+test('normalizeTimeExpression: empty string throws', () => {
+  assert.throws(() => normalizeTimeExpression(''), /Empty time expression/);
+});
+
+test('parseTimeExpression is an alias for normalizeTimeExpression', () => {
+  assert.equal(parseTimeExpression('now'), normalizeTimeExpression('now'));
+  assert.equal(parseTimeExpression('now-1h'), normalizeTimeExpression('now-1h'));
+});
+
+test('isStreamerConfigured requires both LOG10X_STREAMER_URL and LOG10X_STREAMER_BUCKET', () => {
+  const savedUrl = process.env.LOG10X_STREAMER_URL;
+  const savedBucket = process.env.LOG10X_STREAMER_BUCKET;
   try {
     delete process.env.LOG10X_STREAMER_URL;
+    delete process.env.LOG10X_STREAMER_BUCKET;
     assert.equal(isStreamerConfigured(), false);
-    process.env.LOG10X_STREAMER_URL = 'https://example.test';
+
+    process.env.LOG10X_STREAMER_URL = 'http://example.com';
+    assert.equal(isStreamerConfigured(), false); // still missing bucket
+
+    process.env.LOG10X_STREAMER_BUCKET = 'my-bucket';
     assert.equal(isStreamerConfigured(), true);
   } finally {
-    if (original === undefined) delete process.env.LOG10X_STREAMER_URL;
-    else process.env.LOG10X_STREAMER_URL = original;
+    if (savedUrl === undefined) delete process.env.LOG10X_STREAMER_URL;
+    else process.env.LOG10X_STREAMER_URL = savedUrl;
+    if (savedBucket === undefined) delete process.env.LOG10X_STREAMER_BUCKET;
+    else process.env.LOG10X_STREAMER_BUCKET = savedBucket;
   }
 });
