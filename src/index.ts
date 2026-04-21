@@ -50,6 +50,7 @@ import {
   executeTranslateMetricToPatterns,
 } from './tools/translate-metric-to-patterns.js';
 import { discoverEnvSchema, executeDiscoverEnv } from './tools/discover-env.js';
+import { adviseReporterSchema, executeAdviseReporter } from './tools/advise-reporter.js';
 import { getStatus } from './resources/status.js';
 
 // ── Environment + cost cache ──
@@ -498,6 +499,15 @@ server.tool(
   'Read-only discovery of the caller\'s Kubernetes cluster + AWS account. Probes kubectl (workloads, DaemonSets, Helm releases, service-account IRSA annotations) and AWS (EKS, S3, SQS, CloudWatch log groups) to detect: which forwarder is running (Fluent Bit, Fluentd, Filebeat, Vector, Logstash, OTel Collector), which log10x apps are already installed (Reporter, Regulator, Streamer), and what infrastructure exists that could host a Streamer install. Returns a terse markdown report + a `snapshot_id` (cached 30 min) the advisor tools consume. Use this tool BEFORE calling `log10x_advise_reporter`, `log10x_advise_regulator`, or `log10x_advise_streamer` — they read the snapshot to tailor their install/verify/teardown commands to the specific cluster state. Every shell call is logged in the snapshot\'s `probeLog` for audit. No writes, no state mutation: only `kubectl get` and `aws ... describe/list` verbs. **Tier prerequisites**: none — this is a pre-install tool and runs against any customer environment.',
   discoverEnvSchema,
   (args) => wrap('log10x_discover_env', () => executeDiscoverEnv(args))
+);
+
+// ── Tool: log10x_advise_reporter (install advisor) ──
+
+server.tool(
+  'log10x_advise_reporter',
+  'Given a DiscoverySnapshot (from `log10x_discover_env`) + a forwarder choice + a license key, produce a tailored install/verify/teardown plan for the Log10x Reporter. Supports 6 forwarders (fluent-bit, fluentd, filebeat, vector, logstash, otel-collector). The plan includes: preflight checks (namespace existence, release-name collision, chart availability, forwarder alignment); per-step install commands (helm repo, values.yaml, helm upgrade, rollout wait); verify probes that answer specific questions (pods ready? 10x sidecar processing events? forwarder emitting output?); and teardown commands (helm uninstall, PVC cleanup, residue check). Every step is paste-ready — no shell interpolation. Use `action: "verify"` or `action: "teardown"` to scope the output. Default destination is `mock` (forwarder stdout) which is safe for dogfooding; switch to `elasticsearch|splunk|datadog|cloudwatch` with `destination` + `output_host` for production installs. **Tier prerequisites**: none — this is a pre-install tool.',
+  adviseReporterSchema,
+  (args) => wrap('log10x_advise_reporter', () => executeAdviseReporter(args))
 );
 
 // ── Resource: log10x://status ──
