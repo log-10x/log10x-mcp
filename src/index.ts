@@ -51,6 +51,7 @@ import {
 } from './tools/translate-metric-to-patterns.js';
 import { discoverEnvSchema, executeDiscoverEnv } from './tools/discover-env.js';
 import { adviseReporterSchema, executeAdviseReporter } from './tools/advise-reporter.js';
+import { adviseRegulatorSchema, executeAdviseRegulator } from './tools/advise-regulator.js';
 import { getStatus } from './resources/status.js';
 
 // ── Environment + cost cache ──
@@ -508,6 +509,15 @@ server.tool(
   'Given a DiscoverySnapshot (from `log10x_discover_env`) + a forwarder choice + a license key, produce a tailored install/verify/teardown plan for the Log10x Reporter. Supports 5 forwarders (fluent-bit, fluentd, filebeat, logstash, otel-collector). The plan includes: preflight checks (namespace existence, release-name collision, chart availability, forwarder alignment); per-step install commands (helm repo, values.yaml, helm upgrade, rollout wait); verify probes that answer specific questions (pods ready? 10x sidecar processing events? forwarder emitting output?); and teardown commands (helm uninstall, PVC cleanup, residue check). Every step is paste-ready — no shell interpolation. Use `action: "verify"` or `action: "teardown"` to scope the output. Default destination is `mock` (forwarder stdout) which is safe for dogfooding; switch to `elasticsearch|splunk|datadog|cloudwatch` with `destination` + `output_host` for production installs. **Tier prerequisites**: none — this is a pre-install tool.',
   adviseReporterSchema,
   (args) => wrap('log10x_advise_reporter', () => executeAdviseReporter(args))
+);
+
+// ── Tool: log10x_advise_regulator (install advisor) ──
+
+server.tool(
+  'log10x_advise_regulator',
+  'Given a DiscoverySnapshot (from `log10x_discover_env`) + a forwarder choice + a license key, produce a tailored install/verify/teardown plan for the Log10x Regulator. Same 5 forwarders as the Reporter (fluent-bit, fluentd, filebeat, logstash, otel-collector) and same charts — the Regulator differs from the Reporter by writing regulated events back through the forwarder (with mute/sample/compact applied) instead of only emitting metrics. Values files carry `kind: "regulate"` which routes the tenx launcher to `@run/input/forwarder/<fw>/regulate` + `@apps/regulator`. Output shape is identical to `log10x_advise_reporter`: preflight, install steps, verify probes, teardown. **Tier prerequisites**: none — this is a pre-install tool.',
+  adviseRegulatorSchema,
+  (args) => wrap('log10x_advise_regulator', () => executeAdviseRegulator(args))
 );
 
 // ── Resource: log10x://status ──

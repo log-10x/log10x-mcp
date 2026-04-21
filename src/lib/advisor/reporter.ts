@@ -1,21 +1,37 @@
 /**
- * Reporter install/verify/teardown plan builder.
+ * Reporter + Regulator install/verify/teardown plan builder.
  *
  * Given a DiscoverySnapshot + user args, produce an `AdvisePlan` that
  * covers the whole lifecycle for one forwarder kind. The plan is pure
  * data — rendering to markdown is the render layer's job.
+ *
+ * The same builder serves both apps: Reporter (kind=report, read-only
+ * metric emission) and Regulator (kind=regulate, read + write back to
+ * the forwarder with mute/sample/compact applied). They share every
+ * forwarder spec, every chart, every preflight check. The single
+ * differentiator is the `kind` value baked into the tenx values block,
+ * which the chart templates route to different launch args.
  */
 
 import type { DiscoverySnapshot, ForwarderKind } from '../discovery/types.js';
 import type { AdvisePlan, PlanStep, VerifyProbe, PreflightCheck } from './types.js';
-import { REPORTER_FORWARDER_SPECS, type OutputDestination, type ForwarderSpec } from './reporter-forwarders.js';
+import {
+  REPORTER_FORWARDER_SPECS,
+  type OutputDestination,
+  type ForwarderSpec,
+  type TenxKind,
+} from './reporter-forwarders.js';
 import { run } from '../discovery/shell.js';
+
+export type AdvisorApp = 'reporter' | 'regulator';
 
 export interface ReporterAdviseArgs {
   snapshot: DiscoverySnapshot;
+  /** Which app this plan installs. Default: 'reporter'. */
+  app?: AdvisorApp;
   /** Forwarder to target. If omitted, uses the snapshot's recommendation. */
   forwarder?: ForwarderKind;
-  /** Helm release name. Default: 'my-reporter'. */
+  /** Helm release name. Default: `my-${app}`. */
   releaseName?: string;
   /** Target namespace. Default: snapshot's suggestedNamespace. */
   namespace?: string;
@@ -35,10 +51,17 @@ export interface ReporterAdviseArgs {
   skipVerify?: boolean;
 }
 
+const APP_TO_KIND: Record<AdvisorApp, TenxKind> = {
+  reporter: 'report',
+  regulator: 'regulate',
+};
+
 /** Produce the plan. Never throws — surfaces missing input as `blockers`. */
 export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<AdvisePlan> {
   const snapshot = args.snapshot;
-  const releaseName = args.releaseName ?? 'my-reporter';
+  const app: AdvisorApp = args.app ?? 'reporter';
+  const kind: TenxKind = APP_TO_KIND[app];
+  const releaseName = args.releaseName ?? `my-${app}`;
   const destination: OutputDestination = args.destination ?? 'mock';
   const namespace =
     args.namespace ?? snapshot.recommendations.suggestedNamespace ?? 'logging';
@@ -74,9 +97,10 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   );
 
   const notes: string[] = [];
-  if (snapshot.recommendations.alreadyInstalled.reporter) {
+  const appTitle = app === 'reporter' ? 'Reporter' : 'Regulator';
+  if (snapshot.recommendations.alreadyInstalled[app]) {
     notes.push(
-      `A Reporter is already installed in namespace \`${snapshot.recommendations.alreadyInstalled.reporter}\`. Installing a second release under a different name + namespace is safe but will duplicate metric emission unless the existing one is torn down first.`
+      `A ${appTitle} is already installed in namespace \`${snapshot.recommendations.alreadyInstalled[app]}\`. Installing a second release under a different name + namespace is safe but will duplicate ${app === 'reporter' ? 'metric emission' : 'regulation'} unless the existing one is torn down first.`
     );
   }
   if (spec?.chartAvailability === 'upstream-fallback') {
@@ -95,7 +119,7 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   const teardown: PlanStep[] = [];
 
   if (spec && !args.skipInstall && blockers.length === 0) {
-    install.push(...buildInstallSteps({ ...args, spec, releaseName, namespace, destination }));
+    install.push(...buildInstallSteps({ ...args, spec, releaseName, namespace, destination, app, kind }));
   }
   if (spec && !args.skipVerify) {
     verify.push(
@@ -114,7 +138,7 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   }
 
   return {
-    app: 'reporter',
+    app,
     snapshotId: snapshot.snapshotId,
     forwarder,
     releaseName,
@@ -271,8 +295,10 @@ function buildInstallSteps(opts: {
   destination: OutputDestination;
   outputHost?: string;
   splunkHecToken?: string;
+  app: AdvisorApp;
+  kind: TenxKind;
 }): PlanStep[] {
-  const { spec, releaseName, namespace, destination, outputHost, splunkHecToken } = opts;
+  const { spec, releaseName, namespace, destination, outputHost, splunkHecToken, kind } = opts;
   const apiKey = opts.apiKey ?? 'REPLACE_WITH_LICENSE_KEY';
   const steps: PlanStep[] = [];
 
@@ -298,7 +324,7 @@ function buildInstallSteps(opts: {
     rationale: `Tenx config + ${spec.label}-specific output destination (\`${destination}\`).`,
     file: {
       path: valuesFile,
-      contents: spec.renderValues({ apiKey, releaseName, destination, outputHost, splunkHecToken }),
+      contents: spec.renderValues({ apiKey, releaseName, destination, kind, outputHost, splunkHecToken }),
       language: 'yaml',
     },
     commands: [],

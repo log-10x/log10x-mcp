@@ -41,6 +41,13 @@ import type { ForwarderKind } from '../discovery/types.js';
 
 export type OutputDestination = 'mock' | 'elasticsearch' | 'splunk' | 'datadog' | 'cloudwatch';
 
+/**
+ * Which tenx kind this install is for. `report` → Reporter (read-only
+ * metric emission). `regulate` → Regulator (read + write events back
+ * through the forwarder with mute/sample applied).
+ */
+export type TenxKind = 'report' | 'regulate';
+
 /** How a forwarder's helm chart labels its workloads + pods. */
 export type SelectorStyle = 'k8s-recommended' | 'legacy-helm';
 
@@ -80,6 +87,8 @@ export interface ForwarderSpec {
     apiKey: string;
     releaseName: string;
     destination: OutputDestination;
+    /** Tenx kind — report (Reporter app) or regulate (Regulator app). */
+    kind: TenxKind;
     outputHost?: string;
     splunkHecToken?: string;
     /** Placeholder emitted into `tenx.gitToken`. Defaults to the public-repo no-op string. */
@@ -132,12 +141,12 @@ export const REPORTER_FORWARDER_SPECS: Record<Exclude<ForwarderKind, 'unknown'>,
     hasTenxSidecar: false,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ apiKey, releaseName, destination, outputHost, splunkHecToken, gitToken }) => {
+    renderValues: ({ apiKey, releaseName, destination, kind, outputHost, splunkHecToken, gitToken }) => {
       const outputBlock = renderFluentBitOutput(destination, outputHost, splunkHecToken);
       return `tenx:
   enabled: true
   apiKey: "${apiKey}"
-  kind: "report"
+  kind: "${kind}"
   runtimeName: "${releaseName}"
   gitToken: "${gitToken ?? DEFAULT_GIT_TOKEN}"
   config:
@@ -170,7 +179,7 @@ ${outputBlock}
         probes.push({
           name: 'tenx-mock-events',
           question: 'Are tagged [TENX-MOCK] events reaching stdout?',
-          commands: [`kubectl -n ${namespace} logs -l ${sel} -c fluent-bit --tail=200 | grep -F '[TENX-MOCK]' | head -5`],
+          commands: [`kubectl -n ${namespace} logs -l ${sel} -c fluent-bit --tail=200 | grep -F 'TENX-MOCK' | head -5`],
           expectOutput: 'TENX-MOCK',
           timeoutSec: 120,
         });
@@ -192,7 +201,7 @@ ${outputBlock}
     hasTenxSidecar: false,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ apiKey, releaseName, destination, outputHost, splunkHecToken, gitToken }) => {
+    renderValues: ({ apiKey, releaseName, destination, kind, outputHost, splunkHecToken, gitToken }) => {
       // IMPORTANT: fluentd's output config lives UNDER `tenx:`, not
       // as a second top-level `tenx:` block. A prior version of this
       // template emitted two `tenx:` keys and YAML silently dropped
@@ -201,7 +210,7 @@ ${outputBlock}
       return `tenx:
   enabled: true
   apiKey: "${apiKey}"
-  kind: "report"
+  kind: "${kind}"
   runtimeName: "${releaseName}"
   gitToken: "${gitToken ?? DEFAULT_GIT_TOKEN}"
   config:
@@ -235,7 +244,7 @@ ${indent(outputConfig, 6)}
         probes.push({
           name: 'tenx-mock-events',
           question: 'Are tagged [TENX-MOCK] events reaching stdout?',
-          commands: [`kubectl -n ${namespace} logs -l ${sel} -c fluentd --tail=200 | grep -F '[TENX-MOCK]' | head -5`],
+          commands: [`kubectl -n ${namespace} logs -l ${sel} -c fluentd --tail=200 | grep -F 'TENX-MOCK' | head -5`],
           expectOutput: 'TENX-MOCK',
           timeoutSec: 120,
         });
@@ -257,7 +266,7 @@ ${indent(outputConfig, 6)}
     hasTenxSidecar: false,
     selectorStyle: 'legacy-helm',
     selectorLabel: (r) => legacyElasticSelector(r, 'filebeat'),
-    renderValues: ({ apiKey, releaseName, destination, outputHost, gitToken }) => {
+    renderValues: ({ apiKey, releaseName, destination, kind, outputHost, gitToken }) => {
       // Chart defaults reference Elasticsearch secrets/certs. For a mock
       // install we MUST override extraEnvs/secretMounts to empty so pods
       // don't hang in FailedMount.
@@ -265,7 +274,7 @@ ${indent(outputConfig, 6)}
       return `tenx:
   enabled: true
   apiKey: "${apiKey}"
-  kind: "report"
+  kind: "${kind}"
   runtimeName: "${releaseName}"
   gitToken: "${gitToken ?? DEFAULT_GIT_TOKEN}"
   config:
@@ -329,12 +338,12 @@ ${indent(outputBlock, 6)}
     hasTenxSidecar: false,
     selectorStyle: 'legacy-helm',
     selectorLabel: (r) => legacyElasticSelector(r, 'logstash'),
-    renderValues: ({ apiKey, releaseName, destination, outputHost, gitToken }) => {
+    renderValues: ({ apiKey, releaseName, destination, kind, outputHost, gitToken }) => {
       const output = renderLogstashOutput(destination, outputHost);
       return `tenx:
   enabled: true
   apiKey: "${apiKey}"
-  kind: "report"
+  kind: "${kind}"
   runtimeName: "${releaseName}"
   gitToken: "${gitToken ?? DEFAULT_GIT_TOKEN}"
   config:
@@ -373,7 +382,7 @@ ${indent(output, 4)}
         probes.push({
           name: 'tenx-mock-events',
           question: 'Are tagged [TENX-MOCK] events reaching stdout?',
-          commands: [`kubectl -n ${namespace} logs -l ${sel} -c logstash --tail=200 | grep -F '[TENX-MOCK]' | head -5`],
+          commands: [`kubectl -n ${namespace} logs -l ${sel} -c logstash --tail=200 | grep -F 'TENX-MOCK' | head -5`],
           expectOutput: 'TENX-MOCK',
           timeoutSec: 180,
         });
@@ -395,7 +404,7 @@ ${indent(output, 4)}
     hasTenxSidecar: false,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ apiKey, releaseName, destination, outputHost, gitToken }) => {
+    renderValues: ({ apiKey, releaseName, destination, kind, outputHost, gitToken }) => {
       // The OTel chart doesn't auto-wire filelog unless the preset is
       // on. We turn it on explicitly so the user's pipeline just works.
       // image.repository is required by the chart and has no default.
@@ -410,7 +419,7 @@ image:
 tenx:
   enabled: true
   apiKey: "${apiKey}"
-  kind: "report"
+  kind: "${kind}"
   runtimeName: "${releaseName}"
   gitToken: "${gitToken ?? DEFAULT_GIT_TOKEN}"
   config:
@@ -459,7 +468,7 @@ ${indent(exporter, 4)}
         probes.push({
           name: 'tenx-mock-events',
           question: 'Are tagged [TENX-MOCK] events reaching the debug exporter?',
-          commands: [`kubectl -n ${namespace} logs -l ${sel} -c opentelemetry-collector --tail=200 | grep -F '[TENX-MOCK]' | head -5`],
+          commands: [`kubectl -n ${namespace} logs -l ${sel} -c opentelemetry-collector --tail=200 | grep -F 'TENX-MOCK' | head -5`],
           expectOutput: 'TENX-MOCK',
           timeoutSec: 120,
         });
@@ -478,6 +487,10 @@ function renderFluentBitOutput(
   splunkHecToken?: string
 ): string {
   if (destination === 'mock') {
+    // NOTE: uses `record_modifier` not `modify`. fluent-bit's modify
+    // filter regex-compiles every Add value; `[TENX-MOCK]` is read as
+    // an unterminated character class and the filter crashes at init.
+    // `record_modifier` treats the value as a literal string.
     return `config:
   outputs: |
     ${MOCK_OUTPUT_NOTE}
@@ -487,9 +500,9 @@ function renderFluentBitOutput(
         Format json_lines
   filters: |
     [FILTER]
-        Name   modify
+        Name   record_modifier
         Match  *
-        Add    _tenx_mock_prefix [TENX-MOCK]`;
+        Record _tenx_mock_prefix TENX-MOCK`;
   }
   if (destination === 'elasticsearch') {
     return `config:
