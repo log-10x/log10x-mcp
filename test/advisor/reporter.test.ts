@@ -50,8 +50,8 @@ const forwarders: ForwarderKind[] = [
 ];
 
 for (const fw of forwarders) {
-  test(`plan for ${fw}: install + verify + teardown all present`, () => {
-    const plan = buildReporterPlan({
+  test(`plan for ${fw}: install + verify + teardown all present`, async () => {
+    const plan = await buildReporterPlan({
       snapshot: baseSnapshot(),
       forwarder: fw,
       apiKey: 'test-key',
@@ -71,16 +71,16 @@ for (const fw of forwarders) {
   });
 }
 
-test('missing api_key adds a blocker', () => {
-  const plan = buildReporterPlan({
+test('missing api_key adds a blocker', async () => {
+  const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
     forwarder: 'fluent-bit',
   });
   assert.ok(plan.blockers.some((b) => b.toLowerCase().includes('license key')));
 });
 
-test('skipInstall means missing api_key does not block', () => {
-  const plan = buildReporterPlan({
+test('skipInstall means missing api_key does not block', async () => {
+  const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
     forwarder: 'fluent-bit',
     skipInstall: true,
@@ -90,8 +90,8 @@ test('skipInstall means missing api_key does not block', () => {
   assert.ok(plan.verify.length > 0, 'verify should still be populated');
 });
 
-test('release name collision flagged in preflight', () => {
-  const plan = buildReporterPlan({
+test('release name collision flagged in preflight', async () => {
+  const plan = await buildReporterPlan({
     snapshot: baseSnapshot({
       kubectl: {
         ...baseSnapshot().kubectl,
@@ -117,8 +117,8 @@ test('release name collision flagged in preflight', () => {
   assert.equal(collision?.status, 'fail');
 });
 
-test('forwarder alignment warns when detected differs from requested', () => {
-  const plan = buildReporterPlan({
+test('forwarder alignment warns when detected differs from requested', async () => {
+  const plan = await buildReporterPlan({
     snapshot: baseSnapshot({
       recommendations: { suggestedNamespace: 'demo', existingForwarder: 'fluentd', alreadyInstalled: {} },
     }),
@@ -132,19 +132,21 @@ test('forwarder alignment warns when detected differs from requested', () => {
   assert.ok(align?.detail.includes('fluent-bit'));
 });
 
-test('vector flags chart availability as upstream-fallback', () => {
-  const plan = buildReporterPlan({
+test('vector plan notes mention upstream-fallback status', async () => {
+  // Chart availability is now LIVE-probed via `helm search repo`, so its
+  // status depends on what's in the test environment's helm cache.
+  // Instead of asserting the preflight status (which can flake), we
+  // assert the plan's notes still flag the WIP chart status.
+  const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
     forwarder: 'vector',
     apiKey: 'test',
   });
-  const chart = plan.preflight.find((p) => p.name === 'chart availability');
-  assert.equal(chart?.status, 'warn');
   assert.ok(plan.notes.some((n) => n.toLowerCase().includes('work-in-progress')));
 });
 
-test('splunk destination without hec_token blocks', () => {
-  const plan = buildReporterPlan({
+test('splunk destination without hec_token blocks', async () => {
+  const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
     forwarder: 'fluent-bit',
     apiKey: 'test',
@@ -153,8 +155,8 @@ test('splunk destination without hec_token blocks', () => {
   assert.ok(plan.blockers.some((b) => b.toLowerCase().includes('splunk_hec_token')));
 });
 
-test('renderPlan for "install" omits verify and teardown', () => {
-  const plan = buildReporterPlan({
+test('renderPlan for "install" omits verify and teardown', async () => {
+  const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
     forwarder: 'fluent-bit',
     apiKey: 'test',
@@ -165,8 +167,8 @@ test('renderPlan for "install" omits verify and teardown', () => {
   assert.ok(!out.includes('## Teardown'));
 });
 
-test('renderPlan for "teardown" omits install and verify', () => {
-  const plan = buildReporterPlan({
+test('renderPlan for "teardown" omits install and verify', async () => {
+  const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
     forwarder: 'fluent-bit',
     apiKey: 'test',
@@ -179,8 +181,8 @@ test('renderPlan for "teardown" omits install and verify', () => {
   assert.ok(!out.includes('## Verify'));
 });
 
-test('already-installed reporter triggers a note, not a blocker', () => {
-  const plan = buildReporterPlan({
+test('already-installed reporter triggers a note, not a blocker', async () => {
+  const plan = await buildReporterPlan({
     snapshot: baseSnapshot({
       recommendations: {
         suggestedNamespace: 'logging',
@@ -194,13 +196,112 @@ test('already-installed reporter triggers a note, not a blocker', () => {
   assert.ok(plan.notes.some((n) => n.toLowerCase().includes('already installed')));
 });
 
-test('values.yaml content is syntactically close to YAML', () => {
-  // Smoke-test by grabbing the generated file for each forwarder and
-  // ensuring it contains the expected top-level keys. This isn't a
-  // real YAML parser — just a "did we not accidentally break the
-  // template?" check.
+test('values.yaml has no duplicate top-level keys (fluentd regression)', async () => {
+  // The dogfood pass found that fluentd values emitted two top-level
+  // `tenx:` keys — YAML silently kept the second and dropped apiKey /
+  // kind / runtimeName / git config entirely. Lock the invariant
+  // across every forwarder: each top-level key appears at most once.
   for (const fw of forwarders) {
-    const plan = buildReporterPlan({
+    const plan = await buildReporterPlan({
+      snapshot: baseSnapshot(),
+      forwarder: fw,
+      apiKey: 'test',
+      destination: 'mock',
+    });
+    const writeStep = plan.install.find((s) => s.file);
+    const content = writeStep!.file!.contents;
+    // Count lines starting at column 0 with `<word>:` (naive but
+    // sufficient — our templates don't embed flow-style).
+    const topLevelKeys = content
+      .split('\n')
+      .filter((l) => /^[A-Za-z_][A-Za-z0-9_-]*:/.test(l))
+      .map((l) => l.match(/^([A-Za-z_][A-Za-z0-9_-]*):/)![1]);
+    const counts = new Map<string, number>();
+    for (const k of topLevelKeys) counts.set(k, (counts.get(k) ?? 0) + 1);
+    for (const [k, n] of counts) {
+      assert.ok(n === 1, `${fw}: top-level key '${k}' appears ${n} times — duplicates silently drop earlier keys`);
+    }
+  }
+});
+
+test('every forwarder values file embeds gitToken (init-container secret mount)', async () => {
+  // Every log10x-repackaged chart mounts a tenx-git-token secret in an
+  // init container. If gitToken is empty the secret isn't created and
+  // pods hang in FailedMount. Every forwarder (except vector, which
+  // uses extraContainers without the init) must emit a placeholder.
+  for (const fw of forwarders) {
+    if (fw === 'vector') continue;
+    const plan = await buildReporterPlan({
+      snapshot: baseSnapshot(),
+      forwarder: fw,
+      apiKey: 'test',
+      destination: 'mock',
+    });
+    const content = plan.install.find((s) => s.file)!.file!.contents;
+    assert.ok(
+      content.includes('gitToken:'),
+      `${fw}: values must emit gitToken (even a placeholder) to satisfy chart init container`
+    );
+  }
+});
+
+test('verify probes target the correct container per forwarder', async () => {
+  const expected: Record<string, string> = {
+    'fluent-bit': 'fluent-bit',
+    fluentd: 'fluentd',
+    filebeat: 'filebeat',
+    vector: 'tenx',            // sidecar mode
+    logstash: 'logstash',
+    'otel-collector': 'opentelemetry-collector',
+  };
+  for (const fw of forwarders) {
+    const plan = await buildReporterPlan({
+      snapshot: baseSnapshot(),
+      forwarder: fw,
+      apiKey: 'test',
+      destination: 'mock',
+    });
+    const probeCmds = plan.verify.flatMap((v) => v.commands).join(' ');
+    // At least one probe command must reference the expected container.
+    assert.ok(
+      probeCmds.includes(`-c ${expected[fw]}`),
+      `${fw}: at least one verify probe should target container '${expected[fw]}', got: ${probeCmds.slice(0, 200)}`
+    );
+  }
+});
+
+test('chart refs are the published names (no `-10x` suffix drift)', async () => {
+  const expected: Record<string, string> = {
+    'fluent-bit': 'log10x-fluent/fluent-bit',
+    fluentd: 'log10x-fluent/fluentd',
+    filebeat: 'log10x-elastic/filebeat',
+    vector: 'vector/vector',
+    logstash: 'log10x-elastic/logstash',
+    'otel-collector': 'log10x-otel/opentelemetry-collector',
+  };
+  for (const fw of forwarders) {
+    const plan = await buildReporterPlan({
+      snapshot: baseSnapshot(),
+      forwarder: fw,
+      apiKey: 'test',
+      destination: 'mock',
+    });
+    const installText = JSON.stringify(plan.install);
+    assert.ok(
+      installText.includes(expected[fw]),
+      `${fw}: install plan must reference chart '${expected[fw]}', not found in: ${installText.slice(0, 400)}`
+    );
+  }
+});
+
+test('values.yaml content is syntactically close to YAML', async () => {
+  // Smoke-test: generated values file has expected shape for each
+  // forwarder. Vector is a sidecar install — it injects tenx via
+  // `extraContainers` + `TENX_API_KEY` env rather than a top-level
+  // `tenx:` block. Every other forwarder uses the embedded-image
+  // pattern with a `tenx:` block.
+  for (const fw of forwarders) {
+    const plan = await buildReporterPlan({
       snapshot: baseSnapshot(),
       forwarder: fw,
       apiKey: 'test-key',
@@ -209,7 +310,14 @@ test('values.yaml content is syntactically close to YAML', () => {
     const writeStep = plan.install.find((s) => s.file);
     assert.ok(writeStep, `${fw} should have a file-write step`);
     const content = writeStep!.file!.contents;
-    assert.ok(content.includes('tenx:'), `${fw} file should declare tenx block`);
-    assert.ok(content.includes('apiKey: "test-key"'), `${fw} file should embed api key`);
+    if (fw === 'vector') {
+      // Sidecar-mode: no top-level tenx: block; tenx runs as a sidecar.
+      assert.ok(content.includes('extraContainers'), `vector should inject sidecar via extraContainers`);
+      assert.ok(content.includes('TENX_API_KEY'), `vector should pass api key as env var`);
+      assert.ok(content.includes('test-key'), `vector should embed the api key value`);
+    } else {
+      assert.ok(content.includes('tenx:'), `${fw} file should declare tenx block`);
+      assert.ok(content.includes('apiKey: "test-key"'), `${fw} file should embed api key`);
+    }
   }
 });

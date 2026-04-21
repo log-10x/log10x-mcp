@@ -8,7 +8,8 @@
 
 import type { DiscoverySnapshot, ForwarderKind } from '../discovery/types.js';
 import type { AdvisePlan, PlanStep, VerifyProbe, PreflightCheck } from './types.js';
-import { REPORTER_FORWARDER_SPECS, type OutputDestination } from './reporter-forwarders.js';
+import { REPORTER_FORWARDER_SPECS, type OutputDestination, type ForwarderSpec } from './reporter-forwarders.js';
+import { run } from '../discovery/shell.js';
 
 export interface ReporterAdviseArgs {
   snapshot: DiscoverySnapshot;
@@ -35,7 +36,7 @@ export interface ReporterAdviseArgs {
 }
 
 /** Produce the plan. Never throws — surfaces missing input as `blockers`. */
-export function buildReporterPlan(args: ReporterAdviseArgs): AdvisePlan {
+export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<AdvisePlan> {
   const snapshot = args.snapshot;
   const releaseName = args.releaseName ?? 'my-reporter';
   const destination: OutputDestination = args.destination ?? 'mock';
@@ -64,7 +65,13 @@ export function buildReporterPlan(args: ReporterAdviseArgs): AdvisePlan {
     blockers.push('destination=splunk requires `splunk_hec_token`.');
   }
 
-  const preflight = runPreflight(snapshot, forwarder, releaseName, namespace, spec?.chartAvailability);
+  const preflight = await runPreflight(
+    snapshot,
+    forwarder,
+    releaseName,
+    namespace,
+    spec
+  );
 
   const notes: string[] = [];
   if (snapshot.recommendations.alreadyInstalled.reporter) {
@@ -98,7 +105,12 @@ export function buildReporterPlan(args: ReporterAdviseArgs): AdvisePlan {
     );
   }
   if (!args.skipTeardown) {
-    teardown.push(...buildTeardownSteps(releaseName, namespace));
+    // Use the forwarder's selector label so teardown actually matches
+    // PVCs + residue on charts that use legacy Helm labels. Falls back
+    // to the k8s-recommended selector when no spec (should never happen
+    // once the forwarder is validated, but belt-and-braces).
+    const selectorLabel = spec?.selectorLabel(releaseName) ?? `app.kubernetes.io/instance=${releaseName}`;
+    teardown.push(...buildTeardownSteps(releaseName, namespace, selectorLabel));
   }
 
   return {
@@ -117,13 +129,14 @@ export function buildReporterPlan(args: ReporterAdviseArgs): AdvisePlan {
   };
 }
 
-function runPreflight(
+async function runPreflight(
   snapshot: DiscoverySnapshot,
   forwarder: ForwarderKind,
   releaseName: string,
   namespace: string,
-  chartAvail: 'published' | 'wip' | 'upstream-fallback' | undefined
-): PreflightCheck[] {
+  spec: ForwarderSpec | undefined
+): Promise<PreflightCheck[]> {
+  const chartAvail = spec?.chartAvailability;
   const checks: PreflightCheck[] = [];
 
   // 1. Cluster reachable.
@@ -170,17 +183,21 @@ function runPreflight(
       : `no \`${releaseName}\` release in \`${namespace}\` — clear to install`,
   });
 
-  // 5. Chart availability.
-  checks.push({
-    name: 'chart availability',
-    status: chartAvail === 'published' ? 'ok' : chartAvail === 'upstream-fallback' ? 'warn' : 'unknown',
-    detail:
-      chartAvail === 'published'
-        ? 'log10x-repackaged chart is published'
-        : chartAvail === 'upstream-fallback'
-        ? 'log10x-repackaged chart not yet published; plan uses upstream chart + sidecar pattern'
-        : 'unknown',
-  });
+  // 5. Chart availability — LIVE probe via `helm search repo`.
+  // The prior static flag claimed `published: ok` for chart refs that
+  // didn't exist (e.g., `filebeat-10x` when the real name is `filebeat`).
+  // We now add the repo and search for the chart; the check only
+  // passes if helm returns a matching entry.
+  if (spec) {
+    const liveCheck = await probeChartAvailability(spec);
+    checks.push(liveCheck);
+  } else {
+    checks.push({
+      name: 'chart availability',
+      status: 'unknown',
+      detail: 'no spec for this forwarder',
+    });
+  }
 
   // 6. API key hint.
   checks.push({
@@ -191,6 +208,59 @@ function runPreflight(
   });
 
   return checks;
+}
+
+/**
+ * Live chart availability probe. Adds the repo (idempotent), runs
+ * `helm search repo <chartRef>`, and returns an `ok` status iff a
+ * matching entry is found. The step exists BECAUSE the first dogfood
+ * pass shipped chart refs that looked real but didn't resolve
+ * (filebeat-10x vs filebeat, logstash-10x vs logstash,
+ * otel-collector-10x vs opentelemetry-collector). Every chart-ref
+ * drift now fails preflight instead of helm-install.
+ */
+async function probeChartAvailability(spec: ForwarderSpec): Promise<PreflightCheck> {
+  try {
+    await run('helm', ['repo', 'add', spec.helmRepoAlias, spec.helmRepo, '--force-update'], {
+      timeoutMs: 10_000,
+    });
+    await run('helm', ['repo', 'update', spec.helmRepoAlias], { timeoutMs: 10_000 });
+    const search = await run('helm', ['search', 'repo', spec.chartRef, '-o', 'json'], {
+      timeoutMs: 10_000,
+    });
+    if (search.exitCode !== 0) {
+      return {
+        name: 'chart availability',
+        status: 'warn',
+        detail: `\`helm search repo ${spec.chartRef}\` failed (exit ${search.exitCode}): ${search.stderr.slice(0, 200)}`,
+      };
+    }
+    let parsed: Array<{ name: string; version: string; app_version: string }> = [];
+    try {
+      parsed = JSON.parse(search.stdout || '[]');
+    } catch {
+      parsed = [];
+    }
+    if (parsed.length === 0) {
+      return {
+        name: 'chart availability',
+        status: 'fail',
+        detail: `\`${spec.chartRef}\` returned 0 results from \`helm search repo\` — chart ref is wrong or the repo is offline`,
+      };
+    }
+    const hit = parsed[0];
+    return {
+      name: 'chart availability',
+      status: 'ok',
+      detail: `\`${hit.name}\` v${hit.version} (app ${hit.app_version}) is live in repo \`${spec.helmRepoAlias}\``,
+    };
+  } catch (e) {
+    return {
+      name: 'chart availability',
+      status: 'unknown',
+      detail: `helm CLI not available or probe errored: ${e instanceof Error ? e.message : String(e)}`,
+    };
+  }
 }
 
 function buildInstallSteps(opts: {
@@ -244,11 +314,12 @@ function buildInstallSteps(opts: {
 
   steps.push({
     title: 'Wait for rollout',
-    rationale: 'Blocks until the DaemonSet/Deployment reports Ready. Required before verify probes.',
+    rationale:
+      'Blocks until the workload reports Ready. Uses the chart\'s own label selector (legacy Helm for elastic charts, k8s-recommended elsewhere) — a mismatched selector silently returns "No resources found" and exits 0.',
     commands: [
-      `kubectl -n ${namespace} rollout status daemonset -l app.kubernetes.io/instance=${releaseName} --timeout=5m || true`,
-      `kubectl -n ${namespace} rollout status deployment -l app.kubernetes.io/instance=${releaseName} --timeout=5m || true`,
-      `kubectl -n ${namespace} rollout status statefulset -l app.kubernetes.io/instance=${releaseName} --timeout=10m || true`,
+      `kubectl -n ${namespace} rollout status daemonset -l ${spec.selectorLabel(releaseName)} --timeout=5m || true`,
+      `kubectl -n ${namespace} rollout status deployment -l ${spec.selectorLabel(releaseName)} --timeout=5m || true`,
+      `kubectl -n ${namespace} rollout status statefulset -l ${spec.selectorLabel(releaseName)} --timeout=10m || true`,
     ],
     expectDurationSec: 600,
   });
@@ -256,18 +327,23 @@ function buildInstallSteps(opts: {
   return steps;
 }
 
-function buildTeardownSteps(releaseName: string, namespace: string): PlanStep[] {
+function buildTeardownSteps(
+  releaseName: string,
+  namespace: string,
+  selectorLabel: string
+): PlanStep[] {
   return [
     {
       title: 'Uninstall the Helm release',
-      rationale: 'Removes the forwarder DaemonSet/Deployment, its ServiceAccount, ConfigMaps, and the 10x Reporter sidecar.',
+      rationale: 'Removes the forwarder DaemonSet/Deployment/StatefulSet, its ServiceAccount, ConfigMaps, and the 10x Reporter sidecar.',
       commands: [`helm -n ${namespace} uninstall ${releaseName}`],
     },
     {
       title: 'Clean up derived resources',
-      rationale: 'Helm does not reap PVCs or Secrets that were created outside of the release.',
+      rationale:
+        'Helm does not reap PVCs or Secrets that were created outside of the release. Selector honors the chart family\'s label convention (k8s-recommended vs legacy Helm).',
       commands: [
-        `kubectl -n ${namespace} delete pvc -l app.kubernetes.io/instance=${releaseName} --ignore-not-found`,
+        `kubectl -n ${namespace} delete pvc -l ${selectorLabel} --ignore-not-found`,
         `kubectl -n ${namespace} delete secret reporter-credentials --ignore-not-found`,
       ],
     },
@@ -275,7 +351,7 @@ function buildTeardownSteps(releaseName: string, namespace: string): PlanStep[] 
       title: 'Verify nothing remains',
       rationale: 'Confirm no pods, services, or configmaps are lingering under the release label.',
       commands: [
-        `kubectl -n ${namespace} get all,configmap,secret,pvc -l app.kubernetes.io/instance=${releaseName}`,
+        `kubectl -n ${namespace} get all,configmap,secret,pvc -l ${selectorLabel}`,
       ],
     },
   ];

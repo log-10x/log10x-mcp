@@ -71,7 +71,7 @@ export async function executeAdviseReporter(args: AdviseReporterArgs): Promise<s
   }
 
   const action = args.action ?? 'all';
-  const plan = buildReporterPlan({
+  const plan = await buildReporterPlan({
     snapshot,
     forwarder: args.forwarder as ForwarderKind | undefined,
     releaseName: args.release_name,

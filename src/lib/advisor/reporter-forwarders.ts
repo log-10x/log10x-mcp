@@ -1,56 +1,93 @@
 /**
  * Per-forwarder Helm repo + chart + values templates for the Reporter.
  *
- * Keep each forwarder's spec isolated so a regression in one (e.g.,
- * Vector chart URL changes) doesn't cascade. The `quickstartValues`
- * string is YAML that's already been indented — caller pastes it
- * verbatim into the file step.
+ * Design after first dogfood pass (2026-04-21):
+ *   - Every values snippet is a SINGLE coherent YAML doc — no duplicate
+ *     top-level keys. The fluentd template had two `tenx:` keys,
+ *     silently dropping the real config. Never again.
+ *   - Every chart requires `tenx.gitToken` even when pulling a public
+ *     repo, because init containers unconditionally mount a secret
+ *     derived from it. We default to `"public-repo-no-token-needed"`.
+ *   - `primaryContainerName` tells verify probes which container tails
+ *     events. 10x runs INSIDE that container in embedded-image mode —
+ *     there is no separate `tenx` sidecar for fluent-bit, fluentd,
+ *     filebeat, logstash, or the OTel collector. (Vector is the lone
+ *     sidecar case and that chart is still WIP.)
+ *   - `selectorLabel` returns the correct kubectl label selector for
+ *     each chart family. log10x-elastic charts (filebeat/logstash) use
+ *     legacy Helm labels (`app=<release>-<chart>,release=<release>`)
+ *     rather than `app.kubernetes.io/instance=<release>`. The advisor
+ *     must honor this or every `kubectl wait` / `rollout status` /
+ *     teardown command silently matches nothing.
+ *   - Chart refs correspond to published chart names:
+ *       log10x-fluent/fluent-bit     (confirmed live)
+ *       log10x-fluent/fluentd        (confirmed live)
+ *       log10x-elastic/filebeat      (NOT `-10x`)
+ *       log10x-elastic/logstash      (NOT `-10x`)
+ *       log10x-otel/opentelemetry-collector  (NOT `otel-collector-10x`)
  *
  * Sources:
- *   - https://github.com/log-10x/fluent-helm-charts (fluent-bit, fluentd)
- *   - https://github.com/log-10x/elastic-helm-charts (filebeat-10x, logstash-10x)
- *   - https://github.com/log-10x/opentelemetry-helm-charts (otel-collector-10x)
- *   - Vector: log10x-repackaged chart is WIP; fall back to upstream + sidecar pattern
- *     (surfaced via `chartAvailability`).
+ *   - https://github.com/log-10x/fluent-helm-charts
+ *   - https://github.com/log-10x/elastic-helm-charts
+ *   - https://github.com/log-10x/opentelemetry-helm-charts
+ *   - Vector: log10x-repackaged chart is WIP; falls back to upstream
+ *     `vector/vector` + a hand-added tenx sidecar via extraContainers.
  */
 
 import type { ForwarderKind } from '../discovery/types.js';
 
 export type OutputDestination = 'mock' | 'elasticsearch' | 'splunk' | 'datadog' | 'cloudwatch';
 
+/** How a forwarder's helm chart labels its workloads + pods. */
+export type SelectorStyle = 'k8s-recommended' | 'legacy-helm';
+
 export interface ForwarderSpec {
-  /** Display name for the forwarder (title-cased). */
+  /** Display name. */
   label: string;
-  /** Short summary of how the Reporter integrates with this forwarder. */
+  /** One-sentence architecture summary. */
   integrationMode: string;
   /** Helm repo URL. */
   helmRepo: string;
-  /** Helm repo alias we'll use in `helm repo add`. */
+  /** Helm repo alias used in `helm repo add`. */
   helmRepoAlias: string;
-  /** Chart reference (e.g., `log10x-fluent/fluent-bit`). */
+  /** Published chart reference (`<alias>/<chart>`). */
   chartRef: string;
-  /** Whether the log10x-repackaged chart is generally published. */
+  /** Availability of the log10x-repackaged chart. */
   chartAvailability: 'published' | 'wip' | 'upstream-fallback';
   /** Default container image reference (for messaging only). */
   primaryImageHint: string;
   /**
-   * Return a values.yaml snippet for the supplied destination.
-   * Every destination must produce valid YAML for the target chart.
+   * Container name that tails + processes events. In embedded-image
+   * mode (fluent-bit, fluentd, filebeat, logstash, otel-collector) the
+   * 10x logic runs *inside* this container — there is no separate
+   * `tenx` sidecar, so verify probes MUST target this container name.
    */
+  primaryContainerName: string;
+  /**
+   * True when this forwarder uses sidecar mode (separate `tenx`
+   * container in the pod). Currently only meaningful for Vector.
+   */
+  hasTenxSidecar: boolean;
+  /** Label-selector style the chart family uses. */
+  selectorStyle: SelectorStyle;
+  /** Return the kubectl label selector for a given release. */
+  selectorLabel: (releaseName: string) => string;
+  /** Render the values.yaml as a SINGLE coherent YAML document. */
   renderValues: (opts: {
     apiKey: string;
     releaseName: string;
     destination: OutputDestination;
     outputHost?: string;
     splunkHecToken?: string;
+    /** Placeholder emitted into `tenx.gitToken`. Defaults to the public-repo no-op string. */
+    gitToken?: string;
   }) => string;
-  /**
-   * Shell snippets (without `bash ` prefix) that verify data is flowing
-   * end-to-end for this forwarder kind. Include commands that read from
-   * the Reporter's own stdout, the forwarder's own stdout, and the
-   * destination (when possible).
-   */
-  verifyProbes: (opts: { releaseName: string; namespace: string; destination: OutputDestination }) => Array<{
+  /** Verify probes — commands that, collectively, prove data is flowing. */
+  verifyProbes: (opts: {
+    releaseName: string;
+    namespace: string;
+    destination: OutputDestination;
+  }) => Array<{
     name: string;
     question: string;
     commands: string[];
@@ -59,52 +96,504 @@ export interface ForwarderSpec {
   }>;
 }
 
-const baseTenxBlock = (apiKey: string, runtimeName: string): string =>
-  `tenx:
-  enabled: true
-  apiKey: "${apiKey}"
-  kind: "report"
-  runtimeName: "${runtimeName}"
-  config:
-    git:
-      enabled: true
-      url: "https://github.com/log-10x/config.git"`;
+const DEFAULT_GIT_TOKEN = 'public-repo-no-token-needed';
 
-/** Mock output writes to the pod's stdout so we can tail-verify. */
 const MOCK_OUTPUT_NOTE =
-  '# Mock output (stdout) — events are written to the forwarder pod stdout so you can tail-verify.';
+  '# Mock output — prints each event to the forwarder stdout with a [TENX-MOCK] prefix so `kubectl logs | grep TENX-MOCK` can deterministically verify the pipeline.';
+
+// ── Shared helpers ──
+
+/** k8s-recommended selector: `app.kubernetes.io/instance=<release>`. */
+function k8sRecommendedSelector(releaseName: string): string {
+  return `app.kubernetes.io/instance=${releaseName}`;
+}
+
+/** Legacy helm (elastic-style): `app=<release>-<chart>,release=<release>`. */
+function legacyElasticSelector(releaseName: string, chartSubstring: string): string {
+  return `app=${releaseName}-${chartSubstring},release=${releaseName}`;
+}
+
+// ── The spec map ──
 
 export const REPORTER_FORWARDER_SPECS: Record<Exclude<ForwarderKind, 'unknown'>, ForwarderSpec> = {
   'fluent-bit': {
     label: 'Fluent Bit',
     integrationMode:
-      'DaemonSet alongside (or replacing) your existing Fluent Bit. The Reporter sees the pre-output event stream via a local IPC socket.',
+      'DaemonSet using the log10x-repackaged Fluent Bit image (`log10x/fluent-bit-10x`). 10x logic is baked into the container via a Lua filter — no separate sidecar.',
     helmRepo: 'https://log-10x.github.io/fluent-helm-charts',
     helmRepoAlias: 'log10x-fluent',
     chartRef: 'log10x-fluent/fluent-bit',
     chartAvailability: 'published',
     primaryImageHint: 'ghcr.io/log-10x/fluent-bit-10x',
-    renderValues: ({ apiKey, releaseName, destination, outputHost, splunkHecToken }) => {
-      const tenx = baseTenxBlock(apiKey, releaseName);
-      let outputs = '';
+    primaryContainerName: 'fluent-bit',
+    hasTenxSidecar: false,
+    selectorStyle: 'k8s-recommended',
+    selectorLabel: (r) => k8sRecommendedSelector(r),
+    renderValues: ({ apiKey, releaseName, destination, outputHost, splunkHecToken, gitToken }) => {
+      const outputBlock = renderFluentBitOutput(destination, outputHost, splunkHecToken);
+      return `tenx:
+  enabled: true
+  apiKey: "${apiKey}"
+  kind: "report"
+  runtimeName: "${releaseName}"
+  gitToken: "${gitToken ?? DEFAULT_GIT_TOKEN}"
+  config:
+    git:
+      enabled: true
+      url: "https://github.com/log-10x/config.git"
+
+${outputBlock}
+`;
+    },
+    verifyProbes: ({ releaseName, namespace, destination }) => {
+      const sel = k8sRecommendedSelector(releaseName);
+      const probes = [
+        {
+          name: 'pods-ready',
+          question: 'Are all Reporter DaemonSet pods Ready?',
+          commands: [`kubectl -n ${namespace} wait --for=condition=Ready pod -l ${sel} --timeout=5m`],
+          expectOutput: 'condition met',
+          timeoutSec: 300,
+        },
+        {
+          name: 'processor-alive',
+          question: 'Is the 10x Lua filter loaded and processing events?',
+          commands: [
+            `kubectl -n ${namespace} logs -l ${sel} -c fluent-bit --tail=400 | grep -E 'tenx|10x|pattern|lua' | head -20`,
+          ],
+        },
+      ];
       if (destination === 'mock') {
-        outputs = `config:
+        probes.push({
+          name: 'tenx-mock-events',
+          question: 'Are tagged [TENX-MOCK] events reaching stdout?',
+          commands: [`kubectl -n ${namespace} logs -l ${sel} -c fluent-bit --tail=200 | grep -F '[TENX-MOCK]' | head -5`],
+          expectOutput: 'TENX-MOCK',
+          timeoutSec: 120,
+        });
+      }
+      return probes;
+    },
+  },
+
+  fluentd: {
+    label: 'Fluentd',
+    integrationMode:
+      'DaemonSet using the log10x-repackaged Fluentd image (`log10x/fluentd-10x`). 10x logic runs inside the `fluentd` container — no separate sidecar.',
+    helmRepo: 'https://log-10x.github.io/fluent-helm-charts',
+    helmRepoAlias: 'log10x-fluent',
+    chartRef: 'log10x-fluent/fluentd',
+    chartAvailability: 'published',
+    primaryImageHint: 'ghcr.io/log-10x/fluentd-10x',
+    primaryContainerName: 'fluentd',
+    hasTenxSidecar: false,
+    selectorStyle: 'k8s-recommended',
+    selectorLabel: (r) => k8sRecommendedSelector(r),
+    renderValues: ({ apiKey, releaseName, destination, outputHost, splunkHecToken, gitToken }) => {
+      // IMPORTANT: fluentd's output config lives UNDER `tenx:`, not
+      // as a second top-level `tenx:` block. A prior version of this
+      // template emitted two `tenx:` keys and YAML silently dropped
+      // the first — losing apiKey/kind/runtimeName/git config entirely.
+      const outputConfig = renderFluentdOutputConfig(destination, outputHost, splunkHecToken);
+      return `tenx:
+  enabled: true
+  apiKey: "${apiKey}"
+  kind: "report"
+  runtimeName: "${releaseName}"
+  gitToken: "${gitToken ?? DEFAULT_GIT_TOKEN}"
+  config:
+    git:
+      enabled: true
+      url: "https://github.com/log-10x/config.git"
+  outputConfigs:
+    06_final_output.conf: |-
+${indent(outputConfig, 6)}
+`;
+    },
+    verifyProbes: ({ releaseName, namespace, destination }) => {
+      const sel = k8sRecommendedSelector(releaseName);
+      const probes = [
+        {
+          name: 'pods-ready',
+          question: 'Are all Reporter DaemonSet pods Ready?',
+          commands: [`kubectl -n ${namespace} wait --for=condition=Ready pod -l ${sel} --timeout=5m`],
+          expectOutput: 'condition met',
+          timeoutSec: 300,
+        },
+        {
+          name: 'processor-alive',
+          question: 'Is the 10x Fluentd plugin initialized and processing records?',
+          commands: [
+            `kubectl -n ${namespace} logs -l ${sel} -c fluentd --tail=400 | grep -iE 'tenx|10x|pattern' | head -20`,
+          ],
+        },
+      ];
+      if (destination === 'mock') {
+        probes.push({
+          name: 'tenx-mock-events',
+          question: 'Are tagged [TENX-MOCK] events reaching stdout?',
+          commands: [`kubectl -n ${namespace} logs -l ${sel} -c fluentd --tail=200 | grep -F '[TENX-MOCK]' | head -5`],
+          expectOutput: 'TENX-MOCK',
+          timeoutSec: 120,
+        });
+      }
+      return probes;
+    },
+  },
+
+  filebeat: {
+    label: 'Filebeat',
+    integrationMode:
+      'DaemonSet using the log10x-repackaged Filebeat image (`log10x/filebeat-10x`). 10x logic runs inside the `filebeat` container via a processor. Chart is in the Elastic-style helm repo and uses legacy Helm labels.',
+    helmRepo: 'https://log-10x.github.io/elastic-helm-charts',
+    helmRepoAlias: 'log10x-elastic',
+    chartRef: 'log10x-elastic/filebeat',
+    chartAvailability: 'published',
+    primaryImageHint: 'ghcr.io/log-10x/filebeat-10x',
+    primaryContainerName: 'filebeat',
+    hasTenxSidecar: false,
+    selectorStyle: 'legacy-helm',
+    selectorLabel: (r) => legacyElasticSelector(r, 'filebeat'),
+    renderValues: ({ apiKey, releaseName, destination, outputHost, gitToken }) => {
+      // Chart defaults reference Elasticsearch secrets/certs. For a mock
+      // install we MUST override extraEnvs/secretMounts to empty so pods
+      // don't hang in FailedMount.
+      const outputBlock = renderFilebeatOutput(destination, outputHost);
+      return `tenx:
+  enabled: true
+  apiKey: "${apiKey}"
+  kind: "report"
+  runtimeName: "${releaseName}"
+  gitToken: "${gitToken ?? DEFAULT_GIT_TOKEN}"
+  config:
+    git:
+      enabled: true
+      url: "https://github.com/log-10x/config.git"
+
+daemonset:
+  # Avoid chart defaults that hardcode elasticsearch-master-credentials / certs.
+  # Override to empty lists for mock/test; add back real refs for production ES.
+  extraEnvs: []
+  secretMounts: []
+  filebeatConfig:
+    filebeat.yml: |
+${indent(outputBlock, 6)}
+`;
+    },
+    verifyProbes: ({ releaseName, namespace, destination }) => {
+      const sel = legacyElasticSelector(releaseName, 'filebeat');
+      const probes = [
+        {
+          name: 'pods-ready',
+          question: 'Are all Reporter DaemonSet pods Ready?',
+          commands: [`kubectl -n ${namespace} wait --for=condition=Ready pod -l ${sel} --timeout=5m`],
+          expectOutput: 'condition met',
+          timeoutSec: 300,
+        },
+        {
+          name: 'processor-alive',
+          question: 'Is the 10x processor initialized in the filebeat container?',
+          commands: [
+            `kubectl -n ${namespace} logs -l ${sel} -c filebeat --tail=400 | grep -iE 'tenx|10x|pattern' | head -20`,
+          ],
+        },
+      ];
+      if (destination === 'mock') {
+        probes.push({
+          name: 'tenx-mock-events',
+          question: 'Are tagged [TENX-MOCK] events reaching stdout (via `output.file` path /tmp)?',
+          commands: [
+            `kubectl -n ${namespace} exec -it $(kubectl -n ${namespace} get pod -l ${sel} -o name | head -1) -c filebeat -- sh -c 'head -5 /tmp/tenx-mock.out 2>/dev/null || echo "no mock output yet"'`,
+          ],
+          expectOutput: 'TENX-MOCK',
+          timeoutSec: 120,
+        });
+      }
+      return probes;
+    },
+  },
+
+  vector: {
+    label: 'Vector',
+    integrationMode:
+      'DaemonSet using upstream Vector (chart `vector/vector`) with a hand-added 10x Reporter sidecar. The sidecar reads events from Vector via a Unix domain socket. The log10x-repackaged Vector chart is WIP — this template emits the upstream chart + sidecar wiring.',
+    helmRepo: 'https://helm.vector.dev',
+    helmRepoAlias: 'vector',
+    chartRef: 'vector/vector',
+    chartAvailability: 'upstream-fallback',
+    primaryImageHint: 'timberio/vector:0.40.0-debian',
+    primaryContainerName: 'vector',
+    hasTenxSidecar: true,
+    selectorStyle: 'k8s-recommended',
+    selectorLabel: (r) => k8sRecommendedSelector(r),
+    renderValues: ({ apiKey, releaseName, destination, outputHost }) => {
+      // Pure YAML. Previous version emitted TOML-inline syntax inside
+      // a YAML doc, which helm rejected.
+      // `service.enabled: false` required because role=Agent + custom
+      // sinks yields an empty Service spec otherwise.
+      // `extraContainers` + `extraVolumes` inject the tenx sidecar and
+      // the Unix socket volume Vector writes to.
+      const vectorSinks = renderVectorSinks(destination, outputHost);
+      return `# ${MOCK_OUTPUT_NOTE}
+# NOTE: upstream vector/vector chart with a hand-added tenx sidecar.
+# When the log10x-repackaged Vector chart ships, switch to it.
+
+role: Agent
+
+service:
+  enabled: false
+
+extraVolumes:
+  - name: tenx-ipc
+    emptyDir: {}
+
+extraVolumeMounts:
+  - name: tenx-ipc
+    mountPath: /var/run/tenx
+
+extraContainers:
+  - name: tenx
+    image: ghcr.io/log-10x/tenx-reporter:latest
+    args:
+      - "@run/input/forwarder/vector/report"
+      - "@apps/edge/reporter"
+    env:
+      - name: TENX_API_KEY
+        value: "${apiKey}"
+      - name: TENX_RUNTIME_NAME
+        value: "${releaseName}"
+      - name: TENX_KIND
+        value: "report"
+    volumeMounts:
+      - name: tenx-ipc
+        mountPath: /var/run/tenx
+
+customConfig:
+  data_dir: /vector-data-dir
+  sources:
+    kubernetes_logs:
+      type: kubernetes_logs
+${vectorSinks}
+`;
+    },
+    verifyProbes: ({ releaseName, namespace, destination }) => {
+      const sel = k8sRecommendedSelector(releaseName);
+      const probes = [
+        {
+          name: 'pods-ready',
+          question: 'Are all Vector+Reporter DaemonSet pods Ready?',
+          commands: [`kubectl -n ${namespace} wait --for=condition=Ready pod -l ${sel} --timeout=5m`],
+          expectOutput: 'condition met',
+          timeoutSec: 300,
+        },
+        {
+          name: 'tenx-sidecar-alive',
+          question: 'Is the 10x sidecar (separate container) running and reading from Vector?',
+          commands: [
+            `kubectl -n ${namespace} get pods -l ${sel} -o jsonpath='{range .items[*]}{.status.containerStatuses[?(@.name=="tenx")].ready}{"\\n"}{end}' | head -5`,
+            `kubectl -n ${namespace} logs -l ${sel} -c tenx --tail=200 | grep -iE 'pattern|metric|record|socket' | head -20`,
+          ],
+        },
+      ];
+      if (destination === 'mock') {
+        probes.push({
+          name: 'tenx-mock-events',
+          question: 'Are tagged [TENX-MOCK] events reaching Vector\'s console sink?',
+          commands: [`kubectl -n ${namespace} logs -l ${sel} -c vector --tail=200 | grep -F '[TENX-MOCK]' | head -5`],
+          expectOutput: 'TENX-MOCK',
+          timeoutSec: 120,
+        });
+      }
+      return probes;
+    },
+  },
+
+  logstash: {
+    label: 'Logstash',
+    integrationMode:
+      'StatefulSet using the log10x-repackaged Logstash image (`log10x/logstash-10x`). 10x logic runs inside the `logstash` container via a filter plugin. Chart uses legacy Helm labels.',
+    helmRepo: 'https://log-10x.github.io/elastic-helm-charts',
+    helmRepoAlias: 'log10x-elastic',
+    chartRef: 'log10x-elastic/logstash',
+    chartAvailability: 'published',
+    primaryImageHint: 'ghcr.io/log-10x/logstash-10x',
+    primaryContainerName: 'logstash',
+    hasTenxSidecar: false,
+    selectorStyle: 'legacy-helm',
+    selectorLabel: (r) => legacyElasticSelector(r, 'logstash'),
+    renderValues: ({ apiKey, releaseName, destination, outputHost, gitToken }) => {
+      const output = renderLogstashOutput(destination, outputHost);
+      return `tenx:
+  enabled: true
+  apiKey: "${apiKey}"
+  kind: "report"
+  runtimeName: "${releaseName}"
+  gitToken: "${gitToken ?? DEFAULT_GIT_TOKEN}"
+  config:
+    git:
+      enabled: true
+      url: "https://github.com/log-10x/config.git"
+
+# Avoid chart defaults hardcoding Elasticsearch credentials/mounts.
+extraEnvs: []
+secretMounts: []
+
+logstashPipeline:
+  output.conf: |
+${indent(output, 4)}
+`;
+    },
+    verifyProbes: ({ releaseName, namespace, destination }) => {
+      const sel = legacyElasticSelector(releaseName, 'logstash');
+      const probes = [
+        {
+          name: 'pods-ready',
+          question: 'Are all Logstash+Reporter StatefulSet pods Ready?',
+          commands: [`kubectl -n ${namespace} wait --for=condition=Ready pod -l ${sel} --timeout=10m`],
+          expectOutput: 'condition met',
+          timeoutSec: 600,
+        },
+        {
+          name: 'processor-alive',
+          question: 'Is the 10x filter plugin loaded in the logstash container?',
+          commands: [
+            `kubectl -n ${namespace} logs -l ${sel} -c logstash --tail=400 | grep -iE 'tenx|10x|pattern' | head -20`,
+          ],
+        },
+      ];
+      if (destination === 'mock') {
+        probes.push({
+          name: 'tenx-mock-events',
+          question: 'Are tagged [TENX-MOCK] events reaching stdout?',
+          commands: [`kubectl -n ${namespace} logs -l ${sel} -c logstash --tail=200 | grep -F '[TENX-MOCK]' | head -5`],
+          expectOutput: 'TENX-MOCK',
+          timeoutSec: 180,
+        });
+      }
+      return probes;
+    },
+  },
+
+  'otel-collector': {
+    label: 'OTel Collector',
+    integrationMode:
+      'DaemonSet using the log10x-repackaged chart `log10x-otel/opentelemetry-collector`. Uses the chart\'s hidden `logs/to-tenx` pipeline with a syslog exporter over a Unix socket; the 10x logic runs inside the collector container.',
+    helmRepo: 'https://log-10x.github.io/opentelemetry-helm-charts',
+    helmRepoAlias: 'log10x-otel',
+    chartRef: 'log10x-otel/opentelemetry-collector',
+    chartAvailability: 'published',
+    primaryImageHint: 'ghcr.io/log-10x/opentelemetry-collector',
+    primaryContainerName: 'opentelemetry-collector',
+    hasTenxSidecar: false,
+    selectorStyle: 'k8s-recommended',
+    selectorLabel: (r) => k8sRecommendedSelector(r),
+    renderValues: ({ apiKey, releaseName, destination, outputHost, gitToken }) => {
+      // The OTel chart doesn't auto-wire filelog unless the preset is
+      // on. We turn it on explicitly so the user's pipeline just works.
+      // image.repository is required by the chart and has no default.
+      const exporter = renderOtelExporter(destination, outputHost);
+      return `mode: "daemonset"
+
+# Required by the chart — no default.
+image:
+  repository: ghcr.io/log-10x/opentelemetry-collector
+  # tag defaults to chart appVersion; pin here if needed.
+
+tenx:
+  enabled: true
+  apiKey: "${apiKey}"
+  kind: "report"
+  runtimeName: "${releaseName}"
+  gitToken: "${gitToken ?? DEFAULT_GIT_TOKEN}"
+  config:
+    git:
+      enabled: true
+      url: "https://github.com/log-10x/config.git"
+
+# Turn on the chart's filelog logsCollection preset so the receiver
+# is actually wired up; advising pipeline.receivers without this
+# results in "references receiver 'filelog' which is not configured".
+presets:
+  logsCollection:
+    enabled: true
+    includeCollectorLogs: false
+
+config:
+  exporters:
+${indent(exporter, 4)}
+  service:
+    pipelines:
+      logs:
+        receivers: [filelog]
+        processors: [memory_limiter, batch]
+        exporters: [${destination === 'mock' ? 'debug' : 'elasticsearch'}]
+`;
+    },
+    verifyProbes: ({ releaseName, namespace, destination }) => {
+      const sel = k8sRecommendedSelector(releaseName);
+      const probes = [
+        {
+          name: 'pods-ready',
+          question: 'Are all OTel Collector pods Ready?',
+          commands: [`kubectl -n ${namespace} wait --for=condition=Ready pod -l ${sel} --timeout=5m`],
+          expectOutput: 'condition met',
+          timeoutSec: 300,
+        },
+        {
+          name: 'processor-alive',
+          question: 'Is the 10x syslog exporter pipeline wired and emitting?',
+          commands: [
+            `kubectl -n ${namespace} logs -l ${sel} -c opentelemetry-collector --tail=400 | grep -iE 'tenx|10x|pattern' | head -20`,
+          ],
+        },
+      ];
+      if (destination === 'mock') {
+        probes.push({
+          name: 'tenx-mock-events',
+          question: 'Are tagged [TENX-MOCK] events reaching the debug exporter?',
+          commands: [`kubectl -n ${namespace} logs -l ${sel} -c opentelemetry-collector --tail=200 | grep -F '[TENX-MOCK]' | head -5`],
+          expectOutput: 'TENX-MOCK',
+          timeoutSec: 120,
+        });
+      }
+      return probes;
+    },
+  },
+};
+
+// ── Destination-specific sub-renderers ──
+// Pulled out so the destination logic lives in one place per forwarder.
+
+function renderFluentBitOutput(
+  destination: OutputDestination,
+  outputHost?: string,
+  splunkHecToken?: string
+): string {
+  if (destination === 'mock') {
+    return `config:
   outputs: |
     ${MOCK_OUTPUT_NOTE}
     [OUTPUT]
         Name   stdout
         Match  *
-        Format json_lines`;
-      } else if (destination === 'elasticsearch') {
-        outputs = `config:
+        Format json_lines
+  filters: |
+    [FILTER]
+        Name   modify
+        Match  *
+        Add    _tenx_mock_prefix [TENX-MOCK]`;
+  }
+  if (destination === 'elasticsearch') {
+    return `config:
   outputs: |
     [OUTPUT]
         Name   es
         Match  kube.*
         Host   ${outputHost ?? 'elasticsearch-master'}
         Logstash_Format On`;
-      } else if (destination === 'splunk') {
-        outputs = `config:
+  }
+  if (destination === 'splunk') {
+    return `config:
   outputs: |
     [OUTPUT]
         Name         splunk
@@ -113,347 +602,162 @@ export const REPORTER_FORWARDER_SPECS: Record<Exclude<ForwarderKind, 'unknown'>,
         Port         8088
         TLS          On
         Splunk_Token ${splunkHecToken ?? 'REPLACE_WITH_HEC_TOKEN'}`;
-      }
-      return `${tenx}\n\n${outputs}\n`;
-    },
-    verifyProbes: ({ releaseName, namespace, destination }) => [
-      {
-        name: 'pods-ready',
-        question: 'Are all Reporter pods Ready?',
-        commands: [
-          `kubectl -n ${namespace} wait --for=condition=Ready pod -l app.kubernetes.io/instance=${releaseName} --timeout=5m`,
-        ],
-        expectOutput: 'condition met',
-        timeoutSec: 300,
-      },
-      {
-        name: 'reporter-processing',
-        question: 'Is the 10x sidecar processing events (non-zero metric count in stdout)?',
-        commands: [
-          `kubectl -n ${namespace} logs -l app.kubernetes.io/instance=${releaseName} -c tenx --tail=200 | grep -E 'pattern|metric|record' | head -20`,
-        ],
-      },
-      ...(destination === 'mock'
-        ? [
-            {
-              name: 'events-flowing',
-              question: 'Is the forwarder emitting events to stdout?',
-              commands: [
-                `kubectl -n ${namespace} logs -l app.kubernetes.io/instance=${releaseName} -c fluent-bit --tail=100 | head -20`,
-              ],
-              timeoutSec: 60,
-            },
-          ]
-        : []),
-    ],
-  },
+  }
+  return '';
+}
 
-  fluentd: {
-    label: 'Fluentd',
-    integrationMode:
-      'DaemonSet with the Reporter as a sidecar reading the pre-output event stream. Uses the log10x-repackaged fluentd chart (image: `log-10x/fluentd-10x`).',
-    helmRepo: 'https://log-10x.github.io/fluent-helm-charts',
-    helmRepoAlias: 'log10x-fluent',
-    chartRef: 'log10x-fluent/fluentd',
-    chartAvailability: 'published',
-    primaryImageHint: 'ghcr.io/log-10x/fluentd-10x',
-    renderValues: ({ apiKey, releaseName, destination, outputHost, splunkHecToken }) => {
-      const tenx = baseTenxBlock(apiKey, releaseName);
-      let outputs = '';
-      if (destination === 'mock') {
-        outputs = `tenx:
-  outputConfigs:
-    06_final_output.conf: |-
-      ${MOCK_OUTPUT_NOTE}
-      <label @FINAL-OUTPUT>
-        <match **>
-          @type stdout
-        </match>
-      </label>`;
-      } else if (destination === 'elasticsearch') {
-        outputs = `tenx:
-  outputConfigs:
-    06_final_output.conf: |-
-      <label @FINAL-OUTPUT>
-        <match **>
-          @type elasticsearch
-          host "${outputHost ?? 'elasticsearch-master'}"
-          port 9200
-        </match>
-      </label>`;
-      } else if (destination === 'splunk') {
-        outputs = `tenx:
-  outputConfigs:
-    06_final_output.conf: |-
-      <label @FINAL-OUTPUT>
-        <match **>
-          @type splunk_hec
-          hec_host ${outputHost ?? 'splunk-hec.example.com'}
-          hec_port 8088
-          hec_token ${splunkHecToken ?? 'REPLACE_WITH_HEC_TOKEN'}
-        </match>
-      </label>`;
-      }
-      return `${tenx}\n\n${outputs}\n`;
-    },
-    verifyProbes: ({ releaseName, namespace, destination }) => [
-      {
-        name: 'pods-ready',
-        question: 'Are all Reporter pods Ready?',
-        commands: [
-          `kubectl -n ${namespace} wait --for=condition=Ready pod -l app.kubernetes.io/instance=${releaseName} --timeout=5m`,
-        ],
-        expectOutput: 'condition met',
-        timeoutSec: 300,
-      },
-      {
-        name: 'reporter-processing',
-        question: 'Is the 10x sidecar processing events?',
-        commands: [
-          `kubectl -n ${namespace} logs -l app.kubernetes.io/instance=${releaseName} -c tenx --tail=200 | grep -E 'pattern|metric|record' | head -20`,
-        ],
-      },
-      ...(destination === 'mock'
-        ? [
-            {
-              name: 'events-flowing',
-              question: 'Is fluentd emitting events to stdout (mock output)?',
-              commands: [
-                `kubectl -n ${namespace} logs -l app.kubernetes.io/instance=${releaseName} -c fluentd --tail=100 | head -20`,
-              ],
-              timeoutSec: 60,
-            },
-          ]
-        : []),
-    ],
-  },
+function renderFluentdOutputConfig(
+  destination: OutputDestination,
+  outputHost?: string,
+  splunkHecToken?: string
+): string {
+  if (destination === 'mock') {
+    return `${MOCK_OUTPUT_NOTE}
+<label @FINAL-OUTPUT>
+  <filter **>
+    @type record_transformer
+    <record>
+      _tenx_mock_prefix "[TENX-MOCK]"
+    </record>
+  </filter>
+  <match **>
+    @type stdout
+  </match>
+</label>`;
+  }
+  if (destination === 'elasticsearch') {
+    return `<label @FINAL-OUTPUT>
+  <match **>
+    @type elasticsearch
+    host "${outputHost ?? 'elasticsearch-master'}"
+    port 9200
+  </match>
+</label>`;
+  }
+  if (destination === 'splunk') {
+    return `<label @FINAL-OUTPUT>
+  <match **>
+    @type splunk_hec
+    hec_host ${outputHost ?? 'splunk-hec.example.com'}
+    hec_port 8088
+    hec_token ${splunkHecToken ?? 'REPLACE_WITH_HEC_TOKEN'}
+  </match>
+</label>`;
+  }
+  return '';
+}
 
-  filebeat: {
-    label: 'Filebeat',
-    integrationMode:
-      'DaemonSet with the Reporter as a sidecar. Uses the log10x-repackaged filebeat-10x chart.',
-    helmRepo: 'https://log-10x.github.io/elastic-helm-charts',
-    helmRepoAlias: 'log10x-elastic',
-    chartRef: 'log10x-elastic/filebeat-10x',
-    chartAvailability: 'published',
-    primaryImageHint: 'ghcr.io/log-10x/filebeat-10x',
-    renderValues: ({ apiKey, releaseName, destination, outputHost }) => {
-      const tenx = baseTenxBlock(apiKey, releaseName);
-      let output = '';
-      if (destination === 'mock') {
-        output = `daemonset:
-  filebeatConfig:
-    filebeat.yml: |
-      filebeat.inputs:
-      - type: container
-        paths:
-        - /var/log/containers/*.log
-      # ${MOCK_OUTPUT_NOTE}
-      output.console:
-        pretty: false`;
-      } else if (destination === 'elasticsearch') {
-        output = `daemonset:
-  filebeatConfig:
-    filebeat.yml: |
-      filebeat.inputs:
-      - type: container
-        paths:
-        - /var/log/containers/*.log
-      output.elasticsearch:
-        hosts: ["https://${outputHost ?? 'elasticsearch-master'}:9200"]`;
-      }
-      return `${tenx}\n\n${output}\n`;
-    },
-    verifyProbes: ({ releaseName, namespace }) => [
-      {
-        name: 'pods-ready',
-        question: 'Are Filebeat+Reporter DaemonSet pods Ready?',
-        commands: [
-          `kubectl -n ${namespace} wait --for=condition=Ready pod -l app.kubernetes.io/instance=${releaseName} --timeout=5m`,
-        ],
-        expectOutput: 'condition met',
-        timeoutSec: 300,
-      },
-      {
-        name: 'reporter-processing',
-        question: 'Is the 10x sidecar processing events?',
-        commands: [
-          `kubectl -n ${namespace} logs -l app.kubernetes.io/instance=${releaseName} -c tenx --tail=200 | grep -E 'pattern|metric|record' | head -20`,
-        ],
-      },
-    ],
-  },
+function renderFilebeatOutput(destination: OutputDestination, outputHost?: string): string {
+  if (destination === 'mock') {
+    // output.console breaks the 10x stdout pipe per chart docs; use
+    // output.file into a path only we tail to keep verification clean.
+    return `filebeat.inputs:
+- type: container
+  paths:
+  - /var/log/containers/*.log
+processors:
+- add_fields:
+    target: ""
+    fields:
+      _tenx_mock_prefix: "[TENX-MOCK]"
+${MOCK_OUTPUT_NOTE}
+output.file:
+  path: "/tmp"
+  filename: "tenx-mock"
+  rotate_every_kb: 10000
+  number_of_files: 5`;
+  }
+  if (destination === 'elasticsearch') {
+    return `filebeat.inputs:
+- type: container
+  paths:
+  - /var/log/containers/*.log
+output.elasticsearch:
+  hosts: ["https://${outputHost ?? 'elasticsearch-master'}:9200"]`;
+  }
+  return '';
+}
 
-  vector: {
-    label: 'Vector',
-    integrationMode:
-      'DaemonSet using upstream Vector with the Reporter as a sidecar container. The log10x-repackaged Vector chart is in active development; until it ships, use the upstream Vector Helm chart + manual sidecar.',
-    helmRepo: 'https://helm.vector.dev',
-    helmRepoAlias: 'vector',
-    chartRef: 'vector/vector',
-    chartAvailability: 'upstream-fallback',
-    primaryImageHint: 'timberio/vector:0.40.0-debian',
-    renderValues: ({ apiKey, releaseName, destination, outputHost }) => {
-      const tenx = baseTenxBlock(apiKey, releaseName);
-      // Vector config is TOML-via-YAML-string. For mock, use the `console` sink.
-      let sink = '';
-      if (destination === 'mock') {
-        sink = `      [sinks.mock_out]
-      type = "console"
-      inputs = ["kubernetes_logs"]
-      encoding.codec = "json"`;
-      } else if (destination === 'elasticsearch') {
-        sink = `      [sinks.es]
-      type = "elasticsearch"
-      inputs = ["kubernetes_logs"]
-      endpoint = "https://${outputHost ?? 'elasticsearch-master'}:9200"`;
-      }
-      return `# ${MOCK_OUTPUT_NOTE}
-# NOTE: the log10x Vector chart is WIP. This template uses upstream Vector
-# with a manually-added tenx sidecar via extraContainers. Confirm
-# chart availability via \`helm search repo vector/vector\`.
-
-${tenx}
-
-role: Agent
-customConfig:
-  data_dir: /vector-data-dir
-  sources:
-    kubernetes_logs:
-      type: kubernetes_logs
+function renderVectorSinks(destination: OutputDestination, outputHost?: string): string {
+  if (destination === 'mock') {
+    return `  transforms:
+    tenx_mock_mark:
+      type: remap
+      inputs: [kubernetes_logs]
+      source: |
+        .message = "[TENX-MOCK] " + string!(.message ?? "")
   sinks:
-${sink}
-`;
-    },
-    verifyProbes: ({ releaseName, namespace }) => [
-      {
-        name: 'pods-ready',
-        question: 'Are Vector+Reporter DaemonSet pods Ready?',
-        commands: [
-          `kubectl -n ${namespace} wait --for=condition=Ready pod -l app.kubernetes.io/instance=${releaseName} --timeout=5m`,
-        ],
-        expectOutput: 'condition met',
-        timeoutSec: 300,
-      },
-      {
-        name: 'reporter-processing',
-        question: 'Is the 10x sidecar processing events?',
-        commands: [
-          `kubectl -n ${namespace} logs -l app.kubernetes.io/instance=${releaseName} -c tenx --tail=200 | grep -E 'pattern|metric|record' | head -20`,
-        ],
-      },
-    ],
-  },
+    tenx_socket:
+      type: socket
+      mode: unix
+      inputs: [tenx_mock_mark]
+      path: /var/run/tenx/ingest.sock
+      encoding:
+        codec: json
+    mock_out:
+      type: console
+      inputs: [tenx_mock_mark]
+      encoding:
+        codec: json`;
+  }
+  if (destination === 'elasticsearch') {
+    return `  sinks:
+    tenx_socket:
+      type: socket
+      mode: unix
+      inputs: [kubernetes_logs]
+      path: /var/run/tenx/ingest.sock
+      encoding:
+        codec: json
+    es:
+      type: elasticsearch
+      inputs: [kubernetes_logs]
+      endpoint: "https://${outputHost ?? 'elasticsearch-master'}:9200"`;
+  }
+  return '  sinks: {}';
+}
 
-  logstash: {
-    label: 'Logstash',
-    integrationMode:
-      'StatefulSet (Logstash is not a DaemonSet) with the Reporter as a sidecar. Uses the log10x-repackaged logstash-10x chart.',
-    helmRepo: 'https://log-10x.github.io/elastic-helm-charts',
-    helmRepoAlias: 'log10x-elastic',
-    chartRef: 'log10x-elastic/logstash-10x',
-    chartAvailability: 'published',
-    primaryImageHint: 'ghcr.io/log-10x/logstash-10x',
-    renderValues: ({ apiKey, releaseName, destination, outputHost }) => {
-      const tenx = baseTenxBlock(apiKey, releaseName);
-      let outputs = '';
-      if (destination === 'mock') {
-        outputs = `# ${MOCK_OUTPUT_NOTE}
-logstashPipeline:
-  output.conf: |
-    output {
-      stdout {
-        codec => json_lines
-      }
-    }`;
-      } else if (destination === 'elasticsearch') {
-        outputs = `logstashPipeline:
-  output.conf: |
-    output {
-      elasticsearch {
-        hosts => ["${outputHost ?? 'elasticsearch-master'}:9200"]
-        index => "logs-%{+YYYY.MM.dd}"
-      }
-    }`;
-      }
-      return `${tenx}\n\n${outputs}\n`;
-    },
-    verifyProbes: ({ releaseName, namespace }) => [
-      {
-        name: 'pods-ready',
-        question: 'Are Logstash+Reporter StatefulSet pods Ready?',
-        commands: [
-          `kubectl -n ${namespace} wait --for=condition=Ready pod -l app.kubernetes.io/instance=${releaseName} --timeout=10m`,
-        ],
-        expectOutput: 'condition met',
-        timeoutSec: 600,
-      },
-      {
-        name: 'reporter-processing',
-        question: 'Is the 10x sidecar processing events?',
-        commands: [
-          `kubectl -n ${namespace} logs -l app.kubernetes.io/instance=${releaseName} -c tenx --tail=200 | grep -E 'pattern|metric|record' | head -20`,
-        ],
-      },
-    ],
-  },
+function renderLogstashOutput(destination: OutputDestination, outputHost?: string): string {
+  if (destination === 'mock') {
+    return `${MOCK_OUTPUT_NOTE}
+filter {
+  mutate { add_field => { "_tenx_mock_prefix" => "[TENX-MOCK]" } }
+}
+output {
+  stdout {
+    codec => json_lines
+  }
+}`;
+  }
+  if (destination === 'elasticsearch') {
+    return `output {
+  elasticsearch {
+    hosts => ["${outputHost ?? 'elasticsearch-master'}:9200"]
+    index => "logs-%{+YYYY.MM.dd}"
+  }
+}`;
+  }
+  return 'output { }';
+}
 
-  'otel-collector': {
-    label: 'OTel Collector',
-    integrationMode:
-      'DaemonSet using the log10x-repackaged otel-collector-10x chart. The Reporter runs as a sidecar and receives events from the collector via a local Unix socket.',
-    helmRepo: 'https://log-10x.github.io/opentelemetry-helm-charts',
-    helmRepoAlias: 'log10x-otel',
-    chartRef: 'log10x-otel/otel-collector-10x',
-    chartAvailability: 'published',
-    primaryImageHint: 'ghcr.io/log-10x/otel-collector-10x',
-    renderValues: ({ apiKey, releaseName, destination, outputHost }) => {
-      const tenx = baseTenxBlock(apiKey, releaseName);
-      let exporter = '';
-      if (destination === 'mock') {
-        exporter = `config:
-  exporters:
-    debug:
-      verbosity: basic
-  service:
-    pipelines:
-      logs:
-        receivers: [filelog]
-        processors: [memory_limiter, batch]
-        # ${MOCK_OUTPUT_NOTE}
-        exporters: [debug]`;
-      } else if (destination === 'elasticsearch') {
-        exporter = `config:
-  exporters:
-    elasticsearch:
-      endpoints: ["https://${outputHost ?? 'elasticsearch-master'}:9200"]
-      logs_index: logs
-  service:
-    pipelines:
-      logs:
-        receivers: [filelog]
-        processors: [memory_limiter, batch]
-        exporters: [elasticsearch]`;
-      }
-      return `mode: "daemonset"\n\n${tenx}\n\n${exporter}\n`;
-    },
-    verifyProbes: ({ releaseName, namespace }) => [
-      {
-        name: 'pods-ready',
-        question: 'Are OTel Collector+Reporter pods Ready?',
-        commands: [
-          `kubectl -n ${namespace} wait --for=condition=Ready pod -l app.kubernetes.io/instance=${releaseName} --timeout=5m`,
-        ],
-        expectOutput: 'condition met',
-        timeoutSec: 300,
-      },
-      {
-        name: 'reporter-processing',
-        question: 'Is the 10x sidecar processing events?',
-        commands: [
-          `kubectl -n ${namespace} logs -l app.kubernetes.io/instance=${releaseName} -c tenx --tail=200 | grep -E 'pattern|metric|record' | head -20`,
-        ],
-      },
-    ],
-  },
-};
+function renderOtelExporter(destination: OutputDestination, outputHost?: string): string {
+  if (destination === 'mock') {
+    return `debug:
+  verbosity: basic`;
+  }
+  if (destination === 'elasticsearch') {
+    return `elasticsearch:
+  endpoints: ["https://${outputHost ?? 'elasticsearch-master'}:9200"]
+  logs_index: logs`;
+  }
+  return '';
+}
+
+/** Indent every line of `s` by `spaces` spaces. */
+function indent(s: string, spaces: number): string {
+  const pad = ' '.repeat(spaces);
+  return s
+    .split('\n')
+    .map((line) => (line.length > 0 ? pad + line : line))
+    .join('\n');
+}
