@@ -41,11 +41,23 @@ import type { ForwarderKind } from '../discovery/types.js';
 
 export type OutputDestination = 'mock' | 'elasticsearch' | 'splunk' | 'datadog' | 'cloudwatch';
 
-/**
- * Which tenx kind this install is for. `report` → Reporter (read-only
- * metric emission). `regulate` → Regulator (read + write events back
- * through the forwarder with mute/sample applied).
- */
+// Which tenx kind this install is for.
+//   report   -> Reporter (read-only metric emission)
+//   regulate -> Regulator (read + write events back through the forwarder)
+//
+// 'optimize' is intentionally NOT in this union. Per config-repo commit
+// 6960e01 ("Feature/edge apps rework - Integrate optimizer into regulator")
+// the standalone optimize mode was folded into regulate with a
+// regulatorOptimize flag. But verified on the live demo cluster
+// 2026-04-22, BOTH paths are broken at engine init:
+//   - kind=optimize: missing include 'run/input/forwarder/*/optimize/config.yaml'
+//     (intentionally deleted in 6960e01, chart still references it)
+//   - kind=regulate + regulatorOptimize=true: the config's yield-macro
+//     'encodeObjects: $=yield TenXEnv.get("regulatorOptimize", false)'
+//     fails the boolean option parser with ParameterException
+//     (engine sees literal macro string, not its evaluation)
+// See VERIFICATION-HANDOFF.md 'Deferred #4' for the full trace and
+// the two unblock paths (config-side vs engine-side).
 export type TenxKind = 'report' | 'regulate';
 
 /** How a forwarder's helm chart labels its workloads + pods. */
