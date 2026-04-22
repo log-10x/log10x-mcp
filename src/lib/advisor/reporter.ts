@@ -124,6 +124,21 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
       'Destination is `mock` (events written to forwarder stdout). Ideal for dogfooding or smoke tests; switch to `elasticsearch`, `splunk`, `datadog`, or `cloudwatch` for production.'
     );
   }
+  // Surface the non-invasive alternative for the Reporter app. The
+  // `log10x-k8s/reporter-10x@1.0.7` chart ships a parallel DaemonSet
+  // (fluent-bit + tenx-edge, ~250Mi/150m per node) that reads the same
+  // /var/log/containers/*.log files the user's existing forwarder already
+  // tails, so it adds reporter observability WITHOUT replacing or
+  // reconfiguring the production log path. Verified end-to-end 2026-04-21:
+  // Forward-protocol unix socket wiring + backpressure tester firing on
+  // real 2MB/s traffic + "📈 Publishing TenXSummary metrics to the log10x
+  // backend". This is the cleanest install path when the user doesn't
+  // want to touch their existing logstash/filebeat/etc. pipeline.
+  if (app === 'reporter') {
+    notes.push(
+      'Alternative: the `log10x-k8s/reporter-10x@1.0.7` chart deploys a standalone non-invasive DaemonSet (fluent-bit + tenx-edge) that tails the same container logs your existing forwarder reads, without replacing it. Install with `helm install <name> log10x-k8s/reporter-10x --set log10xApiKey=<key> --set runtimeName=<name>` (leave `config.git.enabled=false` so the chart uses the image-baked config). Recommended when you don\'t want the 10x logic running inside your production forwarder.'
+    );
+  }
 
   const install: PlanStep[] = [];
   const verify: VerifyProbe[] = [];
