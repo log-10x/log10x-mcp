@@ -585,21 +585,44 @@ function renderFluentdOutputConfig(
 
 function renderFilebeatOutput(destination: OutputDestination, outputHost?: string): string {
   if (destination === 'mock') {
-    // output.console breaks the 10x stdout pipe per chart docs; use
-    // output.file into a path only we tail to keep verification clean.
-    // NOTE: the caller must also override the chart's readiness probe
-    // (`filebeat test output` — which doesn't support file output) via
-    // `daemonset.readinessProbe` + `daemonset.livenessProbe`. The advisor's
-    // install steps emit those overrides alongside this config.
+    // CRITICAL: the chart's default filebeat.yml includes a
+    // \`processors: script\` step that runs tenx-report.js — which
+    // marks each event with "tenx":true and writes it to stdout so
+    // the tenx-edge process (reading filebeat's stdout via
+    // \`filebeat ... 2>&1 | tenx-edge run ...\` in docker-entrypoint)
+    // can ingest it. Replacing filebeat.yml without that script
+    // processor means tenx sees zero events.
+    //
+    // Include the script processor here, per-forwarder-kind, so tenx
+    // actually processes the data. The chart exposes the script
+    // paths as \`tenx.processors.<kind>\` — but since we're fully
+    // overriding filebeatConfig, we hardcode the path to tenx-report.js
+    // which is baked at a known location in every log10x/filebeat-10x
+    // image.
+    //
+    // output.file writes the regular event stream to /tmp/tenx-mock-*
+    // for "is the forwarder working" verification. The script-processor
+    // side writes separately to stdout for tenx ingestion.
     return `filebeat.inputs:
 - type: container
   paths:
   - /var/log/containers/*.log
+  processors:
+  - add_kubernetes_metadata:
+      host: \${NODE_NAME}
+      matchers:
+      - logs_path:
+          logs_path: "/var/log/containers/"
+  - script:
+      lang: javascript
+      file: \${TENX_MODULES}/pipelines/run/modules/input/forwarder/filebeat/script/tenx-report.js
+
 processors:
 - add_fields:
     target: ""
     fields:
       _tenx_mock_prefix: "TENX-MOCK"
+
 ${MOCK_OUTPUT_NOTE}
 output.file:
   path: "/tmp"
