@@ -9,7 +9,7 @@
 
 import { z } from 'zod';
 import { getSnapshot } from '../lib/discovery/snapshot-store.js';
-import { buildReporterPlan } from '../lib/advisor/reporter.js';
+import { buildReporterPlan, type DeploymentShape } from '../lib/advisor/reporter.js';
 import { renderPlan } from '../lib/advisor/render.js';
 import type { ForwarderKind } from '../lib/discovery/types.js';
 import type { OutputDestination } from '../lib/advisor/reporter-forwarders.js';
@@ -18,11 +18,17 @@ export const adviseReporterSchema = {
   snapshot_id: z
     .string()
     .describe('ID returned by `log10x_discover_env`. The snapshot is cached for 30 min.'),
+  shape: z
+    .enum(['inline', 'standalone'])
+    .optional()
+    .describe(
+      'Deployment shape. Default: `inline` — installs a log10x-repackaged version of the user\'s forwarder chart (tenx baked in), replacing the existing deployment. `standalone` — installs `log10x-k8s/reporter-10x` as a parallel DaemonSet alongside the user\'s forwarder (zero-touch, report-mode only). When unsure which to pick, call `log10x_advise_install` first.'
+    ),
   forwarder: z
     .enum(['fluent-bit', 'fluentd', 'filebeat', 'logstash', 'otel-collector'])
     .optional()
     .describe(
-      'Forwarder to target. If omitted, uses the forwarder detected in the snapshot (falls back to fluent-bit when none is detected).'
+      'Forwarder to target. Drives chart selection when shape=inline. When shape=standalone, stays in the plan as detected context only. If omitted, uses the forwarder detected in the snapshot (falls back to fluent-bit when none is detected).'
     ),
   release_name: z
     .string()
@@ -73,6 +79,7 @@ export async function executeAdviseReporter(args: AdviseReporterArgs): Promise<s
   const action = args.action ?? 'all';
   const plan = await buildReporterPlan({
     snapshot,
+    shape: args.shape as DeploymentShape | undefined,
     forwarder: args.forwarder as ForwarderKind | undefined,
     releaseName: args.release_name,
     namespace: args.namespace,
