@@ -179,9 +179,9 @@ test('helm-managed fluentd + goal=compact → inline regulator + optimize=true',
   assert.equal(rec.topPick.args.optimize, true);
 });
 
-// ── Rule 5: helm-managed filebeat + goal=compact → blocked (1.0.6 chart) ──
+// ── Rule 5: helm-managed filebeat + goal=compact → inline regulator + optimize (1.0.7 unified) ──
 
-test('helm-managed filebeat + goal=compact → top pick is NOT optimize (1.0.6 blocked)', () => {
+test('helm-managed filebeat + goal=compact → inline regulator + optimize=true (1.0.7)', () => {
   const rec = recommendInstallMode({
     snapshot: baseSnapshot({
       kubectl: {
@@ -196,16 +196,15 @@ test('helm-managed filebeat + goal=compact → top pick is NOT optimize (1.0.6 b
     }),
     goal: 'compact',
   });
-  // The inline-regulator+optimize alt for filebeat must be blocked.
+  // With chart 1.0.7, filebeat + optimize is no longer blocked.
   const fbOptimize = rec.alternatives.find(
     (a) => a.args.forwarder === 'filebeat' && a.args.shape === 'inline' && a.args.optimize === true
   );
   assert.ok(fbOptimize);
-  assert.ok(
-    fbOptimize?.blocker?.toLowerCase().includes('optimize'),
-    `filebeat + optimize should be blocked: ${fbOptimize?.blocker}`
-  );
-  // Top pick cannot be a blocked alt.
+  assert.equal(fbOptimize?.blocker, undefined, `filebeat + optimize should be available on 1.0.7; got: ${fbOptimize?.blocker}`);
+  // Top pick for goal=compact on filebeat is the optimize alt itself.
+  assert.equal(rec.topPick.args.forwarder, 'filebeat');
+  assert.equal(rec.topPick.args.optimize, true);
   assert.equal(rec.topPick.blocker, undefined);
 });
 
