@@ -45,19 +45,18 @@ export type OutputDestination = 'mock' | 'elasticsearch' | 'splunk' | 'datadog' 
 //   report   -> Reporter (read-only metric emission)
 //   regulate -> Regulator (read + write events back through the forwarder)
 //
-// 'optimize' is intentionally NOT in this union. Per config-repo commit
-// 6960e01 ("Feature/edge apps rework - Integrate optimizer into regulator")
-// the standalone optimize mode was folded into regulate with a
-// regulatorOptimize flag. But verified on the live demo cluster
-// 2026-04-22, BOTH paths are broken at engine init:
-//   - kind=optimize: missing include 'run/input/forwarder/*/optimize/config.yaml'
-//     (intentionally deleted in 6960e01, chart still references it)
-//   - kind=regulate + regulatorOptimize=true: the config's yield-macro
-//     'encodeObjects: $=yield TenXEnv.get("regulatorOptimize", false)'
-//     fails the boolean option parser with ParameterException
-//     (engine sees literal macro string, not its evaluation)
-// See VERIFICATION-HANDOFF.md 'Deferred #4' for the full trace and
-// the two unblock paths (config-side vs engine-side).
+// For fluent-bit / fluentd charts at 1.0.7 the `tenx.kind` field is
+// silently ignored — they always run the regulator pipeline. For
+// filebeat / logstash / otel-collector still at 1.0.6, kind is honored.
+//
+// Optimizer mode (lossless encoded-event output, verified 2026-04-22
+// on demo cluster: `"log":"~-8Av]P9cVZb,timestamp,var1,var2,..."` —
+// 20-40x volume reduction per event) is NOT exposed as a kind. It is
+// triggered by setting `env: [{name: regulatorOptimize, value: "true"}]`
+// on the forwarder container. The chart's own `tenx.optimize: true`
+// field is broken (points at a `tenx-optimize.lua` file the 1.0.7
+// image does not ship). Expose as a distinct `optimize: boolean`
+// parameter on `advise-regulator` in a follow-up.
 export type TenxKind = 'report' | 'regulate';
 
 /** How a forwarder's helm chart labels its workloads + pods. */
