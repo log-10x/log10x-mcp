@@ -147,6 +147,19 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
       'Destination is `mock` (events written to forwarder stdout). Ideal for dogfooding or smoke tests; switch to `elasticsearch`, `splunk`, `datadog`, or `cloudwatch` for production.'
     );
   }
+  // Filebeat's tenx integration is hardcoded in the log10x/filebeat-10x
+  // Dockerfile: `filebeat 2>&1 | tenx-edge run …`. The tenx subprocess
+  // reads events from filebeat's stdout — which means `output.console`
+  // in the user's filebeat.yml (or any output that writes to stdout)
+  // corrupts the tenx input stream. This is NOT overridable at the
+  // chart level. The mock destination the advisor ships uses
+  // `output.file: /tmp/tenx-mock-*`, which is safe; any non-stdout
+  // output (elasticsearch, splunk, logstash, kafka, etc.) is also safe.
+  if (forwarder === 'filebeat') {
+    notes.push(
+      "Filebeat constraint: **do not configure `output.console`** in `filebeat.yml`. Filebeat's tenx integration uses its stdout as the pipe to the 10x engine (baked into the `log10x/filebeat-10x` Dockerfile entrypoint: `filebeat 2>&1 | tenx-edge run …`). Any output that writes to stdout corrupts that pipe. Use `output.elasticsearch`, `output.file`, `output.logstash`, `output.kafka`, etc. — the mock destination used by this plan is `output.file` (safe by default)."
+    );
+  }
   // Surface the non-invasive alternative for the Reporter app. The
   // `log10x-k8s/reporter-10x@1.0.7` chart ships a parallel DaemonSet
   // (fluent-bit + tenx-edge, ~250Mi/150m per node) that reads the same

@@ -762,6 +762,15 @@ function renderFilebeatOutput(destination: OutputDestination, outputHost?: strin
     // which is baked at a known location in every log10x/filebeat-10x
     // image.
     //
+    // CRITICAL (Dor, 2026-04-22): filebeat + log10x is INCOMPATIBLE with
+    // \`output.console\`. The tenx subprocess reads from filebeat's
+    // stdout — the same channel \`output.console\` writes to — so a
+    // console output corrupts the tenx input stream. Use output.file
+    // (below) for mock verification, or any non-stdout output in prod
+    // (elasticsearch, splunk, logstash, kafka, etc.). The log10x/
+    // filebeat-10x Dockerfile hardcodes this pipe assumption, so it's
+    // not overridable at the chart level.
+    //
     // output.file writes the regular event stream to /tmp/tenx-mock-*
     // for "is the forwarder working" verification. The script-processor
     // side writes separately to stdout for tenx ingestion.
