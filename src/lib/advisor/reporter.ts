@@ -79,6 +79,17 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
       `No forwarder template for kind '${forwarder}'. Pass forwarder ∈ ${Object.keys(REPORTER_FORWARDER_SPECS).join('|')}.`
     );
   }
+  // VERIFIED 2026-04-21: logstash chart is broken in sidecar mode — tenx
+  // expects to be spawned by logstash's pipe output plugin (so its stdin is
+  // wired to logstash), but the chart runs tenx as an independent side
+  // container. Pipeline inits, then shuts down after ~9s with no input.
+  // Surface this as a blocker so we never produce install instructions
+  // that can't possibly work.
+  if (spec && forwarder === 'logstash') {
+    blockers.push(
+      "The log10x-elastic/logstash@1.0.6 chart is broken for sidecar mode: tenx needs to be a child process of logstash (spawned by the `pipe` output plugin), but the chart runs it as a separate container reading from its own stdin. Pipeline inits then shuts down after ~9s with no input. Use fluent-bit, fluentd, or otel-collector until the chart is fixed, OR deploy `log10x-k8s/reporter-10x` (non-invasive, parallel DaemonSet) alongside your existing logstash."
+    );
+  }
   if (!args.apiKey && !args.skipInstall) {
     blockers.push(
       'Log10x license key is required to produce an install plan. Pass `api_key` or set the snapshot-wide default and re-run. (Teardown and verify plans work without it.)'

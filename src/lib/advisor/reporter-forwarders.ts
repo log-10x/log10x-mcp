@@ -207,6 +207,9 @@ ${outputBlock}
       // template emitted two `tenx:` keys and YAML silently dropped
       // the first — losing apiKey/kind/runtimeName/git config entirely.
       const outputConfig = renderFluentdOutputConfig(destination, outputHost, splunkHecToken);
+      const fluentdExcludePaths = FORWARDER_EXCLUDE_REGEX.map((g) => `/var/log/containers/${g.replace('.*', '*').replace('\\.log$', '.log')}`)
+        .map((g) => `"${g}"`)
+        .join(', ');
       return `tenx:
   enabled: true
   apiKey: "${apiKey}"
@@ -217,6 +220,40 @@ ${outputBlock}
     git:
       enabled: true
       url: "https://github.com/log-10x/config.git"
+  # Override the default container-log tail input to exclude all log-forwarder
+  # container logs (fluent-bit, fluentd, filebeat, logstash, otel-collector).
+  # Without this, when multiple forwarders share a node, each tails the other's
+  # stdout and events recurse — verified to crash the tenx aggregator on 40KB+
+  # self-referential events.
+  fileConfigs:
+    01_sources.conf: |-
+      <source>
+        @type tail
+        @id in_tail_container_logs
+        @label @CONCAT
+        path /var/log/containers/*.log
+        exclude_path [${fluentdExcludePaths}]
+        pos_file /var/log/fluentd-containers.log.pos
+        tag raw.kubernetes.*
+        read_from_head true
+        <parse>
+          @type multi_format
+          <pattern>
+            format json
+            time_key time
+            time_type string
+            time_format "%Y-%m-%dT%H:%M:%S.%NZ"
+            keep_time_key false
+          </pattern>
+          <pattern>
+            format regexp
+            expression /^(?<time>.+) (?<stream>stdout|stderr)( (?<logtag>.))? (?<log>.*)$/
+            time_format '%Y-%m-%dT%H:%M:%S.%N%:z'
+            keep_time_key false
+          </pattern>
+        </parse>
+        emit_unmatched_lines true
+      </source>
   outputConfigs:
     06_final_output.conf: |-
 ${indent(outputConfig, 6)}
@@ -342,12 +379,21 @@ ${indent(outputBlock, 6)}
 
   logstash: {
     label: 'Logstash',
+    // VERIFIED 2026-04-21: the log10x-elastic/logstash@1.0.6 chart is
+    // BROKEN in sidecar mode. The chart runs tenx as a separate pod
+    // container reading from its own STDIN, but the tenx-logstash design
+    // expects tenx to be a CHILD PROCESS of logstash spawned by the
+    // `pipe` output plugin (so tenx's stdin is wired to logstash's pipe).
+    // With the chart's layout, tenx.stdin is a tty, it sees no input,
+    // and after ~9s the pipeline shuts down. Do NOT ship this path to
+    // users until the chart is fixed or a sidecar-capable launcher is
+    // added to tenx-edge.
     integrationMode:
-      'StatefulSet using the log10x-repackaged Logstash image (`log10x/logstash-10x`). 10x logic runs inside the `logstash` container via a filter plugin. Chart uses legacy Helm labels.',
+      'StatefulSet + `tenx` sidecar — CURRENTLY BROKEN: the chart runs tenx as a side container reading from its own stdin, but tenx-logstash expects to be spawned by the logstash `pipe` output plugin. Do not advise users to install this until the chart is fixed.',
     helmRepo: 'https://log-10x.github.io/elastic-helm-charts',
     helmRepoAlias: 'log10x-elastic',
     chartRef: 'log10x-elastic/logstash',
-    chartAvailability: 'published',
+    chartAvailability: 'wip',
     primaryImageHint: 'ghcr.io/log-10x/logstash-10x',
     primaryContainerName: 'logstash',
     hasTenxSidecar: false,
@@ -496,6 +542,23 @@ ${indent(exporter, 4)}
 // ── Destination-specific sub-renderers ──
 // Pulled out so the destination logic lives in one place per forwarder.
 
+// Exclude all known log-forwarder container logs from the tail input.
+// Without this, every forwarder on a node tails every OTHER forwarder's
+// output, producing runaway recursion where each event contains all the
+// prior forwarded events escaped inside. Verified: 40KB+ events crash
+// the tenx aggregator with ArrayIndexOutOfBoundsException / OOM.
+const FORWARDER_EXCLUDE_GLOBS =
+  '/var/log/containers/*fluent-bit*.log,/var/log/containers/*fluentd*.log,/var/log/containers/*filebeat*.log,/var/log/containers/*logstash*.log,/var/log/containers/*otel-collector*.log,/var/log/containers/*opentelemetry-collector*.log';
+
+const FORWARDER_EXCLUDE_REGEX = [
+  '.*fluent-bit.*\\.log$',
+  '.*fluentd.*\\.log$',
+  '.*filebeat.*\\.log$',
+  '.*logstash.*\\.log$',
+  '.*otel-collector.*\\.log$',
+  '.*opentelemetry-collector.*\\.log$',
+];
+
 function renderFluentBitOutput(
   destination: OutputDestination,
   outputHost?: string,
@@ -507,6 +570,15 @@ function renderFluentBitOutput(
     // an unterminated character class and the filter crashes at init.
     // `record_modifier` treats the value as a literal string.
     return `config:
+  inputs: |
+    [INPUT]
+        Name tail
+        Path /var/log/containers/*.log
+        Exclude_Path ${FORWARDER_EXCLUDE_GLOBS}
+        multiline.parser docker, cri
+        Tag kube.*
+        Mem_Buf_Limit 5MB
+        Skip_Long_Lines On
   outputs: |
     ${MOCK_OUTPUT_NOTE}
     [OUTPUT]
@@ -604,9 +676,16 @@ function renderFilebeatOutput(destination: OutputDestination, outputHost?: strin
     // for "is the forwarder working" verification. The script-processor
     // side writes separately to stdout for tenx ingestion.
     return `filebeat.inputs:
+- type: filestream
+  id: tenx_internal
+  paths:
+    - \${TENX_LOG_PATH:/etc/tenx/log}/*.log
+  fields:
+    log_type: tenx_internal
 - type: container
   paths:
   - /var/log/containers/*.log
+  exclude_files: ${JSON.stringify(FORWARDER_EXCLUDE_REGEX)}
   processors:
   - add_kubernetes_metadata:
       host: \${NODE_NAME}
