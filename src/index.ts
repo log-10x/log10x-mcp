@@ -53,6 +53,7 @@ import { discoverEnvSchema, executeDiscoverEnv } from './tools/discover-env.js';
 import { adviseReporterSchema, executeAdviseReporter } from './tools/advise-reporter.js';
 import { adviseRegulatorSchema, executeAdviseRegulator } from './tools/advise-regulator.js';
 import { adviseStreamerSchema, executeAdviseStreamer } from './tools/advise-streamer.js';
+import { adviseInstallSchema, executeAdviseInstall } from './tools/advise-install.js';
 import { getStatus } from './resources/status.js';
 
 // ── Environment + cost cache ──
@@ -530,6 +531,15 @@ server.tool(
   (args) => wrap('log10x_advise_regulator', () => executeAdviseRegulator(args))
 );
 
+// ── Tool: log10x_advise_install (mode selector + front-end advisor) ──
+
+server.tool(
+  'log10x_advise_install',
+  'Front-end install advisor — picks the RIGHT install path based on what `log10x_discover_env` detected. Sits in front of `log10x_advise_{reporter,regulator,streamer}`. Takes a snapshot_id + optional `goal` and decides between: standalone reporter (log10x-k8s/reporter-10x parallel DaemonSet, zero-touch to user forwarder), inline reporter/regulator (log10x-repackaged forwarder charts that replace the user\'s deployment), or Streamer (S3 archive). Detection rules: no forwarder OR hand-rolled forwarder → standalone; helm-managed fluent-bit/fluentd → inline (optimize-capable on 1.0.7); helm-managed filebeat/otel-collector → inline without optimize (1.0.6); helm-managed logstash → standalone (chart broken for sidecar mode). **Two call modes**: (1) with `goal` → returns a concrete install plan for the top-ranked path; goals are `just-metrics` (pattern fingerprinting + cost attribution), `cut-cost` (regulate: filter/sample), `compact` (regulate + compact encoding, only on fluent-bit/fluentd 1.0.7), `archive` (Streamer). (2) without `goal` → returns a ranked table of candidates + structured top-pick args so the caller can re-invoke with `goal=<winner>` or jump to an app-specific advisor. Call this BEFORE `log10x_advise_reporter`/`log10x_advise_regulator`/`log10x_advise_streamer` when you want the tool to pick the shape/app/forwarder combination for you. **Tier prerequisites**: none — this is a pre-install tool.',
+  adviseInstallSchema,
+  (args) => wrap('log10x_advise_install', () => executeAdviseInstall(args))
+);
+
 // ── Resource: log10x://status ──
 
 server.resource(
@@ -566,6 +576,11 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_discover_join', intent: 'Auto-discover the join label between Log10x pattern metrics and the customer metric backend via Jaccard similarity' },
   { name: 'log10x_correlate_cross_pillar', intent: 'Bidirectional cross-pillar correlation with structural validation — confirmed / service-match / coincidence / unconfirmed tiering' },
   { name: 'log10x_translate_metric_to_patterns', intent: 'Given a customer APM metric, return the Log10x patterns whose rate curves correspond — with structural validation' },
+  { name: 'log10x_discover_env', intent: 'Read-only probe of k8s + AWS — returns a snapshot_id the advise_* tools consume' },
+  { name: 'log10x_advise_install', intent: 'Front-end install advisor — picks standalone vs inline + app + forwarder + optimize based on what was detected' },
+  { name: 'log10x_advise_reporter', intent: 'Reporter install/verify/teardown plan for a forwarder — inline or standalone (shape=standalone)' },
+  { name: 'log10x_advise_regulator', intent: 'Regulator install/verify/teardown plan — inline only, with optional compact encoding (optimize=true)' },
+  { name: 'log10x_advise_streamer', intent: 'Streamer install/verify/teardown plan — standalone S3 + SQS archive + query' },
 ];
 
 async function handleCliFlags(): Promise<boolean> {

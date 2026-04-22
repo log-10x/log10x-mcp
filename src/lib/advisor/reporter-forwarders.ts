@@ -629,6 +629,86 @@ ${indent(exporter, 4)}
   },
 };
 
+// ── Standalone Reporter spec (reporter-10x chart) ──
+//
+// Architecturally distinct from the inline specs above: the `reporter-10x`
+// chart deploys a parallel DaemonSet (fluent-bit + tenx-edge) that tails
+// the same /var/log/containers/*.log files the user's existing forwarder
+// already tails, WITHOUT replacing or reconfiguring that forwarder. It is
+// zero-touch: no values to patch on the user's prod pipeline, no pods to
+// restart on their critical path.
+//
+// Kept as a separate export rather than a 6th entry in
+// REPORTER_FORWARDER_SPECS because the spec map is keyed by "which user
+// forwarder kind do we replace" — and standalone replaces none. It runs
+// alongside whatever the user has (or nothing). Callers select standalone
+// via `shape: 'standalone'` in ReporterAdviseArgs; `forwarder` stays in
+// the plan as detected context only.
+//
+// Only supports app=reporter (kind=report). The reporter-10x chart has no
+// path to hook into the user's forwarder's output to regulate / compact
+// events — it only emits metrics. Callers passing app='regulator' or
+// optimize=true with shape='standalone' get a blocker.
+export const STANDALONE_SPEC: ForwarderSpec = {
+  label: 'Standalone Reporter (reporter-10x)',
+  integrationMode:
+    'Parallel DaemonSet using the log10x-k8s/reporter-10x chart — bundles fluent-bit + tenx-edge. Tails /var/log/containers/*.log alongside your existing forwarder without touching it. Report-mode only (metrics, no filtering or encoded output).',
+  helmRepo: 'https://log-10x.github.io/helm-charts',
+  helmRepoAlias: 'log10x-k8s',
+  chartRef: 'log10x-k8s/reporter-10x',
+  chartAvailability: 'published',
+  primaryImageHint: 'ghcr.io/log-10x/fluent-bit-10x',
+  primaryContainerName: 'fluent-bit',
+  hasTenxSidecar: false,
+  selectorStyle: 'k8s-recommended',
+  selectorLabel: (r) => k8sRecommendedSelector(r),
+  renderValues: ({ apiKey, releaseName, gitToken }) => {
+    // reporter-10x uses a flat values layout: top-level log10xApiKey +
+    // runtimeName (NOT nested under `tenx:`). `config.git.enabled: false`
+    // tells the chart to use the image-baked config instead of cloning
+    // the public config repo at startup — faster boot, no outbound call.
+    // gitToken is still required (init container unconditionally mounts
+    // a secret derived from it) even though git.enabled is false.
+    return `# reporter-10x: non-invasive parallel DaemonSet.
+# Runs alongside the user's existing forwarder without touching it.
+log10xApiKey: "${apiKey}"
+runtimeName: "${releaseName}"
+gitToken: "${gitToken ?? DEFAULT_GIT_TOKEN}"
+config:
+  git:
+    enabled: false
+`;
+  },
+  verifyProbes: ({ releaseName, namespace }) => {
+    const sel = k8sRecommendedSelector(releaseName);
+    return [
+      {
+        name: 'pods-ready',
+        question: 'Are all reporter-10x DaemonSet pods Ready?',
+        commands: [`kubectl -n ${namespace} wait --for=condition=Ready pod -l ${sel} --timeout=5m`],
+        expectOutput: 'condition met',
+        timeoutSec: 300,
+      },
+      {
+        name: 'processor-alive',
+        question: 'Is tenx-edge processing events (pattern fingerprinting)?',
+        commands: [
+          `kubectl -n ${namespace} logs -l ${sel} -c fluent-bit --tail=400 | grep -iE 'tenx|10x|pattern' | head -20`,
+        ],
+      },
+      {
+        name: 'metrics-publishing',
+        question: 'Is the Reporter publishing TenXSummary metrics to the log10x backend?',
+        commands: [
+          `kubectl -n ${namespace} logs -l ${sel} -c fluent-bit --tail=400 | grep -F 'Publishing TenXSummary' | head -3`,
+        ],
+        expectOutput: 'Publishing TenXSummary',
+        timeoutSec: 300,
+      },
+    ];
+  },
+};
+
 // ── Destination-specific sub-renderers ──
 // Pulled out so the destination logic lives in one place per forwarder.
 

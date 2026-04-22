@@ -17,6 +17,7 @@ import type { DiscoverySnapshot, ForwarderKind } from '../discovery/types.js';
 import type { AdvisePlan, PlanStep, VerifyProbe, PreflightCheck } from './types.js';
 import {
   REPORTER_FORWARDER_SPECS,
+  STANDALONE_SPEC,
   type OutputDestination,
   type ForwarderSpec,
   type TenxKind,
@@ -25,10 +26,30 @@ import { run } from '../discovery/shell.js';
 
 export type AdvisorApp = 'reporter' | 'regulator';
 
+/**
+ * Deployment shape — orthogonal to forwarder kind.
+ *   inline     = replace the user's forwarder deployment with a
+ *                log10x-repackaged version of the same chart (tenx baked
+ *                in as a processor/filter/init-container).
+ *   standalone = install log10x-k8s/reporter-10x as a parallel DaemonSet
+ *                that bundles its own fluent-bit. Does NOT touch the
+ *                user's forwarder. Report-mode only.
+ * The user's detected forwarder kind is still surfaced in the plan when
+ * shape='standalone' — as context, not as the install target.
+ */
+export type DeploymentShape = 'inline' | 'standalone';
+
 export interface ReporterAdviseArgs {
   snapshot: DiscoverySnapshot;
   /** Which app this plan installs. Default: 'reporter'. */
   app?: AdvisorApp;
+  /**
+   * Deployment shape. Default: 'inline'. When 'standalone', the plan
+   * installs reporter-10x alongside the user's forwarder instead of
+   * replacing it — `forwarder` is kept in the plan as detected context
+   * only and regulator/optimize combinations become blockers.
+   */
+  shape?: DeploymentShape;
   /** Forwarder to target. If omitted, uses the snapshot's recommendation. */
   forwarder?: ForwarderKind;
   /** Helm release name. Default: `my-${app}`. */
@@ -69,6 +90,7 @@ const APP_TO_KIND: Record<AdvisorApp, TenxKind> = {
 export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<AdvisePlan> {
   const snapshot = args.snapshot;
   const app: AdvisorApp = args.app ?? 'reporter';
+  const shape: DeploymentShape = args.shape ?? 'inline';
   const kind: TenxKind = APP_TO_KIND[app];
   const releaseName = args.releaseName ?? `my-${app}`;
   const destination: OutputDestination = args.destination ?? 'mock';
@@ -80,7 +102,14 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   const forwarder: ForwarderKind =
     forwarderCandidate === 'unknown' ? 'fluent-bit' : forwarderCandidate;
 
-  const spec = REPORTER_FORWARDER_SPECS[forwarder as Exclude<ForwarderKind, 'unknown'>];
+  // Spec selection splits on shape, not on forwarder kind. Standalone
+  // always resolves to the reporter-10x spec regardless of what
+  // forwarder was detected — the user's forwarder is kept as context
+  // in the plan output but does not drive chart selection.
+  const spec: ForwarderSpec | undefined =
+    shape === 'standalone'
+      ? STANDALONE_SPEC
+      : REPORTER_FORWARDER_SPECS[forwarder as Exclude<ForwarderKind, 'unknown'>];
 
   const blockers: string[] = [];
   if (!spec) {
@@ -88,13 +117,27 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
       `No forwarder template for kind '${forwarder}'. Pass forwarder ∈ ${Object.keys(REPORTER_FORWARDER_SPECS).join('|')}.`
     );
   }
+  // Shape=standalone only supports reporter (report-only). The
+  // reporter-10x chart has no hook into the user's forwarder output,
+  // so it can't regulate/filter/compact events — only emit metrics.
+  if (shape === 'standalone' && app === 'regulator') {
+    blockers.push(
+      'shape=standalone is only valid for app=reporter. The `log10x-k8s/reporter-10x` chart bundles its own fluent-bit + tenx-edge and reads container logs in parallel to your existing forwarder — it has no path to write regulated events back through that forwarder. Either switch to shape=inline (replaces your forwarder with a log10x-repackaged version) or app=reporter.'
+    );
+  }
+  if (shape === 'standalone' && args.optimize) {
+    blockers.push(
+      'optimize=true requires shape=inline. Compact encoding rewrites events emitted back through the forwarder — standalone runs alongside your forwarder without touching its event path, so there are no events to encode. Drop `optimize` or switch to shape=inline.'
+    );
+  }
   // VERIFIED 2026-04-21: logstash chart is broken in sidecar mode — tenx
   // expects to be spawned by logstash's pipe output plugin (so its stdin is
   // wired to logstash), but the chart runs tenx as an independent side
   // container. Pipeline inits, then shuts down after ~9s with no input.
   // Surface this as a blocker so we never produce install instructions
-  // that can't possibly work.
-  if (spec && forwarder === 'logstash') {
+  // that can't possibly work. Only applies to shape=inline — standalone
+  // sidesteps the broken chart entirely.
+  if (shape === 'inline' && spec && forwarder === 'logstash') {
     blockers.push(
       "The log10x-elastic/logstash@1.0.6 chart is broken for sidecar mode: tenx needs to be a child process of logstash (spawned by the `pipe` output plugin), but the chart runs it as a separate container reading from its own stdin. Pipeline inits then shuts down after ~9s with no input. Use fluent-bit, fluentd, or otel-collector until the chart is fixed, OR deploy `log10x-k8s/reporter-10x` (non-invasive, parallel DaemonSet) alongside your existing logstash."
     );
@@ -111,12 +154,19 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   // as of 2026-04-22. For the other forwarders, the charts are still at
   // 1.0.6 with a different optimize wiring that we have not verified —
   // refuse rather than emit install instructions that likely don't work.
-  if (args.optimize && spec && forwarder !== 'fluent-bit' && forwarder !== 'fluentd') {
+  // Gated on shape=inline; standalone has already blocked optimize above.
+  if (
+    shape === 'inline' &&
+    args.optimize &&
+    spec &&
+    forwarder !== 'fluent-bit' &&
+    forwarder !== 'fluentd'
+  ) {
     blockers.push(
       `optimize=true is verified working only on fluent-bit@1.0.7 and fluentd@1.0.7 (via the \`regulatorOptimize=true\` env-var workaround for a chart bug in \`tenx.optimize: true\`). For \`${forwarder}\` the chart is still at 1.0.6 with an unverified optimize path — refusing to emit an install plan. Either pick fluent-bit/fluentd, or drop \`optimize\` and deploy the regulator in non-encoding mode.`
     );
   }
-  if (args.optimize && app === 'reporter') {
+  if (shape === 'inline' && args.optimize && app === 'reporter') {
     blockers.push(
       'optimize=true is a Regulator-app feature (it encodes events emitted back through the forwarder). The Reporter app does not emit events back through the forwarder — it only publishes aggregated TenXSummary metrics. Drop `optimize` or switch to `app=regulator`.'
     );
@@ -127,7 +177,8 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
     forwarder,
     releaseName,
     namespace,
-    spec
+    spec,
+    shape
   );
 
   const notes: string[] = [];
@@ -155,24 +206,27 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   // chart level. The mock destination the advisor ships uses
   // `output.file: /tmp/tenx-mock-*`, which is safe; any non-stdout
   // output (elasticsearch, splunk, logstash, kafka, etc.) is also safe.
-  if (forwarder === 'filebeat') {
+  if (shape === 'inline' && forwarder === 'filebeat') {
     notes.push(
       "Filebeat constraint: **do not configure `output.console`** in `filebeat.yml`. Filebeat's tenx integration uses its stdout as the pipe to the 10x engine (baked into the `log10x/filebeat-10x` Dockerfile entrypoint: `filebeat 2>&1 | tenx-edge run …`). Any output that writes to stdout corrupts that pipe. Use `output.elasticsearch`, `output.file`, `output.logstash`, `output.kafka`, etc. — the mock destination used by this plan is `output.file` (safe by default)."
     );
   }
-  // Surface the non-invasive alternative for the Reporter app. The
-  // `log10x-k8s/reporter-10x@1.0.7` chart ships a parallel DaemonSet
-  // (fluent-bit + tenx-edge, ~250Mi/150m per node) that reads the same
-  // /var/log/containers/*.log files the user's existing forwarder already
-  // tails, so it adds reporter observability WITHOUT replacing or
-  // reconfiguring the production log path. Verified end-to-end 2026-04-21:
-  // Forward-protocol unix socket wiring + backpressure tester firing on
-  // real 2MB/s traffic + "📈 Publishing TenXSummary metrics to the log10x
-  // backend". This is the cleanest install path when the user doesn't
-  // want to touch their existing logstash/filebeat/etc. pipeline.
-  if (app === 'reporter') {
+  // Surface the non-invasive alternative only when the plan is inline.
+  // Once shape='standalone' is selected this IS the non-invasive path,
+  // so re-recommending it would be noise.
+  if (shape === 'inline' && app === 'reporter') {
     notes.push(
-      'Alternative: the `log10x-k8s/reporter-10x@1.0.7` chart deploys a standalone non-invasive DaemonSet (fluent-bit + tenx-edge) that tails the same container logs your existing forwarder reads, without replacing it. Install with `helm install <name> log10x-k8s/reporter-10x --set log10xApiKey=<key> --set runtimeName=<name>` (leave `config.git.enabled=false` so the chart uses the image-baked config). Recommended when you don\'t want the 10x logic running inside your production forwarder.'
+      'Alternative: the `log10x-k8s/reporter-10x@1.0.7` chart deploys a standalone non-invasive DaemonSet (fluent-bit + tenx-edge) that tails the same container logs your existing forwarder reads, without replacing it. Call `log10x_advise_reporter` with `shape: "standalone"` or use `log10x_advise_install` to compare paths. Recommended when you don\'t want the 10x logic running inside your production forwarder.'
+    );
+  }
+  if (shape === 'standalone') {
+    // Prefer the forwarder arg (what the caller is actually targeting /
+    // what mode.ts picked) over the snapshot's existingForwarder field,
+    // which may name a DIFFERENT workload than the one the plan is for
+    // when the cluster runs multiple forwarder DaemonSets.
+    const fwLabel = args.forwarder ?? snapshot.recommendations.existingForwarder ?? 'no forwarder';
+    notes.push(
+      `This plan installs **standalone** — \`log10x-k8s/reporter-10x\` runs as a parallel DaemonSet alongside your existing ${fwLabel} deployment. No changes to your forwarder; the chart bundles its own fluent-bit to tail /var/log/containers/*.log. Report-mode only (metrics). For regulation/filtering/compaction you'd install the \`log10x-fluent/*\` inline variant in place of your forwarder.`
     );
   }
 
@@ -220,7 +274,8 @@ async function runPreflight(
   forwarder: ForwarderKind,
   releaseName: string,
   namespace: string,
-  spec: ForwarderSpec | undefined
+  spec: ForwarderSpec | undefined,
+  shape: DeploymentShape
 ): Promise<PreflightCheck[]> {
   const chartAvail = spec?.chartAvailability;
   const checks: PreflightCheck[] = [];
@@ -245,17 +300,31 @@ async function runPreflight(
   });
 
   // 3. Existing forwarder alignment.
+  // Standalone runs ALONGSIDE the user's forwarder by design — any
+  // detected forwarder is fine (even a mismatch), no forwarder is fine
+  // too (reporter-10x brings its own fluent-bit). Only inline plans
+  // care about alignment.
   const existing = snapshot.recommendations.existingForwarder;
-  checks.push({
-    name: 'forwarder alignment',
-    status:
-      existing === forwarder ? 'ok' : existing ? 'warn' : 'warn',
-    detail: existing
-      ? existing === forwarder
-        ? `detected \`${existing}\` matches the target`
-        : `detected \`${existing}\` in the cluster; this plan targets \`${forwarder}\` — safe to co-exist in different namespaces, but confirm that's what you want`
-      : 'no existing forwarder detected; the plan installs one from scratch',
-  });
+  if (shape === 'standalone') {
+    checks.push({
+      name: 'forwarder alignment',
+      status: 'ok',
+      detail: existing
+        ? `detected \`${existing}\` — reporter-10x runs in parallel, no conflict`
+        : 'no existing forwarder detected — reporter-10x bundles its own fluent-bit',
+    });
+  } else {
+    checks.push({
+      name: 'forwarder alignment',
+      status:
+        existing === forwarder ? 'ok' : existing ? 'warn' : 'warn',
+      detail: existing
+        ? existing === forwarder
+          ? `detected \`${existing}\` matches the target`
+          : `detected \`${existing}\` in the cluster; this plan targets \`${forwarder}\` — safe to co-exist in different namespaces, but confirm that's what you want`
+        : 'no existing forwarder detected; the plan installs one from scratch',
+    });
+  }
 
   // 4. Release-name collision check.
   const releaseCollision = snapshot.kubectl.helmReleases.some(

@@ -318,3 +318,83 @@ test('values.yaml content is syntactically close to YAML', async () => {
     assert.ok(content.includes('apiKey: "test-key"'), `${fw} file should embed api key`);
   }
 });
+
+test('shape=standalone installs reporter-10x regardless of detected forwarder', async () => {
+  // Standalone path: the chart is reporter-10x, not the log10x-repackaged
+  // forwarder chart. The detected forwarder (fluent-bit here) stays in
+  // the plan as context but does NOT drive chart selection.
+  const plan = await buildReporterPlan({
+    snapshot: baseSnapshot({
+      recommendations: {
+        suggestedNamespace: 'logging',
+        existingForwarder: 'fluent-bit',
+        alreadyInstalled: {},
+      },
+    }),
+    shape: 'standalone',
+    forwarder: 'fluent-bit',
+    apiKey: 'test-key',
+  });
+  assert.equal(plan.blockers.length, 0);
+  const installText = JSON.stringify(plan.install);
+  assert.ok(
+    installText.includes('log10x-k8s/reporter-10x'),
+    `standalone install should use reporter-10x chart; got: ${installText.slice(0, 400)}`
+  );
+  assert.ok(
+    !installText.includes('log10x-fluent/fluent-bit'),
+    'standalone install should NOT reference the log10x-repackaged fluent-bit chart'
+  );
+  // Values file uses the flat reporter-10x layout: top-level log10xApiKey.
+  const valuesContent = plan.install.find((s) => s.file)?.file?.contents ?? '';
+  assert.ok(valuesContent.includes('log10xApiKey:'), 'standalone values should use reporter-10x flat layout');
+});
+
+test('shape=standalone + app=regulator is blocked', async () => {
+  const plan = await buildReporterPlan({
+    snapshot: baseSnapshot(),
+    shape: 'standalone',
+    app: 'regulator',
+    apiKey: 'test',
+  });
+  // Blocker must call out that standalone is reporter-only.
+  assert.ok(
+    plan.blockers.some(
+      (b) => b.toLowerCase().includes('standalone') && b.toLowerCase().includes('reporter')
+    ),
+    `expected standalone-is-reporter-only blocker; got: ${plan.blockers.join(' | ')}`
+  );
+  assert.equal(plan.install.length, 0, 'blocked plan should not emit install steps');
+});
+
+test('shape=standalone + optimize=true is blocked', async () => {
+  const plan = await buildReporterPlan({
+    snapshot: baseSnapshot(),
+    shape: 'standalone',
+    apiKey: 'test',
+    optimize: true,
+  });
+  assert.ok(
+    plan.blockers.some((b) => b.toLowerCase().includes('optimize') && b.toLowerCase().includes('standalone')),
+    `expected standalone+optimize blocker; got: ${plan.blockers.join(' | ')}`
+  );
+});
+
+test('shape=standalone + logstash does NOT emit the chart-broken blocker', async () => {
+  // The logstash chart-broken blocker only applies to inline (it's the
+  // inline sidecar layout that's broken). Standalone sidesteps the
+  // broken chart entirely by running reporter-10x in parallel.
+  const plan = await buildReporterPlan({
+    snapshot: baseSnapshot({
+      recommendations: {
+        suggestedNamespace: 'logging',
+        existingForwarder: 'logstash',
+        alreadyInstalled: {},
+      },
+    }),
+    shape: 'standalone',
+    forwarder: 'logstash',
+    apiKey: 'test',
+  });
+  assert.equal(plan.blockers.length, 0, `standalone should sidestep logstash blocker; got: ${plan.blockers.join(' | ')}`);
+});
