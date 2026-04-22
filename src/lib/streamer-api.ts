@@ -140,24 +140,250 @@ export interface StreamerQueryResponse {
   };
 }
 
+export type StreamerDetectionPath =
+  | 'explicit_env'
+  | 'aws_s3_bucket_pattern'
+  | 'kubectl_service'
+  | 'terraform_state';
+
+export interface StreamerResolution {
+  url?: string;
+  bucket?: string;
+  target?: string;
+  detectionPath?: StreamerDetectionPath;
+  trace: Array<{ path: StreamerDetectionPath; status: 'matched' | 'skipped' | 'failed'; reason: string }>;
+}
+
+/**
+ * Resolve the Streamer URL + bucket from the ambient environment.
+ *
+ * Detection order (first hit wins):
+ *   1. explicit LOG10X_STREAMER_URL + LOG10X_STREAMER_BUCKET
+ *   2. AWS conventional bucket naming (log10x-streamer-*, *-log10x-archive)
+ *      combined with a kubectl-discovered query-handler service URL
+ *   3. kubectl service probe alone (url resolved, bucket from annotation)
+ *   4. Terraform state file (~/.log10x/streamer.tfstate or LOG10X_TERRAFORM_STATE)
+ */
+export async function resolveStreamer(): Promise<StreamerResolution> {
+  const trace: StreamerResolution['trace'] = [];
+
+  if (process.env.LOG10X_STREAMER_URL && process.env.LOG10X_STREAMER_BUCKET) {
+    trace.push({
+      path: 'explicit_env',
+      status: 'matched',
+      reason: `LOG10X_STREAMER_URL + LOG10X_STREAMER_BUCKET set`,
+    });
+    return {
+      url: process.env.LOG10X_STREAMER_URL.replace(/\/+$/, ''),
+      bucket: process.env.LOG10X_STREAMER_BUCKET,
+      target: process.env.LOG10X_STREAMER_TARGET,
+      detectionPath: 'explicit_env',
+      trace,
+    };
+  }
+  if (process.env.LOG10X_STREAMER_URL || process.env.LOG10X_STREAMER_BUCKET) {
+    trace.push({
+      path: 'explicit_env',
+      status: 'skipped',
+      reason: 'only one of LOG10X_STREAMER_URL / LOG10X_STREAMER_BUCKET set — need both',
+    });
+  } else {
+    trace.push({ path: 'explicit_env', status: 'skipped', reason: 'LOG10X_STREAMER_URL / LOG10X_STREAMER_BUCKET not set' });
+  }
+
+  // 4. Terraform state file (checked before AWS/kubectl so scripted installs
+  //    that write a state file are deterministic regardless of ambient AWS).
+  const tfRes = await tryDetectStreamerFromTerraformState();
+  if (tfRes.url && tfRes.bucket) {
+    trace.push({ path: 'terraform_state', status: 'matched', reason: tfRes.reason });
+    return { ...tfRes, detectionPath: 'terraform_state', trace };
+  }
+  trace.push({ path: 'terraform_state', status: tfRes.failed ? 'failed' : 'skipped', reason: tfRes.reason });
+
+  // 2. AWS bucket pattern.
+  const awsRes = await tryDetectStreamerBucketFromAws();
+  if (awsRes.bucket) {
+    // Bucket found; probe kubectl for URL (or fall back to explicit override).
+    const svc = process.env.LOG10X_STREAMER_URL
+      ? { url: process.env.LOG10X_STREAMER_URL, reason: 'LOG10X_STREAMER_URL explicit' }
+      : await tryDetectStreamerUrlFromKubectl();
+    if (svc.url) {
+      trace.push({
+        path: 'aws_s3_bucket_pattern',
+        status: 'matched',
+        reason: `${awsRes.reason}; url: ${svc.reason}`,
+      });
+      return {
+        bucket: awsRes.bucket,
+        url: svc.url.replace(/\/+$/, ''),
+        target: process.env.LOG10X_STREAMER_TARGET,
+        detectionPath: 'aws_s3_bucket_pattern',
+        trace,
+      };
+    }
+    trace.push({
+      path: 'aws_s3_bucket_pattern',
+      status: 'skipped',
+      reason: `${awsRes.reason}; no query-handler URL — kubectl probe: ${svc.reason}`,
+    });
+  } else {
+    trace.push({ path: 'aws_s3_bucket_pattern', status: awsRes.failed ? 'failed' : 'skipped', reason: awsRes.reason });
+  }
+
+  // 3. kubectl service probe alone (no bucket).
+  const kRes = await tryDetectStreamerUrlFromKubectl();
+  if (kRes.url) {
+    trace.push({
+      path: 'kubectl_service',
+      status: 'skipped',
+      reason: `${kRes.reason} — but no matching bucket found; set LOG10X_STREAMER_BUCKET`,
+    });
+  } else {
+    trace.push({ path: 'kubectl_service', status: kRes.failed ? 'failed' : 'skipped', reason: kRes.reason });
+  }
+
+  return { trace };
+}
+
 export function isStreamerConfigured(): boolean {
+  // Sync helper retained for callers that need a quick check before paying
+  // the cost of a full async resolve. Covers only the explicit-env path;
+  // `resolveStreamer()` for the full cascade.
   return Boolean(process.env.LOG10X_STREAMER_URL && process.env.LOG10X_STREAMER_BUCKET);
 }
 
-function getStreamerUrl(): string {
-  const url = process.env.LOG10X_STREAMER_URL;
-  if (!url) throw new StreamerNotConfiguredError();
-  return url.replace(/\/+$/, '');
+export function formatStreamerTrace(trace: StreamerResolution['trace']): string {
+  if (!trace.length) return '(no detection attempts logged)';
+  return trace.map((t) => `  - ${t.path}: ${t.status} — ${t.reason}`).join('\n');
 }
 
-function getStreamerBucket(): string {
-  const bucket = process.env.LOG10X_STREAMER_BUCKET;
-  if (!bucket) throw new StreamerNotConfiguredError();
-  return bucket;
+/** Cached resolution so call-sites inside a single tool invocation don't re-spawn aws/kubectl. */
+let cachedResolution: { resolution: StreamerResolution; at: number } | undefined;
+
+async function resolveStreamerCached(): Promise<StreamerResolution> {
+  const now = Date.now();
+  if (cachedResolution && now - cachedResolution.at < 60_000) return cachedResolution.resolution;
+  const r = await resolveStreamer();
+  cachedResolution = { resolution: r, at: now };
+  return r;
 }
 
-function getDefaultTarget(): string {
-  return process.env.LOG10X_STREAMER_TARGET || 'app';
+/** Reset the resolver cache — only for tests. */
+export function clearStreamerResolutionCacheForTest(): void {
+  cachedResolution = undefined;
+}
+
+async function getStreamerUrl(): Promise<string> {
+  const r = await resolveStreamerCached();
+  if (!r.url) throw new StreamerNotConfiguredError();
+  return r.url;
+}
+
+async function getStreamerBucket(): Promise<string> {
+  const r = await resolveStreamerCached();
+  if (!r.bucket) throw new StreamerNotConfiguredError();
+  return r.bucket;
+}
+
+async function tryDetectStreamerBucketFromAws(): Promise<{ bucket?: string; reason: string; failed?: boolean }> {
+  // Skip if aws CLI is obviously not reachable (cheap check to avoid spawn cost).
+  if (!process.env.AWS_REGION && !process.env.AWS_DEFAULT_REGION && !process.env.AWS_PROFILE) {
+    return { reason: 'no AWS_REGION / AWS_PROFILE in env' };
+  }
+  try {
+    const { stdout } = await execFileP('aws', ['s3api', 'list-buckets', '--output', 'json'], {
+      timeout: 8_000,
+      maxBuffer: 8 * 1024 * 1024,
+    });
+    const parsed = JSON.parse(stdout) as { Buckets?: Array<{ Name: string }> };
+    const names = (parsed.Buckets || []).map((b) => b.Name);
+    const matches = names.filter(
+      (n) =>
+        n.startsWith('log10x-streamer-') ||
+        n.endsWith('-log10x-archive') ||
+        n.includes('log10x-streamer')
+    );
+    if (matches.length === 0) {
+      return { reason: `aws s3api list-buckets returned ${names.length} buckets, none match log10x-streamer-* / *-log10x-archive` };
+    }
+    if (matches.length > 1) {
+      return {
+        reason: `${matches.length} candidate buckets match log10x-streamer patterns — set LOG10X_STREAMER_BUCKET to disambiguate (candidates: ${matches.join(', ')})`,
+      };
+    }
+    return { bucket: matches[0], reason: `aws s3api list-buckets → single log10x-streamer bucket ${matches[0]}` };
+  } catch (e) {
+    return {
+      failed: true,
+      reason: `aws s3api list-buckets failed: ${((e as Error).message || '').slice(0, 160)}`,
+    };
+  }
+}
+
+async function tryDetectStreamerUrlFromKubectl(): Promise<{ url?: string; reason: string; failed?: boolean }> {
+  try {
+    const { stdout } = await execFileP(
+      'kubectl',
+      ['get', 'svc', '-A', '-l', 'app.kubernetes.io/name=log10x-streamer', '-o', 'json'],
+      { timeout: 8_000, maxBuffer: 8 * 1024 * 1024 }
+    );
+    const parsed = JSON.parse(stdout) as {
+      items?: Array<{
+        metadata: { name: string; namespace: string };
+        spec?: { ports?: Array<{ port: number; name?: string }> };
+      }>;
+    };
+    const items = parsed.items || [];
+    // Prefer the query-handler service; fall back to any single match.
+    const qh = items.find((i) => i.metadata.name.includes('query-handler') || i.metadata.name.endsWith('query'));
+    const chosen = qh || (items.length === 1 ? items[0] : undefined);
+    if (!chosen) {
+      return { reason: `kubectl found ${items.length} log10x-streamer services — none clearly a query-handler` };
+    }
+    const port = chosen.spec?.ports?.[0]?.port ?? 8080;
+    const url = `http://${chosen.metadata.name}.${chosen.metadata.namespace}.svc.cluster.local:${port}`;
+    return {
+      url,
+      reason: `kubectl get svc → ${chosen.metadata.namespace}/${chosen.metadata.name}:${port}`,
+    };
+  } catch (e) {
+    return { failed: true, reason: `kubectl probe failed: ${((e as Error).message || '').slice(0, 160)}` };
+  }
+}
+
+async function tryDetectStreamerFromTerraformState(): Promise<{ url?: string; bucket?: string; target?: string; reason: string; failed?: boolean }> {
+  const path =
+    process.env.LOG10X_TERRAFORM_STATE ||
+    (process.env.HOME ? `${process.env.HOME}/.log10x/streamer.tfstate` : undefined);
+  if (!path) return { reason: 'no LOG10X_TERRAFORM_STATE and no HOME to find ~/.log10x/streamer.tfstate' };
+  try {
+    const { readFile } = await import('node:fs/promises');
+    const raw = await readFile(path, 'utf8');
+    const state = JSON.parse(raw) as { outputs?: Record<string, { value: unknown }> };
+    const outputs = state.outputs || {};
+    const get = (k: string): string | undefined => {
+      const v = outputs[k]?.value;
+      return typeof v === 'string' ? v : undefined;
+    };
+    const url = get('streamer_url') || get('query_handler_url');
+    const bucket = get('streamer_bucket') || get('archive_bucket');
+    const target = get('streamer_target');
+    if (!url || !bucket) {
+      return { reason: `terraform state at ${path} missing streamer_url/streamer_bucket outputs` };
+    }
+    return { url: url.replace(/\/+$/, ''), bucket, target, reason: `read ${path}` };
+  } catch (e) {
+    const err = e as NodeJS.ErrnoException;
+    if (err.code === 'ENOENT') return { reason: `${path} not present` };
+    return { failed: true, reason: `read ${path} failed: ${(err.message || '').slice(0, 160)}` };
+  }
+}
+
+async function getDefaultTarget(): Promise<string> {
+  const explicit = process.env.LOG10X_STREAMER_TARGET;
+  if (explicit) return explicit;
+  const r = await resolveStreamerCached();
+  return r.target || 'app';
 }
 
 function authHeaders(env: EnvConfig): Record<string, string> {
@@ -243,7 +469,7 @@ async function submitQuery(
   env: EnvConfig,
   body: Record<string, unknown>
 ): Promise<SubmitResponse> {
-  const base = getStreamerUrl();
+  const base = await getStreamerUrl();
   const resp = await fetch(`${base}/streamer/query`, {
     method: 'POST',
     headers: authHeaders(env),
@@ -439,8 +665,8 @@ export async function runStreamerQuery(
   // accepted but has no effect.
   _legacy?: { timeoutMs?: number; pollIntervalMs?: number }
 ): Promise<StreamerQueryResponse> {
-  const bucket = getStreamerBucket();
-  const target = req.target || getDefaultTarget();
+  const bucket = await getStreamerBucket();
+  const target = req.target || (await getDefaultTarget());
   const queryId = randomUUID();
   const pollMs = parseInt(process.env.LOG10X_STREAMER_POLL_MS || '1500', 10);
   const timeoutMs = parseInt(process.env.LOG10X_STREAMER_TIMEOUT_MS || '90000', 10);

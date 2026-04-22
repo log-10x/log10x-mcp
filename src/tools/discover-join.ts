@@ -23,7 +23,8 @@
 import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
 import {
-  loadBackendFromEnv,
+  resolveBackend,
+  formatDetectionTrace,
   CustomerMetricsNotConfiguredError,
 } from '../lib/customer-metrics.js';
 import { getOrDiscoverJoin, discoverJoin, type JoinDiscoveryResult, type JoinPair } from '../lib/join-discovery.js';
@@ -62,10 +63,11 @@ export async function executeDiscoverJoin(
   },
   env: EnvConfig
 ): Promise<string> {
-  const backend = loadBackendFromEnv();
-  if (!backend) {
-    throw new CustomerMetricsNotConfiguredError();
+  const resolution = await resolveBackend();
+  if (!resolution.backend) {
+    throw new CustomerMetricsNotConfiguredError(formatDetectionTrace(resolution.trace));
   }
+  const backend = resolution.backend;
 
   const windowSeconds = args.window ? parseWindowToSeconds(args.window) : undefined;
   // When a window is specified, always bypass the session cache — the cache
