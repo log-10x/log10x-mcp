@@ -245,7 +245,10 @@ test('optimize=false leaves fluent-bit values unchanged (no env block)', async (
   );
 });
 
-test('optimize=true on filebeat regulator is blocked (unverified chart)', async () => {
+test('optimize=true on filebeat regulator is allowed (1.0.7 unified path)', async () => {
+  // As of chart 1.0.7, every forwarder maps kind=optimize to
+  // @apps/regulator + regulatorOptimize=true env — no per-forwarder
+  // blocker anymore.
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
     app: 'regulator',
@@ -253,14 +256,11 @@ test('optimize=true on filebeat regulator is blocked (unverified chart)', async 
     apiKey: 'test',
     optimize: true,
   });
-  assert.ok(
-    plan.blockers.some((b) => b.includes('optimize=true is verified working only')),
-    `expected optimize-unverified blocker for filebeat; got: ${plan.blockers.join(' | ')}`
-  );
-  assert.equal(plan.install.length, 0, `blocked plans should not emit install steps`);
+  assert.equal(plan.blockers.length, 0, `expected no blockers; got: ${plan.blockers.join(' | ')}`);
+  assert.ok(plan.install.length > 0, 'install plan should be emitted for filebeat + optimize');
 });
 
-test('optimize=true on otel-collector regulator is blocked (unverified chart)', async () => {
+test('optimize=true on otel-collector regulator is allowed (1.0.7 unified path)', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
     app: 'regulator',
@@ -268,10 +268,8 @@ test('optimize=true on otel-collector regulator is blocked (unverified chart)', 
     apiKey: 'test',
     optimize: true,
   });
-  assert.ok(
-    plan.blockers.some((b) => b.includes('optimize=true is verified working only')),
-    `expected optimize-unverified blocker for otel-collector; got: ${plan.blockers.join(' | ')}`
-  );
+  assert.equal(plan.blockers.length, 0, `expected no blockers; got: ${plan.blockers.join(' | ')}`);
+  assert.ok(plan.install.length > 0, 'install plan should be emitted for otel-collector + optimize');
 });
 
 test('optimize=true with app=reporter is blocked', async () => {

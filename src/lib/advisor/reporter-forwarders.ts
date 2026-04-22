@@ -45,18 +45,17 @@ export type OutputDestination = 'mock' | 'elasticsearch' | 'splunk' | 'datadog' 
 //   report   -> Reporter (read-only metric emission)
 //   regulate -> Regulator (read + write events back through the forwarder)
 //
-// For fluent-bit / fluentd charts at 1.0.7 the `tenx.kind` field is
-// silently ignored — they always run the regulator pipeline. For
-// filebeat / logstash / otel-collector still at 1.0.6, kind is honored.
+// fluent-bit + fluentd charts at 1.0.7 silently ignore tenx.kind and always
+// run the regulator pipeline (kind=report is effectively "regulator with no
+// filter rules" at the observable level). filebeat / logstash / otel-
+// collector at 1.0.7 still honor kind and launch @apps/reporter vs
+// @apps/regulator accordingly.
 //
-// Optimizer mode (lossless encoded-event output, verified 2026-04-22
-// on demo cluster: `"log":"~-8Av]P9cVZb,timestamp,var1,var2,..."` —
-// 20-40x volume reduction per event) is NOT exposed as a kind. It is
-// triggered by setting `env: [{name: regulatorOptimize, value: "true"}]`
-// on the forwarder container. The chart's own `tenx.optimize: true`
-// field is broken (points at a `tenx-optimize.lua` file the 1.0.7
-// image does not ship). Expose as a distinct `optimize: boolean`
-// parameter on `advise-regulator` in a follow-up.
+// Optimizer mode (lossless encoded-event output, ~20-40x volume reduction:
+// `"log":"~-8Av]P9cVZb,timestamp,var1,var2,..."`) is NOT exposed as a kind.
+// It is triggered by setting `env: [{name: regulatorOptimize, value: "true"}]`
+// on the forwarder container. Unified across all 5 charts as of 1.0.7
+// (the per-forwarder optimize path is now just regulator + this env var).
 export type TenxKind = 'report' | 'regulate';
 
 /** How a forwarder's helm chart labels its workloads + pods. */
@@ -393,15 +392,18 @@ ${envBlock}`;
     hasTenxSidecar: false,
     selectorStyle: 'legacy-helm',
     selectorLabel: (r) => legacyElasticSelector(r, 'filebeat'),
-    renderValues: ({ apiKey, releaseName, destination, kind, outputHost, gitToken }) => {
+    renderValues: ({ apiKey, releaseName, destination, kind, outputHost, gitToken, optimize }) => {
       // Chart defaults reference Elasticsearch secrets/certs. For a mock
       // install we MUST override extraEnvs/secretMounts to empty so pods
       // don't hang in FailedMount.
       const outputBlock = renderFilebeatOutput(destination, outputHost);
+      // Chart 1.0.7 routes kind=optimize → @apps/regulator + regulatorOptimize
+      // env var. Emit kind=optimize in values when caller requested optimize.
+      const effectiveKind = optimize && kind === 'regulate' ? 'optimize' : kind;
       return `tenx:
   enabled: true
   apiKey: "${apiKey}"
-  kind: "${kind}"
+  kind: "${effectiveKind}"
   runtimeName: "${releaseName}"
   gitToken: "${gitToken ?? DEFAULT_GIT_TOKEN}"
   config:
@@ -489,12 +491,13 @@ ${indent(outputBlock, 6)}
     hasTenxSidecar: false,
     selectorStyle: 'legacy-helm',
     selectorLabel: (r) => legacyElasticSelector(r, 'logstash'),
-    renderValues: ({ apiKey, releaseName, destination, kind, outputHost, gitToken }) => {
+    renderValues: ({ apiKey, releaseName, destination, kind, outputHost, gitToken, optimize }) => {
       const output = renderLogstashOutput(destination, outputHost);
+      const effectiveKind = optimize && kind === 'regulate' ? 'optimize' : kind;
       return `tenx:
   enabled: true
   apiKey: "${apiKey}"
-  kind: "${kind}"
+  kind: "${effectiveKind}"
   runtimeName: "${releaseName}"
   gitToken: "${gitToken ?? DEFAULT_GIT_TOKEN}"
   config:
@@ -555,11 +558,12 @@ ${indent(output, 4)}
     hasTenxSidecar: false,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ apiKey, releaseName, destination, kind, outputHost, gitToken }) => {
+    renderValues: ({ apiKey, releaseName, destination, kind, outputHost, gitToken, optimize }) => {
       // The OTel chart doesn't auto-wire filelog unless the preset is
       // on. We turn it on explicitly so the user's pipeline just works.
       // image.repository is required by the chart and has no default.
       const exporter = renderOtelExporter(destination, outputHost);
+      const effectiveKind = optimize && kind === 'regulate' ? 'optimize' : kind;
       return `mode: "daemonset"
 
 # image.repository defaults in the chart's values.yaml to the upstream
@@ -570,7 +574,7 @@ ${indent(output, 4)}
 tenx:
   enabled: true
   apiKey: "${apiKey}"
-  kind: "${kind}"
+  kind: "${effectiveKind}"
   runtimeName: "${releaseName}"
   gitToken: "${gitToken ?? DEFAULT_GIT_TOKEN}"
   config:

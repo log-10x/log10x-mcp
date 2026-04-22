@@ -24,15 +24,11 @@
  *      version without rewriting their manifests)
  *   4. forwarder is helm-managed logstash → standalone reporter (chart
  *      broken for sidecar mode; surface migration note)
- *   5. forwarder is helm-managed fluent-bit or fluentd (1.0.7-capable):
+ *   5. forwarder is helm-managed fluent-bit/fluentd/filebeat/otel-collector (all 1.0.7):
  *        goal='compact'     → inline regulator + optimize=true
  *        goal='cut-cost'    → inline regulator
  *        goal='just-metrics'→ inline reporter (standalone is alt)
  *        no goal            → inline reporter (standalone is alt)
- *   6. forwarder is helm-managed filebeat or otel-collector (1.0.6):
- *        goal='compact'     → BLOCKED on this forwarder; propose
- *                             switching to fluent-bit/fluentd
- *        otherwise          → inline reporter/regulator (no optimize)
  *
  * Already-installed apps are surfaced as warnings — we don't silently
  * refuse to recommend a duplicate install, but the note makes it clear.
@@ -271,7 +267,7 @@ function makeStandaloneAlt(params: {
     rationale = `Detected forwarder is hand-rolled — inline would require rewriting your manifests; reporter-10x runs in parallel, zero-touch.`;
   } else if (detectedKind === 'logstash') {
     score = SCORE_DIRECT_GOAL_MATCH;
-    rationale = 'log10x-elastic/logstash@1.0.6 chart is broken for sidecar mode — standalone reporter-10x is the recommended path until the chart is fixed.';
+    rationale = 'log10x-elastic/logstash chart is architecturally broken for sidecar mode (tenx wants to be a child process of logstash, chart runs it as a separate container). Standalone reporter-10x is the recommended path.';
   } else {
     score = SCORE_ALTERNATIVE_OK;
     rationale = 'Standalone reporter is always a safe alternative — non-invasive, report-mode only.';
@@ -315,7 +311,7 @@ function makeInlineAlts(params: {
   // Blocker: logstash chart is broken for sidecar mode.
   const logstashBlocker =
     detectedKind === 'logstash'
-      ? 'log10x-elastic/logstash@1.0.6 chart is broken for sidecar mode (verified 2026-04-21). Pick fluent-bit/fluentd/otel-collector or shape=standalone until fixed.'
+      ? 'log10x-elastic/logstash chart is architecturally broken for sidecar mode (stdin wiring, independent of chart version). Pick fluent-bit/fluentd/filebeat/otel-collector or shape=standalone.'
       : undefined;
 
   // Inline reporter.
@@ -370,11 +366,11 @@ function makeInlineAlts(params: {
   });
 
   // Inline regulator + optimize (compact encoding).
-  // Only available on fluent-bit@1.0.7 + fluentd@1.0.7 as of 2026-04-22.
-  const optimizeBlocker =
-    detectedKind === 'fluent-bit' || detectedKind === 'fluentd'
-      ? undefined
-      : `optimize=true only verified on fluent-bit@1.0.7 + fluentd@1.0.7. The log10x chart for ${detectedKind} is at 1.0.6 with unverified optimize wiring.`;
+  // All 5 forwarder charts now ship at 1.0.7 with a unified optimize path
+  // (kind=optimize launches @apps/regulator + regulatorOptimize=true env
+  // var). Logstash still hits its architectural sidecar bug regardless
+  // of optimize, so the logstashBlocker above handles that case.
+  const optimizeBlocker = undefined;
   alts.push({
     label: `Inline Regulator + Compact (${detectedKind})`,
     args: {

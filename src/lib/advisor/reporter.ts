@@ -130,16 +130,17 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
       'optimize=true requires shape=inline. Compact encoding rewrites events emitted back through the forwarder — standalone runs alongside your forwarder without touching its event path, so there are no events to encode. Drop `optimize` or switch to shape=inline.'
     );
   }
-  // VERIFIED 2026-04-21: logstash chart is broken in sidecar mode — tenx
-  // expects to be spawned by logstash's pipe output plugin (so its stdin is
-  // wired to logstash), but the chart runs tenx as an independent side
-  // container. Pipeline inits, then shuts down after ~9s with no input.
-  // Surface this as a blocker so we never produce install instructions
-  // that can't possibly work. Only applies to shape=inline — standalone
-  // sidesteps the broken chart entirely.
+  // VERIFIED 2026-04-21: logstash chart sidecar wiring is ARCHITECTURALLY
+  // broken regardless of chart version. tenx needs to be a child process
+  // of logstash (spawned by the `pipe` output plugin), but the chart runs
+  // tenx as an independent side container reading from its own stdin.
+  // Pipeline inits, then shuts down after ~9s with no input. Chart 1.0.7
+  // (shipped 2026-04-22) fixes the apps/edge path but does NOT fix the
+  // stdin-wiring bug. Keep the blocker until the chart is refactored to
+  // use the pipe-output plugin launch pattern.
   if (shape === 'inline' && spec && forwarder === 'logstash') {
     blockers.push(
-      "The log10x-elastic/logstash@1.0.6 chart is broken for sidecar mode: tenx needs to be a child process of logstash (spawned by the `pipe` output plugin), but the chart runs it as a separate container reading from its own stdin. Pipeline inits then shuts down after ~9s with no input. Use fluent-bit, fluentd, or otel-collector until the chart is fixed, OR deploy `log10x-k8s/reporter-10x` (non-invasive, parallel DaemonSet) alongside your existing logstash."
+      "The log10x-elastic/logstash chart is architecturally broken for sidecar mode: tenx needs to be a child process of logstash (spawned by the `pipe` output plugin), but the chart runs it as a separate container reading from its own stdin. Pipeline inits then shuts down after ~9s with no input. Chart 1.0.7 fixes the apps/ path but does NOT fix this wiring. Use fluent-bit, fluentd, filebeat, or otel-collector, OR deploy `log10x-k8s/reporter-10x` (non-invasive, parallel DaemonSet) alongside your existing logstash."
     );
   }
   if (!args.apiKey && !args.skipInstall) {
@@ -150,22 +151,11 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   if (destination === 'splunk' && !args.splunkHecToken && !args.skipInstall) {
     blockers.push('destination=splunk requires `splunk_hec_token`.');
   }
-  // optimize=true is only verified on fluent-bit@1.0.7 + fluentd@1.0.7
-  // as of 2026-04-22. For the other forwarders, the charts are still at
-  // 1.0.6 with a different optimize wiring that we have not verified —
-  // refuse rather than emit install instructions that likely don't work.
-  // Gated on shape=inline; standalone has already blocked optimize above.
-  if (
-    shape === 'inline' &&
-    args.optimize &&
-    spec &&
-    forwarder !== 'fluent-bit' &&
-    forwarder !== 'fluentd'
-  ) {
-    blockers.push(
-      `optimize=true is verified working only on fluent-bit@1.0.7 and fluentd@1.0.7 (via the \`regulatorOptimize=true\` env-var workaround for a chart bug in \`tenx.optimize: true\`). For \`${forwarder}\` the chart is still at 1.0.6 with an unverified optimize path — refusing to emit an install plan. Either pick fluent-bit/fluentd, or drop \`optimize\` and deploy the regulator in non-encoding mode.`
-    );
-  }
+  // optimize=true path, now unified across all charts at 1.0.7 — every
+  // chart (fluent-bit, fluentd, filebeat, logstash, otel-collector) maps
+  // kind=optimize to @apps/regulator + regulatorOptimize=true env var.
+  // No per-forwarder blocker remains (logstash is blocked above for the
+  // sidecar wiring bug, which applies regardless of optimize).
   if (shape === 'inline' && args.optimize && app === 'reporter') {
     blockers.push(
       'optimize=true is a Regulator-app feature (it encodes events emitted back through the forwarder). The Reporter app does not emit events back through the forwarder — it only publishes aggregated TenXSummary metrics. Drop `optimize` or switch to `app=regulator`.'
