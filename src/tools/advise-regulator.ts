@@ -51,6 +51,12 @@ export const adviseRegulatorSchema = {
     .optional()
     .describe('Host for non-mock destinations (ES endpoint, Splunk HEC host, etc.). Ignored when destination=mock.'),
   splunk_hec_token: z.string().optional().describe('Required when destination=splunk.'),
+  optimize: z
+    .boolean()
+    .optional()
+    .describe(
+      'When true, emit events out of the forwarder in compact encoded form (templateHash+vars, ~20-40x volume reduction; see `config/modules/pipelines/run/units/transform/doc.md#compact`). Verified working on fluent-bit@1.0.7 + fluentd@1.0.7 via an env-var workaround (the chart\'s own `tenx.optimize: true` field is chart-broken — do NOT use it directly). Refused on filebeat/logstash/otel-collector (charts still at 1.0.6 with unverified optimize wiring). Default: false.'
+    ),
   action: z
     .enum(['install', 'verify', 'teardown', 'all'])
     .optional()
@@ -83,6 +89,7 @@ export async function executeAdviseRegulator(args: AdviseRegulatorArgs): Promise
     destination: args.destination as OutputDestination | undefined,
     outputHost: args.output_host,
     splunkHecToken: args.splunk_hec_token,
+    optimize: args.optimize,
     skipInstall: action === 'verify' || action === 'teardown',
     skipVerify: action === 'install' || action === 'teardown',
     skipTeardown: action === 'install' || action === 'verify',

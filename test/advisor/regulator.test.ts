@@ -138,3 +138,131 @@ test('regulator plan install commands reference the same chart as reporter', asy
     );
   }
 });
+
+// ── optimize flag ──
+
+test('optimize=true on fluent-bit regulator renders the regulatorOptimize env block', async () => {
+  const plan = await buildReporterPlan({
+    snapshot: baseSnapshot(),
+    app: 'regulator',
+    forwarder: 'fluent-bit',
+    apiKey: 'test',
+    destination: 'mock',
+    optimize: true,
+  });
+  assert.equal(plan.blockers.length, 0, `no blockers expected, got: ${plan.blockers.join(' | ')}`);
+  const content = plan.install.find((s) => s.file)!.file!.contents;
+  assert.ok(
+    content.includes('regulatorOptimize'),
+    `fluent-bit optimize=true values should set regulatorOptimize env; got: ${content}`
+  );
+  assert.ok(
+    content.includes('value: "true"'),
+    `fluent-bit optimize=true values should set regulatorOptimize to "true"; got: ${content}`
+  );
+});
+
+test('optimize=true on fluent-bit does NOT flip tenx.optimize (chart-broken path)', async () => {
+  const plan = await buildReporterPlan({
+    snapshot: baseSnapshot(),
+    app: 'regulator',
+    forwarder: 'fluent-bit',
+    apiKey: 'test',
+    optimize: true,
+  });
+  const content = plan.install.find((s) => s.file)!.file!.contents;
+  // We specifically do NOT want `tenx.optimize: true` in the rendered
+  // values — the chart's optimize path at 1.0.7 references a Lua script
+  // that isn't shipped in the image, so using it blows up at init.
+  assert.ok(
+    !content.includes('optimize: true'),
+    `fluent-bit values should NOT set tenx.optimize: true (chart-broken); got: ${content}`
+  );
+});
+
+test('optimize=true on fluentd regulator renders the regulatorOptimize env block', async () => {
+  const plan = await buildReporterPlan({
+    snapshot: baseSnapshot(),
+    app: 'regulator',
+    forwarder: 'fluentd',
+    apiKey: 'test',
+    optimize: true,
+  });
+  assert.equal(plan.blockers.length, 0);
+  const content = plan.install.find((s) => s.file)!.file!.contents;
+  assert.ok(content.includes('regulatorOptimize'), `fluentd optimize=true values should set regulatorOptimize env`);
+});
+
+test('optimize=true adds an encoded-events verify probe', async () => {
+  const plan = await buildReporterPlan({
+    snapshot: baseSnapshot(),
+    app: 'regulator',
+    forwarder: 'fluent-bit',
+    apiKey: 'test',
+    optimize: true,
+  });
+  const encodedProbe = plan.verify.find((p) => p.name === 'tenx-encoded-events');
+  assert.ok(encodedProbe, `expected a verify probe named 'tenx-encoded-events'; got: ${plan.verify.map((p) => p.name).join(',')}`);
+  assert.ok(
+    encodedProbe!.commands.some((c) => c.includes('~[')),
+    `encoded-events probe should grep for templateHash prefix; got commands: ${encodedProbe!.commands.join(' | ')}`
+  );
+});
+
+test('optimize=false leaves fluent-bit values unchanged (no env block)', async () => {
+  const plan = await buildReporterPlan({
+    snapshot: baseSnapshot(),
+    app: 'regulator',
+    forwarder: 'fluent-bit',
+    apiKey: 'test',
+    optimize: false,
+  });
+  const content = plan.install.find((s) => s.file)!.file!.contents;
+  assert.ok(
+    !content.includes('regulatorOptimize'),
+    `optimize=false must NOT include regulatorOptimize env; got: ${content}`
+  );
+});
+
+test('optimize=true on filebeat regulator is blocked (unverified chart)', async () => {
+  const plan = await buildReporterPlan({
+    snapshot: baseSnapshot(),
+    app: 'regulator',
+    forwarder: 'filebeat',
+    apiKey: 'test',
+    optimize: true,
+  });
+  assert.ok(
+    plan.blockers.some((b) => b.includes('optimize=true is verified working only')),
+    `expected optimize-unverified blocker for filebeat; got: ${plan.blockers.join(' | ')}`
+  );
+  assert.equal(plan.install.length, 0, `blocked plans should not emit install steps`);
+});
+
+test('optimize=true on otel-collector regulator is blocked (unverified chart)', async () => {
+  const plan = await buildReporterPlan({
+    snapshot: baseSnapshot(),
+    app: 'regulator',
+    forwarder: 'otel-collector',
+    apiKey: 'test',
+    optimize: true,
+  });
+  assert.ok(
+    plan.blockers.some((b) => b.includes('optimize=true is verified working only')),
+    `expected optimize-unverified blocker for otel-collector; got: ${plan.blockers.join(' | ')}`
+  );
+});
+
+test('optimize=true with app=reporter is blocked', async () => {
+  const plan = await buildReporterPlan({
+    snapshot: baseSnapshot(),
+    app: 'reporter',
+    forwarder: 'fluent-bit',
+    apiKey: 'test',
+    optimize: true,
+  });
+  assert.ok(
+    plan.blockers.some((b) => b.includes('Regulator-app feature')),
+    `expected reporter+optimize blocker; got: ${plan.blockers.join(' | ')}`
+  );
+});
