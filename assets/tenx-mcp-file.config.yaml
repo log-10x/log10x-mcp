@@ -1,0 +1,72 @@
+# Log10x MCP — file-mode tenx runtime config.
+#
+# Used by log10x_extract_templates. Reads log events from a file/glob
+# path (set via LOG10X_MCP_INPUT_PATH env var), runs the full enrichment
+# pipeline, and writes templates + encoded rows + aggregated summary to
+# a per-invocation temp dir via LOG10X_MCP_OUTPUT_DIR.
+#
+# Safe to edit: copy to ~/.log10x-mcp/file.config.yaml and set
+# LOG10X_MCP_FILE_CONFIG_PATH in the MCP env.
+
+tenx: run
+runtimeName: $=TenXEnv.get("LOG10X_MCP_RUNTIME_NAME", "mcp-file")
+
+include:
+
+  # Shared bootstrap (symbols, template loading, transform, etc.)
+  - apps/shared
+
+  # File input only — path comes from LOG10X_MCP_INPUT_PATH env var.
+  - run/input/file
+
+  # Full enrichment chain.
+  - run/initialize/inputField
+  - run/initialize/level
+  - run/initialize/group
+  - run/initialize/message
+  - run/initialize/httpCode
+  - run/initialize/lookup
+  - run/initialize/custom
+  - run/initialize/k8s
+
+  # File output.
+  - run/output/event/file
+
+# Template cache: same shadow technique as stdin config — the runner
+# creates a shadow run/template/config.yaml in the tempdir with
+# files: [] and sets TENX_INCLUDE_PATHS with tempdir first.
+
+# ========================== Input options ==========================
+
+inputFile:
+  - name: mcpFileInput
+    path: $=TenXEnv.get("LOG10X_MCP_INPUT_PATH")
+    printProgress: false
+    extractors: []
+    sourcePattern: null
+
+# ========================= Output options =========================
+
+outputFile:
+
+  - path: $=TenXEnv.get("LOG10X_MCP_OUTPUT_DIR") + "/templates.json"
+    writeTemplates: true
+    append: false
+
+  - path: $=TenXEnv.get("LOG10X_MCP_OUTPUT_DIR") + "/encoded.log"
+    fields:
+      - encode()
+
+  - path: $=TenXEnv.get("LOG10X_MCP_OUTPUT_DIR") + "/decoded.log"
+    filter: isEncoded
+    fields:
+      - text
+
+  - path: $=TenXEnv.get("LOG10X_MCP_OUTPUT_DIR") + "/aggregated.csv"
+    filter: isSummary
+    header: $=yield TenXString.join(",", TenXEnv.get("enrichmentFields"), "summaryVolume", "summaryBytes", "summaryTotals") + "\n"
+    fields:
+      - $=yield TenXEnv.get("enrichmentFields")
+      - summaryVolume
+      - summaryBytes
+      - summaryTotals

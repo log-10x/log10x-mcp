@@ -1,0 +1,91 @@
+# Log10x MCP — stdin-mode tenx runtime config.
+#
+# Used by log10x_resolve_batch. The batch is piped to tenx over stdin,
+# templates + encoded rows + aggregated summary are written to a
+# per-invocation temp dir via LOG10X_MCP_OUTPUT_DIR.
+#
+# Safe to edit: copy to ~/.log10x-mcp/stdin.config.yaml and set
+# LOG10X_MCP_STDIN_CONFIG_PATH in the MCP env.
+
+tenx: run
+runtimeName: $=TenXEnv.get("LOG10X_MCP_RUNTIME_NAME", "mcp-stdin")
+
+# Stdin input is controlled by the `stdinEnabled` env var. Force it on
+# so the stdin reader consumes piped batches.
+stdinEnabled: "true"
+
+include:
+
+  # --------------------------- Shared bootstrap ---------------------------
+  # apps/shared chains run/bootstrap, run/symbol, run/template,
+  # run/transform, run/reload, run/monitor, run/console — everything
+  # the runtime needs before input/enrichment/output. Intentionally
+  # NOT including `dev` or `run/aggregate/dev` — those pull in
+  # DevOutputStream which requires an API key, and we want local
+  # offline validation to work without one.
+  - apps/shared
+
+  # --------------------------- Input ---------------------------
+  - run/input/stdin
+
+  # ------------------------ Enrichment --------------------------
+  # Full chain — keeps validation realistic. Matches the modules the
+  # paste Lambda and in-cluster fluentd use, so templates and
+  # identities here are byte-compatible with the production pipeline.
+  - run/initialize/inputField
+  - run/initialize/level
+  - run/initialize/group
+  - run/initialize/message
+  - run/initialize/httpCode
+  - run/initialize/lookup
+  - run/initialize/custom
+  - run/initialize/k8s
+
+  # --------------------------- Output ---------------------------
+  # File sink only. Output paths are constructed per-invocation from
+  # LOG10X_MCP_OUTPUT_DIR. The MCP creates a fresh tempdir per call
+  # so concurrent invocations don't collide.
+  - run/output/event/file
+
+# Template cache: the engine loads cached templates from
+# data/templates/*.json and data/sample/output/*.json at startup.
+# The MCP's runner sets TENX_INCLUDE_PATHS with the per-invocation
+# tempdir FIRST, so template-file globs resolve to empty directories
+# there before hitting the install's cache. This forces all templates
+# produced during the run to be "new" and written to templates.json.
+
+# ========================== Input options ==========================
+
+stdin:
+  extractors: []
+  sourcePattern: null
+
+# ========================= Output options =========================
+
+outputFile:
+
+  # Full structural identity library — one line per unique template.
+  - path: $=TenXEnv.get("LOG10X_MCP_OUTPUT_DIR") + "/templates.json"
+    writeTemplates: true
+    append: false
+
+  # Per-event encoded rows — one per input event, mapping to template hash.
+  - path: $=TenXEnv.get("LOG10X_MCP_OUTPUT_DIR") + "/encoded.log"
+    fields:
+      - encode()
+
+  # Per-event decoded text — for human inspection / round-trip checks.
+  - path: $=TenXEnv.get("LOG10X_MCP_OUTPUT_DIR") + "/decoded.log"
+    filter: isEncoded
+    fields:
+      - text
+
+  # Aggregated summary — used for severity / service / volume rollups.
+  - path: $=TenXEnv.get("LOG10X_MCP_OUTPUT_DIR") + "/aggregated.csv"
+    filter: isSummary
+    header: $=yield TenXString.join(",", TenXEnv.get("enrichmentFields"), "summaryVolume", "summaryBytes", "summaryTotals") + "\n"
+    fields:
+      - $=yield TenXEnv.get("enrichmentFields")
+      - summaryVolume
+      - summaryBytes
+      - summaryTotals

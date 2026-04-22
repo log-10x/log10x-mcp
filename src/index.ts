@@ -24,6 +24,7 @@ import { discoverLabelsSchema, executeDiscoverLabels } from './tools/discover-la
 import { topPatternsSchema, executeTopPatterns } from './tools/top-patterns.js';
 import { listByLabelSchema, executeListByLabel } from './tools/list-by-label.js';
 import { resolveBatchSchema, executeResolveBatch } from './tools/resolve-batch.js';
+import { extractTemplatesSchema, executeExtractTemplates } from './tools/extract-templates.js';
 import {
   investigateSchema,
   executeInvestigate,
@@ -48,6 +49,10 @@ import {
   translateMetricToPatternsSchema,
   executeTranslateMetricToPatterns,
 } from './tools/translate-metric-to-patterns.js';
+import { discoverEnvSchema, executeDiscoverEnv } from './tools/discover-env.js';
+import { adviseReporterSchema, executeAdviseReporter } from './tools/advise-reporter.js';
+import { adviseRegulatorSchema, executeAdviseRegulator } from './tools/advise-regulator.js';
+import { adviseStreamerSchema, executeAdviseStreamer } from './tools/advise-streamer.js';
 import { getStatus } from './resources/status.js';
 
 // ── Environment + cost cache ──
@@ -397,6 +402,15 @@ server.tool(
   (args) => wrap('log10x_resolve_batch', async () => executeResolveBatch(args))
 );
 
+// ── Tool: log10x_extract_templates ──
+
+server.tool(
+  'log10x_extract_templates',
+  'Extract the structural template library from a log corpus via the local tenx CLI. Returns per-template identity (stable templateHash), template body with variable slots, and event count. Use for: (a) bootstrapping a pattern catalog before wiring up a Reporter, (b) offline auditing of archived log corpora, (c) validating that a config change produces expected template identities (pass `expected` assertions). Input: inline events, raw text, or a file path/glob. The tenx CLI must be installed locally (`brew install log10x/tap/tenx`). **Validation mode**: pass `expected.min_templates`, `expected.required_patterns`, and/or `expected.forbidden_merges` to turn extraction into assertion-checked validation — each assertion reports PASS/FAIL in the output. **Example**: `{"source": "events", "events": ["ERROR checkout-svc ...", "INFO cart-svc ..."], "expected": {"min_templates": 2, "forbidden_merges": [["checkout", "cart"]]}}` to assert the two services produce separate templates.',
+  extractTemplatesSchema,
+  (args) => wrap('log10x_extract_templates', async () => executeExtractTemplates(args))
+);
+
 // ── Tool: log10x_streamer_query ──
 
 server.tool(
@@ -478,6 +492,42 @@ server.tool(
       const env = resolveEnv(getEnvs(), args.environment);
       return executeTranslateMetricToPatterns(args, env);
     })
+);
+
+// ── Tool: log10x_discover_env (install advisor) ──
+
+server.tool(
+  'log10x_discover_env',
+  'Read-only discovery of the caller\'s Kubernetes cluster + AWS account. Probes kubectl (workloads, DaemonSets, Helm releases, service-account IRSA annotations) and AWS (EKS, S3, SQS, CloudWatch log groups) to detect: which forwarder is running (Fluent Bit, Fluentd, Filebeat, Logstash, OTel Collector), which log10x apps are already installed (Reporter, Regulator, Streamer), and what infrastructure exists that could host a Streamer install. Returns a terse markdown report + a `snapshot_id` (cached 30 min) the advisor tools consume. Use this tool BEFORE calling `log10x_advise_reporter`, `log10x_advise_regulator`, or `log10x_advise_streamer` — they read the snapshot to tailor their install/verify/teardown commands to the specific cluster state. Every shell call is logged in the snapshot\'s `probeLog` for audit. No writes, no state mutation: only `kubectl get` and `aws ... describe/list` verbs. **Tier prerequisites**: none — this is a pre-install tool and runs against any customer environment.',
+  discoverEnvSchema,
+  (args) => wrap('log10x_discover_env', () => executeDiscoverEnv(args))
+);
+
+// ── Tool: log10x_advise_reporter (install advisor) ──
+
+server.tool(
+  'log10x_advise_reporter',
+  'Given a DiscoverySnapshot (from `log10x_discover_env`) + a forwarder choice + a license key, produce a tailored install/verify/teardown plan for the Log10x Reporter. Supports 5 forwarders (fluent-bit, fluentd, filebeat, logstash, otel-collector). The plan includes: preflight checks (namespace existence, release-name collision, chart availability, forwarder alignment); per-step install commands (helm repo, values.yaml, helm upgrade, rollout wait); verify probes that answer specific questions (pods ready? 10x sidecar processing events? forwarder emitting output?); and teardown commands (helm uninstall, PVC cleanup, residue check). Every step is paste-ready — no shell interpolation. Use `action: "verify"` or `action: "teardown"` to scope the output. Default destination is `mock` (forwarder stdout) which is safe for dogfooding; switch to `elasticsearch|splunk|datadog|cloudwatch` with `destination` + `output_host` for production installs. **Tier prerequisites**: none — this is a pre-install tool.',
+  adviseReporterSchema,
+  (args) => wrap('log10x_advise_reporter', () => executeAdviseReporter(args))
+);
+
+// ── Tool: log10x_advise_regulator (install advisor) ──
+
+server.tool(
+  'log10x_advise_streamer',
+  'Given a DiscoverySnapshot (from `log10x_discover_env`), produce an install/verify/teardown plan for the Log10x Streamer. Unlike Reporter + Regulator, the Streamer has no forwarder choice — it is a standalone set of workloads (indexer + query-handler + stream-worker + filter CronJobs) that read from S3 via SQS and serve an HTTP query endpoint. The advisor detects existing AWS infra (input bucket with `indexing-results/` prefix, four SQS queues — index/query/subquery/stream — and an IRSA-annotated ServiceAccount) from the discovery snapshot, or accepts explicit overrides. Preflight fails closed when any required resource is missing — the Streamer depends on Terraform-provisioned infra that this advisor does NOT create. Verify probes: pods Ready, indexer processing messages, query endpoint responding, S3 indexing-results/ getting writes, SQS queue drainage. Teardown uninstalls the Helm release but leaves AWS infra alone (Terraform\'s concern). **Tier prerequisites**: none — but AWS infra must exist before install.',
+  adviseStreamerSchema,
+  (args) => wrap('log10x_advise_streamer', () => executeAdviseStreamer(args))
+);
+
+// ── Tool: log10x_advise_regulator (install advisor) ──
+
+server.tool(
+  'log10x_advise_regulator',
+  'Given a DiscoverySnapshot (from `log10x_discover_env`) + a forwarder choice + a license key, produce a tailored install/verify/teardown plan for the Log10x Regulator. Same 5 forwarders as the Reporter (fluent-bit, fluentd, filebeat, logstash, otel-collector) and same charts — the Regulator differs from the Reporter by writing regulated events back through the forwarder (with mute/sample/compact applied) instead of only emitting metrics. Values files carry `kind: "regulate"` which routes the tenx launcher to `@run/input/forwarder/<fw>/regulate` + `@apps/regulator`. Output shape is identical to `log10x_advise_reporter`: preflight, install steps, verify probes, teardown. **Tier prerequisites**: none — this is a pre-install tool.',
+  adviseRegulatorSchema,
+  (args) => wrap('log10x_advise_regulator', () => executeAdviseRegulator(args))
 );
 
 // ── Resource: log10x://status ──

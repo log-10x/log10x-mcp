@@ -1,8 +1,66 @@
 # Engine team tickets — ready to file
 
-These are pre-written tickets for the engine-side bugs caught during the 2026-04-15 GA hardening session. All have MCP-layer mitigations shipped (PRs #32–#35) but need engine root-cause fixes before the affected workflows are fully GA-ready.
+These are pre-written tickets for the engine-side bugs caught during the 2026-04-15 GA hardening session. All have MCP-layer mitigations shipped (PRs #32–#36) but need engine root-cause fixes before the affected workflows are fully GA-ready.
 
 Each ticket is self-contained — copy the title and body directly into whichever issue tracker the engine team uses.
+
+## 2026-04-15 evening status
+
+- **Ticket 0 (G12 JSONL writer)**: confirmed engine bug, awaits engine fix. MCP shape guard merged.
+- **Ticket 1 (G11 paste templatizer)**: **Status split.**
+  - In-cluster fluentd ingestion path: hot-patched live in 4 fluentd pods (group-template.js negator-fallback branch). Verified — 30-line G11 bundle produces 22 distinct templates instead of 7. Awaits image rebuild for permanence.
+  - **Paste Lambda path: STILL BROKEN.** Reproduced 2026-04-15 evening: `log10x_resolve_batch` with 10 distinct lines returns 3 patterns, 7 lines silently dropped, cross-event template merge present (libgssapi error + shipping error glued by `\n` in Pattern #1's body). The paste Lambda is a separate deployment from in-cluster fluentd — different image, different runtime — so the hot-patch never touched it. **The G11 fix needs a coordinated rollout: rebuild engine image AND redeploy the paste Lambda.** Customers using SlackPasteBot / `/log10x triage` are still affected even after the fluentd image rebuild lands. See **Ticket 1b** below.
+  - **Failure 4 (UUID over-segmentation) WITHDRAWN** — `$-$-$-$-$` still produces stable templateHash for structurally-identical UUIDs; structural identity is preserved.
+- **Ticket 2 (G12 streamer)**: **Status split.**
+  - **Failure B (-32000 crash on canonical name): RESOLVED.** Did not reproduce post-fix. Was an artifact of the malformed body in Failure A.
+  - **Failure A (zero events on known-exists data): RECONFIRMED reproducible.** PR #36 fixed the body shape (verified end-to-end with 886 matched / 16 returned earlier today after manually triggering an indexer run). Hours later, multiple distinct queries reproduce the 0-events / 92s wall-time symptom: `tenx_user_service=="frontend"`, `includes(text, "shipping")`, and canonical pattern-name searches all return 0 against an environment where `pattern_trend` shows live $4.1/day CRIT shipping traffic. The earlier 16-event verification required manually copying an existing S3 object to trigger an indexer event — twice today. **The pattern of needing manual S3 triggers indicates a real indexer freshness/coverage bug, root cause TBD.** Hypotheses: (a) indexer's S3 event subscription not firing reliably, (b) indexer cron is too sparse, (c) indexer crashes silently on certain object shapes. Need engine investigation with indexer-pod logs tailed during a live query.
+- **Ticket 3 (G10 fingerprinter)**: **WITHDRAWN.** The two product-reviews templates are structurally different at the templater level (different literal sets in overlapping positions) — the templater is internally consistent. PR #35's MCP-layer collapse heuristic addresses the operational UX pain at the right layer. Not an engine bug.
+- **Ticket 4 (G9 tenx-edge stale state)**: **Confirmed engine bug, root cause TBD.** Symptom is reproducible and currently active: doctor flags 11 services with non-zero 24h volume and zero 15m volume; `kubectl rollout restart ds/tenx-fluentd` clears it instantly. Two hypotheses ruled out today against the source: `PrometheusRequestBuilder.reportedCounters` latch (zero-baselines are first-time-only by design — missing them on retry is correct, not a bug) and `BaseReaderDecoderProducer` backpressure wait loop (the `wait(intervalDuration)` + time-gated `shouldTest()` recovers after at most one interval, not a deadlock). Need live repro with thread dump from a stuck pod and Prometheus scrape logs (Grok's hint: check for missing labels during recovery — could indicate metric exporter caching service metadata incorrectly during backpressure recovery).
+
+---
+
+## Ticket 1b — GA BLOCKER: Paste Lambda runs unfixed templater (separate from in-cluster fluentd)
+
+**Severity**: GA blocker for the paste-triage workflow. SEPARATE from Ticket 1's in-cluster fluentd fix.
+**Affected component**: Paste Lambda (the AWS Lambda behind `LOG10X_PASTE_URL` that backs `log10x_resolve_batch`).
+**GAPS ID**: G11 (Lambda half)
+
+### Evidence
+
+`log10x_resolve_batch` with 10 distinct log lines (subset of the original G11 bundle) on 2026-04-15 evening:
+
+Input:
+```
+info: cart.cartstore.ValkeyCartStore[0] GetCartAsync called with userId=0b244836-38ef-11f1-97c3-2e37e12f85c8
+Error: libgssapi_krb5.so.2: cannot open shared object file: No such file or directory
+Post "http://shipping:8080/quote": unsupported protocol scheme "shipping"
+2026-04-15T17:23:47Z WRN checkpoints.go:73 failed to find checkpoint: resource not found
+grpc: addrConn.createTransport failed to connect to {Addr: "jaeger:4317", ServerName: "jaeger:4317"}
+AdService Targeted ad request received for "books" with trace_id=abc123
+frontend: POST /api/checkout 200
+opentelemetry-collector: exporter otlp failed to send metrics: rpc error: code=Unavailable
+payment: gRPC server started on :9000
+kube-proxy: Running on node ip-10-0-48-245.ec2.internal
+```
+
+Output: 3 patterns, **7 lines (70%) silently dropped**. Pattern #1's body literally contains the libgssapi error AND the Post shipping error fused with `\n`:
+```
+template: 'Error: libgssapi_krb5.so.$: cannot open shared object file: No such file or directory\nPost "http://shipping:$/quote": unsupported protocol scheme...'
+```
+
+This is the same cross-event template merge bug from the original G11 ticket, in a different deployment.
+
+### Why the in-cluster hot-patch doesn't help
+
+The hot-patch applied earlier this session was `kubectl cp` of `group-template.js` into 4 in-cluster fluentd pods, followed by `kill <PID>` to respawn the tenx-edge child. The paste Lambda is an entirely separate AWS Lambda runtime — it bundles its own copy of the engine, runs in Lambda execution environment, and is not reachable via kubectl. The hot-patch never touched it.
+
+### Required fix
+
+Rebuild the engine image (which fixes the in-cluster fluentd path's persistence issue too), then redeploy the paste Lambda with the new image. Both are downstream of the same engine source change, so a single image rebuild covers both surfaces.
+
+### MCP-side mitigation
+
+PR #35's drop-count warning IS already firing on the broken paste Lambda output and correctly tells users not to trust the result. But the workflow remains unusable for production triage until the paste Lambda is redeployed.
 
 ---
 
