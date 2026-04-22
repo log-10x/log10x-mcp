@@ -49,6 +49,25 @@ const forwarders: ForwarderKind[] = [
 ];
 
 for (const fw of forwarders) {
+  if (fw === 'logstash') {
+    // log10x-elastic/logstash@1.0.6 is chart-broken for sidecar mode;
+    // the advisor blocks it entirely. Assert the blocker path here.
+    test(`regulator plan for ${fw} is blocked (chart broken)`, async () => {
+      const plan = await buildReporterPlan({
+        snapshot: baseSnapshot(),
+        app: 'regulator',
+        forwarder: fw,
+        apiKey: 'test',
+        destination: 'mock',
+      });
+      assert.ok(
+        plan.blockers.some((b) => b.toLowerCase().includes('logstash')),
+        `expected logstash blocker; got: ${plan.blockers.join(' | ')}`
+      );
+      assert.equal(plan.install.length, 0, `blocked plans should not emit install steps`);
+    });
+    continue;
+  }
   test(`regulator plan for ${fw}: values embed kind=regulate`, async () => {
     const plan = await buildReporterPlan({
       snapshot: baseSnapshot(),
@@ -115,15 +134,17 @@ test('alreadyInstalled.regulator triggers a note, not a blocker', async () => {
 });
 
 test('regulator plan install commands reference the same chart as reporter', async () => {
-  // Regulator uses the same charts; only kind differs.
+  // Regulator uses the same charts; only kind differs. Logstash is
+  // blocked upstream (chart-broken sidecar wiring) so we skip it here —
+  // the logstash blocker is covered by the dedicated test above.
   const expected: Record<string, string> = {
     'fluent-bit': 'log10x-fluent/fluent-bit',
     fluentd: 'log10x-fluent/fluentd',
     filebeat: 'log10x-elastic/filebeat',
-    logstash: 'log10x-elastic/logstash',
     'otel-collector': 'log10x-otel/opentelemetry-collector',
   };
   for (const fw of forwarders) {
+    if (fw === 'logstash') continue;
     const plan = await buildReporterPlan({
       snapshot: baseSnapshot(),
       app: 'regulator',
