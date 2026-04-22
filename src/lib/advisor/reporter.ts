@@ -43,6 +43,15 @@ export interface ReporterAdviseArgs {
   outputHost?: string;
   /** Splunk HEC token if destination=splunk. */
   splunkHecToken?: string;
+  /**
+   * Enable encoded event output (compact templateHash+vars form,
+   * ~20-40x volume reduction). Only meaningful when app='regulator'.
+   * Silently ignored otherwise. Verified working on fluent-bit@1.0.7 +
+   * fluentd@1.0.7 via the `regulatorOptimize=true` env-var workaround
+   * (the chart's `tenx.optimize: true` path is chart-broken — do NOT
+   * use it directly). Unverified on filebeat/logstash/otel-collector.
+   */
+  optimize?: boolean;
   /** Skip install — for users who just want verify or teardown guidance. */
   skipInstall?: boolean;
   /** Skip teardown. */
@@ -98,6 +107,20 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   if (destination === 'splunk' && !args.splunkHecToken && !args.skipInstall) {
     blockers.push('destination=splunk requires `splunk_hec_token`.');
   }
+  // optimize=true is only verified on fluent-bit@1.0.7 + fluentd@1.0.7
+  // as of 2026-04-22. For the other forwarders, the charts are still at
+  // 1.0.6 with a different optimize wiring that we have not verified —
+  // refuse rather than emit install instructions that likely don't work.
+  if (args.optimize && spec && forwarder !== 'fluent-bit' && forwarder !== 'fluentd') {
+    blockers.push(
+      `optimize=true is verified working only on fluent-bit@1.0.7 and fluentd@1.0.7 (via the \`regulatorOptimize=true\` env-var workaround for a chart bug in \`tenx.optimize: true\`). For \`${forwarder}\` the chart is still at 1.0.6 with an unverified optimize path — refusing to emit an install plan. Either pick fluent-bit/fluentd, or drop \`optimize\` and deploy the regulator in non-encoding mode.`
+    );
+  }
+  if (args.optimize && app === 'reporter') {
+    blockers.push(
+      'optimize=true is a Regulator-app feature (it encodes events emitted back through the forwarder). The Reporter app does not emit events back through the forwarder — it only publishes aggregated TenXSummary metrics. Drop `optimize` or switch to `app=regulator`.'
+    );
+  }
 
   const preflight = await runPreflight(
     snapshot,
@@ -124,6 +147,19 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
       'Destination is `mock` (events written to forwarder stdout). Ideal for dogfooding or smoke tests; switch to `elasticsearch`, `splunk`, `datadog`, or `cloudwatch` for production.'
     );
   }
+  // Filebeat's tenx integration is hardcoded in the log10x/filebeat-10x
+  // Dockerfile: `filebeat 2>&1 | tenx-edge run …`. The tenx subprocess
+  // reads events from filebeat's stdout — which means `output.console`
+  // in the user's filebeat.yml (or any output that writes to stdout)
+  // corrupts the tenx input stream. This is NOT overridable at the
+  // chart level. The mock destination the advisor ships uses
+  // `output.file: /tmp/tenx-mock-*`, which is safe; any non-stdout
+  // output (elasticsearch, splunk, logstash, kafka, etc.) is also safe.
+  if (forwarder === 'filebeat') {
+    notes.push(
+      "Filebeat constraint: **do not configure `output.console`** in `filebeat.yml`. Filebeat's tenx integration uses its stdout as the pipe to the 10x engine (baked into the `log10x/filebeat-10x` Dockerfile entrypoint: `filebeat 2>&1 | tenx-edge run …`). Any output that writes to stdout corrupts that pipe. Use `output.elasticsearch`, `output.file`, `output.logstash`, `output.kafka`, etc. — the mock destination used by this plan is `output.file` (safe by default)."
+    );
+  }
   // Surface the non-invasive alternative for the Reporter app. The
   // `log10x-k8s/reporter-10x@1.0.7` chart ships a parallel DaemonSet
   // (fluent-bit + tenx-edge, ~250Mi/150m per node) that reads the same
@@ -145,11 +181,11 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   const teardown: PlanStep[] = [];
 
   if (spec && !args.skipInstall && blockers.length === 0) {
-    install.push(...buildInstallSteps({ ...args, spec, releaseName, namespace, destination, app, kind }));
+    install.push(...buildInstallSteps({ ...args, spec, releaseName, namespace, destination, app, kind, optimize: args.optimize }));
   }
   if (spec && !args.skipVerify) {
     verify.push(
-      ...spec.verifyProbes({ releaseName, namespace, destination }).map((p) => ({
+      ...spec.verifyProbes({ releaseName, namespace, destination, optimize: args.optimize }).map((p) => ({
         ...p,
       }))
     );
@@ -323,8 +359,9 @@ function buildInstallSteps(opts: {
   splunkHecToken?: string;
   app: AdvisorApp;
   kind: TenxKind;
+  optimize?: boolean;
 }): PlanStep[] {
-  const { spec, releaseName, namespace, destination, outputHost, splunkHecToken, kind } = opts;
+  const { spec, releaseName, namespace, destination, outputHost, splunkHecToken, kind, optimize } = opts;
   const apiKey = opts.apiKey ?? 'REPLACE_WITH_LICENSE_KEY';
   const steps: PlanStep[] = [];
 
@@ -350,7 +387,7 @@ function buildInstallSteps(opts: {
     rationale: `Tenx config + ${spec.label}-specific output destination (\`${destination}\`).`,
     file: {
       path: valuesFile,
-      contents: spec.renderValues({ apiKey, releaseName, destination, kind, outputHost, splunkHecToken }),
+      contents: spec.renderValues({ apiKey, releaseName, destination, kind, outputHost, splunkHecToken, optimize }),
       language: 'yaml',
     },
     commands: [],

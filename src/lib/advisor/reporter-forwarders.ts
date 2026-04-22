@@ -104,12 +104,24 @@ export interface ForwarderSpec {
     splunkHecToken?: string;
     /** Placeholder emitted into `tenx.gitToken`. Defaults to the public-repo no-op string. */
     gitToken?: string;
+    /**
+     * When true AND kind=regulate, emit events in compact encoded form
+     * (templateHash+vars, ~20-40x volume reduction). Verified 2026-04-22
+     * on demo cluster for fluent-bit@1.0.7 + fluentd@1.0.7 via the
+     * `regulatorOptimize=true` env var workaround (the chart's own
+     * `tenx.optimize: true` field points at a Lua script that's not
+     * shipped in the 1.0.7 image — do NOT use it directly). Silently
+     * ignored when kind=report.
+     */
+    optimize?: boolean;
   }) => string;
   /** Verify probes — commands that, collectively, prove data is flowing. */
   verifyProbes: (opts: {
     releaseName: string;
     namespace: string;
     destination: OutputDestination;
+    /** True when the install enabled encoded output (see renderValues.optimize). */
+    optimize?: boolean;
   }) => Array<{
     name: string;
     question: string;
@@ -152,8 +164,26 @@ export const REPORTER_FORWARDER_SPECS: Record<Exclude<ForwarderKind, 'unknown'>,
     hasTenxSidecar: false,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ apiKey, releaseName, destination, kind, outputHost, splunkHecToken, gitToken }) => {
+    renderValues: ({ apiKey, releaseName, destination, kind, outputHost, splunkHecToken, gitToken, optimize }) => {
       const outputBlock = renderFluentBitOutput(destination, outputHost, splunkHecToken);
+      // Optimizer mode: the chart's own `tenx.optimize: true` path is
+      // broken on 1.0.7 (references tenx-optimize.lua which isn't in
+      // the image). The verified workaround is tenx.optimize:false +
+      // env regulatorOptimize=true — the regulate Lua fires, the engine
+      // picks up the env var and flips encodeObjects on.
+      const envBlock =
+        optimize && kind === 'regulate'
+          ? `
+# Optimizer flag. Chart 1.0.7's tenx.optimize:true references a
+# tenx-optimize.lua file that isn't shipped in fluent-bit-10x:1.0.7-jit.
+# Use the env-var workaround: regulate Lua filter + regulatorOptimize=true
+# so the engine emits compact encoded events (templateHash+vars, ~20-40x
+# volume reduction). Verified 2026-04-22 on demo cluster.
+env:
+  - name: regulatorOptimize
+    value: "true"
+`
+          : '';
       return `tenx:
   enabled: true
   apiKey: "${apiKey}"
@@ -164,13 +194,19 @@ export const REPORTER_FORWARDER_SPECS: Record<Exclude<ForwarderKind, 'unknown'>,
     git:
       enabled: true
       url: "https://github.com/log-10x/config.git"
-
+${envBlock}
 ${outputBlock}
 `;
     },
-    verifyProbes: ({ releaseName, namespace, destination }) => {
+    verifyProbes: ({ releaseName, namespace, destination, optimize }) => {
       const sel = k8sRecommendedSelector(releaseName);
-      const probes = [
+      const probes: Array<{
+        name: string;
+        question: string;
+        commands: string[];
+        expectOutput?: string;
+        timeoutSec?: number;
+      }> = [
         {
           name: 'pods-ready',
           question: 'Are all Reporter DaemonSet pods Ready?',
@@ -195,6 +231,20 @@ ${outputBlock}
           timeoutSec: 120,
         });
       }
+      if (optimize) {
+        // Grep for the compact encoded form — a `log` field whose value
+        // starts with `~<templateHash>,<timestamp>,...` (never happens
+        // for raw events, which are always JSON or plain text).
+        probes.push({
+          name: 'tenx-encoded-events',
+          question: 'Are events emitted in compact encoded form (templateHash+vars)?',
+          commands: [
+            `kubectl -n ${namespace} logs -l ${sel} -c fluent-bit --tail=500 | grep -oE '"log":"~[^"]{5,20},[0-9]{10,}' | head -3`,
+          ],
+          expectOutput: '~',
+          timeoutSec: 120,
+        });
+      }
       return probes;
     },
   },
@@ -212,7 +262,7 @@ ${outputBlock}
     hasTenxSidecar: false,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ apiKey, releaseName, destination, kind, outputHost, splunkHecToken, gitToken }) => {
+    renderValues: ({ apiKey, releaseName, destination, kind, outputHost, splunkHecToken, gitToken, optimize }) => {
       // IMPORTANT: fluentd's output config lives UNDER `tenx:`, not
       // as a second top-level `tenx:` block. A prior version of this
       // template emitted two `tenx:` keys and YAML silently dropped
@@ -221,6 +271,18 @@ ${outputBlock}
       const fluentdExcludePaths = FORWARDER_EXCLUDE_REGEX.map((g) => `/var/log/containers/${g.replace('.*', '*').replace('\\.log$', '.log')}`)
         .map((g) => `"${g}"`)
         .join(', ');
+      // Optimizer mode via env workaround — same as fluent-bit. Verified
+      // 2026-04-22 on demo cluster: tenx banner shows
+      //   📝 Writing TenXObject fields: 'encoded=encode()' → Fluentd: /tmp/tenx_fluentd.sock
+      // and events emitted downstream come out in compact form.
+      const envBlock =
+        optimize && kind === 'regulate'
+          ? `
+env:
+  - name: regulatorOptimize
+    value: "true"
+`
+          : '';
       return `tenx:
   enabled: true
   apiKey: "${apiKey}"
@@ -268,11 +330,17 @@ ${outputBlock}
   outputConfigs:
     06_final_output.conf: |-
 ${indent(outputConfig, 6)}
-`;
+${envBlock}`;
     },
-    verifyProbes: ({ releaseName, namespace, destination }) => {
+    verifyProbes: ({ releaseName, namespace, destination, optimize }) => {
       const sel = k8sRecommendedSelector(releaseName);
-      const probes = [
+      const probes: Array<{
+        name: string;
+        question: string;
+        commands: string[];
+        expectOutput?: string;
+        timeoutSec?: number;
+      }> = [
         {
           name: 'pods-ready',
           question: 'Are all Reporter DaemonSet pods Ready?',
@@ -294,6 +362,17 @@ ${indent(outputConfig, 6)}
           question: 'Are tagged [TENX-MOCK] events reaching stdout?',
           commands: [`kubectl -n ${namespace} logs -l ${sel} -c fluentd --tail=200 | grep -F 'TENX-MOCK' | head -5`],
           expectOutput: 'TENX-MOCK',
+          timeoutSec: 120,
+        });
+      }
+      if (optimize) {
+        probes.push({
+          name: 'tenx-encoded-events',
+          question: 'Are events emitted in compact encoded form (templateHash+vars)?',
+          commands: [
+            `kubectl -n ${namespace} logs -l ${sel} -c fluentd --tail=500 | grep -oE '"log":"~[^"]{5,20},[0-9]{10,}' | head -3`,
+          ],
+          expectOutput: '~',
           timeoutSec: 120,
         });
       }
@@ -682,6 +761,15 @@ function renderFilebeatOutput(destination: OutputDestination, outputHost?: strin
     // overriding filebeatConfig, we hardcode the path to tenx-report.js
     // which is baked at a known location in every log10x/filebeat-10x
     // image.
+    //
+    // CRITICAL (Dor, 2026-04-22): filebeat + log10x is INCOMPATIBLE with
+    // \`output.console\`. The tenx subprocess reads from filebeat's
+    // stdout — the same channel \`output.console\` writes to — so a
+    // console output corrupts the tenx input stream. Use output.file
+    // (below) for mock verification, or any non-stdout output in prod
+    // (elasticsearch, splunk, logstash, kafka, etc.). The log10x/
+    // filebeat-10x Dockerfile hardcodes this pipe assumption, so it's
+    // not overridable at the chart level.
     //
     // output.file writes the regular event stream to /tmp/tenx-mock-*
     // for "is the forwarder working" verification. The script-processor
