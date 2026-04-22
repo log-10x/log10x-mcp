@@ -48,7 +48,14 @@ const forwarders: ForwarderKind[] = [
   'otel-collector',
 ];
 
-for (const fw of forwarders) {
+// log10x-elastic/logstash@1.0.6 is chart-broken for sidecar mode — the
+// advisor emits a blocker for `forwarder=logstash` (no install steps).
+// Tests that iterate over forwarders and expect each to produce install
+// plans use `installableForwarders`; the logstash-blocker assertion
+// lives in its own dedicated test below.
+const installableForwarders: ForwarderKind[] = forwarders.filter((f) => f !== 'logstash');
+
+for (const fw of installableForwarders) {
   test(`plan for ${fw}: install + verify + teardown all present`, async () => {
     const plan = await buildReporterPlan({
       snapshot: baseSnapshot(),
@@ -69,6 +76,22 @@ for (const fw of forwarders) {
     }
   });
 }
+
+test('plan for logstash is blocked (chart-broken sidecar wiring)', async () => {
+  const plan = await buildReporterPlan({
+    snapshot: baseSnapshot(),
+    forwarder: 'logstash',
+    apiKey: 'test-key',
+    destination: 'mock',
+  });
+  assert.ok(
+    plan.blockers.some((b) => b.toLowerCase().includes('logstash')),
+    `expected logstash blocker; got: ${plan.blockers.join(' | ')}`
+  );
+  assert.equal(plan.install.length, 0, 'blocked plans should not emit install steps');
+  assert.ok(plan.verify.length > 0, 'verify probes still emitted');
+  assert.ok(plan.teardown.length > 0, 'teardown still emitted');
+});
 
 test('missing api_key adds a blocker', async () => {
   const plan = await buildReporterPlan({
@@ -187,7 +210,7 @@ test('values.yaml has no duplicate top-level keys (fluentd regression)', async (
   // `tenx:` keys — YAML silently kept the second and dropped apiKey /
   // kind / runtimeName / git config entirely. Lock the invariant
   // across every forwarder: each top-level key appears at most once.
-  for (const fw of forwarders) {
+  for (const fw of installableForwarders) {
     const plan = await buildReporterPlan({
       snapshot: baseSnapshot(),
       forwarder: fw,
@@ -215,7 +238,7 @@ test('every forwarder values file embeds gitToken (init-container secret mount)'
   // init container. If gitToken is empty the secret isn't created and
   // pods hang in FailedMount. Every supported forwarder must emit a
   // placeholder.
-  for (const fw of forwarders) {
+  for (const fw of installableForwarders) {
     const plan = await buildReporterPlan({
       snapshot: baseSnapshot(),
       forwarder: fw,
@@ -238,7 +261,7 @@ test('verify probes target the correct container per forwarder', async () => {
     logstash: 'logstash',
     'otel-collector': 'opentelemetry-collector',
   };
-  for (const fw of forwarders) {
+  for (const fw of installableForwarders) {
     const plan = await buildReporterPlan({
       snapshot: baseSnapshot(),
       forwarder: fw,
@@ -262,7 +285,7 @@ test('chart refs are the published names (no `-10x` suffix drift)', async () => 
     logstash: 'log10x-elastic/logstash',
     'otel-collector': 'log10x-otel/opentelemetry-collector',
   };
-  for (const fw of forwarders) {
+  for (const fw of installableForwarders) {
     const plan = await buildReporterPlan({
       snapshot: baseSnapshot(),
       forwarder: fw,
@@ -281,7 +304,7 @@ test('values.yaml content is syntactically close to YAML', async () => {
   // Smoke-test: generated values file has expected shape for each
   // supported forwarder. All 5 use the embedded-image pattern with
   // a top-level `tenx:` block.
-  for (const fw of forwarders) {
+  for (const fw of installableForwarders) {
     const plan = await buildReporterPlan({
       snapshot: baseSnapshot(),
       forwarder: fw,
