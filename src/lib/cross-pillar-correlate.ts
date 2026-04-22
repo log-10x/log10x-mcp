@@ -8,15 +8,14 @@
  *   Phase 4 — temporal correlation (Pearson on rate curves with lag
  *             offsets)
  *   Phase 5 — structural validation (check metadata overlap between
- *             candidate and anchor; tier output into joined /
- *             structurally_validated / temporal_coincidence /
- *             validation_unavailable)
+ *             candidate and anchor; tier output into confirmed /
+ *             service-match / coincidence / unconfirmed)
  *
  * The tiered output is the differentiating property vs every other
- * agent observability tool: a candidate returned in the
- * `temporal_coincidence` tier is explicitly labeled as coincidence, not
- * quietly ranked alongside structurally-grounded candidates. This is
- * what prevents the hallucination failure mode the spec identifies.
+ * agent observability tool: a candidate returned in the `coincidence`
+ * tier is explicitly labeled as coincidence, not quietly ranked
+ * alongside structurally-grounded candidates. This is what prevents
+ * the hallucination failure mode the spec identifies.
  *
  * Node-level correlation is out of scope for v1.4 — the k8s enrichment
  * module doesn't populate k8s_node, so the structural-label alias map
@@ -41,15 +40,15 @@ export interface AnchorSpec {
 /**
  * Confidence tiers for cross-pillar candidates. Ordered by decreasing
  * trustworthiness. A caller that wants to auto-drill should only drill
- * into `joined` or `structurally_validated` tiers; `validation_unavailable`
- * and `temporal_coincidence` should be surfaced to the user without
- * autonomous action.
+ * into `confirmed` or `service-match` tiers; `unconfirmed` and
+ * `coincidence` should be surfaced to the user without autonomous
+ * action.
  */
 export type ConfidenceTier =
-  | 'joined'
-  | 'structurally_validated'
-  | 'validation_unavailable'
-  | 'temporal_coincidence';
+  | 'confirmed'
+  | 'service-match'
+  | 'unconfirmed'
+  | 'coincidence';
 
 export interface CandidateSubScores {
   /** Pearson r on the rate curves. */
@@ -68,7 +67,7 @@ export interface CrossPillarCandidate {
   /** Labels on the candidate side. */
   labels: Record<string, string>;
   subScores: CandidateSubScores;
-  /** Combined confidence. `null` when structural = null (validation_unavailable tier). */
+  /** Combined confidence. `null` when structural = null (unconfirmed tier). */
   combinedConfidence: number | null;
   tier: ConfidenceTier;
   /** Lag offset in seconds: negative = candidate leads anchor. */
@@ -239,13 +238,13 @@ export async function runCrossPillarCorrelation(
     });
   }
 
-  // Sort: joined first, then structurally_validated, then validation_unavailable, then temporal_coincidence.
+  // Sort: confirmed first, then service-match, then unconfirmed, then coincidence.
   // Within each tier, sort by combinedConfidence descending (null treated as 0).
   const tierOrder: Record<ConfidenceTier, number> = {
-    joined: 0,
-    structurally_validated: 1,
-    validation_unavailable: 2,
-    temporal_coincidence: 3,
+    'confirmed': 0,
+    'service-match': 1,
+    'unconfirmed': 2,
+    'coincidence': 3,
   };
   candidates.sort((a, b) => {
     const tierDelta = tierOrder[a.tier] - tierOrder[b.tier];
@@ -258,10 +257,10 @@ export async function runCrossPillarCorrelation(
   const trimmed = candidates.slice(0, maxCandidates);
 
   const byTier: Record<ConfidenceTier, CrossPillarCandidate[]> = {
-    joined: [],
-    structurally_validated: [],
-    validation_unavailable: [],
-    temporal_coincidence: [],
+    'confirmed': [],
+    'service-match': [],
+    'unconfirmed': [],
+    'coincidence': [],
   };
   for (const c of trimmed) byTier[c.tier].push(c);
 
@@ -591,10 +590,10 @@ function pickFirst(obj: Record<string, string>, keys: string[]): string | undefi
 
 function pickTier(score: number | null, reason: string): ConfidenceTier {
   void reason; // reserved for future per-reason tiering
-  if (score === null) return 'validation_unavailable';
-  if (score >= 1.0) return 'joined';
-  if (score >= 0.5) return 'structurally_validated';
-  return 'temporal_coincidence';
+  if (score === null) return 'unconfirmed';
+  if (score >= 1.0) return 'confirmed';
+  if (score >= 0.5) return 'service-match';
+  return 'coincidence';
 }
 
 // ── Temporal correlation (Pearson + lag) ──

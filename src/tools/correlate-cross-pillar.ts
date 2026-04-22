@@ -7,10 +7,10 @@
  * by structural validation confidence.
  *
  * Tiers:
- *   joined                 — structural overlap on join key + at least one more label
- *   structurally_validated — join key match, partial overlap
- *   validation_unavailable — required labels missing on Log10x side
- *   temporal_coincidence   — no structural link despite temporal match (should be rare; Phase 2 filter)
+ *   confirmed     — structural overlap on join key + at least one more label
+ *   service-match — join key match, partial overlap
+ *   unconfirmed   — required labels missing on Log10x side
+ *   coincidence   — no structural link despite temporal match (should be rare; Phase 2 filter)
  *
  * When the session cache has no join discovery result, this tool
  * auto-runs join discovery internally. When the join is not available at
@@ -28,7 +28,8 @@
 import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
 import {
-  loadBackendFromEnv,
+  resolveBackend,
+  formatDetectionTrace,
   CustomerMetricsNotConfiguredError,
 } from '../lib/customer-metrics.js';
 import { getOrDiscoverJoin, type JoinDiscoveryResult } from '../lib/join-discovery.js';
@@ -88,10 +89,11 @@ export async function executeCorrelateCrossPillar(
   },
   env: EnvConfig
 ): Promise<string> {
-  const backend = loadBackendFromEnv();
-  if (!backend) {
-    throw new CustomerMetricsNotConfiguredError();
+  const resolution = await resolveBackend();
+  if (!resolution.backend) {
+    throw new CustomerMetricsNotConfiguredError(formatDetectionTrace(resolution.trace));
   }
+  const backend = resolution.backend;
 
   // Auto-discover the join key. Use the correlation window as the label-value
   // probe window (matches the data we're about to analyze), and pass through
@@ -191,53 +193,53 @@ function renderCorrelationResult(
   lines.push(`**Candidates analyzed**: ${result.metadata.patternsAnalyzed}`);
   lines.push('');
 
-  // Joined tier
-  if (result.byTier.joined.length > 0) {
-    lines.push('### Tier 1 — joined (full structural overlap confirmed)');
+  // Confirmed tier
+  if (result.byTier['confirmed'].length > 0) {
+    lines.push('### Tier 1 — confirmed (full structural overlap)');
     lines.push('');
-    for (let i = 0; i < result.byTier.joined.length; i++) {
-      lines.push(formatCandidate(i + 1, result.byTier.joined[i]));
+    for (let i = 0; i < result.byTier['confirmed'].length; i++) {
+      lines.push(formatCandidate(i + 1, result.byTier['confirmed'][i]));
     }
     lines.push('');
   } else {
-    lines.push('### Tier 1 — joined');
+    lines.push('### Tier 1 — confirmed');
     lines.push('');
     lines.push('_No candidates with full structural overlap. This is normal when the anchor label set doesn\'t include a second structural dimension beyond the join key._');
     lines.push('');
   }
 
-  // Structurally validated tier
-  if (result.byTier.structurally_validated.length > 0) {
-    lines.push('### Tier 2 — structurally validated (join key match, partial overlap)');
+  // Service-match tier
+  if (result.byTier['service-match'].length > 0) {
+    lines.push('### Tier 2 — service-match (join key match, partial overlap)');
     lines.push('');
     lines.push('_Candidates matched on the join key but not on a second structural dimension. Plausibly a service-level issue affecting all instances, but the structural link is weaker than Tier 1._');
     lines.push('');
-    for (let i = 0; i < result.byTier.structurally_validated.length; i++) {
-      lines.push(formatCandidate(i + 1, result.byTier.structurally_validated[i]));
+    for (let i = 0; i < result.byTier['service-match'].length; i++) {
+      lines.push(formatCandidate(i + 1, result.byTier['service-match'][i]));
     }
     lines.push('');
   }
 
-  // Validation unavailable tier
-  if (result.byTier.validation_unavailable.length > 0) {
-    lines.push('### Tier 3 — validation unavailable');
+  // Unconfirmed tier
+  if (result.byTier['unconfirmed'].length > 0) {
+    lines.push('### Tier 3 — unconfirmed');
     lines.push('');
     lines.push('_These candidates have temporal correlation with the anchor BUT the tool could not confirm whether they are structurally linked, because required Log10x enrichment labels are absent or the anchor expression doesn\'t expose enough label matchers to validate against. **Do not drill autonomously.**_');
     lines.push('');
-    for (let i = 0; i < result.byTier.validation_unavailable.length; i++) {
-      lines.push(formatCandidate(i + 1, result.byTier.validation_unavailable[i]));
+    for (let i = 0; i < result.byTier['unconfirmed'].length; i++) {
+      lines.push(formatCandidate(i + 1, result.byTier['unconfirmed'][i]));
     }
     lines.push('');
   }
 
-  // Temporal coincidence tier
-  if (result.byTier.temporal_coincidence.length > 0) {
-    lines.push('### Tier 4 — temporal coincidence (warning)');
+  // Coincidence tier
+  if (result.byTier['coincidence'].length > 0) {
+    lines.push('### Tier 4 — coincidence (warning)');
     lines.push('');
     lines.push('_These candidates have temporal correlation with the anchor AND structural validation ran, but they have NO structural overlap with the anchor. This is coincidence, not causation. Do not present these as causal candidates without independent evidence._');
     lines.push('');
-    for (let i = 0; i < result.byTier.temporal_coincidence.length; i++) {
-      lines.push(formatCandidate(i + 1, result.byTier.temporal_coincidence[i]));
+    for (let i = 0; i < result.byTier['coincidence'].length; i++) {
+      lines.push(formatCandidate(i + 1, result.byTier['coincidence'][i]));
     }
     lines.push('');
   }
@@ -245,7 +247,7 @@ function renderCorrelationResult(
   // Next actions
   lines.push('### Next actions');
   lines.push('');
-  const topJoined = result.byTier.joined[0] || result.byTier.structurally_validated[0];
+  const topJoined = result.byTier['confirmed'][0] || result.byTier['service-match'][0];
   if (topJoined && result.anchor.type === 'customer_metric') {
     lines.push(`1. Drill into the top candidate: \`log10x_investigate({ starting_point: '${topJoined.name}' })\` for full causal-chain analysis.`);
     lines.push(`2. Pull the actual events contributing to the correlation: \`log10x_streamer_query({ pattern: '${topJoined.name}', window: 'last ${windowLabel}' })\`.`);
