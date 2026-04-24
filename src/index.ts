@@ -35,6 +35,7 @@ import { doctorSchema, executeDoctor, runDoctorChecks, renderDoctorReport } from
 import { log } from './lib/log.js';
 import { describeToolError } from './lib/tool-errors.js';
 import { streamerQuerySchema, executeStreamerQuery } from './tools/streamer-query.js';
+import { streamerSeriesSchema, executeStreamerSeries } from './tools/streamer-series.js';
 import { backfillMetricSchema, executeBackfillMetric } from './tools/backfill-metric.js';
 import {
   customerMetricsQuerySchema,
@@ -422,6 +423,19 @@ server.tool(
     wrap('log10x_streamer_query', async () => {
       const env = resolveEnv(getEnvs(), args.environment);
       return executeStreamerQuery(args, env);
+    })
+);
+
+// ── Tool: log10x_streamer_series ──
+
+server.tool(
+  'log10x_streamer_series',
+  'Materialize a fidelity-aware time series from the customer\'s S3 archive over an arbitrary window, with optional group-by on enrichment fields. Auto-selects between exact full aggregation (Strategy A) and per-window-sampled fan-out (Strategy B) based on Reporter pattern volume — small/moderate-volume queries get exact counts; high-volume / long-window queries get a sampled series with time-distribution and group-ranking fidelity preserved and tail caveats reported. Pathological volume is refused with structured narrowing guidance, never silently truncated. Call when: (a) the user wants a "what is the rate of pattern X over the last 30 days, broken down by tenant" answer that exceeds the SIEM\'s retention or query budget, (b) a baseline needs building from cost-driver patterns where Prometheus has continuous metrics but the *grouped breakdown* lives only in the S3 archive, (c) any time series question over a window where you don\'t know in advance whether full aggregation will fit. Use `log10x_streamer_query` instead when you need the actual event payloads (not aggregates). Use `log10x_backfill_metric` instead when you want to push the resulting series to a TSDB rather than just see it. **Tier prerequisites**: requires Storage Streamer deployed. Reporter is optional — when absent, mode selection falls back to window-length heuristic. **Example**: `{"search": "tenx_user_pattern == \\"PaymentRetry\\"", "from": "now-30d", "to": "now", "bucket_size": "1h", "group_by": "tenx_user_service", "fidelity": "auto"}` for a 30-day grouped baseline.',
+  streamerSeriesSchema,
+  (args) =>
+    wrap('log10x_streamer_series', async () => {
+      const env = resolveEnv(getEnvs(), args.environment);
+      return executeStreamerSeries(args, env);
     })
 );
 

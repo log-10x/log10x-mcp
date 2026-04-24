@@ -8,7 +8,7 @@
 
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { parseTimeExpression, normalizeTimeExpression, isStreamerConfigured } from '../src/lib/streamer-api.js';
+import { parseTimeExpression, normalizeTimeExpression, isStreamerConfigured, eventTimestampMs } from '../src/lib/streamer-api.js';
 
 test('normalizeTimeExpression: bare `now` becomes $=now()', () => {
   assert.equal(normalizeTimeExpression('now'), '$=now()');
@@ -66,4 +66,51 @@ test('isStreamerConfigured requires both LOG10X_STREAMER_URL and LOG10X_STREAMER
     if (savedBucket === undefined) delete process.env.LOG10X_STREAMER_BUCKET;
     else process.env.LOG10X_STREAMER_BUCKET = savedBucket;
   }
+});
+
+// ─── eventTimestampMs ──────────────────────────────────────────────────
+//
+// Magnitude-based unit detection. Modern epochs:
+//   seconds  ~1.77e9  → s × 1000
+//   millis   ~1.77e12 → as-is
+//   micros   ~1.77e15 → / 1000
+//   nanos    ~1.77e18 → / 1_000_000
+
+test('eventTimestampMs: 13-digit millis stays as millis (regression test)', () => {
+  // 1776851170107 is 2026-04-22T09:46:10.107Z — was previously misclassified
+  // as micros due to the > 1e12 boundary, dividing by 1000 and aliasing
+  // to 1970-01-21T13:00:00.
+  assert.equal(eventTimestampMs({ timestamp: 1_776_851_170_107 } as any), 1_776_851_170_107);
+});
+
+test('eventTimestampMs: array-wrapped millis extracted', () => {
+  assert.equal(eventTimestampMs({ timestamp: [1_776_851_170_107] } as any), 1_776_851_170_107);
+});
+
+test('eventTimestampMs: 16-digit micros divided by 1000', () => {
+  // 1776851170107000 → 1776851170107 ms
+  assert.equal(eventTimestampMs({ timestamp: 1_776_851_170_107_000 } as any), 1_776_851_170_107);
+});
+
+test('eventTimestampMs: 19-digit nanos divided by 1e6', () => {
+  // 1776851170107000000 → 1776851170107 ms
+  assert.equal(eventTimestampMs({ timestamp: 1_776_851_170_107_000_000 } as any), 1_776_851_170_107);
+});
+
+test('eventTimestampMs: 10-digit seconds multiplied by 1000', () => {
+  // 1776851170 → 1776851170000 ms
+  assert.equal(eventTimestampMs({ timestamp: 1_776_851_170 } as any), 1_776_851_170_000);
+});
+
+test('eventTimestampMs: ISO8601 string parses', () => {
+  const ms = eventTimestampMs({ timestamp: '2026-04-22T09:46:10.107Z' } as any);
+  assert.equal(ms, Date.parse('2026-04-22T09:46:10.107Z'));
+});
+
+test('eventTimestampMs: missing timestamp returns 0', () => {
+  assert.equal(eventTimestampMs({} as any), 0);
+});
+
+test('eventTimestampMs: numeric string in millis stays as millis', () => {
+  assert.equal(eventTimestampMs({ timestamp: '1776851170107' } as any), 1_776_851_170_107);
 });

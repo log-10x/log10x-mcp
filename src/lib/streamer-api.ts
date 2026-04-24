@@ -594,30 +594,50 @@ function parseJsonl(content: string): StreamerEvent[] {
   return events;
 }
 
-function eventTimestampMs(ev: StreamerEvent): number {
+/**
+ * Normalize a streamer event's timestamp to epoch-ms.
+ *
+ * The streamer encodes timestamps as `[<scalar>]` (array wrapping a single
+ * value). The scalar's unit varies by upstream pipeline configuration —
+ * fluent-bit ships seconds, the engine's TenXObject ships millis or nanos
+ * depending on the input adapter. Magnitude-based detection is the only
+ * portable approach.
+ *
+ * Ranges (today's epoch ≈ 1.77 × 10^X):
+ *   - seconds: ~1.77e9   (10 digits)
+ *   - millis:  ~1.77e12  (13 digits)
+ *   - micros:  ~1.77e15  (16 digits)
+ *   - nanos:   ~1.77e18  (19 digits)
+ *
+ * Boundaries are placed at 10^10, 10^13, 10^16 — one decade below the
+ * current epoch in each unit so 13-digit millis values like 1776851170107
+ * (2026-04-22) are correctly classified as millis instead of falsely
+ * matching the looser `>1e12` micros boundary and dividing by 1000 to
+ * land in 1970. (Bug discovered live during streamer_series testing
+ * 2026-04-23 — the entire bucket histogram aliased to 1970-01-21.)
+ */
+export function eventTimestampMs(ev: StreamerEvent): number {
   let ts: unknown = ev.timestamp;
-  // Streamer encodes the TenXObject timestamp as `[<epoch-nanos>]`.
   if (Array.isArray(ts) && ts.length > 0) {
     ts = ts[0];
   }
   if (typeof ts === 'number') {
-    // Heuristic: >1e15 → nanos, >1e12 → micros, >1e10 → millis, else seconds.
-    if (ts > 1e15) return Math.floor(ts / 1_000_000);
-    if (ts > 1e12) return Math.floor(ts / 1_000);
-    if (ts > 1e10) return ts;
-    return ts * 1000;
+    return classifyTs(ts);
   }
   if (typeof ts === 'string') {
     const asNum = Number(ts);
-    if (Number.isFinite(asNum)) {
-      if (asNum > 1e15) return Math.floor(asNum / 1_000_000);
-      if (asNum > 1e12) return Math.floor(asNum / 1_000);
-      if (asNum > 1e10) return asNum;
-      return asNum * 1000;
-    }
+    if (Number.isFinite(asNum)) return classifyTs(asNum);
     const asDate = Date.parse(ts);
     if (Number.isFinite(asDate)) return asDate;
   }
+  return 0;
+}
+
+function classifyTs(ts: number): number {
+  if (ts >= 1e16) return Math.floor(ts / 1_000_000); // nanos → ms
+  if (ts >= 1e13) return Math.floor(ts / 1_000); // micros → ms
+  if (ts >= 1e10) return ts; // millis already
+  if (ts > 0) return ts * 1000; // seconds → ms
   return 0;
 }
 
