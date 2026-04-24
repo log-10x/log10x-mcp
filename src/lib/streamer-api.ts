@@ -20,7 +20,13 @@
  *   - LOG10X_STREAMER_TARGET: default target app prefix (e.g., "app" for
  *     the otek demo env). Overridable per query.
  *   - LOG10X_STREAMER_POLL_MS: poll interval, default 1500 ms.
- *   - LOG10X_STREAMER_TIMEOUT_MS: total poll budget, default 90_000 ms.
+ *   - LOG10X_STREAMER_TIMEOUT_MS: total poll budget, default 180_000 ms.
+ *     The 90s default was too small for archives where the query-handler
+ *     spawns dozens of stream workers — observed live on the otel-demo
+ *     env taking >60s to write the first marker. 180s covers single
+ *     forensic queries; per-sub-window calls in streamer_series get the
+ *     same budget but typically finish in seconds because each query is
+ *     scoped to a small sub-window.
  *
  * Authentication piggybacks on the same X-10X-Auth header the Prometheus
  * gateway uses (apiKey/envId). Override via LOG10X_STREAMER_AUTH_HEADER /
@@ -594,30 +600,50 @@ function parseJsonl(content: string): StreamerEvent[] {
   return events;
 }
 
-function eventTimestampMs(ev: StreamerEvent): number {
+/**
+ * Normalize a streamer event's timestamp to epoch-ms.
+ *
+ * The streamer encodes timestamps as `[<scalar>]` (array wrapping a single
+ * value). The scalar's unit varies by upstream pipeline configuration —
+ * fluent-bit ships seconds, the engine's TenXObject ships millis or nanos
+ * depending on the input adapter. Magnitude-based detection is the only
+ * portable approach.
+ *
+ * Ranges (today's epoch ≈ 1.77 × 10^X):
+ *   - seconds: ~1.77e9   (10 digits)
+ *   - millis:  ~1.77e12  (13 digits)
+ *   - micros:  ~1.77e15  (16 digits)
+ *   - nanos:   ~1.77e18  (19 digits)
+ *
+ * Boundaries are placed at 10^10, 10^13, 10^16 — one decade below the
+ * current epoch in each unit so 13-digit millis values like 1776851170107
+ * (2026-04-22) are correctly classified as millis instead of falsely
+ * matching the looser `>1e12` micros boundary and dividing by 1000 to
+ * land in 1970. (Bug discovered live during streamer_series testing
+ * 2026-04-23 — the entire bucket histogram aliased to 1970-01-21.)
+ */
+export function eventTimestampMs(ev: StreamerEvent): number {
   let ts: unknown = ev.timestamp;
-  // Streamer encodes the TenXObject timestamp as `[<epoch-nanos>]`.
   if (Array.isArray(ts) && ts.length > 0) {
     ts = ts[0];
   }
   if (typeof ts === 'number') {
-    // Heuristic: >1e15 → nanos, >1e12 → micros, >1e10 → millis, else seconds.
-    if (ts > 1e15) return Math.floor(ts / 1_000_000);
-    if (ts > 1e12) return Math.floor(ts / 1_000);
-    if (ts > 1e10) return ts;
-    return ts * 1000;
+    return classifyTs(ts);
   }
   if (typeof ts === 'string') {
     const asNum = Number(ts);
-    if (Number.isFinite(asNum)) {
-      if (asNum > 1e15) return Math.floor(asNum / 1_000_000);
-      if (asNum > 1e12) return Math.floor(asNum / 1_000);
-      if (asNum > 1e10) return asNum;
-      return asNum * 1000;
-    }
+    if (Number.isFinite(asNum)) return classifyTs(asNum);
     const asDate = Date.parse(ts);
     if (Number.isFinite(asDate)) return asDate;
   }
+  return 0;
+}
+
+function classifyTs(ts: number): number {
+  if (ts >= 1e16) return Math.floor(ts / 1_000_000); // nanos → ms
+  if (ts >= 1e13) return Math.floor(ts / 1_000); // micros → ms
+  if (ts >= 1e10) return ts; // millis already
+  if (ts > 0) return ts * 1000; // seconds → ms
   return 0;
 }
 
@@ -660,16 +686,19 @@ async function waitForMarkerStability(
 export async function runStreamerQuery(
   env: EnvConfig,
   req: StreamerQueryRequest,
-  // Legacy options kept for call-site compatibility. The poll interval and
-  // timeout are now taken from environment variables; this argument is
-  // accepted but has no effect.
-  _legacy?: { timeoutMs?: number; pollIntervalMs?: number }
+  // Per-call overrides for poll interval + total budget. When unset, the
+  // env var defaults apply (LOG10X_STREAMER_POLL_MS, LOG10X_STREAMER_TIMEOUT_MS).
+  // streamer_series passes a tighter budget for sampled-mode sub-window
+  // calls so a single slow sub-window doesn't stall the whole fan-out.
+  options?: { timeoutMs?: number; pollIntervalMs?: number }
 ): Promise<StreamerQueryResponse> {
   const bucket = await getStreamerBucket();
   const target = req.target || (await getDefaultTarget());
   const queryId = randomUUID();
-  const pollMs = parseInt(process.env.LOG10X_STREAMER_POLL_MS || '1500', 10);
-  const timeoutMs = parseInt(process.env.LOG10X_STREAMER_TIMEOUT_MS || '90000', 10);
+  const pollMs =
+    options?.pollIntervalMs ?? parseInt(process.env.LOG10X_STREAMER_POLL_MS || '1500', 10);
+  const timeoutMs =
+    options?.timeoutMs ?? parseInt(process.env.LOG10X_STREAMER_TIMEOUT_MS || '180000', 10);
 
   // Minimal body format — matches the shape the engine's query-handler
   // actually expects (verified live on the otel-demo env 2026-04-15).
