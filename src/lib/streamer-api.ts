@@ -20,7 +20,13 @@
  *   - LOG10X_STREAMER_TARGET: default target app prefix (e.g., "app" for
  *     the otek demo env). Overridable per query.
  *   - LOG10X_STREAMER_POLL_MS: poll interval, default 1500 ms.
- *   - LOG10X_STREAMER_TIMEOUT_MS: total poll budget, default 90_000 ms.
+ *   - LOG10X_STREAMER_TIMEOUT_MS: total poll budget, default 180_000 ms.
+ *     The 90s default was too small for archives where the query-handler
+ *     spawns dozens of stream workers — observed live on the otel-demo
+ *     env taking >60s to write the first marker. 180s covers single
+ *     forensic queries; per-sub-window calls in streamer_series get the
+ *     same budget but typically finish in seconds because each query is
+ *     scoped to a small sub-window.
  *
  * Authentication piggybacks on the same X-10X-Auth header the Prometheus
  * gateway uses (apiKey/envId). Override via LOG10X_STREAMER_AUTH_HEADER /
@@ -680,16 +686,19 @@ async function waitForMarkerStability(
 export async function runStreamerQuery(
   env: EnvConfig,
   req: StreamerQueryRequest,
-  // Legacy options kept for call-site compatibility. The poll interval and
-  // timeout are now taken from environment variables; this argument is
-  // accepted but has no effect.
-  _legacy?: { timeoutMs?: number; pollIntervalMs?: number }
+  // Per-call overrides for poll interval + total budget. When unset, the
+  // env var defaults apply (LOG10X_STREAMER_POLL_MS, LOG10X_STREAMER_TIMEOUT_MS).
+  // streamer_series passes a tighter budget for sampled-mode sub-window
+  // calls so a single slow sub-window doesn't stall the whole fan-out.
+  options?: { timeoutMs?: number; pollIntervalMs?: number }
 ): Promise<StreamerQueryResponse> {
   const bucket = await getStreamerBucket();
   const target = req.target || (await getDefaultTarget());
   const queryId = randomUUID();
-  const pollMs = parseInt(process.env.LOG10X_STREAMER_POLL_MS || '1500', 10);
-  const timeoutMs = parseInt(process.env.LOG10X_STREAMER_TIMEOUT_MS || '90000', 10);
+  const pollMs =
+    options?.pollIntervalMs ?? parseInt(process.env.LOG10X_STREAMER_POLL_MS || '1500', 10);
+  const timeoutMs =
+    options?.timeoutMs ?? parseInt(process.env.LOG10X_STREAMER_TIMEOUT_MS || '180000', 10);
 
   // Minimal body format — matches the shape the engine's query-handler
   // actually expects (verified live on the otel-demo env 2026-04-15).

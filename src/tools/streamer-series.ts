@@ -39,6 +39,13 @@ import { streamerNotConfiguredMessage } from './streamer-query.js';
 const TOP_K_GROUPS = 1000;
 /** Concurrency cap for Strategy B sub-window fan-out. */
 const SUBWINDOW_CONCURRENCY = 6;
+/**
+ * Per-sub-window poll budget (ms). Each sub-window query is small (K events,
+ * narrow window), so it should finish well under the global default. Cap
+ * here keeps one slow sub-window from blocking a slot for the whole
+ * global timeout.
+ */
+const SUBWINDOW_TIMEOUT_MS = 60_000;
 
 export const streamerSeriesSchema = {
   search: z
@@ -193,14 +200,18 @@ async function executeSampledMode(
   const responses = await Promise.all(
     subWindows.map((sw) =>
       limiter(() =>
-        runStreamerQuery(env, {
-          from: String(sw.fromMs),
-          to: String(sw.toMs),
-          search: args.search,
-          filters: args.filters,
-          target: args.target,
-          limit: k,
-        }).catch((e: Error) => {
+        runStreamerQuery(
+          env,
+          {
+            from: String(sw.fromMs),
+            to: String(sw.toMs),
+            search: args.search,
+            filters: args.filters,
+            target: args.target,
+            limit: k,
+          },
+          { timeoutMs: SUBWINDOW_TIMEOUT_MS }
+        ).catch((e: Error) => {
           // One failing sub-window must not poison the whole series — empty
           // its slot, surface the failure in diagnostics, and keep going.
           return { __error: e.message } as unknown as StreamerQueryResponse;
