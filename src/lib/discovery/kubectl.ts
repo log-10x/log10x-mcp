@@ -285,7 +285,7 @@ async function probeWorkloadsInNamespace(
     // First pass: does ANY container look like a log10x app image? If so,
     // we classify the whole workload as a log10x app and skip forwarder
     // classification entirely — this prevents fluent-bit sidecars inside
-    // log10x retriever/regulator pods from being mis-detected as a customer
+    // log10x retriever/reducer pods from being mis-detected as a customer
     // forwarder.
     const log10xContainer = (containers ?? []).find(
       (c) => isLog10xImage(c.image) || classifyLog10xApp(c.image, labels, helmRel?.chart) !== 'unknown'
@@ -297,7 +297,7 @@ async function probeWorkloadsInNamespace(
         // valueFrom-based entries (secretKeyRef, configMapKeyRef, fieldRef)
         // are intentionally dropped — exposing secret refs is unsafe and
         // downstream consumers (e.g. advise-compact) only need literal
-        // settings like GH_REPO / compactRegulatorLookupFile.
+        // settings like GH_REPO / compactReducerLookupFile.
         const env: Record<string, string> = {};
         for (const e of (log10xContainer as ContainerLike).env ?? []) {
           if (typeof e.value === 'string' && !e.valueFrom) {

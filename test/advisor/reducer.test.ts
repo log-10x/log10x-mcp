@@ -1,8 +1,8 @@
 /**
- * Regulator advisor tests. The same plan builder serves reporter +
- * regulator — these tests lock down the regulator-specific
+ * Reducer advisor tests. The same plan builder serves reporter +
+ * reducer — these tests lock down the reducer-specific
  * differences: kind='regulate' in values, release-name default,
- * alreadyInstalled note keyed by regulator, and plan.app field.
+ * alreadyInstalled note keyed by reducer, and plan.app field.
  */
 
 import { test } from 'node:test';
@@ -52,10 +52,10 @@ for (const fw of forwarders) {
   if (fw === 'logstash') {
     // log10x-elastic/logstash@1.0.6 is chart-broken for sidecar mode;
     // the advisor blocks it entirely. Assert the blocker path here.
-    test(`regulator plan for ${fw} is blocked (chart broken)`, async () => {
+    test(`reducer plan for ${fw} is blocked (chart broken)`, async () => {
       const plan = await buildReporterPlan({
         snapshot: baseSnapshot(),
-        app: 'regulator',
+        app: 'reducer',
         forwarder: fw,
         apiKey: 'test',
         destination: 'mock',
@@ -68,29 +68,29 @@ for (const fw of forwarders) {
     });
     continue;
   }
-  test(`regulator plan for ${fw}: values embed kind=regulate`, async () => {
+  test(`reducer plan for ${fw}: values embed kind=regulate`, async () => {
     const plan = await buildReporterPlan({
       snapshot: baseSnapshot(),
-      app: 'regulator',
+      app: 'reducer',
       forwarder: fw,
       apiKey: 'test',
       destination: 'mock',
     });
-    assert.equal(plan.app, 'regulator');
+    assert.equal(plan.app, 'reducer');
     const content = plan.install.find((s) => s.file)!.file!.contents;
     assert.ok(content.includes('kind: "regulate"'), `${fw} values should embed kind=regulate`);
     assert.ok(!content.includes('kind: "report"'), `${fw} values should NOT embed kind=report`);
   });
 }
 
-test('regulator default release name is my-regulator', async () => {
+test('reducer default release name is my-reducer', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
-    app: 'regulator',
+    app: 'reducer',
     forwarder: 'fluent-bit',
     apiKey: 'test',
   });
-  assert.equal(plan.releaseName, 'my-regulator');
+  assert.equal(plan.releaseName, 'my-reducer');
 });
 
 test('reporter default release name is my-reporter (unchanged)', async () => {
@@ -106,7 +106,7 @@ test('reporter default release name is my-reporter (unchanged)', async () => {
 test('explicit release_name overrides the app default', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
-    app: 'regulator',
+    app: 'reducer',
     forwarder: 'fluent-bit',
     releaseName: 'custom-reg-name',
     apiKey: 'test',
@@ -114,27 +114,27 @@ test('explicit release_name overrides the app default', async () => {
   assert.equal(plan.releaseName, 'custom-reg-name');
 });
 
-test('alreadyInstalled.regulator triggers a note, not a blocker', async () => {
+test('alreadyInstalled.reducer triggers a note, not a blocker', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot({
       recommendations: {
         suggestedNamespace: 'logging',
-        alreadyInstalled: { regulator: 'demo' },
+        alreadyInstalled: { reducer: 'demo' },
       },
     }),
-    app: 'regulator',
+    app: 'reducer',
     forwarder: 'fluent-bit',
     apiKey: 'test',
   });
   assert.equal(plan.blockers.length, 0);
   assert.ok(
-    plan.notes.some((n) => n.toLowerCase().includes('regulator') && n.includes('`demo`')),
-    `expected a note about existing Regulator in demo namespace; got: ${plan.notes.join(' | ')}`
+    plan.notes.some((n) => n.toLowerCase().includes('reducer') && n.includes('`demo`')),
+    `expected a note about existing Reducer in demo namespace; got: ${plan.notes.join(' | ')}`
   );
 });
 
-test('regulator plan install commands reference the same chart as reporter', async () => {
-  // Regulator uses the same charts; only kind differs. Logstash is
+test('reducer plan install commands reference the same chart as reporter', async () => {
+  // Reducer uses the same charts; only kind differs. Logstash is
   // blocked upstream (chart-broken sidecar wiring) so we skip it here —
   // the logstash blocker is covered by the dedicated test above.
   const expected: Record<string, string> = {
@@ -147,7 +147,7 @@ test('regulator plan install commands reference the same chart as reporter', asy
     if (fw === 'logstash') continue;
     const plan = await buildReporterPlan({
       snapshot: baseSnapshot(),
-      app: 'regulator',
+      app: 'reducer',
       forwarder: fw,
       apiKey: 'test',
       destination: 'mock',
@@ -155,17 +155,17 @@ test('regulator plan install commands reference the same chart as reporter', asy
     const installText = JSON.stringify(plan.install);
     assert.ok(
       installText.includes(expected[fw]),
-      `regulator plan for ${fw} should reference chart '${expected[fw]}'`
+      `reducer plan for ${fw} should reference chart '${expected[fw]}'`
     );
   }
 });
 
 // ── optimize flag ──
 
-test('optimize=true on fluent-bit regulator renders the regulatorOptimize env block', async () => {
+test('optimize=true on fluent-bit reducer renders the reducerOptimize env block', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
-    app: 'regulator',
+    app: 'reducer',
     forwarder: 'fluent-bit',
     apiKey: 'test',
     destination: 'mock',
@@ -174,19 +174,19 @@ test('optimize=true on fluent-bit regulator renders the regulatorOptimize env bl
   assert.equal(plan.blockers.length, 0, `no blockers expected, got: ${plan.blockers.join(' | ')}`);
   const content = plan.install.find((s) => s.file)!.file!.contents;
   assert.ok(
-    content.includes('regulatorOptimize'),
-    `fluent-bit optimize=true values should set regulatorOptimize env; got: ${content}`
+    content.includes('reducerOptimize'),
+    `fluent-bit optimize=true values should set reducerOptimize env; got: ${content}`
   );
   assert.ok(
     content.includes('value: "true"'),
-    `fluent-bit optimize=true values should set regulatorOptimize to "true"; got: ${content}`
+    `fluent-bit optimize=true values should set reducerOptimize to "true"; got: ${content}`
   );
 });
 
 test('optimize=true on fluent-bit does NOT flip tenx.optimize (chart-broken path)', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
-    app: 'regulator',
+    app: 'reducer',
     forwarder: 'fluent-bit',
     apiKey: 'test',
     optimize: true,
@@ -201,23 +201,23 @@ test('optimize=true on fluent-bit does NOT flip tenx.optimize (chart-broken path
   );
 });
 
-test('optimize=true on fluentd regulator renders the regulatorOptimize env block', async () => {
+test('optimize=true on fluentd reducer renders the reducerOptimize env block', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
-    app: 'regulator',
+    app: 'reducer',
     forwarder: 'fluentd',
     apiKey: 'test',
     optimize: true,
   });
   assert.equal(plan.blockers.length, 0);
   const content = plan.install.find((s) => s.file)!.file!.contents;
-  assert.ok(content.includes('regulatorOptimize'), `fluentd optimize=true values should set regulatorOptimize env`);
+  assert.ok(content.includes('reducerOptimize'), `fluentd optimize=true values should set reducerOptimize env`);
 });
 
 test('optimize=true adds an encoded-events verify probe', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
-    app: 'regulator',
+    app: 'reducer',
     forwarder: 'fluent-bit',
     apiKey: 'test',
     optimize: true,
@@ -233,25 +233,25 @@ test('optimize=true adds an encoded-events verify probe', async () => {
 test('optimize=false leaves fluent-bit values unchanged (no env block)', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
-    app: 'regulator',
+    app: 'reducer',
     forwarder: 'fluent-bit',
     apiKey: 'test',
     optimize: false,
   });
   const content = plan.install.find((s) => s.file)!.file!.contents;
   assert.ok(
-    !content.includes('regulatorOptimize'),
-    `optimize=false must NOT include regulatorOptimize env; got: ${content}`
+    !content.includes('reducerOptimize'),
+    `optimize=false must NOT include reducerOptimize env; got: ${content}`
   );
 });
 
-test('optimize=true on filebeat regulator is allowed (1.0.7 unified path)', async () => {
+test('optimize=true on filebeat reducer is allowed (1.0.7 unified path)', async () => {
   // As of chart 1.0.7, every forwarder maps kind=optimize to
-  // @apps/regulator + regulatorOptimize=true env — no per-forwarder
+  // __SAVE_APPS_REDUCER__ + reducerOptimize=true env — no per-forwarder
   // blocker anymore.
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
-    app: 'regulator',
+    app: 'reducer',
     forwarder: 'filebeat',
     apiKey: 'test',
     optimize: true,
@@ -260,10 +260,10 @@ test('optimize=true on filebeat regulator is allowed (1.0.7 unified path)', asyn
   assert.ok(plan.install.length > 0, 'install plan should be emitted for filebeat + optimize');
 });
 
-test('optimize=true on otel-collector regulator is allowed (1.0.7 unified path)', async () => {
+test('optimize=true on otel-collector reducer is allowed (1.0.7 unified path)', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
-    app: 'regulator',
+    app: 'reducer',
     forwarder: 'otel-collector',
     apiKey: 'test',
     optimize: true,
@@ -281,7 +281,7 @@ test('optimize=true with app=reporter is blocked', async () => {
     optimize: true,
   });
   assert.ok(
-    plan.blockers.some((b) => b.includes('Regulator-app feature')),
+    plan.blockers.some((b) => b.includes('Reducer-app feature')),
     `expected reporter+optimize blocker; got: ${plan.blockers.join(' | ')}`
   );
 });

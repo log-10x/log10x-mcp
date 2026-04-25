@@ -8,9 +8,9 @@
 
 | Path | Verdict | Evidence |
 |---|---|---|
-| `log10x-fluent/fluent-bit@1.0.7` reporter/regulator | **WORKS** | Pipeline init + PrometheusClient publish of `emitted_events_summaryBytes_total` etc. Chart 1.0.7 silently ignores `tenx.kind` — always runs regulator pipeline. |
-| `log10x-fluent/fluent-bit@1.0.7` **optimizer** | **WORKS via env workaround** | Events emitted to fluent-bit stdout come out compact: `"log":"~-8Av]P9cVZb,1776860517542787000,1,proxier,1484,numServices,49,..."` — templateHash + comma-sep values per the transform/compact spec. 20-40x volume reduction by eyeball. Trigger: `env: [{name: regulatorOptimize, value: "true"}]` on the pod. The chart's own `tenx.optimize: true` field is CHART-BROKEN (points at `tenx-optimize.lua` missing from the 1.0.7 image). |
-| `log10x-fluent/fluentd@1.0.7` reporter/regulator | **WORKS** | Pipeline init (`readFile(file:fluentd) => … => publishEnvMetrics`). |
+| `log10x-fluent/fluent-bit@1.0.7` reporter/reducer | **WORKS** | Pipeline init + PrometheusClient publish of `emitted_events_summaryBytes_total` etc. Chart 1.0.7 silently ignores `tenx.kind` — always runs reducer pipeline. |
+| `log10x-fluent/fluent-bit@1.0.7` **optimizer** | **WORKS via env workaround** | Events emitted to fluent-bit stdout come out compact: `"log":"~-8Av]P9cVZb,1776860517542787000,1,proxier,1484,numServices,49,..."` — templateHash + comma-sep values per the transform/compact spec. 20-40x volume reduction by eyeball. Trigger: `env: [{name: reducerOptimize, value: "true"}]` on the pod. The chart's own `tenx.optimize: true` field is CHART-BROKEN (points at `tenx-optimize.lua` missing from the 1.0.7 image). |
+| `log10x-fluent/fluentd@1.0.7` reporter/reducer | **WORKS** | Pipeline init (`readFile(file:fluentd) => … => publishEnvMetrics`). |
 | `log10x-fluent/fluentd@1.0.7` **optimizer** | **WORKS via same env workaround** | tenx banner shows `📝 Writing TenXObject fields: 'encoded=encode()' → Fluentd: /tmp/tenx_fluentd.sock`. |
 | `log10x-elastic/filebeat@1.0.6` reporter | **WORKS w/ caveat** | Pipeline inits clean, pods 1/1, BUT tenx stdin shows no events flowing from the filebeat script processor — needs deeper debug before claiming full pass. |
 | `log10x-elastic/logstash@1.0.6` reporter | **BROKEN CHART** | Sidecar tenx needs to be spawned by logstash `pipe` output, chart runs it as independent container with empty stdin; pipeline inits then dies after ~9s. Advisor now blocks `forwarder=logstash`. |
@@ -18,12 +18,12 @@
 | `log10x-k8s/reporter-10x@1.0.7` (non-invasive) | **WORKS (cleanest path)** | Full pipeline + real backpressure (2MB/s) + publish verified. |
 | `log10x-k8s/retriever-10x@1.0.6` | Already live in demo ns | Install pattern documented (S3 + 4 SQS queues + CloudWatch log group + IRSA role pre-provisioned). |
 
-**Every app the user asked about (reporter, regulator, optimizer, retriever) now has at least one verified working install path.**
+**Every app the user asked about (reporter, reducer, optimizer, retriever) now has at least one verified working install path.**
 
 ## Pre-reqs the advisor MUST communicate
 
 1. **Real license key required.** The `metricOutput(Log10xMetricRegistryFactory)` unit fails-fast if the `TENX_API_KEY` value is a tenant-id (UUID). It must be a license key (different UUID). The advisor already surfaces this as a blocker.
-2. **`github.com/log-10x/config@main` compatibility (resolved 2026-04-22).** PR #9 (commit `a982e06`) merged band-aid `apps/edge/{reporter,regulator,optimizer}/config.yaml` templates to unblock pipeline-10x:1.0.6 charts. Then dor shipped fluent-helm-charts PR #7 which bumped fluent-bit + fluentd to 1.0.7 using pipeline-10x:1.0.7 (flat topology). Commit `4dc0712` on main **reverts** the `apps/{reporter,regulator,compiler}/config.yaml` include redirects back to flat form (`- reporter` / `- regulator` / `- compiler`) to match the 1.0.7 image. The `apps/edge/*/config.yaml` templates from PR #9 **stay in place** so forwarder charts still on 1.0.6 (filebeat/logstash/otel-collector) keep working.
+2. **`github.com/log-10x/config@main` compatibility (resolved 2026-04-22).** PR #9 (commit `a982e06`) merged band-aid `apps/edge/{reporter,reducer,optimizer}/config.yaml` templates to unblock pipeline-10x:1.0.6 charts. Then dor shipped fluent-helm-charts PR #7 which bumped fluent-bit + fluentd to 1.0.7 using pipeline-10x:1.0.7 (flat topology). Commit `4dc0712` on main **reverts** the `apps/{reporter,reducer,compiler}/config.yaml` include redirects back to flat form (`- reporter` / `- reducer` / `- compiler`) to match the 1.0.7 image. The `apps/edge/*/config.yaml` templates from PR #9 **stay in place** so forwarder charts still on 1.0.6 (filebeat/logstash/otel-collector) keep working.
 3. **Chart/image version pairings verified:**
    - `log10x-fluent/fluent-bit@1.0.7` → `log10x/fluent-bit-10x:1.0.7-jit` (flat topology, `tenx.optimize` boolean)
    - `log10x-fluent/fluentd@1.0.7` → `log10x/fluentd-10x:1.0.7-jit` (flat topology)
@@ -46,7 +46,7 @@ Published charts that map to apps:
 | App | Inline chart (replaces forwarder image) | Non-invasive chart (runs alongside) |
 |---|---|---|
 | Reporter | `log10x-fluent/fluent-bit`, `log10x-fluent/fluentd`, `log10x-elastic/filebeat`, `log10x-otel/opentelemetry-collector` — all with `tenx.kind=report` | `log10x-k8s/reporter-10x@1.0.7` ← **cleanest** |
-| Regulator | Same charts with `tenx.kind=regulate` | N/A (regulator needs bidirectional readback, must be inline) |
+| Reducer | Same charts with `tenx.kind=regulate` | N/A (reducer needs bidirectional readback, must be inline) |
 | Optimizer | Same charts with `tenx.kind=optimize` (not yet verified) | N/A |
 | Compiler | NOT a forwarder chart — needs its own path (batch compile job, consuming symbol-library inputs and producing `.10x.tar`) | — |
 | Retriever | `log10x-k8s/retriever-10x@1.0.6` + S3 bucket + 4 SQS queues + CloudWatch log group (see demo values for pattern) | — |
@@ -116,6 +116,6 @@ Published charts that map to apps:
    ```
    "log":"~-8Av]P9cVZb,1776860517542787000,1,proxier,1484,numServices,49,numEndpoints,136,numFilterChains,6,numFilterRules,4,numNATChains,14,numNATRules,85"
    ```
-   First field is templateHash, rest are timestamp + high-cardinality vars. The raw form of this event was ~2KB of JSON-embedded text; the compact form is ~150 bytes. Trigger: `env: [{name: regulatorOptimize, value: "true"}]` on the forwarder pod. The chart's `tenx.optimize: true` field is chart-broken (references `tenx-optimize.lua` which is missing from `log10x/fluent-bit-10x:1.0.7-jit`) — do NOT use it. Recorded in `TenxKind` docstring. Follow-up: expose `optimize: boolean` as a first-class parameter on `advise-regulator` so users get the env workaround in their rendered install plan.
+   First field is templateHash, rest are timestamp + high-cardinality vars. The raw form of this event was ~2KB of JSON-embedded text; the compact form is ~150 bytes. Trigger: `env: [{name: reducerOptimize, value: "true"}]` on the forwarder pod. The chart's `tenx.optimize: true` field is chart-broken (references `tenx-optimize.lua` which is missing from `log10x/fluent-bit-10x:1.0.7-jit`) — do NOT use it. Recorded in `TenxKind` docstring. Follow-up: expose `optimize: boolean` as a first-class parameter on `advise-reducer` so users get the env workaround in their rendered install plan.
 5. **Compiler app**: verify the batch-compile install path. Likely a one-shot Job, not a DaemonSet. Needs its own advisor tool.
-6. **Image rebuild coordination**: once forwarder charts bump to `1.0.7` (pipeline-10x flat topology), drop the band-aid on `log-10x/config@main` as part of the regulator→reducer / retriever→offloader rename.
+6. **Image rebuild coordination**: once forwarder charts bump to `1.0.7` (pipeline-10x flat topology), drop the band-aid on `log-10x/config@main` as part of the reducer→reducer / retriever→offloader rename.

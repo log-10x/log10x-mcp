@@ -3,7 +3,7 @@
  * snapshot (+ optional goal).
  *
  * Sits in front of `buildReporterPlan` / `buildRetrieverPlan` and decides:
- *   - Which app: reporter / regulator / retriever
+ *   - Which app: reporter / reducer / retriever
  *   - Which deployment shape: inline (replace forwarder) / standalone
  *     (parallel DaemonSet) / standalone-retriever
  *   - Which forwarder (when inline)
@@ -25,8 +25,8 @@
  *   4. forwarder is helm-managed logstash → standalone reporter (chart
  *      broken for sidecar mode; surface migration note)
  *   5. forwarder is helm-managed fluent-bit/fluentd/filebeat/otel-collector (all 1.0.7):
- *        goal='compact'     → inline regulator + optimize=true
- *        goal='cut-cost'    → inline regulator
+ *        goal='compact'     → inline reducer + optimize=true
+ *        goal='cut-cost'    → inline reducer
  *        goal='just-metrics'→ inline reporter (standalone is alt)
  *        no goal            → inline reporter (standalone is alt)
  *
@@ -50,7 +50,7 @@ export interface ResolvedInstallArgs {
   shape: DeploymentShape;
   /** Detected forwarder (for context in standalone plans; drives chart for inline). */
   forwarder?: ForwarderKind;
-  /** Only set when app='regulator' and target forwarder supports it. */
+  /** Only set when app='reducer' and target forwarder supports it. */
   optimize?: boolean;
   /** Target namespace. */
   namespace: string;
@@ -58,7 +58,7 @@ export interface ResolvedInstallArgs {
 
 /** One candidate mode with its score + rationale. Higher score = better match. */
 export interface RankedAlternative {
-  /** Short label: "standalone reporter", "inline regulator (fluent-bit) + optimize", etc. */
+  /** Short label: "standalone reporter", "inline reducer (fluent-bit) + optimize", etc. */
   label: string;
   args: ResolvedInstallArgs;
   /** Detection-based score. Alternatives are sorted descending by this. */
@@ -182,9 +182,9 @@ export function recommendInstallMode(opts: RecommendOpts): ModeRecommendation {
       `A Reporter is already installed in \`${snapshot.recommendations.alreadyInstalled.reporter}\`. Installing another duplicates metric emission — tear down first, or target a different namespace.`
     );
   }
-  if (snapshot.recommendations.alreadyInstalled.regulator) {
+  if (snapshot.recommendations.alreadyInstalled.reducer) {
     warnings.push(
-      `A Regulator is already installed in \`${snapshot.recommendations.alreadyInstalled.regulator}\`. Two regulators on the same event stream double-filter — tear one down before installing another.`
+      `A Reducer is already installed in \`${snapshot.recommendations.alreadyInstalled.reducer}\`. Two reducers on the same event stream double-filter — tear one down before installing another.`
     );
   }
 
@@ -317,7 +317,7 @@ function makeInlineAlts(params: {
   // Inline reporter.
   // No-goal case: this is the conservative default when the user has a
   // helm-managed, replaceable forwarder — no extra DaemonSet, no event
-  // modification, just metrics. Ranks above Inline Regulator because
+  // modification, just metrics. Ranks above Inline Reducer because
   // report-mode touches the event path less than regulate-mode does.
   alts.push({
     label: `Inline Reporter (${detectedKind})`,
@@ -339,13 +339,13 @@ function makeInlineAlts(params: {
     blocker: helmBlocker ?? logstashBlocker,
   });
 
-  // Inline regulator (filter/sample).
-  // No-goal case: regulator sits BELOW reporter (conservative default).
+  // Inline reducer (filter/sample).
+  // No-goal case: reducer sits BELOW reporter (conservative default).
   // Users who want filtering state that goal explicitly.
   alts.push({
-    label: `Inline Regulator (${detectedKind})`,
+    label: `Inline Reducer (${detectedKind})`,
     args: {
-      app: 'regulator',
+      app: 'reducer',
       shape: 'inline',
       forwarder: detectedKind,
       namespace,
@@ -360,21 +360,21 @@ function makeInlineAlts(params: {
             : SCORE_ALTERNATIVE_OK,
     rationale:
       goal === 'cut-cost'
-        ? `Inline regulator on ${detectedKind} — filter/sample rules applied in-flight, events emitted back through the forwarder.`
-        : `Inline regulator — full filter/sample/compact engine on the forwarder's event path. No filtering rules applied by default; escalate to this over Inline Reporter only when you want event modification.`,
+        ? `Inline reducer on ${detectedKind} — filter/sample rules applied in-flight, events emitted back through the forwarder.`
+        : `Inline reducer — full filter/sample/compact engine on the forwarder's event path. No filtering rules applied by default; escalate to this over Inline Reporter only when you want event modification.`,
     blocker: helmBlocker ?? logstashBlocker,
   });
 
-  // Inline regulator + optimize (compact encoding).
+  // Inline reducer + optimize (compact encoding).
   // All 5 forwarder charts now ship at 1.0.7 with a unified optimize path
-  // (kind=optimize launches @apps/regulator + regulatorOptimize=true env
+  // (kind=optimize launches __SAVE_APPS_REDUCER__ + reducerOptimize=true env
   // var). Logstash still hits its architectural sidecar bug regardless
   // of optimize, so the logstashBlocker above handles that case.
   const optimizeBlocker = undefined;
   alts.push({
-    label: `Inline Regulator + Compact (${detectedKind})`,
+    label: `Inline Reducer + Compact (${detectedKind})`,
     args: {
-      app: 'regulator',
+      app: 'reducer',
       shape: 'inline',
       forwarder: detectedKind,
       optimize: true,
@@ -388,8 +388,8 @@ function makeInlineAlts(params: {
           : SCORE_ALTERNATIVE_OK,
     rationale:
       goal === 'compact'
-        ? `Inline regulator + optimize on ${detectedKind} — compact encoding (~20-40x volume reduction) applied in-flight.`
-        : `Inline regulator + optimize — maximum volume reduction; events emitted in compact \`~templateHash,vars\` form.`,
+        ? `Inline reducer + optimize on ${detectedKind} — compact encoding (~20-40x volume reduction) applied in-flight.`
+        : `Inline reducer + optimize — maximum volume reduction; events emitted in compact \`~templateHash,vars\` form.`,
     blocker: helmBlocker ?? logstashBlocker ?? optimizeBlocker,
   });
 
@@ -427,7 +427,7 @@ function makeRetrieverAlt(params: {
         ? infraReady
           ? 'Retriever — long-term S3 archive with Bloom-filter index; detected AWS infra is compatible.'
           : 'Retriever matches goal=archive but required AWS infra is missing — blocker before install.'
-        : 'Retriever — separate pillar for long-term archive + forensic query; consider alongside a Reporter/Regulator install.',
+        : 'Retriever — separate pillar for long-term archive + forensic query; consider alongside a Reporter/Reducer install.',
     blocker,
   };
 }

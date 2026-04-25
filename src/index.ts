@@ -52,7 +52,7 @@ import {
 } from './tools/translate-metric-to-patterns.js';
 import { discoverEnvSchema, executeDiscoverEnv } from './tools/discover-env.js';
 import { adviseReporterSchema, executeAdviseReporter } from './tools/advise-reporter.js';
-import { adviseRegulatorSchema, executeAdviseRegulator } from './tools/advise-regulator.js';
+import { adviseReducerSchema, executeAdviseReducer } from './tools/advise-reducer.js';
 import { adviseRetrieverSchema, executeAdviseRetriever } from './tools/advise-retriever.js';
 import { adviseInstallSchema, executeAdviseInstall } from './tools/advise-install.js';
 import { adviseCompactSchema, executeAdviseCompact } from './tools/advise-compact.js';
@@ -328,7 +328,7 @@ server.registerTool(
   'log10x_savings',
   {
     title: 'Pipeline savings',
-    description: 'Show pipeline savings — how much the regulator (filtering), optimizer (compaction), and retriever (indexing) are saving in dollars. Use for "how much are we saving", "pipeline ROI", or "what is the Log10x stack worth financially". **Tier prerequisites**: requires Reporter pipeline. Savings attribution requires per-app continuous metric emission.',
+    description: 'Show pipeline savings — how much the reducer (filtering), optimizer (compaction), and retriever (indexing) are saving in dollars. Use for "how much are we saving", "pipeline ROI", or "what is the Log10x stack worth financially". **Tier prerequisites**: requires Reporter pipeline. Savings attribution requires per-app continuous metric emission.',
     inputSchema: savingsSchema,
     annotations: { title: 'Pipeline savings', readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   },
@@ -382,7 +382,7 @@ server.registerTool(
   'log10x_exclusion_filter',
   {
     title: 'Exclusion filter snippet',
-    description: 'Generate a config snippet to silence or reduce a log pattern. Produces either (a) a Log10x rate regulator mute-file entry keyed by field-set with explicit sampleRate and untilEpochSec expiry (the preferred path — self-expiring, git-reviewable, no regex), or (b) a native drop rule for the user\'s forwarder or SIEM (Datadog, Splunk, Elasticsearch, CloudWatch, Fluent Bit, OTel Collector, Vector, and others). Call when the user asks to "mute", "silence", "drop", "cap", or "reduce" a specific pattern. Always run log10x_dependency_check first so the reply can flag anything that will break. **Tier prerequisites**: none. Generates mute file entries independent of the Reporter tier.',
+    description: 'Generate a config snippet to silence or reduce a log pattern. Produces either (a) a Log10x rate reducer mute-file entry keyed by field-set with explicit sampleRate and untilEpochSec expiry (the preferred path — self-expiring, git-reviewable, no regex), or (b) a native drop rule for the user\'s forwarder or SIEM (Datadog, Splunk, Elasticsearch, CloudWatch, Fluent Bit, OTel Collector, Vector, and others). Call when the user asks to "mute", "silence", "drop", "cap", or "reduce" a specific pattern. Always run log10x_dependency_check first so the reply can flag anything that will break. **Tier prerequisites**: none. Generates mute file entries independent of the Reporter tier.',
     inputSchema: exclusionFilterSchema,
     annotations: { title: 'Exclusion filter snippet', readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   },
@@ -517,7 +517,7 @@ server.registerTool(
   'log10x_retriever_query',
   {
     title: 'Retriever query',
-    description: 'Direct retrieval of historical events from the Log10x Retriever archive (customer\'s S3 bucket) by stable pattern identity, with optional JavaScript filter expressions over event payloads. Call when: (a) the user asks for specific events matching a pattern over a time window that is OUTSIDE the SIEM\'s retention, (b) the user asks to retrieve events filtered by a variable value that is NOT a faceted dimension in their SIEM (e.g., "all payment_retry events for customer acme-corp from 90 days ago"), (c) compliance, legal, audit, or forensic workflows need exact event retrieval with stable identity. Do NOT call when the events are in the SIEM\'s current retention and can be queried natively faster, or when the user wants aggregated metrics over time instead of specific events (use log10x_backfill_metric or log10x_investigate instead). No re-ingestion. No proprietary format. The archive is in the customer\'s own S3 bucket and queries are scoped to the matching templateHash via pre-computed Bloom filters so only relevant byte ranges are fetched. Three output formats: events (raw with metadata), count (distribution summary), aggregated (bucketed time series). **Tier prerequisites**: requires Retriever component deployed. Does NOT require Reporter. Returns a graceful "Retriever not configured" message when __SAVE_LOG10X_RETRIEVER_URL__ is unset. **Example**: `{"pattern": "payment_retry_attempt", "from": "now-90d", "to": "now-15d", "filters": ["event.customer_id === \\"acme-corp-inc\\""], "format": "events", "limit": 10000}` for a 90-day legal forensic retrieval.',
+    description: 'Direct retrieval of historical events from the Log10x Retriever archive (customer\'s S3 bucket) by stable pattern identity, with optional JavaScript filter expressions over event payloads. Call when: (a) the user asks for specific events matching a pattern over a time window that is OUTSIDE the SIEM\'s retention, (b) the user asks to retrieve events filtered by a variable value that is NOT a faceted dimension in their SIEM (e.g., "all payment_retry events for customer acme-corp from 90 days ago"), (c) compliance, legal, audit, or forensic workflows need exact event retrieval with stable identity. Do NOT call when the events are in the SIEM\'s current retention and can be queried natively faster, or when the user wants aggregated metrics over time instead of specific events (use log10x_backfill_metric or log10x_investigate instead). No re-ingestion. No proprietary format. The archive is in the customer\'s own S3 bucket and queries are scoped to the matching templateHash via pre-computed Bloom filters so only relevant byte ranges are fetched. Three output formats: events (raw with metadata), count (distribution summary), aggregated (bucketed time series). **Tier prerequisites**: requires Retriever component deployed. Does NOT require Reporter. Returns a graceful "Retriever not configured" message when LOG10X_REGULATOR_RETRIEVER_URL is unset. **Example**: `{"pattern": "payment_retry_attempt", "from": "now-90d", "to": "now-15d", "filters": ["event.customer_id === \\"acme-corp-inc\\""], "format": "events", "limit": 10000}` for a 90-day legal forensic retrieval.',
     inputSchema: retrieverQuerySchema,
     annotations: { title: 'Retriever query', readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   },
@@ -658,7 +658,7 @@ server.registerTool(
   'log10x_discover_env',
   {
     title: 'Discover env (k8s + AWS)',
-    description: 'Read-only discovery of the caller\'s Kubernetes cluster + AWS account — i.e. the customer\'s INFRASTRUCTURE environment, NOT their Log10x account. Probes kubectl (workloads, DaemonSets, Helm releases, service-account IRSA annotations) and AWS (EKS, S3, SQS, CloudWatch log groups) to detect: which forwarder is running (Fluent Bit, Fluentd, Filebeat, Logstash, OTel Collector), which log10x apps are already installed (Reporter, Regulator, Retriever), and what infrastructure exists that could host a Retriever install. Returns a terse markdown report + a `snapshot_id` (cached 30 min) the advisor tools consume. **Do NOT call this tool to answer "which Log10x environments do I have access to" / "list my envs" / "switch envs" — those are about the user\'s Log10x ACCOUNT environments, use `log10x_login_status` for that.** Call THIS tool only when the question is about k8s workloads, AWS infra, or "what\'s deployed in my cluster". Use this BEFORE calling `log10x_advise_reporter`, `log10x_advise_regulator`, or `log10x_advise_retriever` — they read the snapshot to tailor their install/verify/teardown commands to the specific cluster state. Every shell call is logged in the snapshot\'s `probeLog` for audit. No writes, no state mutation: only `kubectl get` and `aws ... describe/list` verbs. **Tier prerequisites**: none — this is a pre-install tool and runs against any customer environment.',
+    description: 'Read-only discovery of the caller\'s Kubernetes cluster + AWS account — i.e. the customer\'s INFRASTRUCTURE environment, NOT their Log10x account. Probes kubectl (workloads, DaemonSets, Helm releases, service-account IRSA annotations) and AWS (EKS, S3, SQS, CloudWatch log groups) to detect: which forwarder is running (Fluent Bit, Fluentd, Filebeat, Logstash, OTel Collector), which log10x apps are already installed (Reporter, Reducer, Retriever), and what infrastructure exists that could host a Retriever install. Returns a terse markdown report + a `snapshot_id` (cached 30 min) the advisor tools consume. **Do NOT call this tool to answer "which Log10x environments do I have access to" / "list my envs" / "switch envs" — those are about the user\'s Log10x ACCOUNT environments, use `log10x_login_status` for that.** Call THIS tool only when the question is about k8s workloads, AWS infra, or "what\'s deployed in my cluster". Use this BEFORE calling `log10x_advise_reporter`, `log10x_advise_reducer`, or `log10x_advise_retriever` — they read the snapshot to tailor their install/verify/teardown commands to the specific cluster state. Every shell call is logged in the snapshot\'s `probeLog` for audit. No writes, no state mutation: only `kubectl get` and `aws ... describe/list` verbs. **Tier prerequisites**: none — this is a pre-install tool and runs against any customer environment.',
     inputSchema: discoverEnvSchema,
     annotations: { title: 'Discover env (k8s + AWS)', readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   },
@@ -678,30 +678,30 @@ server.registerTool(
   (args) => wrap('log10x_advise_reporter', () => executeAdviseReporter(args))
 );
 
-// ── Tool: log10x_advise_regulator (install advisor) ──
+// ── Tool: log10x_advise_reducer (install advisor) ──
 
 server.registerTool(
   'log10x_advise_retriever',
   {
     title: 'Advise: Retriever install',
-    description: 'Given a DiscoverySnapshot (from `log10x_discover_env`), produce an install/verify/teardown plan for the Log10x Retriever. Unlike Reporter + Regulator, the Retriever has no forwarder choice — it is a standalone set of workloads (indexer + query-handler + stream-worker + filter CronJobs) that read from S3 via SQS and serve an HTTP query endpoint. The advisor detects existing AWS infra (input bucket with `indexing-results/` prefix, four SQS queues — index/query/subquery/stream — and an IRSA-annotated ServiceAccount) from the discovery snapshot, or accepts explicit overrides. Preflight fails closed when any required resource is missing — the Retriever depends on Terraform-provisioned infra that this advisor does NOT create. Verify probes: pods Ready, indexer processing messages, query endpoint responding, S3 indexing-results/ getting writes, SQS queue drainage. Teardown uninstalls the Helm release but leaves AWS infra alone (Terraform\'s concern). **Tier prerequisites**: none — but AWS infra must exist before install.',
+    description: 'Given a DiscoverySnapshot (from `log10x_discover_env`), produce an install/verify/teardown plan for the Log10x Retriever. Unlike Reporter + Reducer, the Retriever has no forwarder choice — it is a standalone set of workloads (indexer + query-handler + stream-worker + filter CronJobs) that read from S3 via SQS and serve an HTTP query endpoint. The advisor detects existing AWS infra (input bucket with `indexing-results/` prefix, four SQS queues — index/query/subquery/stream — and an IRSA-annotated ServiceAccount) from the discovery snapshot, or accepts explicit overrides. Preflight fails closed when any required resource is missing — the Retriever depends on Terraform-provisioned infra that this advisor does NOT create. Verify probes: pods Ready, indexer processing messages, query endpoint responding, S3 indexing-results/ getting writes, SQS queue drainage. Teardown uninstalls the Helm release but leaves AWS infra alone (Terraform\'s concern). **Tier prerequisites**: none — but AWS infra must exist before install.',
     inputSchema: adviseRetrieverSchema,
     annotations: { title: 'Advise: Retriever install', readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   },
   (args) => wrap('log10x_advise_retriever', () => executeAdviseRetriever(args))
 );
 
-// ── Tool: log10x_advise_regulator (install advisor) ──
+// ── Tool: log10x_advise_reducer (install advisor) ──
 
 server.registerTool(
-  'log10x_advise_regulator',
+  'log10x_advise_reducer',
   {
-    title: 'Advise: Regulator install',
-    description: 'Given a DiscoverySnapshot (from `log10x_discover_env`) + a forwarder choice + a license key, produce a tailored install/verify/teardown plan for the Log10x Regulator. Same 5 forwarders as the Reporter (fluent-bit, fluentd, filebeat, logstash, otel-collector) and same charts — the Regulator differs from the Reporter by writing regulated events back through the forwarder (with mute/sample/compact applied) instead of only emitting metrics. Values files carry `kind: "regulate"` which routes the tenx launcher to `@run/input/forwarder/<fw>/regulate` + `@apps/regulator`. Output shape is identical to `log10x_advise_reporter`: preflight, install steps, verify probes, teardown. **Tier prerequisites**: none — this is a pre-install tool.',
-    inputSchema: adviseRegulatorSchema,
-    annotations: { title: 'Advise: Regulator install', readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+    title: 'Advise: Reducer install',
+    description: 'Given a DiscoverySnapshot (from `log10x_discover_env`) + a forwarder choice + a license key, produce a tailored install/verify/teardown plan for the Log10x Reducer. Same 5 forwarders as the Reporter (fluent-bit, fluentd, filebeat, logstash, otel-collector) and same charts — the Reducer differs from the Reporter by writing regulated events back through the forwarder (with mute/sample/compact applied) instead of only emitting metrics. Values files carry `kind: "regulate"` which routes the tenx launcher to `@run/input/forwarder/<fw>/regulate` + `__SAVE_APPS_REDUCER__`. Output shape is identical to `log10x_advise_reporter`: preflight, install steps, verify probes, teardown. **Tier prerequisites**: none — this is a pre-install tool.',
+    inputSchema: adviseReducerSchema,
+    annotations: { title: 'Advise: Reducer install', readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   },
-  (args) => wrap('log10x_advise_regulator', () => executeAdviseRegulator(args))
+  (args) => wrap('log10x_advise_reducer', () => executeAdviseReducer(args))
 );
 
 // ── Tool: log10x_advise_install (mode selector + front-end advisor) ──
@@ -710,7 +710,7 @@ server.registerTool(
   'log10x_advise_install',
   {
     title: 'Advise: install path',
-    description: 'Front-end install advisor — picks the RIGHT install path based on what `log10x_discover_env` detected. Sits in front of `log10x_advise_{reporter,regulator,retriever}`. Takes a snapshot_id + optional `goal` and decides between: standalone reporter (log10x-k8s/reporter-10x parallel DaemonSet, zero-touch to user forwarder), inline reporter/regulator (log10x-repackaged forwarder charts that replace the user\'s deployment), or Retriever (S3 archive). Detection rules: no forwarder OR hand-rolled forwarder → standalone; helm-managed fluent-bit/fluentd → inline (optimize-capable on 1.0.7); helm-managed filebeat/otel-collector → inline without optimize (1.0.6); helm-managed logstash → standalone (chart broken for sidecar mode). **Two call modes**: (1) with `goal` → returns a concrete install plan for the top-ranked path; goals are `just-metrics` (pattern fingerprinting + cost attribution), `cut-cost` (regulate: filter/sample), `compact` (regulate + compact encoding, only on fluent-bit/fluentd 1.0.7), `archive` (Retriever). (2) without `goal` → returns a ranked table of candidates + structured top-pick args so the caller can re-invoke with `goal=<winner>` or jump to an app-specific advisor. Call this BEFORE `log10x_advise_reporter`/`log10x_advise_regulator`/`log10x_advise_retriever` when you want the tool to pick the shape/app/forwarder combination for you. **Tier prerequisites**: none — this is a pre-install tool.',
+    description: 'Front-end install advisor — picks the RIGHT install path based on what `log10x_discover_env` detected. Sits in front of `log10x_advise_{reporter,reducer,retriever}`. Takes a snapshot_id + optional `goal` and decides between: standalone reporter (log10x-k8s/reporter-10x parallel DaemonSet, zero-touch to user forwarder), inline reporter/reducer (log10x-repackaged forwarder charts that replace the user\'s deployment), or Retriever (S3 archive). Detection rules: no forwarder OR hand-rolled forwarder → standalone; helm-managed fluent-bit/fluentd → inline (optimize-capable on 1.0.7); helm-managed filebeat/otel-collector → inline without optimize (1.0.6); helm-managed logstash → standalone (chart broken for sidecar mode). **Two call modes**: (1) with `goal` → returns a concrete install plan for the top-ranked path; goals are `just-metrics` (pattern fingerprinting + cost attribution), `cut-cost` (regulate: filter/sample), `compact` (regulate + compact encoding, only on fluent-bit/fluentd 1.0.7), `archive` (Retriever). (2) without `goal` → returns a ranked table of candidates + structured top-pick args so the caller can re-invoke with `goal=<winner>` or jump to an app-specific advisor. Call this BEFORE `log10x_advise_reporter`/`log10x_advise_reducer`/`log10x_advise_retriever` when you want the tool to pick the shape/app/forwarder combination for you. **Tier prerequisites**: none — this is a pre-install tool.',
     inputSchema: adviseInstallSchema,
     annotations: { title: 'Advise: install path', readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   },
@@ -723,7 +723,7 @@ server.registerTool(
   'log10x_advise_compact',
   {
     title: 'Advise: compact-lookup PR',
-    description: 'Emit a literal `gh` PR command + the file diff for a compactRegulator change against the customer\'s GitOps repo. Two modes: `mode=csv` (default) edits `compact-lookup.csv` — the engine hot-reloads via `FileResourceLookup.reset()` on each gitops poll (**no pipeline restart, no event drops**); `mode=js` replaces `compact-object-global.js` with new predicate logic — the engine triggers `restartPipeline()` (brief drain + relaunch). Use `js` only when CSV-keyed lookup is insufficient (regex match, multi-field-set OR semantics, external-flag gate). The compactRegulator decides per-event whether each event is emitted via `encode()` (compact templateHash+vars, ~20-40x volume reduction) or as `fullText`, keyed off `compactRegulatorFieldNames` (default: `[symbolMessage]`). This tool is a *renderer*, not a decider: the caller decides which patterns to compact (typically via `log10x_top_patterns` + `log10x_cost_drivers`) and passes the lists in. Output is markdown with a diff summary, the new full file content, and two ready-to-run shell snippets (one-shot via `gh api`, or local clone+edit+push). Pass either `gitops_repo` directly OR `snapshot_id` (from `log10x_discover_env`) — when given a snapshot, the tool auto-resolves the repo from a running regulator pod\'s `GH_REPO` env var. **Tier prerequisites**: requires a Reporter (Cloud or Edge) so pattern keys exist; the regulator pod must be configured with `GH_ENABLED=true`, `GH_REPO=<owner/name>`, `GH_TOKEN` (PAT), and `compactRegulatorLookupFile` pointing at the same path inside its gitops-pulled tree. The `log10x_advise_regulator` install plan now includes a "GitOps — MCP-managed runtime config" section that lists every env var to set.',
+    description: 'Emit a literal `gh` PR command + the file diff for a compactReducer change against the customer\'s GitOps repo. Two modes: `mode=csv` (default) edits `compact-lookup.csv` — the engine hot-reloads via `FileResourceLookup.reset()` on each gitops poll (**no pipeline restart, no event drops**); `mode=js` replaces `compact-object-global.js` with new predicate logic — the engine triggers `restartPipeline()` (brief drain + relaunch). Use `js` only when CSV-keyed lookup is insufficient (regex match, multi-field-set OR semantics, external-flag gate). The compactReducer decides per-event whether each event is emitted via `encode()` (compact templateHash+vars, ~20-40x volume reduction) or as `fullText`, keyed off `compactReducerFieldNames` (default: `[symbolMessage]`). This tool is a *renderer*, not a decider: the caller decides which patterns to compact (typically via `log10x_top_patterns` + `log10x_cost_drivers`) and passes the lists in. Output is markdown with a diff summary, the new full file content, and two ready-to-run shell snippets (one-shot via `gh api`, or local clone+edit+push). Pass either `gitops_repo` directly OR `snapshot_id` (from `log10x_discover_env`) — when given a snapshot, the tool auto-resolves the repo from a running reducer pod\'s `GH_REPO` env var. **Tier prerequisites**: requires a Reporter (Cloud or Edge) so pattern keys exist; the reducer pod must be configured with `GH_ENABLED=true`, `GH_REPO=<owner/name>`, `GH_TOKEN` (PAT), and `compactReducerLookupFile` pointing at the same path inside its gitops-pulled tree. The `log10x_advise_reducer` install plan now includes a "GitOps — MCP-managed runtime config" section that lists every env var to set.',
     inputSchema: adviseCompactSchema,
     annotations: { title: 'Advise: compact-lookup PR', readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   },
@@ -748,7 +748,7 @@ server.resource(
 const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_cost_drivers', intent: 'Why did log costs spike this week — dollar-ranked patterns with week-over-week deltas' },
   { name: 'log10x_event_lookup', intent: 'What is this single log line — resolve to stable identity + cost + AI classification' },
-  { name: 'log10x_savings', intent: 'Pipeline ROI — how much regulator / optimizer / retriever are saving in dollars' },
+  { name: 'log10x_savings', intent: 'Pipeline ROI — how much reducer / optimizer / retriever are saving in dollars' },
   { name: 'log10x_pattern_trend', intent: 'Time series for a pattern — volume + cost history, spike detection, sparkline' },
   { name: 'log10x_services', intent: 'List all monitored services ranked by cost' },
   { name: 'log10x_exclusion_filter', intent: 'Generate mute file entry or SIEM drop rule for a pattern' },
@@ -772,9 +772,9 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_discover_env', intent: 'Read-only probe of k8s + AWS — returns a snapshot_id the advise_* tools consume' },
   { name: 'log10x_advise_install', intent: 'Front-end install advisor — picks standalone vs inline + app + forwarder + optimize based on what was detected' },
   { name: 'log10x_advise_reporter', intent: 'Reporter install/verify/teardown plan for a forwarder — inline or standalone (shape=standalone)' },
-  { name: 'log10x_advise_regulator', intent: 'Regulator install/verify/teardown plan — inline only, with optional compact encoding (optimize=true)' },
+  { name: 'log10x_advise_reducer', intent: 'Reducer install/verify/teardown plan — inline only, with optional compact encoding (optimize=true)' },
   { name: 'log10x_advise_retriever', intent: 'Retriever install/verify/teardown plan — standalone S3 + SQS archive + query' },
-  { name: 'log10x_advise_compact', intent: 'Render a `gh` PR command + diff for a compactRegulator lookup-CSV update against the customer GitOps repo (engine hot-reloads the CSV without a pipeline restart)' },
+  { name: 'log10x_advise_compact', intent: 'Render a `gh` PR command + diff for a compactReducer lookup-CSV update against the customer GitOps repo (engine hot-reloads the CSV without a pipeline restart)' },
 ];
 
 async function handleCliFlags(): Promise<boolean> {
@@ -826,7 +826,7 @@ async function handleCliFlags(): Promise<boolean> {
         '  LOG10X_ENV_ID             Environment ID (single-env mode)',
         '  LOG10X_ENVS               JSON array for multi-env: [{"nickname","apiKey","envId"}]',
         '  LOG10X_API_BASE           Override Prometheus gateway URL',
-        '  __SAVE_LOG10X_RETRIEVER_URL__       Retriever query endpoint (optional)',
+        '  LOG10X_REGULATOR_RETRIEVER_URL       Retriever query endpoint (optional)',
         '  LOG10X_PASTE_URL          Override Log10x paste endpoint (optional)',
         '  LOG10X_TENX_MODE          `local` (default) or `docker` — backend for privacy-mode tools',
         '  LOG10X_TENX_PATH          Path to local tenx CLI (used when LOG10X_TENX_MODE=local)',
