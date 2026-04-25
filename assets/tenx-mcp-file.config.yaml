@@ -17,7 +17,15 @@ include:
   - apps/shared
 
   # File input only — path comes from LOG10X_MCP_INPUT_PATH env var.
-  - run/input/file
+  # Include the MODULE, not the config wrapper — the wrapper
+  # (config/pipelines/run/input/file/config.yaml) pre-defines a named
+  # `fileInput` entry reading from `data/sample/input/*.log`. Because
+  # the module has `allowMultiple: true`, that default input runs
+  # ALONGSIDE the `mcpFileInput` defined below, emitting ~2000 extra
+  # events from the image's bundled sample into every file-mode
+  # invocation. Including the module directly skips the wrapper and
+  # leaves `mcpFileInput` as the only file input.
+  - run/modules/input/file
 
   # Full enrichment chain.
   - run/initialize/inputField

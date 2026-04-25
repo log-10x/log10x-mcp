@@ -63,18 +63,51 @@ export async function runDoctorChecks(envNickname?: string): Promise<DoctorRepor
   // 1. Environment configuration loads successfully (global).
   let envs: Environments | undefined;
   try {
-    envs = loadEnvironments();
-    globalChecks.push({
-      name: 'environment_config',
-      status: 'pass',
-      message: `${envs.all.length} environment${envs.all.length === 1 ? '' : 's'} configured (${envs.all.map((e) => e.nickname).join(', ')}).`,
-    });
+    envs = await loadEnvironments();
+    const summary = envs.all.map((e) => {
+      const perm = e.permissions ? ` (${e.permissions.toLowerCase()})` : '';
+      const star = e.isDefault ? ' ★' : '';
+      return `${e.nickname}${perm}${star}`;
+    }).join(', ');
+    const source = envs.autodiscovered ? 'autodiscovered via GET /api/v1/user' : 'from env vars';
+
+    // Demo-mode signaling. Two flavors:
+    //   - Pure demo (no LOG10X_API_KEY set): warn (the user opted in but
+    //     should know all data is shared sample data).
+    //   - Demo fallback (LOG10X_API_KEY set but failed validation): fail-
+    //     style attention even though the MCP still works against demo,
+    //     because the user almost certainly thinks they're hitting their
+    //     own account.
+    if (envs.isDemoMode && envs.demoFallbackReason) {
+      globalChecks.push({
+        name: 'environment_config',
+        status: 'fail',
+        message:
+          `**DEMO FALLBACK** — your configured LOG10X_API_KEY failed validation, so the MCP is running against the public Log10x demo env (read-only). Reason: ${envs.demoFallbackReason.split('\n')[0].slice(0, 300)}. ` +
+          `All API-hitting tools will return demo data, NOT your account. ` +
+          `${envs.all.length} demo env${envs.all.length === 1 ? '' : 's'} ${source}: ${summary}. Default: ${envs.default.nickname}.`,
+        fix: 'Re-check LOG10X_API_KEY at https://console.log10x.com → Profile → API Settings. Update the value in your MCP host\'s config (e.g. claude_desktop_config.json) and fully restart the host. Or unset LOG10X_API_KEY entirely to keep demo mode without the warning.',
+      });
+    } else if (envs.isDemoMode) {
+      globalChecks.push({
+        name: 'environment_config',
+        status: 'warn',
+        message:
+          `Running in **demo mode** — no LOG10X_API_KEY configured. The MCP autodiscovered ${envs.all.length} read-only demo env${envs.all.length === 1 ? '' : 's'}: ${summary}. All data is shared sample data, not your own. Call \`log10x_login_status\` for upgrade steps.`,
+      });
+    } else {
+      globalChecks.push({
+        name: 'environment_config',
+        status: 'pass',
+        message: `${envs.all.length} environment${envs.all.length === 1 ? '' : 's'} ${source}: ${summary}. Default: ${envs.default.nickname}. (★ = default env; nicknames with (read) are read-only.)`,
+      });
+    }
   } catch (e) {
     globalChecks.push({
       name: 'environment_config',
       status: 'fail',
       message: (e as Error).message,
-      fix: 'Set LOG10X_API_KEY + LOG10X_ENV_ID for single-env, or LOG10X_ENVS as a JSON array for multi-env. Get credentials at https://console.log10x.com → Profile → API Settings.',
+      fix: 'Set LOG10X_API_KEY (autodiscovery), or LOG10X_API_KEY + LOG10X_ENV_ID (legacy single-env), or LOG10X_ENVS as a JSON array (multi-env). Get credentials at https://console.log10x.com → Profile → API Settings.',
     });
     return finalize(globalChecks, perEnvChecks);
   }
