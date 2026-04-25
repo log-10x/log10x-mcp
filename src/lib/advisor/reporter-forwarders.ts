@@ -49,7 +49,7 @@ export type OutputDestination = 'mock' | 'elasticsearch' | 'splunk' | 'datadog' 
 // run the reducer pipeline (kind=report is effectively "reducer with no
 // filter rules" at the observable level). filebeat / logstash / otel-
 // collector at 1.0.7 still honor kind and launch @apps/reporter vs
-// __SAVE_APPS_REDUCER__ accordingly.
+// @apps/reducer accordingly.
 //
 // Optimizer mode (lossless encoded-event output, ~20-40x volume reduction:
 // `"log":"~-8Av]P9cVZb,timestamp,var1,var2,..."`) is NOT exposed as a kind.
@@ -397,7 +397,7 @@ ${envBlock}`;
       // install we MUST override extraEnvs/secretMounts to empty so pods
       // don't hang in FailedMount.
       const outputBlock = renderFilebeatOutput(destination, outputHost);
-      // Chart 1.0.7 routes kind=optimize → __SAVE_APPS_REDUCER__ + reducerOptimize
+      // Chart 1.0.7 routes kind=optimize → @apps/reducer + reducerOptimize
       // env var. Emit kind=optimize in values when caller requested optimize.
       const effectiveKind = optimize && kind === 'regulate' ? 'optimize' : kind;
       return `tenx:

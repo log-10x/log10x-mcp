@@ -697,7 +697,7 @@ server.registerTool(
   'log10x_advise_reducer',
   {
     title: 'Advise: Reducer install',
-    description: 'Given a DiscoverySnapshot (from `log10x_discover_env`) + a forwarder choice + a license key, produce a tailored install/verify/teardown plan for the Log10x Reducer. Same 5 forwarders as the Reporter (fluent-bit, fluentd, filebeat, logstash, otel-collector) and same charts — the Reducer differs from the Reporter by writing regulated events back through the forwarder (with mute/sample/compact applied) instead of only emitting metrics. Values files carry `kind: "regulate"` which routes the tenx launcher to `@run/input/forwarder/<fw>/regulate` + `__SAVE_APPS_REDUCER__`. Output shape is identical to `log10x_advise_reporter`: preflight, install steps, verify probes, teardown. **Tier prerequisites**: none — this is a pre-install tool.',
+    description: 'Given a DiscoverySnapshot (from `log10x_discover_env`) + a forwarder choice + a license key, produce a tailored install/verify/teardown plan for the Log10x Reducer. Same 5 forwarders as the Reporter (fluent-bit, fluentd, filebeat, logstash, otel-collector) and same charts — the Reducer differs from the Reporter by writing regulated events back through the forwarder (with mute/sample/compact applied) instead of only emitting metrics. Values files carry `kind: "regulate"` which routes the tenx launcher to `@run/input/forwarder/<fw>/regulate` + `@apps/reducer`. Output shape is identical to `log10x_advise_reporter`: preflight, install steps, verify probes, teardown. **Tier prerequisites**: none — this is a pre-install tool.',
     inputSchema: adviseReducerSchema,
     annotations: { title: 'Advise: Reducer install', readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   },
