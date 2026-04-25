@@ -4,7 +4,7 @@
 import { randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 
-const STREAMER = 'http://a2936089108bb492cb41d18cb5b75f8d-1298006809.us-east-1.elb.amazonaws.com';
+const RETRIEVER = 'http://a2936089108bb492cb41d18cb5b75f8d-1298006809.us-east-1.elb.amazonaws.com';
 
 const tests = [
   { tag: 'nested-AND-OR-NOT',     search: '((severity_level=="ERROR" || severity_level=="FATAL") && k8s_namespace=="otel-demo") || (http_code=="500")',
@@ -37,7 +37,7 @@ async function run(t) {
     resultSize: t.extra?.resultSize ?? 1048576,
   };
   const t0 = Date.now();
-  const r = await fetch(`${STREAMER}/streamer/query`, {
+  const r = await fetch(`${RETRIEVER}/retriever/query`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
@@ -51,7 +51,7 @@ async function run(t) {
   const deadline = Date.now() + 240_000;
   while (Date.now() < deadline) {
     await sleep(5_000);
-    const sr = await fetch(`${STREAMER}/streamer/query/${qid}/status`);
+    const sr = await fetch(`${RETRIEVER}/retriever/query/${qid}/status`);
     if (sr.status !== 200) continue;
     const j = await sr.json();
     const s = j.summary || {};

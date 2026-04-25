@@ -1,11 +1,11 @@
-# Streamer Logging Gaps — Diagnosis from 2026-04-16 GA Session
+# Retriever Logging Gaps — Diagnosis from 2026-04-16 GA Session
 
 ## Problem
 We couldn't trace why `message_pattern=="..."` searches return 0 events despite the enrichment values being in the Bloom filter. Added TRACE-Q logging to IndexQueryWriter + IndexQueryReader, rebuilt and deployed — but the traces never appeared for MCP-originated queries.
 
 ## Gap 1: REST-originated queries log to file, not stdout
 
-**Root cause**: The REST endpoint (`/streamer/query`) submits the pipeline directly via `executor.submit(new PipelineLaunchTask(request))` in `BasePipeline.handleRequest()` (line 36). The pipeline runs in a managed executor thread. Log4j routes `logger.warn/info` from these threads to the **file appender** (`/var/log/tenx/tenx.log`), not to stdout.
+**Root cause**: The REST endpoint (`/retriever/query`) submits the pipeline directly via `executor.submit(new PipelineLaunchTask(request))` in `BasePipeline.handleRequest()` (line 36). The pipeline runs in a managed executor thread. Log4j routes `logger.warn/info` from these threads to the **file appender** (`/var/log/tenx/tenx.log`), not to stdout.
 
 `kubectl logs` reads stdout/stderr only. So REST-originated queries (from the MCP) are invisible in `kubectl logs`.
 
@@ -16,7 +16,7 @@ We couldn't trace why `message_pattern=="..."` searches return 0 events despite 
 2. Change the file appender to write to `/proc/1/fd/1` (stdout of PID 1) instead of `/var/log/tenx/tenx.log`
 3. Add a dedicated logger for `com.log10x.ext.cloud.index.query` that routes to both file and console
 
-**Impact**: ALL streamer query debugging is blind when looking at `kubectl logs`. You have to exec into the pod and read `/var/log/tenx/tenx.log` directly.
+**Impact**: ALL retriever query debugging is blind when looking at `kubectl logs`. You have to exec into the pod and read `/var/log/tenx/tenx.log` directly.
 
 ## Gap 2: Missing log statements in the query path
 

@@ -25,10 +25,10 @@ Log10x fingerprints every log line into a stable `templateHash` — a structural
 
 | Tool | Answers | Tier |
 |---|---|---|
-| `log10x_investigate` | "Why is this spiking?" — single-call root-cause: anchor resolution, trajectory shape detection (acute-spike vs drift), cross-pattern lag correlation, causal chain with stat/lag/chain confidence sub-scores, drift cohort analysis, two-stage Streamer fallback, verification commands. Surfaces log-only signals (pool saturation, cache evictions, retry amplification) that APM structurally cannot see. | Reporter |
+| `log10x_investigate` | "Why is this spiking?" — single-call root-cause: anchor resolution, trajectory shape detection (acute-spike vs drift), cross-pattern lag correlation, causal chain with stat/lag/chain confidence sub-scores, drift cohort analysis, two-stage Retriever fallback, verification commands. Surfaces log-only signals (pool saturation, cache evictions, retry amplification) that APM structurally cannot see. | Reporter |
 | `log10x_resolve_batch` | "Triage these events" — paste a file / array / text dump of raw log lines and get per-pattern frequency, severity, variable concentration, and next-action suggestions. Runs via the Log10x paste endpoint; works at any tier including CLI-only. | None |
-| `log10x_streamer_query` | "Get me the actual events" — direct retrieval from the Storage Streamer archive by templateHash with JS filter expressions over event payloads. Queries the customer's own S3 via pre-computed Bloom filters. Answers forensic, audit, and out-of-retention retrieval. | Streamer |
-| `log10x_backfill_metric` | "Create a new Datadog metric backfilled with 90 days of history" — pulls historical events from the Streamer, aggregates into a bucketed time series, emits to the destination TSDB with historical timestamps preserved. Datadog + Prometheus remote_write supported today. | Streamer |
+| `log10x_retriever_query` | "Get me the actual events" — direct retrieval from the Retriever archive by templateHash with JS filter expressions over event payloads. Queries the customer's own S3 via pre-computed Bloom filters. Answers forensic, audit, and out-of-retention retrieval. | Retriever |
+| `log10x_backfill_metric` | "Create a new Datadog metric backfilled with 90 days of history" — pulls historical events from the Retriever, aggregates into a bucketed time series, emits to the destination TSDB with historical timestamps preserved. Datadog + Prometheus remote_write supported today. | Retriever |
 
 All tools query `prometheus.log10x.com` (for Reporter-tier tools) over HTTPS, with the same `X-10X-Auth` header used by the rest of the Log10x stack. No log scanning; sub-second at any scale.
 
@@ -126,7 +126,7 @@ Variable concentration (top values within this batch):
 
 **Next actions**:
   - call `log10x_investigate({ starting_point: '...' })` for historical correlation (requires Reporter tier).
-  - call `log10x_streamer_query({ pattern: '...', filters: ["event.order === \"12347\""] })` to retrieve all historical events concentrated on order=12347 (requires Streamer tier).
+  - call `log10x_retriever_query({ pattern: '...', filters: ["event.order === \"12347\""] })` to retrieve all historical events concentrated on order=12347 (requires Retriever tier).
   - native Datadog follow-up: `dog log search '@order:"12347"' --from now-24h` — filters to the dominant variable concentration directly in the SIEM.
 ```
 
@@ -269,21 +269,21 @@ cart — $103 → $13K/wk (3 cost drivers)
 |---|---|---|
 | `LOG10X_PASTE_URL` | No | Override the Log10x paste endpoint (default: `https://meljpepqpd.execute-api.us-east-1.amazonaws.com/paste`). Body limit 100 KB. |
 
-### Storage Streamer (`log10x_streamer_query`, `log10x_backfill_metric`)
+### Retriever (`log10x_retriever_query`, `log10x_backfill_metric`)
 
 | Variable | Required | Description |
 |---|---|---|
-| `LOG10X_STREAMER_URL` | Yes (Streamer tier) | Base URL of the customer's deployed Storage Streamer query endpoint (e.g., `https://streamer.<your-domain>`). When unset, Streamer-dependent tools return a graceful "not configured" message. |
-| `LOG10X_STREAMER_AUTH_HEADER` | No | Override the auth header name (default: `X-10X-Auth`, same as the Prometheus gateway). |
-| `LOG10X_STREAMER_AUTH_VALUE` | No | Override the auth header value. Default is `${apiKey}/${envId}` from the active environment. |
-| `LOG10X_STREAMER_TARGET` | No | Override the default target prefix under which streamer writes indexed objects (default: `app`). |
-| `LOG10X_STREAMER_INDEX_SUBPATH` | No | Override the index subpath inside the bucket (default: `indexing-results`, matching the engine's indexContainer convention). |
-| `LOG10X_STREAMER_POLL_MS` | No | Override the marker-stability poll interval (default: `1500` ms). |
-| `LOG10X_STREAMER_TIMEOUT_MS` | No | Override the query timeout (default: `90000` ms). |
+| `__SAVE_LOG10X_RETRIEVER_URL__` | Yes (Retriever tier) | Base URL of the customer's deployed Retriever query endpoint (e.g., `https://retriever.<your-domain>`). When unset, Retriever-dependent tools return a graceful "not configured" message. |
+| `LOG10X_RETRIEVER_AUTH_HEADER` | No | Override the auth header name (default: `X-10X-Auth`, same as the Prometheus gateway). |
+| `LOG10X_RETRIEVER_AUTH_VALUE` | No | Override the auth header value. Default is `${apiKey}/${envId}` from the active environment. |
+| `__SAVE_LOG10X_RETRIEVER_TARGET__` | No | Override the default target prefix under which retriever writes indexed objects (default: `app`). |
+| `LOG10X_RETRIEVER_INDEX_SUBPATH` | No | Override the index subpath inside the bucket (default: `indexing-results`, matching the engine's indexContainer convention). |
+| `LOG10X_RETRIEVER_POLL_MS` | No | Override the marker-stability poll interval (default: `1500` ms). |
+| `LOG10X_RETRIEVER_TIMEOUT_MS` | No | Override the query timeout (default: `90000` ms). |
 
-**Demo env streamer LB**: the otel-demo cluster has a pre-provisioned streamer LoadBalancer at `http://a2936089108bb492cb41d18cb5b75f8d-1298006809.us-east-1.elb.amazonaws.com`. Set `LOG10X_STREAMER_URL` to that value for the demo. The demo bucket is `tenx-demo-cloud-streamer-351939435334/indexing-results/`.
+**Demo env retriever LB**: the otel-demo cluster has a pre-provisioned retriever LoadBalancer at `http://a2936089108bb492cb41d18cb5b75f8d-1298006809.us-east-1.elb.amazonaws.com`. Set `__SAVE_LOG10X_RETRIEVER_URL__` to that value for the demo. The demo bucket is `tenx-demo-cloud-retriever-351939435334/indexing-results/`.
 
-**Known engine-side issues (GAPS G12)**: `log10x_streamer_query` has two unresolved engine-side bugs that `log10x_doctor` flags as `streamer_forensic_health` warnings: (1) it may return 0 events on windows where `log10x_pattern_trend` proves events exist, (2) it may crash with `MCP error -32000: Connection closed` when passed a canonical slash-underscore pattern name. Workarounds: use short/free-text pattern names, cross-check any zero result against `log10x_pattern_trend`, prefer `log10x_event_lookup` + `log10x_pattern_trend` for incident reconstruction where approximate timing is acceptable. See `docs/ENGINE_TICKETS.md` for the full engine-team ticket.
+**Known engine-side issues (GAPS G12)**: `log10x_retriever_query` has two unresolved engine-side bugs that `log10x_doctor` flags as `retriever_forensic_health` warnings: (1) it may return 0 events on windows where `log10x_pattern_trend` proves events exist, (2) it may crash with `MCP error -32000: Connection closed` when passed a canonical slash-underscore pattern name. Workarounds: use short/free-text pattern names, cross-check any zero result against `log10x_pattern_trend`, prefer `log10x_event_lookup` + `log10x_pattern_trend` for incident reconstruction where approximate timing is acceptable. See `docs/ENGINE_TICKETS.md` for the full engine-team ticket.
 
 ### Metric backfill destinations (`log10x_backfill_metric`)
 

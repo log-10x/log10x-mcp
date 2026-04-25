@@ -253,46 +253,46 @@ test('helm-managed fluent-bit + goal=just-metrics → inline reporter', () => {
   assert.equal(rec.topPick.args.app, 'reporter');
 });
 
-// ── Rule 8: goal=archive without AWS infra → streamer is blocked ──
+// ── Rule 8: goal=archive without AWS infra → retriever is blocked ──
 
-test('goal=archive without streamer infra → blocked, top pick falls back', () => {
+test('goal=archive without retriever infra → blocked, top pick falls back', () => {
   const rec = recommendInstallMode({
     snapshot: baseSnapshot(),
     goal: 'archive',
   });
-  const streamerAlt = rec.alternatives.find((a) => a.args.app === 'streamer');
-  assert.ok(streamerAlt);
+  const retrieverAlt = rec.alternatives.find((a) => a.args.app === 'retriever');
+  assert.ok(retrieverAlt);
   assert.ok(
-    streamerAlt?.blocker?.toLowerCase().includes('s3') ||
-      streamerAlt?.blocker?.toLowerCase().includes('sqs'),
-    `streamer alt should be blocked on missing AWS infra: ${streamerAlt?.blocker}`
+    retrieverAlt?.blocker?.toLowerCase().includes('s3') ||
+      retrieverAlt?.blocker?.toLowerCase().includes('sqs'),
+    `retriever alt should be blocked on missing AWS infra: ${retrieverAlt?.blocker}`
   );
 });
 
-// ── Rule 9: goal=archive WITH streamer infra → streamer is top pick ──
+// ── Rule 9: goal=archive WITH retriever infra → retriever is top pick ──
 
-test('goal=archive with streamer infra → streamer is top pick', () => {
+test('goal=archive with retriever infra → retriever is top pick', () => {
   const rec = recommendInstallMode({
     snapshot: baseSnapshot({
       aws: {
         available: true,
         region: 'us-east-1',
-        s3Buckets: [{ name: 'my-streamer', matchReason: 'name_match', hasIndexingPrefix: true }],
+        s3Buckets: [{ name: 'my-retriever', matchReason: 'name_match', hasIndexingPrefix: true }],
         sqsQueues: [
-          { url: 'https://sqs.us-east-1.amazonaws.com/111/streamer-index-queue', name: 'streamer-index-queue', role: 'index' },
+          { url: 'https://sqs.us-east-1.amazonaws.com/111/retriever-index-queue', name: 'retriever-index-queue', role: 'index' },
         ],
         cwLogGroups: [],
       },
       recommendations: {
         suggestedNamespace: 'logging',
-        streamerS3Bucket: 'my-streamer',
-        streamerSqsUrls: { index: 'https://sqs.us-east-1.amazonaws.com/111/streamer-index-queue' },
+        retrieverS3Bucket: 'my-retriever',
+        retrieverSqsUrls: { index: 'https://sqs.us-east-1.amazonaws.com/111/retriever-index-queue' },
         alreadyInstalled: {},
       },
     }),
     goal: 'archive',
   });
-  assert.equal(rec.topPick.args.app, 'streamer');
+  assert.equal(rec.topPick.args.app, 'retriever');
   assert.equal(rec.topPick.blocker, undefined);
 });
 

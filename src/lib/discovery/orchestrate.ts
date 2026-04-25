@@ -126,20 +126,20 @@ function deriveRecommendations(
   const suggestedNamespace =
     opts.namespaceHint ??
     existingForwarderNamespace ??
-    (alreadyInstalled.reporter ?? alreadyInstalled.regulator ?? alreadyInstalled.streamer) ??
+    (alreadyInstalled.reporter ?? alreadyInstalled.regulator ?? alreadyInstalled.retriever) ??
     'logging';
 
-  // Streamer S3 bucket: prefer one with an indexing-results prefix.
-  const streamerBucket =
+  // Retriever S3 bucket: prefer one with an indexing-results prefix.
+  const retrieverBucket =
     aws.s3Buckets.find((b) => b.hasIndexingPrefix)?.name ?? aws.s3Buckets[0]?.name;
 
-  // Streamer SQS URLs: group by role.
-  const streamerSqsUrls: Recommendations['streamerSqsUrls'] = {};
+  // Retriever SQS URLs: group by role.
+  const retrieverSqsUrls: Recommendations['retrieverSqsUrls'] = {};
   for (const q of aws.sqsQueues) {
     if (q.role === 'dlq' || q.role === 'unknown') continue;
-    const current = streamerSqsUrls[q.role];
+    const current = retrieverSqsUrls[q.role];
     // Prefer non-dlq, and first seen.
-    if (!current) streamerSqsUrls[q.role] = q.url;
+    if (!current) retrieverSqsUrls[q.role] = q.url;
   }
 
   // Pull GitOps + compactRegulator wiring from any running regulator pod.
@@ -165,10 +165,10 @@ function deriveRecommendations(
     suggestedNamespace,
     existingForwarder,
     existingForwarderNamespace,
-    streamerS3Bucket: streamerBucket,
+    retrieverS3Bucket: retrieverBucket,
     regulatorGitopsRepo,
     regulatorCompactLookupFile,
-    streamerSqsUrls: Object.keys(streamerSqsUrls).length > 0 ? streamerSqsUrls : undefined,
+    retrieverSqsUrls: Object.keys(retrieverSqsUrls).length > 0 ? retrieverSqsUrls : undefined,
     alreadyInstalled,
   };
 }

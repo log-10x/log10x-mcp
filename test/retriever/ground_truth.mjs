@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Ground-truth correctness: download the raw log, count occurrences of a known
-// pattern text over a 60min window, compare to streamer's reported count.
+// pattern text over a 60min window, compare to retriever's reported count.
 //
 // Known fact: indexer cron drops a file every minute containing ~21MB of
 // identical otel-sample content, just re-timestamped to "now". That means
@@ -12,9 +12,9 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { CloudWatchLogsClient, FilterLogEventsCommand } from '@aws-sdk/client-cloudwatch-logs';
 import { S3Client, GetObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 
-const STREAMER_URL = 'http://a2936089108bb492cb41d18cb5b75f8d-1298006809.us-east-1.elb.amazonaws.com';
-const BUCKET = 'tenx-demo-cloud-streamer-351939435334';
-const LG = '/tenx/demo-streamer/query';
+const RETRIEVER_URL = 'http://a2936089108bb492cb41d18cb5b75f8d-1298006809.us-east-1.elb.amazonaws.com';
+const BUCKET = 'tenx-demo-cloud-retriever-351939435334';
+const LG = '/tenx/demo-retriever/query';
 const hdrs = { 'Content-Type': 'application/json' };
 const s3 = new S3Client({ region: 'us-east-1' });
 const cw = new CloudWatchLogsClient({ region: 'us-east-1' });
@@ -37,7 +37,7 @@ async function countPatternInOneFile() {
   return { key, perFile: count, bytes: body.length };
 }
 
-// 2) Submit a streamer query over 60min and retrieve the count.
+// 2) Submit a retriever query over 60min and retrieve the count.
 async function submitAndCount() {
   const to = Date.now();
   const from = to - 60 * 60 * 1000;
@@ -49,7 +49,7 @@ async function submitAndCount() {
     filters: [], writeResults: false, logLevels: 'ERROR,INFO,PERF',
     processingTime: 600_000,
   };
-  const r = await fetch(`${STREAMER_URL}/streamer/query`, {
+  const r = await fetch(`${RETRIEVER_URL}/retriever/query`, {
     method: 'POST', headers: hdrs, body: JSON.stringify(body),
   });
   if (r.status !== 200) throw new Error(`submit failed: ${r.status} ${await r.text()}`);
@@ -99,10 +99,10 @@ console.log(`  ${bytes} bytes, '${PATTERN_TEXT}' occurs ${perFile} times per fil
 console.log(`expected over 60min: ~${perFile * 60} (60 files, identical content)`);
 
 const { qid, totalMatched, finished } = await submitAndCount();
-console.log(`streamer qid=${qid} finished=${finished} matched=${totalMatched}`);
+console.log(`retriever qid=${qid} finished=${finished} matched=${totalMatched}`);
 const expected = perFile * 60;
 const ratio = totalMatched / expected;
-console.log(`ratio streamer/expected = ${ratio.toFixed(3)} (1.0 = perfect)`);
+console.log(`ratio retriever/expected = ${ratio.toFixed(3)} (1.0 = perfect)`);
 if (ratio < 0.8 || ratio > 1.2) {
   console.log(`  WARN: off-target by >20%`);
   process.exit(3);

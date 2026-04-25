@@ -272,8 +272,8 @@ async function probeWorkloadsInNamespace(
     readyReplicas: number
   ): void {
     const labels = w.metadata.labels ?? {};
-    // Prefer longest-matching release name so `tenx-streamer-streamer-10x-stream-worker`
-    // matches helm release `tenx-streamer`, not `tenx`. Exact label match wins outright.
+    // Prefer longest-matching release name so `tenx-retriever-retriever-10x-stream-worker`
+    // matches helm release `tenx-retriever`, not `tenx`. Exact label match wins outright.
     const instanceLabel = labels['app.kubernetes.io/instance'];
     const nsReleases = helmReleases.filter((h) => h.namespace === namespace);
     const helmRel =
@@ -285,7 +285,7 @@ async function probeWorkloadsInNamespace(
     // First pass: does ANY container look like a log10x app image? If so,
     // we classify the whole workload as a log10x app and skip forwarder
     // classification entirely — this prevents fluent-bit sidecars inside
-    // log10x streamer/regulator pods from being mis-detected as a customer
+    // log10x retriever/regulator pods from being mis-detected as a customer
     // forwarder.
     const log10xContainer = (containers ?? []).find(
       (c) => isLog10xImage(c.image) || classifyLog10xApp(c.image, labels, helmRel?.chart) !== 'unknown'

@@ -2,10 +2,10 @@
  * Mode recommender — picks the right install path from a discovery
  * snapshot (+ optional goal).
  *
- * Sits in front of `buildReporterPlan` / `buildStreamerPlan` and decides:
- *   - Which app: reporter / regulator / streamer
+ * Sits in front of `buildReporterPlan` / `buildRetrieverPlan` and decides:
+ *   - Which app: reporter / regulator / retriever
  *   - Which deployment shape: inline (replace forwarder) / standalone
- *     (parallel DaemonSet) / standalone-streamer
+ *     (parallel DaemonSet) / standalone-retriever
  *   - Which forwarder (when inline)
  *   - Whether to enable compact encoding (optimize)
  *   - Which namespace
@@ -17,7 +17,7 @@
  * Rule priority (first matching wins, but we evaluate ALL rules so the
  * returned `alternatives` list covers the rejected options too):
  *
- *   1. goal='archive' → streamer (require S3+SQS+IRSA in snapshot)
+ *   1. goal='archive' → retriever (require S3+SQS+IRSA in snapshot)
  *   2. no forwarder detected (or kind='unknown') → standalone reporter
  *   3. forwarder detected, but NOT helm-managed → standalone reporter
  *      (we can't upgrade a hand-rolled DaemonSet to a log10x-repackaged
@@ -44,9 +44,9 @@ import type { AdvisorApp, DeploymentShape } from './reporter.js';
 /** Goals a user might want to achieve. Optional — inference works without one. */
 export type InstallGoal = 'just-metrics' | 'cut-cost' | 'compact' | 'archive';
 
-/** A fully-resolved args bundle that `buildReporterPlan` / `buildStreamerPlan` can consume. */
+/** A fully-resolved args bundle that `buildReporterPlan` / `buildRetrieverPlan` can consume. */
 export interface ResolvedInstallArgs {
-  app: AdvisorApp | 'streamer';
+  app: AdvisorApp | 'retriever';
   shape: DeploymentShape;
   /** Detected forwarder (for context in standalone plans; drives chart for inline). */
   forwarder?: ForwarderKind;
@@ -121,11 +121,11 @@ function pickPrimaryForwarder(snapshot: DiscoverySnapshot): DetectedForwarder | 
   return helm ?? candidates.find((f) => f.readyReplicas > 0) ?? candidates[0];
 }
 
-/** True when the snapshot has enough AWS signal to plan a streamer install. */
-function streamerInfraPresent(snapshot: DiscoverySnapshot): boolean {
+/** True when the snapshot has enough AWS signal to plan a retriever install. */
+function retrieverInfraPresent(snapshot: DiscoverySnapshot): boolean {
   const r = snapshot.recommendations;
-  const sqs = r.streamerSqsUrls ?? {};
-  return Boolean(r.streamerS3Bucket) && Object.values(sqs).some((v) => Boolean(v));
+  const sqs = r.retrieverSqsUrls ?? {};
+  return Boolean(r.retrieverS3Bucket) && Object.values(sqs).some((v) => Boolean(v));
 }
 
 // ── Core recommender ──
@@ -154,8 +154,8 @@ export function recommendInstallMode(opts: RecommendOpts): ModeRecommendation {
     `Namespace suggestion: \`${namespace}\`${snapshot.recommendations.existingForwarderNamespace ? ` (from detected forwarder)` : ''}.`
   );
   if (snapshot.kubectl.log10xApps.length > 0) {
-    // Dedup by kind+namespace so a streamer's 7 subcomponent CronJobs
-    // don't render as "streamer(demo), streamer(demo), streamer(demo)…".
+    // Dedup by kind+namespace so a retriever's 7 subcomponent CronJobs
+    // don't render as "retriever(demo), retriever(demo), retriever(demo)…".
     const seen = new Set<string>();
     const condensed: string[] = [];
     for (const a of snapshot.kubectl.log10xApps) {
@@ -168,12 +168,12 @@ export function recommendInstallMode(opts: RecommendOpts): ModeRecommendation {
     detectionSummary.push(`Log10x apps already in cluster: ${condensed.join(', ')}.`);
   }
   if (snapshot.aws.available) {
-    const streamerReady = streamerInfraPresent(snapshot);
+    const retrieverReady = retrieverInfraPresent(snapshot);
     detectionSummary.push(
-      `AWS reachable (${snapshot.aws.region ?? 'region unknown'}); streamer infra ${streamerReady ? '**present**' : 'missing'}.`
+      `AWS reachable (${snapshot.aws.region ?? 'region unknown'}); retriever infra ${retrieverReady ? '**present**' : 'missing'}.`
     );
   } else {
-    detectionSummary.push('AWS CLI not reachable — streamer advice will be best-effort.');
+    detectionSummary.push('AWS CLI not reachable — retriever advice will be best-effort.');
   }
 
   const warnings: string[] = [];
@@ -203,8 +203,8 @@ export function recommendInstallMode(opts: RecommendOpts): ModeRecommendation {
     alts.push(...makeInlineAlts({ detectedKind: 'fluent-bit', namespace, goal, helmManaged: false }));
   }
 
-  // ── Streamer option (independent of forwarder state) ──
-  alts.push(makeStreamerAlt({ snapshot, namespace, goal }));
+  // ── Retriever option (independent of forwarder state) ──
+  alts.push(makeRetrieverAlt({ snapshot, namespace, goal }));
 
   // Sort: installable (no blocker) first, then by score desc.
   alts.sort((a, b) => {
@@ -246,7 +246,7 @@ function makeStandaloneAlt(params: {
     blocker = `standalone is report-mode only (metrics, no filtering or encoded output). For goal=${goal} you need an inline install that hooks into the forwarder's output path.`;
   }
   if (goal === 'archive') {
-    blocker = 'standalone reporter is metrics-only; goal=archive requires the Streamer (S3 + SQS).';
+    blocker = 'standalone reporter is metrics-only; goal=archive requires the Retriever (S3 + SQS).';
   }
 
   // Scoring:
@@ -396,16 +396,16 @@ function makeInlineAlts(params: {
   return alts;
 }
 
-function makeStreamerAlt(params: {
+function makeRetrieverAlt(params: {
   snapshot: DiscoverySnapshot;
   namespace: string;
   goal: InstallGoal | undefined;
 }): RankedAlternative {
   const { snapshot, namespace, goal } = params;
-  const infraReady = streamerInfraPresent(snapshot);
+  const infraReady = retrieverInfraPresent(snapshot);
   let blocker: string | undefined;
   if (!infraReady) {
-    blocker = `Streamer requires an S3 bucket + SQS queues + IRSA-annotated SA — none detected in snapshot. Provision via Terraform first (see docs/apps/cloud/streamer/setup), or set \`streamerS3Bucket\` hint in discovery.`;
+    blocker = `Retriever requires an S3 bucket + SQS queues + IRSA-annotated SA — none detected in snapshot. Provision via Terraform first (see docs/apps/cloud/retriever/setup), or set \`retrieverS3Bucket\` hint in discovery.`;
   }
   const score =
     goal === 'archive'
@@ -415,9 +415,9 @@ function makeStreamerAlt(params: {
       : SCORE_ALTERNATIVE_OK;
 
   return {
-    label: 'Streamer (S3 archive + query)',
+    label: 'Retriever (S3 archive + query)',
     args: {
-      app: 'streamer',
+      app: 'retriever',
       shape: 'standalone',
       namespace,
     },
@@ -425,9 +425,9 @@ function makeStreamerAlt(params: {
     rationale:
       goal === 'archive'
         ? infraReady
-          ? 'Streamer — long-term S3 archive with Bloom-filter index; detected AWS infra is compatible.'
-          : 'Streamer matches goal=archive but required AWS infra is missing — blocker before install.'
-        : 'Streamer — separate pillar for long-term archive + forensic query; consider alongside a Reporter/Regulator install.',
+          ? 'Retriever — long-term S3 archive with Bloom-filter index; detected AWS infra is compatible.'
+          : 'Retriever matches goal=archive but required AWS infra is missing — blocker before install.'
+        : 'Retriever — separate pillar for long-term archive + forensic query; consider alongside a Reporter/Regulator install.',
     blocker,
   };
 }

@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 // Ground-truth correctness using R18 status endpoint.
-// Relies on GET /streamer/query/{qid}/status which runs CW Logs Insights to
+// Relies on GET /retriever/query/{qid}/status which runs CW Logs Insights to
 // aggregate eventsWrittenTotal from "results writer complete: N events" lines.
 import { randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { S3Client, GetObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 
-const STREAMER_URL = 'http://a2936089108bb492cb41d18cb5b75f8d-1298006809.us-east-1.elb.amazonaws.com';
-const BUCKET = 'tenx-demo-cloud-streamer-351939435334';
+const RETRIEVER_URL = 'http://a2936089108bb492cb41d18cb5b75f8d-1298006809.us-east-1.elb.amazonaws.com';
+const BUCKET = 'tenx-demo-cloud-retriever-351939435334';
 const s3 = new S3Client({ region: 'us-east-1' });
 const hdrs = { 'Content-Type': 'application/json' };
 
@@ -39,7 +39,7 @@ async function submit() {
     // isn't capped by the byte budget.
     resultSize: 524288000,
   };
-  const r = await fetch(`${STREAMER_URL}/streamer/query`, {
+  const r = await fetch(`${RETRIEVER_URL}/retriever/query`, {
     method: 'POST', headers: hdrs, body: JSON.stringify(body),
   });
   if (r.status !== 200) throw new Error(`submit failed: ${r.status}`);
@@ -51,7 +51,7 @@ async function pollStatus(qid, deadlineMs) {
   let lastEw = -1;
   while (Date.now() < deadlineMs) {
     await sleep(10_000);
-    const r = await fetch(`${STREAMER_URL}/streamer/query/${qid}/status`);
+    const r = await fetch(`${RETRIEVER_URL}/retriever/query/${qid}/status`);
     if (r.status !== 200) { console.log(`  http ${r.status}`); continue; }
     const j = await r.json();
     const s = j.summary || {};
@@ -87,7 +87,7 @@ const status = await pollStatus(qid, Date.now() + 240_000);
 const expected = perFile * 60;
 const actual = status.eventsWrittenTotal;
 const ratio = actual / expected;
-console.log(`streamer=${actual}, expected=${expected}, ratio=${ratio.toFixed(3)}`);
+console.log(`retriever=${actual}, expected=${expected}, ratio=${ratio.toFixed(3)}`);
 if (ratio < 0.9 || ratio > 1.1) {
   console.log(`  WARN: off-target by >10%`);
   process.exit(3);

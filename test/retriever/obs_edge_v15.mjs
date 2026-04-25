@@ -6,14 +6,14 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { CloudWatchLogsClient, FilterLogEventsCommand } from '@aws-sdk/client-cloudwatch-logs';
 
-const STREAMER = 'http://a2936089108bb492cb41d18cb5b75f8d-1298006809.us-east-1.elb.amazonaws.com';
+const RETRIEVER = 'http://a2936089108bb492cb41d18cb5b75f8d-1298006809.us-east-1.elb.amazonaws.com';
 const cw = new CloudWatchLogsClient({ region: 'us-east-1' });
 
 async function submitWithTp(tp) {
   const qid = randomUUID();
   const to = Date.now();
   const from = to - 60_000;
-  const r = await fetch(`${STREAMER}/streamer/query`, {
+  const r = await fetch(`${RETRIEVER}/retriever/query`, {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'traceparent': tp },
     body: JSON.stringify({ id: qid, name: `obs-v15-${to}`, from, to,
       search: 'severity_level=="ERROR"', filters: [],
@@ -26,14 +26,14 @@ async function submitWithTp(tp) {
 async function fetchCwEvents(qid, deadlineMs) {
   while (Date.now() < deadlineMs) {
     await sleep(8_000);
-    const sr = await fetch(`${STREAMER}/streamer/query/${qid}/status`);
+    const sr = await fetch(`${RETRIEVER}/retriever/query/${qid}/status`);
     if (sr.status !== 200) continue;
     const j = await sr.json();
     if (j.state === 'complete' || j.state === 'complete_no_events') break;
   }
   await sleep(20_000); // CW Insights catchup
   const res = await cw.send(new FilterLogEventsCommand({
-    logGroupName: '/tenx/demo-streamer/query',
+    logGroupName: '/tenx/demo-retriever/query',
     startTime: Date.now() - 600_000, endTime: Date.now(),
     filterPattern: `"${qid}"`,
     limit: 1000,

@@ -4,7 +4,7 @@
  * Read-only discovery of the caller's Kubernetes cluster + AWS account.
  * Produces a DiscoverySnapshot (stored in-memory for 30 min) and a
  * terse markdown report of what was found. The advise_{reporter,
- * regulator, streamer} tools consume the snapshot by id.
+ * regulator, retriever} tools consume the snapshot by id.
  *
  * Nothing here mutates state. Every probe is a `kubectl get` or
  * `aws ...describe/list` call. If kubectl or aws isn't configured, the
@@ -37,7 +37,7 @@ export const discoverEnvSchema = {
     .string()
     .optional()
     .describe(
-      'Substring to match against S3 bucket names. Defaults to "streamer"; also matches "log10x" and "tenx" out of the box.'
+      'Substring to match against S3 bucket names. Defaults to "retriever"; also matches "log10x" and "tenx" out of the box.'
     ),
   forwarder_hint: z
     .enum(['fluent-bit', 'fluentd', 'filebeat', 'logstash', 'otel-collector'])
@@ -209,11 +209,11 @@ export function renderDiscoverReport(s: DiscoverySnapshot): string {
   if (installed.length > 0) {
     lines.push(`- **already installed**: ${installed.map(([k, v]) => `${k} (in \`${v}\`)`).join(', ')}`);
   }
-  if (r.streamerS3Bucket) {
-    lines.push(`- **streamer S3 bucket candidate**: \`${r.streamerS3Bucket}\``);
+  if (r.retrieverS3Bucket) {
+    lines.push(`- **retriever S3 bucket candidate**: \`${r.retrieverS3Bucket}\``);
   }
-  if (r.streamerSqsUrls) {
-    lines.push(`- **streamer SQS roles detected**: ${Object.keys(r.streamerSqsUrls).join(', ')}`);
+  if (r.retrieverSqsUrls) {
+    lines.push(`- **retriever SQS roles detected**: ${Object.keys(r.retrieverSqsUrls).join(', ')}`);
   }
   lines.push('');
 
@@ -224,7 +224,7 @@ export function renderDiscoverReport(s: DiscoverySnapshot): string {
   lines.push('```');
   lines.push(`log10x_advise_reporter({ snapshot_id: "${s.snapshotId}" })`);
   lines.push(`log10x_advise_regulator({ snapshot_id: "${s.snapshotId}" })`);
-  lines.push(`log10x_advise_streamer({ snapshot_id: "${s.snapshotId}" })`);
+  lines.push(`log10x_advise_retriever({ snapshot_id: "${s.snapshotId}" })`);
   lines.push('```');
   lines.push('');
   lines.push(

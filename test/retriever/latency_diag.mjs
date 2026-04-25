@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { CloudWatchLogsClient, FilterLogEventsCommand } from '@aws-sdk/client-cloudwatch-logs';
 
-const STREAMER = 'http://a2936089108bb492cb41d18cb5b75f8d-1298006809.us-east-1.elb.amazonaws.com';
+const RETRIEVER = 'http://a2936089108bb492cb41d18cb5b75f8d-1298006809.us-east-1.elb.amazonaws.com';
 const cw = new CloudWatchLogsClient({ region: 'us-east-1' });
 
 async function one() {
@@ -19,13 +19,13 @@ async function one() {
   const body = { id: qid, name: `diag-${to}`, from, to,
     search: 'severity_level == "ERROR"', filters: [],
     logLevels: 'ERROR,INFO,PERF', processingTime: 120_000, resultSize: 10485760 };
-  await fetch(`${STREAMER}/streamer/query`, { method: 'POST',
+  await fetch(`${RETRIEVER}/retriever/query`, { method: 'POST',
     headers: { 'Content-Type': 'application/json', 'traceparent': tp }, body: JSON.stringify(body) });
   // Poll R18 until complete
   let endState;
   for (;;) {
     await sleep(2_000);
-    const sr = await fetch(`${STREAMER}/streamer/query/${qid}/status`);
+    const sr = await fetch(`${RETRIEVER}/retriever/query/${qid}/status`);
     if (sr.status !== 200) continue;
     const j = await sr.json();
     if (j.state === 'complete' || j.state === 'complete_no_events') { endState = j; break; }
@@ -35,7 +35,7 @@ async function one() {
   // Pull CW timeline
   await sleep(30_000); // CW Insights lag; give it time
   const res = await cw.send(new FilterLogEventsCommand({
-    logGroupName: '/tenx/demo-streamer/query',
+    logGroupName: '/tenx/demo-retriever/query',
     startTime: submitAt - 5000,
     endTime: completeDetectedAt + 15000,
     filterPattern: `"${qid}"`,

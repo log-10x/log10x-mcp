@@ -13,7 +13,7 @@
  *      Drift slope-similarity cohort analysis             (Phase 3-D)
  *   4. Causal chain construction (acute only)
  *   5. Confidence scoring
- *   6. Two-stage Streamer fallback (graceful degradation)
+ *   6. Two-stage Retriever fallback (graceful degradation)
  *   7. Verification command generation
  *
  * Intelligence lives in the tool, not the model. Any MCP-aware client
@@ -40,7 +40,7 @@ import {
   collectDriftPatternsReferenced,
 } from '../lib/investigation-templates.js';
 import { recordInvestigation, getInvestigation, listInvestigations } from '../lib/investigation-cache.js';
-import { isStreamerConfigured, runStreamerQuery, parseTimeExpression } from '../lib/streamer-api.js';
+import { isRetrieverConfigured, runRetrieverQuery, parseTimeExpression } from '../lib/retriever-api.js';
 
 export const investigateSchema = {
   starting_point: z
@@ -427,18 +427,18 @@ export async function executeInvestigate(
     }
   }
 
-  // ── Phase 6 — Streamer fallback (graceful) ──
-  let streamerFallback: 'disabled' | 'unavailable' | 'stage_1_only' | 'stage_1_and_2' | 'not_run' = 'not_run';
+  // ── Phase 6 — Retriever fallback (graceful) ──
+  let retrieverFallback: 'disabled' | 'unavailable' | 'stage_1_only' | 'stage_1_and_2' | 'not_run' = 'not_run';
   const leadConfidence = correlation.chain[0]?.confidence ?? 0;
 
-  if (!isStreamerConfigured()) {
-    streamerFallback = 'unavailable';
+  if (!isRetrieverConfigured()) {
+    retrieverFallback = 'unavailable';
   } else if (leadConfidence >= thresholds.cleanChainThreshold) {
-    streamerFallback = 'disabled'; // clean chain — no need
-  } else if (leadConfidence < thresholds.streamerEscalationThreshold) {
+    retrieverFallback = 'disabled'; // clean chain — no need
+  } else if (leadConfidence < thresholds.retrieverEscalationThreshold) {
     // Stage 1 — targeted anchor history
     try {
-      const stage1 = await runStreamerQuery(
+      const stage1 = await runRetrieverQuery(
         env,
         {
           pattern: resolution.anchor,
@@ -450,15 +450,15 @@ export async function executeInvestigate(
         },
         { timeoutMs: 30_000 }
       );
-      streamerFallback = 'stage_1_only';
+      retrieverFallback = 'stage_1_only';
       // If Stage 1 reveals enough buckets with sustained movement, we'd
       // normally fire Stage 2. The MVP stops at Stage 1 and annotates.
       if ((stage1.buckets || []).length > 7) {
         // TODO: full Stage 2 re-correlation in the historical inflection window.
-        streamerFallback = 'stage_1_only';
+        retrieverFallback = 'stage_1_only';
       }
     } catch {
-      streamerFallback = 'unavailable';
+      retrieverFallback = 'unavailable';
     }
   }
 
@@ -482,7 +482,7 @@ export async function executeInvestigate(
     noiseFloor: thresholds.acuteNoiseFloor,
     modeDetection,
     correlation,
-    streamerFallback,
+    retrieverFallback,
     depth: args.depth,
     metricWarning,
   });

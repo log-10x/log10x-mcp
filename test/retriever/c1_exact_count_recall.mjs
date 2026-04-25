@@ -18,7 +18,7 @@ import { CloudWatchLogsClient, DescribeLogStreamsCommand, GetLogEventsCommand } 
 
 const hdrs = { 'X-10X-Auth': `${process.env.LOG10X_API_KEY}/${process.env.LOG10X_ENV_ID}`, 'Content-Type': 'application/json' };
 const cw = new CloudWatchLogsClient({ region: 'us-east-1' });
-const LG = '/tenx/demo-streamer/query';
+const LG = '/tenx/demo-retriever/query';
 
 // Lock the window so both runs query the same absolute time range.
 const to = Date.now();
@@ -33,7 +33,7 @@ async function submit(name) {
     filters: [], writeResults: true, logLevels: 'ERROR,INFO,PERF',
     processingTime: 600_000,
   };
-  const r = await fetch(`${process.env.LOG10X_STREAMER_URL}/streamer/query`, {
+  const r = await fetch(`${process.env.__SAVE_LOG10X_RETRIEVER_URL__}/retriever/query`, {
     method: 'POST', headers: hdrs, body: JSON.stringify(body),
   });
   if (r.status !== 200) throw new Error(`submit ${name} failed: ${r.status}`);

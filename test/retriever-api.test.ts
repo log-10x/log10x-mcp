@@ -1,5 +1,5 @@
 /**
- * Unit tests for streamer-api public helpers.
+ * Unit tests for retriever-api public helpers.
  *
  * parseTimeExpression converts user-friendly time expressions into the
  * engine-compatible form — the engine expects JS-eval-prefixed `$=now(...)`
@@ -8,7 +8,7 @@
 
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { parseTimeExpression, normalizeTimeExpression, isStreamerConfigured, eventTimestampMs } from '../src/lib/streamer-api.js';
+import { parseTimeExpression, normalizeTimeExpression, isRetrieverConfigured, eventTimestampMs } from '../src/lib/retriever-api.js';
 
 test('normalizeTimeExpression: bare `now` becomes $=now()', () => {
   assert.equal(normalizeTimeExpression('now'), '$=now()');
@@ -47,24 +47,24 @@ test('parseTimeExpression is an alias for normalizeTimeExpression', () => {
   assert.equal(parseTimeExpression('now-1h'), normalizeTimeExpression('now-1h'));
 });
 
-test('isStreamerConfigured requires both LOG10X_STREAMER_URL and LOG10X_STREAMER_BUCKET', () => {
-  const savedUrl = process.env.LOG10X_STREAMER_URL;
-  const savedBucket = process.env.LOG10X_STREAMER_BUCKET;
+test('isRetrieverConfigured requires both __SAVE_LOG10X_RETRIEVER_URL__ and __SAVE_LOG10X_RETRIEVER_BUCKET__', () => {
+  const savedUrl = process.env.__SAVE_LOG10X_RETRIEVER_URL__;
+  const savedBucket = process.env.__SAVE_LOG10X_RETRIEVER_BUCKET__;
   try {
-    delete process.env.LOG10X_STREAMER_URL;
-    delete process.env.LOG10X_STREAMER_BUCKET;
-    assert.equal(isStreamerConfigured(), false);
+    delete process.env.__SAVE_LOG10X_RETRIEVER_URL__;
+    delete process.env.__SAVE_LOG10X_RETRIEVER_BUCKET__;
+    assert.equal(isRetrieverConfigured(), false);
 
-    process.env.LOG10X_STREAMER_URL = 'http://example.com';
-    assert.equal(isStreamerConfigured(), false); // still missing bucket
+    process.env.__SAVE_LOG10X_RETRIEVER_URL__ = 'http://example.com';
+    assert.equal(isRetrieverConfigured(), false); // still missing bucket
 
-    process.env.LOG10X_STREAMER_BUCKET = 'my-bucket';
-    assert.equal(isStreamerConfigured(), true);
+    process.env.__SAVE_LOG10X_RETRIEVER_BUCKET__ = 'my-bucket';
+    assert.equal(isRetrieverConfigured(), true);
   } finally {
-    if (savedUrl === undefined) delete process.env.LOG10X_STREAMER_URL;
-    else process.env.LOG10X_STREAMER_URL = savedUrl;
-    if (savedBucket === undefined) delete process.env.LOG10X_STREAMER_BUCKET;
-    else process.env.LOG10X_STREAMER_BUCKET = savedBucket;
+    if (savedUrl === undefined) delete process.env.__SAVE_LOG10X_RETRIEVER_URL__;
+    else process.env.__SAVE_LOG10X_RETRIEVER_URL__ = savedUrl;
+    if (savedBucket === undefined) delete process.env.__SAVE_LOG10X_RETRIEVER_BUCKET__;
+    else process.env.__SAVE_LOG10X_RETRIEVER_BUCKET__ = savedBucket;
   }
 });
 

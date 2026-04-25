@@ -1,29 +1,29 @@
 /**
- * log10x_advise_streamer
+ * log10x_advise_retriever
  *
  * Given a DiscoverySnapshot (from `log10x_discover_env`), produce an
- * install/verify/teardown plan for the Log10x Streamer. Unlike
- * Reporter + Regulator, the Streamer has no forwarder choice — just
+ * install/verify/teardown plan for the Log10x Retriever. Unlike
+ * Reporter + Regulator, the Retriever has no forwarder choice — just
  * AWS infra pointers (S3 buckets, SQS queues, IRSA role).
  */
 
 import { z } from 'zod';
 import { getSnapshot } from '../lib/discovery/snapshot-store.js';
-import { buildStreamerPlan } from '../lib/advisor/streamer.js';
+import { buildRetrieverPlan } from '../lib/advisor/retriever.js';
 import { renderPlan } from '../lib/advisor/render.js';
 
-export const adviseStreamerSchema = {
+export const adviseRetrieverSchema = {
   snapshot_id: z
     .string()
     .describe('ID returned by `log10x_discover_env`. The snapshot is cached for 30 min.'),
-  release_name: z.string().optional().describe('Helm release name. Default: `my-streamer`.'),
+  release_name: z.string().optional().describe('Helm release name. Default: `my-retriever`.'),
   namespace: z.string().optional().describe('Target namespace. Default: snapshot.recommendations.suggestedNamespace.'),
   api_key: z.string().optional().describe('Log10x license key.'),
   input_bucket: z
     .string()
     .optional()
     .describe(
-      'S3 bucket for source logs. Default: snapshot.recommendations.streamerS3Bucket (auto-detected).'
+      'S3 bucket for source logs. Default: snapshot.recommendations.retrieverS3Bucket (auto-detected).'
     ),
   index_bucket: z
     .string()
@@ -35,7 +35,7 @@ export const adviseStreamerSchema = {
     .string()
     .optional()
     .describe(
-      'IAM role ARN for the Streamer ServiceAccount (IRSA). Default: auto-detected from snapshot.'
+      'IAM role ARN for the Retriever ServiceAccount (IRSA). Default: auto-detected from snapshot.'
     ),
   sqs_index_url: z
     .string()
@@ -56,14 +56,14 @@ export const adviseStreamerSchema = {
   action: z.enum(['install', 'verify', 'teardown', 'all']).optional().describe('Default: `all`.'),
 };
 
-const schemaObj = z.object(adviseStreamerSchema);
-export type AdviseStreamerArgs = z.infer<typeof schemaObj>;
+const schemaObj = z.object(adviseRetrieverSchema);
+export type AdviseRetrieverArgs = z.infer<typeof schemaObj>;
 
-export async function executeAdviseStreamer(args: AdviseStreamerArgs): Promise<string> {
+export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise<string> {
   const snapshot = getSnapshot(args.snapshot_id);
   if (!snapshot) {
     return [
-      `# Streamer advisor — snapshot not found`,
+      `# Retriever advisor — snapshot not found`,
       ``,
       `Snapshot \`${args.snapshot_id}\` is missing or expired (snapshots live 30 min).`,
       ``,
@@ -72,7 +72,7 @@ export async function executeAdviseStreamer(args: AdviseStreamerArgs): Promise<s
   }
 
   const action = args.action ?? 'all';
-  const plan = await buildStreamerPlan({
+  const plan = await buildRetrieverPlan({
     snapshot,
     releaseName: args.release_name,
     namespace: args.namespace,

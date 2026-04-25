@@ -250,7 +250,7 @@ function renderCorrelationResult(
   const topJoined = result.byTier['confirmed'][0] || result.byTier['service-match'][0];
   if (topJoined && result.anchor.type === 'customer_metric') {
     lines.push(`1. Drill into the top candidate: \`log10x_investigate({ starting_point: '${topJoined.name}' })\` for full causal-chain analysis.`);
-    lines.push(`2. Pull the actual events contributing to the correlation: \`log10x_streamer_query({ pattern: '${topJoined.name}', window: 'last ${windowLabel}' })\`.`);
+    lines.push(`2. Pull the actual events contributing to the correlation: \`log10x_retriever_query({ pattern: '${topJoined.name}', window: 'last ${windowLabel}' })\`.`);
     lines.push(`3. Before muting or dropping the candidate pattern, check blast radius: \`log10x_dependency_check({ pattern: '${topJoined.name}' })\`.`);
   } else if (topJoined) {
     lines.push(`1. The top correlated customer metric is \`${topJoined.name}\`. Inspect it directly in your backend's UI or via \`log10x_customer_metrics_query\`.`);

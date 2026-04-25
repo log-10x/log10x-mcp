@@ -1,5 +1,5 @@
 /**
- * Streamer advisor tests. Locks down:
+ * Retriever advisor tests. Locks down:
  *   - preflight fails closed when AWS infra is missing
  *   - auto-detection from snapshot works when infra is present
  *   - values file wires all four SQS queues + IRSA role
@@ -9,14 +9,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildStreamerPlan } from '../../src/lib/advisor/streamer.js';
+import { buildRetrieverPlan } from '../../src/lib/advisor/retriever.js';
 import type { DiscoverySnapshot } from '../../src/lib/discovery/types.js';
 import { SNAPSHOT_SCHEMA_VERSION } from '../../src/lib/discovery/types.js';
 
 function baseSnapshot(overrides: Partial<DiscoverySnapshot> = {}): DiscoverySnapshot {
   return {
     schemaVersion: SNAPSHOT_SCHEMA_VERSION,
-    snapshotId: 'disc-streamer-1',
+    snapshotId: 'disc-retriever-1',
     startedAt: '2026-04-21T00:00:00Z',
     finishedAt: '2026-04-21T00:01:00Z',
     kubectl: {
@@ -39,39 +39,39 @@ function baseSnapshot(overrides: Partial<DiscoverySnapshot> = {}): DiscoverySnap
 }
 
 function richSnapshot(): DiscoverySnapshot {
-  // Snapshot with all the infra the streamer needs.
+  // Snapshot with all the infra the retriever needs.
   return baseSnapshot({
     kubectl: {
       ...baseSnapshot().kubectl,
       serviceAccountIrsa: [
         {
           namespace: 'demo',
-          name: 'tenx-streamer',
-          roleArn: 'arn:aws:iam::111:role/tenx-demo-streamer',
+          name: 'tenx-retriever',
+          roleArn: 'arn:aws:iam::111:role/tenx-demo-retriever',
         },
       ],
     },
     recommendations: {
       suggestedNamespace: 'logging',
       alreadyInstalled: {},
-      streamerS3Bucket: 'tenx-demo-streamer-111',
-      streamerSqsUrls: {
-        index: 'https://sqs.us-east-1.amazonaws.com/111/tenx-demo-streamer-index-queue',
-        query: 'https://sqs.us-east-1.amazonaws.com/111/tenx-demo-streamer-query-queue',
-        subquery: 'https://sqs.us-east-1.amazonaws.com/111/tenx-demo-streamer-subquery-queue',
-        stream: 'https://sqs.us-east-1.amazonaws.com/111/tenx-demo-streamer-stream-queue',
+      retrieverS3Bucket: 'tenx-demo-retriever-111',
+      retrieverSqsUrls: {
+        index: 'https://sqs.us-east-1.amazonaws.com/111/tenx-demo-retriever-index-queue',
+        query: 'https://sqs.us-east-1.amazonaws.com/111/tenx-demo-retriever-query-queue',
+        subquery: 'https://sqs.us-east-1.amazonaws.com/111/tenx-demo-retriever-subquery-queue',
+        stream: 'https://sqs.us-east-1.amazonaws.com/111/tenx-demo-retriever-stream-queue',
       },
     },
   });
 }
 
 test('plan blocks when api_key is missing', async () => {
-  const plan = await buildStreamerPlan({ snapshot: richSnapshot() });
+  const plan = await buildRetrieverPlan({ snapshot: richSnapshot() });
   assert.ok(plan.blockers.some((b) => b.toLowerCase().includes('license key')));
 });
 
 test('plan blocks when input bucket is missing from snapshot + args', async () => {
-  const plan = await buildStreamerPlan({ snapshot: baseSnapshot(), apiKey: 'x' });
+  const plan = await buildRetrieverPlan({ snapshot: baseSnapshot(), apiKey: 'x' });
   assert.ok(
     plan.blockers.some((b) => b.toLowerCase().includes('input s3 bucket')),
     `expected input-bucket blocker; got: ${plan.blockers.join(' | ')}`
@@ -79,17 +79,17 @@ test('plan blocks when input bucket is missing from snapshot + args', async () =
 });
 
 test('plan blocks when any SQS queue URL is missing', async () => {
-  const plan = await buildStreamerPlan({
+  const plan = await buildRetrieverPlan({
     snapshot: baseSnapshot({
       recommendations: {
         suggestedNamespace: 'logging',
         alreadyInstalled: {},
-        streamerS3Bucket: 'bucket',
-        streamerSqsUrls: { index: 'url', query: 'url' }, // missing subquery + stream
+        retrieverS3Bucket: 'bucket',
+        retrieverSqsUrls: { index: 'url', query: 'url' }, // missing subquery + stream
       },
       kubectl: {
         ...baseSnapshot().kubectl,
-        serviceAccountIrsa: [{ namespace: 'demo', name: 'tenx-streamer', roleArn: 'arn' }],
+        serviceAccountIrsa: [{ namespace: 'demo', name: 'tenx-retriever', roleArn: 'arn' }],
       },
     }),
     apiKey: 'x',
@@ -101,13 +101,13 @@ test('plan blocks when any SQS queue URL is missing', async () => {
 });
 
 test('plan blocks when IRSA role is missing', async () => {
-  const plan = await buildStreamerPlan({
+  const plan = await buildRetrieverPlan({
     snapshot: baseSnapshot({
       recommendations: {
         suggestedNamespace: 'logging',
         alreadyInstalled: {},
-        streamerS3Bucket: 'bucket',
-        streamerSqsUrls: {
+        retrieverS3Bucket: 'bucket',
+        retrieverSqsUrls: {
           index: 'url',
           query: 'url',
           subquery: 'url',
@@ -124,7 +124,7 @@ test('plan blocks when IRSA role is missing', async () => {
 });
 
 test('rich snapshot + api_key produces a no-blocker plan', async () => {
-  const plan = await buildStreamerPlan({ snapshot: richSnapshot(), apiKey: 'test' });
+  const plan = await buildRetrieverPlan({ snapshot: richSnapshot(), apiKey: 'test' });
   assert.equal(plan.blockers.length, 0, `expected zero blockers; got: ${plan.blockers.join(' | ')}`);
   assert.ok(plan.install.length >= 4, 'install should have ≥4 steps');
   assert.ok(plan.verify.length >= 3, 'verify should have ≥3 probes');
@@ -132,7 +132,7 @@ test('rich snapshot + api_key produces a no-blocker plan', async () => {
 });
 
 test('values file wires all four SQS queues + IRSA role + buckets', async () => {
-  const plan = await buildStreamerPlan({ snapshot: richSnapshot(), apiKey: 'test' });
+  const plan = await buildRetrieverPlan({ snapshot: richSnapshot(), apiKey: 'test' });
   const values = plan.install.find((s) => s.file)?.file?.contents;
   assert.ok(values, 'install should have a file-write step with contents');
   assert.ok(values!.includes('indexQueueUrl:'), 'values should include indexQueueUrl');
@@ -146,7 +146,7 @@ test('values file wires all four SQS queues + IRSA role + buckets', async () => 
 });
 
 test('explicit args override snapshot-detected values', async () => {
-  const plan = await buildStreamerPlan({
+  const plan = await buildRetrieverPlan({
     snapshot: richSnapshot(),
     apiKey: 'test',
     inputBucket: 'custom-bucket',
@@ -164,28 +164,28 @@ test('explicit args override snapshot-detected values', async () => {
   assert.ok(values.includes('https://custom/index'));
 });
 
-test('alreadyInstalled.streamer triggers a note (not a blocker)', async () => {
-  const plan = await buildStreamerPlan({
+test('alreadyInstalled.retriever triggers a note (not a blocker)', async () => {
+  const plan = await buildRetrieverPlan({
     snapshot: {
       ...richSnapshot(),
       recommendations: {
         ...richSnapshot().recommendations,
-        alreadyInstalled: { streamer: 'demo' },
+        alreadyInstalled: { retriever: 'demo' },
       },
     },
     apiKey: 'test',
   });
   assert.equal(plan.blockers.length, 0);
-  assert.ok(plan.notes.some((n) => n.toLowerCase().includes('streamer') && n.includes('`demo`')));
+  assert.ok(plan.notes.some((n) => n.toLowerCase().includes('retriever') && n.includes('`demo`')));
 });
 
-test('plan.app is always "streamer"', async () => {
-  const plan = await buildStreamerPlan({ snapshot: richSnapshot(), apiKey: 'test' });
-  assert.equal(plan.app, 'streamer');
+test('plan.app is always "retriever"', async () => {
+  const plan = await buildRetrieverPlan({ snapshot: richSnapshot(), apiKey: 'test' });
+  assert.equal(plan.app, 'retriever');
 });
 
 test('teardown does not touch AWS infra (Terraform concern)', async () => {
-  const plan = await buildStreamerPlan({ snapshot: richSnapshot(), apiKey: 'test' });
+  const plan = await buildRetrieverPlan({ snapshot: richSnapshot(), apiKey: 'test' });
   const teardownText = JSON.stringify(plan.teardown);
   // The optional AWS teardown step is a commented-out terraform reference,
   // NOT aws-cli delete calls. Assert no aws-cli delete verbs appear.

@@ -17,7 +17,7 @@
 
 import { z } from 'zod';
 import { queryInstant } from '../lib/api.js';
-import { resolveStreamer, formatStreamerTrace, runStreamerQuery } from '../lib/streamer-api.js';
+import { resolveRetriever, formatRetrieverTrace, runRetrieverQuery } from '../lib/retriever-api.js';
 import { loadEnvironments, type Environments, type EnvConfig } from '../lib/environments.js';
 import { LABELS } from '../lib/promql.js';
 import { fmtBytes as formatBytes } from '../lib/format.js';
@@ -79,7 +79,7 @@ export async function runDoctorChecks(envNickname?: string): Promise<DoctorRepor
     return finalize(globalChecks, perEnvChecks);
   }
 
-  // 2. Infrastructure-wide informational checks (streamer, datadog, paste).
+  // 2. Infrastructure-wide informational checks (retriever, datadog, paste).
   //    These don't depend on a specific env so they live in globalChecks.
   await addInfrastructureChecks(globalChecks);
   await addPasteEndpointCheck(globalChecks);
@@ -109,31 +109,31 @@ export async function runDoctorChecks(envNickname?: string): Promise<DoctorRepor
 
 /** Checks that apply independent of a specific environment. */
 async function addInfrastructureChecks(checks: DoctorCheck[]): Promise<void> {
-  // Streamer endpoint configured? (informational, not required)
-  const streamerRes = await resolveStreamer().catch((e) => ({
+  // Retriever endpoint configured? (informational, not required)
+  const retrieverRes = await resolveRetriever().catch((e) => ({
     url: undefined,
     bucket: undefined,
     detectionPath: undefined,
     trace: [{ path: 'explicit_env' as const, status: 'failed' as const, reason: (e as Error).message }],
   }));
-  if (streamerRes.url && streamerRes.bucket && streamerRes.detectionPath) {
+  if (retrieverRes.url && retrieverRes.bucket && retrieverRes.detectionPath) {
     checks.push({
-      name: 'streamer_endpoint',
+      name: 'retriever_endpoint',
       status: 'pass',
       message:
-        `Streamer resolved via ${streamerRes.detectionPath}: url=${streamerRes.url}, bucket=${streamerRes.bucket}. ` +
-        'log10x_streamer_query and log10x_backfill_metric will route here.',
+        `Retriever resolved via ${retrieverRes.detectionPath}: url=${retrieverRes.url}, bucket=${retrieverRes.bucket}. ` +
+        'log10x_retriever_query and log10x_backfill_metric will route here.',
     });
   } else {
     checks.push({
-      name: 'streamer_endpoint',
+      name: 'retriever_endpoint',
       status: 'warn',
       message:
-        'Storage Streamer not reachable from this MCP install. log10x_streamer_query and log10x_backfill_metric cannot retrieve raw events from the S3 archive in this session. ' +
-        'For events inside SIEM hot retention (typically <7d), the fastest workaround is direct SIEM query — do not block on streamer setup.\n' +
-        formatStreamerTrace(streamerRes.trace),
+        'Retriever not reachable from this MCP install. log10x_retriever_query and log10x_backfill_metric cannot retrieve raw events from the S3 archive in this session. ' +
+        'For events inside SIEM hot retention (typically <7d), the fastest workaround is direct SIEM query — do not block on retriever setup.\n' +
+        formatRetrieverTrace(retrieverRes.trace),
       fix:
-        'Options: (a) set LOG10X_STREAMER_URL + LOG10X_STREAMER_BUCKET explicitly; (b) expose AWS creds (AWS_REGION + IAM with s3:ListAllMyBuckets) so auto-detect can find a log10x-streamer-* bucket; (c) deploy the Streamer — https://doc.log10x.com/apps/cloud/streamer/',
+        'Options: (a) set __SAVE_LOG10X_RETRIEVER_URL__ + __SAVE_LOG10X_RETRIEVER_BUCKET__ explicitly; (b) expose AWS creds (AWS_REGION + IAM with s3:ListAllMyBuckets) so auto-detect can find a log10x-retriever-* bucket; (c) deploy the Retriever — https://doc.log10x.com/apps/cloud/retriever/',
     });
   }
 
@@ -145,7 +145,7 @@ async function addInfrastructureChecks(checks: DoctorCheck[]): Promise<void> {
       name: 'datadog_destination',
       status: 'pass',
       message:
-        `Datadog API key detected (site: ${site}). log10x_backfill_metric can emit to Datadog (requires Streamer for the source).`,
+        `Datadog API key detected (site: ${site}). log10x_backfill_metric can emit to Datadog (requires Retriever for the source).`,
     });
   } else {
     checks.push({
@@ -576,17 +576,17 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
     }
   }
 
-  // G12 mitigation: detect streamer false-negatives. We cannot run a real
-  // streamer query here without side effects, but we CAN check whether the
-  // streamer endpoint is configured AND whether the paste endpoint's
-  // health probe reports streamer index coverage for recent windows.
-  // Live streamer probe: fire a lightweight count query (limit=1, last
+  // G12 mitigation: detect retriever false-negatives. We cannot run a real
+  // retriever query here without side effects, but we CAN check whether the
+  // retriever endpoint is configured AND whether the paste endpoint's
+  // health probe reports retriever index coverage for recent windows.
+  // Live retriever probe: fire a lightweight count query (limit=1, last
   // 1h window) and check whether the pipeline responds. Replaces the old
   // hardcoded G12 WARN that was stale after the body-shape fix (PR #36)
   // and the demo-env indexer fix (2026-04-16).
-  if (detectedTier && process.env.LOG10X_STREAMER_URL) {
+  if (detectedTier && process.env.__SAVE_LOG10X_RETRIEVER_URL__) {
     try {
-      const probeResult = await runStreamerQuery(env, {
+      const probeResult = await runRetrieverQuery(env, {
         from: 'now-1h',
         to: 'now',
         search: '',
@@ -596,34 +596,34 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
       const matchedCount = probeResult.execution.eventsMatched ?? 0;
       if (matchedCount > 0) {
         checks.push({
-          name: 'streamer_forensic_health',
+          name: 'retriever_forensic_health',
           status: 'pass',
           message:
-            `Streamer forensic retrieval is operational. Probe query returned ${matchedCount} event(s) in the last 1h. ` +
+            `Retriever forensic retrieval is operational. Probe query returned ${matchedCount} event(s) in the last 1h. ` +
             `Wall time: ${probeResult.execution.wallTimeMs}ms, worker files: ${probeResult.execution.workerFiles}.`,
         });
       } else {
         checks.push({
-          name: 'streamer_forensic_health',
+          name: 'retriever_forensic_health',
           status: 'warn',
           message:
-            `Streamer endpoint responded but returned 0 events in the last 1h (wall time: ${probeResult.execution.wallTimeMs}ms). ` +
-            `This may indicate the S3 index is stale — check that the index-inducer CronJob is running and that new .log files are being written to the streamer S3 bucket.`,
+            `Retriever endpoint responded but returned 0 events in the last 1h (wall time: ${probeResult.execution.wallTimeMs}ms). ` +
+            `This may indicate the S3 index is stale — check that the index-inducer CronJob is running and that new .log files are being written to the retriever S3 bucket.`,
           fix:
-            'Verify: (1) `kubectl get cronjob -n <streamer-ns>` — is the index-inducer running and not Pending? ' +
-            '(2) `aws s3 ls s3://<streamer-bucket>/app/ | tail -5` — are recent .log files present? ' +
+            'Verify: (1) `kubectl get cronjob -n <retriever-ns>` — is the index-inducer running and not Pending? ' +
+            '(2) `aws s3 ls s3://<retriever-bucket>/app/ | tail -5` — are recent .log files present? ' +
             '(3) Check SQS index queue depth — if 0 and no recent files, the data pipeline upstream of the indexer is stopped.',
         });
       }
     } catch (e) {
       const errMsg = (e as Error).message || String(e);
       checks.push({
-        name: 'streamer_forensic_health',
+        name: 'retriever_forensic_health',
         status: 'fail',
         message:
-          `Streamer probe query failed: ${errMsg.slice(0, 300)}`,
+          `Retriever probe query failed: ${errMsg.slice(0, 300)}`,
         fix:
-          'Check streamer endpoint reachability (`curl -s $LOG10X_STREAMER_URL/health`), query-handler pod status, and SQS queue configuration.',
+          'Check retriever endpoint reachability (`curl -s $__SAVE_LOG10X_RETRIEVER_URL__/health`), query-handler pod status, and SQS queue configuration.',
       });
     }
   }

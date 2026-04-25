@@ -39,7 +39,7 @@ export function classifyForwarderImage(image: string): ForwarderKind {
  * Classify a log10x app workload by its image + label set + helm chart.
  *
  * The most reliable signal in practice is the `helm.sh/chart` label,
- * which every log10x helm chart stamps (`streamer-10x-X.Y.Z`,
+ * which every log10x helm chart stamps (`retriever-10x-X.Y.Z`,
  * `cron-10x-X.Y.Z`, `fluentd-X.Y.Z`, `fluent-bit-X.Y.Z`, etc.). We
  * consult that first, then fall back to image/name heuristics for
  * customers who've stripped the chart label.
@@ -55,13 +55,13 @@ export function classifyLog10xApp(
   const nameLabel = (labels['app.kubernetes.io/name'] ?? labels['app'] ?? '').toLowerCase();
   const helmName = (labels['app.kubernetes.io/instance'] ?? '').toLowerCase();
 
-  // Streamer: distinct chart family + image family.
+  // Retriever: distinct chart family + image family.
   if (
-    imgLc.includes('streamer-10x') ||
-    chart.includes('streamer-10x') ||
-    nameLabel.includes('streamer')
+    imgLc.includes('retriever-10x') ||
+    chart.includes('retriever-10x') ||
+    nameLabel.includes('retriever')
   ) {
-    return 'streamer';
+    return 'retriever';
   }
 
   // Reporter vs Regulator both use cron-10x chart — disambiguate via

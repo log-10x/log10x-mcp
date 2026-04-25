@@ -1,5 +1,5 @@
 /**
- * log10x_streamer_series — fidelity-aware time series materialization.
+ * log10x_retriever_series — fidelity-aware time series materialization.
  *
  * Builds a time series (counts per bucket, optionally grouped by an
  * enrichment label) from the customer's S3 archive over an arbitrary
@@ -17,23 +17,23 @@ import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
 import {
   eventTimestampMs,
-  isStreamerConfigured,
+  isRetrieverConfigured,
   normalizeTimeExpression,
-  runStreamerQuery,
-  type StreamerEvent,
-  type StreamerQueryRequest,
-  type StreamerQueryResponse,
-} from '../lib/streamer-api.js';
+  runRetrieverQuery,
+  type RetrieverEvent,
+  type RetrieverQueryRequest,
+  type RetrieverQueryResponse,
+} from '../lib/retriever-api.js';
 import {
   decideFidelity,
   parseFidelityArg,
   timeExprToMs,
   type FidelityDecision,
   type RefusalDecision,
-} from '../lib/streamer-fidelity.js';
+} from '../lib/retriever-fidelity.js';
 import { createLimiter } from '../lib/concurrency.js';
 import { fmtCount } from '../lib/format.js';
-import { streamerNotConfiguredMessage } from './streamer-query.js';
+import { retrieverNotConfiguredMessage } from './retriever-query.js';
 
 /** Cap on group-by cardinality. Tail collapsed to "_other_". */
 const TOP_K_GROUPS = 1000;
@@ -47,7 +47,7 @@ const SUBWINDOW_CONCURRENCY = 6;
  */
 const SUBWINDOW_TIMEOUT_MS = 60_000;
 
-export const streamerSeriesSchema = {
+export const retrieverSeriesSchema = {
   search: z
     .string()
     .optional()
@@ -64,7 +64,7 @@ export const streamerSeriesSchema = {
     .array(z.string())
     .optional()
     .describe('In-memory JS filters applied after the Bloom-scoped fetch (AND-combined).'),
-  target: z.string().optional().describe('Target app prefix. Defaults to LOG10X_STREAMER_TARGET.'),
+  target: z.string().optional().describe('Target app prefix. Defaults to __SAVE_LOG10X_RETRIEVER_TARGET__.'),
   bucket_size: z
     .string()
     .default('5m')
@@ -90,7 +90,7 @@ interface SeriesPoint {
   count: number;
 }
 
-export async function executeStreamerSeries(
+export async function executeRetrieverSeries(
   args: {
     search?: string;
     from: string;
@@ -104,14 +104,14 @@ export async function executeStreamerSeries(
   },
   env: EnvConfig
 ): Promise<string> {
-  if (!isStreamerConfigured()) {
-    return streamerNotConfiguredMessage();
+  if (!isRetrieverConfigured()) {
+    return retrieverNotConfiguredMessage();
   }
 
   const fid = parseFidelityArg(args.fidelity);
 
   // Validate the time expressions early so a malformed window doesn't
-  // ride all the way down to the streamer for a cryptic 400.
+  // ride all the way down to the retriever for a cryptic 400.
   try {
     normalizeTimeExpression(args.from);
     normalizeTimeExpression(args.to);
@@ -167,7 +167,7 @@ async function executeFullMode(
   fromMs: number,
   toMs: number
 ): Promise<SeriesResult> {
-  const req: StreamerQueryRequest = {
+  const req: RetrieverQueryRequest = {
     from: String(fromMs),
     to: String(toMs),
     search: args.search,
@@ -179,7 +179,7 @@ async function executeFullMode(
     // expected to happen.
     limit: 10_000,
   };
-  const resp = await runStreamerQuery(env, req);
+  const resp = await runRetrieverQuery(env, req);
   return aggregate(resp.events, args.bucket_size, args.group_by, {
     workerFiles: resp.execution.workerFiles,
     truncated: resp.execution.truncated,
@@ -200,7 +200,7 @@ async function executeSampledMode(
   const responses = await Promise.all(
     subWindows.map((sw) =>
       limiter(() =>
-        runStreamerQuery(
+        runRetrieverQuery(
           env,
           {
             from: String(sw.fromMs),
@@ -214,20 +214,20 @@ async function executeSampledMode(
         ).catch((e: Error) => {
           // One failing sub-window must not poison the whole series — empty
           // its slot, surface the failure in diagnostics, and keep going.
-          return { __error: e.message } as unknown as StreamerQueryResponse;
+          return { __error: e.message } as unknown as RetrieverQueryResponse;
         })
       )
     )
   );
 
-  const allEvents: StreamerEvent[] = [];
+  const allEvents: RetrieverEvent[] = [];
   const subWindowResults: SeriesResult['subWindowResults'] = [];
   let workerFiles = 0;
   let anyTruncated = false;
 
   for (let i = 0; i < subWindows.length; i++) {
     const sw = subWindows[i];
-    const resp = responses[i] as (StreamerQueryResponse & { __error?: string }) | undefined;
+    const resp = responses[i] as (RetrieverQueryResponse & { __error?: string }) | undefined;
     if (!resp || resp.__error) {
       subWindowResults.push({ fromMs: sw.fromMs, toMs: sw.toMs, eventsFetched: 0, truncated: false });
       continue;
@@ -264,7 +264,7 @@ function splitWindow(fromMs: number, toMs: number, n: number): Array<{ fromMs: n
 }
 
 function aggregate(
-  events: StreamerEvent[],
+  events: RetrieverEvent[],
   bucketSize: string,
   groupBy: string | undefined,
   meta: { workerFiles: number; truncated: boolean }
@@ -352,7 +352,7 @@ function parseBucketSize(expr: string): number {
   }
 }
 
-function extractGroupValue(ev: StreamerEvent, field: string): string {
+function extractGroupValue(ev: RetrieverEvent, field: string): string {
   // Support dotted paths so callers can group on nested fluent-bit fields
   // (e.g. `kubernetes.container_name`, `kubernetes.labels.app`). Falls back
   // to the literal key for fields written with dotted names verbatim
@@ -387,7 +387,7 @@ function renderSeries(
   windowMs: number
 ): string {
   const lines: string[] = [];
-  lines.push(`## Streamer Series`);
+  lines.push(`## Retriever Series`);
   lines.push('');
   lines.push(`**Window**: ${args.from} → ${args.to} (${formatDuration(windowMs)})`);
   if (args.search) lines.push(`**Search**: \`${args.search}\``);
@@ -517,7 +517,7 @@ function renderRefusal(
   windowMs: number
 ): string {
   const lines: string[] = [];
-  lines.push(`## Streamer Series — Refused`);
+  lines.push(`## Retriever Series — Refused`);
   lines.push('');
   lines.push(`**Window**: ${args.from} → ${args.to} (${formatDuration(windowMs)})`);
   if (args.search) lines.push(`**Search**: \`${args.search}\``);

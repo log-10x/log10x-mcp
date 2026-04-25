@@ -137,9 +137,9 @@ export function edgeEmittedBytes(range: string): string {
   return `(sum(increase(${EMITTED_OPT_METRIC}{tenx_app="optimizer",${LABELS.env}="edge"}[${range}])) or vector(0)) + (sum(increase(${EMITTED_METRIC}{tenx_app="regulator",${LABELS.env}="edge"}[${range}])) or vector(0))`;
 }
 
-/** Bytes indexed into the customer's S3 by the Storage Streamer. */
-export function streamerIndexedBytes(range: string): string {
-  return `sum(increase(${INDEXED_METRIC}{tenx_app="streamer",${LABELS.env}="cloud"}[${range}]))`;
+/** Bytes indexed into the customer's S3 by the Retriever. */
+export function retrieverIndexedBytes(range: string): string {
+  return `sum(increase(${INDEXED_METRIC}{tenx_app="retriever",${LABELS.env}="cloud"}[${range}]))`;
 }
 
 /**
@@ -148,20 +148,20 @@ export function streamerIndexedBytes(range: string): string {
  * the server's query budget. Summing N × 1d chunks client-side stays per-chunk
  * small enough to complete.
  */
-export function streamerIndexedBytesChunk(offsetDays: number): string {
+export function retrieverIndexedBytesChunk(offsetDays: number): string {
   const offset = offsetDays > 0 ? ` offset ${offsetDays}d` : '';
-  return `sum(increase(${INDEXED_METRIC}{tenx_app="streamer",${LABELS.env}="cloud"}[1d]${offset}))`;
+  return `sum(increase(${INDEXED_METRIC}{tenx_app="retriever",${LABELS.env}="cloud"}[1d]${offset}))`;
 }
 
 /** Bytes actually streamed back out (i.e., served to a SIEM or dashboard). */
-export function streamerStreamedBytes(range: string): string {
-  return `sum(increase(${STREAMED_METRIC}{tenx_app="streamer",${LABELS.env}="cloud"}[${range}]))`;
+export function retrieverStreamedBytes(range: string): string {
+  return `sum(increase(${STREAMED_METRIC}{tenx_app="retriever",${LABELS.env}="cloud"}[${range}]))`;
 }
 
-/** Single-day `increase()` chunk for the streamed metric. Same chunking rationale as streamerIndexedBytesChunk. */
-export function streamerStreamedBytesChunk(offsetDays: number): string {
+/** Single-day `increase()` chunk for the streamed metric. Same chunking rationale as retrieverIndexedBytesChunk. */
+export function retrieverStreamedBytesChunk(offsetDays: number): string {
   const offset = offsetDays > 0 ? ` offset ${offsetDays}d` : '';
-  return `sum(increase(${STREAMED_METRIC}{tenx_app="streamer",${LABELS.env}="cloud"}[1d]${offset}))`;
+  return `sum(increase(${STREAMED_METRIC}{tenx_app="retriever",${LABELS.env}="cloud"}[1d]${offset}))`;
 }
 
 // ── Top patterns + list-by-label ──

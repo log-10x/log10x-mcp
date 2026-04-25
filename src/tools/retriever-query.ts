@@ -1,5 +1,5 @@
 /**
- * log10x_streamer_query — direct retrieval from the Log10x Storage Streamer archive.
+ * log10x_retriever_query — direct retrieval from the Log10x Retriever archive.
  *
  * Forensic-retrieval entry point. Call when the user needs specific historical
  * events matching a search expression over a window that is outside the SIEM's
@@ -11,22 +11,22 @@
  * under {bucket}/tenx/{target}/qr/{queryId}/. The client polls the marker
  * prefix for stability, then reads and merges the JSONL result files.
  *
- * Requires LOG10X_STREAMER_URL and LOG10X_STREAMER_BUCKET to be set. Falls
+ * Requires __SAVE_LOG10X_RETRIEVER_URL__ and __SAVE_LOG10X_RETRIEVER_BUCKET__ to be set. Falls
  * back gracefully with a "not configured" message otherwise.
  */
 
 import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
 import {
-  runStreamerQuery,
-  isStreamerConfigured,
+  runRetrieverQuery,
+  isRetrieverConfigured,
   normalizeTimeExpression,
-  type StreamerQueryRequest,
-  type StreamerEvent,
-} from '../lib/streamer-api.js';
+  type RetrieverQueryRequest,
+  type RetrieverEvent,
+} from '../lib/retriever-api.js';
 import { fmtCount } from '../lib/format.js';
 
-export const streamerQuerySchema = {
+export const retrieverQuerySchema = {
   search: z
     .string()
     .optional()
@@ -52,7 +52,7 @@ export const streamerQuerySchema = {
     .string()
     .optional()
     .describe(
-      'Target app/service prefix to scope the index scan. Defaults to LOG10X_STREAMER_TARGET (env var). Required if no default is configured.'
+      'Target app/service prefix to scope the index scan. Defaults to __SAVE_LOG10X_RETRIEVER_TARGET__ (env var). Required if no default is configured.'
     ),
   limit: z
     .number()
@@ -75,7 +75,7 @@ export const streamerQuerySchema = {
   environment: z.string().optional().describe('Environment nickname — required if multi-env.'),
 };
 
-export async function executeStreamerQuery(
+export async function executeRetrieverQuery(
   args: {
     search?: string;
     from: string;
@@ -89,8 +89,8 @@ export async function executeStreamerQuery(
   },
   env: EnvConfig
 ): Promise<string> {
-  if (!isStreamerConfigured()) {
-    return streamerNotConfiguredMessage();
+  if (!isRetrieverConfigured()) {
+    return retrieverNotConfiguredMessage();
   }
 
   try {
@@ -100,7 +100,7 @@ export async function executeStreamerQuery(
     throw new Error(`Invalid time window: ${(e as Error).message}`);
   }
 
-  const req: StreamerQueryRequest = {
+  const req: RetrieverQueryRequest = {
     from: args.from,
     to: args.to,
     search: args.search,
@@ -109,10 +109,10 @@ export async function executeStreamerQuery(
     limit: args.limit,
   };
 
-  const resp = await runStreamerQuery(env, req);
+  const resp = await runRetrieverQuery(env, req);
 
   const lines: string[] = [];
-  lines.push(`## Streamer Query`);
+  lines.push(`## Retriever Query`);
   lines.push('');
   lines.push(`**Window**: ${args.from} → ${args.to}`);
   if (args.search) lines.push(`**Search**: \`${args.search}\``);
@@ -157,7 +157,7 @@ export async function executeStreamerQuery(
   }
   if (events.length === 0) {
     lines.push(
-      '_Streamer returned zero events. Verify the search expression matches at least one real value, check the window, or widen the filter._'
+      '_Retriever returned zero events. Verify the search expression matches at least one real value, check the window, or widen the filter._'
     );
   }
 
@@ -171,7 +171,7 @@ export async function executeStreamerQuery(
   return lines.join('\n');
 }
 
-function renderCount(events: StreamerEvent[], lines: string[]): string[] {
+function renderCount(events: RetrieverEvent[], lines: string[]): string[] {
   lines.push(`### Count summary`);
   lines.push('');
   lines.push(`Total matched: **${fmtCount(events.length)}**`);
@@ -221,7 +221,7 @@ function renderCount(events: StreamerEvent[], lines: string[]): string[] {
   return lines;
 }
 
-function bucketEvents(events: StreamerEvent[], bucketSize: string): Array<{ timestamp: string; count: number }> {
+function bucketEvents(events: RetrieverEvent[], bucketSize: string): Array<{ timestamp: string; count: number }> {
   const bucketMs = parseBucketSize(bucketSize);
   const buckets = new Map<number, number>();
 
@@ -257,7 +257,7 @@ function parseBucketSize(expr: string): number {
   }
 }
 
-function renderAggregated(events: StreamerEvent[], bucketSize: string, lines: string[]): string[] {
+function renderAggregated(events: RetrieverEvent[], bucketSize: string, lines: string[]): string[] {
   const buckets = bucketEvents(events, bucketSize);
   lines.push(`### Time-bucketed (${bucketSize})`);
   lines.push('');
@@ -278,7 +278,7 @@ function renderAggregated(events: StreamerEvent[], bucketSize: string, lines: st
 }
 
 function renderEphemeralSeries(
-  events: StreamerEvent[],
+  events: RetrieverEvent[],
   bucketSize: string,
   search: string | undefined,
   lines: string[]
@@ -302,7 +302,7 @@ function renderEphemeralSeries(
         {
           metric: {
             __name__: 'log10x_ephemeral',
-            source: 'streamer_archive',
+            source: 'retriever_archive',
             search: search || '',
           },
           values,
@@ -320,8 +320,8 @@ function renderEphemeralSeries(
   return lines;
 }
 
-function formatEvent(ev: StreamerEvent): string {
-  // The streamer returns events in two shapes depending on whether the
+function formatEvent(ev: RetrieverEvent): string {
+  // The retriever returns events in two shapes depending on whether the
   // query-handler pipeline enriched them:
   //
   // 1. **log10x canonical** — `text`, `severity_level`, `tenx_user_service`,
@@ -334,7 +334,7 @@ function formatEvent(ev: StreamerEvent): string {
   //    that bypassed log10x enrichment).
   //
   // Previously this function only handled shape 1, silently rendering
-  // empty rows for shape 2. Caught during streamer end-to-end validation
+  // empty rows for shape 2. Caught during retriever end-to-end validation
   // on the demo env (2026-04-15). Now handles both shapes explicitly.
   const parts: string[] = [];
   const evRec = ev as unknown as Record<string, unknown>;
@@ -364,20 +364,20 @@ function renderBar(ratio: number, width: number): string {
   return '█'.repeat(filled) + '░'.repeat(width - filled);
 }
 
-export function streamerNotConfiguredMessage(): string {
+export function retrieverNotConfiguredMessage(): string {
   return [
-    '## Streamer not configured',
+    '## Retriever not configured',
     '',
-    "This MCP server doesn't currently have a Log10x Storage Streamer endpoint configured. The Streamer is what lets this tool query historical events in the customer's S3 archive by Bloom-indexed variable values and template hashes.",
+    "This MCP server doesn't currently have a Log10x Retriever endpoint configured. The Retriever is what lets this tool query historical events in the customer's S3 archive by Bloom-indexed variable values and template hashes.",
     '',
     '**To enable it**:',
     '',
-    '1. Deploy the Log10x Storage Streamer per https://doc.log10x.com/apps/cloud/streamer/',
-    '2. Set `LOG10X_STREAMER_URL` to the query handler endpoint (e.g., the NLB for the query-handler service).',
-    '3. Set `LOG10X_STREAMER_BUCKET` to the S3 bucket holding the streamer index.',
-    '4. Optionally set `LOG10X_STREAMER_TARGET` to the default target app prefix (e.g., `app`).',
+    '1. Deploy the Log10x Retriever per https://doc.log10x.com/apps/cloud/retriever/',
+    '2. Set `__SAVE_LOG10X_RETRIEVER_URL__` to the query handler endpoint (e.g., the NLB for the query-handler service).',
+    '3. Set `__SAVE_LOG10X_RETRIEVER_BUCKET__` to the S3 bucket holding the retriever index.',
+    '4. Optionally set `__SAVE_LOG10X_RETRIEVER_TARGET__` to the default target app prefix (e.g., `app`).',
     '5. Re-run this tool.',
     '',
-    "**Without the Streamer**: for in-retention retrieval, use the customer's SIEM directly. For long-window retrieval outside SIEM retention, the Streamer is the only supported path.",
+    "**Without the Retriever**: for in-retention retrieval, use the customer's SIEM directly. For long-window retrieval outside SIEM retention, the Retriever is the only supported path.",
   ].join('\n');
 }

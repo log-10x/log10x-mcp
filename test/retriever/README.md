@@ -1,18 +1,18 @@
-# Streamer E2E test harnesses
+# Retriever E2E test harnesses
 
 End-to-end / observability / performance harnesses that drive the Log10x
-Storage Streamer via HTTP and validate via S3 + CloudWatch. Written during
+Retriever via HTTP and validate via S3 + CloudWatch. Written during
 a prod-readiness pass; each harness answers a specific question.
 
-These are **live tests** — they hit a real deployed streamer. Set
-`LOG10X_STREAMER_URL` in env, or edit the constant at the top of each
+These are **live tests** — they hit a real deployed retriever. Set
+`__SAVE_LOG10X_RETRIEVER_URL__` in env, or edit the constant at the top of each
 harness. Default target is the demo env URL baked into the scripts; those
 URLs will die with the demo env.
 
 ## Setup
 
 ```bash
-cd test/streamer
+cd test/retriever
 npm install   # pulls @aws-sdk/client-s3, @aws-sdk/client-cloudwatch-logs
 ```
 
@@ -23,7 +23,7 @@ or IRSA if running in-cluster).
 
 | file | question it answers | exit code |
 |---|---|---|
-| `ground_truth.mjs` | Baseline: does streamer eventsWrittenTotal agree with raw-file substring count over a 60min window? (v1 — polls CW log events directly) | 0 if within 20% |
+| `ground_truth.mjs` | Baseline: does retriever eventsWrittenTotal agree with raw-file substring count over a 60min window? (v1 — polls CW log events directly) | 0 if within 20% |
 | `ground_truth_v2.mjs` | Same baseline via R18 `/status` endpoint. Preferred over v1. | 0 if within 10% |
 | `patterns.mjs` | 7 adversarial query shapes: nested boolean, always-false, wide OR, substring `includes(text, …)`, compound AND, specific `message_pattern`, infrastructure namespace filter. Each must complete without SOE. | 0 if 7/7 pass |
 | `complex.mjs` | 10-case complex-query suite: nested AND/OR/NOT, always-false, empty search, wide OR over 10 codes, huge substring, `processingTime=1ms` (must not hang), `resultSize=0`, reversed time range, deep fan-out 60min×5s timeslice, SQL-injection-shaped string (must reject or handle safely). | prints PASS/FAIL table |
@@ -44,32 +44,32 @@ or IRSA if running in-cluster).
 - All harnesses are Node ESM (`.mjs`), Node 20+.
 - Most use only `fetch` + `setTimeout/promises`. A few use `@aws-sdk/client-s3`
   or `@aws-sdk/client-cloudwatch-logs` (declared in `package.json`).
-- Default streamer URL is hardcoded to the demo-env ELB. Set
-  `LOG10X_STREAMER_URL` to override.
-- No credentials baked in; the demo streamer's internal ELB does not require
+- Default retriever URL is hardcoded to the demo-env ELB. Set
+  `__SAVE_LOG10X_RETRIEVER_URL__` to override.
+- No credentials baked in; the demo retriever's internal ELB does not require
   X-10X-Auth for the tests done here.
 
 ## How the v16 hardening maps back
 
 Several tests found or verified fixes during the 2026-04-17..20 session.
-See the streamer handoff guide in
-`~/.claude/projects/-Users-talweiss-eclipse-workspace-l1x-co-config/memory/project_streamer_handoff_guide.md`
+See the retriever handoff guide in
+`~/.claude/projects/-Users-talweiss-eclipse-workspace-l1x-co-config/memory/project_retriever_handoff_guide.md`
 for the full narrative. Short version:
 
 - `obs_edge.mjs` found the log-injection risk in `[tp=%X{traceparent}]`.
 - `obs_crlf.mjs` confirmed the fix (W3C regex + control-char reject at
-  `StreamerQuery` and `AWSAccessor`).
+  `RetrieverQuery` and `AWSAccessor`).
 - `latency_diag.mjs` characterised the ~25s Insights polling lag in R18,
   leading to the `DescribeLogStreams` + `GetLogEvents` rewrite in
-  `StreamerQueryStatus`.
+  `RetrieverQueryStatus`.
 - `v16_e2e.mjs` confirmed the R21 `_DONE.json` marker and the R18 rewrite
   both land under 2s on the demo env.
 
 ## When the demo env dies
 
-These harnesses assume a live streamer. When the demo env is retired in
+These harnesses assume a live retriever. When the demo env is retired in
 favor of the replay-based simulator (see handoff guide §8), update the
-hardcoded ELB URL constants to point at the simulator's streamer, or pass
-`LOG10X_STREAMER_URL` via env. The harnesses themselves should work
-unchanged — they only assume a streamer implementing the REST contract
-documented in `src/lib/streamer-api.ts`.
+hardcoded ELB URL constants to point at the simulator's retriever, or pass
+`__SAVE_LOG10X_RETRIEVER_URL__` via env. The harnesses themselves should work
+unchanged — they only assume a retriever implementing the REST contract
+documented in `src/lib/retriever-api.ts`.
