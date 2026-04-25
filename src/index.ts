@@ -56,18 +56,30 @@ import { adviseRegulatorSchema, executeAdviseRegulator } from './tools/advise-re
 import { adviseRetrieverSchema, executeAdviseRetriever } from './tools/advise-retriever.js';
 import { adviseInstallSchema, executeAdviseInstall } from './tools/advise-install.js';
 import { adviseCompactSchema, executeAdviseCompact } from './tools/advise-compact.js';
+import { loginStatusSchema, executeLoginStatus } from './tools/login-status.js';
 import { getStatus } from './resources/status.js';
 
 // ── Environment + cost cache ──
 //
 // Env loading is deferred until after CLI flag handling so `--version`,
 // `--list-tools`, `--doctor`, and `--help` all work without env vars set.
-// Tool callbacks reference `envs` lazily through `getEnvs()`.
+// `main()` calls `initEnvs()` once before `server.connect(transport)`,
+// so every tool callback can use `getEnvs()` synchronously from that
+// point onward. The async load path is required because autodiscovery
+// (apiKey alone → GET /api/v1/user) hits the network.
 
 let envs: Environments | undefined;
 
+async function initEnvs(): Promise<void> {
+  envs = await loadEnvironments();
+}
+
 function getEnvs(): Environments {
-  if (!envs) envs = loadEnvironments();
+  if (!envs) {
+    throw new Error(
+      '[log10x-mcp] internal error: envs accessed before initEnvs() completed.'
+    );
+  }
   return envs;
 }
 
@@ -94,17 +106,46 @@ function wrap(
   return fn()
     .then((text) => {
       log.info(`tool.${toolName}.ok`, { ms: Date.now() - started });
-      return { content: [{ type: 'text' as const, text }] };
+      return { content: [{ type: 'text' as const, text: applyDemoBanner(text) }] };
     })
     .catch((e) => {
       const raw = e instanceof Error ? e.message : String(e);
       log.debug(`tool.${toolName}.raw_err`, { msg: raw });
       log.warn(`tool.${toolName}.err`, { ms: Date.now() - started, msg: raw });
       return {
-        content: [{ type: 'text' as const, text: describeToolError(toolName, e) }],
+        content: [{ type: 'text' as const, text: applyDemoBanner(describeToolError(toolName, e)) }],
         isError: true,
       };
     });
+}
+
+/**
+ * Prepend a banner to the tool result when the MCP is in
+ * demo-fallback mode (user supplied an API key but it failed). The
+ * goal is hard-to-miss notification — but the wording matters: only
+ * account-scoped tools return demo data; local-only templater tools
+ * (resolve_batch, extract_templates) operate on the caller's own
+ * input regardless of credential state. So the banner describes the
+ * MCP's *mode*, not "this tool's data."
+ *
+ * Pure demo mode (no key set) is the user's own choice and gets a
+ * quieter footer instead.
+ */
+function applyDemoBanner(text: string): string {
+  if (!envs?.isDemoMode) return text;
+  if (envs.demoFallbackReason) {
+    const reason = envs.demoFallbackReason.split('\n')[0].slice(0, 240);
+    return (
+      `> ⚠ **DEMO MODE — your LOG10X_API_KEY failed validation.** ` +
+      `Account-scoped tools (cost_drivers, investigate, services, etc.) hit the public Log10x demo env, NOT your account. ` +
+      `Local-only tools (resolve_batch, extract_templates) are unaffected. ` +
+      `Reason: ${reason} ` +
+      `Call \`log10x_login_status\` for fix steps.\n\n` +
+      text
+    );
+  }
+  // Pure demo: lighter footer; the user opted in by not setting a key.
+  return text + `\n\n_(Demo mode — account-scoped tools query the read-only Log10x demo env. Call \`log10x_login_status\` to use your own data.)_`;
 }
 
 async function getAnalyzerCost(env: EnvConfig, override?: number): Promise<number> {
@@ -462,6 +503,15 @@ server.tool(
   (args) => wrap('log10x_doctor', async () => executeDoctor(args))
 );
 
+// ── Tool: log10x_login_status ──
+
+server.tool(
+  'log10x_login_status',
+  'Report the MCP\'s current Log10x credential / env state. Call this whenever the user asks "am I logged in", "which envs do I have access to", "log me in", "use my account instead of demo", "switch envs", or whenever a tool result shows a "DEMO MODE" banner the user wants to act on. In demo mode (no LOG10X_API_KEY set, OR a key was set but failed validation), the response is a step-by-step config guide for adding a real API key to the MCP host\'s config (Claude Desktop, Cursor, etc.) and restarting. In signed-in mode, the response lists the user\'s identity, every env they can reach with permissions (OWNER/WRITE/READ), the default env, and the env most-recently used this session. Read-only — does not mutate any state. Takes no args. **Tier prerequisites**: none — runs in demo mode too.',
+  loginStatusSchema,
+  () => wrap('log10x_login_status', async () => executeLoginStatus({}, getEnvs()))
+);
+
 // ── Tool: log10x_customer_metrics_query (v1.4) ──
 
 server.tool(
@@ -597,6 +647,7 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_retriever_query', intent: 'Direct archive retrieval by templateHash with JS filter expressions' },
   { name: 'log10x_backfill_metric', intent: 'Create a new Datadog / Prometheus metric backfilled from Retriever archive' },
   { name: 'log10x_doctor', intent: 'Startup health check — env config, gateway, tier, freshness, Retriever, paste endpoint, cross-pillar enrichment floor' },
+  { name: 'log10x_login_status', intent: 'Report credential / env state — identity, env list with permissions, demo-mode upgrade guide if applicable' },
   { name: 'log10x_customer_metrics_query', intent: 'Direct PromQL passthrough to the customer metric backend (escape hatch for cross-pillar investigations)' },
   { name: 'log10x_discover_join', intent: 'Auto-discover the join label between Log10x pattern metrics and the customer metric backend via Jaccard similarity' },
   { name: 'log10x_correlate_cross_pillar', intent: 'Bidirectional cross-pillar correlation with structural validation — confirmed / service-match / coincidence / unconfirmed tiering' },
@@ -683,7 +734,7 @@ async function main() {
   // structured error instead of crashing on the first tool call from the
   // model, which is much harder to debug from a Claude Desktop log.
   try {
-    getEnvs();
+    await initEnvs();
   } catch (e) {
     if (e instanceof EnvironmentValidationError) {
       // eslint-disable-next-line no-console
@@ -692,7 +743,14 @@ async function main() {
     }
     throw e;
   }
-  log.info('mcp.boot', { version: '1.4.0', tools: REGISTERED_TOOLS.length });
+  const loaded = getEnvs();
+  log.info('mcp.boot', {
+    version: '1.4.0',
+    tools: REGISTERED_TOOLS.length,
+    envs: loaded.all.length,
+    default_env: loaded.default.nickname,
+    autodiscovered: loaded.autodiscovered,
+  });
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
