@@ -12,7 +12,7 @@ Stable templateHash is genuinely differentiated in 3 of 5 tested axes. Two axes 
 |---|----------|------|---------|-------|
 | 1 | Long-term trend (30d pattern_trend) | Identity stability across deploys/restarts | **DIFFERENTIATED** | 10/10 |
 | 2 | Cross-service correlation (investigate) | Metric-based causal chain | **PARTIALLY DIFFERENTIATED** | 6/10 |
-| 3 | Forensic retrieval (streamer_query) | Cold-storage queryability via Bloom index | **NOT DIFFERENTIATED** (demo reliability) | 3/10 |
+| 3 | Forensic retrieval (retriever_query) | Cold-storage queryability via Bloom index | **NOT DIFFERENTIATED** (demo reliability) | 3/10 |
 | 4 | Offline validation (extract_templates) | Deterministic offline extraction + assertions | **DIFFERENTIATED** | 9/10 |
 | 5 | Week-over-week cost attribution (cost_drivers) | Query-independent cost delta by stable identity | **DIFFERENTIATED** | 9/10 |
 
@@ -39,7 +39,7 @@ The PMF is strongest when framed as **observability memory for cost optimization
 ## What was tested
 
 - **Live environment**: otel-demo, 41 services, 44.3 GB/day, 2664 patterns, Edge Reporter tier
-- **Tools exercised**: log10x_doctor, log10x_services, log10x_top_patterns, log10x_cost_drivers, log10x_pattern_trend, log10x_investigate, log10x_streamer_query, log10x_resolve_batch, log10x_extract_templates, log10x_event_lookup
+- **Tools exercised**: log10x_doctor, log10x_services, log10x_top_patterns, log10x_cost_drivers, log10x_pattern_trend, log10x_investigate, log10x_retriever_query, log10x_resolve_batch, log10x_extract_templates, log10x_event_lookup
 - **Independent reviewer**: Grok-4 (grok-4-latest via xAI API), prompted to be skeptical and assume re-skin until proven otherwise
 - **Methodology**: Grok designed 5 falsifiable scenarios; Claude executed them live; Grok scored the results
 

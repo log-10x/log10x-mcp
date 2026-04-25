@@ -1,8 +1,8 @@
 /**
- * log10x_backfill_metric — create a new TSDB metric, backfilled from the Streamer archive.
+ * log10x_backfill_metric — create a new TSDB metric, backfilled from the Retriever archive.
  *
  * Flagship "Log10x-only" composition tool. Pulls historical events from
- * the Storage Streamer for a specified pattern + filter + window,
+ * the Retriever for a specified pattern + filter + window,
  * aggregates them into a bucketed time series, and emits the result to
  * the destination TSDB with historical timestamps preserved.
  *
@@ -12,22 +12,22 @@
  * gets a continuous time series from 90-180 days ago through the present
  * instant, as if the metric had always existed.
  *
- * Tier prerequisites: Streamer component required; Reporter required
+ * Tier prerequisites: Retriever component required; Reporter required
  * only when emit_forward=true.
  */
 
 import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
 import {
-  runStreamerQuery,
-  isStreamerConfigured,
+  runRetrieverQuery,
+  isRetrieverConfigured,
   parseTimeExpression,
-  type StreamerQueryRequest,
-} from '../lib/streamer-api.js';
+  type RetrieverQueryRequest,
+} from '../lib/retriever-api.js';
 import { aggregate, type AggregationType } from '../lib/aggregator.js';
 import { emitSeries, type Destination } from '../lib/metric-emitters.js';
 import { fmtCount, normalizePattern } from '../lib/format.js';
-import { streamerNotConfiguredMessage } from './streamer-query.js';
+import { retrieverNotConfiguredMessage } from './retriever-query.js';
 
 export const backfillMetricSchema = {
   pattern: z
@@ -61,7 +61,7 @@ export const backfillMetricSchema = {
   filters: z
     .array(z.string())
     .optional()
-    .describe('Optional JS filter expressions over event payloads, passed through to the Streamer query.'),
+    .describe('Optional JS filter expressions over event payloads, passed through to the Retriever query.'),
   unique_field: z
     .string()
     .optional()
@@ -91,8 +91,8 @@ export async function executeBackfillMetric(
   env: EnvConfig
 ): Promise<string> {
   // ── 0. Prerequisites ──
-  if (!isStreamerConfigured()) {
-    return streamerNotConfiguredMessage();
+  if (!isRetrieverConfigured()) {
+    return retrieverNotConfiguredMessage();
   }
 
   try {
@@ -106,13 +106,13 @@ export async function executeBackfillMetric(
     throw new Error('aggregation=unique_values requires a `unique_field` argument.');
   }
 
-  // Reporter/Streamer pattern labels are snake_case. Normalize in case the
+  // Reporter/Retriever pattern labels are snake_case. Normalize in case the
   // agent re-fed a display form (spaces) from top_patterns / cost_drivers.
   const pattern = normalizePattern(args.pattern);
 
-  // ── 1. Query the Streamer for historical events ──
+  // ── 1. Query the Retriever for historical events ──
   const started = Date.now();
-  const streamerReq: StreamerQueryRequest = {
+  const retrieverReq: RetrieverQueryRequest = {
     pattern,
     from: args.from,
     to: args.to,
@@ -120,19 +120,19 @@ export async function executeBackfillMetric(
     limit: 100_000,
     format: 'events',
   };
-  const streamerResp = await runStreamerQuery(env, streamerReq, { timeoutMs: 300_000 });
-  const events = streamerResp.events || [];
-  const streamerWallMs = Date.now() - started;
+  const retrieverResp = await runRetrieverQuery(env, retrieverReq, { timeoutMs: 300_000 });
+  const events = retrieverResp.events || [];
+  const retrieverWallMs = Date.now() - started;
 
   if (events.length === 0) {
     return [
       `## Backfill: ${args.metric_name}`,
       '',
-      `**Result**: Streamer returned **zero events** matching this pattern + filter + window.`,
+      `**Result**: Retriever returned **zero events** matching this pattern + filter + window.`,
       '',
       `**Checked**: pattern=\`${pattern}\`, window=${args.from}→${args.to}, filters=${JSON.stringify(args.filters || [])}`,
       '',
-      `No points were emitted to ${args.destination}. Verify the pattern identity (call log10x_event_lookup on a raw sample line), check the window, or widen the filter expressions. If the Streamer archive's retention is shorter than the requested window, the missing portion is invisible to this tool.`,
+      `No points were emitted to ${args.destination}. Verify the pattern identity (call log10x_event_lookup on a raw sample line), check the window, or widen the filter expressions. If the Retriever archive's retention is shorter than the requested window, the missing portion is invisible to this tool.`,
     ].join('\n');
   }
 
@@ -175,7 +175,7 @@ export async function executeBackfillMetric(
   lines.push('');
   lines.push('### Execution');
   lines.push('');
-  lines.push(`- Streamer scan: ${fmtCount(events.length)} events retrieved in ${streamerWallMs}ms`);
+  lines.push(`- Retriever scan: ${fmtCount(events.length)} events retrieved in ${retrieverWallMs}ms`);
   lines.push(`- Aggregated: ${fmtCount(aggregated.points.length)} data points across ${aggregated.seriesCount} time series (${aggregated.bucketSeconds}s buckets)`);
   lines.push(`- ${args.destination} emission: ${fmtCount(emission.pointsEmitted)} points posted in ${emission.wallTimeMs}ms (${fmtBytes(emission.bytesPosted)})`);
   if (emission.viewUrl) {

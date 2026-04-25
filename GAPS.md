@@ -7,7 +7,7 @@
 | ID | Title | Owner | Severity | State |
 |---|---|---|---|---|
 | **G1** | Cloud reporter CronJob ~10% OOMKilled failure rate | Demo infra | Material | Not fixed — needs memory-limit bump + engine review |
-| ~~G3~~ | Streamer LB wired but undocumented in setup docs | Docs | — | ✅ **CLOSED** — README now documents the LB URL, demo bucket, all env vars, and G12 known issues |
+| ~~G3~~ | Retriever LB wired but undocumented in setup docs | Docs | — | ✅ **CLOSED** — README now documents the LB URL, demo bucket, all env vars, and G12 known issues |
 | **G4** | upstream opentelemetry-demo missing libgssapi-krb5-2 | External upstream | Demo hygiene | Needs upstream issue filed |
 | **G5** | upstream opentelemetry-demo frontend shipping URL bug | External upstream | Demo hygiene | Needs upstream issue filed |
 | ~~G6~~ | env audit +100% false flags | MCP | — | ✅ **CLOSED** via PRs #25/#26/#27 |
@@ -16,7 +16,7 @@
 | **G9** | tenx-edge subprocess stale state after remote-write rejection | Engine | Material | Engine fix needed. **MCP mitigation shipped (PR #35)**: `forwarder_dark_zones` doctor check detects the signature and emits remediation hint with `kubectl rollout restart` command. |
 | **G10** | Engine fingerprinter leaks high-cardinality vars into pattern identities | Engine | Material | Engine fix needed. **MCP mitigation shipped (PR #35)**: env audit collapses 3+ same-service same-delta variants into one summary row with explanation. |
 | **G11** | Paste Lambda templatizer silently drops ~70% of input | Engine | **GA blocker** | Engine fix required. **MCP mitigation shipped (PR #35)**: `resolve_batch` emits prominent "N input lines not accounted for" warning when the gap is ≥20% of input, with workarounds. |
-| **G12** | Streamer forensic query — false negatives + canonical-name crash | Engine | **GA blocker** | Engine fix required. **MCP mitigation shipped (PR #35)**: `streamer_forensic_health` doctor check permanently warns with 3 practical workarounds until engine fix lands. |
+| **G12** | Retriever forensic query — false negatives + canonical-name crash | Engine | **GA blocker** | Engine fix required. **MCP mitigation shipped (PR #35)**: `retriever_forensic_health` doctor check permanently warns with 3 practical workarounds until engine fix lands. |
 | **G13** | Investigate ranks historical cost, not current firing | MCP | Material | **PARTIALLY ADDRESSED** via PRs #32/#33/#34 |
 
 **Next steps for GA**:
@@ -32,7 +32,7 @@ Last update: session 2026-04-15 (continued). **34 MCP PRs merged (#6–#34) + 3 
 - **S4 paste-triage**: found event_lookup 400s on raw lines (fixed #30) + resolve_batch silently drops 70% of input (engine-side templatizer bug, documented G11)
 - **S5 orientation briefing**: 6 tools composed cleanly, totals reconcile across services/top_patterns/list_by_label. Strong positive signal
 - **S6 drift**: caught investigate 30d-window blindness (fixed #30)
-- **S7 streamer forensics**: reproducible false-negative (0 events returned for windows where metrics prove events exist) + MCP -32000 crash on canonical pattern name. Engine/streamer-side issue, documented G12
+- **S7 retriever forensics**: reproducible false-negative (0 events returned for windows where metrics prove events exist) + MCP -32000 crash on canonical pattern name. Engine/retriever-side issue, documented G12
 - **S8 cross-pillar APM wedge**: 0 candidates on canonical test (fixed #31 — 16 Tier 1 matches now)
 - **S9 resolve_batch stress**: confirmed S4's templatizer bug with detailed failure taxonomy (engine-side)
 
@@ -50,7 +50,7 @@ Last update: session 2026-04-15 (continued). **34 MCP PRs merged (#6–#34) + 3 
 ### A1. Savings chunk coverage — server-side root cause
 **Status**: PR #12 surfaces partial-coverage honestly, PR #13 documents that client-side throttling does NOT help. The Final-1 audit finding is **symptom-fixed but not root-caused**.
 
-**What we know**: the `streamerIndexedBytesChunk` queries intermittently hit Prometheus's 5GB aggregation limit with `HTTP 422: expanding series: the query hit the aggregated data size limit`. Failures are **deterministic per chunk**, not caused by client concurrency (tested: throttling to 6 concurrent quadrupled wall time 90s→370s with zero coverage improvement, 37/60 chunks in both cases).
+**What we know**: the `retrieverIndexedBytesChunk` queries intermittently hit Prometheus's 5GB aggregation limit with `HTTP 422: expanding series: the query hit the aggregated data size limit`. Failures are **deterministic per chunk**, not caused by client concurrency (tested: throttling to 6 concurrent quadrupled wall time 90s→370s with zero coverage improvement, 37/60 chunks in both cases).
 
 **Why it matters**: the savings tool's headline number can be 10× undercounted without the coverage annotation. Customer acceptance test (Final-1) caught an internal inconsistency ($12.7M run-rate note text vs $14.4M standalone 7d call); we verified the standalone 7d numbers were real, but the 30d internal 7d computation was using partial data silently.
 
@@ -99,12 +99,12 @@ Last update: session 2026-04-15 (continued). **34 MCP PRs merged (#6–#34) + 3 
 
 ## Category B: Infrastructure gaps (demo env, not MCP code)
 
-### B1. Storage Streamer not wired in demo env
-**Evidence**: S1 (auth forensics), S6 (connection pool), Hard-1 (73-day exfil) — all hit `LOG10X_STREAMER_URL` unset. Verbose error message from PR #9 handled it gracefully but the forensic use-case is untested end-to-end.
+### B1. Retriever not wired in demo env
+**Evidence**: S1 (auth forensics), S6 (connection pool), Hard-1 (73-day exfil) — all hit `__SAVE_LOG10X_RETRIEVER_URL__` unset. Verbose error message from PR #9 handled it gracefully but the forensic use-case is untested end-to-end.
 
 **Resolution paths**:
-- Wire `LOG10X_STREAMER_URL` + `LOG10X_STREAMER_BUCKET` in the demo env config so forensic scenarios have a happy path
-- OR update the demo env documentation to say "Streamer is intentionally disabled in the demo, use Reporter metrics only"
+- Wire `__SAVE_LOG10X_RETRIEVER_URL__` + `__SAVE_LOG10X_RETRIEVER_BUCKET__` in the demo env config so forensic scenarios have a happy path
+- OR update the demo env documentation to say "Retriever is intentionally disabled in the demo, use Reporter metrics only"
 
 This is **demo env infrastructure work**, not MCP code work.
 
@@ -145,9 +145,9 @@ Implemented as `cardinality_concentration` check in `doctor.ts`. Flags when top-
 
 ---
 
-## Category F: Streamer engine issues (out of MCP scope, need upstream fixes)
+## Category F: Retriever engine issues (out of MCP scope, need upstream fixes)
 
-### F1. Streamer server's TenXDate ISO8601 parser is broken
+### F1. Retriever server's TenXDate ISO8601 parser is broken
 **Severity**: high. Silently produces wrong query windows on a documented-supported input format.
 
 **Evidence (2026-04-15, demo env deployment)**:
@@ -157,18 +157,18 @@ Implemented as `cardinality_concentration` check in `doctor.ts`. Flags when top-
 | Epoch millis string | 200 | 3400 |
 | `2026-04-15T11:00:00Z` (ISO8601) | 200 | **0** |
 
-**Expected**: ISO8601 should work per streamer-api.ts comment ("The engine evaluates these as JavaScript on the server via TenXDate, so `now("-1h")` / `now()` / ISO8601 strings / epoch millis all work"). Empirically, ISO8601 silently produces a non-matching window.
+**Expected**: ISO8601 should work per retriever-api.ts comment ("The engine evaluates these as JavaScript on the server via TenXDate, so `now("-1h")` / `now()` / ISO8601 strings / epoch millis all work"). Empirically, ISO8601 silently produces a non-matching window.
 
 **MCP workaround**: PR #17 converts any non-`now()`, non-pure-digit input to epoch millis client-side via `Date.parse()` before submitting. After workaround: same ISO8601 query → 685 events.
 
-**Real fix**: the streamer server's TenXDate parser needs to handle ISO8601 strings correctly. Live in `com.log10x.ext.quarkus.streamer.*` — find where `from`/`to` get parsed and see why the ISO8601 path produces a bad range.
+**Real fix**: the retriever server's TenXDate parser needs to handle ISO8601 strings correctly. Live in `com.log10x.ext.quarkus.retriever.*` — find where `from`/`to` get parsed and see why the ISO8601 path produces a bad range.
 
-### F2. Streamer query API strict-rejects unknown body fields
+### F2. Retriever query API strict-rejects unknown body fields
 **Severity**: medium. Breaks obvious client patterns.
 
 **Evidence**: sending `{"format":"events","limit":3}` in the query body produces HTTP 400 with empty body. The MCP tool works around it by NOT sending these fields (it applies format/limit client-side after reading S3 results).
 
-**Why it matters**: any customer building an integration against `/streamer/query` who passes standard REST-ish fields will hit 400 with no error message. The server should either:
+**Why it matters**: any customer building an integration against `/retriever/query` who passes standard REST-ish fields will hit 400 with no error message. The server should either:
 - Accept unknown fields and ignore them (standard REST behavior)
 - Return HTTP 400 with a descriptive error body explaining which field is invalid
 
@@ -216,8 +216,8 @@ Same fix — backend PR #54 removes the nodeSelector from the demo values file. 
 
 **Real fix**: the helm chart default should be no nodeSelector (run on all nodes like any log forwarder DaemonSet). If a customer wants to limit fluentd to specific node pools, that should be a helm value they set explicitly, not a baked-in default.
 
-### F3. Streamer aggregation limit (5GB) on bleeding-edge day
-**Severity**: medium. See GAPS A1 for MCP workaround; the root cause is server-side. `streamerIndexedBytesChunk` at offset=0d intermittently hits `HTTP 422: expanding series: the query hit the aggregated data size limit (limit: 5000000000 bytes)` under concurrent load. PR #12 added coverage annotation as client-side safety net, but the real fix is server-side: raise the limit, pre-aggregate the high-cardinality metric, or split the streamer's indexed metric across more scrape targets.
+### F3. Retriever aggregation limit (5GB) on bleeding-edge day
+**Severity**: medium. See GAPS A1 for MCP workaround; the root cause is server-side. `retrieverIndexedBytesChunk` at offset=0d intermittently hits `HTTP 422: expanding series: the query hit the aggregated data size limit (limit: 5000000000 bytes)` under concurrent load. PR #12 added coverage annotation as client-side safety net, but the real fix is server-side: raise the limit, pre-aggregate the high-cardinality metric, or split the retriever's indexed metric across more scrape targets.
 
 ---
 
@@ -255,7 +255,7 @@ Was a log replay. Now replaced with a real `opentelemetry-demo` helm deployment 
 - tenx-edge processing real CRI logs via exec_filter
 - log10x `edge` tier metrics flowing to `prometheus.log10x.com` with real k8s_pod/k8s_namespace/k8s_container labels
 - kube-prometheus-stack in `monitoring` namespace scraping the same pods' CPU/memory/HTTP metrics
-- MCP config in `.mcp.json` wired to both: streamer LB + customer metrics via port-forwarded kube-prom
+- MCP config in `.mcp.json` wired to both: retriever LB + customer metrics via port-forwarded kube-prom
 
 **Live validated** (PR #19): primary cross-pillar join `k8s_namespace ↔ namespace` with Jaccard **1.000**. Both pillars observe the same real pod `kafka-57d6ff9c6c-sgnzv` with identical structural labels.
 
@@ -469,26 +469,26 @@ These are in the follow-up backlog (see G13).
 
 **Customer impact**: any customer who pastes a SIEM dump into resolve_batch today gets a report that looks plausible but silently hides 70% of the input. This is the worst possible failure mode for a triage tool.
 
-### G12. Streamer forensic query — false negatives + crash on canonical pattern names
+### G12. Retriever forensic query — false negatives + crash on canonical pattern names
 **Discovered by**: sub-agent S7 (forensic post-mortem scenario), 2026-04-15.
-**Severity**: blocks the forensic retrieval workflow. Storage Streamer is the Tier-4 customer capability and a key GA feature — currently unreliable.
+**Severity**: blocks the forensic retrieval workflow. Retriever is the Tier-4 customer capability and a key GA feature — currently unreliable.
 
 **Evidence** (S7's stress test):
-- **False negative on known-exists data**: `log10x_pattern_trend` confirms ~$11K/wk of the shipping pattern flowing right now (166 data points, 109 GB peak on 2026-04-14). `log10x_streamer_query` with ISO8601, now-expressions, and `last 1h` windows ALL return 0 events. The streamer is submitting queries successfully (92s wall time = full execution), producing marker objects, and reading the results prefix — but the results prefix is empty.
+- **False negative on known-exists data**: `log10x_pattern_trend` confirms ~$11K/wk of the shipping pattern flowing right now (166 data points, 109 GB peak on 2026-04-14). `log10x_retriever_query` with ISO8601, now-expressions, and `last 1h` windows ALL return 0 events. The retriever is submitting queries successfully (92s wall time = full execution), producing marker objects, and reading the results prefix — but the results prefix is empty.
 - **Crash on canonical pattern name**: passing `shipping_service_Post_shipping_get_quote_unsupported_protocol_scheme_shipping` to `name` → `MCP error -32000: Connection closed`. Reproducible, 2 attempts. Short-form (`shipping`) does not crash but returns 0.
 - Two query IDs recorded for false-negative: `ad907b42-e113-463c-86fd-30176dd01db4`, `5ec74e06-75b0-4b4f-855a-a93176fef038`.
 
 **Possible root causes** (not yet diagnosed):
 1. Bloom filter index is not covering the time windows being queried (S3 archive coverage gap?)
-2. Target prefix mismatch — the streamer indexer writes under a different target than `app` or whatever the default is
+2. Target prefix mismatch — the retriever indexer writes under a different target than `app` or whatever the default is
 3. Name-based filter: canonical slash-underscore name doesn't match the underlying stored event keys
 4. The -32000 crash is specifically on name length / content — maybe a JSON-encoding issue in the backend
-5. The streamer was wired up recently and hasn't ingested historical data yet
+5. The retriever was wired up recently and hasn't ingested historical data yet
 
 **Action**:
-1. **Diagnosis required on engine side**: pull the streamer coordinator logs during a reproduction to see whether the query runs, matches, and writes. The MCP is operating correctly per its contract (submit → wait for marker → read results); the failure is downstream.
-2. **MCP-layer mitigation**: when streamer returns 0 events while `pattern_trend` proves the pattern exists, emit a clear warning ("streamer returned 0 events but live metrics prove this pattern has ~$X/wk of traffic — streamer index may be stale or target mismatch; fall back to `pattern_trend` for trajectory and `event_lookup` for pattern metadata").
-3. **Hard crash fix**: investigate the -32000 error — likely a length cap, special-char escaping, or JSON field handling bug. Check engine-side streamer request handler for input validation.
+1. **Diagnosis required on engine side**: pull the retriever coordinator logs during a reproduction to see whether the query runs, matches, and writes. The MCP is operating correctly per its contract (submit → wait for marker → read results); the failure is downstream.
+2. **MCP-layer mitigation**: when retriever returns 0 events while `pattern_trend` proves the pattern exists, emit a clear warning ("retriever returned 0 events but live metrics prove this pattern has ~$X/wk of traffic — retriever index may be stale or target mismatch; fall back to `pattern_trend` for trajectory and `event_lookup` for pattern metadata").
+3. **Hard crash fix**: investigate the -32000 error — likely a length cap, special-char escaping, or JSON field handling bug. Check engine-side retriever request handler for input validation.
 
 **Customer impact**: a customer trying to do forensic retrieval on a known-live pattern gets an empty result set with no explanation. If they pass the canonical name, they get an obscure RPC error. The workflow is currently unusable end-to-end.
 
@@ -535,12 +535,12 @@ A `kubectl rollout restart ds/tenx-fluentd -n demo` resolved it — the fresh te
 
 **Root cause is not fully diagnosed** — it may be (a) tenx-edge internal queue/buffer that needs flushing, (b) a metric-producer error flag that latches on fatal write errors, or (c) fluentd's exec_filter retry semantics interacting badly with the child process. The restart works; the underlying mechanism deserves engine investigation before GA.
 
-### G3. Streamer-wired-but-undocumented in demo env
-**Evidence**: LoadBalancer `tenx-streamer-query-lb` at `a2936089108bb492cb41d18cb5b75f8d-1298006809.us-east-1.elb.amazonaws.com` has been running for 21h but was NOT referenced in any MCP setup docs or env var hint. I found it by `kubectl get svc -A | grep streamer`.
+### G3. Retriever-wired-but-undocumented in demo env
+**Evidence**: LoadBalancer `tenx-retriever-query-lb` at `a2936089108bb492cb41d18cb5b75f8d-1298006809.us-east-1.elb.amazonaws.com` has been running for 21h but was NOT referenced in any MCP setup docs or env var hint. I found it by `kubectl get svc -A | grep retriever`.
 
-**Impact**: every sub-agent run this session that asked about the streamer got "LOG10X_STREAMER_URL not configured" because nobody had wired the MCP to the already-deployed LB. Hard-1 SOC forensics scenario worked around it by suggesting branches; S6 caveated its answer; etc.
+**Impact**: every sub-agent run this session that asked about the retriever got "__SAVE_LOG10X_RETRIEVER_URL__ not configured" because nobody had wired the MCP to the already-deployed LB. Hard-1 SOC forensics scenario worked around it by suggesting branches; S6 caveated its answer; etc.
 
-**Action**: document the streamer LB in the demo README so the next contributor knows to wire it. PR #9 documented the general setup; this adds the specific URL.
+**Action**: document the retriever LB in the demo README so the next contributor knows to wire it. PR #9 documented the general setup; this adds the specific URL.
 
 ### C4. Sub-agent bootstrap catch-22
 **Status**: PR #9 documented the fix (prompt prefix) in README; per-prompt hint works reliably. Fundamental fix requires upstream change in Agent SDK / Claude Code that lets sub-agents auto-load parent MCP tools without requiring a ToolSearch call.
@@ -587,7 +587,7 @@ Blocked on B2 (demo env infra). Tests are ready to run as soon as `LOG10X_CUSTOM
 Partially tested via incidental usage. No dedicated stress test. Worth a pass when revisiting test coverage.
 
 ### E4. Demo-specific polish
-The comments in `streamer-api.ts:21` and `:391` reference "the otek demo env" as an example for the LOG10X_STREAMER_TARGET and LOG10X_STREAMER_INDEX_SUBPATH defaults. The code is portable; only the comments mention the demo. Low priority polish.
+The comments in `retriever-api.ts:21` and `:391` reference "the otek demo env" as an example for the __SAVE_LOG10X_RETRIEVER_TARGET__ and LOG10X_RETRIEVER_INDEX_SUBPATH defaults. The code is portable; only the comments mention the demo. Low priority polish.
 
 ---
 

@@ -39,8 +39,8 @@ function suggestForTool(toolName: string, msg: string): string | undefined {
       if (/Could not resolve/i.test(msg)) {
         return 'The starting_point did not match a known pattern or service. Try `log10x_event_lookup` with a substring of the line, or `log10x_services` to see which services are monitored.';
       }
-      if (/Streamer/i.test(msg)) {
-        return 'The Streamer fallback is unavailable. The investigation will still complete using live Reporter metrics. To enable historical fallback, deploy the Storage Streamer and set LOG10X_STREAMER_URL.';
+      if (/Retriever/i.test(msg)) {
+        return 'The Retriever fallback is unavailable. The investigation will still complete using live Reporter metrics. To enable historical fallback, deploy the Retriever and set __SAVE_LOG10X_RETRIEVER_URL__.';
       }
       return 'If this looks transient, retry. If the anchor is hard to resolve, call `log10x_event_lookup` first to canonicalize the pattern, then call investigate again with the resolved templateHash.';
 
@@ -68,9 +68,9 @@ function suggestForTool(toolName: string, msg: string): string | undefined {
       }
       return undefined;
 
-    case 'log10x_streamer_query':
+    case 'log10x_retriever_query':
       if (/not configured/i.test(msg)) {
-        return 'The Storage Streamer is not deployed in this environment. For in-retention queries, use the customer\'s SIEM directly. For long-window retrieval, deploy the Streamer per https://docs.log10x.com/apps/cloud/streamer/ and set LOG10X_STREAMER_URL.';
+        return 'The Retriever is not deployed in this environment. For in-retention queries, use the customer\'s SIEM directly. For long-window retrieval, deploy the Retriever per https://docs.log10x.com/apps/cloud/retriever/ and set __SAVE_LOG10X_RETRIEVER_URL__.';
       }
       if (/timed out/i.test(msg)) {
         return 'Query exceeded the wall-time budget. Narrow the window, add a more selective filter, or switch format to `count` or `aggregated` for a summary view instead of raw events.';
@@ -79,7 +79,7 @@ function suggestForTool(toolName: string, msg: string): string | undefined {
 
     case 'log10x_backfill_metric':
       if (/zero events/i.test(msg)) {
-        return 'The Streamer found no events matching the pattern + filters in the requested window. Verify the pattern with `log10x_event_lookup` and check the filter expressions. The window may also be outside the customer\'s S3 retention.';
+        return 'The Retriever found no events matching the pattern + filters in the requested window. Verify the pattern with `log10x_event_lookup` and check the filter expressions. The window may also be outside the customer\'s S3 retention.';
       }
       if (/DATADOG_API_KEY/i.test(msg)) {
         return 'Set DATADOG_API_KEY (or DD_API_KEY) on the MCP server process. Generate a key in Datadog: Organization Settings → API Keys.';

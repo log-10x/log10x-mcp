@@ -9,7 +9,7 @@
  * Output is a structured markdown report ranking patterns by interestingness
  * (volume × severity × variable-concentration strength), with per-pattern
  * variable concentrations computed across the batch and next-action
- * suggestions for follow-up via log10x_investigate, log10x_streamer_query,
+ * suggestions for follow-up via log10x_investigate, log10x_retriever_query,
  * or native SIEM commands.
  */
 
@@ -384,7 +384,7 @@ function buildNextActions(p: PatternConcentration, environment?: string): string
     `call \`log10x_investigate({ starting_point: '${identity}'${envArg} })\` for historical correlation (requires Reporter tier).`
   );
 
-  // Variable-filtered Streamer query suggestion — skip typed slots like timestamps
+  // Variable-filtered Retriever query suggestion — skip typed slots like timestamps
   // where filtering on a literal value is almost never what the user wants.
   const strong = p.slots.find(
     (s) =>
@@ -398,7 +398,7 @@ function buildNextActions(p: PatternConcentration, environment?: string): string
     const val = strong.topValues[0].value;
     const jsFilter = `event.${slot} === ${JSON.stringify(val)}`;
     actions.push(
-      `call \`log10x_streamer_query({ pattern: '${p.templateHash}', filters: [${JSON.stringify(jsFilter)}] })\` to retrieve all historical events concentrated on ${slot}=${truncate(val, 40)} (requires Streamer tier).`
+      `call \`log10x_retriever_query({ pattern: '${p.templateHash}', filters: [${JSON.stringify(jsFilter)}] })\` to retrieve all historical events concentrated on ${slot}=${truncate(val, 40)} (requires Retriever tier).`
     );
     actions.push(
       `native Datadog follow-up: \`dog log search '@${slot}:"${val.replace(/"/g, '\\"')}"' --from now-24h\` — filters to the dominant variable concentration directly in the SIEM.`

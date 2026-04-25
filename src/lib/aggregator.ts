@@ -1,7 +1,7 @@
 /**
  * Time-bucketed aggregation for log10x_backfill_metric.
  *
- * Takes a list of events (from the Streamer) and produces a time-series
+ * Takes a list of events (from the Retriever) and produces a time-series
  * of `(timestamp, labels, value)` points suitable for emission to a TSDB.
  *
  * Aggregation types:
@@ -10,14 +10,14 @@
  *   unique_values     — cardinality of a named dimension in the bucket
  *   rate_per_second   — events per second (count / bucket_seconds)
  *
- * Grouping dimensions come from the Streamer event's `enrichedFields`
+ * Grouping dimensions come from the Retriever event's `enrichedFields`
  * (severity, service, tenant_id, http_code, ...). If the caller passes a
  * group_by that is not present on any event, the aggregator treats the
  * dimension as an empty string so the caller still gets a single series
  * rather than a silent drop.
  */
 
-import type { StreamerEvent } from './streamer-api.js';
+import type { RetrieverEvent } from './retriever-api.js';
 
 export type AggregationType = 'count' | 'sum_bytes' | 'unique_values' | 'rate_per_second';
 
@@ -46,7 +46,7 @@ export interface AggregatedSeries {
 }
 
 export function aggregate(
-  events: StreamerEvent[],
+  events: RetrieverEvent[],
   options: AggregatorOptions
 ): AggregatedSeries {
   const bucketSeconds = parseBucketSize(options.bucketSize);
@@ -117,7 +117,7 @@ interface AggregatorState {
   unique: Set<string>;
 }
 
-function selectLabels(ev: StreamerEvent, groupBy?: string[]): Record<string, string> {
+function selectLabels(ev: RetrieverEvent, groupBy?: string[]): Record<string, string> {
   if (!groupBy || groupBy.length === 0) return {};
   const out: Record<string, string> = {};
   for (const g of groupBy) {

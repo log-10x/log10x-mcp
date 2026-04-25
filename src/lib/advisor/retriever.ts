@@ -1,15 +1,15 @@
 /**
- * Streamer install/verify/teardown plan builder.
+ * Retriever install/verify/teardown plan builder.
  *
  * Unlike Reporter/Regulator (which ride on top of a forwarder), the
- * Streamer is a standalone set of workloads (indexer + query-handler
+ * Retriever is a standalone set of workloads (indexer + query-handler
  * + stream-worker + filter CronJobs) that read from S3 via SQS and
  * serve an HTTP query endpoint. No forwarder choice — just one chart
- * (`log10x-k8s/streamer` or the log10x-hosted variant) with AWS infra
+ * (`log10x-k8s/retriever` or the log10x-hosted variant) with AWS infra
  * pointers.
  *
  * The advisor's job is to:
- *   - Surface the AWS infra the Streamer expects (S3 input bucket,
+ *   - Surface the AWS infra the Retriever expects (S3 input bucket,
  *     index bucket, 4 SQS queues, IRSA role).
  *   - Preflight-fail if any of the required AWS resources is missing
  *     from the discovery snapshot.
@@ -23,9 +23,9 @@ import type { DiscoverySnapshot } from '../discovery/types.js';
 import type { AdvisePlan, PlanStep, VerifyProbe, PreflightCheck } from './types.js';
 import { run } from '../discovery/shell.js';
 
-export interface StreamerAdviseArgs {
+export interface RetrieverAdviseArgs {
   snapshot: DiscoverySnapshot;
-  /** Helm release name. Default: `my-streamer`. */
+  /** Helm release name. Default: `my-retriever`. */
   releaseName?: string;
   /** Target namespace. Default: snapshot's suggestedNamespace. */
   namespace?: string;
@@ -35,9 +35,9 @@ export interface StreamerAdviseArgs {
   inputBucket?: string;
   /** Override: index bucket (with prefix). Default: `<inputBucket>/indexing-results/`. */
   indexBucket?: string;
-  /** Override: IRSA role ARN for the streamer SA. Default: from snapshot. */
+  /** Override: IRSA role ARN for the retriever SA. Default: from snapshot. */
   irsaRoleArn?: string;
-  /** Override: SQS queue URLs. Default: from snapshot.recommendations.streamerSqsUrls. */
+  /** Override: SQS queue URLs. Default: from snapshot.recommendations.retrieverSqsUrls. */
   sqsUrls?: {
     index?: string;
     query?: string;
@@ -52,25 +52,25 @@ export interface StreamerAdviseArgs {
   skipVerify?: boolean;
 }
 
-const STREAMER_CHART_REPO = 'https://log-10x.github.io/helm-charts';
-const STREAMER_CHART_ALIAS = 'log10x-k8s';
-const STREAMER_CHART_REF = 'log10x-k8s/streamer';
+const RETRIEVER_CHART_REPO = 'https://log-10x.github.io/helm-charts';
+const RETRIEVER_CHART_ALIAS = 'log10x-k8s';
+const RETRIEVER_CHART_REF = 'log10x-k8s/retriever';
 
-export async function buildStreamerPlan(args: StreamerAdviseArgs): Promise<AdvisePlan> {
+export async function buildRetrieverPlan(args: RetrieverAdviseArgs): Promise<AdvisePlan> {
   const snapshot = args.snapshot;
-  const releaseName = args.releaseName ?? 'my-streamer';
+  const releaseName = args.releaseName ?? 'my-retriever';
   const namespace = args.namespace ?? snapshot.recommendations.suggestedNamespace ?? 'logging';
 
   // Infra: prefer caller-supplied values; fall back to snapshot-derived.
-  const inputBucket = args.inputBucket ?? snapshot.recommendations.streamerS3Bucket;
+  const inputBucket = args.inputBucket ?? snapshot.recommendations.retrieverS3Bucket;
   const indexBucket = args.indexBucket ?? (inputBucket ? `${inputBucket}/indexing-results/` : undefined);
   const irsaRoleArn =
     args.irsaRoleArn ??
     snapshot.kubectl.serviceAccountIrsa.find((sa) =>
-      sa.name.toLowerCase().includes('streamer') || sa.name.toLowerCase().includes('tenx-streamer')
+      sa.name.toLowerCase().includes('retriever') || sa.name.toLowerCase().includes('tenx-retriever')
     )?.roleArn;
 
-  const detectedQueues = snapshot.recommendations.streamerSqsUrls ?? {};
+  const detectedQueues = snapshot.recommendations.retrieverSqsUrls ?? {};
   const sqsUrls = {
     index: args.sqsUrls?.index ?? detectedQueues.index,
     query: args.sqsUrls?.query ?? detectedQueues.query,
@@ -87,12 +87,12 @@ export async function buildStreamerPlan(args: StreamerAdviseArgs): Promise<Advis
   if (!args.skipInstall) {
     if (!inputBucket) {
       blockers.push(
-        'No input S3 bucket detected in the discovery snapshot and none supplied via `input_bucket`. The Streamer reads source logs from S3 — provide a bucket.'
+        'No input S3 bucket detected in the discovery snapshot and none supplied via `input_bucket`. The Retriever reads source logs from S3 — provide a bucket.'
       );
     }
     if (!irsaRoleArn) {
       blockers.push(
-        'No streamer IRSA role detected in the discovery snapshot and none supplied via `irsa_role_arn`. The Streamer needs a ServiceAccount annotated with an IAM role that can read from the input bucket, write to the index bucket, and consume from the SQS queues.'
+        'No retriever IRSA role detected in the discovery snapshot and none supplied via `irsa_role_arn`. The Retriever needs a ServiceAccount annotated with an IAM role that can read from the input bucket, write to the index bucket, and consume from the SQS queues.'
       );
     }
     const missingQueues = (['index', 'query', 'subquery', 'stream'] as const).filter((k) => !sqsUrls[k]);
@@ -111,13 +111,13 @@ export async function buildStreamerPlan(args: StreamerAdviseArgs): Promise<Advis
   });
 
   const notes: string[] = [];
-  if (snapshot.recommendations.alreadyInstalled.streamer) {
+  if (snapshot.recommendations.alreadyInstalled.retriever) {
     notes.push(
-      `A Streamer is already installed in namespace \`${snapshot.recommendations.alreadyInstalled.streamer}\`. Installing a second release requires a separate set of SQS queues + IRSA role — running two streamers against the same queues will race.`
+      `A Retriever is already installed in namespace \`${snapshot.recommendations.alreadyInstalled.retriever}\`. Installing a second release requires a separate set of SQS queues + IRSA role — running two retrievers against the same queues will race.`
     );
   }
   notes.push(
-    'Streamer infra (S3 buckets, SQS queues, IAM role + IRSA binding, CloudWatch log groups) is provisioned via the Terraform module, NOT by this advisor. The plan below assumes infra already exists.'
+    'Retriever infra (S3 buckets, SQS queues, IAM role + IRSA binding, CloudWatch log groups) is provisioned via the Terraform module, NOT by this advisor. The plan below assumes infra already exists.'
   );
 
   const install: PlanStep[] = [];
@@ -145,7 +145,7 @@ export async function buildStreamerPlan(args: StreamerAdviseArgs): Promise<Advis
   }
 
   return {
-    app: 'streamer',
+    app: 'retriever',
     snapshotId: snapshot.snapshotId,
     releaseName,
     namespace,
@@ -227,7 +227,7 @@ async function runPreflight(
     status: infra.irsaRoleArn ? 'ok' : 'fail',
     detail: infra.irsaRoleArn
       ? `\`${infra.irsaRoleArn}\``
-      : 'no streamer IRSA role detected — pass `irsa_role_arn` explicitly',
+      : 'no retriever IRSA role detected — pass `irsa_role_arn` explicitly',
   });
 
   for (const key of ['index', 'query', 'subquery', 'stream'] as const) {
@@ -240,18 +240,18 @@ async function runPreflight(
 
   // Live chart availability probe.
   try {
-    await run('helm', ['repo', 'add', STREAMER_CHART_ALIAS, STREAMER_CHART_REPO, '--force-update'], {
+    await run('helm', ['repo', 'add', RETRIEVER_CHART_ALIAS, RETRIEVER_CHART_REPO, '--force-update'], {
       timeoutMs: 10_000,
     });
-    await run('helm', ['repo', 'update', STREAMER_CHART_ALIAS], { timeoutMs: 10_000 });
-    const search = await run('helm', ['search', 'repo', STREAMER_CHART_REF, '-o', 'json'], {
+    await run('helm', ['repo', 'update', RETRIEVER_CHART_ALIAS], { timeoutMs: 10_000 });
+    const search = await run('helm', ['search', 'repo', RETRIEVER_CHART_REF, '-o', 'json'], {
       timeoutMs: 10_000,
     });
-    const found = search.exitCode === 0 && (search.stdout || '').includes('streamer');
+    const found = search.exitCode === 0 && (search.stdout || '').includes('retriever');
     checks.push({
       name: 'chart availability',
       status: found ? 'ok' : 'warn',
-      detail: found ? `\`${STREAMER_CHART_REF}\` is live in repo \`${STREAMER_CHART_ALIAS}\`` : `\`helm search repo ${STREAMER_CHART_REF}\` returned no matches — check repo URL`,
+      detail: found ? `\`${RETRIEVER_CHART_REF}\` is live in repo \`${RETRIEVER_CHART_ALIAS}\`` : `\`helm search repo ${RETRIEVER_CHART_REF}\` returned no matches — check repo URL`,
     });
   } catch (e) {
     checks.push({
@@ -276,18 +276,18 @@ function buildInstallSteps(opts: {
   const steps: PlanStep[] = [];
 
   steps.push({
-    title: 'Add Streamer Helm repo',
-    rationale: `Makes the ${STREAMER_CHART_REF} chart available to \`helm install\`.`,
+    title: 'Add Retriever Helm repo',
+    rationale: `Makes the ${RETRIEVER_CHART_REF} chart available to \`helm install\`.`,
     commands: [
-      `helm repo add ${STREAMER_CHART_ALIAS} ${STREAMER_CHART_REPO}`,
+      `helm repo add ${RETRIEVER_CHART_ALIAS} ${RETRIEVER_CHART_REPO}`,
       `helm repo update`,
-      `helm search repo ${STREAMER_CHART_REF}`,
+      `helm search repo ${RETRIEVER_CHART_REF}`,
     ],
   });
 
   steps.push({
     title: 'Create target namespace',
-    rationale: `The Streamer installs into \`${opts.namespace}\`.`,
+    rationale: `The Retriever installs into \`${opts.namespace}\`.`,
     commands: [
       `kubectl create namespace ${opts.namespace} --dry-run=client -o yaml | kubectl apply -f -`,
     ],
@@ -299,7 +299,7 @@ function buildInstallSteps(opts: {
     rationale: 'Wires the tenx block, IRSA ServiceAccount, S3 buckets, and all four SQS queue URLs into the chart.',
     file: {
       path: valuesFile,
-      contents: renderStreamerValues(opts),
+      contents: renderRetrieverValues(opts),
       language: 'yaml',
     },
     commands: [],
@@ -309,7 +309,7 @@ function buildInstallSteps(opts: {
     title: 'Install via Helm',
     rationale: 'Deploys the indexer + query-handler + stream-worker + filter CronJobs.',
     commands: [
-      `helm upgrade --install ${opts.releaseName} ${STREAMER_CHART_REF} \\\n  -n ${opts.namespace} --create-namespace \\\n  -f ${valuesFile}`,
+      `helm upgrade --install ${opts.releaseName} ${RETRIEVER_CHART_REF} \\\n  -n ${opts.namespace} --create-namespace \\\n  -f ${valuesFile}`,
     ],
   });
 
@@ -325,7 +325,7 @@ function buildInstallSteps(opts: {
   return steps;
 }
 
-function renderStreamerValues(opts: {
+function renderRetrieverValues(opts: {
   releaseName: string;
   apiKey: string;
   inputBucket: string;
@@ -441,10 +441,10 @@ function buildTeardownSteps(releaseName: string, namespace: string): PlanStep[] 
     {
       title: '(Optional) teardown AWS infra',
       rationale:
-        'If you\'re fully removing the Streamer, tear down the Terraform module that created the S3 buckets, SQS queues, and IAM role. Skipping this leaves empty AWS infra behind (zero-cost for SQS idle, pennies for S3 storage).',
+        'If you\'re fully removing the Retriever, tear down the Terraform module that created the S3 buckets, SQS queues, and IAM role. Skipping this leaves empty AWS infra behind (zero-cost for SQS idle, pennies for S3 storage).',
       commands: [
         `# From your terraform directory:`,
-        `# terraform destroy -target=module.streamer_aws_infra`,
+        `# terraform destroy -target=module.retriever_aws_infra`,
       ],
     },
   ];

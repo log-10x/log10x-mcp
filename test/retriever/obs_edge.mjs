@@ -4,10 +4,10 @@
 // error responses are clean.
 import { randomUUID } from 'node:crypto';
 
-const STREAMER = 'http://a2936089108bb492cb41d18cb5b75f8d-1298006809.us-east-1.elb.amazonaws.com';
+const RETRIEVER = 'http://a2936089108bb492cb41d18cb5b75f8d-1298006809.us-east-1.elb.amazonaws.com';
 
 async function submit(body, headers = {}) {
-  const r = await fetch(`${STREAMER}/streamer/query`, {
+  const r = await fetch(`${RETRIEVER}/retriever/query`, {
     method: 'POST', headers: { 'Content-Type': 'application/json', ...headers },
     body: typeof body === 'string' ? body : JSON.stringify(body),
   });
@@ -16,7 +16,7 @@ async function submit(body, headers = {}) {
 }
 
 async function status(qid) {
-  const r = await fetch(`${STREAMER}/streamer/query/${qid}/status`);
+  const r = await fetch(`${RETRIEVER}/retriever/query/${qid}/status`);
   const t = await r.text().catch(()=>'');
   return { status: r.status, body: t.slice(0, 400) };
 }
@@ -64,7 +64,7 @@ const [r1, r2] = await Promise.all([submit(body), submit(body)]);
 console.log(`  submit1=${r1.status} submit2=${r2.status}`);
 
 console.log('\n=== content-type: text/plain (wrong) ===');
-const r3 = await fetch(`${STREAMER}/streamer/query`, {
+const r3 = await fetch(`${RETRIEVER}/retriever/query`, {
   method: 'POST', headers: { 'Content-Type': 'text/plain' },
   body: JSON.stringify({ id: randomUUID(), from: Date.now()-60000, to: Date.now(), search: '' }),
 });

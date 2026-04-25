@@ -114,7 +114,7 @@ export async function classifyTrajectory(
   //      and env-mode disagreed on the same data: env-mode reported a -73%
   //      decline, service-mode reported "no significant movement". Customers
   //      reading both got whiplash.
-  // 0.5 matches the `streamerEscalationThreshold` philosophy (50% confidence
+  // 0.5 matches the `retrieverEscalationThreshold` philosophy (50% confidence
   // floor) and is halfway between env-mode's 15% surface and the old 100%
   // threshold, preserving back-compat for most tests while fixing the
   // stopped-firing and consistency cases.

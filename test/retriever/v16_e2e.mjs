@@ -14,10 +14,10 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { CloudWatchLogsClient, FilterLogEventsCommand } from '@aws-sdk/client-cloudwatch-logs';
 import { S3Client, HeadObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
 
-const STREAMER = 'http://a2936089108bb492cb41d18cb5b75f8d-1298006809.us-east-1.elb.amazonaws.com';
-const BUCKET = 'tenx-demo-cloud-streamer-351939435334';
+const RETRIEVER = 'http://a2936089108bb492cb41d18cb5b75f8d-1298006809.us-east-1.elb.amazonaws.com';
+const BUCKET = 'tenx-demo-cloud-retriever-351939435334';
 const S3_PREFIX = 'indexing-results/tenx/app/qr';
-const LOG_GROUP = '/tenx/demo-streamer/query';
+const LOG_GROUP = '/tenx/demo-retriever/query';
 
 const cw = new CloudWatchLogsClient({ region: 'us-east-1' });
 const s3 = new S3Client({ region: 'us-east-1' });
@@ -40,7 +40,7 @@ async function submit(writeResults) {
   };
   for (let i = 0; i < 4; i++) {
     try {
-      const r = await fetch(`${STREAMER}/streamer/query`, {
+      const r = await fetch(`${RETRIEVER}/retriever/query`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
@@ -89,7 +89,7 @@ async function findDoneMarkerTs(qid, deadlineMs) {
 async function pollR18Complete(qid, deadlineMs) {
   while (Date.now() < deadlineMs) {
     try {
-      const r = await fetch(`${STREAMER}/streamer/query/${qid}/status`);
+      const r = await fetch(`${RETRIEVER}/retriever/query/${qid}/status`);
       const j = await r.json();
       if (j.state === 'complete' || j.state === 'complete_no_events') return Date.now();
     } catch {}

@@ -6,7 +6,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { execSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 
-const STREAMER = 'http://a2936089108bb492cb41d18cb5b75f8d-1298006809.us-east-1.elb.amazonaws.com';
+const RETRIEVER = 'http://a2936089108bb492cb41d18cb5b75f8d-1298006809.us-east-1.elb.amazonaws.com';
 
 console.log('=== cold start: kill query-handler pods ===');
 const killAt = Date.now();
@@ -17,7 +17,7 @@ let healthyAt = null;
 for (;;) {
   await sleep(500);
   try {
-    const r = await fetch(`${STREAMER}/q/health`);
+    const r = await fetch(`${RETRIEVER}/q/health`);
     if (r.status === 200) { healthyAt = Date.now(); break; }
   } catch {}
   if (Date.now() - killAt > 180_000) { console.error('FAIL: health never returned 200 within 3min'); process.exit(3); }
@@ -29,7 +29,7 @@ const qid = randomUUID();
 const to = Date.now();
 const from = to - 60_000;
 const submitAt = Date.now();
-const r = await fetch(`${STREAMER}/streamer/query`, {
+const r = await fetch(`${RETRIEVER}/retriever/query`, {
   method: 'POST', headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({ id: qid, name: `cold-${to}`, from, to,
     search: 'severity_level=="ERROR"', filters: [],
@@ -42,7 +42,7 @@ const deadline = Date.now() + 180_000;
 while (Date.now() < deadline) {
   await sleep(3_000);
   let sr;
-  try { sr = await fetch(`${STREAMER}/streamer/query/${qid}/status`); }
+  try { sr = await fetch(`${RETRIEVER}/retriever/query/${qid}/status`); }
   catch { continue; }  // LB keepalive reset / HPA churn — retry
   if (sr.status !== 200) continue;
   let j;

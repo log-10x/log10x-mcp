@@ -57,19 +57,19 @@ test('classifyForwarderImage: unknown for random images', () => {
   assert.equal(classifyForwarderImage('ghcr.io/log-10x/quarkus-10x-dev:dev-obs-v16'), 'unknown');
 });
 
-test('classifyLog10xApp: streamer by chart label', () => {
-  const labels = { 'helm.sh/chart': 'streamer-10x-1.0.6', app: 'streamer-10x' };
+test('classifyLog10xApp: retriever by chart label', () => {
+  const labels = { 'helm.sh/chart': 'retriever-10x-1.0.6', app: 'retriever-10x' };
   const out = classifyLog10xApp('ghcr.io/log-10x/quarkus-10x-dev:dev-obs-v16', labels);
-  assert.equal(out, 'streamer');
+  assert.equal(out, 'retriever');
 });
 
-test('classifyLog10xApp: streamer by passed chart arg', () => {
+test('classifyLog10xApp: retriever by passed chart arg', () => {
   const out = classifyLog10xApp(
     'ghcr.io/log-10x/quarkus-10x-dev:dev-obs-v16',
     {},
-    'streamer-10x-1.0.6'
+    'retriever-10x-1.0.6'
   );
-  assert.equal(out, 'streamer');
+  assert.equal(out, 'retriever');
 });
 
 test('classifyLog10xApp: reporter by release name', () => {

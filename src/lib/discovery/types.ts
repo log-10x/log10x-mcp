@@ -2,7 +2,7 @@
  * Shared types for the install-advisor discovery + advise tools.
  *
  * The snapshot is the *only* contract between `discover_env` and
- * `advise_{reporter,regulator,streamer}`. Adding a field here is a
+ * `advise_{reporter,regulator,retriever}`. Adding a field here is a
  * wire-format change — bump `SNAPSHOT_SCHEMA_VERSION` below.
  */
 
@@ -18,7 +18,7 @@ export type ForwarderKind =
   | 'unknown';
 
 /** Log10x apps we look for already being installed. */
-export type Log10xAppKind = 'reporter' | 'regulator' | 'streamer' | 'compiler' | 'unknown';
+export type Log10xAppKind = 'reporter' | 'regulator' | 'retriever' | 'compiler' | 'unknown';
 
 /**
  * A workload (DaemonSet/Deployment/StatefulSet) we classified as a
@@ -70,7 +70,7 @@ export interface HelmRelease {
   revision: number;
 }
 
-/** An S3 bucket we think could be a log10x streamer target. */
+/** An S3 bucket we think could be a log10x retriever target. */
 export interface S3Bucket {
   name: string;
   region?: string;
@@ -79,7 +79,7 @@ export interface S3Bucket {
   hasIndexingPrefix?: boolean;
 }
 
-/** An SQS queue we think belongs to a streamer install. */
+/** An SQS queue we think belongs to a retriever install. */
 export interface SqsQueue {
   url: string;
   name: string;
@@ -87,7 +87,7 @@ export interface SqsQueue {
   role: 'index' | 'query' | 'subquery' | 'stream' | 'dlq' | 'unknown';
 }
 
-/** A CloudWatch log group we think the streamer uses. */
+/** A CloudWatch log group we think the retriever uses. */
 export interface CwLogGroup {
   name: string;
   /** Size in bytes at probe time, if returned by DescribeLogGroups. */
@@ -149,8 +149,8 @@ export interface Recommendations {
   suggestedNamespace: string;
   existingForwarder?: ForwarderKind;
   existingForwarderNamespace?: string;
-  streamerS3Bucket?: string;
-  streamerSqsUrls?: Partial<Record<'index' | 'query' | 'subquery' | 'stream', string>>;
+  retrieverS3Bucket?: string;
+  retrieverSqsUrls?: Partial<Record<'index' | 'query' | 'subquery' | 'stream', string>>;
   alreadyInstalled: Partial<Record<Log10xAppKind, string>>;
   /**
    * `GH_REPO` from a running regulator pod, if detected. Used by the

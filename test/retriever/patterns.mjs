@@ -4,7 +4,7 @@
 import { randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 
-const STREAMER = 'http://a2936089108bb492cb41d18cb5b75f8d-1298006809.us-east-1.elb.amazonaws.com';
+const RETRIEVER = 'http://a2936089108bb492cb41d18cb5b75f8d-1298006809.us-east-1.elb.amazonaws.com';
 
 const tests = [
   { name: 'pure-severity-ERROR',       search: 'severity_level == "ERROR"' },
@@ -22,7 +22,7 @@ async function runOne(search) {
   const from = to - 30 * 60 * 1000;
   const body = { id: qid, name: `pat-${to}`, from, to, search,
     filters: [], logLevels: 'ERROR,INFO,PERF', processingTime: 60_000 };
-  const r = await fetch(`${STREAMER}/streamer/query`, {
+  const r = await fetch(`${RETRIEVER}/retriever/query`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
@@ -31,7 +31,7 @@ async function runOne(search) {
   const deadline = Date.now() + 240_000;
   while (Date.now() < deadline) {
     await sleep(8_000);
-    const sr = await fetch(`${STREAMER}/streamer/query/${qid}/status`);
+    const sr = await fetch(`${RETRIEVER}/retriever/query/${qid}/status`);
     if (sr.status !== 200) continue;
     const j = await sr.json();
     const s = j.summary || {};

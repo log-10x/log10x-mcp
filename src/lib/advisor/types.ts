@@ -98,10 +98,10 @@ export interface GitopsExplainer {
  */
 export interface AdvisePlan {
   /** Which app this plan installs. */
-  app: 'reporter' | 'regulator' | 'streamer';
+  app: 'reporter' | 'regulator' | 'retriever';
   /** Snapshot the plan was built against. */
   snapshotId: string;
-  /** Target forwarder (for reporter/regulator). Unused by streamer. */
+  /** Target forwarder (for reporter/regulator). Unused by retriever. */
   forwarder?: ForwarderKind;
   /** Target helm release name. */
   releaseName: string;
@@ -127,7 +127,7 @@ export interface AdvisePlan {
   blockers: string[];
   /**
    * Optional GitOps section explaining MCP-managed runtime config
-   * updates. Set for app=regulator; omitted for reporter/streamer.
+   * updates. Set for app=regulator; omitted for reporter/retriever.
    */
   gitopsExplainer?: GitopsExplainer;
 }

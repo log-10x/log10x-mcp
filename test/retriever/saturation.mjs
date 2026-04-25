@@ -1,11 +1,11 @@
 #!/usr/bin/env node
-// Concurrent saturation: fire N queries in parallel, confirm the streamer's
+// Concurrent saturation: fire N queries in parallel, confirm the retriever's
 // max-async/max-queued guards return 429 cleanly when saturated (not 500 or
 // silent drop), and every 200-accepted query eventually completes.
 import { randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 
-const STREAMER = 'http://a2936089108bb492cb41d18cb5b75f8d-1298006809.us-east-1.elb.amazonaws.com';
+const RETRIEVER = 'http://a2936089108bb492cb41d18cb5b75f8d-1298006809.us-east-1.elb.amazonaws.com';
 const N = parseInt(process.argv[2] || '20');
 
 async function submit() {
@@ -20,7 +20,7 @@ async function submit() {
   // fine — N=20 ran clean; N=50 just saturates the client's connection pool.
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const r = await fetch(`${STREAMER}/streamer/query`, {
+      const r = await fetch(`${RETRIEVER}/retriever/query`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
@@ -37,7 +37,7 @@ async function waitComplete(qid, deadline) {
     await sleep(4_000);
     let sr;
     try {
-      sr = await fetch(`${STREAMER}/streamer/query/${qid}/status`);
+      sr = await fetch(`${RETRIEVER}/retriever/query/${qid}/status`);
     } catch (e) {
       // Transient socket errors (LB keepalive reset, pod rollover during
       // HPA scale-down) — just retry the next poll.

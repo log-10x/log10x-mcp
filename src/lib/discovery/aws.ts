@@ -24,7 +24,7 @@ import type {
 export interface AwsProbeOpts {
   /** AWS region. If absent, we pick it up from the CLI config. */
   region?: string;
-  /** Substring hint for finding the streamer bucket. Default: 'streamer'. */
+  /** Substring hint for finding the retriever bucket. Default: 'retriever'. */
   bucketHint?: string;
   /** EKS cluster name to describe, if known. */
   eksClusterName?: string;
@@ -142,11 +142,11 @@ export async function probeAws(
     }
   }
 
-  // Step 4: S3 buckets matching the hint (default: "streamer").
-  // Ranking is specificity-first so the most-likely streamer bucket
+  // Step 4: S3 buckets matching the hint (default: "retriever").
+  // Ranking is specificity-first so the most-likely retriever bucket
   // surfaces at the top of the list even on accounts with dozens of
   // log10x/tenx buckets.
-  const hint = (opts.bucketHint ?? 'streamer').toLowerCase();
+  const hint = (opts.bucketHint ?? 'retriever').toLowerCase();
   const buckets = await runJson<{ Buckets: Array<{ Name: string }> }>(
     'aws',
     ['s3api', 'list-buckets', '--output', 'json'],
@@ -226,7 +226,7 @@ export async function probeAws(
     return { url: u, name, role };
   });
 
-  // Step 6: CloudWatch log groups that look streamer-related.
+  // Step 6: CloudWatch log groups that look retriever-related.
   const cw = await runJson<{ logGroups?: Array<{ logGroupName: string; storedBytes?: number }> }>(
     'aws',
     [

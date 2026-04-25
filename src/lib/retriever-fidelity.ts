@@ -1,8 +1,8 @@
 /**
- * Mode selection for streamer_series.
+ * Mode selection for retriever_series.
  *
  * Two strategies:
- *   - "full":               one streamer query covering the whole window,
+ *   - "full":               one retriever query covering the whole window,
  *                           client-side bucketing + group-by aggregation.
  *                           Exact counts. Bounded by Lambda budget.
  *   - "per_window_sampled": split the window into N sub-windows and run K
@@ -122,7 +122,7 @@ export function subWindowCount(windowMs: number): number {
  * Threshold is conservative: without volume data we can't tell a
  * 100-event/sec pattern from a 100K-event/sec pattern. Anything past 4h
  * is sampled by default. The spec's "≤48h start full + abort if it
- * explodes" path was attractive but the streamer doesn't expose mid-query
+ * explodes" path was attractive but the retriever doesn't expose mid-query
  * progress, so an abort would land as a hard timeout — defeating the
  * purpose of the fidelity contract.
  */
@@ -367,7 +367,7 @@ function scalarValue(resp: unknown): number | undefined {
 
 /**
  * Convert a relative or absolute time expression to epoch millis. Mirrors
- * the streamer normalizer's interpretation but returns a number we can
+ * the retriever normalizer's interpretation but returns a number we can
  * arithmetic on (for sub-window splitting and window-length math).
  */
 export function timeExprToMs(expr: string, nowMs: number = Date.now()): number {

@@ -15,7 +15,7 @@ function rawSubmit(tp, payload) {
     // Hand-craft the HTTP request so Node's http-client header-sanitization
     // doesn't block CR/LF in values. We write to the TCP socket directly.
     const req = http.request({
-      host: HOST, port: 80, method: 'POST', path: '/streamer/query',
+      host: HOST, port: 80, method: 'POST', path: '/retriever/query',
       insecureHTTPParser: true,
       headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
     }, (res) => {
@@ -33,7 +33,7 @@ function rawSubmit(tp, payload) {
     req.on('socket', (sock) => {
       sock.once('connect', () => {
         const rawHeaders =
-          `POST /streamer/query HTTP/1.1\r\n` +
+          `POST /retriever/query HTTP/1.1\r\n` +
           `Host: ${HOST}\r\n` +
           `Content-Type: application/json\r\n` +
           `traceparent: ${tp}\r\n` +
@@ -52,7 +52,7 @@ function rawSubmitNet(tp, payload) {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify(payload);
     const raw =
-      `POST /streamer/query HTTP/1.1\r\n` +
+      `POST /retriever/query HTTP/1.1\r\n` +
       `Host: ${HOST}\r\n` +
       `Content-Type: application/json\r\n` +
       `traceparent: ${tp}\r\n` +
@@ -85,7 +85,7 @@ console.log(`body: ${raw.split('\r\n\r\n')[1]?.slice(0,100)}`);
 // Wait for query, then scan CW for injection
 await sleep(40_000);
 const res = await cw.send(new FilterLogEventsCommand({
-  logGroupName: '/tenx/demo-streamer/query',
+  logGroupName: '/tenx/demo-retriever/query',
   startTime: Date.now() - 180_000, endTime: Date.now(),
   filterPattern: `"${qid}"`,
   limit: 500,

@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { aggregate, parseBucketSize } from '../src/lib/aggregator.js';
-import type { StreamerEvent } from '../src/lib/streamer-api.js';
+import type { RetrieverEvent } from '../src/lib/retriever-api.js';
 
-function ev(iso: string, service?: string, severity?: string, text = 'x'): StreamerEvent {
+function ev(iso: string, service?: string, severity?: string, text = 'x'): RetrieverEvent {
   return { timestamp: iso, service, severity, templateHash: '~t', text, enrichedFields: {} };
 }
 
@@ -20,7 +20,7 @@ test('parseBucketSize rejects invalid input', () => {
 });
 
 test('aggregate count: events in the same bucket collapse', () => {
-  const events: StreamerEvent[] = [
+  const events: RetrieverEvent[] = [
     ev('2026-01-01T00:00:00Z'),
     ev('2026-01-01T00:02:00Z'),
     ev('2026-01-01T00:04:59Z'),
@@ -33,7 +33,7 @@ test('aggregate count: events in the same bucket collapse', () => {
 });
 
 test('aggregate with groupBy produces one series per label combination', () => {
-  const events: StreamerEvent[] = [
+  const events: RetrieverEvent[] = [
     ev('2026-01-01T00:00:00Z', 'svc-a'),
     ev('2026-01-01T00:01:00Z', 'svc-a'),
     ev('2026-01-01T00:02:00Z', 'svc-b'),
@@ -47,7 +47,7 @@ test('aggregate with groupBy produces one series per label combination', () => {
 });
 
 test('aggregate rate_per_second normalizes by bucket seconds', () => {
-  const events: StreamerEvent[] = [
+  const events: RetrieverEvent[] = [
     ev('2026-01-01T00:00:00Z'),
     ev('2026-01-01T00:01:00Z'),
     ev('2026-01-01T00:02:00Z'),
@@ -57,7 +57,7 @@ test('aggregate rate_per_second normalizes by bucket seconds', () => {
 });
 
 test('aggregate drops events with unparseable timestamps', () => {
-  const events: StreamerEvent[] = [
+  const events: RetrieverEvent[] = [
     ev('2026-01-01T00:00:00Z'),
     ev('not-a-date'),
   ];
@@ -67,7 +67,7 @@ test('aggregate drops events with unparseable timestamps', () => {
 });
 
 test('aggregate unique_values counts cardinality per bucket', () => {
-  const events: StreamerEvent[] = [
+  const events: RetrieverEvent[] = [
     {
       timestamp: '2026-01-01T00:00:00Z',
       templateHash: '~t',

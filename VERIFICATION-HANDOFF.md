@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-22 (updated after Dor's 1.0.7 fluent-helm-charts fixes landed)
 **Against:** Live `log-10x` demo EKS cluster (tenant `d02ad247-1e32-49ee-918d-93467ba8b134`)
-**Charts under test:** `log10x-fluent/*` at `1.0.7`, `log10x-elastic/*` + `log10x-otel/*` still at `1.0.6`, `log10x-k8s/reporter-10x@1.0.7`, `log10x-k8s/streamer-10x@1.0.6`.
+**Charts under test:** `log10x-fluent/*` at `1.0.7`, `log10x-elastic/*` + `log10x-otel/*` still at `1.0.6`, `log10x-k8s/reporter-10x@1.0.7`, `log10x-k8s/retriever-10x@1.0.6`.
 
 ## TL;DR
 
@@ -16,9 +16,9 @@
 | `log10x-elastic/logstash@1.0.6` reporter | **BROKEN CHART** | Sidecar tenx needs to be spawned by logstash `pipe` output, chart runs it as independent container with empty stdin; pipeline inits then dies after ~9s. Advisor now blocks `forwarder=logstash`. |
 | `log10x-otel/opentelemetry-collector@1.0.6` reporter | **WORKS** | Unix socket wiring verified (`client connected to Forward protocol input`) + Publishing TenXSummary metrics. |
 | `log10x-k8s/reporter-10x@1.0.7` (non-invasive) | **WORKS (cleanest path)** | Full pipeline + real backpressure (2MB/s) + publish verified. |
-| `log10x-k8s/streamer-10x@1.0.6` | Already live in demo ns | Install pattern documented (S3 + 4 SQS queues + CloudWatch log group + IRSA role pre-provisioned). |
+| `log10x-k8s/retriever-10x@1.0.6` | Already live in demo ns | Install pattern documented (S3 + 4 SQS queues + CloudWatch log group + IRSA role pre-provisioned). |
 
-**Every app the user asked about (reporter, regulator, optimizer, streamer) now has at least one verified working install path.**
+**Every app the user asked about (reporter, regulator, optimizer, retriever) now has at least one verified working install path.**
 
 ## Pre-reqs the advisor MUST communicate
 
@@ -39,7 +39,7 @@ Repos:
 - `log10x-fluent` — fluent-bit, fluentd (+ fluent-operator)
 - `log10x-elastic` — filebeat (OK), logstash (BROKEN)
 - `log10x-otel` — opentelemetry-collector + kube-stack + demo + ebpf + operator
-- `log10x-k8s` — **reporter-10x (1.0.7), streamer-10x (1.0.6), cron-10x (1.0.6)**
+- `log10x-k8s` — **reporter-10x (1.0.7), retriever-10x (1.0.6), cron-10x (1.0.6)**
 
 Published charts that map to apps:
 
@@ -49,7 +49,7 @@ Published charts that map to apps:
 | Regulator | Same charts with `tenx.kind=regulate` | N/A (regulator needs bidirectional readback, must be inline) |
 | Optimizer | Same charts with `tenx.kind=optimize` (not yet verified) | N/A |
 | Compiler | NOT a forwarder chart — needs its own path (batch compile job, consuming symbol-library inputs and producing `.10x.tar`) | — |
-| Streamer | `log10x-k8s/streamer-10x@1.0.6` + S3 bucket + 4 SQS queues + CloudWatch log group (see demo values for pattern) | — |
+| Retriever | `log10x-k8s/retriever-10x@1.0.6` + S3 bucket + 4 SQS queues + CloudWatch log group (see demo values for pattern) | — |
 
 ## Key findings per forwarder
 
@@ -90,16 +90,16 @@ Published charts that map to apps:
 - **End-to-end verified**: pipeline init + `ForwardProtocolInputStream - client connected` + backpressure tester firing with `lastObjectSize: 2001006` (~2MB/s real load) + `📈 Publishing TenXSummary metrics to the log10x backend`
 - Works BEST with `config.git.enabled=false` — image's baked-in config is the flat apps topology the image expects. Enabling git clone of `log-10x/config@main` pulls the band-aid which breaks 1.0.7.
 
-### streamer (live in demo)
-- Chart: `log10x-k8s/streamer-10x@1.0.6` (image `log10x/quarkus-10x`)
+### retriever (live in demo)
+- Chart: `log10x-k8s/retriever-10x@1.0.6` (image `log10x/quarkus-10x`)
 - Prerequisites (infra):
   - S3 bucket `<name>` for source, `<name>/indexing-results/` for outputs
   - 4 SQS queues: `-index-queue`, `-query-queue`, `-subquery-queue`, `-stream-queue`
   - CloudWatch log group `/tenx/<name>/query`
   - IAM role via IRSA for S3/SQS access
 - `clusters[]` topology defines which pods handle `index`, `stream`, `query` roles
-- Fluent-bit forwarder pushes events into the streamer via the chart's `fluentBit` values block
-- Verified pattern from `helm get values tenx-streamer -n demo`
+- Fluent-bit forwarder pushes events into the retriever via the chart's `fluentBit` values block
+- Verified pattern from `helm get values tenx-retriever -n demo`
 
 ## Verified artifacts
 
@@ -118,4 +118,4 @@ Published charts that map to apps:
    ```
    First field is templateHash, rest are timestamp + high-cardinality vars. The raw form of this event was ~2KB of JSON-embedded text; the compact form is ~150 bytes. Trigger: `env: [{name: regulatorOptimize, value: "true"}]` on the forwarder pod. The chart's `tenx.optimize: true` field is chart-broken (references `tenx-optimize.lua` which is missing from `log10x/fluent-bit-10x:1.0.7-jit`) — do NOT use it. Recorded in `TenxKind` docstring. Follow-up: expose `optimize: boolean` as a first-class parameter on `advise-regulator` so users get the env workaround in their rendered install plan.
 5. **Compiler app**: verify the batch-compile install path. Likely a one-shot Job, not a DaemonSet. Needs its own advisor tool.
-6. **Image rebuild coordination**: once forwarder charts bump to `1.0.7` (pipeline-10x flat topology), drop the band-aid on `log-10x/config@main` as part of the regulator→reducer / streamer→offloader rename.
+6. **Image rebuild coordination**: once forwarder charts bump to `1.0.7` (pipeline-10x flat topology), drop the band-aid on `log-10x/config@main` as part of the regulator→reducer / retriever→offloader rename.

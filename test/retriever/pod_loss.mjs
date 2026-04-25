@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { execSync } from 'node:child_process';
 
-const STREAMER = 'http://a2936089108bb492cb41d18cb5b75f8d-1298006809.us-east-1.elb.amazonaws.com';
+const RETRIEVER = 'http://a2936089108bb492cb41d18cb5b75f8d-1298006809.us-east-1.elb.amazonaws.com';
 
 const qid = randomUUID();
 const to = Date.now();
@@ -18,7 +18,7 @@ const body = {
   processingTime: 300_000,
   resultSize: 52428800,
 };
-await fetch(`${STREAMER}/streamer/query`, {
+await fetch(`${RETRIEVER}/retriever/query`, {
   method: 'POST', headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify(body),
 });
@@ -26,7 +26,7 @@ console.log(`submitted qid=${qid}`);
 
 // Wait until stream-worker has dispatched at least a few tasks
 await sleep(15_000);
-const preStatus = await (await fetch(`${STREAMER}/streamer/query/${qid}/status`)).json();
+const preStatus = await (await fetch(`${RETRIEVER}/retriever/query/${qid}/status`)).json();
 console.log(`pre-kill: state=${preStatus.state} dispatch=${preStatus.summary?.streamDispatch} wc=${preStatus.summary?.streamWorkerComplete}`);
 
 // Now delete the stream-worker pod
@@ -41,7 +41,7 @@ const deadline = Date.now() + 420_000;
 let lastState;
 while (Date.now() < deadline) {
   await sleep(6_000);
-  const sr = await fetch(`${STREAMER}/streamer/query/${qid}/status`);
+  const sr = await fetch(`${RETRIEVER}/retriever/query/${qid}/status`);
   if (sr.status !== 200) continue;
   const j = await sr.json();
   const s = j.summary || {};

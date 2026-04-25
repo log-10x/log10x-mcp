@@ -11,7 +11,7 @@ import {
   MAX_SUB_WINDOWS,
   FULL_MODE_EVENT_THRESHOLD,
   REFUSAL_EVENT_THRESHOLD,
-} from '../src/lib/streamer-fidelity.js';
+} from '../src/lib/retriever-fidelity.js';
 import type { EnvConfig } from '../src/lib/environments.js';
 
 const fakeEnv: EnvConfig = {

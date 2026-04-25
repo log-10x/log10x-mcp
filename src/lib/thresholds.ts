@@ -13,7 +13,7 @@
 import { readFileSync } from 'fs';
 
 export interface InvestigateThresholds {
-  streamerEscalationThreshold: number;
+  retrieverEscalationThreshold: number;
   cleanChainThreshold: number;
   acuteNoiseFloor: number; // events/sec sustained
   driftMinSlopePerWeek: {
@@ -33,7 +33,7 @@ export interface InvestigateThresholds {
 }
 
 const SPEC_DEFAULTS: InvestigateThresholds = {
-  streamerEscalationThreshold: 0.5,
+  retrieverEscalationThreshold: 0.5,
   cleanChainThreshold: 0.7,
   acuteNoiseFloor: 0.001,
   driftMinSlopePerWeek: {

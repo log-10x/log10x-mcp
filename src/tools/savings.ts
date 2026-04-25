@@ -3,15 +3,15 @@
  *
  * Ported from the Grafana ROI analytics dashboard's canonical formula:
  *   edgeSavings    = (inputBytes - emittedBytes) × analyzerCost
- *   streamerSavings = indexedBytes × (analyzerCost - storageCost)
+ *   retrieverSavings = indexedBytes × (analyzerCost - storageCost)
  *                   - streamedBytes × analyzerCost
- *   totalSavings   = max(0, edgeSavings) + max(0, streamerSavings)
+ *   totalSavings   = max(0, edgeSavings) + max(0, retrieverSavings)
  *
  * The earlier version of this file used all_events_summaryBytes_total as the
  * output metric for every stage, which over-counted by a wide margin because
  * emitted/indexed/streamed are tracked on separate metrics.
  *
- * Streamer indexed metric has high per-series cardinality (~12k active series
+ * Retriever indexed metric has high per-series cardinality (~12k active series
  * per env because of the index_file label). A single `sum(increase(...[7d]))`
  * query blows the Prometheus server's query resource budget and returns 503.
  * The workaround is to chunk the window into N × 1d queries in parallel and
@@ -47,7 +47,7 @@ export async function executeSavings(
   const storagePerGb = args.storageCost ?? DEFAULT_STORAGE_COST_PER_GB;
   const period = costPeriodLabel(tf.days);
 
-  // Streamer indexed/streamed metrics need chunked evaluation: the indexed
+  // Retriever indexed/streamed metrics need chunked evaluation: the indexed
   // metric's ~12k series blows a single 7d/30d `increase()` query.
   //
   // Chunks return { sum, succeeded, total } so callers can annotate coverage.
@@ -96,27 +96,27 @@ export async function executeSavings(
          edgeIn7dRes, edgeOut7dRes, indexed7dResult, streamed7dResult] = await Promise.all([
     queryInstant(env, pql.edgeInputBytes(tf.range)).catch(() => null),
     queryInstant(env, pql.edgeEmittedBytes(tf.range)).catch(() => null),
-    chunkSum(pql.streamerIndexedBytesChunk),
-    chunkSum(pql.streamerStreamedBytesChunk),
+    chunkSum(pql.retrieverIndexedBytesChunk),
+    chunkSum(pql.retrieverStreamedBytesChunk),
     queryInstant(env, pql.pipelineUp()).catch(() => null),
     queryInstant(env, pql.distinctServices(tf.range)).catch(() => null),
     fetch7d ? queryInstant(env, pql.edgeInputBytes('7d')).catch(() => null) : Promise.resolve(null),
     fetch7d ? queryInstant(env, pql.edgeEmittedBytes('7d')).catch(() => null) : Promise.resolve(null),
-    fetch7d ? chunk7dSum(pql.streamerIndexedBytesChunk) : Promise.resolve({ sum: 0, succeeded: 7, total: 7 }),
-    fetch7d ? chunk7dSum(pql.streamerStreamedBytesChunk) : Promise.resolve({ sum: 0, succeeded: 7, total: 7 }),
+    fetch7d ? chunk7dSum(pql.retrieverIndexedBytesChunk) : Promise.resolve({ sum: 0, succeeded: 7, total: 7 }),
+    fetch7d ? chunk7dSum(pql.retrieverStreamedBytesChunk) : Promise.resolve({ sum: 0, succeeded: 7, total: 7 }),
   ]);
   const indexedBytes = indexedResult.sum;
   const streamedBytes = streamedResult.sum;
-  // Coverage fraction across the main streamer chunks (tf.days × 2 queries).
-  const mainStreamerChunksOk = indexedResult.succeeded + streamedResult.succeeded;
-  const mainStreamerChunksTotal = indexedResult.total + streamedResult.total;
-  const mainStreamerCoverage = mainStreamerChunksTotal > 0 ? mainStreamerChunksOk / mainStreamerChunksTotal : 1;
+  // Coverage fraction across the main retriever chunks (tf.days × 2 queries).
+  const mainRetrieverChunksOk = indexedResult.succeeded + streamedResult.succeeded;
+  const mainRetrieverChunksTotal = indexedResult.total + streamedResult.total;
+  const mainRetrieverCoverage = mainRetrieverChunksTotal > 0 ? mainRetrieverChunksOk / mainRetrieverChunksTotal : 1;
   const indexed7d = indexed7dResult.sum;
   const streamed7d = streamed7dResult.sum;
-  // Coverage fraction across the 14 streamer chunks (7 indexed + 7 streamed).
-  const streamer7dChunksOk = indexed7dResult.succeeded + streamed7dResult.succeeded;
-  const streamer7dChunksTotal = indexed7dResult.total + streamed7dResult.total;
-  const streamer7dCoverage = streamer7dChunksTotal > 0 ? streamer7dChunksOk / streamer7dChunksTotal : 1;
+  // Coverage fraction across the 14 retriever chunks (7 indexed + 7 streamed).
+  const retriever7dChunksOk = indexed7dResult.succeeded + streamed7dResult.succeeded;
+  const retriever7dChunksTotal = indexed7dResult.total + streamed7dResult.total;
+  const retriever7dCoverage = retriever7dChunksTotal > 0 ? retriever7dChunksOk / retriever7dChunksTotal : 1;
 
   const edgeIn = edgeInRes?.data?.result?.[0] ? parsePrometheusValue(edgeInRes.data.result[0]) : 0;
   const edgeEmitted = edgeOutRes?.data?.result?.[0] ? parsePrometheusValue(edgeOutRes.data.result[0]) : 0;
@@ -127,9 +127,9 @@ export async function executeSavings(
   const edgeReducedBytes = Math.max(0, edgeIn - edgeEmitted);
   const edgeSavings = bytesToCost(edgeReducedBytes, costPerGb);
 
-  // Streamer savings: cost avoided by keeping data in S3 instead of the SIEM
+  // Retriever savings: cost avoided by keeping data in S3 instead of the SIEM
   // = indexedBytes * (analyzerCost - storageCost) - streamedBytes * analyzerCost
-  const streamerSavings = Math.max(
+  const retrieverSavings = Math.max(
     0,
     bytesToCost(indexedBytes, costPerGb - storagePerGb) - bytesToCost(streamedBytes, costPerGb)
   );
@@ -138,7 +138,7 @@ export async function executeSavings(
   // emission — unshipped potential is not realized savings.
   const edgeEmissionMissing = edgeIn > 0 && edgeEmitted === 0;
   const realizedEdgeSavings = edgeEmissionMissing ? 0 : edgeSavings;
-  const totalSaved = realizedEdgeSavings + streamerSavings;
+  const totalSaved = realizedEdgeSavings + retrieverSavings;
   const annualProjection = totalSaved * (365 / tf.days);
 
   const lines: string[] = [];
@@ -164,7 +164,7 @@ export async function executeSavings(
     lines.push(`             (input ${fmtBytes(edgeIn)} − emitted ${fmtBytes(edgeEmitted)})`);
   }
   if (indexedBytes > 0 || streamedBytes > 0) {
-    lines.push(`  Streamer:  ${fmtBytes(indexedBytes).padEnd(14)} in S3      → ${fmtDollar(streamerSavings)}${period} saved`);
+    lines.push(`  Retriever:  ${fmtBytes(indexedBytes).padEnd(14)} in S3      → ${fmtDollar(retrieverSavings)}${period} saved`);
     lines.push(`             (streamed back: ${fmtBytes(streamedBytes)})`);
   }
 
@@ -173,12 +173,12 @@ export async function executeSavings(
   } else {
     lines.push('');
     lines.push(`  Total: ${fmtDollar(totalSaved)}${period} · ${fmtDollar(annualProjection)}/yr projected`);
-    // Headline reliability caveat: if any streamer chunks in the MAIN query silently
+    // Headline reliability caveat: if any retriever chunks in the MAIN query silently
     // failed, the headline number is an underestimate and the caller needs to know.
     // (Edge queries are single-shot, not chunked, so they either fully succeed or return null.)
-    if (mainStreamerCoverage < 1 && (indexedBytes > 0 || streamedBytes > 0)) {
-      const pct = Math.round(mainStreamerCoverage * 100);
-      lines.push(`  _Coverage note: only ${mainStreamerChunksOk}/${mainStreamerChunksTotal} streamer chunks returned (${pct}%). The Total above is a conservative underestimate — true savings are equal or higher. This is caused by intermittent Prometheus server aggregation limits on the bleeding-edge day; retry in 30s for a cleaner number._`);
+    if (mainRetrieverCoverage < 1 && (indexedBytes > 0 || streamedBytes > 0)) {
+      const pct = Math.round(mainRetrieverCoverage * 100);
+      lines.push(`  _Coverage note: only ${mainRetrieverChunksOk}/${mainRetrieverChunksTotal} retriever chunks returned (${pct}%). The Total above is a conservative underestimate — true savings are equal or higher. This is caused by intermittent Prometheus server aggregation limits on the bleeding-edge day; retry in 30s for a cleaner number._`);
     }
     if (edgeInRes === null || edgeOutRes === null) {
       lines.push(`  _Coverage note: the main edge baseline query failed. The Total above may be missing the Edge savings contribution. Retry the call._`);
@@ -188,8 +188,8 @@ export async function executeSavings(
     // If the 7d-annualized is >2× the trailing-window-annualized, the environment is ramping
     // and the trailing-window number will understate current cost.
     //
-    // IMPORTANT: the internal 7d streamer queries sometimes get partial coverage because
-    // `streamerIndexedBytesChunk` at offset=0d (the bleeding edge) can hit a Prometheus
+    // IMPORTANT: the internal 7d retriever queries sometimes get partial coverage because
+    // `retrieverIndexedBytesChunk` at offset=0d (the bleeding edge) can hit a Prometheus
     // server aggregation limit (~5GB per query) on high-cardinality envs. The previous
     // version silently zero-filled failed chunks, producing a false-all-clear on the
     // run-rate note (caught by Final-1 sub-agent audit). This version reports coverage
@@ -200,21 +200,21 @@ export async function executeSavings(
       const edgeOut7d = edgeOut7dRes?.data?.result?.[0] ? parsePrometheusValue(edgeOut7dRes.data.result[0]) : 0;
       const edgeReduced7d = Math.max(0, edgeIn7d - edgeOut7d);
       const edge7dSavings = bytesToCost(edgeReduced7d, costPerGb);
-      const streamer7dSavings = Math.max(
+      const retriever7dSavings = Math.max(
         0,
         bytesToCost(indexed7d, costPerGb - storagePerGb) - bytesToCost(streamed7d, costPerGb)
       );
-      const total7d = edge7dSavings + streamer7dSavings;
+      const total7d = edge7dSavings + retriever7dSavings;
       const annual7d = total7d * (365 / 7);
 
-      // Coverage: edge contributes 2 queries (both must succeed). streamer contributes
+      // Coverage: edge contributes 2 queries (both must succeed). retriever contributes
       // 14 chunks (7 indexed + 7 streamed). If everything succeeded, coverage is 1.0.
-      // Partial streamer coverage is an UNDERESTIMATE of annual7d — the true value
+      // Partial retriever coverage is an UNDERESTIMATE of annual7d — the true value
       // would be equal or higher. So if the partial math says annual7d > 2×, the real
       // value is definitely > 2×. Only the other direction (partial says <2× but true
       // value is >2×) is a risk, and only when partial coverage is low.
-      const fullCoverage = edge7dOk && streamer7dCoverage >= 1;
-      const enoughCoverage = edge7dOk && streamer7dCoverage >= 0.7; // 10 of 14 chunks min
+      const fullCoverage = edge7dOk && retriever7dCoverage >= 1;
+      const enoughCoverage = edge7dOk && retriever7dCoverage >= 0.7; // 10 of 14 chunks min
 
       if (!edge7dOk) {
         lines.push('');
@@ -223,14 +223,14 @@ export async function executeSavings(
         // Partial or full — if the partial says ramping, the full definitely says ramping.
         const coverageNote = fullCoverage
           ? ''
-          : ` _(streamer coverage: ${streamer7dChunksOk}/${streamer7dChunksTotal} chunks — this is a conservative underestimate; true rate is equal or higher)_`;
+          : ` _(retriever coverage: ${retriever7dChunksOk}/${retriever7dChunksTotal} chunks — this is a conservative underestimate; true rate is equal or higher)_`;
         lines.push('');
         lines.push(`  **Run-rate note**: The last 7 days project to ${fmtDollar(annual7d)}/yr — ${Math.round(annual7d / annualProjection)}× higher than the ${tf.label} trailing average. Volume has been ramping. Use the 7-day figure for forward-looking projections.${coverageNote}`);
       } else if (!enoughCoverage) {
         // Partial coverage AND the partial math was below threshold — this is the
         // failure mode where the true value could be above threshold. Warn.
         lines.push('');
-        lines.push(`  _Run-rate check inconclusive: only ${streamer7dChunksOk}/${streamer7dChunksTotal} streamer chunks returned (coverage ${Math.round(streamer7dCoverage * 100)}%). Partial math projects ${fmtDollar(annual7d)}/yr (${(annual7d / annualProjection).toFixed(1)}× trailing), which is below the 2× ramp-up threshold — but the true value may be higher due to missing chunks. Retry in 30s to confirm whether the environment is stable or ramping._`);
+        lines.push(`  _Run-rate check inconclusive: only ${retriever7dChunksOk}/${retriever7dChunksTotal} retriever chunks returned (coverage ${Math.round(retriever7dCoverage * 100)}%). Partial math projects ${fmtDollar(annual7d)}/yr (${(annual7d / annualProjection).toFixed(1)}× trailing), which is below the 2× ramp-up threshold — but the true value may be higher due to missing chunks. Retry in 30s to confirm whether the environment is stable or ramping._`);
       }
       // Full coverage AND annual7d <= threshold → stable. No note needed.
     }
@@ -244,11 +244,11 @@ export async function executeSavings(
     lines.push(`  ${parts.join(' · ')}`);
   }
 
-  // Warn when Streamer data was present — those chunked queries can take 30–90s
+  // Warn when Retriever data was present — those chunked queries can take 30–90s
   // on high-cardinality envs. Let the caller know this is expected.
   if (indexedBytes > 0) {
     lines.push('');
-    lines.push('  _Streamer figures use chunked parallel queries (one per day) to avoid server budget limits on high-cardinality indexed metrics. This call may take 30–90s on large deployments._');
+    lines.push('  _Retriever figures use chunked parallel queries (one per day) to avoid server budget limits on high-cardinality indexed metrics. This call may take 30–90s on large deployments._');
   }
 
   return lines.join('\n');
