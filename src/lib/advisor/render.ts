@@ -8,7 +8,7 @@
  * target) live in the per-app advisor files.
  */
 
-import type { AdvisePlan } from './types.js';
+import type { AdvisePlan, GitopsExplainer } from './types.js';
 
 export function renderPlan(plan: AdvisePlan, action: 'install' | 'verify' | 'teardown' | 'all'): string {
   const lines: string[] = [];
@@ -70,6 +70,15 @@ export function renderPlan(plan: AdvisePlan, action: 'install' | 'verify' | 'tea
     renderSteps(lines, plan.install);
   }
 
+  // ── GitOps explainer ──
+  // Renders between Install and Verify so the user sees it after the
+  // pod is up but before they exercise it. Only emitted for plans
+  // whose app supports MCP-managed runtime config updates (today:
+  // regulator + compactRegulator).
+  if ((action === 'install' || action === 'all') && plan.gitopsExplainer) {
+    renderGitopsExplainer(lines, plan.gitopsExplainer);
+  }
+
   // ── Verify ──
   if ((action === 'verify' || action === 'all') && plan.verify.length > 0) {
     lines.push('## Verify');
@@ -124,6 +133,64 @@ function renderSteps(lines: string[], steps: AdvisePlan['install']): void {
       lines.push('```');
       lines.push('');
     }
+  }
+}
+
+function renderGitopsExplainer(lines: string[], g: GitopsExplainer): void {
+  lines.push('## GitOps — MCP-managed runtime config (optional)');
+  lines.push('');
+  lines.push(g.headline);
+  lines.push('');
+
+  if (g.whenToEnable.length > 0) {
+    lines.push('**Enable this if:**');
+    for (const w of g.whenToEnable) lines.push(`- ${w}`);
+    lines.push('');
+  }
+  if (g.whenToSkip.length > 0) {
+    lines.push('**Skip this if:**');
+    for (const w of g.whenToSkip) lines.push(`- ${w}`);
+    lines.push('');
+  }
+
+  lines.push('### Repo layout');
+  lines.push('');
+  lines.push('Mirror this in your GitOps config repo (the engine pulls it on each poll):');
+  lines.push('');
+  lines.push('```');
+  for (const r of g.repoLayout) {
+    const padding = ' '.repeat(Math.max(1, 44 - r.path.length));
+    lines.push(`${r.path}${padding}# ${r.comment}`);
+  }
+  lines.push('```');
+  lines.push('');
+
+  lines.push('### Pod env vars');
+  lines.push('');
+  lines.push('Set these on the regulator pod (helm `--set env.<NAME>=<value>` or the chart\'s env block):');
+  lines.push('');
+  lines.push('| Env | Required | Default | Note |');
+  lines.push('|---|---|---|---|');
+  for (const e of g.envVars) {
+    lines.push(
+      `| \`${e.name}\` | ${e.required ? '**yes**' : 'optional'} | \`${e.value}\` | ${e.note ? e.note.replace(/\|/g, '\\|') : '—'} |`
+    );
+  }
+  lines.push('');
+
+  lines.push('### Once wired, author entries via the MCP');
+  lines.push('');
+  lines.push(`Run \`${g.mcpHandoff.tool}\` to compose the per-pattern compact decisions and emit a literal \`gh\` PR command. Example:`);
+  lines.push('');
+  lines.push('```');
+  lines.push(g.mcpHandoff.example);
+  lines.push('```');
+  lines.push('');
+
+  if (g.caveats.length > 0) {
+    lines.push('### Caveats');
+    for (const c of g.caveats) lines.push(`- ${c}`);
+    lines.push('');
   }
 }
 

@@ -14,7 +14,7 @@
  */
 
 import type { DiscoverySnapshot, ForwarderKind } from '../discovery/types.js';
-import type { AdvisePlan, PlanStep, VerifyProbe, PreflightCheck } from './types.js';
+import type { AdvisePlan, PlanStep, VerifyProbe, PreflightCheck, GitopsExplainer } from './types.js';
 import {
   REPORTER_FORWARDER_SPECS,
   STANDALONE_SPEC,
@@ -256,6 +256,64 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
     teardown,
     notes,
     blockers,
+    gitopsExplainer:
+      app === 'regulator' && shape === 'inline' && blockers.length === 0
+        ? buildCompactRegulatorGitopsExplainer({ optimize: args.optimize === true })
+        : undefined,
+  };
+}
+
+/**
+ * GitOps section explaining MCP-managed compactRegulator updates.
+ *
+ * The regulator's compact decision can be:
+ *   - global ON via `regulatorOptimize=true` (compact every event), or
+ *   - per-pattern via the compactRegulator module (CSV lookup + JS predicate),
+ *     which is what this section is for.
+ *
+ * When `optimize=true`, MCP-managed per-pattern decisions are still useful
+ * (to OPT OUT specific audit/compliance patterns), but the customer can
+ * also skip GitOps entirely. We surface that trade-off in `whenToSkip`.
+ */
+function buildCompactRegulatorGitopsExplainer(opts: { optimize: boolean }): GitopsExplainer {
+  return {
+    headline:
+      'The compactRegulator decides per-event whether to emit `encode()` (compact, ~20-40x smaller) or `fullText`. Decisions live in a CSV the engine pulls from your GitHub repo on a schedule. Wire GitOps once and the MCP can author per-pattern PRs (`log10x_advise_compact`) — the engine hot-reloads the CSV without a pod restart.',
+    whenToEnable: [
+      'You want **selective** compaction — compact most patterns but preserve specific ones (audit, compliance, debug).',
+      'You want decisions to evolve over time without redeploying the regulator.',
+      'You want the MCP to manage the compact-decisions file via PRs (review-able, reversible).',
+    ],
+    whenToSkip: [
+      opts.optimize
+        ? '`regulatorOptimize=true` is already set on this plan, which compacts every event. Add GitOps only if you need to opt SPECIFIC patterns OUT of compaction (audit/compliance).'
+        : 'You will set `regulatorOptimize=true` later to compact every event uniformly — no per-pattern decisions needed.',
+      'You will not be using the regulator app at all (this section is regulator-only).',
+    ],
+    repoLayout: [
+      { path: 'pipelines/run/regulate/compact/compact-lookup.csv', comment: 'MCP edits this — CSV change → hot reload (no restart)' },
+      { path: 'pipelines/run/regulate/compact/compact-object-global.js', comment: 'predicate logic — JS change → pipeline restart' },
+    ],
+    envVars: [
+      { name: 'GH_ENABLED', value: 'true', required: true, note: 'master switch for the GitHub puller' },
+      { name: 'GH_REPO', value: 'your-org/your-config-repo', required: true, note: 'owner/name of the GitOps config repo (forked from log-10x/config recommended)' },
+      { name: 'GH_TOKEN', value: '<github PAT>', required: true, note: 'PAT with Contents: Read scope; store as a k8s Secret + reference via valueFrom' },
+      { name: 'GH_BRANCH', value: 'main', required: false, note: 'branch to pull from' },
+      { name: 'GH_SYNC_INTERVAL', value: '30s', required: false, note: 'engine re-fetches the repo this often' },
+      { name: 'compactRegulatorLookupFile', value: 'pipelines/run/regulate/compact/compact-lookup.csv', required: true, note: 'must match the path inside your GitOps repo' },
+      { name: 'compactRegulatorFieldNames', value: '[symbolMessage]', required: false, note: 'fields joined with `_` to form each event\'s lookup key' },
+      { name: 'compactRegulatorDefault', value: 'false', required: false, note: '`false`: entries opt INTO compaction. `true`: entries opt OUT (use with regulatorOptimize=true)' },
+    ],
+    mcpHandoff: {
+      tool: 'log10x_advise_compact',
+      example:
+        'log10x_advise_compact \\\n  gitops_repo=your-org/your-config-repo \\\n  compact=[payment_retry_gateway_timeout, k8s_health_probe_200] \\\n  preserve=[auth_audit_trail] \\\n  reason="OPS-5123: spike triage"',
+    },
+    caveats: [
+      'The default `paths` glob in `pipelines/gitops/config.yaml` is hardcoded to `test/*.csv` for local testing. Override either by forking the config repo and editing the glob, or by setting `GH_PATH=pipelines/run/regulate/compact/*` (Gap A — env override is being wired up).',
+      'Customers running multiple regulator pods all watching the same GitOps repo will see fan-out: a single PR triggers reload on every pod within a poll window. That is the intended behavior — kept here as a heads-up for capacity planning.',
+      'The GitOps puller pulls files into a temp dir scoped per `(repo, branch, sha, pollInterval)`. Folder names rotate as the branch advances; the customer never references that path directly — only the repo-relative path in `compactRegulatorLookupFile`.',
+    ],
   };
 }
 

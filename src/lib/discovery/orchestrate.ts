@@ -142,11 +142,32 @@ function deriveRecommendations(
     if (!current) streamerSqsUrls[q.role] = q.url;
   }
 
+  // Pull GitOps + compactRegulator wiring from any running regulator pod.
+  // Multiple regulators in the cluster (e.g., dev + prod) is rare;
+  // first-wins matches the alreadyInstalled iteration above. Only record
+  // GH_REPO if GH_ENABLED is also literally "true" — a repo set with the
+  // master switch off would mislead the compact advisor.
+  let regulatorGitopsRepo: string | undefined;
+  let regulatorCompactLookupFile: string | undefined;
+  for (const app of kubectl.log10xApps) {
+    if (app.kind !== 'regulator') continue;
+    const env = app.env ?? {};
+    if (env.GH_ENABLED === 'true' && env.GH_REPO) {
+      regulatorGitopsRepo = env.GH_REPO;
+    }
+    if (env.compactRegulatorLookupFile) {
+      regulatorCompactLookupFile = env.compactRegulatorLookupFile;
+    }
+    if (regulatorGitopsRepo || regulatorCompactLookupFile) break;
+  }
+
   return {
     suggestedNamespace,
     existingForwarder,
     existingForwarderNamespace,
     streamerS3Bucket: streamerBucket,
+    regulatorGitopsRepo,
+    regulatorCompactLookupFile,
     streamerSqsUrls: Object.keys(streamerSqsUrls).length > 0 ? streamerSqsUrls : undefined,
     alreadyInstalled,
   };

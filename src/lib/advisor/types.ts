@@ -54,6 +54,45 @@ export interface VerifyProbe {
 }
 
 /**
+ * Optional GitOps section for install plans whose app supports
+ * MCP-managed runtime config updates (today: the Regulator's
+ * compactRegulator). Renders between Install and Verify.
+ *
+ * The mechanism: a GitHub-pull module inside the engine fetches the
+ * customer's config repo on a schedule, drops it into a temp dir,
+ * adds that dir to the engine's working folders. The
+ * ResourceReloadUnit watches files there: CSV changes hot-reload
+ * via FileResourceLookup.reset() (no pipeline restart); .js / .yaml
+ * changes call restartPipeline().
+ *
+ * The MCP's log10x_advise_compact tool authors PRs against the
+ * customer repo. Once merged, the engine picks up the change on the
+ * next poll. End-to-end seconds, no redeploy.
+ */
+export interface GitopsExplainer {
+  /** Headline — one sentence describing the value prop. */
+  headline: string;
+  /** When the user would want this enabled. */
+  whenToEnable: string[];
+  /** When the user can skip this. */
+  whenToSkip: string[];
+  /**
+   * Repo-relative paths the MCP / customer authors. Renders as a
+   * stylized tree.
+   */
+  repoLayout: { path: string; comment: string }[];
+  /**
+   * Pod env vars (or helm values keys) the customer sets. Each
+   * `value` is a literal default the customer pastes in.
+   */
+  envVars: { name: string; value: string; required: boolean; note?: string }[];
+  /** MCP tool to call once GitOps is wired. */
+  mcpHandoff: { tool: string; example: string };
+  /** Caveats / known gaps the customer should be aware of. */
+  caveats: string[];
+}
+
+/**
  * The complete plan. Keep the shape narrow so the render layer and the
  * subagent-dogfooding harness can both consume it structurally.
  */
@@ -86,4 +125,9 @@ export interface AdvisePlan {
    * "provide X and re-run".
    */
   blockers: string[];
+  /**
+   * Optional GitOps section explaining MCP-managed runtime config
+   * updates. Set for app=regulator; omitted for reporter/streamer.
+   */
+  gitopsExplainer?: GitopsExplainer;
 }

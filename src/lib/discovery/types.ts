@@ -48,6 +48,16 @@ export interface DetectedLog10xApp {
   image: string;
   helmRelease?: string;
   labels: Record<string, string>;
+  /**
+   * Literal-valued environment variables on the matching container.
+   * Only `value`-form entries are captured (entries using `valueFrom`
+   * are dropped — exposing secret refs would be unsafe and the
+   * downstream consumers don't need them). The advisor uses this to
+   * extract things like `GH_REPO` (gitops target repo) so MCP tools
+   * like `log10x_advise_compact` can default `gitops_repo` from the
+   * running pod.
+   */
+  env?: Record<string, string>;
 }
 
 /** A Helm release in the cluster (what `helm list -A` returns). */
@@ -142,6 +152,17 @@ export interface Recommendations {
   streamerS3Bucket?: string;
   streamerSqsUrls?: Partial<Record<'index' | 'query' | 'subquery' | 'stream', string>>;
   alreadyInstalled: Partial<Record<Log10xAppKind, string>>;
+  /**
+   * `GH_REPO` from a running regulator pod, if detected. Used by the
+   * MCP's compactRegulator advisor to default the GitOps target repo.
+   */
+  regulatorGitopsRepo?: string;
+  /**
+   * `compactRegulatorLookupFile` from a running regulator pod, if set.
+   * Used by the MCP's compactRegulator advisor to default the lookup
+   * path inside the GitOps repo.
+   */
+  regulatorCompactLookupFile?: string;
 }
 
 /** The complete discovery snapshot. Immutable once emitted. */
