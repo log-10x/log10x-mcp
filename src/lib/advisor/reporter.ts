@@ -1,12 +1,12 @@
 /**
- * Reporter + Regulator install/verify/teardown plan builder.
+ * Reporter + Reducer install/verify/teardown plan builder.
  *
  * Given a DiscoverySnapshot + user args, produce an `AdvisePlan` that
  * covers the whole lifecycle for one forwarder kind. The plan is pure
  * data — rendering to markdown is the render layer's job.
  *
  * The same builder serves both apps: Reporter (kind=report, read-only
- * metric emission) and Regulator (kind=regulate, read + write back to
+ * metric emission) and Reducer (kind=regulate, read + write back to
  * the forwarder with mute/sample/compact applied). They share every
  * forwarder spec, every chart, every preflight check. The single
  * differentiator is the `kind` value baked into the tenx values block,
@@ -24,7 +24,7 @@ import {
 } from './reporter-forwarders.js';
 import { run } from '../discovery/shell.js';
 
-export type AdvisorApp = 'reporter' | 'regulator';
+export type AdvisorApp = 'reporter' | 'reducer';
 
 /**
  * Deployment shape — orthogonal to forwarder kind.
@@ -47,7 +47,7 @@ export interface ReporterAdviseArgs {
    * Deployment shape. Default: 'inline'. When 'standalone', the plan
    * installs reporter-10x alongside the user's forwarder instead of
    * replacing it — `forwarder` is kept in the plan as detected context
-   * only and regulator/optimize combinations become blockers.
+   * only and reducer/optimize combinations become blockers.
    */
   shape?: DeploymentShape;
   /** Forwarder to target. If omitted, uses the snapshot's recommendation. */
@@ -66,9 +66,9 @@ export interface ReporterAdviseArgs {
   splunkHecToken?: string;
   /**
    * Enable encoded event output (compact templateHash+vars form,
-   * ~20-40x volume reduction). Only meaningful when app='regulator'.
+   * ~20-40x volume reduction). Only meaningful when app='reducer'.
    * Silently ignored otherwise. Verified working on fluent-bit@1.0.7 +
-   * fluentd@1.0.7 via the `regulatorOptimize=true` env-var workaround
+   * fluentd@1.0.7 via the `reducerOptimize=true` env-var workaround
    * (the chart's `tenx.optimize: true` path is chart-broken — do NOT
    * use it directly). Unverified on filebeat/logstash/otel-collector.
    */
@@ -83,7 +83,7 @@ export interface ReporterAdviseArgs {
 
 const APP_TO_KIND: Record<AdvisorApp, TenxKind> = {
   reporter: 'report',
-  regulator: 'regulate',
+  reducer: 'regulate',
 };
 
 /** Produce the plan. Never throws — surfaces missing input as `blockers`. */
@@ -120,7 +120,7 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   // Shape=standalone only supports reporter (report-only). The
   // reporter-10x chart has no hook into the user's forwarder output,
   // so it can't regulate/filter/compact events — only emit metrics.
-  if (shape === 'standalone' && app === 'regulator') {
+  if (shape === 'standalone' && app === 'reducer') {
     blockers.push(
       'shape=standalone is only valid for app=reporter. The `log10x-k8s/reporter-10x` chart bundles its own fluent-bit + tenx-edge and reads container logs in parallel to your existing forwarder — it has no path to write regulated events back through that forwarder. Either switch to shape=inline (replaces your forwarder with a log10x-repackaged version) or app=reporter.'
     );
@@ -153,12 +153,12 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   }
   // optimize=true path, now unified across all charts at 1.0.7 — every
   // chart (fluent-bit, fluentd, filebeat, logstash, otel-collector) maps
-  // kind=optimize to @apps/regulator + regulatorOptimize=true env var.
+  // kind=optimize to __SAVE_APPS_REDUCER__ + reducerOptimize=true env var.
   // No per-forwarder blocker remains (logstash is blocked above for the
   // sidecar wiring bug, which applies regardless of optimize).
   if (shape === 'inline' && args.optimize && app === 'reporter') {
     blockers.push(
-      'optimize=true is a Regulator-app feature (it encodes events emitted back through the forwarder). The Reporter app does not emit events back through the forwarder — it only publishes aggregated TenXSummary metrics. Drop `optimize` or switch to `app=regulator`.'
+      'optimize=true is a Reducer-app feature (it encodes events emitted back through the forwarder). The Reporter app does not emit events back through the forwarder — it only publishes aggregated TenXSummary metrics. Drop `optimize` or switch to `app=reducer`.'
     );
   }
 
@@ -172,7 +172,7 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   );
 
   const notes: string[] = [];
-  const appTitle = app === 'reporter' ? 'Reporter' : 'Regulator';
+  const appTitle = app === 'reporter' ? 'Reporter' : 'Reducer';
   if (snapshot.recommendations.alreadyInstalled[app]) {
     notes.push(
       `A ${appTitle} is already installed in namespace \`${snapshot.recommendations.alreadyInstalled[app]}\`. Installing a second release under a different name + namespace is safe but will duplicate ${app === 'reporter' ? 'metric emission' : 'regulation'} unless the existing one is torn down first.`
@@ -257,38 +257,38 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
     notes,
     blockers,
     gitopsExplainer:
-      app === 'regulator' && shape === 'inline' && blockers.length === 0
-        ? buildCompactRegulatorGitopsExplainer({ optimize: args.optimize === true })
+      app === 'reducer' && shape === 'inline' && blockers.length === 0
+        ? buildCompactReducerGitopsExplainer({ optimize: args.optimize === true })
         : undefined,
   };
 }
 
 /**
- * GitOps section explaining MCP-managed compactRegulator updates.
+ * GitOps section explaining MCP-managed compactReducer updates.
  *
- * The regulator's compact decision can be:
- *   - global ON via `regulatorOptimize=true` (compact every event), or
- *   - per-pattern via the compactRegulator module (CSV lookup + JS predicate),
+ * The reducer's compact decision can be:
+ *   - global ON via `reducerOptimize=true` (compact every event), or
+ *   - per-pattern via the compactReducer module (CSV lookup + JS predicate),
  *     which is what this section is for.
  *
  * When `optimize=true`, MCP-managed per-pattern decisions are still useful
  * (to OPT OUT specific audit/compliance patterns), but the customer can
  * also skip GitOps entirely. We surface that trade-off in `whenToSkip`.
  */
-function buildCompactRegulatorGitopsExplainer(opts: { optimize: boolean }): GitopsExplainer {
+function buildCompactReducerGitopsExplainer(opts: { optimize: boolean }): GitopsExplainer {
   return {
     headline:
-      'The compactRegulator decides per-event whether to emit `encode()` (compact, ~20-40x smaller) or `fullText`. Decisions live in a CSV the engine pulls from your GitHub repo on a schedule. Wire GitOps once and the MCP can author per-pattern PRs (`log10x_advise_compact`) — the engine hot-reloads the CSV without a pod restart.',
+      'The compactReducer decides per-event whether to emit `encode()` (compact, ~20-40x smaller) or `fullText`. Decisions live in a CSV the engine pulls from your GitHub repo on a schedule. Wire GitOps once and the MCP can author per-pattern PRs (`log10x_advise_compact`) — the engine hot-reloads the CSV without a pod restart.',
     whenToEnable: [
       'You want **selective** compaction — compact most patterns but preserve specific ones (audit, compliance, debug).',
-      'You want decisions to evolve over time without redeploying the regulator.',
+      'You want decisions to evolve over time without redeploying the reducer.',
       'You want the MCP to manage the compact-decisions file via PRs (review-able, reversible).',
     ],
     whenToSkip: [
       opts.optimize
-        ? '`regulatorOptimize=true` is already set on this plan, which compacts every event. Add GitOps only if you need to opt SPECIFIC patterns OUT of compaction (audit/compliance).'
-        : 'You will set `regulatorOptimize=true` later to compact every event uniformly — no per-pattern decisions needed.',
-      'You will not be using the regulator app at all (this section is regulator-only).',
+        ? '`reducerOptimize=true` is already set on this plan, which compacts every event. Add GitOps only if you need to opt SPECIFIC patterns OUT of compaction (audit/compliance).'
+        : 'You will set `reducerOptimize=true` later to compact every event uniformly — no per-pattern decisions needed.',
+      'You will not be using the reducer app at all (this section is reducer-only).',
     ],
     repoLayout: [
       { path: 'pipelines/run/regulate/compact/compact-lookup.csv', comment: 'MCP edits this — CSV change → hot reload (no restart)' },
@@ -300,9 +300,9 @@ function buildCompactRegulatorGitopsExplainer(opts: { optimize: boolean }): Gito
       { name: 'GH_TOKEN', value: '<github PAT>', required: true, note: 'PAT with Contents: Read scope; store as a k8s Secret + reference via valueFrom' },
       { name: 'GH_BRANCH', value: 'main', required: false, note: 'branch to pull from' },
       { name: 'GH_SYNC_INTERVAL', value: '30s', required: false, note: 'engine re-fetches the repo this often' },
-      { name: 'compactRegulatorLookupFile', value: 'pipelines/run/regulate/compact/compact-lookup.csv', required: true, note: 'must match the path inside your GitOps repo' },
-      { name: 'compactRegulatorFieldNames', value: '[symbolMessage]', required: false, note: 'fields joined with `_` to form each event\'s lookup key' },
-      { name: 'compactRegulatorDefault', value: 'false', required: false, note: '`false`: entries opt INTO compaction. `true`: entries opt OUT (use with regulatorOptimize=true)' },
+      { name: 'compactReducerLookupFile', value: 'pipelines/run/regulate/compact/compact-lookup.csv', required: true, note: 'must match the path inside your GitOps repo' },
+      { name: 'compactReducerFieldNames', value: '[symbolMessage]', required: false, note: 'fields joined with `_` to form each event\'s lookup key' },
+      { name: 'compactReducerDefault', value: 'false', required: false, note: '`false`: entries opt INTO compaction. `true`: entries opt OUT (use with reducerOptimize=true)' },
     ],
     mcpHandoff: {
       tool: 'log10x_advise_compact',
@@ -311,8 +311,8 @@ function buildCompactRegulatorGitopsExplainer(opts: { optimize: boolean }): Gito
     },
     caveats: [
       'The default `paths` glob in `pipelines/gitops/config.yaml` is hardcoded to `test/*.csv` for local testing. Override either by forking the config repo and editing the glob, or by setting `GH_PATH=pipelines/run/regulate/compact/*` (Gap A — env override is being wired up).',
-      'Customers running multiple regulator pods all watching the same GitOps repo will see fan-out: a single PR triggers reload on every pod within a poll window. That is the intended behavior — kept here as a heads-up for capacity planning.',
-      'The GitOps puller pulls files into a temp dir scoped per `(repo, branch, sha, pollInterval)`. Folder names rotate as the branch advances; the customer never references that path directly — only the repo-relative path in `compactRegulatorLookupFile`.',
+      'Customers running multiple reducer pods all watching the same GitOps repo will see fan-out: a single PR triggers reload on every pod within a poll window. That is the intended behavior — kept here as a heads-up for capacity planning.',
+      'The GitOps puller pulls files into a temp dir scoped per `(repo, branch, sha, pollInterval)`. Folder names rotate as the branch advances; the customer never references that path directly — only the repo-relative path in `compactReducerLookupFile`.',
     ],
   };
 }

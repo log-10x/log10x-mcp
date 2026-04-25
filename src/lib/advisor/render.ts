@@ -74,7 +74,7 @@ export function renderPlan(plan: AdvisePlan, action: 'install' | 'verify' | 'tea
   // Renders between Install and Verify so the user sees it after the
   // pod is up but before they exercise it. Only emitted for plans
   // whose app supports MCP-managed runtime config updates (today:
-  // regulator + compactRegulator).
+  // reducer + compactReducer).
   if ((action === 'install' || action === 'all') && plan.gitopsExplainer) {
     renderGitopsExplainer(lines, plan.gitopsExplainer);
   }
@@ -167,7 +167,7 @@ function renderGitopsExplainer(lines: string[], g: GitopsExplainer): void {
 
   lines.push('### Pod env vars');
   lines.push('');
-  lines.push('Set these on the regulator pod (helm `--set env.<NAME>=<value>` or the chart\'s env block):');
+  lines.push('Set these on the reducer pod (helm `--set env.<NAME>=<value>` or the chart\'s env block):');
   lines.push('');
   lines.push('| Env | Required | Default | Note |');
   lines.push('|---|---|---|---|');

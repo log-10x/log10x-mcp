@@ -5,7 +5,7 @@
  * LOG10X_THRESHOLDS_FILE at process startup — the file is merged against
  * the defaults, so users only need to specify the keys they care about.
  *
- * Future: the canonical source is the Regulator policy file (git-versioned,
+ * Future: the canonical source is the Reducer policy file (git-versioned,
  * PR-reviewed) alongside the mute entries. Wire that once the Reporter
  * config-read path exists.
  */

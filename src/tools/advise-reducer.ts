@@ -1,9 +1,9 @@
 /**
- * log10x_advise_regulator
+ * log10x_advise_reducer
  *
  * Given a DiscoverySnapshot (from `log10x_discover_env`) + a few user
  * choices, produce a forwarder-specific install/verify/teardown plan
- * for the Log10x Regulator (kind=regulate). Same 5 forwarders as the
+ * for the Log10x Reducer (kind=regulate). Same 5 forwarders as the
  * Reporter, same charts, same preflight checks — the only difference
  * is the tenx `kind` value, which the chart templates route to a
  * different launch arg (`@run/input/forwarder/<fw>/regulate`).
@@ -16,7 +16,7 @@ import { renderPlan } from '../lib/advisor/render.js';
 import type { ForwarderKind } from '../lib/discovery/types.js';
 import type { OutputDestination } from '../lib/advisor/reporter-forwarders.js';
 
-export const adviseRegulatorSchema = {
+export const adviseReducerSchema = {
   snapshot_id: z
     .string()
     .describe('ID returned by `log10x_discover_env`. The snapshot is cached for 30 min.'),
@@ -29,7 +29,7 @@ export const adviseRegulatorSchema = {
   release_name: z
     .string()
     .optional()
-    .describe('Helm release name. Default: `my-regulator`. Must not collide with an existing release.'),
+    .describe('Helm release name. Default: `my-reducer`. Must not collide with an existing release.'),
   namespace: z
     .string()
     .optional()
@@ -63,14 +63,14 @@ export const adviseRegulatorSchema = {
     .describe('Which sections to emit. Default: `all`.'),
 };
 
-const schemaObj = z.object(adviseRegulatorSchema);
-export type AdviseRegulatorArgs = z.infer<typeof schemaObj>;
+const schemaObj = z.object(adviseReducerSchema);
+export type AdviseReducerArgs = z.infer<typeof schemaObj>;
 
-export async function executeAdviseRegulator(args: AdviseRegulatorArgs): Promise<string> {
+export async function executeAdviseReducer(args: AdviseReducerArgs): Promise<string> {
   const snapshot = getSnapshot(args.snapshot_id);
   if (!snapshot) {
     return [
-      `# Regulator advisor — snapshot not found`,
+      `# Reducer advisor — snapshot not found`,
       ``,
       `Snapshot \`${args.snapshot_id}\` is missing or expired (snapshots live 30 min).`,
       ``,
@@ -81,7 +81,7 @@ export async function executeAdviseRegulator(args: AdviseRegulatorArgs): Promise
   const action = args.action ?? 'all';
   const plan = await buildReporterPlan({
     snapshot,
-    app: 'regulator',
+    app: 'reducer',
     forwarder: args.forwarder as ForwarderKind | undefined,
     releaseName: args.release_name,
     namespace: args.namespace,

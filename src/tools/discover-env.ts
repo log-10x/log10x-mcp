@@ -4,7 +4,7 @@
  * Read-only discovery of the caller's Kubernetes cluster + AWS account.
  * Produces a DiscoverySnapshot (stored in-memory for 30 min) and a
  * terse markdown report of what was found. The advise_{reporter,
- * regulator, retriever} tools consume the snapshot by id.
+ * reducer, retriever} tools consume the snapshot by id.
  *
  * Nothing here mutates state. Every probe is a `kubectl get` or
  * `aws ...describe/list` call. If kubectl or aws isn't configured, the
@@ -223,7 +223,7 @@ export function renderDiscoverReport(s: DiscoverySnapshot): string {
   lines.push('');
   lines.push('```');
   lines.push(`log10x_advise_reporter({ snapshot_id: "${s.snapshotId}" })`);
-  lines.push(`log10x_advise_regulator({ snapshot_id: "${s.snapshotId}" })`);
+  lines.push(`log10x_advise_reducer({ snapshot_id: "${s.snapshotId}" })`);
   lines.push(`log10x_advise_retriever({ snapshot_id: "${s.snapshotId}" })`);
   lines.push('```');
   lines.push('');

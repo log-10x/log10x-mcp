@@ -55,8 +55,8 @@ export interface VerifyProbe {
 
 /**
  * Optional GitOps section for install plans whose app supports
- * MCP-managed runtime config updates (today: the Regulator's
- * compactRegulator). Renders between Install and Verify.
+ * MCP-managed runtime config updates (today: the Reducer's
+ * compactReducer). Renders between Install and Verify.
  *
  * The mechanism: a GitHub-pull module inside the engine fetches the
  * customer's config repo on a schedule, drops it into a temp dir,
@@ -98,10 +98,10 @@ export interface GitopsExplainer {
  */
 export interface AdvisePlan {
   /** Which app this plan installs. */
-  app: 'reporter' | 'regulator' | 'retriever';
+  app: 'reporter' | 'reducer' | 'retriever';
   /** Snapshot the plan was built against. */
   snapshotId: string;
-  /** Target forwarder (for reporter/regulator). Unused by retriever. */
+  /** Target forwarder (for reporter/reducer). Unused by retriever. */
   forwarder?: ForwarderKind;
   /** Target helm release name. */
   releaseName: string;
@@ -127,7 +127,7 @@ export interface AdvisePlan {
   blockers: string[];
   /**
    * Optional GitOps section explaining MCP-managed runtime config
-   * updates. Set for app=regulator; omitted for reporter/retriever.
+   * updates. Set for app=reducer; omitted for reporter/retriever.
    */
   gitopsExplainer?: GitopsExplainer;
 }

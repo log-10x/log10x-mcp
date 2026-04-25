@@ -1,7 +1,7 @@
 /**
  * log10x_advise_install
  *
- * Sits in front of the four app-specific advisors (reporter, regulator,
+ * Sits in front of the four app-specific advisors (reporter, reducer,
  * retriever). Takes a DiscoverySnapshot + optional goal and recommends
  * the right install path based on what's detected.
  *
@@ -39,7 +39,7 @@ export const adviseInstallSchema = {
     .enum(['just-metrics', 'cut-cost', 'compact', 'archive'])
     .optional()
     .describe(
-      'What the user is trying to achieve. When given, the tool returns a single concrete install plan for the best-matching path. When omitted, the tool returns a ranked table of candidate paths + the top pick\'s resolved args so the caller can re-invoke with `goal` or jump to `log10x_advise_{reporter,regulator,retriever}` directly. Values: `just-metrics` (cost attribution + pattern fingerprinting, no filtering), `cut-cost` (regulate: filter/sample events in-flight), `compact` (regulate + ~20-40x volume reduction via compact encoding — only on fluent-bit/fluentd 1.0.7), `archive` (Retriever: long-term S3 archive + forensic query).'
+      'What the user is trying to achieve. When given, the tool returns a single concrete install plan for the best-matching path. When omitted, the tool returns a ranked table of candidate paths + the top pick\'s resolved args so the caller can re-invoke with `goal` or jump to `log10x_advise_{reporter,reducer,retriever}` directly. Values: `just-metrics` (cost attribution + pattern fingerprinting, no filtering), `cut-cost` (regulate: filter/sample events in-flight), `compact` (regulate + ~20-40x volume reduction via compact encoding — only on fluent-bit/fluentd 1.0.7), `archive` (Retriever: long-term S3 archive + forensic query).'
     ),
   api_key: z
     .string()
@@ -123,7 +123,7 @@ async function renderConcretePlan(
   const snapshot = getSnapshot(snapshotId)!;
   const action = args.action ?? 'all';
 
-  // Route: retriever → buildRetrieverPlan; reporter/regulator → buildReporterPlan.
+  // Route: retriever → buildRetrieverPlan; reporter/reducer → buildReporterPlan.
   let planMd: string;
   if (top.args.app === 'retriever') {
     const plan = await buildRetrieverPlan({
@@ -163,7 +163,7 @@ function renderRanked(rec: ModeRecommendation, snapshotId: string): string {
   const lines: string[] = [];
   lines.push('# Install advisor — mode ranking');
   lines.push('');
-  lines.push('_No `goal` was given, so the advisor surfaces all candidate paths with their detection-based ranking. Pick one and re-invoke with `goal=<matching-goal>` for a concrete install plan, or call `log10x_advise_{reporter,regulator,retriever}` directly with the resolved args below._');
+  lines.push('_No `goal` was given, so the advisor surfaces all candidate paths with their detection-based ranking. Pick one and re-invoke with `goal=<matching-goal>` for a concrete install plan, or call `log10x_advise_{reporter,reducer,retriever}` directly with the resolved args below._');
   lines.push('');
 
   // Detection summary.
@@ -187,7 +187,7 @@ function renderRanked(rec: ModeRecommendation, snapshotId: string): string {
   lines.push('## Top pick');
   lines.push(`**${rec.topPick.label}** — ${rec.topPick.rationale}`);
   lines.push('');
-  lines.push('Resolved args (feed into `log10x_advise_{reporter,regulator,retriever}` directly):');
+  lines.push('Resolved args (feed into `log10x_advise_{reporter,reducer,retriever}` directly):');
   lines.push('');
   lines.push('```json');
   lines.push(JSON.stringify(rec.topPick.args, null, 2));

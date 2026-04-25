@@ -82,14 +82,14 @@ test('classifyLog10xApp: reporter by release name', () => {
   assert.equal(out, 'reporter');
 });
 
-test('classifyLog10xApp: regulator by release name (policy-gen)', () => {
+test('classifyLog10xApp: reducer by release name (policy-gen)', () => {
   const labels = { 'app.kubernetes.io/instance': 'tenx-policy-gen' };
   const out = classifyLog10xApp(
     'ghcr.io/log-10x/fluentd-10x-dev:dev-g11',
     labels,
     'cron-10x-1.0.6'
   );
-  assert.equal(out, 'regulator');
+  assert.equal(out, 'reducer');
 });
 
 test('classifyLog10xApp: unknown for non-log10x workloads', () => {

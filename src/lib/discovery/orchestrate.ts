@@ -126,7 +126,7 @@ function deriveRecommendations(
   const suggestedNamespace =
     opts.namespaceHint ??
     existingForwarderNamespace ??
-    (alreadyInstalled.reporter ?? alreadyInstalled.regulator ?? alreadyInstalled.retriever) ??
+    (alreadyInstalled.reporter ?? alreadyInstalled.reducer ?? alreadyInstalled.retriever) ??
     'logging';
 
   // Retriever S3 bucket: prefer one with an indexing-results prefix.
@@ -142,23 +142,23 @@ function deriveRecommendations(
     if (!current) retrieverSqsUrls[q.role] = q.url;
   }
 
-  // Pull GitOps + compactRegulator wiring from any running regulator pod.
-  // Multiple regulators in the cluster (e.g., dev + prod) is rare;
+  // Pull GitOps + compactReducer wiring from any running reducer pod.
+  // Multiple reducers in the cluster (e.g., dev + prod) is rare;
   // first-wins matches the alreadyInstalled iteration above. Only record
   // GH_REPO if GH_ENABLED is also literally "true" — a repo set with the
   // master switch off would mislead the compact advisor.
-  let regulatorGitopsRepo: string | undefined;
-  let regulatorCompactLookupFile: string | undefined;
+  let reducerGitopsRepo: string | undefined;
+  let reducerCompactLookupFile: string | undefined;
   for (const app of kubectl.log10xApps) {
-    if (app.kind !== 'regulator') continue;
+    if (app.kind !== 'reducer') continue;
     const env = app.env ?? {};
     if (env.GH_ENABLED === 'true' && env.GH_REPO) {
-      regulatorGitopsRepo = env.GH_REPO;
+      reducerGitopsRepo = env.GH_REPO;
     }
-    if (env.compactRegulatorLookupFile) {
-      regulatorCompactLookupFile = env.compactRegulatorLookupFile;
+    if (env.compactReducerLookupFile) {
+      reducerCompactLookupFile = env.compactReducerLookupFile;
     }
-    if (regulatorGitopsRepo || regulatorCompactLookupFile) break;
+    if (reducerGitopsRepo || reducerCompactLookupFile) break;
   }
 
   return {
@@ -166,8 +166,8 @@ function deriveRecommendations(
     existingForwarder,
     existingForwarderNamespace,
     retrieverS3Bucket: retrieverBucket,
-    regulatorGitopsRepo,
-    regulatorCompactLookupFile,
+    reducerGitopsRepo,
+    reducerCompactLookupFile,
     retrieverSqsUrls: Object.keys(retrieverSqsUrls).length > 0 ? retrieverSqsUrls : undefined,
     alreadyInstalled,
   };

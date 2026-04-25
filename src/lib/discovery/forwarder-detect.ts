@@ -64,10 +64,10 @@ export function classifyLog10xApp(
     return 'retriever';
   }
 
-  // Reporter vs Regulator both use cron-10x chart — disambiguate via
+  // Reporter vs Reducer both use cron-10x chart — disambiguate via
   // release name (cloud-reporter / policy-gen) or explicit workload name.
   if (helmName.includes('cloud-reporter') || helmName.includes('reporter')) return 'reporter';
-  if (helmName.includes('policy-gen') || helmName.includes('regulator')) return 'regulator';
+  if (helmName.includes('policy-gen') || helmName.includes('reducer')) return 'reducer';
 
   // Compiler (edge compact sidecar) — classify but not in install-advisor scope.
   if (imgLc.includes('compiler-10x') || chart.includes('compiler')) return 'compiler';

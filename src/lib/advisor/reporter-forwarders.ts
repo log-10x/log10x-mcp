@@ -43,19 +43,19 @@ export type OutputDestination = 'mock' | 'elasticsearch' | 'splunk' | 'datadog' 
 
 // Which tenx kind this install is for.
 //   report   -> Reporter (read-only metric emission)
-//   regulate -> Regulator (read + write events back through the forwarder)
+//   regulate -> Reducer (read + write events back through the forwarder)
 //
 // fluent-bit + fluentd charts at 1.0.7 silently ignore tenx.kind and always
-// run the regulator pipeline (kind=report is effectively "regulator with no
+// run the reducer pipeline (kind=report is effectively "reducer with no
 // filter rules" at the observable level). filebeat / logstash / otel-
 // collector at 1.0.7 still honor kind and launch @apps/reporter vs
-// @apps/regulator accordingly.
+// __SAVE_APPS_REDUCER__ accordingly.
 //
 // Optimizer mode (lossless encoded-event output, ~20-40x volume reduction:
 // `"log":"~-8Av]P9cVZb,timestamp,var1,var2,..."`) is NOT exposed as a kind.
-// It is triggered by setting `env: [{name: regulatorOptimize, value: "true"}]`
+// It is triggered by setting `env: [{name: reducerOptimize, value: "true"}]`
 // on the forwarder container. Unified across all 5 charts as of 1.0.7
-// (the per-forwarder optimize path is now just regulator + this env var).
+// (the per-forwarder optimize path is now just reducer + this env var).
 export type TenxKind = 'report' | 'regulate';
 
 /** How a forwarder's helm chart labels its workloads + pods. */
@@ -97,7 +97,7 @@ export interface ForwarderSpec {
     apiKey: string;
     releaseName: string;
     destination: OutputDestination;
-    /** Tenx kind — report (Reporter app) or regulate (Regulator app). */
+    /** Tenx kind — report (Reporter app) or regulate (Reducer app). */
     kind: TenxKind;
     outputHost?: string;
     splunkHecToken?: string;
@@ -107,7 +107,7 @@ export interface ForwarderSpec {
      * When true AND kind=regulate, emit events in compact encoded form
      * (templateHash+vars, ~20-40x volume reduction). Verified 2026-04-22
      * on demo cluster for fluent-bit@1.0.7 + fluentd@1.0.7 via the
-     * `regulatorOptimize=true` env var workaround (the chart's own
+     * `reducerOptimize=true` env var workaround (the chart's own
      * `tenx.optimize: true` field points at a Lua script that's not
      * shipped in the 1.0.7 image — do NOT use it directly). Silently
      * ignored when kind=report.
@@ -168,18 +168,18 @@ export const REPORTER_FORWARDER_SPECS: Record<Exclude<ForwarderKind, 'unknown'>,
       // Optimizer mode: the chart's own `tenx.optimize: true` path is
       // broken on 1.0.7 (references tenx-optimize.lua which isn't in
       // the image). The verified workaround is tenx.optimize:false +
-      // env regulatorOptimize=true — the regulate Lua fires, the engine
+      // env reducerOptimize=true — the regulate Lua fires, the engine
       // picks up the env var and flips encodeObjects on.
       const envBlock =
         optimize && kind === 'regulate'
           ? `
 # Optimizer flag. Chart 1.0.7's tenx.optimize:true references a
 # tenx-optimize.lua file that isn't shipped in fluent-bit-10x:1.0.7-jit.
-# Use the env-var workaround: regulate Lua filter + regulatorOptimize=true
+# Use the env-var workaround: regulate Lua filter + reducerOptimize=true
 # so the engine emits compact encoded events (templateHash+vars, ~20-40x
 # volume reduction). Verified 2026-04-22 on demo cluster.
 env:
-  - name: regulatorOptimize
+  - name: reducerOptimize
     value: "true"
 `
           : '';
@@ -278,7 +278,7 @@ ${outputBlock}
         optimize && kind === 'regulate'
           ? `
 env:
-  - name: regulatorOptimize
+  - name: reducerOptimize
     value: "true"
 `
           : '';
@@ -397,7 +397,7 @@ ${envBlock}`;
       // install we MUST override extraEnvs/secretMounts to empty so pods
       // don't hang in FailedMount.
       const outputBlock = renderFilebeatOutput(destination, outputHost);
-      // Chart 1.0.7 routes kind=optimize → @apps/regulator + regulatorOptimize
+      // Chart 1.0.7 routes kind=optimize → __SAVE_APPS_REDUCER__ + reducerOptimize
       // env var. Emit kind=optimize in values when caller requested optimize.
       const effectiveKind = optimize && kind === 'regulate' ? 'optimize' : kind;
       return `tenx:
@@ -651,7 +651,7 @@ ${indent(exporter, 4)}
 //
 // Only supports app=reporter (kind=report). The reporter-10x chart has no
 // path to hook into the user's forwarder's output to regulate / compact
-// events — it only emits metrics. Callers passing app='regulator' or
+// events — it only emits metrics. Callers passing app='reducer' or
 // optimize=true with shape='standalone' get a blocker.
 export const STANDALONE_SPEC: ForwarderSpec = {
   label: 'Standalone Reporter (reporter-10x)',

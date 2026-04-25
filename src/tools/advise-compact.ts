@@ -1,7 +1,7 @@
 /**
  * log10x_advise_compact
  *
- * Emits a literal `gh` PR command + the file diff for a compactRegulator
+ * Emits a literal `gh` PR command + the file diff for a compactReducer
  * change against the customer's GitOps repo. Two modes:
  *
  *   mode='csv' (default) — edit `compact-lookup.csv`. Per-pattern decisions.
@@ -29,13 +29,13 @@ export const adviseCompactSchema = {
     .string()
     .optional()
     .describe(
-      'Owner/name of the customer GitOps repo the regulator pod pulls config from (e.g., `acme/log10x-config`). Must match `GH_REPO` set on the regulator pod. Optional when `snapshot_id` is given AND the snapshot detected a regulator pod with `GH_REPO` set — the tool resolves it automatically.'
+      'Owner/name of the customer GitOps repo the reducer pod pulls config from (e.g., `acme/log10x-config`). Must match `GH_REPO` set on the reducer pod. Optional when `snapshot_id` is given AND the snapshot detected a reducer pod with `GH_REPO` set — the tool resolves it automatically.'
     ),
   snapshot_id: z
     .string()
     .optional()
     .describe(
-      'ID returned by `log10x_discover_env`. When given, the tool resolves `gitops_repo` and `lookup_path` from the running regulator pod\'s env vars (`GH_REPO`, `compactRegulatorLookupFile`). Either `snapshot_id` or `gitops_repo` must be provided.'
+      'ID returned by `log10x_discover_env`. When given, the tool resolves `gitops_repo` and `lookup_path` from the running reducer pod\'s env vars (`GH_REPO`, `compactReducerLookupFile`). Either `snapshot_id` or `gitops_repo` must be provided.'
     ),
   gitops_branch: z
     .string()
@@ -63,7 +63,7 @@ export const adviseCompactSchema = {
     .array(z.string())
     .optional()
     .describe(
-      'TenXObject fields joined with `_` to form each event\'s lookup key (must match the regulator\'s `compactRegulatorFieldNames`). Default: `[symbolMessage]`. Used in mode=csv to format example keys in the PR description.'
+      'TenXObject fields joined with `_` to form each event\'s lookup key (must match the reducer\'s `compactReducerFieldNames`). Default: `[symbolMessage]`. Used in mode=csv to format example keys in the PR description.'
     ),
   compact: z
     .array(z.string())
@@ -75,13 +75,13 @@ export const adviseCompactSchema = {
     .array(z.string())
     .optional()
     .describe(
-      '(mode=csv) Field-set keys to ADD with `false` (preserve fullText, e.g. audit/compliance patterns). Use when `compactRegulatorDefault: true` and you want specific patterns to opt OUT of compaction.'
+      '(mode=csv) Field-set keys to ADD with `false` (preserve fullText, e.g. audit/compliance patterns). Use when `compactReducerDefault: true` and you want specific patterns to opt OUT of compaction.'
     ),
   remove: z
     .array(z.string())
     .optional()
     .describe(
-      '(mode=csv) Field-set keys to REMOVE from the lookup (revert to `compactRegulatorDefault` for those patterns).'
+      '(mode=csv) Field-set keys to REMOVE from the lookup (revert to `compactReducerDefault` for those patterns).'
     ),
   current_csv: z
     .string()
@@ -111,7 +111,7 @@ export const adviseCompactSchema = {
     .enum(['true', 'false'])
     .optional()
     .describe(
-      '(mode=csv) Current value of `compactRegulatorDefault` on the regulator pod (informational; included in the PR description so reviewers know whether entries opt INTO or OUT OF compaction). Default: `false`.'
+      '(mode=csv) Current value of `compactReducerDefault` on the reducer pod (informational; included in the PR description so reviewers know whether entries opt INTO or OUT OF compaction). Default: `false`.'
     ),
 };
 
@@ -195,9 +195,9 @@ function resolveTarget(args: AdviseCompactArgs): { resolved: AdviseCompactArgs }
   if (!args.snapshot_id) {
     return {
       error: [
-        '# compactRegulator advisor — missing target',
+        '# compactReducer advisor — missing target',
         '',
-        'Pass either `gitops_repo` (owner/name) or `snapshot_id` (from `log10x_discover_env`). With a snapshot, the tool resolves the repo from the running regulator pod\'s `GH_REPO` env var.',
+        'Pass either `gitops_repo` (owner/name) or `snapshot_id` (from `log10x_discover_env`). With a snapshot, the tool resolves the repo from the running reducer pod\'s `GH_REPO` env var.',
       ].join('\n'),
     };
   }
@@ -205,23 +205,23 @@ function resolveTarget(args: AdviseCompactArgs): { resolved: AdviseCompactArgs }
   if (!snapshot) {
     return {
       error: [
-        '# compactRegulator advisor — snapshot not found',
+        '# compactReducer advisor — snapshot not found',
         '',
         `Snapshot \`${args.snapshot_id}\` is missing or expired (snapshots live 30 min). Run \`log10x_discover_env\` again, then re-call this tool with the new snapshot_id (or pass \`gitops_repo\` directly).`,
       ].join('\n'),
     };
   }
-  const repo = snapshot.recommendations.regulatorGitopsRepo;
+  const repo = snapshot.recommendations.reducerGitopsRepo;
   if (!repo) {
     return {
       error: [
-        '# compactRegulator advisor — regulator GitOps not configured',
+        '# compactReducer advisor — reducer GitOps not configured',
         '',
-        `Snapshot \`${args.snapshot_id}\` did not detect a regulator pod with \`GH_ENABLED=true\` + \`GH_REPO=<owner/name>\` set. The compactRegulator GitOps flow requires a regulator already running with the GitOps env vars wired.`,
+        `Snapshot \`${args.snapshot_id}\` did not detect a reducer pod with \`GH_ENABLED=true\` + \`GH_REPO=<owner/name>\` set. The compactReducer GitOps flow requires a reducer already running with the GitOps env vars wired.`,
         '',
         '**Next steps**:',
-        '- If you haven\'t installed the regulator yet, call `log10x_advise_regulator` (or `log10x_advise_install` with `goal=compact`). The plan now includes a "GitOps — MCP-managed runtime config" section that lists every env var to set, including `GH_ENABLED`, `GH_REPO`, `GH_TOKEN`, and `compactRegulatorLookupFile`.',
-        '- If the regulator is already running but GitOps env vars are missing, edit the helm values (or the pod\'s env block) to add them.',
+        '- If you haven\'t installed the reducer yet, call `log10x_advise_reducer` (or `log10x_advise_install` with `goal=compact`). The plan now includes a "GitOps — MCP-managed runtime config" section that lists every env var to set, including `GH_ENABLED`, `GH_REPO`, `GH_TOKEN`, and `compactReducerLookupFile`.',
+        '- If the reducer is already running but GitOps env vars are missing, edit the helm values (or the pod\'s env block) to add them.',
         '- To bypass discovery, re-call this tool with `gitops_repo=<owner/name>` directly.',
       ].join('\n'),
     };
@@ -231,7 +231,7 @@ function resolveTarget(args: AdviseCompactArgs): { resolved: AdviseCompactArgs }
     ...args,
     gitops_repo: repo,
     lookup_path:
-      args.lookup_path ?? snapshot.recommendations.regulatorCompactLookupFile ?? undefined,
+      args.lookup_path ?? snapshot.recommendations.reducerCompactLookupFile ?? undefined,
   };
   return { resolved };
 }
@@ -261,7 +261,7 @@ async function executeCsvMode(args: AdviseCompactArgs): Promise<string> {
 
   if (compactKeys.length + preserveKeys.length + removeKeys.length === 0) {
     return [
-      '# compactRegulator advisor — nothing to do',
+      '# compactReducer advisor — nothing to do',
       '',
       'No keys passed in `compact`, `preserve`, or `remove`. Nothing to write.',
       '',
@@ -277,7 +277,7 @@ async function executeCsvMode(args: AdviseCompactArgs): Promise<string> {
   const overlapCompactPreserve = compactKeys.filter((k) => preserveKeys.includes(k));
   if (overlapCompactPreserve.length > 0) {
     return [
-      '# compactRegulator advisor — invalid input',
+      '# compactReducer advisor — invalid input',
       '',
       `Keys appear in both \`compact\` and \`preserve\`: ${overlapCompactPreserve.join(', ')}.`,
       'A field-set key can be one or the other, not both. Resolve and re-call.',
@@ -302,7 +302,7 @@ async function executeCsvMode(args: AdviseCompactArgs): Promise<string> {
   const prBranchHint = `mcp/compact-${Date.now()}`;
 
   const out: string[] = [];
-  out.push(`# compactRegulator advisor — PR plan for \`${repo}\``);
+  out.push(`# compactReducer advisor — PR plan for \`${repo}\``);
   out.push('');
   out.push(`**Lookup file**: \`${lookupPath}\``);
   out.push(`**Field-set key format**: \`${fieldNameStr}\` (joined with \`_\`)`);
@@ -410,11 +410,11 @@ async function executeCsvMode(args: AdviseCompactArgs): Promise<string> {
 
   out.push('## After merge');
   out.push('');
-  out.push(`The regulator pod\'s gitops puller (\`pipelines/gitops/config.yaml\`, default 30s poll) re-fetches the file. \`FileResourceLookup.reset()\` fires on the file-watcher event. New entries take effect within the poll interval. **No pod restart, no event drops.**`);
+  out.push(`The reducer pod\'s gitops puller (\`pipelines/gitops/config.yaml\`, default 30s poll) re-fetches the file. \`FileResourceLookup.reset()\` fires on the file-watcher event. New entries take effect within the poll interval. **No pod restart, no event drops.**`);
   out.push('');
   out.push('To verify in-cluster after merge:');
   out.push('```bash');
-  out.push('kubectl logs -l app.kubernetes.io/name=regulator -c regulator --tail=200 | grep -i "resource reload"');
+  out.push('kubectl logs -l app.kubernetes.io/name=reducer -c reducer --tail=200 | grep -i "resource reload"');
   out.push('# expected line within ~30s of merge:');
   out.push('# resource reload: resetting pipeline unit ... modified resources: [...compact-lookup.csv]');
   out.push('```');
@@ -500,7 +500,7 @@ async function executeJsMode(args: AdviseCompactArgs): Promise<string> {
 
   if (!newJs || newJs.trim().length === 0) {
     return [
-      '# compactRegulator advisor (js mode) — missing input',
+      '# compactReducer advisor (js mode) — missing input',
       '',
       'Required arg `new_js` is empty. Pass the FULL replacement contents of `compact-object-global.js` (the tool overwrites the file rather than patching it).',
       '',
@@ -515,14 +515,14 @@ async function executeJsMode(args: AdviseCompactArgs): Promise<string> {
       '   - External-flag gate: `if (TenXEnv.get("compactKillSwitch") == "true") return false;`',
       '3. Re-call this tool with `mode=js`, `new_js=<full new contents>`, and optionally `current_js=<old contents>` for a line-diff in the output.',
       '',
-      '**Engine impact when this PR merges**: ResourceReloadUnit detects the .js change and calls `restartPipeline()`. There is a brief drain + relaunch (typically <5s on a regulator pod). For zero-restart changes, prefer `mode=csv`.',
+      '**Engine impact when this PR merges**: ResourceReloadUnit detects the .js change and calls `restartPipeline()`. There is a brief drain + relaunch (typically <5s on a reducer pod). For zero-restart changes, prefer `mode=csv`.',
     ].join('\n');
   }
 
   const validationErr = validateJsContents(newJs);
   if (validationErr) {
     return [
-      '# compactRegulator advisor (js mode) — invalid `new_js`',
+      '# compactReducer advisor (js mode) — invalid `new_js`',
       '',
       `The replacement JS does not match the shape the engine\'s script parser expects: ${validationErr}.`,
       '',
@@ -539,7 +539,7 @@ async function executeJsMode(args: AdviseCompactArgs): Promise<string> {
   const prTitle = 'compact: replace shouldEncode predicate (pipeline restart)';
 
   const out: string[] = [];
-  out.push(`# compactRegulator advisor (js mode) — PR plan for \`${repo}\``);
+  out.push(`# compactReducer advisor (js mode) — PR plan for \`${repo}\``);
   out.push('');
   out.push(`**Predicate file**: \`${jsPath}\``);
   out.push(`**Engine impact**: \`ResourceReloadUnit\` watches \`.js\` files. On change → \`restartPipeline()\` (brief drain + relaunch). **NOT a hot reload.** Use \`mode=csv\` instead if a per-pattern lookup change suffices.`);
@@ -595,11 +595,11 @@ async function executeJsMode(args: AdviseCompactArgs): Promise<string> {
 
   out.push('## After merge');
   out.push('');
-  out.push(`The regulator pod\'s gitops puller fetches the new JS on its next poll. The \`ResourceReloadUnit\` (engine 1.0.10+) sees the file change, classifies \`.js\` as a config file, and calls \`pipeline.restart()\`. Drain + relaunch is typically under 5 seconds for a regulator pod, but it IS a real restart — events in flight may be re-emitted by the upstream forwarder once tenx is back.`);
+  out.push(`The reducer pod\'s gitops puller fetches the new JS on its next poll. The \`ResourceReloadUnit\` (engine 1.0.10+) sees the file change, classifies \`.js\` as a config file, and calls \`pipeline.restart()\`. Drain + relaunch is typically under 5 seconds for a reducer pod, but it IS a real restart — events in flight may be re-emitted by the upstream forwarder once tenx is back.`);
   out.push('');
   out.push('To verify in-cluster after merge:');
   out.push('```bash');
-  out.push('kubectl logs -l app.kubernetes.io/name=regulator -c regulator --tail=200 | grep -i "config file.*changed, restarting pipeline"');
+  out.push('kubectl logs -l app.kubernetes.io/name=reducer -c reducer --tail=200 | grep -i "config file.*changed, restarting pipeline"');
   out.push('# expected line within ~30s of merge:');
   out.push('# Config file .../compact-object-global.js changed, restarting pipeline.');
   out.push('```');
@@ -626,7 +626,7 @@ function buildJsPrBody(jsPath: string, stats: JsLineDiff, hasBaseline: boolean, 
   lines.push('`ResourceReloadUnit` watches `.js` files. On change → `restartPipeline()` (brief drain + relaunch — NOT a hot reload like CSV changes).');
   lines.push('');
   lines.push('Reviewer checklist:');
-  lines.push('- Predicate still gates on `compactRegulatorLookupFile` via `static shouldLoad(c) { ... }` so the module remains opt-in.');
+  lines.push('- Predicate still gates on `compactReducerLookupFile` via `static shouldLoad(c) { ... }` so the module remains opt-in.');
   lines.push('- `shouldEncode` returns `false` for `!this.isObject` and `this.isDropped` (defensive guards).');
   lines.push('- No `parts[N]` indexing on a local `var parts = TenXString.split(...)` — translates to a field lookup, returns empty (DSL gap).');
   lines.push('- No `===` or `!==` (tenx DSL comparisons are content-based with `==` / `TenXString.startsWith` etc).');

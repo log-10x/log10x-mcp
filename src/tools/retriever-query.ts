@@ -11,7 +11,7 @@
  * under {bucket}/tenx/{target}/qr/{queryId}/. The client polls the marker
  * prefix for stability, then reads and merges the JSONL result files.
  *
- * Requires __SAVE_LOG10X_RETRIEVER_URL__ and __SAVE_LOG10X_RETRIEVER_BUCKET__ to be set. Falls
+ * Requires LOG10X_REGULATOR_RETRIEVER_URL and LOG10X_REGULATOR_RETRIEVER_BUCKET to be set. Falls
  * back gracefully with a "not configured" message otherwise.
  */
 
@@ -52,7 +52,7 @@ export const retrieverQuerySchema = {
     .string()
     .optional()
     .describe(
-      'Target app/service prefix to scope the index scan. Defaults to __SAVE_LOG10X_RETRIEVER_TARGET__ (env var). Required if no default is configured.'
+      'Target app/service prefix to scope the index scan. Defaults to LOG10X_REGULATOR_RETRIEVER_TARGET (env var). Required if no default is configured.'
     ),
   limit: z
     .number()
@@ -326,7 +326,7 @@ function formatEvent(ev: RetrieverEvent): string {
   //
   // 1. **log10x canonical** — `text`, `severity_level`, `tenx_user_service`,
   //    `k8s_*` fields. Present when the archive was written by a Reporter/
-  //    Regulator pipeline that had tokenization + enrichment enabled.
+  //    Reducer pipeline that had tokenization + enrichment enabled.
   //
   // 2. **raw fluent-bit** — `log`, `stream`, `kubernetes.namespace_name`,
   //    `kubernetes.pod_name`, `kubernetes.container_name`. Present when the
@@ -373,9 +373,9 @@ export function retrieverNotConfiguredMessage(): string {
     '**To enable it**:',
     '',
     '1. Deploy the Log10x Retriever per https://doc.log10x.com/apps/cloud/retriever/',
-    '2. Set `__SAVE_LOG10X_RETRIEVER_URL__` to the query handler endpoint (e.g., the NLB for the query-handler service).',
-    '3. Set `__SAVE_LOG10X_RETRIEVER_BUCKET__` to the S3 bucket holding the retriever index.',
-    '4. Optionally set `__SAVE_LOG10X_RETRIEVER_TARGET__` to the default target app prefix (e.g., `app`).',
+    '2. Set `LOG10X_REGULATOR_RETRIEVER_URL` to the query handler endpoint (e.g., the NLB for the query-handler service).',
+    '3. Set `LOG10X_REGULATOR_RETRIEVER_BUCKET` to the S3 bucket holding the retriever index.',
+    '4. Optionally set `LOG10X_REGULATOR_RETRIEVER_TARGET` to the default target app prefix (e.g., `app`).',
     '5. Re-run this tool.',
     '',
     "**Without the Retriever**: for in-retention retrieval, use the customer's SIEM directly. For long-window retrieval outside SIEM retention, the Retriever is the only supported path.",
