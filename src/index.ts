@@ -288,10 +288,14 @@ Splunk $6/GB, Datadog $2.50/GB, Elasticsearch $1/GB, CloudWatch $0.50/GB.`,
 
 // ── Tool: log10x_cost_drivers ──
 
-server.tool(
+server.registerTool(
   'log10x_cost_drivers',
-  'Answer "which log patterns made the bill jump this week" or "what changed since yesterday\'s deploy". Returns a dollar-ranked list of patterns whose cost grew versus a prior baseline, with before→after values, exact delta percentages, and new-pattern flags. **By default**: compares the current window against a 3-window average (e.g., timeRange=7d → avg of weeks 1, 2, 3 ago) to smooth noise. **For anchor-aligned deploy comparison**: pass `baselineOffsetDays` to compare against a single specific offset instead — `{timeRange: "1d", baselineOffsetDays: 1}` means "today vs yesterday", which is what you want for "did the deploy change anything". Attribution is keyed by **stable templateHash identity** that stays constant across query windows — Datadog Log Patterns and Splunk Pattern Explorer re-cluster per query, so their week-over-week diffs compare different clusters and are structurally unreliable. **Tier prerequisites**: requires a Reporter pipeline (Cloud or Edge).',
-  costDriversSchema,
+  {
+    title: 'Cost drivers',
+    description: 'Answer "which log patterns made the bill jump this week" or "what changed since yesterday\'s deploy". Returns a dollar-ranked list of patterns whose cost grew versus a prior baseline, with before→after values, exact delta percentages, and new-pattern flags. **By default**: compares the current window against a 3-window average (e.g., timeRange=7d → avg of weeks 1, 2, 3 ago) to smooth noise. **For anchor-aligned deploy comparison**: pass `baselineOffsetDays` to compare against a single specific offset instead — `{timeRange: "1d", baselineOffsetDays: 1}` means "today vs yesterday", which is what you want for "did the deploy change anything". Attribution is keyed by **stable templateHash identity** that stays constant across query windows — Datadog Log Patterns and Splunk Pattern Explorer re-cluster per query, so their week-over-week diffs compare different clusters and are structurally unreliable. **Tier prerequisites**: requires a Reporter pipeline (Cloud or Edge).',
+    inputSchema: costDriversSchema,
+    annotations: { title: 'Cost drivers', readOnlyHint: true, idempotentHint: true, openWorldHint: true },
+  },
   (args) =>
     wrap('log10x_cost_drivers', async () => {
       const env = resolveEnv(getEnvs(), args.environment);
@@ -302,10 +306,14 @@ server.tool(
 
 // ── Tool: log10x_event_lookup ──
 
-server.tool(
+server.registerTool(
   'log10x_event_lookup',
-  'Resolve a raw log line or pattern name to its stable identity (field-set), then return cost per service, before→after delta, first-seen timestamp within the observation window, and an AI classification (error/debug/info) with a recommended action (filter/keep/reduce). **Call this first** whenever a user pastes a SINGLE log line and asks "what is this", "is this new", or "is this safe to drop". The lookup is structural, not byte-exact — different timestamps/request IDs/user IDs on the same underlying pattern resolve to the same identity. If no match is returned, say so honestly. Use log10x_resolve_batch instead when the user pastes MULTIPLE events, a SIEM dump, or a batch to triage. **Tier prerequisites**: requires Reporter pipeline for live pattern lookup. In CLI-only mode, use log10x_resolve_batch instead.',
-  eventLookupSchema,
+  {
+    title: 'Event lookup',
+    description: 'Resolve a raw log line or pattern name to its stable identity (field-set), then return cost per service, before→after delta, first-seen timestamp within the observation window, and an AI classification (error/debug/info) with a recommended action (filter/keep/reduce). **Call this first** whenever a user pastes a SINGLE log line and asks "what is this", "is this new", or "is this safe to drop". The lookup is structural, not byte-exact — different timestamps/request IDs/user IDs on the same underlying pattern resolve to the same identity. If no match is returned, say so honestly. Use log10x_resolve_batch instead when the user pastes MULTIPLE events, a SIEM dump, or a batch to triage. **Tier prerequisites**: requires Reporter pipeline for live pattern lookup. In CLI-only mode, use log10x_resolve_batch instead.',
+    inputSchema: eventLookupSchema,
+    annotations: { title: 'Event lookup', readOnlyHint: true, idempotentHint: true, openWorldHint: true },
+  },
   (args) =>
     wrap('log10x_event_lookup', async () => {
       const env = resolveEnv(getEnvs(), args.environment);
@@ -316,10 +324,14 @@ server.tool(
 
 // ── Tool: log10x_savings ──
 
-server.tool(
+server.registerTool(
   'log10x_savings',
-  'Show pipeline savings — how much the regulator (filtering), optimizer (compaction), and retriever (indexing) are saving in dollars. Use for "how much are we saving", "pipeline ROI", or "what is the Log10x stack worth financially". **Tier prerequisites**: requires Reporter pipeline. Savings attribution requires per-app continuous metric emission.',
-  savingsSchema,
+  {
+    title: 'Pipeline savings',
+    description: 'Show pipeline savings — how much the regulator (filtering), optimizer (compaction), and retriever (indexing) are saving in dollars. Use for "how much are we saving", "pipeline ROI", or "what is the Log10x stack worth financially". **Tier prerequisites**: requires Reporter pipeline. Savings attribution requires per-app continuous metric emission.',
+    inputSchema: savingsSchema,
+    annotations: { title: 'Pipeline savings', readOnlyHint: true, idempotentHint: true, openWorldHint: true },
+  },
   (args) =>
     wrap('log10x_savings', async () => {
       const env = resolveEnv(getEnvs(), args.environment);
@@ -330,10 +342,14 @@ server.tool(
 
 // ── Tool: log10x_pattern_trend ──
 
-server.tool(
+server.registerTool(
   'log10x_pattern_trend',
-  'Return the volume + cost history for a single pattern over a chosen window (e.g. 1h, 24h, 7d, 30d), with a sparkline and spike detection. **Call this after log10x_event_lookup** when the user asks "is this getting worse", "has it been louder before", "when did it start", or wants temporal context on a pattern surfaced in an earlier step. Always state the observation window explicitly in the reply — "flat at 2/h for the last 6 months of observation, spiked at 13:58 today" — and never claim history older than the window. **Tier prerequisites**: requires Reporter pipeline. Time series queries need continuous metric emission.',
-  trendSchema,
+  {
+    title: 'Pattern trend',
+    description: 'Return the volume + cost history for a single pattern over a chosen window (e.g. 1h, 24h, 7d, 30d), with a sparkline and spike detection. **Call this after log10x_event_lookup** when the user asks "is this getting worse", "has it been louder before", "when did it start", or wants temporal context on a pattern surfaced in an earlier step. Always state the observation window explicitly in the reply — "flat at 2/h for the last 6 months of observation, spiked at 13:58 today" — and never claim history older than the window. **Tier prerequisites**: requires Reporter pipeline. Time series queries need continuous metric emission.',
+    inputSchema: trendSchema,
+    annotations: { title: 'Pattern trend', readOnlyHint: true, idempotentHint: true, openWorldHint: true },
+  },
   (args) =>
     wrap('log10x_pattern_trend', async () => {
       const env = resolveEnv(getEnvs(), args.environment);
@@ -344,10 +360,14 @@ server.tool(
 
 // ── Tool: log10x_services ──
 
-server.tool(
+server.registerTool(
   'log10x_services',
-  'List every service the Log10x pipeline is watching, ranked by cost with per-service volume and share of total. Call first on open-ended cost questions, before drilling into a specific service. **Tier prerequisites**: requires Reporter pipeline.',
-  servicesSchema,
+  {
+    title: 'Services',
+    description: 'List every service the Log10x pipeline is watching, ranked by cost with per-service volume and share of total. Call first on open-ended cost questions, before drilling into a specific service. **Tier prerequisites**: requires Reporter pipeline.',
+    inputSchema: servicesSchema,
+    annotations: { title: 'Services', readOnlyHint: true, idempotentHint: true, openWorldHint: true },
+  },
   (args) =>
     wrap('log10x_services', async () => {
       const env = resolveEnv(getEnvs(), args.environment);
@@ -358,28 +378,40 @@ server.tool(
 
 // ── Tool: log10x_exclusion_filter ──
 
-server.tool(
+server.registerTool(
   'log10x_exclusion_filter',
-  'Generate a config snippet to silence or reduce a log pattern. Produces either (a) a Log10x rate regulator mute-file entry keyed by field-set with explicit sampleRate and untilEpochSec expiry (the preferred path — self-expiring, git-reviewable, no regex), or (b) a native drop rule for the user\'s forwarder or SIEM (Datadog, Splunk, Elasticsearch, CloudWatch, Fluent Bit, OTel Collector, Vector, and others). Call when the user asks to "mute", "silence", "drop", "cap", or "reduce" a specific pattern. Always run log10x_dependency_check first so the reply can flag anything that will break. **Tier prerequisites**: none. Generates mute file entries independent of the Reporter tier.',
-  exclusionFilterSchema,
+  {
+    title: 'Exclusion filter snippet',
+    description: 'Generate a config snippet to silence or reduce a log pattern. Produces either (a) a Log10x rate regulator mute-file entry keyed by field-set with explicit sampleRate and untilEpochSec expiry (the preferred path — self-expiring, git-reviewable, no regex), or (b) a native drop rule for the user\'s forwarder or SIEM (Datadog, Splunk, Elasticsearch, CloudWatch, Fluent Bit, OTel Collector, Vector, and others). Call when the user asks to "mute", "silence", "drop", "cap", or "reduce" a specific pattern. Always run log10x_dependency_check first so the reply can flag anything that will break. **Tier prerequisites**: none. Generates mute file entries independent of the Reporter tier.',
+    inputSchema: exclusionFilterSchema,
+    annotations: { title: 'Exclusion filter snippet', readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+  },
   (args) => wrap('log10x_exclusion_filter', async () => executeExclusionFilter(args))
 );
 
 // ── Tool: log10x_dependency_check ──
 
-server.tool(
+server.registerTool(
   'log10x_dependency_check',
-  'Given a pattern identity, generate commands to scan the user\'s SIEM/observability stack (Datadog monitors, Splunk saved searches, Grafana dashboards, Prometheus alert rules) for anything that depends on that pattern. **Call this before any mute, drop, or source-code deletion** — deleting a log line that feeds a live alert silently breaks the alert. Also call when a developer asks "am I allowed to delete this log.info() call" or "what references this pattern". This is the blast-radius check that turns a risky refactor into a reviewed one. **Tier prerequisites**: none. Operates against the customer\'s SIEM, dashboards, and alert surfaces via Bash + credentials.',
-  dependencyCheckSchema,
+  {
+    title: 'Dependency check command',
+    description: 'Given a pattern identity, generate commands to scan the user\'s SIEM/observability stack (Datadog monitors, Splunk saved searches, Grafana dashboards, Prometheus alert rules) for anything that depends on that pattern. **Call this before any mute, drop, or source-code deletion** — deleting a log line that feeds a live alert silently breaks the alert. Also call when a developer asks "am I allowed to delete this log.info() call" or "what references this pattern". This is the blast-radius check that turns a risky refactor into a reviewed one. **Tier prerequisites**: none. Operates against the customer\'s SIEM, dashboards, and alert surfaces via Bash + credentials.',
+    inputSchema: dependencyCheckSchema,
+    annotations: { title: 'Dependency check command', readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+  },
   (args) => wrap('log10x_dependency_check', async () => executeDependencyCheck(args))
 );
 
 // ── Tool: log10x_discover_labels ──
 
-server.tool(
+server.registerTool(
   'log10x_discover_labels',
-  'List the labels Log10x metrics can be filtered or grouped by. Call at the start of a session, or before calling any tool that takes a label/filter argument — stops the model from guessing label names like "namespace" when the real name is "k8s_namespace". Pass a label name to get its distinct values. **Tier prerequisites**: requires Reporter pipeline.',
-  discoverLabelsSchema,
+  {
+    title: 'Discover labels',
+    description: 'List the labels Log10x metrics can be filtered or grouped by. Call at the start of a session, or before calling any tool that takes a label/filter argument — stops the model from guessing label names like "namespace" when the real name is "k8s_namespace". Pass a label name to get its distinct values. **Tier prerequisites**: requires Reporter pipeline.',
+    inputSchema: discoverLabelsSchema,
+    annotations: { title: 'Discover labels', readOnlyHint: true, idempotentHint: true, openWorldHint: true },
+  },
   (args) =>
     wrap('log10x_discover_labels', async () => {
       const env = resolveEnv(getEnvs(), args.environment);
@@ -389,10 +421,14 @@ server.tool(
 
 // ── Tool: log10x_top_patterns ──
 
-server.tool(
+server.registerTool(
   'log10x_top_patterns',
-  'Return the top N log patterns by current cost, with no baseline comparison or filtering gate. Use for "what is expensive right now", "what are the noisy patterns in <service> this hour", or "give me a snapshot of my loudest events". Can be scoped by service label. For "what changed this week" (deltas vs baseline) use log10x_cost_drivers instead; for "why did costs spike" always prefer cost_drivers because this tool has no new-pattern flag. **Tier prerequisites**: requires Reporter pipeline.',
-  topPatternsSchema,
+  {
+    title: 'Top patterns',
+    description: 'Return the top N log patterns by current cost, with no baseline comparison or filtering gate. Use for "what is expensive right now", "what are the noisy patterns in <service> this hour", or "give me a snapshot of my loudest events". Can be scoped by service label. For "what changed this week" (deltas vs baseline) use log10x_cost_drivers instead; for "why did costs spike" always prefer cost_drivers because this tool has no new-pattern flag. **Tier prerequisites**: requires Reporter pipeline.',
+    inputSchema: topPatternsSchema,
+    annotations: { title: 'Top patterns', readOnlyHint: true, idempotentHint: true, openWorldHint: true },
+  },
   (args) =>
     wrap('log10x_top_patterns', async () => {
       const env = resolveEnv(getEnvs(), args.environment);
@@ -403,10 +439,14 @@ server.tool(
 
 // ── Tool: log10x_list_by_label ──
 
-server.tool(
+server.registerTool(
   'log10x_list_by_label',
-  'Rank the distinct values of any label by cost. Use for "cost by namespace", "cost by severity", "cost by country", "cost by container", or any other group-by question. Call log10x_discover_labels first if unsure which label names are valid. **Tier prerequisites**: requires Reporter pipeline.',
-  listByLabelSchema,
+  {
+    title: 'List by label',
+    description: 'Rank the distinct values of any label by cost. Use for "cost by namespace", "cost by severity", "cost by country", "cost by container", or any other group-by question. Call log10x_discover_labels first if unsure which label names are valid. **Tier prerequisites**: requires Reporter pipeline.',
+    inputSchema: listByLabelSchema,
+    annotations: { title: 'List by label', readOnlyHint: true, idempotentHint: true, openWorldHint: true },
+  },
   (args) =>
     wrap('log10x_list_by_label', async () => {
       const env = resolveEnv(getEnvs(), args.environment);
@@ -417,10 +457,14 @@ server.tool(
 
 // ── Tool: log10x_investigate ──
 
-server.tool(
+server.registerTool(
   'log10x_investigate',
-  'Single-call root-cause investigation for any log line, pattern, service, or environment. Returns a complete causal chain (for acute spikes) or co-drifter cohort (for gradual drift) with confidence scores derived mechanically from data signal quality, plus ready-to-run verification commands. Call whenever the user asks "what is going on with X", "why is X spiking", "investigate X", "what is causing this alert", "why is X creeping", or pastes a log line / alert and asks for diagnosis. Input is the user\'s natural-language target — pass their words verbatim. The tool detects whether the input is a raw log line, pattern identity, service name, or "environment" and runs the appropriate flow. It also detects whether the trajectory is an acute spike or gradual drift and renders a different report shape for each. **Structural wedge**: surfaces log-only signals (connection pool saturation, cache eviction storms, feature-flag cache flushes, retry amplification) that APM does NOT see because they manifest as slow-success traces rather than errors — this is why the tool catches causal chains that Datadog APM, Splunk APM, and OpenTelemetry tracing structurally cannot catch. Show the entire markdown report to the user without modification. Confidence percentages decompose into named sub-scores (stat × lag × chain for acute; slope_sig × cohort for drift) — walk the user through the decomposition when asked. **Tier prerequisites**: requires Reporter pipeline (Cloud or Edge). Drift detection requires continuous historical metrics — the CLI-only mode cannot do slope-similarity correlation. For direct forensic retrieval of specific historical events, use log10x_retriever_query instead. For metric backfill from the archive, use log10x_backfill_metric instead. **Example**: `{"starting_point": "payments-svc", "window": "1h", "depth": "normal"}` for a service-mode acute-spike investigation, or `{"starting_point": "environment", "window": "7d"}` for an env-wide audit.',
-  investigateSchema,
+  {
+    title: 'Investigate',
+    description: 'Single-call root-cause investigation for any log line, pattern, service, or environment. Returns a complete causal chain (for acute spikes) or co-drifter cohort (for gradual drift) with confidence scores derived mechanically from data signal quality, plus ready-to-run verification commands. Call whenever the user asks "what is going on with X", "why is X spiking", "investigate X", "what is causing this alert", "why is X creeping", or pastes a log line / alert and asks for diagnosis. Input is the user\'s natural-language target — pass their words verbatim. The tool detects whether the input is a raw log line, pattern identity, service name, or "environment" and runs the appropriate flow. It also detects whether the trajectory is an acute spike or gradual drift and renders a different report shape for each. **Structural wedge**: surfaces log-only signals (connection pool saturation, cache eviction storms, feature-flag cache flushes, retry amplification) that APM does NOT see because they manifest as slow-success traces rather than errors — this is why the tool catches causal chains that Datadog APM, Splunk APM, and OpenTelemetry tracing structurally cannot catch. Show the entire markdown report to the user without modification. Confidence percentages decompose into named sub-scores (stat × lag × chain for acute; slope_sig × cohort for drift) — walk the user through the decomposition when asked. **Tier prerequisites**: requires Reporter pipeline (Cloud or Edge). Drift detection requires continuous historical metrics — the CLI-only mode cannot do slope-similarity correlation. For direct forensic retrieval of specific historical events, use log10x_retriever_query instead. For metric backfill from the archive, use log10x_backfill_metric instead. **Example**: `{"starting_point": "payments-svc", "window": "1h", "depth": "normal"}` for a service-mode acute-spike investigation, or `{"starting_point": "environment", "window": "7d"}` for an env-wide audit.',
+    inputSchema: investigateSchema,
+    annotations: { title: 'Investigate', readOnlyHint: true, idempotentHint: true, openWorldHint: true },
+  },
   (args) =>
     wrap('log10x_investigate', async () => {
       const env = resolveEnv(getEnvs(), args.environment);
@@ -430,37 +474,53 @@ server.tool(
 
 // ── Tool: log10x_investigation_get ──
 
-server.tool(
+server.registerTool(
   'log10x_investigation_get',
-  'Retrieve a prior log10x_investigate report by investigation_id, or list the most recent investigations in this session. Call when the user references a prior investigation ("expand on investigation abc123", "what did we find last time", "show me that report again") or when you need to cross-reference patterns across multiple investigations in the same session without re-running the correlation. Session-local — the cache dies with the process and holds the 50 most recent investigations.',
-  investigationGetSchema,
+  {
+    title: 'Get prior investigation',
+    description: 'Retrieve a prior log10x_investigate report by investigation_id, or list the most recent investigations in this session. Call when the user references a prior investigation ("expand on investigation abc123", "what did we find last time", "show me that report again") or when you need to cross-reference patterns across multiple investigations in the same session without re-running the correlation. Session-local — the cache dies with the process and holds the 50 most recent investigations.',
+    inputSchema: investigationGetSchema,
+    annotations: { title: 'Get prior investigation', readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+  },
   (args) => wrap('log10x_investigation_get', async () => executeInvestigationGet(args))
 );
 
 // ── Tool: log10x_resolve_batch ──
 
-server.tool(
+server.registerTool(
   'log10x_resolve_batch',
-  'Templatize a batch of log events and return structured per-pattern triage with variable concentrations and next-action suggestions. Call whenever the user provides a batch of events to analyze: a pasted Datadog/Splunk/Elastic query result, a Slack incident with attached log lines, kubectl logs output, any raw log text dump, or when the user asks "what patterns are in these events" / "triage this batch". Input is the events themselves (file path, inline array, or raw text). The templater runs via the Log10x paste endpoint; the response structures the batch by stable templateHash, per-pattern frequency and severity, full template structure, and per-slot variable value distribution (answering "for whom is this happening" within the batch). Each pattern in the output carries next_actions suggesting log10x_investigate (for historical correlation), log10x_retriever_query (for archive retrieval), and native SIEM commands with the dominant variable filter pre-constructed. Do NOT call for single-line resolution — use log10x_event_lookup for that. Variable naming honest: structured-log slots get high-confidence names from JSON/logfmt keys; free-text slots with natural-language tokens get medium-confidence inferred names with "(inferred)" annotation; positional-only slots get "slot N" with no hallucinated name. **Tier prerequisites**: works at any tier including CLI-only. Runs via the Log10x paste endpoint by default (raw log text leaves the caller\'s machine); set privacy_mode=true to route through a locally-installed tenx CLI instead (local-only processing, CLI install required). **Example**: `{"source": "text", "text": "2026-04-13 ERROR checkout-svc ...\\n2026-04-13 INFO ..."}` for a pasted Slack dump, or `{"source": "file", "path": "/tmp/incident.log", "top_n_patterns": 10}` for a local file.',
-  resolveBatchSchema,
+  {
+    title: 'Resolve batch',
+    description: 'Templatize a batch of log events and return structured per-pattern triage with variable concentrations and next-action suggestions. Call whenever the user provides a batch of events to analyze: a pasted Datadog/Splunk/Elastic query result, a Slack incident with attached log lines, kubectl logs output, any raw log text dump, or when the user asks "what patterns are in these events" / "triage this batch". Input is the events themselves (file path, inline array, or raw text). The templater runs via the Log10x paste endpoint; the response structures the batch by stable templateHash, per-pattern frequency and severity, full template structure, and per-slot variable value distribution (answering "for whom is this happening" within the batch). Each pattern in the output carries next_actions suggesting log10x_investigate (for historical correlation), log10x_retriever_query (for archive retrieval), and native SIEM commands with the dominant variable filter pre-constructed. Do NOT call for single-line resolution — use log10x_event_lookup for that. Variable naming honest: structured-log slots get high-confidence names from JSON/logfmt keys; free-text slots with natural-language tokens get medium-confidence inferred names with "(inferred)" annotation; positional-only slots get "slot N" with no hallucinated name. **Tier prerequisites**: works at any tier including CLI-only. Runs via the Log10x paste endpoint by default (raw log text leaves the caller\'s machine); set privacy_mode=true to route through a locally-installed tenx CLI instead (local-only processing, CLI install required). **Example**: `{"source": "text", "text": "2026-04-13 ERROR checkout-svc ...\\n2026-04-13 INFO ..."}` for a pasted Slack dump, or `{"source": "file", "path": "/tmp/incident.log", "top_n_patterns": 10}` for a local file.',
+    inputSchema: resolveBatchSchema,
+    annotations: { title: 'Resolve batch', readOnlyHint: true, idempotentHint: true, openWorldHint: true },
+  },
   (args) => wrap('log10x_resolve_batch', async () => executeResolveBatch(args))
 );
 
 // ── Tool: log10x_extract_templates ──
 
-server.tool(
+server.registerTool(
   'log10x_extract_templates',
-  'Extract the structural template library from a log corpus via the local tenx CLI. Returns per-template identity (stable templateHash), template body with variable slots, and event count. Use for: (a) bootstrapping a pattern catalog before wiring up a Reporter, (b) offline auditing of archived log corpora, (c) validating that a config change produces expected template identities (pass `expected` assertions). Input: inline events, raw text, or a file path/glob. The tenx CLI must be installed locally (`brew install log10x/tap/tenx`). **Validation mode**: pass `expected.min_templates`, `expected.required_patterns`, and/or `expected.forbidden_merges` to turn extraction into assertion-checked validation — each assertion reports PASS/FAIL in the output. **Example**: `{"source": "events", "events": ["ERROR checkout-svc ...", "INFO cart-svc ..."], "expected": {"min_templates": 2, "forbidden_merges": [["checkout", "cart"]]}}` to assert the two services produce separate templates.',
-  extractTemplatesSchema,
+  {
+    title: 'Extract templates',
+    description: 'Extract the structural template library from a log corpus via the local tenx CLI. Returns per-template identity (stable templateHash), template body with variable slots, and event count. Use for: (a) bootstrapping a pattern catalog before wiring up a Reporter, (b) offline auditing of archived log corpora, (c) validating that a config change produces expected template identities (pass `expected` assertions). Input: inline events, raw text, or a file path/glob. The tenx CLI must be installed locally (`brew install log10x/tap/tenx`). **Validation mode**: pass `expected.min_templates`, `expected.required_patterns`, and/or `expected.forbidden_merges` to turn extraction into assertion-checked validation — each assertion reports PASS/FAIL in the output. **Example**: `{"source": "events", "events": ["ERROR checkout-svc ...", "INFO cart-svc ..."], "expected": {"min_templates": 2, "forbidden_merges": [["checkout", "cart"]]}}` to assert the two services produce separate templates.',
+    inputSchema: extractTemplatesSchema,
+    annotations: { title: 'Extract templates', readOnlyHint: true, idempotentHint: true, openWorldHint: true },
+  },
   (args) => wrap('log10x_extract_templates', async () => executeExtractTemplates(args))
 );
 
 // ── Tool: log10x_retriever_query ──
 
-server.tool(
+server.registerTool(
   'log10x_retriever_query',
-  'Direct retrieval of historical events from the Log10x Retriever archive (customer\'s S3 bucket) by stable pattern identity, with optional JavaScript filter expressions over event payloads. Call when: (a) the user asks for specific events matching a pattern over a time window that is OUTSIDE the SIEM\'s retention, (b) the user asks to retrieve events filtered by a variable value that is NOT a faceted dimension in their SIEM (e.g., "all payment_retry events for customer acme-corp from 90 days ago"), (c) compliance, legal, audit, or forensic workflows need exact event retrieval with stable identity. Do NOT call when the events are in the SIEM\'s current retention and can be queried natively faster, or when the user wants aggregated metrics over time instead of specific events (use log10x_backfill_metric or log10x_investigate instead). No re-ingestion. No proprietary format. The archive is in the customer\'s own S3 bucket and queries are scoped to the matching templateHash via pre-computed Bloom filters so only relevant byte ranges are fetched. Three output formats: events (raw with metadata), count (distribution summary), aggregated (bucketed time series). **Tier prerequisites**: requires Retriever component deployed. Does NOT require Reporter. Returns a graceful "Retriever not configured" message when __SAVE_LOG10X_RETRIEVER_URL__ is unset. **Example**: `{"pattern": "payment_retry_attempt", "from": "now-90d", "to": "now-15d", "filters": ["event.customer_id === \\"acme-corp-inc\\""], "format": "events", "limit": 10000}` for a 90-day legal forensic retrieval.',
-  retrieverQuerySchema,
+  {
+    title: 'Retriever query',
+    description: 'Direct retrieval of historical events from the Log10x Retriever archive (customer\'s S3 bucket) by stable pattern identity, with optional JavaScript filter expressions over event payloads. Call when: (a) the user asks for specific events matching a pattern over a time window that is OUTSIDE the SIEM\'s retention, (b) the user asks to retrieve events filtered by a variable value that is NOT a faceted dimension in their SIEM (e.g., "all payment_retry events for customer acme-corp from 90 days ago"), (c) compliance, legal, audit, or forensic workflows need exact event retrieval with stable identity. Do NOT call when the events are in the SIEM\'s current retention and can be queried natively faster, or when the user wants aggregated metrics over time instead of specific events (use log10x_backfill_metric or log10x_investigate instead). No re-ingestion. No proprietary format. The archive is in the customer\'s own S3 bucket and queries are scoped to the matching templateHash via pre-computed Bloom filters so only relevant byte ranges are fetched. Three output formats: events (raw with metadata), count (distribution summary), aggregated (bucketed time series). **Tier prerequisites**: requires Retriever component deployed. Does NOT require Reporter. Returns a graceful "Retriever not configured" message when __SAVE_LOG10X_RETRIEVER_URL__ is unset. **Example**: `{"pattern": "payment_retry_attempt", "from": "now-90d", "to": "now-15d", "filters": ["event.customer_id === \\"acme-corp-inc\\""], "format": "events", "limit": 10000}` for a 90-day legal forensic retrieval.',
+    inputSchema: retrieverQuerySchema,
+    annotations: { title: 'Retriever query', readOnlyHint: true, idempotentHint: true, openWorldHint: true },
+  },
   (args) =>
     wrap('log10x_retriever_query', async () => {
       const env = resolveEnv(getEnvs(), args.environment);
@@ -470,10 +530,14 @@ server.tool(
 
 // ── Tool: log10x_retriever_series ──
 
-server.tool(
+server.registerTool(
   'log10x_retriever_series',
-  'Materialize a fidelity-aware time series from the customer\'s S3 archive over an arbitrary window, with optional group-by on enrichment fields. Auto-selects between exact full aggregation (Strategy A) and per-window-sampled fan-out (Strategy B) based on Reporter pattern volume — small/moderate-volume queries get exact counts; high-volume / long-window queries get a sampled series with time-distribution and group-ranking fidelity preserved and tail caveats reported. Pathological volume is refused with structured narrowing guidance, never silently truncated. Call when: (a) the user wants a "what is the rate of pattern X over the last 30 days, broken down by tenant" answer that exceeds the SIEM\'s retention or query budget, (b) a baseline needs building from cost-driver patterns where Prometheus has continuous metrics but the *grouped breakdown* lives only in the S3 archive, (c) any time series question over a window where you don\'t know in advance whether full aggregation will fit. Use `log10x_retriever_query` instead when you need the actual event payloads (not aggregates). Use `log10x_backfill_metric` instead when you want to push the resulting series to a TSDB rather than just see it. **Tier prerequisites**: requires Retriever deployed. Reporter is optional — when absent, mode selection falls back to window-length heuristic. **Example**: `{"search": "tenx_user_pattern == \\"PaymentRetry\\"", "from": "now-30d", "to": "now", "bucket_size": "1h", "group_by": "tenx_user_service", "fidelity": "auto"}` for a 30-day grouped baseline.',
-  retrieverSeriesSchema,
+  {
+    title: 'Retriever time series',
+    description: 'Materialize a fidelity-aware time series from the customer\'s S3 archive over an arbitrary window, with optional group-by on enrichment fields. Auto-selects between exact full aggregation (Strategy A) and per-window-sampled fan-out (Strategy B) based on Reporter pattern volume — small/moderate-volume queries get exact counts; high-volume / long-window queries get a sampled series with time-distribution and group-ranking fidelity preserved and tail caveats reported. Pathological volume is refused with structured narrowing guidance, never silently truncated. Call when: (a) the user wants a "what is the rate of pattern X over the last 30 days, broken down by tenant" answer that exceeds the SIEM\'s retention or query budget, (b) a baseline needs building from cost-driver patterns where Prometheus has continuous metrics but the *grouped breakdown* lives only in the S3 archive, (c) any time series question over a window where you don\'t know in advance whether full aggregation will fit. Use `log10x_retriever_query` instead when you need the actual event payloads (not aggregates). Use `log10x_backfill_metric` instead when you want to push the resulting series to a TSDB rather than just see it. **Tier prerequisites**: requires Retriever deployed. Reporter is optional — when absent, mode selection falls back to window-length heuristic. **Example**: `{"search": "tenx_user_pattern == \\"PaymentRetry\\"", "from": "now-30d", "to": "now", "bucket_size": "1h", "group_by": "tenx_user_service", "fidelity": "auto"}` for a 30-day grouped baseline.',
+    inputSchema: retrieverSeriesSchema,
+    annotations: { title: 'Retriever time series', readOnlyHint: true, idempotentHint: true, openWorldHint: true },
+  },
   (args) =>
     wrap('log10x_retriever_series', async () => {
       const env = resolveEnv(getEnvs(), args.environment);
@@ -483,10 +547,14 @@ server.tool(
 
 // ── Tool: log10x_backfill_metric ──
 
-server.tool(
+server.registerTool(
   'log10x_backfill_metric',
-  'Define a new metric (Datadog, Prometheus remote_write) backfilled with historical data from the Log10x Retriever archive, with optional forward-emission handoff to the live Reporter for continuous population going forward. Call when: (a) the user wants to define a new SLO, alert, or dashboard metric that needs historical context from day one, (b) the customer did not pre-instrument the metric in their TSDB and cannot backfill it from the TSDB\'s own data, (c) historical events are available in the Retriever archive (typically 90-180 days back), (d) the user specifies a pattern, grouping dimensions, aggregation, and destination TSDB. Do NOT call when the metric already exists in the destination TSDB. **This is the single highest-value Log10x-only capability**: Datadog log-based metrics only work on currently-indexed data; Splunk log-based metrics only work over indexed retention; Cribl can emit forward but cannot backfill from archive; Athena + remote-write Lambda is possible but represents 2-4 weeks of data-engineering per metric. This tool collapses that to ~15 minutes of config. Tool runs the Retriever query, aggregates events into bucketed time series (count / sum_bytes / unique_values / rate_per_second), emits to the destination with historical timestamps preserved, and returns a view URL. Datadog and Prometheus (via remote_write adapter) are wired today; CloudWatch/Elastic/SignalFx return "not yet implemented". **Tier prerequisites**: requires Retriever component deployed. Reporter required only when emit_forward=true (default false in this build — the Reporter config update path for forward-emission handoff is not yet wired, so current usage is one-time historical backfill). **Example**: `{"pattern": "db_query_timeout", "metric_name": "log10x.db_query_timeout_by_tenant", "destination": "datadog", "bucket_size": "5m", "aggregation": "count", "from": "now-90d", "to": "now", "group_by": ["tenant_id"]}` for a 90-day Datadog backfill grouped by tenant.',
-  backfillMetricSchema,
+  {
+    title: 'Backfill metric',
+    description: 'Define a new metric (Datadog, Prometheus remote_write) backfilled with historical data from the Log10x Retriever archive, with optional forward-emission handoff to the live Reporter for continuous population going forward. Call when: (a) the user wants to define a new SLO, alert, or dashboard metric that needs historical context from day one, (b) the customer did not pre-instrument the metric in their TSDB and cannot backfill it from the TSDB\'s own data, (c) historical events are available in the Retriever archive (typically 90-180 days back), (d) the user specifies a pattern, grouping dimensions, aggregation, and destination TSDB. Do NOT call when the metric already exists in the destination TSDB. **This is the single highest-value Log10x-only capability**: Datadog log-based metrics only work on currently-indexed data; Splunk log-based metrics only work over indexed retention; Cribl can emit forward but cannot backfill from archive; Athena + remote-write Lambda is possible but represents 2-4 weeks of data-engineering per metric. This tool collapses that to ~15 minutes of config. Tool runs the Retriever query, aggregates events into bucketed time series (count / sum_bytes / unique_values / rate_per_second), emits to the destination with historical timestamps preserved, and returns a view URL. Datadog and Prometheus (via remote_write adapter) are wired today; CloudWatch/Elastic/SignalFx return "not yet implemented". **Tier prerequisites**: requires Retriever component deployed. Reporter required only when emit_forward=true (default false in this build — the Reporter config update path for forward-emission handoff is not yet wired, so current usage is one-time historical backfill). **Example**: `{"pattern": "db_query_timeout", "metric_name": "log10x.db_query_timeout_by_tenant", "destination": "datadog", "bucket_size": "5m", "aggregation": "count", "from": "now-90d", "to": "now", "group_by": ["tenant_id"]}` for a 90-day Datadog backfill grouped by tenant.',
+    inputSchema: backfillMetricSchema,
+    annotations: { title: 'Backfill metric', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  },
   (args) =>
     wrap('log10x_backfill_metric', async () => {
       const env = resolveEnv(getEnvs(), args.environment);
@@ -496,37 +564,53 @@ server.tool(
 
 // ── Tool: log10x_doctor ──
 
-server.tool(
+server.registerTool(
   'log10x_doctor',
-  'Run a startup health check on the Log10x MCP installation. Probes: environment configuration validity, prometheus.log10x.com reachability and auth, Reporter tier detection (Edge / Cloud / none), Retriever endpoint configuration (informational), Datadog destination credentials (informational), paste endpoint reachability, cross-pillar enrichment floor (v1.4, when LOG10X_CUSTOMER_METRICS_URL is set). Returns a markdown report with pass / warn / fail per check and remediation hints. Call this once at the start of a session to verify the install, or any time a tool returns an unexpected error and you want to isolate whether the problem is configuration or transient. **Tier prerequisites**: none. Doctor checks never block; missing components produce warnings with remediation hints.',
-  doctorSchema,
+  {
+    title: 'Doctor (health check)',
+    description: 'Run a startup health check on the Log10x MCP installation. Probes: environment configuration validity, prometheus.log10x.com reachability and auth, Reporter tier detection (Edge / Cloud / none), Retriever endpoint configuration (informational), Datadog destination credentials (informational), paste endpoint reachability, cross-pillar enrichment floor (v1.4, when LOG10X_CUSTOMER_METRICS_URL is set). Returns a markdown report with pass / warn / fail per check and remediation hints. Call this once at the start of a session to verify the install, or any time a tool returns an unexpected error and you want to isolate whether the problem is configuration or transient. **Tier prerequisites**: none. Doctor checks never block; missing components produce warnings with remediation hints.',
+    inputSchema: doctorSchema,
+    annotations: { title: 'Doctor (health check)', readOnlyHint: true, idempotentHint: true, openWorldHint: true },
+  },
   (args) => wrap('log10x_doctor', async () => executeDoctor(args))
 );
 
 // ── Tool: log10x_login_status ──
 
-server.tool(
+server.registerTool(
   'log10x_login_status',
-  'Report the MCP\'s current Log10x credential / env state. Call this whenever the user asks "am I logged in", "which envs do I have access to", "log me in", "use my account instead of demo", "switch envs", or whenever a tool result shows a "DEMO MODE" banner the user wants to act on. In demo mode (no LOG10X_API_KEY set, OR a key was set but failed validation), the response is a step-by-step config guide for adding a real API key to the MCP host\'s config (Claude Desktop, Cursor, etc.) and restarting. In signed-in mode, the response lists the user\'s identity, every env they can reach with permissions (OWNER/WRITE/READ), the default env, and the env most-recently used this session. Read-only — does not mutate any state. Takes no args. **Tier prerequisites**: none — runs in demo mode too.',
-  loginStatusSchema,
+  {
+    title: 'Login status',
+    description: 'Report the MCP\'s current Log10x credential / env state. Call this whenever the user asks "am I logged in", "which envs do I have access to", "log me in", "use my account instead of demo", "switch envs", or whenever a tool result shows a "DEMO MODE" banner the user wants to act on. In demo mode (no LOG10X_API_KEY set, OR a key was set but failed validation), the response is a step-by-step config guide for adding a real API key to the MCP host\'s config (Claude Desktop, Cursor, etc.) and restarting. In signed-in mode, the response lists the user\'s identity, every env they can reach with permissions (OWNER/WRITE/READ), the default env, and the env most-recently used this session. Read-only — does not mutate any state. Takes no args. **Tier prerequisites**: none — runs in demo mode too.',
+    inputSchema: loginStatusSchema,
+    annotations: { title: 'Login status', readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+  },
   () => wrap('log10x_login_status', async () => executeLoginStatus({}, getEnvs()))
 );
 
 // ── Tool: log10x_customer_metrics_query (v1.4) ──
 
-server.tool(
+server.registerTool(
   'log10x_customer_metrics_query',
-  'Low-level PromQL passthrough to the customer metric backend configured via LOG10X_CUSTOMER_METRICS_URL. Returns the raw Prometheus response shape plus metadata about which backend served the query. This is the escape hatch for cross-pillar investigations the higher-level tools don\'t cover — use it to explore the customer backend\'s label universe, run a one-off PromQL expression, or verify that a specific metric exists before correlating against it. For typical cross-pillar workflows, prefer `log10x_translate_metric_to_patterns` (customer metric → log patterns) or `log10x_correlate_cross_pillar` (bidirectional). **Tier prerequisites**: requires LOG10X_CUSTOMER_METRICS_URL configured (grafana_cloud, amp, datadog_prom, or generic_prom backend type). This tool issues exactly 1 PromQL query against the customer backend. **Example**: `{"promql": "apm_request_duration_p99{service=\\"payments-svc\\"}", "mode": "instant"}`.',
-  customerMetricsQuerySchema,
+  {
+    title: 'Customer metrics query',
+    description: 'Low-level PromQL passthrough to the customer metric backend configured via LOG10X_CUSTOMER_METRICS_URL. Returns the raw Prometheus response shape plus metadata about which backend served the query. This is the escape hatch for cross-pillar investigations the higher-level tools don\'t cover — use it to explore the customer backend\'s label universe, run a one-off PromQL expression, or verify that a specific metric exists before correlating against it. For typical cross-pillar workflows, prefer `log10x_translate_metric_to_patterns` (customer metric → log patterns) or `log10x_correlate_cross_pillar` (bidirectional). **Tier prerequisites**: requires LOG10X_CUSTOMER_METRICS_URL configured (grafana_cloud, amp, datadog_prom, or generic_prom backend type). This tool issues exactly 1 PromQL query against the customer backend. **Example**: `{"promql": "apm_request_duration_p99{service=\\"payments-svc\\"}", "mode": "instant"}`.',
+    inputSchema: customerMetricsQuerySchema,
+    annotations: { title: 'Customer metrics query', readOnlyHint: true, idempotentHint: true, openWorldHint: true },
+  },
   (args) => wrap('log10x_customer_metrics_query', async () => executeCustomerMetricsQuery(args))
 );
 
 // ── Tool: log10x_discover_join (v1.4) ──
 
-server.tool(
+server.registerTool(
   'log10x_discover_join',
-  'Auto-discover the structural join label between Log10x pattern metrics and the customer metric backend. Runs Jaccard similarity on label value sets across candidate label pairs, returns the best pair above the 0.7 threshold plus runner-ups above 0.5. The result is cached per-session keyed by (environment, customer-backend-endpoint) so the higher-level cross-pillar correlation tools can auto-run this once at session start and reuse the cached join without re-probing. Agents should normally NOT need to call this tool directly — `log10x_correlate_cross_pillar` and `log10x_translate_metric_to_patterns` call it internally. The explicit tool exists for power users who want to inspect the join universe or force a re-discovery after backend changes. When no pair crosses the threshold, returns a structured `no_join_available` response with the full probed-label matrix and recommended next actions. **Tier prerequisites**: requires LOG10X_CUSTOMER_METRICS_URL configured. This tool issues up to 12 PromQL queries (6 Log10x-side + 6 customer-side label value fetches) on first call; subsequent calls in the same session return the cached result. **Example**: `{"minimum_jaccard": 0.7}`.',
-  discoverJoinSchema,
+  {
+    title: 'Discover join label',
+    description: 'Auto-discover the structural join label between Log10x pattern metrics and the customer metric backend. Runs Jaccard similarity on label value sets across candidate label pairs, returns the best pair above the 0.7 threshold plus runner-ups above 0.5. The result is cached per-session keyed by (environment, customer-backend-endpoint) so the higher-level cross-pillar correlation tools can auto-run this once at session start and reuse the cached join without re-probing. Agents should normally NOT need to call this tool directly — `log10x_correlate_cross_pillar` and `log10x_translate_metric_to_patterns` call it internally. The explicit tool exists for power users who want to inspect the join universe or force a re-discovery after backend changes. When no pair crosses the threshold, returns a structured `no_join_available` response with the full probed-label matrix and recommended next actions. **Tier prerequisites**: requires LOG10X_CUSTOMER_METRICS_URL configured. This tool issues up to 12 PromQL queries (6 Log10x-side + 6 customer-side label value fetches) on first call; subsequent calls in the same session return the cached result. **Example**: `{"minimum_jaccard": 0.7}`.',
+    inputSchema: discoverJoinSchema,
+    annotations: { title: 'Discover join label', readOnlyHint: true, idempotentHint: true, openWorldHint: true },
+  },
   (args) =>
     wrap('log10x_discover_join', async () => {
       const env = resolveEnv(getEnvs(), args.environment);
@@ -536,10 +620,14 @@ server.tool(
 
 // ── Tool: log10x_correlate_cross_pillar (v1.4) ──
 
-server.tool(
+server.registerTool(
   'log10x_correlate_cross_pillar',
-  'Bidirectional cross-pillar correlation with structural validation. Takes an anchor that\'s either a Log10x pattern (`anchor_type: "log10x_pattern"`) OR a customer metric expression (`anchor_type: "customer_metric"`) and returns ranked co-movers from the OTHER pillar, tiered by structural validation confidence. **Four output tiers**: `confirmed` (full structural overlap on join key + at least one additional label — highest confidence), `service-match` (join key match but partial overlap — service-level issue affecting all instances), `unconfirmed` (temporal match but required Log10x enrichment labels missing — unknown causality, do not drill autonomously), `coincidence` (temporal match with NO structural overlap despite having both sides\' labels — this is coincidence, not causation, and the tool explicitly flags it as such). **The structural validation phase is the differentiating capability vs every other agent observability tool in 2026.** Every temporal Pearson ranker produces false positives on workloads that share a daily cycle; cross-pillar bridge filters these out by checking whether the candidate\'s metadata labels could plausibly overlap with the anchor\'s labels. When no structural join exists at all (e.g., node-level anchors against v1.4\'s service/pod/namespace/container label set), the tool returns a structured `no_join_available` refusal with probed-label diagnostics and recommended next actions — never a fall-through to temporal-only ranking. Refusal is a feature, not a failure. **Tier prerequisites**: requires LOG10X_CUSTOMER_METRICS_URL configured AND Reporter tier with k8s_pod / k8s_container / k8s_namespace / tenx_user_service enrichments (defaults on any fluent-k8s or filebeat-k8s install). This tool issues 4-12 PromQL queries for join discovery + candidate generation + up to 8 candidate range queries for temporal scoring. **Example**: `{"anchor_type": "customer_metric", "anchor": "apm_request_duration_p99{service=\\"payments-svc\\"}", "window": "1h"}`.',
-  correlateCrossPillarSchema,
+  {
+    title: 'Correlate cross-pillar',
+    description: 'Bidirectional cross-pillar correlation with structural validation. Takes an anchor that\'s either a Log10x pattern (`anchor_type: "log10x_pattern"`) OR a customer metric expression (`anchor_type: "customer_metric"`) and returns ranked co-movers from the OTHER pillar, tiered by structural validation confidence. **Four output tiers**: `confirmed` (full structural overlap on join key + at least one additional label — highest confidence), `service-match` (join key match but partial overlap — service-level issue affecting all instances), `unconfirmed` (temporal match but required Log10x enrichment labels missing — unknown causality, do not drill autonomously), `coincidence` (temporal match with NO structural overlap despite having both sides\' labels — this is coincidence, not causation, and the tool explicitly flags it as such). **The structural validation phase is the differentiating capability vs every other agent observability tool in 2026.** Every temporal Pearson ranker produces false positives on workloads that share a daily cycle; cross-pillar bridge filters these out by checking whether the candidate\'s metadata labels could plausibly overlap with the anchor\'s labels. When no structural join exists at all (e.g., node-level anchors against v1.4\'s service/pod/namespace/container label set), the tool returns a structured `no_join_available` refusal with probed-label diagnostics and recommended next actions — never a fall-through to temporal-only ranking. Refusal is a feature, not a failure. **Tier prerequisites**: requires LOG10X_CUSTOMER_METRICS_URL configured AND Reporter tier with k8s_pod / k8s_container / k8s_namespace / tenx_user_service enrichments (defaults on any fluent-k8s or filebeat-k8s install). This tool issues 4-12 PromQL queries for join discovery + candidate generation + up to 8 candidate range queries for temporal scoring. **Example**: `{"anchor_type": "customer_metric", "anchor": "apm_request_duration_p99{service=\\"payments-svc\\"}", "window": "1h"}`.',
+    inputSchema: correlateCrossPillarSchema,
+    annotations: { title: 'Correlate cross-pillar', readOnlyHint: true, idempotentHint: true, openWorldHint: true },
+  },
   (args) =>
     wrap('log10x_correlate_cross_pillar', async () => {
       const env = resolveEnv(getEnvs(), args.environment);
@@ -549,10 +637,14 @@ server.tool(
 
 // ── Tool: log10x_translate_metric_to_patterns (v1.4) ──
 
-server.tool(
+server.registerTool(
   'log10x_translate_metric_to_patterns',
-  'Preset wrapper for the customer-metric-to-log-patterns direction of cross-pillar correlation. Given a customer APM / infra / business metric, return the Log10x patterns whose rate curves correspond to the metric\'s movements, with the same four-tier structural validation as `log10x_correlate_cross_pillar`. This is the "agent looking at an APM metric asks what logs correspond" workflow, which is the most common cross-pillar direction and worth routing via a descriptively-named tool rather than through the generic bidirectional primitive. Output is identical to `correlate_cross_pillar`: confirmed / service-match / unconfirmed / coincidence tiers with per-candidate confidence sub-scores. **Tier prerequisites**: same as correlate_cross_pillar. Identical query cost. **Example**: `{"customer_metric": "apm_request_duration_p99{service=\\"payments-svc\\"}", "window": "1h"}`.',
-  translateMetricToPatternsSchema,
+  {
+    title: 'Translate metric to patterns',
+    description: 'Preset wrapper for the customer-metric-to-log-patterns direction of cross-pillar correlation. Given a customer APM / infra / business metric, return the Log10x patterns whose rate curves correspond to the metric\'s movements, with the same four-tier structural validation as `log10x_correlate_cross_pillar`. This is the "agent looking at an APM metric asks what logs correspond" workflow, which is the most common cross-pillar direction and worth routing via a descriptively-named tool rather than through the generic bidirectional primitive. Output is identical to `correlate_cross_pillar`: confirmed / service-match / unconfirmed / coincidence tiers with per-candidate confidence sub-scores. **Tier prerequisites**: same as correlate_cross_pillar. Identical query cost. **Example**: `{"customer_metric": "apm_request_duration_p99{service=\\"payments-svc\\"}", "window": "1h"}`.',
+    inputSchema: translateMetricToPatternsSchema,
+    annotations: { title: 'Translate metric to patterns', readOnlyHint: true, idempotentHint: true, openWorldHint: true },
+  },
   (args) =>
     wrap('log10x_translate_metric_to_patterns', async () => {
       const env = resolveEnv(getEnvs(), args.environment);
@@ -562,55 +654,79 @@ server.tool(
 
 // ── Tool: log10x_discover_env (install advisor) ──
 
-server.tool(
+server.registerTool(
   'log10x_discover_env',
-  'Read-only discovery of the caller\'s Kubernetes cluster + AWS account. Probes kubectl (workloads, DaemonSets, Helm releases, service-account IRSA annotations) and AWS (EKS, S3, SQS, CloudWatch log groups) to detect: which forwarder is running (Fluent Bit, Fluentd, Filebeat, Logstash, OTel Collector), which log10x apps are already installed (Reporter, Regulator, Retriever), and what infrastructure exists that could host a Retriever install. Returns a terse markdown report + a `snapshot_id` (cached 30 min) the advisor tools consume. Use this tool BEFORE calling `log10x_advise_reporter`, `log10x_advise_regulator`, or `log10x_advise_retriever` — they read the snapshot to tailor their install/verify/teardown commands to the specific cluster state. Every shell call is logged in the snapshot\'s `probeLog` for audit. No writes, no state mutation: only `kubectl get` and `aws ... describe/list` verbs. **Tier prerequisites**: none — this is a pre-install tool and runs against any customer environment.',
-  discoverEnvSchema,
+  {
+    title: 'Discover env (k8s + AWS)',
+    description: 'Read-only discovery of the caller\'s Kubernetes cluster + AWS account. Probes kubectl (workloads, DaemonSets, Helm releases, service-account IRSA annotations) and AWS (EKS, S3, SQS, CloudWatch log groups) to detect: which forwarder is running (Fluent Bit, Fluentd, Filebeat, Logstash, OTel Collector), which log10x apps are already installed (Reporter, Regulator, Retriever), and what infrastructure exists that could host a Retriever install. Returns a terse markdown report + a `snapshot_id` (cached 30 min) the advisor tools consume. Use this tool BEFORE calling `log10x_advise_reporter`, `log10x_advise_regulator`, or `log10x_advise_retriever` — they read the snapshot to tailor their install/verify/teardown commands to the specific cluster state. Every shell call is logged in the snapshot\'s `probeLog` for audit. No writes, no state mutation: only `kubectl get` and `aws ... describe/list` verbs. **Tier prerequisites**: none — this is a pre-install tool and runs against any customer environment.',
+    inputSchema: discoverEnvSchema,
+    annotations: { title: 'Discover env (k8s + AWS)', readOnlyHint: true, idempotentHint: true, openWorldHint: true },
+  },
   (args) => wrap('log10x_discover_env', () => executeDiscoverEnv(args))
 );
 
 // ── Tool: log10x_advise_reporter (install advisor) ──
 
-server.tool(
+server.registerTool(
   'log10x_advise_reporter',
-  'Given a DiscoverySnapshot (from `log10x_discover_env`) + a forwarder choice + a license key, produce a tailored install/verify/teardown plan for the Log10x Reporter. Supports 5 forwarders (fluent-bit, fluentd, filebeat, logstash, otel-collector). The plan includes: preflight checks (namespace existence, release-name collision, chart availability, forwarder alignment); per-step install commands (helm repo, values.yaml, helm upgrade, rollout wait); verify probes that answer specific questions (pods ready? 10x sidecar processing events? forwarder emitting output?); and teardown commands (helm uninstall, PVC cleanup, residue check). Every step is paste-ready — no shell interpolation. Use `action: "verify"` or `action: "teardown"` to scope the output. Default destination is `mock` (forwarder stdout) which is safe for dogfooding; switch to `elasticsearch|splunk|datadog|cloudwatch` with `destination` + `output_host` for production installs. **Tier prerequisites**: none — this is a pre-install tool.',
-  adviseReporterSchema,
+  {
+    title: 'Advise: Reporter install',
+    description: 'Given a DiscoverySnapshot (from `log10x_discover_env`) + a forwarder choice + a license key, produce a tailored install/verify/teardown plan for the Log10x Reporter. Supports 5 forwarders (fluent-bit, fluentd, filebeat, logstash, otel-collector). The plan includes: preflight checks (namespace existence, release-name collision, chart availability, forwarder alignment); per-step install commands (helm repo, values.yaml, helm upgrade, rollout wait); verify probes that answer specific questions (pods ready? 10x sidecar processing events? forwarder emitting output?); and teardown commands (helm uninstall, PVC cleanup, residue check). Every step is paste-ready — no shell interpolation. Use `action: "verify"` or `action: "teardown"` to scope the output. Default destination is `mock` (forwarder stdout) which is safe for dogfooding; switch to `elasticsearch|splunk|datadog|cloudwatch` with `destination` + `output_host` for production installs. **Tier prerequisites**: none — this is a pre-install tool.',
+    inputSchema: adviseReporterSchema,
+    annotations: { title: 'Advise: Reporter install', readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+  },
   (args) => wrap('log10x_advise_reporter', () => executeAdviseReporter(args))
 );
 
 // ── Tool: log10x_advise_regulator (install advisor) ──
 
-server.tool(
+server.registerTool(
   'log10x_advise_retriever',
-  'Given a DiscoverySnapshot (from `log10x_discover_env`), produce an install/verify/teardown plan for the Log10x Retriever. Unlike Reporter + Regulator, the Retriever has no forwarder choice — it is a standalone set of workloads (indexer + query-handler + stream-worker + filter CronJobs) that read from S3 via SQS and serve an HTTP query endpoint. The advisor detects existing AWS infra (input bucket with `indexing-results/` prefix, four SQS queues — index/query/subquery/stream — and an IRSA-annotated ServiceAccount) from the discovery snapshot, or accepts explicit overrides. Preflight fails closed when any required resource is missing — the Retriever depends on Terraform-provisioned infra that this advisor does NOT create. Verify probes: pods Ready, indexer processing messages, query endpoint responding, S3 indexing-results/ getting writes, SQS queue drainage. Teardown uninstalls the Helm release but leaves AWS infra alone (Terraform\'s concern). **Tier prerequisites**: none — but AWS infra must exist before install.',
-  adviseRetrieverSchema,
+  {
+    title: 'Advise: Retriever install',
+    description: 'Given a DiscoverySnapshot (from `log10x_discover_env`), produce an install/verify/teardown plan for the Log10x Retriever. Unlike Reporter + Regulator, the Retriever has no forwarder choice — it is a standalone set of workloads (indexer + query-handler + stream-worker + filter CronJobs) that read from S3 via SQS and serve an HTTP query endpoint. The advisor detects existing AWS infra (input bucket with `indexing-results/` prefix, four SQS queues — index/query/subquery/stream — and an IRSA-annotated ServiceAccount) from the discovery snapshot, or accepts explicit overrides. Preflight fails closed when any required resource is missing — the Retriever depends on Terraform-provisioned infra that this advisor does NOT create. Verify probes: pods Ready, indexer processing messages, query endpoint responding, S3 indexing-results/ getting writes, SQS queue drainage. Teardown uninstalls the Helm release but leaves AWS infra alone (Terraform\'s concern). **Tier prerequisites**: none — but AWS infra must exist before install.',
+    inputSchema: adviseRetrieverSchema,
+    annotations: { title: 'Advise: Retriever install', readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+  },
   (args) => wrap('log10x_advise_retriever', () => executeAdviseRetriever(args))
 );
 
 // ── Tool: log10x_advise_regulator (install advisor) ──
 
-server.tool(
+server.registerTool(
   'log10x_advise_regulator',
-  'Given a DiscoverySnapshot (from `log10x_discover_env`) + a forwarder choice + a license key, produce a tailored install/verify/teardown plan for the Log10x Regulator. Same 5 forwarders as the Reporter (fluent-bit, fluentd, filebeat, logstash, otel-collector) and same charts — the Regulator differs from the Reporter by writing regulated events back through the forwarder (with mute/sample/compact applied) instead of only emitting metrics. Values files carry `kind: "regulate"` which routes the tenx launcher to `@run/input/forwarder/<fw>/regulate` + `@apps/regulator`. Output shape is identical to `log10x_advise_reporter`: preflight, install steps, verify probes, teardown. **Tier prerequisites**: none — this is a pre-install tool.',
-  adviseRegulatorSchema,
+  {
+    title: 'Advise: Regulator install',
+    description: 'Given a DiscoverySnapshot (from `log10x_discover_env`) + a forwarder choice + a license key, produce a tailored install/verify/teardown plan for the Log10x Regulator. Same 5 forwarders as the Reporter (fluent-bit, fluentd, filebeat, logstash, otel-collector) and same charts — the Regulator differs from the Reporter by writing regulated events back through the forwarder (with mute/sample/compact applied) instead of only emitting metrics. Values files carry `kind: "regulate"` which routes the tenx launcher to `@run/input/forwarder/<fw>/regulate` + `@apps/regulator`. Output shape is identical to `log10x_advise_reporter`: preflight, install steps, verify probes, teardown. **Tier prerequisites**: none — this is a pre-install tool.',
+    inputSchema: adviseRegulatorSchema,
+    annotations: { title: 'Advise: Regulator install', readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+  },
   (args) => wrap('log10x_advise_regulator', () => executeAdviseRegulator(args))
 );
 
 // ── Tool: log10x_advise_install (mode selector + front-end advisor) ──
 
-server.tool(
+server.registerTool(
   'log10x_advise_install',
-  'Front-end install advisor — picks the RIGHT install path based on what `log10x_discover_env` detected. Sits in front of `log10x_advise_{reporter,regulator,retriever}`. Takes a snapshot_id + optional `goal` and decides between: standalone reporter (log10x-k8s/reporter-10x parallel DaemonSet, zero-touch to user forwarder), inline reporter/regulator (log10x-repackaged forwarder charts that replace the user\'s deployment), or Retriever (S3 archive). Detection rules: no forwarder OR hand-rolled forwarder → standalone; helm-managed fluent-bit/fluentd → inline (optimize-capable on 1.0.7); helm-managed filebeat/otel-collector → inline without optimize (1.0.6); helm-managed logstash → standalone (chart broken for sidecar mode). **Two call modes**: (1) with `goal` → returns a concrete install plan for the top-ranked path; goals are `just-metrics` (pattern fingerprinting + cost attribution), `cut-cost` (regulate: filter/sample), `compact` (regulate + compact encoding, only on fluent-bit/fluentd 1.0.7), `archive` (Retriever). (2) without `goal` → returns a ranked table of candidates + structured top-pick args so the caller can re-invoke with `goal=<winner>` or jump to an app-specific advisor. Call this BEFORE `log10x_advise_reporter`/`log10x_advise_regulator`/`log10x_advise_retriever` when you want the tool to pick the shape/app/forwarder combination for you. **Tier prerequisites**: none — this is a pre-install tool.',
-  adviseInstallSchema,
+  {
+    title: 'Advise: install path',
+    description: 'Front-end install advisor — picks the RIGHT install path based on what `log10x_discover_env` detected. Sits in front of `log10x_advise_{reporter,regulator,retriever}`. Takes a snapshot_id + optional `goal` and decides between: standalone reporter (log10x-k8s/reporter-10x parallel DaemonSet, zero-touch to user forwarder), inline reporter/regulator (log10x-repackaged forwarder charts that replace the user\'s deployment), or Retriever (S3 archive). Detection rules: no forwarder OR hand-rolled forwarder → standalone; helm-managed fluent-bit/fluentd → inline (optimize-capable on 1.0.7); helm-managed filebeat/otel-collector → inline without optimize (1.0.6); helm-managed logstash → standalone (chart broken for sidecar mode). **Two call modes**: (1) with `goal` → returns a concrete install plan for the top-ranked path; goals are `just-metrics` (pattern fingerprinting + cost attribution), `cut-cost` (regulate: filter/sample), `compact` (regulate + compact encoding, only on fluent-bit/fluentd 1.0.7), `archive` (Retriever). (2) without `goal` → returns a ranked table of candidates + structured top-pick args so the caller can re-invoke with `goal=<winner>` or jump to an app-specific advisor. Call this BEFORE `log10x_advise_reporter`/`log10x_advise_regulator`/`log10x_advise_retriever` when you want the tool to pick the shape/app/forwarder combination for you. **Tier prerequisites**: none — this is a pre-install tool.',
+    inputSchema: adviseInstallSchema,
+    annotations: { title: 'Advise: install path', readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+  },
   (args) => wrap('log10x_advise_install', () => executeAdviseInstall(args))
 );
 
 // ── Tool: log10x_advise_compact (compact-lookup PR author) ──
 
-server.tool(
+server.registerTool(
   'log10x_advise_compact',
-  'Emit a literal `gh` PR command + the file diff for a compactRegulator change against the customer\'s GitOps repo. Two modes: `mode=csv` (default) edits `compact-lookup.csv` — the engine hot-reloads via `FileResourceLookup.reset()` on each gitops poll (**no pipeline restart, no event drops**); `mode=js` replaces `compact-object-global.js` with new predicate logic — the engine triggers `restartPipeline()` (brief drain + relaunch). Use `js` only when CSV-keyed lookup is insufficient (regex match, multi-field-set OR semantics, external-flag gate). The compactRegulator decides per-event whether each event is emitted via `encode()` (compact templateHash+vars, ~20-40x volume reduction) or as `fullText`, keyed off `compactRegulatorFieldNames` (default: `[symbolMessage]`). This tool is a *renderer*, not a decider: the caller decides which patterns to compact (typically via `log10x_top_patterns` + `log10x_cost_drivers`) and passes the lists in. Output is markdown with a diff summary, the new full file content, and two ready-to-run shell snippets (one-shot via `gh api`, or local clone+edit+push). Pass either `gitops_repo` directly OR `snapshot_id` (from `log10x_discover_env`) — when given a snapshot, the tool auto-resolves the repo from a running regulator pod\'s `GH_REPO` env var. **Tier prerequisites**: requires a Reporter (Cloud or Edge) so pattern keys exist; the regulator pod must be configured with `GH_ENABLED=true`, `GH_REPO=<owner/name>`, `GH_TOKEN` (PAT), and `compactRegulatorLookupFile` pointing at the same path inside its gitops-pulled tree. The `log10x_advise_regulator` install plan now includes a "GitOps — MCP-managed runtime config" section that lists every env var to set.',
-  adviseCompactSchema,
+  {
+    title: 'Advise: compact-lookup PR',
+    description: 'Emit a literal `gh` PR command + the file diff for a compactRegulator change against the customer\'s GitOps repo. Two modes: `mode=csv` (default) edits `compact-lookup.csv` — the engine hot-reloads via `FileResourceLookup.reset()` on each gitops poll (**no pipeline restart, no event drops**); `mode=js` replaces `compact-object-global.js` with new predicate logic — the engine triggers `restartPipeline()` (brief drain + relaunch). Use `js` only when CSV-keyed lookup is insufficient (regex match, multi-field-set OR semantics, external-flag gate). The compactRegulator decides per-event whether each event is emitted via `encode()` (compact templateHash+vars, ~20-40x volume reduction) or as `fullText`, keyed off `compactRegulatorFieldNames` (default: `[symbolMessage]`). This tool is a *renderer*, not a decider: the caller decides which patterns to compact (typically via `log10x_top_patterns` + `log10x_cost_drivers`) and passes the lists in. Output is markdown with a diff summary, the new full file content, and two ready-to-run shell snippets (one-shot via `gh api`, or local clone+edit+push). Pass either `gitops_repo` directly OR `snapshot_id` (from `log10x_discover_env`) — when given a snapshot, the tool auto-resolves the repo from a running regulator pod\'s `GH_REPO` env var. **Tier prerequisites**: requires a Reporter (Cloud or Edge) so pattern keys exist; the regulator pod must be configured with `GH_ENABLED=true`, `GH_REPO=<owner/name>`, `GH_TOKEN` (PAT), and `compactRegulatorLookupFile` pointing at the same path inside its gitops-pulled tree. The `log10x_advise_regulator` install plan now includes a "GitOps — MCP-managed runtime config" section that lists every env var to set.',
+    inputSchema: adviseCompactSchema,
+    annotations: { title: 'Advise: compact-lookup PR', readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+  },
   (args) => wrap('log10x_advise_compact', () => executeAdviseCompact(args))
 );
 
@@ -645,6 +761,7 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_resolve_batch', intent: 'Pasted-batch triage — per-pattern variable concentration + next actions' },
   { name: 'log10x_extract_templates', intent: 'Extract structural templates from a log corpus via local tenx — optional min/required/forbidden-merge assertions' },
   { name: 'log10x_retriever_query', intent: 'Direct archive retrieval by templateHash with JS filter expressions' },
+  { name: 'log10x_retriever_series', intent: 'Fidelity-aware time series from the S3 archive — auto-selects exact aggregation vs sampled fan-out' },
   { name: 'log10x_backfill_metric', intent: 'Create a new Datadog / Prometheus metric backfilled from Retriever archive' },
   { name: 'log10x_doctor', intent: 'Startup health check — env config, gateway, tier, freshness, Retriever, paste endpoint, cross-pillar enrichment floor' },
   { name: 'log10x_login_status', intent: 'Report credential / env state — identity, env list with permissions, demo-mode upgrade guide if applicable' },
