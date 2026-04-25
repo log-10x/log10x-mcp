@@ -247,7 +247,7 @@ test('optimize=false leaves fluent-bit values unchanged (no env block)', async (
 
 test('optimize=true on filebeat reducer is allowed (1.0.7 unified path)', async () => {
   // As of chart 1.0.7, every forwarder maps kind=optimize to
-  // __SAVE_APPS_REDUCER__ + reducerOptimize=true env — no per-forwarder
+  // @apps/reducer + reducerOptimize=true env — no per-forwarder
   // blocker anymore.
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),

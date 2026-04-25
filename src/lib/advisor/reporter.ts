@@ -153,7 +153,7 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   }
   // optimize=true path, now unified across all charts at 1.0.7 — every
   // chart (fluent-bit, fluentd, filebeat, logstash, otel-collector) maps
-  // kind=optimize to __SAVE_APPS_REDUCER__ + reducerOptimize=true env var.
+  // kind=optimize to @apps/reducer + reducerOptimize=true env var.
   // No per-forwarder blocker remains (logstash is blocked above for the
   // sidecar wiring bug, which applies regardless of optimize).
   if (shape === 'inline' && args.optimize && app === 'reporter') {

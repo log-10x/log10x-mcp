@@ -367,7 +367,7 @@ function makeInlineAlts(params: {
 
   // Inline reducer + optimize (compact encoding).
   // All 5 forwarder charts now ship at 1.0.7 with a unified optimize path
-  // (kind=optimize launches __SAVE_APPS_REDUCER__ + reducerOptimize=true env
+  // (kind=optimize launches @apps/reducer + reducerOptimize=true env
   // var). Logstash still hits its architectural sidecar bug regardless
   // of optimize, so the logstashBlocker above handles that case.
   const optimizeBlocker = undefined;
