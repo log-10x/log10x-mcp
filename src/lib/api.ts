@@ -28,6 +28,18 @@ function authHeader(env: EnvConfig): string {
 }
 
 /**
+ * User-scoped auth header: just the API key, no envId.
+ *
+ * The backend authorizer (backend/lambdas/user-service-go/cmd/authorizer)
+ * accepts `X-10X-Auth: <apiKey>` with no `/<envId>` suffix when routing
+ * to user-scoped endpoints like GET /api/v1/user. The resolved user's
+ * default env is used if downstream handlers need one.
+ */
+function userAuthHeader(apiKey: string): string {
+  return apiKey;
+}
+
+/**
  * Wrap fetch with retry-on-transient-failure.
  *
  * Retries when:
@@ -267,6 +279,101 @@ export async function fetchAnalyzerCost(env: EnvConfig): Promise<number> {
   } catch {
     return DEFAULT_COST_PER_GB;
   }
+}
+
+// ── User profile / env autodiscovery ──
+
+/**
+ * Permission level assigned to a user for a given environment.
+ * Mirrors backend/lambdas/user-service-go/internal/models/environment.go.
+ *   - OWNER: full rights
+ *   - WRITE: can query + write
+ *   - READ : can query but not modify (e.g. shared demo env)
+ */
+export type Permission = 'OWNER' | 'WRITE' | 'READ';
+
+export interface RemoteTenXEnv {
+  envId: string;
+  name: string;
+  owner: string;
+  isDefault: boolean;
+  permissions: Permission;
+}
+
+export interface RemoteUserProfile {
+  userId: string;
+  username: string;
+  tier?: string;
+  userType?: string;
+  environments: RemoteTenXEnv[];
+  metadata: Record<string, unknown>;
+}
+
+/**
+ * Fetch the user profile — identity, tier, and the full list of
+ * environments the API key grants access to — via GET /api/v1/user.
+ *
+ * This is a USER-scoped call (authed with apiKey only, no envId). The
+ * authorizer at backend/lambdas/user-service-go/cmd/authorizer/main.go
+ * accepts `X-10X-Auth: <apiKey>` when envId is omitted and resolves
+ * the user by apiKey alone.
+ *
+ * Throws on network or non-2xx failures. Callers that want fallback
+ * behavior should catch and decide.
+ */
+export async function fetchUserProfile(apiKey: string): Promise<RemoteUserProfile> {
+  const url = new URL('/api/v1/user', getBase());
+  const res = await fetchWithRetry(
+    url.toString(),
+    { headers: { 'X-10X-Auth': userAuthHeader(apiKey) } },
+    'fetchUserProfile'
+  );
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(
+      `GET /api/v1/user returned HTTP ${res.status}: ${body.slice(0, 300)}`
+    );
+  }
+
+  const data = (await res.json()) as {
+    user?: {
+      user_id?: string;
+      username?: string;
+      tier?: string;
+      user_type?: string;
+      environments?: Array<{
+        env_id: string;
+        name: string;
+        owner: string;
+        is_default: boolean;
+        permissions: Permission;
+      }>;
+      metadata?: Record<string, unknown>;
+    };
+  };
+
+  const u = data.user;
+  if (!u || !Array.isArray(u.environments)) {
+    throw new Error(
+      `GET /api/v1/user returned an unexpected shape: missing user.environments.`
+    );
+  }
+
+  return {
+    userId: u.user_id ?? '',
+    username: u.username ?? '',
+    tier: u.tier,
+    userType: u.user_type,
+    environments: u.environments.map((e) => ({
+      envId: e.env_id,
+      name: e.name,
+      owner: e.owner,
+      isDefault: e.is_default,
+      permissions: e.permissions,
+    })),
+    metadata: u.metadata ?? {},
+  };
 }
 
 // ── Types ──

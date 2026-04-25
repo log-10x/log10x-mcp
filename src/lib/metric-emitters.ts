@@ -14,6 +14,7 @@
  */
 
 import type { MetricPoint } from './aggregator.js';
+import { resolveBackend } from './customer-metrics.js';
 
 export type Destination = 'datadog' | 'prometheus' | 'cloudwatch' | 'elastic' | 'signalfx';
 
@@ -75,7 +76,10 @@ async function emitDatadog(points: MetricPoint[], options: EmitOptions): Promise
         'Generate an API key in Datadog: Organization Settings → API Keys.'
     );
   }
-  const site = process.env.DATADOG_SITE || 'datadoghq.com';
+  // Accept DD_SITE and DATADOG_SITE interchangeably, matching Datadog's
+  // own CLI / SDK behavior. Previously only DATADOG_SITE was read, which
+  // produced a silent wrong-region bug when a user had only DD_SITE set.
+  const site = process.env.DD_SITE || process.env.DATADOG_SITE || 'datadoghq.com';
   const endpoint = `https://api.${site}/api/v2/series`;
 
   // Check backdated ingestion window — Datadog /api/v2/series has a hard
@@ -150,13 +154,38 @@ async function emitDatadog(points: MetricPoint[], options: EmitOptions): Promise
 // ── Prometheus remote_write ──
 
 async function emitPrometheus(points: MetricPoint[], options: EmitOptions): Promise<EmitResult> {
-  const url = process.env.PROMETHEUS_REMOTE_WRITE_URL;
+  // Priority:
+  //   1. Explicit PROMETHEUS_REMOTE_WRITE_URL (operator override).
+  //   2. Derived from the already-resolved customer-metrics backend.
+  //      Managed backends (Grafana Cloud, AMP, generic Prometheus with the
+  //      remote-write receiver) expose a sibling write path alongside the
+  //      read URL — forcing users to configure the URL twice is pure
+  //      friction. Datadog + GMP return undefined here; those cases still
+  //      need the explicit env.
+  let url = process.env.PROMETHEUS_REMOTE_WRITE_URL;
+  let urlSource = 'PROMETHEUS_REMOTE_WRITE_URL';
+  if (!url) {
+    try {
+      const resolution = await resolveBackend();
+      const derived = resolution.backend?.remoteWriteUrl();
+      if (derived) {
+        url = derived;
+        urlSource = `derived from ${resolution.backend!.backendType} read endpoint`;
+      }
+    } catch {
+      // Backend resolution errors (malformed explicit config) shouldn't
+      // mask the primary "no remote-write URL" error. Fall through.
+    }
+  }
   if (!url) {
     throw new Error(
-      'Prometheus remote_write emission requires PROMETHEUS_REMOTE_WRITE_URL to be set on the MCP server. ' +
-        'Use the customer\'s Prometheus /api/v1/write endpoint (or an AMP workspace remote_write URL).'
+      'Prometheus remote_write emission requires a write URL. Set PROMETHEUS_REMOTE_WRITE_URL explicitly, or ' +
+        'configure a customer-metrics backend whose read endpoint exposes a sibling write path (Grafana Cloud, AMP, ' +
+        'self-hosted Prometheus with --web.enable-remote-write-receiver). Datadog and GCP Managed Prometheus do not ' +
+        'support Prometheus remote_write and need a different destination.'
     );
   }
+  void urlSource;
 
   // Stub: the MVP path writes JSON to an adapter endpoint rather than the
   // protobuf-Snappy binary remote_write wire format. Callers who want real
@@ -164,10 +193,10 @@ async function emitPrometheus(points: MetricPoint[], options: EmitOptions): Prom
   // MCP ships the protobuf encoder. We surface this loudly instead of
   // silently failing.
   const warnings: string[] = [
-    'Prometheus remote_write path in this MCP build posts JSON to the configured URL and relies on ' +
-      'an adapter (e.g., prometheus-remote-write-adapter, AMP via sigv4 signer) to translate to the ' +
-      'protobuf/Snappy wire format. If your Prometheus requires native remote_write, set ' +
-      'PROMETHEUS_REMOTE_WRITE_URL to an adapter endpoint or wait for the native encoder release.',
+    `Prometheus remote_write URL source: ${urlSource}. ` +
+      'This build posts JSON to the configured URL and relies on an adapter ' +
+      '(prometheus-remote-write-adapter, AMP sigv4-proxy) to translate to the protobuf/Snappy wire format. ' +
+      'If the target accepts only native remote_write, set PROMETHEUS_REMOTE_WRITE_URL to an adapter endpoint.',
   ];
 
   const body = {

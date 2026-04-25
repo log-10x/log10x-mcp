@@ -1,12 +1,70 @@
 # Engine team tickets — ready to file
 
-These are pre-written tickets for the engine-side bugs caught during the 2026-04-15 GA hardening session. All have MCP-layer mitigations shipped (PRs #32–#35) but need engine root-cause fixes before the affected workflows are fully GA-ready.
+These are pre-written tickets for the engine-side bugs caught during the 2026-04-15 GA hardening session. All have MCP-layer mitigations shipped (PRs #32–#36) but need engine root-cause fixes before the affected workflows are fully GA-ready.
 
 Each ticket is self-contained — copy the title and body directly into whichever issue tracker the engine team uses.
 
+## 2026-04-15 evening status
+
+- **Ticket 0 (G12 JSONL writer)**: confirmed engine bug, awaits engine fix. MCP shape guard merged.
+- **Ticket 1 (G11 paste templatizer)**: **Status split.**
+  - In-cluster fluentd ingestion path: hot-patched live in 4 fluentd pods (group-template.js negator-fallback branch). Verified — 30-line G11 bundle produces 22 distinct templates instead of 7. Awaits image rebuild for permanence.
+  - **Paste Lambda path: STILL BROKEN.** Reproduced 2026-04-15 evening: `log10x_resolve_batch` with 10 distinct lines returns 3 patterns, 7 lines silently dropped, cross-event template merge present (libgssapi error + shipping error glued by `\n` in Pattern #1's body). The paste Lambda is a separate deployment from in-cluster fluentd — different image, different runtime — so the hot-patch never touched it. **The G11 fix needs a coordinated rollout: rebuild engine image AND redeploy the paste Lambda.** Customers using SlackPasteBot / `/log10x triage` are still affected even after the fluentd image rebuild lands. See **Ticket 1b** below.
+  - **Failure 4 (UUID over-segmentation) WITHDRAWN** — `$-$-$-$-$` still produces stable templateHash for structurally-identical UUIDs; structural identity is preserved.
+- **Ticket 2 (G12 retriever)**: **Status split.**
+  - **Failure B (-32000 crash on canonical name): RESOLVED.** Did not reproduce post-fix. Was an artifact of the malformed body in Failure A.
+  - **Failure A (zero events on known-exists data): RECONFIRMED reproducible.** PR #36 fixed the body shape (verified end-to-end with 886 matched / 16 returned earlier today after manually triggering an indexer run). Hours later, multiple distinct queries reproduce the 0-events / 92s wall-time symptom: `tenx_user_service=="frontend"`, `includes(text, "shipping")`, and canonical pattern-name searches all return 0 against an environment where `pattern_trend` shows live $4.1/day CRIT shipping traffic. The earlier 16-event verification required manually copying an existing S3 object to trigger an indexer event — twice today. **The pattern of needing manual S3 triggers indicates a real indexer freshness/coverage bug, root cause TBD.** Hypotheses: (a) indexer's S3 event subscription not firing reliably, (b) indexer cron is too sparse, (c) indexer crashes silently on certain object shapes. Need engine investigation with indexer-pod logs tailed during a live query.
+- **Ticket 3 (G10 fingerprinter)**: **WITHDRAWN.** The two product-reviews templates are structurally different at the templater level (different literal sets in overlapping positions) — the templater is internally consistent. PR #35's MCP-layer collapse heuristic addresses the operational UX pain at the right layer. Not an engine bug.
+- **Ticket 4 (G9 tenx-edge stale state)**: **Confirmed engine bug, root cause TBD.** Symptom is reproducible and currently active: doctor flags 11 services with non-zero 24h volume and zero 15m volume; `kubectl rollout restart ds/tenx-fluentd` clears it instantly. Two hypotheses ruled out today against the source: `PrometheusRequestBuilder.reportedCounters` latch (zero-baselines are first-time-only by design — missing them on retry is correct, not a bug) and `BaseReaderDecoderProducer` backpressure wait loop (the `wait(intervalDuration)` + time-gated `shouldTest()` recovers after at most one interval, not a deadlock). Need live repro with thread dump from a stuck pod and Prometheus scrape logs (Grok's hint: check for missing labels during recovery — could indicate metric exporter caching service metadata incorrectly during backpressure recovery).
+
 ---
 
-## Ticket 0 — Streamer JSONL writer doesn't escape `\n` in the `text` field
+## Ticket 1b — GA BLOCKER: Paste Lambda runs unfixed templater (separate from in-cluster fluentd)
+
+**Severity**: GA blocker for the paste-triage workflow. SEPARATE from Ticket 1's in-cluster fluentd fix.
+**Affected component**: Paste Lambda (the AWS Lambda behind `LOG10X_PASTE_URL` that backs `log10x_resolve_batch`).
+**GAPS ID**: G11 (Lambda half)
+
+### Evidence
+
+`log10x_resolve_batch` with 10 distinct log lines (subset of the original G11 bundle) on 2026-04-15 evening:
+
+Input:
+```
+info: cart.cartstore.ValkeyCartStore[0] GetCartAsync called with userId=0b244836-38ef-11f1-97c3-2e37e12f85c8
+Error: libgssapi_krb5.so.2: cannot open shared object file: No such file or directory
+Post "http://shipping:8080/quote": unsupported protocol scheme "shipping"
+2026-04-15T17:23:47Z WRN checkpoints.go:73 failed to find checkpoint: resource not found
+grpc: addrConn.createTransport failed to connect to {Addr: "jaeger:4317", ServerName: "jaeger:4317"}
+AdService Targeted ad request received for "books" with trace_id=abc123
+frontend: POST /api/checkout 200
+opentelemetry-collector: exporter otlp failed to send metrics: rpc error: code=Unavailable
+payment: gRPC server started on :9000
+kube-proxy: Running on node ip-10-0-48-245.ec2.internal
+```
+
+Output: 3 patterns, **7 lines (70%) silently dropped**. Pattern #1's body literally contains the libgssapi error AND the Post shipping error fused with `\n`:
+```
+template: 'Error: libgssapi_krb5.so.$: cannot open shared object file: No such file or directory\nPost "http://shipping:$/quote": unsupported protocol scheme...'
+```
+
+This is the same cross-event template merge bug from the original G11 ticket, in a different deployment.
+
+### Why the in-cluster hot-patch doesn't help
+
+The hot-patch applied earlier this session was `kubectl cp` of `group-template.js` into 4 in-cluster fluentd pods, followed by `kill <PID>` to respawn the tenx-edge child. The paste Lambda is an entirely separate AWS Lambda runtime — it bundles its own copy of the engine, runs in Lambda execution environment, and is not reachable via kubectl. The hot-patch never touched it.
+
+### Required fix
+
+Rebuild the engine image (which fixes the in-cluster fluentd path's persistence issue too), then redeploy the paste Lambda with the new image. Both are downstream of the same engine source change, so a single image rebuild covers both surfaces.
+
+### MCP-side mitigation
+
+PR #35's drop-count warning IS already firing on the broken paste Lambda output and correctly tells users not to trust the result. But the workflow remains unusable for production triage until the paste Lambda is redeployed.
+
+---
+
+## Ticket 0 — Retriever JSONL writer doesn't escape `\n` in the `text` field
 
 **Severity**: high. Produces subtly-broken JSONL that requires client-side workarounds.
 **Affected component**: `IndexQueryWriter` (or whatever writes the stream-worker's JSONL result files to S3 under `tenx/{target}/qr/{queryId}/*.jsonl`).
@@ -14,9 +72,9 @@ Each ticket is self-contained — copy the title and body directly into whicheve
 
 ### Evidence
 
-Pulled a sample JSONL file from the streamer's result bucket during G12 verification:
+Pulled a sample JSONL file from the retriever's result bucket during G12 verification:
 ```
-s3://tenx-demo-cloud-streamer-351939435334/indexing-results/tenx/app/qr/ff4ae1fc-b89c-4525-ab95-c1cc2a02d48e/wcZSyGG_nMnwQaNzc98Stg.jsonl
+s3://tenx-demo-cloud-retriever-351939435334/indexing-results/tenx/app/qr/ff4ae1fc-b89c-4525-ab95-c1cc2a02d48e/wcZSyGG_nMnwQaNzc98Stg.jsonl
 ```
 
 Parsed it in Node with `content.split(/\r?\n/).map(JSON.parse)`:
@@ -34,13 +92,13 @@ Note `\\t` is correctly escaped (because the internal JSON-in-JSON uses `\\` for
 
 ### Required fix
 
-In the writer that serializes `StreamerEvent` → JSONL, escape newlines in string field values as `\\n` before `JSON.stringify`. Or just use a standard JSON library that handles this (most do by default — custom escape logic likely introduced the bug).
+In the writer that serializes `RetrieverEvent` → JSONL, escape newlines in string field values as `\\n` before `JSON.stringify`. Or just use a standard JSON library that handles this (most do by default — custom escape logic likely introduced the bug).
 
 Test: emit an event whose `text` field contains `"line1\nline2"`. Read the output file via `split('\n').map(JSON.parse)` and assert both lines of the input appear in the same parsed record's `text` field, not split across two JSON parses.
 
 ### MCP-side mitigation shipped
 
-`parseJsonl` in `src/lib/streamer-api.ts` now includes a shape guard that rejects records missing the expected event fields (timestamp, text, tenx_user_service, tenx_user_process, LevelTemplate.severity_level, MessageTemplate.message_pattern). Fluentd-wrapped fragments with only `{stream, log, docker, kubernetes, tenx_tag}` get discarded. Count / aggregated / events renders now work correctly end-to-end.
+`parseJsonl` in `src/lib/retriever-api.ts` now includes a shape guard that rejects records missing the expected event fields (timestamp, text, tenx_user_service, tenx_user_process, LevelTemplate.severity_level, MessageTemplate.message_pattern). Fluentd-wrapped fragments with only `{stream, log, docker, kubernetes, tenx_tag}` get discarded. Count / aggregated / events renders now work correctly end-to-end.
 
 When the engine writer is fixed, the shape guard becomes a defensive no-op — fragments won't exist anymore, so nothing to discard.
 
@@ -116,22 +174,22 @@ PR #35 (`log10x-mcp` repo) added a drop-count warning in `resolve_batch`:
 
 ---
 
-## Ticket 2 — GA BLOCKER: Streamer forensic query false negatives + crash on canonical pattern names
+## Ticket 2 — GA BLOCKER: Retriever forensic query false negatives + crash on canonical pattern names
 
-**Severity**: GA blocker for the forensic retrieval workflow. Storage Streamer is the Tier-4 customer capability and a key GA selling point.
-**Affected tool**: `log10x_streamer_query` (MCP), and any direct caller of the streamer `/query` endpoint.
+**Severity**: GA blocker for the forensic retrieval workflow. Retriever is the Tier-4 customer capability and a key GA selling point.
+**Affected tool**: `log10x_retriever_query` (MCP), and any direct caller of the retriever `/query` endpoint.
 **GAPS ID**: G12
 
 ### Evidence (verbatim from sub-agent S7, 2026-04-15)
 
-S7 attempted to reconstruct a shipping-error incident via forensic retrieval. Streamer endpoint was confirmed configured (`log10x_doctor` → streamer_endpoint PASS, Edge Reporter tier, prometheus gateway reachable). The shipping pattern was confirmed to have ~$11K/wk of traffic with 166 data points and a 109 GB peak visible via `log10x_pattern_trend`.
+S7 attempted to reconstruct a shipping-error incident via forensic retrieval. Retriever endpoint was confirmed configured (`log10x_doctor` → retriever_endpoint PASS, Edge Reporter tier, prometheus gateway reachable). The shipping pattern was confirmed to have ~$11K/wk of traffic with 166 data points and a 109 GB peak visible via `log10x_pattern_trend`.
 
 **Two reproducible failures**:
 
 #### Failure A — False negatives on known-exists data
 
 ```
-log10x_streamer_query({
+log10x_retriever_query({
   pattern: "shipping",
   from: "2026-04-12T11:30:00Z",
   to: "2026-04-12T12:30:00Z",
@@ -148,7 +206,7 @@ Independent ground truth via `log10x_pattern_trend` on the same pattern in overl
 #### Failure B — `-32000: Connection closed` on canonical pattern names
 
 ```
-log10x_streamer_query({
+log10x_retriever_query({
   pattern: "shipping_service_Post_shipping_get_quote_unsupported_protocol_scheme_shipping",
   from: "now-1h"
 })
@@ -158,21 +216,21 @@ Reproducible, 2+ attempts. Returns `MCP error -32000: Connection closed`. Short-
 
 ### Hypothesis space (not yet diagnosed)
 
-1. **Archive coverage gap**: the Bloom filter index doesn't cover the time windows being queried. Check whether the streamer indexer has ingested the affected time ranges.
-2. **Target prefix mismatch**: the streamer is writing under a different `target` than the default (`app`). Check `LOG10X_STREAMER_TARGET` / `LOG10X_STREAMER_INDEX_SUBPATH` in the MCP config against what the indexer actually uses.
+1. **Archive coverage gap**: the Bloom filter index doesn't cover the time windows being queried. Check whether the retriever indexer has ingested the affected time ranges.
+2. **Target prefix mismatch**: the retriever is writing under a different `target` than the default (`app`). Check `__SAVE_LOG10X_RETRIEVER_TARGET__` / `LOG10X_RETRIEVER_INDEX_SUBPATH` in the MCP config against what the indexer actually uses.
 3. **Name-based filter mismatch**: canonical slash-underscore pattern names don't match the stored event keys. The indexer may be storing raw pattern body text, not the encoded identity.
-4. **-32000 crash root cause**: likely a length cap, special-char escaping, or JSON field handling bug in the streamer request handler. Check `src/main/java/com/log10x/ext/quarkus/streamer/...` for input validation on the `name` parameter.
-5. **Recently-wired-up race**: the streamer was deployed during the 2026-04-15 otel-demo swap. If the indexer hasn't backfilled historical S3 objects yet, queries against older windows will return empty by design but the tool should say so, not return an empty dataset without explanation.
+4. **-32000 crash root cause**: likely a length cap, special-char escaping, or JSON field handling bug in the retriever request handler. Check `src/main/java/com/log10x/ext/quarkus/retriever/...` for input validation on the `name` parameter.
+5. **Recently-wired-up race**: the retriever was deployed during the 2026-04-15 otel-demo swap. If the indexer hasn't backfilled historical S3 objects yet, queries against older windows will return empty by design but the tool should say so, not return an empty dataset without explanation.
 
 ### Required investigation
 
-1. Pull the streamer coordinator logs during a Failure A reproduction. Confirm the query submitted, which workers ran it, what marker objects were written, and whether the JSONL results prefix is actually populated or just empty.
-2. Reproduce Failure B locally in the engine dev env. The -32000 is an RPC-level failure that propagates up through the MCP client as "Connection closed" — the underlying HTTP response or exception should be captured in the streamer service logs.
-3. Document the expected pattern-name encoding for streamer queries. Is it the canonical snake_case identity? Raw message body? Template ID? The MCP tool currently passes whatever the caller provides, which may mismatch what the indexer stores.
+1. Pull the retriever coordinator logs during a Failure A reproduction. Confirm the query submitted, which workers ran it, what marker objects were written, and whether the JSONL results prefix is actually populated or just empty.
+2. Reproduce Failure B locally in the engine dev env. The -32000 is an RPC-level failure that propagates up through the MCP client as "Connection closed" — the underlying HTTP response or exception should be captured in the retriever service logs.
+3. Document the expected pattern-name encoding for retriever queries. Is it the canonical snake_case identity? Raw message body? Template ID? The MCP tool currently passes whatever the caller provides, which may mismatch what the indexer stores.
 
 ### MCP-side mitigation already shipped
 
-PR #35 (`log10x-mcp` repo) added a `streamer_forensic_health` doctor check that permanently WARNs whenever `LOG10X_STREAMER_URL` is configured, with three practical workarounds:
+PR #35 (`log10x-mcp` repo) added a `retriever_forensic_health` doctor check that permanently WARNs whenever `__SAVE_LOG10X_RETRIEVER_URL__` is configured, with three practical workarounds:
 1. Use short pattern names / free-text search strings rather than canonical identities
 2. Cross-check any zero-event result against `log10x_pattern_trend` before concluding the archive is empty
 3. Prefer `log10x_event_lookup` + `log10x_pattern_trend` for incident reconstruction where approximate timing is acceptable

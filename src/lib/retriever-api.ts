@@ -1,9 +1,9 @@
 /**
- * Log10x Storage Streamer REST client + S3 results poller.
+ * Log10x Retriever REST client + S3 results poller.
  *
- * The Streamer's query API is two-phase:
+ * The Retriever's query API is two-phase:
  *
- *   1. POST /streamer/query with a body shaped like QueryRequest.java accepts.
+ *   1. POST /retriever/query with a body shaped like QueryRequest.java accepts.
  *      The body carries a client-generated `id` field which the engine uses
  *      as the canonical queryId and echoes back in the response.
  *
@@ -15,16 +15,22 @@
  *      prefix is stable.
  *
  * Configure with:
- *   - LOG10X_STREAMER_URL: base URL of the query handler (e.g., the NLB).
- *   - LOG10X_STREAMER_BUCKET: S3 bucket holding the streamer index/results.
- *   - LOG10X_STREAMER_TARGET: default target app prefix (e.g., "app" for
+ *   - __SAVE_LOG10X_RETRIEVER_URL__: base URL of the query handler (e.g., the NLB).
+ *   - __SAVE_LOG10X_RETRIEVER_BUCKET__: S3 bucket holding the retriever index/results.
+ *   - __SAVE_LOG10X_RETRIEVER_TARGET__: default target app prefix (e.g., "app" for
  *     the otek demo env). Overridable per query.
- *   - LOG10X_STREAMER_POLL_MS: poll interval, default 1500 ms.
- *   - LOG10X_STREAMER_TIMEOUT_MS: total poll budget, default 90_000 ms.
+ *   - LOG10X_RETRIEVER_POLL_MS: poll interval, default 1500 ms.
+ *   - LOG10X_RETRIEVER_TIMEOUT_MS: total poll budget, default 180_000 ms.
+ *     The 90s default was too small for archives where the query-handler
+ *     spawns dozens of stream workers — observed live on the otel-demo
+ *     env taking >60s to write the first marker. 180s covers single
+ *     forensic queries; per-sub-window calls in retriever_series get the
+ *     same budget but typically finish in seconds because each query is
+ *     scoped to a small sub-window.
  *
  * Authentication piggybacks on the same X-10X-Auth header the Prometheus
- * gateway uses (apiKey/envId). Override via LOG10X_STREAMER_AUTH_HEADER /
- * LOG10X_STREAMER_AUTH_VALUE if the deployment uses a different scheme.
+ * gateway uses (apiKey/envId). Override via LOG10X_RETRIEVER_AUTH_HEADER /
+ * LOG10X_RETRIEVER_AUTH_VALUE if the deployment uses a different scheme.
  */
 
 import { execFile } from 'node:child_process';
@@ -34,27 +40,27 @@ import type { EnvConfig } from './environments.js';
 
 const execFileP = promisify(execFile);
 
-export class StreamerNotConfiguredError extends Error {
+export class RetrieverNotConfiguredError extends Error {
   constructor() {
     super(
-      'Storage Streamer endpoint not configured for this MCP install. ' +
-        'log10x_streamer_query and log10x_backfill_metric cannot reach the S3 archive in this session.\n\n' +
+      'Retriever endpoint not configured for this MCP install. ' +
+        'log10x_retriever_query and log10x_backfill_metric cannot reach the S3 archive in this session.\n\n' +
         'Two possible causes:\n' +
-        '  1. Streamer IS deployed but MCP env vars are unset. Fix: set LOG10X_STREAMER_URL ' +
-        'to the streamer query handler URL (e.g., the NLB) and LOG10X_STREAMER_BUCKET to the ' +
+        '  1. Retriever IS deployed but MCP env vars are unset. Fix: set __SAVE_LOG10X_RETRIEVER_URL__ ' +
+        'to the retriever query handler URL (e.g., the NLB) and __SAVE_LOG10X_RETRIEVER_BUCKET__ to the ' +
         'archive bucket, then restart the MCP client.\n' +
-        '  2. Streamer is NOT deployed for this customer. Fix: deploy per ' +
-        'https://doc.log10x.com/apps/cloud/streamer/\n\n' +
+        '  2. Retriever is NOT deployed for this customer. Fix: deploy per ' +
+        'https://doc.log10x.com/apps/cloud/retriever/\n\n' +
         'Workaround for the current request: if the events you need are inside SIEM hot retention ' +
         '(typically <7 days for Datadog/Splunk/Elastic), tell the user to query the SIEM directly ' +
         'with the relevant service + time filter — that is the fastest path. For events outside ' +
-        'SIEM retention, the only path is enabling the streamer.'
+        'SIEM retention, the only path is enabling the retriever.'
     );
-    this.name = 'StreamerNotConfiguredError';
+    this.name = 'RetrieverNotConfiguredError';
   }
 }
 
-export interface StreamerQueryRequest {
+export interface RetrieverQueryRequest {
   /** Absolute ISO8601, epoch millis, or relative `now("-1h")`. */
   from: string;
   /** Absolute ISO8601, epoch millis, or relative `now()`. */
@@ -63,7 +69,7 @@ export interface StreamerQueryRequest {
   search?: string;
   /** Optional in-memory JS filters applied after the Bloom-scoped fetch. */
   filters?: string[];
-  /** Target app prefix to scope the index scan. Defaults to LOG10X_STREAMER_TARGET. */
+  /** Target app prefix to scope the index scan. Defaults to __SAVE_LOG10X_RETRIEVER_TARGET__. */
   target?: string;
   /** Logical query name (appears in PERF metrics). */
   name?: string;
@@ -86,7 +92,7 @@ export interface StreamerQueryRequest {
   bucketSize?: string;
 }
 
-export interface StreamerEvent {
+export interface RetrieverEvent {
   timestamp?: string;
   text?: string;
   severity_level?: string;
@@ -97,7 +103,7 @@ export interface StreamerEvent {
   http_code?: string;
 
   // Legacy fields kept for aggregator/backfill compatibility. Populated
-  // from the canonical enrichment fields inside runStreamerQuery.
+  // from the canonical enrichment fields inside runRetrieverQuery.
   service?: string;
   severity?: string;
   templateHash?: string;
@@ -108,13 +114,13 @@ export interface StreamerEvent {
   [key: string]: unknown;
 }
 
-export interface StreamerBucket {
+export interface RetrieverBucket {
   timestamp: string;
   count: number;
   labels?: Record<string, string>;
 }
 
-export interface StreamerQueryResponse {
+export interface RetrieverQueryResponse {
   queryId: string;
   target: string;
   from: string;
@@ -125,13 +131,13 @@ export interface StreamerQueryResponse {
     workerFiles: number;
     truncated: boolean;
   };
-  events: StreamerEvent[];
+  events: RetrieverEvent[];
 
   // Legacy-compatible fields populated client-side from `events` so that
-  // callers written against the old Streamer contract (investigate, backfill)
+  // callers written against the old Retriever contract (investigate, backfill)
   // keep working without a rewrite.
   format?: 'events' | 'count' | 'aggregated';
-  buckets?: StreamerBucket[];
+  buckets?: RetrieverBucket[];
   countSummary?: {
     total: number;
     byService?: Record<string, number>;
@@ -140,29 +146,255 @@ export interface StreamerQueryResponse {
   };
 }
 
-export function isStreamerConfigured(): boolean {
-  return Boolean(process.env.LOG10X_STREAMER_URL && process.env.LOG10X_STREAMER_BUCKET);
+export type RetrieverDetectionPath =
+  | 'explicit_env'
+  | 'aws_s3_bucket_pattern'
+  | 'kubectl_service'
+  | 'terraform_state';
+
+export interface RetrieverResolution {
+  url?: string;
+  bucket?: string;
+  target?: string;
+  detectionPath?: RetrieverDetectionPath;
+  trace: Array<{ path: RetrieverDetectionPath; status: 'matched' | 'skipped' | 'failed'; reason: string }>;
 }
 
-function getStreamerUrl(): string {
-  const url = process.env.LOG10X_STREAMER_URL;
-  if (!url) throw new StreamerNotConfiguredError();
-  return url.replace(/\/+$/, '');
+/**
+ * Resolve the Retriever URL + bucket from the ambient environment.
+ *
+ * Detection order (first hit wins):
+ *   1. explicit __SAVE_LOG10X_RETRIEVER_URL__ + __SAVE_LOG10X_RETRIEVER_BUCKET__
+ *   2. AWS conventional bucket naming (log10x-retriever-*, *-log10x-archive)
+ *      combined with a kubectl-discovered query-handler service URL
+ *   3. kubectl service probe alone (url resolved, bucket from annotation)
+ *   4. Terraform state file (~/.log10x/retriever.tfstate or LOG10X_TERRAFORM_STATE)
+ */
+export async function resolveRetriever(): Promise<RetrieverResolution> {
+  const trace: RetrieverResolution['trace'] = [];
+
+  if (process.env.__SAVE_LOG10X_RETRIEVER_URL__ && process.env.__SAVE_LOG10X_RETRIEVER_BUCKET__) {
+    trace.push({
+      path: 'explicit_env',
+      status: 'matched',
+      reason: `__SAVE_LOG10X_RETRIEVER_URL__ + __SAVE_LOG10X_RETRIEVER_BUCKET__ set`,
+    });
+    return {
+      url: process.env.__SAVE_LOG10X_RETRIEVER_URL__.replace(/\/+$/, ''),
+      bucket: process.env.__SAVE_LOG10X_RETRIEVER_BUCKET__,
+      target: process.env.__SAVE_LOG10X_RETRIEVER_TARGET__,
+      detectionPath: 'explicit_env',
+      trace,
+    };
+  }
+  if (process.env.__SAVE_LOG10X_RETRIEVER_URL__ || process.env.__SAVE_LOG10X_RETRIEVER_BUCKET__) {
+    trace.push({
+      path: 'explicit_env',
+      status: 'skipped',
+      reason: 'only one of __SAVE_LOG10X_RETRIEVER_URL__ / __SAVE_LOG10X_RETRIEVER_BUCKET__ set — need both',
+    });
+  } else {
+    trace.push({ path: 'explicit_env', status: 'skipped', reason: '__SAVE_LOG10X_RETRIEVER_URL__ / __SAVE_LOG10X_RETRIEVER_BUCKET__ not set' });
+  }
+
+  // 4. Terraform state file (checked before AWS/kubectl so scripted installs
+  //    that write a state file are deterministic regardless of ambient AWS).
+  const tfRes = await tryDetectRetrieverFromTerraformState();
+  if (tfRes.url && tfRes.bucket) {
+    trace.push({ path: 'terraform_state', status: 'matched', reason: tfRes.reason });
+    return { ...tfRes, detectionPath: 'terraform_state', trace };
+  }
+  trace.push({ path: 'terraform_state', status: tfRes.failed ? 'failed' : 'skipped', reason: tfRes.reason });
+
+  // 2. AWS bucket pattern.
+  const awsRes = await tryDetectRetrieverBucketFromAws();
+  if (awsRes.bucket) {
+    // Bucket found; probe kubectl for URL (or fall back to explicit override).
+    const svc = process.env.__SAVE_LOG10X_RETRIEVER_URL__
+      ? { url: process.env.__SAVE_LOG10X_RETRIEVER_URL__, reason: '__SAVE_LOG10X_RETRIEVER_URL__ explicit' }
+      : await tryDetectRetrieverUrlFromKubectl();
+    if (svc.url) {
+      trace.push({
+        path: 'aws_s3_bucket_pattern',
+        status: 'matched',
+        reason: `${awsRes.reason}; url: ${svc.reason}`,
+      });
+      return {
+        bucket: awsRes.bucket,
+        url: svc.url.replace(/\/+$/, ''),
+        target: process.env.__SAVE_LOG10X_RETRIEVER_TARGET__,
+        detectionPath: 'aws_s3_bucket_pattern',
+        trace,
+      };
+    }
+    trace.push({
+      path: 'aws_s3_bucket_pattern',
+      status: 'skipped',
+      reason: `${awsRes.reason}; no query-handler URL — kubectl probe: ${svc.reason}`,
+    });
+  } else {
+    trace.push({ path: 'aws_s3_bucket_pattern', status: awsRes.failed ? 'failed' : 'skipped', reason: awsRes.reason });
+  }
+
+  // 3. kubectl service probe alone (no bucket).
+  const kRes = await tryDetectRetrieverUrlFromKubectl();
+  if (kRes.url) {
+    trace.push({
+      path: 'kubectl_service',
+      status: 'skipped',
+      reason: `${kRes.reason} — but no matching bucket found; set __SAVE_LOG10X_RETRIEVER_BUCKET__`,
+    });
+  } else {
+    trace.push({ path: 'kubectl_service', status: kRes.failed ? 'failed' : 'skipped', reason: kRes.reason });
+  }
+
+  return { trace };
 }
 
-function getStreamerBucket(): string {
-  const bucket = process.env.LOG10X_STREAMER_BUCKET;
-  if (!bucket) throw new StreamerNotConfiguredError();
-  return bucket;
+export function isRetrieverConfigured(): boolean {
+  // Sync helper retained for callers that need a quick check before paying
+  // the cost of a full async resolve. Covers only the explicit-env path;
+  // `resolveRetriever()` for the full cascade.
+  return Boolean(process.env.__SAVE_LOG10X_RETRIEVER_URL__ && process.env.__SAVE_LOG10X_RETRIEVER_BUCKET__);
 }
 
-function getDefaultTarget(): string {
-  return process.env.LOG10X_STREAMER_TARGET || 'app';
+export function formatRetrieverTrace(trace: RetrieverResolution['trace']): string {
+  if (!trace.length) return '(no detection attempts logged)';
+  return trace.map((t) => `  - ${t.path}: ${t.status} — ${t.reason}`).join('\n');
+}
+
+/** Cached resolution so call-sites inside a single tool invocation don't re-spawn aws/kubectl. */
+let cachedResolution: { resolution: RetrieverResolution; at: number } | undefined;
+
+async function resolveRetrieverCached(): Promise<RetrieverResolution> {
+  const now = Date.now();
+  if (cachedResolution && now - cachedResolution.at < 60_000) return cachedResolution.resolution;
+  const r = await resolveRetriever();
+  cachedResolution = { resolution: r, at: now };
+  return r;
+}
+
+/** Reset the resolver cache — only for tests. */
+export function clearRetrieverResolutionCacheForTest(): void {
+  cachedResolution = undefined;
+}
+
+async function getRetrieverUrl(): Promise<string> {
+  const r = await resolveRetrieverCached();
+  if (!r.url) throw new RetrieverNotConfiguredError();
+  return r.url;
+}
+
+async function getRetrieverBucket(): Promise<string> {
+  const r = await resolveRetrieverCached();
+  if (!r.bucket) throw new RetrieverNotConfiguredError();
+  return r.bucket;
+}
+
+async function tryDetectRetrieverBucketFromAws(): Promise<{ bucket?: string; reason: string; failed?: boolean }> {
+  // Skip if aws CLI is obviously not reachable (cheap check to avoid spawn cost).
+  if (!process.env.AWS_REGION && !process.env.AWS_DEFAULT_REGION && !process.env.AWS_PROFILE) {
+    return { reason: 'no AWS_REGION / AWS_PROFILE in env' };
+  }
+  try {
+    const { stdout } = await execFileP('aws', ['s3api', 'list-buckets', '--output', 'json'], {
+      timeout: 8_000,
+      maxBuffer: 8 * 1024 * 1024,
+    });
+    const parsed = JSON.parse(stdout) as { Buckets?: Array<{ Name: string }> };
+    const names = (parsed.Buckets || []).map((b) => b.Name);
+    const matches = names.filter(
+      (n) =>
+        n.startsWith('log10x-retriever-') ||
+        n.endsWith('-log10x-archive') ||
+        n.includes('log10x-retriever')
+    );
+    if (matches.length === 0) {
+      return { reason: `aws s3api list-buckets returned ${names.length} buckets, none match log10x-retriever-* / *-log10x-archive` };
+    }
+    if (matches.length > 1) {
+      return {
+        reason: `${matches.length} candidate buckets match log10x-retriever patterns — set __SAVE_LOG10X_RETRIEVER_BUCKET__ to disambiguate (candidates: ${matches.join(', ')})`,
+      };
+    }
+    return { bucket: matches[0], reason: `aws s3api list-buckets → single log10x-retriever bucket ${matches[0]}` };
+  } catch (e) {
+    return {
+      failed: true,
+      reason: `aws s3api list-buckets failed: ${((e as Error).message || '').slice(0, 160)}`,
+    };
+  }
+}
+
+async function tryDetectRetrieverUrlFromKubectl(): Promise<{ url?: string; reason: string; failed?: boolean }> {
+  try {
+    const { stdout } = await execFileP(
+      'kubectl',
+      ['get', 'svc', '-A', '-l', 'app.kubernetes.io/name=log10x-retriever', '-o', 'json'],
+      { timeout: 8_000, maxBuffer: 8 * 1024 * 1024 }
+    );
+    const parsed = JSON.parse(stdout) as {
+      items?: Array<{
+        metadata: { name: string; namespace: string };
+        spec?: { ports?: Array<{ port: number; name?: string }> };
+      }>;
+    };
+    const items = parsed.items || [];
+    // Prefer the query-handler service; fall back to any single match.
+    const qh = items.find((i) => i.metadata.name.includes('query-handler') || i.metadata.name.endsWith('query'));
+    const chosen = qh || (items.length === 1 ? items[0] : undefined);
+    if (!chosen) {
+      return { reason: `kubectl found ${items.length} log10x-retriever services — none clearly a query-handler` };
+    }
+    const port = chosen.spec?.ports?.[0]?.port ?? 8080;
+    const url = `http://${chosen.metadata.name}.${chosen.metadata.namespace}.svc.cluster.local:${port}`;
+    return {
+      url,
+      reason: `kubectl get svc → ${chosen.metadata.namespace}/${chosen.metadata.name}:${port}`,
+    };
+  } catch (e) {
+    return { failed: true, reason: `kubectl probe failed: ${((e as Error).message || '').slice(0, 160)}` };
+  }
+}
+
+async function tryDetectRetrieverFromTerraformState(): Promise<{ url?: string; bucket?: string; target?: string; reason: string; failed?: boolean }> {
+  const path =
+    process.env.LOG10X_TERRAFORM_STATE ||
+    (process.env.HOME ? `${process.env.HOME}/.log10x/retriever.tfstate` : undefined);
+  if (!path) return { reason: 'no LOG10X_TERRAFORM_STATE and no HOME to find ~/.log10x/retriever.tfstate' };
+  try {
+    const { readFile } = await import('node:fs/promises');
+    const raw = await readFile(path, 'utf8');
+    const state = JSON.parse(raw) as { outputs?: Record<string, { value: unknown }> };
+    const outputs = state.outputs || {};
+    const get = (k: string): string | undefined => {
+      const v = outputs[k]?.value;
+      return typeof v === 'string' ? v : undefined;
+    };
+    const url = get('retriever_url') || get('query_handler_url');
+    const bucket = get('retriever_bucket') || get('archive_bucket');
+    const target = get('retriever_target');
+    if (!url || !bucket) {
+      return { reason: `terraform state at ${path} missing retriever_url/retriever_bucket outputs` };
+    }
+    return { url: url.replace(/\/+$/, ''), bucket, target, reason: `read ${path}` };
+  } catch (e) {
+    const err = e as NodeJS.ErrnoException;
+    if (err.code === 'ENOENT') return { reason: `${path} not present` };
+    return { failed: true, reason: `read ${path} failed: ${(err.message || '').slice(0, 160)}` };
+  }
+}
+
+async function getDefaultTarget(): Promise<string> {
+  const explicit = process.env.__SAVE_LOG10X_RETRIEVER_TARGET__;
+  if (explicit) return explicit;
+  const r = await resolveRetrieverCached();
+  return r.target || 'app';
 }
 
 function authHeaders(env: EnvConfig): Record<string, string> {
-  const customHeader = process.env.LOG10X_STREAMER_AUTH_HEADER;
-  const customValue = process.env.LOG10X_STREAMER_AUTH_VALUE;
+  const customHeader = process.env.LOG10X_RETRIEVER_AUTH_HEADER;
+  const customValue = process.env.LOG10X_RETRIEVER_AUTH_VALUE;
   if (customHeader && customValue) {
     return { [customHeader]: customValue, 'Content-Type': 'application/json' };
   }
@@ -173,10 +405,10 @@ function authHeaders(env: EnvConfig): Record<string, string> {
 }
 
 /**
- * Convert the MCP-level `from`/`to` expressions to a form the streamer engine
+ * Convert the MCP-level `from`/`to` expressions to a form the retriever engine
  * reliably parses.
  *
- * Empirical behavior of the streamer server (tested 2026-04-15 against the
+ * Empirical behavior of the retriever server (tested 2026-04-15 against the
  * demo env deployment):
  *   - `now("-1h")` / `now()`    → accepted, matches events
  *   - epoch millis as a string  → accepted, matches events
@@ -189,7 +421,7 @@ function authHeaders(env: EnvConfig): Record<string, string> {
  * millis strings before they leave the MCP. `now(...)` expressions are
  * preserved verbatim (they require server-side evaluation).
  *
- * Filed upstream as a streamer engine bug. The client-side conversion below
+ * Filed upstream as a retriever engine bug. The client-side conversion below
  * is the workaround, not the fix.
  */
 export function normalizeTimeExpression(expr: string): string {
@@ -243,8 +475,8 @@ async function submitQuery(
   env: EnvConfig,
   body: Record<string, unknown>
 ): Promise<SubmitResponse> {
-  const base = getStreamerUrl();
-  const resp = await fetch(`${base}/streamer/query`, {
+  const base = await getRetrieverUrl();
+  const resp = await fetch(`${base}/retriever/query`, {
     method: 'POST',
     headers: authHeaders(env),
     body: JSON.stringify(body),
@@ -252,12 +484,12 @@ async function submitQuery(
 
   if (!resp.ok) {
     const errText = await resp.text().catch(() => '');
-    throw new Error(`Streamer POST /streamer/query HTTP ${resp.status}: ${errText.slice(0, 500)}`);
+    throw new Error(`Retriever POST /retriever/query HTTP ${resp.status}: ${errText.slice(0, 500)}`);
   }
 
   const parsed = (await resp.json()) as SubmitResponse;
   if (!parsed.queryId) {
-    throw new Error('Streamer response missing queryId');
+    throw new Error('Retriever response missing queryId');
   }
   return parsed;
 }
@@ -289,7 +521,7 @@ async function s3List(bucket: string, prefix: string): Promise<S3ListEntry[]> {
     const err = e as { stderr?: string; message?: string };
     const stderr = err.stderr || err.message || '';
     if (stderr.includes('NoSuchBucket')) {
-      throw new Error(`Streamer bucket does not exist: ${bucket}`);
+      throw new Error(`Retriever bucket does not exist: ${bucket}`);
     }
     throw new Error(`aws s3api list-objects-v2 failed: ${stderr.slice(0, 400)}`);
   }
@@ -305,8 +537,8 @@ async function s3Get(bucket: string, key: string): Promise<string> {
   return stdout;
 }
 
-function parseJsonl(content: string): StreamerEvent[] {
-  const events: StreamerEvent[] = [];
+function parseJsonl(content: string): RetrieverEvent[] {
+  const events: RetrieverEvent[] = [];
   for (const line of content.split(/\r?\n/)) {
     const trimmed = line.trim();
     if (!trimmed) continue;
@@ -333,7 +565,7 @@ function parseJsonl(content: string): StreamerEvent[] {
         }
       }
       if (!parsed || typeof parsed !== 'object') continue;
-      // Shape guard: discard records that don't look like real streamer
+      // Shape guard: discard records that don't look like real retriever
       // events. The upstream writer on the demo env has a bug where `text`
       // field values contain literal unescaped newlines, so our
       // split(/\r?\n/) breaks real event records into fragments. Some
@@ -343,7 +575,7 @@ function parseJsonl(content: string): StreamerEvent[] {
       // bogus shapes and pollute downstream rollups ("unknown: 9" in the
       // count summary).
       //
-      // Real streamer events always have at least one of:
+      // Real retriever events always have at least one of:
       //   - `timestamp` (as scalar or [scalar])
       //   - `text` (the raw content field)
       //   - `tenx_user_service` or `tenx_user_process` (enrichment labels)
@@ -359,7 +591,7 @@ function parseJsonl(content: string): StreamerEvent[] {
         'LevelTemplate.severity_level' in obj ||
         'MessageTemplate.message_pattern' in obj;
       if (!hasRealEventShape) continue;
-      events.push(parsed as StreamerEvent);
+      events.push(parsed as RetrieverEvent);
     } catch {
       // Skip unparseable lines — the worker may have written a partial
       // record on the way down; the next poll will pick up the retry.
@@ -368,30 +600,50 @@ function parseJsonl(content: string): StreamerEvent[] {
   return events;
 }
 
-function eventTimestampMs(ev: StreamerEvent): number {
+/**
+ * Normalize a retriever event's timestamp to epoch-ms.
+ *
+ * The retriever encodes timestamps as `[<scalar>]` (array wrapping a single
+ * value). The scalar's unit varies by upstream pipeline configuration —
+ * fluent-bit ships seconds, the engine's TenXObject ships millis or nanos
+ * depending on the input adapter. Magnitude-based detection is the only
+ * portable approach.
+ *
+ * Ranges (today's epoch ≈ 1.77 × 10^X):
+ *   - seconds: ~1.77e9   (10 digits)
+ *   - millis:  ~1.77e12  (13 digits)
+ *   - micros:  ~1.77e15  (16 digits)
+ *   - nanos:   ~1.77e18  (19 digits)
+ *
+ * Boundaries are placed at 10^10, 10^13, 10^16 — one decade below the
+ * current epoch in each unit so 13-digit millis values like 1776851170107
+ * (2026-04-22) are correctly classified as millis instead of falsely
+ * matching the looser `>1e12` micros boundary and dividing by 1000 to
+ * land in 1970. (Bug discovered live during retriever_series testing
+ * 2026-04-23 — the entire bucket histogram aliased to 1970-01-21.)
+ */
+export function eventTimestampMs(ev: RetrieverEvent): number {
   let ts: unknown = ev.timestamp;
-  // Streamer encodes the TenXObject timestamp as `[<epoch-nanos>]`.
   if (Array.isArray(ts) && ts.length > 0) {
     ts = ts[0];
   }
   if (typeof ts === 'number') {
-    // Heuristic: >1e15 → nanos, >1e12 → micros, >1e10 → millis, else seconds.
-    if (ts > 1e15) return Math.floor(ts / 1_000_000);
-    if (ts > 1e12) return Math.floor(ts / 1_000);
-    if (ts > 1e10) return ts;
-    return ts * 1000;
+    return classifyTs(ts);
   }
   if (typeof ts === 'string') {
     const asNum = Number(ts);
-    if (Number.isFinite(asNum)) {
-      if (asNum > 1e15) return Math.floor(asNum / 1_000_000);
-      if (asNum > 1e12) return Math.floor(asNum / 1_000);
-      if (asNum > 1e10) return asNum;
-      return asNum * 1000;
-    }
+    if (Number.isFinite(asNum)) return classifyTs(asNum);
     const asDate = Date.parse(ts);
     if (Number.isFinite(asDate)) return asDate;
   }
+  return 0;
+}
+
+function classifyTs(ts: number): number {
+  if (ts >= 1e16) return Math.floor(ts / 1_000_000); // nanos → ms
+  if (ts >= 1e13) return Math.floor(ts / 1_000); // micros → ms
+  if (ts >= 1e10) return ts; // millis already
+  if (ts > 0) return ts * 1000; // seconds → ms
   return 0;
 }
 
@@ -511,19 +763,22 @@ async function waitForMarkerStability(
   return previous.map((key) => ({ Key: key, Size: 0 }));
 }
 
-export async function runStreamerQuery(
+export async function runRetrieverQuery(
   env: EnvConfig,
-  req: StreamerQueryRequest,
-  // Legacy options kept for call-site compatibility. The poll interval and
-  // timeout are now taken from environment variables; this argument is
-  // accepted but has no effect.
-  _legacy?: { timeoutMs?: number; pollIntervalMs?: number }
-): Promise<StreamerQueryResponse> {
-  const bucket = getStreamerBucket();
-  const target = req.target || getDefaultTarget();
+  req: RetrieverQueryRequest,
+  // Per-call overrides for poll interval + total budget. When unset, the
+  // env var defaults apply (LOG10X_RETRIEVER_POLL_MS, LOG10X_RETRIEVER_TIMEOUT_MS).
+  // retriever_series passes a tighter budget for sampled-mode sub-window
+  // calls so a single slow sub-window doesn't stall the whole fan-out.
+  options?: { timeoutMs?: number; pollIntervalMs?: number }
+): Promise<RetrieverQueryResponse> {
+  const bucket = await getRetrieverBucket();
+  const target = req.target || (await getDefaultTarget());
   const queryId = randomUUID();
-  const pollMs = parseInt(process.env.LOG10X_STREAMER_POLL_MS || '1500', 10);
-  const timeoutMs = parseInt(process.env.LOG10X_STREAMER_TIMEOUT_MS || '90000', 10);
+  const pollMs =
+    options?.pollIntervalMs ?? parseInt(process.env.LOG10X_RETRIEVER_POLL_MS || '1500', 10);
+  const timeoutMs =
+    options?.timeoutMs ?? parseInt(process.env.LOG10X_RETRIEVER_TIMEOUT_MS || '180000', 10);
 
   // Minimal body format — matches the shape the engine's query-handler
   // actually expects (verified live on the otel-demo env 2026-04-15).
@@ -561,19 +816,19 @@ export async function runStreamerQuery(
 
   // The engine's indexObjectPath builds `tenx/{target}/q(r)/{queryId}/`
   // under the configured indexContainer. On the otek demo env the
-  // indexContainer is `tenx-demo-cloud-streamer-351939435334/indexing-results/`
+  // indexContainer is `tenx-demo-cloud-retriever-351939435334/indexing-results/`
   // so the full S3 key is `indexing-results/tenx/{target}/...`. The
-  // `LOG10X_STREAMER_INDEX_SUBPATH` env var lets deployments configure
+  // `LOG10X_RETRIEVER_INDEX_SUBPATH` env var lets deployments configure
   // their own index sub-prefix; default to `indexing-results` to match
   // the otek deploy.
-  const indexSubpath = (process.env.LOG10X_STREAMER_INDEX_SUBPATH || 'indexing-results').replace(/^\/+|\/+$/g, '');
+  const indexSubpath = (process.env.LOG10X_RETRIEVER_INDEX_SUBPATH || 'indexing-results').replace(/^\/+|\/+$/g, '');
   const basePrefix = indexSubpath ? `${indexSubpath}/` : '';
   const markerPrefix = `${basePrefix}tenx/${target}/q/${queryId}/`;
   const resultsPrefix = `${basePrefix}tenx/${target}/qr/${queryId}/`;
   const doneMarkerKey = `${resultsPrefix}_DONE.json`;
 
   // Prefer the coordinator-written _DONE marker. Fall back to the byte-count
-  // stability heuristic for older streamers that don't write it.
+  // stability heuristic for older retrievers that don't write it.
   const doneInfo = await waitForDoneMarker(bucket, doneMarkerKey, pollMs, timeoutMs);
 
   if (doneInfo) {
@@ -600,7 +855,7 @@ export async function runStreamerQuery(
     }
   }
 
-  const events: StreamerEvent[] = [];
+  const events: RetrieverEvent[] = [];
   for (const key of jsonlKeys) {
     const content = await s3Get(bucket, key);
     events.push(...parseJsonl(content));
@@ -675,7 +930,7 @@ export async function runStreamerQuery(
   };
 }
 
-function computeBuckets(events: StreamerEvent[], bucketSize: string): StreamerBucket[] {
+function computeBuckets(events: RetrieverEvent[], bucketSize: string): RetrieverBucket[] {
   const m = bucketSize.trim().match(/^(\d+)([smhd])$/);
   let bucketMs = 5 * 60_000;
   if (m) {
@@ -707,7 +962,7 @@ function computeBuckets(events: StreamerEvent[], bucketSize: string): StreamerBu
     .map(([ts, count]) => ({ timestamp: new Date(ts).toISOString(), count }));
 }
 
-function computeCountSummary(events: StreamerEvent[]): StreamerQueryResponse['countSummary'] {
+function computeCountSummary(events: RetrieverEvent[]): RetrieverQueryResponse['countSummary'] {
   const byService: Record<string, number> = {};
   const bySeverity: Record<string, number> = {};
   const byDay: Record<string, number> = {};

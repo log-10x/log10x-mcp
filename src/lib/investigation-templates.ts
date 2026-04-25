@@ -26,7 +26,7 @@ export interface AcuteSpikeReportInput {
   noiseFloor: number;
   modeDetection: string;
   correlation: CorrelationResult;
-  streamerFallback: 'disabled' | 'unavailable' | 'stage_1_only' | 'stage_1_and_2' | 'not_run';
+  retrieverFallback: 'disabled' | 'unavailable' | 'stage_1_only' | 'stage_1_and_2' | 'not_run';
   depth: string;
   /** Surfaced when the Reporter doesn't emit the event-count metric and the tool auto-fell back to bytes. */
   metricWarning?: string;
@@ -157,7 +157,7 @@ export function renderAcuteSpikeReport(input: AcuteSpikeReportInput): string {
     const lead = chain[0];
     lines.push(`1. Verify the root cause: run the commands above. If the ${rootService} commits or kube events line up with the inflection, the hypothesis is confirmed.`);
     lines.push(`2. Check blast-radius before any action: \`log10x_dependency_check({ pattern: '${lead.mover.pattern}' })\`.`);
-    lines.push(`3. For forensic retrieval of the actual root-cause events: \`log10x_streamer_query({ pattern: '${lead.mover.pattern}', from: 'now-2h' })\` (requires Streamer tier).`);
+    lines.push(`3. For forensic retrieval of the actual root-cause events: \`log10x_retriever_query({ pattern: '${lead.mover.pattern}', from: 'now-2h' })\` (requires Retriever tier).`);
   } else {
     lines.push('1. Widen the investigation window or switch to `depth: "deep"` to expand the pattern universe.');
     lines.push('2. If the symptom is a specific customer or request subset, re-run with a narrower anchor (paste the exact log line instead of a service name).');
@@ -180,7 +180,7 @@ export function renderAcuteSpikeReport(input: AcuteSpikeReportInput): string {
     `**Investigation metadata**: ${input.correlation.metadata.patternsAnalyzed} patterns analyzed, ` +
       `${input.correlation.metadata.queriesExecuted} PromQL queries executed, ` +
       `total wall time ${input.correlation.metadata.wallTimeMs}ms. ` +
-      `Streamer fallback: ${input.streamerFallback}. ` +
+      `Retriever fallback: ${input.retrieverFallback}. ` +
       `Timeout: ${input.correlation.metadata.hardTimeoutHit ? 'hard' : input.correlation.metadata.softTimeoutHit ? 'soft' : 'none'}.`
   );
   lines.push('');

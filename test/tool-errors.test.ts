@@ -27,12 +27,12 @@ test('resolve_batch: too-large batch suggests pagination or privacy_mode', () =>
   assert.match(out, /paginate|privacy_mode/);
 });
 
-test('streamer_query: not-configured suggests deployment URL', () => {
+test('retriever_query: not-configured suggests deployment URL', () => {
   const out = describeToolError(
-    'log10x_streamer_query',
-    new Error('Streamer endpoint not configured')
+    'log10x_retriever_query',
+    new Error('Retriever endpoint not configured')
   );
-  assert.match(out, /Storage Streamer|LOG10X_STREAMER_URL/);
+  assert.match(out, /Retriever|__SAVE_LOG10X_RETRIEVER_URL__/);
 });
 
 test('investigation_get: missing record explains TTL eviction', () => {

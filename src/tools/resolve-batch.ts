@@ -9,14 +9,14 @@
  * Output is a structured markdown report ranking patterns by interestingness
  * (volume × severity × variable-concentration strength), with per-pattern
  * variable concentrations computed across the batch and next-action
- * suggestions for follow-up via log10x_investigate, log10x_streamer_query,
+ * suggestions for follow-up via log10x_investigate, log10x_retriever_query,
  * or native SIEM commands.
  */
 
 import { promises as fs } from 'fs';
 import { z } from 'zod';
 import { submitPaste, PASTE_MAX_BYTES, type PasteResponse } from '../lib/paste-api.js';
-import { runDevCli, DevCliNotInstalledError } from '../lib/dev-cli.js';
+import { runDevCli, DevCliNotInstalledError, DevCliRunError } from '../lib/dev-cli.js';
 import {
   parseTemplates,
   parseEncoded,
@@ -36,15 +36,7 @@ export const resolveBatchSchema = {
   top_n_patterns: z.number().min(1).max(50).default(20).describe('How many patterns to return in the ranked triage.'),
   include_next_actions: z.boolean().default(true).describe('Whether to generate next_action suggestions for each top pattern.'),
   environment: z.string().optional().describe('Environment nickname — used to build next_actions that call log10x_investigate.'),
-  privacy_mode: z
-    .boolean()
-    .default(true)
-    .describe(
-      'Default true: shell out to a locally-installed `tenx` binary so events never leave the machine. ' +
-        'Requires `tenx` (brew install log10x/tap/tenx, or see https://docs.log10x.com/apps/dev/). Errors cleanly ' +
-        'with an install hint if missing. Set to false to route through the public Log10x paste endpoint — demo ' +
-        'use only, not production log content (raw events are sent to a shared public Lambda).'
-    ),
+  privacy_mode: z.boolean().default(true).describe('When true (default), the batch is processed by a locally-installed `tenx` CLI — events never leave the machine. Set to false to route through the public Log10x paste Lambda instead (100 KB limit, requires network). If the local CLI is not installed, the call errors cleanly with an install hint.'),
 };
 
 export async function executeResolveBatch(args: {
@@ -89,6 +81,13 @@ export async function executeResolveBatch(args: {
     } catch (e) {
       if (e instanceof DevCliNotInstalledError) {
         throw e;
+      }
+      if (e instanceof DevCliRunError) {
+        throw new Error(
+          `Local tenx CLI exited with code ${e.exitCode}.\n` +
+            `Config: ${e.configPath}\n` +
+            `${e.stderr.slice(0, 2000)}`
+        );
       }
       throw new Error(`Local tenx CLI run failed: ${(e as Error).message}`);
     }
@@ -182,7 +181,7 @@ export async function executeResolveBatch(args: {
       lines.push(
         `> ⚠ **${fmtCount(droppedEvents)} input lines (${pctLabel}) were NOT accounted for by the templatizer.** ` +
           `The sum of per-pattern event counts (${fmtCount(accountedEvents)}) is less than the input line count (${fmtCount(lineCount)}). ` +
-          `This is a known engine-side bug (GAPS G11) where the paste Lambda templatizer silently drops input lines under certain conditions ` +
+          `This is a known engine-side bug (GAPS G11) where the templatizer silently drops input lines under certain conditions ` +
           `(multi-line stack traces, event-boundary crossings, high-cardinality variant overfitting). ` +
           `**Do not treat this batch as a complete triage** — the dropped lines may contain the most important signals. ` +
           `Workarounds: (1) resubmit the batch with \`top_n_patterns: 50\` to widen the filter; (2) split the batch into halves and compare; ` +
@@ -385,7 +384,7 @@ function buildNextActions(p: PatternConcentration, environment?: string): string
     `call \`log10x_investigate({ starting_point: '${identity}'${envArg} })\` for historical correlation (requires Reporter tier).`
   );
 
-  // Variable-filtered Streamer query suggestion — skip typed slots like timestamps
+  // Variable-filtered Retriever query suggestion — skip typed slots like timestamps
   // where filtering on a literal value is almost never what the user wants.
   const strong = p.slots.find(
     (s) =>
@@ -399,7 +398,7 @@ function buildNextActions(p: PatternConcentration, environment?: string): string
     const val = strong.topValues[0].value;
     const jsFilter = `event.${slot} === ${JSON.stringify(val)}`;
     actions.push(
-      `call \`log10x_streamer_query({ pattern: '${p.templateHash}', filters: [${JSON.stringify(jsFilter)}] })\` to retrieve all historical events concentrated on ${slot}=${truncate(val, 40)} (requires Streamer tier).`
+      `call \`log10x_retriever_query({ pattern: '${p.templateHash}', filters: [${JSON.stringify(jsFilter)}] })\` to retrieve all historical events concentrated on ${slot}=${truncate(val, 40)} (requires Retriever tier).`
     );
     actions.push(
       `native Datadog follow-up: \`dog log search '@${slot}:"${val.replace(/"/g, '\\"')}"' --from now-24h\` — filters to the dominant variable concentration directly in the SIEM.`

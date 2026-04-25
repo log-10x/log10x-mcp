@@ -39,8 +39,8 @@ function suggestForTool(toolName: string, msg: string): string | undefined {
       if (/Could not resolve/i.test(msg)) {
         return 'The starting_point did not match a known pattern or service. Try `log10x_event_lookup` with a substring of the line, or `log10x_services` to see which services are monitored.';
       }
-      if (/Streamer/i.test(msg)) {
-        return 'The Streamer fallback is unavailable. The investigation will still complete using live Reporter metrics. To enable historical fallback, deploy the Storage Streamer and set LOG10X_STREAMER_URL.';
+      if (/Retriever/i.test(msg)) {
+        return 'The Retriever fallback is unavailable. The investigation will still complete using live Reporter metrics. To enable historical fallback, deploy the Retriever and set __SAVE_LOG10X_RETRIEVER_URL__.';
       }
       return 'If this looks transient, retry. If the anchor is hard to resolve, call `log10x_event_lookup` first to canonicalize the pattern, then call investigate again with the resolved templateHash.';
 
@@ -61,16 +61,16 @@ function suggestForTool(toolName: string, msg: string): string | undefined {
         return 'Batch exceeds the 100 KB paste Lambda limit. Either trim to ~1-2K events, paginate across multiple calls, or set privacy_mode=true with a locally-installed `tenx` CLI for unlimited size.';
       }
       if (/CLI is not installed|tenx/i.test(msg)) {
-        return 'Local tenx CLI is missing. Install via Homebrew (`brew install log10x/tap/tenx`) or set privacy_mode=false to route through the public paste endpoint.';
+        return 'Local tenx CLI is missing. Options: (1) install locally (`brew install log-10x/tap/log10x` on macOS, MSI installer on Windows, deb/rpm/install.sh on Linux — see https://docs.log10x.com/install/); (2) run tenx in Docker by setting `LOG10X_TENX_MODE=docker`; (3) set privacy_mode=false to route through the public paste endpoint.';
       }
       if (/No events provided/i.test(msg)) {
         return 'Pass `source: "text"` with the raw events as a `text` argument, or `source: "file"` with `path`, or `source: "events"` with an inline array.';
       }
       return undefined;
 
-    case 'log10x_streamer_query':
+    case 'log10x_retriever_query':
       if (/not configured/i.test(msg)) {
-        return 'The Storage Streamer is not deployed in this environment. For in-retention queries, use the customer\'s SIEM directly. For long-window retrieval, deploy the Streamer per https://docs.log10x.com/apps/cloud/streamer/ and set LOG10X_STREAMER_URL.';
+        return 'The Retriever is not deployed in this environment. For in-retention queries, use the customer\'s SIEM directly. For long-window retrieval, deploy the Retriever per https://docs.log10x.com/apps/cloud/retriever/ and set __SAVE_LOG10X_RETRIEVER_URL__.';
       }
       if (/timed out/i.test(msg)) {
         return 'Query exceeded the wall-time budget. Narrow the window, add a more selective filter, or switch format to `count` or `aggregated` for a summary view instead of raw events.';
@@ -79,7 +79,7 @@ function suggestForTool(toolName: string, msg: string): string | undefined {
 
     case 'log10x_backfill_metric':
       if (/zero events/i.test(msg)) {
-        return 'The Streamer found no events matching the pattern + filters in the requested window. Verify the pattern with `log10x_event_lookup` and check the filter expressions. The window may also be outside the customer\'s S3 retention.';
+        return 'The Retriever found no events matching the pattern + filters in the requested window. Verify the pattern with `log10x_event_lookup` and check the filter expressions. The window may also be outside the customer\'s S3 retention.';
       }
       if (/DATADOG_API_KEY/i.test(msg)) {
         return 'Set DATADOG_API_KEY (or DD_API_KEY) on the MCP server process. Generate a key in Datadog: Organization Settings → API Keys.';

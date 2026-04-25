@@ -22,7 +22,7 @@ This spec pins down the scenarios, Claude baselines, ground truth, and scoring r
 
 2. **Ground truth reproducible**: the accounting pod must still be crashlooping with the same stacked bugs (libgssapi historical + Kafka poison-pill current). Verify with `kubectl get pod -n otel-demo -l app.kubernetes.io/component=accounting` and `kubectl logs <pod> --previous | grep -iE "krb|duplicate"`.
 
-3. **Engine fixes NOT required before running**: tests 1 and 2 do not touch `resolve_batch` or `streamer_query`, so the G11 templatizer bug and G12 streamer bug do not invalidate results. Test 3 (canary detection) uses `top_patterns` which does not depend on either.
+3. **Engine fixes NOT required before running**: tests 1 and 2 do not touch `resolve_batch` or `retriever_query`, so the G11 templatizer bug and G12 retriever bug do not invalidate results. Test 3 (canary detection) uses `top_patterns` which does not depend on either.
 
 4. **API keys**: Claude (Anthropic), OpenAI, xAI (Grok), Google (Gemini), DeepSeek, Perplexity. All stored in `/Users/talweiss/.claude/projects/.../memory/api_keys.md`.
 
@@ -357,7 +357,7 @@ Cell notes should call out **specifically where the model diverged from Claude**
 These are not caused by the MCP or the model — they're known substrate bugs that may affect results if they resurface. Check first if a test fails in an unexpected way:
 
 - **G11 templatizer bug** (resolve_batch): do NOT use `log10x_resolve_batch` in any scenario. The tool silently drops ~70% of input. Not in scope for any of the three test scenarios above.
-- **G12 streamer bug**: do NOT use `log10x_streamer_query` in any scenario. Returns 0 events on known-exists data and crashes on canonical pattern names. Not in scope for any test scenario.
+- **G12 retriever bug**: do NOT use `log10x_retriever_query` in any scenario. Returns 0 events on known-exists data and crashes on canonical pattern names. Not in scope for any test scenario.
 - **G9 tenx-edge stale state**: if the MCP shows zero volume for services that kubectl confirms are actively logging, the fluentd DaemonSet may need a rollout restart. Verify via `kubectl -n demo logs tenx-fluentd-<pod> --since=5m | grep "out of order"` — if non-zero, restart via `kubectl -n demo rollout restart ds/tenx-fluentd`.
 - **Replay-to-real data swap artifacts**: 24h-ago comparisons may reflect the pre-2026-04-15 log-simulator replay data, not real otel-demo traffic. Keep baseline_offset ≤ 1h for any "last hour" test.
 

@@ -82,7 +82,7 @@ type Confidence = 'high' | 'medium' | 'low';
  * Build a display string for a pattern identity. When an AI pretty name
  * exists for this identity, show `<Pretty Name>` with the raw identity
  * inline for copy-paste. Otherwise fall back to the raw identity alone.
- * Never lose the identity — every machine-pasted reference (regulator
+ * Never lose the identity — every machine-pasted reference (reducer
  * YAML, SIEM configs) uses the raw form.
  */
 function displayName(
@@ -161,7 +161,7 @@ interface EnrichedPattern extends ExtractedPattern {
   projectedSavings: number;
   reasoning: string;
   confidence: Confidence;
-  /** Snake-case identity — for ready-to-paste regulator configs. */
+  /** Snake-case identity — for ready-to-paste reducer configs. */
   identity: string;
   /** Token set used downstream for dependency-check guidance. */
   tokens: string[];
@@ -245,7 +245,7 @@ export function renderPocSummary(input: RenderInput, topN = 5): string {
   // Views CTA.
   lines.push('**Available views** — call `log10x_poc_from_siem_status` again with:');
   lines.push('- `view: "full"` — complete 9-section report');
-  lines.push('- `view: "yaml"` — regulator mute YAML for top patterns, paste-ready');
+  lines.push('- `view: "yaml"` — reducer mute YAML for top patterns, paste-ready');
   lines.push('- `view: "configs"` — native SIEM exclusion configs (Datadog exclusion filter, Splunk props.conf, etc.)');
   lines.push('- `view: "pattern", pattern: "<identity>"` — deep dive on a specific pattern');
   lines.push('- `view: "top", top_n: 20` — expanded drivers table');
@@ -254,7 +254,7 @@ export function renderPocSummary(input: RenderInput, topN = 5): string {
 }
 
 /**
- * YAML view — regulator mute-file entries for the top N patterns.
+ * YAML view — reducer mute-file entries for the top N patterns.
  * Paste-ready for a GitOps ConfigMap commit. Includes the display
  * name as a YAML comment so reviewers can scan without decoding the
  * identity strings.
@@ -265,7 +265,7 @@ export function renderPocYaml(input: RenderInput, topN = 5): string {
     .slice(0, topN);
   const lines: string[] = [];
   lines.push('```yaml');
-  lines.push('# regulator mute file — paste into your GitOps ConfigMap');
+  lines.push('# reducer mute file — paste into your GitOps ConfigMap');
   lines.push(`# Generated from snapshot ${input.snapshotId} on ${input.finishedAt}`);
   lines.push('# Auto-expires 30d from commit. Run log10x_dependency_check on each identity before merging.');
   lines.push('');
@@ -275,7 +275,7 @@ export function renderPocYaml(input: RenderInput, topN = 5): string {
     for (const p of patterns) {
       const name = input.aiPrettyNames?.[p.identity];
       if (name) lines.push(`# ${name}`);
-      lines.push(regulatorYaml(p));
+      lines.push(reducerYaml(p));
       lines.push('');
     }
   }
@@ -285,7 +285,7 @@ export function renderPocYaml(input: RenderInput, topN = 5): string {
 
 /**
  * Native SIEM exclusion-config view — the "I don't want the log10x
- * regulator, just give me the raw SIEM config" path.
+ * reducer, just give me the raw SIEM config" path.
  */
 export function renderPocConfigs(input: RenderInput, topN = 5): string {
   const drops = enrichPatterns(input)
@@ -346,7 +346,7 @@ export function renderPocTop(input: RenderInput, topN = 20): string {
 
 /**
  * Pattern-detail view — one pattern, fully expanded. Sample event,
- * slot variables, recommended action, regulator YAML, risk context.
+ * slot variables, recommended action, reducer YAML, risk context.
  */
 export function renderPocPattern(input: RenderInput, identity: string): string {
   const patterns = enrichPatterns(input);
@@ -397,9 +397,9 @@ export function renderPocPattern(input: RenderInput, identity: string): string {
   lines.push(p.reasoning);
   lines.push('');
   if (p.recommendedAction !== 'keep') {
-    lines.push('**Regulator YAML** (paste into GitOps ConfigMap):');
+    lines.push('**Reducer YAML** (paste into GitOps ConfigMap):');
     lines.push('```yaml');
-    lines.push(regulatorYaml(p));
+    lines.push(reducerYaml(p));
     lines.push('```');
     lines.push('');
   }
@@ -466,7 +466,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
     lines.push(`> ${bannerTitle}`);
     lines.push('>');
     lines.push(
-      `> Cost figures below extrapolate from the pulled sample (${fmtBytes(input.extraction.totalBytes)}) to the full daily volume by per-pattern %. Pattern rankings + regulator YAML + native exclusion configs are the same regardless of volume; only dollar figures scale.`
+      `> Cost figures below extrapolate from the pulled sample (${fmtBytes(input.extraction.totalBytes)}) to the full daily volume by per-pattern %. Pattern rankings + reducer YAML + native exclusion configs are the same regardless of volume; only dollar figures scale.`
     );
     lines.push('');
     const dailyCost = projectBilling(totalCost, input.windowHours, 24);
@@ -594,15 +594,15 @@ export function renderPocReport(input: RenderInput): RenderResult {
     }
   }
 
-  // Section 4: Regulator recommendations
-  lines.push('## 4. Regulator Recommendations');
+  // Section 4: Reducer recommendations
+  lines.push('## 4. Reducer Recommendations');
   lines.push('');
   lines.push(
-    'Per-pattern recommendations with reasoning, projected savings, and ready-to-paste log10x regulator mute-file YAML. Mutes auto-expire at `untilEpochSec`; sampling retains a statistical slice for debug.'
+    'Per-pattern recommendations with reasoning, projected savings, and ready-to-paste log10x reducer mute-file YAML. Mutes auto-expire at `untilEpochSec`; sampling retains a statistical slice for debug.'
   );
   lines.push('');
-  const regulatorTopN = Math.min(patterns.length, 10);
-  for (let i = 0; i < regulatorTopN; i++) {
+  const reducerTopN = Math.min(patterns.length, 10);
+  for (let i = 0; i < reducerTopN; i++) {
     const p = patterns[i];
     lines.push(`### #${i + 1} — ${displayName(p.identity, p.template, input.aiPrettyNames)}  _(${p.confidence} confidence)_`);
     lines.push('');
@@ -615,7 +615,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
     lines.push('');
     if (p.recommendedAction !== 'keep') {
       lines.push('```yaml');
-      lines.push(regulatorYaml(p));
+      lines.push(reducerYaml(p));
       lines.push('```');
       lines.push('');
     }
@@ -707,16 +707,16 @@ export function renderPocReport(input: RenderInput): RenderResult {
   // Section 8: Deployment paths
   lines.push('## 8. Deployment Paths');
   lines.push('');
-  lines.push('### Automated — log10x regulator (recommended)');
+  lines.push('### Automated — log10x reducer (recommended)');
   lines.push('');
   lines.push(
-    '1. Install the Log10x Regulator in your forwarder pipeline — https://docs.log10x.com/apps/edge/regulator/'
+    '1. Install the Log10x Reducer in your forwarder pipeline — https://docs.log10x.com/apps/edge/reducer/'
   );
   lines.push(
-    '2. Commit the generated regulator YAML above into your GitOps repo (the regulator watches a ConfigMap)'
+    '2. Commit the generated reducer YAML above into your GitOps repo (the reducer watches a ConfigMap)'
   );
   lines.push(
-    '3. Mutes auto-expire at `untilEpochSec`, so stale rules self-clean. The regulator publishes exact pattern-match metrics, so you can verify the intended traffic is being dropped before committing permanently.'
+    '3. Mutes auto-expire at `untilEpochSec`, so stale rules self-clean. The reducer publishes exact pattern-match metrics, so you can verify the intended traffic is being dropped before committing permanently.'
   );
   lines.push('');
   lines.push('### Manual — native SIEM config (no log10x runtime)');
@@ -726,7 +726,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
   );
   lines.push('2. Monitor ingestion volume for 24-48h to confirm the drop');
   lines.push(
-    '3. Trade-offs vs regulator: no auto-expiry, no per-pattern verification metric, no GitOps-reviewable identity (regex will drift)'
+    '3. Trade-offs vs reducer: no auto-expiry, no per-pattern verification metric, no GitOps-reviewable identity (regex will drift)'
   );
   lines.push('');
 
@@ -991,12 +991,12 @@ function actionLabel(p: EnrichedPattern): string {
   return 'keep';
 }
 
-function regulatorYaml(p: EnrichedPattern): string {
+function reducerYaml(p: EnrichedPattern): string {
   const expirySec = Math.floor(Date.now() / 1000) + 30 * 86_400; // 30-day expiry
   const action = p.recommendedAction === 'mute' ? 'drop' : 'sample';
   const extra = action === 'sample' ? `    sampleRate: ${p.sampleRate}` : '';
   return [
-    '# regulator mute file entry — commit to your GitOps ConfigMap',
+    '# reducer mute file entry — commit to your GitOps ConfigMap',
     `- pattern: ${p.identity}`,
     `  action: ${action}`,
     ...(extra ? [extra] : []),

@@ -1,116 +1,238 @@
 /**
- * Local `tenx` dev CLI wrapper for privacy-mode batch resolution.
+ * Local `tenx` dev CLI runner.
  *
- * When `log10x_resolve_batch` or `log10x_poc_from_siem` is invoked with
- * `privacy_mode: true` (the default), the MCP shells out to a locally-
- * installed `tenx` binary instead of posting events to the public
- * Log10x paste Lambda. Events never leave the caller's machine.
+ * Spawns the locally-installed tenx CLI with a packaged runtime config,
+ * reads the resulting templates + encoded rows + aggregated summary
+ * from a per-invocation temp dir. Two modes:
  *
- * The CLI ships via Homebrew, deb/rpm, PowerShell, and Docker — see
- * https://docs.log10x.com/apps/dev/ for install instructions.
+ *   - stdin: batch piped to stdin (log10x_resolve_batch)
+ *   - file:  reads from a path/glob (log10x_extract_templates)
  *
- * We detect the binary at call time by checking:
- *   1. LOG10X_TENX_PATH env var (explicit override)
- *   2. `tenx` on PATH (standard install)
+ * Backend selection via LOG10X_TENX_MODE:
+ *   - "local" (default): invoke the host-installed tenx binary.
+ *     Binary lookup: LOG10X_TENX_PATH env var wins; otherwise `tenx` on PATH.
+ *   - "docker": `docker run --rm -i log10x/pipeline-10x:latest` (or
+ *     LOG10X_TENX_IMAGE). Useful on hosts without a local tenx install,
+ *     or for hermetic/offline-capable invocation. No auto-fallback —
+ *     the user opts in explicitly.
  *
- * If neither is reachable we throw DevCliNotInstalledError with a
- * platform-specific install command.
+ * Config lookup: LOG10X_MCP_STDIN_CONFIG_PATH / LOG10X_MCP_FILE_CONFIG_PATH
+ *   wins; otherwise the packaged configs shipped alongside the MCP.
  *
- * Config resolution: tenx's module system layers the user's
- * $TENX_CONFIG (typically /usr/local/etc/tenx/config, populated by
- * the Homebrew postinstall) on top of the Cellar modules. Early
- * versions of this wrapper overrode TENX_CONFIG to a bare tempdir,
- * which broke module resolution on Homebrew 1.0.4 (modules like
- * `run/bootstrap` only live in the user config, not the Cellar).
- * We now use the user's real TENX_CONFIG and write our I/O files
- * into a per-invocation subdirectory under `data/sample/`.
+ * Concurrency safety: each invocation gets its own /tmp/log10x-mcp-<uuid>/
+ * tempdir with a shadow template config (empty files list). Parallel calls
+ * don't collide.
  */
 
 import { spawn } from 'child_process';
-import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'fs/promises';
+import { mkdtemp, readFile, writeFile as fsWriteFile, rm, mkdir } from 'fs/promises';
 import { existsSync } from 'fs';
 import { tmpdir } from 'os';
-import { join } from 'path';
-import { randomUUID } from 'crypto';
+import { basename, join, dirname, resolve } from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+// ── Result types ──
 
 export interface DevCliResult {
-  /** templates.json contents (NDJSON). */
   templatesJson: string;
-  /** encoded.log contents. */
   encodedLog: string;
-  /** aggregated.csv contents. */
+  decodedLog: string;
   aggregatedCsv: string;
-  /** CLI wall time in ms. */
   wallTimeMs: number;
-  /** The `tenx --version` output captured at invocation. */
   cliVersion?: string;
+  configPath: string;
+  tempDir: string;
 }
 
-/** Platform-specific install commands for the tenx CLI. */
-function installHint(): string {
-  if (process.platform === 'darwin') {
-    return 'brew install log10x/tap/tenx';
-  }
-  if (process.platform === 'linux') {
-    return 'curl -fsSL https://install.log10x.com | sh  # or apt/yum packages at https://docs.log10x.com/apps/dev/';
-  }
-  if (process.platform === 'win32') {
-    return 'iwr -useb https://install.log10x.com/install.ps1 | iex';
-  }
-  return 'see https://docs.log10x.com/apps/dev/ for install instructions';
-}
+// ── Error types ──
 
 export class DevCliNotInstalledError extends Error {
   constructor() {
     super(
-      `Log10x dev CLI (\`tenx\`) is not installed. Install with:\n\n    ${installHint()}\n\n` +
-        'Then re-run the tool. For a no-install alternative, set `privacy_mode: false` to route ' +
-        'through the public Log10x paste endpoint — but note that this sends raw log text to a ' +
-        'shared public Lambda and is intended for demo use only, not production log content.'
+      "Log10x dev CLI (`tenx`) is not installed on this machine. Options: " +
+        "(1) install locally — `brew install log-10x/tap/log10x` on macOS, " +
+        "MSI installer on Windows (`irm https://raw.githubusercontent.com/log-10x/pipeline-releases/main/install.ps1 | iex`), " +
+        "or deb/rpm/install.sh on Linux — see https://docs.log10x.com/install/; " +
+        "(2) run tenx in Docker — set `LOG10X_TENX_MODE=docker` (requires Docker Desktop or a docker daemon); " +
+        "(3) set privacy_mode=false to route the batch through the public Log10x paste endpoint instead."
     );
     this.name = 'DevCliNotInstalledError';
   }
 }
 
-export class DevCliBrokenInstallError extends Error {
-  constructor(underlying: string) {
+export class DockerNotAvailableError extends Error {
+  constructor(cause: string) {
     super(
-      `Log10x dev CLI (\`tenx\`) is installed but its module configuration is broken. ` +
-        `Error: ${underlying.slice(0, 300)}\n\n` +
-        `Most likely cause: a partial Homebrew install. Try:\n\n    ${installHint().includes('brew') ? 'brew reinstall log10x/tap/tenx' : installHint()}\n\n` +
-        'If that does not resolve it, inspect the user config directory (default /usr/local/etc/tenx/config). ' +
-        'Missing `pipelines/run/bootstrap/` is the specific signature of GAPS-H1.'
+      `LOG10X_TENX_MODE=docker is set but docker is not available: ${cause.slice(0, 300)}. ` +
+        `Install Docker Desktop (https://www.docker.com/products/docker-desktop/) or start the docker daemon and retry, ` +
+        `or unset LOG10X_TENX_MODE to use a local tenx install.`
     );
-    this.name = 'DevCliBrokenInstallError';
+    this.name = 'DockerNotAvailableError';
   }
 }
 
-/** Default user-config location populated by the Homebrew postinstall. */
-const DEFAULT_TENX_CONFIG = '/usr/local/etc/tenx/config';
+export class DevCliRunError extends Error {
+  readonly exitCode: number;
+  readonly stderr: string;
+  readonly stdout: string;
+  readonly configPath: string;
+  constructor(exitCode: number, stderr: string, stdout: string, configPath: string) {
+    super(
+      `Local tenx CLI exited with code ${exitCode}.\n` +
+        `Config: ${configPath}\n` +
+        `Stderr (first 2000 chars):\n${stderr.slice(0, 2000)}`
+    );
+    this.name = 'DevCliRunError';
+    this.exitCode = exitCode;
+    this.stderr = stderr;
+    this.stdout = stdout;
+    this.configPath = configPath;
+  }
+}
+
+// ── Public API ──
 
 /**
- * Run the local `tenx @apps/dev` pipeline on a raw log text blob.
- *
- * Per-invocation isolation strategy:
- *   1. Build a scratch TENX_CONFIG at $TMPDIR/log10x-mcp-<uuid>/ that
- *      SYMLINKS the user's real TENX_CONFIG top-level dirs (apps,
- *      pipelines, lib, symbols, etc.) — so module resolution works
- *      exactly as it does in the user's install.
- *   2. Put our own `data/sample/input/batch.log` inside the scratch
- *      dir — NOT a symlink. Our batch is the only input tenx sees,
- *      so we don't accidentally template whatever sample.log was
- *      already sitting in the user's real data dir.
- *   3. Output goes to scratch `data/sample/output/` and is read back.
- *   4. The whole scratch dir is removed on exit (best-effort).
- *
- * This is robust against:
- *   - Homebrew 1.0.4's split module layout (user-config + Cellar) —
- *     symlinks to the real $TENX_CONFIG preserve resolution.
- *   - Pre-existing sample.log files in the user's real input dir —
- *     we never touch that dir.
- *   - Concurrent invocations — each gets its own scratch dir.
+ * Run the local tenx CLI with batch piped to stdin.
+ * Used by log10x_resolve_batch.
  */
-export async function runDevCli(rawLogText: string): Promise<DevCliResult> {
+export async function runDevCliStdin(rawLogText: string): Promise<DevCliResult> {
+  const configPath = resolveConfigPath('LOG10X_MCP_STDIN_CONFIG_PATH', 'tenx-mcp-stdin.config.yaml');
+  return runDevCliCore({ mode: 'stdin', stdinData: rawLogText, configPath });
+}
+
+/**
+ * Run the local tenx CLI reading from a file path/glob.
+ * Used by log10x_extract_templates.
+ */
+export async function runDevCliFile(inputPath: string): Promise<DevCliResult> {
+  const configPath = resolveConfigPath('LOG10X_MCP_FILE_CONFIG_PATH', 'tenx-mcp-file.config.yaml');
+  return runDevCliCore({ mode: 'file', inputPath, configPath });
+}
+
+/**
+ * Legacy alias for resolve-batch.ts backward compatibility.
+ */
+export async function runDevCli(rawLogText: string): Promise<{
+  templatesJson: string;
+  encodedLog: string;
+  aggregatedCsv: string;
+  wallTimeMs: number;
+  cliVersion?: string;
+}> {
+  const r = await runDevCliStdin(rawLogText);
+  return {
+    templatesJson: r.templatesJson,
+    encodedLog: r.encodedLog,
+    aggregatedCsv: r.aggregatedCsv,
+    wallTimeMs: r.wallTimeMs,
+    cliVersion: r.cliVersion,
+  };
+}
+
+// ── Core runner ──
+
+interface RunDevCliOptions {
+  mode: 'stdin' | 'file';
+  stdinData?: string;
+  inputPath?: string;
+  configPath: string;
+  extraOverlays?: string[];
+  timeoutMs?: number;
+}
+
+async function runDevCliCore(opts: RunDevCliOptions): Promise<DevCliResult> {
+  const mode = resolveTenxMode();
+
+  if (!existsSync(opts.configPath)) {
+    throw new Error(
+      `MCP tenx config not found at: ${opts.configPath}. ` +
+        `Reinstall the log10x-mcp package or set the appropriate config path env var.`
+    );
+  }
+
+  const tempDir = await mkdtemp(join(tmpdir(), 'log10x-mcp-'));
+
+  // Shadow the install's template config with empty files list.
+  // Same on-disk shape in both modes — docker mounts tempDir into the
+  // container so the shadow is visible there too.
+  const templateConfigDir = join(tempDir, 'run', 'template');
+  await mkdir(templateConfigDir, { recursive: true });
+  await fsWriteFile(
+    join(templateConfigDir, 'config.yaml'),
+    [
+      'tenx: run',
+      'template:',
+      '  files: []',
+      '  cacheSize: $=parseBytes("10MB")',
+      'var:',
+      '  placeholder: "$"',
+      '  maxRecurIndexes: 10',
+      'timestamp:',
+      '  prefix: (',
+      '  postfix: )',
+      '',
+    ].join('\n'),
+    'utf8'
+  );
+
+  const started = Date.now();
+  let cliVersion: string | undefined;
+  try {
+    cliVersion = mode === 'docker'
+      ? await runViaDocker(opts, tempDir)
+      : await runViaLocalBinary(opts, tempDir);
+
+    const [templatesJson, encodedLog, decodedLog, aggregatedCsv] = await Promise.all([
+      readFile(join(tempDir, 'templates.json'), 'utf8').catch(() => ''),
+      readFile(join(tempDir, 'encoded.log'), 'utf8').catch(() => ''),
+      readFile(join(tempDir, 'decoded.log'), 'utf8').catch(() => ''),
+      readFile(join(tempDir, 'aggregated.csv'), 'utf8').catch(() => ''),
+    ]);
+
+    if (!encodedLog && !templatesJson) {
+      throw new Error(
+        `tenx ran but produced no parseable output. ` +
+          `tempDir=${tempDir}, config=${opts.configPath}, mode=${mode}.`
+      );
+    }
+
+    return {
+      templatesJson,
+      encodedLog,
+      decodedLog,
+      aggregatedCsv,
+      wallTimeMs: Date.now() - started,
+      cliVersion,
+      configPath: opts.configPath,
+      tempDir,
+    };
+  } finally {
+    await rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+// ── Mode selection ──
+
+function resolveTenxMode(): 'local' | 'docker' {
+  const raw = (process.env.LOG10X_TENX_MODE || '').trim().toLowerCase();
+  if (!raw || raw === 'local') return 'local';
+  if (raw === 'docker') return 'docker';
+  throw new Error(
+    `Invalid LOG10X_TENX_MODE="${process.env.LOG10X_TENX_MODE}". ` +
+      `Valid values: "local" (default), "docker".`
+  );
+}
+
+// ── Local binary backend ──
+
+async function runViaLocalBinary(
+  opts: RunDevCliOptions,
+  tempDir: string
+): Promise<string | undefined> {
   const binary = process.env.LOG10X_TENX_PATH || 'tenx';
   if (!(await isBinaryOnPath(binary))) {
     throw new DevCliNotInstalledError();
@@ -118,136 +240,179 @@ export async function runDevCli(rawLogText: string): Promise<DevCliResult> {
 
   const cliVersion = await tryGetVersion(binary);
 
-  // 1. Resolve the user's real TENX_CONFIG (for symlink sources).
-  const realTenxConfig = process.env.TENX_CONFIG || DEFAULT_TENX_CONFIG;
-  if (!existsSync(realTenxConfig)) {
-    throw new DevCliBrokenInstallError(
-      `TENX_CONFIG directory does not exist: ${realTenxConfig}. ` +
-        'Set $TENX_CONFIG to your tenx config dir, or reinstall tenx.'
-    );
+  // TODO(dev-cli-os-portable): os-aware include-path construction. The
+  // hardcoded /usr/local/etc/tenx/config and /usr/local/Cellar/log10x/1.0.4
+  // defaults are Intel-Homebrew-only and break on Apple Silicon, Linux,
+  // and Windows. Follow-up commit replaces this with a buildIncludePaths()
+  // that respects TENX_HOME / TENX_MODULES / TENX_CONFIG and falls back
+  // to per-OS defaults matching PipelineIncludePathResolver.java.
+  const tenxConfig = process.env.TENX_CONFIG || '/usr/local/etc/tenx/config';
+  const tenxModules = process.env.TENX_MODULES
+    || '/usr/local/Cellar/log10x/1.0.4/lib/tenx/modules';
+  const includePaths = [
+    tempDir,
+    tenxConfig,
+    join(tenxConfig, 'pipelines'),
+    tenxModules,
+    join(tenxModules, 'pipelines'),
+    join(tenxModules, 'apps'),
+  ].join(';');
+
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    TENX_INCLUDE_PATHS: includePaths,
+    LOG10X_MCP_OUTPUT_DIR: tempDir,
+    LOG10X_MCP_RUNTIME_NAME: `mcp-${Date.now()}`,
+  };
+
+  if (opts.mode === 'file' && opts.inputPath) {
+    env.LOG10X_MCP_INPUT_PATH = opts.inputPath;
   }
 
-  // 2. Build the scratch config.
-  const scratch = await mkdtemp(join(tmpdir(), 'log10x-mcp-'));
-  const scratchInput = join(scratch, 'data', 'sample', 'input');
-  const scratchOutput = join(scratch, 'data', 'sample', 'output');
-  await mkdir(scratchInput, { recursive: true });
-  await mkdir(scratchOutput, { recursive: true });
-
-  // 3. Symlink every top-level entry in the real TENX_CONFIG into the
-  //    scratch dir — EXCEPT `data/` which we want isolated. This covers
-  //    apps, pipelines, lib, symbols, jsconfig.json, and any bespoke
-  //    directories the user has added.
-  let realEntries: string[];
-  try {
-    realEntries = await readdir(realTenxConfig);
-  } catch (e) {
-    throw new DevCliBrokenInstallError(
-      `Cannot read TENX_CONFIG ${realTenxConfig}: ${(e as Error).message}`
-    );
-  }
-  for (const entry of realEntries) {
-    if (entry === 'data' || entry.startsWith('.')) continue;
-    const src = join(realTenxConfig, entry);
-    const dest = join(scratch, entry);
-    try {
-      await symlink(src, dest);
-    } catch (e) {
-      // If symlinks fail (Windows without admin, etc.), fall back to a
-      // broken-install error with actionable text instead of silently
-      // breaking templating.
-      throw new DevCliBrokenInstallError(
-        `Could not symlink ${entry} into scratch dir: ${(e as Error).message}. ` +
-          'On Windows, run with admin privileges or set LOG10X_TENX_DISABLE_PRIVACY=1 to force paste-endpoint fallback.'
-      );
-    }
-  }
-  // Also symlink `data/shared` and `data/templates` if they exist — the
-  // symbol libraries + pre-compiled templates live there and tenx reads
-  // them for enrichment. Only `data/sample/{input,output}` needs isolation.
-  const realDataDir = join(realTenxConfig, 'data');
-  if (existsSync(realDataDir)) {
-    const scratchDataDir = join(scratch, 'data');
-    await mkdir(scratchDataDir, { recursive: true });
-    let dataEntries: string[] = [];
-    try {
-      dataEntries = await readdir(realDataDir);
-    } catch {
-      // best-effort
-    }
-    for (const entry of dataEntries) {
-      if (entry === 'sample' || entry.startsWith('.')) continue;
-      const src = join(realDataDir, entry);
-      const dest = join(scratchDataDir, entry);
-      await symlink(src, dest).catch(() => undefined); // non-fatal
+  const args = [`@${opts.configPath}`];
+  if (opts.extraOverlays) {
+    for (const overlay of opts.extraOverlays) {
+      args.push(`@${overlay}`);
     }
   }
 
-  // 4. Write our input file.
-  const inputFile = join(scratchInput, 'batch.log');
-  await writeFile(inputFile, rawLogText, 'utf8');
-
-  const outputTemplates = join(scratchOutput, 'templates.json');
-  const outputEncoded = join(scratchOutput, 'encoded.log');
-  const outputAggregated = join(scratchOutput, 'aggregated.csv');
-
-  const started = Date.now();
-  try {
-    try {
-      // `--set openBrowser=false --set localOnly=true` used to be passed
-      // here; tenx 1.0.4 rejects those flags and neither is referenced
-      // in the current config tree. Omitted intentionally.
-      await runCommand(binary, ['@apps/dev'], {
-        env: { ...process.env, TENX_CONFIG: scratch },
-        cwd: scratch,
-        timeoutMs: 120_000,
-      });
-    } catch (e) {
-      const msg = (e as Error).message || '';
-      if (
-        /could not resolve include|could not process include directive|could not expand macro argument|error reading.*config\.yaml/i.test(
-          msg
-        )
-      ) {
-        throw new DevCliBrokenInstallError(msg);
-      }
-      throw e;
+  await runCommandWithStdin(
+    binary,
+    args,
+    opts.mode === 'stdin' ? (opts.stdinData ?? '') : null,
+    {
+      env,
+      timeoutMs: opts.timeoutMs ?? 120_000,
+      configPath: opts.configPath,
     }
+  );
 
-    const [templatesJson, encodedLog, aggregatedCsv] = await Promise.all([
-      readFile(outputTemplates, 'utf8').catch(() => ''),
-      readFile(outputEncoded, 'utf8').catch(() => ''),
-      readFile(outputAggregated, 'utf8').catch(() => ''),
-    ]);
-
-    if (!templatesJson || !encodedLog) {
-      throw new Error(
-        `Local tenx CLI ran but produced no parseable output. ` +
-          `templates.json bytes=${templatesJson.length}, encoded.log bytes=${encodedLog.length}. ` +
-          `Check that the CLI version supports \`@apps/dev\` with the expected output layout at ${scratchOutput}.`
-      );
-    }
-
-    return {
-      templatesJson,
-      encodedLog,
-      aggregatedCsv,
-      wallTimeMs: Date.now() - started,
-      cliVersion,
-    };
-  } finally {
-    // Blow away the entire scratch dir. Symlinks are just pointers; rm -r
-    // on the scratch dir does NOT follow them into the real config.
-    await rm(scratch, { recursive: true, force: true }).catch(() => undefined);
-  }
+  return cliVersion;
 }
 
+// ── Docker backend ──
+
+/**
+ * Run tenx inside a container. Opt-in via LOG10X_TENX_MODE=docker.
+ *
+ * The container provides its own tenx install (official image
+ * `log10x/pipeline-10x:latest` — Cloud flavor per mksite/docs/install/docker.md),
+ * so OS portability and the Intel-Homebrew path assumption are sidestepped.
+ * The host contributes only the per-invocation tempdir and the MCP's
+ * packaged YAML.
+ *
+ * Mounts:
+ *   - <tempDir>              → /mcp/output  (rw) — shadow template + result files
+ *   - <dirname(configPath)>  → /mcp/config  (ro) — the packaged YAML
+ *   - <dirname(inputPath)>   → /mcp/input   (ro) — file mode only
+ *
+ * The image's baked install lives at /opt/tenx-cloud/lib/app/modules and
+ * /etc/tenx/config; we build TENX_INCLUDE_PATHS with /mcp/output first so
+ * the shadow template config overrides the image's default.
+ */
+async function runViaDocker(
+  opts: RunDevCliOptions,
+  tempDir: string
+): Promise<string | undefined> {
+  // Probe docker up front — fail fast with a useful message rather than
+  // letting the main `docker run` time out obscurely.
+  try {
+    await runCommand('docker', ['info'], { timeoutMs: 5_000 });
+  } catch (e) {
+    throw new DockerNotAvailableError((e as Error).message || String(e));
+  }
+
+  const image = process.env.LOG10X_TENX_IMAGE || 'log10x/pipeline-10x:latest';
+
+  // Resolve to absolute paths — bind mounts reject relative paths and
+  // the user may pass a relative configPath via LOG10X_MCP_*_CONFIG_PATH.
+  const absConfigPath = resolve(opts.configPath);
+  const hostConfigDir = dirname(absConfigPath);
+  const configName = basename(absConfigPath);
+
+  const CONTAINER_OUTPUT = '/mcp/output';
+  const CONTAINER_CONFIG_DIR = '/mcp/config';
+  const CONTAINER_INPUT_DIR = '/mcp/input';
+
+  const containerIncludePaths = [
+    CONTAINER_OUTPUT,
+    '/etc/tenx/config',
+    '/etc/tenx/config/pipelines',
+    '/opt/tenx-cloud/lib/app/modules',
+    '/opt/tenx-cloud/lib/app/modules/pipelines',
+    '/opt/tenx-cloud/lib/app/modules/apps',
+  ].join(';');
+
+  const args: string[] = ['run', '--rm', '-i'];
+
+  // UID mapping — only on Linux. Without it, the container (UID 1000,
+  // tenxuser) writes to the host-mounted tempdir and leaves files the
+  // MCP process can't clean up. Docker Desktop on Windows/macOS handles
+  // ownership via its own VFS, and process.getuid doesn't exist on win32.
+  if (process.platform === 'linux' && typeof process.getuid === 'function') {
+    args.push('--user', `${process.getuid()}:${(process.getgid as () => number)()}`);
+  }
+
+  args.push('-v', `${hostConfigDir}:${CONTAINER_CONFIG_DIR}:ro`);
+  args.push('-v', `${tempDir}:${CONTAINER_OUTPUT}`);
+
+  let containerInputPath: string | undefined;
+  if (opts.mode === 'file' && opts.inputPath) {
+    // TODO: glob paths aren't supported here — we mount the parent of the
+    // exact path. Resolving a glob to its minimal enclosing directory and
+    // rewriting the pattern is possible but left for a follow-up. Absolute
+    // file paths are the 95% case.
+    const absInput = resolve(opts.inputPath);
+    const inDir = dirname(absInput);
+    const inName = basename(absInput);
+    args.push('-v', `${inDir}:${CONTAINER_INPUT_DIR}:ro`);
+    containerInputPath = `${CONTAINER_INPUT_DIR}/${inName}`;
+  }
+
+  args.push('-e', `TENX_INCLUDE_PATHS=${containerIncludePaths}`);
+  args.push('-e', `LOG10X_MCP_OUTPUT_DIR=${CONTAINER_OUTPUT}`);
+  args.push('-e', `LOG10X_MCP_RUNTIME_NAME=mcp-${Date.now()}`);
+  if (containerInputPath) {
+    args.push('-e', `LOG10X_MCP_INPUT_PATH=${containerInputPath}`);
+  }
+
+  args.push(image);
+  args.push(`@${CONTAINER_CONFIG_DIR}/${configName}`);
+  if (opts.extraOverlays) {
+    for (const overlay of opts.extraOverlays) {
+      args.push(`@${overlay}`);
+    }
+  }
+
+  await runCommandWithStdin(
+    'docker',
+    args,
+    opts.mode === 'stdin' ? (opts.stdinData ?? '') : null,
+    {
+      // +60s over local default absorbs first-run image pull on a cold host.
+      timeoutMs: opts.timeoutMs ?? 180_000,
+      configPath: opts.configPath,
+    }
+  );
+
+  return `docker:${image}`;
+}
+
+// ── Config resolution ──
+
+function resolveConfigPath(envVar: string, defaultFilename: string): string {
+  const override = process.env[envVar];
+  if (override) return override;
+  const pkgRoot = resolve(__dirname, '..', '..');
+  return join(pkgRoot, 'assets', defaultFilename);
+}
+
+// ── Binary helpers ──
+
 async function isBinaryOnPath(binary: string): Promise<boolean> {
-  // If it's an absolute path, check existence directly.
   if (binary.startsWith('/') || binary.match(/^[A-Za-z]:\\/)) {
     return existsSync(binary);
   }
-  // Otherwise shell out to `which` / `where` once.
   const lookup = process.platform === 'win32' ? 'where' : 'which';
   try {
     await runCommand(lookup, [binary], { timeoutMs: 3000 });
@@ -266,51 +431,64 @@ async function tryGetVersion(binary: string): Promise<string | undefined> {
   }
 }
 
+// ── Process helpers ──
+
 interface RunOptions {
   env?: NodeJS.ProcessEnv;
   cwd?: string;
   timeoutMs?: number;
+  configPath?: string;
 }
 
 function runCommand(cmd: string, args: string[], options: RunOptions = {}): Promise<string> {
-  return new Promise((resolve, reject) => {
+  return runCommandWithStdin(cmd, args, null, options);
+}
+
+function runCommandWithStdin(
+  cmd: string,
+  args: string[],
+  stdinData: string | null,
+  options: RunOptions = {}
+): Promise<string> {
+  return new Promise((resolvePromise, rejectPromise) => {
     const child = spawn(cmd, args, {
       env: options.env || process.env,
       cwd: options.cwd,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: [stdinData !== null ? 'pipe' : 'ignore', 'pipe', 'pipe'],
     });
     let stdout = '';
     let stderr = '';
     const timer = options.timeoutMs
       ? setTimeout(() => {
           child.kill('SIGKILL');
-          reject(new Error(`Command timed out after ${options.timeoutMs}ms: ${cmd} ${args.join(' ')}`));
+          rejectPromise(
+            new Error(`Command timed out after ${options.timeoutMs}ms: ${cmd} ${args.join(' ')}`)
+          );
         }, options.timeoutMs)
       : null;
 
-    child.stdout.on('data', (d) => {
+    child.stdout?.on('data', (d) => {
       stdout += d.toString();
     });
-    child.stderr.on('data', (d) => {
+    child.stderr?.on('data', (d) => {
       stderr += d.toString();
     });
     child.on('error', (e) => {
       if (timer) clearTimeout(timer);
-      reject(e);
+      rejectPromise(e);
     });
     child.on('close', (code) => {
       if (timer) clearTimeout(timer);
       if (code === 0) {
-        resolve(stdout);
+        resolvePromise(stdout);
       } else {
-        // Keep both stdout + stderr in the error because tenx writes its
-        // config-resolution errors to stdout (the "could not resolve include"
-        // lines we detect in the broken-install path above).
-        const combined = [stdout, stderr].filter((s) => s.trim()).join('\n').slice(0, 2000);
-        reject(
-          new Error(`Command failed (${code}): ${cmd} ${args.join(' ')}\n${combined}`)
-        );
+        rejectPromise(new DevCliRunError(code ?? -1, stderr, stdout, options.configPath || ''));
       }
     });
+
+    if (stdinData !== null && child.stdin) {
+      child.stdin.write(stdinData);
+      child.stdin.end();
+    }
   });
 }

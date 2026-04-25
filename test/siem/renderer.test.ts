@@ -71,7 +71,7 @@ test('renderPocReport emits all 9 sections', () => {
     '## 1. Executive Summary',
     '## 2. Top Cost Drivers',
     '## 3. Service-Level Breakdown',
-    '## 4. Regulator Recommendations',
+    '## 4. Reducer Recommendations',
     '## 5. Native SIEM Exclusion Configs',
     '## 6. Compaction Potential', // Splunk → present
     '## 7. Risk / Dependency Check',
@@ -216,7 +216,7 @@ test('renderPocReport native exclusion configs include the chosen SIEM', () => {
   }
 });
 
-test('renderPocReport regulator YAML has an untilEpochSec', () => {
+test('renderPocReport reducer YAML has an untilEpochSec', () => {
   const out = renderPocReport({
     siem: 'datadog',
     window: '7d',

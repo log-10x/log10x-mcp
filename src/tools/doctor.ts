@@ -17,11 +17,12 @@
 
 import { z } from 'zod';
 import { queryInstant } from '../lib/api.js';
-import { isStreamerConfigured } from '../lib/streamer-api.js';
+import { resolveRetriever, formatRetrieverTrace, runRetrieverQuery } from '../lib/retriever-api.js';
 import { loadEnvironments, type Environments, type EnvConfig } from '../lib/environments.js';
 import { LABELS } from '../lib/promql.js';
 import { fmtBytes as formatBytes } from '../lib/format.js';
 import { discoverAvailable } from '../lib/siem/index.js';
+import { resolveBackend, formatDetectionTrace } from '../lib/customer-metrics.js';
 
 export type CheckStatus = 'pass' | 'warn' | 'fail';
 
@@ -63,25 +64,58 @@ export async function runDoctorChecks(envNickname?: string): Promise<DoctorRepor
   // 1. Environment configuration loads successfully (global).
   let envs: Environments | undefined;
   try {
-    envs = loadEnvironments();
-    globalChecks.push({
-      name: 'environment_config',
-      status: 'pass',
-      message: `${envs.all.length} environment${envs.all.length === 1 ? '' : 's'} configured (${envs.all.map((e) => e.nickname).join(', ')}).`,
-    });
+    envs = await loadEnvironments();
+    const summary = envs.all.map((e) => {
+      const perm = e.permissions ? ` (${e.permissions.toLowerCase()})` : '';
+      const star = e.isDefault ? ' ★' : '';
+      return `${e.nickname}${perm}${star}`;
+    }).join(', ');
+    const source = envs.autodiscovered ? 'autodiscovered via GET /api/v1/user' : 'from env vars';
+
+    // Demo-mode signaling. Two flavors:
+    //   - Pure demo (no LOG10X_API_KEY set): warn (the user opted in but
+    //     should know all data is shared sample data).
+    //   - Demo fallback (LOG10X_API_KEY set but failed validation): fail-
+    //     style attention even though the MCP still works against demo,
+    //     because the user almost certainly thinks they're hitting their
+    //     own account.
+    if (envs.isDemoMode && envs.demoFallbackReason) {
+      globalChecks.push({
+        name: 'environment_config',
+        status: 'fail',
+        message:
+          `**DEMO FALLBACK** — your configured LOG10X_API_KEY failed validation, so the MCP is running against the public Log10x demo env (read-only). Reason: ${envs.demoFallbackReason.split('\n')[0].slice(0, 300)}. ` +
+          `All API-hitting tools will return demo data, NOT your account. ` +
+          `${envs.all.length} demo env${envs.all.length === 1 ? '' : 's'} ${source}: ${summary}. Default: ${envs.default.nickname}.`,
+        fix: 'Re-check LOG10X_API_KEY at https://console.log10x.com → Profile → API Settings. Update the value in your MCP host\'s config (e.g. claude_desktop_config.json) and fully restart the host. Or unset LOG10X_API_KEY entirely to keep demo mode without the warning.',
+      });
+    } else if (envs.isDemoMode) {
+      globalChecks.push({
+        name: 'environment_config',
+        status: 'warn',
+        message:
+          `Running in **demo mode** — no LOG10X_API_KEY configured. The MCP autodiscovered ${envs.all.length} read-only demo env${envs.all.length === 1 ? '' : 's'}: ${summary}. All data is shared sample data, not your own. Call \`log10x_login_status\` for upgrade steps.`,
+      });
+    } else {
+      globalChecks.push({
+        name: 'environment_config',
+        status: 'pass',
+        message: `${envs.all.length} environment${envs.all.length === 1 ? '' : 's'} ${source}: ${summary}. Default: ${envs.default.nickname}. (★ = default env; nicknames with (read) are read-only.)`,
+      });
+    }
   } catch (e) {
     globalChecks.push({
       name: 'environment_config',
       status: 'fail',
       message: (e as Error).message,
-      fix: 'Set LOG10X_API_KEY + LOG10X_ENV_ID for single-env, or LOG10X_ENVS as a JSON array for multi-env. Get credentials at https://console.log10x.com → Profile → API Settings.',
+      fix: 'Set LOG10X_API_KEY (autodiscovery), or LOG10X_API_KEY + LOG10X_ENV_ID (legacy single-env), or LOG10X_ENVS as a JSON array (multi-env). Get credentials at https://console.log10x.com → Profile → API Settings.',
     });
     return finalize(globalChecks, perEnvChecks);
   }
 
-  // 2. Infrastructure-wide informational checks (streamer, datadog, paste).
+  // 2. Infrastructure-wide informational checks (retriever, datadog, paste).
   //    These don't depend on a specific env so they live in globalChecks.
-  addInfrastructureChecks(globalChecks);
+  await addInfrastructureChecks(globalChecks);
   await addPasteEndpointCheck(globalChecks);
   await addSiemDiscoveryCheck(globalChecks);
 
@@ -109,35 +143,44 @@ export async function runDoctorChecks(envNickname?: string): Promise<DoctorRepor
 }
 
 /** Checks that apply independent of a specific environment. */
-function addInfrastructureChecks(checks: DoctorCheck[]): void {
-  // Streamer endpoint configured? (informational, not required)
-  if (isStreamerConfigured()) {
+async function addInfrastructureChecks(checks: DoctorCheck[]): Promise<void> {
+  // Retriever endpoint configured? (informational, not required)
+  const retrieverRes = await resolveRetriever().catch((e) => ({
+    url: undefined,
+    bucket: undefined,
+    detectionPath: undefined,
+    trace: [{ path: 'explicit_env' as const, status: 'failed' as const, reason: (e as Error).message }],
+  }));
+  if (retrieverRes.url && retrieverRes.bucket && retrieverRes.detectionPath) {
     checks.push({
-      name: 'streamer_endpoint',
+      name: 'retriever_endpoint',
       status: 'pass',
-      message: `LOG10X_STREAMER_URL=${process.env.LOG10X_STREAMER_URL} — streamer_query and backfill_metric will route to this endpoint.`,
+      message:
+        `Retriever resolved via ${retrieverRes.detectionPath}: url=${retrieverRes.url}, bucket=${retrieverRes.bucket}. ` +
+        'log10x_retriever_query and log10x_backfill_metric will route here.',
     });
   } else {
     checks.push({
-      name: 'streamer_endpoint',
+      name: 'retriever_endpoint',
       status: 'warn',
       message:
-        'Storage Streamer not reachable from this MCP install. Two possibilities: ' +
-        '(a) Streamer is deployed but LOG10X_STREAMER_URL / LOG10X_STREAMER_BUCKET env vars are unset, ' +
-        '(b) Streamer is not deployed for this customer at all. ' +
-        'Either way, log10x_streamer_query and log10x_backfill_metric cannot retrieve raw events from the S3 archive in this session. ' +
-        'For events inside SIEM hot retention (typically <7d), the fastest workaround is direct SIEM query — do not block on streamer setup.',
-      fix: 'If the Streamer is deployed: set LOG10X_STREAMER_URL to the query handler URL (e.g., the NLB) and LOG10X_STREAMER_BUCKET to the archive bucket, then restart the MCP client. If not deployed: https://doc.log10x.com/apps/cloud/streamer/',
+        'Retriever not reachable from this MCP install. log10x_retriever_query and log10x_backfill_metric cannot retrieve raw events from the S3 archive in this session. ' +
+        'For events inside SIEM hot retention (typically <7d), the fastest workaround is direct SIEM query — do not block on retriever setup.\n' +
+        formatRetrieverTrace(retrieverRes.trace),
+      fix:
+        'Options: (a) set __SAVE_LOG10X_RETRIEVER_URL__ + __SAVE_LOG10X_RETRIEVER_BUCKET__ explicitly; (b) expose AWS creds (AWS_REGION + IAM with s3:ListAllMyBuckets) so auto-detect can find a log10x-retriever-* bucket; (c) deploy the Retriever — https://doc.log10x.com/apps/cloud/retriever/',
     });
   }
 
   // Datadog backfill destination credentials? (informational)
+  // Accept DD_SITE and DATADOG_SITE interchangeably (as Datadog's own SDKs do).
   if (process.env.DATADOG_API_KEY || process.env.DD_API_KEY) {
+    const site = process.env.DD_SITE || process.env.DATADOG_SITE || 'datadoghq.com';
     checks.push({
       name: 'datadog_destination',
       status: 'pass',
       message:
-        'Datadog API key detected. log10x_backfill_metric can emit to Datadog (requires Streamer for the source).',
+        `Datadog API key detected (site: ${site}). log10x_backfill_metric can emit to Datadog (requires Retriever for the source).`,
     });
   } else {
     checks.push({
@@ -145,7 +188,7 @@ function addInfrastructureChecks(checks: DoctorCheck[]): void {
       status: 'warn',
       message:
         'No DATADOG_API_KEY (or DD_API_KEY) set. backfill_metric to Datadog will error if attempted.',
-      fix: 'Set DATADOG_API_KEY in the MCP server environment if you plan to backfill Datadog metrics.',
+      fix: 'Set DATADOG_API_KEY in the MCP server environment if you plan to backfill Datadog metrics. DD_SITE / DATADOG_SITE controls the region (defaults to datadoghq.com).',
     });
   }
 }
@@ -429,11 +472,39 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
     }
   }
 
+  // Cross-pillar backend detection (v1.4).
+  // The MCP tries explicit LOG10X_CUSTOMER_METRICS_URL first, then cascades
+  // through Grafana Cloud / Datadog / AMP / GCP / self-hosted Prometheus
+  // based on ambient env. Report which path resolved, or the full trace of
+  // what was tried when nothing matched.
+  const backendResolution = await resolveBackend().catch((e) => ({
+    backend: undefined,
+    detectionPath: undefined,
+    trace: [{ path: 'explicit_env' as const, status: 'failed' as const, reason: (e as Error).message }],
+  }));
+  if (backendResolution.backend && backendResolution.detectionPath) {
+    checks.push({
+      name: 'cross_pillar_backend',
+      status: 'pass',
+      message: `Customer metrics backend resolved via ${backendResolution.detectionPath} → ${backendResolution.backend.backendType} @ ${backendResolution.backend.endpoint}.`,
+    });
+  } else {
+    checks.push({
+      name: 'cross_pillar_backend',
+      status: 'warn',
+      message:
+        'No customer metrics backend detected. Cross-pillar tools (log10x_correlate_cross_pillar, log10x_translate_metric_to_patterns, log10x_discover_join, log10x_customer_metrics_query) will return "not configured" until a backend is reachable.\n' +
+        formatDetectionTrace(backendResolution.trace),
+      fix:
+        'Set LOG10X_CUSTOMER_METRICS_URL + LOG10X_CUSTOMER_METRICS_TYPE explicitly, or expose one of: GRAFANA_CLOUD_API_KEY (+URL), DD_API_KEY+DD_APP_KEY, AWS_REGION (with AMP workspace available), GOOGLE_APPLICATION_CREDENTIALS (GMP project), or PROMETHEUS_URL.',
+    });
+  }
+
   // Cross-pillar enrichment floor (v1.4).
   // Only runs when a customer metric backend is configured. Verifies that
   // the labels needed for structural validation are actually present on
   // Log10x pattern metrics. Never fails — always degrades gracefully.
-  if (process.env.LOG10X_CUSTOMER_METRICS_URL) {
+  if (backendResolution.backend) {
     const required = ['tenx_user_service', 'k8s_namespace', 'k8s_pod', 'k8s_container'];
     const missing: string[] = [];
     for (const label of required) {
@@ -458,7 +529,7 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
       checks.push({
         name: 'cross_pillar_enrichment_floor',
         status: 'warn',
-        message: `Missing enrichment labels: ${missing.join(', ')}. Cross-pillar correlation will still work for anchor types whose required labels ARE present; affected anchor types will return validation_unavailable instead of joined confidence. Typical on non-k8s deployments or non-fluent/filebeat input formats.`,
+        message: `Missing enrichment labels: ${missing.join(', ')}. Cross-pillar correlation will still work for anchor types whose required labels ARE present; affected anchor types will return unconfirmed instead of confirmed confidence. Typical on non-k8s deployments or non-fluent/filebeat input formats.`,
         fix:
           'For k8s deployments: verify run/initialize/k8s is included in the Reporter config (it is by default) and that the forwarder passes kubernetes.pod_name / kubernetes.container_name / kubernetes.namespace_name metadata. For non-k8s deployments: no action required, the bridge operates in a narrower scope.',
       });
@@ -540,22 +611,56 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
     }
   }
 
-  // G12 mitigation: detect streamer false-negatives. We cannot run a real
-  // streamer query here without side effects, but we CAN check whether the
-  // streamer endpoint is configured AND whether the paste endpoint's
-  // health probe reports streamer index coverage for recent windows.
-  // Shipping as a placeholder that reminds the user the streamer is
-  // operationally uncertain until the engine-side false-negative and
-  // canonical-name-crash bugs (G12) are fixed.
-  if (detectedTier && process.env.LOG10X_STREAMER_URL) {
-    checks.push({
-      name: 'streamer_forensic_health',
-      status: 'warn',
-      message:
-        'Streamer endpoint is configured, but forensic retrieval has a known engine-side false-negative issue: log10x_streamer_query may return 0 events on windows where log10x_pattern_trend proves events exist, and it may crash with "MCP error -32000: Connection closed" when passed a canonical slash-underscore pattern name. Tracked as GAPS G12.',
-      fix:
-        'Until the engine-side fix lands: (1) use short pattern names or free-text search strings rather than canonical pattern identities when calling log10x_streamer_query, (2) cross-check any zero-event result against log10x_pattern_trend on the same pattern+window before concluding the archive is empty, (3) prefer log10x_event_lookup + log10x_pattern_trend for any incident reconstruction where approximate timing is acceptable.',
-    });
+  // G12 mitigation: detect retriever false-negatives. We cannot run a real
+  // retriever query here without side effects, but we CAN check whether the
+  // retriever endpoint is configured AND whether the paste endpoint's
+  // health probe reports retriever index coverage for recent windows.
+  // Live retriever probe: fire a lightweight count query (limit=1, last
+  // 1h window) and check whether the pipeline responds. Replaces the old
+  // hardcoded G12 WARN that was stale after the body-shape fix (PR #36)
+  // and the demo-env indexer fix (2026-04-16).
+  if (detectedTier && process.env.__SAVE_LOG10X_RETRIEVER_URL__) {
+    try {
+      const probeResult = await runRetrieverQuery(env, {
+        from: 'now-1h',
+        to: 'now',
+        search: '',
+        format: 'count',
+        limit: 1,
+      });
+      const matchedCount = probeResult.execution.eventsMatched ?? 0;
+      if (matchedCount > 0) {
+        checks.push({
+          name: 'retriever_forensic_health',
+          status: 'pass',
+          message:
+            `Retriever forensic retrieval is operational. Probe query returned ${matchedCount} event(s) in the last 1h. ` +
+            `Wall time: ${probeResult.execution.wallTimeMs}ms, worker files: ${probeResult.execution.workerFiles}.`,
+        });
+      } else {
+        checks.push({
+          name: 'retriever_forensic_health',
+          status: 'warn',
+          message:
+            `Retriever endpoint responded but returned 0 events in the last 1h (wall time: ${probeResult.execution.wallTimeMs}ms). ` +
+            `This may indicate the S3 index is stale — check that the index-inducer CronJob is running and that new .log files are being written to the retriever S3 bucket.`,
+          fix:
+            'Verify: (1) `kubectl get cronjob -n <retriever-ns>` — is the index-inducer running and not Pending? ' +
+            '(2) `aws s3 ls s3://<retriever-bucket>/app/ | tail -5` — are recent .log files present? ' +
+            '(3) Check SQS index queue depth — if 0 and no recent files, the data pipeline upstream of the indexer is stopped.',
+        });
+      }
+    } catch (e) {
+      const errMsg = (e as Error).message || String(e);
+      checks.push({
+        name: 'retriever_forensic_health',
+        status: 'fail',
+        message:
+          `Retriever probe query failed: ${errMsg.slice(0, 300)}`,
+        fix:
+          'Check retriever endpoint reachability (`curl -s $__SAVE_LOG10X_RETRIEVER_URL__/health`), query-handler pod status, and SQS queue configuration.',
+      });
+    }
   }
 
   return checks;

@@ -16,7 +16,7 @@
  */
 
 import { z } from 'zod';
-import { loadBackendFromEnv, CustomerMetricsNotConfiguredError } from '../lib/customer-metrics.js';
+import { resolveBackend, formatDetectionTrace, CustomerMetricsNotConfiguredError } from '../lib/customer-metrics.js';
 
 export const customerMetricsQuerySchema = {
   promql: z
@@ -47,10 +47,11 @@ export async function executeCustomerMetricsQuery(args: {
   end?: string;
   step?: string;
 }): Promise<string> {
-  const backend = loadBackendFromEnv();
-  if (!backend) {
-    throw new CustomerMetricsNotConfiguredError();
+  const resolution = await resolveBackend();
+  if (!resolution.backend) {
+    throw new CustomerMetricsNotConfiguredError(formatDetectionTrace(resolution.trace));
   }
+  const backend = resolution.backend;
 
   if (args.mode === 'instant') {
     const res = await backend.queryInstant(args.promql);
