@@ -55,6 +55,7 @@ import { adviseReporterSchema, executeAdviseReporter } from './tools/advise-repo
 import { adviseRegulatorSchema, executeAdviseRegulator } from './tools/advise-regulator.js';
 import { adviseStreamerSchema, executeAdviseStreamer } from './tools/advise-streamer.js';
 import { adviseInstallSchema, executeAdviseInstall } from './tools/advise-install.js';
+import { adviseCompactSchema, executeAdviseCompact } from './tools/advise-compact.js';
 import { getStatus } from './resources/status.js';
 
 // ── Environment + cost cache ──
@@ -554,6 +555,15 @@ server.tool(
   (args) => wrap('log10x_advise_install', () => executeAdviseInstall(args))
 );
 
+// ── Tool: log10x_advise_compact (compact-lookup PR author) ──
+
+server.tool(
+  'log10x_advise_compact',
+  'Emit a literal `gh` PR command + the file diff for a compactRegulator lookup-CSV update against the customer\'s GitOps repo. The compactRegulator decides per-event whether each event is emitted via `encode()` (compact templateHash+vars, ~20-40x volume reduction) or as `fullText`, keyed off a CSV lookup of `compactRegulatorFieldNames` (default: `[symbolMessage]`). The engine hot-reloads the CSV via `FileResourceLookup.reset()` on each gitops poll — **no pipeline restart, no event drops** — so per-pattern decisions take effect within seconds of the PR being merged. This tool is a *renderer*, not a decider: the caller decides which patterns to compact (typically using `log10x_top_patterns` + `log10x_cost_drivers`) and passes the lists in. Output is markdown with a diff summary, the new full CSV content, and two ready-to-run shell snippets (one-shot via `gh api`, or local clone+edit+push). **Tier prerequisites**: requires a Reporter (Cloud or Edge) so pattern keys exist; the regulator pod must be configured with `compactRegulatorLookupFile` pointing at the same path inside its gitops-pulled tree. v1 scope: CSV edits only. JS predicate updates (which trigger a full pipeline restart) are a follow-up.',
+  adviseCompactSchema,
+  (args) => wrap('log10x_advise_compact', () => executeAdviseCompact(args))
+);
+
 // ── Resource: log10x://status ──
 
 server.resource(
@@ -595,6 +605,7 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_advise_reporter', intent: 'Reporter install/verify/teardown plan for a forwarder — inline or standalone (shape=standalone)' },
   { name: 'log10x_advise_regulator', intent: 'Regulator install/verify/teardown plan — inline only, with optional compact encoding (optimize=true)' },
   { name: 'log10x_advise_streamer', intent: 'Streamer install/verify/teardown plan — standalone S3 + SQS archive + query' },
+  { name: 'log10x_advise_compact', intent: 'Render a `gh` PR command + diff for a compactRegulator lookup-CSV update against the customer GitOps repo (engine hot-reloads the CSV without a pipeline restart)' },
 ];
 
 async function handleCliFlags(): Promise<boolean> {
