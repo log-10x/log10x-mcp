@@ -63,6 +63,8 @@ import { adviseRetrieverSchema, executeAdviseRetriever } from './tools/advise-re
 import { adviseInstallSchema, executeAdviseInstall } from './tools/advise-install.js';
 import { adviseCompactSchema, executeAdviseCompact } from './tools/advise-compact.js';
 import { loginStatusSchema, executeLoginStatus } from './tools/login-status.js';
+import { signinSchema, executeSignin } from './tools/signin.js';
+import { signoutSchema, executeSignout } from './tools/signout.js';
 import { getStatus } from './resources/status.js';
 
 // ── Environment + cost cache ──
@@ -587,11 +589,37 @@ server.registerTool(
   'log10x_login_status',
   {
     title: 'Login status',
-    description: 'List the user\'s Log10x ACCOUNT environments and report credential / login state. **Call this — and ONLY this — for any of these phrasings**: "which Log10x environments do I have", "which environments are available to me", "list my envs", "what tenants / accounts can I query", "show me my Log10x environments", "am I logged in", "log me in", "use my account instead of demo", "switch envs", or whenever a tool result shows a "DEMO MODE" banner the user wants to act on. **Do NOT call `log10x_discover_env` for these questions** — that tool scans the user\'s Kubernetes cluster + AWS account for forwarder/log10x-app deployments, which is unrelated to "which Log10x service environments does my account have access to". In demo mode (no LOG10X_API_KEY set, OR a key was set but failed validation), the response is a step-by-step config guide for adding a real API key to the MCP host\'s config (Claude Desktop, Cursor, etc.) and restarting. In signed-in mode, the response lists the user\'s identity, every Log10x env they can reach with permissions (OWNER/WRITE/READ), the default env, and the env most-recently used this session. Read-only — does not mutate any state. Takes no args. **Tier prerequisites**: none — runs in demo mode too.',
+    description: 'List the user\'s Log10x ACCOUNT environments and report credential / login state. **Call this — and ONLY this — for any of these phrasings**: "which Log10x environments do I have", "which environments are available to me", "list my envs", "what tenants / accounts can I query", "show me my Log10x environments", "am I logged in", "switch envs". **For "log me in" / "sign me up" / "create a Log10x account" / "use my real account" — call `log10x_signin` instead**, which runs the one-click GitHub sign-up flow. **Do NOT call `log10x_discover_env` for these questions** — that tool scans the user\'s Kubernetes cluster + AWS account for forwarder/log10x-app deployments, which is unrelated to "which Log10x service environments does my account have access to". In demo mode (no LOG10X_API_KEY set, OR a key was set but failed validation), the response is a step-by-step config guide and a pointer to `log10x_signin` for the one-click flow. In signed-in mode, the response lists the user\'s identity, every Log10x env they can reach with permissions (OWNER/WRITE/READ), the default env, and the env most-recently used this session. Read-only — does not mutate any state. Takes no args. **Tier prerequisites**: none — runs in demo mode too.',
     inputSchema: loginStatusSchema,
     annotations: { title: 'Login status', readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   },
   () => wrap('log10x_login_status', async () => executeLoginStatus({}, getEnvs()))
+);
+
+// ── Tool: log10x_signin ──
+
+server.registerTool(
+  'log10x_signin',
+  {
+    title: 'Sign in to Log10x via GitHub',
+    description: 'One-click signup/signin via GitHub. **Call this for any of these phrasings**: "sign me up for Log10x", "create a Log10x account", "log me in to Log10x", "register me", "set up my Log10x account", "I want my own Log10x account instead of demo", "switch from demo to my own data". This tool starts the GitHub Device Flow: it auto-opens the user\'s browser to https://github.com/login/device with the user_code pre-filled, polls until the user clicks **Authorize log10x-mcp**, exchanges the resulting GitHub token with the Log10x backend for a long-lived API key, writes the key to `~/.log10x/credentials` (mode 0600), and hot-reloads the MCP\'s env list in-process so the very next tool call runs against the new account — no MCP-host restart needed. If the user has the GitHub CLI installed and authenticated (`gh auth login`), this is zero-click. The same tool handles both signup (creates a fresh Log10x account auto-keyed by GitHub user id, with a default env named after the GitHub login) and signin (returns the existing account\'s key when the GitHub identity already matches). **Heads-up to the user before calling**: this WILL pop open their browser, ask them to click Authorize, and may take 30s–2min depending on how quickly they authorize. **Tier prerequisites**: none. Idempotent — safe to call multiple times.',
+    inputSchema: signinSchema,
+    annotations: { title: 'Sign in via GitHub', readOnlyHint: false, idempotentHint: true, openWorldHint: true },
+  },
+  (args) => wrap('log10x_signin', async () => executeSignin(args, getEnvs()))
+);
+
+// ── Tool: log10x_signout ──
+
+server.registerTool(
+  'log10x_signout',
+  {
+    title: 'Sign out of Log10x',
+    description: 'Wipe the persistent credentials file at `~/.log10x/credentials` and reload envs so subsequent calls fall back to demo mode (or whichever lower-priority configuration source picks up). **Call this for**: "sign me out of Log10x", "log out", "remove my Log10x credentials", "stop using my Log10x account", "go back to demo mode". Idempotent — running it without saved credentials is a no-op. Does NOT revoke the API key on the BE; the user must do that from console.log10x.com → Profile → API Settings if they want to invalidate the key everywhere (mirrors `gh auth logout` and `aws sso logout`). If the user has `LOG10X_API_KEY` or `LOG10X_ENVS` set in their MCP host config, those env vars will still be active after sign-out — the tool result will flag this so the LLM can tell the user to also unset them and restart. **Tier prerequisites**: none.',
+    inputSchema: signoutSchema,
+    annotations: { title: 'Sign out', readOnlyHint: false, idempotentHint: true, openWorldHint: false },
+  },
+  () => wrap('log10x_signout', async () => executeSignout({}, getEnvs()))
 );
 
 // ── Tool: log10x_customer_metrics_query (v1.4) ──

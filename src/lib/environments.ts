@@ -1,7 +1,7 @@
 /**
  * Multi-environment configuration.
  *
- * Four ways to configure which Log10x envs the MCP can talk to, in
+ * Five ways to configure which Log10x envs the MCP can talk to, in
  * increasing order of convenience:
  *
  *   1. `LOG10X_ENVS` — JSON array of `{nickname, apiKey, envId}` objects.
@@ -15,19 +15,27 @@
  *      `GET /api/v1/user` (a user-scoped endpoint that doesn't need
  *      envId) and populates the env list from the response. Includes
  *      each env's name, owner, default flag, and permission level
- *      (OWNER/WRITE/READ). This is the preferred setup: the user just
- *      drops their API key in and everything else resolves from the
- *      backend.
+ *      (OWNER/WRITE/READ).
  *
- *   4. **Nothing set** — demo mode. The MCP boots against the public
+ *   4. **`~/.log10x/credentials`** — persistent file written by
+ *      `log10x_signin` after a successful GitHub-device-flow signup
+ *      or signin. Loaded the same way as path 3 (autodiscovery via
+ *      `/api/v1/user`) once the key is known. Living outside the MCP
+ *      host's config means a single sign-in works across every MCP
+ *      host on the same machine — sign in once per machine, not once
+ *      per host.
+ *
+ *   5. **Nothing set** — demo mode. The MCP boots against the public
  *      Log10x demo env (read-only) using the same key the
  *      console.log10x.com demo experience uses. The user can use
  *      every read-only tool against the shared demo data without
  *      signing up. The `log10x_login_status` tool surfaces how to
- *      upgrade to a real account. We deliberately fall back ONLY when
- *      no LOG10X_API_KEY is set at all — if one is set but invalid,
- *      we error explicitly rather than silently downgrade, to avoid
- *      a footgun where a typo'd key looks like real-account data.
+ *      upgrade to a real account, and `log10x_signin` runs the
+ *      one-click GitHub flow that writes path 4. We deliberately fall
+ *      back ONLY when no LOG10X_API_KEY is set at all and no
+ *      credentials file exists — if either is set but invalid, we
+ *      error explicitly rather than silently downgrade, to avoid a
+ *      footgun where a typo'd key looks like real-account data.
  *
  * Per-call env resolution (used by every tool that accepts an
  * `environment` arg) follows the chain: explicit-nickname →
@@ -51,6 +59,7 @@ const DEMO_API_KEY = '4d985100-ee4a-4b6c-b784-a416b8684868';
 
 import { z } from 'zod';
 import { fetchUserProfile, type Permission, type RemoteUserProfile } from './api.js';
+import { readCredentials } from './credentials.js';
 
 export interface EnvConfig {
   nickname: string;
@@ -176,9 +185,68 @@ export async function loadEnvironments(): Promise<Environments> {
     }
   }
 
-  // Path 4: nothing set — pure demo mode. Use the publicly-baked
+  // Path 4: persistent credentials at ~/.log10x/credentials, written
+  // by log10x_signin. Same autodiscovery flow as path 3, but the key
+  // came from the file instead of an env var.
+  let creds: Awaited<ReturnType<typeof readCredentials>>;
+  try {
+    creds = await readCredentials();
+  } catch (e) {
+    // Malformed file or permission error — distinct from "missing".
+    // Fall back to demo with the file failure surfaced so the user
+    // can fix it (`log10x_signout` clears the file, then sign in).
+    const reason = (e as Error).message;
+    const demoEnvs = await loadFromApi(DEMO_API_KEY, /*isDemoMode=*/ true);
+    demoEnvs.demoFallbackReason = reason;
+    return demoEnvs;
+  }
+  if (creds) {
+    try {
+      return await loadFromApi(creds.apiKey, /*isDemoMode=*/ false);
+    } catch (e) {
+      if (!(e instanceof EnvironmentValidationError)) throw e;
+      const reason = (e as Error).message;
+      let demoEnvs: Environments;
+      try {
+        demoEnvs = await loadFromApi(DEMO_API_KEY, /*isDemoMode=*/ true);
+      } catch {
+        throw e;
+      }
+      demoEnvs.demoFallbackReason =
+        `~/.log10x/credentials key failed validation: ${reason}. ` +
+        `Run \`log10x_signin\` to refresh, or \`log10x_signout\` to clear and use demo.`;
+      return demoEnvs;
+    }
+  }
+
+  // Path 5: nothing set — pure demo mode. Use the publicly-baked
   // demo key so the user can `play` with the MCP without signing up.
   return await loadFromApi(DEMO_API_KEY, /*isDemoMode=*/ true);
+}
+
+/**
+ * Re-run `loadEnvironments()` from scratch and overwrite the contents
+ * of an existing `Environments` object in place. Used by
+ * `log10x_signin` and `log10x_signout` to swap credentials without
+ * forcing the user to restart the MCP host.
+ *
+ * In-place mutation matters: every tool callback closes over a
+ * reference to the same Environments object via `getEnvs()` in
+ * `index.ts`. If we returned a fresh object, we'd have to chase
+ * references through the entire codebase to swap them all.
+ */
+export async function reloadEnvironmentsInPlace(target: Environments): Promise<void> {
+  const fresh = await loadEnvironments();
+  // Clear the lastUsed pointer — it referenced an EnvConfig from the
+  // old set, which is no longer in `target.byNickname`.
+  target.lastUsed = undefined;
+  target.all = fresh.all;
+  target.byNickname = fresh.byNickname;
+  target.default = fresh.default;
+  target.autodiscovered = fresh.autodiscovered;
+  target.profile = fresh.profile;
+  target.isDemoMode = fresh.isDemoMode;
+  target.demoFallbackReason = fresh.demoFallbackReason;
 }
 
 async function loadFromApi(apiKey: string, isDemoMode: boolean): Promise<Environments> {
