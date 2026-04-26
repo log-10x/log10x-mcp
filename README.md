@@ -145,22 +145,22 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS)
       "command": "npx",
       "args": ["-y", "log10x-mcp"],
       "env": {
-        "LOG10X_API_KEY": "your-api-key",
-        "LOG10X_ENV_ID": "your-env-id"
+        "LOG10X_API_KEY": "your-api-key"
       }
     }
   }
 }
 ```
 
-Restart Claude Desktop.
+Restart Claude Desktop. The server autodiscovers every env your account can reach (default + any shared with you) — pass `environment: "<nickname>"` on any tool call to switch between them.
+
+If `LOG10X_API_KEY` is omitted, the MCP boots in **demo mode** against the public Log10x demo env (read-only). Run `log10x_signin` and the LLM will walk you through the GitHub Device Flow — it mints a real key, writes it to `~/.log10x/credentials`, and hot-reloads without an MCP-host restart.
 
 ### Claude Code
 
 ```bash
 claude mcp add --transport stdio \
   --env LOG10X_API_KEY=your-api-key \
-  --env LOG10X_ENV_ID=your-env-id \
   log10x -- npx -y log10x-mcp
 ```
 
@@ -168,51 +168,22 @@ Verify with `/mcp`.
 
 ### Cursor / Windsurf / other MCP clients
 
-Same pattern — add an `mcpServers` entry with `"command": "npx"`, `"args": ["-y", "log10x-mcp"]`, and the two env vars.
+Same pattern — add an `mcpServers` entry with `"command": "npx"`, `"args": ["-y", "log10x-mcp"]`, and `LOG10X_API_KEY`.
 
 ## Get your credentials
 
-1. Log into [console.log10x.com](https://console.log10x.com)
-2. Open Profile → API Settings
-3. Copy your **API Key** and **Environment ID**
-4. (Optional) Set your **Analyzer Cost** ($/GB for your SIEM) — the server reads this automatically
+Two options:
 
-## Multi-environment setup
+1. **Sign in via GitHub**: launch the MCP without `LOG10X_API_KEY` set, then ask the LLM to "sign in to Log10x". `log10x_signin` runs the GitHub Device Flow, mints an API key, and saves it to `~/.log10x/credentials` — works across every MCP host on the same machine.
+2. **Console**: log into [console.log10x.com](https://console.log10x.com) → Profile → API Settings → copy your API Key. (Optional: set your **Analyzer Cost** ($/GB for your SIEM) on that page — the server reads it automatically.)
 
-To query multiple Log10x environments (prod, staging, etc.), register one MCP server per environment with a distinct name:
+## Multi-environment access
 
-```json
-{
-  "mcpServers": {
-    "log10x-prod": {
-      "command": "npx",
-      "args": ["-y", "log10x-mcp"],
-      "env": {
-        "LOG10X_API_KEY": "prod-api-key",
-        "LOG10X_ENV_ID": "prod-env-id"
-      }
-    },
-    "log10x-staging": {
-      "command": "npx",
-      "args": ["-y", "log10x-mcp"],
-      "env": {
-        "LOG10X_API_KEY": "staging-api-key",
-        "LOG10X_ENV_ID": "staging-env-id"
-      }
-    }
-  }
-}
-```
+Two patterns, depending on what you need:
 
-Ask "check prod costs" and your AI assistant routes to the `log10x-prod` server automatically. Each environment gets its own toolset namespaced by server name — no param juggling, no footguns.
+**Same account, multiple envs** (e.g., your account owns prod, staging, dev). Nothing special to configure — the MCP autodiscovers all envs your account can reach via `GET /api/v1/user`. Pass `environment: "<nickname>"` on any tool call, or just say "check staging costs" and the LLM routes there. The chosen env sticks for follow-up calls until you switch again.
 
-### Advanced: single-process multi-env (for 10+ environments)
-
-If you need to query many environments from a single process, use `LOG10X_ENVS` with a JSON array of `{nickname, apiKey, envId}` objects. Queries accept an `environment` parameter to route by nickname. This is more complex but avoids spawning N subprocesses.
-
-```bash
-LOG10X_ENVS='[{"nickname":"prod","apiKey":"...","envId":"..."},{"nickname":"staging","apiKey":"...","envId":"..."}]'
-```
+**Multiple accounts** (e.g., a consultant accessing customer envs). The Log10x backend supports per-env permission sharing (OWNER / WRITE / READ). Have the env owner grant your account READ on their env from the console — it then shows up in your `/api/v1/user` response automatically, no client-side multi-credential setup needed. If you genuinely need parallel access from distinct API keys, register one MCP server per account in your host config with distinct server names.
 
 ## Usage
 
@@ -258,9 +229,7 @@ cart — $103 → $13K/wk (3 cost drivers)
 
 | Variable | Required | Description |
 |---|---|---|
-| `LOG10X_API_KEY` | Yes (single-env) | Your Log10x API key |
-| `LOG10X_ENV_ID` | Yes (single-env) | Your Log10x environment ID |
-| `LOG10X_ENVS` | Yes (multi-env) | JSON array of `{nickname, apiKey, envId}` |
+| `LOG10X_API_KEY` | No | Your Log10x API key. Omit to boot in demo mode + use `log10x_signin` to mint one via GitHub. The env list is autodiscovered from `GET /api/v1/user` — no env-id pinning needed. |
 | `LOG10X_API_BASE` | No | API base URL (default: `https://prometheus.log10x.com`) |
 
 ### Pasted-batch triage (`log10x_resolve_batch`)

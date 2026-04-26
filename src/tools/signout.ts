@@ -51,10 +51,10 @@ export async function executeSignout(
     );
   } else {
     lines.push(
-      `An env-var-based credential is still active (\`LOG10X_API_KEY\` or ` +
-        `\`LOG10X_ENVS\` is set in your MCP host config). The local credentials ` +
-        `file was wiped, but those env vars take precedence — unset them in ` +
-        `your host config and restart to fully sign out.`
+      `An env-var-based credential is still active (\`LOG10X_API_KEY\` is ` +
+        `set in your MCP host config). The local credentials file was wiped, ` +
+        `but that env var takes precedence — unset it in your host config and ` +
+        `restart to fully sign out.`
     );
   }
   lines.push('');

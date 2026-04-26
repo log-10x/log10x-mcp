@@ -46,4 +46,3 @@ jobs:
           fi
         env:
           LOG10X_API_KEY: 'ci-test-key'
-          LOG10X_ENV_ID: 'ci-test-env'

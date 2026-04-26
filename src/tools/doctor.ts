@@ -70,7 +70,6 @@ export async function runDoctorChecks(envNickname?: string): Promise<DoctorRepor
       const star = e.isDefault ? ' ★' : '';
       return `${e.nickname}${perm}${star}`;
     }).join(', ');
-    const source = envs.autodiscovered ? 'autodiscovered via GET /api/v1/user' : 'from env vars';
 
     // Demo-mode signaling. Two flavors:
     //   - Pure demo (no LOG10X_API_KEY set): warn (the user opted in but
@@ -86,7 +85,7 @@ export async function runDoctorChecks(envNickname?: string): Promise<DoctorRepor
         message:
           `**DEMO FALLBACK** — your configured LOG10X_API_KEY failed validation, so the MCP is running against the public Log10x demo env (read-only). Reason: ${envs.demoFallbackReason.split('\n')[0].slice(0, 300)}. ` +
           `All API-hitting tools will return demo data, NOT your account. ` +
-          `${envs.all.length} demo env${envs.all.length === 1 ? '' : 's'} ${source}: ${summary}. Default: ${envs.default.nickname}.`,
+          `${envs.all.length} demo env${envs.all.length === 1 ? '' : 's'}: ${summary}. Default: ${envs.default.nickname}.`,
         fix: 'Re-check LOG10X_API_KEY at https://console.log10x.com → Profile → API Settings. Update the value in your MCP host\'s config (e.g. claude_desktop_config.json) and fully restart the host. Or unset LOG10X_API_KEY entirely to keep demo mode without the warning.',
       });
     } else if (envs.isDemoMode) {
@@ -94,13 +93,13 @@ export async function runDoctorChecks(envNickname?: string): Promise<DoctorRepor
         name: 'environment_config',
         status: 'warn',
         message:
-          `Running in **demo mode** — no LOG10X_API_KEY configured. The MCP autodiscovered ${envs.all.length} read-only demo env${envs.all.length === 1 ? '' : 's'}: ${summary}. All data is shared sample data, not your own. Call \`log10x_login_status\` for upgrade steps.`,
+          `Running in **demo mode** — no LOG10X_API_KEY configured and no \`~/.log10x/credentials\` file. ${envs.all.length} read-only demo env${envs.all.length === 1 ? '' : 's'}: ${summary}. All data is shared sample data, not your own. Run \`log10x_signin\` or call \`log10x_login_status\` for upgrade steps.`,
       });
     } else {
       globalChecks.push({
         name: 'environment_config',
         status: 'pass',
-        message: `${envs.all.length} environment${envs.all.length === 1 ? '' : 's'} ${source}: ${summary}. Default: ${envs.default.nickname}. (★ = default env; nicknames with (read) are read-only.)`,
+        message: `${envs.all.length} environment${envs.all.length === 1 ? '' : 's'}: ${summary}. Default: ${envs.default.nickname}. (★ = default env; nicknames with (read) are read-only.)`,
       });
     }
   } catch (e) {
@@ -108,7 +107,7 @@ export async function runDoctorChecks(envNickname?: string): Promise<DoctorRepor
       name: 'environment_config',
       status: 'fail',
       message: (e as Error).message,
-      fix: 'Set LOG10X_API_KEY (autodiscovery), or LOG10X_API_KEY + LOG10X_ENV_ID (legacy single-env), or LOG10X_ENVS as a JSON array (multi-env). Get credentials at https://console.log10x.com → Profile → API Settings.',
+      fix: 'Set LOG10X_API_KEY in your MCP host config (key from https://console.log10x.com → Profile → API Settings), or run `log10x_signin` to mint one via GitHub. Unsetting LOG10X_API_KEY drops the MCP into read-only demo mode.',
     });
     return finalize(globalChecks, perEnvChecks);
   }
@@ -220,7 +219,7 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
       name: 'prometheus_gateway',
       status: 'fail',
       message: `Gateway query failed: ${(e as Error).message}`,
-      fix: `Verify LOG10X_API_KEY / LOG10X_ENV_ID for env ${env.nickname} at https://console.log10x.com. If the network is locked down, allowlist prometheus.log10x.com.`,
+      fix: `Verify LOG10X_API_KEY for env ${env.nickname} at https://console.log10x.com. If the network is locked down, allowlist prometheus.log10x.com.`,
     });
     return checks;
   }

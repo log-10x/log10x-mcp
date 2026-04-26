@@ -1,74 +1,57 @@
-import { test, beforeEach, afterEach } from 'node:test';
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { loadEnvironments, EnvironmentValidationError } from '../src/lib/environments.js';
+import { resolveEnv, setLastUsed, type Environments, type EnvConfig } from '../src/lib/environments.js';
 
-const SAVED_ENV = { ...process.env };
-
-beforeEach(() => {
-  delete process.env.LOG10X_API_KEY;
-  delete process.env.LOG10X_ENV_ID;
-  delete process.env.LOG10X_ENVS;
-});
-
-afterEach(() => {
-  for (const k of Object.keys(SAVED_ENV)) {
-    process.env[k] = SAVED_ENV[k] as string;
-  }
-});
-
-// `loadEnvironments` is async since the autodiscovery rewrite — the
-// LOG10X_API_KEY-alone path hits GET /api/v1/user. The legacy single-env
-// (LOG10X_API_KEY + LOG10X_ENV_ID) and multi-env (LOG10X_ENVS JSON) paths
-// still complete without a network call, so we can unit-test them.
+// `loadEnvironments` always hits `GET /api/v1/user` now (the env-var-only
+// fast paths were removed in the credential-resolution simplification).
+// That makes it integration-only — see `test/integration/`.
 //
-// The "no env vars" path now falls back to the public demo key, which DOES
-// hit the network. That branch is exercised in integration tests, not here.
+// What stays here: pure-function tests for `resolveEnv` (the chain
+// every tool callback uses to pick an env) and `setLastUsed`. No
+// network, no env vars.
 
-test('single-env load succeeds with both vars set', async () => {
-  process.env.LOG10X_API_KEY = 'k';
-  process.env.LOG10X_ENV_ID = 'e';
-  const envs = await loadEnvironments();
-  assert.equal(envs.all.length, 1);
-  assert.equal(envs.default.nickname, 'default');
-  assert.equal(envs.isDemoMode, false);
-  assert.equal(envs.autodiscovered, false);
+function makeEnvs(): Environments {
+  const a: EnvConfig = { nickname: 'prod', apiKey: 'k', envId: 'eP', isDefault: true, permissions: 'OWNER' };
+  const b: EnvConfig = { nickname: 'demo', apiKey: 'k', envId: 'eD', permissions: 'READ' };
+  return {
+    all: [a, b],
+    byNickname: new Map([['prod', a], ['demo', b]]),
+    default: a,
+    isDemoMode: false,
+  };
+}
+
+test('resolveEnv: no nickname returns the user default', () => {
+  const envs = makeEnvs();
+  assert.equal(resolveEnv(envs).nickname, 'prod');
 });
 
-test('multi-env load succeeds with valid JSON array', async () => {
-  process.env.LOG10X_ENVS = JSON.stringify([
-    { nickname: 'prod', apiKey: 'k1', envId: 'e1' },
-    { nickname: 'staging', apiKey: 'k2', envId: 'e2' },
-  ]);
-  const envs = await loadEnvironments();
-  assert.equal(envs.all.length, 2);
-  assert.equal(envs.default.nickname, 'prod');
-  assert.equal(envs.byNickname.get('staging')?.envId, 'e2');
-  assert.equal(envs.isDemoMode, false);
+test('resolveEnv: explicit nickname returns that env (case-insensitive)', () => {
+  const envs = makeEnvs();
+  assert.equal(resolveEnv(envs, 'demo').nickname, 'demo');
+  assert.equal(resolveEnv(envs, 'DEMO').nickname, 'demo');
 });
 
-test('multi-env throws on malformed JSON with structured error', async () => {
-  process.env.LOG10X_ENVS = '{not valid';
-  await assert.rejects(
-    loadEnvironments(),
-    (err: Error) => err instanceof EnvironmentValidationError && /not valid JSON/.test(err.message)
+test('resolveEnv: explicit nickname records lastUsed; unscoped follow-up sticks', () => {
+  const envs = makeEnvs();
+  assert.equal(resolveEnv(envs, 'demo').nickname, 'demo');
+  // Subsequent call with no nickname should resolve to lastUsed (demo), NOT default (prod).
+  assert.equal(resolveEnv(envs).nickname, 'demo');
+  // Naming the default explicitly switches lastUsed back.
+  assert.equal(resolveEnv(envs, 'prod').nickname, 'prod');
+  assert.equal(resolveEnv(envs).nickname, 'prod');
+});
+
+test('resolveEnv: unknown nickname throws with available list', () => {
+  const envs = makeEnvs();
+  assert.throws(
+    () => resolveEnv(envs, 'nonexistent'),
+    (err: Error) => /Unknown environment "nonexistent"/.test(err.message) && /prod, demo/.test(err.message)
   );
 });
 
-test('multi-env throws on missing required fields with path info', async () => {
-  process.env.LOG10X_ENVS = JSON.stringify([{ nickname: 'prod', apiKey: '' }]);
-  await assert.rejects(
-    loadEnvironments(),
-    (err: Error) => err instanceof EnvironmentValidationError && /apiKey|envId/.test(err.message)
-  );
-});
-
-test('multi-env rejects duplicate nicknames', async () => {
-  process.env.LOG10X_ENVS = JSON.stringify([
-    { nickname: 'prod', apiKey: 'k', envId: 'e' },
-    { nickname: 'PROD', apiKey: 'k2', envId: 'e2' },
-  ]);
-  await assert.rejects(
-    loadEnvironments(),
-    (err: Error) => err instanceof EnvironmentValidationError && /Duplicate/.test(err.message)
-  );
+test('setLastUsed: pinned env overrides resolveEnv default fallback', () => {
+  const envs = makeEnvs();
+  setLastUsed(envs, envs.byNickname.get('demo')!);
+  assert.equal(resolveEnv(envs).nickname, 'demo');
 });

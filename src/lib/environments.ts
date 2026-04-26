@@ -1,49 +1,42 @@
 /**
- * Multi-environment configuration.
+ * Environment / credential configuration.
  *
- * Five ways to configure which Log10x envs the MCP can talk to, in
- * increasing order of convenience:
+ * Three credential sources, tried in order:
  *
- *   1. `LOG10X_ENVS` — JSON array of `{nickname, apiKey, envId}` objects.
- *      Use when the MCP needs access to envs across different accounts
- *      (different API keys).
+ *   1. `LOG10X_API_KEY` env var. The MCP calls `GET /api/v1/user`
+ *      (a user-scoped endpoint that doesn't need envId) and populates
+ *      the env list from the response. Each env carries its name,
+ *      owner, default flag, and permission level (OWNER/WRITE/READ).
+ *      The user can switch envs at runtime via the `environment` arg
+ *      on any tool call — no env-var pinning needed.
  *
- *   2. `LOG10X_API_KEY` + `LOG10X_ENV_ID` — legacy single-env mode.
- *      Skips the API call; good for hermetic offline setup.
- *
- *   3. `LOG10X_API_KEY` alone — autodiscovery. The MCP calls
- *      `GET /api/v1/user` (a user-scoped endpoint that doesn't need
- *      envId) and populates the env list from the response. Includes
- *      each env's name, owner, default flag, and permission level
- *      (OWNER/WRITE/READ).
- *
- *   4. **`~/.log10x/credentials`** — persistent file written by
+ *   2. `~/.log10x/credentials` — persistent file written by
  *      `log10x_signin` after a successful GitHub-device-flow signup
- *      or signin. Loaded the same way as path 3 (autodiscovery via
- *      `/api/v1/user`) once the key is known. Living outside the MCP
- *      host's config means a single sign-in works across every MCP
- *      host on the same machine — sign in once per machine, not once
- *      per host.
+ *      or signin. Loaded the same way as path 1. Living outside the
+ *      MCP host's config means a single sign-in works across every
+ *      MCP host on the same machine — sign in once per machine, not
+ *      once per host.
  *
- *   5. **Nothing set** — demo mode. The MCP boots against the public
- *      Log10x demo env (read-only) using the same key the
- *      console.log10x.com demo experience uses. The user can use
- *      every read-only tool against the shared demo data without
- *      signing up. The `log10x_login_status` tool surfaces how to
- *      upgrade to a real account, and `log10x_signin` runs the
- *      one-click GitHub flow that writes path 4. We deliberately fall
- *      back ONLY when no LOG10X_API_KEY is set at all and no
- *      credentials file exists — if either is set but invalid, we
- *      error explicitly rather than silently downgrade, to avoid a
- *      footgun where a typo'd key looks like real-account data.
+ *   3. Demo mode. The MCP boots against the public read-only Log10x
+ *      demo env using the same key the console.log10x.com demo
+ *      experience uses, so a user can play without signing up. The
+ *      `log10x_login_status` tool surfaces how to upgrade, and
+ *      `log10x_signin` runs the one-click GitHub flow that writes
+ *      path 2. We fall back to demo ONLY when no LOG10X_API_KEY is
+ *      set and no credentials file exists. If either is set but
+ *      invalid, we still fall back to demo but record the failure in
+ *      `demoFallbackReason` and surface a loud banner — avoiding the
+ *      footgun where a typo'd key silently looks like real-account
+ *      data.
+ *
+ * Multi-account access uses backend-side env sharing: an env owner
+ * grants READ/WRITE/OWNER to another user's account, and the
+ * recipient's `/api/v1/user` response includes the shared env. No
+ * client-side multi-credential juggling.
  *
  * Per-call env resolution (used by every tool that accepts an
  * `environment` arg) follows the chain: explicit-nickname →
  * last-used-this-session → user's default env.
- *
- * Validation runs at startup with structured errors that name the
- * specific env var or JSON path that failed, so a misconfigured Claude
- * Desktop install fails fast at boot instead of crashing on first tool call.
  */
 
 /**
@@ -57,7 +50,6 @@
  */
 const DEMO_API_KEY = '4d985100-ee4a-4b6c-b784-a416b8684868';
 
-import { z } from 'zod';
 import { fetchUserProfile, type Permission, type RemoteUserProfile } from './api.js';
 import { readCredentials } from './credentials.js';
 
@@ -80,9 +72,7 @@ export interface Environments {
   default: EnvConfig;
   /** Set by `resolveEnv` each time a caller names an env explicitly. */
   lastUsed?: EnvConfig;
-  /** `true` if the env list came from GET /api/v1/user rather than env vars. */
-  autodiscovered: boolean;
-  /** The user profile backing the autodiscovered envs, if applicable. */
+  /** The user profile backing the env list — every load path goes through GET /api/v1/user now. */
   profile?: RemoteUserProfile;
   /**
    * `true` if the MCP is running against the public demo key (either
@@ -107,71 +97,31 @@ export interface Environments {
   demoFallbackReason?: string;
 }
 
-const EnvEntrySchema = z.object({
-  nickname: z.string().min(1, 'nickname is required and cannot be empty'),
-  apiKey: z.string().min(1, 'apiKey is required and cannot be empty'),
-  envId: z.string().min(1, 'envId is required and cannot be empty'),
-});
-
-const EnvsArraySchema = z.array(EnvEntrySchema).min(1, 'LOG10X_ENVS must contain at least one environment');
-
 /**
- * Parses environment configuration from process.env. Async because the
- * autodiscovery path hits the Log10x API.
+ * Resolve the active credentials and load the env list from
+ * `/api/v1/user`. Async because every path hits the Log10x API.
  *
- * Throws a structured EnvironmentValidationError on misconfiguration.
+ * Tries `LOG10X_API_KEY` first, then `~/.log10x/credentials` (written
+ * by `log10x_signin`), then falls back to the public demo key.
+ *
+ * Returns demo-mode `Environments` (with `demoFallbackReason` set) on
+ * any non-fatal failure of the user-supplied credential — never
+ * throws on a typo'd key. Tools surface a loud banner when
+ * `demoFallbackReason` is non-empty so the user is told their data is
+ * demo, not their own.
  */
 export async function loadEnvironments(): Promise<Environments> {
-  const envsJson = process.env.LOG10X_ENVS;
-
-  // Path 1: explicit multi-env JSON array.
-  if (envsJson) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(envsJson);
-    } catch (e) {
-      throw new EnvironmentValidationError(
-        `LOG10X_ENVS is not valid JSON: ${(e as Error).message}. ` +
-          `Expected a JSON array like '[{"nickname":"prod","apiKey":"...","envId":"..."}]'.`
-      );
-    }
-    const result = EnvsArraySchema.safeParse(parsed);
-    if (!result.success) {
-      throw new EnvironmentValidationError(
-        `LOG10X_ENVS failed validation:\n` +
-          result.error.issues.map((i) => `  - ${i.path.join('.') || '<root>'}: ${i.message}`).join('\n')
-      );
-    }
-    return buildEnvironments(result.data, false);
-  }
-
   const apiKey = process.env.LOG10X_API_KEY;
-  const envId = process.env.LOG10X_ENV_ID;
 
-  // Path 2: explicit single-env via LOG10X_API_KEY + LOG10X_ENV_ID.
-  if (apiKey && envId) {
-    return buildEnvironments([{ nickname: 'default', apiKey, envId }], false);
-  }
-
-  // Path 3: autodiscovery via GET /api/v1/user. Only needs apiKey.
-  // On failure, fall back to demo with the failure recorded as
-  // `demoFallbackReason` so the user is loudly told their data is
-  // demo, not their own — avoiding the footgun where a typo'd key
-  // silently produces demo results.
+  // Path 1: explicit `LOG10X_API_KEY`.
   if (apiKey) {
     try {
       return await loadFromApi(apiKey, /*isDemoMode=*/ false);
     } catch (e) {
       if (!(e instanceof EnvironmentValidationError)) throw e;
       const reason = (e as Error).message;
-      let demoEnvs: Environments;
-      try {
-        demoEnvs = await loadFromApi(DEMO_API_KEY, /*isDemoMode=*/ true);
-      } catch {
-        // Demo path also failed — surface the user's primary error
-        // since fixing their key is the only actionable path.
-        throw e;
-      }
+      const demoEnvs = await loadFromApi(DEMO_API_KEY, /*isDemoMode=*/ true).catch(() => null);
+      if (!demoEnvs) throw e;
       demoEnvs.demoFallbackReason = reason;
       // eslint-disable-next-line no-console
       console.warn(
@@ -185,9 +135,8 @@ export async function loadEnvironments(): Promise<Environments> {
     }
   }
 
-  // Path 4: persistent credentials at ~/.log10x/credentials, written
-  // by log10x_signin. Same autodiscovery flow as path 3, but the key
-  // came from the file instead of an env var.
+  // Path 2: persistent credentials at ~/.log10x/credentials, written
+  // by log10x_signin.
   let creds: Awaited<ReturnType<typeof readCredentials>>;
   try {
     creds = await readCredentials();
@@ -206,12 +155,8 @@ export async function loadEnvironments(): Promise<Environments> {
     } catch (e) {
       if (!(e instanceof EnvironmentValidationError)) throw e;
       const reason = (e as Error).message;
-      let demoEnvs: Environments;
-      try {
-        demoEnvs = await loadFromApi(DEMO_API_KEY, /*isDemoMode=*/ true);
-      } catch {
-        throw e;
-      }
+      const demoEnvs = await loadFromApi(DEMO_API_KEY, /*isDemoMode=*/ true).catch(() => null);
+      if (!demoEnvs) throw e;
       demoEnvs.demoFallbackReason =
         `~/.log10x/credentials key failed validation: ${reason}. ` +
         `Run \`log10x_signin\` to refresh, or \`log10x_signout\` to clear and use demo.`;
@@ -219,8 +164,8 @@ export async function loadEnvironments(): Promise<Environments> {
     }
   }
 
-  // Path 5: nothing set — pure demo mode. Use the publicly-baked
-  // demo key so the user can `play` with the MCP without signing up.
+  // Path 3: nothing set — pure demo mode. Public demo key so the
+  // user can play without signing up.
   return await loadFromApi(DEMO_API_KEY, /*isDemoMode=*/ true);
 }
 
@@ -243,7 +188,6 @@ export async function reloadEnvironmentsInPlace(target: Environments): Promise<v
   target.all = fresh.all;
   target.byNickname = fresh.byNickname;
   target.default = fresh.default;
-  target.autodiscovered = fresh.autodiscovered;
   target.profile = fresh.profile;
   target.isDemoMode = fresh.isDemoMode;
   target.demoFallbackReason = fresh.demoFallbackReason;
@@ -266,7 +210,6 @@ async function loadFromApi(apiKey: string, isDemoMode: boolean): Promise<Environ
       `LOG10X_API_KEY is set but env autodiscovery via GET /api/v1/user failed: ` +
         `${(e as Error).message}. ` +
         `Verify the key at console.log10x.com → Profile → API Settings, ` +
-        `or set LOG10X_ENV_ID explicitly to skip autodiscovery, ` +
         `or unset LOG10X_API_KEY entirely to fall back to read-only demo mode.`
     );
   }
@@ -286,13 +229,13 @@ async function loadFromApi(apiKey: string, isDemoMode: boolean): Promise<Environ
     permissions: e.permissions,
     isDefault: e.isDefault,
   }));
-  const envs = buildEnvironments(entries, /*autodiscovered=*/ true);
+  const envs = buildEnvironments(entries);
   envs.profile = profile;
   envs.isDemoMode = isDemoMode;
   return envs;
 }
 
-function buildEnvironments(entries: EnvConfig[], autodiscovered: boolean): Environments {
+function buildEnvironments(entries: EnvConfig[]): Environments {
   const byNickname = new Map<string, EnvConfig>();
   for (const env of entries) {
     const key = env.nickname.toLowerCase();
@@ -310,7 +253,7 @@ function buildEnvironments(entries: EnvConfig[], autodiscovered: boolean): Envir
   const explicitDefault = entries.find((e) => e.isDefault);
   const defaultEnv = explicitDefault ?? entries[0];
 
-  return { all: entries, byNickname, default: defaultEnv, autodiscovered, isDemoMode: false };
+  return { all: entries, byNickname, default: defaultEnv, isDemoMode: false };
 }
 
 export class EnvironmentValidationError extends Error {
