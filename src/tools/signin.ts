@@ -153,7 +153,7 @@ export async function executeSignin(
     lines.push(`- **API key**: saved to \`${credentialsPath}\` (this machine only)`);
     lines.push(`- **Path**: pasted API key (no GitHub flow)`);
     if (envVarCleared) {
-      lines.push(`- **Note**: removed in-process \`LOG10X_API_KEY\` env override so the new key takes effect immediately.`);
+      lines.push(`- **Note**: cleared the old \`LOG10X_API_KEY\` from this session so the new key takes effect immediately.`);
     }
     lines.push('');
     lines.push(`### Environments now available (${envs.all.length})`);
@@ -165,11 +165,12 @@ export async function executeSignin(
     lines.push('');
     if (envVarCleared) {
       lines.push(
-        '**Persistence note**: I cleared `LOG10X_API_KEY` from this MCP server\'s in-process ' +
-          'environment, but your MCP host config (e.g. `claude_desktop_config.json`) probably ' +
-          'still has it set — when the host restarts, the env var will come back and override ' +
-          '`~/.log10x/credentials`. To make this permanent, remove `LOG10X_API_KEY` from the ' +
-          'host config\'s `env` block.'
+        '**To make this stick across restarts**: open your Claude Desktop config ' +
+          '(`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS, ' +
+          '`%APPDATA%\\Claude\\claude_desktop_config.json` on Windows, or the equivalent ' +
+          'for Cursor / other MCP hosts) and delete the OLD `LOG10X_API_KEY` line from the ' +
+          '`log10x` server\'s `env` block. Otherwise the host re-injects the old key on ' +
+          'next launch and overrides the credentials I just saved.'
       );
       lines.push('');
     }

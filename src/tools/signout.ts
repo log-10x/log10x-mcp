@@ -66,7 +66,7 @@ export async function executeSignout(
     lines.push(`- No credentials file at \`${path}\` — nothing to remove.`);
   }
   if (envVarWasSet) {
-    lines.push(`- Cleared \`LOG10X_API_KEY\` from this MCP server's in-process environment.`);
+    lines.push(`- Cleared \`LOG10X_API_KEY\` for this session.`);
   }
   if (!wasPresent && !envVarWasSet) {
     lines.push(`- No active credential of either kind — already signed out.`);
@@ -94,12 +94,12 @@ export async function executeSignout(
 
   if (envVarWasSet) {
     lines.push(
-      `**Persistence note**: I cleared \`LOG10X_API_KEY\` from this MCP server's ` +
-        `in-process environment, but your MCP host config (e.g. ` +
-        `\`claude_desktop_config.json\`) almost certainly still has it set — when the ` +
-        `host restarts, the env var will come back and you'll be signed in again. To ` +
-        `make this permanent, remove the \`LOG10X_API_KEY\` entry from your host ` +
-        `config's \`env\` block.`
+      `**To make sign-out stick across restarts**: open your Claude Desktop ` +
+        `config (\`~/Library/Application Support/Claude/claude_desktop_config.json\` ` +
+        `on macOS, \`%APPDATA%\\Claude\\claude_desktop_config.json\` on Windows, ` +
+        `or the equivalent for Cursor / other MCP hosts) and delete the ` +
+        `\`LOG10X_API_KEY\` line from the \`log10x\` server's \`env\` block. ` +
+        `Otherwise the host re-injects it on next launch and you're back to signed in.`
     );
     lines.push('');
   }
