@@ -55,7 +55,7 @@ export const adviseReducerSchema = {
     .boolean()
     .optional()
     .describe(
-      'When true, emit events out of the forwarder in compact encoded form (templateHash+vars, ~20-40x volume reduction; see `config/modules/pipelines/run/units/transform/doc.md#compact`). Verified working on fluent-bit@1.0.7 + fluentd@1.0.7 via an env-var workaround (the chart\'s own `tenx.optimize: true` field is chart-broken — do NOT use it directly). Refused on filebeat/logstash/otel-collector (charts still at 1.0.6 with unverified optimize wiring). Default: false.'
+      'When true, emit events out of the forwarder in compact encoded form (templateHash+vars, ~20-40x volume reduction; see `config/modules/pipelines/run/units/transform/doc.md#compact`). Verified 2026-04-25 on engine 1.0.9 + chart 1.0.8 across all 5 forwarders (otel full payload trace; fluent-bit/fluentd/filebeat/logstash dispatch-confirmed). Plan emits `env: [{name: reducerOptimize, value: "true"}]` — image-version-agnostic (works on engine 1.0.7+ even though chart-native `tenx.optimize: true` only became reliable at engine 1.0.9). Default: false.'
     ),
   action: z
     .enum(['install', 'verify', 'teardown', 'all'])
