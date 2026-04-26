@@ -21,7 +21,7 @@ export function describeToolError(toolName: string, raw: unknown): string {
 function suggestForTool(toolName: string, msg: string): string | undefined {
   // Universal hints that apply to any tool.
   if (/HTTP 401|HTTP 403|unauthorized|forbidden/i.test(msg)) {
-    return 'Authentication failed. Run `log10x_doctor` to verify LOG10X_API_KEY and LOG10X_ENV_ID are valid for the target environment.';
+    return 'Authentication failed. Run `log10x_doctor` to verify LOG10X_API_KEY is valid (or run `log10x_signin` to mint a fresh key via GitHub).';
   }
   if (/HTTP 5\d\d|fetch failed|ECONNREFUSED|ETIMEDOUT/i.test(msg)) {
     return 'Transient gateway failure after retries. Run `log10x_doctor` to confirm prometheus.log10x.com is reachable, then try again. If this persists, the gateway may be degraded.';

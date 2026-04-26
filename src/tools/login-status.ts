@@ -44,7 +44,7 @@ export async function executeLoginStatus(
     lines.push('2. Edit your MCP host\'s config file:');
     lines.push('   - **Claude Desktop**: `%APPDATA%\\Claude\\claude_desktop_config.json` (Windows) or `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS).');
     lines.push('   - **Other MCP hosts**: see your host\'s docs for where MCP server env vars are configured.');
-    lines.push('3. In the `log10x` server\'s `env` block, add `"LOG10X_API_KEY": "<your-key>"`. You do **not** need `LOG10X_ENV_ID` — the MCP autodiscovers your envs from the API.');
+    lines.push('3. In the `log10x` server\'s `env` block, add `"LOG10X_API_KEY": "<your-key>"`. The MCP autodiscovers your envs from the API.');
     lines.push('4. Fully quit and restart the MCP host.');
     lines.push('5. Re-run `log10x_login_status` to confirm — the response should list your real envs instead of the demo.');
     return lines.join('\n');
@@ -56,7 +56,7 @@ export async function executeLoginStatus(
     const tier = profile.tier ? ` · tier=${profile.tier}` : '';
     lines.push(`**Signed in as ${username}**${tier}.`);
   } else {
-    lines.push('**Signed in via static env-var configuration.** (No `/api/v1/user` profile available — credentials came from `LOG10X_API_KEY + LOG10X_ENV_ID` or `LOG10X_ENVS`.)');
+    lines.push('**Signed in via static env-var configuration.** (No `/api/v1/user` profile available — credentials came from `LOG10X_API_KEY`.)');
   }
   lines.push('');
 
