@@ -145,8 +145,13 @@ export interface RetrieverBucket {
  * writer (qrs/ prefix). Aggregated by the pipeline's grouping fields
  * (typically pattern + service + pod + severity); `summaryVolume` is
  * the event count contributed to this row by THIS worker. The slice
- * bounds come from the S3 key path, NOT the record itself — engine
- * sets `timestamp: []` on summaries because they span many events.
+ * bounds come from the S3 key path, NOT the record itself.
+ *
+ * The engine emits enrichment fields as NAMED top-level keys (same
+ * pattern the events writer uses, via `$=yield TenXEnv.get("enrichmentFields")`)
+ * so consumers can look up `record.severity_level` / `record.k8s_pod`
+ * directly. This makes the schema self-describing and survives
+ * customer customization of `enrichmentFields`.
  */
 export interface RetrieverSummary {
   /** Lower bound (epoch ms) of the slice this summary belongs to. */
@@ -157,18 +162,15 @@ export interface RetrieverSummary {
   summaryVolume: number;
   /** UTF-8 byte sum of the events in this row. */
   summaryBytes: number;
-  /**
-   * Grouping field values, ordered by the aggregator's `fields` config.
-   * For the standard retriever stream config that's
-   * `[query_name, index_app, index_file, severity_level,
-   *   message_pattern, http_code, http_message, k8s_pod,
-   *   k8s_container, k8s_namespace, tenx_user_service, group]`.
-   */
-  summaryValues: string[];
-  /** Per-row totals (only populated when `totalFields` is configured; usually `[]`). */
-  summaryTotals: number[];
-  /** Hash over `summaryValues` (deterministic group key). */
+  /** Hash over the grouping fields (deterministic group key). */
   summaryValuesHash?: string;
+  /**
+   * Named enrichment fields (severity_level, tenx_user_service,
+   * k8s_pod, message_pattern, etc.). Order/presence depends on the
+   * deployment's `enrichmentFields` config — consumers should look up
+   * by name, never by position.
+   */
+  [field: string]: unknown;
 }
 
 export interface RetrieverQueryResponse {
@@ -968,23 +970,23 @@ export async function runRetrieverQuery(
         const trimmed = line.trim();
         if (!trimmed) continue;
         try {
-          const raw = JSON.parse(trimmed) as {
-            summaryVolume?: number;
-            summaryBytes?: number;
-            summaryValues?: string[];
-            summaryTotals?: number[];
-            summaryValuesHash?: string;
-          };
-          if (typeof raw.summaryVolume !== 'number' || raw.summaryVolume <= 0) continue;
+          const raw = JSON.parse(trimmed) as Record<string, unknown>;
+          const volume = raw.summaryVolume;
+          if (typeof volume !== 'number' || volume <= 0) continue;
+          // Spread the entire record so all named enrichment fields
+          // (severity_level, k8s_pod, ...) come through as top-level
+          // properties keyed by name. Slice bounds get attached from
+          // the S3 key path; record-side `timestamp: []` is irrelevant
+          // for summaries.
           summaries.push({
+            ...raw,
             sliceFromMs: sliceSegment.fromMs,
             sliceToMs: sliceSegment.toMs,
-            summaryVolume: raw.summaryVolume,
+            summaryVolume: volume,
             summaryBytes: typeof raw.summaryBytes === 'number' ? raw.summaryBytes : 0,
-            summaryValues: Array.isArray(raw.summaryValues) ? raw.summaryValues : [],
-            summaryTotals: Array.isArray(raw.summaryTotals) ? raw.summaryTotals : [],
-            summaryValuesHash: typeof raw.summaryValuesHash === 'string' ? raw.summaryValuesHash : undefined,
-          });
+            summaryValuesHash:
+              typeof raw.summaryValuesHash === 'string' ? raw.summaryValuesHash : undefined,
+          } as RetrieverSummary);
         } catch {
           /* malformed line — skip */
         }

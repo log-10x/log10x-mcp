@@ -217,44 +217,16 @@ async function executeFullMode(
 }
 
 /**
- * Position lookup for the standard retriever stream-pipeline aggregator
- * config. The aggregator's `fields` list determines `summaryValues`
- * order; for the canonical retriever deployment that's:
- *   [0]  query_name
- *   [1]  index_app
- *   [2]  index_file
- *   [3]  severity_level
- *   [4]  message_pattern
- *   [5]  http_code
- *   [6]  http_message
- *   [7]  k8s_pod
- *   [8]  k8s_container
- *   [9]  k8s_namespace
- *   [10] tenx_user_service
- *   [11] group
- *
- * Position-based — brittle if a deployment customizes `enrichmentFields`.
- * If we hit a customer running a non-standard stream config, the right
- * fix is having the engine emit a header line with field names per
- * worker file. For now, document the assumption + alias the common
- * MCP-tool-arg names.
+ * Common name aliases for `group_by`. The engine's
+ * `enrichmentFields` expansion emits field names like `severity_level`
+ * and `tenx_user_service`; tool callers commonly type `severity` /
+ * `service`. Resolve the alias once, look up by name on the summary
+ * record (which is self-describing — see RetrieverSummary).
  */
-const SUMMARY_FIELD_INDEX: Record<string, number> = {
-  query_name: 0,
-  index_app: 1,
-  index_file: 2,
-  severity_level: 3,
-  severity: 3,
-  message_pattern: 4,
-  templateHash: 4,
-  http_code: 5,
-  http_message: 6,
-  k8s_pod: 7,
-  k8s_container: 8,
-  k8s_namespace: 9,
-  tenx_user_service: 10,
-  service: 10,
-  group: 11,
+const GROUP_BY_ALIAS: Record<string, string> = {
+  severity: 'severity_level',
+  service: 'tenx_user_service',
+  templateHash: 'message_pattern',
 };
 
 function aggregateSummaries(
@@ -265,8 +237,7 @@ function aggregateSummaries(
 ): SeriesResult {
   const bucketMs = parseBucketSize(bucketSize);
   const buckets = new Map<number, Map<string, number>>();
-
-  const groupIdx = groupBy ? SUMMARY_FIELD_INDEX[groupBy] : undefined;
+  const fieldName = groupBy ? GROUP_BY_ALIAS[groupBy] ?? groupBy : undefined;
   let totalEvents = 0;
 
   for (const s of summaries) {
@@ -282,12 +253,15 @@ function aggregateSummaries(
       buckets.set(bucketKey, row);
     }
     let groupKey = '__total__';
-    if (groupIdx !== undefined && s.summaryValues[groupIdx]) {
-      groupKey = s.summaryValues[groupIdx] || '_unknown_';
-    } else if (groupBy && groupIdx === undefined) {
-      // Unknown group_by name — fall through, we'll surface this in the
-      // result rather than silently misattributing.
-      groupKey = '_unknown_field_';
+    if (fieldName) {
+      // Engine emits enrichment fields as arrays (matches the events
+      // writer shape); flatten single-element arrays to strings before
+      // lookup. Non-string values fall through to '_unknown_' so the
+      // tool surfaces "we got data we couldn't bucket" rather than
+      // silently misattributing.
+      const raw = (s as Record<string, unknown>)[fieldName];
+      const v = Array.isArray(raw) ? raw[0] : raw;
+      groupKey = typeof v === 'string' && v ? v : '_unknown_';
     }
     row.set(groupKey, (row.get(groupKey) || 0) + s.summaryVolume);
     totalEvents += s.summaryVolume;
