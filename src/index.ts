@@ -619,7 +619,7 @@ server.registerTool(
   'log10x_signout',
   {
     title: 'Sign out of Log10x',
-    description: 'Wipe the persistent credentials file at `~/.log10x/credentials` and reload envs so subsequent calls fall back to demo mode (or whichever lower-priority configuration source picks up). **Call this for**: "sign me out of Log10x", "log out", "remove my Log10x credentials", "stop using my Log10x account", "go back to demo mode". Idempotent — running it without saved credentials is a no-op. Does NOT revoke the API key on the BE; the user must do that from console.log10x.com → Profile → API Settings if they want to invalidate the key everywhere (mirrors `gh auth logout` and `aws sso logout`). If the user has `LOG10X_API_KEY` or `LOG10X_ENVS` set in their MCP host config, those env vars will still be active after sign-out — the tool result will flag this so the LLM can tell the user to also unset them and restart. **Tier prerequisites**: none.',
+    description: 'Wipe the persistent credentials file at `~/.log10x/credentials` and reload envs so subsequent calls fall back to demo mode (or whichever lower-priority configuration source picks up). **Call this for**: "sign me out of Log10x", "log out", "remove my Log10x credentials", "stop using my Log10x account", "go back to demo mode". Idempotent — running it without saved credentials is a no-op. Does NOT revoke the API key on the BE; the user must do that from console.log10x.com → Profile → API Settings if they want to invalidate the key everywhere (mirrors `gh auth logout` and `aws sso logout`). If the user has `LOG10X_API_KEY` set in their MCP host config, that env var will still be active after sign-out — the tool result will flag this so the LLM can tell the user to also unset it and restart. **Tier prerequisites**: none.',
     inputSchema: signoutSchema,
     annotations: { title: 'Sign out', readOnlyHint: false, idempotentHint: true, openWorldHint: false },
   },
@@ -932,9 +932,7 @@ async function handleCliFlags(): Promise<boolean> {
         '  --help, -h          Print this help and exit',
         '',
         'Environment:',
-        '  LOG10X_API_KEY            API key from console.log10x.com (single-env mode)',
-        '  LOG10X_ENV_ID             Environment ID (single-env mode)',
-        '  LOG10X_ENVS               JSON array for multi-env: [{"nickname","apiKey","envId"}]',
+        '  LOG10X_API_KEY            API key from console.log10x.com (or run `log10x_signin` to mint one via GitHub)',
         '  LOG10X_API_BASE           Override Prometheus gateway URL',
         '  LOG10X_REGULATOR_RETRIEVER_URL       Retriever query endpoint (optional)',
         '  LOG10X_PASTE_URL          Override Log10x paste endpoint (optional)',
@@ -956,10 +954,10 @@ async function handleCliFlags(): Promise<boolean> {
 
 async function main() {
   if (await handleCliFlags()) return;
-  // Eagerly validate environment configuration before the server connects.
-  // A malformed LOG10X_ENVS or missing API key surfaces here with a clear
-  // structured error instead of crashing on the first tool call from the
-  // model, which is much harder to debug from a Claude Desktop log.
+  // Eagerly resolve credentials before the server connects so any
+  // configuration / network failure surfaces here with a clear
+  // structured error instead of crashing on the first tool call from
+  // the model, which is much harder to debug from a Claude Desktop log.
   try {
     await initEnvs();
   } catch (e) {
@@ -976,7 +974,7 @@ async function main() {
     tools: REGISTERED_TOOLS.length,
     envs: loaded.all.length,
     default_env: loaded.default.nickname,
-    autodiscovered: loaded.autodiscovered,
+    demo_mode: loaded.isDemoMode,
   });
   const transport = new StdioServerTransport();
   await server.connect(transport);
