@@ -366,10 +366,13 @@ function makeInlineAlts(params: {
   });
 
   // Inline reducer + optimize (compact encoding).
-  // All 5 forwarder charts now ship at 1.0.7 with a unified optimize path
+  // All 5 forwarder charts ship at 1.0.8+ with a unified optimize path
   // (kind=optimize launches @apps/reducer + reducerOptimize=true env
-  // var). Logstash still hits its architectural sidecar bug regardless
-  // of optimize, so the logstashBlocker above handles that case.
+  // var). Engine 1.0.9 bakes in the previously-missing tenx-optimize.lua
+  // so chart-native `tenx.optimize: true` also works, though the plan
+  // continues to emit the env-var form for image-version-agnostic compat.
+  // Logstash still hits its architectural sidecar bug regardless of
+  // optimize, so the logstashBlocker above handles that case.
   const optimizeBlocker = undefined;
   alts.push({
     label: `Inline Reducer + Compact (${detectedKind})`,

@@ -66,11 +66,13 @@ export interface ReporterAdviseArgs {
   splunkHecToken?: string;
   /**
    * Enable encoded event output (compact templateHash+vars form,
-   * ~20-40x volume reduction). Only meaningful when app='reducer'.
-   * Silently ignored otherwise. Verified working on fluent-bit@1.0.7 +
-   * fluentd@1.0.7 via the `reducerOptimize=true` env-var workaround
-   * (the chart's `tenx.optimize: true` path is chart-broken — do NOT
-   * use it directly). Unverified on filebeat/logstash/otel-collector.
+   * ~20-40x volume reduction). Only meaningful when app='reducer';
+   * silently ignored otherwise. Verified 2026-04-25 on engine 1.0.9
+   * + chart 1.0.8 across all 5 forwarders. Plan emits the
+   * `reducerOptimize=true` env var (image-version-agnostic) rather
+   * than the chart-native `tenx.optimize: true` field, which only
+   * became reliable at engine 1.0.9 (the previously-missing
+   * `tenx-optimize.lua` is now baked in).
    */
   optimize?: boolean;
   /** Skip install — for users who just want verify or teardown guidance. */

@@ -105,12 +105,14 @@ export interface ForwarderSpec {
     gitToken?: string;
     /**
      * When true AND kind=regulate, emit events in compact encoded form
-     * (templateHash+vars, ~20-40x volume reduction). Verified 2026-04-22
-     * on demo cluster for fluent-bit@1.0.7 + fluentd@1.0.7 via the
-     * `reducerOptimize=true` env var workaround (the chart's own
-     * `tenx.optimize: true` field points at a Lua script that's not
-     * shipped in the 1.0.7 image — do NOT use it directly). Silently
-     * ignored when kind=report.
+     * (templateHash+vars, ~20-40x volume reduction). Verified 2026-04-25
+     * on demo cluster (engine 1.0.9 + chart 1.0.8) across all 5
+     * forwarders. Plan emits the `reducerOptimize=true` env var
+     * (image-version-agnostic) rather than the chart-native
+     * `tenx.optimize: true` field — the chart-native field works on
+     * engine 1.0.9+ (which baked in the previously-missing
+     * `tenx-optimize.lua`) but the env-var path is preserved for compat
+     * with older images. Silently ignored when kind=report.
      */
     optimize?: boolean;
   }) => string;
