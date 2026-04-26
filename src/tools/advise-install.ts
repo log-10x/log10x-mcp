@@ -30,6 +30,7 @@ import {
   type RankedAlternative,
 } from '../lib/advisor/mode.js';
 import type { OutputDestination } from '../lib/advisor/reporter-forwarders.js';
+import { resolveAdvisorDestination } from '../lib/advisor/dest-resolve.js';
 
 export const adviseInstallSchema = {
   snapshot_id: z
@@ -56,7 +57,7 @@ export const adviseInstallSchema = {
   destination: z
     .enum(['mock', 'elasticsearch', 'splunk', 'datadog', 'cloudwatch'])
     .optional()
-    .describe('Output destination. Default: `mock` (safe for dogfooding).'),
+    .describe('Output destination. When omitted: auto-detects from ambient SIEM credentials (DD_API_KEY → datadog, SPLUNK_HOST+SPLUNK_TOKEN → splunk, ELASTIC_URL → elasticsearch, AWS chain → cloudwatch); single match is used; multiple → ambiguous error; none → falls back to `mock` (safe for dogfooding).'),
   output_host: z.string().optional().describe('Host for non-mock destinations.'),
   splunk_hec_token: z.string().optional().describe('Required when destination=splunk.'),
   action: z
@@ -123,6 +124,16 @@ async function renderConcretePlan(
   const snapshot = getSnapshot(snapshotId)!;
   const action = args.action ?? 'all';
 
+  // Resolve destination once for the reporter/reducer branch. Retriever
+  // doesn't take a destination arg so we skip resolution there.
+  const destResolution =
+    top.args.app === 'retriever'
+      ? { kind: 'resolved' as const, destination: 'mock' as const, note: undefined }
+      : await resolveAdvisorDestination(args.destination);
+  if (destResolution.kind === 'ambiguous') return destResolution.markdown;
+  const destination = destResolution.destination;
+  const destNote = destResolution.note ? `_${destResolution.note}_\n\n` : '';
+
   // Route: retriever → buildRetrieverPlan; reporter/reducer → buildReporterPlan.
   let planMd: string;
   if (top.args.app === 'retriever') {
@@ -146,7 +157,7 @@ async function renderConcretePlan(
       releaseName: args.release_name,
       namespace: args.namespace ?? top.args.namespace,
       apiKey: args.api_key,
-      destination: args.destination as OutputDestination | undefined,
+      destination: destination as OutputDestination,
       outputHost: args.output_host,
       splunkHecToken: args.splunk_hec_token,
       skipInstall: action === 'verify' || action === 'teardown',
@@ -156,7 +167,7 @@ async function renderConcretePlan(
     planMd = renderPlan(plan, action);
   }
 
-  return [header, planMd].join('\n');
+  return [header, destNote + planMd].join('\n');
 }
 
 function renderRanked(rec: ModeRecommendation, snapshotId: string): string {

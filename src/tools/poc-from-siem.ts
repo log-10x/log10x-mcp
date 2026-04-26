@@ -15,8 +15,6 @@ import { join } from 'path';
 import { z } from 'zod';
 
 import {
-  ALL_CONNECTORS,
-  discoverAvailable,
   getConnector,
   parseWindowMs,
   type SiemConnector,
@@ -24,6 +22,11 @@ import {
   type CredentialDiscovery,
   type SiemId as RegistrySiemId,
 } from '../lib/siem/index.js';
+import {
+  resolveSiemSelection,
+  formatAmbiguousError,
+  formatNoneError,
+} from '../lib/siem/resolve.js';
 import type { SiemId } from '../lib/siem/pricing.js';
 import { SIEM_DISPLAY_NAMES, getAnalyzerCostForSiem } from '../lib/siem/pricing.js';
 import { extractPatterns } from '../lib/pattern-extraction.js';
@@ -262,43 +265,17 @@ export interface PocSubmitArgs {
 
 export async function executePocSubmit(args: PocSubmitArgs): Promise<string> {
   // ── Resolve the connector ──
-  let connector: SiemConnector;
-  let siemDetectedNote = '';
-  if (args.siem) {
-    connector = getConnector(args.siem);
-  } else {
-    const discovered = await discoverAvailable();
-    const available = discovered.filter((d) => d.detection.available);
-    if (available.length === 0) {
-      throw new Error(
-        `No SIEM credentials detected. Set credentials for one of: ${ALL_CONNECTORS.map((c) => c.id).join(', ')}. ` +
-          `Run \`log10x_doctor\` for per-SIEM discovery detail.`
-      );
-    }
-    if (available.length > 1) {
-      // Prefer explicit env credentials over ambient ones.
-      const explicit = available.filter((d) => d.detection.source === 'env');
-      if (explicit.length === 1) {
-        connector = getConnector(explicit[0].id);
-        siemDetectedNote = `Auto-detected ${explicit[0].displayName} via explicit env vars (others available: ${available
-          .filter((d) => d.id !== explicit[0].id)
-          .map((d) => d.id)
-          .join(', ')}).`;
-      } else {
-        throw new Error(
-          `Multiple SIEMs detected (${available.map((d) => d.id).join(', ')}). Pass \`siem=<name>\` to disambiguate.`
-        );
-      }
-    } else {
-      const one = available[0];
-      connector = getConnector(one.id);
-      if (one.detection.source === 'ambient') {
-        siemDetectedNote = `Detected ambient credentials for ${one.displayName} — assuming ${one.id}. Override with \`siem=<other>\` if wrong.`;
-      } else {
-        siemDetectedNote = `Auto-detected ${one.displayName}.`;
-      }
-    }
+  const resolution = await resolveSiemSelection({ explicit: args.siem });
+  if (resolution.kind === 'none') {
+    throw new Error(
+      formatNoneError(resolution.probedIds, 'Run `log10x_doctor` for per-SIEM discovery detail.')
+    );
   }
+  if (resolution.kind === 'ambiguous') {
+    throw new Error(formatAmbiguousError(resolution.candidates, 'siem'));
+  }
+  const connector: SiemConnector = getConnector(resolution.id);
+  const siemDetectedNote = resolution.note ?? '';
 
   // ── Build snapshot ──
   const snapshot: Snapshot = {

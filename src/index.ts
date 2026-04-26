@@ -285,9 +285,13 @@ NUMBERS DISCIPLINE — hard rules, no exceptions:
   If the user asks for peaks, call log10x_pattern_trend explicitly and quote its max bucket.
 - Do NOT synthesize a baseline number. If cost_drivers does not list a pattern, that pattern
   is not a cost driver — do not promote it into the driver list with a made-up baseline.
-- log10x_dependency_check returns a COMMAND the user must run locally. It does NOT scan the
-  SIEM. Never report "zero dependencies found" or "safe to drop" based on this tool's output
-  alone — wait for the user to paste the script's actual results.
+- log10x_dependency_check has two output modes. When SIEM credentials are present in the env
+  (DD_API_KEY, SPLUNK_HOST+SPLUNK_TOKEN, ELASTIC_URL+KIBANA_URL, AWS chain), the tool runs the
+  scan in-process and returns ACTUAL dashboard/alert/saved-search/monitor/metric-filter names
+  + URLs — header reads "Dependency Check — <Vendor> (executed)". Treat these as authoritative.
+  When credentials are missing, the tool falls back to a paste-ready bash command — header
+  reads "(paste-ready)". In that case do NOT report "zero dependencies found" or "safe to drop"
+  — wait for the user to run the script and paste back its results.
 
 Analyzer cost is auto-detected from the user's profile. Typical rates if unspecified:
 Splunk $6/GB, Datadog $2.50/GB, Elasticsearch $1/GB, CloudWatch $0.50/GB.`,

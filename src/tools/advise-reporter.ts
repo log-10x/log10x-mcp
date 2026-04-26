@@ -13,6 +13,7 @@ import { buildReporterPlan, type DeploymentShape } from '../lib/advisor/reporter
 import { renderPlan } from '../lib/advisor/render.js';
 import type { ForwarderKind } from '../lib/discovery/types.js';
 import type { OutputDestination } from '../lib/advisor/reporter-forwarders.js';
+import { resolveAdvisorDestination } from '../lib/advisor/dest-resolve.js';
 
 export const adviseReporterSchema = {
   snapshot_id: z
@@ -48,7 +49,7 @@ export const adviseReporterSchema = {
     .enum(['mock', 'elasticsearch', 'splunk', 'datadog', 'cloudwatch'])
     .optional()
     .describe(
-      'Output destination for forwarded events. Default: `mock` (writes to pod stdout — ideal for smoke tests + dogfooding).'
+      'Output destination for forwarded events. When omitted: auto-detects from ambient SIEM credentials (DD_API_KEY → datadog, SPLUNK_HOST+SPLUNK_TOKEN → splunk, ELASTIC_URL → elasticsearch, AWS chain → cloudwatch); single match is used; multiple → ambiguous error; none → falls back to `mock` (writes to pod stdout — ideal for smoke tests + dogfooding).'
     ),
   output_host: z
     .string()
@@ -77,6 +78,11 @@ export async function executeAdviseReporter(args: AdviseReporterArgs): Promise<s
   }
 
   const action = args.action ?? 'all';
+
+  const destResolution = await resolveAdvisorDestination(args.destination);
+  if (destResolution.kind === 'ambiguous') return destResolution.markdown;
+  const destination = destResolution.destination;
+
   const plan = await buildReporterPlan({
     snapshot,
     shape: args.shape as DeploymentShape | undefined,
@@ -84,7 +90,7 @@ export async function executeAdviseReporter(args: AdviseReporterArgs): Promise<s
     releaseName: args.release_name,
     namespace: args.namespace,
     apiKey: args.api_key,
-    destination: args.destination as OutputDestination | undefined,
+    destination: destination as OutputDestination,
     outputHost: args.output_host,
     splunkHecToken: args.splunk_hec_token,
     skipInstall: action === 'verify' || action === 'teardown',
@@ -92,5 +98,6 @@ export async function executeAdviseReporter(args: AdviseReporterArgs): Promise<s
     skipTeardown: action === 'install' || action === 'verify',
   });
 
-  return renderPlan(plan, action);
+  const planMd = renderPlan(plan, action);
+  return destResolution.note ? `_${destResolution.note}_\n\n${planMd}` : planMd;
 }

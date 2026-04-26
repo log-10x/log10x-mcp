@@ -3,10 +3,23 @@
  *
  * Supports 14 vendors (4 SIEMs + 10 forwarders), with config and API modes
  * where applicable. Ported from GettingStarted.jsx exclude section.
+ *
+ * Vendor selection: when `vendor` is omitted, auto-detect across the SIEM
+ * subset (datadog, splunk, elasticsearch, cloudwatch). Forwarder-targeted
+ * exclusion (fluentbit, fluentd, otel, etc.) requires explicit `vendor=`
+ * — there's no ambient signal that distinguishes a fluentbit pipeline
+ * from a vector one in the user's env.
  */
 
 import { z } from 'zod';
 import { normalizePattern } from '../lib/format.js';
+import {
+  resolveSiemSelection,
+  formatAmbiguousError,
+} from '../lib/siem/resolve.js';
+
+const SIEM_VENDORS = ['datadog', 'splunk', 'elasticsearch', 'cloudwatch'] as const;
+type SiemVendor = (typeof SIEM_VENDORS)[number];
 
 export const exclusionFilterSchema = {
   pattern: z.string().describe('Pattern name (e.g., "Payment_Gateway_Timeout")'),
@@ -14,19 +27,41 @@ export const exclusionFilterSchema = {
     'datadog', 'splunk', 'elasticsearch', 'cloudwatch',
     'datadog-agent', 'fluentbit', 'fluentd', 'otel', 'vector',
     'logstash', 'filebeat', 'rsyslog', 'syslog-ng', 'promtail',
-  ]).describe('Target vendor to generate the filter for'),
+  ]).optional().describe('Target vendor to generate the filter for. Omit to auto-detect from ambient SIEM credentials (works for the 4 SIEM vendors only — forwarder-targeted exclusions require explicit `vendor=`).'),
   mode: z.enum(['config', 'api']).default('config').describe('Config snippet or API command (API available for Datadog, Splunk, Elasticsearch)'),
   service: z.string().optional().describe('Service name for scoping the filter'),
   severity: z.string().optional().describe('Severity level (e.g., "error", "warn")'),
 };
 
-export function executeExclusionFilter(args: {
+export async function executeExclusionFilter(args: {
   pattern: string;
-  vendor: string;
+  vendor?: string;
   mode: string;
   service?: string;
   severity?: string;
-}): string {
+}): Promise<string> {
+  let vendor: string | undefined = args.vendor;
+  let detectedNote = '';
+
+  if (!vendor) {
+    const resolution = await resolveSiemSelection({ restrictTo: [...SIEM_VENDORS] as SiemVendor[] });
+    if (resolution.kind === 'none') {
+      return [
+        'Exclusion Filter — vendor required',
+        '',
+        `No SIEM credentials detected and no \`vendor\` arg supplied. Pass \`vendor=<name>\`.`,
+        '',
+        `SIEM vendors (auto-detectable): ${SIEM_VENDORS.join(', ')}`,
+        `Forwarder vendors (explicit only): datadog-agent, fluentbit, fluentd, otel, vector, logstash, filebeat, rsyslog, syslog-ng, promtail`,
+      ].join('\n');
+    }
+    if (resolution.kind === 'ambiguous') {
+      return formatAmbiguousError(resolution.candidates, 'vendor');
+    }
+    vendor = resolution.id;
+    detectedNote = resolution.note ?? '';
+  }
+
   const pattern = normalizePattern(args.pattern);
   const tokens = pattern.split('_').filter(t => t.length > 0);
   // Escape regex metacharacters in each token so dots, brackets, parens, etc.
@@ -35,7 +70,7 @@ export function executeExclusionFilter(args: {
   const patRegex = tokens.map(escapeRegex).join('.*');
   const svc = args.service || '';
   const sev = (args.severity || '').toLowerCase();
-  const vk = args.vendor;
+  const vk = vendor;
   const mode = args.mode;
 
   const { label, text } = generateFilter(vk, mode, tokens, patRegex, svc, sev, pattern);
@@ -43,6 +78,10 @@ export function executeExclusionFilter(args: {
   const lines: string[] = [];
   const vendorLabel = VENDOR_LABELS[vk] || vk;
   lines.push(`Exclusion Filter — ${vendorLabel} (${mode})`);
+  if (detectedNote) {
+    lines.push('');
+    lines.push(`_${detectedNote}_`);
+  }
   lines.push('');
   lines.push(label);
   lines.push('');
