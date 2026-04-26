@@ -23,6 +23,7 @@ import {
   type RetrieverEvent,
   type RetrieverQueryRequest,
   type RetrieverQueryResponse,
+  type RetrieverSummary,
 } from '../lib/retriever-api.js';
 import {
   decideFidelity,
@@ -167,6 +168,35 @@ async function executeFullMode(
   fromMs: number,
   toMs: number
 ): Promise<SeriesResult> {
+  // Summaries path: ~50–500x bandwidth reduction vs raw events because each
+  // qrs/ record carries `summaryVolume` (count) + grouping fields directly,
+  // skipping the per-event `text` payload. Gated by an env flag while the
+  // engine-side writer is rolling out (engine#36 / pipeline-extensions#6).
+  // Fall back to the events path on empty summaries so older retrievers
+  // (no qrs/ writer) still produce a series.
+  const useSummaries = process.env.LOG10X_RETRIEVER_SERIES_USE_SUMMARIES === 'true';
+  if (useSummaries) {
+    const req: RetrieverQueryRequest = {
+      from: String(fromMs),
+      to: String(toMs),
+      search: args.search,
+      filters: args.filters,
+      target: args.target,
+      writeResults: false,
+      writeSummaries: true,
+    };
+    const resp = await runRetrieverQuery(env, req);
+    if (resp.summaries && resp.summaries.length > 0) {
+      return aggregateSummaries(resp.summaries, args.bucket_size, args.group_by, {
+        workerFiles: resp.execution.slicesObserved ?? 0,
+        truncated: false,
+      });
+    }
+    // Empty summaries — fall through to the events path (older retriever or
+    // genuinely empty range). Keeping the second roundtrip avoids silent
+    // false-zero series when the deployment isn't running the writer yet.
+  }
+
   const req: RetrieverQueryRequest = {
     from: String(fromMs),
     to: String(toMs),
@@ -184,6 +214,105 @@ async function executeFullMode(
     workerFiles: resp.execution.workerFiles,
     truncated: resp.execution.truncated,
   });
+}
+
+/**
+ * Common name aliases for `group_by`. The engine's
+ * `enrichmentFields` expansion emits field names like `severity_level`
+ * and `tenx_user_service`; tool callers commonly type `severity` /
+ * `service`. Resolve the alias once, look up by name on the summary
+ * record (which is self-describing — see RetrieverSummary).
+ */
+const GROUP_BY_ALIAS: Record<string, string> = {
+  severity: 'severity_level',
+  service: 'tenx_user_service',
+  templateHash: 'message_pattern',
+};
+
+function aggregateSummaries(
+  summaries: RetrieverSummary[],
+  bucketSize: string,
+  groupBy: string | undefined,
+  meta: { workerFiles: number; truncated: boolean }
+): SeriesResult {
+  const bucketMs = parseBucketSize(bucketSize);
+  const buckets = new Map<number, Map<string, number>>();
+  const fieldName = groupBy ? GROUP_BY_ALIAS[groupBy] ?? groupBy : undefined;
+  let totalEvents = 0;
+
+  for (const s of summaries) {
+    // Use slice midpoint so a slice spanning a bucket boundary lands in
+    // the bucket it overlaps most. For typical 1-min slice / 5-min bucket
+    // configs this is equivalent to using sliceFromMs, but it stays
+    // honest if the user picks bucket_size < slice duration.
+    const ts = Math.floor((s.sliceFromMs + s.sliceToMs) / 2);
+    const bucketKey = Math.floor(ts / bucketMs) * bucketMs;
+    let row = buckets.get(bucketKey);
+    if (!row) {
+      row = new Map();
+      buckets.set(bucketKey, row);
+    }
+    let groupKey = '__total__';
+    if (fieldName) {
+      // Engine emits enrichment fields as arrays (matches the events
+      // writer shape); flatten single-element arrays to strings before
+      // lookup. Non-string values fall through to '_unknown_' so the
+      // tool surfaces "we got data we couldn't bucket" rather than
+      // silently misattributing.
+      const raw = (s as Record<string, unknown>)[fieldName];
+      const v = Array.isArray(raw) ? raw[0] : raw;
+      groupKey = typeof v === 'string' && v ? v : '_unknown_';
+    }
+    row.set(groupKey, (row.get(groupKey) || 0) + s.summaryVolume);
+    totalEvents += s.summaryVolume;
+  }
+
+  // Top-K cap — same semantics as the events-path aggregate.
+  let allowedGroups: Set<string> | undefined;
+  let groupCardinality = 0;
+  if (groupBy) {
+    const totals = new Map<string, number>();
+    for (const row of buckets.values()) {
+      for (const [g, c] of row.entries()) {
+        totals.set(g, (totals.get(g) || 0) + c);
+      }
+    }
+    groupCardinality = totals.size;
+    if (totals.size > TOP_K_GROUPS) {
+      allowedGroups = new Set(
+        [...totals.entries()].sort((a, b) => b[1] - a[1]).slice(0, TOP_K_GROUPS).map(([g]) => g)
+      );
+    }
+  }
+
+  const series: SeriesPoint[] = [];
+  const sortedKeys = [...buckets.keys()].sort((a, b) => a - b);
+  for (const k of sortedKeys) {
+    const row = buckets.get(k)!;
+    const ts = new Date(k).toISOString();
+    if (!groupBy) {
+      const c = row.get('__total__') || 0;
+      series.push({ bucket: ts, count: c });
+      continue;
+    }
+    let otherCount = 0;
+    for (const [g, c] of row.entries()) {
+      if (allowedGroups && !allowedGroups.has(g)) {
+        otherCount += c;
+        continue;
+      }
+      series.push({ bucket: ts, group: g || '_unknown_', count: c });
+    }
+    if (otherCount > 0) series.push({ bucket: ts, group: '_other_', count: otherCount });
+  }
+
+  return {
+    series,
+    actualEvents: totalEvents,
+    workerFiles: meta.workerFiles,
+    truncated: meta.truncated,
+    groupCardinality,
+  };
 }
 
 async function executeSampledMode(

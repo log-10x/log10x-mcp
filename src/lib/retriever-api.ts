@@ -90,6 +90,26 @@ export interface RetrieverQueryRequest {
   format?: 'events' | 'count' | 'aggregated';
   /** @deprecated bucket_size is now a client-side rollup */
   bucketSize?: string;
+
+  /**
+   * Gate the events writer (qr/ prefix). Defaults to true so legacy
+   * call sites keep getting raw event JSONL. Set false alongside
+   * `writeSummaries: true` for count/trend tools that don't need
+   * per-event payload — order-of-magnitude bandwidth saving on
+   * high-volume patterns.
+   */
+  writeResults?: boolean;
+
+  /**
+   * Gate the per-slice TenXSummary writer (qrs/ prefix). Defaults to
+   * false. Each TenXSummary record carries `summaryVolume` (event
+   * count for that group) + `summaryBytes` (utf8 byte sum) + the
+   * grouping field values; the slice's time bounds are encoded in
+   * the S3 key path (`qrs/{queryId}/{sliceFrom}_{sliceTo}/`) and the
+   * client parses them back into `sliceFromMs`/`sliceToMs` on each
+   * record.
+   */
+  writeSummaries?: boolean;
 }
 
 export interface RetrieverEvent {
@@ -120,6 +140,39 @@ export interface RetrieverBucket {
   labels?: Record<string, string>;
 }
 
+/**
+ * One TenXSummary record uploaded by the engine's per-slice summaries
+ * writer (qrs/ prefix). Aggregated by the pipeline's grouping fields
+ * (typically pattern + service + pod + severity); `summaryVolume` is
+ * the event count contributed to this row by THIS worker. The slice
+ * bounds come from the S3 key path, NOT the record itself.
+ *
+ * The engine emits enrichment fields as NAMED top-level keys (same
+ * pattern the events writer uses, via `$=yield TenXEnv.get("enrichmentFields")`)
+ * so consumers can look up `record.severity_level` / `record.k8s_pod`
+ * directly. This makes the schema self-describing and survives
+ * customer customization of `enrichmentFields`.
+ */
+export interface RetrieverSummary {
+  /** Lower bound (epoch ms) of the slice this summary belongs to. */
+  sliceFromMs: number;
+  /** Upper bound (epoch ms, exclusive) of the slice. */
+  sliceToMs: number;
+  /** Event count this summary row aggregates. */
+  summaryVolume: number;
+  /** UTF-8 byte sum of the events in this row. */
+  summaryBytes: number;
+  /** Hash over the grouping fields (deterministic group key). */
+  summaryValuesHash?: string;
+  /**
+   * Named enrichment fields (severity_level, tenx_user_service,
+   * k8s_pod, message_pattern, etc.). Order/presence depends on the
+   * deployment's `enrichmentFields` config — consumers should look up
+   * by name, never by position.
+   */
+  [field: string]: unknown;
+}
+
 export interface RetrieverQueryResponse {
   queryId: string;
   target: string;
@@ -130,8 +183,19 @@ export interface RetrieverQueryResponse {
     eventsMatched: number;
     workerFiles: number;
     truncated: boolean;
+    /** Per-slice summary record count when summaries were requested. */
+    summariesMatched?: number;
+    /** Distinct slice subdirs observed. */
+    slicesObserved?: number;
   };
   events: RetrieverEvent[];
+  /**
+   * Populated only when the request set `writeSummaries: true`. Each
+   * record carries its slice bounds from the S3 key path so callers
+   * can bucket by slice (typically 1 minute on the demo cluster's
+   * `queryScanFunctionParallelTimeslice` default).
+   */
+  summaries?: RetrieverSummary[];
 
   // Legacy-compatible fields populated client-side from `events` so that
   // callers written against the old Retriever contract (investigate, backfill)
@@ -476,7 +540,12 @@ async function submitQuery(
   body: Record<string, unknown>
 ): Promise<SubmitResponse> {
   const base = await getRetrieverUrl();
-  const resp = await fetch(`${base}/retriever/query`, {
+  // The engine still routes the query handler at `/streamer/query`
+  // (see StreamerQuery.java) — the path will rename to `/retriever/query`
+  // when the engine cuts the rename PR. `LOG10X_RETRIEVER_QUERY_PATH`
+  // lets the MCP work against both old and new engines without a rebuild.
+  const path = process.env.LOG10X_RETRIEVER_QUERY_PATH || '/streamer/query';
+  const resp = await fetch(`${base}${path}`, {
     method: 'POST',
     headers: authHeaders(env),
     body: JSON.stringify(body),
@@ -484,7 +553,7 @@ async function submitQuery(
 
   if (!resp.ok) {
     const errText = await resp.text().catch(() => '');
-    throw new Error(`Retriever POST /retriever/query HTTP ${resp.status}: ${errText.slice(0, 500)}`);
+    throw new Error(`Retriever POST ${path} HTTP ${resp.status}: ${errText.slice(0, 500)}`);
   }
 
   const parsed = (await resp.json()) as SubmitResponse;
@@ -801,6 +870,12 @@ export async function runRetrieverQuery(
   //   target, readContainer, indexContainer, objectStorageName,
   //   processingTime, resultSize — sending these causes the engine to
   //   reject the query shape and silently drop it.
+  // Default to events-only for legacy call sites; opt-in to summaries
+  // (or events-off) by setting the flags explicitly. `writeResults`
+  // defaults to true so existing tools keep getting raw events.
+  const writeResults = req.writeResults ?? true;
+  const writeSummaries = req.writeSummaries ?? false;
+
   const body: Record<string, unknown> = {
     id: queryId,
     name: req.name || `mcp-${queryId.slice(0, 8)}`,
@@ -808,7 +883,8 @@ export async function runRetrieverQuery(
     to: normalizeTimeExpression(req.to || 'now'),
     search: req.search || '',
     filters: req.filters || [],
-    writeResults: true,
+    writeResults,
+    writeSummaries,
   };
 
   const started = Date.now();
@@ -831,17 +907,26 @@ export async function runRetrieverQuery(
   // stability heuristic for older retrievers that don't write it.
   const doneInfo = await waitForDoneMarker(bucket, doneMarkerKey, pollMs, timeoutMs);
 
-  if (doneInfo) {
+  if (doneInfo && (doneInfo.expectedMarkers ?? 0) > 0) {
     const tailBudgetMs = Math.min(20_000, Math.max(0, timeoutMs - (Date.now() - started)));
     await waitForMarkerCount(bucket, markerPrefix, doneInfo.expectedMarkers ?? 0, pollMs, tailBudgetMs);
   } else {
+    // Two cases land here:
+    //   (a) _DONE.json missing entirely (legacy retriever) — pure stability fallback.
+    //   (b) _DONE.json present but reports expectedMarkers=0. In remote-dispatch
+    //       mode (the demo retriever, Lambda mode) the coordinator's counters
+    //       only see LOCAL scan work; remote scan workers update their own
+    //       per-process counters, so the coordinator writes _DONE with all-zero
+    //       counts even when stream workers are still mid-flight. Trusting that
+    //       value would race the stream-worker uploads. Falling back to marker
+    //       stability is correct in both cases.
     await waitForMarkerStability(bucket, markerPrefix, pollMs, timeoutMs);
   }
 
   // The results writer only runs on workers that actually matched events, so
   // the results prefix may have fewer entries than the marker prefix — which
   // is correct. Truncation markers are siblings ending in `.truncated`.
-  const resultObjects = await s3List(bucket, resultsPrefix);
+  const resultObjects = writeResults ? await s3List(bucket, resultsPrefix) : [];
 
   let truncated = false;
   const jsonlKeys: string[] = [];
@@ -862,6 +947,53 @@ export async function runRetrieverQuery(
   }
 
   events.sort((a, b) => eventTimestampMs(a) - eventTimestampMs(b));
+
+  // qrs/ summaries — pulled in parallel with events, parsed with slice
+  // bounds extracted from the S3 key path. Each writer outputs JSONL
+  // under `qrs/{queryId}/{sliceFrom}_{sliceTo}/{worker}.jsonl` and the
+  // engine sets `timestamp: []` on the records themselves, so the slice
+  // segment in the key is the only time information.
+  let summaries: RetrieverSummary[] | undefined;
+  let slicesObserved = 0;
+  if (writeSummaries) {
+    const summariesPrefix = `${basePrefix}tenx/${target}/qrs/${queryId}/`;
+    const summaryObjects = await s3List(bucket, summariesPrefix);
+    summaries = [];
+    const distinctSlices = new Set<string>();
+    for (const obj of summaryObjects) {
+      if (!obj.Key.endsWith('.jsonl')) continue;
+      const sliceSegment = parseSliceSegment(obj.Key, summariesPrefix);
+      if (!sliceSegment) continue;
+      distinctSlices.add(`${sliceSegment.fromMs}_${sliceSegment.toMs}`);
+      const content = await s3Get(bucket, obj.Key);
+      for (const line of content.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          const raw = JSON.parse(trimmed) as Record<string, unknown>;
+          const volume = raw.summaryVolume;
+          if (typeof volume !== 'number' || volume <= 0) continue;
+          // Spread the entire record so all named enrichment fields
+          // (severity_level, k8s_pod, ...) come through as top-level
+          // properties keyed by name. Slice bounds get attached from
+          // the S3 key path; record-side `timestamp: []` is irrelevant
+          // for summaries.
+          summaries.push({
+            ...raw,
+            sliceFromMs: sliceSegment.fromMs,
+            sliceToMs: sliceSegment.toMs,
+            summaryVolume: volume,
+            summaryBytes: typeof raw.summaryBytes === 'number' ? raw.summaryBytes : 0,
+            summaryValuesHash:
+              typeof raw.summaryValuesHash === 'string' ? raw.summaryValuesHash : undefined,
+          } as RetrieverSummary);
+        } catch {
+          /* malformed line — skip */
+        }
+      }
+    }
+    slicesObserved = distinctSlices.size;
+  }
 
   // Backfill legacy event fields from canonical enrichment fields so that
   // downstream code written against the old shape (aggregator, backfill)
@@ -922,12 +1054,35 @@ export async function runRetrieverQuery(
       eventsMatched: events.length,
       workerFiles: jsonlKeys.length,
       truncated,
+      ...(summaries ? { summariesMatched: summaries.length, slicesObserved } : {}),
     },
     events: finalEvents,
+    summaries,
     format: req.format || 'events',
     buckets,
     countSummary,
   };
+}
+
+/**
+ * Extract `{sliceFromMs}_{sliceToMs}` from a key like
+ * `indexing-results/tenx/app/qrs/{queryId}/1777143600000_1777143660000/worker.jsonl`.
+ * Returns null when the key is malformed (the writer always emits this
+ * shape, so a miss is a coordinator/engine problem worth surfacing —
+ * but we silently skip rather than failing the whole query).
+ */
+function parseSliceSegment(
+  key: string,
+  prefix: string
+): { fromMs: number; toMs: number } | null {
+  if (!key.startsWith(prefix)) return null;
+  const tail = key.slice(prefix.length);
+  const parts = tail.split('/');
+  // Expect exactly: `{sliceSegment}/{worker}.jsonl`
+  if (parts.length < 2) return null;
+  const segMatch = parts[0].match(/^(\d+)_(\d+)$/);
+  if (!segMatch) return null;
+  return { fromMs: parseInt(segMatch[1], 10), toMs: parseInt(segMatch[2], 10) };
 }
 
 function computeBuckets(events: RetrieverEvent[], bucketSize: string): RetrieverBucket[] {
