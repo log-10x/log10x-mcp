@@ -648,6 +648,86 @@ function classifyTs(ts: number): number {
 }
 
 /**
+ * Coordinator-written completion marker. Arrival means the coordinator has
+ * finished dispatching; `expectedMarkers` tells callers how many per-worker
+ * byte-count markers to wait for before reading results.
+ */
+interface DoneMarkerBody {
+  queryId?: string;
+  completedAt?: number;
+  elapsedMs?: number;
+  reason?: string;
+  scanned?: number;
+  matched?: number;
+  streamRequests?: number;
+  streamBlobs?: number;
+  submittedTasks?: number;
+  expectedMarkers?: number;
+}
+
+async function waitForDoneMarker(
+  bucket: string,
+  key: string,
+  pollMs: number,
+  timeoutMs: number
+): Promise<DoneMarkerBody | null> {
+
+  const started = Date.now();
+
+  while (Date.now() - started < timeoutMs) {
+
+    try {
+
+      const body = await s3Get(bucket, key);
+
+      if (body && body.trim().length > 0) {
+        try {
+          return JSON.parse(body) as DoneMarkerBody;
+        } catch {
+          // Partial read; retry next poll.
+        }
+      }
+
+    } catch {
+      // NoSuchKey until the marker lands.
+    }
+
+    await sleep(pollMs);
+  }
+
+  return null;
+}
+
+/**
+ * Poll the byte-count marker prefix until `expected` keys are present, or
+ * the budget expires.
+ */
+async function waitForMarkerCount(
+  bucket: string,
+  markerPrefix: string,
+  expected: number,
+  pollMs: number,
+  timeoutMs: number
+): Promise<S3ListEntry[]> {
+
+  const started = Date.now();
+  let entries: S3ListEntry[] = [];
+
+  while (Date.now() - started < timeoutMs) {
+
+    entries = await s3List(bucket, markerPrefix);
+
+    if (entries.length >= expected) {
+      return entries;
+    }
+
+    await sleep(pollMs);
+  }
+
+  return entries;
+}
+
+/**
  * Poll the marker prefix until the same set of markers is observed twice in
  * a row (stability = no new workers landing). Returns the stable list of
  * marker keys.
@@ -745,8 +825,18 @@ export async function runRetrieverQuery(
   const basePrefix = indexSubpath ? `${indexSubpath}/` : '';
   const markerPrefix = `${basePrefix}tenx/${target}/q/${queryId}/`;
   const resultsPrefix = `${basePrefix}tenx/${target}/qr/${queryId}/`;
+  const doneMarkerKey = `${resultsPrefix}_DONE.json`;
 
-  await waitForMarkerStability(bucket, markerPrefix, pollMs, timeoutMs);
+  // Prefer the coordinator-written _DONE marker. Fall back to the byte-count
+  // stability heuristic for older retrievers that don't write it.
+  const doneInfo = await waitForDoneMarker(bucket, doneMarkerKey, pollMs, timeoutMs);
+
+  if (doneInfo) {
+    const tailBudgetMs = Math.min(20_000, Math.max(0, timeoutMs - (Date.now() - started)));
+    await waitForMarkerCount(bucket, markerPrefix, doneInfo.expectedMarkers ?? 0, pollMs, tailBudgetMs);
+  } else {
+    await waitForMarkerStability(bucket, markerPrefix, pollMs, timeoutMs);
+  }
 
   // The results writer only runs on workers that actually matched events, so
   // the results prefix may have fewer entries than the marker prefix — which

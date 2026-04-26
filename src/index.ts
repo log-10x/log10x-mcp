@@ -50,6 +50,12 @@ import {
   translateMetricToPatternsSchema,
   executeTranslateMetricToPatterns,
 } from './tools/translate-metric-to-patterns.js';
+import {
+  pocFromSiemSubmitSchema,
+  pocFromSiemStatusSchema,
+  executePocSubmit,
+  executePocStatus,
+} from './tools/poc-from-siem.js';
 import { discoverEnvSchema, executeDiscoverEnv } from './tools/discover-env.js';
 import { adviseReporterSchema, executeAdviseReporter } from './tools/advise-reporter.js';
 import { adviseReducerSchema, executeAdviseReducer } from './tools/advise-reducer.js';
@@ -652,6 +658,74 @@ server.registerTool(
     })
 );
 
+// ── Tool: log10x_poc_from_siem_submit / _status ──
+//
+// Async pair: submit kicks off a background pull + templatize + render;
+// status polls for progress and returns the final markdown once done.
+// Supports 8 SIEMs (cloudwatch, datadog, sumo, gcp-logging, elasticsearch,
+// azure-monitor, splunk, clickhouse) with auto-discovery of credentials.
+
+server.registerTool(
+  'log10x_poc_from_siem_submit',
+  {
+    title: 'POC from SIEM (submit)',
+    description: 'Kick off a full log-cost-optimization POC against the user\'s SIEM. Pulls a representative event sample, templatizes into stable pattern identities, and renders a 9-section markdown report covering top cost drivers, Reducer recommendations, ready-to-paste native SIEM exclusion configs, Compact mode potential, risk/dependency checks, and deployment paths. Supported SIEMs: cloudwatch (AWS CloudWatch Logs via IAM credential chain), datadog (DD_API_KEY + DD_APP_KEY), sumo (Sumo Logic), gcp-logging (GCP Cloud Logging), elasticsearch (Elastic Cloud / self-hosted), azure-monitor (Azure Monitor / Log Analytics), splunk (SPLUNK_HOST + SPLUNK_TOKEN), clickhouse (OpenObserve / SigNoz / custom schemas). Auto-detects the SIEM from env vars when `siem` omitted — explicitly pass `siem` if multiple credential sets exist. `scope` and `query` are SIEM-specific: CloudWatch (log group + filter pattern), Datadog (index + query), Sumo (_sourceCategory + query), GCP (project id + filter), Elasticsearch (index pattern + KQL), Azure (workspace id + KQL), Splunk (index + SPL), ClickHouse (database + SQL WHERE). For ClickHouse, also pass `clickhouse_table` (required) and column-mapping args for custom schemas (OpenObserve/SigNoz auto-detected). Returns a `snapshot_id` — poll via log10x_poc_from_siem_status to retrieve progress and the final report. Report is also written to `${LOG10X_REPORT_DIR:-/tmp/log10x-reports}/poc_from_siem-<timestamp>.md`. Default window is 7d, default target event count is 250k, default max pull time is 5 min — the pull stops at whichever of the two ceilings hits first. **Tier prerequisites**: none. No log10x API key required. **Templating defaults to privacy_mode=true**: events are templated via a locally-installed `tenx` CLI (brew install log10x/tap/tenx) and never leave the machine. Set `privacy_mode: false` to route through the public Log10x paste endpoint — demo use only, not production log content.',
+    inputSchema: pocFromSiemSubmitSchema,
+    annotations: { title: 'POC from SIEM (submit)', readOnlyHint: false, idempotentHint: false, openWorldHint: true },
+  },
+  (args) =>
+    wrap('log10x_poc_from_siem_submit', async () =>
+      executePocSubmit({
+        window: args.window ?? '7d',
+        target_event_count: args.target_event_count ?? 250_000,
+        max_pull_minutes: args.max_pull_minutes ?? 5,
+        privacy_mode: args.privacy_mode ?? true,
+        ai_prettify: args.ai_prettify ?? true,
+        total_daily_gb: args.total_daily_gb,
+        total_monthly_gb: args.total_monthly_gb,
+        total_annual_gb: args.total_annual_gb,
+        auto_detect_volume: args.auto_detect_volume ?? true,
+        _mcpServer: server,
+        siem: args.siem,
+        scope: args.scope,
+        query: args.query,
+        analyzer_cost_per_gb: args.analyzer_cost_per_gb,
+        environment: args.environment,
+        clickhouse_table: args.clickhouse_table,
+        clickhouse_timestamp_column: args.clickhouse_timestamp_column,
+        clickhouse_message_column: args.clickhouse_message_column,
+        clickhouse_service_column: args.clickhouse_service_column,
+        clickhouse_severity_column: args.clickhouse_severity_column,
+      })
+    )
+);
+
+server.registerTool(
+  'log10x_poc_from_siem_status',
+  {
+    title: 'POC from SIEM (status)',
+    description: 'Retrieve progress or a view of the report from a log10x_poc_from_siem_submit run. ' +
+      'Pass `snapshot_id`; optionally `view` to select the level of detail. ' +
+      '**In-progress** responses report status (pulling / templatizing / rendering), progress_pct, ' +
+      'step_detail, and elapsed_seconds — poll every ~30s until done. ' +
+      '**Complete** responses render one of six views: ' +
+      '`summary` (default, ~30 lines — exec banner + top-5 wins + views CTA), ' +
+      '`full` (complete 9-section report, ~300 lines), ' +
+      '`yaml` (paste-ready Reducer mute-file for the top N patterns), ' +
+      '`configs` (native SIEM exclusion configs — Datadog exclusion filter / Splunk props.conf / etc.), ' +
+      '`top` (expanded N-row drivers table), ' +
+      '`pattern` (deep-dive on one identity — requires `pattern` arg). ' +
+      '**Failures** include partial_report_markdown when any events were successfully pulled before the error. ' +
+      'The full report is also written to ${LOG10X_REPORT_DIR:-/tmp/log10x-reports}/poc_from_siem-<timestamp>.md regardless of which view the caller requested. ' +
+      'Snapshots live in-memory per MCP process; a restart clears them, so persist the final report path if you need it later. ' +
+      '**Tier prerequisites**: none. ' +
+      '**Usage guidance for the calling model**: render the returned markdown AS-IS. The view arg has already picked the right level of detail. Do NOT summarize, paraphrase, or quote selectively — the tool has already done that work. If the user wants different detail, re-call with a different view.',
+    inputSchema: pocFromSiemStatusSchema,
+    annotations: { title: 'POC from SIEM (status)', readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+  },
+  (args) => wrap('log10x_poc_from_siem_status', async () => executePocStatus(args))
+);
+
 // ── Tool: log10x_discover_env (install advisor) ──
 
 server.registerTool(
@@ -769,6 +843,8 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_discover_join', intent: 'Auto-discover the join label between Log10x pattern metrics and the customer metric backend via Jaccard similarity' },
   { name: 'log10x_correlate_cross_pillar', intent: 'Bidirectional cross-pillar correlation with structural validation — confirmed / service-match / coincidence / unconfirmed tiering' },
   { name: 'log10x_translate_metric_to_patterns', intent: 'Given a customer APM metric, return the Log10x patterns whose rate curves correspond — with structural validation' },
+  { name: 'log10x_poc_from_siem_submit', intent: 'Pull a sample from the user\'s SIEM, templatize, and render a full cost-optimization POC report (async)' },
+  { name: 'log10x_poc_from_siem_status', intent: 'Poll or retrieve the final report from a log10x_poc_from_siem_submit run' },
   { name: 'log10x_discover_env', intent: 'Read-only probe of k8s + AWS — returns a snapshot_id the advise_* tools consume' },
   { name: 'log10x_advise_install', intent: 'Front-end install advisor — picks standalone vs inline + app + forwarder + optimize based on what was detected' },
   { name: 'log10x_advise_reporter', intent: 'Reporter install/verify/teardown plan for a forwarder — inline or standalone (shape=standalone)' },

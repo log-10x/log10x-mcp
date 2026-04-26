@@ -5,17 +5,34 @@
  * Designed for AI consumption — concise, structured, parseable.
  */
 
-/** Format a dollar amount: $1.2K, $14K, $1.2M, etc. */
+/**
+ * Format a dollar amount: $1.2K, $14K, $1.2M, etc. Sub-dollar amounts
+ * expand precision so sample-size POC runs don't collapse to `$0.00`
+ * and obscure which patterns are actually the most expensive. Anything
+ * below $0.01 goes to 4 decimals; below $1 goes to 2.
+ */
 export function fmtDollar(amount: number): string {
   const abs = Math.abs(amount);
   const sign = amount < 0 ? '-' : '';
 
+  if (abs === 0) return `${sign}$0`;
+  if (abs < 0.01) return `${sign}$${abs.toFixed(4)}`;
   if (abs < 1) return `${sign}$${abs.toFixed(2)}`;
   if (abs < 10) return `${sign}$${abs.toFixed(1)}`;
   if (abs < 1000) return `${sign}$${Math.round(abs)}`;
   if (abs < 10000) return `${sign}$${(abs / 1000).toFixed(1)}K`;
   if (abs < 1000000) return `${sign}$${Math.round(abs / 1000)}K`;
   return `${sign}$${(abs / 1000000).toFixed(1)}M`;
+}
+
+/** Format a GB number with a sensible unit: MB < 1, GB < 1000, TB above. */
+export function fmtGb(gb: number): string {
+  if (gb === 0) return '0 GB';
+  const abs = Math.abs(gb);
+  if (abs < 1) return `${(abs * 1024).toFixed(1)} MB`;
+  if (abs < 10) return `${abs.toFixed(1)} GB`;
+  if (abs < 1000) return `${Math.round(abs)} GB`;
+  return `${(abs / 1000).toFixed(1)} TB`;
 }
 
 /** Format bytes as human-readable: 1.2 GB, 450 MB, etc. */

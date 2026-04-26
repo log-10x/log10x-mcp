@@ -21,6 +21,7 @@ import { resolveRetriever, formatRetrieverTrace, runRetrieverQuery } from '../li
 import { loadEnvironments, type Environments, type EnvConfig } from '../lib/environments.js';
 import { LABELS } from '../lib/promql.js';
 import { fmtBytes as formatBytes } from '../lib/format.js';
+import { discoverAvailable } from '../lib/siem/index.js';
 import { resolveBackend, formatDetectionTrace } from '../lib/customer-metrics.js';
 
 export type CheckStatus = 'pass' | 'warn' | 'fail';
@@ -116,6 +117,7 @@ export async function runDoctorChecks(envNickname?: string): Promise<DoctorRepor
   //    These don't depend on a specific env so they live in globalChecks.
   await addInfrastructureChecks(globalChecks);
   await addPasteEndpointCheck(globalChecks);
+  await addSiemDiscoveryCheck(globalChecks);
 
   // 3. Per-environment checks.
   const targets: EnvConfig[] = envNickname
@@ -664,30 +666,149 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
   return checks;
 }
 
-/** Doctor probe on the paste endpoint — global, only runs once regardless of env count. */
+/**
+ * Check the templating backend the tools will actually use by default:
+ * the local `tenx` CLI. Falls back to checking the public paste endpoint
+ * only as a demo-mode fallback status, with an explicit warning so users
+ * don't assume it's production-ready.
+ */
 async function addPasteEndpointCheck(globalChecks: DoctorCheck[]): Promise<void> {
+  // 1. Primary path: local tenx CLI (privacy_mode: true, the default).
+  const tenxBinary = process.env.LOG10X_TENX_PATH || 'tenx';
+  const tenxAvailable = await isTenxAvailable(tenxBinary);
+  if (tenxAvailable.ok) {
+    globalChecks.push({
+      name: 'templater_local_tenx',
+      status: 'pass',
+      message: `Local tenx CLI available (${tenxAvailable.version || 'version unknown'}). Templating will run locally — events never leave the box.`,
+    });
+  } else {
+    globalChecks.push({
+      name: 'templater_local_tenx',
+      status: 'warn',
+      message:
+        'Local tenx CLI is not installed (or not on PATH / LOG10X_TENX_PATH). ' +
+        'privacy_mode: true (the default) will fail until tenx is installed.',
+      fix: installHintForPlatform(),
+    });
+  }
+
+  // 2. Fallback path: paste endpoint — informational only. It's public,
+  // rate-limited, and not intended for production log content. Flag as
+  // warn regardless of reachability so users don't treat it as a green
+  // pass on a production install.
   try {
     const url = process.env.LOG10X_PASTE_URL || 'https://meljpepqpd.execute-api.us-east-1.amazonaws.com/paste';
     const res = await fetch(url, { method: 'OPTIONS' });
-    if (res.ok || res.status === 204 || res.status === 405) {
-      globalChecks.push({
-        name: 'paste_endpoint',
-        status: 'pass',
-        message: 'Log10x paste endpoint reachable. log10x_resolve_batch will route through it by default.',
-      });
-    } else {
-      globalChecks.push({
-        name: 'paste_endpoint',
-        status: 'warn',
-        message: `Paste endpoint returned HTTP ${res.status}. resolve_batch may fail.`,
-      });
-    }
+    const reachable = res.ok || res.status === 204 || res.status === 405;
+    globalChecks.push({
+      name: 'templater_paste_endpoint_fallback',
+      status: 'warn',
+      message:
+        reachable
+          ? 'Paste endpoint reachable (demo fallback for privacy_mode: false). Do NOT use with production log content — events leave the caller\'s machine and hit a shared public Lambda.'
+          : `Paste endpoint returned HTTP ${res.status}. privacy_mode: false calls will fail; install the local tenx CLI and keep privacy_mode: true (the default).`,
+      fix: tenxAvailable.ok
+        ? undefined
+        : 'For production use, install tenx locally (see templater_local_tenx fix) and leave privacy_mode at its default of true.',
+    });
   } catch (e) {
     globalChecks.push({
-      name: 'paste_endpoint',
+      name: 'templater_paste_endpoint_fallback',
       status: 'warn',
-      message: `Paste endpoint unreachable: ${(e as Error).message}`,
-      fix: 'If the network is locked down, allowlist the LOG10X_PASTE_URL host (default: meljpepqpd.execute-api.us-east-1.amazonaws.com). Or set privacy_mode=true on resolve_batch and install the local tenx CLI.',
+      message: `Paste endpoint unreachable: ${(e as Error).message}. privacy_mode: false will fail; this is expected on air-gapped installs and only matters if you intended to use the demo endpoint.`,
+    });
+  }
+}
+
+function installHintForPlatform(): string {
+  if (process.platform === 'darwin') return 'brew install log10x/tap/tenx';
+  if (process.platform === 'linux') return 'curl -fsSL https://install.log10x.com | sh — or use the apt/yum packages at https://docs.log10x.com/apps/dev/';
+  if (process.platform === 'win32') return 'iwr -useb https://install.log10x.com/install.ps1 | iex';
+  return 'see https://docs.log10x.com/apps/dev/ for install instructions';
+}
+
+async function isTenxAvailable(binary: string): Promise<{ ok: boolean; version?: string }> {
+  // Cheap non-executing check: `which tenx` / `where tenx`. We don't fully
+  // validate module resolution here — that requires running @apps/dev which
+  // takes a few seconds. Doctor is supposed to be fast.
+  const { spawn } = await import('child_process');
+  const lookup = process.platform === 'win32' ? 'where' : 'which';
+  if (binary.startsWith('/') || /^[A-Za-z]:\\/.test(binary)) {
+    const { existsSync } = await import('fs');
+    if (!existsSync(binary)) return { ok: false };
+  } else {
+    const found = await new Promise<boolean>((resolve) => {
+      const p = spawn(lookup, [binary], { stdio: ['ignore', 'ignore', 'ignore'] });
+      p.on('error', () => resolve(false));
+      p.on('close', (c) => resolve(c === 0));
+      setTimeout(() => resolve(false), 3000);
+    });
+    if (!found) return { ok: false };
+  }
+  // Get --version quickly (capped at 3s).
+  const version = await new Promise<string | undefined>((resolve) => {
+    const p = spawn(binary, ['--version'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    p.stdout.on('data', (d) => {
+      out += d.toString();
+    });
+    p.on('error', () => resolve(undefined));
+    p.on('close', () => resolve(out.trim().slice(0, 120) || undefined));
+    setTimeout(() => resolve(undefined), 3000);
+  });
+  return { ok: true, version };
+}
+
+/**
+ * SIEM-discovery probe for log10x_poc_from_siem.
+ *
+ * Iterates every registered SIEM connector's `discoverCredentials()` and
+ * reports which are reachable. Shows one status line per SIEM so users
+ * can see at a glance whether the POC tool can pull from their stack
+ * with no additional config.
+ */
+async function addSiemDiscoveryCheck(globalChecks: DoctorCheck[]): Promise<void> {
+  try {
+    const results = await discoverAvailable();
+    const detected = results.filter((r) => r.detection.available);
+    if (detected.length === 0) {
+      globalChecks.push({
+        name: 'siem_discovery',
+        status: 'warn',
+        message:
+          `No SIEM credentials detected for log10x_poc_from_siem (probed ${results.length} connectors). ` +
+          `Set credentials for any of: cloudwatch (AWS_*), datadog (DD_API_KEY + DD_APP_KEY), sumo (SUMO_ACCESS_ID + SUMO_ACCESS_KEY + SUMO_ENDPOINT), ` +
+          `gcp-logging (GOOGLE_APPLICATION_CREDENTIALS), elasticsearch (ELASTIC_URL + ELASTIC_API_KEY), azure-monitor (AZURE_LOG_ANALYTICS_WORKSPACE_ID + az login), ` +
+          `splunk (SPLUNK_HOST + SPLUNK_TOKEN), or clickhouse (CLICKHOUSE_URL + CLICKHOUSE_USER + CLICKHOUSE_PASSWORD).`,
+        fix: 'The POC tool requires exactly one SIEM to be reachable. Set the env vars for your SIEM and re-run.',
+      });
+      return;
+    }
+    const lines: string[] = [];
+    for (const r of results) {
+      const status = r.detection.available ? 'DETECTED' : 'not_configured';
+      const src = r.detection.available ? ` (${r.detection.source})` : '';
+      const extra = r.detection.available
+        ? Object.entries(r.detection.details || {})
+            .map(([k, v]) => `${k}=${String(v).slice(0, 80)}`)
+            .join(', ')
+        : '';
+      lines.push(`  - ${r.id} (${r.displayName}): ${status}${src}${extra ? ` — ${extra}` : ''}`);
+    }
+    const ids = detected.map((d) => d.id).join(', ');
+    const overall = detected.length === 1 ? 'pass' : 'warn';
+    globalChecks.push({
+      name: 'siem_discovery',
+      status: overall,
+      message:
+        `${detected.length} SIEM connector${detected.length === 1 ? '' : 's'} reachable: ${ids}. ${detected.length > 1 ? 'Pass `siem=<id>` to disambiguate when calling log10x_poc_from_siem_submit.' : 'log10x_poc_from_siem_submit will auto-target this SIEM.'}\n${lines.join('\n')}`,
+    });
+  } catch (e) {
+    globalChecks.push({
+      name: 'siem_discovery',
+      status: 'warn',
+      message: `SIEM discovery failed: ${(e as Error).message}`,
     });
   }
 }
