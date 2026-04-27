@@ -163,8 +163,21 @@ interface EnrichedPattern extends ExtractedPattern {
   confidence: Confidence;
   /** Snake-case identity — for ready-to-paste reducer configs. */
   identity: string;
-  /** Token set used downstream for dependency-check guidance. */
-  tokens: string[];
+  /**
+   * Longest verbatim literal run from the template body, used as a
+   * phrase-match anchor in exclusion configs. Indexed phrase queries
+   * are 1–2 orders of magnitude cheaper at SIEM ingest scale than
+   * regex with `.*` interleaving, and don't false-positive on token
+   * reorderings.
+   */
+  literalPhrase: string;
+  /**
+   * True when `literalPhrase` sits at the start of the template (so
+   * a phrase-prefix anchor is exact). False when the template begins
+   * with a variable slot and the phrase is the longest internal run.
+   * Exclusion configs prepend an approximation footnote in that case.
+   */
+  literalLeading: boolean;
 }
 
 /**
@@ -862,6 +875,7 @@ function enrichPatterns(input: RenderInput): EnrichedPattern[] {
     // Mark unused to satisfy strict mode without altering semantics.
     void scaledBytesPerDay;
     const identity = toSnakeCase(p.template, p.hash);
+    const lit = extractLiteralPhrase(p.template, identity);
     const severity = (p.severity || '').toUpperCase();
 
     let action: 'mute' | 'sample' | 'keep' = 'keep';
@@ -919,7 +933,8 @@ function enrichPatterns(input: RenderInput): EnrichedPattern[] {
       reasoning,
       confidence,
       identity,
-      tokens: identity.split('_').filter(Boolean),
+      literalPhrase: lit.phrase,
+      literalLeading: lit.leading,
     };
   });
 
@@ -1028,17 +1043,46 @@ function nativeConfig(siem: SiemId, drops: EnrichedPattern[]): string {
   }
 }
 
+/**
+ * Banner prepended to a rendered exclusion block when any pattern in
+ * the drop list lacks a leading literal anchor. The phrase is still
+ * the strongest distinguishing run in the template, but matches it
+ * as a substring rather than a prefix.
+ */
+function approximationFootnote(drops: EnrichedPattern[]): string {
+  const approx = drops.filter((p) => !p.literalLeading);
+  if (approx.length === 0) return '';
+  const lines = [
+    '# NOTE: one or more patterns below begin with a variable slot, so the',
+    '# phrase used is the longest internal literal run, not a prefix anchor.',
+    '# Approximated patterns:',
+    ...approx.map((p) => `#   - ${p.identity} → "${p.literalPhrase}"`),
+    '',
+  ];
+  return lines.join('\n');
+}
+
 function datadogExclusion(drops: EnrichedPattern[]): string {
-  // Datadog exclusion filter body; the model will upload via API or paste into UI.
-  return drops
+  // Indexed phrase query against @message. Datadog evaluates this on
+  // the inverted index, so it's not regex-priced at ingest.
+  const body = drops
     .map((p, i) => {
-      const query = p.tokens.map(escapeRegex).join('.*');
+      const phrase = p.literalPhrase.replace(/"/g, '\\"');
       return [
         `# Exclusion filter #${i + 1}`,
-        JSON.stringify({ name: `Drop ${p.identity.slice(0, 40)}`, is_enabled: true, filter: { query: `@message:/${query}/` } }, null, 2),
+        JSON.stringify(
+          {
+            name: `Drop ${p.identity.slice(0, 40)}`,
+            is_enabled: true,
+            filter: { query: `@message:"${phrase}"` },
+          },
+          null,
+          2
+        ),
       ].join('\n');
     })
     .join('\n\n');
+  return approximationFootnote(drops) + body;
 }
 
 function splunkExclusion(drops: EnrichedPattern[]): string {
@@ -1053,67 +1097,140 @@ function splunkExclusion(drops: EnrichedPattern[]): string {
   for (let i = 0; i < drops.length; i++) {
     const p = drops[i];
     stanzas.push(`[log10x_drop_${i}]`);
-    stanzas.push(`REGEX = ${p.tokens.map(escapeRegex).join('.*')}`);
+    // Substring regex. escapeRegex makes this an exact-text match,
+    // no `.*` interleaving, no greedy reorderings.
+    stanzas.push(`REGEX = ${escapeRegex(p.literalPhrase)}`);
     stanzas.push('DEST_KEY = queue');
     stanzas.push('FORMAT = nullQueue');
     stanzas.push('');
   }
-  return stanzas.join('\n');
+  return approximationFootnote(drops) + stanzas.join('\n');
 }
 
 function elasticsearchExclusion(drops: EnrichedPattern[]): string {
-  const processors = drops.map((p) => ({
-    drop: {
-      if: `ctx.message != null && (${p.tokens.map((t) => `ctx.message.contains('${t.replace(/'/g, "\\'")}')`).join(' && ')})`,
-    },
-  }));
-  return `PUT _ingest/pipeline/log10x_drop\n${JSON.stringify({ description: 'Log10x recommended drops', processors }, null, 2)}`;
+  const processors = drops.map((p) => {
+    const phrase = p.literalPhrase.replace(/'/g, "\\'");
+    return {
+      drop: {
+        if: `ctx.message != null && ctx.message.contains('${phrase}')`,
+      },
+    };
+  });
+  return (
+    approximationFootnote(drops) +
+    `PUT _ingest/pipeline/log10x_drop\n${JSON.stringify(
+      { description: 'Log10x recommended drops', processors },
+      null,
+      2
+    )}`
+  );
 }
 
 function cloudwatchExclusion(drops: EnrichedPattern[]): string {
-  // CloudWatch subscription-filter exclude patterns. One per pattern.
-  return drops
-    .map(
-      (p, i) =>
-        `# Subscription filter: drop pattern #${i + 1}\naws logs put-subscription-filter \\\n  --log-group-name "/aws/your/logs" \\\n  --filter-name "log10x-drop-${i}" \\\n  --filter-pattern '-"${p.tokens.slice(0, 3).join('" -"')}"' \\\n  --destination-arn "<your-kinesis-or-lambda-arn>"`
-    )
+  // Subscription-filter pattern: `-"phrase"` excludes lines containing
+  // the literal phrase. One filter per pattern keeps blast radius
+  // visible at the AWS console.
+  const body = drops
+    .map((p, i) => {
+      const phrase = p.literalPhrase.replace(/"/g, '\\"');
+      return `# Subscription filter: drop pattern #${i + 1}\naws logs put-subscription-filter \\\n  --log-group-name "/aws/your/logs" \\\n  --filter-name "log10x-drop-${i}" \\\n  --filter-pattern '-"${phrase}"' \\\n  --destination-arn "<your-kinesis-or-lambda-arn>"`;
+    })
     .join('\n\n');
+  return approximationFootnote(drops) + body;
 }
 
 function azureExclusion(drops: EnrichedPattern[]): string {
-  const drop = drops
-    .map((p) => `has_any(dynamic([${p.tokens.slice(0, 3).map((t) => `"${t}"`).join(', ')}]))`)
+  const conds = drops
+    .map((p) => {
+      const phrase = p.literalPhrase.replace(/"/g, '\\"');
+      return `message contains "${phrase}"`;
+    })
     .join(' or ');
-  return `// Data Collection Rule KQL transform\nsource | where not (${drop})`;
+  return (
+    approximationFootnote(drops) +
+    `// Data Collection Rule KQL transform\nsource | where not (${conds})`
+  );
 }
 
 function gcpExclusion(drops: EnrichedPattern[]): string {
-  return drops
-    .map((p, i) => `# Log exclusion filter #${i + 1} (gcloud logging sinks)\ntextPayload:(${p.tokens.slice(0, 3).map((t) => `"${t}"`).join(' AND ')})`)
+  const body = drops
+    .map((p, i) => {
+      const phrase = p.literalPhrase.replace(/"/g, '\\"');
+      return `# Log exclusion filter #${i + 1} (gcloud logging sinks)\ntextPayload:"${phrase}"`;
+    })
     .join('\n\n');
+  return approximationFootnote(drops) + body;
 }
 
 function sumoExclusion(drops: EnrichedPattern[]): string {
-  return drops
-    .map((p, i) => `# Drop rule #${i + 1} — Field Extraction Rules → Drop\n${p.tokens.slice(0, 3).map((t) => `matches "${t}"`).join(' AND ')}`)
+  const body = drops
+    .map((p, i) => {
+      const phrase = p.literalPhrase.replace(/"/g, '\\"');
+      return `# Drop rule #${i + 1} — Field Extraction Rules → Drop\nmatches "*${phrase}*"`;
+    })
     .join('\n\n');
+  return approximationFootnote(drops) + body;
 }
 
 function clickhouseExclusion(drops: EnrichedPattern[]): string {
   const conds = drops
-    .map((p) => `(message NOT ILIKE '%${p.tokens.slice(0, 3).join('%')}%')`)
+    .map((p) => `(message NOT ILIKE '%${p.literalPhrase.replace(/'/g, "''")}%')`)
     .join('\n        AND ');
-  return `-- Option A: ingestion-layer drop via MATERIALIZED VIEW\nCREATE MATERIALIZED VIEW logs_filtered\nTO logs_final AS\n  SELECT *\n  FROM logs_raw\n  WHERE ${conds};\n\n-- Option B: drop at the forwarder (preferred — no extra storage writes)`;
+  return (
+    approximationFootnote(drops) +
+    `-- Option A: ingestion-layer drop via MATERIALIZED VIEW\nCREATE MATERIALIZED VIEW logs_filtered\nTO logs_final AS\n  SELECT *\n  FROM logs_raw\n  WHERE ${conds};\n\n-- Option B: drop at the forwarder (preferred — no extra storage writes)`
+  );
 }
 
 function fluentBitConfig(drops: EnrichedPattern[]): string {
   const filters = drops
     .map(
       (p, i) =>
-        `[FILTER]\n    Name       grep\n    Match      *\n    Exclude    log ${p.tokens.slice(0, 3).map(escapeRegex).join('.*')}\n# pattern identity: ${p.identity} (#${i + 1})`
+        `[FILTER]\n    Name       grep\n    Match      *\n    Exclude    log ${escapeRegex(p.literalPhrase)}\n# pattern identity: ${p.identity} (#${i + 1})`
     )
     .join('\n\n');
-  return filters;
+  return approximationFootnote(drops) + filters;
+}
+
+/**
+ * Pull the strongest literal anchor from a templated pattern.
+ *
+ * A template body looks like `$(ts) ERROR payment_gateway_timeout for tenant=$ ms=$`,
+ * with `$(...)` typed slots and bare `$` value slots. Splitting on either
+ * variant gives the runs of literal text the template guarantees to emit
+ * verbatim. The longest such run is the cheapest, most-discriminating
+ * anchor for an exclusion query.
+ *
+ * Returns:
+ *   - `phrase`: the longest run with at least 3 alphanumeric chars.
+ *   - `leading`: true if `phrase` is the first run (no variable before it).
+ *
+ * Fallback: when no run clears the alphanumeric threshold, return the
+ * spaced identity so the renderer still has *something* paste-worthy.
+ * The caller surfaces an "approximation" footnote in that case via
+ * `leading=false`.
+ */
+function extractLiteralPhrase(
+  template: string,
+  identity: string
+): { phrase: string; leading: boolean } {
+  const runs = template
+    .split(/\$\([^)]*\)|\$/)
+    .map((s, idx) => ({ text: s.replace(/\s+/g, ' ').trim(), idx }))
+    .filter((r) => r.text.length > 0);
+
+  const qualifying = runs.filter(
+    (r) => (r.text.match(/[A-Za-z0-9]/g) || []).length >= 3
+  );
+  if (qualifying.length === 0) {
+    return { phrase: identity.replace(/_/g, ' ').trim() || identity, leading: false };
+  }
+
+  let best = qualifying[0];
+  for (const r of qualifying) {
+    if (r.text.length > best.text.length) best = r;
+  }
+  return { phrase: best.text, leading: best.idx === 0 };
 }
 
 function escapeRegex(s: string): string {
@@ -1164,3 +1281,16 @@ function scaleCostToDaily(
   const factor = dailyGbScenario / sampleGb;
   return projectBilling(sampleCost * factor, windowHours, 24 * 365);
 }
+
+/**
+ * Test-only surface: phrase extractor + per-vendor exclusion renderer.
+ * Not part of the public MCP API; the leading underscore signals
+ * "internal, may change without notice."
+ */
+export const _internals = {
+  extractLiteralPhrase,
+  renderNativeExclusion: (siem: SiemId, drops: EnrichedPattern[]): string =>
+    nativeConfig(siem, drops),
+  renderFluentBit: (drops: EnrichedPattern[]): string => fluentBitConfig(drops),
+};
+export type _EnrichedPattern = EnrichedPattern;
