@@ -67,11 +67,14 @@ export async function executeLoginStatus(
     const star = e.isDefault ? ' ★ default' : '';
     const current = envs.lastUsed && envs.lastUsed.envId === e.envId ? ' ← last used' : '';
     lines.push(`- **${e.nickname}** · ${perm}${owner}${star}${current}`);
+    lines.push(`    \`env_id: ${e.envId}\``);
   }
   lines.push('');
 
   lines.push('### Env resolution for tool calls');
   lines.push('Tools that take an `environment` arg resolve in this order: explicit value → last env you named this session → your default env. Pass `environment: "<nickname>"` to any tool to switch envs (subsequent calls without an `environment` arg stick to that env until you change it).');
+  lines.push('');
+  lines.push('Tools that mutate an env (`log10x_update_env`, `log10x_delete_env`) take an `env_id` UUID, not the nickname — copy it from the line under each env above.');
 
   return lines.join('\n');
 }
