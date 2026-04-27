@@ -55,6 +55,16 @@ export interface RenderInput {
   /** Error note when auto-detect was attempted but failed. Surfaced under the banner. */
   volumeDetectErrorNote?: string;
   /**
+   * Cost-figure uncertainty bracket attached by the volume-detection
+   * connector. Set when the detected `totalDailyGb` came from a fallback
+   * estimator (Datadog `logs_by_index` × 500 B/event, CloudWatch
+   * NEVER_EXPIRE retention) rather than a byte-precise source. When
+   * present, every projected cost figure is rendered as a range
+   * (`$3.8K - $15.2K/yr`) instead of a single misleading number.
+   * Multipliers apply to the central estimate.
+   */
+  volumeRangeMultiplier?: { low: number; high: number };
+  /**
    * Optional: AI-generated display name per pattern identity. When set,
    * the identity is rendered as `<Pretty Name> (<identity>)` in every
    * table instead of just the identity. Missing entries fall back to
@@ -200,9 +210,16 @@ export function renderPocSummary(input: RenderInput, topN = 5): string {
     const annualSavings = projectBilling(projectedSavings, input.windowHours, 24 * 365);
     const savingsPct = fmtPct((annualSavings / Math.max(1, annualCost)) * 100);
     const mode = input.volumeSource === 'auto_detected' ? 'auto-detected' : 'user-supplied';
+    const m = input.volumeRangeMultiplier;
     lines.push(
-      `Projected annual cost: **${fmtDollar(annualCost)}** · Potential savings: **${fmtDollar(annualSavings)} (${savingsPct})** at ${fmtGb(input.totalDailyGb)}/day (${mode}).`
+      `Projected annual cost: **${formatCostRange(annualCost, m)}** · Potential savings: **${formatCostRange(annualSavings, m)} (${savingsPct})** at ${fmtGb(input.totalDailyGb)}/day (${mode}).`
     );
+    if (m) {
+      lines.push('');
+      lines.push(
+        `_Cost range reflects ${m.low}× to ${m.high}× uncertainty in the auto-detected volume. For a single precise number, pass \`total_daily_gb\` directly or grant the SIEM API key its byte-precise scope (e.g. Datadog \`usage_read\`)._`
+      );
+    }
   } else {
     // No volume — give the most useful scenario on one line, point to full for the table.
     const oneHundred = scaleCostToDaily(totalCost, input.extraction.totalBytes, 100, input.windowHours);
@@ -474,13 +491,20 @@ export function renderPocReport(input: RenderInput): RenderResult {
     const monthlyCost = projectBilling(totalCost, input.windowHours, 24 * 30);
     const annualCost = projectBilling(totalCost, input.windowHours, 24 * 365);
     const annualSavings = projectBilling(projectedSavings, input.windowHours, 24 * 365);
-    lines.push(`- **Projected daily cost**: ${fmtDollar(dailyCost)}`);
-    lines.push(`- **Projected monthly cost**: ${fmtDollar(monthlyCost)}`);
-    lines.push(`- **Projected annual cost**: ${fmtDollar(annualCost)}`);
+    const m = input.volumeRangeMultiplier;
+    lines.push(`- **Projected daily cost**: ${formatCostRange(dailyCost, m)}`);
+    lines.push(`- **Projected monthly cost**: ${formatCostRange(monthlyCost, m)}`);
+    lines.push(`- **Projected annual cost**: ${formatCostRange(annualCost, m)}`);
     void weeklyCost;
     lines.push(
-      `- **Potential annual savings**: **${fmtDollar(annualSavings)}** — ${fmtPct((annualSavings / Math.max(1, annualCost)) * 100)} of annual cost`
+      `- **Potential annual savings**: **${formatCostRange(annualSavings, m)}** — ${fmtPct((annualSavings / Math.max(1, annualCost)) * 100)} of annual cost`
     );
+    if (m) {
+      lines.push('');
+      lines.push(
+        `> Cost ranges reflect ${m.low}× to ${m.high}× uncertainty in the volume estimate (${input.volumeDetectSource || 'auto-detected'}). For a single precise number, pass \`total_daily_gb\` directly or unlock the byte-precise SIEM endpoint (e.g. Datadog \`usage_read\` scope).`
+      );
+    }
   } else {
     // Volume unknown — render scenario brackets so the user still sees
     // dollar magnitudes, plus an explicit call-to-action with whatever
@@ -1118,6 +1142,23 @@ function fluentBitConfig(drops: EnrichedPattern[]): string {
 
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Format a cost figure honestly: a single dollar value when the
+ * volume is byte-precise, or a low-high range when an auto-detected
+ * fallback estimator was used. The wide bracket is the point: it
+ * pushes the user to provide better data (`total_daily_gb`, or grant
+ * `usage_read` scope) instead of trusting a confidently-wrong number.
+ */
+function formatCostRange(
+  cost: number,
+  multiplier?: { low: number; high: number }
+): string {
+  if (!multiplier) return fmtDollar(cost);
+  const lo = cost * multiplier.low;
+  const hi = cost * multiplier.high;
+  return `${fmtDollar(lo)} - ${fmtDollar(hi)}`;
 }
 
 function truncate(s: string, max: number): string {

@@ -296,9 +296,17 @@ async function detectDailyVolumeGb(opts: VolumeDetectionOptions): Promise<Volume
     const dailyGb = totalBytes / (1024 ** 3) / days;
     const neverExpireNote =
       neverExpireCount > 0 ? ` — ${neverExpireCount} group(s) have NEVER_EXPIRE retention; assumed 30d for that subset` : '';
+    // When any log group has NEVER_EXPIRE retention, the 30-day floor
+    // is a guess: real ingest could be anywhere from 0.3× (data has
+    // accumulated for 90+ days) to 3× (data is much fresher than 30d).
+    // Surface that as a range so the headline cost reflects the
+    // assumption.
+    const rangeMultiplier =
+      neverExpireCount > 0 ? { low: 0.3, high: 3 } : undefined;
     return {
       dailyGb,
       source: `CloudWatch DescribeLogGroups (${groups.length} group${groups.length === 1 ? '' : 's'}, ~${Math.round(days)}d retention)${neverExpireNote}`,
+      ...(rangeMultiplier ? { rangeMultiplier } : {}),
     };
   } catch (e) {
     return { errorNote: `CloudWatch volume detection failed: ${(e as Error).message.slice(0, 200)}` };

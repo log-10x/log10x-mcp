@@ -565,6 +565,7 @@ export async function runPipeline(
     volumeSource: volumeResult?.source ?? 'none',
     volumeDetectSource: volumeResult?.sourceLabel,
     volumeDetectErrorNote: volumeResult?.errorNote,
+    volumeRangeMultiplier: volumeResult?.rangeMultiplier,
     aiPrettyNames,
     aiPrettifyErrorNote,
   };
@@ -613,6 +614,7 @@ async function resolveVolume(
   source?: 'user_arg' | 'auto_detected';
   sourceLabel?: string;
   errorNote?: string;
+  rangeMultiplier?: { low: number; high: number };
 } | null> {
   // User arg wins.
   if (args.total_daily_gb && args.total_daily_gb > 0) {
@@ -663,6 +665,9 @@ async function resolveVolume(
         dailyGb: result.dailyGb,
         source: 'auto_detected',
         sourceLabel: result.source || 'SIEM usage API',
+        ...('rangeMultiplier' in result && result.rangeMultiplier
+          ? { rangeMultiplier: result.rangeMultiplier }
+          : {}),
       };
     }
     return { errorNote: ('errorNote' in result && result.errorNote) || 'Auto-detect returned no value' };

@@ -91,6 +91,21 @@ export interface VolumeDetectionResult {
    * the report so users know what to fix.
    */
   errorNote?: string;
+  /**
+   * Cost-figure uncertainty bracket. Undefined when `dailyGb` was read
+   * from a byte-precise source (Datadog usage/logs byte endpoint, ES
+   * `_stats`, CloudWatch `storedBytes` with explicit retention). Set
+   * when a fallback estimator was used (Datadog `logs_by_index` ×
+   * 500 B/event, CloudWatch NEVER_EXPIRE retention) so the renderer
+   * can emit a range instead of a single misleading headline number.
+   *
+   * Multipliers apply to the headline cost: e.g., `{ low: 0.4, high: 4 }`
+   * means the true cost likely sits between 0.4× and 4× the central
+   * estimate. The wide bracket is intentional — Datadog log line sizes
+   * range from 200 B (small structured) to 2 KB (verbose JSON), so a
+   * 500 B/event guess can be wrong in either direction by 10×.
+   */
+  rangeMultiplier?: { low: number; high: number };
 }
 
 export interface SiemConnector {
