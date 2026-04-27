@@ -23,6 +23,7 @@ import type {
 } from './index.js';
 
 import { retryWithBackoff, shouldStop, parseWindowMs } from './_retry.js';
+import { randomTimeBuckets, perBucketCap } from './_sampling.js';
 
 function getKeys(): { apiKey?: string; appKey?: string; site?: string } {
   return {
@@ -72,8 +73,8 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
 
   const deadline = Date.now() + opts.maxPullMinutes * 60_000;
   const windowMs = parseWindowMs(opts.window);
-  const to = new Date();
-  const from = new Date(Date.now() - windowMs);
+  const toMs = Date.now();
+  const fromMs = toMs - windowMs;
 
   // Compose the query. `scope` is treated as an index name (the index
   // facet is `index:<name>`); `query` is the free-text filter.
@@ -86,52 +87,66 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
   let reasonStopped: PullStopReason = 'source_exhausted';
   const notes: string[] = [];
 
-  let cursor: string | undefined;
-  const pageLimit = 1000; // Datadog caps at 5000; 1000 is a good page size.
+  // Stratified random sampling: 24 child sub-windows scattered across
+  // the parent window with per-run RNG. Successive POC runs against the
+  // same window draw non-overlapping samples (sample-overlap ≈ 0%
+  // instead of the prior 100%). Per-bucket event cap keeps any single
+  // bucket from monopolizing the global target.
+  const BUCKET_COUNT = 24;
+  const buckets = randomTimeBuckets(fromMs, toMs, BUCKET_COUNT);
+  const bucketCap = perBucketCap(opts.targetEventCount, BUCKET_COUNT);
+  const pageLimit = Math.min(1000, bucketCap); // Datadog caps at 5000.
 
-  while (true) {
+  bucketLoop: for (const bucket of buckets) {
     if (shouldStop(deadline, events.length, opts.targetEventCount)) {
       reasonStopped = events.length >= opts.targetEventCount ? 'target_reached' : 'time_exhausted';
       break;
     }
-    try {
-      const resp = await retryWithBackoff(() =>
-        api.listLogsGet({
-          filterQuery: queryStr || undefined,
-          filterFrom: from,
-          filterTo: to,
-          pageCursor: cursor,
-          pageLimit,
-          sort: 'timestamp',
-        })
-      );
-      const data = resp.data || [];
-      for (const ev of data) {
-        events.push({
-          timestamp: ev.attributes?.timestamp,
-          message: ev.attributes?.message,
-          service: ev.attributes?.service,
-          status: ev.attributes?.status,
-          tags: ev.attributes?.tags,
-          host: ev.attributes?.host,
-          attributes: ev.attributes?.attributes,
-        });
+    let cursor: string | undefined;
+    let bucketEvents = 0;
+    while (bucketEvents < bucketCap) {
+      if (shouldStop(deadline, events.length, opts.targetEventCount)) {
+        reasonStopped = events.length >= opts.targetEventCount ? 'target_reached' : 'time_exhausted';
+        break bucketLoop;
       }
-      const nextCursor = resp.meta?.page?.after;
-      if (!nextCursor) {
-        reasonStopped = 'source_exhausted';
+      try {
+        const resp = await retryWithBackoff(() =>
+          api.listLogsGet({
+            filterQuery: queryStr || undefined,
+            filterFrom: new Date(bucket.fromMs),
+            filterTo: new Date(bucket.toMs),
+            pageCursor: cursor,
+            pageLimit,
+            sort: 'timestamp',
+          })
+        );
+        const data = resp.data || [];
+        for (const ev of data) {
+          if (bucketEvents >= bucketCap) break;
+          events.push({
+            timestamp: ev.attributes?.timestamp,
+            message: ev.attributes?.message,
+            service: ev.attributes?.service,
+            status: ev.attributes?.status,
+            tags: ev.attributes?.tags,
+            host: ev.attributes?.host,
+            attributes: ev.attributes?.attributes,
+          });
+          bucketEvents++;
+        }
+        const nextCursor = resp.meta?.page?.after;
+        if (!nextCursor || data.length === 0) break; // bucket exhausted
+        cursor = nextCursor;
+        opts.onProgress({
+          step: `datadog bucket ${bucket.index + 1}/${BUCKET_COUNT} (${bucketEvents}/${bucketCap})`,
+          pct: Math.min(50, Math.round(((bucket.index + bucketEvents / bucketCap) / BUCKET_COUNT) * 50)),
+          eventsFetched: events.length,
+        });
+      } catch (e) {
+        notes.push(`datadog_bucket_${bucket.index}_error: ${(e as Error).message.slice(0, 200)}`);
+        // Per-bucket failures are non-fatal; move to the next bucket.
         break;
       }
-      cursor = nextCursor;
-      opts.onProgress({
-        step: `datadog page cursor ${cursor.slice(0, 8)}…`,
-        pct: Math.min(50, Math.round((events.length / opts.targetEventCount) * 50)),
-        eventsFetched: events.length,
-      });
-    } catch (e) {
-      notes.push(`datadog_page_error: ${(e as Error).message.slice(0, 200)}`);
-      reasonStopped = 'error';
-      break;
     }
   }
 
