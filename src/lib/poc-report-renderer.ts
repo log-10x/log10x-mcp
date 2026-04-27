@@ -450,6 +450,37 @@ export function renderPocReport(input: RenderInput): RenderResult {
     );
     lines.push('');
   }
+  // G11 mitigation: the engine-side templater silently drops input
+  // lines under certain conditions (multi-line stack traces, event-
+  // boundary crossings, high-cardinality variant overfitting). The
+  // resolve_batch tool surfaces the same warning at lines 160-195;
+  // mirror it here so POC users see the gap too. Gate at >50 input
+  // lines because tiny batches can lose lines for legitimate
+  // template-overfitting reasons; >50 is anomalous.
+  const lineCount = input.extraction.inputLineCount;
+  const accountedEvents = input.extraction.totalEvents;
+  const droppedEvents = Math.max(0, lineCount - accountedEvents);
+  const dropRate = lineCount > 0 ? droppedEvents / lineCount : 0;
+  if (lineCount > 50 && droppedEvents > 0) {
+    const pctLabel = `${Math.round(dropRate * 100)}%`;
+    if (dropRate >= 0.2) {
+      lines.push(
+        `> ⚠ **${fmtCount(droppedEvents)} input lines (${pctLabel}) were NOT accounted for by the templater.** ` +
+          `The sum of per-pattern event counts (${fmtCount(accountedEvents)}) is less than the sample line count (${fmtCount(lineCount)}). ` +
+          `This is a known engine-side bug (GAPS G11) where the templater silently drops input lines under certain conditions ` +
+          `(multi-line stack traces, event-boundary crossings, high-cardinality variant overfitting). ` +
+          `**Do not treat the savings projection below as complete** — the dropped lines may contain the highest-volume patterns. ` +
+          `Workarounds: (1) rerun with a smaller \`target_event_count\` and broader \`window\` so each batch is large enough that overfitting is unlikely; ` +
+          `(2) use \`log10x_event_lookup\` on individual lines if you need ground truth on a specific pattern.`
+      );
+      lines.push('');
+    } else if (dropRate >= 0.05) {
+      lines.push(
+        `_Note: ${fmtCount(droppedEvents)} sample lines (${pctLabel}) were not accounted for by the templater. Minor drop, likely tiny-batch overfitting._`
+      );
+      lines.push('');
+    }
+  }
   if (input.reasonStopped === 'time_exhausted') {
     lines.push(
       `> Analyzed ${fmtCount(input.extraction.totalEvents)} events (time budget reached before target count). Top patterns reliable; long-tail recommendations may be noisy. Rerun with \`max_pull_minutes: 15\` for deeper coverage.`
