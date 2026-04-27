@@ -37,6 +37,7 @@ import type {
 } from './index.js';
 
 import { shouldStop, sleep, retryWithBackoff, parseWindowMs } from './_retry.js';
+import { randomTimeBuckets, perBucketCap } from './_sampling.js';
 
 async function discoverCredentials(): Promise<CredentialDiscovery> {
   const hasExplicitKey = Boolean(process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY);
@@ -81,8 +82,8 @@ async function discoverCredentials(): Promise<CredentialDiscovery> {
 async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
   const deadline = Date.now() + opts.maxPullMinutes * 60_000;
   const windowMs = parseWindowMs(opts.window);
-  const endTime = Date.now();
-  const startTime = endTime - windowMs;
+  const toMs = Date.now();
+  const fromMs = toMs - windowMs;
 
   const region = process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || 'us-east-1';
   const client = new CloudWatchLogsClient({ region, maxAttempts: 3 });
@@ -134,60 +135,72 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
 
   opts.onProgress({ step: `resolved ${logGroups.length} log group(s)`, pct: 3, eventsFetched: 0 });
 
-  // Pull across log groups round-robin. AWS charges per-call, so we keep
-  // the filter pattern specific and the page size at the upper bound (10,000).
   const filterPattern = opts.query || undefined;
 
-  for (let gi = 0; gi < logGroups.length; gi++) {
-    const logGroupName = logGroups[gi];
-    let nextToken: string | undefined;
-    let groupExhausted = false;
-    // eslint-disable-next-line no-constant-condition
-    while (true) {
-      if (shouldStop(deadline, events.length, opts.targetEventCount)) {
-        reasonStopped = events.length >= opts.targetEventCount ? 'target_reached' : 'time_exhausted';
-        break;
-      }
-      try {
-        const resp = await retryWithBackoff(() =>
-          client.send(
-            new FilterLogEventsCommand({
-              logGroupName,
-              startTime,
-              endTime,
-              filterPattern,
-              limit: 10000,
-              nextToken,
-            })
-          )
-        );
-        if (resp.events && resp.events.length > 0) {
-          for (const ev of resp.events) events.push(ev);
-        }
-        nextToken = resp.nextToken;
-        if (!nextToken) {
-          groupExhausted = true;
-          break;
-        }
-      } catch (e) {
-        const msg = (e as Error).message || '';
-        notes.push(`filter_error on ${logGroupName}: ${msg.slice(0, 200)}`);
-        // Non-fatal per group — move on.
-        groupExhausted = true;
-        break;
-      }
-      opts.onProgress({
-        step: `pulling from ${logGroupName} (${gi + 1}/${logGroups.length})`,
-        pct: Math.min(50, Math.round((events.length / opts.targetEventCount) * 50)),
-        eventsFetched: events.length,
-      });
-    }
+  // Stratified random sampling: 24 child sub-windows scattered across
+  // the parent window with per-run RNG. For each bucket, iterate the
+  // resolved log groups; bucketCap limits the total events across all
+  // groups within one bucket so a single chatty group can't monopolize.
+  const BUCKET_COUNT = 24;
+  const buckets = randomTimeBuckets(fromMs, toMs, BUCKET_COUNT);
+  const bucketCap = perBucketCap(opts.targetEventCount, BUCKET_COUNT);
+  const queryUsed = `${logGroups.join(',')}${filterPattern ? ` | ${filterPattern}` : ''}`;
+
+  bucketLoop: for (const bucket of buckets) {
     if (shouldStop(deadline, events.length, opts.targetEventCount)) {
       reasonStopped = events.length >= opts.targetEventCount ? 'target_reached' : 'time_exhausted';
       break;
     }
-    if (gi === logGroups.length - 1 && groupExhausted) {
-      reasonStopped = 'source_exhausted';
+    let bucketEvents = 0;
+    for (let gi = 0; gi < logGroups.length; gi++) {
+      if (bucketEvents >= bucketCap) break;
+      if (shouldStop(deadline, events.length, opts.targetEventCount)) {
+        reasonStopped = events.length >= opts.targetEventCount ? 'target_reached' : 'time_exhausted';
+        break bucketLoop;
+      }
+      const logGroupName = logGroups[gi];
+      let nextToken: string | undefined;
+      while (bucketEvents < bucketCap) {
+        if (shouldStop(deadline, events.length, opts.targetEventCount)) {
+          reasonStopped = events.length >= opts.targetEventCount ? 'target_reached' : 'time_exhausted';
+          break bucketLoop;
+        }
+        try {
+          const resp = await retryWithBackoff(() =>
+            client.send(
+              new FilterLogEventsCommand({
+                logGroupName,
+                startTime: bucket.fromMs,
+                endTime: bucket.toMs,
+                filterPattern,
+                limit: 10000,
+                nextToken,
+              })
+            )
+          );
+          if (resp.events && resp.events.length > 0) {
+            for (const ev of resp.events) {
+              if (bucketEvents >= bucketCap) break;
+              events.push(ev);
+              bucketEvents++;
+            }
+          }
+          nextToken = resp.nextToken;
+          if (!nextToken) break; // group/bucket exhausted
+        } catch (e) {
+          const msg = (e as Error).message || '';
+          notes.push(`bucket_${bucket.index}_${logGroupName}_error: ${msg.slice(0, 200)}`);
+          break; // non-fatal per group/bucket
+        }
+        opts.onProgress({
+          step: `cloudwatch bucket ${bucket.index + 1}/${BUCKET_COUNT} group ${gi + 1}/${logGroups.length}`,
+          pct: Math.min(
+            50,
+            Math.round(((bucket.index + bucketEvents / bucketCap) / BUCKET_COUNT) * 50)
+          ),
+          eventsFetched: events.length,
+        });
+      }
     }
   }
 

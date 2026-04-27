@@ -19,6 +19,7 @@ import type {
 } from './index.js';
 
 import { retryWithBackoff, shouldStop, parseWindowMs } from './_retry.js';
+import { randomTimeBuckets, perBucketCap } from './_sampling.js';
 
 interface Conn {
   url: string;
@@ -86,73 +87,97 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
 
   const deadline = Date.now() + opts.maxPullMinutes * 60_000;
   const windowMs = parseWindowMs(opts.window);
-  const since = new Date(Date.now() - windowMs).toISOString();
+  const toMs = Date.now();
+  const fromMs = toMs - windowMs;
   const indexPattern = opts.scope || 'logs-*';
-
-  // Build Elasticsearch query. If user passed a KQL-style `query`, pass it as
-  // a query_string (Elasticsearch's KQL superset). Always AND with timestamp.
-  const mustClauses: Record<string, unknown>[] = [
-    { range: { '@timestamp': { gte: since } } },
-  ];
-  if (opts.query) {
-    mustClauses.push({ query_string: { query: opts.query } });
-  }
 
   const events: unknown[] = [];
   const notes: string[] = [];
   let reasonStopped: PullStopReason = 'source_exhausted';
-  let searchAfter: unknown[] | undefined;
 
-  while (true) {
+  // Stratified random sampling: 24 child sub-windows scattered across
+  // the parent window with per-run RNG. Each bucket is its own
+  // search_after pagination scope, capped at perBucketCap.
+  const BUCKET_COUNT = 24;
+  const buckets = randomTimeBuckets(fromMs, toMs, BUCKET_COUNT);
+  const bucketCap = perBucketCap(opts.targetEventCount, BUCKET_COUNT);
+  const pageSize = 1000;
+
+  bucketLoop: for (const bucket of buckets) {
     if (shouldStop(deadline, events.length, opts.targetEventCount)) {
       reasonStopped = events.length >= opts.targetEventCount ? 'target_reached' : 'time_exhausted';
       break;
     }
-    try {
-      // Sort by @timestamp only. ES 9 disallows sorting on `_id`
-      // (indices.id_field_data.enabled=false by default), and `_shard_doc`
-      // requires an open point-in-time (PIT) context. Without PIT, relying
-      // on @timestamp alone is the simplest cross-version-safe option. For
-      // POC triage the rare duplicate/skip at identical timestamps is
-      // acceptable; customers who need strict dedup should open a PIT
-      // themselves and pass the PIT id via a future arg.
-      const searchBody: Record<string, unknown> = {
-        query: { bool: { must: mustClauses } },
-        size: 1000,
-        sort: [{ '@timestamp': 'asc' }],
-        track_total_hits: false,
-      };
-      if (searchAfter) searchBody.search_after = searchAfter;
-      const resp = await retryWithBackoff(() =>
-        client.search({
-          index: indexPattern,
-          ...searchBody,
-        })
-      );
-      const hits = ((resp as unknown as { hits: { hits: Array<{ _source: unknown; sort?: unknown[] }> } })
-        .hits?.hits) || [];
-      if (hits.length === 0) {
-        reasonStopped = 'source_exhausted';
+
+    const mustClauses: Record<string, unknown>[] = [
+      {
+        range: {
+          '@timestamp': {
+            gte: new Date(bucket.fromMs).toISOString(),
+            lte: new Date(bucket.toMs).toISOString(),
+          },
+        },
+      },
+    ];
+    if (opts.query) {
+      mustClauses.push({ query_string: { query: opts.query } });
+    }
+
+    let searchAfter: unknown[] | undefined;
+    let bucketEvents = 0;
+    while (bucketEvents < bucketCap) {
+      if (shouldStop(deadline, events.length, opts.targetEventCount)) {
+        reasonStopped = events.length >= opts.targetEventCount ? 'target_reached' : 'time_exhausted';
+        break bucketLoop;
+      }
+      try {
+        // Sort by @timestamp only. ES 9 disallows sorting on `_id`
+        // (indices.id_field_data.enabled=false by default), and `_shard_doc`
+        // requires an open point-in-time (PIT) context. Without PIT, relying
+        // on @timestamp alone is the simplest cross-version-safe option. For
+        // POC triage the rare duplicate/skip at identical timestamps is
+        // acceptable; customers who need strict dedup should open a PIT
+        // themselves and pass the PIT id via a future arg.
+        const remaining = bucketCap - bucketEvents;
+        const size = Math.min(pageSize, remaining);
+        const searchBody: Record<string, unknown> = {
+          query: { bool: { must: mustClauses } },
+          size,
+          sort: [{ '@timestamp': 'asc' }],
+          track_total_hits: false,
+        };
+        if (searchAfter) searchBody.search_after = searchAfter;
+        const resp = await retryWithBackoff(() =>
+          client.search({
+            index: indexPattern,
+            ...searchBody,
+          })
+        );
+        const hits =
+          ((resp as unknown as { hits: { hits: Array<{ _source: unknown; sort?: unknown[] }> } })
+            .hits?.hits) || [];
+        if (hits.length === 0) break; // bucket exhausted
+        for (const h of hits) {
+          if (bucketEvents >= bucketCap) break;
+          events.push(h._source);
+          bucketEvents++;
+        }
+        const last = hits[hits.length - 1];
+        searchAfter = last.sort;
+        opts.onProgress({
+          step: `elasticsearch bucket ${bucket.index + 1}/${BUCKET_COUNT} (${bucketEvents}/${bucketCap})`,
+          pct: Math.min(
+            50,
+            Math.round(((bucket.index + bucketEvents / bucketCap) / BUCKET_COUNT) * 50)
+          ),
+          eventsFetched: events.length,
+        });
+        if (hits.length < size) break; // bucket exhausted
+      } catch (e) {
+        notes.push(`elastic_bucket_${bucket.index}_error: ${(e as Error).message.slice(0, 200)}`);
+        // Per-bucket failure is non-fatal.
         break;
       }
-      for (const h of hits) {
-        events.push(h._source);
-      }
-      const last = hits[hits.length - 1];
-      searchAfter = last.sort;
-      opts.onProgress({
-        step: `elasticsearch search_after (${events.length} total)`,
-        pct: Math.min(50, Math.round((events.length / opts.targetEventCount) * 50)),
-        eventsFetched: events.length,
-      });
-      if (hits.length < 1000) {
-        reasonStopped = 'source_exhausted';
-        break;
-      }
-    } catch (e) {
-      notes.push(`elastic_page_error: ${(e as Error).message.slice(0, 200)}`);
-      reasonStopped = 'error';
-      break;
     }
   }
 
