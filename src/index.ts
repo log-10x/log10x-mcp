@@ -35,6 +35,7 @@ import { doctorSchema, executeDoctor, runDoctorChecks, renderDoctorReport } from
 import { log } from './lib/log.js';
 import { describeToolError } from './lib/tool-errors.js';
 import { retrieverQuerySchema, executeRetrieverQuery } from './tools/retriever-query.js';
+import { retrieverQueryStatusSchema, executeRetrieverQueryStatus } from './tools/retriever-query-status.js';
 import { retrieverSeriesSchema, executeRetrieverSeries } from './tools/retriever-series.js';
 import { backfillMetricSchema, executeBackfillMetric } from './tools/backfill-metric.js';
 import {
@@ -541,6 +542,37 @@ server.registerTool(
     })
 );
 
+// ── Tool: log10x_retriever_query_status ──
+//
+// Pairs with log10x_retriever_query. Reads the CW log streams for an
+// existing queryId and returns a fresh diagnostics snapshot — useful
+// when a prior retriever_query reported partialResults: true (poll
+// budget exceeded) or when an agent wants to verify a queryId's
+// progress without paying the full S3 results poll again.
+
+server.registerTool(
+  'log10x_retriever_query_status',
+  {
+    title: 'Retriever query status',
+    description:
+      'Poll the CloudWatch diagnostics for an in-flight or recently-completed retriever query. ' +
+      'Use when a prior `log10x_retriever_query` reported `partialResults: true` (MCP poll budget exceeded ' +
+      'before the server query finished), or when the agent wants to verify a queryId\'s progress without ' +
+      're-running the full query. Does NOT re-fetch result events from S3 — only reads the per-query CW ' +
+      'log streams and returns a structured snapshot of plan, scan stats, worker stats, and a status verdict ' +
+      '(complete / in-flight / scan pending / unknown). To fetch events, re-run `log10x_retriever_query`. ' +
+      '**Tier prerequisites**: same as `log10x_retriever_query`; additionally requires `LOG10X_RETRIEVER_LOG_GROUP` ' +
+      'to point at the retriever\'s per-query CW log group. **Example**: `{"queryId": "abc123", "queryStartedAt": 1777200000000}`.',
+    inputSchema: retrieverQueryStatusSchema,
+    annotations: { title: 'Retriever query status', readOnlyHint: true, idempotentHint: true, openWorldHint: true },
+  },
+  (args) =>
+    wrap('log10x_retriever_query_status', async () => {
+      const env = resolveEnv(getEnvs(), args.environment);
+      return executeRetrieverQueryStatus(args, env);
+    })
+);
+
 // ── Tool: log10x_retriever_series ──
 
 server.registerTool(
@@ -913,6 +945,7 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_resolve_batch', intent: 'Pasted-batch triage — per-pattern variable concentration + next actions' },
   { name: 'log10x_extract_templates', intent: 'Extract structural templates from a log corpus via local tenx — optional min/required/forbidden-merge assertions' },
   { name: 'log10x_retriever_query', intent: 'Direct archive retrieval by templateHash with JS filter expressions' },
+  { name: 'log10x_retriever_query_status', intent: 'Poll CloudWatch diagnostics for an existing retriever query (no S3 results re-fetch)' },
   { name: 'log10x_retriever_series', intent: 'Fidelity-aware time series from the S3 archive — auto-selects exact aggregation vs sampled fan-out' },
   { name: 'log10x_backfill_metric', intent: 'Create a new Datadog / Prometheus metric backfilled from Retriever archive' },
   { name: 'log10x_doctor', intent: 'Startup health check — env config, gateway, tier, freshness, Retriever, paste endpoint, cross-pillar enrichment floor' },
