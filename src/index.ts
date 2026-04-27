@@ -56,6 +56,7 @@ import {
   executePocSubmit,
   executePocStatus,
 } from './tools/poc-from-siem.js';
+import { pocFromLocalSchema, executePocFromLocal } from './tools/poc-from-local.js';
 import { discoverEnvSchema, executeDiscoverEnv } from './tools/discover-env.js';
 import { adviseReporterSchema, executeAdviseReporter } from './tools/advise-reporter.js';
 import { adviseReducerSchema, executeAdviseReducer } from './tools/advise-reducer.js';
@@ -758,6 +759,51 @@ server.registerTool(
   (args) => wrap('log10x_poc_from_siem_status', async () => executePocStatus(args))
 );
 
+// ── Tool: log10x_poc_from_local ──
+//
+// Local-source POC: pulls log lines from kubectl (and, in follow-up
+// work, docker / journald) when no log-analyzer connection is
+// available. Distinct from log10x_poc_from_siem in three ways:
+//   1. No vendor credentials needed (uses ambient kubeconfig)
+//   2. Cost framing is an industry-pricing matrix, NOT a prediction
+//      of any specific bill — kubectl only sees pod stdout, not
+//      CloudTrail / ALB / VM-hosted apps
+//   3. Synchronous (kubectl pull is fast); no snapshot lifecycle
+// The user must explicitly invoke this tool — there is NO automatic
+// fallthrough from log10x_poc_from_siem when SIEM creds fail. Implicit
+// fallthrough would let a prospect see local-source numbers framed as
+// if they were SIEM bill predictions; explicit invocation forces the
+// caller to acknowledge the framing change.
+
+server.registerTool(
+  'log10x_poc_from_local',
+  {
+    title: 'POC from local logs (kubectl)',
+    description:
+      'Run a log-cost-optimization POC entirely from local log sources — `kubectl` today, `docker` and `journald` to follow. No log-analyzer credentials required. Use when the prospect has no SIEM connection or has not yet shared API keys. ' +
+      'Returns a synchronous markdown report with: ' +
+      '(a) **sample composition** table — top-N pods by byte volume; the prospect must confirm the sample looks like their production mix, ' +
+      '(b) **industry-pricing matrix** — projected savings at Datadog / Splunk / CloudWatch / Sumo / Elastic / OpenSearch list prices, NOT a prediction of any specific bill, ' +
+      '(c) **top patterns** in the kubectl-sourced sample. ' +
+      'For native exclusion configs, paste-ready Reducer YAML, and the full 9-section report tied to a specific log analyzer\'s actual GB-billed volume, run `log10x_poc_from_siem` once credentials are available. ' +
+      '**No automatic fallthrough**: this tool is invoked explicitly. If `log10x_poc_from_siem` failed on missing credentials, the calling LLM should ask the user before re-invoking with this tool — local-source framing is genuinely different from SIEM-attached framing and silent fallthrough would be a bait-and-switch. ' +
+      '**Tier prerequisites**: kubectl on PATH + a working kubeconfig. No log10x API key required.',
+    inputSchema: pocFromLocalSchema,
+    annotations: { title: 'POC from local logs (kubectl)', readOnlyHint: true, idempotentHint: false, openWorldHint: true },
+  },
+  (args) =>
+    wrap('log10x_poc_from_local', async () =>
+      executePocFromLocal({
+        source: args.source ?? 'kubectl',
+        namespace: args.namespace ?? 'default',
+        window: args.window ?? '1h',
+        per_pod_limit: args.per_pod_limit ?? 5000,
+        max_pods: args.max_pods ?? 20,
+        privacy_mode: args.privacy_mode ?? true,
+      })
+    )
+);
+
 // ── Tool: log10x_discover_env (install advisor) ──
 
 server.registerTool(
@@ -879,6 +925,7 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_translate_metric_to_patterns', intent: 'Given a customer APM metric, return the Log10x patterns whose rate curves correspond — with structural validation' },
   { name: 'log10x_poc_from_siem_submit', intent: 'Pull a sample from the user\'s SIEM, templatize, and render a full cost-optimization POC report (async)' },
   { name: 'log10x_poc_from_siem_status', intent: 'Poll or retrieve the final report from a log10x_poc_from_siem_submit run' },
+  { name: 'log10x_poc_from_local', intent: 'Run the POC from local kubectl logs (no SIEM credentials needed); industry-pricing matrix instead of bill prediction' },
   { name: 'log10x_discover_env', intent: 'Read-only probe of k8s + AWS — returns a snapshot_id the advise_* tools consume' },
   { name: 'log10x_advise_install', intent: 'Front-end install advisor — picks standalone vs inline + app + forwarder + optimize based on what was detected' },
   { name: 'log10x_advise_reporter', intent: 'Reporter install/verify/teardown plan for a forwarder — inline or standalone (shape=standalone)' },
