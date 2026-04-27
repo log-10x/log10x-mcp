@@ -267,9 +267,13 @@ async function detectDailyVolumeGb(opts: VolumeDetectionOptions): Promise<Volume
     if (totalEvents === 0) {
       return { errorNote: 'Datadog logs_by_index: 0 events over 7d' };
     }
-    // Events → bytes approximation. 500 B/event is conservative for
-    // structured JSON logs; over-counts will overstate savings by the
-    // same ratio. Surfaced in the source label so users know.
+    // Events → bytes approximation. 500 B/event is the central guess
+    // for structured JSON logs; real per-event sizes range 200 B (small
+    // structured) to 2 KB (verbose JSON with tags). The rangeMultiplier
+    // (0.4× to 4×) propagates that uncertainty to the renderer so the
+    // headline cost shows as a range, not a misleading single number.
+    // Users who want a precise figure should grant `usage_read` scope
+    // (unlocks endpoint 1 above) or pass `total_daily_gb` directly.
     const AVG_BYTES_PER_EVENT = 500;
     const days = usage.reduce((s, u) => s + (u.hour ? 1 : 0), 0) / 24;
     const dailyEvents = totalEvents / Math.max(1, days);
@@ -277,6 +281,7 @@ async function detectDailyVolumeGb(opts: VolumeDetectionOptions): Promise<Volume
     return {
       dailyGb,
       source: `Datadog /api/v1/usage/logs_by_index (events × 500 B/event avg — byte endpoint not available on this tier, ${baseHost})`,
+      rangeMultiplier: { low: 0.4, high: 4 },
     };
   } catch (e) {
     return { errorNote: `Datadog volume detection failed: ${(e as Error).message.slice(0, 200)}` };
