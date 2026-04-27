@@ -22,6 +22,7 @@ import type {
 } from './index.js';
 
 import { retryWithBackoff, shouldStop, sleep, parseWindowMs } from './_retry.js';
+import { randomTimeBuckets, perBucketCap } from './_sampling.js';
 import { existsSync, readFileSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
@@ -133,8 +134,8 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
 
   const deadline = Date.now() + opts.maxPullMinutes * 60_000;
   const windowMs = parseWindowMs(opts.window);
-  const earliest = new Date(Date.now() - windowMs).toISOString();
-  const latest = new Date().toISOString();
+  const toMs = Date.now();
+  const fromMs = toMs - windowMs;
 
   // Build SPL. scope = index name. Every Splunk search must start with "search".
   const searchParts: string[] = ['search'];
@@ -146,137 +147,136 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
   const notes: string[] = [];
   let reasonStopped: PullStopReason = 'source_exhausted';
 
-  // Step 1: create search job.
-  const body = new URLSearchParams({
-    search: spl,
-    earliest_time: earliest,
-    latest_time: latest,
-    output_mode: 'json',
-    exec_mode: 'normal',
-  });
-
-  let sid: string;
-  try {
-    const createResp = await retryWithBackoff(() =>
-      splunkFetch(conn, '/services/search/jobs', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: body.toString(),
-      })
-    );
-    const job = (await createResp.json()) as { sid?: string };
-    if (!job.sid) throw new Error('splunk did not return a sid');
-    sid = job.sid;
-  } catch (e) {
-    return {
-      events: [],
-      metadata: {
-        actualCount: 0,
-        truncated: false,
-        queryUsed: spl,
-        reasonStopped: 'error',
-        notes: [`job_create_failed: ${(e as Error).message}`],
-      },
-    };
-  }
-
-  opts.onProgress({ step: `splunk job ${sid.slice(0, 12)} created`, pct: 10, eventsFetched: 0 });
-
-  // Step 2: poll for completion.
-  let eventsAvailable = 0;
-  let pollAttempts = 0;
-  while (true) {
-    if (Date.now() >= deadline) {
-      reasonStopped = 'time_exhausted';
-      break;
-    }
-    try {
-      const resp = await retryWithBackoff(() =>
-        splunkFetch(conn, `/services/search/jobs/${sid}?output_mode=json`)
-      );
-      const data = (await resp.json()) as { entry?: Array<{ content?: { isDone?: boolean; eventCount?: number; resultCount?: number; dispatchState?: string; doneProgress?: number } }> };
-      const content = data.entry?.[0]?.content;
-      const progress = content?.doneProgress ?? 0;
-      eventsAvailable = content?.resultCount ?? content?.eventCount ?? 0;
-      if (content?.isDone) break;
-      if (content?.dispatchState === 'FAILED') {
-        reasonStopped = 'error';
-        notes.push('splunk dispatchState=FAILED');
-        break;
-      }
-      // Exponential: 1s, 1s, 2s, 2s, 3s, 3s, … capped at 5s.
-      const wait = Math.min(5000, 1000 + 500 * Math.floor(pollAttempts / 2));
-      pollAttempts++;
-      opts.onProgress({
-        step: `splunk job ${sid.slice(0, 12)} polling (${Math.round(progress * 100)}%)`,
-        pct: 10 + Math.round(progress * 10),
-        eventsFetched: 0,
-      });
-      await sleep(wait);
-    } catch (e) {
-      notes.push(`poll_error: ${(e as Error).message}`);
-      reasonStopped = 'error';
-      break;
-    }
-  }
-
-  if (reasonStopped === 'error') {
-    await cancelJob(conn, sid).catch(() => undefined);
-    return {
-      events: [],
-      metadata: { actualCount: 0, truncated: false, queryUsed: spl, reasonStopped, notes },
-    };
-  }
-
-  // Step 3: paginate results.
+  // Stratified random sampling: 12 child sub-windows scattered across
+  // the parent window with per-run RNG. Splunk dispatches one search
+  // job per bucket sequentially — concurrent dispatches risk hitting
+  // the search head's per-user concurrency cap (default 6).
+  const BUCKET_COUNT = 12;
+  const buckets = randomTimeBuckets(fromMs, toMs, BUCKET_COUNT);
+  const bucketCap = perBucketCap(opts.targetEventCount, BUCKET_COUNT);
   const pageSize = 1000;
-  let offset = 0;
-  while (offset < eventsAvailable) {
+
+  bucketLoop: for (const bucket of buckets) {
     if (shouldStop(deadline, events.length, opts.targetEventCount)) {
       reasonStopped = events.length >= opts.targetEventCount ? 'target_reached' : 'time_exhausted';
       break;
     }
+
+    const earliest = new Date(bucket.fromMs).toISOString();
+    const latest = new Date(bucket.toMs).toISOString();
+    const body = new URLSearchParams({
+      search: spl,
+      earliest_time: earliest,
+      latest_time: latest,
+      output_mode: 'json',
+      exec_mode: 'normal',
+    });
+
+    let sid: string;
     try {
-      const resp = await retryWithBackoff(() =>
-        splunkFetch(
-          conn,
-          `/services/search/jobs/${sid}/results?offset=${offset}&count=${pageSize}&output_mode=json`
-        )
+      const createResp = await retryWithBackoff(() =>
+        splunkFetch(conn, '/services/search/jobs', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: body.toString(),
+        })
       );
-      const data = (await resp.json()) as { results?: Array<Record<string, unknown>> };
-      const results = data.results || [];
-      if (results.length === 0) break;
-      for (const r of results) {
-        events.push({
-          timestamp: r._time,
-          message: r._raw,
-          host: r.host,
-          source: r.source,
-          sourcetype: r.sourcetype,
-          index: r.index,
-          raw: r,
-        });
-      }
-      offset += results.length;
-      opts.onProgress({
-        step: `splunk results offset=${offset}/${eventsAvailable}`,
-        pct: Math.min(50, 20 + Math.round((events.length / opts.targetEventCount) * 30)),
-        eventsFetched: events.length,
-      });
-      if (results.length < pageSize) break;
+      const job = (await createResp.json()) as { sid?: string };
+      if (!job.sid) throw new Error('splunk did not return a sid');
+      sid = job.sid;
     } catch (e) {
-      notes.push(`page_error offset=${offset}: ${(e as Error).message.slice(0, 200)}`);
-      reasonStopped = 'error';
-      break;
+      notes.push(`bucket_${bucket.index}_create_failed: ${(e as Error).message.slice(0, 200)}`);
+      // Per-bucket failure is non-fatal; move on.
+      continue;
     }
-  }
 
-  if (reasonStopped === 'source_exhausted' && events.length < opts.targetEventCount && offset >= eventsAvailable) {
-    reasonStopped = 'source_exhausted';
-  }
+    opts.onProgress({
+      step: `splunk bucket ${bucket.index + 1}/${BUCKET_COUNT} job ${sid.slice(0, 12)}`,
+      pct: 10 + Math.round((bucket.index / BUCKET_COUNT) * 40),
+      eventsFetched: events.length,
+    });
 
-  // Clean up — avoid leaving orphan jobs on the search head.
-  await cancelJob(conn, sid).catch(() => undefined);
+    // Poll for completion.
+    let eventsAvailable = 0;
+    let pollAttempts = 0;
+    let pollFailed = false;
+    while (true) {
+      if (Date.now() >= deadline) {
+        reasonStopped = 'time_exhausted';
+        await cancelJob(conn, sid).catch(() => undefined);
+        break bucketLoop;
+      }
+      try {
+        const resp = await retryWithBackoff(() =>
+          splunkFetch(conn, `/services/search/jobs/${sid}?output_mode=json`)
+        );
+        const data = (await resp.json()) as { entry?: Array<{ content?: { isDone?: boolean; eventCount?: number; resultCount?: number; dispatchState?: string; doneProgress?: number } }> };
+        const content = data.entry?.[0]?.content;
+        eventsAvailable = content?.resultCount ?? content?.eventCount ?? 0;
+        if (content?.isDone) break;
+        if (content?.dispatchState === 'FAILED') {
+          notes.push(`bucket_${bucket.index}_dispatch_failed`);
+          pollFailed = true;
+          break;
+        }
+        const wait = Math.min(5000, 1000 + 500 * Math.floor(pollAttempts / 2));
+        pollAttempts++;
+        await sleep(wait);
+      } catch (e) {
+        notes.push(`bucket_${bucket.index}_poll_error: ${(e as Error).message.slice(0, 200)}`);
+        pollFailed = true;
+        break;
+      }
+    }
+
+    if (pollFailed) {
+      await cancelJob(conn, sid).catch(() => undefined);
+      continue;
+    }
+
+    // Paginate results, capped at bucketCap.
+    let offset = 0;
+    let bucketEvents = 0;
+    while (offset < eventsAvailable && bucketEvents < bucketCap) {
+      if (shouldStop(deadline, events.length, opts.targetEventCount)) {
+        reasonStopped = events.length >= opts.targetEventCount ? 'target_reached' : 'time_exhausted';
+        await cancelJob(conn, sid).catch(() => undefined);
+        break bucketLoop;
+      }
+      try {
+        const remaining = bucketCap - bucketEvents;
+        const count = Math.min(pageSize, remaining);
+        const resp = await retryWithBackoff(() =>
+          splunkFetch(
+            conn,
+            `/services/search/jobs/${sid}/results?offset=${offset}&count=${count}&output_mode=json`
+          )
+        );
+        const data = (await resp.json()) as { results?: Array<Record<string, unknown>> };
+        const results = data.results || [];
+        if (results.length === 0) break;
+        for (const r of results) {
+          events.push({
+            timestamp: r._time,
+            message: r._raw,
+            host: r.host,
+            source: r.source,
+            sourcetype: r.sourcetype,
+            index: r.index,
+            raw: r,
+          });
+          bucketEvents++;
+        }
+        offset += results.length;
+        if (results.length < count) break;
+      } catch (e) {
+        notes.push(`bucket_${bucket.index}_page_error offset=${offset}: ${(e as Error).message.slice(0, 200)}`);
+        break;
+      }
+    }
+
+    await cancelJob(conn, sid).catch(() => undefined);
+  }
 
   const truncated = reasonStopped !== 'source_exhausted' && events.length < opts.targetEventCount;
   return {
