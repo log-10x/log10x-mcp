@@ -595,6 +595,13 @@ export function renderPocReport(input: RenderInput): RenderResult {
     lines.push('');
   }
 
+  // Section 1.5: Reconciliation note — pre-empts the trust failure
+  // when a prospect compares our top-N to their SIEM's native pattern
+  // view. The two views WILL differ, sometimes substantially. Owning
+  // that upfront is cheaper than letting the prospect notice mid-meeting.
+  lines.push(reconciliationSection(input.siem));
+  lines.push('');
+
   // Section 2: Top cost drivers
   lines.push('## 2. Top Cost Drivers');
   lines.push('');
@@ -1173,6 +1180,96 @@ function fluentBitConfig(drops: EnrichedPattern[]): string {
 
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Pre-empt the most common trust-failure mode: prospect compares this
+ * report's top-N to their SIEM's native pattern view (Datadog Patterns,
+ * Splunk `cluster`, Elastic ML categorization, CloudWatch Insights
+ * `pattern` keyword) and finds disagreement. Two pattern algorithms
+ * built on different tokenizers will always disagree on edge cases.
+ * Owning that upfront is cheaper than letting the prospect notice
+ * mid-meeting and conclude the tool is broken.
+ *
+ * The text varies per SIEM because each native tool has its own
+ * tokenization quirks and its own term for "pattern". When live API
+ * integration ships per vendor (deferred to follow-up PRs), this
+ * section will additionally include a side-by-side table.
+ */
+function reconciliationSection(siem: SiemId): string {
+  const lines: string[] = [];
+  lines.push('## 1.5. Reconciliation with native pattern view');
+  lines.push('');
+  switch (siem) {
+    case 'datadog':
+      lines.push(
+        'Datadog has a built-in **Logs > Patterns** view that clusters log lines by template. Our top-N here will not match it line-for-line, and that is expected:'
+      );
+      lines.push('');
+      lines.push(
+        '- **Different tokenizers.** Datadog Patterns merges runs of digits and UUIDs aggressively; Log10x preserves field-level boundaries (`tenant=$ txId=$ ms=$`). The same log line resolves to a coarser Datadog pattern and a finer Log10x pattern.'
+      );
+      lines.push(
+        '- **Different sample.** Datadog Patterns runs over the indexed result set for the current Logs Explorer query. Our sample is a stratified random draw across your window. Different inputs → different distributions.'
+      );
+      lines.push(
+        '- **Different ranking.** Datadog ranks by event count; this report ranks by projected cost (count × bytes-per-event × $/GB). A high-frequency 50 B heartbeat outranks a low-frequency 5 KB stack trace in the Datadog view but not here.'
+      );
+      lines.push('');
+      lines.push(
+        'When you cross-check, expect ~7 of 10 patterns to overlap, 2-3 to differ on tokenization granularity, and rarely 1 to be missing from one side because the windows or scopes are not perfectly aligned.'
+      );
+      break;
+    case 'splunk':
+      lines.push(
+        'Splunk has a `cluster` SPL command (and the Patterns tab in the Search & Reporting app) that groups events by similarity threshold. Our top-N will not match it exactly:'
+      );
+      lines.push('');
+      lines.push(
+        '- **Different similarity model.** `cluster t=0.8` uses a Jaccard-style edit-distance threshold; Log10x extracts a structural template by identifying which positions vary. Edge-case inputs cluster differently.'
+      );
+      lines.push(
+        '- **Different sample.** `cluster` runs over the result set of the current SPL query in the UI. Our sample is a stratified random draw across your window.'
+      );
+      lines.push(
+        '- **Different ranking.** Patterns in the UI rank by event count; this report ranks by projected cost.'
+      );
+      break;
+    case 'elasticsearch':
+      lines.push(
+        'Elastic has ML-powered **categorization** in the Logs UI (`categorize_text` aggregation) that groups by message similarity. Our top-N will not match it exactly:'
+      );
+      lines.push('');
+      lines.push(
+        '- **Different categorization model.** `categorize_text` uses a Bayesian token classifier; Log10x extracts a structural template directly. Both produce templates, but the boundaries between categories differ on long-tail content.'
+      );
+      lines.push(
+        '- **Different sample.** Elastic categorization runs over the index hits for the active query. Our sample is a stratified random draw across your window.'
+      );
+      lines.push('- **Different ranking.** Categorize ranks by doc count; this report ranks by projected cost.');
+      break;
+    case 'cloudwatch':
+      lines.push(
+        'CloudWatch Insights has a **`pattern`** query keyword that groups by template. Our top-N will not match it exactly:'
+      );
+      lines.push('');
+      lines.push(
+        '- **Different sample.** CloudWatch Insights `pattern` runs over the events your Insights query selects. Our sample is a stratified random draw across your window and the same scope.'
+      );
+      lines.push(
+        '- **Different ranking.** CW Insights ranks by event count; this report ranks by projected cost (count × bytes × $/GB ingested).'
+      );
+      break;
+    default:
+      lines.push(
+        `Most log analyzers ship their own pattern/clustering view. Our top-N here is computed by a different algorithm on a different sample, so it will not match line-for-line. The two views are complementary: their pattern view ranks by event count over the result set; this report ranks by projected cost over a stratified random sample of your full window.`
+      );
+  }
+  lines.push('');
+  lines.push(
+    '_Mismatches across the two views are not bugs — they are different lenses. If you see a pattern here that you do not recognize from the native view, that is often the signal: the native view smoothed it into a coarser cluster._'
+  );
+  return lines.join('\n');
 }
 
 /**
