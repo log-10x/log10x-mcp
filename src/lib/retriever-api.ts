@@ -37,6 +37,7 @@ import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 import type { EnvConfig } from './environments.js';
+import { attachDiagnostics, type RetrieverQueryDiagnostics } from './retriever-diagnostics.js';
 
 const execFileP = promisify(execFile);
 
@@ -196,6 +197,14 @@ export interface RetrieverQueryResponse {
    * `queryScanFunctionParallelTimeslice` default).
    */
   summaries?: RetrieverSummary[];
+  /**
+   * Structured execution diagnostics built by polling CloudWatch Logs for
+   * the query's per-stream-worker streams. Populated when
+   * `LOG10X_RETRIEVER_LOG_GROUP` is set and the CW SDK can reach the log
+   * group. `pollingError` is set in place of a silent undefined when CW
+   * is unreachable — callers should check and degrade explicitly.
+   */
+  diagnostics?: RetrieverQueryDiagnostics;
 
   // Legacy-compatible fields populated client-side from `events` so that
   // callers written against the old Retriever contract (investigate, backfill)
@@ -1044,7 +1053,7 @@ export async function runRetrieverQuery(
   const buckets = computeBuckets(finalEvents, req.bucketSize || '5m');
   const countSummary = computeCountSummary(finalEvents);
 
-  return {
+  const response: RetrieverQueryResponse = {
     queryId,
     target,
     from: String(body.from),
@@ -1062,6 +1071,14 @@ export async function runRetrieverQuery(
     buckets,
     countSummary,
   };
+
+  // Attach CloudWatch-sourced execution diagnostics. Best-effort — polling
+  // errors surface as `diagnostics.pollingError` rather than being hidden.
+  // Enables zero-result classification: stale indexer vs. bloom miss vs.
+  // timeout vs. field-not-indexed, pinpointed via scanStats + errors.
+  await attachDiagnostics(response, started);
+
+  return response;
 }
 
 /**
