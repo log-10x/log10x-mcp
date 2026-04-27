@@ -86,6 +86,7 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
   const events: unknown[] = [];
   let reasonStopped: PullStopReason = 'source_exhausted';
   const notes: string[] = [];
+  let skippedNoMessage = 0;
 
   // Stratified random sampling: 24 child sub-windows scattered across
   // the parent window with per-run RNG. Successive POC runs against the
@@ -123,9 +124,19 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
         const data = resp.data || [];
         for (const ev of data) {
           if (bucketEvents >= bucketCap) break;
+          const message = extractMessage(ev);
+          if (message === null) {
+            // Custom-format ingests sometimes have neither
+            // attributes.message nor attributes.attributes.* populated.
+            // Skip rather than push `undefined` into the event stream;
+            // pattern-extraction would otherwise fingerprint a phantom
+            // "undefined" template.
+            skippedNoMessage++;
+            continue;
+          }
           events.push({
             timestamp: ev.attributes?.timestamp,
-            message: ev.attributes?.message,
+            message,
             service: ev.attributes?.service,
             status: ev.attributes?.status,
             tags: ev.attributes?.tags,
@@ -150,6 +161,12 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
     }
   }
 
+  if (skippedNoMessage > 0) {
+    notes.push(
+      `skipped ${skippedNoMessage} event(s) with no resolvable message body (custom-format ingest with empty attributes.message and attributes.attributes.*)`
+    );
+  }
+
   const truncated = reasonStopped !== 'source_exhausted' && events.length < opts.targetEventCount;
   return {
     events,
@@ -161,6 +178,42 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
       notes: notes.length > 0 ? notes : undefined,
     },
   };
+}
+
+/**
+ * Pull a usable message body off a Datadog log event.
+ *
+ * The standard shape is `attributes.message` (string). Custom-format
+ * ingests can populate `attributes.attributes.<field>` instead, with
+ * the original message buried under a customer-chosen key. Fall
+ * through:
+ *   1. attributes.message — happy path, ~95% of events.
+ *   2. attributes.attributes.message — common custom-format aliasing.
+ *   3. attributes.attributes.log / .body / .raw — vendor variants.
+ *   4. JSON.stringify(attributes.attributes) — last resort, gives the
+ *      pattern templater something to fingerprint instead of `undefined`.
+ *
+ * Returns null when every path is empty, so the caller can skip the
+ * event and surface the count in metadata. The prior `?.message`
+ * shortcut returned `undefined`, which then became the literal string
+ * "undefined" after `events.join('\n')` in pattern-extraction and got
+ * fingerprinted as a phantom pattern.
+ */
+function extractMessage(ev: unknown): string | null {
+  const e = ev as { attributes?: Record<string, unknown> };
+  const attrs = e?.attributes;
+  if (!attrs || typeof attrs !== 'object') return null;
+  const direct = attrs.message;
+  if (typeof direct === 'string' && direct.length > 0) return direct;
+  const nested = attrs.attributes as Record<string, unknown> | undefined;
+  if (nested && typeof nested === 'object') {
+    for (const key of ['message', 'log', 'body', 'raw']) {
+      const v = nested[key];
+      if (typeof v === 'string' && v.length > 0) return v;
+    }
+    if (Object.keys(nested).length > 0) return JSON.stringify(nested);
+  }
+  return null;
 }
 
 /**
@@ -295,3 +348,6 @@ export const datadogConnector: SiemConnector = {
   pullEvents,
   detectDailyVolumeGb,
 };
+
+/** Test-only surface; not part of the public connector API. */
+export const _internals = { extractMessage };
