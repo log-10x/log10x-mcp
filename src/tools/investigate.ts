@@ -49,7 +49,11 @@ export const investigateSchema = {
   window: z
     .string()
     .default('1h')
-    .describe('Analysis window. `1h` default for acute-spike cases; `30d` recommended for drift cases. Accepts any PromQL range string.'),
+    .describe('Analysis window. `1h` default for acute-spike cases; `30d` recommended for drift cases. Accepts any PromQL range string. Alias: `timeRange`.'),
+  timeRange: z
+    .string()
+    .optional()
+    .describe('Alias for `window` for consistency with other Log10x tools. If both are set, `window` wins.'),
   baseline_offset: z
     .string()
     .optional()
@@ -68,6 +72,7 @@ export async function executeInvestigate(
   args: {
     starting_point: string;
     window: string;
+    timeRange?: string;
     baseline_offset?: string;
     depth: 'shallow' | 'normal' | 'deep';
     environment?: string;
@@ -77,6 +82,11 @@ export async function executeInvestigate(
 ): Promise<string> {
   const investigationId = randomUUID();
   const thresholds = DEFAULT_THRESHOLDS;
+
+  // Accept `timeRange` as alias for `window` so the same arg name works
+  // across all Log10x tools.
+  // eslint-disable-next-line no-param-reassign
+  if (!args.window && args.timeRange) (args as Record<string, unknown>).window = args.timeRange;
 
   // Apply Zod-schema defaults defensively so the function works when called
   // directly (e.g. from tests or other tools) without the schema layer.
