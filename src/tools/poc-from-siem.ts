@@ -303,7 +303,6 @@ export async function executePocSubmit(args: PocSubmitArgs): Promise<string> {
   if (args.scope) planParts.push(`Scope: \`${args.scope}\`.`);
   if (args.query) planParts.push(`Query: \`${args.query}\`.`);
   if (siemDetectedNote) planParts.push(siemDetectedNote);
-  planParts.push(`Max pull time: ${args.max_pull_minutes} min. Call \`log10x_poc_from_siem_status({snapshot_id: "${snapshot.id}"})\` to retrieve progress and the final report.`);
 
   const out = [
     '## Log10x POC — submit accepted',
@@ -313,6 +312,19 @@ export async function executePocSubmit(args: PocSubmitArgs): Promise<string> {
     `**estimated_duration_minutes**: ${estimatedDuration}`,
     '',
     planParts.join(' '),
+    '',
+    '### Phases',
+    '',
+    `1. \`pulling\` — fetching events from ${SIEM_DISPLAY_NAMES[connector.id]} (typical 1-3 min)`,
+    `2. \`templatizing\` — extracting patterns from the sample (typical 3-8 min depending on event count)`,
+    `3. \`rendering\` — building the final report (<5s)`,
+    `4. \`complete\` — full report available; call status with \`view: "summary"\` (default), \`"yaml"\`, \`"configs"\`, \`"top"\`, or \`"pattern"\`.`,
+    '',
+    '### Polling',
+    '',
+    `Call \`log10x_poc_from_siem_status({snapshot_id: "${snapshot.id}"})\` every ~30s while the pipeline runs.`,
+    `During \`templatizing\`, the snapshot exposes \`partialPatternsFound\` — when that number stabilizes, the templater is winding down and the report is close to ready.`,
+    `Hard ceiling on pull time: ${args.max_pull_minutes} min (per the submit \`max_pull_minutes\` arg).`,
   ].join('\n');
 
   return out;
@@ -411,8 +423,20 @@ export async function executePocStatus(args: PocStatusArgs): Promise<string> {
     lines.push(`**partial_patterns_found**: ${s.partialPatternsFound}`);
   }
   lines.push('');
+  // Phase-aware polling guidance: tell the LLM how long this phase
+  // typically lasts so it can pick a sane next-poll interval and not
+  // burn cycles on pointless 5s-poll loops.
+  const phaseHint =
+    s.status === 'pulling'
+      ? 'Pulling phase typically takes 1-3 min; partial patterns surface only after pull completes.'
+      : s.status === 'templatizing'
+      ? 'Templatizing phase typically takes 3-8 min. `partial_patterns_found` updates as patterns resolve; when it stops growing, render is close.'
+      : s.status === 'rendering'
+      ? 'Rendering takes <5s; the next poll should return `complete`.'
+      : '';
+  if (phaseHint) lines.push(phaseHint);
   lines.push(
-    `The pipeline is still running. Poll again with \`log10x_poc_from_siem_status({snapshot_id: "${s.id}"})\` in ~30s.`
+    `Poll again with \`log10x_poc_from_siem_status({snapshot_id: "${s.id}"})\` in ~30s.`
   );
   return lines.join('\n');
 }
