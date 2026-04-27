@@ -658,10 +658,10 @@ ${indent(exporter, 4)}
 export const STANDALONE_SPEC: ForwarderSpec = {
   label: 'Standalone Reporter (reporter-10x)',
   integrationMode:
-    'Parallel DaemonSet using the log10x-k8s/reporter-10x chart — bundles fluent-bit + tenx-edge. Tails /var/log/containers/*.log alongside your existing forwarder without touching it. Report-mode only (metrics, no filtering or encoded output).',
+    'Parallel DaemonSet using the log10x/reporter-10x chart — bundles fluent-bit + tenx-edge. Tails /var/log/containers/*.log alongside your existing forwarder without touching it. Report-mode only (metrics, no filtering or encoded output).',
   helmRepo: 'https://log-10x.github.io/helm-charts',
-  helmRepoAlias: 'log10x-k8s',
-  chartRef: 'log10x-k8s/reporter-10x',
+  helmRepoAlias: 'log10x',
+  chartRef: 'log10x/reporter-10x',
   chartAvailability: 'published',
   primaryImageHint: 'ghcr.io/log-10x/fluent-bit-10x',
   primaryContainerName: 'fluent-bit',

@@ -5,7 +5,7 @@
  * Retriever is a standalone set of workloads (indexer + query-handler
  * + stream-worker + filter CronJobs) that read from S3 via SQS and
  * serve an HTTP query endpoint. No forwarder choice — just one chart
- * (`log10x-k8s/retriever` or the log10x-hosted variant) with AWS infra
+ * (`log10x/retriever` or the log10x-hosted variant) with AWS infra
  * pointers.
  *
  * The advisor's job is to:
@@ -53,8 +53,8 @@ export interface RetrieverAdviseArgs {
 }
 
 const RETRIEVER_CHART_REPO = 'https://log-10x.github.io/helm-charts';
-const RETRIEVER_CHART_ALIAS = 'log10x-k8s';
-const RETRIEVER_CHART_REF = 'log10x-k8s/retriever';
+const RETRIEVER_CHART_ALIAS = 'log10x';
+const RETRIEVER_CHART_REF = 'log10x/retriever';
 
 export async function buildRetrieverPlan(args: RetrieverAdviseArgs): Promise<AdvisePlan> {
   const snapshot = args.snapshot;
