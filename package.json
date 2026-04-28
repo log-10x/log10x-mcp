@@ -52,10 +52,13 @@
     "@elastic/elasticsearch": "^9.3.4",
     "@google-cloud/logging": "^11.2.1",
     "@modelcontextprotocol/sdk": "^1.12.1",
+    "protobufjs": "^8.0.3",
+    "snappyjs": "^0.7.0",
     "zod": "^3.24.4"
   },
   "devDependencies": {
     "@types/node": "^22.15.17",
+    "@types/snappyjs": "^0.7.1",
     "typescript": "^5.8.3"
   },
   "engines": {
