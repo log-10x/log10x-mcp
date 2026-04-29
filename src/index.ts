@@ -9,7 +9,7 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { recordStart, withTelemetry } from './lib/self-telemetry.js';
+import { recordStart, withTelemetry, setEnvsProvider } from './lib/self-telemetry.js';
 import { z } from 'zod';
 
 import { loadEnvironments, resolveEnv, type EnvConfig, type Environments, EnvironmentValidationError } from './lib/environments.js';
@@ -1061,6 +1061,11 @@ async function main() {
     }
     throw e;
   }
+  // Plumb the envs reference into self-telemetry so the wrapper can
+  // resolve which env each tool call acted on, and flush can drop counters
+  // from read-only envs (incl. demo). Must happen AFTER initEnvs so the
+  // first telemetry flush has a populated env list.
+  setEnvsProvider(getEnvs);
   const loaded = getEnvs();
   log.info('mcp.boot', {
     version: '1.4.0',
