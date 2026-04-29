@@ -1,0 +1,83 @@
+name: Publish to npm
+
+# Triggered by pushing a `v<x.y.z>` tag. The workflow refuses to publish if
+# the tag's version doesn't match `package.json` exactly — a forgotten
+# version bump shouldn't silently ship a stale package.
+#
+# Manual `workflow_dispatch` is also wired so the maintainer can re-publish
+# a previously-tagged version after editing the workflow itself, without
+# needing to delete and re-push the tag.
+#
+# Auth model: npm Trusted Publishing (OIDC). No long-lived NPM_TOKEN secret
+# in the repo — GitHub Actions exchanges its OIDC token for a short-lived
+# npm credential at publish time, scoped to this exact workflow. The
+# package's `Trusted Publisher` config on npmjs.com must list:
+#   - Repository owner: log-10x
+#   - Repository name:  log10x-mcp
+#   - Workflow filename: publish.yml
+#   - Environment:      (leave blank unless we add an environment guard later)
+# Configure once at https://www.npmjs.com/package/log10x-mcp/access (requires
+# package owner — Tal initially; co-maintainers after `npm owner add`).
+#
+# Side benefit: `npm publish --provenance` attaches a verifiable Sigstore
+# attestation tying the published tarball to this commit + workflow run, so
+# downstream consumers can audit the supply chain via `npm audit signatures`.
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+# Concurrency guard: a re-pushed tag (rare, but happens) shouldn't race a
+# previous publish run. Cancel-in-progress is OFF on purpose — if a publish
+# is mid-flight we want it to finish, not get killed.
+concurrency:
+  group: publish-npm
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Required for npm Trusted Publishing — lets the runner mint an OIDC
+      # token that npm can verify against its trusted-publisher config.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node 20 with npm registry
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+          registry-url: 'https://registry.npmjs.org'
+          cache: 'npm'
+
+      - name: Verify tag matches package.json version
+        # Skip on workflow_dispatch (manual re-publish) since there's no tag
+        # to compare against. Tag pushes get the strict check.
+        if: github.event_name == 'push'
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF#refs/tags/v}"
+          pkg=$(node -p "require('./package.json').version")
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::Tag v$tag does not match package.json version $pkg. Bump package.json before tagging."
+            exit 1
+          fi
+          echo "tag=$tag matches package.json=$pkg"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm test
+        env:
+          LOG10X_INTEGRATION_TESTS: '0'
+
+      - name: Publish to npm (Trusted Publishing + provenance)
+        run: npm publish --access public --provenance

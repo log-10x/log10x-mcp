@@ -189,7 +189,7 @@ async function getAnalyzerCost(env: EnvConfig, override?: number): Promise<numbe
 // ── Server ──
 
 const server = new McpServer(
-  { name: 'log10x', version: '1.4.0' },
+  { name: 'log10x', version: readClientVersion() },
   {
     instructions: `Log10x is the observability memory for the user's logs. Every log line the pipeline
 has ever seen is fingerprinted into a stable pattern identity (field-set) that stays constant across
@@ -770,7 +770,7 @@ async function handleCliFlags(): Promise<boolean> {
   const args = process.argv.slice(2);
   if (args.includes('--version') || args.includes('-v')) {
     // eslint-disable-next-line no-console
-    console.log('log10x-mcp 1.4.0');
+    console.log(`log10x-mcp ${readClientVersion()}`);
     return true;
   }
   if (args.includes('--list-tools')) {
