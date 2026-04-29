@@ -68,6 +68,16 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           cache: 'npm'
 
+      # The npm CLI bundled with Node 20.x is 10.8.x — that version sends the
+      # NODE_AUTH_TOKEN that setup-node injects (a GitHub token, not an npm
+      # one) as the auth bearer on `npm publish`, which npm.org masks as 404.
+      # npm 11.5.1+ detects the GitHub OIDC context and ignores the bogus
+      # token, falling back to Trusted Publishing. Force-upgrading is the
+      # cleanest fix until Node 20.x ships with npm 11.5+ by default.
+      - name: Upgrade npm to >= 11.5.1 (Trusted Publishing requires it)
+        if: steps.ver.outputs.already_shipped == 'false'
+        run: npm install -g npm@latest
+
       - name: Install dependencies
         if: steps.ver.outputs.already_shipped == 'false'
         run: npm ci
