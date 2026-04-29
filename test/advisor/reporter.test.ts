@@ -338,7 +338,7 @@ test('shape=standalone installs reporter-10x regardless of detected forwarder', 
   assert.equal(plan.blockers.length, 0);
   const installText = JSON.stringify(plan.install);
   assert.ok(
-    installText.includes('log10x-k8s/reporter-10x'),
+    installText.includes('log10x/reporter-10x'),
     `standalone install should use reporter-10x chart; got: ${installText.slice(0, 400)}`
   );
   assert.ok(
