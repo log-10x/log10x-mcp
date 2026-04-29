@@ -17,6 +17,7 @@
 
 import { z } from 'zod';
 import type { Environments } from '../lib/environments.js';
+import { activeNotices, getManifest } from '../lib/manifest.js';
 
 export const loginStatusSchema = {};
 
@@ -27,6 +28,18 @@ export async function executeLoginStatus(
   const lines: string[] = [];
   lines.push('## Log10x login status');
   lines.push('');
+
+  // Surface any global notices the Log10x team has published in the manifest
+  // (e.g., scheduled maintenance, API deprecation lead times, new tool tips).
+  // Rendered at the top so the LLM relays them prominently.
+  const notices = activeNotices(getManifest());
+  if (notices.length > 0) {
+    for (const n of notices) {
+      const tag = n.level === 'warn' ? '⚠ Notice' : 'ℹ Notice';
+      lines.push(`> **${tag}:** ${n.message}`);
+    }
+    lines.push('');
+  }
 
   if (envs.isDemoMode) {
     lines.push('**You are in DEMO MODE.** No `LOG10X_API_KEY` is set in the MCP server\'s environment, so the MCP booted against the public read-only demo env (the same one console.log10x.com shows visitors who haven\'t signed up).');

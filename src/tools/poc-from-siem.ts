@@ -40,9 +40,10 @@ import {
   type RenderInput,
 } from '../lib/poc-report-renderer.js';
 import { prettifyPatterns } from '../lib/ai-prettify.js';
+import { readClientVersion } from '../lib/manifest.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
-const MCP_VERSION = '1.4.0';
+const MCP_VERSION = readClientVersion();
 
 // ── Schemas ──
 
