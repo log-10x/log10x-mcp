@@ -318,4 +318,24 @@ Full documentation: [doc.log10x.com/manage/mcp-server](https://doc.log10x.com/ma
 
 ## License
 
-MIT
+This package is licensed under the [Apache License 2.0](LICENSE).
+
+### Important: Log10x Product License Required
+
+This package is the open-source MCP server for Log10x. While the MCP itself is open source,
+**using Log10x requires a commercial license**.
+
+| Component | License |
+|-----------|---------|
+| This package (`log10x-mcp`) | Apache 2.0 (open source) |
+| Log10x engine and runtime | Commercial license required |
+
+**What this means:**
+- You can freely use, modify, and distribute this MCP server
+- The Log10x backend services and `tenx` runtime that this MCP talks to require a paid subscription
+- A valid Log10x API key is required to call the account-scoped tools (sign in via `log10x_signin` or set `LOG10X_API_KEY`)
+
+**Get Started:**
+- [Log10x Pricing](https://log10x.com/pricing)
+- [Documentation](https://doc.log10x.com)
+- [Contact Sales](mailto:sales@log10x.com)

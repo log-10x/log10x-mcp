@@ -33,7 +33,7 @@
     "ai-tools"
   ],
   "author": "Log10x",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "homepage": "https://log10x.com",
   "repository": {
     "type": "git",
