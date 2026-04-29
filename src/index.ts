@@ -9,6 +9,7 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { recordStart, withTelemetry, setEnvsProvider } from './lib/self-telemetry.js';
 import { z } from 'zod';
 
 import { loadEnvironments, resolveEnv, type EnvConfig, type Environments, EnvironmentValidationError } from './lib/environments.js';
@@ -299,6 +300,18 @@ Analyzer cost is auto-detected from the user's profile. Typical rates if unspeci
 Splunk $6/GB, Datadog $2.50/GB, Elasticsearch $1/GB, CloudWatch $0.50/GB.`,
   }
 );
+
+// ── Self-telemetry hook ──
+// Wrap every server.registerTool call so tool dispatches increment a counter
+// (log10x_mcp_tool_call_total) that the Log10x console reads to detect MCP activity.
+// Must run BEFORE any registerTool call. Silent no-op unless LOG10X_API_KEY +
+// PROMETHEUS_REMOTE_WRITE_URL (or LOG10X_TELEMETRY_URL) are both set.
+recordStart();
+const _originalRegisterTool = server.registerTool.bind(server) as typeof server.registerTool;
+(server as any).registerTool = ((name: string, schema: any, handler: any) => {
+  const wrapped = withTelemetry(name, handler);
+  return _originalRegisterTool(name as any, schema, wrapped);
+}) as any;
 
 // ── Tool: log10x_cost_drivers ──
 
@@ -1048,6 +1061,11 @@ async function main() {
     }
     throw e;
   }
+  // Plumb the envs reference into self-telemetry so the wrapper can
+  // resolve which env each tool call acted on, and flush can drop counters
+  // from read-only envs (incl. demo). Must happen AFTER initEnvs so the
+  // first telemetry flush has a populated env list.
+  setEnvsProvider(getEnvs);
   const loaded = getEnvs();
   log.info('mcp.boot', {
     version: '1.4.0',
