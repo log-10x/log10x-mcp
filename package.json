@@ -9,6 +9,7 @@
   },
   "files": [
     "build",
+    "default-manifest.json",
     "README.md",
     "LICENSE"
   ],
