@@ -1,8 +1,11 @@
 name: CI
 
+# Runs on PRs only. Direct pushes to main happen via merge of a CI-passing PR
+# (branch protection enforces this), so re-running on push:[main] would just
+# burn minutes on the same code. The actual release is gated by publish.yml,
+# not by this workflow.
+
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
 
@@ -46,3 +49,27 @@ jobs:
           fi
         env:
           LOG10X_API_KEY: 'ci-test-key'
+
+  # Block any merge that doesn't bump package.json — the auto-publish in
+  # publish.yml refuses to re-publish a version that's already on npm, so
+  # without a bump the merge would land but never ship. Catch it here so the
+  # PR author fixes it before merge instead of after.
+  version-bump-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify version bumped vs base branch
+        run: |
+          set -euo pipefail
+          git fetch origin "${{ github.base_ref }}" --depth=1
+          base_ver=$(git show "origin/${{ github.base_ref }}:package.json" | node -p "JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).version")
+          pr_ver=$(node -p "require('./package.json').version")
+          echo "base (${{ github.base_ref }}) version: $base_ver"
+          echo "PR version: $pr_ver"
+          if [ "$base_ver" = "$pr_ver" ]; then
+            echo "::error file=package.json::Version unchanged ($pr_ver). Bump package.json before merging — npm refuses to re-publish the same version."
+            exit 1
+          fi

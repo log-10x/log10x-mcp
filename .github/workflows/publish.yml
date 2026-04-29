@@ -1,37 +1,31 @@
 name: Publish to npm
 
-# Triggered by pushing a `v<x.y.z>` tag. The workflow refuses to publish if
-# the tag's version doesn't match `package.json` exactly — a forgotten
-# version bump shouldn't silently ship a stale package.
+# Auto-publishes on every merge to main where `package.json.version` differs
+# from the most recently shipped version (detected by the absence of a
+# `v<version>` git tag). PR validation in ci.yml refuses to merge a PR that
+# doesn't bump the version, so any push that lands here represents an
+# intentional release.
 #
-# Manual `workflow_dispatch` is also wired so the maintainer can re-publish
-# a previously-tagged version after editing the workflow itself, without
-# needing to delete and re-push the tag.
+# Tag is created AFTER a successful publish so the tag always points at code
+# that actually shipped to npm. A failed publish leaves no tag, which is the
+# correct invariant — the next merge can retry without manual cleanup.
 #
-# Auth model: npm Trusted Publishing (OIDC). No long-lived NPM_TOKEN secret
-# in the repo — GitHub Actions exchanges its OIDC token for a short-lived
-# npm credential at publish time, scoped to this exact workflow. The
-# package's `Trusted Publisher` config on npmjs.com must list:
-#   - Repository owner: log-10x
-#   - Repository name:  log10x-mcp
-#   - Workflow filename: publish.yml
-#   - Environment:      (leave blank unless we add an environment guard later)
-# Configure once at https://www.npmjs.com/package/log10x-mcp/access (requires
-# package owner — Tal initially; co-maintainers after `npm owner add`).
+# Auth model: npm Trusted Publishing (OIDC). The package's Trusted Publisher
+# config on npmjs.com lists this exact workflow filename (`publish.yml`).
+# Configure once at https://www.npmjs.com/package/log10x-mcp/access.
+# `--provenance` attaches a Sigstore attestation tying the published tarball
+# to this workflow run, verifiable via `npm audit signatures`.
 #
-# Side benefit: `npm publish --provenance` attaches a verifiable Sigstore
-# attestation tying the published tarball to this commit + workflow run, so
-# downstream consumers can audit the supply chain via `npm audit signatures`.
+# Manual `workflow_dispatch` is wired for re-runs after editing this file
+# without forcing an empty version-bump merge.
 
 on:
   push:
-    tags:
-      - 'v*.*.*'
+    branches: [main]
   workflow_dispatch:
 
-# Concurrency guard: a re-pushed tag (rare, but happens) shouldn't race a
-# previous publish run. Cancel-in-progress is OFF on purpose — if a publish
-# is mid-flight we want it to finish, not get killed.
+# Concurrency guard: rapid-fire merges shouldn't race a publish in flight.
+# cancel-in-progress is OFF — we never want to kill an active npm publish.
 concurrency:
   group: publish-npm
   cancel-in-progress: false
@@ -40,44 +34,63 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      # `contents: write` is needed to push the v-tag back to origin after
+      # a successful publish. The default GITHUB_TOKEN scope is read-only.
+      contents: write
       # Required for npm Trusted Publishing — lets the runner mint an OIDC
-      # token that npm can verify against its trusted-publisher config.
+      # token that npm verifies against its trusted-publisher config.
       id-token: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Need full history so `git rev-parse v<version>` can see all tags.
+          fetch-depth: 0
+
+      - name: Detect version + check whether already shipped
+        id: ver
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./package.json').version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if git rev-parse --verify --quiet "refs/tags/v$version" >/dev/null; then
+            echo "already_shipped=true" >> "$GITHUB_OUTPUT"
+            echo "v$version already tagged — nothing to publish."
+          else
+            echo "already_shipped=false" >> "$GITHUB_OUTPUT"
+            echo "v$version not yet tagged — will publish."
+          fi
 
       - name: Setup Node 20 with npm registry
+        if: steps.ver.outputs.already_shipped == 'false'
         uses: actions/setup-node@v4
         with:
           node-version: '20.x'
           registry-url: 'https://registry.npmjs.org'
           cache: 'npm'
 
-      - name: Verify tag matches package.json version
-        # Skip on workflow_dispatch (manual re-publish) since there's no tag
-        # to compare against. Tag pushes get the strict check.
-        if: github.event_name == 'push'
-        run: |
-          set -euo pipefail
-          tag="${GITHUB_REF#refs/tags/v}"
-          pkg=$(node -p "require('./package.json').version")
-          if [ "$tag" != "$pkg" ]; then
-            echo "::error::Tag v$tag does not match package.json version $pkg. Bump package.json before tagging."
-            exit 1
-          fi
-          echo "tag=$tag matches package.json=$pkg"
-
       - name: Install dependencies
+        if: steps.ver.outputs.already_shipped == 'false'
         run: npm ci
 
       - name: Build
+        if: steps.ver.outputs.already_shipped == 'false'
         run: npm run build
 
       - name: Test
+        if: steps.ver.outputs.already_shipped == 'false'
         run: npm test
         env:
           LOG10X_INTEGRATION_TESTS: '0'
 
       - name: Publish to npm (Trusted Publishing + provenance)
+        if: steps.ver.outputs.already_shipped == 'false'
         run: npm publish --access public --provenance
+
+      - name: Tag v${{ steps.ver.outputs.version }} (post-publish, ship-of-record)
+        if: steps.ver.outputs.already_shipped == 'false'
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "v${{ steps.ver.outputs.version }}"
+          git push origin "v${{ steps.ver.outputs.version }}"
