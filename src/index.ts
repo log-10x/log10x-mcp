@@ -68,6 +68,11 @@ import { adviseCompactSchema, executeAdviseCompact } from './tools/advise-compac
 import { loginStatusSchema, executeLoginStatus } from './tools/login-status.js';
 import { signinSchema, executeSignin } from './tools/signin.js';
 import { signoutSchema, executeSignout } from './tools/signout.js';
+import { updateSettingsSchema, executeUpdateSettings } from './tools/update-settings.js';
+import { createEnvSchema, executeCreateEnv } from './tools/create-env.js';
+import { updateEnvSchema, executeUpdateEnv } from './tools/update-env.js';
+import { deleteEnvSchema, executeDeleteEnv } from './tools/delete-env.js';
+import { rotateApiKeySchema, executeRotateApiKey } from './tools/rotate-api-key.js';
 import { getStatus } from './resources/status.js';
 
 // ── Environment + cost cache ──
@@ -672,6 +677,71 @@ server.registerTool(
   () => wrap('log10x_signout', async () => executeSignout({}, getEnvs()))
 );
 
+// ── Tool: log10x_update_settings ──
+
+server.registerTool(
+  'log10x_update_settings',
+  {
+    title: 'Update Log10x account settings',
+    description: 'Update the user\'s Log10x account metadata (analyzer cost ($/GB), AI provider settings, display name, etc.) via `POST /api/v1/user`. **Call this for**: "set my analyzer cost to $3", "switch my AI provider to OpenAI", "use my own Anthropic key", "disable AI", "update my company name". Idempotent — repeated calls converge to the same state. The metadata field is a free-form key/value object; common fields are documented in the schema. Existing fields not in the payload are preserved (PATCH-like semantics). On success, the in-process env list is reloaded so subsequent tool calls see the updated metadata immediately (e.g., new analyzer_cost is honored on the next cost_drivers run). **Tier prerequisites**: requires a real signed-in account — demo accounts cannot update metadata.',
+    inputSchema: updateSettingsSchema,
+    annotations: { title: 'Update account settings', readOnlyHint: false, idempotentHint: true, openWorldHint: true },
+  },
+  (args) => wrap('log10x_update_settings', async () => executeUpdateSettings(args, getEnvs()))
+);
+
+// ── Tool: log10x_create_env ──
+
+server.registerTool(
+  'log10x_create_env',
+  {
+    title: 'Create Log10x environment',
+    description: 'Provision a new Log10x environment on the user\'s account via `POST /api/v1/user/env`. **Call this for**: "create a staging env", "I need a new environment for my dev cluster", "set up a separate env for ${customer-name}". Pairs naturally with the install advisor — after creating the env, call `log10x_advise_install` with the new env_id to get the Reporter / Reducer / Retriever install plan scoped to it. The new env\'s id is returned in the result so the LLM can chain. NOT idempotent — duplicate names are rejected with 409 Conflict; the tool pre-checks the in-memory env list to surface a friendly error before the round-trip. **Tier prerequisites**: requires a real signed-in account.',
+    inputSchema: createEnvSchema,
+    annotations: { title: 'Create environment', readOnlyHint: false, idempotentHint: false, openWorldHint: true },
+  },
+  (args) => wrap('log10x_create_env', async () => executeCreateEnv(args, getEnvs()))
+);
+
+// ── Tool: log10x_update_env ──
+
+server.registerTool(
+  'log10x_update_env',
+  {
+    title: 'Rename or set-default Log10x environment',
+    description: 'Update an existing Log10x environment via `PUT /api/v1/user/env`: rename it, or change which env is the user\'s default. **Call this for**: "rename my staging env to dev", "make production the default", "set my main account as the default env". Idempotent. The env_id is required (get it from `log10x_login_status`). Pass at least one of `name` or `is_default`. **Tier prerequisites**: requires a real signed-in account AND the backend gateway to have the PUT route configured (see backend PR #62). Until that ships, the tool surfaces a clean error pointing at the console workaround.',
+    inputSchema: updateEnvSchema,
+    annotations: { title: 'Update environment', readOnlyHint: false, idempotentHint: true, openWorldHint: true },
+  },
+  (args) => wrap('log10x_update_env', async () => executeUpdateEnv(args, getEnvs()))
+);
+
+// ── Tool: log10x_delete_env ──
+
+server.registerTool(
+  'log10x_delete_env',
+  {
+    title: 'Delete Log10x environment (destructive)',
+    description: 'Remove an environment from the user\'s Log10x account via `DELETE /api/v1/user/env`. **DESTRUCTIVE — irrecoverable.** Metric history scoped to the env is also lost. Backend rejects 401 if the caller is not the env owner. **Call this only when the user has explicitly asked to delete an env and confirmed the env name back.** The tool requires a `confirm_name` arg matching the env\'s exact display name (case-sensitive); if it doesn\'t match, the tool refuses without contacting the backend and shows the correct name. Mirrors `gh repo delete` and the GitHub web "type the repo name to confirm" pattern. **Best practice**: when the user says "delete X env", state the name and env_id back, ask for explicit confirmation, then call this with the confirmed name. **Tier prerequisites**: requires a real signed-in account with OWNER permission on the env.',
+    inputSchema: deleteEnvSchema,
+    annotations: { title: 'Delete environment', readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+  },
+  (args) => wrap('log10x_delete_env', async () => executeDeleteEnv(args, getEnvs()))
+);
+
+// ── Tool: log10x_rotate_api_key ──
+
+server.registerTool(
+  'log10x_rotate_api_key',
+  {
+    title: 'Rotate Log10x API key (destructive)',
+    description: 'Replace the user\'s Log10x API key with a freshly-minted UUID via `POST /api/v1/user/rotate-key`. **DESTRUCTIVE — the previous key is invalidated immediately on the backend.** Other devices / scripts / hosts holding the old key will start receiving `401 Unauthorized` on the next request. **Call this for**: "rotate my Log10x API key", "I think my key was leaked", "regenerate my API key". Requires a `confirm: "rotate-now"` literal to prevent accidental triggering — always ask the user to confirm before calling. On success the tool: writes the new key to `~/.log10x/credentials` (so other MCP hosts on this machine pick it up), clears any in-process `LOG10X_API_KEY` so the new key takes effect for THIS server immediately, hot-reloads envs. The new key is shown in the response (also viewable later at console.log10x.com → Profile → API Settings). The result message lists every place the user should update — host configs, scripts, CI secrets, etc. **Tier prerequisites**: requires a real signed-in account — demo accounts get 403 Forbidden.',
+    inputSchema: rotateApiKeySchema,
+    annotations: { title: 'Rotate API key', readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+  },
+  (args) => wrap('log10x_rotate_api_key', async () => executeRotateApiKey(args, getEnvs())),
+);
+
 // ── Tool: log10x_customer_metrics_query (v1.4) ──
 
 server.registerTool(
@@ -907,7 +977,7 @@ server.registerTool(
   'log10x_advise_install',
   {
     title: 'Advise: install path',
-    description: 'Front-end install advisor — picks the RIGHT install path based on what `log10x_discover_env` detected. Sits in front of `log10x_advise_{reporter,reducer,retriever}`. Takes a snapshot_id + optional `goal` and decides between: standalone reporter (log10x-k8s/reporter-10x parallel DaemonSet, zero-touch to user forwarder), inline reporter/reducer (log10x-repackaged forwarder charts that replace the user\'s deployment), or Retriever (S3 archive). Detection rules: no forwarder OR hand-rolled forwarder → standalone; helm-managed fluent-bit/fluentd → inline (optimize-capable on 1.0.7); helm-managed filebeat/otel-collector → inline without optimize (1.0.6); helm-managed logstash → standalone (chart broken for sidecar mode). **Two call modes**: (1) with `goal` → returns a concrete install plan for the top-ranked path; goals are `just-metrics` (pattern fingerprinting + cost attribution), `cut-cost` (regulate: filter/sample), `compact` (regulate + compact encoding, only on fluent-bit/fluentd 1.0.7), `archive` (Retriever). (2) without `goal` → returns a ranked table of candidates + structured top-pick args so the caller can re-invoke with `goal=<winner>` or jump to an app-specific advisor. Call this BEFORE `log10x_advise_reporter`/`log10x_advise_reducer`/`log10x_advise_retriever` when you want the tool to pick the shape/app/forwarder combination for you. **Tier prerequisites**: none — this is a pre-install tool.',
+    description: 'Front-end install advisor — picks the RIGHT install path based on what `log10x_discover_env` detected. Sits in front of `log10x_advise_{reporter,reducer,retriever}`. Takes a snapshot_id + optional `goal` and decides between: standalone reporter (log10x/reporter-10x parallel DaemonSet, zero-touch to user forwarder), inline reporter/reducer (log10x-repackaged forwarder charts that replace the user\'s deployment), or Retriever (S3 archive). Detection rules: no forwarder OR hand-rolled forwarder → standalone; helm-managed fluent-bit/fluentd → inline (optimize-capable on 1.0.7); helm-managed filebeat/otel-collector → inline without optimize (1.0.6); helm-managed logstash → standalone (chart broken for sidecar mode). **Two call modes**: (1) with `goal` → returns a concrete install plan for the top-ranked path; goals are `just-metrics` (pattern fingerprinting + cost attribution), `cut-cost` (regulate: filter/sample), `compact` (regulate + compact encoding, only on fluent-bit/fluentd 1.0.7), `archive` (Retriever). (2) without `goal` → returns a ranked table of candidates + structured top-pick args so the caller can re-invoke with `goal=<winner>` or jump to an app-specific advisor. Call this BEFORE `log10x_advise_reporter`/`log10x_advise_reducer`/`log10x_advise_retriever` when you want the tool to pick the shape/app/forwarder combination for you. **Tier prerequisites**: none — this is a pre-install tool.',
     inputSchema: adviseInstallSchema,
     annotations: { title: 'Advise: install path', readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   },
@@ -965,6 +1035,11 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_login_status', intent: 'Report credential / env state — identity, env list with permissions, demo-mode upgrade guide if applicable' },
   { name: 'log10x_signin', intent: 'GitHub device-flow signup/signin — opens browser, exchanges OAuth token for a Log10x API key, hot-reloads envs (no MCP-host restart needed)' },
   { name: 'log10x_signout', intent: 'Wipe ~/.log10x/credentials and fall back to demo mode (or lower-priority config); does not revoke the key on the backend' },
+  { name: 'log10x_update_settings', intent: 'Update user metadata (analyzer cost, AI provider, etc.) via POST /api/v1/user' },
+  { name: 'log10x_create_env', intent: 'Create a new Log10x environment on the account; pairs with log10x_advise_install for end-to-end provision-and-install' },
+  { name: 'log10x_update_env', intent: 'Rename an env or change the default — requires backend PUT route (see backend PR #62)' },
+  { name: 'log10x_delete_env', intent: 'Delete an env (destructive, irrecoverable) — requires confirm_name matching the env\'s name' },
+  { name: 'log10x_rotate_api_key', intent: 'Rotate the Log10x API key (destructive) — old key invalidated immediately, new one persisted to ~/.log10x/credentials' },
   { name: 'log10x_customer_metrics_query', intent: 'Direct PromQL passthrough to the customer metric backend (escape hatch for cross-pillar investigations)' },
   { name: 'log10x_discover_join', intent: 'Auto-discover the join label between Log10x pattern metrics and the customer metric backend via Jaccard similarity' },
   { name: 'log10x_correlate_cross_pillar', intent: 'Bidirectional cross-pillar correlation with structural validation — confirmed / service-match / coincidence / unconfirmed tiering' },

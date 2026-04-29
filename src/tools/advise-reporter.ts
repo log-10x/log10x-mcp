@@ -23,7 +23,7 @@ export const adviseReporterSchema = {
     .enum(['inline', 'standalone'])
     .optional()
     .describe(
-      'Deployment shape. Default: `inline` — installs a log10x-repackaged version of the user\'s forwarder chart (tenx baked in), replacing the existing deployment. `standalone` — installs `log10x-k8s/reporter-10x` as a parallel DaemonSet alongside the user\'s forwarder (zero-touch, report-mode only). When unsure which to pick, call `log10x_advise_install` first.'
+      'Deployment shape. Default: `inline` — installs a log10x-repackaged version of the user\'s forwarder chart (tenx baked in), replacing the existing deployment. `standalone` — installs `log10x/reporter-10x` as a parallel DaemonSet alongside the user\'s forwarder (zero-touch, report-mode only). When unsure which to pick, call `log10x_advise_install` first.'
     ),
   forwarder: z
     .enum(['fluent-bit', 'fluentd', 'filebeat', 'logstash', 'otel-collector'])

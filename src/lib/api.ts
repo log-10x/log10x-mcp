@@ -376,6 +376,225 @@ export async function fetchUserProfile(apiKey: string): Promise<RemoteUserProfil
   };
 }
 
+// ── Account / env mutations ──
+//
+// These all use user-scoped auth (apiKey only — the lambda authorizer
+// resolves the user from the key alone, no envId required even for env
+// CRUD because the env is identified by `env_id` in the request body).
+
+/**
+ * Update user metadata. Wraps `POST /api/v1/user`. Idempotent — repeated
+ * calls with the same payload converge to the same state. The response
+ * contains the full updated user profile.
+ *
+ * Use cases include analyzer-cost ($/GB) update, AI provider settings
+ * (`ai_provider`, `ai_api_key`, etc.), display-name / company changes.
+ * The set of accepted metadata keys is governed by the backend; the MCP
+ * passes through whatever the caller supplies.
+ */
+export async function updateUserMetadata(
+  apiKey: string,
+  metadata: Record<string, unknown>
+): Promise<RemoteUserProfile> {
+  const url = new URL('/api/v1/user', getBase());
+  const res = await fetchWithRetry(
+    url.toString(),
+    {
+      method: 'POST',
+      headers: {
+        'X-10X-Auth': userAuthHeader(apiKey),
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ metadata }),
+    },
+    'updateUserMetadata'
+  );
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`POST /api/v1/user returned HTTP ${res.status}: ${body.slice(0, 300)}`);
+  }
+  const data = (await res.json()) as { user?: unknown };
+  return parseRemoteUserProfile(data);
+}
+
+/**
+ * Create a new environment. Wraps `POST /api/v1/user/env`. NOT
+ * idempotent — calling twice with the same name returns 409 Conflict
+ * from the backend. Returns the full updated user profile so the
+ * caller can see the new env in the list.
+ */
+export async function createEnvironment(
+  apiKey: string,
+  name: string,
+  isDefault?: boolean
+): Promise<RemoteUserProfile> {
+  const url = new URL('/api/v1/user/env', getBase());
+  const body: Record<string, unknown> = { name };
+  if (isDefault !== undefined) body.is_default = isDefault;
+  const res = await fetchWithRetry(
+    url.toString(),
+    {
+      method: 'POST',
+      headers: {
+        'X-10X-Auth': userAuthHeader(apiKey),
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    },
+    'createEnvironment'
+  );
+  if (!res.ok) {
+    const errBody = await res.text().catch(() => '');
+    throw new Error(`POST /api/v1/user/env returned HTTP ${res.status}: ${errBody.slice(0, 300)}`);
+  }
+  const data = (await res.json()) as { user?: unknown };
+  return parseRemoteUserProfile(data);
+}
+
+/**
+ * Update an existing environment. Wraps `PUT /api/v1/user/env`.
+ * Idempotent. Caller passes `env_id` (from `/api/v1/user`) and the
+ * fields to change (name, is_default).
+ *
+ * NOTE: requires the backend gateway to have the PUT route configured.
+ * Without it the call fails at the API Gateway layer with a 4xx before
+ * reaching the lambda — see the `fix(gateway)` PR on the backend repo.
+ */
+export async function updateEnvironment(
+  apiKey: string,
+  envId: string,
+  changes: { name?: string; is_default?: boolean }
+): Promise<RemoteUserProfile> {
+  const url = new URL('/api/v1/user/env', getBase());
+  const body = { env_id: envId, ...changes };
+  const res = await fetchWithRetry(
+    url.toString(),
+    {
+      method: 'PUT',
+      headers: {
+        'X-10X-Auth': userAuthHeader(apiKey),
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    },
+    'updateEnvironment'
+  );
+  if (!res.ok) {
+    const errBody = await res.text().catch(() => '');
+    throw new Error(`PUT /api/v1/user/env returned HTTP ${res.status}: ${errBody.slice(0, 300)}`);
+  }
+  const data = (await res.json()) as { user?: unknown };
+  return parseRemoteUserProfile(data);
+}
+
+/**
+ * Delete an environment. Wraps `DELETE /api/v1/user/env`. Irreversible.
+ * The backend rejects the call with 401 if the caller is not the env
+ * owner (`existing.Owner != user.Username()` check in the lambda).
+ */
+export async function deleteEnvironment(
+  apiKey: string,
+  envId: string
+): Promise<RemoteUserProfile> {
+  const url = new URL('/api/v1/user/env', getBase());
+  const res = await fetchWithRetry(
+    url.toString(),
+    {
+      method: 'DELETE',
+      headers: {
+        'X-10X-Auth': userAuthHeader(apiKey),
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ env_id: envId }),
+    },
+    'deleteEnvironment'
+  );
+  if (!res.ok) {
+    const errBody = await res.text().catch(() => '');
+    throw new Error(`DELETE /api/v1/user/env returned HTTP ${res.status}: ${errBody.slice(0, 300)}`);
+  }
+  const data = (await res.json()) as { user?: unknown };
+  return parseRemoteUserProfile(data);
+}
+
+/**
+ * Rotate the API key. Wraps `POST /api/v1/user/rotate-key`. Returns
+ * BOTH the new api_key (returned only here, never via subsequent
+ * `/api/v1/user` reads) and the user profile.
+ *
+ * The previous key is invalidated immediately on success; clients
+ * holding the old key — including this MCP server itself if it doesn't
+ * pivot to the new one — will start receiving 401 on the next request.
+ *
+ * Demo accounts get 403 Forbidden.
+ */
+export async function rotateApiKey(
+  apiKey: string
+): Promise<{ apiKey: string; profile: RemoteUserProfile }> {
+  const url = new URL('/api/v1/user/rotate-key', getBase());
+  const res = await fetchWithRetry(
+    url.toString(),
+    {
+      method: 'POST',
+      headers: { 'X-10X-Auth': userAuthHeader(apiKey) },
+    },
+    'rotateApiKey'
+  );
+  if (!res.ok) {
+    const errBody = await res.text().catch(() => '');
+    throw new Error(
+      `POST /api/v1/user/rotate-key returned HTTP ${res.status}: ${errBody.slice(0, 300)}`
+    );
+  }
+  const data = (await res.json()) as { user?: unknown; api_key?: string };
+  if (typeof data.api_key !== 'string' || !data.api_key) {
+    throw new Error('rotate-key response missing `api_key` field');
+  }
+  return { apiKey: data.api_key, profile: parseRemoteUserProfile(data) };
+}
+
+/**
+ * Internal helper: parse the `user` field of an account-mutating API
+ * response into a `RemoteUserProfile`. Mirrors the parsing in
+ * `fetchUserProfile`. The backend returns the same `{ user: {...} }`
+ * envelope from POST /user, all /user/env verbs, and /user/rotate-key.
+ */
+function parseRemoteUserProfile(data: { user?: unknown }): RemoteUserProfile {
+  const u = data.user as
+    | {
+        user_id?: string;
+        username?: string;
+        tier?: string;
+        user_type?: string;
+        environments?: Array<{
+          env_id: string;
+          name: string;
+          owner: string;
+          is_default: boolean;
+          permissions: Permission;
+        }>;
+        metadata?: Record<string, unknown>;
+      }
+    | undefined;
+  if (!u || !Array.isArray(u.environments)) {
+    throw new Error('Response missing user.environments');
+  }
+  return {
+    userId: u.user_id ?? '',
+    username: u.username ?? '',
+    tier: u.tier,
+    userType: u.user_type,
+    environments: u.environments.map((e) => ({
+      envId: e.env_id,
+      name: e.name,
+      owner: e.owner,
+      isDefault: e.is_default,
+      permissions: e.permissions,
+    })),
+    metadata: u.metadata ?? {},
+  };
+}
+
 // ── Types ──
 
 export interface PrometheusResult {

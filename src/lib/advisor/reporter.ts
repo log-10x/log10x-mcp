@@ -31,7 +31,7 @@ export type AdvisorApp = 'reporter' | 'reducer';
  *   inline     = replace the user's forwarder deployment with a
  *                log10x-repackaged version of the same chart (tenx baked
  *                in as a processor/filter/init-container).
- *   standalone = install log10x-k8s/reporter-10x as a parallel DaemonSet
+ *   standalone = install log10x/reporter-10x as a parallel DaemonSet
  *                that bundles its own fluent-bit. Does NOT touch the
  *                user's forwarder. Report-mode only.
  * The user's detected forwarder kind is still surfaced in the plan when
@@ -124,7 +124,7 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   // so it can't regulate/filter/compact events — only emit metrics.
   if (shape === 'standalone' && app === 'reducer') {
     blockers.push(
-      'shape=standalone is only valid for app=reporter. The `log10x-k8s/reporter-10x` chart bundles its own fluent-bit + tenx-edge and reads container logs in parallel to your existing forwarder — it has no path to write regulated events back through that forwarder. Either switch to shape=inline (replaces your forwarder with a log10x-repackaged version) or app=reporter.'
+      'shape=standalone is only valid for app=reporter. The `log10x/reporter-10x` chart bundles its own fluent-bit + tenx-edge and reads container logs in parallel to your existing forwarder — it has no path to write regulated events back through that forwarder. Either switch to shape=inline (replaces your forwarder with a log10x-repackaged version) or app=reporter.'
     );
   }
   if (shape === 'standalone' && args.optimize) {
@@ -142,7 +142,7 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   // use the pipe-output plugin launch pattern.
   if (shape === 'inline' && spec && forwarder === 'logstash') {
     blockers.push(
-      "The log10x-elastic/logstash chart is architecturally broken for sidecar mode: tenx needs to be a child process of logstash (spawned by the `pipe` output plugin), but the chart runs it as a separate container reading from its own stdin. Pipeline inits then shuts down after ~9s with no input. Chart 1.0.7 fixes the apps/ path but does NOT fix this wiring. Use fluent-bit, fluentd, filebeat, or otel-collector, OR deploy `log10x-k8s/reporter-10x` (non-invasive, parallel DaemonSet) alongside your existing logstash."
+      "The log10x-elastic/logstash chart is architecturally broken for sidecar mode: tenx needs to be a child process of logstash (spawned by the `pipe` output plugin), but the chart runs it as a separate container reading from its own stdin. Pipeline inits then shuts down after ~9s with no input. Chart 1.0.7 fixes the apps/ path but does NOT fix this wiring. Use fluent-bit, fluentd, filebeat, or otel-collector, OR deploy `log10x/reporter-10x` (non-invasive, parallel DaemonSet) alongside your existing logstash."
     );
   }
   if (!args.apiKey && !args.skipInstall) {
@@ -208,7 +208,7 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   // so re-recommending it would be noise.
   if (shape === 'inline' && app === 'reporter') {
     notes.push(
-      'Alternative: the `log10x-k8s/reporter-10x@1.0.7` chart deploys a standalone non-invasive DaemonSet (fluent-bit + tenx-edge) that tails the same container logs your existing forwarder reads, without replacing it. Call `log10x_advise_reporter` with `shape: "standalone"` or use `log10x_advise_install` to compare paths. Recommended when you don\'t want the 10x logic running inside your production forwarder.'
+      'Alternative: the `log10x/reporter-10x@1.0.7` chart deploys a standalone non-invasive DaemonSet (fluent-bit + tenx-edge) that tails the same container logs your existing forwarder reads, without replacing it. Call `log10x_advise_reporter` with `shape: "standalone"` or use `log10x_advise_install` to compare paths. Recommended when you don\'t want the 10x logic running inside your production forwarder.'
     );
   }
   if (shape === 'standalone') {
@@ -218,7 +218,7 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
     // when the cluster runs multiple forwarder DaemonSets.
     const fwLabel = args.forwarder ?? snapshot.recommendations.existingForwarder ?? 'no forwarder';
     notes.push(
-      `This plan installs **standalone** — \`log10x-k8s/reporter-10x\` runs as a parallel DaemonSet alongside your existing ${fwLabel} deployment. No changes to your forwarder; the chart bundles its own fluent-bit to tail /var/log/containers/*.log. Report-mode only (metrics). For regulation/filtering/compaction you'd install the \`log10x-fluent/*\` inline variant in place of your forwarder.`
+      `This plan installs **standalone** — \`log10x/reporter-10x\` runs as a parallel DaemonSet alongside your existing ${fwLabel} deployment. No changes to your forwarder; the chart bundles its own fluent-bit to tail /var/log/containers/*.log. Report-mode only (metrics). For regulation/filtering/compaction you'd install the \`log10x-fluent/*\` inline variant in place of your forwarder.`
     );
   }
 
