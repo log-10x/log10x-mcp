@@ -427,7 +427,7 @@ export function renderPocPattern(input: RenderInput, identity: string): string {
   lines.push(p.reasoning);
   lines.push('');
   if (p.recommendedAction !== 'keep') {
-    lines.push('**Reducer YAML** (paste into GitOps ConfigMap):');
+    lines.push('**Receiver YAML** (paste into GitOps ConfigMap):');
     lines.push('```yaml');
     lines.push(reducerYaml(p));
     lines.push('```');
@@ -669,8 +669,8 @@ export function renderPocReport(input: RenderInput): RenderResult {
     }
   }
 
-  // Section 4: Reducer recommendations
-  lines.push('## 4. Reducer Recommendations');
+  // Section 4: Receiver recommendations
+  lines.push('## 4. Receiver Recommendations');
   lines.push('');
   lines.push(
     'Per-pattern recommendations with reasoning, projected savings, and ready-to-paste log10x reducer mute-file YAML. Mutes auto-expire at `untilEpochSec`; sampling retains a statistical slice for debug.'
@@ -785,10 +785,10 @@ export function renderPocReport(input: RenderInput): RenderResult {
   lines.push('### Automated — log10x reducer (recommended)');
   lines.push('');
   lines.push(
-    '1. Install the Log10x Reducer in your forwarder pipeline — https://docs.log10x.com/apps/edge/reducer/'
+    '1. Install the Log10x Receiver in your forwarder pipeline — https://docs.log10x.com/apps/edge/reducer/'
   );
   lines.push(
-    '2. Commit the generated reducer YAML above into your GitOps repo (the reducer watches a ConfigMap)'
+    '2. Commit the generated reducer YAML above into your GitOps repo (the receiver watches a ConfigMap)'
   );
   lines.push(
     '3. Mutes auto-expire at `untilEpochSec`, so stale rules self-clean. The reducer publishes exact pattern-match metrics, so you can verify the intended traffic is being dropped before committing permanently.'

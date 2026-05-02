@@ -1,9 +1,9 @@
 /**
- * log10x_advise_reducer
+ * log10x_advise_receiver
  *
  * Given a DiscoverySnapshot (from `log10x_discover_env`) + a few user
  * choices, produce a forwarder-specific install/verify/teardown plan
- * for the Log10x Reducer (kind=regulate). Same 5 forwarders as the
+ * for the Log10x Receiver (kind=regulate). Same 5 forwarders as the
  * Reporter, same charts, same preflight checks — the only difference
  * is the tenx `kind` value, which the chart templates route to a
  * different launch arg (`@run/input/forwarder/<fw>/regulate`).
@@ -17,7 +17,7 @@ import type { ForwarderKind } from '../lib/discovery/types.js';
 import type { OutputDestination } from '../lib/advisor/reporter-forwarders.js';
 import { resolveAdvisorDestination } from '../lib/advisor/dest-resolve.js';
 
-export const adviseReducerSchema = {
+export const adviseReceiverSchema = {
   snapshot_id: z
     .string()
     .describe('ID returned by `log10x_discover_env`. The snapshot is cached for 30 min.'),
@@ -64,14 +64,14 @@ export const adviseReducerSchema = {
     .describe('Which sections to emit. Default: `all`.'),
 };
 
-const schemaObj = z.object(adviseReducerSchema);
-export type AdviseReducerArgs = z.infer<typeof schemaObj>;
+const schemaObj = z.object(adviseReceiverSchema);
+export type AdviseReceiverArgs = z.infer<typeof schemaObj>;
 
-export async function executeAdviseReducer(args: AdviseReducerArgs): Promise<string> {
+export async function executeAdviseReceiver(args: AdviseReceiverArgs): Promise<string> {
   const snapshot = getSnapshot(args.snapshot_id);
   if (!snapshot) {
     return [
-      `# Reducer advisor — snapshot not found`,
+      `# Receiver advisor — snapshot not found`,
       ``,
       `Snapshot \`${args.snapshot_id}\` is missing or expired (snapshots live 30 min).`,
       ``,

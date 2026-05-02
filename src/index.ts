@@ -67,7 +67,7 @@ import {
 import { pocFromLocalSchema, executePocFromLocal } from './tools/poc-from-local.js';
 import { discoverEnvSchema, executeDiscoverEnv } from './tools/discover-env.js';
 import { adviseReporterSchema, executeAdviseReporter } from './tools/advise-reporter.js';
-import { adviseReducerSchema, executeAdviseReducer } from './tools/advise-reducer.js';
+import { adviseReceiverSchema, executeAdviseReceiver } from './tools/advise-receiver.js';
 import { adviseRetrieverSchema, executeAdviseRetriever } from './tools/advise-retriever.js';
 import { adviseInstallSchema, executeAdviseInstall } from './tools/advise-install.js';
 import { adviseCompactSchema, executeAdviseCompact } from './tools/advise-compact.js';
@@ -684,16 +684,16 @@ registerLog10xTool('log10x_advise_reporter', adviseReporterSchema, (args) =>
   wrap('log10x_advise_reporter', () => executeAdviseReporter(args))
 );
 
-// ── Tool: log10x_advise_reducer (install advisor) ──
+// ── Tool: log10x_advise_receiver (install advisor) ──
 
 registerLog10xTool('log10x_advise_retriever', adviseRetrieverSchema, (args) =>
   wrap('log10x_advise_retriever', () => executeAdviseRetriever(args))
 );
 
-// ── Tool: log10x_advise_reducer (install advisor) ──
+// ── Tool: log10x_advise_receiver (install advisor) ──
 
-registerLog10xTool('log10x_advise_reducer', adviseReducerSchema, (args) =>
-  wrap('log10x_advise_reducer', () => executeAdviseReducer(args))
+registerLog10xTool('log10x_advise_receiver', adviseReceiverSchema, (args) =>
+  wrap('log10x_advise_receiver', () => executeAdviseReceiver(args))
 );
 
 // ── Tool: log10x_advise_install (mode selector + front-end advisor) ──
@@ -761,9 +761,9 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_discover_env', intent: 'Read-only probe of k8s + AWS — returns a snapshot_id the advise_* tools consume' },
   { name: 'log10x_advise_install', intent: 'Front-end install advisor — picks standalone vs inline + app + forwarder + optimize based on what was detected' },
   { name: 'log10x_advise_reporter', intent: 'Reporter install/verify/teardown plan for a forwarder — inline or standalone (shape=standalone)' },
-  { name: 'log10x_advise_reducer', intent: 'Reducer install/verify/teardown plan — inline only, with optional compact encoding (optimize=true)' },
+  { name: 'log10x_advise_receiver', intent: 'Receiver install/verify/teardown plan — inline only, with optional compact encoding (optimize=true)' },
   { name: 'log10x_advise_retriever', intent: 'Retriever install/verify/teardown plan — standalone S3 + SQS archive + query' },
-  { name: 'log10x_advise_compact', intent: 'Render a `gh` PR command + diff for a compactReducer lookup-CSV update against the customer GitOps repo (engine hot-reloads the CSV without a pipeline restart)' },
+  { name: 'log10x_advise_compact', intent: 'Render a `gh` PR command + diff for a compactReceiver lookup-CSV update against the customer GitOps repo (engine hot-reloads the CSV without a pipeline restart)' },
 ];
 
 async function handleCliFlags(): Promise<boolean> {

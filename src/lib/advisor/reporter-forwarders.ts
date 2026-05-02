@@ -43,10 +43,10 @@ export type OutputDestination = 'mock' | 'elasticsearch' | 'splunk' | 'datadog' 
 
 // Which tenx kind this install is for.
 //   report   -> Reporter (read-only metric emission)
-//   regulate -> Reducer (read + write events back through the forwarder)
+//   regulate -> Receiver (read + write events back through the forwarder)
 //
 // fluent-bit + fluentd charts at 1.0.7 silently ignore tenx.kind and always
-// run the reducer pipeline (kind=report is effectively "reducer with no
+// run the receiver pipeline (kind=report is effectively "reducer with no
 // filter rules" at the observable level). filebeat / logstash / otel-
 // collector at 1.0.7 still honor kind and launch @apps/reporter vs
 // @apps/reducer accordingly.
@@ -97,7 +97,7 @@ export interface ForwarderSpec {
     apiKey: string;
     releaseName: string;
     destination: OutputDestination;
-    /** Tenx kind — report (Reporter app) or regulate (Reducer app). */
+    /** Tenx kind — report (Reporter app) or regulate (Receiver app). */
     kind: TenxKind;
     outputHost?: string;
     splunkHecToken?: string;

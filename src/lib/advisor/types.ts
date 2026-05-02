@@ -55,8 +55,8 @@ export interface VerifyProbe {
 
 /**
  * Optional GitOps section for install plans whose app supports
- * MCP-managed runtime config updates (today: the Reducer's
- * compactReducer). Renders between Install and Verify.
+ * MCP-managed runtime config updates (today: the Receiver's
+ * compactReceiver). Renders between Install and Verify.
  *
  * The mechanism: a GitHub-pull module inside the engine fetches the
  * customer's config repo on a schedule, drops it into a temp dir,

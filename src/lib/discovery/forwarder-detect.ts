@@ -64,7 +64,7 @@ export function classifyLog10xApp(
     return 'retriever';
   }
 
-  // Reporter vs Reducer both use cron-10x chart — disambiguate via
+  // Reporter vs Receiver both use cron-10x chart — disambiguate via
   // release name (cloud-reporter / policy-gen) or explicit workload name.
   if (helmName.includes('cloud-reporter') || helmName.includes('reporter')) return 'reporter';
   if (helmName.includes('policy-gen') || helmName.includes('reducer')) return 'reducer';

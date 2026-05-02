@@ -154,12 +154,12 @@ export interface Recommendations {
   alreadyInstalled: Partial<Record<Log10xAppKind, string>>;
   /**
    * `GH_REPO` from a running reducer pod, if detected. Used by the
-   * MCP's compactReducer advisor to default the GitOps target repo.
+   * MCP's compactReceiver advisor to default the GitOps target repo.
    */
   reducerGitopsRepo?: string;
   /**
    * `compactReducerLookupFile` from a running reducer pod, if set.
-   * Used by the MCP's compactReducer advisor to default the lookup
+   * Used by the MCP's compactReceiver advisor to default the lookup
    * path inside the GitOps repo.
    */
   reducerCompactLookupFile?: string;

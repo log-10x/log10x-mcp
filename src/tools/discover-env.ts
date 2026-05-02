@@ -223,7 +223,7 @@ export function renderDiscoverReport(s: DiscoverySnapshot): string {
   lines.push('');
   lines.push('```');
   lines.push(`log10x_advise_reporter({ snapshot_id: "${s.snapshotId}" })`);
-  lines.push(`log10x_advise_reducer({ snapshot_id: "${s.snapshotId}" })`);
+  lines.push(`log10x_advise_receiver({ snapshot_id: "${s.snapshotId}" })`);
   lines.push(`log10x_advise_retriever({ snapshot_id: "${s.snapshotId}" })`);
   lines.push('```');
   lines.push('');

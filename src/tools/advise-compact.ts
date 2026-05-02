@@ -1,7 +1,7 @@
 /**
  * log10x_advise_compact
  *
- * Emits a literal `gh` PR command + the file diff for a compactReducer
+ * Emits a literal `gh` PR command + the file diff for a compactReceiver
  * change against the customer's GitOps repo. Two modes:
  *
  *   mode='csv' (default) — edit `compact-lookup.csv`. Per-pattern decisions.
@@ -29,7 +29,7 @@ export const adviseCompactSchema = {
     .string()
     .optional()
     .describe(
-      'Owner/name of the customer GitOps repo the reducer pod pulls config from (e.g., `acme/log10x-config`). Must match `GH_REPO` set on the reducer pod. Optional when `snapshot_id` is given AND the snapshot detected a reducer pod with `GH_REPO` set — the tool resolves it automatically.'
+      'Owner/name of the customer GitOps repo the receiver pod pulls config from (e.g., `acme/log10x-config`). Must match `GH_REPO` set on the receiver pod. Optional when `snapshot_id` is given AND the snapshot detected a reducer pod with `GH_REPO` set — the tool resolves it automatically.'
     ),
   snapshot_id: z
     .string()
@@ -63,7 +63,7 @@ export const adviseCompactSchema = {
     .array(z.string())
     .optional()
     .describe(
-      'TenXObject fields joined with `_` to form each event\'s lookup key (must match the reducer\'s `compactReducerFieldNames`). Default: `[symbolMessage]`. Used in mode=csv to format example keys in the PR description.'
+      'TenXObject fields joined with `_` to form each event\'s lookup key (must match the receiver\'s `compactReducerFieldNames`). Default: `[symbolMessage]`. Used in mode=csv to format example keys in the PR description.'
     ),
   compact: z
     .array(z.string())
@@ -111,7 +111,7 @@ export const adviseCompactSchema = {
     .enum(['true', 'false'])
     .optional()
     .describe(
-      '(mode=csv) Current value of `compactReducerDefault` on the reducer pod (informational; included in the PR description so reviewers know whether entries opt INTO or OUT OF compaction). Default: `false`.'
+      '(mode=csv) Current value of `compactReducerDefault` on the receiver pod (informational; included in the PR description so reviewers know whether entries opt INTO or OUT OF compaction). Default: `false`.'
     ),
 };
 
@@ -195,7 +195,7 @@ function resolveTarget(args: AdviseCompactArgs): { resolved: AdviseCompactArgs }
   if (!args.snapshot_id) {
     return {
       error: [
-        '# compactReducer advisor — missing target',
+        '# compactReceiver advisor — missing target',
         '',
         'Pass either `gitops_repo` (owner/name) or `snapshot_id` (from `log10x_discover_env`). With a snapshot, the tool resolves the repo from the running reducer pod\'s `GH_REPO` env var.',
       ].join('\n'),
@@ -205,7 +205,7 @@ function resolveTarget(args: AdviseCompactArgs): { resolved: AdviseCompactArgs }
   if (!snapshot) {
     return {
       error: [
-        '# compactReducer advisor — snapshot not found',
+        '# compactReceiver advisor — snapshot not found',
         '',
         `Snapshot \`${args.snapshot_id}\` is missing or expired (snapshots live 30 min). Run \`log10x_discover_env\` again, then re-call this tool with the new snapshot_id (or pass \`gitops_repo\` directly).`,
       ].join('\n'),
@@ -215,13 +215,13 @@ function resolveTarget(args: AdviseCompactArgs): { resolved: AdviseCompactArgs }
   if (!repo) {
     return {
       error: [
-        '# compactReducer advisor — reducer GitOps not configured',
+        '# compactReceiver advisor — reducer GitOps not configured',
         '',
-        `Snapshot \`${args.snapshot_id}\` did not detect a reducer pod with \`GH_ENABLED=true\` + \`GH_REPO=<owner/name>\` set. The compactReducer GitOps flow requires a reducer already running with the GitOps env vars wired.`,
+        `Snapshot \`${args.snapshot_id}\` did not detect a reducer pod with \`GH_ENABLED=true\` + \`GH_REPO=<owner/name>\` set. The compactReceiver GitOps flow requires a reducer already running with the GitOps env vars wired.`,
         '',
         '**Next steps**:',
-        '- If you haven\'t installed the reducer yet, call `log10x_advise_reducer` (or `log10x_advise_install` with `goal=compact`). The plan now includes a "GitOps — MCP-managed runtime config" section that lists every env var to set, including `GH_ENABLED`, `GH_REPO`, `GH_TOKEN`, and `compactReducerLookupFile`.',
-        '- If the reducer is already running but GitOps env vars are missing, edit the helm values (or the pod\'s env block) to add them.',
+        '- If you haven\'t installed the receiver yet, call `log10x_advise_receiver` (or `log10x_advise_install` with `goal=compact`). The plan now includes a "GitOps — MCP-managed runtime config" section that lists every env var to set, including `GH_ENABLED`, `GH_REPO`, `GH_TOKEN`, and `compactReducerLookupFile`.',
+        '- If the receiver is already running but GitOps env vars are missing, edit the helm values (or the pod\'s env block) to add them.',
         '- To bypass discovery, re-call this tool with `gitops_repo=<owner/name>` directly.',
       ].join('\n'),
     };
@@ -261,7 +261,7 @@ async function executeCsvMode(args: AdviseCompactArgs): Promise<string> {
 
   if (compactKeys.length + preserveKeys.length + removeKeys.length === 0) {
     return [
-      '# compactReducer advisor — nothing to do',
+      '# compactReceiver advisor — nothing to do',
       '',
       'No keys passed in `compact`, `preserve`, or `remove`. Nothing to write.',
       '',
@@ -277,7 +277,7 @@ async function executeCsvMode(args: AdviseCompactArgs): Promise<string> {
   const overlapCompactPreserve = compactKeys.filter((k) => preserveKeys.includes(k));
   if (overlapCompactPreserve.length > 0) {
     return [
-      '# compactReducer advisor — invalid input',
+      '# compactReceiver advisor — invalid input',
       '',
       `Keys appear in both \`compact\` and \`preserve\`: ${overlapCompactPreserve.join(', ')}.`,
       'A field-set key can be one or the other, not both. Resolve and re-call.',
@@ -302,7 +302,7 @@ async function executeCsvMode(args: AdviseCompactArgs): Promise<string> {
   const prBranchHint = `mcp/compact-${Date.now()}`;
 
   const out: string[] = [];
-  out.push(`# compactReducer advisor — PR plan for \`${repo}\``);
+  out.push(`# compactReceiver advisor — PR plan for \`${repo}\``);
   out.push('');
   out.push(`**Lookup file**: \`${lookupPath}\``);
   out.push(`**Field-set key format**: \`${fieldNameStr}\` (joined with \`_\`)`);
@@ -500,7 +500,7 @@ async function executeJsMode(args: AdviseCompactArgs): Promise<string> {
 
   if (!newJs || newJs.trim().length === 0) {
     return [
-      '# compactReducer advisor (js mode) — missing input',
+      '# compactReceiver advisor (js mode) — missing input',
       '',
       'Required arg `new_js` is empty. Pass the FULL replacement contents of `compact-object-global.js` (the tool overwrites the file rather than patching it).',
       '',
@@ -522,7 +522,7 @@ async function executeJsMode(args: AdviseCompactArgs): Promise<string> {
   const validationErr = validateJsContents(newJs);
   if (validationErr) {
     return [
-      '# compactReducer advisor (js mode) — invalid `new_js`',
+      '# compactReceiver advisor (js mode) — invalid `new_js`',
       '',
       `The replacement JS does not match the shape the engine\'s script parser expects: ${validationErr}.`,
       '',
@@ -539,7 +539,7 @@ async function executeJsMode(args: AdviseCompactArgs): Promise<string> {
   const prTitle = 'compact: replace shouldEncode predicate (pipeline restart)';
 
   const out: string[] = [];
-  out.push(`# compactReducer advisor (js mode) — PR plan for \`${repo}\``);
+  out.push(`# compactReceiver advisor (js mode) — PR plan for \`${repo}\``);
   out.push('');
   out.push(`**Predicate file**: \`${jsPath}\``);
   out.push(`**Engine impact**: \`ResourceReloadUnit\` watches \`.js\` files. On change → \`restartPipeline()\` (brief drain + relaunch). **NOT a hot reload.** Use \`mode=csv\` instead if a per-pattern lookup change suffices.`);
