@@ -169,7 +169,7 @@ export const pocFromSiemStatusSchema = {
     .describe(
       "How much detail to render. Default `summary` — a ~30-line exec banner + top-5 table + " +
         'available-views list. Use `full` for the complete 9-section report (~300 lines). ' +
-        'Use `yaml` for paste-ready reducer mute-file entries; `configs` for native SIEM ' +
+        'Use `yaml` for paste-ready receiver mute-file entries; `configs` for native SIEM ' +
         "exclusion configs (Datadog exclusion filter, Splunk props.conf, etc.); `top` for an " +
         "expanded N-row drivers table (combine with `top_n`); `pattern` for a deep-dive on " +
         'one identity (requires `pattern` arg).'

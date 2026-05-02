@@ -52,14 +52,24 @@ export async function executeLoginStatus(
     lines.push('- Anything that writes (e.g., `backfill_metric` creating a new metric on YOUR account).');
     lines.push('- Anything that needs YOUR cost data (the demo env is shared sample data — investigations against it won\'t reflect your real spend).');
     lines.push('');
-    lines.push('### To upgrade to your own account');
+    lines.push('### To use your own account');
+    lines.push('Two ways to sign in. Both end up in the same place — the MCP autodiscovers your envs from `/api/v1/user` and the next tool call runs against your real account without an MCP-host restart.');
+    lines.push('');
+    lines.push('**Option A — `log10x_signin` (recommended, no host-config edit needed).** Two modes, ask the user which they prefer:');
+    lines.push('- `mode: "github"` (default) — opens a browser to github.com/login/device with the user_code pre-filled, polls until you click Authorize, then exchanges the GitHub token for a long-lived Log10x API key. Auto-creates an account on first sign-up. Zero-click if `gh auth login` is already set up. 30s–2min.');
+    lines.push('- `mode: "api_key"` with `api_key: "<key>"` — validates a Log10x API key the user already has (e.g., copied from console.log10x.com → Profile → API Settings, or issued by a workspace admin). No browser, no GitHub.');
+    lines.push('');
+    lines.push('Either mode writes the resolved key to `~/.log10x/credentials` (mode 0600), which persists across MCP-host restarts on its own — no config-file edit needed.');
+    lines.push('');
+    lines.push('**Option B — set `LOG10X_API_KEY` in your MCP host config** (manual, useful for CI / shared / scripted setups):');
     lines.push('1. Get your API key at https://console.log10x.com → Profile → API Settings.');
     lines.push('2. Edit your MCP host\'s config file:');
     lines.push('   - **Claude Desktop**: `%APPDATA%\\Claude\\claude_desktop_config.json` (Windows) or `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS).');
-    lines.push('   - **Other MCP hosts**: see your host\'s docs for where MCP server env vars are configured.');
-    lines.push('3. In the `log10x` server\'s `env` block, add `"LOG10X_API_KEY": "<your-key>"`. The MCP autodiscovers your envs from the API.');
+    lines.push('   - **Cursor / Windsurf / other**: see your host\'s docs for where MCP server env vars are configured.');
+    lines.push('3. In the `log10x` server\'s `env` block, add `"LOG10X_API_KEY": "<your-key>"`.');
     lines.push('4. Fully quit and restart the MCP host.');
-    lines.push('5. Re-run `log10x_login_status` to confirm — the response should list your real envs instead of the demo.');
+    lines.push('');
+    lines.push('After either option, re-run `log10x_login_status` to confirm — the response should list your real envs instead of the demo.');
     return lines.join('\n');
   }
 

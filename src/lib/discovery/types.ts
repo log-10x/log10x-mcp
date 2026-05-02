@@ -10,7 +10,7 @@ export const SNAPSHOT_SCHEMA_VERSION = 1;
 
 /** Which forwarder the customer is running. `unknown` = detection gave up. */
 export type ForwarderKind =
-  | 'fluent-bit'
+  | 'fluentbit'
   | 'fluentd'
   | 'filebeat'
   | 'logstash'

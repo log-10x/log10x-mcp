@@ -726,7 +726,7 @@ server.resource(
 const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_cost_drivers', intent: 'Why did log costs spike this week — dollar-ranked patterns with week-over-week deltas' },
   { name: 'log10x_event_lookup', intent: 'What is this single log line — resolve to stable identity + cost + AI classification' },
-  { name: 'log10x_savings', intent: 'Pipeline ROI — how much reducer / optimizer / retriever are saving in dollars' },
+  { name: 'log10x_savings', intent: 'Pipeline ROI — how much receiver / optimizer / retriever are saving in dollars' },
   { name: 'log10x_pattern_trend', intent: 'Time series for a pattern — volume + cost history, spike detection, sparkline' },
   { name: 'log10x_services', intent: 'List all monitored services ranked by cost' },
   { name: 'log10x_exclusion_filter', intent: 'Generate mute file entry or SIEM drop rule for a pattern' },

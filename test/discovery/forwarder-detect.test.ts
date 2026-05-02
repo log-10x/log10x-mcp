@@ -15,24 +15,24 @@ import {
   isLog10xImage,
 } from '../../src/lib/discovery/forwarder-detect.js';
 
-test('classifyForwarderImage: fluent-bit variants', () => {
-  assert.equal(classifyForwarderImage('cr.fluentbit.io/fluent/fluent-bit:4.0'), 'fluent-bit');
+test('classifyForwarderImage: fluentbit variants', () => {
+  assert.equal(classifyForwarderImage('cr.fluentbit.io/fluent/fluent-bit:4.0'), 'fluentbit');
   assert.equal(
     classifyForwarderImage('public.ecr.aws/fluent/fluent-bit:3.2.0'),
-    'fluent-bit'
+    'fluentbit'
   );
-  assert.equal(classifyForwarderImage('fluentbit/fluentbit:latest'), 'fluent-bit');
+  assert.equal(classifyForwarderImage('fluentbit/fluentbit:latest'), 'fluentbit');
   // log10x-repackaged variant
-  assert.equal(classifyForwarderImage('ghcr.io/log-10x/fluent-bit-10x-dev:dev-g11'), 'fluent-bit');
+  assert.equal(classifyForwarderImage('ghcr.io/log-10x/fluent-bit-10x-dev:dev-g11'), 'fluentbit');
 });
 
-test('classifyForwarderImage: fluentd (not confused with fluent-bit)', () => {
+test('classifyForwarderImage: fluentd (not confused with fluentbit)', () => {
   assert.equal(classifyForwarderImage('ghcr.io/log-10x/fluentd-10x-dev:dev-g11'), 'fluentd');
   assert.equal(classifyForwarderImage('fluent/fluentd:v1.16'), 'fluentd');
   // fluent-bit must NOT be mis-classified as fluentd even though it contains "fluent".
   assert.equal(
     classifyForwarderImage('cr.fluentbit.io/fluent/fluent-bit:4.0'),
-    'fluent-bit'
+    'fluentbit'
   );
 });
 
