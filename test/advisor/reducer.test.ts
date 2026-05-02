@@ -128,8 +128,8 @@ test('alreadyInstalled.reducer triggers a note, not a blocker', async () => {
   });
   assert.equal(plan.blockers.length, 0);
   assert.ok(
-    plan.notes.some((n) => n.toLowerCase().includes('reducer') && n.includes('`demo`')),
-    `expected a note about existing Reducer in demo namespace; got: ${plan.notes.join(' | ')}`
+    plan.notes.some((n) => n.toLowerCase().includes('receiver') && n.includes('`demo`')),
+    `expected a note about existing Receiver in demo namespace; got: ${plan.notes.join(' | ')}`
   );
 });
 
@@ -281,7 +281,84 @@ test('optimize=true with app=reporter is blocked', async () => {
     optimize: true,
   });
   assert.ok(
-    plan.blockers.some((b) => b.includes('Reducer-app feature')),
+    plan.blockers.some((b) => b.includes('Receiver-app feature')),
     `expected reporter+optimize blocker; got: ${plan.blockers.join(' | ')}`
+  );
+});
+
+test('mode=readonly emits reducerReadOnly env on fluent-bit', async () => {
+  const plan = await buildReporterPlan({
+    snapshot: baseSnapshot(),
+    app: 'reducer',
+    forwarder: 'fluent-bit',
+    apiKey: 'test',
+    readOnly: true,
+  });
+  assert.equal(plan.blockers.length, 0, `expected no blockers; got: ${plan.blockers.join(' | ')}`);
+  const content = plan.install.find((s) => s.file)!.file!.contents;
+  assert.ok(
+    content.includes('reducerReadOnly') && content.includes('"true"'),
+    `mode=readonly must include reducerReadOnly=true env; got: ${content}`
+  );
+});
+
+test('mode=readonly + optimize=true is blocked', async () => {
+  const plan = await buildReporterPlan({
+    snapshot: baseSnapshot(),
+    app: 'reducer',
+    forwarder: 'fluent-bit',
+    apiKey: 'test',
+    optimize: true,
+    readOnly: true,
+  });
+  assert.ok(
+    plan.blockers.some((b) => b.includes('no-op when mode=readonly')),
+    `expected mutual-exclusion blocker; got: ${plan.blockers.join(' | ')}`
+  );
+});
+
+test('mode=readonly with app=reporter is blocked', async () => {
+  const plan = await buildReporterPlan({
+    snapshot: baseSnapshot(),
+    app: 'reporter',
+    forwarder: 'fluent-bit',
+    apiKey: 'test',
+    readOnly: true,
+  });
+  assert.ok(
+    plan.blockers.some((b) => b.includes('Receiver-app concept')),
+    `expected reporter+readOnly blocker; got: ${plan.blockers.join(' | ')}`
+  );
+});
+
+test('mode=readonly emits reducerReadOnly env on filebeat', async () => {
+  const plan = await buildReporterPlan({
+    snapshot: baseSnapshot(),
+    app: 'reducer',
+    forwarder: 'filebeat',
+    apiKey: 'test',
+    readOnly: true,
+  });
+  assert.equal(plan.blockers.length, 0, `expected no blockers; got: ${plan.blockers.join(' | ')}`);
+  const content = plan.install.find((s) => s.file)!.file!.contents;
+  assert.ok(
+    content.includes('reducerReadOnly'),
+    `mode=readonly must include reducerReadOnly env; got: ${content}`
+  );
+});
+
+test('mode=readonly emits reducerReadOnly env on otel-collector', async () => {
+  const plan = await buildReporterPlan({
+    snapshot: baseSnapshot(),
+    app: 'reducer',
+    forwarder: 'otel-collector',
+    apiKey: 'test',
+    readOnly: true,
+  });
+  assert.equal(plan.blockers.length, 0, `expected no blockers; got: ${plan.blockers.join(' | ')}`);
+  const content = plan.install.find((s) => s.file)!.file!.contents;
+  assert.ok(
+    content.includes('reducerReadOnly'),
+    `mode=readonly must include reducerReadOnly env; got: ${content}`
   );
 });

@@ -75,6 +75,13 @@ export interface ReporterAdviseArgs {
    * `tenx-optimize.lua` is now baked in).
    */
   optimize?: boolean;
+  /**
+   * Read-only mode (Receiver app only). When true, emits `reducerReadOnly=true`
+   * env var so the receiver receives events + publishes TenXSummary metrics
+   * but does NOT write events back to the forwarder. Silently ignored when
+   * app='reporter' (Reporter is read-only by definition).
+   */
+  readOnly?: boolean;
   /** Skip install — for users who just want verify or teardown guidance. */
   skipInstall?: boolean;
   /** Skip teardown. */
@@ -130,6 +137,16 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   if (shape === 'standalone' && args.optimize) {
     blockers.push(
       'optimize=true requires shape=inline. Compact encoding rewrites events emitted back through the forwarder — standalone runs alongside your forwarder without touching its event path, so there are no events to encode. Drop `optimize` or switch to shape=inline.'
+    );
+  }
+  if (app === 'reporter' && args.readOnly) {
+    blockers.push(
+      'mode=readonly is a Receiver-app concept. The Reporter app is read-only by definition (it never writes events back through the forwarder — it only publishes TenXSummary metrics). Drop `mode` or switch to `app=reducer` (Receiver).'
+    );
+  }
+  if (args.optimize && args.readOnly) {
+    blockers.push(
+      'optimize=true is a no-op when mode=readonly. Compact encoding only matters when events are written back through the forwarder; in read-only mode the receiver emits metrics only and never writes events back. Pick one: optimize=true (read-write compact) OR mode=readonly (passive metrics).'
     );
   }
   // VERIFIED 2026-04-21: logstash chart sidecar wiring is ARCHITECTURALLY
@@ -227,11 +244,11 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   const teardown: PlanStep[] = [];
 
   if (spec && !args.skipInstall && blockers.length === 0) {
-    install.push(...buildInstallSteps({ ...args, spec, releaseName, namespace, destination, app, kind, optimize: args.optimize }));
+    install.push(...buildInstallSteps({ ...args, spec, releaseName, namespace, destination, app, kind, optimize: args.optimize, readOnly: args.readOnly }));
   }
   if (spec && !args.skipVerify) {
     verify.push(
-      ...spec.verifyProbes({ releaseName, namespace, destination, optimize: args.optimize }).map((p) => ({
+      ...spec.verifyProbes({ releaseName, namespace, destination, optimize: args.optimize, readOnly: args.readOnly }).map((p) => ({
         ...p,
       }))
     );
@@ -479,8 +496,9 @@ function buildInstallSteps(opts: {
   app: AdvisorApp;
   kind: TenxKind;
   optimize?: boolean;
+  readOnly?: boolean;
 }): PlanStep[] {
-  const { spec, releaseName, namespace, destination, outputHost, splunkHecToken, kind, optimize } = opts;
+  const { spec, releaseName, namespace, destination, outputHost, splunkHecToken, kind, optimize, readOnly } = opts;
   const apiKey = opts.apiKey ?? 'REPLACE_WITH_LICENSE_KEY';
   const steps: PlanStep[] = [];
 
@@ -506,7 +524,7 @@ function buildInstallSteps(opts: {
     rationale: `Tenx config + ${spec.label}-specific output destination (\`${destination}\`).`,
     file: {
       path: valuesFile,
-      contents: spec.renderValues({ apiKey, releaseName, destination, kind, outputHost, splunkHecToken, optimize }),
+      contents: spec.renderValues({ apiKey, releaseName, destination, kind, outputHost, splunkHecToken, optimize, readOnly }),
       language: 'yaml',
     },
     commands: [],

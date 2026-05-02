@@ -115,6 +115,14 @@ export interface ForwarderSpec {
      * with older images. Silently ignored when kind=report.
      */
     optimize?: boolean;
+    /**
+     * When true AND kind=regulate, run the receiver in read-only mode
+     * (passive metrics emitter — no events written back through the
+     * forwarder). Plan emits the `reducerReadOnly=true` env var, which
+     * the engine reads to gate every event-output stream module
+     * (forward/unix/socket/stdout). Silently ignored when kind=report.
+     */
+    readOnly?: boolean;
   }) => string;
   /** Verify probes — commands that, collectively, prove data is flowing. */
   verifyProbes: (opts: {
@@ -123,6 +131,8 @@ export interface ForwarderSpec {
     destination: OutputDestination;
     /** True when the install enabled encoded output (see renderValues.optimize). */
     optimize?: boolean;
+    /** True when the install enabled read-only mode (no return loop). */
+    readOnly?: boolean;
   }) => Array<{
     name: string;
     question: string;
@@ -138,6 +148,27 @@ const MOCK_OUTPUT_NOTE =
   '# Mock output — prints each event to the forwarder stdout with a [TENX-MOCK] prefix so `kubectl logs | grep TENX-MOCK` can deterministically verify the pipeline.';
 
 // ── Shared helpers ──
+
+/**
+ * Build a top-level `env:` YAML block for receiver-mode flags.
+ * - kind=regulate + optimize=true → reducerOptimize=true
+ * - kind=regulate + readOnly=true → reducerReadOnly=true
+ * Silently empty when kind=report or both flags are off. Returned
+ * verbatim for callers that emit it as a top-level chart value
+ * (fluent-bit / fluentd); other charts wrap it differently.
+ */
+function renderTenxEnvBlock(opts: {
+  kind: TenxKind;
+  optimize?: boolean;
+  readOnly?: boolean;
+}): string {
+  if (opts.kind !== 'regulate') return '';
+  const entries: string[] = [];
+  if (opts.optimize) entries.push('  - name: reducerOptimize\n    value: "true"');
+  if (opts.readOnly) entries.push('  - name: reducerReadOnly\n    value: "true"');
+  if (entries.length === 0) return '';
+  return `\nenv:\n${entries.join('\n')}\n`;
+}
 
 /** k8s-recommended selector: `app.kubernetes.io/instance=<release>`. */
 function k8sRecommendedSelector(releaseName: string): string {
@@ -165,26 +196,12 @@ export const REPORTER_FORWARDER_SPECS: Record<Exclude<ForwarderKind, 'unknown'>,
     hasTenxSidecar: false,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ apiKey, releaseName, destination, kind, outputHost, splunkHecToken, gitToken, optimize }) => {
+    renderValues: ({ apiKey, releaseName, destination, kind, outputHost, splunkHecToken, gitToken, optimize, readOnly }) => {
       const outputBlock = renderFluentBitOutput(destination, outputHost, splunkHecToken);
-      // Optimizer mode: the chart's own `tenx.optimize: true` path is
-      // broken on 1.0.7 (references tenx-optimize.lua which isn't in
-      // the image). The verified workaround is tenx.optimize:false +
-      // env reducerOptimize=true — the regulate Lua fires, the engine
-      // picks up the env var and flips encodeObjects on.
-      const envBlock =
-        optimize && kind === 'regulate'
-          ? `
-# Optimizer flag. Chart 1.0.7's tenx.optimize:true references a
-# tenx-optimize.lua file that isn't shipped in fluent-bit-10x:1.0.7-jit.
-# Use the env-var workaround: regulate Lua filter + reducerOptimize=true
-# so the engine emits compact encoded events (templateHash+vars, ~20-40x
-# volume reduction). Verified 2026-04-22 on demo cluster.
-env:
-  - name: reducerOptimize
-    value: "true"
-`
-          : '';
+      // Receiver-mode flags via env-var workaround. Image-version-agnostic
+      // (works on engine 1.0.7+). reducerOptimize=true → compact encoded
+      // events; reducerReadOnly=true → metrics-only, no return write.
+      const envBlock = renderTenxEnvBlock({ kind, optimize, readOnly });
       return `tenx:
   enabled: true
   apiKey: "${apiKey}"
@@ -263,7 +280,7 @@ ${outputBlock}
     hasTenxSidecar: false,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ apiKey, releaseName, destination, kind, outputHost, splunkHecToken, gitToken, optimize }) => {
+    renderValues: ({ apiKey, releaseName, destination, kind, outputHost, splunkHecToken, gitToken, optimize, readOnly }) => {
       // IMPORTANT: fluentd's output config lives UNDER `tenx:`, not
       // as a second top-level `tenx:` block. A prior version of this
       // template emitted two `tenx:` keys and YAML silently dropped
@@ -272,18 +289,8 @@ ${outputBlock}
       const fluentdExcludePaths = FORWARDER_EXCLUDE_REGEX.map((g) => `/var/log/containers/${g.replace('.*', '*').replace('\\.log$', '.log')}`)
         .map((g) => `"${g}"`)
         .join(', ');
-      // Optimizer mode via env workaround — same as fluent-bit. Verified
-      // 2026-04-22 on demo cluster: tenx banner shows
-      //   📝 Writing TenXObject fields: 'encoded=encode()' → Fluentd: /tmp/tenx_fluentd.sock
-      // and events emitted downstream come out in compact form.
-      const envBlock =
-        optimize && kind === 'regulate'
-          ? `
-env:
-  - name: reducerOptimize
-    value: "true"
-`
-          : '';
+      // Receiver-mode flags via env-var workaround — same as fluent-bit.
+      const envBlock = renderTenxEnvBlock({ kind, optimize, readOnly });
       return `tenx:
   enabled: true
   apiKey: "${apiKey}"
@@ -394,7 +401,7 @@ ${envBlock}`;
     hasTenxSidecar: false,
     selectorStyle: 'legacy-helm',
     selectorLabel: (r) => legacyElasticSelector(r, 'filebeat'),
-    renderValues: ({ apiKey, releaseName, destination, kind, outputHost, gitToken, optimize }) => {
+    renderValues: ({ apiKey, releaseName, destination, kind, outputHost, gitToken, optimize, readOnly }) => {
       // Chart defaults reference Elasticsearch secrets/certs. For a mock
       // install we MUST override extraEnvs/secretMounts to empty so pods
       // don't hang in FailedMount.
@@ -402,6 +409,14 @@ ${envBlock}`;
       // Chart 1.0.7 routes kind=optimize → @apps/reducer + reducerOptimize
       // env var. Emit kind=optimize in values when caller requested optimize.
       const effectiveKind = optimize && kind === 'regulate' ? 'optimize' : kind;
+      // readOnly has no chart-level kind value — emit as an env var on
+      // the daemonset's extraEnvs so the engine reads reducerReadOnly=true.
+      const readOnlyEnvEntry =
+        readOnly && kind === 'regulate'
+          ? `
+    - name: reducerReadOnly
+      value: "true"`
+          : '';
       return `tenx:
   enabled: true
   apiKey: "${apiKey}"
@@ -431,7 +446,7 @@ livenessProbe:
 daemonset:
   # Avoid chart defaults that hardcode elasticsearch-master-credentials / certs.
   # Override to empty lists for mock/test; add back real refs for production ES.
-  extraEnvs: []
+  extraEnvs:${readOnlyEnvEntry || ' []'}
   secretMounts: []
   filebeatConfig:
     filebeat.yml: |
@@ -493,9 +508,15 @@ ${indent(outputBlock, 6)}
     hasTenxSidecar: false,
     selectorStyle: 'legacy-helm',
     selectorLabel: (r) => legacyElasticSelector(r, 'logstash'),
-    renderValues: ({ apiKey, releaseName, destination, kind, outputHost, gitToken, optimize }) => {
+    renderValues: ({ apiKey, releaseName, destination, kind, outputHost, gitToken, optimize, readOnly }) => {
       const output = renderLogstashOutput(destination, outputHost);
       const effectiveKind = optimize && kind === 'regulate' ? 'optimize' : kind;
+      const extraEnvsBlock =
+        readOnly && kind === 'regulate'
+          ? `extraEnvs:
+  - name: reducerReadOnly
+    value: "true"`
+          : 'extraEnvs: []';
       return `tenx:
   enabled: true
   apiKey: "${apiKey}"
@@ -508,7 +529,7 @@ ${indent(outputBlock, 6)}
       url: "https://github.com/log-10x/config.git"
 
 # Avoid chart defaults hardcoding Elasticsearch credentials/mounts.
-extraEnvs: []
+${extraEnvsBlock}
 secretMounts: []
 
 logstashPipeline:
@@ -560,19 +581,27 @@ ${indent(output, 4)}
     hasTenxSidecar: false,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ apiKey, releaseName, destination, kind, outputHost, gitToken, optimize }) => {
+    renderValues: ({ apiKey, releaseName, destination, kind, outputHost, gitToken, optimize, readOnly }) => {
       // The OTel chart doesn't auto-wire filelog unless the preset is
       // on. We turn it on explicitly so the user's pipeline just works.
       // image.repository is required by the chart and has no default.
       const exporter = renderOtelExporter(destination, outputHost);
       const effectiveKind = optimize && kind === 'regulate' ? 'optimize' : kind;
+      const extraEnvsBlock =
+        readOnly && kind === 'regulate'
+          ? `
+extraEnvs:
+  - name: reducerReadOnly
+    value: "true"
+`
+          : '';
       return `mode: "daemonset"
 
 # image.repository defaults in the chart's values.yaml to the upstream
 # contrib image (otel/opentelemetry-collector-contrib), which is
 # public. Override here if you want the log10x-repackaged image and
 # have configured the necessary imagePullSecrets.
-
+${extraEnvsBlock}
 tenx:
   enabled: true
   apiKey: "${apiKey}"
