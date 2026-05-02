@@ -71,7 +71,7 @@ test('renderPocReport emits all 9 sections', () => {
     '## 1. Executive Summary',
     '## 2. Top Cost Drivers',
     '## 3. Service-Level Breakdown',
-    '## 4. Reducer Recommendations',
+    '## 4. Receiver Recommendations',
     '## 5. Native SIEM Exclusion Configs',
     '## 6. Compaction Potential', // Splunk → present
     '## 7. Risk / Dependency Check',

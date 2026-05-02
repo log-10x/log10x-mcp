@@ -56,7 +56,13 @@ export const adviseReceiverSchema = {
     .boolean()
     .optional()
     .describe(
-      'When true, emit events out of the forwarder in compact encoded form (templateHash+vars, ~20-40x volume reduction; see `config/modules/pipelines/run/units/transform/doc.md#compact`). Verified 2026-04-25 on engine 1.0.9 + chart 1.0.8 across all 5 forwarders (otel full payload trace; fluent-bit/fluentd/filebeat/logstash dispatch-confirmed). Plan emits `env: [{name: reducerOptimize, value: "true"}]` — image-version-agnostic (works on engine 1.0.7+ even though chart-native `tenx.optimize: true` only became reliable at engine 1.0.9). Default: false.'
+      'When true, emit events out of the forwarder in compact encoded form (templateHash+vars, ~20-40x volume reduction; see `config/modules/pipelines/run/units/transform/doc.md#compact`). Verified 2026-04-25 on engine 1.0.9 + chart 1.0.8 across all 5 forwarders (otel full payload trace; fluent-bit/fluentd/filebeat/logstash dispatch-confirmed). Plan emits `env: [{name: reducerOptimize, value: "true"}]` — image-version-agnostic (works on engine 1.0.7+ even though chart-native `tenx.optimize: true` only became reliable at engine 1.0.9). Has no effect when `mode=readonly` (no events written back). Default: false.'
+    ),
+  mode: z
+    .enum(['readonly', 'readwrite'])
+    .optional()
+    .describe(
+      'Receiver mode. `readwrite` (default): receive events, regulate them, write them back through the forwarder (with optional compact encoding when `optimize=true`). `readonly`: receive events, emit `emitted_events`/`all_events` TenXSummary metrics, do NOT write events back — passive metrics-only deployment. Plan emits `env: [{name: reducerReadOnly, value: "true"}]` for readonly. The engine flag (`reducerReadOnly`) gates every event-output stream module (forward/unix/socket/stdout) so the return loop to the forwarder is never constructed. For the parallel-DaemonSet observation pattern (separate pod, not in the forwarder pipeline), use `log10x_advise_reporter` with `shape=standalone` instead.'
     ),
   action: z
     .enum(['install', 'verify', 'teardown', 'all'])
@@ -96,6 +102,7 @@ export async function executeAdviseReceiver(args: AdviseReceiverArgs): Promise<s
     outputHost: args.output_host,
     splunkHecToken: args.splunk_hec_token,
     optimize: args.optimize,
+    readOnly: args.mode === 'readonly',
     skipInstall: action === 'verify' || action === 'teardown',
     skipVerify: action === 'install' || action === 'teardown',
     skipTeardown: action === 'install' || action === 'verify',
