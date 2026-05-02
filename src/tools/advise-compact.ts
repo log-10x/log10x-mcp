@@ -29,13 +29,13 @@ export const adviseCompactSchema = {
     .string()
     .optional()
     .describe(
-      'Owner/name of the customer GitOps repo the receiver pod pulls config from (e.g., `acme/log10x-config`). Must match `GH_REPO` set on the receiver pod. Optional when `snapshot_id` is given AND the snapshot detected a reducer pod with `GH_REPO` set — the tool resolves it automatically.'
+      'Owner/name of the customer GitOps repo the receiver pod pulls config from (e.g., `acme/log10x-config`). Must match `GH_REPO` set on the receiver pod. Optional when `snapshot_id` is given AND the snapshot detected a receiver pod with `GH_REPO` set — the tool resolves it automatically.'
     ),
   snapshot_id: z
     .string()
     .optional()
     .describe(
-      'ID returned by `log10x_discover_env`. When given, the tool resolves `gitops_repo` and `lookup_path` from the running reducer pod\'s env vars (`GH_REPO`, `compactReceiverLookupFile`). Either `snapshot_id` or `gitops_repo` must be provided.'
+      'ID returned by `log10x_discover_env`. When given, the tool resolves `gitops_repo` and `lookup_path` from the running receiver pod\'s env vars (`GH_REPO`, `compactReceiverLookupFile`). Either `snapshot_id` or `gitops_repo` must be provided.'
     ),
   gitops_branch: z
     .string()
@@ -197,7 +197,7 @@ function resolveTarget(args: AdviseCompactArgs): { resolved: AdviseCompactArgs }
       error: [
         '# compactReceiver advisor — missing target',
         '',
-        'Pass either `gitops_repo` (owner/name) or `snapshot_id` (from `log10x_discover_env`). With a snapshot, the tool resolves the repo from the running reducer pod\'s `GH_REPO` env var.',
+        'Pass either `gitops_repo` (owner/name) or `snapshot_id` (from `log10x_discover_env`). With a snapshot, the tool resolves the repo from the running receiver pod\'s `GH_REPO` env var.',
       ].join('\n'),
     };
   }
@@ -215,9 +215,9 @@ function resolveTarget(args: AdviseCompactArgs): { resolved: AdviseCompactArgs }
   if (!repo) {
     return {
       error: [
-        '# compactReceiver advisor — reducer GitOps not configured',
+        '# compactReceiver advisor — receiver GitOps not configured',
         '',
-        `Snapshot \`${args.snapshot_id}\` did not detect a reducer pod with \`GH_ENABLED=true\` + \`GH_REPO=<owner/name>\` set. The compactReceiver GitOps flow requires a reducer already running with the GitOps env vars wired.`,
+        `Snapshot \`${args.snapshot_id}\` did not detect a receiver pod with \`GH_ENABLED=true\` + \`GH_REPO=<owner/name>\` set. The compactReceiver GitOps flow requires a receiver already running with the GitOps env vars wired.`,
         '',
         '**Next steps**:',
         '- If you haven\'t installed the receiver yet, call `log10x_advise_receiver` (or `log10x_advise_install` with `goal=compact`). The plan now includes a "GitOps — MCP-managed runtime config" section that lists every env var to set, including `GH_ENABLED`, `GH_REPO`, `GH_TOKEN`, and `compactReceiverLookupFile`.',
@@ -410,7 +410,7 @@ async function executeCsvMode(args: AdviseCompactArgs): Promise<string> {
 
   out.push('## After merge');
   out.push('');
-  out.push(`The reducer pod\'s gitops puller (\`pipelines/gitops/config.yaml\`, default 30s poll) re-fetches the file. \`FileResourceLookup.reset()\` fires on the file-watcher event. New entries take effect within the poll interval. **No pod restart, no event drops.**`);
+  out.push(`The receiver pod\'s gitops puller (\`pipelines/gitops/config.yaml\`, default 30s poll) re-fetches the file. \`FileResourceLookup.reset()\` fires on the file-watcher event. New entries take effect within the poll interval. **No pod restart, no event drops.**`);
   out.push('');
   out.push('To verify in-cluster after merge:');
   out.push('```bash');
@@ -515,7 +515,7 @@ async function executeJsMode(args: AdviseCompactArgs): Promise<string> {
       '   - External-flag gate: `if (TenXEnv.get("compactKillSwitch") == "true") return false;`',
       '3. Re-call this tool with `mode=js`, `new_js=<full new contents>`, and optionally `current_js=<old contents>` for a line-diff in the output.',
       '',
-      '**Engine impact when this PR merges**: ResourceReloadUnit detects the .js change and calls `restartPipeline()`. There is a brief drain + relaunch (typically <5s on a reducer pod). For zero-restart changes, prefer `mode=csv`.',
+      '**Engine impact when this PR merges**: ResourceReloadUnit detects the .js change and calls `restartPipeline()`. There is a brief drain + relaunch (typically <5s on a receiver pod). For zero-restart changes, prefer `mode=csv`.',
     ].join('\n');
   }
 
@@ -595,7 +595,7 @@ async function executeJsMode(args: AdviseCompactArgs): Promise<string> {
 
   out.push('## After merge');
   out.push('');
-  out.push(`The reducer pod\'s gitops puller fetches the new JS on its next poll. The \`ResourceReloadUnit\` sees the file change, classifies \`.js\` as a config file, and calls \`pipeline.restart()\`. Drain + relaunch is typically under 5 seconds for a reducer pod, but it IS a real restart — events in flight may be re-emitted by the upstream forwarder once tenx is back.`);
+  out.push(`The receiver pod\'s gitops puller fetches the new JS on its next poll. The \`ResourceReloadUnit\` sees the file change, classifies \`.js\` as a config file, and calls \`pipeline.restart()\`. Drain + relaunch is typically under 5 seconds for a receiver pod, but it IS a real restart — events in flight may be re-emitted by the upstream forwarder once tenx is back.`);
   out.push('');
   out.push('To verify in-cluster after merge:');
   out.push('```bash');

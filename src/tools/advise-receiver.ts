@@ -30,7 +30,7 @@ export const adviseReceiverSchema = {
   release_name: z
     .string()
     .optional()
-    .describe('Helm release name. Default: `my-reducer`. Must not collide with an existing release.'),
+    .describe('Helm release name. Default: `my-receiver`. Must not collide with an existing release.'),
   namespace: z
     .string()
     .optional()
@@ -95,7 +95,7 @@ export async function executeAdviseReceiver(args: AdviseReceiverArgs): Promise<s
     snapshot,
     app: 'reducer',
     forwarder: args.forwarder as ForwarderKind | undefined,
-    releaseName: args.release_name,
+    releaseName: args.release_name ?? 'my-receiver',
     namespace: args.namespace,
     apiKey: args.api_key,
     destination: destination as OutputDestination,

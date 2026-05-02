@@ -4,7 +4,7 @@
  * Read-only discovery of the caller's Kubernetes cluster + AWS account.
  * Produces a DiscoverySnapshot (stored in-memory for 30 min) and a
  * terse markdown report of what was found. The advise_{reporter,
- * reducer, retriever} tools consume the snapshot by id.
+ * receiver, retriever} tools consume the snapshot by id.
  *
  * Nothing here mutates state. Every probe is a `kubectl get` or
  * `aws ...describe/list` call. If kubectl or aws isn't configured, the
