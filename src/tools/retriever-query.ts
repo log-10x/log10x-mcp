@@ -331,7 +331,7 @@ function formatEvent(ev: RetrieverEvent): string {
   //
   // 1. **log10x canonical** — `text`, `severity_level`, `tenx_user_service`,
   //    `k8s_*` fields. Present when the archive was written by a Reporter/
-  //    Reducer pipeline that had tokenization + enrichment enabled.
+  //    Receiver pipeline that had tokenization + enrichment enabled.
   //
   // 2. **raw fluent-bit** — `log`, `stream`, `kubernetes.namespace_name`,
   //    `kubernetes.pod_name`, `kubernetes.container_name`. Present when the

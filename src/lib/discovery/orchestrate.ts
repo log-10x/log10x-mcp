@@ -142,7 +142,7 @@ function deriveRecommendations(
     if (!current) retrieverSqsUrls[q.role] = q.url;
   }
 
-  // Pull GitOps + compactReducer wiring from any running reducer pod.
+  // Pull GitOps + compactReceiver wiring from any running reducer pod.
   // Multiple reducers in the cluster (e.g., dev + prod) is rare;
   // first-wins matches the alreadyInstalled iteration above. Only record
   // GH_REPO if GH_ENABLED is also literally "true" — a repo set with the

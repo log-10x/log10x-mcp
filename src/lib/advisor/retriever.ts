@@ -1,7 +1,7 @@
 /**
  * Retriever install/verify/teardown plan builder.
  *
- * Unlike Reporter/Reducer (which ride on top of a forwarder), the
+ * Unlike Reporter/Receiver (which ride on top of a forwarder), the
  * Retriever is a standalone set of workloads (indexer + query-handler
  * + stream-worker + filter CronJobs) that read from S3 via SQS and
  * serve an HTTP query endpoint. No forwarder choice — just one chart

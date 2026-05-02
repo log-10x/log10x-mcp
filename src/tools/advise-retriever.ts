@@ -3,7 +3,7 @@
  *
  * Given a DiscoverySnapshot (from `log10x_discover_env`), produce an
  * install/verify/teardown plan for the Log10x Retriever. Unlike
- * Reporter + Reducer, the Retriever has no forwarder choice — just
+ * Reporter + Receiver, the Retriever has no forwarder choice — just
  * AWS infra pointers (S3 buckets, SQS queues, IRSA role).
  */
 

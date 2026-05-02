@@ -1,12 +1,12 @@
 /**
- * Reporter + Reducer install/verify/teardown plan builder.
+ * Reporter + Receiver install/verify/teardown plan builder.
  *
  * Given a DiscoverySnapshot + user args, produce an `AdvisePlan` that
  * covers the whole lifecycle for one forwarder kind. The plan is pure
  * data — rendering to markdown is the render layer's job.
  *
  * The same builder serves both apps: Reporter (kind=report, read-only
- * metric emission) and Reducer (kind=regulate, read + write back to
+ * metric emission) and Receiver (kind=regulate, read + write back to
  * the forwarder with mute/sample/compact applied). They share every
  * forwarder spec, every chart, every preflight check. The single
  * differentiator is the `kind` value baked into the tenx values block,
@@ -160,7 +160,7 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   // sidecar wiring bug, which applies regardless of optimize).
   if (shape === 'inline' && args.optimize && app === 'reporter') {
     blockers.push(
-      'optimize=true is a Reducer-app feature (it encodes events emitted back through the forwarder). The Reporter app does not emit events back through the forwarder — it only publishes aggregated TenXSummary metrics. Drop `optimize` or switch to `app=reducer`.'
+      'optimize=true is a Receiver-app feature (it encodes events emitted back through the forwarder). The Reporter app does not emit events back through the forwarder — it only publishes aggregated TenXSummary metrics. Drop `optimize` or switch to `app=reducer`.'
     );
   }
 
@@ -174,7 +174,7 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   );
 
   const notes: string[] = [];
-  const appTitle = app === 'reporter' ? 'Reporter' : 'Reducer';
+  const appTitle = app === 'reporter' ? 'Reporter' : 'Receiver';
   if (snapshot.recommendations.alreadyInstalled[app]) {
     notes.push(
       `A ${appTitle} is already installed in namespace \`${snapshot.recommendations.alreadyInstalled[app]}\`. Installing a second release under a different name + namespace is safe but will duplicate ${app === 'reporter' ? 'metric emission' : 'regulation'} unless the existing one is torn down first.`
@@ -266,11 +266,11 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
 }
 
 /**
- * GitOps section explaining MCP-managed compactReducer updates.
+ * GitOps section explaining MCP-managed compactReceiver updates.
  *
  * The reducer's compact decision can be:
  *   - global ON via `reducerOptimize=true` (compact every event), or
- *   - per-pattern via the compactReducer module (CSV lookup + JS predicate),
+ *   - per-pattern via the compactReceiver module (CSV lookup + JS predicate),
  *     which is what this section is for.
  *
  * When `optimize=true`, MCP-managed per-pattern decisions are still useful
@@ -280,17 +280,17 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
 function buildCompactReducerGitopsExplainer(opts: { optimize: boolean }): GitopsExplainer {
   return {
     headline:
-      'The compactReducer decides per-event whether to emit `encode()` (compact, ~20-40x smaller) or `fullText`. Decisions live in a CSV the engine pulls from your GitHub repo on a schedule. Wire GitOps once and the MCP can author per-pattern PRs (`log10x_advise_compact`) — the engine hot-reloads the CSV without a pod restart.',
+      'The compactReceiver decides per-event whether to emit `encode()` (compact, ~20-40x smaller) or `fullText`. Decisions live in a CSV the engine pulls from your GitHub repo on a schedule. Wire GitOps once and the MCP can author per-pattern PRs (`log10x_advise_compact`) — the engine hot-reloads the CSV without a pod restart.',
     whenToEnable: [
       'You want **selective** compaction — compact most patterns but preserve specific ones (audit, compliance, debug).',
-      'You want decisions to evolve over time without redeploying the reducer.',
+      'You want decisions to evolve over time without redeploying the receiver.',
       'You want the MCP to manage the compact-decisions file via PRs (review-able, reversible).',
     ],
     whenToSkip: [
       opts.optimize
         ? '`reducerOptimize=true` is already set on this plan, which compacts every event. Add GitOps only if you need to opt SPECIFIC patterns OUT of compaction (audit/compliance).'
         : 'You will set `reducerOptimize=true` later to compact every event uniformly — no per-pattern decisions needed.',
-      'You will not be using the reducer app at all (this section is reducer-only).',
+      'You will not be using the receiver app at all (this section is reducer-only).',
     ],
     repoLayout: [
       { path: 'pipelines/run/regulate/compact/compact-lookup.csv', comment: 'MCP edits this — CSV change → hot reload (no restart)' },

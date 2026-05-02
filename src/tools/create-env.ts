@@ -91,7 +91,7 @@ export async function executeCreateEnv(
   }
   lines.push('');
   lines.push(
-    'Next step: deploy a Reporter / Reducer / Retriever into this env using ' +
+    'Next step: deploy a Reporter / Receiver / Retriever into this env using ' +
       '`log10x_advise_install` (pass the new `env_id` so the install plan is scoped correctly).'
   );
   return lines.join('\n');

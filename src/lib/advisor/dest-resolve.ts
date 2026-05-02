@@ -1,5 +1,5 @@
 /**
- * Auto-detect the `destination` argument for advise_install / advise_reducer /
+ * Auto-detect the `destination` argument for advise_install / advise_receiver /
  * advise_reporter from ambient SIEM credentials.
  *
  * The advisor `destination` enum (`mock | elasticsearch | splunk | datadog |

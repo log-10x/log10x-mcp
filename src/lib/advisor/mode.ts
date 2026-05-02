@@ -184,7 +184,7 @@ export function recommendInstallMode(opts: RecommendOpts): ModeRecommendation {
   }
   if (snapshot.recommendations.alreadyInstalled.reducer) {
     warnings.push(
-      `A Reducer is already installed in \`${snapshot.recommendations.alreadyInstalled.reducer}\`. Two reducers on the same event stream double-filter — tear one down before installing another.`
+      `A Receiver is already installed in \`${snapshot.recommendations.alreadyInstalled.reducer}\`. Two reducers on the same event stream double-filter — tear one down before installing another.`
     );
   }
 
@@ -317,7 +317,7 @@ function makeInlineAlts(params: {
   // Inline reporter.
   // No-goal case: this is the conservative default when the user has a
   // helm-managed, replaceable forwarder — no extra DaemonSet, no event
-  // modification, just metrics. Ranks above Inline Reducer because
+  // modification, just metrics. Ranks above Inline Receiver because
   // report-mode touches the event path less than regulate-mode does.
   alts.push({
     label: `Inline Reporter (${detectedKind})`,
@@ -343,7 +343,7 @@ function makeInlineAlts(params: {
   // No-goal case: reducer sits BELOW reporter (conservative default).
   // Users who want filtering state that goal explicitly.
   alts.push({
-    label: `Inline Reducer (${detectedKind})`,
+    label: `Inline Receiver (${detectedKind})`,
     args: {
       app: 'reducer',
       shape: 'inline',
@@ -375,7 +375,7 @@ function makeInlineAlts(params: {
   // optimize, so the logstashBlocker above handles that case.
   const optimizeBlocker = undefined;
   alts.push({
-    label: `Inline Reducer + Compact (${detectedKind})`,
+    label: `Inline Receiver + Compact (${detectedKind})`,
     args: {
       app: 'reducer',
       shape: 'inline',
@@ -430,7 +430,7 @@ function makeRetrieverAlt(params: {
         ? infraReady
           ? 'Retriever — long-term S3 archive with Bloom-filter index; detected AWS infra is compatible.'
           : 'Retriever matches goal=archive but required AWS infra is missing — blocker before install.'
-        : 'Retriever — separate pillar for long-term archive + forensic query; consider alongside a Reporter/Reducer install.',
+        : 'Retriever — separate pillar for long-term archive + forensic query; consider alongside a Reporter/Receiver install.',
     blocker,
   };
 }

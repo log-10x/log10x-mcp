@@ -219,7 +219,7 @@ export async function executePocFromLocal(args: PocFromLocalArgs): Promise<strin
     }
     lines.push('');
     lines.push(
-      `_For native SIEM exclusion configs, paste-ready Reducer YAML, and the full 9-section report, run \`log10x_poc_from_siem\` once you have credentials available._`
+      `_For native SIEM exclusion configs, paste-ready Receiver YAML, and the full 9-section report, run \`log10x_poc_from_siem\` once you have credentials available._`
     );
   }
   lines.push('');
