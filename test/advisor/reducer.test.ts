@@ -290,7 +290,7 @@ test('mode=readonly emits receiverReadOnly env on fluent-bit', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
     app: 'reducer',
-    forwarder: 'fluent-bit',
+    forwarder: 'fluentbit',
     apiKey: 'test',
     readOnly: true,
   });
@@ -306,7 +306,7 @@ test('mode=readonly + optimize=true is blocked', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
     app: 'reducer',
-    forwarder: 'fluent-bit',
+    forwarder: 'fluentbit',
     apiKey: 'test',
     optimize: true,
     readOnly: true,
@@ -321,7 +321,7 @@ test('mode=readonly with app=reporter is blocked', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
     app: 'reporter',
-    forwarder: 'fluent-bit',
+    forwarder: 'fluentbit',
     apiKey: 'test',
     readOnly: true,
   });
