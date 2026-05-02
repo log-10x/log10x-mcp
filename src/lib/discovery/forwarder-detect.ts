@@ -5,7 +5,7 @@
  * because registry host + tag vary wildly in the wild:
  *   - `public.ecr.aws/fluent/fluent-bit:3.2`
  *   - `cr.fluentbit.io/fluent/fluent-bit:3.2`
- *   - `ghcr.io/log-10x/fluent-bit-10x:1.0.6`
+ *   - `ghcr.io/log-10x/fluent-bit-10x:latest`
  *   - `docker.elastic.co/beats/filebeat:8.15.0`
  *   - `docker.elastic.co/logstash/logstash:8.15.0`
  *   - `otel/opentelemetry-collector-contrib:0.108.0`

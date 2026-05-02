@@ -45,17 +45,10 @@ export type OutputDestination = 'mock' | 'elasticsearch' | 'splunk' | 'datadog' 
 //   report   -> Reporter (read-only metric emission)
 //   regulate -> Receiver (read + write events back through the forwarder)
 //
-// fluent-bit + fluentd charts at 1.0.7 silently ignore tenx.kind and always
-// run the receiver pipeline (kind=report is effectively "reducer with no
-// filter rules" at the observable level). filebeat / logstash / otel-
-// collector at 1.0.7 still honor kind and launch @apps/reporter vs
-// @apps/reducer accordingly.
-//
 // Optimizer mode (lossless encoded-event output, ~20-40x volume reduction:
 // `"log":"~-8Av]P9cVZb,timestamp,var1,var2,..."`) is NOT exposed as a kind.
 // It is triggered by setting `env: [{name: receiverOptimize, value: "true"}]`
-// on the forwarder container. Unified across all 5 charts as of 1.0.7
-// (the per-forwarder optimize path is now just reducer + this env var).
+// on the forwarder container.
 export type TenxKind = 'report' | 'regulate';
 
 /** How a forwarder's helm chart labels its workloads + pods. */
@@ -105,14 +98,9 @@ export interface ForwarderSpec {
     gitToken?: string;
     /**
      * When true AND kind=regulate, emit events in compact encoded form
-     * (templateHash+vars, ~20-40x volume reduction). Verified 2026-04-25
-     * on demo cluster (engine 1.0.9 + chart 1.0.8) across all 5
-     * forwarders. Plan emits the `receiverOptimize=true` env var
-     * (image-version-agnostic) rather than the chart-native
-     * `tenx.optimize: true` field — the chart-native field works on
-     * engine 1.0.9+ (which baked in the previously-missing
-     * `tenx-optimize.lua`) but the env-var path is preserved for compat
-     * with older images. Silently ignored when kind=report.
+     * (templateHash+vars, ~20-40x volume reduction). Plan emits the
+     * `receiverOptimize=true` env var on the forwarder container.
+     * Silently ignored when kind=report.
      */
     optimize?: boolean;
     /**
@@ -198,9 +186,9 @@ export const REPORTER_FORWARDER_SPECS: Record<Exclude<ForwarderKind, 'unknown'>,
     selectorLabel: (r) => k8sRecommendedSelector(r),
     renderValues: ({ apiKey, releaseName, destination, kind, outputHost, splunkHecToken, gitToken, optimize, readOnly }) => {
       const outputBlock = renderFluentBitOutput(destination, outputHost, splunkHecToken);
-      // Receiver-mode flags via env-var workaround. Image-version-agnostic
-      // (works on engine 1.0.7+). receiverOptimize=true → compact encoded
-      // events; receiverReadOnly=true → metrics-only, no return write.
+      // Receiver-mode flags via env-var workaround.
+      // receiverOptimize=true → compact encoded events;
+      // receiverReadOnly=true → metrics-only, no return write.
       const envBlock = renderTenxEnvBlock({ kind, optimize, readOnly });
       return `tenx:
   enabled: true
@@ -406,7 +394,7 @@ ${envBlock}`;
       // install we MUST override extraEnvs/secretMounts to empty so pods
       // don't hang in FailedMount.
       const outputBlock = renderFilebeatOutput(destination, outputHost);
-      // Chart 1.0.7 routes kind=optimize → @apps/reducer + receiverOptimize
+      // The chart routes kind=optimize → @apps/receiver + receiverOptimize
       // env var. Emit kind=optimize in values when caller requested optimize.
       const effectiveKind = optimize && kind === 'regulate' ? 'optimize' : kind;
       // readOnly has no chart-level kind value — emit as an env var on
@@ -488,15 +476,14 @@ ${indent(outputBlock, 6)}
 
   logstash: {
     label: 'Logstash',
-    // VERIFIED 2026-04-21: the log10x-elastic/logstash@1.0.6 chart is
-    // BROKEN in sidecar mode. The chart runs tenx as a separate pod
-    // container reading from its own STDIN, but the tenx-logstash design
-    // expects tenx to be a CHILD PROCESS of logstash spawned by the
-    // `pipe` output plugin (so tenx's stdin is wired to logstash's pipe).
-    // With the chart's layout, tenx.stdin is a tty, it sees no input,
-    // and after ~9s the pipeline shuts down. Do NOT ship this path to
-    // users until the chart is fixed or a sidecar-capable launcher is
-    // added to tenx-edge.
+    // The log10x-elastic/logstash chart is broken in sidecar mode. The
+    // chart runs tenx as a separate pod container reading from its own
+    // STDIN, but the tenx-logstash design expects tenx to be a CHILD
+    // PROCESS of logstash spawned by the `pipe` output plugin (so tenx's
+    // stdin is wired to logstash's pipe). With the chart's layout,
+    // tenx.stdin is a tty, it sees no input, and after ~9s the pipeline
+    // shuts down. Do NOT ship this path to users until the chart is
+    // fixed or a sidecar-capable launcher is added to tenx-edge.
     integrationMode:
       'StatefulSet + `tenx` sidecar — CURRENTLY BROKEN: the chart runs tenx as a side container reading from its own stdin, but tenx-logstash expects to be spawned by the logstash `pipe` output plugin. Do not advise users to install this until the chart is fixed.',
     helmRepo: 'https://log-10x.github.io/elastic-helm-charts',

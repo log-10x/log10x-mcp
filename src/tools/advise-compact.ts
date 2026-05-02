@@ -595,7 +595,7 @@ async function executeJsMode(args: AdviseCompactArgs): Promise<string> {
 
   out.push('## After merge');
   out.push('');
-  out.push(`The reducer pod\'s gitops puller fetches the new JS on its next poll. The \`ResourceReloadUnit\` (engine 1.0.10+) sees the file change, classifies \`.js\` as a config file, and calls \`pipeline.restart()\`. Drain + relaunch is typically under 5 seconds for a reducer pod, but it IS a real restart — events in flight may be re-emitted by the upstream forwarder once tenx is back.`);
+  out.push(`The reducer pod\'s gitops puller fetches the new JS on its next poll. The \`ResourceReloadUnit\` sees the file change, classifies \`.js\` as a config file, and calls \`pipeline.restart()\`. Drain + relaunch is typically under 5 seconds for a reducer pod, but it IS a real restart — events in flight may be re-emitted by the upstream forwarder once tenx is back.`);
   out.push('');
   out.push('To verify in-cluster after merge:');
   out.push('```bash');
