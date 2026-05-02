@@ -69,14 +69,14 @@ export interface ReporterAdviseArgs {
    * ~20-40x volume reduction). Only meaningful when app='reducer';
    * silently ignored otherwise. Verified 2026-04-25 on engine 1.0.9
    * + chart 1.0.8 across all 5 forwarders. Plan emits the
-   * `reducerOptimize=true` env var (image-version-agnostic) rather
+   * `receiverOptimize=true` env var (image-version-agnostic) rather
    * than the chart-native `tenx.optimize: true` field, which only
    * became reliable at engine 1.0.9 (the previously-missing
    * `tenx-optimize.lua` is now baked in).
    */
   optimize?: boolean;
   /**
-   * Read-only mode (Receiver app only). When true, emits `reducerReadOnly=true`
+   * Read-only mode (Receiver app only). When true, emits `receiverReadOnly=true`
    * env var so the receiver receives events + publishes TenXSummary metrics
    * but does NOT write events back to the forwarder. Silently ignored when
    * app='reporter' (Reporter is read-only by definition).
@@ -172,7 +172,7 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   }
   // optimize=true path, now unified across all charts at 1.0.7 — every
   // chart (fluent-bit, fluentd, filebeat, logstash, otel-collector) maps
-  // kind=optimize to @apps/reducer + reducerOptimize=true env var.
+  // kind=optimize to @apps/reducer + receiverOptimize=true env var.
   // No per-forwarder blocker remains (logstash is blocked above for the
   // sidecar wiring bug, which applies regardless of optimize).
   if (shape === 'inline' && args.optimize && app === 'reporter') {
@@ -286,7 +286,7 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
  * GitOps section explaining MCP-managed compactReceiver updates.
  *
  * The reducer's compact decision can be:
- *   - global ON via `reducerOptimize=true` (compact every event), or
+ *   - global ON via `receiverOptimize=true` (compact every event), or
  *   - per-pattern via the compactReceiver module (CSV lookup + JS predicate),
  *     which is what this section is for.
  *
@@ -305,8 +305,8 @@ function buildCompactReducerGitopsExplainer(opts: { optimize: boolean }): Gitops
     ],
     whenToSkip: [
       opts.optimize
-        ? '`reducerOptimize=true` is already set on this plan, which compacts every event. Add GitOps only if you need to opt SPECIFIC patterns OUT of compaction (audit/compliance).'
-        : 'You will set `reducerOptimize=true` later to compact every event uniformly — no per-pattern decisions needed.',
+        ? '`receiverOptimize=true` is already set on this plan, which compacts every event. Add GitOps only if you need to opt SPECIFIC patterns OUT of compaction (audit/compliance).'
+        : 'You will set `receiverOptimize=true` later to compact every event uniformly — no per-pattern decisions needed.',
       'You will not be using the receiver app at all (this section is reducer-only).',
     ],
     repoLayout: [
@@ -319,9 +319,9 @@ function buildCompactReducerGitopsExplainer(opts: { optimize: boolean }): Gitops
       { name: 'GH_TOKEN', value: '<github PAT>', required: true, note: 'PAT with Contents: Read scope; store as a k8s Secret + reference via valueFrom' },
       { name: 'GH_BRANCH', value: 'main', required: false, note: 'branch to pull from' },
       { name: 'GH_SYNC_INTERVAL', value: '30s', required: false, note: 'engine re-fetches the repo this often' },
-      { name: 'compactReducerLookupFile', value: 'pipelines/run/regulate/compact/compact-lookup.csv', required: true, note: 'must match the path inside your GitOps repo' },
-      { name: 'compactReducerFieldNames', value: '[symbolMessage]', required: false, note: 'fields joined with `_` to form each event\'s lookup key' },
-      { name: 'compactReducerDefault', value: 'false', required: false, note: '`false`: entries opt INTO compaction. `true`: entries opt OUT (use with reducerOptimize=true)' },
+      { name: 'compactReceiverLookupFile', value: 'pipelines/run/regulate/compact/compact-lookup.csv', required: true, note: 'must match the path inside your GitOps repo' },
+      { name: 'compactReceiverFieldNames', value: '[symbolMessage]', required: false, note: 'fields joined with `_` to form each event\'s lookup key' },
+      { name: 'compactReceiverDefault', value: 'false', required: false, note: '`false`: entries opt INTO compaction. `true`: entries opt OUT (use with receiverOptimize=true)' },
     ],
     mcpHandoff: {
       tool: 'log10x_advise_compact',
@@ -331,7 +331,7 @@ function buildCompactReducerGitopsExplainer(opts: { optimize: boolean }): Gitops
     caveats: [
       'The default `paths` glob in `pipelines/gitops/config.yaml` is hardcoded to `test/*.csv` for local testing. Override either by forking the config repo and editing the glob, or by setting `GH_PATH=pipelines/run/regulate/compact/*` (Gap A — env override is being wired up).',
       'Customers running multiple reducer pods all watching the same GitOps repo will see fan-out: a single PR triggers reload on every pod within a poll window. That is the intended behavior — kept here as a heads-up for capacity planning.',
-      'The GitOps puller pulls files into a temp dir scoped per `(repo, branch, sha, pollInterval)`. Folder names rotate as the branch advances; the customer never references that path directly — only the repo-relative path in `compactReducerLookupFile`.',
+      'The GitOps puller pulls files into a temp dir scoped per `(repo, branch, sha, pollInterval)`. Folder names rotate as the branch advances; the customer never references that path directly — only the repo-relative path in `compactReceiverLookupFile`.',
     ],
   };
 }

@@ -158,7 +158,7 @@ export interface Recommendations {
    */
   reducerGitopsRepo?: string;
   /**
-   * `compactReducerLookupFile` from a running reducer pod, if set.
+   * `compactReceiverLookupFile` from a running reducer pod, if set.
    * Used by the MCP's compactReceiver advisor to default the lookup
    * path inside the GitOps repo.
    */

@@ -162,7 +162,7 @@ test('reducer plan install commands reference the same chart as reporter', async
 
 // ── optimize flag ──
 
-test('optimize=true on fluent-bit reducer renders the reducerOptimize env block', async () => {
+test('optimize=true on fluent-bit reducer renders the receiverOptimize env block', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
     app: 'reducer',
@@ -174,12 +174,12 @@ test('optimize=true on fluent-bit reducer renders the reducerOptimize env block'
   assert.equal(plan.blockers.length, 0, `no blockers expected, got: ${plan.blockers.join(' | ')}`);
   const content = plan.install.find((s) => s.file)!.file!.contents;
   assert.ok(
-    content.includes('reducerOptimize'),
-    `fluent-bit optimize=true values should set reducerOptimize env; got: ${content}`
+    content.includes('receiverOptimize'),
+    `fluent-bit optimize=true values should set receiverOptimize env; got: ${content}`
   );
   assert.ok(
     content.includes('value: "true"'),
-    `fluent-bit optimize=true values should set reducerOptimize to "true"; got: ${content}`
+    `fluent-bit optimize=true values should set receiverOptimize to "true"; got: ${content}`
   );
 });
 
@@ -201,7 +201,7 @@ test('optimize=true on fluent-bit does NOT flip tenx.optimize (chart-broken path
   );
 });
 
-test('optimize=true on fluentd reducer renders the reducerOptimize env block', async () => {
+test('optimize=true on fluentd reducer renders the receiverOptimize env block', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
     app: 'reducer',
@@ -211,7 +211,7 @@ test('optimize=true on fluentd reducer renders the reducerOptimize env block', a
   });
   assert.equal(plan.blockers.length, 0);
   const content = plan.install.find((s) => s.file)!.file!.contents;
-  assert.ok(content.includes('reducerOptimize'), `fluentd optimize=true values should set reducerOptimize env`);
+  assert.ok(content.includes('receiverOptimize'), `fluentd optimize=true values should set receiverOptimize env`);
 });
 
 test('optimize=true adds an encoded-events verify probe', async () => {
@@ -240,14 +240,14 @@ test('optimize=false leaves fluent-bit values unchanged (no env block)', async (
   });
   const content = plan.install.find((s) => s.file)!.file!.contents;
   assert.ok(
-    !content.includes('reducerOptimize'),
-    `optimize=false must NOT include reducerOptimize env; got: ${content}`
+    !content.includes('receiverOptimize'),
+    `optimize=false must NOT include receiverOptimize env; got: ${content}`
   );
 });
 
 test('optimize=true on filebeat reducer is allowed (1.0.7 unified path)', async () => {
   // As of chart 1.0.7, every forwarder maps kind=optimize to
-  // @apps/reducer + reducerOptimize=true env — no per-forwarder
+  // @apps/reducer + receiverOptimize=true env — no per-forwarder
   // blocker anymore.
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
@@ -286,7 +286,7 @@ test('optimize=true with app=reporter is blocked', async () => {
   );
 });
 
-test('mode=readonly emits reducerReadOnly env on fluent-bit', async () => {
+test('mode=readonly emits receiverReadOnly env on fluent-bit', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
     app: 'reducer',
@@ -297,8 +297,8 @@ test('mode=readonly emits reducerReadOnly env on fluent-bit', async () => {
   assert.equal(plan.blockers.length, 0, `expected no blockers; got: ${plan.blockers.join(' | ')}`);
   const content = plan.install.find((s) => s.file)!.file!.contents;
   assert.ok(
-    content.includes('reducerReadOnly') && content.includes('"true"'),
-    `mode=readonly must include reducerReadOnly=true env; got: ${content}`
+    content.includes('receiverReadOnly') && content.includes('"true"'),
+    `mode=readonly must include receiverReadOnly=true env; got: ${content}`
   );
 });
 
@@ -331,7 +331,7 @@ test('mode=readonly with app=reporter is blocked', async () => {
   );
 });
 
-test('mode=readonly emits reducerReadOnly env on filebeat', async () => {
+test('mode=readonly emits receiverReadOnly env on filebeat', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
     app: 'reducer',
@@ -342,12 +342,12 @@ test('mode=readonly emits reducerReadOnly env on filebeat', async () => {
   assert.equal(plan.blockers.length, 0, `expected no blockers; got: ${plan.blockers.join(' | ')}`);
   const content = plan.install.find((s) => s.file)!.file!.contents;
   assert.ok(
-    content.includes('reducerReadOnly'),
-    `mode=readonly must include reducerReadOnly env; got: ${content}`
+    content.includes('receiverReadOnly'),
+    `mode=readonly must include receiverReadOnly env; got: ${content}`
   );
 });
 
-test('mode=readonly emits reducerReadOnly env on otel-collector', async () => {
+test('mode=readonly emits receiverReadOnly env on otel-collector', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
     app: 'reducer',
@@ -358,7 +358,7 @@ test('mode=readonly emits reducerReadOnly env on otel-collector', async () => {
   assert.equal(plan.blockers.length, 0, `expected no blockers; got: ${plan.blockers.join(' | ')}`);
   const content = plan.install.find((s) => s.file)!.file!.contents;
   assert.ok(
-    content.includes('reducerReadOnly'),
-    `mode=readonly must include reducerReadOnly env; got: ${content}`
+    content.includes('receiverReadOnly'),
+    `mode=readonly must include receiverReadOnly env; got: ${content}`
   );
 });

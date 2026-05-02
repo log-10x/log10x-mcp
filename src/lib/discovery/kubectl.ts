@@ -297,7 +297,7 @@ async function probeWorkloadsInNamespace(
         // valueFrom-based entries (secretKeyRef, configMapKeyRef, fieldRef)
         // are intentionally dropped — exposing secret refs is unsafe and
         // downstream consumers (e.g. advise-compact) only need literal
-        // settings like GH_REPO / compactReducerLookupFile.
+        // settings like GH_REPO / compactReceiverLookupFile.
         const env: Record<string, string> = {};
         for (const e of (log10xContainer as ContainerLike).env ?? []) {
           if (typeof e.value === 'string' && !e.valueFrom) {

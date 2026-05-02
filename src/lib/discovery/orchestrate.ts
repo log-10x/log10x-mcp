@@ -143,7 +143,7 @@ function deriveRecommendations(
   }
 
   // Pull GitOps + compactReceiver wiring from any running reducer pod.
-  // Multiple reducers in the cluster (e.g., dev + prod) is rare;
+  // Multiple receivers in the cluster (e.g., dev + prod) is rare;
   // first-wins matches the alreadyInstalled iteration above. Only record
   // GH_REPO if GH_ENABLED is also literally "true" — a repo set with the
   // master switch off would mislead the compact advisor.
@@ -155,8 +155,8 @@ function deriveRecommendations(
     if (env.GH_ENABLED === 'true' && env.GH_REPO) {
       reducerGitopsRepo = env.GH_REPO;
     }
-    if (env.compactReducerLookupFile) {
-      reducerCompactLookupFile = env.compactReducerLookupFile;
+    if (env.compactReceiverLookupFile) {
+      reducerCompactLookupFile = env.compactReceiverLookupFile;
     }
     if (reducerGitopsRepo || reducerCompactLookupFile) break;
   }

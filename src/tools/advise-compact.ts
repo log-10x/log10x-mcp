@@ -35,7 +35,7 @@ export const adviseCompactSchema = {
     .string()
     .optional()
     .describe(
-      'ID returned by `log10x_discover_env`. When given, the tool resolves `gitops_repo` and `lookup_path` from the running reducer pod\'s env vars (`GH_REPO`, `compactReducerLookupFile`). Either `snapshot_id` or `gitops_repo` must be provided.'
+      'ID returned by `log10x_discover_env`. When given, the tool resolves `gitops_repo` and `lookup_path` from the running reducer pod\'s env vars (`GH_REPO`, `compactReceiverLookupFile`). Either `snapshot_id` or `gitops_repo` must be provided.'
     ),
   gitops_branch: z
     .string()
@@ -63,7 +63,7 @@ export const adviseCompactSchema = {
     .array(z.string())
     .optional()
     .describe(
-      'TenXObject fields joined with `_` to form each event\'s lookup key (must match the receiver\'s `compactReducerFieldNames`). Default: `[symbolMessage]`. Used in mode=csv to format example keys in the PR description.'
+      'TenXObject fields joined with `_` to form each event\'s lookup key (must match the receiver\'s `compactReceiverFieldNames`). Default: `[symbolMessage]`. Used in mode=csv to format example keys in the PR description.'
     ),
   compact: z
     .array(z.string())
@@ -75,13 +75,13 @@ export const adviseCompactSchema = {
     .array(z.string())
     .optional()
     .describe(
-      '(mode=csv) Field-set keys to ADD with `false` (preserve fullText, e.g. audit/compliance patterns). Use when `compactReducerDefault: true` and you want specific patterns to opt OUT of compaction.'
+      '(mode=csv) Field-set keys to ADD with `false` (preserve fullText, e.g. audit/compliance patterns). Use when `compactReceiverDefault: true` and you want specific patterns to opt OUT of compaction.'
     ),
   remove: z
     .array(z.string())
     .optional()
     .describe(
-      '(mode=csv) Field-set keys to REMOVE from the lookup (revert to `compactReducerDefault` for those patterns).'
+      '(mode=csv) Field-set keys to REMOVE from the lookup (revert to `compactReceiverDefault` for those patterns).'
     ),
   current_csv: z
     .string()
@@ -111,7 +111,7 @@ export const adviseCompactSchema = {
     .enum(['true', 'false'])
     .optional()
     .describe(
-      '(mode=csv) Current value of `compactReducerDefault` on the receiver pod (informational; included in the PR description so reviewers know whether entries opt INTO or OUT OF compaction). Default: `false`.'
+      '(mode=csv) Current value of `compactReceiverDefault` on the receiver pod (informational; included in the PR description so reviewers know whether entries opt INTO or OUT OF compaction). Default: `false`.'
     ),
 };
 
@@ -220,7 +220,7 @@ function resolveTarget(args: AdviseCompactArgs): { resolved: AdviseCompactArgs }
         `Snapshot \`${args.snapshot_id}\` did not detect a reducer pod with \`GH_ENABLED=true\` + \`GH_REPO=<owner/name>\` set. The compactReceiver GitOps flow requires a reducer already running with the GitOps env vars wired.`,
         '',
         '**Next steps**:',
-        '- If you haven\'t installed the receiver yet, call `log10x_advise_receiver` (or `log10x_advise_install` with `goal=compact`). The plan now includes a "GitOps — MCP-managed runtime config" section that lists every env var to set, including `GH_ENABLED`, `GH_REPO`, `GH_TOKEN`, and `compactReducerLookupFile`.',
+        '- If you haven\'t installed the receiver yet, call `log10x_advise_receiver` (or `log10x_advise_install` with `goal=compact`). The plan now includes a "GitOps — MCP-managed runtime config" section that lists every env var to set, including `GH_ENABLED`, `GH_REPO`, `GH_TOKEN`, and `compactReceiverLookupFile`.',
         '- If the receiver is already running but GitOps env vars are missing, edit the helm values (or the pod\'s env block) to add them.',
         '- To bypass discovery, re-call this tool with `gitops_repo=<owner/name>` directly.',
       ].join('\n'),
@@ -626,7 +626,7 @@ function buildJsPrBody(jsPath: string, stats: JsLineDiff, hasBaseline: boolean, 
   lines.push('`ResourceReloadUnit` watches `.js` files. On change → `restartPipeline()` (brief drain + relaunch — NOT a hot reload like CSV changes).');
   lines.push('');
   lines.push('Reviewer checklist:');
-  lines.push('- Predicate still gates on `compactReducerLookupFile` via `static shouldLoad(c) { ... }` so the module remains opt-in.');
+  lines.push('- Predicate still gates on `compactReceiverLookupFile` via `static shouldLoad(c) { ... }` so the module remains opt-in.');
   lines.push('- `shouldEncode` returns `false` for `!this.isObject` and `this.isDropped` (defensive guards).');
   lines.push('- No `parts[N]` indexing on a local `var parts = TenXString.split(...)` — translates to a field lookup, returns empty (DSL gap).');
   lines.push('- No `===` or `!==` (tenx DSL comparisons are content-based with `==` / `TenXString.startsWith` etc).');
