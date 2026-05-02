@@ -200,7 +200,7 @@ export function recommendInstallMode(opts: RecommendOpts): ModeRecommendation {
   } else {
     // No detected forwarder — surface inline fluent-bit as an option but
     // score it lower (the user would be installing a forwarder from scratch).
-    alts.push(...makeInlineAlts({ detectedKind: 'fluent-bit', namespace, goal, helmManaged: false }));
+    alts.push(...makeInlineAlts({ detectedKind: 'fluentbit', namespace, goal, helmManaged: false }));
   }
 
   // ── Retriever option (independent of forwarder state) ──

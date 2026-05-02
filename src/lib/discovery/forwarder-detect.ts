@@ -26,7 +26,7 @@ import type { ForwarderKind, Log10xAppKind } from './types.js';
 export function classifyForwarderImage(image: string): ForwarderKind {
   const s = image.toLowerCase();
   // fluent-bit must be checked BEFORE fluentd because "fluent-bit" contains "fluent".
-  if (s.includes('fluent-bit') || s.includes('fluentbit')) return 'fluent-bit';
+  if (s.includes('fluent-bit') || s.includes('fluentbit')) return 'fluentbit';
   if (s.includes('fluentd') || s.includes('fluent/fluentd')) return 'fluentd';
   if (s.includes('filebeat')) return 'filebeat';
   if (s.includes('logstash')) return 'logstash';

@@ -91,7 +91,7 @@ export async function runDoctorChecks(envNickname?: string): Promise<DoctorRepor
           `**DEMO FALLBACK** — your configured LOG10X_API_KEY failed validation, so the MCP is running against the public Log10x demo env (read-only). Reason: ${envs.demoFallbackReason.split('\n')[0].slice(0, 300)}. ` +
           `All API-hitting tools will return demo data, NOT your account. ` +
           `${envs.all.length} demo env${envs.all.length === 1 ? '' : 's'}: ${summary}. Default: ${envs.default.nickname}.`,
-        fix: 'Re-check LOG10X_API_KEY at https://console.log10x.com → Profile → API Settings. Update the value in your MCP host\'s config (e.g. claude_desktop_config.json) and fully restart the host. Or unset LOG10X_API_KEY entirely to keep demo mode without the warning.',
+        fix: 'Easiest fix: run `log10x_signin` — it mints a fresh key (`mode: "github"` for GitHub Device Flow, or `mode: "api_key"` to paste an existing key from https://console.log10x.com → Profile → API Settings) and auto-clears the bad `LOG10X_API_KEY` from this MCP server\'s process so the new key takes effect immediately, no host restart needed. Alternatively: re-check `LOG10X_API_KEY` at https://console.log10x.com → Profile → API Settings, update the value in your MCP host\'s config (e.g. claude_desktop_config.json) and fully restart the host. Or unset `LOG10X_API_KEY` entirely to keep demo mode without the warning. See `log10x_login_status` for the full breakdown.',
       });
     } else if (envs.isDemoMode) {
       globalChecks.push({
@@ -112,7 +112,7 @@ export async function runDoctorChecks(envNickname?: string): Promise<DoctorRepor
       name: 'environment_config',
       status: 'fail',
       message: (e as Error).message,
-      fix: 'Set LOG10X_API_KEY in your MCP host config (key from https://console.log10x.com → Profile → API Settings), or run `log10x_signin` to mint one via GitHub. Unsetting LOG10X_API_KEY drops the MCP into read-only demo mode.',
+      fix: 'Run `log10x_signin` to sign in (`mode: "github"` for GitHub Device Flow — opens a browser, no manual key handling; or `mode: "api_key"` to paste an existing key). Or set `LOG10X_API_KEY` in your MCP host config (key from https://console.log10x.com → Profile → API Settings) and restart the host. Unsetting `LOG10X_API_KEY` drops the MCP into read-only demo mode. See `log10x_login_status` for the full breakdown.',
     });
     return finalize(globalChecks, perEnvChecks);
   }
@@ -224,7 +224,7 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
       name: 'prometheus_gateway',
       status: 'fail',
       message: `Gateway query failed: ${(e as Error).message}`,
-      fix: `Verify LOG10X_API_KEY for env ${env.nickname} at https://console.log10x.com. If the network is locked down, allowlist prometheus.log10x.com.`,
+      fix: `Verify the credentials for env ${env.nickname}: re-check the key at https://console.log10x.com → Profile → API Settings, or run \`log10x_signin\` to mint a fresh one (\`mode: "github"\` for GitHub Device Flow, or \`mode: "api_key"\` to paste a key). If the network is locked down, allowlist prometheus.log10x.com.`,
     });
     return checks;
   }

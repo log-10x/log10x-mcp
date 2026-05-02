@@ -90,11 +90,11 @@ test('hand-rolled fluent-bit → standalone reporter is top pick', () => {
     snapshot: baseSnapshot({
       kubectl: {
         ...baseSnapshot().kubectl,
-        forwarders: [handRolledForwarder('fluent-bit')],
+        forwarders: [handRolledForwarder('fluentbit')],
       },
       recommendations: {
         suggestedNamespace: 'logging',
-        existingForwarder: 'fluent-bit',
+        existingForwarder: 'fluentbit',
         alreadyInstalled: {},
       },
     }),
@@ -143,11 +143,11 @@ test('helm-managed fluent-bit + goal=compact → inline reducer + optimize=true'
     snapshot: baseSnapshot({
       kubectl: {
         ...baseSnapshot().kubectl,
-        forwarders: [helmForwarder('fluent-bit')],
+        forwarders: [helmForwarder('fluentbit')],
       },
       recommendations: {
         suggestedNamespace: 'logging',
-        existingForwarder: 'fluent-bit',
+        existingForwarder: 'fluentbit',
         alreadyInstalled: {},
       },
     }),
@@ -156,7 +156,7 @@ test('helm-managed fluent-bit + goal=compact → inline reducer + optimize=true'
   assert.equal(rec.topPick.args.app, 'reducer');
   assert.equal(rec.topPick.args.shape, 'inline');
   assert.equal(rec.topPick.args.optimize, true);
-  assert.equal(rec.topPick.args.forwarder, 'fluent-bit');
+  assert.equal(rec.topPick.args.forwarder, 'fluentbit');
   assert.equal(rec.topPick.blocker, undefined);
 });
 
@@ -215,11 +215,11 @@ test('helm-managed fluent-bit + goal=cut-cost → inline reducer (no optimize)',
     snapshot: baseSnapshot({
       kubectl: {
         ...baseSnapshot().kubectl,
-        forwarders: [helmForwarder('fluent-bit')],
+        forwarders: [helmForwarder('fluentbit')],
       },
       recommendations: {
         suggestedNamespace: 'logging',
-        existingForwarder: 'fluent-bit',
+        existingForwarder: 'fluentbit',
         alreadyInstalled: {},
       },
     }),
@@ -238,11 +238,11 @@ test('helm-managed fluent-bit + goal=just-metrics → inline reporter', () => {
     snapshot: baseSnapshot({
       kubectl: {
         ...baseSnapshot().kubectl,
-        forwarders: [helmForwarder('fluent-bit')],
+        forwarders: [helmForwarder('fluentbit')],
       },
       recommendations: {
         suggestedNamespace: 'logging',
-        existingForwarder: 'fluent-bit',
+        existingForwarder: 'fluentbit',
         alreadyInstalled: {},
       },
     }),
@@ -347,11 +347,11 @@ test('no goal + helm-managed fluent-bit → top pick has no blocker, resolved ar
     snapshot: baseSnapshot({
       kubectl: {
         ...baseSnapshot().kubectl,
-        forwarders: [helmForwarder('fluent-bit')],
+        forwarders: [helmForwarder('fluentbit')],
       },
       recommendations: {
         suggestedNamespace: 'logging',
-        existingForwarder: 'fluent-bit',
+        existingForwarder: 'fluentbit',
         alreadyInstalled: {},
       },
     }),
@@ -369,11 +369,11 @@ test('detectionSummary flags helm-managed vs hand-rolled', () => {
     snapshot: baseSnapshot({
       kubectl: {
         ...baseSnapshot().kubectl,
-        forwarders: [helmForwarder('fluent-bit')],
+        forwarders: [helmForwarder('fluentbit')],
       },
       recommendations: {
         suggestedNamespace: 'logging',
-        existingForwarder: 'fluent-bit',
+        existingForwarder: 'fluentbit',
         alreadyInstalled: {},
       },
     }),
@@ -387,11 +387,11 @@ test('detectionSummary flags helm-managed vs hand-rolled', () => {
     snapshot: baseSnapshot({
       kubectl: {
         ...baseSnapshot().kubectl,
-        forwarders: [handRolledForwarder('fluent-bit')],
+        forwarders: [handRolledForwarder('fluentbit')],
       },
       recommendations: {
         suggestedNamespace: 'logging',
-        existingForwarder: 'fluent-bit',
+        existingForwarder: 'fluentbit',
         alreadyInstalled: {},
       },
     }),

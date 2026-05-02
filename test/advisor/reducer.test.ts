@@ -41,7 +41,7 @@ function baseSnapshot(overrides: Partial<DiscoverySnapshot> = {}): DiscoverySnap
 }
 
 const forwarders: ForwarderKind[] = [
-  'fluent-bit',
+  'fluentbit',
   'fluentd',
   'filebeat',
   'logstash',
@@ -87,7 +87,7 @@ test('reducer default release name is my-reducer', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
     app: 'reducer',
-    forwarder: 'fluent-bit',
+    forwarder: 'fluentbit',
     apiKey: 'test',
   });
   assert.equal(plan.releaseName, 'my-reducer');
@@ -96,7 +96,7 @@ test('reducer default release name is my-reducer', async () => {
 test('reporter default release name is my-reporter (unchanged)', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
-    forwarder: 'fluent-bit',
+    forwarder: 'fluentbit',
     apiKey: 'test',
   });
   assert.equal(plan.app, 'reporter');
@@ -107,7 +107,7 @@ test('explicit release_name overrides the app default', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
     app: 'reducer',
-    forwarder: 'fluent-bit',
+    forwarder: 'fluentbit',
     releaseName: 'custom-reg-name',
     apiKey: 'test',
   });
@@ -123,7 +123,7 @@ test('alreadyInstalled.reducer triggers a note, not a blocker', async () => {
       },
     }),
     app: 'reducer',
-    forwarder: 'fluent-bit',
+    forwarder: 'fluentbit',
     apiKey: 'test',
   });
   assert.equal(plan.blockers.length, 0);
@@ -138,7 +138,7 @@ test('reducer plan install commands reference the same chart as reporter', async
   // blocked upstream (chart-broken sidecar wiring) so we skip it here —
   // the logstash blocker is covered by the dedicated test above.
   const expected: Record<string, string> = {
-    'fluent-bit': 'log10x-fluent/fluent-bit',
+    'fluentbit': 'log10x-fluent/fluent-bit',
     fluentd: 'log10x-fluent/fluentd',
     filebeat: 'log10x-elastic/filebeat',
     'otel-collector': 'log10x-otel/opentelemetry-collector',
@@ -166,7 +166,7 @@ test('optimize=true on fluent-bit reducer renders the receiverOptimize env block
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
     app: 'reducer',
-    forwarder: 'fluent-bit',
+    forwarder: 'fluentbit',
     apiKey: 'test',
     destination: 'mock',
     optimize: true,
@@ -187,7 +187,7 @@ test('optimize=true on fluent-bit does NOT flip tenx.optimize (chart-broken path
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
     app: 'reducer',
-    forwarder: 'fluent-bit',
+    forwarder: 'fluentbit',
     apiKey: 'test',
     optimize: true,
   });
@@ -218,7 +218,7 @@ test('optimize=true adds an encoded-events verify probe', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
     app: 'reducer',
-    forwarder: 'fluent-bit',
+    forwarder: 'fluentbit',
     apiKey: 'test',
     optimize: true,
   });
@@ -234,7 +234,7 @@ test('optimize=false leaves fluent-bit values unchanged (no env block)', async (
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
     app: 'reducer',
-    forwarder: 'fluent-bit',
+    forwarder: 'fluentbit',
     apiKey: 'test',
     optimize: false,
   });
@@ -276,7 +276,7 @@ test('optimize=true with app=reporter is blocked', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
     app: 'reporter',
-    forwarder: 'fluent-bit',
+    forwarder: 'fluentbit',
     apiKey: 'test',
     optimize: true,
   });

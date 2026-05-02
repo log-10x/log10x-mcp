@@ -183,7 +183,7 @@ function legacyElasticSelector(releaseName: string, chartSubstring: string): str
 // ── The spec map ──
 
 export const REPORTER_FORWARDER_SPECS: Record<Exclude<ForwarderKind, 'unknown'>, ForwarderSpec> = {
-  'fluent-bit': {
+  'fluentbit': {
     label: 'Fluent Bit',
     integrationMode:
       'DaemonSet using the log10x-repackaged Fluent Bit image (`log10x/fluent-bit-10x`). 10x logic is baked into the container via a Lua filter — no separate sidecar.',

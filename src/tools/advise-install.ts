@@ -40,7 +40,7 @@ export const adviseInstallSchema = {
     .enum(['just-metrics', 'cut-cost', 'compact', 'archive'])
     .optional()
     .describe(
-      'What the user is trying to achieve. When given, the tool returns a single concrete install plan for the best-matching path. When omitted, the tool returns a ranked table of candidate paths + the top pick\'s resolved args so the caller can re-invoke with `goal` or jump to `log10x_advise_{reporter,reducer,retriever}` directly. Values: `just-metrics` (cost attribution + pattern fingerprinting, no filtering), `cut-cost` (regulate: filter/sample events in-flight), `compact` (regulate + ~20-40x volume reduction via compact encoding — only on fluent-bit/fluentd 1.0.7), `archive` (Retriever: long-term S3 archive + forensic query).'
+      'What the user is trying to achieve. When given, the tool returns a single concrete install plan for the best-matching path. When omitted, the tool returns a ranked table of candidate paths + the top pick\'s resolved args so the caller can re-invoke with `goal` or jump to `log10x_advise_{reporter,reducer,retriever}` directly. Values: `just-metrics` (cost attribution + pattern fingerprinting, no filtering), `cut-cost` (regulate: filter/sample events in-flight), `compact` (regulate + ~20-40x volume reduction via compact encoding — only on fluentbit/fluentd 1.0.7), `archive` (Retriever: long-term S3 archive + forensic query).'
     ),
   api_key: z
     .string()

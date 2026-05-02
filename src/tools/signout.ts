@@ -79,12 +79,13 @@ export async function executeSignout(
   } else if (envs.isDemoMode) {
     lines.push(
       `Now running in demo mode against the public Log10x demo env. ` +
-        `Run \`log10x_signin\` to sign back in.`
+        `Run \`log10x_signin\` to sign back in (\`mode: "github"\` for the GitHub Device Flow, ` +
+        `or \`mode: "api_key"\` with a key from console.log10x.com → Profile → API Settings). ` +
+        `Call \`log10x_login_status\` for the full breakdown.`
     );
   } else {
     // We cleared both layers but envs is somehow not in demo mode.
-    // Could happen if a future credential source (LOG10X_ENVS, etc.)
-    // is reintroduced. Surface honestly rather than confidently lie.
+    // Surface honestly rather than confidently lie.
     lines.push(
       'A non-env-var, non-file credential source is still active. ' +
         'Run `log10x_login_status` to see what\'s active and how to fully sign out.'

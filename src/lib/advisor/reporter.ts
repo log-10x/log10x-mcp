@@ -107,9 +107,9 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
     args.namespace ?? snapshot.recommendations.suggestedNamespace ?? 'logging';
 
   const forwarderCandidate =
-    args.forwarder ?? snapshot.recommendations.existingForwarder ?? 'fluent-bit';
+    args.forwarder ?? snapshot.recommendations.existingForwarder ?? 'fluentbit';
   const forwarder: ForwarderKind =
-    forwarderCandidate === 'unknown' ? 'fluent-bit' : forwarderCandidate;
+    forwarderCandidate === 'unknown' ? 'fluentbit' : forwarderCandidate;
 
   // Spec selection splits on shape, not on forwarder kind. Standalone
   // always resolves to the reporter-10x spec regardless of what
@@ -159,7 +159,7 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   // use the pipe-output plugin launch pattern.
   if (shape === 'inline' && spec && forwarder === 'logstash') {
     blockers.push(
-      "The log10x-elastic/logstash chart is architecturally broken for sidecar mode: tenx needs to be a child process of logstash (spawned by the `pipe` output plugin), but the chart runs it as a separate container reading from its own stdin. Pipeline inits then shuts down after ~9s with no input. Chart 1.0.7 fixes the apps/ path but does NOT fix this wiring. Use fluent-bit, fluentd, filebeat, or otel-collector, OR deploy `log10x/reporter-10x` (non-invasive, parallel DaemonSet) alongside your existing logstash."
+      "The log10x-elastic/logstash chart is architecturally broken for sidecar mode: tenx needs to be a child process of logstash (spawned by the `pipe` output plugin), but the chart runs it as a separate container reading from its own stdin. Pipeline inits then shuts down after ~9s with no input. Chart 1.0.7 fixes the apps/ path but does NOT fix this wiring. Use fluentbit, fluentd, filebeat, or otel-collector, OR deploy `log10x/reporter-10x` (non-invasive, parallel DaemonSet) alongside your existing logstash."
     );
   }
   if (!args.apiKey && !args.skipInstall) {
