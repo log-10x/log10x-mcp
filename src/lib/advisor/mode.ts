@@ -184,7 +184,7 @@ export function recommendInstallMode(opts: RecommendOpts): ModeRecommendation {
   }
   if (snapshot.recommendations.alreadyInstalled.reducer) {
     warnings.push(
-      `A Receiver is already installed in \`${snapshot.recommendations.alreadyInstalled.reducer}\`. Two reducers on the same event stream double-filter — tear one down before installing another.`
+      `A Receiver is already installed in \`${snapshot.recommendations.alreadyInstalled.reducer}\`. Two receivers on the same event stream double-filter — tear one down before installing another.`
     );
   }
 
@@ -367,7 +367,7 @@ function makeInlineAlts(params: {
 
   // Inline reducer + optimize (compact encoding).
   // All 5 forwarder charts ship at 1.0.8+ with a unified optimize path
-  // (kind=optimize launches @apps/reducer + reducerOptimize=true env
+  // (kind=optimize launches @apps/reducer + receiverOptimize=true env
   // var). Engine 1.0.9 bakes in the previously-missing tenx-optimize.lua
   // so chart-native `tenx.optimize: true` also works, though the plan
   // continues to emit the env-var form for image-version-agnostic compat.

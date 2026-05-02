@@ -53,7 +53,7 @@ export type OutputDestination = 'mock' | 'elasticsearch' | 'splunk' | 'datadog' 
 //
 // Optimizer mode (lossless encoded-event output, ~20-40x volume reduction:
 // `"log":"~-8Av]P9cVZb,timestamp,var1,var2,..."`) is NOT exposed as a kind.
-// It is triggered by setting `env: [{name: reducerOptimize, value: "true"}]`
+// It is triggered by setting `env: [{name: receiverOptimize, value: "true"}]`
 // on the forwarder container. Unified across all 5 charts as of 1.0.7
 // (the per-forwarder optimize path is now just reducer + this env var).
 export type TenxKind = 'report' | 'regulate';
@@ -107,7 +107,7 @@ export interface ForwarderSpec {
      * When true AND kind=regulate, emit events in compact encoded form
      * (templateHash+vars, ~20-40x volume reduction). Verified 2026-04-25
      * on demo cluster (engine 1.0.9 + chart 1.0.8) across all 5
-     * forwarders. Plan emits the `reducerOptimize=true` env var
+     * forwarders. Plan emits the `receiverOptimize=true` env var
      * (image-version-agnostic) rather than the chart-native
      * `tenx.optimize: true` field — the chart-native field works on
      * engine 1.0.9+ (which baked in the previously-missing
@@ -118,7 +118,7 @@ export interface ForwarderSpec {
     /**
      * When true AND kind=regulate, run the receiver in read-only mode
      * (passive metrics emitter — no events written back through the
-     * forwarder). Plan emits the `reducerReadOnly=true` env var, which
+     * forwarder). Plan emits the `receiverReadOnly=true` env var, which
      * the engine reads to gate every event-output stream module
      * (forward/unix/socket/stdout). Silently ignored when kind=report.
      */
@@ -151,8 +151,8 @@ const MOCK_OUTPUT_NOTE =
 
 /**
  * Build a top-level `env:` YAML block for receiver-mode flags.
- * - kind=regulate + optimize=true → reducerOptimize=true
- * - kind=regulate + readOnly=true → reducerReadOnly=true
+ * - kind=regulate + optimize=true → receiverOptimize=true
+ * - kind=regulate + readOnly=true → receiverReadOnly=true
  * Silently empty when kind=report or both flags are off. Returned
  * verbatim for callers that emit it as a top-level chart value
  * (fluent-bit / fluentd); other charts wrap it differently.
@@ -164,8 +164,8 @@ function renderTenxEnvBlock(opts: {
 }): string {
   if (opts.kind !== 'regulate') return '';
   const entries: string[] = [];
-  if (opts.optimize) entries.push('  - name: reducerOptimize\n    value: "true"');
-  if (opts.readOnly) entries.push('  - name: reducerReadOnly\n    value: "true"');
+  if (opts.optimize) entries.push('  - name: receiverOptimize\n    value: "true"');
+  if (opts.readOnly) entries.push('  - name: receiverReadOnly\n    value: "true"');
   if (entries.length === 0) return '';
   return `\nenv:\n${entries.join('\n')}\n`;
 }
@@ -199,8 +199,8 @@ export const REPORTER_FORWARDER_SPECS: Record<Exclude<ForwarderKind, 'unknown'>,
     renderValues: ({ apiKey, releaseName, destination, kind, outputHost, splunkHecToken, gitToken, optimize, readOnly }) => {
       const outputBlock = renderFluentBitOutput(destination, outputHost, splunkHecToken);
       // Receiver-mode flags via env-var workaround. Image-version-agnostic
-      // (works on engine 1.0.7+). reducerOptimize=true → compact encoded
-      // events; reducerReadOnly=true → metrics-only, no return write.
+      // (works on engine 1.0.7+). receiverOptimize=true → compact encoded
+      // events; receiverReadOnly=true → metrics-only, no return write.
       const envBlock = renderTenxEnvBlock({ kind, optimize, readOnly });
       return `tenx:
   enabled: true
@@ -406,15 +406,15 @@ ${envBlock}`;
       // install we MUST override extraEnvs/secretMounts to empty so pods
       // don't hang in FailedMount.
       const outputBlock = renderFilebeatOutput(destination, outputHost);
-      // Chart 1.0.7 routes kind=optimize → @apps/reducer + reducerOptimize
+      // Chart 1.0.7 routes kind=optimize → @apps/reducer + receiverOptimize
       // env var. Emit kind=optimize in values when caller requested optimize.
       const effectiveKind = optimize && kind === 'regulate' ? 'optimize' : kind;
       // readOnly has no chart-level kind value — emit as an env var on
-      // the daemonset's extraEnvs so the engine reads reducerReadOnly=true.
+      // the daemonset's extraEnvs so the engine reads receiverReadOnly=true.
       const readOnlyEnvEntry =
         readOnly && kind === 'regulate'
           ? `
-    - name: reducerReadOnly
+    - name: receiverReadOnly
       value: "true"`
           : '';
       return `tenx:
@@ -514,7 +514,7 @@ ${indent(outputBlock, 6)}
       const extraEnvsBlock =
         readOnly && kind === 'regulate'
           ? `extraEnvs:
-  - name: reducerReadOnly
+  - name: receiverReadOnly
     value: "true"`
           : 'extraEnvs: []';
       return `tenx:
@@ -591,7 +591,7 @@ ${indent(output, 4)}
         readOnly && kind === 'regulate'
           ? `
 extraEnvs:
-  - name: reducerReadOnly
+  - name: receiverReadOnly
     value: "true"
 `
           : '';
