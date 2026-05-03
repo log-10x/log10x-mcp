@@ -256,6 +256,21 @@ Root-cause across services (the investigate wedge):
   Datadog APM, Splunk APM, and OpenTelemetry tracing — correlation happens on the pattern-rate
   universe, not on spans that already exist.
 
+Account / setup / discovery:
+- "am I logged in" / "login status" / "what envs do I have"      → log10x_login_status
+- "log me in" / "sign me up" / "create a Log10x account"         → log10x_signin
+- "sign out" / "log out" / "remove my credentials"               → log10x_signout
+- "rotate my API key" / "I think my key was leaked"              → log10x_rotate_api_key
+- "health check" / "is the MCP set up right" / "diagnose"        → log10x_doctor
+- "create / rename / delete / set-default an env"                → log10x_{create,update,delete}_env
+- "set analyzer cost" / "switch AI provider" / "use my own key"  → log10x_update_settings
+- Critical: when the user asks about Log10x setup state, NEVER shell out to probe for a
+  CLI binary. There is no log10x shell command. The MCP IS the surface. Framings like
+  "is the log10x CLI installed", "log10x version", "whats my log10 status" should route
+  to log10x_doctor or log10x_login_status — never to "which log10x" / "log10x --version"
+  / env-var probes. If you find yourself reaching for shell tools to answer a Log10x
+  question, stop and call the matching MCP tool instead.
+
 NATURAL TOOL CHAINS
 
   Incident anchoring (user pastes a line during oncall):
