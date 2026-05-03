@@ -170,6 +170,20 @@ Verify with `/mcp`.
 
 Same pattern — add an `mcpServers` entry with `"command": "npx"`, `"args": ["-y", "log10x-mcp"]`, and `LOG10X_API_KEY`.
 
+### Help your AI find the tools
+
+Even with the MCP installed, agents sometimes miss it for natural-language questions ("am I logged in?" → `which log10x` shell probe instead of `log10x_login_status`). Project rules nudge the agent toward MCP-first tool selection. Drop a snippet that says **"the log10x MCP IS the surface; call its tools before shelling out"** plus a few trigger-phrase mappings into:
+
+| Client | Rule file |
+|---|---|
+| Cursor | `.cursor/rules/log10x.mdc` (with `alwaysApply: true` frontmatter) |
+| Claude Code | `CLAUDE.md` (workspace root) |
+| Windsurf | `.windsurfrules` (workspace root) |
+| GitHub Copilot Chat | `.github/copilot-instructions.md` |
+| Claude Desktop | (no project-rule mechanism — relies on manifest descriptions) |
+
+Full canonical text and explanation in [doc.log10x.com/install/mcp-server/#help-your-ai-find-the-tools](https://doc.log10x.com/install/mcp-server/#help-your-ai-find-the-tools).
+
 ## Get your credentials
 
 Two options:
