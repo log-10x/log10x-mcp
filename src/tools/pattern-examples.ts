@@ -409,8 +409,12 @@ function buildVendorQuery(
       return parts.join(' ');
     }
     case 'elasticsearch': {
-      // KQL: explicit AND on the message field.
-      const parts: string[] = phrases.map((p) => `message: ${p}`);
+      // ES query_string syntax. Bare quoted phrases search the default
+      // field (typically all text fields) — works across the common
+      // shipper conventions: `log` for OTel/k8s/fluent-bit envelopes,
+      // `message` for direct ingest, `_raw` for Splunk-forwarder shape.
+      // Hardcoding `message:` would miss `log`-field logs entirely.
+      const parts: string[] = [...phrases];
       if (service) parts.push(`service: "${service}"`);
       if (severity) parts.push(`severity: "${severity}"`);
       return parts.join(' AND ');
