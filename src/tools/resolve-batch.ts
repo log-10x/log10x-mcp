@@ -456,6 +456,10 @@ function buildStructuredNextActions(
           tool: 'log10x_retriever_query',
           args: {
             pattern: p.symbolMessage,
+            // retriever_query.from is required (no default). Use a 30d
+            // window which matches the prose suggestion's intent for
+            // "historical events" — agents can override.
+            from: 'now-30d',
             filters: [`event.${slot} === ${JSON.stringify(val)}`],
           },
           reason: `historical events concentrated on ${slot}=${truncate(val, 40)}`,
