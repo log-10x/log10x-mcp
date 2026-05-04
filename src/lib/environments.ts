@@ -11,7 +11,7 @@
  *      on any tool call — no env-var pinning needed.
  *
  *   2. `~/.log10x/credentials` — persistent file written by
- *      `log10x_signin` after a successful GitHub-device-flow signup
+ *      `log10x_signin` after a successful Auth0 Device Flow signup
  *      or signin. Loaded the same way as path 1. Living outside the
  *      MCP host's config means a single sign-in works across every
  *      MCP host on the same machine — sign in once per machine, not
@@ -21,8 +21,9 @@
  *      demo env using the same key the console.log10x.com demo
  *      experience uses, so a user can play without signing up. The
  *      `log10x_login_status` tool surfaces how to upgrade, and
- *      `log10x_signin` runs the one-click GitHub flow that writes
- *      path 2. We fall back to demo ONLY when no LOG10X_API_KEY is
+ *      `log10x_signin` runs the Auth0 Device Flow (user picks GitHub
+ *      or Google) and writes path 2. We fall back to demo ONLY when
+ *      no LOG10X_API_KEY is
  *      set and no credentials file exists. If either is set but
  *      invalid, we still fall back to demo but record the failure in
  *      `demoFallbackReason` and surface a loud banner — avoiding the
