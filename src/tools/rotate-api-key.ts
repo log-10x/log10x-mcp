@@ -70,8 +70,8 @@ export async function executeRotateApiKey(
       '## Cannot rotate — running in demo mode\n\n' +
       'You\'re currently authenticated against the public Log10x demo account, which ' +
       'cannot rotate API keys (the backend returns 403 for demo users). Sign in to ' +
-      'your own account first via `log10x_signin` (`mode: "github"` for the GitHub ' +
-      'Device Flow, or `mode: "api_key"` to paste a key from console.log10x.com → ' +
+      'your own account first via `log10x_signin` (`mode: "browser"` for the Auth0 ' +
+      'Device Flow with GitHub or Google, or `mode: "api_key"` to paste a key from console.log10x.com → ' +
       'Profile → API Settings), then retry rotation. See `log10x_login_status` for ' +
       'the full sign-in breakdown.'
     );

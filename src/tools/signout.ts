@@ -79,7 +79,7 @@ export async function executeSignout(
   } else if (envs.isDemoMode) {
     lines.push(
       `Now running in demo mode against the public Log10x demo env. ` +
-        `Run \`log10x_signin\` to sign back in (\`mode: "github"\` for the GitHub Device Flow, ` +
+        `Run \`log10x_signin\` to sign back in (\`mode: "browser"\` for the Auth0 Device Flow with GitHub or Google, ` +
         `or \`mode: "api_key"\` with a key from console.log10x.com → Profile → API Settings). ` +
         `Call \`log10x_login_status\` for the full breakdown.`
     );

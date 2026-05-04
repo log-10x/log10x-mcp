@@ -1,19 +1,22 @@
 /**
- * log10x_signin — sign in to a Log10x account. Two modes:
+ * log10x_signin: sign in to a Log10x account. Two modes:
  *
- *   - `mode: "github"` (default) — runs the GitHub Device Flow. We
- *     probe `gh auth token` first; if no CLI token, we open the
- *     browser at github.com/login/device with the user_code
- *     pre-filled, poll until the user clicks Authorize, then
- *     exchange the GitHub token at
- *     `prometheus.log10x.com/api/v1/auth/github` for a long-lived
- *     Log10x API key (auto-creates the account on first signup).
+ *   - `mode: "browser"` (default): runs Auth0 Device Authorization
+ *     Flow (RFC 8628). We POST to `auth.log10x.com/oauth/device/code`,
+ *     show the user the verification URL (browser auto-launched), and
+ *     poll `/oauth/token` until they complete sign-in. The user picks
+ *     GitHub OR Google (or any other connection enabled on the
+ *     `mcp_backend` Auth0 client) at Auth0's universal login page;
+ *     the MCP doesn't care which IdP they use. Once Auth0 issues an
+ *     access_token, we exchange it at
+ *     `prometheus.log10x.com/api/v1/auth/token` for a long-lived
+ *     Log10x API key.
  *
- *   - `mode: "api_key"` — the user already has an API key (e.g.
- *     copied from console.log10x.com → Profile → API Settings, or
+ *   - `mode: "api_key"`: the user already has an API key (e.g.
+ *     copied from console.log10x.com -> Profile -> API Settings, or
  *     issued out-of-band by a workspace admin). We validate the key
  *     by calling `/api/v1/user`, then proceed identically to the
- *     GitHub branch from step 4 onward. No browser, no GitHub.
+ *     browser branch from step 4 onward. No browser, no IdP.
  *
  * Either way, the resolved API key is written to
  * `~/.log10x/credentials` (mode 0600) and envs are hot-reloaded
@@ -21,7 +24,7 @@
  * without an MCP-host restart.
  *
  * If `LOG10X_API_KEY` is set in process.env when signin completes,
- * we ALSO `delete` it — otherwise the env var beats the freshly
+ * we ALSO `delete` it. Otherwise the env var beats the freshly
  * written credentials file (priority 1 vs priority 2 in the
  * resolution chain) and the new account would be silently
  * overridden. The result message tells the user to also remove the
@@ -33,29 +36,26 @@ import { z } from 'zod';
 import type { Environments } from '../lib/environments.js';
 import { reloadEnvironmentsInPlace } from '../lib/environments.js';
 import { writeCredentials, getCredentialsPath } from '../lib/credentials.js';
-import { tryGhCliToken } from '../lib/gh-cli.js';
 import {
   requestDeviceCode,
   pollForAccessToken,
-  buildVerificationUrlWithCode,
-  REQUESTED_SCOPES,
-  LOG10X_GITHUB_CLIENT_ID,
-} from '../lib/github-device-flow.js';
+  LOG10X_AUTH0_DOMAIN,
+} from '../lib/auth0-device-flow.js';
 import { tryOpenBrowser } from '../lib/open-browser.js';
-import { exchangeGithubTokenForApiKey } from '../lib/auth-api.js';
+import { exchangeAuth0TokenForApiKey } from '../lib/auth-api.js';
 import { fetchUserProfile } from '../lib/api.js';
 import { log } from '../lib/log.js';
 
 export const signinSchema = {
   /**
    * Which signin path to use. The model SHOULD ask the user up front
-   * — see the tool description — and pass the chosen mode here.
+   * (see the tool description) and pass the chosen mode here.
    */
   mode: z
-    .enum(['github', 'api_key'])
+    .enum(['browser', 'api_key'])
     .optional()
     .describe(
-      'Which signin path: "github" (default — opens browser, runs Device Flow) or "api_key" (user pastes a Log10x API key they already have). The MCP should ask the user which they prefer before calling this tool unless the user has already specified.'
+      'Which signin path: "browser" (default, opens Auth0 Device Flow in the user\'s browser, lets them pick GitHub or Google or any other configured login) or "api_key" (user pastes a Log10x API key they already have). The MCP should ask the user which they prefer before calling this tool unless the user has already specified.'
     ),
   /**
    * Required when `mode: "api_key"`. The Log10x API key minted from
@@ -71,8 +71,8 @@ export const signinSchema = {
     ),
   /**
    * Maximum number of seconds to wait for the user to authorize in the
-   * browser. Only applies to mode="github". Default 300 (5 minutes).
-   * Cap at 900 (GitHub's device_code expiry).
+   * browser. Only applies to mode="browser". Default 300 (5 minutes).
+   * Cap at 900 (Auth0 device_code default expiry).
    */
   wait_seconds: z
     .number()
@@ -80,17 +80,17 @@ export const signinSchema = {
     .min(30)
     .max(900)
     .optional()
-    .describe('Max seconds to wait for browser authorization (mode="github" only). Default 300.'),
+    .describe('Max seconds to wait for browser authorization (mode="browser" only). Default 300.'),
 };
 
 export async function executeSignin(
-  args: { mode?: 'github' | 'api_key'; api_key?: string; wait_seconds?: number },
+  args: { mode?: 'browser' | 'api_key'; api_key?: string; wait_seconds?: number },
   envs: Environments
 ): Promise<string> {
   // The schema allows ambiguous combinations. Resolve before branching:
   //   - api_key arg present (with or without mode) → api_key flow
   //   - mode='api_key' but no api_key → ask the caller for one
-  //   - mode='github' or unset → github flow
+  //   - mode='browser' or unset → browser flow
   const explicitMode = args.mode;
   if (explicitMode === 'api_key' && !args.api_key) {
     return (
@@ -98,8 +98,8 @@ export async function executeSignin(
       'You picked `mode: "api_key"` but did not pass `api_key`. Get the key from ' +
       '[console.log10x.com](https://console.log10x.com) → Profile → API Settings, ' +
       'then call `log10x_signin` again with `{ mode: "api_key", api_key: "<your-key>" }`.\n\n' +
-      'Or call `log10x_signin` with `{ mode: "github" }` for the GitHub Device Flow ' +
-      '(opens your browser).'
+      'Or call `log10x_signin` with `{ mode: "browser" }` for the Auth0 Device Flow ' +
+      '(opens your browser; pick GitHub or Google).'
     );
   }
   const useApiKey = !!args.api_key;
@@ -117,8 +117,8 @@ export async function executeSignin(
         '## Sign-in failed\n\n' +
         `The API key you provided was rejected by \`/api/v1/user\`: ${(e as Error).message}\n\n` +
         'Verify the key at [console.log10x.com](https://console.log10x.com) → Profile → API Settings ' +
-        'and retry, or run `log10x_signin` with `{ mode: "github" }` to mint a fresh key via ' +
-        'GitHub Device Flow.'
+        'and retry, or run `log10x_signin` with `{ mode: "browser" }` to mint a fresh key via ' +
+        'the Auth0 Device Flow.'
       );
     }
 
@@ -138,7 +138,7 @@ export async function executeSignin(
       await reloadEnvironmentsInPlace(envs);
     } catch (e) {
       return (
-        '## Signed in — but env reload failed\n\n' +
+        '## Signed in. Env reload failed\n\n' +
         `The key was saved to \`${credentialsPath}\` successfully, but the in-process ` +
         `env list could not refresh: ${(e as Error).message}.\n\n` +
         'Restart your MCP host to pick up the new account.'
@@ -151,7 +151,7 @@ export async function executeSignin(
     lines.push(`Validated via \`/api/v1/user\` and signed in as **${profile.username || '(no email)'}**.`);
     lines.push('');
     lines.push(`- **API key**: saved to \`${credentialsPath}\` (this machine only)`);
-    lines.push(`- **Path**: pasted API key (no GitHub flow)`);
+    lines.push(`- **Path**: pasted API key (no browser flow)`);
     if (envVarCleared) {
       lines.push(`- **Note**: cleared the old \`LOG10X_API_KEY\` from this session so the new key takes effect immediately.`);
     }
@@ -180,82 +180,50 @@ export async function executeSignin(
     return lines.join('\n');
   }
 
-  // ── Branch B: GitHub Device Flow (default) ──────────────────────────────
-  const requiredScopes = REQUESTED_SCOPES.split(/\s+/).filter(Boolean);
+  // ── Branch B: Auth0 Device Flow (default) ───────────────────────────────
   const waitSeconds = args.wait_seconds ?? 300;
 
-  // 1. Zero-click path: gh CLI.
-  let githubToken: string | null = null;
-  let usedGhCli = false;
+  // 1. Request device + user code from Auth0.
+  let device;
   try {
-    githubToken = await tryGhCliToken(requiredScopes);
-    if (githubToken) {
-      usedGhCli = true;
-      log.info('signin.gh_cli.ok', { scopes: requiredScopes });
-    }
+    device = await requestDeviceCode();
   } catch (e) {
-    log.warn('signin.gh_cli.err', { msg: (e as Error).message });
+    return `## Sign-in failed\n\nCould not start Auth0 Device Flow: ${(e as Error).message}`;
   }
 
-  // 2. Device-flow fallback.
-  let deviceFlowDescription = '';
-  if (!githubToken) {
-    let device;
-    try {
-      device = await requestDeviceCode();
-    } catch (e) {
-      const msg = (e as Error).message;
-      if (msg.includes('device_flow_disabled')) {
-        return (
-          '## Sign-in failed\n\n' +
-          'GitHub returned `device_flow_disabled`. The Log10x OAuth App needs ' +
-          '**Enable Device Flow** ticked at https://github.com/settings/developers ' +
-          '— this is a one-time configuration that only the app owner can fix. ' +
-          'If you\'re running a fork, set `LOG10X_GITHUB_CLIENT_ID` to your own ' +
-          'OAuth App\'s client id.'
-        );
-      }
-      return `## Sign-in failed\n\nCould not start GitHub Device Flow: ${msg}`;
-    }
+  const opened = tryOpenBrowser(device.verification_uri_complete);
+  const deviceFlowDescription =
+    `Opened your browser at:\n  ${device.verification_uri_complete}\n` +
+    (opened ? '' : '(Auto-launch failed. Copy the URL above into your browser.)\n') +
+    `User code: \`${device.user_code}\` (already embedded in the URL)\n` +
+    `Sign in with **GitHub** or **Google** on the page Auth0 shows you, then confirm the device authorization.\n` +
+    `Waiting up to ${Math.min(waitSeconds, device.expires_in)}s...\n`;
 
-    const verificationUrl = buildVerificationUrlWithCode(
-      device.verification_uri,
-      device.user_code
-    );
-    const opened = tryOpenBrowser(verificationUrl);
-    deviceFlowDescription =
-      `Opened your browser at:\n  ${verificationUrl}\n` +
-      (opened ? '' : '(Auto-launch failed — copy the URL above into your browser.)\n') +
-      `User code: \`${device.user_code}\` (pre-filled in the URL)\n` +
-      `Waiting up to ${Math.min(waitSeconds, device.expires_in)}s for you to click ` +
-      `**Authorize log10x-mcp**…\n`;
+  log.info('signin.device_flow.started', {
+    user_code: device.user_code,
+    verification_uri: device.verification_uri,
+    interval: device.interval,
+    expires_in: device.expires_in,
+    browser_launched: opened,
+    auth0_domain: LOG10X_AUTH0_DOMAIN,
+  });
 
-    log.info('signin.device_flow.started', {
-      user_code: device.user_code,
-      verification_uri: device.verification_uri,
+  // 2. Poll Auth0 for the access token.
+  let token;
+  try {
+    token = await pollForAccessToken({
+      deviceCode: device.device_code,
       interval: device.interval,
-      expires_in: device.expires_in,
-      browser_launched: opened,
+      expiresIn: Math.min(waitSeconds, device.expires_in),
     });
-
-    let token;
-    try {
-      token = await pollForAccessToken({
-        deviceCode: device.device_code,
-        interval: device.interval,
-        expiresIn: Math.min(waitSeconds, device.expires_in),
-        clientId: LOG10X_GITHUB_CLIENT_ID,
-      });
-    } catch (e) {
-      return `## Sign-in did not complete\n\n${deviceFlowDescription}\nError: ${(e as Error).message}`;
-    }
-    githubToken = token.access_token;
+  } catch (e) {
+    return `## Sign-in did not complete\n\n${deviceFlowDescription}\nError: ${(e as Error).message}`;
   }
 
-  // 3. Exchange the GitHub token for a Log10x API key.
+  // 3. Exchange the Auth0 access token for a Log10x API key.
   let signinResult;
   try {
-    signinResult = await exchangeGithubTokenForApiKey(githubToken);
+    signinResult = await exchangeAuth0TokenForApiKey(token.access_token);
   } catch (e) {
     return (
       `## Sign-in failed at the Log10x backend\n\n${(e as Error).message}\n\n` +
@@ -268,7 +236,6 @@ export async function executeSignin(
   try {
     credentialsPath = await writeCredentials({
       apiKey: signinResult.api_key,
-      githubLogin: signinResult.github_login,
     });
   } catch (e) {
     return (
@@ -287,7 +254,7 @@ export async function executeSignin(
     await reloadEnvironmentsInPlace(envs);
   } catch (e) {
     return (
-      `## Signed in — but env reload failed\n\n` +
+      `## Signed in. Env reload failed\n\n` +
       `Your API key was saved to ${credentialsPath} successfully, but the in-process ` +
       `env list could not refresh: ${(e as Error).message}.\n\n` +
       `Restart your MCP host (Claude Desktop / Cursor) to pick up the new account.`
@@ -295,24 +262,11 @@ export async function executeSignin(
   }
 
   const lines: string[] = [];
-  lines.push(
-    signinResult.is_new_account
-      ? '## Welcome to Log10x'
-      : '## Signed in to Log10x'
-  );
-  lines.push('');
-  if (signinResult.is_new_account) {
-    lines.push(`We just created your account.`);
-  } else {
-    lines.push(`We found your existing account and signed you in.`);
-  }
+  lines.push('## Signed in to Log10x');
   lines.push('');
   lines.push(`- **Account**: ${signinResult.username || '(no email)'}`);
-  if (signinResult.github_login) {
-    lines.push(`- **GitHub**: \`${signinResult.github_login}\``);
-  }
   lines.push(`- **API key**: saved to \`${credentialsPath}\` (this machine only)`);
-  lines.push(`- **Path**: ${usedGhCli ? 'gh CLI (zero-click)' : 'GitHub Device Flow'}`);
+  lines.push(`- **Path**: Auth0 Device Flow`);
   if (envVarCleared) {
     lines.push(`- **Note**: removed in-process \`LOG10X_API_KEY\` env override so the new key takes effect immediately.`);
   }
@@ -328,7 +282,7 @@ export async function executeSignin(
     lines.push(
       '**Persistence note**: I cleared `LOG10X_API_KEY` from this MCP server\'s in-process ' +
         'environment, but your MCP host config (e.g. `claude_desktop_config.json`) probably ' +
-        'still has it set — when the host restarts, the env var will come back and override ' +
+        'still has it set. When the host restarts, the env var will come back and override ' +
         '`~/.log10x/credentials`. To make this permanent, remove `LOG10X_API_KEY` from the ' +
         'host config\'s `env` block.'
     );
@@ -339,11 +293,7 @@ export async function executeSignin(
       `\`~/.log10x/credentials\`. Run \`log10x_signout\` to revoke. ` +
       `Visit https://console.log10x.com to upgrade tier or manage envs from a UI.`
   );
-  if (deviceFlowDescription) {
-    // Keep the device-flow trace at the bottom for debuggability — useful
-    // when the user runs sign-in twice and wants to see what changed.
-    log.debug('signin.device_flow.complete');
-  }
+  log.debug('signin.device_flow.complete');
 
   return lines.join('\n');
 }

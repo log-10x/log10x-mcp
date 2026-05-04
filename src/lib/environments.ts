@@ -159,7 +159,7 @@ export async function loadEnvironments(): Promise<Environments> {
       if (!demoEnvs) throw e;
       demoEnvs.demoFallbackReason =
         `~/.log10x/credentials key failed validation: ${reason}. ` +
-        `Run \`log10x_signin\` to refresh (\`mode: "github"\` for GitHub Device Flow, ` +
+        `Run \`log10x_signin\` to refresh (\`mode: "browser"\` for the Auth0 Device Flow with GitHub or Google, ` +
         `or \`mode: "api_key"\` to paste a key from console.log10x.com → Profile → API Settings), ` +
         `or \`log10x_signout\` to clear and use demo. See \`log10x_login_status\` for the full breakdown.`;
       return demoEnvs;
@@ -206,7 +206,7 @@ async function loadFromApi(apiKey: string, isDemoMode: boolean): Promise<Environ
           `Either the MCP can't reach prometheus.log10x.com from this network, ` +
           `or the demo key has rotated and the MCP needs a refresh. ` +
           `Bypass demo by signing in to your own account: run \`log10x_signin\` ` +
-          `(\`mode: "github"\` for GitHub Device Flow, or \`mode: "api_key"\` to paste ` +
+          `(\`mode: "browser"\` for the Auth0 Device Flow with GitHub or Google, or \`mode: "api_key"\` to paste ` +
           `an existing key), or set \`LOG10X_API_KEY\` to a key from ` +
           `console.log10x.com → Profile → API Settings.`
       );
@@ -215,8 +215,8 @@ async function loadFromApi(apiKey: string, isDemoMode: boolean): Promise<Environ
       `LOG10X_API_KEY is set but env autodiscovery via GET /api/v1/user failed: ` +
         `${(e as Error).message}. ` +
         `Verify the key at console.log10x.com → Profile → API Settings, ` +
-        `or run \`log10x_signin\` to mint a fresh one (\`mode: "github"\` for GitHub ` +
-        `Device Flow, or \`mode: "api_key"\` to paste a key) — it auto-clears the bad ` +
+        `or run \`log10x_signin\` to mint a fresh one (\`mode: "browser"\` for the Auth0 ` +
+        `Device Flow with GitHub or Google, or \`mode: "api_key"\` to paste a key). It auto-clears the bad ` +
         `\`LOG10X_API_KEY\` in-process. Or unset \`LOG10X_API_KEY\` entirely to fall ` +
         `back to read-only demo mode.`
     );

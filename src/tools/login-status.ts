@@ -56,8 +56,8 @@ export async function executeLoginStatus(
     lines.push('Two ways to sign in. Both end up in the same place — the MCP autodiscovers your envs from `/api/v1/user` and the next tool call runs against your real account without an MCP-host restart.');
     lines.push('');
     lines.push('**Option A — `log10x_signin` (recommended, no host-config edit needed).** Two modes, ask the user which they prefer:');
-    lines.push('- `mode: "github"` (default) — opens a browser to github.com/login/device with the user_code pre-filled, polls until you click Authorize, then exchanges the GitHub token for a long-lived Log10x API key. Auto-creates an account on first sign-up. Zero-click if `gh auth login` is already set up. 30s–2min.');
-    lines.push('- `mode: "api_key"` with `api_key: "<key>"` — validates a Log10x API key the user already has (e.g., copied from console.log10x.com → Profile → API Settings, or issued by a workspace admin). No browser, no GitHub.');
+    lines.push('- `mode: "browser"` (default): opens a browser to Auth0\'s universal login page with the device code pre-filled. The user picks **GitHub** or **Google** there, completes OAuth with the chosen IdP, and confirms the device authorization. The MCP polls until done, then exchanges the Auth0 access token for a long-lived Log10x API key. Auto-creates an account on first sign-up. 30s to 2 min.');
+    lines.push('- `mode: "api_key"` with `api_key: "<key>"`: validates a Log10x API key the user already has (e.g., copied from console.log10x.com → Profile → API Settings, or issued by a workspace admin). No browser.');
     lines.push('');
     lines.push('Either mode writes the resolved key to `~/.log10x/credentials` (mode 0600), which persists across MCP-host restarts on its own — no config-file edit needed.');
     lines.push('');
