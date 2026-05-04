@@ -30,6 +30,7 @@ import {
   type RetrieverQueryDiagnostics,
 } from '../lib/retriever-diagnostics.js';
 import { fmtCount } from '../lib/format.js';
+import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 
 export const retrieverQuerySchema = {
   pattern: z
@@ -157,42 +158,69 @@ export async function executeRetrieverQuery(
   lines.push('');
 
   if (args.format === 'count') {
-    return renderCount(resp.events, lines).join('\n');
-  }
-
-  if (args.format === 'aggregated') {
-    return renderAggregated(resp.events, args.bucket_size, lines).join('\n');
-  }
-
-  if (args.format === 'ephemeral_series') {
-    return renderEphemeralSeries(resp.events, args.bucket_size, args.search, lines).join('\n');
-  }
-
-  // events format
-  const events = resp.events;
-  lines.push(`### Events (${Math.min(events.length, 50)} of ${events.length} shown)`);
-  lines.push('');
-  for (let i = 0; i < Math.min(events.length, 50); i++) {
-    lines.push(formatEvent(events[i]));
-  }
-  if (events.length > 50) {
+    renderCount(resp.events, lines);
+  } else if (args.format === 'aggregated') {
+    renderAggregated(resp.events, args.bucket_size, lines);
+  } else if (args.format === 'ephemeral_series') {
+    renderEphemeralSeries(resp.events, args.bucket_size, args.search, lines);
+  } else {
+    // events format
+    const events = resp.events;
+    lines.push(`### Events (${Math.min(events.length, 50)} of ${events.length} shown)`);
     lines.push('');
-    lines.push(
-      `_${events.length - 50} additional events omitted. Switch to \`format: "aggregated"\` or \`"count"\` for a summary, or narrow the search/filter._`
-    );
-  }
-  if (events.length === 0) {
-    lines.push(
-      '_Retriever returned zero events. Verify the search expression matches at least one real value, check the window, or widen the filter._'
-    );
+    for (let i = 0; i < Math.min(events.length, 50); i++) {
+      lines.push(formatEvent(events[i]));
+    }
+    if (events.length > 50) {
+      lines.push('');
+      lines.push(
+        `_${events.length - 50} additional events omitted. Switch to \`format: "aggregated"\` or \`"count"\` for a summary, or narrow the search/filter._`
+      );
+    }
+    if (events.length === 0) {
+      lines.push(
+        '_Retriever returned zero events. Verify the search expression matches at least one real value, check the window, or widen the filter._'
+      );
+    }
+
+    if (resp.execution.truncated) {
+      lines.push('');
+      lines.push(
+        '> **Truncated**: one or more stream workers hit the per-worker result cap. Narrow the search expression or add a more selective filter to see the full match set.'
+      );
+    }
   }
 
-  if (resp.execution.truncated) {
-    lines.push('');
-    lines.push(
-      '> **Truncated**: one or more stream workers hit the per-worker result cap. Narrow the search expression or add a more selective filter to see the full match set.'
-    );
+  // Structured NEXT_ACTIONS for autonomous chains.
+  const nextActions: NextAction[] = [];
+  const partialDiag = (resp.diagnostics as RetrieverQueryDiagnostics & { partialResults?: boolean })?.partialResults;
+  if (partialDiag) {
+    nextActions.push({
+      tool: 'log10x_retriever_query_status',
+      args: { queryId: resp.queryId, fetch_results: true, target: resp.target },
+      reason: 'partialResults — recover stranded events from S3 without resubmitting',
+    });
   }
+  if (args.pattern && resp.events.length > 0) {
+    nextActions.push({
+      tool: 'log10x_backfill_metric',
+      args: {
+        pattern: args.pattern,
+        metric_name: `log10x.${args.pattern.toLowerCase()}_count`,
+        destination: 'datadog',
+        from: args.from,
+        to: args.to,
+      },
+      reason: 'create a TSDB metric backfilled from these archive events',
+    });
+    nextActions.push({
+      tool: 'log10x_retriever_series',
+      args: { pattern: args.pattern, from: args.from, to: args.to, bucket_size: '1h' },
+      reason: 'time-bucketed series across the same window',
+    });
+  }
+  const block = renderNextActions(nextActions);
+  if (block) lines.push('', block);
 
   return lines.join('\n');
 }

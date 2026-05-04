@@ -36,6 +36,7 @@ import {
 import { createLimiter } from '../lib/concurrency.js';
 import { fmtCount } from '../lib/format.js';
 import { retrieverNotConfiguredMessage } from './retriever-query.js';
+import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 
 /** Cap on group-by cardinality. Tail collapsed to "_other_". */
 const TOP_K_GROUPS = 1000;
@@ -659,6 +660,28 @@ function renderSeries(
     );
   }
 
+  // Structured NEXT_ACTIONS for autonomous chains. The natural follow-up
+  // after a series is to backfill the metric into a TSDB so dashboards /
+  // alerts can use it ongoing. Only emit when a pattern arg was supplied
+  // (the typical autonomous-chain path); free-form search expressions don't
+  // round-trip cleanly into backfill_metric without further translation.
+  const nextActions: NextAction[] = [];
+  if (args.pattern && result.actualEvents > 0) {
+    nextActions.push({
+      tool: 'log10x_backfill_metric',
+      args: {
+        pattern: args.pattern,
+        metric_name: `log10x.${args.pattern.toLowerCase()}_count`,
+        destination: 'datadog',
+        from: args.from,
+        to: args.to,
+        bucket_size: args.bucket_size,
+      },
+      reason: 'create a TSDB metric from this series so dashboards / alerts can consume it',
+    });
+  }
+  const block = renderNextActions(nextActions);
+  if (block) lines.push('', block);
   return lines.join('\n');
 }
 
