@@ -22,7 +22,7 @@ import {
   type DepCheckResult,
   type DepMatchedIn,
   emptyResult,
-  anyTokenMatches,
+  allTokensMatchExact,
   meaningfulTokens,
 } from './types.js';
 
@@ -63,8 +63,8 @@ export async function checkDatadogDeps(opts: DepCheckOptions): Promise<DepCheckR
       const title = d.title || '';
       const description = d.description || '';
       const matchedIn: DepMatchedIn[] = [];
-      if (anyTokenMatches(title, tokens)) matchedIn.push('name');
-      if (anyTokenMatches(description, tokens)) matchedIn.push('definition');
+      if (allTokensMatchExact(title, tokens)) matchedIn.push('name');
+      if (allTokensMatchExact(description, tokens)) matchedIn.push('definition');
       if (matchedIn.length === 0) continue;
       result.matches.push({
         type: 'dashboard',
@@ -88,8 +88,8 @@ export async function checkDatadogDeps(opts: DepCheckOptions): Promise<DepCheckR
       const query = m.query || '';
       const message = m.message || '';
       const matchedIn: DepMatchedIn[] = [];
-      if (anyTokenMatches(name, tokens)) matchedIn.push('name');
-      if (anyTokenMatches(query, tokens) || anyTokenMatches(message, tokens)) matchedIn.push('query');
+      if (allTokensMatchExact(name, tokens)) matchedIn.push('name');
+      if (allTokensMatchExact(query, tokens) || allTokensMatchExact(message, tokens)) matchedIn.push('query');
       if (matchedIn.length === 0) continue;
       result.matches.push({
         type: 'monitor',
