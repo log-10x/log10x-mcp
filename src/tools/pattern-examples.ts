@@ -210,12 +210,24 @@ export async function executePatternExamples(
   if (probe.metadata.notes) probeNotes.push(...probe.metadata.notes);
 
   if (probe.events.length === 0) {
-    return graceful(`Pattern Examples — no events in ${args.timeRange} window`, [
+    const lines: string[] = [
       `No events matched the probe in the ${args.timeRange} window on ${vendor}.`,
       `Query used: \`${probe.metadata.queryUsed || vendorQuery}\``,
-      '',
-      'Try a longer `timeRange` (max 24h), or use `log10x_retriever_query` for events older than the analyzer\'s retention.',
-    ]);
+    ];
+    // Surface connector-level notes — rate limits, auth issues, partial
+    // failures — so the agent can distinguish "no matching events" from
+    // "couldn't query the SIEM at all." Empty-state without these notes
+    // misleads chains: a 429-rate-limited probe looks identical to a
+    // genuinely empty result.
+    if (probeNotes.length > 0) {
+      lines.push('');
+      lines.push('### Probe notes');
+      for (const n of probeNotes.slice(0, 5)) lines.push(`- ${n.slice(0, 200)}`);
+      if (probeNotes.length > 5) lines.push(`- ... (${probeNotes.length - 5} more notes truncated)`);
+    }
+    lines.push('');
+    lines.push('Try a longer `timeRange` (max 24h), or use `log10x_retriever_query` for events older than the analyzer\'s retention.');
+    return graceful(`Pattern Examples — no events in ${args.timeRange} window`, lines);
   }
 
   // ── 5. Templatize the probe batch ──────────────────────────────────
