@@ -113,6 +113,26 @@ export interface RetrieverQueryRequest {
   writeSummaries?: boolean;
 }
 
+/**
+ * Build a Bloom-filter `search` expression from a Reporter-named pattern
+ * (Symbol Message). Tools that take a user-facing pattern name (the same
+ * snake_case identity surfaced by event_lookup, top_patterns, cost_drivers)
+ * call this before submitting to runRetrieverQuery so the engine actually
+ * scopes the scan to the pattern. Without this translation the engine sees
+ * `search: ''` (the deprecated `pattern` field is silently dropped at body
+ * build time) and runs unfiltered across the window.
+ *
+ * The inverse — parsing a pattern back out of a search expression — lives
+ * in retriever-fidelity.ts as `extractPatternFromSearch`.
+ *
+ * Pattern values are expected to be snake_case (Symbol Message form). Quotes
+ * are stripped defensively; legitimate Symbol Messages never contain them.
+ */
+export function buildPatternSearch(pattern: string): string {
+  const safe = pattern.trim().replace(/"/g, '');
+  return `tenx_user_pattern == "${safe}"`;
+}
+
 export interface RetrieverEvent {
   timestamp?: string;
   text?: string;

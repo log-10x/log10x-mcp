@@ -8,7 +8,7 @@
 
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { parseTimeExpression, normalizeTimeExpression, isRetrieverConfigured, eventTimestampMs } from '../src/lib/retriever-api.js';
+import { parseTimeExpression, normalizeTimeExpression, isRetrieverConfigured, eventTimestampMs, buildPatternSearch } from '../src/lib/retriever-api.js';
 
 test('normalizeTimeExpression: bare `now` becomes $=now()', () => {
   assert.equal(normalizeTimeExpression('now'), '$=now()');
@@ -113,4 +113,35 @@ test('eventTimestampMs: missing timestamp returns 0', () => {
 
 test('eventTimestampMs: numeric string in millis stays as millis', () => {
   assert.equal(eventTimestampMs({ timestamp: '1776851170107' } as any), 1_776_851_170_107);
+});
+
+// ─── buildPatternSearch ─────────────────────────────────────────────────
+//
+// Translates a Reporter-named pattern (Symbol Message) into a Bloom-filter
+// `search` expression. Required because the deprecated `pattern` field on
+// RetrieverQueryRequest is silently dropped by the body builder; tools
+// passing only `pattern` get an unfiltered scan and wrong-data results.
+// Keep the produced format aligned with retriever-fidelity.ts:351's regex
+// extractor so the pair is invertible.
+
+test('buildPatternSearch: produces canonical tenx_user_pattern equality', () => {
+  assert.equal(buildPatternSearch('Payment_Gateway_Timeout'), 'tenx_user_pattern == "Payment_Gateway_Timeout"');
+});
+
+test('buildPatternSearch: round-trips with retriever-fidelity extractor regex', () => {
+  // Mirrors retriever-fidelity.ts:351 — keep these in sync.
+  const built = buildPatternSearch('Auth_Failed');
+  const m = built.match(/tenx_user_pattern\s*==\s*"([^"]+)"/);
+  assert.ok(m, 'expected match');
+  assert.equal(m![1], 'Auth_Failed');
+});
+
+test('buildPatternSearch: trims whitespace', () => {
+  assert.equal(buildPatternSearch('  Payment_Gateway_Timeout  '), 'tenx_user_pattern == "Payment_Gateway_Timeout"');
+});
+
+test('buildPatternSearch: strips embedded quotes defensively', () => {
+  // Symbol Messages from the templater never contain quotes, but defensive
+  // stripping prevents an injection-style break of the search expression.
+  assert.equal(buildPatternSearch('Bad"Pattern'), 'tenx_user_pattern == "BadPattern"');
 });

@@ -22,6 +22,7 @@ import {
   runRetrieverQuery,
   isRetrieverConfigured,
   parseTimeExpression,
+  buildPatternSearch,
   type RetrieverQueryRequest,
 } from '../lib/retriever-api.js';
 import { aggregate, type AggregationType } from '../lib/aggregator.js';
@@ -111,14 +112,18 @@ export async function executeBackfillMetric(
   const pattern = normalizePattern(args.pattern);
 
   // ── 1. Query the Retriever for historical events ──
+  // Translate the user-facing pattern name into a Bloom-filter `search`
+  // expression. The deprecated `pattern` field on RetrieverQueryRequest is
+  // silently dropped by the body builder; without this translation the
+  // engine runs unfiltered across the window and the resulting metric is
+  // populated with every event in scope, not just the requested pattern.
   const started = Date.now();
   const retrieverReq: RetrieverQueryRequest = {
-    pattern,
+    search: buildPatternSearch(pattern),
     from: args.from,
     to: args.to,
     filters: args.filters,
     limit: 100_000,
-    format: 'events',
   };
   const retrieverResp = await runRetrieverQuery(env, retrieverReq, { timeoutMs: 300_000 });
   const events = retrieverResp.events || [];
