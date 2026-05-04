@@ -67,7 +67,16 @@ export async function executeExclusionFilter(args: {
   // Escape regex metacharacters in each token so dots, brackets, parens, etc.
   // don't get interpreted as regex syntax by the target vendor's engine.
   const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const patRegex = tokens.map(escapeRegex).join('.*');
+  // Tightened regex: word-bounded, ordered, non-greedy between tokens, plus
+  // an alternative for the canonical underscore form. The previous form
+  // (`tokens.join('.*')` with no boundaries) matched any line containing
+  // the tokens as substrings — `payment` in `paymentprocessing` would
+  // satisfy a `Payment_Gateway_Timeout` rule, dropping unrelated events.
+  // Word boundaries plus the canonical-form alternative scope the rule to
+  // lines that semantically reference the pattern.
+  const tokenRegex = tokens.map((t) => `\\b${escapeRegex(t)}\\b`).join('.*?');
+  const canonicalRegex = `\\b${escapeRegex(pattern)}\\b`;
+  const patRegex = `(?:${tokenRegex}|${canonicalRegex})`;
   const svc = args.service || '';
   const sev = (args.severity || '').toLowerCase();
   const vk = vendor;
