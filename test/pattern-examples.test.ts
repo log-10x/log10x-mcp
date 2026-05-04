@@ -33,9 +33,18 @@ test('buildVendorQuery datadog: phrases space-joined, service:/status:', () => {
   assert.equal(q, '"Payment" "Gateway" "Timeout" service:payments-svc status:error');
 });
 
-test('buildVendorQuery elasticsearch: explicit AND on message field', () => {
+test('buildVendorQuery elasticsearch: bare phrases AND-joined', () => {
+  // Bare phrases (no `message:` qualifier) so the query searches all
+  // text fields. The earlier `message:` prefix missed `log`-field events
+  // (the OTel/k8s/fluent-bit shape) — verified live and changed in the
+  // dependent commit.
   const q = buildVendorQuery('elasticsearch', ['Payment', 'Gateway'], 'payments-svc', 'ERROR');
-  assert.equal(q, 'message: "Payment" AND message: "Gateway" AND service: "payments-svc" AND severity: "ERROR"');
+  assert.equal(q, '"Payment" AND "Gateway" AND service: "payments-svc" AND severity: "ERROR"');
+});
+
+test('buildVendorQuery elasticsearch: bare phrases without service / severity', () => {
+  const q = buildVendorQuery('elasticsearch', ['Foo', 'Bar'], undefined, undefined);
+  assert.equal(q, '"Foo" AND "Bar"');
 });
 
 test('buildVendorQuery cloudwatch: filter @message like /escaped/ AND', () => {
