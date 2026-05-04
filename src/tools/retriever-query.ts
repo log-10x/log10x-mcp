@@ -21,6 +21,7 @@ import {
   runRetrieverQuery,
   isRetrieverConfigured,
   normalizeTimeExpression,
+  buildPatternSearch,
   type RetrieverQueryRequest,
   type RetrieverEvent,
 } from '../lib/retriever-api.js';
@@ -31,11 +32,17 @@ import {
 import { fmtCount } from '../lib/format.js';
 
 export const retrieverQuerySchema = {
+  pattern: z
+    .string()
+    .optional()
+    .describe(
+      'Reporter-named pattern (Symbol Message) to scope the scan to. Auto-translated to `tenx_user_pattern == "<name>"` Bloom-filter expression. Use this when the agent has a pattern name from event_lookup / top_patterns / cost_drivers and wants archive events for it without authoring the Bloom expression by hand. Mutually exclusive with `search`; if both are provided, `search` wins and `pattern` is ignored. Example: `pattern: "Payment_Gateway_Timeout"`.'
+    ),
   search: z
     .string()
     .optional()
     .describe(
-      'Bloom-filter search expression using the TenX subset: `==`, `||`, `&&`, `includes(field, "substr")`. Example: `severity_level=="ERROR" && includes(text, "ECONNREFUSED")`. Selective values are dramatically cheaper than open-ended scans. Omit to scan the full window (bounded by limit/processingTime).'
+      'Bloom-filter search expression using the TenX subset: `==`, `||`, `&&`, `includes(field, "substr")`. Example: `severity_level=="ERROR" && includes(text, "ECONNREFUSED")`. Selective values are dramatically cheaper than open-ended scans. Omit to scan the full window (bounded by limit/processingTime). Pass `pattern` instead for the common case of scoping to one Reporter-named pattern.'
     ),
   from: z
     .string()
@@ -81,6 +88,7 @@ export const retrieverQuerySchema = {
 
 export async function executeRetrieverQuery(
   args: {
+    pattern?: string;
     search?: string;
     from: string;
     to: string;
@@ -104,10 +112,17 @@ export async function executeRetrieverQuery(
     throw new Error(`Invalid time window: ${(e as Error).message}`);
   }
 
+  // Resolve pattern → search. When both are provided, `search` wins so the
+  // explicit form is never overwritten by an auto-translation. Tools that
+  // pass `pattern` (the Reporter-named Symbol Message) want the engine to
+  // scope to that pattern without the agent having to author the TenX
+  // expression by hand. See buildPatternSearch in retriever-api.
+  const effectiveSearch = args.search || (args.pattern ? buildPatternSearch(args.pattern) : undefined);
+
   const req: RetrieverQueryRequest = {
     from: args.from,
     to: args.to,
-    search: args.search,
+    search: effectiveSearch,
     filters: args.filters,
     target: args.target,
     limit: args.limit,
@@ -119,7 +134,13 @@ export async function executeRetrieverQuery(
   lines.push(`## Retriever Query`);
   lines.push('');
   lines.push(`**Window**: ${args.from} → ${args.to}`);
-  if (args.search) lines.push(`**Search**: \`${args.search}\``);
+  if (effectiveSearch) {
+    if (args.pattern && !args.search) {
+      lines.push(`**Pattern**: \`${args.pattern}\` (auto-translated to \`${effectiveSearch}\`)`);
+    } else {
+      lines.push(`**Search**: \`${effectiveSearch}\``);
+    }
+  }
   if (args.filters && args.filters.length > 0) {
     lines.push(`**Filters**: ${args.filters.map((f) => `\`${f}\``).join(' AND ')}`);
   }
