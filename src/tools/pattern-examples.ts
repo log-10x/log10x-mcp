@@ -160,7 +160,13 @@ export async function executePatternExamples(
   }
 
   // ── 3. Build per-vendor probe query ────────────────────────────────
-  const tokens = canonicalPattern.split('_').filter((t) => t.length >= 2);
+  // Split on underscores, drop short tokens, dedupe (case-sensitive — the
+  // pattern often has the same word repeated, which adds no selectivity to
+  // the AND query and just bloats the parser-cost). Symbol Messages from
+  // the engine for templates that emit multiple distinct symbols still
+  // contribute meaningfully; pure repetition gets collapsed.
+  const rawTokens = canonicalPattern.split('_').filter((t) => t.length >= 2);
+  const tokens = Array.from(new Set(rawTokens));
   if (tokens.length === 0) {
     return graceful('Pattern Examples — pattern has no usable tokens', [
       `The pattern \`${canonicalPattern}\` produced no tokens after normalization. Pass a real Symbol Message or pasted log line.`,
