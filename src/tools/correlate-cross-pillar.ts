@@ -30,7 +30,7 @@ import type { EnvConfig } from '../lib/environments.js';
 import {
   resolveBackend,
   formatDetectionTrace,
-  CustomerMetricsNotConfiguredError,
+  customerMetricsNotConfiguredMessage,
 } from '../lib/customer-metrics.js';
 import { getOrDiscoverJoin, type JoinDiscoveryResult } from '../lib/join-discovery.js';
 import {
@@ -100,7 +100,11 @@ export async function executeCorrelateCrossPillar(
   }
   const resolution = await resolveBackend();
   if (!resolution.backend) {
-    throw new CustomerMetricsNotConfiguredError(formatDetectionTrace(resolution.trace));
+    // Graceful degrade for autonomous chains. Throwing aborts a parent
+    // chain (e.g., investigate -> correlate_cross_pillar -> ...); a
+    // structured markdown return lets the parent log the missing-backend
+    // state and continue with log-tier-only synthesis.
+    return customerMetricsNotConfiguredMessage(formatDetectionTrace(resolution.trace));
   }
   const backend = resolution.backend;
 
