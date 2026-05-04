@@ -129,20 +129,28 @@ export async function executePatternExamples(
 
   // ── 2. Resolve pattern: pasted-line vs Symbol Message ──────────────
   const looksLikeRawLogLine = /\s/.test(args.pattern) && /["'{}:/]/.test(args.pattern);
-  let canonicalPattern: string;
+  let canonicalPattern: string;       // Display label for output rendering.
+  let probeTokenSource: string;       // String to derive probe tokens from.
   let inputTemplateBody: string | undefined;
   let inputTemplateHash: string | undefined;
 
   if (looksLikeRawLogLine) {
     // Pasted-line input: templatize once via tenx to discover the input
-    // event's templateHash and template body. The body is the reference
-    // for Jaccard discrimination; the hash is the verification key.
+    // event's templateHash. The hash is the verification key. The probe
+    // tokens come from the SAMPLE EVENT's content (the original raw text),
+    // not the template body — pattern-extraction.ts sometimes returns
+    // `template: <hash>` instead of the actual template body when the
+    // engine's template cache short-circuits the parser, so the sample
+    // event is the only reliably-populated source of searchable words
+    // for the probe.
     try {
       const resolved = await extractPatterns([args.pattern], { privacyMode: true });
       if (resolved.patterns[0]) {
-        canonicalPattern = resolved.patterns[0].hash;
-        inputTemplateBody = resolved.patterns[0].template;
-        inputTemplateHash = resolved.patterns[0].hash;
+        const p = resolved.patterns[0];
+        canonicalPattern = p.hash;
+        probeTokenSource = p.sampleEvent || args.pattern;
+        inputTemplateBody = p.sampleEvent || args.pattern;
+        inputTemplateHash = p.hash;
       } else {
         return graceful('Pattern Examples — could not resolve pasted log line', [
           'The templater returned no patterns for the pasted line. Verify the line is well-formed and contains at least one recurring symbol.',
@@ -157,16 +165,27 @@ export async function executePatternExamples(
     }
   } else {
     canonicalPattern = normalizePattern(args.pattern);
+    probeTokenSource = canonicalPattern; // tokens come from underscore-split below
   }
 
   // ── 3. Build per-vendor probe query ────────────────────────────────
-  // Split on underscores, drop short tokens, dedupe (case-sensitive — the
-  // pattern often has the same word repeated, which adds no selectivity to
-  // the AND query and just bloats the parser-cost). Symbol Messages from
-  // the engine for templates that emit multiple distinct symbols still
-  // contribute meaningfully; pure repetition gets collapsed.
-  const rawTokens = canonicalPattern.split('_').filter((t) => t.length >= 2);
-  const tokens = Array.from(new Set(rawTokens));
+  // Two paths:
+  //   - Symbol Message input: split on `_`, drop short tokens, dedupe.
+  //     Each token is a searchable phrase in the log analyzer.
+  //   - Pasted-line input: extract content tokens from the template body
+  //     (alphanumeric runs ≥ 2 chars, deduped). The body's literal tokens
+  //     are what appears in actual log lines; the hash is opaque.
+  let tokens: string[];
+  if (looksLikeRawLogLine) {
+    // Cap at 10 tokens — Datadog query DSL has ~2-3KB budget and other
+    // vendors get noisy with too many AND clauses. Top 10 by length
+    // (longer = more selective) is the heuristic.
+    const all = Array.from(contentTokens(probeTokenSource)).filter((t) => t.length >= 3);
+    tokens = all.sort((a, b) => b.length - a.length).slice(0, 10);
+  } else {
+    const rawTokens = canonicalPattern.split('_').filter((t) => t.length >= 2);
+    tokens = Array.from(new Set(rawTokens));
+  }
   if (tokens.length === 0) {
     return graceful('Pattern Examples — pattern has no usable tokens', [
       `The pattern \`${canonicalPattern}\` produced no tokens after normalization. Pass a real Symbol Message or pasted log line.`,
@@ -224,20 +243,23 @@ export async function executePatternExamples(
   }
 
   // ── 6. Discriminate by content-token Jaccard ───────────────────────
-  // Reference body = the input pattern's template body when we have a
-  // pasted line; otherwise pick the dominant template from the probe
-  // (Symbol Message input case — top-3 fan-out fallback).
+  // Reference body = the input event's content (pasted-line case) or the
+  // dominant returned bucket's sample event (Symbol Message case).
+  // Sample events are used INSTEAD of template bodies because
+  // pattern-extraction.ts sometimes populates `template` with just the
+  // hash; sample events are reliably the original raw text.
   let referenceBody = inputTemplateBody;
   if (!referenceBody) {
     const dominant = extracted.patterns[0];
-    referenceBody = dominant.template;
+    referenceBody = dominant.sampleEvent || dominant.template;
     inputTemplateHash = dominant.hash;
   }
   const referenceTokens = contentTokens(referenceBody);
 
   // Group events by templateHash, attach Jaccard score against reference.
   const buckets = extracted.patterns.map((p) => {
-    const bodyTokens = contentTokens(p.template);
+    const bodySource = p.sampleEvent || p.template;
+    const bodyTokens = contentTokens(bodySource);
     const jaccard = jaccardSimilarity(referenceTokens, bodyTokens);
     const threshold = Math.min(referenceTokens.size, bodyTokens.size) < 8 ? 0.7 : 0.85;
     return { p, jaccard, threshold, kept: jaccard >= threshold };
