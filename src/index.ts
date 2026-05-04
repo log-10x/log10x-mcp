@@ -358,7 +358,10 @@ const _originalRegisterTool = server.registerTool.bind(server) as typeof server.
 function registerLog10xTool(
   name: string,
   inputSchema: Record<string, unknown>,
-  handler: (args: any) => Promise<{ content: { type: 'text'; text: string }[]; isError?: boolean }>
+  handler: (
+    args: any,
+    extra?: { sendNotification?: (n: { method: string; params: Record<string, unknown> }) => Promise<void> }
+  ) => Promise<{ content: { type: 'text'; text: string }[]; isError?: boolean }>
 ): void {
   const meta = getPackageDefaultTool(name);
   (server.registerTool as any)(
@@ -547,8 +550,8 @@ registerLog10xTool('log10x_login_status', loginStatusSchema, () =>
 
 // ── Tool: log10x_signin ──
 
-registerLog10xTool('log10x_signin', signinSchema, (args) =>
-  wrap('log10x_signin', async () => executeSignin(args, getEnvs()))
+registerLog10xTool('log10x_signin', signinSchema, (args, extra) =>
+  wrap('log10x_signin', async () => executeSignin(args, getEnvs(), extra))
 );
 
 // ── Tool: log10x_signout ──

@@ -83,9 +83,24 @@ export const signinSchema = {
     .describe('Max seconds to wait for browser authorization (mode="browser" only). Default 300.'),
 };
 
+/**
+ * Optional MCP RequestHandlerExtra. Tool handlers in @modelcontextprotocol/sdk
+ * receive this as their second arg; we type only the parts we use so we don't
+ * have to pull in the SDK's protocol types here.
+ *
+ * `sendNotification` is how we tell the MCP host (Claude Desktop / Cursor /
+ * etc.) to surface a message to the user mid-tool, before the tool returns.
+ * That's the channel for showing the device user_code so the user can verify
+ * it matches what the browser shows them on Auth0's confirmation page.
+ */
+type SigninExtra = {
+  sendNotification?: (n: { method: string; params: Record<string, unknown> }) => Promise<void>;
+};
+
 export async function executeSignin(
   args: { mode?: 'browser' | 'api_key'; api_key?: string; wait_seconds?: number },
-  envs: Environments
+  envs: Environments,
+  extra?: SigninExtra
 ): Promise<string> {
   // The schema allows ambiguous combinations. Resolve before branching:
   //   - api_key arg present (with or without mode) → api_key flow
@@ -199,6 +214,30 @@ export async function executeSignin(
     `Sign in with **GitHub** or **Google** on the page Auth0 shows you, then confirm the device authorization.\n` +
     `Waiting up to ${Math.min(waitSeconds, device.expires_in)}s...\n`;
 
+  // Surface the user_code to the MCP host BEFORE we block on polling.
+  // The Auth0 confirmation page asks the user to verify the code matches
+  // what's displayed on this device, so the user has to see it here first.
+  // notifications/message is the standard MCP channel for inline messages.
+  // If the host (e.g. Cursor) renders these, the user sees the code right
+  // when they need it. Best-effort: failing to send is not fatal because
+  // the code is also returned in the final markdown for post-hoc check.
+  if (extra?.sendNotification) {
+    try {
+      await extra.sendNotification({
+        method: 'notifications/message',
+        params: {
+          level: 'info',
+          data:
+            `Log10x sign-in: confirm the code in your browser is **${device.user_code}**.\n` +
+            `URL: ${device.verification_uri_complete}\n` +
+            `Pick GitHub or Google on the Auth0 page, then approve the device authorization.`,
+        },
+      });
+    } catch {
+      // Some hosts may not implement notifications/message; ignore.
+    }
+  }
+
   log.info('signin.device_flow.started', {
     user_code: device.user_code,
     verification_uri: device.verification_uri,
@@ -266,7 +305,7 @@ export async function executeSignin(
   lines.push('');
   lines.push(`- **Account**: ${signinResult.username || '(no email)'}`);
   lines.push(`- **API key**: saved to \`${credentialsPath}\` (this machine only)`);
-  lines.push(`- **Path**: Auth0 Device Flow`);
+  lines.push(`- **Path**: Auth0 Device Flow (verified code \`${device.user_code}\`)`);
   if (envVarCleared) {
     lines.push(`- **Note**: removed in-process \`LOG10X_API_KEY\` env override so the new key takes effect immediately.`);
   }
