@@ -260,7 +260,8 @@ test('getPackageDefaultManifest: ships every registered tool with title + descri
   const required = [
     'log10x_cost_drivers',
     'log10x_investigate',
-    'log10x_signin',
+    'log10x_signin_start',
+    'log10x_signin_complete',
     'log10x_advise_install',
     'log10x_rotate_api_key',
   ];

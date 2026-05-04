@@ -6,7 +6,7 @@
  * Two layers cleared in this single call:
  *
  *   1. Persistent file at `~/.log10x/credentials` (priority 2 in the
- *      resolution chain — written by `log10x_signin`).
+ *      resolution chain, written by `log10x_signin_complete`).
  *
  *   2. The `LOG10X_API_KEY` entry in `process.env` (priority 1). The
  *      MCP server is a child process spawned by the MCP host with
@@ -79,9 +79,10 @@ export async function executeSignout(
   } else if (envs.isDemoMode) {
     lines.push(
       `Now running in demo mode against the public Log10x demo env. ` +
-        `Run \`log10x_signin\` to sign back in (\`mode: "browser"\` for the Auth0 Device Flow with GitHub or Google, ` +
-        `or \`mode: "api_key"\` with a key from console.log10x.com → Profile → API Settings). ` +
-        `Call \`log10x_login_status\` for the full breakdown.`
+        `Run \`log10x_signin_start\` to sign back in via the Auth0 Device Flow with GitHub or Google ` +
+        `(the model will chain to \`log10x_signin_complete\` automatically), or call ` +
+        `\`log10x_signin_complete\` directly with \`{ api_key: "<key>" }\` if you already have a key from ` +
+        `console.log10x.com → Profile → API Settings. Call \`log10x_login_status\` for the full breakdown.`
     );
   } else {
     // We cleared both layers but envs is somehow not in demo mode.

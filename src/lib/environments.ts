@@ -10,19 +10,20 @@
  *      The user can switch envs at runtime via the `environment` arg
  *      on any tool call — no env-var pinning needed.
  *
- *   2. `~/.log10x/credentials` — persistent file written by
- *      `log10x_signin` after a successful Auth0 Device Flow signup
- *      or signin. Loaded the same way as path 1. Living outside the
- *      MCP host's config means a single sign-in works across every
- *      MCP host on the same machine — sign in once per machine, not
- *      once per host.
+ *   2. `~/.log10x/credentials`, persistent file written by
+ *      `log10x_signin_complete` after a successful Auth0 Device Flow
+ *      signup/signin (or after the pasted-key path validates a key).
+ *      Loaded the same way as path 1. Living outside the MCP host's
+ *      config means a single sign-in works across every MCP host on
+ *      the same machine: sign in once per machine, not once per host.
  *
  *   3. Demo mode. The MCP boots against the public read-only Log10x
  *      demo env using the same key the console.log10x.com demo
  *      experience uses, so a user can play without signing up. The
  *      `log10x_login_status` tool surfaces how to upgrade, and
- *      `log10x_signin` runs the Auth0 Device Flow (user picks GitHub
- *      or Google) and writes path 2. We fall back to demo ONLY when
+ *      `log10x_signin_start` (chained to `log10x_signin_complete`)
+ *      runs the Auth0 Device Flow (user picks GitHub or Google) and
+ *      writes path 2. We fall back to demo ONLY when
  *      no LOG10X_API_KEY is
  *      set and no credentials file exists. If either is set but
  *      invalid, we still fall back to demo but record the failure in
@@ -103,7 +104,7 @@ export interface Environments {
  * `/api/v1/user`. Async because every path hits the Log10x API.
  *
  * Tries `LOG10X_API_KEY` first, then `~/.log10x/credentials` (written
- * by `log10x_signin`), then falls back to the public demo key.
+ * by `log10x_signin_complete`), then falls back to the public demo key.
  *
  * Returns demo-mode `Environments` (with `demoFallbackReason` set) on
  * any non-fatal failure of the user-supplied credential — never
@@ -137,7 +138,7 @@ export async function loadEnvironments(): Promise<Environments> {
   }
 
   // Path 2: persistent credentials at ~/.log10x/credentials, written
-  // by log10x_signin.
+  // by log10x_signin_complete.
   let creds: Awaited<ReturnType<typeof readCredentials>>;
   try {
     creds = await readCredentials();
@@ -160,9 +161,11 @@ export async function loadEnvironments(): Promise<Environments> {
       if (!demoEnvs) throw e;
       demoEnvs.demoFallbackReason =
         `~/.log10x/credentials key failed validation: ${reason}. ` +
-        `Run \`log10x_signin\` to refresh (\`mode: "browser"\` for the Auth0 Device Flow with GitHub or Google, ` +
-        `or \`mode: "api_key"\` to paste a key from console.log10x.com → Profile → API Settings), ` +
-        `or \`log10x_signout\` to clear and use demo. See \`log10x_login_status\` for the full breakdown.`;
+        `Run \`log10x_signin_start\` to refresh via the Auth0 Device Flow with GitHub or Google ` +
+        `(the model chains to \`log10x_signin_complete\` automatically), or call ` +
+        `\`log10x_signin_complete\` directly with \`{ api_key: "<key>" }\` to paste a key from ` +
+        `console.log10x.com → Profile → API Settings, or \`log10x_signout\` to clear and use demo. ` +
+        `See \`log10x_login_status\` for the full breakdown.`;
       return demoEnvs;
     }
   }
@@ -175,8 +178,8 @@ export async function loadEnvironments(): Promise<Environments> {
 /**
  * Re-run `loadEnvironments()` from scratch and overwrite the contents
  * of an existing `Environments` object in place. Used by
- * `log10x_signin` and `log10x_signout` to swap credentials without
- * forcing the user to restart the MCP host.
+ * `log10x_signin_complete` and `log10x_signout` to swap credentials
+ * without forcing the user to restart the MCP host.
  *
  * In-place mutation matters: every tool callback closes over a
  * reference to the same Environments object via `getEnvs()` in
@@ -206,18 +209,21 @@ async function loadFromApi(apiKey: string, isDemoMode: boolean): Promise<Environ
         `Demo-mode boot via GET /api/v1/user failed: ${(e as Error).message}. ` +
           `Either the MCP can't reach prometheus.log10x.com from this network, ` +
           `or the demo key has rotated and the MCP needs a refresh. ` +
-          `Bypass demo by signing in to your own account: run \`log10x_signin\` ` +
-          `(\`mode: "browser"\` for the Auth0 Device Flow with GitHub or Google, or \`mode: "api_key"\` to paste ` +
-          `an existing key), or set \`LOG10X_API_KEY\` to a key from ` +
-          `console.log10x.com → Profile → API Settings.`
+          `Bypass demo by signing in to your own account: run \`log10x_signin_start\` ` +
+          `for the Auth0 Device Flow with GitHub or Google (the model chains to ` +
+          `\`log10x_signin_complete\` automatically), or call \`log10x_signin_complete\` ` +
+          `directly with \`{ api_key: "<key>" }\` to paste an existing key, or set ` +
+          `\`LOG10X_API_KEY\` to a key from console.log10x.com → Profile → API Settings.`
       );
     }
     throw new EnvironmentValidationError(
       `LOG10X_API_KEY is set but env autodiscovery via GET /api/v1/user failed: ` +
         `${(e as Error).message}. ` +
         `Verify the key at console.log10x.com → Profile → API Settings, ` +
-        `or run \`log10x_signin\` to mint a fresh one (\`mode: "browser"\` for the Auth0 ` +
-        `Device Flow with GitHub or Google, or \`mode: "api_key"\` to paste a key). It auto-clears the bad ` +
+        `or run \`log10x_signin_start\` to mint a fresh one via the Auth0 Device Flow ` +
+        `with GitHub or Google (the model chains to \`log10x_signin_complete\` ` +
+        `automatically), or call \`log10x_signin_complete\` directly with ` +
+        `\`{ api_key: "<key>" }\` to paste a key. Either path auto-clears the bad ` +
         `\`LOG10X_API_KEY\` in-process. Or unset \`LOG10X_API_KEY\` entirely to fall ` +
         `back to read-only demo mode.`
     );

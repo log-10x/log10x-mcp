@@ -1,7 +1,8 @@
 /**
  * Auth0 OAuth 2.0 Device Authorization Flow client (RFC 8628).
  *
- * Used by `log10x_signin`. The flow:
+ * Used by `log10x_signin_start` (step 1: requestDeviceCode) and
+ * `log10x_signin_complete` (step 2: pollForAccessToken). The flow:
  *
  *   1. POST `{AUTH0_DOMAIN}/oauth/device/code` with our public client_id
  *      → get back `device_code`, `user_code`, `verification_uri`,

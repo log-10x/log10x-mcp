@@ -1,7 +1,8 @@
 /**
  * Persistent credentials at `~/.log10x/credentials`.
  *
- * Written by `log10x_signin` after the BE returns an API key, read by
+ * Written by `log10x_signin_complete` after the BE returns an API key
+ * (or after the pasted-key path validates one), read by
  * `loadEnvironments` when no `LOG10X_API_KEY` env var is set, wiped by
  * `log10x_signout`.
  *

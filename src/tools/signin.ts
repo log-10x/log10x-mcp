@@ -1,35 +1,31 @@
 /**
- * log10x_signin: sign in to a Log10x account. Two modes:
+ * log10x_signin_start + log10x_signin_complete: two-tool sign-in chain.
  *
- *   - `mode: "browser"` (default): runs Auth0 Device Authorization
- *     Flow (RFC 8628). We POST to `auth.log10x.com/oauth/device/code`,
- *     show the user the verification URL (browser auto-launched), and
- *     poll `/oauth/token` until they complete sign-in. The user picks
- *     GitHub OR Google (or any other connection enabled on the
- *     `mcp_backend` Auth0 client) at Auth0's universal login page;
- *     the MCP doesn't care which IdP they use. Once Auth0 issues an
- *     access_token, we exchange it at
- *     `prometheus.log10x.com/api/v1/auth/token` for a long-lived
- *     Log10x API key.
+ * Why split into two tools? Auth0 Device Authorization Flow is
+ * inherently asynchronous: we hand the user a code, they confirm it
+ * in their browser, then we poll Auth0 for the access token. There is
+ * no in-band channel inside a single tool call to surface the
+ * verification code BEFORE we block on polling. We tried mid-tool
+ * `notifications/message` push, but Cursor (and most other hosts
+ * today) does not render that channel during a tool execution, so the
+ * user never sees the code and the tool just hangs until expiry.
  *
- *   - `mode: "api_key"`: the user already has an API key (e.g.
- *     copied from console.log10x.com -> Profile -> API Settings, or
- *     issued out-of-band by a workspace admin). We validate the key
- *     by calling `/api/v1/user`, then proceed identically to the
- *     browser branch from step 4 onward. No browser, no IdP.
+ * Splitting the flow into two tools sidesteps the host limitation: the
+ * `_start` tool returns the code immediately as plain markdown, the
+ * model relays it to the user, and the `_complete` tool resumes the
+ * flow by polling for the access token using the device_code returned
+ * by `_start`. Works in every MCP host, no notification API required.
  *
- * Either way, the resolved API key is written to
- * `~/.log10x/credentials` (mode 0600) and envs are hot-reloaded
- * in-process, so the next tool call runs against the new account
- * without an MCP-host restart.
+ * The two tools share `log10x_signin_complete`:
+ *   - With `device_code`: finishes the browser flow started by `_start`.
+ *   - With `api_key`: pasted-key path (no browser, no IdP). The user
+ *     already has a key from console.log10x.com and just needs the
+ *     MCP to validate + persist it.
  *
- * If `LOG10X_API_KEY` is set in process.env when signin completes,
- * we ALSO `delete` it. Otherwise the env var beats the freshly
- * written credentials file (priority 1 vs priority 2 in the
- * resolution chain) and the new account would be silently
- * overridden. The result message tells the user to also remove the
- * env var from their MCP host config to make the change persist
- * across host restarts.
+ * On success either path writes the API key to `~/.log10x/credentials`
+ * (mode 0600), hot-reloads envs in-place, and clears
+ * `LOG10X_API_KEY` from `process.env` if set so the freshly written
+ * file wins the priority chain.
  */
 
 import { z } from 'zod';
@@ -46,197 +42,44 @@ import { exchangeAuth0TokenForApiKey } from '../lib/auth-api.js';
 import { fetchUserProfile } from '../lib/api.js';
 import { log } from '../lib/log.js';
 
-export const signinSchema = {
-  /**
-   * Which signin path to use. The model SHOULD ask the user up front
-   * (see the tool description) and pass the chosen mode here.
-   */
-  mode: z
-    .enum(['browser', 'api_key'])
-    .optional()
-    .describe(
-      'Which signin path: "browser" (default, opens Auth0 Device Flow in the user\'s browser, lets them pick GitHub or Google or any other configured login) or "api_key" (user pastes a Log10x API key they already have). The MCP should ask the user which they prefer before calling this tool unless the user has already specified.'
-    ),
-  /**
-   * Required when `mode: "api_key"`. The Log10x API key minted from
-   * console.log10x.com → Profile → API Settings. Validated against
-   * `/api/v1/user` before being written to `~/.log10x/credentials`.
-   */
-  api_key: z
-    .string()
-    .min(1)
-    .optional()
-    .describe(
-      'Log10x API key to sign in with. Required when mode="api_key". Validated against /api/v1/user before saving.'
-    ),
-  /**
-   * Maximum number of seconds to wait for the user to authorize in the
-   * browser. Only applies to mode="browser". Default 300 (5 minutes).
-   * Cap at 900 (Auth0 device_code default expiry).
-   */
-  wait_seconds: z
-    .number()
-    .int()
-    .min(30)
-    .max(900)
-    .optional()
-    .describe('Max seconds to wait for browser authorization (mode="browser" only). Default 300.'),
-};
-
 /**
- * Optional MCP RequestHandlerExtra. Tool handlers in @modelcontextprotocol/sdk
- * receive this as their second arg; we type only the parts we use so we don't
- * have to pull in the SDK's protocol types here.
- *
- * `sendNotification` is how we tell the MCP host (Claude Desktop / Cursor /
- * etc.) to surface a message to the user mid-tool, before the tool returns.
- * That's the channel for showing the device user_code so the user can verify
- * it matches what the browser shows them on Auth0's confirmation page.
+ * Default polling deadline for `_complete`. Auth0's device_code expiry
+ * is 900s (15 min). 600s is a comfortable middle ground that gives
+ * users plenty of time to switch tabs and confirm without burning the
+ * whole expiry on one stuck call.
  */
-type SigninExtra = {
-  sendNotification?: (n: { method: string; params: Record<string, unknown> }) => Promise<void>;
+const DEFAULT_WAIT_SECONDS_COMPLETE = 600;
+
+/** Floor: less than 30s is not enough for a human to switch tabs and approve. */
+const MIN_WAIT_SECONDS = 30;
+
+/** Cap: matches Auth0's device_code expiry. Asking for more is meaningless. */
+const MAX_WAIT_SECONDS = 900;
+
+// ── log10x_signin_start ──────────────────────────────────────────────
+
+export const signinStartSchema = {
+  /**
+   * No `wait_seconds` here. `_start` does NOT block on polling: it
+   * requests a device code, opens the browser, and returns the code
+   * to the model. The model then calls `_complete` with the
+   * device_code, where polling actually happens.
+   */
 };
 
-export async function executeSignin(
-  args: { mode?: 'browser' | 'api_key'; api_key?: string; wait_seconds?: number },
-  envs: Environments,
-  extra?: SigninExtra
-): Promise<string> {
-  // The schema allows ambiguous combinations. Resolve before branching:
-  //   - api_key arg present (with or without mode) → api_key flow
-  //   - mode='api_key' but no api_key → ask the caller for one
-  //   - mode='browser' or unset → browser flow
-  const explicitMode = args.mode;
-  if (explicitMode === 'api_key' && !args.api_key) {
-    return (
-      '## Sign-in needs an API key\n\n' +
-      'You picked `mode: "api_key"` but did not pass `api_key`. Get the key from ' +
-      '[console.log10x.com](https://console.log10x.com) → Profile → API Settings, ' +
-      'then call `log10x_signin` again with `{ mode: "api_key", api_key: "<your-key>" }`.\n\n' +
-      'Or call `log10x_signin` with `{ mode: "browser" }` for the Auth0 Device Flow ' +
-      '(opens your browser; pick GitHub or Google).'
-    );
-  }
-  const useApiKey = !!args.api_key;
+export interface SigninStartResult {
+  markdown: string;
+}
 
-  // ── Branch A: user pasted a Log10x API key ──────────────────────────────
-  if (useApiKey) {
-    const apiKey = args.api_key!;
-    // Validate. /api/v1/user is user-scoped (the key alone authenticates),
-    // and a successful response also gives us the env list to render.
-    let profile;
-    try {
-      profile = await fetchUserProfile(apiKey);
-    } catch (e) {
-      return (
-        '## Sign-in failed\n\n' +
-        `The API key you provided was rejected by \`/api/v1/user\`: ${(e as Error).message}\n\n` +
-        'Verify the key at [console.log10x.com](https://console.log10x.com) → Profile → API Settings ' +
-        'and retry, or run `log10x_signin` with `{ mode: "browser" }` to mint a fresh key via ' +
-        'the Auth0 Device Flow.'
-      );
-    }
-
-    let credentialsPath: string;
-    try {
-      credentialsPath = await writeCredentials({ apiKey });
-    } catch (e) {
-      return (
-        '## Key validated but writing credentials failed\n\n' +
-        `Path: ${getCredentialsPath()}\nError: ${(e as Error).message}\n\n` +
-        'As a workaround, set `LOG10X_API_KEY` in your MCP host config and restart.'
-      );
-    }
-
-    const envVarCleared = clearOverridingEnvVar();
-    try {
-      await reloadEnvironmentsInPlace(envs);
-    } catch (e) {
-      return (
-        '## Signed in. Env reload failed\n\n' +
-        `The key was saved to \`${credentialsPath}\` successfully, but the in-process ` +
-        `env list could not refresh: ${(e as Error).message}.\n\n` +
-        'Restart your MCP host to pick up the new account.'
-      );
-    }
-
-    const lines: string[] = [];
-    lines.push('## Signed in to Log10x');
-    lines.push('');
-    lines.push(`Validated via \`/api/v1/user\` and signed in as **${profile.username || '(no email)'}**.`);
-    lines.push('');
-    lines.push(`- **API key**: saved to \`${credentialsPath}\` (this machine only)`);
-    lines.push(`- **Path**: pasted API key (no browser flow)`);
-    if (envVarCleared) {
-      lines.push(`- **Note**: cleared the old \`LOG10X_API_KEY\` from this session so the new key takes effect immediately.`);
-    }
-    lines.push('');
-    lines.push(`### Environments now available (${envs.all.length})`);
-    for (const e of envs.all) {
-      const star = e.isDefault ? ' ★ default' : '';
-      const perm = e.permissions ? ` · \`${e.permissions}\`` : '';
-      lines.push(`- **${e.nickname}**${perm}${star}`);
-    }
-    lines.push('');
-    if (envVarCleared) {
-      lines.push(
-        '**To make this stick across restarts**: open your Claude Desktop config ' +
-          '(`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS, ' +
-          '`%APPDATA%\\Claude\\claude_desktop_config.json` on Windows, or the equivalent ' +
-          'for Cursor / other MCP hosts) and delete the OLD `LOG10X_API_KEY` line from the ' +
-          '`log10x` server\'s `env` block. Otherwise the host re-injects the old key on ' +
-          'next launch and overrides the credentials I just saved.'
-      );
-      lines.push('');
-    }
-    lines.push(
-      'Run `log10x_signout` to revoke. Visit https://console.log10x.com to upgrade tier or manage envs.'
-    );
-    return lines.join('\n');
-  }
-
-  // ── Branch B: Auth0 Device Flow (default) ───────────────────────────────
-  const waitSeconds = args.wait_seconds ?? 300;
-
-  // 1. Request device + user code from Auth0.
+export async function executeSigninStart(): Promise<string> {
   let device;
   try {
     device = await requestDeviceCode();
   } catch (e) {
-    return `## Sign-in failed\n\nCould not start Auth0 Device Flow: ${(e as Error).message}`;
+    return `## Sign-in failed to start\n\nCould not request a device code from Auth0: ${(e as Error).message}`;
   }
 
   const opened = tryOpenBrowser(device.verification_uri_complete);
-  const deviceFlowDescription =
-    `Opened your browser at:\n  ${device.verification_uri_complete}\n` +
-    (opened ? '' : '(Auto-launch failed. Copy the URL above into your browser.)\n') +
-    `User code: \`${device.user_code}\` (already embedded in the URL)\n` +
-    `Sign in with **GitHub** or **Google** on the page Auth0 shows you, then confirm the device authorization.\n` +
-    `Waiting up to ${Math.min(waitSeconds, device.expires_in)}s...\n`;
-
-  // Surface the user_code to the MCP host BEFORE we block on polling.
-  // The Auth0 confirmation page asks the user to verify the code matches
-  // what's displayed on this device, so the user has to see it here first.
-  // notifications/message is the standard MCP channel for inline messages.
-  // If the host (e.g. Cursor) renders these, the user sees the code right
-  // when they need it. Best-effort: failing to send is not fatal because
-  // the code is also returned in the final markdown for post-hoc check.
-  if (extra?.sendNotification) {
-    try {
-      await extra.sendNotification({
-        method: 'notifications/message',
-        params: {
-          level: 'info',
-          data:
-            `Log10x sign-in: confirm the code in your browser is **${device.user_code}**.\n` +
-            `URL: ${device.verification_uri_complete}\n` +
-            `Pick GitHub or Google on the Auth0 page, then approve the device authorization.`,
-        },
-      });
-    } catch {
-      // Some hosts may not implement notifications/message; ignore.
-    }
-  }
 
   log.info('signin.device_flow.started', {
     user_code: device.user_code,
@@ -247,19 +90,203 @@ export async function executeSignin(
     auth0_domain: LOG10X_AUTH0_DOMAIN,
   });
 
-  // 2. Poll Auth0 for the access token.
+  const lines: string[] = [];
+  lines.push('## Sign in to Log10x: confirm the code in your browser');
+  lines.push('');
+  lines.push(`**User code**: \`${device.user_code}\``);
+  lines.push('');
+  lines.push(`**Verification URL**: ${device.verification_uri_complete}`);
+  if (!opened) {
+    lines.push('');
+    lines.push('_(Auto-launch failed. Copy the URL above into your browser.)_');
+  }
+  lines.push('');
+  lines.push(
+    'Open the URL, verify the code on the Auth0 page matches the user code above, ' +
+      'pick **GitHub** or **Google** (or any other configured login), and click **Confirm**. ' +
+      `You have ${Math.min(device.expires_in, MAX_WAIT_SECONDS)} seconds before the code expires.`
+  );
+  lines.push('');
+  lines.push(
+    `Once the user confirms in the browser, call \`log10x_signin_complete\` with ` +
+      `\`{ device_code: "${device.device_code}" }\`. ` +
+      `The user does NOT need to ask for that step. The model should call ` +
+      `\`log10x_signin_complete\` automatically as the next action.`
+  );
+
+  return lines.join('\n');
+}
+
+// ── log10x_signin_complete ──────────────────────────────────────────
+
+export const signinCompleteSchema = {
+  /**
+   * The opaque device_code returned by `log10x_signin_start`. Passed
+   * back unchanged. Mutually exclusive with `api_key`: pass exactly one.
+   */
+  device_code: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'The opaque device_code returned by `log10x_signin_start`. Pass it back unchanged. The tool polls Auth0 for the access token, then exchanges it for a long-lived Log10x API key. Mutually exclusive with `api_key`.'
+    ),
+  /**
+   * A Log10x API key the user already has (pasted from
+   * console.log10x.com). When passed, no browser flow runs; we
+   * validate the key and persist it. Mutually exclusive with
+   * `device_code`.
+   */
+  api_key: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'Log10x API key to sign in with directly (no browser). Validated against /api/v1/user before saving. Use this when the user already has a key from console.log10x.com → Profile → API Settings, or when issued out-of-band by a workspace admin. Mutually exclusive with `device_code`.'
+    ),
+  /**
+   * Maximum number of seconds to poll Auth0 for the access token.
+   * Only applies when `device_code` is passed; ignored on the api_key
+   * path. Default 600 (10 minutes). Floor 30, cap 900 (Auth0 expiry).
+   */
+  wait_seconds: z
+    .number()
+    .int()
+    .min(MIN_WAIT_SECONDS)
+    .max(MAX_WAIT_SECONDS)
+    .optional()
+    .describe(
+      `Max seconds to poll for browser confirmation (only used when device_code is passed). Default ${DEFAULT_WAIT_SECONDS_COMPLETE}.`
+    ),
+};
+
+export async function executeSigninComplete(
+  args: { device_code?: string; api_key?: string; wait_seconds?: number },
+  envs: Environments
+): Promise<string> {
+  if (args.device_code && args.api_key) {
+    return (
+      '## Sign-in could not complete\n\n' +
+      'Pass exactly one of `device_code` (to finish a browser sign-in started by ' +
+      '`log10x_signin_start`) or `api_key` (to validate a key the user already has). ' +
+      'Both were provided, which is ambiguous.'
+    );
+  }
+  if (!args.device_code && !args.api_key) {
+    return (
+      '## Sign-in could not complete\n\n' +
+      'Pass either `device_code` (returned by `log10x_signin_start`) to finish a ' +
+      'browser flow, or `api_key` to validate a key the user already has from ' +
+      'console.log10x.com → Profile → API Settings.'
+    );
+  }
+
+  if (args.api_key) {
+    return await completeWithApiKey(args.api_key, envs);
+  }
+  return await completeWithDeviceCode(args.device_code!, args.wait_seconds, envs);
+}
+
+async function completeWithApiKey(apiKey: string, envs: Environments): Promise<string> {
+  // Validate. /api/v1/user is user-scoped (the key alone authenticates),
+  // and a successful response also gives us the env list to render.
+  let profile;
+  try {
+    profile = await fetchUserProfile(apiKey);
+  } catch (e) {
+    return (
+      '## Sign-in failed\n\n' +
+      `The API key you provided was rejected by \`/api/v1/user\`: ${(e as Error).message}\n\n` +
+      'Verify the key at [console.log10x.com](https://console.log10x.com) → Profile → API Settings ' +
+      'and retry, or run `log10x_signin_start` to mint a fresh key via the Auth0 Device Flow.'
+    );
+  }
+
+  let credentialsPath: string;
+  try {
+    credentialsPath = await writeCredentials({ apiKey });
+  } catch (e) {
+    return (
+      '## Key validated but writing credentials failed\n\n' +
+      `Path: ${getCredentialsPath()}\nError: ${(e as Error).message}\n\n` +
+      'As a workaround, set `LOG10X_API_KEY` in your MCP host config and restart.'
+    );
+  }
+
+  const envVarCleared = clearOverridingEnvVar();
+  try {
+    await reloadEnvironmentsInPlace(envs);
+  } catch (e) {
+    return (
+      '## Signed in. Env reload failed\n\n' +
+      `The key was saved to \`${credentialsPath}\` successfully, but the in-process ` +
+      `env list could not refresh: ${(e as Error).message}.\n\n` +
+      'Restart your MCP host to pick up the new account.'
+    );
+  }
+
+  const lines: string[] = [];
+  lines.push('## Signed in to Log10x');
+  lines.push('');
+  lines.push(`Validated via \`/api/v1/user\` and signed in as **${profile.username || '(no email)'}**.`);
+  lines.push('');
+  lines.push(`- **API key**: saved to \`${credentialsPath}\` (this machine only)`);
+  lines.push(`- **Path**: pasted API key (no browser flow)`);
+  if (envVarCleared) {
+    lines.push(`- **Note**: cleared the old \`LOG10X_API_KEY\` from this session so the new key takes effect immediately.`);
+  }
+  lines.push('');
+  lines.push(`### Environments now available (${envs.all.length})`);
+  for (const e of envs.all) {
+    const star = e.isDefault ? ' ★ default' : '';
+    const perm = e.permissions ? ` · \`${e.permissions}\`` : '';
+    lines.push(`- **${e.nickname}**${perm}${star}`);
+  }
+  lines.push('');
+  if (envVarCleared) {
+    lines.push(
+      '**To make this stick across restarts**: open your Claude Desktop config ' +
+        '(`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS, ' +
+        '`%APPDATA%\\Claude\\claude_desktop_config.json` on Windows, or the equivalent ' +
+        'for Cursor / other MCP hosts) and delete the OLD `LOG10X_API_KEY` line from the ' +
+        '`log10x` server\'s `env` block. Otherwise the host re-injects the old key on ' +
+        'next launch and overrides the credentials I just saved.'
+    );
+    lines.push('');
+  }
+  lines.push(
+    'Run `log10x_signout` to revoke. Visit https://console.log10x.com to upgrade tier or manage envs.'
+  );
+  return lines.join('\n');
+}
+
+async function completeWithDeviceCode(
+  deviceCode: string,
+  waitSecondsArg: number | undefined,
+  envs: Environments
+): Promise<string> {
+  const waitSeconds = waitSecondsArg ?? DEFAULT_WAIT_SECONDS_COMPLETE;
+
+  // 1. Poll Auth0 for the access token. Auth0's interval is 5s by
+  //    default; we don't have a fresh device-code response here so we
+  //    pick a sane default. The poll loop honors the slow_down signal
+  //    too if Auth0 returns it.
   let token;
   try {
     token = await pollForAccessToken({
-      deviceCode: device.device_code,
-      interval: device.interval,
-      expiresIn: Math.min(waitSeconds, device.expires_in),
+      deviceCode,
+      interval: 5,
+      expiresIn: waitSeconds,
     });
   } catch (e) {
-    return `## Sign-in did not complete\n\n${deviceFlowDescription}\nError: ${(e as Error).message}`;
+    return (
+      `## Sign-in did not complete\n\n` +
+      `Polling Auth0 for the access token failed: ${(e as Error).message}\n\n` +
+      `Run \`log10x_signin_start\` again to get a fresh code.`
+    );
   }
 
-  // 3. Exchange the Auth0 access token for a Log10x API key.
+  // 2. Exchange the Auth0 access token for a Log10x API key.
   let signinResult;
   try {
     signinResult = await exchangeAuth0TokenForApiKey(token.access_token);
@@ -270,7 +297,7 @@ export async function executeSignin(
     );
   }
 
-  // 4. Persist credentials.
+  // 3. Persist credentials.
   let credentialsPath: string;
   try {
     credentialsPath = await writeCredentials({
@@ -286,7 +313,7 @@ export async function executeSignin(
     );
   }
 
-  // 5. Clear any overriding env var, then hot-reload envs so the next
+  // 4. Clear any overriding env var, then hot-reload envs so the next
   //    tool call sees the new account.
   const envVarCleared = clearOverridingEnvVar();
   try {
@@ -305,7 +332,7 @@ export async function executeSignin(
   lines.push('');
   lines.push(`- **Account**: ${signinResult.username || '(no email)'}`);
   lines.push(`- **API key**: saved to \`${credentialsPath}\` (this machine only)`);
-  lines.push(`- **Path**: Auth0 Device Flow (verified code \`${device.user_code}\`)`);
+  lines.push(`- **Path**: Auth0 Device Flow`);
   if (envVarCleared) {
     lines.push(`- **Note**: removed in-process \`LOG10X_API_KEY\` env override so the new key takes effect immediately.`);
   }
