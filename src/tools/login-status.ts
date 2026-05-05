@@ -16,7 +16,7 @@
  */
 
 import { z } from 'zod';
-import type { Environments } from '../lib/environments.js';
+import { revalidateEnvironments, type Environments } from '../lib/environments.js';
 import { activeNotices, getManifest } from '../lib/manifest.js';
 
 export const loginStatusSchema = {};
@@ -25,6 +25,21 @@ export async function executeLoginStatus(
   _args: Record<string, never>,
   envs: Environments
 ): Promise<string> {
+  // Revalidate credentials before reporting state. Without this, the
+  // tool would render whatever was decided at MCP boot, even if the
+  // credentials file has since become valid (e.g. a rotated key whose
+  // authorizer cache has now cleared) or vice versa. The user-visible
+  // "am I signed in" tool must reflect ground truth, not boot state.
+  // Also clears any stale `LOG10X_API_KEY` from process.env that would
+  // otherwise shadow the credentials file on the reload.
+  try {
+    await revalidateEnvironments(envs);
+  } catch {
+    // Best-effort. If reload fails, fall through and render whatever
+    // state we have. The caller still gets useful output instead of
+    // an opaque error from a status-only tool.
+  }
+
   const lines: string[] = [];
   lines.push('## Log10x login status');
   lines.push('');
@@ -55,11 +70,11 @@ export async function executeLoginStatus(
     lines.push('### To use your own account');
     lines.push('Two ways to sign in. Both end up in the same place — the MCP autodiscovers your envs from `/api/v1/user` and the next tool call runs against your real account without an MCP-host restart.');
     lines.push('');
-    lines.push('**Option A — `log10x_signin` (recommended, no host-config edit needed).** Two modes, ask the user which they prefer:');
-    lines.push('- `mode: "github"` (default) — opens a browser to github.com/login/device with the user_code pre-filled, polls until you click Authorize, then exchanges the GitHub token for a long-lived Log10x API key. Auto-creates an account on first sign-up. Zero-click if `gh auth login` is already set up. 30s–2min.');
-    lines.push('- `mode: "api_key"` with `api_key: "<key>"` — validates a Log10x API key the user already has (e.g., copied from console.log10x.com → Profile → API Settings, or issued by a workspace admin). No browser, no GitHub.');
+    lines.push('**Option A: two-tool sign-in chain (recommended, no host-config edit needed).** Two paths, ask the user which they prefer:');
+    lines.push('- **Browser path**: call `log10x_signin_start`. It opens a browser to Auth0\'s universal login page with the device code pre-filled and returns the user_code immediately. The user picks **GitHub** or **Google** there, completes OAuth with the chosen IdP, and confirms the device authorization. The model then automatically calls `log10x_signin_complete` with the device_code returned by `_start` to finish the flow (the MCP polls Auth0, exchanges the access token for a long-lived Log10x API key, and persists it). Auto-creates an account on first sign-up. 30s to 2 min.');
+    lines.push('- **Pasted-key path**: call `log10x_signin_complete` directly with `{ api_key: "<key>" }`. Validates a Log10x API key the user already has (e.g., copied from console.log10x.com → Profile → API Settings, or issued by a workspace admin). No browser.');
     lines.push('');
-    lines.push('Either mode writes the resolved key to `~/.log10x/credentials` (mode 0600), which persists across MCP-host restarts on its own — no config-file edit needed.');
+    lines.push('Either path writes the resolved key to `~/.log10x/credentials` (mode 0600), which persists across MCP-host restarts on its own, no config-file edit needed.');
     lines.push('');
     lines.push('**Option B — set `LOG10X_API_KEY` in your MCP host config** (manual, useful for CI / shared / scripted setups):');
     lines.push('1. Get your API key at https://console.log10x.com → Profile → API Settings.');

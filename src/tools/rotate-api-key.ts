@@ -39,7 +39,7 @@
 
 import { z } from 'zod';
 import type { Environments } from '../lib/environments.js';
-import { reloadEnvironmentsInPlace } from '../lib/environments.js';
+import { reloadEnvironmentsInPlace, clearOverridingEnvVar } from '../lib/environments.js';
 import { writeCredentials, getCredentialsPath } from '../lib/credentials.js';
 import { rotateApiKey } from '../lib/api.js';
 
@@ -70,10 +70,11 @@ export async function executeRotateApiKey(
       '## Cannot rotate — running in demo mode\n\n' +
       'You\'re currently authenticated against the public Log10x demo account, which ' +
       'cannot rotate API keys (the backend returns 403 for demo users). Sign in to ' +
-      'your own account first via `log10x_signin` (`mode: "github"` for the GitHub ' +
-      'Device Flow, or `mode: "api_key"` to paste a key from console.log10x.com → ' +
-      'Profile → API Settings), then retry rotation. See `log10x_login_status` for ' +
-      'the full sign-in breakdown.'
+      'your own account first: call `log10x_signin_start` for the Auth0 Device Flow with ' +
+      'GitHub or Google (the model chains to `log10x_signin_complete` automatically once you ' +
+      'confirm in the browser), or call `log10x_signin_complete` directly with ' +
+      '`{ api_key: "<key>" }` to paste a key from console.log10x.com → Profile → API ' +
+      'Settings. Then retry rotation. See `log10x_login_status` for the full sign-in breakdown.'
     );
   }
 
@@ -122,10 +123,7 @@ export async function executeRotateApiKey(
   // file. Without this, the OLD value in process.env would still win
   // priority 1 and we'd start hitting 401s on every subsequent tool
   // call until the host restarts. Same logic as signin / signout.
-  const envVarWasSet = !!process.env.LOG10X_API_KEY;
-  if (envVarWasSet) {
-    delete process.env.LOG10X_API_KEY;
-  }
+  const envVarWasSet = clearOverridingEnvVar();
 
   try {
     await reloadEnvironmentsInPlace(envs);

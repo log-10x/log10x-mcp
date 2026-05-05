@@ -10,41 +10,44 @@ function getBase(): string {
   return process.env.LOG10X_API_BASE || DEFAULT_BASE;
 }
 
-export interface GithubSigninResponse {
+export interface SigninResponse {
   /** Long-lived Log10x API key. Persist this. */
   api_key: string;
-  /** User's email — used as their human-readable identity. */
+  /** User's email. The backend reads it from the Auth0 user record's
+   *  email attribute. May be empty if Auth0 didn't capture one
+   *  (e.g. a misconfigured social connection); the MCP should treat
+   *  empty as "no email" and continue. */
   username: string;
-  /** GitHub login (e.g. "talweiss"). */
-  github_login: string;
-  /** True for fresh signups, false when an existing account was matched. */
-  is_new_account: boolean;
 }
 
 /**
- * POST /api/v1/auth/github with a verified GitHub access token. The BE
- * verifies the token against api.github.com, looks up or creates the
- * matching Log10x account, and returns an API key.
+ * POST /api/v1/auth/token with an Auth0 access_token (issued via the
+ * Device Authorization Flow against `auth.log10x.com`). The BE calls
+ * Auth0's `/userinfo` to resolve the `sub`, then looks up the user
+ * record via the Management API and returns the long-lived api_key
+ * stored in `app_metadata.api_key`.
+ *
+ * The Auth0 access_token is single-use from the MCP's perspective:
+ * we don't keep it after this exchange. The api_key is what
+ * authenticates every subsequent log10x call.
  */
-export async function exchangeGithubTokenForApiKey(githubToken: string): Promise<GithubSigninResponse> {
-  const url = new URL('/api/v1/auth/github', getBase()).toString();
+export async function exchangeAuth0TokenForApiKey(auth0AccessToken: string): Promise<SigninResponse> {
+  const url = new URL('/api/v1/auth/token', getBase()).toString();
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ github_token: githubToken }),
+    body: JSON.stringify({ access_token: auth0AccessToken }),
   });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    throw new Error(`Log10x BE rejected GitHub token: HTTP ${res.status}: ${body.slice(0, 300)}`);
+    throw new Error(`Log10x BE rejected the Auth0 access token: HTTP ${res.status}: ${body.slice(0, 300)}`);
   }
-  const json = (await res.json()) as Partial<GithubSigninResponse>;
+  const json = (await res.json()) as Partial<SigninResponse>;
   if (!json.api_key) {
     throw new Error(`Log10x BE response missing api_key: ${JSON.stringify(json).slice(0, 300)}`);
   }
   return {
     api_key: json.api_key,
     username: json.username || '',
-    github_login: json.github_login || '',
-    is_new_account: !!json.is_new_account,
   };
 }

@@ -18,7 +18,7 @@ import {
 } from './lib/manifest.js';
 import { z } from 'zod';
 
-import { loadEnvironments, resolveEnv, type EnvConfig, type Environments, EnvironmentValidationError } from './lib/environments.js';
+import { loadEnvironments, resolveEnv, revalidateEnvironments, type EnvConfig, type Environments, EnvironmentValidationError } from './lib/environments.js';
 import { fetchAnalyzerCost } from './lib/api.js';
 import { costDriversSchema, executeCostDrivers } from './tools/cost-drivers.js';
 import { eventLookupSchema, executeEventLookup } from './tools/event-lookup.js';
@@ -72,7 +72,12 @@ import { adviseRetrieverSchema, executeAdviseRetriever } from './tools/advise-re
 import { adviseInstallSchema, executeAdviseInstall } from './tools/advise-install.js';
 import { adviseCompactSchema, executeAdviseCompact } from './tools/advise-compact.js';
 import { loginStatusSchema, executeLoginStatus } from './tools/login-status.js';
-import { signinSchema, executeSignin } from './tools/signin.js';
+import {
+  signinStartSchema,
+  signinCompleteSchema,
+  executeSigninStart,
+  executeSigninComplete,
+} from './tools/signin.js';
 import { signoutSchema, executeSignout } from './tools/signout.js';
 import { updateSettingsSchema, executeUpdateSettings } from './tools/update-settings.js';
 import { createEnvSchema, executeCreateEnv } from './tools/create-env.js';
@@ -120,25 +125,78 @@ const COST_REFRESH_MS = 3_600_000; // 1 hour
  * the raw error message is logged at debug level before `describeToolError`
  * rewrites it, so ops can see the original text when hunting root causes.
  */
-function wrap(
+async function wrap(
   toolName: string,
   fn: () => Promise<string>
 ): Promise<{ content: { type: 'text'; text: string }[]; isError?: boolean }> {
   const started = Date.now();
-  return fn()
-    .then((text) => {
-      log.info(`tool.${toolName}.ok`, { ms: Date.now() - started });
-      return { content: [{ type: 'text' as const, text: applyDemoBanner(text) }] };
-    })
-    .catch((e) => {
-      const raw = e instanceof Error ? e.message : String(e);
-      log.debug(`tool.${toolName}.raw_err`, { msg: raw });
-      log.warn(`tool.${toolName}.err`, { ms: Date.now() - started, msg: raw });
-      return {
-        content: [{ type: 'text' as const, text: applyDemoBanner(describeToolError(toolName, e)) }],
-        isError: true,
-      };
+  try {
+    const text = await runWithDemoFallbackRetry(toolName, fn);
+    log.info(`tool.${toolName}.ok`, { ms: Date.now() - started });
+    return { content: [{ type: 'text' as const, text: applyDemoBanner(text) }] };
+  } catch (e) {
+    const raw = e instanceof Error ? e.message : String(e);
+    log.debug(`tool.${toolName}.raw_err`, { msg: raw });
+    log.warn(`tool.${toolName}.err`, { ms: Date.now() - started, msg: raw });
+    return {
+      content: [{ type: 'text' as const, text: applyDemoBanner(describeToolError(toolName, e)) }],
+      isError: true,
+    };
+  }
+}
+
+/**
+ * Run the tool's inner function. If it throws an auth error (401/403)
+ * AND the MCP is currently in demo-fallback mode, revalidate
+ * credentials once and retry the tool.
+ *
+ * Why: every account-scoped EnvConfig bakes the apiKey at boot
+ * (`environments.ts:loadFromApi`). If the user's key was invalid at
+ * boot (typo, transient backend issue, rotated key whose authorizer
+ * cache had not yet cleared), the MCP falls back to the public demo
+ * key and every account-scoped tool keeps using that demo key for the
+ * lifetime of the process, even after the real key starts working.
+ * Restarting the MCP host was the only recovery path until now.
+ *
+ * This wrapper makes recovery automatic: any account-scoped tool that
+ * gets 401/403 while in demo-fallback triggers a single revalidation
+ * + retry, transparently un-sticking the user. Pure demo mode (no key
+ * configured at all) does NOT trigger this; only the fallback case
+ * where the user intended to use a real account.
+ *
+ * Tools that don't hit the gateway (resolve_batch, extract_templates)
+ * never produce 401/403 errors so this is a no-op for them.
+ */
+async function runWithDemoFallbackRetry(toolName: string, fn: () => Promise<string>): Promise<string> {
+  try {
+    return await fn();
+  } catch (e) {
+    if (!isAuthRecoverableError(e)) throw e;
+    if (!envs || !envs.isDemoMode || !envs.demoFallbackReason) throw e;
+    log.info(`tool.${toolName}.auth_retry.attempt`, {
+      reason: envs.demoFallbackReason.slice(0, 200),
     });
+    try {
+      await revalidateEnvironments(envs);
+    } catch (reloadErr) {
+      log.warn(`tool.${toolName}.auth_retry.reload_failed`, {
+        msg: (reloadErr as Error).message,
+      });
+      throw e;
+    }
+    if (envs.isDemoMode) {
+      // Reload still ended in demo. Original error stands.
+      log.info(`tool.${toolName}.auth_retry.still_demo`);
+      throw e;
+    }
+    log.info(`tool.${toolName}.auth_retry.recovered`);
+    return await fn();
+  }
+}
+
+function isAuthRecoverableError(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e);
+  return /HTTP 401|HTTP 403|forbidden|unauthorized/i.test(msg);
 }
 
 /**
@@ -191,6 +249,15 @@ async function getAnalyzerCost(env: EnvConfig, override?: number): Promise<numbe
 const server = new McpServer(
   { name: 'log10x', version: readClientVersion() },
   {
+    // Declare the `logging` capability so calls to extra.sendNotification
+    // ('notifications/message', ...) inside tool handlers don't throw
+    // synchronously from the SDK's assertNotificationCapability guard.
+    // We don't currently rely on mid-tool push for the sign-in flow
+    // (the two-tool log10x_signin_start / log10x_signin_complete split
+    // sidesteps Cursor's lack of mid-tool rendering), but declaring the
+    // capability is correct hygiene and unblocks any other tool that
+    // wants to use the channel on hosts that do support it.
+    capabilities: { logging: {} },
     instructions: `Log10x is the observability memory for the user's logs. Every log line the pipeline
 has ever seen is fingerprinted into a stable pattern identity (field-set) that stays constant across
 deploys, restarts, pod names, timestamps, and request IDs. That identity is the key to a Prometheus
@@ -258,7 +325,12 @@ Root-cause across services (the investigate wedge):
 
 Account / setup / discovery:
 - "am I logged in" / "login status" / "what envs do I have"      → log10x_login_status
-- "log me in" / "sign me up" / "create a Log10x account"         → log10x_signin
+- "log me in" / "sign me up" / "create a Log10x account"         → log10x_signin_start, then log10x_signin_complete
+  (Two-tool chain: log10x_signin_start opens the browser and returns the device_code + user_code,
+   the model surfaces the code so the user can verify it matches the Auth0 page, then the model
+   automatically calls log10x_signin_complete with that device_code to finish the flow. The user
+   does NOT need to ask for the second step explicitly. For pasted-key sign-in instead of browser,
+   skip log10x_signin_start and call log10x_signin_complete directly with { api_key: "<key>" }.)
 - "sign out" / "log out" / "remove my credentials"               → log10x_signout
 - "rotate my API key" / "I think my key was leaked"              → log10x_rotate_api_key
 - "health check" / "is the MCP set up right" / "diagnose"        → log10x_doctor
@@ -358,7 +430,10 @@ const _originalRegisterTool = server.registerTool.bind(server) as typeof server.
 function registerLog10xTool(
   name: string,
   inputSchema: Record<string, unknown>,
-  handler: (args: any) => Promise<{ content: { type: 'text'; text: string }[]; isError?: boolean }>
+  handler: (
+    args: any,
+    extra?: { sendNotification?: (n: { method: string; params: Record<string, unknown> }) => Promise<void> }
+  ) => Promise<{ content: { type: 'text'; text: string }[]; isError?: boolean }>
 ): void {
   const meta = getPackageDefaultTool(name);
   (server.registerTool as any)(
@@ -545,10 +620,34 @@ registerLog10xTool('log10x_login_status', loginStatusSchema, () =>
   wrap('log10x_login_status', async () => executeLoginStatus({}, getEnvs()))
 );
 
-// ── Tool: log10x_signin ──
+// ── Tool: log10x_signin_start ──
+//
+// Step 1 of the sign-in chain: requests an Auth0 device code, opens the
+// user's browser, and returns the user_code + device_code immediately.
+// Returns synchronously (no polling) because Cursor and most other MCP
+// hosts do NOT render mid-tool `notifications/message` push, so the
+// only reliable way to surface the user_code to a human is to put it
+// in the tool's response markdown. The model then calls
+// `log10x_signin_complete` with the device_code to finish the flow.
 
-registerLog10xTool('log10x_signin', signinSchema, (args) =>
-  wrap('log10x_signin', async () => executeSignin(args, getEnvs()))
+registerLog10xTool('log10x_signin_start', signinStartSchema, () =>
+  wrap('log10x_signin_start', async () => executeSigninStart())
+);
+
+// ── Tool: log10x_signin_complete ──
+//
+// Step 2 of the sign-in chain. Two paths via mutually-exclusive args:
+//   - { device_code }: finishes a browser flow started by `_start`.
+//     Polls Auth0 until the user confirms in the browser, then
+//     exchanges the access token for a Log10x API key.
+//   - { api_key }:     pasted-key path. Validates the key against
+//     /api/v1/user and persists. No browser, no IdP.
+// Either path writes the resolved API key to ~/.log10x/credentials,
+// hot-reloads envs in-process, and clears any overriding
+// LOG10X_API_KEY env var so the new key wins the priority chain.
+
+registerLog10xTool('log10x_signin_complete', signinCompleteSchema, (args) =>
+  wrap('log10x_signin_complete', async () => executeSigninComplete(args, getEnvs()))
 );
 
 // ── Tool: log10x_signout ──
@@ -759,7 +858,8 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_backfill_metric', intent: 'Create a new Datadog / Prometheus metric backfilled from Retriever archive' },
   { name: 'log10x_doctor', intent: 'Startup health check — env config, gateway, tier, freshness, Retriever, paste endpoint, cross-pillar enrichment floor' },
   { name: 'log10x_login_status', intent: 'Report credential / env state — identity, env list with permissions, demo-mode upgrade guide if applicable' },
-  { name: 'log10x_signin', intent: 'GitHub device-flow signup/signin — opens browser, exchanges OAuth token for a Log10x API key, hot-reloads envs (no MCP-host restart needed)' },
+  { name: 'log10x_signin_start', intent: 'Step 1 of Auth0 Device Flow signup/signin: opens browser, returns the user_code + device_code so the model can surface them and chain to log10x_signin_complete' },
+  { name: 'log10x_signin_complete', intent: 'Step 2 of sign-in: pass back the device_code from log10x_signin_start to finish the browser flow, OR pass api_key directly for pasted-key sign-in (no browser). Hot-reloads envs (no MCP-host restart needed)' },
   { name: 'log10x_signout', intent: 'Wipe ~/.log10x/credentials and fall back to demo mode (or lower-priority config); does not revoke the key on the backend' },
   { name: 'log10x_update_settings', intent: 'Update user metadata (analyzer cost, AI provider, etc.) via POST /api/v1/user' },
   { name: 'log10x_create_env', intent: 'Create a new Log10x environment on the account; pairs with log10x_advise_install for end-to-end provision-and-install' },
@@ -826,7 +926,7 @@ async function handleCliFlags(): Promise<boolean> {
         '  --help, -h          Print this help and exit',
         '',
         'Environment:',
-        '  LOG10X_API_KEY            API key from console.log10x.com (or run `log10x_signin` to mint one via GitHub)',
+        '  LOG10X_API_KEY            API key from console.log10x.com (or run `log10x_signin_start` then `log10x_signin_complete` to mint one via Auth0 Device Flow)',
         '  LOG10X_API_BASE           Override Prometheus gateway URL',
         '  LOG10X_REGULATOR_RETRIEVER_URL       Retriever query endpoint (optional)',
         '  LOG10X_PASTE_URL          Override Log10x paste endpoint (optional)',

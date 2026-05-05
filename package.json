@@ -1,6 +1,6 @@
 {
   "name": "log10x-mcp",
-  "version": "1.6.7",
+  "version": "1.8.0",
   "description": "Log10x MCP Server — per-pattern log cost attribution, root-cause investigation, pasted-batch triage, archive query/backfill, and cross-pillar correlation against customer metric backends (Grafana Cloud, Mimir, Thanos, AMP) with structural validation that refuses when it cannot prove linkage",
   "type": "module",
   "main": "build/index.js",
