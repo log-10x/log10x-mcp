@@ -30,7 +30,7 @@
 
 import { z } from 'zod';
 import type { Environments } from '../lib/environments.js';
-import { reloadEnvironmentsInPlace } from '../lib/environments.js';
+import { reloadEnvironmentsInPlace, clearOverridingEnvVar } from '../lib/environments.js';
 import { writeCredentials, getCredentialsPath } from '../lib/credentials.js';
 import {
   requestDeviceCode,
@@ -364,27 +364,3 @@ async function completeWithDeviceCode(
   return lines.join('\n');
 }
 
-/**
- * Delete `LOG10X_API_KEY` from `process.env` if set. Returns whether
- * a deletion occurred so the caller can mention it in the result.
- *
- * Why: the credential resolution chain checks `LOG10X_API_KEY` first
- * (priority 1) and `~/.log10x/credentials` second (priority 2). After
- * a successful signin, if the env var is still set, the next
- * `loadEnvironments()` would resolve to the OLD env-var key, not the
- * freshly written file. The user's new credentials would be silently
- * shadowed. Clearing the env var in-process is the smallest fix that
- * lets `reloadEnvironmentsInPlace()` honor the new file.
- *
- * Caveat: the deletion only lives for the current MCP server process.
- * Whatever the host config says is what gets injected on next host
- * restart. The result message tells the user to also edit the host
- * config to make the change permanent.
- */
-function clearOverridingEnvVar(): boolean {
-  if (process.env.LOG10X_API_KEY) {
-    delete process.env.LOG10X_API_KEY;
-    return true;
-  }
-  return false;
-}

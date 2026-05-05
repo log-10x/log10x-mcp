@@ -29,7 +29,7 @@
  * make the sign-out permanent.
  */
 import type { Environments } from '../lib/environments.js';
-import { reloadEnvironmentsInPlace } from '../lib/environments.js';
+import { reloadEnvironmentsInPlace, clearOverridingEnvVar } from '../lib/environments.js';
 import { clearCredentials, getCredentialsPath } from '../lib/credentials.js';
 
 export const signoutSchema = {};
@@ -44,10 +44,7 @@ export async function executeSignout(
   // Drop the in-process LOG10X_API_KEY override too (priority 1).
   // Without this, the file wipe above does nothing visible because
   // the env var still satisfies path 1 in loadEnvironments().
-  const envVarWasSet = !!process.env.LOG10X_API_KEY;
-  if (envVarWasSet) {
-    delete process.env.LOG10X_API_KEY;
-  }
+  const envVarWasSet = clearOverridingEnvVar();
 
   // Reload envs so the in-process state reflects both wipes.
   let reloadErr: string | undefined;

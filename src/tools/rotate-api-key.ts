@@ -39,7 +39,7 @@
 
 import { z } from 'zod';
 import type { Environments } from '../lib/environments.js';
-import { reloadEnvironmentsInPlace } from '../lib/environments.js';
+import { reloadEnvironmentsInPlace, clearOverridingEnvVar } from '../lib/environments.js';
 import { writeCredentials, getCredentialsPath } from '../lib/credentials.js';
 import { rotateApiKey } from '../lib/api.js';
 
@@ -123,10 +123,7 @@ export async function executeRotateApiKey(
   // file. Without this, the OLD value in process.env would still win
   // priority 1 and we'd start hitting 401s on every subsequent tool
   // call until the host restarts. Same logic as signin / signout.
-  const envVarWasSet = !!process.env.LOG10X_API_KEY;
-  if (envVarWasSet) {
-    delete process.env.LOG10X_API_KEY;
-  }
+  const envVarWasSet = clearOverridingEnvVar();
 
   try {
     await reloadEnvironmentsInPlace(envs);

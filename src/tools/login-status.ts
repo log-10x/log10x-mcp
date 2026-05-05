@@ -16,7 +16,7 @@
  */
 
 import { z } from 'zod';
-import type { Environments } from '../lib/environments.js';
+import { revalidateEnvironments, type Environments } from '../lib/environments.js';
 import { activeNotices, getManifest } from '../lib/manifest.js';
 
 export const loginStatusSchema = {};
@@ -25,6 +25,21 @@ export async function executeLoginStatus(
   _args: Record<string, never>,
   envs: Environments
 ): Promise<string> {
+  // Revalidate credentials before reporting state. Without this, the
+  // tool would render whatever was decided at MCP boot, even if the
+  // credentials file has since become valid (e.g. a rotated key whose
+  // authorizer cache has now cleared) or vice versa. The user-visible
+  // "am I signed in" tool must reflect ground truth, not boot state.
+  // Also clears any stale `LOG10X_API_KEY` from process.env that would
+  // otherwise shadow the credentials file on the reload.
+  try {
+    await revalidateEnvironments(envs);
+  } catch {
+    // Best-effort. If reload fails, fall through and render whatever
+    // state we have. The caller still gets useful output instead of
+    // an opaque error from a status-only tool.
+  }
+
   const lines: string[] = [];
   lines.push('## Log10x login status');
   lines.push('');

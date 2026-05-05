@@ -18,7 +18,7 @@ import {
 } from './lib/manifest.js';
 import { z } from 'zod';
 
-import { loadEnvironments, resolveEnv, type EnvConfig, type Environments, EnvironmentValidationError } from './lib/environments.js';
+import { loadEnvironments, resolveEnv, revalidateEnvironments, type EnvConfig, type Environments, EnvironmentValidationError } from './lib/environments.js';
 import { fetchAnalyzerCost } from './lib/api.js';
 import { costDriversSchema, executeCostDrivers } from './tools/cost-drivers.js';
 import { eventLookupSchema, executeEventLookup } from './tools/event-lookup.js';
@@ -125,25 +125,78 @@ const COST_REFRESH_MS = 3_600_000; // 1 hour
  * the raw error message is logged at debug level before `describeToolError`
  * rewrites it, so ops can see the original text when hunting root causes.
  */
-function wrap(
+async function wrap(
   toolName: string,
   fn: () => Promise<string>
 ): Promise<{ content: { type: 'text'; text: string }[]; isError?: boolean }> {
   const started = Date.now();
-  return fn()
-    .then((text) => {
-      log.info(`tool.${toolName}.ok`, { ms: Date.now() - started });
-      return { content: [{ type: 'text' as const, text: applyDemoBanner(text) }] };
-    })
-    .catch((e) => {
-      const raw = e instanceof Error ? e.message : String(e);
-      log.debug(`tool.${toolName}.raw_err`, { msg: raw });
-      log.warn(`tool.${toolName}.err`, { ms: Date.now() - started, msg: raw });
-      return {
-        content: [{ type: 'text' as const, text: applyDemoBanner(describeToolError(toolName, e)) }],
-        isError: true,
-      };
+  try {
+    const text = await runWithDemoFallbackRetry(toolName, fn);
+    log.info(`tool.${toolName}.ok`, { ms: Date.now() - started });
+    return { content: [{ type: 'text' as const, text: applyDemoBanner(text) }] };
+  } catch (e) {
+    const raw = e instanceof Error ? e.message : String(e);
+    log.debug(`tool.${toolName}.raw_err`, { msg: raw });
+    log.warn(`tool.${toolName}.err`, { ms: Date.now() - started, msg: raw });
+    return {
+      content: [{ type: 'text' as const, text: applyDemoBanner(describeToolError(toolName, e)) }],
+      isError: true,
+    };
+  }
+}
+
+/**
+ * Run the tool's inner function. If it throws an auth error (401/403)
+ * AND the MCP is currently in demo-fallback mode, revalidate
+ * credentials once and retry the tool.
+ *
+ * Why: every account-scoped EnvConfig bakes the apiKey at boot
+ * (`environments.ts:loadFromApi`). If the user's key was invalid at
+ * boot (typo, transient backend issue, rotated key whose authorizer
+ * cache had not yet cleared), the MCP falls back to the public demo
+ * key and every account-scoped tool keeps using that demo key for the
+ * lifetime of the process, even after the real key starts working.
+ * Restarting the MCP host was the only recovery path until now.
+ *
+ * This wrapper makes recovery automatic: any account-scoped tool that
+ * gets 401/403 while in demo-fallback triggers a single revalidation
+ * + retry, transparently un-sticking the user. Pure demo mode (no key
+ * configured at all) does NOT trigger this; only the fallback case
+ * where the user intended to use a real account.
+ *
+ * Tools that don't hit the gateway (resolve_batch, extract_templates)
+ * never produce 401/403 errors so this is a no-op for them.
+ */
+async function runWithDemoFallbackRetry(toolName: string, fn: () => Promise<string>): Promise<string> {
+  try {
+    return await fn();
+  } catch (e) {
+    if (!isAuthRecoverableError(e)) throw e;
+    if (!envs || !envs.isDemoMode || !envs.demoFallbackReason) throw e;
+    log.info(`tool.${toolName}.auth_retry.attempt`, {
+      reason: envs.demoFallbackReason.slice(0, 200),
     });
+    try {
+      await revalidateEnvironments(envs);
+    } catch (reloadErr) {
+      log.warn(`tool.${toolName}.auth_retry.reload_failed`, {
+        msg: (reloadErr as Error).message,
+      });
+      throw e;
+    }
+    if (envs.isDemoMode) {
+      // Reload still ended in demo. Original error stands.
+      log.info(`tool.${toolName}.auth_retry.still_demo`);
+      throw e;
+    }
+    log.info(`tool.${toolName}.auth_retry.recovered`);
+    return await fn();
+  }
+}
+
+function isAuthRecoverableError(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e);
+  return /HTTP 401|HTTP 403|forbidden|unauthorized/i.test(msg);
 }
 
 /**

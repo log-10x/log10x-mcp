@@ -188,7 +188,7 @@ export async function loadEnvironments(): Promise<Environments> {
  */
 export async function reloadEnvironmentsInPlace(target: Environments): Promise<void> {
   const fresh = await loadEnvironments();
-  // Clear the lastUsed pointer — it referenced an EnvConfig from the
+  // Clear the lastUsed pointer. It referenced an EnvConfig from the
   // old set, which is no longer in `target.byNickname`.
   target.lastUsed = undefined;
   target.all = fresh.all;
@@ -197,6 +197,61 @@ export async function reloadEnvironmentsInPlace(target: Environments): Promise<v
   target.profile = fresh.profile;
   target.isDemoMode = fresh.isDemoMode;
   target.demoFallbackReason = fresh.demoFallbackReason;
+}
+
+/**
+ * Delete `LOG10X_API_KEY` from `process.env` if set. Returns whether
+ * a deletion occurred so the caller can mention it in the result.
+ *
+ * Why: the credential resolution chain (`loadEnvironments`) tries
+ * `LOG10X_API_KEY` first (priority 1) and `~/.log10x/credentials`
+ * second (priority 2). After signin, signout, rotate, or any other
+ * write to the credentials file, if the env var is still set, the
+ * next `loadEnvironments()` will resolve to the OLD env-var key and
+ * shadow the freshly written file. Clearing the env var in-process
+ * lets the file win the priority chain.
+ *
+ * Caveat: the deletion only lives for the current MCP server process.
+ * Whatever the host config (claude_desktop_config.json, etc.) sets is
+ * what gets injected on next host restart. Callers that care should
+ * tell the user to also edit the host config.
+ */
+export function clearOverridingEnvVar(): boolean {
+  if (process.env.LOG10X_API_KEY) {
+    delete process.env.LOG10X_API_KEY;
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Force a revalidation of credentials and refresh the in-memory `envs`
+ * object so the next tool call sees ground truth instead of cached
+ * boot-time state. Used by:
+ *
+ *   - `log10x_login_status`: every call revalidates so the user-visible
+ *     "am I signed in" state is always honest, never stale.
+ *   - The wrap() retry path in `index.ts`: when an account-scoped tool
+ *     gets 401/403 AND the MCP is currently in demo-fallback mode, we
+ *     revalidate once and retry the tool. Recovers transparently from
+ *     transient failures (e.g., rotated key whose authorizer cache had
+ *     not yet expired at boot).
+ *
+ * Always calls `clearOverridingEnvVar` first. Without that, a stale
+ * `LOG10X_API_KEY` in `process.env` (from the MCP host config) would
+ * keep beating the freshly-written credentials file and reload would
+ * just re-fail the same way. The signin / signout / rotate tools have
+ * always done this clear-then-reload pair; this helper centralizes it
+ * so revalidation entry points outside those tools get the same
+ * behavior.
+ *
+ * Returns whether the env var was actually present before the clear so
+ * callers can mention it in result messages.
+ */
+export async function revalidateEnvironments(target: Environments): Promise<{ envVarCleared: boolean }> {
+  const envVarCleared = clearOverridingEnvVar();
+  await reloadEnvironmentsInPlace(target);
+  return { envVarCleared };
 }
 
 async function loadFromApi(apiKey: string, isDemoMode: boolean): Promise<Environments> {
