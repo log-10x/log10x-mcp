@@ -22,15 +22,15 @@ export const adviseReceiverSchema = {
     .string()
     .describe('ID returned by `log10x_discover_env`. The snapshot is cached for 30 min.'),
   forwarder: z
-    .enum(['fluent-bit', 'fluentd', 'filebeat', 'logstash', 'otel-collector'])
+    .enum(['fluentbit', 'fluentd', 'filebeat', 'logstash', 'otel-collector'])
     .optional()
     .describe(
-      'Forwarder to target. If omitted, uses the forwarder detected in the snapshot (falls back to fluent-bit when none is detected).'
+      'Forwarder to target. If omitted, uses the forwarder detected in the snapshot (falls back to fluentbit when none is detected).'
     ),
   release_name: z
     .string()
     .optional()
-    .describe('Helm release name. Default: `my-reducer`. Must not collide with an existing release.'),
+    .describe('Helm release name. Default: `my-receiver`. Must not collide with an existing release.'),
   namespace: z
     .string()
     .optional()
@@ -56,7 +56,7 @@ export const adviseReceiverSchema = {
     .boolean()
     .optional()
     .describe(
-      'When true, emit events out of the forwarder in compact encoded form (templateHash+vars, ~20-40x volume reduction; see `config/modules/pipelines/run/units/transform/doc.md#compact`). Verified 2026-04-25 on engine 1.0.9 + chart 1.0.8 across all 5 forwarders (otel full payload trace; fluent-bit/fluentd/filebeat/logstash dispatch-confirmed). Plan emits `env: [{name: receiverOptimize, value: "true"}]` — image-version-agnostic (works on engine 1.0.7+ even though chart-native `tenx.optimize: true` only became reliable at engine 1.0.9). Has no effect when `mode=readonly` (no events written back). Default: false.'
+      'When true, emit events out of the forwarder in compact encoded form (templateHash+vars, ~20-40x volume reduction; see `config/modules/pipelines/run/units/transform/doc.md#compact`). Supported on all 5 forwarders. Plan emits `env: [{name: receiverOptimize, value: "true"}]`. Has no effect when `mode=readonly` (no events written back). Default: false.'
     ),
   mode: z
     .enum(['readonly', 'readwrite'])
@@ -95,7 +95,7 @@ export async function executeAdviseReceiver(args: AdviseReceiverArgs): Promise<s
     snapshot,
     app: 'reducer',
     forwarder: args.forwarder as ForwarderKind | undefined,
-    releaseName: args.release_name,
+    releaseName: args.release_name ?? 'my-receiver',
     namespace: args.namespace,
     apiKey: args.api_key,
     destination: destination as OutputDestination,

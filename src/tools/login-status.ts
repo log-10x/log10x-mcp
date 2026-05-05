@@ -16,7 +16,7 @@
  */
 
 import { z } from 'zod';
-import type { Environments } from '../lib/environments.js';
+import { revalidateEnvironments, type Environments } from '../lib/environments.js';
 import { activeNotices, getManifest } from '../lib/manifest.js';
 
 export const loginStatusSchema = {};
@@ -25,6 +25,21 @@ export async function executeLoginStatus(
   _args: Record<string, never>,
   envs: Environments
 ): Promise<string> {
+  // Revalidate credentials before reporting state. Without this, the
+  // tool would render whatever was decided at MCP boot, even if the
+  // credentials file has since become valid (e.g. a rotated key whose
+  // authorizer cache has now cleared) or vice versa. The user-visible
+  // "am I signed in" tool must reflect ground truth, not boot state.
+  // Also clears any stale `LOG10X_API_KEY` from process.env that would
+  // otherwise shadow the credentials file on the reload.
+  try {
+    await revalidateEnvironments(envs);
+  } catch {
+    // Best-effort. If reload fails, fall through and render whatever
+    // state we have. The caller still gets useful output instead of
+    // an opaque error from a status-only tool.
+  }
+
   const lines: string[] = [];
   lines.push('## Log10x login status');
   lines.push('');
@@ -52,14 +67,24 @@ export async function executeLoginStatus(
     lines.push('- Anything that writes (e.g., `backfill_metric` creating a new metric on YOUR account).');
     lines.push('- Anything that needs YOUR cost data (the demo env is shared sample data — investigations against it won\'t reflect your real spend).');
     lines.push('');
-    lines.push('### To upgrade to your own account');
+    lines.push('### To use your own account');
+    lines.push('Two ways to sign in. Both end up in the same place — the MCP autodiscovers your envs from `/api/v1/user` and the next tool call runs against your real account without an MCP-host restart.');
+    lines.push('');
+    lines.push('**Option A: two-tool sign-in chain (recommended, no host-config edit needed).** Two paths, ask the user which they prefer:');
+    lines.push('- **Browser path**: call `log10x_signin_start`. It opens a browser to Auth0\'s universal login page with the device code pre-filled and returns the user_code immediately. The user picks **GitHub** or **Google** there, completes OAuth with the chosen IdP, and confirms the device authorization. The model then automatically calls `log10x_signin_complete` with the device_code returned by `_start` to finish the flow (the MCP polls Auth0, exchanges the access token for a long-lived Log10x API key, and persists it). Auto-creates an account on first sign-up. 30s to 2 min.');
+    lines.push('- **Pasted-key path**: call `log10x_signin_complete` directly with `{ api_key: "<key>" }`. Validates a Log10x API key the user already has (e.g., copied from console.log10x.com → Profile → API Settings, or issued by a workspace admin). No browser.');
+    lines.push('');
+    lines.push('Either path writes the resolved key to `~/.log10x/credentials` (mode 0600), which persists across MCP-host restarts on its own, no config-file edit needed.');
+    lines.push('');
+    lines.push('**Option B — set `LOG10X_API_KEY` in your MCP host config** (manual, useful for CI / shared / scripted setups):');
     lines.push('1. Get your API key at https://console.log10x.com → Profile → API Settings.');
     lines.push('2. Edit your MCP host\'s config file:');
     lines.push('   - **Claude Desktop**: `%APPDATA%\\Claude\\claude_desktop_config.json` (Windows) or `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS).');
-    lines.push('   - **Other MCP hosts**: see your host\'s docs for where MCP server env vars are configured.');
-    lines.push('3. In the `log10x` server\'s `env` block, add `"LOG10X_API_KEY": "<your-key>"`. The MCP autodiscovers your envs from the API.');
+    lines.push('   - **Cursor / Windsurf / other**: see your host\'s docs for where MCP server env vars are configured.');
+    lines.push('3. In the `log10x` server\'s `env` block, add `"LOG10X_API_KEY": "<your-key>"`.');
     lines.push('4. Fully quit and restart the MCP host.');
-    lines.push('5. Re-run `log10x_login_status` to confirm — the response should list your real envs instead of the demo.');
+    lines.push('');
+    lines.push('After either option, re-run `log10x_login_status` to confirm — the response should list your real envs instead of the demo.');
     return lines.join('\n');
   }
 

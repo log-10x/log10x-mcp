@@ -5,7 +5,7 @@
  * because registry host + tag vary wildly in the wild:
  *   - `public.ecr.aws/fluent/fluent-bit:3.2`
  *   - `cr.fluentbit.io/fluent/fluent-bit:3.2`
- *   - `ghcr.io/log-10x/fluent-bit-10x:1.0.6`
+ *   - `ghcr.io/log-10x/fluent-bit-10x:latest`
  *   - `docker.elastic.co/beats/filebeat:8.15.0`
  *   - `docker.elastic.co/logstash/logstash:8.15.0`
  *   - `otel/opentelemetry-collector-contrib:0.108.0`
@@ -26,7 +26,7 @@ import type { ForwarderKind, Log10xAppKind } from './types.js';
 export function classifyForwarderImage(image: string): ForwarderKind {
   const s = image.toLowerCase();
   // fluent-bit must be checked BEFORE fluentd because "fluent-bit" contains "fluent".
-  if (s.includes('fluent-bit') || s.includes('fluentbit')) return 'fluent-bit';
+  if (s.includes('fluent-bit') || s.includes('fluentbit')) return 'fluentbit';
   if (s.includes('fluentd') || s.includes('fluent/fluentd')) return 'fluentd';
   if (s.includes('filebeat')) return 'filebeat';
   if (s.includes('logstash')) return 'logstash';

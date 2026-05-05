@@ -1,7 +1,8 @@
 /**
  * Persistent credentials at `~/.log10x/credentials`.
  *
- * Written by `log10x_signin` after the BE returns an API key, read by
+ * Written by `log10x_signin_complete` after the BE returns an API key
+ * (or after the pasted-key path validates one), read by
  * `loadEnvironments` when no `LOG10X_API_KEY` env var is set, wiped by
  * `log10x_signout`.
  *
@@ -21,8 +22,6 @@ import * as os from 'os';
 export interface Credentials {
   /** Long-lived Log10x API key minted by the BE. */
   apiKey: string;
-  /** GitHub login at the time of sign-in (cosmetic — for status messages). */
-  githubLogin?: string;
   /** ISO-8601 timestamp when these credentials were written. */
   signedInAt?: string;
 }
@@ -65,7 +64,6 @@ export async function readCredentials(): Promise<Credentials | null> {
   }
   return {
     apiKey: c.apiKey,
-    githubLogin: typeof c.githubLogin === 'string' ? c.githubLogin : undefined,
     signedInAt: typeof c.signedInAt === 'string' ? c.signedInAt : undefined,
   };
 }

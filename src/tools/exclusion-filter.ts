@@ -6,9 +6,13 @@
  *
  * Vendor selection: when `vendor` is omitted, auto-detect across the SIEM
  * subset (datadog, splunk, elasticsearch, cloudwatch). Forwarder-targeted
- * exclusion (fluentbit, fluentd, otel, etc.) requires explicit `vendor=`
- * — there's no ambient signal that distinguishes a fluentbit pipeline
- * from a vector one in the user's env.
+ * exclusion (fluentbit, fluentd, otel-collector, etc.) requires explicit
+ * `vendor=` — there's no ambient signal that distinguishes a fluentbit
+ * pipeline from a vector one in the user's env.
+ *
+ * Forwarder name canonical form matches the rest of the user-facing
+ * surface area (helm chart values keys, mksite URL slugs, advise-* tool
+ * schemas): `fluentbit` (no hyphen), `otel-collector` (full, hyphenated).
  */
 
 import { z } from 'zod';
@@ -25,7 +29,7 @@ export const exclusionFilterSchema = {
   pattern: z.string().describe('Pattern name (e.g., "Payment_Gateway_Timeout")'),
   vendor: z.enum([
     'datadog', 'splunk', 'elasticsearch', 'cloudwatch',
-    'datadog-agent', 'fluentbit', 'fluentd', 'otel', 'vector',
+    'datadog-agent', 'fluentbit', 'fluentd', 'otel-collector', 'vector',
     'logstash', 'filebeat', 'rsyslog', 'syslog-ng', 'promtail',
   ]).optional().describe('Target vendor to generate the filter for. Omit to auto-detect from ambient SIEM credentials (works for the 4 SIEM vendors only — forwarder-targeted exclusions require explicit `vendor=`).'),
   mode: z.enum(['config', 'api']).default('config').describe('Config snippet or API command (API available for Datadog, Splunk, Elasticsearch)'),
@@ -52,7 +56,7 @@ export async function executeExclusionFilter(args: {
         `No SIEM credentials detected and no \`vendor\` arg supplied. Pass \`vendor=<name>\`.`,
         '',
         `SIEM vendors (auto-detectable): ${SIEM_VENDORS.join(', ')}`,
-        `Forwarder vendors (explicit only): datadog-agent, fluentbit, fluentd, otel, vector, logstash, filebeat, rsyslog, syslog-ng, promtail`,
+        `Forwarder vendors (explicit only): datadog-agent, fluentbit, fluentd, otel-collector, vector, logstash, filebeat, rsyslog, syslog-ng, promtail`,
       ].join('\n');
     }
     if (resolution.kind === 'ambiguous') {
@@ -118,7 +122,7 @@ const VENDOR_LABELS: Record<string, string> = {
   'datadog-agent': 'Datadog Agent',
   'fluentbit': 'Fluent Bit',
   'fluentd': 'Fluentd',
-  'otel': 'OTel Collector',
+  'otel-collector': 'OTel Collector',
   'vector': 'Vector',
   'logstash': 'Logstash',
   'filebeat': 'Filebeat',
@@ -242,7 +246,7 @@ function generateFilter(
     lines.push(`</filter>`);
     return { label: 'Add this filter block to your Fluentd configuration to drop matching events.', text: lines.join('\n') };
   }
-  if (vk === 'otel') {
+  if (vk === 'otel-collector') {
     const cond = [`IsMatch(body, "${patRegex}")`];
     if (svc) cond.push(`resource.attributes["service.name"] == "${svc}"`);
     if (sev && sev !== 'uncl') cond.push(`severity_text == "${sev.toUpperCase()}"`);

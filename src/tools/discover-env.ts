@@ -4,7 +4,7 @@
  * Read-only discovery of the caller's Kubernetes cluster + AWS account.
  * Produces a DiscoverySnapshot (stored in-memory for 30 min) and a
  * terse markdown report of what was found. The advise_{reporter,
- * reducer, retriever} tools consume the snapshot by id.
+ * receiver, retriever} tools consume the snapshot by id.
  *
  * Nothing here mutates state. Every probe is a `kubectl get` or
  * `aws ...describe/list` call. If kubectl or aws isn't configured, the
@@ -40,7 +40,7 @@ export const discoverEnvSchema = {
       'Substring to match against S3 bucket names. Defaults to "retriever"; also matches "log10x" and "tenx" out of the box.'
     ),
   forwarder_hint: z
-    .enum(['fluent-bit', 'fluentd', 'filebeat', 'logstash', 'otel-collector'])
+    .enum(['fluentbit', 'fluentd', 'filebeat', 'logstash', 'otel-collector'])
     .optional()
     .describe(
       'Override forwarder detection. Use this if multiple forwarders are running and you want the advisor to target a specific one.'

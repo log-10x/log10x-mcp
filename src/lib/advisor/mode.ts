@@ -24,7 +24,7 @@
  *      version without rewriting their manifests)
  *   4. forwarder is helm-managed logstash → standalone reporter (chart
  *      broken for sidecar mode; surface migration note)
- *   5. forwarder is helm-managed fluent-bit/fluentd/filebeat/otel-collector (all 1.0.7):
+ *   5. forwarder is helm-managed fluentbit/fluentd/filebeat/otel-collector:
  *        goal='compact'     → inline reducer + optimize=true
  *        goal='cut-cost'    → inline reducer
  *        goal='just-metrics'→ inline reporter (standalone is alt)
@@ -200,7 +200,7 @@ export function recommendInstallMode(opts: RecommendOpts): ModeRecommendation {
   } else {
     // No detected forwarder — surface inline fluent-bit as an option but
     // score it lower (the user would be installing a forwarder from scratch).
-    alts.push(...makeInlineAlts({ detectedKind: 'fluent-bit', namespace, goal, helmManaged: false }));
+    alts.push(...makeInlineAlts({ detectedKind: 'fluentbit', namespace, goal, helmManaged: false }));
   }
 
   // ── Retriever option (independent of forwarder state) ──
@@ -365,14 +365,11 @@ function makeInlineAlts(params: {
     blocker: helmBlocker ?? logstashBlocker,
   });
 
-  // Inline reducer + optimize (compact encoding).
-  // All 5 forwarder charts ship at 1.0.8+ with a unified optimize path
-  // (kind=optimize launches @apps/reducer + receiverOptimize=true env
-  // var). Engine 1.0.9 bakes in the previously-missing tenx-optimize.lua
-  // so chart-native `tenx.optimize: true` also works, though the plan
-  // continues to emit the env-var form for image-version-agnostic compat.
-  // Logstash still hits its architectural sidecar bug regardless of
-  // optimize, so the logstashBlocker above handles that case.
+  // Inline receiver + optimize (compact encoding).
+  // All 5 forwarder charts use a unified optimize path: kind=optimize
+  // launches @apps/receiver + receiverOptimize=true env var. Logstash
+  // still hits its architectural sidecar bug regardless of optimize,
+  // so the logstashBlocker above handles that case.
   const optimizeBlocker = undefined;
   alts.push({
     label: `Inline Receiver + Compact (${detectedKind})`,

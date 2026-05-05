@@ -66,13 +66,9 @@ export interface ReporterAdviseArgs {
   splunkHecToken?: string;
   /**
    * Enable encoded event output (compact templateHash+vars form,
-   * ~20-40x volume reduction). Only meaningful when app='reducer';
-   * silently ignored otherwise. Verified 2026-04-25 on engine 1.0.9
-   * + chart 1.0.8 across all 5 forwarders. Plan emits the
-   * `receiverOptimize=true` env var (image-version-agnostic) rather
-   * than the chart-native `tenx.optimize: true` field, which only
-   * became reliable at engine 1.0.9 (the previously-missing
-   * `tenx-optimize.lua` is now baked in).
+   * ~20-40x volume reduction). Only meaningful when app='receiver';
+   * silently ignored otherwise. Plan emits the `receiverOptimize=true`
+   * env var on the forwarder container.
    */
   optimize?: boolean;
   /**
@@ -107,9 +103,9 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
     args.namespace ?? snapshot.recommendations.suggestedNamespace ?? 'logging';
 
   const forwarderCandidate =
-    args.forwarder ?? snapshot.recommendations.existingForwarder ?? 'fluent-bit';
+    args.forwarder ?? snapshot.recommendations.existingForwarder ?? 'fluentbit';
   const forwarder: ForwarderKind =
-    forwarderCandidate === 'unknown' ? 'fluent-bit' : forwarderCandidate;
+    forwarderCandidate === 'unknown' ? 'fluentbit' : forwarderCandidate;
 
   // Spec selection splits on shape, not on forwarder kind. Standalone
   // always resolves to the reporter-10x spec regardless of what
@@ -149,17 +145,15 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
       'optimize=true is a no-op when mode=readonly. Compact encoding only matters when events are written back through the forwarder; in read-only mode the receiver emits metrics only and never writes events back. Pick one: optimize=true (read-write compact) OR mode=readonly (passive metrics).'
     );
   }
-  // VERIFIED 2026-04-21: logstash chart sidecar wiring is ARCHITECTURALLY
-  // broken regardless of chart version. tenx needs to be a child process
-  // of logstash (spawned by the `pipe` output plugin), but the chart runs
-  // tenx as an independent side container reading from its own stdin.
-  // Pipeline inits, then shuts down after ~9s with no input. Chart 1.0.7
-  // (shipped 2026-04-22) fixes the apps/edge path but does NOT fix the
-  // stdin-wiring bug. Keep the blocker until the chart is refactored to
-  // use the pipe-output plugin launch pattern.
+  // logstash chart sidecar wiring is architecturally broken: tenx needs
+  // to be a child process of logstash (spawned by the `pipe` output
+  // plugin), but the chart runs tenx as an independent side container
+  // reading from its own stdin. Pipeline inits, then shuts down after
+  // ~9s with no input. Keep the blocker until the chart is refactored
+  // to use the pipe-output plugin launch pattern.
   if (shape === 'inline' && spec && forwarder === 'logstash') {
     blockers.push(
-      "The log10x-elastic/logstash chart is architecturally broken for sidecar mode: tenx needs to be a child process of logstash (spawned by the `pipe` output plugin), but the chart runs it as a separate container reading from its own stdin. Pipeline inits then shuts down after ~9s with no input. Chart 1.0.7 fixes the apps/ path but does NOT fix this wiring. Use fluent-bit, fluentd, filebeat, or otel-collector, OR deploy `log10x/reporter-10x` (non-invasive, parallel DaemonSet) alongside your existing logstash."
+      "The log10x-elastic/logstash chart is architecturally broken for sidecar mode: tenx needs to be a child process of logstash (spawned by the `pipe` output plugin), but the chart runs it as a separate container reading from its own stdin. Pipeline inits then shuts down after ~9s with no input. Use fluentbit, fluentd, filebeat, or otel-collector, OR deploy `log10x/reporter-10x` (non-invasive, parallel DaemonSet) alongside your existing logstash."
     );
   }
   if (!args.apiKey && !args.skipInstall) {
@@ -170,11 +164,10 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   if (destination === 'splunk' && !args.splunkHecToken && !args.skipInstall) {
     blockers.push('destination=splunk requires `splunk_hec_token`.');
   }
-  // optimize=true path, now unified across all charts at 1.0.7 — every
-  // chart (fluent-bit, fluentd, filebeat, logstash, otel-collector) maps
-  // kind=optimize to @apps/reducer + receiverOptimize=true env var.
-  // No per-forwarder blocker remains (logstash is blocked above for the
-  // sidecar wiring bug, which applies regardless of optimize).
+  // optimize=true path: every forwarder chart maps kind=optimize to
+  // @apps/receiver + receiverOptimize=true env var. No per-forwarder
+  // blocker remains (logstash is blocked above for the sidecar wiring
+  // bug, which applies regardless of optimize).
   if (shape === 'inline' && args.optimize && app === 'reporter') {
     blockers.push(
       'optimize=true is a Receiver-app feature (it encodes events emitted back through the forwarder). The Reporter app does not emit events back through the forwarder — it only publishes aggregated TenXSummary metrics. Drop `optimize` or switch to `app=reducer`.'
@@ -225,7 +218,7 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   // so re-recommending it would be noise.
   if (shape === 'inline' && app === 'reporter') {
     notes.push(
-      'Alternative: the `log10x/reporter-10x@1.0.7` chart deploys a standalone non-invasive DaemonSet (fluent-bit + tenx-edge) that tails the same container logs your existing forwarder reads, without replacing it. Call `log10x_advise_reporter` with `shape: "standalone"` or use `log10x_advise_install` to compare paths. Recommended when you don\'t want the 10x logic running inside your production forwarder.'
+      'Alternative: the `log10x/reporter-10x` chart deploys a standalone non-invasive DaemonSet (fluent-bit + tenx-edge) that tails the same container logs your existing forwarder reads, without replacing it. Call `log10x_advise_reporter` with `shape: "standalone"` or use `log10x_advise_install` to compare paths. Recommended when you don\'t want the 10x logic running inside your production forwarder.'
     );
   }
   if (shape === 'standalone') {

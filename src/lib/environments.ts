@@ -10,19 +10,21 @@
  *      The user can switch envs at runtime via the `environment` arg
  *      on any tool call — no env-var pinning needed.
  *
- *   2. `~/.log10x/credentials` — persistent file written by
- *      `log10x_signin` after a successful GitHub-device-flow signup
- *      or signin. Loaded the same way as path 1. Living outside the
- *      MCP host's config means a single sign-in works across every
- *      MCP host on the same machine — sign in once per machine, not
- *      once per host.
+ *   2. `~/.log10x/credentials`, persistent file written by
+ *      `log10x_signin_complete` after a successful Auth0 Device Flow
+ *      signup/signin (or after the pasted-key path validates a key).
+ *      Loaded the same way as path 1. Living outside the MCP host's
+ *      config means a single sign-in works across every MCP host on
+ *      the same machine: sign in once per machine, not once per host.
  *
  *   3. Demo mode. The MCP boots against the public read-only Log10x
  *      demo env using the same key the console.log10x.com demo
  *      experience uses, so a user can play without signing up. The
  *      `log10x_login_status` tool surfaces how to upgrade, and
- *      `log10x_signin` runs the one-click GitHub flow that writes
- *      path 2. We fall back to demo ONLY when no LOG10X_API_KEY is
+ *      `log10x_signin_start` (chained to `log10x_signin_complete`)
+ *      runs the Auth0 Device Flow (user picks GitHub or Google) and
+ *      writes path 2. We fall back to demo ONLY when
+ *      no LOG10X_API_KEY is
  *      set and no credentials file exists. If either is set but
  *      invalid, we still fall back to demo but record the failure in
  *      `demoFallbackReason` and surface a loud banner — avoiding the
@@ -102,7 +104,7 @@ export interface Environments {
  * `/api/v1/user`. Async because every path hits the Log10x API.
  *
  * Tries `LOG10X_API_KEY` first, then `~/.log10x/credentials` (written
- * by `log10x_signin`), then falls back to the public demo key.
+ * by `log10x_signin_complete`), then falls back to the public demo key.
  *
  * Returns demo-mode `Environments` (with `demoFallbackReason` set) on
  * any non-fatal failure of the user-supplied credential — never
@@ -136,7 +138,7 @@ export async function loadEnvironments(): Promise<Environments> {
   }
 
   // Path 2: persistent credentials at ~/.log10x/credentials, written
-  // by log10x_signin.
+  // by log10x_signin_complete.
   let creds: Awaited<ReturnType<typeof readCredentials>>;
   try {
     creds = await readCredentials();
@@ -159,7 +161,11 @@ export async function loadEnvironments(): Promise<Environments> {
       if (!demoEnvs) throw e;
       demoEnvs.demoFallbackReason =
         `~/.log10x/credentials key failed validation: ${reason}. ` +
-        `Run \`log10x_signin\` to refresh, or \`log10x_signout\` to clear and use demo.`;
+        `Run \`log10x_signin_start\` to refresh via the Auth0 Device Flow with GitHub or Google ` +
+        `(the model chains to \`log10x_signin_complete\` automatically), or call ` +
+        `\`log10x_signin_complete\` directly with \`{ api_key: "<key>" }\` to paste a key from ` +
+        `console.log10x.com → Profile → API Settings, or \`log10x_signout\` to clear and use demo. ` +
+        `See \`log10x_login_status\` for the full breakdown.`;
       return demoEnvs;
     }
   }
@@ -172,8 +178,8 @@ export async function loadEnvironments(): Promise<Environments> {
 /**
  * Re-run `loadEnvironments()` from scratch and overwrite the contents
  * of an existing `Environments` object in place. Used by
- * `log10x_signin` and `log10x_signout` to swap credentials without
- * forcing the user to restart the MCP host.
+ * `log10x_signin_complete` and `log10x_signout` to swap credentials
+ * without forcing the user to restart the MCP host.
  *
  * In-place mutation matters: every tool callback closes over a
  * reference to the same Environments object via `getEnvs()` in
@@ -182,7 +188,7 @@ export async function loadEnvironments(): Promise<Environments> {
  */
 export async function reloadEnvironmentsInPlace(target: Environments): Promise<void> {
   const fresh = await loadEnvironments();
-  // Clear the lastUsed pointer — it referenced an EnvConfig from the
+  // Clear the lastUsed pointer. It referenced an EnvConfig from the
   // old set, which is no longer in `target.byNickname`.
   target.lastUsed = undefined;
   target.all = fresh.all;
@@ -191,6 +197,61 @@ export async function reloadEnvironmentsInPlace(target: Environments): Promise<v
   target.profile = fresh.profile;
   target.isDemoMode = fresh.isDemoMode;
   target.demoFallbackReason = fresh.demoFallbackReason;
+}
+
+/**
+ * Delete `LOG10X_API_KEY` from `process.env` if set. Returns whether
+ * a deletion occurred so the caller can mention it in the result.
+ *
+ * Why: the credential resolution chain (`loadEnvironments`) tries
+ * `LOG10X_API_KEY` first (priority 1) and `~/.log10x/credentials`
+ * second (priority 2). After signin, signout, rotate, or any other
+ * write to the credentials file, if the env var is still set, the
+ * next `loadEnvironments()` will resolve to the OLD env-var key and
+ * shadow the freshly written file. Clearing the env var in-process
+ * lets the file win the priority chain.
+ *
+ * Caveat: the deletion only lives for the current MCP server process.
+ * Whatever the host config (claude_desktop_config.json, etc.) sets is
+ * what gets injected on next host restart. Callers that care should
+ * tell the user to also edit the host config.
+ */
+export function clearOverridingEnvVar(): boolean {
+  if (process.env.LOG10X_API_KEY) {
+    delete process.env.LOG10X_API_KEY;
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Force a revalidation of credentials and refresh the in-memory `envs`
+ * object so the next tool call sees ground truth instead of cached
+ * boot-time state. Used by:
+ *
+ *   - `log10x_login_status`: every call revalidates so the user-visible
+ *     "am I signed in" state is always honest, never stale.
+ *   - The wrap() retry path in `index.ts`: when an account-scoped tool
+ *     gets 401/403 AND the MCP is currently in demo-fallback mode, we
+ *     revalidate once and retry the tool. Recovers transparently from
+ *     transient failures (e.g., rotated key whose authorizer cache had
+ *     not yet expired at boot).
+ *
+ * Always calls `clearOverridingEnvVar` first. Without that, a stale
+ * `LOG10X_API_KEY` in `process.env` (from the MCP host config) would
+ * keep beating the freshly-written credentials file and reload would
+ * just re-fail the same way. The signin / signout / rotate tools have
+ * always done this clear-then-reload pair; this helper centralizes it
+ * so revalidation entry points outside those tools get the same
+ * behavior.
+ *
+ * Returns whether the env var was actually present before the clear so
+ * callers can mention it in result messages.
+ */
+export async function revalidateEnvironments(target: Environments): Promise<{ envVarCleared: boolean }> {
+  const envVarCleared = clearOverridingEnvVar();
+  await reloadEnvironmentsInPlace(target);
+  return { envVarCleared };
 }
 
 async function loadFromApi(apiKey: string, isDemoMode: boolean): Promise<Environments> {
@@ -203,14 +264,23 @@ async function loadFromApi(apiKey: string, isDemoMode: boolean): Promise<Environ
         `Demo-mode boot via GET /api/v1/user failed: ${(e as Error).message}. ` +
           `Either the MCP can't reach prometheus.log10x.com from this network, ` +
           `or the demo key has rotated and the MCP needs a refresh. ` +
-          `Set LOG10X_API_KEY to your own key from console.log10x.com to bypass.`
+          `Bypass demo by signing in to your own account: run \`log10x_signin_start\` ` +
+          `for the Auth0 Device Flow with GitHub or Google (the model chains to ` +
+          `\`log10x_signin_complete\` automatically), or call \`log10x_signin_complete\` ` +
+          `directly with \`{ api_key: "<key>" }\` to paste an existing key, or set ` +
+          `\`LOG10X_API_KEY\` to a key from console.log10x.com → Profile → API Settings.`
       );
     }
     throw new EnvironmentValidationError(
       `LOG10X_API_KEY is set but env autodiscovery via GET /api/v1/user failed: ` +
         `${(e as Error).message}. ` +
         `Verify the key at console.log10x.com → Profile → API Settings, ` +
-        `or unset LOG10X_API_KEY entirely to fall back to read-only demo mode.`
+        `or run \`log10x_signin_start\` to mint a fresh one via the Auth0 Device Flow ` +
+        `with GitHub or Google (the model chains to \`log10x_signin_complete\` ` +
+        `automatically), or call \`log10x_signin_complete\` directly with ` +
+        `\`{ api_key: "<key>" }\` to paste a key. Either path auto-clears the bad ` +
+        `\`LOG10X_API_KEY\` in-process. Or unset \`LOG10X_API_KEY\` entirely to fall ` +
+        `back to read-only demo mode.`
     );
   }
   if (profile.environments.length === 0) {

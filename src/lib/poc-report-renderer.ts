@@ -276,7 +276,7 @@ export function renderPocSummary(input: RenderInput, topN = 5): string {
   // Views CTA.
   lines.push('**Available views** — call `log10x_poc_from_siem_status` again with:');
   lines.push('- `view: "full"` — complete 9-section report');
-  lines.push('- `view: "yaml"` — reducer mute YAML for top patterns, paste-ready');
+  lines.push('- `view: "yaml"` — receiver mute YAML for top patterns, paste-ready');
   lines.push('- `view: "configs"` — native SIEM exclusion configs (Datadog exclusion filter, Splunk props.conf, etc.)');
   lines.push('- `view: "pattern", pattern: "<identity>"` — deep dive on a specific pattern');
   lines.push('- `view: "top", top_n: 20` — expanded drivers table');
@@ -296,7 +296,7 @@ export function renderPocYaml(input: RenderInput, topN = 5): string {
     .slice(0, topN);
   const lines: string[] = [];
   lines.push('```yaml');
-  lines.push('# reducer mute file — paste into your GitOps ConfigMap');
+  lines.push('# receiver mute file — paste into your GitOps ConfigMap');
   lines.push(`# Generated from snapshot ${input.snapshotId} on ${input.finishedAt}`);
   lines.push('# Auto-expires 30d from commit. Run log10x_dependency_check on each identity before merging.');
   lines.push('');

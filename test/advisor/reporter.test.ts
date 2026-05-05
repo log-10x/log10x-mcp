@@ -41,7 +41,7 @@ function baseSnapshot(overrides: Partial<DiscoverySnapshot> = {}): DiscoverySnap
 }
 
 const forwarders: ForwarderKind[] = [
-  'fluent-bit',
+  'fluentbit',
   'fluentd',
   'filebeat',
   'logstash',
@@ -96,7 +96,7 @@ test('plan for logstash is blocked (chart-broken sidecar wiring)', async () => {
 test('missing api_key adds a blocker', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
-    forwarder: 'fluent-bit',
+    forwarder: 'fluentbit',
   });
   assert.ok(plan.blockers.some((b) => b.toLowerCase().includes('license key')));
 });
@@ -104,7 +104,7 @@ test('missing api_key adds a blocker', async () => {
 test('skipInstall means missing api_key does not block', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
-    forwarder: 'fluent-bit',
+    forwarder: 'fluentbit',
     skipInstall: true,
   });
   assert.equal(plan.blockers.length, 0);
@@ -129,7 +129,7 @@ test('release name collision flagged in preflight', async () => {
         ],
       },
     }),
-    forwarder: 'fluent-bit',
+    forwarder: 'fluentbit',
     releaseName: 'my-reporter',
     namespace: 'logging',
     apiKey: 'test',
@@ -144,20 +144,20 @@ test('forwarder alignment warns when detected differs from requested', async () 
     snapshot: baseSnapshot({
       recommendations: { suggestedNamespace: 'demo', existingForwarder: 'fluentd', alreadyInstalled: {} },
     }),
-    forwarder: 'fluent-bit',
+    forwarder: 'fluentbit',
     apiKey: 'test',
   });
   const align = plan.preflight.find((p) => p.name === 'forwarder alignment');
   assert.ok(align);
   assert.equal(align?.status, 'warn');
   assert.ok(align?.detail.includes('fluentd'));
-  assert.ok(align?.detail.includes('fluent-bit'));
+  assert.ok(align?.detail.includes('fluentbit'));
 });
 
 test('splunk destination without hec_token blocks', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
-    forwarder: 'fluent-bit',
+    forwarder: 'fluentbit',
     apiKey: 'test',
     destination: 'splunk',
   });
@@ -167,7 +167,7 @@ test('splunk destination without hec_token blocks', async () => {
 test('renderPlan for "install" omits verify and teardown', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
-    forwarder: 'fluent-bit',
+    forwarder: 'fluentbit',
     apiKey: 'test',
   });
   const out = renderPlan(plan, 'install');
@@ -179,7 +179,7 @@ test('renderPlan for "install" omits verify and teardown', async () => {
 test('renderPlan for "teardown" omits install and verify', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
-    forwarder: 'fluent-bit',
+    forwarder: 'fluentbit',
     apiKey: 'test',
     skipInstall: true,
     skipVerify: true,
@@ -198,7 +198,7 @@ test('already-installed reporter triggers a note, not a blocker', async () => {
         alreadyInstalled: { reporter: 'demo' },
       },
     }),
-    forwarder: 'fluent-bit',
+    forwarder: 'fluentbit',
     apiKey: 'test',
   });
   assert.equal(plan.blockers.length, 0);
@@ -254,8 +254,11 @@ test('every forwarder values file embeds gitToken (init-container secret mount)'
 });
 
 test('verify probes target the correct container per forwarder', async () => {
+  // Forwarder *identifier* (left) vs k8s *container name* in the upstream
+  // chart (right). For Fluent Bit the upstream chart names the container
+  // `fluent-bit` (with hyphen) even though our identifier is `fluentbit`.
   const expected: Record<string, string> = {
-    'fluent-bit': 'fluent-bit',
+    'fluentbit': 'fluent-bit',
     fluentd: 'fluentd',
     filebeat: 'filebeat',
     logstash: 'logstash',
@@ -279,7 +282,7 @@ test('verify probes target the correct container per forwarder', async () => {
 
 test('chart refs are the published names (no `-10x` suffix drift)', async () => {
   const expected: Record<string, string> = {
-    'fluent-bit': 'log10x-fluent/fluent-bit',
+    'fluentbit': 'log10x-fluent/fluent-bit',
     fluentd: 'log10x-fluent/fluentd',
     filebeat: 'log10x-elastic/filebeat',
     logstash: 'log10x-elastic/logstash',
@@ -327,12 +330,12 @@ test('shape=standalone installs reporter-10x regardless of detected forwarder', 
     snapshot: baseSnapshot({
       recommendations: {
         suggestedNamespace: 'logging',
-        existingForwarder: 'fluent-bit',
+        existingForwarder: 'fluentbit',
         alreadyInstalled: {},
       },
     }),
     shape: 'standalone',
-    forwarder: 'fluent-bit',
+    forwarder: 'fluentbit',
     apiKey: 'test-key',
   });
   assert.equal(plan.blockers.length, 0);
