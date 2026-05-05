@@ -170,9 +170,18 @@ export async function executeRotateApiKey(
   lines.push('### Other places to update');
   lines.push('');
   lines.push(
-    'Anything else holding the previous key — other MCP hosts on this machine, scripts, CI secrets, ' +
-      'forwarder configs, terraform tfvars, etc. — will start receiving `401 Unauthorized` until updated. ' +
+    'Anything else holding the previous key, other MCP hosts on this machine, scripts, CI secrets, ' +
+      'forwarder configs, terraform tfvars, and so on, will start receiving `401 Unauthorized` until updated. ' +
       'Sweep them now while the new key is fresh.'
+  );
+  lines.push('');
+  lines.push('### Heads up: brief propagation window');
+  lines.push('');
+  lines.push(
+    'The old key stops working immediately. The new key may need up to a few seconds before it ' +
+      'is accepted on every request. If the very next call fails with `401` or `403`, retry once after a ' +
+      'short wait. The MCP itself recovers automatically on transient auth errors after rotation, so ' +
+      'you usually will not have to do anything.'
   );
   return lines.join('\n');
 }
