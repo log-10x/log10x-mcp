@@ -113,6 +113,120 @@ export interface RetrieverQueryRequest {
   writeSummaries?: boolean;
 }
 
+/**
+ * Result of a `fetchExistingResults` call.
+ */
+export interface ExistingResultsResponse {
+  /** Events recovered from the qr/{queryId}/ prefix, sorted by timestamp. */
+  events: RetrieverEvent[];
+  /** True when at least one worker uploaded a `.truncated` sibling. */
+  truncated: boolean;
+  /** Number of `.jsonl` worker files read. */
+  jsonlObjectCount: number;
+  /** True when the `_DONE.json` marker exists. False when the query is mid-flight. */
+  done: boolean;
+  /** Resolved target prefix the result paths used. */
+  target: string;
+}
+
+/**
+ * Fetch results for a previously-submitted retriever query by `queryId`.
+ *
+ * Closes the stranded-queryId dead-end. When `runRetrieverQuery` returns
+ * `partialResults: true` (its MCP-side poll budget exceeded the engine's
+ * actual completion time), the engine still finishes the scan and uploads
+ * results to S3 under `qr/{queryId}/`. Without this helper, those results
+ * are unreachable: re-running `runRetrieverQuery` submits a new queryId.
+ * `log10x_retriever_query_status` calls this helper when invoked with
+ * `fetch_results: true` so the agent can recover the stranded events.
+ *
+ * Reads only — no engine submission. Returns `done: false` when the
+ * `_DONE.json` marker is missing, in which case the caller should poll
+ * status diagnostics again before re-fetching.
+ */
+export async function fetchExistingResults(
+  queryId: string,
+  options?: { target?: string },
+): Promise<ExistingResultsResponse> {
+  const bucket = await getRetrieverBucket();
+  const target = options?.target || (await getDefaultTarget());
+
+  const indexSubpath = (process.env.LOG10X_RETRIEVER_INDEX_SUBPATH || 'indexing-results').replace(/^\/+|\/+$/g, '');
+  const basePrefix = indexSubpath ? `${indexSubpath}/` : '';
+  const resultsPrefix = `${basePrefix}tenx/${target}/qr/${queryId}/`;
+  const doneMarkerKey = `${resultsPrefix}_DONE.json`;
+
+  // Probe the _DONE marker without retry. The marker either exists (engine
+  // finished) or doesn't (engine still running). Distinguishing missing from
+  // 4xx is unimportant here — both mean "not done."
+  let done = false;
+  try {
+    await s3Get(bucket, doneMarkerKey);
+    done = true;
+  } catch {
+    done = false;
+  }
+
+  const resultObjects = await s3List(bucket, resultsPrefix);
+
+  let truncated = false;
+  const jsonlKeys: string[] = [];
+  for (const obj of resultObjects) {
+    if (obj.Key.endsWith('.truncated')) {
+      truncated = true;
+      continue;
+    }
+    if (obj.Key.endsWith('.jsonl')) {
+      jsonlKeys.push(obj.Key);
+    }
+  }
+
+  const events: RetrieverEvent[] = [];
+  for (const key of jsonlKeys) {
+    const content = await s3Get(bucket, key);
+    events.push(...parseJsonl(content));
+  }
+
+  events.sort((a, b) => eventTimestampMs(a) - eventTimestampMs(b));
+
+  // Backfill legacy fields the same way runRetrieverQuery does so callers
+  // see a consistent event shape regardless of which path produced them.
+  for (const ev of events) {
+    const levelTemplated = (ev as Record<string, unknown>)['LevelTemplate.severity_level'];
+    if (ev.severity_level == null && typeof levelTemplated === 'string') {
+      ev.severity_level = levelTemplated;
+    }
+    if (ev.service == null && typeof ev.tenx_user_service === 'string') {
+      ev.service = ev.tenx_user_service;
+    }
+    if (ev.severity == null && typeof ev.severity_level === 'string') {
+      ev.severity = ev.severity_level;
+    }
+  }
+
+  return { events, truncated, jsonlObjectCount: jsonlKeys.length, done, target };
+}
+
+/**
+ * Build a Bloom-filter `search` expression from a Reporter-named pattern
+ * (Symbol Message). Tools that take a user-facing pattern name (the same
+ * snake_case identity surfaced by event_lookup, top_patterns, cost_drivers)
+ * call this before submitting to runRetrieverQuery so the engine actually
+ * scopes the scan to the pattern. Without this translation the engine sees
+ * `search: ''` (the deprecated `pattern` field is silently dropped at body
+ * build time) and runs unfiltered across the window.
+ *
+ * The inverse — parsing a pattern back out of a search expression — lives
+ * in retriever-fidelity.ts as `extractPatternFromSearch`.
+ *
+ * Pattern values are expected to be snake_case (Symbol Message form). Quotes
+ * are stripped defensively; legitimate Symbol Messages never contain them.
+ */
+export function buildPatternSearch(pattern: string): string {
+  const safe = pattern.trim().replace(/"/g, '');
+  return `tenx_user_pattern == "${safe}"`;
+}
+
 export interface RetrieverEvent {
   timestamp?: string;
   text?: string;

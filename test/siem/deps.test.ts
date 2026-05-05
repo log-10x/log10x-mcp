@@ -15,6 +15,7 @@ import assert from 'node:assert/strict';
 
 import {
   anyTokenMatches,
+  allTokensMatchExact,
   meaningfulTokens,
   emptyResult,
   type DepCheckResult,
@@ -54,6 +55,49 @@ test('anyTokenMatches is case-insensitive substring OR', () => {
   assert.equal(anyTokenMatches('Payment Gateway Timeout', ['Payment', 'foo']), true);
   assert.equal(anyTokenMatches('Heartbeat', ['payment', 'gateway']), false);
   assert.equal(anyTokenMatches('', ['x']), false);
+});
+
+// allTokensMatchExact replaces anyTokenMatches in the dep-check tool.
+// The looser OR-substring match was producing false-positive dependencies
+// on saved searches that just happened to contain one common pattern token
+// (e.g. matching `Payment_Gateway_Timeout` against any saved search
+// containing `payment`). The strict AND-tokenized matcher requires every
+// pattern token to appear as a discrete token in the haystack.
+
+test('allTokensMatchExact: AND match requires every pattern token in haystack', () => {
+  // All tokens present, separated by punctuation that the haystack tokenizer splits on.
+  assert.equal(allTokensMatchExact('Payment Gateway Timeout > 5min', ['payment', 'gateway', 'timeout']), true);
+  // Dotted identifier — split on `.` yields the same token set.
+  assert.equal(allTokensMatchExact('Payment.Gateway.Timeout', ['payment', 'gateway', 'timeout']), true);
+});
+
+test('allTokensMatchExact: missing any token fails the match', () => {
+  // gateway is missing — old anyTokenMatches would have matched on `payment` alone.
+  assert.equal(allTokensMatchExact('Payment Heartbeat 5min', ['payment', 'gateway', 'timeout']), false);
+});
+
+test('allTokensMatchExact: case-insensitive', () => {
+  assert.equal(allTokensMatchExact('PAYMENT.gateway.Timeout', ['payment', 'GATEWAY', 'timeout']), true);
+});
+
+test('allTokensMatchExact: substring stuffed into one identifier does NOT match', () => {
+  // Trade-off: precision over recall. A saved search whose body contains a
+  // single identifier `paymentgatewaytimeout` (no separators) cannot
+  // tokenize cleanly, so AND-token cannot resolve it. This is the desired
+  // behavior — opaque identifiers shouldn't count as dependencies on the
+  // semantic pattern.
+  assert.equal(allTokensMatchExact('paymentgatewaytimeout', ['payment', 'gateway', 'timeout']), false);
+});
+
+test('allTokensMatchExact: empty inputs', () => {
+  assert.equal(allTokensMatchExact('', ['x']), false);
+  assert.equal(allTokensMatchExact('Payment', []), false);
+});
+
+test('allTokensMatchExact: single-char tokens are skipped', () => {
+  // The matcher ignores tokens < 2 chars to avoid noise — matching on a
+  // single letter would re-introduce the false-positive class we removed.
+  assert.equal(allTokensMatchExact('Payment Gateway', ['payment', 'a']), true);
 });
 
 test('meaningfulTokens prefers tokens >= 4 chars; falls back to pattern-as-phrase', () => {

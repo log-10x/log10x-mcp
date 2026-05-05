@@ -21,6 +21,7 @@ import {
   runRetrieverQuery,
   isRetrieverConfigured,
   normalizeTimeExpression,
+  buildPatternSearch,
   type RetrieverQueryRequest,
   type RetrieverEvent,
 } from '../lib/retriever-api.js';
@@ -29,13 +30,20 @@ import {
   type RetrieverQueryDiagnostics,
 } from '../lib/retriever-diagnostics.js';
 import { fmtCount } from '../lib/format.js';
+import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 
 export const retrieverQuerySchema = {
+  pattern: z
+    .string()
+    .optional()
+    .describe(
+      'Reporter-named pattern (Symbol Message) to scope the scan to. Auto-translated to `tenx_user_pattern == "<name>"` Bloom-filter expression. Use this when the agent has a pattern name from event_lookup / top_patterns / cost_drivers and wants archive events for it without authoring the Bloom expression by hand. Mutually exclusive with `search`; if both are provided, `search` wins and `pattern` is ignored. Example: `pattern: "Payment_Gateway_Timeout"`.'
+    ),
   search: z
     .string()
     .optional()
     .describe(
-      'Bloom-filter search expression using the TenX subset: `==`, `||`, `&&`, `includes(field, "substr")`. Example: `severity_level=="ERROR" && includes(text, "ECONNREFUSED")`. Selective values are dramatically cheaper than open-ended scans. Omit to scan the full window (bounded by limit/processingTime).'
+      'Bloom-filter search expression using the TenX subset: `==`, `||`, `&&`, `includes(field, "substr")`. Example: `severity_level=="ERROR" && includes(text, "ECONNREFUSED")`. Selective values are dramatically cheaper than open-ended scans. Omit to scan the full window (bounded by limit/processingTime). Pass `pattern` instead for the common case of scoping to one Reporter-named pattern.'
     ),
   from: z
     .string()
@@ -81,6 +89,7 @@ export const retrieverQuerySchema = {
 
 export async function executeRetrieverQuery(
   args: {
+    pattern?: string;
     search?: string;
     from: string;
     to: string;
@@ -104,10 +113,17 @@ export async function executeRetrieverQuery(
     throw new Error(`Invalid time window: ${(e as Error).message}`);
   }
 
+  // Resolve pattern → search. When both are provided, `search` wins so the
+  // explicit form is never overwritten by an auto-translation. Tools that
+  // pass `pattern` (the Reporter-named Symbol Message) want the engine to
+  // scope to that pattern without the agent having to author the TenX
+  // expression by hand. See buildPatternSearch in retriever-api.
+  const effectiveSearch = args.search || (args.pattern ? buildPatternSearch(args.pattern) : undefined);
+
   const req: RetrieverQueryRequest = {
     from: args.from,
     to: args.to,
-    search: args.search,
+    search: effectiveSearch,
     filters: args.filters,
     target: args.target,
     limit: args.limit,
@@ -119,7 +135,13 @@ export async function executeRetrieverQuery(
   lines.push(`## Retriever Query`);
   lines.push('');
   lines.push(`**Window**: ${args.from} → ${args.to}`);
-  if (args.search) lines.push(`**Search**: \`${args.search}\``);
+  if (effectiveSearch) {
+    if (args.pattern && !args.search) {
+      lines.push(`**Pattern**: \`${args.pattern}\` (auto-translated to \`${effectiveSearch}\`)`);
+    } else {
+      lines.push(`**Search**: \`${effectiveSearch}\``);
+    }
+  }
   if (args.filters && args.filters.length > 0) {
     lines.push(`**Filters**: ${args.filters.map((f) => `\`${f}\``).join(' AND ')}`);
   }
@@ -136,42 +158,69 @@ export async function executeRetrieverQuery(
   lines.push('');
 
   if (args.format === 'count') {
-    return renderCount(resp.events, lines).join('\n');
-  }
-
-  if (args.format === 'aggregated') {
-    return renderAggregated(resp.events, args.bucket_size, lines).join('\n');
-  }
-
-  if (args.format === 'ephemeral_series') {
-    return renderEphemeralSeries(resp.events, args.bucket_size, args.search, lines).join('\n');
-  }
-
-  // events format
-  const events = resp.events;
-  lines.push(`### Events (${Math.min(events.length, 50)} of ${events.length} shown)`);
-  lines.push('');
-  for (let i = 0; i < Math.min(events.length, 50); i++) {
-    lines.push(formatEvent(events[i]));
-  }
-  if (events.length > 50) {
+    renderCount(resp.events, lines);
+  } else if (args.format === 'aggregated') {
+    renderAggregated(resp.events, args.bucket_size, lines);
+  } else if (args.format === 'ephemeral_series') {
+    renderEphemeralSeries(resp.events, args.bucket_size, args.search, lines);
+  } else {
+    // events format
+    const events = resp.events;
+    lines.push(`### Events (${Math.min(events.length, 50)} of ${events.length} shown)`);
     lines.push('');
-    lines.push(
-      `_${events.length - 50} additional events omitted. Switch to \`format: "aggregated"\` or \`"count"\` for a summary, or narrow the search/filter._`
-    );
-  }
-  if (events.length === 0) {
-    lines.push(
-      '_Retriever returned zero events. Verify the search expression matches at least one real value, check the window, or widen the filter._'
-    );
+    for (let i = 0; i < Math.min(events.length, 50); i++) {
+      lines.push(formatEvent(events[i]));
+    }
+    if (events.length > 50) {
+      lines.push('');
+      lines.push(
+        `_${events.length - 50} additional events omitted. Switch to \`format: "aggregated"\` or \`"count"\` for a summary, or narrow the search/filter._`
+      );
+    }
+    if (events.length === 0) {
+      lines.push(
+        '_Retriever returned zero events. Verify the search expression matches at least one real value, check the window, or widen the filter._'
+      );
+    }
+
+    if (resp.execution.truncated) {
+      lines.push('');
+      lines.push(
+        '> **Truncated**: one or more stream workers hit the per-worker result cap. Narrow the search expression or add a more selective filter to see the full match set.'
+      );
+    }
   }
 
-  if (resp.execution.truncated) {
-    lines.push('');
-    lines.push(
-      '> **Truncated**: one or more stream workers hit the per-worker result cap. Narrow the search expression or add a more selective filter to see the full match set.'
-    );
+  // Structured NEXT_ACTIONS for autonomous chains.
+  const nextActions: NextAction[] = [];
+  const partialDiag = (resp.diagnostics as RetrieverQueryDiagnostics & { partialResults?: boolean })?.partialResults;
+  if (partialDiag) {
+    nextActions.push({
+      tool: 'log10x_retriever_query_status',
+      args: { queryId: resp.queryId, fetch_results: true, target: resp.target },
+      reason: 'partialResults — recover stranded events from S3 without resubmitting',
+    });
   }
+  if (args.pattern && resp.events.length > 0) {
+    nextActions.push({
+      tool: 'log10x_backfill_metric',
+      args: {
+        pattern: args.pattern,
+        metric_name: `log10x.${args.pattern.toLowerCase()}_count`,
+        destination: 'datadog',
+        from: args.from,
+        to: args.to,
+      },
+      reason: 'create a TSDB metric backfilled from these archive events',
+    });
+    nextActions.push({
+      tool: 'log10x_retriever_series',
+      args: { pattern: args.pattern, from: args.from, to: args.to, bucket_size: '1h' },
+      reason: 'time-bucketed series across the same window',
+    });
+  }
+  const block = renderNextActions(nextActions);
+  if (block) lines.push('', block);
 
   return lines.join('\n');
 }

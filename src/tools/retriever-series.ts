@@ -16,6 +16,7 @@
 import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
 import {
+  buildPatternSearch,
   eventTimestampMs,
   isRetrieverConfigured,
   normalizeTimeExpression,
@@ -35,6 +36,7 @@ import {
 import { createLimiter } from '../lib/concurrency.js';
 import { fmtCount } from '../lib/format.js';
 import { retrieverNotConfiguredMessage } from './retriever-query.js';
+import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 
 /** Cap on group-by cardinality. Tail collapsed to "_other_". */
 const TOP_K_GROUPS = 1000;
@@ -49,11 +51,17 @@ const SUBWINDOW_CONCURRENCY = 6;
 const SUBWINDOW_TIMEOUT_MS = 60_000;
 
 export const retrieverSeriesSchema = {
+  pattern: z
+    .string()
+    .optional()
+    .describe(
+      'Reporter-named pattern (Symbol Message). Auto-translated to `tenx_user_pattern == "<name>"` Bloom-filter expression. Use this when the agent has a pattern name from event_lookup / top_patterns / cost_drivers. Mutually exclusive with `search`; `search` wins if both provided.'
+    ),
   search: z
     .string()
     .optional()
     .describe(
-      'Bloom-filter search expression using the TenX subset. Tightly bound queries (e.g., `tenx_user_pattern == "PaymentRetry"`) get the cheapest fetch path. Pattern-bound expressions are also what unlocks the Reporter-driven cost heuristic — without one, mode selection falls back to window-length only.'
+      'Bloom-filter search expression using the TenX subset. Tightly bound queries (e.g., `tenx_user_pattern == "PaymentRetry"`) get the cheapest fetch path. Pattern-bound expressions are also what unlocks the Reporter-driven cost heuristic — without one, mode selection falls back to window-length only. Pass `pattern` instead for the common case of scoping to one Reporter-named pattern.'
     ),
   from: z
     .string()
@@ -93,6 +101,7 @@ interface SeriesPoint {
 
 export async function executeRetrieverSeries(
   args: {
+    pattern?: string;
     search?: string;
     from: string;
     to: string;
@@ -107,6 +116,16 @@ export async function executeRetrieverSeries(
 ): Promise<string> {
   if (!isRetrieverConfigured()) {
     return retrieverNotConfiguredMessage();
+  }
+
+  // Pattern → search translation. Resolve once at the top so all downstream
+  // paths (decideFidelity's pattern extractor, full-mode runRetrieverQuery,
+  // sampled-mode sub-window calls, output rendering) see the same expression.
+  // `search` wins over `pattern` so an agent that already authored a precise
+  // expression isn't overridden. Decision rationale lives at retriever-api's
+  // buildPatternSearch helper.
+  if (args.pattern && !args.search) {
+    args.search = buildPatternSearch(args.pattern);
   }
 
   const fid = parseFidelityArg(args.fidelity);
@@ -511,7 +530,7 @@ function extractGroupValue(ev: RetrieverEvent, field: string): string {
 function renderSeries(
   result: SeriesResult,
   decision: FidelityDecision,
-  args: { from: string; to: string; bucket_size: string; group_by?: string; search?: string },
+  args: { from: string; to: string; bucket_size: string; group_by?: string; search?: string; pattern?: string },
   wallTimeMs: number,
   windowMs: number
 ): string {
@@ -519,7 +538,11 @@ function renderSeries(
   lines.push(`## Retriever Series`);
   lines.push('');
   lines.push(`**Window**: ${args.from} → ${args.to} (${formatDuration(windowMs)})`);
-  if (args.search) lines.push(`**Search**: \`${args.search}\``);
+  if (args.pattern) {
+    lines.push(`**Pattern**: \`${args.pattern}\` (auto-translated to \`${args.search}\`)`);
+  } else if (args.search) {
+    lines.push(`**Search**: \`${args.search}\``);
+  }
   if (args.group_by) lines.push(`**Group by**: \`${args.group_by}\``);
   lines.push(`**Bucket**: ${args.bucket_size}`);
   lines.push('');
@@ -637,19 +660,45 @@ function renderSeries(
     );
   }
 
+  // Structured NEXT_ACTIONS for autonomous chains. The natural follow-up
+  // after a series is to backfill the metric into a TSDB so dashboards /
+  // alerts can use it ongoing. Only emit when a pattern arg was supplied
+  // (the typical autonomous-chain path); free-form search expressions don't
+  // round-trip cleanly into backfill_metric without further translation.
+  const nextActions: NextAction[] = [];
+  if (args.pattern && result.actualEvents > 0) {
+    nextActions.push({
+      tool: 'log10x_backfill_metric',
+      args: {
+        pattern: args.pattern,
+        metric_name: `log10x.${args.pattern.toLowerCase()}_count`,
+        destination: 'datadog',
+        from: args.from,
+        to: args.to,
+        bucket_size: args.bucket_size,
+      },
+      reason: 'create a TSDB metric from this series so dashboards / alerts can consume it',
+    });
+  }
+  const block = renderNextActions(nextActions);
+  if (block) lines.push('', block);
   return lines.join('\n');
 }
 
 function renderRefusal(
   refusal: RefusalDecision,
-  args: { from: string; to: string; search?: string },
+  args: { from: string; to: string; search?: string; pattern?: string },
   windowMs: number
 ): string {
   const lines: string[] = [];
   lines.push(`## Retriever Series — Refused`);
   lines.push('');
   lines.push(`**Window**: ${args.from} → ${args.to} (${formatDuration(windowMs)})`);
-  if (args.search) lines.push(`**Search**: \`${args.search}\``);
+  if (args.pattern) {
+    lines.push(`**Pattern**: \`${args.pattern}\` (auto-translated to \`${args.search}\`)`);
+  } else if (args.search) {
+    lines.push(`**Search**: \`${args.search}\``);
+  }
   lines.push('');
   lines.push(`**Reason**: \`${refusal.reason}\``);
   if (refusal.estimatedEvents !== undefined) {

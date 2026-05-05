@@ -11,6 +11,7 @@ import * as pql from '../lib/promql.js';
 import { bytesToCost } from '../lib/cost.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { fmtDollar, fmtPattern, fmtBytes, parseTimeframe, costPeriodLabel, normalizePattern } from '../lib/format.js';
+import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 
 export const trendSchema = {
   pattern: z.string().describe('Pattern name (e.g., "Payment_Gateway_Timeout")'),
@@ -112,19 +113,40 @@ export async function executeTrend(
     lines.push(`  ${renderSparkline(points)}`);
   }
 
-  // next_action hint — shape depends on what we saw.
+  // next_action hints — prose for human readers, structured NEXT_ACTIONS
+  // block for autonomous-chain agents. Spike or sustained drift → suggest
+  // investigate. Always recommend dependency_check before any mute action.
   const elevated = baselineCost > 0 && recentCost > baselineCost * 1.5;
   const sustainedSlope = baselineCost > 0 && recentCost > baselineCost * 1.2 && !spikePoint;
+  const nextActions: NextAction[] = [];
   if (spikePoint || elevated) {
     lines.push('');
-    lines.push('**Next action**:');
+    lines.push('**Next actions**:');
     lines.push(`  - Inflection or spike detected — call \`log10x_investigate({ starting_point: '${pattern}', window: '${args.timeRange}' })\` to trace the cause.`);
+    nextActions.push({
+      tool: 'log10x_investigate',
+      args: { starting_point: pattern, window: args.timeRange },
+      reason: spikePoint ? 'spike detected — trace the cause' : 'elevated vs baseline — trace the cause',
+    });
+    lines.push(`  - Cross-pillar correlation: \`log10x_correlate_cross_pillar({ anchor_type: 'log10x_pattern', anchor: '${pattern}', window: '${args.timeRange}' })\` to find the upstream metric anomaly.`);
+    nextActions.push({
+      tool: 'log10x_correlate_cross_pillar',
+      args: { anchor_type: 'log10x_pattern', anchor: pattern, window: args.timeRange },
+      reason: 'find upstream metric anomaly co-moving with the spike',
+    });
   } else if (sustainedSlope) {
     lines.push('');
     lines.push('**Next action**:');
     lines.push(`  - This pattern shows gradual drift (no discrete inflection). Call \`log10x_investigate({ starting_point: '${pattern}', window: '30d' })\` for slope-similarity cohort analysis and historical investigation guidance.`);
+    nextActions.push({
+      tool: 'log10x_investigate',
+      args: { starting_point: pattern, window: '30d' },
+      reason: 'gradual drift — slope-similarity cohort analysis',
+    });
   }
 
+  const block = renderNextActions(nextActions);
+  if (block) lines.push('', block);
   return lines.join('\n');
 }
 

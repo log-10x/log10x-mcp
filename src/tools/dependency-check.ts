@@ -29,6 +29,7 @@
 
 import { z } from 'zod';
 import { normalizePattern } from '../lib/format.js';
+import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import {
   resolveSiemSelection,
   formatAmbiguousError,
@@ -123,16 +124,43 @@ export async function executeDependencyCheck(args: DependencyCheckArgs): Promise
   // even after the resolver picked the vendor — e.g., Elasticsearch
   // creds satisfy the resolver but the dep-check needs Kibana too).
   const scan = await checkDeps(vendor, { pattern, tokens, service: args.service, severity: args.severity });
+  let result: string;
+  let scanRan: boolean;
   if (!scan.error) {
     const detectedNote =
       !wasExplicit && resolution.note ? `\n_${resolution.note}_\n` : '';
-    return detectedNote + renderDepCheckResult(scan);
+    result = detectedNote + renderDepCheckResult(scan);
+    scanRan = true;
+  } else {
+    // Fallback: emit the bash command. Surface why we fell back, so the
+    // caller knows whether to set extra env vars (e.g., KIBANA_URL) or
+    // accept that they'll run the script themselves.
+    result = renderBashFallback(vendor, scan.error, pattern, tokens, args, wasExplicit, resolution.note);
+    scanRan = false;
   }
 
-  // Fallback: emit the bash command. Surface why we fell back, so the
-  // caller knows whether to set extra env vars (e.g., KIBANA_URL) or
-  // accept that they'll run the script themselves.
-  return renderBashFallback(vendor, scan.error, pattern, tokens, args, wasExplicit, resolution.note);
+  // Structured NEXT_ACTIONS for autonomous chain agents. After dependency
+  // check, the canonical next steps are: generate a mute config (if no
+  // critical dependencies surfaced) or look at the events (to confirm
+  // what's being muted). When the scan didn't run (paste-mode fallback),
+  // exclusion_filter is still suggested but with explicit acknowledgement
+  // that no scan was performed — caller's responsibility to verify.
+  const nextActions: NextAction[] = [
+    {
+      tool: 'log10x_exclusion_filter',
+      args: { pattern, vendor: args.vendor },
+      reason: scanRan
+        ? 'generate the drop / mute config after dependency review'
+        : 'generate the drop / mute config (NOTE: dependency scan did NOT run, verify dashboards / alerts manually first)',
+    },
+    {
+      tool: 'log10x_pattern_trend',
+      args: { pattern },
+      reason: 'see the pattern volume trend before deciding to mute',
+    },
+  ];
+  const block = renderNextActions(nextActions);
+  return block ? `${result}\n\n${block}` : result;
 }
 
 function renderBashFallback(
