@@ -6,7 +6,7 @@
  * data — rendering to markdown is the render layer's job.
  *
  * The same builder serves both apps: Reporter (kind=report, read-only
- * metric emission) and Receiver (kind=regulate, read + write back to
+ * metric emission) and Receiver (kind=receive, read + write back to
  * the forwarder with mute/sample/compact applied). They share every
  * forwarder spec, every chart, every preflight check. The single
  * differentiator is the `kind` value baked into the tenx values block,
@@ -24,7 +24,7 @@ import {
 } from './reporter-forwarders.js';
 import { run } from '../discovery/shell.js';
 
-export type AdvisorApp = 'reporter' | 'reducer';
+export type AdvisorApp = 'reporter' | 'receiver';
 
 /**
  * Deployment shape — orthogonal to forwarder kind.
@@ -47,7 +47,7 @@ export interface ReporterAdviseArgs {
    * Deployment shape. Default: 'inline'. When 'standalone', the plan
    * installs reporter-10x alongside the user's forwarder instead of
    * replacing it — `forwarder` is kept in the plan as detected context
-   * only and reducer/optimize combinations become blockers.
+   * only and receiver/optimize combinations become blockers.
    */
   shape?: DeploymentShape;
   /** Forwarder to target. If omitted, uses the snapshot's recommendation. */
@@ -88,7 +88,7 @@ export interface ReporterAdviseArgs {
 
 const APP_TO_KIND: Record<AdvisorApp, TenxKind> = {
   reporter: 'report',
-  reducer: 'regulate',
+  receiver: 'receive',
 };
 
 /** Produce the plan. Never throws — surfaces missing input as `blockers`. */
@@ -124,10 +124,10 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   }
   // Shape=standalone only supports reporter (report-only). The
   // reporter-10x chart has no hook into the user's forwarder output,
-  // so it can't regulate/filter/compact events — only emit metrics.
-  if (shape === 'standalone' && app === 'reducer') {
+  // so it can't filter/compact events — only emit metrics.
+  if (shape === 'standalone' && app === 'receiver') {
     blockers.push(
-      'shape=standalone is only valid for app=reporter. The `log10x/reporter-10x` chart bundles its own fluent-bit + tenx-edge and reads container logs in parallel to your existing forwarder — it has no path to write regulated events back through that forwarder. Either switch to shape=inline (replaces your forwarder with a log10x-repackaged version) or app=reporter.'
+      'shape=standalone is only valid for app=reporter. The `log10x/reporter-10x` chart bundles its own fluent-bit + tenx-edge and reads container logs in parallel to your existing forwarder — it has no path to write filtered events back through that forwarder. Either switch to shape=inline (replaces your forwarder with a log10x-repackaged version) or app=reporter.'
     );
   }
   if (shape === 'standalone' && args.optimize) {
@@ -137,7 +137,7 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   }
   if (app === 'reporter' && args.readOnly) {
     blockers.push(
-      'mode=readonly is a Receiver-app concept. The Reporter app is read-only by definition (it never writes events back through the forwarder — it only publishes TenXSummary metrics). Drop `mode` or switch to `app=reducer` (Receiver).'
+      'mode=readonly is a Receiver-app concept. The Reporter app is read-only by definition (it never writes events back through the forwarder — it only publishes TenXSummary metrics). Drop `mode` or switch to `app=receiver` (Receiver).'
     );
   }
   if (args.optimize && args.readOnly) {
@@ -170,7 +170,7 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   // bug, which applies regardless of optimize).
   if (shape === 'inline' && args.optimize && app === 'reporter') {
     blockers.push(
-      'optimize=true is a Receiver-app feature (it encodes events emitted back through the forwarder). The Reporter app does not emit events back through the forwarder — it only publishes aggregated TenXSummary metrics. Drop `optimize` or switch to `app=reducer`.'
+      'optimize=true is a Receiver-app feature (it encodes events emitted back through the forwarder). The Reporter app does not emit events back through the forwarder — it only publishes aggregated TenXSummary metrics. Drop `optimize` or switch to `app=receiver`.'
     );
   }
 
@@ -187,7 +187,7 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   const appTitle = app === 'reporter' ? 'Reporter' : 'Receiver';
   if (snapshot.recommendations.alreadyInstalled[app]) {
     notes.push(
-      `A ${appTitle} is already installed in namespace \`${snapshot.recommendations.alreadyInstalled[app]}\`. Installing a second release under a different name + namespace is safe but will duplicate ${app === 'reporter' ? 'metric emission' : 'regulation'} unless the existing one is torn down first.`
+      `A ${appTitle} is already installed in namespace \`${snapshot.recommendations.alreadyInstalled[app]}\`. Installing a second release under a different name + namespace is safe but will duplicate ${app === 'reporter' ? 'metric emission' : 'event filtering'} unless the existing one is torn down first.`
     );
   }
   if (spec?.chartAvailability === 'upstream-fallback') {
@@ -228,7 +228,7 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
     // when the cluster runs multiple forwarder DaemonSets.
     const fwLabel = args.forwarder ?? snapshot.recommendations.existingForwarder ?? 'no forwarder';
     notes.push(
-      `This plan installs **standalone** — \`log10x/reporter-10x\` runs as a parallel DaemonSet alongside your existing ${fwLabel} deployment. No changes to your forwarder; the chart bundles its own fluent-bit to tail /var/log/containers/*.log. Report-mode only (metrics). For regulation/filtering/compaction you'd install the \`log10x-fluent/*\` inline variant in place of your forwarder.`
+      `This plan installs **standalone** — \`log10x/reporter-10x\` runs as a parallel DaemonSet alongside your existing ${fwLabel} deployment. No changes to your forwarder; the chart bundles its own fluent-bit to tail /var/log/containers/*.log. Report-mode only (metrics). For filtering/compaction you'd install the \`log10x-fluent/*\` inline variant in place of your forwarder.`
     );
   }
 
@@ -269,8 +269,8 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
     notes,
     blockers,
     gitopsExplainer:
-      app === 'reducer' && shape === 'inline' && blockers.length === 0
-        ? buildCompactReducerGitopsExplainer({ optimize: args.optimize === true })
+      app === 'receiver' && shape === 'inline' && blockers.length === 0
+        ? buildCompactReceiverGitopsExplainer({ optimize: args.optimize === true })
         : undefined,
   };
 }
@@ -278,7 +278,7 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
 /**
  * GitOps section explaining MCP-managed compactReceiver updates.
  *
- * The reducer's compact decision can be:
+ * The receiver's compact decision can be:
  *   - global ON via `receiverOptimize=true` (compact every event), or
  *   - per-pattern via the compactReceiver module (CSV lookup + JS predicate),
  *     which is what this section is for.
@@ -287,7 +287,7 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
  * (to OPT OUT specific audit/compliance patterns), but the customer can
  * also skip GitOps entirely. We surface that trade-off in `whenToSkip`.
  */
-function buildCompactReducerGitopsExplainer(opts: { optimize: boolean }): GitopsExplainer {
+function buildCompactReceiverGitopsExplainer(opts: { optimize: boolean }): GitopsExplainer {
   return {
     headline:
       'The compactReceiver decides per-event whether to emit `encode()` (compact, ~20-40x smaller) or `fullText`. Decisions live in a CSV the engine pulls from your GitHub repo on a schedule. Wire GitOps once and the MCP can author per-pattern PRs (`log10x_advise_compact`) — the engine hot-reloads the CSV without a pod restart.',
@@ -300,11 +300,11 @@ function buildCompactReducerGitopsExplainer(opts: { optimize: boolean }): Gitops
       opts.optimize
         ? '`receiverOptimize=true` is already set on this plan, which compacts every event. Add GitOps only if you need to opt SPECIFIC patterns OUT of compaction (audit/compliance).'
         : 'You will set `receiverOptimize=true` later to compact every event uniformly — no per-pattern decisions needed.',
-      'You will not be using the receiver app at all (this section is reducer-only).',
+      'You will not be using the receiver app at all (this section is receiver-only).',
     ],
     repoLayout: [
-      { path: 'pipelines/run/regulate/compact/compact-lookup.csv', comment: 'MCP edits this — CSV change → hot reload (no restart)' },
-      { path: 'pipelines/run/regulate/compact/compact-object-global.js', comment: 'predicate logic — JS change → pipeline restart' },
+      { path: 'pipelines/run/receive/compact/compact-lookup.csv', comment: 'MCP edits this — CSV change → hot reload (no restart)' },
+      { path: 'pipelines/run/receive/compact/compact-object-global.js', comment: 'predicate logic — JS change → pipeline restart' },
     ],
     envVars: [
       { name: 'GH_ENABLED', value: 'true', required: true, note: 'master switch for the GitHub puller' },
@@ -312,7 +312,7 @@ function buildCompactReducerGitopsExplainer(opts: { optimize: boolean }): Gitops
       { name: 'GH_TOKEN', value: '<github PAT>', required: true, note: 'PAT with Contents: Read scope; store as a k8s Secret + reference via valueFrom' },
       { name: 'GH_BRANCH', value: 'main', required: false, note: 'branch to pull from' },
       { name: 'GH_SYNC_INTERVAL', value: '30s', required: false, note: 'engine re-fetches the repo this often' },
-      { name: 'compactReceiverLookupFile', value: 'pipelines/run/regulate/compact/compact-lookup.csv', required: true, note: 'must match the path inside your GitOps repo' },
+      { name: 'compactReceiverLookupFile', value: 'pipelines/run/receive/compact/compact-lookup.csv', required: true, note: 'must match the path inside your GitOps repo' },
       { name: 'compactReceiverFieldNames', value: '[symbolMessage]', required: false, note: 'fields joined with `_` to form each event\'s lookup key' },
       { name: 'compactReceiverDefault', value: 'false', required: false, note: '`false`: entries opt INTO compaction. `true`: entries opt OUT (use with receiverOptimize=true)' },
     ],
@@ -322,8 +322,8 @@ function buildCompactReducerGitopsExplainer(opts: { optimize: boolean }): Gitops
         'log10x_advise_compact \\\n  gitops_repo=your-org/your-config-repo \\\n  compact=[payment_retry_gateway_timeout, k8s_health_probe_200] \\\n  preserve=[auth_audit_trail] \\\n  reason="OPS-5123: spike triage"',
     },
     caveats: [
-      'The default `paths` glob in `pipelines/gitops/config.yaml` is hardcoded to `test/*.csv` for local testing. Override either by forking the config repo and editing the glob, or by setting `GH_PATH=pipelines/run/regulate/compact/*` (Gap A — env override is being wired up).',
-      'Customers running multiple reducer pods all watching the same GitOps repo will see fan-out: a single PR triggers reload on every pod within a poll window. That is the intended behavior — kept here as a heads-up for capacity planning.',
+      'The default `paths` glob in `pipelines/gitops/config.yaml` is hardcoded to `test/*.csv` for local testing. Override either by forking the config repo and editing the glob, or by setting `GH_PATH=pipelines/run/receive/compact/*` (Gap A — env override is being wired up).',
+      'Customers running multiple receiver pods all watching the same GitOps repo will see fan-out: a single PR triggers reload on every pod within a poll window. That is the intended behavior — kept here as a heads-up for capacity planning.',
       'The GitOps puller pulls files into a temp dir scoped per `(repo, branch, sha, pollInterval)`. Folder names rotate as the branch advances; the customer never references that path directly — only the repo-relative path in `compactReceiverLookupFile`.',
     ],
   };

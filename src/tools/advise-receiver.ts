@@ -3,10 +3,10 @@
  *
  * Given a DiscoverySnapshot (from `log10x_discover_env`) + a few user
  * choices, produce a forwarder-specific install/verify/teardown plan
- * for the Log10x Receiver (kind=regulate). Same 5 forwarders as the
+ * for the Log10x Receiver (kind=receive). Same 5 forwarders as the
  * Reporter, same charts, same preflight checks — the only difference
  * is the tenx `kind` value, which the chart templates route to a
- * different launch arg (`@run/input/forwarder/<fw>/regulate`).
+ * different launch arg (`@run/input/forwarder/<fw>/receive`).
  */
 
 import { z } from 'zod';
@@ -45,7 +45,7 @@ export const adviseReceiverSchema = {
     .enum(['mock', 'elasticsearch', 'splunk', 'datadog', 'cloudwatch'])
     .optional()
     .describe(
-      'Output destination for regulated events. When omitted: auto-detects from ambient SIEM credentials (DD_API_KEY → datadog, SPLUNK_HOST+SPLUNK_TOKEN → splunk, ELASTIC_URL → elasticsearch, AWS chain → cloudwatch); single match is used; multiple → ambiguous error; none → falls back to `mock` (writes to pod stdout — ideal for smoke tests + dogfooding).'
+      'Output destination for filtered events. When omitted: auto-detects from ambient SIEM credentials (DD_API_KEY → datadog, SPLUNK_HOST+SPLUNK_TOKEN → splunk, ELASTIC_URL → elasticsearch, AWS chain → cloudwatch); single match is used; multiple → ambiguous error; none → falls back to `mock` (writes to pod stdout — ideal for smoke tests + dogfooding).'
     ),
   output_host: z
     .string()
@@ -62,7 +62,7 @@ export const adviseReceiverSchema = {
     .enum(['readonly', 'readwrite'])
     .optional()
     .describe(
-      'Receiver mode. `readwrite` (default): receive events, regulate them, write them back through the forwarder (with optional compact encoding when `optimize=true`). `readonly`: receive events, emit `emitted_events`/`all_events` TenXSummary metrics, do NOT write events back — passive metrics-only deployment. Plan emits `env: [{name: receiverReadOnly, value: "true"}]` for readonly. The engine flag (`receiverReadOnly`) gates every event-output stream module (forward/unix/socket/stdout) so the return loop to the forwarder is never constructed. For the parallel-DaemonSet observation pattern (separate pod, not in the forwarder pipeline), use `log10x_advise_reporter` with `shape=standalone` instead.'
+      'Receiver mode. `readwrite` (default): receive events, filter them, write them back through the forwarder (with optional compact encoding when `optimize=true`). `readonly`: receive events, emit `emitted_events`/`all_events` TenXSummary metrics, do NOT write events back — passive metrics-only deployment. Plan emits `env: [{name: receiverReadOnly, value: "true"}]` for readonly. The engine flag (`receiverReadOnly`) gates every event-output stream module (forward/unix/socket/stdout) so the return loop to the forwarder is never constructed. For the parallel-DaemonSet observation pattern (separate pod, not in the forwarder pipeline), use `log10x_advise_reporter` with `shape=standalone` instead.'
     ),
   action: z
     .enum(['install', 'verify', 'teardown', 'all'])
@@ -93,7 +93,7 @@ export async function executeAdviseReceiver(args: AdviseReceiverArgs): Promise<s
 
   const plan = await buildReporterPlan({
     snapshot,
-    app: 'reducer',
+    app: 'receiver',
     forwarder: args.forwarder as ForwarderKind | undefined,
     releaseName: args.release_name ?? 'my-receiver',
     namespace: args.namespace,

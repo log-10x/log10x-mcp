@@ -216,7 +216,7 @@ test('renderPocReport native exclusion configs include the chosen SIEM', () => {
   }
 });
 
-test('renderPocReport reducer YAML has an untilEpochSec', () => {
+test('renderPocReport receiver YAML has an untilEpochSec', () => {
   const out = renderPocReport({
     siem: 'datadog',
     window: '7d',

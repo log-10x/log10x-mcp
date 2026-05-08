@@ -100,9 +100,9 @@ test('hand-rolled fluent-bit → standalone reporter is top pick', () => {
     }),
   });
   assert.equal(rec.topPick.args.shape, 'standalone');
-  // Inline reducer should be in the list but blocked.
+  // Inline receiver should be in the list but blocked.
   const inlineReg = rec.alternatives.find(
-    (a) => a.args.app === 'reducer' && a.args.shape === 'inline' && !a.args.optimize
+    (a) => a.args.app === 'receiver' && a.args.shape === 'inline' && !a.args.optimize
   );
   assert.ok(inlineReg);
   assert.ok(inlineReg?.blocker?.toLowerCase().includes('not helm-managed'));
@@ -136,9 +136,9 @@ test('helm-managed logstash → standalone reporter; inline alts blocked', () =>
   );
 });
 
-// ── Rule 4: helm-managed fluent-bit + goal=compact → inline reducer + optimize ──
+// ── Rule 4: helm-managed fluent-bit + goal=compact → inline receiver + optimize ──
 
-test('helm-managed fluent-bit + goal=compact → inline reducer + optimize=true', () => {
+test('helm-managed fluent-bit + goal=compact → inline receiver + optimize=true', () => {
   const rec = recommendInstallMode({
     snapshot: baseSnapshot({
       kubectl: {
@@ -153,14 +153,14 @@ test('helm-managed fluent-bit + goal=compact → inline reducer + optimize=true'
     }),
     goal: 'compact',
   });
-  assert.equal(rec.topPick.args.app, 'reducer');
+  assert.equal(rec.topPick.args.app, 'receiver');
   assert.equal(rec.topPick.args.shape, 'inline');
   assert.equal(rec.topPick.args.optimize, true);
   assert.equal(rec.topPick.args.forwarder, 'fluentbit');
   assert.equal(rec.topPick.blocker, undefined);
 });
 
-test('helm-managed fluentd + goal=compact → inline reducer + optimize=true', () => {
+test('helm-managed fluentd + goal=compact → inline receiver + optimize=true', () => {
   const rec = recommendInstallMode({
     snapshot: baseSnapshot({
       kubectl: {
@@ -175,13 +175,13 @@ test('helm-managed fluentd + goal=compact → inline reducer + optimize=true', (
     }),
     goal: 'compact',
   });
-  assert.equal(rec.topPick.args.app, 'reducer');
+  assert.equal(rec.topPick.args.app, 'receiver');
   assert.equal(rec.topPick.args.optimize, true);
 });
 
-// ── Rule 5: helm-managed filebeat + goal=compact → inline reducer + optimize (1.0.7 unified) ──
+// ── Rule 5: helm-managed filebeat + goal=compact → inline receiver + optimize (1.0.7 unified) ──
 
-test('helm-managed filebeat + goal=compact → inline reducer + optimize=true (1.0.7)', () => {
+test('helm-managed filebeat + goal=compact → inline receiver + optimize=true (1.0.7)', () => {
   const rec = recommendInstallMode({
     snapshot: baseSnapshot({
       kubectl: {
@@ -208,9 +208,9 @@ test('helm-managed filebeat + goal=compact → inline reducer + optimize=true (1
   assert.equal(rec.topPick.blocker, undefined);
 });
 
-// ── Rule 6: helm-managed fluent-bit + goal=cut-cost → inline reducer (no optimize) ──
+// ── Rule 6: helm-managed fluent-bit + goal=cut-cost → inline receiver (no optimize) ──
 
-test('helm-managed fluent-bit + goal=cut-cost → inline reducer (no optimize)', () => {
+test('helm-managed fluent-bit + goal=cut-cost → inline receiver (no optimize)', () => {
   const rec = recommendInstallMode({
     snapshot: baseSnapshot({
       kubectl: {
@@ -225,9 +225,9 @@ test('helm-managed fluent-bit + goal=cut-cost → inline reducer (no optimize)',
     }),
     goal: 'cut-cost',
   });
-  assert.equal(rec.topPick.args.app, 'reducer');
+  assert.equal(rec.topPick.args.app, 'receiver');
   assert.equal(rec.topPick.args.shape, 'inline');
-  // optimize not required for cut-cost — regulate (filter/sample) alone suffices.
+  // optimize not required for cut-cost — receive (filter/sample) alone suffices.
   assert.notEqual(rec.topPick.args.optimize, true);
 });
 
@@ -249,7 +249,7 @@ test('helm-managed fluent-bit + goal=just-metrics → inline reporter', () => {
     goal: 'just-metrics',
   });
   // Either inline reporter OR standalone reporter is acceptable — both match
-  // the goal. Assert just-metrics is report-mode (not reducer).
+  // the goal. Assert just-metrics is report-mode (not receiver).
   assert.equal(rec.topPick.args.app, 'reporter');
 });
 

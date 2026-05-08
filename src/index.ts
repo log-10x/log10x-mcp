@@ -814,7 +814,7 @@ registerLog10xTool('log10x_advise_reporter', adviseReporterSchema, (args) =>
   wrap('log10x_advise_reporter', () => executeAdviseReporter(args))
 );
 
-// ── Tool: log10x_advise_receiver (install advisor) ──
+// ── Tool: log10x_advise_retriever (install advisor) ──
 
 registerLog10xTool('log10x_advise_retriever', adviseRetrieverSchema, (args) =>
   wrap('log10x_advise_retriever', () => executeAdviseRetriever(args))
@@ -857,7 +857,7 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_cost_drivers', intent: 'Why did log costs spike this week — dollar-ranked patterns with week-over-week deltas' },
   { name: 'log10x_event_lookup', intent: 'What is this single log line — resolve to stable identity + cost + AI classification' },
   { name: 'log10x_pattern_examples', intent: 'Recent live events for a pattern from the log analyzer with template-parsed slot values — bounded to 24h, for older use retriever_query' },
-  { name: 'log10x_savings', intent: 'Pipeline ROI — how much receiver / optimizer / retriever are saving in dollars' },
+  { name: 'log10x_savings', intent: 'Pipeline ROI — how much receiver / retriever are saving in dollars' },
   { name: 'log10x_pattern_trend', intent: 'Time series for a pattern — volume + cost history, spike detection, sparkline' },
   { name: 'log10x_services', intent: 'List all monitored services ranked by cost' },
   { name: 'log10x_exclusion_filter', intent: 'Generate mute file entry or SIEM drop rule for a pattern' },
@@ -945,7 +945,7 @@ async function handleCliFlags(): Promise<boolean> {
         'Environment:',
         '  LOG10X_API_KEY            API key from console.log10x.com (or run `log10x_signin_start` then `log10x_signin_complete` to mint one via Auth0 Device Flow)',
         '  LOG10X_API_BASE           Override Prometheus gateway URL',
-        '  LOG10X_REGULATOR_RETRIEVER_URL       Retriever query endpoint (optional)',
+        '  __SAVE_LOG10X_RETRIEVER_URL__       Retriever query endpoint (optional)',
         '  LOG10X_PASTE_URL          Override Log10x paste endpoint (optional)',
         '  LOG10X_TENX_MODE          `local` (default) or `docker` — backend for privacy-mode tools',
         '  LOG10X_TENX_PATH          Path to local tenx CLI (used when LOG10X_TENX_MODE=local)',

@@ -126,7 +126,7 @@ function deriveRecommendations(
   const suggestedNamespace =
     opts.namespaceHint ??
     existingForwarderNamespace ??
-    (alreadyInstalled.reporter ?? alreadyInstalled.reducer ?? alreadyInstalled.retriever) ??
+    (alreadyInstalled.reporter ?? alreadyInstalled.receiver ?? alreadyInstalled.retriever) ??
     'logging';
 
   // Retriever S3 bucket: prefer one with an indexing-results prefix.
@@ -142,23 +142,23 @@ function deriveRecommendations(
     if (!current) retrieverSqsUrls[q.role] = q.url;
   }
 
-  // Pull GitOps + compactReceiver wiring from any running reducer pod.
+  // Pull GitOps + compactReceiver wiring from any running receiver pod.
   // Multiple receivers in the cluster (e.g., dev + prod) is rare;
   // first-wins matches the alreadyInstalled iteration above. Only record
   // GH_REPO if GH_ENABLED is also literally "true" — a repo set with the
   // master switch off would mislead the compact advisor.
-  let reducerGitopsRepo: string | undefined;
-  let reducerCompactLookupFile: string | undefined;
+  let receiverGitopsRepo: string | undefined;
+  let receiverCompactLookupFile: string | undefined;
   for (const app of kubectl.log10xApps) {
-    if (app.kind !== 'reducer') continue;
+    if (app.kind !== 'receiver') continue;
     const env = app.env ?? {};
     if (env.GH_ENABLED === 'true' && env.GH_REPO) {
-      reducerGitopsRepo = env.GH_REPO;
+      receiverGitopsRepo = env.GH_REPO;
     }
     if (env.compactReceiverLookupFile) {
-      reducerCompactLookupFile = env.compactReceiverLookupFile;
+      receiverCompactLookupFile = env.compactReceiverLookupFile;
     }
-    if (reducerGitopsRepo || reducerCompactLookupFile) break;
+    if (receiverGitopsRepo || receiverCompactLookupFile) break;
   }
 
   return {
@@ -166,8 +166,8 @@ function deriveRecommendations(
     existingForwarder,
     existingForwarderNamespace,
     retrieverS3Bucket: retrieverBucket,
-    reducerGitopsRepo,
-    reducerCompactLookupFile,
+    receiverGitopsRepo,
+    receiverCompactLookupFile,
     retrieverSqsUrls: Object.keys(retrieverSqsUrls).length > 0 ? retrieverSqsUrls : undefined,
     alreadyInstalled,
   };

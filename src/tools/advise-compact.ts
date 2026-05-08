@@ -51,13 +51,13 @@ export const adviseCompactSchema = {
     .string()
     .optional()
     .describe(
-      'Repo-relative path to the compact lookup CSV (mode=csv). Default: `pipelines/run/regulate/compact/compact-lookup.csv` — matches the recommended layout where JS predicate + lookup CSV co-locate in one dir.'
+      'Repo-relative path to the compact lookup CSV (mode=csv). Default: `pipelines/run/receive/compact/compact-lookup.csv` — matches the recommended layout where JS predicate + lookup CSV co-locate in one dir.'
     ),
   js_path: z
     .string()
     .optional()
     .describe(
-      'Repo-relative path to the predicate JS file (mode=js). Default: `pipelines/run/regulate/compact/compact-object-global.js`.'
+      'Repo-relative path to the predicate JS file (mode=js). Default: `pipelines/run/receive/compact/compact-object-global.js`.'
     ),
   field_names: z
     .array(z.string())
@@ -118,8 +118,8 @@ export const adviseCompactSchema = {
 const schemaObj = z.object(adviseCompactSchema);
 export type AdviseCompactArgs = z.infer<typeof schemaObj>;
 
-const DEFAULT_LOOKUP_PATH = 'pipelines/run/regulate/compact/compact-lookup.csv';
-const DEFAULT_JS_PATH = 'pipelines/run/regulate/compact/compact-object-global.js';
+const DEFAULT_LOOKUP_PATH = 'pipelines/run/receive/compact/compact-lookup.csv';
+const DEFAULT_JS_PATH = 'pipelines/run/receive/compact/compact-object-global.js';
 const DEFAULT_FIELD_NAMES = ['symbolMessage'];
 const CSV_HEADER = 'key,value';
 
@@ -211,7 +211,7 @@ function resolveTarget(args: AdviseCompactArgs): { resolved: AdviseCompactArgs }
       ].join('\n'),
     };
   }
-  const repo = snapshot.recommendations.reducerGitopsRepo;
+  const repo = snapshot.recommendations.receiverGitopsRepo;
   if (!repo) {
     return {
       error: [
@@ -231,7 +231,7 @@ function resolveTarget(args: AdviseCompactArgs): { resolved: AdviseCompactArgs }
     ...args,
     gitops_repo: repo,
     lookup_path:
-      args.lookup_path ?? snapshot.recommendations.reducerCompactLookupFile ?? undefined,
+      args.lookup_path ?? snapshot.recommendations.receiverCompactLookupFile ?? undefined,
   };
   return { resolved };
 }
@@ -414,7 +414,7 @@ async function executeCsvMode(args: AdviseCompactArgs): Promise<string> {
   out.push('');
   out.push('To verify in-cluster after merge:');
   out.push('```bash');
-  out.push('kubectl logs -l app.kubernetes.io/name=reducer -c reducer --tail=200 | grep -i "resource reload"');
+  out.push('kubectl logs -l app.kubernetes.io/name=receiver -c receiver --tail=200 | grep -i "resource reload"');
   out.push('# expected line within ~30s of merge:');
   out.push('# resource reload: resetting pipeline unit ... modified resources: [...compact-lookup.csv]');
   out.push('```');
@@ -599,7 +599,7 @@ async function executeJsMode(args: AdviseCompactArgs): Promise<string> {
   out.push('');
   out.push('To verify in-cluster after merge:');
   out.push('```bash');
-  out.push('kubectl logs -l app.kubernetes.io/name=reducer -c reducer --tail=200 | grep -i "config file.*changed, restarting pipeline"');
+  out.push('kubectl logs -l app.kubernetes.io/name=receiver -c receiver --tail=200 | grep -i "config file.*changed, restarting pipeline"');
   out.push('# expected line within ~30s of merge:');
   out.push('# Config file .../compact-object-global.js changed, restarting pipeline.');
   out.push('```');

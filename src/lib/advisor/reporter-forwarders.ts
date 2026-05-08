@@ -42,14 +42,14 @@ import type { ForwarderKind } from '../discovery/types.js';
 export type OutputDestination = 'mock' | 'elasticsearch' | 'splunk' | 'datadog' | 'cloudwatch';
 
 // Which tenx kind this install is for.
-//   report   -> Reporter (read-only metric emission)
-//   regulate -> Receiver (read + write events back through the forwarder)
+//   report  -> Reporter (read-only metric emission)
+//   receive -> Receiver (read + write events back through the forwarder)
 //
 // Optimizer mode (lossless encoded-event output, ~20-40x volume reduction:
 // `"log":"~-8Av]P9cVZb,timestamp,var1,var2,..."`) is NOT exposed as a kind.
 // It is triggered by setting `env: [{name: receiverOptimize, value: "true"}]`
 // on the forwarder container.
-export type TenxKind = 'report' | 'regulate';
+export type TenxKind = 'report' | 'receive';
 
 /** How a forwarder's helm chart labels its workloads + pods. */
 export type SelectorStyle = 'k8s-recommended' | 'legacy-helm';
@@ -90,21 +90,21 @@ export interface ForwarderSpec {
     apiKey: string;
     releaseName: string;
     destination: OutputDestination;
-    /** Tenx kind — report (Reporter app) or regulate (Receiver app). */
+    /** Tenx kind — report (Reporter app) or receive (Receiver app). */
     kind: TenxKind;
     outputHost?: string;
     splunkHecToken?: string;
     /** Placeholder emitted into `tenx.gitToken`. Defaults to the public-repo no-op string. */
     gitToken?: string;
     /**
-     * When true AND kind=regulate, emit events in compact encoded form
+     * When true AND kind=receive, emit events in compact encoded form
      * (templateHash+vars, ~20-40x volume reduction). Plan emits the
      * `receiverOptimize=true` env var on the forwarder container.
      * Silently ignored when kind=report.
      */
     optimize?: boolean;
     /**
-     * When true AND kind=regulate, run the receiver in read-only mode
+     * When true AND kind=receive, run the receiver in read-only mode
      * (passive metrics emitter — no events written back through the
      * forwarder). Plan emits the `receiverReadOnly=true` env var, which
      * the engine reads to gate every event-output stream module
@@ -139,8 +139,8 @@ const MOCK_OUTPUT_NOTE =
 
 /**
  * Build a top-level `env:` YAML block for receiver-mode flags.
- * - kind=regulate + optimize=true → receiverOptimize=true
- * - kind=regulate + readOnly=true → receiverReadOnly=true
+ * - kind=receive + optimize=true → receiverOptimize=true
+ * - kind=receive + readOnly=true → receiverReadOnly=true
  * Silently empty when kind=report or both flags are off. Returned
  * verbatim for callers that emit it as a top-level chart value
  * (fluent-bit / fluentd); other charts wrap it differently.
@@ -150,7 +150,7 @@ function renderTenxEnvBlock(opts: {
   optimize?: boolean;
   readOnly?: boolean;
 }): string {
-  if (opts.kind !== 'regulate') return '';
+  if (opts.kind !== 'receive') return '';
   const entries: string[] = [];
   if (opts.optimize) entries.push('  - name: receiverOptimize\n    value: "true"');
   if (opts.readOnly) entries.push('  - name: receiverReadOnly\n    value: "true"');
@@ -396,11 +396,11 @@ ${envBlock}`;
       const outputBlock = renderFilebeatOutput(destination, outputHost);
       // The chart routes kind=optimize → @apps/receiver + receiverOptimize
       // env var. Emit kind=optimize in values when caller requested optimize.
-      const effectiveKind = optimize && kind === 'regulate' ? 'optimize' : kind;
+      const effectiveKind = optimize && kind === 'receive' ? 'optimize' : kind;
       // readOnly has no chart-level kind value — emit as an env var on
       // the daemonset's extraEnvs so the engine reads receiverReadOnly=true.
       const readOnlyEnvEntry =
-        readOnly && kind === 'regulate'
+        readOnly && kind === 'receive'
           ? `
     - name: receiverReadOnly
       value: "true"`
@@ -497,9 +497,9 @@ ${indent(outputBlock, 6)}
     selectorLabel: (r) => legacyElasticSelector(r, 'logstash'),
     renderValues: ({ apiKey, releaseName, destination, kind, outputHost, gitToken, optimize, readOnly }) => {
       const output = renderLogstashOutput(destination, outputHost);
-      const effectiveKind = optimize && kind === 'regulate' ? 'optimize' : kind;
+      const effectiveKind = optimize && kind === 'receive' ? 'optimize' : kind;
       const extraEnvsBlock =
-        readOnly && kind === 'regulate'
+        readOnly && kind === 'receive'
           ? `extraEnvs:
   - name: receiverReadOnly
     value: "true"`
@@ -573,9 +573,9 @@ ${indent(output, 4)}
       // on. We turn it on explicitly so the user's pipeline just works.
       // image.repository is required by the chart and has no default.
       const exporter = renderOtelExporter(destination, outputHost);
-      const effectiveKind = optimize && kind === 'regulate' ? 'optimize' : kind;
+      const effectiveKind = optimize && kind === 'receive' ? 'optimize' : kind;
       const extraEnvsBlock =
-        readOnly && kind === 'regulate'
+        readOnly && kind === 'receive'
           ? `
 extraEnvs:
   - name: receiverReadOnly
@@ -668,8 +668,8 @@ ${indent(exporter, 4)}
 // the plan as detected context only.
 //
 // Only supports app=reporter (kind=report). The reporter-10x chart has no
-// path to hook into the user's forwarder's output to regulate / compact
-// events — it only emits metrics. Callers passing app='reducer' or
+// path to hook into the user's forwarder's output to filter / compact
+// events — it only emits metrics. Callers passing app='receiver' or
 // optimize=true with shape='standalone' get a blocker.
 export const STANDALONE_SPEC: ForwarderSpec = {
   label: 'Standalone Reporter (reporter-10x)',

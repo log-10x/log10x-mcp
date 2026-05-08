@@ -2,7 +2,7 @@
  * Per-view renderer tests. Each view is deterministic given a
  * RenderInput; we lock down shape + line counts + must-include tokens
  * so future changes that bloat the summary (or accidentally strip the
- * reducer YAML) fail loudly in CI.
+ * receiver YAML) fail loudly in CI.
  */
 
 import { test } from 'node:test';
@@ -114,13 +114,13 @@ test('summary flags WARN/ERROR patterns in top-N with risk banner', () => {
   assert.ok(out.includes('log10x_dependency_check'), 'should reference the dependency check tool');
 });
 
-test('yaml view returns valid YAML fence with reducer entries', () => {
+test('yaml view returns valid YAML fence with receiver entries', () => {
   const out = renderPocYaml(input(), 3);
   assert.ok(out.startsWith('```yaml'), 'yaml view should start with fenced block');
   assert.ok(out.includes('- pattern:'), 'should include pattern key');
   assert.ok(out.includes('action:'), 'should include action key');
   assert.ok(out.includes('untilEpochSec:'), 'should include expiry');
-  assert.ok(out.includes('reducer mute file'), 'should have reducer comment');
+  assert.ok(out.includes('receiver mute file'), 'should have receiver comment');
 });
 
 test('yaml view cap respects top_n', () => {
@@ -147,7 +147,7 @@ test('top view emits a drivers table with $/year column', () => {
 
 test('pattern view returns detail for a known identity', () => {
   const patterns = renderPocReport(input()).markdown;
-  // Pick an identity that should appear in the report: extract from reducer YAML block.
+  // Pick an identity that should appear in the report: extract from receiver YAML block.
   const m = /- pattern: ([a-z0-9_]+)/.exec(patterns);
   assert.ok(m, 'should find at least one identity in full report');
   const identity = m[1];

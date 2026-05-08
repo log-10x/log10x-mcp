@@ -8,7 +8,7 @@
 const BYTES_METRIC = 'all_events_summaryBytes_total';
 const VOLUME_METRIC = 'all_events_summaryVolume_total';
 const EMITTED_METRIC = 'emitted_events_summaryBytes_total';
-const EMITTED_OPT_METRIC = 'emitted_events_summaryOptimizedBytes_total';
+const EMITTED_OPT_METRIC = 'emitted_events_optimized_size_total';
 const INDEXED_METRIC = 'indexed_events_summaryBytes_total';
 const STREAMED_METRIC = 'streamed_events_summaryBytes_total';
 
@@ -136,15 +136,17 @@ export function distinctServices(range: string): string {
 
 // ── Savings queries — port of Grafana ROI analytics dashboard ──
 // See backend/grafana/dashboards/roi_analytics.json. Metric names MATTER.
+// The engine emits `app:receiver` and `app:reporter` — see
+// modules/apps/{receiver,reporter}/config.yaml.
 
-/** Bytes entering the edge pipeline (reporter + reducer + optimizer input). */
+/** Bytes entering the edge pipeline (reporter + receiver input). */
 export function edgeInputBytes(range: string): string {
-  return `sum(increase(${BYTES_METRIC}{tenx_app=~"reporter|reducer|optimizer",${LABELS.env}="edge"}[${range}]))`;
+  return `sum(increase(${BYTES_METRIC}{tenx_app=~"reporter|receiver",${LABELS.env}="edge"}[${range}]))`;
 }
 
-/** Bytes emitted from the edge pipeline — reducer output + optimizer compact output. */
+/** Bytes emitted from the edge pipeline — receiver output (incl. compact). */
 export function edgeEmittedBytes(range: string): string {
-  return `(sum(increase(${EMITTED_OPT_METRIC}{tenx_app="optimizer",${LABELS.env}="edge"}[${range}])) or vector(0)) + (sum(increase(${EMITTED_METRIC}{tenx_app="regulator",${LABELS.env}="edge"}[${range}])) or vector(0))`;
+  return `(sum(increase(${EMITTED_OPT_METRIC}{tenx_app="receiver",${LABELS.env}="edge"}[${range}])) or vector(0)) + (sum(increase(${EMITTED_METRIC}{tenx_app="receiver",${LABELS.env}="edge"}[${range}])) or vector(0))`;
 }
 
 /** Bytes indexed into the customer's S3 by the Retriever. */

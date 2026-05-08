@@ -353,11 +353,11 @@ test('shape=standalone installs reporter-10x regardless of detected forwarder', 
   assert.ok(valuesContent.includes('log10xApiKey:'), 'standalone values should use reporter-10x flat layout');
 });
 
-test('shape=standalone + app=reducer is blocked', async () => {
+test('shape=standalone + app=receiver is blocked', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
     shape: 'standalone',
-    app: 'reducer',
+    app: 'receiver',
     apiKey: 'test',
   });
   // Blocker must call out that standalone is reporter-only.
