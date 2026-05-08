@@ -40,7 +40,7 @@ export const adviseInstallSchema = {
     .enum(['just-metrics', 'cut-cost', 'compact', 'archive'])
     .optional()
     .describe(
-      'What the user is trying to achieve. When given, the tool returns a single concrete install plan for the best-matching path. When omitted, the tool returns a ranked table of candidate paths + the top pick\'s resolved args so the caller can re-invoke with `goal` or jump to `log10x_advise_{reporter,receiver,retriever}` directly. Values: `just-metrics` (cost attribution + pattern fingerprinting, no filtering), `cut-cost` (regulate: filter/sample events in-flight), `compact` (regulate + ~20-40x volume reduction via compact encoding), `archive` (Retriever: long-term S3 archive + forensic query).'
+      'What the user is trying to achieve. When given, the tool returns a single concrete install plan for the best-matching path. When omitted, the tool returns a ranked table of candidate paths + the top pick\'s resolved args so the caller can re-invoke with `goal` or jump to `log10x_advise_{reporter,receiver,retriever}` directly. Values: `just-metrics` (cost attribution + pattern fingerprinting, no filtering), `cut-cost` (receive: filter/sample events in-flight), `compact` (receive + ~20-40x volume reduction via compact encoding), `archive` (Retriever: long-term S3 archive + forensic query).'
     ),
   api_key: z
     .string()
@@ -124,7 +124,7 @@ async function renderConcretePlan(
   const snapshot = getSnapshot(snapshotId)!;
   const action = args.action ?? 'all';
 
-  // Resolve destination once for the reporter/reducer branch. Retriever
+  // Resolve destination once for the reporter/receiver branch. Retriever
   // doesn't take a destination arg so we skip resolution there.
   const destResolution =
     top.args.app === 'retriever'
@@ -134,7 +134,7 @@ async function renderConcretePlan(
   const destination = destResolution.destination;
   const destNote = destResolution.note ? `_${destResolution.note}_\n\n` : '';
 
-  // Route: retriever → buildRetrieverPlan; reporter/reducer → buildReporterPlan.
+  // Route: retriever → buildRetrieverPlan; reporter/receiver → buildReporterPlan.
   let planMd: string;
   if (top.args.app === 'retriever') {
     const plan = await buildRetrieverPlan({

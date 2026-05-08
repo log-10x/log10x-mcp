@@ -285,7 +285,7 @@ async function probeWorkloadsInNamespace(
     // First pass: does ANY container look like a log10x app image? If so,
     // we classify the whole workload as a log10x app and skip forwarder
     // classification entirely — this prevents fluent-bit sidecars inside
-    // log10x retriever/reducer pods from being mis-detected as a customer
+    // log10x retriever/receiver pods from being mis-detected as a customer
     // forwarder.
     const log10xContainer = (containers ?? []).find(
       (c) => isLog10xImage(c.image) || classifyLog10xApp(c.image, labels, helmRel?.chart) !== 'unknown'

@@ -2,7 +2,7 @@
  * Shared types for the install-advisor discovery + advise tools.
  *
  * The snapshot is the *only* contract between `discover_env` and
- * `advise_{reporter,reducer,retriever}`. Adding a field here is a
+ * `advise_{reporter,receiver,retriever}`. Adding a field here is a
  * wire-format change — bump `SNAPSHOT_SCHEMA_VERSION` below.
  */
 
@@ -18,7 +18,7 @@ export type ForwarderKind =
   | 'unknown';
 
 /** Log10x apps we look for already being installed. */
-export type Log10xAppKind = 'reporter' | 'reducer' | 'retriever' | 'compiler' | 'unknown';
+export type Log10xAppKind = 'reporter' | 'receiver' | 'retriever' | 'compiler' | 'unknown';
 
 /**
  * A workload (DaemonSet/Deployment/StatefulSet) we classified as a
@@ -153,16 +153,16 @@ export interface Recommendations {
   retrieverSqsUrls?: Partial<Record<'index' | 'query' | 'subquery' | 'stream', string>>;
   alreadyInstalled: Partial<Record<Log10xAppKind, string>>;
   /**
-   * `GH_REPO` from a running reducer pod, if detected. Used by the
+   * `GH_REPO` from a running receiver pod, if detected. Used by the
    * MCP's compactReceiver advisor to default the GitOps target repo.
    */
-  reducerGitopsRepo?: string;
+  receiverGitopsRepo?: string;
   /**
-   * `compactReceiverLookupFile` from a running reducer pod, if set.
+   * `compactReceiverLookupFile` from a running receiver pod, if set.
    * Used by the MCP's compactReceiver advisor to default the lookup
    * path inside the GitOps repo.
    */
-  reducerCompactLookupFile?: string;
+  receiverCompactLookupFile?: string;
 }
 
 /** The complete discovery snapshot. Immutable once emitted. */

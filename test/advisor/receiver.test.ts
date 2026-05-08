@@ -1,8 +1,15 @@
 /**
- * Reducer advisor tests. The same plan builder serves reporter +
- * reducer — these tests lock down the reducer-specific
- * differences: kind='regulate' in values, release-name default,
- * alreadyInstalled note keyed by reducer, and plan.app field.
+ * Receiver advisor tests. The same plan builder serves reporter +
+ * receiver — these tests lock down the receiver-specific differences:
+ * the right feature flags / kind values land in the chart values for
+ * each forwarder, release-name default, alreadyInstalled note keyed
+ * by receiver, and plan.app field.
+ *
+ * Per-forwarder values shape (current chart format, no backcompat):
+ * Every chart (fluent-bit / fluentd / otel-collector / filebeat / logstash)
+ * uses `tenx.optimize` and `tenx.readOnly` booleans. Default mode emits
+ * neither. The two flags are mutually exclusive — every chart's
+ * `tenx-validate.yaml` template fails install if both are true.
  */
 
 import { test } from 'node:test';
@@ -15,7 +22,7 @@ import { SNAPSHOT_SCHEMA_VERSION } from '../../src/lib/discovery/types.js';
 function baseSnapshot(overrides: Partial<DiscoverySnapshot> = {}): DiscoverySnapshot {
   return {
     schemaVersion: SNAPSHOT_SCHEMA_VERSION,
-    snapshotId: 'disc-reg-test-1',
+    snapshotId: 'disc-rec-test-1',
     startedAt: '2026-04-21T00:00:00Z',
     finishedAt: '2026-04-21T00:01:00Z',
     kubectl: {
@@ -52,10 +59,10 @@ for (const fw of forwarders) {
   if (fw === 'logstash') {
     // log10x-elastic/logstash@1.0.6 is chart-broken for sidecar mode;
     // the advisor blocks it entirely. Assert the blocker path here.
-    test(`reducer plan for ${fw} is blocked (chart broken)`, async () => {
+    test(`receiver plan for ${fw} is blocked (chart broken)`, async () => {
       const plan = await buildReporterPlan({
         snapshot: baseSnapshot(),
-        app: 'reducer',
+        app: 'receiver',
         forwarder: fw,
         apiKey: 'test',
         destination: 'mock',
@@ -68,29 +75,33 @@ for (const fw of forwarders) {
     });
     continue;
   }
-  test(`reducer plan for ${fw}: values embed kind=regulate`, async () => {
+  test(`receiver plan for ${fw}: values match the chart's expected shape`, async () => {
     const plan = await buildReporterPlan({
       snapshot: baseSnapshot(),
-      app: 'reducer',
+      app: 'receiver',
       forwarder: fw,
       apiKey: 'test',
       destination: 'mock',
     });
-    assert.equal(plan.app, 'reducer');
+    assert.equal(plan.app, 'receiver');
     const content = plan.install.find((s) => s.file)!.file!.contents;
-    assert.ok(content.includes('kind: "regulate"'), `${fw} values should embed kind=regulate`);
-    assert.ok(!content.includes('kind: "report"'), `${fw} values should NOT embed kind=report`);
+    // Every supported chart now uses boolean feature flags. Default mode
+    // (neither flag set) is just plain receiver — no `kind:` line, no
+    // `optimize: true`, no `readOnly: true`.
+    assert.ok(!/^\s*kind:/m.test(content), `${fw} values should NOT embed any kind: line; got: ${content}`);
+    assert.ok(!content.includes('optimize: true'), `${fw} default-mode values should NOT enable optimize`);
+    assert.ok(!content.includes('readOnly: true'), `${fw} default-mode values should NOT enable readOnly`);
   });
 }
 
-test('reducer default release name is my-reducer', async () => {
+test('receiver default release name is my-receiver', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
-    app: 'reducer',
+    app: 'receiver',
     forwarder: 'fluentbit',
     apiKey: 'test',
   });
-  assert.equal(plan.releaseName, 'my-reducer');
+  assert.equal(plan.releaseName, 'my-receiver');
 });
 
 test('reporter default release name is my-reporter (unchanged)', async () => {
@@ -106,23 +117,23 @@ test('reporter default release name is my-reporter (unchanged)', async () => {
 test('explicit release_name overrides the app default', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
-    app: 'reducer',
+    app: 'receiver',
     forwarder: 'fluentbit',
-    releaseName: 'custom-reg-name',
+    releaseName: 'custom-rec-name',
     apiKey: 'test',
   });
-  assert.equal(plan.releaseName, 'custom-reg-name');
+  assert.equal(plan.releaseName, 'custom-rec-name');
 });
 
-test('alreadyInstalled.reducer triggers a note, not a blocker', async () => {
+test('alreadyInstalled.receiver triggers a note, not a blocker', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot({
       recommendations: {
         suggestedNamespace: 'logging',
-        alreadyInstalled: { reducer: 'demo' },
+        alreadyInstalled: { receiver: 'demo' },
       },
     }),
-    app: 'reducer',
+    app: 'receiver',
     forwarder: 'fluentbit',
     apiKey: 'test',
   });
@@ -133,8 +144,8 @@ test('alreadyInstalled.reducer triggers a note, not a blocker', async () => {
   );
 });
 
-test('reducer plan install commands reference the same chart as reporter', async () => {
-  // Reducer uses the same charts; only kind differs. Logstash is
+test('receiver plan install commands reference the same chart as reporter', async () => {
+  // Receiver uses the same charts; only kind differs. Logstash is
   // blocked upstream (chart-broken sidecar wiring) so we skip it here —
   // the logstash blocker is covered by the dedicated test above.
   const expected: Record<string, string> = {
@@ -147,7 +158,7 @@ test('reducer plan install commands reference the same chart as reporter', async
     if (fw === 'logstash') continue;
     const plan = await buildReporterPlan({
       snapshot: baseSnapshot(),
-      app: 'reducer',
+      app: 'receiver',
       forwarder: fw,
       apiKey: 'test',
       destination: 'mock',
@@ -155,17 +166,17 @@ test('reducer plan install commands reference the same chart as reporter', async
     const installText = JSON.stringify(plan.install);
     assert.ok(
       installText.includes(expected[fw]),
-      `reducer plan for ${fw} should reference chart '${expected[fw]}'`
+      `receiver plan for ${fw} should reference chart '${expected[fw]}'`
     );
   }
 });
 
 // ── optimize flag ──
 
-test('optimize=true on fluent-bit reducer renders the receiverOptimize env block', async () => {
+test('optimize=true on fluent-bit receiver flips tenx.optimize: true', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
-    app: 'reducer',
+    app: 'receiver',
     forwarder: 'fluentbit',
     apiKey: 'test',
     destination: 'mock',
@@ -174,50 +185,49 @@ test('optimize=true on fluent-bit reducer renders the receiverOptimize env block
   assert.equal(plan.blockers.length, 0, `no blockers expected, got: ${plan.blockers.join(' | ')}`);
   const content = plan.install.find((s) => s.file)!.file!.contents;
   assert.ok(
-    content.includes('receiverOptimize'),
-    `fluent-bit optimize=true values should set receiverOptimize env; got: ${content}`
+    content.includes('optimize: true'),
+    `fluent-bit optimize=true values should set tenx.optimize: true; got: ${content}`
   );
   assert.ok(
-    content.includes('value: "true"'),
-    `fluent-bit optimize=true values should set receiverOptimize to "true"; got: ${content}`
+    !content.includes('readOnly: true'),
+    `fluent-bit optimize=true values should NOT set tenx.readOnly; got: ${content}`
   );
 });
 
-test('optimize=true on fluent-bit does NOT flip tenx.optimize (chart-broken path)', async () => {
+test('optimize=true on fluentd receiver flips tenx.optimize: true', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
-    app: 'reducer',
-    forwarder: 'fluentbit',
-    apiKey: 'test',
-    optimize: true,
-  });
-  const content = plan.install.find((s) => s.file)!.file!.contents;
-  // We specifically do NOT want `tenx.optimize: true` in the rendered
-  // values — the chart's optimize path at 1.0.7 references a Lua script
-  // that isn't shipped in the image, so using it blows up at init.
-  assert.ok(
-    !content.includes('optimize: true'),
-    `fluent-bit values should NOT set tenx.optimize: true (chart-broken); got: ${content}`
-  );
-});
-
-test('optimize=true on fluentd reducer renders the receiverOptimize env block', async () => {
-  const plan = await buildReporterPlan({
-    snapshot: baseSnapshot(),
-    app: 'reducer',
+    app: 'receiver',
     forwarder: 'fluentd',
     apiKey: 'test',
     optimize: true,
   });
   assert.equal(plan.blockers.length, 0);
   const content = plan.install.find((s) => s.file)!.file!.contents;
-  assert.ok(content.includes('receiverOptimize'), `fluentd optimize=true values should set receiverOptimize env`);
+  assert.ok(content.includes('optimize: true'), `fluentd optimize=true values should set tenx.optimize: true`);
+});
+
+test('optimize=true on filebeat receiver sets tenx.optimize: true', async () => {
+  const plan = await buildReporterPlan({
+    snapshot: baseSnapshot(),
+    app: 'receiver',
+    forwarder: 'filebeat',
+    apiKey: 'test',
+    optimize: true,
+  });
+  assert.equal(plan.blockers.length, 0);
+  const content = plan.install.find((s) => s.file)!.file!.contents;
+  assert.ok(
+    content.includes('optimize: true'),
+    `filebeat optimize=true values should set tenx.optimize: true; got: ${content}`
+  );
+  assert.ok(!/^\s*kind:/m.test(content), `filebeat values should NOT embed any kind: line`);
 });
 
 test('optimize=true adds an encoded-events verify probe', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
-    app: 'reducer',
+    app: 'receiver',
     forwarder: 'fluentbit',
     apiKey: 'test',
     optimize: true,
@@ -230,28 +240,32 @@ test('optimize=true adds an encoded-events verify probe', async () => {
   );
 });
 
-test('optimize=false leaves fluent-bit values unchanged (no env block)', async () => {
+test('optimize=false leaves fluent-bit values unchanged (no optimize flag)', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
-    app: 'reducer',
+    app: 'receiver',
     forwarder: 'fluentbit',
     apiKey: 'test',
     optimize: false,
   });
   const content = plan.install.find((s) => s.file)!.file!.contents;
   assert.ok(
+    !content.includes('optimize: true'),
+    `optimize=false must NOT set tenx.optimize: true; got: ${content}`
+  );
+  assert.ok(
     !content.includes('receiverOptimize'),
-    `optimize=false must NOT include receiverOptimize env; got: ${content}`
+    `optimize=false must NOT include any legacy receiverOptimize env (the workaround was deleted); got: ${content}`
   );
 });
 
-test('optimize=true on filebeat reducer is allowed (1.0.7 unified path)', async () => {
+test('optimize=true on filebeat receiver is allowed (1.0.7 unified path)', async () => {
   // As of chart 1.0.7, every forwarder maps kind=optimize to
-  // @apps/reducer + receiverOptimize=true env — no per-forwarder
+  // @apps/receiver + receiverOptimize=true env — no per-forwarder
   // blocker anymore.
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
-    app: 'reducer',
+    app: 'receiver',
     forwarder: 'filebeat',
     apiKey: 'test',
     optimize: true,
@@ -260,10 +274,10 @@ test('optimize=true on filebeat reducer is allowed (1.0.7 unified path)', async 
   assert.ok(plan.install.length > 0, 'install plan should be emitted for filebeat + optimize');
 });
 
-test('optimize=true on otel-collector reducer is allowed (1.0.7 unified path)', async () => {
+test('optimize=true on otel-collector receiver is allowed (1.0.7 unified path)', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
-    app: 'reducer',
+    app: 'receiver',
     forwarder: 'otel-collector',
     apiKey: 'test',
     optimize: true,
@@ -286,10 +300,10 @@ test('optimize=true with app=reporter is blocked', async () => {
   );
 });
 
-test('mode=readonly emits receiverReadOnly env on fluent-bit', async () => {
+test('mode=readonly flips tenx.readOnly: true on fluent-bit', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
-    app: 'reducer',
+    app: 'receiver',
     forwarder: 'fluentbit',
     apiKey: 'test',
     readOnly: true,
@@ -297,15 +311,19 @@ test('mode=readonly emits receiverReadOnly env on fluent-bit', async () => {
   assert.equal(plan.blockers.length, 0, `expected no blockers; got: ${plan.blockers.join(' | ')}`);
   const content = plan.install.find((s) => s.file)!.file!.contents;
   assert.ok(
-    content.includes('receiverReadOnly') && content.includes('"true"'),
-    `mode=readonly must include receiverReadOnly=true env; got: ${content}`
+    content.includes('readOnly: true'),
+    `mode=readonly must set tenx.readOnly: true; got: ${content}`
+  );
+  assert.ok(
+    !content.includes('receiverReadOnly'),
+    `mode=readonly must NOT emit any legacy receiverReadOnly env (the workaround was deleted); got: ${content}`
   );
 });
 
 test('mode=readonly + optimize=true is blocked', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
-    app: 'reducer',
+    app: 'receiver',
     forwarder: 'fluentbit',
     apiKey: 'test',
     optimize: true,
@@ -331,10 +349,10 @@ test('mode=readonly with app=reporter is blocked', async () => {
   );
 });
 
-test('mode=readonly emits receiverReadOnly env on filebeat', async () => {
+test('mode=readonly sets tenx.readOnly: true on filebeat', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
-    app: 'reducer',
+    app: 'receiver',
     forwarder: 'filebeat',
     apiKey: 'test',
     readOnly: true,
@@ -342,15 +360,16 @@ test('mode=readonly emits receiverReadOnly env on filebeat', async () => {
   assert.equal(plan.blockers.length, 0, `expected no blockers; got: ${plan.blockers.join(' | ')}`);
   const content = plan.install.find((s) => s.file)!.file!.contents;
   assert.ok(
-    content.includes('receiverReadOnly'),
-    `mode=readonly must include receiverReadOnly env; got: ${content}`
+    content.includes('readOnly: true'),
+    `mode=readonly on filebeat must set tenx.readOnly: true; got: ${content}`
   );
+  assert.ok(!/^\s*kind:/m.test(content), `filebeat values should NOT embed any kind: line`);
 });
 
-test('mode=readonly emits receiverReadOnly env on otel-collector', async () => {
+test('mode=readonly flips tenx.readOnly: true on otel-collector', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
-    app: 'reducer',
+    app: 'receiver',
     forwarder: 'otel-collector',
     apiKey: 'test',
     readOnly: true,
@@ -358,7 +377,38 @@ test('mode=readonly emits receiverReadOnly env on otel-collector', async () => {
   assert.equal(plan.blockers.length, 0, `expected no blockers; got: ${plan.blockers.join(' | ')}`);
   const content = plan.install.find((s) => s.file)!.file!.contents;
   assert.ok(
-    content.includes('receiverReadOnly'),
-    `mode=readonly must include receiverReadOnly env; got: ${content}`
+    content.includes('readOnly: true'),
+    `mode=readonly must set tenx.readOnly: true; got: ${content}`
   );
+});
+
+test('app=reporter on fluent-bit emits tenx.readOnly: true (Reporter is sugar for receiver+readOnly)', async () => {
+  const plan = await buildReporterPlan({
+    snapshot: baseSnapshot(),
+    app: 'reporter',
+    forwarder: 'fluentbit',
+    apiKey: 'test',
+  });
+  assert.equal(plan.blockers.length, 0, `no blockers expected; got: ${plan.blockers.join(' | ')}`);
+  const content = plan.install.find((s) => s.file)!.file!.contents;
+  assert.ok(
+    content.includes('readOnly: true'),
+    `app=reporter on fluent-bit must set tenx.readOnly: true; got: ${content}`
+  );
+});
+
+test('app=reporter on filebeat emits tenx.readOnly: true (Reporter is sugar for receiver+readOnly)', async () => {
+  const plan = await buildReporterPlan({
+    snapshot: baseSnapshot(),
+    app: 'reporter',
+    forwarder: 'filebeat',
+    apiKey: 'test',
+  });
+  assert.equal(plan.blockers.length, 0);
+  const content = plan.install.find((s) => s.file)!.file!.contents;
+  assert.ok(
+    content.includes('readOnly: true'),
+    `app=reporter on filebeat must set tenx.readOnly: true; got: ${content}`
+  );
+  assert.ok(!/^\s*kind:/m.test(content), `filebeat values should NOT embed any kind: line`);
 });

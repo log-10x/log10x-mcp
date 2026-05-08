@@ -74,7 +74,7 @@ export function renderPlan(plan: AdvisePlan, action: 'install' | 'verify' | 'tea
   // Renders between Install and Verify so the user sees it after the
   // pod is up but before they exercise it. Only emitted for plans
   // whose app supports MCP-managed runtime config updates (today:
-  // reducer + compactReceiver).
+  // receiver + compactReceiver).
   if ((action === 'install' || action === 'all') && plan.gitopsExplainer) {
     renderGitopsExplainer(lines, plan.gitopsExplainer);
   }

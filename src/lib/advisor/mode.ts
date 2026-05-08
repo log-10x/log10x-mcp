@@ -3,7 +3,7 @@
  * snapshot (+ optional goal).
  *
  * Sits in front of `buildReporterPlan` / `buildRetrieverPlan` and decides:
- *   - Which app: reporter / reducer / retriever
+ *   - Which app: reporter / receiver / retriever
  *   - Which deployment shape: inline (replace forwarder) / standalone
  *     (parallel DaemonSet) / standalone-retriever
  *   - Which forwarder (when inline)
@@ -25,8 +25,8 @@
  *   4. forwarder is helm-managed logstash → standalone reporter (chart
  *      broken for sidecar mode; surface migration note)
  *   5. forwarder is helm-managed fluentbit/fluentd/filebeat/otel-collector:
- *        goal='compact'     → inline reducer + optimize=true
- *        goal='cut-cost'    → inline reducer
+ *        goal='compact'     → inline receiver + optimize=true
+ *        goal='cut-cost'    → inline receiver
  *        goal='just-metrics'→ inline reporter (standalone is alt)
  *        no goal            → inline reporter (standalone is alt)
  *
@@ -50,7 +50,7 @@ export interface ResolvedInstallArgs {
   shape: DeploymentShape;
   /** Detected forwarder (for context in standalone plans; drives chart for inline). */
   forwarder?: ForwarderKind;
-  /** Only set when app='reducer' and target forwarder supports it. */
+  /** Only set when app='receiver' and target forwarder supports it. */
   optimize?: boolean;
   /** Target namespace. */
   namespace: string;
@@ -58,7 +58,7 @@ export interface ResolvedInstallArgs {
 
 /** One candidate mode with its score + rationale. Higher score = better match. */
 export interface RankedAlternative {
-  /** Short label: "standalone reporter", "inline reducer (fluent-bit) + optimize", etc. */
+  /** Short label: "standalone reporter", "inline receiver (fluent-bit) + optimize", etc. */
   label: string;
   args: ResolvedInstallArgs;
   /** Detection-based score. Alternatives are sorted descending by this. */
@@ -182,9 +182,9 @@ export function recommendInstallMode(opts: RecommendOpts): ModeRecommendation {
       `A Reporter is already installed in \`${snapshot.recommendations.alreadyInstalled.reporter}\`. Installing another duplicates metric emission — tear down first, or target a different namespace.`
     );
   }
-  if (snapshot.recommendations.alreadyInstalled.reducer) {
+  if (snapshot.recommendations.alreadyInstalled.receiver) {
     warnings.push(
-      `A Receiver is already installed in \`${snapshot.recommendations.alreadyInstalled.reducer}\`. Two receivers on the same event stream double-filter — tear one down before installing another.`
+      `A Receiver is already installed in \`${snapshot.recommendations.alreadyInstalled.receiver}\`. Two receivers on the same event stream double-filter — tear one down before installing another.`
     );
   }
 
@@ -318,7 +318,7 @@ function makeInlineAlts(params: {
   // No-goal case: this is the conservative default when the user has a
   // helm-managed, replaceable forwarder — no extra DaemonSet, no event
   // modification, just metrics. Ranks above Inline Receiver because
-  // report-mode touches the event path less than regulate-mode does.
+  // report-mode touches the event path less than receive-mode does.
   alts.push({
     label: `Inline Reporter (${detectedKind})`,
     args: {
@@ -339,13 +339,13 @@ function makeInlineAlts(params: {
     blocker: helmBlocker ?? logstashBlocker,
   });
 
-  // Inline reducer (filter/sample).
-  // No-goal case: reducer sits BELOW reporter (conservative default).
+  // Inline receiver (filter/sample).
+  // No-goal case: receiver sits BELOW reporter (conservative default).
   // Users who want filtering state that goal explicitly.
   alts.push({
     label: `Inline Receiver (${detectedKind})`,
     args: {
-      app: 'reducer',
+      app: 'receiver',
       shape: 'inline',
       forwarder: detectedKind,
       namespace,
@@ -360,21 +360,22 @@ function makeInlineAlts(params: {
             : SCORE_ALTERNATIVE_OK,
     rationale:
       goal === 'cut-cost'
-        ? `Inline reducer on ${detectedKind} — filter/sample rules applied in-flight, events emitted back through the forwarder.`
-        : `Inline reducer — full filter/sample/compact engine on the forwarder's event path. No filtering rules applied by default; escalate to this over Inline Reporter only when you want event modification.`,
+        ? `Inline receiver on ${detectedKind} — filter/sample rules applied in-flight, events emitted back through the forwarder.`
+        : `Inline receiver — full filter/sample/compact engine on the forwarder's event path. No filtering rules applied by default; escalate to this over Inline Reporter only when you want event modification.`,
     blocker: helmBlocker ?? logstashBlocker,
   });
 
   // Inline receiver + optimize (compact encoding).
-  // All 5 forwarder charts use a unified optimize path: kind=optimize
-  // launches @apps/receiver + receiverOptimize=true env var. Logstash
-  // still hits its architectural sidecar bug regardless of optimize,
-  // so the logstashBlocker above handles that case.
+  // All 5 forwarder charts deploy the Receiver workload and accept
+  // `optimize=true` via the chart's standard feature-flag surface
+  // (`tenx.optimize: true` in every chart's values.yaml). Logstash still
+  // hits its architectural sidecar bug regardless of optimize, so the
+  // logstashBlocker above handles that case.
   const optimizeBlocker = undefined;
   alts.push({
     label: `Inline Receiver + Compact (${detectedKind})`,
     args: {
-      app: 'reducer',
+      app: 'receiver',
       shape: 'inline',
       forwarder: detectedKind,
       optimize: true,
@@ -388,8 +389,8 @@ function makeInlineAlts(params: {
           : SCORE_ALTERNATIVE_OK,
     rationale:
       goal === 'compact'
-        ? `Inline reducer + optimize on ${detectedKind} — compact encoding (~20-40x volume reduction) applied in-flight.`
-        : `Inline reducer + optimize — maximum volume reduction; events emitted in compact \`~templateHash,vars\` form.`,
+        ? `Inline receiver + optimize on ${detectedKind} — compact encoding (~20-40x volume reduction) applied in-flight.`
+        : `Inline receiver + optimize — maximum volume reduction; events emitted in compact \`~templateHash,vars\` form.`,
     blocker: helmBlocker ?? logstashBlocker ?? optimizeBlocker,
   });
 

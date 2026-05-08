@@ -93,7 +93,7 @@ type Confidence = 'high' | 'medium' | 'low';
  * Build a display string for a pattern identity. When an AI pretty name
  * exists for this identity, show `<Pretty Name>` with the raw identity
  * inline for copy-paste. Otherwise fall back to the raw identity alone.
- * Never lose the identity — every machine-pasted reference (reducer
+ * Never lose the identity — every machine-pasted reference (receiver
  * YAML, SIEM configs) uses the raw form.
  */
 function displayName(
@@ -172,7 +172,7 @@ interface EnrichedPattern extends ExtractedPattern {
   projectedSavings: number;
   reasoning: string;
   confidence: Confidence;
-  /** Snake-case identity — for ready-to-paste reducer configs. */
+  /** Snake-case identity — for ready-to-paste receiver configs. */
   identity: string;
   /**
    * Longest verbatim literal run from the template body, used as a
@@ -285,7 +285,7 @@ export function renderPocSummary(input: RenderInput, topN = 5): string {
 }
 
 /**
- * YAML view — reducer mute-file entries for the top N patterns.
+ * YAML view — receiver mute-file entries for the top N patterns.
  * Paste-ready for a GitOps ConfigMap commit. Includes the display
  * name as a YAML comment so reviewers can scan without decoding the
  * identity strings.
@@ -306,7 +306,7 @@ export function renderPocYaml(input: RenderInput, topN = 5): string {
     for (const p of patterns) {
       const name = input.aiPrettyNames?.[p.identity];
       if (name) lines.push(`# ${name}`);
-      lines.push(reducerYaml(p));
+      lines.push(receiverYaml(p));
       lines.push('');
     }
   }
@@ -316,7 +316,7 @@ export function renderPocYaml(input: RenderInput, topN = 5): string {
 
 /**
  * Native SIEM exclusion-config view — the "I don't want the log10x
- * reducer, just give me the raw SIEM config" path.
+ * receiver, just give me the raw SIEM config" path.
  */
 export function renderPocConfigs(input: RenderInput, topN = 5): string {
   const drops = enrichPatterns(input)
@@ -377,7 +377,7 @@ export function renderPocTop(input: RenderInput, topN = 20): string {
 
 /**
  * Pattern-detail view — one pattern, fully expanded. Sample event,
- * slot variables, recommended action, reducer YAML, risk context.
+ * slot variables, recommended action, receiver YAML, risk context.
  */
 export function renderPocPattern(input: RenderInput, identity: string): string {
   const patterns = enrichPatterns(input);
@@ -438,7 +438,7 @@ export function renderPocPattern(input: RenderInput, identity: string): string {
   if (p.recommendedAction !== 'keep') {
     lines.push('**Receiver YAML** (paste into GitOps ConfigMap):');
     lines.push('```yaml');
-    lines.push(reducerYaml(p));
+    lines.push(receiverYaml(p));
     lines.push('```');
     lines.push('');
   }
@@ -577,7 +577,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
     lines.push(`> ${bannerTitle}`);
     lines.push('>');
     lines.push(
-      `> Cost figures below extrapolate from the pulled sample (${fmtBytes(input.extraction.totalBytes)}) to the full daily volume by per-pattern %. Pattern rankings + reducer YAML + native exclusion configs are the same regardless of volume; only dollar figures scale.`
+      `> Cost figures below extrapolate from the pulled sample (${fmtBytes(input.extraction.totalBytes)}) to the full daily volume by per-pattern %. Pattern rankings + receiver YAML + native exclusion configs are the same regardless of volume; only dollar figures scale.`
     );
     lines.push('');
     const dailyCost = projectBilling(totalCost, input.windowHours, 24);
@@ -723,11 +723,11 @@ export function renderPocReport(input: RenderInput): RenderResult {
   lines.push('## 4. Receiver Recommendations');
   lines.push('');
   lines.push(
-    'Per-pattern recommendations with reasoning, projected savings, and ready-to-paste log10x reducer mute-file YAML. Mutes auto-expire at `untilEpochSec`; sampling retains a statistical slice for debug.'
+    'Per-pattern recommendations with reasoning, projected savings, and ready-to-paste log10x receiver mute-file YAML. Mutes auto-expire at `untilEpochSec`; sampling retains a statistical slice for debug.'
   );
   lines.push('');
-  const reducerTopN = Math.min(patterns.length, 10);
-  for (let i = 0; i < reducerTopN; i++) {
+  const receiverTopN = Math.min(patterns.length, 10);
+  for (let i = 0; i < receiverTopN; i++) {
     const p = patterns[i];
     lines.push(`### #${i + 1} — ${displayName(p.identity, p.template, input.aiPrettyNames)}  _(${p.confidence} confidence)_`);
     lines.push('');
@@ -740,7 +740,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
     lines.push('');
     if (p.recommendedAction !== 'keep') {
       lines.push('```yaml');
-      lines.push(reducerYaml(p));
+      lines.push(receiverYaml(p));
       lines.push('```');
       lines.push('');
     }
@@ -832,16 +832,16 @@ export function renderPocReport(input: RenderInput): RenderResult {
   // Section 8: Deployment paths
   lines.push('## 8. Deployment Paths');
   lines.push('');
-  lines.push('### Automated — log10x reducer (recommended)');
+  lines.push('### Automated — log10x receiver (recommended)');
   lines.push('');
   lines.push(
-    '1. Install the Log10x Receiver in your forwarder pipeline — https://docs.log10x.com/apps/edge/reducer/'
+    '1. Install the Log10x Receiver in your forwarder pipeline — https://docs.log10x.com/apps/edge/receiver/'
   );
   lines.push(
-    '2. Commit the generated reducer YAML above into your GitOps repo (the receiver watches a ConfigMap)'
+    '2. Commit the generated receiver YAML above into your GitOps repo (the receiver watches a ConfigMap)'
   );
   lines.push(
-    '3. Mutes auto-expire at `untilEpochSec`, so stale rules self-clean. The reducer publishes exact pattern-match metrics, so you can verify the intended traffic is being dropped before committing permanently.'
+    '3. Mutes auto-expire at `untilEpochSec`, so stale rules self-clean. The receiver publishes exact pattern-match metrics, so you can verify the intended traffic is being dropped before committing permanently.'
   );
   lines.push('');
   lines.push('### Manual — native SIEM config (no log10x runtime)');
@@ -851,7 +851,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
   );
   lines.push('2. Monitor ingestion volume for 24-48h to confirm the drop');
   lines.push(
-    '3. Trade-offs vs reducer: no auto-expiry, no per-pattern verification metric, no GitOps-reviewable identity (regex will drift)'
+    '3. Trade-offs vs receiver: no auto-expiry, no per-pattern verification metric, no GitOps-reviewable identity (regex will drift)'
   );
   lines.push('');
 
@@ -1118,12 +1118,12 @@ function actionLabel(p: EnrichedPattern): string {
   return 'keep';
 }
 
-function reducerYaml(p: EnrichedPattern): string {
+function receiverYaml(p: EnrichedPattern): string {
   const expirySec = Math.floor(Date.now() / 1000) + 30 * 86_400; // 30-day expiry
   const action = p.recommendedAction === 'mute' ? 'drop' : 'sample';
   const extra = action === 'sample' ? `    sampleRate: ${p.sampleRate}` : '';
   return [
-    '# reducer mute file entry — commit to your GitOps ConfigMap',
+    '# receiver mute file entry — commit to your GitOps ConfigMap',
     `- pattern: ${p.identity}`,
     `  action: ${action}`,
     ...(extra ? [extra] : []),
