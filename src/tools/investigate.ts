@@ -41,6 +41,7 @@ import {
 } from '../lib/investigation-templates.js';
 import { recordInvestigation, getInvestigation, listInvestigations } from '../lib/investigation-cache.js';
 import { isRetrieverConfigured, runRetrieverQuery, parseTimeExpression } from '../lib/retriever-api.js';
+import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 
 export const investigateSchema = {
   starting_point: z
@@ -227,7 +228,7 @@ export async function executeInvestigate(
       report,
       patternsReferenced: [],
     });
-    return report;
+    return appendInvestigateNextActions(report, resolution.anchor, args.window);
   }
 
   if (!resolution.anchor) {
@@ -272,7 +273,7 @@ export async function executeInvestigate(
       report,
       patternsReferenced: [],
     });
-    return report;
+    return appendInvestigateNextActions(report, resolution.anchor, args.window);
   }
 
   // ── Phase 2a — Recency probe ──
@@ -372,7 +373,7 @@ export async function executeInvestigate(
       report,
       patternsReferenced: [resolution.anchor],
     });
-    return report;
+    return appendInvestigateNextActions(report, resolution.anchor, args.window);
   }
 
   // ── Phase 3-D — Drift flow ──
@@ -417,7 +418,7 @@ export async function executeInvestigate(
       report,
       patternsReferenced: collectDriftPatternsReferenced(resolution.anchor, drift),
     });
-    return report;
+    return appendInvestigateNextActions(report, resolution.anchor, args.window);
   }
 
   // ── Phase 3 — Acute-spike flow ──
@@ -525,7 +526,40 @@ export async function executeInvestigate(
     report,
     patternsReferenced: collectPatternsReferenced(resolution.anchor, correlation),
   });
-  return report;
+  return appendInvestigateNextActions(report, resolution.anchor, args.window);
+}
+
+// ── Next-action generation for autonomous chains ──
+//
+// Investigate's natural downstream tools depend on its outcome. Always
+// emit the canonical post-investigation chain links so an orchestrator
+// reading the structured block can continue without prose-parsing the
+// markdown body.
+function buildInvestigateNextActions(anchor?: string, window?: string): NextAction[] {
+  if (!anchor) return [];
+  const out: NextAction[] = [
+    {
+      tool: 'log10x_dependency_check',
+      args: { pattern: anchor },
+      reason: 'check dashboards / alerts before any mute action',
+    },
+    {
+      tool: 'log10x_correlate_cross_pillar',
+      args: { anchor_type: 'log10x_pattern', anchor, ...(window ? { window } : {}) },
+      reason: 'find upstream metric anomaly co-moving with the pattern',
+    },
+    {
+      tool: 'log10x_pattern_trend',
+      args: { pattern: anchor },
+      reason: 'time series for the investigated pattern',
+    },
+  ];
+  return out;
+}
+
+function appendInvestigateNextActions(report: string, anchor?: string, window?: string): string {
+  const block = renderNextActions(buildInvestigateNextActions(anchor, window));
+  return block ? `${report}\n\n${block}` : report;
 }
 
 // ── Anchor resolution ──

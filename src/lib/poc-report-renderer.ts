@@ -10,6 +10,7 @@ import type { ExtractedPattern, ExtractedPatterns } from './pattern-extraction.j
 import type { SiemId } from './siem/pricing.js';
 import { SIEM_DISPLAY_NAMES } from './siem/pricing.js';
 import { fmtBytes, fmtCount, fmtDollar, fmtGb, fmtPct } from './format.js';
+import { renderNextActions, type NextAction } from './next-actions.js';
 
 export interface RenderInput {
   siem: SiemId;
@@ -415,11 +416,19 @@ export function renderPocPattern(input: RenderInput, identity: string): string {
   lines.push(truncate(p.template, 400));
   lines.push('```');
   lines.push('');
-  const topSlots = Object.entries(p.variables).slice(0, 6);
-  if (topSlots.length > 0) {
-    lines.push('### Variable slots (distinct values observed)');
-    for (const [slot, vals] of topSlots) {
-      lines.push(`- \`${slot}\`: ${vals.slice(0, 5).map((v) => `\`${truncate(v, 40)}\``).join(', ')}${vals.length > 5 ? `, … (${vals.length - 5} more)` : ''}`);
+  // Sort slots so high-cardinality (interesting variation) and low-cardinality
+  // (good grouping / filter candidates) are clearly distinguishable. Low-card
+  // slots (1-3 distinct values) are surfaced as candidate filters in the
+  // structured next-actions block below; high-card slots (10+ distinct values)
+  // signal where event-by-event variation actually lives.
+  const slotsByCount = Object.entries(p.variables)
+    .map(([slot, vals]) => ({ slot, vals, distinct: vals.length }))
+    .sort((a, b) => b.distinct - a.distinct);
+  if (slotsByCount.length > 0) {
+    lines.push('### Variable slots (sorted by distinct count, descending)');
+    for (const { slot, vals, distinct } of slotsByCount.slice(0, 6)) {
+      const distinctTag = distinct === 1 ? 'constant' : `${distinct} distinct`;
+      lines.push(`- \`${slot}\` (${distinctTag}): ${vals.slice(0, 5).map((v) => `\`${truncate(v, 40)}\``).join(', ')}${vals.length > 5 ? `, … (${vals.length - 5} more)` : ''}`);
     }
     lines.push('');
   }
@@ -438,6 +447,47 @@ export function renderPocPattern(input: RenderInput, identity: string): string {
       `⚠ **Review before muting**: run \`log10x_dependency_check(pattern: "${p.identity}")\` — this pattern\'s ` +
         `${p.severity || 'severity'}/${p.confidence} profile means it may feed live alerts or dashboards.`
     );
+  }
+
+  // Structured NEXT_ACTIONS for autonomous chains. The pattern view is a
+  // natural handoff into deeper investigation: dependency_check before any
+  // mute, retriever_query for archive history (with a worked filter on the
+  // strongest low-cardinality slot when one exists), pattern_trend for
+  // volume series.
+  const nextActions: NextAction[] = [
+    {
+      tool: 'log10x_dependency_check',
+      args: { pattern: p.identity },
+      reason: 'check dashboards / alerts before any mute action',
+    },
+    {
+      tool: 'log10x_pattern_trend',
+      args: { pattern: p.identity },
+      reason: 'volume series for the resolved pattern',
+    },
+  ];
+  // Pick a candidate filter slot: lowest non-1 distinct count (not constant,
+  // not too high-cardinality). Surface as a worked retriever_query that the
+  // agent can run verbatim or adjust.
+  const filterCandidate = slotsByCount.find((s) => s.distinct >= 2 && s.distinct <= 10);
+  if (filterCandidate && filterCandidate.vals[0]) {
+    const slotName = filterCandidate.slot.replace(/^slot_/, 'slot_');
+    const sampleValue = filterCandidate.vals[0];
+    nextActions.push({
+      tool: 'log10x_retriever_query',
+      args: {
+        pattern: p.identity,
+        from: 'now-7d',
+        to: 'now',
+        filters: [`event.${slotName} === ${JSON.stringify(sampleValue)}`],
+      },
+      reason: `historical events of this pattern filtered to ${slotName}=${truncate(sampleValue, 30)} (one of ${filterCandidate.distinct} distinct values)`,
+    });
+  }
+  const block = renderNextActions(nextActions);
+  if (block) {
+    lines.push('');
+    lines.push(block);
   }
   return lines.join('\n');
 }

@@ -25,7 +25,7 @@ import {
   type DepMatchedIn,
   type DepMatchType,
   emptyResult,
-  anyTokenMatches,
+  allTokensMatchExact,
   meaningfulTokens,
 } from './types.js';
 
@@ -106,8 +106,8 @@ async function scanSavedObjects(
       const title = o.attributes?.title || '';
       const desc = o.attributes?.description || '';
       const matchedIn: DepMatchedIn[] = [];
-      if (anyTokenMatches(title, tokens)) matchedIn.push('name');
-      if (anyTokenMatches(desc, tokens)) matchedIn.push('definition');
+      if (allTokensMatchExact(title, tokens)) matchedIn.push('name');
+      if (allTokensMatchExact(desc, tokens)) matchedIn.push('definition');
       if (matchedIn.length === 0) continue;
       const m: DepMatch = {
         type: resultType,
@@ -160,8 +160,8 @@ export async function checkElasticsearchDeps(opts: DepCheckOptions): Promise<Dep
       const name = r.name || '';
       const params = r.params ? JSON.stringify(r.params) : '';
       const matchedIn: DepMatchedIn[] = [];
-      if (anyTokenMatches(name, tokens)) matchedIn.push('name');
-      if (anyTokenMatches(params, tokens)) matchedIn.push('query');
+      if (allTokensMatchExact(name, tokens)) matchedIn.push('name');
+      if (allTokensMatchExact(params, tokens)) matchedIn.push('query');
       if (matchedIn.length === 0) continue;
       result.matches.push({
         type: 'alert',

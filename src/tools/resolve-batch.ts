@@ -25,6 +25,7 @@ import {
 } from '../lib/cli-output-parser.js';
 import { computeConcentration, type PatternConcentration } from '../lib/variable-concentration.js';
 import { fmtCount, fmtBytes } from '../lib/format.js';
+import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 
 export const resolveBatchSchema = {
   source: z
@@ -277,6 +278,16 @@ export async function executeResolveBatch(args: {
     lines.push('');
   }
 
+  // Structured NEXT_ACTIONS for autonomous chains. Emits one investigate
+  // call per top-3 pattern plus the strongest variable-filtered retriever
+  // suggestion when a symbolMessage is available. Suppresses the retriever
+  // suggestion when symbolMessage is missing because the retriever scopes
+  // on tenx_user_pattern, not on templateHash.
+  if (args.include_next_actions) {
+    const block = renderNextActions(buildStructuredNextActions(ranked.map((r) => r.p), args.environment));
+    if (block) lines.push(block);
+  }
+
   return lines.join('\n');
 }
 
@@ -386,6 +397,10 @@ function buildNextActions(p: PatternConcentration, environment?: string): string
 
   // Variable-filtered Retriever query suggestion — skip typed slots like timestamps
   // where filtering on a literal value is almost never what the user wants.
+  // Skip the retriever suggestion entirely when symbolMessage is missing
+  // because the retriever scopes by `tenx_user_pattern` (the Reporter-tier
+  // pattern name), not by templateHash. Suggesting `pattern: '<hash>'` would
+  // produce `tenx_user_pattern == "<hash>"` which never matches.
   const strong = p.slots.find(
     (s) =>
       s.topValues[0] &&
@@ -393,12 +408,12 @@ function buildNextActions(p: PatternConcentration, environment?: string): string
       s.namingConfidence !== 'low' &&
       s.inferredName !== 'timestamp'
   );
-  if (strong && strong.topValues[0]) {
+  if (strong && strong.topValues[0] && p.symbolMessage) {
     const slot = strong.inferredName.replace(/\s*\(inferred\)$/i, '');
     const val = strong.topValues[0].value;
     const jsFilter = `event.${slot} === ${JSON.stringify(val)}`;
     actions.push(
-      `call \`log10x_retriever_query({ pattern: '${p.templateHash}', filters: [${JSON.stringify(jsFilter)}] })\` to retrieve all historical events concentrated on ${slot}=${truncate(val, 40)} (requires Retriever tier).`
+      `call \`log10x_retriever_query({ pattern: '${p.symbolMessage}', filters: [${JSON.stringify(jsFilter)}] })\` to retrieve all historical events concentrated on ${slot}=${truncate(val, 40)} (requires Retriever tier).`
     );
     actions.push(
       `native Datadog follow-up: \`dog log search '@${slot}:"${val.replace(/"/g, '\\"')}"' --from now-24h\` — filters to the dominant variable concentration directly in the SIEM.`
@@ -406,6 +421,53 @@ function buildNextActions(p: PatternConcentration, environment?: string): string
   }
 
   return actions;
+}
+
+/**
+ * Structured NEXT_ACTIONS for autonomous-chain agents. Mirrors the prose
+ * from buildNextActions but emits typed args ready to consume.
+ */
+function buildStructuredNextActions(
+  patterns: PatternConcentration[],
+  environment?: string
+): NextAction[] {
+  const out: NextAction[] = [];
+  for (const p of patterns.slice(0, 3)) {
+    const identity = p.symbolMessage || p.templateHash;
+    const investigateArgs: Record<string, unknown> = { starting_point: identity };
+    if (environment) investigateArgs.environment = environment;
+    out.push({
+      tool: 'log10x_investigate',
+      args: investigateArgs,
+      reason: `historical correlation for ${identity}`,
+    });
+    if (p.symbolMessage) {
+      const strong = p.slots.find(
+        (s) =>
+          s.topValues[0] &&
+          s.topValues[0].pct >= 0.3 &&
+          s.namingConfidence !== 'low' &&
+          s.inferredName !== 'timestamp'
+      );
+      if (strong && strong.topValues[0]) {
+        const slot = strong.inferredName.replace(/\s*\(inferred\)$/i, '');
+        const val = strong.topValues[0].value;
+        out.push({
+          tool: 'log10x_retriever_query',
+          args: {
+            pattern: p.symbolMessage,
+            // retriever_query.from is required (no default). Use a 30d
+            // window which matches the prose suggestion's intent for
+            // "historical events" — agents can override.
+            from: 'now-30d',
+            filters: [`event.${slot} === ${JSON.stringify(val)}`],
+          },
+          reason: `historical events concentrated on ${slot}=${truncate(val, 40)}`,
+        });
+      }
+    }
+  }
+  return out;
 }
 
 // ── Symbol message canonicalization ──

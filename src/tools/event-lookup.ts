@@ -18,6 +18,7 @@ import {
   fmtDollar, fmtPattern, fmtSeverity, fmtCount,
   parseTimeframe, costPeriodLabel, normalizePattern
 } from '../lib/format.js';
+import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 
 export const eventLookupSchema = {
   pattern: z.string().describe('Pattern name or search term to look up (e.g., "Payment_Gateway_Timeout")'),
@@ -192,14 +193,38 @@ async function formatResults(
   lines.push('');
   lines.push(`${rows.length} service${rows.length !== 1 ? 's' : ''} · ${fmtCount(totalEvents)} events`);
 
-  // next_action hint — if this pattern is elevated vs its own baseline, nudge toward investigate.
-  if (totalCostBase > 0 && totalCostNow > totalCostBase * 2) {
+  // next_action hints — provide both prose (for human readers) and a
+  // structured NEXT_ACTIONS block (for autonomous-chain agents). When the
+  // pattern is elevated, nudge toward investigate; otherwise the standard
+  // chain handoffs (pattern_trend for time series, dependency_check before
+  // any mute action) are appropriate.
+  const nextActions: NextAction[] = [];
+  const elevated = totalCostBase > 0 && totalCostNow > totalCostBase * 2;
+  lines.push('');
+  lines.push('**Next actions**:');
+  if (elevated) {
     const pctChange = Math.round(((totalCostNow - totalCostBase) / totalCostBase) * 100);
-    lines.push('');
-    lines.push('**Next actions**:');
     lines.push(`  - This pattern is up ${pctChange}% vs its baseline — call \`log10x_investigate({ starting_point: '${pattern}' })\` to trace the cause.`);
-    lines.push(`  - Or call \`log10x_pattern_trend({ pattern: '${pattern}' })\` for the time series.`);
+    nextActions.push({
+      tool: 'log10x_investigate',
+      args: { starting_point: pattern },
+      reason: `pattern is up ${pctChange}% vs baseline — trace the cause`,
+    });
   }
+  lines.push(`  - Time series via \`log10x_pattern_trend({ pattern: '${pattern}' })\`.`);
+  nextActions.push({
+    tool: 'log10x_pattern_trend',
+    args: { pattern },
+    reason: 'time series for the resolved pattern',
+  });
+  lines.push(`  - Before any mute / drop action, run \`log10x_dependency_check({ pattern: '${pattern}' })\` to find dashboards / alerts that depend on it.`);
+  nextActions.push({
+    tool: 'log10x_dependency_check',
+    args: { pattern },
+    reason: 'find dashboard / alert dependencies before muting',
+  });
 
+  const block = renderNextActions(nextActions);
+  if (block) lines.push('', block);
   return lines.join('\n');
 }

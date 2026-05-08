@@ -30,7 +30,7 @@ import type { EnvConfig } from '../lib/environments.js';
 import {
   resolveBackend,
   formatDetectionTrace,
-  CustomerMetricsNotConfiguredError,
+  customerMetricsNotConfiguredMessage,
 } from '../lib/customer-metrics.js';
 import { getOrDiscoverJoin, type JoinDiscoveryResult } from '../lib/join-discovery.js';
 import {
@@ -39,6 +39,7 @@ import {
   type CrossPillarResult,
   type CrossPillarCandidate,
 } from '../lib/cross-pillar-correlate.js';
+import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 
 export const correlateCrossPillarSchema = {
   anchor_type: z
@@ -100,7 +101,11 @@ export async function executeCorrelateCrossPillar(
   }
   const resolution = await resolveBackend();
   if (!resolution.backend) {
-    throw new CustomerMetricsNotConfiguredError(formatDetectionTrace(resolution.trace));
+    // Graceful degrade for autonomous chains. Throwing aborts a parent
+    // chain (e.g., investigate -> correlate_cross_pillar -> ...); a
+    // structured markdown return lets the parent log the missing-backend
+    // state and continue with log-tier-only synthesis.
+    return customerMetricsNotConfiguredMessage(formatDetectionTrace(resolution.trace));
   }
   const backend = resolution.backend;
 
@@ -257,13 +262,34 @@ function renderCorrelationResult(
   lines.push('### Next actions');
   lines.push('');
   const topJoined = result.byTier['confirmed'][0] || result.byTier['service-match'][0];
+  const nextActions: NextAction[] = [];
   if (topJoined && result.anchor.type === 'customer_metric') {
     lines.push(`1. Drill into the top candidate: \`log10x_investigate({ starting_point: '${topJoined.name}' })\` for full causal-chain analysis.`);
-    lines.push(`2. Pull the actual events contributing to the correlation: \`log10x_retriever_query({ pattern: '${topJoined.name}', window: 'last ${windowLabel}' })\`.`);
+    nextActions.push({
+      tool: 'log10x_investigate',
+      args: { starting_point: topJoined.name },
+      reason: 'full causal-chain analysis on the top correlated pattern',
+    });
+    lines.push(`2. Pull the actual events contributing to the correlation: \`log10x_retriever_query({ pattern: '${topJoined.name}' })\`.`);
+    nextActions.push({
+      tool: 'log10x_retriever_query',
+      args: { pattern: topJoined.name, from: `now-${windowLabel}` },
+      reason: 'pull historical events contributing to the correlation',
+    });
     lines.push(`3. Before muting or dropping the candidate pattern, check blast radius: \`log10x_dependency_check({ pattern: '${topJoined.name}' })\`.`);
+    nextActions.push({
+      tool: 'log10x_dependency_check',
+      args: { pattern: topJoined.name },
+      reason: 'blast-radius check before muting the candidate',
+    });
   } else if (topJoined) {
     lines.push(`1. The top correlated customer metric is \`${topJoined.name}\`. Inspect it directly in your backend's UI or via \`log10x_customer_metrics_query\`.`);
     lines.push(`2. If this anchor pattern should be muted, verify dependencies first: \`log10x_dependency_check({ pattern: '${result.anchor.value}' })\`.`);
+    nextActions.push({
+      tool: 'log10x_dependency_check',
+      args: { pattern: result.anchor.value },
+      reason: 'blast-radius check before muting the anchor',
+    });
   } else {
     lines.push('_No high-confidence candidates found. Consider widening the window, lowering `minimum_confidence`, or verifying the anchor actually moved in the requested window._');
   }
@@ -274,6 +300,8 @@ function renderCorrelationResult(
   lines.push('');
   lines.push(`**Metadata**: ${result.metadata.patternsAnalyzed} candidates analyzed, ${result.metadata.log10xQueries} PromQL queries against Log10x, ${result.metadata.customerQueries} against the customer backend, total wall time ${result.metadata.wallTimeMs}ms.`);
 
+  const block = renderNextActions(nextActions);
+  if (block) lines.push('', block);
   return lines.join('\n');
 }
 

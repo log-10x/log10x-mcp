@@ -71,7 +71,27 @@ export async function executeExclusionFilter(args: {
   // Escape regex metacharacters in each token so dots, brackets, parens, etc.
   // don't get interpreted as regex syntax by the target vendor's engine.
   const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const patRegex = tokens.map(escapeRegex).join('.*');
+  // Two-form regex: the loose ordered token form (matches CamelCase and
+  // separated variants alike) PLUS an alternative for the canonical
+  // underscored Symbol Message when it appears as a discrete word.
+  //
+  // An earlier attempt added word boundaries around each token to reduce
+  // false positives, but that regressed on CamelCase log lines: a real
+  // event `PaymentGateway request Timeout` failed `\bPayment\b.*?\bGateway\b`
+  // because there's no word boundary between adjacent CamelCase tokens.
+  // PCRE engines without lookbehind (Splunk RE2) can't express
+  // "boundary OR camel-case transition" in a single expression, so this
+  // tool keeps the loose form (preserving recall) and adds the canonical
+  // form only as an additional alternative. Result: no regression vs the
+  // original behavior, plus a precise match path when the snake_case
+  // identity literally appears in the haystack.
+  //
+  // Customers who want a precise drop should use the Receiver mute-file
+  // entry the tool also documents — that path is templateHash-keyed and
+  // doesn't have the regex matching limitation.
+  const tokenRegex = tokens.map(escapeRegex).join('.*?');
+  const canonicalRegex = `\\b${escapeRegex(pattern)}\\b`;
+  const patRegex = `(?:${tokenRegex}|${canonicalRegex})`;
   const svc = args.service || '';
   const sev = (args.severity || '').toLowerCase();
   const vk = vendor;

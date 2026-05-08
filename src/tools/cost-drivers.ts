@@ -20,6 +20,7 @@ import { LABELS } from '../lib/promql.js';
 import { bytesToCost, parsePrometheusValue } from '../lib/cost.js';
 import { applyCostDriverGates, DEFAULT_GATES } from '../lib/gates.js';
 import { resolveMetricsEnv, resolveMetricsEnvFiltered } from '../lib/resolve-env.js';
+import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import {
   fmtDollar, fmtPattern, fmtSeverity, fmtCount, fmtPct,
   parseTimeframe, costPeriodLabel, type Timeframe
@@ -195,10 +196,23 @@ export async function executeCostDrivers(
     // next_action hints — nudge the model toward investigate for each top driver.
     lines.push('');
     lines.push('**Next actions**:');
+    const nextActions: NextAction[] = [];
     for (const d of drivers.slice(0, 3)) {
       lines.push(`  - call \`log10x_investigate({ starting_point: '${d.hash}' })\` to trace the cause of the ${fmtDollar(d.delta)} delta on this pattern.`);
+      nextActions.push({
+        tool: 'log10x_investigate',
+        args: { starting_point: d.hash },
+        reason: `trace the ${fmtDollar(d.delta)} delta driver`,
+      });
     }
     lines.push(`  - call \`log10x_dependency_check({ pattern: '${drivers[0].hash}' })\` before muting or dropping — blast-radius safety.`);
+    nextActions.push({
+      tool: 'log10x_dependency_check',
+      args: { pattern: drivers[0].hash },
+      reason: 'blast-radius check before muting top driver',
+    });
+    const block = renderNextActions(nextActions);
+    if (block) lines.push('', block);
   } else {
     // No drivers — show top patterns by current cost.
     // Print the comparison that WAS attempted so the agent can report it correctly

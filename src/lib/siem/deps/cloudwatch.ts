@@ -32,7 +32,7 @@ import {
   type DepCheckResult,
   type DepMatchedIn,
   emptyResult,
-  anyTokenMatches,
+  allTokensMatchExact,
   meaningfulTokens,
 } from './types.js';
 
@@ -65,8 +65,8 @@ export async function checkCloudWatchDeps(opts: DepCheckOptions): Promise<DepChe
         const pattern = f.filterPattern || '';
         const lg = f.logGroupName || '';
         const matchedIn: DepMatchedIn[] = [];
-        if (anyTokenMatches(name, tokens)) matchedIn.push('name');
-        if (anyTokenMatches(pattern, tokens)) matchedIn.push('query');
+        if (allTokensMatchExact(name, tokens)) matchedIn.push('name');
+        if (allTokensMatchExact(pattern, tokens)) matchedIn.push('query');
         if (matchedIn.length === 0) continue;
         result.matches.push({
           type: 'metric-filter',
@@ -106,8 +106,8 @@ export async function checkCloudWatchDeps(opts: DepCheckOptions): Promise<DepChe
         // MetricAlarm has MetricName; CompositeAlarm doesn't.
         const metricName = (a as { MetricName?: string }).MetricName || '';
         const matchedIn: DepMatchedIn[] = [];
-        if (anyTokenMatches(name, tokens)) matchedIn.push('name');
-        if (anyTokenMatches(metricName, tokens) || anyTokenMatches(desc, tokens)) matchedIn.push('query');
+        if (allTokensMatchExact(name, tokens)) matchedIn.push('name');
+        if (allTokensMatchExact(metricName, tokens) || allTokensMatchExact(desc, tokens)) matchedIn.push('query');
         if (matchedIn.length === 0) continue;
         result.matches.push({
           type: 'alert',
@@ -140,7 +140,7 @@ export async function checkCloudWatchDeps(opts: DepCheckOptions): Promise<DepChe
       const resp = await cwClient.send(new ListDashboardsCommand({ NextToken: nextToken }));
       for (const d of resp.DashboardEntries || []) {
         const name = d.DashboardName || '';
-        if (!anyTokenMatches(name, tokens)) continue;
+        if (!allTokensMatchExact(name, tokens)) continue;
         result.matches.push({
           type: 'dashboard',
           name,

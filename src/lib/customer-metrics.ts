@@ -108,6 +108,49 @@ export class CustomerMetricsNotConfiguredError extends Error {
   }
 }
 
+/**
+ * Markdown form of the not-configured message for tools that participate
+ * in autonomous chains. Throwing aborts the parent chain; returning
+ * structured markdown lets the parent log "no cross-pillar data, continuing
+ * without it" and complete the rest of the investigation.
+ *
+ * customer_metrics_query (the human escape-hatch tool) keeps the throw
+ * behavior intentionally — a user-issued PromQL passthrough should fail
+ * loudly when the backend isn't there. correlate_cross_pillar and
+ * discover_join (chain participants) call this helper instead.
+ */
+export function customerMetricsNotConfiguredMessage(diagnostic?: string): string {
+  const lines: string[] = [
+    '## Cross-pillar metrics backend not configured',
+    '',
+    "This MCP server doesn't currently have a customer metrics backend configured. Cross-pillar correlation joins log-side patterns to the customer's APM / infrastructure metrics; without a configured backend, the bridge cannot run.",
+    '',
+    "**What's out of reach without the cross-pillar backend**:",
+    '',
+    '- Correlating a spiking log pattern to its upstream metric anomaly (gateway latency, dependency saturation, etc.)',
+    '- Translating a customer-metric anomaly back to the log patterns that caused it',
+    '- Discovering join keys between the log enrichment label set and the customer metrics label set',
+    '',
+    '**To configure**:',
+    '',
+    '- (a) Set explicit env vars: `LOG10X_CUSTOMER_METRICS_URL` + `LOG10X_CUSTOMER_METRICS_TYPE`.',
+    '- (b) Or expose one of the ambient-detect credential sets: `GRAFANA_CLOUD_API_KEY`, `DD_API_KEY`+`DD_APP_KEY`, `AWS_REGION` (AMP), `GOOGLE_APPLICATION_CREDENTIALS` (GCP Managed Prometheus), `PROMETHEUS_URL`.',
+    '',
+    '**Continuing without cross-pillar**:',
+    '',
+    'The agent can still investigate using log-tier tools (event_lookup, pattern_trend, top_patterns, cost_drivers) and archive tools (retriever_query, retriever_series). Skip cross-pillar correlation in this chain and surface the missing-backend state in the synthesis.',
+  ];
+  if (diagnostic) {
+    lines.push('');
+    lines.push('**Detection trace**:');
+    lines.push('');
+    lines.push('```');
+    lines.push(diagnostic);
+    lines.push('```');
+  }
+  return lines.join('\n');
+}
+
 // ── Detection cascade ──
 
 export type DetectionPath =

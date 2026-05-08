@@ -26,6 +26,7 @@ import { savingsSchema, executeSavings } from './tools/savings.js';
 import { trendSchema, executeTrend } from './tools/trend.js';
 import { servicesSchema, executeServices } from './tools/services.js';
 import { exclusionFilterSchema, executeExclusionFilter } from './tools/exclusion-filter.js';
+import { patternExamplesSchema, executePatternExamples } from './tools/pattern-examples.js';
 import { dependencyCheckSchema, executeDependencyCheck } from './tools/dependency-check.js';
 import { discoverLabelsSchema, executeDiscoverLabels } from './tools/discover-labels.js';
 import { topPatternsSchema, executeTopPatterns } from './tools/top-patterns.js';
@@ -468,6 +469,21 @@ registerLog10xTool('log10x_event_lookup', eventLookupSchema, (args) =>
   })
 );
 
+// ── Tool: log10x_pattern_examples ──
+//
+// Orchestration primitive for fetching live SIEM events for one pattern
+// with template-extracted slot values. Designed for `log10x_investigate`
+// (or another orchestrator) to call autonomously when the chain needs
+// event evidence. See memory/project_pattern_examples_design.md for the
+// full design contract — read before changing this tool's shape.
+
+registerLog10xTool('log10x_pattern_examples', patternExamplesSchema, (args) =>
+  wrap('log10x_pattern_examples', async () => {
+    const env = resolveEnv(getEnvs(), args.environment);
+    return executePatternExamples(args, env);
+  })
+);
+
 // ── Tool: log10x_savings ──
 
 registerLog10xTool('log10x_savings', savingsSchema, (args) =>
@@ -840,6 +856,7 @@ server.resource(
 const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_cost_drivers', intent: 'Why did log costs spike this week — dollar-ranked patterns with week-over-week deltas' },
   { name: 'log10x_event_lookup', intent: 'What is this single log line — resolve to stable identity + cost + AI classification' },
+  { name: 'log10x_pattern_examples', intent: 'Recent live events for a pattern from the log analyzer with template-parsed slot values — bounded to 24h, for older use retriever_query' },
   { name: 'log10x_savings', intent: 'Pipeline ROI — how much receiver / optimizer / retriever are saving in dollars' },
   { name: 'log10x_pattern_trend', intent: 'Time series for a pattern — volume + cost history, spike detection, sparkline' },
   { name: 'log10x_services', intent: 'List all monitored services ranked by cost' },
@@ -853,7 +870,7 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_resolve_batch', intent: 'Pasted-batch triage — per-pattern variable concentration + next actions' },
   { name: 'log10x_extract_templates', intent: 'Extract structural templates from a log corpus via local tenx — optional min/required/forbidden-merge assertions' },
   { name: 'log10x_retriever_query', intent: 'Direct archive retrieval by templateHash with JS filter expressions' },
-  { name: 'log10x_retriever_query_status', intent: 'Poll CloudWatch diagnostics for an existing retriever query (no S3 results re-fetch)' },
+  { name: 'log10x_retriever_query_status', intent: 'Poll CloudWatch diagnostics for an existing retriever query and optionally recover stranded results from S3 via fetch_results=true (avoids resubmit + new queryId)' },
   { name: 'log10x_retriever_series', intent: 'Fidelity-aware time series from the S3 archive — auto-selects exact aggregation vs sampled fan-out' },
   { name: 'log10x_backfill_metric', intent: 'Create a new Datadog / Prometheus metric backfilled from Retriever archive' },
   { name: 'log10x_doctor', intent: 'Startup health check — env config, gateway, tier, freshness, Retriever, paste endpoint, cross-pillar enrichment floor' },

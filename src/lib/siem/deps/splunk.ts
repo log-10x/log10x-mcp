@@ -22,7 +22,7 @@ import {
   type DepMatch,
   type DepMatchedIn,
   emptyResult,
-  anyTokenMatches,
+  allTokensMatchExact,
   meaningfulTokens,
 } from './types.js';
 
@@ -137,8 +137,8 @@ export async function checkSplunkDeps(opts: DepCheckOptions): Promise<DepCheckRe
       const alertType = String(e.content?.alert_type || '');
       const isAlert = trackStr === '1' || (alertType !== '' && alertType !== 'always');
       const matchedIn: DepMatchedIn[] = [];
-      if (anyTokenMatches(e.name, tokens)) matchedIn.push('name');
-      if (anyTokenMatches(search, tokens) || anyTokenMatches(description, tokens)) matchedIn.push('query');
+      if (allTokensMatchExact(e.name, tokens)) matchedIn.push('name');
+      if (allTokensMatchExact(search, tokens) || allTokensMatchExact(description, tokens)) matchedIn.push('query');
       if (matchedIn.length === 0) continue;
       const app = String(e.acl?.app || 'search');
       const url = `${webHost}/en-US/manager/${encodeURIComponent(app)}/saved/searches/${encodeURIComponent(e.name)}`;
@@ -166,8 +166,8 @@ export async function checkSplunkDeps(opts: DepCheckOptions): Promise<DepCheckRe
       const xml = String(e.content?.['eai:data'] || '');
       const label = String(e.content?.label || '');
       const matchedIn: DepMatchedIn[] = [];
-      if (anyTokenMatches(e.name, tokens) || anyTokenMatches(label, tokens)) matchedIn.push('name');
-      if (anyTokenMatches(xml, tokens)) matchedIn.push('definition');
+      if (allTokensMatchExact(e.name, tokens) || allTokensMatchExact(label, tokens)) matchedIn.push('name');
+      if (allTokensMatchExact(xml, tokens)) matchedIn.push('definition');
       if (matchedIn.length === 0) continue;
       const app = String(e.acl?.app || 'search');
       const url = `${webHost}/en-US/app/${encodeURIComponent(app)}/${encodeURIComponent(e.name)}`;

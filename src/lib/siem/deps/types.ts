@@ -63,11 +63,62 @@ export function emptyResult(vendor: SiemId, pattern: string): DepCheckResult {
   };
 }
 
-/** Case-insensitive token-OR match. */
+/**
+ * Case-insensitive token-OR match.
+ *
+ * @deprecated Replaced by `allTokensMatchExact` for the dependency-check
+ * tool. The OR substring approach matched any saved search whose body
+ * contained one of the pattern tokens, producing dependencies on saved
+ * searches that didn't actually reference the pattern semantically.
+ * Kept for back-compat with any caller outside the dep-check vendor
+ * modules.
+ */
 export function anyTokenMatches(haystack: string, tokens: string[]): boolean {
   if (!haystack) return false;
   const h = haystack.toLowerCase();
   return tokens.some((t) => t.length > 0 && h.includes(t.toLowerCase()));
+}
+
+/**
+ * Strict token-AND match using the templater's tokenization rules.
+ *
+ * The haystack is split on non-alphanumeric runs and lower-cased to
+ * produce a token set. The match passes when every supplied pattern
+ * token appears as a discrete token in the haystack — not just as a
+ * substring. Two consequences:
+ *
+ *   1. ALL pattern tokens must appear, not just one. A saved search
+ *      that incidentally contains the word `payment` won't match
+ *      `Payment_Gateway_Timeout` unless `gateway` and `timeout` are
+ *      also present in the haystack.
+ *   2. Tokens must be discrete. The substring `paymentgatewaytimeout`
+ *      stuffed into a single identifier will NOT satisfy a match for
+ *      `payment, gateway, timeout` because the haystack tokenizer
+ *      doesn't split it. This trades some recall for a major precision
+ *      gain — the dep-check tool's old OR-substring matcher delivered
+ *      false-positive dependencies on saved searches that just happened
+ *      to mention one common word.
+ *
+ * This is the matcher the dependency-check tool uses on saved-search
+ * names, queries, alert messages, and dashboard descriptions. It mirrors
+ * the templater's symbol tokenization (split on non-alphanumeric, ≥ 2
+ * chars) so a pattern like `Payment_Gateway_Timeout` matches a saved
+ * search whose body says `payment gateway timeout` or
+ * `Payment.Gateway.Timeout` but not one that just mentions `payment`.
+ */
+export function allTokensMatchExact(haystack: string, tokens: string[]): boolean {
+  if (!haystack || tokens.length === 0) return false;
+  const haystackTokens = new Set(
+    haystack
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((t) => t.length >= 2),
+  );
+  for (const t of tokens) {
+    if (t.length < 2) continue;
+    if (!haystackTokens.has(t.toLowerCase())) return false;
+  }
+  return true;
 }
 
 /** Pick keyword tokens long enough to be meaningful (>= 4 chars) — falls back to the full pattern. */
