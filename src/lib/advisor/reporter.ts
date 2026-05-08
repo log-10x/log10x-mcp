@@ -5,12 +5,16 @@
  * covers the whole lifecycle for one forwarder kind. The plan is pure
  * data — rendering to markdown is the render layer's job.
  *
- * The same builder serves both apps: Reporter (kind=report, read-only
- * metric emission) and Receiver (kind=receive, read + write back to
- * the forwarder with mute/sample/compact applied). They share every
- * forwarder spec, every chart, every preflight check. The single
- * differentiator is the `kind` value baked into the tenx values block,
- * which the chart templates route to different launch args.
+ * The same builder serves both apps. The current chart format unifies
+ * around a single Receiver workload with two opt-in feature flags:
+ *   - `optimize` — losslessly compact events (~20-40x volume reduction).
+ *   - `readOnly` — emit metrics, do NOT write events back through the
+ *     forwarder (passive observation).
+ * The flags are mutually exclusive at the chart level. AdvisorApp keeps
+ * a thin distinction at the user-facing surface: `reporter` is sugar
+ * for "Receiver with readOnly=true" (different release-name default,
+ * different verify wording, blocks optimize since there are no
+ * write-back events to encode); `receiver` exposes the flags directly.
  */
 
 import type { DiscoverySnapshot, ForwarderKind } from '../discovery/types.js';
@@ -20,7 +24,6 @@ import {
   STANDALONE_SPEC,
   type OutputDestination,
   type ForwarderSpec,
-  type TenxKind,
 } from './reporter-forwarders.js';
 import { run } from '../discovery/shell.js';
 
@@ -67,15 +70,18 @@ export interface ReporterAdviseArgs {
   /**
    * Enable encoded event output (compact templateHash+vars form,
    * ~20-40x volume reduction). Only meaningful when app='receiver';
-   * silently ignored otherwise. Plan emits the `receiverOptimize=true`
-   * env var on the forwarder container.
+   * blocks when app='reporter' (Reporter has no write-back path to
+   * encode events on). Maps to `tenx.optimize: true` in every
+   * supported chart's values.yaml.
    */
   optimize?: boolean;
   /**
-   * Read-only mode (Receiver app only). When true, emits `receiverReadOnly=true`
-   * env var so the receiver receives events + publishes TenXSummary metrics
-   * but does NOT write events back to the forwarder. Silently ignored when
-   * app='reporter' (Reporter is read-only by definition).
+   * Read-only mode (Receiver app only). When true, the receiver
+   * publishes TenXSummary metrics but does NOT write events back
+   * through the forwarder. Maps to `tenx.readOnly: true` in every
+   * supported chart's values.yaml. Silently ignored when app='reporter'
+   * — that app sets readOnly implicitly (Reporter IS read-only by
+   * definition).
    */
   readOnly?: boolean;
   /** Skip install — for users who just want verify or teardown guidance. */
@@ -86,17 +92,16 @@ export interface ReporterAdviseArgs {
   skipVerify?: boolean;
 }
 
-const APP_TO_KIND: Record<AdvisorApp, TenxKind> = {
-  reporter: 'report',
-  receiver: 'receive',
-};
-
 /** Produce the plan. Never throws — surfaces missing input as `blockers`. */
 export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<AdvisePlan> {
   const snapshot = args.snapshot;
   const app: AdvisorApp = args.app ?? 'reporter';
   const shape: DeploymentShape = args.shape ?? 'inline';
-  const kind: TenxKind = APP_TO_KIND[app];
+  // Reporter app is sugar for "Receiver + readOnly=true"; the chart
+  // format unified around feature flags so there's nothing else to
+  // distinguish.
+  const effectiveReadOnly = app === 'reporter' ? true : (args.readOnly ?? false);
+  const effectiveOptimize = args.optimize ?? false;
   const releaseName = args.releaseName ?? `my-${app}`;
   const destination: OutputDestination = args.destination ?? 'mock';
   const namespace =
@@ -164,10 +169,10 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   if (destination === 'splunk' && !args.splunkHecToken && !args.skipInstall) {
     blockers.push('destination=splunk requires `splunk_hec_token`.');
   }
-  // optimize=true path: every forwarder chart maps kind=optimize to
-  // @apps/receiver + receiverOptimize=true env var. No per-forwarder
-  // blocker remains (logstash is blocked above for the sidecar wiring
-  // bug, which applies regardless of optimize).
+  // optimize=true path: every forwarder chart deploys the Receiver and
+  // exposes the optimize feature flag as `tenx.optimize: true`. No
+  // per-forwarder blocker remains (logstash is blocked above for the
+  // sidecar wiring bug, which applies regardless of optimize).
   if (shape === 'inline' && args.optimize && app === 'reporter') {
     blockers.push(
       'optimize=true is a Receiver-app feature (it encodes events emitted back through the forwarder). The Reporter app does not emit events back through the forwarder — it only publishes aggregated TenXSummary metrics. Drop `optimize` or switch to `app=receiver`.'
@@ -237,11 +242,11 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   const teardown: PlanStep[] = [];
 
   if (spec && !args.skipInstall && blockers.length === 0) {
-    install.push(...buildInstallSteps({ ...args, spec, releaseName, namespace, destination, app, kind, optimize: args.optimize, readOnly: args.readOnly }));
+    install.push(...buildInstallSteps({ ...args, spec, releaseName, namespace, destination, app, optimize: effectiveOptimize, readOnly: effectiveReadOnly }));
   }
   if (spec && !args.skipVerify) {
     verify.push(
-      ...spec.verifyProbes({ releaseName, namespace, destination, optimize: args.optimize, readOnly: args.readOnly }).map((p) => ({
+      ...spec.verifyProbes({ releaseName, namespace, destination, optimize: effectiveOptimize, readOnly: effectiveReadOnly }).map((p) => ({
         ...p,
       }))
     );
@@ -279,7 +284,8 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
  * GitOps section explaining MCP-managed compactReceiver updates.
  *
  * The receiver's compact decision can be:
- *   - global ON via `receiverOptimize=true` (compact every event), or
+ *   - global ON via the chart's `optimize` feature flag (compact every
+ *     event — `tenx.optimize: true` in any supported chart's values.yaml), or
  *   - per-pattern via the compactReceiver module (CSV lookup + JS predicate),
  *     which is what this section is for.
  *
@@ -298,8 +304,8 @@ function buildCompactReceiverGitopsExplainer(opts: { optimize: boolean }): Gitop
     ],
     whenToSkip: [
       opts.optimize
-        ? '`receiverOptimize=true` is already set on this plan, which compacts every event. Add GitOps only if you need to opt SPECIFIC patterns OUT of compaction (audit/compliance).'
-        : 'You will set `receiverOptimize=true` later to compact every event uniformly — no per-pattern decisions needed.',
+        ? 'The chart `optimize` feature flag is already set on this plan, which compacts every event. Add GitOps only if you need to opt SPECIFIC patterns OUT of compaction (audit/compliance).'
+        : 'You will turn on the chart `optimize` feature flag later to compact every event uniformly — no per-pattern decisions needed.',
       'You will not be using the receiver app at all (this section is receiver-only).',
     ],
     repoLayout: [
@@ -314,7 +320,7 @@ function buildCompactReceiverGitopsExplainer(opts: { optimize: boolean }): Gitop
       { name: 'GH_SYNC_INTERVAL', value: '30s', required: false, note: 'engine re-fetches the repo this often' },
       { name: 'compactReceiverLookupFile', value: 'pipelines/run/receive/compact/compact-lookup.csv', required: true, note: 'must match the path inside your GitOps repo' },
       { name: 'compactReceiverFieldNames', value: '[symbolMessage]', required: false, note: 'fields joined with `_` to form each event\'s lookup key' },
-      { name: 'compactReceiverDefault', value: 'false', required: false, note: '`false`: entries opt INTO compaction. `true`: entries opt OUT (use with receiverOptimize=true)' },
+      { name: 'compactReceiverDefault', value: 'false', required: false, note: '`false`: entries opt INTO compaction. `true`: entries opt OUT (use with the chart `optimize` flag)' },
     ],
     mcpHandoff: {
       tool: 'log10x_advise_compact',
@@ -487,11 +493,10 @@ function buildInstallSteps(opts: {
   outputHost?: string;
   splunkHecToken?: string;
   app: AdvisorApp;
-  kind: TenxKind;
   optimize?: boolean;
   readOnly?: boolean;
 }): PlanStep[] {
-  const { spec, releaseName, namespace, destination, outputHost, splunkHecToken, kind, optimize, readOnly } = opts;
+  const { spec, releaseName, namespace, destination, outputHost, splunkHecToken, optimize, readOnly } = opts;
   const apiKey = opts.apiKey ?? 'REPLACE_WITH_LICENSE_KEY';
   const steps: PlanStep[] = [];
 
@@ -517,7 +522,7 @@ function buildInstallSteps(opts: {
     rationale: `Tenx config + ${spec.label}-specific output destination (\`${destination}\`).`,
     file: {
       path: valuesFile,
-      contents: spec.renderValues({ apiKey, releaseName, destination, kind, outputHost, splunkHecToken, optimize, readOnly }),
+      contents: spec.renderValues({ apiKey, releaseName, destination, outputHost, splunkHecToken, optimize, readOnly }),
       language: 'yaml',
     },
     commands: [],

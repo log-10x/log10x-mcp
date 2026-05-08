@@ -366,10 +366,11 @@ function makeInlineAlts(params: {
   });
 
   // Inline receiver + optimize (compact encoding).
-  // All 5 forwarder charts use a unified optimize path: kind=optimize
-  // launches @apps/receiver + receiverOptimize=true env var. Logstash
-  // still hits its architectural sidecar bug regardless of optimize,
-  // so the logstashBlocker above handles that case.
+  // All 5 forwarder charts deploy the Receiver workload and accept
+  // `optimize=true` via the chart's standard feature-flag surface
+  // (`tenx.optimize: true` in every chart's values.yaml). Logstash still
+  // hits its architectural sidecar bug regardless of optimize, so the
+  // logstashBlocker above handles that case.
   const optimizeBlocker = undefined;
   alts.push({
     label: `Inline Receiver + Compact (${detectedKind})`,

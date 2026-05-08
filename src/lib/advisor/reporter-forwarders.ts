@@ -41,16 +41,6 @@ import type { ForwarderKind } from '../discovery/types.js';
 
 export type OutputDestination = 'mock' | 'elasticsearch' | 'splunk' | 'datadog' | 'cloudwatch';
 
-// Which tenx kind this install is for.
-//   report  -> Reporter (read-only metric emission)
-//   receive -> Receiver (read + write events back through the forwarder)
-//
-// Optimizer mode (lossless encoded-event output, ~20-40x volume reduction:
-// `"log":"~-8Av]P9cVZb,timestamp,var1,var2,..."`) is NOT exposed as a kind.
-// It is triggered by setting `env: [{name: receiverOptimize, value: "true"}]`
-// on the forwarder container.
-export type TenxKind = 'report' | 'receive';
-
 /** How a forwarder's helm chart labels its workloads + pods. */
 export type SelectorStyle = 'k8s-recommended' | 'legacy-helm';
 
@@ -85,30 +75,43 @@ export interface ForwarderSpec {
   selectorStyle: SelectorStyle;
   /** Return the kubectl label selector for a given release. */
   selectorLabel: (releaseName: string) => string;
-  /** Render the values.yaml as a SINGLE coherent YAML document. */
+  /**
+   * Render the values.yaml as a SINGLE coherent YAML document.
+   *
+   * The chart format is unified around the Receiver — every supported
+   * forwarder chart deploys the Receiver app and exposes feature flags
+   * (`optimize`, `readOnly`) for the two opt-in modes:
+   *   - default (neither flag): receive + filter events, emit them in
+   *     their original form back through the forwarder.
+   *   - optimize=true: receive + filter + losslessly compact (~20-40x
+   *     volume reduction).
+   *   - readOnly=true: receive + emit TenXSummary metrics, do NOT write
+   *     events back through the forwarder (passive observation).
+   *
+   * The two flags are mutually exclusive at the chart level (every chart
+   * has a `tenx-validate.yaml` template that fails helm install if both
+   * are set). The advisor enforces the same invariant upstream.
+   *
+   * Every chart in the supported set (fluent-bit, fluentd, otel-collector,
+   * filebeat, logstash) reads `tenx.optimize` / `tenx.readOnly` directly.
+   */
   renderValues: (opts: {
     apiKey: string;
     releaseName: string;
     destination: OutputDestination;
-    /** Tenx kind — report (Reporter app) or receive (Receiver app). */
-    kind: TenxKind;
     outputHost?: string;
     splunkHecToken?: string;
     /** Placeholder emitted into `tenx.gitToken`. Defaults to the public-repo no-op string. */
     gitToken?: string;
     /**
-     * When true AND kind=receive, emit events in compact encoded form
-     * (templateHash+vars, ~20-40x volume reduction). Plan emits the
-     * `receiverOptimize=true` env var on the forwarder container.
-     * Silently ignored when kind=report.
+     * When true, emit events in compact encoded form (templateHash+vars,
+     * ~20-40x volume reduction). Mutually exclusive with `readOnly`.
      */
     optimize?: boolean;
     /**
-     * When true AND kind=receive, run the receiver in read-only mode
-     * (passive metrics emitter — no events written back through the
-     * forwarder). Plan emits the `receiverReadOnly=true` env var, which
-     * the engine reads to gate every event-output stream module
-     * (forward/unix/socket/stdout). Silently ignored when kind=report.
+     * When true, run the receiver in read-only mode (passive metrics
+     * emitter — no events written back through the forwarder). Mutually
+     * exclusive with `optimize`.
      */
     readOnly?: boolean;
   }) => string;
@@ -138,24 +141,19 @@ const MOCK_OUTPUT_NOTE =
 // ── Shared helpers ──
 
 /**
- * Build a top-level `env:` YAML block for receiver-mode flags.
- * - kind=receive + optimize=true → receiverOptimize=true
- * - kind=receive + readOnly=true → receiverReadOnly=true
- * Silently empty when kind=report or both flags are off. Returned
- * verbatim for callers that emit it as a top-level chart value
- * (fluent-bit / fluentd); other charts wrap it differently.
+ * Render `tenx.optimize` / `tenx.readOnly` lines as nested YAML under
+ * the existing `tenx:` block. Every chart now accepts these flags
+ * directly (fluent-bit, fluentd, otel-collector, filebeat, logstash);
+ * the chart's `tenx-validate.yaml` template fails install if both are
+ * true at once, so the advisor enforces the same invariant upstream.
+ * Emits one line per truthy flag at 2-space indent; emits nothing when
+ * both are false (chart defaults are false).
  */
-function renderTenxEnvBlock(opts: {
-  kind: TenxKind;
-  optimize?: boolean;
-  readOnly?: boolean;
-}): string {
-  if (opts.kind !== 'receive') return '';
-  const entries: string[] = [];
-  if (opts.optimize) entries.push('  - name: receiverOptimize\n    value: "true"');
-  if (opts.readOnly) entries.push('  - name: receiverReadOnly\n    value: "true"');
-  if (entries.length === 0) return '';
-  return `\nenv:\n${entries.join('\n')}\n`;
+function renderTenxFeatureFlags(opts: { optimize?: boolean; readOnly?: boolean }): string {
+  const lines: string[] = [];
+  if (opts.optimize) lines.push('  optimize: true');
+  if (opts.readOnly) lines.push('  readOnly: true');
+  return lines.length === 0 ? '' : '\n' + lines.join('\n');
 }
 
 /** k8s-recommended selector: `app.kubernetes.io/instance=<release>`. */
@@ -184,23 +182,22 @@ export const REPORTER_FORWARDER_SPECS: Record<Exclude<ForwarderKind, 'unknown'>,
     hasTenxSidecar: false,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ apiKey, releaseName, destination, kind, outputHost, splunkHecToken, gitToken, optimize, readOnly }) => {
+    renderValues: ({ apiKey, releaseName, destination, outputHost, splunkHecToken, gitToken, optimize, readOnly }) => {
       const outputBlock = renderFluentBitOutput(destination, outputHost, splunkHecToken);
-      // Receiver-mode flags via env-var workaround.
-      // receiverOptimize=true → compact encoded events;
-      // receiverReadOnly=true → metrics-only, no return write.
-      const envBlock = renderTenxEnvBlock({ kind, optimize, readOnly });
+      // The fluent-bit chart's values.yaml exposes optimize + readOnly
+      // booleans directly; the chart templates wire them to the matching
+      // engine launch args. Default (both false) is plain receiver.
+      const featureFlags = renderTenxFeatureFlags({ optimize, readOnly });
       return `tenx:
   enabled: true
-  apiKey: "${apiKey}"
-  kind: "${kind}"
+  apiKey: "${apiKey}"${featureFlags}
   runtimeName: "${releaseName}"
   gitToken: "${gitToken ?? DEFAULT_GIT_TOKEN}"
   config:
     git:
       enabled: true
       url: "https://github.com/log-10x/config.git"
-${envBlock}
+
 ${outputBlock}
 `;
     },
@@ -268,21 +265,21 @@ ${outputBlock}
     hasTenxSidecar: false,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ apiKey, releaseName, destination, kind, outputHost, splunkHecToken, gitToken, optimize, readOnly }) => {
+    renderValues: ({ apiKey, releaseName, destination, outputHost, splunkHecToken, gitToken, optimize, readOnly }) => {
       // IMPORTANT: fluentd's output config lives UNDER `tenx:`, not
       // as a second top-level `tenx:` block. A prior version of this
       // template emitted two `tenx:` keys and YAML silently dropped
-      // the first — losing apiKey/kind/runtimeName/git config entirely.
+      // the first — losing apiKey/runtimeName/git config entirely.
       const outputConfig = renderFluentdOutputConfig(destination, outputHost, splunkHecToken);
       const fluentdExcludePaths = FORWARDER_EXCLUDE_REGEX.map((g) => `/var/log/containers/${g.replace('.*', '*').replace('\\.log$', '.log')}`)
         .map((g) => `"${g}"`)
         .join(', ');
-      // Receiver-mode flags via env-var workaround — same as fluent-bit.
-      const envBlock = renderTenxEnvBlock({ kind, optimize, readOnly });
+      // Same as fluent-bit: chart values expose optimize + readOnly
+      // booleans directly; chart templates handle the engine wiring.
+      const featureFlags = renderTenxFeatureFlags({ optimize, readOnly });
       return `tenx:
   enabled: true
-  apiKey: "${apiKey}"
-  kind: "${kind}"
+  apiKey: "${apiKey}"${featureFlags}
   runtimeName: "${releaseName}"
   gitToken: "${gitToken ?? DEFAULT_GIT_TOKEN}"
   config:
@@ -326,7 +323,7 @@ ${outputBlock}
   outputConfigs:
     06_final_output.conf: |-
 ${indent(outputConfig, 6)}
-${envBlock}`;
+`;
     },
     verifyProbes: ({ releaseName, namespace, destination, optimize }) => {
       const sel = k8sRecommendedSelector(releaseName);
@@ -389,32 +386,21 @@ ${envBlock}`;
     hasTenxSidecar: false,
     selectorStyle: 'legacy-helm',
     selectorLabel: (r) => legacyElasticSelector(r, 'filebeat'),
-    renderValues: ({ apiKey, releaseName, destination, kind, outputHost, gitToken, optimize, readOnly }) => {
+    renderValues: ({ apiKey, releaseName, destination, outputHost, gitToken, optimize, readOnly }) => {
       // Chart defaults reference Elasticsearch secrets/certs. For a mock
       // install we MUST override extraEnvs/secretMounts to empty so pods
       // don't hang in FailedMount.
       const outputBlock = renderFilebeatOutput(destination, outputHost);
-      // The chart routes kind=optimize → @apps/receiver + receiverOptimize
-      // env var. Emit kind=optimize in values when caller requested optimize.
-      const effectiveKind = optimize && kind === 'receive' ? 'optimize' : kind;
-      // readOnly has no chart-level kind value — emit as an env var on
-      // the daemonset's extraEnvs so the engine reads receiverReadOnly=true.
-      const readOnlyEnvEntry =
-        readOnly && kind === 'receive'
-          ? `
-    - name: receiverReadOnly
-      value: "true"`
-          : '';
+      const featureFlags = renderTenxFeatureFlags({ optimize, readOnly });
       return `tenx:
   enabled: true
   apiKey: "${apiKey}"
-  kind: "${effectiveKind}"
   runtimeName: "${releaseName}"
   gitToken: "${gitToken ?? DEFAULT_GIT_TOKEN}"
   config:
     git:
       enabled: true
-      url: "https://github.com/log-10x/config.git"
+      url: "https://github.com/log-10x/config.git"${featureFlags}
 
 # The chart's default readiness/liveness probes run \`filebeat test output\`
 # which doesn't support \`output.file\` (used by mock destination). Override
@@ -434,7 +420,7 @@ livenessProbe:
 daemonset:
   # Avoid chart defaults that hardcode elasticsearch-master-credentials / certs.
   # Override to empty lists for mock/test; add back real refs for production ES.
-  extraEnvs:${readOnlyEnvEntry || ' []'}
+  extraEnvs: []
   secretMounts: []
   filebeatConfig:
     filebeat.yml: |
@@ -495,28 +481,21 @@ ${indent(outputBlock, 6)}
     hasTenxSidecar: false,
     selectorStyle: 'legacy-helm',
     selectorLabel: (r) => legacyElasticSelector(r, 'logstash'),
-    renderValues: ({ apiKey, releaseName, destination, kind, outputHost, gitToken, optimize, readOnly }) => {
+    renderValues: ({ apiKey, releaseName, destination, outputHost, gitToken, optimize, readOnly }) => {
       const output = renderLogstashOutput(destination, outputHost);
-      const effectiveKind = optimize && kind === 'receive' ? 'optimize' : kind;
-      const extraEnvsBlock =
-        readOnly && kind === 'receive'
-          ? `extraEnvs:
-  - name: receiverReadOnly
-    value: "true"`
-          : 'extraEnvs: []';
+      const featureFlags = renderTenxFeatureFlags({ optimize, readOnly });
       return `tenx:
   enabled: true
   apiKey: "${apiKey}"
-  kind: "${effectiveKind}"
   runtimeName: "${releaseName}"
   gitToken: "${gitToken ?? DEFAULT_GIT_TOKEN}"
   config:
     git:
       enabled: true
-      url: "https://github.com/log-10x/config.git"
+      url: "https://github.com/log-10x/config.git"${featureFlags}
 
 # Avoid chart defaults hardcoding Elasticsearch credentials/mounts.
-${extraEnvsBlock}
+extraEnvs: []
 secretMounts: []
 
 logstashPipeline:
@@ -568,31 +547,26 @@ ${indent(output, 4)}
     hasTenxSidecar: false,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ apiKey, releaseName, destination, kind, outputHost, gitToken, optimize, readOnly }) => {
+    renderValues: ({ apiKey, releaseName, destination, outputHost, gitToken, optimize, readOnly }) => {
       // The OTel chart doesn't auto-wire filelog unless the preset is
       // on. We turn it on explicitly so the user's pipeline just works.
       // image.repository is required by the chart and has no default.
       const exporter = renderOtelExporter(destination, outputHost);
-      const effectiveKind = optimize && kind === 'receive' ? 'optimize' : kind;
-      const extraEnvsBlock =
-        readOnly && kind === 'receive'
-          ? `
-extraEnvs:
-  - name: receiverReadOnly
-    value: "true"
-`
-          : '';
+      // Same as fluent-bit: chart values expose optimize + readOnly
+      // booleans directly; chart templates wire them to the matching
+      // engine launch args (and gate the fluentforward / from-tenx
+      // pipeline when readOnly is true).
+      const featureFlags = renderTenxFeatureFlags({ optimize, readOnly });
       return `mode: "daemonset"
 
 # image.repository defaults in the chart's values.yaml to the upstream
 # contrib image (otel/opentelemetry-collector-contrib), which is
 # public. Override here if you want the log10x-repackaged image and
 # have configured the necessary imagePullSecrets.
-${extraEnvsBlock}
+
 tenx:
   enabled: true
-  apiKey: "${apiKey}"
-  kind: "${effectiveKind}"
+  apiKey: "${apiKey}"${featureFlags}
   runtimeName: "${releaseName}"
   gitToken: "${gitToken ?? DEFAULT_GIT_TOKEN}"
   config:

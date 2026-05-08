@@ -3,10 +3,11 @@
  *
  * Given a DiscoverySnapshot (from `log10x_discover_env`) + a few user
  * choices, produce a forwarder-specific install/verify/teardown plan
- * for the Log10x Receiver (kind=receive). Same 5 forwarders as the
- * Reporter, same charts, same preflight checks — the only difference
- * is the tenx `kind` value, which the chart templates route to a
- * different launch arg (`@run/input/forwarder/<fw>/receive`).
+ * for the Log10x Receiver. Same 5 forwarders as the Reporter, same
+ * charts, same preflight checks — the only difference is which feature
+ * flags are toggled in the chart values (`optimize`, `readOnly` on
+ * fluent-bit / fluentd / otel-collector; `kind` on filebeat / logstash,
+ * mapped from the same booleans).
  */
 
 import { z } from 'zod';
@@ -56,13 +57,13 @@ export const adviseReceiverSchema = {
     .boolean()
     .optional()
     .describe(
-      'When true, emit events out of the forwarder in compact encoded form (templateHash+vars, ~20-40x volume reduction; see `config/modules/pipelines/run/units/transform/doc.md#compact`). Supported on all 5 forwarders. Plan emits `env: [{name: receiverOptimize, value: "true"}]`. Has no effect when `mode=readonly` (no events written back). Default: false.'
+      'When true, emit events out of the forwarder in compact encoded form (templateHash+vars, ~20-40x volume reduction; see `config/modules/pipelines/run/units/transform/doc.md#compact`). Supported on all 5 forwarders via `tenx.optimize: true` in the chart values. Mutually exclusive with `mode=readonly` (chart fails install if both are set). Default: false.'
     ),
   mode: z
     .enum(['readonly', 'readwrite'])
     .optional()
     .describe(
-      'Receiver mode. `readwrite` (default): receive events, filter them, write them back through the forwarder (with optional compact encoding when `optimize=true`). `readonly`: receive events, emit `emitted_events`/`all_events` TenXSummary metrics, do NOT write events back — passive metrics-only deployment. Plan emits `env: [{name: receiverReadOnly, value: "true"}]` for readonly. The engine flag (`receiverReadOnly`) gates every event-output stream module (forward/unix/socket/stdout) so the return loop to the forwarder is never constructed. For the parallel-DaemonSet observation pattern (separate pod, not in the forwarder pipeline), use `log10x_advise_reporter` with `shape=standalone` instead.'
+      'Receiver mode. `readwrite` (default): receive events, filter them, write them back through the forwarder (with optional compact encoding when `optimize=true`). `readonly`: receive events, emit `emitted_events`/`all_events` TenXSummary metrics, do NOT write events back — passive metrics-only deployment. Maps to `tenx.readOnly: true` in the chart values. The chart wires the engine flag that gates every event-output stream module (forward/unix/socket/stdout) so the return loop to the forwarder is never constructed. Mutually exclusive with `optimize=true`. For the parallel-DaemonSet observation pattern (separate pod, not in the forwarder pipeline), use `log10x_advise_reporter` with `shape=standalone` instead.'
     ),
   action: z
     .enum(['install', 'verify', 'teardown', 'all'])
