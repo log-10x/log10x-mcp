@@ -2,5 +2,11 @@ node_modules/
 build-eval/
 reports/*
 !reports/.gitkeep
+# Hero-scenario artifacts ARE checked in — they document what
+# real sub-agents did against the live demo env, with oracle
+# validation, and survive compaction as evidence. The
+# deterministic reports/<scenario>/<ts>/ tree is still ephemeral.
+!reports/hero/
+!reports/hero/**
 *.log
 .DS_Store

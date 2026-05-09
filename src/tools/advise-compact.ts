@@ -381,7 +381,16 @@ async function executeCsvMode(args: AdviseCompactArgs): Promise<string> {
   out.push('# Fetch current SHA (needed for update; empty for create)');
   out.push('CUR_SHA=$(gh api "/repos/$REPO/contents/$LOOKUP_PATH?ref=$BASE" --jq .sha 2>/dev/null || true)');
   out.push('');
-  out.push('# Commit the new content on a fresh branch (gh api creates the branch if absent)');
+  out.push('# Create the working branch from BASE. The PUT-contents endpoint');
+  out.push('# does NOT auto-create branches — passing -f branch=<new> errors');
+  out.push('# with HTTP 404 "Branch not found" if the ref doesn\'t already');
+  out.push('# exist. Caught live by eval-harness Stage 5 (2026-05).');
+  out.push('BASE_SHA=$(gh api "/repos/$REPO/git/refs/heads/$BASE" --jq .object.sha)');
+  out.push('gh api -X POST "/repos/$REPO/git/refs" \\');
+  out.push('  -f ref="refs/heads/$BRANCH" \\');
+  out.push('  -f sha="$BASE_SHA" >/dev/null 2>&1 || true   # ignore "already exists"');
+  out.push('');
+  out.push('# Commit the new content on the working branch.');
   out.push('CONTENT_B64=$(base64 < "$TMPFILE" | tr -d "\\n")');
   out.push('PUT_ARGS=( -X PUT "/repos/$REPO/contents/$LOOKUP_PATH"');
   out.push(`  -f branch="$BRANCH"`);
