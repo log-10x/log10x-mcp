@@ -100,16 +100,16 @@ interface SeriesPoint {
 }
 
 export async function executeRetrieverSeries(
-  args: {
+  rawArgs: {
     pattern?: string;
     search?: string;
     from: string;
     to: string;
     filters?: string[];
     target?: string;
-    bucket_size: string;
+    bucket_size?: string;
     group_by?: string;
-    fidelity: string;
+    fidelity?: string;
     environment?: string;
   },
   env: EnvConfig
@@ -117,6 +117,14 @@ export async function executeRetrieverSeries(
   if (!isRetrieverConfigured()) {
     return retrieverNotConfiguredMessage();
   }
+  // Defensive defaults — match retrieverSeriesSchema for non-SDK
+  // callers. Narrow into a fully-populated args local so the helper
+  // functions can keep their non-optional bucket_size/fidelity types.
+  const args = {
+    ...rawArgs,
+    bucket_size: rawArgs.bucket_size ?? '5m',
+    fidelity: rawArgs.fidelity ?? 'auto',
+  };
 
   // Pattern → search translation. Resolve once at the top so all downstream
   // paths (decideFidelity's pattern extractor, full-mode runRetrieverQuery,

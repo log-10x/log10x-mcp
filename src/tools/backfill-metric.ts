@@ -79,14 +79,14 @@ export async function executeBackfillMetric(
     pattern: string;
     metric_name: string;
     destination: Destination;
-    bucket_size: string;
-    aggregation: AggregationType;
+    bucket_size?: string;
+    aggregation?: AggregationType;
     from: string;
-    to: string;
+    to?: string;
     group_by?: string[];
     filters?: string[];
     unique_field?: string;
-    emit_forward: boolean;
+    emit_forward?: boolean;
     environment?: string;
   },
   env: EnvConfig
@@ -95,6 +95,11 @@ export async function executeBackfillMetric(
   if (!isRetrieverConfigured()) {
     return retrieverNotConfiguredMessage();
   }
+  // Defensive defaults — match backfillMetricSchema for non-SDK callers.
+  args.bucket_size = args.bucket_size ?? '5m';
+  args.aggregation = args.aggregation ?? 'count';
+  args.to = args.to ?? 'now';
+  args.emit_forward = args.emit_forward ?? false;
 
   try {
     parseTimeExpression(args.from);

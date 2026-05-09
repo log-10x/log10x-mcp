@@ -95,9 +95,9 @@ export async function executeRetrieverQuery(
     to: string;
     filters?: string[];
     target?: string;
-    limit: number;
-    format: 'events' | 'count' | 'aggregated' | 'ephemeral_series';
-    bucket_size: string;
+    limit?: number;
+    format?: 'events' | 'count' | 'aggregated' | 'ephemeral_series';
+    bucket_size?: string;
     environment?: string;
   },
   env: EnvConfig
@@ -105,6 +105,12 @@ export async function executeRetrieverQuery(
   if (!isRetrieverConfigured()) {
     return retrieverNotConfiguredMessage();
   }
+  // Defensive defaults — match retrieverQuerySchema. Direct/chain
+  // callers bypass the SDK Zod boundary; without these the rendering
+  // path renders `${undefined}`.
+  args.limit = args.limit ?? 500;
+  args.format = args.format ?? 'events';
+  args.bucket_size = args.bucket_size ?? '5m';
 
   try {
     normalizeTimeExpression(args.from);
