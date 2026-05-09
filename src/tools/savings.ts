@@ -27,6 +27,7 @@ import { queryInstant } from '../lib/api.js';
 import * as pql from '../lib/promql.js';
 import { bytesToCost, parsePrometheusValue } from '../lib/cost.js';
 import { fmtDollar, fmtBytes, parseTimeframe, costPeriodLabel } from '../lib/format.js';
+import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 
 /** S3 Standard default, matching the ROI dashboard's storageCost default ($/GB/month). */
 const DEFAULT_STORAGE_COST_PER_GB = 0.023;
@@ -250,6 +251,33 @@ export async function executeSavings(
     lines.push('');
     lines.push('  _Retriever figures use chunked parallel queries (one per day) to avoid server budget limits on high-cardinality indexed metrics. This call may take 30–90s on large deployments._');
   }
+
+  // NEXT_ACTIONS: drill-downs to surface WHICH patterns drive cost
+  // (top_patterns) and WHETHER cost is growing (cost_drivers) — those
+  // are the natural follow-ups after seeing the aggregate savings
+  // number. Without these hints, autonomous chains terminate after
+  // savings even when the obvious next question is "where is this
+  // coming from?".
+  //
+  // Compact-mode advisor is intentionally NOT hinted here: it requires
+  // a snapshot_id (from discover_env) which savings has no way to
+  // produce. Walking savings → advise_compact directly produces a
+  // "missing target" stub. The user routes via discover_env →
+  // advise_install → advise_compact instead.
+  const next: NextAction[] = [
+    {
+      tool: 'log10x_top_patterns',
+      args: { timeRange: tf.range, limit: 10 },
+      reason: 'see which patterns currently drive cost (where the savings come from)',
+    },
+    {
+      tool: 'log10x_cost_drivers',
+      args: { timeRange: tf.range },
+      reason: 'check whether costs are growing — savings projection assumes stable run-rate',
+    },
+  ];
+  const block = renderNextActions(next);
+  if (block) lines.push('', block);
 
   return lines.join('\n');
 }

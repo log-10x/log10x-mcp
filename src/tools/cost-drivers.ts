@@ -57,15 +57,29 @@ interface Pattern {
 export async function executeCostDrivers(
   args: {
     service?: string;
-    timeRange: string;
-    limit: number;
-    analyzerCost: number;
+    timeRange?: string;
+    limit?: number;
+    analyzerCost?: number;
     baselineOffsetDays?: number;
   },
   env: EnvConfig
 ): Promise<string> {
-  const tf = parseTimeframe(args.timeRange);
-  const costPerGb = args.analyzerCost;
+  // Defensive defaults — match `costDriversSchema` (timeRange:'7d',
+  // limit:10). The MCP SDK normally fills these via Zod-defaults at
+  // dispatch time, but tools also get invoked directly from internal
+  // chains, scripts, the eval harness, and NEXT_ACTIONS hints — none
+  // of which run the schema. Crashing on undefined timeRange (the
+  // earlier behavior) leaks a TypeError up the chain and confuses
+  // autonomous agents reading the result.
+  const timeRange = args.timeRange ?? '7d';
+  const limit = args.limit ?? 10;
+  const tf = parseTimeframe(timeRange);
+  // analyzerCost is normally injected by the index.ts dispatch (auto-
+  // detect from user profile). Direct/script callers might omit it —
+  // fall back to the default mid-tier rate so cost output is still
+  // populated rather than NaN. The dollar floor in gates.ts uses this
+  // same default elsewhere.
+  const costPerGb = args.analyzerCost ?? 1.0;
   const period = costPeriodLabel(tf.days);
   // If the caller supplied an explicit baseline offset, use it as the sole comparison window
   // instead of the 3-window average (tf.baselineOffsets default = [days, 2*days, 3*days]).
@@ -168,7 +182,7 @@ export async function executeCostDrivers(
     lines.push(`⚠ These are GROWTH deltas (current window vs prior baseline), NOT current ranking. Do not re-rank or merge with log10x_top_patterns output.`);
     lines.push('');
 
-    for (let i = 0; i < Math.min(drivers.length, args.limit); i++) {
+    for (let i = 0; i < Math.min(drivers.length, limit); i++) {
       const d = drivers[i];
       const name = fmtPattern(d.hash).padEnd(35);
       const costStr = `${fmtDollar(d.costBaseline)} → ${fmtDollar(d.costNow)}${period}`;
@@ -230,11 +244,39 @@ export async function executeCostDrivers(
 
     const top = allPatterns
       .sort((a, b) => b.costNow - a.costNow)
-      .slice(0, Math.min(5, args.limit));
+      .slice(0, Math.min(5, limit));
 
     for (const p of top) {
       lines.push(`  ${fmtPattern(p.hash).padEnd(35)} ${fmtDollar(p.costNow)}${period}   ${fmtSeverity(p.severity)}`);
     }
+
+    // Even on the no-movement path, give chain walkers somewhere to go.
+    // top_patterns is the right next step (the agent now wants the
+    // current-rank view since growth math returned empty); savings
+    // surfaces ROI numbers if the user's "bill is high" framing was
+    // current-cost not delta. Without this hint the autonomous chain
+    // dead-ends and the model stalls asking "what would you like next?".
+    const fallback: NextAction[] = [
+      {
+        tool: 'log10x_top_patterns',
+        args: { timeRange: tf.range, ...(args.service ? { service: args.service } : {}) },
+        reason: 'no growth detected; pivot to current-rank view',
+      },
+      {
+        tool: 'log10x_savings',
+        args: { timeRange: tf.range },
+        reason: 'no growth detected; surface pipeline ROI for the current bill question',
+      },
+    ];
+    if (top[0] && top[0].hash) {
+      fallback.push({
+        tool: 'log10x_investigate',
+        args: { starting_point: top[0].hash, window: '1h' },
+        reason: 'investigate the largest current pattern even though it is not a growth driver',
+      });
+    }
+    const block = renderNextActions(fallback);
+    if (block) lines.push('', block);
   }
 
   return lines.join('\n');

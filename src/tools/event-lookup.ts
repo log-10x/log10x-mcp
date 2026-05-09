@@ -69,7 +69,26 @@ export async function executeEventLookup(
 
     if (!fuzzyRes || fuzzyRes.status !== 'success' || fuzzyRes.data.result.length === 0) {
       if (looksLikeRawLogLine) {
-        return `No match found for raw log line via pattern matcher.\n\nThis input looks like a raw log line (contains spaces + punctuation). \`log10x_event_lookup\` is for canonical pattern identities (snake_case, no punctuation). For raw-line triage, use \`log10x_resolve_batch({ events: ["<line>"] })\` which templatizes lines into pattern identities first.`;
+        // Emit a NEXT_ACTIONS hint to resolve_batch so autonomous-chain
+        // walkers can pivot without rereading the prose. The structured
+        // hint is what the deterministic harness and chain-walker
+        // sub-models read; the prose above is for human-facing render.
+        const rawHint: NextAction[] = [
+          {
+            tool: 'log10x_resolve_batch',
+            args: { source: 'events', events: [rawInput] },
+            reason: 'raw log line — templatize via resolve_batch to get a stable pattern identity',
+          },
+        ];
+        return [
+          'No match found for raw log line via pattern matcher.',
+          '',
+          'This input looks like a raw log line (contains spaces + punctuation). `log10x_event_lookup` is for canonical pattern identities (snake_case, no punctuation). For raw-line triage, use `log10x_resolve_batch({ events: ["<line>"] })` which templatizes lines into pattern identities first.',
+          '',
+          renderNextActions(rawHint),
+        ]
+          .filter(Boolean)
+          .join('\n');
       }
       return `No data found for pattern "${pattern}". Check the pattern name (use underscores, e.g., Payment_Gateway_Timeout).`;
     }

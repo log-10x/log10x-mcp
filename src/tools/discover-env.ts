@@ -15,6 +15,7 @@
 import { z } from 'zod';
 import { runDiscovery } from '../lib/discovery/orchestrate.js';
 import type { DiscoverySnapshot, ForwarderKind } from '../lib/discovery/types.js';
+import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 
 export const discoverEnvSchema = {
   namespaces: z
@@ -222,6 +223,7 @@ export function renderDiscoverReport(s: DiscoverySnapshot): string {
   lines.push('Pass this snapshot id to an advisor:');
   lines.push('');
   lines.push('```');
+  lines.push(`log10x_advise_install({ snapshot_id: "${s.snapshotId}" })   # picks the right shape automatically`);
   lines.push(`log10x_advise_reporter({ snapshot_id: "${s.snapshotId}" })`);
   lines.push(`log10x_advise_receiver({ snapshot_id: "${s.snapshotId}" })`);
   lines.push(`log10x_advise_retriever({ snapshot_id: "${s.snapshotId}" })`);
@@ -230,6 +232,49 @@ export function renderDiscoverReport(s: DiscoverySnapshot): string {
   lines.push(
     `_Snapshot is cached in-memory for 30 min. Re-run \`log10x_discover_env\` for a fresh probe._`
   );
+
+  // Structured chain hint: install_advise is the meta-advisor that
+  // dispatches into the right specific advisor. Listing it as the
+  // primary hint lets autonomous walkers chain straight through to a
+  // real plan; listing the three specific advisors after gives the
+  // walker fallback options if it needs a particular tier.
+  const nextActions: NextAction[] = [
+    {
+      tool: 'log10x_advise_install',
+      args: { snapshot_id: s.snapshotId },
+      reason: 'meta-advisor: pick the right shape (standalone vs inline) and tier from the snapshot',
+    },
+    {
+      tool: 'log10x_advise_receiver',
+      args: { snapshot_id: s.snapshotId },
+      reason: 'Receiver (Reducer + Optimizer) inline install plan',
+    },
+    {
+      tool: 'log10x_advise_reporter',
+      args: { snapshot_id: s.snapshotId },
+      reason: 'Reporter install plan (inline or standalone)',
+    },
+    {
+      tool: 'log10x_advise_retriever',
+      args: { snapshot_id: s.snapshotId },
+      reason: 'Retriever (S3 archive) install plan',
+    },
+  ];
+  // Compact-mode advisor hint: always emit it, scoped on the snapshot.
+  // When GitOps is wired (receiverGitopsRepo present) the advisor
+  // emits a real CSV PR; otherwise it returns a coherent
+  // "GitOps not configured" markdown. Either path is a productive
+  // chain hop — leaving this off means autonomous chains asking
+  // "would compact mode save us money?" dead-end after install advice.
+  nextActions.push({
+    tool: 'log10x_advise_compact',
+    args: { snapshot_id: s.snapshotId, mode: 'csv' },
+    reason: s.recommendations.receiverGitopsRepo
+      ? 'snapshot detected receiver with GitOps wired up — render the compact-lookup CSV PR'
+      : 'compact-mode advisor will return a truthful negative if GitOps is not yet wired (chain handoff is still informative)',
+  });
+  const block = renderNextActions(nextActions);
+  if (block) lines.push('', block);
 
   return lines.join('\n');
 }

@@ -169,13 +169,20 @@ export async function executeTopPatterns(
   if (rows[0]) {
     lines.push('');
     lines.push('**Next actions**:');
-    lines.push(`  - call \`log10x_investigate({ starting_point: '${rows[0].hash}' })\` to trace what\'s driving the top pattern.`);
-    nextActions.push({
-      tool: 'log10x_investigate',
-      args: { starting_point: rows[0].hash },
-      reason: 'trace the top pattern',
-    });
-    if (newlyEmerged.length > 0) {
+    // Only suggest investigate when the top row resolves to a real
+    // pattern identity. '(unknown)' is the placeholder we substitute
+    // when the upstream metric row has no pattern label — investigate
+    // can't accept it (it would fail with "Could not resolve").
+    const topHashUsable = rows[0].hash && rows[0].hash !== '(unknown)';
+    if (topHashUsable) {
+      lines.push(`  - call \`log10x_investigate({ starting_point: '${rows[0].hash}' })\` to trace what\'s driving the top pattern.`);
+      nextActions.push({
+        tool: 'log10x_investigate',
+        args: { starting_point: rows[0].hash },
+        reason: 'trace the top pattern',
+      });
+    }
+    if (newlyEmerged.length > 0 && newlyEmerged[0].hash && newlyEmerged[0].hash !== '(unknown)') {
       lines.push(`  - **Investigate the newly-emerged pattern**: \`log10x_investigate({ starting_point: '${newlyEmerged[0].hash}', window: '15m' })\` — it is not in the cost ranking yet but is firing right now.`);
       nextActions.push({
         tool: 'log10x_investigate',
@@ -185,17 +192,17 @@ export async function executeTopPatterns(
     }
     const svcHint = args.service || rows[0]?.service;
     if (svcHint) {
-      lines.push(`  - call \`log10x_cost_drivers({ service: '${svcHint}' })\` for week-over-week deltas on the top service.`);
+      lines.push(`  - call \`log10x_cost_drivers({ service: '${svcHint}', timeRange: '7d' })\` for week-over-week deltas on the top service.`);
       nextActions.push({
         tool: 'log10x_cost_drivers',
-        args: { service: svcHint },
+        args: { service: svcHint, timeRange: '7d' },
         reason: 'week-over-week deltas on the top service',
       });
     } else {
-      lines.push(`  - call \`log10x_cost_drivers()\` for week-over-week deltas across all services.`);
+      lines.push(`  - call \`log10x_cost_drivers({ timeRange: '7d' })\` for week-over-week deltas across all services.`);
       nextActions.push({
         tool: 'log10x_cost_drivers',
-        args: {},
+        args: { timeRange: '7d' },
         reason: 'week-over-week deltas across all services',
       });
     }

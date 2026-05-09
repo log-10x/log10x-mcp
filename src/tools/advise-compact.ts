@@ -23,6 +23,7 @@
 
 import { z } from 'zod';
 import { getSnapshot } from '../lib/discovery/snapshot-store.js';
+import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 
 export const adviseCompactSchema = {
   gitops_repo: z
@@ -193,12 +194,26 @@ function resolveTarget(args: AdviseCompactArgs): { resolved: AdviseCompactArgs }
     return { resolved: args };
   }
   if (!args.snapshot_id) {
+    // Emit a NEXT_ACTIONS hint to discover_env so autonomous chains
+    // can recover automatically — agents reaching this branch usually
+    // got here via a savings/cost hint without a snapshot in hand.
+    const recover: NextAction[] = [
+      {
+        tool: 'log10x_discover_env',
+        args: {},
+        reason: 'compact-mode advisor needs a snapshot_id; run discovery first then re-invoke advise_compact',
+      },
+    ];
     return {
       error: [
         '# compactReceiver advisor — missing target',
         '',
         'Pass either `gitops_repo` (owner/name) or `snapshot_id` (from `log10x_discover_env`). With a snapshot, the tool resolves the repo from the running receiver pod\'s `GH_REPO` env var.',
-      ].join('\n'),
+        '',
+        renderNextActions(recover),
+      ]
+        .filter(Boolean)
+        .join('\n'),
     };
   }
   const snapshot = getSnapshot(args.snapshot_id);
