@@ -27,7 +27,13 @@ import type { ParsedTranscript } from './transcript-parser.js';
 
 const JUDGE_MODEL = 'claude-sonnet-4-6';
 const RESULT_PREVIEW_BYTES = 2000;
-const MAX_RESULTS_SHOWN = 5;
+// Show every tool call's result preview to the judge. Earlier this was
+// capped at 5, which produced false-positive hallucination flags when
+// the agent quoted numbers from the 6th-or-later tool call (e.g. a
+// pattern_trend result the judge couldn't see). The judge can't grade
+// "did the agent fabricate this number" if it can't see the tool that
+// produced the number.
+const MAX_RESULTS_SHOWN = 20;
 
 export interface JudgeInput {
   scenario: Scenario;
