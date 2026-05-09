@@ -60,9 +60,16 @@ export interface HeroOracleReport {
 // ─── Extraction ─────────────────────────────────────────────────────────
 
 const DOLLAR_RE = /\$[\d,]+(?:\.\d+)?/g;
-const VOLUME_RE = /(\d+(?:\.\d+)?)\s*(GB|MB|KB|B)\b/g;
-const COUNT_RE = /(\d{2,}(?:[,_]\d{3})*)\s*(events?|patterns?|services?|messages?|lines?)/gi;
+// Volume claim: number + GB/MB/KB or the word "bytes". Bare `B` is
+// excluded because agents commonly write "13.9B events" meaning 13.9
+// billion events — the trailing `B` is a magnitude suffix, not a byte
+// unit. Caught when hero-investigation flagged 8 false drifts.
+const VOLUME_RE = /(\d+(?:\.\d+)?)\s*(GB|MB|KB|bytes?)\b/gi;
+// Count with optional magnitude suffix (K/M/B/T = thousand/million/
+// billion/trillion). Captures "13.9B events", "9.2M lines" etc.
+const COUNT_RE = /(\d+(?:\.\d+)?)\s*([KMBT])?\s+(events?|patterns?|services?|messages?|lines?)/gi;
 const PERCENT_RE = /([+-]?\d+(?:\.\d+)?)\s*%/g;
+const SUFFIX_TO_MULT: Record<string, number> = { K: 1e3, M: 1e6, B: 1e9, T: 1e12 };
 // Snake_case identifiers with at least 3 underscores and 14+ chars —
 // captures Symbol Messages without grabbing common words. The minimum
 // underscore count is critical: with 2, we matched things like
@@ -91,11 +98,15 @@ export function extractNumericClaims(text: string): NumericClaim[] {
   }
   for (const m of text.matchAll(COUNT_RE)) {
     const ctx = textWindow(text, m.index ?? 0, 80);
+    const base = parseFloat(m[1]);
+    const suffix = m[2];
+    const noun = m[3];
+    const value = base * (suffix ? SUFFIX_TO_MULT[suffix.toUpperCase()] ?? 1 : 1);
     out.push({
       raw: m[0],
       kind: 'count',
-      value: parseInt(m[1].replace(/[,_]/g, ''), 10),
-      unit: m[2],
+      value,
+      unit: noun,
       context: ctx,
     });
   }
@@ -199,32 +210,26 @@ export async function validateClaims(
       continue;
     }
 
-    if (c.kind === 'volume' && c.value > 0) {
-      // Volume claims commonly reference different windows (1d, 7d,
-      // 30d). The oracle's 24h total is ~5 GB on demo; "34.9 GB this
-      // week" is 7× that and entirely consistent. We accept any claim
-      // that fits within an order of magnitude of a known window
-      // (24h × N for N in {1, 7, 30}).
-      const ratios = [1, 7, 30].map((days) => c.value / (oracleVolume * days));
-      const closest = ratios.reduce((best, r) => (Math.abs(Math.log(r)) < Math.abs(Math.log(best)) ? r : best), ratios[0]);
-      const supported = ratios.some((r) => r > 0.2 && r < 5);
-      if (supported) {
-        details.push({
-          claim: c.raw,
-          kind: 'numeric',
-          oracleResult: `env total ~${(oracleVolume / 1e9).toFixed(2)}GB/24h; claim plausible at ${closest.toFixed(2)}× of some {1d,7d,30d} window`,
-          status: 'supported',
-          detail: c.context,
-        });
-      } else {
-        details.push({
-          claim: c.raw,
-          kind: 'numeric',
-          oracleResult: `env total ~${(oracleVolume / 1e9).toFixed(2)}GB/24h; closest window-ratio ${closest.toExponential(2)}× — outside any 24h/7d/30d band`,
-          status: 'unsupported',
-          detail: `${c.context} — claim is way outside oracle band`,
-        });
-      }
+    if (c.kind === 'volume' && c.value >= 0) {
+      // Volume claims can be totals OR subsets (single namespace,
+      // single pattern, etc.). We can't tell which from the claim
+      // alone, so the oracle uses a generous upper-bound band: a
+      // claim is supported if it doesn't exceed 5× the 30-day env
+      // total. Anything within that band is at least plausibly a
+      // subset of real volume. Earlier the check required 0.2× to 5×
+      // of a single-window total — that flagged any subset claim
+      // smaller than ~1 GB as drift.
+      const upper = oracleVolume * 30 * 5; // 5× the 30-day total
+      const supported = c.value <= upper;
+      details.push({
+        claim: c.raw,
+        kind: 'numeric',
+        oracleResult: supported
+          ? `env total ~${(oracleVolume / 1e9).toFixed(2)}GB/24h; claim within plausible subset/total range`
+          : `env total ~${(oracleVolume / 1e9).toFixed(2)}GB/24h; claim exceeds 30-day total ×5`,
+        status: supported ? 'supported' : 'unsupported',
+        detail: c.context,
+      });
       continue;
     }
 

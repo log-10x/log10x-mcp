@@ -35,9 +35,13 @@ const report = await runHero(spec, env, outDir);
 
 // Also drop a stable SUMMARY.md at the scenario root (not just the
 // timestamped subdir) so the plan's done-marker path is predictable.
-import('node:fs').then(({ copyFileSync }) => {
-  copyFileSync(join(outDir, 'SUMMARY.md'), join(evalRoot, 'reports', 'hero', spec.id, 'SUMMARY.md'));
-});
+// AWAITED top-level — earlier this used a fire-and-forget
+// `import().then()` which raced with process.exit and lost the file.
+const fs = await import('node:fs');
+fs.copyFileSync(
+  join(outDir, 'SUMMARY.md'),
+  join(evalRoot, 'reports', 'hero', spec.id, 'SUMMARY.md')
+);
 
 console.error('');
 console.error(`[run-hero] status=${report.status}`);

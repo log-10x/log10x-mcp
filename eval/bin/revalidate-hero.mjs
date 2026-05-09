@@ -18,9 +18,11 @@ const evalRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const { loadEvalEnv } = await import(resolve(evalRoot, 'build-eval/env.js'));
 const { validateClaims } = await import(resolve(evalRoot, 'build-eval/hero-oracle.js'));
 
-const path = process.argv[2];
+const args = process.argv.slice(2);
+const noJudge = args.includes('--no-judge');
+const path = args.filter((a) => !a.startsWith('--'))[0];
 if (!path) {
-  console.error('Usage: revalidate-hero.mjs <path/to/transcript.json>');
+  console.error('Usage: revalidate-hero.mjs <path/to/transcript.json> [--no-judge]');
   process.exit(2);
 }
 const transcriptPath = resolve(path);
@@ -35,9 +37,16 @@ console.error(
   `[revalidate-hero] oracle: drift=${hallucination.driftScore} supported=${hallucination.supported} inconclusive=${hallucination.inconclusive}`
 );
 
-// Judge pass — directly call Sonnet with the same prompt the runner
-// uses. We duplicate the logic here to keep the script self-contained.
-const client = new Anthropic();
+let judge;
+if (noJudge) {
+  judge = {
+    value_delivered: { score: -1, rationale: 'judge skipped (--no-judge)' },
+    value_received: { score: -1, rationale: 'judge skipped (--no-judge)' },
+  };
+} else {
+  // Judge pass — directly call Sonnet with the same prompt the runner
+  // uses. We duplicate the logic here to keep the script self-contained.
+  const client = new Anthropic();
 const previews = t.bashCommands
   .slice(0, 12)
   .map((c, i) => {
@@ -93,16 +102,16 @@ const cleaned = judgeText
   .trim()
   .replace(/^```(?:json)?\s*/i, '')
   .replace(/\s*```$/i, '');
-let judge;
 try {
-  judge = JSON.parse(cleaned);
-} catch (e) {
-  console.error(`[revalidate-hero] judge JSON parse failed: ${e.message}`);
-  judge = {
-    value_delivered: { score: 0.5, rationale: 'judge JSON parse failed' },
-    value_received: { score: 0.5, rationale: 'judge JSON parse failed' },
-  };
-}
+    judge = JSON.parse(cleaned);
+  } catch (e) {
+    console.error(`[revalidate-hero] judge JSON parse failed: ${e.message}`);
+    judge = {
+      value_delivered: { score: 0.5, rationale: 'judge JSON parse failed' },
+      value_received: { score: 0.5, rationale: 'judge JSON parse failed' },
+    };
+  }
+} // close noJudge else
 
 const status =
   hallucination.driftScore <= 0 && judge.value_delivered.score >= 0.6
