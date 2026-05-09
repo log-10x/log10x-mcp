@@ -40,11 +40,13 @@ export const savingsSchema = {
 };
 
 export async function executeSavings(
-  args: { timeRange: string; analyzerCost: number; storageCost?: number },
+  args: { timeRange?: string; analyzerCost?: number; storageCost?: number },
   env: EnvConfig
 ): Promise<string> {
-  const tf = parseTimeframe(args.timeRange);
-  const costPerGb = args.analyzerCost;
+  // Defensive defaults — match savingsSchema (timeRange:'7d').
+  const timeRange = args.timeRange ?? '7d';
+  const tf = parseTimeframe(timeRange);
+  const costPerGb = args.analyzerCost ?? 1.0;
   const storagePerGb = args.storageCost ?? DEFAULT_STORAGE_COST_PER_GB;
   const period = costPeriodLabel(tf.days);
 

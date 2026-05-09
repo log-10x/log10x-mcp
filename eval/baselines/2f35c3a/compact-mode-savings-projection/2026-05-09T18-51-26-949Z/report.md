@@ -4,8 +4,8 @@
 **Mode:** deterministic
 **Outcome:** completed
 **Steps:** 6
-**Duration:** 29.56s
-**Started:** 2026-05-09T18:32:01.467Z
+**Duration:** 28.55s
+**Started:** 2026-05-09T18:51:26.950Z
 **Passed criteria:** PASS
 
 ## Scores
@@ -50,5 +50,5 @@ _(none)_
 
 ## Artifacts
 
-- transcript: `/Users/talweiss/git/l1x-co/log10x-mcp/eval/reports/compact-mode-savings-projection/2026-05-09T18-32-01-467Z/transcript.jsonl`
-- step log: `/Users/talweiss/git/l1x-co/log10x-mcp/eval/reports/compact-mode-savings-projection/2026-05-09T18-32-01-467Z/step-log.jsonl`
+- transcript: `/Users/talweiss/git/l1x-co/log10x-mcp/eval/reports/compact-mode-savings-projection/2026-05-09T18-51-26-949Z/transcript.jsonl`
+- step log: `/Users/talweiss/git/l1x-co/log10x-mcp/eval/reports/compact-mode-savings-projection/2026-05-09T18-51-26-949Z/step-log.jsonl`

@@ -4,8 +4,8 @@
 **Mode:** deterministic
 **Outcome:** completed
 **Steps:** 10
-**Duration:** 105.32s
-**Started:** 2026-05-09T18:32:31.026Z
+**Duration:** 104.05s
+**Started:** 2026-05-09T18:51:55.505Z
 **Passed criteria:** PASS
 
 ## Scores
@@ -51,5 +51,5 @@ _(none)_
 
 ## Artifacts
 
-- transcript: `/Users/talweiss/git/l1x-co/log10x-mcp/eval/reports/cost-spike-cart-store/2026-05-09T18-32-31-026Z/transcript.jsonl`
-- step log: `/Users/talweiss/git/l1x-co/log10x-mcp/eval/reports/cost-spike-cart-store/2026-05-09T18-32-31-026Z/step-log.jsonl`
+- transcript: `/Users/talweiss/git/l1x-co/log10x-mcp/eval/reports/cost-spike-cart-store/2026-05-09T18-51-55-504Z/transcript.jsonl`
+- step log: `/Users/talweiss/git/l1x-co/log10x-mcp/eval/reports/cost-spike-cart-store/2026-05-09T18-51-55-504Z/step-log.jsonl`

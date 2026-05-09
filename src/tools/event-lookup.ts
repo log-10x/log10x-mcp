@@ -29,11 +29,15 @@ export const eventLookupSchema = {
 };
 
 export async function executeEventLookup(
-  args: { pattern: string; service?: string; timeRange: string; analyzerCost: number },
+  args: { pattern: string; service?: string; timeRange?: string; analyzerCost?: number },
   env: EnvConfig
 ): Promise<string> {
-  const tf = parseTimeframe(args.timeRange);
-  const costPerGb = args.analyzerCost;
+  // Defensive defaults — schema defaults only apply at the MCP-SDK
+  // boundary; chain-walkers, internal callers, and the eval harness
+  // can land here with raw args. Match eventLookupSchema defaults.
+  const timeRange = args.timeRange ?? '7d';
+  const tf = parseTimeframe(timeRange);
+  const costPerGb = args.analyzerCost ?? 1.0;
   const period = costPeriodLabel(tf.days);
   const metricsEnv = await resolveMetricsEnv(env);
 

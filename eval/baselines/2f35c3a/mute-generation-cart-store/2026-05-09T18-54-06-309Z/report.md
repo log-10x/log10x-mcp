@@ -4,8 +4,8 @@
 **Mode:** deterministic
 **Outcome:** completed
 **Steps:** 3
-**Duration:** 1.62s
-**Started:** 2026-05-09T18:34:43.193Z
+**Duration:** 1.48s
+**Started:** 2026-05-09T18:54:06.309Z
 **Passed criteria:** PASS
 
 ## Scores
@@ -51,5 +51,5 @@ _(none)_
 
 ## Artifacts
 
-- transcript: `/Users/talweiss/git/l1x-co/log10x-mcp/eval/reports/mute-generation-cart-store/2026-05-09T18-34-43-192Z/transcript.jsonl`
-- step log: `/Users/talweiss/git/l1x-co/log10x-mcp/eval/reports/mute-generation-cart-store/2026-05-09T18-34-43-192Z/step-log.jsonl`
+- transcript: `/Users/talweiss/git/l1x-co/log10x-mcp/eval/reports/mute-generation-cart-store/2026-05-09T18-54-06-309Z/transcript.jsonl`
+- step log: `/Users/talweiss/git/l1x-co/log10x-mcp/eval/reports/mute-generation-cart-store/2026-05-09T18-54-06-309Z/step-log.jsonl`

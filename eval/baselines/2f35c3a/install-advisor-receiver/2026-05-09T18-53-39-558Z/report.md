@@ -4,8 +4,8 @@
 **Mode:** deterministic
 **Outcome:** completed
 **Steps:** 6
-**Duration:** 26.84s
-**Started:** 2026-05-09T18:34:16.349Z
+**Duration:** 26.75s
+**Started:** 2026-05-09T18:53:39.558Z
 **Passed criteria:** PASS
 
 ## Scores
@@ -51,5 +51,5 @@ _(none)_
 
 ## Artifacts
 
-- transcript: `/Users/talweiss/git/l1x-co/log10x-mcp/eval/reports/install-advisor-receiver/2026-05-09T18-34-16-349Z/transcript.jsonl`
-- step log: `/Users/talweiss/git/l1x-co/log10x-mcp/eval/reports/install-advisor-receiver/2026-05-09T18-34-16-349Z/step-log.jsonl`
+- transcript: `/Users/talweiss/git/l1x-co/log10x-mcp/eval/reports/install-advisor-receiver/2026-05-09T18-53-39-558Z/transcript.jsonl`
+- step log: `/Users/talweiss/git/l1x-co/log10x-mcp/eval/reports/install-advisor-receiver/2026-05-09T18-53-39-558Z/step-log.jsonl`

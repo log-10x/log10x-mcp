@@ -19,11 +19,13 @@ export const servicesSchema = {
 };
 
 export async function executeServices(
-  args: { timeRange: string; analyzerCost: number },
+  args: { timeRange?: string; analyzerCost?: number },
   env: EnvConfig
 ): Promise<string> {
-  const tf = parseTimeframe(args.timeRange);
-  const costPerGb = args.analyzerCost;
+  // Defensive defaults — match servicesSchema.
+  const timeRange = args.timeRange ?? '7d';
+  const tf = parseTimeframe(timeRange);
+  const costPerGb = args.analyzerCost ?? 1.0;
   const period = costPeriodLabel(tf.days);
   const metricsEnv = await resolveMetricsEnv(env);
 

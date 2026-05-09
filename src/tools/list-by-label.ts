@@ -33,14 +33,18 @@ export async function executeListByLabel(
     label: string;
     service?: string;
     severity?: string;
-    timeRange: string;
-    limit: number;
-    analyzerCost: number;
+    timeRange?: string;
+    limit?: number;
+    analyzerCost?: number;
   },
   env: EnvConfig
 ): Promise<string> {
-  const tf = parseTimeframe(args.timeRange);
-  const costPerGb = args.analyzerCost;
+  // Defensive defaults — match listByLabelSchema in case caller
+  // bypassed the MCP-SDK Zod boundary.
+  const timeRange = args.timeRange ?? '7d';
+  const limit = args.limit ?? 20;
+  const tf = parseTimeframe(timeRange);
+  const costPerGb = args.analyzerCost ?? 1.0;
   const period = costPeriodLabel(tf.days);
 
   const filters: Record<string, string> = {};
@@ -70,7 +74,7 @@ export async function executeListByLabel(
     r.pct = totalBytes > 0 ? (r.bytes / totalBytes) * 100 : 0;
   }
   rows.sort((a, b) => b.bytes - a.bytes);
-  const shown = rows.slice(0, args.limit);
+  const shown = rows.slice(0, limit);
 
   const totalCost = bytesToCost(totalBytes, costPerGb);
   const scopeParts: string[] = [];

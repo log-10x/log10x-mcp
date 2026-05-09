@@ -4,8 +4,8 @@
 **Mode:** deterministic
 **Outcome:** completed
 **Steps:** 2
-**Duration:** 8.74s
-**Started:** 2026-05-09T18:31:52.718Z
+**Duration:** 9.44s
+**Started:** 2026-05-09T18:51:17.506Z
 **Passed criteria:** PASS
 
 ## Scores
@@ -50,5 +50,5 @@ _(none)_
 
 ## Artifacts
 
-- transcript: `/Users/talweiss/git/l1x-co/log10x-mcp/eval/reports/alert-triage-failed-upload/2026-05-09T18-31-52-716Z/transcript.jsonl`
-- step log: `/Users/talweiss/git/l1x-co/log10x-mcp/eval/reports/alert-triage-failed-upload/2026-05-09T18-31-52-716Z/step-log.jsonl`
+- transcript: `/Users/talweiss/git/l1x-co/log10x-mcp/eval/reports/alert-triage-failed-upload/2026-05-09T18-51-17-504Z/transcript.jsonl`
+- step log: `/Users/talweiss/git/l1x-co/log10x-mcp/eval/reports/alert-triage-failed-upload/2026-05-09T18-51-17-504Z/step-log.jsonl`

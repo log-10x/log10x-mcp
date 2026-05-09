@@ -22,11 +22,14 @@ export const trendSchema = {
 };
 
 export async function executeTrend(
-  args: { pattern: string; timeRange: string; step: string; analyzerCost: number },
+  args: { pattern: string; timeRange?: string; step?: string; analyzerCost?: number },
   env: EnvConfig
 ): Promise<string> {
-  const tf = parseTimeframe(args.timeRange);
-  const costPerGb = args.analyzerCost;
+  // Defensive defaults — match trendSchema.
+  const timeRange = args.timeRange ?? '7d';
+  const step = args.step ?? '1h';
+  const tf = parseTimeframe(timeRange);
+  const costPerGb = args.analyzerCost ?? 1.0;
   const period = costPeriodLabel(tf.days);
   const metricsEnv = await resolveMetricsEnv(env);
 
@@ -36,9 +39,9 @@ export async function executeTrend(
 
   const now = Math.floor(Date.now() / 1000);
   const start = now - tf.days * 86400;
-  const stepSeconds = parseStep(args.step);
+  const stepSeconds = parseStep(step);
 
-  const query = pql.patternBytesOverTime(pattern, metricsEnv, args.step);
+  const query = pql.patternBytesOverTime(pattern, metricsEnv, step);
   const res = await queryRange(env, query, start, now, stepSeconds);
 
   if (res.status !== 'success' || res.data.result.length === 0) {
@@ -122,16 +125,16 @@ export async function executeTrend(
   if (spikePoint || elevated) {
     lines.push('');
     lines.push('**Next actions**:');
-    lines.push(`  - Inflection or spike detected — call \`log10x_investigate({ starting_point: '${pattern}', window: '${args.timeRange}' })\` to trace the cause.`);
+    lines.push(`  - Inflection or spike detected — call \`log10x_investigate({ starting_point: '${pattern}', window: '${timeRange}' })\` to trace the cause.`);
     nextActions.push({
       tool: 'log10x_investigate',
-      args: { starting_point: pattern, window: args.timeRange },
+      args: { starting_point: pattern, window: timeRange },
       reason: spikePoint ? 'spike detected — trace the cause' : 'elevated vs baseline — trace the cause',
     });
-    lines.push(`  - Cross-pillar correlation: \`log10x_correlate_cross_pillar({ anchor_type: 'log10x_pattern', anchor: '${pattern}', window: '${args.timeRange}' })\` to find the upstream metric anomaly.`);
+    lines.push(`  - Cross-pillar correlation: \`log10x_correlate_cross_pillar({ anchor_type: 'log10x_pattern', anchor: '${pattern}', window: '${timeRange}' })\` to find the upstream metric anomaly.`);
     nextActions.push({
       tool: 'log10x_correlate_cross_pillar',
-      args: { anchor_type: 'log10x_pattern', anchor: pattern, window: args.timeRange },
+      args: { anchor_type: 'log10x_pattern', anchor: pattern, window: timeRange },
       reason: 'find upstream metric anomaly co-moving with the spike',
     });
   } else if (sustainedSlope) {
