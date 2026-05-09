@@ -1,0 +1,36 @@
+{
+  "id": "doctor-health-check",
+  "title": "Pipeline health probe (doctor)",
+  "description": "log10x_doctor performs the canonical startup health check — env config, gateway reachability, tier detection, freshness, Retriever, paste endpoint, cross-pillar enrichment floor. Test enforces (1) doctor runs without throwing, (2) result is a structured report with at least one section heading. Catches regressions in env-resolution and gateway-probe code paths.",
+  "prompt": "Run the doctor on this env and tell me what's healthy and what isn't.",
+  "initial_tool": {
+    "tool": "log10x_doctor",
+    "args": {},
+    "reason": "doctor is the canonical pipeline-health probe; takes no required args."
+  },
+  "tool_arg_defaults": {},
+  "expected_sequence": {
+    "must_include": ["log10x_doctor"],
+    "tolerance": 0
+  },
+  "ground_truth": [
+    {
+      "matcher_kind": "regex",
+      "description": "doctor result is a structured report with at least one section / status / check marker",
+      "scope": "tool_result",
+      "tool": "log10x_doctor",
+      "pattern": "(##|PASS|FAIL|WARN|gateway|tier|freshness|env|retriever|paste|enrichment|check)",
+      "flags": "i"
+    }
+  ],
+  "quality_criteria": {
+    "reasoning": 0.6,
+    "value": 0.5,
+    "autonomy": 0.5,
+    "hallucination_max": 0.5
+  },
+  "optimal_steps": 1,
+  "max_steps": 3,
+  "error_policy": "continue",
+  "tags": ["doctor", "pipeline-health", "baseline"]
+}

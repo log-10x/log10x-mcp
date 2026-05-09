@@ -59,8 +59,8 @@ export const discoverJoinSchema = {
 
 export async function executeDiscoverJoin(
   args: {
-    force_refresh: boolean;
-    minimum_jaccard: number;
+    force_refresh?: boolean;
+    minimum_jaccard?: number;
     candidate_labels?: string[];
     window?: string;
     timeRange?: string;
@@ -68,6 +68,9 @@ export async function executeDiscoverJoin(
   },
   env: EnvConfig
 ): Promise<string> {
+  // Defensive defaults — match discoverJoinSchema for non-SDK callers.
+  args.force_refresh = args.force_refresh ?? false;
+  args.minimum_jaccard = args.minimum_jaccard ?? 0.7;
   const resolution = await resolveBackend();
   if (!resolution.backend) {
     // Same graceful-degrade rationale as correlate_cross_pillar: this tool

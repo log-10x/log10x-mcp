@@ -36,24 +36,27 @@ export const translateMetricToPatternsSchema = {
 export async function executeTranslateMetricToPatterns(
   args: {
     customer_metric: string;
-    window: string;
+    window?: string;
     timeRange?: string;
-    step: string;
-    depth: 'shallow' | 'normal' | 'deep';
-    minimum_confidence: number;
+    step?: string;
+    depth?: 'shallow' | 'normal' | 'deep';
+    minimum_confidence?: number;
     environment?: string;
   },
   env: EnvConfig
 ): Promise<string> {
+  // Apply schema defaults for direct/chain callers that bypass the SDK
+  // Zod boundary. correlate-cross-pillar has its own defensive fallback,
+  // but it expects window to be set; pass through everything explicitly.
   const window = args.window || args.timeRange || '1h';
   return executeCorrelateCrossPillar(
     {
       anchor_type: 'customer_metric',
       anchor: args.customer_metric,
       window,
-      step: args.step,
-      depth: args.depth,
-      minimum_confidence: args.minimum_confidence,
+      step: args.step ?? '60s',
+      depth: args.depth ?? 'normal',
+      minimum_confidence: args.minimum_confidence ?? 0.3,
       environment: args.environment,
     },
     env

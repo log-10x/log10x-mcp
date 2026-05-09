@@ -41,16 +41,21 @@ const FEATURED_LABELS = [
 ];
 
 export async function executeDiscoverLabels(
-  args: { label?: string; limit: number },
+  args: { label?: string; limit?: number },
   env: EnvConfig
 ): Promise<string> {
+  // Defensive default — match discoverLabelsSchema (limit: 100). Direct
+  // callers (chains, scripts) bypass the SDK Zod boundary, so without
+  // this `values.slice(0, undefined)` truncates to the full array but
+  // any downstream comparisons with `.limit` would NaN.
+  const limit = args.limit ?? 100;
   // Mode 1: return values for a specific label.
   if (args.label) {
     const values = await fetchLabelValues(env, args.label);
     if (values.length === 0) {
       return `Label "${args.label}" has no values. Check the label name or try a different time range by querying a tool that accepts filters.`;
     }
-    const shown = values.slice(0, args.limit);
+    const shown = values.slice(0, limit);
     const lines: string[] = [];
     lines.push(`Label "${args.label}" — ${values.length} distinct value${values.length !== 1 ? 's' : ''}${values.length > shown.length ? ` (showing ${shown.length})` : ''}`);
     lines.push('');
