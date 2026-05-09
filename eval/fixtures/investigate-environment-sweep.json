@@ -1,0 +1,36 @@
+{
+  "id": "investigate-environment-sweep",
+  "title": "Environment-wide investigation sweep",
+  "description": "Exercises `log10x_investigate` on the broadest path — `starting_point: 'environment'` — which scans every service for drift / acute-spike candidates. Test enforces (1) investigate runs and produces a coherent report (or a truthful 'no significant movement' negative result), (2) the chain emits at least one downstream NEXT_ACTIONS hint (drilldown into a specific service or pattern). Catches regressions in the environment-mode resolver and the empty-result NEXT_ACTIONS emission.",
+  "prompt": "Anything weird going on across the whole environment in the last hour? If so, dig in.",
+  "initial_tool": {
+    "tool": "log10x_investigate",
+    "args": { "starting_point": "environment", "window": "1h" },
+    "reason": "Environment-wide sweep is the canonical entry point for 'is anything weird?' on the demo env."
+  },
+  "tool_arg_defaults": {},
+  "expected_sequence": {
+    "must_include": ["log10x_investigate"],
+    "tolerance": 0
+  },
+  "ground_truth": [
+    {
+      "matcher_kind": "regex",
+      "description": "investigate produces a coherent report — either a result body, a 'no significant movement' negative, or an honest empty-environment marker",
+      "scope": "tool_result",
+      "tool": "log10x_investigate",
+      "pattern": "(Investigation:|## |significant movement|no .{0,40}(detected|found|movement)|Environment-wide|drift|spike|cohort|inflection)",
+      "flags": "i"
+    }
+  ],
+  "quality_criteria": {
+    "reasoning": 0.5,
+    "value": 0.4,
+    "autonomy": 0.4,
+    "hallucination_max": 0.5
+  },
+  "optimal_steps": 2,
+  "max_steps": 10,
+  "error_policy": "continue",
+  "tags": ["investigate", "environment", "sweep"]
+}

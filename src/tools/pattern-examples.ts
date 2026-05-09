@@ -93,16 +93,25 @@ interface PatternExamplesArgs {
   vendor?: 'splunk' | 'datadog' | 'elasticsearch' | 'cloudwatch';
   service?: string;
   severity?: string;
-  timeRange: '15m' | '1h' | '6h' | '24h';
-  limit: number;
+  timeRange?: '15m' | '1h' | '6h' | '24h';
+  limit?: number;
   scope?: string;
   environment?: string;
 }
 
 export async function executePatternExamples(
-  args: PatternExamplesArgs,
+  rawArgs: PatternExamplesArgs,
   _env: EnvConfig,
 ): Promise<string> {
+  // Defensive defaults — match patternExamplesSchema. Tools dispatched
+  // outside the MCP-SDK Zod boundary (chains, scripts, harness) can
+  // land here with timeRange/limit unset; without these we'd hit
+  // `${undefined}` template renders and `undefined * 5` NaN math.
+  const args: Required<Pick<PatternExamplesArgs, 'timeRange' | 'limit'>> & PatternExamplesArgs = {
+    ...rawArgs,
+    timeRange: rawArgs.timeRange ?? '1h',
+    limit: rawArgs.limit ?? 10,
+  };
   // ── 1. Resolve vendor ──────────────────────────────────────────────
   const resolution = await resolveSiemSelection({
     explicit: args.vendor,

@@ -1,0 +1,76 @@
+{
+  "scenarioId": "install-advisor-receiver",
+  "scenarioTitle": "Install advisor — Receiver readwrite, no compact",
+  "mode": "deterministic",
+  "startedAt": "2026-05-09T19:00:26.082Z",
+  "endedAt": "2026-05-09T19:00:52.414Z",
+  "durationMs": 26332,
+  "transcriptPath": "/Users/talweiss/git/l1x-co/log10x-mcp/eval/reports/install-advisor-receiver/2026-05-09T19-00-26-082Z/transcript.jsonl",
+  "stepLogPath": "/Users/talweiss/git/l1x-co/log10x-mcp/eval/reports/install-advisor-receiver/2026-05-09T19-00-26-082Z/step-log.jsonl",
+  "outcome": "completed",
+  "totalSteps": 6,
+  "scores": {
+    "tool_selection": 0,
+    "parameters": 0,
+    "sequencing": 2,
+    "accuracy": 0,
+    "hallucination": 0,
+    "follow_through": 0,
+    "reasoning": 0.7,
+    "value": 0,
+    "autonomy": 0.85
+  },
+  "groundTruth": [
+    {
+      "description": "discover_env returns a snapshot id (disc-<uuid>)",
+      "matcher_kind": "regex",
+      "passed": true,
+      "detail": "regex /disc-[a-f0-9]{6,}/ matched"
+    },
+    {
+      "description": "advise_receiver was called with a snapshot_id arg (chain handoff)",
+      "matcher_kind": "regex",
+      "passed": true,
+      "detail": "regex /\"snapshot_id\"/ matched"
+    },
+    {
+      "description": "advise_receiver result is a coherent advisor plan (Target/Blockers/Plan section headers)",
+      "matcher_kind": "regex",
+      "passed": true,
+      "detail": "regex /(## Target|## Blockers|## Install plan|## Verify|advisor)/i matched"
+    }
+  ],
+  "sequenceDiff": {
+    "expected": [
+      "log10x_discover_env",
+      "log10x_advise_receiver"
+    ],
+    "actual": [
+      "log10x_discover_env",
+      "log10x_advise_install",
+      "log10x_advise_receiver",
+      "log10x_advise_reporter",
+      "log10x_advise_retriever",
+      "log10x_advise_compact"
+    ],
+    "missing": [],
+    "extra": [
+      "log10x_advise_install",
+      "log10x_advise_reporter",
+      "log10x_advise_retriever",
+      "log10x_advise_compact"
+    ],
+    "mustNotIncludeViolations": [],
+    "satisfied": true
+  },
+  "autonomyMetrics": {
+    "toolCallCount": 6,
+    "optimalSteps": 4,
+    "stalled": false,
+    "abandonedNextActions": 0,
+    "score": 0.85
+  },
+  "judgeVerdict": null,
+  "passedCriteria": true,
+  "flags": []
+}

@@ -85,20 +85,27 @@ export async function executeCorrelateCrossPillar(
   args: {
     anchor_type: 'log10x_pattern' | 'customer_metric';
     anchor: string;
-    window: string;
+    window?: string;
     timeRange?: string;
-    step: string;
-    depth: 'shallow' | 'normal' | 'deep';
-    minimum_confidence: number;
+    step?: string;
+    depth?: 'shallow' | 'normal' | 'deep';
+    minimum_confidence?: number;
     minimum_join_jaccard?: number;
     environment?: string;
   },
   env: EnvConfig
 ): Promise<string> {
-  // Accept `timeRange` as alias for `window`.
+  // Accept `timeRange` as alias for `window`, then apply schema-default
+  // fallbacks for chain/script callers that bypass the MCP-SDK Zod
+  // boundary. Without these `parseDuration(undefined)` and the depth /
+  // minimum_confidence comparisons crash.
   if (!args.window && args.timeRange) {
     args.window = args.timeRange;
   }
+  args.window = args.window ?? '1h';
+  args.step = args.step ?? '60s';
+  args.depth = args.depth ?? 'normal';
+  args.minimum_confidence = args.minimum_confidence ?? 0.3;
   const resolution = await resolveBackend();
   if (!resolution.backend) {
     // Graceful degrade for autonomous chains. Throwing aborts a parent

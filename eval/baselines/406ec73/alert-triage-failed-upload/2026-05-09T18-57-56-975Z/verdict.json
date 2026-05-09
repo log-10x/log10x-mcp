@@ -1,0 +1,61 @@
+{
+  "scenarioId": "alert-triage-failed-upload",
+  "scenarioTitle": "Alert triage from pasted raw log line",
+  "mode": "deterministic",
+  "startedAt": "2026-05-09T18:57:56.977Z",
+  "endedAt": "2026-05-09T18:58:05.224Z",
+  "durationMs": 8247,
+  "transcriptPath": "/Users/talweiss/git/l1x-co/log10x-mcp/eval/reports/alert-triage-failed-upload/2026-05-09T18-57-56-975Z/transcript.jsonl",
+  "stepLogPath": "/Users/talweiss/git/l1x-co/log10x-mcp/eval/reports/alert-triage-failed-upload/2026-05-09T18-57-56-975Z/step-log.jsonl",
+  "outcome": "completed",
+  "totalSteps": 2,
+  "scores": {
+    "tool_selection": 0,
+    "parameters": 0,
+    "sequencing": 2,
+    "accuracy": 0,
+    "hallucination": 0,
+    "follow_through": 0,
+    "reasoning": 0.7,
+    "value": 0,
+    "autonomy": 1
+  },
+  "groundTruth": [
+    {
+      "description": "event_lookup recognized the input as a raw log line and emits a NEXT_ACTIONS hint to resolve_batch with source='events'",
+      "matcher_kind": "regex",
+      "passed": true,
+      "detail": "regex /NEXT_ACTIONS:.*log10x_resolve_batch.*\"source\":\\s*\"events\"/ matched"
+    },
+    {
+      "description": "resolve_batch was invoked with source=events and the raw input as one of the events",
+      "matcher_kind": "regex",
+      "passed": true,
+      "detail": "regex /\"source\"\\s*:\\s*\"events\"/ matched"
+    }
+  ],
+  "sequenceDiff": {
+    "expected": [
+      "log10x_event_lookup",
+      "log10x_resolve_batch"
+    ],
+    "actual": [
+      "log10x_event_lookup",
+      "log10x_resolve_batch"
+    ],
+    "missing": [],
+    "extra": [],
+    "mustNotIncludeViolations": [],
+    "satisfied": true
+  },
+  "autonomyMetrics": {
+    "toolCallCount": 2,
+    "optimalSteps": 3,
+    "stalled": false,
+    "abandonedNextActions": 0,
+    "score": 1
+  },
+  "judgeVerdict": null,
+  "passedCriteria": true,
+  "flags": []
+}

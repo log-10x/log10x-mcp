@@ -1,0 +1,43 @@
+{
+  "id": "services-baseline",
+  "title": "Services listing — pipeline health baseline",
+  "description": "Sanity-check that `log10x_services` runs cleanly on demo env and surfaces at least one service. The OTel demo env continuously replays cart/shipping/etc. services, so this should never return empty. If services returns empty, the metrics pipeline is broken — this scenario catches that regression deterministically.",
+  "prompt": "What services do we monitor and which is the biggest by volume?",
+  "initial_tool": {
+    "tool": "log10x_services",
+    "args": { "timeRange": "1d" },
+    "reason": "services lists monitored services ranked by cost; 1d is the canonical baseline window."
+  },
+  "tool_arg_defaults": {},
+  "expected_sequence": {
+    "must_include": ["log10x_services"],
+    "tolerance": 0
+  },
+  "ground_truth": [
+    {
+      "matcher_kind": "regex",
+      "description": "services result lists at least one service row (not the empty-data terminal text)",
+      "scope": "tool_result",
+      "tool": "log10x_services",
+      "pattern": "(\\$\\d|\\d+%|\\d+ MB|service|namespace)",
+      "flags": "i"
+    },
+    {
+      "matcher_kind": "regex",
+      "description": "services emits a NEXT_ACTIONS hint to a downstream tool (top_patterns / cost_drivers / list_by_label)",
+      "scope": "tool_result",
+      "tool": "log10x_services",
+      "pattern": "NEXT_ACTIONS:.*(log10x_top_patterns|log10x_cost_drivers|log10x_list_by_label|log10x_investigate)"
+    }
+  ],
+  "quality_criteria": {
+    "reasoning": 0.6,
+    "value": 0.5,
+    "autonomy": 0.5,
+    "hallucination_max": 0.5
+  },
+  "optimal_steps": 1,
+  "max_steps": 5,
+  "error_policy": "continue",
+  "tags": ["services", "pipeline-health", "baseline"]
+}
