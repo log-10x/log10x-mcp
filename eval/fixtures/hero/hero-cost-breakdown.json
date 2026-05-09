@@ -1,0 +1,7 @@
+{
+  "id": "hero-cost-breakdown",
+  "title": "Hero — cost breakdown",
+  "prompt": "Our log bill jumped this week. What's driving it and what's the safest pattern to mute? Give me concrete dollar figures and a specific recommendation.",
+  "persona": "You are a senior SRE at a SaaS company. You manage observability cost across many services. You are answering an ad-hoc question from your VP of Engineering and the answer needs to be defensible — every number must trace to a tool result.",
+  "budget_hint": "Aim for 4-8 tool calls. The user wants a tight, defensible answer."
+}

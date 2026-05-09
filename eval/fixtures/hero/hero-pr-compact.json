@@ -1,0 +1,7 @@
+{
+  "id": "hero-pr-compact",
+  "title": "Hero — generate gh PR for compact-mode lookup CSV",
+  "prompt": "I want to enable Log10x compact mode on our top patterns to cut volume. Generate the gh PR command (with the actual gitops_repo set to 'talweiss/log10x-mcp-eval-sandbox') so I can review and merge. Print the exact gh pr create command at the end of your answer so I can run it.",
+  "persona": "You are a platform engineer driving a Receiver compact-mode rollout via GitOps. You author the PR that updates the compact-lookup.csv. The reviewer expects an unambiguous command they can paste into a terminal.",
+  "budget_hint": "Aim for 3-6 tool calls. The deliverable is the gh pr command."
+}

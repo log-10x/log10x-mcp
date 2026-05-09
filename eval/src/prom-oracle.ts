@@ -42,14 +42,19 @@ function gatewayBase(env: EvalEnv): string {
 export async function promQuery(env: EvalEnv, promql: string): Promise<PromResponse> {
   const url = new URL('/api/v1/query', gatewayBase(env));
   url.searchParams.set('query', promql);
-  const res = await fetch(url.toString(), {
-    headers: { 'X-10X-Auth': authHeader(env) },
-  });
-  if (!res.ok) {
+  // Retry on 5xx (gateway 500 / 502 / 503 / 504 are transient on the
+  // demo env's prometheus). 2 retries with brief backoff keeps the
+  // oracle resilient without masking real bugs.
+  let lastErr = '';
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const res = await fetch(url.toString(), { headers: { 'X-10X-Auth': authHeader(env) } });
+    if (res.ok) return (await res.json()) as PromResponse;
     const body = await res.text();
-    throw new Error(`Prometheus HTTP ${res.status} on query "${promql.slice(0, 80)}...": ${body.slice(0, 300)}`);
+    lastErr = `HTTP ${res.status}: ${body.slice(0, 300)}`;
+    if (res.status < 500) break; // not transient — fail immediately
+    await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
   }
-  return (await res.json()) as PromResponse;
+  throw new Error(`Prometheus query "${promql.slice(0, 80)}..." failed after retries: ${lastErr}`);
 }
 
 export async function promLabelValues(env: EvalEnv, label: string): Promise<string[]> {
