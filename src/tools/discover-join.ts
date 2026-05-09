@@ -28,6 +28,7 @@ import {
   customerMetricsNotConfiguredMessage,
 } from '../lib/customer-metrics.js';
 import { getOrDiscoverJoin, discoverJoin, type JoinDiscoveryResult, type JoinPair } from '../lib/join-discovery.js';
+import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 
 export const discoverJoinSchema = {
   force_refresh: z
@@ -145,6 +146,22 @@ function renderJoinResult(
     }
 
     lines.push('**Next action**: the cross-pillar correlation tools will use this join key automatically. Call `log10x_correlate_cross_pillar` or `log10x_translate_metric_to_patterns` with an anchor and they will reuse the cached result.');
+    // Structured chain hint so autonomous walkers don't need to
+    // prose-parse the markdown above.
+    const next: NextAction[] = [
+      {
+        tool: 'log10x_correlate_cross_pillar',
+        args: { anchor_type: 'log10x_pattern' },
+        reason: 'use the resolved join key to correlate a Log10x pattern against the customer metric backend',
+      },
+      {
+        tool: 'log10x_translate_metric_to_patterns',
+        args: {},
+        reason: 'reverse direction: pick a customer metric and find which Log10x patterns track it',
+      },
+    ];
+    const block = renderNextActions(next);
+    if (block) lines.push('', block);
     return lines.join('\n');
   }
 
