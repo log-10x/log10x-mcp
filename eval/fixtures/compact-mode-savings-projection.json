@@ -1,0 +1,46 @@
+{
+  "id": "compact-mode-savings-projection",
+  "title": "Compact mode savings projection + GitOps PR",
+  "description": "User wants the compact-mode pitch with concrete numbers and a ready-to-merge PR for the lookup CSV. Canonical chain: discover_env (resolve receiver pod GH_REPO) → top_patterns (current ROI candidates) → advise_compact (gh PR for compact-lookup.csv). The compact-mode flow is gated on a snapshot, so the chain MUST start with discover_env. On a demo env where the receiver's GH_ENABLED=true is not wired, advise_compact returns 'receiver GitOps not configured' — the test accepts that as a coherent outcome (it's the correct truthful negative) AND verifies the chain at least walked discover_env → advise_compact.",
+  "prompt": "Would compact mode save us money? Discover the cluster, then generate the gh PR command for compact-lookup.csv.",
+  "initial_tool": {
+    "tool": "log10x_discover_env",
+    "args": { "skip_aws": true },
+    "reason": "Compact-mode advisor needs a snapshot to resolve the receiver pod's GH_REPO env var; discover_env is the entry point."
+  },
+  "tool_arg_defaults": {},
+  "expected_sequence": {
+    "must_include": ["log10x_discover_env", "log10x_advise_compact"],
+    "tolerance": 0
+  },
+  "ground_truth": [
+    {
+      "matcher_kind": "regex",
+      "description": "discover_env emits a snapshot id",
+      "scope": "tool_result",
+      "tool": "log10x_discover_env",
+      "pattern": "disc-[a-f0-9]{6,}"
+    },
+    {
+      "matcher_kind": "regex",
+      "description": "advise_compact result is one of: full plan with `gh pr` command, OR a coherent truthful-negative explaining what's missing",
+      "scope": "tool_result",
+      "tool": "log10x_advise_compact",
+      "pattern": "(gh\\s+pr\\s+(create|edit)|compactReceiver advisor|GitOps not configured|missing target|snapshot.+not found)",
+      "flags": "i"
+    }
+  ],
+  "quality_criteria": {
+    "reasoning": 0.6,
+    "value": 0.5,
+    "autonomy": 0.3,
+    "hallucination_max": 0.5
+  },
+  "optimal_steps": 3,
+  "max_steps": 12,
+  "error_policy": "continue",
+  "receiver_assertions": {
+    "expected_optimize": true
+  },
+  "tags": ["compact", "savings", "advise-compact", "gitops", "receiver", "discovery-gated"]
+}

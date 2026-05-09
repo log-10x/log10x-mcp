@@ -1,0 +1,24 @@
+{
+  "name": "log10x-mcp-eval",
+  "version": "0.1.0",
+  "description": "End-to-end evaluation harness for the log10x MCP catalog. Measures agent reasoning, value delivered, and autonomy on a Receiver-deployed demo env. See README.md.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "tsc",
+    "scenario": "node bin/run-scenario.mjs",
+    "suite": "node bin/run-suite.mjs",
+    "judge": "node bin/judge-only.mjs",
+    "diff": "node bin/diff-runs.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.30.0",
+    "zod": "^3.24.4"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

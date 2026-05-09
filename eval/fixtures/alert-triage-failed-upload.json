@@ -1,0 +1,45 @@
+{
+  "id": "alert-triage-failed-upload",
+  "title": "Alert triage from pasted raw log line",
+  "description": "User pastes a raw error line and asks for triage. Canonical chain on the raw-line branch: event_lookup → resolve_batch (templatize the raw line into a stable pattern identity) → investigate. event_lookup recognizes the input as a raw log line and emits a NEXT_ACTIONS hint to resolve_batch with source='events' — the harness fix that landed in this PR. Test enforces the raw-line chain handoff.",
+  "prompt": "We're getting alerts in PagerDuty for this line — what is it and what's actually happening?\n\n```\nfailed to upload metrics: Post \"https://otel-collector.metrics.example.com/v1/metrics\": context deadline exceeded\n```",
+  "initial_tool": {
+    "tool": "log10x_event_lookup",
+    "args": {
+      "pattern": "failed to upload metrics: Post \"https://otel-collector.metrics.example.com/v1/metrics\": context deadline exceeded",
+      "timeRange": "7d"
+    },
+    "reason": "User pasted a raw line — event_lookup resolves it to a stable pattern identity. When the input is detected as a raw log line, event_lookup hints into resolve_batch (the templatizer)."
+  },
+  "tool_arg_defaults": {},
+  "expected_sequence": {
+    "must_include": ["log10x_event_lookup", "log10x_resolve_batch"],
+    "tolerance": 0
+  },
+  "ground_truth": [
+    {
+      "matcher_kind": "regex",
+      "description": "event_lookup recognized the input as a raw log line and emits a NEXT_ACTIONS hint to resolve_batch with source='events'",
+      "scope": "tool_result",
+      "tool": "log10x_event_lookup",
+      "pattern": "NEXT_ACTIONS:.*log10x_resolve_batch.*\"source\":\\s*\"events\""
+    },
+    {
+      "matcher_kind": "regex",
+      "description": "resolve_batch was invoked with source=events and the raw input as one of the events",
+      "scope": "tool_call_args",
+      "tool": "log10x_resolve_batch",
+      "pattern": "\"source\"\\s*:\\s*\"events\""
+    }
+  ],
+  "quality_criteria": {
+    "reasoning": 0.6,
+    "value": 0.4,
+    "autonomy": 0.4,
+    "hallucination_max": 0.5
+  },
+  "optimal_steps": 3,
+  "max_steps": 8,
+  "error_policy": "continue",
+  "tags": ["incident", "alert-triage", "event-lookup", "resolve-batch", "raw-line"]
+}

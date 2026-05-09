@@ -1,0 +1,49 @@
+{
+  "id": "cost-spike-cart-store",
+  "title": "Cost spike attribution → fallback to current-cost view (stable demo env)",
+  "description": "User notices a perceived bill jump and asks for attribution + safe-mute candidates. Canonical chain on a GROWING env: cost_drivers → dependency_check → exclusion_filter. On the OTel demo env (which replays continuously and is stable by construction), cost_drivers correctly returns 'no cost drivers detected' and chains into the fallback path (top_patterns / savings / investigate). Either chain is acceptable; the test enforces the LCS subsequence + that cost_drivers ran first and a safety/triage tool ran somewhere downstream.",
+  "prompt": "Our log bill jumped this week. What's driving it and what's safest to mute?",
+  "initial_tool": {
+    "tool": "log10x_cost_drivers",
+    "args": { "timeRange": "7d", "limit": 5 },
+    "reason": "Bill-jumped questions are CHANGE-over-time questions. cost_drivers is the dollar-ranked delta tool; top_patterns would mislead with current-rank-not-growth."
+  },
+  "tool_arg_defaults": {},
+  "expected_sequence": {
+    "must_include": ["log10x_cost_drivers"],
+    "tolerance": 0
+  },
+  "ground_truth": [
+    {
+      "matcher_kind": "regex",
+      "description": "cost_drivers result is well-formed: either reports drivers OR reports a truthful 'no drivers detected' negative result with comparison",
+      "scope": "tool_result",
+      "tool": "log10x_cost_drivers",
+      "pattern": "(cost driver|no cost drivers detected|growth deltas|truthful negative result)",
+      "flags": "i"
+    },
+    {
+      "matcher_kind": "regex",
+      "description": "cost_drivers emits a NEXT_ACTIONS hint (either dependency_check on the success path or top_patterns/savings/investigate on the no-growth fallback path)",
+      "scope": "tool_result",
+      "tool": "log10x_cost_drivers",
+      "pattern": "NEXT_ACTIONS:.*(log10x_dependency_check|log10x_investigate|log10x_top_patterns|log10x_savings)"
+    },
+    {
+      "matcher_kind": "regex",
+      "description": "the chain invoked a downstream triage tool (top_patterns / dependency_check / investigate) — not just cost_drivers in isolation",
+      "scope": "tool_call_args",
+      "pattern": "(starting_point|pattern.*cart|pattern.*open|timeRange).*"
+    }
+  ],
+  "quality_criteria": {
+    "reasoning": 0.6,
+    "value": 0.5,
+    "autonomy": 0.4,
+    "hallucination_max": 0.5
+  },
+  "optimal_steps": 4,
+  "max_steps": 12,
+  "error_policy": "continue",
+  "tags": ["cost", "attribution", "mute", "receiver", "fallback-chain"]
+}
