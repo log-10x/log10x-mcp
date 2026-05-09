@@ -45,7 +45,22 @@ include:
   # File sink only. Output paths are constructed per-invocation from
   # LOG10X_MCP_OUTPUT_DIR. The MCP creates a fresh tempdir per call
   # so concurrent invocations don't collide.
-  - run/output/event/file
+  #
+  # IMPORTANT: include the bare module (`run/modules/output/event/file`)
+  # not the full config-bearing path (`run/output/event/file`). The
+  # full path's `config.yaml` defines `outputFile:` entries pointing at
+  # `data/sample/output/*.json` — those entries APPEND to ours and the
+  # engine writes newly-discovered templates into the system cache at
+  # `/usr/local/etc/tenx/config/data/sample/output/templates.json`. On
+  # subsequent MCP runs the engine loads that system cache and
+  # correctly deduplicates already-known templates, so our tempdir's
+  # `templates.json` comes back empty even though `encoded.log` is full
+  # — which makes `resolve_batch` return "No patterns resolved" for any
+  # input whose templates were learned in a previous MCP run.
+  # Caught live by the eval-harness sub-agent on cart logs (templates
+  # were cached system-wide after the first run; second run returned
+  # 0 templates with the same input).
+  - run/modules/output/event/file
 
 # Template cache: the engine loads cached templates from
 # data/templates/*.json and data/sample/output/*.json at startup.

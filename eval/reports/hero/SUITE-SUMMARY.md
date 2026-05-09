@@ -1,8 +1,41 @@
 # Hero-scenario suite — final summary
 
-**All 5 stages complete.** Three sub-agent runs against the live OTel
-demo env, oracle-validated, plus a real GitHub PR end-to-end (twice —
-clone+push and gh-api-PUT, the latter only after a real MCP bug fix).
+**All 6 stages complete + 1 major retraction.** Three sub-agent runs
+against the live OTel demo env, oracle-validated, plus a real GitHub
+PR end-to-end (twice), plus an MCP-config bug found by the user
+pushing back on the planner's incorrect engine-bug attribution.
+
+## Retraction — earlier "engine bug" claim was wrong
+
+Earlier this PR claimed local tenx CLI v1.0.4 had an engine bug
+producing empty `templates.json`. **That was incorrect.** The engine
+works as designed; it deduplicates known templates against its
+loaded cache.
+
+The actual bug was in the **MCP**:
+`assets/tenx-mcp-stdin.config.yaml` included
+`run/output/event/file` (the config-bearing path), whose default
+`outputFile:` block APPENDED streamOutputs to `data/sample/output/*`
+on top of the MCP's tempdir outputs. The engine wrote newly-discovered
+templates to BOTH the per-run tempdir AND the system/CWD cache. On
+subsequent runs, the engine's `templateLoader` step loaded the cache
+and correctly dedup'd the known templates → tempdir's
+`templates.json` came back empty (only NEW templates emit) →
+`parseTemplates()` returned 0 → `resolve_batch` returned "No patterns
+resolved" for any input the engine had already seen via this MCP.
+
+**Fix**: include the bare module `run/modules/output/event/file`
+instead of the config-bearing `run/output/event/file`. Verified: cart
+input now produces 291-byte templates.json on both first AND second
+consecutive runs (previously the second run came back empty), and
+`log10x_resolve_batch` returns a real triage on cart input that
+previously returned "No patterns resolved".
+
+This was caught only because the user pushed back on the engine-bug
+claim and asked "can you see the engine log". Reading
+`/var/log/tenx/tenx.log` showed the pipeline-units list with 8
+streamOutputs (4 to tempdir + 4 to data/sample/output) instead of
+the expected 4 — smoking gun.
 
 ## Per-scenario results
 
