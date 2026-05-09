@@ -17,6 +17,7 @@ import { LABELS } from '../lib/promql.js';
 import { bytesToCost, parsePrometheusValue } from '../lib/cost.js';
 import { resolveMetricsEnv, resolveMetricsEnvFiltered } from '../lib/resolve-env.js';
 import { fmtDollar, fmtBytes, fmtPct, parseTimeframe, costPeriodLabel } from '../lib/format.js';
+import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 
 export const listByLabelSchema = {
   label: z.string().describe('Label to group by. Common choices: tenx_user_service, severity_level, k8s_namespace, k8s_container, country, http_code. Call log10x_discover_labels first to see what is queryable.'),
@@ -117,6 +118,7 @@ export async function executeListByLabel(
     }
   }
 
+  const nextActions: NextAction[] = [];
   if (shown[0]) {
     lines.push('');
     lines.push('**Next actions**:');
@@ -124,10 +126,32 @@ export async function executeListByLabel(
     if (args.label === LABELS.service || args.label === 'tenx_user_service') {
       lines.push(`  - Drill into the top service: \`log10x_cost_drivers({ service: '${top.value}' })\` for week-over-week deltas.`);
       lines.push(`  - Or investigate it: \`log10x_investigate({ starting_point: '${top.value}' })\`.`);
+      nextActions.push({
+        tool: 'log10x_cost_drivers',
+        args: { service: top.value, timeRange: timeRange },
+        reason: 'drill into the top service by week-over-week deltas',
+      });
+      nextActions.push({
+        tool: 'log10x_investigate',
+        args: { starting_point: top.value, window: tf.range },
+        reason: 'investigate the top service',
+      });
     } else {
       lines.push(`  - Filter cost_drivers to the top dimension: pass \`${args.label}\` value into a cost_drivers query, or call \`log10x_top_patterns\` scoped to the relevant service.`);
+      nextActions.push({
+        tool: 'log10x_top_patterns',
+        args: { timeRange: timeRange, limit: 10 },
+        reason: `top patterns scoped to the same window as the ${args.label} ranking`,
+      });
+      nextActions.push({
+        tool: 'log10x_cost_drivers',
+        args: { timeRange: timeRange },
+        reason: 'check whether the top dimensions are growing',
+      });
     }
   }
+  const block = renderNextActions(nextActions);
+  if (block) lines.push('', block);
 
   return lines.join('\n');
 }

@@ -1,0 +1,2 @@
+{"step":1,"kind":"tool_call","tool":"log10x_doctor","args":{},"durationMs":8692,"isError":false,"resultBytes":5070,"nextActionsFound":0,"reason":"doctor is the canonical pipeline-health probe; takes no required args."}
+{"step":1,"kind":"terminate","outcome":"completed","totalSteps":1}

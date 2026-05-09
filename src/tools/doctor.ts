@@ -632,7 +632,19 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
   // 1h window) and check whether the pipeline responds. Replaces the old
   // hardcoded G12 WARN that was stale after the body-shape fix (PR #36)
   // and the demo-env indexer fix (2026-04-16).
-  if (detectedTier && process.env.__SAVE_LOG10X_RETRIEVER_URL__) {
+  // Only probe the live retriever when BOTH URL + BUCKET are set. The
+  // retriever_endpoint check above already WARNs about partial config;
+  // running the forensic probe with a half-configured retriever just
+  // produces a redundant FAIL for the same root cause. Caught by
+  // doctor-health-check eval scenario: with only URL set (the default
+  // demo env config), the probe FAIL'd and flipped overall→fail, which
+  // surfaced an alarming "MCP cannot serve tool calls" verdict for what
+  // is really a missing-bucket-config WARN.
+  if (
+    detectedTier &&
+    process.env.__SAVE_LOG10X_RETRIEVER_URL__ &&
+    process.env.__SAVE_LOG10X_RETRIEVER_BUCKET__
+  ) {
     try {
       const probeResult = await runRetrieverQuery(env, {
         from: 'now-1h',
@@ -957,7 +969,21 @@ export function renderDoctorReport(report: DoctorReport): string {
   } else if (report.overall === 'warn') {
     lines.push('The MCP will function but some tools may be unavailable or degraded. See the warnings above.');
   } else {
-    lines.push('The MCP cannot serve tool calls until the failed check is resolved. See the fix above.');
+    // Be specific about WHICH tool surfaces are blocked. A retriever
+    // probe failing only blocks retriever-* tools; cost_drivers /
+    // top_patterns / investigate / etc. continue to work. The earlier
+    // blanket "MCP cannot serve tool calls until the failed check is
+    // resolved" message was overly broad and frightened readers off
+    // the rest of the catalog.
+    const failed = [...report.globalChecks, ...Object.values(report.perEnvChecks).flat()]
+      .filter((c) => c.status === 'fail')
+      .map((c) => c.name);
+    const failList = failed.length > 0 ? failed.join(', ') : 'one or more checks';
+    lines.push(
+      `Some checks failed (${failList}). Tools that depend on the failing subsystem will return errors; ` +
+        'unrelated tools (cost_drivers, top_patterns, investigate, etc.) continue to work normally. ' +
+        'See the fix(es) above.'
+    );
   }
   return lines.join('\n');
 }

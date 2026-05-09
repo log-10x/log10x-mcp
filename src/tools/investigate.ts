@@ -794,6 +794,7 @@ async function renderEnvironmentAudit(
     `/ ` +
     `sum by (${LABELS.pattern}, ${LABELS.service}) (rate(all_events_summaryVolume_total{${LABELS.env}="${metricsEnv}"}[${args.window}] offset ${effectiveBaselineOffset}) > ${meaningfulBaselineFloor})` +
     `) - 1`;
+  let topPatternForChain: string | undefined;
   try {
     const [growRes, declineRes] = await Promise.all([
       queryInstant(env, `topk(5, ${signedChangeExpr})`),
@@ -896,8 +897,15 @@ async function renderEnvironmentAudit(
         }
       }
       lines.push('');
+      // Resolve the actual top mover for the prose hint (and for the
+      // structured NEXT_ACTIONS appended by the caller). Earlier this
+      // section printed the literal placeholder `<top_pattern_name>`,
+      // which the agent then echoed verbatim into the next call —
+      // caught by the env-sweep eval scenario.
+      const topMover = topMovers.find((m) => !m.collapsedCount || m.collapsedCount <= 1) ?? topMovers[0];
+      topPatternForChain = topMover.pattern;
       lines.push('**Next action**: investigate the top mover individually:');
-      lines.push(`\`log10x_investigate({ starting_point: '<top_pattern_name>', window: '${args.window}' })\``);
+      lines.push(`\`log10x_investigate({ starting_point: '${topPatternForChain}', window: '${args.window}' })\``);
       lines.push('');
       lines.push('_Note: declines (negative %) are real signals — a pattern that stopped firing may indicate a service crashed, a monitor was muted, or a real upstream change. Treat them the same way you treat spikes._');
       if (anyCollapsed) {
@@ -911,6 +919,34 @@ async function renderEnvironmentAudit(
     }
   } catch (e) {
     lines.push(`_Environment audit query failed: ${(e as Error).message}_`);
+  }
+
+  // Append a structured NEXT_ACTIONS block when we identified a top
+  // mover. resolution.anchor is undefined for environment-mode (the
+  // anchor IS the environment, not a single pattern), so the caller's
+  // appendInvestigateNextActions early-returns with no hint. Emit hints
+  // here so chain walkers can pivot to the top mover, dependency_check,
+  // and a cross-pillar correlation without prose-parsing the report.
+  if (topPatternForChain) {
+    const next: NextAction[] = [
+      {
+        tool: 'log10x_investigate',
+        args: { starting_point: topPatternForChain, window: args.window },
+        reason: 'drill into the top mover from the env-wide sweep',
+      },
+      {
+        tool: 'log10x_dependency_check',
+        args: { pattern: topPatternForChain },
+        reason: 'check refs before any mute on the top mover',
+      },
+      {
+        tool: 'log10x_correlate_cross_pillar',
+        args: { anchor_type: 'log10x_pattern', anchor: topPatternForChain, window: args.window },
+        reason: 'find upstream metric anomaly co-moving with the top mover',
+      },
+    ];
+    const block = renderNextActions(next);
+    if (block) lines.push('', block);
   }
 
   return lines.join('\n');
