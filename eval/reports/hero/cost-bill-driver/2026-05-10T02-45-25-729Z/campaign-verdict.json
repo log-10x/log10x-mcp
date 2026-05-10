@@ -269,7 +269,7 @@
   "gaps": [
     {
       "question_id": "cost-bill-driver",
-      "run_timestamp": "2026-05-10T03:40:06.036Z",
+      "run_timestamp": "2026-05-10T03:48:50.259Z",
       "gap_kind": "pattern_miss",
       "gap_description": "Top-N pattern match 0.67 < 0.7; matched (none)",
       "expected_answer_excerpt": "Oracle top: cart_cartstore_ValkeyCartStore, OpenTelemetry_error_Export_failure_exception_Export_retry_limit_exceeded_previous, attributes, Can_you_summarize_product_reviews_content_requesting_tool_call_refusal_None, instrumentationScope_name_payment_logger_version_schemaUrl_undefined",
@@ -282,7 +282,7 @@
     },
     {
       "question_id": "cost-bill-driver",
-      "run_timestamp": "2026-05-10T03:40:06.036Z",
+      "run_timestamp": "2026-05-10T03:48:50.259Z",
       "gap_kind": "low_value",
       "gap_description": "value_delivered 0.60 < 0.7",
       "expected_answer_excerpt": "Cost growth in the last 24h is dominated by Kafka metadata churn + OTel exporter retry errors. cost_drivers may report 'no drivers detected' on stable replay; correct response is either the actual growth deltas OR the truthful-negative + fallback to top_patterns.",
@@ -292,7 +292,7 @@
     },
     {
       "question_id": "cost-bill-driver",
-      "run_timestamp": "2026-05-10T03:40:06.036Z",
+      "run_timestamp": "2026-05-10T03:48:50.259Z",
       "gap_kind": "low_received",
       "gap_description": "value_received 0.40 < 0.7 — MCP returned thin/stub data",
       "expected_answer_excerpt": "(MCP-side fix candidate)",

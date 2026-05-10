@@ -176,7 +176,7 @@
   "gaps": [
     {
       "question_id": "stability-pipeline-health",
-      "run_timestamp": "2026-05-10T03:40:14.128Z",
+      "run_timestamp": "2026-05-10T03:48:58.642Z",
       "gap_kind": "drift",
       "gap_description": "Drift on 1 claim(s)",
       "expected_answer_excerpt": "Edge tier is healthy (metrics fresh within 54s). Cloud tier has zero metrics — the every-5-min cronjob does not exist on this env. Expected: agent runs doctor and reports both findings.",
@@ -188,7 +188,7 @@
     },
     {
       "question_id": "stability-pipeline-health",
-      "run_timestamp": "2026-05-10T03:40:14.128Z",
+      "run_timestamp": "2026-05-10T03:48:58.642Z",
       "gap_kind": "low_received",
       "gap_description": "value_received 0.60 < 0.7 — MCP returned thin/stub data",
       "expected_answer_excerpt": "(MCP-side fix candidate)",

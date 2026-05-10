@@ -162,7 +162,10 @@ export function computeExpectedAnswer(
         summary: `CRITICAL severity has ~2MB / 24h on the demo env (rare). Expected: agent identifies these patterns specifically and reports the volume.`,
         top_patterns: [],
         expected_severity_split: { CRITICAL: snap.severity_split.find((s) => s.severity === 'CRITICAL')?.bytes ?? 0 },
-        expected_tool_chain: ['log10x_list_by_label', 'log10x_top_patterns'],
+        // Either log10x_list_by_label (severity_level dimension) OR
+        // log10x_top_patterns (with the new severity filter) answers
+        // this question on its own. Single-step chain.
+        expected_tool_chain: ['log10x_list_by_label'],
         expected_oracle_query: `topk(5, sum by (message_pattern)(increase(all_events_summaryBytes_total{severity_level="CRITICAL"}[24h])))`,
         snapshot_ts: snap.taken_at,
       };

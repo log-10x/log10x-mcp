@@ -215,7 +215,7 @@
   "gaps": [
     {
       "question_id": "cost-mute-candidates",
-      "run_timestamp": "2026-05-10T03:40:07.209Z",
+      "run_timestamp": "2026-05-10T03:48:51.967Z",
       "gap_kind": "drift",
       "gap_description": "Drift on 1 claim(s)",
       "expected_answer_excerpt": "Safest mute candidates are high-volume patterns with no severity (or DEBUG/TRACE), which on this env are the OTel collector internals. Agent must mention dependency_check before suggesting mute.",
@@ -227,7 +227,7 @@
     },
     {
       "question_id": "cost-mute-candidates",
-      "run_timestamp": "2026-05-10T03:40:07.209Z",
+      "run_timestamp": "2026-05-10T03:48:51.967Z",
       "gap_kind": "pattern_miss",
       "gap_description": "Top-N pattern match 0.00 < 0.7; matched (none)",
       "expected_answer_excerpt": "Oracle top: open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter, opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go, service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
@@ -240,7 +240,7 @@
     },
     {
       "question_id": "cost-mute-candidates",
-      "run_timestamp": "2026-05-10T03:40:07.209Z",
+      "run_timestamp": "2026-05-10T03:48:51.967Z",
       "gap_kind": "low_value",
       "gap_description": "value_delivered 0.55 < 0.7",
       "expected_answer_excerpt": "Safest mute candidates are high-volume patterns with no severity (or DEBUG/TRACE), which on this env are the OTel collector internals. Agent must mention dependency_check before suggesting mute.",
@@ -250,7 +250,7 @@
     },
     {
       "question_id": "cost-mute-candidates",
-      "run_timestamp": "2026-05-10T03:40:07.209Z",
+      "run_timestamp": "2026-05-10T03:48:51.967Z",
       "gap_kind": "low_received",
       "gap_description": "value_received 0.40 < 0.7 — MCP returned thin/stub data",
       "expected_answer_excerpt": "(MCP-side fix candidate)",

@@ -1,7 +1,7 @@
 [
   {
     "question_id": "cost-bill-driver",
-    "run_timestamp": "2026-05-10T03:40:06.036Z",
+    "run_timestamp": "2026-05-10T03:48:50.259Z",
     "gap_kind": "pattern_miss",
     "gap_description": "Top-N pattern match 0.67 < 0.7; matched (none)",
     "expected_answer_excerpt": "Oracle top: cart_cartstore_ValkeyCartStore, OpenTelemetry_error_Export_failure_exception_Export_retry_limit_exceeded_previous, attributes, Can_you_summarize_product_reviews_content_requesting_tool_call_refusal_None, instrumentationScope_name_payment_logger_version_schemaUrl_undefined",
@@ -14,7 +14,7 @@
   },
   {
     "question_id": "cost-bill-driver",
-    "run_timestamp": "2026-05-10T03:40:06.036Z",
+    "run_timestamp": "2026-05-10T03:48:50.259Z",
     "gap_kind": "low_value",
     "gap_description": "value_delivered 0.60 < 0.7",
     "expected_answer_excerpt": "Cost growth in the last 24h is dominated by Kafka metadata churn + OTel exporter retry errors. cost_drivers may report 'no drivers detected' on stable replay; correct response is either the actual growth deltas OR the truthful-negative + fallback to top_patterns.",
@@ -24,7 +24,7 @@
   },
   {
     "question_id": "cost-bill-driver",
-    "run_timestamp": "2026-05-10T03:40:06.036Z",
+    "run_timestamp": "2026-05-10T03:48:50.259Z",
     "gap_kind": "low_received",
     "gap_description": "value_received 0.40 < 0.7 — MCP returned thin/stub data",
     "expected_answer_excerpt": "(MCP-side fix candidate)",
@@ -34,7 +34,7 @@
   },
   {
     "question_id": "cost-mute-candidates",
-    "run_timestamp": "2026-05-10T03:40:07.209Z",
+    "run_timestamp": "2026-05-10T03:48:51.967Z",
     "gap_kind": "drift",
     "gap_description": "Drift on 1 claim(s)",
     "expected_answer_excerpt": "Safest mute candidates are high-volume patterns with no severity (or DEBUG/TRACE), which on this env are the OTel collector internals. Agent must mention dependency_check before suggesting mute.",
@@ -46,7 +46,7 @@
   },
   {
     "question_id": "cost-mute-candidates",
-    "run_timestamp": "2026-05-10T03:40:07.209Z",
+    "run_timestamp": "2026-05-10T03:48:51.967Z",
     "gap_kind": "pattern_miss",
     "gap_description": "Top-N pattern match 0.00 < 0.7; matched (none)",
     "expected_answer_excerpt": "Oracle top: open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter, opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go, service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
@@ -59,7 +59,7 @@
   },
   {
     "question_id": "cost-mute-candidates",
-    "run_timestamp": "2026-05-10T03:40:07.209Z",
+    "run_timestamp": "2026-05-10T03:48:51.967Z",
     "gap_kind": "low_value",
     "gap_description": "value_delivered 0.55 < 0.7",
     "expected_answer_excerpt": "Safest mute candidates are high-volume patterns with no severity (or DEBUG/TRACE), which on this env are the OTel collector internals. Agent must mention dependency_check before suggesting mute.",
@@ -69,7 +69,7 @@
   },
   {
     "question_id": "cost-mute-candidates",
-    "run_timestamp": "2026-05-10T03:40:07.209Z",
+    "run_timestamp": "2026-05-10T03:48:51.967Z",
     "gap_kind": "low_received",
     "gap_description": "value_received 0.40 < 0.7 — MCP returned thin/stub data",
     "expected_answer_excerpt": "(MCP-side fix candidate)",
@@ -79,7 +79,7 @@
   },
   {
     "question_id": "cost-top-by-volume",
-    "run_timestamp": "2026-05-10T03:40:08.193Z",
+    "run_timestamp": "2026-05-10T03:48:52.945Z",
     "gap_kind": "pattern_miss",
     "gap_description": "Top-N pattern match 0.00 < 0.7; matched (none)",
     "expected_answer_excerpt": "Oracle top: service_instance_id_service_name_otelcol_contrib_service_version_otelcol, open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter, opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go, service_instance_id_service_name_otelcol_contrib_service_version_otelcol, go_opentelemetry_io_collector_consumer_ConsumeLogsFunc_ConsumeLogs",
@@ -92,7 +92,7 @@
   },
   {
     "question_id": "cost-week-over-week",
-    "run_timestamp": "2026-05-10T03:40:08.643Z",
+    "run_timestamp": "2026-05-10T03:48:53.414Z",
     "gap_kind": "pattern_miss",
     "gap_description": "Top-N pattern match 0.00 < 0.7; matched (none)",
     "expected_answer_excerpt": "Oracle top: service_instance_id_service_name_otelcol_contrib_service_version_otelcol, open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter, opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go",
@@ -105,7 +105,7 @@
   },
   {
     "question_id": "cost-week-over-week",
-    "run_timestamp": "2026-05-10T03:40:08.643Z",
+    "run_timestamp": "2026-05-10T03:48:53.414Z",
     "gap_kind": "low_received",
     "gap_description": "value_received 0.60 < 0.7 — MCP returned thin/stub data",
     "expected_answer_excerpt": "(MCP-side fix candidate)",
@@ -114,28 +114,8 @@
     "notes": []
   },
   {
-    "question_id": "error-critical-events",
-    "run_timestamp": "2026-05-10T03:40:09.131Z",
-    "gap_kind": "low_value",
-    "gap_description": "value_delivered 0.40 < 0.7",
-    "expected_answer_excerpt": "CRITICAL severity has ~2MB / 24h on the demo env (rare). Expected: agent identifies these patterns specifically and reports the volume.",
-    "actual_answer_excerpt": "",
-    "fix_status": "open",
-    "notes": []
-  },
-  {
-    "question_id": "error-critical-events",
-    "run_timestamp": "2026-05-10T03:40:09.131Z",
-    "gap_kind": "low_received",
-    "gap_description": "value_received 0.40 < 0.7 — MCP returned thin/stub data",
-    "expected_answer_excerpt": "(MCP-side fix candidate)",
-    "actual_answer_excerpt": "",
-    "fix_status": "open",
-    "notes": []
-  },
-  {
     "question_id": "error-investigate-pattern",
-    "run_timestamp": "2026-05-10T03:40:09.587Z",
+    "run_timestamp": "2026-05-10T03:48:54.347Z",
     "gap_kind": "pattern_miss",
     "gap_description": "Top-N pattern match 0.00 < 0.7; matched (none)",
     "expected_answer_excerpt": "Oracle top: service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
@@ -148,7 +128,7 @@
   },
   {
     "question_id": "error-investigate-pattern",
-    "run_timestamp": "2026-05-10T03:40:09.587Z",
+    "run_timestamp": "2026-05-10T03:48:54.347Z",
     "gap_kind": "low_value",
     "gap_description": "value_delivered 0.40 < 0.7",
     "expected_answer_excerpt": "Investigation of the top ERROR pattern should produce a coherent report (acute-spike or stable). Expected to use log10x_investigate with the resolved pattern name.",
@@ -158,7 +138,7 @@
   },
   {
     "question_id": "error-investigate-pattern",
-    "run_timestamp": "2026-05-10T03:40:09.587Z",
+    "run_timestamp": "2026-05-10T03:48:54.347Z",
     "gap_kind": "low_received",
     "gap_description": "value_received 0.30 < 0.7 — MCP returned thin/stub data",
     "expected_answer_excerpt": "(MCP-side fix candidate)",
@@ -168,7 +148,7 @@
   },
   {
     "question_id": "error-top-error-pattern",
-    "run_timestamp": "2026-05-10T03:40:10.676Z",
+    "run_timestamp": "2026-05-10T03:48:55.369Z",
     "gap_kind": "drift",
     "gap_description": "Drift on 1 claim(s)",
     "expected_answer_excerpt": "The top ERROR-severity pattern is service_instance_id_service_name_otelcol_contrib_service_version_otelcol at ~397MB / 24h. Total ERROR volume is ~464MB / 24h.",
@@ -180,7 +160,7 @@
   },
   {
     "question_id": "error-top-error-pattern",
-    "run_timestamp": "2026-05-10T03:40:10.676Z",
+    "run_timestamp": "2026-05-10T03:48:55.369Z",
     "gap_kind": "pattern_miss",
     "gap_description": "Top-N pattern match 0.00 < 0.7; matched (none)",
     "expected_answer_excerpt": "Oracle top: service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
@@ -193,7 +173,7 @@
   },
   {
     "question_id": "error-top-error-pattern",
-    "run_timestamp": "2026-05-10T03:40:10.676Z",
+    "run_timestamp": "2026-05-10T03:48:55.369Z",
     "gap_kind": "low_received",
     "gap_description": "value_received 0.50 < 0.7 — MCP returned thin/stub data",
     "expected_answer_excerpt": "(MCP-side fix candidate)",
@@ -203,7 +183,7 @@
   },
   {
     "question_id": "stability-cloud-reporter-missing",
-    "run_timestamp": "2026-05-10T03:40:11.674Z",
+    "run_timestamp": "2026-05-10T03:48:56.286Z",
     "gap_kind": "low_value",
     "gap_description": "value_delivered 0.60 < 0.7",
     "expected_answer_excerpt": "Cloud reporter cronjob does NOT exist on this env. Expected: agent diagnoses absence (via doctor or services) and notes that cloud-tier metrics are zero.",
@@ -213,7 +193,7 @@
   },
   {
     "question_id": "stability-cloud-reporter-missing",
-    "run_timestamp": "2026-05-10T03:40:11.674Z",
+    "run_timestamp": "2026-05-10T03:48:56.286Z",
     "gap_kind": "low_received",
     "gap_description": "value_received 0.50 < 0.7 — MCP returned thin/stub data",
     "expected_answer_excerpt": "(MCP-side fix candidate)",
@@ -223,7 +203,7 @@
   },
   {
     "question_id": "stability-env-sweep",
-    "run_timestamp": "2026-05-10T03:40:12.148Z",
+    "run_timestamp": "2026-05-10T03:48:56.785Z",
     "gap_kind": "drift",
     "gap_description": "Drift on 2 claim(s)",
     "expected_answer_excerpt": "Environment-wide investigation should run cleanly and surface either growth/decline drivers OR a truthful-negative. Top movers from oracle: open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter, opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go, cart_cartstore_ValkeyCartStore.",
@@ -236,7 +216,7 @@
   },
   {
     "question_id": "stability-env-sweep",
-    "run_timestamp": "2026-05-10T03:40:12.148Z",
+    "run_timestamp": "2026-05-10T03:48:56.785Z",
     "gap_kind": "pattern_miss",
     "gap_description": "Top-N pattern match 0.33 < 0.7; matched (none)",
     "expected_answer_excerpt": "Oracle top: cart_cartstore_ValkeyCartStore, OpenTelemetry_error_Export_failure_exception_Export_retry_limit_exceeded_previous, attributes",
@@ -249,7 +229,7 @@
   },
   {
     "question_id": "stability-env-sweep",
-    "run_timestamp": "2026-05-10T03:40:12.148Z",
+    "run_timestamp": "2026-05-10T03:48:56.785Z",
     "gap_kind": "low_received",
     "gap_description": "value_received 0.60 < 0.7 — MCP returned thin/stub data",
     "expected_answer_excerpt": "(MCP-side fix candidate)",
@@ -259,7 +239,7 @@
   },
   {
     "question_id": "stability-newly-emerged",
-    "run_timestamp": "2026-05-10T03:40:13.666Z",
+    "run_timestamp": "2026-05-10T03:48:58.192Z",
     "gap_kind": "drift",
     "gap_description": "Drift on 1 claim(s)",
     "expected_answer_excerpt": "In the last 1 hour, 5 patterns newly emerged. Top: attributes.",
@@ -271,7 +251,7 @@
   },
   {
     "question_id": "stability-newly-emerged",
-    "run_timestamp": "2026-05-10T03:40:13.666Z",
+    "run_timestamp": "2026-05-10T03:48:58.192Z",
     "gap_kind": "pattern_miss",
     "gap_description": "Top-N pattern match 0.00 < 0.7; matched (none)",
     "expected_answer_excerpt": "Oracle top: attributes, service_name_product_reviews_trace_sampled_True_HTTP_Request_POST_llm_chat, process_pid, severityText_, instrumentationScope_name_payment_logger_version_schemaUrl_undefined",
@@ -284,7 +264,7 @@
   },
   {
     "question_id": "stability-newly-emerged",
-    "run_timestamp": "2026-05-10T03:40:13.666Z",
+    "run_timestamp": "2026-05-10T03:48:58.192Z",
     "gap_kind": "low_value",
     "gap_description": "value_delivered 0.45 < 0.7",
     "expected_answer_excerpt": "In the last 1 hour, 5 patterns newly emerged. Top: attributes.",
@@ -294,7 +274,7 @@
   },
   {
     "question_id": "stability-newly-emerged",
-    "run_timestamp": "2026-05-10T03:40:13.666Z",
+    "run_timestamp": "2026-05-10T03:48:58.192Z",
     "gap_kind": "low_received",
     "gap_description": "value_received 0.35 < 0.7 — MCP returned thin/stub data",
     "expected_answer_excerpt": "(MCP-side fix candidate)",
@@ -304,7 +284,7 @@
   },
   {
     "question_id": "stability-pipeline-health",
-    "run_timestamp": "2026-05-10T03:40:14.128Z",
+    "run_timestamp": "2026-05-10T03:48:58.642Z",
     "gap_kind": "drift",
     "gap_description": "Drift on 1 claim(s)",
     "expected_answer_excerpt": "Edge tier is healthy (metrics fresh within 54s). Cloud tier has zero metrics — the every-5-min cronjob does not exist on this env. Expected: agent runs doctor and reports both findings.",
@@ -316,7 +296,7 @@
   },
   {
     "question_id": "stability-pipeline-health",
-    "run_timestamp": "2026-05-10T03:40:14.128Z",
+    "run_timestamp": "2026-05-10T03:48:58.642Z",
     "gap_kind": "low_received",
     "gap_description": "value_received 0.60 < 0.7 — MCP returned thin/stub data",
     "expected_answer_excerpt": "(MCP-side fix candidate)",

@@ -95,7 +95,7 @@
   "gaps": [
     {
       "question_id": "stability-cloud-reporter-missing",
-      "run_timestamp": "2026-05-10T03:40:11.674Z",
+      "run_timestamp": "2026-05-10T03:48:56.286Z",
       "gap_kind": "low_value",
       "gap_description": "value_delivered 0.60 < 0.7",
       "expected_answer_excerpt": "Cloud reporter cronjob does NOT exist on this env. Expected: agent diagnoses absence (via doctor or services) and notes that cloud-tier metrics are zero.",
@@ -105,7 +105,7 @@
     },
     {
       "question_id": "stability-cloud-reporter-missing",
-      "run_timestamp": "2026-05-10T03:40:11.674Z",
+      "run_timestamp": "2026-05-10T03:48:56.286Z",
       "gap_kind": "low_received",
       "gap_description": "value_received 0.50 < 0.7 — MCP returned thin/stub data",
       "expected_answer_excerpt": "(MCP-side fix candidate)",

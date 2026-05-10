@@ -448,9 +448,10 @@ export function scoreTopNMatch(
  */
 const TOOL_ALTERNATIVES: Record<string, string[]> = {
   log10x_doctor: ['log10x_discover_env'],
-  log10x_top_patterns: ['log10x_cost_drivers'],
+  log10x_top_patterns: ['log10x_cost_drivers', 'log10x_list_by_label'],
   log10x_list_by_label: ['log10x_top_patterns', 'log10x_services'],
   log10x_investigate: ['log10x_pattern_trend', 'log10x_cost_drivers'],
+  log10x_cost_drivers: ['log10x_top_patterns'],
 };
 
 /**

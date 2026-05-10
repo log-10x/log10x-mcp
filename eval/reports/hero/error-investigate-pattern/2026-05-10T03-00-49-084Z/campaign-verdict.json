@@ -150,7 +150,7 @@
   "gaps": [
     {
       "question_id": "error-investigate-pattern",
-      "run_timestamp": "2026-05-10T03:40:09.587Z",
+      "run_timestamp": "2026-05-10T03:48:54.347Z",
       "gap_kind": "pattern_miss",
       "gap_description": "Top-N pattern match 0.00 < 0.7; matched (none)",
       "expected_answer_excerpt": "Oracle top: service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
@@ -163,7 +163,7 @@
     },
     {
       "question_id": "error-investigate-pattern",
-      "run_timestamp": "2026-05-10T03:40:09.587Z",
+      "run_timestamp": "2026-05-10T03:48:54.347Z",
       "gap_kind": "low_value",
       "gap_description": "value_delivered 0.40 < 0.7",
       "expected_answer_excerpt": "Investigation of the top ERROR pattern should produce a coherent report (acute-spike or stable). Expected to use log10x_investigate with the resolved pattern name.",
@@ -173,7 +173,7 @@
     },
     {
       "question_id": "error-investigate-pattern",
-      "run_timestamp": "2026-05-10T03:40:09.587Z",
+      "run_timestamp": "2026-05-10T03:48:54.347Z",
       "gap_kind": "low_received",
       "gap_description": "value_received 0.30 < 0.7 — MCP returned thin/stub data",
       "expected_answer_excerpt": "(MCP-side fix candidate)",

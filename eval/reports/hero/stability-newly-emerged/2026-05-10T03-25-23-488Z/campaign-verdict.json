@@ -206,7 +206,7 @@
   "gaps": [
     {
       "question_id": "stability-newly-emerged",
-      "run_timestamp": "2026-05-10T03:40:13.666Z",
+      "run_timestamp": "2026-05-10T03:48:58.192Z",
       "gap_kind": "drift",
       "gap_description": "Drift on 1 claim(s)",
       "expected_answer_excerpt": "In the last 1 hour, 5 patterns newly emerged. Top: attributes.",
@@ -218,7 +218,7 @@
     },
     {
       "question_id": "stability-newly-emerged",
-      "run_timestamp": "2026-05-10T03:40:13.666Z",
+      "run_timestamp": "2026-05-10T03:48:58.192Z",
       "gap_kind": "pattern_miss",
       "gap_description": "Top-N pattern match 0.00 < 0.7; matched (none)",
       "expected_answer_excerpt": "Oracle top: attributes, service_name_product_reviews_trace_sampled_True_HTTP_Request_POST_llm_chat, process_pid, severityText_, instrumentationScope_name_payment_logger_version_schemaUrl_undefined",
@@ -231,7 +231,7 @@
     },
     {
       "question_id": "stability-newly-emerged",
-      "run_timestamp": "2026-05-10T03:40:13.666Z",
+      "run_timestamp": "2026-05-10T03:48:58.192Z",
       "gap_kind": "low_value",
       "gap_description": "value_delivered 0.45 < 0.7",
       "expected_answer_excerpt": "In the last 1 hour, 5 patterns newly emerged. Top: attributes.",
@@ -241,7 +241,7 @@
     },
     {
       "question_id": "stability-newly-emerged",
-      "run_timestamp": "2026-05-10T03:40:13.666Z",
+      "run_timestamp": "2026-05-10T03:48:58.192Z",
       "gap_kind": "low_received",
       "gap_description": "value_received 0.35 < 0.7 — MCP returned thin/stub data",
       "expected_answer_excerpt": "(MCP-side fix candidate)",
