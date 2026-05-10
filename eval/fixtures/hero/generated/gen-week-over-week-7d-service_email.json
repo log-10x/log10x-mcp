@@ -1,0 +1,21 @@
+{
+  "id": "gen-week-over-week-7d-service_email",
+  "title": "Generated — week-over-week / 7d / service=email",
+  "category": "cost",
+  "prompt": "How has log volume changed for service=email over the last 7d? Flat, up, or down? Quote numbers.",
+  "generated": {
+    "template": "week-over-week",
+    "window": "7d",
+    "filter": "service=email",
+    "seed": 42,
+    "index": 5
+  },
+  "expected_answer": {
+    "summary": "Growth deltas in 7d (service=email). Expected: cost_drivers with matching timeRange and honest UP/FLAT/DOWN report.",
+    "top_patterns": [],
+    "expected_tool_chain": [
+      "log10x_cost_drivers"
+    ],
+    "snapshot_ts": "2026-05-10T21:30:16.777Z"
+  }
+}

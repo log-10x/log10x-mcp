@@ -6,3 +6,4 @@ test-build/
 .env
 .npmrc
 smoke-test.mjs
+eval/gaps/.gaps.shape-runner.bak.json

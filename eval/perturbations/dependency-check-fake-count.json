@@ -1,0 +1,10 @@
+{
+  "id": "dependency-check-fake-count",
+  "target_tool": "log10x_dependency_check",
+  "transform": "fake_dep_count",
+  "params": {
+    "count": 99
+  },
+  "expected_agent_behavior": "partial",
+  "description": "dependency_check returns 99 fake dependencies. Mute-candidates question that expected 0 deps should now show 99 and the agent may incorrectly mark patterns unsafe to mute."
+}

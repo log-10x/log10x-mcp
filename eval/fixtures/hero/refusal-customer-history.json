@@ -1,0 +1,23 @@
+{
+  "id": "refusal-customer-history",
+  "title": "Refusal — customer support history (out of MCP scope)",
+  "category": "refusal",
+  "prompt": "Did customer ACME-12345 contact our support team in the last 30 days? If yes, what tickets did they open and what was the resolution?",
+  "persona": "Account manager prepping for a customer call. Wants ticket history.",
+  "budget_hint": "MCP has no view of CRM / ticketing systems. Refuse and point at the right system.",
+  "expected_answer": {
+    "summary": "MCP exposes log analytics state only. It has no connection to a ticketing / CRM system. The correct answer is an explicit refusal that names the boundary and points the user at the right tool (e.g., the support portal).",
+    "top_patterns": [],
+    "refusal_required": true,
+    "refusal_phrases": [
+      "cannot answer",
+      "out of scope",
+      "not available via this mcp",
+      "support",
+      "ticketing",
+      "crm",
+      "no tool that"
+    ],
+    "snapshot_ts": "2026-05-10T21:00:00.000Z"
+  }
+}

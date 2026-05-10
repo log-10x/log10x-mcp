@@ -1,0 +1,21 @@
+{
+  "id": "gen-services-emitting-1d-namespace_otel_demo",
+  "title": "Generated — services-emitting / 1d / namespace=otel-demo",
+  "category": "stability",
+  "prompt": "Which services are emitting logs in the last 1d, and what fraction of volume does each represent?",
+  "generated": {
+    "template": "services-emitting",
+    "window": "1d",
+    "filter": "namespace=otel-demo",
+    "seed": 42,
+    "index": 2
+  },
+  "expected_answer": {
+    "summary": "Service-level volume distribution in 1d. Expected: agent calls services and reports the cardinality + per-service share.",
+    "top_patterns": [],
+    "expected_tool_chain": [
+      "log10x_services"
+    ],
+    "snapshot_ts": "2026-05-10T21:30:16.776Z"
+  }
+}

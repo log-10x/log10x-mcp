@@ -1,0 +1,48 @@
+{
+  "fabrication": {
+    "id": "critical-events-real-but-unrelated",
+    "shape": "scope-confusion",
+    "base_transcript": "reports/hero/error-critical-events/2026-05-10T03-46-29-619Z/transcript.json",
+    "splice_finalText": "**Yes — CRITICAL-severity events are firing.** Top 3 by volume:\n\n| # | Pattern | Volume |\n|---|---|---|\n| 1 | service_instance_id_service_name_otelcol_contrib_service_version_otelcol | $4.5/wk · 397 MB |\n| 2 | open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter | $4.4/wk · 394 MB |\n| 3 | opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go | $4.3/wk · 383 MB |\n\nTotal CRITICAL volume around 1.2 GB / 24h.",
+    "expected_verdict": "should_fail",
+    "rationale": "Cites real ERROR-tier OTel collector patterns when question asks for CRITICAL"
+  },
+  "verdict": {
+    "drift_score": 0,
+    "drift_supported": 7,
+    "drift_inconclusive": 3,
+    "pattern_match": {
+      "agent_top_patterns": [
+        "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
+        "open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter",
+        "opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go"
+      ],
+      "oracle_top_patterns": [],
+      "matched": 3,
+      "missed": 0,
+      "extra": 0,
+      "score": 1
+    },
+    "chain_alignment": {
+      "expected": [
+        "log10x_list_by_label"
+      ],
+      "actual": [
+        "log10x_top_patterns",
+        "log10x_pattern_trend",
+        "log10x_pattern_trend",
+        "log10x_pattern_trend"
+      ],
+      "hits": [
+        "log10x_top_patterns"
+      ],
+      "misses": [],
+      "score": 1
+    },
+    "value_delivered": 0.85,
+    "value_received": 0.75,
+    "passed": true,
+    "axes_summary": "drift=0/10 pattern_match=3/0=1.00 chain=1/1=1.00 value_delivered=0.85 value_received=0.75"
+  },
+  "gaps": []
+}

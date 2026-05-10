@@ -85,6 +85,17 @@ jobs:
           LOG10X_EVAL_ENV=demo node eval/bin/run-campaign.mjs \
             --score-only --stale --skip-refresh --min-pass 14
 
+      - name: Shape-coverage harness
+        run: |
+          set -euo pipefail
+          # Re-scores every fabrication under eval/shapes/<shape>/fabrications/
+          # via the unmodified campaign scorer. --min-coverage gates on the
+          # baseline measured at the time the harness landed (3/16 shapes
+          # covered by should_fail fabrications correctly being detected).
+          # A drop below this = scorer regression with respect to detected
+          # failure shapes. Improvements (more shapes covered) keep CI green.
+          LOG10X_EVAL_ENV=demo node eval/bin/run-shapes.mjs --min-coverage 0.18
+
       - name: Upload re-scored verdicts
         if: always()
         uses: actions/upload-artifact@v4
@@ -94,5 +105,6 @@ jobs:
             eval/reports/hero/CAMPAIGN-PROOF.md
             eval/reports/hero/SUITE-SUMMARY.md
             eval/reports/hero/*/*/campaign-verdict.json
+            eval/shapes/COVERAGE.md
           if-no-files-found: warn
           retention-days: 14

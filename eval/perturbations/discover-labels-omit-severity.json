@@ -1,0 +1,8 @@
+{
+  "id": "discover-labels-omit-severity",
+  "target_tool": "log10x_discover_labels",
+  "transform": "omit_severity_label",
+  "params": {},
+  "expected_agent_behavior": "partial",
+  "description": "discover_labels omits severity_level from the list. Agent asking about severity may incorrectly conclude severity tagging is absent."
+}

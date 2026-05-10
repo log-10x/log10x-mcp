@@ -1,0 +1,82 @@
+{
+  "fabrication": {
+    "id": "cost-week-over-week-fake-pattern-names",
+    "shape": "pattern-name-hallucination",
+    "base_transcript": "reports/hero/cost-week-over-week/2026-05-10T13-00-13-349Z/transcript.json",
+    "splice_finalText": "## Week-over-Week Trend: FLAT\n\nTop contributors (24h):\n\n| # | Pattern | Volume |\n|---|---|---|\n| 1 | telemetry_pipeline_high_cardinality_metric_label_explosion_warning | 412 MB |\n| 2 | grpc_server_handler_request_received_with_invalid_metadata_header | 387 MB |\n| 3 | otelcollector_processor_batch_send_size_exceeded_threshold_event | 374 MB |\n\ncost_drivers detected no growth at the 7d window. Total volume 34.9 GB / 7d.",
+    "expected_verdict": "should_fail",
+    "rationale": "Invents telemetry_pipeline_*, grpc_server_*, otelcollector_processor_* patterns"
+  },
+  "verdict": {
+    "drift_score": 3,
+    "drift_supported": 4,
+    "drift_inconclusive": 0,
+    "pattern_match": {
+      "agent_top_patterns": [
+        "telemetry_pipeline_high_cardinality_metric_label_explosion_warning",
+        "grpc_server_handler_request_received_with_invalid_metadata_header",
+        "otelcollector_processor_batch_send_size_exceeded_threshold_event"
+      ],
+      "oracle_top_patterns": [
+        "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
+        "open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter",
+        "opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go"
+      ],
+      "matched": 0,
+      "missed": 3,
+      "extra": 3,
+      "score": 0
+    },
+    "chain_alignment": {
+      "expected": [
+        "log10x_cost_drivers"
+      ],
+      "actual": [
+        "log10x_doctor",
+        "log10x_cost_drivers",
+        "log10x_top_patterns",
+        "log10x_savings",
+        "log10x_cost_drivers",
+        "log10x_top_patterns"
+      ],
+      "hits": [
+        "log10x_cost_drivers"
+      ],
+      "misses": [],
+      "score": 1
+    },
+    "value_delivered": 0.8,
+    "value_received": 0.7,
+    "passed": false,
+    "axes_summary": "drift=3/7 pattern_match=0/3=0.00 chain=1/1=1.00 value_delivered=0.80 value_received=0.70"
+  },
+  "gaps": [
+    {
+      "question_id": "cost-week-over-week",
+      "run_timestamp": "2026-05-10T21:49:20.169Z",
+      "gap_kind": "drift",
+      "gap_description": "Drift on 3 claim(s)",
+      "expected_answer_excerpt": "Demo env is a continuous-replay env; week-over-week growth is near zero. Correct answer recognizes the stable run-rate and reports total volume + top contributors.",
+      "actual_answer_excerpt": "## Week-over-Week Trend: FLAT\n\nTop contributors (24h):\n\n| # | Pattern | Volume |\n|---|---|---|\n| 1 | telemetry_pipeline_high_cardinality_metric_label_explosion_warning | 412 MB |\n| 2 | grpc_server_handler_request_received_with_invalid_metadata_header | 387 MB |\n| 3 | otelcollector_processor_batch_send_size_exceeded_threshold_event | 374 MB |\n\ncost_drivers detected no growth at the 7d window. Total",
+      "fix_status": "open",
+      "notes": [
+        "unsupported: telemetry_pipeline_high_cardinality_metric_label_explosion_warning — no metric data in 24h window",
+        "unsupported: grpc_server_handler_request_received_with_invalid_metadata_header — no metric data in 24h window",
+        "unsupported: otelcollector_processor_batch_send_size_exceeded_threshold_event — no metric data in 24h window"
+      ]
+    },
+    {
+      "question_id": "cost-week-over-week",
+      "run_timestamp": "2026-05-10T21:49:20.169Z",
+      "gap_kind": "pattern_miss",
+      "gap_description": "Top-N pattern match 0.00 < 0.7; matched (none)",
+      "expected_answer_excerpt": "Oracle top: service_instance_id_service_name_otelcol_contrib_service_version_otelcol, open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter, opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go",
+      "actual_answer_excerpt": "Agent top: telemetry_pipeline_high_cardinality_metric_label_explosion_warning, grpc_server_handler_request_received_with_invalid_metadata_header, otelcollector_processor_batch_send_size_exceeded_threshold_event",
+      "fix_status": "open",
+      "notes": [
+        "agent_top=[\"telemetry_pipeline_high_cardinality_metric_label_explosion_warning\",\"grpc_server_handler_request_received_with_invalid_metadata_header\",\"otelcollector_processor_batch_send_size_exceeded_threshold_event\"]",
+        "oracle_top=[\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\",\"open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter\",\"opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go\"]"
+      ]
+    }
+  ]
+}

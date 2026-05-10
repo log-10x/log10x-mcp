@@ -1,0 +1,10 @@
+{
+  "id": "services-fake-service",
+  "target_tool": "log10x_services",
+  "transform": "fabricate_service",
+  "params": {
+    "service_name": "billing-svc"
+  },
+  "expected_agent_behavior": "catch",
+  "description": "services list gains a fabricated billing-svc row. Agent should NOT incorporate billing-svc into the synthesis if it never appears in any other tool output."
+}

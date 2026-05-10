@@ -1,0 +1,22 @@
+{
+  "id": "gen-pattern-attribution-1h-all",
+  "title": "Generated — pattern-attribution / 1h / all",
+  "category": "cost",
+  "prompt": "Find the single highest-cost pattern in the last 1h and explain what's driving it. Trace the cause.",
+  "generated": {
+    "template": "pattern-attribution",
+    "window": "1h",
+    "filter": "",
+    "seed": 42,
+    "index": 4
+  },
+  "expected_answer": {
+    "summary": "Single-pattern attribution in 1h. Expected: cost_drivers → investigate chain.",
+    "top_patterns": [],
+    "expected_tool_chain": [
+      "log10x_cost_drivers",
+      "log10x_investigate"
+    ],
+    "snapshot_ts": "2026-05-10T21:30:16.777Z"
+  }
+}

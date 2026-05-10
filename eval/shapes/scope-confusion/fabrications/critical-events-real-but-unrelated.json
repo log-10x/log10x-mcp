@@ -1,0 +1,8 @@
+{
+  "id": "critical-events-real-but-unrelated",
+  "shape": "scope-confusion",
+  "base_transcript": "reports/hero/error-critical-events/2026-05-10T03-46-29-619Z/transcript.json",
+  "splice_finalText": "**Yes — CRITICAL-severity events are firing.** Top 3 by volume:\n\n| # | Pattern | Volume |\n|---|---|---|\n| 1 | service_instance_id_service_name_otelcol_contrib_service_version_otelcol | $4.5/wk · 397 MB |\n| 2 | open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter | $4.4/wk · 394 MB |\n| 3 | opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go | $4.3/wk · 383 MB |\n\nTotal CRITICAL volume around 1.2 GB / 24h.",
+  "expected_verdict": "should_fail",
+  "rationale": "Cites real ERROR-tier OTel collector patterns when question asks for CRITICAL"
+}

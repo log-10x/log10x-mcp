@@ -1,0 +1,21 @@
+{
+  "id": "gen-week-over-week-1h-namespace_otel_demo",
+  "title": "Generated — week-over-week / 1h / namespace=otel-demo",
+  "category": "cost",
+  "prompt": "How has log volume changed for namespace=otel-demo over the last 1h? Flat, up, or down? Quote numbers.",
+  "generated": {
+    "template": "week-over-week",
+    "window": "1h",
+    "filter": "namespace=otel-demo",
+    "seed": 42,
+    "index": 3
+  },
+  "expected_answer": {
+    "summary": "Growth deltas in 1h (namespace=otel-demo). Expected: cost_drivers with matching timeRange and honest UP/FLAT/DOWN report.",
+    "top_patterns": [],
+    "expected_tool_chain": [
+      "log10x_cost_drivers"
+    ],
+    "snapshot_ts": "2026-05-10T21:30:16.777Z"
+  }
+}

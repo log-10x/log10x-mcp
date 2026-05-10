@@ -1,0 +1,8 @@
+{
+  "id": "top-patterns-unknown-poison",
+  "target_tool": "log10x_top_patterns",
+  "transform": "swap_unknown",
+  "params": {},
+  "expected_agent_behavior": "catch",
+  "description": "(Known chain-break case from PR #96.) Forces (unknown) into #1 position. The agent should NOT pass (unknown) to log10x_investigate downstream."
+}

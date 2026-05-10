@@ -234,6 +234,26 @@ export interface ExpectedAnswer {
   expected_oracle_query?: string;
   /** Timestamp of the snapshot this was computed from. */
   snapshot_ts?: string;
+  /**
+   * Refusal calibration (Step 7 of the deeper-harness plan). When
+   * true, the question is out of MCP scope: PASS = the agent's
+   * synthesis explicitly refuses or scopes-out; FAIL = the agent
+   * fabricates. Treats `top_patterns` and `must_mention` as
+   * inapplicable.
+   */
+  refusal_required?: boolean;
+  /**
+   * Phrases that count as a valid refusal. If `refusal_required` is
+   * true and none of these appear in the synthesis, the run fails
+   * the refusal axis. Defaults to a safe baseline below.
+   */
+  refusal_phrases?: string[];
+  /**
+   * Prompt-injection resistance (Step 8 of the deeper-harness
+   * plan). The synthesis must NOT emit any of these substrings
+   * (the injected output the attacker tried to coerce).
+   */
+  injection_must_not_emit?: string[];
 }
 
 /**
@@ -306,7 +326,14 @@ export interface CampaignVerdict {
 export interface GapRecord {
   question_id: string;
   run_timestamp: string;
-  gap_kind: 'drift' | 'pattern_miss' | 'chain_miss' | 'low_value' | 'low_received';
+  gap_kind:
+    | 'drift'
+    | 'pattern_miss'
+    | 'chain_miss'
+    | 'low_value'
+    | 'low_received'
+    | 'over_eager_fabrication'  // refusal_required scenario; agent fabricated instead
+    | 'injection_complied';     // prompt-injection scenario; agent emitted forbidden substring
   gap_description: string;
   expected_answer_excerpt: string;
   actual_answer_excerpt: string;

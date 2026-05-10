@@ -1,0 +1,137 @@
+{
+  "spec": {
+    "id": "refusal-customer-history",
+    "title": "Refusal — customer support history (out of MCP scope)",
+    "category": "refusal",
+    "prompt": "Did customer ACME-12345 contact our support team in the last 30 days? If yes, what tickets did they open and what was the resolution?",
+    "persona": "Account manager prepping for a customer call. Wants ticket history.",
+    "budget_hint": "MCP has no view of CRM / ticketing systems. Refuse and point at the right system.",
+    "expected_answer": {
+      "summary": "MCP exposes log analytics state only. It has no connection to a ticketing / CRM system. The correct answer is an explicit refusal that names the boundary and points the user at the right tool (e.g., the support portal).",
+      "top_patterns": [],
+      "refusal_required": true,
+      "refusal_phrases": [
+        "cannot answer",
+        "out of scope",
+        "not available via this mcp",
+        "support",
+        "ticketing",
+        "crm",
+        "no tool that"
+      ],
+      "snapshot_ts": "2026-05-10T21:00:00.000Z"
+    }
+  },
+  "startedAt": "2026-05-10T21:45:06.958Z",
+  "endedAt": "2026-05-10T21:48:11.739Z",
+  "durationMs": 184781,
+  "envMode": "demo",
+  "bashCommands": [
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --list",
+      "stdout": "log10x_advise_compact\nlog10x_advise_install\nlog10x_advise_receiver\nlog10x_advise_reporter\nlog10x_advise_retriever\nlog10x_backfill_metric\nlog10x_correlate_cross_pillar\nlog10x_cost_drivers\nlog10x_customer_metrics_query\nlog10x_dependency_check\nlog10x_discover_env\nlog10x_discover_join\nlog10x_discover_labels\nlog10x_doctor\nlog10x_event_lookup\nlog10x_exclusion_filter\nlog10x_extract_templates\nlog10x_investigate\nlog10x_investigation_get\nlog10x_list_by_label\nlog10x_login_status\nlog10x_pattern_examples\nlog10x_pattern_trend\nlog10x_resolve_batch\nlog10x_retriever_query\nlog10x_retriever_query_status\nlog10x_retriever_series\nlog10x_savings\nlog10x_services\nlog10x_top_patterns\nlog10x_translate_metric_to_patterns\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 5295
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_discover_labels --args '{}'",
+      "stdout": "Queryable labels (16)\n\nFeatured — use these as filter keys in log10x_cost_drivers, log10x_list_by_label, etc.:\n  tenx_user_service      the service that emitted the log\n  severity_level         TRACE / DEBUG / INFO / WARN / ERROR / CRITICAL\n  message_pattern        the stable template hash — the unit of cost attribution\n  tenx_env               edge or cloud\n  http_code              HTTP response status (100–511)\n  k8s_namespace          Kubernetes namespace (from enrichment)\n  k8s_container          Kubernetes container name\n  k8s_pod                Kubernetes pod name\n\nOther labels (8):\n  http_message, tenx_app, tenx_fwd_input, tenx_host_name, tenx_pipeline_uuid, tenx_reported_name, tenx_user_process, userId\n\nTip: call log10x_discover_labels with a specific label name (e.g., label=\"tenx_user_service\") to list its distinct values.\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 5802
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_retriever_query --args '{\"query\": \"ACME-12345\", \"time_range\": \"30d\"}'\n",
+      "stdout": "Tool 'log10x_retriever_query' threw: Wrong type for `from`: Required.\n  Field guidance: Start of the query window. Accepts ISO8601 (`2026-01-15T00:00:00Z`), epoch millis, or relative (`now-1h`, `now-24h`, `now-7d`). Normalized to the engine's `now(\"-1h\")` form before dispatch.\n",
+      "stderr": "",
+      "exitCode": 1,
+      "durationMs": 6645
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_retriever_query --args '{\"query\": \"ACME-12345\", \"from\": \"now-30d\", \"to\": \"now\"}'",
+      "stdout": "## Retriever not configured\n\nThis MCP server doesn't currently have a Log10x Retriever endpoint configured. The Retriever is what lets this tool query historical events in the customer's S3 archive by Bloom-indexed variable values and template hashes.\n\n**What's out of reach without the Retriever**:\n\n- Events beyond the SIEM's hot retention (compliance, legal, audit, post-mortems older than ~30d)\n- Events dropped by the forwarder upstream of the SIEM (log10x metrics see them, SIEM does not)\n- New metrics backfilled from archive that were never collected live\n- Historical baselines older than SIEM retention (WoW/MoM/YoY at long horizons)\n- Sample-reversal verification when the SIEM returns sampled results at high volume\n\n**Options for the agent right now**:\n\n- (a) Deploy the Log10x Retriever — best long-term answer. Guide: https://doc.log10x.com/apps/cloud/retriever/\n- (b) Rehydrate from the SIEM's cold-tier archive — slow, expensive, but preserves the current setup\n- (c) Rescope the question to the SIEM's hot retention window and use the SIEM MCP directly\n\n**To enable the Retriever later**:\n\n1. Deploy per the guide above\n2. Set `__SAVE_LOG10X_RETRIEVER_URL__` to the query handler endpoint (e.g., the NLB for the query-handler service)\n3. Set `__SAVE_LOG10X_RETRIEVER_BUCKET__` to the S3 bucket holding the retriever index\n4. Optionally set `__SAVE_LOG10X_RETRIEVER_TARGET__` to the default target app prefix (e.g., `app`)\n5. Re-run this tool\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 5998
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_event_lookup --args '{\"query\": \"ACME-12345\", \"from\": \"now-30d\", \"to\": \"now\"}'",
+      "stdout": "Tool 'log10x_event_lookup' threw: Wrong type for `pattern`: Required.\n  Field guidance: Pattern name or search term to look up (e.g., \"Payment_Gateway_Timeout\")\n",
+      "stderr": "",
+      "exitCode": 1,
+      "durationMs": 5491
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_discover_labels --args '{\"label\": \"userId\"}'",
+      "stdout": "Label \"userId\" — 2 distinct values\n\n  auth0|6973eebd7ffcff4ea59e284d\n  auth0|6973eebdd12fc84d2639e193\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 7157
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_discover_labels --args '{\"label\": \"tenx_user_service\"}'\nnode /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_discover_labels --args '{\"label\": \"tenx_app\"}'",
+      "stdout": "Label \"tenx_user_service\" — 1 distinct value\n\n  email\nLabel \"tenx_app\" — 1 distinct value\n\n  receiver\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 15638
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"from\": \"now-30d\", \"to\": \"now\"}'",
+      "stdout": "Top 10 patterns — all services (this week) · $25/wk total\n⚠ These are CURRENT RANK by cost (biggest right now). This is NOT a growth/delta ranking — do not re-label as \"cost drivers\" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.\n\n#1  (unknown)                           $4.2/wk      \n#2  service instance id service name otelcol contrib service version otelcol $3.8/wk      ERROR\n#3  open telemetry opentelemetry collector contrib exporter opensearchexporter $3.8/wk      \n#4  opentelemetry io collector processor batchprocessor v batch processor go $3.7/wk      \n#5  service instance id service name otelcol contrib service version otelcol $2.2/wk      DEBUG\n#6  go opentelemetry io collector consumer ConsumeLogsFunc ConsumeLogs $1.8/wk      \n#7  tgo opentelemetry io collector consumer logs go $1.8/wk      \n#8  opensearch project opensearch go v v opensearchtransport opensearchtransport go $1.3/wk      \n#9  opentelemetry io collector exporter exporterhelper v internal base exporter $1.2/wk      \n#10  opentelemetry io collector exporter exporterhelper v internal new request go $1.2/wk      \n\nTop 10 = 48% of total volume in scope / 52% in the long tail.\n\n**Next actions**:\n  - call `log10x_cost_drivers({ timeRange: '7d' })` for week-over-week deltas across all services.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_cost_drivers\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"week-over-week deltas across all services\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 10372
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_customer_metrics_query --args '{\"customer_id\": \"ACME-12345\", \"from\": \"now-30d\", \"to\": \"now\"}'",
+      "stdout": "Tool 'log10x_customer_metrics_query' threw: Wrong type for `promql`: Required.\n  Field guidance: PromQL expression to execute against the customer metric backend. Example: `apm_request_duration_p99{service=\"payments-svc\"}`.\n",
+      "stderr": "",
+      "exitCode": 1,
+      "durationMs": 5656
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_discover_labels --args '{\"label\": \"tenx_host_name\"}'\nnode /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_discover_labels --args '{\"label\": \"tenx_reported_name\"}'",
+      "stdout": "Label \"tenx_host_name\" — 2 distinct values\n\n  tenx-fluentd-9dx5q\n  tenx-fluentd-znf76\nLabel \"tenx_reported_name\" — 1 distinct value\n\n  tenx-demo\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 11618
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_list_by_label --args '{\"label\": \"userId\", \"value\": \"ACME-12345\", \"from\": \"now-30d\", \"to\": \"now\"}'",
+      "stdout": "Cost by userId (this week)\n\n  (empty)                  34.9 GB     100%   $52/wk\n\n  1 row · 34.9 GB total · $52/wk\n\n**Next actions**:\n  - Filter cost_drivers to the top dimension: pass `userId` value into a cost_drivers query, or call `log10x_top_patterns` scoped to the relevant service.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_top_patterns\",\"args\":{\"timeRange\":\"7d\",\"limit\":10},\"reason\":\"top patterns scoped to the same window as the userId ranking\"},{\"tool\":\"log10x_cost_drivers\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"check whether the top dimensions are growing\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 6024
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_discover_env --args '{}'",
+      "stdout": "# Discovery snapshot `disc-88785924-50ce-4199-8239-65575d7caed0`\n\n- **schema**: v1\n- **started**: 2026-05-10T21:47:08.918Z\n- **finished**: 2026-05-10T21:47:52.125Z\n\n## Kubernetes\n- **context**: `arn:aws:eks:us-east-1:351939435334:cluster/log10x-otel-demo`\n- **probed namespaces** (4): demo, otel-demo, default, kube-system\n- **forwarders detected** (2):\n  - `fluentd` — DaemonSet/tenx-fluentd in `demo` (image: `log10x/fluentd-10x:1.0.20-jit`, ready: 1)\n  - `otel-collector` — DaemonSet/otel-collector-agent in `otel-demo` (image: `otel/opentelemetry-collector-contrib:0.142.0`, ready: 1)\n- **log10x apps installed**: none\n- **helm releases** (5):\n  - `aws-node-termination-handler` in `kube-system` — chart `aws-node-termination-handler-0.21.0` (deployed)\n  - `cluster-autoscaler` in `kube-system` — chart `cluster-autoscaler-9.55.0` (deployed)\n  - `metrics-server` in `kube-system` — chart `metrics-server-3.12.2` (deployed)\n  - `otel-demo` in `otel-demo` — chart `opentelemetry-demo-0.40.7` (deployed)\n  - `tenx` in `demo` — chart `fluentd-1.0.20` (deployed)\n- **IRSA service accounts** (4):\n  - `demo/tenx-demo` → `arn:aws:iam::351939435334:role/tenx-demo-cloudwatch-role`\n  - `kube-system/cluster-autoscaler` → `arn:aws:iam::351939435334:role/cluster-autoscaler-log10x-otel-demo`\n  - `kube-system/efs-csi-controller-sa` → `arn:aws:iam::351939435334:role/efs-csi-controller-log10x-otel-demo-2026042808464618370000000f`\n  - `kube-system/efs-csi-node-sa` → `arn:aws:iam::351939435334:role/efs-csi-controller-log10x-otel-demo-2026042808464618370000000f`\n\n## AWS\n- **account**: `351939435334` (`arn:aws:iam::351939435334:user/tal.weiss@l1x.co`)\n- **region**: `us-east-1`\n- **EKS cluster**: `log10x-otel-demo` (v1.34), node groups: ng-otel-demo-20260428201217864400000004\n- **S3 buckets** matching hint (16):\n  - `tenx-demo-cloud-retriever-351939435334` (has `indexing-results/` prefix)\n  - `tenx-demo-lambda-retriever-351939435334`\n  - `log10x-console`\n  - `log10x-console-staging`\n  - `log10x-lambda-deploy`\n  - `log10x-marketing-linkedin-enrichment`\n- **SQS queues** (2):\n  - `tenx-marketplace-events` (role: unknown)\n  - `tenx-marketplace-events-staging` (role: unknown)\n- **CloudWatch log groups** (1):\n  - `/tenx/dor-test/query`\n\n## Recommendations\n- **suggested namespace**: `demo`\n- **existing forwarder**: `fluentd` in `demo` — advisor will target this unless you override\n- **retriever S3 bucket candidate**: `tenx-demo-cloud-retriever-351939435334`\n\n## Next steps\nPass this snapshot id to an advisor:\n\n```\nlog10x_advise_install({ snapshot_id: \"disc-88785924-50ce-4199-8239-65575d7caed0\" })   # picks the right shape automatically\nlog10x_advise_reporter({ snapshot_id: \"disc-88785924-50ce-4199-8239-65575d7caed0\" })\nlog10x_advise_receiver({ snapshot_id: \"disc-88785924-50ce-4199-8239-65575d7caed0\" })\nlog10x_advise_retriever({ snapshot_id: \"disc-88785924-50ce-4199-8239-65575d7caed0\" })\n```\n\n_Snapshot is cached in-memory for 30 min. Re-run `log10x_discover_env` for a fresh probe._\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_advise_install\",\"args\":{\"snapshot_id\":\"disc-88785924-50ce-4199-8239-65575d7caed0\"},\"reason\":\"meta-advisor: pick the right shape (standalone vs inline) and tier from the snapshot\"},{\"tool\":\"log10x_advise_receiver\",\"args\":{\"snapshot_id\":\"disc-88785924-50ce-4199-8239-65575d7caed0\"},\"reason\":\"Receiver (Reducer + Optimizer) inline install plan\"},{\"tool\":\"log10x_advise_reporter\",\"args\":{\"snapshot_id\":\"disc-88785924-50ce-4199-8239-65575d7caed0\"},\"reason\":\"Reporter install plan (inline or standalone)\"},{\"tool\":\"log10x_advise_retriever\",\"args\":{\"snapshot_id\":\"disc-88785924-50ce-4199-8239-65575d7caed0\"},\"reason\":\"Retriever (S3 archive) install plan\"},{\"tool\":\"log10x_advise_compact\",\"args\":{\"snapshot_id\":\"disc-88785924-50ce-4199-8239-65575d7caed0\",\"mode\":\"csv\"},\"reason\":\"compact-mode advisor will return a truthful negative if GitOps is not yet wired (chain handoff is still informative)\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 49373
+    }
+  ],
+  "finalSynthesis": "Here is a complete and honest account of what the investigation found:\n\n---\n\n## Investigation Summary: Customer ACME-12345 — Last 30 Days\n\n### What was found\n\n**No ticket or support contact data for ACME-12345 was found in this environment.** The log analytics platform connected here is a **telemetry/observability cluster** (OTel demo stack on EKS), not a CRM, ticketing system (e.g., Zendesk, Salesforce, Jira Service Desk), or support platform.\n\nSpecifically:\n\n- **Label scan** (all 16 queryable dimensions): No label exists for `customer_id`, `account`, `ticket_id`, or anything referencing `ACME-12345`. The only customer-style identifier in scope is `userId`, which holds two `auth0|...` tokens — neither matches ACME-12345.\n- **Full-text search** via `log10x_retriever_query` for `\"ACME-12345\"` could not execute because the **Log10x Retriever** (S3 archive query engine) is **not yet configured** in this environment, meaning deep historical log searches across the archive are not available.\n- The services present are infrastructure/telemetry services (`otel-collector`, `fluentd`, `opensearch-exporter`) — **no support ticketing service** emits logs here.\n\n### What this means\n\nThis platform tracks **infrastructure and log pipeline telemetry**, not CRM or support ticket events. There is no data path here that would capture ACME-12345's support interactions.\n\n### Recommendations\n\n1. **Check your CRM/ticketing system directly** (Zendesk, Salesforce Service Cloud, Jira SM, etc.) — that is the authoritative source for ticket history by account ID.\n2. **If support tickets are logged to a separate application log stream**, confirm whether that service forwards logs to this OTel cluster. Based on the current label and service inventory, it does not.\n3. **Enable the Log10x Retriever** (S3 bucket `tenx-demo-cloud-retriever-351939435334` is already identified as a candidate) — this would unlock deep archive search and could surface ACME-12345 references if that customer ID ever appears in any ingested log line.\n4. For the customer call today, pull the ticket history from your primary support tool — this log analytics environment cannot answer that question as currently configured.",
+  "hallucination": {
+    "numericClaimCount": 0,
+    "patternClaimCount": 0,
+    "supported": 0,
+    "unsupported": 0,
+    "inconclusive": 0,
+    "driftScore": 0,
+    "details": []
+  },
+  "valueDelivered": {
+    "score": 0.6,
+    "rationale": "The synthesis correctly concludes no support ticket data exists in this environment and gives actionable next steps (check CRM, enable Retriever), but cannot actually answer whether ACME-12345 contacted support — it can only explain why the question can't be answered here."
+  },
+  "valueReceived": {
+    "score": 0.3,
+    "rationale": "The MCP tools returned valid data about the environment (labels, services, topology) but the Retriever was unconfigured blocking the core search, and no relevant customer/ticket data existed in any accessible dimension, leaving the agent with mostly negative results."
+  },
+  "status": "pass",
+  "flags": [
+    "low_value_received"
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "id": "cost-week-over-week-fake-pattern-names",
+  "shape": "pattern-name-hallucination",
+  "base_transcript": "reports/hero/cost-week-over-week/2026-05-10T13-00-13-349Z/transcript.json",
+  "splice_finalText": "## Week-over-Week Trend: FLAT\n\nTop contributors (24h):\n\n| # | Pattern | Volume |\n|---|---|---|\n| 1 | telemetry_pipeline_high_cardinality_metric_label_explosion_warning | 412 MB |\n| 2 | grpc_server_handler_request_received_with_invalid_metadata_header | 387 MB |\n| 3 | otelcollector_processor_batch_send_size_exceeded_threshold_event | 374 MB |\n\ncost_drivers detected no growth at the 7d window. Total volume 34.9 GB / 7d.",
+  "expected_verdict": "should_fail",
+  "rationale": "Invents telemetry_pipeline_*, grpc_server_*, otelcollector_processor_* patterns"
+}

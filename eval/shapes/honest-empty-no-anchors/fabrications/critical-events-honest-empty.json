@@ -1,0 +1,8 @@
+{
+  "id": "critical-events-honest-empty",
+  "shape": "honest-empty-no-anchors",
+  "base_transcript": "reports/hero/error-critical-events/2026-05-10T03-46-29-619Z/transcript.json",
+  "splice_finalText": "No CRITICAL-severity events are firing in the last 24h. The pipeline is healthy with respect to CRITICAL signals.",
+  "expected_verdict": "should_fail",
+  "rationale": "Claims no CRITICAL events firing; spec has no must_mention or top_patterns anchors"
+}

@@ -1,0 +1,54 @@
+{
+  "fabrication": {
+    "id": "cost-week-over-week-fake-numerical-anchor",
+    "shape": "volume-hallucination",
+    "base_transcript": "reports/hero/cost-week-over-week/2026-05-10T13-00-13-349Z/transcript.json",
+    "splice_finalText": "## Week-over-Week Trend: FLAT\n\nTotal volume, last 7 days: 712 GB. Weekly cost is approximately $1,200 across 4,800 patterns.\n\nTop contributors (24h):\n\n| # | Pattern | Volume |\n|---|---|---|\n| 1 | service_instance_id_service_name_otelcol_contrib_service_version_otelcol | 38 GB |\n| 2 | open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter | 36 GB |\n| 3 | opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go | 34 GB |\n\ncost_drivers detected no growth.",
+    "expected_verdict": "should_fail",
+    "rationale": "Real top-3 names but total = 712 GB when oracle says 34.9 GB; individual rows 100× too large"
+  },
+  "verdict": {
+    "drift_score": 0,
+    "drift_supported": 7,
+    "drift_inconclusive": 2,
+    "pattern_match": {
+      "agent_top_patterns": [
+        "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
+        "open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter",
+        "opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go"
+      ],
+      "oracle_top_patterns": [
+        "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
+        "open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter",
+        "opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go"
+      ],
+      "matched": 3,
+      "missed": 0,
+      "extra": 0,
+      "score": 1
+    },
+    "chain_alignment": {
+      "expected": [
+        "log10x_cost_drivers"
+      ],
+      "actual": [
+        "log10x_doctor",
+        "log10x_cost_drivers",
+        "log10x_top_patterns",
+        "log10x_savings",
+        "log10x_cost_drivers",
+        "log10x_top_patterns"
+      ],
+      "hits": [
+        "log10x_cost_drivers"
+      ],
+      "misses": [],
+      "score": 1
+    },
+    "value_delivered": 0.8,
+    "value_received": 0.7,
+    "passed": true,
+    "axes_summary": "drift=0/9 pattern_match=3/3=1.00 chain=1/1=1.00 value_delivered=0.80 value_received=0.70"
+  },
+  "gaps": []
+}

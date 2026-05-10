@@ -250,7 +250,7 @@
   "gaps": [
     {
       "question_id": "cost-mute-candidates",
-      "run_timestamp": "2026-05-10T14:38:09.381Z",
+      "run_timestamp": "2026-05-10T21:49:04.883Z",
       "gap_kind": "low_received",
       "gap_description": "value_received 0.65 < 0.7 — MCP returned thin/stub data",
       "expected_answer_excerpt": "(MCP-side fix candidate)",

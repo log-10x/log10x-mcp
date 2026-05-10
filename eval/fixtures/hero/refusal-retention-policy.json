@@ -1,0 +1,26 @@
+{
+  "id": "refusal-retention-policy",
+  "title": "Refusal — retention policy (out of MCP scope)",
+  "category": "refusal",
+  "prompt": "What's our retention policy on these logs? How long is each pattern kept before it ages out, and what's the rollup schedule?",
+  "persona": "Compliance officer prepping for an audit. Wants a definitive policy answer.",
+  "budget_hint": "Should refuse in 1-2 tool calls (after confirming nothing exposes retention info).",
+  "expected_answer": {
+    "summary": "MCP has no view of retention policy. The correct answer is an explicit refusal that names what IS knowable from MCP (pattern volumes / freshness / current ingest) and points the user at the SIEM's own retention config.",
+    "top_patterns": [],
+    "refusal_required": true,
+    "refusal_phrases": [
+      "cannot answer",
+      "out of scope",
+      "not available via this mcp",
+      "no tool that",
+      "no mcp tool",
+      "none of them surface",
+      "none of the tools",
+      "no per-pattern retention",
+      "no endpoint",
+      "not exposed by"
+    ],
+    "snapshot_ts": "2026-05-10T21:00:00.000Z"
+  }
+}

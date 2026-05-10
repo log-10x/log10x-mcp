@@ -60,6 +60,36 @@ LOG10X_EVAL_ENV=demo node bin/run-campaign.mjs --score-only --stale --skip-refre
 node bin/score-hero-vs-expected.mjs reports/hero/<id>/<ts>/transcript.jsonl
 ```
 
+### Deeper test surfaces (landed 2026-05-10)
+
+After the campaign closed at 14/15, eight deeper test surfaces were
+added to make the rubric itself defensible. See
+`eval/CAMPAIGN.md`'s "Deeper harness landed 2026-05-10" section
+and `eval/UNVERIFIED.md` for the full state.
+
+```bash
+# shape-coverage harness: every catalogued failure shape gets at least
+# one fabrication; CI gates on the coverage_score baseline (3/16)
+LOG10X_EVAL_ENV=demo node eval/bin/run-shapes.mjs --min-coverage 0.18
+
+# mutation testing of the scorer: surfaces dead defense
+LOG10X_EVAL_ENV=demo node eval/bin/mutation-test.mjs --quick
+
+# tool-output perturbation: wraps mcp-call.mjs to mutate one response
+# per scenario; tests the agent's anti-hallucination defenses
+ANTHROPIC_API_KEY=... LOG10X_EVAL_ENV=demo \
+  node eval/bin/run-perturbed-scenario.mjs \
+    --scenario eval/fixtures/hero/cost-week-over-week.json \
+    --perturbation eval/perturbations/top-patterns-fake-row.json
+
+# parametric scenario generator: seeded, reproducible
+node eval/bin/generate-scenarios.mjs --count 20 --seed 42
+
+# multi-judge ensemble: same transcript, multiple judge models
+ANTHROPIC_API_KEY=... [XAI_API_KEY=...] \
+  node eval/bin/judge-ensemble.mjs --all
+```
+
 Persistent state for the campaign:
 
 | Path | Purpose |
@@ -71,6 +101,13 @@ Persistent state for the campaign:
 | `eval/fixtures/hero/<id>.json` | 15 hero specs with `expected_answer` baked in |
 | `eval/reports/hero/<id>/<ts>/` | Sub-agent transcripts + 5-axis verdict |
 | `eval/reports/hero/CAMPAIGN-PROOF.md` | Falsifiable suite report |
+| `eval/shapes/catalog.json` | 15-shape catalogue of agent-failure modes |
+| `eval/shapes/<shape>/fabrications/*.json` | Hand-crafted fabrications per shape |
+| `eval/shapes/COVERAGE.md` | Per-shape coverage matrix (CI-gated) |
+| `eval/perturbations/<id>.json` | 10 tool-output perturbation specs |
+| `eval/COUNTERFACTUAL.md` | Counterfactual injection harness design (deferred) |
+| `eval/reports/hero/JUDGE-ENSEMBLE.md` | Multi-judge calibration matrix |
+| `eval/audits/dead-defense-<date>.md` | Mutation-testing audit output |
 
 ## Env modes
 

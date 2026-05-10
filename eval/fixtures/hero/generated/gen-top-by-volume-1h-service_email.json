@@ -1,0 +1,21 @@
+{
+  "id": "gen-top-by-volume-1h-service_email",
+  "title": "Generated — top-by-volume / 1h / service=email",
+  "category": "cost",
+  "prompt": "Show me the top 5 patterns by volume in the last 1h filtered to service=email. List names + volume + severity.",
+  "generated": {
+    "template": "top-by-volume",
+    "window": "1h",
+    "filter": "service=email",
+    "seed": 42,
+    "index": 8
+  },
+  "expected_answer": {
+    "summary": "Top patterns by volume in 1h (service=email). Expected: agent calls top_patterns with matching args and quotes oracle's top-N verbatim.",
+    "top_patterns": [],
+    "expected_tool_chain": [
+      "log10x_top_patterns"
+    ],
+    "snapshot_ts": "2026-05-10T21:30:16.777Z"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "id": "cost-week-over-week-control-verbatim",
+  "shape": "controls",
+  "base_transcript": "reports/hero/cost-week-over-week/2026-05-10T13-00-13-349Z/transcript.json",
+  "splice_finalText": "## Week-over-Week Trend: FLAT\n\nTotal volume, last 7 days: 34.9 GB / $25 weekly cost across 1,188 patterns.\n\nTop contributors (24h):\n\n| # | Pattern | Volume |\n|---|---|---|\n| 1 | service_instance_id_service_name_otelcol_contrib_service_version_otelcol | 398 MB |\n| 2 | open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter | 395 MB |\n| 3 | opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go | 384 MB |\n\ncost_drivers detected no week-over-week growth at the 7d window.",
+  "expected_verdict": "should_pass",
+  "rationale": "Close-to-oracle sanity control"
+}

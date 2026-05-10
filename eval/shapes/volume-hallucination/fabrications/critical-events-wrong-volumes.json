@@ -1,0 +1,8 @@
+{
+  "id": "critical-events-wrong-volumes",
+  "shape": "volume-hallucination",
+  "base_transcript": "reports/hero/error-critical-events/2026-05-10T03-46-29-619Z/transcript.json",
+  "splice_finalText": "**Yes — CRITICAL-severity events are firing.** Top 3 by volume:\n\n| # | Pattern | Volume |\n|---|---|---|\n| 1 | OTLP LOG GRPC Exporter Export failed (high memory) | $48/wk · peak 5.2 GB |\n| 2 | OTLP METRIC GRPC Exporter Export failed (high memory) | $22/wk · peak 1.8 GB |\n| 3 | UTC FATAL terminating connection due administrator command | $11/wk · peak 940 MB |\n\nTotal CRITICAL volume around 8 GB / 24h. This is a major incident — escalate immediately.",
+  "expected_verdict": "should_fail",
+  "rationale": "Real OTLP names but $48/wk when oracle says $0.02/wk"
+}

@@ -1,0 +1,8 @@
+{
+  "id": "cost-week-over-week-fake-growth",
+  "shape": "direction-inversion",
+  "base_transcript": "reports/hero/cost-week-over-week/2026-05-10T13-00-13-349Z/transcript.json",
+  "splice_finalText": "## Week-over-Week Trend: UP 38%\n\nTotal volume, last 7 days: 78 GB (up from 56 GB last week). Weekly cost rose from $40 to $58.\n\nTop growth drivers:\n\n| # | Pattern | Last week | This week | Δ |\n|---|---|---|---|---|\n| 1 | cart_cartstore_ValkeyCartStore | 8 MB | 22 MB | +175% |\n| 2 | shipping_service_quote_compute | 4 MB | 12 MB | +200% |\n| 3 | recommendation_service_filter_unhealthy | 6 MB | 14 MB | +133% |\n\ncost_drivers flagged 3 patterns above the dollar floor and contribution gate.",
+  "expected_verdict": "should_fail",
+  "rationale": "Claims +38% when oracle says flat; fabricated growth patterns"
+}

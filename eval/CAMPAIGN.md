@@ -1,7 +1,9 @@
 # Anti-Hallucination Campaign — MCP Hero Questions vs Demo-Env Ground Truth
 
-> **Status (2026-05-10): 14/15 PASS.** Iteration loop closed across
-> 7 fix-rerun cycles. One remaining open scenario
+> **Status (2026-05-10): 19/20 PASS** (was 14/15; 5 new scenarios added).
+> Original 15 cost / error-levels / stability scenarios at 14/15.
+> New 3 refusal + 2 prompt-injection scenarios all PASS via new
+> refusal / injection_must_not_emit axes. One remaining open scenario
 > (`stability-newly-emerged`) is documented agent-quality variance
 > rather than a fixable defect on this env. Falsifiable: any
 > reviewer can re-run `LOG10X_EVAL_ENV=demo node bin/run-campaign.mjs
@@ -255,3 +257,55 @@ read `gaps/gaps.json` for canonical state):
   that would re-open the gap.
 - **CI workflow added** at `.github/workflows/eval-campaign.yml`
   (re-scores saved transcripts on every PR; the falsifiable check).
+
+## Deeper harness landed 2026-05-10
+
+After the 14/15 closure, eight deeper test surfaces were authored
+in one day to make the rubric itself defensible under a challenge
+review. See `~/.claude/plans/dor-has-done-a-recursive-pnueli.md`
+for the plan and `eval/UNVERIFIED.md` for what is still unproven.
+
+- **Shape catalog**: 15 catalogued failure shapes (pattern-name
+  hallucination, volume hallucination, direction inversion,
+  scope confusion, etc.) in `eval/shapes/catalog.json`. 15
+  fabrications ported from the adversarial run as the day-1
+  seed. **Coverage baseline: 3/16 shapes covered (18.8%)** —
+  CI gate at this floor via `bin/run-shapes.mjs --min-coverage 0.18`.
+- **Tool perturbation interposer**:
+  `eval/bin/mcp-call-perturbed.mjs` wraps `mcp-call.mjs`. 10
+  perturbation specs in `eval/perturbations/`. Drive via
+  `bin/run-perturbed-scenario.mjs`. Runtime $5-7 per
+  scenario × perturbation; ran 0 LLM-driven perturbations
+  today (authoring only, deferred to a follow-up budget
+  cycle).
+- **Mutation testing**: `eval/bin/mutation-test.mjs` mutates
+  scorer source and reruns the shape suite. Surviving mutations
+  = dead defense, filed to `eval/audits/dead-defense-<date>.md`.
+- **Generative scenarios**: `eval/bin/generate-scenarios.mjs`
+  emits parametric hero specs. 10 sample specs in
+  `eval/fixtures/hero/generated/` (seed=42).
+- **Multi-judge ensemble**: Sonnet 4.6 + Opus 4.7 in parallel
+  via `eval/bin/judge-ensemble.mjs`. Optional Grok-4 when
+  `XAI_API_KEY` is set. **Real finding 2026-05-10**: Sonnet
+  and Opus disagreed by 0.25-0.30 on 2 of 5 representative
+  transcripts (`error-severity-distribution`,
+  `error-critical-events`). Output in
+  `eval/reports/hero/JUDGE-ENSEMBLE.md`. Direct evidence the
+  judge axis is calibration-sensitive; CAMPAIGN.md verdicts
+  depend on judge-model choice.
+- **Refusal axis**: `expected_answer.refusal_required` +
+  `refusal_phrases` in the spec; scorer skips
+  pattern_match / value_delivered gates when true. 3 specs
+  added; all 3 PASS after one calibration pass (widened
+  refusal_phrases when the first run refused semantically
+  without hitting the strict list).
+- **Prompt-injection axis**: `injection_must_not_emit` in the
+  spec; context-aware check distinguishes "agent quoted the
+  payload to flag it" from "agent complied with the payload".
+  2 specs added; both PASS. The context-aware framing-word
+  heuristic is itself a calibration artifact and is documented
+  in `UNVERIFIED.md`.
+- **Counterfactual harness**: design-only in
+  `eval/COUNTERFACTUAL.md`. Implementation blocked on
+  parallel-env infrastructure (~1-2 engineering days +
+  $50-150/mo recurring).

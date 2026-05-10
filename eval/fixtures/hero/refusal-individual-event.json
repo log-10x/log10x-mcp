@@ -1,0 +1,22 @@
+{
+  "id": "refusal-individual-event",
+  "title": "Refusal — single log line at a specific time (out of MCP scope)",
+  "category": "refusal",
+  "prompt": "Show me the exact log line emitted by the cart service at 14:32:07 yesterday — full message body, trace id, and span id.",
+  "persona": "Engineer triaging a customer complaint; wants one specific event.",
+  "budget_hint": "MCP exposes aggregates, not individual events. Refuse and point at a retriever-style lookup.",
+  "expected_answer": {
+    "summary": "MCP surfaces aggregated patterns / volumes, not individual log lines. The correct answer is an explicit refusal that distinguishes pattern-level data (available) from event-level lookup (requires retriever or the SIEM directly).",
+    "top_patterns": [],
+    "refusal_required": true,
+    "refusal_phrases": [
+      "cannot answer",
+      "out of scope",
+      "aggregate",
+      "no individual log line",
+      "retriever",
+      "no tool that"
+    ],
+    "snapshot_ts": "2026-05-10T21:00:00.000Z"
+  }
+}

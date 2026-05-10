@@ -29,9 +29,15 @@ carries a reasoning note, but `wontfix` is a disposition, not a proof.
 
 ## 2. Foundational assumptions under every PASS
 
-1. **Sonnet 4.6 judge correlates with human SREs.** No human-rated
-   baseline. A 0.85 judge score has no proven correspondence to
-   "an SRE would call this correct."
+1. **Sonnet 4.6 judge correlates with human SREs — MEASURED PARTIAL
+   2026-05-10.** Multi-judge ensemble (Sonnet 4.6 + Opus 4.7) on
+   5 representative transcripts found σ-disagreement
+   (pairwise diff > 0.2) on 2 of 5: `error-severity-distribution`
+   (Sonnet 0.72 vd, Opus 0.90 vd — diff 0.18; vr diff 0.25) and
+   `error-critical-events` (vd 0.25, vr 0.30). The two judges are
+   the SAME family (Claude); cross-family agreement still unknown.
+   Still no human-SRE baseline. See
+   `eval/reports/hero/JUDGE-ENSEMBLE.md` for the matrix.
 2. **`expected_answer` derived from PromQL == what an SRE wants.**
    For finance-scope questions the highest-volume row in PromQL
    may not be the right answer (OTel collector noise vs cart-store
@@ -146,7 +152,15 @@ Estimated cost for the unblocked set: ~$0.60 × 9-11 scenarios
 |---|---|---|---|---|
 | 1 | ~~Adversarial run~~ — **DONE 2026-05-10**, found 67% FN rate. See [adversarial/RESULTS.md](./adversarial/RESULTS.md). Closes assumption #4, #5 with measured numbers. | Assumption #4, #5 | $0 | DONE |
 | 1a | Implement RESULTS.md fix #1, #3, #4, #6 (zero-LLM scorer hardenings that close 5 of 8 FNs) | Five FN classes | $0 | No |
-| 1b | Re-run all 15 hero scenarios after fix #1a is in; expect verdict deltas on cases that previously passed via volume-fabrication-blindness | Validates fix lands cleanly | re-score $0; re-runs vary | No |
+| 1b | Re-run all hero scenarios after fix #1a is in; expect verdict deltas on cases that previously passed via volume-fabrication-blindness | Validates fix lands cleanly | re-score $0; re-runs vary | No |
+| 1c | ~~Shape catalog harness~~ — **DONE 2026-05-10**. 15-shape catalog in `eval/shapes/catalog.json`, 15 fabrications ported, CI gate at `bin/run-shapes.mjs --min-coverage 0.18`. Baseline = 3/16 covered. | Tracked metric for scorer shape-detection | $0 | DONE |
+| 1d | ~~Mutation testing driver~~ — **DONE 2026-05-10** at `eval/bin/mutation-test.mjs`. Mutates scorer source; surviving mutations are filed to `eval/audits/dead-defense-<date>.md`. | Dead defense in the scorer | $0 | DONE (not yet executed) |
+| 1e | Run the mutation tester on the current scorer; investigate every survivor | Surfaces dead defense | $0 | No |
+| 6 | ~~Multi-judge ensemble~~ — **DONE 2026-05-10** at `eval/bin/judge-ensemble.mjs`. Sonnet+Opus run. Found σ > 0.2 on 2 of 5 transcripts → assumption #1 partially measured. Cross-family (e.g., Grok) deferred. | Assumption #1 | $0 (one-time ~$3 run) | DONE |
+| 7 | ~~Refusal calibration~~ — **DONE 2026-05-10**. 3 specs in `fixtures/hero/refusal-*.json`; new `refusal_required` axis in the scorer. 3/3 PASS after one calibration round (widened refusal phrases when the first run refused semantically without hitting the strict list). | Over-eager fabrication on out-of-scope | $0 (~$2 run) | DONE |
+| 8a | ~~Prompt-injection (static)~~ — **DONE 2026-05-10**. 2 specs; new `injection_must_not_emit` axis with context-aware framing-word check. 2/2 PASS. | Prompt injection through prompt content | $0 (~$1.20 run) | DONE |
+| 8b | Prompt-injection (live, via env labels) | Live injection surface | Needs parallel env | Blocked on counterfactual env |
+| 5 | ~~Counterfactual design doc~~ — **DONE 2026-05-10** at `eval/COUNTERFACTUAL.md`. Implementation blocked on env-fixture infra. | Whole-pipeline integration test | Infra cost | Blocked |
 | 2 | Human-SRE-rated baseline on 5-10 transcripts | Assumption #1, #3 | Free if SRE willing | Need a willing SRE |
 | 3 | Coverage scenarios for the 9-11 unblocked tools | Coverage hole 3.1 | ~$5-7 | No |
 | 4 | STDIO transport scenario | Coverage hole 3.2 | $0-0.50 | No |

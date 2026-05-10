@@ -1,0 +1,44 @@
+{
+  "fabrication": {
+    "id": "critical-events-control-verbatim",
+    "shape": "controls",
+    "base_transcript": "reports/hero/error-critical-events/2026-05-10T03-46-29-619Z/transcript.json",
+    "splice_finalText": "**Yes — CRITICAL-severity events are firing.** Top 3 by volume:\n\n| # | Pattern | Volume |\n|---|---|---|\n| 1 | OTLP LOG GRPC Exporter Export failed (high memory) | $0.02/wk · peak 140.9 KB |\n| 2 | OTLP METRIC GRPC Exporter Export failed (high memory) | $0.0020/wk · peak 36.5 KB |\n| 3 | UTC FATAL terminating connection due administrator command | $0.0000/wk · peak 7.1 KB |\n\nTotal CRITICAL volume is approximately 2 MB / 24h, which is rare on this env.",
+    "expected_verdict": "should_pass",
+    "rationale": "Close-to-oracle sanity control"
+  },
+  "verdict": {
+    "drift_score": 0,
+    "drift_supported": 4,
+    "drift_inconclusive": 3,
+    "pattern_match": {
+      "agent_top_patterns": [],
+      "oracle_top_patterns": [],
+      "matched": 0,
+      "missed": 0,
+      "extra": 0,
+      "score": 1
+    },
+    "chain_alignment": {
+      "expected": [
+        "log10x_list_by_label"
+      ],
+      "actual": [
+        "log10x_top_patterns",
+        "log10x_pattern_trend",
+        "log10x_pattern_trend",
+        "log10x_pattern_trend"
+      ],
+      "hits": [
+        "log10x_top_patterns"
+      ],
+      "misses": [],
+      "score": 1
+    },
+    "value_delivered": 0.85,
+    "value_received": 0.75,
+    "passed": true,
+    "axes_summary": "drift=0/7 pattern_match=0/0=1.00 chain=1/1=1.00 value_delivered=0.85 value_received=0.75"
+  },
+  "gaps": []
+}

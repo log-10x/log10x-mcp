@@ -1,0 +1,8 @@
+{
+  "id": "cost-week-over-week-fake-numerical-anchor",
+  "shape": "volume-hallucination",
+  "base_transcript": "reports/hero/cost-week-over-week/2026-05-10T13-00-13-349Z/transcript.json",
+  "splice_finalText": "## Week-over-Week Trend: FLAT\n\nTotal volume, last 7 days: 712 GB. Weekly cost is approximately $1,200 across 4,800 patterns.\n\nTop contributors (24h):\n\n| # | Pattern | Volume |\n|---|---|---|\n| 1 | service_instance_id_service_name_otelcol_contrib_service_version_otelcol | 38 GB |\n| 2 | open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter | 36 GB |\n| 3 | opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go | 34 GB |\n\ncost_drivers detected no growth.",
+  "expected_verdict": "should_fail",
+  "rationale": "Real top-3 names but total = 712 GB when oracle says 34.9 GB; individual rows 100× too large"
+}

@@ -1,0 +1,8 @@
+{
+  "id": "cost-drivers-cache-poison",
+  "target_tool": "log10x_cost_drivers",
+  "transform": "cache_poison",
+  "params": {},
+  "expected_agent_behavior": "partial",
+  "description": "Appends a \"[cached at 2026-05-09; stale 24h]\" marker. Tests whether the agent notices stale-data markers in tool output."
+}

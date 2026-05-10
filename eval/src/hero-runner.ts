@@ -55,6 +55,14 @@ export interface HeroRunReport {
   flags: string[];
 }
 
+// The CLI binary the agent is told to invoke. Default points at the
+// real per-tool wrapper. Override via MCP_CALL_BIN to swap in a
+// perturbation interposer (Step 3 of the deeper-harness plan): the
+// interposer wraps mcp-call.mjs and mutates one tool response per
+// scenario so we can probe the agent's anti-hallucination defenses.
+const MCP_CALL_BIN =
+  process.env.MCP_CALL_BIN ?? '/Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs';
+
 const HERO_SYSTEM_PROMPT_BASE = `You are an experienced site reliability engineer (SRE)
 investigating a question on a real production-shape log analytics
 environment. You have a Bash tool that lets you invoke individual
@@ -62,11 +70,11 @@ log10x MCP tools by name.
 
 Tool invocation contract:
 
-  bash> node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --list
+  bash> node ${MCP_CALL_BIN} --list
        # prints every tool name available
-  bash> node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool <name> --args '<json>'
+  bash> node ${MCP_CALL_BIN} --tool <name> --args '<json>'
        # invokes one tool, prints markdown response to stdout
-  bash> node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --help
+  bash> node ${MCP_CALL_BIN} --help
        # prints usage
 
 The env is set: LOG10X_EVAL_ENV=demo points at a public, read-only
