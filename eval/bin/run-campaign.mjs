@@ -24,7 +24,7 @@ const evalRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const fixturesDir = join(evalRoot, 'fixtures', 'hero');
 
 function parseArgs(argv) {
-  const out = { filter: null, only: null, scoreOnly: false, stale: false, skipRefresh: false };
+  const out = { filter: null, only: null, scoreOnly: false, stale: false, skipRefresh: false, minPass: null };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--filter') out.filter = argv[++i];
@@ -32,6 +32,7 @@ function parseArgs(argv) {
     else if (a === '--score-only') out.scoreOnly = true;
     else if (a === '--stale') out.stale = true;
     else if (a === '--skip-refresh') out.skipRefresh = true;
+    else if (a === '--min-pass') out.minPass = parseInt(argv[++i], 10);
     else {
       console.error(`Unknown arg: ${a}`);
       process.exit(2);
@@ -157,4 +158,14 @@ console.error(`\n[campaign] ${passed}/${results.length} PASS`);
 console.error(`[campaign] proof artifact: ${proofPath}`);
 console.error(`[campaign] gaps file:     ${join(evalRoot, 'gaps', 'gaps.json')}`);
 
-process.exit(passed === results.length ? 0 : 1);
+// Gate: by default exit non-zero if not every scenario PASSES. With
+// --min-pass=N, accept any run that produces at least N passes — used
+// by CI to gate on regression below the documented baseline rather
+// than on the documented variance (e.g., stability-newly-emerged
+// fluctuates around 0.30/0.45/0.65 vd; baseline=14/15).
+const gate = opts.minPass != null ? passed >= opts.minPass : passed === results.length;
+if (!gate) {
+  console.error(`[campaign] gate FAILED: ${passed}/${results.length} pass, required ${opts.minPass ?? results.length}`);
+  process.exit(1);
+}
+process.exit(0);

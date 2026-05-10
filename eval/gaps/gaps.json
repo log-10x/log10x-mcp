@@ -1,7 +1,7 @@
 [
   {
     "question_id": "cost-bill-driver",
-    "run_timestamp": "2026-05-10T14:32:08.408Z",
+    "run_timestamp": "2026-05-10T14:38:08.591Z",
     "gap_kind": "low_received",
     "gap_description": "value_received 0.65 < 0.7 — MCP returned thin/stub data",
     "expected_answer_excerpt": "(MCP-side fix candidate)",
@@ -17,7 +17,7 @@
   },
   {
     "question_id": "cost-mute-candidates",
-    "run_timestamp": "2026-05-10T14:32:09.525Z",
+    "run_timestamp": "2026-05-10T14:38:09.381Z",
     "gap_kind": "low_received",
     "gap_description": "value_received 0.65 < 0.7 — MCP returned thin/stub data",
     "expected_answer_excerpt": "(MCP-side fix candidate)",
@@ -32,7 +32,7 @@
   },
   {
     "question_id": "error-top-error-pattern",
-    "run_timestamp": "2026-05-10T14:32:13.533Z",
+    "run_timestamp": "2026-05-10T14:38:13.278Z",
     "gap_kind": "low_received",
     "gap_description": "value_received 0.50 < 0.7 — MCP returned thin/stub data",
     "expected_answer_excerpt": "(MCP-side fix candidate)",
@@ -46,7 +46,7 @@
   },
   {
     "question_id": "stability-cloud-reporter-missing",
-    "run_timestamp": "2026-05-10T14:32:14.607Z",
+    "run_timestamp": "2026-05-10T14:38:14.465Z",
     "gap_kind": "low_received",
     "gap_description": "value_received 0.50 < 0.7 — MCP returned thin/stub data",
     "expected_answer_excerpt": "(MCP-side fix candidate)",
@@ -61,7 +61,7 @@
   },
   {
     "question_id": "stability-env-sweep",
-    "run_timestamp": "2026-05-10T14:32:15.063Z",
+    "run_timestamp": "2026-05-10T14:38:14.918Z",
     "gap_kind": "low_received",
     "gap_description": "value_received 0.65 < 0.7 — MCP returned thin/stub data",
     "expected_answer_excerpt": "(MCP-side fix candidate)",
@@ -76,7 +76,7 @@
   },
   {
     "question_id": "stability-newly-emerged",
-    "run_timestamp": "2026-05-10T14:32:15.787Z",
+    "run_timestamp": "2026-05-10T14:38:15.522Z",
     "gap_kind": "low_received",
     "gap_description": "value_received 0.30 < 0.7 — MCP returned thin/stub data",
     "expected_answer_excerpt": "(MCP-side fix candidate)",
@@ -89,7 +89,7 @@
   },
   {
     "question_id": "stability-newly-emerged",
-    "run_timestamp": "2026-05-10T14:32:15.787Z",
+    "run_timestamp": "2026-05-10T14:38:15.522Z",
     "gap_kind": "low_value",
     "gap_description": "value_delivered 0.30 < 0.7",
     "expected_answer_excerpt": "In the last 1 hour, 5 patterns newly emerged. Top meaningful: service_name_product_reviews_trace_sampled_True_HTTP_Request_POST_llm_chat.",
@@ -105,7 +105,7 @@
   },
   {
     "question_id": "stability-pipeline-health",
-    "run_timestamp": "2026-05-10T14:32:16.563Z",
+    "run_timestamp": "2026-05-10T14:38:16.195Z",
     "gap_kind": "low_received",
     "gap_description": "value_received 0.60 < 0.7 — MCP returned thin/stub data",
     "expected_answer_excerpt": "(MCP-side fix candidate)",

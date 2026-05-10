@@ -168,7 +168,7 @@
       {
         "claim": "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
         "kind": "pattern",
-        "oracleResult": "628.6 MB / 24h in metrics",
+        "oracleResult": "628.7 MB / 24h in metrics",
         "status": "supported",
         "detail": "of what the tools returned: --- ## Root-Cause Report: Top ERROR Pattern ### Pattern Identity **`service_instance_id_service_name_otelcol_contrib_service_version_otelcol`** — this is the single top"
       }
