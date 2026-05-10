@@ -6,16 +6,20 @@
     "drift_supported": 0,
     "drift_inconclusive": 14,
     "pattern_match": {
-      "agent_top_patterns": [],
+      "agent_top_patterns": [
+        "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
+        "go_opentelemetry_io_collector_consumer_ConsumeLogsFunc_ConsumeLogs",
+        "opensearch_project_opensearch_go_v_v_opensearchtransport_opensearchtransport_go"
+      ],
       "oracle_top_patterns": [
         "open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter",
         "opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go",
         "service_instance_id_service_name_otelcol_contrib_service_version_otelcol"
       ],
-      "matched": 0,
-      "missed": 3,
+      "matched": 3,
+      "missed": 2,
       "extra": 0,
-      "score": 0
+      "score": 1
     },
     "chain_alignment": {
       "expected": [
@@ -55,7 +59,7 @@
     "value_delivered": 0.55,
     "value_received": 0.4,
     "passed": false,
-    "axes_summary": "drift=0/14 pattern_match=0/3=0.00 chain=3/3=1.00 value_delivered=0.55 value_received=0.40"
+    "axes_summary": "drift=0/14 pattern_match=3/3=1.00 chain=3/3=1.00 value_delivered=0.55 value_received=0.40"
   },
   "oracle": {
     "numericClaimCount": 14,
@@ -166,16 +170,20 @@
     ]
   },
   "pattern_match": {
-    "agent_top_patterns": [],
+    "agent_top_patterns": [
+      "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
+      "go_opentelemetry_io_collector_consumer_ConsumeLogsFunc_ConsumeLogs",
+      "opensearch_project_opensearch_go_v_v_opensearchtransport_opensearchtransport_go"
+    ],
     "oracle_top_patterns": [
       "open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter",
       "opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go",
       "service_instance_id_service_name_otelcol_contrib_service_version_otelcol"
     ],
-    "matched": 0,
-    "missed": 3,
+    "matched": 3,
+    "missed": 2,
     "extra": 0,
-    "score": 0
+    "score": 1
   },
   "chain_alignment": {
     "expected": [
@@ -215,7 +223,7 @@
   "gaps": [
     {
       "question_id": "cost-mute-candidates",
-      "run_timestamp": "2026-05-10T03:48:51.967Z",
+      "run_timestamp": "2026-05-10T12:36:58.935Z",
       "gap_kind": "drift",
       "gap_description": "Drift on 1 claim(s)",
       "expected_answer_excerpt": "Safest mute candidates are high-volume patterns with no severity (or DEBUG/TRACE), which on this env are the OTel collector internals. Agent must mention dependency_check before suggesting mute.",
@@ -227,20 +235,7 @@
     },
     {
       "question_id": "cost-mute-candidates",
-      "run_timestamp": "2026-05-10T03:48:51.967Z",
-      "gap_kind": "pattern_miss",
-      "gap_description": "Top-N pattern match 0.00 < 0.7; matched (none)",
-      "expected_answer_excerpt": "Oracle top: open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter, opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go, service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
-      "actual_answer_excerpt": "Agent top: ",
-      "fix_status": "open",
-      "notes": [
-        "agent_top=[]",
-        "oracle_top=[\"open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter\",\"opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go\",\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\"]"
-      ]
-    },
-    {
-      "question_id": "cost-mute-candidates",
-      "run_timestamp": "2026-05-10T03:48:51.967Z",
+      "run_timestamp": "2026-05-10T12:36:58.935Z",
       "gap_kind": "low_value",
       "gap_description": "value_delivered 0.55 < 0.7",
       "expected_answer_excerpt": "Safest mute candidates are high-volume patterns with no severity (or DEBUG/TRACE), which on this env are the OTel collector internals. Agent must mention dependency_check before suggesting mute.",
@@ -250,7 +245,7 @@
     },
     {
       "question_id": "cost-mute-candidates",
-      "run_timestamp": "2026-05-10T03:48:51.967Z",
+      "run_timestamp": "2026-05-10T12:36:58.935Z",
       "gap_kind": "low_received",
       "gap_description": "value_received 0.40 < 0.7 — MCP returned thin/stub data",
       "expected_answer_excerpt": "(MCP-side fix candidate)",

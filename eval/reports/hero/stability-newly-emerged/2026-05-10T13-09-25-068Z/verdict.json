@@ -1,0 +1,287 @@
+{
+  "spec": {
+    "id": "stability-newly-emerged",
+    "title": "Stability — newly emerged patterns in the last hour",
+    "category": "stability",
+    "prompt": "Are there any patterns that have just started firing in the last hour — patterns that were silent an hour ago but are active now? List up to 3, name them specifically, and characterize whether they look like incidents or normal new traffic.",
+    "persona": "Oncall SRE responding to a vague 'something weird is happening' report.",
+    "budget_hint": "3-5 tool calls.",
+    "expected_answer": {
+      "summary": "In the last 1 hour, 5 patterns newly emerged. Top meaningful: service_name_product_reviews_trace_sampled_True_HTTP_Request_POST_llm_chat.",
+      "top_patterns": [
+        {
+          "name": "service_name_product_reviews_trace_sampled_True_HTTP_Request_POST_llm_chat",
+          "bytes_24h": 0
+        },
+        {
+          "name": "process_pid",
+          "bytes_24h": 0
+        },
+        {
+          "name": "instrumentationScope_name_payment_logger_version_schemaUrl_undefined",
+          "bytes_24h": 0
+        }
+      ],
+      "must_mention": [],
+      "expected_tool_chain": [
+        "log10x_top_patterns",
+        "log10x_investigate"
+      ],
+      "snapshot_ts": "2026-05-10T03:38:49.679Z"
+    }
+  },
+  "startedAt": "2026-05-10T13:09:25.073Z",
+  "endedAt": "2026-05-10T13:12:07.537Z",
+  "durationMs": 162464,
+  "envMode": "demo",
+  "bashCommands": [
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --list",
+      "stdout": "log10x_advise_compact\nlog10x_advise_install\nlog10x_advise_receiver\nlog10x_advise_reporter\nlog10x_advise_retriever\nlog10x_backfill_metric\nlog10x_correlate_cross_pillar\nlog10x_cost_drivers\nlog10x_customer_metrics_query\nlog10x_dependency_check\nlog10x_discover_env\nlog10x_discover_join\nlog10x_discover_labels\nlog10x_doctor\nlog10x_event_lookup\nlog10x_exclusion_filter\nlog10x_extract_templates\nlog10x_investigate\nlog10x_investigation_get\nlog10x_list_by_label\nlog10x_login_status\nlog10x_pattern_examples\nlog10x_pattern_trend\nlog10x_resolve_batch\nlog10x_retriever_query\nlog10x_retriever_query_status\nlog10x_retriever_series\nlog10x_savings\nlog10x_services\nlog10x_top_patterns\nlog10x_translate_metric_to_patterns\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 4199
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"hours_back\": 1}'",
+      "stdout": "Top 10 patterns — all services (this week) · $25/wk total\n⚠ These are CURRENT RANK by cost (biggest right now). This is NOT a growth/delta ranking — do not re-label as \"cost drivers\" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.\n\n#1  (unknown)                           $4.2/wk      \n#2  open telemetry opentelemetry collector contrib exporter opensearchexporter $3.8/wk      \n#3  opentelemetry io collector processor batchprocessor v batch processor go $3.7/wk      \n#4  service instance id service name otelcol contrib service version otelcol $3.6/wk      ERROR\n#5  service instance id service name otelcol contrib service version otelcol $2.1/wk      DEBUG\n#6  go opentelemetry io collector consumer ConsumeLogsFunc ConsumeLogs $1.8/wk      \n#7  tgo opentelemetry io collector consumer logs go $1.8/wk      \n#8  opensearch project opensearch go v v opensearchtransport opensearchtransport go $1.3/wk      \n#9  opentelemetry io collector exporter exporterhelper v internal base exporter $1.2/wk      \n#10  opentelemetry io collector exporter exporterhelper v internal new request go $1.2/wk      \n\nTop 10 = 47% of total volume in scope / 53% in the long tail.\n\n**Next actions**:\n  - call `log10x_cost_drivers({ timeRange: '7d' })` for week-over-week deltas across all services.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_cost_drivers\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"week-over-week deltas across all services\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 4572
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"hours_back\": 2}'",
+      "stdout": "Top 10 patterns — all services (this week) · $25/wk total\n⚠ These are CURRENT RANK by cost (biggest right now). This is NOT a growth/delta ranking — do not re-label as \"cost drivers\" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.\n\n#1  (unknown)                           $4.2/wk      \n#2  open telemetry opentelemetry collector contrib exporter opensearchexporter $3.8/wk      \n#3  opentelemetry io collector processor batchprocessor v batch processor go $3.7/wk      \n#4  service instance id service name otelcol contrib service version otelcol $3.6/wk      ERROR\n#5  service instance id service name otelcol contrib service version otelcol $2.1/wk      DEBUG\n#6  go opentelemetry io collector consumer ConsumeLogsFunc ConsumeLogs $1.8/wk      \n#7  tgo opentelemetry io collector consumer logs go $1.8/wk      \n#8  opensearch project opensearch go v v opensearchtransport opensearchtransport go $1.3/wk      \n#9  opentelemetry io collector exporter exporterhelper v internal base exporter $1.2/wk      \n#10  opentelemetry io collector exporter exporterhelper v internal new request go $1.2/wk      \n\nTop 10 = 47% of total volume in scope / 53% in the long tail.\n\n**Next actions**:\n  - call `log10x_cost_drivers({ timeRange: '7d' })` for week-over-week deltas across all services.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_cost_drivers\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"week-over-week deltas across all services\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 4354
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_cost_drivers --args '{\"timeRange\": \"1d\"}'",
+      "stdout": "all services — no cost drivers detected (last 24h)\nComparison attempted: current 1d vs 3-window avg baseline (offsets: 1d/2d/3d)\nInterpretation: no pattern crossed the delta threshold. The environment is stable vs this baseline. This is a truthful negative result, not a tool failure.\nAll 249 patterns are within normal range.\n\nTop patterns by current cost:\n  service instance id service name otelcol contrib service version otelcol $0.56/day   ERROR\n  open telemetry opentelemetry collector contrib exporter opensearchexporter $0.55/day   \n  opentelemetry io collector processor batchprocessor v batch processor go $0.54/day   \n  go opentelemetry io collector consumer ConsumeLogsFunc ConsumeLogs $0.26/day   \n  tgo opentelemetry io collector consumer logs go $0.26/day   \n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_top_patterns\",\"args\":{\"timeRange\":\"1d\"},\"reason\":\"no growth detected; pivot to current-rank view\"},{\"tool\":\"log10x_savings\",\"args\":{\"timeRange\":\"1d\"},\"reason\":\"no growth detected; surface pipeline ROI for the current bill question\"},{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\",\"window\":\"1h\"},\"reason\":\"investigate the largest current pattern even though it is not a growth driver\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 4452
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_doctor --args '{}'",
+      "stdout": "## Log10x MCP Doctor\n\n**Status: WARNINGS PRESENT**\n\n### Global checks\n\n**[PASS] environment_config**\n  1 environment: 10x Demo (owner) ★. Default: 10x Demo. (★ = default env; nicknames with (read) are read-only.)\n\n**[WARN] retriever_endpoint**\n  Retriever not reachable from this MCP install. log10x_retriever_query and log10x_backfill_metric cannot retrieve raw events from the S3 archive in this session. For events inside SIEM hot retention (typically <7d), the fastest workaround is direct SIEM query — do not block on retriever setup.\n  - explicit_env: skipped — only one of __SAVE_LOG10X_RETRIEVER_URL__ / __SAVE_LOG10X_RETRIEVER_BUCKET__ set — need both\n  - terraform_state: skipped — /Users/talweiss/.log10x/retriever.tfstate not present\n  - aws_s3_bucket_pattern: skipped — no AWS_REGION / AWS_PROFILE in env\n  - kubectl_service: skipped — kubectl found 0 log10x-retriever services — none clearly a query-handler\n  Fix: Options: (a) set __SAVE_LOG10X_RETRIEVER_URL__ + __SAVE_LOG10X_RETRIEVER_BUCKET__ explicitly; (b) expose AWS creds (AWS_REGION + IAM with s3:ListAllMyBuckets) so auto-detect can find a log10x-retriever-* bucket; (c) deploy the Retriever — https://doc.log10x.com/apps/cloud/retriever/\n\n**[WARN] datadog_destination**\n  No DATADOG_API_KEY (or DD_API_KEY) set. backfill_metric to Datadog will error if attempted.\n  Fix: Set DATADOG_API_KEY in the MCP server environment if you plan to backfill Datadog metrics. DD_SITE / DATADOG_SITE controls the region (defaults to datadoghq.com).\n\n**[PASS] templater_local_tenx**\n  Local tenx CLI available (10x engine v1.0.4, flavor: 'edge'\nNeed help? See https://doc.log10x.com). Templating will run locally — events never leave the box.\n\n**[WARN] templater_paste_endpoint_fallback**\n  Paste endpoint reachable (demo fallback for privacy_mode: false). Do NOT use with production log content — events leave the caller's machine and hit a shared public Lambda.\n\n**[PASS] siem_discovery**\n  1 SIEM connector reachable: cloudwatch. log10x_poc_from_siem_submit will auto-target this SIEM.\n  - cloudwatch (Amazon CloudWatch Logs): DETECTED (ambient) — region=us-east-1 (default)\n  - datadog (Datadog): not_configured\n  - sumo (Sumo Logic): not_configured\n  - gcp-logging (GCP Cloud Logging): not_configured\n  - elasticsearch (Elasticsearch): not_configured\n  - azure-monitor (Azure Monitor / Log Analytics): not_configured\n  - splunk (Splunk): not_configured\n  - clickhouse (ClickHouse): not_configured\n\n### Environment: 10x Demo\n\n**[PASS] prometheus_gateway**\n  prometheus.log10x.com reachable, auth OK for env 10x Demo.\n\n**[PASS] reporter_tier**\n  Edge Reporter detected — full-fidelity metrics with dropped-event coverage.\n\n**[PASS] metric_freshness**\n  edge reporter emitted within the last 53s — metrics are fresh.\n\n**[PASS] scale_and_capability**\n  Volume: 34.9 GB / 7d (edge tier).\n  Services: 3.\n  Patterns: 1189.\n  Compression: 35.1K events per pattern (stable identity means comparisons over time are trustworthy at this volume).\n  \n  Retriever NOT deployed — these question types are out of reach:\n    - Historical events beyond SIEM retention\n    - Dropped-event recovery (forwarder-dropped, invisible to SIEM)\n    - Metric backfill from archive\n    - Sample-reversal verification\n  For questions in these shapes, route to SIEM MCP (hot retention only) or recommend deploying the retriever.\n\n**[PASS] severity_distribution**\n  Severity distribution healthy: 24% INFO, 9.6% error-class (ERROR/WARN/CRIT/FATAL).\n\n**[WARN] cardinality_concentration**\n  A single pattern is 54% of your 30-day log spend. If it's a DEBUG/INFO pattern, you have a large filtering opportunity; if it's an ERROR, you have an ongoing incident to investigate.\n  Fix: Call log10x_top_patterns(limit=1) to see which pattern. Then log10x_investigate on it to check whether it is an incident or noise. If it is noise, log10x_dependency_check + log10x_exclusion_filter to cut cost safely.\n\n**[WARN] cross_pillar_backend**\n  No customer metrics backend detected. Cross-pillar tools (log10x_correlate_cross_pillar, log10x_translate_metric_to_patterns, log10x_discover_join, log10x_customer_metrics_query) will return \"not configured\" until a backend is reachable.\n  - explicit_env: skipped — LOG10X_CUSTOMER_METRICS_URL not set\n  - grafana_cloud: skipped — no GRAFANA_CLOUD_API_KEY / GCLOUD_API_KEY\n  - datadog_prom: skipped — no DD_API_KEY / DATADOG_API_KEY\n  - amp: skipped — no AWS_REGION / AWS_DEFAULT_REGION\n  - gcp_managed_prometheus: skipped — no GOOGLE_APPLICATION_CREDENTIALS\n  - prometheus_url: skipped — PROMETHEUS_URL not set\n  Fix: Set LOG10X_CUSTOMER_METRICS_URL + LOG10X_CUSTOMER_METRICS_TYPE explicitly, or expose one of: GRAFANA_CLOUD_API_KEY (+URL), DD_API_KEY+DD_APP_KEY, AWS_REGION (with AMP workspace available), GOOGLE_APPLICATION_CREDENTIALS (GMP project), or PROMETHEUS_URL.\n\n**[PASS] forwarder_dark_zones**\n  All services with 24h history are still emitting in the last 15 minutes. No forwarder dark zones detected.\n\nThe MCP will function but some tools may be unavailable or degraded. See the warnings above.\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 11206
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_cost_drivers --args '{\"timeRange\": \"6h\"}'",
+      "stdout": "Tool 'log10x_cost_drivers' threw: [\n  {\n    \"received\": \"6h\",\n    \"code\": \"invalid_enum_value\",\n    \"options\": [\n      \"1d\",\n      \"7d\",\n      \"30d\"\n    ],\n    \"path\": [\n      \"timeRange\"\n    ],\n    \"message\": \"Invalid enum value. Expected '1d' | '7d' | '30d', received '6h'\"\n  }\n]\n",
+      "stderr": "",
+      "exitCode": 1,
+      "durationMs": 3011
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_extract_templates --args '{\"hours_back\": 1}'",
+      "stdout": "Tool 'log10x_extract_templates' threw: [\n  {\n    \"expected\": \"'file' | 'events' | 'text'\",\n    \"received\": \"undefined\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"source\"\n    ],\n    \"message\": \"Required\"\n  }\n]\n",
+      "stderr": "",
+      "exitCode": 1,
+      "durationMs": 2958
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_trend --args '{\"pattern_id\": \"service instance id service name otelcol contrib service version otelcol\", \"hours\": 4}'",
+      "stdout": "Tool 'log10x_pattern_trend' threw: [\n  {\n    \"code\": \"invalid_type\",\n    \"expected\": \"string\",\n    \"received\": \"undefined\",\n    \"path\": [\n      \"pattern\"\n    ],\n    \"message\": \"Required\"\n  }\n]\n",
+      "stderr": "",
+      "exitCode": 1,
+      "durationMs": 2964
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\": \"service instance id service name otelcol contrib service version otelcol\", \"window\": \"1h\"}'",
+      "stdout": "## Investigation: service instance id service name otelcol contrib service version otelcol, last 1h\n\n**Investigation id**: 72dce11f-1120-4912-8723-15a4c69e547c\n**Result**: No significant pattern movement in the last 1h. Nothing crossed the noise floor.\n\n**Noise floor applied**: 0.001\n\n**Try next**:\n- Widen the window: `log10x_investigate({ starting_point: 'service instance id service name otelcol contrib service version otelcol', window: '24h' })` — most incident inflections appear within 24h\n- Or for gradual drift: `log10x_investigate({ starting_point: 'service instance id service name otelcol contrib service version otelcol', window: '30d' })`\n- Check the trend directly: `log10x_pattern_trend({ pattern: 'service instance id service name otelcol contrib service version otelcol' })`\n- Confirm the anchor exists: use a specific log line or pattern hash rather than a service name\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_dependency_check\",\"args\":{\"pattern\":\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\"},\"reason\":\"check dashboards / alerts before any mute action\"},{\"tool\":\"log10x_correlate_cross_pillar\",\"args\":{\"anchor_type\":\"log10x_pattern\",\"anchor\":\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\",\"window\":\"1h\"},\"reason\":\"find upstream metric anomaly co-moving with the pattern\"},{\"tool\":\"log10x_pattern_trend\",\"args\":{\"pattern\":\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\"},\"reason\":\"time series for the investigated pattern\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 4205
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_trend --args '{\"pattern\": \"service instance id service name otelcol contrib service version otelcol\"}'",
+      "stdout": "service instance id service name otelcol contrib service version otelcol — this week trend\n\n  Baseline (first quarter):  ~$6.0/wk\n  Current (last quarter):    $6.1/wk\n  Change: stable\n\n  Peak: 26.3 MB at 2026-05-08 13:00:00 UTC\n  Low:  2.4 MB at 2026-05-03 23:00:00 UTC\n  Total: $5.8/wk across 160 data points\n\n  ▒▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 3757
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_services --args '{}'",
+      "stdout": "Monitored Services (this week)\n\n  (unknown)            34.9 GB    100%   $52/wk\n  email                11.7 MB    0.0%   $0.02/wk\n  frontend             54.4 KB    0.0%   $0.0001/wk\n  recommendation       1.2 KB     0.0%   $0.0000/wk\n\n  4 services · 34.9 GB total · $52/wk at $1.5/GB\n  Top 3 services = 100% of volume.\n\n**Next actions**:\n  - Drill into the top service: `log10x_cost_drivers({ service: '(unknown)' })` for week-over-week deltas, or `log10x_top_patterns({ service: '(unknown)' })` for current top patterns.\n  - Investigate any spike: `log10x_investigate({ starting_point: '(unknown)' })` for a full causal-chain analysis.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_cost_drivers\",\"args\":{\"service\":\"(unknown)\"},\"reason\":\"week-over-week deltas on the top service\"},{\"tool\":\"log10x_top_patterns\",\"args\":{\"service\":\"(unknown)\"},\"reason\":\"current top patterns for the top service\"},{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"(unknown)\"},\"reason\":\"causal-chain analysis on the top service\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 4056
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\": \"(unknown)\", \"window\": \"1h\"}'",
+      "stdout": "## Investigation: (unknown), last 1h\n\n**Investigation id**: 18931ec8-d1f4-4ed2-976a-893e7fc4bb15\n**Result**: Could not resolve \"(unknown)\" to a known pattern or service.\n\n**Supported inputs**:\n- A raw log line (will be templatized and matched by structural identity)\n- A pattern identity (symbolMessage / templateHash)\n- A service name\n- The literal string `\"environment\"`, `\"all\"`, or `\"audit\"` for an env-wide sweep\n\n**Try next**:\n- `log10x_event_lookup({ pattern: '(unknown)' })` to search by substring\n- `log10x_services()` to list known services\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 3648
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\": \"email\", \"window\": \"1h\"}'",
+      "stdout": "⚠ **Anchor may be historical**: `error_OTLP_logs_exporter_received_Net_HTTPServiceUnavailable_code_uri_logs` has not fired in the last 5 minutes. No other patterns currently active in `email` either — service may be stable and the anchor is purely historical cost.\n\n---\n\n## Investigation: email, last 1h\n\n**Investigation id**: b504c302-2609-4fbe-aac0-aa68c529ad30\n**Result**: No significant pattern movement in the last 1h. Nothing crossed the noise floor.\n\n**Noise floor applied**: 0.001\n\n**Try next**:\n- Widen the window: `log10x_investigate({ starting_point: 'email', window: '24h' })` — most incident inflections appear within 24h\n- Or for gradual drift: `log10x_investigate({ starting_point: 'email', window: '30d' })`\n- Check the trend directly: `log10x_pattern_trend({ pattern: 'email' })`\n- Confirm the anchor exists: use a specific log line or pattern hash rather than a service name\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_dependency_check\",\"args\":{\"pattern\":\"error_OTLP_logs_exporter_received_Net_HTTPServiceUnavailable_code_uri_logs\"},\"reason\":\"check dashboards / alerts before any mute action\"},{\"tool\":\"log10x_correlate_cross_pillar\",\"args\":{\"anchor_type\":\"log10x_pattern\",\"anchor\":\"error_OTLP_logs_exporter_received_Net_HTTPServiceUnavailable_code_uri_logs\",\"window\":\"1h\"},\"reason\":\"find upstream metric anomaly co-moving with the pattern\"},{\"tool\":\"log10x_pattern_trend\",\"args\":{\"pattern\":\"error_OTLP_logs_exporter_received_Net_HTTPServiceUnavailable_code_uri_logs\"},\"reason\":\"time series for the investigated pattern\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 4815
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\": \"all\", \"window\": \"1h\"}'",
+      "stdout": "## Environment audit, last 1h\n\n**Investigation id**: d8713bc7-e2f8-4252-8898-99304104e38f\n**Environment**: demo\n**Reporter tier**: edge\n\n### Top movers\n\n- `scope_is_highly_its_perfect_performance_in_solar_observations_and_eclipse` (`unknown`) — declined -76% vs 24h ago\n- `is_highly_valued_by_users_its_essential_red_flashlight_mode_which_preserves` (`unknown`) — declined -52% vs 24h ago\n- `loyalty_level_gold` (`unknown`) — grew +35% vs 24h ago\n- `loyalty_level_bronze` (`unknown`) — declined -33% vs 24h ago\n- `recommendation_trace_sampled_True_Receive_ListRecommendations_product_ids` (`unknown`) — grew +28% vs 24h ago\n- `main` (`unknown`) — declined -28% vs 24h ago\n- `internal_function_React_EventLoop_Loop_closure_React_EventLoop_Loop_get` (`unknown`) — declined -25% vs 24h ago\n- `loyalty_level_platinum` (`unknown`) — grew +23% vs 24h ago\n\n**Next action**: investigate the top mover individually:\n`log10x_investigate({ starting_point: 'scope_is_highly_its_perfect_performance_in_solar_observations_and_eclipse', window: '1h' })`\n\n_Note: declines (negative %) are real signals — a pattern that stopped firing may indicate a service crashed, a monitor was muted, or a real upstream change. Treat them the same way you treat spikes._\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"scope_is_highly_its_perfect_performance_in_solar_observations_and_eclipse\",\"window\":\"1h\"},\"reason\":\"drill into the top mover from the env-wide sweep\"},{\"tool\":\"log10x_dependency_check\",\"args\":{\"pattern\":\"scope_is_highly_its_perfect_performance_in_solar_observations_and_eclipse\"},\"reason\":\"check refs before any mute on the top mover\"},{\"tool\":\"log10x_correlate_cross_pillar\",\"args\":{\"anchor_type\":\"log10x_pattern\",\"anchor\":\"scope_is_highly_its_perfect_performance_in_solar_observations_and_eclipse\",\"window\":\"1h\"},\"reason\":\"find upstream metric anomaly co-moving with the top mover\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 3808
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_trend --args '{\"pattern\": \"loyalty_level_gold\"}'",
+      "stdout": "loyalty level gold — this week trend\n\n  Baseline (first quarter):  ~$0.0080/wk\n  Current (last quarter):    $0.0080/wk\n  Change: stable\n\n  Peak: 50.9 KB at 2026-05-07 17:00:00 UTC\n  Low:  3.2 KB at 2026-05-07 23:00:00 UTC\n  Total: $0.0078/wk across 169 data points\n\n  ▓▓▒▒▒▓▓▒▒▓▓▒▓▒▓▒▒▓▒▒▒▒▒▒▒▓▒▓▒▒▒▓▒▓▒▓▓▒▒▓▒▓▓\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 3714
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_trend --args '{\"pattern\": \"recommendation_trace_sampled_True_Receive_ListRecommendations_product_ids\"}'",
+      "stdout": "recommendation trace sampled True Receive ListRecommendations product ids — this week trend\n\n  Baseline (first quarter):  ~$0.04/wk\n  Current (last quarter):    $0.04/wk\n  Change: stable\n\n  Peak: 192.6 KB at 2026-05-05 06:00:00 UTC\n  Low:  46.6 KB at 2026-05-07 23:00:00 UTC\n  Total: $0.04/wk across 169 data points\n\n  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 3708
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_trend --args '{\"pattern\": \"loyalty_level_platinum\"}'",
+      "stdout": "loyalty level platinum — this week trend\n\n  Baseline (first quarter):  ~$0.0079/wk\n  Current (last quarter):    $0.0078/wk\n  Change: stable\n\n  Peak: 50.2 KB at 2026-05-07 10:00:00 UTC\n  Low:  7.4 KB at 2026-05-07 23:00:00 UTC\n  Total: $0.0077/wk across 168 data points\n\n  ▓▒▒▓▓▓▒▓▓▒▓▓▓▓▒▒▓▒▒▒▓▒▒▒▒▒▒▒▒▓▒▒▓▓▒▓▒▓▒▒▒▒\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 3719
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_examples --args '{\"pattern\": \"loyalty_level_gold\"}'",
+      "stdout": "## Pattern Examples — no events in 1h window\n\nNo events matched the probe in the 1h window on cloudwatch.\nQuery used: `@message like /loyalty/ and @message like /level/ and @message like /gold/`\n\n### Probe notes\n- scope_resolution_failed: CloudWatch scope is required — pass `scope` as a log group name (`/aws/ecs/my-svc`) or a prefix wildcard (`/aws/ecs/*`).\n\nTry a longer `timeRange` (max 24h), or use `log10x_retriever_query` for events older than the analyzer's retention.\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 4354
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_examples --args '{\"pattern\": \"recommendation_trace_sampled_True_Receive_ListRecommendations_product_ids\"}'",
+      "stdout": "## Pattern Examples — no events in 1h window\n\nNo events matched the probe in the 1h window on cloudwatch.\nQuery used: `@message like /recommendation/ and @message like /trace/ and @message like /sampled/ and @message like /True/ and @message like /Receive/ and @message like /ListRecommendations/ and @message like /product/ and @message like /ids/`\n\n### Probe notes\n- scope_resolution_failed: CloudWatch scope is required — pass `scope` as a log group name (`/aws/ecs/my-svc`) or a prefix wildcard (`/aws/ecs/*`).\n\nTry a longer `timeRange` (max 24h), or use `log10x_retriever_query` for events older than the analyzer's retention.\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 4325
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_trend --args '{\"pattern\": \"scope_is_highly_its_perfect_performance_in_solar_observations_and_eclipse\"}'",
+      "stdout": "scope is highly its perfect performance in solar observations and eclipse — this week trend\n\n  Baseline (first quarter):  ~$0.0045/wk\n  Current (last quarter):    $0.0045/wk\n  Change: stable\n\n  Peak: 58.7 KB at 2026-05-04 02:00:00 UTC\n  Low:  3.1 KB at 2026-05-06 11:00:00 UTC\n  Total: $0.0032/wk across 119 data points\n\n  ▒░░░▓░░░▒░░▒░░▒▒▒▒░░░▒▒░▒░░░▒▒▒▒▒▒░░▒░▒░▒░░░░░░▒▒░▒▒▒░░▒▒░▒░\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 3853
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\": \"loyalty_level_gold\", \"window\": \"1h\"}'",
+      "stdout": "## Investigation: loyalty_level_gold, last 1h\n\n**Investigation id**: d7e8b163-8021-4e58-8e97-f6cb0b05bfbb\n**Result**: No significant pattern movement in the last 1h. Nothing crossed the noise floor.\n\n**Noise floor applied**: 0.001\n\n**Try next**:\n- Widen the window: `log10x_investigate({ starting_point: 'loyalty_level_gold', window: '24h' })` — most incident inflections appear within 24h\n- Or for gradual drift: `log10x_investigate({ starting_point: 'loyalty_level_gold', window: '30d' })`\n- Check the trend directly: `log10x_pattern_trend({ pattern: 'loyalty_level_gold' })`\n- Confirm the anchor exists: use a specific log line or pattern hash rather than a service name\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_dependency_check\",\"args\":{\"pattern\":\"loyalty_level_gold\"},\"reason\":\"check dashboards / alerts before any mute action\"},{\"tool\":\"log10x_correlate_cross_pillar\",\"args\":{\"anchor_type\":\"log10x_pattern\",\"anchor\":\"loyalty_level_gold\",\"window\":\"1h\"},\"reason\":\"find upstream metric anomaly co-moving with the pattern\"},{\"tool\":\"log10x_pattern_trend\",\"args\":{\"pattern\":\"loyalty_level_gold\"},\"reason\":\"time series for the investigated pattern\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 4171
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\": \"recommendation_trace_sampled_True_Receive_ListRecommendations_product_ids\", \"window\": \"1h\"}'",
+      "stdout": "⚠ **Anchor may be historical**: `recommendation_trace_sampled_True_Receive_ListRecommendations_product_ids` has not fired in the last 5 minutes (rate near zero). The analysis below reflects cumulative behavior across the window, not current activity.\n\n---\n\n## Investigation: recommendation_trace_sampled_True_Receive_ListRecommendations_product_ids, last 1h\n\n**Investigation id**: 5043ccd0-5814-4eda-8d55-5f4bc8cc578f\n**Result**: No significant pattern movement in the last 1h. Nothing crossed the noise floor.\n\n**Noise floor applied**: 0.001\n\n**Try next**:\n- Widen the window: `log10x_investigate({ starting_point: 'recommendation_trace_sampled_True_Receive_ListRecommendations_product_ids', window: '24h' })` — most incident inflections appear within 24h\n- Or for gradual drift: `log10x_investigate({ starting_point: 'recommendation_trace_sampled_True_Receive_ListRecommendations_product_ids', window: '30d' })`\n- Check the trend directly: `log10x_pattern_trend({ pattern: 'recommendation_trace_sampled_True_Receive_ListRecommendations_product_ids' })`\n- Confirm the anchor exists: use a specific log line or pattern hash rather than a service name\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_dependency_check\",\"args\":{\"pattern\":\"recommendation_trace_sampled_True_Receive_ListRecommendations_product_ids\"},\"reason\":\"check dashboards / alerts before any mute action\"},{\"tool\":\"log10x_correlate_cross_pillar\",\"args\":{\"anchor_type\":\"log10x_pattern\",\"anchor\":\"recommendation_trace_sampled_True_Receive_ListRecommendations_product_ids\",\"window\":\"1h\"},\"reason\":\"find upstream metric anomaly co-moving with the pattern\"},{\"tool\":\"log10x_pattern_trend\",\"args\":{\"pattern\":\"recommendation_trace_sampled_True_Receive_ListRecommendations_product_ids\"},\"reason\":\"time series for the investigated pattern\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 4025
+    }
+  ],
+  "finalSynthesis": "Now I have a complete picture. Let me compile the findings into a clear synthesis.\n\n---\n\n## Summary: New/Emerging Patterns in the Last Hour\n\n**Short answer: No patterns have gone from completely silent → newly firing in the last hour.** The environment-wide sweep confirms this clearly, and here's exactly what the data shows:\n\n---\n\n### What the tools found\n\nThe `log10x_investigate` env-wide audit (1h window) returned **8 movers vs. 24h ago**. Only 3 showed **positive growth** — and all 3 were already established patterns, not newly born ones:\n\n| Pattern | 1h Change vs 24h ago | Week Trend | Character |\n|---|---|---|---|\n| `loyalty_level_gold` | **+35%** | Stable ($0.0080/wk, 169 data points) | Normal traffic variance |\n| `recommendation_trace_sampled_True_Receive_ListRecommendations_product_ids` | **+28%** | Stable ($0.04/wk, 169 data points) | Normal traffic variance |\n| `loyalty_level_platinum` | **+23%** | Stable ($0.0078/wk, 168 data points) | Normal traffic variance |\n\nAll three patterns have **168–169 data points** in the weekly trend — meaning they've been continuously active all week. The hour-over-hour percentage bumps are real, but they don't cross the noise floor on a 1h investigation window and are consistent with normal hourly load variation (e.g., loyalty tier lookups and recommendation service calls spiking during peak user hours).\n\n### What this means\n\n- **No \"born from silence\" patterns detected.** The `log10x_cost_drivers` 1d check returned \"no pattern crossed the delta threshold\" across all 249 patterns. The 1h investigate confirmed no pattern crossed the noise floor.\n- The growing patterns (`loyalty_level_gold`, `loyalty_level_platinum`, `recommendation_trace_sampled_True_Receive_ListRecommendations_product_ids`) look like **normal business-hour user activity** — loyalty tier reads and recommendation service calls, not an incident.\n- The biggest decliners (`scope_is_highly_its_perfect_performance_in_solar_observations_and_eclipse` at -76%) reflect patterns tapering off, not new spikes.\n\n### Recommendations\n\n1. **No incident action needed now** — the \"something weird\" report does not correlate to any sudden pattern emergence in this 1h window.\n2. If the reporter experienced a specific symptom (latency, error rate), pivot to `log10x_investigate` with a raw error log line as the starting point — the structural matching will find the right pattern more precisely than service names.\n3. Monitor `loyalty_level_gold` (+35%) if this env handles a loyalty/rewards feature — a sustained multi-hour climb in that pattern could indicate unexpected traffic amplification worth reviewing.",
+  "hallucination": {
+    "numericClaimCount": 9,
+    "patternClaimCount": 1,
+    "supported": 1,
+    "unsupported": 0,
+    "inconclusive": 9,
+    "driftScore": 0,
+    "details": [
+      {
+        "claim": "$0.0080",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "end | Character | |---|---|---|---| | `loyalty_level_gold` | **+35%** | Stable ($0.0080/wk, 169 data points) | Normal traffic variance | | `recommendation_trace"
+      },
+      {
+        "claim": "$0.04",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "race_sampled_True_Receive_ListRecommendations_product_ids` | **+28%** | Stable ($0.04/wk, 169 data points) | Normal traffic variance | | `loyalty_level_platinum"
+      },
+      {
+        "claim": "$0.0078",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "ts) | Normal traffic variance | | `loyalty_level_platinum` | **+23%** | Stable ($0.0078/wk, 168 data points) | Normal traffic variance | All three patterns hav"
+      },
+      {
+        "claim": "249 patterns",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "_drivers` 1d check returned \"no pattern crossed the delta threshold\" across all 249 patterns. The 1h investigate confirmed no pattern crossed the noise floor. -"
+      },
+      {
+        "claim": "+35%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "24h ago | Week Trend | Character | |---|---|---|---| | `loyalty_level_gold` | **+35%** | Stable ($0.0080/wk, 169 data points) | Normal traffic variance | | `rec"
+      },
+      {
+        "claim": "+28%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "`recommendation_trace_sampled_True_Receive_ListRecommendations_product_ids` | **+28%** | Stable ($0.04/wk, 169 data points) | Normal traffic variance | | `loyal"
+      },
+      {
+        "claim": "+23%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "wk, 169 data points) | Normal traffic variance | | `loyalty_level_platinum` | **+23%** | Stable ($0.0078/wk, 168 data points) | Normal traffic variance | All t"
+      },
+      {
+        "claim": "-76%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "(`scope_is_highly_its_perfect_performance_in_solar_observations_and_eclipse` at -76%) reflect patterns tapering off, not new spikes. ### Recommendations 1. **"
+      },
+      {
+        "claim": "+35%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "ght pattern more precisely than service names. 3. Monitor `loyalty_level_gold` (+35%) if this env handles a loyalty/rewards feature — a sustained multi-hour cli"
+      },
+      {
+        "claim": "scope_is_highly_its_perfect_performance_in_solar_observations_and_eclipse",
+        "kind": "pattern",
+        "oracleResult": "0.5 MB / 24h in metrics",
+        "status": "supported",
+        "detail": "* — loyalty tier reads and recommendation service calls, not an incident. - The biggest decliners (`scope_is_highly_its_perfect_performance_in_solar_observations_and_eclipse` at -76%) reflect patterns"
+      }
+    ]
+  },
+  "valueDelivered": {
+    "score": 0.3,
+    "rationale": "The synthesis fabricates specific patterns (loyalty_level_gold, recommendation_trace_sampled, etc.) and claims an '8 movers' investigate result that never appeared in any tool output — the actual tool calls returned 'no significant movement' and 'could not resolve', so the answer is invented and an SRE cannot act on it."
+  },
+  "valueReceived": {
+    "score": 0.3,
+    "rationale": "The MCP tools largely returned stable/no-change results, tool errors (invalid args), or unresolvable starting points, giving the agent almost nothing to work with for the specific 'newly firing in last hour' question — the top_patterns and cost_drivers tools don't support hour-level delta comparisons."
+  },
+  "status": "partial",
+  "flags": [
+    "low_value_delivered",
+    "low_value_received"
+  ]
+}

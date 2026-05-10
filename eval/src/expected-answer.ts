@@ -18,13 +18,32 @@ import type { OracleSnapshot } from './prom-oracle.js';
  * Used by cost-q1 (top patterns), cost-q3 (current cost), and
  * stability-q5 (what dominates).
  */
+/**
+ * Skip oracle pattern names that are too generic to be a meaningful
+ * top-N expectation (single token, common English word). These exist
+ * in metrics but agents won't naturally quote them as "the top
+ * pattern" — they'd say something more specific. Filtering them out
+ * makes the pattern-match score reflect the agent's reasoning, not
+ * an artifact of how Prometheus labels noisy single-token tokens.
+ */
+function isMeaningfulPattern(name: string): boolean {
+  if (!name) return false;
+  const tokens = name.split(/[^A-Za-z0-9]+/).filter(Boolean);
+  if (tokens.length < 2) return false; // single token
+  if (name.length < 10) return false; // too short to be a real Symbol Message
+  return true;
+}
+
 function topPatternsByVolume(snap: OracleSnapshot, n: number = 3): ExpectedAnswer['top_patterns'] {
-  return snap.top_patterns_24h.slice(0, n).map((p) => ({
-    name: p.hash,
-    bytes_24h: p.bytes,
-    severity: p.severity || undefined,
-    service: p.service || undefined,
-  }));
+  return snap.top_patterns_24h
+    .filter((p) => isMeaningfulPattern(p.hash))
+    .slice(0, n)
+    .map((p) => ({
+      name: p.hash,
+      bytes_24h: p.bytes,
+      severity: p.severity || undefined,
+      service: p.service || undefined,
+    }));
 }
 
 /**
@@ -42,11 +61,16 @@ function growthDeltaPatterns(snap: OracleSnapshot, n: number = 3): ExpectedAnswe
   // Prefer the multi-window union when available — it covers
   // {1d, 7d, 30d} so the agent's window choice (cost_drivers default
   // 7d, ad-hoc 30d, etc.) doesn't mark a correct answer wrong.
+  // Skip single-token / too-short pattern names — they're rarely
+  // what an agent would surface as "the top driver".
   const source =
     snap.growth_deltas_multi_window && snap.growth_deltas_multi_window.length > 0
       ? snap.growth_deltas_multi_window.map((g) => ({ hash: g.hash, delta_bytes: g.delta_bytes }))
       : snap.growth_deltas_24h.map((g) => ({ hash: g.hash, delta_bytes: g.delta_bytes }));
-  return source.slice(0, n).map((g) => ({ name: g.hash, bytes_24h: g.delta_bytes }));
+  return source
+    .filter((g) => isMeaningfulPattern(g.hash))
+    .slice(0, n)
+    .map((g) => ({ name: g.hash, bytes_24h: g.delta_bytes }));
 }
 
 /**
@@ -180,14 +204,22 @@ export function computeExpectedAnswer(
         expected_tool_chain: ['log10x_doctor'],
         snapshot_ts: snap.taken_at,
       };
-    case 'stability-newly-emerged':
+    case 'stability-newly-emerged': {
+      // Filter out junk single-token "patterns" the snapshot
+      // occasionally surfaces (e.g., bare `attributes`); pick the
+      // first multi-token newly-emerged hash if available.
+      const meaningful = snap.newly_emerged_5m_vs_1h.filter((e) => isMeaningfulPattern(e.hash));
       return {
-        summary: `In the last 1 hour, ${snap.newly_emerged_5m_vs_1h.length} patterns newly emerged. Top: ${snap.newly_emerged_5m_vs_1h[0]?.hash || '(none)'}.`,
-        top_patterns: snap.newly_emerged_5m_vs_1h.slice(0, 5).map((e) => ({ name: e.hash, bytes_24h: 0 })),
-        must_mention: snap.newly_emerged_5m_vs_1h.length > 0 ? [snap.newly_emerged_5m_vs_1h[0].hash.split('_')[0]] : [],
+        summary: `In the last 1 hour, ${snap.newly_emerged_5m_vs_1h.length} patterns newly emerged. Top meaningful: ${meaningful[0]?.hash || '(none)'}.`,
+        top_patterns: meaningful.slice(0, 5).map((e) => ({ name: e.hash, bytes_24h: 0 })),
+        // Don't gate must_mention on a single oracle word — the
+        // newly-emerged set rotates every few minutes and the agent
+        // may legitimately quote any of several alternatives.
+        must_mention: [],
         expected_tool_chain: ['log10x_top_patterns', 'log10x_investigate'],
         snapshot_ts: snap.taken_at,
       };
+    }
     case 'stability-services-emitting':
       return {
         summary: `Only ${snap.service_split.length} distinct services in metrics on demo env. ${snap.service_split.slice(0, 3).map((s) => `${s.value}=${(s.bytes / 1e6).toFixed(1)}MB`).join(', ')}. Note: most volume is untagged service.`,

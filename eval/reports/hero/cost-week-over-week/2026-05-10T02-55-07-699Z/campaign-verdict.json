@@ -259,7 +259,7 @@
   "gaps": [
     {
       "question_id": "cost-week-over-week",
-      "run_timestamp": "2026-05-10T03:48:53.414Z",
+      "run_timestamp": "2026-05-10T12:37:00.539Z",
       "gap_kind": "pattern_miss",
       "gap_description": "Top-N pattern match 0.00 < 0.7; matched (none)",
       "expected_answer_excerpt": "Oracle top: service_instance_id_service_name_otelcol_contrib_service_version_otelcol, open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter, opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go",
@@ -272,7 +272,7 @@
     },
     {
       "question_id": "cost-week-over-week",
-      "run_timestamp": "2026-05-10T03:48:53.414Z",
+      "run_timestamp": "2026-05-10T12:37:00.539Z",
       "gap_kind": "low_received",
       "gap_description": "value_received 0.60 < 0.7 — MCP returned thin/stub data",
       "expected_answer_excerpt": "(MCP-side fix candidate)",

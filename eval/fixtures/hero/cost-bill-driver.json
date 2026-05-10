@@ -17,16 +17,16 @@
         "bytes_24h": 29631518.47144328
       },
       {
-        "name": "attributes",
-        "bytes_24h": 13146246.875604972
-      },
-      {
         "name": "Can_you_summarize_product_reviews_content_requesting_tool_call_refusal_None",
         "bytes_24h": 7653175.228769451
       },
       {
         "name": "instrumentationScope_name_payment_logger_version_schemaUrl_undefined",
         "bytes_24h": 7247837.50088504
+      },
+      {
+        "name": "status_code_UNAVAILABLE_error_message_data_refused_due_high_memory_usage",
+        "bytes_24h": 7184818.85444686
       }
     ],
     "must_mention": [],

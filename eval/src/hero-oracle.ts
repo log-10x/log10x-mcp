@@ -371,20 +371,51 @@ export { promQuery };
  */
 export function extractAgentTopPatterns(text: string, n: number = 3): string[] {
   const counts = new Map<string, number>();
-  // Pattern names allow CamelCase tokens between underscores, e.g.
-  // `cart_cartstore_ValkeyCartStore`, `shipping_service_Post_shipping_...`.
-  // Earlier we required lowercase-only segments and missed every
-  // pattern with an internal capital. Now: each segment is alnum,
-  // start segment must begin with a letter, total ≥3 underscores.
-  const PATTERN_RE = /(?<![\\A-Za-z0-9])\b([A-Za-z][A-Za-z0-9]+(?:_[A-Za-z0-9]+){3,})\b/g;
-  for (const m of text.matchAll(PATTERN_RE)) {
+
+  // Form 1: snake_case-or-CamelCase tokens with ≥3 underscores.
+  // Examples: `cart_cartstore_ValkeyCartStore`, `shipping_service_Post_shipping_...`.
+  // Skip MCP tool slugs (with or without log10x_ prefix); agents
+  // commonly write `translate_metric_to_patterns` etc. as tool refs.
+  const MCP_TOOL_SLUGS = new Set([
+    'cost_drivers', 'event_lookup', 'pattern_examples', 'pattern_trend', 'top_patterns',
+    'list_by_label', 'discover_labels', 'savings', 'services', 'investigate',
+    'investigation_get', 'resolve_batch', 'extract_templates', 'doctor', 'login_status',
+    'signin', 'signout', 'update_settings', 'create_env', 'update_env', 'delete_env',
+    'rotate_api_key', 'customer_metrics_query', 'discover_join', 'correlate_cross_pillar',
+    'translate_metric_to_patterns', 'poc_from_siem_submit', 'poc_from_siem_status',
+    'poc_from_local', 'discover_env', 'advise_install', 'advise_reporter',
+    'advise_receiver', 'advise_retriever', 'advise_compact', 'dependency_check',
+    'exclusion_filter', 'retriever_query', 'retriever_query_status', 'retriever_series',
+    'backfill_metric',
+  ]);
+  const PATTERN_SNAKE_RE = /(?<![\\A-Za-z0-9])\b([A-Za-z][A-Za-z0-9]+(?:_[A-Za-z0-9]+){3,})\b/g;
+  for (const m of text.matchAll(PATTERN_SNAKE_RE)) {
     const name = m[1];
     if (name.startsWith('log10x_')) continue;
-    // Skip prose-converted phrases captured in the old fallback path
-    // (kept the lowercased space-form catcher off; it created more
-    // garbage than it caught).
+    if (MCP_TOOL_SLUGS.has(name)) continue; // skip tool refs
     counts.set(name, (counts.get(name) ?? 0) + 1);
   }
+
+  // Form 2: backtick-wrapped DISPLAY form. The MCP renders top patterns
+  // as space-separated lowercase phrases (e.g. `service instance id
+  // service name otelcol contrib service version otelcol`); agents
+  // commonly quote them verbatim. Normalize to snake_case so they
+  // collide with oracle's canonical names. Without this catcher, every
+  // synthesis that uses the MCP's display form ends up with empty
+  // agent_top — caught when 7 of 10 failing scenarios had agent_top=[]
+  // despite the agent clearly naming patterns.
+  const BACKTICK_DISPLAY_RE = /`([a-zA-Z][a-zA-Z0-9 ]{18,})`/g;
+  for (const m of text.matchAll(BACKTICK_DISPLAY_RE)) {
+    const display = m[1].trim();
+    // Skip command literals and short option names.
+    if (/^(node |npm |bash |--|\/|http|https)/.test(display)) continue;
+    const words = display.split(/\s+/).filter(Boolean);
+    if (words.length < 4) continue;
+    const norm = words.join('_');
+    if (norm.startsWith('log10x_')) continue;
+    counts.set(norm, (counts.get(norm) ?? 0) + 1);
+  }
+
   return [...counts.entries()]
     .sort((a, b) => b[1] - a[1])
     .slice(0, n)

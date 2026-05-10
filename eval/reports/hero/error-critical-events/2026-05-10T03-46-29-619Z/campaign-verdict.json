@@ -6,12 +6,16 @@
     "drift_supported": 3,
     "drift_inconclusive": 9,
     "pattern_match": {
-      "agent_top_patterns": [],
+      "agent_top_patterns": [
+        "Traceback_most_recent_call_last",
+        "Error_UNAVAILABLE_read_ECONNRESET",
+        "Exception_calling_application_InactiveRpcError"
+      ],
       "oracle_top_patterns": [],
       "matched": 0,
       "missed": 0,
-      "extra": 0,
-      "score": 1
+      "extra": 3,
+      "score": 0
     },
     "chain_alignment": {
       "expected": [
@@ -32,7 +36,7 @@
     "value_delivered": 0.85,
     "value_received": 0.75,
     "passed": true,
-    "axes_summary": "drift=0/12 pattern_match=0/0=1.00 chain=1/1=1.00 value_delivered=0.85 value_received=0.75"
+    "axes_summary": "drift=0/12 pattern_match=0/0=0.00 chain=1/1=1.00 value_delivered=0.85 value_received=0.75"
   },
   "oracle": {
     "numericClaimCount": 12,
@@ -73,21 +77,21 @@
       {
         "claim": "140.9 KB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "C Exporter Export failed data refused due high memory usage** | $0.02/wk · Peak 140.9 KB | Stable (persistent) | | #2 | **OTLP METRIC GRPC Exporter Export faile"
       },
       {
         "claim": "36.5 KB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "Exporter Export failed data refused due high memory usage** | $0.0020/wk · Peak 36.5 KB | −34% decrease (improving) | | #3 | **UTC FATAL terminating connection"
       },
       {
         "claim": "7.1 KB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "TC FATAL terminating connection due administrator command** | $0.0000/wk · Peak 7.1 KB | Stable (low volume, 4 data points) | *(4–7 additional CRITICAL pattern"
       },
@@ -129,12 +133,16 @@
     ]
   },
   "pattern_match": {
-    "agent_top_patterns": [],
+    "agent_top_patterns": [
+      "Traceback_most_recent_call_last",
+      "Error_UNAVAILABLE_read_ECONNRESET",
+      "Exception_calling_application_InactiveRpcError"
+    ],
     "oracle_top_patterns": [],
     "matched": 0,
     "missed": 0,
-    "extra": 0,
-    "score": 1
+    "extra": 3,
+    "score": 0
   },
   "chain_alignment": {
     "expected": [

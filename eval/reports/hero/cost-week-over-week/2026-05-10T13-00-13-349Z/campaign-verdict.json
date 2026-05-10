@@ -1,0 +1,183 @@
+{
+  "question_id": "cost-week-over-week",
+  "transcript_path": "/Users/talweiss/git/l1x-co/log10x-mcp/eval/reports/hero/cost-week-over-week/2026-05-10T13-00-13-349Z/transcript.json",
+  "verdict": {
+    "drift_score": 0,
+    "drift_supported": 2,
+    "drift_inconclusive": 11,
+    "pattern_match": {
+      "agent_top_patterns": [
+        "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
+        "open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter",
+        "opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go"
+      ],
+      "oracle_top_patterns": [
+        "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
+        "open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter",
+        "opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go"
+      ],
+      "matched": 3,
+      "missed": 0,
+      "extra": 0,
+      "score": 1
+    },
+    "chain_alignment": {
+      "expected": [
+        "log10x_cost_drivers"
+      ],
+      "actual": [
+        "log10x_doctor",
+        "log10x_cost_drivers",
+        "log10x_top_patterns",
+        "log10x_savings",
+        "log10x_cost_drivers",
+        "log10x_top_patterns"
+      ],
+      "hits": [
+        "log10x_cost_drivers"
+      ],
+      "misses": [],
+      "score": 1
+    },
+    "value_delivered": 0.8,
+    "value_received": 0.7,
+    "passed": true,
+    "axes_summary": "drift=0/13 pattern_match=3/3=1.00 chain=1/1=1.00 value_delivered=0.80 value_received=0.70"
+  },
+  "oracle": {
+    "numericClaimCount": 13,
+    "patternClaimCount": 0,
+    "supported": 2,
+    "unsupported": 0,
+    "inconclusive": 11,
+    "driftScore": 0,
+    "details": [
+      {
+        "claim": "$25",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "last 7 days** | **34.9 GB** (log10x_doctor) | | **Weekly cost (7d window)** | **$25/wk** across 1,188 patterns (log10x_top_patterns, 7d) | | **WoW growth driver"
+      },
+      {
+        "claim": "$4.2",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "single-week view. The **top cost pattern** at the 7d scale is `(unknown)` at **$4.2/wk**, followed by `open telemetry opentelemetry collector contrib exporter"
+      },
+      {
+        "claim": "$3.8",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "pen telemetry opentelemetry collector contrib exporter opensearchexporter` at **$3.8/wk** and `opentelemetry io collector processor batchprocessor v batch proce"
+      },
+      {
+        "claim": "$3.7",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "`opentelemetry io collector processor batchprocessor v batch processor go` at **$3.7/wk**. None of these are growing — they are simply the biggest steady-state"
+      },
+      {
+        "claim": "$86",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "`service instance id service name otelcol contrib service version otelcol` at **$86K/mo (DEBUG, opentelemetry-collector service)**. That is a large but *stable*"
+      },
+      {
+        "claim": "$25",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "trend chart:** Plot **flat** — volume is stable week-over-week at ~34.9 GB/7d, $25/wk. No quarter-over-quarter growth signal in the available window. 2. **Inve"
+      },
+      {
+        "claim": "$86",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "tance id service name otelcol contrib service version otelcol` DEBUG pattern at $86K/mo is 54% of spend. Run `log10x_investigate` on it — if it's noise, `log10x"
+      },
+      {
+        "claim": "34.9 GB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "Metric | Value (tool-reported) | |---|---| | **Total volume, last 7 days** | **34.9 GB** (log10x_doctor) | | **Weekly cost (7d window)** | **$25/wk** across 1,"
+      },
+      {
+        "claim": "34.9 GB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": ". **For your trend chart:** Plot **flat** — volume is stable week-over-week at ~34.9 GB/7d, $25/wk. No quarter-over-quarter growth signal in the available windo"
+      },
+      {
+        "claim": "188 patterns",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "34.9 GB** (log10x_doctor) | | **Weekly cost (7d window)** | **$25/wk** across 1,188 patterns (log10x_top_patterns, 7d) | | **WoW growth drivers** | **None detec"
+      },
+      {
+        "claim": "188 patterns",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "log10x_top_patterns, 7d) | | **WoW growth drivers** | **None detected** — all 1,188 patterns within normal range (log10x_cost_drivers, 7d) | | **Longer baseline"
+      },
+      {
+        "claim": "54%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "ng: the doctor's `cardinality_concentration` warning says a **single pattern is 54% of your 30-day log spend**, and the 30-day top_patterns view shows pattern `"
+      },
+      {
+        "claim": "54%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "rvice name otelcol contrib service version otelcol` DEBUG pattern at $86K/mo is 54% of spend. Run `log10x_investigate` on it — if it's noise, `log10x_exclusion_"
+      }
+    ]
+  },
+  "pattern_match": {
+    "agent_top_patterns": [
+      "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
+      "open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter",
+      "opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go"
+    ],
+    "oracle_top_patterns": [
+      "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
+      "open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter",
+      "opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go"
+    ],
+    "matched": 3,
+    "missed": 0,
+    "extra": 0,
+    "score": 1
+  },
+  "chain_alignment": {
+    "expected": [
+      "log10x_cost_drivers"
+    ],
+    "actual": [
+      "log10x_doctor",
+      "log10x_cost_drivers",
+      "log10x_top_patterns",
+      "log10x_savings",
+      "log10x_cost_drivers",
+      "log10x_top_patterns"
+    ],
+    "hits": [
+      "log10x_cost_drivers"
+    ],
+    "misses": [],
+    "score": 1
+  },
+  "gaps": []
+}

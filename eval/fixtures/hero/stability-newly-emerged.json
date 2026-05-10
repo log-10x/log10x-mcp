@@ -6,12 +6,8 @@
   "persona": "Oncall SRE responding to a vague 'something weird is happening' report.",
   "budget_hint": "3-5 tool calls.",
   "expected_answer": {
-    "summary": "In the last 1 hour, 5 patterns newly emerged. Top: attributes.",
+    "summary": "In the last 1 hour, 5 patterns newly emerged. Top meaningful: service_name_product_reviews_trace_sampled_True_HTTP_Request_POST_llm_chat.",
     "top_patterns": [
-      {
-        "name": "attributes",
-        "bytes_24h": 0
-      },
       {
         "name": "service_name_product_reviews_trace_sampled_True_HTTP_Request_POST_llm_chat",
         "bytes_24h": 0
@@ -21,17 +17,11 @@
         "bytes_24h": 0
       },
       {
-        "name": "severityText_",
-        "bytes_24h": 0
-      },
-      {
         "name": "instrumentationScope_name_payment_logger_version_schemaUrl_undefined",
         "bytes_24h": 0
       }
     ],
-    "must_mention": [
-      "attributes"
-    ],
+    "must_mention": [],
     "expected_tool_chain": [
       "log10x_top_patterns",
       "log10x_investigate"

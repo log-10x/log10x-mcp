@@ -90,6 +90,32 @@ Required behavior:
   - Do NOT invent pattern names or services. Only quote names that
     appeared verbatim in tool stdout.
 
+ANTI-HALLUCINATION RULES (HARD — agents that violate these get
+flagged as drift by the oracle and the run is recorded as a fail):
+
+  - Do NOT extrapolate or aggregate numbers across windows. If
+    cost_drivers reports "$3.6/wk for pattern X", do NOT write
+    "$15/mo" or "$180/yr" unless a tool emitted those projections.
+    Report values exactly as the tool printed them.
+  - Do NOT sum figures across patterns to make a "combined" total
+    unless the tool already aggregated them. Each value is a
+    separate observation.
+  - Do NOT cite freshness / timestamps / "N seconds ago" unless a
+    tool returned that exact phrase. ONLY log10x_doctor reports
+    metric_freshness in seconds. If a tool didn't return a
+    freshness number, write "freshness not reported in this tool
+    output".
+  - Demo env scale check: total volume is ~5 GB/day. ANY single
+    claim above 150 GB / month or 5 TB / year is almost certainly
+    a fabrication. Sanity-check before quoting big numbers.
+  - When a tool returns "no movement detected" or "no cost drivers
+    detected", that IS the answer — do NOT switch windows and
+    fabricate growth. If you switch windows, say so explicitly:
+    "Switching from 7d to 30d window per the tool's hint, the
+    longer baseline shows…"
+  - Pattern names must appear verbatim in some tool's stdout. Do
+    NOT typo or abbreviate them; copy exactly.
+
 Out of scope: do not edit files, do not push commits, do not
 exfiltrate data. Read-only investigation only.`;
 

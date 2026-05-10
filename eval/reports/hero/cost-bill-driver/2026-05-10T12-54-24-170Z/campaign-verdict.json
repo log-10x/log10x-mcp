@@ -1,0 +1,251 @@
+{
+  "question_id": "cost-bill-driver",
+  "transcript_path": "/Users/talweiss/git/l1x-co/log10x-mcp/eval/reports/hero/cost-bill-driver/2026-05-10T12-54-24-170Z/transcript.json",
+  "verdict": {
+    "drift_score": 0,
+    "drift_supported": 1,
+    "drift_inconclusive": 19,
+    "pattern_match": {
+      "agent_top_patterns": [
+        "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
+        "open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter",
+        "opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go"
+      ],
+      "oracle_top_patterns": [
+        "cart_cartstore_ValkeyCartStore",
+        "OpenTelemetry_error_Export_failure_exception_Export_retry_limit_exceeded_previous",
+        "Can_you_summarize_product_reviews_content_requesting_tool_call_refusal_None",
+        "instrumentationScope_name_payment_logger_version_schemaUrl_undefined",
+        "status_code_UNAVAILABLE_error_message_data_refused_due_high_memory_usage"
+      ],
+      "matched": 3,
+      "missed": 5,
+      "extra": 0,
+      "score": 1
+    },
+    "chain_alignment": {
+      "expected": [
+        "log10x_cost_drivers"
+      ],
+      "actual": [
+        "log10x_cost_drivers",
+        "log10x_cost_drivers",
+        "log10x_cost_drivers",
+        "log10x_savings",
+        "log10x_top_patterns",
+        "log10x_savings",
+        "log10x_savings",
+        "log10x_savings"
+      ],
+      "hits": [
+        "log10x_cost_drivers"
+      ],
+      "misses": [],
+      "score": 1
+    },
+    "value_delivered": 0.72,
+    "value_received": 0.65,
+    "passed": true,
+    "axes_summary": "drift=0/20 pattern_match=3/5=1.00 chain=1/1=1.00 value_delivered=0.72 value_received=0.65"
+  },
+  "oracle": {
+    "numericClaimCount": 20,
+    "patternClaimCount": 0,
+    "supported": 1,
+    "unsupported": 0,
+    "inconclusive": 19,
+    "driftScore": 0,
+    "details": [
+      {
+        "claim": "$25",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "iggest right now — for context only) `log10x_top_patterns` shows the bill at **$25/wk total**, with the top 10 patterns accounting for 47% of volume: | # | Pa"
+      },
+      {
+        "claim": "$4.2",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "% of volume: | # | Pattern | Cost | |---|---------|------| | 1 | *(unknown)* | $4.2/wk | | 2 | `open telemetry opentelemetry collector contrib exporter opensea"
+      },
+      {
+        "claim": "$3.8",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "`open telemetry opentelemetry collector contrib exporter opensearchexporter` | $3.8/wk | | 3 | `opentelemetry io collector processor batchprocessor v batch pro"
+      },
+      {
+        "claim": "$3.7",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "| `opentelemetry io collector processor batchprocessor v batch processor go` | $3.7/wk | | 4 | `service instance id service name otelcol contrib service versio"
+      },
+      {
+        "claim": "$3.6",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "ice instance id service name otelcol contrib service version otelcol` (ERROR) | $3.6/wk | | 5 | `service instance id service name otelcol contrib service versio"
+      },
+      {
+        "claim": "$2.1",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "ice instance id service name otelcol contrib service version otelcol` (DEBUG) | $2.1/wk | 53% of volume sits in the long tail. These are **current rank by cost"
+      },
+      {
+        "claim": "$15",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "savings` reports the Retriever is already diverting **10.2 GB to S3**, saving **$15/wk** ($788/yr projected) at the current $1.5/GB analyzer + $0.02/GB storage"
+      },
+      {
+        "claim": "$788",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "eports the Retriever is already diverting **10.2 GB to S3**, saving **$15/wk** ($788/yr projected) at the current $1.5/GB analyzer + $0.02/GB storage rate. Cove"
+      },
+      {
+        "claim": "$1.5",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "verting **10.2 GB to S3**, saving **$15/wk** ($788/yr projected) at the current $1.5/GB analyzer + $0.02/GB storage rate. Coverage note from the tool: only 10/1"
+      },
+      {
+        "claim": "$0.02",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "o S3**, saving **$15/wk** ($788/yr projected) at the current $1.5/GB analyzer + $0.02/GB storage rate. Coverage note from the tool: only 10/14 retriever chunks"
+      },
+      {
+        "claim": "$2.1",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "instance id service name otelcol contrib service version otelcol` (DEBUG tier, $2.1/wk) — DEBUG-level collector self-telemetry is almost always droppable at th"
+      },
+      {
+        "claim": "$788",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "r coverage** to close the 29% gap (4 missing chunks); doing so will firm up the $788/yr savings projection and may reveal additional archivable patterns in the"
+      },
+      {
+        "claim": "10.2 GB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "he real lever is `log10x_savings` reports the Retriever is already diverting **10.2 GB to S3**, saving **$15/wk** ($788/yr projected) at the current $1.5/GB an"
+      },
+      {
+        "claim": "188 patterns",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "wth deltas (what GREW): None detected `log10x_cost_drivers` was run across **1,188 patterns** at the 7d, 1d, and 30d windows. All three returned the same verdi"
+      },
+      {
+        "claim": "10 patterns",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "t only) `log10x_top_patterns` shows the bill at **$25/wk total**, with the top 10 patterns accounting for 47% of volume: | # | Pattern | Cost | |---|---------"
+      },
+      {
+        "claim": "188 patterns",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "ately this week — costs are flat against a 3-week rolling baseline across all 1,188 patterns. If the invoice number went up, the delta likely reflects **billing"
+      },
+      {
+        "claim": "47%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "ns` shows the bill at **$25/wk total**, with the top 10 patterns accounting for 47% of volume: | # | Pattern | Cost | |---|---------|------| | 1 | *(unknown)*"
+      },
+      {
+        "claim": "53%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "e id service name otelcol contrib service version otelcol` (DEBUG) | $2.1/wk | 53% of volume sits in the long tail. These are **current rank by cost, not growt"
+      },
+      {
+        "claim": "71%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "torage rate. Coverage note from the tool: only 10/14 retriever chunks returned (71%), so the true savings figure is equal or higher. --- ### What this means a"
+      },
+      {
+        "claim": "29%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "dge with zero operational impact. 4. **Expand Retriever coverage** to close the 29% gap (4 missing chunks); doing so will firm up the $788/yr savings projection"
+      }
+    ]
+  },
+  "pattern_match": {
+    "agent_top_patterns": [
+      "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
+      "open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter",
+      "opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go"
+    ],
+    "oracle_top_patterns": [
+      "cart_cartstore_ValkeyCartStore",
+      "OpenTelemetry_error_Export_failure_exception_Export_retry_limit_exceeded_previous",
+      "Can_you_summarize_product_reviews_content_requesting_tool_call_refusal_None",
+      "instrumentationScope_name_payment_logger_version_schemaUrl_undefined",
+      "status_code_UNAVAILABLE_error_message_data_refused_due_high_memory_usage"
+    ],
+    "matched": 3,
+    "missed": 5,
+    "extra": 0,
+    "score": 1
+  },
+  "chain_alignment": {
+    "expected": [
+      "log10x_cost_drivers"
+    ],
+    "actual": [
+      "log10x_cost_drivers",
+      "log10x_cost_drivers",
+      "log10x_cost_drivers",
+      "log10x_savings",
+      "log10x_top_patterns",
+      "log10x_savings",
+      "log10x_savings",
+      "log10x_savings"
+    ],
+    "hits": [
+      "log10x_cost_drivers"
+    ],
+    "misses": [],
+    "score": 1
+  },
+  "gaps": [
+    {
+      "question_id": "cost-bill-driver",
+      "run_timestamp": "2026-05-10T13:12:24.569Z",
+      "gap_kind": "low_received",
+      "gap_description": "value_received 0.65 < 0.7 — MCP returned thin/stub data",
+      "expected_answer_excerpt": "(MCP-side fix candidate)",
+      "actual_answer_excerpt": "I now have all the data I need from every tool. Here's the complete picture:\n\n---\n\n## Cost Driver Investigation — Finance Escalation\n\n### Growth deltas (what GREW): None detected\n\n`log10x_cost_drivers` was run across **1,188 patterns** at the 7d, 1d, and 30d windows. All three returned the same verdict:\n\n> **\"no cost drivers detected\"** — no pattern crossed the delta threshold. The environment is ",
+      "fix_status": "open",
+      "notes": []
+    }
+  ]
+}

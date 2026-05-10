@@ -6,7 +6,10 @@
     "drift_supported": 0,
     "drift_inconclusive": 11,
     "pattern_match": {
-      "agent_top_patterns": [],
+      "agent_top_patterns": [
+        "OTLP_LOG_GRPC_Exporter_Export_failed_data_refused_due_high_memory_usage",
+        "AddItemAsync_called_with_userId_productId_LECAVKIM_quantity"
+      ],
       "oracle_top_patterns": [
         "attributes",
         "service_name_product_reviews_trace_sampled_True_HTTP_Request_POST_llm_chat",
@@ -14,10 +17,10 @@
         "severityText_",
         "instrumentationScope_name_payment_logger_version_schemaUrl_undefined"
       ],
-      "matched": 0,
+      "matched": 2,
       "missed": 5,
       "extra": 0,
-      "score": 0
+      "score": 1
     },
     "chain_alignment": {
       "expected": [
@@ -61,7 +64,7 @@
     "value_delivered": 0.45,
     "value_received": 0.35,
     "passed": false,
-    "axes_summary": "drift=0/11 pattern_match=0/5=0.00 chain=2/2=1.00 value_delivered=0.45 value_received=0.35"
+    "axes_summary": "drift=0/11 pattern_match=2/5=1.00 chain=2/2=1.00 value_delivered=0.45 value_received=0.35"
   },
   "oracle": {
     "numericClaimCount": 11,
@@ -151,7 +154,10 @@
     ]
   },
   "pattern_match": {
-    "agent_top_patterns": [],
+    "agent_top_patterns": [
+      "OTLP_LOG_GRPC_Exporter_Export_failed_data_refused_due_high_memory_usage",
+      "AddItemAsync_called_with_userId_productId_LECAVKIM_quantity"
+    ],
     "oracle_top_patterns": [
       "attributes",
       "service_name_product_reviews_trace_sampled_True_HTTP_Request_POST_llm_chat",
@@ -159,10 +165,10 @@
       "severityText_",
       "instrumentationScope_name_payment_logger_version_schemaUrl_undefined"
     ],
-    "matched": 0,
+    "matched": 2,
     "missed": 5,
     "extra": 0,
-    "score": 0
+    "score": 1
   },
   "chain_alignment": {
     "expected": [
@@ -206,7 +212,7 @@
   "gaps": [
     {
       "question_id": "stability-newly-emerged",
-      "run_timestamp": "2026-05-10T03:48:58.192Z",
+      "run_timestamp": "2026-05-10T12:26:02.200Z",
       "gap_kind": "drift",
       "gap_description": "Drift on 1 claim(s)",
       "expected_answer_excerpt": "In the last 1 hour, 5 patterns newly emerged. Top: attributes.",
@@ -218,20 +224,7 @@
     },
     {
       "question_id": "stability-newly-emerged",
-      "run_timestamp": "2026-05-10T03:48:58.192Z",
-      "gap_kind": "pattern_miss",
-      "gap_description": "Top-N pattern match 0.00 < 0.7; matched (none)",
-      "expected_answer_excerpt": "Oracle top: attributes, service_name_product_reviews_trace_sampled_True_HTTP_Request_POST_llm_chat, process_pid, severityText_, instrumentationScope_name_payment_logger_version_schemaUrl_undefined",
-      "actual_answer_excerpt": "Agent top: ",
-      "fix_status": "open",
-      "notes": [
-        "agent_top=[]",
-        "oracle_top=[\"attributes\",\"service_name_product_reviews_trace_sampled_True_HTTP_Request_POST_llm_chat\",\"process_pid\",\"severityText_\",\"instrumentationScope_name_payment_logger_version_schemaUrl_undefined\"]"
-      ]
-    },
-    {
-      "question_id": "stability-newly-emerged",
-      "run_timestamp": "2026-05-10T03:48:58.192Z",
+      "run_timestamp": "2026-05-10T12:26:02.200Z",
       "gap_kind": "low_value",
       "gap_description": "value_delivered 0.45 < 0.7",
       "expected_answer_excerpt": "In the last 1 hour, 5 patterns newly emerged. Top: attributes.",
@@ -241,7 +234,7 @@
     },
     {
       "question_id": "stability-newly-emerged",
-      "run_timestamp": "2026-05-10T03:48:58.192Z",
+      "run_timestamp": "2026-05-10T12:26:02.200Z",
       "gap_kind": "low_received",
       "gap_description": "value_received 0.35 < 0.7 — MCP returned thin/stub data",
       "expected_answer_excerpt": "(MCP-side fix candidate)",

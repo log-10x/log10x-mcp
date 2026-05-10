@@ -46,112 +46,112 @@
       {
         "claim": "28.9 GB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "evel | Severity | Volume | Share | |---|---|---| | 🔴 **(empty — no tag)** | **28.9 GB** | **83%** | | ERROR | 3.0 GB | 9% | | DEBUG | 1.5 GB | 4% | | INFO | 8"
       },
       {
         "claim": "3.0 GB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "e | |---|---|---| | 🔴 **(empty — no tag)** | **28.9 GB** | **83%** | | ERROR | 3.0 GB | 9% | | DEBUG | 1.5 GB | 4% | | INFO | 838.9 MB | 2% | | TRACE | 646.7 M"
       },
       {
         "claim": "1.5 GB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "*(empty — no tag)** | **28.9 GB** | **83%** | | ERROR | 3.0 GB | 9% | | DEBUG | 1.5 GB | 4% | | INFO | 838.9 MB | 2% | | TRACE | 646.7 MB | 2% | | CRITICAL | 14"
       },
       {
         "claim": "838.9 MB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "*28.9 GB** | **83%** | | ERROR | 3.0 GB | 9% | | DEBUG | 1.5 GB | 4% | | INFO | 838.9 MB | 2% | | TRACE | 646.7 MB | 2% | | CRITICAL | 14.7 MB | <1% | | WARN |"
       },
       {
         "claim": "646.7 MB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "RROR | 3.0 GB | 9% | | DEBUG | 1.5 GB | 4% | | INFO | 838.9 MB | 2% | | TRACE | 646.7 MB | 2% | | CRITICAL | 14.7 MB | <1% | | WARN | 49.5 KB | <1% | | **Total*"
       },
       {
         "claim": "14.7 MB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "| 1.5 GB | 4% | | INFO | 838.9 MB | 2% | | TRACE | 646.7 MB | 2% | | CRITICAL | 14.7 MB | <1% | | WARN | 49.5 KB | <1% | | **Total** | **34.9 GB** | 100% | ---"
       },
       {
         "claim": "49.5 KB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "838.9 MB | 2% | | TRACE | 646.7 MB | 2% | | CRITICAL | 14.7 MB | <1% | | WARN | 49.5 KB | <1% | | **Total** | **34.9 GB** | 100% | --- ### 🚨 Label-Quality Fi"
       },
       {
         "claim": "34.9 GB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "MB | 2% | | CRITICAL | 14.7 MB | <1% | | WARN | 49.5 KB | <1% | | **Total** | **34.9 GB** | 100% | --- ### 🚨 Label-Quality Finding: 83% of Volume Is Untagged"
       },
       {
         "claim": "28.9 GB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "ing is not which severity level dominates — **it's that 83% of your log volume (28.9 GB out of 34.9 GB) carries no `severity_level` tag at all** (shown as `empt"
       },
       {
         "claim": "34.9 GB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "h severity level dominates — **it's that 83% of your log volume (28.9 GB out of 34.9 GB) carries no `severity_level` tag at all** (shown as `empty` in the break"
       },
       {
         "claim": "3 GB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "l levels: - **ERROR (9%)** is the largest tagged tier — healthy to have, but at 3 GB it warrants cost scrutiny. - **DEBUG (4%)** shipping to production at 1.5 G"
       },
       {
         "claim": "1.5 GB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "t at 3 GB it warrants cost scrutiny. - **DEBUG (4%)** shipping to production at 1.5 GB/week is a common cost leak; debug logs typically should be suppressed or"
       },
       {
         "claim": "14.7 MB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "e small but present. - **CRITICAL (<1%) and WARN (<1%)** are nearly invisible — 14.7 MB and 49.5 KB respectively — which is suspiciously low and may indicate mi"
       },
       {
         "claim": "49.5 KB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "present. - **CRITICAL (<1%) and WARN (<1%)** are nearly invisible — 14.7 MB and 49.5 KB respectively — which is suspiciously low and may indicate missing severi"
       },
       {
         "claim": "1.5 GB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "nternal logs lacking enrichment. 2. **Suppress or sample DEBUG in production.** 1.5 GB/week of DEBUG-tagged logs is a controllable cost lever — apply an exclusi"
       },
       {
         "claim": "49.5 KB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "processor at the collector. 3. **Investigate the near-zero WARN volume.** Only 49.5 KB of WARN over 24h across the entire environment is almost certainly a lab"
       },

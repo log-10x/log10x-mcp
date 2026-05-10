@@ -135,10 +135,23 @@ export async function scoreAgainstExpected(
   const valueReceived = judgeScores?.value_received ?? -1;
 
   // ── must_mention / must_not_mention quick checks ──────────────────
+  // Fuzzy match: agents may quote a snake_case identifier as
+  // space-separated ("service instance id" vs "service_instance_id"),
+  // or vice versa. Normalize both sides to a canonical form (lowercase
+  // alphanumerics joined by single underscores) before substring
+  // checking.
+  const fuzzNormalize = (s: string): string =>
+    s
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '');
+  const fuzzText = fuzzNormalize(transcript.finalText);
   const driftFromMustMention: string[] = [];
   if (expected?.must_mention) {
     for (const phrase of expected.must_mention) {
-      if (!transcript.finalText.toLowerCase().includes(phrase.toLowerCase())) {
+      const fp = fuzzNormalize(phrase);
+      if (!fp) continue;
+      if (!fuzzText.includes(fp)) {
         driftFromMustMention.push(`missing must-mention "${phrase}"`);
       }
     }
@@ -146,7 +159,9 @@ export async function scoreAgainstExpected(
   const driftFromMustNotMention: string[] = [];
   if (expected?.must_not_mention) {
     for (const phrase of expected.must_not_mention) {
-      if (transcript.finalText.toLowerCase().includes(phrase.toLowerCase())) {
+      const fp = fuzzNormalize(phrase);
+      if (!fp) continue;
+      if (fuzzText.includes(fp)) {
         driftFromMustNotMention.push(`hit must-not-mention "${phrase}"`);
       }
     }

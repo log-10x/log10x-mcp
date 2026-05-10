@@ -7,8 +7,8 @@
     "drift_inconclusive": 19,
     "pattern_match": {
       "agent_top_patterns": [
-        "plugin_kubernetes_Unhandled_Error",
         "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
+        "plugin_kubernetes_Unhandled_Error",
         "filter_out_schedulable_go_pods_marked_as_unschedulable_can_be_scheduled"
       ],
       "oracle_top_patterns": [
@@ -201,7 +201,7 @@
       {
         "claim": "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
         "kind": "pattern",
-        "oracleResult": "628.6 MB / 24h in metrics",
+        "oracleResult": "628.4 MB / 24h in metrics",
         "status": "supported",
         "detail": "g opportunity or an ongoing incident to investigate. **Negative drift (shrinking) over 30 days:** `service_instance_id_service_name_otelcol_contrib_service_version_otelcol` is on a sustained downward"
       },
@@ -223,8 +223,8 @@
   },
   "pattern_match": {
     "agent_top_patterns": [
-      "plugin_kubernetes_Unhandled_Error",
       "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
+      "plugin_kubernetes_Unhandled_Error",
       "filter_out_schedulable_go_pods_marked_as_unschedulable_can_be_scheduled"
     ],
     "oracle_top_patterns": [
@@ -271,7 +271,7 @@
   "gaps": [
     {
       "question_id": "stability-env-sweep",
-      "run_timestamp": "2026-05-10T03:48:56.785Z",
+      "run_timestamp": "2026-05-10T12:26:00.684Z",
       "gap_kind": "drift",
       "gap_description": "Drift on 2 claim(s)",
       "expected_answer_excerpt": "Environment-wide investigation should run cleanly and surface either growth/decline drivers OR a truthful-negative. Top movers from oracle: open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter, opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go, cart_cartstore_ValkeyCartStore.",
@@ -284,20 +284,20 @@
     },
     {
       "question_id": "stability-env-sweep",
-      "run_timestamp": "2026-05-10T03:48:56.785Z",
+      "run_timestamp": "2026-05-10T12:26:00.684Z",
       "gap_kind": "pattern_miss",
       "gap_description": "Top-N pattern match 0.33 < 0.7; matched (none)",
       "expected_answer_excerpt": "Oracle top: cart_cartstore_ValkeyCartStore, OpenTelemetry_error_Export_failure_exception_Export_retry_limit_exceeded_previous, attributes",
-      "actual_answer_excerpt": "Agent top: plugin_kubernetes_Unhandled_Error, service_instance_id_service_name_otelcol_contrib_service_version_otelcol, filter_out_schedulable_go_pods_marked_as_unschedulable_can_be_scheduled",
+      "actual_answer_excerpt": "Agent top: service_instance_id_service_name_otelcol_contrib_service_version_otelcol, plugin_kubernetes_Unhandled_Error, filter_out_schedulable_go_pods_marked_as_unschedulable_can_be_scheduled",
       "fix_status": "open",
       "notes": [
-        "agent_top=[\"plugin_kubernetes_Unhandled_Error\",\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\",\"filter_out_schedulable_go_pods_marked_as_unschedulable_can_be_scheduled\"]",
+        "agent_top=[\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\",\"plugin_kubernetes_Unhandled_Error\",\"filter_out_schedulable_go_pods_marked_as_unschedulable_can_be_scheduled\"]",
         "oracle_top=[\"cart_cartstore_ValkeyCartStore\",\"OpenTelemetry_error_Export_failure_exception_Export_retry_limit_exceeded_previous\",\"attributes\"]"
       ]
     },
     {
       "question_id": "stability-env-sweep",
-      "run_timestamp": "2026-05-10T03:48:56.785Z",
+      "run_timestamp": "2026-05-10T12:26:00.684Z",
       "gap_kind": "low_received",
       "gap_description": "value_received 0.60 < 0.7 — MCP returned thin/stub data",
       "expected_answer_excerpt": "(MCP-side fix candidate)",

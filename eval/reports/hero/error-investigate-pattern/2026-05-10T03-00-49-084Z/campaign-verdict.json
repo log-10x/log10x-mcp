@@ -7,15 +7,16 @@
     "drift_inconclusive": 4,
     "pattern_match": {
       "agent_top_patterns": [
-        "GRAFANA_CLOUD_API_KEY"
+        "GRAFANA_CLOUD_API_KEY",
+        "error_OTLP_logs_exporter_received_Net_HTTPServiceUnavailable_code_uri_logs"
       ],
       "oracle_top_patterns": [
         "service_instance_id_service_name_otelcol_contrib_service_version_otelcol"
       ],
-      "matched": 0,
+      "matched": 1,
       "missed": 1,
       "extra": 1,
-      "score": 0
+      "score": 0.5
     },
     "chain_alignment": {
       "expected": [
@@ -47,7 +48,7 @@
     "value_delivered": 0.4,
     "value_received": 0.3,
     "passed": false,
-    "axes_summary": "drift=0/7 pattern_match=0/1=0.00 chain=1/1=1.00 value_delivered=0.40 value_received=0.30"
+    "axes_summary": "drift=0/7 pattern_match=1/1=0.50 chain=1/1=1.00 value_delivered=0.40 value_received=0.30"
   },
   "oracle": {
     "numericClaimCount": 7,
@@ -110,15 +111,16 @@
   },
   "pattern_match": {
     "agent_top_patterns": [
-      "GRAFANA_CLOUD_API_KEY"
+      "GRAFANA_CLOUD_API_KEY",
+      "error_OTLP_logs_exporter_received_Net_HTTPServiceUnavailable_code_uri_logs"
     ],
     "oracle_top_patterns": [
       "service_instance_id_service_name_otelcol_contrib_service_version_otelcol"
     ],
-    "matched": 0,
+    "matched": 1,
     "missed": 1,
     "extra": 1,
-    "score": 0
+    "score": 0.5
   },
   "chain_alignment": {
     "expected": [
@@ -150,20 +152,20 @@
   "gaps": [
     {
       "question_id": "error-investigate-pattern",
-      "run_timestamp": "2026-05-10T03:48:54.347Z",
+      "run_timestamp": "2026-05-10T12:37:02.056Z",
       "gap_kind": "pattern_miss",
-      "gap_description": "Top-N pattern match 0.00 < 0.7; matched (none)",
+      "gap_description": "Top-N pattern match 0.50 < 0.7; matched (none)",
       "expected_answer_excerpt": "Oracle top: service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
-      "actual_answer_excerpt": "Agent top: GRAFANA_CLOUD_API_KEY",
+      "actual_answer_excerpt": "Agent top: GRAFANA_CLOUD_API_KEY, error_OTLP_logs_exporter_received_Net_HTTPServiceUnavailable_code_uri_logs",
       "fix_status": "open",
       "notes": [
-        "agent_top=[\"GRAFANA_CLOUD_API_KEY\"]",
+        "agent_top=[\"GRAFANA_CLOUD_API_KEY\",\"error_OTLP_logs_exporter_received_Net_HTTPServiceUnavailable_code_uri_logs\"]",
         "oracle_top=[\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\"]"
       ]
     },
     {
       "question_id": "error-investigate-pattern",
-      "run_timestamp": "2026-05-10T03:48:54.347Z",
+      "run_timestamp": "2026-05-10T12:37:02.056Z",
       "gap_kind": "low_value",
       "gap_description": "value_delivered 0.40 < 0.7",
       "expected_answer_excerpt": "Investigation of the top ERROR pattern should produce a coherent report (acute-spike or stable). Expected to use log10x_investigate with the resolved pattern name.",
@@ -173,7 +175,7 @@
     },
     {
       "question_id": "error-investigate-pattern",
-      "run_timestamp": "2026-05-10T03:48:54.347Z",
+      "run_timestamp": "2026-05-10T12:37:02.056Z",
       "gap_kind": "low_received",
       "gap_description": "value_received 0.30 < 0.7 — MCP returned thin/stub data",
       "expected_answer_excerpt": "(MCP-side fix candidate)",

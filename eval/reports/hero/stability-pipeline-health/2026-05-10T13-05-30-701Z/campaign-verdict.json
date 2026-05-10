@@ -1,0 +1,166 @@
+{
+  "question_id": "stability-pipeline-health",
+  "transcript_path": "/Users/talweiss/git/l1x-co/log10x-mcp/eval/reports/hero/stability-pipeline-health/2026-05-10T13-05-30-701Z/transcript.json",
+  "verdict": {
+    "drift_score": 0,
+    "drift_supported": 4,
+    "drift_inconclusive": 7,
+    "pattern_match": {
+      "agent_top_patterns": [
+        "GRAFANA_CLOUD_API_KEY"
+      ],
+      "oracle_top_patterns": [],
+      "matched": 0,
+      "missed": 0,
+      "extra": 1,
+      "score": 0
+    },
+    "chain_alignment": {
+      "expected": [
+        "log10x_doctor"
+      ],
+      "actual": [
+        "log10x_doctor",
+        "log10x_discover_env",
+        "log10x_login_status",
+        "log10x_top_patterns",
+        "log10x_services"
+      ],
+      "hits": [
+        "log10x_doctor"
+      ],
+      "misses": [],
+      "score": 1
+    },
+    "value_delivered": 0.85,
+    "value_received": 0.6,
+    "passed": true,
+    "axes_summary": "drift=0/11 pattern_match=0/0=0.00 chain=1/1=1.00 value_delivered=0.85 value_received=0.60"
+  },
+  "oracle": {
+    "numericClaimCount": 11,
+    "patternClaimCount": 0,
+    "supported": 4,
+    "unsupported": 0,
+    "inconclusive": 7,
+    "driftScore": 0,
+    "details": [
+      {
+        "claim": "$52",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "day log spend** — flagged by doctor - Top weekly cost: `(unknown)` service at **$52/wk**, dominating 100% of volume (34.9 GB/7d). The remaining 3 services (`ema"
+      },
+      {
+        "claim": "34.9 GB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": ", image `otel/opentelemetry-collector-contrib:0.142.0`, ready: 1) - **Volume**: 34.9 GB / 7d across 4 services, 1,189 patterns - **Severity distribution**: 24%"
+      },
+      {
+        "claim": "34.9 GB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "Top weekly cost: `(unknown)` service at **$52/wk**, dominating 100% of volume (34.9 GB/7d). The remaining 3 services (`email`, `frontend`, `recommendation`) ac"
+      },
+      {
+        "claim": "4 services",
+        "kind": "numeric",
+        "oracleResult": "oracle reports 1 services",
+        "status": "supported",
+        "detail": "lemetry-collector-contrib:0.142.0`, ready: 1) - **Volume**: 34.9 GB / 7d across 4 services, 1,189 patterns - **Severity distribution**: 24% INFO, 9.6% error-cla"
+      },
+      {
+        "claim": "189 patterns",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "tor-contrib:0.142.0`, ready: 1) - **Volume**: 34.9 GB / 7d across 4 services, 1,189 patterns - **Severity distribution**: 24% INFO, 9.6% error-class (ERROR/WARN"
+      },
+      {
+        "claim": "3 services",
+        "kind": "numeric",
+        "oracleResult": "oracle reports 1 services",
+        "status": "supported",
+        "detail": ")` service at **$52/wk**, dominating 100% of volume (34.9 GB/7d). The remaining 3 services (`email`, `frontend`, `recommendation`) account for a rounding-error"
+      },
+      {
+        "claim": "24%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "**: 34.9 GB / 7d across 4 services, 1,189 patterns - **Severity distribution**: 24% INFO, 9.6% error-class (ERROR/WARN/CRIT/FATAL) — **PASS** #### ⚠️ CLOUD TIE"
+      },
+      {
+        "claim": "9.6%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "B / 7d across 4 services, 1,189 patterns - **Severity distribution**: 24% INFO, 9.6% error-class (ERROR/WARN/CRIT/FATAL) — **PASS** #### ⚠️ CLOUD TIER — Degrad"
+      },
+      {
+        "claim": "54%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "### ⚠️ Active Anomaly — Cardinality Concentration - **A single pattern consumes 54% of the 30-day log spend** — flagged by doctor - Top weekly cost: `(unknown)`"
+      },
+      {
+        "claim": "100%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "gged by doctor - Top weekly cost: `(unknown)` service at **$52/wk**, dominating 100% of volume (34.9 GB/7d). The remaining 3 services (`email`, `frontend`, `rec"
+      },
+      {
+        "claim": "54%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "n)')` then `log10x_investigate(starting_point='(unknown)')` to determine if the 54% concentration is an incident or suppressible noise. 2. **Fix the Retriever**"
+      }
+    ]
+  },
+  "pattern_match": {
+    "agent_top_patterns": [
+      "GRAFANA_CLOUD_API_KEY"
+    ],
+    "oracle_top_patterns": [],
+    "matched": 0,
+    "missed": 0,
+    "extra": 1,
+    "score": 0
+  },
+  "chain_alignment": {
+    "expected": [
+      "log10x_doctor"
+    ],
+    "actual": [
+      "log10x_doctor",
+      "log10x_discover_env",
+      "log10x_login_status",
+      "log10x_top_patterns",
+      "log10x_services"
+    ],
+    "hits": [
+      "log10x_doctor"
+    ],
+    "misses": [],
+    "score": 1
+  },
+  "gaps": [
+    {
+      "question_id": "stability-pipeline-health",
+      "run_timestamp": "2026-05-10T13:12:32.101Z",
+      "gap_kind": "low_received",
+      "gap_description": "value_received 0.60 < 0.7 — MCP returned thin/stub data",
+      "expected_answer_excerpt": "(MCP-side fix candidate)",
+      "actual_answer_excerpt": "All the data I need is in. Here is the full, no-fluff health digest:\n\n---\n\n## 🩺 Pipeline Health Digest — Log10x Demo Env\n\n### Auth & Connectivity\n| Check | Status |\n|---|---|\n| API Auth | ✅ PASS — Demo mode, read-only; prometheus.log10x.com auth OK |\n| SIEM Connector | ✅ PASS — **Amazon CloudWatch Logs** detected (region: `us-east-1`) |\n| Datadog | ❌ Not configured |\n| All other SIEMs (Splunk, Su",
+      "fix_status": "open",
+      "notes": []
+    }
+  ]
+}

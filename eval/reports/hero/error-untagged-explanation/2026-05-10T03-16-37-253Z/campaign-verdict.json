@@ -138,70 +138,70 @@
       {
         "claim": "28.9 GB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "Volume (7d) | Share | Cost/wk | |---|---|---|---| | **(empty — untagged)** | **28.9 GB** | **83%** | **$43** | | ERROR | 3.0 GB | 9% | $4.5 | | DEBUG | 1.5 GB"
       },
       {
         "claim": "3.0 GB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "---|---| | **(empty — untagged)** | **28.9 GB** | **83%** | **$43** | | ERROR | 3.0 GB | 9% | $4.5 | | DEBUG | 1.5 GB | 4% | $2.2 | | INFO | 839 MB | 2% | $1.2"
       },
       {
         "claim": "1.5 GB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "** | **28.9 GB** | **83%** | **$43** | | ERROR | 3.0 GB | 9% | $4.5 | | DEBUG | 1.5 GB | 4% | $2.2 | | INFO | 839 MB | 2% | $1.2 | | TRACE | 647 MB | 2% | $0.95"
       },
       {
         "claim": "839 MB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "*$43** | | ERROR | 3.0 GB | 9% | $4.5 | | DEBUG | 1.5 GB | 4% | $2.2 | | INFO | 839 MB | 2% | $1.2 | | TRACE | 647 MB | 2% | $0.95 | | CRITICAL | 15 MB | <1% |"
       },
       {
         "claim": "647 MB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "| $4.5 | | DEBUG | 1.5 GB | 4% | $2.2 | | INFO | 839 MB | 2% | $1.2 | | TRACE | 647 MB | 2% | $0.95 | | CRITICAL | 15 MB | <1% | $0.02 | | WARN | 49 KB | <1% |"
       },
       {
         "claim": "15 MB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": ".2 | | INFO | 839 MB | 2% | $1.2 | | TRACE | 647 MB | 2% | $0.95 | | CRITICAL | 15 MB | <1% | $0.02 | | WARN | 49 KB | <1% | — | | **Total** | **34.9 GB** | | *"
       },
       {
         "claim": "49 KB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "2 | | TRACE | 647 MB | 2% | $0.95 | | CRITICAL | 15 MB | <1% | $0.02 | | WARN | 49 KB | <1% | — | | **Total** | **34.9 GB** | | **$52/wk** | **83% of your 34.9"
       },
       {
         "claim": "34.9 GB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "| | CRITICAL | 15 MB | <1% | $0.02 | | WARN | 49 KB | <1% | — | | **Total** | **34.9 GB** | | **$52/wk** | **83% of your 34.9 GB/week (28.9 GB, $43/wk) carries"
       },
       {
         "claim": "34.9 GB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "N | 49 KB | <1% | — | | **Total** | **34.9 GB** | | **$52/wk** | **83% of your 34.9 GB/week (28.9 GB, $43/wk) carries no `severity_level` tag.** --- ### Why"
       },
       {
         "claim": "28.9 GB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "% | — | | **Total** | **34.9 GB** | | **$52/wk** | **83% of your 34.9 GB/week (28.9 GB, $43/wk) carries no `severity_level` tag.** --- ### Why this is happen"
       },
