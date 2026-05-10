@@ -1,12 +1,22 @@
 # Anti-Hallucination Campaign — MCP Hero Questions vs Demo-Env Ground Truth
 
-> **Status (2026-05-10 evening): 19/20 PASS + shape coverage 12/18 (66.7%).**
-> Up from 3/16 (18.8%) earlier the same day. The jump came from four
-> scorer hardenings (paired pattern+volume validation, scope-relevance,
-> spec-anchor lint, must_not_mention defaults) plus 9 new fabrications
-> exercising the refusal / injection / volume / scope axes.
-> Mutation tester run identified 5 surviving mutations (dead-defense
-> candidates) in `eval/audits/dead-defense-2026-05-10.md`.
+> **Status (2026-05-10 late evening): 19/20 PASS + shape coverage
+> 15/18 (83.3%) with LLM classifier on, 12/18 (66.7%) deterministic-only.**
+> Up from 3/16 (18.8%) earlier the same day. Three measurable wins:
+> (1) four scorer hardenings (paired pattern+volume validation,
+> scope-relevance, spec-anchor lint, must_not_mention defaults)
+> closed the volume / scope / service / honest-empty-with-anchor
+> classes. (2) Nine new fabrications exercised refusal / injection /
+> overconfidence / premature-synthesis / etc. (3) An opt-in LLM
+> mini-classifier (`enable_llm_classifier_axes` on the spec) added
+> direction / window / narrative_frame / citation detection,
+> closing 3 more shapes. Mutation tester re-run after these landed:
+> **7 killed, 3 survived** (was 5/5) — refusal-ignored and
+> injection-ignored survivors became killed because the new shape
+> fabs exercise those axes. Perturbation runs on 3 scenarios
+> confirmed the agent's anti-hallucination defenses don't reliably
+> catch perturbed tool output: 1/3 caught, 2/3 complied. Findings
+> in `eval/perturbations/RESULTS.md`.
 >
 > **Status (2026-05-10): 19/20 PASS** (was 14/15; 5 new scenarios added).
 > Original 15 cost / error-levels / stability scenarios at 14/15.

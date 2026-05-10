@@ -48,7 +48,7 @@
     "value_delivered": 0.8,
     "value_received": 0.7,
     "passed": true,
-    "axes_summary": "drift=0/9 pattern_match=3/3=1.00 chain=1/1=1.00 value_delivered=0.80 value_received=0.70"
+    "axes_summary": "drift=0/9 pattern_match=3/3=1.00 chain=1/1=1.00 value_delivered=0.80 value_received=0.70 classifier=OK"
   },
   "gaps": []
 }

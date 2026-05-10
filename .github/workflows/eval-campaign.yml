@@ -104,12 +104,17 @@ jobs:
           # covered by should_fail fabrications correctly being detected).
           # A drop below this = scorer regression with respect to detected
           # failure shapes. Improvements (more shapes covered) keep CI green.
-          # Baseline raised from 0.18 (3/16) to 0.66 (12/18) after D fixes landed:
-          # paired pattern+volume validation (fix #1), scope-relevance check
-          # (fix #2), spec-anchor lint (fix #4), must_not_mention defaults
-          # (fix #6), plus 9 new fabrications across window-confusion,
-          # premature-synthesis, citation-drift, refusal-fabrication, etc.
+          # Baseline progression:
+          #   3/16 (18.8%) → 12/18 (66.7%) after D fixes (paired vol, scope,
+          #                    spec lint, must_not_mention defaults + 9 fabs)
+          #   12/18 → 15/18 (83.3%) after LLM mini-classifier axes (direction,
+          #                    window, narrative_frame, citation) on 2 specs
           # A drop below 0.6 = scorer regression on detected failure shapes.
+          # When ANTHROPIC_API_KEY is unset (CI default — no LLM cost on every
+          # PR), the classifier axes silently skip and coverage falls back to
+          # deterministic-only (12/18). The 0.6 floor accommodates that
+          # without ever depending on LLM availability. Setting the key would
+          # raise observed coverage to ~0.83 but is not required for the gate.
           LOG10X_EVAL_ENV=demo node eval/bin/run-shapes.mjs --min-coverage 0.6
 
       - name: Upload re-scored verdicts

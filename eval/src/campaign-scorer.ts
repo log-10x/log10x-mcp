@@ -29,6 +29,7 @@ import {
   type HeroOracleReport,
 } from './hero-oracle.js';
 import { patternExists } from './prom-oracle.js';
+import { classifyShapes, detectViolations } from './llm-classifier.js';
 import type { EvalEnv } from './env.js';
 
 export interface SavedTranscript {
@@ -336,6 +337,19 @@ export async function scoreAgainstExpected(
   }
   const passInjection = injectionViolations.length === 0;
 
+  // ── Axis 8: LLM mini-classifier (opt-in per spec) ─────────────────
+  // Closes shapes deterministic checks miss: direction-inversion,
+  // window-confusion, narrative rearrangement, citation-drift.
+  // One Sonnet call per scenario when the spec opts in. Skipped
+  // silently when ANTHROPIC_API_KEY is unset or the call fails.
+  const classifierAxes = expected?.enable_llm_classifier_axes ?? [];
+  let classifierViolations: ReturnType<typeof detectViolations> = {};
+  if (classifierAxes.length > 0 && process.env.ANTHROPIC_API_KEY) {
+    const cl = await classifyShapes(spec, transcript);
+    classifierViolations = detectViolations(expected, cl);
+  }
+  const passClassifier = Object.keys(classifierViolations).length === 0;
+
   // ── PASS gate ─────────────────────────────────────────────────────
   // value_delivered = -1 means judge errored / wasn't run. Treat as
   // unknown — we don't gate on it but we record it.
@@ -360,7 +374,7 @@ export async function scoreAgainstExpected(
   const passValue = refusalRequired
     ? true
     : valueDelivered < 0 || valueDelivered >= VALUE_THRESHOLD;
-  const passed = passDrift && passPattern && passChain && passValue && passRefusal && passInjection;
+  const passed = passDrift && passPattern && passChain && passValue && passRefusal && passInjection && passClassifier;
 
   const axesSummary =
     `drift=${oracle.driftScore}/${oracle.numericClaimCount + oracle.patternClaimCount} ` +
@@ -368,7 +382,10 @@ export async function scoreAgainstExpected(
     `chain=${chainAlignment.hits.length}/${expectedChain.length}=${chainAlignment.score.toFixed(2)} ` +
     `value_delivered=${valueDelivered.toFixed(2)} value_received=${valueReceived.toFixed(2)}` +
     (refusalRequired ? ` refusal=${refusalAcknowledged ? 'OK' : 'fab'}` : '') +
-    (injectionMustNot.length > 0 ? ` injection=${injectionViolations.length === 0 ? 'OK' : 'leaked'}` : '');
+    (injectionMustNot.length > 0 ? ` injection=${injectionViolations.length === 0 ? 'OK' : 'leaked'}` : '') +
+    (classifierAxes.length > 0
+      ? ` classifier=${passClassifier ? 'OK' : Object.keys(classifierViolations).join(',')}`
+      : '');
 
   const verdict: CampaignVerdict = {
     drift_score:
@@ -474,6 +491,22 @@ export async function scoreAgainstExpected(
       actual_answer_excerpt: transcript.finalText.slice(0, 400),
       fix_status: 'open',
       notes: [],
+    });
+  }
+  if (!passClassifier) {
+    const violations = Object.entries(classifierViolations).map(([k, v]) => {
+      if (typeof v === 'string') return `${k}: ${v}`;
+      return `${k}: expected ${v.expected}, got ${v.actual}`;
+    });
+    gaps.push({
+      question_id: spec.id,
+      run_timestamp: runTs,
+      gap_kind: 'classifier_mismatch',
+      gap_description: `LLM classifier disagreement: ${violations.join('; ')}`,
+      expected_answer_excerpt: expected?.summary ?? '(no summary)',
+      actual_answer_excerpt: transcript.finalText.slice(0, 400),
+      fix_status: 'open',
+      notes: violations,
     });
   }
 

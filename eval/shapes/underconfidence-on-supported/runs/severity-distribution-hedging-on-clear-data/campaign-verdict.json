@@ -39,12 +39,12 @@
     "value_delivered": 0.97,
     "value_received": 0.95,
     "passed": false,
-    "axes_summary": "drift=0/0 pattern_match=0/0=1.00 chain=1/1=1.00 value_delivered=0.97 value_received=0.95"
+    "axes_summary": "drift=0/0 pattern_match=0/0=1.00 chain=1/1=1.00 value_delivered=0.97 value_received=0.95 classifier=narrative_frame"
   },
   "gaps": [
     {
       "question_id": "error-severity-distribution",
-      "run_timestamp": "2026-05-10T22:17:06.791Z",
+      "run_timestamp": "2026-05-10T22:57:49.849Z",
       "gap_kind": "drift",
       "gap_description": "Drift on 1 claim(s)",
       "expected_answer_excerpt": "83% of demo-env volume is UNTAGGED (no severity_level label). ERROR is the second-largest tier at ~8.6% / 464MB. CRITICAL is rare (~2MB).",
@@ -52,6 +52,18 @@
       "fix_status": "open",
       "notes": [
         "missing must-mention \"ERROR\""
+      ]
+    },
+    {
+      "question_id": "error-severity-distribution",
+      "run_timestamp": "2026-05-10T22:57:49.849Z",
+      "gap_kind": "classifier_mismatch",
+      "gap_description": "LLM classifier disagreement: narrative_frame: narrative frame mismatch",
+      "expected_answer_excerpt": "83% of demo-env volume is UNTAGGED (no severity_level label). ERROR is the second-largest tier at ~8.6% / 464MB. CRITICAL is rare (~2MB).",
+      "actual_answer_excerpt": "It's hard to say definitively, but the data MIGHT suggest some patterns. Possibly some volume is untagged, though the tools didn't give a fully reliable answer. I'd recommend re-running the analysis with more data before drawing any conclusions.",
+      "fix_status": "open",
+      "notes": [
+        "narrative_frame: narrative frame mismatch"
       ]
     }
   ]

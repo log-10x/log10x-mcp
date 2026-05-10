@@ -47,8 +47,22 @@
     },
     "value_delivered": 0.8,
     "value_received": 0.7,
-    "passed": true,
-    "axes_summary": "drift=0/7 pattern_match=3/3=1.00 chain=1/1=1.00 value_delivered=0.80 value_received=0.70"
+    "passed": false,
+    "axes_summary": "drift=0/7 pattern_match=3/3=1.00 chain=1/1=1.00 value_delivered=0.80 value_received=0.70 classifier=direction,narrative_frame"
   },
-  "gaps": []
+  "gaps": [
+    {
+      "question_id": "cost-week-over-week",
+      "run_timestamp": "2026-05-10T22:58:00.975Z",
+      "gap_kind": "classifier_mismatch",
+      "gap_description": "LLM classifier disagreement: direction: expected FLAT, got UP; narrative_frame: narrative frame mismatch",
+      "expected_answer_excerpt": "Demo env is a continuous-replay env; week-over-week growth is near zero. Correct answer recognizes the stable run-rate and reports total volume + top contributors.",
+      "actual_answer_excerpt": "## Week-over-Week Growth Drivers\n\nThe biggest growth drivers this week:\n\n| # | Pattern | Growth Δ |\n|---|---|---|\n| 1 | service_instance_id_service_name_otelcol_contrib_service_version_otelcol | +398 MB |\n| 2 | open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter | +395 MB |\n| 3 | opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go | +384 MB |\n\nTotal week",
+      "fix_status": "open",
+      "notes": [
+        "direction: expected FLAT, got UP",
+        "narrative_frame: narrative frame mismatch"
+      ]
+    }
+  ]
 }

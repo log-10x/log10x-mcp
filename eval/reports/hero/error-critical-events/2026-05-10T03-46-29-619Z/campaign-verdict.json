@@ -77,21 +77,21 @@
       {
         "claim": "140.9 KB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "C Exporter Export failed data refused due high memory usage** | $0.02/wk · Peak 140.9 KB | Stable (persistent) | | #2 | **OTLP METRIC GRPC Exporter Export faile"
       },
       {
         "claim": "36.5 KB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "Exporter Export failed data refused due high memory usage** | $0.0020/wk · Peak 36.5 KB | −34% decrease (improving) | | #3 | **UTC FATAL terminating connection"
       },
       {
         "claim": "7.1 KB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "TC FATAL terminating connection due administrator command** | $0.0000/wk · Peak 7.1 KB | Stable (low volume, 4 data points) | *(4–7 additional CRITICAL pattern"
       },

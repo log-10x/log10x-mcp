@@ -83,7 +83,13 @@ for (const { full, name } of specs) {
       console.error(`  [skip] no reports dir at ${reportsDir} — run with agent first`);
       continue;
     }
-    const subdirs = readdirSync(reportsDir).filter((d) => statSync(join(reportsDir, d)).isDirectory());
+    // Skip perturbation runs — they're intentionally seeded with bad
+    // tool output to test the agent's defenses, NOT to evaluate
+    // baseline campaign performance. Marked by a .perturbed file
+    // dropped by bin/run-perturbed-scenario.mjs.
+    const subdirs = readdirSync(reportsDir)
+      .filter((d) => statSync(join(reportsDir, d)).isDirectory())
+      .filter((d) => !existsSync(join(reportsDir, d, '.perturbed')));
     if (subdirs.length === 0) {
       console.error(`  [skip] no run subdirs in ${reportsDir}`);
       continue;

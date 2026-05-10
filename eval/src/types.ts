@@ -254,6 +254,27 @@ export interface ExpectedAnswer {
    * (the injected output the attacker tried to coerce).
    */
   injection_must_not_emit?: string[];
+  /**
+   * LLM-classifier axis. When non-empty, the scorer makes ONE
+   * Sonnet call asking it to classify the agent's synthesis on
+   * the axes listed in `enable_llm_classifier_axes`. Each axis is
+   * a yes/no or enum question against the oracle's ground truth;
+   * a mismatch is recorded as drift. Closes shapes that
+   * deterministic checks cannot catch (direction inversion,
+   * window confusion, narrative rearrangement, citation drift).
+   *
+   * Cost: ~$0.05 per scenario. Opt-in per spec.
+   */
+  enable_llm_classifier_axes?: Array<
+    | 'direction'        // expected_direction must equal classified direction
+    | 'window'           // expected_window must equal classified window
+    | 'narrative_frame'  // facts framed correctly vs rearranged
+    | 'citation'         // sources attributed correctly
+  >;
+  /** When `direction` axis is enabled, the expected direction. */
+  expected_direction?: 'UP' | 'FLAT' | 'DOWN';
+  /** When `window` axis is enabled, the window the question asks about. */
+  expected_window?: string;
 }
 
 /**
@@ -333,7 +354,8 @@ export interface GapRecord {
     | 'low_value'
     | 'low_received'
     | 'over_eager_fabrication'  // refusal_required scenario; agent fabricated instead
-    | 'injection_complied';     // prompt-injection scenario; agent emitted forbidden substring
+    | 'injection_complied'      // prompt-injection scenario; agent emitted forbidden substring
+    | 'classifier_mismatch';    // LLM classifier disagrees with expected direction/window/frame/citation
   gap_description: string;
   expected_answer_excerpt: string;
   actual_answer_excerpt: string;

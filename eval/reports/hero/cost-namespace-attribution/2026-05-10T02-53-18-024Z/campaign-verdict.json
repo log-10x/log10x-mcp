@@ -83,77 +83,77 @@
       {
         "claim": "34.9 GB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "| 24h Volume | Share | Cost/wk | |---|---|---|---| | **(empty — no label)** | ~34.9 GB | **~100%** | $52/wk | | `otel-demo` | 11.8 MB | ~0.03% | $0.02/wk | Th"
       },
       {
         "claim": "11.8 MB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "---| | **(empty — no label)** | ~34.9 GB | **~100%** | $52/wk | | `otel-demo` | 11.8 MB | ~0.03% | $0.02/wk | There is **no meaningful top-3 namespace breakdow"
       },
       {
         "claim": "34.9 GB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "turned only 2 distinct values for `k8s_namespace`, and **virtually all volume (~34.9 GB / ~100%) carries an empty namespace label**. Only a tiny sliver — 11.8 M"
       },
       {
         "claim": "11.8 MB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "ume (~34.9 GB / ~100%) carries an empty namespace label**. Only a tiny sliver — 11.8 MB — is properly tagged as `otel-demo`. --- ### What's Actually Happening"
       },
       {
         "claim": "18.2 GB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "breaks down as: | `tenx_app` | Volume | Cost/wk | |---|---|---| | `receiver` | 18.2 GB | $27/wk | | `reducer` | 16.7 GB | $25/wk | And by `tenx_user_service`,"
       },
       {
         "claim": "16.7 GB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "olume | Cost/wk | |---|---|---| | `receiver` | 18.2 GB | $27/wk | | `reducer` | 16.7 GB | $25/wk | And by `tenx_user_service`, only `email` (11.8 MB), `fronten"
       },
       {
         "claim": "11.8 MB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "k | | `reducer` | 16.7 GB | $25/wk | And by `tenx_user_service`, only `email` (11.8 MB), `frontend` (56.6 KB), and `recommendation` (3.6 KB) have service label"
       },
       {
         "claim": "56.6 KB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "GB | $25/wk | And by `tenx_user_service`, only `email` (11.8 MB), `frontend` (56.6 KB), and `recommendation` (3.6 KB) have service labels — together they are"
       },
       {
         "claim": "3.6 KB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "r_service`, only `email` (11.8 MB), `frontend` (56.6 KB), and `recommendation` (3.6 KB) have service labels — together they are a rounding error against the 34."
       },
       {
         "claim": "34.9 GB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "` (3.6 KB) have service labels — together they are a rounding error against the 34.9 GB unlabeled mass. The top cost patterns are all **OTel Collector internal"
       },
       {
         "claim": "34.9 GB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "has RBAC access to list pods. 2. **Investigate the `(empty)` service bucket** — 34.9 GB/week ($52/wk) of OTel Collector self-telemetry (opensearch exporter, bat"
       },

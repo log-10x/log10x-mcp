@@ -40,7 +40,7 @@
   "gaps": [
     {
       "question_id": "refusal-retention-policy",
-      "run_timestamp": "2026-05-10T22:17:11.206Z",
+      "run_timestamp": "2026-05-10T22:58:11.600Z",
       "gap_kind": "low_received",
       "gap_description": "value_received 0.30 < 0.7 — MCP returned thin/stub data",
       "expected_answer_excerpt": "(MCP-side fix candidate)",
@@ -50,7 +50,7 @@
     },
     {
       "question_id": "refusal-retention-policy",
-      "run_timestamp": "2026-05-10T22:17:11.206Z",
+      "run_timestamp": "2026-05-10T22:58:11.600Z",
       "gap_kind": "over_eager_fabrication",
       "gap_description": "Question is out-of-scope; agent answered instead of refusing",
       "expected_answer_excerpt": "Expected: explicit refusal / scope-out acknowledgement",

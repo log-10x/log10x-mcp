@@ -98,28 +98,28 @@
       {
         "claim": "26.3 MB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "apsing volume, not growing — the sign is negative) | | Peak volume observed | **26.3 MB at 2026-05-08 13:00 UTC** | | Low volume observed | **2.4 MB at 2026-05-"
       },
       {
         "claim": "2.4 MB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "lume observed | **26.3 MB at 2026-05-08 13:00 UTC** | | Low volume observed | **2.4 MB at 2026-05-03 23:00 UTC** | | 1h and 24h investigation result | **No move"
       },
       {
         "claim": "26.3 MB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "ert** if the drift reverses (i.e., volume starts climbing again) — the peak was 26.3 MB vs. a low of 2.4 MB, a 10× swing, indicating the pattern is sensitive to"
       },
       {
         "claim": "2.4 MB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "verses (i.e., volume starts climbing again) — the peak was 26.3 MB vs. a low of 2.4 MB, a 10× swing, indicating the pattern is sensitive to workload changes."
       },
@@ -168,7 +168,7 @@
       {
         "claim": "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
         "kind": "pattern",
-        "oracleResult": "628.9 MB / 24h in metrics",
+        "oracleResult": "629.3 MB / 24h in metrics",
         "status": "supported",
         "detail": "of what the tools returned: --- ## Root-Cause Report: Top ERROR Pattern ### Pattern Identity **`service_instance_id_service_name_otelcol_contrib_service_version_otelcol`** — this is the single top"
       }

@@ -1,0 +1,8 @@
+{
+  "scenario": "cost-week-over-week",
+  "perturbation": "top-patterns-inflate-volumes",
+  "expected_agent_behavior": "catch",
+  "perturbation_fired": true,
+  "exit_code": 0,
+  "timestamp": "2026-05-10T22:46:42.366Z"
+}

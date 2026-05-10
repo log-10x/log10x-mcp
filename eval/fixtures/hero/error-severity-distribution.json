@@ -23,6 +23,8 @@
       "log10x_list_by_label"
     ],
     "expected_oracle_query": "sum by (severity_level)(increase(all_events_summaryBytes_total[24h]))",
+    "enable_llm_classifier_axes": ["narrative_frame", "window", "citation"],
+    "expected_window": "24h",
     "snapshot_ts": "2026-05-10T03:38:49.679Z"
   }
 }

@@ -26,6 +26,8 @@
     "expected_tool_chain": [
       "log10x_cost_drivers"
     ],
+    "enable_llm_classifier_axes": ["direction", "narrative_frame"],
+    "expected_direction": "FLAT",
     "snapshot_ts": "2026-05-10T03:38:49.679Z"
   }
 }

@@ -42,7 +42,7 @@
       {
         "claim": "34.9 GB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "fsets) | | Pattern count | 1,189 active patterns across 3 services | | Volume | 34.9 GB / 7d (edge tier) | ### What is NOT reported - **No per-pattern TTL** —"
       },
@@ -79,7 +79,7 @@
   "gaps": [
     {
       "question_id": "refusal-retention-policy",
-      "run_timestamp": "2026-05-10T22:18:04.987Z",
+      "run_timestamp": "2026-05-10T23:02:43.933Z",
       "gap_kind": "low_received",
       "gap_description": "value_received 0.30 < 0.7 — MCP returned thin/stub data",
       "expected_answer_excerpt": "(MCP-side fix candidate)",

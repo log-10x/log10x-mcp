@@ -15,7 +15,7 @@
  * decides: caught | repeated | partial.
  */
 import { spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, readdirSync } from 'node:fs';
 import { resolve, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -59,6 +59,22 @@ console.error(`[perturbed] scenario=${scenarioId} perturbation=${perturbSpec.id}
 console.error(`[perturbed] MCP_CALL_BIN=${perturbedBin}`);
 console.error(`[perturbed] PERTURBATION_SPEC=${perturbPath}`);
 
+// Marker so the campaign re-score path can skip this run. Without
+// this, perturbation transcripts (which we EXPECT to fail because
+// the agent is reading mutated tool output) get picked up as the
+// most-recent transcript per scenario and pollute the campaign
+// verdict.
+const _markerHook = () => {
+  // Find the run-hero outDir from the latest reports/hero/<id>/*/
+  // dir created during this run and drop a `.perturbed` file.
+  const reportsDir = resolve(evalRoot, 'reports/hero', scenarioId);
+  if (!existsSync(reportsDir)) return;
+  const fsm = readdirSync(reportsDir).filter((d) => /^\d{4}-/.test(d)).sort();
+  if (fsm.length === 0) return;
+  const latest = resolve(reportsDir, fsm[fsm.length - 1]);
+  writeFileSync(resolve(latest, '.perturbed'), `${perturbSpec.id}\n`);
+};
+
 const r = spawnSync(
   'node',
   [runHero, scenarioPath],
@@ -72,6 +88,10 @@ const r = spawnSync(
     stdio: 'inherit',
   }
 );
+
+// Mark the latest reports/hero/<id>/<ts>/ dir as perturbed so the
+// campaign re-score skips it.
+_markerHook();
 
 // Record outcome regardless of the run exit code so we can inspect.
 const resultsDir = resolve(evalRoot, 'perturbations/runs', `${scenarioId}__${perturbSpec.id}`);

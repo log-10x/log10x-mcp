@@ -47,16 +47,16 @@
   "gaps": [
     {
       "question_id": "error-critical-events",
-      "run_timestamp": "2026-05-10T22:17:02.303Z",
+      "run_timestamp": "2026-05-10T22:57:27.590Z",
       "gap_kind": "drift",
       "gap_description": "Drift on 3 claim(s)",
       "expected_answer_excerpt": "CRITICAL severity has ~2MB / 24h on the demo env (rare). Expected: agent identifies these patterns specifically and reports the volume.",
       "actual_answer_excerpt": "**Yes — CRITICAL-severity events are firing.** Top 3 by volume:\n\n| # | Pattern | Volume |\n|---|---|---|\n| 1 | service_instance_id_service_name_otelcol_contrib_service_version_otelcol | $4.5/wk · 397 MB |\n| 2 | open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter | $4.4/wk · 394 MB |\n| 3 | opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go | $4.3/wk · 383",
       "fix_status": "open",
       "notes": [
-        "scope: pattern exists at 629.0 MB / 24h but has 0 bytes under filter severity_level=\"CRITICAL\" — question scope",
-        "scope: pattern exists at 395.6 MB / 24h but has 0 bytes under filter severity_level=\"CRITICAL\" — question scope",
-        "scope: pattern exists at 384.2 MB / 24h but has 0 bytes under filter severity_level=\"CRITICAL\" — question scope"
+        "scope: pattern exists at 629.2 MB / 24h but has 0 bytes under filter severity_level=\"CRITICAL\" — question scope",
+        "scope: pattern exists at 395.9 MB / 24h but has 0 bytes under filter severity_level=\"CRITICAL\" — question scope",
+        "scope: pattern exists at 384.4 MB / 24h but has 0 bytes under filter severity_level=\"CRITICAL\" — question scope"
       ]
     }
   ]

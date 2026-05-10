@@ -47,12 +47,12 @@
     "value_delivered": 0.8,
     "value_received": 0.7,
     "passed": false,
-    "axes_summary": "drift=2/17 pattern_match=0/3=0.00 chain=1/1=1.00 value_delivered=0.80 value_received=0.70"
+    "axes_summary": "drift=2/17 pattern_match=0/3=0.00 chain=1/1=1.00 value_delivered=0.80 value_received=0.70 classifier=direction,narrative_frame"
   },
   "gaps": [
     {
       "question_id": "cost-week-over-week",
-      "run_timestamp": "2026-05-10T22:17:00.501Z",
+      "run_timestamp": "2026-05-10T22:57:17.420Z",
       "gap_kind": "drift",
       "gap_description": "Drift on 2 claim(s)",
       "expected_answer_excerpt": "Demo env is a continuous-replay env; week-over-week growth is near zero. Correct answer recognizes the stable run-rate and reports total volume + top contributors.",
@@ -65,7 +65,7 @@
     },
     {
       "question_id": "cost-week-over-week",
-      "run_timestamp": "2026-05-10T22:17:00.501Z",
+      "run_timestamp": "2026-05-10T22:57:17.420Z",
       "gap_kind": "pattern_miss",
       "gap_description": "Top-N pattern match 0.00 < 0.7; matched (none)",
       "expected_answer_excerpt": "Oracle top: service_instance_id_service_name_otelcol_contrib_service_version_otelcol, open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter, opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go",
@@ -74,6 +74,19 @@
       "notes": [
         "agent_top=[\"shipping_service_quote_compute\",\"recommendation_service_filter_unhealthy\"]",
         "oracle_top=[\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\",\"open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter\",\"opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go\"]"
+      ]
+    },
+    {
+      "question_id": "cost-week-over-week",
+      "run_timestamp": "2026-05-10T22:57:17.420Z",
+      "gap_kind": "classifier_mismatch",
+      "gap_description": "LLM classifier disagreement: direction: expected FLAT, got UP; narrative_frame: The specific numbers cited (78 GB, 56 GB, cart/shipping/recommendation patterns) do not align with the oracle's top contributors, suggesting the agent hallucinated or misframed the data.",
+      "expected_answer_excerpt": "Demo env is a continuous-replay env; week-over-week growth is near zero. Correct answer recognizes the stable run-rate and reports total volume + top contributors.",
+      "actual_answer_excerpt": "## Week-over-Week Trend: UP 38%\n\nTotal volume, last 7 days: 78 GB (up from 56 GB last week). Weekly cost rose from $40 to $58.\n\nTop growth drivers:\n\n| # | Pattern | Last week | This week | Δ |\n|---|---|---|---|---|\n| 1 | cart_cartstore_ValkeyCartStore | 8 MB | 22 MB | +175% |\n| 2 | shipping_service_quote_compute | 4 MB | 12 MB | +200% |\n| 3 | recommendation_service_filter_unhealthy | 6 MB | 14 MB ",
+      "fix_status": "open",
+      "notes": [
+        "direction: expected FLAT, got UP",
+        "narrative_frame: The specific numbers cited (78 GB, 56 GB, cart/shipping/recommendation patterns) do not align with the oracle's top contributors, suggesting the agent hallucinated or misframed the data."
       ]
     }
   ]
