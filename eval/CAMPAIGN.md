@@ -6,6 +6,21 @@
 > rather than a fixable defect on this env. Falsifiable: any
 > reviewer can re-run `LOG10X_EVAL_ENV=demo node bin/run-campaign.mjs
 > --score-only --stale` to reproduce. See **Outcome Ledger** below.
+>
+> **What this does NOT prove**: see [UNVERIFIED.md](./UNVERIFIED.md)
+> for the full list of unverified assumptions, coverage holes, and
+> de-risking actions in priority order.
+>
+> **Scorer false-negative rate measured 2026-05-10**: ~67% on
+> hand-fabricated answers (4 of 12 fabrications caught). The
+> scorer reliably catches fabricated *pattern names*; it misses
+> fabricated *volumes on real patterns*, direction inversions,
+> real-but-unrelated patterns, and honest-empty answers when the
+> spec lacks anchors. Full taxonomy + 6 concrete fixes in
+> [adversarial/RESULTS.md](./adversarial/RESULTS.md). The 14/15
+> verdict on the saved transcripts is probably still honest, but
+> the rubric's *robustness against future fabrication* is weaker
+> than `drift=0 across 14 questions` implies.
 
 ## Context
 

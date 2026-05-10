@@ -1,0 +1,86 @@
+{
+  "question_id": "error-severity-distribution",
+  "transcript_path": "eval/adversarial/error-severity-distribution/honest-empty/transcript.json",
+  "verdict": {
+    "drift_score": 1,
+    "drift_supported": 0,
+    "drift_inconclusive": 0,
+    "pattern_match": {
+      "agent_top_patterns": [],
+      "oracle_top_patterns": [],
+      "matched": 0,
+      "missed": 0,
+      "extra": 0,
+      "score": 1
+    },
+    "chain_alignment": {
+      "expected": [
+        "log10x_list_by_label"
+      ],
+      "actual": [
+        "log10x_discover_labels",
+        "log10x_discover_labels",
+        "log10x_cost_drivers",
+        "log10x_list_by_label",
+        "log10x_top_patterns"
+      ],
+      "hits": [
+        "log10x_list_by_label"
+      ],
+      "misses": [],
+      "score": 1
+    },
+    "value_delivered": -1,
+    "value_received": -1,
+    "passed": false,
+    "axes_summary": "drift=0/0 pattern_match=0/0=1.00 chain=1/1=1.00 value_delivered=-1.00 value_received=-1.00"
+  },
+  "oracle": {
+    "numericClaimCount": 0,
+    "patternClaimCount": 0,
+    "supported": 0,
+    "unsupported": 0,
+    "inconclusive": 0,
+    "driftScore": 0,
+    "details": []
+  },
+  "pattern_match": {
+    "agent_top_patterns": [],
+    "oracle_top_patterns": [],
+    "matched": 0,
+    "missed": 0,
+    "extra": 0,
+    "score": 1
+  },
+  "chain_alignment": {
+    "expected": [
+      "log10x_list_by_label"
+    ],
+    "actual": [
+      "log10x_discover_labels",
+      "log10x_discover_labels",
+      "log10x_cost_drivers",
+      "log10x_list_by_label",
+      "log10x_top_patterns"
+    ],
+    "hits": [
+      "log10x_list_by_label"
+    ],
+    "misses": [],
+    "score": 1
+  },
+  "gaps": [
+    {
+      "question_id": "error-severity-distribution",
+      "run_timestamp": "2026-05-10T17:25:04.349Z",
+      "gap_kind": "drift",
+      "gap_description": "Drift on 1 claim(s)",
+      "expected_answer_excerpt": "83% of demo-env volume is UNTAGGED (no severity_level label). ERROR is the second-largest tier at ~8.6% / 464MB. CRITICAL is rare (~2MB).",
+      "actual_answer_excerpt": "No severity_level data is available on this environment. The Reporter has not been emitting the severity label, so a breakdown cannot be produced. Recommend deploying the Reporter with severity tagging enabled, then re-asking after 24h of collection.",
+      "fix_status": "open",
+      "notes": [
+        "missing must-mention \"ERROR\""
+      ]
+    }
+  ]
+}

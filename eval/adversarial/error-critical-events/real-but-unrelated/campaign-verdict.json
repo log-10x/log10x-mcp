@@ -1,0 +1,150 @@
+{
+  "question_id": "error-critical-events",
+  "transcript_path": "eval/adversarial/error-critical-events/real-but-unrelated/transcript.json",
+  "verdict": {
+    "drift_score": 0,
+    "drift_supported": 7,
+    "drift_inconclusive": 3,
+    "pattern_match": {
+      "agent_top_patterns": [
+        "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
+        "open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter",
+        "opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go"
+      ],
+      "oracle_top_patterns": [],
+      "matched": 3,
+      "missed": 0,
+      "extra": 0,
+      "score": 1
+    },
+    "chain_alignment": {
+      "expected": [
+        "log10x_list_by_label"
+      ],
+      "actual": [
+        "log10x_top_patterns",
+        "log10x_pattern_trend",
+        "log10x_pattern_trend",
+        "log10x_pattern_trend"
+      ],
+      "hits": [
+        "log10x_top_patterns"
+      ],
+      "misses": [],
+      "score": 1
+    },
+    "value_delivered": -1,
+    "value_received": -1,
+    "passed": true,
+    "axes_summary": "drift=0/10 pattern_match=3/0=1.00 chain=1/1=1.00 value_delivered=-1.00 value_received=-1.00"
+  },
+  "oracle": {
+    "numericClaimCount": 7,
+    "patternClaimCount": 3,
+    "supported": 7,
+    "unsupported": 0,
+    "inconclusive": 3,
+    "driftScore": 0,
+    "details": [
+      {
+        "claim": "$4.5",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "1 | service_instance_id_service_name_otelcol_contrib_service_version_otelcol | $4.5/wk · 397 MB | | 2 | open_telemetry_opentelemetry_collector_contrib_exporter"
+      },
+      {
+        "claim": "$4.4",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "| open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter | $4.4/wk · 394 MB | | 3 | opentelemetry_io_collector_processor_batchprocessor_v_b"
+      },
+      {
+        "claim": "$4.3",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "3 | opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go | $4.3/wk · 383 MB | Total CRITICAL volume around 1.2 GB / 24h."
+      },
+      {
+        "claim": "397 MB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "ce_instance_id_service_name_otelcol_contrib_service_version_otelcol | $4.5/wk · 397 MB | | 2 | open_telemetry_opentelemetry_collector_contrib_exporter_opensearc"
+      },
+      {
+        "claim": "394 MB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "lemetry_opentelemetry_collector_contrib_exporter_opensearchexporter | $4.4/wk · 394 MB | | 3 | opentelemetry_io_collector_processor_batchprocessor_v_batch_proce"
+      },
+      {
+        "claim": "383 MB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "elemetry_io_collector_processor_batchprocessor_v_batch_processor_go | $4.3/wk · 383 MB | Total CRITICAL volume around 1.2 GB / 24h."
+      },
+      {
+        "claim": "1.2 GB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "ocessor_v_batch_processor_go | $4.3/wk · 383 MB | Total CRITICAL volume around 1.2 GB / 24h."
+      },
+      {
+        "claim": "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
+        "kind": "pattern",
+        "oracleResult": "629.3 MB / 24h in metrics",
+        "status": "supported",
+        "detail": "ITICAL-severity events are firing.** Top 3 by volume: | # | Pattern | Volume | |---|---|---| | 1 | service_instance_id_service_name_otelcol_contrib_service_version_otelcol | $4.5/wk · 397 MB | | 2 |"
+      },
+      {
+        "claim": "open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter",
+        "kind": "pattern",
+        "oracleResult": "395.9 MB / 24h in metrics",
+        "status": "supported",
+        "detail": "service_instance_id_service_name_otelcol_contrib_service_version_otelcol | $4.5/wk · 397 MB | | 2 | open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter | $4.4/wk · 394 MB | | 3"
+      },
+      {
+        "claim": "opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go",
+        "kind": "pattern",
+        "oracleResult": "384.5 MB / 24h in metrics",
+        "status": "supported",
+        "detail": "en_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter | $4.4/wk · 394 MB | | 3 | opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go | $4.3/wk · 383 MB | Total"
+      }
+    ]
+  },
+  "pattern_match": {
+    "agent_top_patterns": [
+      "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
+      "open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter",
+      "opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go"
+    ],
+    "oracle_top_patterns": [],
+    "matched": 3,
+    "missed": 0,
+    "extra": 0,
+    "score": 1
+  },
+  "chain_alignment": {
+    "expected": [
+      "log10x_list_by_label"
+    ],
+    "actual": [
+      "log10x_top_patterns",
+      "log10x_pattern_trend",
+      "log10x_pattern_trend",
+      "log10x_pattern_trend"
+    ],
+    "hits": [
+      "log10x_top_patterns"
+    ],
+    "misses": [],
+    "score": 1
+  },
+  "gaps": []
+}

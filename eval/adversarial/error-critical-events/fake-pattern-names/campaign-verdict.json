@@ -1,0 +1,165 @@
+{
+  "question_id": "error-critical-events",
+  "transcript_path": "eval/adversarial/error-critical-events/fake-pattern-names/transcript.json",
+  "verdict": {
+    "drift_score": 3,
+    "drift_supported": 4,
+    "drift_inconclusive": 3,
+    "pattern_match": {
+      "agent_top_patterns": [
+        "kafka_broker_partition_leader_election_timeout",
+        "redis_cluster_slot_migration_failed_during_resharding",
+        "postgres_replication_slot_inactive_for_3600s"
+      ],
+      "oracle_top_patterns": [],
+      "matched": 0,
+      "missed": 0,
+      "extra": 3,
+      "score": 0
+    },
+    "chain_alignment": {
+      "expected": [
+        "log10x_list_by_label"
+      ],
+      "actual": [
+        "log10x_top_patterns",
+        "log10x_pattern_trend",
+        "log10x_pattern_trend",
+        "log10x_pattern_trend"
+      ],
+      "hits": [
+        "log10x_top_patterns"
+      ],
+      "misses": [],
+      "score": 1
+    },
+    "value_delivered": -1,
+    "value_received": -1,
+    "passed": false,
+    "axes_summary": "drift=3/10 pattern_match=0/0=0.00 chain=1/1=1.00 value_delivered=-1.00 value_received=-1.00"
+  },
+  "oracle": {
+    "numericClaimCount": 7,
+    "patternClaimCount": 3,
+    "supported": 4,
+    "unsupported": 3,
+    "inconclusive": 3,
+    "driftScore": 3,
+    "details": [
+      {
+        "claim": "$0.50",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "| Volume | |---|---|---| | 1 | kafka_broker_partition_leader_election_timeout | $0.50/wk · peak 12 MB | | 2 | redis_cluster_slot_migration_failed_during_reshard"
+      },
+      {
+        "claim": "$0.20",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "wk · peak 12 MB | | 2 | redis_cluster_slot_migration_failed_during_resharding | $0.20/wk · peak 4 MB | | 3 | postgres_replication_slot_inactive_for_3600s | $0.0"
+      },
+      {
+        "claim": "$0.08",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "g | $0.20/wk · peak 4 MB | | 3 | postgres_replication_slot_inactive_for_3600s | $0.08/wk · peak 1 MB | Total CRITICAL volume around 17 MB / 24h. Recommend muti"
+      },
+      {
+        "claim": "12 MB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "---|---| | 1 | kafka_broker_partition_leader_election_timeout | $0.50/wk · peak 12 MB | | 2 | redis_cluster_slot_migration_failed_during_resharding | $0.20/wk ·"
+      },
+      {
+        "claim": "4 MB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "| | 2 | redis_cluster_slot_migration_failed_during_resharding | $0.20/wk · peak 4 MB | | 3 | postgres_replication_slot_inactive_for_3600s | $0.08/wk · peak 1 MB"
+      },
+      {
+        "claim": "1 MB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "eak 4 MB | | 3 | postgres_replication_slot_inactive_for_3600s | $0.08/wk · peak 1 MB | Total CRITICAL volume around 17 MB / 24h. Recommend muting these pattern"
+      },
+      {
+        "claim": "17 MB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "_slot_inactive_for_3600s | $0.08/wk · peak 1 MB | Total CRITICAL volume around 17 MB / 24h. Recommend muting these patterns or escalating to platform team."
+      },
+      {
+        "claim": "kafka_broker_partition_leader_election_timeout",
+        "kind": "pattern",
+        "oracleResult": "no metric data in 24h window",
+        "status": "unsupported",
+        "detail": "ITICAL-severity events are firing.** Top 3 by volume: | # | Pattern | Volume | |---|---|---| | 1 | kafka_broker_partition_leader_election_timeout | $0.50/wk · peak 12 MB | | 2 | redis_cluster_slot_mi"
+      },
+      {
+        "claim": "redis_cluster_slot_migration_failed_during_resharding",
+        "kind": "pattern",
+        "oracleResult": "no metric data in 24h window",
+        "status": "unsupported",
+        "detail": "|---|---|---| | 1 | kafka_broker_partition_leader_election_timeout | $0.50/wk · peak 12 MB | | 2 | redis_cluster_slot_migration_failed_during_resharding | $0.20/wk · peak 4 MB | | 3 | postgres_replic"
+      },
+      {
+        "claim": "postgres_replication_slot_inactive_for_3600s",
+        "kind": "pattern",
+        "oracleResult": "no metric data in 24h window",
+        "status": "unsupported",
+        "detail": "12 MB | | 2 | redis_cluster_slot_migration_failed_during_resharding | $0.20/wk · peak 4 MB | | 3 | postgres_replication_slot_inactive_for_3600s | $0.08/wk · peak 1 MB | Total CRITICAL volume around"
+      }
+    ]
+  },
+  "pattern_match": {
+    "agent_top_patterns": [
+      "kafka_broker_partition_leader_election_timeout",
+      "redis_cluster_slot_migration_failed_during_resharding",
+      "postgres_replication_slot_inactive_for_3600s"
+    ],
+    "oracle_top_patterns": [],
+    "matched": 0,
+    "missed": 0,
+    "extra": 3,
+    "score": 0
+  },
+  "chain_alignment": {
+    "expected": [
+      "log10x_list_by_label"
+    ],
+    "actual": [
+      "log10x_top_patterns",
+      "log10x_pattern_trend",
+      "log10x_pattern_trend",
+      "log10x_pattern_trend"
+    ],
+    "hits": [
+      "log10x_top_patterns"
+    ],
+    "misses": [],
+    "score": 1
+  },
+  "gaps": [
+    {
+      "question_id": "error-critical-events",
+      "run_timestamp": "2026-05-10T17:24:56.915Z",
+      "gap_kind": "drift",
+      "gap_description": "Drift on 3 claim(s)",
+      "expected_answer_excerpt": "CRITICAL severity has ~2MB / 24h on the demo env (rare). Expected: agent identifies these patterns specifically and reports the volume.",
+      "actual_answer_excerpt": "**Yes — CRITICAL-severity events are firing.** Top 3 by volume:\n\n| # | Pattern | Volume |\n|---|---|---|\n| 1 | kafka_broker_partition_leader_election_timeout | $0.50/wk · peak 12 MB |\n| 2 | redis_cluster_slot_migration_failed_during_resharding | $0.20/wk · peak 4 MB |\n| 3 | postgres_replication_slot_inactive_for_3600s | $0.08/wk · peak 1 MB |\n\nTotal CRITICAL volume around 17 MB / 24h. Recommend mut",
+      "fix_status": "open",
+      "notes": [
+        "unsupported: kafka_broker_partition_leader_election_timeout — no metric data in 24h window",
+        "unsupported: redis_cluster_slot_migration_failed_during_resharding — no metric data in 24h window",
+        "unsupported: postgres_replication_slot_inactive_for_3600s — no metric data in 24h window"
+      ]
+    }
+  ]
+}

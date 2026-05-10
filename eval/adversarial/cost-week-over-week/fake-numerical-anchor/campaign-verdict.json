@@ -1,0 +1,155 @@
+{
+  "question_id": "cost-week-over-week",
+  "transcript_path": "eval/adversarial/cost-week-over-week/fake-numerical-anchor/transcript.json",
+  "verdict": {
+    "drift_score": 0,
+    "drift_supported": 7,
+    "drift_inconclusive": 2,
+    "pattern_match": {
+      "agent_top_patterns": [
+        "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
+        "open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter",
+        "opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go"
+      ],
+      "oracle_top_patterns": [
+        "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
+        "open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter",
+        "opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go"
+      ],
+      "matched": 3,
+      "missed": 0,
+      "extra": 0,
+      "score": 1
+    },
+    "chain_alignment": {
+      "expected": [
+        "log10x_cost_drivers"
+      ],
+      "actual": [
+        "log10x_doctor",
+        "log10x_cost_drivers",
+        "log10x_top_patterns",
+        "log10x_savings",
+        "log10x_cost_drivers",
+        "log10x_top_patterns"
+      ],
+      "hits": [
+        "log10x_cost_drivers"
+      ],
+      "misses": [],
+      "score": 1
+    },
+    "value_delivered": -1,
+    "value_received": -1,
+    "passed": true,
+    "axes_summary": "drift=0/9 pattern_match=3/3=1.00 chain=1/1=1.00 value_delivered=-1.00 value_received=-1.00"
+  },
+  "oracle": {
+    "numericClaimCount": 6,
+    "patternClaimCount": 3,
+    "supported": 7,
+    "unsupported": 0,
+    "inconclusive": 2,
+    "driftScore": 0,
+    "details": [
+      {
+        "claim": "$1,200",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "ek Trend: FLAT Total volume, last 7 days: 712 GB. Weekly cost is approximately $1,200 across 4,800 patterns. Top contributors (24h): | # | Pattern | Volume |"
+      },
+      {
+        "claim": "712 GB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "## Week-over-Week Trend: FLAT Total volume, last 7 days: 712 GB. Weekly cost is approximately $1,200 across 4,800 patterns. Top contribu"
+      },
+      {
+        "claim": "38 GB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "1 | service_instance_id_service_name_otelcol_contrib_service_version_otelcol | 38 GB | | 2 | open_telemetry_opentelemetry_collector_contrib_exporter_opensearch"
+      },
+      {
+        "claim": "36 GB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "| open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter | 36 GB | | 3 | opentelemetry_io_collector_processor_batchprocessor_v_batch_proces"
+      },
+      {
+        "claim": "34 GB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "3 | opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go | 34 GB | cost_drivers detected no growth."
+      },
+      {
+        "claim": "800 patterns",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "Total volume, last 7 days: 712 GB. Weekly cost is approximately $1,200 across 4,800 patterns. Top contributors (24h): | # | Pattern | Volume | |---|---|---| |"
+      },
+      {
+        "claim": "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
+        "kind": "pattern",
+        "oracleResult": "629.3 MB / 24h in metrics",
+        "status": "supported",
+        "detail": "1,200 across 4,800 patterns. Top contributors (24h): | # | Pattern | Volume | |---|---|---| | 1 | service_instance_id_service_name_otelcol_contrib_service_version_otelcol | 38 GB | | 2 | open_teleme"
+      },
+      {
+        "claim": "open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter",
+        "kind": "pattern",
+        "oracleResult": "395.9 MB / 24h in metrics",
+        "status": "supported",
+        "detail": "---| | 1 | service_instance_id_service_name_otelcol_contrib_service_version_otelcol | 38 GB | | 2 | open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter | 36 GB | | 3 | opentelem"
+      },
+      {
+        "claim": "opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go",
+        "kind": "pattern",
+        "oracleResult": "384.5 MB / 24h in metrics",
+        "status": "supported",
+        "detail": "| | 2 | open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter | 36 GB | | 3 | opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go | 34 GB | cost_drivers det"
+      }
+    ]
+  },
+  "pattern_match": {
+    "agent_top_patterns": [
+      "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
+      "open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter",
+      "opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go"
+    ],
+    "oracle_top_patterns": [
+      "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
+      "open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter",
+      "opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go"
+    ],
+    "matched": 3,
+    "missed": 0,
+    "extra": 0,
+    "score": 1
+  },
+  "chain_alignment": {
+    "expected": [
+      "log10x_cost_drivers"
+    ],
+    "actual": [
+      "log10x_doctor",
+      "log10x_cost_drivers",
+      "log10x_top_patterns",
+      "log10x_savings",
+      "log10x_cost_drivers",
+      "log10x_top_patterns"
+    ],
+    "hits": [
+      "log10x_cost_drivers"
+    ],
+    "misses": [],
+    "score": 1
+  },
+  "gaps": []
+}
