@@ -1,0 +1,30 @@
+{
+  "id": "error-untagged-explanation",
+  "title": "Errors — explain the untagged-severity volume",
+  "category": "error-levels",
+  "prompt": "We see a lot of log volume without any severity tag. Tell me what fraction of our volume is untagged severity, why this might be happening, and how to fix it — without recommending we mute it (untagged content can still be important).",
+  "persona": "Platform engineer evaluating logging hygiene. Knows that untagged severity is a structural issue, not a candidate for muting.",
+  "budget_hint": "2-4 tool calls.",
+  "expected_answer": {
+    "summary": "83% of demo-env volume is UNTAGGED severity_level. This is a labeling-quality issue, not a service issue. Expected response: identify the untagged share, recommend severity enrichment, NOT recommend muting.",
+    "top_patterns": [],
+    "must_mention": [
+      "untagged"
+    ],
+    "must_not_mention": [
+      "mute the untagged"
+    ],
+    "expected_severity_split": {
+      "(untagged)": 4485317914.9425955,
+      "CRITICAL": 2231287.724769979,
+      "DEBUG": 218716469.29287112,
+      "ERROR": 465035485.26829433,
+      "INFO": 127705408.67236903,
+      "TRACE": 97831415.47077928
+    },
+    "expected_tool_chain": [
+      "log10x_list_by_label"
+    ],
+    "snapshot_ts": "2026-05-10T02:37:41.860Z"
+  }
+}

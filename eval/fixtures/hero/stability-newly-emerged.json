@@ -1,0 +1,29 @@
+{
+  "id": "stability-newly-emerged",
+  "title": "Stability — newly emerged patterns in the last hour",
+  "category": "stability",
+  "prompt": "Are there any patterns that have just started firing in the last hour — patterns that were silent an hour ago but are active now? List up to 3, name them specifically, and characterize whether they look like incidents or normal new traffic.",
+  "persona": "Oncall SRE responding to a vague 'something weird is happening' report.",
+  "budget_hint": "3-5 tool calls.",
+  "expected_answer": {
+    "summary": "In the last 1 hour, 2 patterns newly emerged. Top: service_name_product_reviews_trace_sampled_True_Returning_an_AI_assistant.",
+    "top_patterns": [
+      {
+        "name": "service_name_product_reviews_trace_sampled_True_Returning_an_AI_assistant",
+        "bytes_24h": 0
+      },
+      {
+        "name": "request_received_preparing_random_response_trace_id_span_id_trace_flags",
+        "bytes_24h": 0
+      }
+    ],
+    "must_mention": [
+      "service"
+    ],
+    "expected_tool_chain": [
+      "log10x_top_patterns",
+      "log10x_investigate"
+    ],
+    "snapshot_ts": "2026-05-10T02:37:41.860Z"
+  }
+}

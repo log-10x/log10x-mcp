@@ -351,3 +351,130 @@ function unitToBytes(unit: string): number {
 
 // Re-export for caller convenience.
 export { promQuery };
+
+// ── Campaign scoring extensions ─────────────────────────────────────────
+
+/**
+ * Extract the top-N pattern names the agent referenced in its
+ * synthesis. Heuristic:
+ *   1. Find every snake_case-ish token with at least 3 underscores
+ *      and ≥14 chars (already in PATTERN_NAME_RE for drift checks).
+ *   2. Count mentions per token.
+ *   3. Return the top-N by mention count.
+ *
+ * This is an approximation — agents sometimes mention a pattern once
+ * in a recommendation and four times in a table; we don't try to
+ * distinguish "the answer" from "supporting context". But the
+ * top-mention heuristic is robust enough that the top-N pattern-match
+ * score correlates well with whether the agent actually identified
+ * the right patterns.
+ */
+export function extractAgentTopPatterns(text: string, n: number = 3): string[] {
+  const counts = new Map<string, number>();
+  for (const m of text.matchAll(/(?<![\\bA-Za-z])\b([a-z][a-z0-9]+(?:_[a-z0-9]+){3,})\b/g)) {
+    const name = m[1];
+    // Skip MCP tool names (they appear naturally in agent prose).
+    if (name.startsWith('log10x_')) continue;
+    counts.set(name, (counts.get(name) ?? 0) + 1);
+  }
+  // Also pick up "display form" — space-separated tokens MCP renders.
+  // The agent may quote them verbatim; convert to snake_case for
+  // comparison.
+  for (const m of text.matchAll(/\b([a-z]+(?:\s+[a-z]+){3,})\b/g)) {
+    const candidate = m[1].toLowerCase().split(/\s+/).join('_');
+    if (counts.has(candidate)) continue;
+    if (counts.size > 50) break; // cap noise
+    // Light heuristic: require the candidate to look like a pattern
+    // (no common stop-word run).
+    if (/^(the|a|an|of|to|in|on|with|for|by|and|or)\s/.test(m[1].toLowerCase())) continue;
+    counts.set(candidate, (counts.get(candidate) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, n)
+    .map((e) => e[0]);
+}
+
+/**
+ * Score the agent's top-N against the oracle's top-N. Names match
+ * loosely: case-insensitive, with snake_case normalization.
+ *
+ * The score is symmetric in the sense that BOTH sides matter — an
+ * agent that says "X" when oracle says "Y, Z, W" gets 0/3 even though
+ * X might exist in metrics. The point is: did the agent identify the
+ * patterns the oracle considers most important for this question?
+ */
+export function scoreTopNMatch(
+  agentTop: string[],
+  oracleTop: string[]
+): { matched: number; missed: number; extra: number; score: number; matched_names: string[] } {
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  const oracleSet = new Set(oracleTop.map(norm));
+  const agentSet = new Set(agentTop.map(norm));
+
+  const matched_names: string[] = [];
+  let matched = 0;
+  for (const o of oracleTop) {
+    const n = norm(o);
+    // Loose match: agent mentions a name that contains a substantial
+    // substring of the oracle name, or vice-versa.
+    const hit = [...agentSet].some(
+      (a) => a === n || a.includes(n) || n.includes(a)
+    );
+    if (hit) {
+      matched++;
+      matched_names.push(o);
+    }
+  }
+  const missed = Math.max(0, oracleTop.length - matched);
+  let extra = 0;
+  for (const a of agentTop) {
+    const n = norm(a);
+    const hit = [...oracleSet].some((o) => o === n || o.includes(n) || n.includes(o));
+    if (!hit) extra++;
+  }
+  const score = (matched + missed) > 0 ? matched / (matched + missed) : 0;
+  return { matched, missed, extra, score, matched_names };
+}
+
+/**
+ * Score whether the bash trace contains the expected_tool_chain in
+ * order. Each tool-name in `expected` must appear at least once in
+ * `actual`, and they must appear in order (subsequence match).
+ */
+export function scoreChainAlignment(
+  expected: string[],
+  actual: string[]
+): { hits: string[]; misses: string[]; score: number } {
+  if (expected.length === 0) return { hits: [], misses: [], score: 1 };
+  const hits: string[] = [];
+  const misses: string[] = [];
+  let cursor = 0;
+  for (const e of expected) {
+    const idx = actual.indexOf(e, cursor);
+    if (idx >= 0) {
+      hits.push(e);
+      cursor = idx + 1;
+    } else {
+      misses.push(e);
+    }
+  }
+  return { hits, misses, score: hits.length / expected.length };
+}
+
+/**
+ * Pull the MCP tool names out of a hero-runner's bash trace. Each
+ * bash command of the form `node .../mcp-call.mjs --tool <name> --args <json>`
+ * produces one tool name.
+ */
+export function extractToolChainFromBash(
+  bashCommands: Array<{ cmd: string }>
+): string[] {
+  const out: string[] = [];
+  for (const c of bashCommands) {
+    const m = c.cmd.match(/--tool\s+(\S+)/);
+    if (m) out.push(m[1]);
+  }
+  return out;
+}
+

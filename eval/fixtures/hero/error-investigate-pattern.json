@@ -1,0 +1,22 @@
+{
+  "id": "error-investigate-pattern",
+  "title": "Errors — investigate the top error",
+  "category": "error-levels",
+  "prompt": "Take our top ERROR-severity log pattern and run a full investigate on it. Tell me whether it's an acute spike, gradual drift, or stable. Quote actual rates and time windows from the tool output.",
+  "persona": "Oncall SRE doing root-cause work after a quiet alert.",
+  "budget_hint": "4-6 tool calls; log10x_investigate is required.",
+  "expected_answer": {
+    "summary": "Investigation of the top ERROR pattern should produce a coherent report (acute-spike or stable). Expected to use log10x_investigate with the resolved pattern name.",
+    "top_patterns": [
+      {
+        "name": "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
+        "bytes_24h": 397670041.1053754,
+        "severity": "ERROR"
+      }
+    ],
+    "expected_tool_chain": [
+      "log10x_investigate"
+    ],
+    "snapshot_ts": "2026-05-10T02:37:41.860Z"
+  }
+}

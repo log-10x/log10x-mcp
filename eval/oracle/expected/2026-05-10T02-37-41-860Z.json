@@ -1,0 +1,140 @@
+{
+  "taken_at": "2026-05-10T02:37:41.860Z",
+  "env_mode": "demo",
+  "total_volume_24h_bytes": 5396837981.371679,
+  "pattern_cardinality": 252,
+  "top_patterns_24h": [
+    {
+      "hash": "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
+      "service": "",
+      "severity": "ERROR",
+      "bytes": 397670041.1053754
+    },
+    {
+      "hash": "open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter",
+      "service": "",
+      "severity": "",
+      "bytes": 394567571.3816197
+    },
+    {
+      "hash": "opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go",
+      "service": "",
+      "severity": "",
+      "bytes": 383184393.0390252
+    },
+    {
+      "hash": "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
+      "service": "",
+      "severity": "DEBUG",
+      "bytes": 218716469.29287112
+    },
+    {
+      "hash": "go_opentelemetry_io_collector_consumer_ConsumeLogsFunc_ConsumeLogs",
+      "service": "",
+      "severity": "",
+      "bytes": 186713691.51554352
+    },
+    {
+      "hash": "tgo_opentelemetry_io_collector_consumer_logs_go",
+      "service": "",
+      "severity": "",
+      "bytes": 185161439.92337155
+    },
+    {
+      "hash": "opensearch_project_opensearch_go_v_v_opensearchtransport_opensearchtransport_go",
+      "service": "",
+      "severity": "",
+      "bytes": 129797799.80257103
+    },
+    {
+      "hash": "opentelemetry_io_collector_exporter_exporterhelper_v_internal_base_exporter",
+      "service": "",
+      "severity": "",
+      "bytes": 128615131.92282096
+    },
+    {
+      "hash": "opentelemetry_io_collector_exporter_exporterhelper_v_internal_new_request_go",
+      "service": "",
+      "severity": "",
+      "bytes": 128171631.46791469
+    }
+  ],
+  "severity_split": [
+    {
+      "severity": "(untagged)",
+      "bytes": 4485317914.9425955
+    },
+    {
+      "severity": "CRITICAL",
+      "bytes": 2231287.724769979
+    },
+    {
+      "severity": "DEBUG",
+      "bytes": 218716469.29287112
+    },
+    {
+      "severity": "ERROR",
+      "bytes": 465035485.26829433
+    },
+    {
+      "severity": "INFO",
+      "bytes": 127705408.67236903
+    },
+    {
+      "severity": "TRACE",
+      "bytes": 97831415.47077928
+    }
+  ],
+  "service_split": [
+    {
+      "value": "(empty)",
+      "bytes": 5395002761.079294
+    },
+    {
+      "value": "email",
+      "bytes": 1837016.2793170712
+    }
+  ],
+  "namespace_split": [
+    {
+      "value": "(empty)",
+      "bytes": 5395000943.711873
+    },
+    {
+      "value": "otel-demo",
+      "bytes": 1837037.6598068743
+    }
+  ],
+  "freshness_seconds": {
+    "edge": 6.671999931335449,
+    "cloud": null
+  },
+  "growth_deltas_24h": [
+    {
+      "hash": "OpenTelemetry_error_Export_failure_exception_Export_retry_limit_exceeded_previous",
+      "delta_bytes": 442438.8270911407
+    },
+    {
+      "hash": "cart_cartstore_ValkeyCartStore",
+      "delta_bytes": 438645.8623796627
+    },
+    {
+      "hash": "Deleted_producer_state_snapshot_tmp_kafka_logs_cluster_metadata_snapshot",
+      "delta_bytes": 411582.8321929723
+    },
+    {
+      "hash": "cluster_metadata_timeindex_deleted_org_apache_kafka_storage_internals_LogSegment",
+      "delta_bytes": 403131.79618349764
+    }
+  ],
+  "newly_emerged_5m_vs_1h": [
+    {
+      "hash": "service_name_product_reviews_trace_sampled_True_Returning_an_AI_assistant",
+      "rate_5m": 0.03964530575370103
+    },
+    {
+      "hash": "request_received_preparing_random_response_trace_id_span_id_trace_flags",
+      "rate_5m": 0.016630910209715778
+    }
+  ]
+}

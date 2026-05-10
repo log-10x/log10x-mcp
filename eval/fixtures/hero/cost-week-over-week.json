@@ -1,0 +1,31 @@
+{
+  "id": "cost-week-over-week",
+  "title": "Cost — week-over-week change",
+  "category": "cost",
+  "prompt": "How has our log volume changed week-over-week? Are we trending up, flat, or down? Quote actual numbers and explain.",
+  "persona": "Platform engineer building a quarterly trend chart.",
+  "budget_hint": "3-5 tool calls.",
+  "expected_answer": {
+    "summary": "Demo env is a continuous-replay env; week-over-week growth is near zero. Correct answer recognizes the stable run-rate and reports total volume + top contributors.",
+    "top_patterns": [
+      {
+        "name": "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
+        "bytes_24h": 397670041.1053754,
+        "severity": "ERROR"
+      },
+      {
+        "name": "open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter",
+        "bytes_24h": 394567571.3816197
+      },
+      {
+        "name": "opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go",
+        "bytes_24h": 383184393.0390252
+      }
+    ],
+    "must_mention": [],
+    "expected_tool_chain": [
+      "log10x_cost_drivers"
+    ],
+    "snapshot_ts": "2026-05-10T02:37:41.860Z"
+  }
+}

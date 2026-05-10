@@ -1,0 +1,20 @@
+{
+  "id": "stability-services-emitting",
+  "title": "Stability — what services are emitting",
+  "category": "stability",
+  "prompt": "Which services are actually emitting logs into our metrics pipeline right now? Tell me the count and name the top contributors by volume. If most volume is untagged service, call that out as a labeling issue.",
+  "persona": "Platform engineer auditing service-level coverage.",
+  "budget_hint": "1-3 tool calls.",
+  "expected_answer": {
+    "summary": "Only 2 distinct services in metrics on demo env. (empty)=5395.0MB, email=1.8MB. Note: most volume is untagged service.",
+    "top_patterns": [],
+    "must_mention": [
+      "email"
+    ],
+    "expected_tool_chain": [
+      "log10x_services"
+    ],
+    "expected_oracle_query": "sum by (tenx_user_service)(increase(all_events_summaryBytes_total[24h]))",
+    "snapshot_ts": "2026-05-10T02:37:41.860Z"
+  }
+}

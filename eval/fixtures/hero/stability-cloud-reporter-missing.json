@@ -1,0 +1,22 @@
+{
+  "id": "stability-cloud-reporter-missing",
+  "title": "Stability — is the cloud reporter healthy",
+  "category": "stability",
+  "prompt": "Is our cloud-tier log reporter healthy? When did it last write metrics? If it's not running or not emitting, tell me plainly — don't paper over a missing tier.",
+  "persona": "SRE auditing observability coverage. A silent reporter is a silent blind spot.",
+  "budget_hint": "1-3 tool calls.",
+  "expected_answer": {
+    "summary": "Cloud reporter cronjob does NOT exist on this env. Expected: agent diagnoses absence (via doctor or services) and notes that cloud-tier metrics are zero.",
+    "top_patterns": [],
+    "must_mention": [
+      "cloud"
+    ],
+    "expected_freshness_seconds": {
+      "cloud": null
+    },
+    "expected_tool_chain": [
+      "log10x_doctor"
+    ],
+    "snapshot_ts": "2026-05-10T02:37:41.860Z"
+  }
+}

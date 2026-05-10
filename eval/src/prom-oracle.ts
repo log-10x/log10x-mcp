@@ -196,3 +196,135 @@ export async function activeTemplateHashes(env: EvalEnv, limit: number = 3): Pro
   const top = await topPatterns(env, '1h', limit);
   return top.map((p) => p.hash);
 }
+
+// ── Campaign oracle snapshot ────────────────────────────────────────────
+
+/**
+ * Severity-distribution snapshot — bytes per `severity_level` label
+ * value over the window. Used by error-levels questions to verify the
+ * agent reports the correct distribution.
+ */
+export async function severitySplit(
+  env: EvalEnv,
+  range: string = '24h'
+): Promise<Array<{ severity: string; bytes: number }>> {
+  const promql = `sum by (severity_level) (increase(all_events_summaryBytes_total[${range}]))`;
+  const r = await promQuery(env, promql);
+  if (r.status !== 'success') return [];
+  return r.data.result.map((row) => ({
+    severity: row.metric.severity_level || '(untagged)',
+    bytes: row.value ? parseFloat(row.value[1]) : 0,
+  }));
+}
+
+/**
+ * Reporter freshness — seconds since the last metric write per tier.
+ * Returns Infinity when a tier has never written.
+ */
+export async function freshness(
+  env: EvalEnv
+): Promise<{ edge: number; cloud: number }> {
+  const out = { edge: Infinity, cloud: Infinity };
+  for (const tier of ['edge', 'cloud'] as const) {
+    const promql = `time() - max(timestamp(all_events_summaryBytes_total{tenx_env="${tier}"}))`;
+    try {
+      const r = await promQuery(env, promql);
+      if (r.status === 'success' && r.data.result.length > 0) {
+        out[tier] = parseFloat(r.data.result[0].value?.[1] ?? 'Infinity');
+      }
+    } catch {
+      // leave as Infinity
+    }
+  }
+  return out;
+}
+
+/**
+ * Top growth deltas — patterns whose 24h volume grew the most vs the
+ * prior 24h window. Subtraction is server-side.
+ */
+export async function growthDeltas(
+  env: EvalEnv,
+  range: string = '24h',
+  limit: number = 5
+): Promise<Array<{ hash: string; delta_bytes: number }>> {
+  const promql =
+    `topk(${limit}, ` +
+    `sum by (message_pattern)(increase(all_events_summaryBytes_total[${range}])) ` +
+    `- sum by (message_pattern)(increase(all_events_summaryBytes_total[${range}] offset 1d)))`;
+  const r = await promQuery(env, promql);
+  if (r.status !== 'success') return [];
+  return r.data.result
+    .map((row) => ({
+      hash: row.metric.message_pattern || '',
+      delta_bytes: row.value ? parseFloat(row.value[1]) : 0,
+    }))
+    .filter((r) => r.hash && r.delta_bytes > 0);
+}
+
+/**
+ * Newly emerged patterns — active in last 5m, silent in the 1h-offset
+ * 5m window. Catches "what just started happening?" questions.
+ */
+export async function newlyEmerged(
+  env: EvalEnv,
+  limit: number = 5
+): Promise<Array<{ hash: string; rate_5m: number }>> {
+  const promql =
+    `topk(${limit}, sum by (message_pattern)(rate(all_events_summaryVolume_total[5m])) ` +
+    `unless on (message_pattern)(rate(all_events_summaryVolume_total[5m] offset 1h) > 0))`;
+  const r = await promQuery(env, promql);
+  if (r.status !== 'success') return [];
+  return r.data.result
+    .map((row) => ({
+      hash: row.metric.message_pattern || '',
+      rate_5m: row.value ? parseFloat(row.value[1]) : 0,
+    }))
+    .filter((r) => r.hash);
+}
+
+/**
+ * Comprehensive snapshot of the env — captures everything the campaign
+ * oracle needs to compute expected answers for hero questions.
+ * Pickled into eval/oracle/expected/<ts>.json by `bin/oracle-probe.mjs`.
+ */
+export interface OracleSnapshot {
+  taken_at: string;
+  env_mode: string;
+  total_volume_24h_bytes: number;
+  pattern_cardinality: number;
+  top_patterns_24h: Array<{ hash: string; service: string; severity: string; bytes: number }>;
+  severity_split: Array<{ severity: string; bytes: number }>;
+  service_split: Array<{ value: string; bytes: number }>;
+  namespace_split: Array<{ value: string; bytes: number }>;
+  freshness_seconds: { edge: number; cloud: number };
+  growth_deltas_24h: Array<{ hash: string; delta_bytes: number }>;
+  newly_emerged_5m_vs_1h: Array<{ hash: string; rate_5m: number }>;
+}
+
+export async function fullSnapshot(env: EvalEnv): Promise<OracleSnapshot> {
+  const [tot, card, top, sev, svc, ns, fresh, growth, emerged] = await Promise.all([
+    totalVolume(env, '24h'),
+    patternCardinality(env, '24h'),
+    topPatterns(env, '24h', 10),
+    severitySplit(env, '24h'),
+    topByLabel(env, 'tenx_user_service', '24h', 10),
+    topByLabel(env, 'k8s_namespace', '24h', 10),
+    freshness(env),
+    growthDeltas(env, '24h', 5),
+    newlyEmerged(env, 5),
+  ]);
+  return {
+    taken_at: new Date().toISOString(),
+    env_mode: env.mode,
+    total_volume_24h_bytes: tot,
+    pattern_cardinality: card,
+    top_patterns_24h: top,
+    severity_split: sev,
+    service_split: svc,
+    namespace_split: ns,
+    freshness_seconds: fresh,
+    growth_deltas_24h: growth,
+    newly_emerged_5m_vs_1h: emerged,
+  };
+}

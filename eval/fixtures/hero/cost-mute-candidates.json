@@ -1,0 +1,36 @@
+{
+  "id": "cost-mute-candidates",
+  "title": "Cost — safest mute candidates",
+  "category": "cost",
+  "prompt": "Identify 3 patterns we could safely mute today. For each, tell me the projected weekly savings, what severity it is, and what would break if we mute it. Run dependency_check before recommending.",
+  "persona": "Senior SRE preparing a mute-now-or-never proposal for a change-review board. The board will reject any recommendation without a dependency-safety check.",
+  "budget_hint": "5-8 tool calls; dependency_check is mandatory.",
+  "expected_answer": {
+    "summary": "Safest mute candidates are high-volume patterns with no severity (or DEBUG/TRACE), which on this env are the OTel collector internals. Agent must mention dependency_check before suggesting mute.",
+    "top_patterns": [
+      {
+        "name": "open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter",
+        "bytes_24h": 394567571.3816197
+      },
+      {
+        "name": "opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go",
+        "bytes_24h": 383184393.0390252
+      },
+      {
+        "name": "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
+        "bytes_24h": 218716469.29287112,
+        "severity": "DEBUG"
+      }
+    ],
+    "must_mention": [
+      "dependency_check",
+      "exclusion_filter"
+    ],
+    "expected_tool_chain": [
+      "log10x_top_patterns",
+      "log10x_dependency_check",
+      "log10x_exclusion_filter"
+    ],
+    "snapshot_ts": "2026-05-10T02:37:41.860Z"
+  }
+}

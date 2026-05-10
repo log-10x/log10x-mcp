@@ -1,0 +1,39 @@
+{
+  "id": "cost-bill-driver",
+  "title": "Cost — what's actually driving the bill",
+  "category": "cost",
+  "prompt": "Our log bill jumped this week. What's driving it? Use cost_drivers as your starting point and report the actual growth deltas, not the current top by volume — I want to know what GREW, not what's biggest.",
+  "persona": "Senior SRE responding to a finance escalation. The user knows that 'biggest right now' and 'grew the most' are different questions.",
+  "budget_hint": "4-7 tool calls.",
+  "expected_answer": {
+    "summary": "Cost growth in the last 24h is dominated by Kafka metadata churn + OTel exporter retry errors. cost_drivers may report 'no drivers detected' on stable replay; correct response is either the actual growth deltas OR the truthful-negative + fallback to top_patterns.",
+    "top_patterns": [
+      {
+        "name": "OpenTelemetry_error_Export_failure_exception_Export_retry_limit_exceeded_previous",
+        "bytes_24h": 442438.8270911407
+      },
+      {
+        "name": "cart_cartstore_ValkeyCartStore",
+        "bytes_24h": 438645.8623796627
+      },
+      {
+        "name": "Deleted_producer_state_snapshot_tmp_kafka_logs_cluster_metadata_snapshot",
+        "bytes_24h": 411582.8321929723
+      },
+      {
+        "name": "cluster_metadata_timeindex_deleted_org_apache_kafka_storage_internals_LogSegment",
+        "bytes_24h": 403131.79618349764
+      }
+    ],
+    "must_mention": [],
+    "must_not_mention": [
+      "cart_cartstore is the top driver",
+      "cart_cartstore drives the bill"
+    ],
+    "expected_tool_chain": [
+      "log10x_cost_drivers"
+    ],
+    "expected_oracle_query": "topk(5, sum by (message_pattern)(increase(all_events_summaryBytes_total[24h])) - sum by (message_pattern)(increase(all_events_summaryBytes_total[24h] offset 1d)))",
+    "snapshot_ts": "2026-05-10T02:37:41.860Z"
+  }
+}

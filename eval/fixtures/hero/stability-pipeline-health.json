@@ -1,0 +1,24 @@
+{
+  "id": "stability-pipeline-health",
+  "title": "Stability — full pipeline health check",
+  "category": "stability",
+  "prompt": "Run a full pipeline health check on this env. Report which tiers (edge, cloud) are healthy, which are degraded, and which are missing entirely. Be specific — quote freshness numbers and any failed checks.",
+  "persona": "Oncall SRE at start-of-shift handover. Wants the no-fluff health digest before stepping into incidents.",
+  "budget_hint": "1-2 tool calls; doctor is the canonical answer.",
+  "expected_answer": {
+    "summary": "Edge tier is healthy (metrics fresh within 7s). Cloud tier has zero metrics — the every-5-min cronjob does not exist on this env. Expected: agent runs doctor and reports both findings.",
+    "top_patterns": [],
+    "must_mention": [
+      "edge",
+      "cloud"
+    ],
+    "expected_freshness_seconds": {
+      "edge": 6.671999931335449,
+      "cloud": null
+    },
+    "expected_tool_chain": [
+      "log10x_doctor"
+    ],
+    "snapshot_ts": "2026-05-10T02:37:41.860Z"
+  }
+}

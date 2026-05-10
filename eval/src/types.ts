@@ -198,6 +198,124 @@ export interface RunReport {
   flags: string[];
 }
 
+// ── Anti-hallucination campaign types (CAMPAIGN.md) ───────────────────
+
+/**
+ * Pre-computed expected answer for a hero question. Populated by
+ * `bin/refresh-expected.mjs` from the latest oracle snapshot. The
+ * sub-agent's actual synthesis is compared against this — strict
+ * pattern-name matching, plus must_mention / must_not_mention checks,
+ * plus a tool-chain alignment check on the bash trace.
+ */
+export interface ExpectedAnswer {
+  /** One-sentence ground truth derivable from the oracle snapshot. */
+  summary: string;
+  /**
+   * Top patterns the agent is expected to surface, ranked. Pulled from
+   * a PromQL query at fixture-refresh time.
+   */
+  top_patterns: Array<{
+    name: string;
+    bytes_24h?: number;
+    severity?: string;
+    service?: string;
+  }>;
+  /** Substrings the synthesis must contain (oracle-traceable facts). */
+  must_mention?: string[];
+  /** Substrings indicating hallucination. */
+  must_not_mention?: string[];
+  /** Tool names that must appear in the bash trace, in order. */
+  expected_tool_chain?: string[];
+  /** Category-specific expected fields (severity split, namespaces, freshness). */
+  expected_severity_split?: Record<string, number>;
+  expected_namespaces?: Array<{ name: string; bytes_24h: number }>;
+  expected_freshness_seconds?: { edge?: number; cloud?: number };
+  /** The exact PromQL the oracle uses to verify; refreshable. */
+  expected_oracle_query?: string;
+  /** Timestamp of the snapshot this was computed from. */
+  snapshot_ts?: string;
+}
+
+/**
+ * Hero specification with optional expected_answer block. The campaign
+ * extends the original hero shape (id/title/prompt/persona/budget) with
+ * the structured ground truth so scoring is no longer "is this
+ * plausible" but "does this match the pre-computed answer".
+ */
+export interface CampaignHeroSpec {
+  id: string;
+  title: string;
+  category: 'cost' | 'error-levels' | 'stability';
+  prompt: string;
+  persona?: string;
+  budget_hint?: string;
+  expected_answer?: ExpectedAnswer;
+}
+
+/**
+ * Top-N pattern-match score: how many of the agent's named patterns
+ * are in the oracle's top-N, vs how many oracle patterns the agent
+ * never mentioned.
+ */
+export interface PatternMatchScore {
+  agent_top_patterns: string[];
+  oracle_top_patterns: string[];
+  matched: number;
+  missed: number;
+  extra: number;
+  /** matched / max(matched + missed, 1) — 0..1. */
+  score: number;
+}
+
+/**
+ * Tool-chain alignment: does the bash trace include the
+ * expected_tool_chain in order?
+ */
+export interface ChainAlignmentScore {
+  expected: string[];
+  actual: string[];
+  hits: string[];
+  misses: string[];
+  /** hits.length / max(expected.length, 1) — 0..1. */
+  score: number;
+}
+
+/**
+ * Five-axis verdict for a hero run. Replaces the older 3-axis
+ * (drift/value-delivered/value-received) verdict.
+ */
+export interface CampaignVerdict {
+  drift_score: number;
+  drift_supported: number;
+  drift_inconclusive: number;
+  pattern_match: PatternMatchScore;
+  chain_alignment: ChainAlignmentScore;
+  value_delivered: number;
+  value_received: number;
+  /** Overall PASS gate: drift=0 AND pattern_match≥0.7 AND chain≥0.7 AND value_delivered≥0.7. */
+  passed: boolean;
+  /** Human-readable axes summary. */
+  axes_summary: string;
+}
+
+/**
+ * Persistent gap record. One JSON file holds an array of these in
+ * eval/gaps/gaps.json. Survives compaction; loaded at every campaign
+ * start, appended on each run that produces a failure.
+ */
+export interface GapRecord {
+  question_id: string;
+  run_timestamp: string;
+  gap_kind: 'drift' | 'pattern_miss' | 'chain_miss' | 'low_value' | 'low_received';
+  gap_description: string;
+  expected_answer_excerpt: string;
+  actual_answer_excerpt: string;
+  fix_status: 'open' | 'in_progress' | 'fixed' | 'wontfix';
+  fix_commit?: string;
+  fix_verified_run_ts?: string;
+  notes: string[];
+}
+
 // ── Anthropic-shape transcript events (subset we write) ───────────────
 
 export type ContentBlock =

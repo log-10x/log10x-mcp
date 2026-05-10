@@ -1,0 +1,28 @@
+{
+  "id": "error-severity-distribution",
+  "title": "Errors — severity distribution",
+  "category": "error-levels",
+  "prompt": "Break down our 24h log volume by severity level. Show me the percentages — what fraction is INFO vs WARN vs ERROR vs CRITICAL etc. If some volume has no severity tag, call that out specifically.",
+  "persona": "Senior SRE writing a logging-quality report. The user knows untagged severity is a label-quality issue worth flagging separately.",
+  "budget_hint": "2-4 tool calls.",
+  "expected_answer": {
+    "summary": "83% of demo-env volume is UNTAGGED (no severity_level label). ERROR is the second-largest tier at ~8.6% / 464MB. CRITICAL is rare (~2MB).",
+    "top_patterns": [],
+    "must_mention": [
+      "ERROR"
+    ],
+    "expected_severity_split": {
+      "(untagged)": 4485317914.9425955,
+      "CRITICAL": 2231287.724769979,
+      "DEBUG": 218716469.29287112,
+      "ERROR": 465035485.26829433,
+      "INFO": 127705408.67236903,
+      "TRACE": 97831415.47077928
+    },
+    "expected_tool_chain": [
+      "log10x_list_by_label"
+    ],
+    "expected_oracle_query": "sum by (severity_level)(increase(all_events_summaryBytes_total[24h]))",
+    "snapshot_ts": "2026-05-10T02:37:41.860Z"
+  }
+}

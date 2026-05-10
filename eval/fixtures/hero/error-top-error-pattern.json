@@ -1,0 +1,27 @@
+{
+  "id": "error-top-error-pattern",
+  "title": "Errors — top ERROR-severity pattern",
+  "category": "error-levels",
+  "prompt": "What's our single highest-volume ERROR-severity log pattern in the last 24h? Name it specifically and tell me how much volume it's producing. Then briefly characterize whether it looks like a real incident or chatter.",
+  "persona": "Oncall SRE reviewing the error backlog. Wants the single biggest pattern, not a top-N list.",
+  "budget_hint": "3-5 tool calls.",
+  "expected_answer": {
+    "summary": "The top ERROR-severity pattern is service_instance_id_service_name_otelcol_contrib_service_version_otelcol at ~397MB / 24h. Total ERROR volume is ~464MB / 24h.",
+    "top_patterns": [
+      {
+        "name": "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
+        "bytes_24h": 397670041.1053754,
+        "severity": "ERROR"
+      }
+    ],
+    "must_mention": [
+      "service_instance_id",
+      "ERROR"
+    ],
+    "expected_tool_chain": [
+      "log10x_top_patterns"
+    ],
+    "expected_oracle_query": "topk(3, sum by (message_pattern)(increase(all_events_summaryBytes_total{severity_level=\"ERROR\"}[24h])))",
+    "snapshot_ts": "2026-05-10T02:37:41.860Z"
+  }
+}
