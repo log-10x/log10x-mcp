@@ -1,0 +1,94 @@
+name: Eval campaign (score-only)
+
+# Re-scores saved hero transcripts against the latest expected_answer
+# state on every PR. This is the falsifiable-proof check from the
+# anti-hallucination campaign — see eval/CAMPAIGN.md.
+#
+# It does NOT spawn sub-agents and does NOT hit Anthropic, so it costs
+# zero tokens and runs without LOG10X_API_KEY. A regression here means
+# either:
+#   - someone moved a hero spec / scorer in a way that breaks already-
+#     captured transcripts (test failure)
+#   - someone changed the rubric (intentional — bump the saved baselines)
+#
+# To re-run the full campaign with fresh sub-agents (costs ~$10), do
+# it locally:
+#   ANTHROPIC_API_KEY=... LOG10X_EVAL_ENV=demo \
+#     node eval/bin/run-campaign.mjs
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'eval/**'
+      - 'src/tools/**'
+      - 'src/lib/**'
+      - 'package.json'
+
+jobs:
+  campaign-rescore:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+          cache: 'npm'
+
+      - name: Install MCP dependencies
+        run: npm ci
+
+      - name: Build MCP
+        run: npm run build
+
+      - name: Install eval dependencies
+        working-directory: eval
+        run: npm install
+
+      - name: Build eval harness
+        working-directory: eval
+        run: npm run build
+
+      - name: Verify gap state is well-formed
+        run: |
+          set -euo pipefail
+          node -e '
+            const g = require("./eval/gaps/gaps.json");
+            if (!Array.isArray(g)) { console.error("gaps.json is not an array"); process.exit(1); }
+            const open = g.filter(x => x.fix_status === "open");
+            console.log(`Total gaps: ${g.length}. Open: ${open.length}.`);
+            if (open.length > 0) {
+              console.error("::warning ::There are open gaps in eval/gaps/gaps.json. Disposition them (fixed / wontfix) before merge.");
+              for (const og of open) console.error(`  open: ${og.question_id} (${og.gap_kind}) — ${og.gap_description}`);
+            }
+            for (const x of g) {
+              if (!x.question_id || !x.gap_kind || !x.fix_status) {
+                console.error(`Malformed gap: ${JSON.stringify(x)}`); process.exit(1);
+              }
+              if (!["open","in_progress","fixed","wontfix"].includes(x.fix_status)) {
+                console.error(`Bad fix_status on ${x.question_id}: ${x.fix_status}`); process.exit(1);
+              }
+            }
+          '
+
+      - name: Re-score saved hero transcripts
+        run: |
+          set -euo pipefail
+          # --score-only: do not spawn agents. --stale: accept saved transcripts
+          # without freshness check. --skip-refresh: do not call oracle (no live env).
+          # If any saved transcript fails to re-score, the script exits non-zero.
+          LOG10X_EVAL_ENV=demo node eval/bin/run-campaign.mjs --score-only --stale --skip-refresh
+
+      - name: Upload re-scored verdicts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: campaign-verdicts
+          path: |
+            eval/reports/hero/CAMPAIGN-PROOF.md
+            eval/reports/hero/SUITE-SUMMARY.md
+            eval/reports/hero/*/*/campaign-verdict.json
+          if-no-files-found: warn
+          retention-days: 14

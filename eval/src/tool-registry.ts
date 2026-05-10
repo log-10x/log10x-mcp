@@ -136,7 +136,51 @@ type AnyArgs = any;
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function parseArgs(schema: Record<string, z.ZodTypeAny>, raw: Record<string, unknown>): any {
-  return z.object(schema).parse(raw);
+  try {
+    return z.object(schema).parse(raw);
+  } catch (e) {
+    if (e instanceof z.ZodError) {
+      throw new Error(formatZodError(e, schema));
+    }
+    throw e;
+  }
+}
+
+/**
+ * Render a Zod error in a way an agent can act on. Stock ZodError JSON
+ * (`[ {received, code, options, path, ...} ]`) reads as a structured
+ * dump and the agent has to puzzle out the field name + fix.
+ *
+ * Surfaced by the anti-hallucination campaign: stability-env-sweep
+ * called `cost_drivers --args '{"timeRange":"1h"}'`, got a raw enum
+ * dump, retried with `'1d'` — costs an extra round-trip and a confused
+ * trace. This formatter pulls the field's `.describe()` text (which
+ * already explains the redirect to pattern_trend / investigate for
+ * sub-day questions) into the error message itself.
+ */
+function formatZodError(e: z.ZodError, schema: Record<string, z.ZodTypeAny>): string {
+  const lines: string[] = [];
+  for (const issue of e.issues) {
+    const field = issue.path.join('.') || '(root)';
+    const fieldSchema = (schema as Record<string, z.ZodTypeAny>)[String(issue.path[0] ?? '')];
+    // Zod attaches the human description on the inner type (after .default()).
+    const describe = fieldSchema?.description ?? '';
+    if (issue.code === 'invalid_enum_value') {
+      const opts = (issue as z.ZodIssue & { options?: readonly string[] }).options ?? [];
+      lines.push(
+        `Invalid value for \`${field}\`: '${(issue as z.ZodIssue & { received?: string }).received}' is not one of ${opts.map(o => `'${o}'`).join(', ')}.` +
+          (describe ? `\n  Field guidance: ${describe}` : '')
+      );
+    } else if (issue.code === 'invalid_type') {
+      lines.push(
+        `Wrong type for \`${field}\`: ${issue.message}.` +
+          (describe ? `\n  Field guidance: ${describe}` : '')
+      );
+    } else {
+      lines.push(`\`${field}\`: ${issue.message}` + (describe ? `\n  Field guidance: ${describe}` : ''));
+    }
+  }
+  return lines.join('\n');
 }
 
 const TOOL_TABLE: Record<string, ExecuteFn> = {

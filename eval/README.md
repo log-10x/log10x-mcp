@@ -33,6 +33,45 @@ ANTHROPIC_API_KEY=... LOG10X_EVAL_ENV=demo \
 node bin/diff-runs.mjs eval/baselines/<sha> eval/reports
 ```
 
+## Anti-hallucination campaign (15 hero questions)
+
+The campaign drives 15 sub-agent (no shared planner context) hero
+questions against the live OTel demo env, scores each on 5 axes
+against a pre-computed Prometheus oracle, and tracks gaps to closure.
+See [CAMPAIGN.md](./CAMPAIGN.md) for the plan, the Outcome Ledger
+(7 fix-rerun cycles, 4→14/15 PASS, $10 / $25 budget), and the
+resume protocol.
+
+```bash
+# refresh the oracle snapshot (writes eval/oracle/expected/<ts>.json + latest.json)
+LOG10X_EVAL_ENV=demo node bin/oracle-probe.mjs --snapshot
+
+# rebuild expected_answer blocks in every fixtures/hero/<id>.json
+LOG10X_EVAL_ENV=demo node bin/refresh-expected.mjs
+
+# run all 15 hero scenarios (full Sonnet driver + judge — costs tokens)
+ANTHROPIC_API_KEY=... LOG10X_EVAL_ENV=demo \
+  node bin/run-campaign.mjs
+
+# re-score saved transcripts only (no LLM cost — falsifiability check)
+LOG10X_EVAL_ENV=demo node bin/run-campaign.mjs --score-only --stale --skip-refresh
+
+# score one saved transcript against its expected_answer
+node bin/score-hero-vs-expected.mjs reports/hero/<id>/<ts>/transcript.jsonl
+```
+
+Persistent state for the campaign:
+
+| Path | Purpose |
+|---|---|
+| `eval/CAMPAIGN.md` | In-repo plan + Outcome Ledger (canonical) |
+| `eval/gaps/gaps.json` | Open + fixed gap records (survives compaction) |
+| `eval/oracle/expected/<ts>.json` | Per-probe oracle snapshot |
+| `eval/oracle/expected/latest.json` | Stable pointer to most recent snapshot |
+| `eval/fixtures/hero/<id>.json` | 15 hero specs with `expected_answer` baked in |
+| `eval/reports/hero/<id>/<ts>/` | Sub-agent transcripts + 5-axis verdict |
+| `eval/reports/hero/CAMPAIGN-PROOF.md` | Falsifiable suite report |
+
 ## Env modes
 
 `LOG10X_EVAL_ENV` selects credentials:
@@ -62,13 +101,30 @@ eval/
     judge.ts                          Sonnet 4.6 LLM-judge for reasoning/value/hallucination
     report-writer.ts                  Markdown report.md + verdict.json
     orchestrator.ts                   Wires runner → validators → judge → report
+    gap-tracker.ts                    GapRecord type + load/append/markFixed/pickNextOpenGap
+    expected-answer.ts                computeExpectedAnswer(question_id, env) — oracle round-trip
+    campaign-scorer.ts                5-axis scorer + two-layer pattern match (oracle exact + Prom existence)
+    hero-runner.ts                    Sub-agent driver (Sonnet via Bash → mcp-call.mjs CLI)
+    hero-oracle.ts                    Pattern extraction + scoreTopNMatch + chain alignment
+    prom-oracle.ts                    Direct PromQL client (independent of MCP code path)
   bin/
     run-scenario.mjs                  Single fixture, one mode
     run-suite.mjs                     Fan-out across fixtures
     judge-only.mjs                    Re-score an existing transcript
     diff-runs.mjs                     Compare report dirs; CI gate
-  fixtures/                           Scenario JSONs (5 Receiver-core to start)
+    run-hero.mjs                      Single hero scenario via sub-agent driver
+    run-campaign.mjs                  Full 15-hero campaign orchestrator (--score-only / --stale / --skip-refresh)
+    refresh-expected.mjs              Rebuild expected_answer blocks against latest oracle
+    score-hero-vs-expected.mjs        Compare a saved transcript against its hero spec's expected_answer
+    oracle-probe.mjs                  Probe Prometheus; --snapshot writes eval/oracle/expected/<ts>.json
+    mcp-call.mjs                      Per-tool CLI surface for sub-agents (no SDK dependency)
+  fixtures/                           Scenario JSONs (Receiver-core)
+  fixtures/hero/                      15 hero specs with expected_answer baked in
+  oracle/expected/                    Per-probe oracle snapshots + latest.json pointer
+  gaps/gaps.json                      Persistent gap records (survives compaction)
   reports/                            Gitignored except .gitkeep
+  reports/hero/<id>/<ts>/             Sub-agent transcripts + verdicts + campaign-verdict.json
+  reports/hero/CAMPAIGN-PROOF.md      Falsifiable suite report
   baselines/                          Committed regression baselines (one dir per SHA)
 ```
 

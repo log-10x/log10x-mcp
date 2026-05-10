@@ -104,14 +104,14 @@
       {
         "claim": "34.9 GB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "Metric | Value (tool-reported) | |---|---| | **Total volume, last 7 days** | **34.9 GB** (log10x_doctor) | | **Weekly cost (7d window)** | **$25/wk** across 1,"
       },
       {
         "claim": "34.9 GB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": ". **For your trend chart:** Plot **flat** — volume is stable week-over-week at ~34.9 GB/7d, $25/wk. No quarter-over-quarter growth signal in the available windo"
       },

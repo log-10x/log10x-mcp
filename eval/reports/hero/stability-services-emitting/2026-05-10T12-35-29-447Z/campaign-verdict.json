@@ -58,49 +58,49 @@
       {
         "claim": "34.9 GB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "Pipeline **4 distinct service buckets** are active this week, accounting for **34.9 GB total** at **$52/wk**: | Rank | Service | Volume | % of Total | |------"
       },
       {
         "claim": "34.9 GB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "e | % of Total | |------|---------|--------|------------| | 1 | **(unknown)** | 34.9 GB | **~100%** | | 2 | `email` | 11.7 MB | ~0.0% | | 3 | `frontend` | 54.4"
       },
       {
         "claim": "11.7 MB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "-----|------------| | 1 | **(unknown)** | 34.9 GB | **~100%** | | 2 | `email` | 11.7 MB | ~0.0% | | 3 | `frontend` | 54.4 KB | ~0.0% | | 4 | `recommendation` |"
       },
       {
         "claim": "54.4 KB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "** | 34.9 GB | **~100%** | | 2 | `email` | 11.7 MB | ~0.0% | | 3 | `frontend` | 54.4 KB | ~0.0% | | 4 | `recommendation` | 1.2 KB | ~0.0% | --- ## 🚨 Critical"
       },
       {
         "claim": "1.2 KB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "11.7 MB | ~0.0% | | 3 | `frontend` | 54.4 KB | ~0.0% | | 4 | `recommendation` | 1.2 KB | ~0.0% | --- ## 🚨 Critical Labeling Issue Confirmed **`(unknown)` do"
       },
       {
         "claim": "34.9 GB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "l Labeling Issue Confirmed **`(unknown)` dominates at 100% of pipeline volume (34.9 GB / $52/wk)**, yet it does not appear as a named value in the `tenx_user_s"
       },
       {
         "claim": "34.9 GB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "log emitters (agents, SDKs, collectors) for the `tenx_user_service` label. The 34.9 GB `(unknown)` mass must be attributed to real services before any meaningf"
       },

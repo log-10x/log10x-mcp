@@ -37,11 +37,13 @@ export function saveGaps(path: string, gaps: GapRecord[]): void {
 }
 
 /**
- * Append a gap; dedup against any open gap with the same
- * (question_id, gap_kind, gap_description). Re-scoring a transcript
- * shouldn't multiply gap records — the gap is the same observation.
- * Distinct fixes that introduce new gaps still get their own record
- * because they have a different description.
+ * Append a gap; dedup against any record with the same
+ * (question_id, gap_kind, gap_description) regardless of fix_status.
+ * Re-scoring a transcript shouldn't multiply gap records — the gap
+ * is the same observation. If the existing record is `wontfix` or
+ * `fixed`, we update the latest-sighting fields but preserve the
+ * disposition. Distinct fixes that introduce new gaps still get
+ * their own record because they have a different description.
  */
 export function appendGap(path: string, gap: GapRecord): GapRecord[] {
   const gaps = loadGaps(path);
@@ -49,12 +51,11 @@ export function appendGap(path: string, gap: GapRecord): GapRecord[] {
     (g) =>
       g.question_id === gap.question_id &&
       g.gap_kind === gap.gap_kind &&
-      g.gap_description === gap.gap_description &&
-      (g.fix_status === 'open' || g.fix_status === 'in_progress')
+      g.gap_description === gap.gap_description
   );
   if (existing) {
-    // Update the timestamp to the latest sighting; don't append a
-    // duplicate.
+    // Refresh latest-sighting fields. Do NOT touch fix_status / notes —
+    // those are the operator's disposition and persist across re-scores.
     existing.run_timestamp = gap.run_timestamp;
     existing.actual_answer_excerpt = gap.actual_answer_excerpt;
     saveGaps(path, gaps);

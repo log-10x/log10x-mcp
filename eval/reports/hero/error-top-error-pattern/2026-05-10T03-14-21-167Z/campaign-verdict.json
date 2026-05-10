@@ -92,14 +92,14 @@
       {
         "claim": "26.3 MB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "**$5.8/wk total** across 160 data points over the week, with a **peak burst of 26.3 MB at 2026-05-08 13:00 UTC** and a low of 2.4 MB. The baseline and current-"
       },
       {
         "claim": "2.4 MB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "the week, with a **peak burst of 26.3 MB at 2026-05-08 13:00 UTC** and a low of 2.4 MB. The baseline and current-quarter rates are both ~$6/wk — meaning it has"
       }
@@ -144,7 +144,7 @@
   "gaps": [
     {
       "question_id": "error-top-error-pattern",
-      "run_timestamp": "2026-05-10T13:12:29.364Z",
+      "run_timestamp": "2026-05-10T14:32:13.533Z",
       "gap_kind": "low_received",
       "gap_description": "value_received 0.50 < 0.7 — MCP returned thin/stub data",
       "expected_answer_excerpt": "(MCP-side fix candidate)",
