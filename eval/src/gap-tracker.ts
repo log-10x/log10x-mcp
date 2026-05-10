@@ -37,13 +37,29 @@ export function saveGaps(path: string, gaps: GapRecord[]): void {
 }
 
 /**
- * Append a gap; do NOT dedup against existing records — the same
- * question can produce different gaps over multiple runs (e.g., first
- * run fails on drift, the fix introduces a chain_miss). Each gap is a
- * point-in-time observation.
+ * Append a gap; dedup against any open gap with the same
+ * (question_id, gap_kind, gap_description). Re-scoring a transcript
+ * shouldn't multiply gap records — the gap is the same observation.
+ * Distinct fixes that introduce new gaps still get their own record
+ * because they have a different description.
  */
 export function appendGap(path: string, gap: GapRecord): GapRecord[] {
   const gaps = loadGaps(path);
+  const existing = gaps.find(
+    (g) =>
+      g.question_id === gap.question_id &&
+      g.gap_kind === gap.gap_kind &&
+      g.gap_description === gap.gap_description &&
+      (g.fix_status === 'open' || g.fix_status === 'in_progress')
+  );
+  if (existing) {
+    // Update the timestamp to the latest sighting; don't append a
+    // duplicate.
+    existing.run_timestamp = gap.run_timestamp;
+    existing.actual_answer_excerpt = gap.actual_answer_excerpt;
+    saveGaps(path, gaps);
+    return gaps;
+  }
   gaps.push(gap);
   saveGaps(path, gaps);
   return gaps;

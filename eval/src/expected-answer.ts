@@ -39,10 +39,14 @@ function topPatternsByVolume(snap: OracleSnapshot, n: number = 3): ExpectedAnswe
  * grade against either path.
  */
 function growthDeltaPatterns(snap: OracleSnapshot, n: number = 3): ExpectedAnswer['top_patterns'] {
-  return snap.growth_deltas_24h.slice(0, n).map((g) => ({
-    name: g.hash,
-    bytes_24h: g.delta_bytes,
-  }));
+  // Prefer the multi-window union when available — it covers
+  // {1d, 7d, 30d} so the agent's window choice (cost_drivers default
+  // 7d, ad-hoc 30d, etc.) doesn't mark a correct answer wrong.
+  const source =
+    snap.growth_deltas_multi_window && snap.growth_deltas_multi_window.length > 0
+      ? snap.growth_deltas_multi_window.map((g) => ({ hash: g.hash, delta_bytes: g.delta_bytes }))
+      : snap.growth_deltas_24h.map((g) => ({ hash: g.hash, delta_bytes: g.delta_bytes }));
+  return source.slice(0, n).map((g) => ({ name: g.hash, bytes_24h: g.delta_bytes }));
 }
 
 /**

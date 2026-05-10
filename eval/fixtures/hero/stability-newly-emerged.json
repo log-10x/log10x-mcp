@@ -6,24 +6,36 @@
   "persona": "Oncall SRE responding to a vague 'something weird is happening' report.",
   "budget_hint": "3-5 tool calls.",
   "expected_answer": {
-    "summary": "In the last 1 hour, 2 patterns newly emerged. Top: service_name_product_reviews_trace_sampled_True_Returning_an_AI_assistant.",
+    "summary": "In the last 1 hour, 5 patterns newly emerged. Top: attributes.",
     "top_patterns": [
       {
-        "name": "service_name_product_reviews_trace_sampled_True_Returning_an_AI_assistant",
+        "name": "attributes",
         "bytes_24h": 0
       },
       {
-        "name": "request_received_preparing_random_response_trace_id_span_id_trace_flags",
+        "name": "service_name_product_reviews_trace_sampled_True_HTTP_Request_POST_llm_chat",
+        "bytes_24h": 0
+      },
+      {
+        "name": "process_pid",
+        "bytes_24h": 0
+      },
+      {
+        "name": "severityText_",
+        "bytes_24h": 0
+      },
+      {
+        "name": "instrumentationScope_name_payment_logger_version_schemaUrl_undefined",
         "bytes_24h": 0
       }
     ],
     "must_mention": [
-      "service"
+      "attributes"
     ],
     "expected_tool_chain": [
       "log10x_top_patterns",
       "log10x_investigate"
     ],
-    "snapshot_ts": "2026-05-10T02:37:41.860Z"
+    "snapshot_ts": "2026-05-10T03:38:49.679Z"
   }
 }

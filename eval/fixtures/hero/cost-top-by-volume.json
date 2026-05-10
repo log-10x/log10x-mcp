@@ -10,25 +10,25 @@
     "top_patterns": [
       {
         "name": "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
-        "bytes_24h": 397670041.1053754,
+        "bytes_24h": 398095238.4253796,
         "severity": "ERROR"
       },
       {
         "name": "open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter",
-        "bytes_24h": 394567571.3816197
+        "bytes_24h": 394932893.9856524
       },
       {
         "name": "opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go",
-        "bytes_24h": 383184393.0390252
+        "bytes_24h": 383539176.17490107
       },
       {
         "name": "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
-        "bytes_24h": 218716469.29287112,
+        "bytes_24h": 218862972.23043916,
         "severity": "DEBUG"
       },
       {
         "name": "go_opentelemetry_io_collector_consumer_ConsumeLogsFunc_ConsumeLogs",
-        "bytes_24h": 186713691.51554352
+        "bytes_24h": 186886566.1685571
       }
     ],
     "must_mention": [
@@ -40,6 +40,6 @@
       "log10x_top_patterns"
     ],
     "expected_oracle_query": "topk(5, sum by (message_pattern, tenx_user_service, severity_level)(increase(all_events_summaryBytes_total[24h])))",
-    "snapshot_ts": "2026-05-10T02:37:41.860Z"
+    "snapshot_ts": "2026-05-10T03:38:49.679Z"
   }
 }

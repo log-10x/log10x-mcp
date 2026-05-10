@@ -10,13 +10,13 @@
     "top_patterns": [
       {
         "name": "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
-        "bytes_24h": 397670041.1053754,
+        "bytes_24h": 398095238.4253796,
         "severity": "ERROR"
       }
     ],
     "expected_tool_chain": [
       "log10x_investigate"
     ],
-    "snapshot_ts": "2026-05-10T02:37:41.860Z"
+    "snapshot_ts": "2026-05-10T03:38:49.679Z"
   }
 }

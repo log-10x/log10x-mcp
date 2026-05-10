@@ -240,8 +240,13 @@ export async function freshness(
 }
 
 /**
- * Top growth deltas — patterns whose 24h volume grew the most vs the
- * prior 24h window. Subtraction is server-side.
+ * Top growth deltas — patterns whose `range`-window volume grew the
+ * most vs the prior same-length window. Subtraction is server-side.
+ *
+ * Agents pick different baseline windows depending on framing
+ * (cost_drivers default = 7d, ad-hoc = 30d, sub-day = 1d). The
+ * `growthDeltasMultiWindow` helper computes the union across
+ * windows so the campaign matcher accepts any legit window choice.
  */
 export async function growthDeltas(
   env: EvalEnv,
@@ -251,7 +256,7 @@ export async function growthDeltas(
   const promql =
     `topk(${limit}, ` +
     `sum by (message_pattern)(increase(all_events_summaryBytes_total[${range}])) ` +
-    `- sum by (message_pattern)(increase(all_events_summaryBytes_total[${range}] offset 1d)))`;
+    `- sum by (message_pattern)(increase(all_events_summaryBytes_total[${range}] offset ${range})))`;
   const r = await promQuery(env, promql);
   if (r.status !== 'success') return [];
   return r.data.result
@@ -260,6 +265,42 @@ export async function growthDeltas(
       delta_bytes: row.value ? parseFloat(row.value[1]) : 0,
     }))
     .filter((r) => r.hash && r.delta_bytes > 0);
+}
+
+/**
+ * Multi-window growth — union of growthDeltas across windows. Used
+ * by the campaign for "what's growing?" questions where the agent
+ * may legitimately pick any window. De-duped by pattern; keep the
+ * window/delta with the largest absolute growth.
+ */
+export async function growthDeltasMultiWindow(
+  env: EvalEnv,
+  ranges: string[] = ['1d', '7d'],
+  limitPerWindow: number = 8
+): Promise<Array<{ hash: string; delta_bytes: number; window: string }>> {
+  // Per-window catch — Prometheus aggregation queries on long windows
+  // (30d-vs-30d subtractions across 400+ patterns) sometimes 5xx. We
+  // accept the union of whichever windows succeeded; the campaign
+  // scorer reads whatever rows we return. 30d is intentionally
+  // off-by-default for the same reason — too expensive on demo.
+  const sets = await Promise.all(
+    ranges.map(async (r) => {
+      try {
+        const rows = await growthDeltas(env, r, limitPerWindow);
+        return rows.map((row) => ({ ...row, window: r }));
+      } catch {
+        return [];
+      }
+    })
+  );
+  const byHash = new Map<string, { hash: string; delta_bytes: number; window: string }>();
+  for (const set of sets) {
+    for (const row of set) {
+      const cur = byHash.get(row.hash);
+      if (!cur || row.delta_bytes > cur.delta_bytes) byHash.set(row.hash, row);
+    }
+  }
+  return [...byHash.values()].sort((a, b) => b.delta_bytes - a.delta_bytes);
 }
 
 /**
@@ -299,11 +340,17 @@ export interface OracleSnapshot {
   namespace_split: Array<{ value: string; bytes: number }>;
   freshness_seconds: { edge: number; cloud: number };
   growth_deltas_24h: Array<{ hash: string; delta_bytes: number }>;
+  /**
+   * Union of growth across {1d, 7d, 30d} windows. Used by the campaign
+   * matcher for "what's growing" questions so the agent's window
+   * choice doesn't mark the answer wrong when both are valid.
+   */
+  growth_deltas_multi_window: Array<{ hash: string; delta_bytes: number; window: string }>;
   newly_emerged_5m_vs_1h: Array<{ hash: string; rate_5m: number }>;
 }
 
 export async function fullSnapshot(env: EvalEnv): Promise<OracleSnapshot> {
-  const [tot, card, top, sev, svc, ns, fresh, growth, emerged] = await Promise.all([
+  const [tot, card, top, sev, svc, ns, fresh, growth, multiGrowth, emerged] = await Promise.all([
     totalVolume(env, '24h'),
     patternCardinality(env, '24h'),
     topPatterns(env, '24h', 10),
@@ -312,6 +359,7 @@ export async function fullSnapshot(env: EvalEnv): Promise<OracleSnapshot> {
     topByLabel(env, 'k8s_namespace', '24h', 10),
     freshness(env),
     growthDeltas(env, '24h', 5),
+    growthDeltasMultiWindow(env, ['1d', '7d'], 8),
     newlyEmerged(env, 5),
   ]);
   return {
@@ -325,6 +373,7 @@ export async function fullSnapshot(env: EvalEnv): Promise<OracleSnapshot> {
     namespace_split: ns,
     freshness_seconds: fresh,
     growth_deltas_24h: growth,
+    growth_deltas_multi_window: multiGrowth,
     newly_emerged_5m_vs_1h: emerged,
   };
 }

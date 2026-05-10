@@ -1,1 +1,327 @@
-[]
+[
+  {
+    "question_id": "cost-bill-driver",
+    "run_timestamp": "2026-05-10T03:40:06.036Z",
+    "gap_kind": "pattern_miss",
+    "gap_description": "Top-N pattern match 0.67 < 0.7; matched (none)",
+    "expected_answer_excerpt": "Oracle top: cart_cartstore_ValkeyCartStore, OpenTelemetry_error_Export_failure_exception_Export_retry_limit_exceeded_previous, attributes, Can_you_summarize_product_reviews_content_requesting_tool_call_refusal_None, instrumentationScope_name_payment_logger_version_schemaUrl_undefined",
+    "actual_answer_excerpt": "Agent top: shipping_service_Post_shipping_get_quote_unsupported_protocol_scheme_shipping, GetCartAsync_called_with_userId, AddItemAsync_called_with_userId_productId_quantity",
+    "fix_status": "open",
+    "notes": [
+      "agent_top=[\"shipping_service_Post_shipping_get_quote_unsupported_protocol_scheme_shipping\",\"GetCartAsync_called_with_userId\",\"AddItemAsync_called_with_userId_productId_quantity\"]",
+      "oracle_top=[\"cart_cartstore_ValkeyCartStore\",\"OpenTelemetry_error_Export_failure_exception_Export_retry_limit_exceeded_previous\",\"attributes\",\"Can_you_summarize_product_reviews_content_requesting_tool_call_refusal_None\",\"instrumentationScope_name_payment_logger_version_schemaUrl_undefined\"]"
+    ]
+  },
+  {
+    "question_id": "cost-bill-driver",
+    "run_timestamp": "2026-05-10T03:40:06.036Z",
+    "gap_kind": "low_value",
+    "gap_description": "value_delivered 0.60 < 0.7",
+    "expected_answer_excerpt": "Cost growth in the last 24h is dominated by Kafka metadata churn + OTel exporter retry errors. cost_drivers may report 'no drivers detected' on stable replay; correct response is either the actual growth deltas OR the truthful-negative + fallback to top_patterns.",
+    "actual_answer_excerpt": "I now have a complete picture from all tools. Here is my synthesis:\n\n---\n\n## 📊 Log Bill Growth Analysis — Finance Escalation Report\n\n### What the tools found\n\nThe **7-day `cost_drivers` window returned a clean negative** — all 1,204 patterns were within normal variance vs the prior 3-week rolling baseline. The week-over-week comparison shows **no discrete spike** this week alone.\n\n**Switching to ",
+    "fix_status": "open",
+    "notes": []
+  },
+  {
+    "question_id": "cost-bill-driver",
+    "run_timestamp": "2026-05-10T03:40:06.036Z",
+    "gap_kind": "low_received",
+    "gap_description": "value_received 0.40 < 0.7 — MCP returned thin/stub data",
+    "expected_answer_excerpt": "(MCP-side fix candidate)",
+    "actual_answer_excerpt": "I now have a complete picture from all tools. Here is my synthesis:\n\n---\n\n## 📊 Log Bill Growth Analysis — Finance Escalation Report\n\n### What the tools found\n\nThe **7-day `cost_drivers` window returned a clean negative** — all 1,204 patterns were within normal variance vs the prior 3-week rolling baseline. The week-over-week comparison shows **no discrete spike** this week alone.\n\n**Switching to ",
+    "fix_status": "open",
+    "notes": []
+  },
+  {
+    "question_id": "cost-mute-candidates",
+    "run_timestamp": "2026-05-10T03:40:07.209Z",
+    "gap_kind": "drift",
+    "gap_description": "Drift on 1 claim(s)",
+    "expected_answer_excerpt": "Safest mute candidates are high-volume patterns with no severity (or DEBUG/TRACE), which on this env are the OTel collector internals. Agent must mention dependency_check before suggesting mute.",
+    "actual_answer_excerpt": "All the data I need is in hand. The trend tool revealed that patterns #4 and #5 are actually the **same pattern** (the `service instance id … otelcol` pattern appearing at both ERROR and DEBUG severities), with a combined trended cost of **$5.8/wk** — higher than the $3.6 + $2.1 listed individually. All three candidates have **0 dependencies** confirmed by `log10x_dependency_check`. Here is the co",
+    "fix_status": "open",
+    "notes": [
+      "missing must-mention \"exclusion_filter\""
+    ]
+  },
+  {
+    "question_id": "cost-mute-candidates",
+    "run_timestamp": "2026-05-10T03:40:07.209Z",
+    "gap_kind": "pattern_miss",
+    "gap_description": "Top-N pattern match 0.00 < 0.7; matched (none)",
+    "expected_answer_excerpt": "Oracle top: open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter, opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go, service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
+    "actual_answer_excerpt": "Agent top: ",
+    "fix_status": "open",
+    "notes": [
+      "agent_top=[]",
+      "oracle_top=[\"open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter\",\"opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go\",\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\"]"
+    ]
+  },
+  {
+    "question_id": "cost-mute-candidates",
+    "run_timestamp": "2026-05-10T03:40:07.209Z",
+    "gap_kind": "low_value",
+    "gap_description": "value_delivered 0.55 < 0.7",
+    "expected_answer_excerpt": "Safest mute candidates are high-volume patterns with no severity (or DEBUG/TRACE), which on this env are the OTel collector internals. Agent must mention dependency_check before suggesting mute.",
+    "actual_answer_excerpt": "All the data I need is in hand. The trend tool revealed that patterns #4 and #5 are actually the **same pattern** (the `service instance id … otelcol` pattern appearing at both ERROR and DEBUG severities), with a combined trended cost of **$5.8/wk** — higher than the $3.6 + $2.1 listed individually. All three candidates have **0 dependencies** confirmed by `log10x_dependency_check`. Here is the co",
+    "fix_status": "open",
+    "notes": []
+  },
+  {
+    "question_id": "cost-mute-candidates",
+    "run_timestamp": "2026-05-10T03:40:07.209Z",
+    "gap_kind": "low_received",
+    "gap_description": "value_received 0.40 < 0.7 — MCP returned thin/stub data",
+    "expected_answer_excerpt": "(MCP-side fix candidate)",
+    "actual_answer_excerpt": "All the data I need is in hand. The trend tool revealed that patterns #4 and #5 are actually the **same pattern** (the `service instance id … otelcol` pattern appearing at both ERROR and DEBUG severities), with a combined trended cost of **$5.8/wk** — higher than the $3.6 + $2.1 listed individually. All three candidates have **0 dependencies** confirmed by `log10x_dependency_check`. Here is the co",
+    "fix_status": "open",
+    "notes": []
+  },
+  {
+    "question_id": "cost-top-by-volume",
+    "run_timestamp": "2026-05-10T03:40:08.193Z",
+    "gap_kind": "pattern_miss",
+    "gap_description": "Top-N pattern match 0.00 < 0.7; matched (none)",
+    "expected_answer_excerpt": "Oracle top: service_instance_id_service_name_otelcol_contrib_service_version_otelcol, open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter, opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go, service_instance_id_service_name_otelcol_contrib_service_version_otelcol, go_opentelemetry_io_collector_consumer_ConsumeLogsFunc_ConsumeLogs",
+    "actual_answer_excerpt": "Agent top: ",
+    "fix_status": "open",
+    "notes": [
+      "agent_top=[]",
+      "oracle_top=[\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\",\"open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter\",\"opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go\",\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\",\"go_opentelemetry_io_collector_consumer_ConsumeLogsFunc_ConsumeLogs\"]"
+    ]
+  },
+  {
+    "question_id": "cost-week-over-week",
+    "run_timestamp": "2026-05-10T03:40:08.643Z",
+    "gap_kind": "pattern_miss",
+    "gap_description": "Top-N pattern match 0.00 < 0.7; matched (none)",
+    "expected_answer_excerpt": "Oracle top: service_instance_id_service_name_otelcol_contrib_service_version_otelcol, open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter, opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go",
+    "actual_answer_excerpt": "Agent top: ",
+    "fix_status": "open",
+    "notes": [
+      "agent_top=[]",
+      "oracle_top=[\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\",\"open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter\",\"opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go\"]"
+    ]
+  },
+  {
+    "question_id": "cost-week-over-week",
+    "run_timestamp": "2026-05-10T03:40:08.643Z",
+    "gap_kind": "low_received",
+    "gap_description": "value_received 0.60 < 0.7 — MCP returned thin/stub data",
+    "expected_answer_excerpt": "(MCP-side fix candidate)",
+    "actual_answer_excerpt": "I now have all the data needed for a comprehensive answer. Let me synthesize the findings.\n\n---\n\n## Week-over-Week Log Volume: **Flat** ✅\n\nHere are the actual numbers returned by the tools:\n\n### Total volume (current week)\n| Service | Volume | Cost/wk |\n|---|---|---|\n| **(unknown)** | **34.9 GB** | **$52/wk** |\n| email | 11.8 MB | $0.02/wk |\n| frontend | 56.6 KB | $0.0001/wk |\n| recommendation | 3",
+    "fix_status": "open",
+    "notes": []
+  },
+  {
+    "question_id": "error-critical-events",
+    "run_timestamp": "2026-05-10T03:40:09.131Z",
+    "gap_kind": "low_value",
+    "gap_description": "value_delivered 0.40 < 0.7",
+    "expected_answer_excerpt": "CRITICAL severity has ~2MB / 24h on the demo env (rare). Expected: agent identifies these patterns specifically and reports the volume.",
+    "actual_answer_excerpt": "",
+    "fix_status": "open",
+    "notes": []
+  },
+  {
+    "question_id": "error-critical-events",
+    "run_timestamp": "2026-05-10T03:40:09.131Z",
+    "gap_kind": "low_received",
+    "gap_description": "value_received 0.40 < 0.7 — MCP returned thin/stub data",
+    "expected_answer_excerpt": "(MCP-side fix candidate)",
+    "actual_answer_excerpt": "",
+    "fix_status": "open",
+    "notes": []
+  },
+  {
+    "question_id": "error-investigate-pattern",
+    "run_timestamp": "2026-05-10T03:40:09.587Z",
+    "gap_kind": "pattern_miss",
+    "gap_description": "Top-N pattern match 0.00 < 0.7; matched (none)",
+    "expected_answer_excerpt": "Oracle top: service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
+    "actual_answer_excerpt": "Agent top: GRAFANA_CLOUD_API_KEY",
+    "fix_status": "open",
+    "notes": [
+      "agent_top=[\"GRAFANA_CLOUD_API_KEY\"]",
+      "oracle_top=[\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\"]"
+    ]
+  },
+  {
+    "question_id": "error-investigate-pattern",
+    "run_timestamp": "2026-05-10T03:40:09.587Z",
+    "gap_kind": "low_value",
+    "gap_description": "value_delivered 0.40 < 0.7",
+    "expected_answer_excerpt": "Investigation of the top ERROR pattern should produce a coherent report (acute-spike or stable). Expected to use log10x_investigate with the resolved pattern name.",
+    "actual_answer_excerpt": "I now have all the data I need. Here is the full synthesis:\n\n---\n\n## 🔎 RCA Synthesis: Top ERROR Pattern — `email` Service\n\n### What Was Observed\n\n**Pattern**: `error OTLP logs exporter received Net HTTPServiceUnavailable code uri logs`\n**Service**: `email`\n**Severity**: `ERROR`\n**Cost rank**: #1 ERROR-severity pattern, 100% of `email` service log volume at **$0.02/wk**\n\n### Shape: **Acute Spike**",
+    "fix_status": "open",
+    "notes": []
+  },
+  {
+    "question_id": "error-investigate-pattern",
+    "run_timestamp": "2026-05-10T03:40:09.587Z",
+    "gap_kind": "low_received",
+    "gap_description": "value_received 0.30 < 0.7 — MCP returned thin/stub data",
+    "expected_answer_excerpt": "(MCP-side fix candidate)",
+    "actual_answer_excerpt": "I now have all the data I need. Here is the full synthesis:\n\n---\n\n## 🔎 RCA Synthesis: Top ERROR Pattern — `email` Service\n\n### What Was Observed\n\n**Pattern**: `error OTLP logs exporter received Net HTTPServiceUnavailable code uri logs`\n**Service**: `email`\n**Severity**: `ERROR`\n**Cost rank**: #1 ERROR-severity pattern, 100% of `email` service log volume at **$0.02/wk**\n\n### Shape: **Acute Spike**",
+    "fix_status": "open",
+    "notes": []
+  },
+  {
+    "question_id": "error-top-error-pattern",
+    "run_timestamp": "2026-05-10T03:40:10.676Z",
+    "gap_kind": "drift",
+    "gap_description": "Drift on 1 claim(s)",
+    "expected_answer_excerpt": "The top ERROR-severity pattern is service_instance_id_service_name_otelcol_contrib_service_version_otelcol at ~397MB / 24h. Total ERROR volume is ~464MB / 24h.",
+    "actual_answer_excerpt": "Here is the full picture, every number sourced directly from tool output:\n\n---\n\n## Single Highest-Volume ERROR Pattern — Last 24h\n\n### The Pattern\n**`service instance id service name otelcol contrib service version otelcol`** — ranked **#4 overall** and **#1 among ERROR-severity patterns** across all services.\n\n### Volume\n- **$3.6/wk** by cost rank in the current top-10 leaderboard (ERROR severity",
+    "fix_status": "open",
+    "notes": [
+      "missing must-mention \"service_instance_id\""
+    ]
+  },
+  {
+    "question_id": "error-top-error-pattern",
+    "run_timestamp": "2026-05-10T03:40:10.676Z",
+    "gap_kind": "pattern_miss",
+    "gap_description": "Top-N pattern match 0.00 < 0.7; matched (none)",
+    "expected_answer_excerpt": "Oracle top: service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
+    "actual_answer_excerpt": "Agent top: ",
+    "fix_status": "open",
+    "notes": [
+      "agent_top=[]",
+      "oracle_top=[\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\"]"
+    ]
+  },
+  {
+    "question_id": "error-top-error-pattern",
+    "run_timestamp": "2026-05-10T03:40:10.676Z",
+    "gap_kind": "low_received",
+    "gap_description": "value_received 0.50 < 0.7 — MCP returned thin/stub data",
+    "expected_answer_excerpt": "(MCP-side fix candidate)",
+    "actual_answer_excerpt": "Here is the full picture, every number sourced directly from tool output:\n\n---\n\n## Single Highest-Volume ERROR Pattern — Last 24h\n\n### The Pattern\n**`service instance id service name otelcol contrib service version otelcol`** — ranked **#4 overall** and **#1 among ERROR-severity patterns** across all services.\n\n### Volume\n- **$3.6/wk** by cost rank in the current top-10 leaderboard (ERROR severity",
+    "fix_status": "open",
+    "notes": []
+  },
+  {
+    "question_id": "stability-cloud-reporter-missing",
+    "run_timestamp": "2026-05-10T03:40:11.674Z",
+    "gap_kind": "low_value",
+    "gap_description": "value_delivered 0.60 < 0.7",
+    "expected_answer_excerpt": "Cloud reporter cronjob does NOT exist on this env. Expected: agent diagnoses absence (via doctor or services) and notes that cloud-tier metrics are zero.",
+    "actual_answer_excerpt": "Here is a complete, unvarnished picture of the cloud-tier log reporter's health:\n\n---\n\n## 🟡 Reporter Health Audit — Summary\n\n### What the tools found\n\n| Check | Result |\n|---|---|\n| Reporter tier detected | **Edge Reporter** (not a cloud-tier reporter) |\n| Last metric emission | **Within the last 52 seconds** — metrics are fresh |\n| Prometheus gateway auth | ✅ PASS |\n| Forwarder dark zones | ✅ PA",
+    "fix_status": "open",
+    "notes": []
+  },
+  {
+    "question_id": "stability-cloud-reporter-missing",
+    "run_timestamp": "2026-05-10T03:40:11.674Z",
+    "gap_kind": "low_received",
+    "gap_description": "value_received 0.50 < 0.7 — MCP returned thin/stub data",
+    "expected_answer_excerpt": "(MCP-side fix candidate)",
+    "actual_answer_excerpt": "Here is a complete, unvarnished picture of the cloud-tier log reporter's health:\n\n---\n\n## 🟡 Reporter Health Audit — Summary\n\n### What the tools found\n\n| Check | Result |\n|---|---|\n| Reporter tier detected | **Edge Reporter** (not a cloud-tier reporter) |\n| Last metric emission | **Within the last 52 seconds** — metrics are fresh |\n| Prometheus gateway auth | ✅ PASS |\n| Forwarder dark zones | ✅ PA",
+    "fix_status": "open",
+    "notes": []
+  },
+  {
+    "question_id": "stability-env-sweep",
+    "run_timestamp": "2026-05-10T03:40:12.148Z",
+    "gap_kind": "drift",
+    "gap_description": "Drift on 2 claim(s)",
+    "expected_answer_excerpt": "Environment-wide investigation should run cleanly and surface either growth/decline drivers OR a truthful-negative. Top movers from oracle: open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter, opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go, cart_cartstore_ValkeyCartStore.",
+    "actual_answer_excerpt": "I have everything I need for a complete picture. Here is the synthesis:\n\n---\n\n## Environment-Wide Sweep — Last Hour Summary\n\n### What was observed\n\n**Overall: No acute incident in the last 1 hour.** All 1,204 patterns cleared the week-over-week delta threshold (cost_drivers returned a clean negative). No forwarder dark zones — all services with 24h history are still emitting within the last 15 min",
+    "fix_status": "open",
+    "notes": [
+      "unsupported: filter_out_schedulable_go_pods_marked_as_unschedulable_can_be_scheduled — no metric data in 24h window",
+      "unsupported: tat_okhttp_internal_connection_okhttp_kt — no metric data in 24h window"
+    ]
+  },
+  {
+    "question_id": "stability-env-sweep",
+    "run_timestamp": "2026-05-10T03:40:12.148Z",
+    "gap_kind": "pattern_miss",
+    "gap_description": "Top-N pattern match 0.33 < 0.7; matched (none)",
+    "expected_answer_excerpt": "Oracle top: cart_cartstore_ValkeyCartStore, OpenTelemetry_error_Export_failure_exception_Export_retry_limit_exceeded_previous, attributes",
+    "actual_answer_excerpt": "Agent top: plugin_kubernetes_Unhandled_Error, service_instance_id_service_name_otelcol_contrib_service_version_otelcol, filter_out_schedulable_go_pods_marked_as_unschedulable_can_be_scheduled",
+    "fix_status": "open",
+    "notes": [
+      "agent_top=[\"plugin_kubernetes_Unhandled_Error\",\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\",\"filter_out_schedulable_go_pods_marked_as_unschedulable_can_be_scheduled\"]",
+      "oracle_top=[\"cart_cartstore_ValkeyCartStore\",\"OpenTelemetry_error_Export_failure_exception_Export_retry_limit_exceeded_previous\",\"attributes\"]"
+    ]
+  },
+  {
+    "question_id": "stability-env-sweep",
+    "run_timestamp": "2026-05-10T03:40:12.148Z",
+    "gap_kind": "low_received",
+    "gap_description": "value_received 0.60 < 0.7 — MCP returned thin/stub data",
+    "expected_answer_excerpt": "(MCP-side fix candidate)",
+    "actual_answer_excerpt": "I have everything I need for a complete picture. Here is the synthesis:\n\n---\n\n## Environment-Wide Sweep — Last Hour Summary\n\n### What was observed\n\n**Overall: No acute incident in the last 1 hour.** All 1,204 patterns cleared the week-over-week delta threshold (cost_drivers returned a clean negative). No forwarder dark zones — all services with 24h history are still emitting within the last 15 min",
+    "fix_status": "open",
+    "notes": []
+  },
+  {
+    "question_id": "stability-newly-emerged",
+    "run_timestamp": "2026-05-10T03:40:13.666Z",
+    "gap_kind": "drift",
+    "gap_description": "Drift on 1 claim(s)",
+    "expected_answer_excerpt": "In the last 1 hour, 5 patterns newly emerged. Top: attributes.",
+    "actual_answer_excerpt": "I now have all the data I need. Here's my full synthesis:\n\n---\n\n## 🔍 Patterns That Started Firing in the Last Hour\n\nThe environment-wide sweep (comparing last 1h to the prior 24h baseline) surfaced three patterns that were either brand-new (`$0 → $X`) or showing significant upticks. Here's what the tools returned:\n\n---\n\n### 1. `OTLP LOG GRPC Exporter Export failed data refused due high memory usa",
+    "fix_status": "open",
+    "notes": [
+      "missing must-mention \"attributes\""
+    ]
+  },
+  {
+    "question_id": "stability-newly-emerged",
+    "run_timestamp": "2026-05-10T03:40:13.666Z",
+    "gap_kind": "pattern_miss",
+    "gap_description": "Top-N pattern match 0.00 < 0.7; matched (none)",
+    "expected_answer_excerpt": "Oracle top: attributes, service_name_product_reviews_trace_sampled_True_HTTP_Request_POST_llm_chat, process_pid, severityText_, instrumentationScope_name_payment_logger_version_schemaUrl_undefined",
+    "actual_answer_excerpt": "Agent top: ",
+    "fix_status": "open",
+    "notes": [
+      "agent_top=[]",
+      "oracle_top=[\"attributes\",\"service_name_product_reviews_trace_sampled_True_HTTP_Request_POST_llm_chat\",\"process_pid\",\"severityText_\",\"instrumentationScope_name_payment_logger_version_schemaUrl_undefined\"]"
+    ]
+  },
+  {
+    "question_id": "stability-newly-emerged",
+    "run_timestamp": "2026-05-10T03:40:13.666Z",
+    "gap_kind": "low_value",
+    "gap_description": "value_delivered 0.45 < 0.7",
+    "expected_answer_excerpt": "In the last 1 hour, 5 patterns newly emerged. Top: attributes.",
+    "actual_answer_excerpt": "I now have all the data I need. Here's my full synthesis:\n\n---\n\n## 🔍 Patterns That Started Firing in the Last Hour\n\nThe environment-wide sweep (comparing last 1h to the prior 24h baseline) surfaced three patterns that were either brand-new (`$0 → $X`) or showing significant upticks. Here's what the tools returned:\n\n---\n\n### 1. `OTLP LOG GRPC Exporter Export failed data refused due high memory usa",
+    "fix_status": "open",
+    "notes": []
+  },
+  {
+    "question_id": "stability-newly-emerged",
+    "run_timestamp": "2026-05-10T03:40:13.666Z",
+    "gap_kind": "low_received",
+    "gap_description": "value_received 0.35 < 0.7 — MCP returned thin/stub data",
+    "expected_answer_excerpt": "(MCP-side fix candidate)",
+    "actual_answer_excerpt": "I now have all the data I need. Here's my full synthesis:\n\n---\n\n## 🔍 Patterns That Started Firing in the Last Hour\n\nThe environment-wide sweep (comparing last 1h to the prior 24h baseline) surfaced three patterns that were either brand-new (`$0 → $X`) or showing significant upticks. Here's what the tools returned:\n\n---\n\n### 1. `OTLP LOG GRPC Exporter Export failed data refused due high memory usa",
+    "fix_status": "open",
+    "notes": []
+  },
+  {
+    "question_id": "stability-pipeline-health",
+    "run_timestamp": "2026-05-10T03:40:14.128Z",
+    "gap_kind": "drift",
+    "gap_description": "Drift on 1 claim(s)",
+    "expected_answer_excerpt": "Edge tier is healthy (metrics fresh within 54s). Cloud tier has zero metrics — the every-5-min cronjob does not exist on this env. Expected: agent runs doctor and reports both findings.",
+    "actual_answer_excerpt": "I now have a complete, tool-verified picture. Here is the handover digest:\n\n---\n\n## 🩺 Pipeline Health Check — Shift Handover Digest\n\n### ✅ EDGE TIER — **HEALTHY**\n- **Reporter**: Edge Reporter is detected and fully operational.\n- **Metric freshness**: Last emission **22 seconds ago** — metrics are live.\n- **Forwarder dark zones**: None. All 3 services with 24h history are still emitting within th",
+    "fix_status": "open",
+    "notes": [
+      "unsupported: translate_metric_to_patterns — no metric data in 24h window"
+    ]
+  },
+  {
+    "question_id": "stability-pipeline-health",
+    "run_timestamp": "2026-05-10T03:40:14.128Z",
+    "gap_kind": "low_received",
+    "gap_description": "value_received 0.60 < 0.7 — MCP returned thin/stub data",
+    "expected_answer_excerpt": "(MCP-side fix candidate)",
+    "actual_answer_excerpt": "I now have a complete, tool-verified picture. Here is the handover digest:\n\n---\n\n## 🩺 Pipeline Health Check — Shift Handover Digest\n\n### ✅ EDGE TIER — **HEALTHY**\n- **Reporter**: Edge Reporter is detected and fully operational.\n- **Metric freshness**: Last emission **22 seconds ago** — metrics are live.\n- **Forwarder dark zones**: None. All 3 services with 24h history are still emitting within th",
+    "fix_status": "open",
+    "notes": []
+  }
+]

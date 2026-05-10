@@ -10,7 +10,7 @@
     "top_patterns": [
       {
         "name": "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
-        "bytes_24h": 397670041.1053754,
+        "bytes_24h": 398095238.4253796,
         "severity": "ERROR"
       }
     ],
@@ -22,6 +22,6 @@
       "log10x_top_patterns"
     ],
     "expected_oracle_query": "topk(3, sum by (message_pattern)(increase(all_events_summaryBytes_total{severity_level=\"ERROR\"}[24h])))",
-    "snapshot_ts": "2026-05-10T02:37:41.860Z"
+    "snapshot_ts": "2026-05-10T03:38:49.679Z"
   }
 }

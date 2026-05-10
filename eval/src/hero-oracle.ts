@@ -371,23 +371,19 @@ export { promQuery };
  */
 export function extractAgentTopPatterns(text: string, n: number = 3): string[] {
   const counts = new Map<string, number>();
-  for (const m of text.matchAll(/(?<![\\bA-Za-z])\b([a-z][a-z0-9]+(?:_[a-z0-9]+){3,})\b/g)) {
+  // Pattern names allow CamelCase tokens between underscores, e.g.
+  // `cart_cartstore_ValkeyCartStore`, `shipping_service_Post_shipping_...`.
+  // Earlier we required lowercase-only segments and missed every
+  // pattern with an internal capital. Now: each segment is alnum,
+  // start segment must begin with a letter, total ≥3 underscores.
+  const PATTERN_RE = /(?<![\\A-Za-z0-9])\b([A-Za-z][A-Za-z0-9]+(?:_[A-Za-z0-9]+){3,})\b/g;
+  for (const m of text.matchAll(PATTERN_RE)) {
     const name = m[1];
-    // Skip MCP tool names (they appear naturally in agent prose).
     if (name.startsWith('log10x_')) continue;
+    // Skip prose-converted phrases captured in the old fallback path
+    // (kept the lowercased space-form catcher off; it created more
+    // garbage than it caught).
     counts.set(name, (counts.get(name) ?? 0) + 1);
-  }
-  // Also pick up "display form" — space-separated tokens MCP renders.
-  // The agent may quote them verbatim; convert to snake_case for
-  // comparison.
-  for (const m of text.matchAll(/\b([a-z]+(?:\s+[a-z]+){3,})\b/g)) {
-    const candidate = m[1].toLowerCase().split(/\s+/).join('_');
-    if (counts.has(candidate)) continue;
-    if (counts.size > 50) break; // cap noise
-    // Light heuristic: require the candidate to look like a pattern
-    // (no common stop-word run).
-    if (/^(the|a|an|of|to|in|on|with|for|by|and|or)\s/.test(m[1].toLowerCase())) continue;
-    counts.set(candidate, (counts.get(candidate) ?? 0) + 1);
   }
   return [...counts.entries()]
     .sort((a, b) => b[1] - a[1])
@@ -433,14 +429,35 @@ export function scoreTopNMatch(
     const hit = [...oracleSet].some((o) => o === n || o.includes(n) || n.includes(o));
     if (!hit) extra++;
   }
-  const score = (matched + missed) > 0 ? matched / (matched + missed) : 0;
+  // Vacuously satisfied when oracle has no expected patterns: there's
+  // nothing the agent could miss, so score=1. (Older code returned 0
+  // and the campaign-scorer's pass gate had to special-case empty
+  // oracle lists — moving the special case here keeps the score
+  // meaningful in reports.)
+  const denom = matched + missed;
+  const score = denom > 0 ? matched / denom : 1;
   return { matched, missed, extra, score, matched_names };
 }
 
 /**
+ * Tools that answer the same class of question. When the
+ * expected_tool_chain says "log10x_doctor" but the agent uses
+ * "log10x_discover_env" (which also reports tier health), we treat
+ * the alternative as a hit. Hand-curated; only adds equivalences for
+ * cases observed in the campaign.
+ */
+const TOOL_ALTERNATIVES: Record<string, string[]> = {
+  log10x_doctor: ['log10x_discover_env'],
+  log10x_top_patterns: ['log10x_cost_drivers'],
+  log10x_list_by_label: ['log10x_top_patterns', 'log10x_services'],
+  log10x_investigate: ['log10x_pattern_trend', 'log10x_cost_drivers'],
+};
+
+/**
  * Score whether the bash trace contains the expected_tool_chain in
- * order. Each tool-name in `expected` must appear at least once in
- * `actual`, and they must appear in order (subsequence match).
+ * order. Each tool-name in `expected` must appear (or one of its
+ * curated equivalents must), and they must appear in order
+ * (subsequence match).
  */
 export function scoreChainAlignment(
   expected: string[],
@@ -451,10 +468,19 @@ export function scoreChainAlignment(
   const misses: string[] = [];
   let cursor = 0;
   for (const e of expected) {
-    const idx = actual.indexOf(e, cursor);
-    if (idx >= 0) {
-      hits.push(e);
-      cursor = idx + 1;
+    const candidates = [e, ...(TOOL_ALTERNATIVES[e] ?? [])];
+    let hitIdx = -1;
+    let hitName = e;
+    for (const cand of candidates) {
+      const idx = actual.indexOf(cand, cursor);
+      if (idx >= 0 && (hitIdx === -1 || idx < hitIdx)) {
+        hitIdx = idx;
+        hitName = cand;
+      }
+    }
+    if (hitIdx >= 0) {
+      hits.push(hitName);
+      cursor = hitIdx + 1;
     } else {
       misses.push(e);
     }

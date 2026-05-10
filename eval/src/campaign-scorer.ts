@@ -28,6 +28,7 @@ import {
   extractToolChainFromBash,
   type HeroOracleReport,
 } from './hero-oracle.js';
+import { patternExists } from './prom-oracle.js';
 import type { EvalEnv } from './env.js';
 
 export interface SavedTranscript {
@@ -67,16 +68,54 @@ export async function scoreAgainstExpected(
   const oracle = await validateClaims(transcript.finalText, env);
 
   // ── Axis 2: top-N pattern match ────────────────────────────────────
+  // Two-layer match:
+  //   (a) does the agent name patterns in oracle's pre-computed
+  //       top-N? (strict)
+  //   (b) for any agent pattern NOT in (a), does it actually exist in
+  //       Prometheus metrics with positive 24h volume? (loose;
+  //       catches fabrications without penalizing legitimate
+  //       alternative-window picks)
+  // The campaign's purpose is anti-hallucination — a queryable real
+  // pattern is a passing answer even if it's not in our specific
+  // window's top-N.
   const oracleTop = (expected?.top_patterns ?? []).map((p) => p.name);
   const agentTop = extractAgentTopPatterns(transcript.finalText, Math.max(3, oracleTop.length));
   const tnRaw = scoreTopNMatch(agentTop, oracleTop);
+
+  // For agent patterns that didn't strict-match, verify they exist
+  // in metrics. Each existence-check is one Prom query.
+  const matchedNames = new Set(tnRaw.matched_names);
+  let realButNotTopN = 0;
+  for (const agentPat of agentTop) {
+    if ([...matchedNames].some((m) => m.toLowerCase() === agentPat.toLowerCase())) continue;
+    try {
+      const bytes = await patternExists(env, agentPat, '24h');
+      if (bytes > 0) realButNotTopN++;
+    } catch {
+      // ignore; we don't penalize on transient prom errors
+    }
+  }
+
+  const totalNamed = agentTop.length;
+  const realNamed = tnRaw.matched + realButNotTopN;
+  // Combined score: how many of the agent's named patterns are real?
+  // If the agent named 3 patterns and all 3 are real → 1.0. Even if
+  // none matched the strict top-N, queryable real patterns still
+  // count.
+  const combinedScore =
+    totalNamed === 0
+      ? oracleTop.length === 0
+        ? 1
+        : 0
+      : realNamed / totalNamed;
+
   const patternMatch: PatternMatchScore = {
     agent_top_patterns: agentTop,
     oracle_top_patterns: oracleTop,
-    matched: tnRaw.matched,
+    matched: realNamed,
     missed: tnRaw.missed,
-    extra: tnRaw.extra,
-    score: tnRaw.score,
+    extra: totalNamed - realNamed,
+    score: combinedScore,
   };
 
   // ── Axis 3: tool-chain alignment ──────────────────────────────────

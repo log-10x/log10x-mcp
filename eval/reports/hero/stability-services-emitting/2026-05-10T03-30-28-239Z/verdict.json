@@ -1,0 +1,210 @@
+{
+  "spec": {
+    "id": "stability-services-emitting",
+    "title": "Stability — what services are emitting",
+    "category": "stability",
+    "prompt": "Which services are actually emitting logs into our metrics pipeline right now? Tell me the count and name the top contributors by volume. If most volume is untagged service, call that out as a labeling issue.",
+    "persona": "Platform engineer auditing service-level coverage.",
+    "budget_hint": "1-3 tool calls.",
+    "expected_answer": {
+      "summary": "Only 2 distinct services in metrics on demo env. (empty)=5395.0MB, email=1.8MB. Note: most volume is untagged service.",
+      "top_patterns": [],
+      "must_mention": [
+        "email"
+      ],
+      "expected_tool_chain": [
+        "log10x_services"
+      ],
+      "expected_oracle_query": "sum by (tenx_user_service)(increase(all_events_summaryBytes_total[24h]))",
+      "snapshot_ts": "2026-05-10T02:37:41.860Z"
+    }
+  },
+  "startedAt": "2026-05-10T03:30:28.244Z",
+  "endedAt": "2026-05-10T03:31:17.159Z",
+  "durationMs": 48915,
+  "envMode": "demo",
+  "bashCommands": [
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --list",
+      "stdout": "log10x_advise_compact\nlog10x_advise_install\nlog10x_advise_receiver\nlog10x_advise_reporter\nlog10x_advise_retriever\nlog10x_backfill_metric\nlog10x_correlate_cross_pillar\nlog10x_cost_drivers\nlog10x_customer_metrics_query\nlog10x_dependency_check\nlog10x_discover_env\nlog10x_discover_join\nlog10x_discover_labels\nlog10x_doctor\nlog10x_event_lookup\nlog10x_exclusion_filter\nlog10x_extract_templates\nlog10x_investigate\nlog10x_investigation_get\nlog10x_list_by_label\nlog10x_login_status\nlog10x_pattern_examples\nlog10x_pattern_trend\nlog10x_resolve_batch\nlog10x_retriever_query\nlog10x_retriever_query_status\nlog10x_retriever_series\nlog10x_savings\nlog10x_services\nlog10x_top_patterns\nlog10x_translate_metric_to_patterns\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 2744
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_services --args '{}'",
+      "stdout": "Monitored Services (this week)\n\n  (unknown)            34.9 GB    100%   $52/wk\n  email                11.8 MB    0.0%   $0.02/wk\n  frontend             56.6 KB    0.0%   $0.0001/wk\n  recommendation       3.6 KB     0.0%   $0.0000/wk\n\n  4 services · 34.9 GB total · $52/wk at $1.5/GB\n  Top 3 services = 100% of volume.\n\n**Next actions**:\n  - Drill into the top service: `log10x_cost_drivers({ service: '(unknown)' })` for week-over-week deltas, or `log10x_top_patterns({ service: '(unknown)' })` for current top patterns.\n  - Investigate any spike: `log10x_investigate({ starting_point: '(unknown)' })` for a full causal-chain analysis.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_cost_drivers\",\"args\":{\"service\":\"(unknown)\"},\"reason\":\"week-over-week deltas on the top service\"},{\"tool\":\"log10x_top_patterns\",\"args\":{\"service\":\"(unknown)\"},\"reason\":\"current top patterns for the top service\"},{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"(unknown)\"},\"reason\":\"causal-chain analysis on the top service\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 4003
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_discover_labels --args '{\"service\": \"(unknown)\"}' &\nnode /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"service\": \"(unknown)\"}' &\nwait",
+      "stdout": "Queryable labels (16)\n\nFeatured — use these as filter keys in log10x_cost_drivers, log10x_list_by_label, etc.:\n  tenx_user_service      the service that emitted the log\n  severity_level         TRACE / DEBUG / INFO / WARN / ERROR / CRITICAL\n  message_pattern        the stable template hash — the unit of cost attribution\n  tenx_env               edge or cloud\n  http_code              HTTP response status (100–511)\n  k8s_namespace          Kubernetes namespace (from enrichment)\n  k8s_container          Kubernetes container name\n  k8s_pod                Kubernetes pod name\n\nOther labels (8):\n  http_message, tenx_app, tenx_fwd_input, tenx_host_name, tenx_pipeline_uuid, tenx_reported_name, tenx_user_process, userId\n\nTip: call log10x_discover_labels with a specific label name (e.g., label=\"tenx_user_service\") to list its distinct values.\nNo pattern data available. Patterns appear after the first 24h of data collection.\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 3530
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_discover_labels --args '{\"label\": \"tenx_user_service\"}'",
+      "stdout": "Label \"tenx_user_service\" — 3 distinct values\n\n  email\n  frontend\n  recommendation\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 3140
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_cost_drivers --args '{\"service\": \"(unknown)\"}' &\nnode /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_discover_labels --args '{\"label\": \"tenx_reported_name\"}' &\nwait",
+      "stdout": "Label \"tenx_reported_name\" — 1 distinct value\n\n  tenx-demo\nNo pattern data available. Patterns appear after the first 24h of data collection.\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 3338
+    }
+  ],
+  "finalSynthesis": "Here is the complete, tool-grounded picture:\n\n---\n\n## Services Emitting Logs — This Week\n\n**4 services detected** in the metrics pipeline:\n\n| Rank | Service | Volume | Share | Cost/wk |\n|------|---------|--------|-------|---------|\n| 1 | `(unknown)` ⚠️ | **34.9 GB** | **~100%** | $52 |\n| 2 | `email` | 11.8 MB | ~0.0% | $0.02 |\n| 3 | `frontend` | 56.6 KB | ~0.0% | $0.0001 |\n| 4 | `recommendation` | 3.6 KB | ~0.0% | $0.0000 |\n\n**Total pipeline volume: 34.9 GB · $52/week**\n\n---\n\n## 🚨 Critical Labeling Issue\n\nThe `(unknown)` bucket — meaning logs with **no `service` tag set at the emitter level** — accounts for effectively **100% of all log volume and cost**. The `tenx_user_service` label, which is the canonical service identifier in this pipeline, only has **3 distinct values** (`email`, `frontend`, `recommendation`), and together those three contribute less than **12 MB** — a rounding error against 34.9 GB.\n\n**What this means operationally:**\n- The vast majority of log-producing workloads are **not setting a service label**, making cost attribution, alerting, and SLO tracking impossible on a per-service basis.\n- The only reporter name in the pipeline is `tenx-demo`, confirming data is flowing — it's a **tagging gap, not a missing-data problem**.\n\n**Concrete recommendations:**\n1. **Audit every log emitter** sending to this pipeline and enforce the `service` (or `tenx_user_service`) label at the SDK/agent level — this is the highest-leverage fix available.\n2. **Add a pipeline enrichment rule** (e.g., in the OTel Collector or Fluent Bit) to infer service name from `k8s_namespace`, `k8s_container`, or `k8s_pod` labels — all three are already present and queryable — so unlabeled logs can be retroactively attributed.\n3. **Gate CI/CD**: block deployments that don't declare a `service` resource attribute in their OTel config.\n4. Once tagging is fixed, re-run `log10x_services` to validate the `(unknown)` bucket collapses and cost is correctly attributed per service.",
+  "hallucination": {
+    "numericClaimCount": 18,
+    "patternClaimCount": 0,
+    "supported": 8,
+    "unsupported": 0,
+    "inconclusive": 10,
+    "driftScore": 0,
+    "details": [
+      {
+        "claim": "$52",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "--|--------|-------|---------| | 1 | `(unknown)` ⚠️ | **34.9 GB** | **~100%** | $52 | | 2 | `email` | 11.8 MB | ~0.0% | $0.02 | | 3 | `frontend` | 56.6 KB | ~0."
+      },
+      {
+        "claim": "$0.02",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "nknown)` ⚠️ | **34.9 GB** | **~100%** | $52 | | 2 | `email` | 11.8 MB | ~0.0% | $0.02 | | 3 | `frontend` | 56.6 KB | ~0.0% | $0.0001 | | 4 | `recommendation` |"
+      },
+      {
+        "claim": "$0.0001",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "| 2 | `email` | 11.8 MB | ~0.0% | $0.02 | | 3 | `frontend` | 56.6 KB | ~0.0% | $0.0001 | | 4 | `recommendation` | 3.6 KB | ~0.0% | $0.0000 | **Total pipeline"
+      },
+      {
+        "claim": "$0.0000",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "ontend` | 56.6 KB | ~0.0% | $0.0001 | | 4 | `recommendation` | 3.6 KB | ~0.0% | $0.0000 | **Total pipeline volume: 34.9 GB · $52/week** --- ## 🚨 Critical La"
+      },
+      {
+        "claim": "$52",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "ecommendation` | 3.6 KB | ~0.0% | $0.0000 | **Total pipeline volume: 34.9 GB · $52/week** --- ## 🚨 Critical Labeling Issue The `(unknown)` bucket — meaning"
+      },
+      {
+        "claim": "34.9 GB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "ost/wk | |------|---------|--------|-------|---------| | 1 | `(unknown)` ⚠️ | **34.9 GB** | **~100%** | $52 | | 2 | `email` | 11.8 MB | ~0.0% | $0.02 | | 3 | `f"
+      },
+      {
+        "claim": "11.8 MB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "-------| | 1 | `(unknown)` ⚠️ | **34.9 GB** | **~100%** | $52 | | 2 | `email` | 11.8 MB | ~0.0% | $0.02 | | 3 | `frontend` | 56.6 KB | ~0.0% | $0.0001 | | 4 | `"
+      },
+      {
+        "claim": "56.6 KB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "**~100%** | $52 | | 2 | `email` | 11.8 MB | ~0.0% | $0.02 | | 3 | `frontend` | 56.6 KB | ~0.0% | $0.0001 | | 4 | `recommendation` | 3.6 KB | ~0.0% | $0.0000 |"
+      },
+      {
+        "claim": "3.6 KB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "$0.02 | | 3 | `frontend` | 56.6 KB | ~0.0% | $0.0001 | | 4 | `recommendation` | 3.6 KB | ~0.0% | $0.0000 | **Total pipeline volume: 34.9 GB · $52/week** ---"
+      },
+      {
+        "claim": "34.9 GB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "| | 4 | `recommendation` | 3.6 KB | ~0.0% | $0.0000 | **Total pipeline volume: 34.9 GB · $52/week** --- ## 🚨 Critical Labeling Issue The `(unknown)` bucket"
+      },
+      {
+        "claim": "12 MB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "`frontend`, `recommendation`), and together those three contribute less than **12 MB** — a rounding error against 34.9 GB. **What this means operationally:**"
+      },
+      {
+        "claim": "34.9 GB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "together those three contribute less than **12 MB** — a rounding error against 34.9 GB. **What this means operationally:** - The vast majority of log-producin"
+      },
+      {
+        "claim": "4 services",
+        "kind": "numeric",
+        "oracleResult": "oracle reports 1 services",
+        "status": "supported",
+        "detail": "complete, tool-grounded picture: --- ## Services Emitting Logs — This Week **4 services detected** in the metrics pipeline: | Rank | Service | Volume | Shar"
+      },
+      {
+        "claim": "100%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "-|---------|--------|-------|---------| | 1 | `(unknown)` ⚠️ | **34.9 GB** | **~100%** | $52 | | 2 | `email` | 11.8 MB | ~0.0% | $0.02 | | 3 | `frontend` | 56.6"
+      },
+      {
+        "claim": "0.0%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "1 | `(unknown)` ⚠️ | **34.9 GB** | **~100%** | $52 | | 2 | `email` | 11.8 MB | ~0.0% | $0.02 | | 3 | `frontend` | 56.6 KB | ~0.0% | $0.0001 | | 4 | `recommendat"
+      },
+      {
+        "claim": "0.0%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "| $52 | | 2 | `email` | 11.8 MB | ~0.0% | $0.02 | | 3 | `frontend` | 56.6 KB | ~0.0% | $0.0001 | | 4 | `recommendation` | 3.6 KB | ~0.0% | $0.0000 | **Total pi"
+      },
+      {
+        "claim": "0.0%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "3 | `frontend` | 56.6 KB | ~0.0% | $0.0001 | | 4 | `recommendation` | 3.6 KB | ~0.0% | $0.0000 | **Total pipeline volume: 34.9 GB · $52/week** --- ## 🚨 Crit"
+      },
+      {
+        "claim": "100%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "with **no `service` tag set at the emitter level** — accounts for effectively **100% of all log volume and cost**. The `tenx_user_service` label, which is the c"
+      }
+    ]
+  },
+  "valueDelivered": {
+    "score": 0.95,
+    "rationale": "The synthesis directly answers all three parts of the question (count=4, named top contributors with volumes, and explicitly calls out the (unknown) labeling issue as the dominant problem), with concrete actionable remediation steps an SRE can execute immediately."
+  },
+  "valueReceived": {
+    "score": 0.8,
+    "rationale": "The MCP returned the critical services volume breakdown and label discovery data needed to answer the question, but pattern analysis was unavailable ('No pattern data available') and the cost_drivers call for (unknown) didn't return visible output in the transcript, leaving some depth gaps."
+  },
+  "status": "pass",
+  "flags": []
+}

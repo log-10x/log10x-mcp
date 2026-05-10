@@ -9,20 +9,24 @@
     "summary": "Cost growth in the last 24h is dominated by Kafka metadata churn + OTel exporter retry errors. cost_drivers may report 'no drivers detected' on stable replay; correct response is either the actual growth deltas OR the truthful-negative + fallback to top_patterns.",
     "top_patterns": [
       {
-        "name": "OpenTelemetry_error_Export_failure_exception_Export_retry_limit_exceeded_previous",
-        "bytes_24h": 442438.8270911407
-      },
-      {
         "name": "cart_cartstore_ValkeyCartStore",
-        "bytes_24h": 438645.8623796627
+        "bytes_24h": 31697668.45333615
       },
       {
-        "name": "Deleted_producer_state_snapshot_tmp_kafka_logs_cluster_metadata_snapshot",
-        "bytes_24h": 411582.8321929723
+        "name": "OpenTelemetry_error_Export_failure_exception_Export_retry_limit_exceeded_previous",
+        "bytes_24h": 29631518.47144328
       },
       {
-        "name": "cluster_metadata_timeindex_deleted_org_apache_kafka_storage_internals_LogSegment",
-        "bytes_24h": 403131.79618349764
+        "name": "attributes",
+        "bytes_24h": 13146246.875604972
+      },
+      {
+        "name": "Can_you_summarize_product_reviews_content_requesting_tool_call_refusal_None",
+        "bytes_24h": 7653175.228769451
+      },
+      {
+        "name": "instrumentationScope_name_payment_logger_version_schemaUrl_undefined",
+        "bytes_24h": 7247837.50088504
       }
     ],
     "must_mention": [],
@@ -34,6 +38,6 @@
       "log10x_cost_drivers"
     ],
     "expected_oracle_query": "topk(5, sum by (message_pattern)(increase(all_events_summaryBytes_total[24h])) - sum by (message_pattern)(increase(all_events_summaryBytes_total[24h] offset 1d)))",
-    "snapshot_ts": "2026-05-10T02:37:41.860Z"
+    "snapshot_ts": "2026-05-10T03:38:49.679Z"
   }
 }

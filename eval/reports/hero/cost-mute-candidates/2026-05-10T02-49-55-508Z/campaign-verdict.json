@@ -1,0 +1,262 @@
+{
+  "question_id": "cost-mute-candidates",
+  "transcript_path": "/Users/talweiss/git/l1x-co/log10x-mcp/eval/reports/hero/cost-mute-candidates/2026-05-10T02-49-55-508Z/transcript.json",
+  "verdict": {
+    "drift_score": 1,
+    "drift_supported": 0,
+    "drift_inconclusive": 14,
+    "pattern_match": {
+      "agent_top_patterns": [],
+      "oracle_top_patterns": [
+        "open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter",
+        "opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go",
+        "service_instance_id_service_name_otelcol_contrib_service_version_otelcol"
+      ],
+      "matched": 0,
+      "missed": 3,
+      "extra": 0,
+      "score": 0
+    },
+    "chain_alignment": {
+      "expected": [
+        "log10x_top_patterns",
+        "log10x_dependency_check",
+        "log10x_exclusion_filter"
+      ],
+      "actual": [
+        "log10x_top_patterns",
+        "log10x_savings",
+        "log10x_cost_drivers",
+        "log10x_dependency_check",
+        "log10x_pattern_examples",
+        "log10x_pattern_examples",
+        "log10x_pattern_examples",
+        "log10x_dependency_check",
+        "log10x_pattern_examples",
+        "log10x_pattern_examples",
+        "log10x_dependency_check",
+        "log10x_dependency_check",
+        "log10x_dependency_check",
+        "log10x_pattern_trend",
+        "log10x_pattern_trend",
+        "log10x_pattern_trend",
+        "log10x_exclusion_filter",
+        "log10x_exclusion_filter",
+        "log10x_exclusion_filter"
+      ],
+      "hits": [
+        "log10x_top_patterns",
+        "log10x_dependency_check",
+        "log10x_exclusion_filter"
+      ],
+      "misses": [],
+      "score": 1
+    },
+    "value_delivered": 0.55,
+    "value_received": 0.4,
+    "passed": false,
+    "axes_summary": "drift=0/14 pattern_match=0/3=0.00 chain=3/3=1.00 value_delivered=0.55 value_received=0.40"
+  },
+  "oracle": {
+    "numericClaimCount": 14,
+    "patternClaimCount": 0,
+    "supported": 0,
+    "unsupported": 0,
+    "inconclusive": 14,
+    "driftScore": 0,
+    "details": [
+      {
+        "claim": "$5.8",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "ppearing at both ERROR and DEBUG severities), with a combined trended cost of **$5.8/wk** — higher than the $3.6 + $2.1 listed individually. All three candidate"
+      },
+      {
+        "claim": "$3.6",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "EBUG severities), with a combined trended cost of **$5.8/wk** — higher than the $3.6 + $2.1 listed individually. All three candidates have **0 dependencies** co"
+      },
+      {
+        "claim": "$2.1",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "verities), with a combined trended cost of **$5.8/wk** — higher than the $3.6 + $2.1 listed individually. All three candidates have **0 dependencies** confirmed"
+      },
+      {
+        "claim": "$5.8",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "elcol` | Attribute | Value (tool-sourced) | |---|---| | **Weekly savings** | **$5.8/wk** (trended total; both ERROR + DEBUG severities combined) | | **Severity"
+      },
+      {
+        "claim": "$6.0",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "0 dependencies (scanned 2026-05-10T02:51:44Z) | | **Trend** | Stable — baseline $6.0/wk → current $6.2/wk, no growth | | **What breaks if muted** | Nothing — th"
+      },
+      {
+        "claim": "$6.2",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "anned 2026-05-10T02:51:44Z) | | **Trend** | Stable — baseline $6.0/wk → current $6.2/wk, no growth | | **What breaks if muted** | Nothing — this is OTel Collect"
+      },
+      {
+        "claim": "$1.8",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "eLogs` | Attribute | Value (tool-sourced) | |---|---| | **Weekly savings** | **$1.8/wk** | | **Severity** | Not reported (no severity label surfaced by top_pat"
+      },
+      {
+        "claim": "$1.8",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "encies (scanned 2026-05-10T02:52:02Z) | | **Trend** | Perfectly flat — baseline $1.8/wk = current $1.8/wk | | **What breaks if muted** | Nothing — this is OTel"
+      },
+      {
+        "claim": "$1.8",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "26-05-10T02:52:02Z) | | **Trend** | Perfectly flat — baseline $1.8/wk = current $1.8/wk | | **What breaks if muted** | Nothing — this is OTel Collector internal"
+      },
+      {
+        "claim": "$1.3",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "rt go` | Attribute | Value (tool-sourced) | |---|---| | **Weekly savings** | **$1.3/wk** | | **Severity** | Not reported | | **Dependency check** | 0 dependenc"
+      },
+      {
+        "claim": "$1.3",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "encies (scanned 2026-05-10T02:52:07Z) | | **Trend** | Perfectly flat — baseline $1.3/wk = current $1.3/wk | | **What breaks if muted** | Nothing — this is the O"
+      },
+      {
+        "claim": "$1.3",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "26-05-10T02:52:07Z) | | **Trend** | Perfectly flat — baseline $1.3/wk = current $1.3/wk | | **What breaks if muted** | Nothing — this is the OpenSearch Go clien"
+      },
+      {
+        "claim": "$8.9",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "tterns carries no risk of breaking dashboards, alerts, or SLO calculations. The $8.9/wk combined spend is pure ingest waste. **What to do:** 1. **Approve all t"
+      },
+      {
+        "claim": "$5.8",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "h log groups. 2. Pattern 1 (`otelcol service instance id`) is the priority — at $5.8/wk it is the single largest recoverable spend in the environment and carrie"
+      }
+    ]
+  },
+  "pattern_match": {
+    "agent_top_patterns": [],
+    "oracle_top_patterns": [
+      "open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter",
+      "opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go",
+      "service_instance_id_service_name_otelcol_contrib_service_version_otelcol"
+    ],
+    "matched": 0,
+    "missed": 3,
+    "extra": 0,
+    "score": 0
+  },
+  "chain_alignment": {
+    "expected": [
+      "log10x_top_patterns",
+      "log10x_dependency_check",
+      "log10x_exclusion_filter"
+    ],
+    "actual": [
+      "log10x_top_patterns",
+      "log10x_savings",
+      "log10x_cost_drivers",
+      "log10x_dependency_check",
+      "log10x_pattern_examples",
+      "log10x_pattern_examples",
+      "log10x_pattern_examples",
+      "log10x_dependency_check",
+      "log10x_pattern_examples",
+      "log10x_pattern_examples",
+      "log10x_dependency_check",
+      "log10x_dependency_check",
+      "log10x_dependency_check",
+      "log10x_pattern_trend",
+      "log10x_pattern_trend",
+      "log10x_pattern_trend",
+      "log10x_exclusion_filter",
+      "log10x_exclusion_filter",
+      "log10x_exclusion_filter"
+    ],
+    "hits": [
+      "log10x_top_patterns",
+      "log10x_dependency_check",
+      "log10x_exclusion_filter"
+    ],
+    "misses": [],
+    "score": 1
+  },
+  "gaps": [
+    {
+      "question_id": "cost-mute-candidates",
+      "run_timestamp": "2026-05-10T03:40:07.209Z",
+      "gap_kind": "drift",
+      "gap_description": "Drift on 1 claim(s)",
+      "expected_answer_excerpt": "Safest mute candidates are high-volume patterns with no severity (or DEBUG/TRACE), which on this env are the OTel collector internals. Agent must mention dependency_check before suggesting mute.",
+      "actual_answer_excerpt": "All the data I need is in hand. The trend tool revealed that patterns #4 and #5 are actually the **same pattern** (the `service instance id … otelcol` pattern appearing at both ERROR and DEBUG severities), with a combined trended cost of **$5.8/wk** — higher than the $3.6 + $2.1 listed individually. All three candidates have **0 dependencies** confirmed by `log10x_dependency_check`. Here is the co",
+      "fix_status": "open",
+      "notes": [
+        "missing must-mention \"exclusion_filter\""
+      ]
+    },
+    {
+      "question_id": "cost-mute-candidates",
+      "run_timestamp": "2026-05-10T03:40:07.209Z",
+      "gap_kind": "pattern_miss",
+      "gap_description": "Top-N pattern match 0.00 < 0.7; matched (none)",
+      "expected_answer_excerpt": "Oracle top: open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter, opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go, service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
+      "actual_answer_excerpt": "Agent top: ",
+      "fix_status": "open",
+      "notes": [
+        "agent_top=[]",
+        "oracle_top=[\"open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter\",\"opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go\",\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\"]"
+      ]
+    },
+    {
+      "question_id": "cost-mute-candidates",
+      "run_timestamp": "2026-05-10T03:40:07.209Z",
+      "gap_kind": "low_value",
+      "gap_description": "value_delivered 0.55 < 0.7",
+      "expected_answer_excerpt": "Safest mute candidates are high-volume patterns with no severity (or DEBUG/TRACE), which on this env are the OTel collector internals. Agent must mention dependency_check before suggesting mute.",
+      "actual_answer_excerpt": "All the data I need is in hand. The trend tool revealed that patterns #4 and #5 are actually the **same pattern** (the `service instance id … otelcol` pattern appearing at both ERROR and DEBUG severities), with a combined trended cost of **$5.8/wk** — higher than the $3.6 + $2.1 listed individually. All three candidates have **0 dependencies** confirmed by `log10x_dependency_check`. Here is the co",
+      "fix_status": "open",
+      "notes": []
+    },
+    {
+      "question_id": "cost-mute-candidates",
+      "run_timestamp": "2026-05-10T03:40:07.209Z",
+      "gap_kind": "low_received",
+      "gap_description": "value_received 0.40 < 0.7 — MCP returned thin/stub data",
+      "expected_answer_excerpt": "(MCP-side fix candidate)",
+      "actual_answer_excerpt": "All the data I need is in hand. The trend tool revealed that patterns #4 and #5 are actually the **same pattern** (the `service instance id … otelcol` pattern appearing at both ERROR and DEBUG severities), with a combined trended cost of **$5.8/wk** — higher than the $3.6 + $2.1 listed individually. All three candidates have **0 dependencies** confirmed by `log10x_dependency_check`. Here is the co",
+      "fix_status": "open",
+      "notes": []
+    }
+  ]
+}

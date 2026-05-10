@@ -18,6 +18,7 @@ import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 
 export const topPatternsSchema = {
   service: z.string().optional().describe('Service name to scope the result. Omit for all services.'),
+  severity: z.string().optional().describe('Severity level to scope the result (e.g., `ERROR`, `CRITICAL`, `DEBUG`). Omit for all severities. Caught by the eval-harness anti-hallucination campaign — agents asked for "top CRITICAL patterns" couldn\'t scope without this filter and the synthesis was missing the requested top-N.'),
   timeRange: z.enum(['15m', '1h', '6h', '1d', '7d', '30d']).default('7d').describe('Time range to aggregate over. Sub-day values (`15m`, `1h`, `6h`) are useful for incident investigation; day-level values for cost and trend analysis.'),
   limit: z.number().min(1).max(50).default(10).describe('Number of patterns to return.'),
   analyzerCost: z.number().optional().describe('SIEM ingestion cost in $/GB. Auto-detected from profile if omitted.'),
@@ -25,7 +26,7 @@ export const topPatternsSchema = {
 };
 
 export async function executeTopPatterns(
-  args: { service?: string; timeRange: string; limit: number; analyzerCost: number },
+  args: { service?: string; severity?: string; timeRange: string; limit: number; analyzerCost: number },
   env: EnvConfig
 ): Promise<string> {
   // Defensive defaults so the function is safe to call without the zod schema
@@ -44,6 +45,7 @@ export async function executeTopPatterns(
 
   const filters: Record<string, string> = {};
   if (args.service) filters[LABELS.service] = args.service;
+  if (args.severity) filters[LABELS.severity] = args.severity;
 
   const metricsEnv = Object.keys(filters).length > 0
     ? await resolveMetricsEnvFiltered(env, filters)

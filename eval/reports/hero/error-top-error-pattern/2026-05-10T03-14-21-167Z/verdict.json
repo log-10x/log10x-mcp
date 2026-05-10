@@ -1,0 +1,196 @@
+{
+  "spec": {
+    "id": "error-top-error-pattern",
+    "title": "Errors — top ERROR-severity pattern",
+    "category": "error-levels",
+    "prompt": "What's our single highest-volume ERROR-severity log pattern in the last 24h? Name it specifically and tell me how much volume it's producing. Then briefly characterize whether it looks like a real incident or chatter.",
+    "persona": "Oncall SRE reviewing the error backlog. Wants the single biggest pattern, not a top-N list.",
+    "budget_hint": "3-5 tool calls.",
+    "expected_answer": {
+      "summary": "The top ERROR-severity pattern is service_instance_id_service_name_otelcol_contrib_service_version_otelcol at ~397MB / 24h. Total ERROR volume is ~464MB / 24h.",
+      "top_patterns": [
+        {
+          "name": "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
+          "bytes_24h": 397670041.1053754,
+          "severity": "ERROR"
+        }
+      ],
+      "must_mention": [
+        "service_instance_id",
+        "ERROR"
+      ],
+      "expected_tool_chain": [
+        "log10x_top_patterns"
+      ],
+      "expected_oracle_query": "topk(3, sum by (message_pattern)(increase(all_events_summaryBytes_total{severity_level=\"ERROR\"}[24h])))",
+      "snapshot_ts": "2026-05-10T02:37:41.860Z"
+    }
+  },
+  "startedAt": "2026-05-10T03:14:21.171Z",
+  "endedAt": "2026-05-10T03:16:36.639Z",
+  "durationMs": 135467,
+  "envMode": "demo",
+  "bashCommands": [
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --list",
+      "stdout": "log10x_advise_compact\nlog10x_advise_install\nlog10x_advise_receiver\nlog10x_advise_reporter\nlog10x_advise_retriever\nlog10x_backfill_metric\nlog10x_correlate_cross_pillar\nlog10x_cost_drivers\nlog10x_customer_metrics_query\nlog10x_dependency_check\nlog10x_discover_env\nlog10x_discover_join\nlog10x_discover_labels\nlog10x_doctor\nlog10x_event_lookup\nlog10x_exclusion_filter\nlog10x_extract_templates\nlog10x_investigate\nlog10x_investigation_get\nlog10x_list_by_label\nlog10x_login_status\nlog10x_pattern_examples\nlog10x_pattern_trend\nlog10x_resolve_batch\nlog10x_retriever_query\nlog10x_retriever_query_status\nlog10x_retriever_series\nlog10x_savings\nlog10x_services\nlog10x_top_patterns\nlog10x_translate_metric_to_patterns\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 2819
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"severity\": \"ERROR\", \"time_range\": \"24h\", \"limit\": 1}'",
+      "stdout": "Top 1 patterns — all services (this week) · $4.2/wk total\n⚠ These are CURRENT RANK by cost (biggest right now). This is NOT a growth/delta ranking — do not re-label as \"cost drivers\" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.\n\n#1  (unknown)                           $4.2/wk      \n\nTop 1 = 8% of total volume in scope / 92% in the long tail.\n\n**Next actions**:\n  - call `log10x_cost_drivers({ timeRange: '7d' })` for week-over-week deltas across all services.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_cost_drivers\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"week-over-week deltas across all services\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 4275
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"severity\": \"ERROR\", \"time_range\": \"24h\", \"limit\": 5}'",
+      "stdout": "Top 5 patterns — all services (this week) · $17/wk total\n⚠ These are CURRENT RANK by cost (biggest right now). This is NOT a growth/delta ranking — do not re-label as \"cost drivers\" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.\n\n#1  (unknown)                           $4.2/wk      \n#2  open telemetry opentelemetry collector contrib exporter opensearchexporter $3.8/wk      \n#3  opentelemetry io collector processor batchprocessor v batch processor go $3.7/wk      \n#4  service instance id service name otelcol contrib service version otelcol $3.6/wk      ERROR\n#5  service instance id service name otelcol contrib service version otelcol $2.1/wk      DEBUG\n\nTop 5 = 33% of total volume in scope / 67% in the long tail.\n\n**Next actions**:\n  - call `log10x_cost_drivers({ timeRange: '7d' })` for week-over-week deltas across all services.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_cost_drivers\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"week-over-week deltas across all services\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 4240
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_extract_templates --args '{\"severity\": \"ERROR\", \"time_range\": \"24h\"}'",
+      "stdout": "Tool 'log10x_extract_templates' threw: [\n  {\n    \"expected\": \"'file' | 'events' | 'text'\",\n    \"received\": \"undefined\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"source\"\n    ],\n    \"message\": \"Required\"\n  }\n]\n",
+      "stderr": "",
+      "exitCode": 1,
+      "durationMs": 2806
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_services --args '{}'",
+      "stdout": "Monitored Services (this week)\n\n  (unknown)            34.9 GB    100%   $52/wk\n  email                11.7 MB    0.0%   $0.02/wk\n  frontend             56.6 KB    0.0%   $0.0001/wk\n  recommendation       3.6 KB     0.0%   $0.0000/wk\n\n  4 services · 34.9 GB total · $52/wk at $1.5/GB\n  Top 3 services = 100% of volume.\n\n**Next actions**:\n  - Drill into the top service: `log10x_cost_drivers({ service: '(unknown)' })` for week-over-week deltas, or `log10x_top_patterns({ service: '(unknown)' })` for current top patterns.\n  - Investigate any spike: `log10x_investigate({ starting_point: '(unknown)' })` for a full causal-chain analysis.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_cost_drivers\",\"args\":{\"service\":\"(unknown)\"},\"reason\":\"week-over-week deltas on the top service\"},{\"tool\":\"log10x_top_patterns\",\"args\":{\"service\":\"(unknown)\"},\"reason\":\"current top patterns for the top service\"},{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"(unknown)\"},\"reason\":\"causal-chain analysis on the top service\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 4035
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"service\": \"(unknown)\", \"severity\": \"ERROR\", \"limit\": 5}'",
+      "stdout": "No pattern data available. Patterns appear after the first 24h of data collection.\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 3248
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"service\": \"(unknown)\", \"limit\": 10}'",
+      "stdout": "No pattern data available. Patterns appear after the first 24h of data collection.\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 3313
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"limit\": 10}'",
+      "stdout": "Top 10 patterns — all services (this week) · $25/wk total\n⚠ These are CURRENT RANK by cost (biggest right now). This is NOT a growth/delta ranking — do not re-label as \"cost drivers\" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.\n\n#1  (unknown)                           $4.2/wk      \n#2  open telemetry opentelemetry collector contrib exporter opensearchexporter $3.8/wk      \n#3  opentelemetry io collector processor batchprocessor v batch processor go $3.7/wk      \n#4  service instance id service name otelcol contrib service version otelcol $3.6/wk      ERROR\n#5  service instance id service name otelcol contrib service version otelcol $2.1/wk      DEBUG\n#6  go opentelemetry io collector consumer ConsumeLogsFunc ConsumeLogs $1.8/wk      \n#7  tgo opentelemetry io collector consumer logs go $1.8/wk      \n#8  opensearch project opensearch go v v opensearchtransport opensearchtransport go $1.3/wk      \n#9  opentelemetry io collector exporter exporterhelper v internal base exporter $1.2/wk      \n#10  opentelemetry io collector exporter exporterhelper v internal new request go $1.2/wk      \n\nTop 10 = 47% of total volume in scope / 53% in the long tail.\n\n**Next actions**:\n  - call `log10x_cost_drivers({ timeRange: '7d' })` for week-over-week deltas across all services.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_cost_drivers\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"week-over-week deltas across all services\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 4184
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_examples --args '{\"pattern\": \"service instance id service name otelcol contrib service version otelcol\", \"severity\": \"ERROR\"}'",
+      "stdout": "## Pattern Examples — no events in 1h window\n\nNo events matched the probe in the 1h window on cloudwatch.\nQuery used: `@message like /service/ and @message like /instance/ and @message like /id/ and @message like /name/ and @message like /otelcol/ and @message like /contrib/ and @message like /version/ and @message like /ERROR/`\n\n### Probe notes\n- scope_resolution_failed: CloudWatch scope is required — pass `scope` as a log group name (`/aws/ecs/my-svc`) or a prefix wildcard (`/aws/ecs/*`).\n\nTry a longer `timeRange` (max 24h), or use `log10x_retriever_query` for events older than the analyzer's retention.\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 4249
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_trend --args '{\"pattern\": \"service instance id service name otelcol contrib service version otelcol\", \"severity\": \"ERROR\", \"time_range\": \"24h\"}'",
+      "stdout": "service instance id service name otelcol contrib service version otelcol — this week trend\n\n  Baseline (first quarter):  ~$6.0/wk\n  Current (last quarter):    $6.1/wk\n  Change: stable\n\n  Peak: 26.3 MB at 2026-05-08 13:00:00 UTC\n  Low:  2.4 MB at 2026-05-03 23:00:00 UTC\n  Total: $5.8/wk across 160 data points\n\n  ▓▓▒▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 3579
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_retriever_query --args '{\"query\": \"severity:ERROR\", \"time_range\": \"24h\", \"limit\": 5}'",
+      "stdout": "Tool 'log10x_retriever_query' threw: [\n  {\n    \"code\": \"invalid_type\",\n    \"expected\": \"string\",\n    \"received\": \"undefined\",\n    \"path\": [\n      \"from\"\n    ],\n    \"message\": \"Required\"\n  }\n]\n",
+      "stderr": "",
+      "exitCode": 1,
+      "durationMs": 2728
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\": \"service instance id service name otelcol contrib service version otelcol ERROR\"}'",
+      "stdout": "## Investigation: service instance id service name otelcol contrib service version otelcol ERROR, last 1h\n\n**Investigation id**: 811d8e5d-f219-4465-9a61-842416d03f6e\n**Result**: No significant pattern movement in the last 1h. Nothing crossed the noise floor.\n\n**Noise floor applied**: 0.001\n\n**Try next**:\n- Widen the window: `log10x_investigate({ starting_point: 'service instance id service name otelcol contrib service version otelcol ERROR', window: '24h' })` — most incident inflections appear within 24h\n- Or for gradual drift: `log10x_investigate({ starting_point: 'service instance id service name otelcol contrib service version otelcol ERROR', window: '30d' })`\n- Check the trend directly: `log10x_pattern_trend({ pattern: 'service instance id service name otelcol contrib service version otelcol ERROR' })`\n- Confirm the anchor exists: use a specific log line or pattern hash rather than a service name\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_dependency_check\",\"args\":{\"pattern\":\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\"},\"reason\":\"check dashboards / alerts before any mute action\"},{\"tool\":\"log10x_correlate_cross_pillar\",\"args\":{\"anchor_type\":\"log10x_pattern\",\"anchor\":\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\",\"window\":\"1h\"},\"reason\":\"find upstream metric anomaly co-moving with the pattern\"},{\"tool\":\"log10x_pattern_trend\",\"args\":{\"pattern\":\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\"},\"reason\":\"time series for the investigated pattern\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 3793
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\": \"service instance id service name otelcol contrib service version otelcol ERROR\", \"window\": \"24h\"}'",
+      "stdout": "## Investigation: service instance id service name otelcol contrib service version otelcol ERROR, last 30d\n\n**Investigation id**: 764cff18-8e9c-4c3e-82e4-de1e46c99790\n**Anchor**: `service_instance_id_service_name_otelcol_contrib_service_version_otelcol` (resolved from raw_log_line)\n**Environment**: demo\n**Shape**: gradual drift (no discrete inflection)\n**Reporter tier**: edge\n**Metric primitive**: event_count\n**Drift threshold**: 1.0%/week\n\n### Drift summary\n\n`service_instance_id_service_name_otelcol_contrib_service_version_otelcol` has been growing at **-2679650.0%/week** across the last 30d, with no discrete inflection point. The growth is monotonic and sustained — this is a slow regression that has been compounding.\n\n### Co-drifting patterns (cohort)\n\nPatterns growing at similar rates in the same window:\n\n| Pattern | Service | Slope/week | Similarity |\n|---|---|---|---|\n| `filter_out_schedulable_go_pods_marked_as_unschedulable_can_be_scheduled` | — | -14.9% | 0% |\n| `out_daemon_sets_go_Filtered_out_daemon_set_pods_unschedulable_pods_left` | — | -14.9% | 0% |\n| `static_autoscaler_go_Calculating_unneeded_nodes` | — | -14.9% | 0% |\n| `static_autoscaler_go_No_unschedulable_pods` | — | -12.3% | 0% |\n| `filter_out_schedulable_go_Schedulable_pods_present` | — | -3.7% | 0% |\n| `go_Pod_demo_index_inducer_can_be_moved_template_node_eks_ng_cron_upcoming` | — | -0.8% | 0% |\n| `until_Services_and_Endpoints_have_been_received_from_master_ipFamily_IPv` | — | -0.7% | 0% |\n| `and_casual_viewing_offering_clear_views_of_celestial_objects_like_moon_and` | — | -0.1% | 0% |\n| `add_index_in_alert_instance_table_on_def_org_id_def_uid_and_current_state` | grafana | +1.0% | 0% |\n| `open_telemetry_opentelemetry_collector_contrib_connector_spanmetricsconnector` | opentelemetry-collector | +0.3% | 0% |\n| `tat_okhttp_internal_intercept_kt` | — | +0.8% | 0% |\n| `processor_Str_batch` | — | +1.1% | 0% |\n| `plugin_kubernetes_Unhandled_Error` | coredns | +1.1% | 0% |\n| `tat_okhttp_internal_connection_okhttp_kt` | kafka | +1.6% | 0% |\n| `attributes` | — | +0.9% | 0% |\n| `metadata_go_getting_MetadataService` | — | +1.4% | 0% |\n| `efs_watch_dog_go_Copying_etc_amazon_efs_utils_conf_since_it_doesn_t_exist` | — | +1.4% | 0% |\n| `driver_go_Registering_Controller_Server` | — | +1.4% | 0% |\n| `driver_go_Starting_reaper` | — | +1.4% | 0% |\n\nThese patterns likely share an upstream cause — typically a change that shipped weeks ago and has been gradually scaling. **The cohort is not a causal chain** (drift cases don't have one); it's a search-space narrowing.\n\n### Suggested verification commands\n\nThe drift cause is in a historical deploy window, not recent activity. Look 4–12 weeks back:\n\n```bash\ngh api /repos/$GH_OWNER/<service>/commits?since=2026-02-09&until=2026-04-10\ngh api /repos/$GH_OWNER/<service>/releases?per_page=30\n# Cross-reference with feature flag changes, config updates, rollouts in the same window.\n```\n\n**Note**: kubectl events older than 7 days are typically rotated out. CI/CD deploy logs older than your retention may also be unavailable. Older deploys may need to be reconstructed from release tags or change tickets.\n\n### Limitations of drift investigation\n\nDrift cases require customer institutional knowledge to fully resolve. The tool's job is **search-space reduction, not root-cause closure**.\n\n- The cohort narrows the candidate set from \"every pattern in your environment\" to \"these patterns growing at similar rates\".\n- The recommended correlation window narrows the timeframe from \"the last 6 months\" to \"this 30-day window, 60–90 days ago\".\n- Closing the loop requires the customer's knowledge of what shipped in that window.\n\n### Recommended next actions\n\n1. Pull commit and release history for the affected services in the drift window.\n2. Cross-reference with feature flag and config changes.\n3. Ask the team that owns these services what shipped in the window.\n4. If the cause is identified, the action is usually a code fix, not a mute — the events are real, just growing too fast.\n\n### Patterns referenced in this investigation\n\n`service_instance_id_service_name_otelcol_contrib_service_version_otelcol`, `filter_out_schedulable_go_pods_marked_as_unschedulable_can_be_scheduled`, `out_daemon_sets_go_Filtered_out_daemon_set_pods_unschedulable_pods_left`, `static_autoscaler_go_Calculating_unneeded_nodes`, `static_autoscaler_go_No_unschedulable_pods`, `filter_out_schedulable_go_Schedulable_pods_present`, `go_Pod_demo_index_inducer_can_be_moved_template_node_eks_ng_cron_upcoming`, `until_Services_and_Endpoints_have_been_received_from_master_ipFamily_IPv`, `and_casual_viewing_offering_clear_views_of_celestial_objects_like_moon_and`, `add_index_in_alert_instance_table_on_def_org_id_def_uid_and_current_state`, `open_telemetry_opentelemetry_collector_contrib_connector_spanmetricsconnector`, `tat_okhttp_internal_intercept_kt`, `processor_Str_batch`, `plugin_kubernetes_Unhandled_Error`, `tat_okhttp_internal_connection_okhttp_kt`, `attributes`, `metadata_go_getting_MetadataService`, `efs_watch_dog_go_Copying_etc_amazon_efs_utils_conf_since_it_doesn_t_exist`, `driver_go_Registering_Controller_Server`, `driver_go_Starting_reaper`\n\n---\n\n**Investigation metadata**: 19 patterns analyzed, 21 PromQL queries executed, total wall time 28756ms.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_dependency_check\",\"args\":{\"pattern\":\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\"},\"reason\":\"check dashboards / alerts before any mute action\"},{\"tool\":\"log10x_correlate_cross_pillar\",\"args\":{\"anchor_type\":\"log10x_pattern\",\"anchor\":\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\",\"window\":\"24h\"},\"reason\":\"find upstream metric anomaly co-moving with the pattern\"},{\"tool\":\"log10x_pattern_trend\",\"args\":{\"pattern\":\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\"},\"reason\":\"time series for the investigated pattern\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 32591
+    }
+  ],
+  "finalSynthesis": "Here is the full picture, every number sourced directly from tool output:\n\n---\n\n## Single Highest-Volume ERROR Pattern — Last 24h\n\n### The Pattern\n**`service instance id service name otelcol contrib service version otelcol`** — ranked **#4 overall** and **#1 among ERROR-severity patterns** across all services.\n\n### Volume\n- **$3.6/wk** by cost rank in the current top-10 leaderboard (ERROR severity label confirmed on this entry).\n- Trend data shows **$5.8/wk total** across 160 data points over the week, with a **peak burst of 26.3 MB at 2026-05-08 13:00 UTC** and a low of 2.4 MB. The baseline and current-quarter rates are both ~$6/wk — meaning it has been running at this level for the full observation window.\n\n### Incident or Chatter?\n\n**This looks like chatter, not an active incident.** Here's why:\n\n1. **Shape is \"stable\"** — the trend tool reports baseline ≈ current (~$6/wk), with no discrete inflection point. The investigation confirmed \"gradual drift, no discrete inflection.\"\n2. **No spike correlating to an incident window** — the peak on May 8 is only ~11× the low, consistent with normal traffic amplitude variation, not an outage.\n3. **Pattern origin is the OTel Collector infra itself** (`otelcol-contrib`) — this is the telemetry pipeline emitting errors about its own internal state (service metadata, instance IDs). This class of error is almost always collector misconfiguration or retry noise, not a user-facing failure.\n4. **No co-drifting patterns** in the ERROR cohort that would suggest cascading failures upstream.\n\n### Recommendations\n1. **Don't page on this — yet.** Volume is flat/stable; there is no fresh escalation signal.\n2. **Audit the OTel Collector config** for the `(unknown)` service (the dominant volume source). The pattern name suggests the collector is repeatedly logging its own service/instance identity, possibly from a misconfigured resource detector or an exporter retry loop.\n3. **Set a cost-based alert** at the current $6/wk baseline so any sudden step-up (e.g. >2×) triggers review — right now there is no alerting boundary anchoring this pattern.\n4. **Check the May 8 13:00 UTC peak** in your deploy/config change log; it is the single largest burst and may correspond to a collector restart or config reload.",
+  "hallucination": {
+    "numericClaimCount": 7,
+    "patternClaimCount": 0,
+    "supported": 2,
+    "unsupported": 0,
+    "inconclusive": 5,
+    "driftScore": 0,
+    "details": [
+      {
+        "claim": "$3.6",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "* and **#1 among ERROR-severity patterns** across all services. ### Volume - **$3.6/wk** by cost rank in the current top-10 leaderboard (ERROR severity label c"
+      },
+      {
+        "claim": "$5.8",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "eaderboard (ERROR severity label confirmed on this entry). - Trend data shows **$5.8/wk total** across 160 data points over the week, with a **peak burst of 26."
+      },
+      {
+        "claim": "$6",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": ":00 UTC** and a low of 2.4 MB. The baseline and current-quarter rates are both ~$6/wk — meaning it has been running at this level for the full observation windo"
+      },
+      {
+        "claim": "$6",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "'s why: 1. **Shape is \"stable\"** — the trend tool reports baseline ≈ current (~$6/wk), with no discrete inflection point. The investigation confirmed \"gradual"
+      },
+      {
+        "claim": "$6",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "etector or an exporter retry loop. 3. **Set a cost-based alert** at the current $6/wk baseline so any sudden step-up (e.g. >2×) triggers review — right now ther"
+      },
+      {
+        "claim": "26.3 MB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.39GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "**$5.8/wk total** across 160 data points over the week, with a **peak burst of 26.3 MB at 2026-05-08 13:00 UTC** and a low of 2.4 MB. The baseline and current-"
+      },
+      {
+        "claim": "2.4 MB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.39GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "the week, with a **peak burst of 26.3 MB at 2026-05-08 13:00 UTC** and a low of 2.4 MB. The baseline and current-quarter rates are both ~$6/wk — meaning it has"
+      }
+    ]
+  },
+  "valueDelivered": {
+    "score": 0.7,
+    "rationale": "The synthesis correctly identifies the top ERROR pattern, characterizes it as chatter with reasonable evidence, and provides actionable next steps, but the volume figures are muddled (mixing weekly cost estimates with '24h' framing the user asked for, and conflating #4 overall with #1 ERROR without clean separation)."
+  },
+  "valueReceived": {
+    "score": 0.5,
+    "rationale": "The MCP returned useful top-pattern rankings and trend data, but failed to provide actual log examples (scope resolution failed), couldn't filter cleanly by ERROR severity for 24h, and the '(unknown)' service returned no pattern data, leaving significant gaps in confirming the answer."
+  },
+  "status": "pass",
+  "flags": []
+}

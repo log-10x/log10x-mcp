@@ -15,16 +15,16 @@
       "mute the untagged"
     ],
     "expected_severity_split": {
-      "(untagged)": 4485317914.9425955,
-      "CRITICAL": 2231287.724769979,
-      "DEBUG": 218716469.29287112,
-      "ERROR": 465035485.26829433,
-      "INFO": 127705408.67236903,
-      "TRACE": 97831415.47077928
+      "(untagged)": 4488286211.317073,
+      "CRITICAL": 2248875.7405886604,
+      "DEBUG": 218859376.26516193,
+      "ERROR": 465523083.6965088,
+      "INFO": 127495775.7312346,
+      "TRACE": 98304252.23443514
     },
     "expected_tool_chain": [
       "log10x_list_by_label"
     ],
-    "snapshot_ts": "2026-05-10T02:37:41.860Z"
+    "snapshot_ts": "2026-05-10T03:38:49.679Z"
   }
 }

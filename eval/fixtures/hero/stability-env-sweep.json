@@ -6,24 +6,24 @@
   "persona": "Oncall SRE doing a periodic 'is everything OK' scan.",
   "budget_hint": "2-4 tool calls; investigate(starting_point=environment) is the right entry.",
   "expected_answer": {
-    "summary": "Environment-wide investigation should run cleanly and surface either growth/decline drivers OR a truthful-negative. Top movers from oracle: OpenTelemetry_error_Export_failure_exception_Export_retry_limit_exceeded_previous, cart_cartstore_ValkeyCartStore, Deleted_producer_state_snapshot_tmp_kafka_logs_cluster_metadata_snapshot.",
+    "summary": "Environment-wide investigation should run cleanly and surface either growth/decline drivers OR a truthful-negative. Top movers from oracle: open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter, opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go, cart_cartstore_ValkeyCartStore.",
     "top_patterns": [
       {
-        "name": "OpenTelemetry_error_Export_failure_exception_Export_retry_limit_exceeded_previous",
-        "bytes_24h": 442438.8270911407
-      },
-      {
         "name": "cart_cartstore_ValkeyCartStore",
-        "bytes_24h": 438645.8623796627
+        "bytes_24h": 31697668.45333615
       },
       {
-        "name": "Deleted_producer_state_snapshot_tmp_kafka_logs_cluster_metadata_snapshot",
-        "bytes_24h": 411582.8321929723
+        "name": "OpenTelemetry_error_Export_failure_exception_Export_retry_limit_exceeded_previous",
+        "bytes_24h": 29631518.47144328
+      },
+      {
+        "name": "attributes",
+        "bytes_24h": 13146246.875604972
       }
     ],
     "expected_tool_chain": [
       "log10x_investigate"
     ],
-    "snapshot_ts": "2026-05-10T02:37:41.860Z"
+    "snapshot_ts": "2026-05-10T03:38:49.679Z"
   }
 }

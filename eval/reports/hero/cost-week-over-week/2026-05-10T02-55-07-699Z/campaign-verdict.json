@@ -1,0 +1,284 @@
+{
+  "question_id": "cost-week-over-week",
+  "transcript_path": "/Users/talweiss/git/l1x-co/log10x-mcp/eval/reports/hero/cost-week-over-week/2026-05-10T02-55-07-699Z/transcript.json",
+  "verdict": {
+    "drift_score": 0,
+    "drift_supported": 6,
+    "drift_inconclusive": 16,
+    "pattern_match": {
+      "agent_top_patterns": [],
+      "oracle_top_patterns": [
+        "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
+        "open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter",
+        "opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go"
+      ],
+      "matched": 0,
+      "missed": 3,
+      "extra": 0,
+      "score": 0
+    },
+    "chain_alignment": {
+      "expected": [
+        "log10x_cost_drivers"
+      ],
+      "actual": [
+        "log10x_discover_env",
+        "log10x_retriever_series",
+        "log10x_customer_metrics_query",
+        "log10x_retriever_series",
+        "log10x_backfill_metric",
+        "log10x_cost_drivers",
+        "log10x_top_patterns",
+        "log10x_top_patterns",
+        "log10x_savings",
+        "log10x_cost_drivers",
+        "log10x_services",
+        "log10x_cost_drivers",
+        "log10x_customer_metrics_query",
+        "log10x_top_patterns",
+        "log10x_pattern_trend",
+        "log10x_cost_drivers",
+        "log10x_exclusion_filter"
+      ],
+      "hits": [
+        "log10x_cost_drivers"
+      ],
+      "misses": [],
+      "score": 1
+    },
+    "value_delivered": 0.75,
+    "value_received": 0.6,
+    "passed": false,
+    "axes_summary": "drift=0/22 pattern_match=0/3=0.00 chain=1/1=1.00 value_delivered=0.75 value_received=0.60"
+  },
+  "oracle": {
+    "numericClaimCount": 22,
+    "patternClaimCount": 0,
+    "supported": 6,
+    "unsupported": 0,
+    "inconclusive": 16,
+    "driftScore": 0,
+    "details": [
+      {
+        "claim": "$52",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "| Service | Volume | Cost/wk | |---|---|---| | **(unknown)** | **34.9 GB** | **$52/wk** | | email | 11.8 MB | $0.02/wk | | frontend | 56.6 KB | $0.0001/wk | |"
+      },
+      {
+        "claim": "$0.02",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "|---|---|---| | **(unknown)** | **34.9 GB** | **$52/wk** | | email | 11.8 MB | $0.02/wk | | frontend | 56.6 KB | $0.0001/wk | | recommendation | 3.6 KB | $0.00"
+      },
+      {
+        "claim": "$0.0001",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "*34.9 GB** | **$52/wk** | | email | 11.8 MB | $0.02/wk | | frontend | 56.6 KB | $0.0001/wk | | recommendation | 3.6 KB | $0.0000/wk | | **Total** | **~34.9 GB**"
+      },
+      {
+        "claim": "$0.0000",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "MB | $0.02/wk | | frontend | 56.6 KB | $0.0001/wk | | recommendation | 3.6 KB | $0.0000/wk | | **Total** | **~34.9 GB** | **~$52/wk** | ### WoW trend signal -"
+      },
+      {
+        "claim": "$52",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "1/wk | | recommendation | 3.6 KB | $0.0000/wk | | **Total** | **~34.9 GB** | **~$52/wk** | ### WoW trend signal - `log10x_cost_drivers` compared **current 7d v"
+      },
+      {
+        "claim": "$25",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "ol failure.\"* - The top 10 patterns together account for **47% of volume** at **$25/wk** (unchanged from the 2-week window query), with the long tail covering t"
+      },
+      {
+        "claim": "$3.8",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "atterns this week are all OTel collector internals: 1. `opensearchexporter` — **$3.8/wk** 2. `batchprocessor` — **$3.7/wk** 3. `service instance id ... ERROR` l"
+      },
+      {
+        "claim": "$3.7",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "lector internals: 1. `opensearchexporter` — **$3.8/wk** 2. `batchprocessor` — **$3.7/wk** 3. `service instance id ... ERROR` lines — **$3.6/wk** 4. `service ins"
+      },
+      {
+        "claim": "$3.6",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "2. `batchprocessor` — **$3.7/wk** 3. `service instance id ... ERROR` lines — **$3.6/wk** 4. `service instance id ... DEBUG` lines — **$2.1/wk** --- ### Recom"
+      },
+      {
+        "claim": "$2.1",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "id ... ERROR` lines — **$3.6/wk** 4. `service instance id ... DEBUG` lines — **$2.1/wk** --- ### Recommendations 1. **No action needed on growth** — the bas"
+      },
+      {
+        "claim": "$5.7",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "ector self-telemetry. Consider an exclusion filter on these — they account for ~$5.7/wk with low observability value. 4. **Deploy the Log10x Retriever** to unlo"
+      },
+      {
+        "claim": "34.9 GB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "(current week) | Service | Volume | Cost/wk | |---|---|---| | **(unknown)** | **34.9 GB** | **$52/wk** | | email | 11.8 MB | $0.02/wk | | frontend | 56.6 KB | $"
+      },
+      {
+        "claim": "11.8 MB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "Cost/wk | |---|---|---| | **(unknown)** | **34.9 GB** | **$52/wk** | | email | 11.8 MB | $0.02/wk | | frontend | 56.6 KB | $0.0001/wk | | recommendation | 3.6"
+      },
+      {
+        "claim": "56.6 KB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "own)** | **34.9 GB** | **$52/wk** | | email | 11.8 MB | $0.02/wk | | frontend | 56.6 KB | $0.0001/wk | | recommendation | 3.6 KB | $0.0000/wk | | **Total** | **"
+      },
+      {
+        "claim": "3.6 KB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "l | 11.8 MB | $0.02/wk | | frontend | 56.6 KB | $0.0001/wk | | recommendation | 3.6 KB | $0.0000/wk | | **Total** | **~34.9 GB** | **~$52/wk** | ### WoW trend"
+      },
+      {
+        "claim": "34.9 GB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "6.6 KB | $0.0001/wk | | recommendation | 3.6 KB | $0.0000/wk | | **Total** | **~34.9 GB** | **~$52/wk** | ### WoW trend signal - `log10x_cost_drivers` compared"
+      },
+      {
+        "claim": "34.9 GB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "w log emitters detected. 2. **Watch the `(unknown)` service** — it accounts for 34.9 GB / 100% of total byte volume. Resolve its attribution (missing `service.n"
+      },
+      {
+        "claim": "204 patterns",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "s a 3-window rolling baseline** (offsets: 7d, 14d, and 21d back) across all **1,204 patterns** — **zero patterns crossed the growth/drop threshold**. - The tool"
+      },
+      {
+        "claim": "10 patterns",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "s baseline. This is a truthful negative result, not a tool failure.\"* - The top 10 patterns together account for **47% of volume** at **$25/wk** (unchanged from"
+      },
+      {
+        "claim": "47%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "tive result, not a tool failure.\"* - The top 10 patterns together account for **47% of volume** at **$25/wk** (unchanged from the 2-week window query), with the"
+      },
+      {
+        "claim": "53%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "hanged from the 2-week window query), with the long tail covering the remaining 53%. ### What's driving volume The top cost patterns this week are all OTel col"
+      },
+      {
+        "claim": "100%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "ters detected. 2. **Watch the `(unknown)` service** — it accounts for 34.9 GB / 100% of total byte volume. Resolve its attribution (missing `service.name` OTel"
+      }
+    ]
+  },
+  "pattern_match": {
+    "agent_top_patterns": [],
+    "oracle_top_patterns": [
+      "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
+      "open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter",
+      "opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go"
+    ],
+    "matched": 0,
+    "missed": 3,
+    "extra": 0,
+    "score": 0
+  },
+  "chain_alignment": {
+    "expected": [
+      "log10x_cost_drivers"
+    ],
+    "actual": [
+      "log10x_discover_env",
+      "log10x_retriever_series",
+      "log10x_customer_metrics_query",
+      "log10x_retriever_series",
+      "log10x_backfill_metric",
+      "log10x_cost_drivers",
+      "log10x_top_patterns",
+      "log10x_top_patterns",
+      "log10x_savings",
+      "log10x_cost_drivers",
+      "log10x_services",
+      "log10x_cost_drivers",
+      "log10x_customer_metrics_query",
+      "log10x_top_patterns",
+      "log10x_pattern_trend",
+      "log10x_cost_drivers",
+      "log10x_exclusion_filter"
+    ],
+    "hits": [
+      "log10x_cost_drivers"
+    ],
+    "misses": [],
+    "score": 1
+  },
+  "gaps": [
+    {
+      "question_id": "cost-week-over-week",
+      "run_timestamp": "2026-05-10T03:40:08.643Z",
+      "gap_kind": "pattern_miss",
+      "gap_description": "Top-N pattern match 0.00 < 0.7; matched (none)",
+      "expected_answer_excerpt": "Oracle top: service_instance_id_service_name_otelcol_contrib_service_version_otelcol, open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter, opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go",
+      "actual_answer_excerpt": "Agent top: ",
+      "fix_status": "open",
+      "notes": [
+        "agent_top=[]",
+        "oracle_top=[\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\",\"open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter\",\"opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go\"]"
+      ]
+    },
+    {
+      "question_id": "cost-week-over-week",
+      "run_timestamp": "2026-05-10T03:40:08.643Z",
+      "gap_kind": "low_received",
+      "gap_description": "value_received 0.60 < 0.7 — MCP returned thin/stub data",
+      "expected_answer_excerpt": "(MCP-side fix candidate)",
+      "actual_answer_excerpt": "I now have all the data needed for a comprehensive answer. Let me synthesize the findings.\n\n---\n\n## Week-over-Week Log Volume: **Flat** ✅\n\nHere are the actual numbers returned by the tools:\n\n### Total volume (current week)\n| Service | Volume | Cost/wk |\n|---|---|---|\n| **(unknown)** | **34.9 GB** | **$52/wk** |\n| email | 11.8 MB | $0.02/wk |\n| frontend | 56.6 KB | $0.0001/wk |\n| recommendation | 3",
+      "fix_status": "open",
+      "notes": []
+    }
+  ]
+}

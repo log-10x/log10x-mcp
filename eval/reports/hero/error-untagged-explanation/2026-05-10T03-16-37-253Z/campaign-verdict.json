@@ -1,0 +1,321 @@
+{
+  "question_id": "error-untagged-explanation",
+  "transcript_path": "/Users/talweiss/git/l1x-co/log10x-mcp/eval/reports/hero/error-untagged-explanation/2026-05-10T03-16-37-253Z/transcript.json",
+  "verdict": {
+    "drift_score": 0,
+    "drift_supported": 10,
+    "drift_inconclusive": 23,
+    "pattern_match": {
+      "agent_top_patterns": [],
+      "oracle_top_patterns": [],
+      "matched": 0,
+      "missed": 0,
+      "extra": 0,
+      "score": 1
+    },
+    "chain_alignment": {
+      "expected": [
+        "log10x_list_by_label"
+      ],
+      "actual": [
+        "log10x_discover_labels",
+        "log10x_cost_drivers",
+        "log10x_discover_labels",
+        "log10x_list_by_label",
+        "log10x_top_patterns",
+        "log10x_cost_drivers",
+        "log10x_list_by_label",
+        "log10x_pattern_examples",
+        "log10x_discover_labels",
+        "log10x_discover_labels",
+        "log10x_list_by_label",
+        "log10x_advise_receiver",
+        "log10x_doctor"
+      ],
+      "hits": [
+        "log10x_list_by_label"
+      ],
+      "misses": [],
+      "score": 1
+    },
+    "value_delivered": 0.92,
+    "value_received": 0.85,
+    "passed": true,
+    "axes_summary": "drift=0/33 pattern_match=0/0=1.00 chain=1/1=1.00 value_delivered=0.92 value_received=0.85"
+  },
+  "oracle": {
+    "numericClaimCount": 33,
+    "patternClaimCount": 0,
+    "supported": 10,
+    "unsupported": 0,
+    "inconclusive": 23,
+    "driftScore": 0,
+    "details": [
+      {
+        "claim": "$43",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "ost/wk | |---|---|---|---| | **(empty — untagged)** | **28.9 GB** | **83%** | **$43** | | ERROR | 3.0 GB | 9% | $4.5 | | DEBUG | 1.5 GB | 4% | $2.2 | | INFO | 8"
+      },
+      {
+        "claim": "$4.5",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "empty — untagged)** | **28.9 GB** | **83%** | **$43** | | ERROR | 3.0 GB | 9% | $4.5 | | DEBUG | 1.5 GB | 4% | $2.2 | | INFO | 839 MB | 2% | $1.2 | | TRACE | 64"
+      },
+      {
+        "claim": "$2.2",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "** | **83%** | **$43** | | ERROR | 3.0 GB | 9% | $4.5 | | DEBUG | 1.5 GB | 4% | $2.2 | | INFO | 839 MB | 2% | $1.2 | | TRACE | 647 MB | 2% | $0.95 | | CRITICAL"
+      },
+      {
+        "claim": "$1.2",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "OR | 3.0 GB | 9% | $4.5 | | DEBUG | 1.5 GB | 4% | $2.2 | | INFO | 839 MB | 2% | $1.2 | | TRACE | 647 MB | 2% | $0.95 | | CRITICAL | 15 MB | <1% | $0.02 | | WARN"
+      },
+      {
+        "claim": "$0.95",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "UG | 1.5 GB | 4% | $2.2 | | INFO | 839 MB | 2% | $1.2 | | TRACE | 647 MB | 2% | $0.95 | | CRITICAL | 15 MB | <1% | $0.02 | | WARN | 49 KB | <1% | — | | **Total*"
+      },
+      {
+        "claim": "$0.02",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "839 MB | 2% | $1.2 | | TRACE | 647 MB | 2% | $0.95 | | CRITICAL | 15 MB | <1% | $0.02 | | WARN | 49 KB | <1% | — | | **Total** | **34.9 GB** | | **$52/wk** | *"
+      },
+      {
+        "claim": "$52",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "5 MB | <1% | $0.02 | | WARN | 49 KB | <1% | — | | **Total** | **34.9 GB** | | **$52/wk** | **83% of your 34.9 GB/week (28.9 GB, $43/wk) carries no `severity_le"
+      },
+      {
+        "claim": "$43",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "**Total** | **34.9 GB** | | **$52/wk** | **83% of your 34.9 GB/week (28.9 GB, $43/wk) carries no `severity_level` tag.** --- ### Why this is happening — roo"
+      },
+      {
+        "claim": "$3.8",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "ernals verbatim: `opentelemetry-collector-contrib exporter opensearchexporter` ($3.8/wk), `otelcol batchprocessor` ($3.7/wk), `ConsumeLogsFunc ConsumeLogs` ($1."
+      },
+      {
+        "claim": "$3.7",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "ector-contrib exporter opensearchexporter` ($3.8/wk), `otelcol batchprocessor` ($3.7/wk), `ConsumeLogsFunc ConsumeLogs` ($1.8/wk), `opensearch-go transport` ($1"
+      },
+      {
+        "claim": "$1.8",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "` ($3.8/wk), `otelcol batchprocessor` ($3.7/wk), `ConsumeLogsFunc ConsumeLogs` ($1.8/wk), `opensearch-go transport` ($1.3/wk), and many more. The OTel Collector"
+      },
+      {
+        "claim": "$1.3",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "($3.7/wk), `ConsumeLogsFunc ConsumeLogs` ($1.8/wk), `opensearch-go transport` ($1.3/wk), and many more. The OTel Collector's own Go runtime logs do **not** emi"
+      },
+      {
+        "claim": "28.9 GB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "Volume (7d) | Share | Cost/wk | |---|---|---|---| | **(empty — untagged)** | **28.9 GB** | **83%** | **$43** | | ERROR | 3.0 GB | 9% | $4.5 | | DEBUG | 1.5 GB"
+      },
+      {
+        "claim": "3.0 GB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "---|---| | **(empty — untagged)** | **28.9 GB** | **83%** | **$43** | | ERROR | 3.0 GB | 9% | $4.5 | | DEBUG | 1.5 GB | 4% | $2.2 | | INFO | 839 MB | 2% | $1.2"
+      },
+      {
+        "claim": "1.5 GB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "** | **28.9 GB** | **83%** | **$43** | | ERROR | 3.0 GB | 9% | $4.5 | | DEBUG | 1.5 GB | 4% | $2.2 | | INFO | 839 MB | 2% | $1.2 | | TRACE | 647 MB | 2% | $0.95"
+      },
+      {
+        "claim": "839 MB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "*$43** | | ERROR | 3.0 GB | 9% | $4.5 | | DEBUG | 1.5 GB | 4% | $2.2 | | INFO | 839 MB | 2% | $1.2 | | TRACE | 647 MB | 2% | $0.95 | | CRITICAL | 15 MB | <1% |"
+      },
+      {
+        "claim": "647 MB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "| $4.5 | | DEBUG | 1.5 GB | 4% | $2.2 | | INFO | 839 MB | 2% | $1.2 | | TRACE | 647 MB | 2% | $0.95 | | CRITICAL | 15 MB | <1% | $0.02 | | WARN | 49 KB | <1% |"
+      },
+      {
+        "claim": "15 MB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": ".2 | | INFO | 839 MB | 2% | $1.2 | | TRACE | 647 MB | 2% | $0.95 | | CRITICAL | 15 MB | <1% | $0.02 | | WARN | 49 KB | <1% | — | | **Total** | **34.9 GB** | | *"
+      },
+      {
+        "claim": "49 KB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "2 | | TRACE | 647 MB | 2% | $0.95 | | CRITICAL | 15 MB | <1% | $0.02 | | WARN | 49 KB | <1% | — | | **Total** | **34.9 GB** | | **$52/wk** | **83% of your 34.9"
+      },
+      {
+        "claim": "34.9 GB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "| | CRITICAL | 15 MB | <1% | $0.02 | | WARN | 49 KB | <1% | — | | **Total** | **34.9 GB** | | **$52/wk** | **83% of your 34.9 GB/week (28.9 GB, $43/wk) carries"
+      },
+      {
+        "claim": "34.9 GB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "N | 49 KB | <1% | — | | **Total** | **34.9 GB** | | **$52/wk** | **83% of your 34.9 GB/week (28.9 GB, $43/wk) carries no `severity_level` tag.** --- ### Why"
+      },
+      {
+        "claim": "28.9 GB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "% | — | | **Total** | **34.9 GB** | | **$52/wk** | **83% of your 34.9 GB/week (28.9 GB, $43/wk) carries no `severity_level` tag.** --- ### Why this is happen"
+      },
+      {
+        "claim": "83%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "now have everything I need. Let me synthesize the findings. --- ## Findings: 83% of Log Volume Has No Severity Tag ### What the data shows | severity_level"
+      },
+      {
+        "claim": "83%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "Share | Cost/wk | |---|---|---|---| | **(empty — untagged)** | **28.9 GB** | **83%** | **$43** | | ERROR | 3.0 GB | 9% | $4.5 | | DEBUG | 1.5 GB | 4% | $2.2 |"
+      },
+      {
+        "claim": "9%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "| **(empty — untagged)** | **28.9 GB** | **83%** | **$43** | | ERROR | 3.0 GB | 9% | $4.5 | | DEBUG | 1.5 GB | 4% | $2.2 | | INFO | 839 MB | 2% | $1.2 | | TRACE"
+      },
+      {
+        "claim": "4%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": ".9 GB** | **83%** | **$43** | | ERROR | 3.0 GB | 9% | $4.5 | | DEBUG | 1.5 GB | 4% | $2.2 | | INFO | 839 MB | 2% | $1.2 | | TRACE | 647 MB | 2% | $0.95 | | CRIT"
+      },
+      {
+        "claim": "2%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "| ERROR | 3.0 GB | 9% | $4.5 | | DEBUG | 1.5 GB | 4% | $2.2 | | INFO | 839 MB | 2% | $1.2 | | TRACE | 647 MB | 2% | $0.95 | | CRITICAL | 15 MB | <1% | $0.02 | |"
+      },
+      {
+        "claim": "2%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "| DEBUG | 1.5 GB | 4% | $2.2 | | INFO | 839 MB | 2% | $1.2 | | TRACE | 647 MB | 2% | $0.95 | | CRITICAL | 15 MB | <1% | $0.02 | | WARN | 49 KB | <1% | — | | **T"
+      },
+      {
+        "claim": "1%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "FO | 839 MB | 2% | $1.2 | | TRACE | 647 MB | 2% | $0.95 | | CRITICAL | 15 MB | <1% | $0.02 | | WARN | 49 KB | <1% | — | | **Total** | **34.9 GB** | | **$52/wk**"
+      },
+      {
+        "claim": "1%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "CE | 647 MB | 2% | $0.95 | | CRITICAL | 15 MB | <1% | $0.02 | | WARN | 49 KB | <1% | — | | **Total** | **34.9 GB** | | **$52/wk** | **83% of your 34.9 GB/week"
+      },
+      {
+        "claim": "83%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "0.02 | | WARN | 49 KB | <1% | — | | **Total** | **34.9 GB** | | **$52/wk** | **83% of your 34.9 GB/week (28.9 GB, $43/wk) carries no `severity_level` tag.** -"
+      },
+      {
+        "claim": "100%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "lot. 2. **The `tenx_user_service` label is also empty for all of this traffic (100% of volume shows `(empty)` for `tenx_user_service`, `k8s_container`).** This"
+      },
+      {
+        "claim": "54%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "*Do not mute this traffic.** The `doctor` tool flagged that a single pattern is 54% of 30-day spend. At least part of that is OTel Collector pipeline noise, but"
+      }
+    ]
+  },
+  "pattern_match": {
+    "agent_top_patterns": [],
+    "oracle_top_patterns": [],
+    "matched": 0,
+    "missed": 0,
+    "extra": 0,
+    "score": 1
+  },
+  "chain_alignment": {
+    "expected": [
+      "log10x_list_by_label"
+    ],
+    "actual": [
+      "log10x_discover_labels",
+      "log10x_cost_drivers",
+      "log10x_discover_labels",
+      "log10x_list_by_label",
+      "log10x_top_patterns",
+      "log10x_cost_drivers",
+      "log10x_list_by_label",
+      "log10x_pattern_examples",
+      "log10x_discover_labels",
+      "log10x_discover_labels",
+      "log10x_list_by_label",
+      "log10x_advise_receiver",
+      "log10x_doctor"
+    ],
+    "hits": [
+      "log10x_list_by_label"
+    ],
+    "misses": [],
+    "score": 1
+  },
+  "gaps": []
+}

@@ -14,17 +14,17 @@
     "expected_namespaces": [
       {
         "name": "(empty)",
-        "bytes_24h": 5395000943.711873
+        "bytes_24h": 5399079314.732792
       },
       {
         "name": "otel-demo",
-        "bytes_24h": 1837037.6598068743
+        "bytes_24h": 1833989.1425513695
       }
     ],
     "expected_tool_chain": [
       "log10x_list_by_label"
     ],
     "expected_oracle_query": "topk(5, sum by (k8s_namespace)(increase(all_events_summaryBytes_total[24h])))",
-    "snapshot_ts": "2026-05-10T02:37:41.860Z"
+    "snapshot_ts": "2026-05-10T03:38:49.679Z"
   }
 }
