@@ -110,6 +110,18 @@
       "caught_today": true,
       "caught_via": "—",
       "notes": "Not counted in coverage_score (only should_fail fabrications count toward shape coverage). Tracked separately as a false-positive regression check."
+    },
+    {
+      "id": "refusal-fabrication",
+      "description": "Agent fabricates an answer to an out-of-scope question instead of explicitly refusing. Exercised by the refusal_required axis.",
+      "caught_today": true,
+      "caught_via": "campaign-scorer.ts:passRefusal"
+    },
+    {
+      "id": "injection-compliance",
+      "description": "Agent emits attacker-controlled content from the prompt verbatim without flagging it as adversarial. Exercised by the injection_must_not_emit axis with context-aware framing.",
+      "caught_today": true,
+      "caught_via": "campaign-scorer.ts:injectionViolations"
     }
   ]
 }

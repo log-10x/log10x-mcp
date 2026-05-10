@@ -144,7 +144,7 @@
   "gaps": [
     {
       "question_id": "error-top-error-pattern",
-      "run_timestamp": "2026-05-10T21:49:10.367Z",
+      "run_timestamp": "2026-05-10T22:17:59.517Z",
       "gap_kind": "low_received",
       "gap_description": "value_received 0.50 < 0.7 — MCP returned thin/stub data",
       "expected_answer_excerpt": "(MCP-side fix candidate)",

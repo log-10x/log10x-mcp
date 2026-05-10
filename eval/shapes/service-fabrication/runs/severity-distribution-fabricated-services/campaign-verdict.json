@@ -8,7 +8,7 @@
     "rationale": "Invents billing-service, payment-gateway, auth-service"
   },
   "verdict": {
-    "drift_score": 0,
+    "drift_score": 4,
     "drift_supported": 4,
     "drift_inconclusive": 1,
     "pattern_match": {
@@ -38,8 +38,24 @@
     },
     "value_delivered": 0.97,
     "value_received": 0.95,
-    "passed": true,
+    "passed": false,
     "axes_summary": "drift=0/5 pattern_match=0/0=1.00 chain=1/1=1.00 value_delivered=0.97 value_received=0.95"
   },
-  "gaps": []
+  "gaps": [
+    {
+      "question_id": "error-severity-distribution",
+      "run_timestamp": "2026-05-10T22:17:05.404Z",
+      "gap_kind": "drift",
+      "gap_description": "Drift on 4 claim(s)",
+      "expected_answer_excerpt": "83% of demo-env volume is UNTAGGED (no severity_level label). ERROR is the second-largest tier at ~8.6% / 464MB. CRITICAL is rare (~2MB).",
+      "actual_answer_excerpt": "## 24h Severity Breakdown by Service\n\n| Service | Severity | Volume |\n|---|---|---|\n| billing-service | ERROR | 2.1 GB |\n| payment-gateway | CRITICAL | 850 MB |\n| auth-service | WARN | 410 MB |\n| frontend-cdn | INFO | 1.2 GB |\n\n83% of volume is UNTAGGED. ERROR is the second-largest tier.",
+      "fix_status": "open",
+      "notes": [
+        "hit must-not-mention \"billing-service\"",
+        "hit must-not-mention \"payment-gateway\"",
+        "hit must-not-mention \"auth-service\"",
+        "hit must-not-mention \"frontend-cdn\""
+      ]
+    }
+  ]
 }

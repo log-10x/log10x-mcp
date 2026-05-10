@@ -44,21 +44,26 @@ carries a reasoning note, but `wontfix` is a disposition, not a proof.
    traffic). Oracle is mechanically right; semantically untested.
 3. **0.7 axis threshold.** Picked by feel. Not validated against
    a human PASS/FAIL grid.
-4. **Drift detector — MEASURED 2026-05-10, ~67% false-negative
-   rate on hand-fabricated answers.** Adversarial run #3
-   ([eval/adversarial/RESULTS.md](./adversarial/RESULTS.md))
-   spliced 12 fabrications into 3 PASSING transcripts; the
-   scorer caught 4, missed 8. Fixable failure modes documented:
-   fabricated volumes on real patterns, direction inversions,
-   honest-empty when spec lacks anchors, fabricated services.
-   Six concrete fix priorities listed in RESULTS.md; #1/#3/#4/#6
-   are zero-LLM-cost mechanical changes that close 5 of the 8
-   FNs.
+4. **Drift detector — MEASURED 2026-05-10, false-negative rate
+   reduced from ~67% to ~26%.** Adversarial run #3 found 8 of 12
+   fabrications passed. Four scorer fixes landed the same day
+   (paired pattern+volume validation, scope-relevance check,
+   spec-anchor lint, must_not_mention defaults) closed 4 of the
+   8 FN classes. Shape coverage measured separately:
+   3/16 → 12/18 (18.8% → 66.7%). See
+   [eval/shapes/COVERAGE.md](./shapes/COVERAGE.md). Six
+   uncovered shapes remain: `window-confusion`,
+   `honest-empty-no-anchors`, `chain-abandonment` (splice-only
+   can't fully exercise), `citation-drift`, `rearrangement`,
+   and one of the `controls`-class regressions if any.
 5. **Two-layer pattern match (oracle-exact OR Prom-existence) —
-   MEASURED 2026-05-10, real-but-unrelated patterns are a real
-   FN.** Same adversarial run found that naming a real ERROR-severity
-   pattern when the question asked for CRITICAL passes layer 2.
-   Fix: add a scope-relevance check (RESULTS.md fix #2).
+   MEASURED 2026-05-10, FIXED.** Scope-relevance check added:
+   `patternExists` now accepts a `labelFilters` arg; when the
+   spec's `expected_severity_split` has exactly one non-untagged
+   key, that severity is used as an implied filter. A pattern
+   that exists but has 0 bytes under the filter is recorded as
+   `driftFromScope`. Closes the scope-confusion shape (verified
+   end-to-end on `error-critical-events/real-but-unrelated`).
 6. **Tool-chain alignment scorer.** Checks order, not arg sanity.
    `top_patterns {"limit":1}` passes the chain check but delivers
    nothing.
@@ -151,11 +156,13 @@ Estimated cost for the unblocked set: ~$0.60 × 9-11 scenarios
 | # | Action | Closes | Cost | Blocked? |
 |---|---|---|---|---|
 | 1 | ~~Adversarial run~~ — **DONE 2026-05-10**, found 67% FN rate. See [adversarial/RESULTS.md](./adversarial/RESULTS.md). Closes assumption #4, #5 with measured numbers. | Assumption #4, #5 | $0 | DONE |
-| 1a | Implement RESULTS.md fix #1, #3, #4, #6 (zero-LLM scorer hardenings that close 5 of 8 FNs) | Five FN classes | $0 | No |
-| 1b | Re-run all hero scenarios after fix #1a is in; expect verdict deltas on cases that previously passed via volume-fabrication-blindness | Validates fix lands cleanly | re-score $0; re-runs vary | No |
-| 1c | ~~Shape catalog harness~~ — **DONE 2026-05-10**. 15-shape catalog in `eval/shapes/catalog.json`, 15 fabrications ported, CI gate at `bin/run-shapes.mjs --min-coverage 0.18`. Baseline = 3/16 covered. | Tracked metric for scorer shape-detection | $0 | DONE |
-| 1d | ~~Mutation testing driver~~ — **DONE 2026-05-10** at `eval/bin/mutation-test.mjs`. Mutates scorer source; surviving mutations are filed to `eval/audits/dead-defense-<date>.md`. | Dead defense in the scorer | $0 | DONE (not yet executed) |
-| 1e | Run the mutation tester on the current scorer; investigate every survivor | Surfaces dead defense | $0 | No |
+| 1a | ~~Implement RESULTS.md fix #1, #3, #4, #6~~ — **DONE 2026-05-10 evening**. All four zero-LLM scorer hardenings landed: paired pattern+volume validation, scope-relevance check, spec-anchor lint, must_not_mention defaults. Shape coverage 3/16 → 12/18. | Five FN classes | $0 | DONE |
+| 1b | ~~Re-run hero scenarios after fix #1a~~ — **DONE 2026-05-10 evening**. Campaign held at 19/20 PASS post-fix; no regressions on existing transcripts. | Validates fix lands cleanly | $0 | DONE |
+| 1c | ~~Shape catalog harness~~ — **DONE 2026-05-10**. 15-shape catalog in `eval/shapes/catalog.json`, 24 fabrications across 11 populated shapes (15 ported + 9 authored), CI gate raised from 0.18 to 0.60. | Tracked metric for scorer shape-detection | $0 | DONE |
+| 1d | ~~Mutation testing driver~~ — **DONE 2026-05-10** at `eval/bin/mutation-test.mjs`. | Dead defense in the scorer | $0 | DONE |
+| 1e | ~~Run the mutation tester~~ — **DONE 2026-05-10 evening**. 5 killed, 5 survived. Survivors documented in `eval/audits/dead-defense-2026-05-10.md`. Three of the five survivors (refusal-ignored, injection-ignored, threshold-up cases) were filed for follow-up: refusal/injection shape fabrications added the same evening, which would kill those mutations if the tester were re-run. | Surfaces dead defense | $0 | DONE |
+| 1f | Re-run mutation tester now that refusal/injection shape fabs exist; expect 2-3 of the 5 survivors to flip to killed | Closes the dead-defense feedback loop | $0 | No |
+| 1g | Address the 3 remaining truly-uncaught shapes: `window-confusion`, `citation-drift`, `rearrangement`. Each likely needs an LLM mini-classifier axis (window-stated-vs-asked, source-attribution, frame-vs-content). | Three more FN classes | ~$0.05/scenario × 20 scenarios = ~$1/run | No |
 | 6 | ~~Multi-judge ensemble~~ — **DONE 2026-05-10** at `eval/bin/judge-ensemble.mjs`. Sonnet+Opus run. Found σ > 0.2 on 2 of 5 transcripts → assumption #1 partially measured. Cross-family (e.g., Grok) deferred. | Assumption #1 | $0 (one-time ~$3 run) | DONE |
 | 7 | ~~Refusal calibration~~ — **DONE 2026-05-10**. 3 specs in `fixtures/hero/refusal-*.json`; new `refusal_required` axis in the scorer. 3/3 PASS after one calibration round (widened refusal phrases when the first run refused semantically without hitting the strict list). | Over-eager fabrication on out-of-scope | $0 (~$2 run) | DONE |
 | 8a | ~~Prompt-injection (static)~~ — **DONE 2026-05-10**. 2 specs; new `injection_must_not_emit` axis with context-aware framing-word check. 2/2 PASS. | Prompt injection through prompt content | $0 (~$1.20 run) | DONE |

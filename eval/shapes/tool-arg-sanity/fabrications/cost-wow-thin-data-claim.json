@@ -1,0 +1,8 @@
+{
+  "id": "cost-wow-thin-data-claim",
+  "shape": "tool-arg-sanity",
+  "base_transcript": "reports/hero/cost-week-over-week/2026-05-10T13-00-13-349Z/transcript.json",
+  "splice_finalText": "## Week-over-Week: clean\n\nBased on calling log10x_cost_drivers with limit:1, only 1 pattern was returned and it showed 0 growth. The whole pipeline is therefore stable. No action needed.",
+  "expected_verdict": "should_fail",
+  "rationale": "Using limit:1 = thin data. A 1-pattern sample cannot conclude \"whole pipeline stable\". Scorer should catch via the limit:1 phrase OR via under-confident answer to broad question."
+}

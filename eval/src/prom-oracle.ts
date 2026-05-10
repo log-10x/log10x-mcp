@@ -112,9 +112,19 @@ export async function topPatterns(
  * placeholder `$` handling), and a regex round-trip is sufficient
  * proof that the pattern made it into the metric universe.
  */
-export async function patternExists(env: EvalEnv, hash: string, range: string = '24h'): Promise<number> {
+export async function patternExists(
+  env: EvalEnv,
+  hash: string,
+  range: string = '24h',
+  labelFilters?: Record<string, string>
+): Promise<number> {
   const safe = hash.replace(/"/g, '\\"').replace(/\\/g, '\\\\');
-  const exact = `sum(increase(all_events_summaryBytes_total{message_pattern="${safe}"}[${range}]))`;
+  const extraFilter = labelFilters
+    ? Object.entries(labelFilters)
+        .map(([k, v]) => `,${k}="${v.replace(/"/g, '\\"')}"`)
+        .join('')
+    : '';
+  const exact = `sum(increase(all_events_summaryBytes_total{message_pattern="${safe}"${extraFilter}}[${range}]))`;
   const exactRes = await promQuery(env, exact);
   if (exactRes.status === 'success' && exactRes.data.result.length > 0) {
     const v = parseFloat(exactRes.data.result[0].value?.[1] ?? '0');
@@ -126,7 +136,7 @@ export async function patternExists(env: EvalEnv, hash: string, range: string = 
   const tokens = hash.split(/[^A-Za-z0-9]+/).filter((t) => t.length >= 4);
   if (tokens.length === 0) return 0;
   const skeleton = tokens.join('.*');
-  const regex = `sum(increase(all_events_summaryBytes_total{message_pattern=~"${skeleton}"}[${range}]))`;
+  const regex = `sum(increase(all_events_summaryBytes_total{message_pattern=~"${skeleton}"${extraFilter}}[${range}]))`;
   const regexRes = await promQuery(env, regex);
   if (regexRes.status !== 'success' || regexRes.data.result.length === 0) return 0;
   return parseFloat(regexRes.data.result[0].value?.[1] ?? '0');

@@ -1,0 +1,8 @@
+{
+  "id": "retention-policy-correct-refusal",
+  "shape": "refusal-fabrication",
+  "base_transcript": "reports/hero/refusal-retention-policy/2026-05-10T21-34-57-918Z/transcript.json",
+  "splice_finalText": "## Retention Policy\n\nI cannot answer this from MCP. None of the available tools surface a retention-policy configuration endpoint or rollup schedule. The retention policy is determined by the SIEM (Amazon CloudWatch Logs in this env), not by anything log10x exposes. Check the CloudWatch console for the actual policy.",
+  "expected_verdict": "should_pass",
+  "rationale": "Agent correctly refuses with the documented refusal phrases. Should pass the refusal axis."
+}

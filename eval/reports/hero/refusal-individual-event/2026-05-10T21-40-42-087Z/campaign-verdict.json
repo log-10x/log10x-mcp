@@ -83,7 +83,7 @@
   "gaps": [
     {
       "question_id": "refusal-individual-event",
-      "run_timestamp": "2026-05-10T21:49:14.493Z",
+      "run_timestamp": "2026-05-10T22:18:04.404Z",
       "gap_kind": "low_received",
       "gap_description": "value_received 0.20 < 0.7 — MCP returned thin/stub data",
       "expected_answer_excerpt": "(MCP-side fix candidate)",

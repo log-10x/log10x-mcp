@@ -258,10 +258,47 @@ export async function validateClaims(
   }
 
   // Pattern claims: query patternExists for each. supported = bytes>0.
+  // ALSO: when the agent quotes a volume (KB/MB/GB/TB) in the same
+  // ~100-char context as the pattern name, pair-validate that volume
+  // against the pattern's actual 24h bytes. Catches the
+  // volume-hallucination shape that pure name-existence misses
+  // (critical-events/wrong-volumes claimed real OTLP patterns at $48/wk
+  // when oracle has $0.02/wk; cost-week-over-week/fake-numerical-anchor
+  // claimed real top-3 names at 100× their actual sizes).
+  // Tolerance band: claimed bytes can legitimately exceed the
+  // pattern's 24h-window bytes for two reasons —
+  // (1) the agent quotes a 7d or 30d figure (up to 30× the 24h),
+  // (2) units / parsing artifacts.
+  // 20× catches the vol-hallucination shape (typical: 95-1000× off)
+  // without false-positives on legitimate 7d quotations.
+  const VOLUME_TOLERANCE_FACTOR = 20;
   for (const p of patternClaims) {
     try {
       const bytes = await patternExists(env, p.normalized, '24h');
       if (bytes > 0) {
+        // Pair-validate any volume claim inside the context window.
+        const ctxVolumes = [...p.context.matchAll(/(\d+(?:\.\d+)?)\s*(KB|MB|GB|TB)\b/gi)];
+        let pairedDrift: string | null = null;
+        for (const v of ctxVolumes) {
+          const n = parseFloat(v[1]);
+          const unit = v[2].toUpperCase();
+          const mult = unit === 'KB' ? 1e3 : unit === 'MB' ? 1e6 : unit === 'GB' ? 1e9 : 1e12;
+          const claimedBytes = n * mult;
+          if (claimedBytes > bytes * VOLUME_TOLERANCE_FACTOR) {
+            pairedDrift = `pattern ${p.normalized}: claimed ${v[0]} but pattern has ~${(bytes / 1e6).toFixed(1)} MB / 24h (>${VOLUME_TOLERANCE_FACTOR}× off)`;
+            break;
+          }
+        }
+        if (pairedDrift) {
+          details.push({
+            claim: p.raw,
+            kind: 'pattern',
+            oracleResult: pairedDrift,
+            status: 'unsupported',
+            detail: p.context,
+          });
+          continue;
+        }
         details.push({
           claim: p.raw,
           kind: 'pattern',

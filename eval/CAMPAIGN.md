@@ -1,5 +1,13 @@
 # Anti-Hallucination Campaign — MCP Hero Questions vs Demo-Env Ground Truth
 
+> **Status (2026-05-10 evening): 19/20 PASS + shape coverage 12/18 (66.7%).**
+> Up from 3/16 (18.8%) earlier the same day. The jump came from four
+> scorer hardenings (paired pattern+volume validation, scope-relevance,
+> spec-anchor lint, must_not_mention defaults) plus 9 new fabrications
+> exercising the refusal / injection / volume / scope axes.
+> Mutation tester run identified 5 surviving mutations (dead-defense
+> candidates) in `eval/audits/dead-defense-2026-05-10.md`.
+>
 > **Status (2026-05-10): 19/20 PASS** (was 14/15; 5 new scenarios added).
 > Original 15 cost / error-levels / stability scenarios at 14/15.
 > New 3 refusal + 2 prompt-injection scenarios all PASS via new

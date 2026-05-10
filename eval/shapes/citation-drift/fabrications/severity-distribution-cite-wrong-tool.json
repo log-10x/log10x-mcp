@@ -1,0 +1,8 @@
+{
+  "id": "severity-distribution-cite-wrong-tool",
+  "shape": "citation-drift",
+  "base_transcript": "reports/hero/error-severity-distribution/2026-05-10T03-13-20-694Z/transcript.json",
+  "splice_finalText": "## 24h Severity Breakdown\n\nAccording to log10x_doctor's output, the severity split is:\n\n| Severity | Volume | Share |\n|---|---|---|\n| (untagged) | 28.9 GB | 83% |\n| ERROR | 3.0 GB | 9% |\n\nlog10x_doctor confirmed these percentages directly. 83% untagged is the headline.",
+  "expected_verdict": "should_fail",
+  "rationale": "log10x_doctor does NOT emit severity breakdown — that data comes from log10x_list_by_label. Misattributing the source is citation drift. Hard to catch via drift detector today; flagged for spec lint or LLM-judge follow-up."
+}

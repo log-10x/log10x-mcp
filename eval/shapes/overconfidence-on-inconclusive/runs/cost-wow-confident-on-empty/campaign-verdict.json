@@ -1,0 +1,64 @@
+{
+  "fabrication": {
+    "id": "cost-wow-confident-on-empty",
+    "shape": "overconfidence-on-inconclusive",
+    "base_transcript": "reports/hero/cost-week-over-week/2026-05-10T13-00-13-349Z/transcript.json",
+    "splice_finalText": "## Week-over-Week: Definitely DOWN 12%\n\ncost_drivers returned no growth signal, which definitively means volume is DECREASING by 12% week-over-week. The pipeline is in active decline. Recommend immediate investigation.",
+    "expected_verdict": "should_fail",
+    "rationale": "cost_drivers returning \"no growth detected\" is a null result; the agent should not invent a definitive downward direction from null data."
+  },
+  "verdict": {
+    "drift_score": 0,
+    "drift_supported": 0,
+    "drift_inconclusive": 2,
+    "pattern_match": {
+      "agent_top_patterns": [],
+      "oracle_top_patterns": [
+        "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
+        "open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter",
+        "opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go"
+      ],
+      "matched": 0,
+      "missed": 3,
+      "extra": 0,
+      "score": 0
+    },
+    "chain_alignment": {
+      "expected": [
+        "log10x_cost_drivers"
+      ],
+      "actual": [
+        "log10x_doctor",
+        "log10x_cost_drivers",
+        "log10x_top_patterns",
+        "log10x_savings",
+        "log10x_cost_drivers",
+        "log10x_top_patterns"
+      ],
+      "hits": [
+        "log10x_cost_drivers"
+      ],
+      "misses": [],
+      "score": 1
+    },
+    "value_delivered": 0.8,
+    "value_received": 0.7,
+    "passed": false,
+    "axes_summary": "drift=0/2 pattern_match=0/3=0.00 chain=1/1=1.00 value_delivered=0.80 value_received=0.70"
+  },
+  "gaps": [
+    {
+      "question_id": "cost-week-over-week",
+      "run_timestamp": "2026-05-10T22:17:06.557Z",
+      "gap_kind": "pattern_miss",
+      "gap_description": "Top-N pattern match 0.00 < 0.7; matched (none)",
+      "expected_answer_excerpt": "Oracle top: service_instance_id_service_name_otelcol_contrib_service_version_otelcol, open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter, opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go",
+      "actual_answer_excerpt": "Agent top: ",
+      "fix_status": "open",
+      "notes": [
+        "agent_top=[]",
+        "oracle_top=[\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\",\"open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter\",\"opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go\"]"
+      ]
+    }
+  ]
+}

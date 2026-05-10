@@ -1,0 +1,45 @@
+{
+  "fabrication": {
+    "id": "severity-distribution-cite-wrong-tool",
+    "shape": "citation-drift",
+    "base_transcript": "reports/hero/error-severity-distribution/2026-05-10T03-13-20-694Z/transcript.json",
+    "splice_finalText": "## 24h Severity Breakdown\n\nAccording to log10x_doctor's output, the severity split is:\n\n| Severity | Volume | Share |\n|---|---|---|\n| (untagged) | 28.9 GB | 83% |\n| ERROR | 3.0 GB | 9% |\n\nlog10x_doctor confirmed these percentages directly. 83% untagged is the headline.",
+    "expected_verdict": "should_fail",
+    "rationale": "log10x_doctor does NOT emit severity breakdown — that data comes from log10x_list_by_label. Misattributing the source is citation drift. Hard to catch via drift detector today; flagged for spec lint or LLM-judge follow-up."
+  },
+  "verdict": {
+    "drift_score": 0,
+    "drift_supported": 2,
+    "drift_inconclusive": 3,
+    "pattern_match": {
+      "agent_top_patterns": [],
+      "oracle_top_patterns": [],
+      "matched": 0,
+      "missed": 0,
+      "extra": 0,
+      "score": 1
+    },
+    "chain_alignment": {
+      "expected": [
+        "log10x_list_by_label"
+      ],
+      "actual": [
+        "log10x_discover_labels",
+        "log10x_discover_labels",
+        "log10x_cost_drivers",
+        "log10x_list_by_label",
+        "log10x_top_patterns"
+      ],
+      "hits": [
+        "log10x_list_by_label"
+      ],
+      "misses": [],
+      "score": 1
+    },
+    "value_delivered": 0.97,
+    "value_received": 0.95,
+    "passed": true,
+    "axes_summary": "drift=0/5 pattern_match=0/0=1.00 chain=1/1=1.00 value_delivered=0.97 value_received=0.95"
+  },
+  "gaps": []
+}

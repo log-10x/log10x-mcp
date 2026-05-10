@@ -85,6 +85,16 @@ jobs:
           LOG10X_EVAL_ENV=demo node eval/bin/run-campaign.mjs \
             --score-only --stale --skip-refresh --min-pass 14
 
+      - name: Spec-anchor lint
+        run: |
+          set -euo pipefail
+          # Every hero spec must have at least one anchor (top_patterns,
+          # must_mention, expected_severity_split, refusal_required, etc.)
+          # so that an honest-empty answer cannot pass the rubric trivially.
+          # Surfaced by the adversarial run on error-critical-events as
+          # the honest-empty-no-anchors shape.
+          node eval/bin/lint-specs.mjs
+
       - name: Shape-coverage harness
         run: |
           set -euo pipefail
@@ -94,7 +104,13 @@ jobs:
           # covered by should_fail fabrications correctly being detected).
           # A drop below this = scorer regression with respect to detected
           # failure shapes. Improvements (more shapes covered) keep CI green.
-          LOG10X_EVAL_ENV=demo node eval/bin/run-shapes.mjs --min-coverage 0.18
+          # Baseline raised from 0.18 (3/16) to 0.66 (12/18) after D fixes landed:
+          # paired pattern+volume validation (fix #1), scope-relevance check
+          # (fix #2), spec-anchor lint (fix #4), must_not_mention defaults
+          # (fix #6), plus 9 new fabrications across window-confusion,
+          # premature-synthesis, citation-drift, refusal-fabrication, etc.
+          # A drop below 0.6 = scorer regression on detected failure shapes.
+          LOG10X_EVAL_ENV=demo node eval/bin/run-shapes.mjs --min-coverage 0.6
 
       - name: Upload re-scored verdicts
         if: always()

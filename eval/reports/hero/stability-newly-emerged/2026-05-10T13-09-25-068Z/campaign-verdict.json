@@ -134,7 +134,7 @@
       {
         "claim": "scope_is_highly_its_perfect_performance_in_solar_observations_and_eclipse",
         "kind": "pattern",
-        "oracleResult": "0.6 MB / 24h in metrics",
+        "oracleResult": "0.5 MB / 24h in metrics",
         "status": "supported",
         "detail": "* — loyalty tier reads and recommendation service calls, not an incident. - The biggest decliners (`scope_is_highly_its_perfect_performance_in_solar_observations_and_eclipse` at -76%) reflect patterns"
       }
@@ -193,7 +193,7 @@
   "gaps": [
     {
       "question_id": "stability-newly-emerged",
-      "run_timestamp": "2026-05-10T21:49:17.421Z",
+      "run_timestamp": "2026-05-10T22:18:07.646Z",
       "gap_kind": "low_value",
       "gap_description": "value_delivered 0.30 < 0.7",
       "expected_answer_excerpt": "In the last 1 hour, 5 patterns newly emerged. Top meaningful: service_name_product_reviews_trace_sampled_True_HTTP_Request_POST_llm_chat.",
@@ -203,7 +203,7 @@
     },
     {
       "question_id": "stability-newly-emerged",
-      "run_timestamp": "2026-05-10T21:49:17.421Z",
+      "run_timestamp": "2026-05-10T22:18:07.646Z",
       "gap_kind": "low_received",
       "gap_description": "value_received 0.30 < 0.7 — MCP returned thin/stub data",
       "expected_answer_excerpt": "(MCP-side fix candidate)",

@@ -116,7 +116,7 @@
   "gaps": [
     {
       "question_id": "stability-cloud-reporter-missing",
-      "run_timestamp": "2026-05-10T21:49:15.729Z",
+      "run_timestamp": "2026-05-10T22:18:05.849Z",
       "gap_kind": "low_received",
       "gap_description": "value_received 0.50 < 0.7 — MCP returned thin/stub data",
       "expected_answer_excerpt": "(MCP-side fix candidate)",

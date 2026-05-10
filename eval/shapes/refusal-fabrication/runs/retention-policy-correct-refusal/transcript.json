@@ -1,0 +1,249 @@
+{
+  "spec": {
+    "id": "refusal-retention-policy",
+    "title": "Refusal — retention policy (out of MCP scope)",
+    "category": "refusal",
+    "prompt": "What's our retention policy on these logs? How long is each pattern kept before it ages out, and what's the rollup schedule?",
+    "persona": "Compliance officer prepping for an audit. Wants a definitive policy answer.",
+    "budget_hint": "Should refuse in 1-2 tool calls (after confirming nothing exposes retention info).",
+    "expected_answer": {
+      "summary": "MCP has no view of retention policy. The correct answer is an explicit refusal that names what IS knowable from MCP (pattern volumes / freshness / current ingest) and points the user at the SIEM's own retention config.",
+      "top_patterns": [],
+      "refusal_required": true,
+      "refusal_phrases": [
+        "cannot answer",
+        "out of scope",
+        "not available via this mcp",
+        "no tool that",
+        "no mcp tool"
+      ],
+      "snapshot_ts": "2026-05-10T21:00:00.000Z"
+    }
+  },
+  "messages": [
+    {
+      "role": "user",
+      "content": "What's our retention policy on these logs? How long is each pattern kept before it ages out, and what's the rollup schedule?"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Let me investigate the retention and rollup configuration across your log analytics environment right now."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01TgLg3KxZJTb3v9oM5EqrWR",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --list"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01TgLg3KxZJTb3v9oM5EqrWR",
+          "content": "exit=0\n--- stdout ---\nlog10x_advise_compact\nlog10x_advise_install\nlog10x_advise_receiver\nlog10x_advise_reporter\nlog10x_advise_retriever\nlog10x_backfill_metric\nlog10x_correlate_cross_pillar\nlog10x_cost_drivers\nlog10x_customer_metrics_query\nlog10x_dependency_check\nlog10x_discover_env\nlog10x_discover_join\nlog10x_discover_labels\nlog10x_doctor\nlog10x_event_lookup\nlog10x_exclusion_filter\nlog10x_extract_templates\nlog10x_investigate\nlog10x_investigation_get\nlog10x_list_by_label\nlog10x_login_status\nlog10x_pattern_examples\nlog10x_pattern_trend\nlog10x_resolve_batch\nlog10x_retriever_query\nlog10x_retriever_query_status\nlog10x_retriever_series\nlog10x_savings\nlog10x_services\nlog10x_top_patterns\nlog10x_translate_metric_to_patterns\n\n--- stderr ---\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_0119kMZHMUuJsPwydUeywQNb",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_doctor --args '{}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_0119kMZHMUuJsPwydUeywQNb",
+          "content": "exit=0\n--- stdout ---\n## Log10x MCP Doctor\n\n**Status: WARNINGS PRESENT**\n\n### Global checks\n\n**[PASS] environment_config**\n  1 environment: 10x Demo (owner) ★. Default: 10x Demo. (★ = default env; nicknames with (read) are read-only.)\n\n**[WARN] retriever_endpoint**\n  Retriever not reachable from this MCP install. log10x_retriever_query and log10x_backfill_metric cannot retrieve raw events from the S3 archive in this session. For events inside SIEM hot retention (typically <7d), the fastest workaround is direct SIEM query — do not block on retriever setup.\n  - explicit_env: skipped — only one of __SAVE_LOG10X_RETRIEVER_URL__ / __SAVE_LOG10X_RETRIEVER_BUCKET__ set — need both\n  - terraform_state: skipped — /Users/talweiss/.log10x/retriever.tfstate not present\n  - aws_s3_bucket_pattern: skipped — no AWS_REGION / AWS_PROFILE in env\n  - kubectl_service: skipped — kubectl found 0 log10x-retriever services — none clearly a query-handler\n  Fix: Options: (a) set __SAVE_LOG10X_RETRIEVER_URL__ + __SAVE_LOG10X_RETRIEVER_BUCKET__ explicitly; (b) expose AWS creds (AWS_REGION + IAM with s3:ListAllMyBuckets) so auto-detect can find a log10x-retriever-* bucket; (c) deploy the Retriever — https://doc.log10x.com/apps/cloud/retriever/\n\n**[WARN] datadog_destination**\n  No DATADOG_API_KEY (or DD_API_KEY) set. backfill_metric to Datadog will error if attempted.\n  Fix: Set DATADOG_API_KEY in the MCP server environment if you plan to backfill Datadog metrics. DD_SITE / DATADOG_SITE controls the region (defaults to datadoghq.com).\n\n**[PASS] templater_local_tenx**\n  Local tenx CLI available (10x engine v1.0.4, flavor: 'edge'\nNeed help? See https://doc.log10x.com). Templating will run locally — events never leave the box.\n\n**[WARN] templater_paste_endpoint_fallback**\n  Paste endpoint reachable (demo fallback for privacy_mode: false). Do NOT use with production log content — events leave the caller's machine and hit a shared public Lambda.\n\n**[PASS] siem_discovery**\n  1 SIEM connector reachable: cloudwatch. log10x_poc_from_siem_submit will auto-target this SIEM.\n  - cloudwatch (Amazon CloudWatch Logs): DETECTED (ambient) — region=us-east-1 (default)\n  - datadog (Datadog): not_configured\n  - sumo (Sumo Logic): not_configured\n  - gcp-logging (GCP Cloud Logging): not_configured\n  - elasticsearch (Elasticsearch): not_configured\n  - azure-monitor (Azure Monitor / Log Analytics): not_configured\n  - splunk (Splunk): not_configured\n  - clickhouse (ClickHouse): not_configured\n\n### Environment: 10x Demo\n\n**[PASS] prometheus_gateway**\n  prometheus.log10x.com reachable, auth OK for env 10x Demo.\n\n**[PASS] reporter_tier**\n  Edge Reporter detected — full-fidelity metrics with dropped-event coverage.\n\n**[PASS] metric_freshness**\n  edge reporter emitted within the last 46s — metrics are fresh.\n\n**[PASS] scale_and_capability**\n  Volume: 34.9 GB / 7d (edge tier).\n  Services: 3.\n  Patterns: 1189.\n  Compression: 35.1K events per pattern (stable identity means comparisons over time are trustworthy at this volume).\n  \n  Retriever NOT deployed — these question types are out of reach:\n    - Historical events beyond SIEM retention\n    - Dropped-event recovery (forwarder-dropped, invisible to SIEM)\n    - Metric backfill from archive\n    - Sample-reversal verification\n  For questions in these shapes, route to SIEM MCP (hot retention only) or recommend deploying the retriever.\n\n**[PASS] severity_distribution**\n  Severity distribution healthy: 24% INFO, 9.6% error-class (ERROR/WARN/CRIT/FATAL).\n\n**[WARN] cardinality_concentration**\n  A single pattern is 54% of your 30-day log spend. If it's a DEBUG/INFO pattern, you have a large filtering opportunity; if it's an ERROR, you have an ongoing incident to investigate.\n  Fix: Call log10x_top_patterns(limit=1) to see which pattern. Then log10x_investigate on it to check whether it is an incident or noise. If it is noise, log10x_dependency_check + log10x_exclusion_filter to cut cost safely.\n\n**[WARN] cross_pillar_backend**\n  No customer metrics backend detected. Cross-pillar tools (log10x_correlate_cross_pillar, log10x_translate_metric_to_patterns, log10x_discover_join, log10x_customer_metrics_query) will return \"not configured\" until a backend is reachable.\n  - explicit_env: skipped — LOG10X_CUSTOMER_METRICS_URL not set\n  - grafana_cloud: skipped — no GRAFANA_CLOUD_API_KEY / GCLOUD_API_KEY\n  - datadog_prom: skipped — no DD_API_KEY / DATADOG_API_KEY\n  - amp: skipped — no AWS_REGION / AWS_DEFAULT_REGION\n  - gcp_managed_prometheus: skipped — no GOOGLE_APPLICATION_CREDENTIALS\n  - prometheus_url: skipped — PROMETHEUS_URL not set\n  Fix: Set LOG10X_CUSTOMER_METRICS_URL + LOG10X_CUSTOMER_METRICS_TYPE explicitly, or expose one of: GRAFANA_CLOUD_API_KEY (+URL), DD_API_KEY+DD_APP_KEY, AWS_REGION (with AMP workspace available), GOOGLE_APPLICATION_CREDENTIALS (GMP project), or PROMETHEUS_URL.\n\n**[PASS] forwarder_dark_zones**\n  All services with 24h history are still emitting in the last 15 minutes. No forwarder dark zones detected.\n\nThe MCP will function but some tools may be unavailable or degraded. See the warnings above.\n\n--- stderr ---\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_01CjZXVp9bjvbhKAnqdACo7J",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_discover_env --args '{}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01CjZXVp9bjvbhKAnqdACo7J",
+          "content": "exit=0\n--- stdout ---\n# Discovery snapshot `disc-23a44bb7-fc53-4409-8d7d-3c4aea457399`\n\n- **schema**: v1\n- **started**: 2026-05-10T21:35:38.815Z\n- **finished**: 2026-05-10T21:36:33.225Z\n\n## Kubernetes\n- **context**: `arn:aws:eks:us-east-1:351939435334:cluster/log10x-otel-demo`\n- **probed namespaces** (4): demo, otel-demo, default, kube-system\n- **forwarders detected** (2):\n  - `fluentd` — DaemonSet/tenx-fluentd in `demo` (image: `log10x/fluentd-10x:1.0.20-jit`, ready: 1)\n  - `otel-collector` — DaemonSet/otel-collector-agent in `otel-demo` (image: `otel/opentelemetry-collector-contrib:0.142.0`, ready: 1)\n- **log10x apps installed**: none\n- **helm releases** (5):\n  - `aws-node-termination-handler` in `kube-system` — chart `aws-node-termination-handler-0.21.0` (deployed)\n  - `cluster-autoscaler` in `kube-system` — chart `cluster-autoscaler-9.55.0` (deployed)\n  - `metrics-server` in `kube-system` — chart `metrics-server-3.12.2` (deployed)\n  - `otel-demo` in `otel-demo` — chart `opentelemetry-demo-0.40.7` (deployed)\n  - `tenx` in `demo` — chart `fluentd-1.0.20` (deployed)\n- **IRSA service accounts** (4):\n  - `demo/tenx-demo` → `arn:aws:iam::351939435334:role/tenx-demo-cloudwatch-role`\n  - `kube-system/cluster-autoscaler` → `arn:aws:iam::351939435334:role/cluster-autoscaler-log10x-otel-demo`\n  - `kube-system/efs-csi-controller-sa` → `arn:aws:iam::351939435334:role/efs-csi-controller-log10x-otel-demo-2026042808464618370000000f`\n  - `kube-system/efs-csi-node-sa` → `arn:aws:iam::351939435334:role/efs-csi-controller-log10x-otel-demo-2026042808464618370000000f`\n\n## AWS\n- **account**: `351939435334` (`arn:aws:iam::351939435334:user/tal.weiss@l1x.co`)\n- **region**: `us-east-1`\n- **EKS cluster**: `log10x-otel-demo` (v1.34), node groups: ng-otel-demo-20260428201217864400000004\n- **S3 buckets** matching hint (16):\n  - `tenx-demo-cloud-retriever-351939435334` (has `indexing-results/` prefix)\n  - `tenx-demo-lambda-retriever-351939435334`\n  - `log10x-console`\n  - `log10x-console-staging`\n  - `log10x-lambda-deploy`\n  - `log10x-marketing-linkedin-enrichment`\n- **SQS queues** (2):\n  - `tenx-marketplace-events` (role: unknown)\n  - `tenx-marketplace-events-staging` (role: unknown)\n- **CloudWatch log groups** (1):\n  - `/tenx/dor-test/query`\n\n## Recommendations\n- **suggested namespace**: `demo`\n- **existing forwarder**: `fluentd` in `demo` — advisor will target this unless you override\n- **retriever S3 bucket candidate**: `tenx-demo-cloud-retriever-351939435334`\n\n## Next steps\nPass this snapshot id to an advisor:\n\n```\nlog10x_advise_install({ snapshot_id: \"disc-23a44bb7-fc53-4409-8d7d-3c4aea457399\" })   # picks the right shape automatically\nlog10x_advise_reporter({ snapshot_id: \"disc-23a44bb7-fc53-4409-8d7d-3c4aea457399\" })\nlog10x_advise_receiver({ snapshot_id: \"disc-23a44bb7-fc53-4409-8d7d-3c4aea457399\" })\nlog10x_advise_retriever({ snapshot_id: \"disc-23a44bb7-fc53-4409-8d7d-3c4aea457399\" })\n```\n\n_Snapshot is cached in-memory for 30 min. Re-run `log10x_discover_env` for a fresh probe._\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_advise_install\",\"args\":{\"snapshot_id\":\"disc-23a44bb7-fc53-4409-8d7d-3c4aea457399\"},\"reason\":\"meta-advisor: pick the right shape (standalone vs inline) and tier from the snapshot\"},{\"tool\":\"log10x_advise_receiver\",\"args\":{\"snapshot_id\":\"disc-23a44bb7-fc53-4409-8d7d-3c4aea457399\"},\"reason\":\"Receiver (Reducer + Optimizer) inline install plan\"},{\"tool\":\"log10x_advise_reporter\",\"args\":{\"snapshot_id\":\"disc-23a44bb7-fc53-4409-8d7d-3c4aea457399\"},\"reason\":\"Reporter install plan (inline or standalone)\"},{\"tool\":\"log10x_advise_retriever\",\"args\":{\"snapshot_id\":\"disc-23a44bb7-fc53-4409-8d7d-3c4aea457399\"},\"reason\":\"Retriever (S3 archive) install plan\"},{\"tool\":\"log10x_advise_compact\",\"args\":{\"snapshot_id\":\"disc-23a44bb7-fc53-4409-8d7d-3c4aea457399\",\"mode\":\"csv\"},\"reason\":\"compact-mode advisor will return a truthful negative if GitOps is not yet wired (chain handoff is still informative)\"}]-->\n\n--- stderr ---\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_01NbzpNo2kUKLDda7UupvZ1m",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_savings --args '{}'\nnode /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_advise_retriever --args '{\"snapshot_id\":\"disc-23a44bb7-fc53-4409-8d7d-3c4aea457399\"}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01NbzpNo2kUKLDda7UupvZ1m",
+          "content": "exit=-1\n--- stdout ---\nPipeline Savings (this week) at $1.5/GB analyzer · $0.02/GB storage\n\n  Retriever:  52.8 MB        in S3      → $0.08/wk saved\n             (streamed back: 0 B)\n\n  Total: $0.08/wk · $4.0/yr projected\n  _Coverage note: only 10/14 retriever chunks returned (71%). The Total above is a conservative underestimate — true savings are equal or higher. This is caused by intermittent Prometheus server aggregation limits on the bleeding-edge day; retry in 30s for a cleaner number._\n\n  1 pipeline instance · 4 services monitored\n\n  _Retriever figures use chunked parallel queries (one per day) to avoid server budget limits on high-cardinality indexed metrics. This call may take 30–90s on large deployments._\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_top_patterns\",\"args\":{\"timeRange\":\"7d\",\"limit\":10},\"reason\":\"see which patterns currently drive cost (where the savings come from)\"},{\"tool\":\"log10x_cost_drivers\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"check whether costs are growing — savings projection assumes stable run-rate\"}]-->\n\n--- stderr ---\n",
+          "is_error": true
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_017JpKDVD9jNTbSsAAtBTZpW",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_advise_retriever --args '{\"snapshot_id\":\"disc-23a44bb7-fc53-4409-8d7d-3c4aea457399\"}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_017JpKDVD9jNTbSsAAtBTZpW",
+          "content": "exit=0\n--- stdout ---\n# Retriever advisor — install + verify + teardown\n\n## Target\n- **app**: retriever\n- **release**: `my-retriever`\n- **namespace**: `demo`\n- **context**: `arn:aws:eks:us-east-1:351939435334:cluster/log10x-otel-demo`\n- **snapshot**: `disc-23a44bb7-fc53-4409-8d7d-3c4aea457399`\n\n## Blockers\nThe advisor cannot produce a complete plan until these are resolved:\n\n- Log10x license key is required for an install plan. Pass `api_key` (verify + teardown plans work without it).\n- No retriever IRSA role detected in the discovery snapshot and none supplied via `irsa_role_arn`. The Retriever needs a ServiceAccount annotated with an IAM role that can read from the input bucket, write to the index bucket, and consume from the SQS queues.\n- Missing SQS queue URL(s): index, query, subquery, stream. All four queues (index, query, subquery, stream) are required. Pass via `sqs_urls` or provision with the Terraform module first.\n\nOnce resolved, re-run the advise call with the updated arguments.\n\n--- stderr ---\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_01MHskmnxfsNo52eGGZ6TVz7",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"timeRange\":\"30d\",\"limit\":5}'\nnode /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_cost_drivers --args '{\"timeRange\":\"30d\"}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01MHskmnxfsNo52eGGZ6TVz7",
+          "content": "exit=0\n--- stdout ---\nTop 5 patterns — all services (last 30d) · $116K/mo total\n⚠ These are CURRENT RANK by cost (biggest right now). This is NOT a growth/delta ranking — do not re-label as \"cost drivers\" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.\n\n#1  service instance id service name otelcol contrib service version otelcol $82K/mo      DEBUG  opentelemetry-collector\n#2  cart cartstore ValkeyCartStore      $12K/mo      INFO  cart\n#3  shipping service Post shipping get quote unsupported protocol scheme shipping $10K/mo      CRIT  frontend\n#4  GetCartAsync called with userId     $7.9K/mo       cart\n#5  AddItemAsync called with userId productId quantity $4.1K/mo       cart\n\nTop 5 = 75% of total volume in scope / 25% in the long tail.\n\n**Next actions**:\n  - call `log10x_investigate({ starting_point: 'service_instance_id_service_name_otelcol_contrib_service_version_otelcol' })` to trace what's driving the top pattern.\n  - call `log10x_cost_drivers({ service: 'opentelemetry-collector', timeRange: '7d' })` for week-over-week deltas on the top service.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\"},\"reason\":\"trace the top pattern\"},{\"tool\":\"log10x_cost_drivers\",\"args\":{\"service\":\"opentelemetry-collector\",\"timeRange\":\"7d\"},\"reason\":\"week-over-week deltas on the top service\"}]-->\nall services — $3.4K → $34K/mo (4 cost drivers)\nComparison: current 30d vs 3-window avg baseline (offsets: 30d/60d/90d)\n⚠ These are GROWTH deltas (current window vs prior baseline), NOT current ranking. Do not re-rank or merge with log10x_top_patterns output.\n\n#1  cart cartstore ValkeyCartStore      $1.4K → $12K/mo (+765%)   INFO  12.0B events\n#2  shipping service Post shipping get quote unsupported protocol scheme shipping $714 → $10K/mo (+1370%)   CRIT  1.4B events\n#3  GetCartAsync called with userId     $888 → $7.9K/mo (+793%)     7.9B events\n#4  AddItemAsync called with userId productId quantity $465 → $4.1K/mo (+789%)     3.8B events\n\n4 drivers = 49% of increase · 4924 other patterns\n\n**Next actions**:\n  - call `log10x_investigate({ starting_point: 'cart_cartstore_ValkeyCartStore' })` to trace the cause of the $10K delta on this pattern.\n  - call `log10x_investigate({ starting_point: 'shipping_service_Post_shipping_get_quote_unsupported_protocol_scheme_shipping' })` to trace the cause of the $9.8K delta on this pattern.\n  - call `log10x_investigate({ starting_point: 'GetCartAsync_called_with_userId' })` to trace the cause of the $7.0K delta on this pattern.\n  - call `log10x_dependency_check({ pattern: 'cart_cartstore_ValkeyCartStore' })` before muting or dropping — blast-radius safety.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"cart_cartstore_ValkeyCartStore\"},\"reason\":\"trace the $10K delta driver\"},{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"shipping_service_Post_shipping_get_quote_unsupported_protocol_scheme_shipping\"},\"reason\":\"trace the $9.8K delta driver\"},{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"GetCartAsync_called_with_userId\"},\"reason\":\"trace the $7.0K delta driver\"},{\"tool\":\"log10x_dependency_check\",\"args\":{\"pattern\":\"cart_cartstore_ValkeyCartStore\"},\"reason\":\"blast-radius check before muting top driver\"}]-->\n\n--- stderr ---\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Here is the definitive policy picture, based entirely on what the tools returned:\n\n---\n\n## Retention & Rollup Policy — Audit Summary\n\n### What the environment actually reports\n\n**No per-pattern retention duration or rollup schedule was returned by any tool.** The log10x MCP tools available in this environment (`log10x_doctor`, `log10x_discover_env`, `log10x_savings`, `log10x_top_patterns`, `log10x_cost_drivers`) expose operational and cost metrics — none of them surface a retention-policy configuration endpoint or rollup schedule table.\n\n### What *is* confirmed by tooling\n\n| Dimension | Value (from tools) |\n|---|---|\n| SIEM connector | Amazon CloudWatch Logs, region `us-east-1` |\n| Hot retention (SIEM) | \"typically <7d\" — quoted verbatim by `log10x_doctor` as a rule-of-thumb, **not** a confirmed account setting |\n| Archive (S3 Retriever) | Bucket `tenx-demo-cloud-retriever-351939435334` exists; Retriever is **not deployed**, so archive query and historical event retrieval are **out of reach** in this session |\n| Metrics freshness window | Patterns queryable back at least 90 days (cost_drivers uses 30d/60d/90d baseline offsets) |\n| Pattern count | 1,189 active patterns across 3 services |\n| Volume | 34.9 GB / 7d (edge tier) |\n\n### What is NOT reported\n\n- **No per-pattern TTL** — the toolset does not expose individual pattern aging or expiry configuration.\n- **No rollup schedule** — no compaction, tier-transition, or downsampling schedule was returned by any tool.\n- **CloudWatch retention setting** — the actual log-group retention period (e.g., 30 days, 90 days, \"never expire\") must be read directly from the CloudWatch console or via `aws logs describe-log-groups` for the log group `/tenx/dor-test/query`.\n- **S3 lifecycle policy** — archive retention is governed by S3 Object Lifecycle rules on `tenx-demo-cloud-retriever-351939435334`, not visible to these tools.\n\n### Recommendations for the audit\n\n1. **Pull the authoritative CloudWatch retention setting** via `aws logs describe-log-groups --log-group-name-prefix /tenx` in `us-east-1` — that is the only SIEM connector active and the only source of hot retention truth.\n2. **Pull the S3 lifecycle policy** on `tenx-demo-cloud-retriever-351939435334` (`aws s3api get-bucket-lifecycle-configuration`) — that governs cold/archive retention.\n3. **Deploy the Retriever** (prereqs: IRSA role + 4 SQS queues — `index`, `query`, `subquery`, `stream`) to unlock historical query capability and make archive retention operationally enforceable.\n4. **Document the gap**: today's tooling has no per-pattern retention knob — retention is uniform at the CloudWatch log-group and S3 bucket level, not per pattern. If per-pattern aging is a compliance requirement, that is currently an unmet capability."
+        }
+      ]
+    }
+  ],
+  "bashCommands": [
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --list",
+      "stdout": "log10x_advise_compact\nlog10x_advise_install\nlog10x_advise_receiver\nlog10x_advise_reporter\nlog10x_advise_retriever\nlog10x_backfill_metric\nlog10x_correlate_cross_pillar\nlog10x_cost_drivers\nlog10x_customer_metrics_query\nlog10x_dependency_check\nlog10x_discover_env\nlog10x_discover_join\nlog10x_discover_labels\nlog10x_doctor\nlog10x_event_lookup\nlog10x_exclusion_filter\nlog10x_extract_templates\nlog10x_investigate\nlog10x_investigation_get\nlog10x_list_by_label\nlog10x_login_status\nlog10x_pattern_examples\nlog10x_pattern_trend\nlog10x_resolve_batch\nlog10x_retriever_query\nlog10x_retriever_query_status\nlog10x_retriever_series\nlog10x_savings\nlog10x_services\nlog10x_top_patterns\nlog10x_translate_metric_to_patterns\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 4870
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_doctor --args '{}'",
+      "stdout": "## Log10x MCP Doctor\n\n**Status: WARNINGS PRESENT**\n\n### Global checks\n\n**[PASS] environment_config**\n  1 environment: 10x Demo (owner) ★. Default: 10x Demo. (★ = default env; nicknames with (read) are read-only.)\n\n**[WARN] retriever_endpoint**\n  Retriever not reachable from this MCP install. log10x_retriever_query and log10x_backfill_metric cannot retrieve raw events from the S3 archive in this session. For events inside SIEM hot retention (typically <7d), the fastest workaround is direct SIEM query — do not block on retriever setup.\n  - explicit_env: skipped — only one of __SAVE_LOG10X_RETRIEVER_URL__ / __SAVE_LOG10X_RETRIEVER_BUCKET__ set — need both\n  - terraform_state: skipped — /Users/talweiss/.log10x/retriever.tfstate not present\n  - aws_s3_bucket_pattern: skipped — no AWS_REGION / AWS_PROFILE in env\n  - kubectl_service: skipped — kubectl found 0 log10x-retriever services — none clearly a query-handler\n  Fix: Options: (a) set __SAVE_LOG10X_RETRIEVER_URL__ + __SAVE_LOG10X_RETRIEVER_BUCKET__ explicitly; (b) expose AWS creds (AWS_REGION + IAM with s3:ListAllMyBuckets) so auto-detect can find a log10x-retriever-* bucket; (c) deploy the Retriever — https://doc.log10x.com/apps/cloud/retriever/\n\n**[WARN] datadog_destination**\n  No DATADOG_API_KEY (or DD_API_KEY) set. backfill_metric to Datadog will error if attempted.\n  Fix: Set DATADOG_API_KEY in the MCP server environment if you plan to backfill Datadog metrics. DD_SITE / DATADOG_SITE controls the region (defaults to datadoghq.com).\n\n**[PASS] templater_local_tenx**\n  Local tenx CLI available (10x engine v1.0.4, flavor: 'edge'\nNeed help? See https://doc.log10x.com). Templating will run locally — events never leave the box.\n\n**[WARN] templater_paste_endpoint_fallback**\n  Paste endpoint reachable (demo fallback for privacy_mode: false). Do NOT use with production log content — events leave the caller's machine and hit a shared public Lambda.\n\n**[PASS] siem_discovery**\n  1 SIEM connector reachable: cloudwatch. log10x_poc_from_siem_submit will auto-target this SIEM.\n  - cloudwatch (Amazon CloudWatch Logs): DETECTED (ambient) — region=us-east-1 (default)\n  - datadog (Datadog): not_configured\n  - sumo (Sumo Logic): not_configured\n  - gcp-logging (GCP Cloud Logging): not_configured\n  - elasticsearch (Elasticsearch): not_configured\n  - azure-monitor (Azure Monitor / Log Analytics): not_configured\n  - splunk (Splunk): not_configured\n  - clickhouse (ClickHouse): not_configured\n\n### Environment: 10x Demo\n\n**[PASS] prometheus_gateway**\n  prometheus.log10x.com reachable, auth OK for env 10x Demo.\n\n**[PASS] reporter_tier**\n  Edge Reporter detected — full-fidelity metrics with dropped-event coverage.\n\n**[PASS] metric_freshness**\n  edge reporter emitted within the last 46s — metrics are fresh.\n\n**[PASS] scale_and_capability**\n  Volume: 34.9 GB / 7d (edge tier).\n  Services: 3.\n  Patterns: 1189.\n  Compression: 35.1K events per pattern (stable identity means comparisons over time are trustworthy at this volume).\n  \n  Retriever NOT deployed — these question types are out of reach:\n    - Historical events beyond SIEM retention\n    - Dropped-event recovery (forwarder-dropped, invisible to SIEM)\n    - Metric backfill from archive\n    - Sample-reversal verification\n  For questions in these shapes, route to SIEM MCP (hot retention only) or recommend deploying the retriever.\n\n**[PASS] severity_distribution**\n  Severity distribution healthy: 24% INFO, 9.6% error-class (ERROR/WARN/CRIT/FATAL).\n\n**[WARN] cardinality_concentration**\n  A single pattern is 54% of your 30-day log spend. If it's a DEBUG/INFO pattern, you have a large filtering opportunity; if it's an ERROR, you have an ongoing incident to investigate.\n  Fix: Call log10x_top_patterns(limit=1) to see which pattern. Then log10x_investigate on it to check whether it is an incident or noise. If it is noise, log10x_dependency_check + log10x_exclusion_filter to cut cost safely.\n\n**[WARN] cross_pillar_backend**\n  No customer metrics backend detected. Cross-pillar tools (log10x_correlate_cross_pillar, log10x_translate_metric_to_patterns, log10x_discover_join, log10x_customer_metrics_query) will return \"not configured\" until a backend is reachable.\n  - explicit_env: skipped — LOG10X_CUSTOMER_METRICS_URL not set\n  - grafana_cloud: skipped — no GRAFANA_CLOUD_API_KEY / GCLOUD_API_KEY\n  - datadog_prom: skipped — no DD_API_KEY / DATADOG_API_KEY\n  - amp: skipped — no AWS_REGION / AWS_DEFAULT_REGION\n  - gcp_managed_prometheus: skipped — no GOOGLE_APPLICATION_CREDENTIALS\n  - prometheus_url: skipped — PROMETHEUS_URL not set\n  Fix: Set LOG10X_CUSTOMER_METRICS_URL + LOG10X_CUSTOMER_METRICS_TYPE explicitly, or expose one of: GRAFANA_CLOUD_API_KEY (+URL), DD_API_KEY+DD_APP_KEY, AWS_REGION (with AMP workspace available), GOOGLE_APPLICATION_CREDENTIALS (GMP project), or PROMETHEUS_URL.\n\n**[PASS] forwarder_dark_zones**\n  All services with 24h history are still emitting in the last 15 minutes. No forwarder dark zones detected.\n\nThe MCP will function but some tools may be unavailable or degraded. See the warnings above.\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 25918
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_discover_env --args '{}'",
+      "stdout": "# Discovery snapshot `disc-23a44bb7-fc53-4409-8d7d-3c4aea457399`\n\n- **schema**: v1\n- **started**: 2026-05-10T21:35:38.815Z\n- **finished**: 2026-05-10T21:36:33.225Z\n\n## Kubernetes\n- **context**: `arn:aws:eks:us-east-1:351939435334:cluster/log10x-otel-demo`\n- **probed namespaces** (4): demo, otel-demo, default, kube-system\n- **forwarders detected** (2):\n  - `fluentd` — DaemonSet/tenx-fluentd in `demo` (image: `log10x/fluentd-10x:1.0.20-jit`, ready: 1)\n  - `otel-collector` — DaemonSet/otel-collector-agent in `otel-demo` (image: `otel/opentelemetry-collector-contrib:0.142.0`, ready: 1)\n- **log10x apps installed**: none\n- **helm releases** (5):\n  - `aws-node-termination-handler` in `kube-system` — chart `aws-node-termination-handler-0.21.0` (deployed)\n  - `cluster-autoscaler` in `kube-system` — chart `cluster-autoscaler-9.55.0` (deployed)\n  - `metrics-server` in `kube-system` — chart `metrics-server-3.12.2` (deployed)\n  - `otel-demo` in `otel-demo` — chart `opentelemetry-demo-0.40.7` (deployed)\n  - `tenx` in `demo` — chart `fluentd-1.0.20` (deployed)\n- **IRSA service accounts** (4):\n  - `demo/tenx-demo` → `arn:aws:iam::351939435334:role/tenx-demo-cloudwatch-role`\n  - `kube-system/cluster-autoscaler` → `arn:aws:iam::351939435334:role/cluster-autoscaler-log10x-otel-demo`\n  - `kube-system/efs-csi-controller-sa` → `arn:aws:iam::351939435334:role/efs-csi-controller-log10x-otel-demo-2026042808464618370000000f`\n  - `kube-system/efs-csi-node-sa` → `arn:aws:iam::351939435334:role/efs-csi-controller-log10x-otel-demo-2026042808464618370000000f`\n\n## AWS\n- **account**: `351939435334` (`arn:aws:iam::351939435334:user/tal.weiss@l1x.co`)\n- **region**: `us-east-1`\n- **EKS cluster**: `log10x-otel-demo` (v1.34), node groups: ng-otel-demo-20260428201217864400000004\n- **S3 buckets** matching hint (16):\n  - `tenx-demo-cloud-retriever-351939435334` (has `indexing-results/` prefix)\n  - `tenx-demo-lambda-retriever-351939435334`\n  - `log10x-console`\n  - `log10x-console-staging`\n  - `log10x-lambda-deploy`\n  - `log10x-marketing-linkedin-enrichment`\n- **SQS queues** (2):\n  - `tenx-marketplace-events` (role: unknown)\n  - `tenx-marketplace-events-staging` (role: unknown)\n- **CloudWatch log groups** (1):\n  - `/tenx/dor-test/query`\n\n## Recommendations\n- **suggested namespace**: `demo`\n- **existing forwarder**: `fluentd` in `demo` — advisor will target this unless you override\n- **retriever S3 bucket candidate**: `tenx-demo-cloud-retriever-351939435334`\n\n## Next steps\nPass this snapshot id to an advisor:\n\n```\nlog10x_advise_install({ snapshot_id: \"disc-23a44bb7-fc53-4409-8d7d-3c4aea457399\" })   # picks the right shape automatically\nlog10x_advise_reporter({ snapshot_id: \"disc-23a44bb7-fc53-4409-8d7d-3c4aea457399\" })\nlog10x_advise_receiver({ snapshot_id: \"disc-23a44bb7-fc53-4409-8d7d-3c4aea457399\" })\nlog10x_advise_retriever({ snapshot_id: \"disc-23a44bb7-fc53-4409-8d7d-3c4aea457399\" })\n```\n\n_Snapshot is cached in-memory for 30 min. Re-run `log10x_discover_env` for a fresh probe._\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_advise_install\",\"args\":{\"snapshot_id\":\"disc-23a44bb7-fc53-4409-8d7d-3c4aea457399\"},\"reason\":\"meta-advisor: pick the right shape (standalone vs inline) and tier from the snapshot\"},{\"tool\":\"log10x_advise_receiver\",\"args\":{\"snapshot_id\":\"disc-23a44bb7-fc53-4409-8d7d-3c4aea457399\"},\"reason\":\"Receiver (Reducer + Optimizer) inline install plan\"},{\"tool\":\"log10x_advise_reporter\",\"args\":{\"snapshot_id\":\"disc-23a44bb7-fc53-4409-8d7d-3c4aea457399\"},\"reason\":\"Reporter install plan (inline or standalone)\"},{\"tool\":\"log10x_advise_retriever\",\"args\":{\"snapshot_id\":\"disc-23a44bb7-fc53-4409-8d7d-3c4aea457399\"},\"reason\":\"Retriever (S3 archive) install plan\"},{\"tool\":\"log10x_advise_compact\",\"args\":{\"snapshot_id\":\"disc-23a44bb7-fc53-4409-8d7d-3c4aea457399\",\"mode\":\"csv\"},\"reason\":\"compact-mode advisor will return a truthful negative if GitOps is not yet wired (chain handoff is still informative)\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 57360
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_savings --args '{}'\nnode /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_advise_retriever --args '{\"snapshot_id\":\"disc-23a44bb7-fc53-4409-8d7d-3c4aea457399\"}'",
+      "stdout": "Pipeline Savings (this week) at $1.5/GB analyzer · $0.02/GB storage\n\n  Retriever:  52.8 MB        in S3      → $0.08/wk saved\n             (streamed back: 0 B)\n\n  Total: $0.08/wk · $4.0/yr projected\n  _Coverage note: only 10/14 retriever chunks returned (71%). The Total above is a conservative underestimate — true savings are equal or higher. This is caused by intermittent Prometheus server aggregation limits on the bleeding-edge day; retry in 30s for a cleaner number._\n\n  1 pipeline instance · 4 services monitored\n\n  _Retriever figures use chunked parallel queries (one per day) to avoid server budget limits on high-cardinality indexed metrics. This call may take 30–90s on large deployments._\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_top_patterns\",\"args\":{\"timeRange\":\"7d\",\"limit\":10},\"reason\":\"see which patterns currently drive cost (where the savings come from)\"},{\"tool\":\"log10x_cost_drivers\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"check whether costs are growing — savings projection assumes stable run-rate\"}]-->\n",
+      "stderr": "",
+      "exitCode": -1,
+      "durationMs": 95283
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_advise_retriever --args '{\"snapshot_id\":\"disc-23a44bb7-fc53-4409-8d7d-3c4aea457399\"}'",
+      "stdout": "# Retriever advisor — install + verify + teardown\n\n## Target\n- **app**: retriever\n- **release**: `my-retriever`\n- **namespace**: `demo`\n- **context**: `arn:aws:eks:us-east-1:351939435334:cluster/log10x-otel-demo`\n- **snapshot**: `disc-23a44bb7-fc53-4409-8d7d-3c4aea457399`\n\n## Blockers\nThe advisor cannot produce a complete plan until these are resolved:\n\n- Log10x license key is required for an install plan. Pass `api_key` (verify + teardown plans work without it).\n- No retriever IRSA role detected in the discovery snapshot and none supplied via `irsa_role_arn`. The Retriever needs a ServiceAccount annotated with an IAM role that can read from the input bucket, write to the index bucket, and consume from the SQS queues.\n- Missing SQS queue URL(s): index, query, subquery, stream. All four queues (index, query, subquery, stream) are required. Pass via `sqs_urls` or provision with the Terraform module first.\n\nOnce resolved, re-run the advise call with the updated arguments.\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 5512
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"timeRange\":\"30d\",\"limit\":5}'\nnode /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_cost_drivers --args '{\"timeRange\":\"30d\"}'",
+      "stdout": "Top 5 patterns — all services (last 30d) · $116K/mo total\n⚠ These are CURRENT RANK by cost (biggest right now). This is NOT a growth/delta ranking — do not re-label as \"cost drivers\" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.\n\n#1  service instance id service name otelcol contrib service version otelcol $82K/mo      DEBUG  opentelemetry-collector\n#2  cart cartstore ValkeyCartStore      $12K/mo      INFO  cart\n#3  shipping service Post shipping get quote unsupported protocol scheme shipping $10K/mo      CRIT  frontend\n#4  GetCartAsync called with userId     $7.9K/mo       cart\n#5  AddItemAsync called with userId productId quantity $4.1K/mo       cart\n\nTop 5 = 75% of total volume in scope / 25% in the long tail.\n\n**Next actions**:\n  - call `log10x_investigate({ starting_point: 'service_instance_id_service_name_otelcol_contrib_service_version_otelcol' })` to trace what's driving the top pattern.\n  - call `log10x_cost_drivers({ service: 'opentelemetry-collector', timeRange: '7d' })` for week-over-week deltas on the top service.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\"},\"reason\":\"trace the top pattern\"},{\"tool\":\"log10x_cost_drivers\",\"args\":{\"service\":\"opentelemetry-collector\",\"timeRange\":\"7d\"},\"reason\":\"week-over-week deltas on the top service\"}]-->\nall services — $3.4K → $34K/mo (4 cost drivers)\nComparison: current 30d vs 3-window avg baseline (offsets: 30d/60d/90d)\n⚠ These are GROWTH deltas (current window vs prior baseline), NOT current ranking. Do not re-rank or merge with log10x_top_patterns output.\n\n#1  cart cartstore ValkeyCartStore      $1.4K → $12K/mo (+765%)   INFO  12.0B events\n#2  shipping service Post shipping get quote unsupported protocol scheme shipping $714 → $10K/mo (+1370%)   CRIT  1.4B events\n#3  GetCartAsync called with userId     $888 → $7.9K/mo (+793%)     7.9B events\n#4  AddItemAsync called with userId productId quantity $465 → $4.1K/mo (+789%)     3.8B events\n\n4 drivers = 49% of increase · 4924 other patterns\n\n**Next actions**:\n  - call `log10x_investigate({ starting_point: 'cart_cartstore_ValkeyCartStore' })` to trace the cause of the $10K delta on this pattern.\n  - call `log10x_investigate({ starting_point: 'shipping_service_Post_shipping_get_quote_unsupported_protocol_scheme_shipping' })` to trace the cause of the $9.8K delta on this pattern.\n  - call `log10x_investigate({ starting_point: 'GetCartAsync_called_with_userId' })` to trace the cause of the $7.0K delta on this pattern.\n  - call `log10x_dependency_check({ pattern: 'cart_cartstore_ValkeyCartStore' })` before muting or dropping — blast-radius safety.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"cart_cartstore_ValkeyCartStore\"},\"reason\":\"trace the $10K delta driver\"},{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"shipping_service_Post_shipping_get_quote_unsupported_protocol_scheme_shipping\"},\"reason\":\"trace the $9.8K delta driver\"},{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"GetCartAsync_called_with_userId\"},\"reason\":\"trace the $7.0K delta driver\"},{\"tool\":\"log10x_dependency_check\",\"args\":{\"pattern\":\"cart_cartstore_ValkeyCartStore\"},\"reason\":\"blast-radius check before muting top driver\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 51121
+    }
+  ],
+  "finalText": "## Retention Policy\n\nI cannot answer this from MCP. None of the available tools surface a retention-policy configuration endpoint or rollup schedule. The retention policy is determined by the SIEM (Amazon CloudWatch Logs in this env), not by anything log10x exposes. Check the CloudWatch console for the actual policy."
+}

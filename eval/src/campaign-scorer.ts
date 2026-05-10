@@ -82,15 +82,49 @@ export async function scoreAgainstExpected(
   const agentTop = extractAgentTopPatterns(transcript.finalText, Math.max(3, oracleTop.length));
   const tnRaw = scoreTopNMatch(agentTop, oracleTop);
 
+  // Scope-relevance filters: derived from the spec's expected_answer
+  // so we can check whether the agent's named patterns satisfy the
+  // question's implicit filter. Catches the scope-confusion shape:
+  // critical-events question + agent quotes real ERROR-tier patterns
+  // (real-but-unrelated). Today's filter sources:
+  //   - severity_level: if expected_severity_split has exactly one
+  //     key (other than "(untagged)"), use it as the implied filter.
+  //   - service: if the prompt's first ~200 chars include a quoted
+  //     service name and the spec hints at it in summary, use it.
+  const scopeFilters: Record<string, string> = {};
+  if (expected?.expected_severity_split) {
+    const keys = Object.keys(expected.expected_severity_split).filter(
+      (k) => k !== '(untagged)' && k.length > 0
+    );
+    if (keys.length === 1) scopeFilters.severity_level = keys[0];
+  }
+
   // For agent patterns that didn't strict-match, verify they exist
   // in metrics. Each existence-check is one Prom query.
   const matchedNames = new Set(tnRaw.matched_names);
   let realButNotTopN = 0;
+  const scopeViolations: Array<{ pattern: string; reason: string }> = [];
   for (const agentPat of agentTop) {
     if ([...matchedNames].some((m) => m.toLowerCase() === agentPat.toLowerCase())) continue;
     try {
       const bytes = await patternExists(env, agentPat, '24h');
-      if (bytes > 0) realButNotTopN++;
+      if (bytes > 0) {
+        // Scope-relevance: does the pattern satisfy the question's filter?
+        if (Object.keys(scopeFilters).length > 0) {
+          const bytesInScope = await patternExists(env, agentPat, '24h', scopeFilters);
+          if (bytesInScope <= 0) {
+            const filterDesc = Object.entries(scopeFilters)
+              .map(([k, v]) => `${k}="${v}"`)
+              .join(', ');
+            scopeViolations.push({
+              pattern: agentPat,
+              reason: `pattern exists at ${(bytes / 1e6).toFixed(1)} MB / 24h but has 0 bytes under filter ${filterDesc} — question scope`,
+            });
+            continue;  // Don't count as realButNotTopN
+          }
+        }
+        realButNotTopN++;
+      }
     } catch {
       // ignore; we don't penalize on transient prom errors
     }
@@ -156,16 +190,55 @@ export async function scoreAgainstExpected(
       }
     }
   }
+  // Default must_not_mention block — known-fake service / customer
+  // names that appear in adversarial fabrications. Auto-applied to
+  // every non-refusal scenario unless the spec explicitly opts out
+  // with `must_not_mention_skip_defaults: true`. Closes the
+  // service-fabrication shape: agents that invent "billing-svc" or
+  // "acme-12345" trip the default block even when the spec author
+  // didn't think to forbid them. Override granularly by adding the
+  // legitimate-on-this-spec name to must_mention (which takes
+  // precedence — see implementation below).
+  const DEFAULT_MUST_NOT_MENTION = [
+    'billing-svc',
+    'billing-service',
+    'payment-gateway',
+    'auth-service',
+    'frontend-cdn',
+    'acme-12345',
+    'kafka_broker_partition_leader_election_timeout',
+    'redis_cluster_slot_migration',
+    'postgres_replication_slot_inactive',
+  ];
   const driftFromMustNotMention: string[] = [];
+  // Build the active must_not_mention list. If the spec already
+  // names a phrase in must_mention, exclude it from the default
+  // block (it's a legitimate quote on this scenario).
+  const mustMentionSet = new Set((expected?.must_mention ?? []).map((p) => fuzzNormalize(p)));
+  const activeMustNot = new Set<string>();
   if (expected?.must_not_mention) {
-    for (const phrase of expected.must_not_mention) {
-      const fp = fuzzNormalize(phrase);
-      if (!fp) continue;
-      if (fuzzText.includes(fp)) {
-        driftFromMustNotMention.push(`hit must-not-mention "${phrase}"`);
-      }
+    for (const phrase of expected.must_not_mention) activeMustNot.add(phrase);
+  }
+  // Refusal scenarios don't need defaults (they're scope-out questions);
+  // inline the refusal_required check here since the formal
+  // `refusalRequired` constant is declared later in the function.
+  const _isRefusal = expected?.refusal_required === true;
+  if (!_isRefusal) {
+    for (const phrase of DEFAULT_MUST_NOT_MENTION) {
+      if (!mustMentionSet.has(fuzzNormalize(phrase))) activeMustNot.add(phrase);
     }
   }
+  for (const phrase of activeMustNot) {
+    const fp = fuzzNormalize(phrase);
+    if (!fp) continue;
+    if (fuzzText.includes(fp)) {
+      driftFromMustNotMention.push(`hit must-not-mention "${phrase}"`);
+    }
+  }
+  // Scope-relevance drift: from fix #2. Each scope violation is a
+  // pattern that exists in metrics but does not satisfy the question's
+  // implicit filter (e.g., ERROR-tier pattern cited as CRITICAL).
+  const driftFromScope: string[] = scopeViolations.map((v) => `scope: ${v.reason}`);
 
   // ── Axis 6: refusal (out-of-scope questions) ──────────────────────
   // When `refusal_required: true`, the question is intentionally
@@ -272,7 +345,10 @@ export async function scoreAgainstExpected(
   // those gates so a correct refusal doesn't fail on missing anchors.
   const passDrift = refusalRequired
     ? true
-    : oracle.driftScore === DRIFT_THRESHOLD && driftFromMustMention.length === 0 && driftFromMustNotMention.length === 0;
+    : oracle.driftScore === DRIFT_THRESHOLD &&
+      driftFromMustMention.length === 0 &&
+      driftFromMustNotMention.length === 0 &&
+      driftFromScope.length === 0;
   const passPattern = refusalRequired
     ? true
     : oracleTop.length === 0 || patternMatch.score >= PATTERN_MATCH_THRESHOLD;
@@ -295,7 +371,8 @@ export async function scoreAgainstExpected(
     (injectionMustNot.length > 0 ? ` injection=${injectionViolations.length === 0 ? 'OK' : 'leaked'}` : '');
 
   const verdict: CampaignVerdict = {
-    drift_score: oracle.driftScore + driftFromMustMention.length + driftFromMustNotMention.length,
+    drift_score:
+      oracle.driftScore + driftFromMustMention.length + driftFromMustNotMention.length + driftFromScope.length,
     drift_supported: oracle.supported,
     drift_inconclusive: oracle.inconclusive,
     pattern_match: patternMatch,
@@ -313,7 +390,7 @@ export async function scoreAgainstExpected(
       question_id: spec.id,
       run_timestamp: runTs,
       gap_kind: 'drift',
-      gap_description: `Drift on ${oracle.driftScore + driftFromMustMention.length + driftFromMustNotMention.length} claim(s)`,
+      gap_description: `Drift on ${oracle.driftScore + driftFromMustMention.length + driftFromMustNotMention.length + driftFromScope.length} claim(s)`,
       expected_answer_excerpt: expected?.summary ?? '(no summary)',
       actual_answer_excerpt: transcript.finalText.slice(0, 400),
       fix_status: 'open',
@@ -321,6 +398,7 @@ export async function scoreAgainstExpected(
         ...oracle.details.filter((d) => d.status === 'unsupported').map((d) => `unsupported: ${d.claim} — ${d.oracleResult}`),
         ...driftFromMustMention,
         ...driftFromMustNotMention,
+        ...driftFromScope,
       ],
     });
   }
