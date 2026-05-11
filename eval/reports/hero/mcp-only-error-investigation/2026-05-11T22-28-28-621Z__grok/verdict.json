@@ -1,0 +1,168 @@
+{
+  "spec": {
+    "id": "mcp-only-error-investigation",
+    "title": "MCP-only — investigate the top ERROR pattern via the log10x_* causal-chain tools",
+    "category": "stability",
+    "prompt": "Investigate the top ERROR-severity pattern currently firing in otel-demo. Step (1): identify the #1 ERROR pattern by current cost rank via log10x_top_patterns. Step (2): get its time-series trend via log10x_pattern_trend over the last 24h — is it stable, growing, declining, or spiky? Step (3): run log10x_investigate against it to surface the causal chain — what other patterns are co-firing or upstream? Step (4): if applicable, call log10x_correlate_cross_pillar to see if any k8s state correlates. Report a 4-line synthesis quoting the actual pattern name, trend shape, and causal-chain findings. Tools you may use are limited to log10x_* MCP tools only — do NOT use kubectl, do NOT use gh, do NOT use any other shell utility.",
+    "persona": "Oncall SRE doing a first-line investigation. Trained to use the log10x platform's causal-chain tools rather than reaching for kubectl as a reflex. Reports what the platform says, not what they wish it said.",
+    "budget_hint": "4-8 tool calls.",
+    "expected_answer": {
+      "summary": "Agent should call log10x_top_patterns(severity:ERROR) → identify #1 → log10x_pattern_trend → log10x_investigate. The #1 ERROR pattern in otel-demo is consistently 'service instance id service name otelcol contrib service version otelcol' or similar otel-collector infrastructure pattern. PASS = agent names the actual top ERROR pattern verbatim, reports the trend shape from tool stdout, and quotes investigate's causal chain (typically 2-3 co-firing patterns). FAIL = agent fabricates pattern names, invents trend numbers not in tool output, or escapes to kubectl/gh.",
+      "must_mention": [],
+      "expected_tool_chain": [
+        "log10x_top_patterns",
+        "log10x_pattern_trend",
+        "log10x_investigate"
+      ],
+      "snapshot_ts": "2026-05-11T22:00:00.000Z"
+    }
+  },
+  "runnerModel": "grok-4-latest",
+  "runnerVendor": "xai",
+  "startedAt": "2026-05-11T22:28:28.644Z",
+  "endedAt": "2026-05-11T22:35:23.829Z",
+  "durationMs": 415185,
+  "envMode": "demo",
+  "bashCommands": [
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"severity\":\"ERROR\",\"rank_by\":\"cost\",\"limit\":1}'",
+      "stdout": "Top 1 patterns — all services (this week) · $3.9/wk total\n⚠ These are CURRENT RANK by cost (biggest right now). This is NOT a growth/delta ranking — do not re-label as \"cost drivers\" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.\n\n#1  service instance id service name otelcol contrib service version otelcol $3.9/wk      ERROR\n\nTop 1 = 85% of total volume in scope / 15% in the long tail.\n\n**Next actions**:\n  - call `log10x_investigate({ starting_point: 'service_instance_id_service_name_otelcol_contrib_service_version_otelcol' })` to trace what's driving the top pattern.\n  - call `log10x_cost_drivers({ timeRange: '7d' })` for week-over-week deltas across all services.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\"},\"reason\":\"trace the top pattern\"},{\"tool\":\"log10x_cost_drivers\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"week-over-week deltas across all services\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 49122
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_trend --args '{\"pattern\":\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\", \"timeRange\":\"24h\"}'",
+      "stdout": "Tool 'log10x_pattern_trend' threw: Invalid value for `timeRange`: '24h' is not one of '15m', '1h', '6h', '1d', '7d', '30d'.\n  Field guidance: Time range. Sub-day values show fine-grained trajectory around an incident.\n",
+      "stderr": "",
+      "exitCode": 1,
+      "durationMs": 35224
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_trend --args '{\"pattern\":\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\", \"timeRange\":\"1d\"}'",
+      "stdout": "service instance id service name otelcol contrib service version otelcol — last 24h trend\n\n  Baseline (first quarter):  ~$0.88/day\n  Current (last quarter):    $0.90/day\n  Change: stable\n\n  Peak: 25.9 MB at 2026-05-11 19:00:00 UTC\n  Low:  24.4 MB at 2026-05-11 02:00:00 UTC\n  Total: $0.92/day across 25 data points\n\n  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓█▓▓▓\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 24184
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\":\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\"}'",
+      "stdout": "## Investigation: service_instance_id_service_name_otelcol_contrib_service_version_otelcol, last 1h\n\n**Investigation id**: 3e8dd6e5-f725-4fb0-85ae-f1b4371a8929\n**Result**: No significant pattern movement in the last 1h. Nothing crossed the noise floor.\n\n**Noise floor applied**: 0.001\n\n**Try next**:\n- Widen the window: `log10x_investigate({ starting_point: 'service_instance_id_service_name_otelcol_contrib_service_version_otelcol', window: '24h' })` — most incident inflections appear within 24h\n- Or for gradual drift: `log10x_investigate({ starting_point: 'service_instance_id_service_name_otelcol_contrib_service_version_otelcol', window: '30d' })`\n- Check the trend directly: `log10x_pattern_trend({ pattern: 'service_instance_id_service_name_otelcol_contrib_service_version_otelcol' })`\n- Confirm the anchor exists: use a specific log line or pattern hash rather than a service name\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_dependency_check\",\"args\":{\"pattern\":\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\"},\"reason\":\"check dashboards / alerts before any mute action\"},{\"tool\":\"log10x_correlate_cross_pillar\",\"args\":{\"anchor_type\":\"log10x_pattern\",\"anchor\":\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\",\"window\":\"1h\"},\"reason\":\"find upstream metric anomaly co-moving with the pattern\"},{\"tool\":\"log10x_pattern_trend\",\"args\":{\"pattern\":\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\"},\"reason\":\"time series for the investigated pattern\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 16737
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\":\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\", \"window\":\"24h\"}'",
+      "stdout": "## Investigation: service_instance_id_service_name_otelcol_contrib_service_version_otelcol, last 30d\n\n**Investigation id**: 21ffd9a5-db4c-4e60-bdfe-d9dfa6a3a02b\n**Anchor**: `service_instance_id_service_name_otelcol_contrib_service_version_otelcol` (resolved from pattern_identity)\n**Environment**: demo\n**Shape**: gradual drift (no discrete inflection)\n**Reporter tier**: edge\n**Metric primitive**: event_count\n**Drift threshold**: 3.0%/week\n\n### Drift summary\n\n`service_instance_id_service_name_otelcol_contrib_service_version_otelcol` has been growing at **-2046946.1%/week** across the last 30d, with no discrete inflection point. The growth is monotonic and sustained — this is a slow regression that has been compounding.\n\n### Co-drifting patterns (cohort)\n\nPatterns growing at similar rates in the same window:\n\n| Pattern | Service | Slope/week | Similarity |\n|---|---|---|---|\n| `auto_scaling_groups_go_Updated_ASG_cache_eks_ng_streamer_compute_min_max` | — | +2.6% | 0% |\n| `timestamp` | payment | +0.4% | 0% |\n| `process_pid` | payment | +0.4% | 0% |\n| `os_type_linux` | payment | +0.4% | 0% |\n| `usr_src_app_node_modules_thread_stream_lib_worker_js` | payment | +0.4% | 0% |\n| `require_opentelemetry_js` | payment | +0.4% | 0% |\n| `process_command_usr_src_app_node_modules_thread_stream_lib_worker_js` | payment | +0.4% | 0% |\n| `host_name_payment` | payment | +0.4% | 0% |\n| `process_executable_name_nodejs_bin_node` | payment | +0.4% | 0% |\n| `resource` | payment | +0.4% | 0% |\n| `process_runtime_name_nodejs` | payment | +0.4% | 0% |\n| `instrumentationScope_name_payment_logger_version_schemaUrl_undefined` | payment | +0.4% | 0% |\n| `service_name_payment` | payment | +0.4% | 0% |\n| `process_runtime_version` | payment | +0.4% | 0% |\n| `nodejs_bin_node` | payment | +0.4% | 0% |\n| `process_runtime_description_Node_js` | payment | +0.4% | 0% |\n| `severityText_` | payment | +0.4% | 0% |\n| `process_executable_path_nodejs_bin_node` | payment | +0.4% | 0% |\n| `io_quarkus_main_run_quarkus_stopped_in` | — | +3.8% | 0% |\n| `DNS_resolution_failed_upstream_service_svc_timeout_after_attempts_resolver` | — | +3.9% | 0% |\n\nThese patterns likely share an upstream cause — typically a change that shipped weeks ago and has been gradually scaling. **The cohort is not a causal chain** (drift cases don't have one); it's a search-space narrowing.\n\n### Suggested verification commands\n\nThe drift cause is in a historical deploy window, not recent activity. Look 4–12 weeks back:\n\n```bash\ngh api /repos/$GH_OWNER/<service>/commits?since=2026-02-10&until=2026-04-11\ngh api /repos/$GH_OWNER/<service>/releases?per_page=30\n# Cross-reference with feature flag changes, config updates, rollouts in the same window.\n```\n\n**Note**: kubectl events older than 7 days are typically rotated out. CI/CD deploy logs older than your retention may also be unavailable. Older deploys may need to be reconstructed from release tags or change tickets.\n\n### Limitations of drift investigation\n\nDrift cases require customer institutional knowledge to fully resolve. The tool's job is **search-space reduction, not root-cause closure**.\n\n- The cohort narrows the candidate set from \"every pattern in your environment\" to \"these patterns growing at similar rates\".\n- The recommended correlation window narrows the timeframe from \"the last 6 months\" to \"this 30-day window, 60–90 days ago\".\n- Closing the loop requires the customer's knowledge of what shipped in that window.\n\n### Recommended next actions\n\n1. Pull commit and release history for the affected services in the drift window.\n2. Cross-reference with feature flag and config changes.\n3. Ask the team that owns these services what shipped in the window.\n4. If the cause is identified, the action is usually a code fix, not a mute — the events are real, just growing too fast.\n\n### Patterns referenced in this investigation\n\n`service_instance_id_service_name_otelcol_contrib_service_version_otelcol`, `auto_scaling_groups_go_Updated_ASG_cache_eks_ng_streamer_compute_min_max`, `timestamp`, `process_pid`, `os_type_linux`, `usr_src_app_node_modules_thread_stream_lib_worker_js`, `require_opentelemetry_js`, `process_command_usr_src_app_node_modules_thread_stream_lib_worker_js`, `host_name_payment`, `process_executable_name_nodejs_bin_node`, `resource`, `process_runtime_name_nodejs`, `instrumentationScope_name_payment_logger_version_schemaUrl_undefined`, `service_name_payment`, `process_runtime_version`, `nodejs_bin_node`, `process_runtime_description_Node_js`, `severityText_`, `process_executable_path_nodejs_bin_node`, `io_quarkus_main_run_quarkus_stopped_in`, `DNS_resolution_failed_upstream_service_svc_timeout_after_attempts_resolver`\n\n---\n\n**Investigation metadata**: 20 patterns analyzed, 22 PromQL queries executed, total wall time 29564ms.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_dependency_check\",\"args\":{\"pattern\":\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\"},\"reason\":\"check dashboards / alerts before any mute action\"},{\"tool\":\"log10x_correlate_cross_pillar\",\"args\":{\"anchor_type\":\"log10x_pattern\",\"anchor\":\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\",\"window\":\"24h\"},\"reason\":\"find upstream metric anomaly co-moving with the pattern\"},{\"tool\":\"log10x_pattern_trend\",\"args\":{\"pattern\":\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\"},\"reason\":\"time series for the investigated pattern\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 38177
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_correlate_cross_pillar --args '{\"anchor_type\":\"log10x_pattern\",\"anchor\":\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\",\"window\":\"24h\"}'",
+      "stdout": "## Cross-pillar metrics backend not configured\n\nThis MCP server doesn't currently have a customer metrics backend configured. Cross-pillar correlation joins log-side patterns to the customer's APM / infrastructure metrics; without a configured backend, the bridge cannot run.\n\n**What's out of reach without the cross-pillar backend**:\n\n- Correlating a spiking log pattern to its upstream metric anomaly (gateway latency, dependency saturation, etc.)\n- Translating a customer-metric anomaly back to the log patterns that caused it\n- Discovering join keys between the log enrichment label set and the customer metrics label set\n\n**To configure**:\n\n- (a) Set explicit env vars: `LOG10X_CUSTOMER_METRICS_URL` + `LOG10X_CUSTOMER_METRICS_TYPE`.\n- (b) Or expose one of the ambient-detect credential sets: `GRAFANA_CLOUD_API_KEY`, `DD_API_KEY`+`DD_APP_KEY`, `AWS_REGION` (AMP), `GOOGLE_APPLICATION_CREDENTIALS` (GCP Managed Prometheus), `PROMETHEUS_URL`.\n\n**Continuing without cross-pillar**:\n\nThe agent can still investigate using log-tier tools (event_lookup, pattern_trend, top_patterns, cost_drivers) and archive tools (retriever_query, retriever_series). Skip cross-pillar correlation in this chain and surface the missing-backend state in the synthesis.\n\n**Detection trace**:\n\n```\n  - explicit_env: skipped — LOG10X_CUSTOMER_METRICS_URL not set\n  - grafana_cloud: skipped — no GRAFANA_CLOUD_API_KEY / GCLOUD_API_KEY\n  - datadog_prom: skipped — no DD_API_KEY / DATADOG_API_KEY\n  - amp: skipped — no AWS_REGION / AWS_DEFAULT_REGION\n  - gcp_managed_prometheus: skipped — no GOOGLE_APPLICATION_CREDENTIALS\n  - prometheus_url: skipped — PROMETHEUS_URL not set\n```\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 3642
+    }
+  ],
+  "finalSynthesis": "The top ERROR-severity pattern by current cost rank is 'service_instance_id_service_name_otelcol_contrib_service_version_otelcol' at $3.9/wk, representing 85% of scoped volume.\nOver the last 24h, its trend is stable, with volume ranging from 24.4 MB low to 25.9 MB peak and a slight change from ~$0.88/day baseline to $0.90/day current.\nInvestigation over 30d shows gradual drift with -2046946.1%/week growth (massive decline), no discrete inflection or causal chain; co-drifting patterns include 'timestamp' and 'process_pid' from payment service at +0.4%/week, but all with 0% similarity to anchor.\nCross-pillar correlation for k8s state is unavailable due to unconfigured metrics backend; recommend configuring it for deeper analysis, reviewing historical deploys 4-12 weeks back for drift cause, and monitoring for sustained changes without fabricating projections.",
+  "hallucination": {
+    "numericClaimCount": 9,
+    "patternClaimCount": 1,
+    "supported": 6,
+    "unsupported": 0,
+    "inconclusive": 4,
+    "driftScore": 0,
+    "details": [
+      {
+        "claim": "$3.9",
+        "kind": "numeric",
+        "oracleResult": "env ~5.45GB/day; claim within plausible cost band",
+        "status": "supported",
+        "detail": "s 'service_instance_id_service_name_otelcol_contrib_service_version_otelcol' at $3.9/wk, representing 85% of scoped volume. Over the last 24h, its trend is stab"
+      },
+      {
+        "claim": "$0.88",
+        "kind": "numeric",
+        "oracleResult": "env ~5.45GB/day; claim within plausible cost band",
+        "status": "supported",
+        "detail": "with volume ranging from 24.4 MB low to 25.9 MB peak and a slight change from ~$0.88/day baseline to $0.90/day current. Investigation over 30d shows gradual dr"
+      },
+      {
+        "claim": "$0.90",
+        "kind": "numeric",
+        "oracleResult": "env ~5.45GB/day; claim within plausible cost band",
+        "status": "supported",
+        "detail": "rom 24.4 MB low to 25.9 MB peak and a slight change from ~$0.88/day baseline to $0.90/day current. Investigation over 30d shows gradual drift with -2046946.1%/w"
+      },
+      {
+        "claim": "24.4 MB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.45GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "scoped volume. Over the last 24h, its trend is stable, with volume ranging from 24.4 MB low to 25.9 MB peak and a slight change from ~$0.88/day baseline to $0.9"
+      },
+      {
+        "claim": "25.9 MB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.45GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "Over the last 24h, its trend is stable, with volume ranging from 24.4 MB low to 25.9 MB peak and a slight change from ~$0.88/day baseline to $0.90/day current."
+      },
+      {
+        "claim": "85%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "_service_name_otelcol_contrib_service_version_otelcol' at $3.9/wk, representing 85% of scoped volume. Over the last 24h, its trend is stable, with volume rangin"
+      },
+      {
+        "claim": "-2046946.1%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "baseline to $0.90/day current. Investigation over 30d shows gradual drift with -2046946.1%/week growth (massive decline), no discrete inflection or causal chai"
+      },
+      {
+        "claim": "+0.4%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "drifting patterns include 'timestamp' and 'process_pid' from payment service at +0.4%/week, but all with 0% similarity to anchor. Cross-pillar correlation for k"
+      },
+      {
+        "claim": "0%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "'timestamp' and 'process_pid' from payment service at +0.4%/week, but all with 0% similarity to anchor. Cross-pillar correlation for k8s state is unavailable d"
+      },
+      {
+        "claim": "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
+        "kind": "pattern",
+        "oracleResult": "634.8 MB / 24h in metrics",
+        "status": "supported",
+        "detail": "The top ERROR-severity pattern by current cost rank is 'service_instance_id_service_name_otelcol_contrib_service_version_otelcol' at $3.9/wk, representing 8"
+      }
+    ]
+  },
+  "valueDelivered": {
+    "score": 0.65,
+    "rationale": "The synthesis correctly identifies the top ERROR pattern, its stable 24h trend, and notes the causal chain found no discrete inflection—but the '-2046946.1%/week' drift figure is clearly a data artifact that wasn't critically assessed, the 4-line format was violated, and the actionable guidance is thin for an SRE."
+  },
+  "valueReceived": {
+    "score": 0.6,
+    "rationale": "MCP returned usable data for steps 1 and 2 (top pattern and stable trend), the investigate call yielded co-drifting patterns though with 0% similarity making them largely uninformative, and cross-pillar correlation was completely unavailable due to missing backend configuration."
+  },
+  "status": "pass",
+  "flags": [],
+  "cost": {
+    "inputTokens": 31388,
+    "outputTokens": 693,
+    "apiCalls": 7,
+    "costUsd": 0.104559,
+    "pricingFound": true
+  }
+}

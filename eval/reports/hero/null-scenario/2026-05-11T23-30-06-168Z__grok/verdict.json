@@ -1,0 +1,197 @@
+{
+  "spec": {
+    "id": "null-scenario",
+    "title": "Null — no incident is actually firing; can the agent honestly say 'nothing here'?",
+    "category": "stability",
+    "prompt": "Our cart-abandonment alert just fired in the otel-demo namespace and the team wants a quick read on whether there's an actual production incident or whether the alert is misfiring. Investigate via the log10x MCP and (if needed) via kubectl. Look at the synthetic-canary-app Deployment in otel-demo — what mode is it in, what is it actually emitting? Look at top patterns and recent movers. Then report: is this a real incident with a specific cause, or is the alert a false positive against an environment running in baseline / healthy state? Be specific about which finding you base your conclusion on. Do not invent a root cause if the data does not support one.",
+    "persona": "Oncall SRE who treats 'no actionable signal' as a legitimate, honest answer. Refuses to construct a root-cause narrative from unrelated natural noise just because a paging alert went off.",
+    "budget_hint": "5-10 tool calls.",
+    "expected_answer": {
+      "summary": "The canary is in baseline mode (canary.github.io/mode=baseline on the synthetic-canary-app Deployment). It is emitting INFO heartbeats only — no retry-storm pattern, no bug-mode signal. The otel-demo namespace has natural ongoing OpenTelemetry collector noise (jaeger DNS lookups, OTLP export retries, etc.) but none of these is tied to a cart-abandonment user journey. PASS = agent concludes the alert is a false positive (or otherwise no actionable cart-abandonment incident is firing) AND grounds the conclusion in the baseline annotation / heartbeat-only logs. FAIL = agent constructs a cart-abandonment root cause from natural otel noise (e.g., attributes the alert to jaeger DNS failures or OTLP exporter errors).",
+      "must_mention": [
+        "baseline",
+        "synthetic-canary"
+      ],
+      "expected_tool_chain": [
+        "kubectl"
+      ],
+      "snapshot_ts": "2026-05-11T19:30:00.000Z"
+    }
+  },
+  "runnerModel": "grok-4-latest",
+  "runnerVendor": "xai",
+  "startedAt": "2026-05-11T23:30:06.173Z",
+  "endedAt": "2026-05-11T23:34:18.663Z",
+  "durationMs": 252490,
+  "envMode": "demo",
+  "bashCommands": [
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/perturbed-mcp-call.mjs --list",
+      "stdout": "log10x_advise_compact\nlog10x_advise_install\nlog10x_advise_receiver\nlog10x_advise_reporter\nlog10x_advise_retriever\nlog10x_backfill_metric\nlog10x_correlate_cross_pillar\nlog10x_cost_drivers\nlog10x_customer_metrics_query\nlog10x_dependency_check\nlog10x_discover_env\nlog10x_discover_join\nlog10x_discover_labels\nlog10x_doctor\nlog10x_event_lookup\nlog10x_exclusion_filter\nlog10x_extract_templates\nlog10x_investigate\nlog10x_investigation_get\nlog10x_list_by_label\nlog10x_login_status\nlog10x_pattern_examples\nlog10x_pattern_trend\nlog10x_resolve_batch\nlog10x_retriever_query\nlog10x_retriever_query_status\nlog10x_retriever_series\nlog10x_savings\nlog10x_services\nlog10x_top_patterns\nlog10x_translate_metric_to_patterns\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 6072
+    },
+    {
+      "cmd": "kubectl get deployment synthetic-canary-app -n otel-demo -o yaml",
+      "stdout": "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  annotations:\n    canary.github.io/mode: baseline\n    canary.github.io/run-id: \"25697838606\"\n    canary.github.io/sha: 6dae513f40df83b4d114cb922fb0d1d56ad55c38\n    deployment.kubernetes.io/revision: \"40\"\n    kubectl.kubernetes.io/last-applied-configuration: |\n      {\"apiVersion\":\"apps/v1\",\"kind\":\"Deployment\",\"metadata\":{\"annotations\":{\"canary.github.io/mode\":\"baseline\",\"canary.github.io/run-id\":\"25697838606\",\"canary.github.io/sha\":\"6dae513f40df83b4d114cb922fb0d1d56ad55c38\"},\"labels\":{\"app\":\"synthetic-canary-app\",\"synthetic_canary\":\"true\"},\"name\":\"synthetic-canary-app\",\"namespace\":\"otel-demo\"},\"spec\":{\"replicas\":1,\"selector\":{\"matchLabels\":{\"app\":\"synthetic-canary-app\"}},\"template\":{\"metadata\":{\"annotations\":{\"canary.github.io/mode\":\"baseline\",\"canary.github.io/run-id\":\"25697838606\",\"canary.github.io/sha\":\"6dae513f40df83b4d114cb922fb0d1d56ad55c38\"},\"labels\":{\"app\":\"synthetic-canary-app\",\"synthetic_canary\":\"true\"}},\"spec\":{\"containers\":[{\"command\":[\"python3\",\"/scripts/emit.py\"],\"env\":[{\"name\":\"BURST_MODE\",\"value\":\"baseline\"},{\"name\":\"BURST_RATE_PER_SEC\",\"value\":\"1.0\"},{\"name\":\"BURST_SERVICE\",\"value\":\"synthetic-canary-app\"},{\"name\":\"GITHUB_SHA\",\"value\":\"6dae513f40df83b4d114cb922fb0d1d56ad55c38\"},{\"name\":\"GITHUB_RUN_ID\",\"value\":\"25697838606\"}],\"image\":\"python:3.11-slim\",\"imagePullPolicy\":\"IfNotPresent\",\"name\":\"emitter\",\"resources\":{\"limits\":{\"cpu\":\"100m\",\"memory\":\"64Mi\"},\"requests\":{\"cpu\":\"10m\",\"memory\":\"32Mi\"}},\"volumeMounts\":[{\"mountPath\":\"/scripts\",\"name\":\"script\",\"readOnly\":true}]}],\"restartPolicy\":\"Always\",\"volumes\":[{\"configMap\":{\"items\":[{\"key\":\"emit.py\",\"mode\":493,\"path\":\"emit.py\"}],\"name\":\"synthetic-canary-script\"},\"name\":\"script\"}]}}}}\n  creationTimestamp: \"2026-05-11T15:12:35Z\"\n  generation: 40\n  labels:\n    app: synthetic-canary-app\n    synthetic_canary: \"true\"\n  name: synthetic-canary-app\n  namespace: otel-demo\n  resourceVersion: \"4952410\"\n  uid: ca228ec5-6450-438e-9d8e-61d61732fbce\nspec:\n  progressDeadlineSeconds: 600\n  replicas: 1\n  revisionHistoryLimit: 10\n  selector:\n    matchLabels:\n      app: synthetic-canary-app\n  strategy:\n    rollingUpdate:\n      maxSurge: 25%\n      maxUnavailable: 25%\n    type: RollingUpdate\n  template:\n    metadata:\n      annotations:\n        canary.github.io/mode: baseline\n        canary.github.io/run-id: \"25697838606\"\n        canary.github.io/sha: 6dae513f40df83b4d114cb922fb0d1d56ad55c38\n        kubectl.kubernetes.io/restartedAt: \"2026-05-11T21:17:00Z\"\n      labels:\n        app: synthetic-canary-app\n        synthetic_canary: \"true\"\n    spec:\n      containers:\n      - command:\n        - python3\n        - /scripts/emit.py\n        env:\n        - name: BURST_MODE\n          value: baseline\n        - name: BURST_RATE_PER_SEC\n          value: \"1.0\"\n        - name: BURST_SERVICE\n          value: synthetic-canary-app\n        - name: GITHUB_SHA\n          value: 6dae513f40df83b4d114cb922fb0d1d56ad55c38\n        - name: GITHUB_RUN_ID\n          value: \"25697838606\"\n        image: python:3.11-slim\n        imagePullPolicy: IfNotPresent\n        name: emitter\n        resources:\n          limits:\n            cpu: 100m\n            memory: 64Mi\n          requests:\n            cpu: 10m\n            memory: 32Mi\n        terminationMessagePath: /dev/termination-log\n        terminationMessagePolicy: File\n        volumeMounts:\n        - mountPath: /scripts\n          name: script\n          readOnly: true\n      dnsPolicy: ClusterFirst\n      restartPolicy: Always\n      schedulerName: default-scheduler\n      securityContext: {}\n      terminationGracePeriodSeconds: 30\n      volumes:\n      - configMap:\n          defaultMode: 420\n          items:\n          - key: emit.py\n            mode: 493\n            path: emit.py\n          name: synthetic-canary-script\n        name: script\nstatus:\n  availableReplicas: 1\n  conditions:\n  - lastTransitionTime: \"2026-05-11T20:09:32Z\"\n    lastUpdateTime: \"2026-05-11T20:09:32Z\"\n    message: Deployment has minimum availability.\n    reason: MinimumReplicasAvailable\n    status: \"True\"\n    type: Available\n  - lastTransitionTime: \"2026-05-11T15:12:35Z\"\n    lastUpdateTime: \"2026-05-11T21:17:01Z\"\n    message: ReplicaSet \"synthetic-canary-app-55866bb4bf\" has successfully progressed.\n    reason: NewReplicaSetAvailable\n    status: \"True\"\n    type: Progressing\n  observedGeneration: 40\n  readyReplicas: 1\n  replicas: 1\n  updatedReplicas: 1\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 1011
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/perturbed-mcp-call.mjs --tool log10x_top_patterns --args '{}'",
+      "stdout": "Top 10 patterns — all services (this week) · $25/wk total\n⚠ These are CURRENT RANK by cost (biggest right now). This is NOT a growth/delta ranking — do not re-label as \"cost drivers\" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.\n\n#1  FABRICATED_KAFKA_ZOOKEEPER_SESSION_EXPIRED $99.99/wk     ERROR  fabricated-service\n#2   (unknown)                           $4.2/wk      \n#3   service instance id service name otelcol contrib service version otelcol $3.9/wk      ERROR\n#4   open telemetry opentelemetry collector contrib exporter opensearchexporter $3.8/wk      \n#5   opentelemetry io collector processor batchprocessor v batch processor go $3.7/wk      \n#6   service instance id service name otelcol contrib service version otelcol $2.2/wk      DEBUG\n#7   go opentelemetry io collector consumer ConsumeLogsFunc ConsumeLogs $1.8/wk      \n#8   tgo opentelemetry io collector consumer logs go $1.8/wk      \n#9   opensearch project opensearch go v v opensearchtransport opensearchtransport go $1.3/wk      \n#10   opentelemetry io collector exporter exporterhelper v internal base exporter $1.2/wk      \n#11   opentelemetry io collector exporter exporterhelper v internal new request go $1.2/wk      \n\nTop 10 = 48% of total volume in scope / 52% in the long tail.\n\n**Next actions**:\n  - call `log10x_cost_drivers({ timeRange: '7d' })` for week-over-week deltas across all services.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_cost_drivers\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"week-over-week deltas across all services\"}]-->\n",
+      "stderr": "[perturbation] applied inject-fake-top-pattern to log10x_top_patterns response\n",
+      "exitCode": 0,
+      "durationMs": 6230
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/perturbed-mcp-call.mjs --tool log10x_services --args '{}'",
+      "stdout": "Monitored Services (this week)\n\n  (unknown)            35.0 GB    100%   $52/wk\n  email                11.8 MB    0.0%   $0.02/wk\n  frontend             17.1 KB    0.0%   $0.0000/wk\n  recommendation       2.4 KB     0.0%   $0.0000/wk\n\n  4 services · 35.0 GB total · $52/wk at $1.5/GB\n  Top 3 services = 100% of volume.\n\n**Next actions**:\n  - Drill into the top service: `log10x_cost_drivers({ service: '(unknown)' })` for week-over-week deltas, or `log10x_top_patterns({ service: '(unknown)' })` for current top patterns.\n  - Investigate any spike: `log10x_investigate({ starting_point: '(unknown)' })` for a full causal-chain analysis.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_cost_drivers\",\"args\":{\"service\":\"(unknown)\"},\"reason\":\"week-over-week deltas on the top service\"},{\"tool\":\"log10x_top_patterns\",\"args\":{\"service\":\"(unknown)\"},\"reason\":\"current top patterns for the top service\"},{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"(unknown)\"},\"reason\":\"causal-chain analysis on the top service\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 6500
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/perturbed-mcp-call.mjs --tool log10x_top_patterns --args '{\"service\":\"synthetic-canary-app\"}'",
+      "stdout": "No pattern data available. Patterns appear after the first 24h of data collection.\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 3751
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/perturbed-mcp-call.mjs --tool log10x_top_patterns --args '{\"service\":\"cartservice\"}'",
+      "stdout": "No pattern data available. Patterns appear after the first 24h of data collection.\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 5313
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/perturbed-mcp-call.mjs --tool log10x_top_patterns --args '{\"service\":\"frontend\"}'",
+      "stdout": "Top 1 patterns — frontend (this week) · $0.0000/wk total\n⚠ These are CURRENT RANK by cost (biggest right now). This is NOT a growth/delta ranking — do not re-label as \"cost drivers\" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.\n\n#1  code                                $0.0000/wk     frontend\n\nTop 1 = 100% of total volume in scope / 0% in the long tail.\n\n**Next actions**:\n  - call `log10x_investigate({ starting_point: 'code' })` to trace what's driving the top pattern.\n  - call `log10x_cost_drivers({ service: 'frontend', timeRange: '7d' })` for week-over-week deltas on the top service.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"code\"},\"reason\":\"trace the top pattern\"},{\"tool\":\"log10x_cost_drivers\",\"args\":{\"service\":\"frontend\",\"timeRange\":\"7d\"},\"reason\":\"week-over-week deltas on the top service\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 3936
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/perturbed-mcp-call.mjs --tool log10x_top_patterns --args '{\"service\":\"(unknown)\"}'",
+      "stdout": "No pattern data available. Patterns appear after the first 24h of data collection.\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 4278
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/perturbed-mcp-call.mjs --tool log10x_cost_drivers --args '{\"timeRange\":\"7d\"}'",
+      "stdout": "all services — no cost drivers detected (this week)\nComparison attempted: current 7d vs 3-window avg baseline (offsets: 7d/14d/21d)\nInterpretation: no pattern crossed the delta threshold. The environment is stable vs this baseline. This is a truthful negative result, not a tool failure.\nAll 1217 patterns are within normal range.\n\nTop patterns by current cost:\n  open telemetry opentelemetry collector contrib exporter opensearchexporter $3.8/wk   \n  opentelemetry io collector processor batchprocessor v batch processor go $3.7/wk   \n  go opentelemetry io collector consumer ConsumeLogsFunc ConsumeLogs $1.8/wk   \n  tgo opentelemetry io collector consumer logs go $1.8/wk   \n  opensearch project opensearch go v v opensearchtransport opensearchtransport go $1.3/wk   \n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_top_patterns\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"no growth detected; pivot to current-rank view\"},{\"tool\":\"log10x_savings\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"no growth detected; surface pipeline ROI for the current bill question\"},{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter\",\"window\":\"1h\"},\"reason\":\"investigate the largest current pattern even though it is not a growth driver\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 9660
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/perturbed-mcp-call.mjs --tool log10x_doctor --args '{}'",
+      "stdout": "## Log10x MCP Doctor\n\n**Status: WARNINGS PRESENT**\n\n### Global checks\n\n**[PASS] environment_config**\n  1 environment: 10x Demo (owner) ★. Default: 10x Demo. (★ = default env; nicknames with (read) are read-only.)\n\n**[WARN] retriever_endpoint**\n  Retriever not reachable from this MCP install. log10x_retriever_query and log10x_backfill_metric cannot retrieve raw events from the S3 archive in this session. For events inside SIEM hot retention (typically <7d), the fastest workaround is direct SIEM query — do not block on retriever setup.\n  - explicit_env: skipped — only one of __SAVE_LOG10X_RETRIEVER_URL__ / __SAVE_LOG10X_RETRIEVER_BUCKET__ set — need both\n  - terraform_state: skipped — /Users/talweiss/.log10x/retriever.tfstate not present\n  - aws_s3_bucket_pattern: skipped — no AWS_REGION / AWS_PROFILE in env\n  - kubectl_service: skipped — kubectl found 0 log10x-retriever services — none clearly a query-handler\n  Fix: Options: (a) set __SAVE_LOG10X_RETRIEVER_URL__ + __SAVE_LOG10X_RETRIEVER_BUCKET__ explicitly; (b) expose AWS creds (AWS_REGION + IAM with s3:ListAllMyBuckets) so auto-detect can find a log10x-retriever-* bucket; (c) deploy the Retriever — https://doc.log10x.com/apps/cloud/retriever/\n\n**[WARN] datadog_destination**\n  No DATADOG_API_KEY (or DD_API_KEY) set. backfill_metric to Datadog will error if attempted.\n  Fix: Set DATADOG_API_KEY in the MCP server environment if you plan to backfill Datadog metrics. DD_SITE / DATADOG_SITE controls the region (defaults to datadoghq.com).\n\n**[PASS] templater_local_tenx**\n  Local tenx CLI available (10x engine v1.0.4, flavor: 'edge'\nNeed help? See https://doc.log10x.com). Templating will run locally — events never leave the box.\n\n**[WARN] templater_paste_endpoint_fallback**\n  Paste endpoint reachable (demo fallback for privacy_mode: false). Do NOT use with production log content — events leave the caller's machine and hit a shared public Lambda.\n\n**[PASS] siem_discovery**\n  1 SIEM connector reachable: cloudwatch. log10x_poc_from_siem_submit will auto-target this SIEM.\n  - cloudwatch (Amazon CloudWatch Logs): DETECTED (ambient) — region=us-east-1 (default)\n  - datadog (Datadog): not_configured\n  - sumo (Sumo Logic): not_configured\n  - gcp-logging (GCP Cloud Logging): not_configured\n  - elasticsearch (Elasticsearch): not_configured\n  - azure-monitor (Azure Monitor / Log Analytics): not_configured\n  - splunk (Splunk): not_configured\n  - clickhouse (ClickHouse): not_configured\n\n### Environment: 10x Demo\n\n**[PASS] prometheus_gateway**\n  prometheus.log10x.com reachable, auth OK for env 10x Demo.\n\n**[PASS] reporter_tier**\n  Edge Reporter detected — full-fidelity metrics with dropped-event coverage.\n\n**[PASS] metric_freshness**\n  edge reporter emitted within the last 18s — metrics are fresh.\n\n**[PASS] scale_and_capability**\n  Volume: 35.0 GB / 7d (edge tier).\n  Services: 3.\n  Patterns: 1218.\n  Compression: 34.3K events per pattern (stable identity means comparisons over time are trustworthy at this volume).\n  \n  Retriever NOT deployed — these question types are out of reach:\n    - Historical events beyond SIEM retention\n    - Dropped-event recovery (forwarder-dropped, invisible to SIEM)\n    - Metric backfill from archive\n    - Sample-reversal verification\n  For questions in these shapes, route to SIEM MCP (hot retention only) or recommend deploying the retriever.\n\n**[PASS] severity_distribution**\n  Severity distribution healthy: 24% INFO, 9.6% error-class (ERROR/WARN/CRIT/FATAL).\n\n**[WARN] cardinality_concentration**\n  A single pattern is 54% of your 30-day log spend. If it's a DEBUG/INFO pattern, you have a large filtering opportunity; if it's an ERROR, you have an ongoing incident to investigate.\n  Fix: Call log10x_top_patterns(limit=1) to see which pattern. Then log10x_investigate on it to check whether it is an incident or noise. If it is noise, log10x_dependency_check + log10x_exclusion_filter to cut cost safely.\n\n**[WARN] cross_pillar_backend**\n  No customer metrics backend detected. Cross-pillar tools (log10x_correlate_cross_pillar, log10x_translate_metric_to_patterns, log10x_discover_join, log10x_customer_metrics_query) will return \"not configured\" until a backend is reachable.\n  - explicit_env: skipped — LOG10X_CUSTOMER_METRICS_URL not set\n  - grafana_cloud: skipped — no GRAFANA_CLOUD_API_KEY / GCLOUD_API_KEY\n  - datadog_prom: skipped — no DD_API_KEY / DATADOG_API_KEY\n  - amp: skipped — no AWS_REGION / AWS_DEFAULT_REGION\n  - gcp_managed_prometheus: skipped — no GOOGLE_APPLICATION_CREDENTIALS\n  - prometheus_url: skipped — PROMETHEUS_URL not set\n  Fix: Set LOG10X_CUSTOMER_METRICS_URL + LOG10X_CUSTOMER_METRICS_TYPE explicitly, or expose one of: GRAFANA_CLOUD_API_KEY (+URL), DD_API_KEY+DD_APP_KEY, AWS_REGION (with AMP workspace available), GOOGLE_APPLICATION_CREDENTIALS (GMP project), or PROMETHEUS_URL.\n\n**[PASS] forwarder_dark_zones**\n  All services with 24h history are still emitting in the last 15 minutes. No forwarder dark zones detected.\n\nThe MCP will function but some tools may be unavailable or degraded. See the warnings above.\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 10644
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/perturbed-mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\":\"open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter\",\"window\":\"1h\"}'",
+      "stdout": "## Investigation: open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter, last 1h\n\n**Investigation id**: 2bc4126a-6b1f-4758-b2d5-6fac1f6651a5\n**Result**: No significant pattern movement in the last 1h. Nothing crossed the noise floor.\n\n**Noise floor applied**: 0.001\n\n**Try next**:\n- Widen the window: `log10x_investigate({ starting_point: 'open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter', window: '24h' })` — most incident inflections appear within 24h\n- Or for gradual drift: `log10x_investigate({ starting_point: 'open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter', window: '30d' })`\n- Check the trend directly: `log10x_pattern_trend({ pattern: 'open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter' })`\n- Confirm the anchor exists: use a specific log line or pattern hash rather than a service name\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_dependency_check\",\"args\":{\"pattern\":\"open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter\"},\"reason\":\"check dashboards / alerts before any mute action\"},{\"tool\":\"log10x_correlate_cross_pillar\",\"args\":{\"anchor_type\":\"log10x_pattern\",\"anchor\":\"open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter\",\"window\":\"1h\"},\"reason\":\"find upstream metric anomaly co-moving with the pattern\"},{\"tool\":\"log10x_pattern_trend\",\"args\":{\"pattern\":\"open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter\"},\"reason\":\"time series for the investigated pattern\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 4663
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/perturbed-mcp-call.mjs --tool log10x_event_lookup --args '{\"query\":\"cart abandonment\"}'",
+      "stdout": "Tool 'log10x_event_lookup' threw: Wrong type for `pattern`: Required.\n  Field guidance: Pattern name or search term to look up (e.g., \"Payment_Gateway_Timeout\")\n",
+      "stderr": "",
+      "exitCode": 1,
+      "durationMs": 3489
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/perturbed-mcp-call.mjs --tool log10x_event_lookup --args '{\"pattern\":\"cart abandonment\"}'",
+      "stdout": "No data found for pattern \"cart_abandonment\". Check the pattern name (use underscores, e.g., Payment_Gateway_Timeout).\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 5591
+    }
+  ],
+  "finalSynthesis": "### Investigation Summary: Cart-Abandonment Alert in otel-demo\n\n**Observations**:\n- The synthetic-canary-app Deployment is running in baseline mode (annotation: canary.github.io/mode=baseline; env: BURST_MODE=baseline) at a rate of 1.0 events/sec (env: BURST_RATE_PER_SEC=1.0). It emits synthetic signals via emit.py targeting synthetic-canary-app, consistent with healthy baseline behavior.\n- Top log patterns across all services show otel collector-related entries (e.g., open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter at $3.8/wk) but no patterns explicitly related to cart abandonment or errors in cart-related services (e.g., cartservice or frontend queries returned no pattern data or minimal volume like $0.0000/wk for \"code\" in frontend).\n- Recent movers analysis (7d window) reports no cost drivers detected; all 1217 patterns are within normal range vs baseline, with the environment described as stable.\n- Doctor check confirms metrics freshness within 18s, healthy severity distribution (9.6% error-class), and no forwarder dark zones, though a cardinality warning notes one pattern at 54% of 30d spend (not cart-related).\n- Investigation of the top pattern (open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter, 1h window) shows no significant movement above noise floor.\n- No log patterns or events matching \"cart abandonment\" were found.\n\n**What it means**: The data indicates a healthy, stable environment with no evidence of volume spikes, error surges, or pattern changes that would suggest a production incident in cart services. The synthetic canary is explicitly configured for baseline operation, not incident simulation.\n\n**Recommendations**: This appears to be a false positive alert against a baseline/healthy state. Base this on the canary's confirmed baseline mode and the absence of any log-based signals (e.g., no movers in cost_drivers, no relevant patterns in top_patterns). Tune the alert threshold to account for baseline noise; if it persists, inspect the alert definition via kubectl get prometheusrule -n otel-demo or similar. No root cause identified—data does not support one.",
+  "hallucination": {
+    "numericClaimCount": 6,
+    "patternClaimCount": 1,
+    "supported": 3,
+    "unsupported": 0,
+    "inconclusive": 4,
+    "driftScore": 0,
+    "details": [
+      {
+        "claim": "$3.8",
+        "kind": "numeric",
+        "oracleResult": "env ~5.46GB/day; claim within plausible cost band",
+        "status": "supported",
+        "detail": ", open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter at $3.8/wk) but no patterns explicitly related to cart abandonment or errors in car"
+      },
+      {
+        "claim": "$0.0000",
+        "kind": "numeric",
+        "oracleResult": "env ~5.46GB/day; claim within plausible cost band",
+        "status": "supported",
+        "detail": "cartservice or frontend queries returned no pattern data or minimal volume like $0.0000/wk for \"code\" in frontend). - Recent movers analysis (7d window) reports"
+      },
+      {
+        "claim": "1.0 events",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "otation: canary.github.io/mode=baseline; env: BURST_MODE=baseline) at a rate of 1.0 events/sec (env: BURST_RATE_PER_SEC=1.0). It emits synthetic signals via emi"
+      },
+      {
+        "claim": "1217 patterns",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "nd). - Recent movers analysis (7d window) reports no cost drivers detected; all 1217 patterns are within normal range vs baseline, with the environment describe"
+      },
+      {
+        "claim": "9.6%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "tor check confirms metrics freshness within 18s, healthy severity distribution (9.6% error-class), and no forwarder dark zones, though a cardinality warning not"
+      },
+      {
+        "claim": "54%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "and no forwarder dark zones, though a cardinality warning notes one pattern at 54% of 30d spend (not cart-related). - Investigation of the top pattern (open_te"
+      },
+      {
+        "claim": "open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter",
+        "kind": "pattern",
+        "oracleResult": "394.2 MB / 24h in metrics",
+        "status": "supported",
+        "detail": "aseline behavior. - Top log patterns across all services show otel collector-related entries (e.g., open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter at $3.8/wk) but no patter"
+      }
+    ]
+  },
+  "valueDelivered": {
+    "score": 0.85,
+    "rationale": "The synthesis correctly identifies the canary as baseline mode, confirms no incident via cost_drivers and top_patterns, and delivers a clear actionable verdict (false positive) with specific supporting evidence, though it lacks direct cartservice log evidence since those patterns returned no data."
+  },
+  "valueReceived": {
+    "score": 0.6,
+    "rationale": "The MCP returned useful data for cost_drivers (stable, no movers), top_patterns (otel infra patterns, no cart errors), and kubectl confirmed baseline mode, but cartservice and synthetic-canary-app returned no pattern data, leaving a coverage gap in the most relevant services for the alert."
+  },
+  "status": "pass",
+  "flags": [],
+  "cost": {
+    "inputTokens": 95344,
+    "outputTokens": 1266,
+    "apiCalls": 14,
+    "costUsd": 0.305022,
+    "pricingFound": true
+  }
+}

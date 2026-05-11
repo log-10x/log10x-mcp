@@ -1,0 +1,178 @@
+{
+  "spec": {
+    "id": "mcp-only-env-health",
+    "title": "MCP-only — environment health audit via log10x_doctor + services + cost_drivers",
+    "category": "stability",
+    "prompt": "Run a quick health audit of the otel-demo log10x environment. Report: (1) is metric collection fresh — what is the metric_freshness in seconds per log10x_doctor? (2) how many distinct services are emitting and what is the top service's volume share per log10x_services? (3) is the environment in a stable cost regime week-over-week or are there growth drivers per log10x_cost_drivers? Quote the exact numbers from tool stdout — do NOT round, do NOT extrapolate, do NOT project to monthly / yearly. Tools you may use are limited to log10x_* MCP tools only — do NOT use kubectl, do NOT use gh, do NOT use any other shell command.",
+    "persona": "SRE running a 5-minute env-health snapshot before a maintenance window. Wants exact numbers, not interpretations. Reports 'unknown' or 'tool returned no data' when MCP is silent rather than inventing.",
+    "budget_hint": "3-6 tool calls.",
+    "expected_answer": {
+      "summary": "Agent should call log10x_doctor + log10x_services + log10x_cost_drivers and quote verbatim. Doctor typically reports freshness <60s on this env. Services reports ~4 services dominated by '(unknown)'. Cost_drivers often returns 'no drivers detected' indicating stability. PASS = agent quotes the freshness number, service count, and cost_drivers state verbatim from tool stdout; FAIL = agent fabricates numbers, projects to monthly/yearly without tool support, or escapes the MCP-only constraint.",
+      "must_mention": [],
+      "expected_tool_chain": [
+        "log10x_doctor",
+        "log10x_services",
+        "log10x_cost_drivers"
+      ],
+      "snapshot_ts": "2026-05-11T22:00:00.000Z"
+    }
+  },
+  "runnerModel": "grok-4-latest",
+  "runnerVendor": "xai",
+  "startedAt": "2026-05-11T21:52:56.956Z",
+  "endedAt": "2026-05-11T21:56:41.643Z",
+  "durationMs": 224687,
+  "envMode": "demo",
+  "bashCommands": [
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_doctor --args '{}'",
+      "stdout": "",
+      "stderr": "",
+      "exitCode": -1,
+      "durationMs": 60031
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_services --args '{}'",
+      "stdout": "Monitored Services (this week)\n\n  (unknown)            35.0 GB    100%   $52/wk\n  email                11.8 MB    0.0%   $0.02/wk\n  frontend             17.1 KB    0.0%   $0.0000/wk\n  recommendation       2.4 KB     0.0%   $0.0000/wk\n\n  4 services · 35.0 GB total · $52/wk at $1.5/GB\n  Top 3 services = 100% of volume.\n\n**Next actions**:\n  - Drill into the top service: `log10x_cost_drivers({ service: '(unknown)' })` for week-over-week deltas, or `log10x_top_patterns({ service: '(unknown)' })` for current top patterns.\n  - Investigate any spike: `log10x_investigate({ starting_point: '(unknown)' })` for a full causal-chain analysis.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_cost_drivers\",\"args\":{\"service\":\"(unknown)\"},\"reason\":\"week-over-week deltas on the top service\"},{\"tool\":\"log10x_top_patterns\",\"args\":{\"service\":\"(unknown)\"},\"reason\":\"current top patterns for the top service\"},{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"(unknown)\"},\"reason\":\"causal-chain analysis on the top service\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 35021
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_cost_drivers --args '{}'",
+      "stdout": "all services — no cost drivers detected (this week)\nComparison attempted: current 7d vs 3-window avg baseline (offsets: 7d/14d/21d)\nInterpretation: no pattern crossed the delta threshold. The environment is stable vs this baseline. This is a truthful negative result, not a tool failure.\nAll 1217 patterns are within normal range.\n\nTop patterns by current cost:\n  open telemetry opentelemetry collector contrib exporter opensearchexporter $3.8/wk   \n  opentelemetry io collector processor batchprocessor v batch processor go $3.7/wk   \n  go opentelemetry io collector consumer ConsumeLogsFunc ConsumeLogs $1.8/wk   \n  tgo opentelemetry io collector consumer logs go $1.8/wk   \n  opensearch project opensearch go v v opensearchtransport opensearchtransport go $1.3/wk   \n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_top_patterns\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"no growth detected; pivot to current-rank view\"},{\"tool\":\"log10x_savings\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"no growth detected; surface pipeline ROI for the current bill question\"},{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter\",\"window\":\"1h\"},\"reason\":\"investigate the largest current pattern even though it is not a growth driver\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 31497
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --list",
+      "stdout": "log10x_advise_compact\nlog10x_advise_install\nlog10x_advise_receiver\nlog10x_advise_reporter\nlog10x_advise_retriever\nlog10x_backfill_metric\nlog10x_correlate_cross_pillar\nlog10x_cost_drivers\nlog10x_customer_metrics_query\nlog10x_dependency_check\nlog10x_discover_env\nlog10x_discover_join\nlog10x_discover_labels\nlog10x_doctor\nlog10x_event_lookup\nlog10x_exclusion_filter\nlog10x_extract_templates\nlog10x_investigate\nlog10x_investigation_get\nlog10x_list_by_label\nlog10x_login_status\nlog10x_pattern_examples\nlog10x_pattern_trend\nlog10x_resolve_batch\nlog10x_retriever_query\nlog10x_retriever_query_status\nlog10x_retriever_series\nlog10x_savings\nlog10x_services\nlog10x_top_patterns\nlog10x_translate_metric_to_patterns\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 7398
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --help",
+      "stdout": "mcp-call.mjs — invoke a single log10x MCP tool by name.\n\nUsage:\n  node eval/bin/mcp-call.mjs --tool <name> --args '<json>'\n  node eval/bin/mcp-call.mjs --list\n\nEnv: LOG10X_EVAL_ENV=demo|customer|ci (default demo).\n\nExamples:\n  --tool log10x_top_patterns --args '{\"timeRange\":\"1d\",\"limit\":5}'\n  --tool log10x_dependency_check --args '{\"pattern\":\"cart_cartstore_ValkeyCartStore\"}'\n  --tool log10x_doctor --args '{}'\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 10109
+    }
+  ],
+  "finalSynthesis": "### Environment Health Audit Snapshot\n\n**Observations**:\n- log10x_doctor tool invocation returned no data (exit code -1, empty stdout/stderr), so metric_freshness in seconds not reported in this tool output.\n- log10x_services reports 4 distinct services emitting: (unknown) at 35.0 GB (100%), email at 11.8 MB (0.0%), frontend at 17.1 KB (0.0%), recommendation at 2.4 KB (0.0%); total 35.0 GB.\n- log10x_cost_drivers reports \"all services — no cost drivers detected (this week)\"; \"Comparison attempted: current 7d vs 3-window avg baseline (offsets: 7d/14d/21d)\"; \"The environment is stable vs this baseline.\"; \"All 1217 patterns are within normal range.\"\n\n**Interpretation**:\n- Freshness unknown due to tool silence; may indicate no metrics collected or invocation error.\n- Environment has 4 services with volume almost entirely from '(unknown)', suggesting potential labeling gaps in telemetry.\n- Costs are in a stable regime week-over-week with no growth drivers, aligning with demo-scale (~5 GB/day).\n\n**Recommendations**:\n- Re-invoke log10x_doctor with alternative args (e.g., specific checks) or verify metric pipeline setup to confirm freshness.\n- Drill into '(unknown)' service via log10x_top_patterns({ service: '(unknown)' }) to identify unlabeled volume sources.\n- Proceed with maintenance window as stability indicates low risk; monitor for any post-window changes using log10x_cost_drivers.",
+  "hallucination": {
+    "numericClaimCount": 12,
+    "patternClaimCount": 0,
+    "supported": 7,
+    "unsupported": 0,
+    "inconclusive": 5,
+    "driftScore": 0,
+    "details": [
+      {
+        "claim": "35.0 GB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.45GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "ol output. - log10x_services reports 4 distinct services emitting: (unknown) at 35.0 GB (100%), email at 11.8 MB (0.0%), frontend at 17.1 KB (0.0%), recommendat"
+      },
+      {
+        "claim": "11.8 MB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.45GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "ces reports 4 distinct services emitting: (unknown) at 35.0 GB (100%), email at 11.8 MB (0.0%), frontend at 17.1 KB (0.0%), recommendation at 2.4 KB (0.0%); tot"
+      },
+      {
+        "claim": "17.1 KB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.45GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "ces emitting: (unknown) at 35.0 GB (100%), email at 11.8 MB (0.0%), frontend at 17.1 KB (0.0%), recommendation at 2.4 KB (0.0%); total 35.0 GB. - log10x_cost_dr"
+      },
+      {
+        "claim": "2.4 KB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.45GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "(100%), email at 11.8 MB (0.0%), frontend at 17.1 KB (0.0%), recommendation at 2.4 KB (0.0%); total 35.0 GB. - log10x_cost_drivers reports \"all services — no c"
+      },
+      {
+        "claim": "35.0 GB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.45GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "8 MB (0.0%), frontend at 17.1 KB (0.0%), recommendation at 2.4 KB (0.0%); total 35.0 GB. - log10x_cost_drivers reports \"all services — no cost drivers detected"
+      },
+      {
+        "claim": "5 GB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.45GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "stable regime week-over-week with no growth drivers, aligning with demo-scale (~5 GB/day). **Recommendations**: - Re-invoke log10x_doctor with alternative args"
+      },
+      {
+        "claim": "1217 patterns",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "ine (offsets: 7d/14d/21d)\"; \"The environment is stable vs this baseline.\"; \"All 1217 patterns are within normal range.\" **Interpretation**: - Freshness unknown"
+      },
+      {
+        "claim": "4 services",
+        "kind": "numeric",
+        "oracleResult": "oracle reports 2 services",
+        "status": "supported",
+        "detail": "lence; may indicate no metrics collected or invocation error. - Environment has 4 services with volume almost entirely from '(unknown)', suggesting potential la"
+      },
+      {
+        "claim": "100%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": ". - log10x_services reports 4 distinct services emitting: (unknown) at 35.0 GB (100%), email at 11.8 MB (0.0%), frontend at 17.1 KB (0.0%), recommendation at 2."
+      },
+      {
+        "claim": "0.0%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "ts 4 distinct services emitting: (unknown) at 35.0 GB (100%), email at 11.8 MB (0.0%), frontend at 17.1 KB (0.0%), recommendation at 2.4 KB (0.0%); total 35.0 G"
+      },
+      {
+        "claim": "0.0%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "ing: (unknown) at 35.0 GB (100%), email at 11.8 MB (0.0%), frontend at 17.1 KB (0.0%), recommendation at 2.4 KB (0.0%); total 35.0 GB. - log10x_cost_drivers rep"
+      },
+      {
+        "claim": "0.0%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "email at 11.8 MB (0.0%), frontend at 17.1 KB (0.0%), recommendation at 2.4 KB (0.0%); total 35.0 GB. - log10x_cost_drivers reports \"all services — no cost driv"
+      }
+    ]
+  },
+  "valueDelivered": {
+    "score": -1,
+    "rationale": "judge path threw: 400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.\"},\"reque"
+  },
+  "valueReceived": {
+    "score": -1,
+    "rationale": "judge path threw"
+  },
+  "status": "partial",
+  "flags": [
+    "low_value_delivered",
+    "low_value_received"
+  ],
+  "cost": {
+    "inputTokens": 14478,
+    "outputTokens": 599,
+    "apiCalls": 4,
+    "costUsd": 0.052419,
+    "pricingFound": true
+  }
+}

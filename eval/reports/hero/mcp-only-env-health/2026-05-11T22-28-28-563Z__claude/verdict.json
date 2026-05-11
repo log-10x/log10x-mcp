@@ -1,0 +1,294 @@
+{
+  "spec": {
+    "id": "mcp-only-env-health",
+    "title": "MCP-only — environment health audit via log10x_doctor + services + cost_drivers",
+    "category": "stability",
+    "prompt": "Run a quick health audit of the otel-demo log10x environment. Report: (1) is metric collection fresh — what is the metric_freshness in seconds per log10x_doctor? (2) how many distinct services are emitting and what is the top service's volume share per log10x_services? (3) is the environment in a stable cost regime week-over-week or are there growth drivers per log10x_cost_drivers? Quote the exact numbers from tool stdout — do NOT round, do NOT extrapolate, do NOT project to monthly / yearly. Tools you may use are limited to log10x_* MCP tools only — do NOT use kubectl, do NOT use gh, do NOT use any other shell command.",
+    "persona": "SRE running a 5-minute env-health snapshot before a maintenance window. Wants exact numbers, not interpretations. Reports 'unknown' or 'tool returned no data' when MCP is silent rather than inventing.",
+    "budget_hint": "3-6 tool calls.",
+    "expected_answer": {
+      "summary": "Agent should call log10x_doctor + log10x_services + log10x_cost_drivers and quote verbatim. Doctor typically reports freshness <60s on this env. Services reports ~4 services dominated by '(unknown)'. Cost_drivers often returns 'no drivers detected' indicating stability. PASS = agent quotes the freshness number, service count, and cost_drivers state verbatim from tool stdout; FAIL = agent fabricates numbers, projects to monthly/yearly without tool support, or escapes the MCP-only constraint.",
+      "must_mention": [],
+      "expected_tool_chain": [
+        "log10x_doctor",
+        "log10x_services",
+        "log10x_cost_drivers"
+      ],
+      "snapshot_ts": "2026-05-11T22:00:00.000Z"
+    }
+  },
+  "runnerModel": "claude-sonnet-4-6",
+  "runnerVendor": "anthropic",
+  "startedAt": "2026-05-11T22:28:28.569Z",
+  "endedAt": "2026-05-11T22:32:35.231Z",
+  "durationMs": 246662,
+  "envMode": "demo",
+  "bashCommands": [
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --list",
+      "stdout": "log10x_advise_compact\nlog10x_advise_install\nlog10x_advise_receiver\nlog10x_advise_reporter\nlog10x_advise_retriever\nlog10x_backfill_metric\nlog10x_correlate_cross_pillar\nlog10x_cost_drivers\nlog10x_customer_metrics_query\nlog10x_dependency_check\nlog10x_discover_env\nlog10x_discover_join\nlog10x_discover_labels\nlog10x_doctor\nlog10x_event_lookup\nlog10x_exclusion_filter\nlog10x_extract_templates\nlog10x_investigate\nlog10x_investigation_get\nlog10x_list_by_label\nlog10x_login_status\nlog10x_pattern_examples\nlog10x_pattern_trend\nlog10x_resolve_batch\nlog10x_retriever_query\nlog10x_retriever_query_status\nlog10x_retriever_series\nlog10x_savings\nlog10x_services\nlog10x_top_patterns\nlog10x_translate_metric_to_patterns\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 32339
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_doctor --args '{}'",
+      "stdout": "",
+      "stderr": "",
+      "exitCode": -1,
+      "durationMs": 60035
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_services --args '{}'",
+      "stdout": "Monitored Services (this week)\n\n  (unknown)            35.0 GB    100%   $52/wk\n  email                11.8 MB    0.0%   $0.02/wk\n  frontend             17.1 KB    0.0%   $0.0000/wk\n  recommendation       2.4 KB     0.0%   $0.0000/wk\n\n  4 services · 35.0 GB total · $52/wk at $1.5/GB\n  Top 3 services = 100% of volume.\n\n**Next actions**:\n  - Drill into the top service: `log10x_cost_drivers({ service: '(unknown)' })` for week-over-week deltas, or `log10x_top_patterns({ service: '(unknown)' })` for current top patterns.\n  - Investigate any spike: `log10x_investigate({ starting_point: '(unknown)' })` for a full causal-chain analysis.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_cost_drivers\",\"args\":{\"service\":\"(unknown)\"},\"reason\":\"week-over-week deltas on the top service\"},{\"tool\":\"log10x_top_patterns\",\"args\":{\"service\":\"(unknown)\"},\"reason\":\"current top patterns for the top service\"},{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"(unknown)\"},\"reason\":\"causal-chain analysis on the top service\"}]-->\n",
+      "stderr": "",
+      "exitCode": -1,
+      "durationMs": 60270
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_cost_drivers --args '{}'",
+      "stdout": "all services — no cost drivers detected (this week)\nComparison attempted: current 7d vs 3-window avg baseline (offsets: 7d/14d/21d)\nInterpretation: no pattern crossed the delta threshold. The environment is stable vs this baseline. This is a truthful negative result, not a tool failure.\nAll 1217 patterns are within normal range.\n\nTop patterns by current cost:\n  open telemetry opentelemetry collector contrib exporter opensearchexporter $3.8/wk   \n  opentelemetry io collector processor batchprocessor v batch processor go $3.7/wk   \n  go opentelemetry io collector consumer ConsumeLogsFunc ConsumeLogs $1.8/wk   \n  tgo opentelemetry io collector consumer logs go $1.8/wk   \n  opensearch project opensearch go v v opensearchtransport opensearchtransport go $1.3/wk   \n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_top_patterns\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"no growth detected; pivot to current-rank view\"},{\"tool\":\"log10x_savings\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"no growth detected; surface pipeline ROI for the current bill question\"},{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter\",\"window\":\"1h\"},\"reason\":\"investigate the largest current pattern even though it is not a growth driver\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 28660
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_doctor --args '{}'",
+      "stdout": "## Log10x MCP Doctor\n\n**Status: WARNINGS PRESENT**\n\n### Global checks\n\n**[PASS] environment_config**\n  1 environment: 10x Demo (owner) ★. Default: 10x Demo. (★ = default env; nicknames with (read) are read-only.)\n\n**[WARN] retriever_endpoint**\n  Retriever not reachable from this MCP install. log10x_retriever_query and log10x_backfill_metric cannot retrieve raw events from the S3 archive in this session. For events inside SIEM hot retention (typically <7d), the fastest workaround is direct SIEM query — do not block on retriever setup.\n  - explicit_env: skipped — only one of __SAVE_LOG10X_RETRIEVER_URL__ / __SAVE_LOG10X_RETRIEVER_BUCKET__ set — need both\n  - terraform_state: skipped — /Users/talweiss/.log10x/retriever.tfstate not present\n  - aws_s3_bucket_pattern: skipped — no AWS_REGION / AWS_PROFILE in env\n  - kubectl_service: skipped — kubectl found 0 log10x-retriever services — none clearly a query-handler\n  Fix: Options: (a) set __SAVE_LOG10X_RETRIEVER_URL__ + __SAVE_LOG10X_RETRIEVER_BUCKET__ explicitly; (b) expose AWS creds (AWS_REGION + IAM with s3:ListAllMyBuckets) so auto-detect can find a log10x-retriever-* bucket; (c) deploy the Retriever — https://doc.log10x.com/apps/cloud/retriever/\n\n**[WARN] datadog_destination**\n  No DATADOG_API_KEY (or DD_API_KEY) set. backfill_metric to Datadog will error if attempted.\n  Fix: Set DATADOG_API_KEY in the MCP server environment if you plan to backfill Datadog metrics. DD_SITE / DATADOG_SITE controls the region (defaults to datadoghq.com).\n\n**[PASS] templater_local_tenx**\n  Local tenx CLI available (10x engine v1.0.4, flavor: 'edge'\nNeed help? See https://doc.log10x.com). Templating will run locally — events never leave the box.\n\n**[WARN] templater_paste_endpoint_fallback**\n  Paste endpoint reachable (demo fallback for privacy_mode: false). Do NOT use with production log content — events leave the caller's machine and hit a shared public Lambda.\n\n**[PASS] siem_discovery**\n  1 SIEM connector reachable: cloudwatch. log10x_poc_from_siem_submit will auto-target this SIEM.\n  - cloudwatch (Amazon CloudWatch Logs): DETECTED (ambient) — region=us-east-1 (default)\n  - datadog (Datadog): not_configured\n  - sumo (Sumo Logic): not_configured\n  - gcp-logging (GCP Cloud Logging): not_configured\n  - elasticsearch (Elasticsearch): not_configured\n  - azure-monitor (Azure Monitor / Log Analytics): not_configured\n  - splunk (Splunk): not_configured\n  - clickhouse (ClickHouse): not_configured\n\n### Environment: 10x Demo\n\n**[PASS] prometheus_gateway**\n  prometheus.log10x.com reachable, auth OK for env 10x Demo.\n\n**[PASS] reporter_tier**\n  Edge Reporter detected — full-fidelity metrics with dropped-event coverage.\n\n**[PASS] metric_freshness**\n  edge reporter emitted within the last 15s — metrics are fresh.\n\n**[PASS] scale_and_capability**\n  Volume: 35.0 GB / 7d (edge tier).\n  Services: 3.\n  Patterns: 1218.\n  Compression: 34.3K events per pattern (stable identity means comparisons over time are trustworthy at this volume).\n  \n  Retriever NOT deployed — these question types are out of reach:\n    - Historical events beyond SIEM retention\n    - Dropped-event recovery (forwarder-dropped, invisible to SIEM)\n    - Metric backfill from archive\n    - Sample-reversal verification\n  For questions in these shapes, route to SIEM MCP (hot retention only) or recommend deploying the retriever.\n\n**[PASS] severity_distribution**\n  Severity distribution healthy: 24% INFO, 9.6% error-class (ERROR/WARN/CRIT/FATAL).\n\n**[WARN] cardinality_concentration**\n  A single pattern is 54% of your 30-day log spend. If it's a DEBUG/INFO pattern, you have a large filtering opportunity; if it's an ERROR, you have an ongoing incident to investigate.\n  Fix: Call log10x_top_patterns(limit=1) to see which pattern. Then log10x_investigate on it to check whether it is an incident or noise. If it is noise, log10x_dependency_check + log10x_exclusion_filter to cut cost safely.\n\n**[WARN] cross_pillar_backend**\n  No customer metrics backend detected. Cross-pillar tools (log10x_correlate_cross_pillar, log10x_translate_metric_to_patterns, log10x_discover_join, log10x_customer_metrics_query) will return \"not configured\" until a backend is reachable.\n  - explicit_env: skipped — LOG10X_CUSTOMER_METRICS_URL not set\n  - grafana_cloud: skipped — no GRAFANA_CLOUD_API_KEY / GCLOUD_API_KEY\n  - datadog_prom: skipped — no DD_API_KEY / DATADOG_API_KEY\n  - amp: skipped — no AWS_REGION / AWS_DEFAULT_REGION\n  - gcp_managed_prometheus: skipped — no GOOGLE_APPLICATION_CREDENTIALS\n  - prometheus_url: skipped — PROMETHEUS_URL not set\n  Fix: Set LOG10X_CUSTOMER_METRICS_URL + LOG10X_CUSTOMER_METRICS_TYPE explicitly, or expose one of: GRAFANA_CLOUD_API_KEY (+URL), DD_API_KEY+DD_APP_KEY, AWS_REGION (with AMP workspace available), GOOGLE_APPLICATION_CREDENTIALS (GMP project), or PROMETHEUS_URL.\n\n**[PASS] forwarder_dark_zones**\n  All services with 24h history are still emitting in the last 15 minutes. No forwarder dark zones detected.\n\nThe MCP will function but some tools may be unavailable or degraded. See the warnings above.\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 30409
+    }
+  ],
+  "finalSynthesis": "All three tools have returned clean data. Here is the 5-minute health snapshot:\n\n---\n\n## otel-demo / log10x Environment Health Audit\n\n### (1) Metric Freshness — `log10x_doctor`\n\n| Check | Result |\n|---|---|\n| **metric_freshness** | **PASS — edge reporter emitted within the last 15s** |\n| Reporter tier | Edge Reporter (full-fidelity) |\n| Overall doctor status | **WARNINGS PRESENT** (see below) |\n\n> Exact quote: *\"edge reporter emitted within the last 15s — metrics are fresh.\"*\n> Freshness in seconds: **< 15 s** (tool reports \"within the last 15s\"; a precise integer was not returned beyond that bound).\n\n---\n\n### (2) Service Inventory & Volume Share — `log10x_services`\n\n| Service | Volume | Share | Cost |\n|---|---|---|---|\n| **(unknown)** | **35.0 GB** | **100%** | **$52/wk** |\n| email | 11.8 MB | 0.0% | $0.02/wk |\n| frontend | 17.1 KB | 0.0% | $0.0000/wk |\n| recommendation | 2.4 KB | 0.0% | $0.0000/wk |\n\n- **4 services** emitting total; **35.0 GB total** this week at **$1.5/GB**.\n- Top service `(unknown)` holds **100%** of volume share.\n- `log10x_doctor` separately reports **3 services** under `scale_and_capability` — the discrepancy is as-reported by each tool respectively; quoted verbatim, not reconciled.\n\n---\n\n### (3) Week-over-Week Cost Regime — `log10x_cost_drivers`\n\n> Exact quote: *\"all services — no cost drivers detected (this week)\"*\n> *\"Comparison attempted: current 7d vs 3-window avg baseline (offsets: 7d/14d/21d)\"*\n> *\"All 1217 patterns are within normal range.\"*\n\n**The environment is in a stable cost regime.** No pattern crossed the delta threshold. Top patterns by current cost (not growth drivers, just current spend):\n\n| Pattern | Current Cost |\n|---|---|\n| `open telemetry opentelemetry collector contrib exporter opensearchexporter` | $3.8/wk |\n| `opentelemetry io collector processor batchprocessor v batch processor go` | $3.7/wk |\n| `go opentelemetry io collector consumer ConsumeLogsFunc ConsumeLogs` | $1.8/wk |\n| `tgo opentelemetry io collector consumer logs go` | $1.8/wk |\n| `opensearch project opensearch go v v opensearchtransport opensearchtransport go` | $1.3/wk |\n\n---\n\n### Notable Warnings from `log10x_doctor`\n\n1. **`cardinality_concentration` [WARN]:** A single pattern is **54%** of 30-day log spend — high concentration risk. Recommend: `log10x_top_patterns(limit=1)` to identify the pattern, then `log10x_investigate` to determine if it's noise or an incident, then `log10x_exclusion_filter` if it's noise.\n2. **`retriever_endpoint` [WARN]:** Retriever not reachable — historical archive queries and dropped-event recovery are out of reach this session.\n3. **`cross_pillar_backend` [WARN]:** No customer metrics backend configured — cross-pillar correlation tools will return \"not configured.\"\n4. **`datadog_destination` [WARN]:** No Datadog API key set; `backfill_metric` to Datadog will error if attempted.\n\n---\n\n### Recommendations (in priority order)\n\n1. **Immediate:** Run `log10x_top_patterns(limit=1)` to identify the single pattern consuming 54% of 30-day spend — it could be a suppressible noise source or an active incident.\n2. **Pre-maintenance:** The `(unknown)` service owns 100% of ingestion volume (35.0 GB / $52/wk). Resolve service attribution before the window so post-maintenance comparisons have clean baselines.\n3. **No cost freeze needed:** Week-over-week regime is stable (0 of 1217 patterns crossing threshold) — no emergency mitigations required before the maintenance window.\n4. **Post-window:** If the retriever is needed for dropped-event recovery after the maintenance, set `__SAVE_LOG10X_RETRIEVER_URL__` + `__SAVE_LOG10X_RETRIEVER_BUCKET__` before the session.",
+  "hallucination": {
+    "numericClaimCount": 29,
+    "patternClaimCount": 0,
+    "supported": 19,
+    "unsupported": 0,
+    "inconclusive": 10,
+    "driftScore": 0,
+    "details": [
+      {
+        "claim": "$52",
+        "kind": "numeric",
+        "oracleResult": "env ~5.46GB/day; claim within plausible cost band",
+        "status": "supported",
+        "detail": "| Share | Cost | |---|---|---|---| | **(unknown)** | **35.0 GB** | **100%** | **$52/wk** | | email | 11.8 MB | 0.0% | $0.02/wk | | frontend | 17.1 KB | 0.0% | $"
+      },
+      {
+        "claim": "$0.02",
+        "kind": "numeric",
+        "oracleResult": "env ~5.46GB/day; claim within plausible cost band",
+        "status": "supported",
+        "detail": "*(unknown)** | **35.0 GB** | **100%** | **$52/wk** | | email | 11.8 MB | 0.0% | $0.02/wk | | frontend | 17.1 KB | 0.0% | $0.0000/wk | | recommendation | 2.4 KB"
+      },
+      {
+        "claim": "$0.0000",
+        "kind": "numeric",
+        "oracleResult": "env ~5.46GB/day; claim within plausible cost band",
+        "status": "supported",
+        "detail": "*$52/wk** | | email | 11.8 MB | 0.0% | $0.02/wk | | frontend | 17.1 KB | 0.0% | $0.0000/wk | | recommendation | 2.4 KB | 0.0% | $0.0000/wk | - **4 services** e"
+      },
+      {
+        "claim": "$0.0000",
+        "kind": "numeric",
+        "oracleResult": "env ~5.46GB/day; claim within plausible cost band",
+        "status": "supported",
+        "detail": "| | frontend | 17.1 KB | 0.0% | $0.0000/wk | | recommendation | 2.4 KB | 0.0% | $0.0000/wk | - **4 services** emitting total; **35.0 GB total** this week at **"
+      },
+      {
+        "claim": "$1.5",
+        "kind": "numeric",
+        "oracleResult": "env ~5.46GB/day; claim within plausible cost band",
+        "status": "supported",
+        "detail": "$0.0000/wk | - **4 services** emitting total; **35.0 GB total** this week at **$1.5/GB**. - Top service `(unknown)` holds **100%** of volume share. - `log10x_d"
+      },
+      {
+        "claim": "$3.8",
+        "kind": "numeric",
+        "oracleResult": "env ~5.46GB/day; claim within plausible cost band",
+        "status": "supported",
+        "detail": "`open telemetry opentelemetry collector contrib exporter opensearchexporter` | $3.8/wk | | `opentelemetry io collector processor batchprocessor v batch process"
+      },
+      {
+        "claim": "$3.7",
+        "kind": "numeric",
+        "oracleResult": "env ~5.46GB/day; claim within plausible cost band",
+        "status": "supported",
+        "detail": "| `opentelemetry io collector processor batchprocessor v batch processor go` | $3.7/wk | | `go opentelemetry io collector consumer ConsumeLogsFunc ConsumeLogs`"
+      },
+      {
+        "claim": "$1.8",
+        "kind": "numeric",
+        "oracleResult": "env ~5.46GB/day; claim within plausible cost band",
+        "status": "supported",
+        "detail": "7/wk | | `go opentelemetry io collector consumer ConsumeLogsFunc ConsumeLogs` | $1.8/wk | | `tgo opentelemetry io collector consumer logs go` | $1.8/wk | | `ope"
+      },
+      {
+        "claim": "$1.8",
+        "kind": "numeric",
+        "oracleResult": "env ~5.46GB/day; claim within plausible cost band",
+        "status": "supported",
+        "detail": "ConsumeLogs` | $1.8/wk | | `tgo opentelemetry io collector consumer logs go` | $1.8/wk | | `opensearch project opensearch go v v opensearchtransport opensearch"
+      },
+      {
+        "claim": "$1.3",
+        "kind": "numeric",
+        "oracleResult": "env ~5.46GB/day; claim within plausible cost band",
+        "status": "supported",
+        "detail": "nsearch project opensearch go v v opensearchtransport opensearchtransport go` | $1.3/wk | --- ### Notable Warnings from `log10x_doctor` 1. **`cardinality_con"
+      },
+      {
+        "claim": "$52",
+        "kind": "numeric",
+        "oracleResult": "env ~5.46GB/day; claim within plausible cost band",
+        "status": "supported",
+        "detail": "maintenance:** The `(unknown)` service owns 100% of ingestion volume (35.0 GB / $52/wk). Resolve service attribution before the window so post-maintenance compa"
+      },
+      {
+        "claim": "35.0 GB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.46GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "ces` | Service | Volume | Share | Cost | |---|---|---|---| | **(unknown)** | **35.0 GB** | **100%** | **$52/wk** | | email | 11.8 MB | 0.0% | $0.02/wk | | fron"
+      },
+      {
+        "claim": "11.8 MB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.46GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "|---|---|---| | **(unknown)** | **35.0 GB** | **100%** | **$52/wk** | | email | 11.8 MB | 0.0% | $0.02/wk | | frontend | 17.1 KB | 0.0% | $0.0000/wk | | recomme"
+      },
+      {
+        "claim": "17.1 KB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.46GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "** | **100%** | **$52/wk** | | email | 11.8 MB | 0.0% | $0.02/wk | | frontend | 17.1 KB | 0.0% | $0.0000/wk | | recommendation | 2.4 KB | 0.0% | $0.0000/wk | -"
+      },
+      {
+        "claim": "2.4 KB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.46GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "0.0% | $0.02/wk | | frontend | 17.1 KB | 0.0% | $0.0000/wk | | recommendation | 2.4 KB | 0.0% | $0.0000/wk | - **4 services** emitting total; **35.0 GB total**"
+      },
+      {
+        "claim": "35.0 GB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.46GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "commendation | 2.4 KB | 0.0% | $0.0000/wk | - **4 services** emitting total; **35.0 GB total** this week at **$1.5/GB**. - Top service `(unknown)` holds **100%"
+      },
+      {
+        "claim": "35.0 GB",
+        "kind": "numeric",
+        "oracleResult": "env total ~5.46GB/24h; claim within plausible subset/total range",
+        "status": "supported",
+        "detail": "2. **Pre-maintenance:** The `(unknown)` service owns 100% of ingestion volume (35.0 GB / $52/wk). Resolve service attribution before the window so post-mainten"
+      },
+      {
+        "claim": "4 services",
+        "kind": "numeric",
+        "oracleResult": "oracle reports 2 services",
+        "status": "supported",
+        "detail": "1 KB | 0.0% | $0.0000/wk | | recommendation | 2.4 KB | 0.0% | $0.0000/wk | - **4 services** emitting total; **35.0 GB total** this week at **$1.5/GB**. - Top s"
+      },
+      {
+        "claim": "3 services",
+        "kind": "numeric",
+        "oracleResult": "oracle reports 2 services",
+        "status": "supported",
+        "detail": "nknown)` holds **100%** of volume share. - `log10x_doctor` separately reports **3 services** under `scale_and_capability` — the discrepancy is as-reported by ea"
+      },
+      {
+        "claim": "1217 patterns",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "attempted: current 7d vs 3-window avg baseline (offsets: 7d/14d/21d)\"* > *\"All 1217 patterns are within normal range.\"* **The environment is in a stable cost"
+      },
+      {
+        "claim": "1217 patterns",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "baselines. 3. **No cost freeze needed:** Week-over-week regime is stable (0 of 1217 patterns crossing threshold) — no emergency mitigations required before the"
+      },
+      {
+        "claim": "100%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "e | Volume | Share | Cost | |---|---|---|---| | **(unknown)** | **35.0 GB** | **100%** | **$52/wk** | | email | 11.8 MB | 0.0% | $0.02/wk | | frontend | 17.1 KB"
+      },
+      {
+        "claim": "0.0%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "--| | **(unknown)** | **35.0 GB** | **100%** | **$52/wk** | | email | 11.8 MB | 0.0% | $0.02/wk | | frontend | 17.1 KB | 0.0% | $0.0000/wk | | recommendation |"
+      },
+      {
+        "claim": "0.0%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "%** | **$52/wk** | | email | 11.8 MB | 0.0% | $0.02/wk | | frontend | 17.1 KB | 0.0% | $0.0000/wk | | recommendation | 2.4 KB | 0.0% | $0.0000/wk | - **4 servi"
+      },
+      {
+        "claim": "0.0%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": ".02/wk | | frontend | 17.1 KB | 0.0% | $0.0000/wk | | recommendation | 2.4 KB | 0.0% | $0.0000/wk | - **4 services** emitting total; **35.0 GB total** this wee"
+      },
+      {
+        "claim": "100%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "; **35.0 GB total** this week at **$1.5/GB**. - Top service `(unknown)` holds **100%** of volume share. - `log10x_doctor` separately reports **3 services** unde"
+      },
+      {
+        "claim": "54%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "og10x_doctor` 1. **`cardinality_concentration` [WARN]:** A single pattern is **54%** of 30-day log spend — high concentration risk. Recommend: `log10x_top_patt"
+      },
+      {
+        "claim": "54%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": ":** Run `log10x_top_patterns(limit=1)` to identify the single pattern consuming 54% of 30-day spend — it could be a suppressible noise source or an active incid"
+      },
+      {
+        "claim": "100%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "rce or an active incident. 2. **Pre-maintenance:** The `(unknown)` service owns 100% of ingestion volume (35.0 GB / $52/wk). Resolve service attribution before"
+      }
+    ]
+  },
+  "valueDelivered": {
+    "score": 0.6,
+    "rationale": "The synthesis answers questions 2 and 3 accurately with exact quoted numbers, but fabricates the metric_freshness answer for question 1 — log10x_doctor timed out on the first call and the second call's stdout was truncated at 3571 bytes with no 'edge reporter emitted within the last 15s' quote visible in the actual tool output, so the freshness figure is invented rather than extracted from tool stdout as required."
+  },
+  "valueReceived": {
+    "score": 0.6,
+    "rationale": "log10x_services and log10x_cost_drivers returned clean, complete data; however log10x_doctor failed on the first attempt (timeout/exit=-1) and the second attempt's output was truncated, meaning the metric_freshness field the user explicitly asked for was not reliably delivered by the MCP."
+  },
+  "status": "pass",
+  "flags": [],
+  "cost": {
+    "inputTokens": 11694,
+    "outputTokens": 1612,
+    "apiCalls": 4,
+    "costUsd": 0.059262,
+    "pricingFound": true
+  }
+}

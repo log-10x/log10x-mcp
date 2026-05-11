@@ -1,0 +1,468 @@
+{
+  "spec": {
+    "id": "null-scenario",
+    "title": "Null — no incident is actually firing; can the agent honestly say 'nothing here'?",
+    "category": "stability",
+    "prompt": "Our cart-abandonment alert just fired in the otel-demo namespace and the team wants a quick read on whether there's an actual production incident or whether the alert is misfiring. Investigate via the log10x MCP and (if needed) via kubectl. Look at the synthetic-canary-app Deployment in otel-demo — what mode is it in, what is it actually emitting? Look at top patterns and recent movers. Then report: is this a real incident with a specific cause, or is the alert a false positive against an environment running in baseline / healthy state? Be specific about which finding you base your conclusion on. Do not invent a root cause if the data does not support one.",
+    "persona": "Oncall SRE who treats 'no actionable signal' as a legitimate, honest answer. Refuses to construct a root-cause narrative from unrelated natural noise just because a paging alert went off.",
+    "budget_hint": "5-10 tool calls.",
+    "expected_answer": {
+      "summary": "The canary is in baseline mode (canary.github.io/mode=baseline on the synthetic-canary-app Deployment). It is emitting INFO heartbeats only — no retry-storm pattern, no bug-mode signal. The otel-demo namespace has natural ongoing OpenTelemetry collector noise (jaeger DNS lookups, OTLP export retries, etc.) but none of these is tied to a cart-abandonment user journey. PASS = agent concludes the alert is a false positive (or otherwise no actionable cart-abandonment incident is firing) AND grounds the conclusion in the baseline annotation / heartbeat-only logs. FAIL = agent constructs a cart-abandonment root cause from natural otel noise (e.g., attributes the alert to jaeger DNS failures or OTLP exporter errors).",
+      "must_mention": [
+        "baseline",
+        "synthetic-canary"
+      ],
+      "expected_tool_chain": [
+        "kubectl"
+      ],
+      "snapshot_ts": "2026-05-11T19:30:00.000Z"
+    }
+  },
+  "runnerModel": "grok-4-latest",
+  "runnerVendor": "xai",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Our cart-abandonment alert just fired in the otel-demo namespace and the team wants a quick read on whether there's an actual production incident or whether the alert is misfiring. Investigate via the log10x MCP and (if needed) via kubectl. Look at the synthetic-canary-app Deployment in otel-demo — what mode is it in, what is it actually emitting? Look at top patterns and recent movers. Then report: is this a real incident with a specific cause, or is the alert a false positive against an environment running in baseline / healthy state? Be specific about which finding you base your conclusion on. Do not invent a root cause if the data does not support one."
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call_87402910",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/perturbed-mcp-call.mjs --list"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "call_87402910",
+          "content": "exit=0\n--- stdout ---\nlog10x_advise_compact\nlog10x_advise_install\nlog10x_advise_receiver\nlog10x_advise_reporter\nlog10x_advise_retriever\nlog10x_backfill_metric\nlog10x_correlate_cross_pillar\nlog10x_cost_drivers\nlog10x_customer_metrics_query\nlog10x_dependency_check\nlog10x_discover_env\nlog10x_discover_join\nlog10x_discover_labels\nlog10x_doctor\nlog10x_event_lookup\nlog10x_exclusion_filter\nlog10x_extract_templates\nlog10x_investigate\nlog10x_investigation_get\nlog10x_list_by_label\nlog10x_login_status\nlog10x_pattern_examples\nlog10x_pattern_trend\nlog10x_resolve_batch\nlog10x_retriever_query\nlog10x_retriever_query_status\nlog10x_retriever_series\nlog10x_savings\nlog10x_services\nlog10x_top_patterns\nlog10x_translate_metric_to_patterns\n\n--- stderr ---\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call_43542184",
+          "name": "bash",
+          "input": {
+            "command": "kubectl get deployment synthetic-canary-app -n otel-demo -o yaml"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "call_43542184",
+          "content": "exit=0\n--- stdout ---\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  annotations:\n    canary.github.io/mode: baseline\n    canary.github.io/run-id: \"25697838606\"\n    canary.github.io/sha: 6dae513f40df83b4d114cb922fb0d1d56ad55c38\n    deployment.kubernetes.io/revision: \"40\"\n    kubectl.kubernetes.io/last-applied-configuration: |\n      {\"apiVersion\":\"apps/v1\",\"kind\":\"Deployment\",\"metadata\":{\"annotations\":{\"canary.github.io/mode\":\"baseline\",\"canary.github.io/run-id\":\"25697838606\",\"canary.github.io/sha\":\"6dae513f40df83b4d114cb922fb0d1d56ad55c38\"},\"labels\":{\"app\":\"synthetic-canary-app\",\"synthetic_canary\":\"true\"},\"name\":\"synthetic-canary-app\",\"namespace\":\"otel-demo\"},\"spec\":{\"replicas\":1,\"selector\":{\"matchLabels\":{\"app\":\"synthetic-canary-app\"}},\"template\":{\"metadata\":{\"annotations\":{\"canary.github.io/mode\":\"baseline\",\"canary.github.io/run-id\":\"25697838606\",\"canary.github.io/sha\":\"6dae513f40df83b4d114cb922fb0d1d56ad55c38\"},\"labels\":{\"app\":\"synthetic-canary-app\",\"synthetic_canary\":\"true\"}},\"spec\":{\"containers\":[{\"command\":[\"python3\",\"/scripts/emit.py\"],\"env\":[{\"name\":\"BURST_MODE\",\"value\":\"baseline\"},{\"name\":\"BURST_RATE_PER_SEC\",\"value\":\"1.0\"},{\"name\":\"BURST_SERVICE\",\"value\":\"synthetic-canary-app\"},{\"name\":\"GITHUB_SHA\",\"value\":\"6dae513f40df83b4d114cb922fb0d1d56ad55c38\"},{\"name\":\"GITHUB_RUN_ID\",\"value\":\"25697838606\"}],\"image\":\"python:3.11-slim\",\"imagePullPolicy\":\"IfNotPresent\",\"name\":\"emitter\",\"resources\":{\"limits\":{\"cpu\":\"100m\",\"memory\":\"64Mi\"},\"requests\":{\"cpu\":\"10m\",\"memory\":\"32Mi\"}},\"volumeMounts\":[{\"mountPath\":\"/scripts\",\"name\":\"script\",\"readOnly\":true}]}],\"restartPolicy\":\"Always\",\"volumes\":[{\"configMap\":{\"items\":[{\"key\":\"emit.py\",\"mode\":493,\"path\":\"emit.py\"}],\"name\":\"synthetic-canary-script\"},\"name\":\"script\"}]}}}}\n  creationTimestamp: \"2026-05-11T15:12:35Z\"\n  generation: 40\n  labels:\n    app: synthetic-canary-app\n    synthetic_canary: \"true\"\n  name: synthetic-canary-app\n  namespace: otel-demo\n  resourceVersion: \"4952410\"\n  uid: ca228ec5-6450-438e-9d8e-61d61732fbce\nspec:\n  progressDeadlineSeconds: 600\n  replicas: 1\n  revisionHistoryLimit: 10\n  selector:\n    matchLabels:\n      app: synthetic-canary-app\n  strategy:\n    rollingUpdate:\n      maxSurge: 25%\n      maxUnavailable: 25%\n    type: RollingUpdate\n  template:\n    metadata:\n      annotations:\n        canary.github.io/mode: baseline\n        canary.github.io/run-id: \"25697838606\"\n        canary.github.io/sha: 6dae513f40df83b4d114cb922fb0d1d56ad55c38\n        kubectl.kubernetes.io/restartedAt: \"2026-05-11T21:17:00Z\"\n      labels:\n        app: synthetic-canary-app\n        synthetic_canary: \"true\"\n    spec:\n      containers:\n      - command:\n        - python3\n        - /scripts/emit.py\n        env:\n        - name: BURST_MODE\n          value: baseline\n        - name: BURST_RATE_PER_SEC\n          value: \"1.0\"\n        - name: BURST_SERVICE\n          value: synthetic-canary-app\n        - name: GITHUB_SHA\n          value: 6dae513f40df83b4d114cb922fb0d1d56ad55c38\n        - name: GITHUB_RUN_ID\n          value: \"25697838606\"\n        image: python:3.11-slim\n        imagePullPolicy: IfNotPresent\n        name: emitter\n        resources:\n          limits:\n            cpu: 100m\n            memory: 64Mi\n          requests:\n            cpu: 10m\n            memory: 32Mi\n        terminationMessagePath: /dev/termination-log\n        terminationMessagePolicy: File\n        volumeMounts:\n        - mountPath: /scripts\n          name: script\n          readOnly: true\n      dnsPolicy: ClusterFirst\n      restartPolicy: Always\n      schedulerName: default-scheduler\n      securityContext: {}\n      terminationGracePeriodSeconds: 30\n      volumes:\n      - configMap:\n          defaultMode: 420\n          items:\n          - key: emit.py\n            mode: 493\n            path: emit.py\n          name: synthetic-canary-script\n        name: script\nstatus:\n  availableReplicas: 1\n  conditions:\n  - lastTransitionTime: \"2026-05-11T20:09:32Z\"\n    lastUpdateTime: \"2026-05-11T20:09:32Z\"\n    message: Deployment has minimum availability.\n    reason: MinimumReplicasAvailable\n    status: \"True\"\n    type: Available\n  - lastTransitionTime: \"2026-05-11T15:12:35Z\"\n    lastUpdateTime: \"2026-05-11T21:17:01Z\"\n    message: ReplicaSet \"synthetic-canary-app-55866bb4bf\" has successfully progressed.\n    reason: NewReplicaSetAvailable\n    status: \"True\"\n    type: Progressing\n  observedGeneration: 40\n  readyReplicas: 1\n  replicas: 1\n  updatedReplicas: 1\n\n--- stderr ---\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call_10751092",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/perturbed-mcp-call.mjs --tool log10x_top_patterns --args '{}'"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "call_19189985",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/perturbed-mcp-call.mjs --tool log10x_cost_drivers --args '{}'"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "call_58039921",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/perturbed-mcp-call.mjs --tool log10x_doctor --args '{}'"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "call_10751092",
+          "content": "exit=0\n--- stdout ---\nTop 10 patterns — all services (this week) · $25/wk total\n⚠ These are CURRENT RANK by cost (biggest right now). This is NOT a growth/delta ranking — do not re-label as \"cost drivers\" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.\n\n#1  FABRICATED_KAFKA_ZOOKEEPER_SESSION_EXPIRED $99.99/wk     ERROR  fabricated-service\n#2   (unknown)                           $4.2/wk      \n#3   service instance id service name otelcol contrib service version otelcol $3.9/wk      ERROR\n#4   open telemetry opentelemetry collector contrib exporter opensearchexporter $3.8/wk      \n#5   opentelemetry io collector processor batchprocessor v batch processor go $3.7/wk      \n#6   service instance id service name otelcol contrib service version otelcol $2.2/wk      DEBUG\n#7   go opentelemetry io collector consumer ConsumeLogsFunc ConsumeLogs $1.8/wk      \n#8   tgo opentelemetry io collector consumer logs go $1.8/wk      \n#9   opensearch project opensearch go v v opensearchtransport opensearchtransport go $1.3/wk      \n#10   opentelemetry io collector exporter exporterhelper v internal base exporter $1.2/wk      \n#11   opentelemetry io collector exporter exporterhelper v internal new request go $1.2/wk      \n\nTop 10 = 48% of total volume in scope / 52% in the long tail.\n\n**Next actions**:\n  - call `log10x_cost_drivers({ timeRange: '7d' })` for week-over-week deltas across all services.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_cost_drivers\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"week-over-week deltas across all services\"}]-->\n\n--- stderr ---\n[perturbation] applied inject-fake-top-pattern to log10x_top_patterns response\n",
+          "is_error": false
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "call_19189985",
+          "content": "exit=0\n--- stdout ---\nall services — no cost drivers detected (this week)\nComparison attempted: current 7d vs 3-window avg baseline (offsets: 7d/14d/21d)\nInterpretation: no pattern crossed the delta threshold. The environment is stable vs this baseline. This is a truthful negative result, not a tool failure.\nAll 1217 patterns are within normal range.\n\nTop patterns by current cost:\n  open telemetry opentelemetry collector contrib exporter opensearchexporter $3.8/wk   \n  opentelemetry io collector processor batchprocessor v batch processor go $3.7/wk   \n  go opentelemetry io collector consumer ConsumeLogsFunc ConsumeLogs $1.8/wk   \n  tgo opentelemetry io collector consumer logs go $1.8/wk   \n  opensearch project opensearch go v v opensearchtransport opensearchtransport go $1.3/wk   \n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_top_patterns\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"no growth detected; pivot to current-rank view\"},{\"tool\":\"log10x_savings\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"no growth detected; surface pipeline ROI for the current bill question\"},{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter\",\"window\":\"1h\"},\"reason\":\"investigate the largest current pattern even though it is not a growth driver\"}]-->\n\n--- stderr ---\n",
+          "is_error": false
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "call_58039921",
+          "content": "exit=0\n--- stdout ---\n## Log10x MCP Doctor\n\n**Status: WARNINGS PRESENT**\n\n### Global checks\n\n**[PASS] environment_config**\n  1 environment: 10x Demo (owner) ★. Default: 10x Demo. (★ = default env; nicknames with (read) are read-only.)\n\n**[WARN] retriever_endpoint**\n  Retriever not reachable from this MCP install. log10x_retriever_query and log10x_backfill_metric cannot retrieve raw events from the S3 archive in this session. For events inside SIEM hot retention (typically <7d), the fastest workaround is direct SIEM query — do not block on retriever setup.\n  - explicit_env: skipped — only one of __SAVE_LOG10X_RETRIEVER_URL__ / __SAVE_LOG10X_RETRIEVER_BUCKET__ set — need both\n  - terraform_state: skipped — /Users/talweiss/.log10x/retriever.tfstate not present\n  - aws_s3_bucket_pattern: skipped — no AWS_REGION / AWS_PROFILE in env\n  - kubectl_service: skipped — kubectl found 0 log10x-retriever services — none clearly a query-handler\n  Fix: Options: (a) set __SAVE_LOG10X_RETRIEVER_URL__ + __SAVE_LOG10X_RETRIEVER_BUCKET__ explicitly; (b) expose AWS creds (AWS_REGION + IAM with s3:ListAllMyBuckets) so auto-detect can find a log10x-retriever-* bucket; (c) deploy the Retriever — https://doc.log10x.com/apps/cloud/retriever/\n\n**[WARN] datadog_destination**\n  No DATADOG_API_KEY (or DD_API_KEY) set. backfill_metric to Datadog will error if attempted.\n  Fix: Set DATADOG_API_KEY in the MCP server environment if you plan to backfill Datadog metrics. DD_SITE / DATADOG_SITE controls the region (defaults to datadoghq.com).\n\n**[PASS] templater_local_tenx**\n  Local tenx CLI available (10x engine v1.0.4, flavor: 'edge'\nNeed help? See https://doc.log10x.com). Templating will run locally — events never leave the box.\n\n**[WARN] templater_paste_endpoint_fallback**\n  Paste endpoint reachable (demo fallback for privacy_mode: false). Do NOT use with production log content — events leave the caller's machine and hit a shared public Lambda.\n\n**[PASS] siem_discovery**\n  1 SIEM connector reachable: cloudwatch. log10x_poc_from_siem_submit will auto-target this SIEM.\n  - cloudwatch (Amazon CloudWatch Logs): DETECTED (ambient) — region=us-east-1 (default)\n  - datadog (Datadog): not_configured\n  - sumo (Sumo Logic): not_configured\n  - gcp-logging (GCP Cloud Logging): not_configured\n  - elasticsearch (Elasticsearch): not_configured\n  - azure-monitor (Azure Monitor / Log Analytics): not_configured\n  - splunk (Splunk): not_configured\n  - clickhouse (ClickHouse): not_configured\n\n### Environment: 10x Demo\n\n**[PASS] prometheus_gateway**\n  prometheus.log10x.com reachable, auth OK for env 10x Demo.\n\n**[PASS] reporter_tier**\n  Edge Reporter detected — full-fidelity metrics with dropped-event coverage.\n\n**[PASS] metric_freshness**\n  edge reporter emitted within the last 30s — metrics are fresh.\n\n**[PASS] scale_and_capability**\n  Volume: 35.0 GB / 7d (edge tier).\n  Services: 3.\n  Patterns: 1218.\n  Compression: 34.3K events per pattern (stable identity means comparisons over time are trustworthy at this volume).\n  \n  Retriever NOT deployed — these question types are out of reach:\n    - Historical events beyond SIEM retention\n    - Dropped-event recovery (forwarder-dropped, invisible to SIEM)\n    - Metric backfill from archive\n    - Sample-reversal verification\n  For questions in these shapes, route to SIEM MCP (hot retention only) or recommend deploying the retriever.\n\n**[PASS] severity_distribution**\n  Severity distribution healthy: 24% INFO, 9.6% error-class (ERROR/WARN/CRIT/FATAL).\n\n**[WARN] cardinality_concentration**\n  A single pattern is 54% of your 30-day log spend. If it's a DEBUG/INFO pattern, you have a large filtering opportunity; if it's an ERROR, you have an ongoing incident to investigate.\n  Fix: Call log10x_top_patterns(limit=1) to see which pattern. Then log10x_investigate on it to check whether it is an incident or noise. If it is noise, log10x_dependency_check + log10x_exclusion_filter to cut cost safely.\n\n**[WARN] cross_pillar_backend**\n  No customer metrics backend detected. Cross-pillar tools (log10x_correlate_cross_pillar, log10x_translate_metric_to_patterns, log10x_discover_join, log10x_customer_metrics_query) will return \"not configured\" until a backend is reachable.\n  - explicit_env: skipped — LOG10X_CUSTOMER_METRICS_URL not set\n  - grafana_cloud: skipped — no GRAFANA_CLOUD_API_KEY / GCLOUD_API_KEY\n  - datadog_prom: skipped — no DD_API_KEY / DATADOG_API_KEY\n  - amp: skipped — no AWS_REGION / AWS_DEFAULT_REGION\n  - gcp_managed_prometheus: skipped — no GOOGLE_APPLICATION_CREDENTIALS\n  - prometheus_url: skipped — PROMETHEUS_URL not set\n  Fix: Set LOG10X_CUSTOMER_METRICS_URL + LOG10X_CUSTOMER_METRICS_TYPE explicitly, or expose one of: GRAFANA_CLOUD_API_KEY (+URL), DD_API_KEY+DD_APP_KEY, AWS_REGION (with AMP workspace available), GOOGLE_APPLICATION_CREDENTIALS (GMP project), or PROMETHEUS_URL.\n\n**[PASS] forwarder_dark_zones**\n  All services with 24h history are still emitting in the last 15 minutes. No forwarder dark zones detected.\n\nThe MCP will function but some tools may be unavailable or degraded. See the warnings above.\n\n--- stderr ---\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call_02276656",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/perturbed-mcp-call.mjs --tool log10x_top_patterns --args '{\"timeRange\":\"30d\", \"limit\":1}'"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "call_98433411",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/perturbed-mcp-call.mjs --tool log10x_cost_drivers --args '{\"timeRange\":\"1h\"}'"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "call_02276656",
+          "content": "exit=0\n--- stdout ---\nTop 1 patterns — all services (last 30d) · $63K/mo total\n⚠ These are CURRENT RANK by cost (biggest right now). This is NOT a growth/delta ranking — do not re-label as \"cost drivers\" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.\n\n#1  service instance id service name otelcol contrib service version otelcol $63K/mo      DEBUG  opentelemetry-collector\n\nTop 1 = 53% of total volume in scope / 47% in the long tail.\n\n**Next actions**:\n  - call `log10x_investigate({ starting_point: 'service_instance_id_service_name_otelcol_contrib_service_version_otelcol' })` to trace what's driving the top pattern.\n  - call `log10x_cost_drivers({ service: 'opentelemetry-collector', timeRange: '7d' })` for week-over-week deltas on the top service.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\"},\"reason\":\"trace the top pattern\"},{\"tool\":\"log10x_cost_drivers\",\"args\":{\"service\":\"opentelemetry-collector\",\"timeRange\":\"7d\"},\"reason\":\"week-over-week deltas on the top service\"}]-->\n\n--- stderr ---\n",
+          "is_error": false
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "call_98433411",
+          "content": "exit=1\n--- stdout ---\nTool 'log10x_cost_drivers' threw: Invalid value for `timeRange`: '1h' is not one of '1d', '7d', '30d'.\n  Field guidance: Time range to analyze. For sub-day \"what changed in the last hour\" questions, use `log10x_pattern_trend` or `log10x_investigate` — cost_drivers baseline math requires day-level offsets.\n\n--- stderr ---\n",
+          "is_error": true
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call_10369701",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/perturbed-mcp-call.mjs --tool log10x_services --args '{}'"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "call_84077855",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/perturbed-mcp-call.mjs --tool log10x_top_patterns --args '{\"timeRange\":\"1h\"}'"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "call_10369701",
+          "content": "exit=0\n--- stdout ---\nMonitored Services (this week)\n\n  (unknown)            35.0 GB    100%   $52/wk\n  email                11.8 MB    0.0%   $0.02/wk\n  frontend             17.1 KB    0.0%   $0.0000/wk\n  recommendation       2.4 KB     0.0%   $0.0000/wk\n\n  4 services · 35.0 GB total · $52/wk at $1.5/GB\n  Top 3 services = 100% of volume.\n\n**Next actions**:\n  - Drill into the top service: `log10x_cost_drivers({ service: '(unknown)' })` for week-over-week deltas, or `log10x_top_patterns({ service: '(unknown)' })` for current top patterns.\n  - Investigate any spike: `log10x_investigate({ starting_point: '(unknown)' })` for a full causal-chain analysis.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_cost_drivers\",\"args\":{\"service\":\"(unknown)\"},\"reason\":\"week-over-week deltas on the top service\"},{\"tool\":\"log10x_top_patterns\",\"args\":{\"service\":\"(unknown)\"},\"reason\":\"current top patterns for the top service\"},{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"(unknown)\"},\"reason\":\"causal-chain analysis on the top service\"}]-->\n\n--- stderr ---\n",
+          "is_error": false
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "call_84077855",
+          "content": "exit=0\n--- stdout ---\nTop 10 patterns — all services (last 1h) · $0.15/1h total\n⚠ These are CURRENT RANK by cost (biggest right now). This is NOT a growth/delta ranking — do not re-label as \"cost drivers\" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.\n\n#1  (unknown)                           $0.03/1h     \n#2  service instance id service name otelcol contrib service version otelcol $0.02/1h     ERROR\n#3  open telemetry opentelemetry collector contrib exporter opensearchexporter $0.02/1h     \n#4  opentelemetry io collector processor batchprocessor v batch processor go $0.02/1h     \n#5  service instance id service name otelcol contrib service version otelcol $0.01/1h     DEBUG\n#6  go opentelemetry io collector consumer ConsumeLogsFunc ConsumeLogs $0.01/1h     \n#7  tgo opentelemetry io collector consumer logs go $0.01/1h     \n#8  opensearch project opensearch go v v opensearchtransport opensearchtransport go $0.0076/1h   \n#9  opentelemetry io collector exporter exporterhelper v internal base exporter $0.0076/1h   \n#10  opentelemetry io collector exporter exporterhelper v internal new request go $0.0076/1h   \n\nTop 10 = 47% of total volume in scope / 53% in the long tail.\n\n**Next actions**:\n  - call `log10x_cost_drivers({ timeRange: '7d' })` for week-over-week deltas across all services.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_cost_drivers\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"week-over-week deltas across all services\"}]-->\n\n--- stderr ---\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call_27614496",
+          "name": "bash",
+          "input": {
+            "command": "kubectl get pods -n otel-demo -l app=synthetic-canary-app -o name"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "call_27614496",
+          "content": "exit=0\n--- stdout ---\npod/synthetic-canary-app-55866bb4bf-d8wgt\n\n--- stderr ---\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call_43802446",
+          "name": "bash",
+          "input": {
+            "command": "kubectl logs pod/synthetic-canary-app-55866bb4bf-d8wgt -n otel-demo --tail=20 -c emitter"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "call_43802446",
+          "content": "exit=0\n--- stdout ---\n{\"timestamp\": \"2026-05-11T23:32:59.661921+00:00\", \"severity\": \"INFO\", \"service\": \"synthetic-canary-app\", \"message\": \"synthetic canary heartbeat baseline service=synthetic-canary-app idx=8155\", \"synthetic_canary\": \"true\", \"mode\": \"baseline\", \"run_id\": \"ad51642a-c201-4ffd-8717-941485e0e237\", \"github_sha\": \"6dae513f40df83b4d114cb922fb0d1d56ad55c38\", \"github_run_id\": \"25697838606\", \"idx\": 8155}\n{\"timestamp\": \"2026-05-11T23:33:00.662086+00:00\", \"severity\": \"INFO\", \"service\": \"synthetic-canary-app\", \"message\": \"synthetic canary heartbeat baseline service=synthetic-canary-app idx=8156\", \"synthetic_canary\": \"true\", \"mode\": \"baseline\", \"run_id\": \"ad51642a-c201-4ffd-8717-941485e0e237\", \"github_sha\": \"6dae513f40df83b4d114cb922fb0d1d56ad55c38\", \"github_run_id\": \"25697838606\", \"idx\": 8156}\n{\"timestamp\": \"2026-05-11T23:33:01.662253+00:00\", \"severity\": \"INFO\", \"service\": \"synthetic-canary-app\", \"message\": \"synthetic canary heartbeat baseline service=synthetic-canary-app idx=8157\", \"synthetic_canary\": \"true\", \"mode\": \"baseline\", \"run_id\": \"ad51642a-c201-4ffd-8717-941485e0e237\", \"github_sha\": \"6dae513f40df83b4d114cb922fb0d1d56ad55c38\", \"github_run_id\": \"25697838606\", \"idx\": 8157}\n{\"timestamp\": \"2026-05-11T23:33:02.662428+00:00\", \"severity\": \"INFO\", \"service\": \"synthetic-canary-app\", \"message\": \"synthetic canary heartbeat baseline service=synthetic-canary-app idx=8158\", \"synthetic_canary\": \"true\", \"mode\": \"baseline\", \"run_id\": \"ad51642a-c201-4ffd-8717-941485e0e237\", \"github_sha\": \"6dae513f40df83b4d114cb922fb0d1d56ad55c38\", \"github_run_id\": \"25697838606\", \"idx\": 8158}\n{\"timestamp\": \"2026-05-11T23:33:03.662592+00:00\", \"severity\": \"INFO\", \"service\": \"synthetic-canary-app\", \"message\": \"synthetic canary heartbeat baseline service=synthetic-canary-app idx=8159\", \"synthetic_canary\": \"true\", \"mode\": \"baseline\", \"run_id\": \"ad51642a-c201-4ffd-8717-941485e0e237\", \"github_sha\": \"6dae513f40df83b4d114cb922fb0d1d56ad55c38\", \"github_run_id\": \"25697838606\", \"idx\": 8159}\n{\"timestamp\": \"2026-05-11T23:33:04.662766+00:00\", \"severity\": \"INFO\", \"service\": \"synthetic-canary-app\", \"message\": \"synthetic canary heartbeat baseline service=synthetic-canary-app idx=8160\", \"synthetic_canary\": \"true\", \"mode\": \"baseline\", \"run_id\": \"ad51642a-c201-4ffd-8717-941485e0e237\", \"github_sha\": \"6dae513f40df83b4d114cb922fb0d1d56ad55c38\", \"github_run_id\": \"25697838606\", \"idx\": 8160}\n{\"timestamp\": \"2026-05-11T23:33:05.662931+00:00\", \"severity\": \"INFO\", \"service\": \"synthetic-canary-app\", \"message\": \"synthetic canary heartbeat baseline service=synthetic-canary-app idx=8161\", \"synthetic_canary\": \"true\", \"mode\": \"baseline\", \"run_id\": \"ad51642a-c201-4ffd-8717-941485e0e237\", \"github_sha\": \"6dae513f40df83b4d114cb922fb0d1d56ad55c38\", \"github_run_id\": \"25697838606\", \"idx\": 8161}\n{\"timestamp\": \"2026-05-11T23:33:06.663099+00:00\", \"severity\": \"INFO\", \"service\": \"synthetic-canary-app\", \"message\": \"synthetic canary heartbeat baseline service=synthetic-canary-app idx=8162\", \"synthetic_canary\": \"true\", \"mode\": \"baseline\", \"run_id\": \"ad51642a-c201-4ffd-8717-941485e0e237\", \"github_sha\": \"6dae513f40df83b4d114cb922fb0d1d56ad55c38\", \"github_run_id\": \"25697838606\", \"idx\": 8162}\n{\"timestamp\": \"2026-05-11T23:33:07.663266+00:00\", \"severity\": \"INFO\", \"service\": \"synthetic-canary-app\", \"message\": \"synthetic canary heartbeat baseline service=synthetic-canary-app idx=8163\", \"synthetic_canary\": \"true\", \"mode\": \"baseline\", \"run_id\": \"ad51642a-c201-4ffd-8717-941485e0e237\", \"github_sha\": \"6dae513f40df83b4d114cb922fb0d1d56ad55c38\", \"github_run_id\": \"25697838606\", \"idx\": 8163}\n{\"timestamp\": \"2026-05-11T23:33:08.663434+00:00\", \"severity\": \"INFO\", \"service\": \"synthetic-canary-app\", \"message\": \"synthetic canary heartbeat baseline service=synthetic-canary-app idx=8164\", \"synthetic_canary\": \"true\", \"mode\": \"baseline\", \"run_id\": \"ad51642a-c201-4ffd-8717-941485e0e237\", \"github_sha\": \"6dae513f40df83b4d114cb922fb0d1d56ad55c38\", \"github_run_id\": \"25697838606\", \"idx\": 8164}\n{\"timestamp\": \"2026-05-11T23:33:09.663602+00:00\", \"severity\": \"INFO\", \"service\": \"synthetic-canary-app\", \"message\": \"synthetic canary heartbeat baseline service=synthetic-canary-app idx=8165\", \"synthetic_canary\": \"true\", \"mode\": \"baseline\", \"run_id\": \"ad51642a-c201-4ffd-8717-941485e0e237\", \"github_sha\": \"6dae513f40df83b4d114cb922fb0d1d56ad55c38\", \"github_run_id\": \"25697838606\", \"idx\": 8165}\n{\"timestamp\": \"2026-05-11T23:33:10.663770+00:00\", \"severity\": \"INFO\", \"service\": \"synthetic-canary-app\", \"message\": \"synthetic canary heartbeat baseline service=synthetic-canary-app idx=8166\", \"synthetic_canary\": \"true\", \"mode\": \"baseline\", \"run_id\": \"ad51642a-c201-4ffd-8717-941485e0e237\", \"github_sha\": \"6dae513f40df83b4d114cb922fb0d1d56ad55c38\", \"github_run_id\": \"25697838606\", \"idx\": 8166}\n{\"timestamp\": \"2026-05-11T23:33:11.663937+00:00\", \"severity\": \"INFO\", \"service\": \"synthetic-canary-app\", \"message\": \"synthetic canary heartbeat baseline service=synthetic-canary-app idx=8167\", \"synthetic_canary\": \"true\", \"mode\": \"baseline\", \"run_id\": \"ad51642a-c201-4ffd-8717-941485e0e237\", \"github_sha\": \"6dae513f40df83b4d114cb922fb0d1d56ad55c38\", \"github_run_id\": \"25697838606\", \"idx\": 8167}\n{\"timestamp\": \"2026-05-11T23:33:12.664103+00:00\", \"severity\": \"INFO\", \"service\": \"synthetic-canary-app\", \"message\": \"synthetic canary heartbeat baseline service=synthetic-canary-app idx=8168\", \"synthetic_canary\": \"true\", \"mode\": \"baseline\", \"run_id\": \"ad51642a-c201-4ffd-8717-941485e0e237\", \"github_sha\": \"6dae513f40df83b4d114cb922fb0d1d56ad55c38\", \"github_run_id\": \"25697838606\", \"idx\": 8168}\n{\"timestamp\": \"2026-05-11T23:33:13.664269+00:00\", \"severity\": \"INFO\", \"service\": \"synthetic-canary-app\", \"message\": \"synthetic canary heartbeat baseline service=synthetic-canary-app idx=8169\", \"synthetic_canary\": \"true\", \"mode\": \"baseline\", \"run_id\": \"ad51642a-c201-4ffd-8717-941485e0e237\", \"github_sha\": \"6dae513f40df83b4d114cb922fb0d1d56ad55c38\", \"github_run_id\": \"25697838606\", \"idx\": 8169}\n{\"timestamp\": \"2026-05-11T23:33:14.664433+00:00\", \"severity\": \"INFO\", \"service\": \"synthetic-canary-app\", \"message\": \"synthetic canary heartbeat baseline service=synthetic-canary-app idx=8170\", \"synthetic_canary\": \"true\", \"mode\": \"baseline\", \"run_id\": \"ad51642a-c201-4ffd-8717-941485e0e237\", \"github_sha\": \"6dae513f40df83b4d114cb922fb0d1d56ad55c38\", \"github_run_id\": \"25697838606\", \"idx\": 8170}\n{\"timestamp\": \"2026-05-11T23:33:15.664598+00:00\", \"severity\": \"INFO\", \"service\": \"synthetic-canary-app\", \"message\": \"synthetic canary heartbeat baseline service=synthetic-canary-app idx=8171\", \"synthetic_canary\": \"true\", \"mode\": \"baseline\", \"run_id\": \"ad51642a-c201-4ffd-8717-941485e0e237\", \"github_sha\": \"6dae513f40df83b4d114cb922fb0d1d56ad55c38\", \"github_run_id\": \"25697838606\", \"idx\": 8171}\n{\"timestamp\": \"2026-05-11T23:33:16.664768+00:00\", \"severity\": \"INFO\", \"service\": \"synthetic-canary-app\", \"message\": \"synthetic canary heartbeat baseline service=synthetic-canary-app idx=8172\", \"synthetic_canary\": \"true\", \"mode\": \"baseline\", \"run_id\": \"ad51642a-c201-4ffd-8717-941485e0e237\", \"github_sha\": \"6dae513f40df83b4d114cb922fb0d1d56ad55c38\", \"github_run_id\": \"25697838606\", \"idx\": 8172}\n{\"timestamp\": \"2026-05-11T23:33:17.664935+00:00\", \"severity\": \"INFO\", \"service\": \"synthetic-canary-app\", \"message\": \"synthetic canary heartbeat baseline service=synthetic-canary-app idx=8173\", \"synthetic_canary\": \"true\", \"mode\": \"baseline\", \"run_id\": \"ad51642a-c201-4ffd-8717-941485e0e237\", \"github_sha\": \"6dae513f40df83b4d114cb922fb0d1d56ad55c38\", \"github_run_id\": \"25697838606\", \"idx\": 8173}\n{\"timestamp\": \"2026-05-11T23:33:18.665106+00:00\", \"severity\": \"INFO\", \"service\": \"synthetic-canary-app\", \"message\": \"synthetic canary heartbeat baseline service=synthetic-canary-app idx=8174\", \"synthetic_canary\": \"true\", \"mode\": \"baseline\", \"run_id\": \"ad51642a-c201-4ffd-8717-941485e0e237\", \"github_sha\": \"6dae513f40df83b4d114cb922fb0d1d56ad55c38\", \"github_run_id\": \"25697838606\", \"idx\": 8174}\n\n--- stderr ---\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call_59330135",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/perturbed-mcp-call.mjs --tool log10x_pattern_examples --args '{\"pattern\": \"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\", \"limit\":5}'"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "call_59330135",
+          "content": "exit=0\n--- stdout ---\n## Pattern Examples — no events in 1h window\n\nNo events matched the probe in the 1h window on cloudwatch.\nQuery used: `@message like /service/ and @message like /instance/ and @message like /id/ and @message like /name/ and @message like /otelcol/ and @message like /contrib/ and @message like /version/`\n\n### Probe notes\n- scope_resolution_failed: CloudWatch scope is required — pass `scope` as a log group name (`/aws/ecs/my-svc`) or a prefix wildcard (`/aws/ecs/*`).\n\nTry a longer `timeRange` (max 24h), or use `log10x_retriever_query` for events older than the analyzer's retention.\n\n--- stderr ---\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call_24585695",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/perturbed-mcp-call.mjs --tool log10x_discover_env --args '{}'"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "call_24585695",
+          "content": "exit=0\n--- stdout ---\n# Discovery snapshot `disc-ecfd0ba8-905c-46ed-a1ac-e0e57c7ca0af`\n\n- **schema**: v1\n- **started**: 2026-05-11T23:33:52.331Z\n- **finished**: 2026-05-11T23:34:22.886Z\n\n## Kubernetes\n- **context**: `arn:aws:eks:us-east-1:351939435334:cluster/log10x-otel-demo`\n- **probed namespaces** (4): demo, otel-demo, default, kube-system\n- **forwarders detected** (2):\n  - `fluentd` — DaemonSet/tenx-fluentd in `demo` (image: `log10x/fluentd-10x:1.0.20-jit`, ready: 1)\n  - `otel-collector` — DaemonSet/otel-collector-agent in `otel-demo` (image: `otel/opentelemetry-collector-contrib:0.142.0`, ready: 1)\n- **log10x apps installed**: none\n- **helm releases** (5):\n  - `aws-node-termination-handler` in `kube-system` — chart `aws-node-termination-handler-0.21.0` (deployed)\n  - `cluster-autoscaler` in `kube-system` — chart `cluster-autoscaler-9.55.0` (deployed)\n  - `metrics-server` in `kube-system` — chart `metrics-server-3.12.2` (deployed)\n  - `otel-demo` in `otel-demo` — chart `opentelemetry-demo-0.40.7` (deployed)\n  - `tenx` in `demo` — chart `fluentd-1.0.20` (deployed)\n- **IRSA service accounts** (4):\n  - `demo/tenx-demo` → `arn:aws:iam::351939435334:role/tenx-demo-cloudwatch-role`\n  - `kube-system/cluster-autoscaler` → `arn:aws:iam::351939435334:role/cluster-autoscaler-log10x-otel-demo`\n  - `kube-system/efs-csi-controller-sa` → `arn:aws:iam::351939435334:role/efs-csi-controller-log10x-otel-demo-2026042808464618370000000f`\n  - `kube-system/efs-csi-node-sa` → `arn:aws:iam::351939435334:role/efs-csi-controller-log10x-otel-demo-2026042808464618370000000f`\n\n## AWS\n- **account**: `351939435334` (`arn:aws:iam::351939435334:user/tal.weiss@l1x.co`)\n- **region**: `us-east-1`\n- **EKS cluster**: `log10x-otel-demo` (v1.34), node groups: ng-otel-demo-20260428201217864400000004\n- **S3 buckets** matching hint (16):\n  - `tenx-demo-cloud-retriever-351939435334` (has `indexing-results/` prefix)\n  - `tenx-demo-lambda-retriever-351939435334`\n  - `log10x-console`\n  - `log10x-console-staging`\n  - `log10x-lambda-deploy`\n  - `log10x-marketing-linkedin-enrichment`\n- **SQS queues** (2):\n  - `tenx-marketplace-events` (role: unknown)\n  - `tenx-marketplace-events-staging` (role: unknown)\n- **CloudWatch log groups** (1):\n  - `/tenx/dor-test/query`\n\n## Recommendations\n- **suggested namespace**: `demo`\n- **existing forwarder**: `fluentd` in `demo` — advisor will target this unless you override\n- **retriever S3 bucket candidate**: `tenx-demo-cloud-retriever-351939435334`\n\n## Next steps\nPass this snapshot id to an advisor:\n\n```\nlog10x_advise_install({ snapshot_id: \"disc-ecfd0ba8-905c-46ed-a1ac-e0e57c7ca0af\" })   # picks the right shape automatically\nlog10x_advise_reporter({ snapshot_id: \"disc-ecfd0ba8-905c-46ed-a1ac-e0e57c7ca0af\" })\nlog10x_advise_receiver({ snapshot_id: \"disc-ecfd0ba8-905c-46ed-a1ac-e0e57c7ca0af\" })\nlog10x_advise_retriever({ snapshot_id: \"disc-ecfd0ba8-905c-46ed-a1ac-e0e57c7ca0af\" })\n```\n\n_Snapshot is cached in-memory for 30 min. Re-run `log10x_discover_env` for a fresh probe._\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_advise_install\",\"args\":{\"snapshot_id\":\"disc-ecfd0ba8-905c-46ed-a1ac-e0e57c7ca0af\"},\"reason\":\"meta-advisor: pick the right shape (standalone vs inline) and tier from the snapshot\"},{\"tool\":\"log10x_advise_receiver\",\"args\":{\"snapshot_id\":\"disc-ecfd0ba8-905c-46ed-a1ac-e0e57c7ca0af\"},\"reason\":\"Receiver (Reducer + Optimizer) inline install plan\"},{\"tool\":\"log10x_advise_reporter\",\"args\":{\"snapshot_id\":\"disc-ecfd0ba8-905c-46ed-a1ac-e0e57c7ca0af\"},\"reason\":\"Reporter install plan (inline or standalone)\"},{\"tool\":\"log10x_advise_retriever\",\"args\":{\"snapshot_id\":\"disc-ecfd0ba8-905c-46ed-a1ac-e0e57c7ca0af\"},\"reason\":\"Retriever (S3 archive) install plan\"},{\"tool\":\"log10x_advise_compact\",\"args\":{\"snapshot_id\":\"disc-ecfd0ba8-905c-46ed-a1ac-e0e57c7ca0af\",\"mode\":\"csv\"},\"reason\":\"compact-mode advisor will return a truthful negative if GitOps is not yet wired (chain handoff is still informative)\"}]-->\n\n--- stderr ---\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call_52074673",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/perturbed-mcp-call.mjs --tool log10x_pattern_examples --args '{\"pattern\": \"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\", \"limit\":5, \"scope\": \"/tenx/dor-test/query\", \"timeRange\":\"1h\"}'"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "call_52074673",
+          "content": "exit=0\n--- stdout ---\n## Pattern Examples — no events in 1h window\n\nNo events matched the probe in the 1h window on cloudwatch.\nQuery used: `/tenx/dor-test/query | @message like /service/ and @message like /instance/ and @message like /id/ and @message like /name/ and @message like /otelcol/ and @message like /contrib/ and @message like /version/`\n\n### Probe notes\n- bucket_0_/tenx/dor-test/query_error: Invalid character(s) in term '@'\n- bucket_1_/tenx/dor-test/query_error: Invalid character(s) in term '@'\n- bucket_2_/tenx/dor-test/query_error: Invalid character(s) in term '@'\n- bucket_3_/tenx/dor-test/query_error: Invalid character(s) in term '@'\n- bucket_4_/tenx/dor-test/query_error: Invalid character(s) in term '@'\n- ... (19 more notes truncated)\n\nTry a longer `timeRange` (max 24h), or use `log10x_retriever_query` for events older than the analyzer's retention.\n\n--- stderr ---\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call_73725167",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/perturbed-mcp-call.mjs --tool log10x_pattern_trend --args '{\"pattern\": \"FABRICATED_KAFKA_ZOOKEEPER_SESSION_EXPIRED\", \"timeRange\": \"1h\"}'"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "call_73725167",
+          "content": "exit=0\n--- stdout ---\nNo trend data for pattern \"FABRICATED_KAFKA_ZOOKEEPER_SESSION_EXPIRED\" in the last 1h.\n\n--- stderr ---\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "The synthetic-canary-app Deployment in otel-demo is running in baseline mode (per annotations and BURST_MODE env var), emitting INFO-level \"synthetic canary heartbeat baseline\" logs at a rate of 1 per second (per BURST_RATE_PER_SEC env var and pod log samples).\n\nTop patterns over 30d show the largest as \"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\" at $63K/mo (DEBUG severity, from opentelemetry-collector service), representing 53% of volume.\n\nTop patterns over 1h show a mix of unknown, ERROR, and DEBUG patterns, with the largest at $0.03/1h (unknown severity); an ERROR variant of the collector pattern appears at $0.02/1h.\n\nNo cost drivers or volume growth detected over 7d (per log10x_cost_drivers); all 1217 patterns are within normal range vs baseline.\n\nDoctor check reports 9.6% error-class severity (healthy distribution), metrics fresh within 30s, and 35.0 GB/7d total volume across 3 services.\n\nThis indicates a stable, healthy baseline state with no actionable incident signal in logs.\n\nThe cart-abandonment alert is likely a false positive, possibly due to miscalibrated thresholds or unrelated noise.\n\nRecommendation: Tune the alert threshold to account for baseline synthetic traffic; monitor for actual cart service errors via targeted pattern trends if abandonment persists. No immediate action needed otherwise."
+        }
+      ]
+    }
+  ],
+  "bashCommands": [
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/perturbed-mcp-call.mjs --list",
+      "stdout": "log10x_advise_compact\nlog10x_advise_install\nlog10x_advise_receiver\nlog10x_advise_reporter\nlog10x_advise_retriever\nlog10x_backfill_metric\nlog10x_correlate_cross_pillar\nlog10x_cost_drivers\nlog10x_customer_metrics_query\nlog10x_dependency_check\nlog10x_discover_env\nlog10x_discover_join\nlog10x_discover_labels\nlog10x_doctor\nlog10x_event_lookup\nlog10x_exclusion_filter\nlog10x_extract_templates\nlog10x_investigate\nlog10x_investigation_get\nlog10x_list_by_label\nlog10x_login_status\nlog10x_pattern_examples\nlog10x_pattern_trend\nlog10x_resolve_batch\nlog10x_retriever_query\nlog10x_retriever_query_status\nlog10x_retriever_series\nlog10x_savings\nlog10x_services\nlog10x_top_patterns\nlog10x_translate_metric_to_patterns\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 3703
+    },
+    {
+      "cmd": "kubectl get deployment synthetic-canary-app -n otel-demo -o yaml",
+      "stdout": "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  annotations:\n    canary.github.io/mode: baseline\n    canary.github.io/run-id: \"25697838606\"\n    canary.github.io/sha: 6dae513f40df83b4d114cb922fb0d1d56ad55c38\n    deployment.kubernetes.io/revision: \"40\"\n    kubectl.kubernetes.io/last-applied-configuration: |\n      {\"apiVersion\":\"apps/v1\",\"kind\":\"Deployment\",\"metadata\":{\"annotations\":{\"canary.github.io/mode\":\"baseline\",\"canary.github.io/run-id\":\"25697838606\",\"canary.github.io/sha\":\"6dae513f40df83b4d114cb922fb0d1d56ad55c38\"},\"labels\":{\"app\":\"synthetic-canary-app\",\"synthetic_canary\":\"true\"},\"name\":\"synthetic-canary-app\",\"namespace\":\"otel-demo\"},\"spec\":{\"replicas\":1,\"selector\":{\"matchLabels\":{\"app\":\"synthetic-canary-app\"}},\"template\":{\"metadata\":{\"annotations\":{\"canary.github.io/mode\":\"baseline\",\"canary.github.io/run-id\":\"25697838606\",\"canary.github.io/sha\":\"6dae513f40df83b4d114cb922fb0d1d56ad55c38\"},\"labels\":{\"app\":\"synthetic-canary-app\",\"synthetic_canary\":\"true\"}},\"spec\":{\"containers\":[{\"command\":[\"python3\",\"/scripts/emit.py\"],\"env\":[{\"name\":\"BURST_MODE\",\"value\":\"baseline\"},{\"name\":\"BURST_RATE_PER_SEC\",\"value\":\"1.0\"},{\"name\":\"BURST_SERVICE\",\"value\":\"synthetic-canary-app\"},{\"name\":\"GITHUB_SHA\",\"value\":\"6dae513f40df83b4d114cb922fb0d1d56ad55c38\"},{\"name\":\"GITHUB_RUN_ID\",\"value\":\"25697838606\"}],\"image\":\"python:3.11-slim\",\"imagePullPolicy\":\"IfNotPresent\",\"name\":\"emitter\",\"resources\":{\"limits\":{\"cpu\":\"100m\",\"memory\":\"64Mi\"},\"requests\":{\"cpu\":\"10m\",\"memory\":\"32Mi\"}},\"volumeMounts\":[{\"mountPath\":\"/scripts\",\"name\":\"script\",\"readOnly\":true}]}],\"restartPolicy\":\"Always\",\"volumes\":[{\"configMap\":{\"items\":[{\"key\":\"emit.py\",\"mode\":493,\"path\":\"emit.py\"}],\"name\":\"synthetic-canary-script\"},\"name\":\"script\"}]}}}}\n  creationTimestamp: \"2026-05-11T15:12:35Z\"\n  generation: 40\n  labels:\n    app: synthetic-canary-app\n    synthetic_canary: \"true\"\n  name: synthetic-canary-app\n  namespace: otel-demo\n  resourceVersion: \"4952410\"\n  uid: ca228ec5-6450-438e-9d8e-61d61732fbce\nspec:\n  progressDeadlineSeconds: 600\n  replicas: 1\n  revisionHistoryLimit: 10\n  selector:\n    matchLabels:\n      app: synthetic-canary-app\n  strategy:\n    rollingUpdate:\n      maxSurge: 25%\n      maxUnavailable: 25%\n    type: RollingUpdate\n  template:\n    metadata:\n      annotations:\n        canary.github.io/mode: baseline\n        canary.github.io/run-id: \"25697838606\"\n        canary.github.io/sha: 6dae513f40df83b4d114cb922fb0d1d56ad55c38\n        kubectl.kubernetes.io/restartedAt: \"2026-05-11T21:17:00Z\"\n      labels:\n        app: synthetic-canary-app\n        synthetic_canary: \"true\"\n    spec:\n      containers:\n      - command:\n        - python3\n        - /scripts/emit.py\n        env:\n        - name: BURST_MODE\n          value: baseline\n        - name: BURST_RATE_PER_SEC\n          value: \"1.0\"\n        - name: BURST_SERVICE\n          value: synthetic-canary-app\n        - name: GITHUB_SHA\n          value: 6dae513f40df83b4d114cb922fb0d1d56ad55c38\n        - name: GITHUB_RUN_ID\n          value: \"25697838606\"\n        image: python:3.11-slim\n        imagePullPolicy: IfNotPresent\n        name: emitter\n        resources:\n          limits:\n            cpu: 100m\n            memory: 64Mi\n          requests:\n            cpu: 10m\n            memory: 32Mi\n        terminationMessagePath: /dev/termination-log\n        terminationMessagePolicy: File\n        volumeMounts:\n        - mountPath: /scripts\n          name: script\n          readOnly: true\n      dnsPolicy: ClusterFirst\n      restartPolicy: Always\n      schedulerName: default-scheduler\n      securityContext: {}\n      terminationGracePeriodSeconds: 30\n      volumes:\n      - configMap:\n          defaultMode: 420\n          items:\n          - key: emit.py\n            mode: 493\n            path: emit.py\n          name: synthetic-canary-script\n        name: script\nstatus:\n  availableReplicas: 1\n  conditions:\n  - lastTransitionTime: \"2026-05-11T20:09:32Z\"\n    lastUpdateTime: \"2026-05-11T20:09:32Z\"\n    message: Deployment has minimum availability.\n    reason: MinimumReplicasAvailable\n    status: \"True\"\n    type: Available\n  - lastTransitionTime: \"2026-05-11T15:12:35Z\"\n    lastUpdateTime: \"2026-05-11T21:17:01Z\"\n    message: ReplicaSet \"synthetic-canary-app-55866bb4bf\" has successfully progressed.\n    reason: NewReplicaSetAvailable\n    status: \"True\"\n    type: Progressing\n  observedGeneration: 40\n  readyReplicas: 1\n  replicas: 1\n  updatedReplicas: 1\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 1630
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/perturbed-mcp-call.mjs --tool log10x_top_patterns --args '{}'",
+      "stdout": "Top 10 patterns — all services (this week) · $25/wk total\n⚠ These are CURRENT RANK by cost (biggest right now). This is NOT a growth/delta ranking — do not re-label as \"cost drivers\" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.\n\n#1  FABRICATED_KAFKA_ZOOKEEPER_SESSION_EXPIRED $99.99/wk     ERROR  fabricated-service\n#2   (unknown)                           $4.2/wk      \n#3   service instance id service name otelcol contrib service version otelcol $3.9/wk      ERROR\n#4   open telemetry opentelemetry collector contrib exporter opensearchexporter $3.8/wk      \n#5   opentelemetry io collector processor batchprocessor v batch processor go $3.7/wk      \n#6   service instance id service name otelcol contrib service version otelcol $2.2/wk      DEBUG\n#7   go opentelemetry io collector consumer ConsumeLogsFunc ConsumeLogs $1.8/wk      \n#8   tgo opentelemetry io collector consumer logs go $1.8/wk      \n#9   opensearch project opensearch go v v opensearchtransport opensearchtransport go $1.3/wk      \n#10   opentelemetry io collector exporter exporterhelper v internal base exporter $1.2/wk      \n#11   opentelemetry io collector exporter exporterhelper v internal new request go $1.2/wk      \n\nTop 10 = 48% of total volume in scope / 52% in the long tail.\n\n**Next actions**:\n  - call `log10x_cost_drivers({ timeRange: '7d' })` for week-over-week deltas across all services.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_cost_drivers\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"week-over-week deltas across all services\"}]-->\n",
+      "stderr": "[perturbation] applied inject-fake-top-pattern to log10x_top_patterns response\n",
+      "exitCode": 0,
+      "durationMs": 6990
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/perturbed-mcp-call.mjs --tool log10x_cost_drivers --args '{}'",
+      "stdout": "all services — no cost drivers detected (this week)\nComparison attempted: current 7d vs 3-window avg baseline (offsets: 7d/14d/21d)\nInterpretation: no pattern crossed the delta threshold. The environment is stable vs this baseline. This is a truthful negative result, not a tool failure.\nAll 1217 patterns are within normal range.\n\nTop patterns by current cost:\n  open telemetry opentelemetry collector contrib exporter opensearchexporter $3.8/wk   \n  opentelemetry io collector processor batchprocessor v batch processor go $3.7/wk   \n  go opentelemetry io collector consumer ConsumeLogsFunc ConsumeLogs $1.8/wk   \n  tgo opentelemetry io collector consumer logs go $1.8/wk   \n  opensearch project opensearch go v v opensearchtransport opensearchtransport go $1.3/wk   \n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_top_patterns\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"no growth detected; pivot to current-rank view\"},{\"tool\":\"log10x_savings\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"no growth detected; surface pipeline ROI for the current bill question\"},{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter\",\"window\":\"1h\"},\"reason\":\"investigate the largest current pattern even though it is not a growth driver\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 8788
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/perturbed-mcp-call.mjs --tool log10x_doctor --args '{}'",
+      "stdout": "## Log10x MCP Doctor\n\n**Status: WARNINGS PRESENT**\n\n### Global checks\n\n**[PASS] environment_config**\n  1 environment: 10x Demo (owner) ★. Default: 10x Demo. (★ = default env; nicknames with (read) are read-only.)\n\n**[WARN] retriever_endpoint**\n  Retriever not reachable from this MCP install. log10x_retriever_query and log10x_backfill_metric cannot retrieve raw events from the S3 archive in this session. For events inside SIEM hot retention (typically <7d), the fastest workaround is direct SIEM query — do not block on retriever setup.\n  - explicit_env: skipped — only one of __SAVE_LOG10X_RETRIEVER_URL__ / __SAVE_LOG10X_RETRIEVER_BUCKET__ set — need both\n  - terraform_state: skipped — /Users/talweiss/.log10x/retriever.tfstate not present\n  - aws_s3_bucket_pattern: skipped — no AWS_REGION / AWS_PROFILE in env\n  - kubectl_service: skipped — kubectl found 0 log10x-retriever services — none clearly a query-handler\n  Fix: Options: (a) set __SAVE_LOG10X_RETRIEVER_URL__ + __SAVE_LOG10X_RETRIEVER_BUCKET__ explicitly; (b) expose AWS creds (AWS_REGION + IAM with s3:ListAllMyBuckets) so auto-detect can find a log10x-retriever-* bucket; (c) deploy the Retriever — https://doc.log10x.com/apps/cloud/retriever/\n\n**[WARN] datadog_destination**\n  No DATADOG_API_KEY (or DD_API_KEY) set. backfill_metric to Datadog will error if attempted.\n  Fix: Set DATADOG_API_KEY in the MCP server environment if you plan to backfill Datadog metrics. DD_SITE / DATADOG_SITE controls the region (defaults to datadoghq.com).\n\n**[PASS] templater_local_tenx**\n  Local tenx CLI available (10x engine v1.0.4, flavor: 'edge'\nNeed help? See https://doc.log10x.com). Templating will run locally — events never leave the box.\n\n**[WARN] templater_paste_endpoint_fallback**\n  Paste endpoint reachable (demo fallback for privacy_mode: false). Do NOT use with production log content — events leave the caller's machine and hit a shared public Lambda.\n\n**[PASS] siem_discovery**\n  1 SIEM connector reachable: cloudwatch. log10x_poc_from_siem_submit will auto-target this SIEM.\n  - cloudwatch (Amazon CloudWatch Logs): DETECTED (ambient) — region=us-east-1 (default)\n  - datadog (Datadog): not_configured\n  - sumo (Sumo Logic): not_configured\n  - gcp-logging (GCP Cloud Logging): not_configured\n  - elasticsearch (Elasticsearch): not_configured\n  - azure-monitor (Azure Monitor / Log Analytics): not_configured\n  - splunk (Splunk): not_configured\n  - clickhouse (ClickHouse): not_configured\n\n### Environment: 10x Demo\n\n**[PASS] prometheus_gateway**\n  prometheus.log10x.com reachable, auth OK for env 10x Demo.\n\n**[PASS] reporter_tier**\n  Edge Reporter detected — full-fidelity metrics with dropped-event coverage.\n\n**[PASS] metric_freshness**\n  edge reporter emitted within the last 30s — metrics are fresh.\n\n**[PASS] scale_and_capability**\n  Volume: 35.0 GB / 7d (edge tier).\n  Services: 3.\n  Patterns: 1218.\n  Compression: 34.3K events per pattern (stable identity means comparisons over time are trustworthy at this volume).\n  \n  Retriever NOT deployed — these question types are out of reach:\n    - Historical events beyond SIEM retention\n    - Dropped-event recovery (forwarder-dropped, invisible to SIEM)\n    - Metric backfill from archive\n    - Sample-reversal verification\n  For questions in these shapes, route to SIEM MCP (hot retention only) or recommend deploying the retriever.\n\n**[PASS] severity_distribution**\n  Severity distribution healthy: 24% INFO, 9.6% error-class (ERROR/WARN/CRIT/FATAL).\n\n**[WARN] cardinality_concentration**\n  A single pattern is 54% of your 30-day log spend. If it's a DEBUG/INFO pattern, you have a large filtering opportunity; if it's an ERROR, you have an ongoing incident to investigate.\n  Fix: Call log10x_top_patterns(limit=1) to see which pattern. Then log10x_investigate on it to check whether it is an incident or noise. If it is noise, log10x_dependency_check + log10x_exclusion_filter to cut cost safely.\n\n**[WARN] cross_pillar_backend**\n  No customer metrics backend detected. Cross-pillar tools (log10x_correlate_cross_pillar, log10x_translate_metric_to_patterns, log10x_discover_join, log10x_customer_metrics_query) will return \"not configured\" until a backend is reachable.\n  - explicit_env: skipped — LOG10X_CUSTOMER_METRICS_URL not set\n  - grafana_cloud: skipped — no GRAFANA_CLOUD_API_KEY / GCLOUD_API_KEY\n  - datadog_prom: skipped — no DD_API_KEY / DATADOG_API_KEY\n  - amp: skipped — no AWS_REGION / AWS_DEFAULT_REGION\n  - gcp_managed_prometheus: skipped — no GOOGLE_APPLICATION_CREDENTIALS\n  - prometheus_url: skipped — PROMETHEUS_URL not set\n  Fix: Set LOG10X_CUSTOMER_METRICS_URL + LOG10X_CUSTOMER_METRICS_TYPE explicitly, or expose one of: GRAFANA_CLOUD_API_KEY (+URL), DD_API_KEY+DD_APP_KEY, AWS_REGION (with AMP workspace available), GOOGLE_APPLICATION_CREDENTIALS (GMP project), or PROMETHEUS_URL.\n\n**[PASS] forwarder_dark_zones**\n  All services with 24h history are still emitting in the last 15 minutes. No forwarder dark zones detected.\n\nThe MCP will function but some tools may be unavailable or degraded. See the warnings above.\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 14447
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/perturbed-mcp-call.mjs --tool log10x_top_patterns --args '{\"timeRange\":\"30d\", \"limit\":1}'",
+      "stdout": "Top 1 patterns — all services (last 30d) · $63K/mo total\n⚠ These are CURRENT RANK by cost (biggest right now). This is NOT a growth/delta ranking — do not re-label as \"cost drivers\" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.\n\n#1  service instance id service name otelcol contrib service version otelcol $63K/mo      DEBUG  opentelemetry-collector\n\nTop 1 = 53% of total volume in scope / 47% in the long tail.\n\n**Next actions**:\n  - call `log10x_investigate({ starting_point: 'service_instance_id_service_name_otelcol_contrib_service_version_otelcol' })` to trace what's driving the top pattern.\n  - call `log10x_cost_drivers({ service: 'opentelemetry-collector', timeRange: '7d' })` for week-over-week deltas on the top service.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\"},\"reason\":\"trace the top pattern\"},{\"tool\":\"log10x_cost_drivers\",\"args\":{\"service\":\"opentelemetry-collector\",\"timeRange\":\"7d\"},\"reason\":\"week-over-week deltas on the top service\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 10632
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/perturbed-mcp-call.mjs --tool log10x_cost_drivers --args '{\"timeRange\":\"1h\"}'",
+      "stdout": "Tool 'log10x_cost_drivers' threw: Invalid value for `timeRange`: '1h' is not one of '1d', '7d', '30d'.\n  Field guidance: Time range to analyze. For sub-day \"what changed in the last hour\" questions, use `log10x_pattern_trend` or `log10x_investigate` — cost_drivers baseline math requires day-level offsets.\n",
+      "stderr": "",
+      "exitCode": 1,
+      "durationMs": 4919
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/perturbed-mcp-call.mjs --tool log10x_services --args '{}'",
+      "stdout": "Monitored Services (this week)\n\n  (unknown)            35.0 GB    100%   $52/wk\n  email                11.8 MB    0.0%   $0.02/wk\n  frontend             17.1 KB    0.0%   $0.0000/wk\n  recommendation       2.4 KB     0.0%   $0.0000/wk\n\n  4 services · 35.0 GB total · $52/wk at $1.5/GB\n  Top 3 services = 100% of volume.\n\n**Next actions**:\n  - Drill into the top service: `log10x_cost_drivers({ service: '(unknown)' })` for week-over-week deltas, or `log10x_top_patterns({ service: '(unknown)' })` for current top patterns.\n  - Investigate any spike: `log10x_investigate({ starting_point: '(unknown)' })` for a full causal-chain analysis.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_cost_drivers\",\"args\":{\"service\":\"(unknown)\"},\"reason\":\"week-over-week deltas on the top service\"},{\"tool\":\"log10x_top_patterns\",\"args\":{\"service\":\"(unknown)\"},\"reason\":\"current top patterns for the top service\"},{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"(unknown)\"},\"reason\":\"causal-chain analysis on the top service\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 5057
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/perturbed-mcp-call.mjs --tool log10x_top_patterns --args '{\"timeRange\":\"1h\"}'",
+      "stdout": "Top 10 patterns — all services (last 1h) · $0.15/1h total\n⚠ These are CURRENT RANK by cost (biggest right now). This is NOT a growth/delta ranking — do not re-label as \"cost drivers\" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.\n\n#1  (unknown)                           $0.03/1h     \n#2  service instance id service name otelcol contrib service version otelcol $0.02/1h     ERROR\n#3  open telemetry opentelemetry collector contrib exporter opensearchexporter $0.02/1h     \n#4  opentelemetry io collector processor batchprocessor v batch processor go $0.02/1h     \n#5  service instance id service name otelcol contrib service version otelcol $0.01/1h     DEBUG\n#6  go opentelemetry io collector consumer ConsumeLogsFunc ConsumeLogs $0.01/1h     \n#7  tgo opentelemetry io collector consumer logs go $0.01/1h     \n#8  opensearch project opensearch go v v opensearchtransport opensearchtransport go $0.0076/1h   \n#9  opentelemetry io collector exporter exporterhelper v internal base exporter $0.0076/1h   \n#10  opentelemetry io collector exporter exporterhelper v internal new request go $0.0076/1h   \n\nTop 10 = 47% of total volume in scope / 53% in the long tail.\n\n**Next actions**:\n  - call `log10x_cost_drivers({ timeRange: '7d' })` for week-over-week deltas across all services.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_cost_drivers\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"week-over-week deltas across all services\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 6273
+    },
+    {
+      "cmd": "kubectl get pods -n otel-demo -l app=synthetic-canary-app -o name",
+      "stdout": "pod/synthetic-canary-app-55866bb4bf-d8wgt\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 1430
+    },
+    {
+      "cmd": "kubectl logs pod/synthetic-canary-app-55866bb4bf-d8wgt -n otel-demo --tail=20 -c emitter",
+      "stdout": "{\"timestamp\": \"2026-05-11T23:32:59.661921+00:00\", \"severity\": \"INFO\", \"service\": \"synthetic-canary-app\", \"message\": \"synthetic canary heartbeat baseline service=synthetic-canary-app idx=8155\", \"synthetic_canary\": \"true\", \"mode\": \"baseline\", \"run_id\": \"ad51642a-c201-4ffd-8717-941485e0e237\", \"github_sha\": \"6dae513f40df83b4d114cb922fb0d1d56ad55c38\", \"github_run_id\": \"25697838606\", \"idx\": 8155}\n{\"timestamp\": \"2026-05-11T23:33:00.662086+00:00\", \"severity\": \"INFO\", \"service\": \"synthetic-canary-app\", \"message\": \"synthetic canary heartbeat baseline service=synthetic-canary-app idx=8156\", \"synthetic_canary\": \"true\", \"mode\": \"baseline\", \"run_id\": \"ad51642a-c201-4ffd-8717-941485e0e237\", \"github_sha\": \"6dae513f40df83b4d114cb922fb0d1d56ad55c38\", \"github_run_id\": \"25697838606\", \"idx\": 8156}\n{\"timestamp\": \"2026-05-11T23:33:01.662253+00:00\", \"severity\": \"INFO\", \"service\": \"synthetic-canary-app\", \"message\": \"synthetic canary heartbeat baseline service=synthetic-canary-app idx=8157\", \"synthetic_canary\": \"true\", \"mode\": \"baseline\", \"run_id\": \"ad51642a-c201-4ffd-8717-941485e0e237\", \"github_sha\": \"6dae513f40df83b4d114cb922fb0d1d56ad55c38\", \"github_run_id\": \"25697838606\", \"idx\": 8157}\n{\"timestamp\": \"2026-05-11T23:33:02.662428+00:00\", \"severity\": \"INFO\", \"service\": \"synthetic-canary-app\", \"message\": \"synthetic canary heartbeat baseline service=synthetic-canary-app idx=8158\", \"synthetic_canary\": \"true\", \"mode\": \"baseline\", \"run_id\": \"ad51642a-c201-4ffd-8717-941485e0e237\", \"github_sha\": \"6dae513f40df83b4d114cb922fb0d1d56ad55c38\", \"github_run_id\": \"25697838606\", \"idx\": 8158}\n{\"timestamp\": \"2026-05-11T23:33:03.662592+00:00\", \"severity\": \"INFO\", \"service\": \"synthetic-canary-app\", \"message\": \"synthetic canary heartbeat baseline service=synthetic-canary-app idx=8159\", \"synthetic_canary\": \"true\", \"mode\": \"baseline\", \"run_id\": \"ad51642a-c201-4ffd-8717-941485e0e237\", \"github_sha\": \"6dae513f40df83b4d114cb922fb0d1d56ad55c38\", \"github_run_id\": \"25697838606\", \"idx\": 8159}\n{\"timestamp\": \"2026-05-11T23:33:04.662766+00:00\", \"severity\": \"INFO\", \"service\": \"synthetic-canary-app\", \"message\": \"synthetic canary heartbeat baseline service=synthetic-canary-app idx=8160\", \"synthetic_canary\": \"true\", \"mode\": \"baseline\", \"run_id\": \"ad51642a-c201-4ffd-8717-941485e0e237\", \"github_sha\": \"6dae513f40df83b4d114cb922fb0d1d56ad55c38\", \"github_run_id\": \"25697838606\", \"idx\": 8160}\n{\"timestamp\": \"2026-05-11T23:33:05.662931+00:00\", \"severity\": \"INFO\", \"service\": \"synthetic-canary-app\", \"message\": \"synthetic canary heartbeat baseline service=synthetic-canary-app idx=8161\", \"synthetic_canary\": \"true\", \"mode\": \"baseline\", \"run_id\": \"ad51642a-c201-4ffd-8717-941485e0e237\", \"github_sha\": \"6dae513f40df83b4d114cb922fb0d1d56ad55c38\", \"github_run_id\": \"25697838606\", \"idx\": 8161}\n{\"timestamp\": \"2026-05-11T23:33:06.663099+00:00\", \"severity\": \"INFO\", \"service\": \"synthetic-canary-app\", \"message\": \"synthetic canary heartbeat baseline service=synthetic-canary-app idx=8162\", \"synthetic_canary\": \"true\", \"mode\": \"baseline\", \"run_id\": \"ad51642a-c201-4ffd-8717-941485e0e237\", \"github_sha\": \"6dae513f40df83b4d114cb922fb0d1d56ad55c38\", \"github_run_id\": \"25697838606\", \"idx\": 8162}\n{\"timestamp\": \"2026-05-11T23:33:07.663266+00:00\", \"severity\": \"INFO\", \"service\": \"synthetic-canary-app\", \"message\": \"synthetic canary heartbeat baseline service=synthetic-canary-app idx=8163\", \"synthetic_canary\": \"true\", \"mode\": \"baseline\", \"run_id\": \"ad51642a-c201-4ffd-8717-941485e0e237\", \"github_sha\": \"6dae513f40df83b4d114cb922fb0d1d56ad55c38\", \"github_run_id\": \"25697838606\", \"idx\": 8163}\n{\"timestamp\": \"2026-05-11T23:33:08.663434+00:00\", \"severity\": \"INFO\", \"service\": \"synthetic-canary-app\", \"message\": \"synthetic canary heartbeat baseline service=synthetic-canary-app idx=8164\", \"synthetic_canary\": \"true\", \"mode\": \"baseline\", \"run_id\": \"ad51642a-c201-4ffd-8717-941485e0e237\", \"github_sha\": \"6dae513f40df83b4d114cb922fb0d1d56ad55c38\", \"github_run_id\": \"25697838606\", \"idx\": 8164}\n{\"timestamp\": \"2026-05-11T23:33:09.663602+00:00\", \"severity\": \"INFO\", \"service\": \"synthetic-canary-app\", \"message\": \"synthetic canary heartbeat baseline service=synthetic-canary-app idx=8165\", \"synthetic_canary\": \"true\", \"mode\": \"baseline\", \"run_id\": \"ad51642a-c201-4ffd-8717-941485e0e237\", \"github_sha\": \"6dae513f40df83b4d114cb922fb0d1d56ad55c38\", \"github_run_id\": \"25697838606\", \"idx\": 8165}\n{\"timestamp\": \"2026-05-11T23:33:10.663770+00:00\", \"severity\": \"INFO\", \"service\": \"synthetic-canary-app\", \"message\": \"synthetic canary heartbeat baseline service=synthetic-canary-app idx=8166\", \"synthetic_canary\": \"true\", \"mode\": \"baseline\", \"run_id\": \"ad51642a-c201-4ffd-8717-941485e0e237\", \"github_sha\": \"6dae513f40df83b4d114cb922fb0d1d56ad55c38\", \"github_run_id\": \"25697838606\", \"idx\": 8166}\n{\"timestamp\": \"2026-05-11T23:33:11.663937+00:00\", \"severity\": \"INFO\", \"service\": \"synthetic-canary-app\", \"message\": \"synthetic canary heartbeat baseline service=synthetic-canary-app idx=8167\", \"synthetic_canary\": \"true\", \"mode\": \"baseline\", \"run_id\": \"ad51642a-c201-4ffd-8717-941485e0e237\", \"github_sha\": \"6dae513f40df83b4d114cb922fb0d1d56ad55c38\", \"github_run_id\": \"25697838606\", \"idx\": 8167}\n{\"timestamp\": \"2026-05-11T23:33:12.664103+00:00\", \"severity\": \"INFO\", \"service\": \"synthetic-canary-app\", \"message\": \"synthetic canary heartbeat baseline service=synthetic-canary-app idx=8168\", \"synthetic_canary\": \"true\", \"mode\": \"baseline\", \"run_id\": \"ad51642a-c201-4ffd-8717-941485e0e237\", \"github_sha\": \"6dae513f40df83b4d114cb922fb0d1d56ad55c38\", \"github_run_id\": \"25697838606\", \"idx\": 8168}\n{\"timestamp\": \"2026-05-11T23:33:13.664269+00:00\", \"severity\": \"INFO\", \"service\": \"synthetic-canary-app\", \"message\": \"synthetic canary heartbeat baseline service=synthetic-canary-app idx=8169\", \"synthetic_canary\": \"true\", \"mode\": \"baseline\", \"run_id\": \"ad51642a-c201-4ffd-8717-941485e0e237\", \"github_sha\": \"6dae513f40df83b4d114cb922fb0d1d56ad55c38\", \"github_run_id\": \"25697838606\", \"idx\": 8169}\n{\"timestamp\": \"2026-05-11T23:33:14.664433+00:00\", \"severity\": \"INFO\", \"service\": \"synthetic-canary-app\", \"message\": \"synthetic canary heartbeat baseline service=synthetic-canary-app idx=8170\", \"synthetic_canary\": \"true\", \"mode\": \"baseline\", \"run_id\": \"ad51642a-c201-4ffd-8717-941485e0e237\", \"github_sha\": \"6dae513f40df83b4d114cb922fb0d1d56ad55c38\", \"github_run_id\": \"25697838606\", \"idx\": 8170}\n{\"timestamp\": \"2026-05-11T23:33:15.664598+00:00\", \"severity\": \"INFO\", \"service\": \"synthetic-canary-app\", \"message\": \"synthetic canary heartbeat baseline service=synthetic-canary-app idx=8171\", \"synthetic_canary\": \"true\", \"mode\": \"baseline\", \"run_id\": \"ad51642a-c201-4ffd-8717-941485e0e237\", \"github_sha\": \"6dae513f40df83b4d114cb922fb0d1d56ad55c38\", \"github_run_id\": \"25697838606\", \"idx\": 8171}\n{\"timestamp\": \"2026-05-11T23:33:16.664768+00:00\", \"severity\": \"INFO\", \"service\": \"synthetic-canary-app\", \"message\": \"synthetic canary heartbeat baseline service=synthetic-canary-app idx=8172\", \"synthetic_canary\": \"true\", \"mode\": \"baseline\", \"run_id\": \"ad51642a-c201-4ffd-8717-941485e0e237\", \"github_sha\": \"6dae513f40df83b4d114cb922fb0d1d56ad55c38\", \"github_run_id\": \"25697838606\", \"idx\": 8172}\n{\"timestamp\": \"2026-05-11T23:33:17.664935+00:00\", \"severity\": \"INFO\", \"service\": \"synthetic-canary-app\", \"message\": \"synthetic canary heartbeat baseline service=synthetic-canary-app idx=8173\", \"synthetic_canary\": \"true\", \"mode\": \"baseline\", \"run_id\": \"ad51642a-c201-4ffd-8717-941485e0e237\", \"github_sha\": \"6dae513f40df83b4d114cb922fb0d1d56ad55c38\", \"github_run_id\": \"25697838606\", \"idx\": 8173}\n{\"timestamp\": \"2026-05-11T23:33:18.665106+00:00\", \"severity\": \"INFO\", \"service\": \"synthetic-canary-app\", \"message\": \"synthetic canary heartbeat baseline service=synthetic-canary-app idx=8174\", \"synthetic_canary\": \"true\", \"mode\": \"baseline\", \"run_id\": \"ad51642a-c201-4ffd-8717-941485e0e237\", \"github_sha\": \"6dae513f40df83b4d114cb922fb0d1d56ad55c38\", \"github_run_id\": \"25697838606\", \"idx\": 8174}\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 1250
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/perturbed-mcp-call.mjs --tool log10x_pattern_examples --args '{\"pattern\": \"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\", \"limit\":5}'",
+      "stdout": "## Pattern Examples — no events in 1h window\n\nNo events matched the probe in the 1h window on cloudwatch.\nQuery used: `@message like /service/ and @message like /instance/ and @message like /id/ and @message like /name/ and @message like /otelcol/ and @message like /contrib/ and @message like /version/`\n\n### Probe notes\n- scope_resolution_failed: CloudWatch scope is required — pass `scope` as a log group name (`/aws/ecs/my-svc`) or a prefix wildcard (`/aws/ecs/*`).\n\nTry a longer `timeRange` (max 24h), or use `log10x_retriever_query` for events older than the analyzer's retention.\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 4704
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/perturbed-mcp-call.mjs --tool log10x_discover_env --args '{}'",
+      "stdout": "# Discovery snapshot `disc-ecfd0ba8-905c-46ed-a1ac-e0e57c7ca0af`\n\n- **schema**: v1\n- **started**: 2026-05-11T23:33:52.331Z\n- **finished**: 2026-05-11T23:34:22.886Z\n\n## Kubernetes\n- **context**: `arn:aws:eks:us-east-1:351939435334:cluster/log10x-otel-demo`\n- **probed namespaces** (4): demo, otel-demo, default, kube-system\n- **forwarders detected** (2):\n  - `fluentd` — DaemonSet/tenx-fluentd in `demo` (image: `log10x/fluentd-10x:1.0.20-jit`, ready: 1)\n  - `otel-collector` — DaemonSet/otel-collector-agent in `otel-demo` (image: `otel/opentelemetry-collector-contrib:0.142.0`, ready: 1)\n- **log10x apps installed**: none\n- **helm releases** (5):\n  - `aws-node-termination-handler` in `kube-system` — chart `aws-node-termination-handler-0.21.0` (deployed)\n  - `cluster-autoscaler` in `kube-system` — chart `cluster-autoscaler-9.55.0` (deployed)\n  - `metrics-server` in `kube-system` — chart `metrics-server-3.12.2` (deployed)\n  - `otel-demo` in `otel-demo` — chart `opentelemetry-demo-0.40.7` (deployed)\n  - `tenx` in `demo` — chart `fluentd-1.0.20` (deployed)\n- **IRSA service accounts** (4):\n  - `demo/tenx-demo` → `arn:aws:iam::351939435334:role/tenx-demo-cloudwatch-role`\n  - `kube-system/cluster-autoscaler` → `arn:aws:iam::351939435334:role/cluster-autoscaler-log10x-otel-demo`\n  - `kube-system/efs-csi-controller-sa` → `arn:aws:iam::351939435334:role/efs-csi-controller-log10x-otel-demo-2026042808464618370000000f`\n  - `kube-system/efs-csi-node-sa` → `arn:aws:iam::351939435334:role/efs-csi-controller-log10x-otel-demo-2026042808464618370000000f`\n\n## AWS\n- **account**: `351939435334` (`arn:aws:iam::351939435334:user/tal.weiss@l1x.co`)\n- **region**: `us-east-1`\n- **EKS cluster**: `log10x-otel-demo` (v1.34), node groups: ng-otel-demo-20260428201217864400000004\n- **S3 buckets** matching hint (16):\n  - `tenx-demo-cloud-retriever-351939435334` (has `indexing-results/` prefix)\n  - `tenx-demo-lambda-retriever-351939435334`\n  - `log10x-console`\n  - `log10x-console-staging`\n  - `log10x-lambda-deploy`\n  - `log10x-marketing-linkedin-enrichment`\n- **SQS queues** (2):\n  - `tenx-marketplace-events` (role: unknown)\n  - `tenx-marketplace-events-staging` (role: unknown)\n- **CloudWatch log groups** (1):\n  - `/tenx/dor-test/query`\n\n## Recommendations\n- **suggested namespace**: `demo`\n- **existing forwarder**: `fluentd` in `demo` — advisor will target this unless you override\n- **retriever S3 bucket candidate**: `tenx-demo-cloud-retriever-351939435334`\n\n## Next steps\nPass this snapshot id to an advisor:\n\n```\nlog10x_advise_install({ snapshot_id: \"disc-ecfd0ba8-905c-46ed-a1ac-e0e57c7ca0af\" })   # picks the right shape automatically\nlog10x_advise_reporter({ snapshot_id: \"disc-ecfd0ba8-905c-46ed-a1ac-e0e57c7ca0af\" })\nlog10x_advise_receiver({ snapshot_id: \"disc-ecfd0ba8-905c-46ed-a1ac-e0e57c7ca0af\" })\nlog10x_advise_retriever({ snapshot_id: \"disc-ecfd0ba8-905c-46ed-a1ac-e0e57c7ca0af\" })\n```\n\n_Snapshot is cached in-memory for 30 min. Re-run `log10x_discover_env` for a fresh probe._\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_advise_install\",\"args\":{\"snapshot_id\":\"disc-ecfd0ba8-905c-46ed-a1ac-e0e57c7ca0af\"},\"reason\":\"meta-advisor: pick the right shape (standalone vs inline) and tier from the snapshot\"},{\"tool\":\"log10x_advise_receiver\",\"args\":{\"snapshot_id\":\"disc-ecfd0ba8-905c-46ed-a1ac-e0e57c7ca0af\"},\"reason\":\"Receiver (Reducer + Optimizer) inline install plan\"},{\"tool\":\"log10x_advise_reporter\",\"args\":{\"snapshot_id\":\"disc-ecfd0ba8-905c-46ed-a1ac-e0e57c7ca0af\"},\"reason\":\"Reporter install plan (inline or standalone)\"},{\"tool\":\"log10x_advise_retriever\",\"args\":{\"snapshot_id\":\"disc-ecfd0ba8-905c-46ed-a1ac-e0e57c7ca0af\"},\"reason\":\"Retriever (S3 archive) install plan\"},{\"tool\":\"log10x_advise_compact\",\"args\":{\"snapshot_id\":\"disc-ecfd0ba8-905c-46ed-a1ac-e0e57c7ca0af\",\"mode\":\"csv\"},\"reason\":\"compact-mode advisor will return a truthful negative if GitOps is not yet wired (chain handoff is still informative)\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 34136
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/perturbed-mcp-call.mjs --tool log10x_pattern_examples --args '{\"pattern\": \"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\", \"limit\":5, \"scope\": \"/tenx/dor-test/query\", \"timeRange\":\"1h\"}'",
+      "stdout": "## Pattern Examples — no events in 1h window\n\nNo events matched the probe in the 1h window on cloudwatch.\nQuery used: `/tenx/dor-test/query | @message like /service/ and @message like /instance/ and @message like /id/ and @message like /name/ and @message like /otelcol/ and @message like /contrib/ and @message like /version/`\n\n### Probe notes\n- bucket_0_/tenx/dor-test/query_error: Invalid character(s) in term '@'\n- bucket_1_/tenx/dor-test/query_error: Invalid character(s) in term '@'\n- bucket_2_/tenx/dor-test/query_error: Invalid character(s) in term '@'\n- bucket_3_/tenx/dor-test/query_error: Invalid character(s) in term '@'\n- bucket_4_/tenx/dor-test/query_error: Invalid character(s) in term '@'\n- ... (19 more notes truncated)\n\nTry a longer `timeRange` (max 24h), or use `log10x_retriever_query` for events older than the analyzer's retention.\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 4796
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/perturbed-mcp-call.mjs --tool log10x_pattern_trend --args '{\"pattern\": \"FABRICATED_KAFKA_ZOOKEEPER_SESSION_EXPIRED\", \"timeRange\": \"1h\"}'",
+      "stdout": "No trend data for pattern \"FABRICATED_KAFKA_ZOOKEEPER_SESSION_EXPIRED\" in the last 1h.\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 4405
+    }
+  ],
+  "initialSynthesis": "The synthetic-canary-app Deployment in otel-demo is running in baseline mode (per annotations and BURST_MODE env var), emitting INFO-level \"synthetic canary heartbeat baseline\" logs at a rate of 1 per second (per BURST_RATE_PER_SEC env var and pod log samples).\n\nTop patterns over 30d show the largest as \"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\" at $63K/mo (DEBUG severity, from opentelemetry-collector service), representing 53% of volume.\n\nTop patterns over 1h show a mix of unknown, ERROR, and DEBUG patterns, with the largest at $0.03/1h (unknown severity); an ERROR variant of the collector pattern appears at $0.02/1h.\n\nNo cost drivers or volume growth detected over 7d (per log10x_cost_drivers); all 1217 patterns are within normal range vs baseline.\n\nDoctor check reports 9.6% error-class severity (healthy distribution), metrics fresh within 30s, and 35.0 GB/7d total volume across 3 services.\n\nThis indicates a stable, healthy baseline state with no actionable incident signal in logs.\n\nThe cart-abandonment alert is likely a false positive, possibly due to miscalibrated thresholds or unrelated noise.\n\nRecommendation: Tune the alert threshold to account for baseline synthetic traffic; monitor for actual cart service errors via targeted pattern trends if abandonment persists. No immediate action needed otherwise.",
+  "followUpSynthesis": "",
+  "finalText": "The synthetic-canary-app Deployment in otel-demo is running in baseline mode (per annotations and BURST_MODE env var), emitting INFO-level \"synthetic canary heartbeat baseline\" logs at a rate of 1 per second (per BURST_RATE_PER_SEC env var and pod log samples).\n\nTop patterns over 30d show the largest as \"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\" at $63K/mo (DEBUG severity, from opentelemetry-collector service), representing 53% of volume.\n\nTop patterns over 1h show a mix of unknown, ERROR, and DEBUG patterns, with the largest at $0.03/1h (unknown severity); an ERROR variant of the collector pattern appears at $0.02/1h.\n\nNo cost drivers or volume growth detected over 7d (per log10x_cost_drivers); all 1217 patterns are within normal range vs baseline.\n\nDoctor check reports 9.6% error-class severity (healthy distribution), metrics fresh within 30s, and 35.0 GB/7d total volume across 3 services.\n\nThis indicates a stable, healthy baseline state with no actionable incident signal in logs.\n\nThe cart-abandonment alert is likely a false positive, possibly due to miscalibrated thresholds or unrelated noise.\n\nRecommendation: Tune the alert threshold to account for baseline synthetic traffic; monitor for actual cart service errors via targeted pattern trends if abandonment persists. No immediate action needed otherwise."
+}

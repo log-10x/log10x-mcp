@@ -1,0 +1,200 @@
+{
+  "spec": {
+    "id": "mcp-only-cost-audit",
+    "title": "MCP-only — cost / growth / volume audit using log10x_* tools exclusively",
+    "category": "cost",
+    "prompt": "We need a week-over-week cost audit of the otel-demo environment. Specifically: (1) which patterns are the top 3 cost drivers right now (current rank), (2) which patterns are the top 3 GROWTH drivers (week-over-week deltas), and (3) which 3 services consume the most volume. For each answer, name the pattern / service VERBATIM as returned by the tool and quote the cost number from tool stdout. Tools you may use are limited to the log10x_* MCP catalog only — do NOT use kubectl, do NOT use gh, do NOT use grep / awk / curl / or any other shell utility beyond the MCP CLI invocation itself. If the MCP returns 'no drivers detected' or 'no data' for a section, report that honestly instead of inventing numbers.",
+    "persona": "Cost-management SRE on a budget-review cycle. Uses only the log10x platform's tools. Treats 'no data' / 'no drivers' as legitimate honest answers, not as failure conditions.",
+    "budget_hint": "4-8 tool calls.",
+    "expected_answer": {
+      "summary": "Agent should call log10x_top_patterns (or log10x_cost_drivers for week-over-week) + log10x_services and report what those tools return. Top patterns in otel-demo tend to be otel-collector + jaeger infrastructure patterns. cost_drivers may return 'no drivers detected (this week)' when env is stable — that IS the answer. PASS = agent reports verbatim what tools said and honestly admits when MCP returns empty; FAIL = agent fabricates pattern names, invents cost figures, OR uses kubectl/gh to work around the MCP-only constraint.",
+      "must_mention": [],
+      "expected_tool_chain": [
+        "log10x_top_patterns",
+        "log10x_cost_drivers",
+        "log10x_services"
+      ],
+      "snapshot_ts": "2026-05-11T22:00:00.000Z"
+    }
+  },
+  "runnerModel": "claude-sonnet-4-6",
+  "runnerVendor": "anthropic",
+  "messages": [
+    {
+      "role": "user",
+      "content": "We need a week-over-week cost audit of the otel-demo environment. Specifically: (1) which patterns are the top 3 cost drivers right now (current rank), (2) which patterns are the top 3 GROWTH drivers (week-over-week deltas), and (3) which 3 services consume the most volume. For each answer, name the pattern / service VERBATIM as returned by the tool and quote the cost number from tool stdout. Tools you may use are limited to the log10x_* MCP catalog only — do NOT use kubectl, do NOT use gh, do NOT use grep / awk / curl / or any other shell utility beyond the MCP CLI invocation itself. If the MCP returns 'no drivers detected' or 'no data' for a section, report that honestly instead of inventing numbers."
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_01MqKqJBLEHEQQp8hsu3Xdn5",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --list"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01MqKqJBLEHEQQp8hsu3Xdn5",
+          "content": "exit=0\n--- stdout ---\nlog10x_advise_compact\nlog10x_advise_install\nlog10x_advise_receiver\nlog10x_advise_reporter\nlog10x_advise_retriever\nlog10x_backfill_metric\nlog10x_correlate_cross_pillar\nlog10x_cost_drivers\nlog10x_customer_metrics_query\nlog10x_dependency_check\nlog10x_discover_env\nlog10x_discover_join\nlog10x_discover_labels\nlog10x_doctor\nlog10x_event_lookup\nlog10x_exclusion_filter\nlog10x_extract_templates\nlog10x_investigate\nlog10x_investigation_get\nlog10x_list_by_label\nlog10x_login_status\nlog10x_pattern_examples\nlog10x_pattern_trend\nlog10x_resolve_batch\nlog10x_retriever_query\nlog10x_retriever_query_status\nlog10x_retriever_series\nlog10x_savings\nlog10x_services\nlog10x_top_patterns\nlog10x_translate_metric_to_patterns\n\n--- stderr ---\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Good. I can see the full catalog. Now let me fire off all three independent queries in parallel: cost drivers (for current rank + WoW growth), and top services by volume."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01FRXccCQ4NPyZJeKG3rfCbe",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_cost_drivers --args '{\"window\": \"7d\"}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01Wg3r8683SDUwdezZJHM5wA",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_services --args '{}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01FRXccCQ4NPyZJeKG3rfCbe",
+          "content": "exit=0\n--- stdout ---\nall services — no cost drivers detected (this week)\nComparison attempted: current 7d vs 3-window avg baseline (offsets: 7d/14d/21d)\nInterpretation: no pattern crossed the delta threshold. The environment is stable vs this baseline. This is a truthful negative result, not a tool failure.\nAll 1217 patterns are within normal range.\n\nTop patterns by current cost:\n  open telemetry opentelemetry collector contrib exporter opensearchexporter $3.8/wk   \n  opentelemetry io collector processor batchprocessor v batch processor go $3.7/wk   \n  go opentelemetry io collector consumer ConsumeLogsFunc ConsumeLogs $1.8/wk   \n  tgo opentelemetry io collector consumer logs go $1.8/wk   \n  opensearch project opensearch go v v opensearchtransport opensearchtransport go $1.3/wk   \n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_top_patterns\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"no growth detected; pivot to current-rank view\"},{\"tool\":\"log10x_savings\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"no growth detected; surface pipeline ROI for the current bill question\"},{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter\",\"window\":\"1h\"},\"reason\":\"investigate the largest current pattern even though it is not a growth driver\"}]-->\n\n--- stderr ---\n",
+          "is_error": false
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Wg3r8683SDUwdezZJHM5wA",
+          "content": "exit=-1\n--- stdout ---\nMonitored Services (this week)\n\n  (unknown)            35.0 GB    100%   $52/wk\n  email                11.8 MB    0.0%   $0.02/wk\n  frontend             17.1 KB    0.0%   $0.0000/wk\n  recommendation       2.4 KB     0.0%   $0.0000/wk\n\n  4 services · 35.0 GB total · $52/wk at $1.5/GB\n  Top 3 services = 100% of volume.\n\n**Next actions**:\n  - Drill into the top service: `log10x_cost_drivers({ service: '(unknown)' })` for week-over-week deltas, or `log10x_top_patterns({ service: '(unknown)' })` for current top patterns.\n  - Investigate any spike: `log10x_investigate({ starting_point: '(unknown)' })` for a full causal-chain analysis.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_cost_drivers\",\"args\":{\"service\":\"(unknown)\"},\"reason\":\"week-over-week deltas on the top service\"},{\"tool\":\"log10x_top_patterns\",\"args\":{\"service\":\"(unknown)\"},\"reason\":\"current top patterns for the top service\"},{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"(unknown)\"},\"reason\":\"causal-chain analysis on the top service\"}]-->\n\n--- stderr ---\n",
+          "is_error": true
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "I have the cost drivers and services data. Now let me get the top patterns for the WoW growth view, and also drill into the `(unknown)` service's cost drivers since it dominates volume."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01NR2TFsvMc7qH7sWodScMAh",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"timeRange\": \"7d\"}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_019j5PYAmt2Mefwmi4dna9Eh",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_cost_drivers --args '{\"service\": \"(unknown)\"}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01NR2TFsvMc7qH7sWodScMAh",
+          "content": "exit=0\n--- stdout ---\nTop 10 patterns — all services (this week) · $25/wk total\n⚠ These are CURRENT RANK by cost (biggest right now). This is NOT a growth/delta ranking — do not re-label as \"cost drivers\" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.\n\n#1  (unknown)                           $4.2/wk      \n#2  service instance id service name otelcol contrib service version otelcol $3.9/wk      ERROR\n#3  open telemetry opentelemetry collector contrib exporter opensearchexporter $3.8/wk      \n#4  opentelemetry io collector processor batchprocessor v batch processor go $3.7/wk      \n#5  service instance id service name otelcol contrib service version otelcol $2.2/wk      DEBUG\n#6  go opentelemetry io collector consumer ConsumeLogsFunc ConsumeLogs $1.8/wk      \n#7  tgo opentelemetry io collector consumer logs go $1.8/wk      \n#8  opensearch project opensearch go v v opensearchtransport opensearchtransport go $1.3/wk      \n#9  opentelemetry io collector exporter exporterhelper v internal base exporter $1.2/wk      \n#10  opentelemetry io collector exporter exporterhelper v internal new request go $1.2/wk      \n\nTop 10 = 48% of total volume in scope / 52% in the long tail.\n\n**Next actions**:\n  - call `log10x_cost_drivers({ timeRange: '7d' })` for week-over-week deltas across all services.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_cost_drivers\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"week-over-week deltas across all services\"}]-->\n\n--- stderr ---\n",
+          "is_error": false
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_019j5PYAmt2Mefwmi4dna9Eh",
+          "content": "exit=0\n--- stdout ---\nNo pattern data available. Patterns appear after the first 24h of data collection.\n\n--- stderr ---\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "I now have all the data I need. Let me compile the definitive answer.\n\n---\n\n## Week-over-Week Cost Audit — `otel-demo` Environment\n\n---\n\n### (1) Top 3 Cost Drivers by Current Rank\n\nSourced from `log10x_top_patterns` (7d window, all services). These are ranked by **current cost**, not growth:\n\n| Rank | Pattern (verbatim) | Cost |\n|------|-------------------|------|\n| **#1** | `(unknown)` | **$4.2/wk** |\n| **#2** | `service instance id service name otelcol contrib service version otelcol` (ERROR level) | **$3.9/wk** |\n| **#3** | `open telemetry opentelemetry collector contrib exporter opensearchexporter` | **$3.8/wk** |\n\n---\n\n### (2) Top 3 Week-over-Week Growth Drivers (WoW Deltas)\n\nSourced from `log10x_cost_drivers` (7d window, current vs. 3-window rolling average at 7d/14d/21d offsets):\n\n> **No cost drivers detected (this week).** All 1,217 patterns are within normal range. No pattern crossed the delta threshold. This is a truthful negative result — there is no measurable WoW growth acceleration in any pattern this cycle.\n\n---\n\n### (3) Top 3 Services by Volume\n\nSourced from `log10x_services` (this week, 4 services total, $52/wk at $1.5/GB):\n\n| Rank | Service (verbatim) | Volume | Cost |\n|------|-------------------|--------|------|\n| **#1** | `(unknown)` | **35.0 GB** | **$52/wk** |\n| **#2** | `email` | **11.8 MB** | **$0.02/wk** |\n| **#3** | `frontend` | **17.1 KB** | **$0.0000/wk** |\n\n---\n\n### Synthesis & Recommendations\n\n1. **`(unknown)` dominates everything** — it is simultaneously the #1 cost pattern ($4.2/wk), the #1 service by volume (35.0 GB / $52/wk), and represents 100% of attributed spend. The service attribution is broken or logs are being emitted without a `service.name` label; **fix OTel resource attributes** to tag these logs to real services before cost allocation is meaningful.\n2. **The `service instance id … otelcol contrib` ERROR-level pattern ($3.9/wk)** is the second-largest named pattern. ERROR-level log volume at this cost is worth investigating — it may represent a recurring failure loop in the OTel collector itself.\n3. **No WoW growth detected** across all 1,217 patterns — the environment is cost-stable this cycle. No emergency action is required on the growth axis.\n4. **Immediate action:** Run `log10x_cost_drivers({ service: \"(unknown)\" })` after the first 24h of tagged data to get per-service deltas once attribution is fixed. Until `service.name` is populated, per-service WoW comparisons are not meaningful."
+        }
+      ]
+    }
+  ],
+  "bashCommands": [
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --list",
+      "stdout": "log10x_advise_compact\nlog10x_advise_install\nlog10x_advise_receiver\nlog10x_advise_reporter\nlog10x_advise_retriever\nlog10x_backfill_metric\nlog10x_correlate_cross_pillar\nlog10x_cost_drivers\nlog10x_customer_metrics_query\nlog10x_dependency_check\nlog10x_discover_env\nlog10x_discover_join\nlog10x_discover_labels\nlog10x_doctor\nlog10x_event_lookup\nlog10x_exclusion_filter\nlog10x_extract_templates\nlog10x_investigate\nlog10x_investigation_get\nlog10x_list_by_label\nlog10x_login_status\nlog10x_pattern_examples\nlog10x_pattern_trend\nlog10x_resolve_batch\nlog10x_retriever_query\nlog10x_retriever_query_status\nlog10x_retriever_series\nlog10x_savings\nlog10x_services\nlog10x_top_patterns\nlog10x_translate_metric_to_patterns\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 32427
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_cost_drivers --args '{\"window\": \"7d\"}'",
+      "stdout": "all services — no cost drivers detected (this week)\nComparison attempted: current 7d vs 3-window avg baseline (offsets: 7d/14d/21d)\nInterpretation: no pattern crossed the delta threshold. The environment is stable vs this baseline. This is a truthful negative result, not a tool failure.\nAll 1217 patterns are within normal range.\n\nTop patterns by current cost:\n  open telemetry opentelemetry collector contrib exporter opensearchexporter $3.8/wk   \n  opentelemetry io collector processor batchprocessor v batch processor go $3.7/wk   \n  go opentelemetry io collector consumer ConsumeLogsFunc ConsumeLogs $1.8/wk   \n  tgo opentelemetry io collector consumer logs go $1.8/wk   \n  opensearch project opensearch go v v opensearchtransport opensearchtransport go $1.3/wk   \n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_top_patterns\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"no growth detected; pivot to current-rank view\"},{\"tool\":\"log10x_savings\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"no growth detected; surface pipeline ROI for the current bill question\"},{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter\",\"window\":\"1h\"},\"reason\":\"investigate the largest current pattern even though it is not a growth driver\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 53894
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_services --args '{}'",
+      "stdout": "Monitored Services (this week)\n\n  (unknown)            35.0 GB    100%   $52/wk\n  email                11.8 MB    0.0%   $0.02/wk\n  frontend             17.1 KB    0.0%   $0.0000/wk\n  recommendation       2.4 KB     0.0%   $0.0000/wk\n\n  4 services · 35.0 GB total · $52/wk at $1.5/GB\n  Top 3 services = 100% of volume.\n\n**Next actions**:\n  - Drill into the top service: `log10x_cost_drivers({ service: '(unknown)' })` for week-over-week deltas, or `log10x_top_patterns({ service: '(unknown)' })` for current top patterns.\n  - Investigate any spike: `log10x_investigate({ starting_point: '(unknown)' })` for a full causal-chain analysis.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_cost_drivers\",\"args\":{\"service\":\"(unknown)\"},\"reason\":\"week-over-week deltas on the top service\"},{\"tool\":\"log10x_top_patterns\",\"args\":{\"service\":\"(unknown)\"},\"reason\":\"current top patterns for the top service\"},{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"(unknown)\"},\"reason\":\"causal-chain analysis on the top service\"}]-->\n",
+      "stderr": "",
+      "exitCode": -1,
+      "durationMs": 60115
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"timeRange\": \"7d\"}'",
+      "stdout": "Top 10 patterns — all services (this week) · $25/wk total\n⚠ These are CURRENT RANK by cost (biggest right now). This is NOT a growth/delta ranking — do not re-label as \"cost drivers\" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.\n\n#1  (unknown)                           $4.2/wk      \n#2  service instance id service name otelcol contrib service version otelcol $3.9/wk      ERROR\n#3  open telemetry opentelemetry collector contrib exporter opensearchexporter $3.8/wk      \n#4  opentelemetry io collector processor batchprocessor v batch processor go $3.7/wk      \n#5  service instance id service name otelcol contrib service version otelcol $2.2/wk      DEBUG\n#6  go opentelemetry io collector consumer ConsumeLogsFunc ConsumeLogs $1.8/wk      \n#7  tgo opentelemetry io collector consumer logs go $1.8/wk      \n#8  opensearch project opensearch go v v opensearchtransport opensearchtransport go $1.3/wk      \n#9  opentelemetry io collector exporter exporterhelper v internal base exporter $1.2/wk      \n#10  opentelemetry io collector exporter exporterhelper v internal new request go $1.2/wk      \n\nTop 10 = 48% of total volume in scope / 52% in the long tail.\n\n**Next actions**:\n  - call `log10x_cost_drivers({ timeRange: '7d' })` for week-over-week deltas across all services.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_cost_drivers\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"week-over-week deltas across all services\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 27779
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_cost_drivers --args '{\"service\": \"(unknown)\"}'",
+      "stdout": "No pattern data available. Patterns appear after the first 24h of data collection.\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 22443
+    }
+  ],
+  "initialSynthesis": "I now have all the data I need. Let me compile the definitive answer.\n\n---\n\n## Week-over-Week Cost Audit — `otel-demo` Environment\n\n---\n\n### (1) Top 3 Cost Drivers by Current Rank\n\nSourced from `log10x_top_patterns` (7d window, all services). These are ranked by **current cost**, not growth:\n\n| Rank | Pattern (verbatim) | Cost |\n|------|-------------------|------|\n| **#1** | `(unknown)` | **$4.2/wk** |\n| **#2** | `service instance id service name otelcol contrib service version otelcol` (ERROR level) | **$3.9/wk** |\n| **#3** | `open telemetry opentelemetry collector contrib exporter opensearchexporter` | **$3.8/wk** |\n\n---\n\n### (2) Top 3 Week-over-Week Growth Drivers (WoW Deltas)\n\nSourced from `log10x_cost_drivers` (7d window, current vs. 3-window rolling average at 7d/14d/21d offsets):\n\n> **No cost drivers detected (this week).** All 1,217 patterns are within normal range. No pattern crossed the delta threshold. This is a truthful negative result — there is no measurable WoW growth acceleration in any pattern this cycle.\n\n---\n\n### (3) Top 3 Services by Volume\n\nSourced from `log10x_services` (this week, 4 services total, $52/wk at $1.5/GB):\n\n| Rank | Service (verbatim) | Volume | Cost |\n|------|-------------------|--------|------|\n| **#1** | `(unknown)` | **35.0 GB** | **$52/wk** |\n| **#2** | `email` | **11.8 MB** | **$0.02/wk** |\n| **#3** | `frontend` | **17.1 KB** | **$0.0000/wk** |\n\n---\n\n### Synthesis & Recommendations\n\n1. **`(unknown)` dominates everything** — it is simultaneously the #1 cost pattern ($4.2/wk), the #1 service by volume (35.0 GB / $52/wk), and represents 100% of attributed spend. The service attribution is broken or logs are being emitted without a `service.name` label; **fix OTel resource attributes** to tag these logs to real services before cost allocation is meaningful.\n2. **The `service instance id … otelcol contrib` ERROR-level pattern ($3.9/wk)** is the second-largest named pattern. ERROR-level log volume at this cost is worth investigating — it may represent a recurring failure loop in the OTel collector itself.\n3. **No WoW growth detected** across all 1,217 patterns — the environment is cost-stable this cycle. No emergency action is required on the growth axis.\n4. **Immediate action:** Run `log10x_cost_drivers({ service: \"(unknown)\" })` after the first 24h of tagged data to get per-service deltas once attribution is fixed. Until `service.name` is populated, per-service WoW comparisons are not meaningful.",
+  "followUpSynthesis": "",
+  "finalText": "I now have all the data I need. Let me compile the definitive answer.\n\n---\n\n## Week-over-Week Cost Audit — `otel-demo` Environment\n\n---\n\n### (1) Top 3 Cost Drivers by Current Rank\n\nSourced from `log10x_top_patterns` (7d window, all services). These are ranked by **current cost**, not growth:\n\n| Rank | Pattern (verbatim) | Cost |\n|------|-------------------|------|\n| **#1** | `(unknown)` | **$4.2/wk** |\n| **#2** | `service instance id service name otelcol contrib service version otelcol` (ERROR level) | **$3.9/wk** |\n| **#3** | `open telemetry opentelemetry collector contrib exporter opensearchexporter` | **$3.8/wk** |\n\n---\n\n### (2) Top 3 Week-over-Week Growth Drivers (WoW Deltas)\n\nSourced from `log10x_cost_drivers` (7d window, current vs. 3-window rolling average at 7d/14d/21d offsets):\n\n> **No cost drivers detected (this week).** All 1,217 patterns are within normal range. No pattern crossed the delta threshold. This is a truthful negative result — there is no measurable WoW growth acceleration in any pattern this cycle.\n\n---\n\n### (3) Top 3 Services by Volume\n\nSourced from `log10x_services` (this week, 4 services total, $52/wk at $1.5/GB):\n\n| Rank | Service (verbatim) | Volume | Cost |\n|------|-------------------|--------|------|\n| **#1** | `(unknown)` | **35.0 GB** | **$52/wk** |\n| **#2** | `email` | **11.8 MB** | **$0.02/wk** |\n| **#3** | `frontend` | **17.1 KB** | **$0.0000/wk** |\n\n---\n\n### Synthesis & Recommendations\n\n1. **`(unknown)` dominates everything** — it is simultaneously the #1 cost pattern ($4.2/wk), the #1 service by volume (35.0 GB / $52/wk), and represents 100% of attributed spend. The service attribution is broken or logs are being emitted without a `service.name` label; **fix OTel resource attributes** to tag these logs to real services before cost allocation is meaningful.\n2. **The `service instance id … otelcol contrib` ERROR-level pattern ($3.9/wk)** is the second-largest named pattern. ERROR-level log volume at this cost is worth investigating — it may represent a recurring failure loop in the OTel collector itself.\n3. **No WoW growth detected** across all 1,217 patterns — the environment is cost-stable this cycle. No emergency action is required on the growth axis.\n4. **Immediate action:** Run `log10x_cost_drivers({ service: \"(unknown)\" })` after the first 24h of tagged data to get per-service deltas once attribution is fixed. Until `service.name` is populated, per-service WoW comparisons are not meaningful."
+}
