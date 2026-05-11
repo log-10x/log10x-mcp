@@ -387,3 +387,76 @@ export interface TranscriptEvent {
   };
   agentId?: string;
 }
+
+// ── Counterfactual injection harness types ────────────────────────────
+
+/**
+ * One synthetic-event injection. The generator emits events per
+ * `generator_spec`; the harness then runs each `sensitive_scenarios`
+ * scenario and checks the predicted metric + agent-behavior deltas.
+ *
+ * Schema source-of-truth: `eval/counterfactual/specs/*.json`.
+ */
+export interface CounterfactualSpec {
+  id: string;
+  description: string;
+  target_env: 'talw_gx' | 'otel_demo';
+  generator_spec: {
+    /** Template body. Supports `${pod}`, `${run_id}`, `${idx}`. */
+    template: string;
+    severity: 'INFO' | 'WARN' | 'ERROR' | 'CRITICAL';
+    /** Service name; convention: prefix with `canary-` so synthetic
+     *  events are filterable. */
+    service: string;
+    rate_per_second: number;
+    duration_seconds: number;
+    extra_tags?: Record<string, string>;
+  };
+  /** Seconds to wait between generator-exit and post-snapshot, to
+   *  allow Reporter aggregation + Prometheus scrape. 60-120 typical. */
+  propagation_seconds: number;
+  sensitive_scenarios: Array<{
+    scenario_id: string;
+    predicted_metric_delta: {
+      top_patterns_added?: string[];
+      severity_bytes_increase_at_least?: { severity: string; bytes: number };
+      newly_emerged_contains?: string;
+      service_appears?: string;
+    };
+    predicted_agent_behavior: {
+      must_call_tool?: string[];
+      must_mention_correlation?: string[];
+      must_not_fabricate_root_cause?: boolean;
+    };
+  }>;
+}
+
+/**
+ * Per-scenario verdict for a counterfactual run. Three layers
+ * (metric / agent / synthesis), each independently scored, plus an
+ * overall pass.
+ */
+export interface CounterfactualVerdict {
+  spec_id: string;
+  scenario_id: string;
+  run_id: string;
+  metric_layer: {
+    predicted_satisfied: boolean;
+    observed: Record<string, unknown>;
+    notes: string[];
+  };
+  agent_layer: {
+    predicted_satisfied: boolean;
+    tools_called: string[];
+    mentions_found: string[];
+    mentions_missing: string[];
+    notes: string[];
+  };
+  synthesis_layer: {
+    passed: boolean;
+    axes_summary: string;
+  };
+  passed: boolean;
+  /** ISO timestamp the verdict was emitted. */
+  emitted_at: string;
+}

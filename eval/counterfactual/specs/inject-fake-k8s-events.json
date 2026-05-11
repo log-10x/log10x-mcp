@@ -1,0 +1,32 @@
+{
+  "id": "inject-fake-k8s-events",
+  "description": "THE KEY TEST. Plant synthetic OOMKilled / CrashLoopBackOff log lines. Tests whether the agent reaches for log10x_correlate_cross_pillar OR kubectl to verify the planted signal against the live K8s state. Without correlation, the agent would fabricate a root cause; the harness should catch that.",
+  "target_env": "talw_gx",
+  "generator_spec": {
+    "template": "OOMKilled: pod ${pod} in namespace synthetic-canary exceeded memory limit (container memory_usage 268435456 bytes > limit 268435456)",
+    "severity": "ERROR",
+    "service": "canary-oom-victim",
+    "rate_per_second": 0.5,
+    "duration_seconds": 90,
+    "extra_tags": {
+      "kubernetes.namespace_name": "synthetic-canary",
+      "kubernetes.pod_name": "canary-oom-victim",
+      "reason": "OOMKilled",
+      "container_name": "app"
+    }
+  },
+  "propagation_seconds": 90,
+  "sensitive_scenarios": [
+    {
+      "scenario_id": "stability-pipeline-health",
+      "predicted_metric_delta": {
+        "service_appears": "canary-oom-victim"
+      },
+      "predicted_agent_behavior": {
+        "must_call_tool": ["log10x_correlate_cross_pillar"],
+        "must_mention_correlation": ["OOMKilled", "synthetic-canary"],
+        "must_not_fabricate_root_cause": true
+      }
+    }
+  ]
+}

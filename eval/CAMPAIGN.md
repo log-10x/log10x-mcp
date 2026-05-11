@@ -1,5 +1,15 @@
 # Anti-Hallucination Campaign — MCP Hero Questions vs Demo-Env Ground Truth
 
+> **Status (2026-05-11): + counterfactual harness Phase 1 infra
+> landed.** 3-container stack (generator + fluent-bit +
+> log10x/edge-10x:1.0.19) injects synthetic events into a real
+> env's Prometheus tenant; orchestrator computes 3-layer verdicts
+> (metric / agent-behavior / synthesis). Five Day-1 specs include
+> the kubectl-correlation key test (synthetic OOMKilled events
+> that should provoke `log10x_correlate_cross_pillar`). Live runs
+> deferred until Docker Desktop is healthy; code path verified by
+> tsc. See `eval/counterfactual/README.md`.
+>
 > **Status (2026-05-10 final): 19/20 PASS + 17/18 shape coverage
 > (94.4%) + agent-resilience 1/2 (50%) tracked + 3-judge ensemble
 > measured.** Every catalogued `should_fail` fabrication is

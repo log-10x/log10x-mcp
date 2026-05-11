@@ -1,6 +1,20 @@
-# Counterfactual injection harness (design — deferred implementation)
+# Counterfactual injection harness (Phase 1 implemented 2026-05-11)
 
-## Why this is design-only today
+> **Status (2026-05-11)**: Phase 1 infrastructure landed.
+> 3-container stack (generator + Fluent Bit + `log10x/edge-10x:1.0.19`
+> engine) plants synthetic events into the talw.gx env's Prometheus
+> tenant. Orchestrator at `eval/bin/run-counterfactual-scenario.mjs`
+> drives pre/post snapshots, generator spawn, hero run, and 3-layer
+> verdict assembly. Five Day-1 specs cover novel-pattern,
+> critical-burst, newly-emerged, fake-k8s-events (the
+> kubectl-correlation key test), and service-anomaly.
+>
+> See `eval/counterfactual/README.md` for the operator runbook.
+>
+> Phase 2 (graduate to the OTel demo env) is a config flip on the
+> same stack — same `docker-compose.yml`, different env vars.
+
+## Why this is design-only today (was)
 
 The campaign and the deeper test surfaces (shapes / perturbation /
 multi-judge / refusal / injection) all measure the agent + scorer
@@ -18,6 +32,15 @@ This document captures (a) the requirements, (b) the schema for
 injection specs, (c) the predicted-vs-actual verdict-delta method,
 and (d) a cost estimate — so when the env is available, the harness
 can be implemented in one focused chat.
+
+> **Update**: The user's proposal sidesteps the env-fixture cost
+> entirely. Instead of standing up a parallel env we deploy the
+> 10x engine (`log10x/edge-10x` from the Reporter Helm chart) +
+> Fluent Bit + a small Python generator as 3 local Docker
+> containers, all pointed at an EXISTING env via the user's API
+> key. Total infra: laptop docker compose; no AWS spend. Engine
+> image is the same one the demo env runs (per the Helm chart's
+> `appVersion: 1.0.19`).
 
 ## Env-fixture requirements
 

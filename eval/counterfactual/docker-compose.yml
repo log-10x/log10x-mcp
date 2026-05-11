@@ -1,0 +1,60 @@
+## Counterfactual injection harness — local 3-service stack.
+##
+## Brings up the 10x engine (`log10x/edge-10x`, runs `@apps/reporter`,
+## remote-writes to the target env's Prometheus tenant), a Fluent Bit
+## forwarder (tails the synthetic events file → forwards to engine via
+## Unix socket), and a build-only generator service (spawned per-spec by
+## the orchestrator).
+##
+## Env vars required:
+##   TENX_API_KEY   the API key for the target env
+##   TENX_ENV_ID    the envId (informational only — the engine picks up
+##                  the user's default env from the API key)
+##
+## Phase 1 target: talw.gx env (envId 8209858b-...).
+## Phase 2 target: OTel demo env; same compose, different env vars.
+
+services:
+  pipeline-10x:
+    # Engine + bundled Reporter app. Canonical image per the Helm chart
+    # at ~/git/l1x-co/helm-charts/charts/reporter/values.yaml. Pinned to
+    # the chart's appVersion (1.0.19) to match the demo env's deployed
+    # engine.
+    image: log10x/edge-10x:1.0.19
+    container_name: counterfactual-pipeline-10x
+    environment:
+      TENX_API_KEY: ${TENX_API_KEY:?TENX_API_KEY must be set (the target env API key)}
+      TENX_FORWARD_INPUT_ADDRESS: /tenx-sockets/tenx-reporter.sock
+    command: ["run", "@apps/reporter"]
+    volumes:
+      - tenx-sockets:/tenx-sockets
+    restart: unless-stopped
+
+  fluent-bit:
+    image: fluent/fluent-bit:4.2
+    container_name: counterfactual-fluent-bit
+    volumes:
+      - tenx-sockets:/tenx-sockets
+      - synthetic-logs:/var/log/synthetic
+      - ./forwarder/fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
+      - ./forwarder/parsers.conf:/fluent-bit/etc/parsers.conf:ro
+    depends_on:
+      - pipeline-10x
+    restart: unless-stopped
+
+  ## The generator is spawned per-spec (`docker compose run --rm generator
+  ## --spec /specs/<id>.json`) by the orchestrator and exits when its
+  ## duration elapses. Define it here so `docker compose build generator`
+  ## picks up the image.
+  generator:
+    build:
+      context: ./generator
+    image: counterfactual-generator:latest
+    volumes:
+      - synthetic-logs:/var/log/synthetic
+      - ./specs:/specs:ro
+    profiles: ["generator"]   # only started when explicitly invoked
+
+volumes:
+  tenx-sockets:
+  synthetic-logs:
