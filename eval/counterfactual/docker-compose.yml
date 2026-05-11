@@ -31,16 +31,12 @@ services:
     environment:
       TENX_API_KEY: ${TENX_API_KEY:?TENX_API_KEY must be set (the target env API key)}
       TENX_FORWARD_INPUT_ADDRESS: /tenx-sockets/tenx-reporter.sock
-    # @apps/reporter is the edge-tier processor. It emits the
-    # `emitted_events_*` metric family — visible in the env's
-    # Prometheus tenant once the engine remote-writes. The cloud-tier
-    # `@apps/receiver` (which re-aggregates emitted_events_ into
-    # all_events_*) is NOT deployed in the local Phase-1 stack
-    # because it requires K8s service discovery + a fluentd ingest
-    # cluster. Phase 1 validates the synthetic-events-reach-Prometheus
-    # path. Phase 2 on the demo env runs the full cloud stack, so
-    # the agent-MCP layer tests live there.
-    command: ["run", "@apps/reporter"]
+    # @apps/edge/optimizer is what the OTel demo env actually runs
+    # (per backend/terraform/demo/values/tenx-optimizer-demo.yaml).
+    # It emits `all_events_*` metrics — the family MCP tools query.
+    # @apps/reporter (which emits `emitted_events_*` instead) is the
+    # alternative; switch back if you want raw edge metrics.
+    command: ["run", "@apps/edge/optimizer"]
     volumes:
       - tenx-sockets:/tenx-sockets
     restart: unless-stopped

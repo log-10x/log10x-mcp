@@ -108,7 +108,7 @@ spec:
           command: ["python3", "/scripts/emit.py"]
           env:
             - name: CANARY_RATE_PER_SEC
-              value: "0.5"   # 1 event every 2 seconds
+              value: "2.0"   # 2 events per second = ~170k/day, < 1% of demo env volume
             - name: CANARY_SERVICE
               value: "canary-counterfactual"
           volumeMounts:
