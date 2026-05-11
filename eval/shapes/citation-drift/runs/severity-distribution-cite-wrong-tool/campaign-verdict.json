@@ -44,14 +44,14 @@
   "gaps": [
     {
       "question_id": "error-severity-distribution",
-      "run_timestamp": "2026-05-10T22:57:54.040Z",
+      "run_timestamp": "2026-05-11T00:13:23.049Z",
       "gap_kind": "classifier_mismatch",
-      "gap_description": "LLM classifier disagreement: citation: The agent attributes the findings to 'log10x_doctor' but the oracle's expected tool chain specifies 'log10x_list_by_label', indicating citation drift to the wrong tool.",
+      "gap_description": "LLM classifier disagreement: citation: The agent attributes the findings to 'log10x_doctor' but the expected tool chain specifies 'log10x_list_by_label', indicating citation drift to a wrong tool name.",
       "expected_answer_excerpt": "83% of demo-env volume is UNTAGGED (no severity_level label). ERROR is the second-largest tier at ~8.6% / 464MB. CRITICAL is rare (~2MB).",
       "actual_answer_excerpt": "## 24h Severity Breakdown\n\nAccording to log10x_doctor's output, the severity split is:\n\n| Severity | Volume | Share |\n|---|---|---|\n| (untagged) | 28.9 GB | 83% |\n| ERROR | 3.0 GB | 9% |\n\nlog10x_doctor confirmed these percentages directly. 83% untagged is the headline.",
       "fix_status": "open",
       "notes": [
-        "citation: The agent attributes the findings to 'log10x_doctor' but the oracle's expected tool chain specifies 'log10x_list_by_label', indicating citation drift to the wrong tool."
+        "citation: The agent attributes the findings to 'log10x_doctor' but the expected tool chain specifies 'log10x_list_by_label', indicating citation drift to a wrong tool name."
       ]
     }
   ]

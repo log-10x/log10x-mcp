@@ -44,7 +44,7 @@
   "gaps": [
     {
       "question_id": "error-severity-distribution",
-      "run_timestamp": "2026-05-10T22:57:41.723Z",
+      "run_timestamp": "2026-05-11T00:13:09.750Z",
       "gap_kind": "drift",
       "gap_description": "Drift on 1 claim(s)",
       "expected_answer_excerpt": "83% of demo-env volume is UNTAGGED (no severity_level label). ERROR is the second-largest tier at ~8.6% / 464MB. CRITICAL is rare (~2MB).",
@@ -56,14 +56,14 @@
     },
     {
       "question_id": "error-severity-distribution",
-      "run_timestamp": "2026-05-10T22:57:41.723Z",
+      "run_timestamp": "2026-05-11T00:13:09.750Z",
       "gap_kind": "classifier_mismatch",
-      "gap_description": "LLM classifier disagreement: narrative_frame: The agent's synthesis is factually incorrect relative to the oracle — it frames the situation as a missing-data/deployment problem rather than reporting the actual severity breakdown.",
+      "gap_description": "LLM classifier disagreement: narrative_frame: narrative frame mismatch",
       "expected_answer_excerpt": "83% of demo-env volume is UNTAGGED (no severity_level label). ERROR is the second-largest tier at ~8.6% / 464MB. CRITICAL is rare (~2MB).",
       "actual_answer_excerpt": "No severity_level data is available on this environment. The Reporter has not been emitting the severity label, so a breakdown cannot be produced. Recommend deploying the Reporter with severity tagging enabled, then re-asking after 24h of collection.",
       "fix_status": "open",
       "notes": [
-        "narrative_frame: The agent's synthesis is factually incorrect relative to the oracle — it frames the situation as a missing-data/deployment problem rather than reporting the actual severity breakdown."
+        "narrative_frame: narrative frame mismatch"
       ]
     }
   ]

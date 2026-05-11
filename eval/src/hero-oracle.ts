@@ -233,6 +233,38 @@ export async function validateClaims(
       continue;
     }
 
+    if (c.kind === 'dollar') {
+      // Dollar amounts can't be validated without knowing the analyzer
+      // rate, but we CAN catch obviously-fabricated ones using an
+      // env-wide upper bound: bytes/1e9 × $1/GB × 30 days × 5 = the
+      // dollar claim that would correspond to 5× the 30-day env total
+      // at the default mid-tier rate. Anything above that is impossible
+      // even with the most expensive SIEMs (Datadog at $2.50/GB).
+      // Demo env: ~5 GB/day × 30 × 5 × $2.50 = $1875. Real production
+      // envs run higher; check `context` for /wk or /mo modifiers and
+      // normalize.
+      const ctxLower = c.context.toLowerCase();
+      // Normalize the claim to a daily-dollar equivalent.
+      let dailyDollars = c.value;
+      if (/\/wk|\bper week\b|\bweekly\b/.test(ctxLower)) dailyDollars = c.value / 7;
+      else if (/\/mo|\bper month\b|\bmonthly\b/.test(ctxLower)) dailyDollars = c.value / 30;
+      else if (/\/yr|\bper year\b|\bannually\b/.test(ctxLower)) dailyDollars = c.value / 365;
+      // Upper bound: env's GB/day × 5 (subset/total tolerance) × $5/GB
+      // (cap at top-tier SIEM rate). For demo (~5 GB/day): 5 × 5 × 5 = $125/day.
+      const upperDaily = (oracleVolume / 1e9) * 5 * 5;
+      const supported = dailyDollars <= upperDaily;
+      details.push({
+        claim: c.raw,
+        kind: 'numeric',
+        oracleResult: supported
+          ? `env ~${(oracleVolume / 1e9).toFixed(2)}GB/day; claim within plausible cost band`
+          : `env ~${(oracleVolume / 1e9).toFixed(2)}GB/day; claim implies $${dailyDollars.toFixed(2)}/day, > $${upperDaily.toFixed(2)}/day cap (even at top-tier SIEM rate)`,
+        status: supported ? 'supported' : 'unsupported',
+        detail: c.context,
+      });
+      continue;
+    }
+
     if (c.kind === 'count' && c.unit?.startsWith('service')) {
       const oracleCount = oracleServices.length;
       const ok = c.value >= oracleCount && c.value <= oracleCount + 10;
@@ -287,6 +319,31 @@ export async function validateClaims(
           if (claimedBytes > bytes * VOLUME_TOLERANCE_FACTOR) {
             pairedDrift = `pattern ${p.normalized}: claimed ${v[0]} but pattern has ~${(bytes / 1e6).toFixed(1)} MB / 24h (>${VOLUME_TOLERANCE_FACTOR}× off)`;
             break;
+          }
+        }
+        // ALSO pair-validate dollar amounts: $X/wk near a real pattern.
+        // Demo-env analyzer cost defaults to $1/GB (see cost.ts). Convert
+        // pattern's 24h bytes to a weekly cost band: bytes/1e9 * $1/GB * 7.
+        // Use a wider tolerance (50×) than volumes because:
+        //  (1) the agent may quote a different timeframe ($/mo vs $/wk),
+        //  (2) the analyzer cost varies across SIEMs ($0.10 to $5+ per GB),
+        //  (3) we don't know which rate the tool used.
+        // Even at 50× this still catches the inflate-volumes perturbation
+        // (100× off) and the wrong-volumes fabrication ($48/wk vs $0.02/wk
+        // = 2400× off).
+        if (!pairedDrift) {
+          const DOLLAR_TOLERANCE_FACTOR = 50;
+          const expectedWeeklyDollars = (bytes / 1e9) * 1.0 * 7;
+          const ctxDollars = [...p.context.matchAll(/\$\s*(\d+(?:,\d{3})*(?:\.\d+)?)\s*(\/wk|\/mo|\/yr)?/gi)];
+          for (const d of ctxDollars) {
+            const n = parseFloat(d[1].replace(/,/g, ''));
+            const period = (d[2] ?? '/wk').toLowerCase();
+            const periodMult = period === '/yr' ? 1 / 52 : period === '/mo' ? 12 / 52 : 1;
+            const claimedWeekly = n * periodMult;
+            if (claimedWeekly > expectedWeeklyDollars * DOLLAR_TOLERANCE_FACTOR && claimedWeekly > 1) {
+              pairedDrift = `pattern ${p.normalized}: claimed ${d[0]} but pattern's ~$${expectedWeeklyDollars.toFixed(3)}/wk @ $1/GB (>${DOLLAR_TOLERANCE_FACTOR}× off)`;
+              break;
+            }
           }
         }
         if (pairedDrift) {
@@ -453,6 +510,7 @@ export function extractAgentTopPatterns(text: string, n: number = 3): string[] {
     counts.set(norm, (counts.get(norm) ?? 0) + 1);
   }
 
+
   return [...counts.entries()]
     .sort((a, b) => b[1] - a[1])
     .slice(0, n)
@@ -470,11 +528,17 @@ export function extractAgentTopPatterns(text: string, n: number = 3): string[] {
  */
 export function scoreTopNMatch(
   agentTop: string[],
-  oracleTop: string[]
+  oracleTop: string[],
+  agentText?: string
 ): { matched: number; missed: number; extra: number; score: number; matched_names: string[] } {
   const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
   const oracleSet = new Set(oracleTop.map(norm));
   const agentSet = new Set(agentTop.map(norm));
+  // Fuzzy text fallback: when agentText is provided, also check whether
+  // any oracle name appears as a substring of the fuzzNormalized text.
+  // Catches display-form quotes ("OTLP LOG GRPC Exporter ...") in bold,
+  // table cells, or plain prose that the snake_case extractor misses.
+  const fuzzText = agentText ? norm(agentText) : '';
 
   const matched_names: string[] = [];
   let matched = 0;
@@ -484,7 +548,7 @@ export function scoreTopNMatch(
     // substring of the oracle name, or vice-versa.
     const hit = [...agentSet].some(
       (a) => a === n || a.includes(n) || n.includes(a)
-    );
+    ) || (fuzzText && fuzzText.includes(n));
     if (hit) {
       matched++;
       matched_names.push(o);

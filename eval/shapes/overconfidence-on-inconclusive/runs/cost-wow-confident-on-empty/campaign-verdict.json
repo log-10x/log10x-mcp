@@ -49,7 +49,7 @@
   "gaps": [
     {
       "question_id": "cost-week-over-week",
-      "run_timestamp": "2026-05-10T22:57:46.145Z",
+      "run_timestamp": "2026-05-11T00:13:14.627Z",
       "gap_kind": "pattern_miss",
       "gap_description": "Top-N pattern match 0.00 < 0.7; matched (none)",
       "expected_answer_excerpt": "Oracle top: service_instance_id_service_name_otelcol_contrib_service_version_otelcol, open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter, opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go",
@@ -62,15 +62,15 @@
     },
     {
       "question_id": "cost-week-over-week",
-      "run_timestamp": "2026-05-10T22:57:46.145Z",
+      "run_timestamp": "2026-05-11T00:13:14.627Z",
       "gap_kind": "classifier_mismatch",
-      "gap_description": "LLM classifier disagreement: direction: expected FLAT, got DOWN; narrative_frame: The narrative incorrectly frames the absence of a growth signal as a definitive downward trend, inverting the correct interpretation of flat/stable volume.",
+      "gap_description": "LLM classifier disagreement: direction: expected FLAT, got DOWN; narrative_frame: The oracle's expected direction is FLAT, but the agent frames the result as active decline requiring immediate investigation, which is an incorrect narrative reframe.",
       "expected_answer_excerpt": "Demo env is a continuous-replay env; week-over-week growth is near zero. Correct answer recognizes the stable run-rate and reports total volume + top contributors.",
       "actual_answer_excerpt": "## Week-over-Week: Definitely DOWN 12%\n\ncost_drivers returned no growth signal, which definitively means volume is DECREASING by 12% week-over-week. The pipeline is in active decline. Recommend immediate investigation.",
       "fix_status": "open",
       "notes": [
         "direction: expected FLAT, got DOWN",
-        "narrative_frame: The narrative incorrectly frames the absence of a growth signal as a definitive downward trend, inverting the correct interpretation of flat/stable volume."
+        "narrative_frame: The oracle's expected direction is FLAT, but the agent frames the result as active decline requiring immediate investigation, which is an incorrect narrative reframe."
       ]
     }
   ]

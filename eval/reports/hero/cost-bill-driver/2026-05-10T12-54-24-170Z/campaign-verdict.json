@@ -3,8 +3,8 @@
   "transcript_path": "/Users/talweiss/git/l1x-co/log10x-mcp/eval/reports/hero/cost-bill-driver/2026-05-10T12-54-24-170Z/transcript.json",
   "verdict": {
     "drift_score": 0,
-    "drift_supported": 1,
-    "drift_inconclusive": 19,
+    "drift_supported": 13,
+    "drift_inconclusive": 7,
     "pattern_match": {
       "agent_top_patterns": [
         "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
@@ -51,93 +51,93 @@
   "oracle": {
     "numericClaimCount": 20,
     "patternClaimCount": 0,
-    "supported": 1,
+    "supported": 13,
     "unsupported": 0,
-    "inconclusive": 19,
+    "inconclusive": 7,
     "driftScore": 0,
     "details": [
       {
         "claim": "$25",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "iggest right now — for context only) `log10x_top_patterns` shows the bill at **$25/wk total**, with the top 10 patterns accounting for 47% of volume: | # | Pa"
       },
       {
         "claim": "$4.2",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "% of volume: | # | Pattern | Cost | |---|---------|------| | 1 | *(unknown)* | $4.2/wk | | 2 | `open telemetry opentelemetry collector contrib exporter opensea"
       },
       {
         "claim": "$3.8",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "`open telemetry opentelemetry collector contrib exporter opensearchexporter` | $3.8/wk | | 3 | `opentelemetry io collector processor batchprocessor v batch pro"
       },
       {
         "claim": "$3.7",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "| `opentelemetry io collector processor batchprocessor v batch processor go` | $3.7/wk | | 4 | `service instance id service name otelcol contrib service versio"
       },
       {
         "claim": "$3.6",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "ice instance id service name otelcol contrib service version otelcol` (ERROR) | $3.6/wk | | 5 | `service instance id service name otelcol contrib service versio"
       },
       {
         "claim": "$2.1",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "ice instance id service name otelcol contrib service version otelcol` (DEBUG) | $2.1/wk | 53% of volume sits in the long tail. These are **current rank by cost"
       },
       {
         "claim": "$15",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "savings` reports the Retriever is already diverting **10.2 GB to S3**, saving **$15/wk** ($788/yr projected) at the current $1.5/GB analyzer + $0.02/GB storage"
       },
       {
         "claim": "$788",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "eports the Retriever is already diverting **10.2 GB to S3**, saving **$15/wk** ($788/yr projected) at the current $1.5/GB analyzer + $0.02/GB storage rate. Cove"
       },
       {
         "claim": "$1.5",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "verting **10.2 GB to S3**, saving **$15/wk** ($788/yr projected) at the current $1.5/GB analyzer + $0.02/GB storage rate. Coverage note from the tool: only 10/1"
       },
       {
         "claim": "$0.02",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "o S3**, saving **$15/wk** ($788/yr projected) at the current $1.5/GB analyzer + $0.02/GB storage rate. Coverage note from the tool: only 10/14 retriever chunks"
       },
       {
         "claim": "$2.1",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "instance id service name otelcol contrib service version otelcol` (DEBUG tier, $2.1/wk) — DEBUG-level collector self-telemetry is almost always droppable at th"
       },
       {
         "claim": "$788",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "r coverage** to close the 29% gap (4 missing chunks); doing so will firm up the $788/yr savings projection and may reveal additional archivable patterns in the"
       },
       {
@@ -239,7 +239,7 @@
   "gaps": [
     {
       "question_id": "cost-bill-driver",
-      "run_timestamp": "2026-05-10T23:02:26.279Z",
+      "run_timestamp": "2026-05-11T00:12:04.648Z",
       "gap_kind": "low_received",
       "gap_description": "value_received 0.65 < 0.7 — MCP returned thin/stub data",
       "expected_answer_excerpt": "(MCP-side fix candidate)",

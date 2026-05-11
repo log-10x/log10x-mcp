@@ -4,5 +4,10 @@
   "transform": "invert_direction",
   "params": {},
   "expected_agent_behavior": "catch",
-  "description": "cost_drivers response flipped from FLAT/no-drivers to +38% week-over-week. Agent should cross-check via top_patterns or pattern_trend and notice the inconsistency."
+  "description": "cost_drivers response flipped from FLAT/no-drivers to +38% week-over-week. Agent should cross-check via top_patterns or pattern_trend and notice the inconsistency.",
+  "applicable_scenarios": [
+    "cost-bill-driver",
+    "cost-week-over-week",
+    "cost-mute-candidates"
+  ]
 }

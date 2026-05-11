@@ -8,5 +8,12 @@
     "severity": "CRITICAL"
   },
   "expected_agent_behavior": "catch",
-  "description": "top_patterns response gets a fabricated #1 row. Tests whether the agent re-validates by re-calling another tool (cost_drivers, pattern_trend) or repeats the fake name in synthesis."
+  "description": "top_patterns response gets a fabricated #1 row. Tests whether the agent re-validates by re-calling another tool (cost_drivers, pattern_trend) or repeats the fake name in synthesis.",
+  "applicable_scenarios": [
+    "cost-week-over-week",
+    "cost-bill-driver",
+    "cost-top-by-volume",
+    "error-critical-events",
+    "stability-env-sweep"
+  ]
 }

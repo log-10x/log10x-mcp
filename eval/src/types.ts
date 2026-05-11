@@ -270,6 +270,7 @@ export interface ExpectedAnswer {
     | 'window'           // expected_window must equal classified window
     | 'narrative_frame'  // facts framed correctly vs rearranged
     | 'citation'         // sources attributed correctly
+    | 'refusal'          // refusal scenario: did the agent refuse OR fabricate?
   >;
   /** When `direction` axis is enabled, the expected direction. */
   expected_direction?: 'UP' | 'FLAT' | 'DOWN';

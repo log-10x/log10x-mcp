@@ -27,6 +27,26 @@ export interface FabricationSpec {
   base_transcript: string;
   /** Replacement finalText. The agent's bashCommands are preserved. */
   splice_finalText: string;
+  /**
+   * Optional bashCommands replacement. When set, the forked transcript
+   * uses this instead of the base's bashCommands. Used by the
+   * `chain-abandonment` shape: keep only the first tool call to
+   * simulate an agent that stopped early. Splice-only finalText cannot
+   * exercise chain_alignment without this hook.
+   */
+  splice_bash_commands?: Array<{
+    cmd: string;
+    stdout: string;
+    stderr: string;
+    exitCode: number;
+    durationMs: number;
+  }>;
+  /**
+   * Optional: keep only the first N bashCommands from the base
+   * transcript. Convenience shortcut for chain-abandonment when the
+   * caller doesn't want to copy the cmd/stdout payload by hand.
+   */
+  truncate_bash_commands_to?: number;
   /** Expected verdict after rescoring the spliced transcript. */
   expected_verdict: 'should_pass' | 'should_fail';
   /** Human-readable note about why this fabrication targets this shape. */
@@ -65,10 +85,17 @@ export async function runFabrication(
     throw new Error(`base transcript not found: ${baseTxPath}`);
   }
 
-  // Fork the transcript: same spec / bashCommands, replace finalText.
+  // Fork the transcript: same spec, replace finalText. bashCommands
+  // optionally truncated or replaced (for chain-abandonment shape).
   const baseTranscript = JSON.parse(readFileSync(baseTxPath, 'utf8'));
   const fork = JSON.parse(JSON.stringify(baseTranscript));
   fork.finalText = fab.splice_finalText;
+  if (fab.splice_bash_commands) {
+    fork.bashCommands = fab.splice_bash_commands;
+  } else if (typeof fab.truncate_bash_commands_to === 'number') {
+    const n = Math.max(0, fab.truncate_bash_commands_to);
+    fork.bashCommands = (fork.bashCommands ?? []).slice(0, n);
+  }
 
   // Persist the fork beside the fabrication spec so the score is
   // re-runnable.

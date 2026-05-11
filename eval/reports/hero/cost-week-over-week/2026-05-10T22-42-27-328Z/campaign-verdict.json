@@ -1,10 +1,10 @@
 {
   "question_id": "cost-week-over-week",
-  "transcript_path": "/Users/talweiss/git/l1x-co/log10x-mcp/eval/reports/hero/cost-week-over-week/2026-05-10T22-42-27-328Z/transcript.json",
+  "transcript_path": "eval/reports/hero/cost-week-over-week/2026-05-10T22-42-27-328Z/transcript.json",
   "verdict": {
-    "drift_score": 0,
-    "drift_supported": 1,
-    "drift_inconclusive": 14,
+    "drift_score": 1,
+    "drift_supported": 7,
+    "drift_inconclusive": 7,
     "pattern_match": {
       "agent_top_patterns": [
         "open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter",
@@ -44,70 +44,70 @@
     },
     "value_delivered": 0.7,
     "value_received": 0.5,
-    "passed": true,
-    "axes_summary": "drift=0/15 pattern_match=2/3=1.00 chain=1/1=1.00 value_delivered=0.70 value_received=0.50 classifier=OK"
+    "passed": false,
+    "axes_summary": "drift=1/15 pattern_match=2/3=1.00 chain=1/1=1.00 value_delivered=0.70 value_received=0.50 classifier=OK"
   },
   "oracle": {
     "numericClaimCount": 15,
     "patternClaimCount": 0,
-    "supported": 1,
-    "unsupported": 0,
-    "inconclusive": 14,
-    "driftScore": 0,
+    "supported": 7,
+    "unsupported": 1,
+    "inconclusive": 7,
+    "driftScore": 1,
     "details": [
       {
         "claim": "$2,500",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim implies $357.14/day, > $135.15/day cap (even at top-tier SIEM rate)",
+        "status": "unsupported",
         "detail": "— NOT growth drivers) From `log10x_top_patterns`, the current weekly spend is **$2,500/wk total**, led by: | Rank | Pattern | Weekly Cost | |------|---------|-"
       },
       {
         "claim": "$420",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "nk | Pattern | Weekly Cost | |------|---------|------------| | #1 | (unknown) | $420/wk | | #2 | `service instance id service name otelcol contrib ...` (ERROR)"
       },
       {
         "claim": "$390",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "20/wk | | #2 | `service instance id service name otelcol contrib ...` (ERROR) | $390/wk | | #3 | `open telemetry opentelemetry collector contrib exporter opense"
       },
       {
         "claim": "$380",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "`open telemetry opentelemetry collector contrib exporter opensearchexporter` | $380/wk | | #4 | `opentelemetry io collector processor batchprocessor v batch pr"
       },
       {
         "claim": "$370",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "| `opentelemetry io collector processor batchprocessor v batch processor go` | $370/wk | | #5 | `service instance id service name otelcol contrib ...` (DEBUG)"
       },
       {
         "claim": "$220",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "70/wk | | #5 | `service instance id service name otelcol contrib ...` (DEBUG) | $220/wk | The **top 10 patterns account for 48% of total volume**; the remainin"
       },
       {
         "claim": "$420",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "xclusion_filter` could cut costs significantly. 3. **The `(unknown)` pattern at $420/wk** (rank #1 this week) warrants investigation — unclassified patterns ind"
       },
       {
         "claim": "34.9 GB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "s what the tools actually reported: ### Total Volume - **Current 7-day volume: 34.9 GB** (reported by `log10x_doctor`, metric freshness: emitted within the las"
       },
@@ -202,7 +202,19 @@
   "gaps": [
     {
       "question_id": "cost-week-over-week",
-      "run_timestamp": "2026-05-10T22:58:37.341Z",
+      "run_timestamp": "2026-05-10T23:56:03.428Z",
+      "gap_kind": "drift",
+      "gap_description": "Drift on 1 claim(s)",
+      "expected_answer_excerpt": "Demo env is a continuous-replay env; week-over-week growth is near zero. Correct answer recognizes the stable run-rate and reports total volume + top contributors.",
+      "actual_answer_excerpt": "I now have all the data needed. Let me compile the answer with the concrete numbers from the tools.\n\n---\n\n## Week-over-Week Log Volume Trend: **Flat / Stable** ✅\n\nHere is what the tools actually reported:\n\n### Total Volume\n- **Current 7-day volume: 34.9 GB** (reported by `log10x_doctor`, metric freshness: emitted within the last 2s — metrics are fresh)\n- **Trend: No movement detected.** `log10x_co",
+      "fix_status": "open",
+      "notes": [
+        "unsupported: $2,500 — env ~5.41GB/day; claim implies $357.14/day, > $135.15/day cap (even at top-tier SIEM rate)"
+      ]
+    },
+    {
+      "question_id": "cost-week-over-week",
+      "run_timestamp": "2026-05-10T23:56:03.428Z",
       "gap_kind": "low_received",
       "gap_description": "value_received 0.50 < 0.7 — MCP returned thin/stub data",
       "expected_answer_excerpt": "(MCP-side fix candidate)",

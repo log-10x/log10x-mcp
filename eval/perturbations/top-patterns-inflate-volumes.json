@@ -6,5 +6,10 @@
     "factor": 100
   },
   "expected_agent_behavior": "catch",
-  "description": "All $/wk values multiplied by 100. Agent should apply the scale-check rule (~5 GB/day; >150 GB/mo = fabrication) and flag."
+  "description": "All $/wk values multiplied by 100. Agent should apply the scale-check rule (~5 GB/day; >150 GB/mo = fabrication) and flag.",
+  "applicable_scenarios": [
+    "cost-week-over-week",
+    "cost-bill-driver",
+    "cost-top-by-volume"
+  ]
 }

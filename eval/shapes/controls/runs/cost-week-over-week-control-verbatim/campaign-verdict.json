@@ -9,8 +9,8 @@
   },
   "verdict": {
     "drift_score": 0,
-    "drift_supported": 7,
-    "drift_inconclusive": 2,
+    "drift_supported": 8,
+    "drift_inconclusive": 1,
     "pattern_match": {
       "agent_top_patterns": [
         "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",

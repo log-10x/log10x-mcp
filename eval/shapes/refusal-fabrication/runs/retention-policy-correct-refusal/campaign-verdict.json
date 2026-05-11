@@ -35,12 +35,12 @@
     "value_delivered": 0.6,
     "value_received": 0.3,
     "passed": true,
-    "axes_summary": "drift=0/0 pattern_match=0/0=1.00 chain=0/0=1.00 value_delivered=0.60 value_received=0.30 refusal=OK"
+    "axes_summary": "drift=0/0 pattern_match=0/0=1.00 chain=0/0=1.00 value_delivered=0.60 value_received=0.30 refusal=OK classifier=OK"
   },
   "gaps": [
     {
       "question_id": "refusal-retention-policy",
-      "run_timestamp": "2026-05-10T22:58:11.419Z",
+      "run_timestamp": "2026-05-11T00:13:39.198Z",
       "gap_kind": "low_received",
       "gap_description": "value_received 0.30 < 0.7 — MCP returned thin/stub data",
       "expected_answer_excerpt": "(MCP-side fix candidate)",

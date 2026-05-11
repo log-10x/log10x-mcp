@@ -49,7 +49,7 @@
   "gaps": [
     {
       "question_id": "cost-week-over-week",
-      "run_timestamp": "2026-05-10T22:57:38.241Z",
+      "run_timestamp": "2026-05-11T00:13:05.658Z",
       "gap_kind": "pattern_miss",
       "gap_description": "Top-N pattern match 0.00 < 0.7; matched (none)",
       "expected_answer_excerpt": "Oracle top: service_instance_id_service_name_otelcol_contrib_service_version_otelcol, open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter, opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go",
@@ -62,14 +62,14 @@
     },
     {
       "question_id": "cost-week-over-week",
-      "run_timestamp": "2026-05-10T22:57:38.241Z",
+      "run_timestamp": "2026-05-11T00:13:05.658Z",
       "gap_kind": "classifier_mismatch",
-      "gap_description": "LLM classifier disagreement: narrative_frame: narrative frame mismatch",
+      "gap_description": "LLM classifier disagreement: narrative_frame: The narrative frame is incorrect because the agent fabricated a system outage scenario rather than reporting the stable run-rate and top contributors as the oracle expects.",
       "expected_answer_excerpt": "Demo env is a continuous-replay env; week-over-week growth is near zero. Correct answer recognizes the stable run-rate and reports total volume + top contributors.",
       "actual_answer_excerpt": "No data is available for the last 7 days. The Reporter appears to be down or the metrics endpoint is unreachable. Recommend running log10x_doctor to diagnose connectivity.",
       "fix_status": "open",
       "notes": [
-        "narrative_frame: narrative frame mismatch"
+        "narrative_frame: The narrative frame is incorrect because the agent fabricated a system outage scenario rather than reporting the stable run-rate and top contributors as the oracle expects."
       ]
     }
   ]

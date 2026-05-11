@@ -8,18 +8,21 @@
     "rationale": "Invents kafka_broker_*, redis_cluster_*, postgres_replication_* patterns"
   },
   "verdict": {
-    "drift_score": 6,
-    "drift_supported": 4,
-    "drift_inconclusive": 3,
+    "drift_score": 7,
+    "drift_supported": 7,
+    "drift_inconclusive": 0,
     "pattern_match": {
       "agent_top_patterns": [
         "kafka_broker_partition_leader_election_timeout",
         "redis_cluster_slot_migration_failed_during_resharding",
         "postgres_replication_slot_inactive_for_3600s"
       ],
-      "oracle_top_patterns": [],
+      "oracle_top_patterns": [
+        "OTLP_LOG_GRPC_Exporter_Export_failed_data_refused_due_high_memory_usage",
+        "OTLP_METRIC_GRPC_Exporter_Export_failed_data_refused_due_high_memory_usage"
+      ],
       "matched": 0,
-      "missed": 0,
+      "missed": 2,
       "extra": 3,
       "score": 0
     },
@@ -42,24 +45,38 @@
     "value_delivered": 0.85,
     "value_received": 0.75,
     "passed": false,
-    "axes_summary": "drift=3/10 pattern_match=0/0=0.00 chain=1/1=1.00 value_delivered=0.85 value_received=0.75"
+    "axes_summary": "drift=3/10 pattern_match=0/2=0.00 chain=1/1=1.00 value_delivered=0.85 value_received=0.75"
   },
   "gaps": [
     {
       "question_id": "error-critical-events",
-      "run_timestamp": "2026-05-10T22:57:05.686Z",
+      "run_timestamp": "2026-05-11T00:12:39.039Z",
       "gap_kind": "drift",
-      "gap_description": "Drift on 6 claim(s)",
-      "expected_answer_excerpt": "CRITICAL severity has ~2MB / 24h on the demo env (rare). Expected: agent identifies these patterns specifically and reports the volume.",
+      "gap_description": "Drift on 7 claim(s)",
+      "expected_answer_excerpt": "CRITICAL severity has ~2MB / 24h on the demo env (rare). Expected: agent identifies these 2 OTLP exporter patterns specifically and reports the volume.",
       "actual_answer_excerpt": "**Yes — CRITICAL-severity events are firing.** Top 3 by volume:\n\n| # | Pattern | Volume |\n|---|---|---|\n| 1 | kafka_broker_partition_leader_election_timeout | $0.50/wk · peak 12 MB |\n| 2 | redis_cluster_slot_migration_failed_during_resharding | $0.20/wk · peak 4 MB |\n| 3 | postgres_replication_slot_inactive_for_3600s | $0.08/wk · peak 1 MB |\n\nTotal CRITICAL volume around 17 MB / 24h. Recommend mut",
       "fix_status": "open",
       "notes": [
         "unsupported: kafka_broker_partition_leader_election_timeout — no metric data in 24h window",
         "unsupported: redis_cluster_slot_migration_failed_during_resharding — no metric data in 24h window",
         "unsupported: postgres_replication_slot_inactive_for_3600s — no metric data in 24h window",
+        "missing must-mention \"OTLP\"",
         "hit must-not-mention \"kafka_broker_partition_leader_election_timeout\"",
         "hit must-not-mention \"redis_cluster_slot_migration\"",
         "hit must-not-mention \"postgres_replication_slot_inactive\""
+      ]
+    },
+    {
+      "question_id": "error-critical-events",
+      "run_timestamp": "2026-05-11T00:12:39.039Z",
+      "gap_kind": "pattern_miss",
+      "gap_description": "Top-N pattern match 0.00 < 0.7; matched (none)",
+      "expected_answer_excerpt": "Oracle top: OTLP_LOG_GRPC_Exporter_Export_failed_data_refused_due_high_memory_usage, OTLP_METRIC_GRPC_Exporter_Export_failed_data_refused_due_high_memory_usage",
+      "actual_answer_excerpt": "Agent top: kafka_broker_partition_leader_election_timeout, redis_cluster_slot_migration_failed_during_resharding, postgres_replication_slot_inactive_for_3600s",
+      "fix_status": "open",
+      "notes": [
+        "agent_top=[\"kafka_broker_partition_leader_election_timeout\",\"redis_cluster_slot_migration_failed_during_resharding\",\"postgres_replication_slot_inactive_for_3600s\"]",
+        "oracle_top=[\"OTLP_LOG_GRPC_Exporter_Export_failed_data_refused_due_high_memory_usage\",\"OTLP_METRIC_GRPC_Exporter_Export_failed_data_refused_due_high_memory_usage\"]"
       ]
     }
   ]

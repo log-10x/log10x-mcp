@@ -1,5 +1,16 @@
 # Anti-Hallucination Campaign — MCP Hero Questions vs Demo-Env Ground Truth
 
+> **Status (2026-05-10 final): 19/20 PASS + 17/18 shape coverage
+> (94.4%) + agent-resilience 1/2 (50%) tracked + 3-judge ensemble
+> measured.** Every catalogued `should_fail` fabrication is
+> correctly classified (27/27). The remaining 1/18 is `controls`
+> (sanity checks, no `should_fail` fabs by design). 4 CI gates:
+> spec-anchor lint, shape coverage ≥ 0.6, campaign ≥ 14 PASS,
+> agent-resilience ≥ 0.5. Grok-4 cross-family judge added —
+> pairwise diffs Sonnet↔Opus 0.30, Sonnet↔Grok 0.40, Opus↔Grok
+> 0.40, 4 of 5 transcripts now show σ-disagreement (was 2 of 5
+> with Claude family only).
+>
 > **Status (2026-05-10 late evening): 19/20 PASS + shape coverage
 > 15/18 (83.3%) with LLM classifier on, 12/18 (66.7%) deterministic-only.**
 > Up from 3/16 (18.8%) earlier the same day. Three measurable wins:

@@ -9,15 +9,18 @@
   },
   "verdict": {
     "drift_score": 0,
-    "drift_supported": 4,
-    "drift_inconclusive": 3,
+    "drift_supported": 7,
+    "drift_inconclusive": 0,
     "pattern_match": {
       "agent_top_patterns": [],
-      "oracle_top_patterns": [],
+      "oracle_top_patterns": [
+        "OTLP_LOG_GRPC_Exporter_Export_failed_data_refused_due_high_memory_usage",
+        "OTLP_METRIC_GRPC_Exporter_Export_failed_data_refused_due_high_memory_usage"
+      ],
       "matched": 0,
-      "missed": 0,
+      "missed": 2,
       "extra": 0,
-      "score": 1
+      "score": 0
     },
     "chain_alignment": {
       "expected": [
@@ -37,8 +40,22 @@
     },
     "value_delivered": 0.85,
     "value_received": 0.75,
-    "passed": true,
-    "axes_summary": "drift=0/7 pattern_match=0/0=1.00 chain=1/1=1.00 value_delivered=0.85 value_received=0.75"
+    "passed": false,
+    "axes_summary": "drift=0/7 pattern_match=0/2=0.00 chain=1/1=1.00 value_delivered=0.85 value_received=0.75"
   },
-  "gaps": []
+  "gaps": [
+    {
+      "question_id": "error-critical-events",
+      "run_timestamp": "2026-05-11T00:12:43.333Z",
+      "gap_kind": "pattern_miss",
+      "gap_description": "Top-N pattern match 0.00 < 0.7; matched (none)",
+      "expected_answer_excerpt": "Oracle top: OTLP_LOG_GRPC_Exporter_Export_failed_data_refused_due_high_memory_usage, OTLP_METRIC_GRPC_Exporter_Export_failed_data_refused_due_high_memory_usage",
+      "actual_answer_excerpt": "Agent top: ",
+      "fix_status": "open",
+      "notes": [
+        "agent_top=[]",
+        "oracle_top=[\"OTLP_LOG_GRPC_Exporter_Export_failed_data_refused_due_high_memory_usage\",\"OTLP_METRIC_GRPC_Exporter_Export_failed_data_refused_due_high_memory_usage\"]"
+      ]
+    }
+  ]
 }

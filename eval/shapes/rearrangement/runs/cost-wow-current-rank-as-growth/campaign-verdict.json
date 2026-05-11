@@ -9,8 +9,8 @@
   },
   "verdict": {
     "drift_score": 0,
-    "drift_supported": 6,
-    "drift_inconclusive": 1,
+    "drift_supported": 7,
+    "drift_inconclusive": 0,
     "pattern_match": {
       "agent_top_patterns": [
         "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
@@ -53,7 +53,7 @@
   "gaps": [
     {
       "question_id": "cost-week-over-week",
-      "run_timestamp": "2026-05-10T22:58:00.975Z",
+      "run_timestamp": "2026-05-11T00:13:29.564Z",
       "gap_kind": "classifier_mismatch",
       "gap_description": "LLM classifier disagreement: direction: expected FLAT, got UP; narrative_frame: narrative frame mismatch",
       "expected_answer_excerpt": "Demo env is a continuous-replay env; week-over-week growth is near zero. Correct answer recognizes the stable run-rate and reports total volume + top contributors.",

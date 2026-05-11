@@ -3,8 +3,8 @@
   "transcript_path": "/Users/talweiss/git/l1x-co/log10x-mcp/eval/reports/hero/cost-namespace-attribution/2026-05-10T02-53-18-024Z/transcript.json",
   "verdict": {
     "drift_score": 0,
-    "drift_supported": 11,
-    "drift_inconclusive": 9,
+    "drift_supported": 16,
+    "drift_inconclusive": 4,
     "pattern_match": {
       "agent_top_patterns": [],
       "oracle_top_patterns": [],
@@ -40,44 +40,44 @@
   "oracle": {
     "numericClaimCount": 20,
     "patternClaimCount": 0,
-    "supported": 11,
+    "supported": 16,
     "unsupported": 0,
-    "inconclusive": 9,
+    "inconclusive": 4,
     "driftScore": 0,
     "details": [
       {
         "claim": "$52",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "| Cost/wk | |---|---|---|---| | **(empty — no label)** | ~34.9 GB | **~100%** | $52/wk | | `otel-demo` | 11.8 MB | ~0.03% | $0.02/wk | There is **no meaningful"
       },
       {
         "claim": "$0.02",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "o label)** | ~34.9 GB | **~100%** | $52/wk | | `otel-demo` | 11.8 MB | ~0.03% | $0.02/wk | There is **no meaningful top-3 namespace breakdown to give you.** Th"
       },
       {
         "claim": "$27",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "n as: | `tenx_app` | Volume | Cost/wk | |---|---|---| | `receiver` | 18.2 GB | $27/wk | | `reducer` | 16.7 GB | $25/wk | And by `tenx_user_service`, only `ema"
       },
       {
         "claim": "$25",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "st/wk | |---|---|---| | `receiver` | 18.2 GB | $27/wk | | `reducer` | 16.7 GB | $25/wk | And by `tenx_user_service`, only `email` (11.8 MB), `frontend` (56.6 K"
       },
       {
         "claim": "$52",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "s to list pods. 2. **Investigate the `(empty)` service bucket** — 34.9 GB/week ($52/wk) of OTel Collector self-telemetry (opensearch exporter, batch processor,"
       },
       {

@@ -3,8 +3,8 @@
   "transcript_path": "/Users/talweiss/git/l1x-co/log10x-mcp/eval/reports/hero/stability-newly-emerged/2026-05-10T13-09-25-068Z/transcript.json",
   "verdict": {
     "drift_score": 0,
-    "drift_supported": 1,
-    "drift_inconclusive": 9,
+    "drift_supported": 4,
+    "drift_inconclusive": 6,
     "pattern_match": {
       "agent_top_patterns": [
         "recommendation_trace_sampled_True_Receive_ListRecommendations_product_ids",
@@ -63,30 +63,30 @@
   "oracle": {
     "numericClaimCount": 9,
     "patternClaimCount": 1,
-    "supported": 1,
+    "supported": 4,
     "unsupported": 0,
-    "inconclusive": 9,
+    "inconclusive": 6,
     "driftScore": 0,
     "details": [
       {
         "claim": "$0.0080",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "end | Character | |---|---|---|---| | `loyalty_level_gold` | **+35%** | Stable ($0.0080/wk, 169 data points) | Normal traffic variance | | `recommendation_trace"
       },
       {
         "claim": "$0.04",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "race_sampled_True_Receive_ListRecommendations_product_ids` | **+28%** | Stable ($0.04/wk, 169 data points) | Normal traffic variance | | `loyalty_level_platinum"
       },
       {
         "claim": "$0.0078",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "ts) | Normal traffic variance | | `loyalty_level_platinum` | **+23%** | Stable ($0.0078/wk, 168 data points) | Normal traffic variance | All three patterns hav"
       },
       {
@@ -193,7 +193,7 @@
   "gaps": [
     {
       "question_id": "stability-newly-emerged",
-      "run_timestamp": "2026-05-10T23:02:45.924Z",
+      "run_timestamp": "2026-05-11T00:12:31.946Z",
       "gap_kind": "low_value",
       "gap_description": "value_delivered 0.30 < 0.7",
       "expected_answer_excerpt": "In the last 1 hour, 5 patterns newly emerged. Top meaningful: service_name_product_reviews_trace_sampled_True_HTTP_Request_POST_llm_chat.",
@@ -203,7 +203,7 @@
     },
     {
       "question_id": "stability-newly-emerged",
-      "run_timestamp": "2026-05-10T23:02:45.924Z",
+      "run_timestamp": "2026-05-11T00:12:31.946Z",
       "gap_kind": "low_received",
       "gap_description": "value_received 0.30 < 0.7 — MCP returned thin/stub data",
       "expected_answer_excerpt": "(MCP-side fix candidate)",

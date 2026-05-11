@@ -4,5 +4,9 @@
   "transform": "cache_poison",
   "params": {},
   "expected_agent_behavior": "partial",
-  "description": "Appends a \"[cached at 2026-05-09; stale 24h]\" marker. Tests whether the agent notices stale-data markers in tool output."
+  "description": "Appends a \"[cached at 2026-05-09; stale 24h]\" marker. Tests whether the agent notices stale-data markers in tool output.",
+  "applicable_scenarios": [
+    "cost-bill-driver",
+    "cost-week-over-week"
+  ]
 }

@@ -207,5 +207,5 @@
       "durationMs": 7660
     }
   ],
-  "finalText": "**Yes — CRITICAL-severity events are firing.** Top 3 by volume:\n\n| # | Pattern | Volume |\n|---|---|---|\n| 1 | OTLP LOG GRPC Exporter Export failed (high memory) | $0.02/wk · peak 140.9 KB |\n| 2 | OTLP METRIC GRPC Exporter Export failed (high memory) | $0.0020/wk · peak 36.5 KB |\n| 3 | UTC FATAL terminating connection due administrator command | $0.0000/wk · peak 7.1 KB |\n\nTotal CRITICAL volume is approximately 2 MB / 24h, which is rare on this env."
+  "finalText": "**Yes — CRITICAL-severity events are firing.** Top 3 by volume:\n\n| # | Pattern | Volume |\n|---|---|---|\n| 1 | OTLP LOG GRPC Exporter Export failed data refused due high memory usage | $0.02/wk · peak 140.9 KB |\n| 2 | OTLP METRIC GRPC Exporter Export failed data refused due high memory usage | $0.0020/wk · peak 36.5 KB |\n| 3 | UTC FATAL terminating connection due administrator command | $0.0000/wk · peak 7.1 KB |\n\nTotal CRITICAL volume is approximately 2 MB / 24h, which is rare on this env."
 }

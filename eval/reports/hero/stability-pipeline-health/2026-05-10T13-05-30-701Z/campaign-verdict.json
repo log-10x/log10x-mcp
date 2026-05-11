@@ -3,8 +3,8 @@
   "transcript_path": "/Users/talweiss/git/l1x-co/log10x-mcp/eval/reports/hero/stability-pipeline-health/2026-05-10T13-05-30-701Z/transcript.json",
   "verdict": {
     "drift_score": 0,
-    "drift_supported": 4,
-    "drift_inconclusive": 7,
+    "drift_supported": 5,
+    "drift_inconclusive": 6,
     "pattern_match": {
       "agent_top_patterns": [
         "GRAFANA_CLOUD_API_KEY"
@@ -13,7 +13,7 @@
       "matched": 0,
       "missed": 0,
       "extra": 1,
-      "score": 0
+      "score": 1
     },
     "chain_alignment": {
       "expected": [
@@ -35,34 +35,34 @@
     "value_delivered": 0.85,
     "value_received": 0.6,
     "passed": true,
-    "axes_summary": "drift=0/11 pattern_match=0/0=0.00 chain=1/1=1.00 value_delivered=0.85 value_received=0.60"
+    "axes_summary": "drift=0/11 pattern_match=0/0=1.00 chain=1/1=1.00 value_delivered=0.85 value_received=0.60"
   },
   "oracle": {
     "numericClaimCount": 11,
     "patternClaimCount": 0,
-    "supported": 4,
+    "supported": 5,
     "unsupported": 0,
-    "inconclusive": 7,
+    "inconclusive": 6,
     "driftScore": 0,
     "details": [
       {
         "claim": "$52",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "day log spend** — flagged by doctor - Top weekly cost: `(unknown)` service at **$52/wk**, dominating 100% of volume (34.9 GB/7d). The remaining 3 services (`ema"
       },
       {
         "claim": "34.9 GB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": ", image `otel/opentelemetry-collector-contrib:0.142.0`, ready: 1) - **Volume**: 34.9 GB / 7d across 4 services, 1,189 patterns - **Severity distribution**: 24%"
       },
       {
         "claim": "34.9 GB",
         "kind": "numeric",
-        "oracleResult": "env total ~5.40GB/24h; claim within plausible subset/total range",
+        "oracleResult": "env total ~5.41GB/24h; claim within plausible subset/total range",
         "status": "supported",
         "detail": "Top weekly cost: `(unknown)` service at **$52/wk**, dominating 100% of volume (34.9 GB/7d). The remaining 3 services (`email`, `frontend`, `recommendation`) ac"
       },
@@ -132,7 +132,7 @@
     "matched": 0,
     "missed": 0,
     "extra": 1,
-    "score": 0
+    "score": 1
   },
   "chain_alignment": {
     "expected": [
@@ -154,7 +154,7 @@
   "gaps": [
     {
       "question_id": "stability-pipeline-health",
-      "run_timestamp": "2026-05-10T23:02:46.660Z",
+      "run_timestamp": "2026-05-11T00:12:32.751Z",
       "gap_kind": "low_received",
       "gap_description": "value_received 0.60 < 0.7 — MCP returned thin/stub data",
       "expected_answer_excerpt": "(MCP-side fix candidate)",

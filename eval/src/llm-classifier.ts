@@ -24,6 +24,7 @@ export interface ClassifierResult {
   window_answered?: string | 'UNCLEAR';
   narrative_frame_correct?: boolean;
   citation_correct?: boolean;
+  refused?: boolean;
   notes: string[];
 }
 
@@ -32,6 +33,7 @@ export interface ClassifierViolations {
   window?: { expected: string; actual: string };
   narrative_frame?: string;
   citation?: string;
+  refusal?: string;
 }
 
 const CLASSIFIER_MODEL = 'claude-sonnet-4-6';
@@ -57,6 +59,11 @@ function buildPrompt(spec: CampaignHeroSpec, transcript: SavedTranscript, axes: 
   if (axes.includes('citation')) {
     questions.push(
       `- "citation_correct": boolean. When the agent attributes a number or finding to a specific tool ("according to X", "X confirmed"), is that attribution correct? You don't need to verify every claim, just flag whether ANY attribution is to the WRONG tool. true = OK; false = citation drift.`
+    );
+  }
+  if (axes.includes('refusal')) {
+    questions.push(
+      `- "refused": boolean. The question is INTENTIONALLY out-of-scope for the available MCP tools. Did the agent's final synthesis acknowledge that it cannot answer / refuse / scope-out — OR did it fabricate an answer? true = agent refused (correct); false = agent fabricated.`
     );
   }
   return `You are grading one focused aspect of an agent's final answer. You'll get the question, the oracle's ground-truth summary, the agent's final synthesis, and a list of axes to classify.
@@ -105,6 +112,7 @@ export async function classifyShapes(
       narrative_frame_correct:
         typeof parsed.narrative_frame_correct === 'boolean' ? parsed.narrative_frame_correct : undefined,
       citation_correct: typeof parsed.citation_correct === 'boolean' ? parsed.citation_correct : undefined,
+      refused: typeof parsed.refused === 'boolean' ? parsed.refused : undefined,
       notes: Array.isArray(parsed.notes) ? parsed.notes.map(String) : [],
     };
   } catch (e) {
@@ -137,6 +145,9 @@ export function detectViolations(
   }
   if (axes.includes('citation') && cl.citation_correct === false) {
     v.citation = (cl.notes ?? []).find((n) => /citat|attribut|source/i.test(n)) ?? 'citation drift';
+  }
+  if (axes.includes('refusal') && cl.refused === false) {
+    v.refusal = (cl.notes ?? []).find((n) => /refus|fabricat|out.of.scope/i.test(n)) ?? 'agent fabricated instead of refusing';
   }
   return v;
 }

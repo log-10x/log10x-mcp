@@ -6,5 +6,8 @@
     "count": 99
   },
   "expected_agent_behavior": "partial",
-  "description": "dependency_check returns 99 fake dependencies. Mute-candidates question that expected 0 deps should now show 99 and the agent may incorrectly mark patterns unsafe to mute."
+  "description": "dependency_check returns 99 fake dependencies. Mute-candidates question that expected 0 deps should now show 99 and the agent may incorrectly mark patterns unsafe to mute.",
+  "applicable_scenarios": [
+    "cost-mute-candidates"
+  ]
 }

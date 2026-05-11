@@ -17,6 +17,7 @@
       "retriever",
       "no tool that"
     ],
+    "enable_llm_classifier_axes": ["refusal"],
     "snapshot_ts": "2026-05-10T21:00:00.000Z"
   }
 }

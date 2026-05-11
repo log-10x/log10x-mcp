@@ -4,5 +4,9 @@
   "transform": "invert_direction",
   "params": {},
   "expected_agent_behavior": "partial",
-  "description": "pattern_trend has its direction-words flipped. Agent should cross-check with cost_drivers when applicable."
+  "description": "pattern_trend has its direction-words flipped. Agent should cross-check with cost_drivers when applicable.",
+  "applicable_scenarios": [
+    "error-critical-events",
+    "error-investigate-pattern"
+  ]
 }

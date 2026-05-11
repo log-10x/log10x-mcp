@@ -73,6 +73,17 @@ jobs:
             }
           '
 
+      - name: Agent-resilience (tracked perturbation metric)
+        run: |
+          set -euo pipefail
+          # Re-scores saved perturbation transcripts (the .perturbed
+          # marker dirs) against the current scorer. caught = scorer
+          # flagged the agent's compliance; complied = perturbation
+          # slipped through both agent + rubric. Baseline 50% (1 of 2
+          # valid runs); a drop = scorer regression on agent-resilience
+          # detection.
+          LOG10X_EVAL_ENV=demo node eval/bin/score-perturbations.mjs --min-resilience 0.5
+
       - name: Re-score saved hero transcripts
         run: |
           set -euo pipefail

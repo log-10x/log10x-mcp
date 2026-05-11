@@ -44,7 +44,7 @@
   "gaps": [
     {
       "question_id": "error-severity-distribution",
-      "run_timestamp": "2026-05-10T22:57:12.909Z",
+      "run_timestamp": "2026-05-11T00:12:43.476Z",
       "gap_kind": "classifier_mismatch",
       "gap_description": "LLM classifier disagreement: narrative_frame: narrative frame mismatch",
       "expected_answer_excerpt": "83% of demo-env volume is UNTAGGED (no severity_level label). ERROR is the second-largest tier at ~8.6% / 464MB. CRITICAL is rare (~2MB).",

@@ -3,8 +3,8 @@
   "transcript_path": "/Users/talweiss/git/l1x-co/log10x-mcp/eval/reports/hero/cost-week-over-week/2026-05-10T13-00-13-349Z/transcript.json",
   "verdict": {
     "drift_score": 0,
-    "drift_supported": 2,
-    "drift_inconclusive": 11,
+    "drift_supported": 9,
+    "drift_inconclusive": 4,
     "pattern_match": {
       "agent_top_patterns": [
         "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
@@ -47,58 +47,58 @@
   "oracle": {
     "numericClaimCount": 13,
     "patternClaimCount": 0,
-    "supported": 2,
+    "supported": 9,
     "unsupported": 0,
-    "inconclusive": 11,
+    "inconclusive": 4,
     "driftScore": 0,
     "details": [
       {
         "claim": "$25",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "last 7 days** | **34.9 GB** (log10x_doctor) | | **Weekly cost (7d window)** | **$25/wk** across 1,188 patterns (log10x_top_patterns, 7d) | | **WoW growth driver"
       },
       {
         "claim": "$4.2",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "single-week view. The **top cost pattern** at the 7d scale is `(unknown)` at **$4.2/wk**, followed by `open telemetry opentelemetry collector contrib exporter"
       },
       {
         "claim": "$3.8",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "pen telemetry opentelemetry collector contrib exporter opensearchexporter` at **$3.8/wk** and `opentelemetry io collector processor batchprocessor v batch proce"
       },
       {
         "claim": "$3.7",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "`opentelemetry io collector processor batchprocessor v batch processor go` at **$3.7/wk**. None of these are growing — they are simply the biggest steady-state"
       },
       {
         "claim": "$86",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "`service instance id service name otelcol contrib service version otelcol` at **$86K/mo (DEBUG, opentelemetry-collector service)**. That is a large but *stable*"
       },
       {
         "claim": "$25",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "trend chart:** Plot **flat** — volume is stable week-over-week at ~34.9 GB/7d, $25/wk. No quarter-over-quarter growth signal in the available window. 2. **Inve"
       },
       {
         "claim": "$86",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "tance id service name otelcol contrib service version otelcol` DEBUG pattern at $86K/mo is 54% of spend. Run `log10x_investigate` on it — if it's noise, `log10x"
       },
       {

@@ -3,8 +3,8 @@
   "transcript_path": "/Users/talweiss/git/l1x-co/log10x-mcp/eval/reports/hero/error-untagged-explanation/2026-05-10T03-16-37-253Z/transcript.json",
   "verdict": {
     "drift_score": 0,
-    "drift_supported": 10,
-    "drift_inconclusive": 23,
+    "drift_supported": 22,
+    "drift_inconclusive": 11,
     "pattern_match": {
       "agent_top_patterns": [],
       "oracle_top_patterns": [],
@@ -46,93 +46,93 @@
   "oracle": {
     "numericClaimCount": 33,
     "patternClaimCount": 0,
-    "supported": 10,
+    "supported": 22,
     "unsupported": 0,
-    "inconclusive": 23,
+    "inconclusive": 11,
     "driftScore": 0,
     "details": [
       {
         "claim": "$43",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "ost/wk | |---|---|---|---| | **(empty — untagged)** | **28.9 GB** | **83%** | **$43** | | ERROR | 3.0 GB | 9% | $4.5 | | DEBUG | 1.5 GB | 4% | $2.2 | | INFO | 8"
       },
       {
         "claim": "$4.5",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "empty — untagged)** | **28.9 GB** | **83%** | **$43** | | ERROR | 3.0 GB | 9% | $4.5 | | DEBUG | 1.5 GB | 4% | $2.2 | | INFO | 839 MB | 2% | $1.2 | | TRACE | 64"
       },
       {
         "claim": "$2.2",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "** | **83%** | **$43** | | ERROR | 3.0 GB | 9% | $4.5 | | DEBUG | 1.5 GB | 4% | $2.2 | | INFO | 839 MB | 2% | $1.2 | | TRACE | 647 MB | 2% | $0.95 | | CRITICAL"
       },
       {
         "claim": "$1.2",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "OR | 3.0 GB | 9% | $4.5 | | DEBUG | 1.5 GB | 4% | $2.2 | | INFO | 839 MB | 2% | $1.2 | | TRACE | 647 MB | 2% | $0.95 | | CRITICAL | 15 MB | <1% | $0.02 | | WARN"
       },
       {
         "claim": "$0.95",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "UG | 1.5 GB | 4% | $2.2 | | INFO | 839 MB | 2% | $1.2 | | TRACE | 647 MB | 2% | $0.95 | | CRITICAL | 15 MB | <1% | $0.02 | | WARN | 49 KB | <1% | — | | **Total*"
       },
       {
         "claim": "$0.02",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "839 MB | 2% | $1.2 | | TRACE | 647 MB | 2% | $0.95 | | CRITICAL | 15 MB | <1% | $0.02 | | WARN | 49 KB | <1% | — | | **Total** | **34.9 GB** | | **$52/wk** | *"
       },
       {
         "claim": "$52",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "5 MB | <1% | $0.02 | | WARN | 49 KB | <1% | — | | **Total** | **34.9 GB** | | **$52/wk** | **83% of your 34.9 GB/week (28.9 GB, $43/wk) carries no `severity_le"
       },
       {
         "claim": "$43",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "**Total** | **34.9 GB** | | **$52/wk** | **83% of your 34.9 GB/week (28.9 GB, $43/wk) carries no `severity_level` tag.** --- ### Why this is happening — roo"
       },
       {
         "claim": "$3.8",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "ernals verbatim: `opentelemetry-collector-contrib exporter opensearchexporter` ($3.8/wk), `otelcol batchprocessor` ($3.7/wk), `ConsumeLogsFunc ConsumeLogs` ($1."
       },
       {
         "claim": "$3.7",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "ector-contrib exporter opensearchexporter` ($3.8/wk), `otelcol batchprocessor` ($3.7/wk), `ConsumeLogsFunc ConsumeLogs` ($1.8/wk), `opensearch-go transport` ($1"
       },
       {
         "claim": "$1.8",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "` ($3.8/wk), `otelcol batchprocessor` ($3.7/wk), `ConsumeLogsFunc ConsumeLogs` ($1.8/wk), `opensearch-go transport` ($1.3/wk), and many more. The OTel Collector"
       },
       {
         "claim": "$1.3",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "($3.7/wk), `ConsumeLogsFunc ConsumeLogs` ($1.8/wk), `opensearch-go transport` ($1.3/wk), and many more. The OTel Collector's own Go runtime logs do **not** emi"
       },
       {

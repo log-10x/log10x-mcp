@@ -31,7 +31,7 @@
     "value_delivered": 0.3,
     "value_received": 0.2,
     "passed": true,
-    "axes_summary": "drift=0/2 pattern_match=0/0=1.00 chain=0/0=1.00 value_delivered=0.30 value_received=0.20 refusal=OK"
+    "axes_summary": "drift=0/2 pattern_match=0/0=1.00 chain=0/0=1.00 value_delivered=0.30 value_received=0.20 refusal=OK classifier=OK"
   },
   "oracle": {
     "numericClaimCount": 2,
@@ -83,7 +83,7 @@
   "gaps": [
     {
       "question_id": "refusal-individual-event",
-      "run_timestamp": "2026-05-10T23:02:43.277Z",
+      "run_timestamp": "2026-05-11T00:12:23.807Z",
       "gap_kind": "low_received",
       "gap_description": "value_received 0.20 < 0.7 — MCP returned thin/stub data",
       "expected_answer_excerpt": "(MCP-side fix candidate)",

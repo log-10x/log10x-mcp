@@ -3,8 +3,8 @@
   "transcript_path": "/Users/talweiss/git/l1x-co/log10x-mcp/eval/reports/hero/stability-env-sweep/2026-05-10T12-28-02-519Z/transcript.json",
   "verdict": {
     "drift_score": 0,
-    "drift_supported": 2,
-    "drift_inconclusive": 12,
+    "drift_supported": 6,
+    "drift_inconclusive": 8,
     "pattern_match": {
       "agent_top_patterns": [
         "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
@@ -54,37 +54,37 @@
   "oracle": {
     "numericClaimCount": 14,
     "patternClaimCount": 0,
-    "supported": 2,
+    "supported": 6,
     "unsupported": 0,
-    "inconclusive": 12,
+    "inconclusive": 8,
     "driftScore": 0,
     "details": [
       {
         "claim": "$52",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "`, `recommendation`. `(unknown)` dominates at **34.9 GB / week (100% of volume, $52/wk)**; the others are noise-floor tiny. - **Cost drivers check (24h, 7d): cl"
       },
       {
         "claim": "$3.6",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "d for the last 1h; no movement crossed the noise floor. Trend shows **stable** ($3.6/wk, unchanged baseline vs. current quarter). - **Top cost pattern** — `open"
       },
       {
         "claim": "$3.9",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "opentelemetry collector contrib exporter opensearchexporter` — also **stable** ($3.9 → $3.8/wk, -2.5%, within noise). - **Forwarder health:** all services that"
       },
       {
         "claim": "$3.8",
         "kind": "numeric",
-        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
-        "status": "inconclusive",
+        "oracleResult": "env ~5.41GB/day; claim within plausible cost band",
+        "status": "supported",
         "detail": "emetry collector contrib exporter opensearchexporter` — also **stable** ($3.9 → $3.8/wk, -2.5%, within noise). - **Forwarder health:** all services that have 24"
       },
       {
@@ -203,7 +203,7 @@
   "gaps": [
     {
       "question_id": "stability-env-sweep",
-      "run_timestamp": "2026-05-10T23:02:45.260Z",
+      "run_timestamp": "2026-05-11T00:12:31.227Z",
       "gap_kind": "low_received",
       "gap_description": "value_received 0.65 < 0.7 — MCP returned thin/stub data",
       "expected_answer_excerpt": "(MCP-side fix candidate)",

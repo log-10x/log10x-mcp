@@ -81,7 +81,7 @@ export async function scoreAgainstExpected(
   // window's top-N.
   const oracleTop = (expected?.top_patterns ?? []).map((p) => p.name);
   const agentTop = extractAgentTopPatterns(transcript.finalText, Math.max(3, oracleTop.length));
-  const tnRaw = scoreTopNMatch(agentTop, oracleTop);
+  const tnRaw = scoreTopNMatch(agentTop, oracleTop, transcript.finalText);
 
   // Scope-relevance filters: derived from the spec's expected_answer
   // so we can check whether the agent's named patterns satisfy the
@@ -133,16 +133,26 @@ export async function scoreAgainstExpected(
 
   const totalNamed = agentTop.length;
   const realNamed = tnRaw.matched + realButNotTopN;
-  // Combined score: how many of the agent's named patterns are real?
-  // If the agent named 3 patterns and all 3 are real → 1.0. Even if
-  // none matched the strict top-N, queryable real patterns still
-  // count.
-  const combinedScore =
+  // Combined score: max of two metrics —
+  //   strictRecall = matched / oracle.length (did the agent identify
+  //                   the patterns oracle expected?)
+  //   realityFraction = realNamed / totalNamed (of what the agent
+  //                   named, how many are real in metrics?)
+  // The MAX is right because either path is evidence the agent's
+  // answer is honest. Strict recall catches "agent missed oracle's
+  // top"; reality fraction catches "agent named only fabricated
+  // patterns". Using MIN would over-penalize agents who correctly
+  // identify all oracle names AND also name additional real
+  // patterns. Dollar/volume hallucination is caught in the drift
+  // axis (fix B), not here.
+  const strictRecall = oracleTop.length > 0 ? tnRaw.matched / oracleTop.length : 1;
+  const realityFraction =
     totalNamed === 0
       ? oracleTop.length === 0
         ? 1
         : 0
       : realNamed / totalNamed;
+  const combinedScore = Math.max(strictRecall, realityFraction);
 
   const patternMatch: PatternMatchScore = {
     agent_top_patterns: agentTop,
