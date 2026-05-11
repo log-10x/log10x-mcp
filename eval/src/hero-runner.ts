@@ -24,7 +24,12 @@ import { join } from 'node:path';
 import type { EvalEnv } from './env.js';
 import { applyEvalEnvToProcess } from './env.js';
 import { validateClaims, renderOracleReport, type HeroOracleReport } from './hero-oracle.js';
-import { selectAgentClient, type AgentClient, type AgentMessage } from './agent-clients.js';
+import {
+  selectAgentClient,
+  computeCostUsd,
+  type AgentClient,
+  type AgentMessage,
+} from './agent-clients.js';
 
 const JUDGE_MODEL = 'claude-sonnet-4-6';
 const MAX_AGENT_TURNS = 20;
@@ -117,6 +122,14 @@ export interface FollowUpReport {
   courage_rationale: string;
 }
 
+export interface CostReport {
+  inputTokens: number;
+  outputTokens: number;
+  apiCalls: number;
+  costUsd: number;
+  pricingFound: boolean;
+}
+
 export interface HeroRunReport {
   spec: HeroSpec;
   runnerModel: string;
@@ -132,6 +145,7 @@ export interface HeroRunReport {
   valueReceived: { score: number; rationale: string };
   status: 'pass' | 'partial' | 'fail';
   flags: string[];
+  cost?: CostReport;
   closedLoop?: ClosedLoopReport;
   followUp?: FollowUpReport;
 }
@@ -282,6 +296,15 @@ export async function runHero(
 
   const messages: AgentMessage[] = [{ role: 'user', content: spec.prompt }];
 
+  // Accumulators for cost / usage across all runner API calls (the
+  // initial agent loop + any follow-up loop). Judge calls are tracked
+  // separately by design: judge is always Anthropic regardless of
+  // runner model, so its cost is constant and not part of the
+  // per-runner-model comparison.
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
+  let totalApiCalls = 0;
+
   let finalText = '';
   let turn = 0;
   while (turn < MAX_AGENT_TURNS) {
@@ -292,6 +315,9 @@ export async function runHero(
       messages,
       maxTokens: MAX_TOKENS,
     });
+    totalInputTokens += resp.usage.inputTokens;
+    totalOutputTokens += resp.usage.outputTokens;
+    totalApiCalls++;
     messages.push({ role: 'assistant', content: resp.content });
 
     const toolUses = resp.content.filter(
@@ -357,6 +383,9 @@ export async function runHero(
         messages,
         maxTokens: MAX_TOKENS,
       });
+      totalInputTokens += resp.usage.inputTokens;
+      totalOutputTokens += resp.usage.outputTokens;
+      totalApiCalls++;
       messages.push({ role: 'assistant', content: resp.content });
 
       const toolUses = resp.content.filter(
@@ -582,6 +611,15 @@ export async function runHero(
     }
   }
 
+  const costInfo = computeCostUsd(agentClient.modelId, totalInputTokens, totalOutputTokens);
+  const cost: CostReport = {
+    inputTokens: totalInputTokens,
+    outputTokens: totalOutputTokens,
+    apiCalls: totalApiCalls,
+    costUsd: costInfo.usd,
+    pricingFound: costInfo.pricingFound,
+  };
+
   const report: HeroRunReport = {
     spec,
     runnerModel: agentClient.modelId,
@@ -597,6 +635,7 @@ export async function runHero(
     valueReceived: judgeReport.valueReceived,
     status,
     flags,
+    cost,
     closedLoop,
     followUp,
   };
@@ -828,6 +867,12 @@ function renderHeroSummary(r: HeroRunReport): string {
   lines.push(`- **Hallucination (drift score):** ${r.hallucination.driftScore} unsupported · ${r.hallucination.supported} supported · ${r.hallucination.inconclusive} inconclusive`);
   lines.push(`- **Value delivered:** ${r.valueDelivered.score.toFixed(2)} — ${r.valueDelivered.rationale}`);
   lines.push(`- **Value received:** ${r.valueReceived.score.toFixed(2)} — ${r.valueReceived.rationale}`);
+  if (r.cost) {
+    const pricingNote = r.cost.pricingFound ? '' : ' (no price table for this model)';
+    lines.push(
+      `- **Cost (runner only):** $${r.cost.costUsd.toFixed(4)} — ${r.cost.inputTokens} in / ${r.cost.outputTokens} out tokens across ${r.cost.apiCalls} API calls${pricingNote}`
+    );
+  }
   if (r.flags.length > 0) {
     lines.push(`- **Flags:** ${r.flags.join(', ')}`);
   }

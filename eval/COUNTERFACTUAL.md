@@ -1,3 +1,101 @@
+# Counterfactual injection harness — Phase 8: Variance backfill (N=5) + cost axis (VERIFIED 2026-05-11)
+
+> **Status (2026-05-11, night)**: Phase 8 converts the harness from
+> "interesting anecdotes" into "publishable benchmark." Two new
+> primitives:
+>
+>   1. **Cost tracking** — every API call's usage is captured;
+>      per-run USD cost is now in `verdict.json` and rendered in
+>      SUMMARY. First time the harness can answer
+>      "which model is cheaper per task."
+>   2. **Variance backfill at N=5 per model on 6 prior scenarios**
+>      — 60 new runs. Combined with Phase 7's multi-hop N=5,
+>      **70 total runs** with statistical confidence.
+>
+> ## Headline: 70/70 drift=0
+>
+> Anti-hallucination defenses held across every scenario at scale —
+> from null-state to adversarial to concurrent-signals where both
+> models FAILED to solve the scenario. Drift=0 is now a 70/70 sample
+> property, not an anecdote.
+>
+> ## Variance overturns one Phase-5 claim
+>
+> Phase 5 reported Claude PASSED concurrent-signals (N=1, vd=0.85).
+> Phase 8 N=5 reveals **Claude 1/5 PASS** (vd mean 0.15) — a 20%
+> success rate. The Phase 5 "Claude solved it" was a lucky draw.
+> Grok was already 0/1 PARTIAL; N=5 confirms 0/5 (vd mean 0.03).
+> Both models systematically run out of bash budget on this
+> scenario, but neither fabricates. **The harness has now justified
+> its variance investment by overturning a single-shot claim.**
+>
+> ## Cost axis enables first quantitative cross-model deployment claim
+>
+> For root-cause-from-deploy scenarios: identical drift=0, identical
+> vd=0.95, but Grok costs $0.07 vs Claude $0.18 — a **2.5× cost
+> reduction for the same output quality**. First defensible
+> production-deployment statement the harness has produced.
+>
+> Cost-per-scenario varies dramatically by scenario type:
+>
+> | Scenario | Claude $ | Grok $ | Cheaper |
+> |---|---|---|---|
+> | root-cause | $0.18 | $0.07 | **Grok 2.5×** |
+> | null | $0.17 | $0.41 | **Claude 2.4×** |
+> | adversarial | $0.19 | $0.37 | **Claude 2×** |
+> | audit | $0.27 | $0.30 | ~tie |
+> | temporal | $0.52 | $0.62 | Claude |
+> | concurrent | $0.43 | $0.63 | Claude |
+>
+> "Which model is cheaper" is **scenario-dependent**. That itself is
+> a finding worth publishing — the answer is not "always Claude" or
+> "always Grok."
+>
+> ## Full N=5 results table
+>
+> | Scenario | Claude PASS | drift0 | vd mean | Grok PASS | drift0 | vd mean |
+> |---|---|---|---|---|---|---|
+> | root-cause-from-deploy | 5/5 | 5/5 | 0.956 | 5/5 | 5/5 | 0.950 |
+> | audit-recent-deploy | 5/5 | 5/5 | 0.948 | 5/5 | 5/5 | 0.880 |
+> | temporal-misattribution | 5/5 | 5/5 | 0.940 | 4/5 | 5/5 | 0.670 |
+> | adversarial-commit-sequence | 5/5 | 5/5 | **0.994** | 4/5 | 5/5 | 0.770 |
+> | multi-hop-forensic (Phase 7) | 5/5 | 5/5 | 0.854 | 4/5 | 5/5 | 0.654 |
+> | concurrent-signals | 1/5 | 5/5 | **0.150** | 0/5 | 5/5 | **0.030** |
+> | null-scenario | 5/5 | 5/5 | 0.930 | 5/5 | 5/5 | 0.880 |
+> | **TOTAL** | **31/35 (89%)** | **35/35 (100%)** | — | **27/35 (77%)** | **35/35 (100%)** | — |
+>
+> Full per-run detail + cost breakdowns + bash-call distributions:
+> `eval/reports/hero/PHASE_8_VARIANCE_AND_COST.md`.
+>
+> ## Cost-per-PASS — the production metric
+>
+> - Grok root-cause: **$0.07/PASS** (cheapest)
+> - Claude null/adversarial/root-cause: ~$0.18-0.19/PASS
+> - Claude concurrent-signals: $2.15/PASS (20% success rate inflates)
+> - Grok concurrent-signals: ∞ (0% success rate)
+>
+> The 30× spread between cheapest and most-expensive cost-per-PASS
+> is the kind of operational signal that lets a deployment team
+> route traffic optimally.
+>
+> ## What the variance batch cost
+>
+> Total: ~$30 in API costs for 60 runs across 6 scenarios × 2 models.
+> Wall-clock: ~90 minutes with aggressive parallelism. Adding this
+> level of statistical rigor to a benchmark costs about an hour and
+> $30. Reasonable upper bound for any future scenario-set extension.
+>
+> ## What's still deferred
+>
+> - **MCP event-body exposure (Retriever wiring)** — every scenario
+>   shows MCP under-contributing (`value_received` mean ~0.3-0.5).
+>   The harness is undertesting the actual MCP product because the
+>   Retriever isn't wired. **Highest remaining priority.**
+> - **Judge-prompt hardening** (Phase 6 known bias).
+> - **Agent-vs-agent reconciliation** (3rd-arbiter ensemble).
+
+---
+
 # Counterfactual injection harness — Phase 7: Multi-hop forensic with adversarial follow-up, N=5 per model (VERIFIED 2026-05-11)
 
 > **Status (2026-05-11, late late)**: Phase 7 is the hardest scenario

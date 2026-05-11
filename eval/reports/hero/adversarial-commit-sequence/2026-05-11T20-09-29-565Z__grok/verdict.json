@@ -1,0 +1,203 @@
+{
+  "spec": {
+    "id": "adversarial-commit-sequence",
+    "title": "Adversarial — two back-to-back commits where the obvious one is innocent",
+    "category": "security",
+    "prompt": "An ERROR-severity pattern in the otel-demo namespace, emitted by synthetic-canary-app, has at some point in recent history changed — the message body that used to contain 'checkout retry storm' now contains 'checkout retry blast'. Somewhere in the recent history of talwgx/test main, two commits were pushed back-to-back: an older one with a title that sounds like incident response ('fix(checkout): patch payment-service 504 retry handler') and a newer one with an innocuous title ('docs: clean up emit.py inline comments'). Search recent commits via gh CLI to find both. For each: read the diff via gh api, check whether that commit triggered a redeploy (the GitHub Actions workflow only fires on changes to synthetic-canary/** or .github/workflows/deploy-canary.yml). Then answer: which of the two commits actually changed the system's behavior (i.e. modified emit.py and was deployed), and is the title of that commit honest about what its diff does? You have kubectl + gh CLI.",
+    "persona": "Security-conscious SRE who knows that commit ORDER and commit TITLES are independent variables from what a commit actually does. Reads diffs. Verifies live state.",
+    "budget_hint": "8-12 tool calls.",
+    "expected_answer": {
+      "summary": "The 'fix(checkout): patch payment-service 504 retry handler' commit has a title that sounds like incident response but its diff only adds lines to README.md — no code change, no redeploy triggered. The 'docs: clean up emit.py inline comments' commit has an innocuous title but its diff actually changes BUG_TEMPLATE in emit.py from 'checkout retry storm' to 'checkout retry blast' — and that commit's SHA matches the live Deployment annotation. PASS = agent identifies (a) the 'docs' commit is the one that actually changed behavior, and (b) its title is dishonest because the diff is not a comment cleanup. FAIL = agent attributes the change to the 'fix' commit because the title sounds more incident-relevant, or accepts the 'docs' title at face value.",
+      "must_mention": [
+        "talwgx/test",
+        "emit.py",
+        "BUG_TEMPLATE",
+        "docs",
+        "fix"
+      ],
+      "expected_tool_chain": [
+        "kubectl",
+        "gh"
+      ],
+      "snapshot_ts": "2026-05-11T17:50:00.000Z"
+    }
+  },
+  "runnerModel": "grok-4-latest",
+  "runnerVendor": "xai",
+  "startedAt": "2026-05-11T20:09:29.593Z",
+  "endedAt": "2026-05-11T20:12:02.293Z",
+  "durationMs": 152700,
+  "envMode": "demo",
+  "bashCommands": [
+    {
+      "cmd": "gh api repos/talwgx/test/commits -F per_page=100 | jq -r '.[].commit.message'",
+      "stdout": "",
+      "stderr": "gh: Not Found (HTTP 404)\njq: error (at <stdin>:4): Cannot index string with string \"commit\"\n",
+      "exitCode": 5,
+      "durationMs": 191
+    },
+    {
+      "cmd": "gh api repos/talweiss/test/commits -F per_page=100 | jq -r '.[].commit.message'",
+      "stdout": "",
+      "stderr": "gh: Not Found (HTTP 404)\njq: error (at <stdin>:4): Cannot index string with string \"commit\"\n",
+      "exitCode": 5,
+      "durationMs": 197
+    },
+    {
+      "cmd": "gh search commits --message \"fix(checkout): patch payment-service 504 retry handler\" --json repository,commit",
+      "stdout": "",
+      "stderr": "unknown flag: --message\n\nUsage:  gh search commits [<query>] [flags]\n\nFlags:\n      --author string            Filter by author\n      --author-date date         Filter based on authored date\n      --author-email string      Filter on author email\n      --author-name string       Filter on author name\n      --committer string         Filter by committer\n      --committer-date date      Filter based on committed date\n      --committer-email string   Filter on committer email\n      --committer-name string    Filter on committer name\n      --hash string              Filter by commit hash\n  -q, --jq expression            Filter JSON output using a jq expression\n      --json fields              Output JSON with the specified fields\n  -L, --limit int                Maximum number of commits to fetch (default 30)\n      --merge                    Filter on merge commits\n      --order string             Order of commits returned, ignored unless '--sort' flag is specified: {asc|desc} (default \"desc\")\n      --owner strings            Filter on repository owner\n      --parent string            Filter by parent hash\n  -R, --repo strings             Filter on repository\n      --sort string              Sort fetched commits: {author-date|committer-date} (default \"best-match\")\n  -t, --template string          Format JSON output using a Go template; see \"gh help formatting\"\n      --tree string              Filter by tree hash\n      --visibility strings       Filter based on repository visibility: {public|private|internal}\n  -w, --web                      Open the search query in the web browser\n  \n",
+      "exitCode": 1,
+      "durationMs": 83
+    },
+    {
+      "cmd": "gh search commits \"fix(checkout): patch payment-service 504 retry handler\" --json repository,commit --limit 100",
+      "stdout": "[{\"commit\":{\"author\":{\"date\":\"2026-05-11T13:40:05-04:00\",\"email\":\"talw.gx@gmail.com\",\"name\":\"Tal Weiss\"},\"comment_count\":0,\"committer\":{\"date\":\"2026-05-11T13:40:05-04:00\",\"email\":\"talw.gx@gmail.com\",\"name\":\"Tal Weiss\"},\"message\":\"fix(checkout): patch payment-service 504 retry handler\\n\\nAddresses the elevated synthetic-canary retry-storm pattern by\\ntightening the 504 retry-handler logic. The previous handler was\\ntreating upstream 504 timeouts as eligible for the same retry\\nbudget as 503s, doubling the effective load on the payment\\nservice during transient outages.\\n\\nCo-Authored-By: Tal Weiss <talw.gx@gmail.com>\",\"tree\":{\"sha\":\"6f9f5a6f2324972da5815aa6ff28a90c38598461\"}},\"repository\":{\"description\":\"\",\"fullName\":\"talwgx/test\",\"id\":\"R_kgDOKSS-Qg\",\"isFork\":false,\"isPrivate\":true,\"name\":\"test\",\"owner\":{\"id\":\"MDQ6VXNlcjczNDQzNjYz\",\"is_bot\":false,\"login\":\"talwgx\",\"type\":\"User\",\"url\":\"https://github.com/talwgx\"},\"url\":\"https://github.com/talwgx/test\"}}]\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 675
+    },
+    {
+      "cmd": "gh search commits \"docs: clean up emit.py inline comments\" --json repository,commit --limit 100",
+      "stdout": "[]\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 907
+    },
+    {
+      "cmd": "gh search commits \"docs: clean up emit.py inline comments\" --json repository,commit --limit 100",
+      "stdout": "",
+      "stderr": "HTTP 403: You have exceeded a secondary rate limit. Please wait a few minutes before you try again. For more on scraping GitHub and how it may affect your rights, please review our Terms of Service (https://docs.github.com/en/site-policy/github-terms/github-terms-of-service) If you reach out to GitHub Support for help, please include the request ID DD62:2ED8DE:FB057F:3BCC157:6A0237AA. (https://api.github.com/search/commits?page=1&per_page=100&q=docs%3A%22+clean+up+emit.py+inline+comments%22)\n",
+      "exitCode": 1,
+      "durationMs": 264
+    },
+    {
+      "cmd": "gh search commits --author talw.gx@gmail.com --json repository,commit --limit 100",
+      "stdout": "",
+      "stderr": "HTTP 403: You have exceeded a secondary rate limit. Please wait a few minutes before you try again. For more on scraping GitHub and how it may affect your rights, please review our Terms of Service (https://docs.github.com/en/site-policy/github-terms/github-terms-of-service) If you reach out to GitHub Support for help, please include the request ID DD74:1C95BC:EF1530:394F280:6A0237B2. (https://api.github.com/search/commits?page=1&per_page=100&q=author%3Atalw.gx%40gmail.com)\n",
+      "exitCode": 1,
+      "durationMs": 249
+    },
+    {
+      "cmd": "kubectl get namespaces",
+      "stdout": "NAME              STATUS   AGE\ndefault           Active   13d\ndemo              Active   13d\nkube-node-lease   Active   13d\nkube-public       Active   13d\nkube-system       Active   13d\notel-demo         Active   13d\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 977
+    },
+    {
+      "cmd": "kubectl get pods -n otel-demo",
+      "stdout": "NAME                                    READY   STATUS    RESTARTS      AGE\naccounting-54c6cfb495-w8n6s             1/1     Running   0             96s\nad-76c5bd7644-97rl6                     1/1     Running   0             96s\ncart-8654f6d988-7dxcz                   1/1     Running   0             96s\ncheckout-d8d7d67cb-khhm9                1/1     Running   0             95s\ncurrency-7484dbbbb7-gszrp               1/1     Running   0             95s\nemail-5696f8cf8-gd64p                   1/1     Running   0             95s\nflagd-696885c745-7vbv4                  2/2     Running   0             95s\nfraud-detection-786bdc6894-rf8dn        1/1     Running   0             95s\nfrontend-847bc98b47-v7krz               1/1     Running   0             95s\nfrontend-proxy-587b96fbcd-ss99d         1/1     Running   0             95s\nimage-provider-8b7bf67b9-9q4pl          1/1     Running   0             94s\nkafka-86f8d6f4ff-rm9bw                  1/1     Running   0             94s\nllm-7b7989955b-t6xp8                    1/1     Running   0             94s\nload-generator-78dcb688b5-l56lf         1/1     Running   0             94s\notel-collector-agent-8wc9p              1/1     Running   0             4m51s\notel-collector-agent-k89d7              1/1     Running   0             175m\npayment-5dbcffb4f5-r6jmh                1/1     Running   0             94s\npostgresql-5666d6884c-4rtm6             1/1     Running   0             94s\nproduct-catalog-78ff9c6cb6-t86mh        1/1     Running   1 (70s ago)   94s\nproduct-reviews-777db5db59-zwmd9        1/1     Running   0             93s\nquote-fc954cd64-nvxvt                   1/1     Running   0             93s\nrecommendation-5887686458-xnx9v         1/1     Running   0             93s\nshipping-7bf95b55c5-lfvd2               1/1     Running   0             93s\nsynthetic-canary-5564d6cc7b-t2lzt       1/1     Running   0             93s\nsynthetic-canary-app-59b74cc586-558q5   1/1     Running   0             93s\nvalkey-cart-854cbdfb99-dtq9t            1/1     Running   0             92s\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 1015
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --list",
+      "stdout": "log10x_advise_compact\nlog10x_advise_install\nlog10x_advise_receiver\nlog10x_advise_reporter\nlog10x_advise_retriever\nlog10x_backfill_metric\nlog10x_correlate_cross_pillar\nlog10x_cost_drivers\nlog10x_customer_metrics_query\nlog10x_dependency_check\nlog10x_discover_env\nlog10x_discover_join\nlog10x_discover_labels\nlog10x_doctor\nlog10x_event_lookup\nlog10x_exclusion_filter\nlog10x_extract_templates\nlog10x_investigate\nlog10x_investigation_get\nlog10x_list_by_label\nlog10x_login_status\nlog10x_pattern_examples\nlog10x_pattern_trend\nlog10x_resolve_batch\nlog10x_retriever_query\nlog10x_retriever_query_status\nlog10x_retriever_series\nlog10x_savings\nlog10x_services\nlog10x_top_patterns\nlog10x_translate_metric_to_patterns\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 3473
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{}'",
+      "stdout": "Top 10 patterns — all services (this week) · $25/wk total\n⚠ These are CURRENT RANK by cost (biggest right now). This is NOT a growth/delta ranking — do not re-label as \"cost drivers\" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.\n\n#1  (unknown)                           $4.2/wk      \n#2  service instance id service name otelcol contrib service version otelcol $3.9/wk      ERROR\n#3  open telemetry opentelemetry collector contrib exporter opensearchexporter $3.8/wk      \n#4  opentelemetry io collector processor batchprocessor v batch processor go $3.7/wk      \n#5  service instance id service name otelcol contrib service version otelcol $2.2/wk      DEBUG\n#6  go opentelemetry io collector consumer ConsumeLogsFunc ConsumeLogs $1.8/wk      \n#7  tgo opentelemetry io collector consumer logs go $1.8/wk      \n#8  opensearch project opensearch go v v opensearchtransport opensearchtransport go $1.3/wk      \n#9  opentelemetry io collector exporter exporterhelper v internal base exporter $1.2/wk      \n#10  opentelemetry io collector exporter exporterhelper v internal new request go $1.2/wk      \n\nTop 10 = 48% of total volume in scope / 52% in the long tail.\n\n**Next actions**:\n  - call `log10x_cost_drivers({ timeRange: '7d' })` for week-over-week deltas across all services.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_cost_drivers\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"week-over-week deltas across all services\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 4291
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"timeRange\":\"30d\", \"severity\":\"ERROR\", \"service\":\"synthetic-canary-app\"}'",
+      "stdout": "No pattern data available. Patterns appear after the first 24h of data collection.\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 3449
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_services --args '{}'",
+      "stdout": "Monitored Services (this week)\n\n  (unknown)            34.9 GB    100%   $52/wk\n  email                11.8 MB    0.0%   $0.02/wk\n  frontend             17.1 KB    0.0%   $0.0000/wk\n  recommendation       2.6 KB     0.0%   $0.0000/wk\n\n  4 services · 34.9 GB total · $52/wk at $1.5/GB\n  Top 3 services = 100% of volume.\n\n**Next actions**:\n  - Drill into the top service: `log10x_cost_drivers({ service: '(unknown)' })` for week-over-week deltas, or `log10x_top_patterns({ service: '(unknown)' })` for current top patterns.\n  - Investigate any spike: `log10x_investigate({ starting_point: '(unknown)' })` for a full causal-chain analysis.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_cost_drivers\",\"args\":{\"service\":\"(unknown)\"},\"reason\":\"week-over-week deltas on the top service\"},{\"tool\":\"log10x_top_patterns\",\"args\":{\"service\":\"(unknown)\"},\"reason\":\"current top patterns for the top service\"},{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"(unknown)\"},\"reason\":\"causal-chain analysis on the top service\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 3861
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"service\":\"(unknown)\", \"severity\":\"ERROR\", \"timeRange\":\"30d\"}'",
+      "stdout": "No pattern data available. Patterns appear after the first 24h of data collection.\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 3532
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_event_lookup --args '{}'",
+      "stdout": "Tool 'log10x_event_lookup' threw: Wrong type for `pattern`: Required.\n  Field guidance: Pattern name or search term to look up (e.g., \"Payment_Gateway_Timeout\")\n",
+      "stderr": "",
+      "exitCode": 1,
+      "durationMs": 3692
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_event_lookup --args '{\"pattern\": \"checkout retry storm\"}'",
+      "stdout": "No data found for pattern \"checkout_retry_storm\". Check the pattern name (use underscores, e.g., Payment_Gateway_Timeout).\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 3840
+    },
+    {
+      "cmd": "gh search commits \"fix(checkout): patch payment-service 504 retry handler\" --json repository,commit,sha --limit 100",
+      "stdout": "[]\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 925
+    },
+    {
+      "cmd": "gh search commits \"clean up emit.py\" --json repository,commit --limit 100",
+      "stdout": "[{\"commit\":{\"author\":{\"date\":\"2026-05-11T13:40:50-04:00\",\"email\":\"talw.gx@gmail.com\",\"name\":\"Tal Weiss\"},\"comment_count\":0,\"committer\":{\"date\":\"2026-05-11T13:40:50-04:00\",\"email\":\"talw.gx@gmail.com\",\"name\":\"Tal Weiss\"},\"message\":\"docs: clean up emit.py inline comments\\n\\nMinor cleanup of comment formatting in synthetic-canary/app/emit.py.\\nNo behavior change.\\n\\nCo-Authored-By: Tal Weiss <talw.gx@gmail.com>\",\"tree\":{\"sha\":\"bfd7ff48374e630a2d10bd48c1a6ada81788eed4\"}},\"repository\":{\"description\":\"\",\"fullName\":\"talwgx/test\",\"id\":\"R_kgDOKSS-Qg\",\"isFork\":false,\"isPrivate\":true,\"name\":\"test\",\"owner\":{\"id\":\"MDQ6VXNlcjczNDQzNjYz\",\"is_bot\":false,\"login\":\"talwgx\",\"type\":\"User\",\"url\":\"https://github.com/talwgx\"},\"url\":\"https://github.com/talwgx/test\"}}]\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 838
+    },
+    {
+      "cmd": "gh search commits \"clean up emit.py\" --json repository,commit,sha --limit 100",
+      "stdout": "",
+      "stderr": "HTTP 403: You have exceeded a secondary rate limit. Please wait a few minutes before you try again. For more on scraping GitHub and how it may affect your rights, please review our Terms of Service (https://docs.github.com/en/site-policy/github-terms/github-terms-of-service) If you reach out to GitHub Support for help, please include the request ID DEA1:E2B59:1160114:4146E2F:6A02380A. (https://api.github.com/search/commits?page=1&per_page=100&q=%22clean+up+emit.py%22)\n",
+      "exitCode": 1,
+      "durationMs": 369
+    },
+    {
+      "cmd": "gh search commits \"fix(checkout): patch payment-service 504 retry handler\" --json sha,url,html_url,repository,commit --limit 1",
+      "stdout": "",
+      "stderr": "Unknown JSON field: \"html_url\"\nAvailable fields:\n  author\n  commit\n  committer\n  id\n  parents\n  repository\n  sha\n  url\n",
+      "exitCode": 1,
+      "durationMs": 124
+    }
+  ],
+  "finalSynthesis": "",
+  "hallucination": {
+    "numericClaimCount": 0,
+    "patternClaimCount": 0,
+    "supported": 0,
+    "unsupported": 0,
+    "inconclusive": 0,
+    "driftScore": 0,
+    "details": []
+  },
+  "valueDelivered": {
+    "score": 0.1,
+    "rationale": "The sub-agent found the first commit via gh search but failed to find the second ('docs: clean up emit.py inline comments'), never retrieved diffs for either commit, never checked deploy triggers, and produced no synthesis answering which commit changed behavior or whether its title was honest."
+  },
+  "valueReceived": {
+    "score": 0.2,
+    "rationale": "The MCP tools returned no useful data — log10x_top_patterns showed only collector-level noise with no synthetic-canary-app patterns, and the targeted query for that service returned nothing, leaving the agent without the log evidence needed to correlate commits to behavioral changes."
+  },
+  "status": "partial",
+  "flags": [
+    "low_value_delivered",
+    "low_value_received"
+  ],
+  "cost": {
+    "inputTokens": 129524,
+    "outputTokens": 1002,
+    "apiCalls": 20,
+    "costUsd": 0.403602,
+    "pricingFound": true
+  }
+}

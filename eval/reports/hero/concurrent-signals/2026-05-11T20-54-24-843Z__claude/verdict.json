@@ -1,0 +1,202 @@
+{
+  "spec": {
+    "id": "concurrent-signals",
+    "title": "Concurrent signals — distinguish a deploy-attributable incident from unrelated noise firing at the same time",
+    "category": "stability",
+    "prompt": "Two distinct ERROR-shaped patterns are firing in the otel-demo namespace right now. One appears to be related to checkout retry behavior; the other appears to be a DNS resolution failure on some upstream service. The customer-visible cart-abandonment alert is being driven by one of them — the team wants to know which one. Investigation rule: a planted/attributable incident has a deploy trail (the emitting workload has a canary.github.io/sha annotation pointing at a real commit in talwgx/test); concurrent natural noise typically does NOT have a deploy trail. For each of the two ERROR patterns, find the emitting workload via kubectl, check whether it has a canary.github.io/sha annotation, and (if it does) resolve that SHA via gh api. Report: which pattern has a deploy trail and is therefore the cart-abandonment cause, and which is unrelated concurrent noise. You have kubectl + gh CLI.",
+    "persona": "Oncall SRE who treats correlation and causation as distinct. Always looks for the change-management trail (commit/deploy) before blaming a freshly-spiking pattern.",
+    "budget_hint": "8-14 tool calls.",
+    "expected_answer": {
+      "summary": "The 'checkout retry blast' pattern is emitted by synthetic-canary-app, a Deployment whose annotation canary.github.io/sha resolves to a commit in talwgx/test — this IS the cart-abandonment cause (deploy-attributable). The 'DNS resolution failed for upstream service' pattern is emitted by concurrent-noise-job, a k8s Job with no canary.github.io/* annotation and no deploy trail — this is unrelated concurrent noise. PASS = agent correctly attributes ONLY the checkout pattern to the deploy and reports the DNS pattern as unrelated; FAIL = agent attributes both to the same cause, or guesses which is which without verifying via annotations.",
+      "must_mention": [
+        "synthetic-canary-app",
+        "concurrent-noise",
+        "canary.github.io/sha",
+        "talwgx/test"
+      ],
+      "expected_tool_chain": [
+        "kubectl",
+        "gh"
+      ],
+      "snapshot_ts": "2026-05-11T17:55:00.000Z"
+    }
+  },
+  "runnerModel": "claude-sonnet-4-6",
+  "runnerVendor": "anthropic",
+  "startedAt": "2026-05-11T20:54:24.863Z",
+  "endedAt": "2026-05-11T20:58:56.593Z",
+  "durationMs": 271730,
+  "envMode": "demo",
+  "bashCommands": [
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --list",
+      "stdout": "log10x_advise_compact\nlog10x_advise_install\nlog10x_advise_receiver\nlog10x_advise_reporter\nlog10x_advise_retriever\nlog10x_backfill_metric\nlog10x_correlate_cross_pillar\nlog10x_cost_drivers\nlog10x_customer_metrics_query\nlog10x_dependency_check\nlog10x_discover_env\nlog10x_discover_join\nlog10x_discover_labels\nlog10x_doctor\nlog10x_event_lookup\nlog10x_exclusion_filter\nlog10x_extract_templates\nlog10x_investigate\nlog10x_investigation_get\nlog10x_list_by_label\nlog10x_login_status\nlog10x_pattern_examples\nlog10x_pattern_trend\nlog10x_resolve_batch\nlog10x_retriever_query\nlog10x_retriever_query_status\nlog10x_retriever_series\nlog10x_savings\nlog10x_services\nlog10x_top_patterns\nlog10x_translate_metric_to_patterns\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 7125
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"namespace\": \"otel-demo\", \"level\": \"ERROR\", \"limit\": 10}'",
+      "stdout": "Top 10 patterns — all services (this week) · $25/wk total\n⚠ These are CURRENT RANK by cost (biggest right now). This is NOT a growth/delta ranking — do not re-label as \"cost drivers\" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.\n\n#1  (unknown)                           $4.2/wk      \n#2  service instance id service name otelcol contrib service version otelcol $3.9/wk      ERROR\n#3  open telemetry opentelemetry collector contrib exporter opensearchexporter $3.8/wk      \n#4  opentelemetry io collector processor batchprocessor v batch processor go $3.7/wk      \n#5  service instance id service name otelcol contrib service version otelcol $2.2/wk      DEBUG\n#6  go opentelemetry io collector consumer ConsumeLogsFunc ConsumeLogs $1.8/wk      \n#7  tgo opentelemetry io collector consumer logs go $1.8/wk      \n#8  opensearch project opensearch go v v opensearchtransport opensearchtransport go $1.3/wk      \n#9  opentelemetry io collector exporter exporterhelper v internal base exporter $1.2/wk      \n#10  opentelemetry io collector exporter exporterhelper v internal new request go $1.2/wk      \n\nTop 10 = 48% of total volume in scope / 52% in the long tail.\n\n**Next actions**:\n  - call `log10x_cost_drivers({ timeRange: '7d' })` for week-over-week deltas across all services.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_cost_drivers\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"week-over-week deltas across all services\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 15673
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_extract_templates --args '{\"namespace\": \"otel-demo\", \"level\": \"ERROR\", \"limit\": 20}'",
+      "stdout": "Tool 'log10x_extract_templates' threw: Wrong type for `source`: Required.\n  Field guidance: Input mode. `file`: read from a local path/glob. `events`: array of raw log lines. `text`: newline-separated log events as a single string.\n",
+      "stderr": "",
+      "exitCode": 1,
+      "durationMs": 9097
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_discover_labels --args '{\"namespace\": \"otel-demo\"}'",
+      "stdout": "Queryable labels (18)\n\nFeatured — use these as filter keys in log10x_cost_drivers, log10x_list_by_label, etc.:\n  tenx_user_service      the service that emitted the log\n  severity_level         TRACE / DEBUG / INFO / WARN / ERROR / CRITICAL\n  message_pattern        the stable template hash — the unit of cost attribution\n  tenx_env               edge or cloud\n  http_code              HTTP response status (100–511)\n  k8s_namespace          Kubernetes namespace (from enrichment)\n  k8s_container          Kubernetes container name\n  k8s_pod                Kubernetes pod name\n\nOther labels (10):\n  http_message, tenx_app, tenx_failure_reason, tenx_fwd_input, tenx_host_name, tenx_pipeline_uuid, tenx_reported_name, tenx_unit_name, tenx_user_process, userId\n\nTip: call log10x_discover_labels with a specific label name (e.g., label=\"tenx_user_service\") to list its distinct values.\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 5291
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_discover_labels --args '{\"namespace\": \"otel-demo\", \"label\": \"tenx_user_service\"}'",
+      "stdout": "Label \"tenx_user_service\" — 2 distinct values\n\n  email\n  recommendation\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 8138
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_list_by_label --args '{\"label\": \"tenx_user_service\", \"namespace\": \"otel-demo\", \"level\": \"ERROR\"}'",
+      "stdout": "Cost by tenx_user_service (this week)\n\n  (empty)                  34.9 GB     100%   $52/wk\n  email                    11.9 MB     0.0%   $0.02/wk\n  frontend                 17.1 KB     0.0%   $0.0000/wk\n  recommendation           2.4 KB      0.0%   $0.0000/wk\n\n  4 rows · 35.0 GB total · $52/wk\n\n**Next actions**:\n  - Drill into the top service: `log10x_cost_drivers({ service: '(empty)' })` for week-over-week deltas.\n  - Or investigate it: `log10x_investigate({ starting_point: '(empty)' })`.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_cost_drivers\",\"args\":{\"service\":\"(empty)\",\"timeRange\":\"7d\"},\"reason\":\"drill into the top service by week-over-week deltas\"},{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"(empty)\",\"window\":\"7d\"},\"reason\":\"investigate the top service\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 7524
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_list_by_label --args '{\"label\": \"k8s_namespace\", \"namespace\": \"otel-demo\", \"level\": \"ERROR\"}'",
+      "stdout": "Cost by k8s_namespace (this week)\n\n  (empty)                  34.9 GB     100%   $52/wk\n  otel-demo                11.9 MB     0.0%   $0.02/wk\n\n  2 rows · 35.0 GB total · $52/wk\n\n**Next actions**:\n  - Filter cost_drivers to the top dimension: pass `k8s_namespace` value into a cost_drivers query, or call `log10x_top_patterns` scoped to the relevant service.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_top_patterns\",\"args\":{\"timeRange\":\"7d\",\"limit\":10},\"reason\":\"top patterns scoped to the same window as the k8s_namespace ranking\"},{\"tool\":\"log10x_cost_drivers\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"check whether the top dimensions are growing\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 8504
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"namespace\": \"otel-demo\", \"level\": \"ERROR\", \"service\": \"otel-demo\", \"limit\": 20}'",
+      "stdout": "No pattern data available. Patterns appear after the first 24h of data collection.\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 9591
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_list_by_label --args '{\"label\": \"k8s_container\", \"namespace\": \"otel-demo\", \"level\": \"ERROR\"}'",
+      "stdout": "Cost by k8s_container (this week)\n\n  (empty)                  34.9 GB     100%   $52/wk\n  email                    11.9 MB     0.0%   $0.02/wk\n  frontend                 17.1 KB     0.0%   $0.0000/wk\n  recommendation           2.4 KB      0.0%   $0.0000/wk\n\n  4 rows · 35.0 GB total · $52/wk\n\n**Next actions**:\n  - Filter cost_drivers to the top dimension: pass `k8s_container` value into a cost_drivers query, or call `log10x_top_patterns` scoped to the relevant service.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_top_patterns\",\"args\":{\"timeRange\":\"7d\",\"limit\":10},\"reason\":\"top patterns scoped to the same window as the k8s_container ranking\"},{\"tool\":\"log10x_cost_drivers\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"check whether the top dimensions are growing\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 8907
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_list_by_label --args '{\"label\": \"k8s_pod\", \"namespace\": \"otel-demo\", \"level\": \"ERROR\"}'",
+      "stdout": "Cost by k8s_pod (this week)\n\n  (empty)                  34.9 GB     100%   $52/wk\n  email-5696f8cf8-gxrw7    4.1 MB      0.0%   $0.0060/wk\n  email-5696f8cf8-b8fzt    1.8 MB      0.0%   $0.0026/wk\n  email-5696f8cf8-c4kjt    1.4 MB      0.0%   $0.0020/wk\n  email-5696f8cf8-kkkkl    977.6 KB    0.0%   $0.0014/wk\n  email-5696f8cf8-7v5tk    893.3 KB    0.0%   $0.0013/wk\n  email-5696f8cf8-pw2wj    877.5 KB    0.0%   $0.0013/wk\n  email-5696f8cf8-526tg    874.0 KB    0.0%   $0.0013/wk\n  email-5696f8cf8-jvx9r    249.3 KB    0.0%   $0.0004/wk\n  email-5696f8cf8-7xq5t    213.3 KB    0.0%   $0.0003/wk\n  email-5696f8cf8-d6nqg    181.2 KB    0.0%   $0.0003/wk\n  email-5696f8cf8-hpcmr    164.8 KB    0.0%   $0.0002/wk\n  email-5696f8cf8-2mw92    92.8 KB     0.0%   $0.0001/wk\n  email-5696f8cf8-n629t    75.2 KB     0.0%   $0.0001/wk\n  email-5696f8cf8-gd64p    57.8 KB     0.0%   $0.0001/wk\n  email-5696f8cf8-h7lhp    14.1 KB     0.0%   $0.0000/wk\n  frontend-847bc98b47-2xh8l 7.5 KB      0.0%   $0.0000/wk\n  frontend-847bc98b47-bs8br 7.5 KB      0.0%   $0.0000/wk\n  frontend-847bc98b47-lzr47 2.1 KB      0.0%   $0.0000/wk\n  recommendation-5887686458-ml5wx 1.2 KB      0.0%   $0.0000/wk\n\n  21 rows · 35.0 GB total · $52/wk\n\n**Next actions**:\n  - Filter cost_drivers to the top dimension: pass `k8s_pod` value into a cost_drivers query, or call `log10x_top_patterns` scoped to the relevant service.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_top_patterns\",\"args\":{\"timeRange\":\"7d\",\"limit\":10},\"reason\":\"top patterns scoped to the same window as the k8s_pod ranking\"},{\"tool\":\"log10x_cost_drivers\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"check whether the top dimensions are growing\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 16072
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"namespace\": \"otel-demo\", \"level\": \"ERROR\", \"limit\": 20, \"service\": \"email\"}'\n",
+      "stdout": "Top 1 patterns — email (this week) · $0.02/wk total\n⚠ These are CURRENT RANK by cost (biggest right now). This is NOT a growth/delta ranking — do not re-label as \"cost drivers\" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.\n\n#1  error OTLP logs exporter received Net HTTPServiceUnavailable code uri logs $0.02/wk     ERROR  email\n\nTop 1 = 100% of total volume in scope / 0% in the long tail.\n\n**Next actions**:\n  - call `log10x_investigate({ starting_point: 'error_OTLP_logs_exporter_received_Net_HTTPServiceUnavailable_code_uri_logs' })` to trace what's driving the top pattern.\n  - call `log10x_cost_drivers({ service: 'email', timeRange: '7d' })` for week-over-week deltas on the top service.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"error_OTLP_logs_exporter_received_Net_HTTPServiceUnavailable_code_uri_logs\"},\"reason\":\"trace the top pattern\"},{\"tool\":\"log10x_cost_drivers\",\"args\":{\"service\":\"email\",\"timeRange\":\"7d\"},\"reason\":\"week-over-week deltas on the top service\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 14802
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"namespace\": \"otel-demo\", \"level\": \"ERROR\", \"limit\": 20, \"service\": \"frontend\"}' &\nnode /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"namespace\": \"otel-demo\", \"level\": \"ERROR\", \"limit\": 20, \"service\": \"recommendation\"}' &\nwait",
+      "stdout": "Top 1 patterns — recommendation (this week) · $0.0000/wk total\n⚠ These are CURRENT RANK by cost (biggest right now). This is NOT a growth/delta ranking — do not re-label as \"cost drivers\" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.\n\n#1  response or iterator behavior argument context $0.0000/wk     recommendation\n\nTop 1 = 100% of total volume in scope / 0% in the long tail.\n\n**Next actions**:\n  - call `log10x_investigate({ starting_point: 'response_or_iterator_behavior_argument_context' })` to trace what's driving the top pattern.\n  - call `log10x_cost_drivers({ service: 'recommendation', timeRange: '7d' })` for week-over-week deltas on the top service.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"response_or_iterator_behavior_argument_context\"},\"reason\":\"trace the top pattern\"},{\"tool\":\"log10x_cost_drivers\",\"args\":{\"service\":\"recommendation\",\"timeRange\":\"7d\"},\"reason\":\"week-over-week deltas on the top service\"}]-->\nTop 1 patterns — frontend (this week) · $0.0000/wk total\n⚠ These are CURRENT RANK by cost (biggest right now). This is NOT a growth/delta ranking — do not re-label as \"cost drivers\" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.\n\n#1  code                                $0.0000/wk     frontend\n\nTop 1 = 100% of total volume in scope / 0% in the long tail.\n\n**Next actions**:\n  - call `log10x_investigate({ starting_point: 'code' })` to trace what's driving the top pattern.\n  - call `log10x_cost_drivers({ service: 'frontend', timeRange: '7d' })` for week-over-week deltas on the top service.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"code\"},\"reason\":\"trace the top pattern\"},{\"tool\":\"log10x_cost_drivers\",\"args\":{\"service\":\"frontend\",\"timeRange\":\"7d\"},\"reason\":\"week-over-week deltas on the top service\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 14641
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_examples --args '{\"pattern_id\": \"error_OTLP_logs_exporter_received_Net_HTTPServiceUnavailable_code_uri_logs\", \"limit\": 5}' &\nnode /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_examples --args '{\"pattern_id\": \"response_or_iterator_behavior_argument_context\", \"limit\": 5}' &\nnode /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_examples --args '{\"pattern_id\": \"code\", \"limit\": 5}' &\nwait",
+      "stdout": "Tool 'log10x_pattern_examples' threw: Wrong type for `pattern`: Required.\n  Field guidance: Pattern name (Symbol Message, e.g. `Payment_Gateway_Timeout`) or a pasted raw log line. Pasted lines resolve to the matching pattern via the same templater path as log10x_resolve_batch. Required.\nTool 'log10x_pattern_examples' threw: Wrong type for `pattern`: Required.\n  Field guidance: Pattern name (Symbol Message, e.g. `Payment_Gateway_Timeout`) or a pasted raw log line. Pasted lines resolve to the matching pattern via the same templater path as log10x_resolve_batch. Required.\nTool 'log10x_pattern_examples' threw: Wrong type for `pattern`: Required.\n  Field guidance: Pattern name (Symbol Message, e.g. `Payment_Gateway_Timeout`) or a pasted raw log line. Pasted lines resolve to the matching pattern via the same templater path as log10x_resolve_batch. Required.\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 10824
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\": \"error OTLP logs exporter received Net HTTPServiceUnavailable code uri logs\", \"service\": \"email\"}' &\nnode /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\": \"response or iterator behavior argument context\", \"service\": \"recommendation\"}' &\nwait",
+      "stdout": "## Investigation: response or iterator behavior argument context, last 1h\n\n**Investigation id**: 01d886b1-9dbc-4b85-a4d2-2885cdbe7cca\n**Result**: Could not resolve \"response or iterator behavior argument context\" to a known pattern or service.\n\n**Supported inputs**:\n- A raw log line (will be templatized and matched by structural identity)\n- A pattern identity (symbolMessage / templateHash)\n- A service name\n- The literal string `\"environment\"`, `\"all\"`, or `\"audit\"` for an env-wide sweep\n\n**Try next**:\n- `log10x_event_lookup({ pattern: 'response or iterator behavior argument context' })` to search by substring\n- `log10x_services()` to list known services\n## Investigation: error OTLP logs exporter received Net HTTPServiceUnavailable code uri logs, last 1h\n\n**Investigation id**: dd86b197-db47-4654-9ba2-743af1cea08a\n**Result**: Could not resolve \"error OTLP logs exporter received Net HTTPServiceUnavailable code uri logs\" to a known pattern or service.\n\n**Supported inputs**:\n- A raw log line (will be templatized and matched by structural identity)\n- A pattern identity (symbolMessage / templateHash)\n- A service name\n- The literal string `\"environment\"`, `\"all\"`, or `\"audit\"` for an env-wide sweep\n\n**Try next**:\n- `log10x_event_lookup({ pattern: 'error OTLP logs exporter received Net HTTPServiceUnavailable code uri logs' })` to search by substring\n- `log10x_services()` to list known services\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 10458
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_event_lookup --args '{\"pattern\": \"checkout retry\", \"namespace\": \"otel-demo\"}' &\nnode /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_event_lookup --args '{\"pattern\": \"DNS\", \"namespace\": \"otel-demo\"}' &\nwait",
+      "stdout": "No data found for pattern \"checkout_retry\". Check the pattern name (use underscores, e.g., Payment_Gateway_Timeout).\nDNS — $0 → $0.0013/wk\n\nServices:\n                  ERROR  $0.0013/wk   ($0 → $0.0013)  NEW\n\n1 service · 0 events\n\n**Next actions**:\n  - Time series via `log10x_pattern_trend({ pattern: 'DNS' })`.\n  - Before any mute / drop action, run `log10x_dependency_check({ pattern: 'DNS' })` to find dashboards / alerts that depend on it.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_pattern_trend\",\"args\":{\"pattern\":\"DNS\"},\"reason\":\"time series for the resolved pattern\"},{\"tool\":\"log10x_dependency_check\",\"args\":{\"pattern\":\"DNS\"},\"reason\":\"find dashboard / alert dependencies before muting\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 10686
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_event_lookup --args '{\"pattern\": \"retry\", \"namespace\": \"otel-demo\"}' &\nnode /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_event_lookup --args '{\"pattern\": \"checkout\", \"namespace\": \"otel-demo\"}' &\nnode /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_event_lookup --args '{\"pattern\": \"dns resolution\", \"namespace\": \"otel-demo\"}' &\nwait",
+      "stdout": "No data found for pattern \"dns_resolution\". Check the pattern name (use underscores, e.g., Payment_Gateway_Timeout).\nNo data found for pattern \"checkout\". Check the pattern name (use underscores, e.g., Payment_Gateway_Timeout).\nretry — $0 → $1.3/wk\n\nServices:\n                         $1.3/wk      ($0 → $1.3)  NEW\n\n1 service · 0 events\n\n**Next actions**:\n  - Time series via `log10x_pattern_trend({ pattern: 'retry' })`.\n  - Before any mute / drop action, run `log10x_dependency_check({ pattern: 'retry' })` to find dashboards / alerts that depend on it.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_pattern_trend\",\"args\":{\"pattern\":\"retry\"},\"reason\":\"time series for the resolved pattern\"},{\"tool\":\"log10x_dependency_check\",\"args\":{\"pattern\":\"retry\"},\"reason\":\"find dashboard / alert dependencies before muting\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 15162
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_cost_drivers --args '{\"timeRange\": \"7d\", \"namespace\": \"otel-demo\", \"level\": \"ERROR\"}'",
+      "stdout": "all services — no cost drivers detected (this week)\nComparison attempted: current 7d vs 3-window avg baseline (offsets: 7d/14d/21d)\nInterpretation: no pattern crossed the delta threshold. The environment is stable vs this baseline. This is a truthful negative result, not a tool failure.\nAll 1217 patterns are within normal range.\n\nTop patterns by current cost:\n  open telemetry opentelemetry collector contrib exporter opensearchexporter $3.8/wk   \n  opentelemetry io collector processor batchprocessor v batch processor go $3.7/wk   \n  go opentelemetry io collector consumer ConsumeLogsFunc ConsumeLogs $1.8/wk   \n  tgo opentelemetry io collector consumer logs go $1.8/wk   \n  opensearch project opensearch go v v opensearchtransport opensearchtransport go $1.3/wk   \n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_top_patterns\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"no growth detected; pivot to current-rank view\"},{\"tool\":\"log10x_savings\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"no growth detected; surface pipeline ROI for the current bill question\"},{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter\",\"window\":\"1h\"},\"reason\":\"investigate the largest current pattern even though it is not a growth driver\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 14365
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\": \"email\", \"window\": \"1h\"}' &\nnode /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\": \"frontend\", \"window\": \"1h\"}' &\nwait",
+      "stdout": "## Investigation: frontend, last 1h\n\n**Investigation id**: 17e50157-5856-4383-b705-da7a5bb2649b\n**Result**: Could not resolve \"frontend\" to a known pattern or service.\n\n**Supported inputs**:\n- A raw log line (will be templatized and matched by structural identity)\n- A pattern identity (symbolMessage / templateHash)\n- A service name\n- The literal string `\"environment\"`, `\"all\"`, or `\"audit\"` for an env-wide sweep\n\n**Try next**:\n- `log10x_event_lookup({ pattern: 'frontend' })` to search by substring\n- `log10x_services()` to list known services\n⚠ **Anchor may be historical**: `error_OTLP_logs_exporter_received_Net_HTTPServiceUnavailable_code_uri_logs` has not fired in the last 5 minutes. No other patterns currently active in `email` either — service may be stable and the anchor is purely historical cost.\n\n---\n\n## Investigation: email, last 1h\n\n**Investigation id**: 9ca5b36c-2d01-4c0b-8d86-2bd31f71caa8\n**Result**: No significant pattern movement in the last 1h. Nothing crossed the noise floor.\n\n**Noise floor applied**: 0.001\n\n**Try next**:\n- Widen the window: `log10x_investigate({ starting_point: 'email', window: '24h' })` — most incident inflections appear within 24h\n- Or for gradual drift: `log10x_investigate({ starting_point: 'email', window: '30d' })`\n- Check the trend directly: `log10x_pattern_trend({ pattern: 'email' })`\n- Confirm the anchor exists: use a specific log line or pattern hash rather than a service name\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_dependency_check\",\"args\":{\"pattern\":\"error_OTLP_logs_exporter_received_Net_HTTPServiceUnavailable_code_uri_logs\"},\"reason\":\"check dashboards / alerts before any mute action\"},{\"tool\":\"log10x_correlate_cross_pillar\",\"args\":{\"anchor_type\":\"log10x_pattern\",\"anchor\":\"error_OTLP_logs_exporter_received_Net_HTTPServiceUnavailable_code_uri_logs\",\"window\":\"1h\"},\"reason\":\"find upstream metric anomaly co-moving with the pattern\"},{\"tool\":\"log10x_pattern_trend\",\"args\":{\"pattern\":\"error_OTLP_logs_exporter_received_Net_HTTPServiceUnavailable_code_uri_logs\"},\"reason\":\"time series for the investigated pattern\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 12576
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_services --args '{}'",
+      "stdout": "Monitored Services (this week)\n\n  (unknown)            34.9 GB    100%   $52/wk\n  email                11.9 MB    0.0%   $0.02/wk\n  frontend             17.1 KB    0.0%   $0.0000/wk\n  recommendation       2.4 KB     0.0%   $0.0000/wk\n\n  4 services · 35.0 GB total · $52/wk at $1.5/GB\n  Top 3 services = 100% of volume.\n\n**Next actions**:\n  - Drill into the top service: `log10x_cost_drivers({ service: '(unknown)' })` for week-over-week deltas, or `log10x_top_patterns({ service: '(unknown)' })` for current top patterns.\n  - Investigate any spike: `log10x_investigate({ starting_point: '(unknown)' })` for a full causal-chain analysis.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_cost_drivers\",\"args\":{\"service\":\"(unknown)\"},\"reason\":\"week-over-week deltas on the top service\"},{\"tool\":\"log10x_top_patterns\",\"args\":{\"service\":\"(unknown)\"},\"reason\":\"current top patterns for the top service\"},{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"(unknown)\"},\"reason\":\"causal-chain analysis on the top service\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 9250
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_retriever_query --args '{\"query\": \"level:ERROR namespace:otel-demo\", \"limit\": 30}'",
+      "stdout": "Tool 'log10x_retriever_query' threw: Wrong type for `from`: Required.\n  Field guidance: Start of the query window. Accepts ISO8601 (`2026-01-15T00:00:00Z`), epoch millis, or relative (`now-1h`, `now-24h`, `now-7d`). Normalized to the engine's `now(\"-1h\")` form before dispatch.\n",
+      "stderr": "",
+      "exitCode": 1,
+      "durationMs": 4141
+    }
+  ],
+  "finalSynthesis": "",
+  "hallucination": {
+    "numericClaimCount": 0,
+    "patternClaimCount": 0,
+    "supported": 0,
+    "unsupported": 0,
+    "inconclusive": 0,
+    "driftScore": 0,
+    "details": []
+  },
+  "valueDelivered": {
+    "score": 0.1,
+    "rationale": "The agent never completed the investigation: it found email and frontend/recommendation ERROR patterns but never ran kubectl to find emitting workloads, never checked for canary.github.io/sha annotations, and never called gh api to resolve a SHA — so the core question (which pattern has a deploy trail and is the cart-abandonment cause) was never answered."
+  },
+  "valueReceived": {
+    "score": 0.4,
+    "rationale": "The MCP tools returned useful partial data — identifying ERROR-emitting services (email, frontend, recommendation) and their top patterns — but the agent couldn't distinguish checkout-retry vs DNS-failure patterns from the data returned, and the critical kubectl/gh steps were never attempted, leaving the investigation incomplete."
+  },
+  "status": "partial",
+  "flags": [
+    "low_value_delivered",
+    "low_value_received"
+  ],
+  "cost": {
+    "inputTokens": 117884,
+    "outputTokens": 3011,
+    "apiCalls": 20,
+    "costUsd": 0.39881700000000003,
+    "pricingFound": true
+  }
+}

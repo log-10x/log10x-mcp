@@ -49,9 +49,23 @@ export interface AgentRequest {
   maxTokens: number;
 }
 
+export interface AgentUsage {
+  inputTokens: number;
+  outputTokens: number;
+}
+
 export interface AgentResponse {
   content: Array<AgentTextBlock | AgentToolUseBlock>;
   stopReason: 'end_turn' | 'tool_use' | 'max_tokens' | 'stop_sequence' | 'other';
+  /**
+   * Token usage for this single API call. The runner sums these
+   * across all call() invocations to produce a per-run total. Both
+   * Anthropic and xAI return per-call usage in their responses; the
+   * client extracts and normalizes to this shape. inputTokens
+   * includes any cached / cache-read tokens (we account for them as
+   * regular input tokens for cost-table simplicity).
+   */
+  usage: AgentUsage;
 }
 
 export interface AgentClient {
@@ -98,13 +112,27 @@ class AnthropicAgentClient implements AgentClient {
     const resp = (await this.client.messages.create(createParams)) as unknown as {
       content: Array<{ type: string; [k: string]: unknown }>;
       stop_reason: string;
+      usage?: {
+        input_tokens?: number;
+        output_tokens?: number;
+        cache_creation_input_tokens?: number;
+        cache_read_input_tokens?: number;
+      };
     };
     const content = resp.content.filter(
       (b): b is AgentTextBlock | AgentToolUseBlock => b.type === 'text' || b.type === 'tool_use'
     ) as unknown as Array<AgentTextBlock | AgentToolUseBlock>;
+    const u = resp.usage ?? {};
     return {
       content,
       stopReason: resp.stop_reason as AgentResponse['stopReason'],
+      usage: {
+        inputTokens:
+          (u.input_tokens ?? 0) +
+          (u.cache_creation_input_tokens ?? 0) +
+          (u.cache_read_input_tokens ?? 0),
+        outputTokens: u.output_tokens ?? 0,
+      },
     };
   }
 }
@@ -140,7 +168,7 @@ class GrokAgentClient implements AgentClient {
     // UND_ERR_SOCKET) — Grok occasionally hangs >5min and trips
     // undici's default header timeout. Other 4xx fail fast.
     let r: Response | undefined;
-    const retryStatuses = new Set([429, 502, 503, 504]);
+    const retryStatuses = new Set([408, 425, 429, 500, 502, 503, 504, 520, 522, 524]);
     const retryErrorCodes = new Set([
       'UND_ERR_HEADERS_TIMEOUT',
       'UND_ERR_BODY_TIMEOUT',
@@ -188,6 +216,7 @@ class GrokAgentClient implements AgentClient {
         message: { role: string; content?: string | null; tool_calls?: Array<{ id: string; type: string; function: { name: string; arguments: string } }> };
         finish_reason: string;
       }>;
+      usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
     };
     const choice = data.choices?.[0];
     if (!choice) {
@@ -215,8 +244,46 @@ class GrokAgentClient implements AgentClient {
           : choice.finish_reason === 'length'
             ? 'max_tokens'
             : 'other';
-    return { content, stopReason };
+    const u = data.usage ?? {};
+    return {
+      content,
+      stopReason,
+      usage: {
+        inputTokens: u.prompt_tokens ?? 0,
+        outputTokens: u.completion_tokens ?? 0,
+      },
+    };
   }
+}
+
+/**
+ * Price table for the supported runner models, in USD per 1M tokens.
+ * Used by hero-runner to convert per-call usage into a per-run cost.
+ * Conservative numbers from the vendors' published pricing as of
+ * Q2 2026 — refine when vendors change pricing.
+ */
+export const RUNNER_MODEL_PRICING: Record<string, { inputPerMTok: number; outputPerMTok: number }> = {
+  // Anthropic
+  'claude-sonnet-4-6': { inputPerMTok: 3.0, outputPerMTok: 15.0 },
+  'claude-sonnet-4-5': { inputPerMTok: 3.0, outputPerMTok: 15.0 },
+  'claude-opus-4-7': { inputPerMTok: 15.0, outputPerMTok: 75.0 },
+  'claude-haiku-4-5-20251001': { inputPerMTok: 1.0, outputPerMTok: 5.0 },
+  // xAI
+  'grok-4-latest': { inputPerMTok: 3.0, outputPerMTok: 15.0 },
+  'grok-4-0709': { inputPerMTok: 3.0, outputPerMTok: 15.0 },
+};
+
+export function computeCostUsd(
+  modelId: string,
+  inputTokens: number,
+  outputTokens: number
+): { usd: number; pricingFound: boolean } {
+  const p = RUNNER_MODEL_PRICING[modelId];
+  if (!p) {
+    return { usd: 0, pricingFound: false };
+  }
+  const usd = (inputTokens / 1e6) * p.inputPerMTok + (outputTokens / 1e6) * p.outputPerMTok;
+  return { usd, pricingFound: true };
 }
 
 function toOpenAIMessages(system: string, messages: AgentMessage[]): Array<Record<string, unknown>> {

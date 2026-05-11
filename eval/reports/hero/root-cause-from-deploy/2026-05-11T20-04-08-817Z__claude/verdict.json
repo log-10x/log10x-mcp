@@ -1,0 +1,143 @@
+{
+  "spec": {
+    "id": "root-cause-from-deploy",
+    "title": "Root cause — attribute a top-mover pattern back to the deploy that introduced it",
+    "category": "stability",
+    "prompt": "Our 'checkout retry storm' alert just fired. A pattern matching that name is firing as ERROR in the otel-demo k8s namespace, emitted by the service synthetic-canary-app. I think the underlying deploy was triggered from a GitHub repo and the commit SHA is stamped on the Deployment object as the annotation canary.github.io/sha (and on the pod env as GITHUB_SHA). Find: (1) the SHA on the live Deployment via kubectl, (2) resolve which GitHub repo owns that SHA (try the talwgx/test repo as a starting point), and (3) name the commit message + author + parent PR if any. Cite tool outputs. You have kubectl configured for the log10x-otel-demo cluster and gh CLI available.",
+    "persona": "Oncall SRE who treats kubectl + gh CLI as first-class correlation sources alongside the log10x MCP. Routinely bridges observability metrics to source code.",
+    "budget_hint": "5-10 tool calls. The MCP confirms the pattern; kubectl + gh do the attribution.",
+    "expected_answer": {
+      "summary": "The 'checkout retry storm' pattern is being emitted by Deployment synthetic-canary-app in namespace otel-demo (talwgx/test repo). The pod env carries github_sha and github_run_id stamped by the GitHub Actions workflow. Agent should: (1) find the pattern via log10x_top_patterns ERROR, (2) get a sample event body via log10x_event_lookup or pattern_examples to extract deploy_sha, (3) call gh api repos/talwgx/test/commits/<sha> to resolve the commit message + author, (4) name the offending commit. PASS = correct SHA + correct repo cited from real tool output; FAIL = fabricated SHA / repo / commit not present in oracle. The signal originates from talwgx/test synthetic-canary subtree; this test fails fast if the agent does not bridge observability -> source-code attribution.",
+      "must_mention": [
+        "talwgx/test",
+        "synthetic-canary"
+      ],
+      "expected_tool_chain": [
+        "log10x_top_patterns",
+        "log10x_event_lookup",
+        "gh"
+      ],
+      "snapshot_ts": "2026-05-11T15:00:00.000Z"
+    }
+  },
+  "runnerModel": "claude-sonnet-4-6",
+  "runnerVendor": "anthropic",
+  "startedAt": "2026-05-11T20:04:08.822Z",
+  "endedAt": "2026-05-11T20:06:09.453Z",
+  "durationMs": 120632,
+  "envMode": "demo",
+  "bashCommands": [
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --list",
+      "stdout": "log10x_advise_compact\nlog10x_advise_install\nlog10x_advise_receiver\nlog10x_advise_reporter\nlog10x_advise_retriever\nlog10x_backfill_metric\nlog10x_correlate_cross_pillar\nlog10x_cost_drivers\nlog10x_customer_metrics_query\nlog10x_dependency_check\nlog10x_discover_env\nlog10x_discover_join\nlog10x_discover_labels\nlog10x_doctor\nlog10x_event_lookup\nlog10x_exclusion_filter\nlog10x_extract_templates\nlog10x_investigate\nlog10x_investigation_get\nlog10x_list_by_label\nlog10x_login_status\nlog10x_pattern_examples\nlog10x_pattern_trend\nlog10x_resolve_batch\nlog10x_retriever_query\nlog10x_retriever_query_status\nlog10x_retriever_series\nlog10x_savings\nlog10x_services\nlog10x_top_patterns\nlog10x_translate_metric_to_patterns\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 6455
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"namespace\":\"otel-demo\",\"severity\":\"ERROR\",\"limit\":10}'",
+      "stdout": "Top 10 patterns — all services (this week) · $4.5/wk total\n⚠ These are CURRENT RANK by cost (biggest right now). This is NOT a growth/delta ranking — do not re-label as \"cost drivers\" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.\n\n#1  service instance id service name otelcol contrib service version otelcol $3.9/wk      ERROR\n#2  transport Error while dialing dial tcp lookup jaeger on no such host interval $0.46/wk     ERROR\n#3  OpenTelemetry error Export failure exception Export retry limit exceeded previous $0.09/wk     ERROR\n#4  transport Error while dialing dial tcp lookup jaeger on no such host dropped $0.04/wk     ERROR\n#5  error OTLP logs exporter received Net HTTPServiceUnavailable code uri logs $0.02/wk     ERROR  email\n#6  timeout rpc error code Unavailable desc data refused due high memory usage $0.01/wk     ERROR\n#7  run id idx synthetic canary mode bug run id github sha github run id idx $0.01/wk     ERROR\n#8  failed upload metrics reader collect and export timeout retry able request $0.01/wk     ERROR\n#9  error OTel export failure data refused due high memory usage $0.01/wk     ERROR\n#10  grpc addrConn createTransport failed connect Addr jaeger ServerName jaeger $0.0093/wk   ERROR\n\nTop 10 = 100% of total volume in scope / 0% in the long tail.\n\n**Next actions**:\n  - call `log10x_investigate({ starting_point: 'service_instance_id_service_name_otelcol_contrib_service_version_otelcol' })` to trace what's driving the top pattern.\n  - call `log10x_cost_drivers({ timeRange: '7d' })` for week-over-week deltas across all services.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\"},\"reason\":\"trace the top pattern\"},{\"tool\":\"log10x_cost_drivers\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"week-over-week deltas across all services\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 5350
+    },
+    {
+      "cmd": "kubectl get deployment -n otel-demo -o json 2>/dev/null | python3 -c \"\nimport json,sys\ndata=json.load(sys.stdin)\nitems=data.get('items',[])\nfor item in items:\n    name=item['metadata']['name']\n    annotations=item['metadata'].get('annotations',{})\n    sha=annotations.get('canary.github.io/sha','N/A')\n    print(f'Deployment: {name}  |  canary.github.io/sha: {sha}')\n\" 2>/dev/null || echo \"kubectl not available or namespace not found\"",
+      "stdout": "Deployment: accounting  |  canary.github.io/sha: N/A\nDeployment: ad  |  canary.github.io/sha: N/A\nDeployment: cart  |  canary.github.io/sha: N/A\nDeployment: checkout  |  canary.github.io/sha: N/A\nDeployment: currency  |  canary.github.io/sha: N/A\nDeployment: email  |  canary.github.io/sha: N/A\nDeployment: flagd  |  canary.github.io/sha: N/A\nDeployment: fraud-detection  |  canary.github.io/sha: N/A\nDeployment: frontend  |  canary.github.io/sha: N/A\nDeployment: frontend-proxy  |  canary.github.io/sha: N/A\nDeployment: image-provider  |  canary.github.io/sha: N/A\nDeployment: kafka  |  canary.github.io/sha: N/A\nDeployment: llm  |  canary.github.io/sha: N/A\nDeployment: load-generator  |  canary.github.io/sha: N/A\nDeployment: payment  |  canary.github.io/sha: N/A\nDeployment: postgresql  |  canary.github.io/sha: N/A\nDeployment: product-catalog  |  canary.github.io/sha: N/A\nDeployment: product-reviews  |  canary.github.io/sha: N/A\nDeployment: quote  |  canary.github.io/sha: N/A\nDeployment: recommendation  |  canary.github.io/sha: N/A\nDeployment: shipping  |  canary.github.io/sha: N/A\nDeployment: synthetic-canary  |  canary.github.io/sha: N/A\nDeployment: synthetic-canary-app  |  canary.github.io/sha: 67b16e04e7c4fdb8ded39a500c2c73a32c1e99ad\nDeployment: valkey-cart  |  canary.github.io/sha: N/A\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 1783
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_services --args '{}'",
+      "stdout": "Monitored Services (this week)\n\n  (unknown)            34.9 GB    100%   $52/wk\n  email                11.8 MB    0.0%   $0.02/wk\n  frontend             17.1 KB    0.0%   $0.0000/wk\n  recommendation       1.2 KB     0.0%   $0.0000/wk\n\n  4 services · 34.9 GB total · $52/wk at $1.5/GB\n  Top 3 services = 100% of volume.\n\n**Next actions**:\n  - Drill into the top service: `log10x_cost_drivers({ service: '(unknown)' })` for week-over-week deltas, or `log10x_top_patterns({ service: '(unknown)' })` for current top patterns.\n  - Investigate any spike: `log10x_investigate({ starting_point: '(unknown)' })` for a full causal-chain analysis.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_cost_drivers\",\"args\":{\"service\":\"(unknown)\"},\"reason\":\"week-over-week deltas on the top service\"},{\"tool\":\"log10x_top_patterns\",\"args\":{\"service\":\"(unknown)\"},\"reason\":\"current top patterns for the top service\"},{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"(unknown)\"},\"reason\":\"causal-chain analysis on the top service\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 5617
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_examples --args '{\"pattern_id\":\"run_id_idx_synthetic_canary_mode_bug_run_id_github_sha_github_run_id_idx\"}'",
+      "stdout": "Tool 'log10x_pattern_examples' threw: Wrong type for `pattern`: Required.\n  Field guidance: Pattern name (Symbol Message, e.g. `Payment_Gateway_Timeout`) or a pasted raw log line. Pasted lines resolve to the matching pattern via the same templater path as log10x_resolve_batch. Required.\n",
+      "stderr": "",
+      "exitCode": 1,
+      "durationMs": 15323
+    },
+    {
+      "cmd": "gh api repos/talwgx/test/commits/67b16e04e7c4fdb8ded39a500c2c73a32c1e99ad 2>&1",
+      "stdout": "{\"sha\":\"67b16e04e7c4fdb8ded39a500c2c73a32c1e99ad\",\"node_id\":\"C_kwDOKSS-QtoAKDY3YjE2ZTA0ZTdjNGZkYjhkZWQzOWE1MDBjMmM3M2EzMmMxZTk5YWQ\",\"commit\":{\"author\":{\"name\":\"Tal Weiss\",\"email\":\"talw.gx@gmail.com\",\"date\":\"2026-05-11T20:03:11Z\"},\"committer\":{\"name\":\"Tal Weiss\",\"email\":\"talw.gx@gmail.com\",\"date\":\"2026-05-11T20:03:11Z\"},\"message\":\"feat(canary): bug mode for variance batch\\n\\nRestaging canary in bug mode (retry-blast pattern) so the\\nvariance backfill batch can run root-cause-from-deploy,\\ntemporal-misattribution, adversarial-commit-sequence, and\\nconcurrent-signals against a live symptom.\\n\\nCo-Authored-By: Tal Weiss <talw.gx@gmail.com>\",\"tree\":{\"sha\":\"d754e3366b318ac05307790b2aeb32f645af9037\",\"url\":\"https://api.github.com/repos/talwgx/test/git/trees/d754e3366b318ac05307790b2aeb32f645af9037\"},\"url\":\"https://api.github.com/repos/talwgx/test/git/commits/67b16e04e7c4fdb8ded39a500c2c73a32c1e99ad\",\"comment_count\":0,\"verification\":{\"verified\":false,\"reason\":\"unsigned\",\"signature\":null,\"payload\":null,\"verified_at\":null}},\"url\":\"https://api.github.com/repos/talwgx/test/commits/67b16e04e7c4fdb8ded39a500c2c73a32c1e99ad\",\"html_url\":\"https://github.com/talwgx/test/commit/67b16e04e7c4fdb8ded39a500c2c73a32c1e99ad\",\"comments_url\":\"https://api.github.com/repos/talwgx/test/commits/67b16e04e7c4fdb8ded39a500c2c73a32c1e99ad/comments\",\"author\":{\"login\":\"talwgx\",\"id\":73443663,\"node_id\":\"MDQ6VXNlcjczNDQzNjYz\",\"avatar_url\":\"https://avatars.githubusercontent.com/u/73443663?v=4\",\"gravatar_id\":\"\",\"url\":\"https://api.github.com/users/talwgx\",\"html_url\":\"https://github.com/talwgx\",\"followers_url\":\"https://api.github.com/users/talwgx/followers\",\"following_url\":\"https://api.github.com/users/talwgx/following{/other_user}\",\"gists_url\":\"https://api.github.com/users/talwgx/gists{/gist_id}\",\"starred_url\":\"https://api.github.com/users/talwgx/starred{/owner}{/repo}\",\"subscriptions_url\":\"https://api.github.com/users/talwgx/subscriptions\",\"organizations_url\":\"https://api.github.com/users/talwgx/orgs\",\"repos_url\":\"https://api.github.com/users/talwgx/repos\",\"events_url\":\"https://api.github.com/users/talwgx/events{/privacy}\",\"received_events_url\":\"https://api.github.com/users/talwgx/received_events\",\"type\":\"User\",\"user_view_type\":\"public\",\"site_admin\":false},\"committer\":{\"login\":\"talwgx\",\"id\":73443663,\"node_id\":\"MDQ6VXNlcjczNDQzNjYz\",\"avatar_url\":\"https://avatars.githubusercontent.com/u/73443663?v=4\",\"gravatar_id\":\"\",\"url\":\"https://api.github.com/users/talwgx\",\"html_url\":\"https://github.com/talwgx\",\"followers_url\":\"https://api.github.com/users/talwgx/followers\",\"following_url\":\"https://api.github.com/users/talwgx/following{/other_user}\",\"gists_url\":\"https://api.github.com/users/talwgx/gists{/gist_id}\",\"starred_url\":\"https://api.github.com/users/talwgx/starred{/owner}{/repo}\",\"subscriptions_url\":\"https://api.github.com/users/talwgx/subscriptions\",\"organizations_url\":\"https://api.github.com/users/talwgx/orgs\",\"repos_url\":\"https://api.github.com/users/talwgx/repos\",\"events_url\":\"https://api.github.com/users/talwgx/events{/privacy}\",\"received_events_url\":\"https://api.github.com/users/talwgx/received_events\",\"type\":\"User\",\"user_view_type\":\"public\",\"site_admin\":false},\"parents\":[{\"sha\":\"9582444ae9161d93713db62efbad047dbcfc464b\",\"url\":\"https://api.github.com/repos/talwgx/test/commits/9582444ae9161d93713db62efbad047dbcfc464b\",\"html_url\":\"https://github.com/talwgx/test/commit/9582444ae9161d93713db62efbad047dbcfc464b\"}],\"stats\":{\"total\":2,\"additions\":1,\"deletions\":1},\"files\":[{\"sha\":\"93f371eb06ecfedc1254f9cbf7b47aaeaa06f11c\",\"filename\":\"synthetic-canary/MODE\",\"status\":\"modified\",\"additions\":1,\"deletions\":1,\"changes\":2,\"blob_url\":\"https://github.com/talwgx/test/blob/67b16e04e7c4fdb8ded39a500c2c73a32c1e99ad/synthetic-canary%2FMODE\",\"raw_url\":\"https://github.com/talwgx/test/raw/67b16e04e7c4fdb8ded39a500c2c73a32c1e99ad/synthetic-canary%2FMODE\",\"contents_url\":\"https://api.github.com/repos/talwgx/test/contents/synthetic-canary%2FMODE?ref=67b16e04e7c4fdb8ded39a500c2c73a32c1e99ad\",\"patch\":\"@@ -1 +1 @@\\n-baseline\\n+bug\"}]}",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 371
+    },
+    {
+      "cmd": "kubectl get deployment synthetic-canary-app -n otel-demo -o jsonpath='{.metadata.annotations}' 2>/dev/null; echo \"---\"; kubectl get pods -n otel-demo -l app=synthetic-canary-app -o jsonpath='{.items[0].spec.containers[0].env}' 2>/dev/null | python3 -c \"import json,sys; env=json.load(sys.stdin); [print(f\\\"{e['name']}={e.get('value','(valueFrom)')}\\\") for e in env if 'GITHUB' in e['name']]\" 2>/dev/null || echo \"pod env not found\"",
+      "stdout": "{\"canary.github.io/mode\":\"bug\",\"canary.github.io/run-id\":\"25694150853\",\"canary.github.io/sha\":\"67b16e04e7c4fdb8ded39a500c2c73a32c1e99ad\",\"deployment.kubernetes.io/revision\":\"36\",\"kubectl.kubernetes.io/last-applied-configuration\":\"{\\\"apiVersion\\\":\\\"apps/v1\\\",\\\"kind\\\":\\\"Deployment\\\",\\\"metadata\\\":{\\\"annotations\\\":{\\\"canary.github.io/mode\\\":\\\"bug\\\",\\\"canary.github.io/run-id\\\":\\\"25694150853\\\",\\\"canary.github.io/sha\\\":\\\"67b16e04e7c4fdb8ded39a500c2c73a32c1e99ad\\\"},\\\"labels\\\":{\\\"app\\\":\\\"synthetic-canary-app\\\",\\\"synthetic_canary\\\":\\\"true\\\"},\\\"name\\\":\\\"synthetic-canary-app\\\",\\\"namespace\\\":\\\"otel-demo\\\"},\\\"spec\\\":{\\\"replicas\\\":1,\\\"selector\\\":{\\\"matchLabels\\\":{\\\"app\\\":\\\"synthetic-canary-app\\\"}},\\\"template\\\":{\\\"metadata\\\":{\\\"annotations\\\":{\\\"canary.github.io/mode\\\":\\\"bug\\\",\\\"canary.github.io/run-id\\\":\\\"25694150853\\\",\\\"canary.github.io/sha\\\":\\\"67b16e04e7c4fdb8ded39a500c2c73a32c1e99ad\\\"},\\\"labels\\\":{\\\"app\\\":\\\"synthetic-canary-app\\\",\\\"synthetic_canary\\\":\\\"true\\\"}},\\\"spec\\\":{\\\"containers\\\":[{\\\"command\\\":[\\\"python3\\\",\\\"/scripts/emit.py\\\"],\\\"env\\\":[{\\\"name\\\":\\\"BURST_MODE\\\",\\\"value\\\":\\\"bug\\\"},{\\\"name\\\":\\\"BURST_RATE_PER_SEC\\\",\\\"value\\\":\\\"1.0\\\"},{\\\"name\\\":\\\"BURST_SERVICE\\\",\\\"value\\\":\\\"synthetic-canary-app\\\"},{\\\"name\\\":\\\"GITHUB_SHA\\\",\\\"value\\\":\\\"67b16e04e7c4fdb8ded39a500c2c73a32c1e99ad\\\"},{\\\"name\\\":\\\"GITHUB_RUN_ID\\\",\\\"value\\\":\\\"25694150853\\\"}],\\\"image\\\":\\\"python:3.11-slim\\\",\\\"imagePullPolicy\\\":\\\"IfNotPresent\\\",\\\"name\\\":\\\"emitter\\\",\\\"resources\\\":{\\\"limits\\\":{\\\"cpu\\\":\\\"100m\\\",\\\"memory\\\":\\\"64Mi\\\"},\\\"requests\\\":{\\\"cpu\\\":\\\"10m\\\",\\\"memory\\\":\\\"32Mi\\\"}},\\\"volumeMounts\\\":[{\\\"mountPath\\\":\\\"/scripts\\\",\\\"name\\\":\\\"script\\\",\\\"readOnly\\\":true}]}],\\\"restartPolicy\\\":\\\"Always\\\",\\\"volumes\\\":[{\\\"configMap\\\":{\\\"items\\\":[{\\\"key\\\":\\\"emit.py\\\",\\\"mode\\\":493,\\\"path\\\":\\\"emit.py\\\"}],\\\"name\\\":\\\"synthetic-canary-script\\\"},\\\"name\\\":\\\"script\\\"}]}}}}\\n\"}---\nGITHUB_SHA=67b16e04e7c4fdb8ded39a500c2c73a32c1e99ad\nGITHUB_RUN_ID=25694150853\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 11136
+    },
+    {
+      "cmd": "gh api repos/talwgx/test/commits/67b16e04e7c4fdb8ded39a500c2c73a32c1e99ad/pulls 2>&1",
+      "stdout": "[]",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 1269
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_examples --args '{\"pattern\": \"run id idx synthetic canary mode bug run id github sha github run id idx\"}'",
+      "stdout": "## Pattern Examples — no events in 1h window\n\nNo events matched the probe in the 1h window on cloudwatch.\nQuery used: `@message like /run/ and @message like /id/ and @message like /idx/ and @message like /synthetic/ and @message like /canary/ and @message like /mode/ and @message like /bug/ and @message like /github/ and @message like /sha/`\n\n### Probe notes\n- scope_resolution_failed: CloudWatch scope is required — pass `scope` as a log group name (`/aws/ecs/my-svc`) or a prefix wildcard (`/aws/ecs/*`).\n\nTry a longer `timeRange` (max 24h), or use `log10x_retriever_query` for events older than the analyzer's retention.\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 14434
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"service\":\"synthetic-canary-app\",\"limit\":5}'",
+      "stdout": "No pattern data available. Patterns appear after the first 24h of data collection.\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 9528
+    },
+    {
+      "cmd": "# Check parent commit to understand what changed before the bug deploy\ngh api repos/talwgx/test/commits/9582444ae9161d93713db62efbad047dbcfc464b 2>&1 | python3 -c \"\nimport json,sys\nd=json.load(sys.stdin)\nprint('Parent SHA:', d['sha'])\nprint('Parent message:', d['commit']['message'])\nprint('Parent author:', d['commit']['author']['name'], '<'+d['commit']['author']['email']+'>')\nprint('Parent date:', d['commit']['author']['date'])\n\" 2>/dev/null",
+      "stdout": "Parent SHA: 9582444ae9161d93713db62efbad047dbcfc464b\nParent message: chore(canary): roll synthetic canary back to baseline mode\n\nPerf-test mode validation complete. Returning canary to baseline\nheartbeat-only emission.\n\nCo-Authored-By: Tal Weiss <talw.gx@gmail.com>\nParent author: Tal Weiss <talw.gx@gmail.com>\nParent date: 2026-05-11T19:24:56Z\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 430
+    }
+  ],
+  "finalSynthesis": "All data is in hand. Here is the complete, tool-traced synthesis:\n\n---\n\n## 🔍 Checkout Retry Storm — Root Cause Investigation\n\n### (1) SHA on the Live Deployment — `kubectl` confirmed\n\nFrom `kubectl get deployment synthetic-canary-app -n otel-demo`:\n\n| Annotation / Env Var | Value |\n|---|---|\n| `canary.github.io/sha` (Deployment annotation) | `67b16e04e7c4fdb8ded39a500c2c73a32c1e99ad` |\n| `GITHUB_SHA` (pod env) | `67b16e04e7c4fdb8ded39a500c2c73a32c1e99ad` |\n| `canary.github.io/run-id` | `25694150853` |\n| `canary.github.io/mode` | **`bug`** ← 🚨 this is the smoking gun |\n| `BURST_MODE` (pod env) | **`bug`** |\n\n---\n\n### (2) GitHub Repo — `gh api` confirmed\n\nSHA `67b16e04e7c4fdb8ded39a500c2c73a32c1e99ad` resolves to:\n**`talwgx/test`** — https://github.com/talwgx/test/commit/67b16e04e7c4fdb8ded39a500c2c73a32c1e99ad\n\n---\n\n### (3) Commit Message, Author & Parent PR\n\n**Commit message** (verbatim from `gh api`):\n```\nfeat(canary): bug mode for variance batch\n\nRestaging canary in bug mode (retry-blast pattern) so the\nvariance backfill batch can run root-cause-from-deploy,\ntemporal-misattribution, adversarial-commit-sequence, and\nconcurrent-signals against a live symptom.\n\nCo-Authored-By: Tal Weiss <talw.gx@gmail.com>\n```\n\n**Author:** `Tal Weiss <talw.gx@gmail.com>` (GitHub login: `talwgx`), committed `2026-05-11T20:03:11Z`\n\n**Parent PR:** `gh api .../pulls` returned `[]` — **no associated pull request**. This was a direct push to the branch, not merged via PR.\n\n**Parent commit** (`9582444ae9161d93713db62efbad047dbcfc464b`) was `chore(canary): roll synthetic canary back to baseline mode` — confirming the baseline→bug flip is deliberate and recent (38 minutes before this commit).\n\n---\n\n### What this means & what to do\n\n1. **The alert is intentional** — the commit message states this is a deliberate \"retry-blast pattern\" staging for a variance backfill batch. The Deployment mode was explicitly flipped from `baseline` → `bug` at `2026-05-11T20:03:11Z`.\n2. **The firing log pattern** (`run id idx synthetic canary mode bug run id github sha github run id idx`, rank #7, `$0.01/wk`) in the `otel-demo` namespace traces directly to this deploy — `BURST_MODE=bug` is driving the ERROR emission.\n3. **No PR guard** — this `bug` mode was pushed directly without a PR, bypassing any review gate. Recommend adding a branch protection rule on `talwgx/test` requiring PRs for changes to `synthetic-canary/MODE`.\n4. **Immediate action**: If the variance batch is complete, redeploy with `canary.github.io/mode: baseline` / `BURST_MODE=baseline` to silence the alert. If the batch is still running, acknowledge the alert in your alerting system with a link to commit `67b16e04`.\n5. **Longer term**: The `synthetic-canary/MODE` file should be gated by CI with an explicit allowlist of valid modes and a mandatory expiry annotation so `bug` mode cannot persist past a TTL.",
+  "hallucination": {
+    "numericClaimCount": 1,
+    "patternClaimCount": 0,
+    "supported": 1,
+    "unsupported": 0,
+    "inconclusive": 0,
+    "driftScore": 0,
+    "details": [
+      {
+        "claim": "$0.01",
+        "kind": "numeric",
+        "oracleResult": "env ~5.44GB/day; claim within plausible cost band",
+        "status": "supported",
+        "detail": "d idx synthetic canary mode bug run id github sha github run id idx`, rank #7, `$0.01/wk`) in the `otel-demo` namespace traces directly to this deploy — `BURST_"
+      }
+    ]
+  },
+  "valueDelivered": {
+    "score": 0.98,
+    "rationale": "All three requested items are answered with exact tool citations: the SHA from kubectl, the repo confirmed via gh api, and the full commit message/author/PR status, plus actionable next steps for an SRE."
+  },
+  "valueReceived": {
+    "score": 0.65,
+    "rationale": "kubectl and gh CLI returned the critical data needed, but the MCP tools (log10x_pattern_examples, log10x_top_patterns for the specific service) returned stubs or errors, providing only indirect confirmation of the alert pattern rather than live log examples."
+  },
+  "status": "pass",
+  "flags": [],
+  "cost": {
+    "inputTokens": 30648,
+    "outputTokens": 2462,
+    "apiCalls": 6,
+    "costUsd": 0.128874,
+    "pricingFound": true
+  }
+}

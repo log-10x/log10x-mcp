@@ -1,0 +1,125 @@
+{
+  "spec": {
+    "id": "adversarial-commit-sequence",
+    "title": "Adversarial — two back-to-back commits where the obvious one is innocent",
+    "category": "security",
+    "prompt": "An ERROR-severity pattern in the otel-demo namespace, emitted by synthetic-canary-app, has at some point in recent history changed — the message body that used to contain 'checkout retry storm' now contains 'checkout retry blast'. Somewhere in the recent history of talwgx/test main, two commits were pushed back-to-back: an older one with a title that sounds like incident response ('fix(checkout): patch payment-service 504 retry handler') and a newer one with an innocuous title ('docs: clean up emit.py inline comments'). Search recent commits via gh CLI to find both. For each: read the diff via gh api, check whether that commit triggered a redeploy (the GitHub Actions workflow only fires on changes to synthetic-canary/** or .github/workflows/deploy-canary.yml). Then answer: which of the two commits actually changed the system's behavior (i.e. modified emit.py and was deployed), and is the title of that commit honest about what its diff does? You have kubectl + gh CLI.",
+    "persona": "Security-conscious SRE who knows that commit ORDER and commit TITLES are independent variables from what a commit actually does. Reads diffs. Verifies live state.",
+    "budget_hint": "8-12 tool calls.",
+    "expected_answer": {
+      "summary": "The 'fix(checkout): patch payment-service 504 retry handler' commit has a title that sounds like incident response but its diff only adds lines to README.md — no code change, no redeploy triggered. The 'docs: clean up emit.py inline comments' commit has an innocuous title but its diff actually changes BUG_TEMPLATE in emit.py from 'checkout retry storm' to 'checkout retry blast' — and that commit's SHA matches the live Deployment annotation. PASS = agent identifies (a) the 'docs' commit is the one that actually changed behavior, and (b) its title is dishonest because the diff is not a comment cleanup. FAIL = agent attributes the change to the 'fix' commit because the title sounds more incident-relevant, or accepts the 'docs' title at face value.",
+      "must_mention": [
+        "talwgx/test",
+        "emit.py",
+        "BUG_TEMPLATE",
+        "docs",
+        "fix"
+      ],
+      "expected_tool_chain": [
+        "kubectl",
+        "gh"
+      ],
+      "snapshot_ts": "2026-05-11T17:50:00.000Z"
+    }
+  },
+  "runnerModel": "claude-sonnet-4-6",
+  "runnerVendor": "anthropic",
+  "startedAt": "2026-05-11T20:04:35.078Z",
+  "endedAt": "2026-05-11T20:06:07.380Z",
+  "durationMs": 92304,
+  "envMode": "demo",
+  "bashCommands": [
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --list",
+      "stdout": "log10x_advise_compact\nlog10x_advise_install\nlog10x_advise_receiver\nlog10x_advise_reporter\nlog10x_advise_retriever\nlog10x_backfill_metric\nlog10x_correlate_cross_pillar\nlog10x_cost_drivers\nlog10x_customer_metrics_query\nlog10x_dependency_check\nlog10x_discover_env\nlog10x_discover_join\nlog10x_discover_labels\nlog10x_doctor\nlog10x_event_lookup\nlog10x_exclusion_filter\nlog10x_extract_templates\nlog10x_investigate\nlog10x_investigation_get\nlog10x_list_by_label\nlog10x_login_status\nlog10x_pattern_examples\nlog10x_pattern_trend\nlog10x_resolve_batch\nlog10x_retriever_query\nlog10x_retriever_query_status\nlog10x_retriever_series\nlog10x_savings\nlog10x_services\nlog10x_top_patterns\nlog10x_translate_metric_to_patterns\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 20067
+    },
+    {
+      "cmd": "gh api repos/talwgx/test/commits?per_page=30 --jq '.[] | {sha: .sha[0:12], title: .commit.message | split(\"\\n\")[0]}' 2>&1 | head -80",
+      "stdout": "{\"sha\":\"67b16e04e7c4\",\"title\":\"feat(canary): bug mode for variance batch\"}\n{\"sha\":\"9582444ae916\",\"title\":\"chore(canary): roll synthetic canary back to baseline mode\"}\n{\"sha\":\"2d73e1bc47b5\",\"title\":\"feat(canary): switch synthetic canary to perf_test mode\"}\n{\"sha\":\"6efb463e4c0e\",\"title\":\"feat(canary): add gated perf_test mode for two-control emission\"}\n{\"sha\":\"c896c4737fcd\",\"title\":\"closed-loop: apply agent-recommended remediation (flip MODE to baseline)\"}\n{\"sha\":\"88d4c05d3684\",\"title\":\"feat(canary): re-arm bug mode for Phase-6 closed-loop Grok run\"}\n{\"sha\":\"4a8aa0d68ddd\",\"title\":\"closed-loop: apply agent-recommended remediation (flip MODE to baseline)\"}\n{\"sha\":\"eb73cb97a508\",\"title\":\"feat(canary): re-enable bug mode for closed-loop verification scenario\"}\n{\"sha\":\"787a4847e749\",\"title\":\"cleanup: flip canary back to baseline post Phase-5 eval\"}\n{\"sha\":\"879a241e7271\",\"title\":\"docs: clean up emit.py inline comments\"}\n{\"sha\":\"1de81ef96e81\",\"title\":\"fix(checkout): patch payment-service 504 retry handler\"}\n{\"sha\":\"ed0e7bc433a3\",\"title\":\"fix(canary): tune retry budget for checkout flow\"}\n{\"sha\":\"6295379a2ee3\",\"title\":\"feat(canary): re-enable bug-mode retry storm for eval scenario C\"}\n{\"sha\":\"8431ed6fb61b\",\"title\":\"cleanup: flip canary back to baseline post Phase-4 eval\"}\n{\"sha\":\"ed14dd906a78\",\"title\":\"ci: extend workflow MODE allowlist for new modes\"}\n{\"sha\":\"1376ce80cf80\",\"title\":\"perf(observability): simplify checkout-retry telemetry layer\"}\n{\"sha\":\"f8d6b30b527b\",\"title\":\"feat(checkout): retry-storm canary for multi-model eval cross-validation\"}\n{\"sha\":\"dfd44875029e\",\"title\":\"cleanup: flip canary back to baseline post hero-eval run\"}\n{\"sha\":\"4756edc3345d\",\"title\":\"perf(checkout): bump payment-service retry budget to 5 attempts\"}\n{\"sha\":\"fc580f73d12b\",\"title\":\"fix(synthetic-canary): quote annotation placeholders so run-id is string\"}\n{\"sha\":\"abf17b5005c7\",\"title\":\"feat(synthetic-canary): add baseline canary deploy for log10x-mcp eval harness\"}\n{\"sha\":\"a5304f8fa79e\",\"title\":\"revert to all-true baseline\"}\n{\"sha\":\"4fe04e3a39f3\",\"title\":\"e2e: flip all entries to false for routing test\"}\n{\"sha\":\"444957de4c4b\",\"title\":\"e2e test: add claude marker entry\"}\n{\"sha\":\"1c5fd3e3bc10\",\"title\":\"hotreload-v2: add kube-proxy pattern entries\"}\n{\"sha\":\"673cd236e3ba\",\"title\":\"seed: compact lookup with placeholder (gitops reload test)\"}\n{\"sha\":\"610687306a34\",\"title\":\"Update http.csv\"}\n{\"sha\":\"3191fd0e6319\",\"title\":\"Update http.csv\"}\n{\"sha\":\"54fc3465b1f8\",\"title\":\"Update http.csv\"}\n{\"sha\":\"f7ed37885ced\",\"title\":\"Update http.csv\"}\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 567
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"namespace\":\"otel-demo\",\"service\":\"synthetic-canary-app\",\"severity\":\"ERROR\"}' 2>&1",
+      "stdout": "No pattern data available. Patterns appear after the first 24h of data collection.\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 22836
+    },
+    {
+      "cmd": "gh api repos/talwgx/test/commits/879a241e7271 --jq '.sha' 2>&1\n# Get full diff for \"docs: clean up emit.py inline comments\"\ngh api repos/talwgx/test/commits/879a241e7271 -H \"Accept: application/vnd.github.diff\" 2>&1",
+      "stdout": "879a241e72714a791c936d1e71924a01be450172\ndiff --git a/synthetic-canary/app/emit.py b/synthetic-canary/app/emit.py\nindex 5a9f6fc..6eb014f 100644\n--- a/synthetic-canary/app/emit.py\n+++ b/synthetic-canary/app/emit.py\n@@ -42,7 +42,7 @@\n )\n \n BUG_TEMPLATE = (\n-    \"checkout retry storm: payment-service returned 503 after \"\n+    \"checkout retry blast: payment-service returned 503 after \"\n     \"{retries} retries; abandoning cart cart_id={cart_id} \"\n     \"deploy_sha={sha} run_id={run_id} idx={idx}\"\n )\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 799
+    },
+    {
+      "cmd": "# Get full diff for \"fix(checkout): patch payment-service 504 retry handler\"\ngh api repos/talwgx/test/commits/1de81ef96e81 -H \"Accept: application/vnd.github.diff\" 2>&1",
+      "stdout": "diff --git a/README.md b/README.md\nindex cd048ef..c4d1a13 100644\n--- a/README.md\n+++ b/README.md\n@@ -7,3 +7,9 @@ plants attributable signals into the demo cluster.\n \n See `pipeline/` and `test/` for the compact-regulator gitops\n allowlists consumed by a separate engine integration.\n+\n+## Recent operational notes\n+\n+The synthetic-canary retry-storm pattern has been emitting at\n+elevated volume. Investigating upstream payment-service 504s as a\n+possible root cause.\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 467
+    },
+    {
+      "cmd": "# Check GitHub Actions workflow trigger paths\ngh api repos/talwgx/test/contents/.github/workflows --jq '.[].name' 2>&1",
+      "stdout": "deploy-canary.yml\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 359
+    },
+    {
+      "cmd": "# Get the deploy-canary workflow to check trigger paths\ngh api repos/talwgx/test/contents/.github/workflows/deploy-canary.yml --jq '.content' 2>&1 | base64 -d 2>&1 || \\\ngh api \"repos/talwgx/test/contents/.github/workflows/deploy-canary.yml\" 2>&1 | python3 -c \"import sys,json,base64; d=json.load(sys.stdin); print(base64.b64decode(d['content']).decode())\"",
+      "stdout": "## Deploys the synthetic canary into the log10x demo EKS cluster.\n##\n## Triggers: any push to main that touches synthetic-canary/**.\n## Reads the canary mode from the file synthetic-canary/MODE\n## (\"baseline\" or \"bug\"). Stamps the commit SHA + run id into the\n## Deployment annotations and the pod env so the resulting events\n## are attributable back to a specific commit via the MCP's\n## log10x_event_lookup tool + the gh CLI.\n##\n## Auth: GitHub Actions OIDC -> AWS role -> EKS API.\n## Required AWS-side setup (one-time, separate from this workflow):\n##   1. IAM role synthetic-canary-deploy-role with trust to\n##      repo:talwgx/test:ref:refs/heads/main and eks:DescribeCluster\n##      permission.\n##   2. aws-auth ConfigMap entry mapping that role into a k8s group\n##      scoped to namespace otel-demo with create/get/update on\n##      Deployments + ConfigMaps.\nname: Deploy synthetic canary\n\non:\n  push:\n    branches: [main]\n    paths:\n      - synthetic-canary/**\n      - .github/workflows/deploy-canary.yml\n  workflow_dispatch:\n\npermissions:\n  id-token: write\n  contents: read\n\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    steps:\n      - name: Checkout\n        uses: actions/checkout@v4\n\n      - name: Read canary mode\n        id: mode\n        run: |\n          MODE=$(cat synthetic-canary/MODE 2>/dev/null | tr -d '[:space:]' || echo \"baseline\")\n          case \"$MODE\" in\n            baseline|bug|stress|perf_test) ;;\n            *)\n              echo \"::error::synthetic-canary/MODE must be one of: baseline, bug, stress, perf_test. Got: '$MODE'\"\n              exit 1\n              ;;\n          esac\n          echo \"mode=$MODE\" >> \"$GITHUB_OUTPUT\"\n          echo \"Resolved canary mode: $MODE\"\n\n      - name: Configure AWS credentials via OIDC\n        uses: aws-actions/configure-aws-credentials@v4\n        with:\n          role-to-assume: arn:aws:iam::351939435334:role/synthetic-canary-deploy-role\n          aws-region: us-east-1\n\n      - name: Update kubeconfig\n        run: aws eks update-kubeconfig --name log10x-otel-demo --region us-east-1\n\n      - name: Render manifest with deploy metadata\n        run: |\n          mkdir -p rendered\n          sed \\\n            -e \"s|PLACEHOLDER_SHA|${GITHUB_SHA}|g\" \\\n            -e \"s|PLACEHOLDER_RUN_ID|${GITHUB_RUN_ID}|g\" \\\n            -e \"s|PLACEHOLDER_MODE|${MODE}|g\" \\\n            synthetic-canary/deploy/canary.yaml > rendered/canary.yaml\n          echo \"--- rendered manifest ---\"\n          head -30 rendered/canary.yaml\n        env:\n          MODE: ${{ steps.mode.outputs.mode }}\n\n      - name: Apply ConfigMap with emitter script\n        run: |\n          kubectl create configmap synthetic-canary-script \\\n            --namespace otel-demo \\\n            --from-file=emit.py=synthetic-canary/app/emit.py \\\n            --dry-run=client -o yaml | kubectl apply -f -\n\n      - name: Apply Deployment\n        run: kubectl apply -f rendered/canary.yaml\n\n      - name: Restart Deployment so pod picks up new SHA env\n        run: kubectl rollout restart deployment/synthetic-canary-app -n otel-demo\n\n      - name: Wait for rollout\n        run: kubectl rollout status deployment/synthetic-canary-app -n otel-demo --timeout=120s\n\n      - name: Show final pod state\n        run: |\n          kubectl get deploy synthetic-canary-app -n otel-demo -o yaml | grep -E \"(canary.github.io|annotations:)\" | head -10\n          kubectl get pods -n otel-demo -l app=synthetic-canary-app -o wide\n          kubectl logs -n otel-demo -l app=synthetic-canary-app --tail=3 || true\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 369
+    },
+    {
+      "cmd": "# Verify the Actions run history for both commits\ngh api \"repos/talwgx/test/actions/runs?per_page=20\" --jq '.workflow_runs[] | {id: .id, head_sha: .head_sha[0:12], name: .name, status: .status, conclusion: .conclusion, head_commit_title: .head_commit.message | split(\"\\n\")[0]}' 2>&1 | head -60",
+      "stdout": "{\"conclusion\":\"success\",\"head_commit_title\":\"feat(canary): bug mode for variance batch\",\"head_sha\":\"67b16e04e7c4\",\"id\":25694150853,\"name\":\"Deploy synthetic canary\",\"status\":\"completed\"}\n{\"conclusion\":\"success\",\"head_commit_title\":\"chore(canary): roll synthetic canary back to baseline mode\",\"head_sha\":\"9582444ae916\",\"id\":25692203223,\"name\":\"Deploy synthetic canary\",\"status\":\"completed\"}\n{\"conclusion\":\"success\",\"head_commit_title\":\"feat(canary): switch synthetic canary to perf_test mode\",\"head_sha\":\"2d73e1bc47b5\",\"id\":25691956196,\"name\":\"Deploy synthetic canary\",\"status\":\"completed\"}\n{\"conclusion\":\"success\",\"head_commit_title\":\"feat(canary): add gated perf_test mode for two-control emission\",\"head_sha\":\"6efb463e4c0e\",\"id\":25691893786,\"name\":\"Deploy synthetic canary\",\"status\":\"completed\"}\n{\"conclusion\":\"success\",\"head_commit_title\":\"closed-loop: apply agent-recommended remediation (flip MODE to baseline)\",\"head_sha\":\"c896c4737fcd\",\"id\":25689757324,\"name\":\"Deploy synthetic canary\",\"status\":\"completed\"}\n{\"conclusion\":\"success\",\"head_commit_title\":\"feat(canary): re-arm bug mode for Phase-6 closed-loop Grok run\",\"head_sha\":\"88d4c05d3684\",\"id\":25689523918,\"name\":\"Deploy synthetic canary\",\"status\":\"completed\"}\n{\"conclusion\":\"success\",\"head_commit_title\":\"closed-loop: apply agent-recommended remediation (flip MODE to baseline)\",\"head_sha\":\"4a8aa0d68ddd\",\"id\":25689337622,\"name\":\"Deploy synthetic canary\",\"status\":\"completed\"}\n{\"conclusion\":\"success\",\"head_commit_title\":\"feat(canary): re-enable bug mode for closed-loop verification scenario\",\"head_sha\":\"eb73cb97a508\",\"id\":25689110547,\"name\":\"Deploy synthetic canary\",\"status\":\"completed\"}\n{\"conclusion\":\"success\",\"head_commit_title\":\"cleanup: flip canary back to baseline post Phase-5 eval\",\"head_sha\":\"787a4847e749\",\"id\":25688580740,\"name\":\"Deploy synthetic canary\",\"status\":\"completed\"}\n{\"conclusion\":\"success\",\"head_commit_title\":\"docs: clean up emit.py inline comments\",\"head_sha\":\"879a241e7271\",\"id\":25686843248,\"name\":\"Deploy synthetic canary\",\"status\":\"completed\"}\n{\"conclusion\":\"success\",\"head_commit_title\":\"feat(canary): re-enable bug-mode retry storm for eval scenario C\",\"head_sha\":\"6295379a2ee3\",\"id\":25683629881,\"name\":\"Deploy synthetic canary\",\"status\":\"completed\"}\n{\"conclusion\":\"success\",\"head_commit_title\":\"cleanup: flip canary back to baseline post Phase-4 eval\",\"head_sha\":\"8431ed6fb61b\",\"id\":25682040869,\"name\":\"Deploy synthetic canary\",\"status\":\"completed\"}\n{\"conclusion\":\"success\",\"head_commit_title\":\"ci: extend workflow MODE allowlist for new modes\",\"head_sha\":\"ed14dd906a78\",\"id\":25681541577,\"name\":\"Deploy synthetic canary\",\"status\":\"completed\"}\n{\"conclusion\":\"failure\",\"head_commit_title\":\"perf(observability): simplify checkout-retry telemetry layer\",\"head_sha\":\"1376ce80cf80\",\"id\":25681497397,\"name\":\"Deploy synthetic canary\",\"status\":\"completed\"}\n{\"conclusion\":\"success\",\"head_commit_title\":\"feat(checkout): retry-storm canary for multi-model eval cross-validation\",\"head_sha\":\"f8d6b30b527b\",\"id\":25681133562,\"name\":\"Deploy synthetic canary\",\"status\":\"completed\"}\n{\"conclusion\":\"success\",\"head_commit_title\":\"cleanup: flip canary back to baseline post hero-eval run\",\"head_sha\":\"dfd44875029e\",\"id\":25680543041,\"name\":\"Deploy synthetic canary\",\"status\":\"completed\"}\n{\"conclusion\":\"success\",\"head_commit_title\":\"perf(checkout): bump payment-service retry budget to 5 attempts\",\"head_sha\":\"4756edc3345d\",\"id\":25678940824,\"name\":\"Deploy synthetic canary\",\"status\":\"completed\"}\n{\"conclusion\":\"success\",\"head_commit_title\":\"fix(synthetic-canary): quote annotation placeholders so run-id is string\",\"head_sha\":\"fc580f73d12b\",\"id\":25678852925,\"name\":\"Deploy synthetic canary\",\"status\":\"completed\"}\n{\"conclusion\":\"failure\",\"head_commit_title\":\"feat(synthetic-canary): add baseline canary deploy for log10x-mcp eval harness\",\"head_sha\":\"abf17b5005c7\",\"id\":25678796544,\"name\":\"Deploy synthetic canary\",\"status\":\"completed\"}\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 844
+    },
+    {
+      "cmd": "# Confirm fix(checkout) commit sha and that it has NO Actions run\ngh api \"repos/talwgx/test/actions/runs?per_page=50\" --jq '.workflow_runs[] | select(.head_sha | startswith(\"1de81ef\")) | {id, head_sha, name, conclusion}' 2>&1\necho \"---\"\n# Double-check what files the fix(checkout) commit touched\ngh api repos/talwgx/test/commits/1de81ef96e81 --jq '.files[] | {filename, status}' 2>&1",
+      "stdout": "---\n{\"filename\":\"README.md\",\"status\":\"modified\"}\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 1328
+    }
+  ],
+  "finalSynthesis": "I have everything confirmed. Here is the full picture:\n\n---\n\n## Investigation Results\n\n### The Two Back-to-Back Commits in `talwgx/test` main\n\n| Order | SHA | Title | Files Changed |\n|-------|-----|-------|--------------|\n| Older | `1de81ef96e81` | `fix(checkout): patch payment-service 504 retry handler` | `README.md` only |\n| Newer | `879a241e7271` | `docs: clean up emit.py inline comments` | `synthetic-canary/app/emit.py` |\n\n---\n\n### What Each Diff Actually Does\n\n**`1de81ef96e81` — \"fix(checkout): patch payment-service 504 retry handler\"**\nDiff touches **only `README.md`** — adds a prose paragraph saying \"The synthetic-canary retry-storm pattern has been emitting at elevated volume. Investigating upstream payment-service 504s as a possible root cause.\" Zero code changes. Zero deployment trigger.\n\n**`879a241e7271` — \"docs: clean up emit.py inline comments\"**\nDiff touches **`synthetic-canary/app/emit.py`** and makes a **functional string change** — not a comment cleanup:\n```diff\n-    \"checkout retry storm: payment-service returned 503 after \"\n+    \"checkout retry blast: payment-service returned 503 after \"\n```\nThis is the exact `'checkout retry storm'` → `'checkout retry blast'` mutation the question describes.\n\n---\n\n### Which Commit Triggered a Redeploy?\n\nThe workflow `deploy-canary.yml` fires only on `push` to `main` touching `synthetic-canary/**` or `.github/workflows/deploy-canary.yml`.\n\n- **`1de81ef96e81`**: touched only `README.md` → **no workflow run fired** (confirmed: zero Actions runs attributed to that SHA).\n- **`879a241e7271`**: touched `synthetic-canary/app/emit.py` → **workflow run `25686843248` fired and succeeded** (`conclusion: success`). The workflow's `Apply ConfigMap` step hot-reloads `emit.py` into Kubernetes and restarts the `synthetic-canary-app` deployment in `otel-demo`.\n\n---\n\n### Conclusions & Recommendations\n\n1. **`879a241e7271` (\"docs: clean up emit.py inline comments\") is the commit that changed system behavior** — it modified `BUG_TEMPLATE` in `emit.py`, was deployed via Actions run `25686843248`, and is the direct cause of the `'checkout retry storm'` → `'checkout retry blast'` change observed in the otel-demo cluster.\n\n2. **Its title is dishonest.** \"docs: clean up emit.py inline comments\" implies only non-functional comment edits (`docs:` conventional-commit prefix). The diff contains **no comment changes** — it mutates a runtime log message string that flows into production ERROR events. This is a functional code change deliberately disguised as documentation.\n\n3. **`1de81ef96e81` (\"fix(checkout): patch payment-service 504 retry handler\")** is the decoy. Its alarming, incident-sounding title suggests a code fix, but its diff touches only `README.md` prose. It triggered no deployment. It changed nothing in production.\n\n4. **The pattern is a classic misdirection**: a loud, scary-looking commit (the \"fix\") draws reviewer attention and obscures the quiet follow-on commit (the \"docs\" commit) that actually deploys a behavior change. **Recommend:** enforce diff-aware commit linting (flag `docs:`/`chore:` commits that modify non-documentation source files), add required code review for any `synthetic-canary/**` change regardless of commit message prefix, and audit the BUG_TEMPLATE change intent with the commit author.",
+  "hallucination": {
+    "numericClaimCount": 0,
+    "patternClaimCount": 0,
+    "supported": 0,
+    "unsupported": 0,
+    "inconclusive": 0,
+    "driftScore": 0,
+    "details": []
+  },
+  "valueDelivered": {
+    "score": 1,
+    "rationale": "The synthesis precisely identifies which commit changed system behavior (879a241e7271), confirms it was deployed, explains the misdirection pattern, and provides actionable remediation recommendations — directly and completely answering all parts of the user's question."
+  },
+  "valueReceived": {
+    "score": 0.1,
+    "rationale": "The MCP tool (log10x_top_patterns) returned no useful data, so the entire investigation was accomplished via gh CLI alone — the MCP contributed nothing to the answer."
+  },
+  "status": "pass",
+  "flags": [
+    "low_value_received"
+  ],
+  "cost": {
+    "inputTokens": 29821,
+    "outputTokens": 2083,
+    "apiCalls": 7,
+    "costUsd": 0.12070800000000001,
+    "pricingFound": true
+  }
+}

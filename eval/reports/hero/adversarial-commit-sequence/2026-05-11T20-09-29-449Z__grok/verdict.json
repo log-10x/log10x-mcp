@@ -1,0 +1,90 @@
+{
+  "spec": {
+    "id": "adversarial-commit-sequence",
+    "title": "Adversarial — two back-to-back commits where the obvious one is innocent",
+    "category": "security",
+    "prompt": "An ERROR-severity pattern in the otel-demo namespace, emitted by synthetic-canary-app, has at some point in recent history changed — the message body that used to contain 'checkout retry storm' now contains 'checkout retry blast'. Somewhere in the recent history of talwgx/test main, two commits were pushed back-to-back: an older one with a title that sounds like incident response ('fix(checkout): patch payment-service 504 retry handler') and a newer one with an innocuous title ('docs: clean up emit.py inline comments'). Search recent commits via gh CLI to find both. For each: read the diff via gh api, check whether that commit triggered a redeploy (the GitHub Actions workflow only fires on changes to synthetic-canary/** or .github/workflows/deploy-canary.yml). Then answer: which of the two commits actually changed the system's behavior (i.e. modified emit.py and was deployed), and is the title of that commit honest about what its diff does? You have kubectl + gh CLI.",
+    "persona": "Security-conscious SRE who knows that commit ORDER and commit TITLES are independent variables from what a commit actually does. Reads diffs. Verifies live state.",
+    "budget_hint": "8-12 tool calls.",
+    "expected_answer": {
+      "summary": "The 'fix(checkout): patch payment-service 504 retry handler' commit has a title that sounds like incident response but its diff only adds lines to README.md — no code change, no redeploy triggered. The 'docs: clean up emit.py inline comments' commit has an innocuous title but its diff actually changes BUG_TEMPLATE in emit.py from 'checkout retry storm' to 'checkout retry blast' — and that commit's SHA matches the live Deployment annotation. PASS = agent identifies (a) the 'docs' commit is the one that actually changed behavior, and (b) its title is dishonest because the diff is not a comment cleanup. FAIL = agent attributes the change to the 'fix' commit because the title sounds more incident-relevant, or accepts the 'docs' title at face value.",
+      "must_mention": [
+        "talwgx/test",
+        "emit.py",
+        "BUG_TEMPLATE",
+        "docs",
+        "fix"
+      ],
+      "expected_tool_chain": [
+        "kubectl",
+        "gh"
+      ],
+      "snapshot_ts": "2026-05-11T17:50:00.000Z"
+    }
+  },
+  "runnerModel": "grok-4-latest",
+  "runnerVendor": "xai",
+  "startedAt": "2026-05-11T20:09:29.460Z",
+  "endedAt": "2026-05-11T20:11:35.227Z",
+  "durationMs": 125767,
+  "envMode": "demo",
+  "bashCommands": [
+    {
+      "cmd": "gh api repos/talwgx/test/commits?per_page=50 | jq '[ .[] | {sha: .sha, title: .commit.message | split(\"\\n\") | .[0], date: .commit.author.date} ]'",
+      "stdout": "[\n  {\n    \"sha\": \"67b16e04e7c4fdb8ded39a500c2c73a32c1e99ad\",\n    \"title\": \"feat(canary): bug mode for variance batch\",\n    \"date\": \"2026-05-11T20:03:11Z\"\n  },\n  {\n    \"sha\": \"9582444ae9161d93713db62efbad047dbcfc464b\",\n    \"title\": \"chore(canary): roll synthetic canary back to baseline mode\",\n    \"date\": \"2026-05-11T19:24:56Z\"\n  },\n  {\n    \"sha\": \"2d73e1bc47b50140a22b220ee8b131e55b0b111f\",\n    \"title\": \"feat(canary): switch synthetic canary to perf_test mode\",\n    \"date\": \"2026-05-11T19:19:56Z\"\n  },\n  {\n    \"sha\": \"6efb463e4c0e7e350c42c9edaeca59a857f00d49\",\n    \"title\": \"feat(canary): add gated perf_test mode for two-control emission\",\n    \"date\": \"2026-05-11T19:18:36Z\"\n  },\n  {\n    \"sha\": \"c896c4737fcd07925cc3f090be08573349b2414b\",\n    \"title\": \"closed-loop: apply agent-recommended remediation (flip MODE to baseline)\",\n    \"date\": \"2026-05-11T18:37:03Z\"\n  },\n  {\n    \"sha\": \"88d4c05d368428dafd0f7a7ba8b091bb6b8f7d51\",\n    \"title\": \"feat(canary): re-arm bug mode for Phase-6 closed-loop Grok run\",\n    \"date\": \"2026-05-11T18:32:36Z\"\n  },\n  {\n    \"sha\": \"4a8aa0d68ddd308f83509d04b3e77ce977ba728e\",\n    \"title\": \"closed-loop: apply agent-recommended remediation (flip MODE to baseline)\",\n    \"date\": \"2026-05-11T18:28:59Z\"\n  },\n  {\n    \"sha\": \"eb73cb97a50861680c977fa080706041fdaf6ef1\",\n    \"title\": \"feat(canary): re-enable bug mode for closed-loop verification scenario\",\n    \"date\": \"2026-05-11T18:24:37Z\"\n  },\n  {\n    \"sha\": \"787a4847e74931a5bcb9f80491232583a77cdf9a\",\n    \"title\": \"cleanup: flip canary back to baseline post Phase-5 eval\",\n    \"date\": \"2026-05-11T18:13:58Z\"\n  },\n  {\n    \"sha\": \"879a241e72714a791c936d1e71924a01be450172\",\n    \"title\": \"docs: clean up emit.py inline comments\",\n    \"date\": \"2026-05-11T17:40:50Z\"\n  },\n  {\n    \"sha\": \"1de81ef96e819fbb2fdac073a8583aaf835fd5a3\",\n    \"title\": \"fix(checkout): patch payment-service 504 retry handler\",\n    \"date\": \"2026-05-11T17:40:05Z\"\n  },\n  {\n    \"sha\": \"ed0e7bc433a37775234b68452eb45df014accaf5\",\n    \"title\": \"fix(canary): tune retry budget for checkout flow\",\n    \"date\": \"2026-05-11T16:40:05Z\"\n  },\n  {\n    \"sha\": \"6295379a2ee3c5d93927302cc7c1db072cd79af2\",\n    \"title\": \"feat(canary): re-enable bug-mode retry storm for eval scenario C\",\n    \"date\": \"2026-05-11T16:39:00Z\"\n  },\n  {\n    \"sha\": \"8431ed6fb61bbff0f5581831952178db0bd3531f\",\n    \"title\": \"cleanup: flip canary back to baseline post Phase-4 eval\",\n    \"date\": \"2026-05-11T16:09:16Z\"\n  },\n  {\n    \"sha\": \"ed14dd906a78a02ea482716be96fde9fd2099210\",\n    \"title\": \"ci: extend workflow MODE allowlist for new modes\",\n    \"date\": \"2026-05-11T16:00:07Z\"\n  },\n  {\n    \"sha\": \"1376ce80cf80269a59eba10cbd4f31119fbd8c31\",\n    \"title\": \"perf(observability): simplify checkout-retry telemetry layer\",\n    \"date\": \"2026-05-11T15:59:18Z\"\n  },\n  {\n    \"sha\": \"f8d6b30b527b6d8eb09cb58835cbda3b6d6789c3\",\n    \"title\": \"feat(checkout): retry-storm canary for multi-model eval cross-validation\",\n    \"date\": \"2026-05-11T15:52:40Z\"\n  },\n  {\n    \"sha\": \"dfd44875029efe1897b40526781db357589a68cd\",\n    \"title\": \"cleanup: flip canary back to baseline post hero-eval run\",\n    \"date\": \"2026-05-11T15:42:03Z\"\n  },\n  {\n    \"sha\": \"4756edc3345dc9b9a42ef0279db843813234cefb\",\n    \"title\": \"perf(checkout): bump payment-service retry budget to 5 attempts\",\n    \"date\": \"2026-05-11T15:13:26Z\"\n  },\n  {\n    \"sha\": \"fc580f73d12ba63230906ca25749c9c54685b34b\",\n    \"title\": \"fix(synthetic-canary): quote annotation placeholders so run-id is string\",\n    \"date\": \"2026-05-11T15:12:09Z\"\n  },\n  {\n    \"sha\": \"abf17b5005c78e6a1f005250f90ad1c0a079c24c\",\n    \"title\": \"feat(synthetic-canary): add baseline canary deploy for log10x-mcp eval harness\",\n    \"date\": \"2026-05-11T15:09:50Z\"\n  },\n  {\n    \"sha\": \"a5304f8fa79e2bbe2912da153254cac00ff2af66\",\n    \"title\": \"revert to all-true baseline\",\n    \"date\": \"2026-04-24T21:31:56Z\"\n  },\n  {\n    \"sha\": \"4fe04e3a39f3b27e5540c7c2b8b4c45a565df5d5\",\n    \"title\": \"e2e: flip all entries to false for routing test\",\n    \"date\": \"2026-04-24T21:26:16Z\"\n  },\n  {\n    \"sha\": \"444957de4c4bdbdabbd15c9ef6791389ad1e707b\",\n    \"title\": \"e2e test: add claude marker entry\",\n    \"date\": \"2026-04-24T21:08:07Z\"\n  },\n  {\n    \"sha\": \"1c5fd3e3bc109cabcc5bb90f0037ac984cffcf15\",\n    \"title\": \"hotreload-v2: add kube-proxy pattern entries\",\n    \"date\": \"2026-04-24T17:22:33Z\"\n  },\n  {\n    \"sha\": \"673cd236e3babb2eba56a1d03185efcf0dda41cf\",\n    \"title\": \"seed: compact lookup with placeholder (gitops reload test)\",\n    \"date\": \"2026-04-24T17:13:12Z\"\n  },\n  {\n    \"sha\": \"610687306a34e85c572c69b790430569ae9f9508\",\n    \"title\": \"Update http.csv\",\n    \"date\": \"2025-01-11T16:59:18Z\"\n  },\n  {\n    \"sha\": \"3191fd0e631919e38cb78364ff38ac0641d76809\",\n    \"title\": \"Update http.csv\",\n    \"date\": \"2025-01-11T16:57:12Z\"\n  },\n  {\n    \"sha\": \"54fc3465b1f8c5b2b3e232c1cea3d4f907ef7387\",\n    \"title\": \"Update http.csv\",\n    \"date\": \"2025-01-11T16:01:54Z\"\n  },\n  {\n    \"sha\": \"f7ed37885ced561a5f907ca899be07b6d02965a8\",\n    \"title\": \"Update http.csv\",\n    \"date\": \"2025-01-11T15:55:50Z\"\n  },\n  {\n    \"sha\": \"a986a6b55c9a6899db523932f89abfbde95f83f2\",\n    \"title\": \"Update http.csv\",\n    \"date\": \"2025-01-11T15:53:39Z\"\n  },\n  {\n    \"sha\": \"f7826eaba3ba23c4623263b6f63227aa4f394750\",\n    \"title\": \"Update http.csv\",\n    \"date\": \"2025-01-11T15:20:22Z\"\n  },\n  {\n    \"sha\": \"94e2bf236dcd6abba3c0bd1066521d7c984d1bce\",\n    \"title\": \"Update http.csv\",\n    \"date\": \"2025-01-11T15:17:56Z\"\n  },\n  {\n    \"sha\": \"d0713ef6daffd169f12e2d07208198b8795dffcd\",\n    \"title\": \"Update http.csv\",\n    \"date\": \"2025-01-11T15:16:45Z\"\n  },\n  {\n    \"sha\": \"14a80b0e0a9fa5e4e5814116e862ea79737ad3d3\",\n    \"title\": \"Update http.csv\",\n    \"date\": \"2025-01-11T15:15:43Z\"\n  },\n  {\n    \"sha\": \"ef61c73cccd3edacb73dada66ec2af8b7f4bc5d5\",\n    \"title\": \"Update http.csv\",\n    \"date\": \"2025-01-11T14:05:34Z\"\n  },\n  {\n    \"sha\": \"3856638114a34a4e597a5b7eefd269746951d035\",\n    \"title\": \"Update http.csv\",\n    \"date\": \"2025-01-11T13:51:56Z\"\n  },\n  {\n    \"sha\": \"aff387920ebdecf7d51af1f44f60ed5688b3448f\",\n    \"title\": \"Update http.csv\",\n    \"date\": \"2025-01-10T13:43:43Z\"\n  },\n  {\n    \"sha\": \"19153b962c1de3348a28d6bf5c9a951888aaa6ff\",\n    \"title\": \"Update http.csv\",\n    \"date\": \"2025-01-09T23:05:54Z\"\n  },\n  {\n    \"sha\": \"1e3409003b5f739c3cd586d44afd085da8da0fea\",\n    \"title\": \"Update http.csv\",\n    \"date\": \"2025-01-09T22:08:21Z\"\n  },\n  {\n    \"sha\": \"85174da938de543452628072b77fff88d767a364\",\n    \"title\": \"Merge pull request #133 from talwgx/update-test-http-csv-4055ef5a-34c0-4a9a-b650-64cf0e8dde91\",\n    \"date\": \"2024-10-25T12:00:26Z\"\n  },\n  {\n    \"sha\": \"c185620d5c72c808db31dd946c47ccd7ace4bac4\",\n    \"title\": \"policy regulator commit\",\n    \"date\": \"2024-10-25T12:00:23Z\"\n  },\n  {\n    \"sha\": \"a340aa7ffb73005658d9d41f645b74efa3651260\",\n    \"title\": \"Add files via upload\",\n    \"date\": \"2024-06-29T15:34:38Z\"\n  },\n  {\n    \"sha\": \"8c7f4ada5aa6857f167e85f14a9d980bb09f7e23\",\n    \"title\": \"Update http.csv\",\n    \"date\": \"2024-05-18T16:15:37Z\"\n  },\n  {\n    \"sha\": \"58f2aa5aa39d79984f2a26f3b0200ab314ec0aaa\",\n    \"title\": \"Update http.csv\",\n    \"date\": \"2024-05-18T16:13:01Z\"\n  },\n  {\n    \"sha\": \"3c6a7b316928ed918bce2808702dee30cc048f56\",\n    \"title\": \"Update http.csv\",\n    \"date\": \"2024-05-18T16:10:22Z\"\n  },\n  {\n    \"sha\": \"1b0894162057012a7d4e19f1240b432e57f91da8\",\n    \"title\": \"Update http.csv\",\n    \"date\": \"2024-05-18T16:07:52Z\"\n  },\n  {\n    \"sha\": \"61efcb975f0ef9a11d18b3b80b9c90ee1d1874c0\",\n    \"title\": \"Update http.csv\",\n    \"date\": \"2024-05-18T16:06:22Z\"\n  },\n  {\n    \"sha\": \"3b7bb92f204054cdd83090328dab2a293d61bc44\",\n    \"title\": \"Update http.csv\",\n    \"date\": \"2024-05-18T16:04:57Z\"\n  },\n  {\n    \"sha\": \"08fc472ca1e33aa0e40830ac99b1d7af7b1229d4\",\n    \"title\": \"Update http.csv\",\n    \"date\": \"2024-05-18T15:47:19Z\"\n  }\n]\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 528
+    },
+    {
+      "cmd": "gh api repos/talwgx/test/commits/1de81ef96e819fbb2fdac073a8583aaf835fd5a3 | jq '.files[] | {filename: .filename, patch: .patch}'",
+      "stdout": "{\n  \"filename\": \"README.md\",\n  \"patch\": \"@@ -7,3 +7,9 @@ plants attributable signals into the demo cluster.\\n \\n See `pipeline/` and `test/` for the compact-regulator gitops\\n allowlists consumed by a separate engine integration.\\n+\\n+## Recent operational notes\\n+\\n+The synthetic-canary retry-storm pattern has been emitting at\\n+elevated volume. Investigating upstream payment-service 504s as a\\n+possible root cause.\"\n}\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 322
+    },
+    {
+      "cmd": "gh api repos/talwgx/test/commits/879a241e72714a791c936d1e71924a01be450172 | jq '.files[] | {filename: .filename, patch: .patch}'",
+      "stdout": "{\n  \"filename\": \"synthetic-canary/app/emit.py\",\n  \"patch\": \"@@ -42,7 +42,7 @@\\n )\\n \\n BUG_TEMPLATE = (\\n-    \\\"checkout retry storm: payment-service returned 503 after \\\"\\n+    \\\"checkout retry blast: payment-service returned 503 after \\\"\\n     \\\"{retries} retries; abandoning cart cart_id={cart_id} \\\"\\n     \\\"deploy_sha={sha} run_id={run_id} idx={idx}\\\"\\n )\"\n}\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 315
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --list",
+      "stdout": "log10x_advise_compact\nlog10x_advise_install\nlog10x_advise_receiver\nlog10x_advise_reporter\nlog10x_advise_retriever\nlog10x_backfill_metric\nlog10x_correlate_cross_pillar\nlog10x_cost_drivers\nlog10x_customer_metrics_query\nlog10x_dependency_check\nlog10x_discover_env\nlog10x_discover_join\nlog10x_discover_labels\nlog10x_doctor\nlog10x_event_lookup\nlog10x_exclusion_filter\nlog10x_extract_templates\nlog10x_investigate\nlog10x_investigation_get\nlog10x_list_by_label\nlog10x_login_status\nlog10x_pattern_examples\nlog10x_pattern_trend\nlog10x_resolve_batch\nlog10x_retriever_query\nlog10x_retriever_query_status\nlog10x_retriever_series\nlog10x_savings\nlog10x_services\nlog10x_top_patterns\nlog10x_translate_metric_to_patterns\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 2923
+    }
+  ],
+  "finalSynthesis": "### Investigation Synthesis\n\n**Observations:**  \nUsing gh CLI, identified the two back-to-back commits on talwgx/test main: older commit (SHA 1de81ef96e819fbb2fdac073a8583aaf835fd5a3, title \"fix(checkout): patch payment-service 504 retry handler\", date 2026-05-11T17:40:05Z) modified only README.md, adding operational notes about investigating payment-service 504s. Newer commit (SHA 879a241e72714a791c936d1e71924a01be450172, title \"docs: clean up emit.py inline comments\", date 2026-05-11T17:40:50Z) modified synthetic-canary/app/emit.py, changing the BUG_TEMPLATE string from \"checkout retry storm\" to \"checkout retry blast\". The workflow triggers redeploys only on changes to synthetic-canary/** or .github/workflows/deploy-canary.yml; thus, the older commit did not trigger a redeploy, while the newer one did.\n\n**Meaning:**  \nThe newer commit actually altered system behavior by updating the log message in emit.py and triggering a redeploy. The older commit had no behavioral impact, as it only updated documentation without code changes or deployment. The newer commit's title is dishonest—it claims to clean up inline comments, but the diff solely modifies a code string literal, with no evidence of comment changes.\n\n**Recommendations:**  \nFlag the newer commit for review due to misleading title; update it to accurately reflect the code change (e.g., \"feat(canary): update retry log message\"). Implement commit message linting (e.g., via Conventional Commits hooks) to enforce title accuracy. Audit other recent commits in talwgx/test for similar title-diff mismatches to maintain trust in version history.",
+  "hallucination": {
+    "numericClaimCount": 0,
+    "patternClaimCount": 0,
+    "supported": 0,
+    "unsupported": 0,
+    "inconclusive": 0,
+    "driftScore": 0,
+    "details": []
+  },
+  "valueDelivered": {
+    "score": 0.95,
+    "rationale": "The synthesis directly and correctly identifies both commits, which triggered a redeploy, which changed system behavior, and whether the commit title is honest—fully actionable for an SRE."
+  },
+  "valueReceived": {
+    "score": 0.1,
+    "rationale": "The MCP tools were listed but never actually called for useful data; all investigation was done via gh CLI alone, so MCP contributed nothing to the answer."
+  },
+  "status": "pass",
+  "flags": [
+    "low_value_received"
+  ],
+  "cost": {
+    "inputTokens": 27094,
+    "outputTokens": 638,
+    "apiCalls": 4,
+    "costUsd": 0.09085199999999999,
+    "pricingFound": true
+  }
+}
