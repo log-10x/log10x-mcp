@@ -82,6 +82,12 @@ console.error(`  hallucination drift=${report.hallucination.driftScore}`);
 console.error(`  value_delivered=${report.valueDelivered.score.toFixed(2)}`);
 console.error(`  value_received=${report.valueReceived.score.toFixed(2)}`);
 console.error(`  bash calls=${report.bashCommands.length}, duration=${(report.durationMs / 1000).toFixed(1)}s`);
+if (report.followUp) {
+  console.error(
+    `  follow_up: held_ground=${report.followUp.held_ground}` +
+      ` bash_calls_during=${report.followUp.bash_calls_during_follow_up}`
+  );
+}
 if (report.closedLoop) {
   const cl = report.closedLoop;
   console.error(
