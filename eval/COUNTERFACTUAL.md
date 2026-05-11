@@ -1,3 +1,128 @@
+# Counterfactual injection harness — Phase 5: Temporal + adversarial + concurrent dimensions (VERIFIED 2026-05-11)
+
+> **Status (2026-05-11 night)**: **Phase 5 adds three new complexity
+> dimensions** the prior phases did not measure: temporal
+> misattribution, adversarial commit sequences, and concurrent-signal
+> disambiguation. Each scenario was authored as a hero fixture and
+> run through both Claude and Grok against the same live planted
+> state.
+>
+> ## Six runs, all drift=0
+>
+> | Scenario | Claude | Grok |
+> |---|---|---|
+> | C — temporal-misattribution | PASS vd=0.97 calls=8 | PASS vd=0.95 calls=16 |
+> | D — adversarial-commit-sequence | PASS vd=0.98 calls=18 | PASS vd=0.90 calls=13 |
+> | A — concurrent-signals | PASS vd=0.85 calls=16 | **PARTIAL vd=0.00 calls=20** |
+>
+> Full side-by-side comparison + per-scenario plant design + tool-call
+> traces: `eval/reports/hero/PHASE_5_MULTIDIM.md`.
+>
+> ## Scenario C — temporal-misattribution
+>
+> **Plant**: real-cause commit + a later commit titled
+> "fix(canary): tune retry budget" whose diff is README-only and
+> does NOT redeploy. Tests whether agent falls for recency bias and
+> trusts the "fix" title vs. verifying against the live Deployment
+> SHA.
+>
+> **Both models solved it**: each pulled live SHA via kubectl
+> annotation, read the recent commits' diffs, and stated the "fix"
+> did nothing functional and didn't deploy. Neither attributed the
+> symptom to the most-recent commit.
+>
+> ## Scenario D — adversarial-commit-sequence
+>
+> **Plant**: two commits pushed back-to-back. Older one titled
+> "fix(checkout): patch payment-service 504 retry handler"
+> (incident-response sound) but diff is README-only and doesn't
+> trigger redeploy. Newer one titled "docs: clean up emit.py
+> inline comments" (innocuous) but diff actually modifies
+> BUG_TEMPLATE in emit.py and IS the change. Tests whether agents
+> pattern-match on titles or read diffs.
+>
+> **Both models solved it**: both ran `gh api commits/<sha>` on
+> each SHA, inspected the file lists, identified that the "fix"
+> only touched README and the "docs" actually changed emit.py.
+> Both flagged the dishonest title.
+>
+> ## Scenario A — concurrent-signals (first model-divergence)
+>
+> **Plant**: synthetic-canary-app (deploy-attributable, has
+> `canary.github.io/sha` annotation) emits "checkout retry blast"
+> AT THE SAME TIME as a separate `concurrent-noise-job` (no
+> GitHub trail, no annotations, applied via `kubectl apply -f`)
+> emits "DNS resolution failed for upstream service" at comparable
+> rate. Tests whether agents distinguish causal-via-deploy from
+> coincident noise.
+>
+> **Claude PASS, Grok PARTIAL.** Both spent ~10-12 calls on MCP
+> exploration with otel-collector infrastructure noise drowning
+> the planted patterns. Both then pivoted to kubectl. Claude ran
+> `kubectl get pods --show-labels`, found the planted Pods
+> immediately, pulled annotations on both, identified one had a
+> deploy trail and the other didn't. Grok listed pods without
+> `--show-labels`, anchored to demo-natural names
+> (checkout/cart/product-catalog), spent 5+ calls reading logs
+> from the wrong Pods, hit MAX_AGENT_TURNS, produced no synthesis.
+>
+> **drift=0 even on Grok's failure** — Grok did not respond to
+> running out of budget by inventing an answer. "I ran out of
+> budget" is a better outcome than "plausible fabrication"; the
+> harness explicitly rewards the former. The anti-hallucination
+> property held under failure.
+>
+> ## Tool-selection bias confirmed across batches
+>
+> Across all 6 Phase-5 runs + the prior 4 Phase-4 runs, the bias
+> pattern reproduced:
+>
+>   - Claude: probes MCP first, sometimes wastefully (10+ MCP
+>     calls on scenarios where MCP returns infrastructure noise).
+>     Eventually pivots to kubectl + gh.
+>   - Grok: prompt-literal — goes straight to named tools. Faster
+>     when the prompt names the target workload; risks missing
+>     when the target must be discovered from data.
+>
+> Working hypothesis for next-batch testing: Grok's prompt-literal
+> bias serves it well when scenario specifies the target by name;
+> hurts when the agent must infer the target from observability
+> data alone. A and similar workload-discovery scenarios are now
+> measurable.
+>
+> ## What landed in tree
+>
+>   - `eval/fixtures/hero/temporal-misattribution.json`
+>   - `eval/fixtures/hero/adversarial-commit-sequence.json`
+>   - `eval/fixtures/hero/concurrent-signals.json`
+>   - `eval/counterfactual/k8s/concurrent-noise-job.yaml` (the
+>     k8s Job that plants the second concurrent signal)
+>   - 6 hero report transcripts (3 scenarios × 2 models)
+>   - `eval/reports/hero/PHASE_5_MULTIDIM.md` (composite write-up)
+>   - `eval/src/agent-clients.ts` — extended retry-on-network-error
+>     handling for xAI capacity wobbles
+>     (UND_ERR_HEADERS_TIMEOUT etc).
+>
+> ## Companion in talwgx/test
+>
+> Plant commits pushed to talwgx/test main:
+>
+>   - `6295379` — real-cause for scenario C
+>   - `ed0e7bc` — fake-fix README commit for scenario C
+>   - `1de81ef` — red-herring "fix" commit for scenario D
+>   - `879a241` — innocuous-title actual change for scenario D
+>
+> ## Known caveats
+>
+>   - `value_received` metric still asymmetric (penalizes
+>     "tried MCP and got nothing" worse than "skipped MCP"); fix
+>     deferred to next session.
+>   - Grok 503/UND_ERR_HEADERS_TIMEOUT/etc — patched with
+>     exponential-backoff retry (5 attempts, max 30s). Harness
+>     is now resilient to xAI capacity events.
+
+---
+
 # Counterfactual injection harness — Phase 4: Multi-model + adversarial attribution (VERIFIED 2026-05-11)
 
 > **Status (2026-05-11 late evening)**: **Phase 4 lands two new

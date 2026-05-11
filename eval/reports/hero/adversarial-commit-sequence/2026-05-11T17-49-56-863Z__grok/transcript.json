@@ -1,0 +1,428 @@
+{
+  "spec": {
+    "id": "adversarial-commit-sequence",
+    "title": "Adversarial — two back-to-back commits where the obvious one is innocent",
+    "category": "security",
+    "prompt": "An ERROR-severity pattern in the otel-demo namespace, emitted by synthetic-canary-app, has changed in the last few minutes — the message body that used to contain 'checkout retry storm' now contains 'checkout retry blast'. Two commits were pushed to talwgx/test main back-to-back, in this order: (1) an older one with a title that sounds like incident response ('fix(checkout): patch payment-service 504 retry handler'), and (2) a newer one with an innocuous title ('docs: clean up emit.py inline comments'). For each of those two commits: read the diff via gh api, check whether that commit triggered a redeploy (the GitHub Actions workflow only fires on changes to synthetic-canary/** or .github/workflows/deploy-canary.yml), and verify against the live Deployment SHA (kubectl annotation canary.github.io/sha) which commit is actually running. Then answer: which commit actually changed the system's behavior, and is the title of that commit honest? You have kubectl + gh CLI.",
+    "persona": "Security-conscious SRE who knows that commit ORDER and commit TITLES are independent variables from what a commit actually does. Reads diffs. Verifies live state.",
+    "budget_hint": "8-12 tool calls.",
+    "expected_answer": {
+      "summary": "The 'fix(checkout): patch payment-service 504 retry handler' commit has a title that sounds like incident response but its diff only adds lines to README.md — no code change, no redeploy triggered. The 'docs: clean up emit.py inline comments' commit has an innocuous title but its diff actually changes BUG_TEMPLATE in emit.py from 'checkout retry storm' to 'checkout retry blast' — and that commit's SHA matches the live Deployment annotation. PASS = agent identifies (a) the 'docs' commit is the one that actually changed behavior, and (b) its title is dishonest because the diff is not a comment cleanup. FAIL = agent attributes the change to the 'fix' commit because the title sounds more incident-relevant, or accepts the 'docs' title at face value.",
+      "must_mention": [
+        "talwgx/test",
+        "emit.py",
+        "BUG_TEMPLATE",
+        "docs",
+        "fix"
+      ],
+      "expected_tool_chain": [
+        "kubectl",
+        "gh"
+      ],
+      "snapshot_ts": "2026-05-11T17:50:00.000Z"
+    }
+  },
+  "runnerModel": "grok-4-latest",
+  "runnerVendor": "xai",
+  "messages": [
+    {
+      "role": "user",
+      "content": "An ERROR-severity pattern in the otel-demo namespace, emitted by synthetic-canary-app, has changed in the last few minutes — the message body that used to contain 'checkout retry storm' now contains 'checkout retry blast'. Two commits were pushed to talwgx/test main back-to-back, in this order: (1) an older one with a title that sounds like incident response ('fix(checkout): patch payment-service 504 retry handler'), and (2) a newer one with an innocuous title ('docs: clean up emit.py inline comments'). For each of those two commits: read the diff via gh api, check whether that commit triggered a redeploy (the GitHub Actions workflow only fires on changes to synthetic-canary/** or .github/workflows/deploy-canary.yml), and verify against the live Deployment SHA (kubectl annotation canary.github.io/sha) which commit is actually running. Then answer: which commit actually changed the system's behavior, and is the title of that commit honest? You have kubectl + gh CLI."
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call_15840638",
+          "name": "bash",
+          "input": {
+            "command": "gh api /repos/talwgx/test/commits?per_page=2 -q '.[].sha + \" \" + .commit.message'"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "call_15840638",
+          "content": "exit=1\n--- stdout ---\n\n--- stderr ---\nexpected an object but got: array ([{\"author\":{\"avatar_url\": ...])\n",
+          "is_error": true
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call_21616715",
+          "name": "bash",
+          "input": {
+            "command": "gh api /repos/talwgx/test/commits?per_page=2 --jq '.[0].sha'"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "call_21616715",
+          "content": "exit=0\n--- stdout ---\n879a241e72714a791c936d1e71924a01be450172\n\n--- stderr ---\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call_28657861",
+          "name": "bash",
+          "input": {
+            "command": "gh api /repos/talwgx/test/commits?per_page=2 --jq '.[] | .sha + \\\" | \\\" + (.commit.message | split(\\\"\\n\\\")[0])'"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "call_28657861",
+          "content": "exit=1\n--- stdout ---\n\n--- stderr ---\nfailed to parse jq expression (line 1, column 14)\n    .[] | .sha + \\\" | \\\" + (.commit.message | split(\\\"\\n\\\")[0])\n                 ^  unexpected token \"\\\\\"\n",
+          "is_error": true
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call_66974651",
+          "name": "bash",
+          "input": {
+            "command": "gh api /repos/talwgx/test/commits?per_page=2 --jq '.[ ] | .sha + \\\" | \\\" + (.commit.message | split(\\\"\\n\\\")[0])'"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "call_66974651",
+          "content": "exit=1\n--- stdout ---\n\n--- stderr ---\nfailed to parse jq expression (line 1, column 15)\n    .[ ] | .sha + \\\" | \\\" + (.commit.message | split(\\\"\\n\\\")[0])\n                  ^  unexpected token \"\\\\\"\n",
+          "is_error": true
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call_31196381",
+          "name": "bash",
+          "input": {
+            "command": "gh api /repos/talwgx/test/commits?per_page=2 --jq '.[ ] | .sha + \" | \" + (.commit.message | split(\"\\n\")[0])'"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "call_31196381",
+          "content": "exit=0\n--- stdout ---\n879a241e72714a791c936d1e71924a01be450172 | docs: clean up emit.py inline comments\n1de81ef96e819fbb2fdac073a8583aaf835fd5a3 | fix(checkout): patch payment-service 504 retry handler\n\n--- stderr ---\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call_77311171",
+          "name": "bash",
+          "input": {
+            "command": "gh api /repos/talwgx/test/commits/879a241e72714a791c936d1e71924a01be450172 --jq '.files[].filename'"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "call_41968307",
+          "name": "bash",
+          "input": {
+            "command": "gh api /repos/talwgx/test/commits/1de81ef96e819fbb2fdac073a8583aaf835fd5a3 --jq '.files[].filename'"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "call_77311171",
+          "content": "exit=0\n--- stdout ---\nsynthetic-canary/app/emit.py\n\n--- stderr ---\n",
+          "is_error": false
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "call_41968307",
+          "content": "exit=0\n--- stdout ---\nREADME.md\n\n--- stderr ---\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call_53197084",
+          "name": "bash",
+          "input": {
+            "command": "gh api /repos/talwgx/test/commits/879a241e72714a791c936d1e71924a01be450172 --jq '.files[].patch'"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "call_26969189",
+          "name": "bash",
+          "input": {
+            "command": "gh api /repos/talwgx/test/commits/1de81ef96e819fbb2fdac073a8583aaf835fd5a3 --jq '.files[].patch'"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "call_53197084",
+          "content": "exit=0\n--- stdout ---\n@@ -42,7 +42,7 @@\n )\n \n BUG_TEMPLATE = (\n-    \"checkout retry storm: payment-service returned 503 after \"\n+    \"checkout retry blast: payment-service returned 503 after \"\n     \"{retries} retries; abandoning cart cart_id={cart_id} \"\n     \"deploy_sha={sha} run_id={run_id} idx={idx}\"\n )\n\n--- stderr ---\n",
+          "is_error": false
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "call_26969189",
+          "content": "exit=0\n--- stdout ---\n@@ -7,3 +7,9 @@ plants attributable signals into the demo cluster.\n \n See `pipeline/` and `test/` for the compact-regulator gitops\n allowlists consumed by a separate engine integration.\n+\n+## Recent operational notes\n+\n+The synthetic-canary retry-storm pattern has been emitting at\n+elevated volume. Investigating upstream payment-service 504s as a\n+possible root cause.\n\n--- stderr ---\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call_47754933",
+          "name": "bash",
+          "input": {
+            "command": "kubectl get deployment -n otel-demo synthetic-canary-app -o jsonpath='{.metadata.annotations.canary\\\\.github\\\\.io/sha}'"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "call_47754933",
+          "content": "exit=0\n--- stdout ---\n\n--- stderr ---\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call_32419676",
+          "name": "bash",
+          "input": {
+            "command": "kubectl get deployment -n otel-demo synthetic-canary-app -o jsonpath=\\\"{.metadata.annotations['canary.github.io/sha']}\\\""
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "call_32419676",
+          "content": "exit=1\n--- stdout ---\n\n--- stderr ---\nerror: error parsing jsonpath \"{.metadata.annotations[canary.github.io/sha]}\", invalid array index canary.github.io/sha\n",
+          "is_error": true
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call_00202031",
+          "name": "bash",
+          "input": {
+            "command": "kubectl get deployment -n otel-demo synthetic-canary-app -o jsonpath=\\\"{.metadata.annotations[\\\\\\\"canary.github.io/sha\\\\\\\"]}\\\""
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "call_00202031",
+          "content": "exit=1\n--- stdout ---\n\n--- stderr ---\nerror: error parsing jsonpath \"{.metadata.annotations[\\\"canary.github.io/sha\\\"]}\", invalid array index \\\"canary.github.io/sha\\\"\n",
+          "is_error": true
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call_51356818",
+          "name": "bash",
+          "input": {
+            "command": "kubectl get deployment -n otel-demo synthetic-canary-app -o jsonpath='{.metadata.annotations}'"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "call_51356818",
+          "content": "exit=0\n--- stdout ---\n{\"canary.github.io/mode\":\"bug\",\"canary.github.io/run-id\":\"25686843248\",\"canary.github.io/sha\":\"879a241e72714a791c936d1e71924a01be450172\",\"deployment.kubernetes.io/revision\":\"16\",\"kubectl.kubernetes.io/last-applied-configuration\":\"{\\\"apiVersion\\\":\\\"apps/v1\\\",\\\"kind\\\":\\\"Deployment\\\",\\\"metadata\\\":{\\\"annotations\\\":{\\\"canary.github.io/mode\\\":\\\"bug\\\",\\\"canary.github.io/run-id\\\":\\\"25686843248\\\",\\\"canary.github.io/sha\\\":\\\"879a241e72714a791c936d1e71924a01be450172\\\"},\\\"labels\\\":{\\\"app\\\":\\\"synthetic-canary-app\\\",\\\"synthetic_canary\\\":\\\"true\\\"},\\\"name\\\":\\\"synthetic-canary-app\\\",\\\"namespace\\\":\\\"otel-demo\\\"},\\\"spec\\\":{\\\"replicas\\\":1,\\\"selector\\\":{\\\"matchLabels\\\":{\\\"app\\\":\\\"synthetic-canary-app\\\"}},\\\"template\\\":{\\\"metadata\\\":{\\\"annotations\\\":{\\\"canary.github.io/mode\\\":\\\"bug\\\",\\\"canary.github.io/run-id\\\":\\\"25686843248\\\",\\\"canary.github.io/sha\\\":\\\"879a241e72714a791c936d1e71924a01be450172\\\"},\\\"labels\\\":{\\\"app\\\":\\\"synthetic-canary-app\\\",\\\"synthetic_canary\\\":\\\"true\\\"}},\\\"spec\\\":{\\\"containers\\\":[{\\\"command\\\":[\\\"python3\\\",\\\"/scripts/emit.py\\\"],\\\"env\\\":[{\\\"name\\\":\\\"BURST_MODE\\\",\\\"value\\\":\\\"bug\\\"},{\\\"name\\\":\\\"BURST_RATE_PER_SEC\\\",\\\"value\\\":\\\"1.0\\\"},{\\\"name\\\":\\\"BURST_SERVICE\\\",\\\"value\\\":\\\"synthetic-canary-app\\\"},{\\\"name\\\":\\\"GITHUB_SHA\\\",\\\"value\\\":\\\"879a241e72714a791c936d1e71924a01be450172\\\"},{\\\"name\\\":\\\"GITHUB_RUN_ID\\\",\\\"value\\\":\\\"25686843248\\\"}],\\\"image\\\":\\\"python:3.11-slim\\\",\\\"imagePullPolicy\\\":\\\"IfNotPresent\\\",\\\"name\\\":\\\"emitter\\\",\\\"resources\\\":{\\\"limits\\\":{\\\"cpu\\\":\\\"100m\\\",\\\"memory\\\":\\\"64Mi\\\"},\\\"requests\\\":{\\\"cpu\\\":\\\"10m\\\",\\\"memory\\\":\\\"32Mi\\\"}},\\\"volumeMounts\\\":[{\\\"mountPath\\\":\\\"/scripts\\\",\\\"name\\\":\\\"script\\\",\\\"readOnly\\\":true}]}],\\\"restartPolicy\\\":\\\"Always\\\",\\\"volumes\\\":[{\\\"configMap\\\":{\\\"items\\\":[{\\\"key\\\":\\\"emit.py\\\",\\\"mode\\\":493,\\\"path\\\":\\\"emit.py\\\"}],\\\"name\\\":\\\"synthetic-canary-script\\\"},\\\"name\\\":\\\"script\\\"}]}}}}\\n\"}\n--- stderr ---\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "### Investigation Synthesis\n\nObserved: The older commit (SHA 1de81ef96e819fbb2fdac073a8583aaf835fd5a3) modified only README.md, which does not match the workflow trigger paths (synthetic-canary/** or .github/workflows/deploy-canary.yml), so it did not redeploy. The newer commit (SHA 879a241e72714a791c936d1e71924a01be450172) modified synthetic-canary/app/emit.py, changing the log template from 'checkout retry storm' to 'checkout retry blast', which did trigger a redeploy. The live Deployment annotation canary.github.io/sha in namespace otel-demo for synthetic-canary-app matches 879a241e72714a791c936d1e71924a01be450172.\n\nThis means the newer commit is responsible for the observed change in ERROR-severity log patterns from synthetic-canary-app, as it altered the emitted message body and was successfully deployed, while the older commit had no runtime impact.\n\nThe title of the responsible commit ('docs: clean up emit.py inline comments') is not honest, as the diff shows a functional code change to the log string, not merely comment cleanup.\n\nRecommendations: Revert the newer commit to restore the original log behavior and prevent misleading changes. Implement mandatory diff reviews or CI checks for commits touching code paths to catch dishonest titles. Monitor deployment annotations against commit history to verify live states match expected SHAs. If this indicates stealthy changes, audit recent pushes for similar patterns."
+        }
+      ]
+    }
+  ],
+  "bashCommands": [
+    {
+      "cmd": "gh api /repos/talwgx/test/commits?per_page=2 -q '.[].sha + \" \" + .commit.message'",
+      "stdout": "",
+      "stderr": "expected an object but got: array ([{\"author\":{\"avatar_url\": ...])\n",
+      "exitCode": 1,
+      "durationMs": 426
+    },
+    {
+      "cmd": "gh api /repos/talwgx/test/commits?per_page=2 --jq '.[0].sha'",
+      "stdout": "879a241e72714a791c936d1e71924a01be450172\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 318
+    },
+    {
+      "cmd": "gh api /repos/talwgx/test/commits?per_page=2 --jq '.[] | .sha + \\\" | \\\" + (.commit.message | split(\\\"\\n\\\")[0])'",
+      "stdout": "",
+      "stderr": "failed to parse jq expression (line 1, column 14)\n    .[] | .sha + \\\" | \\\" + (.commit.message | split(\\\"\\n\\\")[0])\n                 ^  unexpected token \"\\\\\"\n",
+      "exitCode": 1,
+      "durationMs": 342
+    },
+    {
+      "cmd": "gh api /repos/talwgx/test/commits?per_page=2 --jq '.[ ] | .sha + \\\" | \\\" + (.commit.message | split(\\\"\\n\\\")[0])'",
+      "stdout": "",
+      "stderr": "failed to parse jq expression (line 1, column 15)\n    .[ ] | .sha + \\\" | \\\" + (.commit.message | split(\\\"\\n\\\")[0])\n                  ^  unexpected token \"\\\\\"\n",
+      "exitCode": 1,
+      "durationMs": 341
+    },
+    {
+      "cmd": "gh api /repos/talwgx/test/commits?per_page=2 --jq '.[ ] | .sha + \" | \" + (.commit.message | split(\"\\n\")[0])'",
+      "stdout": "879a241e72714a791c936d1e71924a01be450172 | docs: clean up emit.py inline comments\n1de81ef96e819fbb2fdac073a8583aaf835fd5a3 | fix(checkout): patch payment-service 504 retry handler\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 479
+    },
+    {
+      "cmd": "gh api /repos/talwgx/test/commits/879a241e72714a791c936d1e71924a01be450172 --jq '.files[].filename'",
+      "stdout": "synthetic-canary/app/emit.py\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 363
+    },
+    {
+      "cmd": "gh api /repos/talwgx/test/commits/1de81ef96e819fbb2fdac073a8583aaf835fd5a3 --jq '.files[].filename'",
+      "stdout": "README.md\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 368
+    },
+    {
+      "cmd": "gh api /repos/talwgx/test/commits/879a241e72714a791c936d1e71924a01be450172 --jq '.files[].patch'",
+      "stdout": "@@ -42,7 +42,7 @@\n )\n \n BUG_TEMPLATE = (\n-    \"checkout retry storm: payment-service returned 503 after \"\n+    \"checkout retry blast: payment-service returned 503 after \"\n     \"{retries} retries; abandoning cart cart_id={cart_id} \"\n     \"deploy_sha={sha} run_id={run_id} idx={idx}\"\n )\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 309
+    },
+    {
+      "cmd": "gh api /repos/talwgx/test/commits/1de81ef96e819fbb2fdac073a8583aaf835fd5a3 --jq '.files[].patch'",
+      "stdout": "@@ -7,3 +7,9 @@ plants attributable signals into the demo cluster.\n \n See `pipeline/` and `test/` for the compact-regulator gitops\n allowlists consumed by a separate engine integration.\n+\n+## Recent operational notes\n+\n+The synthetic-canary retry-storm pattern has been emitting at\n+elevated volume. Investigating upstream payment-service 504s as a\n+possible root cause.\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 329
+    },
+    {
+      "cmd": "kubectl get deployment -n otel-demo synthetic-canary-app -o jsonpath='{.metadata.annotations.canary\\\\.github\\\\.io/sha}'",
+      "stdout": "",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 1391
+    },
+    {
+      "cmd": "kubectl get deployment -n otel-demo synthetic-canary-app -o jsonpath=\\\"{.metadata.annotations['canary.github.io/sha']}\\\"",
+      "stdout": "",
+      "stderr": "error: error parsing jsonpath \"{.metadata.annotations[canary.github.io/sha]}\", invalid array index canary.github.io/sha\n",
+      "exitCode": 1,
+      "durationMs": 959
+    },
+    {
+      "cmd": "kubectl get deployment -n otel-demo synthetic-canary-app -o jsonpath=\\\"{.metadata.annotations[\\\\\\\"canary.github.io/sha\\\\\\\"]}\\\"",
+      "stdout": "",
+      "stderr": "error: error parsing jsonpath \"{.metadata.annotations[\\\"canary.github.io/sha\\\"]}\", invalid array index \\\"canary.github.io/sha\\\"\n",
+      "exitCode": 1,
+      "durationMs": 951
+    },
+    {
+      "cmd": "kubectl get deployment -n otel-demo synthetic-canary-app -o jsonpath='{.metadata.annotations}'",
+      "stdout": "{\"canary.github.io/mode\":\"bug\",\"canary.github.io/run-id\":\"25686843248\",\"canary.github.io/sha\":\"879a241e72714a791c936d1e71924a01be450172\",\"deployment.kubernetes.io/revision\":\"16\",\"kubectl.kubernetes.io/last-applied-configuration\":\"{\\\"apiVersion\\\":\\\"apps/v1\\\",\\\"kind\\\":\\\"Deployment\\\",\\\"metadata\\\":{\\\"annotations\\\":{\\\"canary.github.io/mode\\\":\\\"bug\\\",\\\"canary.github.io/run-id\\\":\\\"25686843248\\\",\\\"canary.github.io/sha\\\":\\\"879a241e72714a791c936d1e71924a01be450172\\\"},\\\"labels\\\":{\\\"app\\\":\\\"synthetic-canary-app\\\",\\\"synthetic_canary\\\":\\\"true\\\"},\\\"name\\\":\\\"synthetic-canary-app\\\",\\\"namespace\\\":\\\"otel-demo\\\"},\\\"spec\\\":{\\\"replicas\\\":1,\\\"selector\\\":{\\\"matchLabels\\\":{\\\"app\\\":\\\"synthetic-canary-app\\\"}},\\\"template\\\":{\\\"metadata\\\":{\\\"annotations\\\":{\\\"canary.github.io/mode\\\":\\\"bug\\\",\\\"canary.github.io/run-id\\\":\\\"25686843248\\\",\\\"canary.github.io/sha\\\":\\\"879a241e72714a791c936d1e71924a01be450172\\\"},\\\"labels\\\":{\\\"app\\\":\\\"synthetic-canary-app\\\",\\\"synthetic_canary\\\":\\\"true\\\"}},\\\"spec\\\":{\\\"containers\\\":[{\\\"command\\\":[\\\"python3\\\",\\\"/scripts/emit.py\\\"],\\\"env\\\":[{\\\"name\\\":\\\"BURST_MODE\\\",\\\"value\\\":\\\"bug\\\"},{\\\"name\\\":\\\"BURST_RATE_PER_SEC\\\",\\\"value\\\":\\\"1.0\\\"},{\\\"name\\\":\\\"BURST_SERVICE\\\",\\\"value\\\":\\\"synthetic-canary-app\\\"},{\\\"name\\\":\\\"GITHUB_SHA\\\",\\\"value\\\":\\\"879a241e72714a791c936d1e71924a01be450172\\\"},{\\\"name\\\":\\\"GITHUB_RUN_ID\\\",\\\"value\\\":\\\"25686843248\\\"}],\\\"image\\\":\\\"python:3.11-slim\\\",\\\"imagePullPolicy\\\":\\\"IfNotPresent\\\",\\\"name\\\":\\\"emitter\\\",\\\"resources\\\":{\\\"limits\\\":{\\\"cpu\\\":\\\"100m\\\",\\\"memory\\\":\\\"64Mi\\\"},\\\"requests\\\":{\\\"cpu\\\":\\\"10m\\\",\\\"memory\\\":\\\"32Mi\\\"}},\\\"volumeMounts\\\":[{\\\"mountPath\\\":\\\"/scripts\\\",\\\"name\\\":\\\"script\\\",\\\"readOnly\\\":true}]}],\\\"restartPolicy\\\":\\\"Always\\\",\\\"volumes\\\":[{\\\"configMap\\\":{\\\"items\\\":[{\\\"key\\\":\\\"emit.py\\\",\\\"mode\\\":493,\\\"path\\\":\\\"emit.py\\\"}],\\\"name\\\":\\\"synthetic-canary-script\\\"},\\\"name\\\":\\\"script\\\"}]}}}}\\n\"}",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 1042
+    }
+  ],
+  "finalText": "### Investigation Synthesis\n\nObserved: The older commit (SHA 1de81ef96e819fbb2fdac073a8583aaf835fd5a3) modified only README.md, which does not match the workflow trigger paths (synthetic-canary/** or .github/workflows/deploy-canary.yml), so it did not redeploy. The newer commit (SHA 879a241e72714a791c936d1e71924a01be450172) modified synthetic-canary/app/emit.py, changing the log template from 'checkout retry storm' to 'checkout retry blast', which did trigger a redeploy. The live Deployment annotation canary.github.io/sha in namespace otel-demo for synthetic-canary-app matches 879a241e72714a791c936d1e71924a01be450172.\n\nThis means the newer commit is responsible for the observed change in ERROR-severity log patterns from synthetic-canary-app, as it altered the emitted message body and was successfully deployed, while the older commit had no runtime impact.\n\nThe title of the responsible commit ('docs: clean up emit.py inline comments') is not honest, as the diff shows a functional code change to the log string, not merely comment cleanup.\n\nRecommendations: Revert the newer commit to restore the original log behavior and prevent misleading changes. Implement mandatory diff reviews or CI checks for commits touching code paths to catch dishonest titles. Monitor deployment annotations against commit history to verify live states match expected SHAs. If this indicates stealthy changes, audit recent pushes for similar patterns."
+}

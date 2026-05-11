@@ -134,17 +134,54 @@ class GrokAgentClient implements AgentClient {
       max_tokens: req.maxTokens,
     };
 
-    const r = await fetch(this.baseUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${this.apiKey}`,
-      },
-      body: JSON.stringify(body),
-    });
-    if (!r.ok) {
-      const errText = await r.text();
-      throw new Error(`Grok API ${r.status}: ${errText.slice(0, 500)}`);
+    // xAI returns 503 "model is at capacity" intermittently and 429
+    // on burst rates. Retry on both with exponential backoff. Also
+    // retry on fetch-level network errors (UND_ERR_HEADERS_TIMEOUT,
+    // UND_ERR_SOCKET) — Grok occasionally hangs >5min and trips
+    // undici's default header timeout. Other 4xx fail fast.
+    let r: Response | undefined;
+    const retryStatuses = new Set([429, 502, 503, 504]);
+    const retryErrorCodes = new Set([
+      'UND_ERR_HEADERS_TIMEOUT',
+      'UND_ERR_BODY_TIMEOUT',
+      'UND_ERR_SOCKET',
+      'UND_ERR_CONNECT_TIMEOUT',
+      'ECONNRESET',
+      'ETIMEDOUT',
+    ]);
+    const maxRetries = 5;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        r = await fetch(this.baseUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${this.apiKey}`,
+          },
+          body: JSON.stringify(body),
+        });
+      } catch (err) {
+        const code =
+          (err as { cause?: { code?: string }; code?: string }).cause?.code ??
+          (err as { code?: string }).code ??
+          '';
+        if (retryErrorCodes.has(code) && attempt < maxRetries) {
+          const backoffMs = Math.min(2000 * Math.pow(2, attempt), 30000);
+          await new Promise((resolve) => setTimeout(resolve, backoffMs));
+          continue;
+        }
+        throw err;
+      }
+      if (r.ok) break;
+      if (!retryStatuses.has(r.status) || attempt === maxRetries) {
+        const errText = await r.text();
+        throw new Error(`Grok API ${r.status}: ${errText.slice(0, 500)}`);
+      }
+      const backoffMs = Math.min(2000 * Math.pow(2, attempt), 30000);
+      await new Promise((resolve) => setTimeout(resolve, backoffMs));
+    }
+    if (!r || !r.ok) {
+      throw new Error(`Grok API: exhausted retries without success`);
     }
     const data = (await r.json()) as {
       choices?: Array<{
