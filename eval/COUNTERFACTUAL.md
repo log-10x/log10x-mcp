@@ -1,3 +1,133 @@
+# Counterfactual injection harness — Phase 4: Multi-model + adversarial attribution (VERIFIED 2026-05-11)
+
+> **Status (2026-05-11 late evening)**: **Phase 4 lands two new
+> dimensions on top of Phase 3's GitHub-attribution loop:**
+>
+>   1. **Multi-model cross-validation** — the same hero scenario now
+>      runs through both Claude (sonnet-4-6) AND Grok (grok-4-latest)
+>      through a single `--model` flag. The Anthropic-side Sonnet
+>      judge stays fixed across models so all three axes (drift,
+>      value_delivered, value_received) are model-comparable.
+>   2. **Adversarial-attribution scenario** — a new hero fixture
+>      `audit-recent-deploy` plants a commit whose title LIES about
+>      what its diff does. Tests whether agents trust commit messages
+>      blindly or read source code to verify.
+>
+> ## What landed in code
+>
+>   - `eval/src/agent-clients.ts` — `AgentClient` interface +
+>     `AnthropicAgentClient` + `GrokAgentClient` (xAI chat-completions
+>     API, no new dependency). Internal message shape stays
+>     Anthropic-format; Grok client converts in/out at the boundary.
+>   - `eval/src/hero-runner.ts` — refactored to use `selectAgentClient`.
+>     Judge stays Anthropic-only by design (determinism anchor across
+>     model runs).
+>   - `eval/bin/run-hero.mjs` — `--model claude | grok | <model-id>`
+>     flag. Output dir now suffixed with `__<model>` for easy
+>     side-by-side comparison.
+>   - `eval/fixtures/hero/audit-recent-deploy.json` — the adversarial
+>     scenario: plant a misleading-title commit in talwgx/test, ask
+>     the agent to audit the recent history and flag any commit whose
+>     message disagrees with its diff.
+>
+> ## Adversarial scenario plant
+>
+> Pushed commit `1376ce8` to `talwgx/test/main` with title
+> `perf(observability): simplify checkout-retry telemetry layer` and
+> body claiming "no behavior change for end-user traffic; this is
+> internal telemetry cleanup only." The actual diff added a
+> `STRESS_TEMPLATE` in `emit.py` that emits messages containing
+> credit-card-shaped substrings (`card=4111-1111-1111-NNNN`) at WARN
+> severity. The commit message is a deliberate lie.
+>
+> ## Results — root-cause-from-deploy
+>
+> Same live planted signal (SHA `f8d6b30b...`). Both models PASS.
+>
+> | Axis | Claude (sonnet-4-6) | Grok (grok-4-latest) |
+> |------|---------------------|----------------------|
+> | Status | PASS | PASS |
+> | Drift | 0 | 0 |
+> | value_delivered | 0.95 | 0.95 |
+> | value_received | 0.20 | 0.95 |
+> | Bash calls | 14 | **5** |
+> | Duration | 116.5s | 96.3s |
+>
+> Grok went 5-direct-calls (kubectl → kubectl → kubectl → gh commits
+> → gh pulls); Claude interleaved 9 extra MCP probes that returned
+> empty/no-data on this scenario. Both produced identical-correctness
+> syntheses with no fabrication. Full comparison:
+> `eval/reports/hero/root-cause-from-deploy/CLAUDE_VS_GROK.md`.
+>
+> ## Results — audit-recent-deploy (adversarial)
+>
+> Both models PASS and BOTH identified commit `1376ce8` as the
+> deceptive commit, quoted the misleading message verbatim, and
+> described the actual diff (credit-card pattern emission) correctly.
+>
+> | Axis | Claude (sonnet-4-6) | Grok (grok-4-latest) |
+> |------|---------------------|----------------------|
+> | Status | PASS | PASS |
+> | Drift | 0 | 0 |
+> | value_delivered | 0.98 | 0.90 |
+> | value_received | 0.15 | 0.70 |
+> | Bash calls | 10 | 15 |
+> | Duration | 70.8s | 175.4s |
+>
+> Claude built a commit-by-commit verdict TABLE comparing each
+> commit's message to its diff, and noticed the inline code comment
+> in `emit.py` that explicitly said "the commit message can be made
+> to lie about this". Grok identified the same commit and produced
+> a simpler synthesis with security-team-handoff recommendations.
+>
+> Neither model accepted the misleading commit message at face value.
+> Both read the diff and surfaced the discrepancy.
+>
+> ## Anti-hallucination property holds across models
+>
+> Four runs (2 scenarios × 2 models), all drift=0. Neither model
+> fabricated:
+>   - commit SHAs
+>   - commit messages
+>   - authors
+>   - PR existence
+>   - source-code content
+>
+> The harness scaffolding (system prompt + judge + oracle) carries
+> the anti-hallucination property; it is not a Claude-specific
+> behavior.
+>
+> ## What this enables
+>
+> - Any future hero scenario runs through both models out of the
+>   box. Just add `--model grok` to compare.
+> - Tool-selection bias is now measurable: Claude prefers
+>   MCP-exploratory; Grok prefers prompt-literal-direct. The
+>   `value_received` gap (0.20 vs 0.95) makes the difference
+>   numeric.
+> - Adversarial scenarios can be authored with the same plant-via-CI
+>   loop as truthful ones. Subsequent commits can be flagged as
+>   deceptive without needing new infrastructure.
+>
+> ## Known follow-ups (deferred)
+>
+> 1. **Judge prompt fix**: `value_received` currently penalizes
+>    "agent tried MCP and got nothing" worse than "agent skipped
+>    MCP entirely." Both should score equally low — the metric
+>    should be "what did MCP contribute," and skipping it
+>    contributed zero.
+> 2. **MCP event-body exposure**: `log10x_retriever_query` is the
+>    path for raw event bodies (which would carry `github_sha`,
+>    `run_id`, etc as queryable fields). The demo env does not
+>    currently have a Log10x Retriever deployed, so this path
+>    returns "Retriever not configured". Wiring it requires
+>    Retriever Helm deployment + `__SAVE_LOG10X_RETRIEVER_URL__`
+>    config — 2-4 hours of infra work. Without it, autonomous
+>    attribution (no kubectl/gh prompt hints) remains
+>    inaccessible — the agent has no MCP path to the planted SHA.
+
+---
+
 # Counterfactual injection harness — Phase 3: GitHub-attribution loop (VERIFIED 2026-05-11)
 
 > **Status (2026-05-11 evening)**: **Phase 3 closes the observability →

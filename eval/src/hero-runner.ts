@@ -24,8 +24,8 @@ import { join } from 'node:path';
 import type { EvalEnv } from './env.js';
 import { applyEvalEnvToProcess } from './env.js';
 import { validateClaims, renderOracleReport, type HeroOracleReport } from './hero-oracle.js';
+import { selectAgentClient, type AgentClient, type AgentMessage } from './agent-clients.js';
 
-const RUNNER_MODEL = 'claude-sonnet-4-6';
 const JUDGE_MODEL = 'claude-sonnet-4-6';
 const MAX_AGENT_TURNS = 20;
 const MAX_TOKENS = 4000;
@@ -42,6 +42,8 @@ export interface HeroSpec {
 
 export interface HeroRunReport {
   spec: HeroSpec;
+  runnerModel: string;
+  runnerVendor: 'anthropic' | 'xai';
   startedAt: string;
   endedAt: string;
   durationMs: number;
@@ -154,20 +156,22 @@ interface AnthropicLike {
   };
 }
 
-export async function runHero(spec: HeroSpec, env: EvalEnv, outDir: string): Promise<HeroRunReport> {
-  if (!process.env.ANTHROPIC_API_KEY) {
-    throw new Error('runHero requires ANTHROPIC_API_KEY');
-  }
+export async function runHero(
+  spec: HeroSpec,
+  env: EvalEnv,
+  outDir: string,
+  runnerModel?: string
+): Promise<HeroRunReport> {
   applyEvalEnvToProcess(env);
   mkdirSync(outDir, { recursive: true });
 
+  const agentClient: AgentClient = selectAgentClient(runnerModel);
   const startedAt = new Date().toISOString();
   const t0 = Date.now();
   const bashCommands: HeroRunReport['bashCommands'] = [];
 
   const systemPrompt = (spec.persona ? spec.persona + '\n\n' : '') + HERO_SYSTEM_PROMPT_BASE;
 
-  const client = new Anthropic() as unknown as AnthropicLike;
   // Single-tool surface: a Bash tool. The sub-agent must shell out.
   const tools = [
     {
@@ -184,20 +188,17 @@ export async function runHero(spec: HeroSpec, env: EvalEnv, outDir: string): Pro
     },
   ];
 
-  const messages: Parameters<typeof client.messages.create>[0]['messages'] = [
-    { role: 'user', content: spec.prompt },
-  ];
+  const messages: AgentMessage[] = [{ role: 'user', content: spec.prompt }];
 
   let finalText = '';
   let turn = 0;
   while (turn < MAX_AGENT_TURNS) {
     turn++;
-    const resp = await client.messages.create({
-      model: RUNNER_MODEL,
-      max_tokens: MAX_TOKENS,
+    const resp = await agentClient.call({
       system: systemPrompt,
       tools,
       messages,
+      maxTokens: MAX_TOKENS,
     });
     messages.push({ role: 'assistant', content: resp.content });
 
@@ -207,7 +208,7 @@ export async function runHero(spec: HeroSpec, env: EvalEnv, outDir: string): Pro
     );
     const textBlocks = resp.content.filter((b): b is { type: 'text'; text: string } => b.type === 'text');
 
-    if (resp.stop_reason === 'end_turn' || toolUses.length === 0) {
+    if (resp.stopReason === 'end_turn' || toolUses.length === 0) {
       finalText = textBlocks.map((b) => b.text).join('\n');
       break;
     }
@@ -250,7 +251,11 @@ export async function runHero(spec: HeroSpec, env: EvalEnv, outDir: string): Pro
   // judge) can be re-run against this without losing the agent's work.
   writeFileSync(
     join(outDir, 'transcript.json'),
-    JSON.stringify({ spec, messages, bashCommands, finalText }, null, 2)
+    JSON.stringify(
+      { spec, runnerModel: agentClient.modelId, runnerVendor: agentClient.vendor, messages, bashCommands, finalText },
+      null,
+      2
+    )
   );
 
   // ── Score: hallucination via oracle ──
@@ -281,9 +286,12 @@ export async function runHero(spec: HeroSpec, env: EvalEnv, outDir: string): Pro
   }
 
   // ── Score: value-delivered + value-received via Sonnet judge ──
+  // Judge is always Anthropic Sonnet, regardless of runner model. This
+  // is intentional: the judge is the determinism anchor across runs.
   let judgeReport: JudgeReport;
+  const judgeClient = new Anthropic() as unknown as AnthropicLike;
   try {
-    judgeReport = await judgeHero(spec, finalText, bashCommands, client);
+    judgeReport = await judgeHero(spec, finalText, bashCommands, judgeClient);
   } catch (e) {
     judgeReport = {
       valueDelivered: { score: -1, rationale: `judge path threw: ${(e as Error).message.slice(0, 200)}` },
@@ -305,6 +313,8 @@ export async function runHero(spec: HeroSpec, env: EvalEnv, outDir: string): Pro
 
   const report: HeroRunReport = {
     spec,
+    runnerModel: agentClient.modelId,
+    runnerVendor: agentClient.vendor,
     startedAt,
     endedAt: new Date().toISOString(),
     durationMs: Date.now() - t0,
@@ -435,6 +445,7 @@ function renderHeroSummary(r: HeroRunReport): string {
   lines.push(`**Scenario:** \`${r.spec.id}\``);
   lines.push(`**Status:** ${r.status.toUpperCase()}`);
   lines.push(`**Env:** ${r.envMode}`);
+  lines.push(`**Runner model:** \`${r.runnerModel}\` (${r.runnerVendor})`);
   lines.push(`**Started:** ${r.startedAt}`);
   lines.push(`**Duration:** ${(r.durationMs / 1000).toFixed(1)}s`);
   lines.push(`**Bash calls:** ${r.bashCommands.length}`);

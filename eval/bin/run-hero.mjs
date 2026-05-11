@@ -5,8 +5,13 @@
  *
  * Usage:
  *   ANTHROPIC_API_KEY=... LOG10X_EVAL_ENV=demo node bin/run-hero.mjs <spec.json>
+ *   ANTHROPIC_API_KEY=... GROK_API_KEY=... LOG10X_EVAL_ENV=demo \
+ *     node bin/run-hero.mjs <spec.json> --model grok
  *
- * Writes everything to eval/reports/hero/<id>/<ts>/{transcript.json,
+ * Flags:
+ *   --model claude|grok|<model-id>   Runner model. Default: claude (Anthropic).
+ *
+ * Writes everything to eval/reports/hero/<id>/<ts>[__model]/{transcript.json,
  * verdict.json, SUMMARY.md}. The SUMMARY.md path is the stage's
  * "done marker" per AUTONOMOUS_HERO_PLAN.md.
  */
@@ -18,20 +23,34 @@ const evalRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const { loadEvalEnv } = await import(resolve(evalRoot, 'build-eval/env.js'));
 const { runHero } = await import(resolve(evalRoot, 'build-eval/hero-runner.js'));
 
-const specPath = process.argv[2];
+// Parse args: positional <spec.json> + optional --model <id>
+const args = process.argv.slice(2);
+let specPath;
+let runnerModel;
+for (let i = 0; i < args.length; i++) {
+  const a = args[i];
+  if (a === '--model') {
+    runnerModel = args[++i];
+  } else if (a.startsWith('--model=')) {
+    runnerModel = a.slice('--model='.length);
+  } else if (!specPath) {
+    specPath = a;
+  }
+}
 if (!specPath) {
-  console.error('Usage: run-hero.mjs <spec.json>');
+  console.error('Usage: run-hero.mjs <spec.json> [--model claude|grok|<model-id>]');
   process.exit(2);
 }
 
 const spec = JSON.parse(readFileSync(resolve(specPath), 'utf8'));
 const env = loadEvalEnv();
 const ts = new Date().toISOString().replace(/[:.]/g, '-');
-const outDir = join(evalRoot, 'reports', 'hero', spec.id, ts);
+const modelTag = runnerModel ? `__${runnerModel.replace(/[^a-zA-Z0-9._-]/g, '_')}` : '';
+const outDir = join(evalRoot, 'reports', 'hero', spec.id, `${ts}${modelTag}`);
 
-console.error(`[run-hero] spec=${spec.id} env=${env.mode} outDir=${outDir}`);
+console.error(`[run-hero] spec=${spec.id} env=${env.mode} model=${runnerModel ?? 'claude (default)'} outDir=${outDir}`);
 
-const report = await runHero(spec, env, outDir);
+const report = await runHero(spec, env, outDir, runnerModel);
 
 // Also drop a stable SUMMARY.md at the scenario root (not just the
 // timestamped subdir) so the plan's done-marker path is predictable.
