@@ -22,39 +22,51 @@ services:
     # engine.
     image: log10x/edge-10x:1.0.19
     container_name: counterfactual-pipeline-10x
+    # Override the image's `runAsUser: 10001` (Helm chart hardening)
+    # so the engine can bind the Unix socket in the named volume,
+    # which mounts root:root by default. The production deployment
+    # uses a k8s securityContext + fsGroup; for the local docker
+    # stack root is the simplest path.
+    user: "0:0"
     environment:
       TENX_API_KEY: ${TENX_API_KEY:?TENX_API_KEY must be set (the target env API key)}
       TENX_FORWARD_INPUT_ADDRESS: /tenx-sockets/tenx-reporter.sock
+    # @apps/reporter is the edge-tier processor. It emits the
+    # `emitted_events_*` metric family — visible in the env's
+    # Prometheus tenant once the engine remote-writes. The cloud-tier
+    # `@apps/receiver` (which re-aggregates emitted_events_ into
+    # all_events_*) is NOT deployed in the local Phase-1 stack
+    # because it requires K8s service discovery + a fluentd ingest
+    # cluster. Phase 1 validates the synthetic-events-reach-Prometheus
+    # path. Phase 2 on the demo env runs the full cloud stack, so
+    # the agent-MCP layer tests live there.
     command: ["run", "@apps/reporter"]
     volumes:
       - tenx-sockets:/tenx-sockets
     restart: unless-stopped
 
-  fluent-bit:
-    image: fluent/fluent-bit:4.2
-    container_name: counterfactual-fluent-bit
-    volumes:
-      - tenx-sockets:/tenx-sockets
-      - synthetic-logs:/var/log/synthetic
-      - ./forwarder/fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
-      - ./forwarder/parsers.conf:/fluent-bit/etc/parsers.conf:ro
-    depends_on:
-      - pipeline-10x
-    restart: unless-stopped
-
   ## The generator is spawned per-spec (`docker compose run --rm generator
   ## --spec /specs/<id>.json`) by the orchestrator and exits when its
-  ## duration elapses. Define it here so `docker compose build generator`
-  ## picks up the image.
+  ## duration elapses.
+  ##
+  ## Default mode: `forward` — generator speaks the Fluentd Forward
+  ## Protocol DIRECTLY to the engine's unix socket. No Fluent Bit in
+  ## between. This sidestepped a wire-format incompatibility between
+  ## fluent-bit 4.2.4's forward output and the engine v1.0.18's
+  ## ForwardProtocolInputStream decoder (engine kept reporting "socket
+  ## idle, no decoded messages" even though fluent-bit was pushing
+  ## bytes). The generator's Python `msgpack` library produces a
+  ## known-good `[tag, time, record]` frame the engine accepts.
   generator:
     build:
       context: ./generator
     image: counterfactual-generator:latest
     volumes:
-      - synthetic-logs:/var/log/synthetic
+      - tenx-sockets:/tenx-sockets
       - ./specs:/specs:ro
     profiles: ["generator"]   # only started when explicitly invoked
+    depends_on:
+      - pipeline-10x
 
 volumes:
   tenx-sockets:
-  synthetic-logs:

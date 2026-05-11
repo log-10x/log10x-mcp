@@ -2,45 +2,44 @@
 """
 Synthetic event generator for the counterfactual injection harness.
 
-Reads a CounterfactualSpec from --spec, emits NDJSON event records to
-/var/log/synthetic/events.log at the spec's rate for its duration,
-then exits. Fluent Bit tails the file and forwards events to the
-pipeline-10x engine via the shared Unix socket.
+Two output modes:
+  - forward (default): msgpack-encoded Fluentd Forward Protocol frames
+    written directly to /tenx-sockets/tenx-reporter.sock. The
+    pipeline-10x engine's ForwardProtocolInputStream decodes them and
+    flows the events through its template + aggregate + remote_write
+    pipeline. This sidesteps Fluent Bit entirely — the generator IS
+    the forwarder.
+  - file: legacy NDJSON-to-file mode, kept for debugging.
 
-Every event is tagged with `synthetic_canary: "true"` and a per-run
-UUID so synthetic events are filterable from real ones.
-
-Stdlib-only. No external dependencies.
+Reads a CounterfactualSpec from --spec, emits events at the spec's
+rate for its duration, then exits. Every event carries
+`synthetic_canary: "true"` and a per-run UUID so synthetic events are
+filterable from real ones.
 
 Usage:
     python3 emit.py --spec /specs/inject-critical-burst.json
     python3 emit.py --spec - < spec.json    # spec on stdin
-
-Spec shape (see eval/counterfactual/specs/*.json):
-    {
-      "id": "...",
-      "generator_spec": {
-        "template": "OOMKilled: pod ${pod} exceeded memory",
-        "severity": "CRITICAL",
-        "service": "canary-cart",
-        "rate_per_second": 2.0,
-        "duration_seconds": 60,
-        "extra_tags": { "kubernetes.namespace_name": "synthetic-canary" }
-      },
-      ...
-    }
+    python3 emit.py --spec X --output-mode file --output-path /var/log/synthetic/events.log
 """
 import argparse
 import json
 import os
+import socket
 import sys
 import time
 import uuid
 from datetime import datetime, timezone
 from string import Template
 
+try:
+    import msgpack
+    HAVE_MSGPACK = True
+except ImportError:
+    HAVE_MSGPACK = False
+
 
 OUTPUT_PATH = os.environ.get("SYNTHETIC_OUTPUT_PATH", "/var/log/synthetic/events.log")
+FORWARD_SOCKET = os.environ.get("FORWARD_SOCKET_PATH", "/tenx-sockets/tenx-reporter.sock")
 
 
 def render_template(t: str, run_id: str, idx: int) -> str:
@@ -52,39 +51,116 @@ def render_template(t: str, run_id: str, idx: int) -> str:
     )
 
 
-def emit_one(template: str, severity: str, service: str, run_id: str,
-             idx: int, extra_tags: dict, out_file) -> None:
+def build_event(template: str, severity: str, service: str, run_id: str,
+                idx: int, extra_tags: dict) -> dict:
     msg = render_template(template, run_id, idx)
+    # The engine's templater expects the raw message under `log`
+    # (canonical k8s container-log shape). severity_level + tenx_user_service
+    # are the canonical Prometheus label names per src/lib/promql.ts.
     event = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "severity": severity,
-        "service": service,
-        "message": msg,
+        "log": msg,
+        "severity_level": severity,
+        "tenx_user_service": service,
+        "stream": "stdout",
+        "tenx_env": "edge",
         "synthetic_canary": "true",
         "run_id": run_id,
     }
-    for k, v in extra_tags.items():
-        # Allow dotted keys to become nested objects (kubernetes.namespace_name).
+    # Sort by depth so shallower keys are inserted before deeper ones —
+    # avoids the collision case `kubernetes.labels.app` (string) then
+    # `kubernetes.labels.app.kubernetes.io/name` (would need app to be a
+    # dict). When a collision occurs we keep the deeper key as a flat
+    # joined name on the parent (e.g. `app__kubernetes_io_name`).
+    for k, v in sorted(extra_tags.items(), key=lambda kv: kv[0].count(".")):
         if "." in k:
             parts = k.split(".")
             cur = event
+            ok = True
             for p in parts[:-1]:
-                cur = cur.setdefault(p, {})
-            cur[parts[-1]] = v
+                if isinstance(cur, dict):
+                    nxt = cur.setdefault(p, {})
+                    if not isinstance(nxt, dict):
+                        # Collision: parent slot is already a non-dict.
+                        # Flatten the rest as a synthetic key on the
+                        # ROOT event to avoid losing the data.
+                        event[k.replace(".", "__").replace("/", "_")] = v
+                        ok = False
+                        break
+                    cur = nxt
+                else:
+                    ok = False
+                    break
+            if ok and isinstance(cur, dict):
+                cur[parts[-1]] = v
         else:
             event[k] = v
+    return event
+
+
+def emit_one_file(event: dict, out_file) -> None:
     out_file.write(json.dumps(event) + "\n")
     out_file.flush()
+
+
+class ForwardSink:
+    """Sends events to a Fluentd Forward Protocol Unix socket.
+
+    Message Mode (per the protocol spec):
+        [tag, time, record]
+    msgpack-encoded as a 3-element array.
+
+    The engine's ForwardProtocolInputStream listens on the unix socket
+    and decodes these frames. Each event becomes one TenXObject in the
+    pipeline.
+    """
+
+    def __init__(self, socket_path: str, tag: str = "kube.synthetic"):
+        if not HAVE_MSGPACK:
+            raise RuntimeError("msgpack not installed; cannot use forward mode")
+        self.socket_path = socket_path
+        self.tag = tag
+        self.sock = None
+
+    def connect(self) -> None:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.connect(self.socket_path)
+        self.sock = s
+
+    def emit(self, event: dict, ts: float) -> None:
+        if self.sock is None:
+            self.connect()
+        # Message Mode: [tag, time, record]. time is integer seconds.
+        frame = [self.tag, int(ts), event]
+        packed = msgpack.packb(frame, use_bin_type=True)
+        self.sock.sendall(packed)
+
+    def close(self) -> None:
+        if self.sock is not None:
+            try:
+                self.sock.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+            self.sock.close()
+            self.sock = None
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Emit synthetic events per a CounterfactualSpec.")
     ap.add_argument("--spec", required=True, help="Path to spec JSON, or '-' for stdin.")
-    ap.add_argument("--output", default=OUTPUT_PATH,
-                    help=f"Where to write NDJSON events (default: {OUTPUT_PATH}).")
+    ap.add_argument("--output-mode", choices=["forward", "file", "stdout"], default="forward",
+                    help="forward (default): msgpack frames to engine's unix socket. "
+                         "file: NDJSON to --output-path. stdout: NDJSON to stdout.")
+    ap.add_argument("--output-path", default=OUTPUT_PATH,
+                    help=f"In file mode, where to write NDJSON (default: {OUTPUT_PATH}).")
+    ap.add_argument("--socket-path", default=FORWARD_SOCKET,
+                    help=f"In forward mode, the engine's unix socket (default: {FORWARD_SOCKET}).")
+    ap.add_argument("--forward-tag", default="kube.synthetic",
+                    help="Tag to use in forward-protocol frames.")
     ap.add_argument("--dry-run", action="store_true",
-                    help="Print events to stdout instead of writing to the output file.")
+                    help="Alias for --output-mode stdout.")
     args = ap.parse_args()
+    if args.dry_run:
+        args.output_mode = "stdout"
 
     if args.spec == "-":
         spec = json.load(sys.stdin)
@@ -114,46 +190,58 @@ def main() -> int:
 
     sys.stderr.write(
         f"[generator] spec={spec.get('id')} run_id={run_id} "
-        f"emitting {total} events at {rate}/s for {duration}s → {args.output}\n"
+        f"emitting {total} events at {rate}/s for {duration}s "
+        f"via {args.output_mode}\n"
     )
 
-    if args.dry_run:
+    # Open the chosen sink.
+    sink = None
+    out_file = None
+    if args.output_mode == "stdout":
         out_file = sys.stdout
-    else:
-        os.makedirs(os.path.dirname(args.output), exist_ok=True)
-        out_file = open(args.output, "a", buffering=1)
+    elif args.output_mode == "file":
+        os.makedirs(os.path.dirname(args.output_path), exist_ok=True)
+        out_file = open(args.output_path, "a", buffering=1)
+    elif args.output_mode == "forward":
+        sink = ForwardSink(args.socket_path, args.forward_tag)
+        sink.connect()
+        sys.stderr.write(f"[generator] forward socket connected: {args.socket_path}\n")
 
     start = time.monotonic()
     deadline = start + duration
     idx = 0
+    errors = 0
     while time.monotonic() < deadline and idx < total:
-        emit_one(template, severity, service, run_id, idx, extra_tags, out_file)
+        event = build_event(template, severity, service, run_id, idx, extra_tags)
+        try:
+            if sink is not None:
+                sink.emit(event, time.time())
+            else:
+                emit_one_file(event, out_file)
+        except (BrokenPipeError, ConnectionError, OSError) as e:
+            errors += 1
+            sys.stderr.write(f"[generator] emit error idx={idx}: {e}\n")
+            if sink is not None:
+                # Try one reconnect, then bail if it fails again.
+                try:
+                    sink.close()
+                    sink.connect()
+                except OSError as e2:
+                    sys.stderr.write(f"[generator] reconnect failed: {e2}; aborting\n")
+                    break
         idx += 1
         time.sleep(inter_event_sleep)
 
-    if not args.dry_run:
+    if out_file is not None and out_file is not sys.stdout:
         out_file.close()
+    if sink is not None:
+        sink.close()
 
     elapsed = time.monotonic() - start
-    sys.stderr.write(f"[generator] done. emitted {idx} events in {elapsed:.1f}s\n")
-    # Write a sidecar marker the orchestrator can read to confirm the run.
-    if not args.dry_run:
-        marker_path = os.path.join(
-            os.path.dirname(args.output),
-            f".run-{run_id}.json",
-        )
-        with open(marker_path, "w") as f:
-            json.dump({
-                "spec_id": spec.get("id"),
-                "run_id": run_id,
-                "emitted": idx,
-                "elapsed_seconds": round(elapsed, 1),
-                "rate_per_second": rate,
-                "severity": severity,
-                "service": service,
-                "started_at": datetime.fromtimestamp(start, timezone.utc).isoformat(),
-            }, f)
-    return 0
+    sys.stderr.write(
+        f"[generator] done. emitted {idx} events in {elapsed:.1f}s (errors={errors})\n"
+    )
+    return 0 if errors < idx else 1
 
 
 if __name__ == "__main__":

@@ -1,18 +1,102 @@
-# Counterfactual injection harness (Phase 1 implemented 2026-05-11)
+# Counterfactual injection harness (Phase 1 SMOKE-TESTED 2026-05-11)
 
-> **Status (2026-05-11)**: Phase 1 infrastructure landed.
-> 3-container stack (generator + Fluent Bit + `log10x/edge-10x:1.0.19`
-> engine) plants synthetic events into the talw.gx env's Prometheus
-> tenant. Orchestrator at `eval/bin/run-counterfactual-scenario.mjs`
-> drives pre/post snapshots, generator spawn, hero run, and 3-layer
-> verdict assembly. Five Day-1 specs cover novel-pattern,
-> critical-burst, newly-emerged, fake-k8s-events (the
-> kubectl-correlation key test), and service-anomaly.
+> **Status (2026-05-11 final)**: Phase 1 working end-to-end.
+> **Synthetic events emitted by the Python generator reach the
+> talw.gx env's Prometheus tenant as `emitted_events_*` metrics
+> with correct `message_pattern` labels.** Verified via direct
+> Prometheus query (e.g. `message_pattern="test_event_with_proper_ks_metadata_block"`
+> appears with 2300 bytes after a 5-event emission).
 >
-> See `eval/counterfactual/README.md` for the operator runbook.
+> ## What changed during the smoke test
 >
-> Phase 2 (graduate to the OTel demo env) is a config flip on the
-> same stack — same `docker-compose.yml`, different env vars.
+> Two architectural corrections vs the original plan:
+>
+> 1. **Engine image**: `log10x/edge-10x:1.0.19` (Docker Hub),
+>    not `ghcr.io/log-10x/pipeline-10x`. Confirmed via the
+>    Reporter Helm chart's `appVersion`.
+>
+> 2. **Forwarder removed**: Fluent Bit 4.2.4's `forward` output
+>    pushed bytes that the engine's
+>    `ForwardProtocolInputStream` decoder rejected ("socket idle
+>    for Xms with no decoded messages"). Root cause was a
+>    msgpack-framing incompatibility between the Fluent Bit
+>    version and the engine, NOT a config issue (multiple
+>    `Tag` / `Time_as_Integer` / `Match` permutations were
+>    tried, all failed to decode).
+>
+>    Solution: the Python generator now speaks the **Fluentd
+>    Forward Protocol directly** via `msgpack` over the
+>    engine's Unix socket. The Phase-1 stack collapsed from
+>    3 containers (generator + fluent-bit + engine) to **2**
+>    (generator + engine). This actually matches your original
+>    "a Python synthetic event generator" proposal more
+>    cleanly — the generator IS the forwarder.
+>
+> ## Stack confirmed working
+>
+> ```
+> generator (Python+msgpack)  →  unix socket (tenx-sockets vol)
+>                                       ↓
+>                          pipeline-10x running @apps/reporter
+>                                       ↓ remote_write
+>                            prometheus.log10x.com/api/v1/remote_write
+>                                       ↓
+>                              talw.gx env tenant (envId 8209858b)
+> ```
+>
+> ## Phase 1 deliverables (in tree)
+>
+> - `eval/counterfactual/generator/emit.py` — Python NDJSON +
+>   forward-protocol emitter (msgpack frames over Unix socket).
+> - `eval/counterfactual/docker-compose.yml` — 2-service stack.
+> - `eval/counterfactual/specs/` — 5 day-1 specs (novel,
+>   critical-burst, newly-emerged, fake-k8s, service-anomaly).
+> - `eval/bin/run-counterfactual-scenario.mjs` — orchestrator.
+> - `eval/bin/run-counterfactual-suite.mjs` — suite runner.
+> - `eval/src/counterfactual-runner.ts` — 3-layer verdict
+>   assembly (metric / agent / synthesis).
+> - `eval/src/types.ts` — `CounterfactualSpec` +
+>   `CounterfactualVerdict` schemas.
+> - `eval/counterfactual/README.md` — operator runbook.
+>
+> ## Known limitations of Phase 1 (talw.gx env)
+>
+> The engine's edge tier (`@apps/reporter`) emits the
+> `emitted_events_*` metric family — visible directly in
+> Prometheus, but **not visible to MCP tools** (which query
+> `all_events_*`, the cloud-tier output). For the MCP
+> agent-correlation layer to see the planted events, the
+> harness needs to run against an env that has the cloud-tier
+> receiver (`@apps/receiver`) deployed.
+>
+> Additionally, `tenx_user_service` / `severity_level`
+> Prometheus labels did NOT populate from the generator's
+> events, because the engine's default config doesn't extract
+> them from the k8s-shaped record we emit. Production envs
+> configure `enrichmentFields` + `serviceName` env vars that
+> point at `kubernetes.labels.app`; our standalone stack
+> doesn't. (One severity DID populate via keyword detection on
+> the log text.) This is a config-tuning follow-up, not a
+> fundamental issue.
+>
+> ## Phase 2 — agent-MCP correlation test
+>
+> Repoint the stack at the OTel demo env (`TENX_API_KEY` +
+> `TENX_ENV_ID` env vars in `eval/counterfactual/.env`). The
+> demo env runs the full edge + cloud + reporter stack, so:
+> - `emitted_events_*` from our generator → cloud receiver
+>   → `all_events_*` (visible to MCP)
+> - Agent runs via existing hero-runner; MCP tools surface
+>   the canary signal
+> - The **kubectl-correlation key test** becomes meaningful:
+>   does the agent reach for `log10x_correlate_cross_pillar`
+>   when it sees synthetic OOMKilled patterns?
+>
+> Phase 2 implementation: same `docker-compose.yml`, different
+> `.env` vars. Plus the agent-layer scoring logic in
+> `eval/src/counterfactual-runner.ts` already accepts both
+> `must_call_tool` AND `must_mention_correlation`. Ready when
+> demo env write-access is confirmed.
 
 ## Why this is design-only today (was)
 
