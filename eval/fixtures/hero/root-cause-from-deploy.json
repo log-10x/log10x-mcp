@@ -1,0 +1,21 @@
+{
+  "id": "root-cause-from-deploy",
+  "title": "Root cause — attribute a top-mover pattern back to the deploy that introduced it",
+  "category": "stability",
+  "prompt": "Our 'checkout retry storm' alert just fired. A pattern matching that name is firing as ERROR in the otel-demo k8s namespace, emitted by the service synthetic-canary-app. I think the underlying deploy was triggered from a GitHub repo and the commit SHA is stamped on the Deployment object as the annotation canary.github.io/sha (and on the pod env as GITHUB_SHA). Find: (1) the SHA on the live Deployment via kubectl, (2) resolve which GitHub repo owns that SHA (try the talwgx/test repo as a starting point), and (3) name the commit message + author + parent PR if any. Cite tool outputs. You have kubectl configured for the log10x-otel-demo cluster and gh CLI available.",
+  "persona": "Oncall SRE who treats kubectl + gh CLI as first-class correlation sources alongside the log10x MCP. Routinely bridges observability metrics to source code.",
+  "budget_hint": "5-10 tool calls. The MCP confirms the pattern; kubectl + gh do the attribution.",
+  "expected_answer": {
+    "summary": "The 'checkout retry storm' pattern is being emitted by Deployment synthetic-canary-app in namespace otel-demo (talwgx/test repo). The pod env carries github_sha and github_run_id stamped by the GitHub Actions workflow. Agent should: (1) find the pattern via log10x_top_patterns ERROR, (2) get a sample event body via log10x_event_lookup or pattern_examples to extract deploy_sha, (3) call gh api repos/talwgx/test/commits/<sha> to resolve the commit message + author, (4) name the offending commit. PASS = correct SHA + correct repo cited from real tool output; FAIL = fabricated SHA / repo / commit not present in oracle. The signal originates from talwgx/test synthetic-canary subtree; this test fails fast if the agent does not bridge observability -> source-code attribution.",
+    "must_mention": [
+      "talwgx/test",
+      "synthetic-canary"
+    ],
+    "expected_tool_chain": [
+      "log10x_top_patterns",
+      "log10x_event_lookup",
+      "gh"
+    ],
+    "snapshot_ts": "2026-05-11T15:00:00.000Z"
+  }
+}

@@ -1,3 +1,120 @@
+# Counterfactual injection harness — Phase 3: GitHub-attribution loop (VERIFIED 2026-05-11)
+
+> **Status (2026-05-11 evening)**: **Phase 3 closes the observability →
+> source-code attribution loop.** A GitHub-driven CI/CD pipeline now
+> deploys the synthetic canary into the demo cluster with the commit
+> SHA stamped onto the Deployment annotation and pod env. An agent can
+> see the planted ERROR pattern via MCP, pull the SHA via kubectl, and
+> resolve it to a verbatim commit message + author via `gh api` — the
+> full observability-to-source-code chain, end-to-end, with no
+> hallucination.
+>
+> ## What landed
+>
+> - **GitHub repo**: `talwgx/test` (private). Adds a `synthetic-canary/`
+>   subtree with `app/emit.py` (Python emitter, two modes), a k8s
+>   Deployment manifest with placeholder annotations, a `MODE` file
+>   toggling `baseline | bug`, and a README.
+> - **GitHub Actions workflow**: `.github/workflows/deploy-canary.yml`.
+>   Triggered on any push touching `synthetic-canary/**`. Uses GitHub
+>   OIDC → AWS to assume `synthetic-canary-deploy-role` (no long-lived
+>   secrets), then `aws eks update-kubeconfig` + renders the manifest
+>   with the commit SHA + run id stamped into both the Deployment
+>   annotation (`canary.github.io/sha`) and the pod env (`GITHUB_SHA`).
+> - **AWS-side**: IAM role `synthetic-canary-deploy-role` with OIDC
+>   trust to `repo:talwgx/test:ref:refs/heads/main` and namespace-scoped
+>   `AmazonEKSEditPolicy` on `otel-demo`. Blast radius: pod deploy in
+>   one namespace only.
+> - **Hero scenario fixture**: `eval/fixtures/hero/root-cause-from-deploy.json`.
+>   Asks the agent to attribute a planted "checkout retry storm" ERROR
+>   pattern back to the commit that introduced it.
+>
+> ## Result of the v2 hero run (with kubectl + gh hints in prompt)
+>
+> Transcript: `eval/reports/hero/root-cause-from-deploy/2026-05-11T15-23-00-905Z/`.
+>
+>   - **status**: PASS
+>   - **drift**: 0 (no fabrications)
+>   - **value_delivered**: **0.95** (all 3 sub-questions answered with
+>     exact tool-cited evidence)
+>   - **value_received**: 0.35 (MCP didn't help — kubectl + gh did the
+>     work; honest assessment)
+>   - **duration**: 102.6s, **14 bash calls**
+>
+> Agent quote from the synthesis:
+>
+>   > "The annotation `canary.github.io/sha` on the `synthetic-canary-app`
+>   > Deployment is: `4756edc3345dc9b9a42ef0279db843813234cefb`. This SHA
+>   > resolves cleanly in `talwgx/test` … Commit message:
+>   > `perf(checkout): bump payment-service retry budget to 5 attempts`
+>   > … Author: Tal Weiss … no pull request is associated with this
+>   > commit. It was pushed directly to the branch without a PR."
+>
+> Agent also produced a sophisticated process-gap recommendation
+> ("enforce branch protection on talwgx/test to require PRs before any
+> commit that touches synthetic-canary/MODE reaches the cluster") —
+> noticing the absence of a PR and tying it back to deploy-safety.
+>
+> ## Negative-data point: v1 run (without kubectl/gh hints) FAILED
+>
+> Transcript: `eval/reports/hero/root-cause-from-deploy/2026-05-11T15-18-53-864Z/`.
+>
+>   - status: PARTIAL, value_delivered: 0.00, drift: 0
+>   - Agent reached for `gh` autonomously but searched the wrong repo
+>     (`open-telemetry/opentelemetry-demo` — confused by the env name
+>     "otel-demo"). Honest behavior: drift=0 means no fabricated
+>     attribution; agent reported it couldn't resolve.
+>   - Finding: the agent needs a scenario-level hint about where to
+>     look. The MCP layer alone doesn't expose enough metadata (no
+>     event-body access on Prometheus-only envs) to bridge the gap.
+>   - **Follow-up**: when the SIEM-side retriever is wired,
+>     `log10x_pattern_examples` or `log10x_event_lookup` should return
+>     event bodies including `github_sha`. At that point the v1
+>     scenario (no hints) becomes solvable autonomously.
+>
+> ## What this proves
+>
+> - **End-to-end attribution loop**: GitHub push → Actions OIDC →
+>   AWS-EKS-Edit → kubectl apply → tenx-edge → Prometheus → MCP → agent
+>   → kubectl get annotation → gh api commits → cited commit message +
+>   author. No human in the loop.
+> - **Multi-pillar correlation works**: the agent autonomously combined
+>   kubectl + gh CLI outputs to resolve a SHA to a commit, then to a
+>   process gap (missing PR).
+> - **Anti-hallucination defenses hold**: drift=0 on both runs. The
+>   failed v1 run did NOT fabricate a SHA / repo / commit — it reported
+>   that it couldn't bridge the gap, which is the correct behavior.
+> - **The harness is now end-to-end falsifiable**: any future test can
+>   push to `talwgx/test` with a new MODE or new emitter logic, watch
+>   the planted signal flow, and measure whether agents can attribute
+>   it.
+>
+> ## Files in tree
+>
+>   - `eval/counterfactual/k8s/synthetic-canary.yaml` (Phase 2,
+>     continuous canary)
+>   - `eval/counterfactual/k8s/fresh-burst-job.yaml` (Phase 2.5,
+>     short-burst newly-emerged validator)
+>   - `eval/fixtures/hero/root-cause-from-deploy.json` (Phase 3, this
+>     section)
+>   - GitHub repo: `talwgx/test/synthetic-canary/` (Phase 3 deploy
+>     source-of-truth)
+>
+> ## How to re-run / tear down
+>
+>   - **Re-deploy in bug mode**: in `talwgx/test`, write `bug` to
+>     `synthetic-canary/MODE` and push. Actions deploys ~30s later.
+>     New `github_sha` flows through the pipeline within ~90s of pod
+>     start.
+>   - **Quiet the canary**: write `baseline` to the MODE file and push.
+>     Pod re-rolls; emits INFO heartbeats only.
+>   - **Full teardown**: `kubectl delete deploy synthetic-canary-app -n
+>     otel-demo` + `kubectl delete configmap synthetic-canary-script -n
+>     otel-demo`. The IAM role + EKS access entry can stay (no cost,
+>     namespace-scoped).
+
+---
+
 # Counterfactual injection harness (Phase 2 E2E VERIFIED 2026-05-11)
 
 > **Status (2026-05-11 final)**: **Phase 2 e2e verified end-to-end
