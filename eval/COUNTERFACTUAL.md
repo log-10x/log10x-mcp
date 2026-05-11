@@ -99,6 +99,31 @@
 > - value_delivered = 0.85
 > - value_received = 0.75
 >
+> ## Volume tuning + algorithmic constraint findings (2026-05-11 afternoon)
+>
+> Bumped the canary rate from 0.5 → 2.0 ev/s (~170k events/day, <1%
+> of demo env volume) to see if it cracks ranking-based scenarios.
+>
+> | Scenario | 0.5 ev/s | 2.0 ev/s | Notes |
+> |---|---|---|---|
+> | `error-critical-events` | PASS, canary at rank #3 in CRITICAL | (not re-run) | Severity-filter ensures canary surfaces regardless of rate |
+> | `error-investigate-pattern` | PASS but on natural #1 ERROR | (not re-run) | Canary at any rate < natural OTLP ERROR volume |
+> | `stability-newly-emerged` | FAIL (pattern_match 0.67), canary not surfaced | FAIL (value_delivered 0.65), canary STILL not surfaced | Algorithmic constraint discovered — see below |
+>
+> **Newly-emerged detection has a hidden 1h-ago-offset constraint.**
+> The MCP's `log10x_top_patterns` newly-emerged section uses the query
+> `rate(...{...}[5m]) > 0.001 unless on (pattern) rate(...{...}[5m] offset 1h) > 0`
+> — meaning a pattern only qualifies as "newly emerged" if it has
+> positive 5m rate AND zero rate 1h ago. A canary that's been running
+> for >1h becomes "established" by definition; the algorithm correctly
+> excludes it from the newly-emerged section.
+>
+> **To exercise newly-emerged detection with synthetic canaries**, the
+> canary deployment must be FRESH (<5min old, no prior history in the
+> 1h-offset window). Future counterfactual specs targeting
+> `stability-newly-emerged` should deploy a one-shot Job that runs for
+> 3-5 min and then exits — not a continuous Deployment.
+>
 > ## What this proves
 >
 > - **The full pipeline works end-to-end**: planted-event → fluentd →
