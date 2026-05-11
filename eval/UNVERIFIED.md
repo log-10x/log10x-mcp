@@ -172,8 +172,8 @@ Estimated cost for the unblocked set: ~$0.60 × 9-11 scenarios
 | 3 | Coverage scenarios for the 9-11 unblocked tools | Coverage hole 3.1 | ~$5-7 | No |
 | 4 | STDIO transport scenario | Coverage hole 3.2 | $0-0.50 | No |
 | 5 | One run on a customer env with real growth | Gaps #1-#3, #7 + assumption #2 | Customer-cycle dependent | Need customer access |
-| 5a | **Counterfactual injection harness Phase 1** — DONE 2026-05-11. 3-container stack plants synthetic events into talw.gx env's Prometheus. Three-layer verdict (metric/agent/synthesis). Five Day-1 specs including the kubectl-correlation key test. Live runs deferred until Docker Desktop is healthy. | Whole-pipeline integration test (agent + scorer + env + MCP) | $5-7 LLM + docker compose | Code DONE; live runs blocked on Docker daemon |
-| 5b | Counterfactual Phase 2 (graduate to OTel demo env) | Cross-pillar correlation against real service mesh | Same as 5a | Pending Phase 1 verification |
+| 5a | **Counterfactual injection harness Phase 2** — DONE 2026-05-11 E2E VERIFIED. Synthetic canary k8s Deployment in the demo's `otel-demo` namespace → real fluentd/tenx-edge pipeline → `all_events_*` in demo env tenant → MCP top_patterns surfaces canary as CRIT rank #3 → sub-agent automatically calls `log10x_discover_env` for cross-pillar correlation → scorer verdict PASS (drift=0, pattern_match=1.00, value_delivered=0.85). | Whole-pipeline integration test (agent + scorer + env + MCP) | $0.60 LLM (1 sub-agent run) + kubectl | DONE |
+| 5b | Continuous canary in the demo env — leave the synthetic-canary Deployment running so future hero-scenario runs have a deterministic CRITICAL signal to surface. Optional. | Repeatable canary | $0 | Optional follow-up |
 | 6 | Retriever fixture env | Tools `retriever_*` | Infra cost | Need infra |
 | 7 | Customer metrics backend fixture | Tools `correlate_*`, `customer_metrics_query`, `backfill_metric` | Infra cost | Need backend |
 

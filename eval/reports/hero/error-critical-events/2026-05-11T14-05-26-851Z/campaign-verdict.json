@@ -1,0 +1,144 @@
+{
+  "question_id": "error-critical-events",
+  "transcript_path": "eval/reports/hero/error-critical-events/2026-05-11T14-05-26-851Z/transcript.json",
+  "verdict": {
+    "drift_score": 0,
+    "drift_supported": 6,
+    "drift_inconclusive": 2,
+    "pattern_match": {
+      "agent_top_patterns": [
+        "OTLP_LOG_GRPC_Exporter_Export_failed_data_refused_due_high_memory_usage",
+        "OTLP_METRIC_GRPC_Exporter_Export_failed_data_refused_due_high_memory_usage",
+        "pod_canary_in_namespace_otel_demo_exceeded_memory_limit_container_memory"
+      ],
+      "oracle_top_patterns": [
+        "OTLP_LOG_GRPC_Exporter_Export_failed_data_refused_due_high_memory_usage",
+        "OTLP_METRIC_GRPC_Exporter_Export_failed_data_refused_due_high_memory_usage"
+      ],
+      "matched": 3,
+      "missed": 0,
+      "extra": 0,
+      "score": 1
+    },
+    "chain_alignment": {
+      "expected": [
+        "log10x_list_by_label"
+      ],
+      "actual": [
+        "log10x_top_patterns",
+        "log10x_pattern_trend",
+        "log10x_pattern_examples",
+        "log10x_discover_env",
+        "log10x_top_patterns"
+      ],
+      "hits": [
+        "log10x_top_patterns"
+      ],
+      "misses": [],
+      "score": 1
+    },
+    "value_delivered": 0.85,
+    "value_received": 0.75,
+    "passed": true,
+    "axes_summary": "drift=0/8 pattern_match=3/2=1.00 chain=1/1=1.00 value_delivered=0.85 value_received=0.75"
+  },
+  "oracle": {
+    "numericClaimCount": 8,
+    "patternClaimCount": 0,
+    "supported": 6,
+    "unsupported": 0,
+    "inconclusive": 2,
+    "driftScore": 0,
+    "details": [
+      {
+        "claim": "$0.02",
+        "kind": "numeric",
+        "oracleResult": "env ~5.40GB/day; claim within plausible cost band",
+        "status": "supported",
+        "detail": "1 | `OTLP LOG GRPC Exporter Export failed data refused due high memory usage` | $0.02/wk | | #2 | `OTLP METRIC GRPC Exporter Export failed data refused due high"
+      },
+      {
+        "claim": "$0.0021",
+        "kind": "numeric",
+        "oracleResult": "env ~5.40GB/day; claim within plausible cost band",
+        "status": "supported",
+        "detail": "`OTLP METRIC GRPC Exporter Export failed data refused due high memory usage` | $0.0021/wk | | #3 | `pod canary in namespace otel demo exceeded memory limit con"
+      },
+      {
+        "claim": "$0.0000",
+        "kind": "numeric",
+        "oracleResult": "env ~5.40GB/day; claim within plausible cost band",
+        "status": "supported",
+        "detail": "| `pod canary in namespace otel demo exceeded memory limit container memory` | $0.0000/wk | These 3 patterns account for **100% of the CRITICAL-severity volum"
+      },
+      {
+        "claim": "$0.02",
+        "kind": "numeric",
+        "oracleResult": "env ~5.40GB/day; claim within plausible cost band",
+        "status": "supported",
+        "detail": "efused due to high memory usage** upstream. This is the dominant cost signal at $0.02/wk and $0.0021/wk respectively. - **#3 confirms the memory pressure story:"
+      },
+      {
+        "claim": "$0.0021",
+        "kind": "numeric",
+        "oracleResult": "env ~5.40GB/day; claim within plausible cost band",
+        "status": "supported",
+        "detail": "high memory usage** upstream. This is the dominant cost signal at $0.02/wk and $0.0021/wk respectively. - **#3 confirms the memory pressure story:** a canary p"
+      },
+      {
+        "claim": "$0.0000",
+        "kind": "numeric",
+        "oracleResult": "env ~5.40GB/day; claim within plausible cost band",
+        "status": "supported",
+        "detail": "ly the root cause causing the export refusals in #1 and #2. - Per-event cost is $0.0000/wk for #3, meaning low absolute volume but the signal is structurally im"
+      },
+      {
+        "claim": "3 patterns",
+        "kind": "numeric",
+        "oracleResult": "no targeted oracle path for this kind; claim accepted as plausible",
+        "status": "inconclusive",
+        "detail": "mespace otel demo exceeded memory limit container memory` | $0.0000/wk | These 3 patterns account for **100% of the CRITICAL-severity volume in scope** (no lon"
+      },
+      {
+        "claim": "100%",
+        "kind": "numeric",
+        "oracleResult": "percentages are derived; oracle does not gate them",
+        "status": "inconclusive",
+        "detail": "d memory limit container memory` | $0.0000/wk | These 3 patterns account for **100% of the CRITICAL-severity volume in scope** (no long tail). --- ### What t"
+      }
+    ]
+  },
+  "pattern_match": {
+    "agent_top_patterns": [
+      "OTLP_LOG_GRPC_Exporter_Export_failed_data_refused_due_high_memory_usage",
+      "OTLP_METRIC_GRPC_Exporter_Export_failed_data_refused_due_high_memory_usage",
+      "pod_canary_in_namespace_otel_demo_exceeded_memory_limit_container_memory"
+    ],
+    "oracle_top_patterns": [
+      "OTLP_LOG_GRPC_Exporter_Export_failed_data_refused_due_high_memory_usage",
+      "OTLP_METRIC_GRPC_Exporter_Export_failed_data_refused_due_high_memory_usage"
+    ],
+    "matched": 3,
+    "missed": 0,
+    "extra": 0,
+    "score": 1
+  },
+  "chain_alignment": {
+    "expected": [
+      "log10x_list_by_label"
+    ],
+    "actual": [
+      "log10x_top_patterns",
+      "log10x_pattern_trend",
+      "log10x_pattern_examples",
+      "log10x_discover_env",
+      "log10x_top_patterns"
+    ],
+    "hits": [
+      "log10x_top_patterns"
+    ],
+    "misses": [],
+    "score": 1
+  },
+  "gaps": []
+}

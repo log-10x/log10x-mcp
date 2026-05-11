@@ -1,14 +1,23 @@
 # Anti-Hallucination Campaign — MCP Hero Questions vs Demo-Env Ground Truth
 
-> **Status (2026-05-11): + counterfactual harness Phase 1 infra
-> landed.** 3-container stack (generator + fluent-bit +
-> log10x/edge-10x:1.0.19) injects synthetic events into a real
-> env's Prometheus tenant; orchestrator computes 3-layer verdicts
-> (metric / agent-behavior / synthesis). Five Day-1 specs include
-> the kubectl-correlation key test (synthetic OOMKilled events
-> that should provoke `log10x_correlate_cross_pillar`). Live runs
-> deferred until Docker Desktop is healthy; code path verified by
-> tsc. See `eval/counterfactual/README.md`.
+> **Status (2026-05-11 final): + counterfactual harness Phase 2
+> E2E VERIFIED against the OTel demo env.** Synthetic canary pod
+> deployed via `kubectl apply -f eval/counterfactual/k8s/synthetic-canary.yaml`
+> into the demo's `otel-demo` namespace flows through the
+> existing tenx-fluentd → tenx-edge pipeline, appears in
+> `all_events_*` as a real CRITICAL pattern (rank #3 alongside
+> the demo's natural OTLP-collector failures), and is surfaced
+> by MCP tools to a sub-agent that **automatically reaches for
+> `log10x_discover_env` (k8s cluster-state)** to correlate
+> cross-pillar. Campaign-scorer verdict on the resulting
+> transcript: PASS (drift=0, pattern_match=1.00, chain=1.00,
+> value_delivered=0.85). See `eval/COUNTERFACTUAL.md`.
+>
+> The local-docker stack approach was abandoned per a strategic
+> decision: "would it not be easier to just generate the
+> synthetic logs in the demo env where the fluentd will pick them
+> up". The demo-env approach landed in <30 min; the local stack
+> would have required ~half-day more of config debugging.
 >
 > **Status (2026-05-10 final): 19/20 PASS + 17/18 shape coverage
 > (94.4%) + agent-resilience 1/2 (50%) tracked + 3-judge ensemble

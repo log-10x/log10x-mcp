@@ -1,0 +1,132 @@
+## Phase 2: synthetic canary pod deployed INTO the OTel demo cluster's
+## `otel-demo` namespace. The demo's tenx-fluentd already tails
+## `/var/log/containers/*_otel-demo_*.log` and pushes through the
+## kubernetes_metadata filter → tenx-edge engine → all_events_*. Our
+## pod's stdout becomes a real event stream that lands in the demo
+## env's Prometheus tenant alongside the actual otel-demo services.
+##
+## The script emits a mix of synthetic-correlation triggers:
+##   - OOMKilled-style messages (cross-pillar correlation target)
+##   - CrashLoopBackOff log lines
+##   - simple ERROR / WARN noise with a unique service identity
+##
+## Every line is tagged with `synthetic_canary=true` + run_id so demo
+## consumers can filter. Pattern names contain `canary_` so MCP queries
+## can scope to / exclude them.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: synthetic-canary-script
+  namespace: otel-demo
+  labels:
+    app: synthetic-canary
+    synthetic_canary: "true"
+data:
+  emit.py: |
+    #!/usr/bin/env python3
+    """
+    Counterfactual canary emitter. Runs forever; emits structured
+    JSON events to stdout at slow cadence. Fluent / fluentd /
+    tenx-edge in the demo cluster pick them up via the container
+    log file. Stdlib only.
+    """
+    import json, os, random, sys, time, uuid
+    from datetime import datetime, timezone
+
+    RUN_ID = str(uuid.uuid4())
+    RATE_PER_SEC = float(os.environ.get("CANARY_RATE_PER_SEC", "0.2"))  # 1 event / 5s
+    SERVICE_NAME = os.environ.get("CANARY_SERVICE", "canary-counterfactual")
+
+    # Mix of cross-pillar correlation triggers + plain noise. The first
+    # few are kubectl-correlation targets — an agent investigating
+    # CRITICAL/ERROR patterns SHOULD reach for log10x_correlate_cross_pillar
+    # or kubectl to see if the planted pod exists and what state it's in.
+    TEMPLATES = [
+        ("CRITICAL", "OOMKilled: pod {pod} in namespace otel-demo exceeded memory limit (container memory_usage 268435456 bytes > limit 268435456 bytes)"),
+        ("ERROR",    "CrashLoopBackOff: Back-off restarting failed container app in pod {pod}"),
+        ("ERROR",    "Liveness probe failed: HTTP probe failed with statuscode: 503 for pod {pod}"),
+        ("WARN",     "Readiness probe failed: HTTP probe failed with statuscode: 500 for pod {pod}"),
+        ("ERROR",    "FailedScheduling: 0/3 nodes are available for pod {pod}: 3 Insufficient memory"),
+        ("CRITICAL", "Synthetic canary failure: simulated downstream timeout exceeded 800ms for {pod}"),
+        ("WARN",     "Synthetic canary warning: simulated retry exhausted for downstream request id {req}"),
+        ("INFO",     "Synthetic canary heartbeat for {pod} run {run_id}"),
+    ]
+
+    POD_NAMES = [
+        f"canary-counterfactual-{i:02d}" for i in range(1, 5)
+    ]
+
+    sys.stdout.write(
+        f'{{"level":"INFO","msg":"synthetic canary starting","rate":{RATE_PER_SEC},'
+        f'"service":"{SERVICE_NAME}","run_id":"{RUN_ID}"}}\n'
+    )
+    sys.stdout.flush()
+
+    idx = 0
+    while True:
+        sev, tmpl = random.choice(TEMPLATES)
+        pod = random.choice(POD_NAMES)
+        msg = tmpl.format(pod=pod, run_id=RUN_ID, req=f"req-{idx:06d}")
+        event = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "severity": sev,
+            "service": SERVICE_NAME,
+            "message": msg,
+            "synthetic_canary": "true",
+            "run_id": RUN_ID,
+            "idx": idx,
+        }
+        sys.stdout.write(json.dumps(event) + "\n")
+        sys.stdout.flush()
+        idx += 1
+        time.sleep(1.0 / RATE_PER_SEC if RATE_PER_SEC > 0 else 5.0)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: synthetic-canary
+  namespace: otel-demo
+  labels:
+    app: synthetic-canary
+    synthetic_canary: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: synthetic-canary
+  template:
+    metadata:
+      labels:
+        app: synthetic-canary
+        synthetic_canary: "true"
+    spec:
+      containers:
+        - name: emitter
+          image: python:3.11-slim
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "/scripts/emit.py"]
+          env:
+            - name: CANARY_RATE_PER_SEC
+              value: "0.5"   # 1 event every 2 seconds
+            - name: CANARY_SERVICE
+              value: "canary-counterfactual"
+          volumeMounts:
+            - name: script
+              mountPath: /scripts
+              readOnly: true
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 50m
+              memory: 64Mi
+      volumes:
+        - name: script
+          configMap:
+            name: synthetic-canary-script
+            items:
+              - key: emit.py
+                path: emit.py
+                mode: 0755
