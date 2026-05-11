@@ -124,6 +124,47 @@
 > `stability-newly-emerged` should deploy a one-shot Job that runs for
 > 3-5 min and then exits — not a continuous Deployment.
 >
+> ## Short-burst Job validation (2026-05-11 late afternoon)
+>
+> Implemented the prescription above: see
+> `eval/counterfactual/k8s/fresh-burst-job.yaml`. A k8s Job runs a
+> Python emitter for 3 min at 3 ev/s (540 events total), with a
+> message template guaranteed unique to the env
+> (`FRESH_BURST canary newcomer pattern probe never seen before
+> ts=… run=… idx=…`). `ttlSecondsAfterFinished: 600` self-cleans.
+>
+> Confirmed end-to-end:
+>
+> - Pod → fluentd → tenx-edge → Prometheus visible at ERROR rank
+>   #13 as `pattern probe never seen before ts run idx synthetic
+>   canary burst run id idx` ($0.0003/wk) within ~90s of `kubectl
+>   apply`.
+> - `stability-newly-emerged` re-run during the burst window:
+>   **PASS**, value_delivered **0.85** (up from 0.65 with the
+>   continuous canary), drift 0, value_received 0.70.
+> - Transcript at
+>   `eval/reports/hero/stability-newly-emerged/2026-05-11T14-37-46-592Z/`.
+>
+> **Honest finding** — even with an algorithmically-valid fresh
+> burst, the agent did NOT surface the canary itself as one of its
+> top-3 newly-firing patterns. Instead it correctly named the
+> natural otel-demo memory-pressure cascade (UNAVAILABLE export
+> failures at +82% / +60% / +30% with the same 14:10 UTC
+> inflection point). Reason: the fresh-burst pattern's absolute
+> volume (~150KB over 3 min) is below the threshold at which the
+> newly-emerged section ranks it against multi-MB top-movers in a
+> live demo env. The agent's behavior is correct — drift=0 means
+> no fabrication — but the harness DOES NOT yet force the agent
+> to pick the planted signal over real incidents in the same
+> window.
+>
+> **Next step for full counterfactual coverage** of newly-emerged:
+> either (a) bump burst rate to ~30 ev/s × 3 min for a 5400-event
+> burst that competes with natural top-movers on absolute volume,
+> or (b) author a scenario that queries by service/label filter
+> rather than top-N (`log10x_top_patterns({ service: "fresh-burst-canary" })`
+> would surface the canary directly).
+>
 > ## What this proves
 >
 > - **The full pipeline works end-to-end**: planted-event → fluentd →
