@@ -38,6 +38,46 @@ export interface HeroSpec {
   persona?: string;
   /** Time-budget hint for the sub-agent (controls verbosity). */
   budget_hint?: string;
+  /**
+   * Closed-loop action verification block. If present AND the runner
+   * is invoked with the closed-loop flag enabled, after the agent's
+   * synthesis the harness will:
+   *   1. Ask the judge whether the agent recommended the canonical
+   *      remediation (the `judge_question` is a yes/no).
+   *   2. If yes, run `remediation_script` (a shell snippet — this is
+   *      the harness applying the agent's recommendation; the agent
+   *      itself never executes the action).
+   *   3. Wait `wait_seconds`, then run `verify.command`.
+   *   4. Pass if `verify.expect_stdout_not_contains` is absent and
+   *      `verify.expect_stdout_contains` is present in stdout (when
+   *      specified). Append a `closed_loop` block to the verdict.
+   *
+   * NOTE: spec-defined remediation scripts are auto-executed when the
+   * flag is on. The author of the fixture is responsible for ensuring
+   * the script is bounded and reversible.
+   */
+  closed_loop?: {
+    judge_question: string;
+    remediation_script: string;
+    wait_seconds: number;
+    verify: {
+      command: string;
+      expect_stdout_contains?: string;
+      expect_stdout_not_contains?: string;
+    };
+  };
+}
+
+export interface ClosedLoopReport {
+  ran: boolean;
+  agent_recommended_canonical_fix: boolean | null;
+  judge_rationale: string;
+  remediation_applied: boolean;
+  remediation_exit_code: number | null;
+  remediation_stdout_preview: string;
+  symptom_resolved: boolean | null;
+  verify_stdout_preview: string;
+  verify_stderr_preview: string;
 }
 
 export interface HeroRunReport {
@@ -55,6 +95,7 @@ export interface HeroRunReport {
   valueReceived: { score: number; rationale: string };
   status: 'pass' | 'partial' | 'fail';
   flags: string[];
+  closedLoop?: ClosedLoopReport;
 }
 
 // The CLI binary the agent is told to invoke. Default points at the
@@ -156,11 +197,24 @@ interface AnthropicLike {
   };
 }
 
+export interface RunHeroOptions {
+  /**
+   * Enable closed-loop action verification. If true AND the spec has
+   * a `closed_loop` block, after the agent's synthesis the harness
+   * will judge the synthesis for the recommended action, apply the
+   * canonical remediation script if matched, wait, and verify
+   * symptom resolution. Default: false (safety — destructive
+   * remediation scripts must be opted in).
+   */
+  closedLoop?: boolean;
+}
+
 export async function runHero(
   spec: HeroSpec,
   env: EvalEnv,
   outDir: string,
-  runnerModel?: string
+  runnerModel?: string,
+  options: RunHeroOptions = {}
 ): Promise<HeroRunReport> {
   applyEvalEnvToProcess(env);
   mkdirSync(outDir, { recursive: true });
@@ -311,6 +365,32 @@ export async function runHero(
   if (judgeReport.valueDelivered.score < 0.5) flags.push('low_value_delivered');
   if (judgeReport.valueReceived.score < 0.5) flags.push('low_value_received');
 
+  // ── Closed-loop action verification ──
+  // Only runs when the spec opts in AND the harness was invoked with
+  // the flag. The flag is a hard safety gate: closed-loop scripts
+  // can push commits, deploy infra, etc — they should never run by
+  // accident.
+  let closedLoop: ClosedLoopReport | undefined;
+  if (spec.closed_loop && options.closedLoop) {
+    try {
+      closedLoop = await runClosedLoop(spec, finalText, judgeClient);
+      if (closedLoop.symptom_resolved === true) flags.push('closed_loop_passed');
+      else if (closedLoop.symptom_resolved === false) flags.push('closed_loop_failed');
+    } catch (e) {
+      closedLoop = {
+        ran: true,
+        agent_recommended_canonical_fix: null,
+        judge_rationale: `closed-loop threw: ${(e as Error).message.slice(0, 200)}`,
+        remediation_applied: false,
+        remediation_exit_code: null,
+        remediation_stdout_preview: '',
+        symptom_resolved: null,
+        verify_stdout_preview: '',
+        verify_stderr_preview: '',
+      };
+    }
+  }
+
   const report: HeroRunReport = {
     spec,
     runnerModel: agentClient.modelId,
@@ -326,12 +406,109 @@ export async function runHero(
     valueReceived: judgeReport.valueReceived,
     status,
     flags,
+    closedLoop,
   };
 
   writeFileSync(join(outDir, 'verdict.json'), JSON.stringify(report, null, 2));
   writeFileSync(join(outDir, 'SUMMARY.md'), renderHeroSummary(report));
 
   return report;
+}
+
+async function runClosedLoop(
+  spec: HeroSpec,
+  synthesis: string,
+  judgeClient: AnthropicLike
+): Promise<ClosedLoopReport> {
+  const cl = spec.closed_loop!;
+  // Phase 1: judge whether the synthesis recommended the canonical fix.
+  const judgeResp = await judgeClient.messages.create({
+    model: JUDGE_MODEL,
+    max_tokens: 400,
+    system:
+      'You are an evaluator. Read the synthesis and answer the binary question. Output JSON only: {"recommended": true|false, "rationale": "<one short sentence>"}',
+    messages: [
+      {
+        role: 'user',
+        content: [
+          `# Synthesis to evaluate`,
+          synthesis,
+          ``,
+          `# Question (yes/no)`,
+          cl.judge_question,
+          ``,
+          `Output: {"recommended": true|false, "rationale": "<one sentence>"}`,
+          `JSON only. No markdown fence.`,
+        ].join('\n'),
+      },
+    ],
+  });
+  const judgeText =
+    judgeResp.content.find((b): b is { type: 'text'; text: string } => b.type === 'text')?.text ?? '';
+  const cleaned = judgeText
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/i, '');
+  let parsed: { recommended: boolean; rationale: string };
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch {
+    parsed = { recommended: false, rationale: `judge JSON parse failed: ${cleaned.slice(0, 200)}` };
+  }
+
+  if (!parsed.recommended) {
+    return {
+      ran: true,
+      agent_recommended_canonical_fix: false,
+      judge_rationale: parsed.rationale,
+      remediation_applied: false,
+      remediation_exit_code: null,
+      remediation_stdout_preview: '',
+      symptom_resolved: null,
+      verify_stdout_preview: '',
+      verify_stderr_preview: '',
+    };
+  }
+
+  // Phase 2: apply remediation.
+  const remediation = await runBash(cl.remediation_script);
+  if (remediation.exitCode !== 0) {
+    return {
+      ran: true,
+      agent_recommended_canonical_fix: true,
+      judge_rationale: parsed.rationale,
+      remediation_applied: false,
+      remediation_exit_code: remediation.exitCode,
+      remediation_stdout_preview:
+        `stdout: ${remediation.stdout.slice(0, 500)}\nstderr: ${remediation.stderr.slice(0, 500)}`,
+      symptom_resolved: null,
+      verify_stdout_preview: '',
+      verify_stderr_preview: '',
+    };
+  }
+
+  // Phase 3: wait, then verify.
+  await new Promise((resolve) => setTimeout(resolve, cl.wait_seconds * 1000));
+  const verify = await runBash(cl.verify.command);
+  let symptomResolved = true;
+  if (cl.verify.expect_stdout_contains && !verify.stdout.includes(cl.verify.expect_stdout_contains)) {
+    symptomResolved = false;
+  }
+  if (cl.verify.expect_stdout_not_contains && verify.stdout.includes(cl.verify.expect_stdout_not_contains)) {
+    symptomResolved = false;
+  }
+
+  return {
+    ran: true,
+    agent_recommended_canonical_fix: true,
+    judge_rationale: parsed.rationale,
+    remediation_applied: true,
+    remediation_exit_code: 0,
+    remediation_stdout_preview: remediation.stdout.slice(0, 500),
+    symptom_resolved: symptomResolved,
+    verify_stdout_preview: verify.stdout.slice(0, 800),
+    verify_stderr_preview: verify.stderr.slice(0, 400),
+  };
 }
 
 async function runBash(cmd: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
@@ -467,6 +644,25 @@ function renderHeroSummary(r: HeroRunReport): string {
   lines.push('');
   lines.push(r.finalSynthesis);
   lines.push('');
+  if (r.closedLoop) {
+    lines.push('## Closed-loop action verification');
+    lines.push('');
+    const cl = r.closedLoop;
+    lines.push(`- **Agent recommended canonical fix:** ${cl.agent_recommended_canonical_fix === null ? 'unknown (judge failed)' : cl.agent_recommended_canonical_fix ? 'YES' : 'no'}`);
+    lines.push(`- **Judge rationale:** ${cl.judge_rationale}`);
+    if (cl.agent_recommended_canonical_fix) {
+      lines.push(`- **Remediation applied:** ${cl.remediation_applied ? `YES (exit=${cl.remediation_exit_code})` : 'NO'}`);
+      if (cl.remediation_applied) {
+        lines.push(`- **Symptom resolved after remediation:** ${cl.symptom_resolved === null ? 'unknown' : cl.symptom_resolved ? '**YES — closed loop passed**' : '**NO — closed loop FAILED**'}`);
+        lines.push('');
+        lines.push('### Verify-command stdout preview');
+        lines.push('```');
+        lines.push(cl.verify_stdout_preview || '(empty)');
+        lines.push('```');
+      }
+    }
+    lines.push('');
+  }
   lines.push(renderOracleReport(r.hallucination));
   lines.push('');
   lines.push('## Bash command trace');

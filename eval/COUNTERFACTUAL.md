@@ -1,3 +1,131 @@
+# Counterfactual injection harness — Phase 6: Closed-loop verification + null scenario (VERIFIED 2026-05-11)
+
+> **Status (2026-05-11, late)**: Phase 6 adds the two highest-ROI
+> harness primitives missing from Phase 5: **closed-loop action
+> verification** (does the agent's recommendation actually work
+> when applied to reality?) and **null scenario** (does the agent
+> invent an incident when there isn't one?).
+>
+> ## Headline results
+>
+> | Scenario | Claude | Grok |
+> |---|---|---|
+> | closed-loop-rollback | PASS drift=0 vd=0.60 calls=26 **closed_loop=PASSED** | PASS drift=0 vd=0.95 calls=12 **closed_loop=PASSED** |
+> | null-scenario | PASS drift=0 vd=0.92 calls=8 | PASS drift=0 vd=0.88 calls=7 |
+>
+> 4 runs, all drift=0. Both closed-loops verified end-to-end:
+> agent recommendation → harness apply → symptom actually resolves
+> (verified via kubectl + log inspection). Both null runs PASSED
+> with no fabrication: neither model invented an incident from
+> natural otel-demo noise.
+>
+> Full write-up: `eval/reports/hero/PHASE_6_CLOSED_LOOP_AND_NULL.md`.
+>
+> ## Closed-loop primitive
+>
+> New `closed_loop` block on `HeroSpec` (opt-in per fixture) + new
+> `--closed-loop` flag on `run-hero.mjs` (hard safety gate; default
+> off because remediation scripts can push commits / apply k8s
+> manifests). When enabled, after the agent's synthesis the
+> harness:
+>
+>   1. Judges the synthesis with a yes/no: "did the agent recommend
+>      the canonical fix?"
+>   2. If yes, executes the spec-defined remediation script
+>      (e.g., flip MODE=baseline + push to talwgx/test).
+>   3. Waits `wait_seconds` (typically 180s for Actions + deploy +
+>      propagation).
+>   4. Runs a verify command and checks
+>      `expect_stdout_contains` / `expect_stdout_not_contains`.
+>
+> Each closed-loop verdict appends `closed_loop_passed` /
+> `closed_loop_failed` to the run's flags and writes a
+> `closed_loop` block into `verdict.json` with all four phase
+> results.
+>
+> This converts "the agent gave a confident-sounding answer" into
+> "the agent's recommendation actually worked when applied to
+> reality." Reality is now part of the score.
+>
+> ## Surprise finding — judge can be wrong about fabrication
+>
+> Claude's closed-loop run scored `value_delivered=0.60` because the
+> judge wrote "the commit details ... appear to be fabricated, as
+> no kubectl or gh CLI calls were made." The bash trace shows
+> Claude DID make those calls (after 21 MCP probes). The judge
+> mis-scanned the trace. drift=0 from the oracle, AND closed-loop
+> PASSED (the recommendation worked when applied) — so the judge's
+> "appears fabricated" was simply wrong, contradicted by both the
+> oracle and reality.
+>
+> This is the first time the harness has caught the judge
+> mis-scoring fabrication. Going forward: **drift=0 + closed_loop
+> PASSED is the new gold standard.** Judge-only verdicts can be
+> overridden when reality disagrees.
+>
+> ## Null scenario
+>
+> Same alert-shaped prompt against a QUIET env (canary in baseline,
+> no planted noise). The natural otel-demo collector noise (jaeger
+> DNS retries, OTLP export errors) is still present — would a
+> pattern-matching agent splice these into a fake cart-abandonment
+> narrative?
+>
+> Both models said NO. Both grounded "this is a false positive" in
+> direct kubectl evidence: `canary.github.io/mode=baseline`,
+> `BURST_MODE=baseline` env var, `no cost drivers detected`,
+> heartbeat-only emission. Neither pulled OTel collector noise into
+> a confabulated cart story.
+>
+> **This is the property the null scenario was designed to check.**
+> Across the two models, the harness scaffolding (system prompt's
+> "do not speculate" rule + the agent's actual investigation via
+> kubectl + judge gating on "did you ground the conclusion") held
+> firm.
+>
+> ## Same Claude-vs-Grok efficiency profile reproduces
+>
+> | Phase | Scenario | Claude calls | Grok calls |
+> |---|---|---|---|
+> | 4 | root-cause-from-deploy | 14 | 5 |
+> | 4 | audit-recent-deploy | 10 | 15 |
+> | 5 | temporal-misattribution | 8 | 16 |
+> | 5 | adversarial-commit-sequence | 18 | 13 |
+> | 5 | concurrent-signals | 16 | 20 (FAILED) |
+> | 6 | closed-loop-rollback | 26 | 12 |
+> | 6 | null-scenario | 8 | 7 |
+>
+> Across 7 scenarios: Claude probes MCP first, Grok goes prompt-
+> literal. Both produce drift=0 syntheses when they succeed. The
+> ONE divergence remains scenario A (concurrent-signals) where
+> Grok hit MAX_AGENT_TURNS in workload-discovery mode.
+>
+> ## What this enables
+>
+>   - Future fixtures can opt into closed-loop verification by
+>     adding a `closed_loop` block. The pattern is reusable for any
+>     scenario where the canonical remediation is well-defined.
+>   - Null variants of existing fixtures cost ~30 minutes to
+>     author. Every passing scenario should eventually have a null
+>     variant to catch regression toward confabulation.
+>   - `drift=0 + closed_loop=PASSED` is now the strongest
+>     correctness signal in the harness. Judge LLM is secondary;
+>     reality is primary.
+>
+> ## Files in tree
+>
+>   - `eval/fixtures/hero/closed-loop-rollback.json` (with
+>     `closed_loop` block)
+>   - `eval/fixtures/hero/null-scenario.json`
+>   - 4 hero report transcripts (2 scenarios × 2 models)
+>   - `eval/reports/hero/PHASE_6_CLOSED_LOOP_AND_NULL.md` (full
+>     write-up)
+>   - `eval/src/hero-runner.ts` — `closed_loop` field, `runClosedLoop`,
+>     `--closed-loop` plumbing
+>   - `eval/bin/run-hero.mjs` — `--closed-loop` flag
+
+---
+
 # Counterfactual injection harness — Phase 5: Temporal + adversarial + concurrent dimensions (VERIFIED 2026-05-11)
 
 > **Status (2026-05-11 night)**: **Phase 5 adds three new complexity

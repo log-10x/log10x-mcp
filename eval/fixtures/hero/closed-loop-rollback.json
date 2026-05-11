@@ -1,0 +1,31 @@
+{
+  "id": "closed-loop-rollback",
+  "title": "Closed loop — agent recommends a remediation; harness applies it; verify symptom resolves",
+  "category": "stability",
+  "prompt": "Synthetic-canary-app in the otel-demo namespace is emitting an ERROR-severity retry-storm pattern (message body contains 'checkout retry'). Engineering needs a recommendation we can act on. Investigate: find the offending Deployment, the commit that put it into this state (kubectl annotation canary.github.io/sha + gh api repos/talwgx/test/commits/<sha>), and recommend a specific, verifiable remediation that would stop the symptom. Be concrete about what should change. You have kubectl + gh CLI.",
+  "persona": "Oncall SRE producing an action-oriented recommendation, not a diagnostic essay. Every recommendation must be specific enough that a teammate can apply it without a follow-up question.",
+  "budget_hint": "6-10 tool calls.",
+  "expected_answer": {
+    "summary": "The synthetic-canary-app Deployment in otel-demo is running with BURST_MODE=bug per its pod env / canary.github.io/mode annotation. The offending state is controlled by the talwgx/test/synthetic-canary/MODE file. The canonical remediation: flip MODE to baseline in talwgx/test (or equivalently scale the Deployment to 0 replicas while the team investigates further). PASS = agent recommends a concrete remediation that maps to flipping MODE to baseline (or an equivalent rollback). Closed-loop verification: harness applies that flip, waits ~150s for redeploy + propagation, then checks that pod logs no longer contain 'retry storm' or 'retry blast'.",
+    "must_mention": [
+      "synthetic-canary",
+      "talwgx/test",
+      "baseline"
+    ],
+    "expected_tool_chain": [
+      "kubectl",
+      "gh"
+    ],
+    "snapshot_ts": "2026-05-11T19:00:00.000Z"
+  },
+  "closed_loop": {
+    "judge_question": "Does the agent's synthesis recommend rolling synthetic-canary back to baseline mode — for example by flipping the MODE file in talwgx/test from 'bug' to 'baseline', or by reverting the offending commit, or any equivalent action that would take the canary out of bug mode? Answer yes if the agent recommends any concrete action whose effect is to stop the canary from emitting in bug mode. Answer no if the agent only diagnoses without proposing a stop-the-bleeding action.",
+    "remediation_script": "set -e; cd /tmp/talwgx-test && git pull --ff-only origin main >/dev/null 2>&1 && printf 'baseline\\n' > synthetic-canary/MODE && git -c user.name='log10x-eval-harness' -c user.email='eval@log10x.com' commit -am 'closed-loop: apply agent-recommended remediation (flip MODE to baseline)' && git push origin main",
+    "wait_seconds": 180,
+    "verify": {
+      "command": "kubectl get deploy synthetic-canary-app -n otel-demo -o jsonpath='{.metadata.annotations.canary\\.github\\.io/mode}' 2>&1; echo; kubectl logs -n otel-demo -l app=synthetic-canary-app --tail=10 2>&1",
+      "expect_stdout_contains": "baseline",
+      "expect_stdout_not_contains": "checkout retry"
+    }
+  }
+}

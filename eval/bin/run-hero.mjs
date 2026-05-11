@@ -23,22 +23,32 @@ const evalRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const { loadEvalEnv } = await import(resolve(evalRoot, 'build-eval/env.js'));
 const { runHero } = await import(resolve(evalRoot, 'build-eval/hero-runner.js'));
 
-// Parse args: positional <spec.json> + optional --model <id>
+// Parse args: positional <spec.json> + optional --model <id> + optional --closed-loop
 const args = process.argv.slice(2);
 let specPath;
 let runnerModel;
+let closedLoop = false;
 for (let i = 0; i < args.length; i++) {
   const a = args[i];
   if (a === '--model') {
     runnerModel = args[++i];
   } else if (a.startsWith('--model=')) {
     runnerModel = a.slice('--model='.length);
+  } else if (a === '--closed-loop') {
+    closedLoop = true;
   } else if (!specPath) {
     specPath = a;
   }
 }
 if (!specPath) {
-  console.error('Usage: run-hero.mjs <spec.json> [--model claude|grok|<model-id>]');
+  console.error(
+    'Usage: run-hero.mjs <spec.json> [--model claude|grok|<id>] [--closed-loop]\n' +
+      '\n' +
+      '  --closed-loop  Enable closed-loop action verification (only if the spec has a closed_loop block).\n' +
+      '                 The harness will judge the synthesis for the recommended action and, if matched,\n' +
+      '                 execute the spec-defined remediation script and verify symptom resolution.\n' +
+      '                 Destructive: may push commits / apply k8s manifests. Use deliberately.'
+  );
   process.exit(2);
 }
 
@@ -48,9 +58,13 @@ const ts = new Date().toISOString().replace(/[:.]/g, '-');
 const modelTag = runnerModel ? `__${runnerModel.replace(/[^a-zA-Z0-9._-]/g, '_')}` : '';
 const outDir = join(evalRoot, 'reports', 'hero', spec.id, `${ts}${modelTag}`);
 
-console.error(`[run-hero] spec=${spec.id} env=${env.mode} model=${runnerModel ?? 'claude (default)'} outDir=${outDir}`);
+console.error(
+  `[run-hero] spec=${spec.id} env=${env.mode} model=${runnerModel ?? 'claude (default)'}` +
+    (closedLoop ? ' closed-loop=ON' : '') +
+    ` outDir=${outDir}`
+);
 
-const report = await runHero(spec, env, outDir, runnerModel);
+const report = await runHero(spec, env, outDir, runnerModel, { closedLoop });
 
 // Also drop a stable SUMMARY.md at the scenario root (not just the
 // timestamped subdir) so the plan's done-marker path is predictable.
@@ -68,6 +82,14 @@ console.error(`  hallucination drift=${report.hallucination.driftScore}`);
 console.error(`  value_delivered=${report.valueDelivered.score.toFixed(2)}`);
 console.error(`  value_received=${report.valueReceived.score.toFixed(2)}`);
 console.error(`  bash calls=${report.bashCommands.length}, duration=${(report.durationMs / 1000).toFixed(1)}s`);
+if (report.closedLoop) {
+  const cl = report.closedLoop;
+  console.error(
+    `  closed_loop: recommended=${cl.agent_recommended_canonical_fix}` +
+      ` applied=${cl.remediation_applied}` +
+      ` symptom_resolved=${cl.symptom_resolved}`
+  );
+}
 console.error('');
 console.error(`[run-hero] artifacts: ${outDir}`);
 
