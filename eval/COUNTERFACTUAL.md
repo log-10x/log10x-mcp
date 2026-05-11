@@ -79,24 +79,77 @@
 > the log text.) This is a config-tuning follow-up, not a
 > fundamental issue.
 >
-> ## Phase 2 — agent-MCP correlation test
+> ## Phase 2 — agent-MCP correlation test (attempted 2026-05-11, BLOCKED)
 >
-> Repoint the stack at the OTel demo env (`TENX_API_KEY` +
-> `TENX_ENV_ID` env vars in `eval/counterfactual/.env`). The
-> demo env runs the full edge + cloud + reporter stack, so:
-> - `emitted_events_*` from our generator → cloud receiver
->   → `all_events_*` (visible to MCP)
-> - Agent runs via existing hero-runner; MCP tools surface
->   the canary signal
-> - The **kubectl-correlation key test** becomes meaningful:
->   does the agent reach for `log10x_correlate_cross_pillar`
->   when it sees synthetic OOMKilled patterns?
+> Repointing the stack at the OTel demo env was tested and hit
+> two architectural walls. Documenting both so future planners
+> don't re-discover them.
 >
-> Phase 2 implementation: same `docker-compose.yml`, different
-> `.env` vars. Plus the agent-layer scoring logic in
-> `eval/src/counterfactual-runner.ts` already accepts both
-> `must_call_tool` AND `must_mention_correlation`. Ready when
-> demo env write-access is confirmed.
+> **Wall 1: writes to the demo env tenant are rejected.**
+> The demo env's published API key (`4d985100-...`) is read-only
+> — the engine logged `401 Not Authorized` on every remote_write
+> attempt to `prometheus.log10x.com/api/v1/remote_write`. The
+> user's personal API key (`1bb8b68f-...`) routes writes to
+> the user's OWN tenant (`8209858b-...`) regardless of the
+> envId in the `X-10X-Auth: <key>/<envId>` header. The auth
+> model: API key → user account → that user's tenant. envId is
+> informational, not a cross-env grant.
+>
+> Confirmed via `tenx_usage_write_samples` per-tenant: my engine's
+> writes only ever incremented the talw.gx tenant counter, never
+> the demo env's. Conclusion: to write to the demo env we'd need
+> its actual write credentials (admin-tier, not user-tier).
+>
+> **Wall 2: standalone receiver needs production config.**
+> The cloud-tier `@apps/receiver` (which aggregates
+> `emitted_events_*` from edge into `all_events_*` for MCP
+> consumption) requires forwarder-input modules (rate /
+> compact reducers) that demand `rateReducerFieldNames`,
+> `compactReducerFieldNames`, `levelField`, etc. env vars.
+> Without them the engine throws `TenXLog_throwError`
+> immediately at boot. Setting them requires production-tier
+> tuning (lookup tables, symbol files) the standalone stack
+> doesn't ship with.
+>
+> **What this means**: the MCP-agent correlation layer on
+> talw.gx alone is blocked because MCP tools query
+> `all_events_*` which only the cloud-tier receiver produces.
+> Our edge engine produces `emitted_events_*` directly into
+> the talw.gx tenant (verified) — visible via direct
+> Prometheus query, invisible to the standard MCP tools.
+>
+> ## Unblock options (none cheap)
+>
+> 1. **Demo env admin credentials** (write-scoped). Needs to
+>    come from whoever owns the OTel demo env.
+> 2. **Full standalone cloud-tier deployment**: figure out the
+>    minimal `@apps/receiver` config + supply the reducer
+>    rule env vars. Estimated ~half a day of work to make it
+>    boot, then more to wire it to consume from our edge.
+> 3. **A separate cloud-deployed customer env owned by the
+>    user** with the full stack. The user's account is free-tier;
+>    they'd need either a self-hosted helm-chart deployment OR
+>    a paid tier with cloud-managed cluster.
+> 4. **Patch the MCP tools** (`src/tools/{services, top-patterns,
+>    list-by-label, cost-drivers, ...}.ts`) to also query
+>    `emitted_events_*` as a fallback when `all_events_*` is
+>    empty. Most invasive — changes real MCP behavior.
+>
+> ## What Phase 1 still delivers
+>
+> Even without Phase 2 wired up, the work shipped:
+>
+> - **Generator + Forward Protocol wire compatibility proven** —
+>   we now know msgpack frames work; Fluent Bit 4.2.4 doesn't.
+> - **Auth model documented** — API key binds to tenant; envId
+>   is informational.
+> - **Engine image / version pinned** — `log10x/edge-10x:1.0.19`
+>   matches the demo env's chart appVersion.
+> - **Permission override identified** — `user: "0:0"` on the
+>   engine for docker named-volume socket binding.
+> - **Receiver app config blocker mapped** — see Wall 2.
+> - **Counterfactual scorer scaffolding** is in place — when
+>   Phase 2 unblocks, the 3-layer verdict assembly is ready.
 
 ## Why this is design-only today (was)
 
