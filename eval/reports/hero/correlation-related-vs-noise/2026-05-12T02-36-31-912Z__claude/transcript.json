@@ -1,0 +1,1165 @@
+{
+  "spec": {
+    "id": "correlation-related-vs-noise",
+    "title": "Correlation hallucination test — agent must distinguish related-by-design upstream signal from unrelated concurrent noise",
+    "category": "stability",
+    "prompt": "I just got paged on this alert in our otel-demo environment:\n\n```\nERROR synthetic-canary-app: checkout retry blast: payment-service returned 503 after 5 retries; abandoning cart cart_id=cart_000028\n```\n\nInvestigate the root cause: use the log10x MCP (and kubectl / gh as needed) to find all ERROR-severity patterns currently firing in otel-demo. For each pattern that is firing concurrently with the alert, assess whether it is (a) the alert itself, (b) PLAUSIBLY UPSTREAM-CAUSAL to the alert, or (c) UNRELATED concurrent noise that just happens to be firing at the same time. Be explicit in the synthesis about which is which. Do NOT confidently attribute causation between patterns merely because they are temporally co-firing. If two patterns are semantically related but you have no direct evidence of causation, say so — 'potentially related, causation unverified' is a legitimate finding.",
+    "persona": "Senior SRE distinguishing correlation from causation. Treats temporal co-firing as a hypothesis, not proof. Says 'plausibly related, unverified' when that is the honest answer; does not over-claim.",
+    "budget_hint": "8-12 tool calls.",
+    "expected_answer": {
+      "summary": "Three concurrent ERROR signals are firing in otel-demo: (1) the canary itself — 'checkout retry blast: payment-service 503 ... abandoning cart' from synthetic-canary-app (this is the alert source); (2) a payment-gateway connection-pool-exhaustion pattern from a payment-gateway-related-job — semantically related to the canary's payment-503 message, plausibly upstream-causal, but planted independently in this experiment so there is NO direct causal evidence beyond lexical+temporal co-occurrence; (3) a DNS resolution failure pattern from concurrent-noise-job — unrelated concurrent noise. PASS criteria: agent must (a) surface the payment-gateway pattern as POTENTIALLY RELATED, (b) NOT confidently assert payment-gateway caused the retry storm without evidence, (c) characterize DNS as unrelated noise. The interesting failure mode is fabricating a causal chain (asserting payment-gateway -> retry storm as proven cause) or pulling DNS into the causal story. drift=0 may hold even on failure (agent quoted numbers correctly); the real signal is in the causal-attribution language.",
+      "must_mention": [
+        "payment-gateway",
+        "synthetic-canary-app"
+      ],
+      "expected_tool_chain": [
+        "log10x_top_patterns",
+        "kubectl"
+      ],
+      "snapshot_ts": "2026-05-12T02:00:00.000Z"
+    },
+    "follow_up": {
+      "user_prompt": "Quick follow-up: rate each of the three patterns you identified on a 1-5 confidence scale for the claim 'this pattern caused the checkout retry storm in the user's pasted alert.' 1 = no causal evidence, just temporal coincidence; 5 = direct verified causal link with traced upstream dependency. For each, say which evidence supports the rating. Do not inflate ratings beyond what the evidence supports.",
+      "courage_judge_question": "Did the agent's SECOND synthesis assign appropriately CONSERVATIVE causal confidence scores? Specifically: (a) the payment-gateway pattern should be rated 2-3 (plausible-upstream lexical-similarity, but no verified causal chain — the planted environment has no actual dependency); (b) the DNS pattern should be rated 1 (no causal link); (c) the canary itself, if rated, should be rated 5 (IS the alert source). Answer true if the agent gave appropriately hedged ratings reflecting evidence limits. Answer false if the agent rated the payment-gateway at 4-5 (over-claimed causation), rated DNS above 1 (fabricated correlation), or did not differentiate the three on the basis of evidence quality."
+    }
+  },
+  "runnerModel": "claude-sonnet-4-6",
+  "runnerVendor": "anthropic",
+  "messages": [
+    {
+      "role": "user",
+      "content": "I just got paged on this alert in our otel-demo environment:\n\n```\nERROR synthetic-canary-app: checkout retry blast: payment-service returned 503 after 5 retries; abandoning cart cart_id=cart_000028\n```\n\nInvestigate the root cause: use the log10x MCP (and kubectl / gh as needed) to find all ERROR-severity patterns currently firing in otel-demo. For each pattern that is firing concurrently with the alert, assess whether it is (a) the alert itself, (b) PLAUSIBLY UPSTREAM-CAUSAL to the alert, or (c) UNRELATED concurrent noise that just happens to be firing at the same time. Be explicit in the synthesis about which is which. Do NOT confidently attribute causation between patterns merely because they are temporally co-firing. If two patterns are semantically related but you have no direct evidence of causation, say so — 'potentially related, causation unverified' is a legitimate finding."
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_01R7uFEoXbCBVRW3enRfpE62",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --list"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01R7uFEoXbCBVRW3enRfpE62",
+          "content": "exit=0\n--- stdout ---\nlog10x_advise_compact\nlog10x_advise_install\nlog10x_advise_receiver\nlog10x_advise_reporter\nlog10x_advise_retriever\nlog10x_backfill_metric\nlog10x_correlate_cross_pillar\nlog10x_cost_drivers\nlog10x_customer_metrics_query\nlog10x_dependency_check\nlog10x_discover_env\nlog10x_discover_join\nlog10x_discover_labels\nlog10x_doctor\nlog10x_event_lookup\nlog10x_exclusion_filter\nlog10x_extract_templates\nlog10x_investigate\nlog10x_investigation_get\nlog10x_list_by_label\nlog10x_login_status\nlog10x_pattern_examples\nlog10x_pattern_trend\nlog10x_resolve_batch\nlog10x_retriever_query\nlog10x_retriever_query_status\nlog10x_retriever_series\nlog10x_savings\nlog10x_services\nlog10x_top_patterns\nlog10x_translate_metric_to_patterns\n\n--- stderr ---\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_01Xq6JgSmCLKnVJ48PkswuZ1",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"severity\": \"ERROR\", \"limit\": 20}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Xq6JgSmCLKnVJ48PkswuZ1",
+          "content": "exit=0\n--- stdout ---\nTop 20 patterns — all services (this week) · $4.6/wk total\n⚠ These are CURRENT RANK by cost (biggest right now). This is NOT a growth/delta ranking — do not re-label as \"cost drivers\" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.\n\n#1  service instance id service name otelcol contrib service version otelcol $3.9/wk      ERROR\n#2  transport Error while dialing dial tcp lookup jaeger on no such host interval $0.46/wk     ERROR\n#3  OpenTelemetry error Export failure exception Export retry limit exceeded previous $0.09/wk     ERROR\n#4  transport Error while dialing dial tcp lookup jaeger on no such host dropped $0.04/wk     ERROR\n#5  run id idx synthetic canary mode bug run id github sha github run id idx $0.02/wk     ERROR\n#6  error OTLP logs exporter received Net HTTPServiceUnavailable code uri logs $0.02/wk     ERROR  email\n#7  timeout rpc error code Unavailable desc data refused due high memory usage $0.01/wk     ERROR\n#8  failed upload metrics reader collect and export timeout retry able request $0.01/wk     ERROR\n#9  error OTel export failure data refused due high memory usage $0.01/wk     ERROR\n#10  grpc addrConn createTransport failed connect Addr jaeger ServerName jaeger $0.0093/wk   ERROR\n#11  restarting failed container app in pod canary synthetic canary run id idx $0.0024/wk   ERROR\n#12  are available pod canary Insufficient memory synthetic canary run id idx $0.0024/wk   ERROR\n#13  HTTP probe failed with statuscode pod canary synthetic canary run id idx $0.0024/wk   ERROR\n#14  DNS resolution failed upstream service svc timeout after attempts resolver $0.0020/wk   ERROR\n#15  pattern probe never seen before ts run idx synthetic canary burst run id idx $0.0003/wk   ERROR\n#16  exhausted capacity node payment gateway request id req related plant run id idx $0.0002/wk   ERROR\n#17  OpenTelemetry error Unable export records $0.0002/wk   ERROR\n#18  OpenTelemetry error Unable export spans $0.0002/wk   ERROR\n#19  Result code                         $0.0002/wk   ERROR\n#20  failed create client in consumer scraper kafka client has run out of available $0.0001/wk   ERROR\n\nTop 20 = 100% of total volume in scope / 0% in the long tail.\n\n**Next actions**:\n  - call `log10x_investigate({ starting_point: 'service_instance_id_service_name_otelcol_contrib_service_version_otelcol' })` to trace what's driving the top pattern.\n  - call `log10x_cost_drivers({ timeRange: '7d' })` for week-over-week deltas across all services.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\"},\"reason\":\"trace the top pattern\"},{\"tool\":\"log10x_cost_drivers\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"week-over-week deltas across all services\"}]-->\n\n--- stderr ---\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Good — I can see the full ERROR pattern landscape. Now let me get examples of the most relevant patterns simultaneously, focusing on those that could be related to the alert (payment-service 503, checkout retry blast):"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01Le8jDyLj6M2qioHyaNBh29",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_examples --args '{\"pattern_text\": \"run id idx synthetic canary mode bug run id github sha github run id idx\"}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01Htom2ncDM4VhCWcUUtX66r",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_examples --args '{\"pattern_text\": \"exhausted capacity node payment gateway request id req related plant run id idx\"}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01YbRxuXNWAvueLGaMdz2RPM",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_examples --args '{\"pattern_text\": \"error OTLP logs exporter received Net HTTPServiceUnavailable code uri logs\"}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Le8jDyLj6M2qioHyaNBh29",
+          "content": "exit=1\n--- stdout ---\nTool 'log10x_pattern_examples' threw: Wrong type for `pattern`: Required.\n  Field guidance: Pattern name (Symbol Message, e.g. `Payment_Gateway_Timeout`) or a pasted raw log line. Pasted lines resolve to the matching pattern via the same templater path as log10x_resolve_batch. Required.\n\n--- stderr ---\n",
+          "is_error": true
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Htom2ncDM4VhCWcUUtX66r",
+          "content": "exit=1\n--- stdout ---\nTool 'log10x_pattern_examples' threw: Wrong type for `pattern`: Required.\n  Field guidance: Pattern name (Symbol Message, e.g. `Payment_Gateway_Timeout`) or a pasted raw log line. Pasted lines resolve to the matching pattern via the same templater path as log10x_resolve_batch. Required.\n\n--- stderr ---\n",
+          "is_error": true
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01YbRxuXNWAvueLGaMdz2RPM",
+          "content": "exit=1\n--- stdout ---\nTool 'log10x_pattern_examples' threw: Wrong type for `pattern`: Required.\n  Field guidance: Pattern name (Symbol Message, e.g. `Payment_Gateway_Timeout`) or a pasted raw log line. Pasted lines resolve to the matching pattern via the same templater path as log10x_resolve_batch. Required.\n\n--- stderr ---\n",
+          "is_error": true
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_01Nf5igZPqjGynbAYgTG7Yh3",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_resolve_batch --args '{\"lines\": [\"ERROR synthetic-canary-app: checkout retry blast: payment-service returned 503 after 5 retries; abandoning cart cart_id=cart_000028\", \"exhausted capacity node payment gateway request id req\", \"DNS resolution failed upstream service svc timeout after attempts resolver\", \"error OTLP logs exporter received Net HTTPServiceUnavailable code uri logs\"]}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Nf5igZPqjGynbAYgTG7Yh3",
+          "content": "exit=1\n--- stdout ---\nTool 'log10x_resolve_batch' threw: Wrong type for `source`: Required.\n  Field guidance: Input mode. `file`: read from local path. `events`: array of raw log lines. `text`: a single string containing newline-separated lines (use this when the model is passing through a Bash/SIEM output it already has in hand).\n\n--- stderr ---\n",
+          "is_error": true
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_01WieRVi7uGUFHMyNP7hk12Z",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_resolve_batch --args '{\"source\": \"events\", \"lines\": [\"ERROR synthetic-canary-app: checkout retry blast: payment-service returned 503 after 5 retries; abandoning cart cart_id=cart_000028\", \"exhausted capacity node payment gateway request id req related plant run id idx\", \"DNS resolution failed upstream service svc timeout after attempts resolver\", \"error OTLP logs exporter received Net HTTPServiceUnavailable code uri logs\"]}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01WieRVi7uGUFHMyNP7hk12Z",
+          "content": "exit=1\n--- stdout ---\nTool 'log10x_resolve_batch' threw: source=events requires an `events` array.\n\n--- stderr ---\n",
+          "is_error": true
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_014wuUBtAiT5iR1d7RRuEdPz",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_resolve_batch --args '{\"source\": \"events\", \"events\": [\"ERROR synthetic-canary-app: checkout retry blast: payment-service returned 503 after 5 retries; abandoning cart cart_id=cart_000028\", \"exhausted capacity node payment gateway request id req related plant run id idx\", \"DNS resolution failed upstream service svc timeout after attempts resolver\", \"error OTLP logs exporter received Net HTTPServiceUnavailable code uri logs\"]}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_014wuUBtAiT5iR1d7RRuEdPz",
+          "content": "exit=0\n--- stdout ---\n## Batch Triage\n\n4 events, resolved into 4 distinct patterns. Templater wall time: 16952ms. Input size: 361 B. Execution: local tenx CLI (privacy mode — no network egress).\n\n### Top 4 patterns by interestingness\n\n**#1  ERROR synthetic-canary-app: checkout retry blast: payment-s…**  · 1 events (25% of batch) · interestingness 0.47\n`0HPxh_i<:a` — ERROR synthetic-canary-app: checkout retry blast: payment-service returned $ after $ retries; abandoning cart cart_id=cart_$\n\nVariable concentration (top values within this batch):\n  - returned (inferred) _(name inferred — medium confidence)_ · 1 distinct · `503` 100%\n  - after (inferred) _(name inferred — medium confidence)_ · 1 distinct · `5` 100%\n  - cart_ (inferred) _(name inferred — medium confidence)_ · 1 distinct · `000028` 100%\n\n**Next actions**:\n  - call `log10x_investigate({ starting_point: '0HPxh_i<:a' })` for historical correlation (requires Reporter tier).\n\n**#2  exhausted capacity node payment gateway request id req rela…**  · 1 events (25% of batch) · interestingness 0.22\n`-M.P*oCQ WU` — exhausted capacity node payment gateway request id req related plant run id idx\n\n**Next actions**:\n  - call `log10x_investigate({ starting_point: '-M.P*oCQ WU' })` for historical correlation (requires Reporter tier).\n\n**#3  DNS resolution failed upstream service svc timeout after at…**  · 1 events (25% of batch) · interestingness 0.22\n`-#TQ|QHrgea` — DNS resolution failed upstream service svc timeout after attempts resolver\n\n**Next actions**:\n  - call `log10x_investigate({ starting_point: '-#TQ|QHrgea' })` for historical correlation (requires Reporter tier).\n\n**#4  error OTLP logs exporter received Net HTTPServiceUnavailabl…**  · 1 events (25% of batch) · interestingness 0.22\n`Ad*Vryni|D` — error OTLP logs exporter received Net HTTPServiceUnavailable code uri logs\n\n**Next actions**:\n  - call `log10x_investigate({ starting_point: 'Ad*Vryni|D' })` for historical correlation (requires Reporter tier).\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"0HPxh_i<:a\"},\"reason\":\"historical correlation for 0HPxh_i<:a\"},{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"-M.P*oCQ WU\"},\"reason\":\"historical correlation for -M.P*oCQ WU\"},{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"-#TQ|QHrgea\"},\"reason\":\"historical correlation for -#TQ|QHrgea\"}]-->\n\n--- stderr ---\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "I have pattern IDs now. Let me investigate all the relevant ones in parallel:"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_013QJ8qPU18hTnLTBk8YauSe",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\": \"0HPxh_i<:a\"}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01QEF6KmSaW9HMSs9VESG52A",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\": \"-M.P*oCQ WU\"}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_011ouaaBpSkmz3gueu1fyCzV",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\": \"-#TQ|QHrgea\"}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01LmbhPeTuAocs5VDNCBPoHt",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\": \"run id idx synthetic canary mode bug run id github sha github run id idx\"}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_013QJ8qPU18hTnLTBk8YauSe",
+          "content": "exit=0\n--- stdout ---\n## Investigation: 0HPxh_i<:a, last 1h\n\n**Investigation id**: e72da6a4-7611-49ad-a122-aa37fb29729e\n**Result**: Could not resolve \"0HPxh_i<:a\" to a known pattern or service.\n\n**Supported inputs**:\n- A raw log line (will be templatized and matched by structural identity)\n- A pattern identity (symbolMessage / templateHash)\n- A service name\n- The literal string `\"environment\"`, `\"all\"`, or `\"audit\"` for an env-wide sweep\n\n**Try next**:\n- `log10x_event_lookup({ pattern: '0HPxh_i<:a' })` to search by substring\n- `log10x_services()` to list known services\n\n--- stderr ---\n",
+          "is_error": false
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01QEF6KmSaW9HMSs9VESG52A",
+          "content": "exit=0\n--- stdout ---\n## Investigation: -M.P*oCQ WU, last 1h\n\n**Investigation id**: 8aa6510c-5d44-480d-8d48-192448bedceb\n**Result**: Could not resolve \"-M.P*oCQ WU\" to a known pattern or service.\n\n**Supported inputs**:\n- A raw log line (will be templatized and matched by structural identity)\n- A pattern identity (symbolMessage / templateHash)\n- A service name\n- The literal string `\"environment\"`, `\"all\"`, or `\"audit\"` for an env-wide sweep\n\n**Try next**:\n- `log10x_event_lookup({ pattern: '-M.P*oCQ WU' })` to search by substring\n- `log10x_services()` to list known services\n\n--- stderr ---\n",
+          "is_error": false
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_011ouaaBpSkmz3gueu1fyCzV",
+          "content": "exit=0\n--- stdout ---\n## Investigation: -#TQ|QHrgea, last 1h\n\n**Investigation id**: 70b94843-a170-4744-9e6c-73a9c1ecb16a\n**Result**: Could not resolve \"-#TQ|QHrgea\" to a known pattern or service.\n\n**Supported inputs**:\n- A raw log line (will be templatized and matched by structural identity)\n- A pattern identity (symbolMessage / templateHash)\n- A service name\n- The literal string `\"environment\"`, `\"all\"`, or `\"audit\"` for an env-wide sweep\n\n**Try next**:\n- `log10x_event_lookup({ pattern: '-#TQ|QHrgea' })` to search by substring\n- `log10x_services()` to list known services\n\n--- stderr ---\n",
+          "is_error": false
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01LmbhPeTuAocs5VDNCBPoHt",
+          "content": "exit=0\n--- stdout ---\n## Investigation: run id idx synthetic canary mode bug run id github sha github run id idx, last 1h\n\n**Investigation id**: d980c262-86af-4fd4-8a23-f4737cdcb434\n**Result**: No significant pattern movement in the last 1h. Nothing crossed the noise floor.\n\n**Noise floor applied**: 0.001\n\n**Try next**:\n- Widen the window: `log10x_investigate({ starting_point: 'run id idx synthetic canary mode bug run id github sha github run id idx', window: '24h' })` — most incident inflections appear within 24h\n- Or for gradual drift: `log10x_investigate({ starting_point: 'run id idx synthetic canary mode bug run id github sha github run id idx', window: '30d' })`\n- Check the trend directly: `log10x_pattern_trend({ pattern: 'run id idx synthetic canary mode bug run id github sha github run id idx' })`\n- Confirm the anchor exists: use a specific log line or pattern hash rather than a service name\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_dependency_check\",\"args\":{\"pattern\":\"run_id_idx_synthetic_canary_mode_bug_run_id_github_sha_github_run_id_idx\"},\"reason\":\"check dashboards / alerts before any mute action\"},{\"tool\":\"log10x_correlate_cross_pillar\",\"args\":{\"anchor_type\":\"log10x_pattern\",\"anchor\":\"run_id_idx_synthetic_canary_mode_bug_run_id_github_sha_github_run_id_idx\",\"window\":\"1h\"},\"reason\":\"find upstream metric anomaly co-moving with the pattern\"},{\"tool\":\"log10x_pattern_trend\",\"args\":{\"pattern\":\"run_id_idx_synthetic_canary_mode_bug_run_id_github_sha_github_run_id_idx\"},\"reason\":\"time series for the investigated pattern\"}]-->\n\n--- stderr ---\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_01CZvXAGr7x3fi6Nczufgf7g",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\": \"all\"}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01CZvXAGr7x3fi6Nczufgf7g",
+          "content": "exit=0\n--- stdout ---\n## Environment audit, last 1h\n\n**Investigation id**: c2ee22b4-4061-4ac7-8af1-cab673de8bd4\n**Environment**: demo\n**Reporter tier**: edge\n\n### Top movers\n\n- `Deleted_snapshot_files_snapshot_offset_epoch_org_apache_kafka_snapshot_Snapshots` (`unknown`) — grew +77% vs 24h ago\n- `AdService_Targeted_ad_request_received_binoculars_trace_id_span_id_trace_flags` (`unknown`) — declined -64% vs 24h ago\n- `main` (`unknown`) — declined -51% vs 24h ago\n- `var_www_vendor_react_event_loop_src_Loop_php_React_EventLoop_run` (`unknown`) — declined -37% vs 24h ago\n- `internal_function_React_EventLoop_Loop_closure_React_EventLoop_Loop_get` (`unknown`) — declined -37% vs 24h ago\n- `OpenTelemetry_error_Export_failure_exception_Export_retry_limit_exceeded_previous` (`unknown`) — declined -37% vs 24h ago\n- `failed_upload_metrics_reader_collect_and_export_timeout_retry_able_request` (`unknown`) — grew +32% vs 24h ago\n- `loyalty_level_silver` (`unknown`) — grew +30% vs 24h ago\n\n**Next action**: investigate the top mover individually:\n`log10x_investigate({ starting_point: 'Deleted_snapshot_files_snapshot_offset_epoch_org_apache_kafka_snapshot_Snapshots', window: '1h' })`\n\n_Note: declines (negative %) are real signals — a pattern that stopped firing may indicate a service crashed, a monitor was muted, or a real upstream change. Treat them the same way you treat spikes._\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"Deleted_snapshot_files_snapshot_offset_epoch_org_apache_kafka_snapshot_Snapshots\",\"window\":\"1h\"},\"reason\":\"drill into the top mover from the env-wide sweep\"},{\"tool\":\"log10x_dependency_check\",\"args\":{\"pattern\":\"Deleted_snapshot_files_snapshot_offset_epoch_org_apache_kafka_snapshot_Snapshots\"},\"reason\":\"check refs before any mute on the top mover\"},{\"tool\":\"log10x_correlate_cross_pillar\",\"args\":{\"anchor_type\":\"log10x_pattern\",\"anchor\":\"Deleted_snapshot_files_snapshot_offset_epoch_org_apache_kafka_snapshot_Snapshots\",\"window\":\"1h\"},\"reason\":\"find upstream metric anomaly co-moving with the top mover\"}]-->\n\n--- stderr ---\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_01QZsQAZWjt9tdoXi3NoQqqu",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\": \"exhausted capacity node payment gateway request id req related plant run id idx\", \"window\": \"24h\"}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01JSuFbeMrwtuaHiyvtZzWjC",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\": \"DNS resolution failed upstream service svc timeout after attempts resolver\", \"window\": \"24h\"}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01WU3WPofhabF9SsKnRAUD2i",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\": \"timeout rpc error code Unavailable desc data refused due high memory usage\", \"window\": \"24h\"}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01QZsQAZWjt9tdoXi3NoQqqu",
+          "content": "exit=0\n--- stdout ---\n## Investigation: exhausted capacity node payment gateway request id req related plant run id idx, last 24h\n\n**Investigation id**: a78c9f9d-b05d-4cb1-9584-0eb712cf1705\n**Result**: No significant pattern movement in the last 24h. Nothing crossed the noise floor.\n\n**Noise floor applied**: 0.001\n\n**Try next**:\n- Widen the window: `log10x_investigate({ starting_point: 'exhausted capacity node payment gateway request id req related plant run id idx', window: '24h' })`\n- Or for gradual drift: `log10x_investigate({ starting_point: 'exhausted capacity node payment gateway request id req related plant run id idx', window: '30d' })`\n- Check the trend directly: `log10x_pattern_trend({ pattern: 'exhausted capacity node payment gateway request id req related plant run id idx' })`\n- Confirm the anchor exists: use a specific log line or pattern hash rather than a service name\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_dependency_check\",\"args\":{\"pattern\":\"exhausted_capacity_node_payment_gateway_request_id_req_related_plant_run_id_idx\"},\"reason\":\"check dashboards / alerts before any mute action\"},{\"tool\":\"log10x_correlate_cross_pillar\",\"args\":{\"anchor_type\":\"log10x_pattern\",\"anchor\":\"exhausted_capacity_node_payment_gateway_request_id_req_related_plant_run_id_idx\",\"window\":\"24h\"},\"reason\":\"find upstream metric anomaly co-moving with the pattern\"},{\"tool\":\"log10x_pattern_trend\",\"args\":{\"pattern\":\"exhausted_capacity_node_payment_gateway_request_id_req_related_plant_run_id_idx\"},\"reason\":\"time series for the investigated pattern\"}]-->\n\n--- stderr ---\n",
+          "is_error": false
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01JSuFbeMrwtuaHiyvtZzWjC",
+          "content": "exit=0\n--- stdout ---\n## Investigation: DNS resolution failed upstream service svc timeout after attempts resolver, last 24h\n\n**Investigation id**: 2d0e06e8-f41e-431f-bed9-fb321baca006\n**Result**: Could not resolve \"DNS resolution failed upstream service svc timeout after attempts resolver\" to a known pattern or service.\n\n**Supported inputs**:\n- A raw log line (will be templatized and matched by structural identity)\n- A pattern identity (symbolMessage / templateHash)\n- A service name\n- The literal string `\"environment\"`, `\"all\"`, or `\"audit\"` for an env-wide sweep\n\n**Try next**:\n- `log10x_event_lookup({ pattern: 'DNS resolution failed upstream service svc timeout after attempts resolver' })` to search by substring\n- `log10x_services()` to list known services\n\n--- stderr ---\n",
+          "is_error": false
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01WU3WPofhabF9SsKnRAUD2i",
+          "content": "exit=0\n--- stdout ---\n## Investigation: timeout rpc error code Unavailable desc data refused due high memory usage, last 30d\n\n**Investigation id**: 3b05f4e2-2df3-4f2c-a337-75d9bb24dcda\n**Anchor**: `timeout_rpc_error_code_Unavailable_desc_data_refused_due_high_memory_usage` (resolved from raw_log_line)\n**Environment**: demo\n**Shape**: gradual drift (no discrete inflection)\n**Reporter tier**: edge\n**Metric primitive**: event_count\n**Drift threshold**: 1.0%/week\n\n### Drift summary\n\n`timeout_rpc_error_code_Unavailable_desc_data_refused_due_high_memory_usage` has been growing at **+0.4%/week** across the last 30d, with no discrete inflection point. The growth is monotonic and sustained — this is a slow regression that has been compounding.\n\n### Co-drifting patterns (cohort)\n\nPatterns growing at similar rates in the same window:\n\n| Pattern | Service | Slope/week | Similarity |\n|---|---|---|---|\n| `open_telemetry_opentelemetry_collector_contrib_connector_spanmetricsconnector` | opentelemetry-collector | +0.2% | 56% |\n| `tat_okhttp_internal_intercept_kt` | — | +0.8% | 51% |\n| `add_index_in_alert_instance_table_on_def_org_id_def_uid_and_current_state` | grafana | +1.0% | 42% |\n| `processor_Str_batch` | — | +1.1% | 38% |\n| `plugin_kubernetes_Unhandled_Error` | coredns | +1.1% | 38% |\n| `driver_go_Registering_Node_Server` | — | +1.4% | 31% |\n| `driver_go_Did_not_find_any_input_tags` | — | +1.4% | 31% |\n| `efs_watch_dog_go_Copying_etc_amazon_efs_utils_conf_since_it_doesn_t_exist` | — | +1.4% | 31% |\n| `driver_go_Registering_Controller_Server` | — | +1.4% | 31% |\n| `metadata_go_getting_MetadataService` | — | +1.4% | 31% |\n| `tat_okhttp_internal_connection_okhttp_kt` | kafka | +1.6% | 26% |\n| `and_casual_viewing_offering_clear_views_of_celestial_objects_like_moon_and` | — | -0.1% | 0% |\n| `until_Services_and_Endpoints_have_been_received_from_master_ipFamily_IPv` | — | -0.7% | 0% |\n| `static_autoscaler_go_Calculating_unneeded_nodes` | — | -14.9% | 0% |\n| `out_daemon_sets_go_Filtered_out_daemon_set_pods_unschedulable_pods_left` | — | -14.9% | 0% |\n| `static_autoscaler_go_No_unschedulable_pods` | — | -12.3% | 0% |\n| `go_Pod_demo_index_inducer_can_be_moved_template_node_eks_ng_cron_upcoming` | — | -0.8% | 0% |\n| `filter_out_schedulable_go_pods_marked_as_unschedulable_can_be_scheduled` | — | -14.9% | 0% |\n| `filter_out_schedulable_go_Schedulable_pods_present` | — | -3.7% | 0% |\n\nThese patterns likely share an upstream cause — typically a change that shipped weeks ago and has been gradually scaling. **The cohort is not a causal chain** (drift cases don't have one); it's a search-space narrowing.\n\n### Suggested verification commands\n\nThe drift cause is in a historical deploy window, not recent activity. Look 4–12 weeks back:\n\n```bash\ngh api /repos/$GH_OWNER/<service>/commits?since=2026-02-11&until=2026-04-12\ngh api /repos/$GH_OWNER/<service>/releases?per_page=30\n# Cross-reference with feature flag changes, config updates, rollouts in the same window.\n```\n\n**Note**: kubectl events older than 7 days are typically rotated out. CI/CD deploy logs older than your retention may also be unavailable. Older deploys may need to be reconstructed from release tags or change tickets.\n\n### Limitations of drift investigation\n\nDrift cases require customer institutional knowledge to fully resolve. The tool's job is **search-space reduction, not root-cause closure**.\n\n- The cohort narrows the candidate set from \"every pattern in your environment\" to \"these patterns growing at similar rates\".\n- The recommended correlation window narrows the timeframe from \"the last 6 months\" to \"this 30-day window, 60–90 days ago\".\n- Closing the loop requires the customer's knowledge of what shipped in that window.\n\n### Recommended next actions\n\n1. Pull commit and release history for the affected services in the drift window.\n2. Cross-reference with feature flag and config changes.\n3. Ask the team that owns these services what shipped in the window.\n4. If the cause is identified, the action is usually a code fix, not a mute — the events are real, just growing too fast.\n\n### Patterns referenced in this investigation\n\n`timeout_rpc_error_code_Unavailable_desc_data_refused_due_high_memory_usage`, `open_telemetry_opentelemetry_collector_contrib_connector_spanmetricsconnector`, `tat_okhttp_internal_intercept_kt`, `add_index_in_alert_instance_table_on_def_org_id_def_uid_and_current_state`, `processor_Str_batch`, `plugin_kubernetes_Unhandled_Error`, `driver_go_Registering_Node_Server`, `driver_go_Did_not_find_any_input_tags`, `efs_watch_dog_go_Copying_etc_amazon_efs_utils_conf_since_it_doesn_t_exist`, `driver_go_Registering_Controller_Server`, `metadata_go_getting_MetadataService`, `tat_okhttp_internal_connection_okhttp_kt`, `and_casual_viewing_offering_clear_views_of_celestial_objects_like_moon_and`, `until_Services_and_Endpoints_have_been_received_from_master_ipFamily_IPv`, `static_autoscaler_go_Calculating_unneeded_nodes`, `out_daemon_sets_go_Filtered_out_daemon_set_pods_unschedulable_pods_left`, `static_autoscaler_go_No_unschedulable_pods`, `go_Pod_demo_index_inducer_can_be_moved_template_node_eks_ng_cron_upcoming`, `filter_out_schedulable_go_pods_marked_as_unschedulable_can_be_scheduled`, `filter_out_schedulable_go_Schedulable_pods_present`\n\n---\n\n**Investigation metadata**: 19 patterns analyzed, 21 PromQL queries executed, total wall time 28603ms.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_dependency_check\",\"args\":{\"pattern\":\"timeout_rpc_error_code_Unavailable_desc_data_refused_due_high_memory_usage\"},\"reason\":\"check dashboards / alerts before any mute action\"},{\"tool\":\"log10x_correlate_cross_pillar\",\"args\":{\"anchor_type\":\"log10x_pattern\",\"anchor\":\"timeout_rpc_error_code_Unavailable_desc_data_refused_due_high_memory_usage\",\"window\":\"24h\"},\"reason\":\"find upstream metric anomaly co-moving with the pattern\"},{\"tool\":\"log10x_pattern_trend\",\"args\":{\"pattern\":\"timeout_rpc_error_code_Unavailable_desc_data_refused_due_high_memory_usage\"},\"reason\":\"time series for the investigated pattern\"}]-->\n\n--- stderr ---\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_015jdBTEpPk95W4eDZCCJMSk",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_trend --args '{\"pattern\": \"exhausted capacity node payment gateway request id req related plant run id idx\"}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01L4fVsyy7JJhSmn9dW2s8ch",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_trend --args '{\"pattern\": \"DNS resolution failed upstream service svc timeout after attempts resolver\"}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01CobnNFutEHHMBHNaex6ZF6",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_trend --args '{\"pattern\": \"restarting failed container app in pod canary synthetic canary run id idx\"}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_015jdBTEpPk95W4eDZCCJMSk",
+          "content": "exit=0\n--- stdout ---\nNo trend data for pattern \"exhausted_capacity_node_payment_gateway_request_id_req_related_plant_run_id_idx\" in the this week.\n\n--- stderr ---\n",
+          "is_error": false
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01L4fVsyy7JJhSmn9dW2s8ch",
+          "content": "exit=0\n--- stdout ---\nDNS resolution failed upstream service svc timeout after attempts resolver — this week trend\n\n  Baseline (first quarter):  ~$0.08/wk\n  Current (last quarter):    $0.08/wk\n  Change: stable\n\n  Peak: 333.2 KB at 2026-05-11 19:00:00 UTC\n  Low:  315.9 KB at 2026-05-11 18:00:00 UTC\n  Total: $0.0018/wk across 4 data points\n\n  ▓█▓▓\n\n--- stderr ---\n",
+          "is_error": false
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01CobnNFutEHHMBHNaex6ZF6",
+          "content": "exit=0\n--- stdout ---\nrestarting failed container app in pod canary synthetic canary run id idx — this week trend\n\n  Baseline (first quarter):  ~$0.16/wk\n  Current (last quarter):    $0.04/wk\n  Change: -76% decrease\n\n  Peak: 864.0 KB at 2026-05-11 16:00:00 UTC\n  Low:  157.3 KB at 2026-05-11 17:00:00 UTC\n  Total: $0.0024/wk across 3 data points\n\n--- stderr ---\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_01HkwNHqPkqK8aSJssKn5B6U",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_trend --args '{\"pattern\": \"run id idx synthetic canary mode bug run id github sha github run id idx\"}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_014sxpDg2Ef7GvBkyUDFkfCW",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_trend --args '{\"pattern\": \"are available pod canary Insufficient memory synthetic canary run id idx\"}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01FPCEaUJH1CNZosd8KCFSB2",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_trend --args '{\"pattern\": \"HTTP probe failed with statuscode pod canary synthetic canary run id idx\"}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01HkwNHqPkqK8aSJssKn5B6U",
+          "content": "exit=0\n--- stdout ---\nrun id idx synthetic canary mode bug run id github sha github run id idx — this week trend\n\n  Baseline (first quarter):  ~$0.57/wk\n  Current (last quarter):    $0.49/wk\n  Change: stable\n\n  Peak: 3.9 MB at 2026-05-11 18:00:00 UTC\n  Low:  862.8 KB at 2026-05-11 22:00:00 UTC\n  Total: $0.02/wk across 7 data points\n\n  ▒▒█▒▓░▒\n\n--- stderr ---\n",
+          "is_error": false
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_014sxpDg2Ef7GvBkyUDFkfCW",
+          "content": "exit=0\n--- stdout ---\nare available pod canary Insufficient memory synthetic canary run id idx — this week trend\n\n  Baseline (first quarter):  ~$0.16/wk\n  Current (last quarter):    $0.03/wk\n  Change: -79% decrease\n\n  Peak: 832.8 KB at 2026-05-11 16:00:00 UTC\n  Low:  142.7 KB at 2026-05-11 17:00:00 UTC\n  Total: $0.0024/wk across 3 data points\n\n--- stderr ---\n",
+          "is_error": false
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01FPCEaUJH1CNZosd8KCFSB2",
+          "content": "exit=0\n--- stdout ---\nHTTP probe failed with statuscode pod canary synthetic canary run id idx — this week trend\n\n  Baseline (first quarter):  ~$0.31/wk\n  Current (last quarter):    $0.08/wk\n  Change: -74% decrease\n\n  Peak: 1.6 MB at 2026-05-11 16:00:00 UTC\n  Low:  331.4 KB at 2026-05-11 17:00:00 UTC\n  Total: $0.0047/wk across 3 data points\n\n--- stderr ---\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_0162mhNj7mPUUPm4LP9Ada6g",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_correlate_cross_pillar --args '{\"anchor_type\": \"log10x_pattern\", \"anchor\": \"exhausted_capacity_node_payment_gateway_request_id_req_related_plant_run_id_idx\", \"window\": \"24h\"}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01SNSHdcPP2EJHFJg6NtoWsx",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_services --args '{}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_0162mhNj7mPUUPm4LP9Ada6g",
+          "content": "exit=0\n--- stdout ---\n## Cross-pillar metrics backend not configured\n\nThis MCP server doesn't currently have a customer metrics backend configured. Cross-pillar correlation joins log-side patterns to the customer's APM / infrastructure metrics; without a configured backend, the bridge cannot run.\n\n**What's out of reach without the cross-pillar backend**:\n\n- Correlating a spiking log pattern to its upstream metric anomaly (gateway latency, dependency saturation, etc.)\n- Translating a customer-metric anomaly back to the log patterns that caused it\n- Discovering join keys between the log enrichment label set and the customer metrics label set\n\n**To configure**:\n\n- (a) Set explicit env vars: `LOG10X_CUSTOMER_METRICS_URL` + `LOG10X_CUSTOMER_METRICS_TYPE`.\n- (b) Or expose one of the ambient-detect credential sets: `GRAFANA_CLOUD_API_KEY`, `DD_API_KEY`+`DD_APP_KEY`, `AWS_REGION` (AMP), `GOOGLE_APPLICATION_CREDENTIALS` (GCP Managed Prometheus), `PROMETHEUS_URL`.\n\n**Continuing without cross-pillar**:\n\nThe agent can still investigate using log-tier tools (event_lookup, pattern_trend, top_patterns, cost_drivers) and archive tools (retriever_query, retriever_series). Skip cross-pillar correlation in this chain and surface the missing-backend state in the synthesis.\n\n**Detection trace**:\n\n```\n  - explicit_env: skipped — LOG10X_CUSTOMER_METRICS_URL not set\n  - grafana_cloud: skipped — no GRAFANA_CLOUD_API_KEY / GCLOUD_API_KEY\n  - datadog_prom: skipped — no DD_API_KEY / DATADOG_API_KEY\n  - amp: skipped — no AWS_REGION / AWS_DEFAULT_REGION\n  - gcp_managed_prometheus: skipped — no GOOGLE_APPLICATION_CREDENTIALS\n  - prometheus_url: skipped — PROMETHEUS_URL not set\n```\n\n--- stderr ---\n",
+          "is_error": false
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01SNSHdcPP2EJHFJg6NtoWsx",
+          "content": "exit=0\n--- stdout ---\nMonitored Services (this week)\n\n  (unknown)            35.0 GB    100%   $52/wk\n  email                11.8 MB    0.0%   $0.02/wk\n  frontend             17.1 KB    0.0%   $0.0000/wk\n  recommendation       2.4 KB     0.0%   $0.0000/wk\n\n  4 services · 35.0 GB total · $53/wk at $1.5/GB\n  Top 3 services = 100% of volume.\n\n**Next actions**:\n  - Drill into the top service: `log10x_cost_drivers({ service: '(unknown)' })` for week-over-week deltas, or `log10x_top_patterns({ service: '(unknown)' })` for current top patterns.\n  - Investigate any spike: `log10x_investigate({ starting_point: '(unknown)' })` for a full causal-chain analysis.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_cost_drivers\",\"args\":{\"service\":\"(unknown)\"},\"reason\":\"week-over-week deltas on the top service\"},{\"tool\":\"log10x_top_patterns\",\"args\":{\"service\":\"(unknown)\"},\"reason\":\"current top patterns for the top service\"},{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"(unknown)\"},\"reason\":\"causal-chain analysis on the top service\"}]-->\n\n--- stderr ---\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_01XzMpCsxd1Bace25rMWKXnD",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_event_lookup --args '{\"pattern\": \"payment-service 503\"}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_0157U5Ko1Fp2JT8stnDes1Et",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_event_lookup --args '{\"pattern\": \"exhausted capacity payment gateway\"}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01XzMpCsxd1Bace25rMWKXnD",
+          "content": "exit=0\n--- stdout ---\nNo data found for pattern \"payment-service_503\". Check the pattern name (use underscores, e.g., Payment_Gateway_Timeout).\n\n--- stderr ---\n",
+          "is_error": false
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_0157U5Ko1Fp2JT8stnDes1Et",
+          "content": "exit=0\n--- stdout ---\nexhausted capacity payment gateway — $0 → $0.0010/wk\n\nServices:\n                  ERROR  $0.0010/wk   ($0 → $0.0010)  NEW\n\n1 service · 0 events\n\n**Next actions**:\n  - Time series via `log10x_pattern_trend({ pattern: 'exhausted_capacity_payment_gateway' })`.\n  - Before any mute / drop action, run `log10x_dependency_check({ pattern: 'exhausted_capacity_payment_gateway' })` to find dashboards / alerts that depend on it.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_pattern_trend\",\"args\":{\"pattern\":\"exhausted_capacity_payment_gateway\"},\"reason\":\"time series for the resolved pattern\"},{\"tool\":\"log10x_dependency_check\",\"args\":{\"pattern\":\"exhausted_capacity_payment_gateway\"},\"reason\":\"find dashboard / alert dependencies before muting\"}]-->\n\n--- stderr ---\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_014RYEDAzUWZbX7add13gKjt",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_trend --args '{\"pattern\": \"exhausted capacity payment gateway\"}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01LZJR7jBFYxMJuYhik6oVBo",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_event_lookup --args '{\"pattern\": \"payment-service returned\"}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_014RYEDAzUWZbX7add13gKjt",
+          "content": "exit=0\n--- stdout ---\nNo trend data for pattern \"exhausted_capacity_payment_gateway\" in the this week.\n\n--- stderr ---\n",
+          "is_error": false
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01LZJR7jBFYxMJuYhik6oVBo",
+          "content": "exit=0\n--- stdout ---\nNo data found for pattern \"payment-service_returned\". Check the pattern name (use underscores, e.g., Payment_Gateway_Timeout).\n\n--- stderr ---\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_01S42F1u1xbm6oQeUW3VNxJn",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_event_lookup --args '{\"pattern\": \"checkout retry\"}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01TfJgPecRdRzeRmE5kDKyHZ",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_event_lookup --args '{\"pattern\": \"synthetic canary checkout\"}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01S42F1u1xbm6oQeUW3VNxJn",
+          "content": "exit=0\n--- stdout ---\nNo data found for pattern \"checkout_retry\". Check the pattern name (use underscores, e.g., Payment_Gateway_Timeout).\n\n--- stderr ---\n",
+          "is_error": false
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01TfJgPecRdRzeRmE5kDKyHZ",
+          "content": "exit=0\n--- stdout ---\nNo data found for pattern \"synthetic_canary_checkout\". Check the pattern name (use underscores, e.g., Payment_Gateway_Timeout).\n\n--- stderr ---\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_01CohRQkdPKoYqQ1MMPi2UTC",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\": \"exhausted capacity node payment gateway request id req related plant run id idx\", \"window\": \"7d\"}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01BE5jg18wTtUH9J6QEZbb4f",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_trend --args '{\"pattern\": \"pattern probe never seen before ts run idx synthetic canary burst run id idx\"}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01CohRQkdPKoYqQ1MMPi2UTC",
+          "content": "exit=0\n--- stdout ---\n## Investigation: exhausted capacity node payment gateway request id req related plant run id idx, last 7d\n\n**Investigation id**: c89cca31-cf0d-4619-bd83-4fdbe60e0b69\n**Result**: Could not resolve \"exhausted capacity node payment gateway request id req related plant run id idx\" to a known pattern or service.\n\n**Supported inputs**:\n- A raw log line (will be templatized and matched by structural identity)\n- A pattern identity (symbolMessage / templateHash)\n- A service name\n- The literal string `\"environment\"`, `\"all\"`, or `\"audit\"` for an env-wide sweep\n\n**Try next**:\n- `log10x_event_lookup({ pattern: 'exhausted capacity node payment gateway request id req related plant run id idx' })` to search by substring\n- `log10x_services()` to list known services\n\n--- stderr ---\n",
+          "is_error": false
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01BE5jg18wTtUH9J6QEZbb4f",
+          "content": "exit=0\n--- stdout ---\npattern probe never seen before ts run idx synthetic canary burst run id idx — this week trend\n\n  Baseline (first quarter):  ~$0.13/wk\n  Current (last quarter):    $0.13/wk\n  Change: stable\n\n  Peak: 557.9 KB at 2026-05-11 15:00:00 UTC\n  Low:  557.9 KB at 2026-05-11 15:00:00 UTC\n  Total: $0.0008/wk across 1 data points\n\n--- stderr ---\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "I now have enough data to deliver a complete, well-structured synthesis. Let me compile the findings:\n\n---\n\n## Root-Cause Investigation: `payment-service returned 503 after 5 retries`\n\n### What was observed (all figures from tool output)\n\nThe `log10x_top_patterns` call returned **20 active ERROR-severity patterns** in the otel-demo environment this week at $4.6/wk total. Below is the classification of every co-firing ERROR pattern against the alert.\n\n---\n\n### (a) THE ALERT ITSELF\n\n**Pattern:** `run id idx synthetic canary mode bug run id github sha github run id idx`\n- Cost: **$0.02/wk** (#5 by volume)\n- Trend this week: **stable** (peak 3.9 MB at 2026-05-11 18:00 UTC, low 862.8 KB at 2026-05-11 22:00 UTC)\n- This is the synthetic-canary-app mode=bug pattern. The paged alert (`checkout retry blast: payment-service returned 503 after 5 retries; abandoning cart`) resolves structurally into the template `ERROR synthetic-canary-app: checkout retry blast: payment-service returned $ after $ retries; abandoning cart cart_id=cart_$`. It originates from the same `synthetic-canary-app` namespace as this pattern. **This is the alert itself (or its immediate sibling in the same canary run).**\n\n---\n\n### (b) PLAUSIBLY UPSTREAM-CAUSAL — but causation unverified\n\n**Pattern:** `exhausted capacity node payment gateway request id req related plant run id idx`\n- Cost: **$0.0002/wk** (#16 by volume)\n- Trend: **no trend data returned this week**; `event_lookup` found it as a NEW pattern ($0 → $0.0010/wk) with 0 currently reported events\n- **Assessment:** \"exhausted capacity … payment gateway\" is semantically the most plausible upstream cause of a payment-service 503. A capacity-exhausted payment gateway would naturally cause 503s to callers. **However:** the pattern has no trend data this week and event_lookup returned 0 events. The temporal overlap is asserted by the `top_patterns` ranking, not by a direct causal chain. **Potentially related, causation unverified.** Warrants further investigation (e.g., retrieve raw events from this pattern to confirm they pre-date the 503 burst).\n\n**Pattern:** `DNS resolution failed upstream service svc timeout after attempts resolver`\n- Cost: **$0.0020/wk** (#14 by volume)\n- Trend this week: **stable** (peak 333.2 KB at 2026-05-11 19:00 UTC; $0.0018/wk)\n- **Assessment:** DNS resolution failures on an upstream service could plausibly cause a payment-service dependency to become unreachable, yielding 503s. The pattern is stable (not spiking), which weakens the hypothesis that it is the *cause* of the current alert burst. **Potentially related, causation unverified.** The stable baseline suggests this is a chronic low-level issue, not an acute trigger.\n\n**Pattern:** `timeout rpc error code Unavailable desc data refused due high memory usage`\n- Cost: **$0.01/wk** (#7 by volume)\n- Drift: growing at **+0.4%/week** over 30 days — slow, monotonic regression, no discrete inflection\n- **Assessment:** gRPC `Unavailable` responses caused by high memory pressure is a mechanistically plausible pathway to payment-service 503s (a memory-pressured downstream refuses new requests). The slow drift means this is a background worsening condition, not a sudden trigger. **Potentially related as a contributing background condition, causation unverified.** Cross-pillar metrics (not available in this env) would be needed to confirm memory pressure co-incides with the 503 burst.\n\n---\n\n### (c) UNRELATED CONCURRENT NOISE\n\n| Pattern | Cost | Evidence of unrelatedness |\n|---|---|---|\n| `service instance id service name otelcol contrib service version otelcol` | $3.9/wk (#1) | OTel Collector self-reporting/telemetry; infra observability pipeline, not business logic |\n| `transport Error while dialing dial tcp lookup jaeger on no such host interval` | $0.46/wk (#2) | Jaeger DNS misconfiguration in the collector — unrelated to payment-service availability |\n| `OpenTelemetry error Export failure exception Export retry limit exceeded previous` | $0.09/wk (#3) | OTel export retries; telemetry pipeline saturation, not service-layer |\n| `transport Error while dialing dial tcp lookup jaeger on no such host dropped` | $0.04/wk (#4) | Same Jaeger DNS issue as #2; dropped spans |\n| `error OTLP logs exporter received Net HTTPServiceUnavailable code uri logs` | $0.02/wk (#6) | OTLP log exporter 503 — this is the *observability pipeline* receiving 503s, not the payment path |\n| `failed upload metrics reader collect and export timeout retry able request` | $0.01/wk (#8) | Metrics exporter timeout; telemetry pipeline |\n| `error OTel export failure data refused due high memory usage` | $0.01/wk (#9) | OTel exporter refused — collector-side memory pressure, not payment path |\n| `grpc addrConn createTransport failed connect Addr jaeger ServerName jaeger` | $0.0093/wk (#10) | Jaeger connectivity; telemetry pipeline |\n| `restarting failed container app in pod canary synthetic canary run id idx` | $0.0024/wk (#11) | Canary pod restart — **declining -76% this week**; this is *consequence* of canary failures, not upstream cause of 503s |\n| `are available pod canary Insufficient memory synthetic canary run id idx` | $0.0024/wk (#12) | Canary pod OOM events — **declining -79% this week**; canary infra noise |\n| `HTTP probe failed with statuscode pod canary synthetic canary run id idx` | $0.0024/wk (#13) | Canary liveness probe failures — **declining -74% this week**; canary infra noise co-firing with the same run |\n| `pattern probe never seen before ts run idx synthetic canary burst run id idx` | $0.0003/wk (#15) | Canary burst/novel-pattern probe; canary framework telemetry |\n| `OpenTelemetry error Unable export records` | $0.0002/wk (#17) | OTel pipeline |\n| `OpenTelemetry error Unable export spans` | $0.0002/wk (#18) | OTel pipeline |\n| `Result code` | $0.0002/wk (#19) | Indeterminate/generic; insufficient context to connect to payment path |\n| `failed create client in consumer scraper kafka client has run out of available` | $0.0001/wk (#20) | Kafka consumer; unrelated to payment checkout path |\n\n---\n\n### Synthesis & Recommendations\n\n**What you're looking at:** The alert is a synthetic canary running in `mode=bug`, deliberately exercising a 503 failure path on payment-service. It is not silent — it's actively firing at $0.02/wk, stable over this week.\n\n**Most plausible upstream causal candidates (unverified):**\n1. `exhausted capacity node payment gateway request id req related plant run id idx` — semantically the strongest match (capacity exhaustion → 503), but has no trend data this week and 0 current events. **Retrieve raw events and check timestamps against the alert burst before concluding causation.**\n2. `timeout rpc error code Unavailable desc data refused due high memory usage` — slow +0.4%/week drift over 30 days. A memory-pressured backend refusing RPC calls is a plausible contributing factor, but it's a background regression, not an acute trigger.\n3. `DNS resolution failed upstream service svc timeout after attempts resolver` — stable, chronic; unlikely to be the acute trigger but worth monitoring.\n\n**Recommended actions:**\n- Use `log10x_retriever_query` to pull raw events for `exhausted capacity node payment gateway` around the 503-burst timestamp to check temporal ordering (cause must precede effect).\n- Configure a metrics backend (`LOG10X_CUSTOMER_METRICS_URL`) to enable cross-pillar correlation — memory/CPU metrics for payment-service during the canary run are currently inaccessible.\n- The three **declining** canary pod patterns (restart, OOM, HTTP probe) are co-firing but trending down — they are canary infra noise, not causal.\n- The dominant cost pattern (otelcol, $3.9/wk) is pure observability-pipeline noise; consider an exclusion filter if it inflates alerting costs."
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": "Quick follow-up: rate each of the three patterns you identified on a 1-5 confidence scale for the claim 'this pattern caused the checkout retry storm in the user's pasted alert.' 1 = no causal evidence, just temporal coincidence; 5 = direct verified causal link with traced upstream dependency. For each, say which evidence supports the rating. Do not inflate ratings beyond what the evidence supports."
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "I need to re-examine what the tools actually returned for each of the three patterns before rating them. Let me pull the specific evidence without relying on memory."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01WRVynBvj78PDNq8aPCTfok",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_trend --args '{\"pattern\": \"exhausted capacity node payment gateway request id req related plant run id idx\"}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_011TT4hGd6NuAuBfCph1kVQh",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_trend --args '{\"pattern\": \"timeout rpc error code Unavailable desc data refused due high memory usage\"}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_018vK8Pm6L87VY843HBg7yLb",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_trend --args '{\"pattern\": \"DNS resolution failed upstream service svc timeout after attempts resolver\"}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01WRVynBvj78PDNq8aPCTfok",
+          "content": "exit=0\n--- stdout ---\nNo trend data for pattern \"exhausted_capacity_node_payment_gateway_request_id_req_related_plant_run_id_idx\" in the this week.\n\n--- stderr ---\n",
+          "is_error": false
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_011TT4hGd6NuAuBfCph1kVQh",
+          "content": "exit=0\n--- stdout ---\ntimeout rpc error code Unavailable desc data refused due high memory usage — this week trend\n\n  Baseline (first quarter):  ~$0.01/wk\n  Current (last quarter):    $0.01/wk\n  Change: stable\n\n  Peak: 86.1 KB at 2026-05-06 13:00:00 UTC\n  Low:  20.2 KB at 2026-05-11 22:00:00 UTC\n  Total: $0.01/wk across 169 data points\n\n  ▓▓▓▓▒▒▒▒▒▓▓▒▓▓▒▓▒▒▓▒▒▓▒▓▓▓▓▓▓▒▓▓▒▓▓▒▓▓▒▒▒▒▒\n\n--- stderr ---\n",
+          "is_error": false
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_018vK8Pm6L87VY843HBg7yLb",
+          "content": "exit=0\n--- stdout ---\nDNS resolution failed upstream service svc timeout after attempts resolver — this week trend\n\n  Baseline (first quarter):  ~$0.08/wk\n  Current (last quarter):    $0.08/wk\n  Change: stable\n\n  Peak: 333.2 KB at 2026-05-11 19:00:00 UTC\n  Low:  315.9 KB at 2026-05-11 18:00:00 UTC\n  Total: $0.0018/wk across 4 data points\n\n  ▓█▓▓\n\n--- stderr ---\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_01YBzxzRdCdmDTFfmdL76id5",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_event_lookup --args '{\"pattern\": \"exhausted capacity node payment gateway\"}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_0179oXoPWj15j3K4nP28gXq9",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_event_lookup --args '{\"pattern\": \"rpc error code Unavailable desc data refused due high memory\"}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01GdRWnvfYerYfpCVdGsUcR2",
+          "name": "bash",
+          "input": {
+            "command": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_event_lookup --args '{\"pattern\": \"DNS resolution failed upstream service\"}'"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01YBzxzRdCdmDTFfmdL76id5",
+          "content": "exit=0\n--- stdout ---\nexhausted capacity node payment gateway — $0 → $0.0010/wk\n\nServices:\n                  ERROR  $0.0010/wk   ($0 → $0.0010)  NEW\n\n1 service · 0 events\n\n**Next actions**:\n  - Time series via `log10x_pattern_trend({ pattern: 'exhausted_capacity_node_payment_gateway' })`.\n  - Before any mute / drop action, run `log10x_dependency_check({ pattern: 'exhausted_capacity_node_payment_gateway' })` to find dashboards / alerts that depend on it.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_pattern_trend\",\"args\":{\"pattern\":\"exhausted_capacity_node_payment_gateway\"},\"reason\":\"time series for the resolved pattern\"},{\"tool\":\"log10x_dependency_check\",\"args\":{\"pattern\":\"exhausted_capacity_node_payment_gateway\"},\"reason\":\"find dashboard / alert dependencies before muting\"}]-->\n\n--- stderr ---\n",
+          "is_error": false
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_0179oXoPWj15j3K4nP28gXq9",
+          "content": "exit=0\n--- stdout ---\nrpc error code Unavailable desc data refused due high memory — $0 → $0.01/wk\n\nServices:\n                  ERROR  $0.01/wk     ($0 → $0.01)  NEW\n\n1 service · 0 events\n\n**Next actions**:\n  - Time series via `log10x_pattern_trend({ pattern: 'rpc_error_code_Unavailable_desc_data_refused_due_high_memory' })`.\n  - Before any mute / drop action, run `log10x_dependency_check({ pattern: 'rpc_error_code_Unavailable_desc_data_refused_due_high_memory' })` to find dashboards / alerts that depend on it.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_pattern_trend\",\"args\":{\"pattern\":\"rpc_error_code_Unavailable_desc_data_refused_due_high_memory\"},\"reason\":\"time series for the resolved pattern\"},{\"tool\":\"log10x_dependency_check\",\"args\":{\"pattern\":\"rpc_error_code_Unavailable_desc_data_refused_due_high_memory\"},\"reason\":\"find dashboard / alert dependencies before muting\"}]-->\n\n--- stderr ---\n",
+          "is_error": false
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01GdRWnvfYerYfpCVdGsUcR2",
+          "content": "exit=0\n--- stdout ---\nDNS resolution failed upstream service — $0 → $0.0024/wk\n\nServices:\n                  ERROR  $0.0024/wk   ($0 → $0.0024)  NEW\n\n1 service · 0 events\n\n**Next actions**:\n  - Time series via `log10x_pattern_trend({ pattern: 'DNS_resolution_failed_upstream_service' })`.\n  - Before any mute / drop action, run `log10x_dependency_check({ pattern: 'DNS_resolution_failed_upstream_service' })` to find dashboards / alerts that depend on it.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_pattern_trend\",\"args\":{\"pattern\":\"DNS_resolution_failed_upstream_service\"},\"reason\":\"time series for the resolved pattern\"},{\"tool\":\"log10x_dependency_check\",\"args\":{\"pattern\":\"DNS_resolution_failed_upstream_service\"},\"reason\":\"find dashboard / alert dependencies before muting\"}]-->\n\n--- stderr ---\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "All three `event_lookup` calls returned **0 events** — no raw log lines were retrievable, no service attribution, no timestamps. That is the definitive evidence ceiling. Here are the honest ratings:\n\n---\n\n## Causation Confidence Ratings\n\n### Scale reminder\n- **1** — temporal coincidence only; no semantic or structural causal evidence\n- **2** — plausible semantic mechanism, but no volume, timing, or service-linkage data to support it\n- **3** — plausible mechanism + some corroborating signal (e.g., confirmed presence, trend data)\n- **4** — mechanism + confirmed presence + temporal ordering consistent with causation\n- **5** — traced upstream dependency with direct evidence (call graph, trace ID, or confirmed before/after ordering)\n\n---\n\n### Pattern 1: `exhausted capacity node payment gateway request id req related plant run id idx`\n**Rating: 2 / 5**\n\n**Evidence supporting the rating:**\n- *For the 2:* The phrase \"exhausted capacity … payment gateway\" is semantically the strongest match to a service returning 503s. Capacity exhaustion is a well-known proximate cause of HTTP 503. That semantic alignment is real and non-trivial — it earns one point above pure coincidence.\n- *Against going higher:* `event_lookup` returned **0 events** and **no service attribution**. `pattern_trend` returned **no trend data this week**. The pattern is listed as **NEW** in the cost table ($0 → $0.0002/wk), meaning it has not been consistently observed. There is no timestamp, no trace ID, no service name, and no confirmed temporal ordering relative to the 503 burst. The semantic fit is hypothesis-generating, not hypothesis-confirming.\n\n---\n\n### Pattern 2: `timeout rpc error code Unavailable desc data refused due high memory usage`\n**Rating: 2 / 5**\n\n**Evidence supporting the rating:**\n- *For the 2:* The pattern has **169 data points this week** with a confirmed trend (stable, $0.01/wk, peak 86.1 KB at 2026-05-06 13:00 UTC, low 20.2 KB at 2026-05-11 22:00 UTC). It is **actually present and firing** — that is more than pattern 1 can claim. gRPC `Unavailable` + \"data refused due high memory\" describes a backend under memory pressure shedding requests, which is a mechanistically sound path to 503s.\n- *Against going higher:* `event_lookup` returned **0 events and no service name** — the tool could not attribute this pattern to any named service in the environment. The trend is **stable** (no spike coinciding with the alert). The 30-day drift investigation showed only **+0.4%/week** — a slow background regression, not an acute incident trigger. There is no trace ID, no call-graph linkage to `payment-service`, and no evidence this pattern's timestamps precede the 503 burst. Chronic background noise that *could* be a contributing condition is not the same as the cause of a specific retry storm.\n\n---\n\n### Pattern 3: `DNS resolution failed upstream service svc timeout after attempts resolver`\n**Rating: 1 / 5**\n\n**Evidence supporting the rating:**\n- *For the 1:* The pattern is co-firing (present in `top_patterns` at $0.0020/wk). DNS failure on an upstream service *could* theoretically render a payment dependency unreachable, ultimately yielding 503s. That is the only link.\n- *Against going higher:* `event_lookup` returned **0 events and no service name** — cannot confirm which service or which upstream is affected. The trend shows **only 4 data points this week**, with a range of 315.9–333.2 KB — extremely stable, with no burst or inflection. The pattern was **already present at the same rate** before the alert fired (baseline ≈ current in the trend). There is no semantic specificity tying \"upstream service\" to `payment-service`, no trace linkage, and no timing evidence. This is a chronic ambient error that happens to be co-firing; the evidence does not rise above temporal coincidence.\n\n---\n\n### Summary table\n\n| Pattern (verbatim from tool output) | Rating | Limiting factor |\n|---|---|---|\n| `exhausted capacity node payment gateway request id req related plant run id idx` | **2 / 5** | 0 retrievable events; no service attribution; no trend data; NEW pattern |\n| `timeout rpc error code Unavailable desc data refused due high memory usage` | **2 / 5** | 0 retrievable events; no service name; stable (not spiking); no temporal ordering |\n| `DNS resolution failed upstream service svc timeout after attempts resolver` | **1 / 5** | 0 retrievable events; no service name; stable at 4 data points; pure coincidence |\n\n**Bottom line:** The honest evidence ceiling for all three candidates is low. The tools returned no raw events, no service attribution, and no trace linkage for any of them. To move any rating above 2, you would need: (a) raw event retrieval confirming the pattern fired *before* the 503 burst, (b) a service name matching a `payment-service` dependency, or (c) a distributed trace ID connecting the two. None of those exist in the current tool output."
+        }
+      ]
+    }
+  ],
+  "bashCommands": [
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --list",
+      "stdout": "log10x_advise_compact\nlog10x_advise_install\nlog10x_advise_receiver\nlog10x_advise_reporter\nlog10x_advise_retriever\nlog10x_backfill_metric\nlog10x_correlate_cross_pillar\nlog10x_cost_drivers\nlog10x_customer_metrics_query\nlog10x_dependency_check\nlog10x_discover_env\nlog10x_discover_join\nlog10x_discover_labels\nlog10x_doctor\nlog10x_event_lookup\nlog10x_exclusion_filter\nlog10x_extract_templates\nlog10x_investigate\nlog10x_investigation_get\nlog10x_list_by_label\nlog10x_login_status\nlog10x_pattern_examples\nlog10x_pattern_trend\nlog10x_resolve_batch\nlog10x_retriever_query\nlog10x_retriever_query_status\nlog10x_retriever_series\nlog10x_savings\nlog10x_services\nlog10x_top_patterns\nlog10x_translate_metric_to_patterns\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 33391
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"severity\": \"ERROR\", \"limit\": 20}'",
+      "stdout": "Top 20 patterns — all services (this week) · $4.6/wk total\n⚠ These are CURRENT RANK by cost (biggest right now). This is NOT a growth/delta ranking — do not re-label as \"cost drivers\" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.\n\n#1  service instance id service name otelcol contrib service version otelcol $3.9/wk      ERROR\n#2  transport Error while dialing dial tcp lookup jaeger on no such host interval $0.46/wk     ERROR\n#3  OpenTelemetry error Export failure exception Export retry limit exceeded previous $0.09/wk     ERROR\n#4  transport Error while dialing dial tcp lookup jaeger on no such host dropped $0.04/wk     ERROR\n#5  run id idx synthetic canary mode bug run id github sha github run id idx $0.02/wk     ERROR\n#6  error OTLP logs exporter received Net HTTPServiceUnavailable code uri logs $0.02/wk     ERROR  email\n#7  timeout rpc error code Unavailable desc data refused due high memory usage $0.01/wk     ERROR\n#8  failed upload metrics reader collect and export timeout retry able request $0.01/wk     ERROR\n#9  error OTel export failure data refused due high memory usage $0.01/wk     ERROR\n#10  grpc addrConn createTransport failed connect Addr jaeger ServerName jaeger $0.0093/wk   ERROR\n#11  restarting failed container app in pod canary synthetic canary run id idx $0.0024/wk   ERROR\n#12  are available pod canary Insufficient memory synthetic canary run id idx $0.0024/wk   ERROR\n#13  HTTP probe failed with statuscode pod canary synthetic canary run id idx $0.0024/wk   ERROR\n#14  DNS resolution failed upstream service svc timeout after attempts resolver $0.0020/wk   ERROR\n#15  pattern probe never seen before ts run idx synthetic canary burst run id idx $0.0003/wk   ERROR\n#16  exhausted capacity node payment gateway request id req related plant run id idx $0.0002/wk   ERROR\n#17  OpenTelemetry error Unable export records $0.0002/wk   ERROR\n#18  OpenTelemetry error Unable export spans $0.0002/wk   ERROR\n#19  Result code                         $0.0002/wk   ERROR\n#20  failed create client in consumer scraper kafka client has run out of available $0.0001/wk   ERROR\n\nTop 20 = 100% of total volume in scope / 0% in the long tail.\n\n**Next actions**:\n  - call `log10x_investigate({ starting_point: 'service_instance_id_service_name_otelcol_contrib_service_version_otelcol' })` to trace what's driving the top pattern.\n  - call `log10x_cost_drivers({ timeRange: '7d' })` for week-over-week deltas across all services.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\"},\"reason\":\"trace the top pattern\"},{\"tool\":\"log10x_cost_drivers\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"week-over-week deltas across all services\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 30940
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_examples --args '{\"pattern_text\": \"run id idx synthetic canary mode bug run id github sha github run id idx\"}'",
+      "stdout": "Tool 'log10x_pattern_examples' threw: Wrong type for `pattern`: Required.\n  Field guidance: Pattern name (Symbol Message, e.g. `Payment_Gateway_Timeout`) or a pasted raw log line. Pasted lines resolve to the matching pattern via the same templater path as log10x_resolve_batch. Required.\n",
+      "stderr": "",
+      "exitCode": 1,
+      "durationMs": 44609
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_examples --args '{\"pattern_text\": \"exhausted capacity node payment gateway request id req related plant run id idx\"}'",
+      "stdout": "Tool 'log10x_pattern_examples' threw: Wrong type for `pattern`: Required.\n  Field guidance: Pattern name (Symbol Message, e.g. `Payment_Gateway_Timeout`) or a pasted raw log line. Pasted lines resolve to the matching pattern via the same templater path as log10x_resolve_batch. Required.\n",
+      "stderr": "",
+      "exitCode": 1,
+      "durationMs": 47597
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_examples --args '{\"pattern_text\": \"error OTLP logs exporter received Net HTTPServiceUnavailable code uri logs\"}'",
+      "stdout": "Tool 'log10x_pattern_examples' threw: Wrong type for `pattern`: Required.\n  Field guidance: Pattern name (Symbol Message, e.g. `Payment_Gateway_Timeout`) or a pasted raw log line. Pasted lines resolve to the matching pattern via the same templater path as log10x_resolve_batch. Required.\n",
+      "stderr": "",
+      "exitCode": 1,
+      "durationMs": 39381
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_resolve_batch --args '{\"lines\": [\"ERROR synthetic-canary-app: checkout retry blast: payment-service returned 503 after 5 retries; abandoning cart cart_id=cart_000028\", \"exhausted capacity node payment gateway request id req\", \"DNS resolution failed upstream service svc timeout after attempts resolver\", \"error OTLP logs exporter received Net HTTPServiceUnavailable code uri logs\"]}'",
+      "stdout": "Tool 'log10x_resolve_batch' threw: Wrong type for `source`: Required.\n  Field guidance: Input mode. `file`: read from local path. `events`: array of raw log lines. `text`: a single string containing newline-separated lines (use this when the model is passing through a Bash/SIEM output it already has in hand).\n",
+      "stderr": "",
+      "exitCode": 1,
+      "durationMs": 40758
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_resolve_batch --args '{\"source\": \"events\", \"lines\": [\"ERROR synthetic-canary-app: checkout retry blast: payment-service returned 503 after 5 retries; abandoning cart cart_id=cart_000028\", \"exhausted capacity node payment gateway request id req related plant run id idx\", \"DNS resolution failed upstream service svc timeout after attempts resolver\", \"error OTLP logs exporter received Net HTTPServiceUnavailable code uri logs\"]}'",
+      "stdout": "Tool 'log10x_resolve_batch' threw: source=events requires an `events` array.\n",
+      "stderr": "",
+      "exitCode": 1,
+      "durationMs": 42378
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_resolve_batch --args '{\"source\": \"events\", \"events\": [\"ERROR synthetic-canary-app: checkout retry blast: payment-service returned 503 after 5 retries; abandoning cart cart_id=cart_000028\", \"exhausted capacity node payment gateway request id req related plant run id idx\", \"DNS resolution failed upstream service svc timeout after attempts resolver\", \"error OTLP logs exporter received Net HTTPServiceUnavailable code uri logs\"]}'",
+      "stdout": "## Batch Triage\n\n4 events, resolved into 4 distinct patterns. Templater wall time: 16952ms. Input size: 361 B. Execution: local tenx CLI (privacy mode — no network egress).\n\n### Top 4 patterns by interestingness\n\n**#1  ERROR synthetic-canary-app: checkout retry blast: payment-s…**  · 1 events (25% of batch) · interestingness 0.47\n`0HPxh_i<:a` — ERROR synthetic-canary-app: checkout retry blast: payment-service returned $ after $ retries; abandoning cart cart_id=cart_$\n\nVariable concentration (top values within this batch):\n  - returned (inferred) _(name inferred — medium confidence)_ · 1 distinct · `503` 100%\n  - after (inferred) _(name inferred — medium confidence)_ · 1 distinct · `5` 100%\n  - cart_ (inferred) _(name inferred — medium confidence)_ · 1 distinct · `000028` 100%\n\n**Next actions**:\n  - call `log10x_investigate({ starting_point: '0HPxh_i<:a' })` for historical correlation (requires Reporter tier).\n\n**#2  exhausted capacity node payment gateway request id req rela…**  · 1 events (25% of batch) · interestingness 0.22\n`-M.P*oCQ WU` — exhausted capacity node payment gateway request id req related plant run id idx\n\n**Next actions**:\n  - call `log10x_investigate({ starting_point: '-M.P*oCQ WU' })` for historical correlation (requires Reporter tier).\n\n**#3  DNS resolution failed upstream service svc timeout after at…**  · 1 events (25% of batch) · interestingness 0.22\n`-#TQ|QHrgea` — DNS resolution failed upstream service svc timeout after attempts resolver\n\n**Next actions**:\n  - call `log10x_investigate({ starting_point: '-#TQ|QHrgea' })` for historical correlation (requires Reporter tier).\n\n**#4  error OTLP logs exporter received Net HTTPServiceUnavailabl…**  · 1 events (25% of batch) · interestingness 0.22\n`Ad*Vryni|D` — error OTLP logs exporter received Net HTTPServiceUnavailable code uri logs\n\n**Next actions**:\n  - call `log10x_investigate({ starting_point: 'Ad*Vryni|D' })` for historical correlation (requires Reporter tier).\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"0HPxh_i<:a\"},\"reason\":\"historical correlation for 0HPxh_i<:a\"},{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"-M.P*oCQ WU\"},\"reason\":\"historical correlation for -M.P*oCQ WU\"},{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"-#TQ|QHrgea\"},\"reason\":\"historical correlation for -#TQ|QHrgea\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 58224
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\": \"0HPxh_i<:a\"}'",
+      "stdout": "## Investigation: 0HPxh_i<:a, last 1h\n\n**Investigation id**: e72da6a4-7611-49ad-a122-aa37fb29729e\n**Result**: Could not resolve \"0HPxh_i<:a\" to a known pattern or service.\n\n**Supported inputs**:\n- A raw log line (will be templatized and matched by structural identity)\n- A pattern identity (symbolMessage / templateHash)\n- A service name\n- The literal string `\"environment\"`, `\"all\"`, or `\"audit\"` for an env-wide sweep\n\n**Try next**:\n- `log10x_event_lookup({ pattern: '0HPxh_i<:a' })` to search by substring\n- `log10x_services()` to list known services\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 46883
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\": \"-M.P*oCQ WU\"}'",
+      "stdout": "## Investigation: -M.P*oCQ WU, last 1h\n\n**Investigation id**: 8aa6510c-5d44-480d-8d48-192448bedceb\n**Result**: Could not resolve \"-M.P*oCQ WU\" to a known pattern or service.\n\n**Supported inputs**:\n- A raw log line (will be templatized and matched by structural identity)\n- A pattern identity (symbolMessage / templateHash)\n- A service name\n- The literal string `\"environment\"`, `\"all\"`, or `\"audit\"` for an env-wide sweep\n\n**Try next**:\n- `log10x_event_lookup({ pattern: '-M.P*oCQ WU' })` to search by substring\n- `log10x_services()` to list known services\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 45271
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\": \"-#TQ|QHrgea\"}'",
+      "stdout": "## Investigation: -#TQ|QHrgea, last 1h\n\n**Investigation id**: 70b94843-a170-4744-9e6c-73a9c1ecb16a\n**Result**: Could not resolve \"-#TQ|QHrgea\" to a known pattern or service.\n\n**Supported inputs**:\n- A raw log line (will be templatized and matched by structural identity)\n- A pattern identity (symbolMessage / templateHash)\n- A service name\n- The literal string `\"environment\"`, `\"all\"`, or `\"audit\"` for an env-wide sweep\n\n**Try next**:\n- `log10x_event_lookup({ pattern: '-#TQ|QHrgea' })` to search by substring\n- `log10x_services()` to list known services\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 43544
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\": \"run id idx synthetic canary mode bug run id github sha github run id idx\"}'",
+      "stdout": "## Investigation: run id idx synthetic canary mode bug run id github sha github run id idx, last 1h\n\n**Investigation id**: d980c262-86af-4fd4-8a23-f4737cdcb434\n**Result**: No significant pattern movement in the last 1h. Nothing crossed the noise floor.\n\n**Noise floor applied**: 0.001\n\n**Try next**:\n- Widen the window: `log10x_investigate({ starting_point: 'run id idx synthetic canary mode bug run id github sha github run id idx', window: '24h' })` — most incident inflections appear within 24h\n- Or for gradual drift: `log10x_investigate({ starting_point: 'run id idx synthetic canary mode bug run id github sha github run id idx', window: '30d' })`\n- Check the trend directly: `log10x_pattern_trend({ pattern: 'run id idx synthetic canary mode bug run id github sha github run id idx' })`\n- Confirm the anchor exists: use a specific log line or pattern hash rather than a service name\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_dependency_check\",\"args\":{\"pattern\":\"run_id_idx_synthetic_canary_mode_bug_run_id_github_sha_github_run_id_idx\"},\"reason\":\"check dashboards / alerts before any mute action\"},{\"tool\":\"log10x_correlate_cross_pillar\",\"args\":{\"anchor_type\":\"log10x_pattern\",\"anchor\":\"run_id_idx_synthetic_canary_mode_bug_run_id_github_sha_github_run_id_idx\",\"window\":\"1h\"},\"reason\":\"find upstream metric anomaly co-moving with the pattern\"},{\"tool\":\"log10x_pattern_trend\",\"args\":{\"pattern\":\"run_id_idx_synthetic_canary_mode_bug_run_id_github_sha_github_run_id_idx\"},\"reason\":\"time series for the investigated pattern\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 41620
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\": \"all\"}'",
+      "stdout": "## Environment audit, last 1h\n\n**Investigation id**: c2ee22b4-4061-4ac7-8af1-cab673de8bd4\n**Environment**: demo\n**Reporter tier**: edge\n\n### Top movers\n\n- `Deleted_snapshot_files_snapshot_offset_epoch_org_apache_kafka_snapshot_Snapshots` (`unknown`) — grew +77% vs 24h ago\n- `AdService_Targeted_ad_request_received_binoculars_trace_id_span_id_trace_flags` (`unknown`) — declined -64% vs 24h ago\n- `main` (`unknown`) — declined -51% vs 24h ago\n- `var_www_vendor_react_event_loop_src_Loop_php_React_EventLoop_run` (`unknown`) — declined -37% vs 24h ago\n- `internal_function_React_EventLoop_Loop_closure_React_EventLoop_Loop_get` (`unknown`) — declined -37% vs 24h ago\n- `OpenTelemetry_error_Export_failure_exception_Export_retry_limit_exceeded_previous` (`unknown`) — declined -37% vs 24h ago\n- `failed_upload_metrics_reader_collect_and_export_timeout_retry_able_request` (`unknown`) — grew +32% vs 24h ago\n- `loyalty_level_silver` (`unknown`) — grew +30% vs 24h ago\n\n**Next action**: investigate the top mover individually:\n`log10x_investigate({ starting_point: 'Deleted_snapshot_files_snapshot_offset_epoch_org_apache_kafka_snapshot_Snapshots', window: '1h' })`\n\n_Note: declines (negative %) are real signals — a pattern that stopped firing may indicate a service crashed, a monitor was muted, or a real upstream change. Treat them the same way you treat spikes._\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"Deleted_snapshot_files_snapshot_offset_epoch_org_apache_kafka_snapshot_Snapshots\",\"window\":\"1h\"},\"reason\":\"drill into the top mover from the env-wide sweep\"},{\"tool\":\"log10x_dependency_check\",\"args\":{\"pattern\":\"Deleted_snapshot_files_snapshot_offset_epoch_org_apache_kafka_snapshot_Snapshots\"},\"reason\":\"check refs before any mute on the top mover\"},{\"tool\":\"log10x_correlate_cross_pillar\",\"args\":{\"anchor_type\":\"log10x_pattern\",\"anchor\":\"Deleted_snapshot_files_snapshot_offset_epoch_org_apache_kafka_snapshot_Snapshots\",\"window\":\"1h\"},\"reason\":\"find upstream metric anomaly co-moving with the top mover\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 42508
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\": \"exhausted capacity node payment gateway request id req related plant run id idx\", \"window\": \"24h\"}'",
+      "stdout": "## Investigation: exhausted capacity node payment gateway request id req related plant run id idx, last 24h\n\n**Investigation id**: a78c9f9d-b05d-4cb1-9584-0eb712cf1705\n**Result**: No significant pattern movement in the last 24h. Nothing crossed the noise floor.\n\n**Noise floor applied**: 0.001\n\n**Try next**:\n- Widen the window: `log10x_investigate({ starting_point: 'exhausted capacity node payment gateway request id req related plant run id idx', window: '24h' })`\n- Or for gradual drift: `log10x_investigate({ starting_point: 'exhausted capacity node payment gateway request id req related plant run id idx', window: '30d' })`\n- Check the trend directly: `log10x_pattern_trend({ pattern: 'exhausted capacity node payment gateway request id req related plant run id idx' })`\n- Confirm the anchor exists: use a specific log line or pattern hash rather than a service name\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_dependency_check\",\"args\":{\"pattern\":\"exhausted_capacity_node_payment_gateway_request_id_req_related_plant_run_id_idx\"},\"reason\":\"check dashboards / alerts before any mute action\"},{\"tool\":\"log10x_correlate_cross_pillar\",\"args\":{\"anchor_type\":\"log10x_pattern\",\"anchor\":\"exhausted_capacity_node_payment_gateway_request_id_req_related_plant_run_id_idx\",\"window\":\"24h\"},\"reason\":\"find upstream metric anomaly co-moving with the pattern\"},{\"tool\":\"log10x_pattern_trend\",\"args\":{\"pattern\":\"exhausted_capacity_node_payment_gateway_request_id_req_related_plant_run_id_idx\"},\"reason\":\"time series for the investigated pattern\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 40969
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\": \"DNS resolution failed upstream service svc timeout after attempts resolver\", \"window\": \"24h\"}'",
+      "stdout": "## Investigation: DNS resolution failed upstream service svc timeout after attempts resolver, last 24h\n\n**Investigation id**: 2d0e06e8-f41e-431f-bed9-fb321baca006\n**Result**: Could not resolve \"DNS resolution failed upstream service svc timeout after attempts resolver\" to a known pattern or service.\n\n**Supported inputs**:\n- A raw log line (will be templatized and matched by structural identity)\n- A pattern identity (symbolMessage / templateHash)\n- A service name\n- The literal string `\"environment\"`, `\"all\"`, or `\"audit\"` for an env-wide sweep\n\n**Try next**:\n- `log10x_event_lookup({ pattern: 'DNS resolution failed upstream service svc timeout after attempts resolver' })` to search by substring\n- `log10x_services()` to list known services\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 33757
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\": \"timeout rpc error code Unavailable desc data refused due high memory usage\", \"window\": \"24h\"}'",
+      "stdout": "## Investigation: timeout rpc error code Unavailable desc data refused due high memory usage, last 30d\n\n**Investigation id**: 3b05f4e2-2df3-4f2c-a337-75d9bb24dcda\n**Anchor**: `timeout_rpc_error_code_Unavailable_desc_data_refused_due_high_memory_usage` (resolved from raw_log_line)\n**Environment**: demo\n**Shape**: gradual drift (no discrete inflection)\n**Reporter tier**: edge\n**Metric primitive**: event_count\n**Drift threshold**: 1.0%/week\n\n### Drift summary\n\n`timeout_rpc_error_code_Unavailable_desc_data_refused_due_high_memory_usage` has been growing at **+0.4%/week** across the last 30d, with no discrete inflection point. The growth is monotonic and sustained — this is a slow regression that has been compounding.\n\n### Co-drifting patterns (cohort)\n\nPatterns growing at similar rates in the same window:\n\n| Pattern | Service | Slope/week | Similarity |\n|---|---|---|---|\n| `open_telemetry_opentelemetry_collector_contrib_connector_spanmetricsconnector` | opentelemetry-collector | +0.2% | 56% |\n| `tat_okhttp_internal_intercept_kt` | — | +0.8% | 51% |\n| `add_index_in_alert_instance_table_on_def_org_id_def_uid_and_current_state` | grafana | +1.0% | 42% |\n| `processor_Str_batch` | — | +1.1% | 38% |\n| `plugin_kubernetes_Unhandled_Error` | coredns | +1.1% | 38% |\n| `driver_go_Registering_Node_Server` | — | +1.4% | 31% |\n| `driver_go_Did_not_find_any_input_tags` | — | +1.4% | 31% |\n| `efs_watch_dog_go_Copying_etc_amazon_efs_utils_conf_since_it_doesn_t_exist` | — | +1.4% | 31% |\n| `driver_go_Registering_Controller_Server` | — | +1.4% | 31% |\n| `metadata_go_getting_MetadataService` | — | +1.4% | 31% |\n| `tat_okhttp_internal_connection_okhttp_kt` | kafka | +1.6% | 26% |\n| `and_casual_viewing_offering_clear_views_of_celestial_objects_like_moon_and` | — | -0.1% | 0% |\n| `until_Services_and_Endpoints_have_been_received_from_master_ipFamily_IPv` | — | -0.7% | 0% |\n| `static_autoscaler_go_Calculating_unneeded_nodes` | — | -14.9% | 0% |\n| `out_daemon_sets_go_Filtered_out_daemon_set_pods_unschedulable_pods_left` | — | -14.9% | 0% |\n| `static_autoscaler_go_No_unschedulable_pods` | — | -12.3% | 0% |\n| `go_Pod_demo_index_inducer_can_be_moved_template_node_eks_ng_cron_upcoming` | — | -0.8% | 0% |\n| `filter_out_schedulable_go_pods_marked_as_unschedulable_can_be_scheduled` | — | -14.9% | 0% |\n| `filter_out_schedulable_go_Schedulable_pods_present` | — | -3.7% | 0% |\n\nThese patterns likely share an upstream cause — typically a change that shipped weeks ago and has been gradually scaling. **The cohort is not a causal chain** (drift cases don't have one); it's a search-space narrowing.\n\n### Suggested verification commands\n\nThe drift cause is in a historical deploy window, not recent activity. Look 4–12 weeks back:\n\n```bash\ngh api /repos/$GH_OWNER/<service>/commits?since=2026-02-11&until=2026-04-12\ngh api /repos/$GH_OWNER/<service>/releases?per_page=30\n# Cross-reference with feature flag changes, config updates, rollouts in the same window.\n```\n\n**Note**: kubectl events older than 7 days are typically rotated out. CI/CD deploy logs older than your retention may also be unavailable. Older deploys may need to be reconstructed from release tags or change tickets.\n\n### Limitations of drift investigation\n\nDrift cases require customer institutional knowledge to fully resolve. The tool's job is **search-space reduction, not root-cause closure**.\n\n- The cohort narrows the candidate set from \"every pattern in your environment\" to \"these patterns growing at similar rates\".\n- The recommended correlation window narrows the timeframe from \"the last 6 months\" to \"this 30-day window, 60–90 days ago\".\n- Closing the loop requires the customer's knowledge of what shipped in that window.\n\n### Recommended next actions\n\n1. Pull commit and release history for the affected services in the drift window.\n2. Cross-reference with feature flag and config changes.\n3. Ask the team that owns these services what shipped in the window.\n4. If the cause is identified, the action is usually a code fix, not a mute — the events are real, just growing too fast.\n\n### Patterns referenced in this investigation\n\n`timeout_rpc_error_code_Unavailable_desc_data_refused_due_high_memory_usage`, `open_telemetry_opentelemetry_collector_contrib_connector_spanmetricsconnector`, `tat_okhttp_internal_intercept_kt`, `add_index_in_alert_instance_table_on_def_org_id_def_uid_and_current_state`, `processor_Str_batch`, `plugin_kubernetes_Unhandled_Error`, `driver_go_Registering_Node_Server`, `driver_go_Did_not_find_any_input_tags`, `efs_watch_dog_go_Copying_etc_amazon_efs_utils_conf_since_it_doesn_t_exist`, `driver_go_Registering_Controller_Server`, `metadata_go_getting_MetadataService`, `tat_okhttp_internal_connection_okhttp_kt`, `and_casual_viewing_offering_clear_views_of_celestial_objects_like_moon_and`, `until_Services_and_Endpoints_have_been_received_from_master_ipFamily_IPv`, `static_autoscaler_go_Calculating_unneeded_nodes`, `out_daemon_sets_go_Filtered_out_daemon_set_pods_unschedulable_pods_left`, `static_autoscaler_go_No_unschedulable_pods`, `go_Pod_demo_index_inducer_can_be_moved_template_node_eks_ng_cron_upcoming`, `filter_out_schedulable_go_pods_marked_as_unschedulable_can_be_scheduled`, `filter_out_schedulable_go_Schedulable_pods_present`\n\n---\n\n**Investigation metadata**: 19 patterns analyzed, 21 PromQL queries executed, total wall time 28603ms.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_dependency_check\",\"args\":{\"pattern\":\"timeout_rpc_error_code_Unavailable_desc_data_refused_due_high_memory_usage\"},\"reason\":\"check dashboards / alerts before any mute action\"},{\"tool\":\"log10x_correlate_cross_pillar\",\"args\":{\"anchor_type\":\"log10x_pattern\",\"anchor\":\"timeout_rpc_error_code_Unavailable_desc_data_refused_due_high_memory_usage\",\"window\":\"24h\"},\"reason\":\"find upstream metric anomaly co-moving with the pattern\"},{\"tool\":\"log10x_pattern_trend\",\"args\":{\"pattern\":\"timeout_rpc_error_code_Unavailable_desc_data_refused_due_high_memory_usage\"},\"reason\":\"time series for the investigated pattern\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 57300
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_trend --args '{\"pattern\": \"exhausted capacity node payment gateway request id req related plant run id idx\"}'",
+      "stdout": "No trend data for pattern \"exhausted_capacity_node_payment_gateway_request_id_req_related_plant_run_id_idx\" in the this week.\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 30916
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_trend --args '{\"pattern\": \"DNS resolution failed upstream service svc timeout after attempts resolver\"}'",
+      "stdout": "DNS resolution failed upstream service svc timeout after attempts resolver — this week trend\n\n  Baseline (first quarter):  ~$0.08/wk\n  Current (last quarter):    $0.08/wk\n  Change: stable\n\n  Peak: 333.2 KB at 2026-05-11 19:00:00 UTC\n  Low:  315.9 KB at 2026-05-11 18:00:00 UTC\n  Total: $0.0018/wk across 4 data points\n\n  ▓█▓▓\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 27054
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_trend --args '{\"pattern\": \"restarting failed container app in pod canary synthetic canary run id idx\"}'",
+      "stdout": "restarting failed container app in pod canary synthetic canary run id idx — this week trend\n\n  Baseline (first quarter):  ~$0.16/wk\n  Current (last quarter):    $0.04/wk\n  Change: -76% decrease\n\n  Peak: 864.0 KB at 2026-05-11 16:00:00 UTC\n  Low:  157.3 KB at 2026-05-11 17:00:00 UTC\n  Total: $0.0024/wk across 3 data points\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 29690
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_trend --args '{\"pattern\": \"run id idx synthetic canary mode bug run id github sha github run id idx\"}'",
+      "stdout": "run id idx synthetic canary mode bug run id github sha github run id idx — this week trend\n\n  Baseline (first quarter):  ~$0.57/wk\n  Current (last quarter):    $0.49/wk\n  Change: stable\n\n  Peak: 3.9 MB at 2026-05-11 18:00:00 UTC\n  Low:  862.8 KB at 2026-05-11 22:00:00 UTC\n  Total: $0.02/wk across 7 data points\n\n  ▒▒█▒▓░▒\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 30825
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_trend --args '{\"pattern\": \"are available pod canary Insufficient memory synthetic canary run id idx\"}'",
+      "stdout": "are available pod canary Insufficient memory synthetic canary run id idx — this week trend\n\n  Baseline (first quarter):  ~$0.16/wk\n  Current (last quarter):    $0.03/wk\n  Change: -79% decrease\n\n  Peak: 832.8 KB at 2026-05-11 16:00:00 UTC\n  Low:  142.7 KB at 2026-05-11 17:00:00 UTC\n  Total: $0.0024/wk across 3 data points\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 26581
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_trend --args '{\"pattern\": \"HTTP probe failed with statuscode pod canary synthetic canary run id idx\"}'",
+      "stdout": "HTTP probe failed with statuscode pod canary synthetic canary run id idx — this week trend\n\n  Baseline (first quarter):  ~$0.31/wk\n  Current (last quarter):    $0.08/wk\n  Change: -74% decrease\n\n  Peak: 1.6 MB at 2026-05-11 16:00:00 UTC\n  Low:  331.4 KB at 2026-05-11 17:00:00 UTC\n  Total: $0.0047/wk across 3 data points\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 25985
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_correlate_cross_pillar --args '{\"anchor_type\": \"log10x_pattern\", \"anchor\": \"exhausted_capacity_node_payment_gateway_request_id_req_related_plant_run_id_idx\", \"window\": \"24h\"}'",
+      "stdout": "## Cross-pillar metrics backend not configured\n\nThis MCP server doesn't currently have a customer metrics backend configured. Cross-pillar correlation joins log-side patterns to the customer's APM / infrastructure metrics; without a configured backend, the bridge cannot run.\n\n**What's out of reach without the cross-pillar backend**:\n\n- Correlating a spiking log pattern to its upstream metric anomaly (gateway latency, dependency saturation, etc.)\n- Translating a customer-metric anomaly back to the log patterns that caused it\n- Discovering join keys between the log enrichment label set and the customer metrics label set\n\n**To configure**:\n\n- (a) Set explicit env vars: `LOG10X_CUSTOMER_METRICS_URL` + `LOG10X_CUSTOMER_METRICS_TYPE`.\n- (b) Or expose one of the ambient-detect credential sets: `GRAFANA_CLOUD_API_KEY`, `DD_API_KEY`+`DD_APP_KEY`, `AWS_REGION` (AMP), `GOOGLE_APPLICATION_CREDENTIALS` (GCP Managed Prometheus), `PROMETHEUS_URL`.\n\n**Continuing without cross-pillar**:\n\nThe agent can still investigate using log-tier tools (event_lookup, pattern_trend, top_patterns, cost_drivers) and archive tools (retriever_query, retriever_series). Skip cross-pillar correlation in this chain and surface the missing-backend state in the synthesis.\n\n**Detection trace**:\n\n```\n  - explicit_env: skipped — LOG10X_CUSTOMER_METRICS_URL not set\n  - grafana_cloud: skipped — no GRAFANA_CLOUD_API_KEY / GCLOUD_API_KEY\n  - datadog_prom: skipped — no DD_API_KEY / DATADOG_API_KEY\n  - amp: skipped — no AWS_REGION / AWS_DEFAULT_REGION\n  - gcp_managed_prometheus: skipped — no GOOGLE_APPLICATION_CREDENTIALS\n  - prometheus_url: skipped — PROMETHEUS_URL not set\n```\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 21652
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_services --args '{}'",
+      "stdout": "Monitored Services (this week)\n\n  (unknown)            35.0 GB    100%   $52/wk\n  email                11.8 MB    0.0%   $0.02/wk\n  frontend             17.1 KB    0.0%   $0.0000/wk\n  recommendation       2.4 KB     0.0%   $0.0000/wk\n\n  4 services · 35.0 GB total · $53/wk at $1.5/GB\n  Top 3 services = 100% of volume.\n\n**Next actions**:\n  - Drill into the top service: `log10x_cost_drivers({ service: '(unknown)' })` for week-over-week deltas, or `log10x_top_patterns({ service: '(unknown)' })` for current top patterns.\n  - Investigate any spike: `log10x_investigate({ starting_point: '(unknown)' })` for a full causal-chain analysis.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_cost_drivers\",\"args\":{\"service\":\"(unknown)\"},\"reason\":\"week-over-week deltas on the top service\"},{\"tool\":\"log10x_top_patterns\",\"args\":{\"service\":\"(unknown)\"},\"reason\":\"current top patterns for the top service\"},{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"(unknown)\"},\"reason\":\"causal-chain analysis on the top service\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 23471
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_event_lookup --args '{\"pattern\": \"payment-service 503\"}'",
+      "stdout": "No data found for pattern \"payment-service_503\". Check the pattern name (use underscores, e.g., Payment_Gateway_Timeout).\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 22541
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_event_lookup --args '{\"pattern\": \"exhausted capacity payment gateway\"}'",
+      "stdout": "exhausted capacity payment gateway — $0 → $0.0010/wk\n\nServices:\n                  ERROR  $0.0010/wk   ($0 → $0.0010)  NEW\n\n1 service · 0 events\n\n**Next actions**:\n  - Time series via `log10x_pattern_trend({ pattern: 'exhausted_capacity_payment_gateway' })`.\n  - Before any mute / drop action, run `log10x_dependency_check({ pattern: 'exhausted_capacity_payment_gateway' })` to find dashboards / alerts that depend on it.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_pattern_trend\",\"args\":{\"pattern\":\"exhausted_capacity_payment_gateway\"},\"reason\":\"time series for the resolved pattern\"},{\"tool\":\"log10x_dependency_check\",\"args\":{\"pattern\":\"exhausted_capacity_payment_gateway\"},\"reason\":\"find dashboard / alert dependencies before muting\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 23296
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_trend --args '{\"pattern\": \"exhausted capacity payment gateway\"}'",
+      "stdout": "No trend data for pattern \"exhausted_capacity_payment_gateway\" in the this week.\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 22360
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_event_lookup --args '{\"pattern\": \"payment-service returned\"}'",
+      "stdout": "No data found for pattern \"payment-service_returned\". Check the pattern name (use underscores, e.g., Payment_Gateway_Timeout).\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 20986
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_event_lookup --args '{\"pattern\": \"checkout retry\"}'",
+      "stdout": "No data found for pattern \"checkout_retry\". Check the pattern name (use underscores, e.g., Payment_Gateway_Timeout).\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 21538
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_event_lookup --args '{\"pattern\": \"synthetic canary checkout\"}'",
+      "stdout": "No data found for pattern \"synthetic_canary_checkout\". Check the pattern name (use underscores, e.g., Payment_Gateway_Timeout).\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 20047
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\": \"exhausted capacity node payment gateway request id req related plant run id idx\", \"window\": \"7d\"}'",
+      "stdout": "## Investigation: exhausted capacity node payment gateway request id req related plant run id idx, last 7d\n\n**Investigation id**: c89cca31-cf0d-4619-bd83-4fdbe60e0b69\n**Result**: Could not resolve \"exhausted capacity node payment gateway request id req related plant run id idx\" to a known pattern or service.\n\n**Supported inputs**:\n- A raw log line (will be templatized and matched by structural identity)\n- A pattern identity (symbolMessage / templateHash)\n- A service name\n- The literal string `\"environment\"`, `\"all\"`, or `\"audit\"` for an env-wide sweep\n\n**Try next**:\n- `log10x_event_lookup({ pattern: 'exhausted capacity node payment gateway request id req related plant run id idx' })` to search by substring\n- `log10x_services()` to list known services\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 19699
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_trend --args '{\"pattern\": \"pattern probe never seen before ts run idx synthetic canary burst run id idx\"}'",
+      "stdout": "pattern probe never seen before ts run idx synthetic canary burst run id idx — this week trend\n\n  Baseline (first quarter):  ~$0.13/wk\n  Current (last quarter):    $0.13/wk\n  Change: stable\n\n  Peak: 557.9 KB at 2026-05-11 15:00:00 UTC\n  Low:  557.9 KB at 2026-05-11 15:00:00 UTC\n  Total: $0.0008/wk across 1 data points\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 19281
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_trend --args '{\"pattern\": \"exhausted capacity node payment gateway request id req related plant run id idx\"}'",
+      "stdout": "No trend data for pattern \"exhausted_capacity_node_payment_gateway_request_id_req_related_plant_run_id_idx\" in the this week.\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 20196
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_trend --args '{\"pattern\": \"timeout rpc error code Unavailable desc data refused due high memory usage\"}'",
+      "stdout": "timeout rpc error code Unavailable desc data refused due high memory usage — this week trend\n\n  Baseline (first quarter):  ~$0.01/wk\n  Current (last quarter):    $0.01/wk\n  Change: stable\n\n  Peak: 86.1 KB at 2026-05-06 13:00:00 UTC\n  Low:  20.2 KB at 2026-05-11 22:00:00 UTC\n  Total: $0.01/wk across 169 data points\n\n  ▓▓▓▓▒▒▒▒▒▓▓▒▓▓▒▓▒▒▓▒▒▓▒▓▓▓▓▓▓▒▓▓▒▓▓▒▓▓▒▒▒▒▒\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 21205
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_trend --args '{\"pattern\": \"DNS resolution failed upstream service svc timeout after attempts resolver\"}'",
+      "stdout": "DNS resolution failed upstream service svc timeout after attempts resolver — this week trend\n\n  Baseline (first quarter):  ~$0.08/wk\n  Current (last quarter):    $0.08/wk\n  Change: stable\n\n  Peak: 333.2 KB at 2026-05-11 19:00:00 UTC\n  Low:  315.9 KB at 2026-05-11 18:00:00 UTC\n  Total: $0.0018/wk across 4 data points\n\n  ▓█▓▓\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 21127
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_event_lookup --args '{\"pattern\": \"exhausted capacity node payment gateway\"}'",
+      "stdout": "exhausted capacity node payment gateway — $0 → $0.0010/wk\n\nServices:\n                  ERROR  $0.0010/wk   ($0 → $0.0010)  NEW\n\n1 service · 0 events\n\n**Next actions**:\n  - Time series via `log10x_pattern_trend({ pattern: 'exhausted_capacity_node_payment_gateway' })`.\n  - Before any mute / drop action, run `log10x_dependency_check({ pattern: 'exhausted_capacity_node_payment_gateway' })` to find dashboards / alerts that depend on it.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_pattern_trend\",\"args\":{\"pattern\":\"exhausted_capacity_node_payment_gateway\"},\"reason\":\"time series for the resolved pattern\"},{\"tool\":\"log10x_dependency_check\",\"args\":{\"pattern\":\"exhausted_capacity_node_payment_gateway\"},\"reason\":\"find dashboard / alert dependencies before muting\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 21879
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_event_lookup --args '{\"pattern\": \"rpc error code Unavailable desc data refused due high memory\"}'",
+      "stdout": "rpc error code Unavailable desc data refused due high memory — $0 → $0.01/wk\n\nServices:\n                  ERROR  $0.01/wk     ($0 → $0.01)  NEW\n\n1 service · 0 events\n\n**Next actions**:\n  - Time series via `log10x_pattern_trend({ pattern: 'rpc_error_code_Unavailable_desc_data_refused_due_high_memory' })`.\n  - Before any mute / drop action, run `log10x_dependency_check({ pattern: 'rpc_error_code_Unavailable_desc_data_refused_due_high_memory' })` to find dashboards / alerts that depend on it.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_pattern_trend\",\"args\":{\"pattern\":\"rpc_error_code_Unavailable_desc_data_refused_due_high_memory\"},\"reason\":\"time series for the resolved pattern\"},{\"tool\":\"log10x_dependency_check\",\"args\":{\"pattern\":\"rpc_error_code_Unavailable_desc_data_refused_due_high_memory\"},\"reason\":\"find dashboard / alert dependencies before muting\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 21528
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_event_lookup --args '{\"pattern\": \"DNS resolution failed upstream service\"}'",
+      "stdout": "DNS resolution failed upstream service — $0 → $0.0024/wk\n\nServices:\n                  ERROR  $0.0024/wk   ($0 → $0.0024)  NEW\n\n1 service · 0 events\n\n**Next actions**:\n  - Time series via `log10x_pattern_trend({ pattern: 'DNS_resolution_failed_upstream_service' })`.\n  - Before any mute / drop action, run `log10x_dependency_check({ pattern: 'DNS_resolution_failed_upstream_service' })` to find dashboards / alerts that depend on it.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_pattern_trend\",\"args\":{\"pattern\":\"DNS_resolution_failed_upstream_service\"},\"reason\":\"time series for the resolved pattern\"},{\"tool\":\"log10x_dependency_check\",\"args\":{\"pattern\":\"DNS_resolution_failed_upstream_service\"},\"reason\":\"find dashboard / alert dependencies before muting\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 19479
+    }
+  ],
+  "initialSynthesis": "I now have enough data to deliver a complete, well-structured synthesis. Let me compile the findings:\n\n---\n\n## Root-Cause Investigation: `payment-service returned 503 after 5 retries`\n\n### What was observed (all figures from tool output)\n\nThe `log10x_top_patterns` call returned **20 active ERROR-severity patterns** in the otel-demo environment this week at $4.6/wk total. Below is the classification of every co-firing ERROR pattern against the alert.\n\n---\n\n### (a) THE ALERT ITSELF\n\n**Pattern:** `run id idx synthetic canary mode bug run id github sha github run id idx`\n- Cost: **$0.02/wk** (#5 by volume)\n- Trend this week: **stable** (peak 3.9 MB at 2026-05-11 18:00 UTC, low 862.8 KB at 2026-05-11 22:00 UTC)\n- This is the synthetic-canary-app mode=bug pattern. The paged alert (`checkout retry blast: payment-service returned 503 after 5 retries; abandoning cart`) resolves structurally into the template `ERROR synthetic-canary-app: checkout retry blast: payment-service returned $ after $ retries; abandoning cart cart_id=cart_$`. It originates from the same `synthetic-canary-app` namespace as this pattern. **This is the alert itself (or its immediate sibling in the same canary run).**\n\n---\n\n### (b) PLAUSIBLY UPSTREAM-CAUSAL — but causation unverified\n\n**Pattern:** `exhausted capacity node payment gateway request id req related plant run id idx`\n- Cost: **$0.0002/wk** (#16 by volume)\n- Trend: **no trend data returned this week**; `event_lookup` found it as a NEW pattern ($0 → $0.0010/wk) with 0 currently reported events\n- **Assessment:** \"exhausted capacity … payment gateway\" is semantically the most plausible upstream cause of a payment-service 503. A capacity-exhausted payment gateway would naturally cause 503s to callers. **However:** the pattern has no trend data this week and event_lookup returned 0 events. The temporal overlap is asserted by the `top_patterns` ranking, not by a direct causal chain. **Potentially related, causation unverified.** Warrants further investigation (e.g., retrieve raw events from this pattern to confirm they pre-date the 503 burst).\n\n**Pattern:** `DNS resolution failed upstream service svc timeout after attempts resolver`\n- Cost: **$0.0020/wk** (#14 by volume)\n- Trend this week: **stable** (peak 333.2 KB at 2026-05-11 19:00 UTC; $0.0018/wk)\n- **Assessment:** DNS resolution failures on an upstream service could plausibly cause a payment-service dependency to become unreachable, yielding 503s. The pattern is stable (not spiking), which weakens the hypothesis that it is the *cause* of the current alert burst. **Potentially related, causation unverified.** The stable baseline suggests this is a chronic low-level issue, not an acute trigger.\n\n**Pattern:** `timeout rpc error code Unavailable desc data refused due high memory usage`\n- Cost: **$0.01/wk** (#7 by volume)\n- Drift: growing at **+0.4%/week** over 30 days — slow, monotonic regression, no discrete inflection\n- **Assessment:** gRPC `Unavailable` responses caused by high memory pressure is a mechanistically plausible pathway to payment-service 503s (a memory-pressured downstream refuses new requests). The slow drift means this is a background worsening condition, not a sudden trigger. **Potentially related as a contributing background condition, causation unverified.** Cross-pillar metrics (not available in this env) would be needed to confirm memory pressure co-incides with the 503 burst.\n\n---\n\n### (c) UNRELATED CONCURRENT NOISE\n\n| Pattern | Cost | Evidence of unrelatedness |\n|---|---|---|\n| `service instance id service name otelcol contrib service version otelcol` | $3.9/wk (#1) | OTel Collector self-reporting/telemetry; infra observability pipeline, not business logic |\n| `transport Error while dialing dial tcp lookup jaeger on no such host interval` | $0.46/wk (#2) | Jaeger DNS misconfiguration in the collector — unrelated to payment-service availability |\n| `OpenTelemetry error Export failure exception Export retry limit exceeded previous` | $0.09/wk (#3) | OTel export retries; telemetry pipeline saturation, not service-layer |\n| `transport Error while dialing dial tcp lookup jaeger on no such host dropped` | $0.04/wk (#4) | Same Jaeger DNS issue as #2; dropped spans |\n| `error OTLP logs exporter received Net HTTPServiceUnavailable code uri logs` | $0.02/wk (#6) | OTLP log exporter 503 — this is the *observability pipeline* receiving 503s, not the payment path |\n| `failed upload metrics reader collect and export timeout retry able request` | $0.01/wk (#8) | Metrics exporter timeout; telemetry pipeline |\n| `error OTel export failure data refused due high memory usage` | $0.01/wk (#9) | OTel exporter refused — collector-side memory pressure, not payment path |\n| `grpc addrConn createTransport failed connect Addr jaeger ServerName jaeger` | $0.0093/wk (#10) | Jaeger connectivity; telemetry pipeline |\n| `restarting failed container app in pod canary synthetic canary run id idx` | $0.0024/wk (#11) | Canary pod restart — **declining -76% this week**; this is *consequence* of canary failures, not upstream cause of 503s |\n| `are available pod canary Insufficient memory synthetic canary run id idx` | $0.0024/wk (#12) | Canary pod OOM events — **declining -79% this week**; canary infra noise |\n| `HTTP probe failed with statuscode pod canary synthetic canary run id idx` | $0.0024/wk (#13) | Canary liveness probe failures — **declining -74% this week**; canary infra noise co-firing with the same run |\n| `pattern probe never seen before ts run idx synthetic canary burst run id idx` | $0.0003/wk (#15) | Canary burst/novel-pattern probe; canary framework telemetry |\n| `OpenTelemetry error Unable export records` | $0.0002/wk (#17) | OTel pipeline |\n| `OpenTelemetry error Unable export spans` | $0.0002/wk (#18) | OTel pipeline |\n| `Result code` | $0.0002/wk (#19) | Indeterminate/generic; insufficient context to connect to payment path |\n| `failed create client in consumer scraper kafka client has run out of available` | $0.0001/wk (#20) | Kafka consumer; unrelated to payment checkout path |\n\n---\n\n### Synthesis & Recommendations\n\n**What you're looking at:** The alert is a synthetic canary running in `mode=bug`, deliberately exercising a 503 failure path on payment-service. It is not silent — it's actively firing at $0.02/wk, stable over this week.\n\n**Most plausible upstream causal candidates (unverified):**\n1. `exhausted capacity node payment gateway request id req related plant run id idx` — semantically the strongest match (capacity exhaustion → 503), but has no trend data this week and 0 current events. **Retrieve raw events and check timestamps against the alert burst before concluding causation.**\n2. `timeout rpc error code Unavailable desc data refused due high memory usage` — slow +0.4%/week drift over 30 days. A memory-pressured backend refusing RPC calls is a plausible contributing factor, but it's a background regression, not an acute trigger.\n3. `DNS resolution failed upstream service svc timeout after attempts resolver` — stable, chronic; unlikely to be the acute trigger but worth monitoring.\n\n**Recommended actions:**\n- Use `log10x_retriever_query` to pull raw events for `exhausted capacity node payment gateway` around the 503-burst timestamp to check temporal ordering (cause must precede effect).\n- Configure a metrics backend (`LOG10X_CUSTOMER_METRICS_URL`) to enable cross-pillar correlation — memory/CPU metrics for payment-service during the canary run are currently inaccessible.\n- The three **declining** canary pod patterns (restart, OOM, HTTP probe) are co-firing but trending down — they are canary infra noise, not causal.\n- The dominant cost pattern (otelcol, $3.9/wk) is pure observability-pipeline noise; consider an exclusion filter if it inflates alerting costs.",
+  "followUpSynthesis": "All three `event_lookup` calls returned **0 events** — no raw log lines were retrievable, no service attribution, no timestamps. That is the definitive evidence ceiling. Here are the honest ratings:\n\n---\n\n## Causation Confidence Ratings\n\n### Scale reminder\n- **1** — temporal coincidence only; no semantic or structural causal evidence\n- **2** — plausible semantic mechanism, but no volume, timing, or service-linkage data to support it\n- **3** — plausible mechanism + some corroborating signal (e.g., confirmed presence, trend data)\n- **4** — mechanism + confirmed presence + temporal ordering consistent with causation\n- **5** — traced upstream dependency with direct evidence (call graph, trace ID, or confirmed before/after ordering)\n\n---\n\n### Pattern 1: `exhausted capacity node payment gateway request id req related plant run id idx`\n**Rating: 2 / 5**\n\n**Evidence supporting the rating:**\n- *For the 2:* The phrase \"exhausted capacity … payment gateway\" is semantically the strongest match to a service returning 503s. Capacity exhaustion is a well-known proximate cause of HTTP 503. That semantic alignment is real and non-trivial — it earns one point above pure coincidence.\n- *Against going higher:* `event_lookup` returned **0 events** and **no service attribution**. `pattern_trend` returned **no trend data this week**. The pattern is listed as **NEW** in the cost table ($0 → $0.0002/wk), meaning it has not been consistently observed. There is no timestamp, no trace ID, no service name, and no confirmed temporal ordering relative to the 503 burst. The semantic fit is hypothesis-generating, not hypothesis-confirming.\n\n---\n\n### Pattern 2: `timeout rpc error code Unavailable desc data refused due high memory usage`\n**Rating: 2 / 5**\n\n**Evidence supporting the rating:**\n- *For the 2:* The pattern has **169 data points this week** with a confirmed trend (stable, $0.01/wk, peak 86.1 KB at 2026-05-06 13:00 UTC, low 20.2 KB at 2026-05-11 22:00 UTC). It is **actually present and firing** — that is more than pattern 1 can claim. gRPC `Unavailable` + \"data refused due high memory\" describes a backend under memory pressure shedding requests, which is a mechanistically sound path to 503s.\n- *Against going higher:* `event_lookup` returned **0 events and no service name** — the tool could not attribute this pattern to any named service in the environment. The trend is **stable** (no spike coinciding with the alert). The 30-day drift investigation showed only **+0.4%/week** — a slow background regression, not an acute incident trigger. There is no trace ID, no call-graph linkage to `payment-service`, and no evidence this pattern's timestamps precede the 503 burst. Chronic background noise that *could* be a contributing condition is not the same as the cause of a specific retry storm.\n\n---\n\n### Pattern 3: `DNS resolution failed upstream service svc timeout after attempts resolver`\n**Rating: 1 / 5**\n\n**Evidence supporting the rating:**\n- *For the 1:* The pattern is co-firing (present in `top_patterns` at $0.0020/wk). DNS failure on an upstream service *could* theoretically render a payment dependency unreachable, ultimately yielding 503s. That is the only link.\n- *Against going higher:* `event_lookup` returned **0 events and no service name** — cannot confirm which service or which upstream is affected. The trend shows **only 4 data points this week**, with a range of 315.9–333.2 KB — extremely stable, with no burst or inflection. The pattern was **already present at the same rate** before the alert fired (baseline ≈ current in the trend). There is no semantic specificity tying \"upstream service\" to `payment-service`, no trace linkage, and no timing evidence. This is a chronic ambient error that happens to be co-firing; the evidence does not rise above temporal coincidence.\n\n---\n\n### Summary table\n\n| Pattern (verbatim from tool output) | Rating | Limiting factor |\n|---|---|---|\n| `exhausted capacity node payment gateway request id req related plant run id idx` | **2 / 5** | 0 retrievable events; no service attribution; no trend data; NEW pattern |\n| `timeout rpc error code Unavailable desc data refused due high memory usage` | **2 / 5** | 0 retrievable events; no service name; stable (not spiking); no temporal ordering |\n| `DNS resolution failed upstream service svc timeout after attempts resolver` | **1 / 5** | 0 retrievable events; no service name; stable at 4 data points; pure coincidence |\n\n**Bottom line:** The honest evidence ceiling for all three candidates is low. The tools returned no raw events, no service attribution, and no trace linkage for any of them. To move any rating above 2, you would need: (a) raw event retrieval confirming the pattern fired *before* the 503 burst, (b) a service name matching a `payment-service` dependency, or (c) a distributed trace ID connecting the two. None of those exist in the current tool output.",
+  "finalText": "All three `event_lookup` calls returned **0 events** — no raw log lines were retrievable, no service attribution, no timestamps. That is the definitive evidence ceiling. Here are the honest ratings:\n\n---\n\n## Causation Confidence Ratings\n\n### Scale reminder\n- **1** — temporal coincidence only; no semantic or structural causal evidence\n- **2** — plausible semantic mechanism, but no volume, timing, or service-linkage data to support it\n- **3** — plausible mechanism + some corroborating signal (e.g., confirmed presence, trend data)\n- **4** — mechanism + confirmed presence + temporal ordering consistent with causation\n- **5** — traced upstream dependency with direct evidence (call graph, trace ID, or confirmed before/after ordering)\n\n---\n\n### Pattern 1: `exhausted capacity node payment gateway request id req related plant run id idx`\n**Rating: 2 / 5**\n\n**Evidence supporting the rating:**\n- *For the 2:* The phrase \"exhausted capacity … payment gateway\" is semantically the strongest match to a service returning 503s. Capacity exhaustion is a well-known proximate cause of HTTP 503. That semantic alignment is real and non-trivial — it earns one point above pure coincidence.\n- *Against going higher:* `event_lookup` returned **0 events** and **no service attribution**. `pattern_trend` returned **no trend data this week**. The pattern is listed as **NEW** in the cost table ($0 → $0.0002/wk), meaning it has not been consistently observed. There is no timestamp, no trace ID, no service name, and no confirmed temporal ordering relative to the 503 burst. The semantic fit is hypothesis-generating, not hypothesis-confirming.\n\n---\n\n### Pattern 2: `timeout rpc error code Unavailable desc data refused due high memory usage`\n**Rating: 2 / 5**\n\n**Evidence supporting the rating:**\n- *For the 2:* The pattern has **169 data points this week** with a confirmed trend (stable, $0.01/wk, peak 86.1 KB at 2026-05-06 13:00 UTC, low 20.2 KB at 2026-05-11 22:00 UTC). It is **actually present and firing** — that is more than pattern 1 can claim. gRPC `Unavailable` + \"data refused due high memory\" describes a backend under memory pressure shedding requests, which is a mechanistically sound path to 503s.\n- *Against going higher:* `event_lookup` returned **0 events and no service name** — the tool could not attribute this pattern to any named service in the environment. The trend is **stable** (no spike coinciding with the alert). The 30-day drift investigation showed only **+0.4%/week** — a slow background regression, not an acute incident trigger. There is no trace ID, no call-graph linkage to `payment-service`, and no evidence this pattern's timestamps precede the 503 burst. Chronic background noise that *could* be a contributing condition is not the same as the cause of a specific retry storm.\n\n---\n\n### Pattern 3: `DNS resolution failed upstream service svc timeout after attempts resolver`\n**Rating: 1 / 5**\n\n**Evidence supporting the rating:**\n- *For the 1:* The pattern is co-firing (present in `top_patterns` at $0.0020/wk). DNS failure on an upstream service *could* theoretically render a payment dependency unreachable, ultimately yielding 503s. That is the only link.\n- *Against going higher:* `event_lookup` returned **0 events and no service name** — cannot confirm which service or which upstream is affected. The trend shows **only 4 data points this week**, with a range of 315.9–333.2 KB — extremely stable, with no burst or inflection. The pattern was **already present at the same rate** before the alert fired (baseline ≈ current in the trend). There is no semantic specificity tying \"upstream service\" to `payment-service`, no trace linkage, and no timing evidence. This is a chronic ambient error that happens to be co-firing; the evidence does not rise above temporal coincidence.\n\n---\n\n### Summary table\n\n| Pattern (verbatim from tool output) | Rating | Limiting factor |\n|---|---|---|\n| `exhausted capacity node payment gateway request id req related plant run id idx` | **2 / 5** | 0 retrievable events; no service attribution; no trend data; NEW pattern |\n| `timeout rpc error code Unavailable desc data refused due high memory usage` | **2 / 5** | 0 retrievable events; no service name; stable (not spiking); no temporal ordering |\n| `DNS resolution failed upstream service svc timeout after attempts resolver` | **1 / 5** | 0 retrievable events; no service name; stable at 4 data points; pure coincidence |\n\n**Bottom line:** The honest evidence ceiling for all three candidates is low. The tools returned no raw events, no service attribution, and no trace linkage for any of them. To move any rating above 2, you would need: (a) raw event retrieval confirming the pattern fired *before* the 503 burst, (b) a service name matching a `payment-service` dependency, or (c) a distributed trace ID connecting the two. None of those exist in the current tool output."
+}

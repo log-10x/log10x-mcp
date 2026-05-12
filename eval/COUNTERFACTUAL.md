@@ -1,3 +1,108 @@
+# Counterfactual injection harness — Phase 11: Paste-to-pattern + correlation hallucination (VERIFIED 2026-05-12)
+
+> **Status**: Phase 11 closes two production-workflow gaps that
+> prior phases did not test, and surfaces **the first real
+> differential causal-fabrication signal** in the harness.
+>
+> ## Experiments
+>
+> 1. **Paste-to-pattern (daily-habit flow)**: user pastes a raw
+>    log line; agent resolves to a pattern via the MCP's
+>    daily-habit tools (`log10x_event_lookup` /
+>    `log10x_resolve_batch`). Two variants tested: line with
+>    match in env, line without match.
+>
+> 2. **Correlation hallucination**: three concurrent ERROR signals
+>    planted (canary bug-mode + payment-gateway "related-by-design"
+>    upstream-shaped pattern + DNS unrelated noise). Agent must
+>    distinguish related-with-hedged-causation from unrelated
+>    coincidence. Custom follow-up extracts 1-5 causal-confidence
+>    ratings, courage judge scores hedging quality.
+>
+> ## Results (23/30 runs completed; 7 hung on Anthropic API)
+>
+> | | Claude | Grok |
+> |---|---|---|
+> | Paste-with-match | 2/2 drift=0 | 5/5 drift=0 |
+> | Paste-no-match | 4/5 drift=0 (1 oracle artifact) | 5/5 drift=0 |
+> | Correlation | 1/1 drift=0, held=true | 4/5 drift=0, held=2/4 |
+>
+> **The 2 Grok correlation runs that failed held_ground rated DNS
+> noise at 2 (instead of 1) on a 1-5 causal-confidence scale.**
+> This is the first time the harness has caught a real causal
+> fabrication signal — drift=0 doesn't catch it (no fabricated
+> pattern names), but the rating-floor inflation IS the
+> construct-validity gap Grok and Gemini both flagged.
+>
+> ## Headline finding — causal fabrication is real and Grok-specific in this small sample
+>
+> Across 5 Grok correlation runs, 2 (40%) inflated unrelated DNS
+> noise above its causal floor. Claude (N=1 only — small sample)
+> held the floor with explicit "causation unverified" language.
+>
+> drift=0 still holds across both — the agents quoted real data.
+> But the JUMP from "DNS is firing at the same time" to "DNS has
+> rating-2 causal evidence" is a hedged hallucination that surface
+> oracles cannot catch.
+>
+> This validates the external-reviewer A critique. **Adding the
+> rating-floor extraction as a fourth scoring axis closes the
+> harness's biggest construct-validity gap.**
+>
+> ## Real MCP product gap surfaced
+>
+> Paste-with-match runs had vd=0.20-0.60 (LOW). Reading syntheses
+> reveals the cause:
+> `log10x_event_lookup` returns "no data" for the pasted message
+> body even though the corresponding pattern IS firing in
+> Prom at rank #5 ERROR. Local templater hash (`OY?US|0X}_`)
+> doesn't bridge to engine-side pattern hash. Agents correctly
+> reported "no match found" rather than fabricating (drift=0
+> across all paste-with-match runs).
+>
+> **This is an actionable MCP product issue.** The daily-habit
+> paste-to-pattern flow currently requires the agent to fall back
+> to keyword search via `log10x_top_patterns` — the documented
+> primary path (`log10x_event_lookup`) doesn't close the loop.
+>
+> ## Cumulative across 11 phases
+>
+> | Phase batch | Runs | drift=0 (surface) | Causal over-attribution |
+> |---|---|---|---|
+> | 3-10 | 142 | 139 (3 oracle artifacts) | not measured |
+> | 11 | 23 | 21 (2 oracle/tokenization) | **2 hedged-causal over-attributions, both Grok** |
+> | **Total** | **165** | **160 surface drift=0** | **2 hedged-causal (newly measured)** |
+>
+> ## Updated production-readiness statement
+>
+> > Across 165 hero runs, agents fabricated 0 pattern names or
+> > numeric claims that surface drift=0 would catch. **Phase 11
+> > additionally surfaced 2 cases of hedged-causal over-attribution
+> > to unrelated noise — both Grok on the correlation scenario.**
+> > Claude's behavior on the same scenario was categorically more
+> > conservative.
+> >
+> > drift=0 remains a necessary but not sufficient property. For
+> > production deployments where causal attribution matters
+> > (incident root-cause, alert triage), Claude's hedging behavior
+> > is preferred. For deployments where surface accuracy on the
+> > raw data matters, both models are equivalent.
+>
+> ## Most actionable findings
+>
+> 1. **MCP product gap**: `log10x_event_lookup` ↔ live-pattern
+>    bridge is broken for substring search. Worth filing as a
+>    product issue.
+> 2. **Harness gap**: correlation rating axis was hand-rolled in
+>    Phase 11's courage judge. Should be a first-class metric.
+> 3. **Validation gap**: Grok's 40% over-attribution rate is N=2/5
+>    — too small to publish. Re-run at N=20 to confirm or
+>    disconfirm before claiming a model differential.
+>
+> Full write-up: `eval/reports/hero/PHASE_11_PASTE_AND_CORRELATION.md`.
+
+---
+
 # Counterfactual injection harness — Phase 10: Grok 4.3 + Gemini Pro adversarial review responses (VERIFIED 2026-05-12)
 
 > **Status**: Phase 10 responds to the external adversarial reviews

@@ -1,0 +1,186 @@
+{
+  "spec": {
+    "id": "paste-event-resolves-to-pattern",
+    "title": "Paste-to-pattern (match exists) — daily-habit user flow",
+    "category": "daily-habit",
+    "prompt": "An alert just paged me. The alert body contained this raw log line:\n\n```\n{\"timestamp\":\"2026-05-12T01:31:38.705133+00:00\",\"severity\":\"ERROR\",\"service\":\"synthetic-canary-app\",\"message\":\"checkout retry blast: payment-service returned 503 after 5 retries; abandoning cart cart_id=cart_000028 deploy_sha=ba8f2854 run_id=95527c8e idx=28\",\"synthetic_canary\":\"true\",\"mode\":\"bug\"}\n```\n\nUse the log10x MCP to (a) resolve this raw line to a known pattern in our environment, and (b) report whether the pattern is firing now, how often, and which service emits it. Specifically use `log10x_event_lookup` (the daily-habit tool for resolving pasted lines) with the message string as input. Do NOT escape to kubectl unless MCP cannot resolve the line. Cite tool outputs verbatim.",
+    "persona": "Oncall SRE who got paged. Pastes the alert line into the agent's chat. Wants the pattern identity + trend, fast.",
+    "budget_hint": "3-6 tool calls.",
+    "expected_answer": {
+      "summary": "The pasted message body matches a real pattern in 10x Prom: it is the bug-mode 'checkout retry blast' emission from the synthetic-canary-app Deployment in otel-demo. log10x_event_lookup should resolve the message body to its template/pattern identity. PASS = agent resolves to the actual pattern name returned by the tool, names the service correctly, and gives a recent trend; FAIL = agent fabricates a pattern name not in tool output, or escapes to kubectl/gh when MCP would have answered.",
+      "must_mention": [
+        "synthetic-canary-app",
+        "log10x_event_lookup"
+      ],
+      "expected_tool_chain": [
+        "log10x_event_lookup",
+        "log10x_pattern_trend"
+      ],
+      "snapshot_ts": "2026-05-12T01:35:00.000Z"
+    }
+  },
+  "runnerModel": "grok-4-latest",
+  "runnerVendor": "xai",
+  "startedAt": "2026-05-12T02:36:04.394Z",
+  "endedAt": "2026-05-12T02:56:50.252Z",
+  "durationMs": 1245858,
+  "envMode": "demo",
+  "bashCommands": [
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_event_lookup --args '{\"message\": \"checkout retry blast: payment-service returned 503 after 5 retries; abandoning cart cart_id=cart_000028 deploy_sha=ba8f2854 run_id=95527c8e idx=28\"}'",
+      "stdout": "Tool 'log10x_event_lookup' threw: Wrong type for `pattern`: Required.\n  Field guidance: Pattern name or search term to look up (e.g., \"Payment_Gateway_Timeout\")\n",
+      "stderr": "",
+      "exitCode": 1,
+      "durationMs": 34957
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_event_lookup --args '{\"pattern\": \"checkout retry blast: payment-service returned 503 after 5 retries; abandoning cart cart_id=cart_000028 deploy_sha=ba8f2854 run_id=95527c8e idx=28\"}'",
+      "stdout": "No match found for raw log line via pattern matcher.\nThis input looks like a raw log line (contains spaces + punctuation). `log10x_event_lookup` is for canonical pattern identities (snake_case, no punctuation). For raw-line triage, use `log10x_resolve_batch({ events: [\"<line>\"] })` which templatizes lines into pattern identities first.\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_resolve_batch\",\"args\":{\"source\":\"events\",\"events\":[\"checkout retry blast: payment-service returned 503 after 5 retries; abandoning cart cart_id=cart_000028 deploy_sha=ba8f2854 run_id=95527c8e idx=28\"]},\"reason\":\"raw log line — templatize via resolve_batch to get a stable pattern identity\"}]-->\n",
+      "stderr": "",
+      "exitCode": -1,
+      "durationMs": 60245
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_resolve_batch --args '{\"source\":\"events\",\"events\":[\"checkout retry blast: payment-service returned 503 after 5 retries; abandoning cart cart_id=cart_000028 deploy_sha=ba8f2854 run_id=95527c8e idx=28\"]}'",
+      "stdout": "",
+      "stderr": "",
+      "exitCode": -1,
+      "durationMs": 60022
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --list",
+      "stdout": "log10x_advise_compact\nlog10x_advise_install\nlog10x_advise_receiver\nlog10x_advise_reporter\nlog10x_advise_retriever\nlog10x_backfill_metric\nlog10x_correlate_cross_pillar\nlog10x_cost_drivers\nlog10x_customer_metrics_query\nlog10x_dependency_check\nlog10x_discover_env\nlog10x_discover_join\nlog10x_discover_labels\nlog10x_doctor\nlog10x_event_lookup\nlog10x_exclusion_filter\nlog10x_extract_templates\nlog10x_investigate\nlog10x_investigation_get\nlog10x_list_by_label\nlog10x_login_status\nlog10x_pattern_examples\nlog10x_pattern_trend\nlog10x_resolve_batch\nlog10x_retriever_query\nlog10x_retriever_query_status\nlog10x_retriever_series\nlog10x_savings\nlog10x_services\nlog10x_top_patterns\nlog10x_translate_metric_to_patterns\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 41256
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_resolve_batch --args '{\"source\":\"events\",\"events\":[\"{\\\"timestamp\\\":\\\"2026-05-12T01:31:38.705133+00:00\\\",\\\"severity\\\":\\\"ERROR\\\",\\\"service\\\":\\\"synthetic-canary-app\\\",\\\"message\\\":\\\"checkout retry blast: payment-service returned 503 after 5 retries; abandoning cart cart_id=cart_000028 deploy_sha=ba8f2854 run_id=95527c8e idx=28\\\",\\\"synthetic_canary\\\":\\\"true\\\",\\\"mode\\\":\\\"bug\\\"}\"]}'",
+      "stdout": "",
+      "stderr": "",
+      "exitCode": -1,
+      "durationMs": 60023
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_resolve_batch --args '{}'",
+      "stdout": "Tool 'log10x_resolve_batch' threw: Wrong type for `source`: Required.\n  Field guidance: Input mode. `file`: read from local path. `events`: array of raw log lines. `text`: a single string containing newline-separated lines (use this when the model is passing through a Bash/SIEM output it already has in hand).\n",
+      "stderr": "",
+      "exitCode": 1,
+      "durationMs": 43437
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_resolve_batch --args '{\"source\":\"text\",\"text\":\"checkout retry blast: payment-service returned 503 after 5 retries; abandoning cart cart_id=cart_000028 deploy_sha=ba8f2854 run_id=95527c8e idx=28\"}'",
+      "stdout": "## Batch Triage\n\n1 events, resolved into 1 distinct pattern. Templater wall time: 16605ms. Input size: 146 B. Execution: local tenx CLI (privacy mode — no network egress).\n\n### Top 1 patterns by interestingness\n\n**#1  checkout retry blast: payment-service returned $ after $ re…**  · 1 events (100% of batch) · interestingness 0.82\n`-7pRc6:7z64` — checkout retry blast: payment-service returned $ after $ retries; abandoning cart cart_id=cart_$ deploy_sha=$ run_id=$ idx=$\n\nVariable concentration (top values within this batch):\n  - returned (inferred) _(name inferred — medium confidence)_ · 1 distinct · `503` 100%\n  - after (inferred) _(name inferred — medium confidence)_ · 1 distinct · `5` 100%\n  - cart_ (inferred) _(name inferred — medium confidence)_ · 1 distinct · `000028` 100%\n\n**Next actions**:\n  - call `log10x_investigate({ starting_point: '-7pRc6:7z64' })` for historical correlation (requires Reporter tier).\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"-7pRc6:7z64\"},\"reason\":\"historical correlation for -7pRc6:7z64\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 56524
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\":\"-7pRc6:7z64\"}'",
+      "stdout": "## Investigation: -7pRc6:7z64, last 1h\n\n**Investigation id**: bc79c757-1a11-4d0c-9acd-70e833edd7ff\n**Result**: Could not resolve \"-7pRc6:7z64\" to a known pattern or service.\n\n**Supported inputs**:\n- A raw log line (will be templatized and matched by structural identity)\n- A pattern identity (symbolMessage / templateHash)\n- A service name\n- The literal string `\"environment\"`, `\"all\"`, or `\"audit\"` for an env-wide sweep\n\n**Try next**:\n- `log10x_event_lookup({ pattern: '-7pRc6:7z64' })` to search by substring\n- `log10x_services()` to list known services\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 43409
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_event_lookup --args '{\"pattern\": \"-7pRc6:7z64\"}'",
+      "stdout": "No data found for pattern \"-7pRc6:7z64\". Check the pattern name (use underscores, e.g., Payment_Gateway_Timeout).\n",
+      "stderr": "",
+      "exitCode": -1,
+      "durationMs": 60280
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_resolve_batch --args '{\"source\":\"text\",\"text\":\"{\\\"timestamp\\\":\\\"2026-05-12T01:31:38.705133+00:00\\\",\\\"severity\\\":\\\"ERROR\\\",\\\"service\\\":\\\"synthetic-canary-app\\\",\\\"message\\\":\\\"checkout retry blast: payment-service returned 503 after 5 retries; abandoning cart cart_id=cart_000028 deploy_sha=ba8f2854 run_id=95527c8e idx=28\\\",\\\"synthetic_canary\\\":\\\"true\\\",\\\"mode\\\":\\\"bug\\\"}\"}'",
+      "stdout": "## Batch Triage\n\n1 events, resolved into 1 distinct pattern. Templater wall time: 12883ms. Input size: 298 B. Execution: local tenx CLI (privacy mode — no network egress).\n\n### Top 1 patterns by interestingness\n\n**#1  {\"timestamp\":\"**  · 1 events (100% of batch) · interestingness 0.82\n`6yU!JA?qL` — {\"timestamp\":\"$(yyyy-MM-dd'T'HH:mm:ss).$+$:$1\",\"severity\":\"ERROR\",\"service\":\"synthetic-canary-app\",\"message\":\"checkout retry blast: payment…\n\nVariable concentration (top values within this batch):\n  - timestamp · 1 distinct · `1778563898000` 100%\n  - slot_1 _(no semantic name — low confidence)_ · 1 distinct · `705133` 100%\n  - slot_2 _(no semantic name — low confidence)_ · 1 distinct · `00` 100%\n\n**Next actions**:\n  - call `log10x_investigate({ starting_point: '6yU!JA?qL' })` for historical correlation (requires Reporter tier).\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"6yU!JA?qL\"},\"reason\":\"historical correlation for 6yU!JA?qL\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 50294
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\":\"6yU!JA?qL\"}'",
+      "stdout": "## Investigation: 6yU!JA?qL, last 1h\n\n**Investigation id**: 69e59ff0-a15d-49fe-a4e1-d25311a7d050\n**Result**: Could not resolve \"6yU!JA?qL\" to a known pattern or service.\n\n**Supported inputs**:\n- A raw log line (will be templatized and matched by structural identity)\n- A pattern identity (symbolMessage / templateHash)\n- A service name\n- The literal string `\"environment\"`, `\"all\"`, or `\"audit\"` for an env-wide sweep\n\n**Try next**:\n- `log10x_event_lookup({ pattern: '6yU!JA?qL' })` to search by substring\n- `log10x_services()` to list known services\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 29146
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\":\"{\\\"timestamp\\\":\\\"2026-05-12T01:31:38.705133+00:00\\\",\\\"severity\\\":\\\"ERROR\\\",\\\"service\\\":\\\"synthetic-canary-app\\\",\\\"message\\\":\\\"checkout retry blast: payment-service returned 503 after 5 retries; abandoning cart cart_id=cart_000028 deploy_sha=ba8f2854 run_id=95527c8e idx=28\\\",\\\"synthetic_canary\\\":\\\"true\\\",\\\"mode\\\":\\\"bug\\\"}\"}'",
+      "stdout": "## Investigation: {\"timestamp\":\"2026-05-12T01:31:38.705133+00:00\",\"severity\":\"ERROR\",\"service\":\"synthetic-canary-app\",\"message\":\"checkout retry blast: payment-service returned 503 after 5 retries; abandoning cart cart_id=cart_000028 deploy_sha=ba8f2854 run_id=95527c8e idx=28\",\"synthetic_canary\":\"true\",\"mode\":\"bug\"}, last 1h\n\n**Investigation id**: 3e284bdf-4cce-4864-98db-9f2c8ac8466b\n**Result**: Could not resolve \"{\"timestamp\":\"2026-05-12T01:31:38.705133+00:00\",\"severity\":\"ERROR\",\"service\":\"synthetic-canary-app\",\"message\":\"checkout retry blast: payment-service returned 503 after 5 retries; abandoning cart cart_id=cart_000028 deploy_sha=ba8f2854 run_id=95527c8e idx=28\",\"synthetic_canary\":\"true\",\"mode\":\"bug\"}\" to a known pattern or service.\n\n**Supported inputs**:\n- A raw log line (will be templatized and matched by structural identity)\n- A pattern identity (symbolMessage / templateHash)\n- A service name\n- The literal string `\"environment\"`, `\"all\"`, or `\"audit\"` for an env-wide sweep\n\n**Try next**:\n- `log10x_event_lookup({ pattern: '{\"timestamp\":\"2026-05-12T01:31:38.705133+00:00\",\"severity\":\"ERROR\",\"service\":\"synthetic-canary-app\",\"message\":\"checkout retry blast: payment-service returned 503 after 5 retries; abandoning cart cart_id=cart_000028 deploy_sha=ba8f2854 run_id=95527c8e idx=28\",\"synthetic_canary\":\"true\",\"mode\":\"bug\"}' })` to search by substring\n- `log10x_services()` to list known services\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 34058
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_services --args '{}'",
+      "stdout": "Monitored Services (this week)\n\n  (unknown)            35.0 GB    100%   $52/wk\n  email                11.8 MB    0.0%   $0.02/wk\n  frontend             17.1 KB    0.0%   $0.0000/wk\n  recommendation       2.4 KB     0.0%   $0.0000/wk\n\n  4 services · 35.0 GB total · $53/wk at $1.5/GB\n  Top 3 services = 100% of volume.\n\n**Next actions**:\n  - Drill into the top service: `log10x_cost_drivers({ service: '(unknown)' })` for week-over-week deltas, or `log10x_top_patterns({ service: '(unknown)' })` for current top patterns.\n  - Investigate any spike: `log10x_investigate({ starting_point: '(unknown)' })` for a full causal-chain analysis.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_cost_drivers\",\"args\":{\"service\":\"(unknown)\"},\"reason\":\"week-over-week deltas on the top service\"},{\"tool\":\"log10x_top_patterns\",\"args\":{\"service\":\"(unknown)\"},\"reason\":\"current top patterns for the top service\"},{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"(unknown)\"},\"reason\":\"causal-chain analysis on the top service\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 29604
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_event_lookup --args '{\"pattern\": \"checkout retry blast\"}'",
+      "stdout": "No data found for pattern \"checkout_retry_blast\". Check the pattern name (use underscores, e.g., Payment_Gateway_Timeout).\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 28100
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\":\"synthetic-canary-app\"}'",
+      "stdout": "## Investigation: synthetic-canary-app, last 1h\n\n**Investigation id**: e0b8e889-dc06-45de-8ad3-e10cf6c27b34\n**Result**: Could not resolve \"synthetic-canary-app\" to a known pattern or service.\n\n**Supported inputs**:\n- A raw log line (will be templatized and matched by structural identity)\n- A pattern identity (symbolMessage / templateHash)\n- A service name\n- The literal string `\"environment\"`, `\"all\"`, or `\"audit\"` for an env-wide sweep\n\n**Try next**:\n- `log10x_event_lookup({ pattern: 'synthetic-canary-app' })` to search by substring\n- `log10x_services()` to list known services\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 21921
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_trend --args '{\"pattern\":\"-7pRc6:7z64\"}'",
+      "stdout": "No trend data for pattern \"-7pRc6:7z64\" in the this week.\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 21094
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"service\":\"synthetic-canary-app\"}'",
+      "stdout": "No pattern data available. Patterns appear after the first 24h of data collection.\n",
+      "stderr": "",
+      "exitCode": -1,
+      "durationMs": 60130
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_doctor --args '{}'",
+      "stdout": "## Log10x MCP Doctor\n\n**Status: WARNINGS PRESENT**\n\n### Global checks\n\n**[PASS] environment_config**\n  1 environment: 10x Demo (owner) ★. Default: 10x Demo. (★ = default env; nicknames with (read) are read-only.)\n\n**[WARN] retriever_endpoint**\n  Retriever not reachable from this MCP install. log10x_retriever_query and log10x_backfill_metric cannot retrieve raw events from the S3 archive in this session. For events inside SIEM hot retention (typically <7d), the fastest workaround is direct SIEM query — do not block on retriever setup.\n  - explicit_env: skipped — only one of __SAVE_LOG10X_RETRIEVER_URL__ / __SAVE_LOG10X_RETRIEVER_BUCKET__ set — need both\n  - terraform_state: skipped — /Users/talweiss/.log10x/retriever.tfstate not present\n  - aws_s3_bucket_pattern: skipped — no AWS_REGION / AWS_PROFILE in env\n  - kubectl_service: skipped — kubectl found 0 log10x-retriever services — none clearly a query-handler\n  Fix: Options: (a) set __SAVE_LOG10X_RETRIEVER_URL__ + __SAVE_LOG10X_RETRIEVER_BUCKET__ explicitly; (b) expose AWS creds (AWS_REGION + IAM with s3:ListAllMyBuckets) so auto-detect can find a log10x-retriever-* bucket; (c) deploy the Retriever — https://doc.log10x.com/apps/cloud/retriever/\n\n**[WARN] datadog_destination**\n  No DATADOG_API_KEY (or DD_API_KEY) set. backfill_metric to Datadog will error if attempted.\n  Fix: Set DATADOG_API_KEY in the MCP server environment if you plan to backfill Datadog metrics. DD_SITE / DATADOG_SITE controls the region (defaults to datadoghq.com).\n\n**[PASS] templater_local_tenx**\n  Local tenx CLI available (10x engine v1.0.4, flavor: 'edge'\nNeed help? See https://doc.log10x.com). Templating will run locally — events never leave the box.\n\n**[WARN] templater_paste_endpoint_fallback**\n  Paste endpoint reachable (demo fallback for privacy_mode: false). Do NOT use with production log content — events leave the caller's machine and hit a shared public Lambda.\n\n**[PASS] siem_discovery**\n  1 SIEM connector reachable: cloudwatch. log10x_poc_from_siem_submit will auto-target this SIEM.\n  - cloudwatch (Amazon CloudWatch Logs): DETECTED (ambient) — region=us-east-1 (default)\n  - datadog (Datadog): not_configured\n  - sumo (Sumo Logic): not_configured\n  - gcp-logging (GCP Cloud Logging): not_configured\n  - elasticsearch (Elasticsearch): not_configured\n  - azure-monitor (Azure Monitor / Log Analytics): not_configured\n  - splunk (Splunk): not_configured\n  - clickhouse (ClickHouse): not_configured\n\n### Environment: 10x Demo\n\n**[PASS] prometheus_gateway**\n  prometheus.log10x.com reachable, auth OK for env 10x Demo.\n\n**[PASS] reporter_tier**\n  Edge Reporter detected — full-fidelity metrics with dropped-event coverage.\n\n**[PASS] metric_freshness**\n  edge reporter emitted within the last 8s — metrics are fresh.\n\n**[PASS] scale_and_capability**\n  Volume: 35.0 GB / 7d (edge tier).\n  Services: 3.\n  Patterns: 1217.\n  Compression: 34.3K events per pattern (stable identity means comparisons over time are trustworthy at this volume).\n  \n  Retriever NOT deployed — these question types are out of reach:\n    - Historical events beyond SIEM retention\n    - Dropped-event recovery (forwarder-dropped, invisible to SIEM)\n    - Metric backfill from archive\n    - Sample-reversal verification\n  For questions in these shapes, route to SIEM MCP (hot retention only) or recommend deploying the retriever.\n\n**[PASS] severity_distribution**\n  Severity distribution healthy: 24% INFO, 9.6% error-class (ERROR/WARN/CRIT/FATAL).\n\n**[WARN] cardinality_concentration**\n  A single pattern is 54% of your 30-day log spend. If it's a DEBUG/INFO pattern, you have a large filtering opportunity; if it's an ERROR, you have an ongoing incident to investigate.\n  Fix: Call log10x_top_patterns(limit=1) to see which pattern. Then log10x_investigate on it to check whether it is an incident or noise. If it is noise, log10x_dependency_check + log10x_exclusion_filter to cut cost safely.\n\n**[WARN] cross_pillar_backend**\n  No customer metrics backend detected. Cross-pillar tools (log10x_correlate_cross_pillar, log10x_translate_metric_to_patterns, log10x_discover_join, log10x_customer_metrics_query) will return \"not configured\" until a backend is reachable.\n  - explicit_env: skipped — LOG10X_CUSTOMER_METRICS_URL not set\n  - grafana_cloud: skipped — no GRAFANA_CLOUD_API_KEY / GCLOUD_API_KEY\n  - datadog_prom: skipped — no DD_API_KEY / DATADOG_API_KEY\n  - amp: skipped — no AWS_REGION / AWS_DEFAULT_REGION\n  - gcp_managed_prometheus: skipped — no GOOGLE_APPLICATION_CREDENTIALS\n  - prometheus_url: skipped — PROMETHEUS_URL not set\n  Fix: Set LOG10X_CUSTOMER_METRICS_URL + LOG10X_CUSTOMER_METRICS_TYPE explicitly, or expose one of: GRAFANA_CLOUD_API_KEY (+URL), DD_API_KEY+DD_APP_KEY, AWS_REGION (with AMP workspace available), GOOGLE_APPLICATION_CREDENTIALS (GMP project), or PROMETHEUS_URL.\n\n**[PASS] forwarder_dark_zones**\n  All services with 24h history are still emitting in the last 15 minutes. No forwarder dark zones detected.\n\nThe MCP will function but some tools may be unavailable or degraded. See the warnings above.\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 30707
+    }
+  ],
+  "finalSynthesis": "### Observations\n- The raw log line was templatized via `log10x_resolve_batch` into pattern \"-7pRc6:7z64\" with template: \"checkout retry blast: payment-service returned $ after $ retries; abandoning cart cart_id=cart_$ deploy_sha=$ run_id=$ idx=$\".\n- The log line explicitly attributes this to service \"synthetic-canary-app\" (verbatim from the provided alert body).\n- `log10x_investigate` on the pattern, raw line, and service returned: \"Could not resolve to a known pattern or service.\"\n- `log10x_pattern_trend` reported: \"No trend data for pattern \"-7pRc6:7z64\" in this week.\"\n- `log10x_top_patterns` for service \"synthetic-canary-app\" reported: \"No pattern data available.\"\n- `log10x_services` does not list \"synthetic-canary-app\" among monitored services.\n- `log10x_doctor` reports metrics freshness within 8s, but no warnings directly related to this pattern/service.\n\n### What it means\nThis pattern appears to be new or synthetic (noted as \"synthetic_canary\": \"true\" and \"mode\": \"bug\"), not present in the demo environment's ingested logs. It is not firing now, with frequency not reported (implying 0 based on lack of trend data). The service \"synthetic-canary-app\" emits it, but may not be actively logging or monitored.\n\n### What to do\nAcknowledge the alert as a canary test for a checkout retry failure (payment-service 503). Verify canary configuration and ensure logs from \"synthetic-canary-app\" are ingested if real monitoring is needed. If this indicates a real bug, inspect payment-service for 503 causes and add retries or failover. Run `log10x_investigate({starting_point: \"environment\"})` for env-wide check; consider deploying retriever for deeper archive queries.",
+  "hallucination": {
+    "numericClaimCount": 0,
+    "patternClaimCount": 0,
+    "supported": 0,
+    "unsupported": 0,
+    "inconclusive": 0,
+    "driftScore": 0,
+    "details": []
+  },
+  "valueDelivered": {
+    "score": 0.4,
+    "rationale": "The synthesis correctly identified the pattern template and service from the raw log line, but could not answer whether the pattern is firing now or how often due to MCP lookup failures, leaving the core question partially unanswered."
+  },
+  "valueReceived": {
+    "score": 0.3,
+    "rationale": "The MCP successfully templatized the raw line via log10x_resolve_batch (useful output), but all downstream tools—log10x_investigate, log10x_event_lookup, log10x_pattern_trend—returned 'could not resolve' or 'no data', providing no frequency or firing-status data."
+  },
+  "status": "partial",
+  "flags": [
+    "low_value_delivered",
+    "low_value_received"
+  ],
+  "cost": {
+    "inputTokens": 120710,
+    "outputTokens": 1987,
+    "apiCalls": 19,
+    "costUsd": 0.39193500000000003,
+    "pricingFound": true
+  }
+}
