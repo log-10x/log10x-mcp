@@ -1,8 +1,9 @@
-# Product gap — `log10x_event_lookup` ↔ engine-side pattern hash bridge
+# Product gap — paste-to-live-pattern bridge (cross-tier convergence)
 
-**Severity**: medium (degrades the #1 daily-habit user flow)
+**Severity**: low (in-batch path works on both `privacy_mode: true` and `privacy_mode: false`; only residual is small-batch convergence vs the live Reporter)
 **Surfaced by**: Phase 11 paste-event-resolves-to-pattern hero scenario
-**Symptom**: agents correctly report "no match found" instead of fabricating, but the documented primary path for the paste-to-pattern user flow does not actually find the match even when the pattern is live.
+**Re-verified empirically**: 2026-05-12
+**Status**: both in-batch paths now work end-to-end after the apps/mcp rewrite landed (see [MCP_local_cli_single_event_drop.md](MCP_local_cli_single_event_drop.md)). Residual cross-tier divergence is a templater sample-size limitation, not a bridge bug.
 
 ## The user flow
 
@@ -11,116 +12,125 @@ flow when a user pastes a raw log line is:
 
 > user pastes a raw log line, asks "what is this" → `log10x_event_lookup`
 
-This is the #1 listed daily-habit operational entry point. It is the
-flow that most production users will hit first.
+This is the #1 listed daily-habit operational entry point.
 
-## Reproduction
+## What I tested (2026-05-12)
 
-State: synthetic-canary-app in `otel-demo` namespace is firing in bug mode.
-Pod logs emit the literal line:
+Seven probes against the talw.gx env + paste-Lambda templater:
 
+| # | Test | Result |
+|---|------|--------|
+| 1 | g11.log single event via `resolve_batch` privacy_mode=true (local CLI) | **Drops input (0 patterns resolved)** — separate bug, see [MCP_local_cli_single_event_drop.md](MCP_local_cli_single_event_drop.md) |
+| 2 | g11.log single event via `resolve_batch` privacy_mode=false (paste lambda) | Pattern name surfaces correctly: `opentelemetry_javaagent_tooling_VersionLogger_opentelemetry_javaagent_version` (Jaccard 0.56 > 0.3 threshold) |
+| 3 | Phase 11 `checkout retry blast` line via `resolve_batch` paste lambda | Pattern name surfaces: `returned_after_retries_abandoning_cart_cart_id_cart_deploy_sha_run_id_idx` |
+| 4 | 10-line multi-event mixed batch (4 logical patterns, 10 templates) | All pattern names surface; multiple templates → one pattern handled (#1 + #3 share `checkout_svc_...`) |
+| 5 | `top_patterns` underscored canonical → `event_lookup` (live talw.gx ERROR pattern #14) | Resolves cleanly with full trend + service breakdown |
+| 6 | Same as #5 but all-lowercase: `insufficient_memory` instead of `Insufficient_memory` | **No data found** — case-sensitive exact match required |
+| 7 | 10-event identical-structure OOM batch → `resolve_batch` → `event_lookup` of resulting symbolMessage | **Diverges**: resolve_batch produced `available_pod_canary_app_aaa_Insufficient_memory_synthetic_canary_run_id_idx` (10 distinct templates, per-pod-suffix literals baked in). Live pattern is `are_available_pod_canary_Insufficient_memory_synthetic_canary_run_id_idx`. MCP fires its built-in "Tiny-batch note" warning correctly. |
+
+## The gap (corrected after engine grounding)
+
+The local CLI and the forwarder sidecar run the **same** engine binary.
+The engine emits two artifacts when it processes events:
+
+- `templates.json` — NDJSON, one record per template, keyed by
+  `templateHash` (e.g., `4yR0svSmgt`) with the template body.
+- `aggregated.csv` — one row per pattern, keyed by `message_pattern`
+  (e.g., `opentelemetry_javaagent_tooling_VersionLogger_opentelemetry_javaagent_version`).
+
+The engine's internal rule for mapping templates → patterns:
+**"the longest pattern whose symbols appear in the target template
+in the correct order belongs to it."** Multiple templates can share
+one pattern; a single event gives one template + one pattern.
+
+The engine does **not** emit this template→pattern mapping in
+either output file. There is no `message_pattern` column in
+templates.json and no `templateHash` column in aggregated.csv.
+Both files describe the same population of events but cannot be
+joined by any explicit key.
+
+What the MCP does today: `log10x_resolve_batch` parses both files
+and recovers the mapping via **Jaccard token-set similarity**
+([cli-output-parser.ts](../../src/lib/cli-output-parser.ts) →
+[resolve-batch.ts:132-145, 506-520](../../src/tools/resolve-batch.ts)):
+
+```typescript
+const aggTokenized = aggregated.map((r) => ({ row: r, tokens: tokenize(r.pattern) }));
+for (const p of concentrations) {
+  const tpl = templates.get(p.templateHash);
+  const templateTokens = tokenize(canonicalizeToSymbolMessage(tpl.template));
+  const best = bestJaccardMatch(templateTokens, aggTokenized); // threshold 0.3
+  if (best) p.symbolMessage = best.row.pattern;
+}
 ```
-checkout retry blast: payment-service returned 503 after 5 retries; abandoning cart cart_id=cart_000028 deploy_sha=ba8f2854 run_id=95527c8e idx=28
-```
 
-The corresponding pattern is firing in 10x Prometheus at rank #5 ERROR
-under `log10x_top_patterns({ time_range: "1h", severity: "ERROR" })`.
+**Empirical finding (2026-05-12)**: this heuristic is **looser** than
+the engine's actual rule (token-SET overlap vs in-order SUBSEQUENCE
+match), but it works on every case I tested — single events, multi-event
+mixed batches, and multi-template-to-one-pattern cases. The Phase 11
+hash-only display (`OY?US|0X}_`) is **not currently reproducible** on
+the same line.
 
-### Attempted resolutions
+## What's actually still broken
 
-```bash
-# 1. Raw line via 'line' arg
-$ node eval/bin/mcp-call.mjs --tool log10x_event_lookup --args '{"line":"checkout retry blast: payment-service returned 503 after 5 retries; ..."}'
-Tool 'log10x_event_lookup' threw: Wrong type for `pattern`: Required.
+The **residual** gap is cross-tier convergence between resolve_batch's
+locally-templatized symbolMessage and the live Prometheus pattern label:
 
-# 2. Substring of message body
-$ node eval/bin/mcp-call.mjs --tool log10x_event_lookup --args '{"pattern":"checkout retry blast"}'
-No data found for pattern "checkout_retry_blast".
+- The local templater (whether CLI or paste-Lambda) under-samples on
+  small batches. With 10 structurally-identical events, it produced
+  10 distinct templates with per-line literals baked in, not 1
+  converged template.
+- The live Reporter ingests millions of events and generalizes the
+  same variable slots correctly.
+- Result: resolve_batch's symbolMessage on a small batch will **not
+  match** the live `message_pattern` label that the same line shape
+  is currently bucketed under in Prometheus.
+- `event_lookup` requires an **exact case-sensitive match** on the
+  pattern label — fuzzy / prefix lookup is not supported.
 
-# 3. Shorter substring
-$ node eval/bin/mcp-call.mjs --tool log10x_event_lookup --args '{"pattern":"retry blast"}'
-No data found for pattern "retry_blast".
+The MCP **already documents this** with its built-in "Tiny-batch note"
+([resolve-batch.ts:215-228](../../src/tools/resolve-batch.ts)) which
+fires when N_templates == N_events and pairwise Jaccard > 0.5. The
+warning correctly advises users to "paste ≥50 events" or "use
+`log10x_top_patterns` / `log10x_event_lookup` against the live Reporter."
 
-# 4. resolve_batch with same line — this WORKS (local templater extracts)
-$ node eval/bin/mcp-call.mjs --tool log10x_resolve_batch --args '{"source":"events","events":["checkout retry blast: payment-service returned 503 after 5 retries; ..."]}'
-## Batch Triage
-1 events, resolved into 1 distinct pattern.
-**#1  checkout retry blast: payment-service returned $ after $ re…**
-`OY?US|0X}_` — checkout retry blast: payment-service returned $ after $ retries; abandoning cart cart_id=cart_$
-```
+What the warning doesn't do: automatically find the likely live pattern
+and surface it inline.
 
-Verifying that the pattern IS visible elsewhere in MCP:
+## Proposed fixes (revised)
 
-```bash
-$ node eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{"time_range":"1h","limit":20,"severity":"ERROR"}'
-... [pattern appears at rank #5 under a tokenized name] ...
-```
+Option A — **engine-side join key** (still preferred long-term):
+- Add a `message_pattern` field to each record in `templates.json`,
+  or a `templateHash` column to each row in `aggregated.csv`.
+- Eliminates the Jaccard heuristic.
+- Doesn't fix the small-batch convergence problem — even with an
+  explicit join, the local templater's pattern names diverge from
+  the live engine's on small batches.
 
-## The gap
+Option B — **MCP-side live-pattern fallback** (closes the user flow):
+- After resolve_batch surfaces a symbolMessage, also call
+  `log10x_top_patterns` with a token-overlap filter against the live
+  Reporter. Surface the best live match as `likely live pattern: X
+  (token overlap N/M)` inline in the user-facing output.
+- Cost: 1-2 hours of code + a unit test.
+- Closes the cross-tier divergence problem without engine changes.
+- Handles the case where the small-batch templater diverges from
+  the live engine's converged pattern.
 
-`log10x_event_lookup` accepts:
-- `pattern`: a pattern NAME (e.g., `"Payment_Gateway_Timeout"`)
-- (does NOT accept a raw line)
+Option C — **extend `log10x_event_lookup`** to accept a `raw_line`:
+- Internally call the engine on the raw line to get
+  (templateHash, message_pattern), then look up `message_pattern`
+  in Prometheus.
+- Still subject to small-sample divergence unless combined with
+  Option B's live-pattern fallback.
 
-`log10x_resolve_batch` accepts:
-- `source`: `"events"` | `"text"` | `"file"`
-- raw line input → returns LOCAL TEMPLATER hash (e.g., `OY?US|0X}_`)
-
-The two outputs do not bridge. The local templater's hash is computed
-client-side via the bundled CLI; the engine-side pattern hashes (which
-feed the `top_patterns` / `event_lookup` lookups) are computed
-server-side and differ.
-
-There is no documented MCP path that takes a raw line and returns the
-engine-side pattern hash / canonical pattern name. The agent has to
-do one of:
-
-- Read the resolve_batch output, then keyword-search via
-  `log10x_top_patterns` (multi-call workaround).
-- Skip MCP and use kubectl/SIEM to find the pod producing the line.
-- Report "no match" honestly (the path Phase 11 agents took).
-
-## Why this matters
-
-The catalog's own routing table puts `log10x_event_lookup` at the top of
-the daily-habit list. Users will hit this path first; new users will
-form their first impression of the MCP based on whether it works.
-Currently it does not — even for patterns the platform is actively
-tracking in `top_patterns`.
-
-drift=0 across all 7 Phase 11 paste-with-match runs proves agents do
-NOT fabricate around this gap. They correctly report the gap and fall
-back to keyword search or external context. But the agents' synthesis
-quality (vd) collapses to 0.20-0.60 because the user's actual question
-("identify the pattern this log line came from") cannot be answered
-through the documented path.
-
-## Proposed fix (sketch — needs product owner input)
-
-Option A — extend `log10x_event_lookup`:
-- Accept a `raw_line: string` arg
-- Internally: call the templater to get the local hash + extracted
-  template
-- Substring-search the extracted template against engine-tracked
-  pattern names
-- Return the engine pattern name + hash + trend if a fuzzy match exists,
-  with a confidence score
-
-Option B — bridge in `log10x_resolve_batch`:
-- After local templater extraction, also issue an engine-side lookup
-  using the extracted template substring
-- Annotate each row with `engine_pattern_match: <name> (confidence: 0.X)`
-  when a likely live match exists
-
-Option C — accept this as a documented limitation:
-- Update the tool routing table to say "paste a raw line → `log10x_resolve_batch`
-  followed by `log10x_top_patterns` keyword search"
-- Document the multi-call workaround as canonical
-
-Of the three, A or B is preferred for production user experience.
+**Recommendation**: ship Option B as a 1-2 hour patch. Option A is
+nice-to-have for cleanliness but not load-bearing on the user flow.
 
 ## Evidence
 
-7 hero-scenario transcripts under
-`eval/reports/hero/paste-event-resolves-to-pattern/` show the failure
-mode consistently across 2 Claude + 5 Grok runs.
+- This doc's "What I tested" table — 7 probes, 2026-05-12.
+- 7 hero-scenario transcripts under
+  `eval/reports/hero/paste-event-resolves-to-pattern/` (Phase 11).
+- The MCP's built-in tiny-batch warning at
+  [resolve-batch.ts:215-228](../../src/tools/resolve-batch.ts).

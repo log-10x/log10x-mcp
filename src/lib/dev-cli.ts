@@ -96,12 +96,75 @@ export class DevCliRunError extends Error {
 // ── Public API ──
 
 /**
- * Run the local tenx CLI with batch piped to stdin.
- * Used by log10x_resolve_batch.
+ * Run `tenx @apps/mcp` with batch piped to stdin and demultiplex the
+ * resulting stdout into the four buffers the parser expects.
+ *
+ * The @apps/mcp engine app emits a single stdout stream with three
+ * discriminable line types:
+ *   `~hash,vals...`                            — encoded TenXObject
+ *   `{"templateHash":"...","template":"..."}`  — new TenXTemplate
+ *   `summary=,SEVERITY,pattern,vol,bytes,...`  — aggregated TenXSummary
+ * Any other line (engine info, JS console output) is skipped.
+ *
+ * Path resolution: the engine finds `apps/mcp` via the user's
+ * `TENX_HOME` / `TENX_MODULES` / `TENX_CONFIG` env vars, or OS defaults.
+ * See https://doc.log10x.com/install/paths/. Requires an engine release
+ * with `apps/mcp` shipped (≥ the first release after PR #34).
+ *
+ * No tempdir, no shadow template config, no file I/O — eliminates the
+ * macOS `/var/folders` config-resolver bug, the system-cache dedup, and
+ * the `LOG10X_MCP_OUTPUT_DIR` empty-path crash.
  */
 export async function runDevCliStdin(rawLogText: string): Promise<DevCliResult> {
-  const configPath = resolveConfigPath('LOG10X_MCP_STDIN_CONFIG_PATH', 'tenx-mcp-stdin.config.yaml');
-  return runDevCliCore({ mode: 'stdin', stdinData: rawLogText, configPath });
+  const mode = resolveTenxMode();
+  const started = Date.now();
+  let cliVersion: string | undefined;
+  let stdout: string;
+
+  if (mode === 'docker') {
+    ({ stdout, cliVersion } = await runAppsMcpViaDocker(rawLogText));
+  } else {
+    ({ stdout, cliVersion } = await runAppsMcpViaLocalBinary(rawLogText));
+  }
+
+  // Demultiplex stdout by per-line prefix.
+  const encodedLines: string[] = [];
+  const templateLines: string[] = [];
+  const summaryLines: string[] = [];
+  for (const line of stdout.split('\n')) {
+    if (!line) continue;
+    const c = line.charCodeAt(0);
+    // Fast prefix check on the first byte.
+    if (c === 0x7E /* ~ */) {
+      encodedLines.push(line);
+    } else if (c === 0x7B /* { */) {
+      templateLines.push(line);
+    } else if (line.startsWith('summary=')) {
+      // Engine renders the literal `summary=` as a field, then joins the
+      // remaining fields with `,`, so the line is `summary=,SEV,pat,...`.
+      // Strip the prefix and the delimiter to get a plain CSV row.
+      summaryLines.push(line.slice('summary='.length).replace(/^,/, ''));
+    }
+    // Otherwise: engine info line (emoji-prefixed) or JS console output — skip.
+  }
+
+  // Synthesize a header for the aggregated.csv blob so parseAggregated()
+  // can dispatch on column names. apps/mcp emits these fields in this
+  // order (see config/apps/mcp/stdout/config.yaml summary fields).
+  const aggregatedHeader = 'severity_level,message_pattern,summaryVolume,summaryBytes,summaryTotals';
+
+  return {
+    templatesJson: templateLines.join('\n'),
+    encodedLog: encodedLines.join('\n'),
+    decodedLog: '',
+    aggregatedCsv: summaryLines.length > 0
+      ? aggregatedHeader + '\n' + summaryLines.join('\n')
+      : '',
+    wallTimeMs: Date.now() - started,
+    cliVersion,
+    configPath: '@apps/mcp',
+    tempDir: '',
+  };
 }
 
 /**
@@ -227,7 +290,59 @@ function resolveTenxMode(): 'local' | 'docker' {
   );
 }
 
-// ── Local binary backend ──
+// ── apps/mcp backends (stdin → demuxed stdout) ──
+
+async function runAppsMcpViaLocalBinary(
+  rawLogText: string
+): Promise<{ stdout: string; cliVersion: string | undefined }> {
+  const binary = process.env.LOG10X_TENX_PATH || 'tenx';
+  if (!(await isBinaryOnPath(binary))) {
+    throw new DevCliNotInstalledError();
+  }
+  const cliVersion = await tryGetVersion(binary);
+
+  // Don't inject TENX_INCLUDE_PATHS. Rely on the user's TENX_HOME /
+  // TENX_MODULES / TENX_CONFIG (or OS defaults) to resolve `apps/mcp`.
+  // Set a runtime name so the engine's log line carries a recognizable tag.
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    LOG10X_MCP_RUNTIME_NAME: `mcp-${Date.now()}`,
+  };
+
+  const stdout = await runCommandWithStdin(
+    binary,
+    ['@apps/mcp'],
+    rawLogText,
+    { env, timeoutMs: 120_000, configPath: '@apps/mcp' }
+  );
+  return { stdout, cliVersion };
+}
+
+async function runAppsMcpViaDocker(
+  rawLogText: string
+): Promise<{ stdout: string; cliVersion: string | undefined }> {
+  try {
+    await runCommand('docker', ['info'], { timeoutMs: 5_000 });
+  } catch (e) {
+    throw new DockerNotAvailableError((e as Error).message || String(e));
+  }
+  const image = process.env.LOG10X_TENX_IMAGE || 'log10x/pipeline-10x:latest';
+  const args = [
+    'run', '--rm', '-i',
+    '-e', `LOG10X_MCP_RUNTIME_NAME=mcp-${Date.now()}`,
+    image,
+    '@apps/mcp',
+  ];
+  const stdout = await runCommandWithStdin(
+    'docker',
+    args,
+    rawLogText,
+    { timeoutMs: 180_000, configPath: '@apps/mcp' }
+  );
+  return { stdout, cliVersion: `docker:${image}` };
+}
+
+// ── Local binary backend (legacy file-mode path, used by extract-templates) ──
 
 async function runViaLocalBinary(
   opts: RunDevCliOptions,
