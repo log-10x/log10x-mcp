@@ -1,3 +1,85 @@
+# Counterfactual injection harness — Phase 13: Anthropic timeout fix + CloudWatch SIEM investigation (PARTIAL 2026-05-12)
+
+> **Status**: 3 tasks proposed (AbortController timeout, Claude N=10
+> correlation, CW SIEM investigation). Task 1 fully done; Task 2
+> partial (1/10 — Anthropic API throughput at parallel scale was
+> the limit, not the hang issue); Task 3 surfaced **a new MCP
+> product bug** (CW filter syntax mismatch — separate from the
+> Phase 11/12 event_lookup gap).
+>
+> ## Task 1 — AbortController/timeout on Anthropic SDK ✓
+>
+> `AnthropicAgentClient` now wraps each call with explicit timeout
+> (180s per-call) + retry on network errors + retry on HTTP
+> 429/5xx/529. Mirrors GrokAgentClient logic. Smoke-test confirmed
+> the fix prevents infinite hangs — but does not accelerate the
+> underlying API. Anthropic's parallel-scale throughput today
+> remains the bottleneck.
+>
+> ## Task 2 — Claude N=10 correlation: 1/10 completed
+>
+> The 1 completed run: drift=0, vd=0.65, held_ground=true,
+> **causal_rating drift=0 (perfect)**. Consistent with Phase 12
+> Claude pattern. Combined Claude N across Phases 11+12+13 = 6
+> runs:
+>
+>   - 5/6 perfect causal_rating
+>   - 1/6 with single over-attribution (Phase 12 run 1)
+>   - **Claude over-attribution rate at N=6: 17%**
+>   - vs **Grok at N=24: 37.5%**
+>
+> Cross-model differential directionally holds but Claude N is
+> still small. Right next-session step: serialize Claude runs (not
+> parallel) to dodge Anthropic's parallel-scale throttling.
+>
+> ## Task 3 — CloudWatch SIEM path: investigated, found new MCP bug
+>
+> Set up the smallest viable CW test: created
+> `/log10x-eval/synthetic-canary` log group, pushed 7 canary-shaped
+> events. Direct `aws logs filter-log-events` returns them with
+> CloudWatch filter pattern `'"checkout retry blast"'`.
+>
+> MCP `log10x_pattern_examples --vendor cloudwatch` returns 0
+> events with diagnostic "Invalid character(s) in term '@'".
+>
+> Root cause: `src/tools/pattern-examples.ts` generates **Logs
+> Insights** syntax (`@message like /.../`); `src/lib/siem/cloudwatch.ts`
+> invokes **`FilterLogEventsCommand`** which uses DIFFERENT filter
+> pattern syntax. The Insights-syntax string is rejected by
+> `FilterLogEvents`.
+>
+> Filed: `eval/gaps/MCP_cloudwatch_filterpattern_syntax_mismatch.md`
+> with three proposed fixes (smallest: ~30 min code change).
+>
+> **The MCP CloudWatch SIEM path is broken end-to-end.** Once
+> fixed, the harness can run scenarios exercising real SIEM-backed
+> tools — likely closing the persistent `value_received` ~0.3-0.5
+> gap noted across all 13 phases.
+>
+> ## Cumulative
+>
+> | Metric | Value |
+> |---|---|
+> | Hero runs total | **189** (188 + 1 from this batch) |
+> | Surface drift=0 | 183 |
+> | Surface agent fabrications | **0** |
+> | Causal over-attributions | 10 (Grok 9, Claude 1) |
+> | **MCP product gaps surfaced** | **2** (event_lookup + CW filter syntax) |
+>
+> ## Two MCP product gaps now filed
+>
+>   1. `eval/gaps/MCP_event_lookup_pattern_hash_bridge.md` (Phase 12) —
+>      paste-to-pattern flow broken
+>   2. `eval/gaps/MCP_cloudwatch_filterpattern_syntax_mismatch.md` (Phase 13) —
+>      CW SIEM path broken
+>
+> Both surfaced through the harness exercising real user-flow
+> paths. Neither was caught by any prior test methodology.
+>
+> Full write-up: `eval/reports/hero/PHASE_13_TIMEOUT_FIX_AND_CW_INVESTIGATION.md`.
+
+---
+
 # Counterfactual injection harness — Phase 12: Causal-rating verification at N=24 + first-class metric (VERIFIED 2026-05-12)
 
 > **Status**: Phase 12 executes three concurrent tasks: re-run

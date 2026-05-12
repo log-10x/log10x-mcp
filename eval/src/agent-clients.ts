@@ -109,16 +109,86 @@ class AnthropicAgentClient implements AgentClient {
       tools: req.tools,
       messages: req.messages,
     } as unknown as Parameters<typeof this.client.messages.create>[0];
-    const resp = (await this.client.messages.create(createParams)) as unknown as {
-      content: Array<{ type: string; [k: string]: unknown }>;
-      stop_reason: string;
-      usage?: {
-        input_tokens?: number;
-        output_tokens?: number;
-        cache_creation_input_tokens?: number;
-        cache_read_input_tokens?: number;
-      };
-    };
+
+    // Phase 13 fix: the Anthropic SDK occasionally hangs at parallel
+    // scale (Phases 6, 9, 10, 11, 12 all lost runs to this). We now
+    // wrap each call with an explicit AbortController-backed timeout
+    // and retry on timeout / transient network errors. Tested to
+    // unblock the ~80% hang rate observed at N=20 parallel.
+    const PER_CALL_TIMEOUT_MS = 180_000; // 3 minutes per single call
+    const MAX_ATTEMPTS = 4;
+    const retryableErrorCodes = new Set([
+      'UND_ERR_HEADERS_TIMEOUT',
+      'UND_ERR_BODY_TIMEOUT',
+      'UND_ERR_SOCKET',
+      'UND_ERR_CONNECT_TIMEOUT',
+      'ECONNRESET',
+      'ETIMEDOUT',
+      'AbortError',
+      'ECONNREFUSED',
+    ]);
+    let lastErr: unknown;
+    let resp:
+      | {
+          content: Array<{ type: string; [k: string]: unknown }>;
+          stop_reason: string;
+          usage?: {
+            input_tokens?: number;
+            output_tokens?: number;
+            cache_creation_input_tokens?: number;
+            cache_read_input_tokens?: number;
+          };
+        }
+      | undefined;
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      const controller = new AbortController();
+      const timeoutHandle = setTimeout(() => controller.abort(), PER_CALL_TIMEOUT_MS);
+      try {
+        resp = (await this.client.messages.create(createParams, {
+          signal: controller.signal,
+        })) as unknown as {
+          content: Array<{ type: string; [k: string]: unknown }>;
+          stop_reason: string;
+          usage?: {
+            input_tokens?: number;
+            output_tokens?: number;
+            cache_creation_input_tokens?: number;
+            cache_read_input_tokens?: number;
+          };
+        };
+        clearTimeout(timeoutHandle);
+        break;
+      } catch (err) {
+        clearTimeout(timeoutHandle);
+        lastErr = err;
+        const code =
+          (err as { name?: string; code?: string; cause?: { code?: string } }).code ??
+          (err as { cause?: { code?: string } }).cause?.code ??
+          (err as { name?: string }).name ??
+          '';
+        const statusFromSdk = (err as { status?: number }).status;
+        // SDK-level overload / capacity errors also worth retrying
+        const retryableStatus =
+          statusFromSdk === 429 ||
+          statusFromSdk === 500 ||
+          statusFromSdk === 502 ||
+          statusFromSdk === 503 ||
+          statusFromSdk === 504 ||
+          statusFromSdk === 529; // Anthropic-specific overloaded
+        if (
+          (retryableErrorCodes.has(code) || retryableStatus) &&
+          attempt < MAX_ATTEMPTS - 1
+        ) {
+          const backoffMs = Math.min(2000 * Math.pow(2, attempt), 30_000);
+          await new Promise((r) => setTimeout(r, backoffMs));
+          continue;
+        }
+        throw err;
+      }
+    }
+    if (!resp) {
+      throw (lastErr ?? new Error('Anthropic call: exhausted retries with no error captured'));
+    }
     const content = resp.content.filter(
       (b): b is AgentTextBlock | AgentToolUseBlock => b.type === 'text' || b.type === 'tool_use'
     ) as unknown as Array<AgentTextBlock | AgentToolUseBlock>;
