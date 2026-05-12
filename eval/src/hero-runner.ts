@@ -559,12 +559,15 @@ export async function runHero(
       unsupported: 0,
       inconclusive: 0,
       driftScore: -1,
+      driftHard: 0,
+      driftSoft: 0,
       details: [
         {
           claim: '<oracle errored>',
           kind: 'numeric',
           oracleResult: (e as Error).message.slice(0, 300),
           status: 'inconclusive',
+          driftSeverity: null,
           detail: 'oracle path threw — re-run via bin/run-hero.mjs --revalidate <transcript.json>',
         },
       ],

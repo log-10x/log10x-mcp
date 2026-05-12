@@ -44,6 +44,13 @@ export interface ValidationResult {
   kind: 'numeric' | 'pattern';
   oracleResult: string;
   status: 'supported' | 'unsupported' | 'inconclusive';
+  /**
+   * Drift severity for `unsupported` claims:
+   *   - 'hard': oracle has DIFFERENT data than the claim (claim is contradicted)
+   *   - 'soft': oracle has NO data to verify (claim might be true, just unverifiable)
+   * `null` for non-`unsupported` claims.
+   */
+  driftSeverity: 'hard' | 'soft' | null;
   detail: string;
 }
 
@@ -53,8 +60,32 @@ export interface HeroOracleReport {
   supported: number;
   unsupported: number;
   inconclusive: number;
+  /** Total unsupported claims (legacy). */
   driftScore: number;
+  /** Subset of driftScore: claims contradicted by oracle data. */
+  driftHard: number;
+  /** Subset of driftScore: claims oracle could not verify (no data either way). */
+  driftSoft: number;
   details: ValidationResult[];
+}
+
+/**
+ * Derive drift severity from an unsupported claim's oracleResult string.
+ * - Hard contradiction signals: phrases naming specific contradicting values
+ *   (the `pairedDrift` path sets oracleResult to "claimed X but pattern's Y").
+ * - Soft (no-data) signals: oracleResult contains "no metric data", "absent",
+ *   "no data", or starts with "expected" but the oracle pillar has nothing.
+ */
+function classifyDriftSeverity(oracleResult: string): 'hard' | 'soft' {
+  const r = oracleResult.toLowerCase();
+  if (
+    r.includes('but pattern') ||
+    r.includes('off)') ||
+    r.includes('claimed') ||
+    r.includes('mismatch') ||
+    r.includes('contradict')
+  ) return 'hard';
+  return 'soft';
 }
 
 // ─── Extraction ─────────────────────────────────────────────────────────
@@ -205,6 +236,7 @@ export async function validateClaims(
         kind: 'numeric',
         oracleResult: 'percentages are derived; oracle does not gate them',
         status: 'inconclusive',
+        driftSeverity: null,
         detail: c.context,
       });
       continue;
@@ -228,6 +260,7 @@ export async function validateClaims(
           ? `env total ~${(oracleVolume / 1e9).toFixed(2)}GB/24h; claim within plausible subset/total range`
           : `env total ~${(oracleVolume / 1e9).toFixed(2)}GB/24h; claim exceeds 30-day total ×5`,
         status: supported ? 'supported' : 'unsupported',
+        driftSeverity: supported ? null : 'hard',
         detail: c.context,
       });
       continue;
@@ -260,6 +293,7 @@ export async function validateClaims(
           ? `env ~${(oracleVolume / 1e9).toFixed(2)}GB/day; claim within plausible cost band`
           : `env ~${(oracleVolume / 1e9).toFixed(2)}GB/day; claim implies $${dailyDollars.toFixed(2)}/day, > $${upperDaily.toFixed(2)}/day cap (even at top-tier SIEM rate)`,
         status: supported ? 'supported' : 'unsupported',
+        driftSeverity: supported ? null : 'hard',
         detail: c.context,
       });
       continue;
@@ -273,6 +307,7 @@ export async function validateClaims(
         kind: 'numeric',
         oracleResult: `oracle reports ${oracleCount} services`,
         status: ok ? 'supported' : 'unsupported',
+        driftSeverity: ok ? null : 'hard',
         detail: c.context,
       });
       continue;
@@ -285,6 +320,7 @@ export async function validateClaims(
       kind: 'numeric',
       oracleResult: 'no targeted oracle path for this kind; claim accepted as plausible',
       status: 'inconclusive',
+      driftSeverity: null,
       detail: c.context,
     });
   }
@@ -352,6 +388,7 @@ export async function validateClaims(
             kind: 'pattern',
             oracleResult: pairedDrift,
             status: 'unsupported',
+            driftSeverity: 'hard',
             detail: p.context,
           });
           continue;
@@ -361,6 +398,7 @@ export async function validateClaims(
           kind: 'pattern',
           oracleResult: `${(bytes / 1e6).toFixed(1)} MB / 24h in metrics`,
           status: 'supported',
+          driftSeverity: null,
           detail: p.context,
         });
       } else {
@@ -369,6 +407,7 @@ export async function validateClaims(
           kind: 'pattern',
           oracleResult: 'no metric data in 24h window',
           status: 'unsupported',
+          driftSeverity: 'soft',
           detail: p.context,
         });
       }
@@ -378,6 +417,7 @@ export async function validateClaims(
         kind: 'pattern',
         oracleResult: `oracle query threw: ${(e as Error).message.slice(0, 100)}`,
         status: 'inconclusive',
+        driftSeverity: null,
         detail: p.context,
       });
     }
@@ -386,6 +426,8 @@ export async function validateClaims(
   const supported = details.filter((d) => d.status === 'supported').length;
   const unsupported = details.filter((d) => d.status === 'unsupported').length;
   const inconclusive = details.filter((d) => d.status === 'inconclusive').length;
+  const driftHard = details.filter((d) => d.driftSeverity === 'hard').length;
+  const driftSoft = details.filter((d) => d.driftSeverity === 'soft').length;
 
   return {
     numericClaimCount: numericClaims.length,
@@ -394,6 +436,8 @@ export async function validateClaims(
     unsupported,
     inconclusive,
     driftScore: unsupported,
+    driftHard,
+    driftSoft,
     details,
   };
 }
@@ -408,7 +452,7 @@ export function renderOracleReport(r: HeroOracleReport): string {
   lines.push(
     `- Supported by oracle: ${r.supported} · Unsupported: ${r.unsupported} · Inconclusive: ${r.inconclusive}`
   );
-  lines.push(`- **Drift score: ${r.driftScore}** (count of unsupported claims)`);
+  lines.push(`- **Drift score: ${r.driftScore}** (hard: ${r.driftHard}, soft: ${r.driftSoft}) — hard = oracle data contradicts the claim, soft = oracle could not verify`);
   lines.push('');
   if (r.details.length > 0) {
     lines.push('### Per-claim detail');

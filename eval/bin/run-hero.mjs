@@ -55,8 +55,13 @@ if (!specPath) {
 const spec = JSON.parse(readFileSync(resolve(specPath), 'utf8'));
 const env = loadEvalEnv();
 const ts = new Date().toISOString().replace(/[:.]/g, '-');
+// Millisecond-precision timestamp alone collides on parallel launches (saw it
+// at N=10 Grok where two runs landed in the same ms and the second overwrote
+// the first). Append PID + a short random tag so concurrent runs always get
+// distinct dirs.
+const suffix = `${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
 const modelTag = runnerModel ? `__${runnerModel.replace(/[^a-zA-Z0-9._-]/g, '_')}` : '';
-const outDir = join(evalRoot, 'reports', 'hero', spec.id, `${ts}${modelTag}`);
+const outDir = join(evalRoot, 'reports', 'hero', spec.id, `${ts}__${suffix}${modelTag}`);
 
 console.error(
   `[run-hero] spec=${spec.id} env=${env.mode} model=${runnerModel ?? 'claude (default)'}` +
