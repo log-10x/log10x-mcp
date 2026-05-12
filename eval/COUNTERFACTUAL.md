@@ -1,3 +1,84 @@
+# Counterfactual injection harness — Phase 14: CW filter syntax fix shipped + first SIEM-side hero scenario (VERIFIED 2026-05-12)
+
+> **Status**: The Phase 13 CloudWatch product gap is FIXED in
+> `src/tools/pattern-examples.ts`. The first SIEM-side hero
+> scenario (`siem-correlation-cw`) runs end-to-end against real
+> CloudWatch events.
+>
+> ## The fix
+>
+> 2-line change in `pattern-examples.ts` `case 'cloudwatch'`:
+> emit FilterLogEvents-compatible quoted-phrase syntax
+> (`"phrase"`) instead of the broken Logs-Insights syntax
+> (`@message like /.../`). Smoke test against
+> `/log10x-eval/synthetic-canary` log group returns events for
+> all three planted pattern types.
+>
+> **The MCP CloudWatch SIEM path is now working end-to-end for
+> the first time** — 14 phases of testing surfaced the bug AND
+> the harness session shipped the fix.
+>
+> ## New hero scenario: `siem-correlation-cw`
+>
+> The Phase 11/12 correlation property tested via the SIEM-side
+> path instead of the Prom-side. Agent uses
+> `log10x_pattern_examples --vendor cloudwatch --scope
+> /log10x-eval/synthetic-canary` as its primary investigation
+> surface. 300 events pre-loaded (3 pattern types × ~75 each +
+> heartbeats).
+>
+> ## Results — striking cross-path differential
+>
+> | Path | Model | N | rating_drift=0 | Over-attributions |
+> |------|-------|---|---------------|--------------------|
+> | Prom (P11+12) | Grok | 24 | 7/24 (29%) | 9/24 (37.5%) |
+> | Prom (P11+12) | Claude | 5 | 4/5 (80%) | 1/5 (20%) |
+> | **CW (P14)** | **Grok** | **5** | **5/5 (100%)** | **0/5 (0%)** |
+> | **CW (P14)** | **Claude** | **2** | **1/2 (50%)** | **1/2 (50%)** |
+>
+> Grok's causal hedging on the CW path is dramatically better
+> than on the Prom path at small N=5 (100% perfect vs 29%
+> perfect at N=24). Hypothesis worth N=20 verification: **raw
+> event samples make causal attribution harder to fabricate
+> than aggregated pattern metadata**. Concrete events ground
+> reasoning in a way aggregated counts don't.
+>
+> ## Cumulative across 14 phases
+>
+> | Metric | Value |
+> |---|---|
+> | Hero runs total | **199** |
+> | Surface drift=0 | 192 (7 oracle/tokenization artifacts) |
+> | Surface agent fabrications | **0** |
+> | MCP product gaps surfaced by harness | 2 |
+> | **MCP product gaps FIXED by harness** | **1** (CW filter syntax) |
+>
+> ## What changed about the harness's role
+>
+> Through Phase 13 the harness MEASURED the product. Phase 14
+> the harness IMPROVED the product. The bug was found by the
+> harness (Phase 13 investigation), fixed in the harness
+> session (Phase 14 commit), and the fix was verified by the
+> harness's own new scenarios — all in one continuous
+> investigation. This is the eval working at its strongest:
+> not just scoring agent behavior, but driving product
+> correctness via test-driven discovery.
+>
+> ## Open follow-ups
+>
+>   - **Event_lookup bridge fix** (Phase 11/12 gap, second MCP
+>     product issue). Harder than the CW fix; engine-side hashing.
+>   - **Re-run correlation at N=20+ on both Prom and CW paths**
+>     to verify the 100%-vs-29% rating_drift differential.
+>   - **Anthropic SDK parallel-scale throughput** remains the
+>     load-bearing harness fragility. Even with the Phase 13
+>     timeout fix, parallel Claude is slow. Switch to serial.
+>
+> Full write-up:
+> `eval/reports/hero/PHASE_14_CW_FIX_AND_SIEM_SCENARIO.md`.
+
+---
+
 # Counterfactual injection harness — Phase 13: Anthropic timeout fix + CloudWatch SIEM investigation (PARTIAL 2026-05-12)
 
 > **Status**: 3 tasks proposed (AbortController timeout, Claude N=10

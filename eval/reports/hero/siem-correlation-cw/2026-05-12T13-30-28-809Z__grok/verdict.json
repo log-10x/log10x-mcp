@@ -1,0 +1,257 @@
+{
+  "spec": {
+    "id": "siem-correlation-cw",
+    "title": "SIEM correlation via CloudWatch — paste alert, sample real CW events, distinguish related from unrelated",
+    "category": "stability",
+    "prompt": "An alert just fired with this raw log line:\n\n```\nERROR synthetic-canary-app checkout retry blast: payment-service returned 503 after 5 retries; abandoning cart cart_id=cart_100007 deploy_sha=p14fresh idx=7\n```\n\nWe ship our application logs to AWS CloudWatch. The relevant log group is `/log10x-eval/synthetic-canary`. Investigate via the log10x MCP using `log10x_pattern_examples` with `vendor: cloudwatch` and `scope: \"/log10x-eval/synthetic-canary\"`. Specifically: (a) confirm the alert pattern is firing in CW; (b) sample CW for any OTHER error patterns currently active; (c) for each, assess whether it is the alert itself, plausibly-upstream-causal, or unrelated concurrent noise. Be explicit: do NOT confidently assert causation between two patterns merely because they appear in the same time window. 'Potentially related, causation unverified' is a legitimate finding. AWS credentials are configured via the ambient provider chain.",
+    "persona": "Senior SRE who knows real production logs land in CloudWatch and uses the MCP's CW SIEM path as the primary investigation surface. Treats temporal co-occurrence as a hypothesis, not proof.",
+    "budget_hint": "6-10 tool calls.",
+    "expected_answer": {
+      "summary": "Three distinct ERROR patterns are present in /log10x-eval/synthetic-canary CW log group: (1) the canary itself — 'checkout retry blast: payment-service returned 503' (matches the pasted alert); (2) a payment-gateway connection-pool-exhausted pattern that is SEMANTICALLY RELATED to the canary's 503 messages, plausibly upstream-causal but with no verified causal chain in this synthetic environment; (3) a DNS resolution failure pattern that is unrelated concurrent noise. PASS = agent uses log10x_pattern_examples with cloudwatch vendor, surfaces all three, hedges appropriately on payment-gateway causation, and dismisses DNS as unrelated. FAIL = agent fabricates causation, fails to use the CW path, or quotes pattern names not in tool output.",
+      "must_mention": [
+        "cloudwatch",
+        "synthetic-canary",
+        "payment-gateway"
+      ],
+      "expected_tool_chain": [
+        "log10x_pattern_examples"
+      ],
+      "snapshot_ts": "2026-05-12T13:30:00.000Z"
+    },
+    "causal_rating": {
+      "items": [
+        {
+          "item": "synthetic-canary-app (the alert source)",
+          "expected_min": 5,
+          "expected_max": 5,
+          "description": "The canary IS the alert source."
+        },
+        {
+          "item": "payment-gateway connection pool exhausted (lexically related)",
+          "expected_min": 2,
+          "expected_max": 3,
+          "description": "Plausibly upstream by lexical similarity; planted independently."
+        },
+        {
+          "item": "DNS resolution failures (unrelated noise)",
+          "expected_min": 1,
+          "expected_max": 1,
+          "description": "Unrelated concurrent noise."
+        }
+      ]
+    }
+  },
+  "runnerModel": "grok-4-latest",
+  "runnerVendor": "xai",
+  "startedAt": "2026-05-12T13:30:28.813Z",
+  "endedAt": "2026-05-12T13:54:15.014Z",
+  "durationMs": 1426201,
+  "envMode": "demo",
+  "bashCommands": [
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --list",
+      "stdout": "log10x_advise_compact\nlog10x_advise_install\nlog10x_advise_receiver\nlog10x_advise_reporter\nlog10x_advise_retriever\nlog10x_backfill_metric\nlog10x_correlate_cross_pillar\nlog10x_cost_drivers\nlog10x_customer_metrics_query\nlog10x_dependency_check\nlog10x_discover_env\nlog10x_discover_join\nlog10x_discover_labels\nlog10x_doctor\nlog10x_event_lookup\nlog10x_exclusion_filter\nlog10x_extract_templates\nlog10x_investigate\nlog10x_investigation_get\nlog10x_list_by_label\nlog10x_login_status\nlog10x_pattern_examples\nlog10x_pattern_trend\nlog10x_resolve_batch\nlog10x_retriever_query\nlog10x_retriever_query_status\nlog10x_retriever_series\nlog10x_savings\nlog10x_services\nlog10x_top_patterns\nlog10x_translate_metric_to_patterns\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 53846
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"vendor\":\"cloudwatch\",\"scope\":\"/log10x-eval/synthetic-canary\"}'",
+      "stdout": "",
+      "stderr": "",
+      "exitCode": -1,
+      "durationMs": 60040
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_examples --args '{\"vendor\":\"cloudwatch\",\"scope\":\"/log10x-eval/synthetic-canary\"}'",
+      "stdout": "Tool 'log10x_pattern_examples' threw: Wrong type for `pattern`: Required.\n  Field guidance: Pattern name (Symbol Message, e.g. `Payment_Gateway_Timeout`) or a pasted raw log line. Pasted lines resolve to the matching pattern via the same templater path as log10x_resolve_batch. Required.\n",
+      "stderr": "",
+      "exitCode": 1,
+      "durationMs": 53305
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_resolve_batch --args '{\"vendor\":\"cloudwatch\",\"scope\":\"/log10x-eval/synthetic-canary\",\"lines\":[\"ERROR synthetic-canary-app checkout retry blast: payment-service returned 503 after 5 retries; abandoning cart cart_id=cart_100007 deploy_sha=p14fresh idx=7\"]}'",
+      "stdout": "Tool 'log10x_resolve_batch' threw: Wrong type for `source`: Required.\n  Field guidance: Input mode. `file`: read from local path. `events`: array of raw log lines. `text`: a single string containing newline-separated lines (use this when the model is passing through a Bash/SIEM output it already has in hand).\n",
+      "stderr": "",
+      "exitCode": 1,
+      "durationMs": 53587
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_resolve_batch --args '{\"vendor\":\"cloudwatch\",\"scope\":\"/log10x-eval/synthetic-canary\",\"source\":\"events\",\"lines\":[\"ERROR synthetic-canary-app checkout retry blast: payment-service returned 503 after 5 retries; abandoning cart cart_id=cart_100007 deploy_sha=p14fresh idx=7\"]}'",
+      "stdout": "Tool 'log10x_resolve_batch' threw: source=events requires an `events` array.\n",
+      "stderr": "",
+      "exitCode": 1,
+      "durationMs": 50748
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_resolve_batch --args '{\"vendor\":\"cloudwatch\",\"scope\":\"/log10x-eval/synthetic-canary\",\"source\":\"events\",\"events\":[\"ERROR synthetic-canary-app checkout retry blast: payment-service returned 503 after 5 retries; abandoning cart cart_id=cart_100007 deploy_sha=p14fresh idx=7\"]}'",
+      "stdout": "",
+      "stderr": "",
+      "exitCode": -1,
+      "durationMs": 60109
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_doctor --args '{}'",
+      "stdout": "",
+      "stderr": "",
+      "exitCode": -1,
+      "durationMs": 60025
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_login_status --args '{}'",
+      "stdout": "## Log10x login status\n\n**You are in DEMO MODE.** No `LOG10X_API_KEY` is set in the MCP server's environment, so the MCP booted against the public read-only demo env (the same one console.log10x.com shows visitors who haven't signed up).\n\n### What works in demo mode\n- All read-only tools against the shared `Log10x Demo` env: `cost_drivers`, `top_patterns`, `investigate`, `services`, `event_lookup`, `list_by_label`, etc.\n- The privacy-mode templater tools (`resolve_batch`, `extract_templates`) — those run via local docker / tenx and don't need an account at all.\n\n### What doesn't\n- Anything that writes (e.g., `backfill_metric` creating a new metric on YOUR account).\n- Anything that needs YOUR cost data (the demo env is shared sample data — investigations against it won't reflect your real spend).\n\n### To use your own account\nTwo ways to sign in. Both end up in the same place — the MCP autodiscovers your envs from `/api/v1/user` and the next tool call runs against your real account without an MCP-host restart.\n\n**Option A: two-tool sign-in chain (recommended, no host-config edit needed).** Two paths, ask the user which they prefer:\n- **Browser path**: call `log10x_signin_start`. It opens a browser to Auth0's universal login page with the device code pre-filled and returns the user_code immediately. The user picks **GitHub** or **Google** there, completes OAuth with the chosen IdP, and confirms the device authorization. The model then automatically calls `log10x_signin_complete` with the device_code returned by `_start` to finish the flow (the MCP polls Auth0, exchanges the access token for a long-lived Log10x API key, and persists it). Auto-creates an account on first sign-up. 30s to 2 min.\n- **Pasted-key path**: call `log10x_signin_complete` directly with `{ api_key: \"<key>\" }`. Validates a Log10x API key the user already has (e.g., copied from console.log10x.com → Profile → API Settings, or issued by a workspace admin). No browser.\n\nEither path writes the resolved key to `~/.log10x/credentials` (mode 0600), which persists across MCP-host restarts on its own, no config-file edit needed.\n\n**Option B — set `LOG10X_API_KEY` in your MCP host config** (manual, useful for CI / shared / scripted setups):\n1. Get your API key at https://console.log10x.com → Profile → API Settings.\n2. Edit your MCP host's config file:\n   - **Claude Desktop**: `%APPDATA%\\Claude\\claude_desktop_config.json` (Windows) or `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS).\n   - **Cursor / Windsurf / other**: see your host's docs for where MCP server env vars are configured.\n3. In the `log10x` server's `env` block, add `\"LOG10X_API_KEY\": \"<your-key>\"`.\n4. Fully quit and restart the MCP host.\n\nAfter either option, re-run `log10x_login_status` to confirm — the response should list your real envs instead of the demo.\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 55152
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_discover_env --args '{}'",
+      "stdout": "",
+      "stderr": "",
+      "exitCode": -1,
+      "durationMs": 60021
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_resolve_batch --args '{\"source\":\"events\",\"events\":[\"ERROR synthetic-canary-app checkout retry blast: payment-service returned 503 after 5 retries; abandoning cart cart_id=cart_100007 deploy_sha=p14fresh idx=7\"]}'",
+      "stdout": "",
+      "stderr": "",
+      "exitCode": -1,
+      "durationMs": 60102
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{}'",
+      "stdout": "Top 10 patterns — all services (this week) · $25/wk total\n⚠ These are CURRENT RANK by cost (biggest right now). This is NOT a growth/delta ranking — do not re-label as \"cost drivers\" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.\n\n#1  (unknown)                           $4.2/wk      \n#2  service instance id service name otelcol contrib service version otelcol $3.9/wk      ERROR\n#3  open telemetry opentelemetry collector contrib exporter opensearchexporter $3.8/wk      \n#4  opentelemetry io collector processor batchprocessor v batch processor go $3.7/wk      \n#5  service instance id service name otelcol contrib service version otelcol $2.2/wk      DEBUG\n#6  go opentelemetry io collector consumer ConsumeLogsFunc ConsumeLogs $1.8/wk      \n#7  tgo opentelemetry io collector consumer logs go $1.8/wk      \n#8  opensearch project opensearch go v v opensearchtransport opensearchtransport go $1.3/wk      \n#9  opentelemetry io collector exporter exporterhelper v internal base exporter $1.2/wk      \n#10  opentelemetry io collector exporter exporterhelper v internal new request go $1.2/wk      \n\nTop 10 = 48% of total volume in scope / 52% in the long tail.\n\n**Next actions**:\n  - call `log10x_cost_drivers({ timeRange: '7d' })` for week-over-week deltas across all services.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_cost_drivers\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"week-over-week deltas across all services\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 53156
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_examples --args '{\"vendor\":\"cloudwatch\",\"scope\":\"/log10x-eval/synthetic-canary\",\"pattern\":\"ERROR synthetic-canary-app checkout retry blast: payment-service returned 503 after 5 retries; abandoning cart cart_id=cart_100007 deploy_sha=p14fresh idx=7\"}'",
+      "stdout": "",
+      "stderr": "",
+      "exitCode": -1,
+      "durationMs": 60022
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_pattern_examples --args '{\"pattern\":\"ERROR synthetic-canary-app checkout retry blast: payment-service returned 503 after 5 retries; abandoning cart cart_id=cart_100007 deploy_sha=p14fresh idx=7\"}'",
+      "stdout": "",
+      "stderr": "",
+      "exitCode": -1,
+      "durationMs": 60244
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"severity\":\"error\"}'",
+      "stdout": "No pattern data available. Patterns appear after the first 24h of data collection.\n",
+      "stderr": "",
+      "exitCode": -1,
+      "durationMs": 60417
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_services --args '{}'",
+      "stdout": "Monitored Services (this week)\n\n  (unknown)            35.1 GB    100%   $53/wk\n  email                11.7 MB    0.0%   $0.02/wk\n  frontend             17.1 KB    0.0%   $0.0000/wk\n  recommendation       2.4 KB     0.0%   $0.0000/wk\n\n  4 services · 35.1 GB total · $53/wk at $1.5/GB\n  Top 3 services = 100% of volume.\n\n**Next actions**:\n  - Drill into the top service: `log10x_cost_drivers({ service: '(unknown)' })` for week-over-week deltas, or `log10x_top_patterns({ service: '(unknown)' })` for current top patterns.\n  - Investigate any spike: `log10x_investigate({ starting_point: '(unknown)' })` for a full causal-chain analysis.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_cost_drivers\",\"args\":{\"service\":\"(unknown)\"},\"reason\":\"week-over-week deltas on the top service\"},{\"tool\":\"log10x_top_patterns\",\"args\":{\"service\":\"(unknown)\"},\"reason\":\"current top patterns for the top service\"},{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"(unknown)\"},\"reason\":\"causal-chain analysis on the top service\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 57089
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"service\":\"(unknown)\"}'",
+      "stdout": "No pattern data available. Patterns appear after the first 24h of data collection.\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 56796
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_cost_drivers --args '{\"timeRange\":\"7d\"}'",
+      "stdout": "all services — no cost drivers detected (this week)\nComparison attempted: current 7d vs 3-window avg baseline (offsets: 7d/14d/21d)\nInterpretation: no pattern crossed the delta threshold. The environment is stable vs this baseline. This is a truthful negative result, not a tool failure.\nAll 1213 patterns are within normal range.\n\nTop patterns by current cost:\n  open telemetry opentelemetry collector contrib exporter opensearchexporter $3.8/wk   \n  opentelemetry io collector processor batchprocessor v batch processor go $3.7/wk   \n  go opentelemetry io collector consumer ConsumeLogsFunc ConsumeLogs $1.8/wk   \n  tgo opentelemetry io collector consumer logs go $1.8/wk   \n  opensearch project opensearch go v v opensearchtransport opensearchtransport go $1.3/wk   \n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_top_patterns\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"no growth detected; pivot to current-rank view\"},{\"tool\":\"log10x_savings\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"no growth detected; surface pipeline ROI for the current bill question\"},{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter\",\"window\":\"1h\"},\"reason\":\"investigate the largest current pattern even though it is not a growth driver\"}]-->\n",
+      "stderr": "",
+      "exitCode": -1,
+      "durationMs": 60366
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"scope\":\"/log10x-eval/synthetic-canary\"}'",
+      "stdout": "Top 10 patterns — all services (this week) · $25/wk total\n⚠ These are CURRENT RANK by cost (biggest right now). This is NOT a growth/delta ranking — do not re-label as \"cost drivers\" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.\n\n#1  (unknown)                           $4.2/wk      \n#2  service instance id service name otelcol contrib service version otelcol $3.9/wk      ERROR\n#3  open telemetry opentelemetry collector contrib exporter opensearchexporter $3.8/wk      \n#4  opentelemetry io collector processor batchprocessor v batch processor go $3.7/wk      \n#5  service instance id service name otelcol contrib service version otelcol $2.2/wk      DEBUG\n#6  go opentelemetry io collector consumer ConsumeLogsFunc ConsumeLogs $1.8/wk      \n#7  tgo opentelemetry io collector consumer logs go $1.8/wk      \n#8  opensearch project opensearch go v v opensearchtransport opensearchtransport go $1.3/wk      \n#9  opentelemetry io collector exporter exporterhelper v internal base exporter $1.2/wk      \n#10  opentelemetry io collector exporter exporterhelper v internal new request go $1.2/wk      \n\nTop 10 = 48% of total volume in scope / 52% in the long tail.\n\n**Next actions**:\n  - call `log10x_cost_drivers({ timeRange: '7d' })` for week-over-week deltas across all services.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_cost_drivers\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"week-over-week deltas across all services\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 52275
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\":\"(unknown)\",\"window\":\"1h\"}'",
+      "stdout": "## Investigation: (unknown), last 1h\n\n**Investigation id**: 37b6fae8-e8a7-4fdb-92d6-c0d811fb4b17\n**Result**: No significant pattern movement in the last 1h. Nothing crossed the noise floor.\n\n**Noise floor applied**: 0.001\n\n**Try next**:\n- Widen the window: `log10x_investigate({ starting_point: '(unknown)', window: '24h' })` — most incident inflections appear within 24h\n- Or for gradual drift: `log10x_investigate({ starting_point: '(unknown)', window: '30d' })`\n- Check the trend directly: `log10x_pattern_trend({ pattern: '(unknown)' })`\n- Confirm the anchor exists: use a specific log line or pattern hash rather than a service name\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_dependency_check\",\"args\":{\"pattern\":\"canary_mode_baseline_run_id_github_sha_unknown_github_run_id_unknown_idx\"},\"reason\":\"check dashboards / alerts before any mute action\"},{\"tool\":\"log10x_correlate_cross_pillar\",\"args\":{\"anchor_type\":\"log10x_pattern\",\"anchor\":\"canary_mode_baseline_run_id_github_sha_unknown_github_run_id_unknown_idx\",\"window\":\"1h\"},\"reason\":\"find upstream metric anomaly co-moving with the pattern\"},{\"tool\":\"log10x_pattern_trend\",\"args\":{\"pattern\":\"canary_mode_baseline_run_id_github_sha_unknown_github_run_id_unknown_idx\"},\"reason\":\"time series for the investigated pattern\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 52292
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"service\":\"synthetic-canary-app\"}'",
+      "stdout": "No pattern data available. Patterns appear after the first 24h of data collection.\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 53312
+    }
+  ],
+  "finalSynthesis": "",
+  "hallucination": {
+    "numericClaimCount": 0,
+    "patternClaimCount": 0,
+    "supported": 0,
+    "unsupported": 0,
+    "inconclusive": 0,
+    "driftScore": 0,
+    "details": []
+  },
+  "valueDelivered": {
+    "score": 0,
+    "rationale": "The synthesis never answered any of the three asked questions (a, b, c) — it failed to confirm the alert pattern in CW, sample for other active error patterns, or assess causation relationships, producing no actionable findings for the SRE."
+  },
+  "valueReceived": {
+    "score": 0.05,
+    "rationale": "Nearly every MCP call timed out or returned errors; the only successful call (log10x_login_status) revealed the tool is running in demo mode against shared sample data rather than the user's actual CloudWatch log group, meaning no relevant data was ever retrieved."
+  },
+  "status": "partial",
+  "flags": [
+    "low_value_delivered",
+    "low_value_received"
+  ],
+  "cost": {
+    "inputTokens": 122458,
+    "outputTokens": 1533,
+    "apiCalls": 20,
+    "costUsd": 0.39036899999999997,
+    "pricingFound": true
+  },
+  "causalRating": {
+    "ran": true,
+    "items": [
+      {
+        "item": "synthetic-canary-app (the alert source)",
+        "expected_min": 5,
+        "expected_max": 5,
+        "agent_rating": 5,
+        "within_band": true,
+        "drift_from_band": 0,
+        "rationale": "The canary is explicitly identified as the alert source, making it a direct verified causal link."
+      },
+      {
+        "item": "payment-gateway connection pool exhausted (lexically related)",
+        "expected_min": 2,
+        "expected_max": 3,
+        "agent_rating": 3,
+        "within_band": true,
+        "drift_from_band": 0,
+        "rationale": "Described as plausibly upstream by lexical similarity but planted independently, indicating unverified causation."
+      },
+      {
+        "item": "DNS resolution failures (unrelated noise)",
+        "expected_min": 1,
+        "expected_max": 1,
+        "agent_rating": 1,
+        "within_band": true,
+        "drift_from_band": 0,
+        "rationale": "Explicitly described as unrelated concurrent noise with no causal connection to the alert."
+      }
+    ],
+    "rating_drift": 0,
+    "over_attributions": 0,
+    "under_attributions": 0
+  }
+}

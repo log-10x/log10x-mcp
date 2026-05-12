@@ -429,14 +429,17 @@ function buildVendorQuery(
       return parts.join(' AND ');
     }
     case 'cloudwatch': {
-      // Insights: filter @message like /escaped/ AND ...
-      const escapedPhrases = tokens.map((t) => {
-        const escaped = t.replace(/[.*+?^${}()|[\]\\\/]/g, '\\$&');
-        return `@message like /${escaped}/`;
-      });
-      const parts: string[] = escapedPhrases;
-      if (severity) parts.push(`@message like /${severity.replace(/[.*+?^${}()|[\]\\\/]/g, '\\$&')}/`);
-      return parts.join(' and ');
+      // CloudWatch FilterLogEvents pattern syntax — quoted phrases
+      // joined with implicit AND. The previous code emitted Logs
+      // Insights syntax (`@message like /.../`), which the
+      // FilterLogEvents API rejects with "Invalid character(s) in
+      // term '@'". See eval/gaps/MCP_cloudwatch_filterpattern_syntax_mismatch.md
+      // for the full diagnosis. Filter-pattern reference:
+      // https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/FilterAndPatternSyntax.html
+      const quotedPhrases = tokens.map((t) => `"${t.replace(/"/g, '\\"')}"`);
+      const parts: string[] = quotedPhrases;
+      if (severity) parts.push(`"${severity.replace(/"/g, '\\"')}"`);
+      return parts.join(' ');
     }
     default:
       return phrases.join(' ');
