@@ -32,7 +32,17 @@ import {
 } from './agent-clients.js';
 
 const JUDGE_MODEL = 'claude-sonnet-4-6';
-const MAX_AGENT_TURNS = 20;
+// Configurable via MAX_AGENT_TURNS env var. Default 20. Lower
+// values (e.g., 5) are used in budget-exhaustion experiments to
+// distinguish "agent decided not to fabricate" from "agent never
+// got the chance to fabricate."
+const MAX_AGENT_TURNS = (() => {
+  const raw = process.env.MAX_AGENT_TURNS;
+  if (!raw) return 20;
+  const n = parseInt(raw, 10);
+  if (Number.isFinite(n) && n > 0) return n;
+  return 20;
+})();
 const MAX_TOKENS = 4000;
 
 export interface HeroSpec {

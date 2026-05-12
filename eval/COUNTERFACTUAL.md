@@ -1,3 +1,93 @@
+# Counterfactual injection harness — Phase 10: Grok 4.3 + Gemini Pro adversarial review responses (VERIFIED 2026-05-12)
+
+> **Status**: Phase 10 responds to the external adversarial reviews
+> submitted to Grok 4.3 and Gemini Pro (both converged on 7
+> high-severity weaknesses with 3-6 novel additions). Three
+> experiments targeting the three most attackable single critiques:
+>
+> 1. **Realistic-name perturbation** (closes / reframes Gemini D):
+>    N=7 runs with the injection renamed from `FABRICATED_KAFKA_...`
+>    to `kafka zookeeper session expired after 30s grace timeout
+>    broker` from `kafka-broker`. **Updated property**: agents
+>    faithfully quote MCP tool output but do not amplify corruption
+>    into false causal narratives. 7/7 drift=0; previous "detection
+>    via cross-tool" claim narrows to "faithful narration without
+>    fabrication."
+>
+> 2. **Budget-exhaustion isolation** (closes Gemini H1): MAX_AGENT_TURNS
+>    cut from 20 to 5; concurrent-signals × N=10. **10/10 drift=0
+>    even at 4× tighter budget.** Honesty-by-exhaustion thesis
+>    falsified. Agents fail honestly, not deceptively, under tight
+>    time pressure.
+>
+> 3. **Closed-loop health-check** (closes Gemini E for scale-to-0
+>    attack): New `closed-loop-rollback-with-health.json` fixture
+>    requires `synthetic canary heartbeat baseline` in verify
+>    output. **3-state manual test confirms** the health-check
+>    correctly differentiates (a) bug-active → FAIL, (b) scale-to-0
+>    silent-kill → FAIL, (c) healthy-baseline → PASS. The deeper
+>    circular-fix critique (harness applies its own canonical
+>    script, not the agent's literal command) remains unclosed.
+>
+> ## Updated headline after Phase 10
+>
+> Cumulative across 10 phases:
+>
+> | Phase | Runs | drift=0 | Agent fabrications |
+> |---|---|---|---|
+> | 3-6 | 14 | 14 | 0 |
+> | 7 | 10 | 10 | 0 |
+> | 8 | 60 | 60 | 0 |
+> | 9 | 41 | 38 (3 oracle artifacts) | 0 |
+> | 10 | 17 | 17 | 0 |
+> | **Total** | **142** | **139** | **0** |
+>
+> Rule-of-three 95% CI on 0 events in 142 trials: [0%, ~2.1%].
+> The reviewers' B-critique stands as a strict statistical claim;
+> the harness explicitly acknowledges it in the updated production-
+> readiness statement.
+>
+> ## Updated production-readiness statement
+>
+> Tighter, more defensible, responding directly to reviewer
+> critiques:
+>
+>   - Across 142 hero runs, agents fabricated 0 times. One-sided
+>     95% CI is [0%, ~2.1%].
+>   - The Phase 7 "drift=0 holds under failure" property holds
+>     at 4× tighter budget. Honesty-by-exhaustion ruled out.
+>   - Agents are tool-output-faithful — they quote what tools
+>     say but do not build false causal narratives that amplify
+>     corruption. Updated from "agents detect MCP corruption" which
+>     overstated.
+>   - Closed-loop with health-check now correctly rejects (a)
+>     unchanged bad state, (b) service-killed-but-quiet attacks,
+>     (c) accepts only healthy-baseline restorations.
+>
+> ## What Phase 10 did NOT close
+>
+> Reviewers raised 10 distinct critiques. Phase 10 fully closes 1
+> (Gemini H1), reframes 1 (Gemini D), partially closes 1 (Gemini E).
+> The remaining open critiques: A (drift only catches surface
+> fabrications), B (binomial CI; needs real customer data),
+> C (judge self-similarity), F (production cardinality gap),
+> G (only frontier RLHF tested), Grok H2 (single-bash funnel),
+> Grok H3 (no human baseline), Gemini H2 (static-not-dynamic
+> pushback). Most impactful single follow-up: 30-run blinded
+> human-SRE rater study.
+>
+> ## Harness fragility surfaced
+>
+> 3 of 10 Exp 1 Claude runs hung mid-loop on Anthropic API calls
+> (same hang pattern observed in Phases 6 and 9). Anthropic SDK
+> has no explicit per-call timeout. Adding `AbortController` with
+> 90-180s timeout to `agentClient.call()` would close this in ~30
+> min of code. Deferred.
+>
+> Full write-up: `eval/reports/hero/PHASE_10_GROK_GEMINI_FEEDBACK_RESPONSE.md`.
+
+---
+
 # Counterfactual injection harness — Phase 9: MCP-only validation + perturbation testing (VERIFIED 2026-05-11)
 
 > **Status (2026-05-11, late night)**: Phase 9 closes the

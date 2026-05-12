@@ -1,0 +1,96 @@
+{
+  "spec": {
+    "id": "concurrent-signals",
+    "title": "Concurrent signals — distinguish a deploy-attributable incident from unrelated noise firing at the same time",
+    "category": "stability",
+    "prompt": "Two distinct ERROR-shaped patterns are firing in the otel-demo namespace right now. One appears to be related to checkout retry behavior; the other appears to be a DNS resolution failure on some upstream service. The customer-visible cart-abandonment alert is being driven by one of them — the team wants to know which one. Investigation rule: a planted/attributable incident has a deploy trail (the emitting workload has a canary.github.io/sha annotation pointing at a real commit in talwgx/test); concurrent natural noise typically does NOT have a deploy trail. For each of the two ERROR patterns, find the emitting workload via kubectl, check whether it has a canary.github.io/sha annotation, and (if it does) resolve that SHA via gh api. Report: which pattern has a deploy trail and is therefore the cart-abandonment cause, and which is unrelated concurrent noise. You have kubectl + gh CLI.",
+    "persona": "Oncall SRE who treats correlation and causation as distinct. Always looks for the change-management trail (commit/deploy) before blaming a freshly-spiking pattern.",
+    "budget_hint": "8-14 tool calls.",
+    "expected_answer": {
+      "summary": "The 'checkout retry blast' pattern is emitted by synthetic-canary-app, a Deployment whose annotation canary.github.io/sha resolves to a commit in talwgx/test — this IS the cart-abandonment cause (deploy-attributable). The 'DNS resolution failed for upstream service' pattern is emitted by concurrent-noise-job, a k8s Job with no canary.github.io/* annotation and no deploy trail — this is unrelated concurrent noise. PASS = agent correctly attributes ONLY the checkout pattern to the deploy and reports the DNS pattern as unrelated; FAIL = agent attributes both to the same cause, or guesses which is which without verifying via annotations.",
+      "must_mention": [
+        "synthetic-canary-app",
+        "concurrent-noise",
+        "canary.github.io/sha",
+        "talwgx/test"
+      ],
+      "expected_tool_chain": [
+        "kubectl",
+        "gh"
+      ],
+      "snapshot_ts": "2026-05-11T17:55:00.000Z"
+    }
+  },
+  "runnerModel": "grok-4-latest",
+  "runnerVendor": "xai",
+  "startedAt": "2026-05-12T01:00:37.116Z",
+  "endedAt": "2026-05-12T01:03:37.074Z",
+  "durationMs": 179958,
+  "envMode": "demo",
+  "bashCommands": [
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --list",
+      "stdout": "log10x_advise_compact\nlog10x_advise_install\nlog10x_advise_receiver\nlog10x_advise_reporter\nlog10x_advise_retriever\nlog10x_backfill_metric\nlog10x_correlate_cross_pillar\nlog10x_cost_drivers\nlog10x_customer_metrics_query\nlog10x_dependency_check\nlog10x_discover_env\nlog10x_discover_join\nlog10x_discover_labels\nlog10x_doctor\nlog10x_event_lookup\nlog10x_exclusion_filter\nlog10x_extract_templates\nlog10x_investigate\nlog10x_investigation_get\nlog10x_list_by_label\nlog10x_login_status\nlog10x_pattern_examples\nlog10x_pattern_trend\nlog10x_resolve_batch\nlog10x_retriever_query\nlog10x_retriever_query_status\nlog10x_retriever_series\nlog10x_savings\nlog10x_services\nlog10x_top_patterns\nlog10x_translate_metric_to_patterns\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 17651
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"window\":\"1h\",\"namespace\":\"otel-demo\",\"severity\":\"ERROR\"}'",
+      "stdout": "Top 10 patterns — all services (this week) · $4.5/wk total\n⚠ These are CURRENT RANK by cost (biggest right now). This is NOT a growth/delta ranking — do not re-label as \"cost drivers\" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.\n\n#1  service instance id service name otelcol contrib service version otelcol $3.9/wk      ERROR\n#2  transport Error while dialing dial tcp lookup jaeger on no such host interval $0.46/wk     ERROR\n#3  OpenTelemetry error Export failure exception Export retry limit exceeded previous $0.09/wk     ERROR\n#4  transport Error while dialing dial tcp lookup jaeger on no such host dropped $0.04/wk     ERROR\n#5  run id idx synthetic canary mode bug run id github sha github run id idx $0.02/wk     ERROR\n#6  error OTLP logs exporter received Net HTTPServiceUnavailable code uri logs $0.02/wk     ERROR  email\n#7  timeout rpc error code Unavailable desc data refused due high memory usage $0.01/wk     ERROR\n#8  failed upload metrics reader collect and export timeout retry able request $0.01/wk     ERROR\n#9  error OTel export failure data refused due high memory usage $0.01/wk     ERROR\n#10  grpc addrConn createTransport failed connect Addr jaeger ServerName jaeger $0.0093/wk   ERROR\n\nTop 10 = 100% of total volume in scope / 0% in the long tail.\n\n**Next actions**:\n  - call `log10x_investigate({ starting_point: 'service_instance_id_service_name_otelcol_contrib_service_version_otelcol' })` to trace what's driving the top pattern.\n  - call `log10x_cost_drivers({ timeRange: '7d' })` for week-over-week deltas across all services.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\"},\"reason\":\"trace the top pattern\"},{\"tool\":\"log10x_cost_drivers\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"week-over-week deltas across all services\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 23584
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"timeRange\":\"1h\",\"namespace\":\"otel-demo\",\"severity\":\"ERROR\"}'",
+      "stdout": "Top 10 patterns — all services (last 1h) · $0.03/1h total\n⚠ These are CURRENT RANK by cost (biggest right now). This is NOT a growth/delta ranking — do not re-label as \"cost drivers\" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.\n\n#1  service instance id service name otelcol contrib service version otelcol $0.02/1h     ERROR\n#2  transport Error while dialing dial tcp lookup jaeger on no such host interval $0.0027/1h   ERROR\n#3  OpenTelemetry error Export failure exception Export retry limit exceeded previous $0.0005/1h   ERROR\n#4  transport Error while dialing dial tcp lookup jaeger on no such host dropped $0.0002/1h   ERROR\n#5  DNS resolution failed upstream service svc timeout after attempts resolver $0.0002/1h   ERROR\n#6  run id idx synthetic canary mode bug run id github sha github run id idx $0.0002/1h   ERROR\n#7  error OTLP logs exporter received Net HTTPServiceUnavailable code uri logs $0.0001/1h   ERROR  email\n#8  failed upload metrics reader collect and export timeout retry able request $0.0001/1h   ERROR\n#9  timeout rpc error code Unavailable desc data refused due high memory usage $0.0001/1h   ERROR\n#10  error OTel export failure data refused due high memory usage $0.0001/1h   ERROR\n\nTop 10 = 100% of total volume in scope / 0% in the long tail.\n\n**Next actions**:\n  - call `log10x_investigate({ starting_point: 'service_instance_id_service_name_otelcol_contrib_service_version_otelcol' })` to trace what's driving the top pattern.\n  - call `log10x_cost_drivers({ timeRange: '7d' })` for week-over-week deltas across all services.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\"},\"reason\":\"trace the top pattern\"},{\"tool\":\"log10x_cost_drivers\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"week-over-week deltas across all services\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 19836
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\":\"transport_Error_while_dialing_dial_tcp_lookup_jaeger_on_no_such_host_interval\",\"timeRange\":\"1h\"}'",
+      "stdout": "## Investigation: transport_Error_while_dialing_dial_tcp_lookup_jaeger_on_no_such_host_interval, last 1h\n\n**Investigation id**: 3479ba9d-41b4-41aa-ace8-1aa2b38ef617\n**Result**: No significant pattern movement in the last 1h. Nothing crossed the noise floor.\n\n**Noise floor applied**: 0.001\n\n**Try next**:\n- Widen the window: `log10x_investigate({ starting_point: 'transport_Error_while_dialing_dial_tcp_lookup_jaeger_on_no_such_host_interval', window: '24h' })` — most incident inflections appear within 24h\n- Or for gradual drift: `log10x_investigate({ starting_point: 'transport_Error_while_dialing_dial_tcp_lookup_jaeger_on_no_such_host_interval', window: '30d' })`\n- Check the trend directly: `log10x_pattern_trend({ pattern: 'transport_Error_while_dialing_dial_tcp_lookup_jaeger_on_no_such_host_interval' })`\n- Confirm the anchor exists: use a specific log line or pattern hash rather than a service name\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_dependency_check\",\"args\":{\"pattern\":\"transport_Error_while_dialing_dial_tcp_lookup_jaeger_on_no_such_host_interval\"},\"reason\":\"check dashboards / alerts before any mute action\"},{\"tool\":\"log10x_correlate_cross_pillar\",\"args\":{\"anchor_type\":\"log10x_pattern\",\"anchor\":\"transport_Error_while_dialing_dial_tcp_lookup_jaeger_on_no_such_host_interval\",\"window\":\"1h\"},\"reason\":\"find upstream metric anomaly co-moving with the pattern\"},{\"tool\":\"log10x_pattern_trend\",\"args\":{\"pattern\":\"transport_Error_while_dialing_dial_tcp_lookup_jaeger_on_no_such_host_interval\"},\"reason\":\"time series for the investigated pattern\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 13315
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\":\"transport_Error_while_dialing_dial_tcp_lookup_jaeger_on_no_such_host_interval\",\"timeRange\":\"24h\"}'",
+      "stdout": "## Investigation: transport_Error_while_dialing_dial_tcp_lookup_jaeger_on_no_such_host_interval, last 1h\n\n**Investigation id**: e65f2aa4-7748-471b-89b2-156c569a1c09\n**Result**: No significant pattern movement in the last 1h. Nothing crossed the noise floor.\n\n**Noise floor applied**: 0.001\n\n**Try next**:\n- Widen the window: `log10x_investigate({ starting_point: 'transport_Error_while_dialing_dial_tcp_lookup_jaeger_on_no_such_host_interval', window: '24h' })` — most incident inflections appear within 24h\n- Or for gradual drift: `log10x_investigate({ starting_point: 'transport_Error_while_dialing_dial_tcp_lookup_jaeger_on_no_such_host_interval', window: '30d' })`\n- Check the trend directly: `log10x_pattern_trend({ pattern: 'transport_Error_while_dialing_dial_tcp_lookup_jaeger_on_no_such_host_interval' })`\n- Confirm the anchor exists: use a specific log line or pattern hash rather than a service name\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_dependency_check\",\"args\":{\"pattern\":\"transport_Error_while_dialing_dial_tcp_lookup_jaeger_on_no_such_host_interval\"},\"reason\":\"check dashboards / alerts before any mute action\"},{\"tool\":\"log10x_correlate_cross_pillar\",\"args\":{\"anchor_type\":\"log10x_pattern\",\"anchor\":\"transport_Error_while_dialing_dial_tcp_lookup_jaeger_on_no_such_host_interval\",\"window\":\"1h\"},\"reason\":\"find upstream metric anomaly co-moving with the pattern\"},{\"tool\":\"log10x_pattern_trend\",\"args\":{\"pattern\":\"transport_Error_while_dialing_dial_tcp_lookup_jaeger_on_no_such_host_interval\"},\"reason\":\"time series for the investigated pattern\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 11660
+    }
+  ],
+  "finalSynthesis": "",
+  "hallucination": {
+    "numericClaimCount": 0,
+    "patternClaimCount": 0,
+    "supported": 0,
+    "unsupported": 0,
+    "inconclusive": 0,
+    "driftScore": 0,
+    "details": []
+  },
+  "valueDelivered": {
+    "score": 0.05,
+    "rationale": "The sub-agent never completed the investigation: it didn't use kubectl to find emitting workloads, never checked canary.github.io/sha annotations, never called gh api to resolve any SHA, and produced no final synthesis answering which pattern caused cart-abandonment."
+  },
+  "valueReceived": {
+    "score": 0.5,
+    "rationale": "The MCP successfully returned the two relevant ERROR patterns (checkout retry / Export retry limit exceeded at #3, and DNS resolution failure at #5) in the top-patterns call, giving the sub-agent enough signal to proceed, but the sub-agent then wasted calls on a pattern that returned no significant movement rather than pivoting to kubectl/gh as instructed."
+  },
+  "status": "partial",
+  "flags": [
+    "low_value_delivered"
+  ],
+  "cost": {
+    "inputTokens": 18014,
+    "outputTokens": 366,
+    "apiCalls": 5,
+    "costUsd": 0.059531999999999995,
+    "pricingFound": true
+  }
+}

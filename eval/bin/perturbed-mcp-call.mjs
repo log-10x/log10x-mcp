@@ -89,6 +89,25 @@ function applyMutation(stdout, kind) {
     return newLines.join('\n');
   }
 
+  if (kind === 'inject-realistic-fake-pattern') {
+    // Same injection mechanism as inject-fake-top-pattern, but with
+    // a plausible pattern name and plausible service attribution.
+    // No "FABRICATED" or "fabricated-service" tells. Cost is in a
+    // realistic band ($2-3/wk). The pattern shape mimics existing
+    // kafka/zookeeper-class messages from real-world telemetry.
+    // Phase 10 follow-up to Gemini's prompt-2 critique: tests whether
+    // cross-tool verification holds when the lexical tell is removed.
+    const lines = stdout.split('\n');
+    const idx = lines.findIndex((l) => /^#1\s/.test(l));
+    if (idx < 0) return stdout;
+    const fakeLine =
+      '#1  kafka zookeeper session expired after 30s grace timeout broker $2.40/wk     ERROR  kafka-broker';
+    const newLines = lines.slice(0, idx).concat([fakeLine]).concat(
+      lines.slice(idx).map((l) => l.replace(/^#(\d+)\s/, (_, n) => `#${parseInt(n, 10) + 1}  `))
+    );
+    return newLines.join('\n');
+  }
+
   if (kind === 'inflate-cost-10x') {
     // Multiply the $/wk number on the first ranked line by 10.
     const lines = stdout.split('\n');

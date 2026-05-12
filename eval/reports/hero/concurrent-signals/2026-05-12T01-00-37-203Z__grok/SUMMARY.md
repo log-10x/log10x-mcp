@@ -4,8 +4,8 @@
 **Status:** PARTIAL
 **Env:** demo
 **Runner model:** `grok-4-latest` (xai)
-**Started:** 2026-05-12T01:00:37.164Z
-**Duration:** 203.7s
+**Started:** 2026-05-12T01:00:37.215Z
+**Duration:** 174.7s
 **Bash calls:** 5
 
 ## User question
@@ -15,9 +15,9 @@
 ## Three axes
 
 - **Hallucination (drift score):** 0 unsupported · 0 supported · 0 inconclusive
-- **Value delivered:** 0.00 — The sub-agent never identified the two distinct ERROR patterns (checkout retry vs DNS resolution failure), never ran kubectl to find emitting workloads, never checked for canary.github.io/sha annotations, and never resolved any SHA via gh api — the actual investigation was never performed and no actionable answer was produced.
-- **Value received:** 0.20 — The MCP tools returned some top-patterns data but none of it was specific enough to surface the two named ERROR patterns or their emitting workloads, and the namespace/label scoping did not yield the targeted incident data needed for the investigation.
-- **Cost (runner only):** $0.0614 — 18981 in / 297 out tokens across 5 API calls
+- **Value delivered:** 0.00 — The sub-agent never identified the two ERROR patterns, never ran kubectl to find emitting workloads, never checked canary.github.io/sha annotations, and produced no final synthesis answering which pattern drives cart abandonment.
+- **Value received:** 0.20 — The MCP tools returned top patterns data but the results were generic/global rather than namespace-scoped ERROR patterns, and the one investigate call errored, leaving the agent without the specific pattern data needed for the investigation.
+- **Cost (runner only):** $0.0547 — 16742 in / 296 out tokens across 5 API calls
 - **Flags:** low_value_delivered, low_value_received
 
 ## Sub-agent final synthesis
@@ -34,16 +34,16 @@
 ## Bash command trace
 
 ### 1. node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --list
-exit=0, 17293ms, stdout=703B, stderr=0B
+exit=0, 17526ms, stdout=703B, stderr=0B
 
 ### 2. node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '...
-exit=0, 22664ms, stdout=1448B, stderr=0B
+exit=0, 24754ms, stdout=1448B, stderr=0B
 
 ### 3. node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '...
-exit=0, 19365ms, stdout=1448B, stderr=0B
+exit=0, 19255ms, stdout=1448B, stderr=0B
 
-### 4. node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_doctor --args '{}'
-exit=0, 17583ms, stdout=5071B, stderr=0B
+### 4. node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '...
+exit=0, 9862ms, stdout=1448B, stderr=0B
 
-### 5. node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_list_by_label --args ...
-exit=0, 8263ms, stdout=563B, stderr=0B
+### 5. node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{...
+exit=1, 10297ms, stdout=306B, stderr=0B

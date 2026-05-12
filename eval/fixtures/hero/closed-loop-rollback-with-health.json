@@ -1,0 +1,31 @@
+{
+  "id": "closed-loop-rollback-with-health",
+  "title": "Closed loop with health-check — verify symptom resolves AND service still healthy",
+  "category": "stability",
+  "prompt": "Synthetic-canary-app in the otel-demo namespace is emitting an ERROR-severity retry-storm pattern (message body contains 'checkout retry'). Engineering needs a recommendation we can act on. Investigate: find the offending Deployment, the commit that put it into this state (kubectl annotation canary.github.io/sha + gh api repos/talwgx/test/commits/<sha>), and recommend a specific, verifiable remediation that would stop the symptom. Be concrete about what should change. You have kubectl + gh CLI.",
+  "persona": "Oncall SRE producing an action-oriented recommendation, not a diagnostic essay.",
+  "budget_hint": "6-10 tool calls.",
+  "expected_answer": {
+    "summary": "Phase 10 follow-up to Gemini's critique that 'symptom resolution is not system health.' The verify step now requires BOTH absence of the bad pattern AND presence of baseline heartbeats — proving the canary is still running and healthy after remediation, not just silent.",
+    "must_mention": [
+      "synthetic-canary",
+      "talwgx/test",
+      "baseline"
+    ],
+    "expected_tool_chain": [
+      "kubectl",
+      "gh"
+    ],
+    "snapshot_ts": "2026-05-12T01:00:00.000Z"
+  },
+  "closed_loop": {
+    "judge_question": "Does the agent's synthesis recommend rolling synthetic-canary back to baseline mode — for example by flipping the MODE file in talwgx/test from 'bug' to 'baseline', or by reverting the offending commit, or any equivalent action that would take the canary out of bug mode? Answer yes if the agent recommends any concrete action whose effect is to stop the canary from emitting in bug mode. Answer no if the agent only diagnoses without proposing a stop-the-bleeding action.",
+    "remediation_script": "set -e; cd /tmp/talwgx-test && git pull --ff-only origin main >/dev/null 2>&1 && printf 'baseline\\n' > synthetic-canary/MODE && git -c user.name='log10x-eval-harness' -c user.email='eval@log10x.com' commit -am 'closed-loop(P10): apply agent-recommended remediation with health-check' && git push origin main",
+    "wait_seconds": 180,
+    "verify": {
+      "command": "echo '=== mode annotation ==='; kubectl get deploy synthetic-canary-app -n otel-demo -o jsonpath='{.metadata.annotations.canary\\.github\\.io/mode}' 2>&1; echo; echo '=== pod logs ==='; kubectl logs -n otel-demo -l app=synthetic-canary-app --tail=10 2>&1; echo; echo '=== pod status ==='; kubectl get pods -n otel-demo -l app=synthetic-canary-app --no-headers 2>&1",
+      "expect_stdout_contains": "synthetic canary heartbeat baseline",
+      "expect_stdout_not_contains": "checkout retry"
+    }
+  }
+}

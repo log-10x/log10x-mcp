@@ -3,9 +3,9 @@
 **Scenario:** `concurrent-signals`
 **Status:** PARTIAL
 **Env:** demo
-**Runner model:** `grok-4-latest` (xai)
-**Started:** 2026-05-12T01:00:37.164Z
-**Duration:** 203.7s
+**Runner model:** `claude-sonnet-4-6` (anthropic)
+**Started:** 2026-05-12T01:00:37.106Z
+**Duration:** 131.2s
 **Bash calls:** 5
 
 ## User question
@@ -15,9 +15,9 @@
 ## Three axes
 
 - **Hallucination (drift score):** 0 unsupported · 0 supported · 0 inconclusive
-- **Value delivered:** 0.00 — The sub-agent never identified the two distinct ERROR patterns (checkout retry vs DNS resolution failure), never ran kubectl to find emitting workloads, never checked for canary.github.io/sha annotations, and never resolved any SHA via gh api — the actual investigation was never performed and no actionable answer was produced.
-- **Value received:** 0.20 — The MCP tools returned some top-patterns data but none of it was specific enough to surface the two named ERROR patterns or their emitting workloads, and the namespace/label scoping did not yield the targeted incident data needed for the investigation.
-- **Cost (runner only):** $0.0614 — 18981 in / 297 out tokens across 5 API calls
+- **Value delivered:** 0.00 — The sub-agent produced no final synthesis answering the question — it never identified the two ERROR patterns, never ran kubectl to find emitting workloads, never checked for canary.github.io/sha annotations, and never called gh api to resolve any SHA.
+- **Value received:** 0.20 — The MCP returned some namespace-level data (services list, top patterns) but the ERROR patterns returned were generic otel-collector noise unrelated to checkout retry or DNS failure, and several tool calls errored out, leaving the sub-agent without the specific pattern data it needed.
+- **Cost (runner only):** $0.0468 — 12534 in / 612 out tokens across 5 API calls
 - **Flags:** low_value_delivered, low_value_received
 
 ## Sub-agent final synthesis
@@ -34,16 +34,16 @@
 ## Bash command trace
 
 ### 1. node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --list
-exit=0, 17293ms, stdout=703B, stderr=0B
+exit=0, 16600ms, stdout=703B, stderr=0B
 
 ### 2. node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '...
-exit=0, 22664ms, stdout=1448B, stderr=0B
+exit=0, 19599ms, stdout=1448B, stderr=0B
 
-### 3. node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '...
-exit=0, 19365ms, stdout=1448B, stderr=0B
+### 3. node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_extract_templates --a...
+exit=1, 22658ms, stdout=232B, stderr=0B
 
-### 4. node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_doctor --args '{}'
-exit=0, 17583ms, stdout=5071B, stderr=0B
+### 4. node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{...
+exit=1, 37119ms, stdout=612B, stderr=0B
 
-### 5. node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_list_by_label --args ...
-exit=0, 8263ms, stdout=563B, stderr=0B
+### 5. node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_services --args '{"na...
+exit=0, 18599ms, stdout=1009B, stderr=0B

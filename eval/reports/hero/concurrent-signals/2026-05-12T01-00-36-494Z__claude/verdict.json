@@ -1,0 +1,97 @@
+{
+  "spec": {
+    "id": "concurrent-signals",
+    "title": "Concurrent signals — distinguish a deploy-attributable incident from unrelated noise firing at the same time",
+    "category": "stability",
+    "prompt": "Two distinct ERROR-shaped patterns are firing in the otel-demo namespace right now. One appears to be related to checkout retry behavior; the other appears to be a DNS resolution failure on some upstream service. The customer-visible cart-abandonment alert is being driven by one of them — the team wants to know which one. Investigation rule: a planted/attributable incident has a deploy trail (the emitting workload has a canary.github.io/sha annotation pointing at a real commit in talwgx/test); concurrent natural noise typically does NOT have a deploy trail. For each of the two ERROR patterns, find the emitting workload via kubectl, check whether it has a canary.github.io/sha annotation, and (if it does) resolve that SHA via gh api. Report: which pattern has a deploy trail and is therefore the cart-abandonment cause, and which is unrelated concurrent noise. You have kubectl + gh CLI.",
+    "persona": "Oncall SRE who treats correlation and causation as distinct. Always looks for the change-management trail (commit/deploy) before blaming a freshly-spiking pattern.",
+    "budget_hint": "8-14 tool calls.",
+    "expected_answer": {
+      "summary": "The 'checkout retry blast' pattern is emitted by synthetic-canary-app, a Deployment whose annotation canary.github.io/sha resolves to a commit in talwgx/test — this IS the cart-abandonment cause (deploy-attributable). The 'DNS resolution failed for upstream service' pattern is emitted by concurrent-noise-job, a k8s Job with no canary.github.io/* annotation and no deploy trail — this is unrelated concurrent noise. PASS = agent correctly attributes ONLY the checkout pattern to the deploy and reports the DNS pattern as unrelated; FAIL = agent attributes both to the same cause, or guesses which is which without verifying via annotations.",
+      "must_mention": [
+        "synthetic-canary-app",
+        "concurrent-noise",
+        "canary.github.io/sha",
+        "talwgx/test"
+      ],
+      "expected_tool_chain": [
+        "kubectl",
+        "gh"
+      ],
+      "snapshot_ts": "2026-05-11T17:55:00.000Z"
+    }
+  },
+  "runnerModel": "claude-sonnet-4-6",
+  "runnerVendor": "anthropic",
+  "startedAt": "2026-05-12T01:00:36.758Z",
+  "endedAt": "2026-05-12T01:02:51.935Z",
+  "durationMs": 135177,
+  "envMode": "demo",
+  "bashCommands": [
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --list",
+      "stdout": "log10x_advise_compact\nlog10x_advise_install\nlog10x_advise_receiver\nlog10x_advise_reporter\nlog10x_advise_retriever\nlog10x_backfill_metric\nlog10x_correlate_cross_pillar\nlog10x_cost_drivers\nlog10x_customer_metrics_query\nlog10x_dependency_check\nlog10x_discover_env\nlog10x_discover_join\nlog10x_discover_labels\nlog10x_doctor\nlog10x_event_lookup\nlog10x_exclusion_filter\nlog10x_extract_templates\nlog10x_investigate\nlog10x_investigation_get\nlog10x_list_by_label\nlog10x_login_status\nlog10x_pattern_examples\nlog10x_pattern_trend\nlog10x_resolve_batch\nlog10x_retriever_query\nlog10x_retriever_query_status\nlog10x_retriever_series\nlog10x_savings\nlog10x_services\nlog10x_top_patterns\nlog10x_translate_metric_to_patterns\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 17128
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"namespace\": \"otel-demo\", \"level\": \"ERROR\", \"window\": \"1h\"}'",
+      "stdout": "Top 10 patterns — all services (this week) · $25/wk total\n⚠ These are CURRENT RANK by cost (biggest right now). This is NOT a growth/delta ranking — do not re-label as \"cost drivers\" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.\n\n#1  (unknown)                           $4.2/wk      \n#2  service instance id service name otelcol contrib service version otelcol $3.9/wk      ERROR\n#3  open telemetry opentelemetry collector contrib exporter opensearchexporter $3.8/wk      \n#4  opentelemetry io collector processor batchprocessor v batch processor go $3.7/wk      \n#5  service instance id service name otelcol contrib service version otelcol $2.2/wk      DEBUG\n#6  go opentelemetry io collector consumer ConsumeLogsFunc ConsumeLogs $1.8/wk      \n#7  tgo opentelemetry io collector consumer logs go $1.8/wk      \n#8  opensearch project opensearch go v v opensearchtransport opensearchtransport go $1.3/wk      \n#9  opentelemetry io collector exporter exporterhelper v internal base exporter $1.2/wk      \n#10  opentelemetry io collector exporter exporterhelper v internal new request go $1.2/wk      \n\nTop 10 = 48% of total volume in scope / 52% in the long tail.\n\n**Next actions**:\n  - call `log10x_cost_drivers({ timeRange: '7d' })` for week-over-week deltas across all services.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_cost_drivers\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"week-over-week deltas across all services\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 19928
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_extract_templates --args '{\"namespace\": \"otel-demo\", \"level\": \"ERROR\", \"window\": \"1h\"}'",
+      "stdout": "Tool 'log10x_extract_templates' threw: Wrong type for `source`: Required.\n  Field guidance: Input mode. `file`: read from a local path/glob. `events`: array of raw log lines. `text`: newline-separated log events as a single string.\n",
+      "stderr": "",
+      "exitCode": 1,
+      "durationMs": 22364
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_services --args '{\"namespace\": \"otel-demo\"}'\n",
+      "stdout": "Monitored Services (this week)\n\n  (unknown)            35.0 GB    100%   $52/wk\n  email                11.8 MB    0.0%   $0.02/wk\n  frontend             17.1 KB    0.0%   $0.0000/wk\n  recommendation       2.4 KB     0.0%   $0.0000/wk\n\n  4 services · 35.0 GB total · $52/wk at $1.5/GB\n  Top 3 services = 100% of volume.\n\n**Next actions**:\n  - Drill into the top service: `log10x_cost_drivers({ service: '(unknown)' })` for week-over-week deltas, or `log10x_top_patterns({ service: '(unknown)' })` for current top patterns.\n  - Investigate any spike: `log10x_investigate({ starting_point: '(unknown)' })` for a full causal-chain analysis.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_cost_drivers\",\"args\":{\"service\":\"(unknown)\"},\"reason\":\"week-over-week deltas on the top service\"},{\"tool\":\"log10x_top_patterns\",\"args\":{\"service\":\"(unknown)\"},\"reason\":\"current top patterns for the top service\"},{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"(unknown)\"},\"reason\":\"causal-chain analysis on the top service\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 20233
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"namespace\": \"otel-demo\", \"level\": \"ERROR\"}'\nnode /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_discover_labels --args '{\"namespace\": \"otel-demo\"}'",
+      "stdout": "Top 10 patterns — all services (this week) · $25/wk total\n⚠ These are CURRENT RANK by cost (biggest right now). This is NOT a growth/delta ranking — do not re-label as \"cost drivers\" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.\n\n#1  (unknown)                           $4.2/wk      \n#2  service instance id service name otelcol contrib service version otelcol $3.9/wk      ERROR\n#3  open telemetry opentelemetry collector contrib exporter opensearchexporter $3.8/wk      \n#4  opentelemetry io collector processor batchprocessor v batch processor go $3.7/wk      \n#5  service instance id service name otelcol contrib service version otelcol $2.2/wk      DEBUG\n#6  go opentelemetry io collector consumer ConsumeLogsFunc ConsumeLogs $1.8/wk      \n#7  tgo opentelemetry io collector consumer logs go $1.8/wk      \n#8  opensearch project opensearch go v v opensearchtransport opensearchtransport go $1.3/wk      \n#9  opentelemetry io collector exporter exporterhelper v internal base exporter $1.2/wk      \n#10  opentelemetry io collector exporter exporterhelper v internal new request go $1.2/wk      \n\nTop 10 = 48% of total volume in scope / 52% in the long tail.\n\n**Next actions**:\n  - call `log10x_cost_drivers({ timeRange: '7d' })` for week-over-week deltas across all services.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_cost_drivers\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"week-over-week deltas across all services\"}]-->\nQueryable labels (18)\n\nFeatured — use these as filter keys in log10x_cost_drivers, log10x_list_by_label, etc.:\n  tenx_user_service      the service that emitted the log\n  severity_level         TRACE / DEBUG / INFO / WARN / ERROR / CRITICAL\n  message_pattern        the stable template hash — the unit of cost attribution\n  tenx_env               edge or cloud\n  http_code              HTTP response status (100–511)\n  k8s_namespace          Kubernetes namespace (from enrichment)\n  k8s_container          Kubernetes container name\n  k8s_pod                Kubernetes pod name\n\nOther labels (10):\n  http_message, tenx_app, tenx_failure_reason, tenx_fwd_input, tenx_host_name, tenx_pipeline_uuid, tenx_reported_name, tenx_unit_name, tenx_user_process, userId\n\nTip: call log10x_discover_labels with a specific label name (e.g., label=\"tenx_user_service\") to list its distinct values.\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 38159
+    }
+  ],
+  "finalSynthesis": "",
+  "hallucination": {
+    "numericClaimCount": 0,
+    "patternClaimCount": 0,
+    "supported": 0,
+    "unsupported": 0,
+    "inconclusive": 0,
+    "driftScore": 0,
+    "details": []
+  },
+  "valueDelivered": {
+    "score": 0,
+    "rationale": "The sub-agent never identified the two specific ERROR patterns (checkout retry and DNS resolution failure), never ran kubectl to find emitting workloads, never checked for canary.github.io/sha annotations, and never used gh api to resolve a SHA — so the core question of which pattern drives cart-abandonment was never answered."
+  },
+  "valueReceived": {
+    "score": 0.3,
+    "rationale": "The MCP returned top patterns and services for the namespace but the patterns were generic otel-collector noise rather than the specific checkout/DNS ERROR patterns needed, and the tools required for workload annotation lookup (kubectl, gh) were not invoked at all."
+  },
+  "status": "partial",
+  "flags": [
+    "low_value_delivered",
+    "low_value_received"
+  ],
+  "cost": {
+    "inputTokens": 12646,
+    "outputTokens": 599,
+    "apiCalls": 5,
+    "costUsd": 0.046923,
+    "pricingFound": true
+  }
+}
