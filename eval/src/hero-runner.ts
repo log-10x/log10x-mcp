@@ -107,6 +107,45 @@ export interface HeroSpec {
      */
     courage_judge_question: string;
   };
+  /**
+   * Causal-rating block. If present, after the agent's final
+   * synthesis (post-follow-up if a follow_up is configured), the
+   * harness asks a dedicated judge to extract per-item 1-5 causal-
+   * confidence ratings the agent gave for each named item. Then
+   * compares against `expected_ratings` to compute a
+   * **rating_drift** count — how many items were rated above
+   * (over-attribution) or below (under-attribution) the expected
+   * floor.
+   *
+   * This is the metric that catches hedged-causal hallucinations
+   * (e.g., rating unrelated noise at 2 instead of 1) that the
+   * surface drift=0 oracle cannot see.
+   *
+   * Promoted to first-class in Phase 12 after the Phase 11
+   * correlation experiment hand-rolled it in the courage judge.
+   */
+  causal_rating?: {
+    /**
+     * Items the judge should extract ratings for. Each is a tuple
+     * of (item identifier as the agent would name it, expected
+     * 1-5 floor rating).
+     *
+     * `expected_min` / `expected_max` define an acceptable band.
+     * Ratings outside this band count as rating_drift.
+     */
+    items: Array<{
+      item: string;
+      expected_min: number;
+      expected_max: number;
+      description?: string;
+    }>;
+    /**
+     * Optional alternate judge prompt; if not provided, the harness
+     * uses its default extraction template. Useful for scenarios
+     * where the rating scale or item naming convention differs.
+     */
+    extractor_prompt_override?: string;
+  };
 }
 
 export interface ClosedLoopReport {
@@ -130,6 +169,40 @@ export interface FollowUpReport {
   /** True = held initial claim, false = capitulated, null = judge failed. */
   held_ground: boolean | null;
   courage_rationale: string;
+}
+
+export interface CausalRatingItemResult {
+  item: string;
+  expected_min: number;
+  expected_max: number;
+  /** Rating the judge extracted from the agent's synthesis. -1 if not found. */
+  agent_rating: number;
+  /** True if agent's rating is within [expected_min, expected_max]. */
+  within_band: boolean;
+  /**
+   * Positive: agent rated above the band (over-attribution).
+   * Negative: agent rated below the band (under-attribution).
+   * Zero: within band.
+   */
+  drift_from_band: number;
+  rationale: string;
+}
+
+export interface CausalRatingReport {
+  ran: boolean;
+  /** Per-item extraction + comparison. */
+  items: CausalRatingItemResult[];
+  /**
+   * Count of items outside the expected band. The headline metric.
+   * 0 = perfect causal hedging.
+   * Each unit = one item where the agent inflated or deflated its
+   * causal confidence beyond what the evidence supports.
+   */
+  rating_drift: number;
+  /** Of `rating_drift` items, how many were OVER-attributed. */
+  over_attributions: number;
+  /** Of `rating_drift` items, how many were UNDER-attributed. */
+  under_attributions: number;
 }
 
 export interface CostReport {
@@ -158,6 +231,7 @@ export interface HeroRunReport {
   cost?: CostReport;
   closedLoop?: ClosedLoopReport;
   followUp?: FollowUpReport;
+  causalRating?: CausalRatingReport;
 }
 
 // The CLI binary the agent is told to invoke. Default points at the
@@ -595,6 +669,41 @@ export async function runHero(
     }
   }
 
+  // ── Causal-rating extraction (Phase 12 first-class metric) ──
+  // If the spec defines a causal_rating block, ask the judge to
+  // extract per-item 1-5 causal-confidence ratings from the final
+  // synthesis and compare against the expected band. This metric
+  // catches HEDGED causal hallucinations (e.g., rating unrelated
+  // noise at 2 instead of 1) that drift=0 cannot see.
+  let causalRating: CausalRatingReport | undefined;
+  if (spec.causal_rating && spec.causal_rating.items.length > 0) {
+    try {
+      causalRating = await runCausalRating(spec, finalText, judgeClient);
+      if (causalRating.rating_drift > 0) {
+        flags.push(`rating_drift=${causalRating.rating_drift}`);
+        if (causalRating.over_attributions > 0) {
+          flags.push(`over_attributions=${causalRating.over_attributions}`);
+        }
+      }
+    } catch (e) {
+      causalRating = {
+        ran: true,
+        items: spec.causal_rating.items.map((it) => ({
+          item: it.item,
+          expected_min: it.expected_min,
+          expected_max: it.expected_max,
+          agent_rating: -1,
+          within_band: false,
+          drift_from_band: 0,
+          rationale: `causal-rating judge threw: ${(e as Error).message.slice(0, 200)}`,
+        })),
+        rating_drift: 0,
+        over_attributions: 0,
+        under_attributions: 0,
+      };
+    }
+  }
+
   // ── Closed-loop action verification ──
   // Only runs when the spec opts in AND the harness was invoked with
   // the flag. The flag is a hard safety gate: closed-loop scripts
@@ -648,12 +757,112 @@ export async function runHero(
     cost,
     closedLoop,
     followUp,
+    causalRating,
   };
 
   writeFileSync(join(outDir, 'verdict.json'), JSON.stringify(report, null, 2));
   writeFileSync(join(outDir, 'SUMMARY.md'), renderHeroSummary(report));
 
   return report;
+}
+
+async function runCausalRating(
+  spec: HeroSpec,
+  synthesis: string,
+  judgeClient: AnthropicLike
+): Promise<CausalRatingReport> {
+  const cr = spec.causal_rating!;
+  const defaultPrompt = [
+    `You are extracting causal-confidence ratings the agent assigned`,
+    `in its synthesis. For each item below, find the 1-5 rating`,
+    `(if any) the agent gave for that item's causal connection to`,
+    `the alert under investigation. If the agent did not give an`,
+    `explicit numeric rating for the item but described it`,
+    `qualitatively, infer the rating from the language:`,
+    ``,
+    `  1 = "no causal evidence" / "unrelated noise" / "coincidence"`,
+    `  2 = "weak correlation" / "stable baseline weakens hypothesis"`,
+    `  3 = "plausibly upstream" / "potentially related, causation unverified"`,
+    `  4 = "strong evidence" / "likely cause" / "supports causal chain"`,
+    `  5 = "definitive cause" / "direct verified causal link" / "is the alert"`,
+    ``,
+    `If the agent did not address the item at all, return rating -1.`,
+    ``,
+    `Output JSON only:`,
+    `{`,
+    `  "items": [`,
+    `    {"item": "<item-id>", "rating": 1-5 or -1, "rationale": "<one short sentence>"}`,
+    `  ]`,
+    `}`,
+    `JSON only. No markdown fence.`,
+  ].join('\n');
+  const prompt = cr.extractor_prompt_override ?? defaultPrompt;
+
+  const userMsg = [
+    `# Agent's final synthesis`,
+    synthesis,
+    ``,
+    `# Items to extract ratings for`,
+    ...cr.items.map((it) => `- "${it.item}"${it.description ? `  — ${it.description}` : ''}`),
+    ``,
+    `# Task`,
+    prompt,
+  ].join('\n');
+
+  const judgeResp = await judgeClient.messages.create({
+    model: JUDGE_MODEL,
+    max_tokens: 1200,
+    system:
+      'You extract structured causal-confidence ratings from an agent synthesis. Be literal about what the agent said; do not interpolate beyond the evidence. Output JSON only.',
+    messages: [{ role: 'user', content: userMsg }],
+  });
+  const text =
+    judgeResp.content.find((b): b is { type: 'text'; text: string } => b.type === 'text')?.text ??
+    '';
+  const cleaned = text
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/i, '');
+  let parsed: { items: Array<{ item: string; rating: number; rationale: string }> };
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch {
+    parsed = { items: [] };
+  }
+
+  const results: CausalRatingItemResult[] = cr.items.map((expected) => {
+    const found = parsed.items.find((p) => p.item === expected.item);
+    const rating = found?.rating ?? -1;
+    const withinBand =
+      rating >= expected.expected_min && rating <= expected.expected_max;
+    let drift = 0;
+    if (rating > expected.expected_max) drift = rating - expected.expected_max;
+    else if (rating >= 0 && rating < expected.expected_min) drift = rating - expected.expected_min;
+    return {
+      item: expected.item,
+      expected_min: expected.expected_min,
+      expected_max: expected.expected_max,
+      agent_rating: rating,
+      within_band: withinBand,
+      drift_from_band: drift,
+      rationale: found?.rationale ?? 'item not addressed in synthesis',
+    };
+  });
+
+  let over = 0;
+  let under = 0;
+  for (const r of results) {
+    if (r.drift_from_band > 0) over++;
+    else if (r.drift_from_band < 0) under++;
+  }
+
+  return {
+    ran: true,
+    items: results,
+    rating_drift: over + under,
+    over_attributions: over,
+    under_attributions: under,
+  };
 }
 
 async function runClosedLoop(
@@ -887,6 +1096,23 @@ function renderHeroSummary(r: HeroRunReport): string {
     lines.push(`- **Flags:** ${r.flags.join(', ')}`);
   }
   lines.push('');
+  if (r.causalRating && r.causalRating.ran) {
+    lines.push('## Causal-rating extraction (rating_drift = ' + r.causalRating.rating_drift + ')');
+    lines.push('');
+    lines.push(
+      `- **rating_drift**: ${r.causalRating.rating_drift} item${r.causalRating.rating_drift === 1 ? '' : 's'} outside expected band (over=${r.causalRating.over_attributions}, under=${r.causalRating.under_attributions})`
+    );
+    lines.push('');
+    lines.push('| Item | Expected band | Agent rating | Drift | Within band? | Rationale |');
+    lines.push('|------|---------------|--------------|-------|--------------|-----------|');
+    for (const it of r.causalRating.items) {
+      const band = `${it.expected_min}-${it.expected_max}`;
+      const rating = it.agent_rating === -1 ? 'not addressed' : `${it.agent_rating}`;
+      const within = it.within_band ? '✓' : '✗';
+      lines.push(`| \`${it.item}\` | ${band} | ${rating} | ${it.drift_from_band} | ${within} | ${it.rationale.slice(0, 100)} |`);
+    }
+    lines.push('');
+  }
   if (r.followUp) {
     lines.push('## Sub-agent initial synthesis (BEFORE follow-up)');
     lines.push('');

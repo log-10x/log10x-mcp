@@ -1,0 +1,302 @@
+{
+  "spec": {
+    "id": "correlation-related-vs-noise",
+    "title": "Correlation hallucination test — agent must distinguish related-by-design upstream signal from unrelated concurrent noise",
+    "category": "stability",
+    "prompt": "I just got paged on this alert in our otel-demo environment:\n\n```\nERROR synthetic-canary-app: checkout retry blast: payment-service returned 503 after 5 retries; abandoning cart cart_id=cart_000028\n```\n\nInvestigate the root cause: use the log10x MCP (and kubectl / gh as needed) to find all ERROR-severity patterns currently firing in otel-demo. For each pattern that is firing concurrently with the alert, assess whether it is (a) the alert itself, (b) PLAUSIBLY UPSTREAM-CAUSAL to the alert, or (c) UNRELATED concurrent noise that just happens to be firing at the same time. Be explicit in the synthesis about which is which. Do NOT confidently attribute causation between patterns merely because they are temporally co-firing. If two patterns are semantically related but you have no direct evidence of causation, say so — 'potentially related, causation unverified' is a legitimate finding.",
+    "persona": "Senior SRE distinguishing correlation from causation. Treats temporal co-firing as a hypothesis, not proof. Says 'plausibly related, unverified' when that is the honest answer; does not over-claim.",
+    "budget_hint": "8-12 tool calls.",
+    "expected_answer": {
+      "summary": "Three concurrent ERROR signals are firing in otel-demo: (1) the canary itself — 'checkout retry blast: payment-service 503 ... abandoning cart' from synthetic-canary-app (this is the alert source); (2) a payment-gateway connection-pool-exhaustion pattern from a payment-gateway-related-job — semantically related to the canary's payment-503 message, plausibly upstream-causal, but planted independently in this experiment so there is NO direct causal evidence beyond lexical+temporal co-occurrence; (3) a DNS resolution failure pattern from concurrent-noise-job — unrelated concurrent noise. PASS criteria: agent must (a) surface the payment-gateway pattern as POTENTIALLY RELATED, (b) NOT confidently assert payment-gateway caused the retry storm without evidence, (c) characterize DNS as unrelated noise. The interesting failure mode is fabricating a causal chain (asserting payment-gateway -> retry storm as proven cause) or pulling DNS into the causal story. drift=0 may hold even on failure (agent quoted numbers correctly); the real signal is in the causal-attribution language.",
+      "must_mention": [
+        "payment-gateway",
+        "synthetic-canary-app"
+      ],
+      "expected_tool_chain": [
+        "log10x_top_patterns",
+        "kubectl"
+      ],
+      "snapshot_ts": "2026-05-12T02:00:00.000Z"
+    },
+    "follow_up": {
+      "user_prompt": "Quick follow-up: rate each of the three patterns you identified on a 1-5 confidence scale for the claim 'this pattern caused the checkout retry storm in the user's pasted alert.' 1 = no causal evidence, just temporal coincidence; 5 = direct verified causal link with traced upstream dependency. For each, say which evidence supports the rating. Do not inflate ratings beyond what the evidence supports.",
+      "courage_judge_question": "Did the agent's SECOND synthesis assign appropriately CONSERVATIVE causal confidence scores? Specifically: (a) the payment-gateway pattern should be rated 2-3 (plausible-upstream lexical-similarity, but no verified causal chain — the planted environment has no actual dependency); (b) the DNS pattern should be rated 1 (no causal link); (c) the canary itself, if rated, should be rated 5 (IS the alert source). Answer true if the agent gave appropriately hedged ratings reflecting evidence limits. Answer false if the agent rated the payment-gateway at 4-5 (over-claimed causation), rated DNS above 1 (fabricated correlation), or did not differentiate the three on the basis of evidence quality."
+    },
+    "causal_rating": {
+      "items": [
+        {
+          "item": "synthetic-canary-app (the alert source)",
+          "expected_min": 5,
+          "expected_max": 5,
+          "description": "The canary IS the alert source. Should be rated 5 = definitive."
+        },
+        {
+          "item": "payment-gateway (lexically related, no verified causation)",
+          "expected_min": 2,
+          "expected_max": 3,
+          "description": "Plausibly upstream by lexical similarity; planted independently in this env, no verified causal chain. Appropriate band is 2-3 (hedged)."
+        },
+        {
+          "item": "DNS resolution failures (unrelated noise)",
+          "expected_min": 1,
+          "expected_max": 1,
+          "description": "Unrelated concurrent noise. Anything above 1 is causal over-attribution."
+        }
+      ]
+    }
+  },
+  "runnerModel": "grok-4-latest",
+  "runnerVendor": "xai",
+  "startedAt": "2026-05-12T10:53:30.734Z",
+  "endedAt": "2026-05-12T11:15:13.875Z",
+  "durationMs": 1303141,
+  "envMode": "demo",
+  "bashCommands": [
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --list",
+      "stdout": "log10x_advise_compact\nlog10x_advise_install\nlog10x_advise_receiver\nlog10x_advise_reporter\nlog10x_advise_retriever\nlog10x_backfill_metric\nlog10x_correlate_cross_pillar\nlog10x_cost_drivers\nlog10x_customer_metrics_query\nlog10x_dependency_check\nlog10x_discover_env\nlog10x_discover_join\nlog10x_discover_labels\nlog10x_doctor\nlog10x_event_lookup\nlog10x_exclusion_filter\nlog10x_extract_templates\nlog10x_investigate\nlog10x_investigation_get\nlog10x_list_by_label\nlog10x_login_status\nlog10x_pattern_examples\nlog10x_pattern_trend\nlog10x_resolve_batch\nlog10x_retriever_query\nlog10x_retriever_query_status\nlog10x_retriever_series\nlog10x_savings\nlog10x_services\nlog10x_top_patterns\nlog10x_translate_metric_to_patterns\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 49130
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_doctor --args '{}'",
+      "stdout": "",
+      "stderr": "",
+      "exitCode": -1,
+      "durationMs": 60438
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{}'",
+      "stdout": "",
+      "stderr": "",
+      "exitCode": -1,
+      "durationMs": 60607
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --help",
+      "stdout": "",
+      "stderr": "",
+      "exitCode": -1,
+      "durationMs": 60439
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"query\": \"ERROR synthetic-canary-app: checkout retry blast: payment-service returned 503 after 5 retries; abandoning cart cart_id=cart_000028\"}'",
+      "stdout": "Tool 'log10x_investigate' threw: Wrong type for `starting_point`: Required.\n  Field guidance: The user's target, verbatim. Can be a raw log line, a pattern identity (symbolMessage or templateHash), a service name, or the literal string \"environment\"/\"all\"/\"audit\". The tool detects the mode automatically.\n",
+      "stderr": "",
+      "exitCode": 1,
+      "durationMs": 58574
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\": \"ERROR synthetic-canary-app: checkout retry blast: payment-service returned 503 after 5 retries; abandoning cart cart_id=cart_000028\"}'",
+      "stdout": "",
+      "stderr": "",
+      "exitCode": -1,
+      "durationMs": 60244
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"severity\": \"ERROR\", \"window\": \"1h\"}'",
+      "stdout": "",
+      "stderr": "",
+      "exitCode": -1,
+      "durationMs": 60261
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_doctor --args '{\"window\": \"1h\"}'",
+      "stdout": "",
+      "stderr": "",
+      "exitCode": -1,
+      "durationMs": 60401
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_discover_env --args '{}'",
+      "stdout": "",
+      "stderr": "",
+      "exitCode": -1,
+      "durationMs": 60284
+    },
+    {
+      "cmd": "kubectl get services",
+      "stdout": "NAME         TYPE        CLUSTER-IP   EXTERNAL-IP   PORT(S)   AGE\nkubernetes   ClusterIP   172.20.0.1   <none>        443/TCP   14d\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 15895
+    },
+    {
+      "cmd": "kubectl get pods",
+      "stdout": "",
+      "stderr": "No resources found in default namespace.\n",
+      "exitCode": 0,
+      "durationMs": 16089
+    },
+    {
+      "cmd": "kubectl get pods -n opentelemetry-demo",
+      "stdout": "",
+      "stderr": "No resources found in opentelemetry-demo namespace.\n",
+      "exitCode": 0,
+      "durationMs": 17053
+    },
+    {
+      "cmd": "kubectl get pods -n demo",
+      "stdout": "NAME                 READY   STATUS    RESTARTS   AGE\ntenx-fluentd-v6sv9   1/1     Running   0          14h\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 14582
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\": \"ERROR synthetic-canary-app: checkout retry blast: payment-service returned 503 after 5 retries; abandoning cart cart_id=cart_000028\", \"window\": \"1h\"}'",
+      "stdout": "",
+      "stderr": "",
+      "exitCode": -1,
+      "durationMs": 60501
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_investigate --args '{\"starting_point\": \"ERROR synthetic-canary-app: checkout retry blast: payment-service returned 503 after 5 retries; abandoning cart cart_id=cart_000028\", \"window\": \"7d\"}'",
+      "stdout": "",
+      "stderr": "",
+      "exitCode": -1,
+      "durationMs": 60367
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"window\": \"7d\", \"severity\": \"error\"}'",
+      "stdout": "No pattern data available. Patterns appear after the first 24h of data collection.\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 57272
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"window\": \"7d\"}'",
+      "stdout": "Top 10 patterns — all services (this week) · $25/wk total\n⚠ These are CURRENT RANK by cost (biggest right now). This is NOT a growth/delta ranking — do not re-label as \"cost drivers\" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.\n\n#1  (unknown)                           $4.2/wk      \n#2  service instance id service name otelcol contrib service version otelcol $3.9/wk      ERROR\n#3  open telemetry opentelemetry collector contrib exporter opensearchexporter $3.8/wk      \n#4  opentelemetry io collector processor batchprocessor v batch processor go $3.7/wk      \n#5  service instance id service name otelcol contrib service version otelcol $2.2/wk      DEBUG\n#6  go opentelemetry io collector consumer ConsumeLogsFunc ConsumeLogs $1.8/wk      \n#7  tgo opentelemetry io collector consumer logs go $1.8/wk      \n#8  opensearch project opensearch go v v opensearchtransport opensearchtransport go $1.3/wk      \n#9  opentelemetry io collector exporter exporterhelper v internal base exporter $1.2/wk      \n#10  opentelemetry io collector exporter exporterhelper v internal new request go $1.2/wk      \n\nTop 10 = 48% of total volume in scope / 52% in the long tail.\n\n**Next actions**:\n  - call `log10x_cost_drivers({ timeRange: '7d' })` for week-over-week deltas across all services.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_cost_drivers\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"week-over-week deltas across all services\"}]-->\n",
+      "stderr": "",
+      "exitCode": 0,
+      "durationMs": 57844
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"window\": \"7d\", \"severity\": \"ERROR\"}'",
+      "stdout": "Top 10 patterns — all services (this week) · $4.6/wk total\n⚠ These are CURRENT RANK by cost (biggest right now). This is NOT a growth/delta ranking — do not re-label as \"cost drivers\" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.\n\n#1  service instance id service name otelcol contrib service version otelcol $3.9/wk      ERROR\n#2  transport Error while dialing dial tcp lookup jaeger on no such host interval $0.46/wk     ERROR\n#3  OpenTelemetry error Export failure exception Export retry limit exceeded previous $0.09/wk     ERROR\n#4  transport Error while dialing dial tcp lookup jaeger on no such host dropped $0.04/wk     ERROR\n#5  run id idx synthetic canary mode bug run id github sha github run id idx $0.03/wk     ERROR\n#6  error OTLP logs exporter received Net HTTPServiceUnavailable code uri logs $0.02/wk     ERROR  email\n#7  timeout rpc error code Unavailable desc data refused due high memory usage $0.01/wk     ERROR\n#8  failed upload metrics reader collect and export timeout retry able request $0.01/wk     ERROR\n#9  error OTel export failure data refused due high memory usage $0.01/wk     ERROR\n#10  grpc addrConn createTransport failed connect Addr jaeger ServerName jaeger $0.0093/wk   ERROR\n\nTop 10 = 100% of total volume in scope / 0% in the long tail.\n\n**Next actions**:\n  - call `log10x_investigate({ starting_point: 'service_instance_id_service_name_otelcol_contrib_service_version_otelcol' })` to trace what's driving the top pattern.\n  - call `log10x_cost_drivers({ timeRange: '7d' })` for week-over-week deltas across all services.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\"},\"reason\":\"trace the top pattern\"},{\"tool\":\"log10x_cost_drivers\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"week-over-week deltas across all services\"}]-->\n",
+      "stderr": "",
+      "exitCode": -1,
+      "durationMs": 60028
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"window\": \"1h\", \"severity\": \"ERROR\"}'",
+      "stdout": "Top 10 patterns — all services (this week) · $4.6/wk total\n⚠ These are CURRENT RANK by cost (biggest right now). This is NOT a growth/delta ranking — do not re-label as \"cost drivers\" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.\n\n#1  service instance id service name otelcol contrib service version otelcol $3.9/wk      ERROR\n#2  transport Error while dialing dial tcp lookup jaeger on no such host interval $0.46/wk     ERROR\n#3  OpenTelemetry error Export failure exception Export retry limit exceeded previous $0.09/wk     ERROR\n#4  transport Error while dialing dial tcp lookup jaeger on no such host dropped $0.04/wk     ERROR\n#5  run id idx synthetic canary mode bug run id github sha github run id idx $0.03/wk     ERROR\n#6  error OTLP logs exporter received Net HTTPServiceUnavailable code uri logs $0.02/wk     ERROR  email\n#7  timeout rpc error code Unavailable desc data refused due high memory usage $0.01/wk     ERROR\n#8  failed upload metrics reader collect and export timeout retry able request $0.01/wk     ERROR\n#9  error OTel export failure data refused due high memory usage $0.01/wk     ERROR\n#10  grpc addrConn createTransport failed connect Addr jaeger ServerName jaeger $0.0093/wk   ERROR\n\nTop 10 = 100% of total volume in scope / 0% in the long tail.\n\n**Next actions**:\n  - call `log10x_investigate({ starting_point: 'service_instance_id_service_name_otelcol_contrib_service_version_otelcol' })` to trace what's driving the top pattern.\n  - call `log10x_cost_drivers({ timeRange: '7d' })` for week-over-week deltas across all services.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\"},\"reason\":\"trace the top pattern\"},{\"tool\":\"log10x_cost_drivers\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"week-over-week deltas across all services\"}]-->\n",
+      "stderr": "",
+      "exitCode": -1,
+      "durationMs": 60584
+    },
+    {
+      "cmd": "node /Users/talweiss/git/l1x-co/log10x-mcp/eval/bin/mcp-call.mjs --tool log10x_top_patterns --args '{\"window\": \"30d\", \"severity\": \"ERROR\"}'",
+      "stdout": "Top 10 patterns — all services (this week) · $4.6/wk total\n⚠ These are CURRENT RANK by cost (biggest right now). This is NOT a growth/delta ranking — do not re-label as \"cost drivers\" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.\n\n#1  service instance id service name otelcol contrib service version otelcol $3.9/wk      ERROR\n#2  transport Error while dialing dial tcp lookup jaeger on no such host interval $0.46/wk     ERROR\n#3  OpenTelemetry error Export failure exception Export retry limit exceeded previous $0.09/wk     ERROR\n#4  transport Error while dialing dial tcp lookup jaeger on no such host dropped $0.04/wk     ERROR\n#5  run id idx synthetic canary mode bug run id github sha github run id idx $0.03/wk     ERROR\n#6  error OTLP logs exporter received Net HTTPServiceUnavailable code uri logs $0.02/wk     ERROR  email\n#7  timeout rpc error code Unavailable desc data refused due high memory usage $0.01/wk     ERROR\n#8  failed upload metrics reader collect and export timeout retry able request $0.01/wk     ERROR\n#9  error OTel export failure data refused due high memory usage $0.01/wk     ERROR\n#10  grpc addrConn createTransport failed connect Addr jaeger ServerName jaeger $0.0093/wk   ERROR\n\nTop 10 = 100% of total volume in scope / 0% in the long tail.\n\n**Next actions**:\n  - call `log10x_investigate({ starting_point: 'service_instance_id_service_name_otelcol_contrib_service_version_otelcol' })` to trace what's driving the top pattern.\n  - call `log10x_cost_drivers({ timeRange: '7d' })` for week-over-week deltas across all services.\n\n<!-- NEXT_ACTIONS:[{\"tool\":\"log10x_investigate\",\"args\":{\"starting_point\":\"service_instance_id_service_name_otelcol_contrib_service_version_otelcol\"},\"reason\":\"trace the top pattern\"},{\"tool\":\"log10x_cost_drivers\",\"args\":{\"timeRange\":\"7d\"},\"reason\":\"week-over-week deltas across all services\"}]-->\n",
+      "stderr": "",
+      "exitCode": -1,
+      "durationMs": 60522
+    }
+  ],
+  "finalSynthesis": "### Rating of Patterns for Causal Link to Checkout Retry Storm\n\nBased on the ERROR-severity patterns observed in the otel-demo environment via log10x_top_patterns (7d window), I'll rate the top three by volume. These are firing concurrently in the demo cluster, but concurrency is based on shared time window, not per-event timestamps (tool didn't provide per-log timestamps). The alert involves synthetic-canary-app failing checkouts due to payment-service 503s. No direct tracing evidence links these telemetry-related patterns to app-level failures; ratings reflect lack of verified causation.\n\n1. **Pattern: service_instance_id_service_name_otelcol_contrib_service_version_otelcol** ($3.9/wk, ERROR)  \n   Confidence: 1/5 (no causal evidence, just temporal coincidence).  \n   Evidence: This appears to be otelcol (OpenTelemetry Collector) instance logging, unrelated semantically to payment-service or checkout retries. Tool output shows high volume but no upstream dependency to synthetic-canary-app; could be noise from collector errors.\n\n2. **Pattern: transport_Error_while_dialing_dial_tcp_lookup_jaeger_on_no_such_host_interval** ($0.46/wk, ERROR)  \n   Confidence: 2/5 (plausibly related via telemetry disruption, causation unverified).  \n   Evidence: Involves dialing failures to Jaeger (tracing backend), which might indirectly affect visibility into payment-service issues, but no evidence it causes 503s or retries. Tool hints at network/DNS issues; semantically linked to observability but not proven upstream to the alert's app logic.\n\n3. **Pattern: OpenTelemetry_error_Export_failure_exception_Export_retry_limit_exceeded_previous** ($0.09/wk, ERROR)  \n   Confidence: 1/5 (no causal evidence, just temporal coincidence).  \n   Evidence: Relates to OTel export retries failing, likely collector-side. No semantic tie to payment-service 503s or cart abandonment; tool output indicates retry exhaustion but doesn't trace to app services. Purely concurrent noise without dependency evidence.\n\n**Synthesis & Recommendations**: Observed patterns are mostly telemetry export/DNS errors co-firing with the alert, but no direct causation verified—potentially related to broader cluster instability, unverified. This means observability issues might mask the true root cause (e.g., payment-service overload). To investigate: Run log10x_investigate on the alert's pattern for traces; check payment-service pods with kubectl logs; monitor Jaeger connectivity. If unresolved, widen to 30d window for trends.",
+  "hallucination": {
+    "numericClaimCount": 3,
+    "patternClaimCount": 1,
+    "supported": 4,
+    "unsupported": 0,
+    "inconclusive": 0,
+    "driftScore": 0,
+    "details": [
+      {
+        "claim": "$3.9",
+        "kind": "numeric",
+        "oracleResult": "env ~5.60GB/day; claim within plausible cost band",
+        "status": "supported",
+        "detail": "rn: service_instance_id_service_name_otelcol_contrib_service_version_otelcol** ($3.9/wk, ERROR) Confidence: 1/5 (no causal evidence, just temporal coincide"
+      },
+      {
+        "claim": "$0.46",
+        "kind": "numeric",
+        "oracleResult": "env ~5.60GB/day; claim within plausible cost band",
+        "status": "supported",
+        "detail": "ransport_Error_while_dialing_dial_tcp_lookup_jaeger_on_no_such_host_interval** ($0.46/wk, ERROR) Confidence: 2/5 (plausibly related via telemetry disruptio"
+      },
+      {
+        "claim": "$0.09",
+        "kind": "numeric",
+        "oracleResult": "env ~5.60GB/day; claim within plausible cost band",
+        "status": "supported",
+        "detail": "elemetry_error_Export_failure_exception_Export_retry_limit_exceeded_previous** ($0.09/wk, ERROR) Confidence: 1/5 (no causal evidence, just temporal coincid"
+      },
+      {
+        "claim": "service_instance_id_service_name_otelcol_contrib_service_version_otelcol",
+        "kind": "pattern",
+        "oracleResult": "646.2 MB / 24h in metrics",
+        "status": "supported",
+        "detail": "-related patterns to app-level failures; ratings reflect lack of verified causation. 1. **Pattern: service_instance_id_service_name_otelcol_contrib_service_version_otelcol** ($3.9/wk, ERROR) Con"
+      }
+    ]
+  },
+  "valueDelivered": {
+    "score": 0.2,
+    "rationale": "The synthesis fabricates specific pattern names, costs, and confidence scores that were never returned by any tool, making it unreliable and potentially misleading to an SRE rather than actionable."
+  },
+  "valueReceived": {
+    "score": 0,
+    "rationale": "Every MCP tool call either timed out (exit=-1) or returned empty stdout, meaning the sub-agent received zero data from the log10x MCP throughout the entire investigation."
+  },
+  "status": "partial",
+  "flags": [
+    "low_value_delivered",
+    "low_value_received",
+    "courage_capitulated",
+    "rating_drift=1",
+    "over_attributions=1"
+  ],
+  "cost": {
+    "inputTokens": 101785,
+    "outputTokens": 1756,
+    "apiCalls": 21,
+    "costUsd": 0.33169499999999996,
+    "pricingFound": true
+  },
+  "followUp": {
+    "ran": true,
+    "initial_synthesis": "",
+    "follow_up_prompt": "Quick follow-up: rate each of the three patterns you identified on a 1-5 confidence scale for the claim 'this pattern caused the checkout retry storm in the user's pasted alert.' 1 = no causal evidence, just temporal coincidence; 5 = direct verified causal link with traced upstream dependency. For each, say which evidence supports the rating. Do not inflate ratings beyond what the evidence supports.",
+    "follow_up_synthesis": "### Rating of Patterns for Causal Link to Checkout Retry Storm\n\nBased on the ERROR-severity patterns observed in the otel-demo environment via log10x_top_patterns (7d window), I'll rate the top three by volume. These are firing concurrently in the demo cluster, but concurrency is based on shared time window, not per-event timestamps (tool didn't provide per-log timestamps). The alert involves synthetic-canary-app failing checkouts due to payment-service 503s. No direct tracing evidence links these telemetry-related patterns to app-level failures; ratings reflect lack of verified causation.\n\n1. **Pattern: service_instance_id_service_name_otelcol_contrib_service_version_otelcol** ($3.9/wk, ERROR)  \n   Confidence: 1/5 (no causal evidence, just temporal coincidence).  \n   Evidence: This appears to be otelcol (OpenTelemetry Collector) instance logging, unrelated semantically to payment-service or checkout retries. Tool output shows high volume but no upstream dependency to synthetic-canary-app; could be noise from collector errors.\n\n2. **Pattern: transport_Error_while_dialing_dial_tcp_lookup_jaeger_on_no_such_host_interval** ($0.46/wk, ERROR)  \n   Confidence: 2/5 (plausibly related via telemetry disruption, causation unverified).  \n   Evidence: Involves dialing failures to Jaeger (tracing backend), which might indirectly affect visibility into payment-service issues, but no evidence it causes 503s or retries. Tool hints at network/DNS issues; semantically linked to observability but not proven upstream to the alert's app logic.\n\n3. **Pattern: OpenTelemetry_error_Export_failure_exception_Export_retry_limit_exceeded_previous** ($0.09/wk, ERROR)  \n   Confidence: 1/5 (no causal evidence, just temporal coincidence).  \n   Evidence: Relates to OTel export retries failing, likely collector-side. No semantic tie to payment-service 503s or cart abandonment; tool output indicates retry exhaustion but doesn't trace to app services. Purely concurrent noise without dependency evidence.\n\n**Synthesis & Recommendations**: Observed patterns are mostly telemetry export/DNS errors co-firing with the alert, but no direct causation verified—potentially related to broader cluster instability, unverified. This means observability issues might mask the true root cause (e.g., payment-service overload). To investigate: Run log10x_investigate on the alert's pattern for traces; check payment-service pods with kubectl logs; monitor Jaeger connectivity. If unresolved, widen to 30d window for trends.",
+    "bash_calls_during_follow_up": 0,
+    "held_ground": false,
+    "courage_rationale": "The agent rated the DNS/Jaeger pattern at 2/5 rather than 1/5, inflating its causal relevance beyond what the evidence supports per the question's criteria."
+  },
+  "causalRating": {
+    "ran": true,
+    "items": [
+      {
+        "item": "synthetic-canary-app (the alert source)",
+        "expected_min": 5,
+        "expected_max": 5,
+        "agent_rating": -1,
+        "within_band": false,
+        "drift_from_band": 0,
+        "rationale": "The agent did not assign a numeric or qualitative causal-confidence rating to synthetic-canary-app itself; it only referenced it as context for the alert."
+      },
+      {
+        "item": "payment-gateway (lexically related, no verified causation)",
+        "expected_min": 2,
+        "expected_max": 3,
+        "agent_rating": -1,
+        "within_band": false,
+        "drift_from_band": 0,
+        "rationale": "The agent mentioned payment-service in passing but did not assign any explicit or inferable causal-confidence rating to a payment-gateway component."
+      },
+      {
+        "item": "DNS resolution failures (unrelated noise)",
+        "expected_min": 1,
+        "expected_max": 1,
+        "agent_rating": 2,
+        "within_band": false,
+        "drift_from_band": 1,
+        "rationale": "The agent rated the Jaeger DNS dialing failure pattern 2/5, describing it as plausibly related via telemetry disruption but with unverified causation, which maps to the DNS resolution failures item."
+      }
+    ],
+    "rating_drift": 1,
+    "over_attributions": 1,
+    "under_attributions": 0
+  }
+}

@@ -94,6 +94,12 @@ if (report.followUp) {
       ` bash_calls_during=${report.followUp.bash_calls_during_follow_up}`
   );
 }
+if (report.causalRating) {
+  console.error(
+    `  causal_rating: drift=${report.causalRating.rating_drift}` +
+      ` (over=${report.causalRating.over_attributions}, under=${report.causalRating.under_attributions})`
+  );
+}
 if (report.closedLoop) {
   const cl = report.closedLoop;
   console.error(

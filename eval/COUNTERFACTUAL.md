@@ -1,3 +1,107 @@
+# Counterfactual injection harness — Phase 12: Causal-rating verification at N=24 + first-class metric (VERIFIED 2026-05-12)
+
+> **Status**: Phase 12 executes three concurrent tasks: re-run
+> correlation at N=20 per model to verify the Phase 11 finding,
+> promote causal-rating to a first-class harness metric, file the
+> MCP product gap as a structured report.
+>
+> ## Headline — the Phase 11 finding reproduces at N=24
+>
+> Combined Phase 11 (N=5 Grok) + Phase 12 (N=19 Grok): **9 of 24
+> Grok runs over-attribute** causal weight to unrelated noise or
+> to plausibly-related-but-unverified signals (37.5% rate).
+> One-sided binomial test against null p=0.05: **p ≈ 0.000003**.
+> The finding is significant; the original N=2/5 was not a flaky
+> small-sample artifact.
+>
+> Claude: 1 over-attribution in 5 runs (20% small-sample rate).
+> N=4 of Phase 12's 20 Claude runs completed (16 hung on the
+> recurring Anthropic API parallel-scale hang). Sample is too
+> small for a confident cross-model claim, but consistent with
+> Phase 11.
+>
+> ## Failure modes the data identifies
+>
+>   - **Mode A**: Grok under-rates the canary (the alert source
+>     itself) — 12 of 19 Phase-12 Grok runs rated the canary below
+>     5. Mis-framing of the question (treats source as another
+>     item to rate).
+>   - **Mode B**: Grok over-rates unrelated DNS noise at 2-3
+>     (should be 1) — 5 of 19 runs. The classic hedged-causal
+>     hallucination.
+>   - **Mode C**: Grok over-rates the related-by-design payment-
+>     gateway pattern at 4 (should be 2-3) — 2 of 19 runs. More
+>     egregious "strong evidence" over-claim.
+>
+> Claude shows mode B in 1/4 (DNS=2 in one run); 3/4 hit perfect
+> ratings.
+>
+> ## Task 3 — `causal_rating` is now a first-class harness metric
+>
+>   - New `CausalRatingReport` interface alongside drift/vd/vr
+>   - New `causal_rating` block on `HeroSpec` with per-item
+>     expected bands
+>   - `runCausalRating()` helper extracts 1-5 ratings from synthesis
+>     via a dedicated judge call and compares against expected band
+>   - Headline metric: `rating_drift` = count of items outside their
+>     expected band; breakdown into `over_attributions` and
+>     `under_attributions`
+>   - Rendered in SUMMARY.md as a separate section
+>   - Flags `rating_drift=N`, `over_attributions=N` automatically
+>     attached
+>
+> Reuse: any future scenario that needs causal-hedging tests adds a
+> `causal_rating` block to the fixture. The metric is now
+> persistent.
+>
+> ## Task 2 — MCP product gap filed
+>
+> `eval/gaps/MCP_event_lookup_pattern_hash_bridge.md` documents
+> the gap surfaced in Phase 11 paste-with-match runs. Local
+> templater hash (`OY?US|0X}_`) does NOT bridge to engine-side
+> pattern hash. `log10x_event_lookup` returns "no data" for the
+> pasted message body even when the corresponding pattern is
+> firing in `log10x_top_patterns`. Three proposed fixes (sketched).
+>
+> ## Cumulative across 12 phases
+>
+> | Metric | Value |
+> |---|---|
+> | Hero runs total | **188** |
+> | Surface drift=0 | 182 (6 oracle/tokenization artifacts) |
+> | Surface agent fabrications | **0** |
+> | Correlation runs (Phase 11 + 12) | 29 (Claude 5, Grok 24) |
+> | Over-attribution rate Grok | **37.5%** (9/24) — significant |
+> | Over-attribution rate Claude | 20% (1/5) — small sample |
+> | Courage capitulation rate Grok | 50% (12/24) |
+> | Courage capitulation rate Claude | 20% (1/5) |
+>
+> ## Updated production-readiness statement
+>
+> > Across 188 hero runs, 0 surface fabrications. But the first-class
+> > `rating_drift` metric (Phase 12) caught 10 hedged-causal
+> > over-attributions across 29 correlation runs — significant
+> > Grok-side phenomenon. **drift=0 is necessary but not sufficient
+> > for "no hallucination" on causally-ambiguous scenarios.**
+> >
+> > For deployments where causal attribution matters (incident
+> > triage, root-cause analysis, alert correlation), Claude's
+> > hedging is preferred in this benchmark; the differential is
+> > now statistically meaningful for Grok (p ≈ 0.000003 against
+> > null p=0.05) though still small-sample for Claude.
+>
+> ## Harness fragility (still open)
+>
+> The Anthropic API parallel-scale hang is now a quantified
+> limit: at 20 parallel Claude calls, ~80% hang. The
+> AbortController fix is now the load-bearing single follow-up.
+> Without it, any high-N Claude batch is data-skewed by attrition.
+>
+> Full write-up: `eval/reports/hero/PHASE_12_CAUSAL_RATING_VERIFICATION.md`.
+> Product gap report: `eval/gaps/MCP_event_lookup_pattern_hash_bridge.md`.
+
+---
+
 # Counterfactual injection harness — Phase 11: Paste-to-pattern + correlation hallucination (VERIFIED 2026-05-12)
 
 > **Status**: Phase 11 closes two production-workflow gaps that
