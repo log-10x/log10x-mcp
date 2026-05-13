@@ -24,6 +24,7 @@ import { join } from 'node:path';
 import type { EvalEnv } from './env.js';
 import { applyEvalEnvToProcess } from './env.js';
 import { validateClaims, renderOracleReport, type HeroOracleReport } from './hero-oracle.js';
+import { checkToolOutputDrift, type ToolOutputCheckReport } from './tool-output-validator.js';
 import {
   selectAgentClient,
   computeCostUsd,
@@ -572,6 +573,34 @@ export async function runHero(
         },
       ],
     };
+  }
+
+  // ── Score: tool-output drift (bash-transcript-comparing) ──
+  // Catches agent claims that don't appear in any bash stdout. Caught the
+  // genuine fabrication in the N=20 batch (templateHash `JR#aVP|+<+` +
+  // deploy_sha=p14fresh cited without any bash call returning them) AND
+  // would have cleared the N=3 judge false-positive (the agent's "4 events"
+  // claim WAS backed by a broadened-probe call the judge missed).
+  let toolOutputDrift: ToolOutputCheckReport;
+  try {
+    toolOutputDrift = checkToolOutputDrift(finalText, bashCommands);
+  } catch (e) {
+    toolOutputDrift = { drifts: [] };
+  }
+  // Promote tool-output drifts into the hallucination report so they
+  // surface in surface drift / driftHard counts.
+  for (const tod of toolOutputDrift.drifts) {
+    hallucination.details.push({
+      claim: tod.claim,
+      kind: 'pattern',
+      oracleResult: `tool-output drift (${tod.reason}): claim does not appear in any bash stdout`,
+      status: 'unsupported',
+      driftSeverity: 'hard',
+      detail: tod.context,
+    });
+    hallucination.unsupported += 1;
+    hallucination.driftScore += 1;
+    hallucination.driftHard += 1;
   }
 
   // ── Score: value-delivered + value-received via Sonnet judge ──
