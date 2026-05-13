@@ -134,6 +134,15 @@ Every pattern is ranked by an interestingness score (severity-weighted); the dom
 
 ## Install
 
+### Engine compatibility
+
+| MCP version | tenx engine required | Notes |
+|---|---|---|
+| 1.8.13+ | **1.0.22+** (recommended) | `log10x_resolve_batch` `privacy_mode: true` invokes `tenx @apps/mcp` (stdin/stdout, no temp files). Requires `apps/mcp` shipped in the engine release — first available in 1.0.22. |
+| 1.8.x | 1.0.21 (with `TENX_CONFIG`+`TENX_MODULES` overrides) | Earlier engines can run the MCP only if the user clones `log-10x/config` + `log-10x/modules` at the apps/mcp branches and points `TENX_CONFIG`/`TENX_MODULES` at them. |
+
+`brew upgrade log10x` pulls the latest released engine. See https://doc.log10x.com/install/ for OS-specific installers.
+
 ### Claude Desktop
 
 Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
