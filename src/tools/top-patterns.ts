@@ -208,6 +208,14 @@ export async function executeTopPatterns(
         reason: 'week-over-week deltas across all services',
       });
     }
+    // Cost-mitigation hint: among the top patterns, INFO/DEBUG patterns
+    // with no error signal are often safe to drop. Surface the drop path
+    // explicitly so it's discoverable without the user needing to know
+    // the tool name. The agent decides which specific patterns qualify;
+    // we just surface that the path exists.
+    if (topHashUsable) {
+      lines.push(`  - to **drop a routine pattern** (high-volume INFO/DEBUG with no diagnostic value): run \`log10x_dependency_check({ pattern: '${rows[0].hash}' })\` to verify safe-to-mute, then \`log10x_exclusion_filter({ pattern: '${rows[0].hash}' })\` for the vendor-specific drop config.`);
+    }
   }
   const block = renderNextActions(nextActions);
   if (block) lines.push('', block);

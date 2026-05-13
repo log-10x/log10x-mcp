@@ -55,6 +55,8 @@ export function renderDepCheckResult(result: DepCheckResult): string {
   const total = result.matches.length;
   if (total === 0) {
     lines.push(`Scan complete: 0 dependencies found in ${vendorLabel} for pattern \`${result.pattern}\`.`);
+    lines.push('');
+    lines.push(`**Safe to drop.** Generate the vendor-specific exclusion filter: \`log10x_exclusion_filter({ pattern: '${result.pattern}', vendor: '${result.vendor}' })\`.`);
   } else {
     const counts: string[] = [];
     if (result.byType.dashboards) counts.push(`${result.byType.dashboards} dashboard${result.byType.dashboards === 1 ? '' : 's'}`);

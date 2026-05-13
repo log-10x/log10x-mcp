@@ -291,7 +291,13 @@ Daily-habit / operational:
 - "top patterns in <service> right now"                          → log10x_top_patterns
 - "why is X spiking" / "investigate X" / "what's causing this"   → log10x_investigate
 - "am I allowed to drop this" / "what references this"           → log10x_dependency_check
-- "silence this for N hours" / "mute this pattern"               → log10x_exclusion_filter
+- "drop X" / "filter X" / "mute X" / "stop ingesting X" /
+  "exclude X from Datadog/Splunk/Elastic/CloudWatch"             → log10x_dependency_check FIRST (verify safe-to-drop),
+                                                                    then log10x_exclusion_filter (generate vendor config)
+- (proactive): after log10x_top_patterns or log10x_event_lookup surfaces a high-volume
+  INFO/DEBUG pattern with no error signal AND no growth signal, offer the drop path in
+  the synthesis without waiting for the user to ask — "Pattern X looks like routine
+  $LEVEL traffic, ~$Y/day. Want me to dependency-check it for safe-to-drop?"
 
 Cost investigation:
 - "what's expensive right now" / "top patterns by cost"          → log10x_top_patterns

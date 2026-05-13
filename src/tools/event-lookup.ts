@@ -240,11 +240,16 @@ async function formatResults(
     args: { pattern },
     reason: 'time series for the resolved pattern',
   });
-  lines.push(`  - Before any mute / drop action, run \`log10x_dependency_check({ pattern: '${pattern}' })\` to find dashboards / alerts that depend on it.`);
+  lines.push(`  - To drop / filter this pattern in your SIEM: run \`log10x_dependency_check({ pattern: '${pattern}' })\` FIRST to verify nothing depends on it, then \`log10x_exclusion_filter({ pattern: '${pattern}' })\` to generate the vendor-specific drop config.`);
   nextActions.push({
     tool: 'log10x_dependency_check',
     args: { pattern },
-    reason: 'find dashboard / alert dependencies before muting',
+    reason: 'verify safe-to-drop before generating exclusion filter',
+  });
+  nextActions.push({
+    tool: 'log10x_exclusion_filter',
+    args: { pattern },
+    reason: 'generate vendor-specific drop config after dependency_check confirms safe',
   });
 
   const block = renderNextActions(nextActions);
