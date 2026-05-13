@@ -1028,12 +1028,23 @@ async function judgeHero(
   bashCommands: HeroRunReport['bashCommands'],
   client: AnthropicLike
 ): Promise<JudgeReport> {
+  // Show ALL bash calls and a wider stdout slice. Earlier values (12
+  // calls × 1500 bytes) produced judge false-positive "fabrication"
+  // flags on the cross-pillar scenario: the agent cited templateHash
+  // data that lived in (a) call #14 which the 12-cap hid entirely on
+  // one run, and (b) call #7 at byte 2125 of a 2872-byte stdout that
+  // the 1500-cap truncated on another. The judge then could not find
+  // the cited data in its view and called it a fabrication.
+  //
+  // MAX_AGENT_TURNS is 20 by default, so 20-call coverage matches; the
+  // wider stdout slice (4000 bytes) keeps templateHash + sample-event
+  // payload in view for pattern_examples responses.
   const previews = bashCommands
-    .slice(0, 12)
+    .slice(0, 20)
     .map((c, i) => {
       const cmd = c.cmd.length > 200 ? c.cmd.slice(0, 200) + '...' : c.cmd;
       const out =
-        c.stdout.length > 1500 ? c.stdout.slice(0, 1500) + `... [${c.stdout.length - 1500} more bytes]` : c.stdout;
+        c.stdout.length > 4000 ? c.stdout.slice(0, 4000) + `... [${c.stdout.length - 4000} more bytes]` : c.stdout;
       return `## Bash call ${i + 1} (exit=${c.exitCode}, ${c.durationMs}ms)\n\n\`\`\`\n${cmd}\n\`\`\`\n\nstdout:\n\`\`\`\n${out}\n\`\`\``;
     })
     .join('\n\n');
