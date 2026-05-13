@@ -110,6 +110,16 @@ export function renderPlan(plan: AdvisePlan, action: 'install' | 'verify' | 'tea
   lines.push('---');
   lines.push(`_Plan built from snapshot \`${plan.snapshotId}\`._`);
 
+  // Discoverability: after the user (or agent) runs the install plan,
+  // the natural chain is verify-install (doctor catches setup issues
+  // across all tiers) and discover-env (confirms the new config is
+  // picked up). Surface both — agents otherwise tend to stop after the
+  // install plan without verification.
+  lines.push('');
+  lines.push('**Next actions** (after running the plan above):');
+  lines.push('  - Verify the install is healthy: `log10x_doctor` — runs all freshness/auth/config checks across reporter, receiver, retriever.');
+  lines.push('  - Confirm the config snapshot picked up the change: `log10x_discover_env` — shows what the engine sees as the active config.');
+
   return lines.join('\n');
 }
 

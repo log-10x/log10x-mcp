@@ -87,5 +87,11 @@ export async function executeDiscoverLabels(
   lines.push('');
   lines.push('Tip: call log10x_discover_labels with a specific label name (e.g., label="tenx_user_service") to list its distinct values.');
 
+  lines.push('');
+  lines.push('**Next actions** (using these labels):');
+  lines.push('  - To rank patterns by any of these labels (cost-by-service, cost-by-namespace, etc.): `log10x_list_by_label({ groupBy: "<label_name>" })`');
+  lines.push('  - To scope `log10x_top_patterns` to one label value: pass `service: "..."` or filter by a specific label downstream');
+  lines.push('  - For cross-pillar correlation on a label-keyed customer metric: `log10x_correlate_cross_pillar`');
+
   return lines.join('\n');
 }

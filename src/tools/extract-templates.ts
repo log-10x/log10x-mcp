@@ -164,6 +164,14 @@ export async function executeExtractTemplates(args: ExtractArgs): Promise<string
     lines.push('');
   }
 
+  // Discoverability: after extracting templates locally, the natural
+  // chain is to look up the resulting canonical names against the live
+  // env or to run richer per-pattern triage on the same input.
+  lines.push('');
+  lines.push('**Next actions**:');
+  lines.push('  - To look up any of the extracted templates against the live Reporter (find cost, severity, services, trend), pass the canonical pattern name (e.g. `Payment_Gateway_Timeout`) to `log10x_event_lookup`.');
+  lines.push('  - For richer per-pattern triage with variable concentrations and next-action suggestions on the same input, use `log10x_resolve_batch` instead — same input format, structured per-pattern output.');
+
   return lines.join('\n');
 }
 

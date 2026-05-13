@@ -212,6 +212,10 @@ export async function executeBackfillMetric(
     `**Next action**: create an alert on \`${args.metric_name}\` in ${args.destination}. ` +
       `The full 90-day history is now populated, so you can calibrate thresholds against real data instead of guessing from the first week.`
   );
+  lines.push('');
+  lines.push('**Other things you can do now**:');
+  lines.push(`  - Verify the backfilled series: \`log10x_pattern_trend({ pattern: '${pattern}', timeRange: '30d' })\` — the time series now extends the full 90d, not just from forward-emission start.`);
+  lines.push(`  - Run the same pattern again over the archive at finer granularity: \`log10x_retriever_series({ pattern: '${pattern}' })\` — useful for sanity-checking the backfilled buckets.`);
 
   return lines.join('\n');
 }

@@ -985,6 +985,18 @@ export function renderDoctorReport(report: DoctorReport): string {
         'See the fix(es) above.'
     );
   }
+  // Discoverability: doctor is the entry point for "is everything set up";
+  // when something's missing or broken, the user needs to know which
+  // advise-* tool to call. Surface the full set explicitly so the agent
+  // can pick the right one based on the failing checks above.
+  lines.push('');
+  lines.push('**Next actions** (when a check failed or warned):');
+  lines.push('  - For missing/broken Reporter (cloud-tier metric emission): `log10x_advise_reporter`');
+  lines.push('  - For missing/broken Receiver (edge-tier forwarder sidecar): `log10x_advise_receiver`');
+  lines.push('  - For missing/broken Retriever (S3 archive + bloom index): `log10x_advise_retriever`');
+  lines.push('  - For Compact mode (per-pattern compaction config): `log10x_advise_compact`');
+  lines.push('  - For first-time install / general questions: `log10x_advise_install`');
+  lines.push('  - To inspect the current env config (what doctor saw): `log10x_discover_env`');
   return lines.join('\n');
 }
 

@@ -21,6 +21,7 @@ import {
   resolveSiemSelection,
   formatAmbiguousError,
 } from '../lib/siem/resolve.js';
+import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 
 const SIEM_VENDORS = ['datadog', 'splunk', 'elasticsearch', 'cloudwatch'] as const;
 type SiemVendor = (typeof SIEM_VENDORS)[number];
@@ -110,6 +111,30 @@ export async function executeExclusionFilter(args: {
   lines.push(label);
   lines.push('');
   lines.push(text);
+
+  // Chain to verification + savings — without this, the user is dead-ended
+  // after generating the config. After the drop is applied, the natural
+  // questions are "did volume actually drop" (pattern_trend) and "what did
+  // I save" (cost_drivers shows the delta).
+  lines.push('');
+  lines.push('**Next actions** (after the drop is applied):');
+  lines.push(`  - Verify volume actually dropped: \`log10x_pattern_trend({ pattern: '${pattern}', timeRange: '1d', step: '1h' })\` — look for the inflection where the rate goes to zero.`);
+  lines.push(`  - See the cost impact: \`log10x_cost_drivers({ timeRange: '7d' })\` — the pattern will appear in the "shrinking" / "removed" list with the savings dollar amount.`);
+
+  const nextActions: NextAction[] = [
+    {
+      tool: 'log10x_pattern_trend',
+      args: { pattern, timeRange: '1d', step: '1h' },
+      reason: 'verify volume actually dropped after the exclusion is applied',
+    },
+    {
+      tool: 'log10x_cost_drivers',
+      args: { timeRange: '7d' },
+      reason: 'see cost savings from the drop in week-over-week deltas',
+    },
+  ];
+  const block = renderNextActions(nextActions);
+  if (block) lines.push('', block);
 
   return lines.join('\n');
 }
