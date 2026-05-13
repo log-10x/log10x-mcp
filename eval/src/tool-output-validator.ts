@@ -29,7 +29,10 @@ export interface ToolOutputDrift {
   claim: string;
   context: string;
   /** Why this was flagged: */
-  reason: 'identifier-not-in-tool-output' | 'count-contradicts-no-data';
+  reason:
+    | 'identifier-not-in-tool-output'
+    | 'count-contradicts-no-data'
+    | 'plausible-canonical-not-in-tool-output';
 }
 
 export interface ToolOutputCheckReport {
@@ -167,6 +170,50 @@ export function checkToolOutputDrift(
       claim: m[0],
       context: textWindow(finalText, m.index ?? 0, 100),
       reason: 'count-contradicts-no-data',
+    });
+  }
+
+  // 4. Plausible canonical pattern names: underscored multi-segment
+  // tokens like `payment_gateway_circuit_breaker_open` that the agent
+  // might invent because they look like a legit log10x canonical. The
+  // tenx engine's canonical pattern names use this exact shape (e.g.,
+  // `AddItemAsync_called_with_userId_productId_quantity`,
+  // `service_instance_id_service_name_otelcol_contrib_service_version_otelcol`).
+  //
+  // Heuristic: a token with ≥3 underscore-separated segments and ≥18
+  // chars total. If it does NOT appear verbatim (case-insensitive) in
+  // any bash stdout, flag as fabrication.
+  const PLAUSIBLE_CANONICAL_RE = /\b([A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+){2,})\b/g;
+  const seenIds = new Set<string>(); // dedupe
+  for (const m of cleanText.matchAll(PLAUSIBLE_CANONICAL_RE)) {
+    const id = m[1];
+    if (id.length < 18) continue;
+    if (seenIds.has(id.toLowerCase())) continue;
+    seenIds.add(id.toLowerCase());
+    // Skip if appears in any bash stdout OR any bash command (e.g.,
+    // the agent quoting a tool argument they passed). Check both the
+    // underscored form AND the space-separated form, because
+    // log10x_top_patterns displays patterns space-separated (e.g.,
+    // "transport Error while dialing dial tcp...") and the agent
+    // canonicalizes them to underscores in the synthesis. That's
+    // reformatting, not fabrication.
+    const idLower = id.toLowerCase();
+    const idSpaced = idLower.replace(/_/g, ' ');
+    const inStdout = allStdout.includes(idLower) || allStdout.includes(idSpaced);
+    const inCmds = bashCommands.some((c) => {
+      const cmdLower = (c.cmd || '').toLowerCase();
+      return cmdLower.includes(idLower) || cmdLower.includes(idSpaced);
+    });
+    if (inStdout || inCmds) continue;
+    // Skip scenario-prompt-fed strings (e.g., the alert payload tokens)
+    // — these are user-provided context, not agent fabrications. The
+    // scenario prompt isn't directly in the transcript at this layer,
+    // but we can detect the most common ones.
+    if (/^(synthetic_canary|github_sha|github_run_id|tool_use_id|run_id_alert)/i.test(id)) continue;
+    drifts.push({
+      claim: id,
+      context: textWindow(cleanText, m.index ?? 0, 100),
+      reason: 'plausible-canonical-not-in-tool-output',
     });
   }
 
