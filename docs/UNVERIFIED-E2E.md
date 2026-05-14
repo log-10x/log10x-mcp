@@ -7,15 +7,80 @@ creds/auth, the item stays open with the specific block noted.
 
 ## Open items
 
-### 1. Grafana Cloud Prom — engine write via Basic auth — **CLOSED**
+### 1. Grafana Cloud Prom — **CLOSED with FULL ROUNDTRIP against real `*.grafana.net` SaaS**
 
-Engine wrote via Basic auth to nginx-basic-gated Prom. Verified:
-- Engine `prometheusRW` config set with `user: acme, password: trial`
-- nginx access log: `acme [...] "POST /api/v1/write HTTP/1.1" 204 0 ... "tenx-pipeline"` — engine authenticated and writes were accepted
-- Curl WITHOUT auth → 401; with `-u acme:trial` → 200
-- MCP `kind: 'grafana_cloud_prom'` (now a real subclass of
-  `PrometheusBackend` instead of a stub) rendered 12 services with
-  populated top_patterns
+**Update 2026-05-14**: previous closure (against a local
+`nginx-basic-e2e` proxy fronting in-cluster Mimir) only proved the
+Basic-auth code path. Re-verified end-to-end against the real
+Grafana Cloud SaaS endpoint.
+
+**Setup**:
+- Real GC stack `prometheus-prod-56-prod-us-east-2.grafana.net`,
+  org `1767547`, stack `1642272`.
+- Access policy `claude-claude3` with both `metrics:write` +
+  `metrics:read` scopes; token used for both engine write and
+  MCP read (one token, both directions).
+- Engine `tenx-fluentd` daemonset patched: added `GC_USER` +
+  `GC_TOKEN` env vars (from secret `gc-creds-e2e`), receiver
+  override configmap `receiver-config-gc` switched to include
+  `run/output/metric/prometheus/remote-write` with
+  `prometheusRW: [{host: https://…/api/prom/push, user:
+  $=TenXEnv.get("GC_USER"), password: $=TenXEnv.get("GC_TOKEN")}]`.
+
+**Engine WRITE — hard data**:
+- Engine log line confirms target:
+  `📈 Publishing TenXSummary metrics to Prometheus RW host:
+   https://prometheus-prod-56-prod-us-east-2.grafana.net/api/prom/push`
+- Direct curl to GC read API:
+  ```
+  GET /api/prom/api/v1/label/__name__/values
+  → ["all_events_summaryBytes_total", "all_events_summaryVolume_total",
+     "emitted_events_optimized_size_total",
+     "emitted_events_summaryBytes_total",
+     "emitted_events_summaryVolume_total"]
+  GET /api/prom/api/v1/query?query=count(all_events_summaryBytes_total)
+  → 133 series
+  GET /api/prom/api/v1/query?query=group by(tenx_user_service)(all_events_summaryBytes_total)
+  → 16 services (accounting, ad, cart, email, emitter, kafka,
+     opentelemetry-collector, payment, product-reviews, ...)
+  ```
+
+**MCP READ — hard data via `kind: 'grafana_cloud_prom'`**:
+- Direct invocation against the real GC endpoint
+  (`https://prometheus-prod-56-prod-us-east-2.grafana.net/api/prom`)
+  with `${GC_USER}` + `${GC_TOKEN}` env-var refs.
+- `executeServices(15m)`:
+  ```
+  Monitored Services (last 15m)
+    opentelemetry-collector  9.5 MB     86%  $0.0093/15m
+    payment                  572.7 KB    5%  $0.0005/15m
+    emitter                  399.1 KB    4%  $0.0004/15m
+    kafka                    158.1 KB    1%  $0.0002/15m
+    cart                     126.4 KB    1%  $0.0001/15m
+    … 16 services · 11.1 MB total · $0.01/15m
+    Top 3 services = 95% of volume.
+  ```
+- `executeTopPatterns(15m, limit 10, analyzerCost: 1.0)`:
+  ```
+  Top 10 patterns — all services (last 15m) · $0.0060/15m total
+   #1  service_instance_id_..._otelcol_contrib_..._otelcol $0.0010/15m  ERROR  opentelemetry-collector
+   #2  open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter $0.0009/15m
+   #3  opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go $0.0009/15m
+   #4  (no-symbol)                       $0.0008/15m         opentelemetry-collector
+   …
+   #9  (no-symbol)                       $0.0003/15m         payment
+   Top 10 = 42% of total volume in scope.
+   ⚡ Newly-emerged patterns surfaced with rates (4.033 events/s, etc.)
+  ```
+
+Wire protocol, auth, write path, read path, MCP rendering — every
+hop verified against real Grafana Cloud SaaS. Previous "code-path
+only" caveat retired.
+
+Note: a separate `executeTopPatterns` bug surfaced — the tool
+doesn't default `args.analyzerCost`, so without an explicit cost
+it returns `$NaN/15m`. Not GC-specific; affects every backend.
+Tracked separately.
 
 ### 2. AMP via MCP's direct `kind: 'amp'` adapter — **CLOSED**
 
