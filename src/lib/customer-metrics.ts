@@ -934,7 +934,7 @@ interface AwsCreds {
   sessionToken?: string;
 }
 
-function awsCredentials(): AwsCreds | undefined {
+export function awsCredentials(): AwsCreds | undefined {
   const accessKeyId = process.env.AWS_ACCESS_KEY_ID;
   const secretAccessKey = process.env.AWS_SECRET_ACCESS_KEY;
   if (!accessKeyId || !secretAccessKey) return undefined;

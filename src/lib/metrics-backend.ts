@@ -466,12 +466,6 @@ class CortexBackend extends PrometheusBackend {
  * the ambient AWS SDK credential chain (env vars / AWS_PROFILE / IAM
  * role / SSO / IRSA) — the MCP never reads them itself, never persists
  * them to config.
- *
- * Phase 1 stub — the actual SigV4 signing is shared with the existing
- * `AmpBackend` in `customer-metrics.ts`. Full impl arrives in a
- * subsequent commit; for now we throw on any call so the type
- * compiles. Tests verify the throw is loud and points at the missing
- * impl.
  */
 class AmpBackend implements MetricsBackend {
   readonly kind = 'amp' as const;
@@ -483,17 +477,60 @@ class AmpBackend implements MetricsBackend {
     this.region = config.region;
   }
 
-  async queryInstant(_promql: string): Promise<PrometheusResponse> {
-    throw new Error('AmpBackend not yet implemented in phase 1 — see customer-metrics.ts:AmpBackend for the SigV4 pattern.');
+  async queryInstant(promql: string): Promise<PrometheusResponse> {
+    const url = new URL(`${this.endpoint}/api/v1/query`);
+    url.searchParams.set('query', promql);
+    return this.signedFetch<PrometheusResponse>(url);
   }
-  async queryRange(): Promise<PrometheusResponse> {
-    throw new Error('AmpBackend not yet implemented in phase 1.');
+  async queryRange(promql: string, startSec: number, endSec: number, stepSec: number): Promise<PrometheusResponse> {
+    const url = new URL(`${this.endpoint}/api/v1/query_range`);
+    url.searchParams.set('query', promql);
+    url.searchParams.set('start', String(startSec));
+    url.searchParams.set('end', String(endSec));
+    url.searchParams.set('step', String(stepSec));
+    return this.signedFetch<PrometheusResponse>(url);
   }
   async listLabels(): Promise<string[]> {
-    throw new Error('AmpBackend not yet implemented in phase 1.');
+    const url = new URL(`${this.endpoint}/api/v1/labels`);
+    const res = await this.signedFetch<{ status: string; data: string[] }>(url);
+    return res.data || [];
   }
-  async listLabelValues(): Promise<string[]> {
-    throw new Error('AmpBackend not yet implemented in phase 1.');
+  async listLabelValues(label: string, opts?: { windowSeconds?: number }): Promise<string[]> {
+    const url = new URL(`${this.endpoint}/api/v1/label/${encodeURIComponent(label)}/values`);
+    if (opts?.windowSeconds) {
+      const nowS = Math.floor(Date.now() / 1000);
+      url.searchParams.set('start', String(nowS - opts.windowSeconds));
+      url.searchParams.set('end', String(nowS));
+    }
+    const res = await this.signedFetch<{ status: string; data: string[] }>(url);
+    return res.data || [];
+  }
+
+  private async signedFetch<T>(url: URL): Promise<T> {
+    // Lazy import to avoid pulling customer-metrics in unless AMP is actually used.
+    const cm = await import('./customer-metrics.js');
+    const creds = cm.awsCredentials();
+    if (!creds) {
+      throw new Error(
+        'AMP backend needs AWS credentials in the environment. Export AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY (+ optional AWS_SESSION_TOKEN), use AWS_PROFILE / AWS SSO, or run inside a pod with IRSA. The MCP never reads or persists these credentials itself.'
+      );
+    }
+    const headers = cm.sigV4Sign({
+      method: 'GET',
+      url,
+      region: this.region,
+      service: 'aps',
+      accessKeyId: creds.accessKeyId,
+      secretAccessKey: creds.secretAccessKey,
+      sessionToken: creds.sessionToken,
+      body: '',
+    });
+    const res = await fetch(url.toString(), { headers });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`amp HTTP ${res.status}: ${body.slice(0, 400)}`);
+    }
+    return (await res.json()) as T;
   }
 }
 
@@ -557,29 +594,18 @@ class DatadogBackend implements MetricsBackend {
 /**
  * Grafana Cloud Prometheus. Authenticated via HTTP Basic with the
  * grafana.com instance ID as the user and an API key as the password.
- *
- * Phase 1 stub — full impl arrives once we have credentials (free-tier
- * signup, currently deferred). Throws on any call until then.
+ * Same wire protocol as a plain Prometheus with basic auth — just
+ * different conventions for what goes in user vs password.
  */
-class GrafanaCloudBackend implements MetricsBackend {
-  readonly kind = 'grafana_cloud_prom' as const;
-  readonly endpoint: string;
+class GrafanaCloudBackend extends PrometheusBackend {
+  override readonly kind: MetricsBackendKind = 'grafana_cloud_prom';
 
   constructor(config: Extract<MetricsBackendConfig, { kind: 'grafana_cloud_prom' }>) {
-    this.endpoint = config.url.replace(/\/+$/, '');
-  }
-
-  async queryInstant(): Promise<PrometheusResponse> {
-    throw new Error('GrafanaCloudBackend not yet implemented in phase 1 — pending free-tier credentials for live verification.');
-  }
-  async queryRange(): Promise<PrometheusResponse> {
-    throw new Error('GrafanaCloudBackend not yet implemented in phase 1.');
-  }
-  async listLabels(): Promise<string[]> {
-    throw new Error('GrafanaCloudBackend not yet implemented in phase 1.');
-  }
-  async listLabelValues(): Promise<string[]> {
-    throw new Error('GrafanaCloudBackend not yet implemented in phase 1.');
+    super({
+      kind: 'prometheus',
+      url: config.url,
+      auth: { type: 'basic', user: config.user, password: config.apiKey },
+    });
   }
 }
 
