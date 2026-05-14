@@ -41,46 +41,55 @@ auth_enabled=false (writes land in default tenant `fake`).
 - MCP `kind: 'cortex'` with `X-Scope-OrgID: fake` rendered top
   patterns + 7 services from real engine data
 
-### 4. GCP Managed Prom — full roundtrip — **BLOCKED on auth**
+### 4. GCP Managed Prom — **PARTIAL: read works, write blocked on engine support**
 
-**What I did**: installed gcloud, activated the
-`log10x-poc-reader@log10x-poc.iam.gserviceaccount.com` SA from
-`~/siem-poc-credentials.md`, minted an OAuth2 access token via JWT
-exchange (works — confirms the SA + private key are valid), tried
-a read against
-`https://monitoring.googleapis.com/v1/projects/log10x-poc/location/global/prometheus/api/v1/labels`.
+**IAM unblocked** (user granted `monitoring.viewer` and
+`monitoring.metricWriter` to the SA, enabled the Monitoring API on
+project `log10x-poc`). Read path verified end-to-end:
+- Direct curl with SA's OAuth2 Bearer to
+  `monitoring.googleapis.com/v1/projects/log10x-poc/location/global/prometheus/api/v1/labels`
+  returned a populated label list.
 
-**Result**: HTTP 403:
-`Permission 'monitoring.timeSeries.list' denied on resource 'projects/193220918324'`.
+**Write path: HARD BLOCK at the protocol level, not at auth.**
+- Engine `prometheusRW` configured with `host: …/prometheus/api/v1/write`
+  and `token: ${GCP_OAUTH_TOKEN}` (1h SA token).
+- Engine startup log shows `📈 Publishing TenXSummary metrics to Prometheus RW host: https://monitoring.googleapis.com/…`.
+- Every write attempt: **HTTP 404** with Google's generic 404 page.
+  Tried four path variants — all 404.
 
-The SA in the credentials file has only the **Logs Writer + Logs
-Viewer** roles (per the credentials file). For Managed Prometheus
-we need `roles/monitoring.viewer` (read) and
-`roles/monitoring.metricWriter` (write). The SA cannot grant these
-to itself — it lacks `resourcemanager.projects.setIamPolicy`.
+**Root cause** (from Google's own docs):
 
-**What's needed to unblock**:
-- A human GCP account with admin on `log10x-poc` (or a different
-  admin SA) — they run:
-  ```
-  gcloud projects add-iam-policy-binding log10x-poc \
-    --member=serviceAccount:log10x-poc-reader@log10x-poc.iam.gserviceaccount.com \
-    --role=roles/monitoring.viewer
-  gcloud projects add-iam-policy-binding log10x-poc \
-    --member=serviceAccount:log10x-poc-reader@log10x-poc.iam.gserviceaccount.com \
-    --role=roles/monitoring.metricWriter
-  ```
-- Confirm Managed Prometheus API enabled:
-  `gcloud services enable monitoring.googleapis.com --project=log10x-poc`
-- Then I run the roundtrip the same way I did for AMP:
-  - Deploy a GCP-auth-proxy sidecar (similar to sigv4-proxy; uses
-    the SA to mint Bearer tokens, attaches them to requests)
-  - Engine writes via plain-HTTP prom-RW → proxy → GCP MP
-  - MCP queries via `kind: 'gcp_managed_prom'` (still a phase-1
-    stub — would implement same pattern as AMP)
+> "For the fully Prometheus-compatible binary that writes ingested
+>  data into GMP/GCM, see GoogleCloudPlatform/prometheus."
+>
+> "Google Cloud never directly accesses your cluster to pull or
+>  scrape metric data; your collectors push to Google Cloud."
 
-**Status**: open until IAM unblock. Cannot verify without admin
-credentials I don't have.
+GMP does NOT accept standard Prometheus remote_write. Google
+maintains a Prometheus FORK
+(`GoogleCloudPlatform/prometheus`) that translates from standard
+remote_write to GMP's proprietary Monarch ingestion protocol. The
+public-facing `/api/v1/write` URL on `monitoring.googleapis.com`
+simply doesn't exist.
+
+**Closing this requires real engine-side work**:
+- Option A: deploy Google's prometheus fork as an in-cluster relay
+  (engine→fork→GMP)
+- Option B: add a GMP-specific output module to the 10x engine
+  using Monarch's `CreateTimeSeries` API
+- Option C: route via OTel Collector with the GCP exporter
+
+Same architectural shape as the Datadog gap (Item 5): MCP read is
+straightforward (Prometheus-compatible API + OAuth2 Bearer);
+engine WRITE requires a custom translator/relay. Not the simple
+"OAuth2 sidecar" I initially assumed.
+
+**Hard evidence captured**:
+- SA can read GMP: `curl ... /labels` returned populated list
+- Engine's prom-RW config + token integration WORKS — the 404 is
+  on the GMP side, not the engine side
+- Confirmed 4 URL variants all return 404
+- Google docs explicitly say standard remote_write isn't supported
 
 ### 5. Datadog MCP read path — **CLOSED with definitive evidence**
 
