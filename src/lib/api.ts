@@ -80,27 +80,19 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Raw Prometheus instant query. Returns parsed JSON response. */
+/**
+ * Raw Prometheus instant query.
+ *
+ * Phase 4: delegates to the env's `MetricsBackend` adapter. For
+ * `kind: 'log10x'` this hits `prometheus.log10x.com` with X-10X-Auth
+ * (unchanged behavior); for other kinds it hits the customer's own
+ * Prom-compatible store with the appropriate auth.
+ */
 export async function queryInstant(env: EnvConfig, promql: string): Promise<PrometheusResponse> {
-  const url = new URL('/api/v1/query', getBase());
-  url.searchParams.set('query', promql);
-  url.searchParams.set('stats', 'all');
-
-  const res = await fetchWithRetry(
-    url.toString(),
-    { headers: { 'X-10X-Auth': authHeader(env) } },
-    'queryInstant'
-  );
-
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Prometheus HTTP ${res.status}: ${body}`);
-  }
-
-  return res.json() as Promise<PrometheusResponse>;
+  return env.metricsBackend.queryInstant(promql);
 }
 
-/** Prometheus range query. Returns parsed JSON response. */
+/** Prometheus range query. Delegates to the env's MetricsBackend. */
 export async function queryRange(
   env: EnvConfig,
   promql: string,
@@ -108,24 +100,7 @@ export async function queryRange(
   end: number,
   step: number
 ): Promise<PrometheusResponse> {
-  const url = new URL('/api/v1/query_range', getBase());
-  url.searchParams.set('query', promql);
-  url.searchParams.set('start', start.toString());
-  url.searchParams.set('end', end.toString());
-  url.searchParams.set('step', step.toString());
-
-  const res = await fetchWithRetry(
-    url.toString(),
-    { headers: { 'X-10X-Auth': authHeader(env) } },
-    'queryRange'
-  );
-
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Prometheus HTTP ${res.status}: ${body}`);
-  }
-
-  return res.json() as Promise<PrometheusResponse>;
+  return env.metricsBackend.queryRange(promql, start, end, step);
 }
 
 /** AI analysis query. Returns the AI text response. */
@@ -159,17 +134,12 @@ export async function queryAi(
   return data.data?.ai || '';
 }
 
-/** Prometheus /api/v1/labels — list all label names in the workspace. */
+/**
+ * Prometheus /api/v1/labels — list all label names in the workspace.
+ * Delegates to the env's MetricsBackend (phase 4).
+ */
 export async function fetchLabels(env: EnvConfig): Promise<string[]> {
-  const url = new URL('/api/v1/labels', getBase());
-  const res = await fetchWithRetry(
-    url.toString(),
-    { headers: { 'X-10X-Auth': authHeader(env) } },
-    'fetchLabels'
-  );
-  if (!res.ok) throw new Error(`Prometheus /labels HTTP ${res.status}`);
-  const data = (await res.json()) as { status: string; data: string[] };
-  return data.data || [];
+  return env.metricsBackend.listLabels();
 }
 
 /**
@@ -194,20 +164,7 @@ export async function fetchLabelValues(
   labelName: string,
   opts?: { windowSeconds?: number }
 ): Promise<string[]> {
-  const url = new URL(`/api/v1/label/${encodeURIComponent(labelName)}/values`, getBase());
-  if (opts?.windowSeconds) {
-    const nowS = Math.floor(Date.now() / 1000);
-    url.searchParams.set('start', String(nowS - opts.windowSeconds));
-    url.searchParams.set('end', String(nowS));
-  }
-  const res = await fetchWithRetry(
-    url.toString(),
-    { headers: { 'X-10X-Auth': authHeader(env) } },
-    'fetchLabelValues'
-  );
-  if (!res.ok) throw new Error(`Prometheus /label/${labelName}/values HTTP ${res.status}`);
-  const data = (await res.json()) as { status: string; data: string[] };
-  return data.data || [];
+  return env.metricsBackend.listLabelValues(labelName, opts);
 }
 
 /**

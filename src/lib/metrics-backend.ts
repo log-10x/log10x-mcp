@@ -269,7 +269,16 @@ export function createMetricsBackend(config: MetricsBackendConfig): MetricsBacke
  * Shared helper for the prom-compatible adapters. Builds auth headers
  * from a `PromAuth` value and runs a JSON fetch with consistent error
  * formatting.
+ *
+ * Wraps the fetch in retry-on-transient: 5xx or 429 → exponential
+ * backoff with jitter, up to RETRY_ATTEMPTS. 4xx (other than 429) is
+ * surfaced immediately because retrying won't help (auth, bad query).
+ * Mirrors the retry semantics api.ts has always used for
+ * prometheus.log10x.com.
  */
+const RETRY_ATTEMPTS = 3;
+const RETRY_BASE_MS = parseInt(process.env.LOG10X_RETRY_BASE_MS || '250', 10) || 250;
+
 async function promJsonFetch<T>(
   kindLabel: string,
   url: URL,
@@ -277,12 +286,33 @@ async function promJsonFetch<T>(
   authHeaders: Record<string, string>
 ): Promise<T> {
   const headers = { ...extraHeaders, ...authHeaders };
-  const res = await fetch(url.toString(), { headers });
-  if (!res.ok) {
+  let lastErr: Error | undefined;
+  for (let attempt = 0; attempt < RETRY_ATTEMPTS; attempt++) {
+    let res: Response;
+    try {
+      res = await fetch(url.toString(), { headers });
+    } catch (e) {
+      lastErr = e as Error;
+      if (attempt < RETRY_ATTEMPTS - 1) {
+        const backoff = RETRY_BASE_MS * Math.pow(2, attempt) + Math.floor(Math.random() * 100);
+        await new Promise((resolve) => setTimeout(resolve, backoff));
+      }
+      continue;
+    }
+    if (res.ok) return (await res.json()) as T;
     const body = await res.text().catch(() => '');
-    throw new Error(`${kindLabel} HTTP ${res.status} ${res.statusText}: ${body.slice(0, 400)}`);
+    // 4xx (other than 429) is a caller error — auth, bad query. Don't retry.
+    if (res.status < 500 && res.status !== 429) {
+      throw new Error(`${kindLabel} HTTP ${res.status} ${res.statusText}: ${body.slice(0, 400)}`);
+    }
+    // 5xx and 429 are retryable.
+    lastErr = new Error(`${kindLabel} HTTP ${res.status} ${res.statusText}: ${body.slice(0, 400)}`);
+    if (attempt < RETRY_ATTEMPTS - 1) {
+      const backoff = RETRY_BASE_MS * Math.pow(2, attempt) + Math.floor(Math.random() * 100);
+      await new Promise((resolve) => setTimeout(resolve, backoff));
+    }
   }
-  return (await res.json()) as T;
+  throw lastErr || new Error(`${kindLabel}: fetch failed after ${RETRY_ATTEMPTS} attempts`);
 }
 
 function promAuthHeaders(auth: PromAuth): Record<string, string> {

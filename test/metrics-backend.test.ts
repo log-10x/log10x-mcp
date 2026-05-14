@@ -261,6 +261,35 @@ test('prometheus adapter (header): sends custom-named header', async () => {
   assert.equal(headers['X-API-Key'], 'short-non-secret-value');
 });
 
+test('prometheus adapter: 5xx triggers retry, then succeeds', async () => {
+  process.env.LOG10X_RETRY_BASE_MS = '1';
+  const { calls } = setupMockFetch([
+    new Response('upstream failure', { status: 503, statusText: 'Service Unavailable' }),
+    new Response('upstream failure', { status: 503, statusText: 'Service Unavailable' }),
+    jsonResponse(PROM_OK),
+  ]);
+  const b = createMetricsBackend({
+    kind: 'prometheus',
+    url: 'http://prom.test:9090',
+    auth: { type: 'none' },
+  });
+  const res = await b.queryInstant('up');
+  assert.equal(res.status, 'success');
+  assert.equal(calls.length, 3);
+  delete process.env.LOG10X_RETRY_BASE_MS;
+});
+
+test('prometheus adapter: 4xx (non-429) does NOT retry', async () => {
+  const { calls } = setupMockFetch([new Response('forbidden', { status: 403, statusText: 'Forbidden' })]);
+  const b = createMetricsBackend({
+    kind: 'prometheus',
+    url: 'http://prom.test:9090',
+    auth: { type: 'none' },
+  });
+  await assert.rejects(() => b.queryInstant('up'), /403/);
+  assert.equal(calls.length, 1, 'should fail immediately, not retry');
+});
+
 test('prometheus adapter: non-2xx response throws with status + body', async () => {
   const { calls } = setupMockFetch([new Response('forbidden', { status: 403, statusText: 'Forbidden' })]);
   const b = createMetricsBackend({
