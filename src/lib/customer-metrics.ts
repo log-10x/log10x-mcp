@@ -1023,6 +1023,14 @@ export function sigV4Sign(opts: {
 
 function awsUriEncode(s: string, encodeSlash: boolean): string {
   // RFC 3986 unreserved: A-Z a-z 0-9 - _ . ~
+  // Everything else MUST be percent-encoded byte-by-byte.
+  //
+  // Bug fix: the previous implementation used `encodeURIComponent` to
+  // encode reserved characters, but JS encodeURIComponent leaves
+  // `! * ' ( )` unencoded — which AWS rejects with a 403 signature
+  // mismatch on PromQL queries like `topk(5, sum by (...))` that
+  // contain parens. Switching to manual byte-wise UTF-8 encoding so
+  // every non-unreserved character becomes %XX.
   let out = '';
   for (const ch of s) {
     if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') ||
@@ -1031,7 +1039,10 @@ function awsUriEncode(s: string, encodeSlash: boolean): string {
     } else if (ch === '/' && !encodeSlash) {
       out += ch;
     } else {
-      out += encodeURIComponent(ch).replace(/!/g, '%21');
+      const bytes = Buffer.from(ch, 'utf8');
+      for (const b of bytes) {
+        out += '%' + b.toString(16).toUpperCase().padStart(2, '0');
+      }
     }
   }
   return out;
