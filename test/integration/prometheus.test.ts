@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { queryInstant, fetchLabels } from '../../src/lib/api.js';
+import { createMetricsBackend } from '../../src/lib/metrics-backend.js';
+import { DEFAULT_LABELS } from '../../src/lib/promql.js';
 
 // Integration tests hit the real Log10x Prometheus gateway at prometheus.log10x.com.
 // Uses the demo environment credentials published in the console's config.js.
@@ -9,10 +11,14 @@ import { queryInstant, fetchLabels } from '../../src/lib/api.js';
 const enabled = process.env.LOG10X_INTEGRATION_TESTS === '1';
 
 // Demo credentials — public, baked into the comsite embedded widget.
+const DEMO_API_KEY = process.env.LOG10X_DEMO_API_KEY || '4d985100-ee4a-4b6c-b784-a416b8684868';
+const DEMO_ENV_ID = process.env.LOG10X_DEMO_ENV_ID || '6aa99191-f827-4579-a96a-c0ebdfe73884';
 const DEMO_ENV = {
   nickname: 'demo',
-  apiKey: process.env.LOG10X_DEMO_API_KEY || '4d985100-ee4a-4b6c-b784-a416b8684868',
-  envId: process.env.LOG10X_DEMO_ENV_ID || '6aa99191-f827-4579-a96a-c0ebdfe73884',
+  apiKey: DEMO_API_KEY,
+  envId: DEMO_ENV_ID,
+  metricsBackend: createMetricsBackend({ kind: 'log10x' as const, apiKey: DEMO_API_KEY, envId: DEMO_ENV_ID }),
+  labels: { ...DEFAULT_LABELS },
 };
 
 test('Prometheus gateway: queryInstant returns success for a known label query', { skip: !enabled }, async () => {

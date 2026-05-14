@@ -1,45 +1,60 @@
 /**
  * Environment / credential configuration.
  *
- * Three credential sources, tried in order:
+ * Resolution chain, tried in order. Each path returns either a fully
+ * populated Environments object or undefined (path didn't apply).
  *
- *   1. `LOG10X_API_KEY` env var. The MCP calls `GET /api/v1/user`
- *      (a user-scoped endpoint that doesn't need envId) and populates
- *      the env list from the response. Each env carries its name,
- *      owner, default flag, and permission level (OWNER/WRITE/READ).
- *      The user can switch envs at runtime via the `environment` arg
- *      on any tool call — no env-var pinning needed.
+ *   1. **`LOG10X_METRICS_BACKEND_KIND` + `LOG10X_METRICS_*` env vars**
+ *      (new in phase 3). Single-env mode for laptop-pointing-at-one-
+ *      cluster setups. Any backend kind (prometheus, mimir, cortex,
+ *      amp, datadog, gcp_managed_prom, grafana_cloud_prom, log10x).
+ *      Nickname defaults to `default`. No file required.
  *
- *   2. `~/.log10x/credentials`, persistent file written by
- *      `log10x_signin_complete` after a successful Auth0 Device Flow
- *      signup/signin (or after the pasted-key path validates a key).
- *      Loaded the same way as path 1. Living outside the MCP host's
- *      config means a single sign-in works across every MCP host on
- *      the same machine: sign in once per machine, not once per host.
+ *   2. **`~/.log10x/envs.json`** (new in phase 3). Multi-env file with
+ *      per-env backend declarations. Authoritative when present. The
+ *      `log10x_configure_env` tool writes this file from a
+ *      conversational onboarding flow; users can also hand-edit it.
  *
- *   3. Demo mode. The MCP boots against the public read-only Log10x
- *      demo env using the same key the console.log10x.com demo
- *      experience uses, so a user can play without signing up. The
- *      `log10x_login_status` tool surfaces how to upgrade, and
- *      `log10x_signin_start` (chained to `log10x_signin_complete`)
- *      runs the Auth0 Device Flow (user picks GitHub or Google) and
- *      writes path 2. We fall back to demo ONLY when
- *      no LOG10X_API_KEY is
- *      set and no credentials file exists. If either is set but
- *      invalid, we still fall back to demo but record the failure in
- *      `demoFallbackReason` and surface a loud banner — avoiding the
- *      footgun where a typo'd key silently looks like real-account
- *      data.
+ *   3. **`LOG10X_API_KEY` env var** (legacy). The MCP calls
+ *      `GET /api/v1/user` and populates the env list from the response.
+ *      Each env gets `metricsBackend: { kind: 'log10x', apiKey, envId }`
+ *      auto-populated. Phase 7 makes this path require an explicit
+ *      `LOG10X_METRICS_BACKEND_KIND=log10x` to opt in.
  *
- * Multi-account access uses backend-side env sharing: an env owner
- * grants READ/WRITE/OWNER to another user's account, and the
- * recipient's `/api/v1/user` response includes the shared env. No
- * client-side multi-credential juggling.
+ *   4. **`~/.log10x/credentials`** (legacy). Persistent file written by
+ *      `log10x_signin_complete` after Auth0 device flow. Same shape as
+ *      path 3 — calls `/api/v1/user` with the cached key.
+ *
+ *   5. **Demo mode** (legacy, removed in phase 7). Public read-only
+ *      log10x demo env so a user can play without signing up.
+ *
+ * If both path 1 and path 2 produce envs, the MCP refuses to start
+ * (loud error — user picks one). Paths 1+2 vs paths 3+4 do NOT
+ * collide; the new paths just win.
+ *
+ * Multi-account access for the log10x backend uses backend-side env
+ * sharing: an env owner grants READ/WRITE/OWNER to another user's
+ * account, and the recipient's `/api/v1/user` response includes the
+ * shared env. No client-side multi-credential juggling.
  *
  * Per-call env resolution (used by every tool that accepts an
  * `environment` arg) follows the chain: explicit-nickname →
  * last-used-this-session → user's default env.
  */
+
+import { promises as fs } from 'fs';
+import { homedir } from 'os';
+import { join } from 'path';
+import { fetchUserProfile, type Permission, type RemoteUserProfile } from './api.js';
+import { readCredentials } from './credentials.js';
+import {
+  createMetricsBackend,
+  MetricsBackendConfigError,
+  type MetricsBackend,
+  type MetricsBackendConfig,
+  type PromAuth,
+} from './metrics-backend.js';
+import { DEFAULT_LABELS, type LabelNameMap } from './promql.js';
 
 /**
  * The publicly-baked demo API key used by console.log10x.com's "explore
@@ -49,14 +64,33 @@
  *
  * Grants READ-only access to the shared "Log10x Demo" env. No writes.
  * Same data every demo user sees on the console.
+ *
+ * Phase 7 removes the silent demo-fallback path. The constant remains
+ * here as the "if you really want the demo, here's the key" reference
+ * but is no longer auto-applied.
  */
 const DEMO_API_KEY = '4d985100-ee4a-4b6c-b784-a416b8684868';
 
-import { fetchUserProfile, type Permission, type RemoteUserProfile } from './api.js';
-import { readCredentials } from './credentials.js';
-
 export interface EnvConfig {
   nickname: string;
+  /**
+   * The metrics backend this env queries. Required field — every env
+   * has a backend, even legacy log10x ones (auto-populated from
+   * apiKey + envId).
+   */
+  metricsBackend: MetricsBackend;
+  /**
+   * Per-env label name map. Defaults to `DEFAULT_LABELS`. Customers
+   * who renamed the engine's `metricFieldNames` set this to match.
+   */
+  labels: LabelNameMap;
+  /**
+   * Legacy fields, only meaningful for `kind: 'log10x'` envs.
+   * Auto-populated when the env came from a log10x backend; left as
+   * empty strings for other backends. Phase 4 swaps tools to use
+   * `env.metricsBackend` directly, after which these fields become
+   * informational only.
+   */
   apiKey: string;
   envId: string;
   /** Present when env was loaded via `/api/v1/user` autodiscovery. */
@@ -74,7 +108,7 @@ export interface Environments {
   default: EnvConfig;
   /** Set by `resolveEnv` each time a caller names an env explicitly. */
   lastUsed?: EnvConfig;
-  /** The user profile backing the env list — every load path goes through GET /api/v1/user now. */
+  /** The user profile backing the env list — populated only for log10x-backed envs. */
   profile?: RemoteUserProfile;
   /**
    * `true` if the MCP is running against the public demo key (either
@@ -82,6 +116,9 @@ export interface Environments {
    * LOG10X_API_KEY failed validation and we fell back). Tools should
    * treat this as a "you're in a demo sandbox" signal and prefer to
    * surface upgrade guidance over silent failures on write attempts.
+   *
+   * Phase 7 removes the silent fallback path; this field stays true
+   * only when the user explicitly opts into the demo env.
    */
   isDemoMode: boolean;
   /**
@@ -100,11 +137,17 @@ export interface Environments {
 }
 
 /**
- * Resolve the active credentials and load the env list from
- * `/api/v1/user`. Async because every path hits the Log10x API.
- *
- * Tries `LOG10X_API_KEY` first, then `~/.log10x/credentials` (written
- * by `log10x_signin_complete`), then falls back to the public demo key.
+ * Resolved at call time, not module-load time, so test fixtures can
+ * point `HOME` at a tempdir without `homedir()`'s cache holding the
+ * old path. Production calls hit this once per `loadEnvironments`.
+ */
+function envsJsonPath(): string {
+  return join(process.env.HOME || homedir(), '.log10x', 'envs.json');
+}
+
+/**
+ * Resolve the active credentials and load the env list. Async because
+ * the legacy log10x paths hit the log10x API for env autodiscovery.
  *
  * Returns demo-mode `Environments` (with `demoFallbackReason` set) on
  * any non-fatal failure of the user-supplied credential — never
@@ -113,9 +156,261 @@ export interface Environments {
  * demo, not their own.
  */
 export async function loadEnvironments(): Promise<Environments> {
+  // Path 1 + 2: new-style configuration.
+  const fromMetricsEnvVars = tryBuildFromMetricsEnvVars();
+  const fromEnvsFile = await tryReadEnvsJson();
+
+  if (fromMetricsEnvVars && fromEnvsFile) {
+    throw new EnvironmentValidationError(
+      `Both LOG10X_METRICS_* env vars AND ${envsJsonPath()} are set. ` +
+        `Pick one — env vars are for single-env setups; the file is for multi-env. ` +
+        `Either unset the env vars (\`unset LOG10X_METRICS_BACKEND_KIND ...\`) or ` +
+        `move/remove the file.`
+    );
+  }
+  if (fromMetricsEnvVars) {
+    return buildEnvironments([fromMetricsEnvVars]);
+  }
+  if (fromEnvsFile) {
+    return buildEnvironments(fromEnvsFile);
+  }
+
+  // Path 3 + 4 + 5: legacy log10x-account paths.
+  return loadLegacyLog10x();
+}
+
+// ── New-style loaders ────────────────────────────────────────────────────
+
+/**
+ * Parse `LOG10X_METRICS_*` environment variables into a single
+ * EnvConfig. Returns undefined when `LOG10X_METRICS_BACKEND_KIND` is
+ * unset (the trigger for single-env mode). Throws on partial/invalid
+ * config so the user gets a clear setup error.
+ */
+function tryBuildFromMetricsEnvVars(): EnvConfig | undefined {
+  const kind = process.env.LOG10X_METRICS_BACKEND_KIND?.trim() as
+    | MetricsBackendConfig['kind']
+    | undefined;
+  if (!kind) return undefined;
+
+  const config = parseMetricsBackendFromEnv(kind);
+  try {
+    return {
+      nickname: process.env.LOG10X_METRICS_NICKNAME?.trim() || 'default',
+      metricsBackend: createMetricsBackend(config),
+      labels: parseLabelMapFromEnv(),
+      apiKey: kind === 'log10x' ? config.kind === 'log10x' ? config.apiKey : '' : '',
+      envId: kind === 'log10x' ? config.kind === 'log10x' ? config.envId : '' : '',
+      isDefault: true,
+    };
+  } catch (e) {
+    if (e instanceof MetricsBackendConfigError) {
+      throw new EnvironmentValidationError(`Invalid LOG10X_METRICS_* config: ${e.message}`);
+    }
+    throw e;
+  }
+}
+
+function parseMetricsBackendFromEnv(kind: MetricsBackendConfig['kind']): MetricsBackendConfig {
+  const reqEnv = (name: string): string => {
+    const v = process.env[name];
+    if (!v) throw new EnvironmentValidationError(`Required env var ${name} is unset for backend kind '${kind}'.`);
+    return v;
+  };
+  switch (kind) {
+    case 'log10x':
+      return {
+        kind: 'log10x',
+        apiKey: reqEnv('LOG10X_API_KEY'),
+        envId: reqEnv('LOG10X_ENV_ID'),
+      };
+    case 'prometheus':
+      return { kind: 'prometheus', url: reqEnv('LOG10X_METRICS_URL'), auth: parseAuthFromEnv() };
+    case 'mimir': {
+      const cfg: Extract<MetricsBackendConfig, { kind: 'mimir' }> = {
+        kind: 'mimir',
+        url: reqEnv('LOG10X_METRICS_URL'),
+        auth: parseAuthFromEnv(),
+      };
+      const orgId = process.env.LOG10X_METRICS_MIMIR_ORG_ID;
+      if (orgId) cfg.orgId = orgId;
+      return cfg;
+    }
+    case 'cortex':
+      return {
+        kind: 'cortex',
+        url: reqEnv('LOG10X_METRICS_URL'),
+        auth: parseAuthFromEnv(),
+        orgId: reqEnv('LOG10X_METRICS_CORTEX_ORG_ID'),
+      };
+    case 'amp':
+      return {
+        kind: 'amp',
+        url: reqEnv('LOG10X_METRICS_URL'),
+        region: reqEnv('LOG10X_METRICS_AMP_REGION'),
+      };
+    case 'datadog':
+      return {
+        kind: 'datadog',
+        site: process.env.LOG10X_METRICS_DATADOG_SITE || process.env.DD_SITE || 'datadoghq.com',
+        apiKey: reqEnv('DD_API_KEY'),
+        appKey: reqEnv('DD_APP_KEY'),
+      };
+    case 'grafana_cloud_prom':
+      return {
+        kind: 'grafana_cloud_prom',
+        url: reqEnv('LOG10X_METRICS_URL'),
+        user: reqEnv('LOG10X_METRICS_GRAFANA_USER'),
+        apiKey: reqEnv('GRAFANA_CLOUD_API_KEY'),
+      };
+    case 'gcp_managed_prom':
+      return {
+        kind: 'gcp_managed_prom',
+        url: reqEnv('LOG10X_METRICS_URL'),
+        projectId: reqEnv('LOG10X_METRICS_GCP_PROJECT_ID'),
+      };
+    default: {
+      // Exhaustiveness — TS narrows kind to never if we hit this.
+      const _exhaustive: never = kind;
+      throw new EnvironmentValidationError(`Unknown LOG10X_METRICS_BACKEND_KIND=${String(_exhaustive)}`);
+    }
+  }
+}
+
+function parseAuthFromEnv(): PromAuth {
+  const type = (process.env.LOG10X_METRICS_AUTH_TYPE || 'none').trim().toLowerCase();
+  switch (type) {
+    case 'none':
+      return { type: 'none' };
+    case 'bearer': {
+      const token = process.env.LOG10X_METRICS_AUTH_VALUE;
+      if (!token) throw new EnvironmentValidationError(`LOG10X_METRICS_AUTH_TYPE=bearer requires LOG10X_METRICS_AUTH_VALUE.`);
+      return { type: 'bearer', token };
+    }
+    case 'basic': {
+      const user = process.env.LOG10X_METRICS_AUTH_USER;
+      const password = process.env.LOG10X_METRICS_AUTH_VALUE;
+      if (!user || !password) {
+        throw new EnvironmentValidationError(
+          `LOG10X_METRICS_AUTH_TYPE=basic requires both LOG10X_METRICS_AUTH_USER and LOG10X_METRICS_AUTH_VALUE.`
+        );
+      }
+      return { type: 'basic', user, password };
+    }
+    case 'header': {
+      const name = process.env.LOG10X_METRICS_AUTH_HEADER_NAME;
+      const value = process.env.LOG10X_METRICS_AUTH_VALUE;
+      if (!name || !value) {
+        throw new EnvironmentValidationError(
+          `LOG10X_METRICS_AUTH_TYPE=header requires both LOG10X_METRICS_AUTH_HEADER_NAME and LOG10X_METRICS_AUTH_VALUE.`
+        );
+      }
+      return { type: 'header', name, value };
+    }
+    default:
+      throw new EnvironmentValidationError(
+        `Unknown LOG10X_METRICS_AUTH_TYPE=${type}. Valid: none, bearer, basic, header.`
+      );
+  }
+}
+
+function parseLabelMapFromEnv(): LabelNameMap {
+  return {
+    pattern: process.env.LOG10X_METRICS_LABEL_PATTERN || DEFAULT_LABELS.pattern,
+    service: process.env.LOG10X_METRICS_LABEL_SERVICE || DEFAULT_LABELS.service,
+    severity: process.env.LOG10X_METRICS_LABEL_SEVERITY || DEFAULT_LABELS.severity,
+    env: process.env.LOG10X_METRICS_LABEL_ENV || DEFAULT_LABELS.env,
+  };
+}
+
+/**
+ * Shape stored in `~/.log10x/envs.json`: array of objects each
+ * carrying its own `metricsBackend` config + optional `labels` map.
+ */
+interface EnvsJsonEntry {
+  nickname: string;
+  metricsBackend: MetricsBackendConfig;
+  labels?: Partial<LabelNameMap>;
+  isDefault?: boolean;
+}
+
+/**
+ * Read `~/.log10x/envs.json` if it exists. Returns undefined when the
+ * file is absent (the normal case during the transition). Throws on
+ * parse errors or invalid backend configs.
+ */
+async function tryReadEnvsJson(): Promise<EnvConfig[] | undefined> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(envsJsonPath(), 'utf8');
+  } catch (e: unknown) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw new EnvironmentValidationError(
+      `Could not read ${envsJsonPath()}: ${(e as Error).message}.`
+    );
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    throw new EnvironmentValidationError(
+      `${envsJsonPath()} is not valid JSON: ${(e as Error).message}.`
+    );
+  }
+  if (!Array.isArray(parsed)) {
+    throw new EnvironmentValidationError(
+      `${envsJsonPath()} must be a JSON array of env entries; got ${typeof parsed}.`
+    );
+  }
+  const entries = parsed as EnvsJsonEntry[];
+  if (entries.length === 0) {
+    throw new EnvironmentValidationError(
+      `${envsJsonPath()} is empty. Either remove it (to fall back to env vars or legacy) or add at least one env entry.`
+    );
+  }
+  return entries.map((entry, i) => {
+    if (!entry.nickname || !entry.metricsBackend) {
+      throw new EnvironmentValidationError(
+        `${envsJsonPath()} entry #${i} is missing required field 'nickname' or 'metricsBackend'.`
+      );
+    }
+    try {
+      const backend = createMetricsBackend(entry.metricsBackend);
+      const labels: LabelNameMap = {
+        pattern: entry.labels?.pattern ?? DEFAULT_LABELS.pattern,
+        service: entry.labels?.service ?? DEFAULT_LABELS.service,
+        severity: entry.labels?.severity ?? DEFAULT_LABELS.severity,
+        env: entry.labels?.env ?? DEFAULT_LABELS.env,
+      };
+      const apiKey =
+        entry.metricsBackend.kind === 'log10x' ? entry.metricsBackend.apiKey : '';
+      const envId =
+        entry.metricsBackend.kind === 'log10x' ? entry.metricsBackend.envId : '';
+      return {
+        nickname: entry.nickname,
+        metricsBackend: backend,
+        labels,
+        apiKey,
+        envId,
+        isDefault: entry.isDefault,
+      };
+    } catch (e) {
+      if (e instanceof MetricsBackendConfigError) {
+        throw new EnvironmentValidationError(
+          `${envsJsonPath()} entry #${i} (${entry.nickname}): ${e.message}`
+        );
+      }
+      throw e;
+    }
+  });
+}
+
+// ── Legacy log10x paths (unchanged behavior — phase 7 tightens) ──────────
+
+async function loadLegacyLog10x(): Promise<Environments> {
   const apiKey = process.env.LOG10X_API_KEY;
 
-  // Path 1: explicit `LOG10X_API_KEY`.
+  // Path 3: explicit `LOG10X_API_KEY`.
   if (apiKey) {
     try {
       return await loadFromApi(apiKey, /*isDemoMode=*/ false);
@@ -137,15 +432,14 @@ export async function loadEnvironments(): Promise<Environments> {
     }
   }
 
-  // Path 2: persistent credentials at ~/.log10x/credentials, written
+  // Path 4: persistent credentials at ~/.log10x/credentials, written
   // by log10x_signin_complete.
   let creds: Awaited<ReturnType<typeof readCredentials>>;
   try {
     creds = await readCredentials();
   } catch (e) {
     // Malformed file or permission error — distinct from "missing".
-    // Fall back to demo with the file failure surfaced so the user
-    // can fix it (`log10x_signout` clears the file, then sign in).
+    // Fall back to demo with the file failure surfaced.
     const reason = (e as Error).message;
     const demoEnvs = await loadFromApi(DEMO_API_KEY, /*isDemoMode=*/ true);
     demoEnvs.demoFallbackReason = reason;
@@ -170,8 +464,9 @@ export async function loadEnvironments(): Promise<Environments> {
     }
   }
 
-  // Path 3: nothing set — pure demo mode. Public demo key so the
-  // user can play without signing up.
+  // Path 5: nothing set — pure demo mode. Public demo key so the
+  // user can play without signing up. Phase 7 removes this silent
+  // fallback in favor of an explicit "not configured" state.
   return await loadFromApi(DEMO_API_KEY, /*isDemoMode=*/ true);
 }
 
@@ -202,19 +497,6 @@ export async function reloadEnvironmentsInPlace(target: Environments): Promise<v
 /**
  * Delete `LOG10X_API_KEY` from `process.env` if set. Returns whether
  * a deletion occurred so the caller can mention it in the result.
- *
- * Why: the credential resolution chain (`loadEnvironments`) tries
- * `LOG10X_API_KEY` first (priority 1) and `~/.log10x/credentials`
- * second (priority 2). After signin, signout, rotate, or any other
- * write to the credentials file, if the env var is still set, the
- * next `loadEnvironments()` will resolve to the OLD env-var key and
- * shadow the freshly written file. Clearing the env var in-process
- * lets the file win the priority chain.
- *
- * Caveat: the deletion only lives for the current MCP server process.
- * Whatever the host config (claude_desktop_config.json, etc.) sets is
- * what gets injected on next host restart. Callers that care should
- * tell the user to also edit the host config.
  */
 export function clearOverridingEnvVar(): boolean {
   if (process.env.LOG10X_API_KEY) {
@@ -227,26 +509,12 @@ export function clearOverridingEnvVar(): boolean {
 /**
  * Force a revalidation of credentials and refresh the in-memory `envs`
  * object so the next tool call sees ground truth instead of cached
- * boot-time state. Used by:
- *
- *   - `log10x_login_status`: every call revalidates so the user-visible
- *     "am I signed in" state is always honest, never stale.
- *   - The wrap() retry path in `index.ts`: when an account-scoped tool
- *     gets 401/403 AND the MCP is currently in demo-fallback mode, we
- *     revalidate once and retry the tool. Recovers transparently from
- *     transient failures (e.g., rotated key whose authorizer cache had
- *     not yet expired at boot).
+ * boot-time state.
  *
  * Always calls `clearOverridingEnvVar` first. Without that, a stale
  * `LOG10X_API_KEY` in `process.env` (from the MCP host config) would
  * keep beating the freshly-written credentials file and reload would
- * just re-fail the same way. The signin / signout / rotate tools have
- * always done this clear-then-reload pair; this helper centralizes it
- * so revalidation entry points outside those tools get the same
- * behavior.
- *
- * Returns whether the env var was actually present before the clear so
- * callers can mention it in result messages.
+ * just re-fail the same way.
  */
 export async function revalidateEnvironments(target: Environments): Promise<{ envVarCleared: boolean }> {
   const envVarCleared = clearOverridingEnvVar();
@@ -295,6 +563,8 @@ async function loadFromApi(apiKey: string, isDemoMode: boolean): Promise<Environ
     nickname: e.name,
     apiKey,
     envId: e.envId,
+    metricsBackend: createMetricsBackend({ kind: 'log10x', apiKey, envId: e.envId }),
+    labels: { ...DEFAULT_LABELS },
     owner: e.owner,
     permissions: e.permissions,
     isDefault: e.isDefault,

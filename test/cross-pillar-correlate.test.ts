@@ -7,6 +7,8 @@ import {
   type ConfidenceTier,
 } from '../src/lib/cross-pillar-correlate.js';
 import type { EnvConfig } from '../src/lib/environments.js';
+import { createMetricsBackend } from '../src/lib/metrics-backend.js';
+import { DEFAULT_LABELS } from '../src/lib/promql.js';
 
 // The structural validation algorithm is the load-bearing correctness property
 // of the v1.4 cross-pillar bridge. These tests exercise the alias map directly
@@ -122,7 +124,11 @@ test('runCrossPillarCorrelation returns a `confirmed` tier on full label match',
   }) as typeof fetch;
 
   try {
-    const env: EnvConfig = { nickname: 'test', apiKey: 'k', envId: 'e' };
+    const env: EnvConfig = {
+      nickname: 'test', apiKey: 'k', envId: 'e',
+      metricsBackend: createMetricsBackend({ kind: 'log10x', apiKey: 'k', envId: 'e' }),
+      labels: { ...DEFAULT_LABELS },
+    };
     const result = await runCrossPillarCorrelation({
       env,
       backend,
