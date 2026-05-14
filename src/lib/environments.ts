@@ -212,24 +212,35 @@ function tryBuildFromMetricsEnvVars(): EnvConfig | undefined {
 }
 
 function parseMetricsBackendFromEnv(kind: MetricsBackendConfig['kind']): MetricsBackendConfig {
-  const reqEnv = (name: string): string => {
-    const v = process.env[name];
-    if (!v) throw new EnvironmentValidationError(`Required env var ${name} is unset for backend kind '${kind}'.`);
-    return v;
+  /**
+   * Require the env var to be set, but return a `${VAR}` REFERENCE
+   * string (not the raw value). The reference goes through
+   * `resolveVarReference` in `createMetricsBackend`, which resolves
+   * it from process.env at backend-construction time AND bypasses the
+   * literal-secret guard (the guard only fires on FILE-stored
+   * values without a ${VAR} wrapper). This way the env-var path
+   * accepts long random-looking values (DD_API_KEY, etc.) without
+   * tripping the guard.
+   */
+  const refEnv = (name: string): string => {
+    if (!process.env[name]) {
+      throw new EnvironmentValidationError(`Required env var ${name} is unset for backend kind '${kind}'.`);
+    }
+    return `\${${name}}`;
   };
   switch (kind) {
     case 'log10x':
       return {
         kind: 'log10x',
-        apiKey: reqEnv('LOG10X_API_KEY'),
-        envId: reqEnv('LOG10X_ENV_ID'),
+        apiKey: refEnv('LOG10X_API_KEY'),
+        envId: refEnv('LOG10X_ENV_ID'),
       };
     case 'prometheus':
-      return { kind: 'prometheus', url: reqEnv('LOG10X_METRICS_URL'), auth: parseAuthFromEnv() };
+      return { kind: 'prometheus', url: refEnv('LOG10X_METRICS_URL'), auth: parseAuthFromEnv() };
     case 'mimir': {
       const cfg: Extract<MetricsBackendConfig, { kind: 'mimir' }> = {
         kind: 'mimir',
-        url: reqEnv('LOG10X_METRICS_URL'),
+        url: refEnv('LOG10X_METRICS_URL'),
         auth: parseAuthFromEnv(),
       };
       const orgId = process.env.LOG10X_METRICS_MIMIR_ORG_ID;
@@ -239,35 +250,35 @@ function parseMetricsBackendFromEnv(kind: MetricsBackendConfig['kind']): Metrics
     case 'cortex':
       return {
         kind: 'cortex',
-        url: reqEnv('LOG10X_METRICS_URL'),
+        url: refEnv('LOG10X_METRICS_URL'),
         auth: parseAuthFromEnv(),
-        orgId: reqEnv('LOG10X_METRICS_CORTEX_ORG_ID'),
+        orgId: refEnv('LOG10X_METRICS_CORTEX_ORG_ID'),
       };
     case 'amp':
       return {
         kind: 'amp',
-        url: reqEnv('LOG10X_METRICS_URL'),
-        region: reqEnv('LOG10X_METRICS_AMP_REGION'),
+        url: refEnv('LOG10X_METRICS_URL'),
+        region: refEnv('LOG10X_METRICS_AMP_REGION'),
       };
     case 'datadog':
       return {
         kind: 'datadog',
         site: process.env.LOG10X_METRICS_DATADOG_SITE || process.env.DD_SITE || 'datadoghq.com',
-        apiKey: reqEnv('DD_API_KEY'),
-        appKey: reqEnv('DD_APP_KEY'),
+        apiKey: refEnv('DD_API_KEY'),
+        appKey: refEnv('DD_APP_KEY'),
       };
     case 'grafana_cloud_prom':
       return {
         kind: 'grafana_cloud_prom',
-        url: reqEnv('LOG10X_METRICS_URL'),
-        user: reqEnv('LOG10X_METRICS_GRAFANA_USER'),
-        apiKey: reqEnv('GRAFANA_CLOUD_API_KEY'),
+        url: refEnv('LOG10X_METRICS_URL'),
+        user: refEnv('LOG10X_METRICS_GRAFANA_USER'),
+        apiKey: refEnv('GRAFANA_CLOUD_API_KEY'),
       };
     case 'gcp_managed_prom':
       return {
         kind: 'gcp_managed_prom',
-        url: reqEnv('LOG10X_METRICS_URL'),
-        projectId: reqEnv('LOG10X_METRICS_GCP_PROJECT_ID'),
+        url: refEnv('LOG10X_METRICS_URL'),
+        projectId: refEnv('LOG10X_METRICS_GCP_PROJECT_ID'),
       };
     default: {
       // Exhaustiveness — TS narrows kind to never if we hit this.
@@ -279,13 +290,15 @@ function parseMetricsBackendFromEnv(kind: MetricsBackendConfig['kind']): Metrics
 
 function parseAuthFromEnv(): PromAuth {
   const type = (process.env.LOG10X_METRICS_AUTH_TYPE || 'none').trim().toLowerCase();
+  // Same pattern as parseMetricsBackendFromEnv: validate env-var
+  // presence, but pass `${VAR}` reference so secret-detection guard
+  // bypasses for resolved values.
   switch (type) {
     case 'none':
       return { type: 'none' };
     case 'bearer': {
-      const token = process.env.LOG10X_METRICS_AUTH_VALUE;
-      if (!token) throw new EnvironmentValidationError(`LOG10X_METRICS_AUTH_TYPE=bearer requires LOG10X_METRICS_AUTH_VALUE.`);
-      return { type: 'bearer', token };
+      if (!process.env.LOG10X_METRICS_AUTH_VALUE) throw new EnvironmentValidationError(`LOG10X_METRICS_AUTH_TYPE=bearer requires LOG10X_METRICS_AUTH_VALUE.`);
+      return { type: 'bearer', token: '${LOG10X_METRICS_AUTH_VALUE}' };
     }
     case 'basic': {
       const user = process.env.LOG10X_METRICS_AUTH_USER;
@@ -295,7 +308,7 @@ function parseAuthFromEnv(): PromAuth {
           `LOG10X_METRICS_AUTH_TYPE=basic requires both LOG10X_METRICS_AUTH_USER and LOG10X_METRICS_AUTH_VALUE.`
         );
       }
-      return { type: 'basic', user, password };
+      return { type: 'basic', user: '${LOG10X_METRICS_AUTH_USER}', password: '${LOG10X_METRICS_AUTH_VALUE}' };
     }
     case 'header': {
       const name = process.env.LOG10X_METRICS_AUTH_HEADER_NAME;
@@ -305,7 +318,7 @@ function parseAuthFromEnv(): PromAuth {
           `LOG10X_METRICS_AUTH_TYPE=header requires both LOG10X_METRICS_AUTH_HEADER_NAME and LOG10X_METRICS_AUTH_VALUE.`
         );
       }
-      return { type: 'header', name, value };
+      return { type: 'header', name, value: '${LOG10X_METRICS_AUTH_VALUE}' };
     }
     default:
       throw new EnvironmentValidationError(
