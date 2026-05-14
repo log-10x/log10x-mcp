@@ -91,7 +91,62 @@ engine WRITE requires a custom translator/relay. Not the simple
 - Confirmed 4 URL variants all return 404
 - Google docs explicitly say standard remote_write isn't supported
 
-### 5. Datadog MCP read path — **CLOSED with definitive evidence**
+### 5. Datadog MCP read path — **CLOSED with FULL ROUNDTRIP**
+
+**Update** (after closing the "no PromQL endpoint" finding):
+implemented PromQL→Datadog query translator using vendored
+`guychouk/promql-parser` (MIT) and now have end-to-end working
+Datadog reads with real engine data.
+
+What ships:
+- `vendor/promql-parser/` — vendored PEG.js parser (90KB) + grammar
+- `src/lib/promql-to-datadog.ts` — translator targeting the closed
+  set of query shapes the MCP issues (~10 distinct templates).
+  Handles: `topk(N, INNER)`, `sort_desc/sort(INNER)`,
+  `count(INNER > 0)`, `sum/avg/min/max by (labels) (func(M[range]))`,
+  `group by (labels) (M{filters})`, bare metric/matrix selectors.
+- `DatadogBackend` rewired: translates PromQL via the translator,
+  POSTs to `/api/v1/query` with native DD syntax, reshapes
+  Datadog's time-series response back into Prometheus envelope
+  (sums pointlist values to recover `increase()` semantics).
+
+Key translator details:
+- Pre-processes `topk(N, ...)` before the parser (the vendored
+  PEG.js grammar can't parse multi-arg function calls reliably)
+- Strips `_total` suffix from metric names (Datadog convention —
+  `all_events_summaryBytes_total` → `all_events_summaryBytes`)
+- `by {labels}` clause goes BEFORE `.as_count()` suffix (Datadog
+  syntax requirement; opposite of intuitive ordering)
+- Implements `count(EXPR > 0)` → `count_not_null(EXPR)` collapse
+
+Hard evidence:
+- Live MCP `kind: 'datadog'` against us5 with engine writes:
+  ```
+  Top 5 patterns — all services (last 15m) · $0.0047/15m total
+  #1  service_instance_id_..._otelcol_..._version_otelcol  $0.0011/15m  ERROR  opentelemetry-collector
+  #2  open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter  $0.0011/15m
+  #3  opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go  $0.0010/15m
+  …
+  ```
+- `log10x_services` against DD: 17 services, 16.2 MB total
+- Translator unit tests: 6/6 query templates pass byte-exact
+
+Limitations documented:
+- `customer_metrics_query` user-supplied PromQL would need full
+  PromQL coverage — the translator targets the MCP's specific
+  shapes only. The escape-hatch tool needs explicit "PromQL subset"
+  caveat in its docstring.
+- `count_values`, `quantile`, `histogram_quantile`, `without` clause —
+  not supported; surface translation errors.
+
+Previously documented Datadog gap is now resolved. The
+`DatadogPromBackend` in `customer-metrics.ts` (cross-pillar layer)
+is still using the old "send raw PromQL to /api/v1/query" approach
+that doesn't work — needs the same translator wired in.
+
+---
+
+### 5a. Datadog — original investigation (kept for context)
 
 **Endpoints probed** (all with real DD_API_KEY + DD_APP_KEY against
 `api.us5.datadoghq.com`):

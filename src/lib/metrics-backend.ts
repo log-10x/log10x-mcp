@@ -525,7 +525,15 @@ class AmpBackend implements MetricsBackend {
       sessionToken: creds.sessionToken,
       body: '',
     });
-    const res = await fetch(url.toString(), { headers });
+    // SigV4 canonical query string uses RFC 3986 encoding (spaces as %20).
+    // URL.toString() uses application/x-www-form-urlencoded for the query
+    // (spaces as +). The fetch send-path must match the signed string, so
+    // we rebuild the URL with %20 instead of +. Without this, AWS rejects
+    // with HTTP 403 / SignatureDoesNotMatch on any query that contains a
+    // space (e.g., `topk(5, sum by (...)...)`).
+    const rfc3986Query = url.searchParams.toString().replace(/\+/g, '%20');
+    const fetchUrl = `${url.origin}${url.pathname}${rfc3986Query ? '?' + rfc3986Query : ''}`;
+    const res = await fetch(fetchUrl, { headers });
     if (!res.ok) {
       const body = await res.text().catch(() => '');
       throw new Error(`amp HTTP ${res.status}: ${body.slice(0, 400)}`);
@@ -535,15 +543,28 @@ class AmpBackend implements MetricsBackend {
 }
 
 /**
- * Datadog Prometheus-compatible read API. Endpoint is constructed from
- * the `site` field (e.g., `us5` → `https://api.us5.datadoghq.com`).
- * Auth is `DD-API-KEY` + `DD-APPLICATION-KEY` headers.
+ * Datadog backend with PromQL→DD translation.
  *
- * Datadog's Prom-compat endpoint supports a SUBSET of PromQL. Common
- * queries (topk, sum by, increase, rate, label filters) work; some
- * edge cases (specific functions, complex subqueries) may not. Phase
- * 4 testing validates every MCP tool's queries against a live Datadog
- * account.
+ * Datadog's `/api/v1/query` does NOT accept PromQL — it accepts
+ * Datadog's native syntax (`sum:metric{tag} by {dim}.as_count()`).
+ * This adapter translates the MCP's PromQL queries via
+ * `promql-to-datadog.ts` and reshapes Datadog's response back into a
+ * Prometheus-shaped envelope so the rest of the MCP doesn't need to
+ * care.
+ *
+ * Endpoint is constructed from the `site` field (e.g.,
+ * `us5.datadoghq.com` → `https://api.us5.datadoghq.com`). Auth is
+ * `DD-API-KEY` + `DD-APPLICATION-KEY` headers.
+ *
+ * The translator targets the closed set of query shapes the MCP
+ * tools actually issue — not arbitrary PromQL. See
+ * `src/lib/promql-to-datadog.ts` for the supported subset.
+ *
+ * Datadog has no native equivalent for `/api/v1/labels` and
+ * `/api/v1/label/{name}/values` — those endpoints are documented to
+ * exist but reject any non-trivial input. We fall back to running a
+ * `group by(label)` translated query and extracting distinct values
+ * from the response.
  */
 class DatadogBackend implements MetricsBackend {
   readonly kind = 'datadog' as const;
@@ -559,36 +580,151 @@ class DatadogBackend implements MetricsBackend {
   }
 
   async queryInstant(promql: string): Promise<PrometheusResponse> {
+    // Lazy-load translator so the module only pays the cost when DD is in use.
+    const { promqlToDatadog, PromQLTranslationError } = await import('./promql-to-datadog.js');
+    let ddQuery: string;
+    try {
+      ddQuery = promqlToDatadog(promql);
+    } catch (e) {
+      if (e instanceof PromQLTranslationError) {
+        throw new Error(
+          `datadog: cannot translate PromQL — ${e.message}. Source query: ${promql.slice(0, 200)}`
+        );
+      }
+      throw e;
+    }
+    const now = Math.floor(Date.now() / 1000);
     const url = new URL('/api/v1/query', this.endpoint);
-    url.searchParams.set('query', promql);
-    return promJsonFetch('datadog', url, this.headers, {});
+    url.searchParams.set('query', ddQuery);
+    url.searchParams.set('from', String(now - 900));
+    url.searchParams.set('to', String(now));
+    const res = await ddJsonFetch(url, this.headers);
+    return ddSeriesToPromResponse(res);
   }
 
-  async queryRange(promql: string, startSec: number, endSec: number, stepSec: number): Promise<PrometheusResponse> {
-    const url = new URL('/api/v1/query_range', this.endpoint);
-    url.searchParams.set('query', promql);
-    url.searchParams.set('start', String(startSec));
-    url.searchParams.set('end', String(endSec));
-    url.searchParams.set('step', String(stepSec));
-    return promJsonFetch('datadog', url, this.headers, {});
+  async queryRange(promql: string, startSec: number, endSec: number, _stepSec: number): Promise<PrometheusResponse> {
+    const { promqlToDatadog } = await import('./promql-to-datadog.js');
+    const ddQuery = promqlToDatadog(promql);
+    const url = new URL('/api/v1/query', this.endpoint);
+    url.searchParams.set('query', ddQuery);
+    url.searchParams.set('from', String(startSec));
+    url.searchParams.set('to', String(endSec));
+    const res = await ddJsonFetch(url, this.headers);
+    return ddSeriesToPromResponse(res, { matrix: true });
   }
 
   async listLabels(): Promise<string[]> {
-    const url = new URL('/api/v1/labels', this.endpoint);
-    const res = await promJsonFetch<{ status: string; data: string[] }>('datadog', url, this.headers, {});
-    return res.data || [];
+    // Datadog doesn't expose a Prom-compatible label-enumeration API.
+    // We emit a synthetic list derived from `all_events_summaryBytes`
+    // tags. This is best-effort; callers that absolutely need the full
+    // label universe should query a known metric and inspect the tag
+    // dimensions on the response.
+    const now = Math.floor(Date.now() / 1000);
+    const url = new URL('/api/v1/query', this.endpoint);
+    url.searchParams.set('query', 'sum:all_events_summaryBytes{*}');
+    url.searchParams.set('from', String(now - 900));
+    url.searchParams.set('to', String(now));
+    const res = await ddJsonFetch(url, this.headers);
+    const tags = new Set<string>();
+    for (const s of res.series || []) {
+      for (const t of s.tag_set || []) {
+        const [k] = t.split(':');
+        if (k) tags.add(k);
+      }
+    }
+    return Array.from(tags).sort();
   }
 
-  async listLabelValues(label: string, opts?: { windowSeconds?: number }): Promise<string[]> {
-    const url = new URL(`/api/v1/label/${encodeURIComponent(label)}/values`, this.endpoint);
-    if (opts?.windowSeconds) {
-      const nowS = Math.floor(Date.now() / 1000);
-      url.searchParams.set('start', String(nowS - opts.windowSeconds));
-      url.searchParams.set('end', String(nowS));
+  async listLabelValues(label: string, _opts?: { windowSeconds?: number }): Promise<string[]> {
+    // Use group-by to enumerate distinct values for a label.
+    const now = Math.floor(Date.now() / 1000);
+    const url = new URL('/api/v1/query', this.endpoint);
+    url.searchParams.set('query', `min:all_events_summaryBytes{*} by {${label}}`);
+    url.searchParams.set('from', String(now - 900));
+    url.searchParams.set('to', String(now));
+    const res = await ddJsonFetch(url, this.headers);
+    const values = new Set<string>();
+    for (const s of res.series || []) {
+      for (const t of s.tag_set || []) {
+        if (t.startsWith(`${label}:`)) {
+          values.add(t.slice(label.length + 1));
+        }
+      }
     }
-    const res = await promJsonFetch<{ status: string; data: string[] }>('datadog', url, this.headers, {});
-    return res.data || [];
+    return Array.from(values).sort();
   }
+}
+
+interface DatadogQueryResponse {
+  status: string;
+  series?: Array<{
+    metric?: string;
+    scope?: string;
+    tag_set?: string[];
+    pointlist?: Array<[number, number]>;
+    expression?: string;
+  }>;
+  error?: string;
+  message?: string;
+}
+
+async function ddJsonFetch(url: URL, headers: Record<string, string>): Promise<DatadogQueryResponse> {
+  const res = await fetch(url.toString(), { headers });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`datadog HTTP ${res.status}: ${body.slice(0, 400)}`);
+  }
+  const json = (await res.json()) as DatadogQueryResponse;
+  if (json.status === 'error') {
+    throw new Error(`datadog query error: ${json.error || json.message || '(no message)'}`);
+  }
+  return json;
+}
+
+/**
+ * Reshape a Datadog query response into a Prometheus-shaped response
+ * envelope so the rest of the MCP (which expects PrometheusResponse)
+ * works unchanged.
+ *
+ * For `matrix: true` (range queries), we emit all points. Otherwise
+ * we emit the last point per series.
+ */
+function ddSeriesToPromResponse(
+  ddResp: DatadogQueryResponse,
+  opts: { matrix?: boolean } = {}
+): PrometheusResponse {
+  const result = (ddResp.series || []).map((s) => {
+    const metric: Record<string, string> = {};
+    for (const t of s.tag_set || []) {
+      const idx = t.indexOf(':');
+      if (idx > 0) metric[t.slice(0, idx)] = t.slice(idx + 1);
+    }
+    if (opts.matrix) {
+      // Range / matrix shape: full pointlist.
+      const values: Array<[number, string]> = (s.pointlist || [])
+        .filter(([, v]) => v !== null && !Number.isNaN(v))
+        .map(([ts, v]) => [Math.floor(ts / 1000), String(v)]);
+      return { metric, values };
+    }
+    // Instant shape: SUM the pointlist over the window — Prometheus's
+    // `increase(M[range])` returns one scalar per series representing
+    // the total increase over the range. Datadog's response is a
+    // time-series of `.as_count()` values (one per bucket); summing
+    // them recovers the windowed total. Taking last-point would
+    // return only the most-recent bucket, which is often 0 or partial.
+    const points = (s.pointlist || []).filter(([, v]) => v !== null && !Number.isNaN(v));
+    if (points.length === 0) return { metric };
+    const total = points.reduce((sum, [, v]) => sum + v, 0);
+    const lastTs = points[points.length - 1][0];
+    return { metric, value: [Math.floor(lastTs / 1000), String(total)] as [number, string] };
+  });
+  return {
+    status: 'success',
+    data: {
+      resultType: opts.matrix ? 'matrix' : 'vector',
+      result,
+    },
+  };
 }
 
 /**
