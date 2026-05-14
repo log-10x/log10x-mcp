@@ -19,7 +19,7 @@ import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 export const topPatternsSchema = {
   service: z.string().optional().describe('Service name to scope the result. Omit for all services.'),
   severity: z.string().optional().describe('Severity level to scope the result (e.g., `ERROR`, `CRITICAL`, `DEBUG`). Omit for all severities. Caught by the eval-harness anti-hallucination campaign — agents asked for "top CRITICAL patterns" couldn\'t scope without this filter and the synthesis was missing the requested top-N.'),
-  timeRange: z.enum(['15m', '1h', '6h', '1d', '7d', '30d']).default('7d').describe('Time range to aggregate over. Sub-day values (`15m`, `1h`, `6h`) are useful for incident investigation; day-level values for cost and trend analysis.'),
+  timeRange: z.string().regex(/^\d+[mhd]$/, 'Time range must look like `15m`, `48h`, `2d`, etc.').default('7d').describe('Time range to aggregate over. Free-form `<n><m|h|d>` — any number of minutes / hours / days. Examples: `15m`, `48h`, `3d`, `7d`, `30d`. Bounds: minimum 1 minute, maximum 90 days. Sub-day values are useful for incident investigation; day-level values for cost and trend analysis. (cost_drivers, which uses 3-window baseline math, remains snapped to `1d` / `7d` / `30d` for offset symmetry.)'),
   limit: z.number().min(1).max(50).default(10).describe('Number of patterns to return.'),
   analyzerCost: z.number().optional().describe('SIEM ingestion cost in $/GB. Auto-detected from profile if omitted.'),
   environment: z.string().optional().describe('Environment nickname (for multi-env setups).'),
@@ -51,20 +51,60 @@ export async function executeTopPatterns(
     ? await resolveMetricsEnvFiltered(env, filters)
     : await resolveMetricsEnv(env);
 
-  const res = await queryInstant(env, pql.topPatternsFull(filters, metricsEnv, tf.range, args.limit));
+  // Run the top-N query and a recent-activity probe in parallel.
+  // The recent-activity probe is the freshness guardrail: a row that
+  // ranks top-N over 7d but has zero rate in the last hour is residue
+  // from a closed incident, not an active cost driver. Surface that
+  // explicitly so the agent does not treat stale series as current.
+  const [res, recentRes] = await Promise.all([
+    queryInstant(env, pql.topPatternsFull(filters, metricsEnv, tf.range, args.limit)),
+    queryInstant(env, pql.recentRateByPattern(filters, metricsEnv, '1h')).catch(() => null),
+  ]);
   if (res.status !== 'success' || res.data.result.length === 0) {
     return 'No pattern data available. Patterns appear after the first 24h of data collection.';
   }
 
-  interface Row { hash: string; service: string; severity: string; bytes: number; cost: number }
+  // Build recent-rate lookup keyed by (pattern, service, severity).
+  // Track whether the probe itself succeeded — on failure we must NOT
+  // tag rows as stale (an empty lookup against a failed probe is a
+  // false positive: "everything is stale because we couldn't ask").
+  const recentRateKey = (p: string, s: string, sv: string) => `${p}\x00${s}\x00${sv}`;
+  const recentRates = new Map<string, number>();
+  const freshnessProbeOk = !!(recentRes && recentRes.status === 'success');
+  if (freshnessProbeOk) {
+    for (const r of recentRes!.data.result) {
+      const k = recentRateKey(
+        r.metric[LABELS.pattern] || '',
+        r.metric[LABELS.service] || '',
+        r.metric[LABELS.severity] || ''
+      );
+      const v = parsePrometheusValue(r);
+      if (Number.isFinite(v)) recentRates.set(k, v);
+    }
+  }
+
+  // (no-symbol) replaces the older (unknown) placeholder. An empty
+  // message_pattern label means the engine tokenized the event but
+  // symbol-lookup did not produce a canonical name — the metric does
+  // not tell us what the events were. Agents must not speculate about
+  // event content from this row; the rendered output says so below.
+  const NO_SYMBOL = '(no-symbol)';
+  interface Row { hash: string; service: string; severity: string; bytes: number; cost: number; recentRate: number; isStale: boolean; isNoSymbol: boolean }
   const rows: Row[] = res.data.result.map(r => {
+    const rawPattern = r.metric[LABELS.pattern] || '';
+    const service = r.metric[LABELS.service] || '';
+    const severity = r.metric[LABELS.severity] || '';
     const bytes = parsePrometheusValue(r);
+    const rate = recentRates.get(recentRateKey(rawPattern, service, severity)) ?? 0;
     return {
-      hash: r.metric[LABELS.pattern] || '(unknown)',
-      service: r.metric[LABELS.service] || '',
-      severity: r.metric[LABELS.severity] || '',
+      hash: rawPattern || NO_SYMBOL,
+      service,
+      severity,
       bytes,
       cost: bytesToCost(bytes, costPerGb),
+      recentRate: rate,
+      isStale: freshnessProbeOk && rate <= 0,
+      isNoSymbol: !rawPattern,
     };
   });
   rows.sort((a, b) => b.cost - a.cost);
@@ -95,13 +135,37 @@ export async function executeTopPatterns(
   lines.push(`Top ${rows.length} patterns — ${displayName} (${tf.label}) · ${fmtDollar(totalTopCost)}${period} total`);
   lines.push(`⚠ These are CURRENT RANK by cost (biggest right now). This is NOT a growth/delta ranking — do not re-label as "cost drivers" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.`);
   lines.push('');
+  let staleCount = 0;
+  let noSymbolCount = 0;
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
     const name = fmtPattern(r.hash).padEnd(35);
     const cost = fmtDollar(r.cost) + period;
     const sev = fmtSeverity(r.severity);
     const svc = r.service ? `  ${r.service}` : '';
-    lines.push(`#${i + 1}  ${name} ${cost.padEnd(12)} ${sev}${svc}`);
+    const stale = r.isStale ? '  [stale: no activity in last 1h — residue of closed incident in this window]' : '';
+    lines.push(`#${i + 1}  ${name} ${cost.padEnd(12)} ${sev}${svc}${stale}`);
+    if (r.isStale) staleCount++;
+    if (r.isNoSymbol) noSymbolCount++;
+  }
+
+  // Explicit guardrail for the (no-symbol) row: the metric does NOT
+  // tell us what the events were. Agents must not invent a name or
+  // speculate about content from this row's other labels alone.
+  if (noSymbolCount > 0) {
+    lines.push('');
+    lines.push(
+      `⚠ ${noSymbolCount} row${noSymbolCount > 1 ? 's' : ''} above marked \`${NO_SYMBOL}\`: the engine tokenized these events but symbol-lookup did not produce a canonical name. ` +
+      `The metric tells you volume + bytes + the labels listed (e.g., service, severity). It does NOT tell you what the event text was. ` +
+      `Do not speculate about event content from this row. To inspect the actual events: use \`log10x_retriever_query\` (if Retriever is deployed for this env) or check the source pod's stdout directly.`
+    );
+  }
+  if (staleCount > 0) {
+    lines.push('');
+    lines.push(
+      `⚠ ${staleCount} row${staleCount > 1 ? 's' : ''} above tagged \`stale\`: ranked top-N over ${tf.label} but produced zero events in the last hour. ` +
+      `These are residue of past incidents inside the lookback window, not current cost drivers. Discount accordingly when recommending action.`
+    );
   }
 
   if (scopeCoveragePct !== undefined) {
@@ -168,23 +232,23 @@ export async function executeTopPatterns(
   }
 
   const nextActions: NextAction[] = [];
+  // Pick the first row that is BOTH a real pattern identity AND
+  // currently active. A stale row or a (no-symbol) row is not a
+  // useful starting_point — investigate can't resolve (no-symbol),
+  // and stale rows just lead the agent back to a closed incident.
+  const topActiveRow = rows.find(r => !r.isNoSymbol && !r.isStale && r.hash);
   if (rows[0]) {
     lines.push('');
     lines.push('**Next actions**:');
-    // Only suggest investigate when the top row resolves to a real
-    // pattern identity. '(unknown)' is the placeholder we substitute
-    // when the upstream metric row has no pattern label — investigate
-    // can't accept it (it would fail with "Could not resolve").
-    const topHashUsable = rows[0].hash && rows[0].hash !== '(unknown)';
-    if (topHashUsable) {
-      lines.push(`  - call \`log10x_investigate({ starting_point: '${rows[0].hash}' })\` to trace what\'s driving the top pattern.`);
+    if (topActiveRow) {
+      lines.push(`  - call \`log10x_investigate({ starting_point: '${topActiveRow.hash}' })\` to trace what\'s driving the top active pattern.`);
       nextActions.push({
         tool: 'log10x_investigate',
-        args: { starting_point: rows[0].hash },
-        reason: 'trace the top pattern',
+        args: { starting_point: topActiveRow.hash },
+        reason: 'trace the top active pattern (skipping stale/no-symbol rows)',
       });
     }
-    if (newlyEmerged.length > 0 && newlyEmerged[0].hash && newlyEmerged[0].hash !== '(unknown)') {
+    if (newlyEmerged.length > 0 && newlyEmerged[0].hash && newlyEmerged[0].hash !== '(no-symbol)' && newlyEmerged[0].hash !== '(unknown)') {
       lines.push(`  - **Investigate the newly-emerged pattern**: \`log10x_investigate({ starting_point: '${newlyEmerged[0].hash}', window: '15m' })\` — it is not in the cost ranking yet but is firing right now.`);
       nextActions.push({
         tool: 'log10x_investigate',
@@ -192,7 +256,7 @@ export async function executeTopPatterns(
         reason: 'investigate newly-emerged pattern',
       });
     }
-    const svcHint = args.service || rows[0]?.service;
+    const svcHint = args.service || topActiveRow?.service || rows[0]?.service;
     if (svcHint) {
       lines.push(`  - call \`log10x_cost_drivers({ service: '${svcHint}', timeRange: '7d' })\` for week-over-week deltas on the top service.`);
       nextActions.push({
@@ -212,9 +276,10 @@ export async function executeTopPatterns(
     // with no error signal are often safe to drop. Surface the drop path
     // explicitly so it's discoverable without the user needing to know
     // the tool name. The agent decides which specific patterns qualify;
-    // we just surface that the path exists.
-    if (topHashUsable) {
-      lines.push(`  - to **drop a routine pattern** (high-volume INFO/DEBUG with no diagnostic value): run \`log10x_dependency_check({ pattern: '${rows[0].hash}' })\` to verify safe-to-mute, then \`log10x_exclusion_filter({ pattern: '${rows[0].hash}' })\` for the vendor-specific drop config.`);
+    // we just surface that the path exists. Gated on topActiveRow so
+    // we don't recommend dropping a (no-symbol) or stale series.
+    if (topActiveRow) {
+      lines.push(`  - to **drop a routine pattern** (high-volume INFO/DEBUG with no diagnostic value): run \`log10x_dependency_check({ pattern: '${topActiveRow.hash}' })\` to verify safe-to-mute, then \`log10x_exclusion_filter({ pattern: '${topActiveRow.hash}' })\` for the vendor-specific drop config.`);
     }
   }
   const block = renderNextActions(nextActions);

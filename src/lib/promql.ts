@@ -189,6 +189,21 @@ export function topPatternsFull(
   return `topk(${limit}, sum by (${LABELS.pattern}, ${LABELS.service}, ${LABELS.severity}) (increase(${BYTES_METRIC}{${selector}}[${range}])))`;
 }
 
+/**
+ * Recent-activity rate per (pattern, service, severity) over a short window
+ * (default 1h). Used as a freshness probe: if a top-N row from a longer
+ * window has 0 (or missing) recent rate, it's residue from a closed incident,
+ * not an active cost driver.
+ */
+export function recentRateByPattern(
+  filters: Record<string, string>,
+  env: string,
+  recentRange: string = '1h'
+): string {
+  const selector = buildSelector(filters, env);
+  return `sum by (${LABELS.pattern}, ${LABELS.service}, ${LABELS.severity}) (rate(${BYTES_METRIC}{${selector}}[${recentRange}]))`;
+}
+
 /** Bytes grouped by an arbitrary label, ranked. */
 export function bytesByLabel(
   label: string,
