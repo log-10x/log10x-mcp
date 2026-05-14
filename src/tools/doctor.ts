@@ -122,6 +122,7 @@ export async function runDoctorChecks(envNickname?: string): Promise<DoctorRepor
   await addInfrastructureChecks(globalChecks);
   await addPasteEndpointCheck(globalChecks);
   await addSiemDiscoveryCheck(globalChecks);
+  addNetworkEgressInventory(globalChecks, envs);
 
   // 3. Per-environment checks.
   const targets: EnvConfig[] = envNickname
@@ -206,9 +207,9 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
     const res = await queryInstant(env, `count(up{${LABELS.env}=~"edge|cloud"}) or vector(0)`);
     if (res.status === 'success') {
       checks.push({
-        name: 'prometheus_gateway',
+        name: 'metrics_backend_reachable',
         status: 'pass',
-        message: `prometheus.log10x.com reachable, auth OK for env ${env.nickname}.`,
+        message: `Backend \`${env.metricsBackend.kind}\` at ${env.metricsBackend.endpoint} reachable, auth OK for env ${env.nickname}.`,
       });
     } else {
       checks.push({
@@ -918,6 +919,49 @@ async function addSiemDiscoveryCheck(globalChecks: DoctorCheck[]): Promise<void>
       message: `SIEM discovery failed: ${(e as Error).message}`,
     });
   }
+}
+
+/**
+ * Network egress inventory — enumerates every host the MCP could
+ * reach for the current configuration, grouped by env. This is the
+ * artifact a customer's CISO gets when they ask "what does this tool
+ * talk to."
+ *
+ * Each env's metricsBackend.endpoint is listed by URL + kind. For
+ * `kind: 'log10x'` envs the inventory also calls out the
+ * `/api/v1/user` log10x-account-management endpoint (auth + env
+ * discovery). For other kinds, only the configured backend endpoint
+ * appears — no outbound to log10x.com.
+ *
+ * Surfaced as a `warn` when any env is `kind: 'log10x'` (so CISOs see
+ * the SaaS callout clearly in red); `pass` when every env points
+ * inside the customer perimeter.
+ */
+function addNetworkEgressInventory(checks: DoctorCheck[], envs: Environments): void {
+  const lines: string[] = [];
+  let hasLog10x = false;
+  for (const env of envs.all) {
+    const kind = env.metricsBackend.kind;
+    if (kind === 'log10x') {
+      hasLog10x = true;
+      lines.push(
+        `  - env \`${env.nickname}\` (kind=log10x):\n` +
+          `    • ${env.metricsBackend.endpoint} (metric reads, X-10X-Auth)\n` +
+          `    • https://api.log10x.com/api/v1/user (account / env enumeration, X-10X-Auth)`
+      );
+    } else {
+      lines.push(`  - env \`${env.nickname}\` (kind=${kind}): ${env.metricsBackend.endpoint}`);
+    }
+  }
+  const status: CheckStatus = hasLog10x ? 'warn' : 'pass';
+  const summary = hasLog10x
+    ? `**${envs.all.length} env${envs.all.length === 1 ? '' : 's'} configured. AT LEAST ONE uses kind=log10x — the MCP makes outbound calls to log10x.com for that env's queries.** Move to a self-hosted Prometheus / Mimir / Cortex / AMP / Datadog / Grafana Cloud Prom / GCP Managed Prom to keep telemetry inside your perimeter.`
+    : `**${envs.all.length} env${envs.all.length === 1 ? '' : 's'} configured. ZERO outbound calls to log10x.com — every env points at a customer-owned metrics backend.** This is the 100%-disconnect state.`;
+  checks.push({
+    name: 'network_egress_inventory',
+    status,
+    message: `${summary}\n${lines.join('\n')}`,
+  });
 }
 
 function finalize(globalChecks: DoctorCheck[], perEnvChecks: Record<string, DoctorCheck[]>): DoctorReport {
