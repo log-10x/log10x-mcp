@@ -26,7 +26,7 @@ export const topPatternsSchema = {
 };
 
 export async function executeTopPatterns(
-  args: { service?: string; severity?: string; timeRange: string; limit: number; analyzerCost: number },
+  args: { service?: string; severity?: string; timeRange: string; limit: number; analyzerCost?: number },
   env: EnvConfig
 ): Promise<string> {
   // Defensive defaults so the function is safe to call without the zod schema
@@ -40,7 +40,11 @@ export async function executeTopPatterns(
     (args as Record<string, unknown>).limit = 10;
   }
   const tf = parseTimeframe(args.timeRange);
-  const costPerGb = args.analyzerCost;
+  // Default $/GB when caller doesn't supply analyzerCost. Matches the
+  // default in executeServices; without this, every cost cell renders
+  // as `$NaN/15m` (bytes * undefined). Caught against the real GC
+  // SaaS roundtrip on 2026-05-14.
+  const costPerGb = args.analyzerCost ?? 1.0;
   const period = costPeriodLabel(tf.days);
 
   const filters: Record<string, string> = {};
