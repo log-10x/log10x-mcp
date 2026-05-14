@@ -29,6 +29,12 @@ import { exclusionFilterSchema, executeExclusionFilter } from './tools/exclusion
 import { patternExamplesSchema, executePatternExamples } from './tools/pattern-examples.js';
 import { dependencyCheckSchema, executeDependencyCheck } from './tools/dependency-check.js';
 import { discoverLabelsSchema, executeDiscoverLabels } from './tools/discover-labels.js';
+import { configureEnvSchema, executeConfigureEnv } from './tools/configure-env.js';
+import { renderNotConfigured } from './lib/not-configured.js';
+
+function notConfiguredMessageForTool(toolName: string): string {
+  return renderNotConfigured({ callingTool: toolName });
+}
 import { topPatternsSchema, executeTopPatterns } from './tools/top-patterns.js';
 import { listByLabelSchema, executeListByLabel } from './tools/list-by-label.js';
 import { resolveBatchSchema, executeResolveBatch } from './tools/resolve-batch.js';
@@ -126,11 +132,58 @@ const COST_REFRESH_MS = 3_600_000; // 1 hour
  * the raw error message is logged at debug level before `describeToolError`
  * rewrites it, so ops can see the original text when hunting root causes.
  */
+/**
+ * Tools that query the metrics backend (cost_drivers, top_patterns,
+ * etc.). When the MCP is in pure-demo mode (no user configuration,
+ * silently landed on the demo backend), these tools short-circuit
+ * with a structured `not_configured` response instead of returning
+ * demo data the user didn't ask for. Phase 5b — phase 7 will remove
+ * the silent-demo path entirely; for now we surface the conversation
+ * starter without breaking the demo-mode walkthrough.
+ *
+ * Tools NOT in this set bypass the gate: configure_env (the
+ * onboarding tool itself), doctor (status reporting works in any
+ * mode), local-only tools (resolve_batch, extract_templates,
+ * dependency_check pasted input), signin_* (log10x account
+ * management), discover_env (k8s discovery), poc_from_* (pre-config
+ * sample reports).
+ */
+const METRIC_REQUIRING_TOOLS = new Set([
+  'log10x_top_patterns',
+  'log10x_cost_drivers',
+  'log10x_pattern_trend',
+  'log10x_pattern_examples',
+  'log10x_event_lookup',
+  'log10x_services',
+  'log10x_list_by_label',
+  'log10x_discover_labels',
+  'log10x_savings',
+  'log10x_investigate',
+  'log10x_investigation_get',
+  'log10x_backfill_metric',
+  'log10x_translate_metric_to_patterns',
+  'log10x_correlate_cross_pillar',
+  'log10x_discover_join',
+  'log10x_customer_metrics_query',
+  'log10x_retriever_query',
+  'log10x_retriever_query_status',
+  'log10x_retriever_series',
+]);
+
 async function wrap(
   toolName: string,
   fn: () => Promise<string>
 ): Promise<{ content: { type: 'text'; text: string }[]; isError?: boolean }> {
   const started = Date.now();
+  // Phase 5b gate: if this is a metric-requiring tool and the MCP is
+  // in pure-demo state, redirect to the conversational onboarding
+  // flow instead of returning silent-demo data.
+  if (METRIC_REQUIRING_TOOLS.has(toolName) && envs && envs.isDemoMode && !envs.demoFallbackReason) {
+    log.info(`tool.${toolName}.not_configured`);
+    return {
+      content: [{ type: 'text' as const, text: notConfiguredMessageForTool(toolName) }],
+    };
+  }
   try {
     const text = await runWithDemoFallbackRetry(toolName, fn);
     log.info(`tool.${toolName}.ok`, { ms: Date.now() - started });
@@ -538,6 +591,19 @@ registerLog10xTool('log10x_discover_labels', discoverLabelsSchema, (args) =>
   wrap('log10x_discover_labels', async () => {
     const env = resolveEnv(getEnvs(), args.environment);
     return executeDiscoverLabels(args, env);
+  })
+);
+
+// ── Tool: log10x_configure_env ──
+// Conversational onboarding entry point. Takes a backend config
+// (discriminated union by kind), runs the live-backend validator,
+// and on success persists to ~/.log10x/envs.json. Every metric tool
+// surfaces this tool's name in its `not_configured` response so the
+// agent knows how to drive setup.
+
+registerLog10xTool('log10x_configure_env', configureEnvSchema, (args) =>
+  wrap('log10x_configure_env', async () => {
+    return executeConfigureEnv(args);
   })
 );
 
