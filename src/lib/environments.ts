@@ -138,6 +138,22 @@ export interface EnvConfig {
    * logstash, otel-collector, unknown.
    */
   forwarder?: 'fluentbit' | 'fluentd' | 'filebeat' | 'logstash' | 'otel-collector' | 'unknown';
+  /**
+   * Which log analyzer / SIEM the customer ships logs to. Used by
+   * `log10x_pattern_mitigate` to fill in option 1's vendor name and by
+   * `log10x_exclusion_filter` as the default `vendor` arg. Same fallback
+   * chain as `forwarder`: envs.json field → `LOG10X_ANALYZER` env var →
+   * user profile's `metadata.analyzer_vendor` (populated for
+   * log10x-backed envs from `/api/v1/user`) → undefined.
+   *
+   * The string is loose by design — the exclusion_filter tool only
+   * knows how to generate native configs for the 4 most common
+   * analyzers (datadog, splunk, elasticsearch, cloudwatch). When the
+   * user's analyzer is outside that set the mitigate menu still names
+   * it correctly but notes the agent has to hand-instruct rather than
+   * generate a config.
+   */
+  analyzer?: string;
 }
 
 /** Parsed environment list + default + mutable last-used slot. */
@@ -209,6 +225,46 @@ function parseForwarderEnv(raw: string | undefined): EnvConfig['forwarder'] {
 }
 
 /**
+ * Normalize a `LOG10X_ANALYZER` / `metadata.analyzer_vendor` /
+ * envs.json `analyzer` value into the canonical token the
+ * exclusion_filter tool understands. Accepts both casing-mangled
+ * versions ("Splunk", "splunk") and common aliases ("AWS CloudWatch",
+ * "elastic", "kibana", "azure", "GCP", "newrelic"). Unrecognized
+ * values pass through verbatim — the mitigate menu still names them
+ * for the user even if exclusion_filter can't generate a native
+ * config for them.
+ */
+function parseAnalyzerEnv(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  const s = raw.trim().toLowerCase();
+  if (!s) return undefined;
+  if (s === 'datadog' || s === 'dd') return 'datadog';
+  if (s === 'splunk' || s === 'splunk enterprise') return 'splunk';
+  if (s === 'splunk observability' || s === 'splunk-obs' || s === 'signalfx') return 'splunk-obs';
+  if (s === 'elasticsearch' || s === 'elastic' || s === 'kibana' || s === 'elk') return 'elasticsearch';
+  if (s === 'opensearch') return 'opensearch';
+  if (s === 'cloudwatch' || s === 'cw' || s === 'aws cloudwatch' || s === 'cloudwatch logs')
+    return 'cloudwatch';
+  if (s === 'azure' || s === 'azure monitor' || s === 'azure-monitor' || s === 'log analytics' || s === 'sentinel')
+    return 'azure-monitor';
+  if (s === 'new relic' || s === 'newrelic' || s === 'nr') return 'new-relic';
+  if (s === 'gcp' || s === 'gcp logging' || s === 'google cloud' || s === 'google cloud logging' || s === 'stackdriver')
+    return 'gcp-logging';
+  if (s === 'dynatrace' || s === 'dt') return 'dynatrace';
+  if (s === 'sumo' || s === 'sumo logic' || s === 'sumologic') return 'sumo';
+  if (s === 'grafana' || s === 'loki' || s === 'grafana loki') return 'grafana-loki';
+  if (s === 'coralogix') return 'coralogix';
+  if (s === 'logzio' || s === 'logz.io' || s === 'logz') return 'logzio';
+  if (s === 'crowdstrike' || s === 'crowdstrike falcon' || s === 'falcon logscale' || s === 'humio')
+    return 'crowdstrike';
+  if (s === 'victorialogs' || s === 'victoria logs' || s === 'vlog' || s === 'vlogs')
+    return 'victorialogs';
+  // Pass unknown values through unchanged — mitigate names them; tools
+  // that need a strict enum can refuse.
+  return raw.trim();
+}
+
+/**
  * Resolve the active credentials and load the env list. Async because
  * the legacy log10x paths hit the log10x API for env autodiscovery.
  *
@@ -264,6 +320,7 @@ function tryBuildFromMetricsEnvVars(): EnvConfig | undefined {
       ? { repo: gitopsRepo, ...(gitopsLookupPath ? { lookupPath: gitopsLookupPath } : {}) }
       : undefined;
     const forwarder = parseForwarderEnv(process.env.LOG10X_FORWARDER);
+    const analyzer = parseAnalyzerEnv(process.env.LOG10X_ANALYZER);
     return {
       nickname: process.env.LOG10X_METRICS_NICKNAME?.trim() || 'default',
       metricsBackend: createMetricsBackend(config),
@@ -273,6 +330,7 @@ function tryBuildFromMetricsEnvVars(): EnvConfig | undefined {
       isDefault: true,
       ...(gitops ? { gitops } : {}),
       ...(forwarder ? { forwarder } : {}),
+      ...(analyzer ? { analyzer } : {}),
     };
   } catch (e) {
     if (e instanceof MetricsBackendConfigError) {
@@ -480,6 +538,11 @@ interface EnvsJsonEntry {
    * the full lookup-chain semantics.
    */
   forwarder?: EnvConfig['forwarder'];
+  /**
+   * Which log analyzer / SIEM the customer ships to — see
+   * `EnvConfig.analyzer` for the full lookup-chain semantics.
+   */
+  analyzer?: string;
 }
 
 /**
@@ -543,6 +606,7 @@ async function tryReadEnvsJson(): Promise<EnvConfig[] | undefined> {
         ? { repo: gitopsRepo, ...(gitopsLookupPath ? { lookupPath: gitopsLookupPath } : {}) }
         : undefined;
       const forwarder = entry.forwarder ?? parseForwarderEnv(process.env.LOG10X_FORWARDER);
+      const analyzer = entry.analyzer ?? parseAnalyzerEnv(process.env.LOG10X_ANALYZER);
       return {
         nickname: entry.nickname,
         metricsBackend: backend,
@@ -552,6 +616,7 @@ async function tryReadEnvsJson(): Promise<EnvConfig[] | undefined> {
         isDefault: entry.isDefault,
         ...(gitops ? { gitops } : {}),
         ...(forwarder ? { forwarder } : {}),
+        ...(analyzer ? { analyzer } : {}),
       };
     } catch (e) {
       if (e instanceof MetricsBackendConfigError) {
@@ -718,16 +783,60 @@ async function loadFromApi(apiKey: string, isDemoMode: boolean): Promise<Environ
           `Visit console.log10x.com and provision at least one environment.`
     );
   }
-  const entries: EnvConfig[] = profile.environments.map((e) => ({
-    nickname: e.name,
-    apiKey,
-    envId: e.envId,
-    metricsBackend: createMetricsBackend({ kind: 'log10x', apiKey, envId: e.envId }),
-    labels: { ...DEFAULT_LABELS },
-    owner: e.owner,
-    permissions: e.permissions,
-    isDefault: e.isDefault,
-  }));
+  // Pull analyzer + forwarder hints from the user profile metadata when
+  // present. Account-level settings stored in Auth0 user_metadata flow
+  // here as the lowest-priority source (envs.json + LOG10X_* env vars
+  // win when both are set). For pure-log10x autodiscovered envs this is
+  // typically the ONLY source of these hints, since users on this path
+  // never wrote an envs.json.
+  const meta = profile.metadata ?? {};
+  const accountAnalyzer = parseAnalyzerEnv(
+    typeof meta.analyzer_vendor === 'string' ? meta.analyzer_vendor : undefined
+  );
+  const accountForwarder = parseForwarderEnv(
+    typeof meta.forwarder === 'string' ? meta.forwarder : undefined
+  );
+  const envAnalyzer = parseAnalyzerEnv(process.env.LOG10X_ANALYZER) ?? accountAnalyzer;
+  const envForwarder = parseForwarderEnv(process.env.LOG10X_FORWARDER) ?? accountForwarder;
+
+  // Ensure the apiKey is reachable as `${LOG10X_API_KEY}` for the
+  // backend's secret-guard. The guard refuses literal apiKey values
+  // passed via config to prevent committing them to envs.json; when the
+  // key came from a trusted in-memory source (env var, disk credentials
+  // after signin) we set process.env.LOG10X_API_KEY so the reference
+  // resolves. Side-effecty but bounded to this process, and idempotent
+  // when the env var was already set (the common case).
+  if (process.env.LOG10X_API_KEY !== apiKey) {
+    process.env.LOG10X_API_KEY = apiKey;
+  }
+
+  const entries: EnvConfig[] = profile.environments.map((e) => {
+    // Set envId in env per-environment so the reference resolves to the
+    // right one when we construct the backend below. Only the default
+    // env survives in process.env at the end of the loop — that's fine,
+    // each backend captures its envId at construction time.
+    process.env.LOG10X_ENV_ID = e.envId;
+    return {
+      nickname: e.name,
+      apiKey,
+      envId: e.envId,
+      metricsBackend: createMetricsBackend({
+        kind: 'log10x',
+        apiKey: '${LOG10X_API_KEY}',
+        envId: '${LOG10X_ENV_ID}',
+      }),
+      labels: { ...DEFAULT_LABELS },
+      owner: e.owner,
+      permissions: e.permissions,
+      isDefault: e.isDefault,
+      ...(envAnalyzer ? { analyzer: envAnalyzer } : {}),
+      ...(envForwarder ? { forwarder: envForwarder } : {}),
+    };
+  });
+  // Restore LOG10X_ENV_ID to the default env's value so any subsequent
+  // direct reads from process.env see the user's intended default.
+  const defaultEnv = entries.find((x) => x.isDefault) ?? entries[0];
+  if (defaultEnv) process.env.LOG10X_ENV_ID = defaultEnv.envId;
   const envs = buildEnvironments(entries);
   envs.profile = profile;
   envs.isDemoMode = isDemoMode;

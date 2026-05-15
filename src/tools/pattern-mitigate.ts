@@ -75,8 +75,49 @@ interface Capabilities {
    * the gap explicitly so the agent asks rather than guessing fluent-bit.
    */
   forwarderKind?: 'fluentbit' | 'fluentd' | 'filebeat' | 'logstash' | 'otel-collector' | 'unknown';
+  /**
+   * Detected analyzer vendor — from envs.json, LOG10X_ANALYZER env var,
+   * or the user profile's `metadata.analyzer_vendor`. Used to render
+   * option 1 with the actual analyzer name and to pre-fill the
+   * exclusion_filter `vendor` arg. Loose string because the mitigate
+   * menu must support analyzers that exclusion_filter doesn't yet
+   * generate native configs for (NewRelic, Dynatrace, etc.); the agent
+   * tells the user to apply manually in that case.
+   */
+  analyzerVendor?: string;
   /** Setup hint text when canMute/canCompact are false, explaining what's missing. */
   setupHint?: string;
+}
+
+/**
+ * SIEM vendors the exclusion_filter tool can generate native configs for.
+ * Anything outside this set still gets named in option 1's prose but is
+ * flagged as "apply manually via the analyzer UI".
+ */
+const NATIVE_EXCLUSION_VENDORS = new Set(['datadog', 'splunk', 'elasticsearch', 'cloudwatch']);
+
+const ANALYZER_DISPLAY: Record<string, string> = {
+  datadog: 'Datadog',
+  splunk: 'Splunk',
+  'splunk-obs': 'Splunk Observability',
+  elasticsearch: 'Elasticsearch',
+  opensearch: 'OpenSearch',
+  cloudwatch: 'AWS CloudWatch',
+  'azure-monitor': 'Azure Monitor / Log Analytics',
+  'new-relic': 'New Relic',
+  'gcp-logging': 'Google Cloud Logging',
+  dynatrace: 'Dynatrace',
+  sumo: 'Sumo Logic',
+  'grafana-loki': 'Grafana Loki',
+  coralogix: 'Coralogix',
+  logzio: 'Logz.io',
+  crowdstrike: 'CrowdStrike Falcon LogScale',
+  victorialogs: 'VictoriaLogs',
+};
+
+function analyzerLabel(token: string | undefined): string | undefined {
+  if (!token) return undefined;
+  return ANALYZER_DISPLAY[token] ?? token;
 }
 
 async function detectCapabilities(snapshotId?: string): Promise<Capabilities> {
@@ -95,6 +136,9 @@ async function detectCapabilities(snapshotId?: string): Promise<Capabilities> {
     }
     if (active?.forwarder && active.forwarder !== 'unknown') {
       out.forwarderKind = active.forwarder;
+    }
+    if (active?.analyzer) {
+      out.analyzerVendor = active.analyzer;
     }
   } catch {
     // ignore; fall through to env-var / snapshot
@@ -123,6 +167,30 @@ async function detectCapabilities(snapshotId?: string): Promise<Capabilities> {
       'otel-collector': 'otel-collector', 'opentelemetry-collector': 'otel-collector',
     };
     if (map[raw]) out.forwarderKind = map[raw];
+  }
+  if (!out.analyzerVendor && process.env.LOG10X_ANALYZER) {
+    // Same alias normalization as env-loader's parseAnalyzerEnv. Inline
+    // copy keeps the file self-contained without a cross-module import.
+    const s = process.env.LOG10X_ANALYZER.trim().toLowerCase();
+    const aliases: Record<string, string> = {
+      datadog: 'datadog', dd: 'datadog',
+      splunk: 'splunk', 'splunk enterprise': 'splunk',
+      'splunk observability': 'splunk-obs', 'splunk-obs': 'splunk-obs', signalfx: 'splunk-obs',
+      elasticsearch: 'elasticsearch', elastic: 'elasticsearch', kibana: 'elasticsearch', elk: 'elasticsearch',
+      opensearch: 'opensearch',
+      cloudwatch: 'cloudwatch', cw: 'cloudwatch', 'aws cloudwatch': 'cloudwatch', 'cloudwatch logs': 'cloudwatch',
+      azure: 'azure-monitor', 'azure monitor': 'azure-monitor', 'azure-monitor': 'azure-monitor', 'log analytics': 'azure-monitor', sentinel: 'azure-monitor',
+      'new relic': 'new-relic', newrelic: 'new-relic', nr: 'new-relic',
+      gcp: 'gcp-logging', 'gcp logging': 'gcp-logging', 'google cloud': 'gcp-logging', 'google cloud logging': 'gcp-logging', stackdriver: 'gcp-logging',
+      dynatrace: 'dynatrace', dt: 'dynatrace',
+      sumo: 'sumo', 'sumo logic': 'sumo', sumologic: 'sumo',
+      grafana: 'grafana-loki', loki: 'grafana-loki', 'grafana loki': 'grafana-loki',
+      coralogix: 'coralogix',
+      logzio: 'logzio', 'logz.io': 'logzio', logz: 'logzio',
+      crowdstrike: 'crowdstrike', 'crowdstrike falcon': 'crowdstrike', 'falcon logscale': 'crowdstrike', humio: 'crowdstrike',
+      victorialogs: 'victorialogs', 'victoria logs': 'victorialogs', vlog: 'victorialogs', vlogs: 'victorialogs',
+    };
+    out.analyzerVendor = aliases[s] ?? process.env.LOG10X_ANALYZER.trim();
   }
 
   // Source 3: snapshot from kubectl discovery. Fills in retriever-archive
@@ -175,9 +243,23 @@ export async function executePatternMitigate(args: PatternMitigateArgs): Promise
   lines.push('Pick one. Each option trades off speed-to-effect, where in the pipeline it cuts, and what happens to your data.');
   lines.push('');
 
-  // Option 1 — SIEM-side. Always available; just needs the user to know
-  // their analyzer vendor. We don't need to detect this from the cluster.
-  lines.push('**1. Drop it at your analyzer.** Fastest. Save a config in Datadog / Splunk / Elastic / CloudWatch and the cost stops within minutes. Events still flow through your pipeline up to the analyzer — they just don\'t get indexed or stored. Easy to undo in the same UI.');
+  // Option 1 — SIEM-side. Always available conceptually; the wording
+  // depends on whether we know the user's specific analyzer.
+  const analyzerName = analyzerLabel(caps.analyzerVendor);
+  const analyzerSupported = caps.analyzerVendor ? NATIVE_EXCLUSION_VENDORS.has(caps.analyzerVendor) : false;
+  if (analyzerName && analyzerSupported) {
+    lines.push(
+      `**1. Drop it at ${analyzerName}.** Fastest. We generate a ready-to-apply ${analyzerName} exclusion config; you paste it (or apply via API) and the cost stops within minutes. Events still flow through your pipeline up to ${analyzerName} — they just don't get indexed or stored. Easy to undo in the same UI.`
+    );
+  } else if (analyzerName) {
+    lines.push(
+      `**1. Drop it at ${analyzerName}.** Fastest. Apply an exclusion in ${analyzerName} and the cost stops within minutes. Events still flow through your pipeline up to ${analyzerName} — they just don't get indexed. Note: log10x_exclusion_filter doesn't yet generate native configs for ${analyzerName} (supports Datadog, Splunk, Elasticsearch, AWS CloudWatch); you'd apply this one manually in the ${analyzerName} UI for now.`
+    );
+  } else {
+    lines.push(
+      `**1. Drop it at your analyzer.** Fastest. Save a config in your log analyzer and the cost stops within minutes. Events still flow through your pipeline up to the analyzer — they just don't get indexed or stored. We could not auto-detect which analyzer you ship to — log10x_exclusion_filter can generate native configs for Datadog, Splunk, Elasticsearch, and AWS CloudWatch. For any other analyzer the agent should ask the user and either generate the config (when supported) or hand-instruct apply (when not).`
+    );
+  }
   lines.push('');
 
   // Option 2 — Forwarder-side. Generation is via the same exclusion_filter
@@ -246,8 +328,15 @@ export async function executePatternMitigate(args: PatternMitigateArgs): Promise
     },
     {
       tool: 'log10x_exclusion_filter',
-      args: { pattern, vendor: 'datadog' },
-      reason: 'option 1 — analyzer-side exclusion (replace vendor:datadog with the user\'s actual analyzer when known)',
+      args: {
+        pattern,
+        vendor: analyzerSupported ? caps.analyzerVendor! : 'datadog',
+      },
+      reason: analyzerSupported
+        ? `option 1 — analyzer-side exclusion (auto-detected analyzer: ${caps.analyzerVendor})`
+        : caps.analyzerVendor
+          ? `option 1 — analyzer-side exclusion (detected analyzer: ${caps.analyzerVendor}, but log10x_exclusion_filter doesn't generate native configs for it; agent should hand-instruct rather than call this entry blindly)`
+          : `option 1 — analyzer-side exclusion (vendor unknown; agent should confirm with user before generating config)`,
     },
     {
       tool: 'log10x_exclusion_filter',
