@@ -90,7 +90,10 @@ while (true) {
     console.error('[driver] FAILED:\n' + status);
     process.exit(3);
   }
-  if (/# Log10x POC Report/.test(status) || /_Report saved to:/.test(status)) {
+  // Terminate on any "complete" status string the tool emits. The status
+  // tool's summary view starts with `## POC — done.`; the older formats
+  // used `# Log10x POC Report` or a `_Report saved to:_` line. Match any.
+  if (/# Log10x POC Report/.test(status) || /_Report saved to:/.test(status) || /## POC — done\./.test(status)) {
     if (out) {
       await writeFile(out, status, 'utf8');
       console.log(`[driver] report written to ${out}`);

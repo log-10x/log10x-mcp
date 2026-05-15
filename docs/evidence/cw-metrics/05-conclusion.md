@@ -47,7 +47,7 @@ data:
 
 ## What this does NOT prove (gap: engine→CW write)
 
-The 10x engine's `run/output/metric/cloudwatch` Micrometer module did NOT load in the demo cluster's dev image `ghcr.io/log-10x/pipeline-10x-dev:fluentd-tmp-k8`. Verbatim quote from the captured engine log [06-engine-failure-prev.log:90](06-engine-failure-prev.log):
+The 10x engine's `run/output/metric/cloudwatch` Micrometer module did NOT load in the demo cluster's dev image `ghcr.io/log-10x/pipeline-10x-dev:fluentd-tmp-k8`. Verbatim quote from the captured engine log [06-engine-failure-prev.txt:90](06-engine-failure-prev.txt):
 
 ```
 Caused by: java.lang.IllegalStateException: could not resolve config variable:

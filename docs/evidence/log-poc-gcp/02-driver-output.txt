@@ -1,0 +1,29 @@
+[driver] submit { siem=gcp-logging, scope=log10x-poc, window=1h, target=5000, privacy_mode=true }
+## Log10x POC — submit accepted
+
+**snapshot_id**: `3b89f221-d931-42a8-bd2d-9638cfb0c7b4`
+**siem_detected**: gcp-logging
+**estimated_duration_minutes**: 2
+
+Pulling up to 5,000 events from GCP Cloud Logging over the last 1h. Scope: `log10x-poc`. Query: `logName="projects/log10x-poc/logs/log10x-poc-otel"`.
+
+### Phases
+
+1. `pulling` — fetching events from GCP Cloud Logging (typical 1-3 min)
+2. `templatizing` — extracting patterns from the sample (typical 3-8 min depending on event count)
+3. `rendering` — building the final report (<5s)
+4. `complete` — full report available; call status with `view: "summary"` (default), `"yaml"`, `"configs"`, `"top"`, or `"pattern"`.
+
+### Polling
+
+Call `log10x_poc_from_siem_status({snapshot_id: "3b89f221-d931-42a8-bd2d-9638cfb0c7b4"})` every ~30s while the pipeline runs.
+During `templatizing`, the snapshot exposes `partialPatternsFound` — when that number stabilizes, the templater is winding down and the report is close to ready.
+Hard ceiling on pull time: 10 min (per the submit `max_pull_minutes` arg).
+[driver] 2026-05-15T02:38:03.999Z ## POC — in progress
+         progress=0% step=pulling from gcp-logging
+[driver] 2026-05-15T02:38:07.001Z ## POC — in progress
+         progress=60% step=templating 217 events
+[driver] 2026-05-15T02:38:10.002Z ## POC — in progress
+         progress=60% step=templating 217 events
+[driver] 2026-05-15T02:38:13.007Z ## POC — done. GCP Cloud Logging, 1h window.
+[driver] report written to docs/evidence/log-poc-gcp/01-report.md

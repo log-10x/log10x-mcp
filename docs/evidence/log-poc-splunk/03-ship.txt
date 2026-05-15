@@ -1,0 +1,14 @@
+(node:33061) Warning: Setting the NODE_TLS_REJECT_UNAUTHORIZED environment variable to '0' makes TLS connections and HTTPS requests insecure by disabling certificate verification.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  pushed 533/5000 (10.7%)
+  pushed 1040/5000 (20.8%)
+  pushed 1493/5000 (29.9%)
+  pushed 1946/5000 (38.9%)
+  pushed 2400/5000 (48.0%)
+  pushed 2852/5000 (57.0%)
+  pushed 3353/5000 (67.1%)
+  pushed 3810/5000 (76.2%)
+  pushed 4238/5000 (84.8%)
+  pushed 4653/5000 (93.1%)
+  pushed 5000/5000 (100.0%)
+done: 5000 events shipped to Splunk HEC
