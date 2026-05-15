@@ -270,3 +270,71 @@ Chain confirmed: `(no-symbol)` = engine's symbol-lookup found no match in the lo
 Last updated: starting work-through now. Each item gets its own
 section update with the captured evidence (or block reason) before
 moving to the next.
+
+---
+
+## Phase-1 expansion: 4 new metric-side adapters built + E2E'd (2026-05-14)
+
+After Items 1–6 closed, the user mandated expanding TSDB coverage
+beyond the original 6 backends. Per `docs/BACKEND-COVERAGE-PLAN.md`,
+Phase 1 added four more MCP read adapters, each E2E'd with hard
+data and verified by an independent sub-agent auditor.
+
+### 7. CloudWatch Metrics — `kind: 'cloudwatch_metrics'` — **CLOSED (read)**
+
+- Adapter: wraps `@aws-sdk/client-cloudwatch` `GetMetricData` + `ListMetrics`. Accepts a closed PromQL subset (`count(metric)`, bare selectors with `=` filters); throws on unsupported shapes.
+- Hard data: planted 4 dim combos in real AWS account `351939435334` namespace `Log10x/E2E` via PutMetricData; MCP adapter returned all 4 byte-exact (1234, 567, 2345, 89). Plus listLabels/listLabelValues working on real CW state.
+- Evidence: `docs/evidence/cw-metrics/`
+- **Engine→CW write GAP**: the dev image `ghcr.io/log-10x/pipeline-10x-dev:fluentd-tmp-k8` fails to bind `$cloudwatchNamespace` from the `cloudwatch[]` YAML override. Three YAML variants tried; all hit the same error. Captured in `06-engine-failure-prev.txt`.
+
+### 8. Elasticsearch Metrics — `kind: 'elastic_metrics'` — **CLOSED (read)**
+
+- Adapter: reads docs in the Micrometer-ES schema (`@timestamp` + `name` + `type` + tag fields + `count|value`) from rolling `micrometer-metrics-YYYY-MM` indices. Basic + ApiKey auth.
+- Hard data: Docker ES 9.1.0 single-node; bulk-indexed 4 docs in the Micrometer-ES shape; MCP adapter returned all 4 byte-exact (1234, 567, 2345, 89). count() = "8" (4 docs × 2 seedings) matches direct ES `match_all` total.
+- Evidence: `docs/evidence/elastic-metrics/`
+- Engine→ES write untested.
+
+### 9. OpenSearch Metrics — `kind: 'opensearch_metrics'` — **CLOSED (read)**
+
+- Adapter: subclasses `ElasticMetricsBackend` (OS shares the `_search` + `_bulk` wire protocol). Separate kind discriminator so logs/config say "opensearch" instead of "elastic".
+- Hard data: Docker OS 2.19.5 (port 9201 to avoid ES conflict); same 4 docs planted; MCP adapter returned byte-exact.
+- Evidence: `docs/evidence/opensearch-metrics/`
+
+### 10. GCP Managed Prometheus — `kind: 'gcp_managed_prom'` — **CLOSED (read; Phase-1 stub now real)**
+
+- Adapter: replaces the previous stub that threw on every call. OAuth2 Bearer auth via JWT-bearer flow using Node `crypto.createSign('RSA-SHA256')` (no external Google SDK dep). Token cached with 60s refresh-before-expiry margin. Standard Prometheus PromQL API proxied to GMP's `monitoring.googleapis.com/v1/projects/.../prometheus` endpoint.
+- Hard data: real GCP project `log10x-poc` + SA `log10x-poc-reader`. Baseline 2727 labels / 17428 names. Planted a CUMULATIVE metric `prometheus.googleapis.com/log10x_test_planted/counter` with labels `{tenx_user_service: cart, message_pattern: p_planted_ok}` via Cloud Monitoring v3 timeSeries API. Adapter post-plant returned 2729 labels / 17429 names — delta +2 labels / +1 metric name matches what was planted exactly.
+- GMP-specific behavior surfaces correctly: `=~` on `__name__` errors out with real GMP error message.
+- Evidence: `docs/evidence/gmp-metrics/`
+- **Engine→GMP write remains blocked at Item 4** (this entry covers READ only).
+
+---
+
+## Adapter coverage summary as of 2026-05-14
+
+**Marketplace vendors with full hard-data roundtrip via MCP**:
+1. Datadog (real us5; Item 5)
+2. Grafana Cloud Prom (real `*.grafana.net`; Item 1)
+3. CloudWatch Metrics (real AWS; Item 7, read-side only)
+4. Elasticsearch (Docker; Item 8, read-side only)
+5. OpenSearch (Docker; Item 9, read-side only)
+6. GCP Managed Prometheus (real `log10x-poc`; Item 10, read-side only)
+
+**Non-marketplace TSDBs proven (prom-RW family)**:
+- Prometheus, Mimir, Cortex, AMP (Items 2, 3, and the earlier evidence doc)
+
+**Engine-side gaps logged for follow-up**:
+- Engine→CW Micrometer module config-binding (Item 7 details)
+- Engine→GMP protocol gap (Item 4 details)
+- Engine→ES/OS Micrometer module status untested
+
+**Marketplace vendors awaiting trial creds** (Phase 2):
+- Splunk Observability (SignalFx)
+- New Relic
+- Dynatrace
+- Coralogix
+- Logz.io
+
+**Marketplace vendor with siem-poc creds but TSDB-side deferred**:
+- Azure (5-day SP clock; LogAnalytics scope verified; engine has no Azure Monitor output module so TSDB-side is engine-blocked even with scope)
+- Sumo Logic (creds live; collector may need rebuild)
