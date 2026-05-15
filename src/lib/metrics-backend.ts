@@ -62,6 +62,18 @@ export type MetricsBackendConfig =
       // chain (env vars, shared config, IAM role).
       awsAccessKeyId?: string;
       awsSecretAccessKey?: string;
+    }
+  | {
+      kind: 'elastic_metrics';
+      url: string;
+      // Index name OR glob pattern that matches the Micrometer-ES default
+      // `micrometer-metrics-YYYY-MM` rolling indices. Default:
+      // `micrometer-metrics-*`.
+      index?: string;
+      // Optional auth (Basic OR API key). Falls back to no-auth when both omitted.
+      user?: string;
+      password?: string;
+      apiKey?: string;
     };
 
 export type MetricsBackendKind = MetricsBackendConfig['kind'];
@@ -209,6 +221,15 @@ function normalizeAndGuard(config: MetricsBackendConfig): MetricsBackendConfig {
         awsAccessKeyId: c.awsAccessKeyId ? resolveVarReference(c.awsAccessKeyId) : undefined,
         awsSecretAccessKey: c.awsSecretAccessKey ? guardSecret('cloudwatch_metrics.awsSecretAccessKey', c.awsSecretAccessKey) : undefined,
       };
+    case 'elastic_metrics':
+      return {
+        ...c,
+        url: resolveVarReference(c.url),
+        index: c.index ? resolveVarReference(c.index) : undefined,
+        user: c.user ? resolveVarReference(c.user) : undefined,
+        password: c.password ? guardSecret('elastic_metrics.password', c.password) : undefined,
+        apiKey: c.apiKey ? guardSecret('elastic_metrics.apiKey', c.apiKey) : undefined,
+      };
   }
 }
 
@@ -279,6 +300,8 @@ export function createMetricsBackend(config: MetricsBackendConfig): MetricsBacke
       return new GcpManagedPromBackend(safe);
     case 'cloudwatch_metrics':
       return new CloudWatchMetricsBackend(safe);
+    case 'elastic_metrics':
+      return new ElasticMetricsBackend(safe);
   }
 }
 
@@ -1094,6 +1117,183 @@ class CloudWatchMetricsBackend implements MetricsBackend {
       }
     }
     return out;
+  }
+}
+
+// ── Elasticsearch Metrics adapter ─────────────────────────────────────────
+
+/**
+ * Elasticsearch metrics backend. Reads documents written by the
+ * Micrometer-ES registry to `micrometer-metrics-YYYY-MM` indices and
+ * reshapes them into Prometheus envelopes.
+ *
+ * Document shape (from Micrometer-ES source):
+ *   { "@timestamp": ISO8601, "name": <metric>, "type": "counter|gauge|...",
+ *     <tag1>: <val1>, ..., "count"|"value"|"sum"|...: <number> }
+ *
+ * Like the CW adapter, this V1 implements a closed subset of PromQL —
+ * `count(metric)` and bare selectors with `=` label filters. Unsupported
+ * shapes throw rather than fabricate.
+ */
+class ElasticMetricsBackend implements MetricsBackend {
+  readonly kind = 'elastic_metrics' as const;
+  readonly endpoint: string;
+  private readonly url: string;
+  private readonly index: string;
+  private readonly authHeader: string | undefined;
+
+  // Reserved field names in the Micrometer-ES doc shape — anything else
+  // is treated as a tag (a Prom-style label).
+  private static readonly RESERVED_FIELDS = new Set([
+    '@timestamp',
+    'name',
+    'type',
+    'count',
+    'value',
+    'sum',
+    'mean',
+    'max',
+    'min',
+    'activeTasks',
+    'duration',
+  ]);
+
+  constructor(config: Extract<MetricsBackendConfig, { kind: 'elastic_metrics' }>) {
+    this.url = config.url.replace(/\/+$/, '');
+    this.index = config.index || 'micrometer-metrics-*';
+    this.endpoint = `${this.url}/${this.index}`;
+    if (config.apiKey) {
+      this.authHeader = `ApiKey ${config.apiKey}`;
+    } else if (config.user && config.password) {
+      const b = Buffer.from(`${config.user}:${config.password}`).toString('base64');
+      this.authHeader = `Basic ${b}`;
+    } else {
+      this.authHeader = undefined;
+    }
+  }
+
+  private async esSearch(body: Record<string, unknown>): Promise<{
+    hits: { total: { value: number }; hits: Array<{ _source: Record<string, unknown> }> };
+    aggregations?: Record<string, unknown>;
+  }> {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (this.authHeader) headers.Authorization = this.authHeader;
+    const res = await fetch(`${this.url}/${encodeURIComponent(this.index)}/_search`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => '');
+      throw new Error(`elastic_metrics HTTP ${res.status} ${res.statusText}: ${errBody.slice(0, 400)}`);
+    }
+    return (await res.json()) as never;
+  }
+
+  async listLabels(): Promise<string[]> {
+    // Sample N recent docs, gather all field names not in RESERVED_FIELDS.
+    const r = await this.esSearch({
+      size: 100,
+      sort: [{ '@timestamp': 'desc' }],
+      query: { match_all: {} },
+    });
+    const names = new Set<string>();
+    for (const h of r.hits.hits) {
+      for (const k of Object.keys(h._source)) {
+        if (!ElasticMetricsBackend.RESERVED_FIELDS.has(k)) names.add(k);
+      }
+    }
+    return Array.from(names);
+  }
+
+  async listLabelValues(label: string): Promise<string[]> {
+    const r = await this.esSearch({
+      size: 0,
+      aggs: { uniq: { terms: { field: `${label}.keyword`, size: 1000 } } },
+    });
+    const buckets = (r.aggregations?.uniq as { buckets?: Array<{ key: string }> } | undefined)?.buckets || [];
+    return buckets.map((b) => String(b.key));
+  }
+
+  async queryInstant(promql: string): Promise<PrometheusResponse> {
+    const trimmed = promql.trim();
+
+    // Shape 1: count(<metric>) — count of docs for that metric.
+    const countMatch = trimmed.match(/^count\(([a-zA-Z_:][a-zA-Z0-9_:]*)\)$/);
+    if (countMatch) {
+      const metricName = countMatch[1];
+      const r = await this.esSearch({
+        size: 0,
+        query: { term: { 'name.keyword': metricName } },
+      });
+      return {
+        status: 'success',
+        data: {
+          resultType: 'vector',
+          result: [{ metric: {}, value: [Math.floor(Date.now() / 1000), String(r.hits.total.value)] }],
+        },
+      };
+    }
+
+    // Shape 2: bare metric selector — return one Prom-shape entry per
+    // distinct (tag combo) for that metric, with latest doc's count/value.
+    const selectorMatch = trimmed.match(/^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{[^}]*\})?$/);
+    if (selectorMatch) {
+      const metricName = selectorMatch[1];
+      const filters = parsePromLabelFilters(selectorMatch[2] || '');
+      const filterClauses: Array<Record<string, unknown>> = [
+        { term: { 'name.keyword': metricName } },
+      ];
+      for (const [k, v] of Object.entries(filters)) {
+        filterClauses.push({ term: { [`${k}.keyword`]: v } });
+      }
+      const r = await this.esSearch({
+        size: 100,
+        sort: [{ '@timestamp': 'desc' }],
+        query: { bool: { must: filterClauses } },
+      });
+      // Group by distinct tag combos; keep the most-recent doc per combo.
+      const seen = new Map<string, { metric: Record<string, string>; tsMs: number; value: number }>();
+      for (const h of r.hits.hits) {
+        const src = h._source as Record<string, unknown>;
+        const metric: Record<string, string> = { __name__: metricName };
+        for (const [k, v] of Object.entries(src)) {
+          if (ElasticMetricsBackend.RESERVED_FIELDS.has(k)) continue;
+          if (typeof v === 'string') metric[k] = v;
+        }
+        const tsMs = Date.parse(String(src['@timestamp']));
+        // Prefer `count` (counter), then `value` (gauge).
+        const numericVal = Number(src.count ?? src.value);
+        if (!Number.isFinite(numericVal)) continue;
+        const key = Object.entries(metric).sort().map(([k, v]) => `${k}=${v}`).join('\x00');
+        const prev = seen.get(key);
+        if (!prev || tsMs > prev.tsMs) {
+          seen.set(key, { metric, tsMs, value: numericVal });
+        }
+      }
+      return {
+        status: 'success',
+        data: {
+          resultType: 'vector',
+          result: Array.from(seen.values()).map((s) => ({
+            metric: s.metric,
+            value: [Math.floor(s.tsMs / 1000), String(s.value)] as [number, string],
+          })),
+        },
+      };
+    }
+
+    throw new Error(
+      `ElasticMetricsBackend: PromQL shape not supported yet: ${trimmed.slice(0, 200)}. ` +
+        `Supported: \`count(metric)\`, bare metric selector \`metric{label=\"v\"}\`.`
+    );
+  }
+
+  async queryRange(promql: string): Promise<PrometheusResponse> {
+    throw new Error(
+      `ElasticMetricsBackend.queryRange not yet implemented for: ${promql.slice(0, 200)}. ` +
+        `V1 supports queryInstant for count() + bare selectors only.`
+    );
   }
 }
 

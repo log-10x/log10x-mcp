@@ -292,6 +292,23 @@ function parseMetricsBackendFromEnv(kind: MetricsBackendConfig['kind']): Metrics
           ? { awsSecretAccessKey: refEnv('LOG10X_METRICS_AWS_SECRET_ACCESS_KEY') }
           : {}),
       };
+    case 'elastic_metrics':
+      return {
+        kind: 'elastic_metrics',
+        url: refEnv('LOG10X_METRICS_URL'),
+        ...(process.env.LOG10X_METRICS_ELASTIC_INDEX
+          ? { index: refEnv('LOG10X_METRICS_ELASTIC_INDEX') }
+          : {}),
+        ...(process.env.LOG10X_METRICS_ELASTIC_USER
+          ? { user: refEnv('LOG10X_METRICS_ELASTIC_USER') }
+          : {}),
+        ...(process.env.LOG10X_METRICS_ELASTIC_PASSWORD
+          ? { password: refEnv('LOG10X_METRICS_ELASTIC_PASSWORD') }
+          : {}),
+        ...(process.env.LOG10X_METRICS_ELASTIC_API_KEY
+          ? { apiKey: refEnv('LOG10X_METRICS_ELASTIC_API_KEY') }
+          : {}),
+      };
     default: {
       // Exhaustiveness — TS narrows kind to never if we hit this.
       const _exhaustive: never = kind;
