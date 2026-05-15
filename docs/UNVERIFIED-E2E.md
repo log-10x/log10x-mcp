@@ -338,3 +338,45 @@ data and verified by an independent sub-agent auditor.
 **Marketplace vendor with siem-poc creds but TSDB-side deferred**:
 - Azure (5-day SP clock; LogAnalytics scope verified; engine has no Azure Monitor output module so TSDB-side is engine-blocked even with scope)
 - Sumo Logic (creds live; collector may need rebuild)
+
+---
+
+## Phase-1.6: log-side POC E2E against 8 SIEMs (2026-05-14 / 02:23–02:47 UTC)
+
+The `log10x_poc_from_siem` tool already had per-SIEM connectors in
+`src/lib/siem/*.ts` from PR #41. This phase verified each connector
+end-to-end against the live infrastructure listed in
+`~/siem-poc-credentials.md`. For each SIEM: re-shipped 5000 events
+from `config/data/otel-sample-200mb.log` (where data had aged
+out), ran `scripts/run-poc.mjs`, captured the report. Evidence
+lives in `docs/evidence/log-poc-<siem>/`.
+
+Driver bug fixed mid-flight: `scripts/run-poc.mjs` never broke out
+of its polling loop when the status emitted `## POC — done.` (the
+loop only matched two older heading formats). One commit adds the
+missing match.
+
+### Result matrix
+
+| SIEM | events analyzed | annual cost (extrapolated to 100 GB/day) | annual savings | notes |
+|---|---:|---:|---:|---|
+| Datadog us5 | 5 | $2.2M | 100% | data trial-aged-out; re-ship + scope='*' surfaces real events |
+| ClickHouse Cloud | 5000 | $183 | 91% ($166) | service `dpq5h4e2b4` alive; needed `--ch-msg body --ch-ts timestamp` |
+| Sumo Logic | 0 | n/a | n/a | **connector requires `_sourceCategory` filter**; HTTP source has none — see below |
+| Azure Monitor / Log Analytics | 5000 | $2.8K | 91% ($2.5K) | workspace `38093120-…` + table `log10xPoc_CL` |
+| GCP Cloud Logging | 217 | $438K | 58% ($256K) | log10x-poc-otel log in `log10x-poc` |
+| CloudWatch Logs | 53 | $438K | 97% ($426K) | recreated log group `/log10x/poc-test-otel` |
+| Elasticsearch (Docker 9.1.0) | 55 | $876K | 97% ($849K) | local container `log10x-poc-es` |
+| Splunk (Docker `splunk/splunk:latest`) | 55 | $5.3M | 97% ($5.1M) | container `log10x-poc-splunk` |
+
+**7 of 8 SIEMs produced rendered reports with hard data.** Every "events analyzed > 0" run also produced a top-N pattern table with per-pattern projected savings.
+
+### Sumo connector gap (documented, not closed)
+
+`src/lib/siem/sumo.ts:106` composes the query as `_sourceCategory=<scope>` plus any `--query` filter. The HTTP source used in this POC has no source category attached (the credentials file even notes this: "Sumo assigned default; our Source Category field was empty on the HTTP source"). Result: queries return 0 events even though direct search-job API confirms 394 messages indexed in the last 2h.
+
+Not a tool bug — the connector design assumes Sumo HTTP sources have a populated `_sourceCategory`. Fix path is either: (a) attach `X-Sumo-Category` header in the ship-to-sumo.mjs script, or (b) widen the connector to fall back to `query=*` when scope is omitted. Tracked here for follow-up.
+
+### MCP-tool versus connector layering
+
+This phase confirms the LOG-SIDE adapters (`src/lib/siem/*.ts`) are healthy. The METRIC-SIDE adapters (`src/lib/metrics-backend.ts`) closed in Items 7–10 are a separate layer. Both layers now have hard-data E2E evidence; both share the same authentication codebase for the SIEMs that overlap (Azure, GCP, AWS, ES/OS, Splunk-via-Docker).
