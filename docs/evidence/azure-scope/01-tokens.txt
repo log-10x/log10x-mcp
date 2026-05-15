@@ -1,0 +1,4 @@
+=== Token: api.loganalytics.io ===
+OK
+=== Token: management.azure.com (Monitor) ===
+OK
