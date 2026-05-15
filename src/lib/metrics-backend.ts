@@ -74,6 +74,17 @@ export type MetricsBackendConfig =
       user?: string;
       password?: string;
       apiKey?: string;
+    }
+  | {
+      // OpenSearch shares the ES _search + _bulk wire protocol; the adapter
+      // delegates to the ES backend internally. Separate kind for clarity in
+      // logs / config / doctor output (so users see "opensearch" not "elastic").
+      kind: 'opensearch_metrics';
+      url: string;
+      index?: string;
+      user?: string;
+      password?: string;
+      apiKey?: string;
     };
 
 export type MetricsBackendKind = MetricsBackendConfig['kind'];
@@ -230,6 +241,15 @@ function normalizeAndGuard(config: MetricsBackendConfig): MetricsBackendConfig {
         password: c.password ? guardSecret('elastic_metrics.password', c.password) : undefined,
         apiKey: c.apiKey ? guardSecret('elastic_metrics.apiKey', c.apiKey) : undefined,
       };
+    case 'opensearch_metrics':
+      return {
+        ...c,
+        url: resolveVarReference(c.url),
+        index: c.index ? resolveVarReference(c.index) : undefined,
+        user: c.user ? resolveVarReference(c.user) : undefined,
+        password: c.password ? guardSecret('opensearch_metrics.password', c.password) : undefined,
+        apiKey: c.apiKey ? guardSecret('opensearch_metrics.apiKey', c.apiKey) : undefined,
+      };
   }
 }
 
@@ -302,6 +322,8 @@ export function createMetricsBackend(config: MetricsBackendConfig): MetricsBacke
       return new CloudWatchMetricsBackend(safe);
     case 'elastic_metrics':
       return new ElasticMetricsBackend(safe);
+    case 'opensearch_metrics':
+      return new OpenSearchMetricsBackend(safe);
   }
 }
 
@@ -1136,7 +1158,7 @@ class CloudWatchMetricsBackend implements MetricsBackend {
  * shapes throw rather than fabricate.
  */
 class ElasticMetricsBackend implements MetricsBackend {
-  readonly kind = 'elastic_metrics' as const;
+  readonly kind: MetricsBackendKind = 'elastic_metrics';
   readonly endpoint: string;
   private readonly url: string;
   private readonly index: string;
@@ -1294,6 +1316,30 @@ class ElasticMetricsBackend implements MetricsBackend {
       `ElasticMetricsBackend.queryRange not yet implemented for: ${promql.slice(0, 200)}. ` +
         `V1 supports queryInstant for count() + bare selectors only.`
     );
+  }
+}
+
+// ── OpenSearch Metrics adapter ────────────────────────────────────────────
+
+/**
+ * OpenSearch metrics backend. OS shares the `_search` + `_bulk` wire
+ * protocol with Elasticsearch, so this is a thin subclass that reuses
+ * the ES adapter logic verbatim. The separate `kind` gives users a
+ * distinct label in config + logs (otherwise their "opensearch" cluster
+ * would surface as "elastic" everywhere, which is confusing).
+ */
+class OpenSearchMetricsBackend extends ElasticMetricsBackend {
+  override readonly kind: MetricsBackendKind = 'opensearch_metrics';
+
+  constructor(config: Extract<MetricsBackendConfig, { kind: 'opensearch_metrics' }>) {
+    super({
+      kind: 'elastic_metrics',
+      url: config.url,
+      index: config.index,
+      user: config.user,
+      password: config.password,
+      apiKey: config.apiKey,
+    });
   }
 }
 

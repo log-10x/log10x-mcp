@@ -1,0 +1,114 @@
+[seed] indexing 4 docs into micrometer-metrics-2026-05 at http://localhost:9201
+[seed] errors: false items: 4
+
+=== backend.kind = opensearch_metrics
+=== backend.endpoint = http://localhost:9201/micrometer-metrics-2026-05
+
+=== listLabels() ===
+[ 'tenx_user_service', 'message_pattern' ]
+
+=== listLabelValues("tenx_user_service") ===
+[ 'cart', 'checkout', 'payment' ]
+
+=== queryInstant("count(all_events_summaryBytes)") ===
+{
+  "status": "success",
+  "data": {
+    "resultType": "vector",
+    "result": [
+      {
+        "metric": {},
+        "value": [
+          1778807111,
+          "4"
+        ]
+      }
+    ]
+  }
+}
+
+=== queryInstant("all_events_summaryBytes{tenx_user_service=\"cart\"}") ===
+{
+  "status": "success",
+  "data": {
+    "resultType": "vector",
+    "result": [
+      {
+        "metric": {
+          "__name__": "all_events_summaryBytes",
+          "tenx_user_service": "cart",
+          "message_pattern": "p_cart_ok"
+        },
+        "value": [
+          1778807109,
+          "1234"
+        ]
+      },
+      {
+        "metric": {
+          "__name__": "all_events_summaryBytes",
+          "tenx_user_service": "cart",
+          "message_pattern": "p_cart_err"
+        },
+        "value": [
+          1778807109,
+          "567"
+        ]
+      }
+    ]
+  }
+}
+
+=== queryInstant("all_events_summaryBytes") (no filter) ===
+{
+  "status": "success",
+  "data": {
+    "resultType": "vector",
+    "result": [
+      {
+        "metric": {
+          "__name__": "all_events_summaryBytes",
+          "tenx_user_service": "cart",
+          "message_pattern": "p_cart_ok"
+        },
+        "value": [
+          1778807109,
+          "1234"
+        ]
+      },
+      {
+        "metric": {
+          "__name__": "all_events_summaryBytes",
+          "tenx_user_service": "cart",
+          "message_pattern": "p_cart_err"
+        },
+        "value": [
+          1778807109,
+          "567"
+        ]
+      },
+      {
+        "metric": {
+          "__name__": "all_events_summaryBytes",
+          "tenx_user_service": "checkout",
+          "message_pattern": "p_chk_ok"
+        },
+        "value": [
+          1778807109,
+          "2345"
+        ]
+      },
+      {
+        "metric": {
+          "__name__": "all_events_summaryBytes",
+          "tenx_user_service": "payment",
+          "message_pattern": "p_pay_warn"
+        },
+        "value": [
+          1778807109,
+          "89"
+        ]
+      }
+    ]
+  }
+}

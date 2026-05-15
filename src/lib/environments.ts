@@ -309,6 +309,23 @@ function parseMetricsBackendFromEnv(kind: MetricsBackendConfig['kind']): Metrics
           ? { apiKey: refEnv('LOG10X_METRICS_ELASTIC_API_KEY') }
           : {}),
       };
+    case 'opensearch_metrics':
+      return {
+        kind: 'opensearch_metrics',
+        url: refEnv('LOG10X_METRICS_URL'),
+        ...(process.env.LOG10X_METRICS_OPENSEARCH_INDEX
+          ? { index: refEnv('LOG10X_METRICS_OPENSEARCH_INDEX') }
+          : {}),
+        ...(process.env.LOG10X_METRICS_OPENSEARCH_USER
+          ? { user: refEnv('LOG10X_METRICS_OPENSEARCH_USER') }
+          : {}),
+        ...(process.env.LOG10X_METRICS_OPENSEARCH_PASSWORD
+          ? { password: refEnv('LOG10X_METRICS_OPENSEARCH_PASSWORD') }
+          : {}),
+        ...(process.env.LOG10X_METRICS_OPENSEARCH_API_KEY
+          ? { apiKey: refEnv('LOG10X_METRICS_OPENSEARCH_API_KEY') }
+          : {}),
+      };
     default: {
       // Exhaustiveness — TS narrows kind to never if we hit this.
       const _exhaustive: never = kind;
