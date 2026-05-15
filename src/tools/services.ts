@@ -90,7 +90,8 @@ export async function executeServices(
     lines.push(agentOnly(
       `Suggested next calls: ` +
       `Drill into the top service for week-over-week deltas — log10x_cost_drivers({ service: '${rows[0].name}' }) — or for current top patterns — log10x_top_patterns({ service: '${rows[0].name}' }). ` +
-      `Full causal-chain analysis on any spike: log10x_investigate({ starting_point: '${rows[0].name}' }).`
+      `Full causal-chain analysis on any spike: log10x_investigate({ starting_point: '${rows[0].name}' }). ` +
+      `To reduce the cost of a specific pattern in this service, first run log10x_top_patterns({ service: '${rows[0].name}' }) and then call log10x_pattern_mitigate on a row's pattern identity — gives the user the four cost-reduction options gated on env capabilities.`
     ));
     nextActions.push(
       { tool: 'log10x_cost_drivers', args: { service: rows[0].name }, reason: 'week-over-week deltas on the top service' },

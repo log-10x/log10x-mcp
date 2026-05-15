@@ -68,6 +68,13 @@ interface Capabilities {
   /** Source of the gitops_repo, if any. Used in the rendered explanation so the user understands where the PR will be opened. */
   gitopsRepo?: string;
   gitopsSource?: 'envs.json' | 'snapshot' | 'env-var';
+  /**
+   * Detected forwarder kind from the snapshot's `existingForwarder` (set by
+   * `classifyForwarderImage` against the cluster's running pods). When set,
+   * option 2's vendor is pre-filled. When undefined, the menu acknowledges
+   * the gap explicitly so the agent asks rather than guessing fluent-bit.
+   */
+  forwarderKind?: 'fluentbit' | 'fluentd' | 'filebeat' | 'logstash' | 'otel-collector' | 'unknown';
   /** Setup hint text when canMute/canCompact are false, explaining what's missing. */
   setupHint?: string;
 }
@@ -118,6 +125,13 @@ async function detectCapabilities(snapshotId?: string): Promise<Capabilities> {
       if (snap.recommendations.retrieverS3Bucket) {
         out.hasRetrieverArchive = true;
       }
+      // Forwarder kind. `existingForwarder` is set by the discovery code's
+      // `classifyForwarderImage` against running pods in the cluster.
+      // Possible values: fluentbit / fluentd / filebeat / logstash /
+      // otel-collector / unknown.
+      if (snap.recommendations.existingForwarder) {
+        out.forwarderKind = snap.recommendations.existingForwarder;
+      }
     }
   }
 
@@ -147,10 +161,28 @@ export async function executePatternMitigate(args: PatternMitigateArgs): Promise
   lines.push('**1. Drop it at your analyzer.** Fastest. Save a config in Datadog / Splunk / Elastic / CloudWatch and the cost stops within minutes. Events still flow through your pipeline up to the analyzer — they just don\'t get indexed or stored. Easy to undo in the same UI.');
   lines.push('');
 
-  // Option 2 — Forwarder-side. Also always available (every customer has
-  // some forwarder); generation is via the same exclusion_filter tool with
-  // a different vendor arg.
-  lines.push('**2. Drop it at your forwarder.** Same idea as option 1 but one step earlier. The events never even leave your environment, so on top of analyzer savings you also save the bandwidth between your forwarder and your analyzer. Requires editing your fluent-bit / fluentd / logstash / filebeat config and reloading it (seconds to minutes).');
+  // Option 2 — Forwarder-side. Generation is via the same exclusion_filter
+  // tool with the forwarder-vendor arg. If we know which forwarder the
+  // customer is running (from the snapshot), we name it; otherwise we
+  // list the supported ones and let the agent ask.
+  const knownForwarder = caps.forwarderKind && caps.forwarderKind !== 'unknown';
+  const forwarderLabel: Record<NonNullable<Capabilities['forwarderKind']>, string> = {
+    fluentbit: 'Fluent Bit',
+    fluentd: 'Fluentd',
+    filebeat: 'Filebeat',
+    logstash: 'Logstash',
+    'otel-collector': 'OpenTelemetry Collector',
+    unknown: 'forwarder',
+  };
+  if (knownForwarder) {
+    lines.push(
+      `**2. Drop it at your forwarder (${forwarderLabel[caps.forwarderKind!]}).** Same idea as option 1 but one step earlier. The events never even leave your environment, so on top of analyzer savings you also save the bandwidth between your forwarder and your analyzer. Requires editing your ${forwarderLabel[caps.forwarderKind!]} config and reloading it (seconds to minutes).`
+    );
+  } else {
+    lines.push(
+      '**2. Drop it at your forwarder.** Same idea as option 1 but one step earlier. The events never even leave your environment, so on top of analyzer savings you also save the bandwidth between your forwarder and your analyzer. We could not auto-detect which forwarder you run (no snapshot or no recognized image) — supported: Fluent Bit, Fluentd, Filebeat, Logstash, OpenTelemetry Collector. If you pick option 2 the agent should ask which one and then generate the right config.'
+    );
+  }
   lines.push('');
 
   // Option 3 — Mute at 10x edge. Gated on capability.
@@ -200,8 +232,10 @@ export async function executePatternMitigate(args: PatternMitigateArgs): Promise
     },
     {
       tool: 'log10x_exclusion_filter',
-      args: { pattern, vendor: 'fluentbit' },
-      reason: 'option 2 — forwarder-side drop (replace vendor:fluentbit with the user\'s actual forwarder when known)',
+      args: { pattern, vendor: knownForwarder ? caps.forwarderKind! : 'fluentbit' },
+      reason: knownForwarder
+        ? `option 2 — forwarder-side drop (auto-detected forwarder: ${caps.forwarderKind})`
+        : 'option 2 — forwarder-side drop (forwarder unknown; agent should confirm with user before generating config)',
     },
   ];
   if (caps.canMute) {

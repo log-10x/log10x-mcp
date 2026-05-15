@@ -226,6 +226,12 @@ export async function executeCostDrivers(
       args: { pattern: drivers[0].hash },
       reason: 'blast-radius check before muting top driver',
     });
+    hints.push(`Reduce the cost of the top driver: log10x_pattern_mitigate({ pattern: '${drivers[0].hash}' }) — presents drop @ analyzer / drop @ forwarder / mute @ 10x / compact @ 10x, gated on env capabilities.`);
+    nextActions.push({
+      tool: 'log10x_pattern_mitigate',
+      args: { pattern: drivers[0].hash },
+      reason: 'cost-reduction menu — four options gated on env capabilities',
+    });
     lines.push('');
     lines.push(agentOnly(`Suggested next calls: ${hints.join(' ')}`));
     const block = renderNextActions(nextActions);
