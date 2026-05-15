@@ -124,6 +124,20 @@ export interface EnvConfig {
      */
     lookupPath?: string;
   };
+  /**
+   * Which forwarder the customer runs. Same fallback rationale as
+   * `gitops` — the kubectl-based snapshot is the authoritative source
+   * when available (it classifies the running container image), but
+   * users without cluster reach from their laptop need a stable
+   * declarative path. Loadable from envs.json or `LOG10X_FORWARDER`
+   * env var. Used by `log10x_pattern_mitigate` to fill in option 2's
+   * vendor name without guessing.
+   *
+   * Supported values match `ForwarderKind` in
+   * `src/lib/discovery/types.ts`: fluentbit, fluentd, filebeat,
+   * logstash, otel-collector, unknown.
+   */
+  forwarder?: 'fluentbit' | 'fluentd' | 'filebeat' | 'logstash' | 'otel-collector' | 'unknown';
 }
 
 /** Parsed environment list + default + mutable last-used slot. */
@@ -168,6 +182,30 @@ export interface Environments {
  */
 function envsJsonPath(): string {
   return join(process.env.HOME || homedir(), '.log10x', 'envs.json');
+}
+
+/**
+ * Parse and validate a `LOG10X_FORWARDER` env-var value into the
+ * canonical ForwarderKind. Accepts a handful of common aliases ("fluent-bit",
+ * "fluent_bit", "otel", "otelcol", "opentelemetry-collector", "beats")
+ * because users will typo. Returns undefined on unset / blank /
+ * unrecognized so the snapshot path can still win.
+ */
+function parseForwarderEnv(raw: string | undefined): EnvConfig['forwarder'] {
+  if (!raw) return undefined;
+  const s = raw.trim().toLowerCase();
+  if (!s) return undefined;
+  if (s === 'fluent-bit' || s === 'fluentbit' || s === 'fluent_bit') return 'fluentbit';
+  if (s === 'fluentd' || s === 'fluent-d') return 'fluentd';
+  if (s === 'filebeat' || s === 'beats') return 'filebeat';
+  if (s === 'logstash') return 'logstash';
+  if (s === 'otel' || s === 'otelcol' || s === 'otel-collector' || s === 'opentelemetry-collector')
+    return 'otel-collector';
+  if (s === 'unknown') return 'unknown';
+  // Unrecognized — caller falls through to other sources rather than
+  // failing the entire env load. We don't throw because LOG10X_FORWARDER
+  // is optional metadata, not auth-critical config.
+  return undefined;
 }
 
 /**
@@ -225,6 +263,7 @@ function tryBuildFromMetricsEnvVars(): EnvConfig | undefined {
     const gitops = gitopsRepo
       ? { repo: gitopsRepo, ...(gitopsLookupPath ? { lookupPath: gitopsLookupPath } : {}) }
       : undefined;
+    const forwarder = parseForwarderEnv(process.env.LOG10X_FORWARDER);
     return {
       nickname: process.env.LOG10X_METRICS_NICKNAME?.trim() || 'default',
       metricsBackend: createMetricsBackend(config),
@@ -233,6 +272,7 @@ function tryBuildFromMetricsEnvVars(): EnvConfig | undefined {
       envId: kind === 'log10x' ? config.kind === 'log10x' ? config.envId : '' : '',
       isDefault: true,
       ...(gitops ? { gitops } : {}),
+      ...(forwarder ? { forwarder } : {}),
     };
   } catch (e) {
     if (e instanceof MetricsBackendConfigError) {
@@ -435,6 +475,11 @@ interface EnvsJsonEntry {
    * for the full lookup-chain semantics.
    */
   gitops?: { repo: string; lookupPath?: string };
+  /**
+   * Which forwarder the customer runs — see `EnvConfig.forwarder` for
+   * the full lookup-chain semantics.
+   */
+  forwarder?: EnvConfig['forwarder'];
 }
 
 /**
@@ -497,6 +542,7 @@ async function tryReadEnvsJson(): Promise<EnvConfig[] | undefined> {
       const gitops = gitopsRepo
         ? { repo: gitopsRepo, ...(gitopsLookupPath ? { lookupPath: gitopsLookupPath } : {}) }
         : undefined;
+      const forwarder = entry.forwarder ?? parseForwarderEnv(process.env.LOG10X_FORWARDER);
       return {
         nickname: entry.nickname,
         metricsBackend: backend,
@@ -505,6 +551,7 @@ async function tryReadEnvsJson(): Promise<EnvConfig[] | undefined> {
         envId,
         isDefault: entry.isDefault,
         ...(gitops ? { gitops } : {}),
+        ...(forwarder ? { forwarder } : {}),
       };
     } catch (e) {
       if (e instanceof MetricsBackendConfigError) {

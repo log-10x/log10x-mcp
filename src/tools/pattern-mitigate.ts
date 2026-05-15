@@ -82,8 +82,8 @@ interface Capabilities {
 async function detectCapabilities(snapshotId?: string): Promise<Capabilities> {
   const out: Capabilities = { canMute: false, canCompact: false, hasRetrieverArchive: false };
 
-  // Source 1: active env's gitops field (envs.json). Wins over later sources
-  // because envs.json is user-declared per-env config.
+  // Source 1: active env's gitops field + forwarder field (envs.json).
+  // Wins over later sources because envs.json is user-declared per-env config.
   try {
     const envs = await loadEnvironments();
     const active = envs.lastUsed ?? envs.default;
@@ -93,19 +93,36 @@ async function detectCapabilities(snapshotId?: string): Promise<Capabilities> {
       out.canMute = true;
       out.canCompact = true;
     }
+    if (active?.forwarder && active.forwarder !== 'unknown') {
+      out.forwarderKind = active.forwarder;
+    }
   } catch {
     // ignore; fall through to env-var / snapshot
   }
 
-  // Source 2: LOG10X_GH_REPO env var. Read directly because in demo-mode or
-  // when no LOG10X_METRICS_* is set, the env-var doesn't propagate through
+  // Source 2: env-var fallbacks. Read directly because in demo-mode or
+  // when no LOG10X_METRICS_* is set, env vars don't propagate through
   // `loadEnvironments` to an EnvConfig. This direct read is the
-  // "no-other-config" path that still lets the user point at a repo.
+  // "no-other-config" path that still lets the user supply config.
   if (!out.gitopsRepo && process.env.LOG10X_GH_REPO) {
     out.gitopsRepo = process.env.LOG10X_GH_REPO;
     out.gitopsSource = 'env-var';
     out.canMute = true;
     out.canCompact = true;
+  }
+  if (!out.forwarderKind && process.env.LOG10X_FORWARDER) {
+    // Reuse the same parser the env-loader uses so aliases like
+    // "fluent-bit", "otel", "beats" normalize identically.
+    const raw = process.env.LOG10X_FORWARDER.trim().toLowerCase();
+    const map: Record<string, Capabilities['forwarderKind']> = {
+      'fluent-bit': 'fluentbit', fluentbit: 'fluentbit', fluent_bit: 'fluentbit',
+      fluentd: 'fluentd', 'fluent-d': 'fluentd',
+      filebeat: 'filebeat', beats: 'filebeat',
+      logstash: 'logstash',
+      otel: 'otel-collector', otelcol: 'otel-collector',
+      'otel-collector': 'otel-collector', 'opentelemetry-collector': 'otel-collector',
+    };
+    if (map[raw]) out.forwarderKind = map[raw];
   }
 
   // Source 3: snapshot from kubectl discovery. Fills in retriever-archive
@@ -128,8 +145,10 @@ async function detectCapabilities(snapshotId?: string): Promise<Capabilities> {
       // Forwarder kind. `existingForwarder` is set by the discovery code's
       // `classifyForwarderImage` against running pods in the cluster.
       // Possible values: fluentbit / fluentd / filebeat / logstash /
-      // otel-collector / unknown.
-      if (snap.recommendations.existingForwarder) {
+      // otel-collector / unknown. Only fill in if a higher-priority
+      // source (envs.json or env-var) didn't already declare one — those
+      // are user-explicit and should win.
+      if (!out.forwarderKind && snap.recommendations.existingForwarder) {
         out.forwarderKind = snap.recommendations.existingForwarder;
       }
     }
