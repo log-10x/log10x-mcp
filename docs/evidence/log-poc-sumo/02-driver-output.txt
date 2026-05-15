@@ -1,7 +1,7 @@
 [driver] submit { siem=sumo, scope=*, window=2h, target=5000, privacy_mode=true }
 ## Log10x POC — submit accepted
 
-**snapshot_id**: `52846afb-c06b-428d-ab97-2f2e3f0439c9`
+**snapshot_id**: `5c142183-db84-4f94-8378-0c2be4529e64`
 **siem_detected**: sumo
 **estimated_duration_minutes**: 2
 
@@ -16,10 +16,18 @@ Pulling up to 5,000 events from Sumo Logic over the last 2h. Scope: `*`.
 
 ### Polling
 
-Call `log10x_poc_from_siem_status({snapshot_id: "52846afb-c06b-428d-ab97-2f2e3f0439c9"})` every ~30s while the pipeline runs.
+Call `log10x_poc_from_siem_status({snapshot_id: "5c142183-db84-4f94-8378-0c2be4529e64"})` every ~30s while the pipeline runs.
 During `templatizing`, the snapshot exposes `partialPatternsFound` — when that number stabilizes, the templater is winding down and the report is close to ready.
 Hard ceiling on pull time: 10 min (per the submit `max_pull_minutes` arg).
-[driver] 2026-05-15T02:48:08.957Z ## POC — in progress
+[driver] 2026-05-15T02:51:36.180Z ## POC — in progress
          progress=0% step=pulling from sumo
-[driver] 2026-05-15T02:48:11.959Z ## POC — done. Sumo Logic, 2h window.
+[driver] 2026-05-15T02:51:39.181Z ## POC — in progress
+         progress=60% step=templating 381 events
+[driver] 2026-05-15T02:51:42.183Z ## POC — in progress
+         progress=60% step=templating 381 events
+[driver] 2026-05-15T02:51:45.184Z ## POC — in progress
+         progress=60% step=templating 381 events
+[driver] 2026-05-15T02:51:48.186Z ## POC — in progress
+         progress=60% step=templating 381 events
+[driver] 2026-05-15T02:51:51.192Z ## POC — done. Sumo Logic, 2h window.
 [driver] report written to docs/evidence/log-poc-sumo/01-report.md

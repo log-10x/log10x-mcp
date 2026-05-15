@@ -102,8 +102,16 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
   const from = new Date(Date.now() - windowMs);
 
   // Compose the query. scope = _sourceCategory; query = additional filter.
+  // `*` or `_*` are treated as "all sources" — useful when the customer's
+  // Sumo HTTP source doesn't have a populated `_sourceCategory` (the
+  // default when you create an HTTP source via the UI and don't set the
+  // Source Category field). Without this escape hatch, a customer with
+  // unlabeled sources sees zero events even with real data indexed.
   const queryParts: string[] = [];
-  if (opts.scope) queryParts.push(`_sourceCategory=${jsonSafe(opts.scope)}`);
+  const scopeIsWildcard = !opts.scope || opts.scope === '*' || opts.scope === '_*';
+  if (opts.scope && !scopeIsWildcard) {
+    queryParts.push(`_sourceCategory=${jsonSafe(opts.scope)}`);
+  }
   if (opts.query) queryParts.push(opts.query);
   const searchQuery = queryParts.length > 0 ? queryParts.join(' ') : '*';
 
