@@ -240,16 +240,11 @@ async function formatResults(
     args: { pattern },
     reason: 'time series for the resolved pattern',
   });
-  hints.push(`Drop / filter in SIEM: log10x_dependency_check({ pattern: '${pattern}' }) FIRST to verify nothing depends on it, then log10x_exclusion_filter({ pattern: '${pattern}' }) to generate the vendor-specific drop config.`);
+  hints.push(`Reduce the cost of this pattern: log10x_pattern_mitigate({ pattern: '${pattern}' }) — presents drop @ analyzer / drop @ forwarder / mute @ 10x / compact @ 10x, gated on env capabilities.`);
   nextActions.push({
-    tool: 'log10x_dependency_check',
+    tool: 'log10x_pattern_mitigate',
     args: { pattern },
-    reason: 'verify safe-to-drop before generating exclusion filter',
-  });
-  nextActions.push({
-    tool: 'log10x_exclusion_filter',
-    args: { pattern },
-    reason: 'generate vendor-specific drop config after dependency_check confirms safe',
+    reason: 'cost-reduction menu — four options gated on env capabilities',
   });
   lines.push('');
   lines.push(agentOnly(`Suggested next calls: ${hints.join(' ')}`));

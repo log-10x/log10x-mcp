@@ -78,6 +78,7 @@ import { adviseReceiverSchema, executeAdviseReceiver } from './tools/advise-rece
 import { adviseRetrieverSchema, executeAdviseRetriever } from './tools/advise-retriever.js';
 import { adviseInstallSchema, executeAdviseInstall } from './tools/advise-install.js';
 import { adviseCompactSchema, executeAdviseCompact } from './tools/advise-compact.js';
+import { patternMitigateSchema, executePatternMitigate } from './tools/pattern-mitigate.js';
 import { loginStatusSchema, executeLoginStatus } from './tools/login-status.js';
 import {
   signinStartSchema,
@@ -345,12 +346,26 @@ Daily-habit / operational:
 - "why is X spiking" / "investigate X" / "what's causing this"   → log10x_investigate
 - "am I allowed to drop this" / "what references this"           → log10x_dependency_check
 - "drop X" / "filter X" / "mute X" / "stop ingesting X" /
-  "exclude X from Datadog/Splunk/Elastic/CloudWatch"             → log10x_dependency_check FIRST (verify safe-to-drop),
-                                                                    then log10x_exclusion_filter (generate vendor config)
-- (proactive): after log10x_top_patterns or log10x_event_lookup surfaces a high-volume
-  INFO/DEBUG pattern with no error signal AND no growth signal, offer the drop path in
-  the synthesis without waiting for the user to ask — "Pattern X looks like routine
-  $LEVEL traffic, ~$Y/day. Want me to dependency-check it for safe-to-drop?"
+  "reduce cost of X" / "kill X" / "get rid of X" / "shrink X" /
+  "compact X" / "exclude X from Datadog/Splunk/Elastic/CloudWatch" → log10x_pattern_mitigate (presents four
+                                                                      options: drop @ analyzer / drop @ forwarder /
+                                                                      mute @ 10x / compact @ 10x — only the options
+                                                                      available in this env are offered as one-click;
+                                                                      then route on the user's choice:
+                                                                        option 1 or 2 → log10x_dependency_check
+                                                                                        → log10x_exclusion_filter
+                                                                                          (vendor=analyzer or forwarder)
+                                                                        option 3       → log10x_dependency_check
+                                                                                        → log10x_advise_receiver
+                                                                        option 4       → log10x_advise_compact
+                                                                      Do NOT skip the mitigate menu and call
+                                                                      exclusion_filter directly unless the user
+                                                                      explicitly specified a vendor + intent.)
+- (proactive): after log10x_top_patterns / log10x_cost_drivers / log10x_event_lookup surfaces a
+  high-volume pattern AND the user's framing is cost-related ("expensive", "bill", "save",
+  "reduce", "spike"), offer the mitigation menu as a follow-up question — "Want me to show
+  you options for reducing this?" Do this even if not asked. When the user says yes, call
+  log10x_pattern_mitigate with the pattern identity from the prior row.
 
 Cost investigation:
 - "what's expensive right now" / "top patterns by cost"          → log10x_top_patterns
@@ -955,6 +970,12 @@ registerLog10xTool('log10x_advise_compact', adviseCompactSchema, (args) =>
   wrap('log10x_advise_compact', () => executeAdviseCompact(args))
 );
 
+// ── Tool: log10x_pattern_mitigate (cost-reduction menu) ──
+
+registerLog10xTool('log10x_pattern_mitigate', patternMitigateSchema, (args) =>
+  wrap('log10x_pattern_mitigate', () => executePatternMitigate(args))
+);
+
 // ── Resource: log10x://status ──
 
 server.resource(
@@ -1013,6 +1034,7 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_advise_receiver', intent: 'Receiver install/verify/teardown plan — inline only, with optional compact encoding (optimize=true)' },
   { name: 'log10x_advise_retriever', intent: 'Retriever install/verify/teardown plan — standalone S3 + SQS archive + query' },
   { name: 'log10x_advise_compact', intent: 'Render a `gh` PR command + diff for a compactReceiver lookup-CSV update against the customer GitOps repo (engine hot-reloads the CSV without a pipeline restart)' },
+  { name: 'log10x_pattern_mitigate', intent: 'Single entry point — present the four cost-reduction options for a pattern (drop @ analyzer, drop @ forwarder, mute @ 10x, compact @ 10x) in user terms with env-capability gating; route to the right sub-tool based on user choice' },
 ];
 
 async function handleCliFlags(): Promise<boolean> {

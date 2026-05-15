@@ -292,7 +292,7 @@ export async function executeTopPatterns(
     // this hint. Gated on topActiveRow so we don't recommend dropping
     // a (no-symbol) or stale series.
     if (topActiveRow) {
-      hints.push(`Drop a routine pattern (high-volume INFO/DEBUG with no diagnostic value): log10x_dependency_check({ pattern: '${topActiveRow.hash}' }) → log10x_exclusion_filter({ pattern: '${topActiveRow.hash}' }) for the vendor-specific drop config.`);
+      hints.push(`Reduce the cost of a high-volume pattern: log10x_pattern_mitigate({ pattern: '${topActiveRow.hash}' }) — presents the four options (drop @ analyzer / drop @ forwarder / mute @ 10x / compact @ 10x) gated on this env's capabilities, then routes to the right sub-tool based on user choice.`);
     }
     if (hints.length > 0) {
       lines.push('');

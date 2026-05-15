@@ -99,6 +99,31 @@ export interface EnvConfig {
   permissions?: Permission;
   /** True if the backend marked this env as the user's default. */
   isDefault?: boolean;
+  /**
+   * GitOps configuration for advisor tools that open PRs against the
+   * user's config repo (log10x_advise_compact, log10x_advise_receiver,
+   * and the upcoming log10x_pattern_mitigate menu's PR-based options).
+   *
+   * The advisor's resolveTarget chain prefers, in order:
+   *   1. Explicit `gitops_repo` arg on the tool call
+   *   2. This `gitops` field (from envs.json or LOG10X_GH_REPO env var)
+   *   3. The receiver pod's `GH_REPO` env var, discovered via
+   *      `log10x_discover_env` (requires kubectl access)
+   *
+   * For users without kubectl access from their laptop, sources (1)
+   * and (2) keep the GitOps-based mitigation paths working without
+   * any cluster reach.
+   */
+  gitops?: {
+    /** GitHub owner/name of the config repo, e.g. `acme/log10x-config`. */
+    repo: string;
+    /**
+     * Path inside the repo where the receiver's compact lookup file
+     * lives (e.g. `compact/lookup.csv`). Optional — advisors fall back
+     * to their own default path when absent.
+     */
+    lookupPath?: string;
+  };
 }
 
 /** Parsed environment list + default + mutable last-used slot. */
@@ -195,6 +220,11 @@ function tryBuildFromMetricsEnvVars(): EnvConfig | undefined {
 
   const config = parseMetricsBackendFromEnv(kind);
   try {
+    const gitopsRepo = process.env.LOG10X_GH_REPO;
+    const gitopsLookupPath = process.env.LOG10X_GH_LOOKUP_PATH;
+    const gitops = gitopsRepo
+      ? { repo: gitopsRepo, ...(gitopsLookupPath ? { lookupPath: gitopsLookupPath } : {}) }
+      : undefined;
     return {
       nickname: process.env.LOG10X_METRICS_NICKNAME?.trim() || 'default',
       metricsBackend: createMetricsBackend(config),
@@ -202,6 +232,7 @@ function tryBuildFromMetricsEnvVars(): EnvConfig | undefined {
       apiKey: kind === 'log10x' ? config.kind === 'log10x' ? config.apiKey : '' : '',
       envId: kind === 'log10x' ? config.kind === 'log10x' ? config.envId : '' : '',
       isDefault: true,
+      ...(gitops ? { gitops } : {}),
     };
   } catch (e) {
     if (e instanceof MetricsBackendConfigError) {
@@ -399,6 +430,11 @@ interface EnvsJsonEntry {
   metricsBackend: MetricsBackendConfig;
   labels?: Partial<LabelNameMap>;
   isDefault?: boolean;
+  /**
+   * GitOps target for advisor / mitigation tools — see `EnvConfig.gitops`
+   * for the full lookup-chain semantics.
+   */
+  gitops?: { repo: string; lookupPath?: string };
 }
 
 /**
@@ -453,6 +489,14 @@ async function tryReadEnvsJson(): Promise<EnvConfig[] | undefined> {
         entry.metricsBackend.kind === 'log10x' ? entry.metricsBackend.apiKey : '';
       const envId =
         entry.metricsBackend.kind === 'log10x' ? entry.metricsBackend.envId : '';
+      // GitOps repo can come from the entry OR be globally overridden
+      // by LOG10X_GH_REPO. The entry wins when both are set so per-env
+      // overrides remain possible in multi-env setups.
+      const gitopsRepo = entry.gitops?.repo ?? process.env.LOG10X_GH_REPO;
+      const gitopsLookupPath = entry.gitops?.lookupPath ?? process.env.LOG10X_GH_LOOKUP_PATH;
+      const gitops = gitopsRepo
+        ? { repo: gitopsRepo, ...(gitopsLookupPath ? { lookupPath: gitopsLookupPath } : {}) }
+        : undefined;
       return {
         nickname: entry.nickname,
         metricsBackend: backend,
@@ -460,6 +504,7 @@ async function tryReadEnvsJson(): Promise<EnvConfig[] | undefined> {
         apiKey,
         envId,
         isDefault: entry.isDefault,
+        ...(gitops ? { gitops } : {}),
       };
     } catch (e) {
       if (e instanceof MetricsBackendConfigError) {

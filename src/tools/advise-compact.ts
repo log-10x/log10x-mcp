@@ -24,6 +24,7 @@
 import { z } from 'zod';
 import { getSnapshot } from '../lib/discovery/snapshot-store.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
+import { loadEnvironments } from '../lib/environments.js';
 
 export const adviseCompactSchema = {
   gitops_repo: z
@@ -185,30 +186,52 @@ function shellQuote(s: string): string {
 }
 
 /**
- * Resolves gitops_repo + lookup_path from a snapshot_id when the caller
- * didn't pass them explicitly. Returns a markdown error string when
- * neither source supplies a repo.
+ * Resolves gitops_repo + lookup_path. Lookup precedence:
+ *   1. Explicit `args.gitops_repo`
+ *   2. The active env's `gitops` field (envs.json or LOG10X_GH_REPO env var) —
+ *      lets users without kubectl-from-laptop access still drive PR-based
+ *      mitigation flows
+ *   3. Snapshot from `log10x_discover_env` — receiver pod's GH_REPO env var
+ *   4. Error with setup hints
  */
-function resolveTarget(args: AdviseCompactArgs): { resolved: AdviseCompactArgs } | { error: string } {
+async function resolveTarget(args: AdviseCompactArgs): Promise<{ resolved: AdviseCompactArgs } | { error: string }> {
+  // 1. Explicit arg wins.
   if (args.gitops_repo) {
     return { resolved: args };
   }
+
+  // 2. Active env's gitops field. Non-fatal if env loading fails — fall
+  // through to the snapshot path. The envs lookup is best-effort here.
+  try {
+    const envs = await loadEnvironments();
+    const active = envs.lastUsed ?? envs.default;
+    if (active?.gitops?.repo) {
+      return {
+        resolved: {
+          ...args,
+          gitops_repo: active.gitops.repo,
+          lookup_path: args.lookup_path ?? active.gitops.lookupPath ?? undefined,
+        },
+      };
+    }
+  } catch {
+    // ignore; fall through to snapshot resolution
+  }
+
+  // 3. Snapshot from kubectl discovery.
   if (!args.snapshot_id) {
-    // Emit a NEXT_ACTIONS hint to discover_env so autonomous chains
-    // can recover automatically — agents reaching this branch usually
-    // got here via a savings/cost hint without a snapshot in hand.
     const recover: NextAction[] = [
       {
         tool: 'log10x_discover_env',
         args: {},
-        reason: 'compact-mode advisor needs a snapshot_id; run discovery first then re-invoke advise_compact',
+        reason: 'compact-mode advisor needs a snapshot_id or a configured GitOps repo; run discovery first then re-invoke advise_compact',
       },
     ];
     return {
       error: [
         '# compactReceiver advisor — missing target',
         '',
-        'Pass either `gitops_repo` (owner/name) or `snapshot_id` (from `log10x_discover_env`). With a snapshot, the tool resolves the repo from the running receiver pod\'s `GH_REPO` env var.',
+        'Pass `gitops_repo` (owner/name) directly, set `gitops.repo` in your `envs.json` (or `LOG10X_GH_REPO` env var) for a stable per-env default, or pass `snapshot_id` (from `log10x_discover_env`) so the tool can read the running receiver pod\'s `GH_REPO`.',
         '',
         renderNextActions(recover),
       ]
@@ -222,7 +245,7 @@ function resolveTarget(args: AdviseCompactArgs): { resolved: AdviseCompactArgs }
       error: [
         '# compactReceiver advisor — snapshot not found',
         '',
-        `Snapshot \`${args.snapshot_id}\` is missing or expired (snapshots live 30 min). Run \`log10x_discover_env\` again, then re-call this tool with the new snapshot_id (or pass \`gitops_repo\` directly).`,
+        `Snapshot \`${args.snapshot_id}\` is missing or expired (snapshots live 30 min). Run \`log10x_discover_env\` again, then re-call this tool with the new snapshot_id (or pass \`gitops_repo\` directly, or set \`gitops.repo\` in your envs.json).`,
       ].join('\n'),
     };
   }
@@ -232,12 +255,13 @@ function resolveTarget(args: AdviseCompactArgs): { resolved: AdviseCompactArgs }
       error: [
         '# compactReceiver advisor — receiver GitOps not configured',
         '',
-        `Snapshot \`${args.snapshot_id}\` did not detect a receiver pod with \`GH_ENABLED=true\` + \`GH_REPO=<owner/name>\` set. The compactReceiver GitOps flow requires a receiver already running with the GitOps env vars wired.`,
+        `Snapshot \`${args.snapshot_id}\` did not detect a receiver pod with \`GH_ENABLED=true\` + \`GH_REPO=<owner/name>\` set. The compactReceiver GitOps flow requires either a running receiver wired with those env vars, OR an explicit user-supplied GitOps target.`,
         '',
         '**Next steps**:',
-        '- If you haven\'t installed the receiver yet, call `log10x_advise_receiver` (or `log10x_advise_install` with `goal=compact`). The plan now includes a "GitOps — MCP-managed runtime config" section that lists every env var to set, including `GH_ENABLED`, `GH_REPO`, `GH_TOKEN`, and `compactReceiverLookupFile`.',
+        '- For users without kubectl access from their laptop: set `gitops.repo` (and optional `lookupPath`) in your `~/.log10x/envs.json` entry, or export `LOG10X_GH_REPO=<owner/name>`. Either works as a stable per-env default.',
+        '- If you haven\'t installed the receiver yet, call `log10x_advise_receiver` (or `log10x_advise_install` with `goal=compact`). The plan includes the "GitOps — MCP-managed runtime config" section listing every env var to set.',
         '- If the receiver is already running but GitOps env vars are missing, edit the helm values (or the pod\'s env block) to add them.',
-        '- To bypass discovery, re-call this tool with `gitops_repo=<owner/name>` directly.',
+        '- To bypass discovery entirely, re-call this tool with `gitops_repo=<owner/name>` directly.',
       ].join('\n'),
     };
   }
@@ -252,7 +276,7 @@ function resolveTarget(args: AdviseCompactArgs): { resolved: AdviseCompactArgs }
 }
 
 export async function executeAdviseCompact(args: AdviseCompactArgs): Promise<string> {
-  const r = resolveTarget(args);
+  const r = await resolveTarget(args);
   if ('error' in r) return r.error;
   const resolved = r.resolved;
   const mode = resolved.mode ?? 'csv';
