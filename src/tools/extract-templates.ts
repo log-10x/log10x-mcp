@@ -14,6 +14,7 @@
 import { promises as fs } from 'fs';
 import { z } from 'zod';
 import { runDevCliStdin, runDevCliFile, DevCliNotInstalledError, DevCliRunError } from '../lib/dev-cli.js';
+import { agentOnly } from '../lib/agent-only.js';
 
 export const extractTemplatesSchema = {
   source: z.enum(['file', 'events', 'text']).describe(
@@ -168,9 +169,11 @@ export async function executeExtractTemplates(args: ExtractArgs): Promise<string
   // chain is to look up the resulting canonical names against the live
   // env or to run richer per-pattern triage on the same input.
   lines.push('');
-  lines.push('**Next actions**:');
-  lines.push('  - To look up any of the extracted templates against the live Reporter (find cost, severity, services, trend), pass the canonical pattern name (e.g. `Payment_Gateway_Timeout`) to `log10x_event_lookup`.');
-  lines.push('  - For richer per-pattern triage with variable concentrations and next-action suggestions on the same input, use `log10x_resolve_batch` instead — same input format, structured per-pattern output.');
+  lines.push(agentOnly(
+    `Suggested next calls: ` +
+    `Look up an extracted template against the live Reporter for cost / severity / services / trend → pass its canonical name (e.g. 'Payment_Gateway_Timeout') to log10x_event_lookup. ` +
+    `Richer per-pattern triage with variable concentrations on the same input → log10x_resolve_batch (same input format, structured per-pattern output).`
+  ));
 
   return lines.join('\n');
 }

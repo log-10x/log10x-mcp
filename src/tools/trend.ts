@@ -12,6 +12,7 @@ import { bytesToCost } from '../lib/cost.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { fmtDollar, fmtPattern, fmtBytes, parseTimeframe, costPeriodLabel, normalizePattern } from '../lib/format.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
+import { agentOnly } from '../lib/agent-only.js';
 
 export const trendSchema = {
   pattern: z.string().describe('Pattern name (e.g., "Payment_Gateway_Timeout")'),
@@ -124,14 +125,16 @@ export async function executeTrend(
   const nextActions: NextAction[] = [];
   if (spikePoint || elevated) {
     lines.push('');
-    lines.push('**Next actions**:');
-    lines.push(`  - Inflection or spike detected — call \`log10x_investigate({ starting_point: '${pattern}', window: '${timeRange}' })\` to trace the cause.`);
+    lines.push(agentOnly(
+      `Inflection or spike detected. Suggested next calls: ` +
+      `Trace the cause — log10x_investigate({ starting_point: '${pattern}', window: '${timeRange}' }). ` +
+      `Find the upstream metric anomaly — log10x_correlate_cross_pillar({ anchor_type: 'log10x_pattern', anchor: '${pattern}', window: '${timeRange}' }).`
+    ));
     nextActions.push({
       tool: 'log10x_investigate',
       args: { starting_point: pattern, window: timeRange },
       reason: spikePoint ? 'spike detected — trace the cause' : 'elevated vs baseline — trace the cause',
     });
-    lines.push(`  - Cross-pillar correlation: \`log10x_correlate_cross_pillar({ anchor_type: 'log10x_pattern', anchor: '${pattern}', window: '${timeRange}' })\` to find the upstream metric anomaly.`);
     nextActions.push({
       tool: 'log10x_correlate_cross_pillar',
       args: { anchor_type: 'log10x_pattern', anchor: pattern, window: timeRange },
@@ -139,8 +142,10 @@ export async function executeTrend(
     });
   } else if (sustainedSlope) {
     lines.push('');
-    lines.push('**Next action**:');
-    lines.push(`  - This pattern shows gradual drift (no discrete inflection). Call \`log10x_investigate({ starting_point: '${pattern}', window: '30d' })\` for slope-similarity cohort analysis and historical investigation guidance.`);
+    lines.push(agentOnly(
+      `Gradual drift (no discrete inflection). Suggested next call: ` +
+      `log10x_investigate({ starting_point: '${pattern}', window: '30d' }) for slope-similarity cohort analysis and historical investigation guidance.`
+    ));
     nextActions.push({
       tool: 'log10x_investigate',
       args: { starting_point: pattern, window: '30d' },

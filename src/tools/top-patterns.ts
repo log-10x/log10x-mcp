@@ -15,6 +15,7 @@ import { bytesToCost, parsePrometheusValue } from '../lib/cost.js';
 import { resolveMetricsEnv, resolveMetricsEnvFiltered } from '../lib/resolve-env.js';
 import { fmtDollar, fmtPattern, fmtSeverity, fmtCount, parseTimeframe, costPeriodLabel } from '../lib/format.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
+import { agentOnly } from '../lib/agent-only.js';
 
 export const topPatternsSchema = {
   service: z.string().optional().describe('Service name to scope the result. Omit for all services.'),
@@ -137,7 +138,10 @@ export async function executeTopPatterns(
 
   const lines: string[] = [];
   lines.push(`Top ${rows.length} patterns — ${displayName} (${tf.label}) · ${fmtDollar(totalTopCost)}${period} total`);
-  lines.push(`⚠ These are CURRENT RANK by cost (biggest right now). This is NOT a growth/delta ranking — do not re-label as "cost drivers" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.`);
+  // User-facing caveat: short, factual, no directives or tool names.
+  lines.push(`_Current rank by cost — point-in-time, not a growth/week-over-week ranking._`);
+  // Agent-facing constraint: don't re-label, and the tool name to use for growth.
+  lines.push(agentOnly(`Constraint: these rows are CURRENT RANK by cost over the window, not a growth/delta ranking. Do not re-label as "cost drivers" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.`));
   lines.push('');
   let staleCount = 0;
   let noSymbolCount = 0;
@@ -158,18 +162,25 @@ export async function executeTopPatterns(
   // speculate about content from this row's other labels alone.
   if (noSymbolCount > 0) {
     lines.push('');
+    // User-facing: explain what (no-symbol) means.
     lines.push(
-      `⚠ ${noSymbolCount} row${noSymbolCount > 1 ? 's' : ''} above marked \`${NO_SYMBOL}\`: the engine tokenized these events but symbol-lookup did not produce a canonical name. ` +
-      `The metric tells you volume + bytes + the labels listed (e.g., service, severity). It does NOT tell you what the event text was. ` +
-      `Do not speculate about event content from this row. To inspect the actual events: use \`log10x_retriever_query\` (if Retriever is deployed for this env) or check the source pod's stdout directly.`
+      `_${noSymbolCount} row${noSymbolCount > 1 ? 's' : ''} above marked \`${NO_SYMBOL}\`: the engine tokenized these events but symbol-lookup did not produce a canonical name. ` +
+      `The metric shows volume + bytes + the labels (service, severity). It does not tell you the event text itself._`
     );
+    // Agent-facing: don't speculate; specific follow-up tool.
+    lines.push(agentOnly(
+      `Constraint: do not speculate about event content from a (no-symbol) row. To inspect the actual events, use log10x_retriever_query (if Retriever is deployed for this env) or check the source pod's stdout directly.`
+    ));
   }
   if (staleCount > 0) {
     lines.push('');
+    // User-facing: explain what stale means.
     lines.push(
-      `⚠ ${staleCount} row${staleCount > 1 ? 's' : ''} above tagged \`stale\`: ranked top-N over ${tf.label} but produced zero events in the last hour. ` +
-      `These are residue of past incidents inside the lookback window, not current cost drivers. Discount accordingly when recommending action.`
+      `_${staleCount} row${staleCount > 1 ? 's' : ''} above tagged \`stale\`: ranked top-N over ${tf.label} but produced zero events in the last hour. Residue of a past incident inside the lookback window, not a current cost driver._`
     );
+    lines.push(agentOnly(
+      `Constraint: when recommending action, discount stale rows — they aren't currently firing. Prefer non-stale rows as starting_point.`
+    ));
   }
 
   if (scopeCoveragePct !== undefined) {
@@ -242,10 +253,11 @@ export async function executeTopPatterns(
   // and stale rows just lead the agent back to a closed incident.
   const topActiveRow = rows.find(r => !r.isNoSymbol && !r.isStale && r.hash);
   if (rows[0]) {
-    lines.push('');
-    lines.push('**Next actions**:');
+    // Build the structured + prose next-action hints for the agent.
+    // The user has no use for "call log10x_X" instructions; the agent does.
+    const hints: string[] = [];
     if (topActiveRow) {
-      lines.push(`  - call \`log10x_investigate({ starting_point: '${topActiveRow.hash}' })\` to trace what\'s driving the top active pattern.`);
+      hints.push(`Trace the top active pattern (skipping stale/no-symbol rows): log10x_investigate({ starting_point: '${topActiveRow.hash}' }).`);
       nextActions.push({
         tool: 'log10x_investigate',
         args: { starting_point: topActiveRow.hash },
@@ -253,7 +265,7 @@ export async function executeTopPatterns(
       });
     }
     if (newlyEmerged.length > 0 && newlyEmerged[0].hash && newlyEmerged[0].hash !== '(no-symbol)' && newlyEmerged[0].hash !== '(unknown)') {
-      lines.push(`  - **Investigate the newly-emerged pattern**: \`log10x_investigate({ starting_point: '${newlyEmerged[0].hash}', window: '15m' })\` — it is not in the cost ranking yet but is firing right now.`);
+      hints.push(`Newly-emerged pattern (firing now, not yet in the cost ranking): log10x_investigate({ starting_point: '${newlyEmerged[0].hash}', window: '15m' }).`);
       nextActions.push({
         tool: 'log10x_investigate',
         args: { starting_point: newlyEmerged[0].hash, window: '15m' },
@@ -262,28 +274,29 @@ export async function executeTopPatterns(
     }
     const svcHint = args.service || topActiveRow?.service || rows[0]?.service;
     if (svcHint) {
-      lines.push(`  - call \`log10x_cost_drivers({ service: '${svcHint}', timeRange: '7d' })\` for week-over-week deltas on the top service.`);
+      hints.push(`Week-over-week deltas on the top service: log10x_cost_drivers({ service: '${svcHint}', timeRange: '7d' }).`);
       nextActions.push({
         tool: 'log10x_cost_drivers',
         args: { service: svcHint, timeRange: '7d' },
         reason: 'week-over-week deltas on the top service',
       });
     } else {
-      lines.push(`  - call \`log10x_cost_drivers({ timeRange: '7d' })\` for week-over-week deltas across all services.`);
+      hints.push(`Week-over-week deltas across all services: log10x_cost_drivers({ timeRange: '7d' }).`);
       nextActions.push({
         tool: 'log10x_cost_drivers',
         args: { timeRange: '7d' },
         reason: 'week-over-week deltas across all services',
       });
     }
-    // Cost-mitigation hint: among the top patterns, INFO/DEBUG patterns
-    // with no error signal are often safe to drop. Surface the drop path
-    // explicitly so it's discoverable without the user needing to know
-    // the tool name. The agent decides which specific patterns qualify;
-    // we just surface that the path exists. Gated on topActiveRow so
-    // we don't recommend dropping a (no-symbol) or stale series.
+    // Drop-routine-pattern path: discoverable only if the agent reads
+    // this hint. Gated on topActiveRow so we don't recommend dropping
+    // a (no-symbol) or stale series.
     if (topActiveRow) {
-      lines.push(`  - to **drop a routine pattern** (high-volume INFO/DEBUG with no diagnostic value): run \`log10x_dependency_check({ pattern: '${topActiveRow.hash}' })\` to verify safe-to-mute, then \`log10x_exclusion_filter({ pattern: '${topActiveRow.hash}' })\` for the vendor-specific drop config.`);
+      hints.push(`Drop a routine pattern (high-volume INFO/DEBUG with no diagnostic value): log10x_dependency_check({ pattern: '${topActiveRow.hash}' }) → log10x_exclusion_filter({ pattern: '${topActiveRow.hash}' }) for the vendor-specific drop config.`);
+    }
+    if (hints.length > 0) {
+      lines.push('');
+      lines.push(agentOnly(`Suggested next calls: ${hints.join(' ')}`));
     }
   }
   const block = renderNextActions(nextActions);

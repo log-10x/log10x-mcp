@@ -455,7 +455,26 @@ NUMBERS DISCIPLINE — hard rules, no exceptions:
   — wait for the user to run the script and paste back its results.
 
 Analyzer cost is auto-detected from the user's profile. Typical rates if unspecified:
-Splunk $6/GB, Datadog $2.50/GB, Elasticsearch $1/GB, CloudWatch $0.50/GB.`,
+Splunk $6/GB, Datadog $2.50/GB, Elasticsearch $1/GB, CloudWatch $0.50/GB.
+
+TOOL OUTPUT — AUDIENCE-SEPARATED MARKDOWN
+
+Every tool returns one markdown blob. Two audiences read it:
+  1. The user (sees rendered prose).
+  2. You, the agent (read the raw text, chain follow-up calls).
+
+The MCP marks agent-only content with these inline HTML comments so you can identify and consume them without leaking them to the user:
+
+  <!-- agent-only: <free prose for the agent — constraints, suggested next calls, "do not X" warnings> -->
+  <!-- NEXT_ACTIONS:[{...JSON tool-call hints...}] -->
+
+Rule: when you produce a user-facing reply, DO NOT pass the contents of \`<!-- agent-only: ... -->\` or \`<!-- NEXT_ACTIONS: ... -->\` blocks to the user verbatim. They are tool→agent communication.
+
+Consume them by:
+  - Using the constraints inside \`agent-only\` to shape your synthesis (e.g., "do not re-label current-rank as growth" → say "top patterns by current cost" not "top cost drivers").
+  - Using the \`NEXT_ACTIONS\` JSON when you decide your next tool call.
+
+The visible markdown is the FACTS the user gets. Everything inside an HTML comment is for you to internalize, not relay.`,
   }
 );
 

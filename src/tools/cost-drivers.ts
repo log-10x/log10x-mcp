@@ -21,6 +21,7 @@ import { bytesToCost, parsePrometheusValue } from '../lib/cost.js';
 import { applyCostDriverGates, DEFAULT_GATES } from '../lib/gates.js';
 import { resolveMetricsEnv, resolveMetricsEnvFiltered } from '../lib/resolve-env.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
+import { agentOnly } from '../lib/agent-only.js';
 import {
   fmtDollar, fmtPattern, fmtSeverity, fmtCount, fmtPct,
   parseTimeframe, costPeriodLabel, type Timeframe
@@ -179,7 +180,8 @@ export async function executeCostDrivers(
       : `current ${tf.range} vs 3-window avg baseline (offsets: ${tf.baselineOffsets.join('d/')}d)`;
     lines.push(`${displayName} — ${fmtDollar(baselineCost)} → ${fmtDollar(driversCost)}${period} (${drivers.length} cost driver${drivers.length > 1 ? 's' : ''})`);
     lines.push(`Comparison: ${comparison}`);
-    lines.push(`⚠ These are GROWTH deltas (current window vs prior baseline), NOT current ranking. Do not re-rank or merge with log10x_top_patterns output.`);
+    lines.push(`_Growth deltas (current window vs prior baseline) — not a current-rank list._`);
+    lines.push(agentOnly(`Constraint: these are GROWTH deltas (current window vs prior baseline), NOT current ranking. Do not re-rank or merge with log10x_top_patterns output.`));
     lines.push('');
 
     for (let i = 0; i < Math.min(drivers.length, limit); i++) {
@@ -208,23 +210,24 @@ export async function executeCostDrivers(
     lines.push(`${drivers.length} driver${drivers.length > 1 ? 's' : ''} = ${driverPct}% of increase · ${stableCount} other pattern${stableCount !== 1 ? 's' : ''}`);
 
     // next_action hints — nudge the model toward investigate for each top driver.
-    lines.push('');
-    lines.push('**Next actions**:');
     const nextActions: NextAction[] = [];
+    const hints: string[] = [];
     for (const d of drivers.slice(0, 3)) {
-      lines.push(`  - call \`log10x_investigate({ starting_point: '${d.hash}' })\` to trace the cause of the ${fmtDollar(d.delta)} delta on this pattern.`);
+      hints.push(`Trace the ${fmtDollar(d.delta)} delta on '${d.hash}': log10x_investigate({ starting_point: '${d.hash}' }).`);
       nextActions.push({
         tool: 'log10x_investigate',
         args: { starting_point: d.hash },
         reason: `trace the ${fmtDollar(d.delta)} delta driver`,
       });
     }
-    lines.push(`  - call \`log10x_dependency_check({ pattern: '${drivers[0].hash}' })\` before muting or dropping — blast-radius safety.`);
+    hints.push(`Blast-radius safety before muting/dropping the top driver: log10x_dependency_check({ pattern: '${drivers[0].hash}' }).`);
     nextActions.push({
       tool: 'log10x_dependency_check',
       args: { pattern: drivers[0].hash },
       reason: 'blast-radius check before muting top driver',
     });
+    lines.push('');
+    lines.push(agentOnly(`Suggested next calls: ${hints.join(' ')}`));
     const block = renderNextActions(nextActions);
     if (block) lines.push('', block);
   } else {

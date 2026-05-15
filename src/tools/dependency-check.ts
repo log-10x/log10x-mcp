@@ -30,6 +30,7 @@
 import { z } from 'zod';
 import { normalizePattern } from '../lib/format.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
+import { agentOnly } from '../lib/agent-only.js';
 import {
   resolveSiemSelection,
   formatAmbiguousError,
@@ -203,9 +204,16 @@ function renderBashFallback(
     `In-process scan unavailable (${whyFallback}). Falling back to a paste-ready bash command — runs locally, read-only, against your own credentials.`
   );
   lines.push('');
+  // User-facing fact: the tool didn't run yet. Critical to surface so the
+  // user understands the next step (run the command locally).
   lines.push(
-    `⚠ NO SCAN HAS BEEN RUN. This tool did not query your SIEM. The command below is what the user must run locally in their own terminal against their own ${vc.label} credentials. Do not report "zero dependencies" or "safe to drop" based on this output — wait for the user to paste the script's results back.`
+    `> **No scan has been run yet.** This tool did not query your SIEM. The command below is what to run locally in your own terminal against your own ${vc.label} credentials.`
   );
+  // Agent-only constraint: don't fabricate "zero dependencies" before the
+  // user pastes results back.
+  lines.push(agentOnly(
+    `Constraint: do not report "zero dependencies" or "safe to drop" based on this output — wait for the user to paste the script's results back.`
+  ));
   lines.push('');
   lines.push(
     `Check if any dashboards, alerts, or saved searches in your ${vc.label} depend on this pattern before dropping it.`

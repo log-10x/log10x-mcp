@@ -22,6 +22,7 @@ import {
   formatAmbiguousError,
 } from '../lib/siem/resolve.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
+import { agentOnly } from '../lib/agent-only.js';
 
 const SIEM_VENDORS = ['datadog', 'splunk', 'elasticsearch', 'cloudwatch'] as const;
 type SiemVendor = (typeof SIEM_VENDORS)[number];
@@ -117,9 +118,11 @@ export async function executeExclusionFilter(args: {
   // questions are "did volume actually drop" (pattern_trend) and "what did
   // I save" (cost_drivers shows the delta).
   lines.push('');
-  lines.push('**Next actions** (after the drop is applied):');
-  lines.push(`  - Verify volume actually dropped: \`log10x_pattern_trend({ pattern: '${pattern}', timeRange: '1d', step: '1h' })\` — look for the inflection where the rate goes to zero.`);
-  lines.push(`  - See the cost impact: \`log10x_cost_drivers({ timeRange: '7d' })\` — the pattern will appear in the "shrinking" / "removed" list with the savings dollar amount.`);
+  lines.push(agentOnly(
+    `After the drop is applied, suggested next calls: ` +
+    `Verify volume actually dropped — log10x_pattern_trend({ pattern: '${pattern}', timeRange: '1d', step: '1h' }) — look for the inflection where the rate goes to zero. ` +
+    `See cost impact — log10x_cost_drivers({ timeRange: '7d' }) — the pattern will appear in the shrinking/removed list with the savings dollar amount.`
+  ));
 
   const nextActions: NextAction[] = [
     {

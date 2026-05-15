@@ -17,6 +17,7 @@ import { promises as fs } from 'fs';
 import { z } from 'zod';
 import { submitPaste, PASTE_MAX_BYTES, type PasteResponse } from '../lib/paste-api.js';
 import { runDevCli, DevCliNotInstalledError, DevCliRunError } from '../lib/dev-cli.js';
+import { agentOnly } from '../lib/agent-only.js';
 import {
   parseTemplates,
   parseEncoded,
@@ -179,15 +180,21 @@ export async function executeResolveBatch(args: {
     const pctLabel = `${Math.round(dropRate * 100)}%`;
     if (dropRate >= 0.2) {
       lines.push('');
+      // User-visible: the data-quality fact. The user must see this.
       lines.push(
-        `> ⚠ **${fmtCount(droppedEvents)} input lines (${pctLabel}) were NOT accounted for by the templatizer.** ` +
-          `The sum of per-pattern event counts (${fmtCount(accountedEvents)}) is less than the input line count (${fmtCount(lineCount)}). ` +
-          `This is a known engine-side bug (GAPS G11) where the templatizer silently drops input lines under certain conditions ` +
+        `> **${fmtCount(droppedEvents)} input lines (${pctLabel}) were not accounted for by the templatizer.** ` +
+          `Per-pattern event counts sum to ${fmtCount(accountedEvents)}, less than the input line count (${fmtCount(lineCount)}). ` +
+          `Known engine-side bug (GAPS G11) — the templatizer silently drops lines under certain conditions ` +
           `(multi-line stack traces, event-boundary crossings, high-cardinality variant overfitting). ` +
-          `**Do not treat this batch as a complete triage** — the dropped lines may contain the most important signals. ` +
-          `Workarounds: (1) resubmit the batch with \`top_n_patterns: 50\` to widen the filter; (2) split the batch into halves and compare; ` +
-          `(3) for incident response, use log10x_event_lookup on any specific line you remember rather than trusting the batch output.`
+          `The dropped lines may contain the most important signals.`
       );
+      // Agent-only: behavior constraints + the specific workaround tool calls.
+      lines.push(agentOnly(
+        `Constraint: do not treat this batch as a complete triage when drop_rate ≥ 20%. ` +
+        `Workarounds to surface: (1) resubmit with top_n_patterns: 50 to widen the filter; ` +
+        `(2) split the batch into halves and compare; ` +
+        `(3) for incident response, use log10x_event_lookup on a specific line rather than trusting batch output.`
+      ));
     } else if (dropRate >= 0.05) {
       lines.push(
         `_Note: ${fmtCount(droppedEvents)} lines (${pctLabel}) were not accounted for by the templatizer. Minor drop, likely tiny-batch overfitting._`
@@ -262,11 +269,8 @@ export async function executeResolveBatch(args: {
 
     if (args.include_next_actions) {
       lines.push('');
-      lines.push('**Next actions**:');
       const actions = buildNextActions(p, args.environment);
-      for (const a of actions) {
-        lines.push(`  - ${a}`);
-      }
+      lines.push(agentOnly(`Suggested next calls: ${actions.join(' ')}`));
     }
     lines.push('');
   }

@@ -11,6 +11,7 @@ import type { SiemId } from './siem/pricing.js';
 import { SIEM_DISPLAY_NAMES } from './siem/pricing.js';
 import { fmtBytes, fmtCount, fmtDollar, fmtGb, fmtPct } from './format.js';
 import { renderNextActions, type NextAction } from './next-actions.js';
+import { agentOnly } from './agent-only.js';
 
 export interface RenderInput {
   siem: SiemId;
@@ -443,10 +444,12 @@ export function renderPocPattern(input: RenderInput, identity: string): string {
     lines.push('');
   }
   if (needsReview(p)) {
+    // User-facing fact: this pattern has a profile that warrants review.
     lines.push(
-      `⚠ **Review before muting**: run \`log10x_dependency_check(pattern: "${p.identity}")\` — this pattern\'s ` +
-        `${p.severity || 'severity'}/${p.confidence} profile means it may feed live alerts or dashboards.`
+      `> **Review before muting**: this pattern\'s ${p.severity || 'severity'}/${p.confidence} profile means it may feed live alerts or dashboards.`
     );
+    // Agent-only: the specific tool to call before any mute action.
+    lines.push(agentOnly(`Constraint: before generating an exclusion config for '${p.identity}', call log10x_dependency_check({ pattern: '${p.identity}' }) and surface its findings to the user.`));
   }
 
   // Structured NEXT_ACTIONS for autonomous chains. The pattern view is a
@@ -527,15 +530,20 @@ export function renderPocReport(input: RenderInput): RenderResult {
   if (lineCount > 50 && droppedEvents > 0) {
     const pctLabel = `${Math.round(dropRate * 100)}%`;
     if (dropRate >= 0.2) {
+      // User-facing fact about the dropped lines.
       lines.push(
-        `> ⚠ **${fmtCount(droppedEvents)} input lines (${pctLabel}) were NOT accounted for by the templater.** ` +
-          `The sum of per-pattern event counts (${fmtCount(accountedEvents)}) is less than the sample line count (${fmtCount(lineCount)}). ` +
-          `This is a known engine-side bug (GAPS G11) where the templater silently drops input lines under certain conditions ` +
+        `> **${fmtCount(droppedEvents)} input lines (${pctLabel}) were not accounted for by the templater.** ` +
+          `Per-pattern event counts sum to ${fmtCount(accountedEvents)}, less than the sample line count (${fmtCount(lineCount)}). ` +
+          `Known engine-side bug (GAPS G11) — the templater silently drops lines under certain conditions ` +
           `(multi-line stack traces, event-boundary crossings, high-cardinality variant overfitting). ` +
-          `**Do not treat the savings projection below as complete** — the dropped lines may contain the highest-volume patterns. ` +
-          `Workarounds: (1) rerun with a smaller \`target_event_count\` and broader \`window\` so each batch is large enough that overfitting is unlikely; ` +
-          `(2) use \`log10x_event_lookup\` on individual lines if you need ground truth on a specific pattern.`
+          `The dropped lines may contain the highest-volume patterns, so the savings projection below should be treated as a lower bound.`
       );
+      // Agent-only constraint + workarounds.
+      lines.push(agentOnly(
+        `Constraint: do not treat the savings projection as complete when drop_rate ≥ 20%. ` +
+        `Workarounds to surface: (1) rerun with a smaller target_event_count and broader window so each batch is large enough that overfitting is unlikely; ` +
+        `(2) use log10x_event_lookup on an individual line for ground truth on a specific pattern.`
+      ));
       lines.push('');
     } else if (dropRate >= 0.05) {
       lines.push(

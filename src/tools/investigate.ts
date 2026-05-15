@@ -30,6 +30,7 @@ import { parsePrometheusValue } from '../lib/cost.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { DEFAULT_THRESHOLDS } from '../lib/thresholds.js';
 import { classifyTrajectory, runDriftCorrelation } from '../lib/drift.js';
+import { agentOnly } from '../lib/agent-only.js';
 import { runAcuteSpikeCorrelation } from '../lib/correlate.js';
 import { detectInflection } from '../lib/inflection.js';
 import {
@@ -324,15 +325,16 @@ export async function executeInvestigate(
               })
               .join(', ');
             recencyWarning =
-              `⚠ **Anchor may be historical, not current**: The resolved anchor \`${resolution.anchor}\` has not fired in the last 5 minutes (rate near zero) but is still ranked top by 24h cost. For current-crashloop / active-incident scenarios, the 24h cost ranking can surface a pattern that was loud YESTERDAY but has since been fixed or suppressed, while a DIFFERENT pattern is causing the active failure.\n\n` +
-              `**Currently-active patterns in \`${resolution.service}\`** (last 5 min, any severity, excluding the anchor): ${activeNames}. Re-run \`log10x_investigate\` with one of these as \`starting_point\` to diagnose the live issue.`;
+              `> **Anchor may be historical, not current**: the resolved anchor \`${resolution.anchor}\` has not fired in the last 5 minutes (rate near zero) but is still ranked top by 24h cost. For an active incident, the 24h cost ranking can surface a pattern that was loud yesterday but has since been fixed or suppressed, while a different pattern is causing the active failure.\n\n` +
+              `**Currently-active patterns in \`${resolution.service}\`** (last 5 min, any severity, excluding the anchor): ${activeNames}.\n` +
+              agentOnly(`To diagnose the live issue, re-run log10x_investigate with one of the currently-active patterns above as starting_point instead of the historical anchor.`);
           } else {
             recencyWarning =
-              `⚠ **Anchor may be historical**: \`${resolution.anchor}\` has not fired in the last 5 minutes. No other patterns currently active in \`${resolution.service}\` either — service may be stable and the anchor is purely historical cost.`;
+              `> **Anchor may be historical**: \`${resolution.anchor}\` has not fired in the last 5 minutes. No other patterns currently active in \`${resolution.service}\` either — service may be stable and the anchor is purely historical cost.`;
           }
         } else {
           recencyWarning =
-            `⚠ **Anchor may be historical**: \`${resolution.anchor}\` has not fired in the last 5 minutes (rate near zero). The analysis below reflects cumulative behavior across the window, not current activity.`;
+            `> **Anchor may be historical**: \`${resolution.anchor}\` has not fired in the last 5 minutes (rate near zero). The analysis below reflects cumulative behavior across the window, not current activity.`;
         }
       }
     } catch {

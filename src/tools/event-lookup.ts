@@ -19,6 +19,7 @@ import {
   parseTimeframe, costPeriodLabel, normalizePattern
 } from '../lib/format.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
+import { agentOnly } from '../lib/agent-only.js';
 
 export const eventLookupSchema = {
   pattern: z.string().describe('Pattern name or search term to look up (e.g., "Payment_Gateway_Timeout")'),
@@ -223,24 +224,23 @@ async function formatResults(
   // any mute action) are appropriate.
   const nextActions: NextAction[] = [];
   const elevated = totalCostBase > 0 && totalCostNow > totalCostBase * 2;
-  lines.push('');
-  lines.push('**Next actions**:');
+  const hints: string[] = [];
   if (elevated) {
     const pctChange = Math.round(((totalCostNow - totalCostBase) / totalCostBase) * 100);
-    lines.push(`  - This pattern is up ${pctChange}% vs its baseline — call \`log10x_investigate({ starting_point: '${pattern}' })\` to trace the cause.`);
+    hints.push(`Pattern is up ${pctChange}% vs baseline — trace the cause: log10x_investigate({ starting_point: '${pattern}' }).`);
     nextActions.push({
       tool: 'log10x_investigate',
       args: { starting_point: pattern },
       reason: `pattern is up ${pctChange}% vs baseline — trace the cause`,
     });
   }
-  lines.push(`  - Time series via \`log10x_pattern_trend({ pattern: '${pattern}' })\`.`);
+  hints.push(`Time series for this pattern: log10x_pattern_trend({ pattern: '${pattern}' }).`);
   nextActions.push({
     tool: 'log10x_pattern_trend',
     args: { pattern },
     reason: 'time series for the resolved pattern',
   });
-  lines.push(`  - To drop / filter this pattern in your SIEM: run \`log10x_dependency_check({ pattern: '${pattern}' })\` FIRST to verify nothing depends on it, then \`log10x_exclusion_filter({ pattern: '${pattern}' })\` to generate the vendor-specific drop config.`);
+  hints.push(`Drop / filter in SIEM: log10x_dependency_check({ pattern: '${pattern}' }) FIRST to verify nothing depends on it, then log10x_exclusion_filter({ pattern: '${pattern}' }) to generate the vendor-specific drop config.`);
   nextActions.push({
     tool: 'log10x_dependency_check',
     args: { pattern },
@@ -251,6 +251,8 @@ async function formatResults(
     args: { pattern },
     reason: 'generate vendor-specific drop config after dependency_check confirms safe',
   });
+  lines.push('');
+  lines.push(agentOnly(`Suggested next calls: ${hints.join(' ')}`));
 
   const block = renderNextActions(nextActions);
   if (block) lines.push('', block);

@@ -25,6 +25,7 @@ import {
 } from '../lib/retriever-api.js';
 import { loadEnvironments, type Environments, type EnvConfig } from '../lib/environments.js';
 import { LABELS } from '../lib/promql.js';
+import { agentOnly } from '../lib/agent-only.js';
 import { fmtBytes as formatBytes } from '../lib/format.js';
 import { discoverAvailable } from '../lib/siem/index.js';
 import { resolveBackend, formatDetectionTrace } from '../lib/customer-metrics.js';
@@ -1034,13 +1035,15 @@ export function renderDoctorReport(report: DoctorReport): string {
   // advise-* tool to call. Surface the full set explicitly so the agent
   // can pick the right one based on the failing checks above.
   lines.push('');
-  lines.push('**Next actions** (when a check failed or warned):');
-  lines.push('  - For missing/broken Reporter (cloud-tier metric emission): `log10x_advise_reporter`');
-  lines.push('  - For missing/broken Receiver (edge-tier forwarder sidecar): `log10x_advise_receiver`');
-  lines.push('  - For missing/broken Retriever (S3 archive + bloom index): `log10x_advise_retriever`');
-  lines.push('  - For Compact mode (per-pattern compaction config): `log10x_advise_compact`');
-  lines.push('  - For first-time install / general questions: `log10x_advise_install`');
-  lines.push('  - To inspect the current env config (what doctor saw): `log10x_discover_env`');
+  lines.push(agentOnly(
+    `If a check failed or warned, suggest the relevant advisor: ` +
+    `Reporter (cloud-tier metric emission) → log10x_advise_reporter. ` +
+    `Receiver (edge-tier forwarder sidecar) → log10x_advise_receiver. ` +
+    `Retriever (S3 archive + bloom index) → log10x_advise_retriever. ` +
+    `Compact mode (per-pattern compaction config) → log10x_advise_compact. ` +
+    `First-time install / general questions → log10x_advise_install. ` +
+    `Inspect current env config → log10x_discover_env.`
+  ));
   return lines.join('\n');
 }
 

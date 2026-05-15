@@ -18,6 +18,7 @@ import { bytesToCost, parsePrometheusValue } from '../lib/cost.js';
 import { resolveMetricsEnv, resolveMetricsEnvFiltered } from '../lib/resolve-env.js';
 import { fmtDollar, fmtBytes, fmtPct, parseTimeframe, costPeriodLabel } from '../lib/format.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
+import { agentOnly } from '../lib/agent-only.js';
 
 export const listByLabelSchema = {
   label: z.string().describe('Label to group by. Common choices: tenx_user_service, severity_level, k8s_namespace, k8s_container, country, http_code. Call log10x_discover_labels first to see what is queryable.'),
@@ -120,12 +121,11 @@ export async function executeListByLabel(
 
   const nextActions: NextAction[] = [];
   if (shown[0]) {
-    lines.push('');
-    lines.push('**Next actions**:');
     const top = shown[0];
+    const hints: string[] = [];
     if (args.label === LABELS.service || args.label === 'tenx_user_service') {
-      lines.push(`  - Drill into the top service: \`log10x_cost_drivers({ service: '${top.value}' })\` for week-over-week deltas.`);
-      lines.push(`  - Or investigate it: \`log10x_investigate({ starting_point: '${top.value}' })\`.`);
+      hints.push(`Drill into the top service for week-over-week deltas: log10x_cost_drivers({ service: '${top.value}' }).`);
+      hints.push(`Or investigate it: log10x_investigate({ starting_point: '${top.value}' }).`);
       nextActions.push({
         tool: 'log10x_cost_drivers',
         args: { service: top.value, timeRange: timeRange },
@@ -137,7 +137,7 @@ export async function executeListByLabel(
         reason: 'investigate the top service',
       });
     } else {
-      lines.push(`  - Filter cost_drivers to the top dimension: pass \`${args.label}\` value into a cost_drivers query, or call \`log10x_top_patterns\` scoped to the relevant service.`);
+      hints.push(`Filter cost_drivers / top_patterns to the top ${args.label} value: pass it into log10x_top_patterns or log10x_cost_drivers.`);
       nextActions.push({
         tool: 'log10x_top_patterns',
         args: { timeRange: timeRange, limit: 10 },
@@ -149,6 +149,8 @@ export async function executeListByLabel(
         reason: 'check whether the top dimensions are growing',
       });
     }
+    lines.push('');
+    lines.push(agentOnly(`Suggested next calls: ${hints.join(' ')}`));
   }
   const block = renderNextActions(nextActions);
   if (block) lines.push('', block);
