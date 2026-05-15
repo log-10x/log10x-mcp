@@ -1,0 +1,123 @@
+[seed] putting 4 datapoints with (service,pattern) dimensions...
+[seed] done. Waiting ~120s for CW to surface the new metrics...
+[poll] all 3 services surfaced after 20s: checkout,payment,cart
+
+=== backend.kind = cloudwatch_metrics
+=== backend.endpoint = cloudwatch://us-east-1/Log10x/E2E
+
+=== listLabels() ===
+[ 'tenx_user_service', 'message_pattern' ]
+
+=== listLabelValues("tenx_user_service") ===
+[ 'payment', 'cart', 'checkout' ]
+
+=== queryInstant("count(all_events_summaryBytes)") ===
+{
+  "status": "success",
+  "data": {
+    "resultType": "vector",
+    "result": [
+      {
+        "metric": {},
+        "value": [
+          1778805823,
+          "4"
+        ]
+      }
+    ]
+  }
+}
+
+=== queryInstant("all_events_summaryBytes{tenx_user_service=\"cart\"}") ===
+{
+  "status": "success",
+  "data": {
+    "resultType": "vector",
+    "result": []
+  }
+}
+=== queryInstant("all_events_summaryBytes{tenx_user_service=\"cart\"}") ===
+{
+  "status": "success",
+  "data": {
+    "resultType": "vector",
+    "result": [
+      {
+        "metric": {
+          "__name__": "all_events_summaryBytes",
+          "tenx_user_service": "cart",
+          "message_pattern": "p_cart_ok"
+        },
+        "value": [
+          1778805780,
+          "1234"
+        ]
+      },
+      {
+        "metric": {
+          "__name__": "all_events_summaryBytes",
+          "tenx_user_service": "cart",
+          "message_pattern": "p_cart_err"
+        },
+        "value": [
+          1778805780,
+          "567"
+        ]
+      }
+    ]
+  }
+}
+
+=== queryInstant("all_events_summaryBytes") (no filter) ===
+{
+  "status": "success",
+  "data": {
+    "resultType": "vector",
+    "result": [
+      {
+        "metric": {
+          "__name__": "all_events_summaryBytes",
+          "tenx_user_service": "payment",
+          "message_pattern": "p_pay_warn"
+        },
+        "value": [
+          1778805780,
+          "89"
+        ]
+      },
+      {
+        "metric": {
+          "__name__": "all_events_summaryBytes",
+          "tenx_user_service": "cart",
+          "message_pattern": "p_cart_ok"
+        },
+        "value": [
+          1778805780,
+          "1234"
+        ]
+      },
+      {
+        "metric": {
+          "__name__": "all_events_summaryBytes",
+          "tenx_user_service": "cart",
+          "message_pattern": "p_cart_err"
+        },
+        "value": [
+          1778805780,
+          "567"
+        ]
+      },
+      {
+        "metric": {
+          "__name__": "all_events_summaryBytes",
+          "tenx_user_service": "checkout",
+          "message_pattern": "p_chk_ok"
+        },
+        "value": [
+          1778805780,
+          "2345"
+        ]
+      }
+    ]
+  }
+}

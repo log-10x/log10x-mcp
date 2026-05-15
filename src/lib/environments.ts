@@ -280,6 +280,18 @@ function parseMetricsBackendFromEnv(kind: MetricsBackendConfig['kind']): Metrics
         url: refEnv('LOG10X_METRICS_URL'),
         projectId: refEnv('LOG10X_METRICS_GCP_PROJECT_ID'),
       };
+    case 'cloudwatch_metrics':
+      return {
+        kind: 'cloudwatch_metrics',
+        region: refEnv('LOG10X_METRICS_AWS_REGION'),
+        namespace: refEnv('LOG10X_METRICS_CW_NAMESPACE'),
+        ...(process.env.LOG10X_METRICS_AWS_ACCESS_KEY_ID
+          ? { awsAccessKeyId: refEnv('LOG10X_METRICS_AWS_ACCESS_KEY_ID') }
+          : {}),
+        ...(process.env.LOG10X_METRICS_AWS_SECRET_ACCESS_KEY
+          ? { awsSecretAccessKey: refEnv('LOG10X_METRICS_AWS_SECRET_ACCESS_KEY') }
+          : {}),
+      };
     default: {
       // Exhaustiveness — TS narrows kind to never if we hit this.
       const _exhaustive: never = kind;

@@ -1,0 +1,6 @@
+=== AWS identity ===
+{
+    "UserId": "AIDAVD4JZTNDMG3JGVCD3",
+    "Account": "351939435334",
+    "Arn": "arn:aws:iam::351939435334:user/tal.weiss@l1x.co"
+}

@@ -1,0 +1,36 @@
+=== IAM user creation ===
+{
+    "User": {
+        "Path": "/",
+        "UserName": "log10x-poc-cw-writer",
+        "UserId": "AIDAVD4JZTNDESYVVLJ4O",
+        "Arn": "arn:aws:iam::351939435334:user/log10x-poc-cw-writer",
+        "CreateDate": "2026-05-15T00:27:26+00:00"
+    }
+}
+
+=== Inline policy ===
+{
+    "UserName": "log10x-poc-cw-writer",
+    "PolicyName": "CloudWatchPutMetricNamespaceScoped",
+    "PolicyDocument": {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Action": "cloudwatch:PutMetricData",
+                "Resource": "*",
+                "Condition": {
+                    "StringEquals": {
+                        "cloudwatch:namespace": "Log10x/E2E"
+                    }
+                }
+            }
+        ]
+    }
+}
+
+=== Scope verification ===
+1. PutMetricData on Log10x/E2E: ALLOWED (exit 0 in 02)
+2. PutMetricData on OtherNamespace: DENIED (AccessDenied)
+3. ListMetrics: DENIED (AccessDenied)

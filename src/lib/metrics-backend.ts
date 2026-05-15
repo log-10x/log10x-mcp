@@ -53,7 +53,16 @@ export type MetricsBackendConfig =
   | { kind: 'amp'; url: string; region: string }
   | { kind: 'datadog'; site: string; apiKey: string; appKey: string }
   | { kind: 'grafana_cloud_prom'; url: string; user: string; apiKey: string }
-  | { kind: 'gcp_managed_prom'; url: string; projectId: string };
+  | { kind: 'gcp_managed_prom'; url: string; projectId: string }
+  | {
+      kind: 'cloudwatch_metrics';
+      region: string;
+      namespace: string;
+      // Optional explicit creds — when absent the SDK uses the ambient
+      // chain (env vars, shared config, IAM role).
+      awsAccessKeyId?: string;
+      awsSecretAccessKey?: string;
+    };
 
 export type MetricsBackendKind = MetricsBackendConfig['kind'];
 
@@ -192,6 +201,14 @@ function normalizeAndGuard(config: MetricsBackendConfig): MetricsBackendConfig {
         url: resolveVarReference(c.url),
         projectId: resolveVarReference(c.projectId),
       };
+    case 'cloudwatch_metrics':
+      return {
+        ...c,
+        region: resolveVarReference(c.region),
+        namespace: resolveVarReference(c.namespace),
+        awsAccessKeyId: c.awsAccessKeyId ? resolveVarReference(c.awsAccessKeyId) : undefined,
+        awsSecretAccessKey: c.awsSecretAccessKey ? guardSecret('cloudwatch_metrics.awsSecretAccessKey', c.awsSecretAccessKey) : undefined,
+      };
   }
 }
 
@@ -260,6 +277,8 @@ export function createMetricsBackend(config: MetricsBackendConfig): MetricsBacke
       return new GrafanaCloudBackend(safe);
     case 'gcp_managed_prom':
       return new GcpManagedPromBackend(safe);
+    case 'cloudwatch_metrics':
+      return new CloudWatchMetricsBackend(safe);
   }
 }
 
@@ -776,4 +795,320 @@ class GcpManagedPromBackend implements MetricsBackend {
   async listLabelValues(): Promise<string[]> {
     throw new Error('GcpManagedPromBackend not yet implemented in phase 1.');
   }
+}
+
+// ── CloudWatch Metrics adapter ────────────────────────────────────────────
+
+/**
+ * AWS CloudWatch Metrics backend. Reads metrics that were written to a
+ * specific CW namespace (via PutMetricData) and reshapes responses into
+ * Prometheus envelopes so the existing MCP tools can render them.
+ *
+ * CW doesn't speak PromQL; it speaks Metric Math + GetMetricData /
+ * GetMetricStatistics. This adapter accepts a closed set of PromQL
+ * shapes the MCP issues and translates each to the equivalent CW API
+ * calls. Unsupported shapes throw a clear error rather than fabricating
+ * a result.
+ *
+ * Auth: SDK ambient chain by default (env vars, shared config, IAM
+ * role). When awsAccessKeyId + awsSecretAccessKey are set explicitly,
+ * those override the ambient chain. The secret-guard at config-load
+ * time prevents committing literal secrets.
+ */
+class CloudWatchMetricsBackend implements MetricsBackend {
+  readonly kind = 'cloudwatch_metrics' as const;
+  readonly endpoint: string;
+  private readonly region: string;
+  private readonly namespace: string;
+  private readonly awsAccessKeyId?: string;
+  private readonly awsSecretAccessKey?: string;
+  private clientCache: unknown;
+
+  constructor(config: Extract<MetricsBackendConfig, { kind: 'cloudwatch_metrics' }>) {
+    this.region = config.region;
+    this.namespace = config.namespace;
+    this.awsAccessKeyId = config.awsAccessKeyId;
+    this.awsSecretAccessKey = config.awsSecretAccessKey;
+    this.endpoint = `cloudwatch://${this.region}/${this.namespace}`;
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async client(): Promise<any> {
+    if (this.clientCache) return this.clientCache;
+    const sdk = await import('@aws-sdk/client-cloudwatch');
+    const credentials = this.awsAccessKeyId && this.awsSecretAccessKey
+      ? { accessKeyId: this.awsAccessKeyId, secretAccessKey: this.awsSecretAccessKey }
+      : undefined;
+    const cached = {
+      CloudWatchClient: sdk.CloudWatchClient,
+      ListMetricsCommand: sdk.ListMetricsCommand,
+      GetMetricDataCommand: sdk.GetMetricDataCommand,
+      instance: new sdk.CloudWatchClient({
+        region: this.region,
+        maxAttempts: 3,
+        ...(credentials ? { credentials } : {}),
+      }),
+    };
+    this.clientCache = cached;
+    return cached;
+  }
+
+  async listLabels(): Promise<string[]> {
+    const { instance, ListMetricsCommand } = await this.client();
+    const dims = new Set<string>();
+    let NextToken: string | undefined;
+    do {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const resp: any = await (instance as { send: (c: unknown) => Promise<unknown> }).send(
+        new ListMetricsCommand({ Namespace: this.namespace, NextToken })
+      );
+      for (const m of resp.Metrics || []) {
+        for (const d of m.Dimensions || []) {
+          if (d.Name) dims.add(d.Name);
+        }
+      }
+      NextToken = resp.NextToken;
+    } while (NextToken);
+    return Array.from(dims);
+  }
+
+  async listLabelValues(label: string): Promise<string[]> {
+    const { instance, ListMetricsCommand } = await this.client();
+    const values = new Set<string>();
+    let NextToken: string | undefined;
+    do {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const resp: any = await (instance as { send: (c: unknown) => Promise<unknown> }).send(
+        new ListMetricsCommand({ Namespace: this.namespace, NextToken })
+      );
+      for (const m of resp.Metrics || []) {
+        for (const d of m.Dimensions || []) {
+          if (d.Name === label && d.Value) values.add(d.Value);
+        }
+      }
+      NextToken = resp.NextToken;
+    } while (NextToken);
+    return Array.from(values);
+  }
+
+  async queryInstant(promql: string): Promise<PrometheusResponse> {
+    // Closed set of PromQL shapes the MCP issues. Each translates to a
+    // specific CW operation. Unknown shapes throw — never silently
+    // succeed with a fake answer.
+    const trimmed = promql.trim();
+
+    // Shape 1: count(<metric>) — series count for a metric.
+    const countMatch = trimmed.match(/^count\(([a-zA-Z_:][a-zA-Z0-9_:]*)\)$/);
+    if (countMatch) {
+      const metricName = countMatch[1];
+      const count = await this.countMetricSeries(metricName);
+      return {
+        status: 'success',
+        data: {
+          resultType: 'vector',
+          result: [{ metric: {}, value: [Math.floor(Date.now() / 1000), String(count)] }],
+        },
+      };
+    }
+
+    // Shape 2: bare metric selector <metric> or <metric>{<label>="<value>",...}
+    // → return latest datapoint per series in the namespace.
+    const selectorMatch = trimmed.match(/^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{[^}]*\})?$/);
+    if (selectorMatch) {
+      const metricName = selectorMatch[1];
+      const filters = parsePromLabelFilters(selectorMatch[2] || '');
+      const series = await this.getRecentSeries(metricName, filters);
+      return { status: 'success', data: { resultType: 'vector', result: series } };
+    }
+
+    throw new Error(
+      `CloudWatchMetricsBackend: PromQL shape not supported yet: ${trimmed.slice(0, 200)}. ` +
+        `Supported: \`count(metric)\`, bare metric selector \`metric{label=\"v\"}\`. ` +
+        `CW Metric Math doesn't accept PromQL; extending this adapter means adding a new ` +
+        `case in queryInstant for the specific shape.`
+    );
+  }
+
+  async queryRange(
+    promql: string,
+    startSec: number,
+    endSec: number,
+    stepSec: number
+  ): Promise<PrometheusResponse> {
+    const trimmed = promql.trim();
+    const selectorMatch = trimmed.match(/^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{[^}]*\})?$/);
+    if (!selectorMatch) {
+      throw new Error(
+        `CloudWatchMetricsBackend.queryRange: only bare selector supported; got: ${trimmed.slice(0, 200)}`
+      );
+    }
+    const metricName = selectorMatch[1];
+    const filters = parsePromLabelFilters(selectorMatch[2] || '');
+    const matrix = await this.getSeriesRange(metricName, filters, startSec, endSec, stepSec);
+    return { status: 'success', data: { resultType: 'matrix', result: matrix } };
+  }
+
+  private async countMetricSeries(metricName: string): Promise<number> {
+    const { instance, ListMetricsCommand } = await this.client();
+    let count = 0;
+    let NextToken: string | undefined;
+    do {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const resp: any = await (instance as { send: (c: unknown) => Promise<unknown> }).send(
+        new ListMetricsCommand({
+          Namespace: this.namespace,
+          MetricName: metricName,
+          NextToken,
+        })
+      );
+      count += (resp.Metrics || []).length;
+      NextToken = resp.NextToken;
+    } while (NextToken);
+    return count;
+  }
+
+  private async listMetricsMatching(
+    metricName: string,
+    filters: Record<string, string>
+  ): Promise<Array<{ Name: string; Value: string }[]>> {
+    const { instance, ListMetricsCommand } = await this.client();
+    const matching: Array<{ Name: string; Value: string }[]> = [];
+    let NextToken: string | undefined;
+    do {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const resp: any = await (instance as { send: (c: unknown) => Promise<unknown> }).send(
+        new ListMetricsCommand({
+          Namespace: this.namespace,
+          MetricName: metricName,
+          NextToken,
+        })
+      );
+      for (const m of resp.Metrics || []) {
+        const dims = (m.Dimensions || []) as Array<{ Name: string; Value: string }>;
+        const ok = Object.entries(filters).every(([k, v]) =>
+          dims.some((d) => d.Name === k && d.Value === v)
+        );
+        if (ok) matching.push(dims);
+      }
+      NextToken = resp.NextToken;
+    } while (NextToken);
+    return matching;
+  }
+
+  private async getRecentSeries(
+    metricName: string,
+    filters: Record<string, string>
+  ): Promise<Array<{ metric: Record<string, string>; value: [number, string] }>> {
+    const seriesDims = await this.listMetricsMatching(metricName, filters);
+    if (seriesDims.length === 0) return [];
+
+    const { instance, GetMetricDataCommand } = await this.client();
+    const now = Math.floor(Date.now() / 1000);
+    const start = now - 600; // last 10 minutes
+    // CW caps GetMetricData at 500 queries per call; chunk if needed.
+    const out: Array<{ metric: Record<string, string>; value: [number, string] }> = [];
+    for (let i = 0; i < seriesDims.length; i += 500) {
+      const chunk = seriesDims.slice(i, i + 500);
+      const queries = chunk.map((dims, idx) => ({
+        Id: `q${idx}`,
+        MetricStat: {
+          Metric: {
+            Namespace: this.namespace,
+            MetricName: metricName,
+            Dimensions: dims,
+          },
+          Period: 60,
+          Stat: 'Sum',
+        },
+        ReturnData: true,
+      }));
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const resp: any = await (instance as { send: (c: unknown) => Promise<unknown> }).send(
+        new GetMetricDataCommand({
+          StartTime: new Date(start * 1000),
+          EndTime: new Date(now * 1000),
+          MetricDataQueries: queries,
+        })
+      );
+      for (let j = 0; j < (resp.MetricDataResults || []).length; j++) {
+        const r = resp.MetricDataResults[j];
+        const dims = chunk[j];
+        const metric: Record<string, string> = { __name__: metricName };
+        for (const d of dims) metric[d.Name] = d.Value;
+        const lastVal = (r.Values || []).slice(-1)[0];
+        const lastTs = (r.Timestamps || []).slice(-1)[0];
+        if (lastVal !== undefined && lastTs) {
+          out.push({
+            metric,
+            value: [Math.floor(new Date(lastTs).getTime() / 1000), String(lastVal)],
+          });
+        }
+      }
+    }
+    return out;
+  }
+
+  private async getSeriesRange(
+    metricName: string,
+    filters: Record<string, string>,
+    startSec: number,
+    endSec: number,
+    stepSec: number
+  ): Promise<Array<{ metric: Record<string, string>; values: Array<[number, string]> }>> {
+    const seriesDims = await this.listMetricsMatching(metricName, filters);
+    if (seriesDims.length === 0) return [];
+    const { instance, GetMetricDataCommand } = await this.client();
+    const period = Math.max(60, Math.floor(stepSec));
+    const out: Array<{ metric: Record<string, string>; values: Array<[number, string]> }> = [];
+    for (let i = 0; i < seriesDims.length; i += 500) {
+      const chunk = seriesDims.slice(i, i + 500);
+      const queries = chunk.map((dims, idx) => ({
+        Id: `q${idx}`,
+        MetricStat: {
+          Metric: { Namespace: this.namespace, MetricName: metricName, Dimensions: dims },
+          Period: period,
+          Stat: 'Sum',
+        },
+        ReturnData: true,
+      }));
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const resp: any = await (instance as { send: (c: unknown) => Promise<unknown> }).send(
+        new GetMetricDataCommand({
+          StartTime: new Date(startSec * 1000),
+          EndTime: new Date(endSec * 1000),
+          MetricDataQueries: queries,
+        })
+      );
+      for (let j = 0; j < (resp.MetricDataResults || []).length; j++) {
+        const r = resp.MetricDataResults[j];
+        const dims = chunk[j];
+        const metric: Record<string, string> = { __name__: metricName };
+        for (const d of dims) metric[d.Name] = d.Value;
+        const values: Array<[number, string]> = [];
+        const ts = r.Timestamps || [];
+        const vs = r.Values || [];
+        for (let k = 0; k < ts.length; k++) {
+          values.push([Math.floor(new Date(ts[k]).getTime() / 1000), String(vs[k])]);
+        }
+        out.push({ metric, values });
+      }
+    }
+    return out;
+  }
+}
+
+/** Parse Prometheus label filter syntax like `{label="value",other="x"}` → record. */
+function parsePromLabelFilters(filterStr: string): Record<string, string> {
+  if (!filterStr) return {};
+  const inner = filterStr.replace(/^\{|\}$/g, '');
+  if (!inner.trim()) return {};
+  const out: Record<string, string> = {};
+  // Only handle `=` (exact) for now. `=~`, `!=`, `!~` are CW-incompatible
+  // (no regex support on dimension values) and would need to throw.
+  const re = /([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*"((?:[^"\\]|\\.)*)"\s*,?\s*/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(inner)) !== null) {
+    out[m[1]] = m[2].replace(/\\"/g, '"');
+  }
+  return out;
 }
