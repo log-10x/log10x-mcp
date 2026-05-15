@@ -53,7 +53,23 @@ export type MetricsBackendConfig =
   | { kind: 'amp'; url: string; region: string }
   | { kind: 'datadog'; site: string; apiKey: string; appKey: string }
   | { kind: 'grafana_cloud_prom'; url: string; user: string; apiKey: string }
-  | { kind: 'gcp_managed_prom'; url: string; projectId: string }
+  | {
+      kind: 'gcp_managed_prom';
+      // Full URL up to and including `/api/v1` is constructed from
+      // projectId — pass an override only if your stack uses a non-default
+      // base host (rare). Default constructed URL:
+      //   https://monitoring.googleapis.com/v1/projects/<projectId>/location/global/prometheus
+      url?: string;
+      projectId: string;
+      // Path to the service-account JSON key file (e.g. /tmp/gcp-sa.json).
+      // The adapter reads it once and mints OAuth2 access tokens via the
+      // JWT-bearer flow; tokens are cached and refreshed 60s before
+      // expiry. Mutually exclusive with `accessToken`.
+      serviceAccountKeyFile?: string;
+      // OR pass a pre-minted access token directly (the operator is
+      // responsible for refresh). Useful for short-lived shells.
+      accessToken?: string;
+    }
   | {
       kind: 'cloudwatch_metrics';
       region: string;
@@ -221,8 +237,10 @@ function normalizeAndGuard(config: MetricsBackendConfig): MetricsBackendConfig {
     case 'gcp_managed_prom':
       return {
         ...c,
-        url: resolveVarReference(c.url),
+        url: c.url ? resolveVarReference(c.url) : undefined,
         projectId: resolveVarReference(c.projectId),
+        serviceAccountKeyFile: c.serviceAccountKeyFile ? resolveVarReference(c.serviceAccountKeyFile) : undefined,
+        accessToken: c.accessToken ? guardSecret('gcp_managed_prom.accessToken', c.accessToken) : undefined,
       };
     case 'cloudwatch_metrics':
       return {
@@ -810,35 +828,142 @@ class GrafanaCloudBackend extends PrometheusBackend {
 }
 
 /**
- * GCP Managed Prometheus. Authenticated via Google OAuth2 access
- * tokens — credentials come from the ambient Google SDK chain
- * (GOOGLE_APPLICATION_CREDENTIALS service-account JSON or
- * `gcloud auth application-default login`).
+ * GCP Managed Prometheus (GMP). Reads via the standard Prometheus
+ * PromQL API exposed at
+ *   `monitoring.googleapis.com/v1/projects/<P>/location/global/prometheus`.
+ * Auth: OAuth2 Bearer token from a service-account JSON via the JWT-
+ * bearer flow (no external deps — uses Node crypto for RS256).
  *
- * Phase 1 stub — full impl arrives in a subsequent commit. Throws on
- * any call until then.
+ * Tokens are cached and refreshed 60s before expiry. The adapter
+ * accepts either:
+ *   - `serviceAccountKeyFile`: path to SA JSON; adapter mints + refreshes
+ *   - `accessToken`: pre-minted token; operator is responsible for refresh
  */
 class GcpManagedPromBackend implements MetricsBackend {
   readonly kind = 'gcp_managed_prom' as const;
   readonly endpoint: string;
   private readonly projectId: string;
+  private readonly staticAccessToken?: string;
+  private readonly saKeyFile?: string;
+  // Cached token state when minting from SA JSON.
+  private cachedToken?: string;
+  private cachedTokenExpiresAt = 0;
+  private cachedSa?: { client_email: string; private_key: string };
 
   constructor(config: Extract<MetricsBackendConfig, { kind: 'gcp_managed_prom' }>) {
-    this.endpoint = config.url.replace(/\/+$/, '');
     this.projectId = config.projectId;
+    const baseUrl = config.url
+      ? config.url.replace(/\/+$/, '')
+      : `https://monitoring.googleapis.com/v1/projects/${this.projectId}/location/global/prometheus`;
+    this.endpoint = baseUrl;
+    this.staticAccessToken = config.accessToken;
+    this.saKeyFile = config.serviceAccountKeyFile;
+    if (!this.staticAccessToken && !this.saKeyFile) {
+      throw new MetricsBackendConfigError(
+        'gcp_managed_prom requires either `accessToken` (pre-minted) or `serviceAccountKeyFile` (SA JSON path).'
+      );
+    }
   }
 
-  async queryInstant(): Promise<PrometheusResponse> {
-    throw new Error('GcpManagedPromBackend not yet implemented in phase 1 — see customer-metrics.ts:GcpManagedPrometheusBackend for the OAuth2 pattern.');
+  private async getAccessToken(): Promise<string> {
+    if (this.staticAccessToken) return this.staticAccessToken;
+    if (!this.saKeyFile) throw new Error('gcp_managed_prom: no auth source configured');
+    const now = Math.floor(Date.now() / 1000);
+    if (this.cachedToken && now < this.cachedTokenExpiresAt - 60) {
+      return this.cachedToken;
+    }
+    if (!this.cachedSa) {
+      const fs = await import('node:fs/promises');
+      const raw = await fs.readFile(this.saKeyFile, 'utf-8');
+      const sa = JSON.parse(raw) as { client_email?: string; private_key?: string };
+      if (!sa.client_email || !sa.private_key) {
+        throw new Error(`gcp_managed_prom: SA file ${this.saKeyFile} missing client_email or private_key`);
+      }
+      this.cachedSa = { client_email: sa.client_email, private_key: sa.private_key };
+    }
+    const { createSign } = await import('node:crypto');
+    const header = { alg: 'RS256', typ: 'JWT' };
+    const payload = {
+      iss: this.cachedSa.client_email,
+      scope: 'https://www.googleapis.com/auth/monitoring.read',
+      aud: 'https://oauth2.googleapis.com/token',
+      exp: now + 3600,
+      iat: now,
+    };
+    const b64u = (o: object): string =>
+      Buffer.from(JSON.stringify(o)).toString('base64').replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
+    const signingInput = `${b64u(header)}.${b64u(payload)}`;
+    const signer = createSign('RSA-SHA256');
+    signer.update(signingInput);
+    signer.end();
+    const sig = signer.sign(this.cachedSa.private_key).toString('base64').replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
+    const assertion = `${signingInput}.${sig}`;
+    const tokRes = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+        assertion,
+      }).toString(),
+    });
+    if (!tokRes.ok) {
+      const body = await tokRes.text().catch(() => '');
+      throw new Error(`gcp_managed_prom token exchange HTTP ${tokRes.status}: ${body.slice(0, 400)}`);
+    }
+    const tok = (await tokRes.json()) as { access_token?: string; expires_in?: number };
+    if (!tok.access_token) throw new Error('gcp_managed_prom token exchange: no access_token in response');
+    this.cachedToken = tok.access_token;
+    this.cachedTokenExpiresAt = now + (tok.expires_in ?? 3600);
+    return this.cachedToken;
   }
-  async queryRange(): Promise<PrometheusResponse> {
-    throw new Error('GcpManagedPromBackend not yet implemented in phase 1.');
+
+  private async gmpJsonFetch(path: string, params?: URLSearchParams): Promise<PrometheusResponse> {
+    const token = await this.getAccessToken();
+    const url = new URL(`${this.endpoint}${path}`);
+    if (params) {
+      for (const [k, v] of params.entries()) url.searchParams.append(k, v);
+    }
+    const res = await fetch(url.toString(), {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`gcp_managed_prom HTTP ${res.status}: ${body.slice(0, 400)}`);
+    }
+    return (await res.json()) as PrometheusResponse;
   }
+
+  async queryInstant(promql: string): Promise<PrometheusResponse> {
+    const params = new URLSearchParams({ query: promql });
+    return this.gmpJsonFetch('/api/v1/query', params);
+  }
+
+  async queryRange(
+    promql: string,
+    startSec: number,
+    endSec: number,
+    stepSec: number
+  ): Promise<PrometheusResponse> {
+    const params = new URLSearchParams({
+      query: promql,
+      start: String(startSec),
+      end: String(endSec),
+      step: String(stepSec),
+    });
+    return this.gmpJsonFetch('/api/v1/query_range', params);
+  }
+
   async listLabels(): Promise<string[]> {
-    throw new Error('GcpManagedPromBackend not yet implemented in phase 1.');
+    const resp = await this.gmpJsonFetch('/api/v1/labels');
+    // /labels returns { status, data: string[] }
+    const data = (resp as unknown as { data?: string[] }).data;
+    return Array.isArray(data) ? data : [];
   }
-  async listLabelValues(): Promise<string[]> {
-    throw new Error('GcpManagedPromBackend not yet implemented in phase 1.');
+
+  async listLabelValues(label: string): Promise<string[]> {
+    const resp = await this.gmpJsonFetch(`/api/v1/label/${encodeURIComponent(label)}/values`);
+    const data = (resp as unknown as { data?: string[] }).data;
+    return Array.isArray(data) ? data : [];
   }
 }
 

@@ -1,0 +1,26 @@
+[scan] 17428 metric names total
+[scan] checking 12 candidate metrics for non-empty count
+  → bigquerystorage.googleapis.com/dataflow_write/connection_results_count: empty
+  → bigquerystorage.googleapis.com/dataflow_write/request_count: empty
+  → bigquerystorage.googleapis.com/dataflow_write/server_side_latencies_bucket: empty
+  → bigquerystorage.googleapis.com/dataflow_write/server_side_latencies_count: empty
+  → bigquerystorage.googleapis.com/dataflow_write/server_side_latencies_sum: empty
+  → bigquerystorage.googleapis.com/dataflow_write/transcoding_latencies_bucket: empty
+  → bigquerystorage.googleapis.com/dataflow_write/transcoding_latencies_count: empty
+  → bigquerystorage.googleapis.com/dataflow_write/transcoding_latencies_sum: empty
+  → bigquerystorage.googleapis.com/dataflow_write/uploaded_bytes_count: empty
+  → bigquerystorage.googleapis.com/dataflow_write/uploaded_row_count: empty
+  → bigquerystorage.googleapis.com/read/concurrent_streams: empty
+  → bigquerystorage.googleapis.com/write/concurrent_connections: empty
+
+=== series scan: query{__name__=~"up|kubernetes.*"} via query_range ===
+file:///Users/talweiss/git/l1x-co/log10x-mcp/build/lib/metrics-backend.js:762
+            throw new Error(`gcp_managed_prom HTTP ${res.status}: ${body.slice(0, 400)}`);
+                  ^
+
+Error: gcp_managed_prom HTTP 400: {"status":"error","errorType":"bad_data","error":"invalid parameter \"query\": substitute queries failed: convert vector selector failed: =~ is an unsupported matchtype for the __name__ label: invalid argument"}
+    at GcpManagedPromBackend.gmpJsonFetch (file:///Users/talweiss/git/l1x-co/log10x-mcp/build/lib/metrics-backend.js:762:19)
+    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)
+    at async file:///Users/talweiss/git/l1x-co/log10x-mcp/docs/evidence/gmp-metrics/scripts/probe-active.mjs:45:15
+
+Node.js v20.11.0

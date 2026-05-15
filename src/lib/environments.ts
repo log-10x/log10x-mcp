@@ -277,8 +277,16 @@ function parseMetricsBackendFromEnv(kind: MetricsBackendConfig['kind']): Metrics
     case 'gcp_managed_prom':
       return {
         kind: 'gcp_managed_prom',
-        url: refEnv('LOG10X_METRICS_URL'),
         projectId: refEnv('LOG10X_METRICS_GCP_PROJECT_ID'),
+        ...(process.env.LOG10X_METRICS_URL
+          ? { url: refEnv('LOG10X_METRICS_URL') }
+          : {}),
+        ...(process.env.LOG10X_METRICS_GCP_SA_KEY_FILE
+          ? { serviceAccountKeyFile: refEnv('LOG10X_METRICS_GCP_SA_KEY_FILE') }
+          : {}),
+        ...(process.env.LOG10X_METRICS_GCP_ACCESS_TOKEN
+          ? { accessToken: refEnv('LOG10X_METRICS_GCP_ACCESS_TOKEN') }
+          : {}),
       };
     case 'cloudwatch_metrics':
       return {

@@ -1,0 +1,46 @@
+=== backend.kind = gcp_managed_prom
+=== backend.endpoint = https://monitoring.googleapis.com/v1/projects/log10x-poc/location/global/prometheus
+
+=== listLabels() ===
+count: 2727
+first 20: [
+  'API',                 'From',
+  'Local',               'Remote',
+  'To',                  'Type',
+  'Value',               '__name__',
+  '_gdch_project',       'accelerator_family',
+  'accelerator_id',      'accelerator_type',
+  'access_id',           'access_mode',
+  'access_policy',       'access_type',
+  'accounting_resource', 'accounting_type',
+  'acl_operation',       'action'
+]
+includes __name__? true
+
+=== listLabelValues("__name__") (i.e. all metric names) ===
+count: 17428
+first 5: [
+  'actions.googleapis.com/smarthome_action/camerastream/first_frame_latencies_bucket',
+  'actions.googleapis.com/smarthome_action/camerastream/first_frame_latencies_count',
+  'actions.googleapis.com/smarthome_action/camerastream/first_frame_latencies_sum',
+  'actions.googleapis.com/smarthome_action/camerastream/frame_display_rates_bucket',
+  'actions.googleapis.com/smarthome_action/camerastream/frame_display_rates_count'
+]
+
+=== queryInstant("count(up)") (Prom standard "up" metric) ===
+{
+  "status": "success",
+  "data": {
+    "resultType": "vector",
+    "result": []
+  }
+}
+
+=== queryInstant("count(logging.googleapis.com/billing/bytes_ingested)") ===
+{
+  "status": "success",
+  "data": {
+    "resultType": "vector",
+    "result": []
+  }
+}

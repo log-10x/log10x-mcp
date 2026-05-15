@@ -1,0 +1,14 @@
+=== backend.kind = gcp_managed_prom
+=== backend.endpoint = https://monitoring.googleapis.com/v1/projects/log10x-poc/location/global/prometheus
+
+Total metric names: 17429
+Planted matches: ["log10x_test_planted"]
+PASS: write -> read roundtrip via adapter
+
+=== GMP behavior preserved: =~ on __name__ should error ===
+expected error surfaced: gcp_managed_prom HTTP 400: {"status":"error","errorType":"bad_data","error":"invalid parameter \"query\": substitute queries failed: convert vector selector failed: =~ is an unsupported matchtype for 
+
+=== listLabels() also includes tenx_user_service ===
+Total labels: 2729
+tenx_user_service present? true
+message_pattern present? true
