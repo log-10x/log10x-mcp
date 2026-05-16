@@ -366,7 +366,8 @@ export async function executePatternMitigate(args: PatternMitigateArgs): Promise
     `Routing constraint: do not call any drop/mute/compact sub-tool until the user picks an option. ` +
     `When they do, route option 1 → log10x_exclusion_filter with their analyzer vendor; option 2 → same tool with their forwarder vendor; ` +
     `option 3 → log10x_advise_receiver; option 4 → log10x_advise_compact. ` +
-    `For options 1 and 3, call log10x_dependency_check first and present its findings before generating the drop config.` +
+    `For options 1 and 3, call log10x_dependency_check first and present its findings before generating the drop config. ` +
+    `log10x_exclusion_filter emits an exact tenx_hash drop as the primary config (precise, collision-proof) for structured-field vendors when the env's pipeline carries tenx_hash, with the message-regex form as fallback; the raw-line forwarders rsyslog/syslog-ng/promtail have no structured field so they keep the regex form. For options 1/2 on structured vendors, frame it as a precise drop, not an approximate regex match.` +
     (caps.gitopsRepo ? ` Resolved gitops_repo: ${caps.gitopsRepo} (source: ${caps.gitopsSource}).` : '')
   ));
   lines.push('');

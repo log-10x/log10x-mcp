@@ -22,7 +22,8 @@ import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { agentOnly } from '../lib/agent-only.js';
 
 export const eventLookupSchema = {
-  pattern: z.string().describe('Pattern name or search term to look up (e.g., "Payment_Gateway_Timeout")'),
+  pattern: z.string().optional().describe('Pattern name or search term to look up (e.g., "Payment_Gateway_Timeout"). Omit when passing `tenxHash` instead.'),
+  tenxHash: z.string().optional().describe('A tenx_hash value (e.g. seen on an event in your SIEM / CloudWatch Logs). Resolved against the 10x metrics to recover the pattern, then the normal cost/services breakdown is shown. This is the reverse of the cross-pillar join: opaque SIEM hash → named pattern + cost.'),
   service: z.string().optional().describe('Service to scope the lookup'),
   timeRange: z.enum(['1d', '7d', '30d']).default('7d').describe('Time range'),
   analyzerCost: z.number().optional().describe('SIEM ingestion cost in $/GB'),
@@ -30,7 +31,7 @@ export const eventLookupSchema = {
 };
 
 export async function executeEventLookup(
-  args: { pattern: string; service?: string; timeRange?: string; analyzerCost?: number },
+  args: { pattern?: string; tenxHash?: string; service?: string; timeRange?: string; analyzerCost?: number },
   env: EnvConfig
 ): Promise<string> {
   // Defensive defaults — schema defaults only apply at the MCP-SDK
@@ -42,16 +43,46 @@ export async function executeEventLookup(
   const period = costPeriodLabel(tf.days);
   const metricsEnv = await resolveMetricsEnv(env);
 
+  // Reverse cross-pillar lookup: a tenx_hash (e.g. seen on an event in
+  // the customer's SIEM / CloudWatch Logs) → the named pattern, then the
+  // normal breakdown. tenx_hash is the engine's portable pattern identity;
+  // this resolves the opaque hash back to a name + cost via the 10x metrics.
+  let resolvedFromHash: string | undefined;
+  let inputPattern = args.pattern;
+  if (args.tenxHash) {
+    const h = args.tenxHash.trim();
+    const q = `count by (${LABELS.pattern}) (increase(all_events_summaryBytes_total{${LABELS.hash}="${h.replace(/"/g, '\\"')}",${LABELS.env}="${metricsEnv}"}[${tf.range}]))`;
+    const r = await queryInstant(env, q).catch(() => null);
+    const top = r && r.status === 'success'
+      ? r.data.result
+          .map((x) => ({ p: x.metric[LABELS.pattern] || '', v: parsePrometheusValue(x) }))
+          .filter((x) => x.p)
+          .sort((a, b) => b.v - a.v)[0]?.p
+      : undefined;
+    if (!top) {
+      return `No pattern carries tenx_hash \`${h}\` in this env over the ${tf.label} window. The hash may be from a different env or outside the time range.`;
+    }
+    resolvedFromHash = h;
+    inputPattern = top;
+  }
+  if (!inputPattern) {
+    return 'Pass either `pattern` (a pattern name) or `tenxHash` (a hash seen on a SIEM / CloudWatch Logs event).';
+  }
+
   // Reporter pattern labels are always snake_case. The agent may have picked
   // up a display form (space-separated) from top_patterns / cost_drivers and
   // passed it back in; normalize to the canonical form so the exact-match
   // selector lands.
-  const rawInput = args.pattern;
-  const pattern = normalizePattern(args.pattern);
+  const rawInput = inputPattern;
+  const pattern = normalizePattern(inputPattern);
   // Detect raw-log-line inputs BEFORE normalization (normalize strips the
   // punctuation that identifies them). A raw line typically has spaces AND
   // shell/URL punctuation; a canonical pattern identity has neither.
   const looksLikeRawLogLine = /\s/.test(rawInput) && /["'{}:/]/.test(rawInput);
+  // One clean provenance line when the lookup started from an opaque hash
+  // — tells the human what their SIEM hash maps to. Not agent chatter.
+  const withProvenance = (s: string): string =>
+    resolvedFromHash ? `Resolved tenx_hash \`${resolvedFromHash}\` → \`${pattern}\`\n\n${s}` : s;
 
   // Current window: bytes per service for this pattern
   const currentRes = await queryInstant(env, pql.patternAcrossServices(pattern, metricsEnv, tf.range));
@@ -98,10 +129,10 @@ export async function executeEventLookup(
       return `No data found for pattern "${pattern}". Check the pattern name (use underscores, e.g., Payment_Gateway_Timeout).`;
     }
     // Use fuzzy results
-    return formatResults(fuzzyRes.data.result, pattern, metricsEnv, tf, costPerGb, period, env);
+    return withProvenance(await formatResults(fuzzyRes.data.result, pattern, metricsEnv, tf, costPerGb, period, env));
   }
 
-  return formatResults(currentRes.data.result, pattern, metricsEnv, tf, costPerGb, period, env);
+  return withProvenance(await formatResults(currentRes.data.result, pattern, metricsEnv, tf, costPerGb, period, env));
 }
 
 async function formatResults(
