@@ -32,6 +32,8 @@ export interface LabelNameMap {
   service: string;
   severity: string;
   env: string;
+  /** Stable pattern-identity hash label (engine `symbolMessageHashField`). */
+  hash: string;
 }
 
 /**
@@ -45,6 +47,7 @@ export const DEFAULT_LABELS: LabelNameMap = {
   service: 'tenx_user_service',
   severity: 'severity_level',
   env: 'tenx_env',
+  hash: 'tenx_hash',
 };
 
 /**
@@ -274,7 +277,12 @@ export function topPatternsFull(
   labels: LabelNameMap = DEFAULT_LABELS
 ): string {
   const selector = buildSelector(filters, env, labels);
-  return `topk(${limit}, sum by (${labels.pattern}, ${labels.service}, ${labels.severity}) (increase(${BYTES_METRIC}{${selector}}[${range}])))`;
+  // tenx_hash is 1:1 with the pattern, so adding it to the grouping does
+  // not change row cardinality; it just carries the portable hash through
+  // so the agent can cross-reference a pattern with the same value shipped
+  // into a SIEM / CloudWatch Logs by a 10x-powered forwarder. Envs that
+  // don't emit the label aggregate identically (hash = "").
+  return `topk(${limit}, sum by (${labels.pattern}, ${labels.service}, ${labels.severity}, ${labels.hash}) (increase(${BYTES_METRIC}{${selector}}[${range}])))`;
 }
 
 /**

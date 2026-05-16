@@ -94,7 +94,7 @@ export async function executeTopPatterns(
   // not tell us what the events were. Agents must not speculate about
   // event content from this row; the rendered output says so below.
   const NO_SYMBOL = '(no-symbol)';
-  interface Row { hash: string; service: string; severity: string; bytes: number; cost: number; recentRate: number; isStale: boolean; isNoSymbol: boolean }
+  interface Row { hash: string; tenxHash: string; service: string; severity: string; bytes: number; cost: number; recentRate: number; isStale: boolean; isNoSymbol: boolean }
   const rows: Row[] = res.data.result.map(r => {
     const rawPattern = r.metric[LABELS.pattern] || '';
     const service = r.metric[LABELS.service] || '';
@@ -103,6 +103,7 @@ export async function executeTopPatterns(
     const rate = recentRates.get(recentRateKey(rawPattern, service, severity)) ?? 0;
     return {
       hash: rawPattern || NO_SYMBOL,
+      tenxHash: r.metric[LABELS.hash] || '',
       service,
       severity,
       bytes,
@@ -244,6 +245,30 @@ export async function executeTopPatterns(
       const svc = r.service ? `  ${r.service}` : '';
       lines.push(`  ${name} ${rateLabel.padEnd(18)} ${sev}${svc}`);
     }
+  }
+
+  // ── Cross-pillar join keys (tenx_hash) ──
+  // tenx_hash is the engine's stable, portable pattern identity. A
+  // 10x-powered forwarder ships this exact value on every matching event
+  // into the customer SIEM / CloudWatch Logs, so it is the exact-match
+  // join key between a pattern here and the raw events there. Surfaced
+  // agent-only (machine cross-reference, not user prose). Doubles as
+  // capability detection: derived from the live result, no extra query.
+  const hashed = rows.filter(r => !r.isNoSymbol && r.tenxHash);
+  if (hashed.length > 0) {
+    const map = hashed.slice(0, 10).map(r => `${r.hash} = ${r.tenxHash}`).join('; ');
+    lines.push('');
+    lines.push(agentOnly(
+      `Cross-pillar join keys — tenx_hash: ${map}. ` +
+      `To correlate a pattern here with raw events shipped by a 10x-powered forwarder, ` +
+      `filter the SIEM / CloudWatch Logs group on the field tenx_hash="<value>" — exact match, no regex.`
+    ));
+  } else if (rows.some(r => !r.isNoSymbol)) {
+    lines.push('');
+    lines.push(agentOnly(
+      `Capability: this env's metrics carry no tenx_hash label (engine symbolMessageHashField unset or pre-dates the tenx_hash build). ` +
+      `Exact cross-pillar hash correlation is unavailable here; fall back to message_pattern matching.`
+    ));
   }
 
   const nextActions: NextAction[] = [];

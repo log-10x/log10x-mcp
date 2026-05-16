@@ -135,6 +135,7 @@ export async function executeConfigureEnv(args: ConfigureEnvArgs): Promise<strin
     service: args.labels?.service ?? DEFAULT_LABELS.service,
     severity: args.labels?.severity ?? DEFAULT_LABELS.severity,
     env: args.labels?.env ?? DEFAULT_LABELS.env,
+    hash: args.labels?.hash ?? DEFAULT_LABELS.hash,
   };
 
   // ── 2. Validate against the live backend ──

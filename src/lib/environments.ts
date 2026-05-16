@@ -516,6 +516,7 @@ function parseLabelMapFromEnv(): LabelNameMap {
     service: process.env.LOG10X_METRICS_LABEL_SERVICE || DEFAULT_LABELS.service,
     severity: process.env.LOG10X_METRICS_LABEL_SEVERITY || DEFAULT_LABELS.severity,
     env: process.env.LOG10X_METRICS_LABEL_ENV || DEFAULT_LABELS.env,
+    hash: process.env.LOG10X_METRICS_LABEL_HASH || DEFAULT_LABELS.hash,
   };
 }
 
@@ -592,6 +593,7 @@ async function tryReadEnvsJson(): Promise<EnvConfig[] | undefined> {
         service: entry.labels?.service ?? DEFAULT_LABELS.service,
         severity: entry.labels?.severity ?? DEFAULT_LABELS.severity,
         env: entry.labels?.env ?? DEFAULT_LABELS.env,
+        hash: entry.labels?.hash ?? DEFAULT_LABELS.hash,
       };
       const apiKey =
         entry.metricsBackend.kind === 'log10x' ? entry.metricsBackend.apiKey : '';

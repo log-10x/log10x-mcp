@@ -1,0 +1,12 @@
+{
+  "_comment": "Canonical cross-language conformance vectors for the tenx_hash pattern hash. The engine (PatternHashEncoder, JUnit PatternHashEncoderConformanceTest) and the MCP TypeScript reimplementation MUST both reproduce every expected value exactly. Do not edit an expected value to fix a failing test: a mismatch means the contract changed and every deployed tenx_hash filter is now inconsistent.",
+  "algorithm": "xxHash64 (net.openhft:zero-allocation-hashing:0.12, LongHashFunction.xx(), seed 0) over the UTF-8 bytes of the input; 64-bit result serialized big-endian as 8 bytes; encoded base64url (RFC 4648) without padding; always 11 chars.",
+  "vectors": [
+    { "input": "", "note": "high bit set", "expected": "70bbN1HY6Zk" },
+    { "input": "the cat", "note": "high bit clear", "expected": "E-OzMXyO0Uo" },
+    { "input": "a", "note": "high bit set", "expected": "0k7E8amMbls" },
+    { "input": "OOMKilled: pod ${x} exceeded memory", "note": "high bit set; realistic pattern", "expected": "wy7WAbcu8U8" },
+    { "input": "éè 中文 unicode", "note": "high bit set; multibyte UTF-8", "expected": "-wCKskD3BR0" },
+    { "input": "user=12345 action=login status=200", "note": "high bit set; kv line", "expected": "nq6LnqpN3DM" }
+  ]
+}
