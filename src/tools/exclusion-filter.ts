@@ -23,6 +23,7 @@ import {
 } from '../lib/siem/resolve.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { agentOnly } from '../lib/agent-only.js';
+import { tenxHash } from '../lib/pattern-hash.js';
 
 const SIEM_VENDORS = ['datadog', 'splunk', 'elasticsearch', 'cloudwatch'] as const;
 type SiemVendor = (typeof SIEM_VENDORS)[number];
@@ -100,6 +101,8 @@ export async function executeExclusionFilter(args: {
   const mode = args.mode;
 
   const { label, text } = generateFilter(vk, mode, tokens, patRegex, svc, sev, pattern);
+  const hashKey = tenxHash(pattern);
+  const hashFilter = generateHashFilter(vk, mode, hashKey, svc, sev);
 
   const lines: string[] = [];
   const vendorLabel = VENDOR_LABELS[vk] || vk;
@@ -108,10 +111,37 @@ export async function executeExclusionFilter(args: {
     lines.push('');
     lines.push(`_${detectedNote}_`);
   }
-  lines.push('');
-  lines.push(label);
-  lines.push('');
-  lines.push(text);
+  if (hashFilter) {
+    // Exact tenx_hash is strictly more precise; recommend it first. It is
+    // only valid when events carry tenx_hash (engine symbolMessageHashField
+    // enabled) — the regex form below is the fallback when they don't.
+    lines.push('');
+    lines.push(`**Recommended — exact \`tenx_hash\` (${hashKey})**`);
+    lines.push('');
+    lines.push(hashFilter.label);
+    lines.push('');
+    lines.push(hashFilter.text);
+    lines.push('');
+    lines.push('---');
+    lines.push('');
+    lines.push('**Fallback — message regex** (use only if your pipeline does not carry the `tenx_hash` field):');
+    lines.push('');
+    lines.push(label);
+    lines.push('');
+    lines.push(text);
+    lines.push('');
+    lines.push(agentOnly(
+      `Prefer the exact tenx_hash config. The regex fallback is recall-lossy ` +
+      `(token-order coincidence + per-vendor regex-engine limits). Recommend ` +
+      `the regex form ONLY if the env's pipeline does not emit tenx_hash — ` +
+      `confirm via log10x_pattern_examples (its probe-path note) or log10x_doctor.`
+    ));
+  } else {
+    lines.push('');
+    lines.push(label);
+    lines.push('');
+    lines.push(text);
+  }
 
   // Chain to verification + savings — without this, the user is dead-ended
   // after generating the config. After the drop is applied, the natural
@@ -356,4 +386,150 @@ function generateFilter(
   }
 
   return { label: 'Regex pattern matching this log template.', text: patRegex };
+}
+
+/**
+ * Exact-match drop keyed on the engine's portable `tenx_hash` field.
+ *
+ * This is strictly more precise than the message-regex form: tenx_hash is
+ * a stable per-pattern identity with no token coincidence and no per-vendor
+ * regex-engine limitation. The fluentd block is the exact config proven on
+ * the live otel-demo to drop one pattern with zero collateral.
+ *
+ * Only valid when the pipeline actually carries `tenx_hash` on events
+ * (engine `symbolMessageHashField` enabled). Callers render this as the
+ * primary recommendation with the regex form as an explicit fallback.
+ */
+function generateHashFilter(
+  vk: string, mode: string, hash: string, svc: string, sev: string,
+): { label: string; text: string } | null {
+  const id = hash.replace(/[^A-Za-z0-9]/g, '');
+  switch (vk) {
+    case 'datadog': {
+      const parts = [`@tenx_hash:"${hash}"`];
+      if (svc) parts.push(`service:${svc}`);
+      if (sev && sev !== 'uncl') parts.push(`status:${sev}`);
+      const q = parts.join(' ');
+      if (mode === 'api') {
+        const body = JSON.stringify({ name: `Drop tenx_hash ${hash}`, is_enabled: true, filter: { query: q } });
+        return {
+          label: 'Run this curl to create an exact-tenx_hash exclusion filter via the Datadog API.',
+          text: `curl -X POST "https://api.datadoghq.com/api/v1/logs/config/indexes/<INDEX_NAME>/exclusion_filters" \\\n  -H "DD-API-KEY: <YOUR_API_KEY>" \\\n  -H "DD-APPLICATION-KEY: <YOUR_APP_KEY>" \\\n  -H "Content-Type: application/json" \\\n  -d '${body}'`,
+        };
+      }
+      return { label: 'Paste this query into an exclusion filter under Logs > Configuration > Indexes (exact tenx_hash).', text: q };
+    }
+    case 'splunk': {
+      // _raw literal match on the unique hash string — collision-proof
+      // (the hash is globally unique), so this is exact in effect even
+      // though Splunk nullQueue routing is regex-on-_raw.
+      const rex = `"tenx_hash"\\s*:\\s*"${hash}"`;
+      if (mode === 'api') {
+        return {
+          label: 'Run this curl to create the exact-tenx_hash nullQueue transform via the Splunk REST API.',
+          text: `curl -k -u <USERNAME>:<PASSWORD> \\\n  "https://<SPLUNK_HOST>:8089/servicesNS/nobody/search/data/transforms/extractions" \\\n  -d name=drop_tenx_${id} \\\n  -d REGEX='${rex}' \\\n  -d DEST_KEY=queue \\\n  -d FORMAT=nullQueue`,
+        };
+      }
+      const lines = [
+        `# transforms.conf — exact tenx_hash drop (collision-proof)`,
+        `[drop_tenx_${id}]`,
+        `REGEX = ${rex}`,
+        `DEST_KEY = queue`,
+        `FORMAT = nullQueue`,
+        `# props.conf — wire it to your sourcetype:`,
+        `# [<your_sourcetype>]`,
+        `# TRANSFORMS-drop = drop_tenx_${id}`,
+      ];
+      return { label: 'Add this stanza to transforms.conf (exact tenx_hash → nullQueue) and wire it in props.conf.', text: lines.join('\n') };
+    }
+    case 'elasticsearch': {
+      // null-guard first: a bare ctx.tenx_hash on documents lacking the
+      // field throws a Painless error and fails the whole pipeline (the
+      // 84 other patterns). Mirrors the baseline generateFilter guard.
+      const cond = `ctx.tenx_hash != null && ctx.tenx_hash == '${hash}'`
+        + (svc ? ` && ctx['service.name'] == '${svc}'` : '')
+        + (sev && sev !== 'uncl' ? ` && ctx.level == '${sev.toUpperCase()}'` : '');
+      const proc = { drop: { if: cond } };
+      if (mode === 'api') {
+        const b = JSON.stringify({ description: `Drop tenx_hash ${hash}`, processors: [proc] }, null, 2);
+        return {
+          label: 'Run this curl to create an ingest pipeline that drops by exact tenx_hash.',
+          text: `curl -X PUT "https://<ES_HOST>:9200/_ingest/pipeline/<PIPELINE_ID>" \\\n  -H "Content-Type: application/json" \\\n  -u <USERNAME>:<PASSWORD> \\\n  -d '${b}'`,
+        };
+      }
+      return { label: 'Add this drop processor to an ingest pipeline (exact tenx_hash equality).', text: JSON.stringify(proc, null, 2) };
+    }
+    case 'cloudwatch':
+      return {
+        label: 'Use this exact CloudWatch filter pattern in a subscription/metric filter on the log group.',
+        text: `{ $.tenx_hash = "${hash}" }`,
+      };
+    case 'fluentd': {
+      // Exact block proven on live otel-demo (Step 2) to drop one pattern
+      // with zero collateral.
+      const lines = [
+        `# Fluentd — exact tenx_hash drop (proven on live otel-demo)`,
+        `<filter ${svc || '**'}>`,
+        `  @type grep`,
+        `  <exclude>`,
+        `    key tenx_hash`,
+        `    pattern /^${hash}$/`,
+        `  </exclude>`,
+        `</filter>`,
+      ];
+      return { label: 'Add this filter block to Fluentd (exact tenx_hash drop).', text: lines.join('\n') };
+    }
+    case 'fluentbit':
+      return {
+        label: 'Add this filter to Fluent Bit (exact tenx_hash drop).',
+        text: [`[FILTER]`, `    Name     grep`, `    Match    ${svc || '*'}`, `    Exclude  tenx_hash ^${hash}$`].join('\n'),
+      };
+    case 'otel-collector': {
+      // Raw-line ingestion (the proven shape) carries tenx_hash in the log
+      // body, NOT in OTLP attributes. Match the JSON fragment in body —
+      // collision-proof (hash is globally unique). Mirrors the baseline's
+      // IsMatch(body, ...) form.
+      const lines = [
+        `# OTel Collector — exact tenx_hash drop (body match; raw-line ingestion)`,
+        `processors:`,
+        `  filter/drop_tenx_hash:`,
+        `    logs:`,
+        `      log_record:`,
+        `        - 'IsMatch(body, "\\"tenx_hash\\":\\"${hash}\\"")'`,
+      ];
+      return { label: 'Add this filter processor to your OTel Collector config (exact tenx_hash, body match).', text: lines.join('\n') };
+    }
+    case 'datadog-agent':
+      return {
+        label: 'Add this log_processing_rules block to your Datadog Agent config (exact tenx_hash).',
+        text: [
+          `logs:`, `  - type: file`, `    path: /var/log/app.log`,
+          `    log_processing_rules:`, `      - type: exclude_at_match`,
+          `        name: drop_tenx_${id}`, `        pattern: '"tenx_hash":"${hash}"'`,
+        ].join('\n'),
+      };
+    case 'vector':
+      return {
+        label: 'Add this filter transform to your Vector config (exact tenx_hash).',
+        text: [
+          `[transforms.drop_tenx_hash]`, `type = "filter"`, `inputs = ["<YOUR_SOURCE>"]`,
+          `condition = '!(.tenx_hash == "${hash}")'`,
+        ].join('\n'),
+      };
+    case 'logstash':
+      return {
+        label: 'Add this filter block to your Logstash pipeline (exact tenx_hash).',
+        text: [`filter {`, `  if [tenx_hash] == "${hash}" {`, `    drop { }`, `  }`, `}`].join('\n'),
+      };
+    case 'filebeat':
+      return {
+        label: 'Add this processor to your filebeat.yml (exact tenx_hash).',
+        text: [`processors:`, `  - drop_event:`, `      when:`, `        equals:`, `          tenx_hash: "${hash}"`].join('\n'),
+      };
+    default:
+      // rsyslog / syslog-ng / promtail operate on the raw line with no
+      // structured field; the unique hash string as a literal is still
+      // collision-proof. Returning null lets the caller keep the regex form.
+      return null;
+  }
 }
