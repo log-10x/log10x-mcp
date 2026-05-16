@@ -34,6 +34,8 @@ import { getConnector, type SiemConnector } from '../lib/siem/index.js';
 import type { SiemId } from '../lib/siem/pricing.js';
 import { fmtCount, normalizePattern } from '../lib/format.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
+import { tenxHash } from '../lib/pattern-hash.js';
+import { agentOnly } from '../lib/agent-only.js';
 
 /** SIEM vendors supported by pattern_examples. Inherits from the dep-check / exclusion-filter list. */
 const EXAMPLES_VENDORS: readonly SiemId[] = [
@@ -203,19 +205,41 @@ export async function executePatternExamples(
   const vendorQuery = buildVendorQuery(vendor, tokens, args.service, args.severity);
 
   // ── 4. Probe the SIEM ──────────────────────────────────────────────
+  // Prefer an EXACT tenx_hash filter for Symbol-Message input: it is the
+  // engine's portable pattern identity, so it pins exactly the events a
+  // 10x-powered forwarder shipped — no token coincidence, no per-vendor
+  // query-syntax gaps. Self-verifying capability detection: a non-empty
+  // hash probe proves this env's SIEM carries tenx_hash; an empty one
+  // falls back to the content-token query (env is on the no-hash plane).
   const probeNotes: string[] = [];
   const onProgress = (_p: ProgressNote): void => {
     /* swallow — we render summary at the end, not per-step */
   };
   const probeBatch = Math.max(args.limit * 5, 100);
-  const probe = await connector.pullEvents({
-    window: args.timeRange,
-    scope: args.scope,
-    query: vendorQuery,
-    targetEventCount: probeBatch,
-    maxPullMinutes: 2,
-    onProgress,
-  });
+  const doProbe = (q: string) =>
+    connector.pullEvents({
+      window: args.timeRange,
+      scope: args.scope,
+      query: q,
+      targetEventCount: probeBatch,
+      maxPullMinutes: 2,
+      onProgress,
+    });
+
+  const hashKey = looksLikeRawLogLine ? undefined : tenxHash(canonicalPattern);
+  const hashQuery = hashKey
+    ? buildHashQuery(vendor, hashKey, args.service, args.severity)
+    : undefined;
+
+  let probe = await doProbe(hashQuery ?? vendorQuery);
+  let probePath: 'tenx_hash-exact' | 'content-token' = hashQuery
+    ? 'tenx_hash-exact'
+    : 'content-token';
+  if (hashQuery && probe.events.length === 0) {
+    if (probe.metadata.notes) probeNotes.push(...probe.metadata.notes);
+    probe = await doProbe(vendorQuery);
+    probePath = 'content-token';
+  }
   if (probe.metadata.notes) probeNotes.push(...probe.metadata.notes);
 
   if (probe.events.length === 0) {
@@ -311,6 +335,15 @@ export async function executePatternExamples(
   lines.push(`**Pattern**: \`${canonicalPattern}\``);
   lines.push(`**Window**: last ${args.timeRange}${args.service ? ` · service=${args.service}` : ''}${args.severity ? ` · severity=${args.severity}` : ''}`);
   lines.push(`**Probe**: ${fmtCount(probe.events.length)} events pulled · ${extracted.patterns.length} distinct templates`);
+  lines.push(
+    probePath === 'tenx_hash-exact'
+      ? agentOnly(
+          `Probe path: tenx_hash-exact (filter ${hashQuery}). These events were pinned by the engine's portable pattern hash, so this env's SIEM carries tenx_hash — exact cross-pillar joins and forwarder-native drops by tenx_hash are available here. Prefer tenx_hash over message regex for any follow-up SIEM filter on this env.`,
+        )
+      : agentOnly(
+          `Probe path: content-token (tenx_hash not present in this env's SIEM events, or pasted-line input). Results are phrase-match approximate; exact-hash correlation is unavailable on this env's data plane — do not claim hash-based precision.`,
+        ),
+  );
   lines.push(`**Retained**: ${fmtCount(retained.reduce((s, b) => s + b.p.count, 0))} events across ${retained.length} matching templates (Jaccard ≥ threshold)`);
   if (dropped.length > 0) {
     const droppedCount = dropped.reduce((s, b) => s + b.p.count, 0);
@@ -443,6 +476,54 @@ function buildVendorQuery(
     }
     default:
       return phrases.join(' ');
+  }
+}
+
+/**
+ * Exact-match probe on the `tenx_hash` field. When the input is a Symbol
+ * Message, tenxHash(symbolSequence) is byte-identical to the engine's
+ * emitted tenx_hash (cross-language contract, conformance-proven), so a
+ * 10x-powered forwarder ships this exact value on every matching event.
+ * An exact field match is strictly better than content-token phrase
+ * search: no escaping, no per-vendor query-syntax gaps (notably the
+ * CloudWatch FilterLogEvents `@`-syntax issue), and no false positives
+ * from token coincidence.
+ */
+function buildHashQuery(
+  vendor: SiemId,
+  hash: string,
+  service?: string,
+  severity?: string,
+): string {
+  switch (vendor) {
+    case 'splunk': {
+      const parts = [`tenx_hash="${hash}"`];
+      if (service) parts.push(`tenx_user_service="${service}"`);
+      if (severity) parts.push(`severity_level="${severity}"`);
+      return parts.join(' ');
+    }
+    case 'datadog': {
+      const parts = [`@tenx_hash:${hash}`];
+      if (service) parts.push(`service:${service}`);
+      if (severity) parts.push(`status:${severity.toLowerCase()}`);
+      return parts.join(' ');
+    }
+    case 'elasticsearch': {
+      const parts = [`tenx_hash:"${hash}"`];
+      if (service) parts.push(`service: "${service}"`);
+      if (severity) parts.push(`severity: "${severity}"`);
+      return parts.join(' AND ');
+    }
+    case 'cloudwatch': {
+      // CloudWatch FilterLogEvents JSON selector — exact, no @message
+      // term escaping. && for optional structural narrowing.
+      const sel = [`$.tenx_hash = "${hash}"`];
+      if (service) sel.push(`$.tenx_user_service = "${service}"`);
+      if (severity) sel.push(`$.severity_level = "${severity}"`);
+      return `{ ${sel.join(' && ')} }`;
+    }
+    default:
+      return `tenx_hash="${hash}"`;
   }
 }
 
