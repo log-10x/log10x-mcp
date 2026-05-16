@@ -101,26 +101,38 @@ if [ "${ERRC:-0}" -gt 0 ]; then
   warn "log10x container has ~$ERRC error lines / 5m. $LOCALHOST9090 are remote-write failures to http://localhost:9090 — a PRE-EXISTING demo RW target with no listener (NOT introduced by tenx_hash; the log10x CLOUD backend used for correlation is verified independently in gate 3). Gate 1 does NOT claim 'healthy', only 'on dev image + container ready'."
 fi
 
-# ---- Gate 2: CW freshness via authoritative lastIngestionTime ----
-echo "[2] CW Logs freshness (authoritative: describe-log-streams lastIngestionTime)"
+# ---- Gate 2: CW freshness via AUTHORITATIVE readback (get-log-events, newest) ----
+# Instrument correction (2026-05-16). describe-log-streams
+# lastIngestionTime was found to lag badly: it climbed 1:1 with wall
+# clock to >2000s while the egress was demonstrably healthy
+# (fluent-bit returning PutLogEvents HTTP 200 + nextSequenceToken,
+# and get-log-events showing events at age ~0s). As a freshness gate
+# it FALSE-FAILS a working pipeline. filter-log-events --max-items N
+# is also unsafe here: under the demo firehose it returns the OLDEST
+# N of the window, so "newest age" was really window-size (the prior
+# Gate 2 theater). The authoritative signal is the literal readback:
+# get-log-events with startFromHead=false returns the NEWEST events,
+# so we assert (a) the newest retrievable event is recent and (b) it
+# carries tenx_hash. That is the e2e claim itself, not a proxy.
+# Egress now runs through a Fluent Bit sidecar (Go cloudwatch_logs);
+# the Ruby fluent-plugin-cloudwatch-logs silently never flushed under
+# this firehose topology (4 fluentd-side fixes failed identically).
+echo "[2] CW Logs freshness (authoritative: get-log-events newest + tenx_hash present)"
 NOW=$(date +%s)
-LET=$(aws logs describe-log-streams --log-group-name "$LG" --region us-east-1 \
-  --order-by LastEventTime --descending --max-items 1 \
-  --query 'logStreams[0].lastIngestionTime' --output text 2>/dev/null)
-INGAGE=$(( NOW - ${LET:-0}/1000 ))
-echo "    CW stream last ingestion: ${INGAGE}s ago (true CW lag is ~250-330s; a stall shows as minutes/hours)"
-# pull sampling hashes from the most-recent slice (filter scans oldest-first,
-# so take a tight recent window AND tail the result to bias toward newest).
-CWHASHES=$(aws logs filter-log-events --log-group-name "$LG" --region us-east-1 \
-  --start-time $(( (NOW-1200)*1000 )) --filter-pattern 'tenx_hash' --max-items 800 \
-  --query 'events[].message' --output text 2>/dev/null \
+STREAM="${CW_STREAM:-tenx-fluentd}"
+CWEV=$(aws logs get-log-events --log-group-name "$LG" --log-stream-name "$STREAM" \
+  --region us-east-1 --limit 300 --query 'events[*].[timestamp,message]' \
+  --output text 2>/dev/null)
+NEWEST=$(printf '%s\n' "$CWEV" | awk -F'\t' '$1 ~ /^[0-9]+$/ {print $1}' | sort -n | tail -1)
+INGAGE=$(( NOW - ${NEWEST:-0}/1000 ))
+CWHASHES=$(printf '%s\n' "$CWEV" \
   | grep -oE '"tenx_hash":"[A-Za-z0-9_-]{11}"' | sed -E 's/.*:"([^"]+)"/\1/' | sort -u)
-NCW=$(echo "$CWHASHES" | grep -c . || true)
-echo "    distinct tenx_hash in last 20m of CW: $NCW"
-if [ -n "${LET:-}" ] && [ "$INGAGE" -lt 720 ] && [ "$NCW" -ge "$SAMPLES" ]; then
-  ok "CW genuinely fresh (ingested ${INGAGE}s ago, $NCW distinct)"
+NCW=$(printf '%s\n' "$CWHASHES" | grep -c . || true)
+echo "    newest retrievable CW event: ${INGAGE}s ago; distinct tenx_hash in newest 300: $NCW"
+if [ -n "${NEWEST:-}" ] && [ "$INGAGE" -lt 900 ] && [ "$NCW" -ge "$SAMPLES" ]; then
+  ok "CW genuinely fresh via readback (newest ${INGAGE}s ago, $NCW distinct tenx_hash)"
 else
-  no "CW NOT fresh — last ingestion ${INGAGE}s ago (stall threshold 720s), $NCW distinct. The fluentd->CW egress is down/stalled; tenx_hash correctness is still checked in gate 3 against the cloud backend."
+  no "CW NOT fresh by readback. Newest retrievable event ${INGAGE}s ago (stall threshold 900s), $NCW distinct (need >=$SAMPLES). The fluentd->Fluent Bit->CW egress is stalled; tenx_hash correctness is still checked CW-independently in gate 3."
 fi
 
 # ---- Gate 3: correctness vs AUTHORITATIVE cloud backend (CW-independent) ----
@@ -216,8 +228,20 @@ cat <<LIMS
    http://localhost:9090 (no listener) — ~180 failures/5m. Unrelated to
    tenx_hash; the cloud backend that correlation uses is healthy and is
    what gate 3 verifies. Disclosed by gate 1, not hidden.
- * CW ingestion lag ~5m: gate 2 uses a 30m window and prints newest event
-   age so the lag is visible, not papered over.
+ * CW freshness instrument (corrected 2026-05-16): gate 2 reads the
+   NEWEST events via get-log-events (startFromHead=false), not
+   describe-log-streams lastIngestionTime (that signal was observed to
+   lag 1:1 to >2000s while egress was provably healthy, so it
+   false-fails a working pipeline). Stall threshold is 900s on the
+   actual newest retrievable event; true CW lag is ~0-330s.
+ * CW egress topology: events reach CW through a Fluent Bit sidecar
+   (Go cloudwatch_logs) fed by fluentd forward:24226. The Ruby
+   fluent-plugin-cloudwatch-logs silently never flushed under this
+   firehose (4 fluentd-side fixes failed identically); the sidecar is
+   the fix. This is a live kubectl patch on the Helm-managed
+   tenx-fluentd daemonset + fluentd-config-tenx/fluent-bit-cwl
+   configmaps. A helm upgrade reverts it; re-apply from
+   eval/cw-egress-fix/apply.sh (see TENX_HASH_STATUS.md).
  * Correctness is zero-tolerance; availability is floored (propagation
    lag => UNRESOLVED, reported, never silently passed).
 LIMS
