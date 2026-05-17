@@ -155,15 +155,14 @@ function stanza(
   if (sev) headBits.push(sev);
   if (r.flags && r.flags.length) headBits.push(...r.flags);
   out.push(`${rank}) ${headBits.join(' · ') || '(pattern)'}`);
-  // A real sample line is the readable identity; the tokenized name
-  // is demoted to a secondary `pattern:` line. With no sample the
-  // tokenized name stays the lead (graceful degradation).
+  // Label both lines so the reader knows which is a real example event
+  // and which is the canonical identity. The identity line is always
+  // labeled `pattern:`; when a real sample resolved it leads, labeled
+  // `sample:` (one verbatim event, not the whole population).
   if (r.sample) {
-    out.push(`   ${r.sample}`);
-    out.push(`   pattern: ${fmtPattern(r.pattern)}`);
-  } else {
-    out.push(`   ${fmtPattern(r.pattern)}`);
+    out.push(`   sample:  ${r.sample}`);
   }
+  out.push(`   pattern: ${fmtPattern(r.pattern)}`);
 
   // Prefer a trend sparkline (volume over the window) when samples are
   // supplied: "is this getting worse" is the actionable question, and
