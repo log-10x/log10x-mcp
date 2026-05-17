@@ -7,3 +7,6 @@ test-build/
 .npmrc
 smoke-test.mjs
 eval/gaps/.gaps.shape-runner.bak.json
+# Per-run hero eval artifacts (timestamped dirs). Curated rollups
+# (CAMPAIGN-PROOF.md, JUDGE-ENSEMBLE.md, etc.) are tracked directly.
+eval/reports/hero/**/20*Z*/
