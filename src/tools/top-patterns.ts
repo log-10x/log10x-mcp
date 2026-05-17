@@ -8,7 +8,7 @@
 
 import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
-import { queryInstant } from '../lib/api.js';
+import { queryInstant, queryRange } from '../lib/api.js';
 import * as pql from '../lib/promql.js';
 import { LABELS } from '../lib/promql.js';
 import { bytesToCost, parsePrometheusValue } from '../lib/cost.js';
@@ -63,11 +63,19 @@ export async function executeTopPatterns(
   // ranks top-N over 7d but has zero rate in the last hour is residue
   // from a closed incident, not an active cost driver. Surface that
   // explicitly so the agent does not treat stale series as current.
-  const [res, recentRes, eventsRes, totalRes] = await Promise.all([
+  // Trend sparkline window: ~8 buckets across the lookback. step is
+  // both the query_range step and the increase() inner range.
+  const nowSec = Math.floor(Date.now() / 1000);
+  const windowSec = Math.max(600, Math.round(tf.days * 86400));
+  const stepSec = Math.max(60, Math.floor(windowSec / 8));
+  const startSec = nowSec - windowSec;
+
+  const [res, recentRes, eventsRes, totalRes, trendRes] = await Promise.all([
     queryInstant(env, pql.topPatternsFull(filters, metricsEnv, tf.range, args.limit)),
     queryInstant(env, pql.recentRateByPattern(filters, metricsEnv, '1h')).catch(() => null),
     queryInstant(env, pql.eventsByPatternFull(filters, metricsEnv, tf.range)).catch(() => null),
     queryInstant(env, pql.totalBytesInScope(filters, metricsEnv, tf.range)).catch(() => null),
+    queryRange(env, pql.seriesByPatternFull(filters, metricsEnv, stepSec), startSec, nowSec, stepSec).catch(() => null),
   ]);
   if (res.status !== 'success' || res.data.result.length === 0) {
     return 'No pattern data available. Patterns appear after the first 24h of data collection.';
@@ -113,6 +121,24 @@ export async function executeTopPatterns(
     }
   }
 
+  // Trend series, keyed identically. Each matrix row has .values
+  // ([ts, "n"] per bucket); we keep just the numeric sequence for the
+  // sparkline. Non-fatal: no series -> the renderer falls back to a bar.
+  const trendByKey = new Map<string, number[]>();
+  if (trendRes && trendRes.status === 'success' && Array.isArray(trendRes.data.result)) {
+    for (const r of trendRes.data.result as Array<{ metric: Record<string, string>; values?: [number, string][] }>) {
+      const k = recentRateKey(
+        r.metric[LABELS.pattern] || '',
+        r.metric[LABELS.service] || '',
+        r.metric[LABELS.severity] || ''
+      );
+      const seq = (r.values || [])
+        .map(([, val]) => Number(val))
+        .map(n => (Number.isFinite(n) ? n : 0));
+      if (seq.length >= 2) trendByKey.set(k, seq);
+    }
+  }
+
   const NO_SYMBOL = '(no-symbol)';
   interface Row { hash: string; tenxHash: string; service: string; severity: string; bytes: number; cost: number; events: number; recentRate: number; isStale: boolean; isNoSymbol: boolean }
   const rows: Row[] = res.data.result.map(r => {
@@ -134,7 +160,34 @@ export async function executeTopPatterns(
       isNoSymbol: !rawPattern,
     };
   });
-  rows.sort((a, b) => b.cost - a.cost);
+  // Collapse rows that are the same (pattern, service, severity) but
+  // split across tenx_hash values. During the tenx_hash rollout the
+  // backend holds an unhashed and a hashed series per pattern; topk
+  // groups by hash, so they surface as duplicate-looking rows. Every
+  // hash-agnostic tool (services, cost_drivers) sums these the same
+  // way and produces the product's trusted totals, so the engine
+  // writes each event to exactly one series: summing is correct, not
+  // double-counting. Keep the non-empty hash for the agent block.
+  const mergedByKey = new Map<string, Row>();
+  for (const r of rows) {
+    const k = recentRateKey(r.isNoSymbol ? '' : r.hash, r.service, r.severity);
+    const ex = mergedByKey.get(k);
+    if (!ex) { mergedByKey.set(k, { ...r }); continue; }
+    // bytes come from topPatternsFull (hash IS in the group-by) so the
+    // split rows partition the volume -> sum. events come from
+    // eventsByPatternFull (hash-agnostic) so both split rows already
+    // carry the full logical total -> take max, not sum (summing would
+    // double-count). recentRate is likewise hash-agnostic -> max.
+    ex.bytes += r.bytes;
+    ex.cost += r.cost;
+    ex.events = Math.max(ex.events, r.events);
+    ex.recentRate = Math.max(ex.recentRate, r.recentRate);
+    ex.isStale = ex.isStale && r.isStale; // active if ANY split series is active
+    if (!ex.tenxHash && r.tenxHash) ex.tenxHash = r.tenxHash;
+  }
+  const merged = [...mergedByKey.values()].sort((a, b) => b.cost - a.cost);
+  rows.length = 0;
+  rows.push(...merged);
 
   const displayName = args.service || 'all services';
   const totalTopBytes = rows.reduce((s, r) => s + r.bytes, 0);
@@ -157,6 +210,11 @@ export async function executeTopPatterns(
   let noSymbolCount = 0;
   for (const r of rows) { if (r.isStale) staleCount++; if (r.isNoSymbol) noSymbolCount++; }
 
+  // tenx_hash is intentionally NOT shown in the human stanza: it is a
+  // cross-pillar join key, noise in a "what is expensive" view. It
+  // stays in the agent-only join-keys block below (machine use) and
+  // surfaces to humans only in the tools where they act on it
+  // (event_lookup reverse, exclusion_filter exact-drop).
   const stanzaRows: PatternStanzaRow[] = rows.map(r => ({
     pattern: r.hash,
     service: r.service,
@@ -164,7 +222,7 @@ export async function executeTopPatterns(
     bytes: r.bytes,
     cost: r.cost,
     events: r.events,
-    tenxHash: r.isNoSymbol ? undefined : r.tenxHash,
+    spark: trendByKey.get(recentRateKey(r.isNoSymbol ? '' : r.hash, r.service, r.severity)),
     flags: [
       ...(r.isStale ? ['stale'] : []),
       ...(r.isNoSymbol ? ['no-symbol'] : []),

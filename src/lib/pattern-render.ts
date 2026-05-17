@@ -39,6 +39,45 @@ export interface PatternStanzaRow {
    * this so the bar reflects the metric that actually ranks the list.
    */
   barValue?: number;
+  /**
+   * Volume-over-window samples. When present (>=2 points) the row
+   * renders a trend sparkline + direction word INSTEAD of the static
+   * share-bar (a flat scope-share bar is near-useless on a long-tailed
+   * workload; "is this getting worse" is the question that matters).
+   */
+  spark?: number[];
+}
+
+const SPARK = '▁▂▃▄▅▆▇█';
+
+/** Unicode sparkline scaled to the series own min..max. */
+export function sparkline(vals: number[]): string {
+  const v = vals.filter(x => Number.isFinite(x));
+  if (v.length < 2) return '';
+  const min = Math.min(...v);
+  const max = Math.max(...v);
+  if (max <= min) return SPARK[0].repeat(v.length);
+  return v
+    .map(x => {
+      const i = Math.round(((x - min) / (max - min)) * (SPARK.length - 1));
+      return SPARK[Math.min(SPARK.length - 1, Math.max(0, i))];
+    })
+    .join('');
+}
+
+/** First-third vs last-third mean -> rising / falling / flat. */
+export function trendWord(vals: number[]): string {
+  const v = vals.filter(x => Number.isFinite(x));
+  if (v.length < 4) return 'flat';
+  const k = Math.max(1, Math.floor(v.length / 3));
+  const head = v.slice(0, k).reduce((a, b) => a + b, 0) / k;
+  const tail = v.slice(-k).reduce((a, b) => a + b, 0) / k;
+  if (head <= 0 && tail <= 0) return 'flat';
+  if (head <= 0) return tail > 0 ? 'rising' : 'flat';
+  const ratio = tail / head;
+  if (ratio >= 1.2) return 'rising';
+  if (ratio <= 0.8) return 'falling';
+  return 'flat';
 }
 
 export interface StanzaRenderOpts {
@@ -94,16 +133,20 @@ function stanza(
   out.push(`${rank}) ${headBits.join(' · ')}`);
   out.push(`   ${fmtPattern(r.pattern)}`);
 
-  // Bar is scaled to the LARGEST shown row so a ranked list reads as a
-  // ranked list (scope-relative bars collapse to one cell on a
-  // long-tailed workload). barValue defaults to bytes; tools ranked by
-  // something else (cost_drivers: $ delta) override it.
-  const barVal = typeof r.barValue === 'number' ? r.barValue : r.bytes;
-  const barFrac = maxBytes > 0 ? barVal / maxBytes : 0;
-  const scopeDenom = opts.scopeBytes && opts.scopeBytes > 0 ? opts.scopeBytes : 0;
-  const scopeFrac = scopeDenom > 0 ? r.bytes / scopeDenom : barFrac;
-  const pctTail = scopeDenom > 0 ? ` ${pctText(scopeFrac)} of scope` : '';
-  out.push(`   ${shareBar(barFrac)} ${pctTail}`.trimEnd());
+  // Prefer a trend sparkline (volume over the window) when samples are
+  // supplied: "is this getting worse" is the actionable question, and
+  // a scope-share bar collapses to one cell on a long-tailed workload.
+  // Fall back to the scaled share-bar for callers that pass no series.
+  if (r.spark && r.spark.length >= 2) {
+    out.push(`   trend ${sparkline(r.spark)}  ${trendWord(r.spark)}`);
+  } else {
+    const barVal = typeof r.barValue === 'number' ? r.barValue : r.bytes;
+    const barFrac = maxBytes > 0 ? barVal / maxBytes : 0;
+    const scopeDenom = opts.scopeBytes && opts.scopeBytes > 0 ? opts.scopeBytes : 0;
+    const scopeFrac = scopeDenom > 0 ? r.bytes / scopeDenom : barFrac;
+    const pctTail = scopeDenom > 0 ? ` ${pctText(scopeFrac)} of scope` : '';
+    out.push(`   ${shareBar(barFrac)} ${pctTail}`.trimEnd());
+  }
 
   const metrics: string[] = [];
   if (r.bytes > 0) metrics.push(`${fmtBytes(r.bytes)}`);
@@ -153,10 +196,13 @@ export function renderPatternStanzas(
     0
   );
   const hasScope = !!(opts.scopeBytes && opts.scopeBytes > 0);
+  const hasSpark = rows.some(r => r.spark && r.spark.length >= 2);
   lines.push(
-    hasScope
-      ? '(bar scaled to the largest shown row; % is true share of scope)'
-      : '(bar scaled to the largest shown row)'
+    hasSpark
+      ? '(trend = volume across the window, oldest -> newest)'
+      : hasScope
+        ? '(bar scaled to the largest shown row; % is true share of scope)'
+        : '(bar scaled to the largest shown row)'
   );
   lines.push('');
 

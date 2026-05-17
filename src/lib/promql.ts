@@ -317,6 +317,23 @@ export function eventsByPatternFull(
   return `sum by (${labels.pattern}, ${labels.service}, ${labels.severity}) (increase(${VOLUME_METRIC}{${selector}}[${range}]))`;
 }
 
+/**
+ * Per-(pattern, service, severity) byte series for a query_range call:
+ * each evaluation step is the per-bucket increase, so the matrix is a
+ * volume-over-time sparkline source. Keyed identically to
+ * topPatternsFull so it joins 1:1 with the byte rows. `stepSeconds` is
+ * passed as the increase() inner range AND the query_range step.
+ */
+export function seriesByPatternFull(
+  filters: Record<string, string>,
+  env: string,
+  stepSeconds: number,
+  labels: LabelNameMap = DEFAULT_LABELS
+): string {
+  const selector = buildSelector(filters, env, labels);
+  return `sum by (${labels.pattern}, ${labels.service}, ${labels.severity}) (increase(${BYTES_METRIC}{${selector}}[${Math.max(60, Math.floor(stepSeconds))}s]))`;
+}
+
 /** Bytes grouped by an arbitrary label, ranked. */
 export function bytesByLabel(
   label: string,
