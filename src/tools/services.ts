@@ -10,6 +10,7 @@ import { LABELS } from '../lib/promql.js';
 import { bytesToCost, bytesToGb, parsePrometheusValue } from '../lib/cost.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { fmtDollar, fmtBytes, fmtPct, parseTimeframe, costPeriodLabel } from '../lib/format.js';
+import { shareBar } from '../lib/pattern-render.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { agentOnly } from '../lib/agent-only.js';
 
@@ -59,14 +60,17 @@ export async function executeServices(
 
   const lines: string[] = [];
   lines.push(`Monitored Services (${tf.label})`);
+  lines.push('(bar scaled to the largest service; % is share of total volume)');
   lines.push('');
 
+  const maxBytes = rows.length ? rows[0].bytes : 0;
   for (const r of rows) {
     const name = r.name.padEnd(nameWidth);
     const vol = fmtBytes(r.bytes).padEnd(10);
-    const pct = fmtPct(r.pct).padStart(4);
+    const pct = fmtPct(r.pct).padStart(5);
+    const bar = shareBar(maxBytes > 0 ? r.bytes / maxBytes : 0, 16);
     const cost = `${fmtDollar(r.cost)}${period}`;
-    lines.push(`  ${name} ${vol} ${pct}   ${cost}`);
+    lines.push(`  ${name} ${vol} ${pct}  ${bar}  ${cost}`);
   }
 
   const totalCost = bytesToCost(totalBytes, costPerGb);

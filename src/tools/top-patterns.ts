@@ -16,6 +16,7 @@ import { resolveMetricsEnv, resolveMetricsEnvFiltered } from '../lib/resolve-env
 import { fmtDollar, fmtPattern, fmtSeverity, fmtCount, parseTimeframe, costPeriodLabel } from '../lib/format.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { agentOnly } from '../lib/agent-only.js';
+import { renderPatternStanzas, type PatternStanzaRow } from '../lib/pattern-render.js';
 
 export const topPatternsSchema = {
   service: z.string().optional().describe('Service name to scope the result. Omit for all services.'),
@@ -23,11 +24,12 @@ export const topPatternsSchema = {
   timeRange: z.string().regex(/^\d+[mhd]$/, 'Time range must look like `15m`, `48h`, `2d`, etc.').default('7d').describe('Time range to aggregate over. Free-form `<n><m|h|d>` — any number of minutes / hours / days. Examples: `15m`, `48h`, `3d`, `7d`, `30d`. Bounds: minimum 1 minute, maximum 90 days. Sub-day values are useful for incident investigation; day-level values for cost and trend analysis. (cost_drivers, which uses 3-window baseline math, remains snapped to `1d` / `7d` / `30d` for offset symmetry.)'),
   limit: z.number().min(1).max(50).default(10).describe('Number of patterns to return.'),
   analyzerCost: z.number().optional().describe('SIEM ingestion cost in $/GB. Auto-detected from profile if omitted.'),
+  groupByService: z.boolean().optional().describe('Group the output into per-service sections (each with its own ranked patterns) instead of one global cross-service ranking. Default false: a single global ranking, with the service shown on each pattern.'),
   environment: z.string().optional().describe('Environment nickname (for multi-env setups).'),
 };
 
 export async function executeTopPatterns(
-  args: { service?: string; severity?: string; timeRange: string; limit: number; analyzerCost?: number },
+  args: { service?: string; severity?: string; timeRange: string; limit: number; analyzerCost?: number; groupByService?: boolean },
   env: EnvConfig
 ): Promise<string> {
   // Defensive defaults so the function is safe to call without the zod schema
@@ -61,9 +63,11 @@ export async function executeTopPatterns(
   // ranks top-N over 7d but has zero rate in the last hour is residue
   // from a closed incident, not an active cost driver. Surface that
   // explicitly so the agent does not treat stale series as current.
-  const [res, recentRes] = await Promise.all([
+  const [res, recentRes, eventsRes, totalRes] = await Promise.all([
     queryInstant(env, pql.topPatternsFull(filters, metricsEnv, tf.range, args.limit)),
     queryInstant(env, pql.recentRateByPattern(filters, metricsEnv, '1h')).catch(() => null),
+    queryInstant(env, pql.eventsByPatternFull(filters, metricsEnv, tf.range)).catch(() => null),
+    queryInstant(env, pql.totalBytesInScope(filters, metricsEnv, tf.range)).catch(() => null),
   ]);
   if (res.status !== 'success' || res.data.result.length === 0) {
     return 'No pattern data available. Patterns appear after the first 24h of data collection.';
@@ -93,8 +97,24 @@ export async function executeTopPatterns(
   // symbol-lookup did not produce a canonical name — the metric does
   // not tell us what the events were. Agents must not speculate about
   // event content from this row; the rendered output says so below.
+  // Event-count lookup, keyed identically (pattern, service, severity)
+  // so it joins 1:1 with the byte rows. Non-fatal: a failed probe just
+  // omits the "N events" figure, never blocks the ranking.
+  const eventsByKey = new Map<string, number>();
+  if (eventsRes && eventsRes.status === 'success') {
+    for (const r of eventsRes.data.result) {
+      const k = recentRateKey(
+        r.metric[LABELS.pattern] || '',
+        r.metric[LABELS.service] || '',
+        r.metric[LABELS.severity] || ''
+      );
+      const v = parsePrometheusValue(r);
+      if (Number.isFinite(v) && v > 0) eventsByKey.set(k, v);
+    }
+  }
+
   const NO_SYMBOL = '(no-symbol)';
-  interface Row { hash: string; tenxHash: string; service: string; severity: string; bytes: number; cost: number; recentRate: number; isStale: boolean; isNoSymbol: boolean }
+  interface Row { hash: string; tenxHash: string; service: string; severity: string; bytes: number; cost: number; events: number; recentRate: number; isStale: boolean; isNoSymbol: boolean }
   const rows: Row[] = res.data.result.map(r => {
     const rawPattern = r.metric[LABELS.pattern] || '';
     const service = r.metric[LABELS.service] || '';
@@ -108,6 +128,7 @@ export async function executeTopPatterns(
       severity,
       bytes,
       cost: bytesToCost(bytes, costPerGb),
+      events: eventsByKey.get(recentRateKey(rawPattern, service, severity)) ?? 0,
       recentRate: rate,
       isStale: freshnessProbeOk && rate <= 0,
       isNoSymbol: !rawPattern,
@@ -119,44 +140,52 @@ export async function executeTopPatterns(
   const totalTopBytes = rows.reduce((s, r) => s + r.bytes, 0);
   const totalTopCost = rows.reduce((s, r) => s + r.cost, 0);
 
-  // Coverage probe: one additional PromQL for the total volume in scope,
-  // so the agent can see whether top-N is the iceberg or the tip. At high
-  // volume this is load-bearing — "Top 10 = 18% of total" is a very
-  // different situation from "Top 10 = 92% of total" and changes the
-  // next-action recommendation.
-  let scopeCoveragePct: number | undefined;
-  try {
-    const totalRes = await queryInstant(env, pql.totalBytesInScope(filters, metricsEnv, tf.range));
-    if (totalRes.status === 'success' && totalRes.data.result.length > 0) {
-      const scopeTotalBytes = parsePrometheusValue(totalRes.data.result[0]);
-      if (Number.isFinite(scopeTotalBytes) && scopeTotalBytes > 0) {
-        scopeCoveragePct = (totalTopBytes / scopeTotalBytes) * 100;
-      }
-    }
-  } catch {
-    // non-fatal; skip coverage line if the probe fails
+  // Total volume in scope (from the parallel probe): the share-bar
+  // denominator and the "top-N vs total" coverage footer. Non-fatal:
+  // a failed probe falls back to the top-N sum, which still renders a
+  // sensible (relative) bar. At high volume this is load-bearing:
+  // "Top 10 = 18% of total" vs "Top 10 = 92% of total" are very
+  // different situations and change the next-action recommendation.
+  let scopeTotalBytes: number | undefined;
+  if (totalRes && totalRes.status === 'success' && totalRes.data.result.length > 0) {
+    const v = parsePrometheusValue(totalRes.data.result[0]);
+    if (Number.isFinite(v) && v > 0) scopeTotalBytes = v;
   }
+  const scopeCoveragePct = scopeTotalBytes ? (totalTopBytes / scopeTotalBytes) * 100 : undefined;
 
-  const lines: string[] = [];
-  lines.push(`Top ${rows.length} patterns — ${displayName} (${tf.label}) · ${fmtDollar(totalTopCost)}${period} total`);
-  // User-facing caveat: short, factual, no directives or tool names.
-  lines.push(`_Current rank by cost — point-in-time, not a growth/week-over-week ranking._`);
-  // Agent-facing constraint: don't re-label, and the tool name to use for growth.
-  lines.push(agentOnly(`Constraint: these rows are CURRENT RANK by cost over the window, not a growth/delta ranking. Do not re-label as "cost drivers" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.`));
-  lines.push('');
   let staleCount = 0;
   let noSymbolCount = 0;
-  for (let i = 0; i < rows.length; i++) {
-    const r = rows[i];
-    const name = fmtPattern(r.hash).padEnd(35);
-    const cost = fmtDollar(r.cost) + period;
-    const sev = fmtSeverity(r.severity);
-    const svc = r.service ? `  ${r.service}` : '';
-    const stale = r.isStale ? '  [stale: no activity in last 1h — residue of closed incident in this window]' : '';
-    lines.push(`#${i + 1}  ${name} ${cost.padEnd(12)} ${sev}${svc}${stale}`);
-    if (r.isStale) staleCount++;
-    if (r.isNoSymbol) noSymbolCount++;
-  }
+  for (const r of rows) { if (r.isStale) staleCount++; if (r.isNoSymbol) noSymbolCount++; }
+
+  const stanzaRows: PatternStanzaRow[] = rows.map(r => ({
+    pattern: r.hash,
+    service: r.service,
+    severity: r.severity,
+    bytes: r.bytes,
+    cost: r.cost,
+    events: r.events,
+    tenxHash: r.isNoSymbol ? undefined : r.tenxHash,
+    flags: [
+      ...(r.isStale ? ['stale'] : []),
+      ...(r.isNoSymbol ? ['no-symbol'] : []),
+    ],
+  }));
+
+  const lines: string[] = [];
+  lines.push(renderPatternStanzas(stanzaRows, {
+    title: 'Top patterns',
+    scopeLabel: displayName,
+    windowLabel: tf.label,
+    periodSuffix: period,
+    scopeBytes: scopeTotalBytes ?? totalTopBytes,
+    scopeCost: scopeTotalBytes ? bytesToCost(scopeTotalBytes, costPerGb) : totalTopCost,
+    groupByService: !!args.groupByService,
+  }));
+  // User-facing caveat: short, factual, no directives or tool names.
+  lines.push('');
+  lines.push(`_Current rank by cost, point-in-time, not a growth or week-over-week ranking._`);
+  // Agent-facing constraint: don't re-label, and the tool name to use for growth.
+  lines.push(agentOnly(`Constraint: these rows are CURRENT RANK by cost over the window, not a growth/delta ranking. Do not re-label as "cost drivers" or quote these as week-over-week changes. For growth, call log10x_cost_drivers.`));
 
   // Explicit guardrail for the (no-symbol) row: the metric does NOT
   // tell us what the events were. Agents must not invent a name or

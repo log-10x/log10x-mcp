@@ -32,6 +32,7 @@ import { extractPatterns } from '../lib/pattern-extraction.js';
 import { resolveSiemSelection } from '../lib/siem/resolve.js';
 import { getConnector, type SiemConnector } from '../lib/siem/index.js';
 import type { SiemId } from '../lib/siem/pricing.js';
+import { buildHashQuery } from '../lib/siem/hash-query.js';
 import { fmtCount, normalizePattern } from '../lib/format.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { tenxHash } from '../lib/pattern-hash.js';
@@ -479,53 +480,8 @@ function buildVendorQuery(
   }
 }
 
-/**
- * Exact-match probe on the `tenx_hash` field. When the input is a Symbol
- * Message, tenxHash(symbolSequence) is byte-identical to the engine's
- * emitted tenx_hash (cross-language contract, conformance-proven), so a
- * 10x-powered forwarder ships this exact value on every matching event.
- * An exact field match is strictly better than content-token phrase
- * search: no escaping, no per-vendor query-syntax gaps (notably the
- * CloudWatch FilterLogEvents `@`-syntax issue), and no false positives
- * from token coincidence.
- */
-function buildHashQuery(
-  vendor: SiemId,
-  hash: string,
-  service?: string,
-  severity?: string,
-): string {
-  switch (vendor) {
-    case 'splunk': {
-      const parts = [`tenx_hash="${hash}"`];
-      if (service) parts.push(`tenx_user_service="${service}"`);
-      if (severity) parts.push(`severity_level="${severity}"`);
-      return parts.join(' ');
-    }
-    case 'datadog': {
-      const parts = [`@tenx_hash:${hash}`];
-      if (service) parts.push(`service:${service}`);
-      if (severity) parts.push(`status:${severity.toLowerCase()}`);
-      return parts.join(' ');
-    }
-    case 'elasticsearch': {
-      const parts = [`tenx_hash:"${hash}"`];
-      if (service) parts.push(`service: "${service}"`);
-      if (severity) parts.push(`severity: "${severity}"`);
-      return parts.join(' AND ');
-    }
-    case 'cloudwatch': {
-      // CloudWatch FilterLogEvents JSON selector — exact, no @message
-      // term escaping. && for optional structural narrowing.
-      const sel = [`$.tenx_hash = "${hash}"`];
-      if (service) sel.push(`$.tenx_user_service = "${service}"`);
-      if (severity) sel.push(`$.severity_level = "${severity}"`);
-      return `{ ${sel.join(' && ')} }`;
-    }
-    default:
-      return `tenx_hash="${hash}"`;
-  }
-}
+// buildHashQuery moved to ../lib/siem/hash-query.js (shared with
+// event_lookup's reverse-lookup live sample). Imported at the top.
 
 /**
  * Extract content-only alphanumeric tokens from a template body.

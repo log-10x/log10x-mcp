@@ -301,6 +301,22 @@ export function recentRateByPattern(
   return `sum by (${labels.pattern}, ${labels.service}, ${labels.severity}) (rate(${BYTES_METRIC}{${selector}}[${recentRange}]))`;
 }
 
+/**
+ * Event count per (pattern, service, severity) over the window. Keyed
+ * identically to topPatternsFull so the result joins 1:1 with the byte
+ * rows (a pattern can appear under several services/severities; keying
+ * on the triple avoids over-counting on a pattern-only join).
+ */
+export function eventsByPatternFull(
+  filters: Record<string, string>,
+  env: string,
+  range: string,
+  labels: LabelNameMap = DEFAULT_LABELS
+): string {
+  const selector = buildSelector(filters, env, labels);
+  return `sum by (${labels.pattern}, ${labels.service}, ${labels.severity}) (increase(${VOLUME_METRIC}{${selector}}[${range}]))`;
+}
+
 /** Bytes grouped by an arbitrary label, ranked. */
 export function bytesByLabel(
   label: string,

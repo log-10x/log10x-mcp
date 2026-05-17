@@ -15,11 +15,13 @@ import { LABELS } from '../lib/promql.js';
 import { bytesToCost, parsePrometheusValue } from '../lib/cost.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import {
-  fmtDollar, fmtPattern, fmtSeverity, fmtCount,
+  fmtDollar, fmtPattern, fmtSeverity, fmtCount, fmtBytes,
   parseTimeframe, costPeriodLabel, normalizePattern
 } from '../lib/format.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { agentOnly } from '../lib/agent-only.js';
+import { shareBar } from '../lib/pattern-render.js';
+import { fetchOneSampleByHash } from '../lib/siem/sample.js';
 
 export const eventLookupSchema = {
   pattern: z.string().optional().describe('Pattern name or search term to look up (e.g., "Payment_Gateway_Timeout"). Omit when passing `tenxHash` instead.'),
@@ -27,11 +29,12 @@ export const eventLookupSchema = {
   service: z.string().optional().describe('Service to scope the lookup'),
   timeRange: z.enum(['1d', '7d', '30d']).default('7d').describe('Time range'),
   analyzerCost: z.number().optional().describe('SIEM ingestion cost in $/GB'),
+  siemScope: z.string().optional().describe('SIEM scope for the live sample line on a tenxHash reverse lookup: a CloudWatch log group (`/aws/ecs/my-svc`), ES index, or Splunk index. When omitted, the detected SIEM connector uses its own default scope. Only consulted when `tenxHash` was passed (the cross-pillar correlation case).'),
   environment: z.string().optional().describe('Environment nickname'),
 };
 
 export async function executeEventLookup(
-  args: { pattern?: string; tenxHash?: string; service?: string; timeRange?: string; analyzerCost?: number },
+  args: { pattern?: string; tenxHash?: string; service?: string; timeRange?: string; analyzerCost?: number; siemScope?: string },
   env: EnvConfig
 ): Promise<string> {
   // Defensive defaults — schema defaults only apply at the MCP-SDK
@@ -81,8 +84,21 @@ export async function executeEventLookup(
   const looksLikeRawLogLine = /\s/.test(rawInput) && /["'{}:/]/.test(rawInput);
   // One clean provenance line when the lookup started from an opaque hash
   // — tells the human what their SIEM hash maps to. Not agent chatter.
-  const withProvenance = (s: string): string =>
-    resolvedFromHash ? `Resolved tenx_hash \`${resolvedFromHash}\` → \`${pattern}\`\n\n${s}` : s;
+  // Provenance + (reverse case only) one labeled live SIEM sample.
+  // The SIEM round-trip is gated on resolvedFromHash so a plain
+  // pattern lookup stays a fast metrics-only path; the sample is
+  // best-effort and silent when no SIEM is unambiguously available.
+  const finalize = async (s: string): Promise<string> => {
+    if (!resolvedFromHash) return s;
+    const head = `Resolved tenx_hash \`${resolvedFromHash}\` → \`${pattern}\`\n\n${s}`;
+    const sample = await fetchOneSampleByHash({
+      hash: resolvedFromHash,
+      service: args.service,
+      scope: args.siemScope,
+    });
+    if (!sample) return head;
+    return `${head}\n\nLive sample from ${sample.displayName} (tenx_hash ${resolvedFromHash}):\n  ${sample.line}`;
+  };
 
   // Current window: bytes per service for this pattern
   const currentRes = await queryInstant(env, pql.patternAcrossServices(pattern, metricsEnv, tf.range));
@@ -129,10 +145,10 @@ export async function executeEventLookup(
       return `No data found for pattern "${pattern}". Check the pattern name (use underscores, e.g., Payment_Gateway_Timeout).`;
     }
     // Use fuzzy results
-    return withProvenance(await formatResults(fuzzyRes.data.result, pattern, metricsEnv, tf, costPerGb, period, env));
+    return finalize(await formatResults(fuzzyRes.data.result, pattern, metricsEnv, tf, costPerGb, period, env));
   }
 
-  return withProvenance(await formatResults(currentRes.data.result, pattern, metricsEnv, tf, costPerGb, period, env));
+  return finalize(await formatResults(currentRes.data.result, pattern, metricsEnv, tf, costPerGb, period, env));
 }
 
 async function formatResults(
@@ -186,13 +202,14 @@ async function formatResults(
 
   // Build service rows
   interface SvcRow {
-    service: string; severity: string;
+    service: string; severity: string; bytes: number;
     costNow: number; costBaseline: number; events: number; isNew: boolean;
   }
   const rows: SvcRow[] = [];
   let totalCostNow = 0;
   let totalCostBase = 0;
   let totalEvents = 0;
+  let totalBytes = 0;
 
   for (const [svc, bytes] of serviceBytes) {
     const costNow = bytesToCost(bytes, costPerGb);
@@ -204,29 +221,39 @@ async function formatResults(
     );
     const events = eventsBySvc.get(svc) || 0;
 
-    rows.push({ service: svc, severity: serviceSev.get(svc)?.sev || '', costNow, costBaseline: costBase, events, isNew });
+    rows.push({ service: svc, severity: serviceSev.get(svc)?.sev || '', bytes, costNow, costBaseline: costBase, events, isNew });
     totalCostNow += costNow;
     totalCostBase += costBase;
     totalEvents += events;
+    totalBytes += bytes;
   }
 
   rows.sort((a, b) => b.costNow - a.costNow);
+  const maxBytes = rows.length ? Math.max(...rows.map(r => r.bytes)) : 0;
 
-  // Format output
+  // Format output. One stanza per service for this single pattern:
+  // header (service · severity · NEW), share-bar scaled to the busiest
+  // service, then volume · baseline -> now · events.
   const lines: string[] = [];
-  lines.push(`${fmtPattern(pattern)} — ${fmtDollar(totalCostBase)} → ${fmtDollar(totalCostNow)}${period}`);
+  lines.push(`${fmtPattern(pattern)}`);
+  lines.push(`Total: ${fmtBytes(totalBytes)} · ${fmtDollar(totalCostBase)} -> ${fmtDollar(totalCostNow)}${period} · ${rows.length} service${rows.length !== 1 ? 's' : ''}`);
+  lines.push('(bar scaled to the busiest service for this pattern)');
   lines.push('');
 
-  lines.push('Services:');
   for (const r of rows) {
-    const svc = r.service.padEnd(15);
-    const sev = fmtSeverity(r.severity).padEnd(6);
-    const cost = `${fmtDollar(r.costNow)}${period}`;
-    const delta = `(${fmtDollar(r.costBaseline)} → ${fmtDollar(r.costNow)})`;
-    const events = r.events > 0 ? `  ${fmtCount(r.events)} events` : '';
-    const newFlag = r.isNew ? '  NEW' : '';
-    lines.push(`  ${svc} ${sev} ${cost.padEnd(12)} ${delta}${events}${newFlag}`);
+    const head = [r.service || '(no service)', fmtSeverity(r.severity)].filter(Boolean);
+    if (r.isNew) head.push('NEW');
+    lines.push(`${head.join(' · ')}`);
+    lines.push(`  ${shareBar(maxBytes > 0 ? r.bytes / maxBytes : 0, 20)}`);
+    const m = [
+      fmtBytes(r.bytes),
+      `${fmtDollar(r.costBaseline)} -> ${fmtDollar(r.costNow)}${period}`,
+    ];
+    if (r.events > 0) m.push(`${fmtCount(r.events)} events`);
+    lines.push(`  ${m.join(' · ')}`);
+    lines.push('');
   }
+  if (lines[lines.length - 1] === '') lines.pop();
 
   // AI analysis
   try {

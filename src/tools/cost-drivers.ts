@@ -26,6 +26,7 @@ import {
   fmtDollar, fmtPattern, fmtSeverity, fmtCount, fmtPct,
   parseTimeframe, costPeriodLabel, type Timeframe
 } from '../lib/format.js';
+import { renderPatternStanzas, type PatternStanzaRow } from '../lib/pattern-render.js';
 
 export const costDriversSchema = {
   service: z.string().optional().describe("Service name to filter (e.g., 'checkout'). Omit for all services."),
@@ -178,28 +179,37 @@ export async function executeCostDrivers(
     const comparison = args.baselineOffsetDays
       ? `current ${tf.range} vs ${args.baselineOffsetDays}d-offset baseline`
       : `current ${tf.range} vs 3-window avg baseline (offsets: ${tf.baselineOffsets.join('d/')}d)`;
-    lines.push(`${displayName} — ${fmtDollar(baselineCost)} → ${fmtDollar(driversCost)}${period} (${drivers.length} cost driver${drivers.length > 1 ? 's' : ''})`);
+    lines.push(`Cost drivers · ${tf.label} · ${displayName}`);
+    lines.push(`Total: ${fmtDollar(baselineCost)} -> ${fmtDollar(driversCost)}${period} · ${drivers.length} cost driver${drivers.length > 1 ? 's' : ''}`);
     lines.push(`Comparison: ${comparison}`);
-    lines.push(`_Growth deltas (current window vs prior baseline) — not a current-rank list._`);
+    lines.push(`_Growth deltas (current window vs prior baseline), not a current-rank list._`);
     lines.push(agentOnly(`Constraint: these are GROWTH deltas (current window vs prior baseline), NOT current ranking. Do not re-rank or merge with log10x_top_patterns output.`));
     lines.push('');
 
-    for (let i = 0; i < Math.min(drivers.length, limit); i++) {
-      const d = drivers[i];
-      const name = fmtPattern(d.hash).padEnd(35);
-      const costStr = `${fmtDollar(d.costBaseline)} → ${fmtDollar(d.costNow)}${period}`;
-      // Emit the exact delta percentage so agents do not fabricate one from before/after.
-      // NEW patterns have no baseline — show "NEW" instead of a meaningless 100%.
-      const pctStr = d.isNew
+    const shown = drivers.slice(0, limit);
+    const stanzaRows: PatternStanzaRow[] = shown.map(d => ({
+      pattern: d.hash,
+      service: d.service,
+      severity: d.severity,
+      bytes: 0,
+      cost: d.costNow,
+      costBaseline: d.costBaseline,
+      barValue: Math.max(0, d.delta),
+      events: d.events,
+      deltaLabel: d.isNew
         ? '(NEW)'
         : d.costBaseline > 0
           ? `(+${fmtPct(((d.costNow - d.costBaseline) / d.costBaseline) * 100)})`
-          : '(+∞%)';
-      const sev = fmtSeverity(d.severity);
-      const newFlag = d.isNew ? '  NEW' : '';
-      const evtStr = d.events > 0 ? `  ${fmtCount(d.events)} events` : '';
-      lines.push(`#${i + 1}  ${name} ${costStr} ${pctStr}   ${sev}${newFlag}${evtStr}`);
-    }
+          : '(+inf%)',
+      flags: d.isNew ? ['NEW'] : [],
+    }));
+    lines.push(renderPatternStanzas(stanzaRows, {
+      title: 'Cost drivers',
+      scopeLabel: displayName,
+      windowLabel: tf.label,
+      periodSuffix: period,
+      suppressHeader: true,
+    }));
 
     // Summary line
     const driverPct = totalPositiveDelta > 0
@@ -244,20 +254,34 @@ export async function executeCostDrivers(
     const comparison = args.baselineOffsetDays
       ? `current ${tf.range} vs ${args.baselineOffsetDays}d-offset baseline`
       : `current ${tf.range} vs 3-window avg baseline (offsets: ${tf.baselineOffsets.join('d/')}d)`;
-    lines.push(`${displayName} — no cost drivers detected (${tf.label})`);
+    lines.push(`Cost drivers · ${tf.label} · ${displayName}: none detected`);
     lines.push(`Comparison attempted: ${comparison}`);
     lines.push(`Interpretation: no pattern crossed the delta threshold. The environment is stable vs this baseline. This is a truthful negative result, not a tool failure.`);
     lines.push(`All ${allPatterns.length} patterns are within normal range.`);
     lines.push('');
     lines.push(`Top patterns by current cost:`);
+    lines.push('');
 
     const top = allPatterns
       .sort((a, b) => b.costNow - a.costNow)
       .slice(0, Math.min(5, limit));
 
-    for (const p of top) {
-      lines.push(`  ${fmtPattern(p.hash).padEnd(35)} ${fmtDollar(p.costNow)}${period}   ${fmtSeverity(p.severity)}`);
-    }
+    const fallbackRows: PatternStanzaRow[] = top.map(p => ({
+      pattern: p.hash,
+      service: p.service,
+      severity: p.severity,
+      bytes: 0,
+      cost: p.costNow,
+      barValue: p.costNow,
+      events: p.events,
+    }));
+    lines.push(renderPatternStanzas(fallbackRows, {
+      title: 'Top patterns by current cost',
+      scopeLabel: displayName,
+      windowLabel: tf.label,
+      periodSuffix: period,
+      suppressHeader: true,
+    }));
 
     // Even on the no-movement path, give chain walkers somewhere to go.
     // top_patterns is the right next step (the agent now wants the
