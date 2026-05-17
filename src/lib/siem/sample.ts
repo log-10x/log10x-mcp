@@ -110,9 +110,14 @@ export async function fetchSamplesByHashes(
     const sel = await resolveSiemSelection({});
     if (sel.kind !== 'resolved') return out; // no unambiguous SIEM: silent
     const conn = getConnector(sel.id);
-    const deadline = Date.now() + PER_HASH_MS;
+    // Each query gets its OWN independent PER_HASH_MS bound. A previous
+    // version shared one budget across a severity-then-fallback
+    // sequence; the severity query (slow + empty here, since ~80% of
+    // events carry no severity_level) ate the budget and starved the
+    // fallback, so the top rows lost their sample entirely (worse than
+    // a severity-mismatched sample). Run both in PARALLEL, prefer the
+    // severity-matched result, fall back to the unconstrained one.
     const pullOnce = async (q: string): Promise<unknown> => {
-      const ms = Math.max(250, deadline - Date.now());
       const res = await Promise.race([
         conn.pullEvents({
           window: opts.window ?? '1h',
@@ -122,22 +127,32 @@ export async function fetchSamplesByHashes(
           maxPullMinutes: 0.25,
           onProgress: () => {},
         }),
-        new Promise<null>(r => setTimeout(() => r(null), ms)),
+        new Promise<null>(r => setTimeout(() => r(null), PER_HASH_MS)),
       ]);
       return (res as { events?: unknown[] } | null)?.events?.[0] ?? null;
     };
+    // CloudWatch enriched events only carry `tenx_hash` as a queryable
+    // top-level field; tenx_user_service / severity_level live under
+    // kubernetes.* and are NOT selectable, so constraining by them
+    // returns nothing. Splunk/Datadog/ES DO carry them as fields (the
+    // 10x forwarder sets them), so a severity-matched sample is both
+    // possible and better there. Hence: hash-only for CloudWatch;
+    // severity-matched-with-fallback elsewhere.
+    const cwLike = sel.id === 'cloudwatch';
     await Promise.all(
       uniq.map(async ({ hash: h, severity, service }) => {
         try {
-          // Prefer a sample whose severity matches the row it
-          // illustrates; fall back to an unconstrained hash sample if
-          // the severity-scoped query returns nothing (common here:
-          // ~80% of events carry no severity_level, so a hard
-          // constraint would zero out the sample for the top rows).
-          let ev: unknown = null;
-          if (severity) ev = await pullOnce(buildHashQuery(sel.id, h, service, severity));
-          if (ev === null) ev = await pullOnce(buildHashQuery(sel.id, h, service));
-          if (ev !== null) out.set(h, oneLine(ev));
+          let ev: unknown;
+          if (cwLike || !severity) {
+            ev = await pullOnce(buildHashQuery(sel.id, h));
+          } else {
+            const [matched, any] = await Promise.all([
+              pullOnce(buildHashQuery(sel.id, h, service, severity)),
+              pullOnce(buildHashQuery(sel.id, h, service)),
+            ]);
+            ev = matched ?? any;
+          }
+          if (ev !== null && ev !== undefined) out.set(h, oneLine(ev));
         } catch {
           /* skip this hash; never fail the batch */
         }
