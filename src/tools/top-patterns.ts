@@ -18,6 +18,7 @@ import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { agentOnly } from '../lib/agent-only.js';
 import { renderPatternStanzas, type PatternStanzaRow } from '../lib/pattern-render.js';
 import { fetchSamplesByHashes } from '../lib/siem/sample.js';
+import { tenxHash } from '../lib/pattern-hash.js';
 
 /** Top rows that get a verbatim SIEM sample line. Bounded: one SIEM
  * round-trip per row, parallel, so keep it small on this hot tool. */
@@ -247,13 +248,24 @@ export async function executeTopPatterns(
 
   // Verbatim SIEM sample for the top rows: the readable identity (the
   // tokenized name degenerates to field-soup for JSON logs). Bounded
-  // to SAMPLE_TOP_N, parallel, and the whole batch is raced against a
-  // hard timeout so a slow/absent SIEM never stalls this hot tool. No
-  // new data plane: reads the user's own SIEM by exact tenx_hash.
+  // to SAMPLE_TOP_N, parallel, raced against a hard timeout so a
+  // slow/absent SIEM never stalls this hot tool. No new data plane:
+  // reads the user's own SIEM by exact tenx_hash.
+  //
+  // The join hash is COMPUTED locally (tenxHash(pattern)) rather than
+  // read from the metric's tenx_hash label: that label is unreliable
+  // mid-rollout (a pattern has a hashed and an unhashed series; topk
+  // may surface either, so the label flickers between the real hash
+  // and ""). tenxHash(pattern) is conformance-proven byte-identical
+  // to the engine's emitted hash (harness Gate 3, 0 mismatch), so it
+  // is snapshot-independent and always correct.
+  const localHash = (r: { isNoSymbol: boolean; hash: string }): string =>
+    r.isNoSymbol ? '' : tenxHash(r.hash);
   const sampleHashes = rows
-    .filter(r => !r.isNoSymbol && r.tenxHash)
+    .filter(r => !r.isNoSymbol)
     .slice(0, SAMPLE_TOP_N)
-    .map(r => r.tenxHash);
+    .map(r => localHash(r))
+    .filter(Boolean);
   const sampleByHash: Map<string, string> = sampleHashes.length === 0
     ? new Map()
     : await Promise.race([
@@ -295,7 +307,7 @@ export async function executeTopPatterns(
     cost: r.cost,
     events: r.events,
     spark: trendByKey.get(recentRateKey(r.isNoSymbol ? '' : r.hash, r.service, r.severity)),
-    sample: r.tenxHash ? sampleByHash.get(r.tenxHash) : undefined,
+    sample: r.isNoSymbol ? undefined : sampleByHash.get(localHash(r)),
     impacts: impactsLine(r.isNoSymbol ? '' : r.hash),
     flags: [
       ...(r.isStale ? ['stale'] : []),

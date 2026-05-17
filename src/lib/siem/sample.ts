@@ -70,10 +70,19 @@ function oneLine(ev: unknown, max = 220): string {
  * user's own SIEM; the agent reads them with the user's creds. No new
  * data plane, no bucket, no extra forwarder reach. Best-effort and
  * silent: no SIEM resolved / a hash with no hit / any error -> that
- * hash is simply absent from the returned map. Caller hard-bounds the
- * whole batch with its own timeout so a slow SIEM cannot stall the
- * hot path.
+ * hash is simply absent from the returned map.
+ *
+ * Each hash is bounded by its OWN timeout, not an all-or-nothing batch
+ * timeout. A hash with no events (e.g. a pattern the forwarder drops)
+ * makes the SIEM scan the whole window and is the slowest possible
+ * query; with a batch-level race that one query would sink every other
+ * sample (observed: run-to-run flicker between all samples and none).
+ * Per-hash bounding means a slow/empty hash costs only its own row.
+ * The probe window is short on purpose: a recent sample is enough, and
+ * an empty match fails fast instead of scanning hours.
  */
+const PER_HASH_MS = 2500;
+
 export async function fetchSamplesByHashes(
   hashes: string[],
   opts: { scope?: string; window?: string; service?: string } = {}
@@ -88,14 +97,18 @@ export async function fetchSamplesByHashes(
     await Promise.all(
       uniq.map(async (h) => {
         try {
-          const res = await conn.pullEvents({
-            window: opts.window ?? '6h',
+          const pull = conn.pullEvents({
+            window: opts.window ?? '1h',
             scope: opts.scope,
             query: buildHashQuery(sel.id, h, opts.service),
             targetEventCount: 1,
             maxPullMinutes: 0.25,
             onProgress: () => {},
           });
+          const res = await Promise.race([
+            pull,
+            new Promise<null>(r => setTimeout(() => r(null), PER_HASH_MS)),
+          ]);
           const ev = res?.events?.[0];
           if (ev !== undefined && ev !== null) out.set(h, oneLine(ev));
         } catch {
