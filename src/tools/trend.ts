@@ -90,24 +90,27 @@ export async function executeTrend(
   // `total` is the ACTUAL cost over the window; baseline/current are
   // PROJECTED run-rates from the first/last quarter (used only to
   // judge direction). Label them so they don't read as contradictory.
+  // "quarter" = first/last 25% of the time window (not calendar Q).
   let verdict: string;
   let pct = 0;
   if (baselineCost > 0 && recentCost > baselineCost * 1.5) {
     pct = Math.round(((recentCost - baselineCost) / baselineCost) * 100);
-    verdict = `RISING +${pct}% (last-quarter run-rate vs first-quarter)`;
+    verdict = `RISING +${pct}% (last quarter of the window vs first quarter)`;
   } else if (baselineCost > 0 && recentCost < baselineCost * 0.7) {
     pct = Math.round(((baselineCost - recentCost) / baselineCost) * 100);
-    verdict = `FALLING -${pct}% (last-quarter run-rate vs first-quarter)`;
+    verdict = `FALLING -${pct}% (last quarter of the window vs first quarter)`;
   } else {
-    verdict = `STABLE (last-quarter run-rate ≈ first-quarter)`;
+    verdict = `STABLE (last quarter of the window ≈ first quarter)`;
   }
 
   const lines: string[] = [];
   lines.push(`${fmtPattern(pattern)} · trend over ${tf.label}`);
   lines.push(`Verdict: ${verdict}${spikePoint ? `; spike at ${formatTimestamp(spikePoint.ts)}` : ''}`);
   lines.push('');
-  lines.push(`  Actual cost over ${tf.label}: ${fmtDollar(totalCost)} (${points.length} points)`);
-  lines.push(`  Projected run-rate  first quarter ~${fmtDollar(baselineCost)}${period}  ->  last quarter ${fmtDollar(recentCost)}${period}`);
+  lines.push(`  Measured spend over ${tf.label}: ${fmtDollar(totalCost)}  (${points.length} samples @ ${step})`);
+  lines.push(`  Direction check (extrapolated run-rate, NOT the bill, used only for the verdict):`);
+  lines.push(`    first quarter ~${fmtDollar(baselineCost)}${period}  ->  last quarter ${fmtDollar(recentCost)}${period}`);
+  lines.push(`  _The two numbers differ on purpose: the first is the actual spend over the window; the run-rates annualize each quarter's average rate to judge rising/falling, so they will not equal the measured spend._`);
   lines.push(`  Peak ${fmtBytes(maxPoint.bytes)} @ ${formatTimestamp(maxPoint.ts)} · Low ${fmtBytes(minPoint.bytes)} @ ${formatTimestamp(minPoint.ts)}`);
 
   // Shared sparkline (same glyphs as top_patterns: ▁▂▃▄▅▆▇█), so

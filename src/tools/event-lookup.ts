@@ -238,10 +238,16 @@ async function formatResults(
   lines.push(`${fmtPattern(pattern)}  ·  ${tf.label}`);
   lines.push(`Total: ${fmtBytes(totalBytes)} over ${tf.label} · cost was ${fmtDollar(totalCostBase)} -> now ${fmtDollar(totalCostNow)}${period} · ${rows.length} service${rows.length !== 1 ? 's' : ''}`);
   lines.push(`(cost: prior comparable ${tf.label} baseline -> current; bar scaled to the busiest service)`);
+  lines.push(`_This is the pattern total across every service and severity over ${tf.label}. A per-(service,severity) ranking shows one slice of this pattern, so a smaller number there for the same pattern is expected, not a discrepancy._`);
   lines.push('');
 
   for (const r of rows) {
-    const head = [r.service || '(no service)', fmtSeverity(r.severity)].filter(Boolean);
+    // No severity token here: this row is the service's ALL-severity
+    // total for the pattern, so tagging it with one severity (the
+    // dominant series') misread as "this is the ERROR volume" and
+    // would not reconcile with a per-severity ranking. Severity split
+    // is the per-pattern ranking's job, not this total view.
+    const head = [r.service || '(no service)'];
     if (r.isNew) head.push('NEW');
     lines.push(`${head.join(' · ')}`);
     lines.push(`  ${shareBar(maxBytes > 0 ? r.bytes / maxBytes : 0, 20)}`);
@@ -281,25 +287,46 @@ async function formatResults(
   // chain handoffs (pattern_trend for time series, dependency_check before
   // any mute action) are appropriate.
   const nextActions: NextAction[] = [];
-  const elevated = totalCostBase > 0 && totalCostNow > totalCostBase * 2;
+  const shortElevated = totalCostBase > 0 && totalCostNow > totalCostBase * 2;
   const hints: string[] = [];
-  if (elevated) {
+  if (shortElevated) {
     const pctChange = Math.round(((totalCostNow - totalCostBase) / totalCostBase) * 100);
-    // Surface the elevation IN THE BODY (was previously only in the
-    // agent hint, so the human never saw it) and qualify it: this
-    // baseline is the prior comparable tf.label window, which on a
-    // short timeRange is diurnal-noise-prone and can read "up" while a
-    // 7d/30d view (cost_drivers, pattern_trend) correctly says stable.
-    // State the window and cross-reference so it is never relayed as
-    // an unconditional regression.
+    // The short baseline (prior comparable tf.label) is diurnal-noise-
+    // prone, so a raw "up X%" off it contradicts the 7d view and reads
+    // as a false regression. Corroborate against 7d-vs-prior-7d HERE so
+    // the suite resolves the contradiction itself instead of emitting
+    // it and hoping the agent reconciles. Only 2 extra queries, only on
+    // the (rare) elevated path.
+    let longNow = 0, longBase = 0, longOk = false;
+    try {
+      const [ln, lb] = await Promise.all([
+        queryInstant(env, pql.patternAcrossServices(pattern, metricsEnv, '7d')),
+        queryInstant(env, pql.patternAcrossServices(pattern, metricsEnv, '7d', 7)),
+      ]);
+      if (ln.status === 'success' && lb.status === 'success') {
+        longNow = ln.data.result.reduce((s, r) => s + parsePrometheusValue(r), 0);
+        longBase = lb.data.result.reduce((s, r) => s + parsePrometheusValue(r), 0);
+        longOk = true;
+      }
+    } catch { /* corroboration is best-effort */ }
+    const longElevated = longOk && longBase > 0 && longNow > longBase * 1.5;
     lines.push('');
-    lines.push(`_Cost is up ${pctChange}% vs the prior comparable ${tf.label} baseline. This is a short-window comparison; confirm against a longer-window trend (7d/30d) before treating it as a regression, since longer windows may show it as stable._`);
-    hints.push(`Cost up ${pctChange}% vs prior ${tf.label} (short-window; confirm with pattern_trend, do not treat as a regression until corroborated): trace with log10x_investigate({ starting_point: '${pattern}' }).`);
-    nextActions.push({
-      tool: 'log10x_investigate',
-      args: { starting_point: pattern },
-      reason: `cost up ${pctChange}% vs prior ${tf.label} baseline (short-window; corroborate with pattern_trend before calling it a regression)`,
-    });
+    if (longElevated) {
+      const longPct = Math.round(((longNow - longBase) / longBase) * 100);
+      lines.push(`_Cost is up ${pctChange}% vs the prior comparable window, and ALSO up ~${longPct}% over 7d vs the prior 7d. The rise is corroborated on the longer window; treat as a real regression and trace the cause._`);
+      hints.push(`Corroborated regression (+${pctChange}% / ${tf.label}, +${longPct}% / 7d): trace with log10x_investigate({ starting_point: '${pattern}' }).`);
+      nextActions.push({
+        tool: 'log10x_investigate',
+        args: { starting_point: pattern },
+        reason: `corroborated cost regression (+${pctChange}% over ${tf.label}, +${longPct}% over 7d); trace the cause`,
+      });
+    } else if (longOk) {
+      lines.push(`_${tf.label} cost is up ${pctChange}% vs the prior comparable window, BUT the 7d view is stable (no comparable rise week-over-week). This is short-window noise, not a regression; no action needed unless it persists into the 7d trend._`);
+      hints.push(`Short-window noise: ${tf.label} +${pctChange}% but 7d stable. Not a regression. If unsure, confirm the time series with log10x_pattern_trend({ pattern: '${pattern}' }).`);
+    } else {
+      lines.push(`_Cost is up ${pctChange}% vs the prior comparable window. The 7d corroboration query did not return; confirm against a 7d/30d trend before treating this as a regression._`);
+      hints.push(`Cost up ${pctChange}% vs prior ${tf.label} (7d corroboration unavailable; confirm with log10x_pattern_trend before calling it a regression).`);
+    }
   }
   hints.push(`Time series for this pattern: log10x_pattern_trend({ pattern: '${pattern}' }).`);
   nextActions.push({

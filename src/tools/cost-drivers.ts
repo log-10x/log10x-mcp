@@ -254,12 +254,12 @@ export async function executeCostDrivers(
     const comparison = args.baselineOffsetDays
       ? `current ${tf.range} vs ${args.baselineOffsetDays}d-offset baseline`
       : `current ${tf.range} vs 3-window avg baseline (offsets: ${tf.baselineOffsets.join('d/')}d)`;
-    lines.push(`Cost drivers · ${tf.label} · ${displayName}: none detected`);
-    lines.push(`Comparison attempted: ${comparison}`);
-    lines.push(`Interpretation: no pattern crossed the delta threshold. The environment is stable vs this baseline. This is a truthful negative result, not a tool failure.`);
-    lines.push(`All ${allPatterns.length} patterns are within normal range.`);
+    // Lead with the verdict and the actionable ranking; the
+    // methodology footnote goes AFTER (cost-cutting readers want the
+    // numbers first, not three lines of apology — cold review CL3).
+    lines.push(`Cost drivers · ${tf.label} · ${displayName}: none detected (environment stable vs baseline)`);
     lines.push('');
-    lines.push(`Top patterns by current cost:`);
+    lines.push(`No pattern is growing, but here is where the spend is right now:`);
     lines.push('');
 
     const top = allPatterns
@@ -282,6 +282,8 @@ export async function executeCostDrivers(
       periodSuffix: period,
       suppressHeader: true,
     }));
+    lines.push('');
+    lines.push(`_Method: ${comparison}. No pattern crossed the growth-delta threshold; all ${allPatterns.length} patterns are within normal range vs that baseline. This is a truthful negative result, not a tool failure._`);
 
     // Even on the no-movement path, give chain walkers somewhere to go.
     // top_patterns is the right next step (the agent now wants the

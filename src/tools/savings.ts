@@ -255,7 +255,7 @@ export async function executeSavings(
     lines.push('');
     const parts: string[] = [];
     if (pipeCount > 0) parts.push(`${Math.round(pipeCount)} pipeline instance${pipeCount !== 1 ? 's' : ''}`);
-    if (svcCount > 0) parts.push(`${Math.round(svcCount)} service${svcCount !== 1 ? 's' : ''} monitored`);
+    if (svcCount > 0) parts.push(`${Math.round(svcCount)} service${svcCount !== 1 ? 's' : ''} monitored (all-time; differs from a 24h active-service count)`);
     lines.push(`  ${parts.join(' · ')}`);
   }
 

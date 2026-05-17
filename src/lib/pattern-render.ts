@@ -210,7 +210,7 @@ export function renderPatternStanzas(
   const lines: string[] = [];
   if (!opts.suppressHeader) {
     const scopeLabel = opts.hoistedService
-      ? `${opts.hoistedService} (only service in top ${rows.length})`
+      ? `${opts.hoistedService} (all ${rows.length} top patterns below are this service)`
       : opts.scopeLabel;
     lines.push([opts.title, opts.windowLabel, scopeLabel].join(' · '));
     // Reconciliation line: how much of the whole is on screen, so the

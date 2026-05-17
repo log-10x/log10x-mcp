@@ -86,6 +86,15 @@ export async function executeListByLabel(
 
   const lines: string[] = [];
   lines.push(`Cost by ${args.label} (${tf.label})${scope}`);
+  // Data-quality note GATES the ranking (before the rows): when
+  // `(empty)` is a meaningful share, say up front that the ranking
+  // covers only the labeled remainder, so the SRE reads the caveat
+  // before trusting the numbers (cold review: caveat should gate, not
+  // trail). Applies to ANY label (was http_code-only).
+  const emptyRow = shown.find(r => r.value === '(empty)');
+  if (emptyRow && emptyRow.pct >= 25) {
+    lines.push(`**Data quality note**: ${fmtPct(emptyRow.pct)} of log volume has no \`${args.label}\` label, so the ranking below covers only the labeled remainder. Events with no \`${args.label}\` are typically library / SDK / runtime logs that do not set this field. Not an error, but the dimension does not describe the bulk of the volume here.`);
+  }
   lines.push('');
 
   for (const r of shown) {
@@ -99,16 +108,6 @@ export async function executeListByLabel(
   lines.push('');
   lines.push(`  ${rows.length} row${rows.length !== 1 ? 's' : ''} · ${fmtBytes(totalBytes)} total · ${fmtDollar(totalCost)}${period}`);
 
-  // Generic data-quality note: when `(empty)` is a meaningful share of
-  // volume, the ranking is over only the labeled remainder — say so,
-  // for ANY label (was previously http_code-only, so e.g. severity at
-  // 80% empty rendered bare with no explanation; a cold SRE review
-  // flagged this as silently misleading).
-  const emptyRow = shown.find(r => r.value === '(empty)');
-  if (emptyRow && emptyRow.pct >= 25) {
-    lines.push('');
-    lines.push(`**Data quality note**: ${fmtPct(emptyRow.pct)} of log volume has no \`${args.label}\` label, so the ranking above is over the labeled remainder only. Events with no \`${args.label}\` are typically library / SDK / runtime logs that do not set this field. Not an error, but the dimension does not describe the bulk of the volume here.`);
-  }
   // http_code-specific: flag values outside the valid HTTP range.
   if (args.label === 'http_code') {
     const invalidValues = shown.filter(r => {
