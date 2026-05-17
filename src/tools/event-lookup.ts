@@ -311,7 +311,7 @@ async function formatResults(
   const shortElevated = totalCostBase > 0 && totalCostNow > totalCostBase * 2;
   const hints: string[] = [];
   if (shortElevated) {
-    const pctChange = Math.round(((totalCostNow - totalCostBase) / totalCostBase) * 100);
+    const pctChange = Math.round(((totalCostNow - totalCostBase) / totalCostBase) * 10) * 10; // nearest 10%: two adjacent live queries must not show 348 vs 347
     // The short baseline (prior comparable tf.label) is diurnal-noise-
     // prone, so a raw "up X%" off it contradicts the 7d view and reads
     // as a false regression. Corroborate against 7d-vs-prior-7d HERE so
@@ -333,20 +333,20 @@ async function formatResults(
     const longElevated = longOk && longBase > 0 && longNow > longBase * 1.5;
     lines.push('');
     if (longElevated) {
-      const longPct = Math.round(((longNow - longBase) / longBase) * 100);
-      lines.push(`_Cost is up ${pctChange}% vs the prior comparable window, and ALSO up ~${longPct}% over 7d vs the prior 7d. The rise is corroborated on the longer window; treat as a real regression and trace the cause._`);
-      hints.push(`Corroborated regression (+${pctChange}% / ${tf.label}, +${longPct}% / 7d): trace with log10x_investigate({ starting_point: '${pattern}' }).`);
+      const longPct = Math.round(((longNow - longBase) / longBase) * 10) * 10;
+      lines.push(`_Cost is up ~${pctChange}% vs the prior comparable window, and ALSO up ~${longPct}% over 7d vs the prior 7d. The rise is corroborated on the longer window; treat as a real regression and trace the cause._`);
+      hints.push(`Corroborated regression (up ~${pctChange}% / ${tf.label}, up ~${longPct}% / 7d): trace with log10x_investigate({ starting_point: '${pattern}' }).`);
       nextActions.push({
         tool: 'log10x_investigate',
         args: { starting_point: pattern },
-        reason: `corroborated cost regression (+${pctChange}% over ${tf.label}, +${longPct}% over 7d); trace the cause`,
+        reason: `corroborated cost regression (up ~${pctChange}% over ${tf.label}, up ~${longPct}% over 7d); trace the cause`,
       });
     } else if (longOk) {
-      lines.push(`_${tf.label} cost is up ${pctChange}% vs the prior comparable window, BUT the 7d view is stable (no comparable rise week-over-week). This is short-window noise, not a regression; no action needed unless it persists into the 7d trend._`);
-      hints.push(`Short-window noise: ${tf.label} +${pctChange}% but 7d stable. Not a regression. If unsure, confirm the time series with log10x_pattern_trend({ pattern: '${pattern}' }).`);
+      lines.push(`_${tf.label} cost is up ~${pctChange}% vs the prior comparable window, BUT the 7d view is stable (no comparable rise week-over-week). This is short-window noise, not a regression; no action needed unless it persists into the 7d trend._`);
+      hints.push(`Short-window noise: ${tf.label} up ~${pctChange}% but 7d stable. Not a regression. If unsure, confirm the time series with log10x_pattern_trend({ pattern: '${pattern}' }).`);
     } else {
-      lines.push(`_Cost is up ${pctChange}% vs the prior comparable window. The 7d corroboration query did not return; confirm against a 7d/30d trend before treating this as a regression._`);
-      hints.push(`Cost up ${pctChange}% vs prior ${tf.label} (7d corroboration unavailable; confirm with log10x_pattern_trend before calling it a regression).`);
+      lines.push(`_Cost is up ~${pctChange}% vs the prior comparable window. The 7d corroboration query did not return; confirm against a 7d/30d trend before treating this as a regression._`);
+      hints.push(`Cost up ~${pctChange}% vs prior ${tf.label} (7d corroboration unavailable; confirm with log10x_pattern_trend before calling it a regression).`);
     }
   }
   hints.push(`Time series for this pattern: log10x_pattern_trend({ pattern: '${pattern}' }).`);
