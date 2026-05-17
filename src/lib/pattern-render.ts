@@ -48,6 +48,13 @@ export interface PatternStanzaRow {
   spark?: number[];
   /** Preformatted "impacts" line: which services this pattern hits. */
   impacts?: string;
+  /**
+   * A verbatim sample log line (already truncated) pulled from the
+   * user's SIEM by exact tenx_hash. When present it leads the stanza
+   * as the readable identity and the tokenized pattern is demoted to
+   * a `pattern:` line. Ground truth, not fabrication.
+   */
+  sample?: string;
 }
 
 const SPARK = '▁▂▃▄▅▆▇█';
@@ -148,7 +155,15 @@ function stanza(
   if (sev) headBits.push(sev);
   if (r.flags && r.flags.length) headBits.push(...r.flags);
   out.push(`${rank}) ${headBits.join(' · ') || '(pattern)'}`);
-  out.push(`   ${fmtPattern(r.pattern)}`);
+  // A real sample line is the readable identity; the tokenized name
+  // is demoted to a secondary `pattern:` line. With no sample the
+  // tokenized name stays the lead (graceful degradation).
+  if (r.sample) {
+    out.push(`   ${r.sample}`);
+    out.push(`   pattern: ${fmtPattern(r.pattern)}`);
+  } else {
+    out.push(`   ${fmtPattern(r.pattern)}`);
+  }
 
   // Prefer a trend sparkline (volume over the window) when samples are
   // supplied: "is this getting worse" is the actionable question, and

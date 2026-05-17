@@ -17,6 +17,11 @@ import { fmtDollar, fmtPattern, fmtSeverity, fmtCount, parseTimeframe, costPerio
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { agentOnly } from '../lib/agent-only.js';
 import { renderPatternStanzas, type PatternStanzaRow } from '../lib/pattern-render.js';
+import { fetchSamplesByHashes } from '../lib/siem/sample.js';
+
+/** Top rows that get a verbatim SIEM sample line. Bounded: one SIEM
+ * round-trip per row, parallel, so keep it small on this hot tool. */
+const SAMPLE_TOP_N = 3;
 
 export const topPatternsSchema = {
   service: z.string().optional().describe('Service name to scope the result. Omit for all services.'),
@@ -25,11 +30,12 @@ export const topPatternsSchema = {
   limit: z.number().min(1).max(50).default(10).describe('Number of patterns to return.'),
   analyzerCost: z.number().optional().describe('SIEM ingestion cost in $/GB. Auto-detected from profile if omitted.'),
   groupByService: z.boolean().optional().describe('Group the output into per-service sections (each with its own ranked patterns) instead of one global cross-service ranking. Default false: a single global ranking, with the service shown on each pattern.'),
+  siemScope: z.string().optional().describe('SIEM scope for the verbatim sample line on the top rows: a CloudWatch log group (`/aws/ecs/my-svc`), ES index, or Splunk index. When omitted, the detected SIEM connector uses its default scope. Best-effort: a real sample replaces the tokenized pattern name as the readable identity on the top few rows; silently skipped if no SIEM resolves.'),
   environment: z.string().optional().describe('Environment nickname (for multi-env setups).'),
 };
 
 export async function executeTopPatterns(
-  args: { service?: string; severity?: string; timeRange: string; limit: number; analyzerCost?: number; groupByService?: boolean },
+  args: { service?: string; severity?: string; timeRange: string; limit: number; analyzerCost?: number; groupByService?: boolean; siemScope?: string },
   env: EnvConfig
 ): Promise<string> {
   // Defensive defaults so the function is safe to call without the zod schema
@@ -239,6 +245,22 @@ export async function executeTopPatterns(
   rows.length = 0;
   rows.push(...merged);
 
+  // Verbatim SIEM sample for the top rows: the readable identity (the
+  // tokenized name degenerates to field-soup for JSON logs). Bounded
+  // to SAMPLE_TOP_N, parallel, and the whole batch is raced against a
+  // hard timeout so a slow/absent SIEM never stalls this hot tool. No
+  // new data plane: reads the user's own SIEM by exact tenx_hash.
+  const sampleHashes = rows
+    .filter(r => !r.isNoSymbol && r.tenxHash)
+    .slice(0, SAMPLE_TOP_N)
+    .map(r => r.tenxHash);
+  const sampleByHash: Map<string, string> = sampleHashes.length === 0
+    ? new Map()
+    : await Promise.race([
+        fetchSamplesByHashes(sampleHashes, { scope: args.siemScope }),
+        new Promise<Map<string, string>>(res => setTimeout(() => res(new Map()), 5000)),
+      ]);
+
   const displayName = args.service || 'all services';
   const totalTopBytes = rows.reduce((s, r) => s + r.bytes, 0);
   const totalTopCost = rows.reduce((s, r) => s + r.cost, 0);
@@ -273,6 +295,7 @@ export async function executeTopPatterns(
     cost: r.cost,
     events: r.events,
     spark: trendByKey.get(recentRateKey(r.isNoSymbol ? '' : r.hash, r.service, r.severity)),
+    sample: r.tenxHash ? sampleByHash.get(r.tenxHash) : undefined,
     impacts: impactsLine(r.isNoSymbol ? '' : r.hash),
     flags: [
       ...(r.isStale ? ['stale'] : []),

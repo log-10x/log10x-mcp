@@ -23,19 +23,90 @@ export interface HashSample {
   line: string;
 }
 
+/** Pull the real log payload out of one event, unwrapping the
+ * transport envelope. SIEM events commonly arrive as the
+ * fluentd/docker shape `{"stream":..,"log":"<real line>","docker":..}`
+ * (or a JSON string of it). The `.log`/`.message` field is the actual
+ * log; the wrapper is transport metadata. Unwrapping is more faithful
+ * to "what is this pattern", not less. One level only, defensive. */
 function oneLine(ev: unknown, max = 220): string {
-  let s: string;
-  if (typeof ev === 'string') {
-    s = ev;
-  } else if (ev && typeof ev === 'object') {
-    const o = ev as Record<string, unknown>;
-    const pick = o.message ?? o.log ?? o._raw ?? o.body;
-    s = typeof pick === 'string' ? pick : JSON.stringify(o);
-  } else {
-    s = String(ev);
+  const pickStr = (v: unknown): string => {
+    if (typeof v === 'string') return v;
+    if (v && typeof v === 'object') {
+      const o = v as Record<string, unknown>;
+      const p = o.log ?? o.message ?? o._raw ?? o.body;
+      return typeof p === 'string' ? p : JSON.stringify(o);
+    }
+    return String(v);
+  };
+  let s = pickStr(ev);
+  // Unwrap up to two transport envelopes: the SIEM event often arrives
+  // as {message:'{"stream":..,"log":"<real line>",..}'} (CW) so the
+  // real payload is one or two JSON levels in. Try-parse is the test
+  // (a startsWith/endsWith gate misses huge or noisy envelopes).
+  for (let i = 0; i < 2; i++) {
+    const t = s.trim();
+    if (t.length < 2 || t[0] !== '{') break;
+    try {
+      const parsed = JSON.parse(t) as unknown;
+      if (parsed && typeof parsed === 'object') {
+        const next = pickStr(parsed);
+        if (next && next !== s) { s = next; continue; }
+      }
+    } catch { /* not JSON: stop unwrapping */ }
+    break;
   }
   s = s.replace(/\s+/g, ' ').trim();
   return s.length > max ? s.slice(0, max) + ' ...' : s;
+}
+
+/**
+ * Resolve the SIEM ONCE, then pull one real event per hash in
+ * parallel. For the top_patterns list: a verbatim sample is the
+ * readable identity of a pattern (the tokenized name degenerates to
+ * field-soup for JSON logs), and it is ground truth, not fabrication.
+ *
+ * Zero-egress consistent: the events + tenx_hash are already in the
+ * user's own SIEM; the agent reads them with the user's creds. No new
+ * data plane, no bucket, no extra forwarder reach. Best-effort and
+ * silent: no SIEM resolved / a hash with no hit / any error -> that
+ * hash is simply absent from the returned map. Caller hard-bounds the
+ * whole batch with its own timeout so a slow SIEM cannot stall the
+ * hot path.
+ */
+export async function fetchSamplesByHashes(
+  hashes: string[],
+  opts: { scope?: string; window?: string; service?: string } = {}
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const uniq = [...new Set(hashes.map(h => h?.trim()).filter(Boolean) as string[])];
+  if (uniq.length === 0) return out;
+  try {
+    const sel = await resolveSiemSelection({});
+    if (sel.kind !== 'resolved') return out; // no unambiguous SIEM: silent
+    const conn = getConnector(sel.id);
+    await Promise.all(
+      uniq.map(async (h) => {
+        try {
+          const res = await conn.pullEvents({
+            window: opts.window ?? '6h',
+            scope: opts.scope,
+            query: buildHashQuery(sel.id, h, opts.service),
+            targetEventCount: 1,
+            maxPullMinutes: 0.25,
+            onProgress: () => {},
+          });
+          const ev = res?.events?.[0];
+          if (ev !== undefined && ev !== null) out.set(h, oneLine(ev));
+        } catch {
+          /* skip this hash; never fail the batch */
+        }
+      })
+    );
+  } catch {
+    /* no SIEM / discovery error: return whatever we have (likely empty) */
+  }
+  return out;
 }
 
 export async function fetchOneSampleByHash(opts: {
