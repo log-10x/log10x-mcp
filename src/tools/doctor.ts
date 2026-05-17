@@ -724,10 +724,10 @@ async function addScaleAndCapabilityCheck(
       lines.push(`Volume: ${formatBytes(bytes7d)} / 7d (${detectedTier} tier).`);
     }
     if (Number.isFinite(serviceCount) && serviceCount > 0) {
-      lines.push(`Services: ${Math.round(serviceCount)}.`);
+      lines.push(`Services: ${Math.round(serviceCount)} (active in 7d; a 24h or all-time count will differ).`);
     }
     if (Number.isFinite(patternCount) && patternCount > 0) {
-      lines.push(`Patterns: ${Math.round(patternCount)}.`);
+      lines.push(`Patterns: ${Math.round(patternCount)} (distinct in 7d).`);
       if (Number.isFinite(events7d) && events7d > 0 && patternCount > 0) {
         const ratio = events7d / patternCount;
         lines.push(`Compression: ${scaleFormatNumber(ratio)} events per pattern (stable identity means comparisons over time are trustworthy at this volume).`);

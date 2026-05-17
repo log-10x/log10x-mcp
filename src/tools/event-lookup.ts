@@ -160,15 +160,25 @@ async function formatResults(
   period: string,
   env: EnvConfig
 ): Promise<string> {
-  // Aggregate bytes per service (multiple severity levels possible)
+  // Aggregate bytes per service (multiple severity levels possible).
+  // Also keep the per-severity split per service: a pattern's text
+  // spans severities, and a per-(pattern,service,severity) ranking
+  // (top_patterns) shows ONE severity slice. Surfacing the split here
+  // makes the two reconcile exactly (e.g. all-sev 603 MB = ERROR 374
+  // + DEBUG 218 + (none) 11, and 374 is the slice top_patterns ranks)
+  // instead of looking like a 1.6x discrepancy.
   const serviceBytes = new Map<string, number>();
   const serviceSev = new Map<string, { sev: string; bytes: number }>();
+  const serviceSevSplit = new Map<string, Map<string, number>>();
 
   for (const r of results) {
     const svc = r.metric[LABELS.service] || '';
     const sev = r.metric[LABELS.severity] || '';
     const bytes = parsePrometheusValue(r);
     serviceBytes.set(svc, (serviceBytes.get(svc) || 0) + bytes);
+    const split = serviceSevSplit.get(svc) ?? new Map<string, number>();
+    split.set(sev || '(none)', (split.get(sev || '(none)') || 0) + bytes);
+    serviceSevSplit.set(svc, split);
     // Keep dominant severity
     const current = serviceSev.get(svc);
     if (!current || bytes > current.bytes) {
@@ -238,7 +248,7 @@ async function formatResults(
   lines.push(`${fmtPattern(pattern)}  ·  ${tf.label}`);
   lines.push(`Total: ${fmtBytes(totalBytes)} over ${tf.label} · cost was ${fmtDollar(totalCostBase)} -> now ${fmtDollar(totalCostNow)}${period} · ${rows.length} service${rows.length !== 1 ? 's' : ''}`);
   lines.push(`(cost: prior comparable ${tf.label} baseline -> current; bar scaled to the busiest service)`);
-  lines.push(`_This is the pattern total across every service and severity over ${tf.label}. A per-(service,severity) ranking shows one slice of this pattern, so a smaller number there for the same pattern is expected, not a discrepancy._`);
+  lines.push(`_Total across every service and severity over ${tf.label}; the "by severity" line below shows the split. A per-(pattern,service,severity) ranking (e.g. the top-patterns list) shows ONE severity row, so its number for this pattern equals one line of that split, not this total. That is expected, not a discrepancy._`);
   lines.push('');
 
   for (const r of rows) {
@@ -257,6 +267,17 @@ async function formatResults(
     ];
     if (r.events > 0) m.push(`${fmtCount(r.events)} events`);
     lines.push(`  ${m.join(' · ')}`);
+    // Per-severity split so the all-severity total visibly decomposes,
+    // and the SRE can see which slice a per-(pattern,service,severity)
+    // ranking (top_patterns) is showing. Sorted desc, capped to 4.
+    const split = serviceSevSplit.get(r.service);
+    if (split && split.size > 1) {
+      const parts = [...split.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 4)
+        .map(([sev, b]) => `${fmtSeverity(sev) || sev} ${fmtBytes(b)}`);
+      lines.push(`  by severity: ${parts.join(' · ')}`);
+    }
     lines.push('');
   }
   if (lines[lines.length - 1] === '') lines.pop();

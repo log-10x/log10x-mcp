@@ -206,7 +206,11 @@ export async function executeTopPatterns(
     const rate = recentRates.get(recentRateKey(rawPattern, service, severity)) ?? 0;
     return {
       hash: rawPattern || NO_SYMBOL,
-      tenxHash: r.metric[LABELS.hash] || '',
+      // Computed locally (conformance-proven == engine hash). The
+      // metric is no longer grouped by tenx_hash, so it is not on the
+      // series; deriving it keeps the agent-only cross-pillar join
+      // keys correct and snapshot-independent.
+      tenxHash: rawPattern ? tenxHash(rawPattern) : '',
       service,
       severity,
       bytes,
@@ -217,34 +221,13 @@ export async function executeTopPatterns(
       isNoSymbol: !rawPattern,
     };
   });
-  // Collapse rows that are the same (pattern, service, severity) but
-  // split across tenx_hash values. During the tenx_hash rollout the
-  // backend holds an unhashed and a hashed series per pattern; topk
-  // groups by hash, so they surface as duplicate-looking rows. Every
-  // hash-agnostic tool (services, cost_drivers) sums these the same
-  // way and produces the product's trusted totals, so the engine
-  // writes each event to exactly one series: summing is correct, not
-  // double-counting. Keep the non-empty hash for the agent block.
-  const mergedByKey = new Map<string, Row>();
-  for (const r of rows) {
-    const k = recentRateKey(r.isNoSymbol ? '' : r.hash, r.service, r.severity);
-    const ex = mergedByKey.get(k);
-    if (!ex) { mergedByKey.set(k, { ...r }); continue; }
-    // bytes come from topPatternsFull (hash IS in the group-by) so the
-    // split rows partition the volume -> sum. events come from
-    // eventsByPatternFull (hash-agnostic) so both split rows already
-    // carry the full logical total -> take max, not sum (summing would
-    // double-count). recentRate is likewise hash-agnostic -> max.
-    ex.bytes += r.bytes;
-    ex.cost += r.cost;
-    ex.events = Math.max(ex.events, r.events);
-    ex.recentRate = Math.max(ex.recentRate, r.recentRate);
-    ex.isStale = ex.isStale && r.isStale; // active if ANY split series is active
-    if (!ex.tenxHash && r.tenxHash) ex.tenxHash = r.tenxHash;
-  }
-  const merged = [...mergedByKey.values()].sort((a, b) => b.cost - a.cost);
-  rows.length = 0;
-  rows.push(...merged);
+  // topPatternsFull now groups hash-agnostically, so each
+  // (pattern, service, severity) is already a single row with the
+  // pattern's true volume (Prometheus sums the hashed + unhashed
+  // underlying series). No hash-split merge is needed any more; just
+  // rank by cost. (This is what makes top_patterns reconcile exactly
+  // with event_lookup's hash-agnostic per-severity total.)
+  rows.sort((a, b) => b.cost - a.cost);
 
   // Verbatim SIEM sample for the top rows: the readable identity (the
   // tokenized name degenerates to field-soup for JSON logs). Bounded
@@ -371,8 +354,15 @@ export async function executeTopPatterns(
   if (scopeCoveragePct !== undefined) {
     const shownPct = Math.round(scopeCoveragePct);
     const tailPct = Math.max(0, 100 - shownPct);
+    const tailPatterns = totalPatternCount && totalPatternCount > rows.length
+      ? totalPatternCount - rows.length
+      : undefined;
     lines.push('');
-    lines.push(`Top ${rows.length} = ${shownPct}% of total volume in scope / ${tailPct}% in the long tail.`);
+    lines.push(
+      tailPatterns !== undefined
+        ? `These ${rows.length} patterns are ${shownPct}% of the volume; the other ${tailPct}% is spread across ~${tailPatterns} smaller patterns (the long tail).`
+        : `These ${rows.length} patterns are ${shownPct}% of the volume; the other ${tailPct}% is the long tail of smaller patterns.`
+    );
   }
 
   // cut-risk framing: it is a severity heuristic, NOT a safety

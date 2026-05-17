@@ -277,12 +277,16 @@ export function topPatternsFull(
   labels: LabelNameMap = DEFAULT_LABELS
 ): string {
   const selector = buildSelector(filters, env, labels);
-  // tenx_hash is 1:1 with the pattern, so adding it to the grouping does
-  // not change row cardinality; it just carries the portable hash through
-  // so the agent can cross-reference a pattern with the same value shipped
-  // into a SIEM / CloudWatch Logs by a 10x-powered forwarder. Envs that
-  // don't emit the label aggregate identically (hash = "").
-  return `topk(${limit}, sum by (${labels.pattern}, ${labels.service}, ${labels.severity}, ${labels.hash}) (increase(${BYTES_METRIC}{${selector}}[${range}])))`;
+  // Group hash-AGNOSTICALLY. The old code grouped by tenx_hash too, on
+  // the assumption it is 1:1 with the pattern. During the tenx_hash
+  // rollout that is false: a pattern has both a hashed and an unhashed
+  // series, so grouping by hash split one pattern into two rows that
+  // competed separately in topk and under-reported the pattern's true
+  // cost (e.g. ERROR 202 MB shown vs 374 MB actual; it would not
+  // reconcile with event_lookup's hash-agnostic per-severity total).
+  // The portable hash is derived locally (conformance-proven
+  // tenxHash(pattern)) where needed, not read from the metric label.
+  return `topk(${limit}, sum by (${labels.pattern}, ${labels.service}, ${labels.severity}) (increase(${BYTES_METRIC}{${selector}}[${range}])))`;
 }
 
 /**
