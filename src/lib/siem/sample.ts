@@ -83,34 +83,61 @@ function oneLine(ev: unknown, max = 220): string {
  */
 const PER_HASH_MS = 2500;
 
+export interface HashSpec {
+  hash: string;
+  /** Constrain the sample to this severity so the example matches the
+   * row it illustrates (a pattern hash is severity-agnostic; without
+   * this an ERROR-tagged row can show an INFO sample, contradicting
+   * its own cut-risk tag). */
+  severity?: string;
+  service?: string;
+}
+
 export async function fetchSamplesByHashes(
-  hashes: string[],
-  opts: { scope?: string; window?: string; service?: string } = {}
+  specs: Array<HashSpec | string>,
+  opts: { scope?: string; window?: string } = {}
 ): Promise<Map<string, string>> {
   const out = new Map<string, string>();
-  const uniq = [...new Set(hashes.map(h => h?.trim()).filter(Boolean) as string[])];
+  const norm: HashSpec[] = specs
+    .map(s => (typeof s === 'string' ? { hash: s } : s))
+    .map(s => ({ ...s, hash: s.hash?.trim() }))
+    .filter(s => s.hash);
+  // de-dupe by hash, keeping the first spec (carries severity/service)
+  const seen = new Set<string>();
+  const uniq = norm.filter(s => (seen.has(s.hash) ? false : (seen.add(s.hash), true)));
   if (uniq.length === 0) return out;
   try {
     const sel = await resolveSiemSelection({});
     if (sel.kind !== 'resolved') return out; // no unambiguous SIEM: silent
     const conn = getConnector(sel.id);
+    const deadline = Date.now() + PER_HASH_MS;
+    const pullOnce = async (q: string): Promise<unknown> => {
+      const ms = Math.max(250, deadline - Date.now());
+      const res = await Promise.race([
+        conn.pullEvents({
+          window: opts.window ?? '1h',
+          scope: opts.scope,
+          query: q,
+          targetEventCount: 1,
+          maxPullMinutes: 0.25,
+          onProgress: () => {},
+        }),
+        new Promise<null>(r => setTimeout(() => r(null), ms)),
+      ]);
+      return (res as { events?: unknown[] } | null)?.events?.[0] ?? null;
+    };
     await Promise.all(
-      uniq.map(async (h) => {
+      uniq.map(async ({ hash: h, severity, service }) => {
         try {
-          const pull = conn.pullEvents({
-            window: opts.window ?? '1h',
-            scope: opts.scope,
-            query: buildHashQuery(sel.id, h, opts.service),
-            targetEventCount: 1,
-            maxPullMinutes: 0.25,
-            onProgress: () => {},
-          });
-          const res = await Promise.race([
-            pull,
-            new Promise<null>(r => setTimeout(() => r(null), PER_HASH_MS)),
-          ]);
-          const ev = res?.events?.[0];
-          if (ev !== undefined && ev !== null) out.set(h, oneLine(ev));
+          // Prefer a sample whose severity matches the row it
+          // illustrates; fall back to an unconstrained hash sample if
+          // the severity-scoped query returns nothing (common here:
+          // ~80% of events carry no severity_level, so a hard
+          // constraint would zero out the sample for the top rows).
+          let ev: unknown = null;
+          if (severity) ev = await pullOnce(buildHashQuery(sel.id, h, service, severity));
+          if (ev === null) ev = await pullOnce(buildHashQuery(sel.id, h, service));
+          if (ev !== null) out.set(h, oneLine(ev));
         } catch {
           /* skip this hash; never fail the batch */
         }

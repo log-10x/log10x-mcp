@@ -261,15 +261,15 @@ export async function executeTopPatterns(
   // is snapshot-independent and always correct.
   const localHash = (r: { isNoSymbol: boolean; hash: string }): string =>
     r.isNoSymbol ? '' : tenxHash(r.hash);
-  const sampleHashes = rows
+  const sampleSpecs = rows
     .filter(r => !r.isNoSymbol)
     .slice(0, SAMPLE_TOP_N)
-    .map(r => localHash(r))
-    .filter(Boolean);
-  const sampleByHash: Map<string, string> = sampleHashes.length === 0
+    .map(r => ({ hash: localHash(r), severity: r.severity, service: r.service }))
+    .filter(s => s.hash);
+  const sampleByHash: Map<string, string> = sampleSpecs.length === 0
     ? new Map()
     : await Promise.race([
-        fetchSamplesByHashes(sampleHashes, { scope: args.siemScope }),
+        fetchSamplesByHashes(sampleSpecs, { scope: args.siemScope }),
         new Promise<Map<string, string>>(res => setTimeout(() => res(new Map()), 5000)),
       ]);
 

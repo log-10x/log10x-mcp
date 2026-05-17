@@ -1013,6 +1013,29 @@ export function renderDoctorReport(report: DoctorReport): string {
     lines.push('All checks passed. The MCP is correctly wired and ready to serve tool calls.');
   } else if (report.overall === 'warn') {
     lines.push('The MCP will function but some tools may be unavailable or degraded. See the warnings above.');
+    // Prioritized triage: a cold review flagged that doctor raised
+    // several WARNs with no order to address them. Privacy/egress
+    // risks first, then capability-expanding setup, then informational.
+    const allWarns = [
+      ...report.globalChecks,
+      ...Object.values(report.perEnvChecks).flat(),
+    ].filter(c => c.status === 'warn');
+    if (allWarns.length > 0) {
+      const rank = (n: string): number =>
+        /paste|egress|privacy/.test(n) ? 0
+        : /retriever|cross_pillar|backend|destination/.test(n) ? 1
+        : 2;
+      const ordered = allWarns
+        .map((c, i) => ({ c, i }))
+        .sort((a, b) => rank(a.c.name) - rank(b.c.name) || a.i - b.i);
+      lines.push('');
+      lines.push('### Address these warnings (in order)');
+      lines.push('_None block core cost / investigation tools. Privacy/egress first, then capability setup, then informational._');
+      ordered.forEach(({ c }, n) => {
+        const fixHead = (c.fix || '').split(/(?<=[.)])\s/)[0].trim();
+        lines.push(`  ${n + 1}. \`${c.name}\`${fixHead ? `: ${fixHead}` : ''}`);
+      });
+    }
   } else {
     // Be specific about WHICH tool surfaces are blocked. A retriever
     // probe failing only blocks retriever-* tools; cost_drivers /

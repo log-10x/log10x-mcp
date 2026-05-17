@@ -235,9 +235,9 @@ async function formatResults(
   // header (service · severity · NEW), share-bar scaled to the busiest
   // service, then volume · baseline -> now · events.
   const lines: string[] = [];
-  lines.push(`${fmtPattern(pattern)}`);
-  lines.push(`Total: ${fmtBytes(totalBytes)} · ${fmtDollar(totalCostBase)} -> ${fmtDollar(totalCostNow)}${period} · ${rows.length} service${rows.length !== 1 ? 's' : ''}`);
-  lines.push('(bar scaled to the busiest service for this pattern)');
+  lines.push(`${fmtPattern(pattern)}  ·  ${tf.label}`);
+  lines.push(`Total: ${fmtBytes(totalBytes)} over ${tf.label} · cost was ${fmtDollar(totalCostBase)} -> now ${fmtDollar(totalCostNow)}${period} · ${rows.length} service${rows.length !== 1 ? 's' : ''}`);
+  lines.push(`(cost: prior comparable ${tf.label} baseline -> current; bar scaled to the busiest service)`);
   lines.push('');
 
   for (const r of rows) {
@@ -247,7 +247,7 @@ async function formatResults(
     lines.push(`  ${shareBar(maxBytes > 0 ? r.bytes / maxBytes : 0, 20)}`);
     const m = [
       fmtBytes(r.bytes),
-      `${fmtDollar(r.costBaseline)} -> ${fmtDollar(r.costNow)}${period}`,
+      `was ${fmtDollar(r.costBaseline)} -> now ${fmtDollar(r.costNow)}${period}`,
     ];
     if (r.events > 0) m.push(`${fmtCount(r.events)} events`);
     lines.push(`  ${m.join(' · ')}`);
@@ -285,11 +285,20 @@ async function formatResults(
   const hints: string[] = [];
   if (elevated) {
     const pctChange = Math.round(((totalCostNow - totalCostBase) / totalCostBase) * 100);
-    hints.push(`Pattern is up ${pctChange}% vs baseline — trace the cause: log10x_investigate({ starting_point: '${pattern}' }).`);
+    // Surface the elevation IN THE BODY (was previously only in the
+    // agent hint, so the human never saw it) and qualify it: this
+    // baseline is the prior comparable tf.label window, which on a
+    // short timeRange is diurnal-noise-prone and can read "up" while a
+    // 7d/30d view (cost_drivers, pattern_trend) correctly says stable.
+    // State the window and cross-reference so it is never relayed as
+    // an unconditional regression.
+    lines.push('');
+    lines.push(`_Cost is up ${pctChange}% vs the prior comparable ${tf.label} baseline. This is a short-window comparison; confirm against a longer-window trend (7d/30d) before treating it as a regression, since longer windows may show it as stable._`);
+    hints.push(`Cost up ${pctChange}% vs prior ${tf.label} (short-window; confirm with pattern_trend, do not treat as a regression until corroborated): trace with log10x_investigate({ starting_point: '${pattern}' }).`);
     nextActions.push({
       tool: 'log10x_investigate',
       args: { starting_point: pattern },
-      reason: `pattern is up ${pctChange}% vs baseline — trace the cause`,
+      reason: `cost up ${pctChange}% vs prior ${tf.label} baseline (short-window; corroborate with pattern_trend before calling it a regression)`,
     });
   }
   hints.push(`Time series for this pattern: log10x_pattern_trend({ pattern: '${pattern}' }).`);

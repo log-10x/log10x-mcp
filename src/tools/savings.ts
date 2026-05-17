@@ -172,7 +172,19 @@ export async function executeSavings(
   }
 
   if (totalSaved === 0) {
-    lines.push('  No savings data available yet. Savings appear once the pipeline processes data.');
+    lines.push('  No realized-savings metrics for this environment yet.');
+    lines.push('');
+    lines.push('  This tool measures savings the pipeline has ALREADY booked: edge');
+    lines.push('  volume reduced before egress, and retriever volume kept in S3');
+    lines.push('  instead of the analyzer. None of those metrics are being emitted');
+    lines.push('  here yet (no reducer/optimizer egress and no retriever deployed),');
+    lines.push('  so there is nothing realized to report. This is a truthful empty,');
+    lines.push('  not a tool failure.');
+    lines.push('');
+    lines.push('  The cost-reduction OPPORTUNITY is still visible from the pattern');
+    lines.push('  ranking: the biggest patterns by cost, with a per-pattern reduce');
+    lines.push('  menu (drop / compact / mute), are where booked savings would come');
+    lines.push('  from once the pipeline is reducing volume.');
   } else {
     lines.push('');
     lines.push(`  Total: ${fmtDollar(totalSaved)}${period} · ${fmtDollar(annualProjection)}/yr projected`);

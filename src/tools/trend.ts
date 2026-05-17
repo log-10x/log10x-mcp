@@ -13,6 +13,7 @@ import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { fmtDollar, fmtPattern, fmtBytes, parseTimeframe, costPeriodLabel, normalizePattern } from '../lib/format.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { agentOnly } from '../lib/agent-only.js';
+import { sparkline } from '../lib/pattern-render.js';
 
 export const trendSchema = {
   pattern: z.string().describe('Pattern name (e.g., "Payment_Gateway_Timeout")'),
@@ -84,37 +85,43 @@ export async function executeTrend(
   const recentAvg = recentSlice.reduce((s, p) => s + p.bytes, 0) / recentSlice.length;
   const recentCost = bytesToCost(recentAvg * (tf.days * 86400 / stepSeconds), costPerGb);
 
-  // Format
-  const lines: string[] = [];
-  lines.push(`${fmtPattern(pattern)} — ${tf.label} trend`);
-  lines.push('');
-
-  lines.push(`  Baseline (first quarter):  ~${fmtDollar(baselineCost)}${period}`);
-  lines.push(`  Current (last quarter):    ${fmtDollar(recentCost)}${period}`);
-
+  // Verdict first (the SRE's actual question: did this change?), then
+  // clearly-labeled figures. Three $ numbers confused readers before:
+  // `total` is the ACTUAL cost over the window; baseline/current are
+  // PROJECTED run-rates from the first/last quarter (used only to
+  // judge direction). Label them so they don't read as contradictory.
+  let verdict: string;
+  let pct = 0;
   if (baselineCost > 0 && recentCost > baselineCost * 1.5) {
-    const pctChange = Math.round(((recentCost - baselineCost) / baselineCost) * 100);
-    lines.push(`  Change: +${pctChange}% increase`);
+    pct = Math.round(((recentCost - baselineCost) / baselineCost) * 100);
+    verdict = `RISING +${pct}% (last-quarter run-rate vs first-quarter)`;
   } else if (baselineCost > 0 && recentCost < baselineCost * 0.7) {
-    const pctChange = Math.round(((baselineCost - recentCost) / baselineCost) * 100);
-    lines.push(`  Change: -${pctChange}% decrease`);
+    pct = Math.round(((baselineCost - recentCost) / baselineCost) * 100);
+    verdict = `FALLING -${pct}% (last-quarter run-rate vs first-quarter)`;
   } else {
-    lines.push(`  Change: stable`);
+    verdict = `STABLE (last-quarter run-rate ≈ first-quarter)`;
   }
 
-  if (spikePoint) {
-    lines.push(`  Spike detected: ${formatTimestamp(spikePoint.ts)}`);
-  }
-
+  const lines: string[] = [];
+  lines.push(`${fmtPattern(pattern)} · trend over ${tf.label}`);
+  lines.push(`Verdict: ${verdict}${spikePoint ? `; spike at ${formatTimestamp(spikePoint.ts)}` : ''}`);
   lines.push('');
-  lines.push(`  Peak: ${fmtBytes(maxPoint.bytes)} at ${formatTimestamp(maxPoint.ts)}`);
-  lines.push(`  Low:  ${fmtBytes(minPoint.bytes)} at ${formatTimestamp(minPoint.ts)}`);
-  lines.push(`  Total: ${fmtDollar(totalCost)}${period} across ${points.length} data points`);
+  lines.push(`  Actual cost over ${tf.label}: ${fmtDollar(totalCost)} (${points.length} points)`);
+  lines.push(`  Projected run-rate  first quarter ~${fmtDollar(baselineCost)}${period}  ->  last quarter ${fmtDollar(recentCost)}${period}`);
+  lines.push(`  Peak ${fmtBytes(maxPoint.bytes)} @ ${formatTimestamp(maxPoint.ts)} · Low ${fmtBytes(minPoint.bytes)} @ ${formatTimestamp(minPoint.ts)}`);
 
-  // Mini sparkline
+  // Shared sparkline (same glyphs as top_patterns: ▁▂▃▄▅▆▇█), so
+  // "trend" looks identical across the suite. Downsample to ~40 cells.
   if (points.length >= 4) {
+    const target = 40;
+    const grp = Math.max(1, Math.floor(points.length / target));
+    const ds: number[] = [];
+    for (let i = 0; i < points.length; i += grp) {
+      const sl = points.slice(i, i + grp);
+      ds.push(sl.reduce((s, p) => s + p.bytes, 0) / sl.length);
+    }
     lines.push('');
-    lines.push(`  ${renderSparkline(points)}`);
+    lines.push(`  ${sparkline(ds)}  (oldest -> newest)`);
   }
 
   // next_action hints — prose for human readers, structured NEXT_ACTIONS
@@ -152,6 +159,20 @@ export async function executeTrend(
       reason: 'gradual drift — slope-similarity cohort analysis',
     });
   }
+  // Always offer baseline next steps — even a STABLE trend is not a
+  // dead end: the SRE still wants the full cost/services breakdown and
+  // the reduce-cost menu. Without this the tool ended with nothing to
+  // do next (the discoverability gap a cold review flagged).
+  nextActions.push({
+    tool: 'log10x_event_lookup',
+    args: { pattern },
+    reason: 'full per-service cost breakdown and a real sample for this pattern',
+  });
+  nextActions.push({
+    tool: 'log10x_pattern_mitigate',
+    args: { pattern },
+    reason: 'reduce this pattern cost: drop / compact / mute options gated to this env',
+  });
 
   const block = renderNextActions(nextActions);
   if (block) lines.push('', block);
@@ -172,24 +193,4 @@ function parseStep(step: string): number {
 
 function formatTimestamp(ts: number): string {
   return new Date(ts * 1000).toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC');
-}
-
-function renderSparkline(points: { bytes: number }[]): string {
-  const blocks = ['░', '▒', '▓', '█'];
-  const max = Math.max(...points.map(p => p.bytes));
-  if (max === 0) return points.map(() => blocks[0]).join('');
-
-  // Downsample to ~40 chars
-  const targetLen = 40;
-  const step = Math.max(1, Math.floor(points.length / targetLen));
-  const sampled: number[] = [];
-  for (let i = 0; i < points.length; i += step) {
-    const slice = points.slice(i, i + step);
-    sampled.push(slice.reduce((s, p) => s + p.bytes, 0) / slice.length);
-  }
-
-  return sampled.map(v => {
-    const level = Math.floor((v / max) * (blocks.length - 1));
-    return blocks[Math.min(level, blocks.length - 1)];
-  }).join('');
 }
