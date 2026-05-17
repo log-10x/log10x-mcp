@@ -70,12 +70,14 @@ export async function executeTopPatterns(
   const stepSec = Math.max(60, Math.floor(windowSec / 8));
   const startSec = nowSec - windowSec;
 
-  const [res, recentRes, eventsRes, totalRes, trendRes] = await Promise.all([
+  const [res, recentRes, eventsRes, totalRes, trendRes, countRes, svcRes] = await Promise.all([
     queryInstant(env, pql.topPatternsFull(filters, metricsEnv, tf.range, args.limit)),
     queryInstant(env, pql.recentRateByPattern(filters, metricsEnv, '1h')).catch(() => null),
     queryInstant(env, pql.eventsByPatternFull(filters, metricsEnv, tf.range)).catch(() => null),
     queryInstant(env, pql.totalBytesInScope(filters, metricsEnv, tf.range)).catch(() => null),
     queryRange(env, pql.seriesByPatternFull(filters, metricsEnv, stepSec), startSec, nowSec, stepSec).catch(() => null),
+    queryInstant(env, pql.distinctPatternCount(filters, metricsEnv, tf.range)).catch(() => null),
+    queryInstant(env, pql.servicesByPatternFull(filters, metricsEnv, tf.range)).catch(() => null),
   ]);
   if (res.status !== 'success' || res.data.result.length === 0) {
     return 'No pattern data available. Patterns appear after the first 24h of data collection.';
@@ -132,12 +134,60 @@ export async function executeTopPatterns(
         r.metric[LABELS.service] || '',
         r.metric[LABELS.severity] || ''
       );
-      const seq = (r.values || [])
+      const raw = (r.values || [])
         .map(([, val]) => Number(val))
         .map(n => (Number.isFinite(n) ? n : 0));
+      // Drop the first bucket: increase() over the first query_range
+      // step double-counts the catch-up from before the window start,
+      // so bucket 0 is a spurious spike that mislabels the trend
+      // (caught by an independent review: every series showed a
+      // leading block then "flat"). The remaining buckets are clean.
+      const seq = raw.length > 2 ? raw.slice(1) : raw;
       if (seq.length >= 2) trendByKey.set(k, seq);
     }
   }
+
+  // Which services each pattern impacts (pattern -> services by bytes
+  // desc). A pattern can span services; the row's own service is just
+  // where it ranked. Non-fatal.
+  const svcByPattern = new Map<string, Array<{ svc: string; bytes: number }>>();
+  if (svcRes && svcRes.status === 'success') {
+    for (const r of svcRes.data.result) {
+      const p = r.metric[LABELS.pattern] || '';
+      const svc = r.metric[LABELS.service] || '';
+      const b = parsePrometheusValue(r);
+      if (!p || !svc || !Number.isFinite(b) || b <= 0) continue;
+      const arr = svcByPattern.get(p) ?? [];
+      arr.push({ svc, bytes: b });
+      svcByPattern.set(p, arr);
+    }
+    for (const arr of svcByPattern.values()) arr.sort((a, b) => b.bytes - a.bytes);
+  }
+  const impactsLine = (p: string): string | undefined => {
+    const arr = svcByPattern.get(p);
+    if (!arr || arr.length === 0) return undefined;
+    const head = arr.slice(0, 3).map(x => x.svc);
+    const extra = arr.length - head.length;
+    return extra > 0 ? `${head.join(', ')} (+${extra} more)` : head.join(', ');
+  };
+
+  // Distinct pattern count in scope (the "of M" reconciliation).
+  let totalPatternCount: number | undefined;
+  if (countRes && countRes.status === 'success' && countRes.data.result.length > 0) {
+    const n = parsePrometheusValue(countRes.data.result[0]);
+    if (Number.isFinite(n) && n > 0) totalPatternCount = Math.round(n);
+  }
+
+  // Cut-risk is a SEVERITY HEURISTIC, not a guarantee. ERROR/CRITICAL/
+  // FATAL carry diagnostics you usually want to keep; DEBUG/TRACE are
+  // typically safe to thin. The tool cannot certify safety; it points
+  // the reader at event_lookup / dependency_check to confirm.
+  const cutRisk = (sev: string): string => {
+    const s = sev.toLowerCase();
+    if (s === 'error' || s === 'critical' || s === 'fatal') return 'cut-risk:high';
+    if (s === 'warn' || s === 'warning') return 'cut-risk:med';
+    return 'cut-risk:low';
+  };
 
   const NO_SYMBOL = '(no-symbol)';
   interface Row { hash: string; tenxHash: string; service: string; severity: string; bytes: number; cost: number; events: number; recentRate: number; isStale: boolean; isNoSymbol: boolean }
@@ -223,11 +273,22 @@ export async function executeTopPatterns(
     cost: r.cost,
     events: r.events,
     spark: trendByKey.get(recentRateKey(r.isNoSymbol ? '' : r.hash, r.service, r.severity)),
+    impacts: impactsLine(r.isNoSymbol ? '' : r.hash),
     flags: [
       ...(r.isStale ? ['stale'] : []),
       ...(r.isNoSymbol ? ['no-symbol'] : []),
+      cutRisk(r.severity),
     ],
   }));
+
+  // Single dominant service -> hoist into the header instead of
+  // repeating it on every row (a real env with one noisy service).
+  const svcSet = new Set(rows.map(r => r.service).filter(Boolean));
+  const hoistedService = svcSet.size === 1 ? [...svcSet][0] : undefined;
+
+  const scopeCostNum = scopeTotalBytes ? bytesToCost(scopeTotalBytes, costPerGb) : totalTopCost;
+  const annualMult = tf.days > 0 ? 365 / tf.days : 0;
+  const annualNote = annualMult > 0 ? `~${fmtDollar(scopeCostNum * annualMult)}/yr at this rate` : undefined;
 
   const lines: string[] = [];
   lines.push(renderPatternStanzas(stanzaRows, {
@@ -236,7 +297,11 @@ export async function executeTopPatterns(
     windowLabel: tf.label,
     periodSuffix: period,
     scopeBytes: scopeTotalBytes ?? totalTopBytes,
-    scopeCost: scopeTotalBytes ? bytesToCost(scopeTotalBytes, costPerGb) : totalTopCost,
+    shownBytes: totalTopBytes,
+    scopeCost: scopeCostNum,
+    totalPatternCount,
+    annualNote,
+    hoistedService,
     groupByService: !!args.groupByService,
   }));
   // User-facing caveat: short, factual, no directives or tool names.
@@ -250,11 +315,8 @@ export async function executeTopPatterns(
   // speculate about content from this row's other labels alone.
   if (noSymbolCount > 0) {
     lines.push('');
-    // User-facing: explain what (no-symbol) means.
-    lines.push(
-      `_${noSymbolCount} row${noSymbolCount > 1 ? 's' : ''} above marked \`${NO_SYMBOL}\`: the engine tokenized these events but symbol-lookup did not produce a canonical name. ` +
-      `The metric shows volume + bytes + the labels (service, severity). It does not tell you the event text itself._`
-    );
+    // User-facing: one line, not an essay.
+    lines.push(`_\`${NO_SYMBOL}\`: engine tokenized but produced no canonical name; volume is real, event text is unknown._`);
     // Agent-facing: don't speculate; specific follow-up tool.
     lines.push(agentOnly(
       `Constraint: do not speculate about event content from a (no-symbol) row. To inspect the actual events, use log10x_retriever_query (if Retriever is deployed for this env) or check the source pod's stdout directly.`
@@ -277,6 +339,15 @@ export async function executeTopPatterns(
     lines.push('');
     lines.push(`Top ${rows.length} = ${shownPct}% of total volume in scope / ${tailPct}% in the long tail.`);
   }
+
+  // cut-risk framing: it is a severity heuristic, NOT a safety
+  // guarantee. Say so plainly so nobody drops an ERROR pattern on the
+  // strength of a tag, and point at the tools that actually confirm.
+  lines.push('');
+  lines.push(`_cut-risk is a severity heuristic, not a guarantee: high = ERROR/CRITICAL/FATAL (usually keep), low = DEBUG/TRACE/INFO. Confirm with log10x_event_lookup or log10x_dependency_check before dropping._`);
+  lines.push(agentOnly(
+    `Constraint: cut-risk is derived only from severity. Do NOT assert a pattern is "safe to cut" from the tag alone. Before recommending a drop/mute, confirm with log10x_event_lookup({ pattern }) (or { tenxHash }) for the real events and log10x_dependency_check for downstream consumers. To EXPLAIN what a pattern is, do not synthesize from the tokenized name: pull a real sample via log10x_event_lookup or log10x_pattern_examples and explain from that. The tokenized pattern name is an identity, not a description.`
+  ));
 
   // ── Newly-emerged-patterns probe ──
   // The main ranking above is cost-weighted over `tf.range`, which buries

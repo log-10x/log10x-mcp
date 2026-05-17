@@ -334,6 +334,28 @@ export function seriesByPatternFull(
   return `sum by (${labels.pattern}, ${labels.service}, ${labels.severity}) (increase(${BYTES_METRIC}{${selector}}[${Math.max(60, Math.floor(stepSeconds))}s]))`;
 }
 
+/** Count of distinct patterns in scope (for "N of M patterns shown"). */
+export function distinctPatternCount(
+  filters: Record<string, string>,
+  env: string,
+  range: string,
+  labels: LabelNameMap = DEFAULT_LABELS
+): string {
+  const selector = buildSelector(filters, env, labels);
+  return `count(count by (${labels.pattern}) (increase(${BYTES_METRIC}{${selector}}[${range}]) > 0))`;
+}
+
+/** Bytes per (pattern, service): which services each pattern impacts. */
+export function servicesByPatternFull(
+  filters: Record<string, string>,
+  env: string,
+  range: string,
+  labels: LabelNameMap = DEFAULT_LABELS
+): string {
+  const selector = buildSelector(filters, env, labels);
+  return `sum by (${labels.pattern}, ${labels.service}) (increase(${BYTES_METRIC}{${selector}}[${range}]))`;
+}
+
 /** Bytes grouped by an arbitrary label, ranked. */
 export function bytesByLabel(
   label: string,

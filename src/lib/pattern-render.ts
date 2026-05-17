@@ -46,6 +46,8 @@ export interface PatternStanzaRow {
    * workload; "is this getting worse" is the question that matters).
    */
   spark?: number[];
+  /** Preformatted "impacts" line: which services this pattern hits. */
+  impacts?: string;
 }
 
 const SPARK = '▁▂▃▄▅▆▇█';
@@ -93,6 +95,17 @@ export interface StanzaRenderOpts {
   scopeBytes?: number;
   /** Total cost in scope (footer). */
   scopeCost?: number;
+  /** Bytes actually shown (sum of the displayed rows), for reconciliation. */
+  shownBytes?: number;
+  /** Distinct pattern count in scope (the "of M" in "N of M patterns"). */
+  totalPatternCount?: number;
+  /** Preformatted annualized note, e.g. "~$1.9K/yr". Shown on Scope line. */
+  annualNote?: string;
+  /**
+   * Single dominant service: hoisted into the header, omitted from
+   * every row header (it would be identical noise on each row).
+   */
+  hoistedService?: string;
   /** Render per-service sections instead of one global ranking. */
   groupByService?: boolean;
   /**
@@ -127,10 +140,14 @@ function stanza(
 ): string[] {
   const out: string[] = [];
   const sev = fmtSeverity(r.severity);
-  const headBits = [r.service || '(no service)'];
+  // The service is omitted from the row header when one service
+  // dominates the whole list (hoisted into the header instead) — it
+  // would be identical noise on every row otherwise.
+  const headBits: string[] = [];
+  if (!opts.hoistedService) headBits.push(r.service || '(no service)');
   if (sev) headBits.push(sev);
   if (r.flags && r.flags.length) headBits.push(...r.flags);
-  out.push(`${rank}) ${headBits.join(' · ')}`);
+  out.push(`${rank}) ${headBits.join(' · ') || '(pattern)'}`);
   out.push(`   ${fmtPattern(r.pattern)}`);
 
   // Prefer a trend sparkline (volume over the window) when samples are
@@ -158,9 +175,11 @@ function stanza(
   }
   if (typeof r.events === 'number' && Number.isFinite(r.events) && r.events > 0) {
     metrics.push(`${fmtCount(r.events)} events`);
+    if (r.bytes > 0) metrics.push(`${fmtBytes(r.bytes / r.events)}/event`);
   }
   out.push(`   ${metrics.join(' · ')}`);
 
+  if (r.impacts) out.push(`   impacts: ${r.impacts}`);
   if (r.tenxHash) out.push(`   tenx_hash  ${r.tenxHash}`);
   return out;
 }
@@ -176,12 +195,27 @@ export function renderPatternStanzas(
 ): string {
   const lines: string[] = [];
   if (!opts.suppressHeader) {
-    const headerParts = [opts.title, opts.windowLabel, opts.scopeLabel];
-    lines.push(headerParts.join(' · '));
+    const scopeLabel = opts.hoistedService
+      ? `${opts.hoistedService} (only service in top ${rows.length})`
+      : opts.scopeLabel;
+    lines.push([opts.title, opts.windowLabel, scopeLabel].join(' · '));
+    // Reconciliation line: how much of the whole is on screen, so the
+    // reader does not have to derive 27% from row sums.
     const scopeBits: string[] = [];
-    if (opts.scopeBytes && opts.scopeBytes > 0) scopeBits.push(fmtBytes(opts.scopeBytes));
-    if (typeof opts.scopeCost === 'number') scopeBits.push(`${fmtDollar(opts.scopeCost)}${opts.periodSuffix}`);
-    scopeBits.push(`${rows.length} pattern${rows.length === 1 ? '' : 's'} shown`);
+    if (opts.shownBytes !== undefined && opts.scopeBytes && opts.scopeBytes > 0) {
+      scopeBits.push(`showing ${fmtBytes(opts.shownBytes)} of ${fmtBytes(opts.scopeBytes)}`);
+    } else if (opts.scopeBytes && opts.scopeBytes > 0) {
+      scopeBits.push(fmtBytes(opts.scopeBytes));
+    }
+    if (opts.totalPatternCount && opts.totalPatternCount > 0) {
+      scopeBits.push(`${rows.length} of ${opts.totalPatternCount} patterns`);
+    } else {
+      scopeBits.push(`${rows.length} pattern${rows.length === 1 ? '' : 's'} shown`);
+    }
+    if (typeof opts.scopeCost === 'number') {
+      const ann = opts.annualNote ? ` (${opts.annualNote})` : '';
+      scopeBits.push(`${fmtDollar(opts.scopeCost)}${opts.periodSuffix} total${ann}`);
+    }
     lines.push(`Scope: ${scopeBits.join(' · ')}`);
   }
 
