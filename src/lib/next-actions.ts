@@ -25,15 +25,38 @@ export interface NextAction {
 
 const OPEN = '<!-- NEXT_ACTIONS:';
 const CLOSE = '-->';
+const PRESENT_OPEN = '<!-- NEXT_STEPS_FOR_USER:';
 
 /**
- * Serialize a list of next-action hints into a single-line HTML comment.
+ * Serialize next-action hints. Emits TWO HTML-comment blocks (both
+ * invisible to humans, so the clean-output / Gate-6 invariant holds):
+ *
+ *  1. NEXT_STEPS_FOR_USER — a presentation directive + the plain
+ *     rationale of each action. The agent MUST render this to the user
+ *     as a short numbered "What you can do next" list, phrased as
+ *     things THEY can ask for, in plain language, never tool names or
+ *     "call log10x_X". A user does not know what is possible next
+ *     unless the agent surfaces it; this makes that consistent across
+ *     every tool that emits next-actions, without polluting the
+ *     human-visible tool text.
+ *  2. NEXT_ACTIONS — the machine-parseable JSON, kept as the LAST
+ *     token so extractNextActions() / chain-walkers are unchanged.
+ *
  * Returns '' when the list is empty.
  */
 export function renderNextActions(actions: NextAction[]): string {
   if (!actions || actions.length === 0) return '';
+  const items = actions
+    .map((a, i) => `${i + 1}) ${a.reason}`)
+    .join('  ');
+  const present =
+    `${PRESENT_OPEN} Surface these to the user as a short numbered list ` +
+    `titled "What you can do next". Rephrase each as a plain-language ` +
+    `action the user can ask for (e.g. "ask me to generate a ` +
+    `forwarder/SIEM drop filter for X"), NOT a tool name and NOT ` +
+    `"call log10x_*". Keep to one line each. Items: ${items} ${CLOSE}`;
   // Single-line JSON; newlines inside would break the HTML-comment guard.
-  return `${OPEN}${JSON.stringify(actions)}${CLOSE}`;
+  return `${present}\n${OPEN}${JSON.stringify(actions)}${CLOSE}`;
 }
 
 /**

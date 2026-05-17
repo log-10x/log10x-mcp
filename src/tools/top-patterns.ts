@@ -379,7 +379,7 @@ export async function executeTopPatterns(
   // guarantee. Say so plainly so nobody drops an ERROR pattern on the
   // strength of a tag, and point at the tools that actually confirm.
   lines.push('');
-  lines.push(`_cut-risk is a severity heuristic, not a guarantee: high = ERROR/CRITICAL/FATAL (usually keep), low = DEBUG/TRACE/INFO. Confirm with log10x_event_lookup or log10x_dependency_check before dropping._`);
+  lines.push(`_cut-risk is a severity heuristic, not a guarantee: high = ERROR/CRITICAL/FATAL (usually keep), low = DEBUG/TRACE/INFO. Check a real sample and downstream consumers before dropping._`);
   lines.push(agentOnly(
     `Constraint: cut-risk is derived only from severity. Do NOT assert a pattern is "safe to cut" from the tag alone. Before recommending a drop/mute, confirm with log10x_event_lookup({ pattern }) (or { tenxHash }) for the real events and log10x_dependency_check for downstream consumers. To EXPLAIN what a pattern is, do not synthesize from the tokenized name: pull a real sample via log10x_event_lookup or log10x_pattern_examples and explain from that. The tokenized pattern name is an identity, not a description.`
   ));
