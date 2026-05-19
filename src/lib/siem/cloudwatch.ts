@@ -95,25 +95,59 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
   const scope = opts.scope || '';
   // Resolve log-group(s). Wildcard → DescribeLogGroups(prefix=...) expand.
   let logGroups: string[] = [];
+
+  // DescribeLogGroups by name prefix, paginated (empty prefix = list all).
+  const expand = async (prefix: string): Promise<string[]> => {
+    const out: string[] = [];
+    let nextToken: string | undefined;
+    do {
+      const resp = await retryWithBackoff(() =>
+        client.send(
+          new DescribeLogGroupsCommand(
+            prefix
+              ? { logGroupNamePrefix: prefix, nextToken, limit: 50 }
+              : { nextToken, limit: 50 },
+          ),
+        ),
+      );
+      for (const g of resp.logGroups || []) {
+        if (g.logGroupName) out.push(g.logGroupName);
+      }
+      nextToken = resp.nextToken;
+      if (shouldStop(deadline, events.length, opts.targetEventCount)) break;
+    } while (nextToken && out.length < 200);
+    return out;
+  };
+
   try {
     if (!scope) {
-      throw new Error(
-        'CloudWatch scope is required — pass `scope` as a log group name (`/aws/ecs/my-svc`) or a prefix wildcard (`/aws/ecs/*`).'
-      );
-    }
-    if (scope.includes('*')) {
-      const prefix = scope.replace(/\*+$/, '').replace(/\*/g, '');
-      let nextToken: string | undefined;
-      do {
-        const resp = await retryWithBackoff(() =>
-          client.send(new DescribeLogGroupsCommand({ logGroupNamePrefix: prefix, nextToken, limit: 50 }))
-        );
-        for (const g of resp.logGroups || []) {
-          if (g.logGroupName) logGroups.push(g.logGroupName);
+      // Auto-discovery: a 10x-powered forwarder ships to a /log10x or
+      // /tenx log group by convention. Probe those prefixes and use
+      // what's there — the agent shouldn't have to know the group name
+      // when it's discoverable. If neither convention resolves, fail
+      // LOUD with the groups that DO exist so the caller can pass
+      // `scope` — never silently return empty (that reads as "no
+      // events" and hides a config gap).
+      for (const conv of ['/log10x', '/tenx']) {
+        logGroups = await expand(conv);
+        if (logGroups.length > 0) {
+          notes.push(`scope auto-discovered: ${logGroups.length} group(s) under "${conv}*"`);
+          break;
         }
-        nextToken = resp.nextToken;
-        if (shouldStop(deadline, events.length, opts.targetEventCount)) break;
-      } while (nextToken && logGroups.length < 200);
+      }
+      if (logGroups.length === 0) {
+        const present = (await expand('')).slice(0, 15);
+        throw new Error(
+          'no `scope` given and no /log10x or /tenx log group found (10x-forwarder convention). ' +
+            'Pass `scope` as a log group name or prefix wildcard (`/aws/ecs/*`). ' +
+            (present.length
+              ? `Log groups present: ${present.join(', ')}`
+              : 'No log groups exist in this account/region.'),
+        );
+      }
+    } else if (scope.includes('*')) {
+      const prefix = scope.replace(/\*+$/, '').replace(/\*/g, '');
+      logGroups = await expand(prefix);
       if (logGroups.length === 0) {
         throw new Error(`No log groups matched prefix "${prefix}"`);
       }
