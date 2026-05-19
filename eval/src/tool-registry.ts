@@ -14,13 +14,17 @@
  * of an MCP tool result). The eval harness wraps this in tool_result
  * blocks for the JSONL transcript.
  *
- * EnvConfig shape (from build/lib/environments.js): just
- * {nickname, apiKey, envId}. Apibase / retrieverUrl / region are read
- * by tools from process.env directly — applyEvalEnvToProcess() in env.ts
- * makes sure those are set before any tool fires.
+ * EnvConfig shape (from build/lib/environments.js) now also requires
+ * `metricsBackend` + `labels`; buildEnvConfig() builds them with the
+ * canonical createMetricsBackend()/DEFAULT_LABELS so the eval path is
+ * byte-identical to production. Apibase / retrieverUrl / region are
+ * read by tools from process.env directly — applyEvalEnvToProcess() in
+ * env.ts makes sure those are set before any tool fires.
  */
 import { z } from 'zod';
 import { resolveEnv, type EnvConfig, type Environments } from '../../build/lib/environments.js';
+import { createMetricsBackend } from '../../build/lib/metrics-backend.js';
+import { DEFAULT_LABELS } from '../../build/lib/promql.js';
 import { fetchAnalyzerCost } from '../../build/lib/api.js';
 import type { EvalEnv } from './env.js';
 
@@ -76,10 +80,26 @@ import { loginStatusSchema, executeLoginStatus } from '../../build/tools/login-s
 // ─── Env shim ───────────────────────────────────────────────────────────
 
 function buildEnvConfig(env: EvalEnv): EnvConfig {
+  // EnvConfig now requires metricsBackend + labels. Mirror production's
+  // autodiscovery path (environments.ts ~819-832): seed the ${VAR}
+  // sources in process.env, then build the log10x backend from
+  // references so the literal-secret guard is bypassed exactly as in
+  // prod.
+  process.env.LOG10X_API_KEY = env.apiKey;
+  process.env.LOG10X_ENV_ID = env.envId;
+  if (env.apiBase && !process.env.LOG10X_API_BASE) {
+    process.env.LOG10X_API_BASE = env.apiBase;
+  }
   return {
     nickname: env.mode,
     apiKey: env.apiKey,
     envId: env.envId,
+    metricsBackend: createMetricsBackend({
+      kind: 'log10x',
+      apiKey: '${LOG10X_API_KEY}',
+      envId: '${LOG10X_ENV_ID}',
+    }),
+    labels: { ...DEFAULT_LABELS },
   };
 }
 
