@@ -31,9 +31,13 @@ import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 export const resolveBatchSchema = {
   source: z
     .enum(['file', 'events', 'text'])
-    .describe('Input mode. `file`: read from local path. `events`: array of raw log lines. `text`: a single string containing newline-separated lines (use this when the model is passing through a Bash/SIEM output it already has in hand).'),
+    .optional()
+    .describe('Optional — auto-inferred from whichever of `events` / `text` / `path` you actually provide, so you normally do not set it. Provide explicitly only to disambiguate when more than one is present.'),
   path: z.string().optional().describe('Local file path when source=file. Required for file mode.'),
-  events: z.array(z.string()).optional().describe('Inline log lines when source=events.'),
+  events: z
+    .union([z.array(z.string()), z.string()])
+    .optional()
+    .describe('Inline log lines: an array of lines, or a single newline-separated string (both accepted). `source` need not be set.'),
   text: z.string().optional().describe('Raw text blob when source=text — newline-separated log events.'),
   top_n_patterns: z.number().min(1).max(50).default(20).describe('How many patterns to return in the ranked triage.'),
   include_next_actions: z.boolean().default(true).describe('Whether to generate next_action suggestions for each top pattern.'),
@@ -42,9 +46,9 @@ export const resolveBatchSchema = {
 };
 
 export async function executeResolveBatch(args: {
-  source: 'file' | 'events' | 'text';
+  source?: 'file' | 'events' | 'text';
   path?: string;
-  events?: string[];
+  events?: string[] | string;
   text?: string;
   top_n_patterns: number;
   include_next_actions: boolean;
@@ -237,6 +241,16 @@ export async function executeResolveBatch(args: {
 
   lines.push(`### Top ${ranked.length} patterns by interestingness`);
   lines.push('');
+  lines.push(agentOnly(
+    `Correlation: the \`templateHash\` shown below is a LOCAL templating identity for this paste. ` +
+    `It is NOT the live Prometheus \`tenx_hash\`. The live pipeline hashes the forwarder-wrapped ` +
+    `envelope; a raw paste hashes differently, so a paste hash and a live tenx_hash never match ` +
+    `by construction. To check live state, correlate by PATTERN (the pattern text shown for each ` +
+    `entry) via log10x_top_patterns / log10x_event_lookup — do NOT pass any hash from this output ` +
+    `as a tenxHash/pattern filter; that lookup will always return no-match and must not be read as ` +
+    `"signal absent".`
+  ));
+  lines.push('');
 
   for (let i = 0; i < ranked.length; i++) {
     const { p, score } = ranked[i];
@@ -298,26 +312,44 @@ export async function executeResolveBatch(args: {
 // ── Input materialization ──
 
 async function materialize(args: {
-  source: 'file' | 'events' | 'text';
+  source?: 'file' | 'events' | 'text';
   path?: string;
-  events?: string[];
+  events?: string[] | string;
   text?: string;
 }): Promise<string> {
-  switch (args.source) {
-    case 'file':
-      if (!args.path) throw new Error('source=file requires a `path` argument.');
-      return fs.readFile(args.path, 'utf8');
-    case 'events':
-      if (!Array.isArray(args.events) || args.events.length === 0) {
-        throw new Error('source=events requires an `events` array.');
-      }
-      return args.events.join('\n');
-    case 'text':
-      if (!args.text || args.text.trim().length === 0) {
-        throw new Error('source=text requires a non-empty `text` argument.');
-      }
-      return args.text;
-  }
+  // Tolerant input resolution. Cold agents routinely mismatch the
+  // `source` discriminator against which of path/events/text they
+  // populated (the prior hard-fail cost a wasted round-trip per the
+  // hero-eval finding). Infer intent from what is actually present and
+  // coerce the common shape slip (`events` passed as one string). Only
+  // hard-fail when genuinely nothing usable was passed — and then with
+  // a concrete example.
+  const events: string[] | undefined = Array.isArray(args.events)
+    ? args.events
+    : typeof args.events === 'string' && args.events.trim().length > 0
+      ? args.events.split('\n')
+      : undefined;
+  const hasEvents = !!events && events.length > 0;
+  const hasText = typeof args.text === 'string' && args.text.trim().length > 0;
+  const hasPath = typeof args.path === 'string' && args.path.trim().length > 0;
+
+  // Honor an explicit source only when its payload is actually present;
+  // otherwise fall through to inference so a mislabeled call still works.
+  if (args.source === 'file' && hasPath) return fs.readFile(args.path as string, 'utf8');
+  if (args.source === 'events' && hasEvents) return (events as string[]).join('\n');
+  if (args.source === 'text' && hasText) return args.text as string;
+
+  // Inference: use whatever payload was provided.
+  if (hasEvents) return (events as string[]).join('\n');
+  if (hasText) return args.text as string;
+  if (hasPath) return fs.readFile(args.path as string, 'utf8');
+
+  throw new Error(
+    'No usable input. Provide exactly one of: `events` (array of log lines), ' +
+      '`text` (newline-separated string), or `path` (local file). ' +
+      '`source` is optional and auto-inferred. ' +
+      'Example: {"events":["2026-... ERROR line one","2026-... ERROR line two"]}.'
+  );
 }
 
 // ── Ranking ──

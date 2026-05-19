@@ -301,13 +301,54 @@ export async function validateClaims(
 
     if (c.kind === 'count' && c.unit?.startsWith('service')) {
       const oracleCount = oracleServices.length;
-      const ok = c.value >= oracleCount && c.value <= oracleCount + 10;
+      const ctx = c.context.toLowerCase();
+      // Scope-awareness. The prior code compared EVERY "N services"
+      // claim against the env-wide distinct-service count, so a correct
+      // pattern-scoped claim ("this pattern appears across 2 services")
+      // was hard-flagged as a hallucination because 2 < 23. That
+      // false-positives precise, tool-grounded answers and contradicts
+      // this file's own under-flag-rather-than-over-flag doctrine.
+      const subsetScoped =
+        /\b(across|appears?\s+(in|across)|for\s+(this|the)\s+pattern|this\s+pattern|that\s+pattern|returned|lookup|hit|spans?|concentrat)\b/.test(ctx) ||
+        /\bservices?\b\s*[:(]/.test(ctx);
+      const envWide =
+        /\b(total|distinct|all|overall|the\s+env(ironment)?)\b/.test(ctx) &&
+        !/\b(across|for\s+(this|the)\s+pattern|this\s+pattern|that\s+pattern)\b/.test(ctx);
+
+      if (subsetScoped && !envWide) {
+        // A pattern touches a SUBSET of the env's services; any
+        // 1..oracleCount is structurally plausible. Only a count that
+        // exceeds the env's total service count is genuinely impossible.
+        const ok = c.value >= 1 && c.value <= oracleCount;
+        details.push({
+          claim: c.raw,
+          kind: 'numeric',
+          oracleResult: `pattern-scoped service count; env has ${oracleCount} services — subset of 1..${oracleCount} is plausible`,
+          status: ok ? 'supported' : 'unsupported',
+          driftSeverity: ok ? null : 'soft',
+          detail: c.context,
+        });
+        continue;
+      }
+      if (envWide) {
+        const ok = c.value >= oracleCount && c.value <= oracleCount + 10;
+        details.push({
+          claim: c.raw,
+          kind: 'numeric',
+          oracleResult: `oracle reports ${oracleCount} services (env-wide claim)`,
+          status: ok ? 'supported' : 'unsupported',
+          driftSeverity: ok ? null : 'hard',
+          detail: c.context,
+        });
+        continue;
+      }
+      // Ambiguous scope — under-flag rather than over-flag.
       details.push({
         claim: c.raw,
         kind: 'numeric',
-        oracleResult: `oracle reports ${oracleCount} services`,
-        status: ok ? 'supported' : 'unsupported',
-        driftSeverity: ok ? null : 'hard',
+        oracleResult: `service-count claim, ambiguous scope; oracle env-wide=${oracleCount} (not gated)`,
+        status: 'inconclusive',
+        driftSeverity: null,
         detail: c.context,
       });
       continue;
