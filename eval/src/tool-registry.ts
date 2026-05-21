@@ -90,6 +90,12 @@ function buildEnvConfig(env: EvalEnv): EnvConfig {
   if (env.apiBase && !process.env.LOG10X_API_BASE) {
     process.env.LOG10X_API_BASE = env.apiBase;
   }
+  // Forwarder hint from LOG10X_FORWARDER (e.g. `fluentd`, `fluent-bit`).
+  // The demo env's forwarder is fluentd; production prod-loader infers
+  // this from envs.json + LOG10X_FORWARDER, but the eval harness bypasses
+  // that path. Set it here so log10x_top_patterns can render the right
+  // forwarder-specific drop snippet.
+  const forwarder = parseForwarderEnvVar(process.env.LOG10X_FORWARDER) ?? defaultForwarderForMode(env.mode);
   return {
     nickname: env.mode,
     apiKey: env.apiKey,
@@ -100,7 +106,32 @@ function buildEnvConfig(env: EvalEnv): EnvConfig {
       envId: '${LOG10X_ENV_ID}',
     }),
     labels: { ...DEFAULT_LABELS },
+    ...(forwarder ? { forwarder } : {}),
   };
+}
+
+/** Mirror of parseForwarderEnv in environments.ts — kept private there
+ * so we duplicate the tiny normalization here rather than restructure
+ * the export surface. */
+function parseForwarderEnvVar(raw: string | undefined): EnvConfig['forwarder'] {
+  if (!raw) return undefined;
+  const s = raw.trim().toLowerCase();
+  if (!s) return undefined;
+  if (s === 'fluent-bit' || s === 'fluentbit' || s === 'fluent_bit') return 'fluentbit';
+  if (s === 'fluentd' || s === 'fluent-d') return 'fluentd';
+  if (s === 'filebeat' || s === 'beats') return 'filebeat';
+  if (s === 'logstash') return 'logstash';
+  if (s === 'otel' || s === 'otelcol' || s === 'otel-collector' || s === 'opentelemetry-collector')
+    return 'otel-collector';
+  return undefined;
+}
+
+/** Default forwarder when LOG10X_FORWARDER is unset. The demo env runs
+ * fluentd; for customer / ci modes we leave it unset so the render
+ * skips forwarder-specific guidance instead of fabricating a snippet. */
+function defaultForwarderForMode(mode: EvalEnv['mode']): EnvConfig['forwarder'] {
+  if (mode === 'demo') return 'fluentd';
+  return undefined;
 }
 
 function buildLoadedEnvs(env: EvalEnv): Environments {
