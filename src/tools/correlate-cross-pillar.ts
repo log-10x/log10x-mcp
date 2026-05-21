@@ -40,6 +40,7 @@ import {
   type CrossPillarCandidate,
 } from '../lib/cross-pillar-correlate.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
+import { agentOnly } from '../lib/agent-only.js';
 
 export const correlateCrossPillarSchema = {
   anchor_type: z
@@ -265,17 +266,36 @@ function renderCorrelationResult(
     lines.push('');
   }
 
+  // Topology-boundary hand-off (anti-hallucination). The dangerous path is
+  // the confirmed/service-match tier: an agent can read "leads/trails" + a
+  // tier label as a proven cause and fabricate a dependency story. Make the
+  // correlation→causation line explicit so the agent reasons from co-movement
+  // and defers the causal direction to the customer's traces/APM (the APM
+  // boundary we deliberately do NOT cross by building a call graph ourselves).
+  if (result.byTier['confirmed'].length > 0 || result.byTier['service-match'].length > 0) {
+    lines.push(
+      '> **Co-movement, not causation.** The tiers and lead/trail labels are temporal correlation plus structural label overlap, not a proven cause or call graph. To confirm direction, check your traces/APM or the deploy timeline at the inflection.'
+    );
+    lines.push('');
+    lines.push(
+      agentOnly(
+        'Do not relay these as causation. Present them as co-movers; if the user needs the causal direction, recommend they confirm in their traces/APM or the deploy timeline at the inflection. This tool shows correlation + structural overlap, not a proven dependency.'
+      )
+    );
+    lines.push('');
+  }
+
   // Next actions
   lines.push('### Next actions');
   lines.push('');
   const topJoined = result.byTier['confirmed'][0] || result.byTier['service-match'][0];
   const nextActions: NextAction[] = [];
   if (topJoined && result.anchor.type === 'customer_metric') {
-    lines.push(`1. Drill into the top candidate: \`log10x_investigate({ starting_point: '${topJoined.name}' })\` for full causal-chain analysis.`);
+    lines.push(`1. Drill into the top candidate: \`log10x_investigate({ starting_point: '${topJoined.name}' })\` for temporal-correlation + lag analysis.`);
     nextActions.push({
       tool: 'log10x_investigate',
       args: { starting_point: topJoined.name },
-      reason: 'full causal-chain analysis on the top correlated pattern',
+      reason: 'temporal-correlation + lag analysis on the top correlated pattern',
     });
     lines.push(`2. Pull the actual events contributing to the correlation: \`log10x_retriever_query({ pattern: '${topJoined.name}' })\`.`);
     nextActions.push({

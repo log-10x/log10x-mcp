@@ -71,6 +71,18 @@ const RULES = [
     files: ['event-lookup.ts'],
     note: 'event_lookup must show the short+7d corroboration facts, not assert "treat as a real regression"',
   },
+  {
+    label: 'asserted-causal-header',
+    // Anti-hallucination boundary: a `###` section header asserting "causal
+    // chain" / "root cause" frames correlation output as proven cause and
+    // seeds an agent to fabricate a dependency story (APM territory). Present
+    // temporal / co-mover context + the "co-movement, not causation" handoff
+    // instead. Keyed on headers so the "not a causal chain" disclaimers in
+    // prose are NOT flagged. Applies to all scanned output files.
+    pattern: /###[^`'"]*\b(causal chain|root cause)\b/i,
+    files: null,
+    note: 'present temporal / co-mover context, not an asserted causal-chain or root-cause header; the tool shows correlation, not proven cause',
+  },
 ];
 
 function listTsFiles(dir, filter) {
@@ -87,7 +99,7 @@ function listTsFiles(dir, filter) {
 // narrows where a given verdict pattern applies.
 const scanned = [
   ...listTsFiles(srcTools, () => true),
-  ...listTsFiles(srcLib, (e) => e.endsWith('-render.ts')),
+  ...listTsFiles(srcLib, (e) => e.endsWith('-render.ts') || e === 'investigation-templates.ts'),
 ];
 
 const QUOTE = /[`'"]/;

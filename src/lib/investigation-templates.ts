@@ -93,11 +93,11 @@ export function renderAcuteSpikeReport(input: AcuteSpikeReportInput): string {
   // Pre-compute extras so the no-chain message can reference them accurately.
   const allExtras = input.correlation.coMovers.filter((m) => !chain.find((c) => c.mover.pattern === m.pattern));
 
-  lines.push('### Most likely root cause');
+  lines.push('### Most likely lead (strongest temporal co-mover)');
   lines.push('');
   if (chain.length === 0) {
     if (allExtras.length > 0) {
-      lines.push(`_No co-movers exceeded the primary confidence threshold. ${allExtras.length} lower-confidence co-mover${allExtras.length !== 1 ? 's' : ''} are listed below — they moved with the anchor but without enough lead time or magnitude to infer causality._`);
+      lines.push(`_No co-movers exceeded the primary confidence threshold. ${allExtras.length} lower-confidence co-mover${allExtras.length !== 1 ? 's' : ''} are listed below — they moved with the anchor but without enough lead time or magnitude to rank as a likely lead._`);
       lines.push("_Try `depth: \"deep\"` to expand the candidate universe, or paste a specific log line instead of a service name._");
     } else {
       lines.push('_No co-movers crossed the noise floor. The anchor moved but the correlation engine found no above-threshold candidates in the window and depth scope you specified._');
@@ -117,11 +117,16 @@ export function renderAcuteSpikeReport(input: AcuteSpikeReportInput): string {
 
   // Chain
   if (chain.length > 0) {
-    lines.push('### Causal chain');
+    lines.push('### Temporal chain (lead-time order, not proven cause)');
     lines.push('');
     for (let i = 0; i < chain.length; i++) {
       lines.push(formatChainLink(chain[i], i + 1));
     }
+    lines.push('');
+    // Topology-boundary hand-off (anti-hallucination): the chain is ranked by
+    // temporal lead time + magnitude, not a proven call graph. Defer the causal
+    // direction to the customer's traces/APM rather than asserting it here.
+    lines.push('_Co-movement and lead time are correlation, not proven cause. To confirm direction, check your traces/APM or the deploy timeline at the inflection._');
     lines.push('');
   }
 
