@@ -90,12 +90,18 @@ export async function executeTopPatterns(
     ? await resolveMetricsEnvFiltered(env, filters)
     : await resolveMetricsEnv(env);
 
-  // --- Phase 1: PromQL — ranking, event counts, total-in-scope, distinct ---
-  const [res, eventsRes, totalRes, countRes] = await Promise.all([
+  // --- Phase 1: PromQL — ranking, event counts, total-in-scope, distinct,
+  //              cost-by-service rollup ---
+  const [res, eventsRes, totalRes, countRes, serviceRollupRes] = await Promise.all([
     queryInstant(env, pql.topPatternsFull(filters, metricsEnv, tf.range, args.limit)),
     queryInstant(env, pql.eventsByPatternFull(filters, metricsEnv, tf.range)).catch(() => null),
     queryInstant(env, pql.totalBytesInScope(filters, metricsEnv, tf.range)).catch(() => null),
     queryInstant(env, pql.distinctPatternCount(filters, metricsEnv, tf.range)).catch(() => null),
+    // Cost-by-service rollup — the "where is the money" headline. One
+    // grouped query; answers the question a vanilla-SIEM SRE has to
+    // hand-roll (stats by container_name) and which the per-pattern
+    // list buries under fragmentation.
+    queryInstant(env, pql.bytesPerServiceScoped(filters, metricsEnv, tf.range)).catch(() => null),
   ]);
 
   if (res.status !== 'success' || res.data.result.length === 0) {
@@ -275,6 +281,22 @@ export async function executeTopPatterns(
     if (Number.isFinite(n) && n > 0) patternCountTotal = Math.round(n);
   }
 
+  // Cost-by-service rollup — "where is the money". Parse the grouped
+  // query, compute each service's share of total, sort desc. This is
+  // the headline a vanilla-SIEM SRE has to hand-roll; surfacing it up
+  // front is the differentiator the per-pattern list alone misses.
+  const serviceRollup: Array<{ service: string; bytes: number; pct: number }> = [];
+  if (serviceRollupRes && serviceRollupRes.status === 'success' && totalBytes > 0) {
+    for (const r of serviceRollupRes.data.result) {
+      const svc = r.metric[LABELS.service] || '(unattributed)';
+      const b = parsePrometheusValue(r);
+      if (Number.isFinite(b) && b > 0) {
+        serviceRollup.push({ service: svc, bytes: b, pct: b / totalBytes });
+      }
+    }
+    serviceRollup.sort((a, b) => b.bytes - a.bytes);
+  }
+
   // Analyzer is already resolved up-front in Phase 2 (so dep_check
   // could be dispatched in parallel). No second call needed here.
   // Forwarder from env config (set in env profile / envs.json)
@@ -303,6 +325,8 @@ export async function executeTopPatterns(
     analyzerScope: args.siemScope,
     healthBanner: banner,
     verbose: args.verbose ?? false,
+    costByService: serviceRollup,
+    costPerGb,
   });
 
   // --- Phase 5: Agent-only routing block ---

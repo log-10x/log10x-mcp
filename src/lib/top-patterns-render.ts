@@ -105,6 +105,12 @@ export interface TopPatternsRenderOpts {
   analyzerScope?: string;
   /** Optional degraded-state banner from healthBanner(). */
   healthBanner?: string | null;
+  /** Cost-by-service rollup (sorted desc) — the "where is the money"
+   * headline. Each entry is a service, its bytes, and its share of the
+   * total. Rendered as a compact block above the pattern list. */
+  costByService?: Array<{ service: string; bytes: number; pct: number }>;
+  /** $/GB rate for converting rollup bytes to cost. Default 1.0. */
+  costPerGb?: number;
   /** Verbose mode — when true, every card carries the full forwarder
    * snippet inline, all CTAs render unconditionally, and the volume
    * trend chart shows on every top-3 card instead of only ACUTE/NEW.
@@ -145,6 +151,12 @@ export function renderTopPatterns(
     `**total in scope:** ${fmtBytes(opts.totalBytesInScope)} · ${fmtDollar(opts.totalCostPerHour)}/h · ${rows.length} of ${opts.patternCountTotal ?? '?'} patterns`
   );
   out.push('');
+
+  // Cost-center rollup — "where is the money". This is the headline a
+  // vanilla-SIEM SRE has to hand-roll (stats by service); putting it
+  // ABOVE the per-pattern list answers "which service is the lever"
+  // before the reader gets lost in fragmented sub-patterns.
+  out.push(...renderCostByService(opts));
 
   // Top-of-output list (replaces the code-fenced table). Markdown
   // numbered list with two lines per row: identity first (bold), then
@@ -268,6 +280,60 @@ function renderSnippetTemplate(
  * trajectory badge replaces the sparkline; the volume-trend chart in
  * the card body covers within-1h shape when shape changes the decision.
  */
+/**
+ * Render the cost-by-service rollup — the "where is the money" block.
+ * Leads with a concentration callout when one service dominates (the
+ * single most actionable fact: "one service is 74% of spend"), then a
+ * compact ranked list of the top services with share + cost. Collapses
+ * the long tail into a "+N more" line.
+ *
+ * This is the differentiator over a vanilla SIEM: a raw-CloudWatch SRE
+ * gets here only by abandoning the auto-pattern output and hand-rolling
+ * `stats by container_name`. We put it first.
+ */
+function renderCostByService(opts: TopPatternsRenderOpts): string[] {
+  const rollup = opts.costByService;
+  if (!rollup || rollup.length === 0) return [];
+  const costPerGb = opts.costPerGb ?? 1.0;
+  const lines: string[] = [];
+
+  const top = rollup[0];
+  // Concentration callout when the top service is a clear majority.
+  const headline =
+    top.pct >= 0.5
+      ? `**Where the cost is** — \`${top.service}\` alone is **${Math.round(top.pct * 100)}%** of spend`
+      : '**Where the cost is**';
+  lines.push(headline);
+  lines.push('');
+
+  // Show "material" services (>=2% of spend), capped at 6, but always
+  // at least the top 3. Tail the rest. The materiality floor keeps
+  // every shown row larger than the collapsed tail, so the breakdown
+  // reads monotonically.
+  const SHOWN_MAX = 6;
+  const MATERIAL = 0.02;
+  let shown = 0;
+  for (const s of rollup) {
+    if (shown >= SHOWN_MAX) break;
+    if (shown >= 3 && s.pct < MATERIAL) break;
+    const cost = (s.bytes / 1024 ** 3) * costPerGb;
+    const pct = `${Math.round(s.pct * 100)}%`.padStart(4);
+    lines.push(`- ${pct} · ${fmtDollar(cost)}/h · ${fmtBytes(s.bytes)} · \`${s.service}\``);
+    shown++;
+  }
+  const remaining = rollup.length - shown;
+  if (remaining > 0) {
+    const tailBytes = rollup.slice(shown).reduce((sum, s) => sum + s.bytes, 0);
+    const tailPct = rollup.slice(shown).reduce((sum, s) => sum + s.pct, 0);
+    const tailCost = (tailBytes / 1024 ** 3) * costPerGb;
+    lines.push(
+      `- ${`${Math.round(tailPct * 100)}%`.padStart(4)} · ${fmtDollar(tailCost)}/h · ${fmtBytes(tailBytes)} · _+${remaining} more service${remaining > 1 ? 's' : ''}_`
+    );
+  }
+  lines.push('');
+  return lines;
+}
+
 function renderList(rows: TopPatternRow[]): string {
   const lines: string[] = [];
   for (const r of rows) {

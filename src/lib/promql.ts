@@ -160,6 +160,20 @@ export function bytesPerService(
   return `sort_desc(sum by (${labels.service}) (increase(${BYTES_METRIC}{${labels.env}="${env}"}[${range}])))`;
 }
 
+/** Bytes per service, honoring the same filter scope as the main query
+ * (so a service/severity-filtered top_patterns run shows a rollup over
+ * the same subset, not the whole env). Used by the cost-center rollup
+ * in log10x_top_patterns — the "where is the money" headline. */
+export function bytesPerServiceScoped(
+  filters: Record<string, string>,
+  env: string,
+  range: string,
+  labels: LabelNameMap = DEFAULT_LABELS
+): string {
+  const selector = buildSelector(filters, env, labels);
+  return `sort_desc(sum by (${labels.service}) (increase(${BYTES_METRIC}{${selector}}[${range}])))`;
+}
+
 /** Bytes per severity. */
 export function bytesPerSeverity(
   env: string,
