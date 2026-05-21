@@ -260,7 +260,7 @@ export async function executeInvestigate(
         '',
         '**Try next**:',
         `- \`log10x_event_lookup({ pattern: '${args.starting_point}' })\` to search by substring`,
-        `- \`log10x_services()\` to list known services`,
+        `- \`log10x_list_by_label({ label: 'tenx_user_service' })\` to list known services`,
       );
     }
     const report = lines.join('\n');

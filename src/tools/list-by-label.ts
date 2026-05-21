@@ -21,7 +21,7 @@ import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { agentOnly } from '../lib/agent-only.js';
 
 export const listByLabelSchema = {
-  label: z.string().describe('Label to group by. Common choices: tenx_user_service, severity_level, k8s_namespace, k8s_container, country, http_code. Call log10x_discover_labels first to see what is queryable.'),
+  label: z.string().describe('Label to group by. Pass a label name; common ones are tenx_user_service, severity_level, k8s_namespace, k8s_container, country, http_code.'),
   service: z.string().optional().describe('Scope the result to a single service (sets a tenx_user_service filter).'),
   severity: z.string().optional().describe('Filter by severity_level (e.g., "ERROR").'),
   timeRange: z.enum(['15m', '1h', '6h', '1d', '7d', '30d']).default('7d').describe('Time range to aggregate over. Sub-day values available for incident investigation.'),

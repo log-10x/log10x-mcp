@@ -14,7 +14,7 @@
     "summary": "Service-level volume distribution in 1d. Expected: agent calls services and reports the cardinality + per-service share.",
     "top_patterns": [],
     "expected_tool_chain": [
-      "log10x_services"
+      "log10x_list_by_label"
     ],
     "snapshot_ts": "2026-05-10T21:30:16.776Z"
   }

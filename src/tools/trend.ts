@@ -174,7 +174,7 @@ export async function executeTrend(
   nextActions.push({
     tool: 'log10x_pattern_mitigate',
     args: { pattern },
-    reason: 'reduce this pattern cost: drop / compact / mute options gated to this env',
+    reason: 'env-gated mitigation options + exact configs for this pattern',
   });
 
   const block = renderNextActions(nextActions);

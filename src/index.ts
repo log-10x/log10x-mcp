@@ -24,11 +24,9 @@ import { costDriversSchema, executeCostDrivers } from './tools/cost-drivers.js';
 import { eventLookupSchema, executeEventLookup } from './tools/event-lookup.js';
 import { savingsSchema, executeSavings } from './tools/savings.js';
 import { trendSchema, executeTrend } from './tools/trend.js';
-import { servicesSchema, executeServices } from './tools/services.js';
 import { exclusionFilterSchema, executeExclusionFilter } from './tools/exclusion-filter.js';
 import { patternExamplesSchema, executePatternExamples } from './tools/pattern-examples.js';
 import { dependencyCheckSchema, executeDependencyCheck } from './tools/dependency-check.js';
-import { discoverLabelsSchema, executeDiscoverLabels } from './tools/discover-labels.js';
 import { configureEnvSchema, executeConfigureEnv } from './tools/configure-env.js';
 import { renderNotConfigured } from './lib/not-configured.js';
 
@@ -38,7 +36,6 @@ function notConfiguredMessageForTool(toolName: string): string {
 import { topPatternsSchema, executeTopPatterns } from './tools/top-patterns.js';
 import { listByLabelSchema, executeListByLabel } from './tools/list-by-label.js';
 import { resolveBatchSchema, executeResolveBatch } from './tools/resolve-batch.js';
-import { extractTemplatesSchema, executeExtractTemplates } from './tools/extract-templates.js';
 import {
   investigateSchema,
   executeInvestigate,
@@ -61,10 +58,6 @@ import {
   correlateCrossPillarSchema,
   executeCorrelateCrossPillar,
 } from './tools/correlate-cross-pillar.js';
-import {
-  translateMetricToPatternsSchema,
-  executeTranslateMetricToPatterns,
-} from './tools/translate-metric-to-patterns.js';
 import {
   pocFromSiemSubmitSchema,
   pocFromSiemStatusSchema,
@@ -155,14 +148,11 @@ const METRIC_REQUIRING_TOOLS = new Set([
   'log10x_pattern_trend',
   'log10x_pattern_examples',
   'log10x_event_lookup',
-  'log10x_services',
   'log10x_list_by_label',
-  'log10x_discover_labels',
   'log10x_savings',
   'log10x_investigate',
   'log10x_investigation_get',
   'log10x_backfill_metric',
-  'log10x_translate_metric_to_patterns',
   'log10x_correlate_cross_pillar',
   'log10x_discover_join',
   'log10x_customer_metrics_query',
@@ -326,8 +316,7 @@ CUSTOMER TIER LADDER (determines which tools are available)
                     log10x_exclusion_filter.
 2. Cloud Reporter — k8s CronJob sampling from the SIEM via REST API.
    Adds: log10x_investigate (sampled fidelity), log10x_cost_drivers, log10x_pattern_trend,
-         log10x_top_patterns, log10x_list_by_label, log10x_event_lookup, log10x_services,
-         log10x_discover_labels, log10x_savings.
+         log10x_top_patterns, log10x_list_by_label, log10x_event_lookup, log10x_savings.
 3. Edge Reporter — forwarder pipeline sidecar.
    Same tools as Cloud, but with full-fidelity metrics, ~5s inflection granularity, and
    coverage of events dropped before the SIEM.
@@ -347,25 +336,27 @@ Daily-habit / operational:
 - "am I allowed to drop this" / "what references this"           → log10x_dependency_check
 - "drop X" / "filter X" / "mute X" / "stop ingesting X" /
   "reduce cost of X" / "kill X" / "get rid of X" / "shrink X" /
-  "compact X" / "exclude X from Datadog/Splunk/Elastic/CloudWatch" → log10x_pattern_mitigate (presents four
-                                                                      options: drop @ analyzer / drop @ forwarder /
-                                                                      mute @ 10x / compact @ 10x — only the options
-                                                                      available in this env are offered as one-click;
-                                                                      then route on the user's choice:
+  "compact X" / "exclude X from Datadog/Splunk/Elastic/CloudWatch" → log10x_pattern_mitigate (returns the
+                                                                      env-gated mitigation options + exact configs
+                                                                      for this pattern: drop @ analyzer / drop @
+                                                                      forwarder / mute @ 10x / compact @ 10x —
+                                                                      only the options available in this env are
+                                                                      included. Once the user picks one, the
+                                                                      follow-through is:
                                                                         option 1 or 2 → log10x_dependency_check
                                                                                         → log10x_exclusion_filter
                                                                                           (vendor=analyzer or forwarder)
                                                                         option 3       → log10x_dependency_check
                                                                                         → log10x_advise_receiver
                                                                         option 4       → log10x_advise_compact
-                                                                      Do NOT skip the mitigate menu and call
-                                                                      exclusion_filter directly unless the user
-                                                                      explicitly specified a vendor + intent.)
+                                                                      Call exclusion_filter directly only when the
+                                                                      user already specified a vendor + intent.)
 - (proactive): after log10x_top_patterns / log10x_cost_drivers / log10x_event_lookup surfaces a
   high-volume pattern AND the user's framing is cost-related ("expensive", "bill", "save",
-  "reduce", "spike"), offer the mitigation menu as a follow-up question — "Want me to show
+  "reduce", "spike"), offer to reduce it as a follow-up question — "Want me to show
   you options for reducing this?" Do this even if not asked. When the user says yes, call
-  log10x_pattern_mitigate with the pattern identity from the prior row.
+  log10x_pattern_mitigate with the pattern identity from the prior row; it returns the
+  env-gated mitigation options + exact configs for that pattern.
 
 Cost investigation:
 - "what's expensive right now" / "top patterns by cost"          → log10x_top_patterns
@@ -623,16 +614,6 @@ registerLog10xTool('log10x_pattern_trend', trendSchema, (args) =>
   })
 );
 
-// ── Tool: log10x_services ──
-
-registerLog10xTool('log10x_services', servicesSchema, (args) =>
-  wrap('log10x_services', async () => {
-    const env = resolveEnv(getEnvs(), args.environment);
-    const cost = await getAnalyzerCost(env, args.analyzerCost);
-    return executeServices({ ...args, analyzerCost: cost }, env);
-  })
-);
-
 // ── Tool: log10x_exclusion_filter ──
 
 registerLog10xTool('log10x_exclusion_filter', exclusionFilterSchema, (args) =>
@@ -643,15 +624,6 @@ registerLog10xTool('log10x_exclusion_filter', exclusionFilterSchema, (args) =>
 
 registerLog10xTool('log10x_dependency_check', dependencyCheckSchema, (args) =>
   wrap('log10x_dependency_check', async () => executeDependencyCheck(args))
-);
-
-// ── Tool: log10x_discover_labels ──
-
-registerLog10xTool('log10x_discover_labels', discoverLabelsSchema, (args) =>
-  wrap('log10x_discover_labels', async () => {
-    const env = resolveEnv(getEnvs(), args.environment);
-    return executeDiscoverLabels(args, env);
-  })
 );
 
 // ── Tool: log10x_configure_env ──
@@ -706,12 +678,6 @@ registerLog10xTool('log10x_investigation_get', investigationGetSchema, (args) =>
 
 registerLog10xTool('log10x_resolve_batch', resolveBatchSchema, (args) =>
   wrap('log10x_resolve_batch', async () => executeResolveBatch(args))
-);
-
-// ── Tool: log10x_extract_templates ──
-
-registerLog10xTool('log10x_extract_templates', extractTemplatesSchema, (args) =>
-  wrap('log10x_extract_templates', async () => executeExtractTemplates(args))
 );
 
 // ── Tool: log10x_retriever_query ──
@@ -858,15 +824,6 @@ registerLog10xTool('log10x_correlate_cross_pillar', correlateCrossPillarSchema, 
   })
 );
 
-// ── Tool: log10x_translate_metric_to_patterns (v1.4) ──
-
-registerLog10xTool('log10x_translate_metric_to_patterns', translateMetricToPatternsSchema, (args) =>
-  wrap('log10x_translate_metric_to_patterns', async () => {
-    const env = resolveEnv(getEnvs(), args.environment);
-    return executeTranslateMetricToPatterns(args, env);
-  })
-);
-
 // ── Tool: log10x_poc_from_siem_submit / _status ──
 //
 // Async pair: submit kicks off a background pull + templatize + render;
@@ -997,16 +954,13 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_pattern_examples', intent: 'Recent live events for a pattern from the log analyzer with template-parsed slot values — bounded to 24h, for older use retriever_query' },
   { name: 'log10x_savings', intent: 'Pipeline ROI — how much receiver / retriever are saving in dollars' },
   { name: 'log10x_pattern_trend', intent: 'Time series for a pattern — volume + cost history, spike detection, sparkline' },
-  { name: 'log10x_services', intent: 'List all monitored services ranked by cost' },
   { name: 'log10x_exclusion_filter', intent: 'Generate mute file entry or SIEM drop rule for a pattern' },
   { name: 'log10x_dependency_check', intent: 'Scan SIEM + dashboards + alerts for refs to a pattern before muting / deleting it' },
-  { name: 'log10x_discover_labels', intent: 'List available labels and their values for filter / group-by queries' },
   { name: 'log10x_top_patterns', intent: 'Top N patterns by current cost (no baseline comparison)' },
   { name: 'log10x_list_by_label', intent: 'Rank any label dimension by cost — "cost by namespace / tenant / severity"' },
   { name: 'log10x_investigate', intent: 'Single-call root-cause — causal chain for acute spikes or cohort for drift' },
   { name: 'log10x_investigation_get', intent: 'Retrieve a prior investigation by id or list recent investigations' },
   { name: 'log10x_resolve_batch', intent: 'Pasted-batch triage — per-pattern variable concentration + next actions' },
-  { name: 'log10x_extract_templates', intent: 'Extract structural templates from a log corpus via local tenx — optional min/required/forbidden-merge assertions' },
   { name: 'log10x_retriever_query', intent: 'Direct archive retrieval by templateHash with JS filter expressions' },
   { name: 'log10x_retriever_query_status', intent: 'Poll CloudWatch diagnostics for an existing retriever query and optionally recover stranded results from S3 via fetch_results=true (avoids resubmit + new queryId)' },
   { name: 'log10x_retriever_series', intent: 'Fidelity-aware time series from the S3 archive — auto-selects exact aggregation vs sampled fan-out' },
@@ -1024,7 +978,6 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_customer_metrics_query', intent: 'Direct PromQL passthrough to the customer metric backend (escape hatch for cross-pillar investigations)' },
   { name: 'log10x_discover_join', intent: 'Auto-discover the join label between Log10x pattern metrics and the customer metric backend via Jaccard similarity' },
   { name: 'log10x_correlate_cross_pillar', intent: 'Bidirectional cross-pillar correlation with structural validation — confirmed / service-match / coincidence / unconfirmed tiering' },
-  { name: 'log10x_translate_metric_to_patterns', intent: 'Given a customer APM metric, return the Log10x patterns whose rate curves correspond — with structural validation' },
   { name: 'log10x_poc_from_siem_submit', intent: 'Pull a sample from the user\'s SIEM, templatize, and render a full cost-optimization POC report (async)' },
   { name: 'log10x_poc_from_siem_status', intent: 'Poll or retrieve the final report from a log10x_poc_from_siem_submit run' },
   { name: 'log10x_poc_from_local', intent: 'Run the POC from local kubectl logs (no SIEM credentials needed); industry-pricing matrix instead of bill prediction' },
@@ -1034,7 +987,7 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_advise_receiver', intent: 'Receiver install/verify/teardown plan — inline only, with optional compact encoding (optimize=true)' },
   { name: 'log10x_advise_retriever', intent: 'Retriever install/verify/teardown plan — standalone S3 + SQS archive + query' },
   { name: 'log10x_advise_compact', intent: 'Render a `gh` PR command + diff for a compactReceiver lookup-CSV update against the customer GitOps repo (engine hot-reloads the CSV without a pipeline restart)' },
-  { name: 'log10x_pattern_mitigate', intent: 'Single entry point — present the four cost-reduction options for a pattern (drop @ analyzer, drop @ forwarder, mute @ 10x, compact @ 10x) in user terms with env-capability gating; route to the right sub-tool based on user choice' },
+  { name: 'log10x_pattern_mitigate', intent: 'Return the env-gated mitigation options + exact configs for a pattern (drop @ analyzer, drop @ forwarder, mute @ 10x, compact @ 10x) in user terms with env-capability gating' },
 ];
 
 async function handleCliFlags(): Promise<boolean> {

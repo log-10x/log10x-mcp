@@ -405,7 +405,7 @@ export async function executeTopPatterns(
     nextActions.push({
       tool: 'log10x_pattern_mitigate',
       args: { pattern: topActive.pattern },
-      reason: 'drop / mute / compact / sample menu for the top-cost pattern',
+      reason: 'env-gated mitigation options + exact configs for this pattern',
     });
   }
 

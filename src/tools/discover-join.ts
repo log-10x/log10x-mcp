@@ -145,7 +145,7 @@ function renderJoinResult(
       lines.push('');
     }
 
-    lines.push('**Next action**: the cross-pillar correlation tools will use this join key automatically. Call `log10x_correlate_cross_pillar` or `log10x_translate_metric_to_patterns` with an anchor and they will reuse the cached result.');
+    lines.push('**Next action**: the cross-pillar correlation tools will use this join key automatically. Call `log10x_correlate_cross_pillar` with an anchor (a Log10x pattern, or a customer metric via `anchor_type`) and it will reuse the cached result.');
     // Structured chain hint so autonomous walkers don't need to
     // prose-parse the markdown above.
     const next: NextAction[] = [
@@ -155,8 +155,8 @@ function renderJoinResult(
         reason: 'use the resolved join key to correlate a Log10x pattern against the customer metric backend',
       },
       {
-        tool: 'log10x_translate_metric_to_patterns',
-        args: {},
+        tool: 'log10x_correlate_cross_pillar',
+        args: { anchor_type: 'customer_metric' },
         reason: 'reverse direction: pick a customer metric and find which Log10x patterns track it',
       },
     ];

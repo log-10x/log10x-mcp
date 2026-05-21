@@ -240,7 +240,7 @@ export async function executeCostDrivers(
     nextActions.push({
       tool: 'log10x_pattern_mitigate',
       args: { pattern: drivers[0].hash },
-      reason: 'cost-reduction menu — four options gated on env capabilities',
+      reason: 'env-gated mitigation options + exact configs for this pattern',
     });
     lines.push('');
     lines.push(agentOnly(`Suggested next calls: ${hints.join(' ')}`));

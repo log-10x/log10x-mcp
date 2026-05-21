@@ -11,7 +11,7 @@
     "expected_tool_chain": [
       "log10x_top_patterns",
       "log10x_cost_drivers",
-      "log10x_services"
+      "log10x_list_by_label"
     ],
     "snapshot_ts": "2026-05-11T22:00:00.000Z"
   }

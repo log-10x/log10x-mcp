@@ -10,7 +10,7 @@
   },
   "tool_arg_defaults": {},
   "expected_sequence": {
-    "must_include": ["log10x_services"],
+    "must_include": ["log10x_list_by_label"],
     "tolerance": 0
   },
   "ground_truth": [

@@ -37,7 +37,7 @@ function suggestForTool(toolName: string, msg: string): string | undefined {
   switch (toolName) {
     case 'log10x_investigate':
       if (/Could not resolve/i.test(msg)) {
-        return 'The starting_point did not match a known pattern or service. Try `log10x_event_lookup` with a substring of the line, or `log10x_services` to see which services are monitored.';
+        return 'The starting_point did not match a known pattern or service. Try `log10x_event_lookup` with a substring of the line, or `log10x_list_by_label({ label: \'tenx_user_service\' })` to see which services are monitored.';
       }
       if (/Retriever/i.test(msg)) {
         return 'The Retriever fallback is unavailable. The investigation will still complete using live Reporter metrics. To enable historical fallback, deploy the Retriever and set __SAVE_LOG10X_RETRIEVER_URL__.';
@@ -46,13 +46,13 @@ function suggestForTool(toolName: string, msg: string): string | undefined {
 
     case 'log10x_event_lookup':
       if (/No data found/i.test(msg)) {
-        return 'The pattern was not found in this environment. Try `log10x_resolve_batch` with a sample line to see how the templater normalizes it, or call `log10x_services` to list known services.';
+        return 'The pattern was not found in this environment. Try `log10x_resolve_batch` with a sample line to see how the templater normalizes it, or call `log10x_list_by_label({ label: \'tenx_user_service\' })` to list known services.';
       }
       return 'If you pasted a multi-line batch, use `log10x_resolve_batch` instead — event_lookup is for single-line resolution.';
 
     case 'log10x_cost_drivers':
       if (/No pattern data/i.test(msg)) {
-        return 'No cost data in this window. Verify the service name with `log10x_services`, or widen the timeRange (try `30d`).';
+        return 'No cost data in this window. Verify the service name with `log10x_list_by_label({ label: \'tenx_user_service\' })`, or widen the timeRange (try `30d`).';
       }
       return 'If costs look unexpectedly flat, run `log10x_doctor` to confirm the Reporter tier is detected. If only Cloud Reporter is deployed, sampling can mask short cost spikes.';
 
@@ -97,7 +97,7 @@ function suggestForTool(toolName: string, msg: string): string | undefined {
 
     case 'log10x_top_patterns':
       if (/No pattern data/i.test(msg)) {
-        return 'No data in this window. Try widening the timeRange, or call `log10x_services` to list services with non-zero cost.';
+        return 'No data in this window. Try widening the timeRange, or call `log10x_list_by_label({ label: \'tenx_user_service\' })` to list services with non-zero cost.';
       }
       return undefined;
 
