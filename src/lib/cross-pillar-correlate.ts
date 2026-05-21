@@ -264,9 +264,16 @@ export async function runCrossPillarCorrelation(
   candidates.sort((a, b) => {
     const tierDelta = tierOrder[a.tier] - tierOrder[b.tier];
     if (tierDelta !== 0) return tierDelta;
-    const ac = a.combinedConfidence ?? 0;
-    const bc = b.combinedConfidence ?? 0;
-    return bc - ac;
+    // Within a tier, a genuine temporal co-mover always ranks above a
+    // structurally-matched-but-temporally-flat candidate. Without this the
+    // structural-passthrough confidence (structural * 0.5) outranks a real
+    // co-mover whose temporal*lag product is < 0.5, burying the actual
+    // signal (e.g. an active-requests metric at temporal 0.78 sorted below
+    // a flat memory-limit metric).
+    const aMoves = a.subScores.temporal >= minimumConfidence ? 1 : 0;
+    const bMoves = b.subScores.temporal >= minimumConfidence ? 1 : 0;
+    if (aMoves !== bMoves) return bMoves - aMoves;
+    return (b.combinedConfidence ?? 0) - (a.combinedConfidence ?? 0);
   });
 
   const trimmed = candidates.slice(0, maxCandidates);
@@ -307,8 +314,12 @@ async function fetchAnchorSeries(opts: CorrelateOptions, metric: string): Promis
     return extractValuesFromRange(res);
   }
 
-  // Log10x pattern anchor.
-  const promql = `sum(rate(${metric}{message_pattern="${escape(opts.anchor.value)}"}[${durationLabel(opts.window.step)}]))`;
+  // Log10x pattern anchor. The rate window must be several scrape
+  // intervals wide — log10x metrics are remote-written at ~60s resolution,
+  // so rate(metric[step]) with step=60s returns NO points and the anchor
+  // series comes back empty, collapsing every temporal score to 0. Use
+  // >= 3x step, floor 3m. (Same fix applied to candidate fetches below.)
+  const promql = `sum(rate(${metric}{message_pattern="${escape(opts.anchor.value)}"}[${durationLabel(Math.max(opts.window.step * 3, 180))}]))`;
   const res = await queryRange(opts.env, promql, opts.window.from, opts.window.to, opts.window.step);
   return extractValuesFromRange(res);
 }
@@ -319,8 +330,8 @@ async function fetchCandidateSeries(
   metric: string
 ): Promise<number[]> {
   if (opts.anchor.type === 'customer_metric') {
-    // Candidate is a log10x pattern.
-    const promql = `sum(rate(${metric}{message_pattern="${escape(name)}"}[${durationLabel(opts.window.step)}]))`;
+    // Candidate is a log10x pattern. Wide rate window (see fetchAnchorSeries).
+    const promql = `sum(rate(${metric}{message_pattern="${escape(name)}"}[${durationLabel(Math.max(opts.window.step * 3, 180))}]))`;
     const res = await queryRange(opts.env, promql, opts.window.from, opts.window.to, opts.window.step);
     return extractValuesFromRange(res);
   }
@@ -502,7 +513,7 @@ async function generateCandidateNames(
   // correlating their RAW monotonic values spuriously matches anything
   // that's higher-later, so rate() them (matching how the anchor pattern
   // series is rated). Gauges (memory, ratios, queue depth) stay raw.
-  const rateWin = durationLabel(Math.max(opts.window.step, 60));
+  const rateWin = durationLabel(Math.max(opts.window.step * 3, 180));
   const wrap = (n: string, sel: string): string =>
     /(_total|_count|_sum|_bucket)$/.test(n)
       ? `sum(rate(${n}{${sel}}[${rateWin}]))`
