@@ -164,19 +164,13 @@ function stanza(
   }
   out.push(`   pattern: ${fmtPattern(r.pattern)}`);
 
-  // Prefer a trend sparkline (volume over the window) when samples are
-  // supplied: "is this getting worse" is the actionable question, and
-  // a scope-share bar collapses to one cell on a long-tailed workload.
-  // Fall back to the scaled share-bar for callers that pass no series.
+  // Trend sparkline (the good visual) when the caller supplies a series:
+  // "is this getting worse" is the actionable question. No makeshift
+  // magnitude bar otherwise — it carried no information beyond the $ and the
+  // rank order, and read as an unlabeled mystery graph. Share of scope (when
+  // known) goes on the metrics line below as plain text instead.
   if (r.spark && r.spark.length >= 2) {
     out.push(`   trend ${sparkline(r.spark)}  ${trendWord(r.spark)}`);
-  } else {
-    const barVal = typeof r.barValue === 'number' ? r.barValue : r.bytes;
-    const barFrac = maxBytes > 0 ? barVal / maxBytes : 0;
-    const scopeDenom = opts.scopeBytes && opts.scopeBytes > 0 ? opts.scopeBytes : 0;
-    const scopeFrac = scopeDenom > 0 ? r.bytes / scopeDenom : barFrac;
-    const pctTail = scopeDenom > 0 ? ` ${pctText(scopeFrac)} of scope` : '';
-    out.push(`   ${shareBar(barFrac)} ${pctTail}`.trimEnd());
   }
 
   const metrics: string[] = [];
@@ -191,6 +185,9 @@ function stanza(
     metrics.push(`${fmtCount(r.events)} events`);
     if (r.bytes > 0) metrics.push(`${fmtBytes(r.bytes / r.events)}/event`);
   }
+  // Share of scope as plain text (replaces the removed magnitude bar).
+  const scopeDenom = opts.scopeBytes && opts.scopeBytes > 0 ? opts.scopeBytes : 0;
+  if (scopeDenom > 0 && r.bytes > 0) metrics.push(`${pctText(r.bytes / scopeDenom)} of scope`);
   out.push(`   ${metrics.join(' · ')}`);
 
   if (r.impacts) out.push(`   impacts: ${r.impacts}`);
@@ -243,16 +240,11 @@ export function renderPatternStanzas(
     (m, r) => Math.max(m, typeof r.barValue === 'number' ? r.barValue : r.bytes),
     0
   );
-  const hasScope = !!(opts.scopeBytes && opts.scopeBytes > 0);
   const hasSpark = rows.some(r => r.spark && r.spark.length >= 2);
-  lines.push(
-    hasSpark
-      ? '(trend = volume across the window, oldest -> newest)'
-      : hasScope
-        ? '(bar scaled to the largest shown row; % is true share of scope)'
-        : '(bar scaled to the largest shown row)'
-  );
-  lines.push('');
+  if (hasSpark) {
+    lines.push('(trend = volume across the window, oldest -> newest)');
+    lines.push('');
+  }
 
   if (opts.groupByService) {
     const bySvc = new Map<string, PatternStanzaRow[]>();

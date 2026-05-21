@@ -892,10 +892,10 @@ async function renderEnvironmentAudit(
         if (r.collapsedCount && r.collapsedCount > 1) {
           anyCollapsed = true;
           lines.push(
-            `- **${r.collapsedCount} high-cardinality variants in \`${r.service}\`** — each ${label} ${direction} vs ${effectiveBaselineOffset} ago (collapsed: same rate change within ±5%, likely variable-value rotation rather than a service incident). Example: \`${r.pattern}\``
+            `- **${r.collapsedCount} high-cardinality variants in \`${r.service}\`** — each ${label} ${direction} vs ${effectiveBaselineOffset} ago (collapsed: same rate change within ±5%, likely variable-value rotation rather than a service incident). Example: ${r.pattern.replace(/_/g, ' ')}`
           );
         } else {
-          lines.push(`- \`${r.pattern}\` (\`${r.service}\`) — ${label} ${direction} vs ${effectiveBaselineOffset} ago`);
+          lines.push(`- \`${r.service}\` · ${r.pattern.replace(/_/g, ' ')} · ${label} ${direction} vs ${effectiveBaselineOffset} ago`);
         }
       }
       lines.push('');

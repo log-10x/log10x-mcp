@@ -752,28 +752,16 @@ function renderCard(
 
   const analyzerName = opts.analyzer ?? 'the analyzer';
 
-  // Source-fix signal — when the pattern is an error-severity loop or a
-  // debug-verbosity dump, dropping the logs at the forwarder stops the
-  // cost but hides a real failure (or pays to mute output that could be
-  // turned off at the source). Heuristic from severity + volume only;
-  // the reader is pointed at the example event for the actual cause, so
-  // we name no root cause we can't see.
+  // Severity flag — still used to gate the "investigate" CTA further down.
   const sevUpper = (r.severity || '').toUpperCase();
   const isErrorish =
     sevUpper === 'ERROR' || sevUpper === 'WARN' || sevUpper === 'CRITICAL';
-  const isFailureLoop = isErrorish && r.events >= 100;
-  const isDebugDump = sevUpper === 'DEBUG';
-  if (isFailureLoop) {
-    lines.push(
-      '> **Error loop, not steady telemetry.** Dropping the logs stops the cost but hides the failure. Fix it at the source (see the example event), or investigate before you suppress.'
-    );
-    lines.push('');
-  } else if (isDebugDump) {
-    lines.push(
-      "> **Debug-level output.** If you don't need debug verbosity here, turn it down at the source instead of paying to drop it."
-    );
-    lines.push('');
-  }
+
+  // (Removed: a hardcoded "Error loop / Debug-level output" note keyed on
+  // severity + event-count alone. It asserted "not steady telemetry" / "hides
+  // the failure" from two numbers it couldn't actually verify — opaque at best,
+  // wrong at worst. The card already shows severity, the example event, and the
+  // field-variation block; the reader (or agent) judges from those facts.)
 
   // Find + drop. Compact (templateShown): both live once at the top of
   // the output, so the card carries only its hash. Otherwise (verbose,

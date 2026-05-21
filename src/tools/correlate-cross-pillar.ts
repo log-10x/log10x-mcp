@@ -258,7 +258,7 @@ function renderCorrelationResult(
   if (result.byTier['coincidence'].length > 0) {
     lines.push('### Tier 4 — coincidence (warning)');
     lines.push('');
-    lines.push('_Not co-movers. Either no structural overlap with the anchor, OR structurally co-located but the metric did not meaningfully move over the window (low `volume`) — its correlation is shape-noise, not a response. Do not present these as causal without independent evidence._');
+    lines.push('_Probably unrelated. Either they are not on the same service/pod as your anchor, or they barely moved during the window (so any apparent correlation is just noise). Do not treat these as related._');
     lines.push('');
     for (let i = 0; i < result.byTier['coincidence'].length; i++) {
       lines.push(formatCandidate(i + 1, result.byTier['coincidence'][i]));
@@ -266,20 +266,29 @@ function renderCorrelationResult(
     lines.push('');
   }
 
-  // Topology-boundary hand-off (anti-hallucination). The dangerous path is
-  // the confirmed/service-match tier: an agent can read "leads/trails" + a
-  // tier label as a proven cause and fabricate a dependency story. Make the
-  // correlation→causation line explicit so the agent reasons from co-movement
-  // and defers the causal direction to the customer's traces/APM (the APM
-  // boundary we deliberately do NOT cross by building a call graph ourselves).
+  // Agent-only machine detail (sub-scores + re-runnable PromQL) for every
+  // candidate — kept OUT of the human view (it reads as data-science noise),
+  // handed to the agent for verification / chaining. Humans get the plain
+  // lines above; the agent gets the precision + the exact query here.
+  if (result.candidates.length > 0) {
+    lines.push(candidateAgentDetail(result.candidates));
+    lines.push('');
+  }
+
+  // Topology-boundary hand-off (anti-hallucination), in plain English. The
+  // dangerous path is the confirmed/service-match tier: an agent can read the
+  // timing as a proven cause and fabricate a dependency story. State the
+  // correlation→causation line plainly so the agent reasons from co-movement
+  // and defers causal direction to traces/APM (the APM boundary we do NOT
+  // cross by building a call graph ourselves).
   if (result.byTier['confirmed'].length > 0 || result.byTier['service-match'].length > 0) {
     lines.push(
-      '> **Co-movement, not causation.** The tiers and lead/trail labels are temporal correlation plus structural label overlap, not a proven cause or call graph. To confirm direction, check your traces/APM or the deploy timeline at the inflection.'
+      '> **These moved at the same time as your anchor. That is not proof one caused the other.** To find the actual cause, look at the request traces in your APM, or at what changed or deployed around the time this started.'
     );
     lines.push('');
     lines.push(
       agentOnly(
-        'Do not relay these as causation. Present them as co-movers; if the user needs the causal direction, recommend they confirm in their traces/APM or the deploy timeline at the inflection. This tool shows correlation + structural overlap, not a proven dependency.'
+        'Do NOT relay these as causation. Present them as things that moved together; if the user needs the causal direction, tell them to confirm in their traces/APM or the deploy timeline. This tool shows correlation + shared labels, not a proven dependency.'
       )
     );
     lines.push('');
@@ -332,26 +341,38 @@ function renderCorrelationResult(
   return lines.join('\n');
 }
 
+// Human-facing line: plain English, no data-science sub-scores. The
+// machine detail (temporal/structural/spread + the re-runnable PromQL) goes
+// in an agent-only block via `candidateAgentDetail` so a person reads a
+// sentence and the agent still gets the precision + query to verify/chain.
 function formatCandidate(idx: number, c: CrossPillarCandidate): string {
   const metricName = c.labels['__name__'] || c.name;
-  const conf = c.combinedConfidence !== null ? `${(c.combinedConfidence * 100).toFixed(0)}%` : 'unknown';
-  const structural =
-    c.subScores.structural === null ? 'unknown' : c.subScores.structural.toFixed(2);
-  const lag = c.lagSeconds === 0 ? 'concurrent' : c.lagSeconds < 0 ? `leads ${Math.abs(c.lagSeconds)}s` : `trails ${c.lagSeconds}s`;
-  // #4 — lead with the metric name (not a truncated PromQL blob), then the
-  // evidence behind the score: did it move (the magnitude Pearson discards),
-  // at what rate window, with what lag basis. The full re-runnable query is
-  // on its own line for durability (copy-paste into the backend).
-  const moved = c.evidence
-    ? c.evidence.moved
-      ? `moved (spread ${c.evidence.movedSpread.toFixed(2)})`
-      : `flat (spread ${c.evidence.movedSpread.toFixed(2)})`
-    : `volume ${c.subScores.volume.toFixed(2)}`;
-  const rateWin = c.evidence ? ` · rate ${Math.round(c.evidence.rateWindowSeconds / 60)}m` : '';
-  return (
-    `${idx}. \`${metricName}\` — confidence ${conf} · ${lag}\n` +
-    `   - evidence: temporal ${c.subScores.temporal.toFixed(2)} · structural ${structural} · ${moved}${rateWin}\n` +
-    `   - query: \`${c.name}\``
+  const t = c.subScores.temporal;
+  const strength = t >= 0.7 ? 'tracks the anchor closely' : t >= 0.4 ? 'moves with the anchor' : 'moves loosely with the anchor';
+  const timing =
+    c.lagSeconds === 0 ? 'at the same time'
+      : c.lagSeconds < 0 ? `about ${Math.abs(c.lagSeconds)}s before it`
+        : `about ${c.lagSeconds}s after it`;
+  return `${idx}. \`${metricName}\` — ${strength}, ${timing}`;
+}
+
+/** Agent-only machine detail for the candidates: the sub-scores Pearson/
+ * structural/movement and the exact re-runnable PromQL. Kept out of the
+ * human view (it reads as data-science noise) but handed to the agent so it
+ * can verify independently and chain. */
+function candidateAgentDetail(candidates: CrossPillarCandidate[]): string {
+  const rows = candidates.map((c) => {
+    const name = c.labels['__name__'] || c.name;
+    const s = c.subScores;
+    const structural = s.structural === null ? 'n/a' : s.structural.toFixed(2);
+    const spread = c.evidence ? c.evidence.movedSpread.toFixed(2) : 'n/a';
+    const rate = c.evidence ? `${Math.round(c.evidence.rateWindowSeconds / 60)}m` : 'n/a';
+    const conf = c.combinedConfidence !== null ? `${(c.combinedConfidence * 100).toFixed(0)}%` : 'n/a';
+    return `- ${name} [${c.tier}] temporal=${s.temporal.toFixed(2)} structural=${structural} spread=${spread} rate=${rate} lag=${c.lagSeconds}s conf=${conf}\n  query: ${c.name}`;
+  });
+  return agentOnly(
+    'Per-candidate evidence + re-runnable PromQL (for verification / chaining; not for the human reply):\n' +
+      rows.join('\n')
   );
 }
 
