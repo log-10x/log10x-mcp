@@ -285,7 +285,12 @@ async function formatResults(
   // AI analysis
   try {
     const queryResultJson = JSON.stringify(results.slice(0, 5));
-    const aiPrompt = `Classify this log pattern and recommend an action. Pattern: ${pattern}. Provide: CATEGORY (error/debug/info/metric/health), CONFIDENCE (high/medium/low), ACTION (filter/keep/reduce), FILTER_PCT (% safe to filter), EXPLANATION (one line).`;
+    // De-verdict (TOOL-AUDIT Phase 2): ask the classifier for the FACTUAL
+    // category only, not a routing verdict. The old prompt asked for
+    // ACTION (filter/keep/reduce) + FILTER_PCT (% safe to filter) — an
+    // asserted drop-recommendation the agent/user is better placed to judge
+    // from the cost / severity / sample context this tool already returns.
+    const aiPrompt = `Classify this log pattern. Pattern: ${pattern}. Provide: CATEGORY (error/debug/info/metric/health), CONFIDENCE (high/medium/low), EXPLANATION (one factual line on what the pattern represents, no recommendation).`;
     const aiResult = await queryAi(env, queryResultJson, aiPrompt, costPerGb);
 
     if (aiResult) {
@@ -334,7 +339,7 @@ async function formatResults(
     lines.push('');
     if (longElevated) {
       const longPct = Math.round(((longNow - longBase) / longBase) * 10) * 10;
-      lines.push(`_Cost is up ~${pctChange}% vs the prior comparable window, and ALSO up ~${longPct}% over 7d vs the prior 7d. The rise is corroborated on the longer window; treat as a real regression and trace the cause._`);
+      lines.push(`_Cost is up ~${pctChange}% vs the prior comparable window, and ALSO up ~${longPct}% over 7d vs the prior 7d. The rise shows on both the short and the longer window, not just short-window noise._`);
       hints.push(`Corroborated regression (up ~${pctChange}% / ${tf.label}, up ~${longPct}% / 7d): trace with log10x_investigate({ starting_point: '${pattern}' }).`);
       nextActions.push({
         tool: 'log10x_investigate',

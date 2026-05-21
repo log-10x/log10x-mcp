@@ -85,30 +85,30 @@ export async function executeTrend(
   const recentAvg = recentSlice.reduce((s, p) => s + p.bytes, 0) / recentSlice.length;
   const recentCost = bytesToCost(recentAvg * (tf.days * 86400 / stepSeconds), costPerGb);
 
-  // Verdict first (the SRE's actual question: did this change?), then
-  // clearly-labeled figures. Three $ numbers confused readers before:
-  // `total` is the ACTUAL cost over the window; baseline/current are
-  // PROJECTED run-rates from the first/last quarter (used only to
-  // judge direction). Label them so they don't read as contradictory.
-  // "quarter" = first/last 25% of the time window (not calendar Q).
-  let verdict: string;
+  // De-verdict (TOOL-AUDIT Phase 2): report the MEASURED change as a signed
+  // delta + the two quarter run-rates, NOT an asserted RISING/FALLING/STABLE
+  // label. The fine time series is trend's differentiated context; the
+  // asserted trend word competed with the agent's live judgment and read as
+  // a verdict to distrust. The reader sees the % + the curve and judges
+  // direction. Three $ numbers confused readers before: `total` is the
+  // ACTUAL cost over the window; baseline/current are PROJECTED run-rates
+  // from the first/last quarter (used only to gauge direction). "quarter" =
+  // first/last 25% of the time window (not calendar Q).
   let pct = 0;
-  if (baselineCost > 0 && recentCost > baselineCost * 1.5) {
+  if (baselineCost > 0) {
     pct = Math.round(((recentCost - baselineCost) / baselineCost) * 100);
-    verdict = `RISING +${pct}% (last quarter of the window vs first quarter)`;
-  } else if (baselineCost > 0 && recentCost < baselineCost * 0.7) {
-    pct = Math.round(((baselineCost - recentCost) / baselineCost) * 100);
-    verdict = `FALLING -${pct}% (last quarter of the window vs first quarter)`;
-  } else {
-    verdict = `STABLE (last quarter of the window ≈ first quarter)`;
   }
+  const changeStr =
+    baselineCost > 0
+      ? `${pct >= 0 ? '+' : ''}${pct}% (last quarter vs first quarter run-rate)`
+      : '(no first-quarter baseline to compare against)';
 
   const lines: string[] = [];
   lines.push(`${fmtPattern(pattern)} · trend over ${tf.label}`);
-  lines.push(`Verdict: ${verdict}${spikePoint ? `; spike at ${formatTimestamp(spikePoint.ts)}` : ''}`);
+  lines.push(`Change over ${tf.label}: ${changeStr}${spikePoint ? `; peak ${(maxPoint.bytes / avgBytes).toFixed(1)}× the window average at ${formatTimestamp(spikePoint.ts)}` : ''}`);
   lines.push('');
   lines.push(`  Measured spend over ${tf.label}: ${fmtDollar(totalCost)}  (${points.length} samples @ ${step})`);
-  lines.push(`  Direction check (extrapolated run-rate, NOT the bill, used only for the verdict):`);
+  lines.push(`  Direction check (extrapolated run-rate, NOT the bill, used only to gauge direction):`);
   lines.push(`    first quarter ~${fmtDollar(baselineCost)}${period}  ->  last quarter ${fmtDollar(recentCost)}${period}`);
   lines.push(`  _The two numbers differ on purpose: the first is the actual spend over the window; the run-rates annualize each quarter's average rate to judge rising/falling, so they will not equal the measured spend._`);
   lines.push(`  Peak ${fmtBytes(maxPoint.bytes)} @ ${formatTimestamp(maxPoint.ts)} · Low ${fmtBytes(minPoint.bytes)} @ ${formatTimestamp(minPoint.ts)}`);

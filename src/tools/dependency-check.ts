@@ -212,7 +212,7 @@ function renderBashFallback(
   // Agent-only constraint: don't fabricate "zero dependencies" before the
   // user pastes results back.
   lines.push(agentOnly(
-    `Constraint: do not report "zero dependencies" or "safe to drop" based on this output — wait for the user to paste the script's results back.`
+    `Constraint: do not report "zero dependencies" or "safe to drop" based on this output — wait for the user to paste the script's results back.` // verdict-lint-ok: anti-verdict constraint, instructs the agent AGAINST asserting safe-to-drop (the audit credited dependency_check for already modeling this)
   ));
   lines.push('');
   lines.push(

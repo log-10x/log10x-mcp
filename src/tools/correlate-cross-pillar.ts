@@ -313,12 +313,26 @@ function renderCorrelationResult(
 }
 
 function formatCandidate(idx: number, c: CrossPillarCandidate): string {
-  const name = c.name.length > 100 ? c.name.slice(0, 97) + '...' : c.name;
+  const metricName = c.labels['__name__'] || c.name;
   const conf = c.combinedConfidence !== null ? `${(c.combinedConfidence * 100).toFixed(0)}%` : 'unknown';
   const structural =
     c.subScores.structural === null ? 'unknown' : c.subScores.structural.toFixed(2);
   const lag = c.lagSeconds === 0 ? 'concurrent' : c.lagSeconds < 0 ? `leads ${Math.abs(c.lagSeconds)}s` : `trails ${c.lagSeconds}s`;
-  return `${idx}. \`${name}\` — confidence ${conf} (temporal:${c.subScores.temporal.toFixed(2)} lag:${c.subScores.lag.toFixed(2)} structural:${structural} volume:${c.subScores.volume.toFixed(2)}) — ${lag}`;
+  // #4 — lead with the metric name (not a truncated PromQL blob), then the
+  // evidence behind the score: did it move (the magnitude Pearson discards),
+  // at what rate window, with what lag basis. The full re-runnable query is
+  // on its own line for durability (copy-paste into the backend).
+  const moved = c.evidence
+    ? c.evidence.moved
+      ? `moved (spread ${c.evidence.movedSpread.toFixed(2)})`
+      : `flat (spread ${c.evidence.movedSpread.toFixed(2)})`
+    : `volume ${c.subScores.volume.toFixed(2)}`;
+  const rateWin = c.evidence ? ` · rate ${Math.round(c.evidence.rateWindowSeconds / 60)}m` : '';
+  return (
+    `${idx}. \`${metricName}\` — confidence ${conf} · ${lag}\n` +
+    `   - evidence: temporal ${c.subScores.temporal.toFixed(2)} · structural ${structural} · ${moved}${rateWin}\n` +
+    `   - query: \`${c.name}\``
+  );
 }
 
 function parseDuration(s: string): number {

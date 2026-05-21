@@ -254,10 +254,11 @@ export async function executeCostDrivers(
     const comparison = args.baselineOffsetDays
       ? `current ${tf.range} vs ${args.baselineOffsetDays}d-offset baseline`
       : `current ${tf.range} vs 3-window avg baseline (offsets: ${tf.baselineOffsets.join('d/')}d)`;
-    // Lead with the verdict and the actionable ranking; the
-    // methodology footnote goes AFTER (cost-cutting readers want the
-    // numbers first, not three lines of apology — cold review CL3).
-    lines.push(`Cost drivers · ${tf.label} · ${displayName}: none detected (environment stable vs baseline)`);
+    // De-verdict (TOOL-AUDIT Phase 2): present the growth finding as a
+    // fact, not a global "environment stable" verdict. Lead with the
+    // result + the actionable ranking; methodology footnote goes AFTER
+    // (cost-cutting readers want the numbers first).
+    lines.push(`Cost drivers · ${tf.label} · ${displayName}: no pattern grew materially vs baseline`);
     lines.push('');
     lines.push(`No pattern is growing, but here is where the spend is right now:`);
     lines.push('');

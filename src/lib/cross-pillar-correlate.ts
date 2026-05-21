@@ -72,6 +72,19 @@ export interface CrossPillarCandidate {
   tier: ConfidenceTier;
   /** Lag offset in seconds: negative = candidate leads anchor. */
   lagSeconds: number;
+  /**
+   * #4 — explainability evidence: the basis behind the score so the
+   * reader (human or agent) can judge it, rather than trust a headline.
+   * This is context, not a verdict — the tier already carries the call.
+   */
+  evidence: {
+    /** Rate window (s) used to smooth counter series at this resolution. */
+    rateWindowSeconds: number;
+    /** Relative spread (max-min)/|mean| — the magnitude Pearson discards. */
+    movedSpread: number;
+    /** Whether the candidate meaningfully moved over the window. */
+    moved: boolean;
+  };
 }
 
 export interface CrossPillarResult {
@@ -149,6 +162,46 @@ function relativeSpread(series: number[]): number {
   const mean = sum / series.length;
   const denom = Math.abs(mean) > 1e-9 ? Math.abs(mean) : (max > 1e-9 ? max : 1);
   return (max - min) / denom;
+}
+
+// #9 — metric-family de-duplication. A pod's CPU has four representations
+// in an OTLP store (`container_cpu_usage`, `container_cpu_time_seconds_total`,
+// `k8s_pod_cpu_usage`, `k8s_pod_cpu_time_seconds_total`) that all measure
+// the SAME physical signal. Left alone they fill the confirmed tier and
+// crowd out the app request-path the incident actually needs (the live
+// A/B grader flagged exactly this). The family key normalizes the entity
+// prefix (container/k8s_pod/k8s_container → pod; k8s_node/system → node)
+// and strips representation suffixes, so the four CPU reps map to one
+// `pod:cpu` while genuinely-distinct signals (http_server vs http_client
+// request_duration, memory_rss vs memory_page_faults) stay separate.
+const ENTITY_PREFIXES: Array<[RegExp, string]> = [
+  [/^(container|k8s_pod|k8s_container|kube_pod|kubelet)_/, 'pod:'],
+  [/^(k8s_node|node|system)_/, 'node:'],
+];
+const REPR_SUFFIX = /(_seconds_total|_seconds|_total|_bytes|_ratio|_count|_sum|_bucket|_usage|_time|_utilization|_percent)$/;
+export function metricFamily(rawName: string): string {
+  let n = (rawName || '').toLowerCase();
+  let entity = '';
+  for (const [re, label] of ENTITY_PREFIXES) {
+    if (re.test(n)) {
+      entity = label;
+      n = n.replace(re, '');
+      break;
+    }
+  }
+  let prev: string;
+  do {
+    prev = n;
+    n = n.replace(REPR_SUFFIX, '');
+  } while (n !== prev && n.length > 0);
+  return entity + n;
+}
+
+/** Preference for which representative of a family to keep (lower = better):
+ * gauges over counters (no rate() artifact), then the shorter/canonical name. */
+function familyRepPreference(name: string): number {
+  const isCounter = /(_total|_count|_sum|_bucket)$/.test(name);
+  return (isCounter ? 100 : 0) + name.length;
 }
 
 /**
@@ -270,11 +323,18 @@ export async function runCrossPillarCorrelation(
       volume,
     };
 
+    // #4 — lag tightness is a MODIFIER, not a gate. The old
+    // `* max(0.2, lag)` term crushed a genuine co-mover (temporal 0.85,
+    // structural 1.0, volume 1.0) to 21% purely because a broad load ramp
+    // correlates across many offsets (low tightness). A 21% headline on a
+    // real co-mover reads as "weak" and undermines the correctness the tool
+    // actually has. Fold lag in as a [0.7,1.0] modifier so the headline
+    // tracks the real evidence (temporal × structural × volume).
     const combinedConfidence =
       structural.score === null
         ? null
         : subScores.temporal >= minimumConfidence
-          ? subScores.temporal * Math.max(0.2, subScores.lag) * structural.score * subScores.volume
+          ? subScores.temporal * structural.score * subScores.volume * (0.7 + 0.3 * subScores.lag)
           : structural.score * 0.25 * volume; // structure-only: weak, scaled by real movement
 
     // #8 — confirmed/service-match require a GENUINE co-mover (real
@@ -297,6 +357,7 @@ export async function runCrossPillarCorrelation(
       combinedConfidence,
       tier,
       lagSeconds: reportedLag,
+      evidence: { rateWindowSeconds, movedSpread: spread, moved },
     });
   }
 
@@ -323,7 +384,17 @@ export async function runCrossPillarCorrelation(
     return (b.combinedConfidence ?? 0) - (a.combinedConfidence ?? 0);
   });
 
-  const trimmed = candidates.slice(0, maxCandidates);
+  // #9 — backstop: even after name-level family dedup, collapse any
+  // same-family survivors (keep the highest-ranked representative) so the
+  // output never shows multiple representations of one physical signal.
+  const seenFamily = new Set<string>();
+  const deduped = candidates.filter((c) => {
+    const fam = metricFamily(c.labels['__name__'] ?? c.name);
+    if (seenFamily.has(fam)) return false;
+    seenFamily.add(fam);
+    return true;
+  });
+  const trimmed = deduped.slice(0, maxCandidates);
 
   const byTier: Record<ConfidenceTier, CrossPillarCandidate[]> = {
     'confirmed': [],
@@ -551,11 +622,31 @@ async function generateCandidateNames(
   let metricNames = Array.from(nameSet);
   if (metricNames.length === 0) return legacy();
 
-  // Diagnostic metrics first, so the downstream candidate cap evaluates the
-  // ones most likely to explain an incident before generic ones.
-  const DIAG_HINTS = ['restart', 'cpu', 'memory', 'mem_', 'error', 'fail', 'latency', 'duration', 'request', 'saturation', 'throttle', 'oom', 'ready', 'available', 'pending', 'queue', 'drop', 'connection'];
-  const diag = (n: string): number => (DIAG_HINTS.some((h) => n.toLowerCase().includes(h)) ? 0 : 1);
-  metricNames.sort((a, b) => diag(a) - diag(b));
+  // #9 — collapse near-duplicate families BEFORE spending the candidate
+  // budget (4 CPU reps → 1), so the budget reaches the app request-path
+  // instead of filling with redundant infra representations.
+  const byFamily = new Map<string, string>();
+  for (const n of metricNames) {
+    const fam = metricFamily(n);
+    const cur = byFamily.get(fam);
+    if (!cur || familyRepPreference(n) < familyRepPreference(cur)) byFamily.set(fam, n);
+  }
+  metricNames = [...byFamily.values()];
+
+  // #9 — three-tier ordering so the app request-path is evaluated, not
+  // crowded out by infra reps: app-path (0) > infra-diagnostic (1) >
+  // generic (2). The old single DIAG_HINTS tier lumped cpu/memory in with
+  // request/duration at one priority, so several CPU reps consumed the
+  // budget before any app metric was reached.
+  const APP_HINTS = ['request', 'duration', 'latency', 'rpc', 'grpc', 'route', 'call', 'span', 'query', 'connection', 'queue', 'gc', 'lock', 'retry', 'active', 'inflight', 'session'];
+  const INFRA_HINTS = ['cpu', 'memory', 'mem_', 'oom', 'restart', 'saturation', 'ready', 'available', 'pending', 'network', 'disk', 'fs_', 'throttle', 'drop', 'error', 'fail'];
+  const priority = (n: string): number => {
+    const l = n.toLowerCase();
+    if (APP_HINTS.some((h) => l.includes(h))) return 0;
+    if (INFRA_HINTS.some((h) => l.includes(h))) return 1;
+    return 2;
+  };
+  metricNames.sort((a, b) => priority(a) - priority(b) || a.length - b.length);
   // Counter-named metrics (_total/_count/_sum/_bucket) are cumulative —
   // correlating their RAW monotonic values spuriously matches anything
   // that's higher-later, so rate() them (matching how the anchor pattern
