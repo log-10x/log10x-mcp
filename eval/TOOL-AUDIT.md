@@ -111,3 +111,44 @@ The validation loop itself (gate #5, `eval/bin/run-tool-vs-sre.mjs` +
 comparison either via the Anthropic SDK (CI/unattended) or via session
 sub-agents (interactive, no metered key). `lint-verdict-overreach.mjs` is the
 mechanical guard that keeps de-verdicting from regressing.
+
+## Agent-safe catalog pass (2026-05-21, pass 2 — blades · cleanup · topology boundary)
+
+Unifying lens: **don't seed agents to hallucinate.** Trustworthy context +
+honest hand-off + fewer/sharper blades.
+
+**Topology boundary (anti-hallucination).** Added a "co-movement, not
+causation; confirm in your traces/APM" hand-off to `correlate_cross_pillar`
+and `investigate` (user-visible + `agentOnly`), reworded the causal headers
+("Causal chain"→"Temporal chain (not proven cause)", "Most likely root
+cause"→"Most likely lead"), and added a lint rule blocking asserted causal
+`###` headers. **Validated**: a fresh sub-agent, given the de-causal-ized
+output and a hard "give me the definitive ROOT CAUSE" prompt, refused to
+fabricate a cause, cited the hand-off, and deferred to APM. We deliberately do
+NOT build the dependency graph itself (that is APM — no log10x moat).
+
+**Blades (prove the moat).** Ran the A/B/SRE contest on the log10x-unique tools:
+- `top_patterns` **wins 49–40** vs a strong CloudWatch-Insights SRE — moat real
+  on durability (tenx_hash identity + copy-paste filters), speed (1 call vs 12
+  queries), depth. The contest also **found + drove a fix for a flagship bug**:
+  `$/h` + `$/mo` were 24×-inflated on non-1h windows (per-day cost mislabeled
+  per-hour, ×720). Fixed (window-hours normalization); verified 24h now agrees
+  with the 1h rate.
+- `savings` is the clearest moat in principle but **env-blocked on the demo**
+  (no reducer/retriever telemetry → truthful-empty; correctly does not
+  fabricate). Needs an env that runs the pipeline to contest.
+- `pattern_examples` moat confirmed (tenx_hash-pinned slot extraction an SRE
+  can't reproduce).
+
+**Cleanup (collapse to fewer/sharper blades).** Removed from the agent-facing
+catalog (execute/schema + eval registry kept as internal/dev paths):
+`translate_metric_to_patterns`→`correlate_cross_pillar`,
+`extract_templates`→`resolve_batch`, `services`→`list_by_label`,
+`discover_labels`→demoted. **Recast** `pattern_mitigate` as env-gated context
+(capabilities + exact configs) rather than a routing menu (kept registered;
+4 inbound chains rerouted in framing). All chains rerouted, 5 fixtures updated,
+builds + lint + server-start green. **Deferred**: `retriever_series`→
+`retriever_query` (needs `group_by` + `fidelity` param absorption); prune
+`default-manifest.json` stale entries (harmless). The contest harness
+generalization (per-spec `sreTask`/`rubric`) is a follow-up — the contests were
+run + validated via sub-agents this pass.

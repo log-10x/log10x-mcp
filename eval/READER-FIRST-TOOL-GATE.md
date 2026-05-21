@@ -153,3 +153,31 @@ strings (so the deterministic campaign axes are unchanged).
   magnitude-gated (#8); the evidence is context that lets the reader judge.
 - Lint: green (no asserted-verdict tokens added).
 - Validated: run-3 grader, tool 31→43/60, gap to SRE 14→2.
+
+## Pass 2 — topology boundary + catalog recast
+
+### correlate_cross_pillar / investigate (co-movement-not-causation hand-off)
+- Reader (human SRE): wants the cause; will over-trust a tool that implies one.
+- Reader (SRE AI agent): mid-investigation; tempted to parrot "X caused Y" from
+  a tier label or a "leads/trails" tag.
+- Job (human): the co-movers + the honest boundary ("this is correlation;
+  confirm direction in your traces/APM at the inflection").
+- Job (agent): a `agentOnly` instruction to NOT relay causation and to defer the
+  causal direction to traces/APM — so it reasons from context, not a verdict.
+- Before: "Causal chain" / "Most likely root cause" headers; no boundary line.
+- After: "Temporal chain (not proven cause)" / "Most likely lead"; explicit
+  hand-off on the confirmed/service-match path. No call graph built (that's APM).
+- Lint: green (causal-header rule active). Validated: deferral sub-agent test —
+  agent refused a fabricated root cause and deferred to APM under a leading prompt.
+
+### pattern_mitigate (recast: routing menu → env-gated context)
+- Reader (human SRE): "how do I cut this pattern's cost on MY stack?"
+- Reader (SRE AI agent): chained in from cost_drivers/top_patterns/event_lookup/trend.
+- Job (human): which mitigations this env actually supports + the exact config
+  for each (real engine context), not a generic "pick one of four" menu.
+- Job (agent): env-gated options + configs to act on; routing is the agent's job.
+- Before: hardcoded routing menu ("drop @ analyzer / forwarder, mute/compact
+  @ 10x — pick one") + a system-prompt rule funnelling the workflow through it.
+- After: kept registered, framed as env-gated capability CONTEXT; 4 inbound
+  NEXT_ACTION reasons reworded menu→context; system-prompt routing rule softened.
+- Lint: green.
