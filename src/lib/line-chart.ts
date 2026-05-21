@@ -28,6 +28,11 @@
 export interface LineChartOpts {
   /** Max chart columns. Data wider than this is max-pooled into widthCap buckets. */
   widthCap?: number;
+  /** Hard cap on the TOTAL rendered line width (y-label + axis + canvas),
+   * in monospace columns. Charts wider than the chat panel soft-wrap into
+   * garbage; this bounds the whole line so it can't. Default 54 (fits VS
+   * Code's side panel); raise it for full-width terminals. */
+  maxTotalWidth?: number;
   /** Total time span the data covers, in seconds. Drives the x-axis labels. */
   spanSeconds?: number;
 }
@@ -48,16 +53,26 @@ export interface LineChartOpts {
  */
 export function lineChart(vals: number[], opts: LineChartOpts = {}): string | null {
   const widthCap = opts.widthCap ?? 60;
+  const maxTotalWidth = opts.maxTotalWidth ?? 54;
 
   if (vals.length === 0 || vals.every(v => v === 0)) return null;
 
-  // Downsample to widthCap if needed (max-pool over each chunk so spikes
+  // Choose the canvas width so the WHOLE line fits maxTotalWidth. Each
+  // rendered row is `  ` + label + ` ` + connector + canvas, so the
+  // non-canvas overhead is the y-label column (≤16 chars for any
+  // realistic MB/KB-per-hour value) plus 4. Reserving 20 keeps the
+  // total ≤ maxTotalWidth without needing the (circular) zoom decision
+  // up front. Floor at 12 columns so the shape stays legible on a very
+  // narrow panel.
+  const canvasCap = Math.max(12, Math.min(widthCap, maxTotalWidth - 20));
+
+  // Downsample to canvasCap if needed (max-pool over each chunk so spikes
   // aren't smoothed away).
   let series = vals;
-  if (series.length > widthCap) {
-    const step = series.length / widthCap;
+  if (series.length > canvasCap) {
+    const step = series.length / canvasCap;
     const sampled: number[] = [];
-    for (let i = 0; i < widthCap; i++) {
+    for (let i = 0; i < canvasCap; i++) {
       const chunk = series.slice(Math.floor(i * step), Math.floor((i + 1) * step) + 1);
       sampled.push(chunk.length > 0 ? Math.max(...chunk) : 0);
     }
@@ -173,8 +188,7 @@ export function lineChart(vals: number[], opts: LineChartOpts = {}): string | nu
   }
 
   if (zoomed) {
-    const zeroLbl = useKb ? '0 KB/h' : '0 MB/h';
-    lines.push(`  zoomed to data range; floor is ${fmtY(floorV)}, not ${zeroLbl}`);
+    lines.push(`  zoomed: floor ${fmtY(floorV)} (not 0)`);
   }
   return lines.join('\n');
 }
