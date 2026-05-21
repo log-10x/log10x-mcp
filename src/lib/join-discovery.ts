@@ -40,6 +40,44 @@ export const LOG10X_JOIN_CANDIDATES = [
 export type Log10xJoinCandidate = (typeof LOG10X_JOIN_CANDIDATES)[number];
 
 /**
+ * Canonical k8s/service dimensions and the label names that denote them on
+ * either pillar. Used by the name-aware join rescue: in real OTLP→Prometheus
+ * environments the SAME dimension (pod/service/namespace) overlaps only
+ * ~0.4-0.6 by value across the two pillars — pod names churn over a 24h log
+ * window vs the current metric set, and metric coverage is partial — so the
+ * strict value-only 0.7 floor refuses a join that is genuinely the same
+ * dimension. Requiring a NAME match (both labels denote the same canonical
+ * dimension) before lowering the value floor keeps this from degrading into
+ * a coincidental value overlap. Includes the OTLP `*_name` variants
+ * (`k8s_pod_name`, `k8s_namespace_name`, ...) and `k8s_deployment_name`
+ * (a k8s deployment name is the service identifier).
+ */
+const DIMENSION_ALIASES: Record<string, string[]> = {
+  service: [
+    'tenx_user_service', 'service', 'service_name', 'service.name', 'dd.service',
+    'app', 'kube_service', 'k8s_deployment_name', 'k8s_daemonset_name', 'k8s_statefulset_name',
+  ],
+  namespace: ['k8s_namespace', 'namespace', 'kube_namespace', 'k8s_namespace_name'],
+  pod: ['k8s_pod', 'pod', 'kube_pod', 'kubernetes_pod_name', 'pod_name', 'k8s_pod_name'],
+  container: ['k8s_container', 'container', 'kube_container', 'container_name', 'k8s_container_name'],
+};
+
+/** True when both label names denote the same canonical k8s/service
+ * dimension (per DIMENSION_ALIASES) — i.e. a join between them is
+ * structurally meaningful, not a value coincidence. */
+function sameDimensionByName(l10xLabel: string, customerLabel: string): boolean {
+  for (const names of Object.values(DIMENSION_ALIASES)) {
+    if (names.includes(l10xLabel) && names.includes(customerLabel)) return true;
+  }
+  return false;
+}
+
+/** Value-Jaccard floor for accepting a NAME-aliased join. Below the strict
+ * 0.7 value-only floor, but high enough that a same-dimension pair with real
+ * shared values joins while near-disjoint pairs still refuse. */
+const NAME_AWARE_JACCARD_FLOOR = 0.4;
+
+/**
  * Common customer-side label names worth probing first. The discovery
  * pass probes ALL labels from the backend, but preferring these up front
  * keeps the common case fast.
@@ -67,6 +105,12 @@ export interface JoinPair {
   sharedValues: number;
   log10xOnlyValues: number;
   customerOnlyValues: number;
+  /** True when both labels denote the same canonical dimension by name
+   * (DIMENSION_ALIASES). A join accepted on this basis below the strict
+   * value floor is a "name-aware" join — surfaced so downstream tiering /
+   * rendering can note it joined on name + partial value, not strong value
+   * overlap. */
+  nameAliased?: boolean;
 }
 
 export interface JoinDiscoveryResult {
@@ -186,6 +230,29 @@ export async function discoverJoin(
 
   const best = probed[0];
   if (!best || best.jaccard < minimumJaccard) {
+    // Name-aware rescue: a pair whose labels denote the SAME canonical
+    // dimension (alias map) and whose values still overlap above the
+    // lower name-aware floor is a legitimate join — in real OTLP/Prometheus
+    // envs the same dimension overlaps only ~0.4-0.6 across pillars
+    // (pod-name churn, partial metric coverage), which the strict value-only
+    // floor refuses. `probed` is sorted by jaccard desc, so this picks the
+    // strongest same-dimension pair. Requiring the NAME alias is what keeps
+    // this from accepting a coincidental value overlap (e.g. http_code vs
+    // http_response_status_code never qualifies — not the same dimension).
+    const nameAware = probed.find(
+      (p) => p.nameAliased && p.jaccard >= NAME_AWARE_JACCARD_FLOOR
+    );
+    if (nameAware) {
+      return {
+        status: 'joined',
+        joinKey: nameAware,
+        runnerUps: probed.filter((p) => p !== nameAware && p.jaccard >= 0.5).slice(0, 5),
+        probed,
+        probedLabelsLog10x: Array.from(log10xValues.keys()),
+        probedLabelsCustomer: Array.from(customerValues.keys()),
+        cachedForSession: false,
+      };
+    }
     return {
       status: 'no_join_available',
       runnerUps: probed.filter((p) => p.jaccard >= 0.5).slice(0, 5),
@@ -231,6 +298,7 @@ function computeJaccard(
     sharedValues: intersection,
     log10xOnlyValues: l10xSet.size - intersection,
     customerOnlyValues: custSet.size - intersection,
+    nameAliased: sameDimensionByName(l10xLabel, custLabel),
   };
 }
 
