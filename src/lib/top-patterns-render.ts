@@ -283,39 +283,57 @@ export function renderTopPatterns(
   return out.join('\n');
 }
 
-/** Render the forwarder drop-snippet template once at the top of the
- * output (compact mode). Per-card sections reference it by hash. The
- * full XML/INI/YAML body has identical structure for every card in
- * the run — only the hash changes — so showing it 5 times in a 5-card
- * output is wasted real estate. */
+/** Render the shared "act on any pattern" block once at the top of the
+ * output (compact mode, >1 row). Both the find query and the drop
+ * snippet have identical structure for every card — only the hash
+ * changes — so each card just shows its hash and points back here.
+ * Collapsing that 5x repeat is the signal-to-noise win the per-card
+ * form was bleeding. */
 function renderSnippetTemplate(
   forwarder: ForwarderId,
   hashField: string,
   analyzer: string | null
 ): string[] {
   const lines: string[] = [];
+  const ana = analyzer ?? 'the analyzer';
   const snip = dropRuleSnippet(forwarder, '<HASH>', hashField);
+
   lines.push(
-    `**To drop any pattern below at the ${forwarder} forwarder, use this template** ` +
-    '*(swap `<HASH>` for the row\'s hash — shown on each card below)*'
+    `**To act on any pattern below** — each card shows its \`${hashField}\`; swap it in for \`<HASH>\`.`
   );
   lines.push('');
+
+  // Find query (analyzer-specific) — once.
+  lines.push(`_Find the events_ in ${ana}:`);
+  lines.push('```text');
+  if (ana === 'cloudwatch') {
+    lines.push('fields @timestamp, @message');
+    lines.push(`| filter @message like /${hashField}="<HASH>"/`);
+    lines.push('| sort @timestamp desc');
+  } else if (ana === 'splunk') {
+    lines.push(`index=* ${hashField}="<HASH>"`);
+  } else {
+    lines.push(`filter on ${hashField}="<HASH>" in the ${ana} query UI`);
+  }
+  lines.push('```');
+  lines.push('');
+
+  // Drop snippet (forwarder-specific) — once.
+  lines.push(`_Drop them_ at the ${forwarder} forwarder:`);
   lines.push('```' + snip.language);
   lines.push(snip.body);
   lines.push('```');
-  lines.push('');
   lines.push(`- **placement:** ${snip.placementNote}`);
-  lines.push(
-    `- **apply** with the \`kubectl\` steps at the bottom of this output.`
-  );
-  // CloudWatch can't drop at ingest — state it once here (it's
-  // analyzer-level, identical for every pattern) rather than as a
-  // repeated bullet on each card.
-  if (analyzer === 'cloudwatch') {
+  lines.push(`- **apply** with the \`kubectl\` steps at the bottom of this output.`);
+  if (ana === 'cloudwatch') {
     lines.push(
       '- **cloudwatch can\'t drop at ingest** — no content-match filter exists analyzer-side, so this forwarder snippet is the only point that stops cost.'
     );
   }
+  const others = otherForwarders(forwarder);
+  lines.push(
+    `- **keep 1-in-N instead of dropping, or a different forwarder?** ask with the pattern's hash (also: ${others.join(', ')}).`
+  );
   return lines;
 }
 
@@ -578,39 +596,67 @@ function renderCard(
     lines.push('');
   }
 
-  // To find these events in <analyzer> — verb-shaped header so the
-  // reader knows what to do with the snippet at a glance.
   const analyzerName = opts.analyzer ?? 'the analyzer';
-  lines.push(`**To find these events in ${analyzerName}**`);
-  lines.push('');
-  lines.push('```text');
-  if (analyzerName === 'cloudwatch') {
-    lines.push('fields @timestamp, @message');
-    lines.push(`| filter @message like /${hashField}="${r.hash}"/`);
-    lines.push('| sort @timestamp desc');
-  } else if (analyzerName === 'splunk') {
-    lines.push(`index=* ${hashField}="${r.hash}"`);
-  } else {
-    lines.push(`filter on ${hashField}="${r.hash}" in the analyzer query UI`);
-  }
-  lines.push('```');
-  if (opts.analyzerScope) {
-    lines.push('');
-    lines.push(`*paste into the ${analyzerName} query UI, scope: ${opts.analyzerScope}*`);
-  }
-  lines.push('');
 
-  // To drop at <forwarder>. Compact mode references the template at
-  // the top of the output (full snippet shown once). Verbose mode
-  // renders the per-card snippet inline. Action bullets follow.
-  if (opts.forwarder) {
-    const snip = dropRuleSnippet(opts.forwarder, r.hash, hashField);
-    const otherList = otherForwarders(opts.forwarder);
-    const exampleAlt = otherList[0];
-    const restAlts = otherList.slice(1).join(', ');
-    lines.push(`**To drop at the ${opts.forwarder} forwarder**`);
+  // Source-fix signal — when the pattern is an error-severity loop or a
+  // debug-verbosity dump, dropping the logs at the forwarder stops the
+  // cost but hides a real failure (or pays to mute output that could be
+  // turned off at the source). Heuristic from severity + volume only;
+  // the reader is pointed at the example event for the actual cause, so
+  // we name no root cause we can't see.
+  const sevUpper = (r.severity || '').toUpperCase();
+  const isErrorish =
+    sevUpper === 'ERROR' || sevUpper === 'WARN' || sevUpper === 'CRITICAL';
+  const isFailureLoop = isErrorish && r.events >= 100;
+  const isDebugDump = sevUpper === 'DEBUG';
+  if (isFailureLoop) {
+    lines.push(
+      '> **Error loop, not steady telemetry.** Dropping the logs stops the cost but hides the failure. Fix it at the source (see the example event), or investigate before you suppress.'
+    );
     lines.push('');
-    if (verbose) {
+  } else if (isDebugDump) {
+    lines.push(
+      "> **Debug-level output.** If you don't need debug verbosity here, turn it down at the source instead of paying to drop it."
+    );
+    lines.push('');
+  }
+
+  // Find + drop. Compact (templateShown): both live once at the top of
+  // the output, so the card carries only its hash. Otherwise (verbose,
+  // single-card, or forwarder not detected): full per-card form so the
+  // card stands alone.
+  if (templateShown) {
+    lines.push(
+      `**hash** \`${r.hash}\` — swap into the find query + drop template at the top.`
+    );
+    lines.push('');
+  } else {
+    lines.push(`**To find these events in ${analyzerName}**`);
+    lines.push('');
+    lines.push('```text');
+    if (analyzerName === 'cloudwatch') {
+      lines.push('fields @timestamp, @message');
+      lines.push(`| filter @message like /${hashField}="${r.hash}"/`);
+      lines.push('| sort @timestamp desc');
+    } else if (analyzerName === 'splunk') {
+      lines.push(`index=* ${hashField}="${r.hash}"`);
+    } else {
+      lines.push(`filter on ${hashField}="${r.hash}" in the analyzer query UI`);
+    }
+    lines.push('```');
+    if (opts.analyzerScope) {
+      lines.push('');
+      lines.push(`*paste into the ${analyzerName} query UI, scope: ${opts.analyzerScope}*`);
+    }
+    lines.push('');
+
+    if (opts.forwarder) {
+      const snip = dropRuleSnippet(opts.forwarder, r.hash, hashField);
+      const otherList = otherForwarders(opts.forwarder);
+      const exampleAlt = otherList[0];
+      const restAlts = otherList.slice(1).join(', ');
+      lines.push(`**To drop at the ${opts.forwarder} forwarder**`);
+      lines.push('');
       lines.push('```' + snip.language);
       lines.push(snip.body);
       lines.push('```');
@@ -625,32 +671,20 @@ function renderCard(
       lines.push(
         `- **using a different forwarder?** ask: \`show me the ${exampleAlt} syntax for hash ${r.hash}\` (also: ${restAlts})`
       );
-    } else {
-      // Compact: just the hash + one action bullet. The reader uses
-      // the template at the top of the output, swapping <HASH> for
-      // the value below.
-      lines.push(`Apply the template above with hash = \`${r.hash}\`.`);
+      if (analyzerName === 'cloudwatch') {
+        lines.push(
+          '- **cloudwatch-side drop:** unavailable — cloudwatch has no drop-at-ingest filter for content matches. The forwarder snippet above is the only point that stops cost.'
+        );
+      }
       lines.push('');
-      lines.push(
-        `- **keep 1-in-N instead of drop-all?** ask: \`show me the ${opts.forwarder} sample syntax for hash ${r.hash}\``
-      );
-      lines.push(
-        `- **different forwarder?** ask: \`show me the ${exampleAlt} syntax for hash ${r.hash}\` *(also: ${restAlts})*`
-      );
+    } else {
+      lines.push('**To drop this pattern**');
+      lines.push('');
+      lines.push(`forwarder not detected. Filter on \`${hashField}="${r.hash}"\` using the forwarder's drop syntax.`);
+      lines.push('');
+      lines.push('→ try `log10x_pattern_mitigate` for the full mitigation menu.');
+      lines.push('');
     }
-    if (analyzerName === 'cloudwatch' && !templateShown) {
-      lines.push(
-        '- **cloudwatch-side drop:** unavailable — cloudwatch has no drop-at-ingest filter for content matches. The forwarder snippet above is the only point that stops cost.'
-      );
-    }
-    lines.push('');
-  } else {
-    lines.push('**To drop this pattern**');
-    lines.push('');
-    lines.push(`forwarder not detected. Filter on \`${hashField}="${r.hash}"\` using the forwarder's drop syntax.`);
-    lines.push('');
-    lines.push('→ try `log10x_pattern_mitigate` for the full mitigation menu.');
-    lines.push('');
   }
 
   // Analyzer-side drop. Three shapes:
@@ -726,16 +760,22 @@ function renderCard(
     }
   }
 
-  // "investigate" — heavyweight RCA. Gated to acute/new cards on
-  // ERROR/WARN/CRITICAL severity. Outside that, investigate answers
-  // a different question than what the Reader is asking at card-time.
-  const sevUpper = (r.severity || '').toUpperCase();
+  // "investigate" — heavyweight RCA. Fires for error-severity spikes
+  // (ACUTE/NEW) and for sustained error loops (the source-fix note
+  // above tells those readers to "investigate before you suppress", so
+  // the CTA must be here for them too). sevUpper / isErrorish are
+  // computed above.
   const investigateApplies =
-    (r.badge === 'ACUTE' || r.badge === 'NEW') &&
-    (sevUpper === 'ERROR' || sevUpper === 'WARN' || sevUpper === 'CRITICAL');
+    isErrorish && (r.badge === 'ACUTE' || r.badge === 'NEW' || r.events >= 100);
   if (investigateApplies || verbose) {
+    const subject =
+      r.badge === 'ACUTE' || r.badge === 'NEW'
+        ? `the ${r.badge.toLowerCase()} change in `
+        : isErrorish
+          ? 'the error loop in '
+          : '';
     gatedCtas.push(
-      `- **full root-cause analysis?** ask: \`investigate the ${r.badge.toLowerCase()} change in hash ${r.hash}\``
+      `- **full root-cause analysis?** ask: \`investigate ${subject}hash ${r.hash}\``
     );
   }
 
