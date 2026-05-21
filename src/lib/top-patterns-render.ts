@@ -128,6 +128,21 @@ export function renderTopPatterns(
   const out: string[] = [];
   const hashField = opts.hashField ?? 'tenx_hash';
   const verbose = opts.verbose ?? false;
+  // The drop-snippet template renders once at the top in compact mode
+  // (>1 row, forwarder known); each card then references it. When it is
+  // NOT shown, analyzer-level facts (e.g. "cloudwatch can't drop at
+  // ingest") fall back to per-card so the fact still appears somewhere.
+  const templateShown = !verbose && opts.forwarder !== null && rows.length > 1;
+  // Dependency check: when EVERY shown row came back with zero matches,
+  // collapse the identical per-card "0 references" line into one
+  // env-level statement (cuts the repetition flagged on the
+  // signal-to-noise axis). Cards WITH matches still render per-card —
+  // those are signal, not boilerplate.
+  const depsChecked = rows.filter(r => r.deps && !r.deps.error);
+  const depsAllZero =
+    rows.length > 0 &&
+    depsChecked.length === rows.length &&
+    depsChecked.every(r => r.deps!.matches.length === 0);
 
   // Health banner (pinned at the very top when present). When the
   // engine metric tier is degraded, the Reader needs to know BEFORE
@@ -152,6 +167,35 @@ export function renderTopPatterns(
   );
   out.push('');
 
+  // Aggregate-savings headline — the single most decision-sealing
+  // number, and the one a vanilla-SIEM SRE has to sum by hand: "act on
+  // this whole list and recover $X/mo, Y% of scanned spend." Bytes-pct
+  // equals spend-pct (cost is linear in bytes). "up to" because drop
+  // recovers all, compact/sample less — each card says which. Sits
+  // above the service rollup so the punchline ("how much is on the
+  // table") lands before the structural detail ("where it concentrates").
+  if (rows.length > 0) {
+    const shownMonthly = rows.reduce((s, r) => s + r.costPerMonth, 0);
+    const shownBytes = rows.reduce((s, r) => s + r.bytes, 0);
+    const dollars =
+      shownMonthly >= 10 ? `$${Math.round(shownMonthly)}` : fmtDollar(shownMonthly);
+    const pct =
+      opts.totalBytesInScope > 0
+        ? ` (${Math.round((shownBytes / opts.totalBytesInScope) * 100)}% of scanned spend)`
+        : '';
+    out.push(`**Act on these ${rows.length} → cut up to ${dollars}/mo${pct}.**`);
+    out.push('');
+    // Green light for dropping: when nothing in the analyzer references
+    // any shown hash, say so once here instead of repeating "0
+    // references" on every card.
+    if (depsAllZero) {
+      out.push(
+        `_No saved-search, alert, or dashboard in ${opts.analyzer ?? 'the analyzer'} references any of these ${rows.length} hashes (matched on hash; name-based references not checked)._`
+      );
+      out.push('');
+    }
+  }
+
   // Cost-center rollup — "where is the money". This is the headline a
   // vanilla-SIEM SRE has to hand-roll (stats by service); putting it
   // ABOVE the per-pattern list answers "which service is the lever"
@@ -173,7 +217,7 @@ export function renderTopPatterns(
   // card saves ~8 lines × N cards. Verbose mode keeps per-card
   // snippets so each card is self-contained for one-pattern dives.
   if (!verbose && opts.forwarder && rows.length > 1) {
-    out.push(...renderSnippetTemplate(opts.forwarder, hashField));
+    out.push(...renderSnippetTemplate(opts.forwarder, hashField, opts.analyzer));
     out.push('');
   }
 
@@ -189,7 +233,7 @@ export function renderTopPatterns(
   for (const r of rows) {
     out.push('---');
     out.push('');
-    out.push(...renderCard(r, opts, hashField, verbose));
+    out.push(...renderCard(r, opts, hashField, verbose, templateShown, depsAllZero));
   }
 
   // Footer CTAs — the post-scan questions the Reader has after
@@ -200,7 +244,7 @@ export function renderTopPatterns(
   out.push('**For the full set**');
   out.push('');
   out.push(
-    `- **aggregate savings if you act on the top ${rows.length}?** ask: \`show me projected savings for the top ${rows.length}\``
+    `- **exact savings per mitigation** (drop vs compact vs sample, per pattern)? ask: \`show me projected savings for the top ${rows.length}\``
   );
   out.push(
     '- **what\'s growing vs stable across the whole env?** ask: `show me cost drivers over the last 7d` *(point-in-time rank vs growth-delta rank are different questions)*'
@@ -246,7 +290,8 @@ export function renderTopPatterns(
  * output is wasted real estate. */
 function renderSnippetTemplate(
   forwarder: ForwarderId,
-  hashField: string
+  hashField: string,
+  analyzer: string | null
 ): string[] {
   const lines: string[] = [];
   const snip = dropRuleSnippet(forwarder, '<HASH>', hashField);
@@ -263,6 +308,14 @@ function renderSnippetTemplate(
   lines.push(
     `- **apply** with the \`kubectl\` steps at the bottom of this output.`
   );
+  // CloudWatch can't drop at ingest — state it once here (it's
+  // analyzer-level, identical for every pattern) rather than as a
+  // repeated bullet on each card.
+  if (analyzer === 'cloudwatch') {
+    lines.push(
+      '- **cloudwatch can\'t drop at ingest** — no content-match filter exists analyzer-side, so this forwarder snippet is the only point that stops cost.'
+    );
+  }
   return lines;
 }
 
@@ -400,7 +453,15 @@ function renderCard(
   r: TopPatternRow,
   opts: TopPatternsRenderOpts,
   hashField: string,
-  verbose: boolean
+  verbose: boolean,
+  /** True when the top-of-output snippet template is shown (compact,
+   * >1 row). Tells the card to skip analyzer-level facts already stated
+   * there (e.g. "cloudwatch can't drop at ingest"). */
+  templateShown: boolean,
+  /** True when every shown row had zero dependency matches and the
+   * env-level "nothing references these" line was already emitted at
+   * the top — so the card skips its own "0 references" line. */
+  suppressZeroDeps: boolean
 ): string[] {
   const lines: string[] = [];
   // Card header gets a longer descriptor budget (80 chars) than the
@@ -577,7 +638,7 @@ function renderCard(
         `- **different forwarder?** ask: \`show me the ${exampleAlt} syntax for hash ${r.hash}\` *(also: ${restAlts})*`
       );
     }
-    if (analyzerName === 'cloudwatch') {
+    if (analyzerName === 'cloudwatch' && !templateShown) {
       lines.push(
         '- **cloudwatch-side drop:** unavailable — cloudwatch has no drop-at-ingest filter for content matches. The forwarder snippet above is the only point that stops cost.'
       );
@@ -639,7 +700,7 @@ function renderCard(
         `*token-AND match on the hash; saved-searches that reference this pattern by name only will not appear here.*`
       );
       lines.push('');
-    } else {
+    } else if (!suppressZeroDeps) {
       lines.push(
         `**references found in ${analyzerName}:** 0 *(token-AND match on the hash across saved searches, alerts, dashboards; references by pattern-name not checked)*`
       );

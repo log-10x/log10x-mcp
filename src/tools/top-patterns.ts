@@ -332,7 +332,7 @@ export async function executeTopPatterns(
   // --- Phase 5: Agent-only routing block ---
   const lines: string[] = [rendered, ''];
   lines.push(
-    `_Current rank by cost, point-in-time. For growth/deltas, use log10x_cost_drivers._`
+    `_Ranked by current cost, not by growth. To see what's rising or fading over time, ask for cost drivers over a longer window._`
   );
   lines.push(
     agentOnly(
