@@ -165,6 +165,9 @@ export function renderTopPatterns(
   out.push(
     `**total in scope:** ${fmtBytes(opts.totalBytesInScope)} · ${fmtDollar(opts.totalCostPerHour)}/h · ${rows.length} of ${opts.patternCountTotal ?? '?'} patterns`
   );
+  out.push(
+    `_$/mo = volume × $${(opts.costPerGb ?? 1).toFixed(2)}/GB; the rate is assumed, not measured from your bill._`
+  );
   out.push('');
 
   // Aggregate-savings headline — the single most decision-sealing
@@ -177,8 +180,7 @@ export function renderTopPatterns(
   if (rows.length > 0) {
     const shownMonthly = rows.reduce((s, r) => s + r.costPerMonth, 0);
     const shownBytes = rows.reduce((s, r) => s + r.bytes, 0);
-    const dollars =
-      shownMonthly >= 10 ? `$${Math.round(shownMonthly)}` : fmtDollar(shownMonthly);
+    const dollars = fmtDollarMo(shownMonthly);
     const pct =
       opts.totalBytesInScope > 0
         ? ` (${Math.round((shownBytes / opts.totalBytesInScope) * 100)}% of scanned spend)`
@@ -437,7 +439,7 @@ function renderList(rows: TopPatternRow[]): string {
     const svc = r.service || 'unattributed';
     // Monthly cost as the headline. /h forces mental math; /mo
     // answers the Reader's "is this worth my time" question directly.
-    const cost = `${fmtDollar(r.costPerMonth)}/mo`;
+    const cost = `${fmtDollarMo(r.costPerMonth)}/mo`;
     const bytes = fmtBytes(r.bytes);
     const events = `${fmtCount(r.events)} events`;
     // Use BadgeInfo when available (carries ratio + age for meaningful
@@ -499,7 +501,7 @@ function renderCard(
     ? `first seen ${fmtAge(r.firstSeenAgeSeconds)}`
     : 'first seen unknown';
   lines.push(
-    `**${fmtDollar(r.costPerHour)}/h** · ${fmtDollar(r.costPerMonth)}/mo · ${fmtBytes(r.bytes)} · ${fmtCount(r.events)} events · ${ageStr}`
+    `**${fmtDollar(r.costPerHour)}/h** · ${fmtDollarMo(r.costPerMonth)}/mo · ${fmtBytes(r.bytes)} · ${fmtCount(r.events)} events · ${ageStr}`
   );
   lines.push('');
 
@@ -820,6 +822,15 @@ function fmtCount(n: number): string {
 function fmtDollar(d: number): string {
   if (d >= 0.01) return `$${d.toFixed(2)}`;
   return `$${d.toFixed(4)}`;
+}
+
+/** Monthly-cost formatter. Whole dollars at >= $10 — the cents there are
+ * false precision ($/mo = window volume × an assumed $/GB rate, not a
+ * measured bill). Below $10, keep fmtDollar so small patterns stay
+ * distinguishable. */
+function fmtDollarMo(d: number): string {
+  if (d >= 10) return `$${Math.round(d)}`;
+  return fmtDollar(d);
 }
 
 function truncate(s: string, max: number): string {
