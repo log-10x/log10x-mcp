@@ -51,13 +51,21 @@ export function patternDescriptor(
     // All tokens were prefix-skip; fall back to the raw head
     return tokens.slice(0, 5).join(' ').slice(0, maxChars);
   }
-  // Pack tokens until we'd exceed maxChars
+  // Pack tokens until we'd exceed maxChars, deduping repeats. Engine
+  // names for package-path patterns repeat tokens (the otel collector's
+  // Go path appears twice; payment's `runtime`/`nodejs`/`node modules`
+  // recur) — skipping already-seen tokens collapses the soup into a
+  // readable sequence without inventing content.
   const out: string[] = [];
+  const seen = new Set<string>();
   let len = 0;
   for (const t of meaningful) {
+    const key = t.toLowerCase();
+    if (seen.has(key)) continue;
     const newLen = len + t.length + (out.length > 0 ? 1 : 0);
     if (newLen > maxChars) break;
     out.push(t);
+    seen.add(key);
     len = newLen;
   }
   if (out.length === 0) out.push(...meaningful.slice(0, 3));

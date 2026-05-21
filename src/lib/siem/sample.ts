@@ -298,41 +298,57 @@ export async function fetchEventsByHashes(
     const sel = await resolveSiemSelection({});
     if (sel.kind !== 'resolved') return out;
     const conn = getConnector(sel.id);
-    await Promise.all(
-      uniq.map(async ({ hash: h, severity, service }) => {
-        try {
-          const cwLike = sel.id === 'cloudwatch';
-          const q = cwLike || !severity
-            ? buildHashQuery(sel.id, h)
-            : buildHashQuery(sel.id, h, service, severity);
-          const res = await Promise.race([
-            conn.pullEvents({
-              window: opts.window ?? '1h',
-              scope: opts.scope,
-              query: q,
-              targetEventCount: target,
-              maxPullMinutes: 0.5,
-              // Single bucket = fast recent-window pull. The 24-bucket
-              // representative sampling makes 100+ CW API calls across N
-              // parallel hashes and blows past PER_HASH_BATCH_MS, dropping
-              // most samples. A single bucket returns ~250 recent events
-              // in ~3s. We trade time-representative spread for reliable
-              // retrieval — the right call for descriptors + field-
-              // variation, which only need a recent sample.
-              buckets: 1,
-              onProgress: () => {},
-            }),
-            new Promise<null>(r => setTimeout(() => r(null), PER_HASH_BATCH_MS)),
-          ]);
-          const events = (res as { events?: unknown[] } | null)?.events ?? [];
-          if (events.length > 0) {
-            out.set(h, events.map(parseEvent));
-          }
-        } catch {
-          /* skip this hash */
+    const cwLike = sel.id === 'cloudwatch';
+
+    // Fetch one hash. Returns parsed events (possibly empty). Empty can
+    // mean genuinely-no-events OR a transient timeout/slow CW query.
+    const fetchOne = async ({ hash: h, severity, service }: HashSpec): Promise<void> => {
+      try {
+        const q = cwLike || !severity
+          ? buildHashQuery(sel.id, h)
+          : buildHashQuery(sel.id, h, service, severity);
+        const res = await Promise.race([
+          conn.pullEvents({
+            window: opts.window ?? '1h',
+            scope: opts.scope,
+            query: q,
+            targetEventCount: target,
+            maxPullMinutes: 0.5,
+            // Single bucket = fast recent-window pull. The 24-bucket
+            // representative sampling makes 100+ CW API calls across N
+            // parallel hashes and blows past PER_HASH_BATCH_MS, dropping
+            // most samples. A single bucket returns ~250 recent events
+            // in ~3s. We trade time-representative spread for reliable
+            // retrieval — the right call for descriptors + field-
+            // variation, which only need a recent sample.
+            buckets: 1,
+            onProgress: () => {},
+          }),
+          new Promise<null>(r => setTimeout(() => r(null), PER_HASH_BATCH_MS)),
+        ]);
+        const events = (res as { events?: unknown[] } | null)?.events ?? [];
+        if (events.length > 0) {
+          out.set(h, events.map(parseEvent));
         }
-      })
-    );
+      } catch {
+        /* skip this hash */
+      }
+    };
+
+    // First pass — all hashes in parallel.
+    await Promise.all(uniq.map(fetchOne));
+
+    // Retry pass — CloudWatch FilterLogEvents latency is variable; under
+    // parallel load a hash occasionally hits the per-hash timeout and
+    // returns empty even though events exist (measured ~1-in-5 rows).
+    // Retry the empties once. The retry set is small (usually 0-1), and
+    // a warm second attempt almost always succeeds — this is what keeps
+    // the descriptor as the readable sample-mined error text instead of
+    // falling back to engine-name token soup.
+    const missed = uniq.filter(s => !out.has(s.hash));
+    if (missed.length > 0 && missed.length < uniq.length) {
+      await Promise.all(missed.map(fetchOne));
+    }
   } catch {
     /* no SIEM / discovery error */
   }
