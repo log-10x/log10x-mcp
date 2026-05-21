@@ -312,6 +312,14 @@ export async function fetchEventsByHashes(
               query: q,
               targetEventCount: target,
               maxPullMinutes: 0.5,
+              // Single bucket = fast recent-window pull. The 24-bucket
+              // representative sampling makes 100+ CW API calls across N
+              // parallel hashes and blows past PER_HASH_BATCH_MS, dropping
+              // most samples. A single bucket returns ~250 recent events
+              // in ~3s. We trade time-representative spread for reliable
+              // retrieval — the right call for descriptors + field-
+              // variation, which only need a recent sample.
+              buckets: 1,
               onProgress: () => {},
             }),
             new Promise<null>(r => setTimeout(() => r(null), PER_HASH_BATCH_MS)),

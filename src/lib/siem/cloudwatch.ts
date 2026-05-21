@@ -175,7 +175,10 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
   // the parent window with per-run RNG. For each bucket, iterate the
   // resolved log groups; bucketCap limits the total events across all
   // groups within one bucket so a single chatty group can't monopolize.
-  const BUCKET_COUNT = 24;
+  // Bucket count is caller-tunable. Default 24 for time-representative
+  // sampling; a low value (e.g. 1) collapses to a fast recent-window
+  // pull for callers that just need a quick sample (top_patterns).
+  const BUCKET_COUNT = Math.max(1, opts.buckets ?? 24);
   const buckets = randomTimeBuckets(fromMs, toMs, BUCKET_COUNT);
   const bucketCap = perBucketCap(opts.targetEventCount, BUCKET_COUNT);
   const queryUsed = `${logGroups.join(',')}${filterPattern ? ` | ${filterPattern}` : ''}`;

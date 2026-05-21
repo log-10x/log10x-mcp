@@ -47,6 +47,15 @@ export interface PullEventsOptions {
   maxPullMinutes: number;
   onProgress: (p: { step: string; pct: number; eventsFetched: number }) => void;
   schemaOverride?: SiemSchemaOverride;
+  /** Number of stratified time-buckets to scatter the sample across.
+   * Default (when undefined) is the connector's representative-sampling
+   * count (CloudWatch: 24). A low value (1) collapses to a fast
+   * recent-window pull — appropriate when the caller wants a quick
+   * sample (e.g. log10x_top_patterns descriptors + field-variation)
+   * rather than time-representative coverage. Trades temporal spread
+   * for speed: 24 parallel-hash buckets blow past the per-hash timeout;
+   * 1 bucket returns ~250 events in a single ~3s call. */
+  buckets?: number;
 }
 
 export type PullStopReason = 'target_reached' | 'time_exhausted' | 'source_exhausted' | 'error';
