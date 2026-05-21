@@ -498,11 +498,21 @@ async function generateCandidateNames(
   const DIAG_HINTS = ['restart', 'cpu', 'memory', 'mem_', 'error', 'fail', 'latency', 'duration', 'request', 'saturation', 'throttle', 'oom', 'ready', 'available', 'pending', 'queue', 'drop', 'connection'];
   const diag = (n: string): number => (DIAG_HINTS.some((h) => n.toLowerCase().includes(h)) ? 0 : 1);
   metricNames.sort((a, b) => diag(a) - diag(b));
+  // Counter-named metrics (_total/_count/_sum/_bucket) are cumulative —
+  // correlating their RAW monotonic values spuriously matches anything
+  // that's higher-later, so rate() them (matching how the anchor pattern
+  // series is rated). Gauges (memory, ratios, queue depth) stay raw.
+  const rateWin = durationLabel(Math.max(opts.window.step, 60));
+  const wrap = (n: string, sel: string): string =>
+    /(_total|_count|_sum|_bucket)$/.test(n)
+      ? `sum(rate(${n}{${sel}}[${rateWin}]))`
+      : `sum(${n}{${sel}})`;
+
   const results: CandidateNameAndLabels[] = [];
   for (const name of metricNames.slice(0, 60)) {
     const variants: string[] = [];
-    if (svcLabel) variants.push(`sum(${name}{${nsPrefix}${svcLabel}="${escape(svcVal)}"})`);
-    if (podLabel) variants.push(`sum(${name}{${nsPrefix}${podLabel}=~"${svcRe}-.*"})`);
+    if (svcLabel) variants.push(wrap(name, `${nsPrefix}${svcLabel}="${escape(svcVal)}"`));
+    if (podLabel) variants.push(wrap(name, `${nsPrefix}${podLabel}=~"${svcRe}-.*"`));
     if (variants.length === 0) continue;
     // Real labels for honest structural validation (service + namespace the
     // candidate is scoped to). Pod-labeled metrics are still the service's
