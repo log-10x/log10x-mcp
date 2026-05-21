@@ -99,10 +99,14 @@ export interface CrossPillarResult {
  * enrichment module. See the v1.1 spec's "Enrichment labels" section.
  */
 export const STRUCTURAL_ALIASES: Array<[string[], string[]]> = [
-  [['service', 'service_name', 'service.name', 'dd.service', 'app', 'kube_service'], ['tenx_user_service']],
-  [['namespace', 'kube_namespace', 'k8s_namespace'], ['k8s_namespace']],
-  [['pod', 'kube_pod', 'kubernetes_pod_name', 'k8s_pod', 'pod_name'], ['k8s_pod']],
-  [['container', 'kube_container', 'container_name', 'k8s_container'], ['k8s_container']],
+  // Customer-side aliases include the OTLP→Prometheus promoted names
+  // (`k8s_deployment_name`, `k8s_namespace_name`, `k8s_pod_name`,
+  // `k8s_container_name`) that real OTLP metric stores emit — without them,
+  // structural validation scored a genuine k8s match as coincidence.
+  [['service', 'service_name', 'service.name', 'dd.service', 'app', 'kube_service', 'k8s_deployment_name', 'k8s_daemonset_name', 'k8s_statefulset_name'], ['tenx_user_service']],
+  [['namespace', 'kube_namespace', 'k8s_namespace', 'k8s_namespace_name'], ['k8s_namespace']],
+  [['pod', 'kube_pod', 'kubernetes_pod_name', 'k8s_pod', 'pod_name', 'k8s_pod_name'], ['k8s_pod']],
+  [['container', 'kube_container', 'container_name', 'k8s_container', 'k8s_container_name'], ['k8s_container']],
 ];
 
 export interface CorrelateOptions {
@@ -179,6 +183,17 @@ export async function runCrossPillarCorrelation(
     } catch {
       continue;
     }
+
+    // Drop candidates that returned NO series (empty). With the multi-
+    // granularity candidate gen, a metric scoped to the anchor's service
+    // that belongs to a different service (e.g. redis_* under
+    // k8s_deployment_name="payment") returns nothing — an empty metric
+    // can't be a co-mover. Without this, the synthetic candidate labels
+    // would still pass structural validation and pollute the confirmed
+    // tier with metrics that have no data for this entity. (A genuinely
+    // flat-but-present series has length > 0 and is still rescued by the
+    // structural-passthrough path below.)
+    if (candidateSeries.length === 0) continue;
 
     const { r, lagSeconds, lagTightness } = computeTemporalCorrelation(
       anchorSeries,
@@ -403,28 +418,102 @@ async function generateCandidateNames(
     }
   }
 
-  // Candidates are customer metrics with the join label value matching the anchor's metadata.
-  // We enumerate candidate metric names via the backend's label values for __name__,
-  // then filter to metrics that carry the join key label. This is potentially expensive
-  // on large backends; the topk narrowing happens via the temporal ranker downstream.
-  const candidateSet = new Set<string>();
+  // ── log10x_pattern anchor → customer-metric candidates ──
+  //
+  // Real OTLP/Prometheus metric stores label at MIXED granularity: the
+  // k8s_cluster receiver tags metrics with k8s_deployment_name, while
+  // kubeletstats cpu/mem/restart metrics carry only k8s_pod_name. The old
+  // candidate gen scoped EVERY metric by the single service-level join
+  // label, so the pod-labeled diagnostic metrics — the ones that actually
+  // move — matched nothing and never surfaced. Instead: enumerate the real
+  // metric universe in the anchor's namespace, and scope each metric by the
+  // service (deployment/service_name) OR the pod-name prefix, whichever it
+  // carries, via a PromQL `or`.
+  const svcVal = resolvedAnchorLabels?.['tenx_user_service'];
+  const nsVal = resolvedAnchorLabels?.['k8s_namespace'];
+
+  let custLabels: Set<string>;
   try {
-    const names = await opts.backend.listLabelValues('__name__');
-    for (const n of names) {
-      if (n.startsWith('log10x_')) continue;
-      candidateSet.add(n);
-    }
+    custLabels = new Set(await opts.backend.listLabels());
   } catch {
-    return [];
+    custLabels = new Set();
   }
-  // For each candidate metric name, build a PromQL expression scoped to the join label value.
-  const scopeLabel = opts.joinKey.customerSide;
+  const present = (cands: string[]): string | undefined => cands.find((c) => c && custLabels.has(c));
+  const nsLabel = present(['k8s_namespace_name', 'k8s_namespace', 'namespace', 'kube_namespace']);
+  const svcLabel = present([opts.joinKey.customerSide, 'k8s_deployment_name', 'service_name', 'app']);
+  const podLabel = present(['k8s_pod_name', 'k8s_pod', 'pod', 'pod_name']);
+
+  // Legacy single-join-label scoping — kept for non-k8s backends (or when
+  // we can't resolve the anchor's service / k8s entity labels).
+  const legacy = async (): Promise<CandidateNameAndLabels[]> => {
+    try {
+      const names = await opts.backend.listLabelValues('__name__');
+      const scopeLabel = opts.joinKey.customerSide;
+      return names
+        .filter((n) => !n.startsWith('log10x_'))
+        .slice(0, 100)
+        .map((metricName) => ({
+          name: `${metricName}{${scopeLabel}="${escape(joinValue)}"}`,
+          labels: { [scopeLabel]: joinValue, __name__: metricName },
+        }));
+    } catch {
+      return [];
+    }
+  };
+  if (!svcVal || (!svcLabel && !podLabel)) return legacy();
+
+  const nsSel = nsVal && nsLabel ? `${nsLabel}="${escape(nsVal)}"` : '';
+  const nsPrefix = nsSel ? `${nsSel},` : '';
+  // Regex-escape the service value for the pod-prefix match (keep the `-.*`).
+  const svcRe = svcVal.replace(/[.^$*+?()[\]{}|\\]/g, '\\$&');
+
+  // Enumerate the metric names that ACTUALLY have data for the anchor's
+  // SERVICE — scoped by the service/deployment label AND the pod-name
+  // prefix (mixed granularity), unioned. Enumerating the whole namespace
+  // and scoping per-metric afterward wasted the candidate budget on other
+  // services' metrics (which return empty when scoped to this service, so
+  // the budget filled with redis/postgres/jvm before reaching the anchor's
+  // own metrics). Scoping the enumeration guarantees every candidate has
+  // data for this entity.
+  const nameSet = new Set<string>();
+  const enumQueries: string[] = [];
+  if (svcLabel) enumQueries.push(`group by (__name__) ({${nsPrefix}${svcLabel}="${escape(svcVal)}"})`);
+  if (podLabel) enumQueries.push(`group by (__name__) ({${nsPrefix}${podLabel}=~"${svcRe}-.*"})`);
+  for (const q of enumQueries) {
+    try {
+      const res = await opts.backend.queryInstant(q);
+      for (const s of res.data?.result ?? []) {
+        const n = s.metric?.['__name__'];
+        if (n && !n.startsWith('log10x_')) nameSet.add(n);
+      }
+    } catch {
+      // Skip this granularity; the other may still yield names.
+    }
+  }
+  let metricNames = Array.from(nameSet);
+  if (metricNames.length === 0) return legacy();
+
+  // Diagnostic metrics first, so the downstream candidate cap evaluates the
+  // ones most likely to explain an incident before generic ones.
+  const DIAG_HINTS = ['restart', 'cpu', 'memory', 'mem_', 'error', 'fail', 'latency', 'duration', 'request', 'saturation', 'throttle', 'oom', 'ready', 'available', 'pending', 'queue', 'drop', 'connection'];
+  const diag = (n: string): number => (DIAG_HINTS.some((h) => n.toLowerCase().includes(h)) ? 0 : 1);
+  metricNames.sort((a, b) => diag(a) - diag(b));
   const results: CandidateNameAndLabels[] = [];
-  for (const metricName of Array.from(candidateSet).slice(0, 100)) {
-    const expr = `${metricName}{${scopeLabel}="${escape(joinValue)}"}`;
-    results.push({ name: expr, labels: { [scopeLabel]: joinValue, __name__: metricName } });
+  for (const name of metricNames.slice(0, 60)) {
+    const variants: string[] = [];
+    if (svcLabel) variants.push(`sum(${name}{${nsPrefix}${svcLabel}="${escape(svcVal)}"})`);
+    if (podLabel) variants.push(`sum(${name}{${nsPrefix}${podLabel}=~"${svcRe}-.*"})`);
+    if (variants.length === 0) continue;
+    // Real labels for honest structural validation (service + namespace the
+    // candidate is scoped to). Pod-labeled metrics are still the service's
+    // pods (scoped by the svc-name prefix), so attributing them to the
+    // service is correct.
+    const labels: Record<string, string> = { __name__: name };
+    if (svcLabel) labels[svcLabel] = svcVal;
+    if (nsVal && nsLabel) labels[nsLabel] = nsVal;
+    results.push({ name: variants.join(' or '), labels });
   }
-  return results;
+  return results.length > 0 ? results : legacy();
 }
 
 /**

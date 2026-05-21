@@ -1,0 +1,126 @@
+# Cross-pillar demo test bed — the MISSING metrics sink.
+#
+# The otel-demo collector (otel-collector-agent) is already configured to push
+# all its metrics via OTLP to http://prometheus:9090/api/v1/otlp, but in this
+# stripped demo the `prometheus` service was never deployed (just like the
+# `opensearch` log-export target — which is why the #1 cost pattern is a
+# "dial tcp: lookup opensearch ... no such host" loop). So the collector's
+# rich telemetry — app metrics, hostmetrics, kubeletstats, k8s_cluster, and
+# its own otelcol_exporter_send_failed_* internal metrics — currently goes
+# nowhere queryable.
+#
+# Deploying the prometheus the collector already expects is purely ADDITIVE
+# (no change to the live collector): metrics start landing immediately, giving
+# the MCP's cross-pillar correlation a real backend to join against. The
+# otelcol_exporter_send_failed{exporter=opensearch} metric co-moves with the
+# #1 opensearch log loop by construction (same missing dependency) — the
+# intended cross-pillar test signal.
+#
+# Reachable to the MCP via:  kubectl -n otel-demo port-forward svc/prometheus 9090:9090
+# then  PROMETHEUS_URL=http://localhost:9090  (generic_prom backend).
+#
+# Ephemeral (emptyDir, 6h retention) — a test bed, not durable infra.
+# Cleanup:  kubectl delete -f prometheus.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-cfg
+  namespace: otel-demo
+  labels:
+    app: prometheus
+    managed-by: log10x-cross-pillar-demo
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 30s
+    # No scrape jobs: metrics arrive via the OTLP receiver
+    # (--web.enable-otlp-receiver) from the otel-collector.
+    scrape_configs: []
+    # Promote OTLP resource attributes onto every metric series. By default
+    # the OTLP receiver keeps k8s.*/service.* on `target_info` only, so a
+    # metric like container_memory_usage_bytes carries no k8s label and
+    # cross-pillar can't scope it by namespace/service/pod. Promotion is the
+    # standard production choice for making OTLP metrics queryable by k8s
+    # dimensions — and it's what cross-pillar's structural join needs.
+    otlp:
+      promote_resource_attributes:
+        - service.name
+        - service.namespace
+        - k8s.namespace.name
+        - k8s.pod.name
+        - k8s.container.name
+        - k8s.deployment.name
+        - k8s.daemonset.name
+        - k8s.statefulset.name
+        - k8s.node.name
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: otel-demo
+  labels:
+    app: prometheus
+    managed-by: log10x-cross-pillar-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+        managed-by: log10x-cross-pillar-demo
+    spec:
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v3.1.0
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            - --storage.tsdb.retention.time=6h
+            - --web.enable-otlp-receiver
+            - --web.enable-lifecycle
+          ports:
+            - containerPort: 9090
+              name: http
+          volumeMounts:
+            - name: cfg
+              mountPath: /etc/prometheus
+            - name: data
+              mountPath: /prometheus
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: 9090
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: cfg
+          configMap:
+            name: prometheus-cfg
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: otel-demo
+  labels:
+    app: prometheus
+    managed-by: log10x-cross-pillar-demo
+spec:
+  selector:
+    app: prometheus
+  ports:
+    - name: http
+      port: 9090
+      targetPort: 9090
