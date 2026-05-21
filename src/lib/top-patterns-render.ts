@@ -332,9 +332,12 @@ function renderSnippetTemplate(
       '- **cloudwatch can\'t drop at ingest** — no content-match filter exists analyzer-side, so this forwarder snippet is the only point that stops cost.'
     );
   }
+  lines.push(
+    `- **drop vs compact vs sample:** the snippet above drops. compact keeps every event ~10x smaller (lossless); sample keeps 1-in-N. for either, ask with the pattern's hash.`
+  );
   const others = otherForwarders(forwarder);
   lines.push(
-    `- **keep 1-in-N instead of dropping, or a different forwarder?** ask with the pattern's hash (also: ${others.join(', ')}).`
+    `- **different forwarder?** ask with the pattern's hash (also: ${others.join(', ')}).`
   );
   return lines;
 }
@@ -585,15 +588,16 @@ function renderCard(
       // semantics (compactReducer encodes events to ~10x smaller
       // form, lossless; it does NOT dedupe). The previous "compact
       // keeps one event per combination" was a fabrication.
+      const nVary = r.fieldVar.varying.length;
       lines.push(
-        '→ **drop** stops these events entirely. **compact** encodes every event in ~10x smaller form (same count, lossless). **sample** keeps 1-in-N full-form. Ask: `show me the compact or sample syntax for hash ' + r.hash + '`.'
+        `→ **${nVary} field${nVary > 1 ? 's' : ''} vary** — drop loses those cases; compact or sample keeps them.`
       );
     } else {
       lines.push(
         'every field identical across all sampled events, except per-event timestamps, durations, and IDs.'
       );
       lines.push('');
-      lines.push('→ **drop** is safe — no distinct cases lost.');
+      lines.push('→ **no variants** — dropping loses no distinct cases.');
     }
     lines.push('');
   }
@@ -628,9 +632,7 @@ function renderCard(
   // single-card, or forwarder not detected): full per-card form so the
   // card stands alone.
   if (templateShown) {
-    lines.push(
-      `**hash** \`${r.hash}\` — swap into the find query + drop template at the top.`
-    );
+    lines.push(`**hash** \`${r.hash}\``);
     lines.push('');
   } else {
     lines.push(`**To find these events in ${analyzerName}**`);
