@@ -83,6 +83,13 @@ try {
 
 const env = loadEvalEnv();
 const result = await invokeTool(opts.tool, args, env);
-process.stdout.write(result.text);
-if (!result.text.endsWith('\n')) process.stdout.write('\n');
-if (result.isError) process.exit(1);
+const out = result.text.endsWith('\n') ? result.text : result.text + '\n';
+// Force-exit once stdout is flushed. The AWS SDK / HTTP keep-alive
+// agent leaves sockets open after the tool returns, which keeps Node's
+// event loop alive ~10-15s before it exits naturally. The result is
+// already computed; we don't need to wait for socket drain. This is a
+// CLI-only concern — the long-lived MCP server never exits between
+// calls. The callback guarantees the write reaches the OS before exit
+// (process.stdout is async when piped, so a bare process.exit() could
+// truncate output).
+process.stdout.write(out, () => process.exit(result.isError ? 1 : 0));
