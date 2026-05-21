@@ -126,6 +126,31 @@ export interface CorrelateOptions {
 const DEFAULT_LOG10X_METRIC = 'all_events_summaryVolume_total';
 const LAG_OFFSETS_SECONDS = [-300, -120, -60, -30, 0, 30, 60, 120, 300];
 
+// #8 — volume significance. A candidate must show real relative movement
+// over the window to count as a co-mover; Pearson alone scores shape, not
+// magnitude, so a flat metric with tiny correlated drift would otherwise
+// be "confirmed". MOVED_FLOOR is the minimum (max-min)/mean a series needs
+// to count as having moved; VOLUME_FULL_AT is where the volume sub-score
+// saturates at 1.0.
+const MOVED_FLOOR = 0.1;
+const VOLUME_FULL_AT = 0.3;
+
+/** Relative spread of a series: (max - min) / |mean|. ~0 for a flat metric,
+ * larger for one that ramped/spiked. Used as the magnitude-of-movement
+ * signal that Pearson discards. */
+function relativeSpread(series: number[]): number {
+  if (series.length < 2) return 0;
+  let max = -Infinity, min = Infinity, sum = 0;
+  for (const v of series) {
+    if (v > max) max = v;
+    if (v < min) min = v;
+    sum += v;
+  }
+  const mean = sum / series.length;
+  const denom = Math.abs(mean) > 1e-9 ? Math.abs(mean) : (max > 1e-9 ? max : 1);
+  return (max - min) / denom;
+}
+
 /**
  * Run the full correlation pipeline.
  *
@@ -143,6 +168,10 @@ export async function runCrossPillarCorrelation(
   const metric = opts.log10xMetric || DEFAULT_LOG10X_METRIC;
   const maxCandidates = opts.maxCandidates ?? 8;
   const minimumConfidence = opts.minimumConfidence ?? 0.3;
+  // #7 — lag below the rate-window resolution is unresolvable (the wide
+  // rate window forced by coarse scrapes smears a step ~one window). Must
+  // match the rate window used in the fetch sites.
+  const rateWindowSeconds = Math.max(opts.window.step * 3, 180);
 
   let log10xQueries = 0;
   let customerQueries = 0;
@@ -224,24 +253,42 @@ export async function runCrossPillarCorrelation(
     const structuralAllowsPassthrough = structural.score !== null && structural.score >= 0.5;
     if (Math.abs(r) < minimumConfidence && !structuralAllowsPassthrough) continue;
 
+    // #8 — volume significance. Pearson scores SHAPE not MAGNITUDE, so a
+    // flat metric whose tiny drift happens to align with the anchor scores
+    // temporal ~0.95. Measure the candidate's real relative movement; a
+    // metric that didn't meaningfully move can't be a co-mover, however its
+    // noise correlates. (Was hardcoded volume = 1.0, which let five flat
+    // memory metrics get promoted to "confirmed".)
+    const spread = relativeSpread(candidateSeries);
+    const moved = spread >= MOVED_FLOOR;
+    const volume = Math.min(1, spread / VOLUME_FULL_AT);
+
     const subScores: CandidateSubScores = {
       temporal: Math.abs(r),
       lag: lagTightness,
       structural: structural.score,
-      volume: 1.0,
+      volume,
     };
 
-    // If temporal correlation is below the minimum but structural passes,
-    // use a structural-only combinedConfidence (temporal = 0 zeroes everything
-    // else, which hides the real signal).
     const combinedConfidence =
       structural.score === null
         ? null
         : subScores.temporal >= minimumConfidence
           ? subScores.temporal * Math.max(0.2, subScores.lag) * structural.score * subScores.volume
-          : structural.score * 0.5; // structure-only: halve to indicate weaker than full overlap
+          : structural.score * 0.25 * volume; // structure-only: weak, scaled by real movement
 
-    const tier = pickTier(structural.score, structural.reason);
+    // #8 — confirmed/service-match require a GENUINE co-mover (real
+    // movement AND temporal tracking); structural label overlap alone
+    // demotes to coincidence.
+    const tier = pickTier(structural.score, subScores.temporal, moved, minimumConfidence);
+
+    // #7 — only report a lead/lag direction when (a) the metric actually
+    // moved (a flat metric has no meaningful lag, even if a sub-resolution
+    // cross-correlation peak lands above the window) and (b) the offset
+    // exceeds the rate-window smoothing resolution. Otherwise -> 0
+    // (renders as "concurrent").
+    const reportedLag =
+      !moved || Math.abs(lagSeconds) < rateWindowSeconds ? 0 : lagSeconds;
 
     candidates.push({
       name: candidate.name,
@@ -249,7 +296,7 @@ export async function runCrossPillarCorrelation(
       subScores,
       combinedConfidence,
       tier,
-      lagSeconds,
+      lagSeconds: reportedLag,
     });
   }
 
@@ -698,12 +745,23 @@ function pickFirst(obj: Record<string, string>, keys: string[]): string | undefi
   return undefined;
 }
 
-function pickTier(score: number | null, reason: string): ConfidenceTier {
-  void reason; // reserved for future per-reason tiering
+function pickTier(
+  score: number | null,
+  temporal: number,
+  moved: boolean,
+  minTemporal: number
+): ConfidenceTier {
   if (score === null) return 'unconfirmed';
-  if (score >= 1.0) return 'confirmed';
-  if (score >= 0.5) return 'service-match';
-  return 'coincidence';
+  if (score < 0.5) return 'coincidence';
+  // #8 — structural label overlap alone is NOT evidence of co-movement. A
+  // confirmed / service-match candidate must be a genuine co-mover: it
+  // actually moved (real magnitude) AND tracks the anchor (temporal). A
+  // structurally-co-located but flat or uncorrelated metric is a
+  // coincidence of label overlap, not a finding. (Fixes the flat memory
+  // metrics being promoted to "confirmed" off structural overlap alone.)
+  const isCoMover = moved && temporal >= minTemporal;
+  if (!isCoMover) return 'coincidence';
+  return score >= 1.0 ? 'confirmed' : 'service-match';
 }
 
 // ── Temporal correlation (Pearson + lag) ──

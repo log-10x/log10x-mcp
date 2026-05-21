@@ -257,7 +257,7 @@ function renderCorrelationResult(
   if (result.byTier['coincidence'].length > 0) {
     lines.push('### Tier 4 — coincidence (warning)');
     lines.push('');
-    lines.push('_These candidates have temporal correlation with the anchor AND structural validation ran, but they have NO structural overlap with the anchor. This is coincidence, not causation. Do not present these as causal candidates without independent evidence._');
+    lines.push('_Not co-movers. Either no structural overlap with the anchor, OR structurally co-located but the metric did not meaningfully move over the window (low `volume`) — its correlation is shape-noise, not a response. Do not present these as causal without independent evidence._');
     lines.push('');
     for (let i = 0; i < result.byTier['coincidence'].length; i++) {
       lines.push(formatCandidate(i + 1, result.byTier['coincidence'][i]));
