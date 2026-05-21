@@ -356,21 +356,70 @@ export async function executeTopPatterns(
     );
   }
 
-  // Next-action hints
+  // Next-action hints — pre-filled so a downstream agent with poor
+  // context can EXECUTE the differentiated follow-ups instead of having
+  // to compose the right call. Every arg is verified against the target
+  // tool's schema (investigate=starting_point, correlate=anchor+
+  // anchor_type, savings/cost_drivers=timeRange; tf.range is the PromQL
+  // form, e.g. "1h"). Ordered by differentiated value.
   const nextActions: NextAction[] = [];
   const topActive = renderRows.find(r => r.hash);
+  const errSev = (s: string) => ['ERROR', 'WARN', 'CRITICAL'].includes((s || '').toUpperCase());
+
+  // Root-cause the top error loop (the "investigation" route). Anchor on
+  // the highest-cost error-severity pattern with sustained volume.
+  // Use a >= 24h window for the "why did this start / what co-moves"
+  // routes: the 1h cost-scan window is too narrow to show a pattern's
+  // emergence or to give Pearson enough points. tf.range is fine when
+  // the scan was already wide.
+  const rcaWindow = /^(\d+)(s|m|h)$/.test(tf.range) && !/d|w|y/.test(tf.range) ? '24h' : tf.range;
+  const topErrorLoop = renderRows.find(r => r.hash && errSev(r.severity) && r.events >= 100);
+  if (topErrorLoop) {
+    nextActions.push({
+      tool: 'log10x_investigate',
+      args: { starting_point: topErrorLoop.pattern, window: rcaWindow },
+      reason: 'root-cause the top error loop before suppressing it (surfaces log-only signals: DNS, connection-pool, dependency failures)',
+    });
+  }
+
+  // Cross-pillar: find k8s/metric signals co-moving with the top spike.
+  const topSpiking = renderRows.find(r => r.hash && (r.badge === 'NEW' || r.badge === 'ACUTE'));
+  if (topSpiking) {
+    nextActions.push({
+      tool: 'log10x_correlate_cross_pillar',
+      args: { anchor: topSpiking.pattern, anchor_type: 'log10x_pattern', timeRange: rcaWindow },
+      reason: 'find k8s/metric signals (deploys, pod restarts, OOM) co-moving with the top spike',
+    });
+  }
+
   if (topActive) {
     nextActions.push({
       tool: 'log10x_pattern_mitigate',
       args: { pattern: topActive.pattern },
-      reason: 'four-option mitigation menu (drop / mute / compact / sample) for the top-cost pattern',
+      reason: 'drop / mute / compact / sample menu for the top-cost pattern',
     });
+  }
+
+  // Env-level projections (always available, no per-pattern arg).
+  nextActions.push({
+    tool: 'log10x_savings',
+    args: { timeRange: tf.range },
+    reason: 'projected savings across the env if you act — drop vs compact vs sample',
+  });
+  nextActions.push({
+    tool: 'log10x_cost_drivers',
+    args: { timeRange: '7d' },
+    reason: 'growth/delta ranking over 7d — what is rising, vs the current-cost ranking shown here',
+  });
+
+  if (topActive) {
     nextActions.push({
       tool: 'log10x_pattern_examples',
       args: { pattern: topActive.pattern },
-      reason: 'deeper sample retrieval + slot distribution',
+      reason: 'deeper sample retrieval + slot distribution for the top pattern',
     });
   }
+
   const block = renderNextActions(nextActions);
   if (block) lines.push('', block);
 
