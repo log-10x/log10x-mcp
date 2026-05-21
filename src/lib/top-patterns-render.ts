@@ -335,14 +335,33 @@ function renderCostByService(opts: TopPatternsRenderOpts): string[] {
 }
 
 function renderList(rows: TopPatternRow[]): string {
-  const lines: string[] = [];
-  for (const r of rows) {
-    // Algorithm 1: try the sample-mined descriptor first; fall back to
-    // engine pattern-name extraction when no priority key is present
-    // (plain-text logs, multi-line events, sample fetch failed, etc.).
-    // 80-char budget — the list line wraps naturally if longer.
+  // First pass: compute each row's descriptor (Algorithm 1, then engine-
+  // name fallback). Done up front so we can detect collisions — two
+  // engine patterns can share the same sample-mined text (e.g. the same
+  // error logged at two pipeline stages = two hashes, one error string).
+  const descs = rows.map(r => {
     const sampled = descriptorFromSample(r.sample?.logJson, 80);
-    const desc = sampled ?? patternDescriptor(r.pattern, r.sample?.logLine ?? '', 80);
+    return sampled ?? patternDescriptor(r.pattern, r.sample?.logLine ?? '', 80);
+  });
+  const descCount = new Map<string, number>();
+  for (const d of descs) {
+    const k = d.toLowerCase();
+    descCount.set(k, (descCount.get(k) ?? 0) + 1);
+  }
+
+  const lines: string[] = [];
+  rows.forEach((r, i) => {
+    let desc = descs[i];
+    // Collision discriminator: when 2+ rows share a descriptor, append
+    // what actually differs between them — the top varying field from
+    // each row's own field-variation. Honest (it's the real engine-level
+    // difference) and tells the rows apart without inventing a "variant"
+    // label. Falls back to a short hash tag when no field-variation
+    // signal is available.
+    if (descCount.get(desc.toLowerCase())! > 1) {
+      const disc = collisionDiscriminator(r);
+      if (disc) desc = `${desc} — ${disc}`;
+    }
     const sev = r.severity || 'no severity';
     const svc = r.service || 'unattributed';
     // Monthly cost as the headline. /h forces mental math; /mo
@@ -360,8 +379,21 @@ function renderList(rows: TopPatternRow[]): string {
     lines.push(`${r.rank}. **${desc}** _[${svc} · ${sev}]_`);
     lines.push(`   ${cost} · ${bytes} · ${events} · ${badge}`);
     lines.push('');
-  }
+  });
   return lines.join('\n').trimEnd();
+}
+
+/** When two list rows share a descriptor, return a short string naming
+ * what actually distinguishes THIS row — the top field that varies
+ * across its sampled events (the real engine-level difference between
+ * two same-text patterns), or a short hash tag as last resort. */
+function collisionDiscriminator(r: TopPatternRow): string | null {
+  const top = r.fieldVar?.varying?.[0];
+  if (top) return `\`${top.field}\` varies (${top.distinct})`;
+  // No field-variation signal — distinguish by a short hash tag so the
+  // rows are at least addressable.
+  if (r.hash) return `hash ${r.hash.slice(0, 6)}`;
+  return null;
 }
 
 function renderCard(
