@@ -80,6 +80,14 @@ export async function executeTopPatterns(
     (args as Record<string, unknown>).limit = 5;
   }
   const tf = parseTimeframe(args.timeRange);
+  // Cost normalization. r.bytes / totalBytes are volumes over the WHOLE
+  // window (tf), so the per-hour rate is window-cost / window-hours. The old
+  // code assigned the window cost straight to costPerHour and ×720 for
+  // monthly — correct ONLY for the 1h default; a 24h/7d window over-stated
+  // $/h and $/mo by the window-hours factor (24×, 168×). Caught by the
+  // top_patterns-vs-SRE contest: a 24h run reported "$5323/mo" that was ~24×
+  // too high. windowHours from tf.days (fractional for sub-day windows).
+  const windowHours = tf.days * 24;
   const costPerGb = args.analyzerCost ?? 1.0;
 
   const filters: Record<string, string> = {};
@@ -229,6 +237,7 @@ export async function executeTopPatterns(
     const fv = events.length > 0 ? fieldVariation(events) : undefined;
     const fsRes = firstSeenByHash.get(r.hash);
     const cost = bytesToCost(r.bytes, costPerGb);
+    const costPerHour = windowHours > 0 ? cost / windowHours : cost;
     // Badge = trajectory classification. Key the baseline lookup by
     // the same (pattern, service, severity) triple `topPatternsFull`
     // and `bytesPerPattern` both group on. Cross-check NEW against
@@ -254,8 +263,8 @@ export async function executeTopPatterns(
       service: r.service,
       severity: r.severity,
       bytes: r.bytes,
-      costPerHour: cost,
-      costPerMonth: cost * 720,
+      costPerHour,
+      costPerMonth: costPerHour * 720,
       events: r.events,
       firstSeenAgeSeconds: fsRes?.ageSeconds ?? null,
       trendBytesPerSec: trendVals,
@@ -273,7 +282,7 @@ export async function executeTopPatterns(
   const totalBytes = totalRes && totalRes.status === 'success' && totalRes.data.result.length > 0
     ? parsePrometheusValue(totalRes.data.result[0])
     : renderRows.reduce((s, r) => s + r.bytes, 0);
-  const totalCostPerHour = bytesToCost(totalBytes, costPerGb);
+  const totalCostPerHour = windowHours > 0 ? bytesToCost(totalBytes, costPerGb) / windowHours : bytesToCost(totalBytes, costPerGb);
 
   let patternCountTotal: number | undefined;
   if (countRes && countRes.status === 'success' && countRes.data.result.length > 0) {
