@@ -17,6 +17,7 @@
 
 import { z } from 'zod';
 import { normalizePattern } from '../lib/format.js';
+import { TENX_HASH_GLOSS } from '../lib/pattern-descriptor.js';
 import {
   resolveSiemSelection,
   formatAmbiguousError,
@@ -117,6 +118,7 @@ export async function executeExclusionFilter(args: {
     // enabled) — the regex form below is the fallback when they don't.
     lines.push('');
     lines.push(`**Recommended — exact \`tenx_hash\` (${hashKey})**`);
+    lines.push(`_${TENX_HASH_GLOSS}_`);
     lines.push('');
     lines.push(hashFilter.label);
     lines.push('');

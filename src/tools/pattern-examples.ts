@@ -431,6 +431,10 @@ export async function executePatternExamples(
     lines.push('> **Multi-line detected**: the engine grouped multiple input lines into fewer encoded events. Showing head lines only; continuation frames (e.g. stack-trace `at ` lines) live separately in the analyzer and are not joined here.');
   }
   lines.push('');
+  // Gloss the hash once: a human seeing "templateHash a1b2c3…" needs to know
+  // what it is before the buckets below.
+  lines.push('_Buckets group the matched events by template fingerprint (`templateHash`); the slot table in each shows what varies within that template._');
+  lines.push('');
 
   for (let i = 0; i < topK.length; i++) {
     const bucket = topK[i];

@@ -156,6 +156,16 @@ export function descriptorFromSample(
  * known): the machine handle, to be demoted to a small `id:` line or the
  * agent-only channel, not the human headline.
  */
+/**
+ * One-line plain-English gloss for `tenx_hash`, shown the FIRST time the hash
+ * is surfaced to a human in an action context (exclusion_filter,
+ * pattern_examples). In survey contexts (top_patterns) the bare hash is
+ * demoted to the agent-only channel instead of glossed. Keep the wording in
+ * one place so it stays consistent across tools.
+ */
+export const TENX_HASH_GLOSS =
+  '`tenx_hash` is a stable fingerprint for this exact log pattern; dropping or correlating by it is precise and survives wording changes (unlike a text match).';
+
 export function patternDisplay(
   pattern: string,
   opts: {

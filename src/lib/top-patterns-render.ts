@@ -40,6 +40,7 @@
  */
 
 import { lineChart } from './line-chart.js';
+import { agentOnly } from './agent-only.js';
 import { patternDescriptor, descriptorFromSample } from './pattern-descriptor.js';
 import {
   dropRuleSnippet,
@@ -768,7 +769,11 @@ function renderCard(
   // single-card, or forwarder not detected): full per-card form so the
   // card stands alone.
   if (templateShown) {
-    lines.push(`**hash** \`${r.hash}\``);
+    // Survey context: the human reads the card's description, not a bare
+    // hash. Demote the identity to the agent-only channel (the agent uses it
+    // to chain exact drops/correlation; exclusion_filter/pattern_examples
+    // surface it to the human with a gloss when an action needs it).
+    lines.push(agentOnly(`tenx_hash ${r.hash}`));
     lines.push('');
   } else {
     lines.push(`**To find these events in ${analyzerName}**`);
