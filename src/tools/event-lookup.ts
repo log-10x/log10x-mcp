@@ -20,7 +20,6 @@ import {
 } from '../lib/format.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { agentOnly } from '../lib/agent-only.js';
-import { shareBar } from '../lib/pattern-render.js';
 import { fetchOneSampleByHash } from '../lib/siem/sample.js';
 
 export const eventLookupSchema = {
@@ -247,7 +246,7 @@ async function formatResults(
   const lines: string[] = [];
   lines.push(`${fmtPattern(pattern)}  ·  ${tf.label}`);
   lines.push(`Total: ${fmtBytes(totalBytes)} over ${tf.label} · cost was ${fmtDollar(totalCostBase)} -> now ${fmtDollar(totalCostNow)}${period} · ${rows.length} service${rows.length !== 1 ? 's' : ''}`);
-  lines.push(`(cost: prior comparable ${tf.label} baseline -> current; bar scaled to the busiest service)`);
+  lines.push(`(cost: prior comparable ${tf.label} baseline -> current)`);
   lines.push(`_Total across every service and severity over ${tf.label}; the "by severity" line below shows the split. A per-(pattern,service,severity) ranking (e.g. the top-patterns list) shows ONE severity row, so its number for this pattern equals one line of that split, not this total. That is expected, not a discrepancy._`);
   lines.push('');
 
@@ -260,7 +259,6 @@ async function formatResults(
     const head = [r.service || '(no service)'];
     if (r.isNew) head.push('NEW');
     lines.push(`${head.join(' · ')}`);
-    lines.push(`  ${shareBar(maxBytes > 0 ? r.bytes / maxBytes : 0, 20)}`);
     const m = [
       fmtBytes(r.bytes),
       `was ${fmtDollar(r.costBaseline)} -> now ${fmtDollar(r.costNow)}${period}`,
