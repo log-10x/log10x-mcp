@@ -13,7 +13,8 @@ import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { fmtDollar, fmtPattern, fmtBytes, parseTimeframe, costPeriodLabel, normalizePattern } from '../lib/format.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { agentOnly } from '../lib/agent-only.js';
-import { sparkline } from '../lib/pattern-render.js';
+import { lineChart } from '../lib/line-chart.js';
+import { patternDisplay } from '../lib/pattern-descriptor.js';
 
 export const trendSchema = {
   pattern: z.string().describe('Pattern name (e.g., "Payment_Gateway_Timeout")'),
@@ -104,7 +105,11 @@ export async function executeTrend(
       : '(no first-quarter baseline to compare against)';
 
   const lines: string[] = [];
-  lines.push(`${fmtPattern(pattern)} · trend over ${tf.label}`);
+  // Description-first headline (shared patternDisplay): a readable
+  // description, not the raw token. trend fetches no sample, so this is the
+  // algorithmic token descriptor; the exact pattern id stays in the
+  // agent-only next-action hints below for chaining.
+  lines.push(`${patternDisplay(pattern).title} · trend over ${tf.label}`);
   lines.push(`Change over ${tf.label}: ${changeStr}${spikePoint ? `; peak ${(maxPoint.bytes / avgBytes).toFixed(1)}× the window average at ${formatTimestamp(spikePoint.ts)}` : ''}`);
   lines.push('');
   lines.push(`  Measured spend over ${tf.label}: ${fmtDollar(totalCost)}  (${points.length} samples @ ${step})`);
@@ -113,18 +118,20 @@ export async function executeTrend(
   lines.push(`  _The two numbers differ on purpose: the first is the actual spend over the window; the run-rates annualize each quarter's average rate to judge rising/falling, so they will not equal the measured spend._`);
   lines.push(`  Peak ${fmtBytes(maxPoint.bytes)} @ ${formatTimestamp(maxPoint.ts)} · Low ${fmtBytes(minPoint.bytes)} @ ${formatTimestamp(minPoint.ts)}`);
 
-  // Shared sparkline (same glyphs as top_patterns: ▁▂▃▄▅▆▇█), so
-  // "trend" looks identical across the suite. Downsample to ~40 cells.
-  if (points.length >= 4) {
-    const target = 40;
-    const grp = Math.max(1, Math.floor(points.length / target));
-    const ds: number[] = [];
-    for (let i = 0; i < points.length; i += grp) {
-      const sl = points.slice(i, i + grp);
-      ds.push(sl.reduce((s, p) => s + p.bytes, 0) / sl.length);
-    }
+  // Big line chart (the same one top_patterns uses). trend is a focused
+  // single-pattern view, so it gets the full labeled chart, not a compact
+  // sparkline — consistent chart strategy across the MCP.
+  // lineChart labels its y-axis as a per-hour rate, so it expects
+  // bytes-PER-SECOND values (what top_patterns feeds it). trend's points are
+  // bytes per `stepSeconds` bucket, so divide to get the rate — otherwise the
+  // axis reads ~stepSeconds× too high (e.g. "23608 MB/h" for a 6.6 MB peak).
+  const chart = lineChart(points.map((p) => p.bytes / stepSeconds), { widthCap: 60, spanSeconds: tf.days * 86400 });
+  if (chart) {
     lines.push('');
-    lines.push(`  ${sparkline(ds)}  (oldest -> newest)`);
+    lines.push('**Volume trend**');
+    lines.push('```text');
+    lines.push(chart);
+    lines.push('```');
   }
 
   // next_action hints — prose for human readers, structured NEXT_ACTIONS

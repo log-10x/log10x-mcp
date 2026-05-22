@@ -146,3 +146,29 @@ export function descriptorFromSample(
   }
   return null;
 }
+
+/**
+ * Canonical pattern display for HUMAN-facing output across the whole MCP.
+ * One helper so every tool shows a pattern the same way (the inconsistency
+ * fix). `title` is a readable description — from the sample event's content
+ * when a sample is available (best), else the algorithmic token descriptor —
+ * NEVER the raw snake_case token. `identity` is the raw token (+ hash when
+ * known): the machine handle, to be demoted to a small `id:` line or the
+ * agent-only channel, not the human headline.
+ */
+export function patternDisplay(
+  pattern: string,
+  opts: {
+    sampleJson?: Record<string, unknown> | null;
+    sampleLine?: string;
+    hash?: string;
+    maxChars?: number;
+  } = {}
+): { title: string; identity: string } {
+  const max = opts.maxChars ?? 60;
+  const title =
+    descriptorFromSample(opts.sampleJson, max) ??
+    patternDescriptor(pattern, opts.sampleLine ?? '', max);
+  const identity = opts.hash ? `${pattern} · hash ${opts.hash}` : pattern;
+  return { title, identity };
+}
