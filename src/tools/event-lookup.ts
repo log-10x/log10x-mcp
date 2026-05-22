@@ -21,6 +21,7 @@ import {
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { agentOnly } from '../lib/agent-only.js';
 import { fetchOneSampleByHash } from '../lib/siem/sample.js';
+import { patternDisplay } from '../lib/pattern-descriptor.js';
 
 export const eventLookupSchema = {
   pattern: z.string().optional().describe('Pattern name or search term to look up (e.g., "Payment_Gateway_Timeout"). Omit when passing `tenxHash` instead.'),
@@ -244,7 +245,7 @@ async function formatResults(
   // header (service · severity · NEW), share-bar scaled to the busiest
   // service, then volume · baseline -> now · events.
   const lines: string[] = [];
-  lines.push(`${fmtPattern(pattern)}  ·  ${tf.label}`);
+  lines.push(`${patternDisplay(pattern).title}  ·  ${tf.label}`);
   lines.push(`Total: ${fmtBytes(totalBytes)} over ${tf.label} · cost was ${fmtDollar(totalCostBase)} -> now ${fmtDollar(totalCostNow)}${period} · ${rows.length} service${rows.length !== 1 ? 's' : ''}`);
   lines.push(`(cost: prior comparable ${tf.label} baseline -> current)`);
   lines.push(`_Total across every service and severity over ${tf.label}; the "by severity" line below shows the split. A per-(pattern,service,severity) ranking (e.g. the top-patterns list) shows ONE severity row, so its number for this pattern equals one line of that split, not this total. That is expected, not a discrepancy._`);

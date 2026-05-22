@@ -10,7 +10,8 @@
  * wrap on its own line and keeps magnitude (volume + bar) and the
  * paste-back hash always visible. No em-dashes in any emitted prose.
  */
-import { fmtBytes, fmtCount, fmtDollar, fmtPattern, fmtSeverity } from './format.js';
+import { fmtBytes, fmtCount, fmtDollar, fmtSeverity } from './format.js';
+import { patternDisplay } from './pattern-descriptor.js';
 
 export interface PatternStanzaRow {
   /** Canonical pattern label (snake_case) or a placeholder like (no-symbol). */
@@ -154,15 +155,18 @@ function stanza(
   if (!opts.hoistedService) headBits.push(r.service || '(no service)');
   if (sev) headBits.push(sev);
   if (r.flags && r.flags.length) headBits.push(...r.flags);
+  // Description-first (shared patternDisplay): the header carries a readable
+  // description (sample content when available, else the algorithmic token
+  // descriptor — which strips boilerplate prefixes off otel-collector
+  // patterns); the raw token is demoted to an `id:` line as the machine
+  // handle. A real sample event (when present) leads as the truest content.
+  const display = patternDisplay(r.pattern, { sampleLine: r.sample });
+  headBits.push(display.title);
   out.push(`${rank}) ${headBits.join(' · ') || '(pattern)'}`);
-  // Label both lines so the reader knows which is a real example event
-  // and which is the canonical identity. The identity line is always
-  // labeled `pattern:`; when a real sample resolved it leads, labeled
-  // `sample:` (one verbatim event, not the whole population).
   if (r.sample) {
     out.push(`   sample:  ${r.sample}`);
   }
-  out.push(`   pattern: ${fmtPattern(r.pattern)}`);
+  out.push(`   id: ${r.pattern}`);
 
   // Trend sparkline (the good visual) when the caller supplies a series:
   // "is this getting worse" is the actionable question. No makeshift

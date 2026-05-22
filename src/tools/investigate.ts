@@ -33,6 +33,7 @@ import { classifyTrajectory, runDriftCorrelation } from '../lib/drift.js';
 import { agentOnly } from '../lib/agent-only.js';
 import { runAcuteSpikeCorrelation } from '../lib/correlate.js';
 import { detectInflection } from '../lib/inflection.js';
+import { patternDisplay } from '../lib/pattern-descriptor.js';
 import {
   renderAcuteSpikeReport,
   renderDriftReport,
@@ -892,10 +893,10 @@ async function renderEnvironmentAudit(
         if (r.collapsedCount && r.collapsedCount > 1) {
           anyCollapsed = true;
           lines.push(
-            `- **${r.collapsedCount} high-cardinality variants in \`${r.service}\`** — each ${label} ${direction} vs ${effectiveBaselineOffset} ago (collapsed: same rate change within ±5%, likely variable-value rotation rather than a service incident). Example: ${r.pattern.replace(/_/g, ' ')}`
+            `- **${r.collapsedCount} high-cardinality variants in \`${r.service}\`** — each ${label} ${direction} vs ${effectiveBaselineOffset} ago (collapsed: same rate change within ±5%, likely variable-value rotation rather than a service incident). Example: ${patternDisplay(r.pattern).title}`
           );
         } else {
-          lines.push(`- \`${r.service}\` · ${r.pattern.replace(/_/g, ' ')} · ${label} ${direction} vs ${effectiveBaselineOffset} ago`);
+          lines.push(`- \`${r.service}\` · ${patternDisplay(r.pattern).title} · ${label} ${direction} vs ${effectiveBaselineOffset} ago`);
         }
       }
       lines.push('');
