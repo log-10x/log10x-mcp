@@ -18,8 +18,9 @@
  *     Tool derives the cap, runs sanity checks, and emits the PR command.
  *
  * Zero engine ask: every query runs against existing receive-aggregator
- * metrics (tenx_pipeline_summaryBytes_total labeled by k8s_container,
- * symbolMessage, k8s_pod, level). Gitops PR uses the same machinery as
+ * metrics (all_events_summaryBytes_total + emitted_events_summaryBytes_total,
+ * labeled by k8s_container, symbolMessage, k8s_pod, level). Gitops PR uses
+ * the same machinery as
  * log10x_advise_compact.
  */
 
@@ -238,9 +239,9 @@ async function renderResolutionPrompt(
 
   // observedGB and pod count for any k8s_container whose name contains the
   // service substring. Run both queries in parallel.
-  const filter = `name="all_events", k8s_container=~".*${promEscape(service)}.*"`;
-  const bytesQ = `sum by (k8s_container)(increase(tenx_pipeline_summaryBytes_total{${filter}}[${days}d])) / 1e9`;
-  const podsQ = `count by (k8s_container)(count by (k8s_container, k8s_pod)(rate(tenx_pipeline_summaryBytes_total{${filter}}[5m]) > 0))`;
+  const filter = `k8s_container=~".*${promEscape(service)}.*"`;
+  const bytesQ = `sum by (k8s_container)(increase(all_events_summaryBytes_total{${filter}}[${days}d])) / 1e9`;
+  const podsQ = `count by (k8s_container)(count by (k8s_container, k8s_pod)(rate(all_events_summaryBytes_total{${filter}}[5m]) > 0))`;
 
   const [bytesRes, podsRes] = await Promise.all([
     backend.queryInstant(bytesQ) as Promise<PrometheusResponse>,
@@ -352,20 +353,20 @@ async function runSanityChecks(
 ): Promise<SanityResult> {
   const days = args.observationDays ?? 7;
   const containerRegex = containers.map(promEscape).join('|');
-  const filter = `name="all_events", k8s_container=~"${containerRegex}"`;
+  const filter = `k8s_container=~"${containerRegex}"`;
   const windowsExpected = days * 24 * 12; // 5-minute buckets per day
 
   // 1. coverage — distinct 5-minute buckets in the observation window with data.
-  const coverageQ = `count_over_time((sum(rate(tenx_pipeline_summaryBytes_total{${filter}}[5m])) > 0)[${days}d:5m])`;
+  const coverageQ = `count_over_time((sum(rate(all_events_summaryBytes_total{${filter}}[5m])) > 0)[${days}d:5m])`;
   // 2. 30-day spend in GB.
-  const spendQ = `sum(increase(tenx_pipeline_summaryBytes_total{${filter}}[30d])) / 1e9`;
+  const spendQ = `sum(increase(all_events_summaryBytes_total{${filter}}[30d])) / 1e9`;
   // 3. top-5 patterns by bytes-per-window.
-  const topPatternsQ = `topk(5, sum by (symbolMessage)(increase(tenx_pipeline_summaryBytes_total{${filter}}[${Math.round(RESET_INTERVAL_MS / 1000)}s])))`;
+  const topPatternsQ = `topk(5, sum by (symbolMessage)(increase(all_events_summaryBytes_total{${filter}}[${Math.round(RESET_INTERVAL_MS / 1000)}s])))`;
   // 5. p95 pod count across selected containers.
-  const p95PodsQ = `quantile_over_time(0.95, sum(count by (k8s_pod)(rate(tenx_pipeline_summaryBytes_total{${filter}}[5m]) > 0))[${days}d:5m])`;
+  const p95PodsQ = `quantile_over_time(0.95, sum(count by (k8s_pod)(rate(all_events_summaryBytes_total{${filter}}[5m]) > 0))[${days}d:5m])`;
   // growth: distinct symbolMessages in last 3d vs the prior 4d.
-  const recentPatternsQ = `count(count by (symbolMessage)(increase(tenx_pipeline_summaryBytes_total{${filter}}[3d]) > 0))`;
-  const olderPatternsQ = `count(count by (symbolMessage)(increase(tenx_pipeline_summaryBytes_total{${filter}}[4d] offset 3d) > 0))`;
+  const recentPatternsQ = `count(count by (symbolMessage)(increase(all_events_summaryBytes_total{${filter}}[3d]) > 0))`;
+  const olderPatternsQ = `count(count by (symbolMessage)(increase(all_events_summaryBytes_total{${filter}}[4d] offset 3d) > 0))`;
 
   const [covRes, spendRes, topRes, podsRes, recentPatRes, olderPatRes] =
     await Promise.all([
