@@ -71,6 +71,7 @@ import { adviseReceiverSchema, executeAdviseReceiver } from './tools/advise-rece
 import { adviseRetrieverSchema, executeAdviseRetriever } from './tools/advise-retriever.js';
 import { adviseInstallSchema, executeAdviseInstall } from './tools/advise-install.js';
 import { adviseCompactSchema, executeAdviseCompact } from './tools/advise-compact.js';
+import { configureRegulatorSchema, executeConfigureRegulator } from './tools/configure-regulator.js';
 import { patternMitigateSchema, executePatternMitigate } from './tools/pattern-mitigate.js';
 import { loginStatusSchema, executeLoginStatus } from './tools/login-status.js';
 import {
@@ -927,6 +928,12 @@ registerLog10xTool('log10x_advise_compact', adviseCompactSchema, (args) =>
   wrap('log10x_advise_compact', () => executeAdviseCompact(args))
 );
 
+// ── Tool: log10x_configure_regulator (per-container cap from $ budget) ──
+
+registerLog10xTool('log10x_configure_regulator', configureRegulatorSchema, (args) =>
+  wrap('log10x_configure_regulator', () => executeConfigureRegulator(args))
+);
+
 // ── Tool: log10x_pattern_mitigate (cost-reduction menu) ──
 
 registerLog10xTool('log10x_pattern_mitigate', patternMitigateSchema, (args) =>
@@ -987,6 +994,7 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_advise_receiver', intent: 'Receiver install/verify/teardown plan — inline only, with optional compact encoding (optimize=true)' },
   { name: 'log10x_advise_retriever', intent: 'Retriever install/verify/teardown plan — standalone S3 + SQS archive + query' },
   { name: 'log10x_advise_compact', intent: 'Render a `gh` PR command + diff for a compactReceiver lookup-CSV update against the customer GitOps repo (engine hot-reloads the CSV without a pipeline restart)' },
+  { name: 'log10x_configure_regulator', intent: 'Derive a per-container rate-regulator byte cap from a monthly dollar budget; validate against five Prometheus sanity checks; emit a `gh` PR command against the rate-cap CSV (engine hot-reloads it)' },
   { name: 'log10x_pattern_mitigate', intent: 'Return the env-gated mitigation options + exact configs for a pattern (drop @ analyzer, drop @ forwarder, mute @ 10x, compact @ 10x) in user terms with env-capability gating' },
 ];
 
