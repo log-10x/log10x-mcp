@@ -260,18 +260,19 @@ export function renderDiscoverReport(s: DiscoverySnapshot): string {
       reason: 'Retriever (S3 archive) install plan',
     },
   ];
-  // Compact-mode advisor hint: always emit it, scoped on the snapshot.
-  // When GitOps is wired (receiverGitopsRepo present) the advisor
-  // emits a real CSV PR; otherwise it returns a coherent
-  // "GitOps not configured" markdown. Either path is a productive
-  // chain hop — leaving this off means autonomous chains asking
-  // "would compact mode save us money?" dead-end after install advice.
+  // Compact configuration hint: scoped on the snapshot. When GitOps is wired
+  // (receiverGitopsRepo present) the tool can emit a real per-container cap-file
+  // PR; otherwise it returns a coherent "GitOps not configured" markdown.
+  // Either path is a productive chain hop — leaving this off means autonomous
+  // chains asking "would compact mode save us money?" dead-end after install
+  // advice. The tool also handles the service → containers resolution step,
+  // so we hint at it without a specific service (the agent picks one).
   nextActions.push({
-    tool: 'log10x_advise_compact',
-    args: { snapshot_id: s.snapshotId, mode: 'csv' },
+    tool: 'log10x_configure_compact',
+    args: { snapshot_id: s.snapshotId },
     reason: s.recommendations.receiverGitopsRepo
-      ? 'snapshot detected receiver with GitOps wired up — render the compact-lookup CSV PR'
-      : 'compact-mode advisor will return a truthful negative if GitOps is not yet wired (chain handoff is still informative)',
+      ? 'snapshot detected receiver with GitOps wired up — pick a service and let the tool resolve its containers + render the cap-file PR'
+      : 'configure_compact will return a truthful negative if GitOps is not yet wired (chain handoff is still informative)',
   });
   const block = renderNextActions(nextActions);
   if (block) lines.push('', block);

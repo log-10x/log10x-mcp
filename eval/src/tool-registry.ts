@@ -74,7 +74,7 @@ import { adviseReporterSchema, executeAdviseReporter } from '../../build/tools/a
 import { adviseReceiverSchema, executeAdviseReceiver } from '../../build/tools/advise-receiver.js';
 import { adviseRetrieverSchema, executeAdviseRetriever } from '../../build/tools/advise-retriever.js';
 import { adviseInstallSchema, executeAdviseInstall } from '../../build/tools/advise-install.js';
-import { adviseCompactSchema, executeAdviseCompact } from '../../build/tools/advise-compact.js';
+import { configureCompactSchema, executeConfigureCompact } from '../../build/tools/configure-compact.js';
 import { loginStatusSchema, executeLoginStatus } from '../../build/tools/login-status.js';
 
 // ─── Env shim ───────────────────────────────────────────────────────────
@@ -345,7 +345,7 @@ const TOOL_TABLE: Record<string, ExecuteFn> = {
   log10x_advise_receiver: async (raw) => executeAdviseReceiver(parseArgs(adviseReceiverSchema, raw)),
   log10x_advise_retriever: async (raw) => executeAdviseRetriever(parseArgs(adviseRetrieverSchema, raw)),
   log10x_advise_install: async (raw) => executeAdviseInstall(parseArgs(adviseInstallSchema, raw)),
-  log10x_advise_compact: async (raw) => executeAdviseCompact(parseArgs(adviseCompactSchema, raw)),
+  log10x_configure_compact: async (raw) => executeConfigureCompact(parseArgs(configureCompactSchema, raw)),
 
   // envs object (full Environments shape)
   log10x_login_status: async (raw, ev) =>

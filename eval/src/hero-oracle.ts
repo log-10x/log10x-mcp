@@ -166,7 +166,7 @@ export function extractPatternClaims(text: string): PatternClaim[] {
     'log10x_exclusion_filter',
     'log10x_resolve_batch',
     'log10x_extract_templates',
-    'log10x_advise_compact',
+    'log10x_configure_compact',
     'log10x_advise_install',
     'log10x_advise_receiver',
     'log10x_advise_reporter',
@@ -563,7 +563,7 @@ export function extractAgentTopPatterns(text: string, n: number = 3): string[] {
     'rotate_api_key', 'customer_metrics_query', 'discover_join', 'correlate_cross_pillar',
     'translate_metric_to_patterns', 'poc_from_siem_submit', 'poc_from_siem_status',
     'poc_from_local', 'discover_env', 'advise_install', 'advise_reporter',
-    'advise_receiver', 'advise_retriever', 'advise_compact', 'dependency_check',
+    'advise_receiver', 'advise_retriever', 'configure_compact', 'configure_regulator', 'dependency_check',
     'exclusion_filter', 'retriever_query', 'retriever_query_status', 'retriever_series',
     'backfill_metric',
   ]);

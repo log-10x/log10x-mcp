@@ -5,9 +5,10 @@
  * dollar budget, validates against five sanity checks pulled from the
  * customer's Prometheus, and emits a `gh` PR command against the rate
  * regulator's cap-lookup CSV (`pipelines/run/receive/rate/caps.csv` by
- * default). Mirrors the advise-compact pattern: this tool is a renderer +
- * derivation, not a writer. The agent runs the emitted `gh` snippet to
- * open a PR that the human reviews and merges.
+ * default). This tool is a renderer + derivation, not a writer. The
+ * agent runs the emitted `gh` snippet to open a PR that the human
+ * reviews and merges. Same shape as log10x_configure_compact (the
+ * compact-side equivalent).
  *
  * Two-phase flow (decision γ from the design pass):
  *   Phase 1 — agent calls with `service=<name>` + budget args (no
@@ -19,9 +20,7 @@
  *
  * Zero engine ask: every query runs against existing receive-aggregator
  * metrics (all_events_summaryBytes_total + emitted_events_summaryBytes_total,
- * labeled by k8s_container, symbolMessage, k8s_pod, level). Gitops PR uses
- * the same machinery as
- * log10x_advise_compact.
+ * labeled by k8s_container, symbolMessage, k8s_pod, level).
  */
 
 import { z } from 'zod';
@@ -168,7 +167,7 @@ export async function executeConfigureRegulator(
   return renderResult(args, target.resolved, derivation, checks);
 }
 
-// ─── target resolution (mirror advise-compact) ────────────────────────
+// ─── target resolution ────────────────────────────────────────────────
 async function resolveTarget(
   args: ConfigureRegulatorArgs
 ): Promise<{ resolved: ResolvedTarget } | { error: string }> {

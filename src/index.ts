@@ -70,7 +70,7 @@ import { adviseReporterSchema, executeAdviseReporter } from './tools/advise-repo
 import { adviseReceiverSchema, executeAdviseReceiver } from './tools/advise-receiver.js';
 import { adviseRetrieverSchema, executeAdviseRetriever } from './tools/advise-retriever.js';
 import { adviseInstallSchema, executeAdviseInstall } from './tools/advise-install.js';
-import { adviseCompactSchema, executeAdviseCompact } from './tools/advise-compact.js';
+import { configureCompactSchema, executeConfigureCompact } from './tools/configure-compact.js';
 import { configureRegulatorSchema, executeConfigureRegulator } from './tools/configure-regulator.js';
 import { patternMitigateSchema, executePatternMitigate } from './tools/pattern-mitigate.js';
 import { loginStatusSchema, executeLoginStatus } from './tools/login-status.js';
@@ -349,7 +349,7 @@ Daily-habit / operational:
                                                                                           (vendor=analyzer or forwarder)
                                                                         option 3       → log10x_dependency_check
                                                                                         → log10x_advise_receiver
-                                                                        option 4       → log10x_advise_compact
+                                                                        option 4       → log10x_configure_compact
                                                                       Call exclusion_filter directly only when the
                                                                       user already specified a vendor + intent.)
 - (proactive): after log10x_top_patterns / log10x_cost_drivers / log10x_event_lookup surfaces a
@@ -922,10 +922,10 @@ registerLog10xTool('log10x_advise_install', adviseInstallSchema, (args) =>
   wrap('log10x_advise_install', () => executeAdviseInstall(args))
 );
 
-// ── Tool: log10x_advise_compact (compact-lookup PR author) ──
+// ── Tool: log10x_configure_compact (per-container compact decision PR author) ──
 
-registerLog10xTool('log10x_advise_compact', adviseCompactSchema, (args) =>
-  wrap('log10x_advise_compact', () => executeAdviseCompact(args))
+registerLog10xTool('log10x_configure_compact', configureCompactSchema, (args) =>
+  wrap('log10x_configure_compact', () => executeConfigureCompact(args))
 );
 
 // ── Tool: log10x_configure_regulator (per-container cap from $ budget) ──
@@ -993,7 +993,7 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_advise_reporter', intent: 'Reporter install/verify/teardown plan for a forwarder — inline or standalone (shape=standalone)' },
   { name: 'log10x_advise_receiver', intent: 'Receiver install/verify/teardown plan — inline only, with optional compact encoding (optimize=true)' },
   { name: 'log10x_advise_retriever', intent: 'Retriever install/verify/teardown plan — standalone S3 + SQS archive + query' },
-  { name: 'log10x_advise_compact', intent: 'Render a `gh` PR command + diff for a compactReceiver lookup-CSV update against the customer GitOps repo (engine hot-reloads the CSV without a pipeline restart)' },
+  { name: 'log10x_configure_compact', intent: 'Resolve a service to its k8s_container set via Prometheus; emit a `gh` PR command against the compact cap-file CSV with per-container `true`/`false` decisions (engine hot-reloads the CSV without a pipeline restart)' },
   { name: 'log10x_configure_regulator', intent: 'Derive a per-container rate-regulator byte cap from a monthly dollar budget; validate against five Prometheus sanity checks; emit a `gh` PR command against the rate-cap CSV (engine hot-reloads it)' },
   { name: 'log10x_pattern_mitigate', intent: 'Return the env-gated mitigation options + exact configs for a pattern (drop @ analyzer, drop @ forwarder, mute @ 10x, compact @ 10x) in user terms with env-capability gating' },
 ];

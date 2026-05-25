@@ -273,11 +273,11 @@ export async function executeSavings(
   // savings even when the obvious next question is "where is this
   // coming from?".
   //
-  // Compact-mode advisor is intentionally NOT hinted here: it requires
-  // a snapshot_id (from discover_env) which savings has no way to
-  // produce. Walking savings → advise_compact directly produces a
-  // "missing target" stub. The user routes via discover_env →
-  // advise_install → advise_compact instead.
+  // configure_compact is intentionally NOT hinted here: it requires a
+  // snapshot_id (from discover_env) which savings has no way to produce.
+  // Walking savings → configure_compact directly produces a "missing target"
+  // stub. The user routes via discover_env → advise_install →
+  // configure_compact instead.
   const next: NextAction[] = [
     {
       tool: 'log10x_top_patterns',

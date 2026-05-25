@@ -296,21 +296,21 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
 function buildCompactReceiverGitopsExplainer(opts: { optimize: boolean }): GitopsExplainer {
   return {
     headline:
-      'The compactReceiver decides per-event whether to emit `encode()` (compact, ~20-40x smaller) or `fullText`. Decisions live in a CSV the engine pulls from your GitHub repo on a schedule. Wire GitOps once and the MCP can author per-pattern PRs (`log10x_advise_compact`) — the engine hot-reloads the CSV without a pod restart.',
+      'The compactReceiver decides per-event whether to emit `encode()` (compact, ~20-40x smaller) or `fullText`. The decision is per-container: a CSV keyed by k8s_container name lists which containers to compact. Wire GitOps once and the MCP can author per-container PRs (`log10x_configure_compact`) — the engine hot-reloads the CSV without a pod restart.',
     whenToEnable: [
-      'You want **selective** compaction — compact most patterns but preserve specific ones (audit, compliance, debug).',
+      'You want **selective** compaction — compact specific containers/services but preserve others (audit, compliance, debug).',
       'You want decisions to evolve over time without redeploying the receiver.',
-      'You want the MCP to manage the compact-decisions file via PRs (review-able, reversible).',
+      'You want the MCP to manage the cap-file via PRs (review-able, reversible).',
     ],
     whenToSkip: [
       opts.optimize
-        ? 'The chart `optimize` feature flag is already set on this plan, which compacts every event. Add GitOps only if you need to opt SPECIFIC patterns OUT of compaction (audit/compliance).'
-        : 'You will turn on the chart `optimize` feature flag later to compact every event uniformly — no per-pattern decisions needed.',
+        ? 'The chart `optimize` feature flag is already set on this plan, which compacts every event. Add GitOps only if you need to opt SPECIFIC containers OUT of compaction (audit/compliance).'
+        : 'You will turn on the chart `optimize` feature flag later to compact every event uniformly — no per-container decisions needed.',
       'You will not be using the receiver app at all (this section is receiver-only).',
     ],
     repoLayout: [
-      { path: 'pipelines/run/receive/compact/compact-lookup.csv', comment: 'MCP edits this — CSV change → hot reload (no restart)' },
-      { path: 'pipelines/run/receive/compact/compact-object-global.js', comment: 'predicate logic — JS change → pipeline restart' },
+      { path: 'pipelines/run/receive/compact/compact-cap.csv', comment: 'MCP edits this — per-container CSV; in-place writes hot-reload (no restart)' },
+      { path: 'pipelines/run/receive/compact/compact-object-cap.js', comment: 'predicate logic — JS change → pipeline restart (rarely needed; CSV covers most cases)' },
     ],
     envVars: [
       { name: 'GH_ENABLED', value: 'true', required: true, note: 'master switch for the GitHub puller' },
@@ -318,19 +318,19 @@ function buildCompactReceiverGitopsExplainer(opts: { optimize: boolean }): Gitop
       { name: 'GH_TOKEN', value: '<github PAT>', required: true, note: 'PAT with Contents: Read scope; store as a k8s Secret + reference via valueFrom' },
       { name: 'GH_BRANCH', value: 'main', required: false, note: 'branch to pull from' },
       { name: 'GH_SYNC_INTERVAL', value: '30s', required: false, note: 'engine re-fetches the repo this often' },
-      { name: 'compactReceiverLookupFile', value: 'pipelines/run/receive/compact/compact-lookup.csv', required: true, note: 'must match the path inside your GitOps repo' },
-      { name: 'compactReceiverFieldNames', value: '[symbolMessage]', required: false, note: 'fields joined with `_` to form each event\'s lookup key' },
-      { name: 'compactReceiverDefault', value: 'false', required: false, note: '`false`: entries opt INTO compaction. `true`: entries opt OUT (use with the chart `optimize` flag)' },
+      { name: 'compactReceiverLookupFile', value: 'pipelines/run/receive/compact/compact-cap.csv', required: true, note: 'must match the path inside your GitOps repo (env var name kept for engine compatibility; content is now per-container)' },
+      { name: 'compactReceiverContainerField', value: 'k8s_container', required: false, note: 'event field whose value scopes the cap-file lookup; defaults to the k8s container name' },
+      { name: 'compactReceiverDefault', value: 'false', required: false, note: '`false`: cap-file entries opt INTO compaction. `true`: cap-file entries opt OUT (use with the chart `optimize` flag)' },
     ],
     mcpHandoff: {
-      tool: 'log10x_advise_compact',
+      tool: 'log10x_configure_compact',
       example:
-        'log10x_advise_compact \\\n  gitops_repo=your-org/your-config-repo \\\n  compact=[payment_retry_gateway_timeout, k8s_health_probe_200] \\\n  preserve=[auth_audit_trail] \\\n  reason="OPS-5123: spike triage"',
+        'log10x_configure_compact \\\n  gitops_repo=your-org/your-config-repo \\\n  service=payment-service \\\n  decision=true \\\n  reason="OPS-5123: high-volume container"',
     },
     caveats: [
       'The default `paths` glob in `pipelines/gitops/config.yaml` is hardcoded to `test/*.csv` for local testing. Override either by forking the config repo and editing the glob, or by setting `GH_PATH=pipelines/run/receive/compact/*` (Gap A — env override is being wired up).',
       'Customers running multiple receiver pods all watching the same GitOps repo will see fan-out: a single PR triggers reload on every pod within a poll window. That is the intended behavior — kept here as a heads-up for capacity planning.',
-      'The GitOps puller pulls files into a temp dir scoped per `(repo, branch, sha, pollInterval)`. Folder names rotate as the branch advances; the customer never references that path directly — only the repo-relative path in `compactReceiverLookupFile`.',
+      'Hot-reload requires in-place writes (the gitops pattern). Do not source the cap-file via a Kubernetes ConfigMap mount — CM swaps the file via a symlink rename, which the engine\'s stat-based watcher will not see.',
     ],
   };
 }
