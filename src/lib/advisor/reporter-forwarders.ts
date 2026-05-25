@@ -37,7 +37,7 @@
  * `unknown` and the advisor asks them to pick a supported forwarder.
  */
 
-import type { ForwarderKind } from '../discovery/types.js';
+import type { ForwarderKind, MetricsBackendKind } from '../discovery/types.js';
 
 export type OutputDestination = 'mock' | 'elasticsearch' | 'splunk' | 'datadog' | 'cloudwatch';
 
@@ -120,6 +120,20 @@ export interface ForwarderSpec {
      * exclusive with `optimize`.
      */
     readOnly?: boolean;
+    /**
+     * Metrics backends the engine emits TenXSummary to. `['log10x']` is
+     * the chart default (SaaS Prometheus); additional / replacement
+     * backends are wired via `tenx.extraArgs` (`@run/output/metric/<b>`)
+     * and `tenx.extraEnv` (vendor-specific env vars).
+     */
+    backends?: MetricsBackendKind[];
+    /**
+     * When true, the engine runs fully airgapped. For the standalone
+     * Reporter chart this is the top-level `airgapped: true` value;
+     * for Receiver inline overlays it's the `TENX_AIRGAPPED=true` env
+     * var on the engine sidecar.
+     */
+    airgapped?: boolean;
   }) => string;
   /** Verify probes — commands that, collectively, prove data is flowing. */
   verifyProbes: (opts: {
@@ -162,6 +176,90 @@ function renderTenxFeatureFlags(opts: { optimize?: boolean; readOnly?: boolean }
   return lines.length === 0 ? '' : '\n' + lines.join('\n');
 }
 
+/**
+ * Render the `tenx.extraArgs` + `tenx.extraEnv` blocks that wire up
+ * additional metrics backends (beyond the chart-default `log10x`) and
+ * the `TENX_AIRGAPPED` env var for Receiver inline overlays.
+ *
+ * Emits nothing when there's nothing to add (default `['log10x']` and
+ * not airgapped). Always emits 2-space-indented YAML to nest under
+ * `tenx:`.
+ *
+ * Note: `log10x` is the chart default — we don't emit `@run/output/metric/log10x`
+ * because the chart already wires that pipeline. Only NON-log10x backends
+ * get an extraArg.
+ *
+ * The `airgappedAsEnvVar` flag is true for Receiver inline overlays
+ * (engine reads `TENX_AIRGAPPED`) and false for the standalone Reporter
+ * chart (which has a top-level `airgapped:` value instead).
+ */
+function renderTenxExtraArgsAndEnv(opts: {
+  backends?: MetricsBackendKind[];
+  airgapped?: boolean;
+  airgappedAsEnvVar: boolean;
+}): string {
+  const nonLog10xBackends = (opts.backends ?? []).filter((b) => b !== 'log10x');
+  const lines: string[] = [];
+
+  if (nonLog10xBackends.length > 0) {
+    lines.push('  extraArgs:');
+    for (const b of nonLog10xBackends) {
+      lines.push(`    - "@run/output/metric/${b}"`);
+    }
+  }
+
+  const envEntries: Array<{ name: string; value: string }> = [];
+  for (const b of nonLog10xBackends) {
+    envEntries.push(...envForBackend(b));
+  }
+  if (opts.airgapped && opts.airgappedAsEnvVar) {
+    envEntries.push({ name: 'TENX_AIRGAPPED', value: 'true' });
+  }
+  if (envEntries.length > 0) {
+    lines.push('  extraEnv:');
+    for (const e of envEntries) {
+      lines.push(`    - name: ${e.name}`);
+      lines.push(`      value: "${e.value}"`);
+    }
+  }
+
+  return lines.length === 0 ? '' : '\n' + lines.join('\n');
+}
+
+/**
+ * Best-effort env-var placeholders for each metrics backend. The
+ * renderer doesn't have the user's actual credentials at plan-render
+ * time, so it emits well-known placeholders for the user to fill in
+ * before `helm upgrade`.
+ */
+function envForBackend(kind: MetricsBackendKind): Array<{ name: string; value: string }> {
+  switch (kind) {
+    case 'datadog':
+      return [
+        { name: 'DD_API_KEY', value: '<your-datadog-api-key>' },
+        { name: 'DD_SITE', value: 'datadoghq.com' },
+      ];
+    case 'elastic':
+      return [
+        { name: 'ELASTIC_HOST', value: '<https://your-elastic-host:9200>' },
+        { name: 'ELASTIC_API_KEY', value: '<your-elastic-api-key>' },
+      ];
+    case 'cloudwatch':
+      return [{ name: 'AWS_REGION', value: '<your-region>' }];
+    case 'signalfx':
+      return [
+        { name: 'SIGNALFX_TOKEN', value: '<your-signalfx-token>' },
+        { name: 'SIGNALFX_REALM', value: '<your-realm-e.g.-us0>' },
+      ];
+    case 'prometheus':
+      return [
+        { name: 'PROMETHEUS_REMOTE_WRITE_URL', value: '<https://your-prom/api/v1/write>' },
+      ];
+    default:
+      return [];
+  }
+}
+
 /** k8s-recommended selector: `app.kubernetes.io/instance=<release>`. */
 function k8sRecommendedSelector(releaseName: string): string {
   return `app.kubernetes.io/instance=${releaseName}`;
@@ -188,12 +286,13 @@ export const REPORTER_FORWARDER_SPECS: Record<Exclude<ForwarderKind, 'unknown'>,
     hasTenxSidecar: false,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ licenseJwt, releaseName, destination, outputHost, splunkHecToken, gitToken, optimize, readOnly }) => {
+    renderValues: ({ licenseJwt, releaseName, destination, outputHost, splunkHecToken, gitToken, optimize, readOnly, backends, airgapped }) => {
       const outputBlock = renderFluentBitOutput(destination, outputHost, splunkHecToken);
       // The fluent-bit chart's values.yaml exposes optimize + readOnly
       // booleans directly; the chart templates wire them to the matching
       // engine launch args. Default (both false) is plain receiver.
       const featureFlags = renderTenxFeatureFlags({ optimize, readOnly });
+      const extras = renderTenxExtraArgsAndEnv({ backends, airgapped, airgappedAsEnvVar: true });
       return `tenx:
   enabled: true
   licenseJwt: "${licenseJwt}"${featureFlags}
@@ -202,7 +301,7 @@ export const REPORTER_FORWARDER_SPECS: Record<Exclude<ForwarderKind, 'unknown'>,
   config:
     git:
       enabled: true
-      url: "https://github.com/log-10x/config.git"
+      url: "https://github.com/log-10x/config.git"${extras}
 
 ${outputBlock}
 `;
@@ -271,7 +370,7 @@ ${outputBlock}
     hasTenxSidecar: false,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ licenseJwt, releaseName, destination, outputHost, splunkHecToken, gitToken, optimize, readOnly }) => {
+    renderValues: ({ licenseJwt, releaseName, destination, outputHost, splunkHecToken, gitToken, optimize, readOnly, backends, airgapped }) => {
       // IMPORTANT: fluentd's output config lives UNDER `tenx:`, not
       // as a second top-level `tenx:` block. A prior version of this
       // template emitted two `tenx:` keys and YAML silently dropped
@@ -283,6 +382,7 @@ ${outputBlock}
       // Same as fluent-bit: chart values expose optimize + readOnly
       // booleans directly; chart templates handle the engine wiring.
       const featureFlags = renderTenxFeatureFlags({ optimize, readOnly });
+      const extras = renderTenxExtraArgsAndEnv({ backends, airgapped, airgappedAsEnvVar: true });
       return `tenx:
   enabled: true
   licenseJwt: "${licenseJwt}"${featureFlags}
@@ -291,7 +391,7 @@ ${outputBlock}
   config:
     git:
       enabled: true
-      url: "https://github.com/log-10x/config.git"
+      url: "https://github.com/log-10x/config.git"${extras}
   # Override the default container-log tail input to exclude all log-forwarder
   # container logs (fluent-bit, fluentd, filebeat, logstash, otel-collector).
   # Without this, when multiple forwarders share a node, each tails the other's
@@ -392,12 +492,13 @@ ${indent(outputConfig, 6)}
     hasTenxSidecar: false,
     selectorStyle: 'legacy-helm',
     selectorLabel: (r) => legacyElasticSelector(r, 'filebeat'),
-    renderValues: ({ licenseJwt, releaseName, destination, outputHost, gitToken, optimize, readOnly }) => {
+    renderValues: ({ licenseJwt, releaseName, destination, outputHost, gitToken, optimize, readOnly, backends, airgapped }) => {
       // Chart defaults reference Elasticsearch secrets/certs. For a mock
       // install we MUST override extraEnvs/secretMounts to empty so pods
       // don't hang in FailedMount.
       const outputBlock = renderFilebeatOutput(destination, outputHost);
       const featureFlags = renderTenxFeatureFlags({ optimize, readOnly });
+      const extras = renderTenxExtraArgsAndEnv({ backends, airgapped, airgappedAsEnvVar: true });
       return `tenx:
   enabled: true
   licenseJwt: "${licenseJwt}"
@@ -406,7 +507,7 @@ ${indent(outputConfig, 6)}
   config:
     git:
       enabled: true
-      url: "https://github.com/log-10x/config.git"${featureFlags}
+      url: "https://github.com/log-10x/config.git"${featureFlags}${extras}
 
 # The chart's default readiness/liveness probes run \`filebeat test output\`
 # which doesn't support \`output.file\` (used by mock destination). Override
@@ -487,9 +588,10 @@ ${indent(outputBlock, 6)}
     hasTenxSidecar: false,
     selectorStyle: 'legacy-helm',
     selectorLabel: (r) => legacyElasticSelector(r, 'logstash'),
-    renderValues: ({ licenseJwt, releaseName, destination, outputHost, gitToken, optimize, readOnly }) => {
+    renderValues: ({ licenseJwt, releaseName, destination, outputHost, gitToken, optimize, readOnly, backends, airgapped }) => {
       const output = renderLogstashOutput(destination, outputHost);
       const featureFlags = renderTenxFeatureFlags({ optimize, readOnly });
+      const extras = renderTenxExtraArgsAndEnv({ backends, airgapped, airgappedAsEnvVar: true });
       return `tenx:
   enabled: true
   licenseJwt: "${licenseJwt}"
@@ -498,7 +600,7 @@ ${indent(outputBlock, 6)}
   config:
     git:
       enabled: true
-      url: "https://github.com/log-10x/config.git"${featureFlags}
+      url: "https://github.com/log-10x/config.git"${featureFlags}${extras}
 
 # Avoid chart defaults hardcoding Elasticsearch credentials/mounts.
 extraEnvs: []
@@ -559,8 +661,9 @@ ${indent(output, 4)}
     hasTenxSidecar: false,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ licenseJwt, releaseName, gitToken, optimize, readOnly }) => {
+    renderValues: ({ licenseJwt, releaseName, gitToken, optimize, readOnly, backends, airgapped }) => {
       const featureFlags = renderTenxFeatureFlags({ optimize, readOnly });
+      const extras = renderTenxExtraArgsAndEnv({ backends, airgapped, airgappedAsEnvVar: true });
       // NOTE: this values overlay is a placeholder. The canonical Vector
       // overlay shape (sources/transforms/sinks wiring for the tenx
       // sidecar) is documented in mksite/docs/apps/receiver/deploy.md and
@@ -574,7 +677,7 @@ ${indent(output, 4)}
   config:
     git:
       enabled: true
-      url: "https://github.com/log-10x/config.git"
+      url: "https://github.com/log-10x/config.git"${extras}
 
 # TODO: Add the Vector sources/transforms/sinks wiring per
 # mksite/docs/apps/receiver/deploy.md once the canonical overlay
@@ -633,7 +736,7 @@ ${indent(output, 4)}
     hasTenxSidecar: false,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ licenseJwt, releaseName, destination, outputHost, gitToken, optimize, readOnly }) => {
+    renderValues: ({ licenseJwt, releaseName, destination, outputHost, gitToken, optimize, readOnly, backends, airgapped }) => {
       // The OTel chart doesn't auto-wire filelog unless the preset is
       // on. We turn it on explicitly so the user's pipeline just works.
       // image.repository is required by the chart and has no default.
@@ -643,6 +746,7 @@ ${indent(output, 4)}
       // engine launch args (and gate the fluentforward / from-tenx
       // pipeline when readOnly is true).
       const featureFlags = renderTenxFeatureFlags({ optimize, readOnly });
+      const extras = renderTenxExtraArgsAndEnv({ backends, airgapped, airgappedAsEnvVar: true });
       return `mode: "daemonset"
 
 # image.repository defaults in the chart's values.yaml to the upstream
@@ -658,7 +762,7 @@ tenx:
   config:
     git:
       enabled: true
-      url: "https://github.com/log-10x/config.git"
+      url: "https://github.com/log-10x/config.git"${extras}
 
 # Turn on the chart's filelog logsCollection preset so the receiver
 # is actually wired up; advising pipeline.receivers without this
@@ -744,7 +848,7 @@ export const STANDALONE_SPEC: ForwarderSpec = {
   hasTenxSidecar: false,
   selectorStyle: 'k8s-recommended',
   selectorLabel: (r) => k8sRecommendedSelector(r),
-  renderValues: ({ licenseJwt, releaseName, gitToken }) => {
+  renderValues: ({ licenseJwt, releaseName, gitToken, backends, airgapped }) => {
     // reporter-10x uses a flat values layout: top-level log10xLicenseJwt
     // + runtimeName (NOT nested under `tenx:`). The chart turns the JWT
     // into a Kubernetes Secret and mounts it as a file pointed at by
@@ -754,6 +858,17 @@ export const STANDALONE_SPEC: ForwarderSpec = {
     // faster boot, no outbound call. gitToken is still required (init
     // container unconditionally mounts a secret derived from it) even
     // though git.enabled is false.
+    //
+    // Airgapped is the chart's TOP-LEVEL `airgapped:` value (NOT a tenx
+    // env var as in the Receiver overlays); the chart secret-templates
+    // and engine launch args branch off it. Additional metrics backends
+    // wire via `tenx.extraArgs` + `tenx.extraEnv` — same shape as
+    // Receiver overlays.
+    const airgappedLine = airgapped ? `\nairgapped: true` : '';
+    const extras = renderTenxExtraArgsAndEnv({ backends, airgapped, airgappedAsEnvVar: false });
+    const tenxBlock = extras
+      ? `\ntenx:${extras}\n`
+      : '';
     return `# reporter-10x: non-invasive parallel DaemonSet.
 # Runs alongside the user's existing forwarder without touching it.
 log10xLicenseJwt: "${licenseJwt}"
@@ -761,8 +876,7 @@ runtimeName: "${releaseName}"
 gitToken: "${gitToken ?? DEFAULT_GIT_TOKEN}"
 config:
   git:
-    enabled: false
-`;
+    enabled: false${airgappedLine}${tenxBlock}`;
   },
   verifyProbes: ({ releaseName, namespace }) => {
     const sel = k8sRecommendedSelector(releaseName);

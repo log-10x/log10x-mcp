@@ -197,3 +197,52 @@ export async function pollForAccessToken(opts: PollOptions): Promise<AccessToken
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
+
+/**
+ * Refresh an expired Auth0 access token using a stored refresh token.
+ * The device flow asks for `offline_access` so we always get a refresh
+ * token at signin time. Refresh tokens are long-lived by default in
+ * Auth0; access tokens typically last 24h.
+ *
+ * Returns the new access token + (optionally) a rotated refresh token.
+ * Auth0 may issue a new refresh_token on each refresh — callers should
+ * persist whichever value is returned to keep the chain alive.
+ */
+export async function refreshAuth0AccessToken(
+  refreshToken: string,
+  clientId: string = LOG10X_AUTH0_CLIENT_ID,
+  domain: string = LOG10X_AUTH0_DOMAIN
+): Promise<AccessTokenResponse> {
+  const url = `https://${domain}/oauth/token`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: clientId,
+      grant_type: 'refresh_token',
+      refresh_token: refreshToken,
+    }).toString(),
+  });
+  let json: Partial<AccessTokenResponse> & { error?: string; error_description?: string };
+  try {
+    json = (await res.json()) as typeof json;
+  } catch {
+    const body = await res.text().catch(() => '');
+    throw new Error(`Auth0 refresh returned non-JSON: HTTP ${res.status}: ${body.slice(0, 300)}`);
+  }
+  if (!res.ok || !json.access_token) {
+    throw new Error(
+      `Auth0 refresh failed: HTTP ${res.status}: ${json.error || 'no access_token'}${
+        json.error_description ? `: ${json.error_description}` : ''
+      }`
+    );
+  }
+  return {
+    access_token: json.access_token,
+    id_token: json.id_token,
+    refresh_token: json.refresh_token,
+    scope: json.scope,
+    expires_in: json.expires_in,
+    token_type: json.token_type || 'Bearer',
+  };
+}

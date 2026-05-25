@@ -297,11 +297,23 @@ async function completeWithDeviceCode(
     );
   }
 
-  // 3. Persist credentials.
+  // 3. Persist credentials. Also stash the Auth0 access + refresh tokens
+  //    so the install wizard can mint a user-scoped license JWT later
+  //    (the gateway's POST /license route validates Bearer Auth0 tokens
+  //    only, not the Log10x API key). The `offline_access` scope on the
+  //    device-flow request guarantees a refresh token; access tokens
+  //    expire after ~24h, refresh tokens are long-lived.
   let credentialsPath: string;
+  const now = Date.now();
+  const expiresAtIso = token.expires_in
+    ? new Date(now + token.expires_in * 1000).toISOString()
+    : undefined;
   try {
     credentialsPath = await writeCredentials({
       apiKey: signinResult.api_key,
+      auth0AccessToken: token.access_token,
+      auth0RefreshToken: token.refresh_token,
+      auth0AccessTokenExpiresAt: expiresAtIso,
     });
   } catch (e) {
     return (

@@ -24,6 +24,22 @@ export interface Credentials {
   apiKey: string;
   /** ISO-8601 timestamp when these credentials were written. */
   signedInAt?: string;
+  /**
+   * Auth0 access token retained from the device-flow signin. Needed by
+   * the install wizard to mint a user-scoped license JWT via
+   * `POST /api/v1/license` (which only accepts Bearer Auth0 tokens, not
+   * the Log10x API key). Absent on the pasted-API-key signin path —
+   * the wizard falls back to the anonymous demo license in that case.
+   */
+  auth0AccessToken?: string;
+  /**
+   * Auth0 refresh token. The device flow asks for the `offline_access`
+   * scope so we get one. Used to refresh the access token when it
+   * expires (typically 24h) without forcing the user to re-sign in.
+   */
+  auth0RefreshToken?: string;
+  /** ISO-8601 expiry of `auth0AccessToken`. */
+  auth0AccessTokenExpiresAt?: string;
 }
 
 function credentialsPath(): string {
@@ -65,6 +81,14 @@ export async function readCredentials(): Promise<Credentials | null> {
   return {
     apiKey: c.apiKey,
     signedInAt: typeof c.signedInAt === 'string' ? c.signedInAt : undefined,
+    auth0AccessToken:
+      typeof c.auth0AccessToken === 'string' ? c.auth0AccessToken : undefined,
+    auth0RefreshToken:
+      typeof c.auth0RefreshToken === 'string' ? c.auth0RefreshToken : undefined,
+    auth0AccessTokenExpiresAt:
+      typeof c.auth0AccessTokenExpiresAt === 'string'
+        ? c.auth0AccessTokenExpiresAt
+        : undefined,
   };
 }
 

@@ -37,7 +37,7 @@ import { z } from 'zod';
 import { getSnapshot, updateWizardSession } from '../lib/discovery/snapshot-store.js';
 import { buildReporterPlan } from '../lib/advisor/reporter.js';
 import { renderPlan } from '../lib/advisor/render.js';
-import { fetchDemoLicense, LicenseFetchError } from '../lib/license-api.js';
+import { acquireLicenseForWizard, LicenseFetchError } from '../lib/license-api.js';
 import { resolveAdvisorDestination } from '../lib/advisor/dest-resolve.js';
 import type {
   DiscoverySnapshot,
@@ -160,40 +160,45 @@ export async function executeAdviseInstall(
     return next.markdown;
   }
 
-  // Soft-warn for demo + airgapped before we mint the license.
-  const isSignedIn = !envs.isDemoMode;
-  if (session.airgapped === true && !isSignedIn && !session.licenseJwt) {
-    return renderDemoAirgappedWarning(session);
-  }
-
-  // Auto-fetch a demo license if the user hasn't supplied one and isn't
-  // signed in. Signed-in users normally pass `license_jwt` explicitly
-  // (or the agent fetches via `/api/v1/license` with their Auth0 token
-  // — not yet wired here; see follow-up).
+  // Auto-acquire a license if the user hasn't supplied one. Routes
+  // between user-scoped (signed-in, Auth0 token available) and demo
+  // (not signed in, or pasted-API-key path where we have no Auth0 token).
+  // Refreshes the Auth0 access token transparently if it's expired.
   if (!session.licenseJwt) {
     try {
-      const lic = await fetchDemoLicense();
+      const lic = await acquireLicenseForWizard();
       updateWizardSession(args.snapshot_id, {
         licenseJwt: lic.jwt,
-        isDemoLicense: true,
+        isDemoLicense: lic.isDemoLicense,
       });
       session.licenseJwt = lic.jwt;
-      session.isDemoLicense = true;
+      session.isDemoLicense = lic.isDemoLicense;
     } catch (e) {
       const msg = e instanceof LicenseFetchError ? e.message : String(e);
       return [
-        `# Install wizard — couldn't mint a demo license`,
+        `# Install wizard — couldn't acquire a license JWT`,
         ``,
-        `The wizard tried to fetch a 14-day anonymous demo JWT from \`POST /api/v1/license/demo\` and failed:`,
+        `The wizard tried to mint a license via the gateway and failed:`,
         ``,
         `> ${msg}`,
         ``,
         `Options:`,
-        `- Sign in via \`log10x_signin_start\` to mint a user-scoped license`,
+        `- Sign in via \`log10x_signin_start\` if you haven't already`,
         `- Pass an existing JWT via \`license_jwt\``,
         `- Retry — the gateway may have been transiently unavailable`,
       ].join('\n');
     }
+  }
+
+  // Soft-warn: airgapped + demo license can't actually work — the engine
+  // refuses to run airgapped on demo / limited licenses and silently
+  // downgrades to online mode. We give the user a clear choice before
+  // emitting a plan they think is airgapped but won't be.
+  // Catches BOTH paths: not-signed-in users (fetched anonymous demo) AND
+  // signed-in-via-pasted-key users (fell back to demo because we lack
+  // Auth0 tokens to mint a user license).
+  if (session.airgapped === true && session.isDemoLicense === true) {
+    return renderDemoAirgappedWarning(session, !envs.isDemoMode);
   }
 
   // Everything answered. Emit the plan.
@@ -378,16 +383,26 @@ function airgappedLog10xConflict(backends: MetricsBackendKind[]): string {
   ].join('\n');
 }
 
-function renderDemoAirgappedWarning(session: WizardSession): string {
-  const backendList = (session.backends ?? []).map((b) => `\`${b}\``).join(' + ') || 'your chosen backend';
+function renderDemoAirgappedWarning(session: WizardSession, isSignedIn: boolean): string {
+  const backendList =
+    (session.backends ?? []).map((b) => `\`${b}\``).join(' + ') || 'your chosen backend';
+
+  const intro = isSignedIn
+    ? `You're signed in, but the wizard fell back to an anonymous demo license — usually because the sign-in was done via pasted API key, which doesn't give us the Auth0 access token needed to mint a user-scoped JWT.`
+    : `You're not signed in, so the wizard minted a 14-day anonymous demo JWT.`;
+
+  const signinSuggestion = isSignedIn
+    ? `1. **Sign in via the device flow** to upgrade to a user-scoped license (\`log10x_signin_start\` — it'll go through a browser OAuth that gives us the Auth0 tokens we need). Re-invoke this tool afterward. Your \`airgapped: true\` choice is remembered.`
+    : `1. **Sign in** for a real license. Call \`log10x_signin_start\`, then re-invoke this tool. Your \`airgapped: true\` choice is remembered.`;
+
   return [
     '# Install wizard — airgapped + demo license heads-up',
     '',
-    `You picked **airgapped: true** but you're not signed in, so the wizard would mint a 14-day anonymous demo JWT. **The engine refuses to run airgapped on a demo license** — it logs a warning and downgrades to online mode silently. Manually editing the values file later won't override this; the gate is in the engine.`,
+    `${intro} **The engine refuses to run airgapped on demo / limited licenses** — it logs a warning and downgrades to online mode silently. Manually editing the values file later won't override this; the gate is in the engine.`,
     '',
     '**Two paths forward**:',
     '',
-    `1. **Sign in** for a real license (idempotent — won't disrupt anything). Call \`log10x_signin_start\`, then re-invoke this tool. Your \`airgapped: true\` choice will be preserved in the session.`,
+    signinSuggestion,
     `2. **Proceed without airgapped** for now — the agents will still emit only to ${backendList}, just with anonymous engine telemetry going to log10x. Re-invoke with \`airgapped: false\` to confirm.`,
     '',
     "_Your other answers (app, forwarder, backends) are remembered — you don't need to re-pass them._",
@@ -449,15 +464,6 @@ async function renderInstallPlan(
       skipTeardown: action === 'install' || action === 'verify',
     });
     lines.push(destNote + renderPlan(plan, action));
-
-    // Manual-config note for backend + airgapped (until the per-forwarder
-    // renderValues functions natively wire these into the YAML). For
-    // log10x SaaS + non-airgapped, the chart defaults are correct.
-    const manualBlock = renderManualConfigForBackendAndAirgapped(session);
-    if (manualBlock) {
-      lines.push('');
-      lines.push(manualBlock);
-    }
   }
 
   return lines.join('\n');
@@ -474,93 +480,5 @@ function renderChoiceSummary(session: WizardSession): string {
   if (session.airgapped) rows.push(`- **Airgapped**: yes (engine emits only to user-owned backends)`);
   if (session.isDemoLicense) rows.push(`- **License**: anonymous 14-day demo (sign in for a user-scoped one)`);
   return rows.join('\n');
-}
-
-function renderManualConfigForBackendAndAirgapped(session: WizardSession): string {
-  const backends = session.backends ?? ['log10x'];
-  // Only log10x and not airgapped — chart defaults are already correct.
-  const nonLog10xBackends = backends.filter((b) => b !== 'log10x');
-  if (nonLog10xBackends.length === 0 && !session.airgapped) return '';
-
-  const lines: string[] = [];
-  lines.push('## Manual config — paste into your values.yaml');
-  lines.push('');
-  lines.push(
-    "The per-forwarder helm value renderers don't yet wire `backends` + `airgapped` into the chart YAML automatically. Append the following to your values file before running `helm upgrade`:"
-  );
-  lines.push('');
-  lines.push('```yaml');
-
-  if (session.app === 'reporter' && session.airgapped) {
-    lines.push('# Reporter chart top-level airgapped knob.');
-    lines.push('airgapped: true');
-    lines.push('');
-  }
-
-  // Emit `@run/output/metric/<backend>` for each non-log10x backend.
-  // (`log10x` is the chart default — no extraArg needed.)
-  if (nonLog10xBackends.length > 0 || (session.app === 'receiver' && session.airgapped)) {
-    lines.push('tenx:');
-    if (nonLog10xBackends.length > 0) {
-      lines.push('  extraArgs:');
-      for (const b of nonLog10xBackends) {
-        lines.push(`    - "@run/output/metric/${b}"`);
-      }
-    }
-    const envLines: Array<{ name: string; value: string }> = [];
-    for (const b of nonLog10xBackends) {
-      envLines.push(...envForBackend(b));
-    }
-    if (session.app === 'receiver' && session.airgapped) {
-      envLines.push({ name: 'TENX_AIRGAPPED', value: 'true' });
-    }
-    if (envLines.length > 0) {
-      lines.push('  extraEnv:');
-      for (const env of envLines) {
-        lines.push(`    - name: ${env.name}`);
-        lines.push(`      value: "${env.value}"`);
-      }
-    }
-  }
-
-  lines.push('```');
-
-  return lines.join('\n');
-}
-
-/**
- * Best-effort env-var placeholders for each metrics backend. The wizard
- * doesn't have the user's actual credentials at plan-render time —
- * these are guidance, with placeholders the user fills in.
- */
-function envForBackend(kind: MetricsBackendKind): Array<{ name: string; value: string }> {
-  switch (kind) {
-    case 'datadog':
-      return [
-        { name: 'DD_API_KEY', value: '<your-datadog-api-key>' },
-        { name: 'DD_SITE', value: 'datadoghq.com' },
-      ];
-    case 'elastic':
-      return [
-        { name: 'ELASTIC_HOST', value: '<https://your-elastic-host:9200>' },
-        { name: 'ELASTIC_API_KEY', value: '<your-elastic-api-key>' },
-      ];
-    case 'cloudwatch':
-      return [
-        { name: 'AWS_REGION', value: '<your-region>' },
-        // Use IRSA in prod; AWS_* env vars only for non-IRSA setups.
-      ];
-    case 'signalfx':
-      return [
-        { name: 'SIGNALFX_TOKEN', value: '<your-signalfx-token>' },
-        { name: 'SIGNALFX_REALM', value: '<your-realm-e.g.-us0>' },
-      ];
-    case 'prometheus':
-      return [
-        { name: 'PROMETHEUS_REMOTE_WRITE_URL', value: '<https://your-prom/api/v1/write>' },
-      ];
-    default:
-      return [];
-  }
 }
 
