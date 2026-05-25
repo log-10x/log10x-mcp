@@ -96,7 +96,13 @@ export interface ForwarderSpec {
    * filebeat, logstash) reads `tenx.optimize` / `tenx.readOnly` directly.
    */
   renderValues: (opts: {
-    apiKey: string;
+    /**
+     * Log10x license JWT — the credential the engine consumes. Fetched
+     * from the gateway's `/api/v1/license/demo` (anonymous) or
+     * `/api/v1/license` (Auth0-authed) endpoints. Not the same as the
+     * MCP's `LOG10X_API_KEY` env var, which is used for MCP↔gateway auth.
+     */
+    licenseJwt: string;
     releaseName: string;
     destination: OutputDestination;
     outputHost?: string;
@@ -182,7 +188,7 @@ export const REPORTER_FORWARDER_SPECS: Record<Exclude<ForwarderKind, 'unknown'>,
     hasTenxSidecar: false,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ apiKey, releaseName, destination, outputHost, splunkHecToken, gitToken, optimize, readOnly }) => {
+    renderValues: ({ licenseJwt, releaseName, destination, outputHost, splunkHecToken, gitToken, optimize, readOnly }) => {
       const outputBlock = renderFluentBitOutput(destination, outputHost, splunkHecToken);
       // The fluent-bit chart's values.yaml exposes optimize + readOnly
       // booleans directly; the chart templates wire them to the matching
@@ -190,7 +196,7 @@ export const REPORTER_FORWARDER_SPECS: Record<Exclude<ForwarderKind, 'unknown'>,
       const featureFlags = renderTenxFeatureFlags({ optimize, readOnly });
       return `tenx:
   enabled: true
-  apiKey: "${apiKey}"${featureFlags}
+  licenseJwt: "${licenseJwt}"${featureFlags}
   runtimeName: "${releaseName}"
   gitToken: "${gitToken ?? DEFAULT_GIT_TOKEN}"
   config:
@@ -265,11 +271,11 @@ ${outputBlock}
     hasTenxSidecar: false,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ apiKey, releaseName, destination, outputHost, splunkHecToken, gitToken, optimize, readOnly }) => {
+    renderValues: ({ licenseJwt, releaseName, destination, outputHost, splunkHecToken, gitToken, optimize, readOnly }) => {
       // IMPORTANT: fluentd's output config lives UNDER `tenx:`, not
       // as a second top-level `tenx:` block. A prior version of this
       // template emitted two `tenx:` keys and YAML silently dropped
-      // the first — losing apiKey/runtimeName/git config entirely.
+      // the first — losing licenseJwt/runtimeName/git config entirely.
       const outputConfig = renderFluentdOutputConfig(destination, outputHost, splunkHecToken);
       const fluentdExcludePaths = FORWARDER_EXCLUDE_REGEX.map((g) => `/var/log/containers/${g.replace('.*', '*').replace('\\.log$', '.log')}`)
         .map((g) => `"${g}"`)
@@ -279,7 +285,7 @@ ${outputBlock}
       const featureFlags = renderTenxFeatureFlags({ optimize, readOnly });
       return `tenx:
   enabled: true
-  apiKey: "${apiKey}"${featureFlags}
+  licenseJwt: "${licenseJwt}"${featureFlags}
   runtimeName: "${releaseName}"
   gitToken: "${gitToken ?? DEFAULT_GIT_TOKEN}"
   config:
@@ -386,7 +392,7 @@ ${indent(outputConfig, 6)}
     hasTenxSidecar: false,
     selectorStyle: 'legacy-helm',
     selectorLabel: (r) => legacyElasticSelector(r, 'filebeat'),
-    renderValues: ({ apiKey, releaseName, destination, outputHost, gitToken, optimize, readOnly }) => {
+    renderValues: ({ licenseJwt, releaseName, destination, outputHost, gitToken, optimize, readOnly }) => {
       // Chart defaults reference Elasticsearch secrets/certs. For a mock
       // install we MUST override extraEnvs/secretMounts to empty so pods
       // don't hang in FailedMount.
@@ -394,7 +400,7 @@ ${indent(outputConfig, 6)}
       const featureFlags = renderTenxFeatureFlags({ optimize, readOnly });
       return `tenx:
   enabled: true
-  apiKey: "${apiKey}"
+  licenseJwt: "${licenseJwt}"
   runtimeName: "${releaseName}"
   gitToken: "${gitToken ?? DEFAULT_GIT_TOKEN}"
   config:
@@ -481,12 +487,12 @@ ${indent(outputBlock, 6)}
     hasTenxSidecar: false,
     selectorStyle: 'legacy-helm',
     selectorLabel: (r) => legacyElasticSelector(r, 'logstash'),
-    renderValues: ({ apiKey, releaseName, destination, outputHost, gitToken, optimize, readOnly }) => {
+    renderValues: ({ licenseJwt, releaseName, destination, outputHost, gitToken, optimize, readOnly }) => {
       const output = renderLogstashOutput(destination, outputHost);
       const featureFlags = renderTenxFeatureFlags({ optimize, readOnly });
       return `tenx:
   enabled: true
-  apiKey: "${apiKey}"
+  licenseJwt: "${licenseJwt}"
   runtimeName: "${releaseName}"
   gitToken: "${gitToken ?? DEFAULT_GIT_TOKEN}"
   config:
@@ -534,6 +540,86 @@ ${indent(output, 4)}
     },
   },
 
+  // Vector — upstream `vector/vector` chart with a values overlay (per
+  // mksite/docs/apps/receiver/deploy.md). No log10x-repackaged Vector
+  // chart exists; the integration is done via overlay on top of the
+  // upstream chart. The exact `tenx:` overlay schema is still being
+  // shaped — TODO: lock down the values structure once the engine team
+  // publishes the canonical Vector sidecar config.
+  vector: {
+    label: 'Vector',
+    integrationMode:
+      'Upstream `vector/vector` chart with a `tenx:` values overlay that injects the 10x engine into the Vector pod. No log10x fork.',
+    helmRepo: 'https://helm.vector.dev',
+    helmRepoAlias: 'vector',
+    chartRef: 'vector/vector',
+    chartAvailability: 'upstream-fallback',
+    primaryImageHint: 'timberio/vector',
+    primaryContainerName: 'vector',
+    hasTenxSidecar: false,
+    selectorStyle: 'k8s-recommended',
+    selectorLabel: (r) => k8sRecommendedSelector(r),
+    renderValues: ({ licenseJwt, releaseName, gitToken, optimize, readOnly }) => {
+      const featureFlags = renderTenxFeatureFlags({ optimize, readOnly });
+      // NOTE: this values overlay is a placeholder. The canonical Vector
+      // overlay shape (sources/transforms/sinks wiring for the tenx
+      // sidecar) is documented in mksite/docs/apps/receiver/deploy.md and
+      // should land here verbatim once stable. The `tenx:` block follows
+      // the same convention as the other forwarder charts.
+      return `tenx:
+  enabled: true
+  licenseJwt: "${licenseJwt}"${featureFlags}
+  runtimeName: "${releaseName}"
+  gitToken: "${gitToken ?? DEFAULT_GIT_TOKEN}"
+  config:
+    git:
+      enabled: true
+      url: "https://github.com/log-10x/config.git"
+
+# TODO: Add the Vector sources/transforms/sinks wiring per
+# mksite/docs/apps/receiver/deploy.md once the canonical overlay
+# is finalized. The default vector/vector chart deploys an empty
+# pipeline, so the install will succeed but no events flow until
+# this block is filled in.
+`;
+    },
+    verifyProbes: ({ releaseName, namespace, destination }) => {
+      const sel = k8sRecommendedSelector(releaseName);
+      const probes: Array<{
+        name: string;
+        question: string;
+        commands: string[];
+        expectOutput?: string;
+        timeoutSec?: number;
+      }> = [
+        {
+          name: 'pods-ready',
+          question: 'Are all Vector pods Ready?',
+          commands: [`kubectl -n ${namespace} wait --for=condition=Ready pod -l ${sel} --timeout=5m`],
+          expectOutput: 'condition met',
+          timeoutSec: 300,
+        },
+        {
+          name: 'processor-alive',
+          question: 'Is the 10x sidecar reachable from the Vector container?',
+          commands: [
+            `kubectl -n ${namespace} logs -l ${sel} -c vector --tail=400 | grep -iE 'tenx|10x|pattern' | head -20`,
+          ],
+        },
+      ];
+      if (destination === 'mock') {
+        probes.push({
+          name: 'tenx-mock-events',
+          question: 'Are tagged [TENX-MOCK] events reaching stdout?',
+          commands: [`kubectl -n ${namespace} logs -l ${sel} -c vector --tail=200 | grep -F 'TENX-MOCK' | head -5`],
+          expectOutput: 'TENX-MOCK',
+          timeoutSec: 120,
+        });
+      }
+      return probes;
+    },
+  },
+
   'otel-collector': {
     label: 'OTel Collector',
     integrationMode:
@@ -547,7 +633,7 @@ ${indent(output, 4)}
     hasTenxSidecar: false,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ apiKey, releaseName, destination, outputHost, gitToken, optimize, readOnly }) => {
+    renderValues: ({ licenseJwt, releaseName, destination, outputHost, gitToken, optimize, readOnly }) => {
       // The OTel chart doesn't auto-wire filelog unless the preset is
       // on. We turn it on explicitly so the user's pipeline just works.
       // image.repository is required by the chart and has no default.
@@ -566,7 +652,7 @@ ${indent(output, 4)}
 
 tenx:
   enabled: true
-  apiKey: "${apiKey}"${featureFlags}
+  licenseJwt: "${licenseJwt}"${featureFlags}
   runtimeName: "${releaseName}"
   gitToken: "${gitToken ?? DEFAULT_GIT_TOKEN}"
   config:
@@ -658,16 +744,19 @@ export const STANDALONE_SPEC: ForwarderSpec = {
   hasTenxSidecar: false,
   selectorStyle: 'k8s-recommended',
   selectorLabel: (r) => k8sRecommendedSelector(r),
-  renderValues: ({ apiKey, releaseName, gitToken }) => {
-    // reporter-10x uses a flat values layout: top-level log10xApiKey +
-    // runtimeName (NOT nested under `tenx:`). `config.git.enabled: false`
-    // tells the chart to use the image-baked config instead of cloning
-    // the public config repo at startup — faster boot, no outbound call.
-    // gitToken is still required (init container unconditionally mounts
-    // a secret derived from it) even though git.enabled is false.
+  renderValues: ({ licenseJwt, releaseName, gitToken }) => {
+    // reporter-10x uses a flat values layout: top-level log10xLicenseJwt
+    // + runtimeName (NOT nested under `tenx:`). The chart turns the JWT
+    // into a Kubernetes Secret and mounts it as a file pointed at by
+    // TENX_LICENSE_FILE inside the engine container.
+    // `config.git.enabled: false` tells the chart to use the image-baked
+    // config instead of cloning the public config repo at startup —
+    // faster boot, no outbound call. gitToken is still required (init
+    // container unconditionally mounts a secret derived from it) even
+    // though git.enabled is false.
     return `# reporter-10x: non-invasive parallel DaemonSet.
 # Runs alongside the user's existing forwarder without touching it.
-log10xApiKey: "${apiKey}"
+log10xLicenseJwt: "${licenseJwt}"
 runtimeName: "${releaseName}"
 gitToken: "${gitToken ?? DEFAULT_GIT_TOKEN}"
 config:

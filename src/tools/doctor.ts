@@ -831,7 +831,7 @@ async function addPasteEndpointCheck(globalChecks: DoctorCheck[]): Promise<void>
 }
 
 function installHintForPlatform(): string {
-  if (process.platform === 'darwin') return 'brew install log10x/tap/tenx';
+  if (process.platform === 'darwin') return 'brew install log-10x/tap/log10x';
   if (process.platform === 'linux') return 'curl -fsSL https://install.log10x.com | sh — or use the apt/yum packages at https://docs.log10x.com/apps/dev/';
   if (process.platform === 'win32') return 'iwr -useb https://install.log10x.com/install.ps1 | iex';
   return 'see https://docs.log10x.com/apps/dev/ for install instructions';

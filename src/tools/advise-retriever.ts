@@ -18,7 +18,7 @@ export const adviseRetrieverSchema = {
     .describe('ID returned by `log10x_discover_env`. The snapshot is cached for 30 min.'),
   release_name: z.string().optional().describe('Helm release name. Default: `my-retriever`.'),
   namespace: z.string().optional().describe('Target namespace. Default: snapshot.recommendations.suggestedNamespace.'),
-  api_key: z.string().optional().describe('Log10x license key.'),
+  license_jwt: z.string().optional().describe('Log10x license JWT — mints from `POST /api/v1/license/demo` (anonymous) or `POST /api/v1/license` (Auth0-authed).'),
   input_bucket: z
     .string()
     .optional()
@@ -76,7 +76,7 @@ export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise
     snapshot,
     releaseName: args.release_name,
     namespace: args.namespace,
-    apiKey: args.api_key,
+    licenseJwt: args.license_jwt,
     inputBucket: args.input_bucket,
     indexBucket: args.index_bucket,
     irsaRoleArn: args.irsa_role_arn,

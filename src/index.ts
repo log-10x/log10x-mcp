@@ -71,7 +71,6 @@ import { adviseReceiverSchema, executeAdviseReceiver } from './tools/advise-rece
 import { adviseRetrieverSchema, executeAdviseRetriever } from './tools/advise-retriever.js';
 import { adviseInstallSchema, executeAdviseInstall } from './tools/advise-install.js';
 import { adviseCompactSchema, executeAdviseCompact } from './tools/advise-compact.js';
-import { configureRegulatorSchema, executeConfigureRegulator } from './tools/configure-regulator.js';
 import { patternMitigateSchema, executePatternMitigate } from './tools/pattern-mitigate.js';
 import { loginStatusSchema, executeLoginStatus } from './tools/login-status.js';
 import {
@@ -315,13 +314,17 @@ CUSTOMER TIER LADDER (determines which tools are available)
 1. Dev CLI only — free local binary, no pipeline infrastructure.
    Available tools: log10x_resolve_batch (pasted-batch triage), log10x_dependency_check,
                     log10x_exclusion_filter.
-2. Cloud Reporter — k8s CronJob sampling from the SIEM via REST API.
-   Adds: log10x_investigate (sampled fidelity), log10x_cost_drivers, log10x_pattern_trend,
-         log10x_top_patterns, log10x_list_by_label, log10x_event_lookup, log10x_savings.
-3. Edge Reporter — forwarder pipeline sidecar.
-   Same tools as Cloud, but with full-fidelity metrics, ~5s inflection granularity, and
-   coverage of events dropped before the SIEM.
-4. Retriever (deployable with or without Reporter) — S3 archive with Bloom-filter index.
+2. Reporter — standalone dedicated fluent-bit DaemonSet alongside the user's forwarder
+   (zero-touch, read-only). Emits TenXSummary metrics for cost attribution + pattern
+   fingerprinting.
+   Adds: log10x_investigate, log10x_cost_drivers, log10x_pattern_trend, log10x_top_patterns,
+         log10x_list_by_label, log10x_event_lookup, log10x_savings.
+3. Receiver — sidecar inside the user's existing forwarder (fluent-bit / fluentd /
+   filebeat / logstash / otel-collector / vector). Filters, samples, and optionally
+   losslessly compacts events in-flight. Replaces the legacy Regulator + Optimizer apps.
+   Same tools as Reporter, plus event modification on the forwarder's path.
+4. Retriever (deployable with or without Reporter/Receiver) — S3 archive with Bloom-filter
+   index. Product still being shaped.
    Adds: log10x_retriever_query (forensic retrieval), log10x_backfill_metric (new metric
          backfilled from archive + forward-emission handoff to the Reporter).
 
@@ -919,19 +922,13 @@ registerLog10xTool('log10x_advise_receiver', adviseReceiverSchema, (args) =>
 // ── Tool: log10x_advise_install (mode selector + front-end advisor) ──
 
 registerLog10xTool('log10x_advise_install', adviseInstallSchema, (args) =>
-  wrap('log10x_advise_install', () => executeAdviseInstall(args))
+  wrap('log10x_advise_install', () => executeAdviseInstall(args, getEnvs()))
 );
 
 // ── Tool: log10x_advise_compact (compact-lookup PR author) ──
 
 registerLog10xTool('log10x_advise_compact', adviseCompactSchema, (args) =>
   wrap('log10x_advise_compact', () => executeAdviseCompact(args))
-);
-
-// ── Tool: log10x_configure_regulator (per-container cap from $ budget) ──
-
-registerLog10xTool('log10x_configure_regulator', configureRegulatorSchema, (args) =>
-  wrap('log10x_configure_regulator', () => executeConfigureRegulator(args))
 );
 
 // ── Tool: log10x_pattern_mitigate (cost-reduction menu) ──
@@ -994,7 +991,6 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_advise_receiver', intent: 'Receiver install/verify/teardown plan — inline only, with optional compact encoding (optimize=true)' },
   { name: 'log10x_advise_retriever', intent: 'Retriever install/verify/teardown plan — standalone S3 + SQS archive + query' },
   { name: 'log10x_advise_compact', intent: 'Render a `gh` PR command + diff for a compactReceiver lookup-CSV update against the customer GitOps repo (engine hot-reloads the CSV without a pipeline restart)' },
-  { name: 'log10x_configure_regulator', intent: 'Derive a per-container rate-regulator byte cap from a monthly dollar budget; validate against five Prometheus sanity checks; emit a `gh` PR command against the rate-cap CSV (engine hot-reloads it)' },
   { name: 'log10x_pattern_mitigate', intent: 'Return the env-gated mitigation options + exact configs for a pattern (drop @ analyzer, drop @ forwarder, mute @ 10x, compact @ 10x) in user terms with env-capability gating' },
 ];
 

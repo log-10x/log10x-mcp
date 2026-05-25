@@ -6,7 +6,7 @@
  * wire-format change — bump `SNAPSHOT_SCHEMA_VERSION` below.
  */
 
-export const SNAPSHOT_SCHEMA_VERSION = 1;
+export const SNAPSHOT_SCHEMA_VERSION = 2;
 
 /** Which forwarder the customer is running. `unknown` = detection gave up. */
 export type ForwarderKind =
@@ -15,10 +15,42 @@ export type ForwarderKind =
   | 'filebeat'
   | 'logstash'
   | 'otel-collector'
+  | 'vector'
   | 'unknown';
 
 /** Log10x apps we look for already being installed. */
 export type Log10xAppKind = 'reporter' | 'receiver' | 'retriever' | 'compiler' | 'unknown';
+
+/**
+ * Metrics backends the engine can emit TenXSummary to.
+ * Mirrors the modules in `config/pipelines/run/output/metric/`.
+ * - `log10x` is the SaaS Prometheus default (requires online egress)
+ * - `prometheus` covers all three sub-flavors (remote-write, push-gateway,
+ *   scrape); the wizard picks the sub-flavor at install time
+ */
+export type MetricsBackendKind =
+  | 'log10x'
+  | 'datadog'
+  | 'elastic'
+  | 'cloudwatch'
+  | 'signalfx'
+  | 'prometheus';
+
+/**
+ * A metrics-backend agent we detected running in the cluster. The wizard
+ * surfaces these as the "where should metrics go" pre-filled options:
+ * picking a detected backend means TenXSummary metrics ride alongside
+ * the user's existing logs/metrics on the same SIEM.
+ */
+export interface DetectedMetricsBackend {
+  kind: MetricsBackendKind;
+  /** Confidence of the detection — higher = more reliable. */
+  confidence: 'helm-release' | 'workload-match' | 'crd-only' | 'namespace-only';
+  /** Where the match came from. Free-form for diagnostic transparency. */
+  evidence: string;
+  /** Namespace the agent lives in (when applicable). */
+  namespace?: string;
+}
 
 /**
  * A workload (DaemonSet/Deployment/StatefulSet) we classified as a
@@ -126,6 +158,13 @@ export interface KubectlProbes {
   ingressClasses: string[];
   /** Service-account annotations per SA in probed namespaces, for IRSA detection. */
   serviceAccountIrsa: Array<{ namespace: string; name: string; roleArn: string }>;
+  /**
+   * Metrics-backend agents detected in the cluster (Datadog Agent, Splunk
+   * OTel Collector, Elastic Agent, Prometheus Operator, CloudWatch Agent,
+   * etc.). The wizard uses this to pre-fill "where should metrics go".
+   * Empty list = no agents detected; the wizard falls back to log10x SaaS.
+   */
+  backendAgents: DetectedMetricsBackend[];
 }
 
 /** AWS-side probe results. `available=false` means AWS CLI not configured. */
@@ -163,6 +202,62 @@ export interface Recommendations {
    * path inside the GitOps repo.
    */
   receiverCompactLookupFile?: string;
+}
+
+/**
+ * Wizard session — accumulated user answers across multiple
+ * `advise_install` calls against the same snapshot. The MCP is stateless
+ * per call, but the wizard is conversational; the session lets each turn
+ * merge the user's latest answer with previously-answered questions
+ * without re-asking. Attached to a snapshot by id and shares its TTL.
+ *
+ * All fields optional — the wizard's job is to figure out which are
+ * still missing and ask for them. Once `app` is set, the wizard knows
+ * which branch to drive (standalone Reporter vs sidecar Receiver).
+ */
+export interface WizardSession {
+  snapshotId: string;
+  /**
+   * 'reporter' = "deploy a dedicated DaemonSet forwarder" (standalone)
+   * 'receiver' = "plug into existing forwarder" (sidecar)
+   */
+  app?: 'reporter' | 'receiver';
+  /** Receiver-only: which forwarder kind to sidecar into. */
+  forwarder?: ForwarderKind;
+  /**
+   * Where TenXSummary metrics go. Multi-destination — a user can report
+   * to log10x SaaS AND their own Datadog/Prom/etc. simultaneously. The
+   * only mutual exclusion is `airgapped: true` + `'log10x'` in this list
+   * (airgapped means the engine sends NOTHING to log10x).
+   */
+  backends?: MetricsBackendKind[];
+  /**
+   * When true, the engine emits no outbound traffic to log10x.com (no
+   * engine telemetry, no online license re-validation, no update probes).
+   * `'log10x'` must not be in `backends` when this is true — the wizard
+   * surfaces the conflict if both are picked.
+   *
+   * Demo licenses can't actually run airgapped — the engine downgrades
+   * to online mode with a warning. The wizard surfaces this softly.
+   */
+  airgapped?: boolean;
+  /** Helm release name override. */
+  releaseName?: string;
+  /** Target namespace override. */
+  namespace?: string;
+  /**
+   * License JWT — fetched from `/api/v1/license/demo` (anonymous) or
+   * `/api/v1/license` (Auth0-authed). The wizard fills this in at plan
+   * emission time; the user doesn't enter it directly.
+   */
+  licenseJwt?: string;
+  /**
+   * `true` when the JWT was minted from the demo endpoint. The wizard
+   * uses this to emit the "demo + airgapped is a no-op" notice.
+   */
+  isDemoLicense?: boolean;
+  /** Last-updated timestamp for diagnostics. */
+  updatedAt: string;
 }
 
 /** The complete discovery snapshot. Immutable once emitted. */

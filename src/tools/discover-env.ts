@@ -41,7 +41,7 @@ export const discoverEnvSchema = {
       'Substring to match against S3 bucket names. Defaults to "retriever"; also matches "log10x" and "tenx" out of the box.'
     ),
   forwarder_hint: z
-    .enum(['fluentbit', 'fluentd', 'filebeat', 'logstash', 'otel-collector'])
+    .enum(['fluentbit', 'fluentd', 'filebeat', 'logstash', 'otel-collector', 'vector'])
     .optional()
     .describe(
       'Override forwarder detection. Use this if multiple forwarders are running and you want the advisor to target a specific one.'
@@ -148,6 +148,15 @@ export function renderDiscoverReport(s: DiscoverySnapshot): string {
       lines.push(`- **IRSA service accounts** (${s.kubectl.serviceAccountIrsa.length}):`);
       for (const sa of s.kubectl.serviceAccountIrsa.slice(0, 6)) {
         lines.push(`  - \`${sa.namespace}/${sa.name}\` → \`${sa.roleArn}\``);
+      }
+    }
+
+    if (s.kubectl.backendAgents.length === 0) {
+      lines.push('- **metrics-backend agents detected**: none');
+    } else {
+      lines.push(`- **metrics-backend agents detected** (${s.kubectl.backendAgents.length}):`);
+      for (const b of s.kubectl.backendAgents) {
+        lines.push(`  - **${b.kind}** (${b.confidence}) — ${b.evidence}`);
       }
     }
   }

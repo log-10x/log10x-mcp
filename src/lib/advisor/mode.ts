@@ -96,9 +96,8 @@ export interface ModeRecommendation {
 // fallback; a blocked alt is always lower than any installable alt.
 const SCORE_DIRECT_GOAL_MATCH = 100;
 const SCORE_GOAL_FIT = 80;
-const SCORE_DEFAULT_FIT = 60;
-const SCORE_FALLBACK = 40;
 const SCORE_ALTERNATIVE_OK = 50;
+const SCORE_FALLBACK = 40;
 const SCORE_BLOCKED = 0;
 
 // ── Detection helpers ──
@@ -194,13 +193,12 @@ export function recommendInstallMode(opts: RecommendOpts): ModeRecommendation {
   // ── Standalone reporter (always a valid option) ──
   alts.push(makeStandaloneAlt({ detectedKind, namespace, goal, helmManaged, primary }));
 
-  // ── Inline options, one per supported forwarder kind when applicable ──
+  // ── Inline (Receiver) options — only when a forwarder is detected ──
+  // Receiver is a sidecar inside the user's existing forwarder. With no
+  // forwarder detected there's nothing to plug into, so we don't surface
+  // any inline alternatives — Standalone Reporter is the only viable path.
   if (detectedKind !== 'unknown') {
     alts.push(...makeInlineAlts({ detectedKind, namespace, goal, helmManaged }));
-  } else {
-    // No detected forwarder — surface inline fluent-bit as an option but
-    // score it lower (the user would be installing a forwarder from scratch).
-    alts.push(...makeInlineAlts({ detectedKind: 'fluentbit', namespace, goal, helmManaged: false }));
   }
 
   // ── Retriever option (independent of forwarder state) ──
@@ -249,28 +247,18 @@ function makeStandaloneAlt(params: {
     blocker = 'standalone reporter is metrics-only; goal=archive requires the Retriever (S3 + SQS).';
   }
 
-  // Scoring:
-  //   - goal=just-metrics → this is the direct match
-  //   - no goal → reporter is the conservative default
-  //   - no forwarder / unknown / hand-rolled / logstash → strongly preferred
-  //   - helm-managed fluent-bit/fluentd → lower than inline (user can safely upgrade)
-  let score = SCORE_DEFAULT_FIT;
-  let rationale = '';
+  // Scoring: Reporter is standalone-only (production intent). Score is the
+  // direct goal match for just-metrics and the conservative default for
+  // unset goal. The pre-existing per-forwarder branching (helm-managed,
+  // hand-rolled, logstash) is no longer load-bearing because there's no
+  // inline-Reporter competitor — standalone IS Reporter.
+  let score = SCORE_DIRECT_GOAL_MATCH;
+  let rationale =
+    'Standalone Reporter — dedicated fluent-bit DaemonSet alongside your existing forwarder, zero-touch, read-only. The recommended first install.';
   if (goal === 'just-metrics') {
-    score = SCORE_DIRECT_GOAL_MATCH;
-    rationale = 'Standalone reporter — report-mode, non-invasive, matches goal=just-metrics directly.';
+    rationale = 'Standalone Reporter — matches goal=just-metrics directly.';
   } else if (!primary || detectedKind === 'unknown') {
-    score = SCORE_DIRECT_GOAL_MATCH;
-    rationale = 'No forwarder detected — reporter-10x ships its own fluent-bit, so it works anywhere.';
-  } else if (!helmManaged) {
-    score = SCORE_DIRECT_GOAL_MATCH;
-    rationale = `Detected forwarder is hand-rolled — inline would require rewriting your manifests; reporter-10x runs in parallel, zero-touch.`;
-  } else if (detectedKind === 'logstash') {
-    score = SCORE_DIRECT_GOAL_MATCH;
-    rationale = 'log10x-elastic/logstash chart is architecturally broken for sidecar mode (tenx wants to be a child process of logstash, chart runs it as a separate container). Standalone reporter-10x is the recommended path.';
-  } else {
-    score = SCORE_ALTERNATIVE_OK;
-    rationale = 'Standalone reporter is always a safe alternative — non-invasive, report-mode only.';
+    rationale = 'No forwarder detected — Reporter ships its own fluent-bit, so it works anywhere.';
   }
 
   return {
@@ -313,31 +301,6 @@ function makeInlineAlts(params: {
     detectedKind === 'logstash'
       ? 'log10x-elastic/logstash chart is architecturally broken for sidecar mode (stdin wiring, independent of chart version). Pick fluent-bit/fluentd/filebeat/otel-collector or shape=standalone.'
       : undefined;
-
-  // Inline reporter.
-  // No-goal case: this is the conservative default when the user has a
-  // helm-managed, replaceable forwarder — no extra DaemonSet, no event
-  // modification, just metrics. Ranks above Inline Receiver because
-  // report-mode touches the event path less than receive-mode does.
-  alts.push({
-    label: `Inline Reporter (${detectedKind})`,
-    args: {
-      app: 'reporter',
-      shape: 'inline',
-      forwarder: detectedKind,
-      namespace,
-    },
-    score: goal === 'just-metrics'
-      ? SCORE_DIRECT_GOAL_MATCH
-      : goal === undefined
-        ? SCORE_GOAL_FIT
-        : SCORE_FALLBACK,
-    rationale:
-      goal === 'just-metrics'
-        ? `Inline reporter on helm-managed ${detectedKind} — metrics + pattern fingerprinting inside the existing forwarder.`
-        : `Inline reporter — tenx logic inside the forwarder you already run; metrics only, no event modification.`,
-    blocker: helmBlocker ?? logstashBlocker,
-  });
 
   // Inline receiver (filter/sample).
   // No-goal case: receiver sits BELOW reporter (conservative default).

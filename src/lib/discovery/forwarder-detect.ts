@@ -32,6 +32,8 @@ export function classifyForwarderImage(image: string): ForwarderKind {
   if (s.includes('logstash')) return 'logstash';
   if (s.includes('opentelemetry-collector') || s.includes('otel/collector') || s.includes('otel/opentelemetry'))
     return 'otel-collector';
+  // Vector — Datadog's forwarder. Image refs: `timberio/vector`, `datadog/vector`.
+  if (s.includes('timberio/vector') || s.includes('datadog/vector') || s.includes('vector:')) return 'vector';
   return 'unknown';
 }
 

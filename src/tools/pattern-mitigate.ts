@@ -74,7 +74,7 @@ interface Capabilities {
    * option 2's vendor is pre-filled. When undefined, the menu acknowledges
    * the gap explicitly so the agent asks rather than guessing fluent-bit.
    */
-  forwarderKind?: 'fluentbit' | 'fluentd' | 'filebeat' | 'logstash' | 'otel-collector' | 'unknown';
+  forwarderKind?: 'fluentbit' | 'fluentd' | 'filebeat' | 'logstash' | 'otel-collector' | 'vector' | 'unknown';
   /**
    * Detected analyzer vendor — from envs.json, LOG10X_ANALYZER env var,
    * or the user profile's `metadata.analyzer_vendor`. Used to render
@@ -165,6 +165,7 @@ async function detectCapabilities(snapshotId?: string): Promise<Capabilities> {
       logstash: 'logstash',
       otel: 'otel-collector', otelcol: 'otel-collector',
       'otel-collector': 'otel-collector', 'opentelemetry-collector': 'otel-collector',
+      vector: 'vector',
     };
     if (map[raw]) out.forwarderKind = map[raw];
   }
@@ -273,6 +274,7 @@ export async function executePatternMitigate(args: PatternMitigateArgs): Promise
     filebeat: 'Filebeat',
     logstash: 'Logstash',
     'otel-collector': 'OpenTelemetry Collector',
+    vector: 'Vector',
     unknown: 'forwarder',
   };
   if (knownForwarder) {

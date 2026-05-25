@@ -1,79 +1,136 @@
 /**
- * log10x_advise_install
+ * log10x_advise_install — the wizard front door.
  *
- * Sits in front of the app-specific advisors (reporter, receiver,
- * retriever). Takes a DiscoverySnapshot + optional goal and recommends
- * the right install path based on what's detected.
+ * Progressive Q-and-A driver for a k8s install of the Log10x Reporter or
+ * Receiver. Each call merges the user's latest answer into a wizard
+ * session (held alongside the discovery snapshot) and either:
  *
- * Two call modes:
- *   - `goal` given: returns a single concrete plan (install+verify+
- *     teardown) for the top-ranked path. No table — straight to the
- *     install commands. Use this when the caller knows what they want.
- *   - no `goal`: returns a ranked table of candidate paths with
- *     rationale + blockers, plus a structured block with the top pick's
- *     resolved args so a follow-up call can re-invoke with `goal=<winner>`
- *     or call the app-specific advisor directly.
+ *   1. Asks the next missing question (returning markdown that the agent
+ *      surfaces to the user), or
+ *   2. Once all answers are in, emits a concrete install plan with the
+ *      license JWT pre-filled (auto-fetched from the gateway if absent).
  *
- * The tool never installs anything itself — it produces a markdown
- * checklist the user (or a subagent) executes.
+ * The five decisions, by dependency order:
+ *
+ *   Q1. App — "deploy a dedicated DaemonSet forwarder" (Reporter) vs
+ *       "plug into existing forwarder" (Receiver). The biggest fork.
+ *   Q2. (Receiver only) Which forwarder — auto-uses the snapshot's
+ *       detected forwarder when there's exactly one; asks if multiple.
+ *   Q3. Backend — where TenXSummary metrics go. Default suggestion:
+ *       log10x SaaS unless airgapped or a backend agent is already
+ *       detected in the cluster.
+ *   Q4. (Backend ≠ log10x only) Airgapped — opt-in for CISO-friction
+ *       reduction. Skipped silently when backend=log10x (SaaS implies
+ *       not-airgapped).
+ *   Q5. License — auto-fetched from `/api/v1/license/demo` if the user
+ *       hasn't signed in. When `airgapped=true` and the only available
+ *       license is a demo, the wizard surfaces a soft warning that
+ *       demo licenses can't run airgapped (engine downgrades silently
+ *       to online mode), and offers sign-in or proceed-without-airgapped.
+ *
+ * State retention is via WizardSession on the snapshot store — the
+ * MCP itself is stateless per call, but the snapshot store's 30-min TTL
+ * gives the agent a coherent conversation thread.
  */
 
 import { z } from 'zod';
-import { getSnapshot } from '../lib/discovery/snapshot-store.js';
+import { getSnapshot, updateWizardSession } from '../lib/discovery/snapshot-store.js';
 import { buildReporterPlan } from '../lib/advisor/reporter.js';
-import { buildRetrieverPlan } from '../lib/advisor/retriever.js';
 import { renderPlan } from '../lib/advisor/render.js';
-import {
-  recommendInstallMode,
-  type InstallGoal,
-  type ModeRecommendation,
-  type RankedAlternative,
-} from '../lib/advisor/mode.js';
-import type { OutputDestination } from '../lib/advisor/reporter-forwarders.js';
+import { fetchDemoLicense, LicenseFetchError } from '../lib/license-api.js';
 import { resolveAdvisorDestination } from '../lib/advisor/dest-resolve.js';
+import type {
+  DiscoverySnapshot,
+  ForwarderKind,
+  MetricsBackendKind,
+  WizardSession,
+  DetectedForwarder,
+  DetectedMetricsBackend,
+} from '../lib/discovery/types.js';
+import type { OutputDestination } from '../lib/advisor/reporter-forwarders.js';
+import type { Environments } from '../lib/environments.js';
+
+const SUPPORTED_FORWARDERS = [
+  'fluentbit',
+  'fluentd',
+  'filebeat',
+  'logstash',
+  'otel-collector',
+  'vector',
+] as const;
+const SUPPORTED_BACKENDS: MetricsBackendKind[] = [
+  'log10x',
+  'datadog',
+  'elastic',
+  'cloudwatch',
+  'signalfx',
+  'prometheus',
+];
 
 export const adviseInstallSchema = {
   snapshot_id: z
     .string()
     .describe('ID returned by `log10x_discover_env`. The snapshot is cached for 30 min.'),
-  goal: z
-    .enum(['just-metrics', 'cut-cost', 'compact', 'archive'])
+  app: z
+    .enum(['reporter', 'receiver'])
     .optional()
     .describe(
-      'What the user is trying to achieve. When given, the tool returns a single concrete install plan for the best-matching path. When omitted, the tool returns a ranked table of candidate paths + the top pick\'s resolved args so the caller can re-invoke with `goal` or jump to `log10x_advise_{reporter,receiver,retriever}` directly. Values: `just-metrics` (cost attribution + pattern fingerprinting, no filtering), `cut-cost` (receive: filter/sample events in-flight), `compact` (receive + ~20-40x volume reduction via compact encoding), `archive` (Retriever: long-term S3 archive + forensic query).'
+      'Which Log10x app to install. **reporter** = a dedicated DaemonSet forwarder (zero-touch, runs alongside your existing forwarder); **receiver** = a sidecar plugged into your existing forwarder (filters/samples/compacts events in-flight). When omitted, the wizard asks the user.'
     ),
-  api_key: z
+  forwarder: z
+    .enum(SUPPORTED_FORWARDERS)
+    .optional()
+    .describe(
+      'Receiver-only: which detected forwarder kind to sidecar into. Auto-uses the snapshot\'s detected forwarder when there\'s exactly one; the wizard asks when there are multiple.'
+    ),
+  backends: z
+    .array(z.enum(SUPPORTED_BACKENDS as unknown as [string, ...string[]]))
+    .optional()
+    .describe(
+      'Where the engine emits TenXSummary metrics. Multi-destination — a user can report to log10x SaaS AND their own backend simultaneously, e.g. `["log10x", "datadog"]`. Choices: **log10x** (SaaS Prometheus, free demo tier), **datadog**, **elastic**, **cloudwatch**, **signalfx**, **prometheus** (customer-owned). The wizard pre-fills detected backends from the snapshot. The only mutual exclusion is `airgapped: true` + `"log10x"` in this list.'
+    ),
+  airgapped: z
+    .boolean()
+    .optional()
+    .describe(
+      'When true, the Log10x agents send nothing to log10x.com — engine metrics, license re-validation, and update checks all go silent. Use to reduce CISO friction. Conflicts with `"log10x"` in `backends` (the wizard surfaces the conflict). **Demo licenses cannot actually run airgapped** — the engine downgrades to online mode with a warning. The wizard surfaces this softly when both are picked.'
+    ),
+  license_jwt: z
     .string()
     .optional()
-    .describe('Log10x license key. Required for a complete install plan when `goal` is given.'),
-  namespace: z
-    .string()
-    .optional()
-    .describe('Target namespace override. Default: snapshot.recommendations.suggestedNamespace.'),
+    .describe(
+      'Log10x license JWT — mints from `POST /api/v1/license/demo` (anonymous, 14-day) or `POST /api/v1/license` (Auth0-authed, user-scoped). Maps to the helm chart\'s `log10xLicenseJwt` value. When omitted and the user is not signed in, the wizard auto-fetches a demo JWT.'
+    ),
+  namespace: z.string().optional().describe('Target namespace. Default: snapshot.recommendations.suggestedNamespace.'),
   release_name: z
     .string()
     .optional()
-    .describe('Helm release name override. Default: `my-<app>` (e.g., `my-reporter`).'),
+    .describe('Helm release name. Default: `my-<app>` (e.g., `my-reporter`).'),
   destination: z
     .enum(['mock', 'elasticsearch', 'splunk', 'datadog', 'cloudwatch'])
     .optional()
-    .describe('Output destination. When omitted: auto-detects from ambient SIEM credentials (DD_API_KEY → datadog, SPLUNK_HOST+SPLUNK_TOKEN → splunk, ELASTIC_URL → elasticsearch, AWS chain → cloudwatch); single match is used; multiple → ambiguous error; none → falls back to `mock` (safe for dogfooding).'),
-  output_host: z.string().optional().describe('Host for non-mock destinations.'),
+    .describe(
+      'Event destination for the Receiver path (where filtered events go AFTER the engine processes them). Distinct from `backend` (which is where METRICS go). When omitted: auto-detects from ambient SIEM credentials; falls back to `mock`.'
+    ),
+  output_host: z.string().optional().describe('Host for non-mock event destinations.'),
   splunk_hec_token: z.string().optional().describe('Required when destination=splunk.'),
   action: z
     .enum(['install', 'verify', 'teardown', 'all'])
     .optional()
-    .describe('Plan scope when `goal` is given. Default: `all`.'),
+    .describe('Plan scope when the wizard is ready to emit. Default: `all`.'),
 };
 
 const schemaObj = z.object(adviseInstallSchema);
 export type AdviseInstallArgs = z.infer<typeof schemaObj>;
 
-export async function executeAdviseInstall(args: AdviseInstallArgs): Promise<string> {
+export async function executeAdviseInstall(
+  args: AdviseInstallArgs,
+  envs: Environments
+): Promise<string> {
   const snapshot = getSnapshot(args.snapshot_id);
   if (!snapshot) {
     return [
-      `# Install advisor — snapshot not found`,
+      `# Install wizard — snapshot not found`,
       ``,
       `Snapshot \`${args.snapshot_id}\` is missing or expired (snapshots live 30 min).`,
       ``,
@@ -81,176 +138,429 @@ export async function executeAdviseInstall(args: AdviseInstallArgs): Promise<str
     ].join('\n');
   }
 
-  const rec = recommendInstallMode({
-    snapshot,
-    goal: args.goal as InstallGoal | undefined,
+  // Merge the latest answers into the wizard session. Each call accretes;
+  // the agent only passes the answer it just collected from the user.
+  const session = updateWizardSession(args.snapshot_id, {
+    app: args.app,
+    forwarder: args.forwarder as ForwarderKind | undefined,
+    backends: args.backends as MetricsBackendKind[] | undefined,
+    airgapped: args.airgapped,
+    licenseJwt: args.license_jwt,
+    releaseName: args.release_name,
+    namespace: args.namespace,
   });
-
-  // Mode A: goal given → emit a single concrete plan for the top pick.
-  if (args.goal) {
-    return await renderConcretePlan(rec, args, snapshot.snapshotId);
+  if (!session) {
+    // Should be unreachable — getSnapshot would've failed first.
+    return 'Internal error: wizard session could not be created.';
   }
 
-  // Mode B: no goal → emit the ranked table + structured top-pick args.
-  return renderRanked(rec, snapshot.snapshotId);
+  // Identify the next missing answer, in dependency order.
+  const next = nextQuestion(snapshot, session);
+  if (next.kind === 'ask') {
+    return next.markdown;
+  }
+
+  // Soft-warn for demo + airgapped before we mint the license.
+  const isSignedIn = !envs.isDemoMode;
+  if (session.airgapped === true && !isSignedIn && !session.licenseJwt) {
+    return renderDemoAirgappedWarning(session);
+  }
+
+  // Auto-fetch a demo license if the user hasn't supplied one and isn't
+  // signed in. Signed-in users normally pass `license_jwt` explicitly
+  // (or the agent fetches via `/api/v1/license` with their Auth0 token
+  // — not yet wired here; see follow-up).
+  if (!session.licenseJwt) {
+    try {
+      const lic = await fetchDemoLicense();
+      updateWizardSession(args.snapshot_id, {
+        licenseJwt: lic.jwt,
+        isDemoLicense: true,
+      });
+      session.licenseJwt = lic.jwt;
+      session.isDemoLicense = true;
+    } catch (e) {
+      const msg = e instanceof LicenseFetchError ? e.message : String(e);
+      return [
+        `# Install wizard — couldn't mint a demo license`,
+        ``,
+        `The wizard tried to fetch a 14-day anonymous demo JWT from \`POST /api/v1/license/demo\` and failed:`,
+        ``,
+        `> ${msg}`,
+        ``,
+        `Options:`,
+        `- Sign in via \`log10x_signin_start\` to mint a user-scoped license`,
+        `- Pass an existing JWT via \`license_jwt\``,
+        `- Retry — the gateway may have been transiently unavailable`,
+      ].join('\n');
+    }
+  }
+
+  // Everything answered. Emit the plan.
+  return await renderInstallPlan(snapshot, session, args);
 }
 
-async function renderConcretePlan(
-  rec: ModeRecommendation,
-  args: AdviseInstallArgs,
-  snapshotId: string
-): Promise<string> {
-  const top = rec.topPick;
-  const header = renderHeader(rec, args.goal!);
+// ── Question routing ──
 
-  // If the top pick is blocked (every candidate for this goal is unavailable),
-  // short-circuit to the table with a clear blocker explanation.
-  if (top.blocker) {
-    return [
-      header,
-      '## Blocker',
-      `The best-matching path for goal=\`${args.goal}\` is currently blocked:`,
-      '',
-      `- **${top.label}** — ${top.blocker}`,
-      '',
-      'Full ranking:',
-      '',
-      renderAltTable(rec.alternatives),
-      '',
-      `_Snapshot: \`${snapshotId}\`._`,
-    ].join('\n');
+type NextStep = { kind: 'ask'; markdown: string } | { kind: 'render' };
+
+function nextQuestion(snapshot: DiscoverySnapshot, session: WizardSession): NextStep {
+  // Q1: app
+  if (!session.app) {
+    return { kind: 'ask', markdown: askApp(snapshot) };
   }
 
-  const snapshot = getSnapshot(snapshotId)!;
+  // Q2: Receiver-only forwarder choice (when ambiguous)
+  if (session.app === 'receiver' && !session.forwarder) {
+    const detected = snapshot.kubectl.forwarders.filter((f) => f.kind !== 'unknown');
+    if (detected.length === 0) {
+      return {
+        kind: 'ask',
+        markdown: noForwarderForReceiver(),
+      };
+    }
+    if (detected.length === 1) {
+      // Auto-pick the only detected forwarder.
+      updateWizardSession(session.snapshotId, { forwarder: detected[0].kind });
+      session.forwarder = detected[0].kind;
+    } else {
+      return { kind: 'ask', markdown: askForwarder(detected) };
+    }
+  }
+
+  // Q3: backends — can be multiple, must be non-empty
+  if (!session.backends || session.backends.length === 0) {
+    return { kind: 'ask', markdown: askBackends(snapshot.kubectl.backendAgents) };
+  }
+
+  // Conflict check: airgapped + log10x in backends — surface, don't auto-resolve
+  if (session.airgapped === true && session.backends.includes('log10x')) {
+    return { kind: 'ask', markdown: airgappedLog10xConflict(session.backends) };
+  }
+
+  // Q4: airgapped — only relevant when backends doesn't already include log10x
+  // (if it does, the user has implicitly opted IN to log10x egress and
+  // airgapped is moot)
+  const hasLog10x = session.backends.includes('log10x');
+  if (!hasLog10x && session.airgapped === undefined) {
+    return { kind: 'ask', markdown: askAirgapped(session.backends) };
+  }
+  // backends includes log10x → silently set airgapped=false so the
+  // session is fully determined.
+  if (hasLog10x && session.airgapped === undefined) {
+    updateWizardSession(session.snapshotId, { airgapped: false });
+    session.airgapped = false;
+  }
+
+  return { kind: 'render' };
+}
+
+// ── Question renderers ──
+
+function askApp(snapshot: DiscoverySnapshot): string {
+  const detected = snapshot.kubectl.forwarders.filter((f) => f.kind !== 'unknown');
+  const fwSummary =
+    detected.length === 0
+      ? 'No existing forwarder detected in the cluster. Only the dedicated-DaemonSet path applies.'
+      : detected.length === 1
+      ? `Detected: \`${detected[0].kind}\` in \`${detected[0].namespace}\`.`
+      : `Detected ${detected.length} forwarders: ${detected.map((d) => `\`${d.kind}\` (${d.namespace})`).join(', ')}.`;
+
+  const onlyDedicated = detected.length === 0;
+
+  return [
+    '# Install wizard — pick a path',
+    '',
+    fwSummary,
+    '',
+    `Two ways to install:`,
+    '',
+    onlyDedicated
+      ? `- **(A) Dedicated DaemonSet** — installs a separate fluent-bit DaemonSet (Reporter) that tails container logs and emits cost-attribution metrics. Zero touch to your existing setup.`
+      : `- **(A) Dedicated DaemonSet** — installs a separate fluent-bit DaemonSet (Reporter) that tails container logs alongside your existing forwarder. Zero touch to your existing setup. Read-only (metrics + pattern fingerprinting).`,
+    onlyDedicated
+      ? `- **(B) Plug into existing forwarder** — not available (no forwarder detected).`
+      : `- **(B) Plug into existing forwarder** — installs a sidecar (Receiver) inside your existing forwarder. Filters / samples / compacts events in-flight to cut volume.`,
+    '',
+    `Re-invoke \`log10x_advise_install\` with \`app: "reporter"\` for (A) or \`app: "receiver"\` for (B).`,
+  ].join('\n');
+}
+
+function noForwarderForReceiver(): string {
+  return [
+    '# Install wizard — Receiver needs an existing forwarder',
+    '',
+    'You picked **plug into existing forwarder** (Receiver), but discovery found no forwarder in the cluster.',
+    '',
+    'Options:',
+    '- Switch to the dedicated DaemonSet: re-invoke with `app: "reporter"`.',
+    '- Install a forwarder first (fluent-bit / fluentd / filebeat / logstash / otel-collector / vector), then re-run `log10x_discover_env` and `log10x_advise_install`.',
+  ].join('\n');
+}
+
+function askForwarder(detected: DetectedForwarder[]): string {
+  return [
+    '# Install wizard — pick which forwarder to plug into',
+    '',
+    `${detected.length} forwarders are running in the cluster. Receiver sidecars into one of them:`,
+    '',
+    ...detected.map(
+      (d) =>
+        `- **${d.kind}** — workload \`${d.workloadKind}/${d.workloadName}\` in \`${d.namespace}\` (image \`${d.image}\`, ready ${d.readyReplicas})`
+    ),
+    '',
+    `Re-invoke with \`forwarder: "<kind>"\` to pick one.`,
+  ].join('\n');
+}
+
+function askBackends(detectedAgents: DetectedMetricsBackend[]): string {
+  const lines: string[] = [];
+  lines.push('# Install wizard — where do metrics go?');
+  lines.push('');
+  lines.push(
+    'TenXSummary metrics (cost attribution + pattern fingerprinting) can go to **one or more** destinations simultaneously — for example, to Log10x SaaS for the MCP queries AND to your existing Datadog for unified dashboards.'
+  );
+  lines.push('');
+  lines.push('Options:');
+  lines.push('');
+  lines.push(
+    '- **log10x** — Log10x SaaS Prometheus, free demo tier, sub-second queries via the MCP. Recommended unless you need airgapped. *(requires online egress)*'
+  );
+
+  if (detectedAgents.length > 0) {
+    lines.push('');
+    lines.push('Detected in your cluster — single pane with your existing observability stack:');
+    for (const a of detectedAgents) {
+      lines.push(`- **${a.kind}** — ${a.evidence}`);
+    }
+  }
+
+  const otherOptions = SUPPORTED_BACKENDS.filter(
+    (b) => b !== 'log10x' && !detectedAgents.some((a) => a.kind === b)
+  );
+  if (otherOptions.length > 0) {
+    lines.push('');
+    lines.push(`Other backends: ${otherOptions.map((b) => `\`${b}\``).join(', ')}.`);
+  }
+
+  lines.push('');
+  lines.push('Re-invoke with `backends: ["<choice>", ...]` — pass one or more. Examples:');
+  lines.push('- `backends: ["log10x"]` — just SaaS, default recommendation');
+  lines.push('- `backends: ["datadog"]` — your own backend only');
+  lines.push('- `backends: ["log10x", "datadog"]` — both, side-by-side');
+  return lines.join('\n');
+}
+
+function askAirgapped(backends: MetricsBackendKind[]): string {
+  const backendList = backends.map((b) => `\`${b}\``).join(' + ');
+  return [
+    '# Install wizard — airgapped mode?',
+    '',
+    `You picked ${backendList} for metrics — all user-owned. The Log10x agents can run **fully airgapped**: nothing sent to log10x.com (no engine telemetry, no online license check, no update probes). Agents emit only to your chosen backends and whatever event destinations you wire.`,
+    '',
+    'Common request from security teams — clean network-policy story, smoother CISO sign-off.',
+    '',
+    'Otherwise (default): the agents still emit only to your authorized destinations, but send anonymous engine telemetry to log10x for support diagnostics. Helm chart and docker images still pull from public log10x repos regardless of this choice.',
+    '',
+    'Re-invoke with `airgapped: true` to enable, or `airgapped: false` to skip and proceed with default.',
+  ].join('\n');
+}
+
+function airgappedLog10xConflict(backends: MetricsBackendKind[]): string {
+  return [
+    '# Install wizard — airgapped + log10x is impossible',
+    '',
+    `You picked \`airgapped: true\` AND included \`"log10x"\` in \`backends\` (\`${backends.map((b) => `"${b}"`).join(', ')}\`). These conflict: airgapped means the engine sends NOTHING to log10x.com, but \`"log10x"\` is the SaaS Prometheus endpoint at log10x.com.`,
+    '',
+    'Pick one:',
+    `- **Keep airgapped, drop log10x**: re-invoke with \`backends: [${backends.filter((b) => b !== 'log10x').map((b) => `"${b}"`).join(', ') || '"<your-backend>"'}]\` (engine emits only to your own backend(s))`,
+    `- **Keep log10x, drop airgapped**: re-invoke with \`airgapped: false\` (engine reports to both log10x SaaS AND your own backend(s))`,
+  ].join('\n');
+}
+
+function renderDemoAirgappedWarning(session: WizardSession): string {
+  const backendList = (session.backends ?? []).map((b) => `\`${b}\``).join(' + ') || 'your chosen backend';
+  return [
+    '# Install wizard — airgapped + demo license heads-up',
+    '',
+    `You picked **airgapped: true** but you're not signed in, so the wizard would mint a 14-day anonymous demo JWT. **The engine refuses to run airgapped on a demo license** — it logs a warning and downgrades to online mode silently. Manually editing the values file later won't override this; the gate is in the engine.`,
+    '',
+    '**Two paths forward**:',
+    '',
+    `1. **Sign in** for a real license (idempotent — won't disrupt anything). Call \`log10x_signin_start\`, then re-invoke this tool. Your \`airgapped: true\` choice will be preserved in the session.`,
+    `2. **Proceed without airgapped** for now — the agents will still emit only to ${backendList}, just with anonymous engine telemetry going to log10x. Re-invoke with \`airgapped: false\` to confirm.`,
+    '',
+    "_Your other answers (app, forwarder, backends) are remembered — you don't need to re-pass them._",
+  ].join('\n');
+}
+
+// ── Plan rendering ──
+
+async function renderInstallPlan(
+  snapshot: DiscoverySnapshot,
+  session: WizardSession,
+  args: AdviseInstallArgs
+): Promise<string> {
   const action = args.action ?? 'all';
+  const lines: string[] = [];
 
-  // Resolve destination once for the reporter/receiver branch. Retriever
-  // doesn't take a destination arg so we skip resolution there.
-  const destResolution =
-    top.args.app === 'retriever'
-      ? { kind: 'resolved' as const, destination: 'mock' as const, note: undefined }
-      : await resolveAdvisorDestination(args.destination);
-  if (destResolution.kind === 'ambiguous') return destResolution.markdown;
-  const destination = destResolution.destination;
-  const destNote = destResolution.note ? `_${destResolution.note}_\n\n` : '';
+  // Header: summarize the answered choices.
+  lines.push(`# Install plan — ${session.app === 'receiver' ? 'Receiver sidecar' : 'Standalone Reporter'}`);
+  lines.push('');
+  lines.push(renderChoiceSummary(session));
+  lines.push('');
 
-  // Route: retriever → buildRetrieverPlan; reporter/receiver → buildReporterPlan.
-  let planMd: string;
-  if (top.args.app === 'retriever') {
-    const plan = await buildRetrieverPlan({
-      snapshot,
-      releaseName: args.release_name,
-      namespace: args.namespace ?? top.args.namespace,
-      apiKey: args.api_key,
-      skipInstall: action === 'verify' || action === 'teardown',
-      skipVerify: action === 'install' || action === 'teardown',
-      skipTeardown: action === 'install' || action === 'verify',
-    });
-    planMd = renderPlan(plan, action);
-  } else {
+  // Demo + airgapped: at this point either the user opted out of
+  // airgapped OR signed in. If we still see demo+airgapped together,
+  // the engine will downgrade — emit a banner.
+  if (session.airgapped && session.isDemoLicense) {
+    lines.push(
+      '> ⚠ Plan emitted with `airgapped: true` and a **demo license** — the engine will detect this combo and downgrade to online mode at startup. The plan below leaves `airgapped` set to true so you can sign in later and the chart will then enforce it for real.'
+    );
+    lines.push('');
+  }
+
+  // Route to the right plan builder.
+  if (session.app === 'reporter' || session.app === 'receiver') {
+    // Receiver path needs a destination for the event flow. Resolve it
+    // from explicit arg → ambient SIEM credentials → mock.
+    const destResolution =
+      session.app === 'receiver'
+        ? await resolveAdvisorDestination(args.destination)
+        : { kind: 'resolved' as const, destination: 'mock' as const, note: undefined };
+    if (destResolution.kind === 'ambiguous') return destResolution.markdown;
+    const destination = destResolution.destination;
+    const destNote = destResolution.note ? `_${destResolution.note}_\n\n` : '';
+
     const plan = await buildReporterPlan({
       snapshot,
-      app: top.args.app,
-      shape: top.args.shape,
-      forwarder: top.args.forwarder,
-      optimize: top.args.optimize,
-      releaseName: args.release_name,
-      namespace: args.namespace ?? top.args.namespace,
-      apiKey: args.api_key,
+      app: session.app,
+      forwarder: session.forwarder,
+      releaseName: session.releaseName,
+      namespace: session.namespace,
+      licenseJwt: session.licenseJwt,
       destination: destination as OutputDestination,
       outputHost: args.output_host,
       splunkHecToken: args.splunk_hec_token,
+      backends: session.backends,
+      airgapped: session.airgapped,
       skipInstall: action === 'verify' || action === 'teardown',
       skipVerify: action === 'install' || action === 'teardown',
       skipTeardown: action === 'install' || action === 'verify',
     });
-    planMd = renderPlan(plan, action);
+    lines.push(destNote + renderPlan(plan, action));
+
+    // Manual-config note for backend + airgapped (until the per-forwarder
+    // renderValues functions natively wire these into the YAML). For
+    // log10x SaaS + non-airgapped, the chart defaults are correct.
+    const manualBlock = renderManualConfigForBackendAndAirgapped(session);
+    if (manualBlock) {
+      lines.push('');
+      lines.push(manualBlock);
+    }
   }
 
-  return [header, destNote + planMd].join('\n');
-}
-
-function renderRanked(rec: ModeRecommendation, snapshotId: string): string {
-  const lines: string[] = [];
-  lines.push('# Install advisor — mode ranking');
-  lines.push('');
-  lines.push('_No `goal` was given, so the advisor surfaces all candidate paths with their detection-based ranking. Pick one and re-invoke with `goal=<matching-goal>` for a concrete install plan, or call `log10x_advise_{reporter,receiver,retriever}` directly with the resolved args below._');
-  lines.push('');
-
-  // Detection summary.
-  lines.push('## Detection');
-  for (const d of rec.detectionSummary) lines.push(`- ${d}`);
-  lines.push('');
-
-  if (rec.warnings.length > 0) {
-    lines.push('## Warnings');
-    for (const w of rec.warnings) lines.push(`- ${w}`);
-    lines.push('');
-  }
-
-  // Ranking.
-  lines.push('## Candidates (ranked)');
-  lines.push('');
-  lines.push(renderAltTable(rec.alternatives));
-  lines.push('');
-
-  // Top pick + resolved args (machine-readable fenced block).
-  lines.push('## Top pick');
-  lines.push(`**${rec.topPick.label}** — ${rec.topPick.rationale}`);
-  lines.push('');
-  lines.push('Resolved args (feed into `log10x_advise_{reporter,receiver,retriever}` directly):');
-  lines.push('');
-  lines.push('```json');
-  lines.push(JSON.stringify(rec.topPick.args, null, 2));
-  lines.push('```');
-  lines.push('');
-
-  // Rationale.
-  lines.push('## Rationale');
-  lines.push(rec.rationale);
-  lines.push('');
-
-  lines.push('---');
-  lines.push(`_Snapshot: \`${snapshotId}\`._`);
   return lines.join('\n');
 }
 
-function renderHeader(rec: ModeRecommendation, goal: InstallGoal): string {
-  const lines: string[] = [];
-  lines.push(`# Install advisor — goal=${goal}`);
-  lines.push('');
-  lines.push('## Detection');
-  for (const d of rec.detectionSummary) lines.push(`- ${d}`);
-  lines.push('');
-  if (rec.warnings.length > 0) {
-    lines.push('## Warnings');
-    for (const w of rec.warnings) lines.push(`- ${w}`);
-    lines.push('');
-  }
-  lines.push('## Decision');
-  lines.push(rec.rationale);
-  lines.push('');
-  lines.push('_Alternatives the advisor considered:_');
-  lines.push('');
-  lines.push(renderAltTable(rec.alternatives));
-  lines.push('');
-  return lines.join('\n');
-}
-
-function renderAltTable(alts: RankedAlternative[]): string {
+function renderChoiceSummary(session: WizardSession): string {
   const rows: string[] = [];
-  rows.push('| Rank | Option | Score | Status | Why |');
-  rows.push('|---|---|---|---|---|');
-  for (let i = 0; i < alts.length; i++) {
-    const a = alts[i];
-    const status = a.blocker ? `**blocked**: ${escapePipe(a.blocker)}` : 'available';
-    rows.push(
-      `| ${i + 1} | ${escapePipe(a.label)} | ${a.score} | ${status} | ${escapePipe(a.rationale)} |`
-    );
+  rows.push(`- **App**: ${session.app === 'receiver' ? 'Receiver (sidecar)' : 'Reporter (standalone DaemonSet)'}`);
+  if (session.app === 'receiver' && session.forwarder) {
+    rows.push(`- **Forwarder**: \`${session.forwarder}\``);
   }
+  const backendList = (session.backends ?? ['log10x']).map((b) => `\`${b}\``).join(' + ');
+  rows.push(`- **Metrics backends**: ${backendList}`);
+  if (session.airgapped) rows.push(`- **Airgapped**: yes (engine emits only to user-owned backends)`);
+  if (session.isDemoLicense) rows.push(`- **License**: anonymous 14-day demo (sign in for a user-scoped one)`);
   return rows.join('\n');
 }
 
-function escapePipe(s: string): string {
-  return s.replace(/\|/g, '\\|');
+function renderManualConfigForBackendAndAirgapped(session: WizardSession): string {
+  const backends = session.backends ?? ['log10x'];
+  // Only log10x and not airgapped — chart defaults are already correct.
+  const nonLog10xBackends = backends.filter((b) => b !== 'log10x');
+  if (nonLog10xBackends.length === 0 && !session.airgapped) return '';
+
+  const lines: string[] = [];
+  lines.push('## Manual config — paste into your values.yaml');
+  lines.push('');
+  lines.push(
+    "The per-forwarder helm value renderers don't yet wire `backends` + `airgapped` into the chart YAML automatically. Append the following to your values file before running `helm upgrade`:"
+  );
+  lines.push('');
+  lines.push('```yaml');
+
+  if (session.app === 'reporter' && session.airgapped) {
+    lines.push('# Reporter chart top-level airgapped knob.');
+    lines.push('airgapped: true');
+    lines.push('');
+  }
+
+  // Emit `@run/output/metric/<backend>` for each non-log10x backend.
+  // (`log10x` is the chart default — no extraArg needed.)
+  if (nonLog10xBackends.length > 0 || (session.app === 'receiver' && session.airgapped)) {
+    lines.push('tenx:');
+    if (nonLog10xBackends.length > 0) {
+      lines.push('  extraArgs:');
+      for (const b of nonLog10xBackends) {
+        lines.push(`    - "@run/output/metric/${b}"`);
+      }
+    }
+    const envLines: Array<{ name: string; value: string }> = [];
+    for (const b of nonLog10xBackends) {
+      envLines.push(...envForBackend(b));
+    }
+    if (session.app === 'receiver' && session.airgapped) {
+      envLines.push({ name: 'TENX_AIRGAPPED', value: 'true' });
+    }
+    if (envLines.length > 0) {
+      lines.push('  extraEnv:');
+      for (const env of envLines) {
+        lines.push(`    - name: ${env.name}`);
+        lines.push(`      value: "${env.value}"`);
+      }
+    }
+  }
+
+  lines.push('```');
+
+  return lines.join('\n');
 }
+
+/**
+ * Best-effort env-var placeholders for each metrics backend. The wizard
+ * doesn't have the user's actual credentials at plan-render time —
+ * these are guidance, with placeholders the user fills in.
+ */
+function envForBackend(kind: MetricsBackendKind): Array<{ name: string; value: string }> {
+  switch (kind) {
+    case 'datadog':
+      return [
+        { name: 'DD_API_KEY', value: '<your-datadog-api-key>' },
+        { name: 'DD_SITE', value: 'datadoghq.com' },
+      ];
+    case 'elastic':
+      return [
+        { name: 'ELASTIC_HOST', value: '<https://your-elastic-host:9200>' },
+        { name: 'ELASTIC_API_KEY', value: '<your-elastic-api-key>' },
+      ];
+    case 'cloudwatch':
+      return [
+        { name: 'AWS_REGION', value: '<your-region>' },
+        // Use IRSA in prod; AWS_* env vars only for non-IRSA setups.
+      ];
+    case 'signalfx':
+      return [
+        { name: 'SIGNALFX_TOKEN', value: '<your-signalfx-token>' },
+        { name: 'SIGNALFX_REALM', value: '<your-realm-e.g.-us0>' },
+      ];
+    case 'prometheus':
+      return [
+        { name: 'PROMETHEUS_REMOTE_WRITE_URL', value: '<https://your-prom/api/v1/write>' },
+      ];
+    default:
+      return [];
+  }
+}
+

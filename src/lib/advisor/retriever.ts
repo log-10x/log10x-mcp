@@ -29,8 +29,18 @@ export interface RetrieverAdviseArgs {
   releaseName?: string;
   /** Target namespace. Default: snapshot's suggestedNamespace. */
   namespace?: string;
-  /** Log10x license key. Required for a complete install plan. */
-  apiKey?: string;
+  /**
+   * Log10x license JWT — mints from `POST /api/v1/license/demo` (anonymous)
+   * or `POST /api/v1/license` (Auth0-authed). Required for a complete
+   * install plan.
+   *
+   * NOTE: the retriever helm chart is on an older value-key naming
+   * convention (top-level `apiKeySecret` and the secret data is `apiKey`).
+   * The chart will be aligned with the Reporter chart's `log10xLicenseJwt`
+   * convention as part of the same engine-team migration — until then the
+   * retriever install plan renders the JWT into the old `apiKey` slot.
+   */
+  licenseJwt?: string;
   /** Override: input S3 bucket name. Default: from snapshot. */
   inputBucket?: string;
   /** Override: index bucket (with prefix). Default: `<inputBucket>/indexing-results/`. */
@@ -79,9 +89,9 @@ export async function buildRetrieverPlan(args: RetrieverAdviseArgs): Promise<Adv
   };
 
   const blockers: string[] = [];
-  if (!args.apiKey && !args.skipInstall) {
+  if (!args.licenseJwt && !args.skipInstall) {
     blockers.push(
-      'Log10x license key is required for an install plan. Pass `api_key` (verify + teardown plans work without it).'
+      'Log10x license JWT is required for an install plan. Pass `license_jwt` (fetch one from `POST /api/v1/license/demo` for anonymous demo, or `POST /api/v1/license` with an Auth0 access token). Verify and teardown plans work without it.'
     );
   }
   if (!args.skipInstall) {
@@ -129,7 +139,7 @@ export async function buildRetrieverPlan(args: RetrieverAdviseArgs): Promise<Adv
       ...buildInstallSteps({
         releaseName,
         namespace,
-        apiKey: args.apiKey!,
+        licenseJwt: args.licenseJwt!,
         inputBucket: inputBucket!,
         indexBucket: indexBucket!,
         irsaRoleArn: irsaRoleArn!,
@@ -267,7 +277,7 @@ async function runPreflight(
 function buildInstallSteps(opts: {
   releaseName: string;
   namespace: string;
-  apiKey: string;
+  licenseJwt: string;
   inputBucket: string;
   indexBucket: string;
   irsaRoleArn: string;
@@ -327,15 +337,21 @@ function buildInstallSteps(opts: {
 
 function renderRetrieverValues(opts: {
   releaseName: string;
-  apiKey: string;
+  licenseJwt: string;
   inputBucket: string;
   indexBucket: string;
   irsaRoleArn: string;
   sqsUrls: Record<'index' | 'query' | 'subquery' | 'stream', string>;
 }): string {
+  // NOTE: the retriever chart's values.yaml still uses the older
+  // `apiKeySecret` / nested `tenx.apiKey` slot. We pass the license JWT
+  // into that slot until the chart is aligned with the Reporter chart's
+  // `log10xLicenseJwt` convention. Engine-team migration tracked
+  // separately; the engine itself already validates the JWT regardless
+  // of which value-key it arrives through.
   return `tenx:
   enabled: true
-  apiKey: "${opts.apiKey}"
+  apiKey: "${opts.licenseJwt}"
   runtimeName: "${opts.releaseName}"
   gitToken: "public-repo-no-token-needed"
   config:
