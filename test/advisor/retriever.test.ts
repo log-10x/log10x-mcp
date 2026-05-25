@@ -29,6 +29,7 @@ function baseSnapshot(overrides: Partial<DiscoverySnapshot> = {}): DiscoverySnap
       log10xApps: [],
       storageClasses: ['gp3'],
       ingressClasses: ['alb'],
+      backendAgents: [],
       serviceAccountIrsa: [],
     },
     aws: { available: true, s3Buckets: [], sqsQueues: [], cwLogGroups: [], region: 'us-east-1' },
@@ -65,13 +66,13 @@ function richSnapshot(): DiscoverySnapshot {
   });
 }
 
-test('plan blocks when api_key is missing', async () => {
+test('plan blocks when license_jwt is missing', async () => {
   const plan = await buildRetrieverPlan({ snapshot: richSnapshot() });
-  assert.ok(plan.blockers.some((b) => b.toLowerCase().includes('license key')));
+  assert.ok(plan.blockers.some((b) => b.toLowerCase().includes('license jwt')));
 });
 
 test('plan blocks when input bucket is missing from snapshot + args', async () => {
-  const plan = await buildRetrieverPlan({ snapshot: baseSnapshot(), apiKey: 'x' });
+  const plan = await buildRetrieverPlan({ snapshot: baseSnapshot(), licenseJwt: 'x' });
   assert.ok(
     plan.blockers.some((b) => b.toLowerCase().includes('input s3 bucket')),
     `expected input-bucket blocker; got: ${plan.blockers.join(' | ')}`
@@ -92,7 +93,7 @@ test('plan blocks when any SQS queue URL is missing', async () => {
         serviceAccountIrsa: [{ namespace: 'demo', name: 'tenx-retriever', roleArn: 'arn' }],
       },
     }),
-    apiKey: 'x',
+    licenseJwt: 'x',
   });
   assert.ok(
     plan.blockers.some((b) => b.toLowerCase().includes('subquery') && b.toLowerCase().includes('stream')),
@@ -115,7 +116,7 @@ test('plan blocks when IRSA role is missing', async () => {
         },
       },
     }),
-    apiKey: 'x',
+    licenseJwt: 'x',
   });
   assert.ok(
     plan.blockers.some((b) => b.toLowerCase().includes('irsa')),
@@ -124,7 +125,7 @@ test('plan blocks when IRSA role is missing', async () => {
 });
 
 test('rich snapshot + api_key produces a no-blocker plan', async () => {
-  const plan = await buildRetrieverPlan({ snapshot: richSnapshot(), apiKey: 'test' });
+  const plan = await buildRetrieverPlan({ snapshot: richSnapshot(), licenseJwt: 'test' });
   assert.equal(plan.blockers.length, 0, `expected zero blockers; got: ${plan.blockers.join(' | ')}`);
   assert.ok(plan.install.length >= 4, 'install should have ≥4 steps');
   assert.ok(plan.verify.length >= 3, 'verify should have ≥3 probes');
@@ -132,7 +133,7 @@ test('rich snapshot + api_key produces a no-blocker plan', async () => {
 });
 
 test('values file wires all four SQS queues + IRSA role + buckets', async () => {
-  const plan = await buildRetrieverPlan({ snapshot: richSnapshot(), apiKey: 'test' });
+  const plan = await buildRetrieverPlan({ snapshot: richSnapshot(), licenseJwt: 'test' });
   const values = plan.install.find((s) => s.file)?.file?.contents;
   assert.ok(values, 'install should have a file-write step with contents');
   assert.ok(values!.includes('indexQueueUrl:'), 'values should include indexQueueUrl');
@@ -148,7 +149,7 @@ test('values file wires all four SQS queues + IRSA role + buckets', async () => 
 test('explicit args override snapshot-detected values', async () => {
   const plan = await buildRetrieverPlan({
     snapshot: richSnapshot(),
-    apiKey: 'test',
+    licenseJwt: 'test',
     inputBucket: 'custom-bucket',
     irsaRoleArn: 'arn:aws:iam::222:role/custom',
     sqsUrls: {
@@ -173,19 +174,19 @@ test('alreadyInstalled.retriever triggers a note (not a blocker)', async () => {
         alreadyInstalled: { retriever: 'demo' },
       },
     },
-    apiKey: 'test',
+    licenseJwt: 'test',
   });
   assert.equal(plan.blockers.length, 0);
   assert.ok(plan.notes.some((n) => n.toLowerCase().includes('retriever') && n.includes('`demo`')));
 });
 
 test('plan.app is always "retriever"', async () => {
-  const plan = await buildRetrieverPlan({ snapshot: richSnapshot(), apiKey: 'test' });
+  const plan = await buildRetrieverPlan({ snapshot: richSnapshot(), licenseJwt: 'test' });
   assert.equal(plan.app, 'retriever');
 });
 
 test('teardown does not touch AWS infra (Terraform concern)', async () => {
-  const plan = await buildRetrieverPlan({ snapshot: richSnapshot(), apiKey: 'test' });
+  const plan = await buildRetrieverPlan({ snapshot: richSnapshot(), licenseJwt: 'test' });
   const teardownText = JSON.stringify(plan.teardown);
   // The optional AWS teardown step is a commented-out terraform reference,
   // NOT aws-cli delete calls. Assert no aws-cli delete verbs appear.

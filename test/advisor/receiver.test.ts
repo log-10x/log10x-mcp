@@ -35,6 +35,7 @@ function baseSnapshot(overrides: Partial<DiscoverySnapshot> = {}): DiscoverySnap
       log10xApps: [],
       storageClasses: ['gp3'],
       ingressClasses: ['alb'],
+      backendAgents: [],
       serviceAccountIrsa: [],
     },
     aws: { available: false, s3Buckets: [], sqsQueues: [], cwLogGroups: [] },
@@ -64,7 +65,7 @@ for (const fw of forwarders) {
         snapshot: baseSnapshot(),
         app: 'receiver',
         forwarder: fw,
-        apiKey: 'test',
+        licenseJwt: 'test',
         destination: 'mock',
       });
       assert.ok(
@@ -80,7 +81,7 @@ for (const fw of forwarders) {
       snapshot: baseSnapshot(),
       app: 'receiver',
       forwarder: fw,
-      apiKey: 'test',
+      licenseJwt: 'test',
       destination: 'mock',
     });
     assert.equal(plan.app, 'receiver');
@@ -99,7 +100,7 @@ test('receiver default release name is my-receiver', async () => {
     snapshot: baseSnapshot(),
     app: 'receiver',
     forwarder: 'fluentbit',
-    apiKey: 'test',
+    licenseJwt: 'test',
   });
   assert.equal(plan.releaseName, 'my-receiver');
 });
@@ -108,7 +109,7 @@ test('reporter default release name is my-reporter (unchanged)', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
     forwarder: 'fluentbit',
-    apiKey: 'test',
+    licenseJwt: 'test',
   });
   assert.equal(plan.app, 'reporter');
   assert.equal(plan.releaseName, 'my-reporter');
@@ -120,7 +121,7 @@ test('explicit release_name overrides the app default', async () => {
     app: 'receiver',
     forwarder: 'fluentbit',
     releaseName: 'custom-rec-name',
-    apiKey: 'test',
+    licenseJwt: 'test',
   });
   assert.equal(plan.releaseName, 'custom-rec-name');
 });
@@ -135,7 +136,7 @@ test('alreadyInstalled.receiver triggers a note, not a blocker', async () => {
     }),
     app: 'receiver',
     forwarder: 'fluentbit',
-    apiKey: 'test',
+    licenseJwt: 'test',
   });
   assert.equal(plan.blockers.length, 0);
   assert.ok(
@@ -160,7 +161,7 @@ test('receiver plan install commands reference the same chart as reporter', asyn
       snapshot: baseSnapshot(),
       app: 'receiver',
       forwarder: fw,
-      apiKey: 'test',
+      licenseJwt: 'test',
       destination: 'mock',
     });
     const installText = JSON.stringify(plan.install);
@@ -178,7 +179,7 @@ test('optimize=true on fluent-bit receiver flips tenx.optimize: true', async () 
     snapshot: baseSnapshot(),
     app: 'receiver',
     forwarder: 'fluentbit',
-    apiKey: 'test',
+    licenseJwt: 'test',
     destination: 'mock',
     optimize: true,
   });
@@ -199,7 +200,7 @@ test('optimize=true on fluentd receiver flips tenx.optimize: true', async () => 
     snapshot: baseSnapshot(),
     app: 'receiver',
     forwarder: 'fluentd',
-    apiKey: 'test',
+    licenseJwt: 'test',
     optimize: true,
   });
   assert.equal(plan.blockers.length, 0);
@@ -212,7 +213,7 @@ test('optimize=true on filebeat receiver sets tenx.optimize: true', async () => 
     snapshot: baseSnapshot(),
     app: 'receiver',
     forwarder: 'filebeat',
-    apiKey: 'test',
+    licenseJwt: 'test',
     optimize: true,
   });
   assert.equal(plan.blockers.length, 0);
@@ -229,7 +230,7 @@ test('optimize=true adds an encoded-events verify probe', async () => {
     snapshot: baseSnapshot(),
     app: 'receiver',
     forwarder: 'fluentbit',
-    apiKey: 'test',
+    licenseJwt: 'test',
     optimize: true,
   });
   const encodedProbe = plan.verify.find((p) => p.name === 'tenx-encoded-events');
@@ -245,7 +246,7 @@ test('optimize=false leaves fluent-bit values unchanged (no optimize flag)', asy
     snapshot: baseSnapshot(),
     app: 'receiver',
     forwarder: 'fluentbit',
-    apiKey: 'test',
+    licenseJwt: 'test',
     optimize: false,
   });
   const content = plan.install.find((s) => s.file)!.file!.contents;
@@ -267,7 +268,7 @@ test('optimize=true on filebeat receiver is allowed (1.0.7 unified path)', async
     snapshot: baseSnapshot(),
     app: 'receiver',
     forwarder: 'filebeat',
-    apiKey: 'test',
+    licenseJwt: 'test',
     optimize: true,
   });
   assert.equal(plan.blockers.length, 0, `expected no blockers; got: ${plan.blockers.join(' | ')}`);
@@ -279,7 +280,7 @@ test('optimize=true on otel-collector receiver is allowed (1.0.7 unified path)',
     snapshot: baseSnapshot(),
     app: 'receiver',
     forwarder: 'otel-collector',
-    apiKey: 'test',
+    licenseJwt: 'test',
     optimize: true,
   });
   assert.equal(plan.blockers.length, 0, `expected no blockers; got: ${plan.blockers.join(' | ')}`);
@@ -291,7 +292,7 @@ test('optimize=true with app=reporter is blocked', async () => {
     snapshot: baseSnapshot(),
     app: 'reporter',
     forwarder: 'fluentbit',
-    apiKey: 'test',
+    licenseJwt: 'test',
     optimize: true,
   });
   assert.ok(
@@ -305,7 +306,7 @@ test('mode=readonly flips tenx.readOnly: true on fluent-bit', async () => {
     snapshot: baseSnapshot(),
     app: 'receiver',
     forwarder: 'fluentbit',
-    apiKey: 'test',
+    licenseJwt: 'test',
     readOnly: true,
   });
   assert.equal(plan.blockers.length, 0, `expected no blockers; got: ${plan.blockers.join(' | ')}`);
@@ -325,7 +326,7 @@ test('mode=readonly + optimize=true is blocked', async () => {
     snapshot: baseSnapshot(),
     app: 'receiver',
     forwarder: 'fluentbit',
-    apiKey: 'test',
+    licenseJwt: 'test',
     optimize: true,
     readOnly: true,
   });
@@ -340,7 +341,7 @@ test('mode=readonly with app=reporter is blocked', async () => {
     snapshot: baseSnapshot(),
     app: 'reporter',
     forwarder: 'fluentbit',
-    apiKey: 'test',
+    licenseJwt: 'test',
     readOnly: true,
   });
   assert.ok(
@@ -354,7 +355,7 @@ test('mode=readonly sets tenx.readOnly: true on filebeat', async () => {
     snapshot: baseSnapshot(),
     app: 'receiver',
     forwarder: 'filebeat',
-    apiKey: 'test',
+    licenseJwt: 'test',
     readOnly: true,
   });
   assert.equal(plan.blockers.length, 0, `expected no blockers; got: ${plan.blockers.join(' | ')}`);
@@ -371,7 +372,7 @@ test('mode=readonly flips tenx.readOnly: true on otel-collector', async () => {
     snapshot: baseSnapshot(),
     app: 'receiver',
     forwarder: 'otel-collector',
-    apiKey: 'test',
+    licenseJwt: 'test',
     readOnly: true,
   });
   assert.equal(plan.blockers.length, 0, `expected no blockers; got: ${plan.blockers.join(' | ')}`);
@@ -382,33 +383,34 @@ test('mode=readonly flips tenx.readOnly: true on otel-collector', async () => {
   );
 });
 
-test('app=reporter on fluent-bit emits tenx.readOnly: true (Reporter is sugar for receiver+readOnly)', async () => {
-  const plan = await buildReporterPlan({
-    snapshot: baseSnapshot(),
-    app: 'reporter',
-    forwarder: 'fluentbit',
-    apiKey: 'test',
-  });
-  assert.equal(plan.blockers.length, 0, `no blockers expected; got: ${plan.blockers.join(' | ')}`);
-  const content = plan.install.find((s) => s.file)!.file!.contents;
-  assert.ok(
-    content.includes('readOnly: true'),
-    `app=reporter on fluent-bit must set tenx.readOnly: true; got: ${content}`
-  );
-});
-
-test('app=reporter on filebeat emits tenx.readOnly: true (Reporter is sugar for receiver+readOnly)', async () => {
-  const plan = await buildReporterPlan({
-    snapshot: baseSnapshot(),
-    app: 'reporter',
-    forwarder: 'filebeat',
-    apiKey: 'test',
-  });
-  assert.equal(plan.blockers.length, 0);
-  const content = plan.install.find((s) => s.file)!.file!.contents;
-  assert.ok(
-    content.includes('readOnly: true'),
-    `app=reporter on filebeat must set tenx.readOnly: true; got: ${content}`
-  );
-  assert.ok(!/^\s*kind:/m.test(content), `filebeat values should NOT embed any kind: line`);
+test('app=reporter uses STANDALONE_SPEC (reporter-10x chart) regardless of detected forwarder', async () => {
+  // Production intent shift (2026-05): Reporter is no longer "sugar for
+  // Receiver + readOnly" running on the per-forwarder chart. It's a
+  // dedicated DaemonSet via the log10x/reporter-10x chart, sitting
+  // alongside the user's existing forwarder. The values doc is flat
+  // (top-level log10xLicenseJwt), not the per-forwarder `tenx:` block.
+  for (const fw of ['fluentbit', 'filebeat'] as const) {
+    const plan = await buildReporterPlan({
+      snapshot: baseSnapshot(),
+      app: 'reporter',
+      forwarder: fw,
+      licenseJwt: 'test',
+    });
+    assert.equal(plan.blockers.length, 0, `${fw}: no blockers; got: ${plan.blockers.join(' | ')}`);
+    const content = plan.install.find((s) => s.file)!.file!.contents;
+    assert.ok(
+      content.includes('log10xLicenseJwt: "test"'),
+      `${fw}: standalone Reporter chart uses flat log10xLicenseJwt; got: ${content}`
+    );
+    assert.ok(
+      content.includes('# reporter-10x: non-invasive parallel DaemonSet.'),
+      `${fw}: should render the reporter-10x preamble, not the per-forwarder values`
+    );
+    // Reporter chart has no `tenx.readOnly` field — the chart itself is
+    // read-only by design.
+    assert.ok(
+      !/^\s*readOnly:/m.test(content),
+      `${fw}: reporter chart has no tenx.readOnly field; got: ${content}`
+    );
+  }
 });
