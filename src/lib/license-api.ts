@@ -1,11 +1,13 @@
 /**
- * License JWT fetch helpers.
+ * License JWT fetch helpers — mints credentials for the **ENGINE-ACTION
+ * surface** of the gateway (see `./auth-model.ts` for the full model).
  *
- * The engine (Reporter, Receiver, Retriever) takes a license JWT as its
- * credential — the helm chart's `log10xLicenseJwt` value, mounted as a
- * file at `TENX_LICENSE_FILE` inside the pod. The JWT is ES256-signed
- * by the Log10x backend and verified locally by the engine against an
- * embedded public key (no online check required at engine startup).
+ * The engine (Reporter, Receiver, Retriever) takes a license JWT as
+ * its credential — the helm chart's `log10xLicenseJwt` value, mounted
+ * as a file at `TENX_LICENSE_FILE` inside the pod. The JWT is ES256-
+ * signed by the Log10x backend and verified locally by the engine
+ * against an embedded public key (no online check required at engine
+ * startup).
  *
  * Two ways to mint one, both via the public gateway:
  *
@@ -18,14 +20,23 @@
  *     tenant id. Idempotent — same license_id + same exp on repeat
  *     calls within the trial window.
  *
- * Distinct from `LOG10X_API_KEY`, which authenticates the MCP itself
- * against the gateway's MCP / Console routes (`X-10X-Auth` header,
- * `tenx_api_authorizer` lambda). The license JWT only flows into the
- * engine pods in install plans — the MCP doesn't use it for its own
- * HTTP calls.
+ * **Important separation** — distinct from the api_key
+ * (`LOG10X_API_KEY` / `X-10X-Auth`), which authenticates the MCP
+ * against the user-action surface (`./api.ts`, `tenx_api_authorizer`).
+ * The license JWT is engine-only: it flows into the helm values the
+ * MCP emits, and from there into the engine pod's Kubernetes Secret.
+ * The MCP itself never sends a license JWT on its own requests — those
+ * routes (`/write`, `/agent/whoami`) belong to the engine. Conversely,
+ * never send an api_key to `tenx_license_authorizer`-gated routes;
+ * the authorizer will reject it.
+ *
+ * The Auth0-token → license JWT path exists specifically so MCP and
+ * web-console tools can mint engine credentials directly from the
+ * user's signin session, without needing the api_key as an intermediate.
  */
 
 import { log } from './log.js';
+import './auth-model.js';
 import { readCredentials, writeCredentials, type Credentials } from './credentials.js';
 import { refreshAuth0AccessToken } from './auth0-device-flow.js';
 

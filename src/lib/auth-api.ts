@@ -1,8 +1,17 @@
 /**
- * Calls to the Log10x BE auth endpoints. Kept separate from `api.ts`
- * because these are credential-exchange calls that don't take a
- * `LOG10X_API_KEY` (the goal IS to get one).
+ * Auth0-token → **api_key** exchange — bootstraps the USER-ACTION
+ * surface (see `./auth-model.ts` for the full model).
+ *
+ * Kept separate from `api.ts` because these are credential-exchange
+ * calls that don't take a `LOG10X_API_KEY` (the goal IS to get one).
+ *
+ * Sibling: `./license-api.ts` does the Auth0-token → **license JWT**
+ * exchange, which is the OTHER thing an Auth0 access token can mint.
+ * Same source token (one Auth0 session), two different output credentials
+ * for two different gateway surfaces. Don't conflate them.
  */
+
+import './auth-model.js';
 
 const DEFAULT_BASE = 'https://prometheus.log10x.com';
 

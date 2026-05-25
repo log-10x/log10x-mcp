@@ -1,8 +1,18 @@
 /**
- * Log10x API client.
+ * Log10x API client — **USER-ACTION SURFACE** (api_key / `X-10X-Auth`).
  *
- * Handles authentication, Prometheus queries, user settings,
- * and AI analysis via the Log10x REST API.
+ * Every request out of this file authenticates with the user's api_key
+ * (composed as `<apiKey>/<envId>` for env-scoped calls, or `<apiKey>`
+ * for user-scoped ones). This is the user-action half of the gateway's
+ * two-surface auth model — **don't reach for the license JWT or an
+ * Auth0 Bearer token here**; the `tenx_api_authorizer` will reject them.
+ *
+ * For engine credentials (license JWT) see `./license-api.ts`. For the
+ * Auth0-token → api_key mint that bootstraps this surface see
+ * `./auth-api.ts`. Canonical model: [./auth-model.ts](./auth-model.ts).
+ *
+ * Handles Prometheus queries, user settings, env CRUD, billing, and AI
+ * analysis via the Log10x REST API.
  *
  * All HTTP reads route through `fetchWithRetry` — 3 attempts with
  * exponential backoff + jitter. Retries fire on network errors and
@@ -12,6 +22,8 @@
 
 import type { EnvConfig } from './environments.js';
 import { log } from './log.js';
+// Authentication architecture reference — surface A (api_key) lives here.
+import './auth-model.js';
 
 const DEFAULT_BASE = 'https://prometheus.log10x.com';
 const DEFAULT_COST_PER_GB = 2.50;

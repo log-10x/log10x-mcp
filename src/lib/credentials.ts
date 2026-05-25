@@ -1,6 +1,21 @@
 /**
  * Persistent credentials at `~/.log10x/credentials`.
  *
+ * This file holds the materials for BOTH gateway auth surfaces (see
+ * `./auth-model.ts` for the canonical model):
+ *
+ *   - **api_key** (user-action surface) — `apiKey` field, the long-lived
+ *     token used in `X-10X-Auth` for MCP↔gateway calls.
+ *   - **Auth0 access + refresh tokens** (the unified front door) — used
+ *     to mint license JWTs on demand for install plans (via
+ *     `./license-api.ts`) and to refresh themselves without forcing
+ *     the user to re-sign-in. Absent on the pasted-API-key signin path.
+ *
+ * Note that the **license JWT itself is NOT persisted here**. License
+ * JWTs are short-lived engine credentials minted on demand into helm
+ * values; this file only stores the longer-lived materials that can
+ * derive a fresh license when needed.
+ *
  * Written by `log10x_signin_complete` after the BE returns an API key
  * (or after the pasted-key path validates one), read by
  * `loadEnvironments` when no `LOG10X_API_KEY` env var is set, wiped by
@@ -18,6 +33,7 @@
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import './auth-model.js';
 
 export interface Credentials {
   /** Long-lived Log10x API key minted by the BE. */

@@ -31,6 +31,13 @@
  * State retention is via WizardSession on the snapshot store — the
  * MCP itself is stateless per call, but the snapshot store's 30-min TTL
  * gives the agent a coherent conversation thread.
+ *
+ * **Credential note.** The wizard mints a LICENSE JWT (not an api_key)
+ * for the install plan. The license JWT is the credential the deployed
+ * engine pods consume — it goes into the helm chart's `log10xLicenseJwt`
+ * value. The wizard never touches the user's api_key; the api_key stays
+ * with the MCP for user-action calls (queries, env management, etc.).
+ * See `../lib/auth-model.ts` for the full split.
  */
 
 import { z } from 'zod';
@@ -38,6 +45,7 @@ import { getSnapshot, updateWizardSession } from '../lib/discovery/snapshot-stor
 import { buildReporterPlan } from '../lib/advisor/reporter.js';
 import { renderPlan } from '../lib/advisor/render.js';
 import { acquireLicenseForWizard, LicenseFetchError } from '../lib/license-api.js';
+import '../lib/auth-model.js';
 import { resolveAdvisorDestination } from '../lib/advisor/dest-resolve.js';
 import type {
   DiscoverySnapshot,
