@@ -165,6 +165,7 @@ type WizardMode =
   | 'next_question'
   | 'license_error'
   | 'demo_airgapped_warning'
+  | 'ambiguous_destination'
   | 'plan';
 
 const TOOL_NAME = 'log10x_advise_install';
@@ -185,7 +186,8 @@ function wizardReturn(
   if (view === 'markdown') {
     return buildMarkdownEnvelope({ tool: TOOL_NAME, summary: { headline }, markdown: md });
   }
-  const ok = mode === 'next_question' || mode === 'plan' || mode === 'demo_airgapped_warning';
+  const okModes: WizardMode[] = ['next_question', 'plan', 'demo_airgapped_warning'];
+  const ok = okModes.includes(mode);
   return buildEnvelope({
     tool: TOOL_NAME,
     view: 'summary',
@@ -318,9 +320,17 @@ export async function executeAdviseInstall(
     return wizardReturn(view, 'demo_airgapped_warning', md, { snapshot_id: args.snapshot_id, is_signed_in: !envs.isDemoMode });
   }
 
-  // Everything answered. Emit the plan.
-  const planMd = await renderInstallPlan(snapshot, session, args);
-  return wizardReturn(view, 'plan', planMd, {
+  // Everything answered. Emit the plan (or surface ambiguous-destination).
+  const planResult = await renderInstallPlan(snapshot, session, args);
+  if (planResult.kind === 'ambiguous_destination') {
+    return wizardReturn(view, 'ambiguous_destination', planResult.markdown, {
+      snapshot_id: args.snapshot_id,
+      app: session.app,
+      forwarder: session.forwarder,
+      detected_destinations: planResult.candidates,
+    });
+  }
+  return wizardReturn(view, 'plan', planResult.markdown, {
     snapshot_id: args.snapshot_id,
     app: session.app,
     forwarder: session.forwarder,
@@ -329,6 +339,7 @@ export async function executeAdviseInstall(
     is_demo_license: session.isDemoLicense ?? false,
     release_name: session.releaseName,
     namespace: session.namespace,
+    destination: planResult.destination,
     action: args.action ?? 'all',
   });
 }
@@ -845,11 +856,15 @@ function renderDemoAirgappedWarning(session: WizardSession, isSignedIn: boolean)
 
 // ── Plan rendering ──
 
+type RenderPlanResult =
+  | { kind: 'plan'; markdown: string; destination: string }
+  | { kind: 'ambiguous_destination'; markdown: string; candidates: string[] };
+
 async function renderInstallPlan(
   snapshot: DiscoverySnapshot,
   session: WizardSession,
   args: AdviseInstallArgs
-): Promise<string> {
+): Promise<RenderPlanResult> {
   const action = args.action ?? 'all';
   const lines: string[] = [];
 
@@ -877,7 +892,13 @@ async function renderInstallPlan(
       session.app === 'receiver'
         ? await resolveAdvisorDestination(args.destination)
         : { kind: 'resolved' as const, destination: 'mock' as const, note: undefined };
-    if (destResolution.kind === 'ambiguous') return destResolution.markdown;
+    if (destResolution.kind === 'ambiguous') {
+      return {
+        kind: 'ambiguous_destination',
+        markdown: destResolution.markdown,
+        candidates: destResolution.candidates,
+      };
+    }
     const destination = destResolution.destination;
     const destNote = destResolution.note ? `_${destResolution.note}_\n\n` : '';
 
@@ -899,9 +920,12 @@ async function renderInstallPlan(
       skipTeardown: action === 'install' || action === 'verify',
     });
     lines.push(destNote + renderPlan(plan, action));
+    return { kind: 'plan', markdown: lines.join('\n'), destination };
   }
 
-  return lines.join('\n');
+  // Unreachable — session.app is constrained to 'reporter' | 'receiver' by
+  // the schema, but the type system can't see that here. Defensive return.
+  return { kind: 'plan', markdown: lines.join('\n'), destination: 'mock' };
 }
 
 function renderChoiceSummary(session: WizardSession): string {
