@@ -107,6 +107,19 @@ export interface ForwarderSpec {
      * MCP's `LOG10X_API_KEY` env var, which is used for MCP↔gateway auth.
      */
     licenseJwt: string;
+    /**
+     * True when the JWT was minted from the demo endpoint (anonymous,
+     * 14-day, transient). Renderers inline the JWT for demo licenses
+     * (one-step setup, no Secret to manage). For real (user) licenses
+     * the renderer points the chart at an out-of-band Kubernetes Secret
+     * that the user creates before `helm upgrade` — the JWT itself is
+     * never written into values.yaml.
+     */
+    isDemoLicense?: boolean;
+    /** Name of the Kubernetes Secret holding the real license JWT (when isDemoLicense=false). */
+    licenseSecretName?: string;
+    /** Key inside the Secret whose value is the JWT (when isDemoLicense=false). */
+    licenseSecretKey?: string;
     releaseName: string;
     destination: OutputDestination;
     outputHost?: string;
@@ -907,11 +920,20 @@ export const STANDALONE_SPEC: ForwarderSpec = {
   hasTenxSidecar: false,
   selectorStyle: 'k8s-recommended',
   selectorLabel: (r) => k8sRecommendedSelector(r),
-  renderValues: ({ licenseJwt, releaseName, backends, backendCredentials, airgapped }) => {
+  renderValues: ({ licenseJwt, isDemoLicense, licenseSecretName, licenseSecretKey, releaseName, backends, backendCredentials, airgapped }) => {
     // reporter-10x uses a flat values layout: top-level log10xLicenseJwt
     // + runtimeName (NOT nested under `tenx:`). The chart turns the JWT
     // into a Kubernetes Secret and mounts it as a file pointed at by
     // TENX_LICENSE_FILE inside the engine container.
+    //
+    // Demo licenses (transient, 14-day, anonymous): inline the JWT in
+    // values.yaml — chart creates a Secret on its own from that value.
+    // One-step setup, fine for demos.
+    //
+    // Real (user) licenses: never write the JWT into values.yaml.
+    // Instead, point the chart at an existing Secret the user creates
+    // out-of-band. The chart's `licenseSecret.create=false` mode skips
+    // the auto-Secret generation and mounts the user's existing one.
     //
     // We intentionally DO NOT emit `gitToken` or `config.git` defaults
     // — both match chart defaults and the chart's secret-template only
@@ -930,9 +952,16 @@ export const STANDALONE_SPEC: ForwarderSpec = {
     const tenxBlock = extras
       ? `\ntenx:${extras}\n`
       : '';
+    const licenseBlock = isDemoLicense === false
+      ? `log10xLicenseJwt: ""          # Provided via the Secret below (create it before \`helm upgrade\`)
+licenseSecret:
+  create: false
+  existingSecret: ${licenseSecretName ?? 'log10x-license'}
+  secretKey: ${licenseSecretKey ?? 'license-jwt'}`
+      : `log10xLicenseJwt: "${licenseJwt}"`;
     return `# reporter-10x: non-invasive parallel DaemonSet.
 # Runs alongside the user's existing forwarder without touching it.
-log10xLicenseJwt: "${licenseJwt}"
+${licenseBlock}
 runtimeName: "${releaseName}"${airgappedLine}${tenxBlock}`;
   },
   verifyProbes: ({ releaseName, namespace }) => {

@@ -106,7 +106,7 @@ export const adviseInstallSchema = {
     .array(z.enum(SUPPORTED_BACKENDS as unknown as [string, ...string[]]))
     .optional()
     .describe(
-      'Where the engine emits TenXSummary metrics. Multi-destination — a user can report to log10x SaaS AND their own backend simultaneously, e.g. `["log10x", "datadog"]`. Choices: **log10x** (SaaS Prometheus, free demo tier), **datadog**, **elastic**, **cloudwatch**, **signalfx**, **prometheus** (customer-owned). The wizard pre-fills detected backends from the snapshot. The only mutual exclusion is `airgapped: true` + `"log10x"` in this list.'
+      'Where the engine emits TenXSummary metrics. Multi-destination — a user can report to log10x SaaS AND their own backend simultaneously, e.g. `["log10x", "datadog"]`. Choices: **log10x** (Log10x-managed Prometheus — recommended; no infra to run), **datadog**, **elastic**, **cloudwatch**, **signalfx**, **prometheus** (customer-owned). The wizard pre-fills detected backends from the snapshot. The only mutual exclusion is `airgapped: true` + `"log10x"` in this list.'
     ),
   airgapped: z
     .boolean()
@@ -442,7 +442,7 @@ async function elicitMissingAnswers(
     if (!session.backends || session.backends.length === 0) {
       const detectedSet = new Set(snapshot.kubectl.backendAgents.map((a) => a.kind));
       const result = await (server as any).server.elicitInput({
-        message: 'Where should TenXSummary metrics be sent? Pick one or more.',
+        message: 'The engine emits event statistics, cost attribution, and per-pattern enrichments as time-series metrics — and we need to know where to publish them. Pick the TSDB(s) where you want to read these metrics from (the MCP and your dashboards query them back from here). You can publish to multiple backends at the same time.',
         requestedSchema: {
           type: 'object',
           properties: {
@@ -487,8 +487,8 @@ async function elicitMissingAnswers(
       const properties: Record<string, unknown> = {
         secretName: {
           type: 'string',
-          title: `Kubernetes Secret name`,
-          description: `Name of the Secret holding sensitive ${backend} env vars (${spec.secret.map((s) => s.envVar).join(', ')}). Keys expected inside: ${spec.secret.map((s) => `\`${s.secretKey}\``).join(', ')}.`,
+          title: `Secret the engine reads ${BACKEND_LABEL[backend]} credentials from`,
+          description: `The engine needs to authenticate to ${BACKEND_LABEL[backend]} when it pushes metrics, and we won't put credentials in your values.yaml — instead, the engine reads them from a Kubernetes Secret at runtime via secretKeyRef. Tell us which Secret to read (use whatever your team already manages — Sealed Secrets, External Secrets, Vault, kubectl). Sensitive env vars the engine mounts from this Secret: ${spec.secret.map((s) => s.envVar).join(', ')}. Keys the engine reads inside the Secret: ${spec.secret.map((s) => `\`${s.secretKey}\``).join(', ')}.`,
           default: defaultSecretNameFor(backend),
         },
       };
@@ -506,7 +506,7 @@ async function elicitMissingAnswers(
         if (p.default === undefined) required.push(p.envVar);
       }
       const result = await (server as any).server.elicitInput({
-        message: `Credentials for ${BACKEND_LABEL[backend]}`,
+        message: `The engine pushes metrics to ${BACKEND_LABEL[backend]} and needs to authenticate. To avoid putting credentials in values.yaml, it reads them from a Kubernetes Secret at runtime — point us at the Secret to read (and any non-sensitive env overrides if you need them).`,
         requestedSchema: {
           type: 'object',
           properties,
@@ -708,7 +708,11 @@ function askBackends(detectedAgents: DetectedMetricsBackend[]): string {
   lines.push('# Install wizard — where do metrics go?');
   lines.push('');
   lines.push(
-    'Cost-attribution metrics can go to **one or more** destinations at the same time — for example, to Log10x SaaS for MCP queries AND your existing Datadog for unified dashboards.'
+    'The Log10x engine publishes event statistics (volumes, cost attribution, pattern fingerprints) and per-pattern enrichments as time-series metrics. We need to know **which TSDB(s) to push them to** — that\'s where the MCP and your dashboards will read them back from.'
+  );
+  lines.push('');
+  lines.push(
+    'You can ship the same metrics to **multiple backends in parallel** — for example, to Log10x SaaS for MCP queries AND your existing Datadog for unified dashboards.'
   );
   lines.push('');
   lines.push('Options (pick one or more):');
@@ -723,7 +727,7 @@ function askBackends(detectedAgents: DetectedMetricsBackend[]): string {
   for (const kind of SUPPORTED_BACKENDS) {
     const label = BACKEND_LABEL[kind];
     const annotations: string[] = [];
-    if (kind === 'log10x') annotations.push('Recommended for first install — free demo tier');
+    if (kind === 'log10x') annotations.push('Log10x-managed Prometheus — recommended, no infra to run');
     if (detectedSet.has(kind)) annotations.push('detected in your cluster');
     const suffix = annotations.length > 0 ? ` — ${annotations.join(', ')}` : '';
     lines.push(`- **${label}** (\`${kind}\`)${suffix}`);
@@ -742,10 +746,10 @@ function askBackendCredentials(backends: MetricsBackendKind[]): string {
   lines.push('# Install wizard — credentials for your metrics backends');
   lines.push('');
   lines.push(
-    'For each backend you picked, the wizard wires sensitive env vars (API keys, passwords, etc.) via Kubernetes Secrets — `valueFrom.secretKeyRef` — so credentials never live in your `values.yaml`.'
+    'For each backend, the engine needs credentials to authenticate when it pushes metrics. To do that securely **without putting secrets in `values.yaml`**, we wire sensitive env vars via Kubernetes Secrets (`valueFrom.secretKeyRef`) — you point us at a Secret name and we mount the keys at runtime.'
   );
   lines.push('');
-  lines.push('You **create the Secret(s) out-of-band** before `helm upgrade` (or reuse an existing one your other tools already populate). Per backend, tell the wizard:');
+  lines.push('That way you keep using **whatever Secret-management you already have** (Sealed Secrets, External Secrets, Vault, manual `kubectl create secret`, etc.) — we just consume the result. Create or reuse the Secret out-of-band before `helm upgrade`. Per backend, tell the wizard:');
   lines.push('');
   lines.push('- **Secret name** — what to look up in the cluster. Default if you skip: `<backend>-credentials`.');
   lines.push('- **Plain-value overrides** — non-sensitive config like region/URL/namespace. Each has a sensible default; override when needed.');
@@ -909,6 +913,7 @@ async function renderInstallPlan(
       releaseName: session.releaseName,
       namespace: session.namespace,
       licenseJwt: session.licenseJwt,
+      isDemoLicense: session.isDemoLicense,
       destination: destination as OutputDestination,
       outputHost: args.output_host,
       splunkHecToken: args.splunk_hec_token,

@@ -68,6 +68,13 @@ export interface ReporterAdviseArgs {
    * `log10xLicenseJwt` value. Required for a complete install plan.
    */
   licenseJwt?: string;
+  /**
+   * True when the JWT came from the demo endpoint. Drives the secret-vs-inline
+   * decision in the chart values renderer: demo licenses inline the JWT
+   * (one-step setup, transient); real licenses point the chart at an
+   * out-of-band Kubernetes Secret the user creates before `helm upgrade`.
+   */
+  isDemoLicense?: boolean;
   /** Output destination flavor. Default: 'mock' (safe for dogfooding). */
   destination?: OutputDestination;
   /** Host for non-mock destinations (ES endpoint, Splunk HEC host, etc.). */
@@ -501,6 +508,7 @@ function buildInstallSteps(opts: {
   releaseName: string;
   namespace: string;
   licenseJwt?: string;
+  isDemoLicense?: boolean;
   destination: OutputDestination;
   outputHost?: string;
   splunkHecToken?: string;
@@ -523,8 +531,11 @@ function buildInstallSteps(opts: {
     backends,
     backendCredentials,
     airgapped,
+    isDemoLicense,
   } = opts;
   const licenseJwt = opts.licenseJwt ?? 'REPLACE_WITH_LICENSE_JWT';
+  const licenseSecretName = 'log10x-license';
+  const licenseSecretKey = 'license-jwt';
   const steps: PlanStep[] = [];
 
   steps.push({
@@ -543,6 +554,21 @@ function buildInstallSteps(opts: {
     commands: [`kubectl create namespace ${namespace} --dry-run=client -o yaml | kubectl apply -f -`],
   });
 
+  // Real (user) licenses are kept out of values.yaml — the chart reads them
+  // from an out-of-band Secret the user creates here. Demo licenses skip
+  // this step (transient JWT, fine inline).
+  if (isDemoLicense === false) {
+    steps.push({
+      title: 'Create license Secret',
+      rationale: `Your license JWT must not live in values.yaml. The chart's \`licenseSecret\` block points the engine at this Secret — create it once, replace the JWT later by re-applying. The \`--from-literal\` approach below puts the JWT on the command line; if shell-history exposure matters, write it to a file first with \`umask 077\` and use \`--from-file=${licenseSecretKey}=<path>\`.`,
+      commands: [
+        `kubectl create secret generic ${licenseSecretName} \\
+  -n ${namespace} \\
+  --from-literal=${licenseSecretKey}='${licenseJwt}'`,
+      ],
+    });
+  }
+
   const valuesFile = `${releaseName}-values.yaml`;
   steps.push({
     title: 'Write Helm values',
@@ -551,6 +577,9 @@ function buildInstallSteps(opts: {
       path: valuesFile,
       contents: spec.renderValues({
         licenseJwt,
+        isDemoLicense,
+        licenseSecretName,
+        licenseSecretKey,
         releaseName,
         destination,
         outputHost,
