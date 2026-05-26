@@ -86,6 +86,13 @@ import { createEnvSchema, executeCreateEnv } from './tools/create-env.js';
 import { updateEnvSchema, executeUpdateEnv } from './tools/update-env.js';
 import { deleteEnvSchema, executeDeleteEnv } from './tools/delete-env.js';
 import { rotateApiKeySchema, executeRotateApiKey } from './tools/rotate-api-key.js';
+import { servicesSchema, executeServices } from './tools/services.js';
+import { discoverLabelsSchema, executeDiscoverLabels } from './tools/discover-labels.js';
+import { extractTemplatesSchema, executeExtractTemplates } from './tools/extract-templates.js';
+import {
+  translateMetricToPatternsSchema,
+  executeTranslateMetricToPatterns,
+} from './tools/translate-metric-to-patterns.js';
 import { getStatus } from './resources/status.js';
 
 // ── Environment + cost cache ──
@@ -151,12 +158,15 @@ const METRIC_REQUIRING_TOOLS = new Set([
   'log10x_event_lookup',
   'log10x_list_by_label',
   'log10x_savings',
+  'log10x_services',
+  'log10x_discover_labels',
   'log10x_investigate',
   'log10x_investigation_get',
   'log10x_backfill_metric',
   'log10x_correlate_cross_pillar',
   'log10x_discover_join',
   'log10x_customer_metrics_query',
+  'log10x_translate_metric_to_patterns',
   'log10x_retriever_query',
   'log10x_retriever_query_status',
   'log10x_retriever_series',
@@ -650,6 +660,25 @@ registerLog10xTool('log10x_top_patterns', topPatternsSchema, (args) =>
   })
 );
 
+// ── Tool: log10x_services ──
+
+registerLog10xTool('log10x_services', servicesSchema, (args) =>
+  wrap('log10x_services', async () => {
+    const env = resolveEnv(getEnvs(), args.environment);
+    const cost = await getAnalyzerCost(env, args.analyzerCost);
+    return executeServices({ ...args, analyzerCost: cost }, env);
+  })
+);
+
+// ── Tool: log10x_discover_labels ──
+
+registerLog10xTool('log10x_discover_labels', discoverLabelsSchema, (args) =>
+  wrap('log10x_discover_labels', async () => {
+    const env = resolveEnv(getEnvs(), args.environment);
+    return executeDiscoverLabels(args, env);
+  })
+);
+
 // ── Tool: log10x_list_by_label ──
 
 registerLog10xTool('log10x_list_by_label', listByLabelSchema, (args) =>
@@ -679,6 +708,12 @@ registerLog10xTool('log10x_investigation_get', investigationGetSchema, (args) =>
 
 registerLog10xTool('log10x_resolve_batch', resolveBatchSchema, (args) =>
   wrap('log10x_resolve_batch', async () => executeResolveBatch(args))
+);
+
+// ── Tool: log10x_extract_templates ──
+
+registerLog10xTool('log10x_extract_templates', extractTemplatesSchema, (args) =>
+  wrap('log10x_extract_templates', async () => executeExtractTemplates(args))
 );
 
 // ── Tool: log10x_retriever_query ──
@@ -823,6 +858,18 @@ registerLog10xTool('log10x_correlate_cross_pillar', correlateCrossPillarSchema, 
     const env = resolveEnv(getEnvs(), args.environment);
     return executeCorrelateCrossPillar(args, env);
   })
+);
+
+// ── Tool: log10x_translate_metric_to_patterns ──
+
+registerLog10xTool(
+  'log10x_translate_metric_to_patterns',
+  translateMetricToPatternsSchema,
+  (args) =>
+    wrap('log10x_translate_metric_to_patterns', async () => {
+      const env = resolveEnv(getEnvs(), args.environment);
+      return executeTranslateMetricToPatterns(args, env);
+    })
 );
 
 // ── Tool: log10x_poc_from_siem_submit / _status ──
