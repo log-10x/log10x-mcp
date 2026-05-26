@@ -22,6 +22,7 @@ import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { agentOnly } from '../lib/agent-only.js';
 import { fetchOneSampleByHash } from '../lib/siem/sample.js';
 import { patternDisplay } from '../lib/pattern-descriptor.js';
+import { buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
 export const eventLookupSchema = {
   pattern: z.string().optional().describe('Pattern name or search term to look up (e.g., "Payment_Gateway_Timeout"). Omit when passing `tenxHash` instead.'),
@@ -31,9 +32,28 @@ export const eventLookupSchema = {
   analyzerCost: z.number().optional().describe('SIEM ingestion cost in $/GB'),
   siemScope: z.string().optional().describe('SIEM scope for the live sample line on a tenxHash reverse lookup: a CloudWatch log group (`/aws/ecs/my-svc`), ES index, or Splunk index. When omitted, the detected SIEM connector uses its own default scope. Only consulted when `tenxHash` was passed (the cross-pillar correlation case).'),
   environment: z.string().optional().describe('Environment nickname'),
+  view: z.enum(['summary', 'markdown']).default('summary').describe('Output format. summary returns a structured envelope; markdown returns the rendered table.'),
 };
 
 export async function executeEventLookup(
+  args: { pattern?: string; tenxHash?: string; service?: string; timeRange?: string; analyzerCost?: number; siemScope?: string; view?: 'summary' | 'markdown' },
+  env: EnvConfig
+): Promise<string | StructuredOutput> {
+  const view = args.view ?? 'summary';
+  const wrapOutput = (markdown: string): string | StructuredOutput => {
+    if (view === 'markdown') return markdown;
+    const headline = markdown.split('\n')[0]?.slice(0, 200) || 'event_lookup result';
+    return buildMarkdownEnvelope({
+      tool: 'log10x_event_lookup',
+      summary: { headline },
+      markdown,
+    });
+  };
+  const result = await executeEventLookupInner(args, env);
+  return wrapOutput(result);
+}
+
+async function executeEventLookupInner(
   args: { pattern?: string; tenxHash?: string; service?: string; timeRange?: string; analyzerCost?: number; siemScope?: string },
   env: EnvConfig
 ): Promise<string> {

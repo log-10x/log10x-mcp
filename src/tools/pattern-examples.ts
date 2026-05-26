@@ -153,6 +153,7 @@ export const patternExamplesSchema = {
       'Vendor-specific scope (Splunk index, Datadog index, ES index pattern, CloudWatch log group). Defaults to a sensible per-vendor value when omitted.',
     ),
   environment: z.string().optional().describe('Environment nickname.'),
+  view: z.enum(['summary', 'markdown']).default('summary').describe('Output format. summary returns structured envelope; markdown returns rendered buckets.'),
 };
 
 interface ProgressNote {
@@ -170,9 +171,25 @@ interface PatternExamplesArgs {
   limit?: number;
   scope?: string;
   environment?: string;
+  view?: 'summary' | 'markdown';
 }
 
 export async function executePatternExamples(
+  rawArgs: PatternExamplesArgs,
+  env: EnvConfig,
+): Promise<string | import('../lib/output-types.js').StructuredOutput> {
+  const view = rawArgs.view ?? 'summary';
+  const md = await executePatternExamplesInner(rawArgs, env);
+  if (view === 'markdown') return md;
+  const { buildMarkdownEnvelope } = await import('../lib/output-types.js');
+  return buildMarkdownEnvelope({
+    tool: 'log10x_pattern_examples',
+    summary: { headline: md.split('\n')[0]?.slice(0, 200) || 'pattern_examples result' },
+    markdown: md,
+  });
+}
+
+async function executePatternExamplesInner(
   rawArgs: PatternExamplesArgs,
   env: EnvConfig,
 ): Promise<string> {

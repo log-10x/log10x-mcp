@@ -15,6 +15,7 @@ import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { agentOnly } from '../lib/agent-only.js';
 import { lineChart } from '../lib/line-chart.js';
 import { patternDisplay } from '../lib/pattern-descriptor.js';
+import { buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
 export const trendSchema = {
   pattern: z.string().describe('Pattern name (e.g., "Payment_Gateway_Timeout")'),
@@ -22,9 +23,24 @@ export const trendSchema = {
   step: z.enum(['1m', '5m', '15m', '1h', '6h', '1d']).default('1h').describe('Data point interval. Use `1m`/`5m` for sub-day windows (15m/1h/6h), `1h`/`6h` for day-level, `1d` for week+ windows.'),
   analyzerCost: z.number().optional().describe('SIEM ingestion cost in $/GB'),
   environment: z.string().optional().describe('Environment nickname'),
+  view: z.enum(['summary', 'markdown']).default('summary').describe('Output format. summary returns structured envelope; markdown returns rendered chart + stats.'),
 };
 
 export async function executeTrend(
+  args: { pattern: string; timeRange?: string; step?: string; analyzerCost?: number; view?: 'summary' | 'markdown' },
+  env: EnvConfig
+): Promise<string | StructuredOutput> {
+  const view = args.view ?? 'summary';
+  const md = await executeTrendInner(args, env);
+  if (view === 'markdown') return md;
+  return buildMarkdownEnvelope({
+    tool: 'log10x_pattern_trend',
+    summary: { headline: md.split('\n')[0]?.slice(0, 200) || 'pattern_trend result' },
+    markdown: md,
+  });
+}
+
+async function executeTrendInner(
   args: { pattern: string; timeRange?: string; step?: string; analyzerCost?: number },
   env: EnvConfig
 ): Promise<string> {
