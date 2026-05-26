@@ -16,6 +16,7 @@ import { z } from 'zod';
 import { runDiscovery } from '../lib/discovery/orchestrate.js';
 import type { DiscoverySnapshot, ForwarderKind } from '../lib/discovery/types.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
+import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
 export const discoverEnvSchema = {
   namespaces: z
@@ -55,12 +56,36 @@ export const discoverEnvSchema = {
     .optional()
     .describe('Skip all kubectl probes (for AWS-only discovery or when cluster access is restricted).'),
   skip_aws: z.boolean().optional().describe('Skip all AWS probes (for cluster-only discovery).'),
+  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.snapshot_id, data.forwarder, data.installed_components, data.aws). markdown wraps the rendered report in data.markdown.'),
 };
 
 const schemaObj = z.object(discoverEnvSchema);
 export type DiscoverEnvArgs = z.infer<typeof schemaObj>;
 
-export async function executeDiscoverEnv(args: DiscoverEnvArgs): Promise<string> {
+interface DiscoverEnvSummary {
+  snapshot_id: string;
+  started_at: string;
+  finished_at: string;
+  kubectl_available: boolean;
+  aws_available: boolean;
+  forwarder_kind?: string;
+  forwarder_namespace?: string;
+  installed_components: {
+    reporter: boolean;
+    receiver: boolean;
+    retriever: boolean;
+  };
+  namespaces_probed: string[];
+  eks_cluster?: string;
+  region?: string;
+  s3_buckets: string[];
+  sqs_queues: string[];
+  log_groups_count: number;
+  probe_log_entry_count: number;
+}
+
+export async function executeDiscoverEnv(args: DiscoverEnvArgs & { view?: 'summary' | 'markdown' }): Promise<string | StructuredOutput> {
+  const view = args.view ?? 'summary';
   const snapshot = await runDiscovery({
     kubectl: { namespaces: args.namespaces },
     aws: {
@@ -73,7 +98,56 @@ export async function executeDiscoverEnv(args: DiscoverEnvArgs): Promise<string>
     skipKubectl: args.skip_kubectl,
     skipAws: args.skip_aws,
   });
-  return renderDiscoverReport(snapshot);
+  const md = renderDiscoverReport(snapshot);
+  if (view === 'markdown') {
+    return buildMarkdownEnvelope({
+      tool: 'log10x_discover_env',
+      summary: { headline: `Discovery snapshot ${snapshot.snapshotId}` },
+      markdown: md,
+    });
+  }
+  const rec = snapshot.recommendations;
+  const installedMap = rec.alreadyInstalled ?? {};
+  const topForwarder = snapshot.kubectl?.forwarders?.[0];
+  const data: DiscoverEnvSummary = {
+    snapshot_id: snapshot.snapshotId,
+    started_at: snapshot.startedAt,
+    finished_at: snapshot.finishedAt,
+    kubectl_available: !!snapshot.kubectl?.available,
+    aws_available: !!snapshot.aws?.available,
+    forwarder_kind: rec.existingForwarder ?? topForwarder?.kind,
+    forwarder_namespace: rec.existingForwarderNamespace ?? topForwarder?.namespace,
+    installed_components: {
+      reporter: !!(installedMap as Record<string, string | undefined>).reporter,
+      receiver: !!(installedMap as Record<string, string | undefined>).receiver,
+      retriever: !!(installedMap as Record<string, string | undefined>).retriever,
+    },
+    namespaces_probed: snapshot.kubectl?.probedNamespaces ?? [],
+    eks_cluster: snapshot.aws?.eks?.name,
+    region: snapshot.aws?.region,
+    s3_buckets: (snapshot.aws?.s3Buckets ?? []).map((b) => b.name),
+    sqs_queues: (snapshot.aws?.sqsQueues ?? []).map((q) => q.url),
+    log_groups_count: snapshot.aws?.cwLogGroups?.length ?? 0,
+    probe_log_entry_count: snapshot.probeLog?.length ?? 0,
+  };
+  const installedList = Object.entries(data.installed_components).filter(([, v]) => v).map(([k]) => k);
+  const headline = `Snapshot \`${data.snapshot_id}\`: forwarder=${data.forwarder_kind ?? 'none'}, installed=${installedList.length ? installedList.join(',') : 'none'}, kubectl=${data.kubectl_available ? 'ok' : 'unavailable'}, aws=${data.aws_available ? 'ok' : 'unavailable'}.`;
+  const actions: Array<{ tool: string; args: Record<string, unknown>; reason: string }> = [];
+  if (!data.installed_components.reporter) {
+    actions.push({ tool: 'log10x_advise_install', args: { snapshot_id: data.snapshot_id }, reason: 'no Reporter installed — pick the right install path' });
+  } else if (!data.installed_components.receiver) {
+    actions.push({ tool: 'log10x_advise_receiver', args: { snapshot_id: data.snapshot_id }, reason: 'Reporter present, no Receiver — install for filter / compact / cap' });
+  }
+  if (data.aws_available && data.s3_buckets.length > 0 && !data.installed_components.retriever) {
+    actions.push({ tool: 'log10x_advise_retriever', args: { snapshot_id: data.snapshot_id }, reason: 'S3 + AWS available — Retriever installable for forensic retrieval' });
+  }
+  return buildEnvelope({
+    tool: 'log10x_discover_env',
+    view: 'summary',
+    summary: { headline },
+    data,
+    actions,
+  });
 }
 
 /**

@@ -28,6 +28,7 @@ import * as pql from '../lib/promql.js';
 import { bytesToCost, parsePrometheusValue } from '../lib/cost.js';
 import { fmtDollar, fmtBytes, parseTimeframe, costPeriodLabel } from '../lib/format.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
+import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
 /** S3 Standard default, matching the ROI dashboard's storageCost default ($/GB/month). */
 const DEFAULT_STORAGE_COST_PER_GB = 0.023;
@@ -37,11 +38,77 @@ export const savingsSchema = {
   analyzerCost: z.number().optional().describe('SIEM ingestion cost in $/GB. Auto-detected from profile if omitted.'),
   storageCost: z.number().optional().describe('S3 storage cost in $/GB/month. Defaults to $0.023 (S3 Standard).'),
   environment: z.string().optional().describe('Environment nickname'),
+  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.totals, data.edge, data.retriever, data.run_rate). markdown wraps the rendered table in data.markdown.'),
 };
 
+interface SavingsSummary {
+  time_range: string;
+  cost_per_gb: number;
+  storage_per_gb: number;
+  period: string;
+  edge: {
+    input_bytes: number;
+    emitted_bytes: number;
+    reduced_bytes: number;
+    savings_dollars: number;
+    emission_missing: boolean;
+  };
+  retriever: {
+    indexed_bytes: number;
+    streamed_bytes: number;
+    savings_dollars: number;
+    coverage: number;
+    chunks_ok: number;
+    chunks_total: number;
+  };
+  totals: {
+    realized_dollars: number;
+    annual_projection_dollars: number;
+    has_data: boolean;
+  };
+  run_rate?: {
+    seven_day_annualized: number;
+    ramping: boolean;
+    coverage: number;
+  };
+  pipeline_instances: number;
+  services_monitored: number;
+}
+
 export async function executeSavings(
-  args: { timeRange?: string; analyzerCost?: number; storageCost?: number },
+  args: { timeRange?: string; analyzerCost?: number; storageCost?: number; view?: 'summary' | 'markdown' },
   env: EnvConfig
+): Promise<string | StructuredOutput> {
+  const view = args.view ?? 'summary';
+  const sumOut: { data?: SavingsSummary } = {};
+  const md = await executeSavingsInner(args, env, sumOut);
+  if (view === 'markdown' || !sumOut.data) {
+    return buildMarkdownEnvelope({
+      tool: 'log10x_savings',
+      summary: { headline: md.split('\n').find((l) => l.trim().length > 0)?.slice(0, 200) ?? 'savings result' },
+      markdown: md,
+    });
+  }
+  const d = sumOut.data;
+  const headline = d.totals.has_data
+    ? `Pipeline savings (${d.time_range}): ${fmtDollar(d.totals.realized_dollars)}${d.period} realized, ${fmtDollar(d.totals.annual_projection_dollars)}/yr projected${d.run_rate?.ramping ? ' (volume ramping)' : ''}.`
+    : `No realized-savings metrics for this environment yet — pipeline has not booked any volume reduction.`;
+  return buildEnvelope({
+    tool: 'log10x_savings',
+    view: 'summary',
+    summary: { headline },
+    data: d,
+    actions: [
+      { tool: 'log10x_top_patterns', args: { timeRange: d.time_range, limit: 10 }, reason: 'see which patterns currently drive cost (where the savings come from)' },
+      { tool: 'log10x_top_patterns', args: { timeRange: d.time_range, limit: 10, comparison_window: d.time_range }, reason: 'delta-versus-baseline view to check whether costs are growing' },
+    ],
+  });
+}
+
+async function executeSavingsInner(
+  args: { timeRange?: string; analyzerCost?: number; storageCost?: number },
+  env: EnvConfig,
+  sumOut?: { data?: SavingsSummary }
 ): Promise<string> {
   // Defensive defaults — match savingsSchema (timeRange:'7d').
   const timeRange = args.timeRange ?? '7d';
@@ -266,18 +333,6 @@ export async function executeSavings(
     lines.push('  _Retriever figures use chunked parallel queries (one per day) to avoid server budget limits on high-cardinality indexed metrics. This call may take 30–90s on large deployments._');
   }
 
-  // NEXT_ACTIONS: drill-downs to surface WHICH patterns drive cost
-  // (top_patterns) and WHETHER cost is growing (cost_drivers) — those
-  // are the natural follow-ups after seeing the aggregate savings
-  // number. Without these hints, autonomous chains terminate after
-  // savings even when the obvious next question is "where is this
-  // coming from?".
-  //
-  // configure_compact is intentionally NOT hinted here: it requires a
-  // snapshot_id (from discover_env) which savings has no way to produce.
-  // Walking savings → configure_compact directly produces a "missing target"
-  // stub. The user routes via discover_env → advise_install →
-  // configure_compact instead.
   const next: NextAction[] = [
     {
       tool: 'log10x_top_patterns',
@@ -285,13 +340,61 @@ export async function executeSavings(
       reason: 'see which patterns currently drive cost (where the savings come from)',
     },
     {
-      tool: 'log10x_cost_drivers',
-      args: { timeRange: tf.range },
-      reason: 'check whether costs are growing — savings projection assumes stable run-rate',
+      tool: 'log10x_top_patterns',
+      args: { timeRange: tf.range, limit: 10, comparison_window: tf.range },
+      reason: 'delta-vs-baseline view to check whether costs are growing — savings projection assumes stable run-rate',
     },
   ];
   const block = renderNextActions(next);
   if (block) lines.push('', block);
+
+  if (sumOut) {
+    let runRate: SavingsSummary['run_rate'];
+    if (fetch7d) {
+      const edge7dOk = edgeIn7dRes !== null && edgeOut7dRes !== null;
+      const edgeIn7d = edgeIn7dRes?.data?.result?.[0] ? parsePrometheusValue(edgeIn7dRes.data.result[0]) : 0;
+      const edgeOut7d = edgeOut7dRes?.data?.result?.[0] ? parsePrometheusValue(edgeOut7dRes.data.result[0]) : 0;
+      const edgeReduced7d = Math.max(0, edgeIn7d - edgeOut7d);
+      const edge7dSavings = bytesToCost(edgeReduced7d, costPerGb);
+      const retriever7dSavings = Math.max(0, bytesToCost(indexed7d, costPerGb - storagePerGb) - bytesToCost(streamed7d, costPerGb));
+      const total7d = edge7dSavings + retriever7dSavings;
+      const annual7d = total7d * (365 / 7);
+      runRate = {
+        seven_day_annualized: annual7d,
+        ramping: edge7dOk && annual7d > annualProjection * 2,
+        coverage: retriever7dCoverage,
+      };
+    }
+    sumOut.data = {
+      time_range: tf.label,
+      cost_per_gb: costPerGb,
+      storage_per_gb: storagePerGb,
+      period,
+      edge: {
+        input_bytes: edgeIn,
+        emitted_bytes: edgeEmitted,
+        reduced_bytes: edgeReducedBytes,
+        savings_dollars: realizedEdgeSavings,
+        emission_missing: edgeEmissionMissing,
+      },
+      retriever: {
+        indexed_bytes: indexedBytes,
+        streamed_bytes: streamedBytes,
+        savings_dollars: retrieverSavings,
+        coverage: mainRetrieverCoverage,
+        chunks_ok: mainRetrieverChunksOk,
+        chunks_total: mainRetrieverChunksTotal,
+      },
+      totals: {
+        realized_dollars: totalSaved,
+        annual_projection_dollars: annualProjection,
+        has_data: totalSaved > 0,
+      },
+      run_rate: runRate,
+      pipeline_instances: pipeCount,
+      services_monitored: svcCount,
+    };
+  }
 
   return lines.join('\n');
 }

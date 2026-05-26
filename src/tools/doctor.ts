@@ -29,6 +29,7 @@ import { agentOnly } from '../lib/agent-only.js';
 import { fmtBytes as formatBytes } from '../lib/format.js';
 import { discoverAvailable } from '../lib/siem/index.js';
 import { resolveBackend, formatDetectionTrace } from '../lib/customer-metrics.js';
+import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
 export type CheckStatus = 'pass' | 'warn' | 'fail';
 
@@ -55,11 +56,48 @@ export const doctorSchema = {
     .describe(
       'Optional environment nickname to probe. In multi-env setups, omit to run the checks against ALL configured environments; pass a specific nickname to check only that one.'
     ),
+  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.overall, data.checks_by_env, data.failing_checks, data.warning_checks). markdown wraps the rendered report in data.markdown.'),
 };
 
-export async function executeDoctor(args: { environment?: string }): Promise<string> {
+export async function executeDoctor(args: { environment?: string; view?: 'summary' | 'markdown' }): Promise<string | StructuredOutput> {
+  const view = args.view ?? 'summary';
   const report = await runDoctorChecks(args.environment);
-  return renderDoctorReport(report);
+  const md = renderDoctorReport(report);
+  if (view === 'markdown') {
+    return buildMarkdownEnvelope({
+      tool: 'log10x_doctor',
+      summary: { headline: `Doctor: overall ${report.overall.toUpperCase()}` },
+      markdown: md,
+    });
+  }
+  const allChecks = [
+    ...report.globalChecks.map((c) => ({ env: 'global', ...c })),
+    ...Object.entries(report.perEnvChecks).flatMap(([env, checks]) => checks.map((c) => ({ env, ...c }))),
+  ];
+  const passCount = allChecks.filter((c) => c.status === 'pass').length;
+  const warnCount = allChecks.filter((c) => c.status === 'warn').length;
+  const failCount = allChecks.filter((c) => c.status === 'fail').length;
+  const failing = allChecks.filter((c) => c.status === 'fail').map((c) => ({ env: c.env, name: c.name, message: c.message, fix: c.fix }));
+  const warning = allChecks.filter((c) => c.status === 'warn').map((c) => ({ env: c.env, name: c.name, message: c.message, fix: c.fix }));
+  const headline = `Doctor: overall ${report.overall.toUpperCase()} (${passCount} pass, ${warnCount} warn, ${failCount} fail).`;
+  return buildEnvelope({
+    tool: 'log10x_doctor',
+    view: 'summary',
+    summary: { headline },
+    data: {
+      overall: report.overall,
+      counts: { pass: passCount, warn: warnCount, fail: failCount },
+      checks_by_env: {
+        global: report.globalChecks,
+        ...report.perEnvChecks,
+      },
+      failing_checks: failing,
+      warning_checks: warning,
+    },
+    actions: report.overall === 'fail'
+      ? [{ tool: 'log10x_login_status', args: {}, reason: 'verify credentials and env state if checks are failing on auth/connectivity' }]
+      : [],
+  });
 }
 
 /** Runs the full check sequence and returns a structured report. */

@@ -18,13 +18,72 @@
 import { z } from 'zod';
 import { revalidateEnvironments, type Environments } from '../lib/environments.js';
 import { activeNotices, getManifest } from '../lib/manifest.js';
+import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
-export const loginStatusSchema = {};
+export const loginStatusSchema = {
+  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.signed_in, data.demo_mode, data.envs, data.profile). markdown wraps the rendered guide in data.markdown.'),
+};
+
+interface LoginStatusSummary {
+  signed_in: boolean;
+  demo_mode: boolean;
+  demo_fallback_reason?: string;
+  profile?: { username?: string; user_id?: string; tier?: string };
+  envs: Array<{
+    env_id: string;
+    nickname: string;
+    permissions?: string;
+    owner?: string;
+    is_default: boolean;
+    is_last_used: boolean;
+  }>;
+  notices: Array<{ level: string; message: string }>;
+}
 
 export async function executeLoginStatus(
-  _args: Record<string, never>,
+  args: { view?: 'summary' | 'markdown' } | Record<string, never>,
   envs: Environments
-): Promise<string> {
+): Promise<string | StructuredOutput> {
+  const view = ('view' in args ? args.view : undefined) ?? 'summary';
+  const md = await renderLoginStatusMarkdown(envs);
+  if (view === 'markdown') {
+    return buildMarkdownEnvelope({
+      tool: 'log10x_login_status',
+      summary: { headline: envs.isDemoMode ? 'Demo mode (no LOG10X_API_KEY set or validated).' : `Signed in: ${envs.profile?.username ?? 'static env-var config'}, ${envs.all.length} env${envs.all.length !== 1 ? 's' : ''}.` },
+      markdown: md,
+    });
+  }
+  const notices = activeNotices(getManifest()).map((n) => ({ level: n.level, message: n.message }));
+  const data: LoginStatusSummary = {
+    signed_in: !envs.isDemoMode,
+    demo_mode: envs.isDemoMode,
+    demo_fallback_reason: envs.demoFallbackReason,
+    profile: envs.profile ? { username: envs.profile.username, user_id: envs.profile.userId, tier: envs.profile.tier } : undefined,
+    envs: envs.all.map((e) => ({
+      env_id: e.envId,
+      nickname: e.nickname,
+      permissions: e.permissions,
+      owner: e.owner,
+      is_default: !!e.isDefault,
+      is_last_used: !!(envs.lastUsed && envs.lastUsed.envId === e.envId),
+    })),
+    notices,
+  };
+  const headline = data.demo_mode
+    ? `Demo mode${data.demo_fallback_reason ? ` (API key failed validation)` : ''} — all queries hit the public read-only env.`
+    : `Signed in${data.profile?.username ? ` as ${data.profile.username}` : ''} with access to ${data.envs.length} env${data.envs.length !== 1 ? 's' : ''}.`;
+  return buildEnvelope({
+    tool: 'log10x_login_status',
+    view: 'summary',
+    summary: { headline },
+    data,
+    actions: data.demo_mode
+      ? [{ tool: 'log10x_signin_start', args: {}, reason: 'open browser Auth0 device flow to switch from demo to a real account' }]
+      : [],
+  });
+}
+
+async function renderLoginStatusMarkdown(envs: Environments): Promise<string> {
   // Revalidate credentials before reporting state. Without this, the
   // tool would render whatever was decided at MCP boot, even if the
   // credentials file has since become valid (e.g. a rotated key whose
