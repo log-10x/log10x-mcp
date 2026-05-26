@@ -28,6 +28,7 @@ import {
   formatModeResolution,
   type ModeResolution,
 } from './lib/mode-detect.js';
+import { makeShapeCoercive } from './lib/input-coerce.js';
 
 import { loadEnvironments, resolveEnv, revalidateEnvironments, type EnvConfig, type Environments, EnvironmentValidationError } from './lib/environments.js';
 import { fetchAnalyzerCost } from './lib/api.js';
@@ -793,12 +794,19 @@ function applyToolRegistrations(): { registered: string[]; skipped: string[] } {
       continue;
     }
     const meta = getPackageDefaultTool(t.name);
+    // G3: wrap every input field with a coercive preprocess so the SDK's
+    // strict Zod validation accepts the type-loose inputs LLM hosts
+    // routinely emit (e.g., `"limit": "5"` instead of `"limit": 5`, or
+    // `"events": "one event"` instead of `"events": ["one event"]`). The
+    // wrapper preserves the agent-facing JSON Schema and the handler's
+    // typed args, so downstream code is unchanged.
+    const coerciveInputSchema = makeShapeCoercive(t.inputSchema as Record<string, never>);
     (server.registerTool as any)(
       t.name,
       {
         title: meta.title,
         description: meta.description,
-        inputSchema: t.inputSchema,
+        inputSchema: coerciveInputSchema,
         outputSchema: envelopeOutputSchema,
         annotations: meta.annotations,
       },
