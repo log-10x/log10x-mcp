@@ -722,6 +722,23 @@ const _originalRegisterTool = server.registerTool.bind(server) as typeof server.
  * Throws synchronously if the tool name has no entry in default-manifest.json
  * (build-time guard against drift between code and manifest).
  */
+// Pending registrations queue. Top-level registerLog10xTool() calls
+// push here at module load (before mode detection runs). After
+// initBootMode() resolves the mode in main(), applyToolRegistrations()
+// drains the queue and registers only the tools whose TOOL_MODES
+// entry includes the current boot mode. Tools registered before
+// bootMode is set (e.g. integration tests that bypass main()) fall
+// through to a permissive register-everything path.
+type PendingTool = {
+  name: string;
+  inputSchema: Record<string, unknown>;
+  handler: (
+    args: any,
+    extra?: { sendNotification?: (n: { method: string; params: Record<string, unknown> }) => Promise<void> }
+  ) => Promise<{ content: { type: 'text'; text: string }[]; isError?: boolean }>;
+};
+const pendingTools: PendingTool[] = [];
+
 function registerLog10xTool(
   name: string,
   inputSchema: Record<string, unknown>,
@@ -730,17 +747,42 @@ function registerLog10xTool(
     extra?: { sendNotification?: (n: { method: string; params: Record<string, unknown> }) => Promise<void> }
   ) => Promise<{ content: { type: 'text'; text: string }[]; isError?: boolean }>
 ): void {
-  const meta = getPackageDefaultTool(name);
-  (server.registerTool as any)(
-    name,
-    {
-      title: meta.title,
-      description: meta.description,
-      inputSchema,
-      annotations: meta.annotations,
-    },
-    handler
-  );
+  // Validate manifest entry at queue-time so the build-time guard still
+  // catches missing default-manifest.json entries before main() runs.
+  getPackageDefaultTool(name);
+  pendingTools.push({ name, inputSchema, handler });
+}
+
+/**
+ * Drain the pending registration queue against the server, gated by
+ * the current boot mode. Tools not allowed in this mode are skipped
+ * entirely (they will not appear in tools/list). Called from main()
+ * after initBootMode() resolves the operating mode.
+ */
+function applyToolRegistrations(): { registered: string[]; skipped: string[] } {
+  const mode = bootMode?.mode;
+  const registered: string[] = [];
+  const skipped: string[] = [];
+  for (const t of pendingTools) {
+    const allowed = mode ? shouldRegisterTool(t.name, mode) : true;
+    if (!allowed) {
+      skipped.push(t.name);
+      continue;
+    }
+    const meta = getPackageDefaultTool(t.name);
+    (server.registerTool as any)(
+      t.name,
+      {
+        title: meta.title,
+        description: meta.description,
+        inputSchema: t.inputSchema,
+        annotations: meta.annotations,
+      },
+      t.handler
+    );
+    registered.push(t.name);
+  }
+  return { registered, skipped };
 }
 
 // ── Tool: log10x_cost_drivers ──
@@ -1328,6 +1370,17 @@ async function main() {
   // the module-scoped `bootMode` used by `wrap()` to gate out-of-mode
   // tool invocations with a clear reply rather than 5xx errors.
   await initBootMode();
+  // Drain the pending tool registration queue, gated by boot mode.
+  // Tools not allowed in this mode are skipped and will not appear
+  // in tools/list. Tools that ARE registered still pass through the
+  // wrap() handler-level mode gate as a defense-in-depth check.
+  const regResult = applyToolRegistrations();
+  log.info('mcp.tool_registration', {
+    mode: bootMode?.mode,
+    registered_count: regResult.registered.length,
+    skipped_count: regResult.skipped.length,
+    skipped: regResult.skipped,
+  });
   // Plumb the envs reference into self-telemetry so the wrapper can
   // resolve which env each tool call acted on, and flush can drop counters
   // from read-only envs (incl. demo). Must happen AFTER initEnvs so the

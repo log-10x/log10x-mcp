@@ -174,24 +174,62 @@ interface PatternExamplesArgs {
   view?: 'summary' | 'markdown';
 }
 
+interface PatternExamplesSummary {
+  pattern: string;
+  vendor: string;
+  window: string;
+  service?: string;
+  severity?: string;
+  probe_path: 'tenx_hash-exact' | 'content-token' | 'paste';
+  events_pulled: number;
+  distinct_templates: number;
+  retained_events: number;
+  retained_templates: number;
+  dropped_jaccard_events: number;
+  multi_line_detected: boolean;
+  buckets: Array<{
+    rank: number;
+    template_hash: string;
+    tenx_hash?: string;
+    event_count: number;
+    jaccard: number;
+    severity?: string;
+    service?: string;
+    sample_event: string;
+    slot_distribution: Array<{ slot: string; distinct_count: number; is_constant: boolean; sample_values: string[] }>;
+  }>;
+  probe_notes: string[];
+}
+
 export async function executePatternExamples(
   rawArgs: PatternExamplesArgs,
   env: EnvConfig,
 ): Promise<string | import('../lib/output-types.js').StructuredOutput> {
   const view = rawArgs.view ?? 'summary';
-  const md = await executePatternExamplesInner(rawArgs, env);
-  if (view === 'markdown') return md;
-  const { buildMarkdownEnvelope } = await import('../lib/output-types.js');
-  return buildMarkdownEnvelope({
+  const sumOut: { data?: PatternExamplesSummary } = {};
+  const md = await executePatternExamplesInner(rawArgs, env, sumOut);
+  const { buildMarkdownEnvelope, buildEnvelope } = await import('../lib/output-types.js');
+  if (view === 'markdown' || !sumOut.data) {
+    return buildMarkdownEnvelope({
+      tool: 'log10x_pattern_examples',
+      summary: { headline: md.split('\n')[0]?.slice(0, 200) || 'pattern_examples result' },
+      markdown: md,
+    });
+  }
+  const d = sumOut.data;
+  const headline = `\`${d.pattern}\` (${d.vendor}, ${d.window}): ${d.events_pulled} events pulled, ${d.retained_events} retained across ${d.retained_templates} templates via ${d.probe_path}`;
+  return buildEnvelope({
     tool: 'log10x_pattern_examples',
-    summary: { headline: md.split('\n')[0]?.slice(0, 200) || 'pattern_examples result' },
-    markdown: md,
+    view: 'summary',
+    summary: { headline },
+    data: d,
   });
 }
 
 async function executePatternExamplesInner(
   rawArgs: PatternExamplesArgs,
   env: EnvConfig,
+  sumOut?: { data?: PatternExamplesSummary },
 ): Promise<string> {
   // Defensive defaults — match patternExamplesSchema. Tools dispatched
   // outside the MCP-SDK Zod boundary (chains, scripts, harness) can
@@ -421,6 +459,44 @@ async function executePatternExamplesInner(
   // Top 3 retained buckets.
   const topK = retained.slice(0, 3);
   const droppedFromTopK = retained.slice(3);
+
+  // Populate typed summary for view='summary' callers.
+  if (sumOut) {
+    sumOut.data = {
+      pattern: canonicalPattern,
+      vendor,
+      window: args.timeRange,
+      service: args.service,
+      severity: args.severity,
+      probe_path: probePath,
+      events_pulled: probe.events.length,
+      distinct_templates: extracted.patterns.length,
+      retained_events: retained.reduce((s, b) => s + b.p.count, 0),
+      retained_templates: retained.length,
+      dropped_jaccard_events: dropped.reduce((s, b) => s + b.p.count, 0),
+      multi_line_detected: isMultiLine,
+      buckets: topK.map((bucket, i) => ({
+        rank: i + 1,
+        template_hash: bucket.p.hash,
+        tenx_hash: bucket.p.tenxHash,
+        event_count: bucket.p.count,
+        jaccard: bucket.jaccard,
+        severity: bucket.p.severity,
+        service: bucket.p.service,
+        sample_event: bucket.p.sampleEvent.slice(0, 200),
+        slot_distribution: Object.entries(bucket.p.variables)
+          .sort((a, b) => b[1].length - a[1].length)
+          .slice(0, 6)
+          .map(([slot, vals]) => ({
+            slot,
+            distinct_count: vals.length,
+            is_constant: vals.length === 1,
+            sample_values: vals.slice(0, 3),
+          })),
+      })),
+      probe_notes: probeNotes.slice(0, 5),
+    };
+  }
 
   // ── 7. Render output ───────────────────────────────────────────────
   const lines: string[] = [];

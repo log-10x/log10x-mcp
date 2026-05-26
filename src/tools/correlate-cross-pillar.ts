@@ -83,6 +83,26 @@ export const correlateCrossPillarSchema = {
   view: z.enum(['summary', 'markdown']).default('summary').describe('Output format.'),
 };
 
+interface CorrelateCrossPillarSummary {
+  status: 'correlation_complete' | 'no_join_available' | 'no_anchor_movement';
+  anchor: { type: string; value: string };
+  window: string;
+  join_key?: { log10x_side: string; customer_side: string; jaccard: number };
+  customer_backend?: string;
+  candidates_analyzed: number;
+  candidates_excluded: number;
+  candidates: Array<{
+    name: string;
+    tier: 'confirmed' | 'service-match' | 'unconfirmed' | 'coincidence';
+    pearson_at_lag: number;
+    structural_overlap: number | null;
+    lag_seconds: number;
+    combined_confidence: number | null;
+    moved: boolean;
+  }>;
+  tier_counts: { confirmed: number; 'service-match': number; unconfirmed: number; coincidence: number };
+}
+
 export async function executeCorrelateCrossPillar(
   args: {
     anchor_type: 'log10x_pattern' | 'customer_metric';
@@ -99,13 +119,25 @@ export async function executeCorrelateCrossPillar(
   env: EnvConfig
 ): Promise<string | import('../lib/output-types.js').StructuredOutput> {
   const view = args.view ?? 'summary';
-  const md = await executeCorrelateCrossPillarInner(args, env);
-  if (view === 'markdown') return md;
-  const { buildMarkdownEnvelope } = await import('../lib/output-types.js');
-  return buildMarkdownEnvelope({
+  const sumOut: { data?: CorrelateCrossPillarSummary } = {};
+  const md = await executeCorrelateCrossPillarInner(args, env, sumOut);
+  const { buildMarkdownEnvelope, buildEnvelope } = await import('../lib/output-types.js');
+  if (view === 'markdown' || !sumOut.data) {
+    return buildMarkdownEnvelope({
+      tool: 'log10x_correlate_cross_pillar',
+      summary: { headline: md.split('\n')[0]?.slice(0, 200) || 'correlate_cross_pillar result' },
+      markdown: md,
+    });
+  }
+  const d = sumOut.data;
+  const excludedSuffix = d.candidates_excluded > 0 ? ` (${d.candidates_excluded} excluded below confidence floor)` : '';
+  const headline = `\`${d.anchor.value}\` over ${d.window}: ${d.candidates_analyzed} candidates analyzed via ${d.customer_backend ?? 'customer backend'}, ${d.tier_counts.confirmed} confirmed + ${d.tier_counts['service-match']} service-match + ${d.tier_counts.unconfirmed} unconfirmed${excludedSuffix}`;
+  return buildEnvelope({
     tool: 'log10x_correlate_cross_pillar',
-    summary: { headline: md.split('\n')[0]?.slice(0, 200) || 'correlate_cross_pillar result' },
-    markdown: md,
+    view: 'summary',
+    summary: { headline },
+    data: d,
+    truncated: d.candidates_excluded > 0,
   });
 }
 
@@ -121,7 +153,8 @@ async function executeCorrelateCrossPillarInner(
     minimum_join_jaccard?: number;
     environment?: string;
   },
-  env: EnvConfig
+  env: EnvConfig,
+  sumOut?: { data?: CorrelateCrossPillarSummary }
 ): Promise<string> {
   // Accept `timeRange` as alias for `window`, then apply schema-default
   // fallbacks for chain/script callers that bypass the MCP-SDK Zod
@@ -179,6 +212,39 @@ async function executeCorrelateCrossPillarInner(
     maxCandidates: args.depth === 'deep' ? 16 : args.depth === 'shallow' ? 4 : 8,
     minimumConfidence: args.minimum_confidence,
   });
+
+  // Populate typed summary for view='summary' callers.
+  if (sumOut) {
+    const flatCandidates = [...result.byTier['confirmed'], ...result.byTier['service-match'], ...result.byTier['unconfirmed'], ...result.byTier['coincidence']];
+    sumOut.data = {
+      status: 'correlation_complete',
+      anchor: { type: result.anchor.type, value: result.anchor.value },
+      window: args.window,
+      join_key: result.joinKey ? {
+        log10x_side: result.joinKey.log10xSide,
+        customer_side: result.joinKey.customerSide,
+        jaccard: result.joinKey.jaccard,
+      } : undefined,
+      customer_backend: backend.backendType,
+      candidates_analyzed: result.metadata.patternsAnalyzed,
+      candidates_excluded: Math.max(0, result.metadata.patternsAnalyzed - flatCandidates.length),
+      candidates: flatCandidates.map((c) => ({
+        name: c.name,
+        tier: c.tier,
+        pearson_at_lag: c.subScores.temporal,
+        structural_overlap: c.subScores.structural,
+        lag_seconds: c.lagSeconds,
+        combined_confidence: c.combinedConfidence,
+        moved: c.evidence.moved,
+      })),
+      tier_counts: {
+        confirmed: result.byTier['confirmed'].length,
+        'service-match': result.byTier['service-match'].length,
+        unconfirmed: result.byTier['unconfirmed'].length,
+        coincidence: result.byTier['coincidence'].length,
+      },
+    };
+  }
 
   return renderCorrelationResult(result, backend.backendType, args.window);
 }
