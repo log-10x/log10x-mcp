@@ -67,11 +67,53 @@ export const investigateSchema = {
     .describe('`shallow`: anchor service only. `normal` (default): anchor service + immediate dependencies. `deep`: full environment-wide.'),
   environment: z.string().optional().describe('Environment nickname — required in multi-env setups.'),
   use_bytes: z.boolean().default(false).describe('Use byte-based rate instead of event-count. Event-count is strongly preferred; use only if the Reporter does not emit the count metric.'),
+  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.investigation_id, data.mode, data.starting_point, data.shape, data.findings_count, data.markdown). markdown wraps the rendered report in data.markdown.'),
 };
 
 type Mode = 'pattern' | 'service' | 'environment' | 'raw_line';
 
 export async function executeInvestigate(
+  args: {
+    starting_point: string;
+    window: string;
+    timeRange?: string;
+    baseline_offset?: string;
+    depth: 'shallow' | 'normal' | 'deep';
+    environment?: string;
+    use_bytes: boolean;
+    view?: 'summary' | 'markdown';
+  },
+  env: EnvConfig
+): Promise<string | import('../lib/output-types.js').StructuredOutput> {
+  const view = args.view ?? 'summary';
+  const md = await executeInvestigateInner(args, env);
+  const { buildEnvelope: __be, buildMarkdownEnvelope: __bme } = await import('../lib/output-types.js');
+  const idMatch = md.match(/investigation_id`?:?\s*`?([0-9a-f-]{36})/i);
+  const shapeMatch = md.match(/\*\*shape\*\*:\s*`?(acute|drift|environment|no_significant_movement|empty)`?/i);
+  const modeMatch = md.match(/\*\*mode\*\*:\s*`?(pattern|service|environment|raw_line)`?/i);
+  if (view === 'markdown') {
+    return __bme({ tool: 'log10x_investigate', summary: { headline: `Investigation of "${args.starting_point}" (window=${args.window})` }, markdown: md });
+  }
+  return __be({
+    tool: 'log10x_investigate',
+    view: 'summary',
+    summary: { headline: `Investigation of "${args.starting_point}" (window=${args.window}): shape=${shapeMatch?.[1] ?? 'unknown'}${idMatch ? `, id=${idMatch[1].slice(0, 8)}` : ''}.` },
+    data: {
+      ok: true,
+      investigation_id: idMatch?.[1],
+      starting_point: args.starting_point,
+      window: args.window,
+      depth: args.depth,
+      baseline_offset: args.baseline_offset,
+      mode: modeMatch?.[1],
+      shape: shapeMatch?.[1],
+      use_bytes: args.use_bytes,
+      report_markdown: md,
+    },
+  });
+}
+
+async function executeInvestigateInner(
   args: {
     starting_point: string;
     window: string;
@@ -988,44 +1030,3 @@ function escape(s: string): string {
   return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
-// ── log10x_investigation_get ──
-
-export const investigationGetSchema = {
-  investigation_id: z
-    .string()
-    .optional()
-    .describe('The investigation_id of a prior investigation. If omitted, returns the most recent N investigations as an index.'),
-  limit: z
-    .number()
-    .min(1)
-    .max(50)
-    .default(10)
-    .describe('When investigation_id is omitted: how many recent investigations to list.'),
-};
-
-export function executeInvestigationGet(args: { investigation_id?: string; limit: number }): string {
-  if (args.investigation_id) {
-    const rec = getInvestigation(args.investigation_id);
-    if (!rec) {
-      return `No investigation with id "${args.investigation_id}" in this session\'s cache. Cache holds the 50 most recent investigations; earlier records have been evicted. Run log10x_investigate again with the same starting_point to regenerate.`;
-    }
-    const age = Math.round((Date.now() - rec.createdAt) / 1000);
-    const header = `## Investigation replay · ${rec.investigationId}\n\n**Age**: ${age}s ago\n**Starting point**: ${rec.startingPoint}\n**Shape**: ${rec.shape}\n**Environment**: ${rec.environment} (${rec.reporterTier})\n**Patterns touched**: ${rec.patternsReferenced.length}\n\n---\n\n`;
-    return header + rec.report;
-  }
-
-  const recent = listInvestigations(args.limit);
-  if (recent.length === 0) {
-    return 'No investigations in this session\'s cache yet. Run log10x_investigate first.';
-  }
-  const lines: string[] = ['## Recent investigations', ''];
-  for (const rec of recent) {
-    const age = Math.round((Date.now() - rec.createdAt) / 1000);
-    lines.push(
-      `- \`${rec.investigationId}\` · ${age}s ago · ${rec.shape} · \`${rec.startingPoint}\` · ${rec.patternsReferenced.length} patterns`
-    );
-  }
-  lines.push('');
-  lines.push('Call `log10x_investigation_get({ investigation_id: \'<id>\' })` to replay a specific one.');
-  return lines.join('\n');
-}

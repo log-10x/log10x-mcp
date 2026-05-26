@@ -17,14 +17,24 @@ import {
   getPackageDefaultTool,
 } from './lib/manifest.js';
 import { z } from 'zod';
+import {
+  StructuredOutputSchema,
+  buildEnvelope,
+  type StructuredOutput,
+} from './lib/output-types.js';
+import {
+  detectMode,
+  shouldRegisterTool,
+  formatModeResolution,
+  type ModeResolution,
+} from './lib/mode-detect.js';
+import { makeShapeCoercive } from './lib/input-coerce.js';
 
 import { loadEnvironments, resolveEnv, revalidateEnvironments, type EnvConfig, type Environments, EnvironmentValidationError } from './lib/environments.js';
 import { fetchAnalyzerCost } from './lib/api.js';
-import { costDriversSchema, executeCostDrivers } from './tools/cost-drivers.js';
 import { eventLookupSchema, executeEventLookup } from './tools/event-lookup.js';
 import { savingsSchema, executeSavings } from './tools/savings.js';
 import { trendSchema, executeTrend } from './tools/trend.js';
-import { exclusionFilterSchema, executeExclusionFilter } from './tools/exclusion-filter.js';
 import { patternExamplesSchema, executePatternExamples } from './tools/pattern-examples.js';
 import { dependencyCheckSchema, executeDependencyCheck } from './tools/dependency-check.js';
 import { configureEnvSchema, executeConfigureEnv } from './tools/configure-env.js';
@@ -34,19 +44,15 @@ function notConfiguredMessageForTool(toolName: string): string {
   return renderNotConfigured({ callingTool: toolName });
 }
 import { topPatternsSchema, executeTopPatterns } from './tools/top-patterns.js';
-import { listByLabelSchema, executeListByLabel } from './tools/list-by-label.js';
 import { resolveBatchSchema, executeResolveBatch } from './tools/resolve-batch.js';
 import {
   investigateSchema,
   executeInvestigate,
-  investigationGetSchema,
-  executeInvestigationGet,
 } from './tools/investigate.js';
 import { doctorSchema, executeDoctor, runDoctorChecks, renderDoctorReport } from './tools/doctor.js';
 import { log } from './lib/log.js';
 import { describeToolError } from './lib/tool-errors.js';
 import { retrieverQuerySchema, executeRetrieverQuery } from './tools/retriever-query.js';
-import { retrieverQueryStatusSchema, executeRetrieverQueryStatus } from './tools/retriever-query-status.js';
 import { retrieverSeriesSchema, executeRetrieverSeries } from './tools/retriever-series.js';
 import { backfillMetricSchema, executeBackfillMetric } from './tools/backfill-metric.js';
 import {
@@ -70,7 +76,8 @@ import { adviseReporterSchema, executeAdviseReporter } from './tools/advise-repo
 import { adviseReceiverSchema, executeAdviseReceiver } from './tools/advise-receiver.js';
 import { adviseRetrieverSchema, executeAdviseRetriever } from './tools/advise-retriever.js';
 import { adviseInstallSchema, executeAdviseInstall } from './tools/advise-install.js';
-import { adviseCompactSchema, executeAdviseCompact } from './tools/advise-compact.js';
+import { configureCompactSchema, executeConfigureCompact } from './tools/configure-compact.js';
+import { configureRegulatorSchema, executeConfigureRegulator } from './tools/configure-regulator.js';
 import { patternMitigateSchema, executePatternMitigate } from './tools/pattern-mitigate.js';
 import { loginStatusSchema, executeLoginStatus } from './tools/login-status.js';
 import {
@@ -85,6 +92,17 @@ import { createEnvSchema, executeCreateEnv } from './tools/create-env.js';
 import { updateEnvSchema, executeUpdateEnv } from './tools/update-env.js';
 import { deleteEnvSchema, executeDeleteEnv } from './tools/delete-env.js';
 import { rotateApiKeySchema, executeRotateApiKey } from './tools/rotate-api-key.js';
+import { servicesSchema, executeServices } from './tools/services.js';
+import { findSkewSchema, executeFindSkew } from './tools/find-skew.js';
+import { findConstantSlotsSchema, executeFindConstantSlots } from './tools/find-constant-slots.js';
+import { findUuidInBodySchema, executeFindUuidInBody } from './tools/find-uuid-in-body.js';
+import { findIncidentClusterSchema, executeFindIncidentCluster } from './tools/find-incident-cluster.js';
+import { discoverLabelsSchema, executeDiscoverLabels } from './tools/discover-labels.js';
+import { extractTemplatesSchema, executeExtractTemplates } from './tools/extract-templates.js';
+import {
+  translateMetricToPatternsSchema,
+  executeTranslateMetricToPatterns,
+} from './tools/translate-metric-to-patterns.js';
 import { getStatus } from './resources/status.js';
 
 // ── Environment + cost cache ──
@@ -97,9 +115,32 @@ import { getStatus } from './resources/status.js';
 // (apiKey alone → GET /api/v1/user) hits the network.
 
 let envs: Environments | undefined;
+let bootMode: ModeResolution | undefined;
 
 async function initEnvs(): Promise<void> {
   envs = await loadEnvironments();
+}
+
+/**
+ * Detect the operating mode (analysis | analysis_pending | poc) for
+ * this MCP boot. Runs once after envs are loaded; result is fixed for
+ * the lifetime of the process. Tool handlers consult `bootMode.mode`
+ * via `getBootMode()` to gate themselves; agents see all 44 tools in
+ * `tools/list` and the client's tool-search ranks per query, but a
+ * tool called in the wrong mode returns a clear "not available" reply
+ * instead of 5xx'ing on a missing backend.
+ */
+async function initBootMode(): Promise<void> {
+  bootMode = await detectMode();
+}
+
+export function getBootMode(): ModeResolution {
+  if (!bootMode) {
+    throw new Error(
+      '[log10x-mcp] internal error: bootMode accessed before initBootMode() completed.'
+    );
+  }
+  return bootMode;
 }
 
 function getEnvs(): Environments {
@@ -144,27 +185,35 @@ const COST_REFRESH_MS = 3_600_000; // 1 hour
  */
 const METRIC_REQUIRING_TOOLS = new Set([
   'log10x_top_patterns',
-  'log10x_cost_drivers',
   'log10x_pattern_trend',
   'log10x_pattern_examples',
   'log10x_event_lookup',
-  'log10x_list_by_label',
   'log10x_savings',
+  'log10x_services',
+  'log10x_discover_labels',
   'log10x_investigate',
-  'log10x_investigation_get',
   'log10x_backfill_metric',
   'log10x_correlate_cross_pillar',
   'log10x_discover_join',
   'log10x_customer_metrics_query',
+  'log10x_translate_metric_to_patterns',
   'log10x_retriever_query',
-  'log10x_retriever_query_status',
   'log10x_retriever_series',
 ]);
 
+type WrapResult = {
+  content: Array<
+    | { type: 'text'; text: string }
+    | { type: 'image'; data: string; mimeType: string }
+  >;
+  structuredContent?: Record<string, unknown>;
+  isError?: boolean;
+};
+
 async function wrap(
   toolName: string,
-  fn: () => Promise<string>
-): Promise<{ content: { type: 'text'; text: string }[]; isError?: boolean }> {
+  fn: () => Promise<string | StructuredOutput>
+): Promise<WrapResult> {
   const started = Date.now();
   // Phase 5b gate: if this is a metric-requiring tool and the MCP is
   // in pure-demo state, redirect to the conversational onboarding
@@ -175,10 +224,131 @@ async function wrap(
       content: [{ type: 'text' as const, text: notConfiguredMessageForTool(toolName) }],
     };
   }
+  // Mode gate: if the boot-time mode-detect determined this tool is
+  // not available in the current mode, return a clear out-of-mode
+  // reply rather than letting it 5xx on a missing backend. Agents see
+  // all tools in `tools/list` (client-side tool-search ranks them per
+  // query, so cognitive surface is not the concern); the gate just
+  // ensures wrong-mode calls produce a useful response.
+  if (bootMode && !shouldRegisterTool(toolName, bootMode.mode)) {
+    log.info(`tool.${toolName}.wrong_mode`, { mode: bootMode.mode });
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: formatOutOfModeMessage(toolName, bootMode),
+        },
+      ],
+    };
+  }
   try {
-    const text = await runWithDemoFallbackRetry(toolName, fn);
+    const result = await runWithDemoFallbackRetry(toolName, fn);
     log.info(`tool.${toolName}.ok`, { ms: Date.now() - started });
-    return { content: [{ type: 'text' as const, text: applyDemoBanner(text) }] };
+    // Universal-envelope path: a tool that still returns plain markdown
+    // (the unreshaped legacy tools — primitives, advisors, auth) gets
+    // auto-wrapped into a StructuredOutput envelope here. The agent always
+    // sees JSON. `data` carries `{ markdown }` until the per-tool reshape
+    // upgrades it to a typed shape; the envelope itself is uniform from
+    // day one. Demo banner is applied at the markdown-view extraction
+    // step below, not here — keeps the envelope's data.markdown clean
+    // for downstream consumers that don't want the banner prefix.
+    let normalized: StructuredOutput;
+    if (typeof result === 'string') {
+      const headline = (result.split('\n').find((l) => l.trim().length > 0) ?? `${toolName} result`).slice(0, 200);
+      normalized = buildEnvelope({
+        tool: toolName,
+        view: 'summary',
+        summary: { headline },
+        data: { markdown: result },
+      });
+    } else {
+      normalized = result;
+    }
+    // Structured envelope path. Validate first so a malformed envelope
+    // surfaces as an error rather than silently emitting bad JSON to
+    // the transport.
+    let validated: StructuredOutput;
+    try {
+      validated = StructuredOutputSchema.parse(normalized);
+    } catch (parseErr) {
+      const msg = parseErr instanceof Error ? parseErr.message : String(parseErr);
+      log.warn(`tool.${toolName}.envelope_invalid`, { msg: msg.slice(0, 240) });
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text:
+              `Internal error: tool returned an invalid StructuredOutput envelope.\n` +
+              `Tool: ${toolName}\n` +
+              `Validation error: ${msg}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+    // The 2025-03-26 MCP revision lets a tool emit `structuredContent` (typed
+    // JSON) alongside the text channel. Hosts that honor it (Claude Desktop,
+    // ChatGPT Desktop, Cursor's structured-output path) skip the JSON.parse on
+    // the agent side and read fields directly; legacy hosts still see the
+    // text fallback. We populate BOTH on every successful call.
+    const enriched: StructuredOutput = {
+      ...validated,
+      warnings: maybeAddDemoBannerWarning(validated.warnings),
+    };
+    const structuredContent = enriched as unknown as Record<string, unknown>;
+    // G6: image attachments. Tools that produced inline charts populate
+    // envelope.images; we surface each as an MCP `image` content block.
+    // Hosts that render images (Claude Desktop, ChatGPT Desktop) show the
+    // chart; hosts that don't ignore the block.
+    const imageBlocks: Array<{ type: 'image'; data: string; mimeType: string }> = [];
+    const inlineImages = (validated as { images?: Array<{ data: string; mimeType: string; alt?: string }> }).images;
+    if (Array.isArray(inlineImages)) {
+      for (const img of inlineImages) {
+        if (typeof img.data === 'string' && typeof img.mimeType === 'string') {
+          imageBlocks.push({ type: 'image' as const, data: img.data, mimeType: img.mimeType });
+        }
+      }
+    }
+    if (validated.view === 'markdown') {
+      // Renderer was invoked inside the tool; data.markdown carries the
+      // rendered artifact. Text channel gets the markdown verbatim (with
+      // demo banner); structured channel still ships the full typed envelope
+      // so agents that want both can read it.
+      const md = (validated.data as { markdown?: unknown }).markdown;
+      if (typeof md !== 'string') {
+        log.warn(`tool.${toolName}.markdown_view_missing_markdown`);
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text:
+                `Internal error: tool returned view: "markdown" but data.markdown is not a string.\n` +
+                `Tool: ${toolName}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+      return {
+        content: [
+          { type: 'text' as const, text: applyDemoBanner(md) },
+          ...imageBlocks,
+        ],
+        structuredContent,
+      };
+    }
+    // JSON view. The text channel carries the envelope JSON-stringified so
+    // hosts without `structuredContent` support still see typed data; the
+    // structured channel ships the same envelope as a real object so modern
+    // hosts skip the parse. Demo banner is metadata, not a prose prefix —
+    // it lives in warnings[].
+    return {
+      content: [
+        { type: 'text' as const, text: JSON.stringify(enriched, null, 2) },
+        ...imageBlocks,
+      ],
+      structuredContent,
+    };
   } catch (e) {
     const raw = e instanceof Error ? e.message : String(e);
     log.debug(`tool.${toolName}.raw_err`, { msg: raw });
@@ -212,7 +382,10 @@ async function wrap(
  * Tools that don't hit the gateway (resolve_batch, extract_templates)
  * never produce 401/403 errors so this is a no-op for them.
  */
-async function runWithDemoFallbackRetry(toolName: string, fn: () => Promise<string>): Promise<string> {
+async function runWithDemoFallbackRetry<T>(
+  toolName: string,
+  fn: () => Promise<T>
+): Promise<T> {
   try {
     return await fn();
   } catch (e) {
@@ -256,13 +429,72 @@ function isAuthRecoverableError(e: unknown): boolean {
  * Pure demo mode (no key set) is the user's own choice and gets a
  * quieter footer instead.
  */
+/**
+ * Structured-envelope variant of applyDemoBanner. The demo-mode
+ * signal is appended to the `warnings[]` array rather than prepended
+ * as prose, because JSON consumers parse fields, not prefixes. Same
+ * trigger conditions and wording as applyDemoBanner; just a different
+ * surface.
+ */
+function maybeAddDemoBannerWarning(warnings: string[]): string[] {
+  if (!envs?.isDemoMode) return warnings;
+  if (envs.demoFallbackReason) {
+    const reason = envs.demoFallbackReason.split('\n')[0].slice(0, 240);
+    return [
+      `DEMO MODE — your LOG10X_API_KEY failed validation. Account-scoped tools hit the public Log10x demo env, NOT your account. Reason: ${reason}. Call log10x_login_status for fix steps.`,
+      ...warnings,
+    ];
+  }
+  return [
+    `Demo mode — account-scoped tools query the read-only Log10x demo env. Call log10x_login_status to use your own data.`,
+    ...warnings,
+  ];
+}
+
+/**
+ * Format a clear "this tool is not available in the current boot mode"
+ * reply. The agent calls a tool that mode-detect determined is
+ * irrelevant (analysis tool in POC mode, POC tool in analysis mode);
+ * we tell it why and what would change the mode.
+ */
+function formatOutOfModeMessage(toolName: string, mode: ModeResolution): string {
+  const lines = [
+    `## \`${toolName}\` is not available in this mode`,
+    ``,
+    `**Current mode**: \`${mode.mode}\``,
+    `**Reason**: ${mode.reason}`,
+    ``,
+  ];
+  if (mode.mode === 'poc') {
+    lines.push(
+      `This MCP detected no TSDB backend at boot and registered the POC tools (`,
+      `\`log10x_poc_from_siem_*\`, \`log10x_poc_from_local\`) plus install advisors instead.`,
+      ``,
+      `If you have a 10x deployment with a TSDB (Grafana Cloud, AMP, GCP Managed Prometheus,`,
+      `Datadog Prom, self-hosted Prometheus, or 10x Cloud), set the corresponding env vars`,
+      `(\`LOG10X_CUSTOMER_METRICS_URL\` + \`LOG10X_CUSTOMER_METRICS_TYPE\` + \`LOG10X_CUSTOMER_METRICS_AUTH\`,`,
+      `or any of the ambient detect paths) and restart the MCP. The analysis tools will`,
+      `register on the next boot.`
+    );
+  } else if (mode.mode === 'analysis') {
+    lines.push(
+      `This MCP detected a live 10x deployment at boot and registered the analysis tools.`,
+      ``,
+      `\`${toolName}\` is a POC / install-advisor tool that runs against prospect environments.`,
+      `If you actually want POC / install-advisor behavior in an analysis-mode env, unset the`,
+      `customer-metrics env vars and restart.`
+    );
+  }
+  return lines.join('\n');
+}
+
 function applyDemoBanner(text: string): string {
   if (!envs?.isDemoMode) return text;
   if (envs.demoFallbackReason) {
     const reason = envs.demoFallbackReason.split('\n')[0].slice(0, 240);
     return (
       `> ⚠ **DEMO MODE — your LOG10X_API_KEY failed validation.** ` +
-      `Account-scoped tools (cost_drivers, investigate, services, etc.) hit the public Log10x demo env, NOT your account. ` +
+      `Account-scoped tools (top_patterns, investigate, services, etc.) hit the public Log10x demo env, NOT your account. ` +
       `Local-only tools (resolve_batch, extract_templates) are unaffected. ` +
       `Reason: ${reason} ` +
       `Call \`log10x_login_status\` for fix steps.\n\n` +
@@ -313,12 +545,12 @@ CUSTOMER TIER LADDER (determines which tools are available)
 
 1. Dev CLI only — free local binary, no pipeline infrastructure.
    Available tools: log10x_resolve_batch (pasted-batch triage), log10x_dependency_check,
-                    log10x_exclusion_filter.
+                    log10x_pattern_mitigate.
 2. Reporter — standalone dedicated fluent-bit DaemonSet alongside the user's forwarder
    (zero-touch, read-only). Emits TenXSummary metrics for cost attribution + pattern
    fingerprinting.
-   Adds: log10x_investigate, log10x_cost_drivers, log10x_pattern_trend, log10x_top_patterns,
-         log10x_list_by_label, log10x_event_lookup, log10x_savings.
+   Adds: log10x_investigate, log10x_pattern_trend, log10x_top_patterns,
+         log10x_event_lookup, log10x_savings.
 3. Receiver — sidecar inside the user's existing forwarder (fluent-bit / fluentd /
    filebeat / logstash / otel-collector / vector). Filters, samples, and optionally
    losslessly compacts events in-flight. Replaces the legacy Regulator + Optimizer apps.
@@ -345,17 +577,15 @@ Daily-habit / operational:
                                                                       for this pattern: drop @ analyzer / drop @
                                                                       forwarder / mute @ 10x / compact @ 10x —
                                                                       only the options available in this env are
-                                                                      included. Once the user picks one, the
-                                                                      follow-through is:
+                                                                      included. Each option carries a paste-ready
+                                                                      config snippet inline. Once the user picks one:
                                                                         option 1 or 2 → log10x_dependency_check
-                                                                                        → log10x_exclusion_filter
-                                                                                          (vendor=analyzer or forwarder)
+                                                                                        (paste the snippet from
+                                                                                         pattern_mitigate.options[i].config_snippet)
                                                                         option 3       → log10x_dependency_check
                                                                                         → log10x_advise_receiver
-                                                                        option 4       → log10x_advise_compact
-                                                                      Call exclusion_filter directly only when the
-                                                                      user already specified a vendor + intent.)
-- (proactive): after log10x_top_patterns / log10x_cost_drivers / log10x_event_lookup surfaces a
+                                                                        option 4       → log10x_configure_compact)
+- (proactive): after log10x_top_patterns / log10x_event_lookup surfaces a
   high-volume pattern AND the user's framing is cost-related ("expensive", "bill", "save",
   "reduce", "spike"), offer to reduce it as a follow-up question — "Want me to show
   you options for reducing this?" Do this even if not asked. When the user says yes, call
@@ -363,14 +593,12 @@ Daily-habit / operational:
   env-gated mitigation options + exact configs for that pattern.
 
 Cost investigation:
-- "what's expensive right now" / "top patterns by cost"          → log10x_top_patterns
-- ANY framing of "the bill changed" — "bill jumped", "over forecast", "over budget",
-  "costs spiked", "$N over", "why did costs go up", "who is responsible for the jump",
-  "week-over-week delta"                                         → log10x_cost_drivers
-  (Critical: use cost_drivers NOT top_patterns when the question is about CHANGE over
-   time. top_patterns shows what's big right now; cost_drivers shows what GREW. A
-   surprise bill is always a cost_drivers question first, then drill down.)
-- "cost by namespace / service / severity / country"             → log10x_list_by_label
+- "what's expensive right now" / "top patterns by cost" /
+  "what changed" / "week-over-week delta" /
+  "why did costs go up"                                          → log10x_top_patterns
+  (log10x_top_patterns surfaces current rank + newly-emerged + delta-from-baseline
+   for each pattern in one call. Use the \`comparison_window\` arg for "what changed
+   since last week" framing.)
 - "pipeline savings / ROI"                                       → log10x_savings
 
 Forensic / audit / archive — ANY request for RAW EVENTS from the S3 archive:
@@ -420,13 +648,13 @@ NATURAL TOOL CHAINS
     (or for a batch: log10x_resolve_batch  →  log10x_investigate on the top pattern)
 
   Cost investigation:
-    log10x_cost_drivers  →  log10x_dependency_check  →  log10x_exclusion_filter
+    log10x_top_patterns  →  log10x_pattern_mitigate  →  log10x_dependency_check
 
   Forensic retrieval across retention boundaries:
     log10x_event_lookup  →  log10x_retriever_query
 
   New metric from historical archive:
-    log10x_cost_drivers or log10x_investigate  →  log10x_backfill_metric
+    log10x_top_patterns or log10x_investigate  →  log10x_backfill_metric
 
 RESPONSE STYLE
 
@@ -445,17 +673,12 @@ NUMBERS DISCIPLINE — hard rules, no exceptions:
 - Every dollar amount, percentage, event count, or timestamp in your response must appear
   verbatim in a tool result you called in this session. If you cannot point to the exact tool
   output, do not write the number. Say "not reported" instead.
-- Do NOT compute percentages from before→after values in cost_drivers — the tool emits the
-  exact (+N%) delta next to each row. Quote it. Do not re-derive it.
-- Do NOT merge log10x_top_patterns output into a log10x_cost_drivers table. top_patterns is
-  CURRENT RANK (biggest right now); cost_drivers is GROWTH (what changed). Mixing them into
-  one ranked list and labeling the result "cost drivers" is a specific failure mode that
-  produces fabricated week-over-week percentages. If you need both views, show them in two
-  separate tables with clear headers.
-- Do NOT invent "peak" values. top_patterns and cost_drivers return window averages, not peaks.
+- Do NOT compute percentages from before→after values — log10x_top_patterns emits the
+  exact (+N%) delta on each row when comparison_window is set. Quote it. Do not re-derive it.
+- Do NOT invent "peak" values. log10x_top_patterns returns window averages, not peaks.
   If the user asks for peaks, call log10x_pattern_trend explicitly and quote its max bucket.
-- Do NOT synthesize a baseline number. If cost_drivers does not list a pattern, that pattern
-  is not a cost driver — do not promote it into the driver list with a made-up baseline.
+- Do NOT synthesize a baseline number. If log10x_top_patterns does not list a pattern under
+  the comparison_window delta, that pattern is not a cost driver — do not invent a baseline.
 - log10x_dependency_check has two output modes. When SIEM credentials are present in the env
   (DD_API_KEY, SPLUNK_HOST+SPLUNK_TOKEN, ELASTIC_URL+KIBANA_URL, AWS chain), the tool runs the
   scan in-process and returns ACTUAL dashboard/alert/saved-search/monitor/metric-filter names
@@ -542,36 +765,184 @@ const _originalRegisterTool = server.registerTool.bind(server) as typeof server.
  * Throws synchronously if the tool name has no entry in default-manifest.json
  * (build-time guard against drift between code and manifest).
  */
+// Pending registrations queue. Top-level registerLog10xTool() calls
+// push here at module load (before mode detection runs). After
+// initBootMode() resolves the mode in main(), applyToolRegistrations()
+// drains the queue and registers only the tools whose TOOL_MODES
+// entry includes the current boot mode. Tools registered before
+// bootMode is set (e.g. integration tests that bypass main()) fall
+// through to a permissive register-everything path.
+type PendingTool = {
+  name: string;
+  inputSchema: Record<string, unknown>;
+  handler: (
+    args: any,
+    extra?: { sendNotification?: (n: { method: string; params: Record<string, unknown> }) => Promise<void> }
+  ) => Promise<WrapResult>;
+};
+const pendingTools: PendingTool[] = [];
+
 function registerLog10xTool(
   name: string,
   inputSchema: Record<string, unknown>,
   handler: (
     args: any,
     extra?: { sendNotification?: (n: { method: string; params: Record<string, unknown> }) => Promise<void> }
-  ) => Promise<{ content: { type: 'text'; text: string }[]; isError?: boolean }>
+  ) => Promise<WrapResult>
 ): void {
-  const meta = getPackageDefaultTool(name);
-  (server.registerTool as any)(
-    name,
-    {
-      title: meta.title,
-      description: meta.description,
-      inputSchema,
-      annotations: meta.annotations,
-    },
-    handler
-  );
+  // Validate manifest entry at queue-time so the build-time guard still
+  // catches missing default-manifest.json entries before main() runs.
+  getPackageDefaultTool(name);
+  pendingTools.push({ name, inputSchema, handler });
 }
 
-// ── Tool: log10x_cost_drivers ──
+/**
+ * Drain the pending registration queue against the server, gated by
+ * the current boot mode. Tools not allowed in this mode are skipped
+ * entirely (they will not appear in tools/list). Called from main()
+ * after initBootMode() resolves the operating mode.
+ */
+/**
+ * G5: operator-side category gates. Three env vars at boot:
+ *
+ *   LOG10X_MCP_ENABLED_CATEGORIES=cost,identify,investigate
+ *     Allowlist. When set, ONLY tools whose category is in the list register.
+ *     Empty / unset = all categories allowed.
+ *
+ *   LOG10X_MCP_DISABLED_CATEGORIES=poc,account
+ *     Blocklist. Applied after the allowlist. Categories listed are skipped.
+ *
+ *   LOG10X_MCP_DISABLE_WRITE=true
+ *     When true, every tool whose annotation `readOnlyHint` is explicitly
+ *     `false` is skipped — useful for read-only customer demos, prospect
+ *     evals, and CI sandboxes where the agent must not mutate state.
+ *
+ * Reads at applyToolRegistrations() time, after manifest load and mode
+ * detect. Resolution order: mode-detect first (analysis/poc), then
+ * category-allow, then category-deny, then write-disable.
+ */
+interface OperatorGate {
+  enabledCategories: Set<string> | null;
+  disabledCategories: Set<string>;
+  disableWrite: boolean;
+}
+/**
+ * G11: build the `_meta` block that ships on each tool definition. Carries
+ * operational metadata that doesn't fit in the description (which is for
+ * the agent's prompt) but that ranking-aware hosts can read.
+ *
+ * Fields:
+ *   - category: same as the operator-gate category (cost / identify / ...).
+ *     Lets a host group tools by category in its UI without parsing the
+ *     description prose.
+ *   - tier: which Log10x component the tool needs deployed at the customer
+ *     side. Derived from category as a coarse default; per-tool overrides
+ *     could live in the manifest later but the category mapping is right
+ *     90+% of the time.
+ *       cost/identify/investigate/drop  → 'reporter'
+ *       retrieve                        → 'retriever'
+ *       detect                          → 'cli'  (paste-mode runs locally)
+ *       install/poc/account             → 'none'
+ *   - confirmation_required: true when the tool ships a literal-string
+ *     confirm gate (`confirm: "rotate-now"`, `confirm_name: "<env>"`).
+ *     Lets hosts surface a clearer prompt before invocation.
+ */
+function buildToolMeta(
+  name: string,
+  category: string,
+  annotations: { readOnlyHint?: boolean; destructiveHint?: boolean; idempotentHint?: boolean; openWorldHint?: boolean; [k: string]: unknown } | undefined
+): Record<string, unknown> {
+  const tier =
+    category === 'retrieve' ? 'retriever' :
+    category === 'detect' ? 'cli' :
+    (category === 'install' || category === 'poc' || category === 'account') ? 'none' :
+    'reporter';
+  const confirmationRequired =
+    name === 'log10x_delete_env' || name === 'log10x_rotate_api_key';
+  return {
+    category: category || 'uncategorized',
+    tier,
+    ...(confirmationRequired ? { confirmation_required: true } : {}),
+    ...(annotations?.readOnlyHint === false ? { mutates_state: true } : {}),
+  };
+}
 
-registerLog10xTool('log10x_cost_drivers', costDriversSchema, (args) =>
-  wrap('log10x_cost_drivers', async () => {
-    const env = resolveEnv(getEnvs(), args.environment);
-    const cost = await getAnalyzerCost(env, args.analyzerCost);
-    return executeCostDrivers({ ...args, analyzerCost: cost }, env);
-  })
-);
+function readOperatorGate(): OperatorGate {
+  const splitCsv = (s: string | undefined): Set<string> => new Set(
+    (s ?? '').split(',').map((x) => x.trim().toLowerCase()).filter(Boolean)
+  );
+  const enabled = process.env.LOG10X_MCP_ENABLED_CATEGORIES;
+  const enabledSet = enabled && enabled.trim().length > 0 ? splitCsv(enabled) : null;
+  const disabled = splitCsv(process.env.LOG10X_MCP_DISABLED_CATEGORIES);
+  const disableWrite = /^(1|true|yes)$/i.test(process.env.LOG10X_MCP_DISABLE_WRITE ?? '');
+  return { enabledCategories: enabledSet, disabledCategories: disabled, disableWrite };
+}
+
+function applyToolRegistrations(): { registered: string[]; skipped: string[] } {
+  const mode = bootMode?.mode;
+  const gate = readOperatorGate();
+  const registered: string[] = [];
+  const skipped: string[] = [];
+  // Every tool publishes the envelope's shape as its `outputSchema`. The
+  // per-tool `data` field is `z.unknown()` at the envelope layer — its real
+  // shape lives in each tool's TypeScript interface and in the rendered docs.
+  // We declare it uniformly here so MCP hosts that honor `outputSchema`
+  // (Claude Desktop, ChatGPT Desktop) get a contract; hosts that don't,
+  // ignore it. Pair with `structuredContent` on every result in wrap().
+  const envelopeOutputSchema = StructuredOutputSchema.shape;
+  for (const t of pendingTools) {
+    const allowed = mode ? shouldRegisterTool(t.name, mode) : true;
+    if (!allowed) {
+      skipped.push(t.name);
+      continue;
+    }
+    const meta = getPackageDefaultTool(t.name);
+    // G5: category + write gates.
+    const category = (meta.category ?? '').toLowerCase();
+    // G11: _meta block surfaced on the tool definition. The MCP spec allows
+    // arbitrary `_meta` on tools and on results; hosts that rank tools by
+    // category / tier / safety profile (some autonomous agents do) consume
+    // this. Hosts that don't see it ignore it. Grafana ships zero _meta
+    // today, so this is straight lead.
+    const toolMeta = buildToolMeta(t.name, category, meta.annotations);
+    if (gate.enabledCategories && (!category || !gate.enabledCategories.has(category))) {
+      log.info(`tool.${t.name}.gated_out`, { reason: 'category not in LOG10X_MCP_ENABLED_CATEGORIES', category });
+      skipped.push(t.name);
+      continue;
+    }
+    if (category && gate.disabledCategories.has(category)) {
+      log.info(`tool.${t.name}.gated_out`, { reason: 'category in LOG10X_MCP_DISABLED_CATEGORIES', category });
+      skipped.push(t.name);
+      continue;
+    }
+    if (gate.disableWrite && meta.annotations && meta.annotations.readOnlyHint === false) {
+      log.info(`tool.${t.name}.gated_out`, { reason: 'LOG10X_MCP_DISABLE_WRITE=true and tool has readOnlyHint:false' });
+      skipped.push(t.name);
+      continue;
+    }
+    // G3: wrap every input field with a coercive preprocess so the SDK's
+    // strict Zod validation accepts the type-loose inputs LLM hosts
+    // routinely emit (e.g., `"limit": "5"` instead of `"limit": 5`, or
+    // `"events": "one event"` instead of `"events": ["one event"]`). The
+    // wrapper preserves the agent-facing JSON Schema and the handler's
+    // typed args, so downstream code is unchanged.
+    const coerciveInputSchema = makeShapeCoercive(t.inputSchema as Record<string, never>);
+    (server.registerTool as any)(
+      t.name,
+      {
+        title: meta.title,
+        description: meta.description,
+        inputSchema: coerciveInputSchema,
+        outputSchema: envelopeOutputSchema,
+        annotations: meta.annotations,
+        _meta: toolMeta,
+      },
+      t.handler
+    );
+    registered.push(t.name);
+  }
+  return { registered, skipped };
+}
 
 // ── Tool: log10x_event_lookup ──
 
@@ -618,12 +989,6 @@ registerLog10xTool('log10x_pattern_trend', trendSchema, (args) =>
   })
 );
 
-// ── Tool: log10x_exclusion_filter ──
-
-registerLog10xTool('log10x_exclusion_filter', exclusionFilterSchema, (args) =>
-  wrap('log10x_exclusion_filter', async () => executeExclusionFilter(args))
-);
-
 // ── Tool: log10x_dependency_check ──
 
 registerLog10xTool('log10x_dependency_check', dependencyCheckSchema, (args) =>
@@ -653,13 +1018,22 @@ registerLog10xTool('log10x_top_patterns', topPatternsSchema, (args) =>
   })
 );
 
-// ── Tool: log10x_list_by_label ──
+// ── Tool: log10x_services ──
 
-registerLog10xTool('log10x_list_by_label', listByLabelSchema, (args) =>
-  wrap('log10x_list_by_label', async () => {
+registerLog10xTool('log10x_services', servicesSchema, (args) =>
+  wrap('log10x_services', async () => {
     const env = resolveEnv(getEnvs(), args.environment);
     const cost = await getAnalyzerCost(env, args.analyzerCost);
-    return executeListByLabel({ ...args, analyzerCost: cost }, env);
+    return executeServices({ ...args, analyzerCost: cost }, env);
+  })
+);
+
+// ── Tool: log10x_discover_labels ──
+
+registerLog10xTool('log10x_discover_labels', discoverLabelsSchema, (args) =>
+  wrap('log10x_discover_labels', async () => {
+    const env = resolveEnv(getEnvs(), args.environment);
+    return executeDiscoverLabels(args, env);
   })
 );
 
@@ -672,16 +1046,40 @@ registerLog10xTool('log10x_investigate', investigateSchema, (args) =>
   })
 );
 
-// ── Tool: log10x_investigation_get ──
+// ── Tool: log10x_resolve_batch ──
 
-registerLog10xTool('log10x_investigation_get', investigationGetSchema, (args) =>
-  wrap('log10x_investigation_get', async () => executeInvestigationGet(args))
+// ── Tool: log10x_find_skew ──
+
+registerLog10xTool('log10x_find_skew', findSkewSchema, (args) =>
+  wrap('log10x_find_skew', async () => executeFindSkew(args))
 );
 
-// ── Tool: log10x_resolve_batch ──
+// ── Tool: log10x_find_constant_slots ──
+
+registerLog10xTool('log10x_find_constant_slots', findConstantSlotsSchema, (args) =>
+  wrap('log10x_find_constant_slots', async () => executeFindConstantSlots(args))
+);
+
+// ── Tool: log10x_find_uuid_in_body ──
+
+registerLog10xTool('log10x_find_uuid_in_body', findUuidInBodySchema, (args) =>
+  wrap('log10x_find_uuid_in_body', async () => executeFindUuidInBody(args))
+);
+
+// ── Tool: log10x_find_incident_cluster ──
+
+registerLog10xTool('log10x_find_incident_cluster', findIncidentClusterSchema, (args) =>
+  wrap('log10x_find_incident_cluster', async () => executeFindIncidentCluster(args))
+);
 
 registerLog10xTool('log10x_resolve_batch', resolveBatchSchema, (args) =>
   wrap('log10x_resolve_batch', async () => executeResolveBatch(args))
+);
+
+// ── Tool: log10x_extract_templates ──
+
+registerLog10xTool('log10x_extract_templates', extractTemplatesSchema, (args) =>
+  wrap('log10x_extract_templates', async () => executeExtractTemplates(args))
 );
 
 // ── Tool: log10x_retriever_query ──
@@ -690,21 +1088,6 @@ registerLog10xTool('log10x_retriever_query', retrieverQuerySchema, (args) =>
   wrap('log10x_retriever_query', async () => {
     const env = resolveEnv(getEnvs(), args.environment);
     return executeRetrieverQuery(args, env);
-  })
-);
-
-// ── Tool: log10x_retriever_query_status ──
-//
-// Pairs with log10x_retriever_query. Reads the CW log streams for an
-// existing queryId and returns a fresh diagnostics snapshot — useful
-// when a prior retriever_query reported partialResults: true (poll
-// budget exceeded) or when an agent wants to verify a queryId's
-// progress without paying the full S3 results poll again.
-
-registerLog10xTool('log10x_retriever_query_status', retrieverQueryStatusSchema, (args) =>
-  wrap('log10x_retriever_query_status', async () => {
-    const env = resolveEnv(getEnvs(), args.environment);
-    return executeRetrieverQueryStatus(args, env);
   })
 );
 
@@ -828,6 +1211,18 @@ registerLog10xTool('log10x_correlate_cross_pillar', correlateCrossPillarSchema, 
   })
 );
 
+// ── Tool: log10x_translate_metric_to_patterns ──
+
+registerLog10xTool(
+  'log10x_translate_metric_to_patterns',
+  translateMetricToPatternsSchema,
+  (args) =>
+    wrap('log10x_translate_metric_to_patterns', async () => {
+      const env = resolveEnv(getEnvs(), args.environment);
+      return executeTranslateMetricToPatterns(args, env);
+    })
+);
+
 // ── Tool: log10x_poc_from_siem_submit / _status ──
 //
 // Async pair: submit kicks off a background pull + templatize + render;
@@ -925,10 +1320,10 @@ registerLog10xTool('log10x_advise_install', adviseInstallSchema, (args) =>
   wrap('log10x_advise_install', () => executeAdviseInstall(args, getEnvs(), server))
 );
 
-// ── Tool: log10x_advise_compact (compact-lookup PR author) ──
+// ── Tool: log10x_configure_compact (per-container compact decision PR author) ──
 
-registerLog10xTool('log10x_advise_compact', adviseCompactSchema, (args) =>
-  wrap('log10x_advise_compact', () => executeAdviseCompact(args))
+registerLog10xTool('log10x_configure_compact', configureCompactSchema, (args) =>
+  wrap('log10x_configure_compact', () => executeConfigureCompact(args))
 );
 
 // ── Tool: log10x_pattern_mitigate (cost-reduction menu) ──
@@ -953,20 +1348,15 @@ server.resource(
 // ── CLI flag handlers ──
 
 const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
-  { name: 'log10x_cost_drivers', intent: 'Why did log costs spike this week — dollar-ranked patterns with week-over-week deltas' },
   { name: 'log10x_event_lookup', intent: 'What is this single log line — resolve to stable identity + cost + AI classification' },
   { name: 'log10x_pattern_examples', intent: 'Recent live events for a pattern from the log analyzer with template-parsed slot values — bounded to 24h, for older use retriever_query' },
   { name: 'log10x_savings', intent: 'Pipeline ROI — how much receiver / retriever are saving in dollars' },
   { name: 'log10x_pattern_trend', intent: 'Time series for a pattern — volume + cost history, spike detection, sparkline' },
-  { name: 'log10x_exclusion_filter', intent: 'Generate mute file entry or SIEM drop rule for a pattern' },
   { name: 'log10x_dependency_check', intent: 'Scan SIEM + dashboards + alerts for refs to a pattern before muting / deleting it' },
-  { name: 'log10x_top_patterns', intent: 'Top N patterns by current cost (no baseline comparison)' },
-  { name: 'log10x_list_by_label', intent: 'Rank any label dimension by cost — "cost by namespace / tenant / severity"' },
+  { name: 'log10x_top_patterns', intent: 'Top N patterns by current cost, with per-row delta vs comparison_window and newly-emerged section' },
   { name: 'log10x_investigate', intent: 'Single-call root-cause — causal chain for acute spikes or cohort for drift' },
-  { name: 'log10x_investigation_get', intent: 'Retrieve a prior investigation by id or list recent investigations' },
   { name: 'log10x_resolve_batch', intent: 'Pasted-batch triage — per-pattern variable concentration + next actions' },
   { name: 'log10x_retriever_query', intent: 'Direct archive retrieval by templateHash with JS filter expressions' },
-  { name: 'log10x_retriever_query_status', intent: 'Poll CloudWatch diagnostics for an existing retriever query and optionally recover stranded results from S3 via fetch_results=true (avoids resubmit + new queryId)' },
   { name: 'log10x_retriever_series', intent: 'Fidelity-aware time series from the S3 archive — auto-selects exact aggregation vs sampled fan-out' },
   { name: 'log10x_backfill_metric', intent: 'Create a new Datadog / Prometheus metric backfilled from Retriever archive' },
   { name: 'log10x_doctor', intent: 'Startup health check — env config, gateway, tier, freshness, Retriever, paste endpoint, cross-pillar enrichment floor' },
@@ -990,7 +1380,8 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_advise_reporter', intent: 'Reporter install/verify/teardown plan — standalone dedicated fluent-bit DaemonSet alongside the user\'s forwarder (zero-touch, read-only)' },
   { name: 'log10x_advise_receiver', intent: 'Receiver install/verify/teardown plan — sidecar inside the user\'s existing forwarder, with optional compact encoding (optimize=true)' },
   { name: 'log10x_advise_retriever', intent: 'Retriever install/verify/teardown plan — standalone S3 + SQS archive + query' },
-  { name: 'log10x_advise_compact', intent: 'Render a `gh` PR command + diff for a compactReceiver lookup-CSV update against the customer GitOps repo (engine hot-reloads the CSV without a pipeline restart)' },
+  { name: 'log10x_configure_compact', intent: 'Resolve a service to its k8s_container set via Prometheus; emit a `gh` PR command against the compact cap-file CSV with per-container `true`/`false` decisions (engine hot-reloads the CSV without a pipeline restart)' },
+  { name: 'log10x_configure_regulator', intent: 'Derive a per-container rate-regulator byte cap from a monthly dollar budget; validate against five Prometheus sanity checks; emit a `gh` PR command against the rate-cap CSV (engine hot-reloads it)' },
   { name: 'log10x_pattern_mitigate', intent: 'Return the env-gated mitigation options + exact configs for a pattern (drop @ analyzer, drop @ forwarder, mute @ 10x, compact @ 10x) in user terms with env-capability gating' },
 ];
 
@@ -1061,6 +1452,11 @@ async function handleCliFlags(): Promise<boolean> {
 
 async function main() {
   if (await handleCliFlags()) return;
+  // G7: initialize OTel SDK if OTEL_EXPORTER_OTLP_ENDPOINT is set.
+  // No-op otherwise. Must run before envs init so the very first network
+  // call (env validation against the gateway) lands inside a trace too.
+  const { initOtel } = await import('./lib/otel.js');
+  await initOtel();
   // Eagerly resolve credentials before the server connects so any
   // configuration / network failure surfaces here with a clear
   // structured error instead of crashing on the first tool call from
@@ -1075,6 +1471,22 @@ async function main() {
     }
     throw e;
   }
+  // Detect operating mode (analysis | analysis_pending | poc) from
+  // the TSDB-resolvability cascade. Bounded by 5s probe timeout. Sets
+  // the module-scoped `bootMode` used by `wrap()` to gate out-of-mode
+  // tool invocations with a clear reply rather than 5xx errors.
+  await initBootMode();
+  // Drain the pending tool registration queue, gated by boot mode.
+  // Tools not allowed in this mode are skipped and will not appear
+  // in tools/list. Tools that ARE registered still pass through the
+  // wrap() handler-level mode gate as a defense-in-depth check.
+  const regResult = applyToolRegistrations();
+  log.info('mcp.tool_registration', {
+    mode: bootMode?.mode,
+    registered_count: regResult.registered.length,
+    skipped_count: regResult.skipped.length,
+    skipped: regResult.skipped,
+  });
   // Plumb the envs reference into self-telemetry so the wrapper can
   // resolve which env each tool call acted on, and flush can drop counters
   // from read-only envs (incl. demo). Must happen AFTER initEnvs so the
@@ -1093,7 +1505,16 @@ async function main() {
     default_env: loaded.default.nickname,
     demo_mode: loaded.isDemoMode,
     manifest_loaded: manifest !== null,
+    boot_mode: bootMode?.mode,
+    boot_mode_backend: bootMode?.detectionPath,
+    boot_mode_probe_ms: bootMode?.probeDurationMs,
   });
+  // Surface mode-detect resolution to stderr at boot so it shows up
+  // in MCP-client logs without needing to call `log10x_doctor`.
+  if (bootMode) {
+    // eslint-disable-next-line no-console
+    console.error(`[log10x-mcp] ${formatModeResolution(bootMode).split('\n')[0]}`);
+  }
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }

@@ -153,6 +153,7 @@ export const patternExamplesSchema = {
       'Vendor-specific scope (Splunk index, Datadog index, ES index pattern, CloudWatch log group). Defaults to a sensible per-vendor value when omitted.',
     ),
   environment: z.string().optional().describe('Environment nickname.'),
+  view: z.enum(['summary', 'markdown']).default('summary').describe('Output format. summary returns structured envelope; markdown returns rendered buckets.'),
 };
 
 interface ProgressNote {
@@ -170,11 +171,71 @@ interface PatternExamplesArgs {
   limit?: number;
   scope?: string;
   environment?: string;
+  view?: 'summary' | 'markdown';
+}
+
+interface PatternExamplesSummary {
+  pattern: string;
+  vendor: string;
+  window: string;
+  service?: string;
+  severity?: string;
+  probe_path: 'tenx_hash-exact' | 'content-token' | 'paste';
+  events_pulled: number;
+  distinct_templates: number;
+  retained_events: number;
+  retained_templates: number;
+  dropped_jaccard_events: number;
+  multi_line_detected: boolean;
+  buckets: Array<{
+    rank: number;
+    template_hash: string;
+    tenx_hash?: string;
+    event_count: number;
+    jaccard: number;
+    severity?: string;
+    service?: string;
+    sample_event: string;
+    slot_distribution: Array<{ slot: string; distinct_count: number; is_constant: boolean; sample_values: string[] }>;
+  }>;
+  probe_notes: string[];
 }
 
 export async function executePatternExamples(
   rawArgs: PatternExamplesArgs,
   env: EnvConfig,
+): Promise<string | import('../lib/output-types.js').StructuredOutput> {
+  const view = rawArgs.view ?? 'summary';
+  const sumOut: { data?: PatternExamplesSummary } = {};
+  const md = await executePatternExamplesInner(rawArgs, env, sumOut);
+  const { buildMarkdownEnvelope, buildEnvelope } = await import('../lib/output-types.js');
+  if (view === 'markdown' || !sumOut.data) {
+    return buildMarkdownEnvelope({
+      tool: 'log10x_pattern_examples',
+      summary: { headline: md.split('\n')[0]?.slice(0, 200) || 'pattern_examples result' },
+      markdown: md,
+    });
+  }
+  const d = sumOut.data;
+  const headline = `\`${d.pattern}\` (${d.vendor}, ${d.window}): ${d.events_pulled} events pulled, ${d.retained_events} retained across ${d.retained_templates} templates via ${d.probe_path}`;
+  // Truncation signal: the SIEM probe hit its limit (rawArgs.limit defaults to 5).
+  // If events_pulled equals the requested limit, there are likely more matching
+  // events the agent could see by widening the limit or narrowing the timeRange.
+  const requestedLimit = rawArgs.limit ?? 5;
+  const truncated = d.events_pulled >= requestedLimit;
+  return buildEnvelope({
+    tool: 'log10x_pattern_examples',
+    view: 'summary',
+    summary: { headline },
+    data: d,
+    truncated,
+  });
+}
+
+async function executePatternExamplesInner(
+  rawArgs: PatternExamplesArgs,
+  env: EnvConfig,
+  sumOut?: { data?: PatternExamplesSummary },
 ): Promise<string> {
   // Defensive defaults — match patternExamplesSchema. Tools dispatched
   // outside the MCP-SDK Zod boundary (chains, scripts, harness) can
@@ -397,13 +458,51 @@ export async function executePatternExamples(
       'The pattern may not be active in this window, or the input pattern doesn\'t correspond to events in the requested timeRange.',
       '',
       'Drop counts by Jaccard:',
-      ...buckets.slice(0, 5).map((b) => `  - templateHash \`${b.p.hash.slice(0, 12)}\`: ${b.p.count} events, jaccard=${b.jaccard.toFixed(2)} (threshold ${b.threshold})`),
+      ...buckets.slice(0, 5).map((b) => `  - patternHash \`${(b.p.tenxHash ?? b.p.hash).slice(0, 12)}\`: ${b.p.count} events, jaccard=${b.jaccard.toFixed(2)} (threshold ${b.threshold})`),
     ]);
   }
 
   // Top 3 retained buckets.
   const topK = retained.slice(0, 3);
   const droppedFromTopK = retained.slice(3);
+
+  // Populate typed summary for view='summary' callers.
+  if (sumOut) {
+    sumOut.data = {
+      pattern: canonicalPattern,
+      vendor,
+      window: args.timeRange,
+      service: args.service,
+      severity: args.severity,
+      probe_path: probePath,
+      events_pulled: probe.events.length,
+      distinct_templates: extracted.patterns.length,
+      retained_events: retained.reduce((s, b) => s + b.p.count, 0),
+      retained_templates: retained.length,
+      dropped_jaccard_events: dropped.reduce((s, b) => s + b.p.count, 0),
+      multi_line_detected: isMultiLine,
+      buckets: topK.map((bucket, i) => ({
+        rank: i + 1,
+        template_hash: bucket.p.hash,
+        tenx_hash: bucket.p.tenxHash,
+        event_count: bucket.p.count,
+        jaccard: bucket.jaccard,
+        severity: bucket.p.severity,
+        service: bucket.p.service,
+        sample_event: bucket.p.sampleEvent.slice(0, 200),
+        slot_distribution: Object.entries(bucket.p.variables)
+          .sort((a, b) => b[1].length - a[1].length)
+          .slice(0, 6)
+          .map(([slot, vals]) => ({
+            slot,
+            distinct_count: vals.length,
+            is_constant: vals.length === 1,
+            sample_values: vals.slice(0, 3),
+          })),
+      })),
+      probe_notes: probeNotes.slice(0, 5),
+    };
+  }
 
   // ── 7. Render output ───────────────────────────────────────────────
   const lines: string[] = [];
@@ -431,16 +530,16 @@ export async function executePatternExamples(
     lines.push('> **Multi-line detected**: the engine grouped multiple input lines into fewer encoded events. Showing head lines only; continuation frames (e.g. stack-trace `at ` lines) live separately in the analyzer and are not joined here.');
   }
   lines.push('');
-  // Gloss the hash once: a human seeing "templateHash a1b2c3…" needs to know
+  // Gloss the hash once: a human seeing "patternHash a1b2c3…" needs to know
   // what it is before the buckets below.
-  lines.push('_Buckets group the matched events by template fingerprint (`templateHash`); the slot table in each shows what varies within that template._');
+  lines.push('_Buckets group the matched events by `patternHash` (the engine\'s portable pattern fingerprint); the slot table in each shows what varies within that pattern._');
   lines.push('');
 
   for (let i = 0; i < topK.length; i++) {
     const bucket = topK[i];
     const p = bucket.p;
     const eventsToShow = Math.min(args.limit, p.count);
-    lines.push(`### Bucket ${i + 1}: templateHash \`${p.hash.slice(0, 16)}\` (${fmtCount(p.count)} events, jaccard=${bucket.jaccard.toFixed(2)})`);
+    lines.push(`### Bucket ${i + 1}: patternHash \`${(p.tenxHash ?? p.hash).slice(0, 16)}\` (${fmtCount(p.count)} events, jaccard=${bucket.jaccard.toFixed(2)})`);
     lines.push('');
     if (p.severity) lines.push(`**Severity**: ${p.severity}`);
     if (p.service) lines.push(`**Service**: ${p.service}`);
@@ -468,7 +567,7 @@ export async function executePatternExamples(
 
   if (droppedFromTopK.length > 0) {
     const droppedCount = droppedFromTopK.reduce((s, b) => s + b.p.count, 0);
-    lines.push(`_${fmtCount(droppedCount)} additional events from ${droppedFromTopK.length} additional templateHash bucket(s) not shown (only top 3 by count rendered)._`);
+    lines.push(`_${fmtCount(droppedCount)} additional events from ${droppedFromTopK.length} additional patternHash bucket(s) not shown (only top 3 by count rendered)._`);
     lines.push('');
   }
 

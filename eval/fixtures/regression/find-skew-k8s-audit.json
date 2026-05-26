@@ -1,0 +1,27 @@
+{
+  "id": "find-skew-k8s-audit",
+  "description": "K8s audit-style events with 80% verb=get, 20% verb=post \u2014 find_skew should detect verb slot dominance \u2265 0.6.",
+  "tool": "find_skew",
+  "args": {
+    "events": [
+      "{\"kind\":\"Event\",\"verb\":\"get\",\"user\":\"u1\"}",
+      "{\"kind\":\"Event\",\"verb\":\"get\",\"user\":\"u2\"}",
+      "{\"kind\":\"Event\",\"verb\":\"get\",\"user\":\"u3\"}",
+      "{\"kind\":\"Event\",\"verb\":\"get\",\"user\":\"u4\"}",
+      "{\"kind\":\"Event\",\"verb\":\"get\",\"user\":\"u5\"}",
+      "{\"kind\":\"Event\",\"verb\":\"get\",\"user\":\"u6\"}",
+      "{\"kind\":\"Event\",\"verb\":\"get\",\"user\":\"u7\"}",
+      "{\"kind\":\"Event\",\"verb\":\"get\",\"user\":\"u8\"}",
+      "{\"kind\":\"Event\",\"verb\":\"post\",\"user\":\"u9\"}",
+      "{\"kind\":\"Event\",\"verb\":\"post\",\"user\":\"u10\"}"
+    ],
+    "privacy_mode": true,
+    "min_concentration": 0.6,
+    "min_events": 5
+  },
+  "expected": {
+    "findings_count_min": 1,
+    "headline_must_match": "skew",
+    "rubric": "Tool should detect that one of the slots has a dominant value at or above 0.6. With 8 events having verb=get and 2 having verb=post in a uniform field set, this is a clear skew case. Expect findings.length >= 1 and the top finding's skewedSlots[0].dominantPct around 0.7-1.0."
+  }
+}

@@ -24,6 +24,7 @@ import {
 } from '../lib/metrics-backend.js';
 import { DEFAULT_LABELS, type LabelNameMap } from '../lib/promql.js';
 import { validateBackend, renderValidationResult } from '../lib/backend-validator.js';
+import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
 const promAuthSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('none') }),
@@ -76,6 +77,7 @@ export const configureEnvSchema = {
     .describe(
       'When true, run validation and return the result but DO NOT write the env to `~/.log10x/envs.json`. Useful for dry-run checks during conversational onboarding.'
     ),
+  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.ok, data.nickname, data.action, data.validation). markdown wraps the validation report in data.markdown.'),
 };
 
 interface ConfigureEnvArgs {
@@ -84,6 +86,7 @@ interface ConfigureEnvArgs {
   labels?: Partial<LabelNameMap>;
   isDefault?: boolean;
   validateOnly?: boolean;
+  view?: 'summary' | 'markdown';
 }
 
 function envsJsonPath(): string {
@@ -118,14 +121,53 @@ async function writeEnvsJson(entries: EnvsJsonEntry[]): Promise<void> {
   await fs.writeFile(envsJsonPath(), content, { mode: 0o600 });
 }
 
-export async function executeConfigureEnv(args: ConfigureEnvArgs): Promise<string> {
-  // ── 1. Build the backend instance (runs ${VAR} resolution + secret guard) ──
+export async function executeConfigureEnv(args: ConfigureEnvArgs): Promise<string | StructuredOutput> {
+  const view = args.view ?? 'summary';
+  const result = await executeConfigureEnvInner(args);
+  if (view === 'markdown') {
+    return buildMarkdownEnvelope({
+      tool: 'log10x_configure_env',
+      summary: { headline: result.ok ? `Env "${result.nickname}" ${result.action} in envs.json` : `Configure env refused: ${result.error ?? 'validation failed'}` },
+      markdown: result.markdown,
+    });
+  }
+  return buildEnvelope({
+    tool: 'log10x_configure_env',
+    view: 'summary',
+    summary: { headline: result.ok ? `Env "${result.nickname}" ${result.action}, ${result.total_envs ?? '?'} env${result.total_envs !== 1 ? 's' : ''} configured.` : `Configure env refused: ${result.error ?? 'validation failed'}.` },
+    data: {
+      ok: result.ok,
+      nickname: result.nickname,
+      action: result.action,
+      is_default: result.is_default,
+      total_envs: result.total_envs,
+      envs_json_path: result.envs_json_path,
+      validation_passed: result.validation_passed,
+      error: result.error,
+    },
+  });
+}
+
+interface ConfigureEnvInner {
+  ok: boolean;
+  nickname: string;
+  action?: 'added' | 'updated' | 'validated_only';
+  is_default?: boolean;
+  total_envs?: number;
+  envs_json_path?: string;
+  validation_passed?: boolean;
+  error?: string;
+  markdown: string;
+}
+
+async function executeConfigureEnvInner(args: ConfigureEnvArgs): Promise<ConfigureEnvInner> {
   let backend;
   try {
     backend = createMetricsBackend(args.metricsBackend);
   } catch (e) {
     if (e instanceof MetricsBackendConfigError) {
-      return `## Configuration error\n\n${e.message}\n\nFix and re-run \`log10x_configure_env\`.`;
+      const md = `## Configuration error\n\n${e.message}\n\nFix and re-run \`log10x_configure_env\`.`;
+      return { ok: false, nickname: args.nickname, error: e.message, markdown: md };
     }
     throw e;
   }
@@ -145,18 +187,19 @@ export async function executeConfigureEnv(args: ConfigureEnvArgs): Promise<strin
   if (!validation.ok) {
     const head = `# Validation failed — env \`${args.nickname}\` NOT persisted`;
     const footer = `\n\nFix the first FAIL above, then re-run \`log10x_configure_env\` with the same arguments.`;
-    return `${head}\n\n${validationMarkdown}${footer}`;
+    const md = `${head}\n\n${validationMarkdown}${footer}`;
+    return { ok: false, nickname: args.nickname, validation_passed: false, error: 'validation failed', markdown: md };
   }
 
-  // ── 3. Validate-only? short-circuit before write ──
   if (args.validateOnly) {
-    return [
+    const md = [
       `# Validation passed — env \`${args.nickname}\` NOT persisted (validateOnly=true)`,
       '',
       validationMarkdown,
       '',
       'Re-run with `validateOnly: false` (or omit) to persist this env to `~/.log10x/envs.json`.',
     ].join('\n');
+    return { ok: true, nickname: args.nickname, action: 'validated_only', validation_passed: true, envs_json_path: envsJsonPath(), markdown: md };
   }
 
   // ── 4. Persist to ~/.log10x/envs.json ──
@@ -164,7 +207,9 @@ export async function executeConfigureEnv(args: ConfigureEnvArgs): Promise<strin
   try {
     existing = await readEnvsJsonRaw();
   } catch (e) {
-    return `## Could not read existing envs.json\n\n${(e as Error).message}\n\nValidation passed but the file isn't writable. Fix the file, then re-run.`;
+    const msg = (e as Error).message;
+    const md = `## Could not read existing envs.json\n\n${msg}\n\nValidation passed but the file isn't writable. Fix the file, then re-run.`;
+    return { ok: false, nickname: args.nickname, error: `read envs.json: ${msg}`, markdown: md };
   }
 
   // Replace if same nickname exists (idempotent re-config), else append.
@@ -184,11 +229,12 @@ export async function executeConfigureEnv(args: ConfigureEnvArgs): Promise<strin
   try {
     await writeEnvsJson(entries);
   } catch (e) {
-    return `## Validation passed but failed to write envs.json\n\n${(e as Error).message}\n\nPath: ${envsJsonPath()}`;
+    const msg = (e as Error).message;
+    const md = `## Validation passed but failed to write envs.json\n\n${msg}\n\nPath: ${envsJsonPath()}`;
+    return { ok: false, nickname: args.nickname, validation_passed: true, error: `write envs.json: ${msg}`, markdown: md };
   }
 
-  // ── 5. Render success result ──
-  const action = replacing ? 'updated' : 'added';
+  const action: 'added' | 'updated' = replacing ? 'updated' : 'added';
   const lines: string[] = [];
   lines.push(`# Env \`${args.nickname}\` ${action} in \`${envsJsonPath()}\``);
   lines.push('');
@@ -199,5 +245,14 @@ export async function executeConfigureEnv(args: ConfigureEnvArgs): Promise<strin
     lines.push('');
     lines.push(`\`${args.nickname}\` is now the default env (other envs' \`isDefault\` flag was cleared).`);
   }
-  return lines.join('\n');
+  return {
+    ok: true,
+    nickname: args.nickname,
+    action,
+    is_default: !!args.isDefault,
+    total_envs: entries.length,
+    envs_json_path: envsJsonPath(),
+    validation_passed: true,
+    markdown: lines.join('\n'),
+  };
 }

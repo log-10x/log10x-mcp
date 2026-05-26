@@ -67,6 +67,14 @@ const ToolOverrideSchema = z.object({
   deprecated: z.boolean().optional(),
   /** Free-form note appended to the description when `deprecated: true`. */
   deprecationMessage: z.string().optional(),
+  /**
+   * Operator-facing category tag. Drives `LOG10X_MCP_ENABLED_CATEGORIES` /
+   * `LOG10X_MCP_DISABLED_CATEGORIES` env-var gates at boot — operator can
+   * hide whole categories of tools without code changes. Matches the
+   * mksite docs nav (cost / identify / investigate / detect / drop /
+   * retrieve / install / account / poc / diagnostics).
+   */
+  category: z.string().optional(),
 });
 
 const NoticeSchema = z.object({

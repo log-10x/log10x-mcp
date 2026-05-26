@@ -17,6 +17,7 @@ import { z } from 'zod';
 import type { Environments } from '../lib/environments.js';
 import { reloadEnvironmentsInPlace } from '../lib/environments.js';
 import { createEnvironment } from '../lib/api.js';
+import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
 export const createEnvSchema = {
   name: z
@@ -29,25 +30,46 @@ export const createEnvSchema = {
     .describe(
       'When true, the new env becomes the user\'s default — every tool call without an explicit `environment` arg routes here. The previous default is automatically un-defaulted by the backend. Defaults to false (new env is created but the existing default stays the default).'
     ),
+  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.ok, data.env_id, data.envs[]). markdown wraps the report in data.markdown.'),
 };
 
 export async function executeCreateEnv(
-  args: { name: string; is_default?: boolean },
+  args: { name: string; is_default?: boolean; view?: 'summary' | 'markdown' },
   envs: Environments
-): Promise<string> {
+): Promise<string | StructuredOutput> {
+  const view = args.view ?? 'summary';
+  const inner = await executeCreateEnvInner(args, envs);
+  if (view === 'markdown') {
+    return buildMarkdownEnvelope({
+      tool: 'log10x_create_env',
+      summary: { headline: inner.ok ? `Created env "${inner.name}"` : `Create env refused: ${inner.error}` },
+      markdown: inner.markdown,
+    });
+  }
+  return buildEnvelope({
+    tool: 'log10x_create_env',
+    view: 'summary',
+    summary: { headline: inner.ok ? `Created env "${inner.name}" (env_id ${inner.env_id}${inner.is_default ? ', new default' : ''}).` : `Create env refused: ${inner.error}.` },
+    data: { ok: inner.ok, name: inner.name, env_id: inner.env_id, permissions: inner.permissions, is_default: inner.is_default, total_envs: inner.total_envs, error: inner.error },
+    actions: inner.ok && inner.env_id ? [{ tool: 'log10x_advise_install', args: { environment: inner.name }, reason: 'pick the right Reporter / Receiver / Retriever install path for the new env' }] : [],
+  });
+}
+
+interface CreateEnvInner { ok: boolean; name: string; env_id?: string; permissions?: string; is_default?: boolean; total_envs?: number; error?: string; markdown: string }
+
+async function executeCreateEnvInner(args: { name: string; is_default?: boolean }, envs: Environments): Promise<CreateEnvInner> {
   // Friendly pre-check: if a same-named env already exists, surface it
   // before paying the round-trip + parsing the BE's 409 body.
   const collision = envs.all.find(
     (e) => e.nickname.toLowerCase() === args.name.toLowerCase()
   );
   if (collision) {
-    return (
-      '## Cannot create env — name already in use\n\n' +
+    const md = '## Cannot create env — name already in use\n\n' +
       `An environment named **${collision.nickname}** is already on your account ` +
       `(env_id \`${collision.envId}\`, permissions \`${collision.permissions ?? 'unknown'}\`). ` +
       `Either pick a different name, or use \`log10x_update_env\` to rename / re-flag the ` +
-      `existing one.`
-    );
+      `existing one.`;
+    return { ok: false, name: args.name, error: `name "${args.name}" already in use (env_id ${collision.envId})`, markdown: md };
   }
 
   const apiKey = envs.default.apiKey;
@@ -56,11 +78,9 @@ export async function executeCreateEnv(
   try {
     profile = await createEnvironment(apiKey, args.name, args.is_default);
   } catch (e) {
-    return (
-      '## Create env failed\n\n' +
-      `${(e as Error).message}\n\n` +
-      'Verify the name is unique and run `log10x_login_status` to confirm your account is signed in.'
-    );
+    const msg = (e as Error).message;
+    const md = '## Create env failed\n\n' + `${msg}\n\nVerify the name is unique and run \`log10x_login_status\` to confirm your account is signed in.`;
+    return { ok: false, name: args.name, error: msg, markdown: md };
   }
 
   // Reload so the next tool call sees the new env in `envs.all`.
@@ -94,5 +114,13 @@ export async function executeCreateEnv(
     'Next step: deploy a Reporter / Receiver / Retriever into this env using ' +
       '`log10x_advise_install` (pass the new `env_id` so the install plan is scoped correctly).'
   );
-  return lines.join('\n');
+  return {
+    ok: true,
+    name: args.name,
+    env_id: created?.envId,
+    permissions: created?.permissions,
+    is_default: created?.isDefault,
+    total_envs: profile.environments.length,
+    markdown: lines.join('\n'),
+  };
 }

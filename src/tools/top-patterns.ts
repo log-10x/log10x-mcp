@@ -24,6 +24,8 @@ import { tenxHash } from '../lib/pattern-hash.js';
 import { fetchFirstSeenBatch } from '../lib/first-seen.js';
 import { fieldVariation } from '../lib/field-variation.js';
 import { renderTopPatterns, type TopPatternRow } from '../lib/top-patterns-render.js';
+import { detectIncidents, type IncidentInput } from '../lib/detectors/incident-cluster.js';
+import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import type { ForwarderId } from '../lib/forwarder-snippets.js';
 import { resolveSiemSelection } from '../lib/siem/resolve.js';
 import {
@@ -51,6 +53,12 @@ export const topPatternsSchema = {
       'and the volume-trend chart shows on every top-3 card. Default: compact mode (snippet templated once at top, ' +
       'CTAs gated to where they earn their line, chart only on ACUTE/NEW patterns).'
     ),
+  view: z
+    .enum(['summary', 'markdown'])
+    .default('summary')
+    .describe(
+      'Output format. "summary" (default) returns a structured JSON envelope with patterns, incidents, totals, and chained-tool action hints. "markdown" returns the existing rendered cards for human-consumable deliverables.'
+    ),
 };
 
 /** Normalize the env's forwarder enum to the ForwarderId type the
@@ -72,9 +80,10 @@ export async function executeTopPatterns(
     analyzerCost?: number;
     siemScope?: string;
     verbose?: boolean;
+    view?: 'summary' | 'markdown';
   },
   env: EnvConfig
-): Promise<string> {
+): Promise<string | StructuredOutput> {
   if (!args.timeRange) (args as Record<string, unknown>).timeRange = '1h';
   if (!Number.isFinite(args.limit) || args.limit <= 0) {
     (args as Record<string, unknown>).limit = 5;
@@ -432,5 +441,124 @@ export async function executeTopPatterns(
   const block = renderNextActions(nextActions);
   if (block) lines.push('', block);
 
-  return lines.join('\n');
+  const markdown = lines.join('\n');
+  const view = args.view ?? 'summary';
+
+  // Build the structured-summary envelope from the same rows the
+  // renderer used. This is the agent-default path; the markdown
+  // path is the deliverable / human-consumable opt-in.
+  const incidentInputs: IncidentInput[] = renderRows
+    .filter((r) => r.hash)
+    .map((r) => ({
+      identity: r.hash!,
+      service: r.service,
+      descriptor: r.pattern ?? r.hash!,
+      costPerMonthUsd: r.costPerMonth,
+      trendBytesPerSec: r.trendBytesPerSec,
+    }));
+  const incidents = detectIncidents(incidentInputs);
+
+  const dataPatterns = renderRows.map((r) => ({
+    rank: r.rank,
+    identity: r.pattern ?? r.hash ?? '',
+    template_hash: r.hash ?? '',
+    service: r.service,
+    severity: r.severity,
+    cost_per_hour_usd: r.costPerHour,
+    cost_per_month_usd: r.costPerMonth,
+    bytes: r.bytes,
+    events: r.events,
+    first_seen_age_seconds: r.firstSeenAgeSeconds,
+    badge: r.badge,
+    descriptor: r.pattern ?? r.hash ?? '',
+    trend_bytes_per_sec: r.trendBytesPerSec,
+  }));
+
+  const totals = {
+    monthly_usd: totalCostPerHour * 720,
+    bytes_per_sec: totalBytes / Math.max(1, windowHours * 3600),
+    pattern_count_shown: renderRows.length,
+    pattern_count_total: patternCountTotal,
+  };
+
+  const headline =
+    renderRows.length === 0
+      ? `No patterns in scope over ${tf.label}.`
+      : `Top ${renderRows.length} patterns over ${tf.label} cost ~$${(totals.monthly_usd).toFixed(0)}/mo total.${incidents.length > 0 ? ` ${incidents.length} incident cluster${incidents.length === 1 ? '' : 's'} detected.` : ''}`;
+
+  const callout =
+    incidents.length > 0
+      ? `These look like ${incidents.length === 1 ? 'one incident' : `${incidents.length} incidents`}: ` +
+        incidents
+          .slice(0, 2)
+          .map((c) => `${c.members.length} patterns in \`${c.service}\` share \`${c.representativeLabel.slice(0, 50)}\``)
+          .join('; ')
+      : undefined;
+
+  if (view === 'markdown') {
+    return buildMarkdownEnvelope({
+      tool: 'log10x_top_patterns',
+      summary: { headline, callout },
+      markdown,
+      actions: nextActions.map((a) => ({ tool: a.tool, args: a.args, reason: a.reason })),
+    });
+  }
+
+  // Truncation signal: the engine query is capped at args.limit. If we got
+  // a separate count of total patterns matching the filters, we can tell the
+  // agent there's more to see; otherwise we fall back to "the query returned
+  // exactly limit rows" which is a reasonable heuristic for truncation.
+  const totalAvailable = patternCountTotal ?? (renderRows.length === args.limit ? args.limit + 1 : renderRows.length);
+  const truncated = totalAvailable > renderRows.length;
+
+  // G6: horizontal-bar PNG of top patterns by monthly cost. Hosts that render
+  // image content (Claude Desktop, ChatGPT Desktop) show it; legacy hosts
+  // ignore. Skip silently if rendering fails (missing Cairo etc.).
+  let images: import('../lib/output-types.js').InlineImage[] | undefined;
+  try {
+    const { renderHorizontalBar } = await import('../lib/chart-renderer.js');
+    if (dataPatterns.length > 0) {
+      const png = await renderHorizontalBar(
+        dataPatterns
+          .slice()
+          .sort((a, b) => b.cost_per_month_usd - a.cost_per_month_usd)
+          .map((p, i) => ({ label: `#${i + 1} ${p.identity}`, value: p.cost_per_month_usd })),
+        { title: `Top ${dataPatterns.length} patterns by $/mo (${tf.label})`, xLabel: '$/mo' }
+      );
+      if (png) {
+        images = [{ data: png.base64, mimeType: png.mimeType, alt: `Top ${dataPatterns.length} patterns by monthly cost over ${tf.label}` }];
+      }
+    }
+  } catch (_e) {
+    /* best-effort; never block */
+  }
+
+  return buildEnvelope({
+    tool: 'log10x_top_patterns',
+    view: 'summary',
+    summary: { headline, callout },
+    data: {
+      patterns: dataPatterns,
+      incidents: incidents.map((c) => ({
+        members: c.members.map((m) => ({
+          identity: m.identity,
+          cost_per_month_usd: m.costPerMonthUsd,
+          descriptor: m.descriptor,
+        })),
+        representative_label: c.representativeLabel,
+        service: c.service,
+        combined_monthly_usd: c.combinedMonthlyUsd,
+        join_signal: c.joinSignal,
+        confidence: c.confidence,
+      })),
+      totals,
+      window: tf.label,
+      pattern_count_shown: renderRows.length,
+      pattern_count_total: patternCountTotal,
+    },
+    actions: nextActions.map((a) => ({ tool: a.tool, args: a.args, reason: a.reason })),
+    render_hint: { chart: 'timeseries', units: '$/mo' },
+    truncated,
+    images,
+  });
 }

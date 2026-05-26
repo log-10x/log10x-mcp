@@ -15,6 +15,7 @@ import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { agentOnly } from '../lib/agent-only.js';
 import { lineChart } from '../lib/line-chart.js';
 import { patternDisplay } from '../lib/pattern-descriptor.js';
+import { buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
 export const trendSchema = {
   pattern: z.string().describe('Pattern name (e.g., "Payment_Gateway_Timeout")'),
@@ -22,11 +23,80 @@ export const trendSchema = {
   step: z.enum(['1m', '5m', '15m', '1h', '6h', '1d']).default('1h').describe('Data point interval. Use `1m`/`5m` for sub-day windows (15m/1h/6h), `1h`/`6h` for day-level, `1d` for week+ windows.'),
   analyzerCost: z.number().optional().describe('SIEM ingestion cost in $/GB'),
   environment: z.string().optional().describe('Environment nickname'),
+  view: z.enum(['summary', 'markdown']).default('summary').describe('Output format. summary returns structured envelope; markdown returns rendered chart + stats.'),
 };
 
+interface PatternTrendSummary {
+  pattern: string;
+  window: string;
+  step: string;
+  time_series: Array<{ ts: number; bytes: number }>;
+  total_bytes: number;
+  total_cost_usd: number;
+  baseline_run_rate_usd: number;
+  recent_run_rate_usd: number;
+  change_pct: number;
+  spike_detected: boolean;
+  spike_at_ts?: number;
+  peak_bytes: number;
+  low_bytes: number;
+  sample_count: number;
+}
+
 export async function executeTrend(
-  args: { pattern: string; timeRange?: string; step?: string; analyzerCost?: number },
+  args: { pattern: string; timeRange?: string; step?: string; analyzerCost?: number; view?: 'summary' | 'markdown' },
   env: EnvConfig
+): Promise<string | StructuredOutput> {
+  const view = args.view ?? 'summary';
+  const sumOut: { data?: PatternTrendSummary } = {};
+  const md = await executeTrendInner(args, env, sumOut);
+  if (view === 'markdown' || !sumOut.data) {
+    return buildMarkdownEnvelope({
+      tool: 'log10x_pattern_trend',
+      summary: { headline: md.split('\n')[0]?.slice(0, 200) || 'pattern_trend result' },
+      markdown: md,
+    });
+  }
+  const d = sumOut.data;
+  const headline = `\`${d.pattern}\` over ${d.window}: $${d.total_cost_usd.toFixed(2)} measured spend, change ${d.change_pct >= 0 ? '+' : ''}${d.change_pct}% (last quarter vs first quarter run-rate)${d.spike_detected ? ', spike detected' : ''}`;
+  const { buildEnvelope } = await import('../lib/output-types.js');
+  // G6: render a PNG timeseries chart of the trend so hosts that render
+  // image content (Claude Desktop, ChatGPT Desktop) show it visually. The
+  // chart is best-effort — if chart.js init fails (e.g. missing Cairo on
+  // Linux) the renderer returns null and the result drops back to JSON
+  // envelope + ASCII sparkline only.
+  let images: import('../lib/output-types.js').InlineImage[] | undefined;
+  try {
+    const { renderTimeseries } = await import('../lib/chart-renderer.js');
+    const points = d.time_series.map((p) => ({
+      t: new Date(p.ts * 1000).toISOString().replace('T', ' ').slice(0, 16),
+      value: p.bytes,
+    }));
+    const png = await renderTimeseries(points, {
+      title: `${d.pattern} — bytes/sec over ${d.window}`,
+      yLabel: 'bytes/sec',
+      lineColor: d.spike_detected ? '#ef4444' : '#1e88e5',
+    });
+    if (png) {
+      images = [{ data: png.base64, mimeType: png.mimeType, alt: `Timeseries chart of ${d.pattern} over ${d.window}` }];
+    }
+  } catch (_e) {
+    /* chart rendering is best-effort; never block tool execution */
+  }
+  return buildEnvelope({
+    tool: 'log10x_pattern_trend',
+    view: 'summary',
+    summary: { headline },
+    data: d,
+    render_hint: { chart: 'timeseries', units: 'bytes/sec' },
+    images,
+  });
+}
+
+async function executeTrendInner(
+  args: { pattern: string; timeRange?: string; step?: string; analyzerCost?: number },
+  env: EnvConfig,
+  sumOut?: { data?: PatternTrendSummary }
 ): Promise<string> {
   // Defensive defaults — match trendSchema.
   const timeRange = args.timeRange ?? '7d';
@@ -103,6 +173,28 @@ export async function executeTrend(
     baselineCost > 0
       ? `${pct >= 0 ? '+' : ''}${pct}% (last quarter vs first quarter run-rate)`
       : '(no first-quarter baseline to compare against)';
+
+  // Populate typed summary for view='summary' callers.
+  if (sumOut) {
+    const stepSecs = stepSeconds;
+    sumOut.data = {
+      pattern,
+      window: tf.label,
+      step,
+      time_series: points,
+      total_bytes: totalBytes,
+      total_cost_usd: totalCost,
+      baseline_run_rate_usd: baselineCost,
+      recent_run_rate_usd: recentCost,
+      change_pct: pct,
+      spike_detected: !!spikePoint,
+      spike_at_ts: spikePoint?.ts,
+      peak_bytes: maxPoint.bytes,
+      low_bytes: minPoint.bytes,
+      sample_count: points.length,
+    };
+    void stepSecs;
+  }
 
   const lines: string[] = [];
   // Description-first headline (shared patternDisplay): a readable

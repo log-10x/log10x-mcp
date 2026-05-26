@@ -26,8 +26,33 @@ import {
 } from './cli-output-parser.js';
 
 export interface ExtractedPattern {
-  /** Stable template hash — key for round-trip identity. */
+  /**
+   * Engine's internal templateHash — the templater's structural
+   * fingerprint of the field-set. Used as an INTERNAL join key
+   * between encoded events and their template body. NEVER use this
+   * as a user-facing identity or in mute YAML: the receiver does not
+   * match against templateHash (it matches `symbolMessage` or
+   * `tenx_hash`). Mute targets must use `symbolMessage` (preferred)
+   * or `tenxHash` (patternHash) below.
+   */
   hash: string;
+  /**
+   * Engine-emitted Reporter-tier pattern name (symbol-lookup result).
+   * Bound per-event via the `pattern=` anchor on the encoded line
+   * when the engine's `apps/mcp/stdout` config emits it. This is the
+   * default receiver match key (`compactReceiverFieldNames:
+   * [symbolMessage]`) and the preferred user-facing identity.
+   */
+  symbolMessage?: string;
+  /**
+   * Engine-emitted xxHash64 (11-char base64url) of `symbolMessage`,
+   * carried per-event via the `patternHash=` anchor. Same key the
+   * forwarder enrichment writes to the `tenx_hash` field on events.
+   * Acts as the secondary mute target when symbolMessage isn't
+   * available (receiver must be configured with
+   * `compactReceiverFieldNames: [tenx_hash]`).
+   */
+  tenxHash?: string;
   /** Template body with `$` marking variable slots. */
   template: string;
   /** Dominant service label, when resolvable from sample events. */
@@ -38,6 +63,18 @@ export interface ExtractedPattern {
   count: number;
   /** Total bytes across all matching events. */
   bytes: number;
+  /**
+   * Total bytes that would ship over the wire if these events were
+   * encoded by the engine. Sum of the raw `encoded.log` line bytes
+   * (`~hash,val,val,...` + newline) across this pattern's events.
+   * Measured, not estimated. Used to compute the real compact-byte
+   * ratio in Section 6.
+   *
+   * Optional: missing when the engine didn't emit encoded lines
+   * (paste-lambda fallback path, older CLI without anchored encoded
+   * layout). Consumers treat missing as 0.
+   */
+  encodedBytes?: number;
   /** One representative raw event (from the first encoded match). */
   sampleEvent: string;
   /** Per-slot captured values (slot name or positional index → distinct values observed). */
@@ -158,11 +195,17 @@ export async function extractPatterns(
   const byHash = new Map<string, {
     count: number;
     bytes: number;
+    encodedBytes: number;
     sampleEvent: string;
     variables: Map<string, Set<string>>;
     lineIndices: number[];
     services: Map<string, number>;
     severities: Map<string, number>;
+    // Reporter-tier message_pattern + tenx_hash, read directly off the
+    // engine's anchored encoded line (`pattern=,<symbolMessage>,patternHash=,<tenxHash>`).
+    // Per-template they're constant; we just keep the first non-empty.
+    symbolMessage?: string;
+    tenxHash?: string;
   }>();
 
   for (let i = 0; i < mergedEncoded.length; i++) {
@@ -170,6 +213,7 @@ export async function extractPatterns(
     const rec = byHash.get(ev.templateHash) || {
       count: 0,
       bytes: 0,
+      encodedBytes: 0,
       sampleEvent: '',
       variables: new Map<string, Set<string>>(),
       lineIndices: [],
@@ -177,6 +221,10 @@ export async function extractPatterns(
       severities: new Map<string, number>(),
     };
     rec.count += 1;
+    // Measured encoded-line bytes for this event (the `~hash,val,val,...`
+    // line plus newline). cli-output-parser computes this per-event;
+    // we sum it into the pattern record for the real compact-byte ratio.
+    if (typeof ev.lineBytes === 'number') rec.encodedBytes += ev.lineBytes;
     // Best-effort: attribute the raw-line bytes to this pattern by index into `lines`.
     const raw = i < lines.length ? lines[i] : undefined;
     if (raw) {
@@ -184,6 +232,12 @@ export async function extractPatterns(
       if (!rec.sampleEvent) rec.sampleEvent = raw;
       rec.lineIndices.push(i);
     }
+    // Capture engine-emitted Reporter-tier name + hash from the first
+    // event we see for this templateHash. They're constant per template
+    // because `run/initialize/message` writes them as static fields on
+    // the TenXTemplate.
+    if (!rec.symbolMessage && ev.symbolMessage) rec.symbolMessage = ev.symbolMessage;
+    if (!rec.tenxHash && ev.tenxHash) rec.tenxHash = ev.tenxHash;
     // Aggregate envelope-derived service/severity for majority voting.
     const enr = i < enrichments.length ? enrichments[i] : undefined;
     if (enr?.service) rec.services.set(enr.service, (rec.services.get(enr.service) || 0) + 1);
@@ -199,20 +253,28 @@ export async function extractPatterns(
     byHash.set(ev.templateHash, rec);
   }
 
-  // Severity lookup: try aggregated rows (keyed by pattern name) first by
-  // Jaccard token match between template body + aggregated pattern token set.
-  const aggTokenized = mergedAggregated.map((r) => ({ row: r, tokens: tokenize(r.pattern) }));
+  // Aggregated rows (one per unique enrichment-fields tuple, keyed by
+  // tenx_hash internally). With the per-event symbolMessage already
+  // bound above, the only thing we still mine from aggregated rows is
+  // severity for the templates whose envelope didn't carry it.
+  const aggByHash = new Map<string, AggregatedRow>();
+  for (const r of mergedAggregated) {
+    const h = r.raw['tenx_hash'];
+    if (h) aggByHash.set(h, r);
+  }
 
   const patterns: ExtractedPattern[] = [];
   for (const [hash, rec] of byHash) {
     const tpl = mergedTemplates.get(hash);
     const body = tpl?.template || hash;
-    // Severity priority: envelope majority > template hint > aggregated lookup.
+    // Severity priority: envelope majority > template hint > aggregated
+    // lookup (keyed by tenx_hash now, no Jaccard).
     const envelopeMajorSeverity = majority(rec.severities);
+    const aggMatch = rec.tenxHash ? aggByHash.get(rec.tenxHash) : undefined;
     const severity =
       envelopeMajorSeverity ||
       tpl?.severity ||
-      bestAggregatedMatch(body, aggTokenized)?.row.severity;
+      aggMatch?.severity;
 
     const variables: Record<string, string[]> = {};
     for (const [slot, set] of rec.variables) {
@@ -226,11 +288,18 @@ export async function extractPatterns(
 
     patterns.push({
       hash,
+      // Engine-emitted Reporter name read off the encoded line's
+      // `pattern=` anchor. Falls back to whatever the aggregated row
+      // says (older engine builds with no anchor support) — undefined
+      // if neither path provided it.
+      symbolMessage: rec.symbolMessage || aggMatch?.pattern || undefined,
+      tenxHash: rec.tenxHash || undefined,
       template: body,
       severity: severity ? severity.toUpperCase() : undefined,
       service,
       count: rec.count,
       bytes: rec.bytes,
+      encodedBytes: rec.encodedBytes,
       sampleEvent: rec.sampleEvent,
       variables,
     });
@@ -247,6 +316,78 @@ export async function extractPatterns(
     inputLineCount: lines.length,
     templaterWallTimeMs: totalWallTimeMs,
     executionMode,
+  };
+}
+
+/**
+ * Collapse patterns that share the same `symbolMessage`.
+ *
+ * Why this exists: the engine emits one templateHash per distinct
+ * field-set, but several field-sets can resolve to the same Reporter-tier
+ * `symbolMessage` (e.g., the same log line with and without a trailing
+ * variable slot, or audit logs that differ only by which optional fields
+ * are populated). For a user-facing top-cost view the templateHash
+ * distinction is noise: ten rows all named "Kind Event ApiVersion …"
+ * with slightly different identities. From an action standpoint they
+ * also collapse to one mute target (the receiver matches on
+ * `symbolMessage`, not on templateHash).
+ *
+ * Pass each `ExtractedPattern[]` through this before rendering or
+ * enriching. Patterns without a `symbolMessage` (older CLI, paste-lambda
+ * fallback) are left as-is, keyed by their templateHash.
+ */
+export function collapseBySymbolMessage(patterns: ExtractedPattern[]): ExtractedPattern[] {
+  const groups = new Map<string, ExtractedPattern[]>();
+  for (const p of patterns) {
+    const key = p.symbolMessage || p.hash;
+    const list = groups.get(key) || [];
+    list.push(p);
+    groups.set(key, list);
+  }
+  const out: ExtractedPattern[] = [];
+  for (const group of groups.values()) {
+    if (group.length === 1) { out.push(group[0]); continue; }
+    out.push(mergeExtractedPatterns(group));
+  }
+  out.sort((a, b) => b.count - a.count);
+  return out;
+}
+
+/**
+ * Merge a group of ExtractedPatterns that share a symbolMessage.
+ *
+ * Numeric fields sum. Service/severity pick the value carried by the
+ * highest-count member (majority by event volume). Variables union
+ * across the group with a per-slot cap. Template body picks the
+ * longest one (most informative when slot-counts differ).
+ *
+ * `hash` keeps the first member's templateHash so any downstream code
+ * that joins back to templates.json still works for that representative.
+ */
+function mergeExtractedPatterns(group: ExtractedPattern[]): ExtractedPattern {
+  const sorted = [...group].sort((a, b) => b.count - a.count);
+  const head = sorted[0];
+  const longestTemplate = group.reduce((longest, p) =>
+    p.template.length > longest.length ? p.template : longest, head.template);
+  const variables: Record<string, string[]> = {};
+  for (const p of group) {
+    for (const [slot, vals] of Object.entries(p.variables)) {
+      const merged = variables[slot] ? new Set([...variables[slot], ...vals]) : new Set(vals);
+      variables[slot] = Array.from(merged).slice(0, 20);
+    }
+  }
+  return {
+    hash: head.hash,
+    symbolMessage: head.symbolMessage,
+    tenxHash: head.tenxHash,
+    template: longestTemplate,
+    severity: head.severity,
+    service: head.service,
+    count: group.reduce((s, p) => s + p.count, 0),
+    bytes: group.reduce((s, p) => s + p.bytes, 0),
+    encodedBytes: group.reduce((s, p) => s + (p.encodedBytes ?? 0), 0),
+    sampleEvent: head.sampleEvent,
+    variables,
   };
 }
 
@@ -454,6 +595,16 @@ function extractEnrichmentFromEnvelope(obj: Record<string, unknown>): EnvelopeEn
   if (!out.service && typeof obj.container_name_s === 'string') out.service = obj.container_name_s;
   if (!out.namespace && typeof obj.namespace_name_s === 'string') out.namespace = obj.namespace_name_s;
   if (!out.pod && typeof obj.pod_name_s === 'string') out.pod = obj.pod_name_s;
+
+  // CloudWatch raw events expose `logStreamName` like
+  // `kube-apiserver-audit-<32hex>`, `authenticator-<32hex>`, `<app>-<id>`.
+  // The trailing hash is per-pod / per-instance noise; strip it to
+  // recover the service identity that a K8s envelope would have given
+  // us if a fluent-bit forwarder were in the path.
+  if (!out.service && typeof obj.logStreamName === 'string') {
+    const stripped = obj.logStreamName.replace(/-[a-f0-9]{20,}$/i, '');
+    out.service = stripped || obj.logStreamName;
+  }
 
   // CloudWatch events are `{ timestamp, message, ingestionTime }`. If the
   // message itself is JSON (fluent-bit-shaped), descend into it.

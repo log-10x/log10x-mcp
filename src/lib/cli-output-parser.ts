@@ -41,6 +41,28 @@ export interface EncodedEvent {
   templateHash: string;
   /** Variable values in slot order. */
   values: string[];
+  /**
+   * UTF-8 byte length of the `~hash,val1,val2,...\n` line as it would
+   * ship to a compaction-aware SIEM. Optional for back-compat with older
+   * parser callers. Includes the trailing newline so the sum matches the
+   * on-wire payload.
+   */
+  lineBytes?: number;
+  /**
+   * Reporter-tier symbol-lookup name (`message_pattern`) emitted by the
+   * engine via `apps/mcp/stdout`'s `pattern=` anchor. Present only on
+   * engine builds that include the anchored encoded layout; undefined
+   * otherwise.
+   */
+  symbolMessage?: string;
+  /**
+   * Engine-emitted xxHash64 (base64url, 11 chars) of `symbolMessage`,
+   * carried on the `patternHash=` anchor of the encoded line. Same key
+   * that the engine writes into the `tenx_hash` field of the summary
+   * row, so it joins the encoded event to its aggregated summary
+   * deterministically.
+   */
+  tenxHash?: string;
 }
 
 export interface AggregatedRow {
@@ -168,12 +190,28 @@ function normalizeHash(hash: string): string {
 }
 
 /**
- * Parse `encoded.log` into per-event records.
+ * Parse encoded-event lines into per-event records.
  *
- * Line format: `~templateHash,val1,val2,...` — leading `~` is optional
- * depending on CLI version. Commas inside values are escaped as `\,` in
- * newer versions; older versions do not escape at all. We split on the
- * first comma for the hash and then on unescaped commas for the rest.
+ * Two layouts are accepted (auto-detected per line):
+ *
+ *   1. **Anchored (apps/mcp current)** — caller already stripped the
+ *      `encoded=,` prefix in the demux, so what arrives here is:
+ *
+ *          ~<templateHash>,<val1>,<val2>,…,pattern=,<message_pattern>,patternHash=,<tenx_hash>
+ *
+ *      The `pattern=` and `patternHash=` literals act as section
+ *      anchors, giving us the engine-emitted Reporter-tier name and
+ *      the matching xxHash64 per event.
+ *
+ *   2. **Legacy** — older engines / configs without the anchors:
+ *
+ *          ~<templateHash>,<val1>,<val2>,…
+ *
+ *      No symbolMessage / tenxHash on the EncodedEvent.
+ *
+ * Commas inside variable values are escaped as `\,`. Leading `~` on the
+ * hash is the templater's marker; templates.json stores the hash without
+ * it, so we normalize.
  */
 export function parseEncoded(text: string): EncodedEvent[] {
   const events: EncodedEvent[] = [];
@@ -189,12 +227,35 @@ export function parseEncoded(text: string): EncodedEvent[] {
       hashPart = line.slice(0, commaIdx);
       rest = line.slice(commaIdx + 1);
     }
-    // The CLI uses `~` as a prefix marker on encoded lines; the actual
-    // templateHash is what follows. templates.json stores the hash without
-    // the marker, so we normalize here to make lookups match.
     const templateHash = hashPart.startsWith('~') ? hashPart.slice(1) : hashPart;
-    const values = rest ? splitEscaped(rest) : [];
-    events.push({ templateHash, values });
+    const allValues = rest ? splitEscaped(rest) : [];
+
+    // Peel anchored trailing sections (`pattern=,<value>`, `patternHash=,<value>`)
+    // off the values list. Anchor token appears as its own array element
+    // because the engine joins fields by `,`. Walk from the end so any
+    // future anchors can be added without touching this logic.
+    let values = allValues;
+    let symbolMessage: string | undefined;
+    let tenxHash: string | undefined;
+    while (values.length >= 2) {
+      const anchor = values[values.length - 2];
+      if (anchor === 'patternHash=') {
+        tenxHash = values[values.length - 1];
+        values = values.slice(0, -2);
+      } else if (anchor === 'pattern=') {
+        symbolMessage = values[values.length - 1];
+        values = values.slice(0, -2);
+      } else {
+        break;
+      }
+    }
+
+    // Compaction byte cost = UTF-8 bytes of the (full) line as written,
+    // plus the newline that frames it on the wire. We measure the
+    // input line, NOT the anchor-stripped form, so it matches what a
+    // SIEM ingesting compact format would actually receive.
+    const lineBytes = Buffer.byteLength(line, 'utf8') + 1;
+    events.push({ templateHash, values, lineBytes, symbolMessage, tenxHash });
   }
   return events;
 }

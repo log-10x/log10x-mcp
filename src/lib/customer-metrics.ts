@@ -14,9 +14,10 @@
  * Explicit configuration (wins over any auto-detect):
  *   LOG10X_CUSTOMER_METRICS_URL           endpoint base URL
  *   LOG10X_CUSTOMER_METRICS_TYPE          backend type:
- *                                           grafana_cloud | amp | datadog_prom | generic_prom
+ *                                           grafana_cloud | amp | datadog_prom | generic_prom | log10x
  *                                         Default: generic_prom
  *   LOG10X_CUSTOMER_METRICS_AUTH          auth credential (format depends on type)
+ *                                         For type=log10x: <api_key>/<env_id>
  *   LOG10X_CUSTOMER_METRICS_INSTANCE_ID   optional Grafana Cloud instance ID
  *                                         (numeric, used as HTTP basic auth username)
  *
@@ -48,6 +49,7 @@ export type CustomerMetricsBackendType =
   | 'amp'
   | 'datadog_prom'
   | 'generic_prom'
+  | 'log10x'
   | 'mock';
 
 export interface CustomerMetricsBackend {
@@ -300,6 +302,16 @@ function buildExplicitBackend(): CustomerMetricsBackend | undefined {
     case 'generic_prom':
       return new GenericPromBackend({ endpoint: url, bearerToken: auth });
 
+    case 'log10x': {
+      if (!auth || !auth.includes('/')) {
+        throw new Error(
+          'log10x backend requires LOG10X_CUSTOMER_METRICS_AUTH in the form <api_key>/<env_id>.'
+        );
+      }
+      const [apiKey, envId] = auth.split('/', 2);
+      return new Log10xBackend({ endpoint: url, apiKey, envId });
+    }
+
     case 'datadog_prom': {
       const apiKey = auth || process.env.DD_API_KEY || process.env.DATADOG_API_KEY;
       const appKey = process.env.DD_APP_KEY || process.env.DATADOG_APP_KEY;
@@ -328,7 +340,7 @@ function buildExplicitBackend(): CustomerMetricsBackend | undefined {
     default:
       throw new Error(
         `Unknown LOG10X_CUSTOMER_METRICS_TYPE: ${rawType}. ` +
-          'Supported: grafana_cloud, amp, datadog_prom, generic_prom.'
+          'Supported: grafana_cloud, amp, datadog_prom, generic_prom, log10x.'
       );
   }
 }
@@ -659,6 +671,73 @@ export class GenericPromBackend implements CustomerMetricsBackend {
     if (!res.ok) {
       const body = await res.text().catch(() => '');
       throw new Error(`generic_prom HTTP ${res.status}: ${body.slice(0, 400)}`);
+    }
+    return (await res.json()) as T;
+  }
+}
+
+/**
+ * Log10x cloud metrics backend (prometheus.log10x.com).
+ *
+ * Same Prometheus API surface as GenericPromBackend but authenticates with
+ * `X-10X-Auth: <api_key>/<env_id>` instead of Bearer.
+ */
+export class Log10xBackend implements CustomerMetricsBackend {
+  readonly backendType = 'log10x';
+  readonly endpoint: string;
+  private authHeader: string;
+
+  constructor(config: { endpoint: string; apiKey: string; envId: string }) {
+    this.endpoint = config.endpoint.replace(/\/+$/, '');
+    this.authHeader = `${config.apiKey}/${config.envId}`;
+  }
+
+  async queryInstant(promql: string): Promise<PrometheusResponse> {
+    const url = new URL('/api/v1/query', this.endpoint);
+    url.searchParams.set('query', promql);
+    return this.fetchJson<PrometheusResponse>(url.toString());
+  }
+
+  async queryRange(
+    promql: string,
+    start: number,
+    end: number,
+    step: number
+  ): Promise<PrometheusResponse> {
+    const url = new URL('/api/v1/query_range', this.endpoint);
+    url.searchParams.set('query', promql);
+    url.searchParams.set('start', start.toString());
+    url.searchParams.set('end', end.toString());
+    url.searchParams.set('step', step.toString());
+    return this.fetchJson<PrometheusResponse>(url.toString());
+  }
+
+  async listLabels(): Promise<string[]> {
+    const url = new URL('/api/v1/labels', this.endpoint);
+    const res = await this.fetchJson<{ status: string; data: string[] }>(url.toString());
+    return res.data || [];
+  }
+
+  async listLabelValues(label: string, opts?: { windowSeconds?: number }): Promise<string[]> {
+    const url = new URL(`/api/v1/label/${encodeURIComponent(label)}/values`, this.endpoint);
+    if (opts?.windowSeconds) {
+      const nowS = Math.floor(Date.now() / 1000);
+      url.searchParams.set('start', String(nowS - opts.windowSeconds));
+      url.searchParams.set('end', String(nowS));
+    }
+    const res = await this.fetchJson<{ status: string; data: string[] }>(url.toString());
+    return res.data || [];
+  }
+
+  remoteWriteUrl(): string | undefined {
+    return undefined;
+  }
+
+  private async fetchJson<T>(url: string): Promise<T> {
+    const res = await fetch(url, { headers: { 'X-10X-Auth': this.authHeader } });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`log10x HTTP ${res.status}: ${body.slice(0, 400)}`);
     }
     return (await res.json()) as T;
   }

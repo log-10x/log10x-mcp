@@ -1,16 +1,21 @@
 {
   "id": "cost-by-namespace",
   "title": "Cost-by-label drilldown (namespace)",
-  "description": "User asks 'which namespace is the most expensive?' — canonical entry to log10x_list_by_label. Test enforces (1) list_by_label runs against the k8s_namespace label and produces ranked rows, (2) the chain emits a NEXT_ACTIONS hint into top_patterns or cost_drivers (the natural follow-up — drill into WHICH patterns drive the namespace's cost).",
+  "description": "User asks 'which namespace is the most expensive?' \u2014 canonical entry to log10x_top_patterns. Test enforces (1) list_by_label runs against the k8s_namespace label and produces ranked rows, (2) the chain emits a NEXT_ACTIONS hint into top_patterns or cost_drivers (the natural follow-up \u2014 drill into WHICH patterns drive the namespace's cost).",
   "prompt": "Which Kubernetes namespace is costing us the most? Break down the top 5.",
   "initial_tool": {
-    "tool": "log10x_list_by_label",
-    "args": { "label": "k8s_namespace", "timeRange": "1d", "limit": 5 },
+    "tool": "log10x_top_patterns",
+    "args": {
+      "timeRange": "1d",
+      "limit": 5
+    },
     "reason": "list_by_label ranks any label dimension by cost; k8s_namespace is the canonical operational dimension."
   },
   "tool_arg_defaults": {},
   "expected_sequence": {
-    "must_include": ["log10x_list_by_label"],
+    "must_include": [
+      "log10x_top_patterns"
+    ],
     "tolerance": 0
   },
   "ground_truth": [
@@ -18,7 +23,7 @@
       "matcher_kind": "regex",
       "description": "list_by_label result lists at least one namespace row with a dollar amount",
       "scope": "tool_result",
-      "tool": "log10x_list_by_label",
+      "tool": "log10x_top_patterns",
       "pattern": "(\\$\\d|namespace|otel-demo|demo|kube)",
       "flags": "i"
     }
@@ -32,5 +37,9 @@
   "optimal_steps": 1,
   "max_steps": 5,
   "error_policy": "continue",
-  "tags": ["list-by-label", "namespace", "drilldown"]
+  "tags": [
+    "list-by-label",
+    "namespace",
+    "drilldown"
+  ]
 }

@@ -27,6 +27,7 @@ import {
 import { computeConcentration, type PatternConcentration } from '../lib/variable-concentration.js';
 import { fmtCount, fmtBytes } from '../lib/format.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
+import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
 export const resolveBatchSchema = {
   source: z
@@ -43,7 +44,40 @@ export const resolveBatchSchema = {
   include_next_actions: z.boolean().default(true).describe('Whether to generate next_action suggestions for each top pattern.'),
   environment: z.string().optional().describe('Environment nickname — used to build next_actions that call log10x_investigate.'),
   privacy_mode: z.boolean().default(true).describe('When true (default), the batch is processed by a locally-installed `tenx` CLI — events never leave the machine. Set to false to route through the public Log10x paste Lambda instead (100 KB limit, requires network). If the local CLI is not installed, the call errors cleanly with an install hint.'),
+  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.patterns[], data.totals, data.warnings). markdown wraps the rendered triage in data.markdown.'),
 };
+
+interface ResolveBatchSummary {
+  input_line_count: number;
+  input_bytes: number;
+  resolved_pattern_count: number;
+  shown_pattern_count: number;
+  accounted_events: number;
+  dropped_events: number;
+  drop_rate: number;
+  execution_mode: 'local_cli' | 'paste_lambda';
+  cli_wall_time_ms: number;
+  severity_mix: Record<string, number>;
+  overfit_warning: boolean;
+  patterns: Array<{
+    rank: number;
+    template_hash: string;
+    symbol_message?: string;
+    template: string;
+    event_count: number;
+    share_pct: number;
+    interestingness: number;
+    dominant_severity?: string;
+    severity_distribution: Record<string, number>;
+    slots: Array<{
+      slot_index: number;
+      inferred_name: string;
+      naming_confidence: 'high' | 'medium' | 'low';
+      distinct_count: number;
+      top_values: Array<{ value: string; pct: number }>;
+    }>;
+  }>;
+}
 
 export async function executeResolveBatch(args: {
   source?: 'file' | 'events' | 'text';
@@ -54,7 +88,48 @@ export async function executeResolveBatch(args: {
   include_next_actions: boolean;
   environment?: string;
   privacy_mode: boolean;
-}): Promise<string> {
+  view?: 'summary' | 'markdown';
+}): Promise<string | StructuredOutput> {
+  const view = args.view ?? 'summary';
+  const sumOut: { data?: ResolveBatchSummary } = {};
+  const md = await executeResolveBatchInner(args, sumOut);
+  if (view === 'markdown' || !sumOut.data) {
+    return buildMarkdownEnvelope({
+      tool: 'log10x_resolve_batch',
+      summary: { headline: md.split('\n').find((l) => l.trim().length > 0)?.slice(0, 200) ?? 'resolve_batch result' },
+      markdown: md,
+    });
+  }
+  const d = sumOut.data;
+  const top = d.patterns[0];
+  const dropWarning = d.drop_rate >= 0.2 ? ` (${Math.round(d.drop_rate * 100)}% of input lines dropped by templater)` : '';
+  const headline = `${fmtCount(d.input_line_count)} events → ${d.resolved_pattern_count} pattern${d.resolved_pattern_count !== 1 ? 's' : ''}${top ? `, top: ${top.symbol_message ?? top.template_hash} at ${Math.round(top.share_pct)}% of batch` : ''}${dropWarning}.`;
+  return buildEnvelope({
+    tool: 'log10x_resolve_batch',
+    view: 'summary',
+    summary: { headline },
+    data: d,
+    truncated: d.shown_pattern_count < d.resolved_pattern_count,
+    warnings: d.drop_rate >= 0.2 ? [`templater dropped ${Math.round(d.drop_rate * 100)}% of input lines (engine GAPS G11) — treat as partial triage`] : [],
+    actions: top && top.symbol_message
+      ? [
+          { tool: 'log10x_event_lookup', args: { pattern: top.symbol_message }, reason: 'look up the top pattern against the live Reporter' },
+          { tool: 'log10x_investigate', args: { starting_point: top.symbol_message }, reason: 'causal-chain investigation on the top pattern' },
+        ]
+      : [],
+  });
+}
+
+async function executeResolveBatchInner(args: {
+  source?: 'file' | 'events' | 'text';
+  path?: string;
+  events?: string[] | string;
+  text?: string;
+  top_n_patterns: number;
+  include_next_actions: boolean;
+  environment?: string;
+  privacy_mode: boolean;
+}, sumOut?: { data?: ResolveBatchSummary }): Promise<string> {
   // ── 1. Materialize input text ──
   const text = await materialize(args);
   if (!text || text.trim().length === 0) {
@@ -304,6 +379,40 @@ export async function executeResolveBatch(args: {
   if (args.include_next_actions) {
     const block = renderNextActions(buildStructuredNextActions(ranked.map((r) => r.p), args.environment));
     if (block) lines.push(block);
+  }
+
+  if (sumOut) {
+    sumOut.data = {
+      input_line_count: lineCount,
+      input_bytes: bytes,
+      resolved_pattern_count: concentrations.length,
+      shown_pattern_count: ranked.length,
+      accounted_events: accountedEvents,
+      dropped_events: droppedEvents,
+      drop_rate: dropRate,
+      execution_mode: executionMode,
+      cli_wall_time_ms: cliWallTimeMs,
+      severity_mix: totalSeverityDistribution(concentrations),
+      overfit_warning: !!overfit,
+      patterns: ranked.map(({ p, score }, i) => ({
+        rank: i + 1,
+        template_hash: p.templateHash,
+        symbol_message: p.symbolMessage || undefined,
+        template: p.template,
+        event_count: p.count,
+        share_pct: totalEvents > 0 ? (p.count / totalEvents) * 100 : 0,
+        interestingness: score,
+        dominant_severity: p.dominantSeverity || undefined,
+        severity_distribution: p.severityDistribution,
+        slots: p.slots.map((slot, slotIdx) => ({
+          slot_index: slotIdx,
+          inferred_name: slot.inferredName,
+          naming_confidence: slot.namingConfidence,
+          distinct_count: slot.distinctCount,
+          top_values: slot.topValues.map((v) => ({ value: v.value, pct: v.pct })),
+        })),
+      })),
+    };
   }
 
   return lines.join('\n');

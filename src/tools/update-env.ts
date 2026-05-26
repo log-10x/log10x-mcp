@@ -16,6 +16,7 @@ import { z } from 'zod';
 import type { Environments } from '../lib/environments.js';
 import { reloadEnvironmentsInPlace } from '../lib/environments.js';
 import { updateEnvironment } from '../lib/api.js';
+import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
 export const updateEnvSchema = {
   env_id: z
@@ -35,29 +36,47 @@ export const updateEnvSchema = {
     .describe(
       'When true, this env becomes the user\'s default — every tool call without an explicit `environment` arg routes here. The previous default is automatically un-defaulted by the backend. Optional — omit to leave the default flag unchanged.'
     ),
+  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.ok, data.before, data.after). markdown wraps the report in data.markdown.'),
 };
 
 export async function executeUpdateEnv(
-  args: { env_id: string; name?: string; is_default?: boolean },
+  args: { env_id: string; name?: string; is_default?: boolean; view?: 'summary' | 'markdown' },
   envs: Environments
-): Promise<string> {
+): Promise<string | StructuredOutput> {
+  const view = args.view ?? 'summary';
+  const inner = await executeUpdateEnvInner(args, envs);
+  if (view === 'markdown') {
+    return buildMarkdownEnvelope({
+      tool: 'log10x_update_env',
+      summary: { headline: inner.ok ? `Updated env ${inner.env_id}` : `Update env refused: ${inner.error ?? 'unknown'}` },
+      markdown: inner.markdown,
+    });
+  }
+  return buildEnvelope({
+    tool: 'log10x_update_env',
+    view: 'summary',
+    summary: { headline: inner.ok ? `Updated env ${inner.env_id}${inner.changes.length ? ': ' + inner.changes.join(', ') : ' (no-op)'}.` : `Update env refused: ${inner.error ?? 'unknown'}.` },
+    data: { ok: inner.ok, env_id: inner.env_id, before: inner.before, after: inner.after, changes: inner.changes, error: inner.error },
+  });
+}
+
+interface UpdateEnvInner { ok: boolean; env_id?: string; before?: { name: string; is_default: boolean }; after?: { name: string; is_default: boolean }; changes: string[]; error?: string; markdown: string }
+
+async function executeUpdateEnvInner(args: { env_id: string; name?: string; is_default?: boolean }, envs: Environments): Promise<UpdateEnvInner> {
   if (args.name === undefined && args.is_default === undefined) {
-    return (
-      '## No changes\n\n' +
+    const md = '## No changes\n\n' +
       'Pass at least one of `name` or `is_default`. Example: `{"env_id": "...", "is_default": true}` ' +
-      'to make an env the new default, or `{"env_id": "...", "name": "production-2"}` to rename.'
-    );
+      'to make an env the new default, or `{"env_id": "...", "name": "production-2"}` to rename.';
+    return { ok: false, env_id: args.env_id, changes: [], error: 'no changes — pass at least one of name or is_default', markdown: md };
   }
 
-  // Find the existing env so the result can show before/after.
   const before = envs.all.find((e) => e.envId === args.env_id);
   if (!before) {
     const known = envs.all.map((e) => `${e.nickname} → \`${e.envId}\``).join(', ');
-    return (
-      `## Unknown env_id\n\n` +
+    const md = `## Unknown env_id\n\n` +
       `\`${args.env_id}\` is not in the list of envs your account can reach. Available: ${known}. ` +
-      `Run \`log10x_login_status\` to refresh.`
-    );
+      `Run \`log10x_login_status\` to refresh.`;
+    return { ok: false, env_id: args.env_id, changes: [], error: `unknown env_id ${args.env_id}`, markdown: md };
   }
 
   const apiKey = envs.default.apiKey;
@@ -70,21 +89,16 @@ export async function executeUpdateEnv(
     });
   } catch (e) {
     const msg = (e as Error).message;
-    // Surface the gateway-routing-missing case with a clear hint —
-    // until the backend PR (fix(gateway)) deploys, PUT 4xxs at the
-    // gateway and the user gets a confusing "404 Not Found" or
-    // "405 Method Not Allowed".
     if (/HTTP 40[45]/.test(msg)) {
-      return (
-        '## Update env failed — backend route not yet deployed\n\n' +
+      const md = '## Update env failed — backend route not yet deployed\n\n' +
         `${msg}\n\n` +
         'The \`PUT /api/v1/user/env\` route is not yet in the API Gateway. ' +
         'This is fixed by backend PR #62 (`fix(gateway): wire PUT /api/v1/user/env`). ' +
         'Once that PR ships to staging / prod, this tool will work. As a workaround, ' +
-        'you can rename the env via the console: console.log10x.com → Profile → Environments.'
-      );
+        'you can rename the env via the console: console.log10x.com → Profile → Environments.';
+      return { ok: false, env_id: args.env_id, changes: [], error: 'backend PUT route not deployed (see backend PR #62)', markdown: md };
     }
-    return `## Update env failed\n\n${msg}`;
+    return { ok: false, env_id: args.env_id, changes: [], error: msg, markdown: `## Update env failed\n\n${msg}` };
   }
 
   try {
@@ -116,5 +130,15 @@ export async function executeUpdateEnv(
     const star = e.isDefault ? ' ★ default' : '';
     lines.push(`- **${e.name}** · \`${e.permissions}\`${star}`);
   }
-  return lines.join('\n');
+  const changes: string[] = [];
+  if (args.name && args.name !== before.nickname) changes.push(`renamed "${before.nickname}" → "${args.name}"`);
+  if (args.is_default !== undefined && args.is_default !== before.isDefault) changes.push(`is_default ${before.isDefault} → ${args.is_default}`);
+  return {
+    ok: true,
+    env_id: args.env_id,
+    before: { name: before.nickname, is_default: !!before.isDefault },
+    after: after ? { name: after.name, is_default: !!after.isDefault } : undefined,
+    changes,
+    markdown: lines.join('\n'),
+  };
 }

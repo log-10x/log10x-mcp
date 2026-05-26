@@ -51,12 +51,14 @@ export const patternMitigateSchema = {
     .string()
     .optional()
     .describe('Snapshot from log10x_discover_env. Used to detect which 10x components are deployed in the active env (receiver, retriever, GitOps wiring). Without it, the tool still works but may dim PR-based options if the active env\'s envs.json does not list a gitops repo.'),
+  view: z.enum(['summary', 'markdown']).default('summary').describe('Output format.'),
 };
 
 export interface PatternMitigateArgs {
   pattern: string;
   service?: string;
   snapshot_id?: string;
+  view?: 'summary' | 'markdown';
 }
 
 interface Capabilities {
@@ -231,7 +233,49 @@ async function detectCapabilities(snapshotId?: string): Promise<Capabilities> {
   return out;
 }
 
-export async function executePatternMitigate(args: PatternMitigateArgs): Promise<string> {
+interface PatternMitigateSummary {
+  pattern: string;
+  scope_service?: string;
+  options: Array<{
+    id: 'drop_at_analyzer' | 'drop_at_forwarder' | 'mute_at_10x' | 'compact_at_10x';
+    enabled: boolean;
+    disabled_reason?: string;
+    label: string;
+  }>;
+  env_capabilities: {
+    can_mute: boolean;
+    can_compact: boolean;
+    has_retriever_archive: boolean;
+    forwarder_kind?: string;
+    analyzer_vendor?: string;
+    gitops_repo?: string;
+  };
+}
+
+export async function executePatternMitigate(args: PatternMitigateArgs): Promise<string | import('../lib/output-types.js').StructuredOutput> {
+  const view = args.view ?? 'summary';
+  const sumOut: { data?: PatternMitigateSummary } = {};
+  const md = await executePatternMitigateInner(args, sumOut);
+  const { buildMarkdownEnvelope, buildEnvelope } = await import('../lib/output-types.js');
+  if (view === 'markdown' || !sumOut.data) {
+    return buildMarkdownEnvelope({
+      tool: 'log10x_pattern_mitigate',
+      summary: { headline: md.split('\n')[0]?.slice(0, 200) || 'pattern_mitigate result' },
+      markdown: md,
+    });
+  }
+  const d = sumOut.data;
+  const enabledCount = d.options.filter(o => o.enabled).length;
+  const headline = `\`${d.pattern}\`: ${enabledCount} of ${d.options.length} mitigation options enabled (${d.options.filter(o => o.enabled).map(o => o.id).join(', ')})`;
+  return buildEnvelope({
+    tool: 'log10x_pattern_mitigate',
+    view: 'summary',
+    summary: { headline },
+    data: d,
+  });
+}
+
+async function executePatternMitigateInner(args: PatternMitigateArgs, sumOut?: { data?: PatternMitigateSummary }): Promise<string> {
   const pattern = normalizePattern(args.pattern);
   const displayPattern = fmtPattern(pattern);
   const scopeNote = args.service ? ` (service: ${args.service})` : '';
@@ -357,9 +401,9 @@ export async function executePatternMitigate(args: PatternMitigateArgs): Promise
   }
   if (caps.canCompact) {
     nextActions.push({
-      tool: 'log10x_advise_compact',
-      args: { compact: [pattern], ...(caps.gitopsRepo ? { gitops_repo: caps.gitopsRepo } : {}) },
-      reason: 'option 4 — generate the GitOps PR diff for losslessly compacting',
+      tool: 'log10x_configure_compact',
+      args: { service: pattern, ...(caps.gitopsRepo ? { gitops_repo: caps.gitopsRepo } : {}) },
+      reason: 'option 4 — resolve the service to its containers and generate the GitOps PR diff for per-container compaction',
     });
   }
 
@@ -367,13 +411,56 @@ export async function executePatternMitigate(args: PatternMitigateArgs): Promise
   lines.push(agentOnly(
     `Routing constraint: do not call any drop/mute/compact sub-tool until the user picks an option. ` +
     `When they do, route option 1 → log10x_exclusion_filter with their analyzer vendor; option 2 → same tool with their forwarder vendor; ` +
-    `option 3 → log10x_advise_receiver; option 4 → log10x_advise_compact. ` +
+    `option 3 → log10x_advise_receiver; option 4 → log10x_configure_compact. ` +
     `For options 1 and 3, call log10x_dependency_check first and present its findings before generating the drop config. ` +
     `log10x_exclusion_filter emits an exact tenx_hash drop as the primary config (precise, collision-proof) for structured-field vendors when the env's pipeline carries tenx_hash, with the message-regex form as fallback; the raw-line forwarders rsyslog/syslog-ng/promtail have no structured field so they keep the regex form. For options 1/2 on structured vendors, frame it as a precise drop, not an approximate regex match.` +
     (caps.gitopsRepo ? ` Resolved gitops_repo: ${caps.gitopsRepo} (source: ${caps.gitopsSource}).` : '')
   ));
   lines.push('');
   lines.push(renderNextActions(nextActions));
+
+  // Populate typed summary for view='summary' callers.
+  if (sumOut) {
+    const options: PatternMitigateSummary['options'] = [
+      {
+        id: 'drop_at_analyzer',
+        enabled: analyzerSupported,
+        disabled_reason: analyzerSupported ? undefined : `Native exclusion config not generated for ${analyzerName ?? 'unknown analyzer'} (manual apply required).`,
+        label: `Drop at ${analyzerName ?? 'analyzer'}`,
+      },
+      {
+        id: 'drop_at_forwarder',
+        enabled: Boolean(caps.forwarderKind && caps.forwarderKind !== 'unknown'),
+        disabled_reason: caps.forwarderKind && caps.forwarderKind !== 'unknown' ? undefined : 'forwarder not detected from env / snapshot',
+        label: `Drop at ${caps.forwarderKind ?? 'forwarder'}`,
+      },
+      {
+        id: 'mute_at_10x',
+        enabled: caps.canMute,
+        disabled_reason: caps.canMute ? undefined : caps.setupHint ?? 'no 10x receiver detected',
+        label: 'Mute at 10x receiver',
+      },
+      {
+        id: 'compact_at_10x',
+        enabled: caps.canCompact,
+        disabled_reason: caps.canCompact ? undefined : caps.setupHint ?? 'no 10x receiver detected',
+        label: 'Compact at 10x receiver',
+      },
+    ];
+    sumOut.data = {
+      pattern,
+      scope_service: args.service,
+      options,
+      env_capabilities: {
+        can_mute: caps.canMute,
+        can_compact: caps.canCompact,
+        has_retriever_archive: caps.hasRetrieverArchive,
+        forwarder_kind: caps.forwarderKind,
+        analyzer_vendor: caps.analyzerVendor,
+        gitops_repo: caps.gitopsRepo,
+      },
+    };
+  }
 
   return lines.join('\n');
 }

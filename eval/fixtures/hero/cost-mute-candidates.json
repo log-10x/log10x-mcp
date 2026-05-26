@@ -29,7 +29,7 @@
     "expected_tool_chain": [
       "log10x_top_patterns",
       "log10x_dependency_check",
-      "log10x_exclusion_filter"
+      "log10x_pattern_mitigate"
     ],
     "snapshot_ts": "2026-05-10T03:38:49.679Z"
   }

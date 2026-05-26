@@ -1,0 +1,11 @@
+{
+  "id": "top-patterns-demo-24h",
+  "tool": "top_patterns",
+  "args": { "timeRange": "24h", "limit": 10, "analyzerCost": 1.0, "view": "summary" },
+  "expected": {
+    "headline_must_match": "patterns",
+    "data_contains_string": ["opensearch"],
+    "must_include_field_path": ["data.patterns[0].cost_per_month_usd", "data.patterns[0].template_hash", "data.totals.monthly_usd"],
+    "rubric": "Live demo otel-demo cluster has known opensearchexporter patterns. Top 10 by cost over 24h should include at least one opensearch-related pattern with cost_per_month_usd > 0. Schema valid envelope. Incidents may or may not be detected (data dependent)."
+  }
+}

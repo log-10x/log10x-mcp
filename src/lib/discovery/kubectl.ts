@@ -315,7 +315,7 @@ async function probeWorkloadsInNamespace(
         // Capture literal-valued env on the matching container.
         // valueFrom-based entries (secretKeyRef, configMapKeyRef, fieldRef)
         // are intentionally dropped — exposing secret refs is unsafe and
-        // downstream consumers (e.g. advise-compact) only need literal
+        // downstream consumers (e.g. configure-compact) only need literal
         // settings like GH_REPO / compactReceiverLookupFile.
         const env: Record<string, string> = {};
         for (const e of (log10xContainer as ContainerLike).env ?? []) {

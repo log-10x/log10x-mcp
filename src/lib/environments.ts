@@ -100,9 +100,10 @@ export interface EnvConfig {
   /** True if the backend marked this env as the user's default. */
   isDefault?: boolean;
   /**
-   * GitOps configuration for advisor tools that open PRs against the
-   * user's config repo (log10x_advise_compact, log10x_advise_receiver,
-   * and the upcoming log10x_pattern_mitigate menu's PR-based options).
+   * GitOps configuration for tools that open PRs against the user's
+   * config repo (log10x_configure_compact, log10x_configure_regulator,
+   * log10x_advise_receiver, and the log10x_pattern_mitigate menu's
+   * PR-based options).
    *
    * The advisor's resolveTarget chain prefers, in order:
    *   1. Explicit `gitops_repo` arg on the tool call

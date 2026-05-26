@@ -67,6 +67,7 @@ import {
 } from '../lib/advisor/reporter-forwarders.js';
 import type { Environments } from '../lib/environments.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
 const SUPPORTED_FORWARDERS = [
   'fluentbit',
@@ -151,25 +152,64 @@ export const adviseInstallSchema = {
     .enum(['install', 'verify', 'teardown', 'all'])
     .optional()
     .describe('Plan scope when the wizard is ready to emit. Default: `all`.'),
+  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.next_question / data.plan). markdown wraps the rendered prompt or plan as markdown.'),
 };
 
 const schemaObj = z.object(adviseInstallSchema);
 export type AdviseInstallArgs = z.infer<typeof schemaObj>;
 
+type WizardMode =
+  | 'missing_snapshot'
+  | 'session_error'
+  | 'cancelled'
+  | 'next_question'
+  | 'license_error'
+  | 'demo_airgapped_warning'
+  | 'plan';
+
+const TOOL_NAME = 'log10x_advise_install';
+
+function headlineFromMarkdown(md: string, fallback: string): string {
+  const firstLine = md.split('\n').find((l) => l.trim().length > 0);
+  if (!firstLine) return fallback;
+  return firstLine.replace(/^#+\s*/, '').slice(0, 200);
+}
+
+function wizardReturn(
+  view: 'summary' | 'markdown',
+  mode: WizardMode,
+  md: string,
+  extraData: Record<string, unknown> = {}
+): StructuredOutput {
+  const headline = headlineFromMarkdown(md, `${TOOL_NAME} (${mode})`);
+  if (view === 'markdown') {
+    return buildMarkdownEnvelope({ tool: TOOL_NAME, summary: { headline }, markdown: md });
+  }
+  const ok = mode === 'next_question' || mode === 'plan' || mode === 'demo_airgapped_warning';
+  return buildEnvelope({
+    tool: TOOL_NAME,
+    view: 'summary',
+    summary: { headline },
+    data: { ok, mode, markdown: md, ...extraData },
+  });
+}
+
 export async function executeAdviseInstall(
   args: AdviseInstallArgs,
   envs: Environments,
   mcpServer?: McpServer
-): Promise<string> {
+): Promise<string | StructuredOutput> {
+  const view = args.view ?? 'summary';
   const snapshot = getSnapshot(args.snapshot_id);
   if (!snapshot) {
-    return [
+    const md = [
       `# Install wizard — snapshot not found`,
       ``,
       `Snapshot \`${args.snapshot_id}\` is missing or expired (snapshots live 30 min).`,
       ``,
       `Run \`log10x_discover_env\` again and pass the new snapshot_id.`,
     ].join('\n');
+    return wizardReturn(view, 'missing_snapshot', md, { snapshot_id: args.snapshot_id });
   }
 
   // Merge the latest answers into the wizard session. Each call accretes;
@@ -196,7 +236,7 @@ export async function executeAdviseInstall(
   });
   if (!session) {
     // Should be unreachable — getSnapshot would've failed first.
-    return 'Internal error: wizard session could not be created.';
+    return wizardReturn(view, 'session_error', '# Install wizard — internal error\n\nWizard session could not be created.', { snapshot_id: args.snapshot_id });
   }
 
   // Elicitation path: if the client supports it, drive every missing
@@ -211,23 +251,28 @@ export async function executeAdviseInstall(
   if (mcpServer && clientSupportsElicitation(mcpServer)) {
     const elicitOutcome = await elicitMissingAnswers(mcpServer, snapshot, session);
     if (elicitOutcome.kind === 'cancelled') {
-      return [
+      const md = [
         '# Install wizard — cancelled',
         '',
         'You closed the form before answering. Re-invoke `log10x_advise_install` with the same `snapshot_id` to pick up where you left off — answers you already gave are remembered.',
       ].join('\n');
+      return wizardReturn(view, 'cancelled', md, { snapshot_id: args.snapshot_id });
     }
     if (elicitOutcome.kind === 'failed') {
       // Elicitation errored mid-flow — fall back to markdown questions.
       // The session has accumulated whatever was answered before the error.
       const next = nextQuestion(snapshot, session);
-      if (next.kind === 'ask') return next.markdown;
+      if (next.kind === 'ask') {
+        return wizardReturn(view, 'next_question', next.markdown, { snapshot_id: args.snapshot_id, question_id: next.questionId });
+      }
     }
   } else {
     // Markdown-fallback path: ask one question, return markdown, wait
     // for re-invocation with the answer in tool args.
     const next = nextQuestion(snapshot, session);
-    if (next.kind === 'ask') return next.markdown;
+    if (next.kind === 'ask') {
+      return wizardReturn(view, 'next_question', next.markdown, { snapshot_id: args.snapshot_id, question_id: next.questionId });
+    }
   }
 
   // Auto-acquire a license if the user hasn't supplied one. Routes
@@ -245,7 +290,7 @@ export async function executeAdviseInstall(
       session.isDemoLicense = lic.isDemoLicense;
     } catch (e) {
       const msg = e instanceof LicenseFetchError ? e.message : String(e);
-      return [
+      const md = [
         `# Install wizard — couldn't acquire a license JWT`,
         ``,
         `The wizard tried to mint a license via the gateway and failed:`,
@@ -257,6 +302,7 @@ export async function executeAdviseInstall(
         `- Pass an existing JWT via \`license_jwt\``,
         `- Retry — the gateway may have been transiently unavailable`,
       ].join('\n');
+      return wizardReturn(view, 'license_error', md, { snapshot_id: args.snapshot_id, error_message: msg });
     }
   }
 
@@ -268,11 +314,23 @@ export async function executeAdviseInstall(
   // signed-in-via-pasted-key users (fell back to demo because we lack
   // Auth0 tokens to mint a user license).
   if (session.airgapped === true && session.isDemoLicense === true) {
-    return renderDemoAirgappedWarning(session, !envs.isDemoMode);
+    const md = renderDemoAirgappedWarning(session, !envs.isDemoMode);
+    return wizardReturn(view, 'demo_airgapped_warning', md, { snapshot_id: args.snapshot_id, is_signed_in: !envs.isDemoMode });
   }
 
   // Everything answered. Emit the plan.
-  return await renderInstallPlan(snapshot, session, args);
+  const planMd = await renderInstallPlan(snapshot, session, args);
+  return wizardReturn(view, 'plan', planMd, {
+    snapshot_id: args.snapshot_id,
+    app: session.app,
+    forwarder: session.forwarder,
+    backends: session.backends,
+    airgapped: session.airgapped ?? false,
+    is_demo_license: session.isDemoLicense ?? false,
+    release_name: session.releaseName,
+    namespace: session.namespace,
+    action: args.action ?? 'all',
+  });
 }
 
 // ── Elicitation path (MCP-native interactive forms) ──
@@ -497,12 +555,13 @@ async function elicitMissingAnswers(
 
 // ── Question routing ──
 
-type NextStep = { kind: 'ask'; markdown: string } | { kind: 'render' };
+type QuestionId = 'app' | 'forwarder' | 'no-forwarder' | 'backends' | 'airgapped-log10x-conflict' | 'backend-credentials' | 'airgapped';
+type NextStep = { kind: 'ask'; markdown: string; questionId: QuestionId } | { kind: 'render' };
 
 function nextQuestion(snapshot: DiscoverySnapshot, session: WizardSession): NextStep {
   // Q1: app
   if (!session.app) {
-    return { kind: 'ask', markdown: askApp(snapshot) };
+    return { kind: 'ask', markdown: askApp(snapshot), questionId: 'app' };
   }
 
   // Q2: Receiver-only forwarder choice (when ambiguous)
@@ -512,6 +571,7 @@ function nextQuestion(snapshot: DiscoverySnapshot, session: WizardSession): Next
       return {
         kind: 'ask',
         markdown: noForwarderForReceiver(),
+        questionId: 'no-forwarder',
       };
     }
     if (detected.length === 1) {
@@ -519,18 +579,18 @@ function nextQuestion(snapshot: DiscoverySnapshot, session: WizardSession): Next
       updateWizardSession(session.snapshotId, { forwarder: detected[0].kind });
       session.forwarder = detected[0].kind;
     } else {
-      return { kind: 'ask', markdown: askForwarder(detected) };
+      return { kind: 'ask', markdown: askForwarder(detected), questionId: 'forwarder' };
     }
   }
 
   // Q3: backends — can be multiple, must be non-empty
   if (!session.backends || session.backends.length === 0) {
-    return { kind: 'ask', markdown: askBackends(snapshot.kubectl.backendAgents) };
+    return { kind: 'ask', markdown: askBackends(snapshot.kubectl.backendAgents), questionId: 'backends' };
   }
 
   // Conflict check: airgapped + log10x in backends — surface, don't auto-resolve
   if (session.airgapped === true && session.backends.includes('log10x')) {
-    return { kind: 'ask', markdown: airgappedLog10xConflict(session.backends) };
+    return { kind: 'ask', markdown: airgappedLog10xConflict(session.backends), questionId: 'airgapped-log10x-conflict' };
   }
 
   // Q4: per-backend credentials — ask for any non-`log10x` backend that
@@ -540,7 +600,7 @@ function nextQuestion(snapshot: DiscoverySnapshot, session: WizardSession): Next
     (b) => b !== 'log10x' && !(session.backendCredentials?.[b])
   );
   if (backendsNeedingCreds.length > 0) {
-    return { kind: 'ask', markdown: askBackendCredentials(backendsNeedingCreds) };
+    return { kind: 'ask', markdown: askBackendCredentials(backendsNeedingCreds), questionId: 'backend-credentials' };
   }
 
   // Q5: airgapped — only relevant when backends doesn't already include log10x
@@ -548,7 +608,7 @@ function nextQuestion(snapshot: DiscoverySnapshot, session: WizardSession): Next
   // airgapped is moot)
   const hasLog10x = session.backends.includes('log10x');
   if (!hasLog10x && session.airgapped === undefined) {
-    return { kind: 'ask', markdown: askAirgapped(session.backends) };
+    return { kind: 'ask', markdown: askAirgapped(session.backends), questionId: 'airgapped' };
   }
   // backends includes log10x → silently set airgapped=false so the
   // session is fully determined.

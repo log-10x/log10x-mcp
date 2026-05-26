@@ -29,6 +29,7 @@ import {
 } from '../lib/customer-metrics.js';
 import { getOrDiscoverJoin, discoverJoin, type JoinDiscoveryResult, type JoinPair } from '../lib/join-discovery.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
+import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
 export const discoverJoinSchema = {
   force_refresh: z
@@ -56,7 +57,21 @@ export const discoverJoinSchema = {
     .optional()
     .describe('Alias for `window` for consistency with other Log10x tools.'),
   environment: z.string().optional().describe('Environment nickname (for multi-env setups).'),
+  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope. markdown wraps the rendered discovery report in data.markdown.'),
 };
+
+interface DiscoverJoinSummary {
+  status: 'joined' | 'no_join_available' | 'not_configured';
+  backend?: string;
+  endpoint?: string;
+  cached: boolean;
+  window_seconds?: number;
+  labels_probed_log10x: string[];
+  labels_probed_customer: string[];
+  join_key?: { log10x_side: string; customer_side: string; jaccard: number; shared_values: number; log10x_only_values: number; customer_only_values: number };
+  runner_ups: Array<{ log10x_side: string; customer_side: string; jaccard: number; shared_values: number; log10x_only_values: number; customer_only_values: number }>;
+  top_below_threshold: Array<{ log10x_side: string; customer_side: string; jaccard: number; shared_values: number; log10x_only_values: number; customer_only_values: number }>;
+}
 
 export async function executeDiscoverJoin(
   args: {
@@ -66,27 +81,41 @@ export async function executeDiscoverJoin(
     window?: string;
     timeRange?: string;
     environment?: string;
+    view?: 'summary' | 'markdown';
   },
   env: EnvConfig
-): Promise<string> {
-  // Defensive defaults — match discoverJoinSchema for non-SDK callers.
+): Promise<string | StructuredOutput> {
+  const view = args.view ?? 'summary';
   args.force_refresh = args.force_refresh ?? false;
   args.minimum_jaccard = args.minimum_jaccard ?? 0.7;
   const resolution = await resolveBackend();
   if (!resolution.backend) {
-    // Same graceful-degrade rationale as correlate_cross_pillar: this tool
-    // participates in autonomous chains; a throw aborts the parent chain
-    // when a structured "not configured, continue without it" return lets
-    // the parent log it and complete.
-    return customerMetricsNotConfiguredMessage(formatDetectionTrace(resolution.trace));
+    const md = customerMetricsNotConfiguredMessage(formatDetectionTrace(resolution.trace));
+    if (view === 'markdown') {
+      return buildMarkdownEnvelope({
+        tool: 'log10x_discover_join',
+        summary: { headline: 'Customer metrics backend not configured.' },
+        markdown: md,
+      });
+    }
+    return buildEnvelope({
+      tool: 'log10x_discover_join',
+      view: 'summary',
+      summary: { headline: 'Customer metrics backend not configured — discover_join cannot run.' },
+      data: {
+        status: 'not_configured',
+        cached: false,
+        labels_probed_log10x: [],
+        labels_probed_customer: [],
+        runner_ups: [],
+        top_below_threshold: [],
+      } satisfies DiscoverJoinSummary,
+    });
   }
   const backend = resolution.backend;
 
   const effectiveWindow = args.window ?? args.timeRange;
   const windowSeconds = effectiveWindow ? parseWindowToSeconds(effectiveWindow) : undefined;
-  // When a window is specified, always bypass the session cache — the cache
-  // key is (env, backend) and doesn't include the window, so reusing a
-  // cached no-window probe would defeat the purpose.
   const bypass = args.force_refresh || windowSeconds != null;
   const opts = {
     minimumJaccard: args.minimum_jaccard,
@@ -97,7 +126,54 @@ export async function executeDiscoverJoin(
     ? await discoverJoin(env, backend, opts)
     : await getOrDiscoverJoin(env, backend, opts);
 
-  return renderJoinResult(result, backend.backendType, backend.endpoint, windowSeconds);
+  const md = renderJoinResult(result, backend.backendType, backend.endpoint, windowSeconds);
+  if (view === 'markdown') {
+    return buildMarkdownEnvelope({
+      tool: 'log10x_discover_join',
+      summary: { headline: result.status === 'joined' && result.joinKey ? `Join key: ${result.joinKey.log10xSide} ↔ ${result.joinKey.customerSide} (Jaccard ${result.joinKey.jaccard.toFixed(3)})` : 'No join key found above Jaccard threshold.' },
+      markdown: md,
+    });
+  }
+  const data: DiscoverJoinSummary = {
+    status: result.status === 'joined' ? 'joined' : 'no_join_available',
+    backend: backend.backendType,
+    endpoint: backend.endpoint,
+    cached: result.cachedForSession,
+    window_seconds: windowSeconds,
+    labels_probed_log10x: result.probedLabelsLog10x,
+    labels_probed_customer: result.probedLabelsCustomer,
+    join_key: result.joinKey ? joinPairToData(result.joinKey) : undefined,
+    runner_ups: result.runnerUps.map(joinPairToData),
+    top_below_threshold: result.status === 'no_join_available' ? result.probed.slice(0, 8).map(joinPairToData) : [],
+  };
+  const headline = data.join_key
+    ? `Join key: ${data.join_key.log10x_side} ↔ ${data.join_key.customer_side} (Jaccard ${data.join_key.jaccard.toFixed(3)}, ${data.runner_ups.length} runner-up${data.runner_ups.length !== 1 ? 's' : ''}).`
+    : `No join pair above Jaccard ${args.minimum_jaccard}. Cross-pillar correlation refuses for anchors that need a structural join.`;
+  return buildEnvelope({
+    tool: 'log10x_discover_join',
+    view: 'summary',
+    summary: { headline },
+    data,
+    actions: data.join_key
+      ? [
+          { tool: 'log10x_correlate_cross_pillar', args: { anchor_type: 'log10x_pattern' }, reason: 'use the resolved join key to correlate a Log10x pattern against the customer backend' },
+          { tool: 'log10x_correlate_cross_pillar', args: { anchor_type: 'customer_metric' }, reason: 'reverse direction: pick a customer metric and find which Log10x patterns track it' },
+        ]
+      : [
+          { tool: 'log10x_customer_metrics_query', args: {}, reason: 'explore the customer backend label universe to find a natural join dimension' },
+        ],
+  });
+}
+
+function joinPairToData(p: JoinPair) {
+  return {
+    log10x_side: p.log10xSide,
+    customer_side: p.customerSide,
+    jaccard: p.jaccard,
+    shared_values: p.sharedValues,
+    log10x_only_values: p.log10xOnlyValues,
+    customer_only_values: p.customerOnlyValues,
+  };
 }
 
 /** Parse a Prometheus-style window string ("10m", "1h", "30s") to seconds. */

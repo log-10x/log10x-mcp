@@ -22,6 +22,7 @@ import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { agentOnly } from '../lib/agent-only.js';
 import { fetchOneSampleByHash } from '../lib/siem/sample.js';
 import { patternDisplay } from '../lib/pattern-descriptor.js';
+import { buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
 export const eventLookupSchema = {
   pattern: z.string().optional().describe('Pattern name or search term to look up (e.g., "Payment_Gateway_Timeout"). Omit when passing `tenxHash` instead.'),
@@ -31,11 +32,55 @@ export const eventLookupSchema = {
   analyzerCost: z.number().optional().describe('SIEM ingestion cost in $/GB'),
   siemScope: z.string().optional().describe('SIEM scope for the live sample line on a tenxHash reverse lookup: a CloudWatch log group (`/aws/ecs/my-svc`), ES index, or Splunk index. When omitted, the detected SIEM connector uses its own default scope. Only consulted when `tenxHash` was passed (the cross-pillar correlation case).'),
   environment: z.string().optional().describe('Environment nickname'),
+  view: z.enum(['summary', 'markdown']).default('summary').describe('Output format. summary returns a structured envelope; markdown returns the rendered table.'),
 };
 
+interface EventLookupSummary {
+  pattern: string;
+  window: string;
+  services: Array<{ service: string; severity: string; bytes: number; cost_per_window_usd: number; cost_baseline_usd: number; events: number; is_new: boolean }>;
+  totals: { bytes: number; cost_per_window_usd: number; cost_baseline_usd: number; events: number; service_count: number };
+  resolved_from_hash?: string;
+}
+
 export async function executeEventLookup(
-  args: { pattern?: string; tenxHash?: string; service?: string; timeRange?: string; analyzerCost?: number; siemScope?: string },
+  args: { pattern?: string; tenxHash?: string; service?: string; timeRange?: string; analyzerCost?: number; siemScope?: string; view?: 'summary' | 'markdown' },
   env: EnvConfig
+): Promise<string | StructuredOutput> {
+  const view = args.view ?? 'summary';
+  const sumOut: { data?: EventLookupSummary } = {};
+  const md = await executeEventLookupInner(args, env, sumOut);
+  if (view === 'markdown') {
+    return buildMarkdownEnvelope({
+      tool: 'log10x_event_lookup',
+      summary: { headline: md.split('\n')[0]?.slice(0, 200) || 'event_lookup result' },
+      markdown: md,
+    });
+  }
+  // Summary view: typed envelope when data was computed; fall back to
+  // markdown envelope for early-return cases (no data, raw line, etc).
+  if (!sumOut.data) {
+    return buildMarkdownEnvelope({
+      tool: 'log10x_event_lookup',
+      summary: { headline: md.split('\n')[0]?.slice(0, 200) || 'event_lookup result' },
+      markdown: md,
+    });
+  }
+  const d = sumOut.data;
+  const headline = `\`${d.pattern}\` over ${d.window}: $${d.totals.cost_per_window_usd.toFixed(2)} across ${d.totals.service_count} service${d.totals.service_count === 1 ? '' : 's'} (${d.totals.events} events, ${(d.totals.bytes / 1_000_000).toFixed(1)} MB)`;
+  const { buildEnvelope } = await import('../lib/output-types.js');
+  return buildEnvelope({
+    tool: 'log10x_event_lookup',
+    view: 'summary',
+    summary: { headline },
+    data: d,
+  });
+}
+
+async function executeEventLookupInner(
+  args: { pattern?: string; tenxHash?: string; service?: string; timeRange?: string; analyzerCost?: number; siemScope?: string },
+  env: EnvConfig,
+  sumOut?: { data?: EventLookupSummary }
 ): Promise<string> {
   // Defensive defaults — schema defaults only apply at the MCP-SDK
   // boundary; chain-walkers, internal callers, and the eval harness
@@ -145,10 +190,10 @@ export async function executeEventLookup(
       return `No data found for pattern "${pattern}". Check the pattern name (use underscores, e.g., Payment_Gateway_Timeout).`;
     }
     // Use fuzzy results
-    return finalize(await formatResults(fuzzyRes.data.result, pattern, metricsEnv, tf, costPerGb, period, env));
+    return finalize(await formatResults(fuzzyRes.data.result, pattern, metricsEnv, tf, costPerGb, period, env, sumOut, resolvedFromHash));
   }
 
-  return finalize(await formatResults(currentRes.data.result, pattern, metricsEnv, tf, costPerGb, period, env));
+  return finalize(await formatResults(currentRes.data.result, pattern, metricsEnv, tf, costPerGb, period, env, sumOut, resolvedFromHash));
 }
 
 async function formatResults(
@@ -158,7 +203,9 @@ async function formatResults(
   tf: ReturnType<typeof parseTimeframe>,
   costPerGb: number,
   period: string,
-  env: EnvConfig
+  env: EnvConfig,
+  sumOut?: { data?: EventLookupSummary },
+  resolvedFromHash?: string
 ): Promise<string> {
   // Aggregate bytes per service (multiple severity levels possible).
   // Also keep the per-severity split per service: a pattern's text
@@ -240,6 +287,31 @@ async function formatResults(
 
   rows.sort((a, b) => b.costNow - a.costNow);
   const maxBytes = rows.length ? Math.max(...rows.map(r => r.bytes)) : 0;
+
+  // Populate the typed summary output for view='summary' callers.
+  if (sumOut) {
+    sumOut.data = {
+      pattern,
+      window: tf.label,
+      services: rows.map(r => ({
+        service: r.service,
+        severity: r.severity,
+        bytes: r.bytes,
+        cost_per_window_usd: r.costNow,
+        cost_baseline_usd: r.costBaseline,
+        events: r.events,
+        is_new: r.isNew,
+      })),
+      totals: {
+        bytes: totalBytes,
+        cost_per_window_usd: totalCostNow,
+        cost_baseline_usd: totalCostBase,
+        events: totalEvents,
+        service_count: rows.length,
+      },
+      resolved_from_hash: resolvedFromHash,
+    };
+  }
 
   // Format output. One stanza per service for this single pattern:
   // header (service · severity · NEW), share-bar scaled to the busiest

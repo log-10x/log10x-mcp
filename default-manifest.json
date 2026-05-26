@@ -1,205 +1,503 @@
 {
   "manifestVersion": 1,
   "tools": {
-    "log10x_cost_drivers": {
-      "title": "Cost drivers",
-      "description": "Answer \"which log patterns made the bill jump this week\" or \"what changed since yesterday's deploy\". Returns a dollar-ranked list of patterns whose cost grew versus a prior baseline, with before→after values, exact delta percentages, and new-pattern flags. **By default**: compares the current window against a 3-window average (e.g., timeRange=7d → avg of weeks 1, 2, 3 ago) to smooth noise. **For anchor-aligned deploy comparison**: pass `baselineOffsetDays` to compare against a single specific offset instead — `{timeRange: \"1d\", baselineOffsetDays: 1}` means \"today vs yesterday\", which is what you want for \"did the deploy change anything\". Attribution is keyed by **stable templateHash identity** that stays constant across query windows — Datadog Log Patterns and Splunk Pattern Explorer re-cluster per query, so their week-over-week diffs compare different clusters and are structurally unreliable. **Tier prerequisites**: requires a Reporter pipeline (Cloud or Edge).",
-      "annotations": { "title": "Cost drivers", "readOnlyHint": true, "idempotentHint": true, "openWorldHint": true }
-    },
     "log10x_event_lookup": {
       "title": "Event lookup",
-      "description": "Resolve a raw log line or pattern name to its stable identity (field-set), then return cost per service, before→after delta, first-seen timestamp within the observation window, and an AI classification (error/debug/info) with a recommended action (filter/keep/reduce). **Call this first** whenever a user pastes a SINGLE log line and asks \"what is this\", \"is this new\", or \"is this safe to drop\". The lookup is structural, not byte-exact — different timestamps/request IDs/user IDs on the same underlying pattern resolve to the same identity. If no match is returned, say so honestly. Use log10x_resolve_batch instead when the user pastes MULTIPLE events, a SIEM dump, or a batch to triage. **Tier prerequisites**: requires Reporter pipeline for live pattern lookup. In CLI-only mode, use log10x_resolve_batch instead.",
-      "annotations": { "title": "Event lookup", "readOnlyHint": true, "idempotentHint": true, "openWorldHint": true }
+      "description": "Resolve a raw log line or pattern name to its stable identity (field-set), then return cost per service, before→after delta, first-seen timestamp within the observation window, and an AI classification (error/debug/info) with a recommended action (filter/keep/reduce). **Call this first** whenever a user pastes a SINGLE log line and asks \"what is this\", \"is this new\", or \"is this safe to drop\". The lookup is structural, not byte-exact — different timestamps/request IDs/user IDs on the same underlying pattern resolve to the same identity. If no match is returned, say so honestly. Use log10x_resolve_batch instead when the user pastes MULTIPLE events, a SIEM dump, or a batch to triage.",
+      "annotations": {
+        "title": "Event lookup",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "category": "identify"
     },
     "log10x_pattern_examples": {
       "title": "Pattern examples",
-      "description": "Pull recent live events for a pattern from the customer's log analyzer (Splunk, Datadog, Elasticsearch, CloudWatch) and return them grouped by templateHash with template-extracted slot values per match. **Bounded to a 24-hour window** (live log analyzer retention); for older history use log10x_retriever_query. Input is either a Symbol Message (pattern name like `Payment_Gateway_Timeout`) or a pasted raw log line; pasted lines resolve via the same templater path as log10x_resolve_batch. The tool runs a SIEM phrase-search probe, runs the returned events through the local templater, groups by stable templateHash, applies a content-token Jaccard similarity threshold (≥0.85) to discriminate the matching pattern's events from look-alikes, and returns the top buckets by event count. Output is honest about partial extractions: per-bucket templateHash labels, recall counts, and explicit `parseFailed` markers when slot extraction fails on individual events. Multi-line group templates report head-line-only with an explicit warning. **Designed as an orchestration primitive** called by log10x_investigate or other chained tools when the chain needs concrete event evidence to form a hypothesis after a metric tier identification. Direct user-facing use is fine but rare; prefer log10x_event_lookup + log10x_pattern_trend for single-line inspection. **Tier prerequisites**: at least one supported log-analyzer connection configured (Splunk, Datadog, Elasticsearch, or CloudWatch credentials in the env). The vendor can be auto-detected when exactly one is configured; pass `vendor` explicitly when multiple are present.",
-      "annotations": { "title": "Pattern examples", "readOnlyHint": true, "idempotentHint": true, "openWorldHint": true }
+      "description": "Pull recent live events for a pattern from the customer's log analyzer (Splunk, Datadog, Elasticsearch, CloudWatch) and return them grouped by templateHash with template-extracted slot values per match. **Bounded to a 24-hour window** (live log analyzer retention); for older history use `log10x_retriever_query`. Input is either a Symbol Message (pattern name like `Payment_Gateway_Timeout`) or a pasted raw log line; pasted lines resolve via the same templater path as `log10x_resolve_batch`. The tool runs a SIEM phrase-search probe, runs returned events through the local templater, groups by stable templateHash, applies a content-token Jaccard similarity threshold (≥0.85) to discriminate the matching pattern's events from look-alikes, and returns the top buckets by event count. Output is honest about partial extractions: per-bucket templateHash labels, recall counts, and explicit `parseFailed` markers when slot extraction fails. Multi-line group templates report head-line-only with an explicit warning. **Designed as an orchestration primitive** called by `log10x_investigate` when the chain needs concrete event evidence after a metric-tier identification. Direct user-facing use is fine but rare; prefer `log10x_event_lookup` + `log10x_pattern_trend` for single-line inspection.",
+      "annotations": {
+        "title": "Pattern examples",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "category": "identify"
     },
     "log10x_savings": {
       "title": "Pipeline savings",
-      "description": "Show pipeline savings — how much the receiver (filtering + compaction) and retriever (indexing) are saving in dollars. Use for \"how much are we saving\", \"pipeline ROI\", or \"what is the Log10x stack worth financially\". **Tier prerequisites**: requires Reporter pipeline. Savings attribution requires per-app continuous metric emission.",
-      "annotations": { "title": "Pipeline savings", "readOnlyHint": true, "idempotentHint": true, "openWorldHint": true }
+      "description": "Show pipeline savings — how much the receiver (filtering + compaction) and retriever (indexing) are saving in dollars. Use for \"how much are we saving\", \"pipeline ROI\", or \"what is the Log10x stack worth financially\".",
+      "annotations": {
+        "title": "Pipeline savings",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "category": "cost"
     },
     "log10x_pattern_trend": {
       "title": "Pattern trend",
-      "description": "Return the volume + cost history for a single pattern over a chosen window (e.g. 1h, 24h, 7d, 30d), with a sparkline and spike detection. **Call this after log10x_event_lookup** when the user asks \"is this getting worse\", \"has it been louder before\", \"when did it start\", or wants temporal context on a pattern surfaced in an earlier step. Always state the observation window explicitly in the reply — \"flat at 2/h for the last 6 months of observation, spiked at 13:58 today\" — and never claim history older than the window. **Tier prerequisites**: requires Reporter pipeline. Time series queries need continuous metric emission.",
-      "annotations": { "title": "Pattern trend", "readOnlyHint": true, "idempotentHint": true, "openWorldHint": true }
+      "description": "Return the volume + cost history for a single pattern over a chosen window (e.g. 1h, 24h, 7d, 30d), with a sparkline and spike detection. **Call this after log10x_event_lookup** when the user asks \"is this getting worse\", \"has it been louder before\", \"when did it start\", or wants temporal context on a pattern surfaced in an earlier step. Always state the observation window explicitly in the reply — \"flat at 2/h for the last 6 months of observation, spiked at 13:58 today\" — and never claim history older than the window.",
+      "annotations": {
+        "title": "Pattern trend",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "category": "identify"
     },
-    "log10x_exclusion_filter": {
-      "title": "Exclusion filter snippet",
-      "description": "Generate a config snippet to silence or reduce a log pattern. Produces either (a) a Log10x rate receiver mute-file entry keyed by field-set with explicit sampleRate and untilEpochSec expiry (the preferred path — self-expiring, git-reviewable, no regex), or (b) a native drop rule for the user's forwarder or SIEM (Datadog, Splunk, Elasticsearch, CloudWatch, Fluent Bit, OTel Collector, Vector, and others). Call when the user asks to \"mute\", \"silence\", \"drop\", \"cap\", or \"reduce\" a specific pattern. Always run log10x_dependency_check first so the reply can flag anything that will break. **Tier prerequisites**: none. Generates mute file entries independent of the Reporter tier.",
-      "annotations": { "title": "Exclusion filter snippet", "readOnlyHint": true, "idempotentHint": true, "openWorldHint": false }
+    "log10x_services": {
+      "title": "Services",
+      "description": "List every service the Log10x pipeline is watching, ranked by cost with per-service volume and share of total. Call first on open-ended cost questions, before drilling into a specific service.",
+      "annotations": {
+        "title": "Services",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "category": "cost"
     },
     "log10x_dependency_check": {
       "title": "Dependency check command",
-      "description": "Given a pattern identity, generate commands to scan the user's SIEM/observability stack (Datadog monitors, Splunk saved searches, Grafana dashboards, Prometheus alert rules) for anything that depends on that pattern. **Call this before any mute, drop, or source-code deletion** — deleting a log line that feeds a live alert silently breaks the alert. Also call when a developer asks \"am I allowed to delete this log.info() call\" or \"what references this pattern\". This is the blast-radius check that turns a risky refactor into a reviewed one. **Tier prerequisites**: none. Operates against the customer's SIEM, dashboards, and alert surfaces via Bash + credentials.",
-      "annotations": { "title": "Dependency check command", "readOnlyHint": true, "idempotentHint": true, "openWorldHint": false }
+      "description": "Given a pattern identity, generate commands to scan the user's SIEM/observability stack (Datadog monitors, Splunk saved searches, Grafana dashboards, Prometheus alert rules) for anything that depends on that pattern. **Call this before any mute, drop, or source-code deletion** — deleting a log line that feeds a live alert silently breaks the alert. Also call when a developer asks \"am I allowed to delete this log.info() call\" or \"what references this pattern\". This is the blast-radius check that turns a risky refactor into a reviewed one.",
+      "annotations": {
+        "title": "Dependency check command",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "category": "drop"
+    },
+    "log10x_discover_labels": {
+      "title": "Discover labels",
+      "description": "List the labels Log10x metrics can be filtered or grouped by. Call at the start of a session, or before calling any tool that takes a label/filter argument — stops the model from guessing label names like \"namespace\" when the real name is \"k8s_namespace\". Pass a label name to get its distinct values.",
+      "annotations": {
+        "title": "Discover labels",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "category": "cost"
     },
     "log10x_configure_env": {
       "title": "Configure metrics env",
-      "description": "Register a metrics backend with the MCP and persist it to `~/.log10x/envs.json`. **Use this when the user's MCP is not yet configured** and a metric tool has returned a `not_configured` response. The flow: ask the user where their 10x engine ships metrics (log10x hosted, self-hosted Prometheus, Mimir, Cortex, AMP, Datadog, Grafana Cloud Prom, or GCP Managed Prom), collect the URL + auth, then call this tool with the corresponding `metricsBackend` config. The tool runs a 4-step live-backend validation (reachable, authenticated, engine metrics present, expected labels present) and refuses to persist if validation fails — the user fixes the underlying issue and re-runs. Credentials should be wrapped in `${VAR_NAME}` references (resolved from env) rather than passed as literals; the tool refuses literals that look like real secrets. **Tier prerequisites**: none — this is the bootstrapping tool.",
-      "annotations": { "title": "Configure metrics env", "readOnlyHint": false, "idempotentHint": true, "openWorldHint": false }
+      "description": "Register a metrics backend with the MCP and persist it to `~/.log10x/envs.json`. **Use this when the user's MCP is not yet configured** and a metric tool has returned a `not_configured` response. The flow: ask the user where their 10x engine ships metrics (log10x hosted, self-hosted Prometheus, Mimir, Cortex, AMP, Datadog, Grafana Cloud Prom, or GCP Managed Prom), collect the URL + auth, then call this tool with the corresponding `metricsBackend` config. The tool runs a 4-step live-backend validation (reachable, authenticated, engine metrics present, expected labels present) and refuses to persist if validation fails — the user fixes the underlying issue and re-runs. Credentials should be wrapped in `${VAR_NAME}` references (resolved from env) rather than passed as literals; the tool refuses literals that look like real secrets.",
+      "annotations": {
+        "title": "Configure metrics env",
+        "readOnlyHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "category": "install"
     },
     "log10x_top_patterns": {
       "title": "Top patterns",
-      "description": "Return the top N log patterns by current cost, with no baseline comparison or filtering gate. Use for \"what is expensive right now\", \"what are the noisy patterns in <service> this hour\", or \"give me a snapshot of my loudest events\". Can be scoped by service label. For \"what changed this week\" (deltas vs baseline) use log10x_cost_drivers instead; for \"why did costs spike\" always prefer cost_drivers because this tool has no new-pattern flag. `timeRange` accepts free-form `<n><m|h|d>` durations (e.g., `48h`, `3d`, `15m`) — there's no enum snap. **Output guardrails the caller MUST respect**: (1) rows tagged `[stale]` had zero events in the last hour — they are residue of a past incident inside the lookback window, not current cost drivers; do not recommend action against them. (2) rows shown as `(no-symbol)` have an empty `message_pattern` label — the engine tokenized those events but symbol-lookup did not assign a canonical name. The metric tells you volume + bytes + the populated labels; it does NOT tell you what the event text was. Do not speculate about event content from a `(no-symbol)` row's other labels. To inspect actual events: use `log10x_retriever_query` (if Retriever is deployed) or the source pod's stdout directly. **Tier prerequisites**: requires Reporter pipeline.",
-      "annotations": { "title": "Top patterns", "readOnlyHint": true, "idempotentHint": true, "openWorldHint": true }
-    },
-    "log10x_list_by_label": {
-      "title": "List by label",
-      "description": "Rank the distinct values of any label by cost. Use for \"cost by namespace\", \"cost by severity\", \"cost by country\", \"cost by container\", or any other group-by question. Call log10x_discover_labels first if unsure which label names are valid. **Tier prerequisites**: requires Reporter pipeline.",
-      "annotations": { "title": "List by label", "readOnlyHint": true, "idempotentHint": true, "openWorldHint": true }
+      "description": "Return the top N log patterns by current cost, optionally with a delta column vs a `comparison_window` baseline (week-over-week / day-over-day / 1h-vs-prior-1h). Use for \"what is expensive right now\", \"what are the noisy patterns in <service> this hour\", \"give me a snapshot of my loudest events\", \"what changed this week\", \"did the deploy add cost\". Can be scoped by service label. `timeRange` accepts free-form `<n><m|h|d>` durations (e.g., `48h`, `3d`, `15m`) — there's no enum snap. Pass `comparison_window` to get a per-row delta column; omit for current-rank-only.",
+      "annotations": {
+        "title": "Top patterns",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "category": "cost"
     },
     "log10x_investigate": {
       "title": "Investigate",
-      "description": "Single-call root-cause investigation for any log line, pattern, service, or environment. Returns a complete causal chain (for acute spikes) or co-drifter cohort (for gradual drift) with confidence scores derived mechanically from data signal quality, plus ready-to-run verification commands. Call whenever the user asks \"what is going on with X\", \"why is X spiking\", \"investigate X\", \"what is causing this alert\", \"why is X creeping\", or pastes a log line / alert and asks for diagnosis. Input is the user's natural-language target — pass their words verbatim. The tool detects whether the input is a raw log line, pattern identity, service name, or \"environment\" and runs the appropriate flow. It also detects whether the trajectory is an acute spike or gradual drift and renders a different report shape for each. **Structural wedge**: surfaces log-only signals (connection pool saturation, cache eviction storms, feature-flag cache flushes, retry amplification) that APM does NOT see because they manifest as slow-success traces rather than errors — this is why the tool catches causal chains that Datadog APM, Splunk APM, and OpenTelemetry tracing structurally cannot catch. Show the entire markdown report to the user without modification. Confidence percentages decompose into named sub-scores (stat × lag × chain for acute; slope_sig × cohort for drift) — walk the user through the decomposition when asked. **Tier prerequisites**: requires Reporter pipeline (Cloud or Edge). Drift detection requires continuous historical metrics — the CLI-only mode cannot do slope-similarity correlation. For direct forensic retrieval of specific historical events, use log10x_retriever_query instead. For metric backfill from the archive, use log10x_backfill_metric instead. **Example**: `{\"starting_point\": \"payments-svc\", \"window\": \"1h\", \"depth\": \"normal\"}` for a service-mode acute-spike investigation, or `{\"starting_point\": \"environment\", \"window\": \"7d\"}` for an env-wide audit.",
-      "annotations": { "title": "Investigate", "readOnlyHint": true, "idempotentHint": true, "openWorldHint": true }
-    },
-    "log10x_investigation_get": {
-      "title": "Get prior investigation",
-      "description": "Retrieve a prior log10x_investigate report by investigation_id, or list the most recent investigations in this session. Call when the user references a prior investigation (\"expand on investigation abc123\", \"what did we find last time\", \"show me that report again\") or when you need to cross-reference patterns across multiple investigations in the same session without re-running the correlation. Session-local — the cache dies with the process and holds the 50 most recent investigations.",
-      "annotations": { "title": "Get prior investigation", "readOnlyHint": true, "idempotentHint": true, "openWorldHint": false }
+      "description": "Single-call root-cause investigation for any log line, pattern, service, or environment. Returns a complete causal chain (for acute spikes) or co-drifter cohort (for gradual drift) with confidence scores derived mechanically from data signal quality, plus ready-to-run verification commands. Call whenever the user asks 'what is going on with X', 'why is X spiking', 'investigate X', or pastes a log line / alert and asks for diagnosis. Input is the user's natural-language target — pass their words verbatim. The tool detects whether the input is a raw log line, pattern identity, service name, or 'environment' and runs the appropriate flow. It also detects whether the trajectory is acute or gradual drift and renders a different report shape for each. Confidence percentages decompose into named sub-scores (stat × lag × chain for acute; slope_sig × cohort for drift) — walk the user through the decomposition when asked. Show the entire markdown report to the user without modification.",
+      "annotations": {
+        "title": "Investigate",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "category": "investigate"
     },
     "log10x_resolve_batch": {
       "title": "Triage",
-      "description": "Templatize a batch of log events and return structured per-pattern triage with variable concentrations and next-action suggestions. **This is one of two tools that ACTUALLY RUN A LOCAL LOG10X PIPELINE on the user's machine** (the other is `log10x_extract_templates`) — call this whenever the user asks \"can you run log10x locally\", \"do a local pipeline run\", \"templatize these events\", or supplies any batch of events to analyze: a pasted Datadog/Splunk/Elastic query result, a Slack incident with attached log lines, kubectl logs output, any raw log text dump. Does NOT need Kubernetes, a deployed Reporter, or a Log10x account — the pipeline runs in-process on the host. Input is the events themselves (file path, inline array, or raw text). Output structures the batch by stable templateHash, per-pattern frequency and severity, full template structure, and per-slot variable value distribution (answering \"for whom is this happening\" within the batch). Each pattern in the output carries next_actions suggesting log10x_investigate (for historical correlation), log10x_retriever_query (for archive retrieval), and native SIEM commands with the dominant variable filter pre-constructed. Do NOT call for single-line resolution — use log10x_event_lookup for that. Variable naming honest: structured-log slots get high-confidence names from JSON/logfmt keys; free-text slots with natural-language tokens get medium-confidence inferred names with \"(inferred)\" annotation; positional-only slots get \"slot N\" with no hallucinated name. **Two execution paths**: (a) `privacy_mode=true` (DEFAULT) — events stay on the host: the MCP spawns a local `tenx` binary OR a `docker run log10x/pipeline-10x` container (controlled by `LOG10X_TENX_MODE=local|docker`). The container path requires Docker Desktop / docker daemon running on the host; if it errors with `DockerNotAvailableError`, tell the user to start Docker Desktop. (b) `privacy_mode=false` — routes through the public Log10x paste endpoint (~100 KB limit, internet required, raw log text leaves the host). **Example**: `{\"source\": \"text\", \"text\": \"2026-04-13 ERROR checkout-svc ...\\n2026-04-13 INFO ...\"}` for a pasted Slack dump, or `{\"source\": \"file\", \"path\": \"/tmp/incident.log\", \"top_n_patterns\": 10}` for a local file.",
-      "annotations": { "title": "Triage", "readOnlyHint": true, "idempotentHint": true, "openWorldHint": true }
+      "description": "Templatize a batch of log events and return per-pattern triage. **This is one of two tools that ACTUALLY RUN A LOCAL LOG10X PIPELINE on the user's machine** (the other is `log10x_extract_templates`) — call this whenever the user asks 'can you run log10x locally', 'do a local pipeline run', 'templatize these events', or supplies any batch to analyze (Datadog/Splunk/Elastic query results, Slack incident attachments, kubectl logs, raw text). Does NOT need Kubernetes, a deployed Reporter, or a Log10x account — the pipeline runs in-process on the host. Output structures the batch by stable templateHash with per-pattern frequency + severity + full template structure + per-slot variable distribution. Each top pattern carries `actions[]` chaining to `log10x_investigate` (historical correlation) and `log10x_retriever_query` (archive retrieval). Do NOT call for single-line resolution — use `log10x_event_lookup` for that.",
+      "annotations": {
+        "title": "Triage",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "category": "identify"
+    },
+    "log10x_extract_templates": {
+      "title": "Extract templates",
+      "description": "Extract the structural template library from a log corpus by RUNNING A LOCAL LOG10X PIPELINE on the user's machine. Returns per-template identity (stable templateHash), template body with variable slots, and event count. Companion to `log10x_resolve_batch` — both tools answer 'can you run log10x locally / templatize these events'. Does NOT need Kubernetes, a deployed Reporter, or a Log10x account; the pipeline runs in-process on the host via either a locally-installed `tenx` binary or a `docker run log10x/pipeline-10x` container. Use for: (a) bootstrapping a pattern catalog before wiring up a Reporter, (b) offline auditing of archived log corpora, (c) validating that a config change produces expected template identities. **Validation mode**: pass `expected.min_templates`, `expected.required_patterns`, and/or `expected.forbidden_merges` to turn extraction into assertion-checked validation — each assertion reports PASS/FAIL in the output.",
+      "annotations": {
+        "title": "Extract templates",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "category": "identify"
     },
     "log10x_retriever_query": {
       "title": "Retriever query",
-      "description": "Direct retrieval of historical events from the Log10x Retriever archive (customer's S3 bucket) by stable pattern identity, with optional JavaScript filter expressions over event payloads. Call when: (a) the user asks for specific events matching a pattern over a time window that is OUTSIDE the SIEM's retention, (b) the user asks to retrieve events filtered by a variable value that is NOT a faceted dimension in their SIEM (e.g., \"all payment_retry events for customer acme-corp from 90 days ago\"), (c) compliance, legal, audit, or forensic workflows need exact event retrieval with stable identity. Do NOT call when the events are in the SIEM's current retention and can be queried natively faster, or when the user wants aggregated metrics over time instead of specific events (use log10x_backfill_metric or log10x_investigate instead). No re-ingestion. No proprietary format. The archive is in the customer's own S3 bucket and queries are scoped to the matching templateHash via pre-computed Bloom filters so only relevant byte ranges are fetched. Three output formats: events (raw with metadata), count (distribution summary), aggregated (bucketed time series). **Tier prerequisites**: requires Retriever component deployed. Does NOT require Reporter. Returns a graceful \"Retriever not configured\" message when __SAVE_LOG10X_RETRIEVER_URL__ is unset. **Example**: `{\"pattern\": \"payment_retry_attempt\", \"from\": \"now-90d\", \"to\": \"now-15d\", \"filters\": [\"event.customer_id === \\\"acme-corp-inc\\\"\"], \"format\": \"events\", \"limit\": 10000}` for a 90-day legal forensic retrieval.",
-      "annotations": { "title": "Retriever query", "readOnlyHint": true, "idempotentHint": true, "openWorldHint": true }
-    },
-    "log10x_retriever_query_status": {
-      "title": "Retriever query status",
-      "description": "Poll the CloudWatch diagnostics for an in-flight or recently-completed retriever query. Use when a prior `log10x_retriever_query` reported `partialResults: true` (MCP poll budget exceeded before the server query finished), or when the agent wants to verify a queryId's progress without re-running the full query. Does NOT re-fetch result events from S3 — only reads the per-query CW log streams and returns a structured snapshot of plan, scan stats, worker stats, and a status verdict (complete / in-flight / scan pending / unknown). To fetch events, re-run `log10x_retriever_query`. **Tier prerequisites**: same as `log10x_retriever_query`; additionally requires `LOG10X_RETRIEVER_LOG_GROUP` to point at the retriever's per-query CW log group. **Example**: `{\"queryId\": \"abc123\", \"queryStartedAt\": 1777200000000}`.",
-      "annotations": { "title": "Retriever query status", "readOnlyHint": true, "idempotentHint": true, "openWorldHint": true }
+      "description": "Direct retrieval of historical events from the Log10x Retriever archive (customer's S3 bucket) by stable pattern identity, with optional JavaScript filter expressions over event payloads. Call when: (a) the user asks for specific events matching a pattern over a window OUTSIDE the SIEM's retention, (b) the user asks to retrieve events filtered by a variable value that is NOT a faceted dimension in their SIEM (e.g., 'all payment_retry events for customer acme-corp from 90 days ago'), (c) compliance / legal / audit / forensic workflows need exact event retrieval with stable identity. Do NOT call when the events are in the SIEM's current retention and can be queried natively faster, or when the user wants aggregated metrics instead of specific events (use `log10x_backfill_metric` or `log10x_investigate` instead). No re-ingestion. No proprietary format. The archive is in the customer's own S3 bucket; queries are scoped to the matching templateHash via pre-computed Bloom filters so only relevant byte ranges are fetched.",
+      "annotations": {
+        "title": "Retriever query",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "category": "retrieve"
     },
     "log10x_retriever_series": {
       "title": "Retriever time series",
-      "description": "Materialize a fidelity-aware time series from the customer's S3 archive over an arbitrary window, with optional group-by on enrichment fields. Auto-selects between exact full aggregation (Strategy A) and per-window-sampled fan-out (Strategy B) based on Reporter pattern volume — small/moderate-volume queries get exact counts; high-volume / long-window queries get a sampled series with time-distribution and group-ranking fidelity preserved and tail caveats reported. Pathological volume is refused with structured narrowing guidance, never silently truncated. Call when: (a) the user wants a \"what is the rate of pattern X over the last 30 days, broken down by tenant\" answer that exceeds the SIEM's retention or query budget, (b) a baseline needs building from cost-driver patterns where Prometheus has continuous metrics but the *grouped breakdown* lives only in the S3 archive, (c) any time series question over a window where you don't know in advance whether full aggregation will fit. Use `log10x_retriever_query` instead when you need the actual event payloads (not aggregates). Use `log10x_backfill_metric` instead when you want to push the resulting series to a TSDB rather than just see it. **Tier prerequisites**: requires Retriever deployed. Reporter is optional — when absent, mode selection falls back to window-length heuristic. **Example**: `{\"search\": \"tenx_user_pattern == \\\"PaymentRetry\\\"\", \"from\": \"now-30d\", \"to\": \"now\", \"bucket_size\": \"1h\", \"group_by\": \"tenx_user_service\", \"fidelity\": \"auto\"}` for a 30-day grouped baseline.",
-      "annotations": { "title": "Retriever time series", "readOnlyHint": true, "idempotentHint": true, "openWorldHint": true }
+      "description": "Materialize a fidelity-aware time series from the customer's S3 archive over an arbitrary window, with optional group-by on enrichment fields. Auto-selects between exact full aggregation (Strategy A) and per-window-sampled fan-out (Strategy B) based on Reporter pattern volume — small/moderate-volume queries get exact counts; high-volume / long-window queries get a sampled series with time-distribution + group-ranking fidelity preserved and tail caveats reported. Pathological volume is refused with structured narrowing guidance, never silently truncated. Call when: (a) the user wants a 'rate of pattern X over the last 30 days, broken down by tenant' answer that exceeds SIEM retention/budget, (b) a baseline needs building from cost-driver patterns where Prometheus has continuous metrics but the *grouped breakdown* lives only in the S3 archive. Use `log10x_retriever_query` instead when you need the actual event payloads (not aggregates).",
+      "annotations": {
+        "title": "Retriever time series",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "category": "retrieve"
     },
     "log10x_backfill_metric": {
       "title": "Backfill metric",
-      "description": "Define a new metric (Datadog, Prometheus remote_write) backfilled with historical data from the Log10x Retriever archive, with optional forward-emission handoff to the live Reporter for continuous population going forward. Call when: (a) the user wants to define a new SLO, alert, or dashboard metric that needs historical context from day one, (b) the customer did not pre-instrument the metric in their TSDB and cannot backfill it from the TSDB's own data, (c) historical events are available in the Retriever archive (typically 90-180 days back), (d) the user specifies a pattern, grouping dimensions, aggregation, and destination TSDB. Do NOT call when the metric already exists in the destination TSDB. **This is the single highest-value Log10x-only capability**: Datadog log-based metrics only work on currently-indexed data; Splunk log-based metrics only work over indexed retention; Cribl can emit forward but cannot backfill from archive; Athena + remote-write Lambda is possible but represents 2-4 weeks of data-engineering per metric. This tool collapses that to ~15 minutes of config. Tool runs the Retriever query, aggregates events into bucketed time series (count / sum_bytes / unique_values / rate_per_second), emits to the destination with historical timestamps preserved, and returns a view URL. Datadog and Prometheus (via remote_write adapter) are wired today; CloudWatch/Elastic/SignalFx return \"not yet implemented\". **Tier prerequisites**: requires Retriever component deployed. Reporter required only when emit_forward=true (default false in this build — the Reporter config update path for forward-emission handoff is not yet wired, so current usage is one-time historical backfill). **Example**: `{\"pattern\": \"db_query_timeout\", \"metric_name\": \"log10x.db_query_timeout_by_tenant\", \"destination\": \"datadog\", \"bucket_size\": \"5m\", \"aggregation\": \"count\", \"from\": \"now-90d\", \"to\": \"now\", \"group_by\": [\"tenant_id\"]}` for a 90-day Datadog backfill grouped by tenant.",
-      "annotations": { "title": "Backfill metric", "readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": true }
+      "description": "Define a new metric (Datadog, Prometheus remote_write) backfilled with historical data from the Log10x Retriever archive, with optional forward-emission handoff to the live Reporter for continuous population going forward. Call when: (a) the user wants a new SLO/alert/dashboard metric that needs historical context from day one, (b) the customer did not pre-instrument the metric in their TSDB and cannot backfill from the TSDB's own data, (c) historical events are available in the Retriever archive (typically 90-180d back). Tool runs the Retriever query, aggregates events into bucketed time series (count / sum_bytes / unique_values / rate_per_second), emits to the destination with historical timestamps preserved, and returns a view URL. Datadog and Prometheus (via remote_write adapter) are wired today; CloudWatch/Elastic/SignalFx return 'not yet implemented'. Do NOT call when the metric already exists in the destination TSDB.",
+      "annotations": {
+        "title": "Backfill metric",
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "category": "retrieve"
     },
     "log10x_doctor": {
       "title": "Doctor (health check)",
-      "description": "Run a startup health check on the Log10x MCP installation. Probes: environment configuration validity, prometheus.log10x.com reachability and auth, Reporter tier detection (Edge / Cloud / none), Retriever endpoint configuration (informational), Datadog destination credentials (informational), paste endpoint reachability, cross-pillar enrichment floor (v1.4, when LOG10X_CUSTOMER_METRICS_URL is set). Returns a markdown report with pass / warn / fail per check and remediation hints. Call this once at the start of a session to verify the install, or any time a tool returns an unexpected error and you want to isolate whether the problem is configuration or transient. **Tier prerequisites**: none. Doctor checks never block; missing components produce warnings with remediation hints.",
-      "annotations": { "title": "Doctor (health check)", "readOnlyHint": true, "idempotentHint": true, "openWorldHint": true }
+      "description": "Run a startup health check on the Log10x MCP installation. Probes: environment configuration validity, prometheus.log10x.com reachability and auth, Reporter tier detection (Edge / Cloud / none), Retriever endpoint configuration (informational), Datadog destination credentials (informational), paste endpoint reachability, cross-pillar enrichment floor (v1.4, when LOG10X_CUSTOMER_METRICS_URL is set). Returns a markdown report with pass / warn / fail per check and remediation hints. Call this once at the start of a session to verify the install, or any time a tool returns an unexpected error and you want to isolate whether the problem is configuration or transient.",
+      "annotations": {
+        "title": "Doctor (health check)",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "category": "install"
     },
     "log10x_login_status": {
       "title": "Login status",
-      "description": "List the user's Log10x ACCOUNT environments and report credential / login state. **Call this, and ONLY this, for any of these phrasings**: \"which Log10x environments do I have\", \"which environments are available to me\", \"list my envs\", \"what tenants / accounts can I query\", \"show me my Log10x environments\", \"am I logged in\", \"switch envs\". **For \"log me in\" / \"sign me up\" / \"create a Log10x account\" / \"use my real account\"**: call `log10x_signin_start` to begin the browser-based Auth0 Device Flow (user picks GitHub or Google in the browser, then the model chains to `log10x_signin_complete` automatically), or call `log10x_signin_complete` directly with `{ api_key: \"<key>\" }` if the user already has a Log10x API key to paste. **Do NOT call `log10x_discover_env` for these questions**, that tool scans the user's Kubernetes cluster + AWS account for forwarder/log10x-app deployments, which is unrelated to \"which Log10x service environments does my account have access to\". In demo mode (no LOG10X_API_KEY set, OR a key was set but failed validation), the response is a step-by-step config guide and a pointer to `log10x_signin_start`. In signed-in mode, the response lists the user's identity, every Log10x env they can reach with permissions (OWNER/WRITE/READ), the default env, and the env most-recently used this session. Read-only, does not mutate any state. Takes no args. **Tier prerequisites**: none, runs in demo mode too.",
-      "annotations": { "title": "Login status", "readOnlyHint": true, "idempotentHint": true, "openWorldHint": false }
+      "description": "List the user's Log10x ACCOUNT environments and report credential / login state. **Call this, and ONLY this, for any of these phrasings**: 'which Log10x environments do I have', 'which environments are available to me', 'list my envs', 'what tenants/accounts can I query', 'am I logged in', 'switch envs'. **For 'log me in' / 'sign me up' / 'create a Log10x account' / 'use my real account'**: call `log10x_signin_start` (browser Auth0 device flow; the model chains to `log10x_signin_complete` automatically), or call `log10x_signin_complete` directly with `{ api_key: \"<key>\" }` if the user already has a key. **Do NOT call `log10x_discover_env` for these questions** — that tool scans the user's Kubernetes/AWS infrastructure, unrelated to Log10x account environments. In demo mode (no key set, or key failed validation), the response is a step-by-step config guide. In signed-in mode, lists the user's identity, every env they can reach with permissions (OWNER/WRITE/READ), the default env, and the most-recently used env this session. Read-only, takes no args.",
+      "annotations": {
+        "title": "Login status",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "category": "account"
     },
     "log10x_signin_start": {
       "title": "Sign in (start browser flow)",
-      "description": "Step 1 of the Log10x browser sign-in chain. **Call this for any of these phrasings**: \"sign me up for Log10x\", \"create a Log10x account\", \"log me in to Log10x\", \"register me\", \"set up my Log10x account\", \"I want my own Log10x account instead of demo\", \"switch from demo to my own data\". This tool requests an Auth0 device code, opens the user's browser to auth.log10x.com with the user_code pre-embedded, and returns IMMEDIATELY (no polling). The response markdown contains the `user_code`, `verification_uri_complete`, and the opaque `device_code`. **What the model MUST do after this returns**: (1) show the user the `user_code` and `verification_uri_complete` from the response so they can verify the code in their browser matches, then (2) AUTOMATICALLY call `log10x_signin_complete` with `{ device_code: \"<the device_code from this response>\" }` as the very next tool call. The user does NOT need to ask for that second step explicitly, the model should chain to it on its own. **For pasted-key sign-in instead of browser**: skip this tool entirely and call `log10x_signin_complete` directly with `{ api_key: \"<key>\" }`. Useful when the user already has a Log10x API key from console.log10x.com → Profile → API Settings or from a workspace admin. **Tier prerequisites**: none.",
-      "annotations": { "title": "Sign in (start browser flow)", "readOnlyHint": true, "idempotentHint": false, "openWorldHint": true }
+      "description": "Step 1 of the Log10x browser sign-in chain. **Call this for any of these phrasings**: 'sign me up for Log10x', 'create a Log10x account', 'log me in to Log10x', 'set up my Log10x account', 'switch from demo to my own data'. Requests an Auth0 device code, opens the user's browser to auth.log10x.com with the user_code pre-embedded, and returns IMMEDIATELY (no polling). Response carries `user_code`, `verification_uri_complete`, and the opaque `device_code`. **What the model MUST do after this returns**: (1) show the user the `user_code` and `verification_uri_complete` so they can verify the code in their browser matches, then (2) AUTOMATICALLY call `log10x_signin_complete` with `{ device_code: \"<the device_code from this response>\" }` as the next tool call. The user does NOT need to ask for that second step. **For pasted-key sign-in instead of browser**: skip this tool and call `log10x_signin_complete` directly with `{ api_key: \"<key>\" }`.",
+      "annotations": {
+        "title": "Sign in (start browser flow)",
+        "readOnlyHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "category": "account"
     },
     "log10x_signin_complete": {
       "title": "Sign in (complete)",
-      "description": "Step 2 of the Log10x sign-in chain. Two mutually-exclusive paths controlled by which arg you pass: (a) **`{ device_code: \"<...>\" }`**: finishes the browser flow that `log10x_signin_start` began. The model should call this AUTOMATICALLY right after `log10x_signin_start` returns, passing back the opaque `device_code` from that response unchanged. The tool polls Auth0's `/oauth/token` until the user confirms the device authorization in their browser (default 600s, max 900s, Auth0's device_code expiry), then exchanges the resulting Auth0 access token for a long-lived Log10x API key. (b) **`{ api_key: \"<key>\" }`**: pasted-key path, no browser. Use when the user already has a Log10x API key (copied from console.log10x.com → Profile → API Settings, or issued by a workspace admin). The tool validates the key against `/api/v1/user` and saves it. **Pass exactly one of `device_code` or `api_key`**; passing both or neither is rejected with a clear error. Either path writes the resolved API key to `~/.log10x/credentials` (mode 0600), hot-reloads the MCP's env list in-process so the very next tool call runs against the new account, and (if `LOG10X_API_KEY` is set in the host config and would override the new file) clears that env var in-process and tells the user to also remove it from their host config to make the change permanent. **Tier prerequisites**: none. The browser path is one-shot per `log10x_signin_start` call (the device_code is single-use); the api_key path is idempotent.",
-      "annotations": { "title": "Sign in (complete)", "readOnlyHint": false, "idempotentHint": true, "openWorldHint": true }
+      "description": "Step 2 of the Log10x sign-in chain. Two mutually-exclusive paths controlled by which arg you pass. (a) **`{ device_code: \"<...>\" }`**: finishes the browser flow that `log10x_signin_start` began. The model should call this AUTOMATICALLY right after `log10x_signin_start` returns, passing back the opaque `device_code` from that response unchanged. Polls Auth0's `/oauth/token` until the user confirms the device authorization in their browser, then exchanges the Auth0 access token for a long-lived Log10x API key. (b) **`{ api_key: \"<key>\" }`**: pasted-key path, no browser. Validates the key against `/api/v1/user` and saves it. **Pass exactly one of `device_code` or `api_key`**; both or neither is rejected with a clear error. Either path writes the resolved API key to `~/.log10x/credentials` (mode 0600), hot-reloads the MCP's env list in-process, and (if `LOG10X_API_KEY` is set in the host config and would override the new file) clears that env var in-process and tells the user to remove it from their host config to make the change permanent.",
+      "annotations": {
+        "title": "Sign in (complete)",
+        "readOnlyHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "category": "account"
     },
     "log10x_signout": {
       "title": "Sign out",
-      "description": "Wipe the persistent credentials file at `~/.log10x/credentials` and reload envs so subsequent calls fall back to demo mode (or whichever lower-priority configuration source picks up). **Call this for**: \"sign me out of Log10x\", \"log out\", \"remove my Log10x credentials\", \"stop using my Log10x account\", \"go back to demo mode\". Idempotent — running it without saved credentials is a no-op. Does NOT revoke the API key on the BE; the user must do that from console.log10x.com → Profile → API Settings if they want to invalidate the key everywhere (mirrors `gh auth logout` and `aws sso logout`). If the user has `LOG10X_API_KEY` set in their MCP host config, that env var will still be active after sign-out — the tool result will flag this so the LLM can tell the user to also unset it and restart. **Tier prerequisites**: none.",
-      "annotations": { "title": "Sign out", "readOnlyHint": false, "idempotentHint": true, "openWorldHint": false }
+      "description": "Wipe the persistent credentials file at `~/.log10x/credentials` and reload envs so subsequent calls fall back to demo mode (or whichever lower-priority configuration source picks up). **Call this for**: \"sign me out of Log10x\", \"log out\", \"remove my Log10x credentials\", \"stop using my Log10x account\", \"go back to demo mode\". Idempotent — running it without saved credentials is a no-op. Does NOT revoke the API key on the BE; the user must do that from console.log10x.com → Profile → API Settings if they want to invalidate the key everywhere (mirrors `gh auth logout` and `aws sso logout`). If the user has `LOG10X_API_KEY` set in their MCP host config, that env var will still be active after sign-out — the tool result will flag this so the LLM can tell the user to also unset it and restart.",
+      "annotations": {
+        "title": "Sign out",
+        "readOnlyHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "category": "account"
     },
     "log10x_update_settings": {
       "title": "Update account settings",
-      "description": "Update the user's Log10x account metadata (analyzer cost ($/GB), AI provider settings, display name, etc.) via `POST /api/v1/user`. **Call this for**: \"set my analyzer cost to $3\", \"switch my AI provider to OpenAI\", \"use my own Anthropic key\", \"disable AI\", \"update my company name\". Idempotent — repeated calls converge to the same state. The metadata field is a free-form key/value object; common fields are documented in the schema. Existing fields not in the payload are preserved (PATCH-like semantics). On success, the in-process env list is reloaded so subsequent tool calls see the updated metadata immediately (e.g., new analyzer_cost is honored on the next cost_drivers run). **Tier prerequisites**: requires a real signed-in account — demo accounts cannot update metadata.",
-      "annotations": { "title": "Update account settings", "readOnlyHint": false, "idempotentHint": true, "openWorldHint": true }
+      "description": "Update the user's Log10x account metadata (analyzer cost ($/GB), AI provider settings, display name, etc.) via `POST /api/v1/user`. **Call this for**: \"set my analyzer cost to $3\", \"switch my AI provider to OpenAI\", \"use my own Anthropic key\", \"disable AI\", \"update my company name\". Idempotent — repeated calls converge to the same state. The metadata field is a free-form key/value object; common fields are documented in the schema. Existing fields not in the payload are preserved (PATCH-like semantics). On success, the in-process env list is reloaded so subsequent tool calls see the updated metadata immediately (e.g., new analyzer_cost is honored on the next cost_drivers run).",
+      "annotations": {
+        "title": "Update account settings",
+        "readOnlyHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "category": "account"
     },
     "log10x_create_env": {
       "title": "Create environment",
-      "description": "Provision a new Log10x environment on the user's account via `POST /api/v1/user/env`. **Call this for**: \"create a staging env\", \"I need a new environment for my dev cluster\", \"set up a separate env for ${customer-name}\". Pairs naturally with the install advisor — after creating the env, call `log10x_advise_install` with the new env_id to get the Reporter / Receiver / Retriever install plan scoped to it. The new env's id is returned in the result so the LLM can chain. NOT idempotent — duplicate names are rejected with 409 Conflict; the tool pre-checks the in-memory env list to surface a friendly error before the round-trip. **Tier prerequisites**: requires a real signed-in account.",
-      "annotations": { "title": "Create environment", "readOnlyHint": false, "idempotentHint": false, "openWorldHint": true }
+      "description": "Provision a new Log10x environment on the user's account via `POST /api/v1/user/env`. **Call this for**: \"create a staging env\", \"I need a new environment for my dev cluster\", \"set up a separate env for ${customer-name}\". Pairs naturally with the install advisor — after creating the env, call `log10x_advise_install` with the new env_id to get the Reporter / Receiver / Retriever install plan scoped to it. The new env's id is returned in the result so the LLM can chain. NOT idempotent — duplicate names are rejected with 409 Conflict; the tool pre-checks the in-memory env list to surface a friendly error before the round-trip.",
+      "annotations": {
+        "title": "Create environment",
+        "readOnlyHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "category": "account"
     },
     "log10x_update_env": {
       "title": "Update environment",
-      "description": "Update an existing Log10x environment via `PUT /api/v1/user/env`: rename it, or change which env is the user's default. **Call this for**: \"rename my staging env to dev\", \"make production the default\", \"set my main account as the default env\". Idempotent. The env_id is required (get it from `log10x_login_status`). Pass at least one of `name` or `is_default`. **Tier prerequisites**: requires a real signed-in account AND the backend gateway to have the PUT route configured (see backend PR #62). Until that ships, the tool surfaces a clean error pointing at the console workaround.",
-      "annotations": { "title": "Update environment", "readOnlyHint": false, "idempotentHint": true, "openWorldHint": true }
+      "description": "Update an existing Log10x environment via `PUT /api/v1/user/env`: rename it, or change which env is the user's default. **Call this for**: \"rename my staging env to dev\", \"make production the default\", \"set my main account as the default env\". Idempotent. The env_id is required (get it from `log10x_login_status`). Pass at least one of `name` or `is_default`.",
+      "annotations": {
+        "title": "Update environment",
+        "readOnlyHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "category": "account"
     },
     "log10x_delete_env": {
       "title": "Delete environment (destructive)",
-      "description": "Remove an environment from the user's Log10x account via `DELETE /api/v1/user/env`. **DESTRUCTIVE — irrecoverable.** Metric history scoped to the env is also lost. Backend rejects 401 if the caller is not the env owner. **Call this only when the user has explicitly asked to delete an env and confirmed the env name back.** The tool requires a `confirm_name` arg matching the env's exact display name (case-sensitive); if it doesn't match, the tool refuses without contacting the backend and shows the correct name. Mirrors `gh repo delete` and the GitHub web \"type the repo name to confirm\" pattern. **Best practice**: when the user says \"delete X env\", state the name and env_id back, ask for explicit confirmation, then call this with the confirmed name. **Tier prerequisites**: requires a real signed-in account with OWNER permission on the env.",
-      "annotations": { "title": "Delete environment", "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": true }
+      "description": "Remove an environment from the user's Log10x account via `DELETE /api/v1/user/env`. **DESTRUCTIVE — irrecoverable.** Metric history scoped to the env is also lost. Backend rejects 401 if the caller is not the env owner. **Call this only when the user has explicitly asked to delete an env and confirmed the env name back.** The tool requires a `confirm_name` arg matching the env's exact display name (case-sensitive); if it doesn't match, the tool refuses without contacting the backend and shows the correct name. Mirrors `gh repo delete` and the GitHub web \"type the repo name to confirm\" pattern. **Best practice**: when the user says \"delete X env\", state the name and env_id back, ask for explicit confirmation, then call this with the confirmed name.",
+      "annotations": {
+        "title": "Delete environment",
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "category": "account"
     },
     "log10x_rotate_api_key": {
       "title": "Rotate API key (destructive)",
-      "description": "Replace the user's Log10x API key with a freshly-minted UUID via `POST /api/v1/user/rotate-key`. **DESTRUCTIVE — the previous key is invalidated immediately on the backend.** Other devices / scripts / hosts holding the old key will start receiving `401 Unauthorized` on the next request. **Call this for**: \"rotate my Log10x API key\", \"I think my key was leaked\", \"regenerate my API key\". Requires a `confirm: \"rotate-now\"` literal to prevent accidental triggering — always ask the user to confirm before calling. On success the tool: writes the new key to `~/.log10x/credentials` (so other MCP hosts on this machine pick it up), clears any in-process `LOG10X_API_KEY` so the new key takes effect for THIS server immediately, hot-reloads envs. The new key is shown in the response (also viewable later at console.log10x.com → Profile → API Settings). The result message lists every place the user should update — host configs, scripts, CI secrets, etc. **Tier prerequisites**: requires a real signed-in account — demo accounts get 403 Forbidden.",
-      "annotations": { "title": "Rotate API key", "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": true }
+      "description": "Replace the user's Log10x API key with a freshly-minted UUID via `POST /api/v1/user/rotate-key`. **DESTRUCTIVE — the previous key is invalidated immediately on the backend.** Other devices / scripts / hosts holding the old key will start receiving `401 Unauthorized` on the next request. **Call this for**: \"rotate my Log10x API key\", \"I think my key was leaked\", \"regenerate my API key\". Requires a `confirm: \"rotate-now\"` literal to prevent accidental triggering — always ask the user to confirm before calling. On success the tool: writes the new key to `~/.log10x/credentials` (so other MCP hosts on this machine pick it up), clears any in-process `LOG10X_API_KEY` so the new key takes effect for THIS server immediately, hot-reloads envs. The new key is shown in the response (also viewable later at console.log10x.com → Profile → API Settings). The result message lists every place the user should update — host configs, scripts, CI secrets, etc.",
+      "annotations": {
+        "title": "Rotate API key",
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "category": "account"
     },
     "log10x_customer_metrics_query": {
       "title": "Customer metrics query",
-      "description": "Low-level PromQL passthrough to the customer metric backend configured via LOG10X_CUSTOMER_METRICS_URL. Returns the raw Prometheus response shape plus metadata about which backend served the query. This is the escape hatch for cross-pillar investigations the higher-level tools don't cover — use it to explore the customer backend's label universe, run a one-off PromQL expression, or verify that a specific metric exists before correlating against it. For typical cross-pillar workflows, prefer `log10x_translate_metric_to_patterns` (customer metric → log patterns) or `log10x_correlate_cross_pillar` (bidirectional). **Tier prerequisites**: requires LOG10X_CUSTOMER_METRICS_URL configured (grafana_cloud, amp, datadog_prom, or generic_prom backend type). This tool issues exactly 1 PromQL query against the customer backend. **Example**: `{\"promql\": \"apm_request_duration_p99{service=\\\"payments-svc\\\"}\", \"mode\": \"instant\"}`.",
-      "annotations": { "title": "Customer metrics query", "readOnlyHint": true, "idempotentHint": true, "openWorldHint": true }
+      "description": "Low-level PromQL passthrough to the customer metric backend configured via LOG10X_CUSTOMER_METRICS_URL. Returns the raw Prometheus response shape plus metadata about which backend served the query. This is the escape hatch for cross-pillar investigations the higher-level tools don't cover — use it to explore the customer backend's label universe, run a one-off PromQL expression, or verify that a specific metric exists before correlating against it. For typical cross-pillar workflows, prefer `log10x_translate_metric_to_patterns` (customer metric → log patterns) or `log10x_correlate_cross_pillar` (bidirectional).",
+      "annotations": {
+        "title": "Customer metrics query",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "category": "investigate"
     },
     "log10x_discover_join": {
       "title": "Discover join label",
-      "description": "Auto-discover the structural join label between Log10x pattern metrics and the customer metric backend. Runs Jaccard similarity on label value sets across candidate label pairs, returns the best pair above the 0.7 threshold plus runner-ups above 0.5. The result is cached per-session keyed by (environment, customer-backend-endpoint) so the higher-level cross-pillar correlation tools can auto-run this once at session start and reuse the cached join without re-probing. Agents should normally NOT need to call this tool directly — `log10x_correlate_cross_pillar` and `log10x_translate_metric_to_patterns` call it internally. The explicit tool exists for power users who want to inspect the join universe or force a re-discovery after backend changes. When no pair crosses the threshold, returns a structured `no_join_available` response with the full probed-label matrix and recommended next actions. **Tier prerequisites**: requires LOG10X_CUSTOMER_METRICS_URL configured. This tool issues up to 12 PromQL queries (6 Log10x-side + 6 customer-side label value fetches) on first call; subsequent calls in the same session return the cached result. **Example**: `{\"minimum_jaccard\": 0.7}`.",
-      "annotations": { "title": "Discover join label", "readOnlyHint": true, "idempotentHint": true, "openWorldHint": true }
+      "description": "Auto-discover the structural join label between Log10x pattern metrics and the customer metric backend. Runs Jaccard similarity on label value sets across candidate label pairs, returns the best pair above the 0.7 threshold plus runner-ups above 0.5. The result is cached per-session keyed by (environment, customer-backend-endpoint) so the higher-level cross-pillar correlation tools can auto-run this once at session start and reuse the cached join without re-probing. Agents should normally NOT need to call this tool directly — `log10x_correlate_cross_pillar` and `log10x_translate_metric_to_patterns` call it internally. The explicit tool exists for power users who want to inspect the join universe or force a re-discovery after backend changes. When no pair crosses the threshold, returns a structured `no_join_available` response with the full probed-label matrix and recommended next actions.",
+      "annotations": {
+        "title": "Discover join label",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "category": "investigate"
     },
     "log10x_correlate_cross_pillar": {
       "title": "Correlate cross-pillar",
-      "description": "Bidirectional cross-pillar correlation with structural validation. Takes an anchor that's either a Log10x pattern (`anchor_type: \"log10x_pattern\"`) OR a customer metric expression (`anchor_type: \"customer_metric\"`) and returns ranked co-movers from the OTHER pillar, tiered by structural validation confidence. **Four output tiers**: `confirmed` (full structural overlap on join key + at least one additional label — highest confidence), `service-match` (join key match but partial overlap — service-level issue affecting all instances), `unconfirmed` (temporal match but required Log10x enrichment labels missing — unknown causality, do not drill autonomously), `coincidence` (temporal match with NO structural overlap despite having both sides' labels — this is coincidence, not causation, and the tool explicitly flags it as such). **The structural validation phase is the differentiating capability vs every other agent observability tool in 2026.** Every temporal Pearson ranker produces false positives on workloads that share a daily cycle; cross-pillar bridge filters these out by checking whether the candidate's metadata labels could plausibly overlap with the anchor's labels. When no structural join exists at all (e.g., node-level anchors against v1.4's service/pod/namespace/container label set), the tool returns a structured `no_join_available` refusal with probed-label diagnostics and recommended next actions — never a fall-through to temporal-only ranking. Refusal is a feature, not a failure. **Tier prerequisites**: requires LOG10X_CUSTOMER_METRICS_URL configured AND Reporter tier with k8s_pod / k8s_container / k8s_namespace / tenx_user_service enrichments (defaults on any fluent-k8s or filebeat-k8s install). This tool issues 4-12 PromQL queries for join discovery + candidate generation + up to 8 candidate range queries for temporal scoring. **Example**: `{\"anchor_type\": \"customer_metric\", \"anchor\": \"apm_request_duration_p99{service=\\\"payments-svc\\\"}\", \"window\": \"1h\"}`.",
-      "annotations": { "title": "Correlate cross-pillar", "readOnlyHint": true, "idempotentHint": true, "openWorldHint": true }
+      "description": "Bidirectional cross-pillar correlation with structural validation. Takes an anchor that's either a Log10x pattern (`anchor_type: \"log10x_pattern\"`) OR a customer metric expression (`anchor_type: \"customer_metric\"`) and returns ranked co-movers from the OTHER pillar, tiered by structural validation confidence. **Four output tiers**: `confirmed` (full structural overlap on join key + at least one additional label — highest confidence), `service-match` (join key match but partial overlap), `unconfirmed` (temporal match but required Log10x enrichment labels missing — do not drill autonomously), `coincidence` (temporal match with NO structural overlap — flagged as coincidence, not causation). The structural validation phase is the differentiating capability vs every other agent observability tool in 2026: every temporal Pearson ranker produces false positives on workloads that share a daily cycle; this filter eliminates them. When no structural join exists, returns a structured `no_join_available` refusal with diagnostics — never a fall-through to temporal-only ranking.",
+      "annotations": {
+        "title": "Correlate cross-pillar",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "category": "investigate"
+    },
+    "log10x_translate_metric_to_patterns": {
+      "title": "Translate metric to patterns",
+      "description": "Preset wrapper for the customer-metric-to-log-patterns direction of cross-pillar correlation. Given a customer APM / infra / business metric, return the Log10x patterns whose rate curves correspond to the metric's movements, with the same four-tier structural validation as `log10x_correlate_cross_pillar`. This is the \"agent looking at an APM metric asks what logs correspond\" workflow, which is the most common cross-pillar direction and worth routing via a descriptively-named tool rather than through the generic bidirectional primitive. Output is identical to `correlate_cross_pillar`: confirmed / service-match / unconfirmed / coincidence tiers with per-candidate confidence sub-scores.",
+      "annotations": {
+        "title": "Translate metric to patterns",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "category": "investigate"
     },
     "log10x_poc_from_siem_submit": {
       "title": "POC from SIEM (submit)",
-      "description": "Kick off a full log-cost-optimization POC against the user's SIEM. Pulls a representative event sample, templatizes into stable pattern identities, and renders a 9-section markdown report covering top cost drivers, Receiver recommendations, ready-to-paste native SIEM exclusion configs, Compact mode potential, risk/dependency checks, and deployment paths. Supported SIEMs: cloudwatch (AWS CloudWatch Logs via IAM credential chain), datadog (DD_API_KEY + DD_APP_KEY), sumo (Sumo Logic), gcp-logging (GCP Cloud Logging), elasticsearch (Elastic Cloud / self-hosted), azure-monitor (Azure Monitor / Log Analytics), splunk (SPLUNK_HOST + SPLUNK_TOKEN), clickhouse (OpenObserve / SigNoz / custom schemas). Auto-detects the SIEM from env vars when `siem` omitted — explicitly pass `siem` if multiple credential sets exist. `scope` and `query` are SIEM-specific: CloudWatch (log group + filter pattern), Datadog (index + query), Sumo (_sourceCategory + query), GCP (project id + filter), Elasticsearch (index pattern + KQL), Azure (workspace id + KQL), Splunk (index + SPL), ClickHouse (database + SQL WHERE). For ClickHouse, also pass `clickhouse_table` (required) and column-mapping args for custom schemas (OpenObserve/SigNoz auto-detected). Returns a `snapshot_id` — poll via log10x_poc_from_siem_status to retrieve progress and the final report. Report is also written to `${LOG10X_REPORT_DIR:-/tmp/log10x-reports}/poc_from_siem-<timestamp>.md`. Default window is 7d, default target event count is 250k, default max pull time is 5 min — the pull stops at whichever of the two ceilings hits first. **Tier prerequisites**: none. No log10x API key required. **Templating defaults to privacy_mode=true**: events are templated via a locally-installed `tenx` CLI (brew install log-10x/tap/log10x) and never leave the machine. Set `privacy_mode: false` to route through the public Log10x paste endpoint — demo use only, not production log content.",
-      "annotations": { "title": "POC from SIEM (submit)", "readOnlyHint": false, "idempotentHint": false, "openWorldHint": true }
+      "description": "Kick off a full log-cost-optimization POC against the user's SIEM. Pulls a representative event sample, templatizes into stable pattern identities, and renders a 9-section markdown report covering top cost drivers, Receiver recommendations, ready-to-paste native SIEM exclusion configs, Compact mode potential, risk/dependency checks, and deployment paths. Supported SIEMs: cloudwatch (AWS CloudWatch Logs via IAM credential chain), datadog (DD_API_KEY + DD_APP_KEY), sumo (Sumo Logic), gcp-logging (GCP Cloud Logging), elasticsearch (Elastic Cloud / self-hosted), azure-monitor (Azure Monitor / Log Analytics), splunk (SPLUNK_HOST + SPLUNK_TOKEN), clickhouse (OpenObserve / SigNoz / custom schemas). Auto-detects the SIEM from env vars when `siem` omitted â€” explicitly pass `siem` if multiple credential sets exist. `scope` and `query` are SIEM-specific: CloudWatch (log group + filter pattern), Datadog (index + query), Sumo (_sourceCategory + query), GCP (project id + filter), Elasticsearch (index pattern + KQL), Azure (workspace id + KQL), Splunk (index + SPL), ClickHouse (database + SQL WHERE). For ClickHouse, also pass `clickhouse_table` (required) and column-mapping args for custom schemas (OpenObserve/SigNoz auto-detected). Returns a `snapshot_id` â€” poll via log10x_poc_from_siem_status to retrieve progress and the final report. Report is also written to `${LOG10X_REPORT_DIR:-/tmp/log10x-reports}/poc_from_siem-<timestamp>.md`. Default window is 7d, default target event count is 250k, default max pull time is 5 min â€” the pull stops at whichever of the two ceilings hits first. **Tier prerequisites**: none. No log10x API key required. **Templating defaults to privacy_mode=true**: events are templated via a locally-installed `tenx` CLI (brew install log-10x/tap/log10x) and never leave the machine. Set `privacy_mode: false` to route through the public Log10x paste endpoint â€” demo use only, not production log content.",
+      "annotations": {
+        "title": "POC from SIEM (submit)",
+        "readOnlyHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "category": "poc"
     },
     "log10x_poc_from_siem_status": {
       "title": "POC from SIEM (status)",
-      "description": "Retrieve progress or a view of the report from a log10x_poc_from_siem_submit run. Pass `snapshot_id`; optionally `view` to select the level of detail. **In-progress** responses report status (pulling / templatizing / rendering), progress_pct, step_detail, and elapsed_seconds — poll every ~30s until done. **Complete** responses render one of six views: `summary` (default, ~30 lines — exec banner + top-5 wins + views CTA), `full` (complete 9-section report, ~300 lines), `yaml` (paste-ready Receiver mute-file for the top N patterns), `configs` (native SIEM exclusion configs — Datadog exclusion filter / Splunk props.conf / etc.), `top` (expanded N-row drivers table), `pattern` (deep-dive on one identity — requires `pattern` arg). **Failures** include partial_report_markdown when any events were successfully pulled before the error. The full report is also written to ${LOG10X_REPORT_DIR:-/tmp/log10x-reports}/poc_from_siem-<timestamp>.md regardless of which view the caller requested. Snapshots live in-memory per MCP process; a restart clears them, so persist the final report path if you need it later. **Tier prerequisites**: none. **Usage guidance for the calling model**: render the returned markdown AS-IS. The view arg has already picked the right level of detail. Do NOT summarize, paraphrase, or quote selectively — the tool has already done that work. If the user wants different detail, re-call with a different view.",
-      "annotations": { "title": "POC from SIEM (status)", "readOnlyHint": true, "idempotentHint": true, "openWorldHint": false }
+      "description": "Retrieve progress or a view of the report from a log10x_poc_from_siem_submit run. Pass `snapshot_id`; optionally `view` to select the level of detail. **In-progress** responses report status (pulling / templatizing / rendering), progress_pct, step_detail, and elapsed_seconds — poll every ~30s until done. **Complete** responses render one of six views: `summary` (default, ~30 lines — exec banner + top-5 wins + views CTA), `full` (complete 9-section report, ~300 lines), `yaml` (paste-ready Receiver mute-file for the top N patterns), `configs` (native SIEM exclusion configs — Datadog exclusion filter / Splunk props.conf / etc.), `top` (expanded N-row drivers table), `pattern` (deep-dive on one identity — requires `pattern` arg). **Failures** include partial_report_markdown when any events were successfully pulled before the error. The full report is also written to ${LOG10X_REPORT_DIR:-/tmp/log10x-reports}/poc_from_siem-<timestamp>.md regardless of which view the caller requested. Snapshots live in-memory per MCP process; a restart clears them, so persist the final report path if you need it later.",
+      "annotations": {
+        "title": "POC from SIEM (status)",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "category": "poc"
     },
     "log10x_poc_from_local": {
       "title": "POC from local logs (kubectl)",
-      "description": "Run a log-cost-optimization POC entirely from local log sources — `kubectl` today, `docker` and `journald` to follow. No log-analyzer credentials required. Use when the prospect has no SIEM connection or has not yet shared API keys. Returns a synchronous markdown report with: (a) **sample composition** table — top-N pods by byte volume; the prospect must confirm the sample looks like their production mix, (b) **industry-pricing matrix** — projected savings at Datadog / Splunk / CloudWatch / Sumo / Elastic / OpenSearch list prices, NOT a prediction of any specific bill, (c) **top patterns** in the kubectl-sourced sample. For native exclusion configs, paste-ready Receiver YAML, and the full 9-section report tied to a specific log analyzer's actual GB-billed volume, run `log10x_poc_from_siem` once credentials are available. **No automatic fallthrough**: this tool is invoked explicitly. If `log10x_poc_from_siem` failed on missing credentials, the calling LLM should ask the user before re-invoking with this tool — local-source framing is genuinely different from SIEM-attached framing and silent fallthrough would be a bait-and-switch. **Tier prerequisites**: kubectl on PATH + a working kubeconfig. No log10x API key required.",
-      "annotations": { "title": "POC from local logs (kubectl)", "readOnlyHint": true, "idempotentHint": false, "openWorldHint": true }
+      "description": "Run a log-cost-optimization POC entirely from local log sources — `kubectl` today, `docker` and `journald` to follow. No log-analyzer credentials required. Use when the prospect has no SIEM connection or has not yet shared API keys. Returns a synchronous markdown report with: (a) **sample composition** table — top-N pods by byte volume; the prospect must confirm the sample looks like their production mix, (b) **industry-pricing matrix** — projected savings at Datadog / Splunk / CloudWatch / Sumo / Elastic / OpenSearch list prices, NOT a prediction of any specific bill, (c) **top patterns** in the kubectl-sourced sample. For native exclusion configs, paste-ready Receiver YAML, and the full 9-section report tied to a specific log analyzer's actual GB-billed volume, run `log10x_poc_from_siem` once credentials are available. **No automatic fallthrough**: this tool is invoked explicitly. If `log10x_poc_from_siem` failed on missing credentials, the calling LLM should ask the user before re-invoking with this tool — local-source framing is genuinely different from SIEM-attached framing and silent fallthrough would be a bait-and-switch.",
+      "annotations": {
+        "title": "POC from local logs (kubectl)",
+        "readOnlyHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "category": "poc"
     },
     "log10x_discover_env": {
       "title": "Discover env (k8s + AWS)",
-      "description": "Read-only discovery of the caller's Kubernetes cluster + AWS account — i.e. the customer's INFRASTRUCTURE environment, NOT their Log10x account. **When the user wants to install Log10x: call this tool FIRST and then `log10x_advise_install` — that's the whole pre-flight. Do NOT call `log10x_doctor` / `log10x_login_status` / `log10x_savings` / etc. before the install; the wizard handles all login + license logic internally, and surfacing those tools' optional-capability warnings (Retriever, Datadog backfill, cross-pillar metrics) makes the install feel more complicated than it is.** Probes kubectl (workloads, DaemonSets, Helm releases, service-account IRSA annotations, metrics-backend agents) and AWS (EKS, S3, SQS, CloudWatch log groups) to detect: which forwarder is running (Fluent Bit, Fluentd, Filebeat, Logstash, OTel Collector, Vector), which log10x apps are already installed (Reporter, Receiver, Retriever), and which metrics backends are already deployed (Datadog Agent, Prometheus, Elastic, CloudWatch Agent, etc.). Returns a terse markdown report + a `snapshot_id` (cached 30 min) the advisor tools consume. **Do NOT call this tool to answer \"which Log10x environments do I have access to\" / \"list my envs\" / \"switch envs\" — those are about the user's Log10x ACCOUNT environments, use `log10x_login_status` for that.** Call THIS tool only when the question is about k8s workloads, AWS infra, or \"what's deployed in my cluster\". Every shell call is logged in the snapshot's `probeLog` for audit. No writes, no state mutation: only `kubectl get` and `aws ... describe/list` verbs. **Tier prerequisites**: none — this is a pre-install tool and runs against any customer environment.",
-      "annotations": { "title": "Discover env (k8s + AWS)", "readOnlyHint": true, "idempotentHint": true, "openWorldHint": true }
+      "description": "Read-only discovery of the caller's Kubernetes cluster + AWS account â€” i.e. the customer's INFRASTRUCTURE environment, NOT their Log10x account. **When the user wants to install Log10x: call this tool FIRST and then `log10x_advise_install` â€” that's the whole pre-flight. Do NOT call `log10x_doctor` / `log10x_login_status` / `log10x_savings` / etc. before the install; the wizard handles all login + license logic internally, and surfacing those tools' optional-capability warnings (Retriever, Datadog backfill, cross-pillar metrics) makes the install feel more complicated than it is.** Probes kubectl (workloads, DaemonSets, Helm releases, service-account IRSA annotations, metrics-backend agents) and AWS (EKS, S3, SQS, CloudWatch log groups) to detect: which forwarder is running (Fluent Bit, Fluentd, Filebeat, Logstash, OTel Collector, Vector), which log10x apps are already installed (Reporter, Receiver, Retriever), and which metrics backends are already deployed (Datadog Agent, Prometheus, Elastic, CloudWatch Agent, etc.). Returns a terse markdown report + a `snapshot_id` (cached 30 min) the advisor tools consume. **Do NOT call this tool to answer \"which Log10x environments do I have access to\" / \"list my envs\" / \"switch envs\" â€” those are about the user's Log10x ACCOUNT environments, use `log10x_login_status` for that.** Call THIS tool only when the question is about k8s workloads, AWS infra, or \"what's deployed in my cluster\". Every shell call is logged in the snapshot's `probeLog` for audit. No writes, no state mutation: only `kubectl get` and `aws ... describe/list` verbs. **Tier prerequisites**: none â€” this is a pre-install tool and runs against any customer environment.",
+      "annotations": {
+        "title": "Discover env (k8s + AWS)",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "category": "install"
     },
     "log10x_advise_reporter": {
       "title": "Advise: Reporter install",
-      "description": "Given a DiscoverySnapshot (from `log10x_discover_env`) + a forwarder choice + a license JWT, produce a tailored install/verify/teardown plan for the Log10x Reporter. Supports 6 forwarders (fluent-bit, fluentd, filebeat, logstash, otel-collector, vector). The plan includes: preflight checks (namespace existence, release-name collision, chart availability, forwarder alignment); per-step install commands (helm repo, values.yaml, helm upgrade, rollout wait); verify probes that answer specific questions (pods ready? 10x sidecar processing events? forwarder emitting output?); and teardown commands (helm uninstall, PVC cleanup, residue check). Every step is paste-ready — no shell interpolation. Use `action: \"verify\"` or `action: \"teardown\"` to scope the output. Default destination is `mock` (forwarder stdout) which is safe for dogfooding; switch to `elasticsearch|splunk|datadog|cloudwatch` with `destination` + `output_host` for production installs. **Tier prerequisites**: none — this is a pre-install tool.",
-      "annotations": { "title": "Advise: Reporter install", "readOnlyHint": true, "idempotentHint": true, "openWorldHint": false }
+      "description": "Given a DiscoverySnapshot (from `log10x_discover_env`) + a forwarder choice + a license JWT, produce a tailored install/verify/teardown plan for the Log10x Reporter. Supports 6 forwarders (fluent-bit, fluentd, filebeat, logstash, otel-collector, vector). The plan includes: preflight checks (namespace existence, release-name collision, chart availability, forwarder alignment); per-step install commands (helm repo, values.yaml, helm upgrade, rollout wait); verify probes that answer specific questions (pods ready? 10x sidecar processing events? forwarder emitting output?); and teardown commands (helm uninstall, PVC cleanup, residue check). Every step is paste-ready â€” no shell interpolation. Use `action: \"verify\"` or `action: \"teardown\"` to scope the output. Default destination is `mock` (forwarder stdout) which is safe for dogfooding; switch to `elasticsearch|splunk|datadog|cloudwatch` with `destination` + `output_host` for production installs. **Tier prerequisites**: none â€” this is a pre-install tool.",
+      "annotations": {
+        "title": "Advise: Reporter install",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "category": "install"
     },
     "log10x_advise_retriever": {
       "title": "Advise: Retriever install",
-      "description": "Given a DiscoverySnapshot (from `log10x_discover_env`), produce an install/verify/teardown plan for the Log10x Retriever. Unlike Reporter + Receiver, the Retriever has no forwarder choice — it is a standalone set of workloads (indexer + query-handler + stream-worker + filter CronJobs) that read from S3 via SQS and serve an HTTP query endpoint. The advisor detects existing AWS infra (input bucket with `indexing-results/` prefix, four SQS queues — index/query/subquery/stream — and an IRSA-annotated ServiceAccount) from the discovery snapshot, or accepts explicit overrides. Preflight fails closed when any required resource is missing — the Retriever depends on Terraform-provisioned infra that this advisor does NOT create. Verify probes: pods Ready, indexer processing messages, query endpoint responding, S3 indexing-results/ getting writes, SQS queue drainage. Teardown uninstalls the Helm release but leaves AWS infra alone (Terraform's concern). **Tier prerequisites**: none — but AWS infra must exist before install.",
-      "annotations": { "title": "Advise: Retriever install", "readOnlyHint": true, "idempotentHint": true, "openWorldHint": false }
+      "description": "Given a DiscoverySnapshot (from `log10x_discover_env`), produce an install/verify/teardown plan for the Log10x Retriever. Unlike Reporter + Receiver, the Retriever has no forwarder choice — it is a standalone set of workloads (indexer + query-handler + stream-worker + filter CronJobs) that read from S3 via SQS and serve an HTTP query endpoint. The advisor detects existing AWS infra (input bucket with `indexing-results/` prefix, four SQS queues — index/query/subquery/stream — and an IRSA-annotated ServiceAccount) from the discovery snapshot, or accepts explicit overrides. Preflight fails closed when any required resource is missing — the Retriever depends on Terraform-provisioned infra that this advisor does NOT create. Verify probes: pods Ready, indexer processing messages, query endpoint responding, S3 indexing-results/ getting writes, SQS queue drainage. Teardown uninstalls the Helm release but leaves AWS infra alone (Terraform's concern).",
+      "annotations": {
+        "title": "Advise: Retriever install",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "category": "install"
     },
     "log10x_advise_receiver": {
       "title": "Advise: Receiver install",
-      "description": "Given a DiscoverySnapshot (from `log10x_discover_env`) + a forwarder choice + a license JWT, produce a tailored install/verify/teardown plan for the Log10x Receiver. Same 6 forwarders as the Reporter (fluent-bit, fluentd, filebeat, logstash, otel-collector, vector) and same charts — the Receiver differs from the Reporter by writing filtered events back through the forwarder (with mute/sample/compact applied) instead of only emitting metrics. Every chart deploys the Receiver workload and exposes two opt-in feature flags via `tenx.optimize` and `tenx.readOnly`: `optimize=true` adds compact encoding (~20-40x volume reduction) and `mode=readonly` switches to passive metrics-only (no write-back). The two flags are mutually exclusive at the chart level (every chart's `tenx-validate.yaml` template fails install if both are set). Output shape is identical to `log10x_advise_reporter`: preflight, install steps, verify probes, teardown. **Tier prerequisites**: none — this is a pre-install tool.",
-      "annotations": { "title": "Advise: Receiver install", "readOnlyHint": true, "idempotentHint": true, "openWorldHint": false }
+      "description": "Given a DiscoverySnapshot (from `log10x_discover_env`) + a forwarder choice + a license JWT, produce a tailored install/verify/teardown plan for the Log10x Receiver. Same 6 forwarders as the Reporter (fluent-bit, fluentd, filebeat, logstash, otel-collector, vector) and same charts â€” the Receiver differs from the Reporter by writing filtered events back through the forwarder (with mute/sample/compact applied) instead of only emitting metrics. Every chart deploys the Receiver workload and exposes two opt-in feature flags via `tenx.optimize` and `tenx.readOnly`: `optimize=true` adds compact encoding (~20-40x volume reduction) and `mode=readonly` switches to passive metrics-only (no write-back). The two flags are mutually exclusive at the chart level (every chart's `tenx-validate.yaml` template fails install if both are set). Output shape is identical to `log10x_advise_reporter`: preflight, install steps, verify probes, teardown. **Tier prerequisites**: none â€” this is a pre-install tool.",
+      "annotations": {
+        "title": "Advise: Receiver install",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "category": "install"
     },
     "log10x_advise_install": {
       "title": "Install wizard",
-      "description": "Progressive install wizard for the Log10x Reporter / Receiver on Kubernetes. **This is the SINGLE entry point for installs — call it first.** Do NOT call `log10x_doctor` or `log10x_login_status` as a pre-flight; the wizard handles login state, license acquisition, and demo-mode fallback internally, and surfacing the doctor's optional-capability warnings (Retriever, Datadog backfill, cross-pillar metrics) ahead of the install confuses users with concepts that are unrelated to deploying the Reporter/Receiver. Takes a `snapshot_id` from `log10x_discover_env` and walks the user through five decisions, asking one at a time and remembering each answer across turns (the snapshot's wizard session): (1) **app** — `reporter` (dedicated DaemonSet forwarder, zero-touch) or `receiver` (sidecar inside the user's existing forwarder); (2) **forwarder** — Receiver-only, auto-picked when one is detected, asked when multiple; (3) **backends** — array of metrics destinations, can be multiple (e.g., `[\"log10x\", \"datadog\"]` to report to both SaaS + own backend simultaneously); (4) **airgapped** — opt-in CISO-friction reducer, conflicts only with `\"log10x\"` in `backends` (engine sends NOTHING to log10x.com); (5) **license_jwt** — auto-fetched from `/api/v1/license/demo` if the user is not signed in, or from `/api/v1/license` with the persisted Auth0 token if they are. Each call merges new args into the session and either asks the next question (returning a markdown prompt) or emits the final install plan once all answers are in. Demo + airgapped surfaces a soft warning (engine downgrades to online mode on demo licenses). Plan is plan-only: emits helm commands + values.yaml; the user runs them. **Tier prerequisites**: none — this is a pre-install tool.",
-      "annotations": { "title": "Install wizard", "readOnlyHint": true, "idempotentHint": true, "openWorldHint": false }
+      "description": "Progressive install wizard for the Log10x Reporter / Receiver on Kubernetes. **This is the SINGLE entry point for installs â€” call it first.** Do NOT call `log10x_doctor` or `log10x_login_status` as a pre-flight; the wizard handles login state, license acquisition, and demo-mode fallback internally, and surfacing the doctor's optional-capability warnings (Retriever, Datadog backfill, cross-pillar metrics) ahead of the install confuses users with concepts that are unrelated to deploying the Reporter/Receiver. Takes a `snapshot_id` from `log10x_discover_env` and walks the user through five decisions, asking one at a time and remembering each answer across turns (the snapshot's wizard session): (1) **app** â€” `reporter` (dedicated DaemonSet forwarder, zero-touch) or `receiver` (sidecar inside the user's existing forwarder); (2) **forwarder** â€” Receiver-only, auto-picked when one is detected, asked when multiple; (3) **backends** â€” array of metrics destinations, can be multiple (e.g., `[\"log10x\", \"datadog\"]` to report to both SaaS + own backend simultaneously); (4) **airgapped** â€” opt-in CISO-friction reducer, conflicts only with `\"log10x\"` in `backends` (engine sends NOTHING to log10x.com); (5) **license_jwt** â€” auto-fetched from `/api/v1/license/demo` if the user is not signed in, or from `/api/v1/license` with the persisted Auth0 token if they are. Each call merges new args into the session and either asks the next question (returning a markdown prompt) or emits the final install plan once all answers are in. Demo + airgapped surfaces a soft warning (engine downgrades to online mode on demo licenses). Plan is plan-only: emits helm commands + values.yaml; the user runs them. **Tier prerequisites**: none â€” this is a pre-install tool.",
+      "annotations": {
+        "title": "Install wizard",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "category": "install"
+    },
+    "log10x_configure_compact": {
+      "title": "Configure compact",
+      "description": "Configure per-container compact-mode rules on a running 10x receiver. Hot-reloads via the receiver's CSV lookup (no pipeline restart). Use this after log10x_find_constant_slots or log10x_find_uuid_in_body identifies compact-mode candidates.",
+      "annotations": {
+        "title": "Configure compact",
+        "readOnlyHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "category": "install"
+    },
+    "log10x_configure_regulator": {
+      "title": "Configure regulator",
+      "description": "Configure per-pattern rate-limit / sample / drop rules on a running 10x regulator (receiver) by deriving per-container caps from a monthly dollar budget. Use this after log10x_find_skew identifies high-skew patterns or when budget pressure forces sampling decisions.",
+      "annotations": {
+        "title": "Configure regulator",
+        "readOnlyHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "category": "install"
+    },
+    "log10x_find_skew": {
+      "title": "Find skew",
+      "description": "Identify patterns where one slot value dominates the field (>= 60% of events by default). Surfaces sampling opportunities: \"slot `verb` is `get` 78% of events — sample the get case at 1/10 and save volume without losing signal.\" Differentiated against analyzer field histograms because the engine groups by per-pattern field-set, so dominance is measured within the structural pattern, not globally. **Stage 1**: accepts events as a paste array (same shape as log10x_resolve_batch).",
+      "annotations": {
+        "title": "Find skew",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "category": "detect"
+    },
+    "log10x_find_constant_slots": {
+      "title": "Find constant slots",
+      "description": "Identify slots that never vary across an aggregated pattern (distinct value count = 1). Compact-mode candidate: the receiver can strip the slot from emission without losing analytic value. Anti-pattern surfacing for structural-overhead bytes. **Stage 1**: paste-mode.",
+      "annotations": {
+        "title": "Find constant slots",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "category": "detect"
+    },
+    "log10x_find_uuid_in_body": {
+      "title": "Find UUID-in-body",
+      "description": "Flag slots that carry per-event unique values (UUID, ISO timestamp, hex ID) in the message body. Cardinality / event-count ratio >= 0.9 plus regex match. Anti-pattern: high cardinality in the body costs storage with no analytic value across events. Output includes a fix hint (promote to structured label or strip). **Stage 1**: paste-mode.",
+      "annotations": {
+        "title": "Find UUID-in-body",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "category": "detect"
+    },
+    "log10x_find_incident_cluster": {
+      "title": "Find incident cluster",
+      "description": "Group patterns by shared root-cause descriptor text. Surfaces \"three patterns share a DNS lookup failure for opensearch — fix once, three patterns vanish.\" Same-service required; joins via Jaccard 0.5 direct, overlap 0.6 with shared-tokens >= 3, or Jaccard 0.2 with Pearson correlation >= 0.75 on volume curves. Conservative thresholds: over-merging is the trap SIEMs fall into. **Stage 1**: paste-mode.",
+      "annotations": {
+        "title": "Find incident cluster",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "category": "detect"
+    },
+    "log10x_pattern_mitigate": {
+      "title": "Pattern mitigate",
+      "description": "Given one pattern (identity or templateHash), return the env-gated menu of mitigation options: drop_at_analyzer, drop_at_forwarder, mute_at_10x, compact_at_10x. Each option carries enabled-or-not + reason + estimated $/mo savings + a paste-ready config snippet + follow-through tool calls (typically log10x_dependency_check before applying). The agent surfaces these to the user; the user picks. **Call this** when a previous tool surfaced a high-cost pattern and the user asks 'what should I do' / 'how do I drop this' / 'how do I reduce this'.",
+      "annotations": {
+        "title": "Pattern mitigate",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "category": "drop"
     },
     "log10x_advise_compact": {
       "title": "Advise: compact-lookup PR",
-      "description": "Emit a literal `gh` PR command + the file diff for a compactReceiver change against the customer's GitOps repo. Two modes: `mode=csv` (default) edits `compact-lookup.csv` — the engine hot-reloads via `FileResourceLookup.reset()` on each gitops poll (**no pipeline restart, no event drops**); `mode=js` replaces `compact-object-global.js` with new predicate logic — the engine triggers `restartPipeline()` (brief drain + relaunch). Use `js` only when CSV-keyed lookup is insufficient (regex match, multi-field-set OR semantics, external-flag gate). The compactReceiver decides per-event whether each event is emitted via `encode()` (compact templateHash+vars, ~20-40x volume reduction) or as `fullText`, keyed off `compactReceiverFieldNames` (default: `[symbolMessage]`). This tool is a *renderer*, not a decider: the caller decides which patterns to compact (typically via `log10x_top_patterns` + `log10x_cost_drivers`) and passes the lists in. Output is markdown with a diff summary, the new full file content, and two ready-to-run shell snippets (one-shot via `gh api`, or local clone+edit+push). Pass either `gitops_repo` directly OR `snapshot_id` (from `log10x_discover_env`) — when given a snapshot, the tool auto-resolves the repo from a running receiver pod's `GH_REPO` env var. **Tier prerequisites**: requires a Reporter (Cloud or Edge) so pattern keys exist; the receiver pod must be configured with `GH_ENABLED=true`, `GH_REPO=<owner/name>`, `GH_TOKEN` (PAT), and `compactReceiverLookupFile` pointing at the same path inside its gitops-pulled tree.",
-      "annotations": { "title": "Advise: compact-lookup PR", "readOnlyHint": true, "idempotentHint": true, "openWorldHint": false }
-    },
-    "log10x_pattern_mitigate": {
-      "title": "Pattern mitigation menu",
-      "description": "Single user-facing entry for \"this pattern costs too much, what are my options\". Returns the four env-gated mitigation paths in plain-user terms — (1) drop @ analyzer (SIEM-side drop rule), (2) drop @ forwarder (forwarder-side drop), (3) mute @ 10x (Receiver mute via GitOps CSV), (4) compact @ 10x (~20-40x reduction via GitOps CSV) — with options DIMMED when the env doesn't have the required infra (no Receiver deployed → mute/compact off; no GitOps wired → mute/compact off). Each option's NEXT_ACTIONS hint routes the agent to the right follow-up tool: `log10x_dependency_check` first (always, for the drop/mute paths), then `log10x_exclusion_filter` (options 1+2), `log10x_advise_receiver` (option 3), or `log10x_advise_compact` (option 4). Call when a user surfaces a high-cost pattern and asks \"how do I drop / reduce / mute / kill / shrink / compact / get rid of\" it. **Tier prerequisites**: none — the tool renders even when no infra is configured (just dims all 10x-side options).",
-      "annotations": { "title": "Pattern mitigation menu", "readOnlyHint": true, "idempotentHint": true, "openWorldHint": false }
+      "description": "Emit a literal `gh` PR command + the file diff for a compactReceiver change against the customer's GitOps repo. Two modes: `mode=csv` (default) edits `compact-lookup.csv` — the engine hot-reloads on each gitops poll (no pipeline restart, no event drops); `mode=js` replaces `compact-object-global.js` with new predicate logic — the engine triggers `restartPipeline()`. Use `js` only when CSV-keyed lookup is insufficient (regex match, multi-field-set OR semantics, external-flag gate). The compactReceiver decides per-event whether each event is emitted via `encode()` (compact templateHash+vars, ~20-40x volume reduction) or as `fullText`, keyed off `compactReceiverFieldNames` (default: `[symbolMessage]`). This tool is a renderer, not a decider: the caller decides which patterns to compact (typically via `log10x_top_patterns` filtered to high-volume rows) and passes the lists in. Output is markdown with a diff summary, the new full file content, and two ready-to-run shell snippets. Pass either `gitops_repo` directly OR `snapshot_id` (from `log10x_discover_env`) — when given a snapshot, the tool auto-resolves the repo from a running receiver pod's `GH_REPO` env var.",
+      "annotations": {
+        "title": "Advise: compact-lookup PR",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "category": "install"
     }
   }
 }

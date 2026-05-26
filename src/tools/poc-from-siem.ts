@@ -29,7 +29,7 @@ import {
 } from '../lib/siem/resolve.js';
 import type { SiemId } from '../lib/siem/pricing.js';
 import { SIEM_DISPLAY_NAMES, getAnalyzerCostForSiem } from '../lib/siem/pricing.js';
-import { extractPatterns } from '../lib/pattern-extraction.js';
+import { extractPatterns, collapseBySymbolMessage } from '../lib/pattern-extraction.js';
 import {
   renderPocReport,
   renderPocSummary,
@@ -264,7 +264,38 @@ export interface PocSubmitArgs {
   _mcpServer?: McpServer;
 }
 
-export async function executePocSubmit(args: PocSubmitArgs): Promise<string> {
+export async function executePocSubmit(args: PocSubmitArgs): Promise<string | import('../lib/output-types.js').StructuredOutput> {
+  const { buildEnvelope: __be, buildMarkdownEnvelope: __bme } = await import('../lib/output-types.js');
+  // Tool-level view fallback for callers passing { view } at the registration level.
+  // The submit schema doesn't declare `view`, so we accept it as an extra field on args.
+  const view = (args as unknown as { view?: 'summary' | 'markdown' }).view ?? 'summary';
+  const md = await executePocSubmitInner(args);
+  const sidMatch = md.match(/snapshot_id\*\*: `(.+?)`/);
+  const siemMatch = md.match(/siem_detected\*\*: (\S+)/);
+  const durMatch = md.match(/estimated_duration_minutes\*\*: (\d+)/);
+  if (view === 'markdown') {
+    return __bme({ tool: 'log10x_poc_from_siem_submit', summary: { headline: `POC submitted${sidMatch ? ` (snapshot_id ${sidMatch[1]})` : ''}` }, markdown: md });
+  }
+  return __be({
+    tool: 'log10x_poc_from_siem_submit',
+    view: 'summary',
+    summary: { headline: `POC submit accepted${siemMatch ? ` for ${siemMatch[1]}` : ''}${sidMatch ? ` (snapshot_id ${sidMatch[1]})` : ''}; estimated ${durMatch?.[1] ?? '?'} min. Poll log10x_poc_from_siem_status.` },
+    data: {
+      ok: true,
+      snapshot_id: sidMatch?.[1],
+      siem_detected: siemMatch?.[1],
+      estimated_duration_minutes: durMatch ? Number(durMatch[1]) : undefined,
+      window: args.window,
+      scope: args.scope,
+      query: args.query,
+      target_event_count: args.target_event_count,
+      max_pull_minutes: args.max_pull_minutes,
+    },
+    actions: sidMatch ? [{ tool: 'log10x_poc_from_siem_status', args: { snapshot_id: sidMatch[1] }, reason: 'poll POC progress; phases: pulling -> templatizing -> rendering -> complete' }] : [],
+  });
+}
+
+async function executePocSubmitInner(args: PocSubmitArgs): Promise<string> {
   // ── Resolve the connector ──
   const resolution = await resolveSiemSelection({ explicit: args.siem });
   if (resolution.kind === 'none') {
@@ -340,7 +371,54 @@ export interface PocStatusArgs {
   top_n?: number;
 }
 
-export async function executePocStatus(args: PocStatusArgs): Promise<string> {
+export async function executePocStatus(args: PocStatusArgs): Promise<string | import('../lib/output-types.js').StructuredOutput> {
+  const { buildEnvelope: __be, buildMarkdownEnvelope: __bme } = await import('../lib/output-types.js');
+  // poc_from_siem_status already has its own `view` enum (summary/full/yaml/configs/top/pattern).
+  // The MCP envelope `view` is a SEPARATE control: how to package the output.
+  // Convention: when the caller wants the typed envelope, they pass envelope_view='summary' or just omit it.
+  // We default to wrapping any view's rendered markdown in a typed envelope.
+  const envView = (args as unknown as { envelope_view?: 'summary' | 'markdown' }).envelope_view ?? 'summary';
+  const s = SNAPSHOTS.get(args.snapshot_id);
+  if (!s) {
+    throw new Error(
+      `Unknown snapshot_id "${args.snapshot_id}". Submit via log10x_poc_from_siem_submit first; snapshots live in-memory per MCP process.`
+    );
+  }
+  const md = await executePocStatusInner(args);
+  if (envView === 'markdown') {
+    return __bme({
+      tool: 'log10x_poc_from_siem_status',
+      summary: { headline: `POC status (${s.status}) for snapshot_id ${s.id}` },
+      markdown: md,
+    });
+  }
+  return __be({
+    tool: 'log10x_poc_from_siem_status',
+    view: 'summary',
+    summary: { headline: `POC ${s.status} for snapshot_id ${s.id}${s.status === 'complete' ? ` (${args.view ?? 'summary'} view)` : `, progress=${s.progressPct}%, elapsed=${Math.round((Date.now() - s.startedAtMs) / 1000)}s`}.` },
+    data: {
+      snapshot_id: s.id,
+      status: s.status,
+      progress_pct: s.progressPct,
+      step_detail: s.stepDetail,
+      elapsed_seconds: Math.round((Date.now() - s.startedAtMs) / 1000),
+      partial_patterns_found: s.partialPatternsFound,
+      report_file_path: s.reportFilePath,
+      error: s.error,
+      retry_hint: s.retryHint,
+      view_rendered: s.status === 'complete' ? (args.view ?? 'summary') : undefined,
+      report_markdown: s.status === 'complete' ? md : undefined,
+      partial_report_markdown: s.status === 'failed' ? s.partialReportMarkdown : undefined,
+    },
+    actions: s.status === 'complete'
+      ? []
+      : s.status === 'failed'
+        ? [{ tool: 'log10x_poc_from_siem_submit', args: {}, reason: 'POC failed — resubmit with adjusted args' }]
+        : [{ tool: 'log10x_poc_from_siem_status', args: { snapshot_id: s.id }, reason: 'continue polling every ~30s until status=complete' }],
+  });
+}
+
+async function executePocStatusInner(args: PocStatusArgs): Promise<string> {
   const s = SNAPSHOTS.get(args.snapshot_id);
   if (!s) {
     throw new Error(
@@ -516,6 +594,12 @@ export async function runPipeline(
     return;
   }
   const templateWallTimeMs = Date.now() - templStart;
+  // Collapse engine-emitted templateHashes that share a Reporter-tier
+  // symbolMessage into one row. From a user-facing-action standpoint
+  // those rows resolve to the same mute target, so showing them
+  // separately is noise. Patterns without a symbolMessage are left
+  // keyed by templateHash.
+  extraction.patterns = collapseBySymbolMessage(extraction.patterns);
   snapshot.partialPatternsFound = extraction.patterns.length;
 
   // Await volume detect AFTER templating — the templater is the long pole
@@ -534,7 +618,7 @@ export async function runPipeline(
     snapshot.stepDetail = 'ai-prettifying pattern names';
     const topPatterns = extraction.patterns.slice(0, 30);
     const prettifyInputs = topPatterns.map((p) => ({
-      identity: toSnakeCaseLocal(p.template, p.hash),
+      identity: p.hash,
       service: p.service,
       severity: p.severity,
       count: p.count,
@@ -699,23 +783,6 @@ async function resolveVolume(
   } catch (e) {
     return { errorNote: `Auto-detect threw: ${(e as Error).message.slice(0, 200)}` };
   }
-}
-
-/**
- * Mirror the snake-case identity derivation the renderer uses. Duplicated
- * here so we can compute identity once before prettify and the renderer
- * computes the same value later. Keep in sync with `toSnakeCase` in
- * `poc-report-renderer.ts`.
- */
-function toSnakeCaseLocal(template: string, fallbackHash: string): string {
-  let s = template.replace(/\$\([^)]*\)/g, '');
-  s = s.trim().replace(/^(FATAL|ERROR|WARN(?:ING)?|INFO|DEBUG|TRACE|CRIT(?:ICAL)?)\b\s*/i, '');
-  s = s.replace(/([A-Za-z_][A-Za-z0-9_]*)=\$/g, '$1');
-  s = s.replace(/\$/g, '');
-  s = s.replace(/[^A-Za-z0-9]+/g, '_');
-  s = s.toLowerCase().replace(/_+/g, '_').replace(/^_+|_+$/g, '');
-  if (!s) return fallbackHash.slice(0, 16);
-  return s.slice(0, 120);
 }
 
 // Exposed for tests.
