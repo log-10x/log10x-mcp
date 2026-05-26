@@ -20,7 +20,7 @@
       "TRACE": 98304252.23443514
     },
     "expected_tool_chain": [
-      "log10x_list_by_label"
+      "log10x_top_patterns"
     ],
     "expected_oracle_query": "sum by (severity_level)(increase(all_events_summaryBytes_total[24h]))",
     "enable_llm_classifier_axes": ["narrative_frame", "window", "citation"],

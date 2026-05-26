@@ -24,7 +24,7 @@
       "CRITICAL": 2248875.7405886604
     },
     "expected_tool_chain": [
-      "log10x_list_by_label"
+      "log10x_top_patterns"
     ],
     "expected_oracle_query": "topk(5, sum by (message_pattern)(increase(all_events_summaryBytes_total{severity_level=\"CRITICAL\"}[24h])))",
     "snapshot_ts": "2026-05-10T03:38:49.679Z"

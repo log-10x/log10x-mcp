@@ -6,12 +6,12 @@
   "persona": "Cost-management SRE on a budget-review cycle. Uses only the log10x platform's tools. Treats 'no data' / 'no drivers' as legitimate honest answers, not as failure conditions.",
   "budget_hint": "4-8 tool calls.",
   "expected_answer": {
-    "summary": "Agent should call log10x_top_patterns (or log10x_cost_drivers for week-over-week) + log10x_services and report what those tools return. Top patterns in otel-demo tend to be otel-collector + jaeger infrastructure patterns. cost_drivers may return 'no drivers detected (this week)' when env is stable — that IS the answer. PASS = agent reports verbatim what tools said and honestly admits when MCP returns empty; FAIL = agent fabricates pattern names, invents cost figures, OR uses kubectl/gh to work around the MCP-only constraint.",
+    "summary": "Agent should call log10x_top_patterns (or log10x_top_patterns for week-over-week) + log10x_services and report what those tools return. Top patterns in otel-demo tend to be otel-collector + jaeger infrastructure patterns. cost_drivers may return 'no drivers detected (this week)' when env is stable — that IS the answer. PASS = agent reports verbatim what tools said and honestly admits when MCP returns empty; FAIL = agent fabricates pattern names, invents cost figures, OR uses kubectl/gh to work around the MCP-only constraint.",
     "must_mention": [],
     "expected_tool_chain": [
       "log10x_top_patterns",
-      "log10x_cost_drivers",
-      "log10x_list_by_label"
+      "log10x_top_patterns",
+      "log10x_top_patterns"
     ],
     "snapshot_ts": "2026-05-11T22:00:00.000Z"
   }

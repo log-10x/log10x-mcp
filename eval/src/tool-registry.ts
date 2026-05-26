@@ -29,30 +29,26 @@ import { fetchAnalyzerCost } from '../../build/lib/api.js';
 import type { EvalEnv } from './env.js';
 
 // ─── Tool imports (pulled from build/tools/*.js) ────────────────────────
-import { costDriversSchema, executeCostDrivers } from '../../build/tools/cost-drivers.js';
+// chk-15 cut 5 redundant tools (cost_drivers, list_by_label, exclusion_filter,
+// investigation_get, retriever_query_status); they no longer exist as files
+// or registrations. Fixtures referencing the old names have been rewritten
+// to the replacements (top_patterns / pattern_mitigate / investigate /
+// retriever_query) — see eval/fixtures/*.json.
 import { eventLookupSchema, executeEventLookup } from '../../build/tools/event-lookup.js';
 import { patternExamplesSchema, executePatternExamples } from '../../build/tools/pattern-examples.js';
 import { savingsSchema, executeSavings } from '../../build/tools/savings.js';
 import { trendSchema, executeTrend } from '../../build/tools/trend.js';
 import { servicesSchema, executeServices } from '../../build/tools/services.js';
-import { exclusionFilterSchema, executeExclusionFilter } from '../../build/tools/exclusion-filter.js';
 import { dependencyCheckSchema, executeDependencyCheck } from '../../build/tools/dependency-check.js';
 import { discoverLabelsSchema, executeDiscoverLabels } from '../../build/tools/discover-labels.js';
 import { topPatternsSchema, executeTopPatterns } from '../../build/tools/top-patterns.js';
-import { listByLabelSchema, executeListByLabel } from '../../build/tools/list-by-label.js';
 import {
   investigateSchema,
   executeInvestigate,
-  investigationGetSchema,
-  executeInvestigationGet,
 } from '../../build/tools/investigate.js';
 import { resolveBatchSchema, executeResolveBatch } from '../../build/tools/resolve-batch.js';
 import { extractTemplatesSchema, executeExtractTemplates } from '../../build/tools/extract-templates.js';
 import { retrieverQuerySchema, executeRetrieverQuery } from '../../build/tools/retriever-query.js';
-import {
-  retrieverQueryStatusSchema,
-  executeRetrieverQueryStatus,
-} from '../../build/tools/retriever-query-status.js';
 import { retrieverSeriesSchema, executeRetrieverSeries } from '../../build/tools/retriever-series.js';
 import { backfillMetricSchema, executeBackfillMetric } from '../../build/tools/backfill-metric.js';
 import { doctorSchema, executeDoctor } from '../../build/tools/doctor.js';
@@ -166,10 +162,32 @@ async function getAnalyzerCost(env: EnvConfig, override: number | undefined): Pr
 
 // ─── Dispatch table ─────────────────────────────────────────────────────
 
+/**
+ * After the chk-15..chk-33 envelope refactor, every upstream tool now
+ * returns `Promise<string | StructuredOutput>`. The eval harness still
+ * expects a single string for downstream matchers (regex on rendered
+ * markdown, headline assertions, etc.). When a tool returns the typed
+ * envelope, we serialize it to JSON so the matchers can run against
+ * structured fields too. Markdown-view envelopes get their data.markdown
+ * extracted verbatim so the existing prose-matchers still apply.
+ */
+type ToolReturn = string | { view?: 'summary' | 'markdown'; data?: unknown; [k: string]: unknown };
+
 type ExecuteFn = (
   args: Record<string, unknown>,
   env: EvalEnv
-) => Promise<string>;
+) => Promise<ToolReturn>;
+
+function normalizeReturn(r: ToolReturn): string {
+  if (typeof r === 'string') return r;
+  if (r && typeof r === 'object') {
+    if (r.view === 'markdown' && r.data && typeof (r.data as { markdown?: unknown }).markdown === 'string') {
+      return (r.data as { markdown: string }).markdown;
+    }
+    return JSON.stringify(r, null, 2);
+  }
+  return String(r);
+}
 
 // Dynamic args: the upstream Zod schemas know the per-tool shapes; the
 // harness deliberately treats args as a generic record so fixtures can
@@ -236,12 +254,6 @@ function formatZodError(e: z.ZodError, schema: Record<string, z.ZodTypeAny>): st
 
 const TOOL_TABLE: Record<string, ExecuteFn> = {
   // env + cost auto-detect
-  log10x_cost_drivers: async (raw, ev) => {
-    const args = parseArgs(costDriversSchema, raw);
-    const e = resolveEnv(buildLoadedEnvs(ev), args.environment);
-    const cost = await getAnalyzerCost(e, args.analyzerCost);
-    return executeCostDrivers({ ...args, analyzerCost: cost }, e);
-  },
   log10x_event_lookup: async (raw, ev) => {
     const args = parseArgs(eventLookupSchema, raw);
     const e = resolveEnv(buildLoadedEnvs(ev), args.environment);
@@ -272,12 +284,6 @@ const TOOL_TABLE: Record<string, ExecuteFn> = {
     const cost = await getAnalyzerCost(e, args.analyzerCost);
     return executeTopPatterns({ ...args, analyzerCost: cost }, e);
   },
-  log10x_list_by_label: async (raw, ev) => {
-    const args = parseArgs(listByLabelSchema, raw);
-    const e = resolveEnv(buildLoadedEnvs(ev), args.environment);
-    const cost = await getAnalyzerCost(e, args.analyzerCost);
-    return executeListByLabel({ ...args, analyzerCost: cost }, e);
-  },
   log10x_backfill_metric: async (raw, ev) => {
     const args = parseArgs(backfillMetricSchema, raw);
     const e = resolveEnv(buildLoadedEnvs(ev), args.environment);
@@ -305,11 +311,6 @@ const TOOL_TABLE: Record<string, ExecuteFn> = {
     const e = resolveEnv(buildLoadedEnvs(ev), args.environment);
     return executeRetrieverQuery(args, e);
   },
-  log10x_retriever_query_status: async (raw, ev) => {
-    const args = parseArgs(retrieverQueryStatusSchema, raw);
-    const e = resolveEnv(buildLoadedEnvs(ev), args.environment);
-    return executeRetrieverQueryStatus(args, e);
-  },
   log10x_retriever_series: async (raw, ev) => {
     const args = parseArgs(retrieverSeriesSchema, raw);
     const e = resolveEnv(buildLoadedEnvs(ev), args.environment);
@@ -332,9 +333,7 @@ const TOOL_TABLE: Record<string, ExecuteFn> = {
   },
 
   // args only (no env / no cost)
-  log10x_exclusion_filter: async (raw) => executeExclusionFilter(parseArgs(exclusionFilterSchema, raw)),
   log10x_dependency_check: async (raw) => executeDependencyCheck(parseArgs(dependencyCheckSchema, raw)),
-  log10x_investigation_get: async (raw) => executeInvestigationGet(parseArgs(investigationGetSchema, raw)),
   log10x_resolve_batch: async (raw) => executeResolveBatch(parseArgs(resolveBatchSchema, raw)),
   log10x_extract_templates: async (raw) => executeExtractTemplates(parseArgs(extractTemplatesSchema, raw)),
   log10x_doctor: async (raw) => executeDoctor(parseArgs(doctorSchema, raw)),
@@ -384,7 +383,8 @@ export async function invokeTool(
   if (!fn) throw new UnknownToolError(name);
   const started = Date.now();
   try {
-    const text = await fn(args, env);
+    const raw = await fn(args, env);
+    const text = normalizeReturn(raw);
     return { text, isError: false, durationMs: Date.now() - started };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);

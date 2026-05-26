@@ -23,7 +23,7 @@
       "TRACE": 98304252.23443514
     },
     "expected_tool_chain": [
-      "log10x_list_by_label"
+      "log10x_top_patterns"
     ],
     "snapshot_ts": "2026-05-10T03:38:49.679Z"
   }

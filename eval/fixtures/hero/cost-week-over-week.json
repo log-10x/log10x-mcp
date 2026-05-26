@@ -24,7 +24,7 @@
     ],
     "must_mention": [],
     "expected_tool_chain": [
-      "log10x_cost_drivers"
+      "log10x_top_patterns"
     ],
     "enable_llm_classifier_axes": ["direction", "narrative_frame"],
     "expected_direction": "FLAT",

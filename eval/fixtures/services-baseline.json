@@ -1,16 +1,20 @@
 {
   "id": "services-baseline",
-  "title": "Services listing — pipeline health baseline",
-  "description": "Sanity-check that `log10x_services` runs cleanly on demo env and surfaces at least one service. The OTel demo env continuously replays cart/shipping/etc. services, so this should never return empty. If services returns empty, the metrics pipeline is broken — this scenario catches that regression deterministically.",
+  "title": "Services listing \u2014 pipeline health baseline",
+  "description": "Sanity-check that `log10x_services` runs cleanly on demo env and surfaces at least one service. The OTel demo env continuously replays cart/shipping/etc. services, so this should never return empty. If services returns empty, the metrics pipeline is broken \u2014 this scenario catches that regression deterministically.",
   "prompt": "What services do we monitor and which is the biggest by volume?",
   "initial_tool": {
     "tool": "log10x_services",
-    "args": { "timeRange": "1d" },
+    "args": {
+      "timeRange": "1d"
+    },
     "reason": "services lists monitored services ranked by cost; 1d is the canonical baseline window."
   },
   "tool_arg_defaults": {},
   "expected_sequence": {
-    "must_include": ["log10x_list_by_label"],
+    "must_include": [
+      "log10x_top_patterns"
+    ],
     "tolerance": 0
   },
   "ground_truth": [
@@ -27,7 +31,7 @@
       "description": "services emits a NEXT_ACTIONS hint to a downstream tool (top_patterns / cost_drivers / list_by_label)",
       "scope": "tool_result",
       "tool": "log10x_services",
-      "pattern": "NEXT_ACTIONS:.*(log10x_top_patterns|log10x_cost_drivers|log10x_list_by_label|log10x_investigate)"
+      "pattern": "NEXT_ACTIONS:.*(log10x_top_patterns|log10x_top_patterns|log10x_investigate)"
     }
   ],
   "quality_criteria": {
@@ -39,5 +43,9 @@
   "optimal_steps": 1,
   "max_steps": 5,
   "error_policy": "continue",
-  "tags": ["services", "pipeline-health", "baseline"]
+  "tags": [
+    "services",
+    "pipeline-health",
+    "baseline"
+  ]
 }

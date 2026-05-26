@@ -35,7 +35,7 @@
       "cart_cartstore drives the bill"
     ],
     "expected_tool_chain": [
-      "log10x_cost_drivers"
+      "log10x_top_patterns"
     ],
     "expected_oracle_query": "topk(5, sum by (message_pattern)(increase(all_events_summaryBytes_total[24h])) - sum by (message_pattern)(increase(all_events_summaryBytes_total[24h] offset 1d)))",
     "snapshot_ts": "2026-05-10T03:38:49.679Z"
