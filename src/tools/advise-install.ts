@@ -183,7 +183,19 @@ type WizardData =
   | { mode: 'missing_snapshot'; ok: false; snapshot_id: string; markdown: string }
   | { mode: 'session_error'; ok: false; snapshot_id: string; markdown: string }
   | { mode: 'cancelled'; ok: false; snapshot_id: string; markdown: string }
-  | { mode: 'next_question'; ok: false; snapshot_id: string; question_id: QuestionId; markdown: string }
+  | {
+      mode: 'next_question';
+      ok: false;
+      snapshot_id: string;
+      question_id: QuestionId;
+      markdown: string;
+      /**
+       * Structured rendering of the question — variants by input shape.
+       * The agent reads this instead of parsing the markdown to know
+       * what to ask the user and what shape the answer takes.
+       */
+      shape: QuestionShape;
+    }
   | { mode: 'license_error'; ok: false; snapshot_id: string; error_message: string; markdown: string }
   | { mode: 'signin_required'; ok: false; snapshot_id: string; markdown: string }
   | { mode: 'demo_airgapped_warning'; ok: true; snapshot_id: string; is_signed_in: boolean; markdown: string }
@@ -501,6 +513,7 @@ export async function executeAdviseInstall(
           snapshot_id: args.snapshot_id,
           question_id: next.questionId,
           markdown: next.markdown,
+          shape: next.shape,
         });
       }
     }
@@ -515,6 +528,7 @@ export async function executeAdviseInstall(
         snapshot_id: args.snapshot_id,
         question_id: next.questionId,
         markdown: next.markdown,
+        shape: next.shape,
       });
     }
   }
@@ -884,12 +898,80 @@ async function elicitMissingAnswers(
 // ── Question routing ──
 
 type QuestionId = 'app' | 'forwarder' | 'no-forwarder' | 'backends' | 'airgapped-log10x-conflict' | 'backend-credentials' | 'airgapped' | 'license-source' | 'license-paste';
-type NextStep = { kind: 'ask'; markdown: string; questionId: QuestionId } | { kind: 'render' };
+
+/**
+ * Structured rendering of the wizard's next question. The agent uses
+ * this instead of regex-grepping the markdown for valid answers — it
+ * sees the choices, their human labels, which one is recommended, and
+ * the schema field name to fill on the next call.
+ *
+ * Variants by user-input shape:
+ *   - single-choice  — pick one (`app`, `forwarder`, `license-source`)
+ *   - multi-choice   — pick one or more (`backends`)
+ *   - boolean        — yes/no (`airgapped`)
+ *   - string         — free-text input (`license-paste`)
+ *   - form           — multi-field object (`backend-credentials`)
+ *   - info           — no input expected; the agent presents
+ *     `resolutions[]` (each with an example re-invocation) so the user
+ *     can pick a path out of the situation (`no-forwarder`,
+ *     `airgapped-log10x-conflict`)
+ */
+type QuestionChoice = {
+  value: string;
+  label: string;
+  recommended?: boolean;
+  details?: string;
+};
+
+type QuestionFormField = {
+  name: string;
+  type: 'string';
+  description: string;
+  required: boolean;
+  default?: string;
+  example?: string;
+};
+
+type QuestionShape =
+  | { type: 'single-choice'; answer_field: string; choices: QuestionChoice[] }
+  | { type: 'multi-choice'; answer_field: string; min_items: number; choices: QuestionChoice[] }
+  | { type: 'boolean'; answer_field: string; default?: boolean }
+  | { type: 'string'; answer_field: string; description: string; example?: string }
+  | { type: 'form'; description: string; fields: QuestionFormField[] }
+  | { type: 'info'; resolutions: Array<{ args: Record<string, unknown>; description: string }> };
+
+type NextStep =
+  | { kind: 'ask'; markdown: string; questionId: QuestionId; shape: QuestionShape }
+  | { kind: 'render' };
 
 function nextQuestion(snapshot: DiscoverySnapshot, session: WizardSession): NextStep {
   // Q1: app
   if (!session.app) {
-    return { kind: 'ask', markdown: askApp(snapshot), questionId: 'app' };
+    const supportedDetected = snapshot.kubectl.forwarders.filter(
+      (f) => (SUPPORTED_FORWARDERS as readonly string[]).includes(f.kind)
+    );
+    const choices: QuestionChoice[] = [
+      {
+        value: 'reporter',
+        label: 'Reporter (standalone DaemonSet, zero-touch)',
+        recommended: supportedDetected.length === 0,
+        details: 'A dedicated DaemonSet running alongside your existing forwarder. Tails container logs in parallel — does not touch your forwarder. Read-only.',
+      },
+    ];
+    if (supportedDetected.length > 0) {
+      choices.push({
+        value: 'receiver',
+        label: 'Receiver (sidecar inside your existing forwarder)',
+        recommended: true,
+        details: `A log10x/edge-10x sidecar injected into your existing forwarder pod (${supportedDetected.map((d) => d.kind).join(', ')} detected). Filters / samples / compacts events in-flight.`,
+      });
+    }
+    return {
+      kind: 'ask',
+      markdown: askApp(snapshot),
+      questionId: 'app',
+      shape: { type: 'single-choice', answer_field: 'app', choices },
+    };
   }
 
   // Q2: Receiver-only forwarder choice (when ambiguous)
@@ -904,17 +986,34 @@ function nextQuestion(snapshot: DiscoverySnapshot, session: WizardSession): Next
       // No supported forwarder. Differentiate "nothing detected" from
       // "only unsupported (filebeat) detected" so the user gets the
       // right next-step guidance.
+      const baseResolutions: Array<{ args: Record<string, unknown>; description: string }> = [
+        { args: { snapshot_id: session.snapshotId, app: 'reporter' }, description: 'Switch to the standalone Reporter DaemonSet — runs alongside whatever forwarder you have today, zero-touch.' },
+      ];
       if (unsupported.length > 0) {
         return {
           kind: 'ask',
           markdown: unsupportedForwarderForReceiver(unsupported),
           questionId: 'no-forwarder',
+          shape: {
+            type: 'info',
+            resolutions: [
+              ...baseResolutions,
+              { args: {}, description: `Add a wizard-supported forwarder to the cluster (${SUPPORTED_FORWARDERS.join(' / ')}), then re-run discover_env + advise_install.` },
+            ],
+          },
         };
       }
       return {
         kind: 'ask',
         markdown: noForwarderForReceiver(),
         questionId: 'no-forwarder',
+        shape: {
+          type: 'info',
+          resolutions: [
+            ...baseResolutions,
+            { args: {}, description: `Install a forwarder first (${SUPPORTED_FORWARDERS.join(' / ')}), then re-run discover_env + advise_install.` },
+          ],
+        },
       };
     }
     if (supported.length === 1) {
@@ -922,18 +1021,76 @@ function nextQuestion(snapshot: DiscoverySnapshot, session: WizardSession): Next
       updateWizardSession(session.snapshotId, { forwarder: supported[0].kind });
       session.forwarder = supported[0].kind;
     } else {
-      return { kind: 'ask', markdown: askForwarder(supported), questionId: 'forwarder' };
+      return {
+        kind: 'ask',
+        markdown: askForwarder(supported),
+        questionId: 'forwarder',
+        shape: {
+          type: 'single-choice',
+          answer_field: 'forwarder',
+          choices: supported.map((d) => ({
+            value: d.kind,
+            label: `${d.kind} (${d.workloadKind}/${d.workloadName} in ${d.namespace})`,
+            details: `image: ${d.image}, ready: ${d.readyReplicas}`,
+          })),
+        },
+      };
     }
   }
 
   // Q3: backends — can be multiple, must be non-empty
   if (!session.backends || session.backends.length === 0) {
-    return { kind: 'ask', markdown: askBackends(snapshot.kubectl.backendAgents), questionId: 'backends' };
+    const detectedSet = new Set(snapshot.kubectl.backendAgents.map((a) => a.kind));
+    const backendDetails: Record<MetricsBackendKind, string> = {
+      log10x: 'Log10x-managed Prometheus — no infra to run; the MCP queries metrics straight from here.',
+      datadog: 'Datadog metric API (DD-API-KEY auth).',
+      elastic: 'Elasticsearch metric ingest API.',
+      cloudwatch: 'AWS CloudWatch metric streams.',
+      signalfx: 'Splunk Observability (SignalFx) metric ingest API.',
+      prometheus: 'Customer-owned Prometheus / Mimir / Thanos remote_write endpoint.',
+    };
+    return {
+      kind: 'ask',
+      markdown: askBackends(snapshot.kubectl.backendAgents),
+      questionId: 'backends',
+      shape: {
+        type: 'multi-choice',
+        answer_field: 'backends',
+        min_items: 1,
+        choices: SUPPORTED_BACKENDS.map((b) => {
+          const detected = detectedSet.has(b as MetricsBackendKind);
+          const detail = backendDetails[b as MetricsBackendKind] ?? '';
+          return {
+            value: b,
+            label: detected ? `${BACKEND_LABEL[b as MetricsBackendKind]} (detected in your cluster)` : BACKEND_LABEL[b as MetricsBackendKind],
+            recommended: b === 'log10x' || detected,
+            details: detail,
+          };
+        }),
+      },
+    };
   }
 
   // Conflict check: airgapped + log10x in backends — surface, don't auto-resolve
   if (session.airgapped === true && session.backends.includes('log10x')) {
-    return { kind: 'ask', markdown: airgappedLog10xConflict(session.backends), questionId: 'airgapped-log10x-conflict' };
+    return {
+      kind: 'ask',
+      markdown: airgappedLog10xConflict(session.backends),
+      questionId: 'airgapped-log10x-conflict',
+      shape: {
+        type: 'info',
+        resolutions: [
+          {
+            args: { snapshot_id: session.snapshotId, backends: session.backends.filter((b) => b !== 'log10x') },
+            description: 'Keep airgapped, drop "log10x" from backends — engine emits only to your own backend(s).',
+          },
+          {
+            args: { snapshot_id: session.snapshotId, airgapped: false },
+            description: 'Keep "log10x" in backends, drop airgapped — engine reports to log10x SaaS + your own backend(s).',
+          },
+        ],
+      },
+    };
   }
 
   // Q4: per-backend credentials — ask for any non-`log10x` backend that
@@ -943,7 +1100,38 @@ function nextQuestion(snapshot: DiscoverySnapshot, session: WizardSession): Next
     (b) => b !== 'log10x' && !(session.backendCredentials?.[b])
   );
   if (backendsNeedingCreds.length > 0) {
-    return { kind: 'ask', markdown: askBackendCredentials(backendsNeedingCreds), questionId: 'backend-credentials' };
+    const fields: QuestionFormField[] = [];
+    for (const backend of backendsNeedingCreds) {
+      const spec = BACKEND_ENV_SPECS[backend];
+      if (!spec) continue;
+      fields.push({
+        name: `backend_credentials.${backend}.secretName`,
+        type: 'string',
+        description: `Existing Kubernetes Secret holding ${BACKEND_LABEL[backend]} credentials. Expected keys inside: ${spec.secret.map((s) => `\`${s.secretKey}\` (→ ${s.envVar})`).join(', ')}.`,
+        required: true,
+        default: defaultSecretNameFor(backend),
+      });
+      for (const p of spec.plain) {
+        fields.push({
+          name: `backend_credentials.${backend}.plainValues.${p.envVar}`,
+          type: 'string',
+          description: `${p.envVar} for ${BACKEND_LABEL[backend]}.`,
+          required: p.default === undefined,
+          default: p.default,
+          example: p.placeholder,
+        });
+      }
+    }
+    return {
+      kind: 'ask',
+      markdown: askBackendCredentials(backendsNeedingCreds),
+      questionId: 'backend-credentials',
+      shape: {
+        type: 'form',
+        description: `For each non-log10x backend (${backendsNeedingCreds.join(', ')}), provide a Kubernetes Secret name + optional plain-value overrides. The engine reads sensitive values from the Secret at runtime — they never enter values.yaml.`,
+        fields,
+      },
+    };
   }
 
   // Q5: airgapped — only relevant when backends doesn't already include log10x
@@ -951,7 +1139,12 @@ function nextQuestion(snapshot: DiscoverySnapshot, session: WizardSession): Next
   // airgapped is moot)
   const hasLog10x = session.backends.includes('log10x');
   if (!hasLog10x && session.airgapped === undefined) {
-    return { kind: 'ask', markdown: askAirgapped(session.backends), questionId: 'airgapped' };
+    return {
+      kind: 'ask',
+      markdown: askAirgapped(session.backends),
+      questionId: 'airgapped',
+      shape: { type: 'boolean', answer_field: 'airgapped', default: false },
+    };
   }
   // backends includes log10x → silently set airgapped=false so the
   // session is fully determined.
@@ -962,14 +1155,50 @@ function nextQuestion(snapshot: DiscoverySnapshot, session: WizardSession): Next
 
   // Q6: license source — sign in (recommended), demo, or paste.
   if (!session.licenseSource) {
-    return { kind: 'ask', markdown: askLicenseSource(), questionId: 'license-source' };
+    return {
+      kind: 'ask',
+      markdown: askLicenseSource(),
+      questionId: 'license-source',
+      shape: {
+        type: 'single-choice',
+        answer_field: 'license_source',
+        choices: [
+          {
+            value: 'signin',
+            label: 'Sign in to Log10x — real license, recommended',
+            recommended: true,
+            details: 'Call log10x_signin_start to open the device-code browser flow; after sign-in, re-invoke advise_install and the wizard mints a user-scoped license. Required for airgapped installs.',
+          },
+          {
+            value: 'demo',
+            label: 'Mint an anonymous 14-day demo license',
+            details: 'Quick + zero-setup. Transient (expires in 14 days). Cannot run airgapped — the engine downgrades to online mode with a warning.',
+          },
+          {
+            value: 'paste',
+            label: "I'll paste a license JWT I already have",
+            details: 'Re-invoke with license_source: "paste" and license_jwt_paste: "<jwt>". The wizard mounts it via a Kubernetes Secret.',
+          },
+        ],
+      },
+    };
   }
 
   // Q7: when license_source=paste and the JWT hasn't been provided yet,
   // ask for it. (The agent passes it via `license_jwt_paste`, which the
   // session merge folds into `licenseJwt`.)
   if (session.licenseSource === 'paste' && !session.licenseJwt) {
-    return { kind: 'ask', markdown: askLicensePaste(), questionId: 'license-paste' };
+    return {
+      kind: 'ask',
+      markdown: askLicensePaste(),
+      questionId: 'license-paste',
+      shape: {
+        type: 'string',
+        answer_field: 'license_jwt_paste',
+        description: 'The JWT string the engine will use to authenticate. Mounted via a Kubernetes Secret at /etc/tenx/license/license.jwt — never written to values.yaml.',
+        example: 'eyJhbGciOiJSUzI1NiIs...',
+      },
+    };
   }
 
   return { kind: 'render' };
