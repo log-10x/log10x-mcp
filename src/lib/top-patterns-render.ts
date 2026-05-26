@@ -53,6 +53,7 @@ import type { FieldVariation } from './field-variation.js';
 import type { ParsedSiemEvent } from './siem/sample.js';
 import { fmtAge } from './first-seen.js';
 import { type Badge, type BadgeInfo, fmtBadgeInfo } from './top-patterns-extras.js';
+import { detectIncidents as detectIncidentsGeneric } from './detectors/incident-cluster.js';
 import type { DepCheckResult } from './siem/deps/index.js';
 
 export interface TopPatternRow {
@@ -499,115 +500,37 @@ interface Incident {
   combinedMonthly: number;
 }
 
-// Conservative thresholds — over-merging is the trap the SIEMs fall into
-// (collapsing genuinely distinct errors). Two rows join on ONE of:
-//   - high Jaccard (very similar descriptors), OR
-//   - high overlap coefficient + >= 3 shared substantial tokens (one
-//     descriptor's specific vocabulary is contained in the other — e.g.
-//     a raw error and the same error wrapped in retry/flush text; Jaccard
-//     undercounts this because the wrapper adds non-shared tokens), OR
-//   - weak overlap + co-moving volume curves.
-// The >= 3-shared-token floor is what stops a 1-2 generic-word overlap
-// from merging genuinely distinct failures.
-const INCIDENT_JACCARD_DIRECT = 0.5;
-const INCIDENT_OVERLAP_COEF = 0.6;
-const INCIDENT_MIN_SHARED = 3;
-const INCIDENT_JACCARD_WITH_CORR = 0.2;
-const INCIDENT_CORR = 0.75;
-
 /**
- * Group the shown rows into incidents — sets of patterns that are the
- * same underlying failure. Same service is required; then either a
- * strong descriptor-token overlap, or a weak overlap with co-moving
- * 24h volume curves. Returns only multi-member groups, largest combined
- * cost first. Never merges across services and always leaves the
- * per-pattern rows intact (this only adds framing).
+ * Adapter to the shared incident-cluster detector at
+ * `src/lib/detectors/incident-cluster.ts`. Same algorithm and
+ * thresholds as before; this file now keeps only the TopPatternRow
+ * shaping and the rank-index roundtripping for the rendered callout.
  */
 function detectIncidents(rows: TopPatternRow[], descs: string[]): Incident[] {
-  const n = rows.length;
-  const tokens = descs.map(incidentTokens);
-  const parent = Array.from({ length: n }, (_, i) => i);
-  const find = (x: number): number =>
-    parent[x] === x ? x : (parent[x] = find(parent[x]));
-  const union = (a: number, b: number): void => {
-    parent[find(a)] = find(b);
-  };
-
-  for (let i = 0; i < n; i++) {
-    for (let j = i + 1; j < n; j++) {
-      if ((rows[i].service || '') !== (rows[j].service || '')) continue;
-      const inter = intersectionSize(tokens[i], tokens[j]);
-      const minSize = Math.min(tokens[i].size, tokens[j].size);
-      const union2 = tokens[i].size + tokens[j].size - inter;
-      const jac = union2 === 0 ? 0 : inter / union2;
-      const overlap = minSize === 0 ? 0 : inter / minSize;
-      let related =
-        jac >= INCIDENT_JACCARD_DIRECT ||
-        (overlap >= INCIDENT_OVERLAP_COEF && inter >= INCIDENT_MIN_SHARED);
-      if (!related && jac >= INCIDENT_JACCARD_WITH_CORR) {
-        related = pearson(rows[i].trendBytesPerSec, rows[j].trendBytesPerSec) >= INCIDENT_CORR;
-      }
-      if (related) union(i, j);
-    }
+  const clusters = detectIncidentsGeneric(
+    rows.map((r, i) => ({
+      identity: r.hash || `idx-${i}`,
+      service: r.service,
+      descriptor: descs[i] ?? '',
+      costPerMonthUsd: r.costPerMonth,
+      trendBytesPerSec: r.trendBytesPerSec,
+    }))
+  );
+  // Map cluster member identity back to the row's rank for the
+  // existing callout renderer.
+  const rankByIdentity = new Map<string, number>();
+  for (let i = 0; i < rows.length; i++) {
+    rankByIdentity.set(rows[i].hash || `idx-${i}`, rows[i].rank);
   }
-
-  const groups = new Map<number, number[]>();
-  for (let i = 0; i < n; i++) {
-    const root = find(i);
-    const g = groups.get(root);
-    if (g) g.push(i);
-    else groups.set(root, [i]);
-  }
-
-  const incidents: Incident[] = [];
-  for (const idxs of groups.values()) {
-    if (idxs.length < 2) continue;
-    idxs.sort((a, b) => a - b); // ascending index = descending cost (rows are cost-sorted)
-    incidents.push({
-      ranks: idxs.map(i => rows[i].rank),
-      label: descs[idxs[0]],
-      service: rows[idxs[0]].service || '(unattributed)',
-      combinedMonthly: idxs.reduce((s, i) => s + rows[i].costPerMonth, 0),
-    });
-  }
-  incidents.sort((a, b) => b.combinedMonthly - a.combinedMonthly);
-  return incidents;
-}
-
-/** Tokenize a descriptor into meaningful lowercase tokens: length >= 3,
- * dropping pure-numeric tokens (per-event noise like IP octets / ports). */
-function incidentTokens(desc: string): Set<string> {
-  const out = new Set<string>();
-  for (const t of desc.toLowerCase().split(/[^a-z0-9]+/)) {
-    if (t.length < 3 || /^\d+$/.test(t)) continue;
-    out.add(t);
-  }
-  return out;
-}
-
-function intersectionSize(a: Set<string>, b: Set<string>): number {
-  let inter = 0;
-  for (const x of a) if (b.has(x)) inter++;
-  return inter;
-}
-
-function pearson(a: number[], b: number[]): number {
-  const n = Math.min(a.length, b.length);
-  if (n < 3) return 0;
-  const ax = a.slice(0, n);
-  const bx = b.slice(0, n);
-  const ma = ax.reduce((s, x) => s + x, 0) / n;
-  const mb = bx.reduce((s, x) => s + x, 0) / n;
-  let num = 0, da = 0, db = 0;
-  for (let i = 0; i < n; i++) {
-    const x = ax[i] - ma;
-    const y = bx[i] - mb;
-    num += x * y;
-    da += x * x;
-    db += y * y;
-  }
-  if (da === 0 || db === 0) return 0;
-  return num / Math.sqrt(da * db);
+  return clusters.map((c) => ({
+    ranks: c.members
+      .map((m) => rankByIdentity.get(m.identity))
+      .filter((r): r is number => typeof r === 'number')
+      .sort((a, b) => a - b),
+    label: c.representativeLabel,
+    service: c.service,
+    combinedMonthly: c.combinedMonthlyUsd,
+  }));
 }
 
 /** Render the incident callout shown above the list — ranks of the
