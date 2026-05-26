@@ -31,6 +31,7 @@ import {
 } from '../lib/retriever-diagnostics.js';
 import { fmtCount } from '../lib/format.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
+import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
 export const retrieverQuerySchema = {
   pattern: z
@@ -85,7 +86,39 @@ export const retrieverQuerySchema = {
     .default('5m')
     .describe('Bucket size when format=aggregated or ephemeral_series. Examples: `1m`, `5m`, `1h`, `1d`.'),
   environment: z.string().optional().describe('Environment nickname — required if multi-env.'),
+  view: z
+    .enum(['summary', 'markdown'])
+    .default('summary')
+    .describe('summary returns the typed envelope (data.events_matched, data.events[], data.query_id, data.diagnostics). markdown wraps the rendered report in data.markdown.'),
 };
+
+interface RetrieverQuerySummary {
+  status: 'ok' | 'not_configured';
+  query_id?: string;
+  target?: string;
+  from: string;
+  to: string;
+  search?: string;
+  pattern?: string;
+  filters: string[];
+  format: 'events' | 'count' | 'aggregated' | 'ephemeral_series';
+  events_matched: number;
+  events_returned: number;
+  worker_files: number;
+  wall_time_ms: number;
+  truncated: boolean;
+  partial_results: boolean;
+  diagnostics_zero_reason?: string;
+  by_severity?: Record<string, number>;
+  by_service?: Record<string, number>;
+  by_day?: Record<string, number>;
+  events_preview: Array<{
+    timestamp?: string | number;
+    severity?: string;
+    service?: string;
+    text?: string;
+  }>;
+}
 
 export async function executeRetrieverQuery(
   args: {
@@ -99,12 +132,87 @@ export async function executeRetrieverQuery(
     format?: 'events' | 'count' | 'aggregated' | 'ephemeral_series';
     bucket_size?: string;
     environment?: string;
+    view?: 'summary' | 'markdown';
   },
   env: EnvConfig
-): Promise<string> {
+): Promise<string | StructuredOutput> {
+  const view = args.view ?? 'summary';
   if (!isRetrieverConfigured()) {
-    return retrieverNotConfiguredMessage();
+    const md = retrieverNotConfiguredMessage();
+    if (view === 'markdown') {
+      return buildMarkdownEnvelope({
+        tool: 'log10x_retriever_query',
+        summary: { headline: 'Retriever not configured.' },
+        markdown: md,
+      });
+    }
+    return buildEnvelope({
+      tool: 'log10x_retriever_query',
+      view: 'summary',
+      summary: { headline: 'Retriever not configured — archive query refused.' },
+      data: {
+        status: 'not_configured',
+        from: args.from,
+        to: args.to,
+        filters: [],
+        format: args.format ?? 'events',
+        events_matched: 0,
+        events_returned: 0,
+        worker_files: 0,
+        wall_time_ms: 0,
+        truncated: false,
+        partial_results: false,
+        events_preview: [],
+      } satisfies RetrieverQuerySummary,
+    });
   }
+  const sumOut: { data?: RetrieverQuerySummary } = {};
+  const md = await executeRetrieverQueryInner(args, env, sumOut);
+  if (view === 'markdown' || !sumOut.data) {
+    return buildMarkdownEnvelope({
+      tool: 'log10x_retriever_query',
+      summary: { headline: md.split('\n').find((l) => l.trim().length > 0)?.slice(0, 200) ?? 'retriever_query result' },
+      markdown: md,
+    });
+  }
+  const d = sumOut.data;
+  const headline = `Retriever query \`${d.query_id ?? '?'}\` over ${d.from} → ${d.to}: ${fmtCount(d.events_matched)} events matched, ${d.events_returned} returned (${d.wall_time_ms}ms${d.truncated ? ', truncated' : ''}).`;
+  const actions: Array<{ tool: string; args: Record<string, unknown>; reason: string }> = [];
+  if (d.partial_results) {
+    actions.push({ tool: 'log10x_retriever_query', args: { from: d.from, to: d.to, pattern: d.pattern, search: d.search, target: d.target }, reason: 'partialResults — re-run with same args to resume from cached scan progress' });
+  }
+  if (d.pattern && d.events_matched > 0) {
+    actions.push(
+      { tool: 'log10x_retriever_series', args: { pattern: d.pattern, from: d.from, to: d.to, bucket_size: '1h' }, reason: 'time-bucketed series across the same window' },
+      { tool: 'log10x_backfill_metric', args: { pattern: d.pattern, metric_name: `log10x.${d.pattern.toLowerCase()}_count`, destination: 'datadog', from: d.from, to: d.to }, reason: 'create a TSDB metric backfilled from these archive events' }
+    );
+  }
+  return buildEnvelope({
+    tool: 'log10x_retriever_query',
+    view: 'summary',
+    summary: { headline },
+    data: d,
+    truncated: d.truncated || d.partial_results,
+    actions,
+  });
+}
+
+async function executeRetrieverQueryInner(
+  args: {
+    pattern?: string;
+    search?: string;
+    from: string;
+    to: string;
+    filters?: string[];
+    target?: string;
+    limit?: number;
+    format?: 'events' | 'count' | 'aggregated' | 'ephemeral_series';
+    bucket_size?: string;
+    environment?: string;
+  },
+  env: EnvConfig,
+  sumOut?: { data?: RetrieverQuerySummary }
+): Promise<string> {
   // Defensive defaults — match retrieverQuerySchema. Direct/chain
   // callers bypass the SDK Zod boundary; without these the rendering
   // path renders `${undefined}`.
@@ -227,6 +335,54 @@ export async function executeRetrieverQuery(
   }
   const block = renderNextActions(nextActions);
   if (block) lines.push('', block);
+
+  if (sumOut) {
+    const bySeverity: Record<string, number> = {};
+    const byService: Record<string, number> = {};
+    const byDay: Record<string, number> = {};
+    for (const ev of resp.events) {
+      const sev = (ev.severity_level as string) || 'unknown';
+      bySeverity[sev] = (bySeverity[sev] ?? 0) + 1;
+      const svc = (ev.tenx_user_service as string) || 'unknown';
+      byService[svc] = (byService[svc] ?? 0) + 1;
+      const ts = ev.timestamp;
+      if (ts) {
+        const d = new Date(typeof ts === 'number' ? ts : String(ts));
+        if (!isNaN(d.getTime())) {
+          const day = d.toISOString().slice(0, 10);
+          byDay[day] = (byDay[day] ?? 0) + 1;
+        }
+      }
+    }
+    const previewEvents = resp.events.slice(0, 10).map((ev) => ({
+      timestamp: ev.timestamp as string | number | undefined,
+      severity: ev.severity_level as string | undefined,
+      service: ev.tenx_user_service as string | undefined,
+      text: typeof ev.text === 'string' ? (ev.text as string).slice(0, 240) : undefined,
+    }));
+    sumOut.data = {
+      status: 'ok',
+      query_id: resp.queryId,
+      target: resp.target,
+      from: args.from,
+      to: args.to,
+      search: effectiveSearch,
+      pattern: args.pattern,
+      filters: args.filters ?? [],
+      format: args.format ?? 'events',
+      events_matched: resp.execution.eventsMatched,
+      events_returned: resp.events.length,
+      worker_files: resp.execution.workerFiles,
+      wall_time_ms: resp.execution.wallTimeMs,
+      truncated: !!resp.execution.truncated,
+      partial_results: !!(resp.diagnostics as RetrieverQueryDiagnostics & { partialResults?: boolean })?.partialResults,
+      diagnostics_zero_reason: resp.events.length === 0 && resp.diagnostics ? (explainZeroResults(resp.diagnostics) ?? undefined) : undefined,
+      by_severity: Object.keys(bySeverity).length > 0 ? bySeverity : undefined,
+      by_service: Object.keys(byService).length > 0 ? byService : undefined,
+      by_day: Object.keys(byDay).length > 0 ? byDay : undefined,
+      events_preview: previewEvents,
+    };
+  }
 
   return lines.join('\n');
 }

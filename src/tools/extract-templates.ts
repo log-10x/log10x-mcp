@@ -15,6 +15,7 @@ import { promises as fs } from 'fs';
 import { z } from 'zod';
 import { runDevCliStdin, runDevCliFile, DevCliNotInstalledError, DevCliRunError } from '../lib/dev-cli.js';
 import { agentOnly } from '../lib/agent-only.js';
+import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
 export const extractTemplatesSchema = {
   source: z.enum(['file', 'events', 'text']).describe(
@@ -35,6 +36,7 @@ export const extractTemplatesSchema = {
   }).optional().describe(
     'Optional assertions — turns extraction into validation. Each assertion reports pass/fail in the output.'
   ),
+  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.templates[], data.event_count, data.assertions). markdown wraps the rendered report in data.markdown.'),
 };
 
 interface ExtractArgs {
@@ -48,9 +50,57 @@ interface ExtractArgs {
     required_patterns?: string[];
     forbidden_merges?: string[][];
   };
+  view?: 'summary' | 'markdown';
 }
 
-export async function executeExtractTemplates(args: ExtractArgs): Promise<string> {
+interface ExtractTemplatesSummary {
+  event_count: number;
+  distinct_templates: number;
+  shown_templates: number;
+  cli_wall_time_ms: number;
+  cli_version: string | null;
+  templates: Array<{
+    rank: number;
+    template_hash: string;
+    template: string;
+    event_count: number;
+    share_pct: number;
+  }>;
+  assertions?: {
+    passed: number;
+    total: number;
+    results: Array<{ kind: 'min_templates' | 'required_pattern' | 'forbidden_merge'; ok: boolean; detail: string }>;
+  };
+}
+
+export async function executeExtractTemplates(args: ExtractArgs): Promise<string | StructuredOutput> {
+  const view = args.view ?? 'summary';
+  const sumOut: { data?: ExtractTemplatesSummary } = {};
+  const md = await executeExtractTemplatesInner(args, sumOut);
+  if (view === 'markdown' || !sumOut.data) {
+    return buildMarkdownEnvelope({
+      tool: 'log10x_extract_templates',
+      summary: { headline: md.split('\n').find((l) => l.trim().length > 0)?.slice(0, 200) ?? 'extract_templates result' },
+      markdown: md,
+    });
+  }
+  const d = sumOut.data;
+  const headline = `${d.event_count} events → ${d.distinct_templates} distinct template${d.distinct_templates !== 1 ? 's' : ''}${d.assertions ? ` (${d.assertions.passed}/${d.assertions.total} assertions passed)` : ''}.`;
+  return buildEnvelope({
+    tool: 'log10x_extract_templates',
+    view: 'summary',
+    summary: { headline },
+    data: d,
+    truncated: d.shown_templates < d.distinct_templates,
+    actions: d.templates.length > 0
+      ? [
+          { tool: 'log10x_resolve_batch', args: { source: args.source, path: args.path, events: args.events, text: args.text }, reason: 'richer per-pattern triage with variable concentrations on the same input' },
+        ]
+      : [],
+  });
+}
+
+async function executeExtractTemplatesInner(args: ExtractArgs, sumOut?: { data?: ExtractTemplatesSummary }): Promise<string> {
   // ── 1. Run the CLI ──
   const result = args.source === 'file'
     ? await runFile(args)
@@ -174,6 +224,51 @@ export async function executeExtractTemplates(args: ExtractArgs): Promise<string
     `Look up an extracted template against the live Reporter for cost / severity / services / trend → pass its canonical name (e.g. 'Payment_Gateway_Timeout') to log10x_event_lookup. ` +
     `Richer per-pattern triage with variable concentrations on the same input → log10x_resolve_batch (same input format, structured per-pattern output).`
   ));
+
+  if (sumOut) {
+    let assertions: ExtractTemplatesSummary['assertions'];
+    if (args.expected) {
+      const allBodies = templates.map((t) => t.template);
+      const results: NonNullable<ExtractTemplatesSummary['assertions']>['results'] = [];
+      let passed = 0;
+      if (args.expected.min_templates !== undefined) {
+        const ok = templateMap.size >= args.expected.min_templates;
+        if (ok) passed++;
+        results.push({ kind: 'min_templates', ok, detail: `min_templates >= ${args.expected.min_templates} (actual: ${templateMap.size})` });
+      }
+      if (args.expected.required_patterns) {
+        for (const pattern of args.expected.required_patterns) {
+          const found = allBodies.some((b) => b.includes(pattern));
+          if (found) passed++;
+          results.push({ kind: 'required_pattern', ok: found, detail: `required_pattern "${truncate(pattern, 60)}" ${found ? 'found' : 'NOT found'}` });
+        }
+      }
+      if (args.expected.forbidden_merges) {
+        for (const [a, b] of args.expected.forbidden_merges) {
+          const merged = allBodies.some((body) => body.includes(a) && body.includes(b));
+          const ok = !merged;
+          if (ok) passed++;
+          results.push({ kind: 'forbidden_merge', ok, detail: `forbidden_merge ["${truncate(a, 40)}", "${truncate(b, 40)}"] — ${merged ? 'MERGED' : 'separated correctly'}` });
+        }
+      }
+      assertions = { passed, total: results.length, results };
+    }
+    sumOut.data = {
+      event_count: encodedLines.length,
+      distinct_templates: templateMap.size,
+      shown_templates: templates.length,
+      cli_wall_time_ms: result.wallTimeMs,
+      cli_version: result.cliVersion ?? null,
+      templates: templates.map((t, i) => ({
+        rank: i + 1,
+        template_hash: t.templateHash,
+        template: t.template,
+        event_count: t.count,
+        share_pct: encodedLines.length > 0 ? (t.count / encodedLines.length) * 100 : 0,
+      })),
+      assertions,
+    };
+  }
 
   return lines.join('\n');
 }
