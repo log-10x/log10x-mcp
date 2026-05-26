@@ -296,12 +296,16 @@ test('Receiver: verify probes target the correct container per forwarder', async
   }
 });
 
-test('Receiver: chart refs are the published names (no `-10x` suffix drift)', async () => {
-  // Receiver uses per-forwarder upstream charts (or log10x forks for
-  // filebeat / logstash). Reporter has its own chart (log10x/reporter-10x)
-  // and skips per-forwarder routing entirely.
-  const expected: Record<string, string> = {
-    'fluentbit': 'log10x-fluent/fluent-bit',
+test('Receiver: chart refs are the right published names', async () => {
+  // Receiver migration in flight: migrated forwarders target the UPSTREAM
+  // chart with a sidecar overlay (the new model per receiver/deploy.md);
+  // pre-migration forwarders still target log10x repackages. Reporter
+  // has its own chart (log10x/reporter-10x) and skips per-forwarder
+  // routing entirely.
+  const upstream: Partial<Record<ForwarderKind, string>> = {
+    'fluentbit': 'fluent/fluent-bit',
+  };
+  const legacy: Partial<Record<ForwarderKind, string>> = {
     fluentd: 'log10x-fluent/fluentd',
     filebeat: 'log10x-elastic/filebeat',
     logstash: 'log10x-elastic/logstash',
@@ -316,18 +320,21 @@ test('Receiver: chart refs are the published names (no `-10x` suffix drift)', as
       destination: 'mock',
     });
     const installText = JSON.stringify(plan.install);
+    const expected = upstream[fw] ?? legacy[fw];
     assert.ok(
-      installText.includes(expected[fw]),
-      `${fw}: install plan must reference chart '${expected[fw]}', not found in: ${installText.slice(0, 400)}`
+      expected && installText.includes(expected),
+      `${fw}: install plan must reference chart '${expected}', not found in: ${installText.slice(0, 400)}`
     );
   }
 });
 
-test('Receiver: values.yaml content is syntactically close to YAML', async () => {
-  // Smoke-test: generated values file has expected shape for each
-  // supported Receiver forwarder. All use the embedded-image pattern
-  // with a top-level `tenx:` block. (Reporter uses a flat layout —
-  // covered by the dedicated Reporter STANDALONE_SPEC test.)
+test('Receiver: values.yaml content has the expected shape per forwarder', async () => {
+  // Migration in flight: migrated forwarders emit a sidecar overlay
+  // (extraContainers/extraVolumes, no top-level `tenx:` block, license
+  // via Secret-mounted file). Pre-migration forwarders still emit the
+  // embedded-image `tenx:` block. (Reporter uses a flat layout — covered
+  // by the dedicated STANDALONE_SPEC test.)
+  const migrated = new Set<ForwarderKind>(['fluentbit']);
   for (const fw of installableForwarders) {
     const plan = await buildReporterPlan({
       snapshot: baseSnapshot(),
@@ -339,8 +346,16 @@ test('Receiver: values.yaml content is syntactically close to YAML', async () =>
     const writeStep = plan.install.find((s) => s.file);
     assert.ok(writeStep, `${fw} should have a file-write step`);
     const content = writeStep!.file!.contents;
-    assert.ok(content.includes('tenx:'), `${fw} file should declare tenx block`);
-    assert.ok(content.includes('licenseJwt: "test-key"'), `${fw} file should embed license JWT`);
+    if (migrated.has(fw)) {
+      assert.ok(content.includes('extraContainers:'), `${fw} should declare extraContainers (sidecar overlay)`);
+      assert.ok(content.includes('image: log10x/edge-10x'), `${fw} should mount the log10x/edge-10x sidecar`);
+      assert.ok(content.includes('extraVolumes:'), `${fw} should declare extraVolumes for the license Secret`);
+      assert.ok(content.includes('TENX_LICENSE_FILE'), `${fw} should set TENX_LICENSE_FILE in the sidecar env`);
+      assert.ok(!content.includes('licenseJwt: "test-key"'), `${fw} should NOT embed the JWT inline (license-Secret pattern)`);
+    } else {
+      assert.ok(content.includes('tenx:'), `${fw} file should declare tenx block (legacy embedded-image shape)`);
+      assert.ok(content.includes('licenseJwt: "test-key"'), `${fw} file should embed license JWT (legacy shape)`);
+    }
   }
 });
 

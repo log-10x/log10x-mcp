@@ -69,10 +69,16 @@ import type { Environments } from '../lib/environments.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
+// Forwarders the Receiver wizard knows how to install a sidecar into.
+// Filebeat is intentionally NOT here: the Receiver pattern is a values
+// overlay on the upstream chart with extraContainers + extraVolumes, and
+// the upstream elastic/filebeat chart doesn't expose those hooks. The
+// supported-via-fork path (log10x-elastic/filebeat) is deferred — the
+// wizard refuses Filebeat with a clear "not yet" message rather than
+// pretending it works.
 const SUPPORTED_FORWARDERS = [
   'fluentbit',
   'fluentd',
-  'filebeat',
   'logstash',
   'otel-collector',
   'vector',
@@ -380,10 +386,15 @@ async function elicitMissingAnswers(
   try {
     // Q1: app
     if (!session.app) {
-      const detected = snapshot.kubectl.forwarders.filter((f) => f.kind !== 'unknown');
+      // "Supported" here means the Receiver wizard can install a sidecar
+      // into it — see SUPPORTED_FORWARDERS at the top of this file.
+      // Filebeat is detected but not yet wizard-supported.
+      const supportedDetected = snapshot.kubectl.forwarders.filter(
+        (f) => (SUPPORTED_FORWARDERS as readonly string[]).includes(f.kind)
+      );
       const result = await (server as any).server.elicitInput({
-        message: detected.length === 0
-          ? 'No existing forwarder detected. Install a dedicated DaemonSet Reporter?'
+        message: supportedDetected.length === 0
+          ? 'No supported forwarder detected for the Receiver path. Install a dedicated DaemonSet Reporter?'
           : 'Pick an install path:',
         requestedSchema: {
           type: 'object',
@@ -391,8 +402,8 @@ async function elicitMissingAnswers(
             app: {
               type: 'string',
               title: 'Install path',
-              enum: detected.length === 0 ? ['reporter'] : ['reporter', 'receiver'],
-              enumNames: detected.length === 0
+              enum: supportedDetected.length === 0 ? ['reporter'] : ['reporter', 'receiver'],
+              enumNames: supportedDetected.length === 0
                 ? ['Dedicated DaemonSet (Reporter)']
                 : ['Dedicated DaemonSet (Reporter) — zero touch', 'Plug into existing forwarder (Receiver) — sidecar in your forwarder'],
             },
@@ -407,26 +418,29 @@ async function elicitMissingAnswers(
 
     // Q2: forwarder (Receiver only, when ambiguous)
     if (session.app === 'receiver' && !session.forwarder) {
-      const detected = snapshot.kubectl.forwarders.filter((f) => f.kind !== 'unknown');
-      if (detected.length === 0) {
-        // Need to bail back to the markdown path which emits a helpful
-        // "no forwarder detected" message; elicitation can't render that.
+      const supportedDetected = snapshot.kubectl.forwarders.filter(
+        (f) => (SUPPORTED_FORWARDERS as readonly string[]).includes(f.kind)
+      );
+      if (supportedDetected.length === 0) {
+        // Need to bail back to the markdown path which emits the helpful
+        // "no supported forwarder" / "filebeat-not-yet" message;
+        // elicitation can't render that.
         return { kind: 'failed' };
       }
-      if (detected.length === 1) {
-        session.forwarder = detected[0].kind;
+      if (supportedDetected.length === 1) {
+        session.forwarder = supportedDetected[0].kind;
         updateWizardSession(session.snapshotId, { forwarder: session.forwarder });
       } else {
         const result = await (server as any).server.elicitInput({
-          message: `Multiple forwarders detected. Which one should the Receiver sidecar into?`,
+          message: `Multiple supported forwarders detected. Which one should the Receiver sidecar into?`,
           requestedSchema: {
             type: 'object',
             properties: {
               forwarder: {
                 type: 'string',
                 title: 'Forwarder',
-                enum: detected.map((d) => d.kind),
-                enumNames: detected.map((d) => `${d.kind} (${d.workloadKind}/${d.workloadName} in ${d.namespace})`),
+                enum: supportedDetected.map((d) => d.kind),
+                enumNames: supportedDetected.map((d) => `${d.kind} (${d.workloadKind}/${d.workloadName} in ${d.namespace})`),
               },
             },
             required: ['forwarder'],
@@ -578,19 +592,34 @@ function nextQuestion(snapshot: DiscoverySnapshot, session: WizardSession): Next
   // Q2: Receiver-only forwarder choice (when ambiguous)
   if (session.app === 'receiver' && !session.forwarder) {
     const detected = snapshot.kubectl.forwarders.filter((f) => f.kind !== 'unknown');
-    if (detected.length === 0) {
+    // Filebeat detection is real (we want the cluster picture to include it)
+    // but the Receiver wizard can't install into it yet — the supported set
+    // is the SUPPORTED_FORWARDERS list above. Partition detection accordingly.
+    const supported = detected.filter((f) => (SUPPORTED_FORWARDERS as readonly string[]).includes(f.kind));
+    const unsupported = detected.filter((f) => !(SUPPORTED_FORWARDERS as readonly string[]).includes(f.kind));
+    if (supported.length === 0) {
+      // No supported forwarder. Differentiate "nothing detected" from
+      // "only unsupported (filebeat) detected" so the user gets the
+      // right next-step guidance.
+      if (unsupported.length > 0) {
+        return {
+          kind: 'ask',
+          markdown: unsupportedForwarderForReceiver(unsupported),
+          questionId: 'no-forwarder',
+        };
+      }
       return {
         kind: 'ask',
         markdown: noForwarderForReceiver(),
         questionId: 'no-forwarder',
       };
     }
-    if (detected.length === 1) {
-      // Auto-pick the only detected forwarder.
-      updateWizardSession(session.snapshotId, { forwarder: detected[0].kind });
-      session.forwarder = detected[0].kind;
+    if (supported.length === 1) {
+      // Auto-pick the only supported detected forwarder.
+      updateWizardSession(session.snapshotId, { forwarder: supported[0].kind });
+      session.forwarder = supported[0].kind;
     } else {
-      return { kind: 'ask', markdown: askForwarder(detected), questionId: 'forwarder' };
+      return { kind: 'ask', markdown: askForwarder(supported), questionId: 'forwarder' };
     }
   }
 
@@ -670,7 +699,23 @@ function noForwarderForReceiver(): string {
     '',
     'Options:',
     '- Switch to the dedicated DaemonSet: re-invoke with `app: "reporter"`.',
-    '- Install a forwarder first (fluent-bit / fluentd / filebeat / logstash / otel-collector / vector), then re-run `log10x_discover_env` and `log10x_advise_install`.',
+    `- Install a forwarder first (${SUPPORTED_FORWARDERS.join(' / ')}), then re-run \`log10x_discover_env\` and \`log10x_advise_install\`.`,
+  ].join('\n');
+}
+
+function unsupportedForwarderForReceiver(unsupported: DetectedForwarder[]): string {
+  const kinds = Array.from(new Set(unsupported.map((d) => d.kind))).join(', ');
+  return [
+    '# Install wizard — Receiver path not supported for your forwarder yet',
+    '',
+    `Discovery found these forwarders in the cluster: **${kinds}**. The Receiver wizard can install a sidecar into ${SUPPORTED_FORWARDERS.join(' / ')}, but not into ${kinds}.`,
+    '',
+    'Filebeat specifically needs a forked helm chart (`log10x-elastic/filebeat`) because the upstream chart has no extraContainers/extraVolumes hooks — that path isn\'t wired into the wizard yet.',
+    '',
+    'Options:',
+    '- Switch to the dedicated DaemonSet: re-invoke with `app: "reporter"`. The Reporter runs alongside whatever forwarder you have today, zero-touch.',
+    `- Add a supported forwarder to the cluster (${SUPPORTED_FORWARDERS.join(' / ')}), then re-run \`log10x_discover_env\` and \`log10x_advise_install\`.`,
+    '- Ask the Log10x team to prioritise the Filebeat receiver path.',
   ].join('\n');
 }
 

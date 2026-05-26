@@ -56,6 +56,14 @@ const forwarders: ForwarderKind[] = [
   'otel-collector',
 ];
 
+// Forwarders whose Receiver renderer has been migrated from the old
+// embedded-image `tenx:` block to the upstream-chart sidecar overlay
+// pattern (extraContainers + extraVolumes per deploy.md). Tests
+// assertion-branch on membership: migrated forwarders get sidecar-shape
+// assertions; the rest keep the legacy assertions until they're done.
+// Expand as each forwarder spec is rewritten.
+const MIGRATED_TO_SIDECAR = new Set<ForwarderKind>(['fluentbit']);
+
 for (const fw of forwarders) {
   if (fw === 'logstash') {
     // log10x-elastic/logstash@1.0.6 is chart-broken for sidecar mode;
@@ -86,12 +94,21 @@ for (const fw of forwarders) {
     });
     assert.equal(plan.app, 'receiver');
     const content = plan.install.find((s) => s.file)!.file!.contents;
-    // Every supported chart now uses boolean feature flags. Default mode
-    // (neither flag set) is just plain receiver — no `kind:` line, no
-    // `optimize: true`, no `readOnly: true`.
-    assert.ok(!/^\s*kind:/m.test(content), `${fw} values should NOT embed any kind: line; got: ${content}`);
-    assert.ok(!content.includes('optimize: true'), `${fw} default-mode values should NOT enable optimize`);
-    assert.ok(!content.includes('readOnly: true'), `${fw} default-mode values should NOT enable readOnly`);
+    if (MIGRATED_TO_SIDECAR.has(fw)) {
+      // Sidecar overlay shape (per receiver/deploy.md): extraContainers
+      // with the log10x sidecar + extraVolumes mounting the license Secret.
+      assert.ok(content.includes('extraContainers:'), `${fw} values should declare extraContainers`);
+      assert.ok(/name:\s*log10x\b/.test(content), `${fw} sidecar container should be named log10x`);
+      assert.ok(content.includes('image: log10x/edge-10x'), `${fw} sidecar should use log10x/edge-10x image`);
+      assert.ok(content.includes('extraVolumes:'), `${fw} values should declare extraVolumes for the license Secret`);
+      assert.ok(content.includes('TENX_LICENSE_FILE'), `${fw} sidecar should read license via TENX_LICENSE_FILE`);
+      assert.ok(!content.startsWith('tenx:'), `${fw} receiver overlays should NOT have a top-level tenx: block`);
+    } else {
+      // Legacy embedded-image shape — pending migration to sidecar overlay.
+      assert.ok(!/^\s*kind:/m.test(content), `${fw} values should NOT embed any kind: line; got: ${content}`);
+      assert.ok(!content.includes('optimize: true'), `${fw} default-mode values should NOT enable optimize`);
+      assert.ok(!content.includes('readOnly: true'), `${fw} default-mode values should NOT enable readOnly`);
+    }
   });
 }
 
@@ -145,12 +162,16 @@ test('alreadyInstalled.receiver triggers a note, not a blocker', async () => {
   );
 });
 
-test('receiver plan install commands reference the same chart as reporter', async () => {
-  // Receiver uses the same charts; only kind differs. Logstash is
-  // blocked upstream (chart-broken sidecar wiring) so we skip it here —
-  // the logstash blocker is covered by the dedicated test above.
-  const expected: Record<string, string> = {
-    'fluentbit': 'log10x-fluent/fluent-bit',
+test('receiver plan install commands reference the right chart', async () => {
+  // Migrated forwarders target the UPSTREAM chart with a sidecar overlay.
+  // Pre-migration forwarders still target the old log10x repackages
+  // (they will move to upstream as each one is rewritten).
+  // Logstash is blocked upstream (chart-broken sidecar wiring) so we skip
+  // it here — the logstash blocker is covered by the dedicated test above.
+  const upstream: Partial<Record<ForwarderKind, string>> = {
+    'fluentbit': 'fluent/fluent-bit',
+  };
+  const legacy: Partial<Record<ForwarderKind, string>> = {
     fluentd: 'log10x-fluent/fluentd',
     filebeat: 'log10x-elastic/filebeat',
     'otel-collector': 'log10x-otel/opentelemetry-collector',
@@ -165,16 +186,21 @@ test('receiver plan install commands reference the same chart as reporter', asyn
       destination: 'mock',
     });
     const installText = JSON.stringify(plan.install);
+    const expected = upstream[fw] ?? legacy[fw];
     assert.ok(
-      installText.includes(expected[fw]),
-      `receiver plan for ${fw} should reference chart '${expected[fw]}'`
+      expected && installText.includes(expected),
+      `receiver plan for ${fw} should reference chart '${expected}'`
     );
   }
 });
 
 // ── optimize flag ──
 
-test('optimize=true on fluent-bit receiver flips tenx.optimize: true', async () => {
+test('optimize=true on fluent-bit receiver appends receiverOptimize to the engine args', async () => {
+  // Post-migration: optimize is no longer a chart-value boolean. It's
+  // appended to the log10x sidecar container's args as the engine flag
+  // `receiverOptimize true`, which switches the receiver to compact
+  // encoded output.
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
     app: 'receiver',
@@ -186,13 +212,10 @@ test('optimize=true on fluent-bit receiver flips tenx.optimize: true', async () 
   assert.equal(plan.blockers.length, 0, `no blockers expected, got: ${plan.blockers.join(' | ')}`);
   const content = plan.install.find((s) => s.file)!.file!.contents;
   assert.ok(
-    content.includes('optimize: true'),
-    `fluent-bit optimize=true values should set tenx.optimize: true; got: ${content}`
+    content.includes('receiverOptimize'),
+    `fluent-bit optimize=true values should append receiverOptimize to the sidecar args; got: ${content}`
   );
-  assert.ok(
-    !content.includes('readOnly: true'),
-    `fluent-bit optimize=true values should NOT set tenx.readOnly; got: ${content}`
-  );
+  assert.ok(/name:\s*log10x\b/.test(content), 'fluent-bit overlay should have the log10x sidecar');
 });
 
 test('optimize=true on fluentd receiver flips tenx.optimize: true', async () => {
