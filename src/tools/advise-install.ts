@@ -197,21 +197,60 @@ type WizardMode = WizardData['mode'];
 
 const TOOL_NAME = 'log10x_advise_install';
 
-function headlineFromMarkdown(md: string, fallback: string): string {
-  const firstLine = md.split('\n').find((l) => l.trim().length > 0);
-  if (!firstLine) return fallback;
-  return firstLine.replace(/^#+\s*/, '').slice(0, 200);
-}
+/**
+ * Per-question metadata. Each entry pairs a `QuestionId` with the
+ * one-line headline that lands cold for the agent + the schema field
+ * the agent fills in to answer it. The wizard surfaces these on the
+ * `next_question` mode so the agent doesn't have to regex-grep the
+ * markdown for the next valid arg.
+ */
+const QUESTION_META: Record<QuestionId, { headline: string; answer_field: string }> = {
+  'app': {
+    headline: 'Wizard Q1: pick the install path — `reporter` (parallel DaemonSet, zero-touch) or `receiver` (sidecar in your forwarder).',
+    answer_field: 'app',
+  },
+  'forwarder': {
+    headline: 'Wizard Q2: multiple supported forwarders detected — pick which one the Receiver should sidecar into.',
+    answer_field: 'forwarder',
+  },
+  'no-forwarder': {
+    headline: 'Wizard Q2 blocked: no supported forwarder detected in the cluster. Switch to `app: "reporter"` or install a forwarder first.',
+    answer_field: 'app',
+  },
+  'backends': {
+    headline: 'Wizard Q3: pick one or more metrics backends (TSDBs) — where the engine publishes event statistics and Log10x enrichments.',
+    answer_field: 'backends',
+  },
+  'airgapped-log10x-conflict': {
+    headline: 'Wizard conflict: `airgapped: true` + `"log10x"` in backends is impossible — drop one.',
+    answer_field: 'backends',
+  },
+  'backend-credentials': {
+    headline: 'Wizard Q4: each non-`log10x` backend needs a Kubernetes Secret name + plain-value overrides — the engine reads credentials from there at runtime.',
+    answer_field: 'backend_credentials',
+  },
+  'airgapped': {
+    headline: 'Wizard Q5: run the engine fully airgapped (zero outbound calls to log10x.com)?',
+    answer_field: 'airgapped',
+  },
+  'license-source': {
+    headline: 'Wizard Q6: how should the engine get its license JWT — sign in (recommended), demo (transient), or paste an existing JWT?',
+    answer_field: 'license_source',
+  },
+  'license-paste': {
+    headline: 'Wizard Q7: paste the license JWT you already have.',
+    answer_field: 'license_jwt_paste',
+  },
+};
 
 /**
- * Build a wizard StructuredOutput. The caller passes a typed `WizardData`
- * variant; the envelope's `data` is exactly that shape (`mode` is the
- * discriminator the agent narrows on). The headline is auto-derived from
- * the variant's markdown by default — Chunk B replaces these with
- * per-mode crafted headlines.
+ * Build a wizard StructuredOutput. The mode determines the headline,
+ * `actions[]` (next-tool hints the agent reads to route), and `warnings[]`
+ * (plan-level issues surfaced out-of-band so the agent doesn't have to
+ * parse markdown). Same shape every wizard call.
  */
 function wizardReturn(view: 'summary' | 'markdown', data: WizardData): StructuredOutput {
-  const headline = headlineFromMarkdown(data.markdown, `${TOOL_NAME} (${data.mode})`);
+  const { headline, actions, warnings } = wizardEnvelopeMeta(data);
   if (view === 'markdown') {
     return buildMarkdownEnvelope({ tool: TOOL_NAME, summary: { headline }, markdown: data.markdown });
   }
@@ -220,7 +259,152 @@ function wizardReturn(view: 'summary' | 'markdown', data: WizardData): Structure
     view: 'summary',
     summary: { headline },
     data,
+    actions,
+    warnings,
   });
+}
+
+/**
+ * Per-mode crafted headline + next-tool actions + warnings. Headlines
+ * are sentences the agent can quote cold to a user; actions[] tells the
+ * agent what to call next with what args; warnings[] surface non-fatal
+ * issues at the envelope level (plan blockers, demo-license caveats).
+ */
+function wizardEnvelopeMeta(data: WizardData): {
+  headline: string;
+  actions: Array<{ tool: string; args: Record<string, unknown>; reason: string }>;
+  warnings: string[];
+} {
+  switch (data.mode) {
+    case 'missing_snapshot':
+      return {
+        headline: `Snapshot \`${data.snapshot_id}\` expired or not found (30-min TTL). Re-discover the cluster first.`,
+        actions: [
+          { tool: 'log10x_discover_env', args: {}, reason: 'mint a fresh snapshot; then re-invoke log10x_advise_install with the new snapshot_id' },
+        ],
+        warnings: [],
+      };
+    case 'session_error':
+      return {
+        headline: `Wizard session failed to initialize for snapshot \`${data.snapshot_id}\` — re-discover and retry.`,
+        actions: [
+          { tool: 'log10x_discover_env', args: {}, reason: 'mint a fresh snapshot — internal session-store state is unexpected' },
+        ],
+        warnings: ['unexpected internal error — the snapshot store is in a bad state for this snapshot_id'],
+      };
+    case 'cancelled':
+      return {
+        headline: `Wizard cancelled mid-flow. Re-invoke log10x_advise_install with snapshot_id="${data.snapshot_id}" to resume — every prior answer is preserved.`,
+        actions: [
+          { tool: 'log10x_advise_install', args: { snapshot_id: data.snapshot_id }, reason: 'resume the wizard — the session remembers every prior answer for 30 min' },
+        ],
+        warnings: [],
+      };
+    case 'next_question': {
+      const meta = QUESTION_META[data.question_id];
+      return {
+        headline: meta?.headline ?? `Wizard next question (${data.question_id}).`,
+        actions: [
+          {
+            tool: 'log10x_advise_install',
+            args: meta
+              ? { snapshot_id: data.snapshot_id, [meta.answer_field]: '<user answer>' }
+              : { snapshot_id: data.snapshot_id },
+            reason: meta
+              ? `answer "${data.question_id}" by setting \`${meta.answer_field}\` and re-invoke; the session keeps every prior answer`
+              : `answer "${data.question_id}" and re-invoke the wizard`,
+          },
+        ],
+        warnings: [],
+      };
+    }
+    case 'license_error':
+      return {
+        headline: `License acquisition failed: ${data.error_message}. Sign in or paste an existing JWT to retry.`,
+        actions: [
+          { tool: 'log10x_signin_start', args: {}, reason: 'sign in via the browser device flow to mint a user-scoped license' },
+          {
+            tool: 'log10x_advise_install',
+            args: { snapshot_id: data.snapshot_id, license_source: 'paste', license_jwt_paste: '<your JWT>' },
+            reason: 'retry with a license JWT you already have',
+          },
+        ],
+        warnings: [`license fetch failed: ${data.error_message}`],
+      };
+    case 'signin_required':
+      return {
+        headline: `Sign-in required for a user-scoped license. Run log10x_signin_start, then re-invoke log10x_advise_install — every prior answer is preserved.`,
+        actions: [
+          { tool: 'log10x_signin_start', args: {}, reason: 'open the device-code browser flow to sign in to Log10x' },
+          { tool: 'log10x_advise_install', args: { snapshot_id: data.snapshot_id }, reason: 'after sign-in, re-invoke the wizard with the same snapshot_id — it will auto-mint a real license' },
+        ],
+        warnings: [],
+      };
+    case 'demo_airgapped_warning':
+      return {
+        headline: data.is_signed_in
+          ? `Demo license + airgapped doesn't enforce — your pasted-API-key sign-in lacks Auth0 tokens to mint a user license. Switch to device-flow sign-in, or drop airgapped.`
+          : `Demo license + airgapped doesn't enforce: engine downgrades to online mode silently. Sign in for a real license, or drop airgapped.`,
+        actions: [
+          { tool: 'log10x_signin_start', args: {}, reason: 'sign in to mint a real license that actually enforces airgapped (the engine refuses to run airgapped on demo licenses)' },
+          { tool: 'log10x_advise_install', args: { snapshot_id: data.snapshot_id, airgapped: false }, reason: 'or keep the demo license and proceed without airgapped' },
+        ],
+        warnings: ['demo licenses cannot run airgapped — engine downgrades to online mode at startup with a warning log'],
+      };
+    case 'plan': {
+      const warnings: string[] = [];
+      if (data.blockers.length > 0) {
+        warnings.push(`plan has ${data.blockers.length} blocker${data.blockers.length !== 1 ? 's' : ''} — see data.blockers`);
+      }
+      // The wizard's plan path may emit a real or demo license; if demo,
+      // surface it as a warning so the agent flags it to the user.
+      // (We can't read isDemoLicense from AdvisePlanSummary, so this is a
+      // soft heuristic — extract from notes when present.)
+      const demoNote = data.notes.find((n) => /demo license/i.test(n));
+      if (demoNote) {
+        warnings.push('plan emitted with a demo license — re-run with `license_source: "signin"` before the 14-day window expires to get a user-scoped one');
+      }
+      const actions: Array<{ tool: string; args: Record<string, unknown>; reason: string }> = [];
+      // Post-install health check is universal.
+      actions.push({
+        tool: 'log10x_doctor',
+        args: {},
+        reason: 'verify the install once the helm release rolls out — checks engine pods Ready, metrics flowing, license-Secret mounted',
+      });
+      // Receiver path: post-install pattern-mitigation is the natural follow-up.
+      if (data.app === 'receiver') {
+        actions.push({
+          tool: 'log10x_top_patterns',
+          args: {},
+          reason: 'once events are flowing, see which patterns dominate cost and offer mitigation via log10x_pattern_mitigate',
+        });
+      }
+      // Real-license-Secret path requires the user to create the Secret BEFORE
+      // `helm upgrade`. The plan markdown explains it; surface as warning too.
+      const needsSecret = data.notes.some((n) => /licenseSecret|log10x-license/i.test(n));
+      if (needsSecret) {
+        warnings.push('the plan references an out-of-band Kubernetes Secret (log10x-license) — create it with kubectl before running the helm upgrade step');
+      }
+      return {
+        headline: planHeadlineForWizard(data),
+        actions,
+        warnings,
+      };
+    }
+  }
+}
+
+/**
+ * Plan-mode headline. Mirrors lib/advisor/envelope.ts's planHeadline
+ * shape but tailored for the wizard's plan emit (the wizard always
+ * emits app + forwarder; advise_reporter/receiver may not).
+ */
+function planHeadlineForWizard(data: { app: string; forwarder?: string; action: string; install_step_count: number; verify_probe_count: number; teardown_step_count: number; blockers: string[]; release_name: string; namespace: string }): string {
+  const fwd = data.forwarder ? ` on ${data.forwarder}` : '';
+  if (data.blockers.length > 0) {
+    return `${data.app} ${data.action} plan${fwd}: BLOCKED (${data.blockers.length} issue${data.blockers.length !== 1 ? 's' : ''}). Release "${data.release_name}" in "${data.namespace}".`;
+  }
+  return `${data.app} ${data.action} plan${fwd}: ${data.install_step_count} install / ${data.verify_probe_count} verify / ${data.teardown_step_count} teardown — release "${data.release_name}" in namespace "${data.namespace}".`;
 }
 
 export async function executeAdviseInstall(
