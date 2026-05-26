@@ -221,6 +221,26 @@
       "description": "Configure per-pattern rate-limit / sample / drop rules on a running 10x regulator (receiver) by deriving per-container caps from a monthly dollar budget. Use this after log10x_find_skew identifies high-skew patterns or when budget pressure forces sampling decisions. **Tier prerequisites**: requires a deployed 10x receiver.",
       "annotations": { "title": "Configure regulator", "readOnlyHint": false, "idempotentHint": true, "openWorldHint": true }
     },
+    "log10x_find_skew": {
+      "title": "Find skew",
+      "description": "Identify patterns where one slot value dominates the field (>= 60% of events by default). Surfaces sampling opportunities: \"slot `verb` is `get` 78% of events — sample the get case at 1/10 and save volume without losing signal.\" Differentiated against analyzer field histograms because the engine groups by per-pattern field-set, so dominance is measured within the structural pattern, not globally. **Stage 1**: accepts events as a paste array (same shape as log10x_resolve_batch). **Tier prerequisites**: none — local templater operates on the pasted batch.",
+      "annotations": { "title": "Find skew", "readOnlyHint": true, "idempotentHint": true, "openWorldHint": false }
+    },
+    "log10x_find_constant_slots": {
+      "title": "Find constant slots",
+      "description": "Identify slots that never vary across an aggregated pattern (distinct value count = 1). Compact-mode candidate: the receiver can strip the slot from emission without losing analytic value. Anti-pattern surfacing for structural-overhead bytes. **Stage 1**: paste-mode. **Tier prerequisites**: none.",
+      "annotations": { "title": "Find constant slots", "readOnlyHint": true, "idempotentHint": true, "openWorldHint": false }
+    },
+    "log10x_find_uuid_in_body": {
+      "title": "Find UUID-in-body",
+      "description": "Flag slots that carry per-event unique values (UUID, ISO timestamp, hex ID) in the message body. Cardinality / event-count ratio >= 0.9 plus regex match. Anti-pattern: high cardinality in the body costs storage with no analytic value across events. Output includes a fix hint (promote to structured label or strip). **Stage 1**: paste-mode. **Tier prerequisites**: none.",
+      "annotations": { "title": "Find UUID-in-body", "readOnlyHint": true, "idempotentHint": true, "openWorldHint": false }
+    },
+    "log10x_find_incident_cluster": {
+      "title": "Find incident cluster",
+      "description": "Group patterns by shared root-cause descriptor text. Surfaces \"three patterns share a DNS lookup failure for opensearch — fix once, three patterns vanish.\" Same-service required; joins via Jaccard 0.5 direct, overlap 0.6 with shared-tokens >= 3, or Jaccard 0.2 with Pearson correlation >= 0.75 on volume curves. Conservative thresholds: over-merging is the trap SIEMs fall into. **Stage 1**: paste-mode. **Tier prerequisites**: none.",
+      "annotations": { "title": "Find incident cluster", "readOnlyHint": true, "idempotentHint": true, "openWorldHint": false }
+    },
     "log10x_pattern_mitigate": {
       "title": "Pattern mitigate",
       "description": "Given one pattern (identity or templateHash), return the env-gated menu of mitigation options: drop_at_analyzer, drop_at_forwarder, mute_at_10x, compact_at_10x. Each option carries enabled-or-not + reason + estimated $/mo savings + a paste-ready config snippet + follow-through tool calls (typically log10x_dependency_check before applying). The agent surfaces these to the user; the user picks. **Call this** when a previous tool surfaced a high-cost pattern and the user asks 'what should I do' / 'how do I drop this' / 'how do I reduce this'. **Tier prerequisites**: none for read; env-gated for which options are actionable.",

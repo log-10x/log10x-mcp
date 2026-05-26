@@ -97,6 +97,10 @@ import { updateEnvSchema, executeUpdateEnv } from './tools/update-env.js';
 import { deleteEnvSchema, executeDeleteEnv } from './tools/delete-env.js';
 import { rotateApiKeySchema, executeRotateApiKey } from './tools/rotate-api-key.js';
 import { servicesSchema, executeServices } from './tools/services.js';
+import { findSkewSchema, executeFindSkew } from './tools/find-skew.js';
+import { findConstantSlotsSchema, executeFindConstantSlots } from './tools/find-constant-slots.js';
+import { findUuidInBodySchema, executeFindUuidInBody } from './tools/find-uuid-in-body.js';
+import { findIncidentClusterSchema, executeFindIncidentCluster } from './tools/find-incident-cluster.js';
 import { discoverLabelsSchema, executeDiscoverLabels } from './tools/discover-labels.js';
 import { extractTemplatesSchema, executeExtractTemplates } from './tools/extract-templates.js';
 import {
@@ -874,6 +878,30 @@ registerLog10xTool('log10x_investigation_get', investigationGetSchema, (args) =>
 );
 
 // ── Tool: log10x_resolve_batch ──
+
+// ── Tool: log10x_find_skew ──
+
+registerLog10xTool('log10x_find_skew', findSkewSchema, (args) =>
+  wrap('log10x_find_skew', async () => executeFindSkew(args))
+);
+
+// ── Tool: log10x_find_constant_slots ──
+
+registerLog10xTool('log10x_find_constant_slots', findConstantSlotsSchema, (args) =>
+  wrap('log10x_find_constant_slots', async () => executeFindConstantSlots(args))
+);
+
+// ── Tool: log10x_find_uuid_in_body ──
+
+registerLog10xTool('log10x_find_uuid_in_body', findUuidInBodySchema, (args) =>
+  wrap('log10x_find_uuid_in_body', async () => executeFindUuidInBody(args))
+);
+
+// ── Tool: log10x_find_incident_cluster ──
+
+registerLog10xTool('log10x_find_incident_cluster', findIncidentClusterSchema, (args) =>
+  wrap('log10x_find_incident_cluster', async () => executeFindIncidentCluster(args))
+);
 
 registerLog10xTool('log10x_resolve_batch', resolveBatchSchema, (args) =>
   wrap('log10x_resolve_batch', async () => executeResolveBatch(args))
