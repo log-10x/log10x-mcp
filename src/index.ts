@@ -776,8 +776,44 @@ function registerLog10xTool(
  * entirely (they will not appear in tools/list). Called from main()
  * after initBootMode() resolves the operating mode.
  */
+/**
+ * G5: operator-side category gates. Three env vars at boot:
+ *
+ *   LOG10X_MCP_ENABLED_CATEGORIES=cost,identify,investigate
+ *     Allowlist. When set, ONLY tools whose category is in the list register.
+ *     Empty / unset = all categories allowed.
+ *
+ *   LOG10X_MCP_DISABLED_CATEGORIES=poc,account
+ *     Blocklist. Applied after the allowlist. Categories listed are skipped.
+ *
+ *   LOG10X_MCP_DISABLE_WRITE=true
+ *     When true, every tool whose annotation `readOnlyHint` is explicitly
+ *     `false` is skipped — useful for read-only customer demos, prospect
+ *     evals, and CI sandboxes where the agent must not mutate state.
+ *
+ * Reads at applyToolRegistrations() time, after manifest load and mode
+ * detect. Resolution order: mode-detect first (analysis/poc), then
+ * category-allow, then category-deny, then write-disable.
+ */
+interface OperatorGate {
+  enabledCategories: Set<string> | null;
+  disabledCategories: Set<string>;
+  disableWrite: boolean;
+}
+function readOperatorGate(): OperatorGate {
+  const splitCsv = (s: string | undefined): Set<string> => new Set(
+    (s ?? '').split(',').map((x) => x.trim().toLowerCase()).filter(Boolean)
+  );
+  const enabled = process.env.LOG10X_MCP_ENABLED_CATEGORIES;
+  const enabledSet = enabled && enabled.trim().length > 0 ? splitCsv(enabled) : null;
+  const disabled = splitCsv(process.env.LOG10X_MCP_DISABLED_CATEGORIES);
+  const disableWrite = /^(1|true|yes)$/i.test(process.env.LOG10X_MCP_DISABLE_WRITE ?? '');
+  return { enabledCategories: enabledSet, disabledCategories: disabled, disableWrite };
+}
+
 function applyToolRegistrations(): { registered: string[]; skipped: string[] } {
   const mode = bootMode?.mode;
+  const gate = readOperatorGate();
   const registered: string[] = [];
   const skipped: string[] = [];
   // Every tool publishes the envelope's shape as its `outputSchema`. The
@@ -794,6 +830,23 @@ function applyToolRegistrations(): { registered: string[]; skipped: string[] } {
       continue;
     }
     const meta = getPackageDefaultTool(t.name);
+    // G5: category + write gates.
+    const category = (meta.category ?? '').toLowerCase();
+    if (gate.enabledCategories && (!category || !gate.enabledCategories.has(category))) {
+      log.info(`tool.${t.name}.gated_out`, { reason: 'category not in LOG10X_MCP_ENABLED_CATEGORIES', category });
+      skipped.push(t.name);
+      continue;
+    }
+    if (category && gate.disabledCategories.has(category)) {
+      log.info(`tool.${t.name}.gated_out`, { reason: 'category in LOG10X_MCP_DISABLED_CATEGORIES', category });
+      skipped.push(t.name);
+      continue;
+    }
+    if (gate.disableWrite && meta.annotations && meta.annotations.readOnlyHint === false) {
+      log.info(`tool.${t.name}.gated_out`, { reason: 'LOG10X_MCP_DISABLE_WRITE=true and tool has readOnlyHint:false' });
+      skipped.push(t.name);
+      continue;
+    }
     // G3: wrap every input field with a coercive preprocess so the SDK's
     // strict Zod validation accepts the type-loose inputs LLM hosts
     // routinely emit (e.g., `"limit": "5"` instead of `"limit": 5`, or

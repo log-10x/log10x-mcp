@@ -9,7 +9,8 @@
         "readOnlyHint": true,
         "idempotentHint": true,
         "openWorldHint": true
-      }
+      },
+      "category": "identify"
     },
     "log10x_pattern_examples": {
       "title": "Pattern examples",
@@ -19,7 +20,8 @@
         "readOnlyHint": true,
         "idempotentHint": true,
         "openWorldHint": true
-      }
+      },
+      "category": "identify"
     },
     "log10x_savings": {
       "title": "Pipeline savings",
@@ -29,7 +31,8 @@
         "readOnlyHint": true,
         "idempotentHint": true,
         "openWorldHint": true
-      }
+      },
+      "category": "cost"
     },
     "log10x_pattern_trend": {
       "title": "Pattern trend",
@@ -39,7 +42,8 @@
         "readOnlyHint": true,
         "idempotentHint": true,
         "openWorldHint": true
-      }
+      },
+      "category": "identify"
     },
     "log10x_services": {
       "title": "Services",
@@ -49,7 +53,8 @@
         "readOnlyHint": true,
         "idempotentHint": true,
         "openWorldHint": true
-      }
+      },
+      "category": "cost"
     },
     "log10x_dependency_check": {
       "title": "Dependency check command",
@@ -59,7 +64,8 @@
         "readOnlyHint": true,
         "idempotentHint": true,
         "openWorldHint": false
-      }
+      },
+      "category": "drop"
     },
     "log10x_discover_labels": {
       "title": "Discover labels",
@@ -69,7 +75,8 @@
         "readOnlyHint": true,
         "idempotentHint": true,
         "openWorldHint": true
-      }
+      },
+      "category": "cost"
     },
     "log10x_configure_env": {
       "title": "Configure metrics env",
@@ -79,7 +86,8 @@
         "readOnlyHint": false,
         "idempotentHint": true,
         "openWorldHint": false
-      }
+      },
+      "category": "install"
     },
     "log10x_top_patterns": {
       "title": "Top patterns",
@@ -89,7 +97,8 @@
         "readOnlyHint": true,
         "idempotentHint": true,
         "openWorldHint": true
-      }
+      },
+      "category": "cost"
     },
     "log10x_investigate": {
       "title": "Investigate",
@@ -99,7 +108,8 @@
         "readOnlyHint": true,
         "idempotentHint": true,
         "openWorldHint": true
-      }
+      },
+      "category": "investigate"
     },
     "log10x_resolve_batch": {
       "title": "Triage",
@@ -109,7 +119,8 @@
         "readOnlyHint": true,
         "idempotentHint": true,
         "openWorldHint": true
-      }
+      },
+      "category": "identify"
     },
     "log10x_extract_templates": {
       "title": "Extract templates",
@@ -119,7 +130,8 @@
         "readOnlyHint": true,
         "idempotentHint": true,
         "openWorldHint": true
-      }
+      },
+      "category": "identify"
     },
     "log10x_retriever_query": {
       "title": "Retriever query",
@@ -129,7 +141,8 @@
         "readOnlyHint": true,
         "idempotentHint": true,
         "openWorldHint": true
-      }
+      },
+      "category": "retrieve"
     },
     "log10x_retriever_series": {
       "title": "Retriever time series",
@@ -139,7 +152,8 @@
         "readOnlyHint": true,
         "idempotentHint": true,
         "openWorldHint": true
-      }
+      },
+      "category": "retrieve"
     },
     "log10x_backfill_metric": {
       "title": "Backfill metric",
@@ -150,7 +164,8 @@
         "destructiveHint": false,
         "idempotentHint": false,
         "openWorldHint": true
-      }
+      },
+      "category": "retrieve"
     },
     "log10x_doctor": {
       "title": "Doctor (health check)",
@@ -160,7 +175,8 @@
         "readOnlyHint": true,
         "idempotentHint": true,
         "openWorldHint": true
-      }
+      },
+      "category": "install"
     },
     "log10x_login_status": {
       "title": "Login status",
@@ -170,7 +186,8 @@
         "readOnlyHint": true,
         "idempotentHint": true,
         "openWorldHint": false
-      }
+      },
+      "category": "account"
     },
     "log10x_signin_start": {
       "title": "Sign in (start browser flow)",
@@ -180,7 +197,8 @@
         "readOnlyHint": true,
         "idempotentHint": false,
         "openWorldHint": true
-      }
+      },
+      "category": "account"
     },
     "log10x_signin_complete": {
       "title": "Sign in (complete)",
@@ -190,7 +208,8 @@
         "readOnlyHint": false,
         "idempotentHint": true,
         "openWorldHint": true
-      }
+      },
+      "category": "account"
     },
     "log10x_signout": {
       "title": "Sign out",
@@ -200,7 +219,8 @@
         "readOnlyHint": false,
         "idempotentHint": true,
         "openWorldHint": false
-      }
+      },
+      "category": "account"
     },
     "log10x_update_settings": {
       "title": "Update account settings",
@@ -210,7 +230,8 @@
         "readOnlyHint": false,
         "idempotentHint": true,
         "openWorldHint": true
-      }
+      },
+      "category": "account"
     },
     "log10x_create_env": {
       "title": "Create environment",
@@ -220,7 +241,8 @@
         "readOnlyHint": false,
         "idempotentHint": false,
         "openWorldHint": true
-      }
+      },
+      "category": "account"
     },
     "log10x_update_env": {
       "title": "Update environment",
@@ -230,7 +252,8 @@
         "readOnlyHint": false,
         "idempotentHint": true,
         "openWorldHint": true
-      }
+      },
+      "category": "account"
     },
     "log10x_delete_env": {
       "title": "Delete environment (destructive)",
@@ -241,7 +264,8 @@
         "destructiveHint": true,
         "idempotentHint": true,
         "openWorldHint": true
-      }
+      },
+      "category": "account"
     },
     "log10x_rotate_api_key": {
       "title": "Rotate API key (destructive)",
@@ -252,7 +276,8 @@
         "destructiveHint": true,
         "idempotentHint": false,
         "openWorldHint": true
-      }
+      },
+      "category": "account"
     },
     "log10x_customer_metrics_query": {
       "title": "Customer metrics query",
@@ -262,7 +287,8 @@
         "readOnlyHint": true,
         "idempotentHint": true,
         "openWorldHint": true
-      }
+      },
+      "category": "investigate"
     },
     "log10x_discover_join": {
       "title": "Discover join label",
@@ -272,7 +298,8 @@
         "readOnlyHint": true,
         "idempotentHint": true,
         "openWorldHint": true
-      }
+      },
+      "category": "investigate"
     },
     "log10x_correlate_cross_pillar": {
       "title": "Correlate cross-pillar",
@@ -282,7 +309,8 @@
         "readOnlyHint": true,
         "idempotentHint": true,
         "openWorldHint": true
-      }
+      },
+      "category": "investigate"
     },
     "log10x_translate_metric_to_patterns": {
       "title": "Translate metric to patterns",
@@ -292,7 +320,8 @@
         "readOnlyHint": true,
         "idempotentHint": true,
         "openWorldHint": true
-      }
+      },
+      "category": "investigate"
     },
     "log10x_poc_from_siem_submit": {
       "title": "POC from SIEM (submit)",
@@ -302,7 +331,8 @@
         "readOnlyHint": false,
         "idempotentHint": false,
         "openWorldHint": true
-      }
+      },
+      "category": "poc"
     },
     "log10x_poc_from_siem_status": {
       "title": "POC from SIEM (status)",
@@ -312,7 +342,8 @@
         "readOnlyHint": true,
         "idempotentHint": true,
         "openWorldHint": false
-      }
+      },
+      "category": "poc"
     },
     "log10x_poc_from_local": {
       "title": "POC from local logs (kubectl)",
@@ -322,7 +353,8 @@
         "readOnlyHint": true,
         "idempotentHint": false,
         "openWorldHint": true
-      }
+      },
+      "category": "poc"
     },
     "log10x_discover_env": {
       "title": "Discover env (k8s + AWS)",
@@ -332,7 +364,8 @@
         "readOnlyHint": true,
         "idempotentHint": true,
         "openWorldHint": true
-      }
+      },
+      "category": "install"
     },
     "log10x_advise_reporter": {
       "title": "Advise: Reporter install",
@@ -342,7 +375,8 @@
         "readOnlyHint": true,
         "idempotentHint": true,
         "openWorldHint": false
-      }
+      },
+      "category": "install"
     },
     "log10x_advise_retriever": {
       "title": "Advise: Retriever install",
@@ -352,7 +386,8 @@
         "readOnlyHint": true,
         "idempotentHint": true,
         "openWorldHint": false
-      }
+      },
+      "category": "install"
     },
     "log10x_advise_receiver": {
       "title": "Advise: Receiver install",
@@ -362,7 +397,8 @@
         "readOnlyHint": true,
         "idempotentHint": true,
         "openWorldHint": false
-      }
+      },
+      "category": "install"
     },
     "log10x_advise_install": {
       "title": "Advise: install path",
@@ -372,7 +408,8 @@
         "readOnlyHint": true,
         "idempotentHint": true,
         "openWorldHint": false
-      }
+      },
+      "category": "install"
     },
     "log10x_configure_compact": {
       "title": "Configure compact",
@@ -382,7 +419,8 @@
         "readOnlyHint": false,
         "idempotentHint": true,
         "openWorldHint": true
-      }
+      },
+      "category": "install"
     },
     "log10x_configure_regulator": {
       "title": "Configure regulator",
@@ -392,7 +430,8 @@
         "readOnlyHint": false,
         "idempotentHint": true,
         "openWorldHint": true
-      }
+      },
+      "category": "install"
     },
     "log10x_find_skew": {
       "title": "Find skew",
@@ -402,7 +441,8 @@
         "readOnlyHint": true,
         "idempotentHint": true,
         "openWorldHint": false
-      }
+      },
+      "category": "detect"
     },
     "log10x_find_constant_slots": {
       "title": "Find constant slots",
@@ -412,7 +452,8 @@
         "readOnlyHint": true,
         "idempotentHint": true,
         "openWorldHint": false
-      }
+      },
+      "category": "detect"
     },
     "log10x_find_uuid_in_body": {
       "title": "Find UUID-in-body",
@@ -422,7 +463,8 @@
         "readOnlyHint": true,
         "idempotentHint": true,
         "openWorldHint": false
-      }
+      },
+      "category": "detect"
     },
     "log10x_find_incident_cluster": {
       "title": "Find incident cluster",
@@ -432,7 +474,8 @@
         "readOnlyHint": true,
         "idempotentHint": true,
         "openWorldHint": false
-      }
+      },
+      "category": "detect"
     },
     "log10x_pattern_mitigate": {
       "title": "Pattern mitigate",
@@ -442,7 +485,8 @@
         "readOnlyHint": true,
         "idempotentHint": true,
         "openWorldHint": false
-      }
+      },
+      "category": "drop"
     },
     "log10x_advise_compact": {
       "title": "Advise: compact-lookup PR",
@@ -452,7 +496,8 @@
         "readOnlyHint": true,
         "idempotentHint": true,
         "openWorldHint": false
-      }
+      },
+      "category": "install"
     }
   }
 }
