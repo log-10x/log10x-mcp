@@ -41,6 +41,7 @@ import { tryOpenBrowser } from '../lib/open-browser.js';
 import { exchangeAuth0TokenForApiKey } from '../lib/auth-api.js';
 import { fetchUserProfile } from '../lib/api.js';
 import { log } from '../lib/log.js';
+import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
 /**
  * Default polling deadline for `_complete`. Auth0's device_code expiry
@@ -59,24 +60,30 @@ const MAX_WAIT_SECONDS = 900;
 // ── log10x_signin_start ──────────────────────────────────────────────
 
 export const signinStartSchema = {
-  /**
-   * No `wait_seconds` here. `_start` does NOT block on polling: it
-   * requests a device code, opens the browser, and returns the code
-   * to the model. The model then calls `_complete` with the
-   * device_code, where polling actually happens.
-   */
+  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.user_code, data.verification_url, data.device_code). markdown wraps the message in data.markdown.'),
 };
 
 export interface SigninStartResult {
   markdown: string;
 }
 
-export async function executeSigninStart(): Promise<string> {
+export async function executeSigninStart(args: { view?: 'summary' | 'markdown' } = {}): Promise<string | StructuredOutput> {
+  const view = args.view ?? 'summary';
   let device;
   try {
     device = await requestDeviceCode();
   } catch (e) {
-    return `## Sign-in failed to start\n\nCould not request a device code from Auth0: ${(e as Error).message}`;
+    const msg = (e as Error).message;
+    const md = `## Sign-in failed to start\n\nCould not request a device code from Auth0: ${msg}`;
+    if (view === 'markdown') {
+      return buildMarkdownEnvelope({ tool: 'log10x_signin_start', summary: { headline: 'Sign-in failed to start' }, markdown: md });
+    }
+    return buildEnvelope({
+      tool: 'log10x_signin_start',
+      view: 'summary',
+      summary: { headline: `Sign-in failed to start: ${msg}` },
+      data: { ok: false, error: msg },
+    });
   }
 
   const opened = tryOpenBrowser(device.verification_uri_complete);
@@ -114,16 +121,34 @@ export async function executeSigninStart(): Promise<string> {
       `\`log10x_signin_complete\` automatically as the next action.`
   );
 
-  return lines.join('\n');
+  const md = lines.join('\n');
+  if (view === 'markdown') {
+    return buildMarkdownEnvelope({
+      tool: 'log10x_signin_start',
+      summary: { headline: `Sign-in started — confirm code ${device.user_code} in browser` },
+      markdown: md,
+    });
+  }
+  return buildEnvelope({
+    tool: 'log10x_signin_start',
+    view: 'summary',
+    summary: { headline: `Sign-in started — confirm code ${device.user_code} in browser, then call signin_complete with the device_code below.` },
+    data: {
+      ok: true,
+      user_code: device.user_code,
+      verification_url: device.verification_uri_complete,
+      device_code: device.device_code,
+      expires_in_seconds: Math.min(device.expires_in, MAX_WAIT_SECONDS),
+      browser_launched: opened,
+      auth0_domain: LOG10X_AUTH0_DOMAIN,
+    },
+    actions: [{ tool: 'log10x_signin_complete', args: { device_code: device.device_code }, reason: 'finish the device flow once the user confirms in their browser' }],
+  });
 }
 
 // ── log10x_signin_complete ──────────────────────────────────────────
 
 export const signinCompleteSchema = {
-  /**
-   * The opaque device_code returned by `log10x_signin_start`. Passed
-   * back unchanged. Mutually exclusive with `api_key`: pass exactly one.
-   */
   device_code: z
     .string()
     .min(1)
@@ -131,12 +156,6 @@ export const signinCompleteSchema = {
     .describe(
       'The opaque device_code returned by `log10x_signin_start`. Pass it back unchanged. The tool polls Auth0 for the access token, then exchanges it for a long-lived Log10x API key. Mutually exclusive with `api_key`.'
     ),
-  /**
-   * A Log10x API key the user already has (pasted from
-   * console.log10x.com). When passed, no browser flow runs; we
-   * validate the key and persist it. Mutually exclusive with
-   * `device_code`.
-   */
   api_key: z
     .string()
     .min(1)
@@ -144,11 +163,6 @@ export const signinCompleteSchema = {
     .describe(
       'Log10x API key to sign in with directly (no browser). Validated against /api/v1/user before saving. Use this when the user already has a key from console.log10x.com → Profile → API Settings, or when issued out-of-band by a workspace admin. Mutually exclusive with `device_code`.'
     ),
-  /**
-   * Maximum number of seconds to poll Auth0 for the access token.
-   * Only applies when `device_code` is passed; ignored on the api_key
-   * path. Default 600 (10 minutes). Floor 30, cap 900 (Auth0 expiry).
-   */
   wait_seconds: z
     .number()
     .int()
@@ -158,9 +172,41 @@ export const signinCompleteSchema = {
     .describe(
       `Max seconds to poll for browser confirmation (only used when device_code is passed). Default ${DEFAULT_WAIT_SECONDS_COMPLETE}.`
     ),
+  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.ok, data.signed_in_as, data.credentials_path). markdown wraps the message in data.markdown.'),
 };
 
 export async function executeSigninComplete(
+  args: { device_code?: string; api_key?: string; wait_seconds?: number; view?: 'summary' | 'markdown' },
+  envs: Environments
+): Promise<string | StructuredOutput> {
+  const view = args.view ?? 'summary';
+  const md = await executeSigninCompleteInner(args, envs);
+  const okMatch = /^## Signed in to Log10x/m.test(md);
+  const usernameMatch = md.match(/signed in as \*\*(.+?)\*\*/);
+  const pathMatch = md.match(/saved to `(.+?)`/);
+  if (view === 'markdown') {
+    return buildMarkdownEnvelope({
+      tool: 'log10x_signin_complete',
+      summary: { headline: okMatch ? `Signed in${usernameMatch ? ` as ${usernameMatch[1]}` : ''}` : 'Sign-in did not complete (see body for details)' },
+      markdown: md,
+    });
+  }
+  return buildEnvelope({
+    tool: 'log10x_signin_complete',
+    view: 'summary',
+    summary: { headline: okMatch ? `Signed in${usernameMatch ? ` as ${usernameMatch[1]}` : ''}; credentials saved to ${pathMatch?.[1] ?? '~/.log10x/credentials'}.` : 'Sign-in did not complete — see data.error_message for the reason.' },
+    data: {
+      ok: okMatch,
+      signed_in_as: usernameMatch?.[1],
+      credentials_path: pathMatch?.[1],
+      path_used: args.api_key ? 'pasted_api_key' : 'browser_device_flow',
+      error_message: okMatch ? undefined : md.split('\n').find((l) => l.trim().length > 0 && !l.startsWith('#')),
+    },
+    actions: okMatch ? [{ tool: 'log10x_login_status', args: {}, reason: 'verify env list and identity now that sign-in completed' }] : [],
+  });
+}
+
+async function executeSigninCompleteInner(
   args: { device_code?: string; api_key?: string; wait_seconds?: number },
   envs: Environments
 ): Promise<string> {
