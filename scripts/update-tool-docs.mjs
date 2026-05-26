@@ -197,6 +197,11 @@ function sourceLink(toolName) {
   return `[\`${path}\`](${REPO_URL}/${path})`;
 }
 
+/** Generic helper: turn any repo-relative path into a clickable GitHub link. */
+function repoLink(repoPath) {
+  return `[\`${repoPath}\`](${REPO_URL}/${repoPath})`;
+}
+
 /** Render the new "Schema and samples" section for a tool. */
 function renderSchemaSection(toolName, inputJson, outputEnvelope) {
   const trimmedOut = trimForDoc(outputEnvelope);
@@ -206,7 +211,7 @@ function renderSchemaSection(toolName, inputJson, outputEnvelope) {
 
 ??? tenx-input-example "Input example"
 
-    Real call against the demo env (captured by \`scripts/capture-tool-envelopes.mjs\`).
+    Real call against the demo env (captured by ${repoLink('scripts/capture-tool-envelopes.mjs')}).
 
     \`\`\`json
 ${indent(JSON.stringify(inputJson, null, 2), '    ')}
