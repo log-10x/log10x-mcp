@@ -8,7 +8,14 @@ import type { AdvisePlan, AdviseAction } from './types.js';
 import { renderPlan } from './render.js';
 import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../output-types.js';
 
-interface AdvisePlanSummary {
+/**
+ * Typed summary of an AdvisePlan. Exported so the install wizard
+ * (`advise_install`) can mirror this shape on its final `plan` mode —
+ * any agent that consumes `advise_reporter` / `advise_receiver` /
+ * `advise_retriever` then handles the wizard's plan output via the
+ * same code path.
+ */
+export interface AdvisePlanSummary {
   ok: boolean;
   app: 'reporter' | 'receiver' | 'retriever';
   snapshot_id: string;
@@ -24,6 +31,16 @@ interface AdvisePlanSummary {
   blockers: string[];
   notes: string[];
   has_gitops_section: boolean;
+}
+
+/** Build the typed plan summary. Exported for the install wizard's plan-mode. */
+export function buildPlanSummary(plan: AdvisePlan, action: AdviseAction): AdvisePlanSummary {
+  return summarize(plan, action);
+}
+
+/** Plan-mode headline (sentence the agent can quote cold). Exported. */
+export function buildPlanHeadline(plan: AdvisePlan, action: AdviseAction): string {
+  return planHeadline(plan, action);
 }
 
 export function buildAdvisePlanEnvelope(args: {

@@ -48,6 +48,8 @@ import {
 } from '../lib/discovery/snapshot-store.js';
 import { buildReporterPlan } from '../lib/advisor/reporter.js';
 import { renderPlan } from '../lib/advisor/render.js';
+import { buildPlanSummary, type AdvisePlanSummary } from '../lib/advisor/envelope.js';
+import type { AdvisePlan, AdviseAction } from '../lib/advisor/types.js';
 import { acquireLicenseForWizard, LicenseFetchError } from '../lib/license-api.js';
 import '../lib/auth-model.js';
 import type {
@@ -167,43 +169,254 @@ export const adviseInstallSchema = {
 const schemaObj = z.object(adviseInstallSchema);
 export type AdviseInstallArgs = z.infer<typeof schemaObj>;
 
-type WizardMode =
-  | 'missing_snapshot'
-  | 'session_error'
-  | 'cancelled'
-  | 'next_question'
-  | 'license_error'
-  | 'signin_required'
-  | 'demo_airgapped_warning'
-  | 'ambiguous_destination'
-  | 'plan';
+/**
+ * Discriminated union over every possible wizard outcome. The agent
+ * reads `data.mode` and narrows to the per-mode shape — every field
+ * is typed. Mirrors the typed-data pattern Tal established for
+ * services / pattern_mitigate / dependency_check / etc.
+ *
+ * Every variant carries `markdown` so a host that wants the rendered
+ * prompt can still read it; agents that want structured info read the
+ * mode-specific fields instead.
+ */
+type WizardData =
+  | { mode: 'missing_snapshot'; ok: false; snapshot_id: string; markdown: string }
+  | { mode: 'session_error'; ok: false; snapshot_id: string; markdown: string }
+  | { mode: 'cancelled'; ok: false; snapshot_id: string; markdown: string }
+  | {
+      mode: 'next_question';
+      ok: false;
+      snapshot_id: string;
+      question_id: QuestionId;
+      markdown: string;
+      /**
+       * Structured rendering of the question — variants by input shape.
+       * The agent reads this instead of parsing the markdown to know
+       * what to ask the user and what shape the answer takes.
+       */
+      shape: QuestionShape;
+    }
+  | { mode: 'license_error'; ok: false; snapshot_id: string; error_message: string; markdown: string }
+  | { mode: 'signin_required'; ok: false; snapshot_id: string; markdown: string }
+  | { mode: 'demo_airgapped_warning'; ok: true; snapshot_id: string; is_signed_in: boolean; markdown: string }
+  // `ok` on the plan variant comes from AdvisePlanSummary (blockers.length === 0).
+  // A "plan" return is always a successful wizard run — even when the plan
+  // itself has blockers, the wizard's job (turning answers into a typed
+  // plan) succeeded. Agents read summary.blockers for plan-level issues.
+  | ({ mode: 'plan'; markdown: string } & AdvisePlanSummary);
+
+type WizardMode = WizardData['mode'];
 
 const TOOL_NAME = 'log10x_advise_install';
 
-function headlineFromMarkdown(md: string, fallback: string): string {
-  const firstLine = md.split('\n').find((l) => l.trim().length > 0);
-  if (!firstLine) return fallback;
-  return firstLine.replace(/^#+\s*/, '').slice(0, 200);
-}
+/**
+ * Per-question metadata. Each entry pairs a `QuestionId` with the
+ * one-line headline that lands cold for the agent + the schema field
+ * the agent fills in to answer it. The wizard surfaces these on the
+ * `next_question` mode so the agent doesn't have to regex-grep the
+ * markdown for the next valid arg.
+ */
+const QUESTION_META: Record<QuestionId, { headline: string; answer_field: string }> = {
+  'app': {
+    headline: 'Wizard Q1: pick the install path — `reporter` (parallel DaemonSet, zero-touch) or `receiver` (sidecar in your forwarder).',
+    answer_field: 'app',
+  },
+  'forwarder': {
+    headline: 'Wizard Q2: multiple supported forwarders detected — pick which one the Receiver should sidecar into.',
+    answer_field: 'forwarder',
+  },
+  'no-forwarder': {
+    headline: 'Wizard Q2 blocked: no supported forwarder detected in the cluster. Switch to `app: "reporter"` or install a forwarder first.',
+    answer_field: 'app',
+  },
+  'backends': {
+    headline: 'Wizard Q3: pick one or more metrics backends (TSDBs) — where the engine publishes event statistics and Log10x enrichments.',
+    answer_field: 'backends',
+  },
+  'airgapped-log10x-conflict': {
+    headline: 'Wizard conflict: `airgapped: true` + `"log10x"` in backends is impossible — drop one.',
+    answer_field: 'backends',
+  },
+  'backend-credentials': {
+    headline: 'Wizard Q4: each non-`log10x` backend needs a Kubernetes Secret name + plain-value overrides — the engine reads credentials from there at runtime.',
+    answer_field: 'backend_credentials',
+  },
+  'airgapped': {
+    headline: 'Wizard Q5: run the engine fully airgapped (zero outbound calls to log10x.com)?',
+    answer_field: 'airgapped',
+  },
+  'license-source': {
+    headline: 'Wizard Q6: how should the engine get its license JWT — sign in (recommended), demo (transient), or paste an existing JWT?',
+    answer_field: 'license_source',
+  },
+  'license-paste': {
+    headline: 'Wizard Q7: paste the license JWT you already have.',
+    answer_field: 'license_jwt_paste',
+  },
+};
 
-function wizardReturn(
-  view: 'summary' | 'markdown',
-  mode: WizardMode,
-  md: string,
-  extraData: Record<string, unknown> = {}
-): StructuredOutput {
-  const headline = headlineFromMarkdown(md, `${TOOL_NAME} (${mode})`);
+/**
+ * Build a wizard StructuredOutput. The mode determines the headline,
+ * `actions[]` (next-tool hints the agent reads to route), and `warnings[]`
+ * (plan-level issues surfaced out-of-band so the agent doesn't have to
+ * parse markdown). Same shape every wizard call.
+ */
+function wizardReturn(view: 'summary' | 'markdown', data: WizardData): StructuredOutput {
+  const { headline, actions, warnings } = wizardEnvelopeMeta(data);
   if (view === 'markdown') {
-    return buildMarkdownEnvelope({ tool: TOOL_NAME, summary: { headline }, markdown: md });
+    return buildMarkdownEnvelope({ tool: TOOL_NAME, summary: { headline }, markdown: data.markdown });
   }
-  const okModes: WizardMode[] = ['next_question', 'plan', 'demo_airgapped_warning'];
-  const ok = okModes.includes(mode);
   return buildEnvelope({
     tool: TOOL_NAME,
     view: 'summary',
     summary: { headline },
-    data: { ok, mode, markdown: md, ...extraData },
+    data,
+    actions,
+    warnings,
   });
+}
+
+/**
+ * Per-mode crafted headline + next-tool actions + warnings. Headlines
+ * are sentences the agent can quote cold to a user; actions[] tells the
+ * agent what to call next with what args; warnings[] surface non-fatal
+ * issues at the envelope level (plan blockers, demo-license caveats).
+ */
+function wizardEnvelopeMeta(data: WizardData): {
+  headline: string;
+  actions: Array<{ tool: string; args: Record<string, unknown>; reason: string }>;
+  warnings: string[];
+} {
+  switch (data.mode) {
+    case 'missing_snapshot':
+      return {
+        headline: `Snapshot \`${data.snapshot_id}\` expired or not found (30-min TTL). Re-discover the cluster first.`,
+        actions: [
+          { tool: 'log10x_discover_env', args: {}, reason: 'mint a fresh snapshot; then re-invoke log10x_advise_install with the new snapshot_id' },
+        ],
+        warnings: [],
+      };
+    case 'session_error':
+      return {
+        headline: `Wizard session failed to initialize for snapshot \`${data.snapshot_id}\` — re-discover and retry.`,
+        actions: [
+          { tool: 'log10x_discover_env', args: {}, reason: 'mint a fresh snapshot — internal session-store state is unexpected' },
+        ],
+        warnings: ['unexpected internal error — the snapshot store is in a bad state for this snapshot_id'],
+      };
+    case 'cancelled':
+      return {
+        headline: `Wizard cancelled mid-flow. Re-invoke log10x_advise_install with snapshot_id="${data.snapshot_id}" to resume — every prior answer is preserved.`,
+        actions: [
+          { tool: 'log10x_advise_install', args: { snapshot_id: data.snapshot_id }, reason: 'resume the wizard — the session remembers every prior answer for 30 min' },
+        ],
+        warnings: [],
+      };
+    case 'next_question': {
+      const meta = QUESTION_META[data.question_id];
+      return {
+        headline: meta?.headline ?? `Wizard next question (${data.question_id}).`,
+        actions: [
+          {
+            tool: 'log10x_advise_install',
+            args: meta
+              ? { snapshot_id: data.snapshot_id, [meta.answer_field]: '<user answer>' }
+              : { snapshot_id: data.snapshot_id },
+            reason: meta
+              ? `answer "${data.question_id}" by setting \`${meta.answer_field}\` and re-invoke; the session keeps every prior answer`
+              : `answer "${data.question_id}" and re-invoke the wizard`,
+          },
+        ],
+        warnings: [],
+      };
+    }
+    case 'license_error':
+      return {
+        headline: `License acquisition failed: ${data.error_message}. Sign in or paste an existing JWT to retry.`,
+        actions: [
+          { tool: 'log10x_signin_start', args: {}, reason: 'sign in via the browser device flow to mint a user-scoped license' },
+          {
+            tool: 'log10x_advise_install',
+            args: { snapshot_id: data.snapshot_id, license_source: 'paste', license_jwt_paste: '<your JWT>' },
+            reason: 'retry with a license JWT you already have',
+          },
+        ],
+        warnings: [`license fetch failed: ${data.error_message}`],
+      };
+    case 'signin_required':
+      return {
+        headline: `Sign-in required for a user-scoped license. Run log10x_signin_start, then re-invoke log10x_advise_install — every prior answer is preserved.`,
+        actions: [
+          { tool: 'log10x_signin_start', args: {}, reason: 'open the device-code browser flow to sign in to Log10x' },
+          { tool: 'log10x_advise_install', args: { snapshot_id: data.snapshot_id }, reason: 'after sign-in, re-invoke the wizard with the same snapshot_id — it will auto-mint a real license' },
+        ],
+        warnings: [],
+      };
+    case 'demo_airgapped_warning':
+      return {
+        headline: data.is_signed_in
+          ? `Demo license + airgapped doesn't enforce — your pasted-API-key sign-in lacks Auth0 tokens to mint a user license. Switch to device-flow sign-in, or drop airgapped.`
+          : `Demo license + airgapped doesn't enforce: engine downgrades to online mode silently. Sign in for a real license, or drop airgapped.`,
+        actions: [
+          { tool: 'log10x_signin_start', args: {}, reason: 'sign in to mint a real license that actually enforces airgapped (the engine refuses to run airgapped on demo licenses)' },
+          { tool: 'log10x_advise_install', args: { snapshot_id: data.snapshot_id, airgapped: false }, reason: 'or keep the demo license and proceed without airgapped' },
+        ],
+        warnings: ['demo licenses cannot run airgapped — engine downgrades to online mode at startup with a warning log'],
+      };
+    case 'plan': {
+      const warnings: string[] = [];
+      if (data.blockers.length > 0) {
+        warnings.push(`plan has ${data.blockers.length} blocker${data.blockers.length !== 1 ? 's' : ''} — see data.blockers`);
+      }
+      // The wizard's plan path may emit a real or demo license; if demo,
+      // surface it as a warning so the agent flags it to the user.
+      // (We can't read isDemoLicense from AdvisePlanSummary, so this is a
+      // soft heuristic — extract from notes when present.)
+      const demoNote = data.notes.find((n) => /demo license/i.test(n));
+      if (demoNote) {
+        warnings.push('plan emitted with a demo license — re-run with `license_source: "signin"` before the 14-day window expires to get a user-scoped one');
+      }
+      const actions: Array<{ tool: string; args: Record<string, unknown>; reason: string }> = [];
+      // Post-install health check is universal.
+      actions.push({
+        tool: 'log10x_doctor',
+        args: {},
+        reason: 'verify the install once the helm release rolls out — checks engine pods Ready, metrics flowing, license-Secret mounted',
+      });
+      // Receiver path: post-install pattern-mitigation is the natural follow-up.
+      if (data.app === 'receiver') {
+        actions.push({
+          tool: 'log10x_top_patterns',
+          args: {},
+          reason: 'once events are flowing, see which patterns dominate cost and offer mitigation via log10x_pattern_mitigate',
+        });
+      }
+      // Real-license-Secret path requires the user to create the Secret BEFORE
+      // `helm upgrade`. The plan markdown explains it; surface as warning too.
+      const needsSecret = data.notes.some((n) => /licenseSecret|log10x-license/i.test(n));
+      if (needsSecret) {
+        warnings.push('the plan references an out-of-band Kubernetes Secret (log10x-license) — create it with kubectl before running the helm upgrade step');
+      }
+      return {
+        headline: planHeadlineForWizard(data),
+        actions,
+        warnings,
+      };
+    }
+  }
+}
+
+/**
+ * Plan-mode headline. Mirrors lib/advisor/envelope.ts's planHeadline
+ * shape but tailored for the wizard's plan emit (the wizard always
+ * emits app + forwarder; advise_reporter/receiver may not).
+ */
+function planHeadlineForWizard(data: { app: string; forwarder?: string; action: string; install_step_count: number; verify_probe_count: number; teardown_step_count: number; blockers: string[]; release_name: string; namespace: string }): string {
+  const fwd = data.forwarder ? ` on ${data.forwarder}` : '';
+  if (data.blockers.length > 0) {
+    return `${data.app} ${data.action} plan${fwd}: BLOCKED (${data.blockers.length} issue${data.blockers.length !== 1 ? 's' : ''}). Release "${data.release_name}" in "${data.namespace}".`;
+  }
+  return `${data.app} ${data.action} plan${fwd}: ${data.install_step_count} install / ${data.verify_probe_count} verify / ${data.teardown_step_count} teardown — release "${data.release_name}" in namespace "${data.namespace}".`;
 }
 
 export async function executeAdviseInstall(
@@ -221,7 +434,12 @@ export async function executeAdviseInstall(
       ``,
       `Run \`log10x_discover_env\` again and pass the new snapshot_id.`,
     ].join('\n');
-    return wizardReturn(view, 'missing_snapshot', md, { snapshot_id: args.snapshot_id });
+    return wizardReturn(view, {
+      mode: 'missing_snapshot',
+      ok: false,
+      snapshot_id: args.snapshot_id,
+      markdown: md,
+    });
   }
 
   // Merge the latest answers into the wizard session. Each call accretes;
@@ -252,7 +470,12 @@ export async function executeAdviseInstall(
   });
   if (!session) {
     // Should be unreachable — getSnapshot would've failed first.
-    return wizardReturn(view, 'session_error', '# Install wizard — internal error\n\nWizard session could not be created.', { snapshot_id: args.snapshot_id });
+    return wizardReturn(view, {
+      mode: 'session_error',
+      ok: false,
+      snapshot_id: args.snapshot_id,
+      markdown: '# Install wizard — internal error\n\nWizard session could not be created.',
+    });
   }
 
   // Elicitation path: if the client supports it, drive every missing
@@ -272,14 +495,26 @@ export async function executeAdviseInstall(
         '',
         'You closed the form before answering. Re-invoke `log10x_advise_install` with the same `snapshot_id` to pick up where you left off — answers you already gave are remembered.',
       ].join('\n');
-      return wizardReturn(view, 'cancelled', md, { snapshot_id: args.snapshot_id });
+      return wizardReturn(view, {
+        mode: 'cancelled',
+        ok: false,
+        snapshot_id: args.snapshot_id,
+        markdown: md,
+      });
     }
     if (elicitOutcome.kind === 'failed') {
       // Elicitation errored mid-flow — fall back to markdown questions.
       // The session has accumulated whatever was answered before the error.
       const next = nextQuestion(snapshot, session);
       if (next.kind === 'ask') {
-        return wizardReturn(view, 'next_question', next.markdown, { snapshot_id: args.snapshot_id, question_id: next.questionId });
+        return wizardReturn(view, {
+          mode: 'next_question',
+          ok: false,
+          snapshot_id: args.snapshot_id,
+          question_id: next.questionId,
+          markdown: next.markdown,
+          shape: next.shape,
+        });
       }
     }
   } else {
@@ -287,7 +522,14 @@ export async function executeAdviseInstall(
     // for re-invocation with the answer in tool args.
     const next = nextQuestion(snapshot, session);
     if (next.kind === 'ask') {
-      return wizardReturn(view, 'next_question', next.markdown, { snapshot_id: args.snapshot_id, question_id: next.questionId });
+      return wizardReturn(view, {
+        mode: 'next_question',
+        ok: false,
+        snapshot_id: args.snapshot_id,
+        question_id: next.questionId,
+        markdown: next.markdown,
+        shape: next.shape,
+      });
     }
   }
 
@@ -309,7 +551,12 @@ export async function executeAdviseInstall(
         ``,
         `Once you're signed in, re-invoke \`log10x_advise_install\` with the same \`snapshot_id\`. Every answer you gave above is remembered — you won't have to redo any step.`,
       ].join('\n');
-      return wizardReturn(view, 'signin_required', md, { snapshot_id: args.snapshot_id });
+      return wizardReturn(view, {
+        mode: 'signin_required',
+        ok: false,
+        snapshot_id: args.snapshot_id,
+        markdown: md,
+      });
     }
     try {
       const lic = await acquireLicenseForWizard();
@@ -333,7 +580,13 @@ export async function executeAdviseInstall(
         `- Re-invoke with \`license_source: "paste"\` and \`license_jwt_paste: "<your-jwt>"\` if you have one`,
         `- Retry — the gateway may have been transiently unavailable`,
       ].join('\n');
-      return wizardReturn(view, 'license_error', md, { snapshot_id: args.snapshot_id, error_message: msg });
+      return wizardReturn(view, {
+        mode: 'license_error',
+        ok: false,
+        snapshot_id: args.snapshot_id,
+        error_message: msg,
+        markdown: md,
+      });
     }
   }
 
@@ -346,30 +599,24 @@ export async function executeAdviseInstall(
   // Auth0 tokens to mint a user license).
   if (session.airgapped === true && session.isDemoLicense === true) {
     const md = renderDemoAirgappedWarning(session, !envs.isDemoMode);
-    return wizardReturn(view, 'demo_airgapped_warning', md, { snapshot_id: args.snapshot_id, is_signed_in: !envs.isDemoMode });
-  }
-
-  // Everything answered. Emit the plan (or surface ambiguous-destination).
-  const planResult = await renderInstallPlan(snapshot, session, args);
-  if (planResult.kind === 'ambiguous_destination') {
-    return wizardReturn(view, 'ambiguous_destination', planResult.markdown, {
+    return wizardReturn(view, {
+      mode: 'demo_airgapped_warning',
+      ok: true,
       snapshot_id: args.snapshot_id,
-      app: session.app,
-      forwarder: session.forwarder,
-      detected_destinations: planResult.candidates,
+      is_signed_in: !envs.isDemoMode,
+      markdown: md,
     });
   }
-  return wizardReturn(view, 'plan', planResult.markdown, {
-    snapshot_id: args.snapshot_id,
-    app: session.app,
-    forwarder: session.forwarder,
-    backends: session.backends,
-    airgapped: session.airgapped ?? false,
-    is_demo_license: session.isDemoLicense ?? false,
-    release_name: session.releaseName,
-    namespace: session.namespace,
-    destination: planResult.destination,
-    action: args.action ?? 'all',
+
+  // Everything answered. Emit the typed plan envelope — `data` mirrors
+  // AdvisePlanSummary so an agent that already handles
+  // advise_reporter/receiver/retriever consumes this identically.
+  const planResult = await renderInstallPlan(snapshot, session, args);
+  const summary = buildPlanSummary(planResult.plan, planResult.action);
+  return wizardReturn(view, {
+    ...summary,
+    mode: 'plan',
+    markdown: planResult.markdown,
   });
 }
 
@@ -651,12 +898,80 @@ async function elicitMissingAnswers(
 // ── Question routing ──
 
 type QuestionId = 'app' | 'forwarder' | 'no-forwarder' | 'backends' | 'airgapped-log10x-conflict' | 'backend-credentials' | 'airgapped' | 'license-source' | 'license-paste';
-type NextStep = { kind: 'ask'; markdown: string; questionId: QuestionId } | { kind: 'render' };
+
+/**
+ * Structured rendering of the wizard's next question. The agent uses
+ * this instead of regex-grepping the markdown for valid answers — it
+ * sees the choices, their human labels, which one is recommended, and
+ * the schema field name to fill on the next call.
+ *
+ * Variants by user-input shape:
+ *   - single-choice  — pick one (`app`, `forwarder`, `license-source`)
+ *   - multi-choice   — pick one or more (`backends`)
+ *   - boolean        — yes/no (`airgapped`)
+ *   - string         — free-text input (`license-paste`)
+ *   - form           — multi-field object (`backend-credentials`)
+ *   - info           — no input expected; the agent presents
+ *     `resolutions[]` (each with an example re-invocation) so the user
+ *     can pick a path out of the situation (`no-forwarder`,
+ *     `airgapped-log10x-conflict`)
+ */
+type QuestionChoice = {
+  value: string;
+  label: string;
+  recommended?: boolean;
+  details?: string;
+};
+
+type QuestionFormField = {
+  name: string;
+  type: 'string';
+  description: string;
+  required: boolean;
+  default?: string;
+  example?: string;
+};
+
+type QuestionShape =
+  | { type: 'single-choice'; answer_field: string; choices: QuestionChoice[] }
+  | { type: 'multi-choice'; answer_field: string; min_items: number; choices: QuestionChoice[] }
+  | { type: 'boolean'; answer_field: string; default?: boolean }
+  | { type: 'string'; answer_field: string; description: string; example?: string }
+  | { type: 'form'; description: string; fields: QuestionFormField[] }
+  | { type: 'info'; resolutions: Array<{ args: Record<string, unknown>; description: string }> };
+
+type NextStep =
+  | { kind: 'ask'; markdown: string; questionId: QuestionId; shape: QuestionShape }
+  | { kind: 'render' };
 
 function nextQuestion(snapshot: DiscoverySnapshot, session: WizardSession): NextStep {
   // Q1: app
   if (!session.app) {
-    return { kind: 'ask', markdown: askApp(snapshot), questionId: 'app' };
+    const supportedDetected = snapshot.kubectl.forwarders.filter(
+      (f) => (SUPPORTED_FORWARDERS as readonly string[]).includes(f.kind)
+    );
+    const choices: QuestionChoice[] = [
+      {
+        value: 'reporter',
+        label: 'Reporter (standalone DaemonSet, zero-touch)',
+        recommended: supportedDetected.length === 0,
+        details: 'A dedicated DaemonSet running alongside your existing forwarder. Tails container logs in parallel — does not touch your forwarder. Read-only.',
+      },
+    ];
+    if (supportedDetected.length > 0) {
+      choices.push({
+        value: 'receiver',
+        label: 'Receiver (sidecar inside your existing forwarder)',
+        recommended: true,
+        details: `A log10x/edge-10x sidecar injected into your existing forwarder pod (${supportedDetected.map((d) => d.kind).join(', ')} detected). Filters / samples / compacts events in-flight.`,
+      });
+    }
+    return {
+      kind: 'ask',
+      markdown: askApp(snapshot),
+      questionId: 'app',
+      shape: { type: 'single-choice', answer_field: 'app', choices },
+    };
   }
 
   // Q2: Receiver-only forwarder choice (when ambiguous)
@@ -671,17 +986,34 @@ function nextQuestion(snapshot: DiscoverySnapshot, session: WizardSession): Next
       // No supported forwarder. Differentiate "nothing detected" from
       // "only unsupported (filebeat) detected" so the user gets the
       // right next-step guidance.
+      const baseResolutions: Array<{ args: Record<string, unknown>; description: string }> = [
+        { args: { snapshot_id: session.snapshotId, app: 'reporter' }, description: 'Switch to the standalone Reporter DaemonSet — runs alongside whatever forwarder you have today, zero-touch.' },
+      ];
       if (unsupported.length > 0) {
         return {
           kind: 'ask',
           markdown: unsupportedForwarderForReceiver(unsupported),
           questionId: 'no-forwarder',
+          shape: {
+            type: 'info',
+            resolutions: [
+              ...baseResolutions,
+              { args: {}, description: `Add a wizard-supported forwarder to the cluster (${SUPPORTED_FORWARDERS.join(' / ')}), then re-run discover_env + advise_install.` },
+            ],
+          },
         };
       }
       return {
         kind: 'ask',
         markdown: noForwarderForReceiver(),
         questionId: 'no-forwarder',
+        shape: {
+          type: 'info',
+          resolutions: [
+            ...baseResolutions,
+            { args: {}, description: `Install a forwarder first (${SUPPORTED_FORWARDERS.join(' / ')}), then re-run discover_env + advise_install.` },
+          ],
+        },
       };
     }
     if (supported.length === 1) {
@@ -689,18 +1021,76 @@ function nextQuestion(snapshot: DiscoverySnapshot, session: WizardSession): Next
       updateWizardSession(session.snapshotId, { forwarder: supported[0].kind });
       session.forwarder = supported[0].kind;
     } else {
-      return { kind: 'ask', markdown: askForwarder(supported), questionId: 'forwarder' };
+      return {
+        kind: 'ask',
+        markdown: askForwarder(supported),
+        questionId: 'forwarder',
+        shape: {
+          type: 'single-choice',
+          answer_field: 'forwarder',
+          choices: supported.map((d) => ({
+            value: d.kind,
+            label: `${d.kind} (${d.workloadKind}/${d.workloadName} in ${d.namespace})`,
+            details: `image: ${d.image}, ready: ${d.readyReplicas}`,
+          })),
+        },
+      };
     }
   }
 
   // Q3: backends — can be multiple, must be non-empty
   if (!session.backends || session.backends.length === 0) {
-    return { kind: 'ask', markdown: askBackends(snapshot.kubectl.backendAgents), questionId: 'backends' };
+    const detectedSet = new Set(snapshot.kubectl.backendAgents.map((a) => a.kind));
+    const backendDetails: Record<MetricsBackendKind, string> = {
+      log10x: 'Log10x-managed Prometheus — no infra to run; the MCP queries metrics straight from here.',
+      datadog: 'Datadog metric API (DD-API-KEY auth).',
+      elastic: 'Elasticsearch metric ingest API.',
+      cloudwatch: 'AWS CloudWatch metric streams.',
+      signalfx: 'Splunk Observability (SignalFx) metric ingest API.',
+      prometheus: 'Customer-owned Prometheus / Mimir / Thanos remote_write endpoint.',
+    };
+    return {
+      kind: 'ask',
+      markdown: askBackends(snapshot.kubectl.backendAgents),
+      questionId: 'backends',
+      shape: {
+        type: 'multi-choice',
+        answer_field: 'backends',
+        min_items: 1,
+        choices: SUPPORTED_BACKENDS.map((b) => {
+          const detected = detectedSet.has(b as MetricsBackendKind);
+          const detail = backendDetails[b as MetricsBackendKind] ?? '';
+          return {
+            value: b,
+            label: detected ? `${BACKEND_LABEL[b as MetricsBackendKind]} (detected in your cluster)` : BACKEND_LABEL[b as MetricsBackendKind],
+            recommended: b === 'log10x' || detected,
+            details: detail,
+          };
+        }),
+      },
+    };
   }
 
   // Conflict check: airgapped + log10x in backends — surface, don't auto-resolve
   if (session.airgapped === true && session.backends.includes('log10x')) {
-    return { kind: 'ask', markdown: airgappedLog10xConflict(session.backends), questionId: 'airgapped-log10x-conflict' };
+    return {
+      kind: 'ask',
+      markdown: airgappedLog10xConflict(session.backends),
+      questionId: 'airgapped-log10x-conflict',
+      shape: {
+        type: 'info',
+        resolutions: [
+          {
+            args: { snapshot_id: session.snapshotId, backends: session.backends.filter((b) => b !== 'log10x') },
+            description: 'Keep airgapped, drop "log10x" from backends — engine emits only to your own backend(s).',
+          },
+          {
+            args: { snapshot_id: session.snapshotId, airgapped: false },
+            description: 'Keep "log10x" in backends, drop airgapped — engine reports to log10x SaaS + your own backend(s).',
+          },
+        ],
+      },
+    };
   }
 
   // Q4: per-backend credentials — ask for any non-`log10x` backend that
@@ -710,7 +1100,38 @@ function nextQuestion(snapshot: DiscoverySnapshot, session: WizardSession): Next
     (b) => b !== 'log10x' && !(session.backendCredentials?.[b])
   );
   if (backendsNeedingCreds.length > 0) {
-    return { kind: 'ask', markdown: askBackendCredentials(backendsNeedingCreds), questionId: 'backend-credentials' };
+    const fields: QuestionFormField[] = [];
+    for (const backend of backendsNeedingCreds) {
+      const spec = BACKEND_ENV_SPECS[backend];
+      if (!spec) continue;
+      fields.push({
+        name: `backend_credentials.${backend}.secretName`,
+        type: 'string',
+        description: `Existing Kubernetes Secret holding ${BACKEND_LABEL[backend]} credentials. Expected keys inside: ${spec.secret.map((s) => `\`${s.secretKey}\` (→ ${s.envVar})`).join(', ')}.`,
+        required: true,
+        default: defaultSecretNameFor(backend),
+      });
+      for (const p of spec.plain) {
+        fields.push({
+          name: `backend_credentials.${backend}.plainValues.${p.envVar}`,
+          type: 'string',
+          description: `${p.envVar} for ${BACKEND_LABEL[backend]}.`,
+          required: p.default === undefined,
+          default: p.default,
+          example: p.placeholder,
+        });
+      }
+    }
+    return {
+      kind: 'ask',
+      markdown: askBackendCredentials(backendsNeedingCreds),
+      questionId: 'backend-credentials',
+      shape: {
+        type: 'form',
+        description: `For each non-log10x backend (${backendsNeedingCreds.join(', ')}), provide a Kubernetes Secret name + optional plain-value overrides. The engine reads sensitive values from the Secret at runtime — they never enter values.yaml.`,
+        fields,
+      },
+    };
   }
 
   // Q5: airgapped — only relevant when backends doesn't already include log10x
@@ -718,7 +1139,12 @@ function nextQuestion(snapshot: DiscoverySnapshot, session: WizardSession): Next
   // airgapped is moot)
   const hasLog10x = session.backends.includes('log10x');
   if (!hasLog10x && session.airgapped === undefined) {
-    return { kind: 'ask', markdown: askAirgapped(session.backends), questionId: 'airgapped' };
+    return {
+      kind: 'ask',
+      markdown: askAirgapped(session.backends),
+      questionId: 'airgapped',
+      shape: { type: 'boolean', answer_field: 'airgapped', default: false },
+    };
   }
   // backends includes log10x → silently set airgapped=false so the
   // session is fully determined.
@@ -729,14 +1155,50 @@ function nextQuestion(snapshot: DiscoverySnapshot, session: WizardSession): Next
 
   // Q6: license source — sign in (recommended), demo, or paste.
   if (!session.licenseSource) {
-    return { kind: 'ask', markdown: askLicenseSource(), questionId: 'license-source' };
+    return {
+      kind: 'ask',
+      markdown: askLicenseSource(),
+      questionId: 'license-source',
+      shape: {
+        type: 'single-choice',
+        answer_field: 'license_source',
+        choices: [
+          {
+            value: 'signin',
+            label: 'Sign in to Log10x — real license, recommended',
+            recommended: true,
+            details: 'Call log10x_signin_start to open the device-code browser flow; after sign-in, re-invoke advise_install and the wizard mints a user-scoped license. Required for airgapped installs.',
+          },
+          {
+            value: 'demo',
+            label: 'Mint an anonymous 14-day demo license',
+            details: 'Quick + zero-setup. Transient (expires in 14 days). Cannot run airgapped — the engine downgrades to online mode with a warning.',
+          },
+          {
+            value: 'paste',
+            label: "I'll paste a license JWT I already have",
+            details: 'Re-invoke with license_source: "paste" and license_jwt_paste: "<jwt>". The wizard mounts it via a Kubernetes Secret.',
+          },
+        ],
+      },
+    };
   }
 
   // Q7: when license_source=paste and the JWT hasn't been provided yet,
   // ask for it. (The agent passes it via `license_jwt_paste`, which the
   // session merge folds into `licenseJwt`.)
   if (session.licenseSource === 'paste' && !session.licenseJwt) {
-    return { kind: 'ask', markdown: askLicensePaste(), questionId: 'license-paste' };
+    return {
+      kind: 'ask',
+      markdown: askLicensePaste(),
+      questionId: 'license-paste',
+      shape: {
+        type: 'string',
+        answer_field: 'license_jwt_paste',
+        description: 'The JWT string the engine will use to authenticate. Mounted via a Kubernetes Secret at /etc/tenx/license/license.jwt — never written to values.yaml.',
+        example: 'eyJhbGciOiJSUzI1NiIs...',
+      },
+    };
   }
 
   return { kind: 'render' };
@@ -1009,16 +1471,18 @@ function renderDemoAirgappedWarning(session: WizardSession, isSignedIn: boolean)
 
 // ── Plan rendering ──
 
-type RenderPlanResult =
-  | { kind: 'plan'; markdown: string; destination: string }
-  | { kind: 'ambiguous_destination'; markdown: string; candidates: string[] };
+interface RenderPlanResult {
+  markdown: string;
+  plan: AdvisePlan;
+  action: AdviseAction;
+}
 
 async function renderInstallPlan(
   snapshot: DiscoverySnapshot,
   session: WizardSession,
   args: AdviseInstallArgs
 ): Promise<RenderPlanResult> {
-  const action = args.action ?? 'all';
+  const action: AdviseAction = args.action ?? 'all';
   const lines: string[] = [];
 
   // Header: summarize the answered choices.
@@ -1037,38 +1501,34 @@ async function renderInstallPlan(
     lines.push('');
   }
 
-  // Route to the right plan builder. Destination defaults to `mock` —
-  // the install wizard no longer asks for a forwarder-event destination
-  // (the user's existing forwarder still controls where events go;
-  // the wizard's overlay is additive for the sidecar pattern, with a
-  // documented placeholder in the values for the user to wire their own
-  // destination output).
-  if (session.app === 'reporter' || session.app === 'receiver') {
-    const destination: OutputDestination = 'mock';
+  // Destination defaults to `mock` — the install wizard no longer asks
+  // for a forwarder-event destination (the user's existing forwarder
+  // still controls where events go; the overlay is additive with a
+  // documented placeholder for them to wire their own destination).
+  const destination: OutputDestination = 'mock';
+  // session.app is constrained to 'reporter' | 'receiver' by the schema
+  // — defaulting to 'reporter' below is just to satisfy the type-narrower
+  // when session.app is undefined (unreachable after Q1 is answered).
+  const app = session.app ?? 'reporter';
 
-    const plan = await buildReporterPlan({
-      snapshot,
-      app: session.app,
-      forwarder: session.forwarder,
-      releaseName: session.releaseName,
-      namespace: session.namespace,
-      licenseJwt: session.licenseJwt,
-      isDemoLicense: session.isDemoLicense,
-      destination,
-      backends: session.backends,
-      backendCredentials: session.backendCredentials,
-      airgapped: session.airgapped,
-      skipInstall: action === 'verify' || action === 'teardown',
-      skipVerify: action === 'install' || action === 'teardown',
-      skipTeardown: action === 'install' || action === 'verify',
-    });
-    lines.push(renderPlan(plan, action));
-    return { kind: 'plan', markdown: lines.join('\n'), destination };
-  }
-
-  // Unreachable — session.app is constrained to 'reporter' | 'receiver' by
-  // the schema, but the type system can't see that here. Defensive return.
-  return { kind: 'plan', markdown: lines.join('\n'), destination: 'mock' };
+  const plan = await buildReporterPlan({
+    snapshot,
+    app,
+    forwarder: session.forwarder,
+    releaseName: session.releaseName,
+    namespace: session.namespace,
+    licenseJwt: session.licenseJwt,
+    isDemoLicense: session.isDemoLicense,
+    destination,
+    backends: session.backends,
+    backendCredentials: session.backendCredentials,
+    airgapped: session.airgapped,
+    skipInstall: action === 'verify' || action === 'teardown',
+    skipVerify: action === 'install' || action === 'teardown',
+    skipTeardown: action === 'install' || action === 'verify',
+  });
+  lines.push(renderPlan(plan, action));
+  return { markdown: lines.join('\n'), plan, action };
 }
 
 function renderChoiceSummary(session: WizardSession): string {
