@@ -49,10 +49,14 @@ const forwarders: ForwarderKind[] = [
   'otel-collector',
 ];
 
-// Logstash is now supported via the upstream elastic/logstash chart +
-// sidecar overlay; no longer blocked. `installableForwarders` is kept
-// as an alias for now so the rest of the file doesn't need re-flowing.
-const installableForwarders: ForwarderKind[] = forwarders;
+// Receiver wizard support status (matches src/lib/advisor/reporter.ts
+// blockers): fluentd is blocked (kustomize post-renderer not yet
+// wired), filebeat is blocked (upstream chart has no extraContainers
+// hook). Everything else is wizard-supported.
+const WIZARD_BLOCKED_RECEIVERS = new Set<ForwarderKind>(['fluentd', 'filebeat']);
+const installableForwarders: ForwarderKind[] = forwarders.filter(
+  (f) => !WIZARD_BLOCKED_RECEIVERS.has(f)
+);
 
 for (const fw of installableForwarders) {
   test(`plan for ${fw}: install + verify + teardown all present`, async () => {
@@ -242,11 +246,9 @@ test('values.yaml has no duplicate top-level keys (fluentd regression)', async (
 });
 
 test('forwarder values files do NOT embed gitToken or config.git noise', async () => {
-  // 2026-05: the gitToken / config.git block was legacy noise — the
-  // chart's git-token Secret template gates on `config.git.enabled` OR
-  // `symbols.git.enabled` (both default false), so emitting placeholder
-  // values that match defaults just clutters the user's values.yaml.
-  // Verify neither field appears in any forwarder's rendered values.
+  // 2026-05: the gitToken / config.git block was legacy noise. Verify
+  // neither field appears in any wizard-supported receiver's rendered
+  // values. Reporter (STANDALONE_SPEC) intentionally omits gitToken too.
   for (const fw of installableForwarders) {
     const plan = await buildReporterPlan({
       snapshot: baseSnapshot(),
@@ -267,19 +269,12 @@ test('forwarder values files do NOT embed gitToken or config.git noise', async (
   }
 });
 
-test('Receiver: verify probes target the correct container per forwarder', async () => {
-  // Forwarder *identifier* (left) vs k8s *container name* in the upstream
-  // chart (right). For Fluent Bit the upstream chart names the container
-  // `fluent-bit` (with hyphen) even though our identifier is `fluentbit`.
-  // Reporter is standalone (its probes target the chart-bundled fluent-bit
-  // container) — this check is Receiver-only.
-  const expected: Record<string, string> = {
-    'fluentbit': 'fluent-bit',
-    fluentd: 'fluentd',
-    filebeat: 'filebeat',
-    logstash: 'logstash',
-    'otel-collector': 'opentelemetry-collector',
-  };
+test('Receiver: verify probes target the log10x sidecar container', async () => {
+  // Migrated receivers all run a sidecar named `log10x`. At least one
+  // verify probe per forwarder should target it (the sidecar liveness
+  // check). The forwarder's own container is named per upstream chart
+  // convention (fluent-bit, vector, logstash, opentelemetry-collector) —
+  // probes that target it are still allowed, just not required.
   for (const fw of installableForwarders) {
     const plan = await buildReporterPlan({
       snapshot: baseSnapshot(),
@@ -290,8 +285,8 @@ test('Receiver: verify probes target the correct container per forwarder', async
     });
     const probeCmds = plan.verify.flatMap((v) => v.commands).join(' ');
     assert.ok(
-      probeCmds.includes(`-c ${expected[fw]}`),
-      `${fw}: at least one verify probe should target container '${expected[fw]}', got: ${probeCmds.slice(0, 200)}`
+      probeCmds.includes('-c log10x'),
+      `${fw}: at least one verify probe should target the log10x sidecar container, got: ${probeCmds.slice(0, 400)}`
     );
   }
 });
@@ -308,10 +303,6 @@ test('Receiver: chart refs are the right published names', async () => {
     'vector': 'vector/vector',
     'logstash': 'elastic/logstash',
   };
-  const legacy: Partial<Record<ForwarderKind, string>> = {
-    fluentd: 'log10x-fluent/fluentd',
-    filebeat: 'log10x-elastic/filebeat',
-  };
   for (const fw of installableForwarders) {
     const plan = await buildReporterPlan({
       snapshot: baseSnapshot(),
@@ -321,7 +312,7 @@ test('Receiver: chart refs are the right published names', async () => {
       destination: 'mock',
     });
     const installText = JSON.stringify(plan.install);
-    const expected = upstream[fw] ?? legacy[fw];
+    const expected = upstream[fw];
     assert.ok(
       expected && installText.includes(expected),
       `${fw}: install plan must reference chart '${expected}', not found in: ${installText.slice(0, 400)}`

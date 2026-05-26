@@ -598,70 +598,28 @@ ${destOutput}
   fluentd: {
     label: 'Fluentd',
     integrationMode:
-      'DaemonSet using the log10x-repackaged Fluentd image (`log10x/fluentd-10x`). 10x logic runs inside the `fluentd` container — no separate sidecar.',
-    helmRepo: 'https://log-10x.github.io/fluent-helm-charts',
-    helmRepoAlias: 'log10x-fluent',
-    chartRef: 'log10x-fluent/fluentd',
-    chartAvailability: 'published',
-    primaryImageHint: 'ghcr.io/log-10x/fluentd-10x',
-    primaryContainerName: 'fluentd',
-    hasTenxSidecar: false,
+      'Sidecar pattern via upstream `fluent/fluentd` chart + a kustomize post-renderer overlay (the chart has no extraContainers hook, so the sidecar is injected via a Strategic Merge Patch on the Deployment). The wizard would need to emit four files alongside the values.yaml — kustomize.yaml, sidecar-patch.yaml, post-render.sh, post-render.cmd — which the install plan model doesn\'t yet support. Tracked as a follow-up.',
+    helmRepo: 'https://fluent.github.io/helm-charts',
+    helmRepoAlias: 'fluent',
+    chartRef: 'fluent/fluentd',
+    chartAvailability: 'wip',
+    primaryImageHint: 'log10x/edge-10x',
+    primaryContainerName: 'log10x',
+    hasTenxSidecar: true,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ licenseJwt, releaseName, destination, outputHost, splunkHecToken, gitToken, optimize, readOnly, backends, backendCredentials, airgapped }) => {
-      // IMPORTANT: fluentd's output config lives UNDER `tenx:`, not
-      // as a second top-level `tenx:` block. A prior version of this
-      // template emitted two `tenx:` keys and YAML silently dropped
-      // the first — losing licenseJwt/runtimeName/git config entirely.
-      const outputConfig = renderFluentdOutputConfig(destination, outputHost, splunkHecToken);
-      const fluentdExcludePaths = FORWARDER_EXCLUDE_REGEX.map((g) => `/var/log/containers/${g.replace('.*', '*').replace('\\.log$', '.log')}`)
-        .map((g) => `"${g}"`)
-        .join(', ');
-      // Same as fluent-bit: chart values expose optimize + readOnly
-      // booleans directly; chart templates handle the engine wiring.
-      const featureFlags = renderTenxFeatureFlags({ optimize, readOnly });
-      const extras = renderTenxExtraArgsAndEnv({ backends, backendCredentials, airgapped, airgappedAsEnvVar: true });
-      return `tenx:
-  enabled: true
-  licenseJwt: "${licenseJwt}"${featureFlags}
-  runtimeName: "${releaseName}"${extras}
-  # Override the default container-log tail input to exclude all log-forwarder
-  # container logs (fluent-bit, fluentd, filebeat, logstash, otel-collector).
-  # Without this, when multiple forwarders share a node, each tails the other's
-  # stdout and events recurse — verified to crash the tenx aggregator on 40KB+
-  # self-referential events.
-  fileConfigs:
-    01_sources.conf: |-
-      <source>
-        @type tail
-        @id in_tail_container_logs
-        @label @CONCAT
-        path /var/log/containers/*.log
-        exclude_path [${fluentdExcludePaths}]
-        pos_file /var/log/fluentd-containers.log.pos
-        tag raw.kubernetes.*
-        read_from_head true
-        <parse>
-          @type multi_format
-          <pattern>
-            format json
-            time_key time
-            time_type string
-            time_format "%Y-%m-%dT%H:%M:%S.%NZ"
-            keep_time_key false
-          </pattern>
-          <pattern>
-            format regexp
-            expression /^(?<time>.+) (?<stream>stdout|stderr)( (?<logtag>.))? (?<log>.*)$/
-            time_format '%Y-%m-%dT%H:%M:%S.%N%:z'
-            keep_time_key false
-          </pattern>
-        </parse>
-        emit_unmatched_lines true
-      </source>
-  outputConfigs:
-    06_final_output.conf: |-
-${indent(outputConfig, 6)}
+    renderValues: () => {
+      // Placeholder — the wizard blocks the fluentd receiver path
+      // upstream of this (see reporter.ts), so this should never run.
+      // Keeping the function so the spec satisfies the ForwarderSpec
+      // type contract. Real overlay (per receiver/deploy.md) requires
+      // a kustomize post-renderer + a separate sidecar-patch.yaml file,
+      // which the current single-file `file:` step model can't emit.
+      return `# Fluentd receiver path is not yet wired into the wizard.
+# See receiver/deploy.md for the canonical kustomize-post-renderer
+# overlay shape; the install plan model needs to be extended to emit
+# multiple files (values.yaml + tenx-kustomize/{kustomization,sidecar-patch,post-render.sh,post-render.cmd})
+# before this can be wizard-emitted automatically.
 `;
     },
     verifyProbes: ({ releaseName, namespace, destination, optimize }) => {

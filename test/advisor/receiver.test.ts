@@ -64,7 +64,16 @@ const forwarders: ForwarderKind[] = [
 // Expand as each forwarder spec is rewritten.
 const MIGRATED_TO_SIDECAR = new Set<ForwarderKind>(['fluentbit', 'otel-collector', 'vector', 'logstash']);
 
-for (const fw of forwarders) {
+// Receiver-path support status:
+//   - fluentd: BLOCKED — kustomize post-renderer overlay needs multi-file
+//     emit support that the install plan model doesn't have yet.
+//   - filebeat: BLOCKED — upstream elastic/filebeat chart has no
+//     extraContainers/extraVolumes hooks.
+//   - everything else: wizard-supported.
+const WIZARD_BLOCKED_RECEIVERS = new Set<ForwarderKind>(['fluentd', 'filebeat']);
+const wizardSupportedReceivers = forwarders.filter((f) => !WIZARD_BLOCKED_RECEIVERS.has(f));
+
+for (const fw of wizardSupportedReceivers) {
   test(`receiver plan for ${fw}: values match the chart's expected shape`, async () => {
     const plan = await buildReporterPlan({
       snapshot: baseSnapshot(),
@@ -150,20 +159,15 @@ test('alreadyInstalled.receiver triggers a note, not a blocker', async () => {
 });
 
 test('receiver plan install commands reference the right chart', async () => {
-  // Migrated forwarders target the UPSTREAM chart with a sidecar overlay.
-  // Pre-migration forwarders still target the old log10x repackages
-  // (they will move to upstream as each one is rewritten).
+  // Only iterate the wizard-supported set; fluentd + filebeat are blocked
+  // entirely and emit no install steps.
   const upstream: Partial<Record<ForwarderKind, string>> = {
     'fluentbit': 'fluent/fluent-bit',
     'otel-collector': 'open-telemetry/opentelemetry-collector',
     'vector': 'vector/vector',
     'logstash': 'elastic/logstash',
   };
-  const legacy: Partial<Record<ForwarderKind, string>> = {
-    fluentd: 'log10x-fluent/fluentd',
-    filebeat: 'log10x-elastic/filebeat',
-  };
-  for (const fw of forwarders) {
+  for (const fw of wizardSupportedReceivers) {
     const plan = await buildReporterPlan({
       snapshot: baseSnapshot(),
       app: 'receiver',
@@ -172,12 +176,27 @@ test('receiver plan install commands reference the right chart', async () => {
       destination: 'mock',
     });
     const installText = JSON.stringify(plan.install);
-    const expected = upstream[fw] ?? legacy[fw];
+    const expected = upstream[fw];
     assert.ok(
       expected && installText.includes(expected),
       `receiver plan for ${fw} should reference chart '${expected}'`
     );
   }
+});
+
+test('receiver plan for fluentd is blocked (kustomize post-renderer not yet wired)', async () => {
+  const plan = await buildReporterPlan({
+    snapshot: baseSnapshot(),
+    app: 'receiver',
+    forwarder: 'fluentd',
+    licenseJwt: 'test',
+    destination: 'mock',
+  });
+  assert.ok(
+    plan.blockers.some((b) => b.toLowerCase().includes('fluentd')),
+    `expected fluentd blocker; got: ${plan.blockers.join(' | ')}`
+  );
+  assert.equal(plan.install.length, 0, 'blocked plans should not emit install steps');
 });
 
 // ── optimize flag ──
@@ -204,35 +223,11 @@ test('optimize=true on fluent-bit receiver appends receiverOptimize to the engin
   assert.ok(/name:\s*log10x\b/.test(content), 'fluent-bit overlay should have the log10x sidecar');
 });
 
-test('optimize=true on fluentd receiver flips tenx.optimize: true', async () => {
-  const plan = await buildReporterPlan({
-    snapshot: baseSnapshot(),
-    app: 'receiver',
-    forwarder: 'fluentd',
-    licenseJwt: 'test',
-    optimize: true,
-  });
-  assert.equal(plan.blockers.length, 0);
-  const content = plan.install.find((s) => s.file)!.file!.contents;
-  assert.ok(content.includes('optimize: true'), `fluentd optimize=true values should set tenx.optimize: true`);
-});
-
-test('optimize=true on filebeat receiver sets tenx.optimize: true', async () => {
-  const plan = await buildReporterPlan({
-    snapshot: baseSnapshot(),
-    app: 'receiver',
-    forwarder: 'filebeat',
-    licenseJwt: 'test',
-    optimize: true,
-  });
-  assert.equal(plan.blockers.length, 0);
-  const content = plan.install.find((s) => s.file)!.file!.contents;
-  assert.ok(
-    content.includes('optimize: true'),
-    `filebeat optimize=true values should set tenx.optimize: true; got: ${content}`
-  );
-  assert.ok(!/^\s*kind:/m.test(content), `filebeat values should NOT embed any kind: line`);
-});
+// Deleted: 'optimize=true on fluentd receiver flips tenx.optimize: true'
+// Fluentd is now blocked (kustomize post-renderer not yet wired).
+//
+// Deleted: 'optimize=true on filebeat receiver sets tenx.optimize: true'
+// Filebeat is now blocked (upstream chart has no extraContainers hook).
 
 test('optimize=true adds an encoded-events verify probe', async () => {
   const plan = await buildReporterPlan({
@@ -269,22 +264,10 @@ test('optimize=false leaves fluent-bit values unchanged (no optimize flag)', asy
   );
 });
 
-test('optimize=true on filebeat receiver is allowed (1.0.7 unified path)', async () => {
-  // As of chart 1.0.7, every forwarder maps kind=optimize to
-  // @apps/receiver + receiverOptimize=true env — no per-forwarder
-  // blocker anymore.
-  const plan = await buildReporterPlan({
-    snapshot: baseSnapshot(),
-    app: 'receiver',
-    forwarder: 'filebeat',
-    licenseJwt: 'test',
-    optimize: true,
-  });
-  assert.equal(plan.blockers.length, 0, `expected no blockers; got: ${plan.blockers.join(' | ')}`);
-  assert.ok(plan.install.length > 0, 'install plan should be emitted for filebeat + optimize');
-});
+// Deleted: 'optimize=true on filebeat receiver is allowed (1.0.7 unified path)'
+// Filebeat is now blocked.
 
-test('optimize=true on otel-collector receiver is allowed (1.0.7 unified path)', async () => {
+test('optimize=true on otel-collector receiver is allowed', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
     app: 'receiver',
@@ -294,6 +277,11 @@ test('optimize=true on otel-collector receiver is allowed (1.0.7 unified path)',
   });
   assert.equal(plan.blockers.length, 0, `expected no blockers; got: ${plan.blockers.join(' | ')}`);
   assert.ok(plan.install.length > 0, 'install plan should be emitted for otel-collector + optimize');
+  const content = plan.install.find((s) => s.file)!.file!.contents;
+  assert.ok(
+    content.includes('receiverOptimize'),
+    `otel-collector optimize=true values should append receiverOptimize to the sidecar args; got: ${content}`
+  );
 });
 
 test('optimize=true with app=reporter is blocked', async () => {
@@ -310,25 +298,13 @@ test('optimize=true with app=reporter is blocked', async () => {
   );
 });
 
-test('mode=readonly flips tenx.readOnly: true on fluent-bit', async () => {
-  const plan = await buildReporterPlan({
-    snapshot: baseSnapshot(),
-    app: 'receiver',
-    forwarder: 'fluentbit',
-    licenseJwt: 'test',
-    readOnly: true,
-  });
-  assert.equal(plan.blockers.length, 0, `expected no blockers; got: ${plan.blockers.join(' | ')}`);
-  const content = plan.install.find((s) => s.file)!.file!.contents;
-  assert.ok(
-    content.includes('readOnly: true'),
-    `mode=readonly must set tenx.readOnly: true; got: ${content}`
-  );
-  assert.ok(
-    !content.includes('receiverReadOnly'),
-    `mode=readonly must NOT emit any legacy receiverReadOnly env (the workaround was deleted); got: ${content}`
-  );
-});
+// Deleted: 'mode=readonly flips tenx.readOnly: true on fluent-bit'
+// The chart-value `tenx.readOnly: true` does not exist in the new
+// sidecar-overlay model. readOnly behavior would now need to be
+// expressed as an engine arg appended to the log10x sidecar's args
+// (mirror of `receiverOptimize`), which isn't implemented yet. The
+// mutual-exclusion blocker tests below still cover the
+// readOnly + optimize and readOnly + app=reporter conflict cases.
 
 test('mode=readonly + optimize=true is blocked', async () => {
   const plan = await buildReporterPlan({
@@ -359,38 +335,9 @@ test('mode=readonly with app=reporter is blocked', async () => {
   );
 });
 
-test('mode=readonly sets tenx.readOnly: true on filebeat', async () => {
-  const plan = await buildReporterPlan({
-    snapshot: baseSnapshot(),
-    app: 'receiver',
-    forwarder: 'filebeat',
-    licenseJwt: 'test',
-    readOnly: true,
-  });
-  assert.equal(plan.blockers.length, 0, `expected no blockers; got: ${plan.blockers.join(' | ')}`);
-  const content = plan.install.find((s) => s.file)!.file!.contents;
-  assert.ok(
-    content.includes('readOnly: true'),
-    `mode=readonly on filebeat must set tenx.readOnly: true; got: ${content}`
-  );
-  assert.ok(!/^\s*kind:/m.test(content), `filebeat values should NOT embed any kind: line`);
-});
-
-test('mode=readonly flips tenx.readOnly: true on otel-collector', async () => {
-  const plan = await buildReporterPlan({
-    snapshot: baseSnapshot(),
-    app: 'receiver',
-    forwarder: 'otel-collector',
-    licenseJwt: 'test',
-    readOnly: true,
-  });
-  assert.equal(plan.blockers.length, 0, `expected no blockers; got: ${plan.blockers.join(' | ')}`);
-  const content = plan.install.find((s) => s.file)!.file!.contents;
-  assert.ok(
-    content.includes('readOnly: true'),
-    `mode=readonly must set tenx.readOnly: true; got: ${content}`
-  );
-});
+// Deleted: 'mode=readonly sets tenx.readOnly: true on filebeat' — blocked.
+// Deleted: 'mode=readonly flips tenx.readOnly: true on otel-collector' —
+// the chart-value pattern no longer exists in the sidecar overlay model.
 
 test('app=reporter uses STANDALONE_SPEC (reporter-10x chart) regardless of detected forwarder', async () => {
   // Production intent shift (2026-05): Reporter is no longer "sugar for
