@@ -329,11 +329,11 @@ function makeInlineAlts(params: {
   });
 
   // Inline receiver + optimize (compact encoding).
-  // All 5 forwarder charts deploy the Receiver workload and accept
-  // `optimize=true` via the chart's standard feature-flag surface
-  // (`tenx.optimize: true` in every chart's values.yaml). Logstash still
-  // hits its architectural sidecar bug regardless of optimize, so the
-  // logstashBlocker above handles that case.
+  // The four wizard-supported receiver overlays (fluent-bit, otel-collector,
+  // vector, logstash) all accept `optimize=true` — it's appended to the
+  // log10x sidecar container's args as `receiverOptimize true`. Fluentd is
+  // blocked at the wizard level (kustomize post-renderer not yet wired);
+  // Filebeat is blocked (upstream chart has no extraContainers hook).
   const optimizeBlocker = undefined;
   alts.push({
     label: `Inline Receiver + Compact (${detectedKind})`,

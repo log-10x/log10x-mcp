@@ -59,13 +59,13 @@ export const adviseReceiverSchema = {
     .boolean()
     .optional()
     .describe(
-      'When true, emit events out of the forwarder in compact encoded form (templateHash+vars, ~20-40x volume reduction; see `config/modules/pipelines/run/units/transform/doc.md#compact`). Supported on all 5 forwarders via `tenx.optimize: true` in the chart values. Mutually exclusive with `mode=readonly` (chart fails install if both are set). Default: false.'
+      'When true, emit events out of the forwarder in compact encoded form (templateHash+vars, ~20-40x volume reduction; see `config/modules/pipelines/run/units/transform/doc.md#compact`). Wizard-supported on fluent-bit, otel-collector, vector, and logstash — appended to the log10x sidecar container\'s `args` as `receiverOptimize true` rather than a chart value. Mutually exclusive with `mode=readonly`. Default: false.'
     ),
   mode: z
     .enum(['readonly', 'readwrite'])
     .optional()
     .describe(
-      'Receiver mode. `readwrite` (default): receive events, filter them, write them back through the forwarder (with optional compact encoding when `optimize=true`). `readonly`: receive events, emit `emitted_events`/`all_events` TenXSummary metrics, do NOT write events back — passive metrics-only deployment. Maps to `tenx.readOnly: true` in the chart values. The chart wires the engine flag that gates every event-output stream module (forward/unix/socket/stdout) so the return loop to the forwarder is never constructed. Mutually exclusive with `optimize=true`. For the parallel-DaemonSet observation pattern (separate pod, not in the forwarder pipeline), use `log10x_advise_reporter` instead — Reporter is standalone-by-design.'
+      'Receiver mode. `readwrite` (default): receive events, filter them, write them back through the forwarder (with optional compact encoding when `optimize=true`). `readonly`: receive events, emit `emitted_events`/`all_events` TenXSummary metrics, do NOT write events back — passive metrics-only deployment. The engine flag that gates every event-output stream module (forward/unix/socket/stdout) is set via the log10x sidecar container\'s args. Mutually exclusive with `optimize=true`. For the parallel-DaemonSet observation pattern (separate pod, not in the forwarder pipeline), use `log10x_advise_reporter` instead — Reporter is standalone-by-design.'
     ),
   action: z
     .enum(['install', 'verify', 'teardown', 'all'])

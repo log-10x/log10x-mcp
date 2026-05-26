@@ -447,7 +447,7 @@ extraVolumes:
 
 // ── The spec map ──
 
-export const REPORTER_FORWARDER_SPECS: Record<Exclude<ForwarderKind, 'unknown'>, ForwarderSpec> = {
+export const RECEIVER_FORWARDER_SPECS: Record<Exclude<ForwarderKind, 'unknown'>, ForwarderSpec> = {
   'fluentbit': {
     label: 'Fluent Bit',
     integrationMode:
@@ -1202,7 +1202,7 @@ ${exporterBlock ? `${indent(exporterBlock, 4)}\n` : ''}
 // restart on their critical path.
 //
 // Kept as a separate export rather than a 6th entry in
-// REPORTER_FORWARDER_SPECS because the spec map is keyed by "which user
+// RECEIVER_FORWARDER_SPECS because the spec map is keyed by "which user
 // forwarder kind do we replace" — and standalone replaces none. It runs
 // alongside whatever the user has (or nothing). Callers select standalone
 // via `shape: 'standalone'` in ReporterAdviseArgs; `forwarder` stays in

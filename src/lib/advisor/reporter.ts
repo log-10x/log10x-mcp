@@ -25,7 +25,7 @@ import type {
 } from '../discovery/types.js';
 import type { AdvisePlan, PlanStep, VerifyProbe, PreflightCheck, GitopsExplainer } from './types.js';
 import {
-  REPORTER_FORWARDER_SPECS,
+  RECEIVER_FORWARDER_SPECS,
   STANDALONE_SPEC,
   type OutputDestination,
   type ForwarderSpec,
@@ -166,12 +166,12 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   const spec: ForwarderSpec | undefined =
     app === 'reporter'
       ? STANDALONE_SPEC
-      : REPORTER_FORWARDER_SPECS[forwarder as Exclude<ForwarderKind, 'unknown'>];
+      : RECEIVER_FORWARDER_SPECS[forwarder as Exclude<ForwarderKind, 'unknown'>];
 
   const blockers: string[] = [];
   if (!spec) {
     blockers.push(
-      `No forwarder template for kind '${forwarder}'. Pass forwarder ∈ ${Object.keys(REPORTER_FORWARDER_SPECS).join('|')}.`
+      `No forwarder template for kind '${forwarder}'. Pass forwarder ∈ ${Object.keys(RECEIVER_FORWARDER_SPECS).join('|')}.`
     );
   }
   if (app === 'reporter' && args.optimize) {
@@ -513,7 +513,7 @@ async function probeChartAvailability(spec: ForwarderSpec): Promise<PreflightChe
 }
 
 function buildInstallSteps(opts: {
-  spec: NonNullable<(typeof REPORTER_FORWARDER_SPECS)[keyof typeof REPORTER_FORWARDER_SPECS]>;
+  spec: NonNullable<(typeof RECEIVER_FORWARDER_SPECS)[keyof typeof RECEIVER_FORWARDER_SPECS]>;
   releaseName: string;
   namespace: string;
   licenseJwt?: string;
