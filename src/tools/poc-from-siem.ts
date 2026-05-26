@@ -264,7 +264,38 @@ export interface PocSubmitArgs {
   _mcpServer?: McpServer;
 }
 
-export async function executePocSubmit(args: PocSubmitArgs): Promise<string> {
+export async function executePocSubmit(args: PocSubmitArgs): Promise<string | import('../lib/output-types.js').StructuredOutput> {
+  const { buildEnvelope: __be, buildMarkdownEnvelope: __bme } = await import('../lib/output-types.js');
+  // Tool-level view fallback for callers passing { view } at the registration level.
+  // The submit schema doesn't declare `view`, so we accept it as an extra field on args.
+  const view = (args as unknown as { view?: 'summary' | 'markdown' }).view ?? 'summary';
+  const md = await executePocSubmitInner(args);
+  const sidMatch = md.match(/snapshot_id\*\*: `(.+?)`/);
+  const siemMatch = md.match(/siem_detected\*\*: (\S+)/);
+  const durMatch = md.match(/estimated_duration_minutes\*\*: (\d+)/);
+  if (view === 'markdown') {
+    return __bme({ tool: 'log10x_poc_from_siem_submit', summary: { headline: `POC submitted${sidMatch ? ` (snapshot_id ${sidMatch[1]})` : ''}` }, markdown: md });
+  }
+  return __be({
+    tool: 'log10x_poc_from_siem_submit',
+    view: 'summary',
+    summary: { headline: `POC submit accepted${siemMatch ? ` for ${siemMatch[1]}` : ''}${sidMatch ? ` (snapshot_id ${sidMatch[1]})` : ''}; estimated ${durMatch?.[1] ?? '?'} min. Poll log10x_poc_from_siem_status.` },
+    data: {
+      ok: true,
+      snapshot_id: sidMatch?.[1],
+      siem_detected: siemMatch?.[1],
+      estimated_duration_minutes: durMatch ? Number(durMatch[1]) : undefined,
+      window: args.window,
+      scope: args.scope,
+      query: args.query,
+      target_event_count: args.target_event_count,
+      max_pull_minutes: args.max_pull_minutes,
+    },
+    actions: sidMatch ? [{ tool: 'log10x_poc_from_siem_status', args: { snapshot_id: sidMatch[1] }, reason: 'poll POC progress; phases: pulling -> templatizing -> rendering -> complete' }] : [],
+  });
+}
+
+async function executePocSubmitInner(args: PocSubmitArgs): Promise<string> {
   // ── Resolve the connector ──
   const resolution = await resolveSiemSelection({ explicit: args.siem });
   if (resolution.kind === 'none') {
@@ -340,7 +371,54 @@ export interface PocStatusArgs {
   top_n?: number;
 }
 
-export async function executePocStatus(args: PocStatusArgs): Promise<string> {
+export async function executePocStatus(args: PocStatusArgs): Promise<string | import('../lib/output-types.js').StructuredOutput> {
+  const { buildEnvelope: __be, buildMarkdownEnvelope: __bme } = await import('../lib/output-types.js');
+  // poc_from_siem_status already has its own `view` enum (summary/full/yaml/configs/top/pattern).
+  // The MCP envelope `view` is a SEPARATE control: how to package the output.
+  // Convention: when the caller wants the typed envelope, they pass envelope_view='summary' or just omit it.
+  // We default to wrapping any view's rendered markdown in a typed envelope.
+  const envView = (args as unknown as { envelope_view?: 'summary' | 'markdown' }).envelope_view ?? 'summary';
+  const s = SNAPSHOTS.get(args.snapshot_id);
+  if (!s) {
+    throw new Error(
+      `Unknown snapshot_id "${args.snapshot_id}". Submit via log10x_poc_from_siem_submit first; snapshots live in-memory per MCP process.`
+    );
+  }
+  const md = await executePocStatusInner(args);
+  if (envView === 'markdown') {
+    return __bme({
+      tool: 'log10x_poc_from_siem_status',
+      summary: { headline: `POC status (${s.status}) for snapshot_id ${s.id}` },
+      markdown: md,
+    });
+  }
+  return __be({
+    tool: 'log10x_poc_from_siem_status',
+    view: 'summary',
+    summary: { headline: `POC ${s.status} for snapshot_id ${s.id}${s.status === 'complete' ? ` (${args.view ?? 'summary'} view)` : `, progress=${s.progressPct}%, elapsed=${Math.round((Date.now() - s.startedAtMs) / 1000)}s`}.` },
+    data: {
+      snapshot_id: s.id,
+      status: s.status,
+      progress_pct: s.progressPct,
+      step_detail: s.stepDetail,
+      elapsed_seconds: Math.round((Date.now() - s.startedAtMs) / 1000),
+      partial_patterns_found: s.partialPatternsFound,
+      report_file_path: s.reportFilePath,
+      error: s.error,
+      retry_hint: s.retryHint,
+      view_rendered: s.status === 'complete' ? (args.view ?? 'summary') : undefined,
+      report_markdown: s.status === 'complete' ? md : undefined,
+      partial_report_markdown: s.status === 'failed' ? s.partialReportMarkdown : undefined,
+    },
+    actions: s.status === 'complete'
+      ? []
+      : s.status === 'failed'
+        ? [{ tool: 'log10x_poc_from_siem_submit', args: {}, reason: 'POC failed — resubmit with adjusted args' }]
+        : [{ tool: 'log10x_poc_from_siem_status', args: { snapshot_id: s.id }, reason: 'continue polling every ~30s until status=complete' }],
+  });
+}
+
+async function executePocStatusInner(args: PocStatusArgs): Promise<string> {
   const s = SNAPSHOTS.get(args.snapshot_id);
   if (!s) {
     throw new Error(

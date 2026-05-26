@@ -21,6 +21,7 @@ import { z } from 'zod';
 import { sampleFromKubectl, type LocalSourceOptions } from '../lib/local-source.js';
 import { extractPatterns } from '../lib/pattern-extraction.js';
 import { fmtBytes, fmtCount, fmtDollar, fmtPct } from '../lib/format.js';
+import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
 export const pocFromLocalSchema = {
   source: z
@@ -61,6 +62,7 @@ export const pocFromLocalSchema = {
     .optional()
     .default(true)
     .describe('Templatize via locally-installed `tenx` (true) or the public Log10x paste endpoint (false). Default true.'),
+  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.sample, data.patterns, data.projections). markdown wraps the rendered report in data.markdown.'),
 };
 
 export interface PocFromLocalArgs {
@@ -71,6 +73,7 @@ export interface PocFromLocalArgs {
   max_pods?: number;
   privacy_mode?: boolean;
   ai_prettify?: boolean;
+  view?: 'summary' | 'markdown';
 }
 
 interface PriceRow {
@@ -88,7 +91,47 @@ const INDUSTRY_PRICING: PriceRow[] = [
   { vendor: 'OpenSearch', perGb: 0.1, note: 'self-hosted compute baseline' },
 ];
 
-export async function executePocFromLocal(args: PocFromLocalArgs): Promise<string> {
+export async function executePocFromLocal(args: PocFromLocalArgs): Promise<string | StructuredOutput> {
+  const view = args.view ?? 'summary';
+  const inner = await executePocFromLocalInner(args);
+  if (view === 'markdown') {
+    return buildMarkdownEnvelope({
+      tool: 'log10x_poc_from_local',
+      summary: { headline: inner.events_pulled > 0 ? `POC from kubectl: ${inner.events_pulled} events, ${inner.distinct_patterns} patterns` : 'POC from kubectl: no log lines pulled' },
+      markdown: inner.markdown,
+    });
+  }
+  return buildEnvelope({
+    tool: 'log10x_poc_from_local',
+    view: 'summary',
+    summary: { headline: inner.events_pulled > 0
+      ? `POC from kubectl: ${inner.events_pulled.toLocaleString()} lines from ${inner.pods_sampled} pod${inner.pods_sampled !== 1 ? 's' : ''} → ${inner.distinct_patterns} distinct pattern${inner.distinct_patterns !== 1 ? 's' : ''}, projected ${fmtDollar(inner.daily_dollar_projection_low ?? 0)}-${fmtDollar(inner.daily_dollar_projection_high ?? 0)}/day across vendors.`
+      : 'POC from kubectl: no log lines pulled. Check namespace + pod filter.' },
+    data: inner,
+    actions: inner.events_pulled > 0
+      ? [{ tool: 'log10x_resolve_batch', args: { source: 'text', text: '...' }, reason: 'run the same sample through resolve_batch for per-pattern variable concentration + next actions' }]
+      : [],
+  });
+}
+
+interface PocFromLocalInner {
+  ok: boolean;
+  source: 'kubectl';
+  namespace: string;
+  window: string;
+  pods_sampled: number;
+  pods_failed: number;
+  events_pulled: number;
+  total_bytes: number;
+  distinct_patterns: number;
+  daily_gb_projection: number;
+  daily_dollar_projection_low?: number;
+  daily_dollar_projection_high?: number;
+  notes: string[];
+  markdown: string;
+}
+
+async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFromLocalInner> {
   const source = args.source ?? 'kubectl';
   if (source !== 'kubectl') {
     throw new Error(
@@ -121,7 +164,20 @@ export async function executePocFromLocal(args: PocFromLocalArgs): Promise<strin
         lines.push(`- ... and ${sample.failedPods.length - 10} more`);
       }
     }
-    return lines.join('\n');
+    return {
+      ok: false,
+      source: 'kubectl',
+      namespace: opts.namespace!,
+      window: opts.window!,
+      pods_sampled: 0,
+      pods_failed: sample.failedPods.length,
+      events_pulled: 0,
+      total_bytes: 0,
+      distinct_patterns: 0,
+      daily_gb_projection: 0,
+      notes: sample.notes,
+      markdown: lines.join('\n'),
+    };
   }
 
   const extraction = await extractPatterns(sample.events, {
@@ -235,7 +291,24 @@ export async function executePocFromLocal(args: PocFromLocalArgs): Promise<strin
     }
   }
 
-  return lines.join('\n');
+  const lowVendor = INDUSTRY_PRICING.reduce((min, r) => (r.perGb < min ? r.perGb : min), Infinity);
+  const highVendor = INDUSTRY_PRICING.reduce((max, r) => (r.perGb > max ? r.perGb : max), 0);
+  return {
+    ok: true,
+    source: 'kubectl',
+    namespace: opts.namespace!,
+    window: opts.window!,
+    pods_sampled: sample.composition.length,
+    pods_failed: sample.failedPods.length,
+    events_pulled: totalEvents,
+    total_bytes: sample.totalBytes,
+    distinct_patterns: patterns.length,
+    daily_gb_projection: dailyGbProjected,
+    daily_dollar_projection_low: dailyGbProjected * lowVendor,
+    daily_dollar_projection_high: dailyGbProjected * highVendor,
+    notes: sample.notes,
+    markdown: lines.join('\n'),
+  };
 }
 
 function parseWindowHours(window: string): number {
