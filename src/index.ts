@@ -21,6 +21,12 @@ import {
   StructuredOutputSchema,
   type StructuredOutput,
 } from './lib/output-types.js';
+import {
+  detectMode,
+  shouldRegisterTool,
+  formatModeResolution,
+  type ModeResolution,
+} from './lib/mode-detect.js';
 
 import { loadEnvironments, resolveEnv, revalidateEnvironments, type EnvConfig, type Environments, EnvironmentValidationError } from './lib/environments.js';
 import { fetchAnalyzerCost } from './lib/api.js';
@@ -109,9 +115,32 @@ import { getStatus } from './resources/status.js';
 // (apiKey alone → GET /api/v1/user) hits the network.
 
 let envs: Environments | undefined;
+let bootMode: ModeResolution | undefined;
 
 async function initEnvs(): Promise<void> {
   envs = await loadEnvironments();
+}
+
+/**
+ * Detect the operating mode (analysis | analysis_pending | poc) for
+ * this MCP boot. Runs once after envs are loaded; result is fixed for
+ * the lifetime of the process. Tool handlers consult `bootMode.mode`
+ * via `getBootMode()` to gate themselves; agents see all 44 tools in
+ * `tools/list` and the client's tool-search ranks per query, but a
+ * tool called in the wrong mode returns a clear "not available" reply
+ * instead of 5xx'ing on a missing backend.
+ */
+async function initBootMode(): Promise<void> {
+  bootMode = await detectMode();
+}
+
+export function getBootMode(): ModeResolution {
+  if (!bootMode) {
+    throw new Error(
+      '[log10x-mcp] internal error: bootMode accessed before initBootMode() completed.'
+    );
+  }
+  return bootMode;
 }
 
 function getEnvs(): Environments {
@@ -188,6 +217,23 @@ async function wrap(
     log.info(`tool.${toolName}.not_configured`);
     return {
       content: [{ type: 'text' as const, text: notConfiguredMessageForTool(toolName) }],
+    };
+  }
+  // Mode gate: if the boot-time mode-detect determined this tool is
+  // not available in the current mode, return a clear out-of-mode
+  // reply rather than letting it 5xx on a missing backend. Agents see
+  // all tools in `tools/list` (client-side tool-search ranks them per
+  // query, so cognitive surface is not the concern); the gate just
+  // ensures wrong-mode calls produce a useful response.
+  if (bootMode && !shouldRegisterTool(toolName, bootMode.mode)) {
+    log.info(`tool.${toolName}.wrong_mode`, { mode: bootMode.mode });
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: formatOutOfModeMessage(toolName, bootMode),
+        },
+      ],
     };
   }
   try {
@@ -351,6 +397,43 @@ function maybeAddDemoBannerWarning(warnings: string[]): string[] {
     `Demo mode — account-scoped tools query the read-only Log10x demo env. Call log10x_login_status to use your own data.`,
     ...warnings,
   ];
+}
+
+/**
+ * Format a clear "this tool is not available in the current boot mode"
+ * reply. The agent calls a tool that mode-detect determined is
+ * irrelevant (analysis tool in POC mode, POC tool in analysis mode);
+ * we tell it why and what would change the mode.
+ */
+function formatOutOfModeMessage(toolName: string, mode: ModeResolution): string {
+  const lines = [
+    `## \`${toolName}\` is not available in this mode`,
+    ``,
+    `**Current mode**: \`${mode.mode}\``,
+    `**Reason**: ${mode.reason}`,
+    ``,
+  ];
+  if (mode.mode === 'poc') {
+    lines.push(
+      `This MCP detected no TSDB backend at boot and registered the POC tools (`,
+      `\`log10x_poc_from_siem_*\`, \`log10x_poc_from_local\`) plus install advisors instead.`,
+      ``,
+      `If you have a 10x deployment with a TSDB (Grafana Cloud, AMP, GCP Managed Prometheus,`,
+      `Datadog Prom, self-hosted Prometheus, or 10x Cloud), set the corresponding env vars`,
+      `(\`LOG10X_CUSTOMER_METRICS_URL\` + \`LOG10X_CUSTOMER_METRICS_TYPE\` + \`LOG10X_CUSTOMER_METRICS_AUTH\`,`,
+      `or any of the ambient detect paths) and restart the MCP. The analysis tools will`,
+      `register on the next boot.`
+    );
+  } else if (mode.mode === 'analysis') {
+    lines.push(
+      `This MCP detected a live 10x deployment at boot and registered the analysis tools.`,
+      ``,
+      `\`${toolName}\` is a POC / install-advisor tool that runs against prospect environments.`,
+      `If you actually want POC / install-advisor behavior in an analysis-mode env, unset the`,
+      `customer-metrics env vars and restart.`
+    );
+  }
+  return lines.join('\n');
 }
 
 function applyDemoBanner(text: string): string {
@@ -1212,6 +1295,11 @@ async function main() {
     }
     throw e;
   }
+  // Detect operating mode (analysis | analysis_pending | poc) from
+  // the TSDB-resolvability cascade. Bounded by 5s probe timeout. Sets
+  // the module-scoped `bootMode` used by `wrap()` to gate out-of-mode
+  // tool invocations with a clear reply rather than 5xx errors.
+  await initBootMode();
   // Plumb the envs reference into self-telemetry so the wrapper can
   // resolve which env each tool call acted on, and flush can drop counters
   // from read-only envs (incl. demo). Must happen AFTER initEnvs so the
@@ -1230,7 +1318,16 @@ async function main() {
     default_env: loaded.default.nickname,
     demo_mode: loaded.isDemoMode,
     manifest_loaded: manifest !== null,
+    boot_mode: bootMode?.mode,
+    boot_mode_backend: bootMode?.detectionPath,
+    boot_mode_probe_ms: bootMode?.probeDurationMs,
   });
+  // Surface mode-detect resolution to stderr at boot so it shows up
+  // in MCP-client logs without needing to call `log10x_doctor`.
+  if (bootMode) {
+    // eslint-disable-next-line no-console
+    console.error(`[log10x-mcp] ${formatModeResolution(bootMode).split('\n')[0]}`);
+  }
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
