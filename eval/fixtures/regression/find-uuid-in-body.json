@@ -1,0 +1,29 @@
+{
+  "id": "find-uuid-in-body",
+  "description": "Events where auditID is a per-event UUID \u2014 find_uuid_in_body should flag the auditID slot.",
+  "tool": "find_uuid_in_body",
+  "args": {
+    "events": [
+      "{\"verb\":\"get\",\"auditID\":\"e0f83483-3150-4951-afd1-886061c949b8\",\"user\":\"u1\"}",
+      "{\"verb\":\"get\",\"auditID\":\"deadbeef-1111-2222-3333-444444444444\",\"user\":\"u2\"}",
+      "{\"verb\":\"get\",\"auditID\":\"cafef00d-aaaa-bbbb-cccc-dddddddddddd\",\"user\":\"u3\"}",
+      "{\"verb\":\"get\",\"auditID\":\"12345678-90ab-cdef-1234-567890abcdef\",\"user\":\"u4\"}",
+      "{\"verb\":\"get\",\"auditID\":\"00000000-0000-0000-0000-000000000000\",\"user\":\"u5\"}",
+      "{\"verb\":\"get\",\"auditID\":\"11111111-2222-3333-4444-555555555555\",\"user\":\"u6\"}",
+      "{\"verb\":\"get\",\"auditID\":\"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\",\"user\":\"u7\"}",
+      "{\"verb\":\"get\",\"auditID\":\"fffffff1-2222-3333-4444-555555555555\",\"user\":\"u8\"}",
+      "{\"verb\":\"get\",\"auditID\":\"99999999-8888-7777-6666-555555555555\",\"user\":\"u9\"}",
+      "{\"verb\":\"get\",\"auditID\":\"abcdef12-3456-7890-abcd-ef1234567890\",\"user\":\"u10\"}",
+      "{\"verb\":\"get\",\"auditID\":\"12345678-1234-1234-1234-123456789012\",\"user\":\"u11\"}",
+      "{\"verb\":\"get\",\"auditID\":\"98765432-9876-9876-9876-987654321098\",\"user\":\"u12\"}"
+    ],
+    "privacy_mode": true,
+    "cardinality_ratio_threshold": 0.9,
+    "min_events": 5
+  },
+  "expected": {
+    "findings_count_min": 1,
+    "headline_must_match": "uuid",
+    "rubric": "Tool should detect at least one slot with cardinality ratio >= 0.9 and a UUID regex match. The auditID slot has 12 distinct values across 12 events; regex_match should be 'uuid'."
+  }
+}
