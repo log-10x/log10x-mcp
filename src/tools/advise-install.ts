@@ -50,7 +50,6 @@ import { buildReporterPlan } from '../lib/advisor/reporter.js';
 import { renderPlan } from '../lib/advisor/render.js';
 import { acquireLicenseForWizard, LicenseFetchError } from '../lib/license-api.js';
 import '../lib/auth-model.js';
-import { resolveAdvisorDestination } from '../lib/advisor/dest-resolve.js';
 import type {
   DiscoverySnapshot,
   ForwarderKind,
@@ -135,25 +134,29 @@ export const adviseInstallSchema = {
     .describe(
       'Per-backend credential configuration, keyed by backend kind. **Only set for non-`log10x` backends** — `log10x` SaaS uses the license JWT and needs no extra credentials. Each entry has a `secretName` (the Kubernetes Secret the user creates out-of-band holding sensitive env vars like `DD_API_KEY`; default per backend is `<backend>-credentials`) and optional `plainValues` (overrides for non-sensitive env vars like `DD_SITE`). Example: `{ "datadog": { "secretName": "datadog-secret", "plainValues": { "DD_SITE": "us5.datadoghq.com" } } }`.'
     ),
-  license_jwt: z
-    .string()
+  license_source: z
+    .enum(['signin', 'demo', 'paste'])
     .optional()
     .describe(
-      'Log10x license JWT — mints from `POST /api/v1/license/demo` (anonymous, 14-day) or `POST /api/v1/license` (Auth0-authed, user-scoped). Maps to the helm chart\'s `log10xLicenseJwt` value. When omitted and the user is not signed in, the wizard auto-fetches a demo JWT.'
+      'How the wizard should acquire the engine\'s license JWT. **signin** (recommended) returns a sign-in step the user runs in a separate `log10x_signin_start` call — re-invoking the wizard after sign-in auto-mints a user-scoped license. **demo** mints a 14-day anonymous demo JWT (transient, can\'t run airgapped). **paste** asks the user for an existing JWT via `license_jwt_paste`. When omitted, the wizard surfaces this as a question.'
     ),
+  license_jwt_paste: z
+    .string()
+    .optional()
+    .describe('License JWT supplied by the user when `license_source: "paste"`. Mints from `POST /api/v1/license` (signed-in) or `POST /api/v1/license/demo` (anonymous). Maps to the chart\'s license Secret.'),
   namespace: z.string().optional().describe('Target namespace. Default: snapshot.recommendations.suggestedNamespace.'),
   release_name: z
     .string()
     .optional()
     .describe('Helm release name. Default: `my-<app>` (e.g., `my-reporter`).'),
-  destination: z
-    .enum(['mock', 'elasticsearch', 'splunk', 'datadog', 'cloudwatch'])
-    .optional()
-    .describe(
-      'Event destination for the Receiver path (where filtered events go AFTER the engine processes them). Distinct from `backend` (which is where METRICS go). When omitted: auto-detects from ambient SIEM credentials; falls back to `mock`.'
-    ),
-  output_host: z.string().optional().describe('Host for non-mock event destinations.'),
-  splunk_hec_token: z.string().optional().describe('Required when destination=splunk.'),
+  // `destination` / `output_host` / `splunk_hec_token` were deliberately
+  // removed from the install-wizard schema. The Receiver is a sidecar
+  // that processes events in-flight and emits METRICS — `backends` already
+  // captures where those metrics go. The user's existing forwarder still
+  // controls where the actual events go; we don't replace that. (The
+  // generated overlay falls back to a documented placeholder for the
+  // event-out config when the chart's `config:` is replaced wholesale —
+  // see the per-forwarder renderer in reporter-forwarders.ts.)
   action: z
     .enum(['install', 'verify', 'teardown', 'all'])
     .optional()
@@ -170,6 +173,7 @@ type WizardMode =
   | 'cancelled'
   | 'next_question'
   | 'license_error'
+  | 'signin_required'
   | 'demo_airgapped_warning'
   | 'ambiguous_destination'
   | 'plan';
@@ -238,7 +242,11 @@ export async function executeAdviseInstall(
     backends: args.backends as MetricsBackendKind[] | undefined,
     backendCredentials: mergedBackendCredentials,
     airgapped: args.airgapped,
-    licenseJwt: args.license_jwt,
+    licenseSource: args.license_source,
+    // license_jwt_paste fills licenseJwt directly — it's the actual JWT
+    // the user supplied. The session's licenseJwt is overwritten below
+    // by acquireLicenseForWizard() for the signin/demo paths.
+    licenseJwt: args.license_jwt_paste,
     releaseName: args.release_name,
     namespace: args.namespace,
   });
@@ -283,11 +291,26 @@ export async function executeAdviseInstall(
     }
   }
 
-  // Auto-acquire a license if the user hasn't supplied one. Routes
-  // between user-scoped (signed-in, Auth0 token available) and demo
-  // (not signed in, or pasted-API-key path where we have no Auth0 token).
-  // Refreshes the Auth0 access token transparently if it's expired.
-  if (!session.licenseJwt) {
+  // License acquisition. Three paths driven by session.licenseSource:
+  //   - 'signin' — the user said "sign me in". acquireLicenseForWizard
+  //     mints a user-scoped JWT IF they're already signed in; otherwise
+  //     it falls back to demo. We surface a clear "go sign in first"
+  //     message when the fallback to demo would happen, so the user
+  //     gets the real license they asked for rather than a silent demo.
+  //   - 'demo' — explicit demo. Skip the signed-in check, mint a demo.
+  //   - 'paste' — the user supplied license_jwt_paste; session.licenseJwt
+  //     is already populated from that arg. Nothing to do here.
+  if (!session.licenseJwt && session.licenseSource !== 'paste') {
+    if (session.licenseSource === 'signin' && envs.isDemoMode) {
+      const md = [
+        `# Install wizard — sign in to Log10x first`,
+        ``,
+        `You picked **Sign in** for the license. The wizard needs a Log10x account session to mint a user-scoped license — run \`log10x_signin_start\` in your next turn (it opens a browser to auth.log10x.com and exchanges the device-code for an API key).`,
+        ``,
+        `Once you're signed in, re-invoke \`log10x_advise_install\` with the same \`snapshot_id\`. Every answer you gave above is remembered — you won't have to redo any step.`,
+      ].join('\n');
+      return wizardReturn(view, 'signin_required', md, { snapshot_id: args.snapshot_id });
+    }
     try {
       const lic = await acquireLicenseForWizard();
       updateWizardSession(args.snapshot_id, {
@@ -307,7 +330,7 @@ export async function executeAdviseInstall(
         ``,
         `Options:`,
         `- Sign in via \`log10x_signin_start\` if you haven't already`,
-        `- Pass an existing JWT via \`license_jwt\``,
+        `- Re-invoke with \`license_source: "paste"\` and \`license_jwt_paste: "<your-jwt>"\` if you have one`,
         `- Retry — the gateway may have been transiently unavailable`,
       ].join('\n');
       return wizardReturn(view, 'license_error', md, { snapshot_id: args.snapshot_id, error_message: msg });
@@ -569,6 +592,53 @@ async function elicitMissingAnswers(
       session.airgapped = false;
     }
 
+    // Q6: license source — sign in, demo, or paste.
+    if (!session.licenseSource) {
+      const result = await (server as any).server.elicitInput({
+        message: 'How do you want to license the engine? The engine needs a Log10x license JWT to start — sign in to log10x for a real user-scoped license (recommended), mint an anonymous 14-day demo, or paste a JWT you already have.',
+        requestedSchema: {
+          type: 'object',
+          properties: {
+            licenseSource: {
+              type: 'string',
+              title: 'License source',
+              enum: ['signin', 'demo', 'paste'],
+              enumNames: [
+                'Sign in to Log10x — real license, recommended',
+                'Mint an anonymous 14-day demo license — transient, no airgapped',
+                "I'll paste a license JWT I already have",
+              ],
+            },
+          },
+          required: ['licenseSource'],
+        },
+      });
+      if (result.action !== 'accept') return { kind: 'cancelled' };
+      session.licenseSource = result.content?.licenseSource as 'signin' | 'demo' | 'paste';
+      updateWizardSession(session.snapshotId, { licenseSource: session.licenseSource });
+    }
+
+    // Q7: paste path — ask for the JWT itself.
+    if (session.licenseSource === 'paste' && !session.licenseJwt) {
+      const result = await (server as any).server.elicitInput({
+        message: 'Paste the Log10x license JWT. The chart mounts this via a Kubernetes Secret at /etc/tenx/license/license.jwt — it never lives in values.yaml.',
+        requestedSchema: {
+          type: 'object',
+          properties: {
+            licenseJwt: {
+              type: 'string',
+              title: 'License JWT',
+              description: 'The JWT string. Starts with "eyJ".',
+            },
+          },
+          required: ['licenseJwt'],
+        },
+      });
+      if (result.action !== 'accept') return { kind: 'cancelled' };
+      session.licenseJwt = result.content?.licenseJwt as string;
+      updateWizardSession(session.snapshotId, { licenseJwt: session.licenseJwt });
+    }
+
     return { kind: 'all-answered' };
   } catch (e) {
     // The SDK throws if the client doesn't actually support elicitation
@@ -580,7 +650,7 @@ async function elicitMissingAnswers(
 
 // ── Question routing ──
 
-type QuestionId = 'app' | 'forwarder' | 'no-forwarder' | 'backends' | 'airgapped-log10x-conflict' | 'backend-credentials' | 'airgapped';
+type QuestionId = 'app' | 'forwarder' | 'no-forwarder' | 'backends' | 'airgapped-log10x-conflict' | 'backend-credentials' | 'airgapped' | 'license-source' | 'license-paste';
 type NextStep = { kind: 'ask'; markdown: string; questionId: QuestionId } | { kind: 'render' };
 
 function nextQuestion(snapshot: DiscoverySnapshot, session: WizardSession): NextStep {
@@ -655,6 +725,18 @@ function nextQuestion(snapshot: DiscoverySnapshot, session: WizardSession): Next
   if (hasLog10x && session.airgapped === undefined) {
     updateWizardSession(session.snapshotId, { airgapped: false });
     session.airgapped = false;
+  }
+
+  // Q6: license source — sign in (recommended), demo, or paste.
+  if (!session.licenseSource) {
+    return { kind: 'ask', markdown: askLicenseSource(), questionId: 'license-source' };
+  }
+
+  // Q7: when license_source=paste and the JWT hasn't been provided yet,
+  // ask for it. (The agent passes it via `license_jwt_paste`, which the
+  // session merge folds into `licenseJwt`.)
+  if (session.licenseSource === 'paste' && !session.licenseJwt) {
+    return { kind: 'ask', markdown: askLicensePaste(), questionId: 'license-paste' };
   }
 
   return { kind: 'render' };
@@ -850,6 +932,28 @@ function askBackendCredentials(backends: MetricsBackendKind[]): string {
   return lines.join('\n');
 }
 
+function askLicenseSource(): string {
+  return [
+    '# Install wizard — how do you want to license the engine?',
+    '',
+    'The Log10x engine needs a license JWT to start. We need to know how you want to get one — there\'s a real Log10x license tied to your account (recommended), a transient demo, and a paste-an-existing-JWT path.',
+    '',
+    'Re-invoke `log10x_advise_install` with one of:',
+    '',
+    '- **`license_source: "signin"`** — recommended. The wizard will tell you to call `log10x_signin_start` to authenticate to Log10x; after sign-in, re-invoke and the wizard mints a user-scoped license automatically. Your other answers are remembered. Required for airgapped installs.',
+    '- **`license_source: "demo"`** — anonymous 14-day demo JWT. Quick and zero-setup, but transient, can\'t run airgapped, and the demo license tier has reduced limits.',
+    '- **`license_source: "paste"`** — you already have a JWT and want to use it. Re-invoke with `license_jwt_paste: "<the jwt>"`.',
+  ].join('\n');
+}
+
+function askLicensePaste(): string {
+  return [
+    '# Install wizard — paste the license JWT',
+    '',
+    'You picked `license_source: "paste"`. Re-invoke `log10x_advise_install` with `license_jwt_paste: "<your JWT>"` to supply the license JWT. The JWT is what authorizes the engine and what the chart mounts via the license Secret — keep it out of shell history (the wizard\'s pre-install step uses `--from-literal` but you can switch to `--from-file=<path>` after the fact if needed).',
+  ].join('\n');
+}
+
 function askAirgapped(backends: MetricsBackendKind[]): string {
   const backendList = backends.map((b) => `\`${b}\``).join(' + ');
   return [
@@ -933,23 +1037,14 @@ async function renderInstallPlan(
     lines.push('');
   }
 
-  // Route to the right plan builder.
+  // Route to the right plan builder. Destination defaults to `mock` —
+  // the install wizard no longer asks for a forwarder-event destination
+  // (the user's existing forwarder still controls where events go;
+  // the wizard's overlay is additive for the sidecar pattern, with a
+  // documented placeholder in the values for the user to wire their own
+  // destination output).
   if (session.app === 'reporter' || session.app === 'receiver') {
-    // Receiver path needs a destination for the event flow. Resolve it
-    // from explicit arg → ambient SIEM credentials → mock.
-    const destResolution =
-      session.app === 'receiver'
-        ? await resolveAdvisorDestination(args.destination)
-        : { kind: 'resolved' as const, destination: 'mock' as const, note: undefined };
-    if (destResolution.kind === 'ambiguous') {
-      return {
-        kind: 'ambiguous_destination',
-        markdown: destResolution.markdown,
-        candidates: destResolution.candidates,
-      };
-    }
-    const destination = destResolution.destination;
-    const destNote = destResolution.note ? `_${destResolution.note}_\n\n` : '';
+    const destination: OutputDestination = 'mock';
 
     const plan = await buildReporterPlan({
       snapshot,
@@ -959,9 +1054,7 @@ async function renderInstallPlan(
       namespace: session.namespace,
       licenseJwt: session.licenseJwt,
       isDemoLicense: session.isDemoLicense,
-      destination: destination as OutputDestination,
-      outputHost: args.output_host,
-      splunkHecToken: args.splunk_hec_token,
+      destination,
       backends: session.backends,
       backendCredentials: session.backendCredentials,
       airgapped: session.airgapped,
@@ -969,7 +1062,7 @@ async function renderInstallPlan(
       skipVerify: action === 'install' || action === 'teardown',
       skipTeardown: action === 'install' || action === 'verify',
     });
-    lines.push(destNote + renderPlan(plan, action));
+    lines.push(renderPlan(plan, action));
     return { kind: 'plan', markdown: lines.join('\n'), destination };
   }
 

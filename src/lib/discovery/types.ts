@@ -272,9 +272,9 @@ export interface WizardSession {
   /** Target namespace override. */
   namespace?: string;
   /**
-   * License JWT — fetched from `/api/v1/license/demo` (anonymous) or
-   * `/api/v1/license` (Auth0-authed). The wizard fills this in at plan
-   * emission time; the user doesn't enter it directly.
+   * License JWT — minted from `/api/v1/license` (signed-in, user-scoped)
+   * or `/api/v1/license/demo` (anonymous, 14-day). The wizard fills this
+   * in at plan-emission time based on `licenseSource`.
    */
   licenseJwt?: string;
   /**
@@ -282,6 +282,16 @@ export interface WizardSession {
    * uses this to emit the "demo + airgapped is a no-op" notice.
    */
   isDemoLicense?: boolean;
+  /**
+   * How the user chose to get the license JWT:
+   *   - 'signin' — sign in to log10x first, then re-invoke (the
+   *     recommended path; produces a real user-scoped license)
+   *   - 'demo' — mint an anonymous 14-day demo JWT (transient, can't
+   *     run airgapped)
+   *   - 'paste' — the user supplied a JWT they already have, via
+   *     `license_jwt_paste`
+   */
+  licenseSource?: 'signin' | 'demo' | 'paste';
   /** Last-updated timestamp for diagnostics. */
   updatedAt: string;
 }

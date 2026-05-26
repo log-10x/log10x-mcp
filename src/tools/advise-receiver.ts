@@ -59,14 +59,14 @@ export const adviseReceiverSchema = {
     .boolean()
     .optional()
     .describe(
-      'When true, emit events out of the forwarder in compact encoded form (templateHash+vars, ~20-40x volume reduction; see `config/modules/pipelines/run/units/transform/doc.md#compact`). Wizard-supported on fluent-bit, otel-collector, vector, and logstash — appended to the log10x sidecar container\'s `args` as `receiverOptimize true` rather than a chart value. Mutually exclusive with `mode=readonly`. Default: false.'
+      'When true, emit events out of the forwarder in compact encoded form (templateHash+vars, ~20-40x volume reduction; see `config/modules/pipelines/run/units/transform/doc.md#compact`). Wizard-supported on fluent-bit, otel-collector, vector, and logstash — appended to the log10x sidecar container\'s `args` as `receiverOptimize true`. Default: false.'
     ),
-  mode: z
-    .enum(['readonly', 'readwrite'])
-    .optional()
-    .describe(
-      'Receiver mode. `readwrite` (default): receive events, filter them, write them back through the forwarder (with optional compact encoding when `optimize=true`). `readonly`: receive events, emit `emitted_events`/`all_events` TenXSummary metrics, do NOT write events back — passive metrics-only deployment. The engine flag that gates every event-output stream module (forward/unix/socket/stdout) is set via the log10x sidecar container\'s args. Mutually exclusive with `optimize=true`. For the parallel-DaemonSet observation pattern (separate pod, not in the forwarder pipeline), use `log10x_advise_reporter` instead — Reporter is standalone-by-design.'
-    ),
+  // `mode` (readonly/readwrite) was deliberately removed from the schema:
+  // the default is always readwrite, and surfacing the choice in the wizard
+  // (which Claude Desktop does automatically for every optional enum) was
+  // both confusing and not what most users want. Readonly is a niche
+  // observation-only mode; add it back via a different mechanism (e.g. a
+  // `goal` arg or a dedicated read-only tool) if/when needed.
   action: z
     .enum(['install', 'verify', 'teardown', 'all'])
     .optional()
@@ -116,7 +116,6 @@ export async function executeAdviseReceiver(args: AdviseReceiverArgs): Promise<s
     outputHost: args.output_host,
     splunkHecToken: args.splunk_hec_token,
     optimize: args.optimize,
-    readOnly: args.mode === 'readonly',
     skipInstall: action === 'verify' || action === 'teardown',
     skipVerify: action === 'install' || action === 'teardown',
     skipTeardown: action === 'install' || action === 'verify',
