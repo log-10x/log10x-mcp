@@ -19,6 +19,7 @@ import {
 import { z } from 'zod';
 import {
   StructuredOutputSchema,
+  buildEnvelope,
   type StructuredOutput,
 } from './lib/output-types.js';
 import {
@@ -233,17 +234,32 @@ async function wrap(
   try {
     const result = await runWithDemoFallbackRetry(toolName, fn);
     log.info(`tool.${toolName}.ok`, { ms: Date.now() - started });
-    // Legacy path: tool returned a markdown string. Apply demo banner
-    // as a prepended block and wrap as text content.
+    // Universal-envelope path: a tool that still returns plain markdown
+    // (the unreshaped legacy tools — primitives, advisors, auth) gets
+    // auto-wrapped into a StructuredOutput envelope here. The agent always
+    // sees JSON. `data` carries `{ markdown }` until the per-tool reshape
+    // upgrades it to a typed shape; the envelope itself is uniform from
+    // day one. Demo banner is applied at the markdown-view extraction
+    // step below, not here — keeps the envelope's data.markdown clean
+    // for downstream consumers that don't want the banner prefix.
+    let normalized: StructuredOutput;
     if (typeof result === 'string') {
-      return { content: [{ type: 'text' as const, text: applyDemoBanner(result) }] };
+      const headline = (result.split('\n').find((l) => l.trim().length > 0) ?? `${toolName} result`).slice(0, 200);
+      normalized = buildEnvelope({
+        tool: toolName,
+        view: 'summary',
+        summary: { headline },
+        data: { markdown: result },
+      });
+    } else {
+      normalized = result;
     }
     // Structured envelope path. Validate first so a malformed envelope
     // surfaces as an error rather than silently emitting bad JSON to
     // the transport.
     let validated: StructuredOutput;
     try {
-      validated = StructuredOutputSchema.parse(result);
+      validated = StructuredOutputSchema.parse(normalized);
     } catch (parseErr) {
       const msg = parseErr instanceof Error ? parseErr.message : String(parseErr);
       log.warn(`tool.${toolName}.envelope_invalid`, { msg: msg.slice(0, 240) });
