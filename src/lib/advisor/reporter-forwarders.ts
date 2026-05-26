@@ -797,68 +797,173 @@ ${indent(outputBlock, 6)}
 
   logstash: {
     label: 'Logstash',
-    // The log10x-elastic/logstash chart is broken in sidecar mode. The
-    // chart runs tenx as a separate pod container reading from its own
-    // STDIN, but the tenx-logstash design expects tenx to be a CHILD
-    // PROCESS of logstash spawned by the `pipe` output plugin (so tenx's
-    // stdin is wired to logstash's pipe). With the chart's layout,
-    // tenx.stdin is a tty, it sees no input, and after ~9s the pipeline
-    // shuts down. Do NOT ship this path to users until the chart is
-    // fixed or a sidecar-capable launcher is added to tenx-edge.
     integrationMode:
-      'StatefulSet + `tenx` sidecar — CURRENTLY BROKEN: the chart runs tenx as a side container reading from its own stdin, but tenx-logstash expects to be spawned by the logstash `pipe` output plugin. Do not advise users to install this until the chart is fixed.',
-    helmRepo: 'https://log-10x.github.io/elastic-helm-charts',
-    helmRepoAlias: 'log10x-elastic',
-    chartRef: 'log10x-elastic/logstash',
-    chartAvailability: 'wip',
-    primaryImageHint: 'ghcr.io/log-10x/logstash-10x',
-    primaryContainerName: 'logstash',
-    hasTenxSidecar: false,
-    selectorStyle: 'legacy-helm',
-    selectorLabel: (r) => legacyElasticSelector(r, 'logstash'),
-    renderValues: ({ licenseJwt, releaseName, destination, outputHost, gitToken, optimize, readOnly, backends, backendCredentials, airgapped }) => {
-      const output = renderLogstashOutput(destination, outputHost);
-      const featureFlags = renderTenxFeatureFlags({ optimize, readOnly });
-      const extras = renderTenxExtraArgsAndEnv({ backends, backendCredentials, airgapped, airgappedAsEnvVar: true });
-      return `tenx:
-  enabled: true
-  licenseJwt: "${licenseJwt}"
-  runtimeName: "${releaseName}"${featureFlags}${extras}
+      'Sidecar (`log10x/edge-10x`) injected into the user\'s existing Logstash pod via the upstream `elastic/logstash` chart. The chart uses `extraContainers` (as a YAML pipe-string) + `secretMounts` (not `extraVolumes`) for the license, plus `logstashConfig` (pipelines.yml) and `logstashPipeline` (per-pipeline .conf files). Two pipelines: `ingest` runs your filters once and hands events off to the sidecar over loopback TCP :5044; `destinations` is filter-free and receives processed events back from the sidecar on :5045 to ship to the real backends.',
+    helmRepo: 'https://helm.elastic.co',
+    helmRepoAlias: 'elastic',
+    chartRef: 'elastic/logstash',
+    chartAvailability: 'published',
+    primaryImageHint: 'log10x/edge-10x',
+    primaryContainerName: 'log10x',
+    hasTenxSidecar: true,
+    selectorStyle: 'k8s-recommended',
+    selectorLabel: (r) => k8sRecommendedSelector(r),
+    renderValues: ({ destination, outputHost, optimize, airgapped, licenseSecretName, licenseSecretKey }) => {
+      // Logstash chart quirks (vs the other receiver overlays):
+      //   - `extraContainers` is a YAML pipe-string, not a list. We inline
+      //     the log10x container block here rather than using the shared
+      //     renderLog10xSidecar helper (which emits a top-level list).
+      //   - License is mounted via the chart's `secretMounts` field, not
+      //     `extraVolumes`. The chart's `secretMounts[].subPath` projects a
+      //     single key from the Secret to a file path on disk.
+      const secretName = licenseSecretName ?? 'log10x-license';
+      const secretKey = licenseSecretKey ?? 'license-jwt';
+      const argLines: string[] = [
+        `      - "@run/input/forwarder/logstash"`,
+        `      - "@apps/receiver"`,
+      ];
+      if (optimize) {
+        argLines.push(`      - "receiverOptimize"`);
+        argLines.push(`      - "true"`);
+      }
+      const envLines: string[] = [
+        `      - name: TENX_LICENSE_FILE`,
+        `        value: /etc/tenx/license/license.jwt`,
+      ];
+      if (airgapped) {
+        envLines.push(`      - name: TENX_AIRGAPPED`);
+        envLines.push(`        value: "true"`);
+      }
+      const destOutput = renderLogstashDestinationOutput(destination, outputHost);
+      return `# Receiver overlay for Logstash (upstream elastic/logstash chart).
+# Layer on top of your existing values:
+#   helm upgrade --install <release> elastic/logstash \\
+#     -f your-existing-logstash-values.yaml \\
+#     -f my-receiver.yaml --namespace <namespace>
 
-# Avoid chart defaults hardcoding Elasticsearch credentials/mounts.
-extraEnvs: []
-secretMounts: []
+# elastic/logstash quirk: extraContainers is a YAML pipe-string, not a list.
+extraContainers: |
+  - name: log10x
+    image: log10x/edge-10x:latest
+    imagePullPolicy: IfNotPresent
+    args:
+${argLines.join('\n')}
+    env:
+${envLines.join('\n')}
+    volumeMounts:
+      - name: tenx-license
+        mountPath: /etc/tenx/license/license.jwt
+        subPath: license.jwt
+        readOnly: true
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits:   { cpu: 500m, memory: 512Mi }
+
+# License via the chart's secretMounts (not extraVolumes). subPath
+# projects the Secret's \`${secretKey}\` key to a single file.
+secretMounts:
+  - name: tenx-license
+    secretName: ${secretName}
+    path: /etc/tenx/license/license.jwt
+    subPath: ${secretKey}
+
+# Two-pipeline driver: ingest runs your filters and hands off to the
+# sidecar; destinations consumes returning events filter-free, so
+# enrichment runs exactly once.
+logstashConfig:
+  pipelines.yml: |
+    - pipeline.id: ingest
+      path.config: "/usr/share/logstash/pipeline/tenx-ingest.conf"
+    - pipeline.id: destinations
+      path.config: "/usr/share/logstash/pipeline/tenx-destinations.conf"
 
 logstashPipeline:
-  output.conf: |
-${indent(output, 4)}
+  tenx-ingest.conf: |
+    input {
+      # Replace with your real inputs (file, beats, http, ...). The
+      # \`tag\` field becomes the event's source inside Log10x.
+      file {
+        path  => "/var/log/containers/*.log"
+        codec => "json"
+        start_position => "beginning"
+      }
+    }
+    filter {
+      mutate {
+        add_field => { "cluster" => "$\{CLUSTER_NAME:unset\}" }
+        add_field => { "tag" => "k8s.containers" }
+      }
+    }
+    output {
+      tcp {
+        host  => "127.0.0.1"
+        port  => 5044
+        codec => json_lines
+      }
+    }
+  tenx-destinations.conf: |
+    input {
+      tcp {
+        host  => "0.0.0.0"
+        port  => 5045
+        codec => json_lines
+      }
+    }
+    output {
+${indent(destOutput, 6)}
+    }
 `;
     },
-    verifyProbes: ({ releaseName, namespace, destination }) => {
-      const sel = legacyElasticSelector(releaseName, 'logstash');
-      const probes = [
+    verifyProbes: ({ releaseName, namespace, destination, optimize }) => {
+      const sel = k8sRecommendedSelector(releaseName);
+      const probes: Array<{
+        name: string;
+        question: string;
+        commands: string[];
+        expectOutput?: string;
+        timeoutSec?: number;
+      }> = [
         {
           name: 'pods-ready',
-          question: 'Are all Logstash+Reporter StatefulSet pods Ready?',
+          question: 'Are all Logstash pods Ready (with the log10x sidecar)?',
           commands: [`kubectl -n ${namespace} wait --for=condition=Ready pod -l ${sel} --timeout=10m`],
           expectOutput: 'condition met',
           timeoutSec: 600,
         },
         {
-          name: 'processor-alive',
-          question: 'Is the 10x filter plugin loaded in the logstash container?',
+          name: 'sidecar-alive',
+          question: 'Is the log10x sidecar running and processing events?',
           commands: [
-            `kubectl -n ${namespace} logs -l ${sel} -c logstash --tail=400 | grep -iE 'tenx|10x|pattern' | head -20`,
+            `kubectl -n ${namespace} logs -l ${sel} -c log10x --tail=400 | grep -E 'tenx|pattern|receiver|template' | head -20`,
+          ],
+        },
+        {
+          name: 'pipeline-wired',
+          question: 'Are the ingest and destinations pipelines both running?',
+          commands: [
+            `kubectl -n ${namespace} logs -l ${sel} -c logstash --tail=400 | grep -E 'pipeline.id|tenx-ingest|tenx-destinations|5044|5045' | head -20`,
           ],
         },
       ];
       if (destination === 'mock') {
         probes.push({
           name: 'tenx-mock-events',
-          question: 'Are tagged [TENX-MOCK] events reaching stdout?',
-          commands: [`kubectl -n ${namespace} logs -l ${sel} -c logstash --tail=200 | grep -F 'TENX-MOCK' | head -5`],
-          expectOutput: 'TENX-MOCK',
+          question: 'Are returning events reaching the stdout destination?',
+          commands: [
+            `kubectl -n ${namespace} logs -l ${sel} -c logstash --tail=200 | grep -E 'tenx-destinations' | head -10`,
+          ],
           timeoutSec: 180,
+        });
+      }
+      if (optimize) {
+        probes.push({
+          name: 'tenx-encoded-events',
+          question: 'Are events emitted in compact encoded form (templateHash+vars)?',
+          commands: [
+            `kubectl -n ${namespace} logs -l ${sel} -c logstash --tail=500 | grep -oE '~[A-Za-z0-9]{5,20},[0-9]{10,}' | head -3`,
+          ],
+          expectOutput: '~',
+          timeoutSec: 120,
         });
       }
       return probes;
@@ -1509,6 +1614,49 @@ output {
 }`;
   }
   return 'output { }';
+}
+
+/**
+ * Returns the inside-`output {...}` block for the Logstash receiver
+ * overlay's `tenx-destinations.conf` pipeline. Consumes returning
+ * processed events from the sidecar (on :5045) and ships them to the
+ * user's chosen backend. Caller wraps this in `output { ... }`.
+ * Indentation is 0 (caller indents).
+ */
+function renderLogstashDestinationOutput(destination: OutputDestination, outputHost?: string): string {
+  if (destination === 'mock') {
+    return `stdout { codec => json_lines }`;
+  }
+  if (destination === 'elasticsearch') {
+    return `elasticsearch {
+  hosts => ["${outputHost ?? 'elasticsearch-master'}:9200"]
+  index => "logs-%{+YYYY.MM.dd}"
+}`;
+  }
+  if (destination === 'splunk') {
+    return `http {
+  url => "https://${outputHost ?? 'splunk-hec.example.com'}:8088/services/collector/event"
+  format => "json_batch"
+  http_method => "post"
+  headers => { "Authorization" => "Splunk \${SPLUNK_HEC_TOKEN}" }
+}`;
+  }
+  if (destination === 'datadog') {
+    return `http {
+  url => "https://http-intake.logs.datadoghq.com/api/v2/logs"
+  format => "json_batch"
+  http_method => "post"
+  headers => { "DD-API-KEY" => "\${DD_API_KEY}" }
+}`;
+  }
+  if (destination === 'cloudwatch') {
+    return `# CloudWatch Logs from Logstash uses the
+    # logstash-output-cloudwatch_logs plugin (gem install required in
+    # a custom image). Replace this stdout with the cloudwatch_logs
+    # block once the plugin is installed.
+stdout { codec => json_lines }`;
+  }
+  return `stdout { codec => json_lines }`;
 }
 
 /**

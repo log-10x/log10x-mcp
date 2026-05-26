@@ -49,12 +49,10 @@ const forwarders: ForwarderKind[] = [
   'otel-collector',
 ];
 
-// log10x-elastic/logstash@1.0.6 is chart-broken for sidecar mode — the
-// advisor emits a blocker for `forwarder=logstash` (no install steps).
-// Tests that iterate over forwarders and expect each to produce install
-// plans use `installableForwarders`; the logstash-blocker assertion
-// lives in its own dedicated test below.
-const installableForwarders: ForwarderKind[] = forwarders.filter((f) => f !== 'logstash');
+// Logstash is now supported via the upstream elastic/logstash chart +
+// sidecar overlay; no longer blocked. `installableForwarders` is kept
+// as an alias for now so the rest of the file doesn't need re-flowing.
+const installableForwarders: ForwarderKind[] = forwarders;
 
 for (const fw of installableForwarders) {
   test(`plan for ${fw}: install + verify + teardown all present`, async () => {
@@ -78,9 +76,11 @@ for (const fw of installableForwarders) {
   });
 }
 
-test('Receiver plan for logstash is blocked (chart-broken sidecar wiring)', async () => {
-  // Reporter is standalone-only now, so the logstash sidecar bug only
-  // applies to the Receiver path.
+test('Receiver plan for logstash is supported via the upstream chart sidecar overlay', async () => {
+  // The old log10x-elastic/logstash repackage was architecturally broken
+  // for sidecar mode. The new path uses the upstream elastic/logstash
+  // chart with extraContainers (pipe-string form) + secretMounts +
+  // logstashConfig + logstashPipeline. No blocker.
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
     app: 'receiver',
@@ -88,13 +88,13 @@ test('Receiver plan for logstash is blocked (chart-broken sidecar wiring)', asyn
     licenseJwt: 'test-key',
     destination: 'mock',
   });
-  assert.ok(
-    plan.blockers.some((b) => b.toLowerCase().includes('logstash')),
-    `expected logstash blocker; got: ${plan.blockers.join(' | ')}`
-  );
-  assert.equal(plan.install.length, 0, 'blocked plans should not emit install steps');
-  assert.ok(plan.verify.length > 0, 'verify probes still emitted');
-  assert.ok(plan.teardown.length > 0, 'teardown still emitted');
+  assert.equal(plan.blockers.length, 0, `no blockers expected; got: ${plan.blockers.join(' | ')}`);
+  const installText = JSON.stringify(plan.install);
+  assert.ok(installText.includes('elastic/logstash'), 'should reference the upstream elastic/logstash chart');
+  const content = plan.install.find((s) => s.file)!.file!.contents;
+  assert.ok(content.includes('extraContainers: |'), 'logstash uses extraContainers as a pipe-string');
+  assert.ok(content.includes('secretMounts:'), 'logstash uses secretMounts for the license');
+  assert.ok(content.includes('logstashPipeline:'), 'logstash overlay declares the ingest + destinations pipelines');
 });
 
 test('missing license_jwt adds a blocker', async () => {
@@ -306,11 +306,11 @@ test('Receiver: chart refs are the right published names', async () => {
     'fluentbit': 'fluent/fluent-bit',
     'otel-collector': 'open-telemetry/opentelemetry-collector',
     'vector': 'vector/vector',
+    'logstash': 'elastic/logstash',
   };
   const legacy: Partial<Record<ForwarderKind, string>> = {
     fluentd: 'log10x-fluent/fluentd',
     filebeat: 'log10x-elastic/filebeat',
-    logstash: 'log10x-elastic/logstash',
   };
   for (const fw of installableForwarders) {
     const plan = await buildReporterPlan({
@@ -335,7 +335,7 @@ test('Receiver: values.yaml content has the expected shape per forwarder', async
   // via Secret-mounted file). Pre-migration forwarders still emit the
   // embedded-image `tenx:` block. (Reporter uses a flat layout — covered
   // by the dedicated STANDALONE_SPEC test.)
-  const migrated = new Set<ForwarderKind>(['fluentbit', 'otel-collector', 'vector']);
+  const migrated = new Set<ForwarderKind>(['fluentbit', 'otel-collector', 'vector', 'logstash']);
   for (const fw of installableForwarders) {
     const plan = await buildReporterPlan({
       snapshot: baseSnapshot(),
@@ -350,7 +350,10 @@ test('Receiver: values.yaml content has the expected shape per forwarder', async
     if (migrated.has(fw)) {
       assert.ok(content.includes('extraContainers:'), `${fw} should declare extraContainers (sidecar overlay)`);
       assert.ok(content.includes('image: log10x/edge-10x'), `${fw} should mount the log10x/edge-10x sidecar`);
-      assert.ok(content.includes('extraVolumes:'), `${fw} should declare extraVolumes for the license Secret`);
+      assert.ok(
+        content.includes('extraVolumes:') || content.includes('secretMounts:'),
+        `${fw} should mount the license Secret via extraVolumes or secretMounts`
+      );
       assert.ok(content.includes('TENX_LICENSE_FILE'), `${fw} should set TENX_LICENSE_FILE in the sidecar env`);
       assert.ok(!content.includes('licenseJwt: "test-key"'), `${fw} should NOT embed the JWT inline (license-Secret pattern)`);
     } else {

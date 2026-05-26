@@ -62,28 +62,9 @@ const forwarders: ForwarderKind[] = [
 // assertion-branch on membership: migrated forwarders get sidecar-shape
 // assertions; the rest keep the legacy assertions until they're done.
 // Expand as each forwarder spec is rewritten.
-const MIGRATED_TO_SIDECAR = new Set<ForwarderKind>(['fluentbit', 'otel-collector', 'vector']);
+const MIGRATED_TO_SIDECAR = new Set<ForwarderKind>(['fluentbit', 'otel-collector', 'vector', 'logstash']);
 
 for (const fw of forwarders) {
-  if (fw === 'logstash') {
-    // log10x-elastic/logstash@1.0.6 is chart-broken for sidecar mode;
-    // the advisor blocks it entirely. Assert the blocker path here.
-    test(`receiver plan for ${fw} is blocked (chart broken)`, async () => {
-      const plan = await buildReporterPlan({
-        snapshot: baseSnapshot(),
-        app: 'receiver',
-        forwarder: fw,
-        licenseJwt: 'test',
-        destination: 'mock',
-      });
-      assert.ok(
-        plan.blockers.some((b) => b.toLowerCase().includes('logstash')),
-        `expected logstash blocker; got: ${plan.blockers.join(' | ')}`
-      );
-      assert.equal(plan.install.length, 0, `blocked plans should not emit install steps`);
-    });
-    continue;
-  }
   test(`receiver plan for ${fw}: values match the chart's expected shape`, async () => {
     const plan = await buildReporterPlan({
       snapshot: baseSnapshot(),
@@ -96,11 +77,17 @@ for (const fw of forwarders) {
     const content = plan.install.find((s) => s.file)!.file!.contents;
     if (MIGRATED_TO_SIDECAR.has(fw)) {
       // Sidecar overlay shape (per receiver/deploy.md): extraContainers
-      // with the log10x sidecar + extraVolumes mounting the license Secret.
+      // with the log10x sidecar + license Secret mounted via the chart's
+      // own volume mechanism. Most charts use `extraVolumes:`; the
+      // elastic/logstash chart uses `secretMounts:` instead (different
+      // chart-side convention, same effect).
       assert.ok(content.includes('extraContainers:'), `${fw} values should declare extraContainers`);
       assert.ok(/name:\s*log10x\b/.test(content), `${fw} sidecar container should be named log10x`);
       assert.ok(content.includes('image: log10x/edge-10x'), `${fw} sidecar should use log10x/edge-10x image`);
-      assert.ok(content.includes('extraVolumes:'), `${fw} values should declare extraVolumes for the license Secret`);
+      assert.ok(
+        content.includes('extraVolumes:') || content.includes('secretMounts:'),
+        `${fw} should mount the license Secret via extraVolumes or secretMounts`
+      );
       assert.ok(content.includes('TENX_LICENSE_FILE'), `${fw} sidecar should read license via TENX_LICENSE_FILE`);
       assert.ok(!content.startsWith('tenx:'), `${fw} receiver overlays should NOT have a top-level tenx: block`);
     } else {
@@ -166,19 +153,17 @@ test('receiver plan install commands reference the right chart', async () => {
   // Migrated forwarders target the UPSTREAM chart with a sidecar overlay.
   // Pre-migration forwarders still target the old log10x repackages
   // (they will move to upstream as each one is rewritten).
-  // Logstash is blocked upstream (chart-broken sidecar wiring) so we skip
-  // it here — the logstash blocker is covered by the dedicated test above.
   const upstream: Partial<Record<ForwarderKind, string>> = {
     'fluentbit': 'fluent/fluent-bit',
     'otel-collector': 'open-telemetry/opentelemetry-collector',
     'vector': 'vector/vector',
+    'logstash': 'elastic/logstash',
   };
   const legacy: Partial<Record<ForwarderKind, string>> = {
     fluentd: 'log10x-fluent/fluentd',
     filebeat: 'log10x-elastic/filebeat',
   };
   for (const fw of forwarders) {
-    if (fw === 'logstash') continue;
     const plan = await buildReporterPlan({
       snapshot: baseSnapshot(),
       app: 'receiver',

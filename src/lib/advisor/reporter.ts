@@ -189,16 +189,12 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
       'optimize=true is a no-op when mode=readonly. Compact encoding only matters when events are written back through the forwarder; in read-only mode the receiver emits metrics only. Pick one: optimize=true OR mode=readonly.'
     );
   }
-  // logstash chart sidecar wiring is architecturally broken: tenx needs
-  // to be a child process of logstash (spawned by the `pipe` output
-  // plugin), but the chart runs tenx as an independent side container
-  // reading from its own stdin. Pipeline inits, then shuts down after
-  // ~9s with no input. Receiver-only concern; Reporter is standalone.
-  if (app === 'receiver' && spec && forwarder === 'logstash') {
-    blockers.push(
-      "The log10x-elastic/logstash chart is architecturally broken for sidecar mode: tenx needs to be a child process of logstash (spawned by the `pipe` output plugin), but the chart runs it as a separate container reading from its own stdin. Pipeline inits then shuts down after ~9s with no input. Use fluentbit, fluentd, filebeat, otel-collector, or vector — or deploy the standalone Reporter (parallel DaemonSet) alongside your existing logstash."
-    );
-  }
+  // logstash receiver path is now supported via the upstream
+  // elastic/logstash chart + sidecar overlay (extraContainers as a
+  // pipe-string, secretMounts for the license, logstashConfig +
+  // logstashPipeline for the two-pipeline driver). The old log10x-elastic
+  // chart that ran tenx as a stdin-fed container was the broken path;
+  // it's gone. No blocker.
   if (!args.licenseJwt && !args.skipInstall) {
     blockers.push(
       'Log10x license JWT is required to produce an install plan. Pass `license_jwt` (fetch one from `POST /api/v1/license/demo` for anonymous demo, or `POST /api/v1/license` with an Auth0 access token for a user-scoped one). Teardown and verify plans work without it.'
