@@ -48,6 +48,8 @@ import {
 } from '../lib/discovery/snapshot-store.js';
 import { buildReporterPlan } from '../lib/advisor/reporter.js';
 import { renderPlan } from '../lib/advisor/render.js';
+import { buildPlanSummary, type AdvisePlanSummary } from '../lib/advisor/envelope.js';
+import type { AdvisePlan, AdviseAction } from '../lib/advisor/types.js';
 import { acquireLicenseForWizard, LicenseFetchError } from '../lib/license-api.js';
 import '../lib/auth-model.js';
 import type {
@@ -167,16 +169,31 @@ export const adviseInstallSchema = {
 const schemaObj = z.object(adviseInstallSchema);
 export type AdviseInstallArgs = z.infer<typeof schemaObj>;
 
-type WizardMode =
-  | 'missing_snapshot'
-  | 'session_error'
-  | 'cancelled'
-  | 'next_question'
-  | 'license_error'
-  | 'signin_required'
-  | 'demo_airgapped_warning'
-  | 'ambiguous_destination'
-  | 'plan';
+/**
+ * Discriminated union over every possible wizard outcome. The agent
+ * reads `data.mode` and narrows to the per-mode shape — every field
+ * is typed. Mirrors the typed-data pattern Tal established for
+ * services / pattern_mitigate / dependency_check / etc.
+ *
+ * Every variant carries `markdown` so a host that wants the rendered
+ * prompt can still read it; agents that want structured info read the
+ * mode-specific fields instead.
+ */
+type WizardData =
+  | { mode: 'missing_snapshot'; ok: false; snapshot_id: string; markdown: string }
+  | { mode: 'session_error'; ok: false; snapshot_id: string; markdown: string }
+  | { mode: 'cancelled'; ok: false; snapshot_id: string; markdown: string }
+  | { mode: 'next_question'; ok: false; snapshot_id: string; question_id: QuestionId; markdown: string }
+  | { mode: 'license_error'; ok: false; snapshot_id: string; error_message: string; markdown: string }
+  | { mode: 'signin_required'; ok: false; snapshot_id: string; markdown: string }
+  | { mode: 'demo_airgapped_warning'; ok: true; snapshot_id: string; is_signed_in: boolean; markdown: string }
+  // `ok` on the plan variant comes from AdvisePlanSummary (blockers.length === 0).
+  // A "plan" return is always a successful wizard run — even when the plan
+  // itself has blockers, the wizard's job (turning answers into a typed
+  // plan) succeeded. Agents read summary.blockers for plan-level issues.
+  | ({ mode: 'plan'; markdown: string } & AdvisePlanSummary);
+
+type WizardMode = WizardData['mode'];
 
 const TOOL_NAME = 'log10x_advise_install';
 
@@ -186,23 +203,23 @@ function headlineFromMarkdown(md: string, fallback: string): string {
   return firstLine.replace(/^#+\s*/, '').slice(0, 200);
 }
 
-function wizardReturn(
-  view: 'summary' | 'markdown',
-  mode: WizardMode,
-  md: string,
-  extraData: Record<string, unknown> = {}
-): StructuredOutput {
-  const headline = headlineFromMarkdown(md, `${TOOL_NAME} (${mode})`);
+/**
+ * Build a wizard StructuredOutput. The caller passes a typed `WizardData`
+ * variant; the envelope's `data` is exactly that shape (`mode` is the
+ * discriminator the agent narrows on). The headline is auto-derived from
+ * the variant's markdown by default — Chunk B replaces these with
+ * per-mode crafted headlines.
+ */
+function wizardReturn(view: 'summary' | 'markdown', data: WizardData): StructuredOutput {
+  const headline = headlineFromMarkdown(data.markdown, `${TOOL_NAME} (${data.mode})`);
   if (view === 'markdown') {
-    return buildMarkdownEnvelope({ tool: TOOL_NAME, summary: { headline }, markdown: md });
+    return buildMarkdownEnvelope({ tool: TOOL_NAME, summary: { headline }, markdown: data.markdown });
   }
-  const okModes: WizardMode[] = ['next_question', 'plan', 'demo_airgapped_warning'];
-  const ok = okModes.includes(mode);
   return buildEnvelope({
     tool: TOOL_NAME,
     view: 'summary',
     summary: { headline },
-    data: { ok, mode, markdown: md, ...extraData },
+    data,
   });
 }
 
@@ -221,7 +238,12 @@ export async function executeAdviseInstall(
       ``,
       `Run \`log10x_discover_env\` again and pass the new snapshot_id.`,
     ].join('\n');
-    return wizardReturn(view, 'missing_snapshot', md, { snapshot_id: args.snapshot_id });
+    return wizardReturn(view, {
+      mode: 'missing_snapshot',
+      ok: false,
+      snapshot_id: args.snapshot_id,
+      markdown: md,
+    });
   }
 
   // Merge the latest answers into the wizard session. Each call accretes;
@@ -252,7 +274,12 @@ export async function executeAdviseInstall(
   });
   if (!session) {
     // Should be unreachable — getSnapshot would've failed first.
-    return wizardReturn(view, 'session_error', '# Install wizard — internal error\n\nWizard session could not be created.', { snapshot_id: args.snapshot_id });
+    return wizardReturn(view, {
+      mode: 'session_error',
+      ok: false,
+      snapshot_id: args.snapshot_id,
+      markdown: '# Install wizard — internal error\n\nWizard session could not be created.',
+    });
   }
 
   // Elicitation path: if the client supports it, drive every missing
@@ -272,14 +299,25 @@ export async function executeAdviseInstall(
         '',
         'You closed the form before answering. Re-invoke `log10x_advise_install` with the same `snapshot_id` to pick up where you left off — answers you already gave are remembered.',
       ].join('\n');
-      return wizardReturn(view, 'cancelled', md, { snapshot_id: args.snapshot_id });
+      return wizardReturn(view, {
+        mode: 'cancelled',
+        ok: false,
+        snapshot_id: args.snapshot_id,
+        markdown: md,
+      });
     }
     if (elicitOutcome.kind === 'failed') {
       // Elicitation errored mid-flow — fall back to markdown questions.
       // The session has accumulated whatever was answered before the error.
       const next = nextQuestion(snapshot, session);
       if (next.kind === 'ask') {
-        return wizardReturn(view, 'next_question', next.markdown, { snapshot_id: args.snapshot_id, question_id: next.questionId });
+        return wizardReturn(view, {
+          mode: 'next_question',
+          ok: false,
+          snapshot_id: args.snapshot_id,
+          question_id: next.questionId,
+          markdown: next.markdown,
+        });
       }
     }
   } else {
@@ -287,7 +325,13 @@ export async function executeAdviseInstall(
     // for re-invocation with the answer in tool args.
     const next = nextQuestion(snapshot, session);
     if (next.kind === 'ask') {
-      return wizardReturn(view, 'next_question', next.markdown, { snapshot_id: args.snapshot_id, question_id: next.questionId });
+      return wizardReturn(view, {
+        mode: 'next_question',
+        ok: false,
+        snapshot_id: args.snapshot_id,
+        question_id: next.questionId,
+        markdown: next.markdown,
+      });
     }
   }
 
@@ -309,7 +353,12 @@ export async function executeAdviseInstall(
         ``,
         `Once you're signed in, re-invoke \`log10x_advise_install\` with the same \`snapshot_id\`. Every answer you gave above is remembered — you won't have to redo any step.`,
       ].join('\n');
-      return wizardReturn(view, 'signin_required', md, { snapshot_id: args.snapshot_id });
+      return wizardReturn(view, {
+        mode: 'signin_required',
+        ok: false,
+        snapshot_id: args.snapshot_id,
+        markdown: md,
+      });
     }
     try {
       const lic = await acquireLicenseForWizard();
@@ -333,7 +382,13 @@ export async function executeAdviseInstall(
         `- Re-invoke with \`license_source: "paste"\` and \`license_jwt_paste: "<your-jwt>"\` if you have one`,
         `- Retry — the gateway may have been transiently unavailable`,
       ].join('\n');
-      return wizardReturn(view, 'license_error', md, { snapshot_id: args.snapshot_id, error_message: msg });
+      return wizardReturn(view, {
+        mode: 'license_error',
+        ok: false,
+        snapshot_id: args.snapshot_id,
+        error_message: msg,
+        markdown: md,
+      });
     }
   }
 
@@ -346,30 +401,24 @@ export async function executeAdviseInstall(
   // Auth0 tokens to mint a user license).
   if (session.airgapped === true && session.isDemoLicense === true) {
     const md = renderDemoAirgappedWarning(session, !envs.isDemoMode);
-    return wizardReturn(view, 'demo_airgapped_warning', md, { snapshot_id: args.snapshot_id, is_signed_in: !envs.isDemoMode });
-  }
-
-  // Everything answered. Emit the plan (or surface ambiguous-destination).
-  const planResult = await renderInstallPlan(snapshot, session, args);
-  if (planResult.kind === 'ambiguous_destination') {
-    return wizardReturn(view, 'ambiguous_destination', planResult.markdown, {
+    return wizardReturn(view, {
+      mode: 'demo_airgapped_warning',
+      ok: true,
       snapshot_id: args.snapshot_id,
-      app: session.app,
-      forwarder: session.forwarder,
-      detected_destinations: planResult.candidates,
+      is_signed_in: !envs.isDemoMode,
+      markdown: md,
     });
   }
-  return wizardReturn(view, 'plan', planResult.markdown, {
-    snapshot_id: args.snapshot_id,
-    app: session.app,
-    forwarder: session.forwarder,
-    backends: session.backends,
-    airgapped: session.airgapped ?? false,
-    is_demo_license: session.isDemoLicense ?? false,
-    release_name: session.releaseName,
-    namespace: session.namespace,
-    destination: planResult.destination,
-    action: args.action ?? 'all',
+
+  // Everything answered. Emit the typed plan envelope — `data` mirrors
+  // AdvisePlanSummary so an agent that already handles
+  // advise_reporter/receiver/retriever consumes this identically.
+  const planResult = await renderInstallPlan(snapshot, session, args);
+  const summary = buildPlanSummary(planResult.plan, planResult.action);
+  return wizardReturn(view, {
+    ...summary,
+    mode: 'plan',
+    markdown: planResult.markdown,
   });
 }
 
@@ -1009,16 +1058,18 @@ function renderDemoAirgappedWarning(session: WizardSession, isSignedIn: boolean)
 
 // ── Plan rendering ──
 
-type RenderPlanResult =
-  | { kind: 'plan'; markdown: string; destination: string }
-  | { kind: 'ambiguous_destination'; markdown: string; candidates: string[] };
+interface RenderPlanResult {
+  markdown: string;
+  plan: AdvisePlan;
+  action: AdviseAction;
+}
 
 async function renderInstallPlan(
   snapshot: DiscoverySnapshot,
   session: WizardSession,
   args: AdviseInstallArgs
 ): Promise<RenderPlanResult> {
-  const action = args.action ?? 'all';
+  const action: AdviseAction = args.action ?? 'all';
   const lines: string[] = [];
 
   // Header: summarize the answered choices.
@@ -1037,38 +1088,34 @@ async function renderInstallPlan(
     lines.push('');
   }
 
-  // Route to the right plan builder. Destination defaults to `mock` —
-  // the install wizard no longer asks for a forwarder-event destination
-  // (the user's existing forwarder still controls where events go;
-  // the wizard's overlay is additive for the sidecar pattern, with a
-  // documented placeholder in the values for the user to wire their own
-  // destination output).
-  if (session.app === 'reporter' || session.app === 'receiver') {
-    const destination: OutputDestination = 'mock';
+  // Destination defaults to `mock` — the install wizard no longer asks
+  // for a forwarder-event destination (the user's existing forwarder
+  // still controls where events go; the overlay is additive with a
+  // documented placeholder for them to wire their own destination).
+  const destination: OutputDestination = 'mock';
+  // session.app is constrained to 'reporter' | 'receiver' by the schema
+  // — defaulting to 'reporter' below is just to satisfy the type-narrower
+  // when session.app is undefined (unreachable after Q1 is answered).
+  const app = session.app ?? 'reporter';
 
-    const plan = await buildReporterPlan({
-      snapshot,
-      app: session.app,
-      forwarder: session.forwarder,
-      releaseName: session.releaseName,
-      namespace: session.namespace,
-      licenseJwt: session.licenseJwt,
-      isDemoLicense: session.isDemoLicense,
-      destination,
-      backends: session.backends,
-      backendCredentials: session.backendCredentials,
-      airgapped: session.airgapped,
-      skipInstall: action === 'verify' || action === 'teardown',
-      skipVerify: action === 'install' || action === 'teardown',
-      skipTeardown: action === 'install' || action === 'verify',
-    });
-    lines.push(renderPlan(plan, action));
-    return { kind: 'plan', markdown: lines.join('\n'), destination };
-  }
-
-  // Unreachable — session.app is constrained to 'reporter' | 'receiver' by
-  // the schema, but the type system can't see that here. Defensive return.
-  return { kind: 'plan', markdown: lines.join('\n'), destination: 'mock' };
+  const plan = await buildReporterPlan({
+    snapshot,
+    app,
+    forwarder: session.forwarder,
+    releaseName: session.releaseName,
+    namespace: session.namespace,
+    licenseJwt: session.licenseJwt,
+    isDemoLicense: session.isDemoLicense,
+    destination,
+    backends: session.backends,
+    backendCredentials: session.backendCredentials,
+    airgapped: session.airgapped,
+    skipInstall: action === 'verify' || action === 'teardown',
+    skipVerify: action === 'install' || action === 'teardown',
+    skipTeardown: action === 'install' || action === 'verify',
+  });
+  lines.push(renderPlan(plan, action));
+  return { markdown: lines.join('\n'), plan, action };
 }
 
 function renderChoiceSummary(session: WizardSession): string {
