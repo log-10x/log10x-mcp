@@ -202,7 +202,10 @@ const METRIC_REQUIRING_TOOLS = new Set([
 ]);
 
 type WrapResult = {
-  content: { type: 'text'; text: string }[];
+  content: Array<
+    | { type: 'text'; text: string }
+    | { type: 'image'; data: string; mimeType: string }
+  >;
   structuredContent?: Record<string, unknown>;
   isError?: boolean;
 };
@@ -293,6 +296,19 @@ async function wrap(
       warnings: maybeAddDemoBannerWarning(validated.warnings),
     };
     const structuredContent = enriched as unknown as Record<string, unknown>;
+    // G6: image attachments. Tools that produced inline charts populate
+    // envelope.images; we surface each as an MCP `image` content block.
+    // Hosts that render images (Claude Desktop, ChatGPT Desktop) show the
+    // chart; hosts that don't ignore the block.
+    const imageBlocks: Array<{ type: 'image'; data: string; mimeType: string }> = [];
+    const inlineImages = (validated as { images?: Array<{ data: string; mimeType: string; alt?: string }> }).images;
+    if (Array.isArray(inlineImages)) {
+      for (const img of inlineImages) {
+        if (typeof img.data === 'string' && typeof img.mimeType === 'string') {
+          imageBlocks.push({ type: 'image' as const, data: img.data, mimeType: img.mimeType });
+        }
+      }
+    }
     if (validated.view === 'markdown') {
       // Renderer was invoked inside the tool; data.markdown carries the
       // rendered artifact. Text channel gets the markdown verbatim (with
@@ -314,7 +330,10 @@ async function wrap(
         };
       }
       return {
-        content: [{ type: 'text' as const, text: applyDemoBanner(md) }],
+        content: [
+          { type: 'text' as const, text: applyDemoBanner(md) },
+          ...imageBlocks,
+        ],
         structuredContent,
       };
     }
@@ -324,7 +343,10 @@ async function wrap(
     // hosts skip the parse. Demo banner is metadata, not a prose prefix —
     // it lives in warnings[].
     return {
-      content: [{ type: 'text' as const, text: JSON.stringify(enriched, null, 2) }],
+      content: [
+        { type: 'text' as const, text: JSON.stringify(enriched, null, 2) },
+        ...imageBlocks,
+      ],
       structuredContent,
     };
   } catch (e) {

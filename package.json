@@ -58,6 +58,8 @@
     "@opentelemetry/resources": "^2.7.1",
     "@opentelemetry/sdk-node": "^0.218.0",
     "@opentelemetry/semantic-conventions": "^1.41.1",
+    "chart.js": "^4.5.1",
+    "chartjs-node-canvas": "^5.0.0",
     "protobufjs": "^8.0.3",
     "snappyjs": "^0.7.0",
     "zod": "^3.24.4"

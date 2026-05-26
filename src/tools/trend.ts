@@ -60,12 +60,36 @@ export async function executeTrend(
   const d = sumOut.data;
   const headline = `\`${d.pattern}\` over ${d.window}: $${d.total_cost_usd.toFixed(2)} measured spend, change ${d.change_pct >= 0 ? '+' : ''}${d.change_pct}% (last quarter vs first quarter run-rate)${d.spike_detected ? ', spike detected' : ''}`;
   const { buildEnvelope } = await import('../lib/output-types.js');
+  // G6: render a PNG timeseries chart of the trend so hosts that render
+  // image content (Claude Desktop, ChatGPT Desktop) show it visually. The
+  // chart is best-effort — if chart.js init fails (e.g. missing Cairo on
+  // Linux) the renderer returns null and the result drops back to JSON
+  // envelope + ASCII sparkline only.
+  let images: import('../lib/output-types.js').InlineImage[] | undefined;
+  try {
+    const { renderTimeseries } = await import('../lib/chart-renderer.js');
+    const points = d.time_series.map((p) => ({
+      t: new Date(p.ts * 1000).toISOString().replace('T', ' ').slice(0, 16),
+      value: p.bytes,
+    }));
+    const png = await renderTimeseries(points, {
+      title: `${d.pattern} — bytes/sec over ${d.window}`,
+      yLabel: 'bytes/sec',
+      lineColor: d.spike_detected ? '#ef4444' : '#1e88e5',
+    });
+    if (png) {
+      images = [{ data: png.base64, mimeType: png.mimeType, alt: `Timeseries chart of ${d.pattern} over ${d.window}` }];
+    }
+  } catch (_e) {
+    /* chart rendering is best-effort; never block tool execution */
+  }
   return buildEnvelope({
     tool: 'log10x_pattern_trend',
     view: 'summary',
     summary: { headline },
     data: d,
     render_hint: { chart: 'timeseries', units: 'bytes/sec' },
+    images,
   });
 }
 

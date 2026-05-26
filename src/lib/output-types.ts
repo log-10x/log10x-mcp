@@ -86,6 +86,26 @@ export const SummarySchema = z.object({
 export type Summary = z.infer<typeof SummarySchema>;
 
 /**
+ * Optional inline image attachments produced by the tool. Tools that
+ * render their own visualizations (e.g. pattern_trend's timeseries,
+ * top_patterns' cost-by-pattern bar chart) populate this. `wrap()` in
+ * src/index.ts pulls each entry into an MCP `image` content block on the
+ * tool result; hosts that render images (Claude Desktop, ChatGPT Desktop)
+ * surface them; hosts that don't, ignore them gracefully.
+ *
+ * `data` is the literal base64 string (no `data:` URL prefix). `mimeType`
+ * is the MCP-standard image MIME (`image/png`, `image/jpeg`, `image/gif`,
+ * `image/webp`). `alt` becomes the screen-reader description and the
+ * agent-readable label.
+ */
+const InlineImageSchema = z.object({
+  data: z.string(),
+  mimeType: z.enum(['image/png', 'image/jpeg', 'image/gif', 'image/webp']).default('image/png'),
+  alt: z.string().optional(),
+});
+export type InlineImage = z.infer<typeof InlineImageSchema>;
+
+/**
  * The canonical envelope. Every default-loaded tool returns one of
  * these. Per-tool `data` is typed by a separate per-tool Zod schema;
  * here we accept z.unknown() because the envelope itself is
@@ -104,6 +124,7 @@ export const StructuredOutputSchema = z.object({
   truncated: z.boolean().default(false),
   next_cursor: z.string().optional(),
   warnings: z.array(z.string()).default([]),
+  images: z.array(InlineImageSchema).optional(),
 });
 
 export type StructuredOutput = z.infer<typeof StructuredOutputSchema>;
@@ -123,6 +144,7 @@ export function buildEnvelope(args: {
   truncated?: boolean;
   next_cursor?: string;
   warnings?: string[];
+  images?: InlineImage[];
 }): StructuredOutput {
   return {
     schema_version: SCHEMA_VERSION,
@@ -137,6 +159,7 @@ export function buildEnvelope(args: {
     truncated: args.truncated ?? false,
     next_cursor: args.next_cursor,
     warnings: args.warnings ?? [],
+    ...(args.images && args.images.length > 0 ? { images: args.images } : {}),
   };
 }
 

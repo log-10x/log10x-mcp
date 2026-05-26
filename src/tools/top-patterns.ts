@@ -511,6 +511,28 @@ export async function executeTopPatterns(
   const totalAvailable = patternCountTotal ?? (renderRows.length === args.limit ? args.limit + 1 : renderRows.length);
   const truncated = totalAvailable > renderRows.length;
 
+  // G6: horizontal-bar PNG of top patterns by monthly cost. Hosts that render
+  // image content (Claude Desktop, ChatGPT Desktop) show it; legacy hosts
+  // ignore. Skip silently if rendering fails (missing Cairo etc.).
+  let images: import('../lib/output-types.js').InlineImage[] | undefined;
+  try {
+    const { renderHorizontalBar } = await import('../lib/chart-renderer.js');
+    if (dataPatterns.length > 0) {
+      const png = await renderHorizontalBar(
+        dataPatterns
+          .slice()
+          .sort((a, b) => b.cost_per_month_usd - a.cost_per_month_usd)
+          .map((p, i) => ({ label: `#${i + 1} ${p.identity}`, value: p.cost_per_month_usd })),
+        { title: `Top ${dataPatterns.length} patterns by $/mo (${tf.label})`, xLabel: '$/mo' }
+      );
+      if (png) {
+        images = [{ data: png.base64, mimeType: png.mimeType, alt: `Top ${dataPatterns.length} patterns by monthly cost over ${tf.label}` }];
+      }
+    }
+  } catch (_e) {
+    /* best-effort; never block */
+  }
+
   return buildEnvelope({
     tool: 'log10x_top_patterns',
     view: 'summary',
@@ -537,5 +559,6 @@ export async function executeTopPatterns(
     actions: nextActions.map((a) => ({ tool: a.tool, args: a.args, reason: a.reason })),
     render_hint: { chart: 'timeseries', units: '$/mo' },
     truncated,
+    images,
   });
 }
