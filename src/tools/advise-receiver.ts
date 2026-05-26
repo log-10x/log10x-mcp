@@ -17,6 +17,8 @@ import { renderPlan } from '../lib/advisor/render.js';
 import type { ForwarderKind } from '../lib/discovery/types.js';
 import type { OutputDestination } from '../lib/advisor/reporter-forwarders.js';
 import { resolveAdvisorDestination } from '../lib/advisor/dest-resolve.js';
+import { buildAdvisePlanEnvelope } from '../lib/advisor/envelope.js';
+import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
 export const adviseReceiverSchema = {
   snapshot_id: z
@@ -69,27 +71,38 @@ export const adviseReceiverSchema = {
     .enum(['install', 'verify', 'teardown', 'all'])
     .optional()
     .describe('Which sections to emit. Default: `all`.'),
+  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.app, data.preflight[], data.install_step_count, data.blockers[]). markdown wraps the rendered plan in data.markdown.'),
 };
 
 const schemaObj = z.object(adviseReceiverSchema);
 export type AdviseReceiverArgs = z.infer<typeof schemaObj>;
 
-export async function executeAdviseReceiver(args: AdviseReceiverArgs): Promise<string> {
+export async function executeAdviseReceiver(args: AdviseReceiverArgs): Promise<string | StructuredOutput> {
+  const view = args.view ?? 'summary';
   const snapshot = getSnapshot(args.snapshot_id);
   if (!snapshot) {
-    return [
+    const md = [
       `# Receiver advisor — snapshot not found`,
       ``,
       `Snapshot \`${args.snapshot_id}\` is missing or expired (snapshots live 30 min).`,
       ``,
       `Run \`log10x_discover_env\` again and pass the new snapshot_id.`,
     ].join('\n');
+    if (view === 'markdown') {
+      return buildMarkdownEnvelope({ tool: 'log10x_advise_receiver', summary: { headline: 'Receiver advisor: snapshot not found' }, markdown: md });
+    }
+    return buildEnvelope({ tool: 'log10x_advise_receiver', view: 'summary', summary: { headline: `Receiver advisor refused: snapshot ${args.snapshot_id} not found.` }, data: { ok: false, app: 'receiver', snapshot_id: args.snapshot_id, error: 'snapshot not found' } });
   }
 
   const action = args.action ?? 'all';
 
   const destResolution = await resolveAdvisorDestination(args.destination);
-  if (destResolution.kind === 'ambiguous') return destResolution.markdown;
+  if (destResolution.kind === 'ambiguous') {
+    if (view === 'markdown') {
+      return buildMarkdownEnvelope({ tool: 'log10x_advise_receiver', summary: { headline: 'Receiver advisor: destination ambiguous' }, markdown: destResolution.markdown });
+    }
+    return buildEnvelope({ tool: 'log10x_advise_receiver', view: 'summary', summary: { headline: 'Receiver advisor refused: destination ambiguous.' }, data: { ok: false, app: 'receiver', snapshot_id: args.snapshot_id, error: 'destination ambiguous' } });
+  }
   const destination = destResolution.destination;
 
   const plan = await buildReporterPlan({
@@ -109,6 +122,5 @@ export async function executeAdviseReceiver(args: AdviseReceiverArgs): Promise<s
     skipTeardown: action === 'install' || action === 'verify',
   });
 
-  const planMd = renderPlan(plan, action);
-  return destResolution.note ? `_${destResolution.note}_\n\n${planMd}` : planMd;
+  return buildAdvisePlanEnvelope({ tool: 'log10x_advise_receiver', view, plan, action, destinationNote: destResolution.note });
 }

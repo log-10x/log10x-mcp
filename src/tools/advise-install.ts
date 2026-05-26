@@ -31,6 +31,7 @@ import {
 } from '../lib/advisor/mode.js';
 import type { OutputDestination } from '../lib/advisor/reporter-forwarders.js';
 import { resolveAdvisorDestination } from '../lib/advisor/dest-resolve.js';
+import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
 export const adviseInstallSchema = {
   snapshot_id: z
@@ -64,21 +65,27 @@ export const adviseInstallSchema = {
     .enum(['install', 'verify', 'teardown', 'all'])
     .optional()
     .describe('Plan scope when `goal` is given. Default: `all`.'),
+  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.mode, data.top_pick, data.ranked_alternatives). markdown wraps the plan rendering in data.markdown.'),
 };
 
 const schemaObj = z.object(adviseInstallSchema);
 export type AdviseInstallArgs = z.infer<typeof schemaObj>;
 
-export async function executeAdviseInstall(args: AdviseInstallArgs): Promise<string> {
+export async function executeAdviseInstall(args: AdviseInstallArgs): Promise<string | StructuredOutput> {
+  const view = args.view ?? 'summary';
   const snapshot = getSnapshot(args.snapshot_id);
   if (!snapshot) {
-    return [
+    const md = [
       `# Install advisor — snapshot not found`,
       ``,
       `Snapshot \`${args.snapshot_id}\` is missing or expired (snapshots live 30 min).`,
       ``,
       `Run \`log10x_discover_env\` again and pass the new snapshot_id.`,
     ].join('\n');
+    if (view === 'markdown') {
+      return buildMarkdownEnvelope({ tool: 'log10x_advise_install', summary: { headline: 'Install advisor: snapshot not found' }, markdown: md });
+    }
+    return buildEnvelope({ tool: 'log10x_advise_install', view: 'summary', summary: { headline: `Install advisor refused: snapshot ${args.snapshot_id} not found (snapshots live 30 min).` }, data: { ok: false, mode: 'missing_snapshot', snapshot_id: args.snapshot_id } });
   }
 
   const rec = recommendInstallMode({
@@ -86,13 +93,47 @@ export async function executeAdviseInstall(args: AdviseInstallArgs): Promise<str
     goal: args.goal as InstallGoal | undefined,
   });
 
-  // Mode A: goal given → emit a single concrete plan for the top pick.
   if (args.goal) {
-    return await renderConcretePlan(rec, args, snapshot.snapshotId);
+    const md = await renderConcretePlan(rec, args, snapshot.snapshotId);
+    if (view === 'markdown') {
+      return buildMarkdownEnvelope({ tool: 'log10x_advise_install', summary: { headline: `Install plan for goal=${args.goal}: ${rec.topPick.label}` }, markdown: md });
+    }
+    return buildEnvelope({
+      tool: 'log10x_advise_install',
+      view: 'summary',
+      summary: { headline: `Install plan for goal=${args.goal}: ${rec.topPick.label}.` },
+      data: {
+        ok: true,
+        mode: 'concrete_plan',
+        snapshot_id: snapshot.snapshotId,
+        goal: args.goal,
+        top_pick: { label: rec.topPick.label, args: rec.topPick.args, score: rec.topPick.score, rationale: rec.topPick.rationale, blocker: rec.topPick.blocker },
+        action: args.action ?? 'all',
+      },
+    });
   }
 
-  // Mode B: no goal → emit the ranked table + structured top-pick args.
-  return renderRanked(rec, snapshot.snapshotId);
+  const md = renderRanked(rec, snapshot.snapshotId);
+  if (view === 'markdown') {
+    return buildMarkdownEnvelope({ tool: 'log10x_advise_install', summary: { headline: `Install advisor: ${rec.alternatives.length} candidate path${rec.alternatives.length !== 1 ? 's' : ''}` }, markdown: md });
+  }
+  return buildEnvelope({
+    tool: 'log10x_advise_install',
+    view: 'summary',
+    summary: { headline: `Top pick: ${rec.topPick.label}. ${rec.alternatives.length} candidate path${rec.alternatives.length !== 1 ? 's' : ''} considered.` },
+    data: {
+      ok: true,
+      mode: 'ranked_alternatives',
+      snapshot_id: snapshot.snapshotId,
+      top_pick: { label: rec.topPick.label, args: rec.topPick.args, score: rec.topPick.score, rationale: rec.topPick.rationale, blocker: rec.topPick.blocker },
+      alternatives: rec.alternatives.map((r) => ({ label: r.label, args: r.args, score: r.score, rationale: r.rationale, blocker: r.blocker })),
+      detection_summary: rec.detectionSummary,
+      rationale: rec.rationale,
+    },
+    actions: [
+      { tool: 'log10x_advise_install', args: { snapshot_id: snapshot.snapshotId, goal: 'just-metrics' }, reason: 'emit concrete plan for the top-ranked path with goal=just-metrics (or pick another goal)' },
+    ],
+  });
 }
 
 async function renderConcretePlan(
