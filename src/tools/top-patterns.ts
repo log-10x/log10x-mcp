@@ -504,6 +504,13 @@ export async function executeTopPatterns(
     });
   }
 
+  // Truncation signal: the engine query is capped at args.limit. If we got
+  // a separate count of total patterns matching the filters, we can tell the
+  // agent there's more to see; otherwise we fall back to "the query returned
+  // exactly limit rows" which is a reasonable heuristic for truncation.
+  const totalAvailable = patternCountTotal ?? (renderRows.length === args.limit ? args.limit + 1 : renderRows.length);
+  const truncated = totalAvailable > renderRows.length;
+
   return buildEnvelope({
     tool: 'log10x_top_patterns',
     view: 'summary',
@@ -524,8 +531,11 @@ export async function executeTopPatterns(
       })),
       totals,
       window: tf.label,
+      pattern_count_shown: renderRows.length,
+      pattern_count_total: patternCountTotal,
     },
     actions: nextActions.map((a) => ({ tool: a.tool, args: a.args, reason: a.reason })),
     render_hint: { chart: 'timeseries', units: '$/mo' },
+    truncated,
   });
 }

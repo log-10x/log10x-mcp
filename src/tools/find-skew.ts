@@ -62,6 +62,7 @@ export async function executeFindSkew(args: FindSkewArgs): Promise<StructuredOut
     });
   }
 
+  const topN = args.top_n ?? 20;
   return buildEnvelope({
     tool: 'log10x_find_skew',
     view: 'summary',
@@ -73,6 +74,9 @@ export async function executeFindSkew(args: FindSkewArgs): Promise<StructuredOut
       }),
     },
     data: { findings },
+    // Heuristic: when findings.length == top_n, the cap was hit and there are
+    // likely more skewed patterns the agent could see by widening top_n.
+    truncated: findings.length >= topN,
     actions: findings.slice(0, 3).map((f) => ({
       tool: 'log10x_pattern_mitigate',
       args: { pattern: f.patternIdentity },

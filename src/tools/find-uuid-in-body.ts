@@ -55,6 +55,7 @@ export async function executeFindUuidInBody(args: FindUuidInBodyArgs): Promise<S
     });
   }
 
+  const topN = args.top_n ?? 20;
   return buildEnvelope({
     tool: 'log10x_find_uuid_in_body',
     view: 'summary',
@@ -66,6 +67,7 @@ export async function executeFindUuidInBody(args: FindUuidInBodyArgs): Promise<S
       }),
     },
     data: { findings },
+    truncated: findings.length >= topN,
     actions: findings.slice(0, 3).map((f) => ({
       tool: 'log10x_pattern_mitigate',
       args: { pattern: f.patternIdentity },

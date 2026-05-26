@@ -43,6 +43,7 @@ export async function executeFindConstantSlots(args: FindConstantSlotsArgs): Pro
     });
   }
 
+  const topN = args.top_n ?? 20;
   return buildEnvelope({
     tool: 'log10x_find_constant_slots',
     view: 'summary',
@@ -53,6 +54,7 @@ export async function executeFindConstantSlots(args: FindConstantSlotsArgs): Pro
       ),
     },
     data: { findings },
+    truncated: findings.length >= topN,
     actions: findings.slice(0, 3).map((f) => ({
       tool: 'log10x_pattern_mitigate',
       args: { pattern: f.patternIdentity },

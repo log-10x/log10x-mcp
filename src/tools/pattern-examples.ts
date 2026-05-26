@@ -218,11 +218,17 @@ export async function executePatternExamples(
   }
   const d = sumOut.data;
   const headline = `\`${d.pattern}\` (${d.vendor}, ${d.window}): ${d.events_pulled} events pulled, ${d.retained_events} retained across ${d.retained_templates} templates via ${d.probe_path}`;
+  // Truncation signal: the SIEM probe hit its limit (rawArgs.limit defaults to 5).
+  // If events_pulled equals the requested limit, there are likely more matching
+  // events the agent could see by widening the limit or narrowing the timeRange.
+  const requestedLimit = rawArgs.limit ?? 5;
+  const truncated = d.events_pulled >= requestedLimit;
   return buildEnvelope({
     tool: 'log10x_pattern_examples',
     view: 'summary',
     summary: { headline },
     data: d,
+    truncated,
   });
 }
 
