@@ -68,11 +68,13 @@ export interface ExtractedPattern {
    * encoded by the engine. Sum of the raw `encoded.log` line bytes
    * (`~hash,val,val,...` + newline) across this pattern's events.
    * Measured, not estimated. Used to compute the real compact-byte
-   * ratio in Section 6. Zero when the engine didn't emit encoded
-   * lines (paste-lambda fallback path, older CLI without anchored
-   * encoded layout).
+   * ratio in Section 6.
+   *
+   * Optional: missing when the engine didn't emit encoded lines
+   * (paste-lambda fallback path, older CLI without anchored encoded
+   * layout). Consumers treat missing as 0.
    */
-  encodedBytes: number;
+  encodedBytes?: number;
   /** One representative raw event (from the first encoded match). */
   sampleEvent: string;
   /** Per-slot captured values (slot name or positional index → distinct values observed). */
@@ -383,7 +385,7 @@ function mergeExtractedPatterns(group: ExtractedPattern[]): ExtractedPattern {
     service: head.service,
     count: group.reduce((s, p) => s + p.count, 0),
     bytes: group.reduce((s, p) => s + p.bytes, 0),
-    encodedBytes: group.reduce((s, p) => s + p.encodedBytes, 0),
+    encodedBytes: group.reduce((s, p) => s + (p.encodedBytes ?? 0), 0),
     sampleEvent: head.sampleEvent,
     variables,
   };

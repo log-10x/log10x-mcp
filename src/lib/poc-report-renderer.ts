@@ -981,7 +981,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
   // compacted streams).
   const compactionApplies = input.siem === 'splunk' || input.siem === 'elasticsearch' || input.siem === 'clickhouse';
   if (compactionApplies) {
-    const measured = patterns.filter((p) => p.encodedBytes > 0).slice(0, 8);
+    const measured = patterns.filter((p) => (p.encodedBytes ?? 0) > 0).slice(0, 8);
     lines.push('## 6. Compact-byte Ratio (Measured)');
     lines.push('');
     if (measured.length === 0) {
@@ -997,10 +997,11 @@ export function renderPocReport(input: RenderInput): RenderResult {
       lines.push('| pattern | raw bytes | compact bytes | ratio | $ saved /window |');
       lines.push('|---|---|---|---|---|');
       for (const p of measured) {
-        const ratio = p.bytes > 0 ? p.bytes / Math.max(1, p.encodedBytes) : 1;
-        const saveCost = costFromBytes(p.bytes - p.encodedBytes, input.analyzerCostPerGb);
+        const encBytes = p.encodedBytes ?? 0;
+        const ratio = p.bytes > 0 ? p.bytes / Math.max(1, encBytes) : 1;
+        const saveCost = costFromBytes(p.bytes - encBytes, input.analyzerCostPerGb);
         lines.push(
-          `| ${displayNameCompact(p.identity, p.template, input.aiPrettyNames, p.symbolMessage, undefined, setDiff.get(p.identity))} | ${fmtBytes(p.bytes)} | ${fmtBytes(p.encodedBytes)} | ${ratio.toFixed(1)}× | ${fmtDollar(saveCost)} |`
+          `| ${displayNameCompact(p.identity, p.template, input.aiPrettyNames, p.symbolMessage, undefined, setDiff.get(p.identity))} | ${fmtBytes(p.bytes)} | ${fmtBytes(encBytes)} | ${ratio.toFixed(1)}× | ${fmtDollar(saveCost)} |`
         );
       }
       lines.push('');

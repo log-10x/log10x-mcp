@@ -17,6 +17,10 @@ import {
   getPackageDefaultTool,
 } from './lib/manifest.js';
 import { z } from 'zod';
+import {
+  StructuredOutputSchema,
+  type StructuredOutput,
+} from './lib/output-types.js';
 
 import { loadEnvironments, resolveEnv, revalidateEnvironments, type EnvConfig, type Environments, EnvironmentValidationError } from './lib/environments.js';
 import { fetchAnalyzerCost } from './lib/api.js';
@@ -174,7 +178,7 @@ const METRIC_REQUIRING_TOOLS = new Set([
 
 async function wrap(
   toolName: string,
-  fn: () => Promise<string>
+  fn: () => Promise<string | StructuredOutput>
 ): Promise<{ content: { type: 'text'; text: string }[]; isError?: boolean }> {
   const started = Date.now();
   // Phase 5b gate: if this is a metric-requiring tool and the MCP is
@@ -187,9 +191,66 @@ async function wrap(
     };
   }
   try {
-    const text = await runWithDemoFallbackRetry(toolName, fn);
+    const result = await runWithDemoFallbackRetry(toolName, fn);
     log.info(`tool.${toolName}.ok`, { ms: Date.now() - started });
-    return { content: [{ type: 'text' as const, text: applyDemoBanner(text) }] };
+    // Legacy path: tool returned a markdown string. Apply demo banner
+    // as a prepended block and wrap as text content.
+    if (typeof result === 'string') {
+      return { content: [{ type: 'text' as const, text: applyDemoBanner(result) }] };
+    }
+    // Structured envelope path. Validate first so a malformed envelope
+    // surfaces as an error rather than silently emitting bad JSON to
+    // the transport.
+    let validated: StructuredOutput;
+    try {
+      validated = StructuredOutputSchema.parse(result);
+    } catch (parseErr) {
+      const msg = parseErr instanceof Error ? parseErr.message : String(parseErr);
+      log.warn(`tool.${toolName}.envelope_invalid`, { msg: msg.slice(0, 240) });
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text:
+              `Internal error: tool returned an invalid StructuredOutput envelope.\n` +
+              `Tool: ${toolName}\n` +
+              `Validation error: ${msg}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+    if (validated.view === 'markdown') {
+      // Renderer was invoked inside the tool; data.markdown carries
+      // the rendered artifact. Pull it through to the text channel
+      // verbatim, with the demo banner prepended exactly as in the
+      // legacy string path.
+      const md = (validated.data as { markdown?: unknown }).markdown;
+      if (typeof md !== 'string') {
+        log.warn(`tool.${toolName}.markdown_view_missing_markdown`);
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text:
+                `Internal error: tool returned view: "markdown" but data.markdown is not a string.\n` +
+                `Tool: ${toolName}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+      return { content: [{ type: 'text' as const, text: applyDemoBanner(md) }] };
+    }
+    // JSON view. The demo-mode banner is structural metadata, not a
+    // prose prefix, so it lives in warnings[] rather than being
+    // injected into a `text` blob. The agent reads warnings and
+    // decides how to surface them to the user.
+    const enriched: StructuredOutput = {
+      ...validated,
+      warnings: maybeAddDemoBannerWarning(validated.warnings),
+    };
+    return { content: [{ type: 'text' as const, text: JSON.stringify(enriched, null, 2) }] };
   } catch (e) {
     const raw = e instanceof Error ? e.message : String(e);
     log.debug(`tool.${toolName}.raw_err`, { msg: raw });
@@ -223,7 +284,10 @@ async function wrap(
  * Tools that don't hit the gateway (resolve_batch, extract_templates)
  * never produce 401/403 errors so this is a no-op for them.
  */
-async function runWithDemoFallbackRetry(toolName: string, fn: () => Promise<string>): Promise<string> {
+async function runWithDemoFallbackRetry<T>(
+  toolName: string,
+  fn: () => Promise<T>
+): Promise<T> {
   try {
     return await fn();
   } catch (e) {
@@ -267,6 +331,28 @@ function isAuthRecoverableError(e: unknown): boolean {
  * Pure demo mode (no key set) is the user's own choice and gets a
  * quieter footer instead.
  */
+/**
+ * Structured-envelope variant of applyDemoBanner. The demo-mode
+ * signal is appended to the `warnings[]` array rather than prepended
+ * as prose, because JSON consumers parse fields, not prefixes. Same
+ * trigger conditions and wording as applyDemoBanner; just a different
+ * surface.
+ */
+function maybeAddDemoBannerWarning(warnings: string[]): string[] {
+  if (!envs?.isDemoMode) return warnings;
+  if (envs.demoFallbackReason) {
+    const reason = envs.demoFallbackReason.split('\n')[0].slice(0, 240);
+    return [
+      `DEMO MODE — your LOG10X_API_KEY failed validation. Account-scoped tools hit the public Log10x demo env, NOT your account. Reason: ${reason}. Call log10x_login_status for fix steps.`,
+      ...warnings,
+    ];
+  }
+  return [
+    `Demo mode — account-scoped tools query the read-only Log10x demo env. Call log10x_login_status to use your own data.`,
+    ...warnings,
+  ];
+}
+
 function applyDemoBanner(text: string): string {
   if (!envs?.isDemoMode) return text;
   if (envs.demoFallbackReason) {
