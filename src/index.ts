@@ -30,11 +30,9 @@ import {
 
 import { loadEnvironments, resolveEnv, revalidateEnvironments, type EnvConfig, type Environments, EnvironmentValidationError } from './lib/environments.js';
 import { fetchAnalyzerCost } from './lib/api.js';
-import { costDriversSchema, executeCostDrivers } from './tools/cost-drivers.js';
 import { eventLookupSchema, executeEventLookup } from './tools/event-lookup.js';
 import { savingsSchema, executeSavings } from './tools/savings.js';
 import { trendSchema, executeTrend } from './tools/trend.js';
-import { exclusionFilterSchema, executeExclusionFilter } from './tools/exclusion-filter.js';
 import { patternExamplesSchema, executePatternExamples } from './tools/pattern-examples.js';
 import { dependencyCheckSchema, executeDependencyCheck } from './tools/dependency-check.js';
 import { configureEnvSchema, executeConfigureEnv } from './tools/configure-env.js';
@@ -44,19 +42,15 @@ function notConfiguredMessageForTool(toolName: string): string {
   return renderNotConfigured({ callingTool: toolName });
 }
 import { topPatternsSchema, executeTopPatterns } from './tools/top-patterns.js';
-import { listByLabelSchema, executeListByLabel } from './tools/list-by-label.js';
 import { resolveBatchSchema, executeResolveBatch } from './tools/resolve-batch.js';
 import {
   investigateSchema,
   executeInvestigate,
-  investigationGetSchema,
-  executeInvestigationGet,
 } from './tools/investigate.js';
 import { doctorSchema, executeDoctor, runDoctorChecks, renderDoctorReport } from './tools/doctor.js';
 import { log } from './lib/log.js';
 import { describeToolError } from './lib/tool-errors.js';
 import { retrieverQuerySchema, executeRetrieverQuery } from './tools/retriever-query.js';
-import { retrieverQueryStatusSchema, executeRetrieverQueryStatus } from './tools/retriever-query-status.js';
 import { retrieverSeriesSchema, executeRetrieverSeries } from './tools/retriever-series.js';
 import { backfillMetricSchema, executeBackfillMetric } from './tools/backfill-metric.js';
 import {
@@ -189,23 +183,19 @@ const COST_REFRESH_MS = 3_600_000; // 1 hour
  */
 const METRIC_REQUIRING_TOOLS = new Set([
   'log10x_top_patterns',
-  'log10x_cost_drivers',
   'log10x_pattern_trend',
   'log10x_pattern_examples',
   'log10x_event_lookup',
-  'log10x_list_by_label',
   'log10x_savings',
   'log10x_services',
   'log10x_discover_labels',
   'log10x_investigate',
-  'log10x_investigation_get',
   'log10x_backfill_metric',
   'log10x_correlate_cross_pillar',
   'log10x_discover_join',
   'log10x_customer_metrics_query',
   'log10x_translate_metric_to_patterns',
   'log10x_retriever_query',
-  'log10x_retriever_query_status',
   'log10x_retriever_series',
 ]);
 
@@ -446,7 +436,7 @@ function applyDemoBanner(text: string): string {
     const reason = envs.demoFallbackReason.split('\n')[0].slice(0, 240);
     return (
       `> ⚠ **DEMO MODE — your LOG10X_API_KEY failed validation.** ` +
-      `Account-scoped tools (cost_drivers, investigate, services, etc.) hit the public Log10x demo env, NOT your account. ` +
+      `Account-scoped tools (top_patterns, investigate, services, etc.) hit the public Log10x demo env, NOT your account. ` +
       `Local-only tools (resolve_batch, extract_templates) are unaffected. ` +
       `Reason: ${reason} ` +
       `Call \`log10x_login_status\` for fix steps.\n\n` +
@@ -497,10 +487,10 @@ CUSTOMER TIER LADDER (determines which tools are available)
 
 1. Dev CLI only — free local binary, no pipeline infrastructure.
    Available tools: log10x_resolve_batch (pasted-batch triage), log10x_dependency_check,
-                    log10x_exclusion_filter.
+                    log10x_pattern_mitigate.
 2. Cloud Reporter — k8s CronJob sampling from the SIEM via REST API.
-   Adds: log10x_investigate (sampled fidelity), log10x_cost_drivers, log10x_pattern_trend,
-         log10x_top_patterns, log10x_list_by_label, log10x_event_lookup, log10x_savings.
+   Adds: log10x_investigate (sampled fidelity), log10x_pattern_trend,
+         log10x_top_patterns, log10x_event_lookup, log10x_savings.
 3. Edge Reporter — forwarder pipeline sidecar.
    Same tools as Cloud, but with full-fidelity metrics, ~5s inflection granularity, and
    coverage of events dropped before the SIEM.
@@ -525,17 +515,15 @@ Daily-habit / operational:
                                                                       for this pattern: drop @ analyzer / drop @
                                                                       forwarder / mute @ 10x / compact @ 10x —
                                                                       only the options available in this env are
-                                                                      included. Once the user picks one, the
-                                                                      follow-through is:
+                                                                      included. Each option carries a paste-ready
+                                                                      config snippet inline. Once the user picks one:
                                                                         option 1 or 2 → log10x_dependency_check
-                                                                                        → log10x_exclusion_filter
-                                                                                          (vendor=analyzer or forwarder)
+                                                                                        (paste the snippet from
+                                                                                         pattern_mitigate.options[i].config_snippet)
                                                                         option 3       → log10x_dependency_check
                                                                                         → log10x_advise_receiver
-                                                                        option 4       → log10x_configure_compact
-                                                                      Call exclusion_filter directly only when the
-                                                                      user already specified a vendor + intent.)
-- (proactive): after log10x_top_patterns / log10x_cost_drivers / log10x_event_lookup surfaces a
+                                                                        option 4       → log10x_configure_compact)
+- (proactive): after log10x_top_patterns / log10x_event_lookup surfaces a
   high-volume pattern AND the user's framing is cost-related ("expensive", "bill", "save",
   "reduce", "spike"), offer to reduce it as a follow-up question — "Want me to show
   you options for reducing this?" Do this even if not asked. When the user says yes, call
@@ -543,14 +531,12 @@ Daily-habit / operational:
   env-gated mitigation options + exact configs for that pattern.
 
 Cost investigation:
-- "what's expensive right now" / "top patterns by cost"          → log10x_top_patterns
-- ANY framing of "the bill changed" — "bill jumped", "over forecast", "over budget",
-  "costs spiked", "$N over", "why did costs go up", "who is responsible for the jump",
-  "week-over-week delta"                                         → log10x_cost_drivers
-  (Critical: use cost_drivers NOT top_patterns when the question is about CHANGE over
-   time. top_patterns shows what's big right now; cost_drivers shows what GREW. A
-   surprise bill is always a cost_drivers question first, then drill down.)
-- "cost by namespace / service / severity / country"             → log10x_list_by_label
+- "what's expensive right now" / "top patterns by cost" /
+  "what changed" / "week-over-week delta" /
+  "why did costs go up"                                          → log10x_top_patterns
+  (log10x_top_patterns surfaces current rank + newly-emerged + delta-from-baseline
+   for each pattern in one call. Use the \`comparison_window\` arg for "what changed
+   since last week" framing.)
 - "pipeline savings / ROI"                                       → log10x_savings
 
 Forensic / audit / archive — ANY request for RAW EVENTS from the S3 archive:
@@ -600,13 +586,13 @@ NATURAL TOOL CHAINS
     (or for a batch: log10x_resolve_batch  →  log10x_investigate on the top pattern)
 
   Cost investigation:
-    log10x_cost_drivers  →  log10x_dependency_check  →  log10x_exclusion_filter
+    log10x_top_patterns  →  log10x_pattern_mitigate  →  log10x_dependency_check
 
   Forensic retrieval across retention boundaries:
     log10x_event_lookup  →  log10x_retriever_query
 
   New metric from historical archive:
-    log10x_cost_drivers or log10x_investigate  →  log10x_backfill_metric
+    log10x_top_patterns or log10x_investigate  →  log10x_backfill_metric
 
 RESPONSE STYLE
 
@@ -625,17 +611,12 @@ NUMBERS DISCIPLINE — hard rules, no exceptions:
 - Every dollar amount, percentage, event count, or timestamp in your response must appear
   verbatim in a tool result you called in this session. If you cannot point to the exact tool
   output, do not write the number. Say "not reported" instead.
-- Do NOT compute percentages from before→after values in cost_drivers — the tool emits the
-  exact (+N%) delta next to each row. Quote it. Do not re-derive it.
-- Do NOT merge log10x_top_patterns output into a log10x_cost_drivers table. top_patterns is
-  CURRENT RANK (biggest right now); cost_drivers is GROWTH (what changed). Mixing them into
-  one ranked list and labeling the result "cost drivers" is a specific failure mode that
-  produces fabricated week-over-week percentages. If you need both views, show them in two
-  separate tables with clear headers.
-- Do NOT invent "peak" values. top_patterns and cost_drivers return window averages, not peaks.
+- Do NOT compute percentages from before→after values — log10x_top_patterns emits the
+  exact (+N%) delta on each row when comparison_window is set. Quote it. Do not re-derive it.
+- Do NOT invent "peak" values. log10x_top_patterns returns window averages, not peaks.
   If the user asks for peaks, call log10x_pattern_trend explicitly and quote its max bucket.
-- Do NOT synthesize a baseline number. If cost_drivers does not list a pattern, that pattern
-  is not a cost driver — do not promote it into the driver list with a made-up baseline.
+- Do NOT synthesize a baseline number. If log10x_top_patterns does not list a pattern under
+  the comparison_window delta, that pattern is not a cost driver — do not invent a baseline.
 - log10x_dependency_check has two output modes. When SIEM credentials are present in the env
   (DD_API_KEY, SPLUNK_HOST+SPLUNK_TOKEN, ELASTIC_URL+KIBANA_URL, AWS chain), the tool runs the
   scan in-process and returns ACTUAL dashboard/alert/saved-search/monitor/metric-filter names
@@ -785,16 +766,6 @@ function applyToolRegistrations(): { registered: string[]; skipped: string[] } {
   return { registered, skipped };
 }
 
-// ── Tool: log10x_cost_drivers ──
-
-registerLog10xTool('log10x_cost_drivers', costDriversSchema, (args) =>
-  wrap('log10x_cost_drivers', async () => {
-    const env = resolveEnv(getEnvs(), args.environment);
-    const cost = await getAnalyzerCost(env, args.analyzerCost);
-    return executeCostDrivers({ ...args, analyzerCost: cost }, env);
-  })
-);
-
 // ── Tool: log10x_event_lookup ──
 
 registerLog10xTool('log10x_event_lookup', eventLookupSchema, (args) =>
@@ -838,12 +809,6 @@ registerLog10xTool('log10x_pattern_trend', trendSchema, (args) =>
     const cost = await getAnalyzerCost(env, args.analyzerCost);
     return executeTrend({ ...args, analyzerCost: cost }, env);
   })
-);
-
-// ── Tool: log10x_exclusion_filter ──
-
-registerLog10xTool('log10x_exclusion_filter', exclusionFilterSchema, (args) =>
-  wrap('log10x_exclusion_filter', async () => executeExclusionFilter(args))
 );
 
 // ── Tool: log10x_dependency_check ──
@@ -894,16 +859,6 @@ registerLog10xTool('log10x_discover_labels', discoverLabelsSchema, (args) =>
   })
 );
 
-// ── Tool: log10x_list_by_label ──
-
-registerLog10xTool('log10x_list_by_label', listByLabelSchema, (args) =>
-  wrap('log10x_list_by_label', async () => {
-    const env = resolveEnv(getEnvs(), args.environment);
-    const cost = await getAnalyzerCost(env, args.analyzerCost);
-    return executeListByLabel({ ...args, analyzerCost: cost }, env);
-  })
-);
-
 // ── Tool: log10x_investigate ──
 
 registerLog10xTool('log10x_investigate', investigateSchema, (args) =>
@@ -911,12 +866,6 @@ registerLog10xTool('log10x_investigate', investigateSchema, (args) =>
     const env = resolveEnv(getEnvs(), args.environment);
     return executeInvestigate(args, env);
   })
-);
-
-// ── Tool: log10x_investigation_get ──
-
-registerLog10xTool('log10x_investigation_get', investigationGetSchema, (args) =>
-  wrap('log10x_investigation_get', async () => executeInvestigationGet(args))
 );
 
 // ── Tool: log10x_resolve_batch ──
@@ -961,21 +910,6 @@ registerLog10xTool('log10x_retriever_query', retrieverQuerySchema, (args) =>
   wrap('log10x_retriever_query', async () => {
     const env = resolveEnv(getEnvs(), args.environment);
     return executeRetrieverQuery(args, env);
-  })
-);
-
-// ── Tool: log10x_retriever_query_status ──
-//
-// Pairs with log10x_retriever_query. Reads the CW log streams for an
-// existing queryId and returns a fresh diagnostics snapshot — useful
-// when a prior retriever_query reported partialResults: true (poll
-// budget exceeded) or when an agent wants to verify a queryId's
-// progress without paying the full S3 results poll again.
-
-registerLog10xTool('log10x_retriever_query_status', retrieverQueryStatusSchema, (args) =>
-  wrap('log10x_retriever_query_status', async () => {
-    const env = resolveEnv(getEnvs(), args.environment);
-    return executeRetrieverQueryStatus(args, env);
   })
 );
 
@@ -1242,20 +1176,15 @@ server.resource(
 // ── CLI flag handlers ──
 
 const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
-  { name: 'log10x_cost_drivers', intent: 'Why did log costs spike this week — dollar-ranked patterns with week-over-week deltas' },
   { name: 'log10x_event_lookup', intent: 'What is this single log line — resolve to stable identity + cost + AI classification' },
   { name: 'log10x_pattern_examples', intent: 'Recent live events for a pattern from the log analyzer with template-parsed slot values — bounded to 24h, for older use retriever_query' },
   { name: 'log10x_savings', intent: 'Pipeline ROI — how much receiver / retriever are saving in dollars' },
   { name: 'log10x_pattern_trend', intent: 'Time series for a pattern — volume + cost history, spike detection, sparkline' },
-  { name: 'log10x_exclusion_filter', intent: 'Generate mute file entry or SIEM drop rule for a pattern' },
   { name: 'log10x_dependency_check', intent: 'Scan SIEM + dashboards + alerts for refs to a pattern before muting / deleting it' },
-  { name: 'log10x_top_patterns', intent: 'Top N patterns by current cost (no baseline comparison)' },
-  { name: 'log10x_list_by_label', intent: 'Rank any label dimension by cost — "cost by namespace / tenant / severity"' },
+  { name: 'log10x_top_patterns', intent: 'Top N patterns by current cost, with per-row delta vs comparison_window and newly-emerged section' },
   { name: 'log10x_investigate', intent: 'Single-call root-cause — causal chain for acute spikes or cohort for drift' },
-  { name: 'log10x_investigation_get', intent: 'Retrieve a prior investigation by id or list recent investigations' },
   { name: 'log10x_resolve_batch', intent: 'Pasted-batch triage — per-pattern variable concentration + next actions' },
   { name: 'log10x_retriever_query', intent: 'Direct archive retrieval by templateHash with JS filter expressions' },
-  { name: 'log10x_retriever_query_status', intent: 'Poll CloudWatch diagnostics for an existing retriever query and optionally recover stranded results from S3 via fetch_results=true (avoids resubmit + new queryId)' },
   { name: 'log10x_retriever_series', intent: 'Fidelity-aware time series from the S3 archive — auto-selects exact aggregation vs sampled fan-out' },
   { name: 'log10x_backfill_metric', intent: 'Create a new Datadog / Prometheus metric backfilled from Retriever archive' },
   { name: 'log10x_doctor', intent: 'Startup health check — env config, gateway, tier, freshness, Retriever, paste endpoint, cross-pillar enrichment floor' },

@@ -229,7 +229,6 @@ export const TOOL_MODES: Record<string, ('analysis' | 'analysis_pending' | 'poc'
   log10x_pattern_mitigate_legacy: ['analysis', 'analysis_pending'], // alias if any
   log10x_savings: ['analysis', 'analysis_pending'],
   log10x_investigate: ['analysis', 'analysis_pending'],
-  log10x_investigation_get: ['analysis', 'analysis_pending'],
   log10x_services: ['analysis', 'analysis_pending'],
   log10x_discover_labels: ['analysis', 'analysis_pending'],
   log10x_discover_join: ['analysis', 'analysis_pending'],
@@ -238,18 +237,8 @@ export const TOOL_MODES: Record<string, ('analysis' | 'analysis_pending' | 'poc'
   log10x_resolve_batch: ['analysis', 'analysis_pending', 'poc'], // local-only, no TSDB needed
   log10x_extract_templates: ['analysis', 'analysis_pending', 'poc'], // local-only, no TSDB needed
   log10x_retriever_query: ['analysis', 'analysis_pending'],
-  log10x_retriever_query_status: ['analysis', 'analysis_pending'],
   log10x_retriever_series: ['analysis', 'analysis_pending'],
   log10x_backfill_metric: ['analysis', 'analysis_pending'],
-
-  // ── Legacy (kept available but in flux) ──
-  // cost_drivers, list_by_label, event_lookup, exclusion_filter are
-  // candidates for removal/absorption per the plan. Kept registered
-  // for now to avoid breaking in-flight callers; removal happens in
-  // a later checkpoint after the new tools are validated.
-  log10x_cost_drivers: ['analysis', 'analysis_pending'],
-  log10x_list_by_label: ['analysis', 'analysis_pending'],
-  log10x_exclusion_filter: ['analysis', 'analysis_pending'],
 
   // ── Install advisors (POC + analysis_pending) ──
   log10x_advise_install: ['poc', 'analysis_pending'],
