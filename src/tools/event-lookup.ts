@@ -35,27 +35,52 @@ export const eventLookupSchema = {
   view: z.enum(['summary', 'markdown']).default('summary').describe('Output format. summary returns a structured envelope; markdown returns the rendered table.'),
 };
 
+interface EventLookupSummary {
+  pattern: string;
+  window: string;
+  services: Array<{ service: string; severity: string; bytes: number; cost_per_window_usd: number; cost_baseline_usd: number; events: number; is_new: boolean }>;
+  totals: { bytes: number; cost_per_window_usd: number; cost_baseline_usd: number; events: number; service_count: number };
+  resolved_from_hash?: string;
+}
+
 export async function executeEventLookup(
   args: { pattern?: string; tenxHash?: string; service?: string; timeRange?: string; analyzerCost?: number; siemScope?: string; view?: 'summary' | 'markdown' },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
   const view = args.view ?? 'summary';
-  const wrapOutput = (markdown: string): string | StructuredOutput => {
-    if (view === 'markdown') return markdown;
-    const headline = markdown.split('\n')[0]?.slice(0, 200) || 'event_lookup result';
+  const sumOut: { data?: EventLookupSummary } = {};
+  const md = await executeEventLookupInner(args, env, sumOut);
+  if (view === 'markdown') {
     return buildMarkdownEnvelope({
       tool: 'log10x_event_lookup',
-      summary: { headline },
-      markdown,
+      summary: { headline: md.split('\n')[0]?.slice(0, 200) || 'event_lookup result' },
+      markdown: md,
     });
-  };
-  const result = await executeEventLookupInner(args, env);
-  return wrapOutput(result);
+  }
+  // Summary view: typed envelope when data was computed; fall back to
+  // markdown envelope for early-return cases (no data, raw line, etc).
+  if (!sumOut.data) {
+    return buildMarkdownEnvelope({
+      tool: 'log10x_event_lookup',
+      summary: { headline: md.split('\n')[0]?.slice(0, 200) || 'event_lookup result' },
+      markdown: md,
+    });
+  }
+  const d = sumOut.data;
+  const headline = `\`${d.pattern}\` over ${d.window}: $${d.totals.cost_per_window_usd.toFixed(2)} across ${d.totals.service_count} service${d.totals.service_count === 1 ? '' : 's'} (${d.totals.events} events, ${(d.totals.bytes / 1_000_000).toFixed(1)} MB)`;
+  const { buildEnvelope } = await import('../lib/output-types.js');
+  return buildEnvelope({
+    tool: 'log10x_event_lookup',
+    view: 'summary',
+    summary: { headline },
+    data: d,
+  });
 }
 
 async function executeEventLookupInner(
   args: { pattern?: string; tenxHash?: string; service?: string; timeRange?: string; analyzerCost?: number; siemScope?: string },
-  env: EnvConfig
+  env: EnvConfig,
+  sumOut?: { data?: EventLookupSummary }
 ): Promise<string> {
   // Defensive defaults — schema defaults only apply at the MCP-SDK
   // boundary; chain-walkers, internal callers, and the eval harness
@@ -165,10 +190,10 @@ async function executeEventLookupInner(
       return `No data found for pattern "${pattern}". Check the pattern name (use underscores, e.g., Payment_Gateway_Timeout).`;
     }
     // Use fuzzy results
-    return finalize(await formatResults(fuzzyRes.data.result, pattern, metricsEnv, tf, costPerGb, period, env));
+    return finalize(await formatResults(fuzzyRes.data.result, pattern, metricsEnv, tf, costPerGb, period, env, sumOut, resolvedFromHash));
   }
 
-  return finalize(await formatResults(currentRes.data.result, pattern, metricsEnv, tf, costPerGb, period, env));
+  return finalize(await formatResults(currentRes.data.result, pattern, metricsEnv, tf, costPerGb, period, env, sumOut, resolvedFromHash));
 }
 
 async function formatResults(
@@ -178,7 +203,9 @@ async function formatResults(
   tf: ReturnType<typeof parseTimeframe>,
   costPerGb: number,
   period: string,
-  env: EnvConfig
+  env: EnvConfig,
+  sumOut?: { data?: EventLookupSummary },
+  resolvedFromHash?: string
 ): Promise<string> {
   // Aggregate bytes per service (multiple severity levels possible).
   // Also keep the per-severity split per service: a pattern's text
@@ -260,6 +287,31 @@ async function formatResults(
 
   rows.sort((a, b) => b.costNow - a.costNow);
   const maxBytes = rows.length ? Math.max(...rows.map(r => r.bytes)) : 0;
+
+  // Populate the typed summary output for view='summary' callers.
+  if (sumOut) {
+    sumOut.data = {
+      pattern,
+      window: tf.label,
+      services: rows.map(r => ({
+        service: r.service,
+        severity: r.severity,
+        bytes: r.bytes,
+        cost_per_window_usd: r.costNow,
+        cost_baseline_usd: r.costBaseline,
+        events: r.events,
+        is_new: r.isNew,
+      })),
+      totals: {
+        bytes: totalBytes,
+        cost_per_window_usd: totalCostNow,
+        cost_baseline_usd: totalCostBase,
+        events: totalEvents,
+        service_count: rows.length,
+      },
+      resolved_from_hash: resolvedFromHash,
+    };
+  }
 
   // Format output. One stanza per service for this single pattern:
   // header (service · severity · NEW), share-bar scaled to the busiest

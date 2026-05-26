@@ -95,19 +95,39 @@ export interface DependencyCheckArgs {
   view?: 'summary' | 'markdown';
 }
 
+interface DependencyCheckSummary {
+  pattern: string;
+  vendor?: string;
+  execution_mode: 'in_process' | 'paste_ready' | 'vendor_required' | 'ambiguous';
+  scan_ran: boolean;
+  dependencies: Array<{ kind: string; name: string; url?: string }>;
+  safe_to_drop_recommendation: 'safe' | 'blocked' | 'unverifiable';
+  note?: string;
+}
+
 export async function executeDependencyCheck(args: DependencyCheckArgs): Promise<string | import('../lib/output-types.js').StructuredOutput> {
   const view = args.view ?? 'summary';
-  const md = await executeDependencyCheckInner(args);
-  if (view === 'markdown') return md;
-  const { buildMarkdownEnvelope } = await import('../lib/output-types.js');
-  return buildMarkdownEnvelope({
+  const sumOut: { data?: DependencyCheckSummary } = {};
+  const md = await executeDependencyCheckInner(args, sumOut);
+  const { buildMarkdownEnvelope, buildEnvelope } = await import('../lib/output-types.js');
+  if (view === 'markdown' || !sumOut.data) {
+    return buildMarkdownEnvelope({
+      tool: 'log10x_dependency_check',
+      summary: { headline: md.split('\n')[0]?.slice(0, 200) || 'dependency_check result' },
+      markdown: md,
+    });
+  }
+  const d = sumOut.data;
+  const headline = `\`${d.pattern}\`: ${d.dependencies.length} dependencies found in ${d.vendor ?? 'analyzer'} (recommendation: ${d.safe_to_drop_recommendation})`;
+  return buildEnvelope({
     tool: 'log10x_dependency_check',
-    summary: { headline: md.split('\n')[0]?.slice(0, 200) || 'dependency_check result' },
-    markdown: md,
+    view: 'summary',
+    summary: { headline },
+    data: d,
   });
 }
 
-async function executeDependencyCheckInner(args: DependencyCheckArgs): Promise<string> {
+async function executeDependencyCheckInner(args: DependencyCheckArgs, sumOut?: { data?: DependencyCheckSummary }): Promise<string> {
   const pattern = normalizePattern(args.pattern);
   const tokens = pattern.split('_').filter((t) => t.length > 0);
 
@@ -117,6 +137,13 @@ async function executeDependencyCheckInner(args: DependencyCheckArgs): Promise<s
   });
 
   if (resolution.kind === 'none') {
+    if (sumOut) {
+      sumOut.data = {
+        pattern, execution_mode: 'vendor_required', scan_ran: false, dependencies: [],
+        safe_to_drop_recommendation: 'unverifiable',
+        note: 'no SIEM credentials detected and no vendor arg supplied',
+      };
+    }
     return [
       'Dependency Check — vendor required',
       '',
@@ -175,6 +202,28 @@ async function executeDependencyCheckInner(args: DependencyCheckArgs): Promise<s
     },
   ];
   const block = renderNextActions(nextActions);
+  // Populate typed summary for view='summary' callers.
+  if (sumOut) {
+    const dependencies: DependencyCheckSummary['dependencies'] = scanRan && !scan.error
+      ? (scan.matches ?? []).map(m => ({
+          kind: m.type,
+          name: m.name,
+          url: m.url,
+        }))
+      : [];
+    const recommendation: DependencyCheckSummary['safe_to_drop_recommendation'] = scanRan
+      ? (dependencies.length === 0 ? 'safe' : 'blocked')
+      : 'unverifiable';
+    sumOut.data = {
+      pattern,
+      vendor,
+      execution_mode: scanRan ? 'in_process' : 'paste_ready',
+      scan_ran: scanRan,
+      dependencies,
+      safe_to_drop_recommendation: recommendation,
+      note: resolution.note,
+    };
+  }
   return block ? `${result}\n\n${block}` : result;
 }
 

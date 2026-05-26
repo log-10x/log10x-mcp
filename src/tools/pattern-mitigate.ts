@@ -232,19 +232,49 @@ async function detectCapabilities(snapshotId?: string): Promise<Capabilities> {
   return out;
 }
 
+interface PatternMitigateSummary {
+  pattern: string;
+  scope_service?: string;
+  options: Array<{
+    id: 'drop_at_analyzer' | 'drop_at_forwarder' | 'mute_at_10x' | 'compact_at_10x';
+    enabled: boolean;
+    disabled_reason?: string;
+    label: string;
+  }>;
+  env_capabilities: {
+    can_mute: boolean;
+    can_compact: boolean;
+    has_retriever_archive: boolean;
+    forwarder_kind?: string;
+    analyzer_vendor?: string;
+    gitops_repo?: string;
+  };
+}
+
 export async function executePatternMitigate(args: PatternMitigateArgs): Promise<string | import('../lib/output-types.js').StructuredOutput> {
   const view = args.view ?? 'summary';
-  const md = await executePatternMitigateInner(args);
-  if (view === 'markdown') return md;
-  const { buildMarkdownEnvelope } = await import('../lib/output-types.js');
-  return buildMarkdownEnvelope({
+  const sumOut: { data?: PatternMitigateSummary } = {};
+  const md = await executePatternMitigateInner(args, sumOut);
+  const { buildMarkdownEnvelope, buildEnvelope } = await import('../lib/output-types.js');
+  if (view === 'markdown' || !sumOut.data) {
+    return buildMarkdownEnvelope({
+      tool: 'log10x_pattern_mitigate',
+      summary: { headline: md.split('\n')[0]?.slice(0, 200) || 'pattern_mitigate result' },
+      markdown: md,
+    });
+  }
+  const d = sumOut.data;
+  const enabledCount = d.options.filter(o => o.enabled).length;
+  const headline = `\`${d.pattern}\`: ${enabledCount} of ${d.options.length} mitigation options enabled (${d.options.filter(o => o.enabled).map(o => o.id).join(', ')})`;
+  return buildEnvelope({
     tool: 'log10x_pattern_mitigate',
-    summary: { headline: md.split('\n')[0]?.slice(0, 200) || 'pattern_mitigate result' },
-    markdown: md,
+    view: 'summary',
+    summary: { headline },
+    data: d,
   });
 }
 
-async function executePatternMitigateInner(args: PatternMitigateArgs): Promise<string> {
+async function executePatternMitigateInner(args: PatternMitigateArgs, sumOut?: { data?: PatternMitigateSummary }): Promise<string> {
   const pattern = normalizePattern(args.pattern);
   const displayPattern = fmtPattern(pattern);
   const scopeNote = args.service ? ` (service: ${args.service})` : '';
@@ -386,6 +416,49 @@ async function executePatternMitigateInner(args: PatternMitigateArgs): Promise<s
   ));
   lines.push('');
   lines.push(renderNextActions(nextActions));
+
+  // Populate typed summary for view='summary' callers.
+  if (sumOut) {
+    const options: PatternMitigateSummary['options'] = [
+      {
+        id: 'drop_at_analyzer',
+        enabled: analyzerSupported,
+        disabled_reason: analyzerSupported ? undefined : `Native exclusion config not generated for ${analyzerName ?? 'unknown analyzer'} (manual apply required).`,
+        label: `Drop at ${analyzerName ?? 'analyzer'}`,
+      },
+      {
+        id: 'drop_at_forwarder',
+        enabled: Boolean(caps.forwarderKind && caps.forwarderKind !== 'unknown'),
+        disabled_reason: caps.forwarderKind && caps.forwarderKind !== 'unknown' ? undefined : 'forwarder not detected from env / snapshot',
+        label: `Drop at ${caps.forwarderKind ?? 'forwarder'}`,
+      },
+      {
+        id: 'mute_at_10x',
+        enabled: caps.canMute,
+        disabled_reason: caps.canMute ? undefined : caps.setupHint ?? 'no 10x receiver detected',
+        label: 'Mute at 10x receiver',
+      },
+      {
+        id: 'compact_at_10x',
+        enabled: caps.canCompact,
+        disabled_reason: caps.canCompact ? undefined : caps.setupHint ?? 'no 10x receiver detected',
+        label: 'Compact at 10x receiver',
+      },
+    ];
+    sumOut.data = {
+      pattern,
+      scope_service: args.service,
+      options,
+      env_capabilities: {
+        can_mute: caps.canMute,
+        can_compact: caps.canCompact,
+        has_retriever_archive: caps.hasRetrieverArchive,
+        forwarder_kind: caps.forwarderKind,
+        analyzer_vendor: caps.analyzerVendor,
+        gitops_repo: caps.gitopsRepo,
+      },
+    };
+  }
 
   return lines.join('\n');
 }

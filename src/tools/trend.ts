@@ -26,23 +26,53 @@ export const trendSchema = {
   view: z.enum(['summary', 'markdown']).default('summary').describe('Output format. summary returns structured envelope; markdown returns rendered chart + stats.'),
 };
 
+interface PatternTrendSummary {
+  pattern: string;
+  window: string;
+  step: string;
+  time_series: Array<{ ts: number; bytes: number }>;
+  total_bytes: number;
+  total_cost_usd: number;
+  baseline_run_rate_usd: number;
+  recent_run_rate_usd: number;
+  change_pct: number;
+  spike_detected: boolean;
+  spike_at_ts?: number;
+  peak_bytes: number;
+  low_bytes: number;
+  sample_count: number;
+}
+
 export async function executeTrend(
   args: { pattern: string; timeRange?: string; step?: string; analyzerCost?: number; view?: 'summary' | 'markdown' },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
   const view = args.view ?? 'summary';
-  const md = await executeTrendInner(args, env);
-  if (view === 'markdown') return md;
-  return buildMarkdownEnvelope({
+  const sumOut: { data?: PatternTrendSummary } = {};
+  const md = await executeTrendInner(args, env, sumOut);
+  if (view === 'markdown' || !sumOut.data) {
+    return buildMarkdownEnvelope({
+      tool: 'log10x_pattern_trend',
+      summary: { headline: md.split('\n')[0]?.slice(0, 200) || 'pattern_trend result' },
+      markdown: md,
+    });
+  }
+  const d = sumOut.data;
+  const headline = `\`${d.pattern}\` over ${d.window}: $${d.total_cost_usd.toFixed(2)} measured spend, change ${d.change_pct >= 0 ? '+' : ''}${d.change_pct}% (last quarter vs first quarter run-rate)${d.spike_detected ? ', spike detected' : ''}`;
+  const { buildEnvelope } = await import('../lib/output-types.js');
+  return buildEnvelope({
     tool: 'log10x_pattern_trend',
-    summary: { headline: md.split('\n')[0]?.slice(0, 200) || 'pattern_trend result' },
-    markdown: md,
+    view: 'summary',
+    summary: { headline },
+    data: d,
+    render_hint: { chart: 'timeseries', units: 'bytes/sec' },
   });
 }
 
 async function executeTrendInner(
   args: { pattern: string; timeRange?: string; step?: string; analyzerCost?: number },
-  env: EnvConfig
+  env: EnvConfig,
+  sumOut?: { data?: PatternTrendSummary }
 ): Promise<string> {
   // Defensive defaults — match trendSchema.
   const timeRange = args.timeRange ?? '7d';
@@ -119,6 +149,28 @@ async function executeTrendInner(
     baselineCost > 0
       ? `${pct >= 0 ? '+' : ''}${pct}% (last quarter vs first quarter run-rate)`
       : '(no first-quarter baseline to compare against)';
+
+  // Populate typed summary for view='summary' callers.
+  if (sumOut) {
+    const stepSecs = stepSeconds;
+    sumOut.data = {
+      pattern,
+      window: tf.label,
+      step,
+      time_series: points,
+      total_bytes: totalBytes,
+      total_cost_usd: totalCost,
+      baseline_run_rate_usd: baselineCost,
+      recent_run_rate_usd: recentCost,
+      change_pct: pct,
+      spike_detected: !!spikePoint,
+      spike_at_ts: spikePoint?.ts,
+      peak_bytes: maxPoint.bytes,
+      low_bytes: minPoint.bytes,
+      sample_count: points.length,
+    };
+    void stepSecs;
+  }
 
   const lines: string[] = [];
   // Description-first headline (shared patternDisplay): a readable

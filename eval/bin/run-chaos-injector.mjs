@@ -46,12 +46,18 @@ const scenarios = {
     { msg: 'flush dial tcp lookup opensearch retry exhausted after 3 attempts', service: 'opentelemetry-collector', level: 'ERROR' },
     { msg: 'queue worker dial tcp lookup opensearch error giving up', service: 'opentelemetry-collector', level: 'ERROR' },
   ],
-  // High-skew slot: same verb=get repeated 78% of the time, verb=post 22%.
-  // find_skew should detect verb=get dominance.
+  // High-skew slot: same template structure across events, but one SLOT
+  // value dominates at 78%. Variation in the dominant slot must be in a
+  // value the templater extracts as a slot, NOT in the template path.
+  // We use http_status as the dominant slot: every event is `audit
+  // verb=GET status=$ duration=$ uri=$` with status=200 (78%) or
+  // status=404 (22%). The verb stays constant so it doesn't fork the
+  // symbolMessage; status varies into a slot value the templater
+  // captures.
   'skew-78': () => {
-    const isGet = Math.random() < 0.78;
+    const isOk = Math.random() < 0.78;
     return [{
-      msg: `audit verb=${isGet ? 'get' : 'post'} user=system:serviceaccount:default:default uri=/api/v1/nodes/${randomUUID().slice(0, 8)}`,
+      msg: `audit verb=GET status=${isOk ? '200' : '404'} duration=${Math.floor(Math.random() * 500)}ms uri=/api/v1/nodes/eks-master`,
       service: 'kube-apiserver-audit',
       level: 'INFO',
     }];
