@@ -67,11 +67,53 @@ export const investigateSchema = {
     .describe('`shallow`: anchor service only. `normal` (default): anchor service + immediate dependencies. `deep`: full environment-wide.'),
   environment: z.string().optional().describe('Environment nickname — required in multi-env setups.'),
   use_bytes: z.boolean().default(false).describe('Use byte-based rate instead of event-count. Event-count is strongly preferred; use only if the Reporter does not emit the count metric.'),
+  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.investigation_id, data.mode, data.starting_point, data.shape, data.findings_count, data.markdown). markdown wraps the rendered report in data.markdown.'),
 };
 
 type Mode = 'pattern' | 'service' | 'environment' | 'raw_line';
 
 export async function executeInvestigate(
+  args: {
+    starting_point: string;
+    window: string;
+    timeRange?: string;
+    baseline_offset?: string;
+    depth: 'shallow' | 'normal' | 'deep';
+    environment?: string;
+    use_bytes: boolean;
+    view?: 'summary' | 'markdown';
+  },
+  env: EnvConfig
+): Promise<string | import('../lib/output-types.js').StructuredOutput> {
+  const view = args.view ?? 'summary';
+  const md = await executeInvestigateInner(args, env);
+  const { buildEnvelope: __be, buildMarkdownEnvelope: __bme } = await import('../lib/output-types.js');
+  const idMatch = md.match(/investigation_id`?:?\s*`?([0-9a-f-]{36})/i);
+  const shapeMatch = md.match(/\*\*shape\*\*:\s*`?(acute|drift|environment|no_significant_movement|empty)`?/i);
+  const modeMatch = md.match(/\*\*mode\*\*:\s*`?(pattern|service|environment|raw_line)`?/i);
+  if (view === 'markdown') {
+    return __bme({ tool: 'log10x_investigate', summary: { headline: `Investigation of "${args.starting_point}" (window=${args.window})` }, markdown: md });
+  }
+  return __be({
+    tool: 'log10x_investigate',
+    view: 'summary',
+    summary: { headline: `Investigation of "${args.starting_point}" (window=${args.window}): shape=${shapeMatch?.[1] ?? 'unknown'}${idMatch ? `, id=${idMatch[1].slice(0, 8)}` : ''}.` },
+    data: {
+      ok: true,
+      investigation_id: idMatch?.[1],
+      starting_point: args.starting_point,
+      window: args.window,
+      depth: args.depth,
+      baseline_offset: args.baseline_offset,
+      mode: modeMatch?.[1],
+      shape: shapeMatch?.[1],
+      use_bytes: args.use_bytes,
+      report_markdown: md,
+    },
+  });
+}
+
+async function executeInvestigateInner(
   args: {
     starting_point: string;
     window: string;

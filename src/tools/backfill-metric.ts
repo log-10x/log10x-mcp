@@ -29,6 +29,7 @@ import { aggregate, type AggregationType } from '../lib/aggregator.js';
 import { emitSeries, type Destination } from '../lib/metric-emitters.js';
 import { fmtCount, normalizePattern } from '../lib/format.js';
 import { retrieverNotConfiguredMessage } from './retriever-query.js';
+import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
 export const backfillMetricSchema = {
   pattern: z
@@ -72,6 +73,7 @@ export const backfillMetricSchema = {
     .default(false)
     .describe('When true, wire the live Reporter to continue emitting the same metric from current events going forward. Default false in this build — the forward-emission handoff path to the Reporter config file is not yet implemented. Set true only after installing the Reporter config update path.'),
   environment: z.string().optional().describe('Environment nickname — required if multi-env.'),
+  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.metric_name, data.events_retrieved, data.points_emitted, data.view_url, data.warnings). markdown wraps the full report in data.markdown.'),
 };
 
 export async function executeBackfillMetric(
@@ -88,13 +90,78 @@ export async function executeBackfillMetric(
     unique_field?: string;
     emit_forward?: boolean;
     environment?: string;
+    view?: 'summary' | 'markdown';
   },
   env: EnvConfig
-): Promise<string> {
-  // ── 0. Prerequisites ──
+): Promise<string | StructuredOutput> {
+  const view = args.view ?? 'summary';
   if (!isRetrieverConfigured()) {
-    return retrieverNotConfiguredMessage();
+    const md = retrieverNotConfiguredMessage();
+    if (view === 'markdown') {
+      return buildMarkdownEnvelope({ tool: 'log10x_backfill_metric', summary: { headline: 'Retriever not configured' }, markdown: md });
+    }
+    return buildEnvelope({ tool: 'log10x_backfill_metric', view: 'summary', summary: { headline: 'Retriever not configured — backfill requires archive access.' }, data: { ok: false, error: 'retriever_not_configured' } });
   }
+  const sumOut: { data?: BackfillMetricSummary } = {};
+  const md = await executeBackfillMetricInner(args, env, sumOut);
+  if (view === 'markdown' || !sumOut.data) {
+    return buildMarkdownEnvelope({ tool: 'log10x_backfill_metric', summary: { headline: sumOut.data ? `Backfilled ${sumOut.data.metric_name} (${sumOut.data.points_emitted} points)` : 'backfill_metric result' }, markdown: md });
+  }
+  const d = sumOut.data;
+  return buildEnvelope({
+    tool: 'log10x_backfill_metric',
+    view: 'summary',
+    summary: { headline: `Backfill ${d.metric_name} to ${d.destination}: ${d.events_retrieved} events → ${d.points_emitted} points (${d.series_count} series, ${d.bucket_seconds}s buckets), view at ${d.view_url ?? 'destination'}.` },
+    data: d,
+    warnings: d.warnings,
+    actions: [
+      { tool: 'log10x_pattern_trend', args: { pattern: d.pattern, timeRange: '30d' }, reason: 'verify the backfilled series — pattern_trend now extends full 90d' },
+      { tool: 'log10x_retriever_series', args: { pattern: d.pattern, from: d.window_from, to: d.window_to }, reason: 'sanity-check the backfilled buckets at finer granularity' },
+    ],
+  });
+}
+
+interface BackfillMetricSummary {
+  ok: boolean;
+  pattern: string;
+  metric_name: string;
+  destination: string;
+  window_from: string;
+  window_to: string;
+  bucket_size: string;
+  bucket_seconds: number;
+  aggregation: string;
+  group_by: string[];
+  filters: string[];
+  events_retrieved: number;
+  retriever_wall_ms: number;
+  points_emitted: number;
+  series_count: number;
+  emission_wall_ms: number;
+  bytes_posted: number;
+  view_url?: string;
+  warnings: string[];
+  forward_emission_note: string;
+}
+
+async function executeBackfillMetricInner(
+  args: {
+    pattern: string;
+    metric_name: string;
+    destination: Destination;
+    bucket_size?: string;
+    aggregation?: AggregationType;
+    from: string;
+    to?: string;
+    group_by?: string[];
+    filters?: string[];
+    unique_field?: string;
+    emit_forward?: boolean;
+    environment?: string;
+  },
+  env: EnvConfig,
+  sumOut?: { data?: BackfillMetricSummary }
+): Promise<string> {
   // Defensive defaults — match backfillMetricSchema for non-SDK callers.
   args.bucket_size = args.bucket_size ?? '5m';
   args.aggregation = args.aggregation ?? 'count';
@@ -216,6 +283,31 @@ export async function executeBackfillMetric(
   lines.push('**Other things you can do now**:');
   lines.push(`  - Verify the backfilled series: \`log10x_pattern_trend({ pattern: '${pattern}', timeRange: '30d' })\` — the time series now extends the full 90d, not just from forward-emission start.`);
   lines.push(`  - Run the same pattern again over the archive at finer granularity: \`log10x_retriever_series({ pattern: '${pattern}' })\` — useful for sanity-checking the backfilled buckets.`);
+
+  if (sumOut) {
+    sumOut.data = {
+      ok: true,
+      pattern,
+      metric_name: args.metric_name,
+      destination: args.destination,
+      window_from: args.from,
+      window_to: args.to ?? 'now',
+      bucket_size: args.bucket_size ?? '5m',
+      bucket_seconds: aggregated.bucketSeconds,
+      aggregation: args.aggregation ?? 'count',
+      group_by: args.group_by ?? [],
+      filters: args.filters ?? [],
+      events_retrieved: events.length,
+      retriever_wall_ms: retrieverWallMs,
+      points_emitted: emission.pointsEmitted,
+      series_count: aggregated.seriesCount,
+      emission_wall_ms: emission.wallTimeMs,
+      bytes_posted: emission.bytesPosted,
+      view_url: emission.viewUrl,
+      warnings: emission.warnings,
+      forward_emission_note: forwardNote,
+    };
+  }
 
   return lines.join('\n');
 }

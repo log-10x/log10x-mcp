@@ -91,6 +91,7 @@ export const retrieverSeriesSchema = {
       '`auto` (tool decides via Reporter volume + window length), `full` (force exact aggregation — may exceed Lambda budget), `per_window_sampled` (force sampling, default K=1000 per sub-window), or `per_window_sampled:K` (custom K).'
     ),
   environment: z.string().optional().describe('Environment nickname — required if multi-env.'),
+  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.mode, data.bucket_seconds, data.series_count, data.points_returned, data.top_groups, data.caveats). markdown wraps the full series rendering in data.markdown.'),
 };
 
 interface SeriesPoint {
@@ -111,11 +112,18 @@ export async function executeRetrieverSeries(
     group_by?: string;
     fidelity?: string;
     environment?: string;
+    view?: 'summary' | 'markdown';
   },
   env: EnvConfig
-): Promise<string> {
+): Promise<string | import('../lib/output-types.js').StructuredOutput> {
+  const view = rawArgs.view ?? 'summary';
+  const { buildEnvelope: __be, buildMarkdownEnvelope: __bme } = await import('../lib/output-types.js');
   if (!isRetrieverConfigured()) {
-    return retrieverNotConfiguredMessage();
+    const md = retrieverNotConfiguredMessage();
+    if (view === 'markdown') {
+      return __bme({ tool: 'log10x_retriever_series', summary: { headline: 'Retriever not configured' }, markdown: md });
+    }
+    return __be({ tool: 'log10x_retriever_series', view: 'summary', summary: { headline: 'Retriever not configured — series refused.' }, data: { ok: false, error: 'retriever_not_configured' } });
   }
   // Defensive defaults — match retrieverSeriesSchema for non-SDK
   // callers. Narrow into a fully-populated args local so the helper
@@ -161,7 +169,11 @@ export async function executeRetrieverSeries(
   });
 
   if (decision.mode === 'refused') {
-    return renderRefusal(decision, args, windowMs);
+    const md = renderRefusal(decision, args, windowMs);
+    if (view === 'markdown') {
+      return __bme({ tool: 'log10x_retriever_series', summary: { headline: 'Series refused: window/volume exceeds budget' }, markdown: md });
+    }
+    return __be({ tool: 'log10x_retriever_series', view: 'summary', summary: { headline: `Series refused: ${decision.reason ?? 'window/volume exceeds Lambda budget'}. Narrow the window or add a more selective search expression.` }, data: { ok: false, mode: 'refused', from: args.from, to: args.to, window_ms: windowMs, reason: decision.reason } });
   }
 
   const startedMs = Date.now();
@@ -171,7 +183,45 @@ export async function executeRetrieverSeries(
       : await executeSampledMode(env, args, fromMs, toMs, decision.subWindows!, decision.eventsPerSubWindow!);
 
   const wallTimeMs = Date.now() - startedMs;
-  return renderSeries(result, decision, args, wallTimeMs, windowMs);
+  const md = renderSeries(result, decision, args, wallTimeMs, windowMs);
+  if (view === 'markdown') {
+    return __bme({ tool: 'log10x_retriever_series', summary: { headline: `Retriever series: ${result.series.length} bucket points, mode=${decision.mode}` }, markdown: md });
+  }
+  const groupCounts: Record<string, number> = {};
+  for (const p of result.series) {
+    if (p.group) groupCounts[p.group] = (groupCounts[p.group] ?? 0) + p.count;
+  }
+  const topGroups = Object.entries(groupCounts)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 10)
+    .map(([group, count]) => ({ group, count }));
+  return __be({
+    tool: 'log10x_retriever_series',
+    view: 'summary',
+    summary: { headline: `Retriever series for ${args.pattern ?? args.search ?? 'window'}: ${result.series.length} bucket point${result.series.length !== 1 ? 's' : ''}, ${result.groupCardinality} group${result.groupCardinality !== 1 ? 's' : ''}, mode=${decision.mode}, wall=${wallTimeMs}ms.` },
+    data: {
+      ok: true,
+      mode: decision.mode,
+      from: args.from,
+      to: args.to,
+      window_ms: windowMs,
+      group_by: args.group_by,
+      actual_events: result.actualEvents,
+      worker_files: result.workerFiles,
+      truncated: result.truncated,
+      points_returned: result.series.length,
+      series_count: result.groupCardinality,
+      top_groups: topGroups,
+      wall_time_ms: wallTimeMs,
+      sub_windows: decision.subWindows,
+      events_per_sub_window: decision.eventsPerSubWindow,
+      sub_window_results: result.subWindowResults,
+    },
+    actions: args.pattern ? [
+      { tool: 'log10x_retriever_query', args: { pattern: args.pattern, from: args.from, to: args.to }, reason: 'fetch the actual events that built this series' },
+      { tool: 'log10x_backfill_metric', args: { pattern: args.pattern, metric_name: `log10x.${args.pattern.toLowerCase()}_count`, destination: 'datadog', from: args.from, to: args.to, bucket_size: args.bucket_size, aggregation: 'count' }, reason: 'push this series to a TSDB as a backfilled metric' },
+    ] : [],
+  });
 }
 
 interface SeriesResult {
