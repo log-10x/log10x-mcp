@@ -1432,6 +1432,11 @@ async function handleCliFlags(): Promise<boolean> {
 
 async function main() {
   if (await handleCliFlags()) return;
+  // G7: initialize OTel SDK if OTEL_EXPORTER_OTLP_ENDPOINT is set.
+  // No-op otherwise. Must run before envs init so the very first network
+  // call (env validation against the gateway) lands inside a trace too.
+  const { initOtel } = await import('./lib/otel.js');
+  await initOtel();
   // Eagerly resolve credentials before the server connects so any
   // configuration / network failure surfaces here with a clear
   // structured error instead of crashing on the first tool call from

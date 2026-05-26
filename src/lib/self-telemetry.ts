@@ -326,10 +326,36 @@ export function withTelemetry<H extends (...args: any[]) => Promise<any>>(toolNa
     } catch {
       /* never throw from telemetry env resolution */
     }
+    // G7: open an OTel span for this tool call, child of the agent's trace
+    // when args[1]._meta.traceparent is supplied by the MCP host. No-op
+    // when OTel hasn't been initialized (no OTEL_EXPORTER_OTLP_ENDPOINT).
+    const extra = args[1] as { _meta?: Record<string, unknown>; sessionId?: string; requestId?: string | number } | undefined;
+    const startedMs = Date.now();
+    let span: import('./otel.js').OtelSpan | null = null;
     try {
-      return await handler(...args);
+      const otel = await import('./otel.js');
+      span = otel.startToolSpan(toolName, extra);
+      if (envId) span?.setAttribute?.('log10x.env.id', envId);
+    } catch {
+      /* never throw from telemetry span start */
+    }
+    try {
+      const result = await handler(...args);
+      try {
+        if (span) {
+          const otel = await import('./otel.js');
+          otel.endToolSpan(span, { ok: true, durationMs: Date.now() - startedMs });
+        }
+      } catch { /* swallow */ }
+      return result;
     } catch (err) {
       status = 'error';
+      try {
+        if (span) {
+          const otel = await import('./otel.js');
+          otel.endToolSpan(span, { ok: false, durationMs: Date.now() - startedMs, error: err });
+        }
+      } catch { /* swallow */ }
       throw err;
     } finally {
       try {
