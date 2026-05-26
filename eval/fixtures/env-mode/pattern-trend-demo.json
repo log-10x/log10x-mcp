@@ -1,0 +1,9 @@
+{
+  "id": "pattern-trend-demo-opensearch",
+  "tool": "pattern_trend",
+  "args": { "pattern": "open_telemetry_opensearchexporter_clientLogger_LogRoundTrip_open_telemetry_opensearchexporter_v_go_github_opensearch_project", "timeRange": "24h", "step": "1h", "view": "summary" },
+  "expected": {
+    "headline_must_match": "opensearchexporter",
+    "rubric": "Pattern trend over 24h for a known live pattern. Should return time-series data + a measured spend figure."
+  }
+}

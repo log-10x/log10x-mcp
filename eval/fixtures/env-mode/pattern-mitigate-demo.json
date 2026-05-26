@@ -1,0 +1,10 @@
+{
+  "id": "pattern-mitigate-demo-opensearch",
+  "tool": "pattern_mitigate",
+  "args": { "pattern": "open_telemetry_opensearchexporter_clientLogger_LogRoundTrip_open_telemetry_opensearchexporter_v_go_github_opensearch_project", "view": "summary" },
+  "expected": {
+    "headline_must_match": "mitigation",
+    "data_contains_string": ["drop", "mute", "compact"],
+    "rubric": "Pattern mitigate menu should surface multiple options (drop at analyzer, drop at forwarder, mute at 10x, compact at 10x) with env-gated enabled flags."
+  }
+}
