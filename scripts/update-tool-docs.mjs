@@ -172,6 +172,31 @@ function tsTypeOf(v) {
   return 'unknown';
 }
 
+// GitHub repo for source links.
+const REPO_URL = 'https://github.com/log-10x/log10x-mcp/blob/main';
+
+// Mapping from tool name to its actual source file under src/tools/. Most are
+// derived by tool_name.replace(/_/g, '-') but a few don't match (the file
+// contains multiple registered tools, or it was renamed at some point).
+const SOURCE_FILE = {
+  // Multiple tools registered from one file.
+  poc_from_siem_submit: 'src/tools/poc-from-siem.ts',
+  poc_from_siem_status: 'src/tools/poc-from-siem.ts',
+  signin_start:         'src/tools/signin.ts',
+  signin_complete:      'src/tools/signin.ts',
+  // Filename diverges from tool name.
+  pattern_trend:        'src/tools/trend.ts',
+};
+
+function sourcePathFor(toolName) {
+  return SOURCE_FILE[toolName] ?? `src/tools/${toolName.replace(/_/g, '-')}.ts`;
+}
+
+function sourceLink(toolName) {
+  const path = sourcePathFor(toolName);
+  return `[\`${path}\`](${REPO_URL}/${path})`;
+}
+
 /** Render the new "Schema and samples" section for a tool. */
 function renderSchemaSection(toolName, inputJson, outputEnvelope) {
   const trimmedOut = trimForDoc(outputEnvelope);
@@ -189,7 +214,7 @@ ${indent(JSON.stringify(inputJson, null, 2), '    ')}
 
 ??? tenx-input-schema "Input schema"
 
-    See the Zod schema in \`src/tools/${toolName.replace(/_/g, '-')}.ts\`. The agent-facing JSON Schema is published via \`tools/list\` (every Zod \`.default(...)\` materializes as a \`default\` field; every \`.describe(...)\` becomes the \`description\`).
+    See the Zod schema in ${sourceLink(toolName)}. The agent-facing JSON Schema is published via \`tools/list\` (every Zod \`.default(...)\` materializes as a \`default\` field; every \`.describe(...)\` becomes the \`description\`).
 
 ??? tenx-output-example "Output example"
 
