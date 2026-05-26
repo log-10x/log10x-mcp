@@ -41,6 +41,7 @@ import {
 } from '../lib/customer-metrics.js';
 import { loadEnvironments } from '../lib/environments.js';
 import type { PrometheusResponse } from '../lib/api.js';
+import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
 // ─── constants ────────────────────────────────────────────────────────
 const DEFAULT_LOOKUP_PATH = 'pipelines/run/receive/compact/compact-cap.csv';
@@ -109,6 +110,7 @@ export const configureCompactSchema = {
     .describe(
       'Existing CSV content (header + rows). If omitted, the tool emits commands to fetch it from the repo before computing the diff. Pass it for a one-shot output.'
     ),
+  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.phase, data.service, data.containers, data.csv_path, data.gitops_repo). markdown wraps the PR rendering in data.markdown.'),
 };
 
 const schemaObj = z.object(configureCompactSchema);
@@ -122,12 +124,16 @@ type ResolvedTarget = ConfigureCompactArgs & {
 // ─── main entry ───────────────────────────────────────────────────────
 export async function executeConfigureCompact(
   args: ConfigureCompactArgs
-): Promise<string> {
-  // Phase 0: resolve gitops target.
+): Promise<string | StructuredOutput> {
+  const view = args.view ?? 'summary';
   const target = await resolveTarget(args);
-  if ('error' in target) return target.error;
+  if ('error' in target) {
+    if (view === 'markdown') {
+      return buildMarkdownEnvelope({ tool: 'log10x_configure_compact', summary: { headline: 'Configure compact: target resolution failed' }, markdown: target.error });
+    }
+    return buildEnvelope({ tool: 'log10x_configure_compact', view: 'summary', summary: { headline: 'Configure compact refused: target resolution failed.' }, data: { ok: false, phase: 'target_resolution', error: target.error.split('\n').find((l) => l.trim().length > 0) } });
+  }
 
-  // Phase 1: Prometheus backend.
   let backend;
   try {
     const r = await resolveBackend();
@@ -136,19 +142,38 @@ export async function executeConfigureCompact(
     }
     backend = r.backend;
   } catch (e: any) {
-    return renderError(
-      'Customer metrics backend not configured',
-      e?.message ?? String(e)
-    );
+    const md = renderError('Customer metrics backend not configured', e?.message ?? String(e));
+    if (view === 'markdown') {
+      return buildMarkdownEnvelope({ tool: 'log10x_configure_compact', summary: { headline: 'Customer metrics backend not configured' }, markdown: md });
+    }
+    return buildEnvelope({ tool: 'log10x_configure_compact', view: 'summary', summary: { headline: 'Customer metrics backend not configured — configure_compact cannot resolve containers.' }, data: { ok: false, phase: 'backend', error: e?.message ?? String(e) } });
   }
 
-  // Phase 2: service → candidate containers if not yet committed.
   if (!args.containers || args.containers.length === 0) {
-    return await renderResolutionPrompt(args, backend);
+    const md = await renderResolutionPrompt(args, backend);
+    if (view === 'markdown') {
+      return buildMarkdownEnvelope({ tool: 'log10x_configure_compact', summary: { headline: `Phase 1: resolve "${args.service}" → containers` }, markdown: md });
+    }
+    return buildEnvelope({ tool: 'log10x_configure_compact', view: 'summary', summary: { headline: `Phase 1: pick containers for service "${args.service}" — re-call with containers: ["..."] to emit PR.` }, data: { ok: true, phase: 'resolution_prompt', service: args.service, gitops_repo: target.resolved.gitops_repo, lookup_path: target.resolved.lookup_path } });
   }
 
-  // Phase 3: emit PR command (no derivation needed; compact decision is binary).
-  return renderResult(args, target.resolved);
+  const md = renderResult(args, target.resolved);
+  if (view === 'markdown') {
+    return buildMarkdownEnvelope({ tool: 'log10x_configure_compact', summary: { headline: `PR command for ${args.containers.length} container${args.containers.length !== 1 ? 's' : ''} in "${args.service}"` }, markdown: md });
+  }
+  return buildEnvelope({
+    tool: 'log10x_configure_compact',
+    view: 'summary',
+    summary: { headline: `Compact-cap PR command rendered for ${args.containers.length} container${args.containers.length !== 1 ? 's' : ''} on ${target.resolved.gitops_repo}/${target.resolved.lookup_path}.` },
+    data: {
+      ok: true,
+      phase: 'pr_rendered',
+      service: args.service,
+      containers: args.containers,
+      gitops_repo: target.resolved.gitops_repo,
+      lookup_path: target.resolved.lookup_path,
+    },
+  });
 }
 
 // ─── target resolution ────────────────────────────────────────────────

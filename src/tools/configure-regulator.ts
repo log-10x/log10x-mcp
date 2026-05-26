@@ -113,6 +113,7 @@ export const configureRegulatorSchema = {
     .describe(
       'Existing CSV content (header + rows). If omitted, the tool emits commands to fetch it from the repo before computing the diff. Pass it for a one-shot output.'
     ),
+  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.phase, data.service, data.containers, data.derivation, data.checks). markdown wraps the PR rendering in data.markdown.'),
 };
 
 const schemaObj = z.object(configureRegulatorSchema);
@@ -123,15 +124,21 @@ type ResolvedTarget = ConfigureRegulatorArgs & {
   lookup_path: string;
 };
 
+import { buildEnvelope as _buildEnvelope, buildMarkdownEnvelope as _buildMdEnvelope, type StructuredOutput as _StructuredOutput } from '../lib/output-types.js';
+
 // ─── main entry ───────────────────────────────────────────────────────
 export async function executeConfigureRegulator(
   args: ConfigureRegulatorArgs
-): Promise<string> {
-  // Phase 0: resolve gitops target.
+): Promise<string | _StructuredOutput> {
+  const view = args.view ?? 'summary';
   const target = await resolveTarget(args);
-  if ('error' in target) return target.error;
+  if ('error' in target) {
+    if (view === 'markdown') {
+      return _buildMdEnvelope({ tool: 'log10x_configure_regulator', summary: { headline: 'Configure regulator: target resolution failed' }, markdown: target.error });
+    }
+    return _buildEnvelope({ tool: 'log10x_configure_regulator', view: 'summary', summary: { headline: 'Configure regulator refused: target resolution failed.' }, data: { ok: false, phase: 'target_resolution', error: target.error.split('\n').find((l) => l.trim().length > 0) } });
+  }
 
-  // Phase 1: Prometheus backend.
   let backend;
   try {
     const r = await resolveBackend();
@@ -140,21 +147,23 @@ export async function executeConfigureRegulator(
     }
     backend = r.backend;
   } catch (e: any) {
-    return renderError(
-      'Customer metrics backend not configured',
-      e?.message ?? String(e)
-    );
+    const md = renderError('Customer metrics backend not configured', e?.message ?? String(e));
+    if (view === 'markdown') {
+      return _buildMdEnvelope({ tool: 'log10x_configure_regulator', summary: { headline: 'Customer metrics backend not configured' }, markdown: md });
+    }
+    return _buildEnvelope({ tool: 'log10x_configure_regulator', view: 'summary', summary: { headline: 'Customer metrics backend not configured — configure_regulator cannot run derivation.' }, data: { ok: false, phase: 'backend', error: e?.message ?? String(e) } });
   }
 
-  // Phase 2: γ resolution (service → candidate containers) if not yet committed.
   if (!args.containers || args.containers.length === 0) {
-    return await renderResolutionPrompt(args, backend);
+    const md = await renderResolutionPrompt(args, backend);
+    if (view === 'markdown') {
+      return _buildMdEnvelope({ tool: 'log10x_configure_regulator', summary: { headline: `Phase 1: resolve "${args.service}" → containers` }, markdown: md });
+    }
+    return _buildEnvelope({ tool: 'log10x_configure_regulator', view: 'summary', summary: { headline: `Phase 1: pick containers for service "${args.service}" — re-call with containers: ["..."] to derive cap.` }, data: { ok: true, phase: 'resolution_prompt', service: args.service, gitops_repo: target.resolved.gitops_repo, lookup_path: target.resolved.lookup_path } });
   }
 
-  // Phase 3: sanity checks against the committed container set.
   const checks = await runSanityChecks(args, backend, args.containers);
 
-  // Phase 4: derive cap (math is per-container, scaled by container count).
   const derivation = deriveCap({
     budget: args.budget,
     costPerGB: args.costPerGB,
@@ -163,8 +172,25 @@ export async function executeConfigureRegulator(
     containers: args.containers.length,
   });
 
-  // Phase 5: render (refusal if blocking, otherwise full plan + PR command).
-  return renderResult(args, target.resolved, derivation, checks);
+  const md = renderResult(args, target.resolved, derivation, checks);
+  if (view === 'markdown') {
+    return _buildMdEnvelope({ tool: 'log10x_configure_regulator', summary: { headline: `Cap derivation for ${args.containers.length} container${args.containers.length !== 1 ? 's' : ''}` }, markdown: md });
+  }
+  return _buildEnvelope({
+    tool: 'log10x_configure_regulator',
+    view: 'summary',
+    summary: { headline: `Rate-cap derivation: $${args.budget}/mo budget across ${args.containers.length} container${args.containers.length !== 1 ? 's' : ''} → ${derivation.capHuman} per container.` },
+    data: {
+      ok: true,
+      phase: 'pr_rendered',
+      service: args.service,
+      containers: args.containers,
+      gitops_repo: target.resolved.gitops_repo,
+      lookup_path: target.resolved.lookup_path,
+      derivation,
+      checks,
+    },
+  });
 }
 
 // ─── target resolution ────────────────────────────────────────────────
