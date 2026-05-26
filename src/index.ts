@@ -200,10 +200,16 @@ const METRIC_REQUIRING_TOOLS = new Set([
   'log10x_retriever_series',
 ]);
 
+type WrapResult = {
+  content: { type: 'text'; text: string }[];
+  structuredContent?: Record<string, unknown>;
+  isError?: boolean;
+};
+
 async function wrap(
   toolName: string,
   fn: () => Promise<string | StructuredOutput>
-): Promise<{ content: { type: 'text'; text: string }[]; isError?: boolean }> {
+): Promise<WrapResult> {
   const started = Date.now();
   // Phase 5b gate: if this is a metric-requiring tool and the MCP is
   // in pure-demo state, redirect to the conversational onboarding
@@ -276,11 +282,21 @@ async function wrap(
         isError: true,
       };
     }
+    // The 2025-03-26 MCP revision lets a tool emit `structuredContent` (typed
+    // JSON) alongside the text channel. Hosts that honor it (Claude Desktop,
+    // ChatGPT Desktop, Cursor's structured-output path) skip the JSON.parse on
+    // the agent side and read fields directly; legacy hosts still see the
+    // text fallback. We populate BOTH on every successful call.
+    const enriched: StructuredOutput = {
+      ...validated,
+      warnings: maybeAddDemoBannerWarning(validated.warnings),
+    };
+    const structuredContent = enriched as unknown as Record<string, unknown>;
     if (validated.view === 'markdown') {
-      // Renderer was invoked inside the tool; data.markdown carries
-      // the rendered artifact. Pull it through to the text channel
-      // verbatim, with the demo banner prepended exactly as in the
-      // legacy string path.
+      // Renderer was invoked inside the tool; data.markdown carries the
+      // rendered artifact. Text channel gets the markdown verbatim (with
+      // demo banner); structured channel still ships the full typed envelope
+      // so agents that want both can read it.
       const md = (validated.data as { markdown?: unknown }).markdown;
       if (typeof md !== 'string') {
         log.warn(`tool.${toolName}.markdown_view_missing_markdown`);
@@ -296,17 +312,20 @@ async function wrap(
           isError: true,
         };
       }
-      return { content: [{ type: 'text' as const, text: applyDemoBanner(md) }] };
+      return {
+        content: [{ type: 'text' as const, text: applyDemoBanner(md) }],
+        structuredContent,
+      };
     }
-    // JSON view. The demo-mode banner is structural metadata, not a
-    // prose prefix, so it lives in warnings[] rather than being
-    // injected into a `text` blob. The agent reads warnings and
-    // decides how to surface them to the user.
-    const enriched: StructuredOutput = {
-      ...validated,
-      warnings: maybeAddDemoBannerWarning(validated.warnings),
+    // JSON view. The text channel carries the envelope JSON-stringified so
+    // hosts without `structuredContent` support still see typed data; the
+    // structured channel ships the same envelope as a real object so modern
+    // hosts skip the parse. Demo banner is metadata, not a prose prefix —
+    // it lives in warnings[].
+    return {
+      content: [{ type: 'text' as const, text: JSON.stringify(enriched, null, 2) }],
+      structuredContent,
     };
-    return { content: [{ type: 'text' as const, text: JSON.stringify(enriched, null, 2) }] };
   } catch (e) {
     const raw = e instanceof Error ? e.message : String(e);
     log.debug(`tool.${toolName}.raw_err`, { msg: raw });
@@ -732,7 +751,7 @@ type PendingTool = {
   handler: (
     args: any,
     extra?: { sendNotification?: (n: { method: string; params: Record<string, unknown> }) => Promise<void> }
-  ) => Promise<{ content: { type: 'text'; text: string }[]; isError?: boolean }>;
+  ) => Promise<WrapResult>;
 };
 const pendingTools: PendingTool[] = [];
 
@@ -742,7 +761,7 @@ function registerLog10xTool(
   handler: (
     args: any,
     extra?: { sendNotification?: (n: { method: string; params: Record<string, unknown> }) => Promise<void> }
-  ) => Promise<{ content: { type: 'text'; text: string }[]; isError?: boolean }>
+  ) => Promise<WrapResult>
 ): void {
   // Validate manifest entry at queue-time so the build-time guard still
   // catches missing default-manifest.json entries before main() runs.
@@ -760,6 +779,13 @@ function applyToolRegistrations(): { registered: string[]; skipped: string[] } {
   const mode = bootMode?.mode;
   const registered: string[] = [];
   const skipped: string[] = [];
+  // Every tool publishes the envelope's shape as its `outputSchema`. The
+  // per-tool `data` field is `z.unknown()` at the envelope layer — its real
+  // shape lives in each tool's TypeScript interface and in the rendered docs.
+  // We declare it uniformly here so MCP hosts that honor `outputSchema`
+  // (Claude Desktop, ChatGPT Desktop) get a contract; hosts that don't,
+  // ignore it. Pair with `structuredContent` on every result in wrap().
+  const envelopeOutputSchema = StructuredOutputSchema.shape;
   for (const t of pendingTools) {
     const allowed = mode ? shouldRegisterTool(t.name, mode) : true;
     if (!allowed) {
@@ -773,6 +799,7 @@ function applyToolRegistrations(): { registered: string[]; skipped: string[] } {
         title: meta.title,
         description: meta.description,
         inputSchema: t.inputSchema,
+        outputSchema: envelopeOutputSchema,
         annotations: meta.annotations,
       },
       t.handler
