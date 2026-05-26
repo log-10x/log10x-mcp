@@ -922,7 +922,7 @@ registerLog10xTool('log10x_advise_receiver', adviseReceiverSchema, (args) =>
 // ── Tool: log10x_advise_install (mode selector + front-end advisor) ──
 
 registerLog10xTool('log10x_advise_install', adviseInstallSchema, (args) =>
-  wrap('log10x_advise_install', () => executeAdviseInstall(args, getEnvs()))
+  wrap('log10x_advise_install', () => executeAdviseInstall(args, getEnvs(), server))
 );
 
 // ── Tool: log10x_advise_compact (compact-lookup PR author) ──

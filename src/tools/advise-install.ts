@@ -41,7 +41,11 @@
  */
 
 import { z } from 'zod';
-import { getSnapshot, updateWizardSession } from '../lib/discovery/snapshot-store.js';
+import {
+  getSnapshot,
+  getWizardSession,
+  updateWizardSession,
+} from '../lib/discovery/snapshot-store.js';
 import { buildReporterPlan } from '../lib/advisor/reporter.js';
 import { renderPlan } from '../lib/advisor/render.js';
 import { acquireLicenseForWizard, LicenseFetchError } from '../lib/license-api.js';
@@ -54,9 +58,15 @@ import type {
   WizardSession,
   DetectedForwarder,
   DetectedMetricsBackend,
+  BackendCredentialConfig,
 } from '../lib/discovery/types.js';
-import type { OutputDestination } from '../lib/advisor/reporter-forwarders.js';
+import {
+  type OutputDestination,
+  BACKEND_ENV_SPECS,
+  defaultSecretNameFor,
+} from '../lib/advisor/reporter-forwarders.js';
 import type { Environments } from '../lib/environments.js';
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
 const SUPPORTED_FORWARDERS = [
   'fluentbit',
@@ -103,6 +113,21 @@ export const adviseInstallSchema = {
     .describe(
       'When true, the Log10x agents send nothing to log10x.com — engine metrics, license re-validation, and update checks all go silent. Use to reduce CISO friction. Conflicts with `"log10x"` in `backends` (the wizard surfaces the conflict). **Demo licenses cannot actually run airgapped** — the engine downgrades to online mode with a warning. The wizard surfaces this softly when both are picked.'
     ),
+  backend_credentials: z
+    .record(
+      z.string(),
+      z.object({
+        secretName: z.string().describe('Name of the Kubernetes Secret holding sensitive env vars for this backend.'),
+        plainValues: z
+          .record(z.string(), z.string())
+          .optional()
+          .describe('Non-sensitive env var overrides keyed by env var name (e.g., `{ DD_SITE: "us5.datadoghq.com" }`).'),
+      })
+    )
+    .optional()
+    .describe(
+      'Per-backend credential configuration, keyed by backend kind. **Only set for non-`log10x` backends** — `log10x` SaaS uses the license JWT and needs no extra credentials. Each entry has a `secretName` (the Kubernetes Secret the user creates out-of-band holding sensitive env vars like `DD_API_KEY`; default per backend is `<backend>-credentials`) and optional `plainValues` (overrides for non-sensitive env vars like `DD_SITE`). Example: `{ "datadog": { "secretName": "datadog-secret", "plainValues": { "DD_SITE": "us5.datadoghq.com" } } }`.'
+    ),
   license_jwt: z
     .string()
     .optional()
@@ -133,7 +158,8 @@ export type AdviseInstallArgs = z.infer<typeof schemaObj>;
 
 export async function executeAdviseInstall(
   args: AdviseInstallArgs,
-  envs: Environments
+  envs: Environments,
+  mcpServer?: McpServer
 ): Promise<string> {
   const snapshot = getSnapshot(args.snapshot_id);
   if (!snapshot) {
@@ -148,10 +174,21 @@ export async function executeAdviseInstall(
 
   // Merge the latest answers into the wizard session. Each call accretes;
   // the agent only passes the answer it just collected from the user.
+  // For `backendCredentials`, merge per-backend entries with whatever's
+  // already there rather than replacing the whole map — the user might
+  // answer credentials for one backend at a time across multiple turns.
+  const prior = getWizardSession(args.snapshot_id);
+  const mergedBackendCredentials = args.backend_credentials
+    ? {
+        ...(prior?.backendCredentials ?? {}),
+        ...(args.backend_credentials as Partial<Record<MetricsBackendKind, BackendCredentialConfig>>),
+      }
+    : undefined;
   const session = updateWizardSession(args.snapshot_id, {
     app: args.app,
     forwarder: args.forwarder as ForwarderKind | undefined,
     backends: args.backends as MetricsBackendKind[] | undefined,
+    backendCredentials: mergedBackendCredentials,
     airgapped: args.airgapped,
     licenseJwt: args.license_jwt,
     releaseName: args.release_name,
@@ -162,10 +199,35 @@ export async function executeAdviseInstall(
     return 'Internal error: wizard session could not be created.';
   }
 
-  // Identify the next missing answer, in dependency order.
-  const next = nextQuestion(snapshot, session);
-  if (next.kind === 'ask') {
-    return next.markdown;
+  // Elicitation path: if the client supports it, drive every missing
+  // answer via `server.elicitInput` in a single tool call. The user
+  // sees one form per question with proper enum/multi-select/form UI;
+  // we never return a "re-invoke with X" markdown prompt.
+  //
+  // Falls back to the markdown-question path on:
+  //   - hosts without elicitation capability (older Claude Desktop, etc.)
+  //   - missing `mcpServer` reference (defensive)
+  //   - elicitation request rejected/cancelled by the user
+  if (mcpServer && clientSupportsElicitation(mcpServer)) {
+    const elicitOutcome = await elicitMissingAnswers(mcpServer, snapshot, session);
+    if (elicitOutcome.kind === 'cancelled') {
+      return [
+        '# Install wizard — cancelled',
+        '',
+        'You closed the form before answering. Re-invoke `log10x_advise_install` with the same `snapshot_id` to pick up where you left off — answers you already gave are remembered.',
+      ].join('\n');
+    }
+    if (elicitOutcome.kind === 'failed') {
+      // Elicitation errored mid-flow — fall back to markdown questions.
+      // The session has accumulated whatever was answered before the error.
+      const next = nextQuestion(snapshot, session);
+      if (next.kind === 'ask') return next.markdown;
+    }
+  } else {
+    // Markdown-fallback path: ask one question, return markdown, wait
+    // for re-invocation with the answer in tool args.
+    const next = nextQuestion(snapshot, session);
+    if (next.kind === 'ask') return next.markdown;
   }
 
   // Auto-acquire a license if the user hasn't supplied one. Routes
@@ -213,6 +275,226 @@ export async function executeAdviseInstall(
   return await renderInstallPlan(snapshot, session, args);
 }
 
+// ── Elicitation path (MCP-native interactive forms) ──
+
+/**
+ * Detect whether the connected MCP client supports `elicitation/create`.
+ * Claude Code 2.1.76+ and recent VS Code / Cursor builds declare the
+ * `elicitation` capability at handshake; older Claude Desktop builds
+ * don't, and the SDK throws if we try `elicitInput` without the
+ * capability declared.
+ */
+function clientSupportsElicitation(server: McpServer): boolean {
+  // McpServer is a thin wrapper; the underlying low-level server holds
+  // the client capabilities. The `server.server` accessor reaches it.
+  try {
+    const caps = (server as any).server?.getClientCapabilities?.();
+    return Boolean(caps?.elicitation);
+  } catch {
+    return false;
+  }
+}
+
+type ElicitOutcome = { kind: 'all-answered' } | { kind: 'cancelled' } | { kind: 'failed' };
+
+/**
+ * Drive every still-missing wizard answer via `server.elicitInput`.
+ * Each question is a discrete form; the function persists answers to
+ * the wizard session between forms so a mid-flow cancellation can be
+ * resumed via the markdown-fallback path on the next tool call.
+ */
+async function elicitMissingAnswers(
+  server: McpServer,
+  snapshot: DiscoverySnapshot,
+  session: WizardSession
+): Promise<ElicitOutcome> {
+  try {
+    // Q1: app
+    if (!session.app) {
+      const detected = snapshot.kubectl.forwarders.filter((f) => f.kind !== 'unknown');
+      const result = await (server as any).server.elicitInput({
+        message: detected.length === 0
+          ? 'No existing forwarder detected. Install a dedicated DaemonSet Reporter?'
+          : 'Pick an install path:',
+        requestedSchema: {
+          type: 'object',
+          properties: {
+            app: {
+              type: 'string',
+              title: 'Install path',
+              enum: detected.length === 0 ? ['reporter'] : ['reporter', 'receiver'],
+              enumNames: detected.length === 0
+                ? ['Dedicated DaemonSet (Reporter)']
+                : ['Dedicated DaemonSet (Reporter) — zero touch', 'Plug into existing forwarder (Receiver) — sidecar in your forwarder'],
+            },
+          },
+          required: ['app'],
+        },
+      });
+      if (result.action !== 'accept') return { kind: 'cancelled' };
+      session.app = result.content?.app as 'reporter' | 'receiver';
+      updateWizardSession(session.snapshotId, { app: session.app });
+    }
+
+    // Q2: forwarder (Receiver only, when ambiguous)
+    if (session.app === 'receiver' && !session.forwarder) {
+      const detected = snapshot.kubectl.forwarders.filter((f) => f.kind !== 'unknown');
+      if (detected.length === 0) {
+        // Need to bail back to the markdown path which emits a helpful
+        // "no forwarder detected" message; elicitation can't render that.
+        return { kind: 'failed' };
+      }
+      if (detected.length === 1) {
+        session.forwarder = detected[0].kind;
+        updateWizardSession(session.snapshotId, { forwarder: session.forwarder });
+      } else {
+        const result = await (server as any).server.elicitInput({
+          message: `Multiple forwarders detected. Which one should the Receiver sidecar into?`,
+          requestedSchema: {
+            type: 'object',
+            properties: {
+              forwarder: {
+                type: 'string',
+                title: 'Forwarder',
+                enum: detected.map((d) => d.kind),
+                enumNames: detected.map((d) => `${d.kind} (${d.workloadKind}/${d.workloadName} in ${d.namespace})`),
+              },
+            },
+            required: ['forwarder'],
+          },
+        });
+        if (result.action !== 'accept') return { kind: 'cancelled' };
+        session.forwarder = result.content?.forwarder as ForwarderKind;
+        updateWizardSession(session.snapshotId, { forwarder: session.forwarder });
+      }
+    }
+
+    // Q3: backends (multi-select)
+    if (!session.backends || session.backends.length === 0) {
+      const detectedSet = new Set(snapshot.kubectl.backendAgents.map((a) => a.kind));
+      const result = await (server as any).server.elicitInput({
+        message: 'Where should TenXSummary metrics be sent? Pick one or more.',
+        requestedSchema: {
+          type: 'object',
+          properties: {
+            backends: {
+              type: 'array',
+              title: 'Metrics backends',
+              minItems: 1,
+              items: {
+                anyOf: SUPPORTED_BACKENDS.map((b) => ({
+                  const: b,
+                  title:
+                    BACKEND_LABEL[b] +
+                    (b === 'log10x'
+                      ? ' (recommended for first install)'
+                      : detectedSet.has(b)
+                        ? ' (detected in your cluster)'
+                        : ''),
+                })),
+              },
+            },
+          },
+          required: ['backends'],
+        },
+      });
+      if (result.action !== 'accept') return { kind: 'cancelled' };
+      session.backends = result.content?.backends as MetricsBackendKind[];
+      updateWizardSession(session.snapshotId, { backends: session.backends });
+    }
+
+    // Conflict check: airgapped+log10x — surface in markdown if hit
+    if (session.airgapped === true && session.backends.includes('log10x')) {
+      return { kind: 'failed' };
+    }
+
+    // Q4: per-backend credentials
+    const backendsNeedingCreds = session.backends.filter(
+      (b) => b !== 'log10x' && !(session.backendCredentials?.[b])
+    );
+    for (const backend of backendsNeedingCreds) {
+      const spec = BACKEND_ENV_SPECS[backend];
+      if (!spec) continue;
+      const properties: Record<string, unknown> = {
+        secretName: {
+          type: 'string',
+          title: `Kubernetes Secret name`,
+          description: `Name of the Secret holding sensitive ${backend} env vars (${spec.secret.map((s) => s.envVar).join(', ')}). Keys expected inside: ${spec.secret.map((s) => `\`${s.secretKey}\``).join(', ')}.`,
+          default: defaultSecretNameFor(backend),
+        },
+      };
+      const required = ['secretName'];
+      for (const p of spec.plain) {
+        properties[p.envVar] = {
+          type: 'string',
+          title: p.envVar,
+          ...(p.default !== undefined ? { default: p.default } : {}),
+          description:
+            p.default !== undefined
+              ? `Optional override; defaults to \`${p.default}\`.`
+              : `Required; no default. Example: \`${p.placeholder ?? ''}\`.`,
+        };
+        if (p.default === undefined) required.push(p.envVar);
+      }
+      const result = await (server as any).server.elicitInput({
+        message: `Credentials for ${BACKEND_LABEL[backend]}`,
+        requestedSchema: {
+          type: 'object',
+          properties,
+          required,
+        },
+      });
+      if (result.action !== 'accept') return { kind: 'cancelled' };
+      const content = (result.content ?? {}) as Record<string, string>;
+      const cred: BackendCredentialConfig = {
+        secretName: content.secretName ?? defaultSecretNameFor(backend),
+        plainValues: Object.fromEntries(
+          spec.plain
+            .filter((p) => content[p.envVar] !== undefined && content[p.envVar] !== '')
+            .map((p) => [p.envVar, content[p.envVar]!])
+        ),
+      };
+      if (!cred.plainValues || Object.keys(cred.plainValues).length === 0) {
+        delete cred.plainValues;
+      }
+      session.backendCredentials = { ...(session.backendCredentials ?? {}), [backend]: cred };
+      updateWizardSession(session.snapshotId, { backendCredentials: session.backendCredentials });
+    }
+
+    // Q5: airgapped — only when backends doesn't include log10x
+    if (!session.backends.includes('log10x') && session.airgapped === undefined) {
+      const result = await (server as any).server.elicitInput({
+        message: `Run the engine airgapped? (Engine sends NOTHING to log10x.com — only emits to ${session.backends.map((b) => BACKEND_LABEL[b]).join(' + ')}.)`,
+        requestedSchema: {
+          type: 'object',
+          properties: {
+            airgapped: {
+              type: 'boolean',
+              title: 'Airgapped mode',
+              description: 'Common request from security teams. No telemetry, no online license check, no update probes.',
+              default: false,
+            },
+          },
+        },
+      });
+      if (result.action !== 'accept') return { kind: 'cancelled' };
+      session.airgapped = Boolean(result.content?.airgapped);
+      updateWizardSession(session.snapshotId, { airgapped: session.airgapped });
+    } else if (session.backends.includes('log10x') && session.airgapped === undefined) {
+      // log10x in backends implicitly means not airgapped — don't ask.
+      updateWizardSession(session.snapshotId, { airgapped: false });
+      session.airgapped = false;
+    }
+
+    return { kind: 'all-answered' };
+  } catch (e) {
+    // The SDK throws if the client doesn't actually support elicitation
+    // (capability negotiation lied), or on transport errors. Surface the
+    // failure so the caller can fall back to the markdown question path.
+    return { kind: 'failed' };
+  }
+}
+
 // ── Question routing ──
 
 type NextStep = { kind: 'ask'; markdown: string } | { kind: 'render' };
@@ -251,7 +533,17 @@ function nextQuestion(snapshot: DiscoverySnapshot, session: WizardSession): Next
     return { kind: 'ask', markdown: airgappedLog10xConflict(session.backends) };
   }
 
-  // Q4: airgapped — only relevant when backends doesn't already include log10x
+  // Q4: per-backend credentials — ask for any non-`log10x` backend that
+  // doesn't yet have a credential entry in the session. The agent can
+  // bundle multiple backends into one answer via `backend_credentials`.
+  const backendsNeedingCreds = session.backends.filter(
+    (b) => b !== 'log10x' && !(session.backendCredentials?.[b])
+  );
+  if (backendsNeedingCreds.length > 0) {
+    return { kind: 'ask', markdown: askBackendCredentials(backendsNeedingCreds) };
+  }
+
+  // Q5: airgapped — only relevant when backends doesn't already include log10x
   // (if it does, the user has implicitly opted IN to log10x egress and
   // airgapped is moot)
   const hasLog10x = session.backends.includes('log10x');
@@ -326,41 +618,115 @@ function askForwarder(detected: DetectedForwarder[]): string {
   ].join('\n');
 }
 
+/**
+ * Human-readable labels for each supported metrics backend. Keep stable —
+ * the picklist UI in MCP hosts (Claude Desktop) renders these verbatim
+ * as the option text.
+ */
+const BACKEND_LABEL: Record<MetricsBackendKind, string> = {
+  log10x: 'Log10x SaaS',
+  datadog: 'Datadog',
+  elastic: 'Elasticsearch',
+  cloudwatch: 'AWS CloudWatch',
+  signalfx: 'Splunk Observability (SignalFx)',
+  prometheus: 'Prometheus (self-hosted)',
+};
+
 function askBackends(detectedAgents: DetectedMetricsBackend[]): string {
   const lines: string[] = [];
   lines.push('# Install wizard — where do metrics go?');
   lines.push('');
   lines.push(
-    'TenXSummary metrics (cost attribution + pattern fingerprinting) can go to **one or more** destinations simultaneously — for example, to Log10x SaaS for the MCP queries AND to your existing Datadog for unified dashboards.'
+    'Cost-attribution metrics can go to **one or more** destinations at the same time — for example, to Log10x SaaS for MCP queries AND your existing Datadog for unified dashboards.'
   );
   lines.push('');
-  lines.push('Options:');
+  lines.push('Options (pick one or more):');
   lines.push('');
-  lines.push(
-    '- **log10x** — Log10x SaaS Prometheus, free demo tier, sub-second queries via the MCP. Recommended unless you need airgapped. *(requires online egress)*'
-  );
 
-  if (detectedAgents.length > 0) {
-    lines.push('');
-    lines.push('Detected in your cluster — single pane with your existing observability stack:');
-    for (const a of detectedAgents) {
-      lines.push(`- **${a.kind}** — ${a.evidence}`);
-    }
-  }
-
-  const otherOptions = SUPPORTED_BACKENDS.filter(
-    (b) => b !== 'log10x' && !detectedAgents.some((a) => a.kind === b)
-  );
-  if (otherOptions.length > 0) {
-    lines.push('');
-    lines.push(`Other backends: ${otherOptions.map((b) => `\`${b}\``).join(', ')}.`);
+  // Emit every supported backend as its own bullet so MCP-host UIs that
+  // auto-render bullet lists as picklists (Claude Desktop, etc.) produce
+  // one selectable item per backend. Bundling backends into a prose
+  // "Other backends:" line causes those UIs to collapse them into a
+  // single "Something else" option, hiding choices.
+  const detectedSet = new Set(detectedAgents.map((a) => a.kind));
+  for (const kind of SUPPORTED_BACKENDS) {
+    const label = BACKEND_LABEL[kind];
+    const annotations: string[] = [];
+    if (kind === 'log10x') annotations.push('Recommended for first install — free demo tier');
+    if (detectedSet.has(kind)) annotations.push('detected in your cluster');
+    const suffix = annotations.length > 0 ? ` — ${annotations.join(', ')}` : '';
+    lines.push(`- **${label}** (\`${kind}\`)${suffix}`);
   }
 
   lines.push('');
-  lines.push('Re-invoke with `backends: ["<choice>", ...]` — pass one or more. Examples:');
-  lines.push('- `backends: ["log10x"]` — just SaaS, default recommendation');
+  lines.push('Re-invoke `log10x_advise_install` with `backends: ["<choice>", ...]` — one or more. Examples:');
+  lines.push('- `backends: ["log10x"]` — just SaaS, default for first install');
   lines.push('- `backends: ["datadog"]` — your own backend only');
   lines.push('- `backends: ["log10x", "datadog"]` — both, side-by-side');
+  return lines.join('\n');
+}
+
+function askBackendCredentials(backends: MetricsBackendKind[]): string {
+  const lines: string[] = [];
+  lines.push('# Install wizard — credentials for your metrics backends');
+  lines.push('');
+  lines.push(
+    'For each backend you picked, the wizard wires sensitive env vars (API keys, passwords, etc.) via Kubernetes Secrets — `valueFrom.secretKeyRef` — so credentials never live in your `values.yaml`.'
+  );
+  lines.push('');
+  lines.push('You **create the Secret(s) out-of-band** before `helm upgrade` (or reuse an existing one your other tools already populate). Per backend, tell the wizard:');
+  lines.push('');
+  lines.push('- **Secret name** — what to look up in the cluster. Default if you skip: `<backend>-credentials`.');
+  lines.push('- **Plain-value overrides** — non-sensitive config like region/URL/namespace. Each has a sensible default; override when needed.');
+  lines.push('');
+
+  for (const b of backends) {
+    const spec = BACKEND_ENV_SPECS[b];
+    if (!spec) continue;
+    lines.push(`### ${b}`);
+    lines.push('');
+    lines.push(`Default secret name: \`${defaultSecretNameFor(b)}\`. Expected keys inside the Secret:`);
+    for (const s of spec.secret) {
+      lines.push(`  - \`${s.secretKey}\` → mounted as env var \`${s.envVar}\``);
+    }
+    if (spec.plain.length > 0) {
+      lines.push('');
+      lines.push('Plain-value env vars (override or accept the default):');
+      for (const p of spec.plain) {
+        if (p.default !== undefined) {
+          lines.push(`  - \`${p.envVar}\` (default: \`${p.default}\`)`);
+        } else {
+          lines.push(`  - \`${p.envVar}\` (no default — must supply; placeholder: \`${p.placeholder ?? ''}\`)`);
+        }
+      }
+    }
+    lines.push('');
+  }
+
+  // Show a worked example so the agent has a template for the
+  // `backend_credentials` arg shape.
+  lines.push('## Re-invoke shape');
+  lines.push('');
+  lines.push('Pass a `backend_credentials` map keyed by backend, with `secretName` and optional `plainValues`. Example covering the backends asked:');
+  lines.push('');
+  lines.push('```json');
+  const example: Record<string, { secretName: string; plainValues?: Record<string, string> }> = {};
+  for (const b of backends) {
+    const spec = BACKEND_ENV_SPECS[b];
+    if (!spec) continue;
+    const plainExample: Record<string, string> = {};
+    for (const p of spec.plain) {
+      plainExample[p.envVar] = p.default ?? p.placeholder ?? '';
+    }
+    example[b] = {
+      secretName: defaultSecretNameFor(b),
+      ...(Object.keys(plainExample).length > 0 ? { plainValues: plainExample } : {}),
+    };
+  }
+  lines.push(JSON.stringify({ backend_credentials: example }, null, 2));
+  lines.push('```');
+  lines.push('');
+  lines.push('You can answer all backends in one call, or one at a time — the wizard remembers what\'s been answered.');
   return lines.join('\n');
 }
 
@@ -466,6 +832,7 @@ async function renderInstallPlan(
       outputHost: args.output_host,
       splunkHecToken: args.splunk_hec_token,
       backends: session.backends,
+      backendCredentials: session.backendCredentials,
       airgapped: session.airgapped,
       skipInstall: action === 'verify' || action === 'teardown',
       skipVerify: action === 'install' || action === 'teardown',

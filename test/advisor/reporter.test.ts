@@ -241,22 +241,28 @@ test('values.yaml has no duplicate top-level keys (fluentd regression)', async (
   }
 });
 
-test('every forwarder values file embeds gitToken (init-container secret mount)', async () => {
-  // Every log10x-repackaged chart mounts a tenx-git-token secret in an
-  // init container. If gitToken is empty the secret isn't created and
-  // pods hang in FailedMount. Every supported forwarder must emit a
-  // placeholder.
+test('forwarder values files do NOT embed gitToken or config.git noise', async () => {
+  // 2026-05: the gitToken / config.git block was legacy noise — the
+  // chart's git-token Secret template gates on `config.git.enabled` OR
+  // `symbols.git.enabled` (both default false), so emitting placeholder
+  // values that match defaults just clutters the user's values.yaml.
+  // Verify neither field appears in any forwarder's rendered values.
   for (const fw of installableForwarders) {
     const plan = await buildReporterPlan({
       snapshot: baseSnapshot(),
+      app: 'receiver',
       forwarder: fw,
       licenseJwt: 'test',
       destination: 'mock',
     });
     const content = plan.install.find((s) => s.file)!.file!.contents;
     assert.ok(
-      content.includes('gitToken:'),
-      `${fw}: values must emit gitToken (even a placeholder) to satisfy chart init container`
+      !content.includes('gitToken:'),
+      `${fw}: rendered values should NOT emit gitToken (chart default works); got: ${content.slice(0, 400)}`
+    );
+    assert.ok(
+      !/config:\s*\n\s+git:/.test(content),
+      `${fw}: rendered values should NOT emit config.git block; got: ${content.slice(0, 400)}`
     );
   }
 });

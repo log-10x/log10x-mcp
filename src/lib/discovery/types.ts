@@ -205,6 +205,26 @@ export interface Recommendations {
 }
 
 /**
+ * Per-backend credential configuration the wizard collects from the user
+ * and the renderer threads into helm values.
+ *
+ * `secretName` is the name of a Kubernetes Secret the user creates (or
+ * already has) that holds sensitive env vars (`DD_API_KEY`,
+ * `AWS_SECRET_ACCESS_KEY`, etc.) for this backend. The wizard emits
+ * `valueFrom.secretKeyRef` references; user creates the Secret out-of-band
+ * before `helm upgrade`. Default name when unset: `<backend>-credentials`.
+ *
+ * `plainValues` carries non-sensitive overrides keyed by env var name
+ * (e.g., `{ DD_SITE: 'us5.datadoghq.com', CW_NAMESPACE: 'Log10x' }`).
+ * Each backend has its own spec of which env vars are sensitive vs plain;
+ * see `BACKEND_ENV_SPECS` in `lib/advisor/reporter-forwarders.ts`.
+ */
+export interface BackendCredentialConfig {
+  secretName: string;
+  plainValues?: Record<string, string>;
+}
+
+/**
  * Wizard session — accumulated user answers across multiple
  * `advise_install` calls against the same snapshot. The MCP is stateless
  * per call, but the wizard is conversational; the session lets each turn
@@ -231,6 +251,12 @@ export interface WizardSession {
    * (airgapped means the engine sends NOTHING to log10x).
    */
   backends?: MetricsBackendKind[];
+  /**
+   * Per-backend credential configuration the wizard collected. Indexed
+   * by backend kind. Only set for non-`log10x` backends — the `log10x`
+   * SaaS path uses the license JWT and needs no extra credentials.
+   */
+  backendCredentials?: Partial<Record<MetricsBackendKind, BackendCredentialConfig>>;
   /**
    * When true, the engine emits no outbound traffic to log10x.com (no
    * engine telemetry, no online license re-validation, no update probes).

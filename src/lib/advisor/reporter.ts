@@ -17,7 +17,12 @@
  * write-back events to encode); `receiver` exposes the flags directly.
  */
 
-import type { DiscoverySnapshot, ForwarderKind, MetricsBackendKind } from '../discovery/types.js';
+import type {
+  DiscoverySnapshot,
+  ForwarderKind,
+  MetricsBackendKind,
+  BackendCredentialConfig,
+} from '../discovery/types.js';
 import type { AdvisePlan, PlanStep, VerifyProbe, PreflightCheck, GitopsExplainer } from './types.js';
 import {
   REPORTER_FORWARDER_SPECS,
@@ -96,6 +101,15 @@ export interface ReporterAdviseArgs {
    * MUST NOT be in this list (engine sends nothing to log10x.com).
    */
   backends?: MetricsBackendKind[];
+  /**
+   * Per-backend credential configuration the wizard collected: secret
+   * name + plain-value overrides. The renderer threads this into the
+   * `tenx.extraEnv` block as `valueFrom.secretKeyRef` references.
+   * When unset for a selected backend, the renderer falls back to
+   * `<backend>-credentials` for the secret name and per-backend defaults
+   * for plain values.
+   */
+  backendCredentials?: Partial<Record<MetricsBackendKind, BackendCredentialConfig>>;
   /**
    * Run the engine fully airgapped — no outbound calls to log10x.com
    * (no telemetry, no online license check, no update probes). Engine
@@ -493,8 +507,23 @@ function buildInstallSteps(opts: {
   app: AdvisorApp;
   optimize?: boolean;
   readOnly?: boolean;
+  backends?: MetricsBackendKind[];
+  backendCredentials?: Partial<Record<MetricsBackendKind, BackendCredentialConfig>>;
+  airgapped?: boolean;
 }): PlanStep[] {
-  const { spec, releaseName, namespace, destination, outputHost, splunkHecToken, optimize, readOnly } = opts;
+  const {
+    spec,
+    releaseName,
+    namespace,
+    destination,
+    outputHost,
+    splunkHecToken,
+    optimize,
+    readOnly,
+    backends,
+    backendCredentials,
+    airgapped,
+  } = opts;
   const licenseJwt = opts.licenseJwt ?? 'REPLACE_WITH_LICENSE_JWT';
   const steps: PlanStep[] = [];
 
@@ -520,7 +549,18 @@ function buildInstallSteps(opts: {
     rationale: `Tenx config + ${spec.label}-specific output destination (\`${destination}\`).`,
     file: {
       path: valuesFile,
-      contents: spec.renderValues({ licenseJwt, releaseName, destination, outputHost, splunkHecToken, optimize, readOnly }),
+      contents: spec.renderValues({
+        licenseJwt,
+        releaseName,
+        destination,
+        outputHost,
+        splunkHecToken,
+        optimize,
+        readOnly,
+        backends,
+        backendCredentials,
+        airgapped,
+      }),
       language: 'yaml',
     },
     commands: [],
