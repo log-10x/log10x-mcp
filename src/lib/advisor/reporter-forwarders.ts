@@ -874,37 +874,80 @@ ${indent(output, 4)}
   vector: {
     label: 'Vector',
     integrationMode:
-      'Upstream `vector/vector` chart with a `tenx:` values overlay that injects the 10x engine into the Vector pod. No log10x fork.',
+      'Sidecar (`log10x/edge-10x`) injected into the user\'s existing Vector pod via the upstream `vector/vector` chart\'s `extraContainers` + `extraVolumes` hooks. The chart\'s `customConfig` is replaced to wire the sidecar bypass — Vector\'s DAG IS the bypass: sources feed an `ingest` transform → `tenx_in` socket sink → the sidecar processes → returns via the `tenx_out` fluent source → destinations sinks consume `tenx_out` only.',
     helmRepo: 'https://helm.vector.dev',
     helmRepoAlias: 'vector',
     chartRef: 'vector/vector',
-    chartAvailability: 'upstream-fallback',
-    primaryImageHint: 'timberio/vector',
-    primaryContainerName: 'vector',
-    hasTenxSidecar: false,
+    chartAvailability: 'published',
+    primaryImageHint: 'log10x/edge-10x',
+    primaryContainerName: 'log10x',
+    hasTenxSidecar: true,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ licenseJwt, releaseName, gitToken, optimize, readOnly, backends, backendCredentials, airgapped }) => {
-      const featureFlags = renderTenxFeatureFlags({ optimize, readOnly });
-      const extras = renderTenxExtraArgsAndEnv({ backends, backendCredentials, airgapped, airgappedAsEnvVar: true });
-      // NOTE: this values overlay is a placeholder. The canonical Vector
-      // overlay shape (sources/transforms/sinks wiring for the tenx
-      // sidecar) is documented in mksite/docs/apps/receiver/deploy.md and
-      // should land here verbatim once stable. The `tenx:` block follows
-      // the same convention as the other forwarder charts.
-      return `tenx:
-  enabled: true
-  licenseJwt: "${licenseJwt}"${featureFlags}
-  runtimeName: "${releaseName}"${extras}
+    renderValues: ({ destination, outputHost, optimize, airgapped, licenseSecretName, licenseSecretKey }) => {
+      const sidecar = renderLog10xSidecar({
+        forwarderKind: 'vector',
+        optimize,
+        airgapped,
+        licenseSecretName: licenseSecretName ?? 'log10x-license',
+        licenseSecretKey: licenseSecretKey ?? 'license-jwt',
+      });
+      const destSink = renderVectorDestinationSink(destination, outputHost);
+      return `# Receiver overlay for Vector (upstream vector/vector chart).
+# Layer on top of your existing values:
+#   helm upgrade --install <release> vector/vector \\
+#     -f your-existing-vector-values.yaml \\
+#     -f my-receiver.yaml --namespace <namespace>
 
-# TODO: Add the Vector sources/transforms/sinks wiring per
-# mksite/docs/apps/receiver/deploy.md once the canonical overlay
-# is finalized. The default vector/vector chart deploys an empty
-# pipeline, so the install will succeed but no events flow until
-# this block is filled in.
+${sidecar}
+
+# Replace the chart's default customConfig with the sidecar bypass.
+# Sources feed the \`ingest\` transform; sinks consume \`tenx_out\` so
+# enrichment runs exactly once. Vector's DAG IS the bypass.
+customConfig:
+  data_dir: /vector-data-dir
+
+  sources:
+    # Replace with your real sources (file, kubernetes_logs, journald,
+    # http_server, ...). All sources MUST feed the \`ingest\` transform —
+    # anything wired directly to a destination skips Log10x.
+    app_logs:
+      type: kubernetes_logs
+
+    # Returning events from the 10x sidecar. Bind on 0.0.0.0 so kubelet's
+    # tcpSocket probe reaches the port from the pod IP; the sidecar still
+    # connects via 127.0.0.1 (same pod, same netns).
+    tenx_out:
+      type: fluent
+      mode: tcp
+      address: 0.0.0.0:9001
+
+  transforms:
+    # Enrichment runs here exactly once before handoff. The return path
+    # skips this transform via the DAG wiring below.
+    ingest:
+      type: remap
+      inputs: [app_logs]
+      source: |
+        .cluster = get_env_var("CLUSTER_NAME") ?? "unset"
+        .tag = .source_type
+
+  sinks:
+    # Hand off to the Log10x sidecar.
+    tenx_in:
+      type: socket
+      inputs: [ingest]
+      mode: tcp
+      address: 127.0.0.1:9000
+      encoding: { codec: json }
+      framing: { method: newline_delimited }
+
+    # Destinations consume tenx_out ONLY (never the raw sources or
+    # \`ingest\`). That structural wiring is the enrichment bypass.
+${indent(destSink, 4)}
 `;
     },
-    verifyProbes: ({ releaseName, namespace, destination }) => {
+    verifyProbes: ({ releaseName, namespace, destination, optimize }) => {
       const sel = k8sRecommendedSelector(releaseName);
       const probes: Array<{
         name: string;
@@ -915,25 +958,44 @@ ${indent(output, 4)}
       }> = [
         {
           name: 'pods-ready',
-          question: 'Are all Vector pods Ready?',
+          question: 'Are all Vector pods Ready (with the log10x sidecar)?',
           commands: [`kubectl -n ${namespace} wait --for=condition=Ready pod -l ${sel} --timeout=5m`],
           expectOutput: 'condition met',
           timeoutSec: 300,
         },
         {
-          name: 'processor-alive',
-          question: 'Is the 10x sidecar reachable from the Vector container?',
+          name: 'sidecar-alive',
+          question: 'Is the log10x sidecar running and processing events?',
           commands: [
-            `kubectl -n ${namespace} logs -l ${sel} -c vector --tail=400 | grep -iE 'tenx|10x|pattern' | head -20`,
+            `kubectl -n ${namespace} logs -l ${sel} -c log10x --tail=400 | grep -E 'tenx|pattern|receiver|template' | head -20`,
+          ],
+        },
+        {
+          name: 'pipeline-wired',
+          question: 'Is the tenx_in sink reaching the sidecar and tenx_out receiving returns?',
+          commands: [
+            `kubectl -n ${namespace} logs -l ${sel} -c vector --tail=400 | grep -E 'tenx_in|tenx_out|fluent' | head -10`,
           ],
         },
       ];
       if (destination === 'mock') {
         probes.push({
           name: 'tenx-mock-events',
-          question: 'Are tagged [TENX-MOCK] events reaching stdout?',
-          commands: [`kubectl -n ${namespace} logs -l ${sel} -c vector --tail=200 | grep -F 'TENX-MOCK' | head -5`],
-          expectOutput: 'TENX-MOCK',
+          question: 'Are returning events being printed by the console sink?',
+          commands: [
+            `kubectl -n ${namespace} logs -l ${sel} -c vector --tail=200 | grep -E 'destinations' | head -10`,
+          ],
+          timeoutSec: 120,
+        });
+      }
+      if (optimize) {
+        probes.push({
+          name: 'tenx-encoded-events',
+          question: 'Are events emitted in compact encoded form (templateHash+vars)?',
+          commands: [
+            `kubectl -n ${namespace} logs -l ${sel} -c vector --tail=500 | grep -oE '~[A-Za-z0-9]{5,20},[0-9]{10,}' | head -3`,
+          ],
+          expectOutput: '~',
           timeoutSec: 120,
         });
       }
@@ -1447,6 +1509,59 @@ output {
 }`;
   }
   return 'output { }';
+}
+
+/**
+ * Returns the `destinations` sink block for the Vector receiver overlay.
+ * Consumes the `tenx_out` source (post-sidecar events) and writes them
+ * to the user's chosen backend. Indentation is 0 (caller indents).
+ */
+function renderVectorDestinationSink(destination: OutputDestination, outputHost?: string): string {
+  if (destination === 'mock') {
+    return `destinations:
+  type: console
+  inputs: [tenx_out]
+  encoding:
+    codec: json`;
+  }
+  if (destination === 'elasticsearch') {
+    return `destinations:
+  type: elasticsearch
+  inputs: [tenx_out]
+  endpoints: ["https://${outputHost ?? 'elasticsearch-master'}:9200"]
+  mode: bulk
+  bulk:
+    index: logs`;
+  }
+  if (destination === 'splunk') {
+    return `destinations:
+  type: splunk_hec_logs
+  inputs: [tenx_out]
+  endpoint: "https://${outputHost ?? 'splunk-hec.example.com'}:8088"
+  default_token: \${SPLUNK_HEC_TOKEN}`;
+  }
+  if (destination === 'datadog') {
+    return `destinations:
+  type: datadog_logs
+  inputs: [tenx_out]
+  default_api_key: \${DD_API_KEY}
+  site: \${DD_SITE:-datadoghq.com}`;
+  }
+  if (destination === 'cloudwatch') {
+    return `destinations:
+  type: aws_cloudwatch_logs
+  inputs: [tenx_out]
+  group_name: ${outputHost ?? '/aws/log10x/receiver'}
+  stream_name: log10x-receiver
+  region: \${AWS_REGION:-us-east-1}
+  encoding:
+    codec: json`;
+  }
+  return `destinations:
+  type: console
+  inputs: [tenx_out]
+  encoding:
+    codec: json`;
 }
 
 function renderOtelExporter(destination: OutputDestination, outputHost?: string): string {

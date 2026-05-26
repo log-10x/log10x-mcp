@@ -305,6 +305,7 @@ test('Receiver: chart refs are the right published names', async () => {
   const upstream: Partial<Record<ForwarderKind, string>> = {
     'fluentbit': 'fluent/fluent-bit',
     'otel-collector': 'open-telemetry/opentelemetry-collector',
+    'vector': 'vector/vector',
   };
   const legacy: Partial<Record<ForwarderKind, string>> = {
     fluentd: 'log10x-fluent/fluentd',
@@ -334,7 +335,7 @@ test('Receiver: values.yaml content has the expected shape per forwarder', async
   // via Secret-mounted file). Pre-migration forwarders still emit the
   // embedded-image `tenx:` block. (Reporter uses a flat layout — covered
   // by the dedicated STANDALONE_SPEC test.)
-  const migrated = new Set<ForwarderKind>(['fluentbit', 'otel-collector']);
+  const migrated = new Set<ForwarderKind>(['fluentbit', 'otel-collector', 'vector']);
   for (const fw of installableForwarders) {
     const plan = await buildReporterPlan({
       snapshot: baseSnapshot(),
