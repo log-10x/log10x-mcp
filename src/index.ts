@@ -800,6 +800,47 @@ interface OperatorGate {
   disabledCategories: Set<string>;
   disableWrite: boolean;
 }
+/**
+ * G11: build the `_meta` block that ships on each tool definition. Carries
+ * operational metadata that doesn't fit in the description (which is for
+ * the agent's prompt) but that ranking-aware hosts can read.
+ *
+ * Fields:
+ *   - category: same as the operator-gate category (cost / identify / ...).
+ *     Lets a host group tools by category in its UI without parsing the
+ *     description prose.
+ *   - tier: which Log10x component the tool needs deployed at the customer
+ *     side. Derived from category as a coarse default; per-tool overrides
+ *     could live in the manifest later but the category mapping is right
+ *     90+% of the time.
+ *       cost/identify/investigate/drop  → 'reporter'
+ *       retrieve                        → 'retriever'
+ *       detect                          → 'cli'  (paste-mode runs locally)
+ *       install/poc/account             → 'none'
+ *   - confirmation_required: true when the tool ships a literal-string
+ *     confirm gate (`confirm: "rotate-now"`, `confirm_name: "<env>"`).
+ *     Lets hosts surface a clearer prompt before invocation.
+ */
+function buildToolMeta(
+  name: string,
+  category: string,
+  annotations: { readOnlyHint?: boolean; destructiveHint?: boolean; idempotentHint?: boolean; openWorldHint?: boolean; [k: string]: unknown } | undefined
+): Record<string, unknown> {
+  const tier =
+    category === 'retrieve' ? 'retriever' :
+    category === 'detect' ? 'cli' :
+    (category === 'install' || category === 'poc' || category === 'account') ? 'none' :
+    'reporter';
+  const confirmationRequired =
+    name === 'log10x_delete_env' || name === 'log10x_rotate_api_key';
+  return {
+    category: category || 'uncategorized',
+    tier,
+    ...(confirmationRequired ? { confirmation_required: true } : {}),
+    ...(annotations?.readOnlyHint === false ? { mutates_state: true } : {}),
+  };
+}
+
 function readOperatorGate(): OperatorGate {
   const splitCsv = (s: string | undefined): Set<string> => new Set(
     (s ?? '').split(',').map((x) => x.trim().toLowerCase()).filter(Boolean)
@@ -832,6 +873,12 @@ function applyToolRegistrations(): { registered: string[]; skipped: string[] } {
     const meta = getPackageDefaultTool(t.name);
     // G5: category + write gates.
     const category = (meta.category ?? '').toLowerCase();
+    // G11: _meta block surfaced on the tool definition. The MCP spec allows
+    // arbitrary `_meta` on tools and on results; hosts that rank tools by
+    // category / tier / safety profile (some autonomous agents do) consume
+    // this. Hosts that don't see it ignore it. Grafana ships zero _meta
+    // today, so this is straight lead.
+    const toolMeta = buildToolMeta(t.name, category, meta.annotations);
     if (gate.enabledCategories && (!category || !gate.enabledCategories.has(category))) {
       log.info(`tool.${t.name}.gated_out`, { reason: 'category not in LOG10X_MCP_ENABLED_CATEGORIES', category });
       skipped.push(t.name);
@@ -862,6 +909,7 @@ function applyToolRegistrations(): { registered: string[]; skipped: string[] } {
         inputSchema: coerciveInputSchema,
         outputSchema: envelopeOutputSchema,
         annotations: meta.annotations,
+        _meta: toolMeta,
       },
       t.handler
     );
