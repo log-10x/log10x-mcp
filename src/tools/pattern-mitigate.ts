@@ -51,12 +51,14 @@ export const patternMitigateSchema = {
     .string()
     .optional()
     .describe('Snapshot from log10x_discover_env. Used to detect which 10x components are deployed in the active env (receiver, retriever, GitOps wiring). Without it, the tool still works but may dim PR-based options if the active env\'s envs.json does not list a gitops repo.'),
+  view: z.enum(['summary', 'markdown']).default('summary').describe('Output format.'),
 };
 
 export interface PatternMitigateArgs {
   pattern: string;
   service?: string;
   snapshot_id?: string;
+  view?: 'summary' | 'markdown';
 }
 
 interface Capabilities {
@@ -230,7 +232,19 @@ async function detectCapabilities(snapshotId?: string): Promise<Capabilities> {
   return out;
 }
 
-export async function executePatternMitigate(args: PatternMitigateArgs): Promise<string> {
+export async function executePatternMitigate(args: PatternMitigateArgs): Promise<string | import('../lib/output-types.js').StructuredOutput> {
+  const view = args.view ?? 'summary';
+  const md = await executePatternMitigateInner(args);
+  if (view === 'markdown') return md;
+  const { buildMarkdownEnvelope } = await import('../lib/output-types.js');
+  return buildMarkdownEnvelope({
+    tool: 'log10x_pattern_mitigate',
+    summary: { headline: md.split('\n')[0]?.slice(0, 200) || 'pattern_mitigate result' },
+    markdown: md,
+  });
+}
+
+async function executePatternMitigateInner(args: PatternMitigateArgs): Promise<string> {
   const pattern = normalizePattern(args.pattern);
   const displayPattern = fmtPattern(pattern);
   const scopeNote = args.service ? ` (service: ${args.service})` : '';

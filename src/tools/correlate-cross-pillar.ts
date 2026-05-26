@@ -80,9 +80,36 @@ export const correlateCrossPillarSchema = {
       'Override the Jaccard threshold the underlying join-discovery pass uses to accept a primary join key. Default 0.7 (high-confidence structural overlap). Lower to 0.3–0.5 when the join key is legitimate but label value sets include stale data from decommissioned pods or historical replay — the underlying correlation is still structural, just dragged down by orphan values. Pair with `window` to suppress the stale data at probe time and avoid needing this override.'
     ),
   environment: z.string().optional().describe('Environment nickname (for multi-env setups).'),
+  view: z.enum(['summary', 'markdown']).default('summary').describe('Output format.'),
 };
 
 export async function executeCorrelateCrossPillar(
+  args: {
+    anchor_type: 'log10x_pattern' | 'customer_metric';
+    anchor: string;
+    window?: string;
+    timeRange?: string;
+    step?: string;
+    depth?: 'shallow' | 'normal' | 'deep';
+    minimum_confidence?: number;
+    minimum_join_jaccard?: number;
+    environment?: string;
+    view?: 'summary' | 'markdown';
+  },
+  env: EnvConfig
+): Promise<string | import('../lib/output-types.js').StructuredOutput> {
+  const view = args.view ?? 'summary';
+  const md = await executeCorrelateCrossPillarInner(args, env);
+  if (view === 'markdown') return md;
+  const { buildMarkdownEnvelope } = await import('../lib/output-types.js');
+  return buildMarkdownEnvelope({
+    tool: 'log10x_correlate_cross_pillar',
+    summary: { headline: md.split('\n')[0]?.slice(0, 200) || 'correlate_cross_pillar result' },
+    markdown: md,
+  });
+}
+
+async function executeCorrelateCrossPillarInner(
   args: {
     anchor_type: 'log10x_pattern' | 'customer_metric';
     anchor: string;

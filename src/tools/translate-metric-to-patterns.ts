@@ -44,7 +44,7 @@ export async function executeTranslateMetricToPatterns(
     environment?: string;
   },
   env: EnvConfig
-): Promise<string> {
+): Promise<string | import('../lib/output-types.js').StructuredOutput> {
   // Apply schema defaults for direct/chain callers that bypass the SDK
   // Zod boundary. correlate-cross-pillar has its own defensive fallback,
   // but it expects window to be set; pass through everything explicitly.

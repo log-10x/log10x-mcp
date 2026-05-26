@@ -52,6 +52,7 @@ export const dependencyCheckSchema = {
     ),
   service: z.string().optional().describe('Service name to scope the scan'),
   severity: z.string().optional().describe('Severity level'),
+  view: z.enum(['summary', 'markdown']).default('summary').describe('Output format.'),
 };
 
 const VENDOR_CONFIG: Record<
@@ -91,9 +92,22 @@ export interface DependencyCheckArgs {
   vendor?: string;
   service?: string;
   severity?: string;
+  view?: 'summary' | 'markdown';
 }
 
-export async function executeDependencyCheck(args: DependencyCheckArgs): Promise<string> {
+export async function executeDependencyCheck(args: DependencyCheckArgs): Promise<string | import('../lib/output-types.js').StructuredOutput> {
+  const view = args.view ?? 'summary';
+  const md = await executeDependencyCheckInner(args);
+  if (view === 'markdown') return md;
+  const { buildMarkdownEnvelope } = await import('../lib/output-types.js');
+  return buildMarkdownEnvelope({
+    tool: 'log10x_dependency_check',
+    summary: { headline: md.split('\n')[0]?.slice(0, 200) || 'dependency_check result' },
+    markdown: md,
+  });
+}
+
+async function executeDependencyCheckInner(args: DependencyCheckArgs): Promise<string> {
   const pattern = normalizePattern(args.pattern);
   const tokens = pattern.split('_').filter((t) => t.length > 0);
 
