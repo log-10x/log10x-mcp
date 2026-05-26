@@ -62,7 +62,7 @@ const forwarders: ForwarderKind[] = [
 // assertion-branch on membership: migrated forwarders get sidecar-shape
 // assertions; the rest keep the legacy assertions until they're done.
 // Expand as each forwarder spec is rewritten.
-const MIGRATED_TO_SIDECAR = new Set<ForwarderKind>(['fluentbit']);
+const MIGRATED_TO_SIDECAR = new Set<ForwarderKind>(['fluentbit', 'otel-collector']);
 
 for (const fw of forwarders) {
   if (fw === 'logstash') {
@@ -170,11 +170,11 @@ test('receiver plan install commands reference the right chart', async () => {
   // it here — the logstash blocker is covered by the dedicated test above.
   const upstream: Partial<Record<ForwarderKind, string>> = {
     'fluentbit': 'fluent/fluent-bit',
+    'otel-collector': 'open-telemetry/opentelemetry-collector',
   };
   const legacy: Partial<Record<ForwarderKind, string>> = {
     fluentd: 'log10x-fluent/fluentd',
     filebeat: 'log10x-elastic/filebeat',
-    'otel-collector': 'log10x-otel/opentelemetry-collector',
   };
   for (const fw of forwarders) {
     if (fw === 'logstash') continue;

@@ -944,82 +944,121 @@ ${indent(output, 4)}
   'otel-collector': {
     label: 'OTel Collector',
     integrationMode:
-      'DaemonSet using the log10x-repackaged chart `log10x-otel/opentelemetry-collector`. Uses the chart\'s hidden `logs/to-tenx` pipeline with a syslog exporter over a Unix socket; the 10x logic runs inside the collector container.',
-    helmRepo: 'https://log-10x.github.io/opentelemetry-helm-charts',
-    helmRepoAlias: 'log10x-otel',
-    chartRef: 'log10x-otel/opentelemetry-collector',
+      'Sidecar (`log10x/edge-10x`) injected into the user\'s existing OTel Collector pod via the upstream `open-telemetry/opentelemetry-collector` chart\'s `extraContainers` + `extraVolumes` hooks. The chart\'s `config:` is deep-merged: we add an `otlp/tenx` exporter (handoff to sidecar at 127.0.0.1:4317), an `otlp/tenx` receiver (return path on 0.0.0.0:24225), rewire the `logs` pipeline through `otlp/tenx`, and add a `logs/from-tenx` pipeline that ships the returning events to the user\'s real destinations. Both directions are OTLP/gRPC over loopback.',
+    helmRepo: 'https://open-telemetry.github.io/opentelemetry-helm-charts',
+    helmRepoAlias: 'open-telemetry',
+    chartRef: 'open-telemetry/opentelemetry-collector',
     chartAvailability: 'published',
-    primaryImageHint: 'ghcr.io/log-10x/opentelemetry-collector',
-    primaryContainerName: 'opentelemetry-collector',
-    hasTenxSidecar: false,
+    primaryImageHint: 'log10x/edge-10x',
+    primaryContainerName: 'log10x',
+    hasTenxSidecar: true,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ licenseJwt, releaseName, destination, outputHost, gitToken, optimize, readOnly, backends, backendCredentials, airgapped }) => {
-      // The OTel chart doesn't auto-wire filelog unless the preset is
-      // on. We turn it on explicitly so the user's pipeline just works.
-      // image.repository is required by the chart and has no default.
-      const exporter = renderOtelExporter(destination, outputHost);
-      // Same as fluent-bit: chart values expose optimize + readOnly
-      // booleans directly; chart templates wire them to the matching
-      // engine launch args (and gate the fluentforward / from-tenx
-      // pipeline when readOnly is true).
-      const featureFlags = renderTenxFeatureFlags({ optimize, readOnly });
-      const extras = renderTenxExtraArgsAndEnv({ backends, backendCredentials, airgapped, airgappedAsEnvVar: true });
-      return `mode: "daemonset"
+    renderValues: ({ destination, outputHost, optimize, airgapped, licenseSecretName, licenseSecretKey }) => {
+      const sidecar = renderLog10xSidecar({
+        forwarderKind: 'otel-collector',
+        optimize,
+        airgapped,
+        licenseSecretName: licenseSecretName ?? 'log10x-license',
+        licenseSecretKey: licenseSecretKey ?? 'license-jwt',
+      });
+      // OTel destination exporter declaration + the exporter name(s) the
+      // from-tenx pipeline references. For mock we use the chart's built-in
+      // `debug` exporter (no extra config needed); for real destinations
+      // we declare a typed exporter block.
+      const { exporterName, exporterBlock } = renderOtelDestinationExporter(destination, outputHost);
+      return `# Receiver overlay for OTel Collector (upstream open-telemetry/opentelemetry-collector chart).
+# Layer on top of your existing values:
+#   helm upgrade --install <release> open-telemetry/opentelemetry-collector \\
+#     -f your-existing-otel-values.yaml \\
+#     -f my-receiver.yaml --namespace <namespace>
 
-# image.repository defaults in the chart's values.yaml to the upstream
-# contrib image (otel/opentelemetry-collector-contrib), which is
-# public. Override here if you want the log10x-repackaged image and
-# have configured the necessary imagePullSecrets.
+${sidecar}
 
-tenx:
-  enabled: true
-  licenseJwt: "${licenseJwt}"${featureFlags}
-  runtimeName: "${releaseName}"${extras}
-
-# Turn on the chart's filelog logsCollection preset so the receiver
-# is actually wired up; advising pipeline.receivers without this
-# results in "references receiver 'filelog' which is not configured".
-presets:
-  logsCollection:
-    enabled: true
-    includeCollectorLogs: false
-
+# config: is deep-merged with chart defaults and your existing values.
+# We add: an otlp/tenx exporter (handoff to the sidecar), an otlp/tenx
+# receiver (return path), rewire the logs pipeline through the sidecar,
+# and add a logs/from-tenx pipeline that ships returning events to
+# your real destinations.
 config:
+  receivers:
+    otlp/tenx:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:24225
+
   exporters:
-${indent(exporter, 4)}
+    otlp/tenx:
+      endpoint: 127.0.0.1:4317
+      tls:
+        insecure: true
+${exporterBlock ? `${indent(exporterBlock, 4)}\n` : ''}
   service:
     pipelines:
+      # Replace your existing logs pipeline (Helm merges these lists
+      # wholesale; spell out everything you need).
       logs:
-        receivers: [filelog]
-        processors: [memory_limiter, batch]
-        exporters: [${destination === 'mock' ? 'debug' : 'elasticsearch'}]
+        receivers: [filelog]                # ← your existing receivers
+        processors:
+          - memory_limiter
+          - batch
+        exporters: [otlp/tenx]
+
+      # New egress pipeline. Processor-free so enrichment runs exactly once.
+      logs/from-tenx:
+        receivers: [otlp/tenx]
+        exporters: [${exporterName}]
 `;
     },
-    verifyProbes: ({ releaseName, namespace, destination }) => {
+    verifyProbes: ({ releaseName, namespace, destination, optimize }) => {
       const sel = k8sRecommendedSelector(releaseName);
-      const probes = [
+      const probes: Array<{
+        name: string;
+        question: string;
+        commands: string[];
+        expectOutput?: string;
+        timeoutSec?: number;
+      }> = [
         {
           name: 'pods-ready',
-          question: 'Are all OTel Collector pods Ready?',
+          question: 'Are all OTel Collector pods Ready (with the log10x sidecar)?',
           commands: [`kubectl -n ${namespace} wait --for=condition=Ready pod -l ${sel} --timeout=5m`],
           expectOutput: 'condition met',
           timeoutSec: 300,
         },
         {
-          name: 'processor-alive',
-          question: 'Is the 10x syslog exporter pipeline wired and emitting?',
+          name: 'sidecar-alive',
+          question: 'Is the log10x sidecar running and processing events?',
           commands: [
-            `kubectl -n ${namespace} logs -l ${sel} -c opentelemetry-collector --tail=400 | grep -iE 'tenx|10x|pattern' | head -20`,
+            `kubectl -n ${namespace} logs -l ${sel} -c log10x --tail=400 | grep -E 'tenx|pattern|receiver|template' | head -20`,
+          ],
+        },
+        {
+          name: 'pipeline-wired',
+          question: 'Is the otlp/tenx receiver listening and the logs pipeline routing through it?',
+          commands: [
+            `kubectl -n ${namespace} logs -l ${sel} -c opentelemetry-collector --tail=400 | grep -E 'otlp/tenx|logs/from-tenx' | head -10`,
           ],
         },
       ];
       if (destination === 'mock') {
         probes.push({
           name: 'tenx-mock-events',
-          question: 'Are tagged [TENX-MOCK] events reaching the debug exporter?',
-          commands: [`kubectl -n ${namespace} logs -l ${sel} -c opentelemetry-collector --tail=200 | grep -F 'TENX-MOCK' | head -5`],
-          expectOutput: 'TENX-MOCK',
+          question: 'Are returning events being printed by the debug exporter?',
+          commands: [
+            `kubectl -n ${namespace} logs -l ${sel} -c opentelemetry-collector --tail=300 | grep -E 'debug' | head -10`,
+          ],
+          timeoutSec: 120,
+        });
+      }
+      if (optimize) {
+        probes.push({
+          name: 'tenx-encoded-events',
+          question: 'Are events emitted in compact encoded form (templateHash+vars)?',
+          commands: [
+            `kubectl -n ${namespace} logs -l ${sel} -c opentelemetry-collector --tail=500 | grep -oE '~[A-Za-z0-9]{5,20},[0-9]{10,}' | head -3`,
+          ],
+          expectOutput: '~',
           timeoutSec: 120,
         });
       }
@@ -1421,6 +1460,57 @@ function renderOtelExporter(destination: OutputDestination, outputHost?: string)
   logs_index: logs`;
   }
   return '';
+}
+
+/**
+ * Returns the exporter name to reference from the `logs/from-tenx`
+ * pipeline plus the optional exporter block to add under
+ * `config.exporters`. `mock` uses the chart's built-in `debug` exporter
+ * (no extra block needed). Real destinations get a typed exporter block.
+ */
+function renderOtelDestinationExporter(
+  destination: OutputDestination,
+  outputHost?: string,
+): { exporterName: string; exporterBlock: string } {
+  if (destination === 'mock') {
+    return { exporterName: 'debug', exporterBlock: '' };
+  }
+  if (destination === 'elasticsearch') {
+    return {
+      exporterName: 'elasticsearch',
+      exporterBlock: `elasticsearch:
+  endpoints: ["https://${outputHost ?? 'elasticsearch-master'}:9200"]
+  logs_index: logs`,
+    };
+  }
+  if (destination === 'splunk') {
+    return {
+      exporterName: 'splunk_hec',
+      exporterBlock: `splunk_hec:
+  token: \${SPLUNK_HEC_TOKEN}
+  endpoint: "https://${outputHost ?? 'splunk-hec.example.com'}:8088/services/collector"`,
+    };
+  }
+  if (destination === 'datadog') {
+    return {
+      exporterName: 'datadog',
+      exporterBlock: `datadog:
+  api:
+    key: \${DD_API_KEY}
+    site: \${DD_SITE:-datadoghq.com}`,
+    };
+  }
+  if (destination === 'cloudwatch') {
+    return {
+      exporterName: 'awscloudwatchlogs',
+      exporterBlock: `awscloudwatchlogs:
+  log_group_name: ${outputHost ?? '/aws/log10x/receiver'}
+  log_stream_name: log10x-receiver
+  region: \${AWS_REGION:-us-east-1}`,
+    };
+  }
+  // Fallback to debug — should be unreachable since destination is enum-typed.
+  return { exporterName: 'debug', exporterBlock: '' };
 }
 
 /** Indent every line of `s` by `spaces` spaces. */
