@@ -13,16 +13,69 @@ import { fmtDollar, fmtBytes, fmtPct, parseTimeframe, costPeriodLabel } from '..
 import { shareBar } from '../lib/pattern-render.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { agentOnly } from '../lib/agent-only.js';
+import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
 export const servicesSchema = {
   timeRange: z.enum(['15m', '1h', '6h', '1d', '7d', '30d']).default('7d').describe('Time range. Sub-day values available for incident-window service ranking.'),
   analyzerCost: z.number().optional().describe('SIEM ingestion cost in $/GB'),
   environment: z.string().optional().describe('Environment nickname'),
+  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.services[], data.totals). markdown wraps the rendered table in data.markdown.'),
 };
 
+interface ServicesSummary {
+  time_range: string;
+  cost_per_gb: number;
+  period: string;
+  total_bytes: number;
+  total_cost: number;
+  service_count: number;
+  top_n_share_pct: number;
+  services: Array<{
+    rank: number;
+    name: string;
+    bytes: number;
+    cost: number;
+    pct: number;
+  }>;
+}
+
 export async function executeServices(
-  args: { timeRange?: string; analyzerCost?: number },
+  args: { timeRange?: string; analyzerCost?: number; view?: 'summary' | 'markdown' },
   env: EnvConfig
+): Promise<string | StructuredOutput> {
+  const view = args.view ?? 'summary';
+  const sumOut: { data?: ServicesSummary } = {};
+  const md = await executeServicesInner(args, env, sumOut);
+  if (view === 'markdown' || !sumOut.data) {
+    return buildMarkdownEnvelope({
+      tool: 'log10x_services',
+      summary: { headline: md.split('\n').find((l) => l.trim().length > 0)?.slice(0, 200) ?? 'services result' },
+      markdown: md,
+    });
+  }
+  const d = sumOut.data;
+  const top = d.services[0];
+  const headline = top
+    ? `${d.service_count} services over ${d.time_range}: ${top.name} leads at ${fmtDollar(top.cost)}${d.period} (${Math.round(top.pct)}% of total ${fmtDollar(d.total_cost)}${d.period}).`
+    : `No services with data in ${d.time_range}.`;
+  return buildEnvelope({
+    tool: 'log10x_services',
+    view: 'summary',
+    summary: { headline },
+    data: d,
+    actions: top
+      ? [
+          { tool: 'log10x_top_patterns', args: { service: top.name }, reason: 'current top patterns for the highest-cost service' },
+          { tool: 'log10x_investigate', args: { starting_point: top.name }, reason: 'causal-chain analysis on the top service' },
+        ]
+      : [],
+  });
+}
+
+async function executeServicesInner(
+  args: { timeRange?: string; analyzerCost?: number; view?: 'summary' | 'markdown' },
+  env: EnvConfig,
+  sumOut?: { data?: ServicesSummary }
 ): Promise<string> {
   // Defensive defaults — match servicesSchema.
   const timeRange = args.timeRange ?? '7d';
@@ -93,12 +146,11 @@ export async function executeServices(
     lines.push('');
     lines.push(agentOnly(
       `Suggested next calls: ` +
-      `Drill into the top service for week-over-week deltas — log10x_cost_drivers({ service: '${rows[0].name}' }) — or for current top patterns — log10x_top_patterns({ service: '${rows[0].name}' }). ` +
+      `Drill into the top service for current top patterns — log10x_top_patterns({ service: '${rows[0].name}' }). ` +
       `Full causal-chain analysis on any spike: log10x_investigate({ starting_point: '${rows[0].name}' }). ` +
       `To reduce the cost of a specific pattern in this service, first run log10x_top_patterns({ service: '${rows[0].name}' }) and then call log10x_pattern_mitigate on a row's pattern identity — gives the user the four cost-reduction options gated on env capabilities.`
     ));
     nextActions.push(
-      { tool: 'log10x_cost_drivers', args: { service: rows[0].name }, reason: 'week-over-week deltas on the top service' },
       { tool: 'log10x_top_patterns', args: { service: rows[0].name }, reason: 'current top patterns for the top service' },
       { tool: 'log10x_investigate', args: { starting_point: rows[0].name }, reason: 'causal-chain analysis on the top service' },
     );
@@ -106,5 +158,28 @@ export async function executeServices(
 
   const block = renderNextActions(nextActions);
   if (block) lines.push('', block);
+
+  if (sumOut) {
+    const topN = Math.min(3, rows.length);
+    const topBytes = rows.slice(0, topN).reduce((s, r) => s + r.bytes, 0);
+    const topShare = totalBytes > 0 ? Math.round((topBytes / totalBytes) * 100) : 0;
+    sumOut.data = {
+      time_range: tf.label,
+      cost_per_gb: costPerGb,
+      period,
+      total_bytes: totalBytes,
+      total_cost: totalCost,
+      service_count: rows.length,
+      top_n_share_pct: topShare,
+      services: rows.map((r, i) => ({
+        rank: i + 1,
+        name: r.name,
+        bytes: r.bytes,
+        cost: r.cost,
+        pct: r.pct,
+      })),
+    };
+  }
+
   return lines.join('\n');
 }
