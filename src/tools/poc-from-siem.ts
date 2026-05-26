@@ -29,7 +29,7 @@ import {
 } from '../lib/siem/resolve.js';
 import type { SiemId } from '../lib/siem/pricing.js';
 import { SIEM_DISPLAY_NAMES, getAnalyzerCostForSiem } from '../lib/siem/pricing.js';
-import { extractPatterns } from '../lib/pattern-extraction.js';
+import { extractPatterns, collapseBySymbolMessage } from '../lib/pattern-extraction.js';
 import {
   renderPocReport,
   renderPocSummary,
@@ -516,6 +516,12 @@ export async function runPipeline(
     return;
   }
   const templateWallTimeMs = Date.now() - templStart;
+  // Collapse engine-emitted templateHashes that share a Reporter-tier
+  // symbolMessage into one row. From a user-facing-action standpoint
+  // those rows resolve to the same mute target, so showing them
+  // separately is noise. Patterns without a symbolMessage are left
+  // keyed by templateHash.
+  extraction.patterns = collapseBySymbolMessage(extraction.patterns);
   snapshot.partialPatternsFound = extraction.patterns.length;
 
   // Await volume detect AFTER templating — the templater is the long pole
@@ -534,7 +540,7 @@ export async function runPipeline(
     snapshot.stepDetail = 'ai-prettifying pattern names';
     const topPatterns = extraction.patterns.slice(0, 30);
     const prettifyInputs = topPatterns.map((p) => ({
-      identity: toSnakeCaseLocal(p.template, p.hash),
+      identity: p.hash,
       service: p.service,
       severity: p.severity,
       count: p.count,
@@ -699,23 +705,6 @@ async function resolveVolume(
   } catch (e) {
     return { errorNote: `Auto-detect threw: ${(e as Error).message.slice(0, 200)}` };
   }
-}
-
-/**
- * Mirror the snake-case identity derivation the renderer uses. Duplicated
- * here so we can compute identity once before prettify and the renderer
- * computes the same value later. Keep in sync with `toSnakeCase` in
- * `poc-report-renderer.ts`.
- */
-function toSnakeCaseLocal(template: string, fallbackHash: string): string {
-  let s = template.replace(/\$\([^)]*\)/g, '');
-  s = s.trim().replace(/^(FATAL|ERROR|WARN(?:ING)?|INFO|DEBUG|TRACE|CRIT(?:ICAL)?)\b\s*/i, '');
-  s = s.replace(/([A-Za-z_][A-Za-z0-9_]*)=\$/g, '$1');
-  s = s.replace(/\$/g, '');
-  s = s.replace(/[^A-Za-z0-9]+/g, '_');
-  s = s.toLowerCase().replace(/_+/g, '_').replace(/^_+|_+$/g, '');
-  if (!s) return fallbackHash.slice(0, 16);
-  return s.slice(0, 120);
 }
 
 // Exposed for tests.

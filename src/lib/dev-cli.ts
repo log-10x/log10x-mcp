@@ -128,30 +128,43 @@ export async function runDevCliStdin(rawLogText: string): Promise<DevCliResult> 
   }
 
   // Demultiplex stdout by per-line prefix.
+  //
+  // apps/mcp/stdout/config.yaml now emits each kind of line behind a
+  // self-describing literal anchor:
+  //
+  //   encoded= ,~<hash>,val1,val2,…,pattern=,<message_pattern>,patternHash=,<tenx_hash>
+  //   {"templateHash":"…","template":"…"}
+  //   summary= ,<severity>,<message_pattern>,<tenx_hash>,<vol>,<bytes>,<totals>
+  //
+  // (The leading `~` on the encoded payload still exists but now sits
+  // after the `encoded=` anchor, so first-byte tests no longer work for
+  // routing — we match prefixes by string.)
   const encodedLines: string[] = [];
   const templateLines: string[] = [];
   const summaryLines: string[] = [];
   for (const line of stdout.split('\n')) {
     if (!line) continue;
-    const c = line.charCodeAt(0);
-    // Fast prefix check on the first byte.
-    if (c === 0x7E /* ~ */) {
-      encodedLines.push(line);
-    } else if (c === 0x7B /* { */) {
+    if (line.startsWith('encoded=')) {
+      // Strip the literal `encoded=,` so parseEncoded sees the
+      // `~hash,vals…,pattern=,…,patternHash=,…` body without the anchor.
+      encodedLines.push(line.slice('encoded='.length).replace(/^,/, ''));
+    } else if (line.charCodeAt(0) === 0x7B /* { */) {
       templateLines.push(line);
     } else if (line.startsWith('summary=')) {
-      // Engine renders the literal `summary=` as a field, then joins the
-      // remaining fields with `,`, so the line is `summary=,SEV,pat,...`.
-      // Strip the prefix and the delimiter to get a plain CSV row.
       summaryLines.push(line.slice('summary='.length).replace(/^,/, ''));
     }
     // Otherwise: engine info line (emoji-prefixed) or JS console output — skip.
   }
 
-  // Synthesize a header for the aggregated.csv blob so parseAggregated()
-  // can dispatch on column names. apps/mcp emits these fields in this
-  // order (see config/apps/mcp/stdout/config.yaml summary fields).
-  const aggregatedHeader = 'severity_level,message_pattern,summaryVolume,summaryBytes,summaryTotals';
+  // Synthesize a header for the aggregated rows so parseAggregated()
+  // can dispatch on column names. apps/mcp's stdout config emits the
+  // enrichment fields in this order:
+  //   severity_level, message_pattern, tenx_hash, summaryVolume, summaryBytes, summaryTotals
+  // The `tenx_hash` column was added when the new aggregator started
+  // emitting summaries on EOF (drain enabled via --install-exit-handlers
+  // in the native-image build). Without `tenx_hash` here, parseAggregated
+  // would mis-bind every column to the right of message_pattern.
+  const aggregatedHeader = 'severity_level,message_pattern,tenx_hash,summaryVolume,summaryBytes,summaryTotals';
 
   return {
     templatesJson: templateLines.join('\n'),

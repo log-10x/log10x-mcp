@@ -397,7 +397,7 @@ export async function executePatternExamples(
       'The pattern may not be active in this window, or the input pattern doesn\'t correspond to events in the requested timeRange.',
       '',
       'Drop counts by Jaccard:',
-      ...buckets.slice(0, 5).map((b) => `  - templateHash \`${b.p.hash.slice(0, 12)}\`: ${b.p.count} events, jaccard=${b.jaccard.toFixed(2)} (threshold ${b.threshold})`),
+      ...buckets.slice(0, 5).map((b) => `  - patternHash \`${(b.p.tenxHash ?? b.p.hash).slice(0, 12)}\`: ${b.p.count} events, jaccard=${b.jaccard.toFixed(2)} (threshold ${b.threshold})`),
     ]);
   }
 
@@ -431,16 +431,16 @@ export async function executePatternExamples(
     lines.push('> **Multi-line detected**: the engine grouped multiple input lines into fewer encoded events. Showing head lines only; continuation frames (e.g. stack-trace `at ` lines) live separately in the analyzer and are not joined here.');
   }
   lines.push('');
-  // Gloss the hash once: a human seeing "templateHash a1b2c3…" needs to know
+  // Gloss the hash once: a human seeing "patternHash a1b2c3…" needs to know
   // what it is before the buckets below.
-  lines.push('_Buckets group the matched events by template fingerprint (`templateHash`); the slot table in each shows what varies within that template._');
+  lines.push('_Buckets group the matched events by `patternHash` (the engine\'s portable pattern fingerprint); the slot table in each shows what varies within that pattern._');
   lines.push('');
 
   for (let i = 0; i < topK.length; i++) {
     const bucket = topK[i];
     const p = bucket.p;
     const eventsToShow = Math.min(args.limit, p.count);
-    lines.push(`### Bucket ${i + 1}: templateHash \`${p.hash.slice(0, 16)}\` (${fmtCount(p.count)} events, jaccard=${bucket.jaccard.toFixed(2)})`);
+    lines.push(`### Bucket ${i + 1}: patternHash \`${(p.tenxHash ?? p.hash).slice(0, 16)}\` (${fmtCount(p.count)} events, jaccard=${bucket.jaccard.toFixed(2)})`);
     lines.push('');
     if (p.severity) lines.push(`**Severity**: ${p.severity}`);
     if (p.service) lines.push(`**Service**: ${p.service}`);
@@ -468,7 +468,7 @@ export async function executePatternExamples(
 
   if (droppedFromTopK.length > 0) {
     const droppedCount = droppedFromTopK.reduce((s, b) => s + b.p.count, 0);
-    lines.push(`_${fmtCount(droppedCount)} additional events from ${droppedFromTopK.length} additional templateHash bucket(s) not shown (only top 3 by count rendered)._`);
+    lines.push(`_${fmtCount(droppedCount)} additional events from ${droppedFromTopK.length} additional patternHash bucket(s) not shown (only top 3 by count rendered)._`);
     lines.push('');
   }
 

@@ -97,12 +97,42 @@ type Confidence = 'high' | 'medium' | 'low';
  * Never lose the identity — every machine-pasted reference (receiver
  * YAML, SIEM configs) uses the raw form.
  */
+/**
+ * Convert an engine-emitted symbolMessage (snake_case Reporter-tier name)
+ * into a readable bold label. We do NOT invent any words — just replace
+ * `_` with space and title-case the existing tokens. The full string
+ * stays in the identity code-span next to it.
+ */
+function formatEngineLabel(symbolMessage: string, maxWords = 6): string {
+  const words = symbolMessage.split('_').filter((w) => w.length > 0);
+  if (words.length === 0) return symbolMessage;
+  const picked = words.slice(0, maxWords).map((w) => w[0].toUpperCase() + w.slice(1));
+  const more = words.length > maxWords ? ' …' : '';
+  return picked.join(' ') + more;
+}
+
 function displayName(
   identity: string,
   template: string,
-  aiPrettyNames?: Record<string, string>
+  aiPrettyNames?: Record<string, string>,
+  symbolMessage?: string,
+  /**
+   * Pre-computed set-difference label for this row. Caller derives it
+   * once per visible row set via `setDifferenceLabels()`. When present,
+   * overrides the first-N-tokens fallback so rows that share a long
+   * symbolMessage prefix get distinct bold names.
+   */
+  labelOverride?: string,
 ): string {
-  const name = aiPrettyNames?.[identity] || heuristicName(template, identity);
+  // Priority: AI-prettified > set-difference label > engine symbolMessage > heuristic on body.
+  const aiName = aiPrettyNames?.[identity];
+  const name = aiName
+    ? aiName
+    : labelOverride
+      ? labelOverride
+      : symbolMessage
+        ? formatEngineLabel(symbolMessage)
+        : heuristicName(template, identity);
   return `**${name}** (\`${identity}\`)`;
 }
 
@@ -110,11 +140,164 @@ function displayName(
 function displayNameCompact(
   identity: string,
   template: string,
-  aiPrettyNames?: Record<string, string>
+  aiPrettyNames?: Record<string, string>,
+  symbolMessage?: string,
+  /**
+   * Optional pre-computed display form to use in place of head-truncated
+   * identity. Used for common-prefix cropping across multi-row tables:
+   * the caller computes the longest common prefix across all rendered
+   * identities and passes each row's cropped `…<unique tail>`. The
+   * full identity is still used internally for the AI-pretty-names
+   * lookup so we don't lose that mapping.
+   */
+  displayOverride?: string,
+  /**
+   * Pre-computed set-difference label for this row. See `displayName`.
+   */
+  labelOverride?: string,
 ): string {
-  const name = aiPrettyNames?.[identity] || heuristicName(template, identity);
-  const short = identity.length > 40 ? identity.slice(0, 38) + '…' : identity;
+  const aiName = aiPrettyNames?.[identity];
+  const name = aiName
+    ? aiName
+    : labelOverride
+      ? labelOverride
+      : symbolMessage
+        ? formatEngineLabel(symbolMessage)
+        : heuristicName(template, identity);
+  const short = displayOverride
+    ?? (identity.length > 40 ? identity.slice(0, 38) + '…' : identity);
   return `**${name}**<br>\`${short}\``;
+}
+
+/**
+ * Set-difference labeling: pick bold tokens that DIFFER across the
+ * visible row set, not the first six tokens of each row's symbolMessage.
+ *
+ * Problem: every K8s audit-log pattern starts with
+ * `kind_Event_apiVersion_audit_ks_io_…` so the first-six-tokens label
+ * is identical for every row. The discriminator is buried in the tail
+ * (requestURI path, verb, level), which the label drops.
+ *
+ * Algorithm:
+ *   1. Tokenize every row's symbolMessage on `_`.
+ *   2. A token is "common" if it appears in ≥60% of rows. (60% rather
+ *      than 100% so a single outlier — e.g., an `Unauthorized` row —
+ *      doesn't keep `kind` in the discriminator set for 46 K8s rows.)
+ *   3. For each row, take its tokens MINUS the common set, in original
+ *      order, deduped against consecutive repeats, with short noise
+ *      tokens (length ≤ 2 like `v`, `ks`, `io`) dropped.
+ *   4. Take the LAST `maxWords` discriminators. The suffix usually
+ *      carries the unique info (`…kube_system_leases`,
+ *      `…customresourcedefinitions_networking`).
+ *   5. Title-case + join. Empty result → caller falls back to original.
+ *
+ * Returns identity → label map. Identities without a symbolMessage,
+ * and identities whose discriminator set is empty, are omitted.
+ */
+function setDifferenceLabels(
+  rows: Array<{ identity: string; symbolMessage?: string }>,
+  maxWords = 4,
+  commonThreshold = 0.6,
+): Map<string, string> {
+  const out = new Map<string, string>();
+  const tokenized = rows
+    .map((r) => ({
+      identity: r.identity,
+      tokens: r.symbolMessage ? r.symbolMessage.split('_').filter((t) => t.length > 0) : [],
+    }))
+    .filter((r) => r.tokens.length > 0);
+  if (tokenized.length < 2) return out;
+
+  const N = tokenized.length;
+  const minCount = Math.max(2, Math.ceil(N * commonThreshold));
+  const tokenRowCount = new Map<string, number>();
+  for (const { tokens } of tokenized) {
+    const seen = new Set<string>();
+    for (const t of tokens) seen.add(t);
+    for (const t of seen) tokenRowCount.set(t, (tokenRowCount.get(t) || 0) + 1);
+  }
+  const common = new Set<string>();
+  for (const [t, c] of tokenRowCount) {
+    if (c >= minCount) common.add(t);
+  }
+
+  for (const { identity, tokens } of tokenized) {
+    const diff: string[] = [];
+    for (const t of tokens) {
+      if (common.has(t)) continue;
+      if (t.length <= 2) continue;
+      if (diff.length > 0 && diff[diff.length - 1].toLowerCase() === t.toLowerCase()) continue;
+      diff.push(t);
+    }
+    if (diff.length === 0) continue;
+    const picked = diff.slice(-maxWords);
+    const label = picked.map((t) => t[0].toUpperCase() + t.slice(1).toLowerCase()).join(' ');
+    out.set(identity, label);
+  }
+  return out;
+}
+
+/**
+ * Longest common prefix across a set of strings. Returns empty string
+ * if the set has fewer than 2 entries or no shared lead-in. Used by
+ * table renderers to crop a noisy common prefix off the displayed
+ * identity column so the per-row tail (the part that actually differs)
+ * is visible.
+ */
+function longestCommonPrefix(strs: string[]): string {
+  if (strs.length < 2) return '';
+  let prefix = strs[0];
+  for (let i = 1; i < strs.length && prefix.length > 0; i++) {
+    const s = strs[i];
+    let j = 0;
+    while (j < prefix.length && j < s.length && prefix.charCodeAt(j) === s.charCodeAt(j)) j++;
+    prefix = prefix.slice(0, j);
+  }
+  return prefix;
+}
+
+/**
+ * Per-row crop of a shared prefix. The naive "longest prefix across
+ * the whole table" approach fails the moment a single outlier row
+ * doesn't share that prefix (LCP collapses to empty). Instead we sort
+ * the identities lexicographically and find runs where each adjacent
+ * pair's LCP meets `minPrefix`; each run gets cropped against the
+ * run's own LCP. Outliers (singletons) are left alone and the caller
+ * falls back to head-truncation for them.
+ *
+ *   - maxLen: visible cap on each row's cropped display.
+ *   - minPrefix: minimum shared prefix length before cropping fires.
+ */
+function buildCroppedDisplays(
+  identities: string[],
+  maxLen = 40,
+  minPrefix = 12,
+): Map<string, string> {
+  const out = new Map<string, string>();
+  if (identities.length < 2) return out;
+  const sorted = [...identities].sort();
+  // Walk sorted list, group into runs where adjacent pair-LCP ≥ minPrefix.
+  let runStart = 0;
+  for (let i = 1; i <= sorted.length; i++) {
+    const pairLcp = i < sorted.length ? longestCommonPrefix([sorted[i - 1], sorted[i]]) : '';
+    if (i === sorted.length || pairLcp.length < minPrefix) {
+      // Close the current run [runStart, i)
+      if (i - runStart >= 2) {
+        const run = sorted.slice(runStart, i);
+        const lcp = longestCommonPrefix(run);
+        if (lcp.length >= minPrefix) {
+          for (const id of run) {
+            if (id.length <= lcp.length) continue;
+            const tail = id.slice(lcp.length);
+            const display = tail.length > maxLen - 1 ? '…' + tail.slice(-(maxLen - 1)) : '…' + tail;
+            out.set(id, display);
+          }
+        }
+      }
+      runStart = i;
+    }
+  }
+  return out;
 }
 
 /**
@@ -151,17 +334,25 @@ function heuristicName(template: string, identity: string): string {
     .filter((t) => t.length >= 2)
     .filter((t) => !/^\d+$/.test(t));
   const picked = tokens.slice(0, 4);
-  if (picked.length === 0) return shortIdentity(identity);
+  if (picked.length === 0) return 'Unnamed pattern';
+  // If every picked token is short (≤3 chars) and there's no
+  // recognizable content word, we're tokenizing a templateHash
+  // (happens when the engine didn't emit a body for this hash and
+  // pattern-extraction fell back to `hash` as the body). Better to
+  // label honestly than to print "Hu Zz6j Mr" / "Sy8fu9l" gibberish.
+  const hasContentWord = picked.some((t) => t.length >= 4);
+  if (!hasContentWord) return 'Unnamed pattern';
   return picked.map((t) => t[0].toUpperCase() + t.slice(1).toLowerCase()).join(' ');
 }
 
-/** Resolve a display name: AI > heuristic > spaced identity. */
+/** Resolve a display name: AI > set-difference label > heuristic > spaced identity. */
 function resolveName(
   identity: string,
   template: string,
-  aiPrettyNames?: Record<string, string>
+  aiPrettyNames?: Record<string, string>,
+  labelOverride?: string,
 ): string {
-  return aiPrettyNames?.[identity] || heuristicName(template, identity);
+  return aiPrettyNames?.[identity] || labelOverride || heuristicName(template, identity);
 }
 
 interface EnrichedPattern extends ExtractedPattern {
@@ -212,6 +403,7 @@ interface EnrichedPattern extends ExtractedPattern {
  */
 export function renderPocSummary(input: RenderInput, topN = 5): string {
   const patterns = enrichPatterns(input);
+  const setDiff = setDifferenceLabels(patterns);
   const totalCost = patterns.reduce((s, p) => s + p.costPerWindow, 0);
   const projectedSavings = patterns.reduce((s, p) => s + p.projectedSavings, 0);
   const lines: string[] = [];
@@ -254,7 +446,7 @@ export function renderPocSummary(input: RenderInput, topN = 5): string {
     lines.push('|---|---|---|---|---|---|');
     for (let i = 0; i < top.length; i++) {
       const p = top[i];
-      const name = resolveName(p.identity, p.template, input.aiPrettyNames);
+      const name = resolveName(p.identity, p.template, input.aiPrettyNames, setDiff.get(p.identity));
       const annualSavings = projectBilling(p.projectedSavings, input.windowHours, 24 * 365);
       const flag = needsReview(p) ? ' ⚠' : '';
       lines.push(
@@ -352,6 +544,7 @@ export function renderPocConfigs(input: RenderInput, topN = 5): string {
  */
 export function renderPocTop(input: RenderInput, topN = 20): string {
   const patterns = enrichPatterns(input);
+  const setDiff = setDifferenceLabels(patterns);
   const top = patterns.slice(0, topN);
   const lines: string[] = [];
   lines.push(`## Top ${top.length} cost drivers`);
@@ -365,7 +558,7 @@ export function renderPocTop(input: RenderInput, topN = 20): string {
   lines.push('|---|---|---|---|---|---|---|---|');
   for (let i = 0; i < top.length; i++) {
     const p = top[i];
-    const name = resolveName(p.identity, p.template, input.aiPrettyNames);
+    const name = resolveName(p.identity, p.template, input.aiPrettyNames, setDiff.get(p.identity));
     const weekly = p.costPerWeek;
     const annual = projectBilling(p.costPerWindow, input.windowHours, 24 * 365);
     const flag = needsReview(p) ? ' ⚠' : '';
@@ -382,6 +575,7 @@ export function renderPocTop(input: RenderInput, topN = 20): string {
  */
 export function renderPocPattern(input: RenderInput, identity: string): string {
   const patterns = enrichPatterns(input);
+  const setDiff = setDifferenceLabels(patterns);
   const p = patterns.find((x) => x.identity === identity);
   if (!p) {
     const suggestions = patterns
@@ -394,7 +588,7 @@ export function renderPocPattern(input: RenderInput, identity: string): string {
     );
   }
   const lines: string[] = [];
-  const name = resolveName(p.identity, p.template, input.aiPrettyNames);
+  const name = resolveName(p.identity, p.template, input.aiPrettyNames, setDiff.get(p.identity));
   const annualSavings = projectBilling(p.projectedSavings, input.windowHours, 24 * 365);
   lines.push(`## ${name}`);
   lines.push('');
@@ -501,6 +695,11 @@ export function renderPocPattern(input: RenderInput, identity: string): string {
  */
 export function renderPocReport(input: RenderInput): RenderResult {
   const patterns = enrichPatterns(input);
+  // Set-difference labels: one stable label per pattern across the
+  // whole report, computed against the full visible set so rows
+  // sharing a long symbolMessage prefix (K8s audit logs, OTel spans)
+  // get distinct bold names instead of all reading "Kind Event …".
+  const setDiff = setDifferenceLabels(patterns);
   const lines: string[] = [];
 
   // Banner block
@@ -654,7 +853,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
   if (top3.length > 0) {
     lines.push('**Top 3 wins**:');
     for (const p of top3) {
-      const dn = displayName(p.identity, p.template, input.aiPrettyNames);
+      const dn = displayName(p.identity, p.template, input.aiPrettyNames, p.symbolMessage, setDiff.get(p.identity));
       const label = p.recommendedAction === 'mute'
         ? `Mute ${dn}`
         : p.recommendedAction === 'sample'
@@ -665,13 +864,6 @@ export function renderPocReport(input: RenderInput): RenderResult {
     }
     lines.push('');
   }
-
-  // Section 1.5: Reconciliation note — pre-empts the trust failure
-  // when a prospect compares our top-N to their SIEM's native pattern
-  // view. The two views WILL differ, sometimes substantially. Owning
-  // that upfront is cheaper than letting the prospect notice mid-meeting.
-  lines.push(reconciliationSection(input.siem));
-  lines.push('');
 
   // Section 2: Top cost drivers
   lines.push('## 2. Top Cost Drivers');
@@ -685,11 +877,15 @@ export function renderPocReport(input: RenderInput): RenderResult {
       '| # | pattern identity | service | sev | events | % total | $/window | $/wk projected | newly-emerged |'
     );
     lines.push('|---|---|---|---|---|---|---|---|---|');
+    // Crop the shared identity prefix across the rendered top-N so the
+    // per-row tail (the disambiguating part) is what the reader sees,
+    // not 20 copies of `kind_event_apiversion_audit_k8s_io_v1_…`.
+    const cropped = buildCroppedDisplays(patterns.slice(0, topN).map((p) => p.identity));
     for (let i = 0; i < topN; i++) {
       const p = patterns[i];
       const newFlag = p.count === 1 && input.extraction.totalEvents > 100 ? 'new?' : '';
       lines.push(
-        `| ${i + 1} | ${displayNameCompact(p.identity, p.template, input.aiPrettyNames)} | ${p.service || 'unknown'} | ${p.severity || '—'} | ${fmtCount(p.count)} | ${fmtPct(p.pctOfTotal * 100)} | ${fmtDollar(p.costPerWindow)} | ${fmtDollar(p.costPerWeek)} | ${newFlag} |`
+        `| ${i + 1} | ${displayNameCompact(p.identity, p.template, input.aiPrettyNames, p.symbolMessage, cropped.get(p.identity), setDiff.get(p.identity))} | ${p.service || 'unknown'} | ${p.severity || '—'} | ${fmtCount(p.count)} | ${fmtPct(p.pctOfTotal * 100)} | ${fmtDollar(p.costPerWindow)} | ${fmtDollar(p.costPerWeek)} | ${newFlag} |`
       );
     }
     lines.push('');
@@ -737,7 +933,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
   const receiverTopN = Math.min(patterns.length, 10);
   for (let i = 0; i < receiverTopN; i++) {
     const p = patterns[i];
-    lines.push(`### #${i + 1} — ${displayName(p.identity, p.template, input.aiPrettyNames)}  _(${p.confidence} confidence)_`);
+    lines.push(`### #${i + 1} — ${displayName(p.identity, p.template, input.aiPrettyNames, p.symbolMessage, setDiff.get(p.identity))}  _(${p.confidence} confidence)_`);
     lines.push('');
     lines.push(`- **Action**: ${actionLabel(p)}`);
     lines.push(`- **Reasoning**: ${p.reasoning}`);
@@ -780,30 +976,35 @@ export function renderPocReport(input: RenderInput): RenderResult {
     lines.push('');
   }
 
-  // Section 6: Compaction potential (only Splunk / ES / ClickHouse)
+  // Section 6: Compact-byte ratio (measured, only where the engine
+  // emitted encoded lines and only for SIEMs that ingest forwarder-
+  // compacted streams).
   const compactionApplies = input.siem === 'splunk' || input.siem === 'elasticsearch' || input.siem === 'clickhouse';
   if (compactionApplies) {
-    lines.push('## 6. Compaction Potential');
+    const measured = patterns.filter((p) => p.encodedBytes > 0).slice(0, 8);
+    lines.push('## 6. Compact-byte Ratio (Measured)');
     lines.push('');
-    lines.push(
-      `The Log10x optimizer **losslessly compacts** events by storing structure once and shipping only variable values. For ${SIEM_DISPLAY_NAMES[input.siem]}, the compaction ratio typically runs 5-10× on structured JSON logs, 2-3× on semi-structured.`
-    );
-    lines.push('');
-    lines.push('| pattern | current bytes/window | est. compact bytes | est. savings | before sample | after (compact) |');
-    lines.push('|---|---|---|---|---|---|');
-    for (const p of patterns.slice(0, 8)) {
-      const afterBytes = estimateCompactBytes(p.bytes, p.template);
-      const ratio = p.bytes > 0 ? p.bytes / Math.max(1, afterBytes) : 1;
-      const saveCost = costFromBytes(p.bytes - afterBytes, input.analyzerCostPerGb);
+    if (measured.length === 0) {
       lines.push(
-        `| ${displayNameCompact(p.identity, p.template, input.aiPrettyNames)} | ${fmtBytes(p.bytes)} | ${fmtBytes(afterBytes)} (${ratio.toFixed(1)}×) | ${fmtDollar(saveCost)} | \`${truncate(p.sampleEvent, 60)}\` | \`~${truncate(p.template, 60)}\` |`
+        `_No measured compact bytes available. The local tenx CLI did not emit encoded lines for these events (older CLI build, or non-privacy-mode paste path). Re-run with \`privacy_mode: true\` on a tenx CLI ≥ 1.1.0 to see the real per-pattern ratio._`
       );
+      lines.push('');
+    } else {
+      lines.push(
+        `Numbers below are summed from the engine's actual \`encoded.log\` lines for these events. Not estimated. Each row's "compact bytes" is the total bytes the 10x forwarder would ship downstream for this pattern. Install: https://docs.log10x.com/apps/cloud/optimizer/`
+      );
+      lines.push('');
+      lines.push('| pattern | raw bytes | compact bytes | ratio | $ saved /window |');
+      lines.push('|---|---|---|---|---|');
+      for (const p of measured) {
+        const ratio = p.bytes > 0 ? p.bytes / Math.max(1, p.encodedBytes) : 1;
+        const saveCost = costFromBytes(p.bytes - p.encodedBytes, input.analyzerCostPerGb);
+        lines.push(
+          `| ${displayNameCompact(p.identity, p.template, input.aiPrettyNames, p.symbolMessage, undefined, setDiff.get(p.identity))} | ${fmtBytes(p.bytes)} | ${fmtBytes(p.encodedBytes)} | ${ratio.toFixed(1)}× | ${fmtDollar(saveCost)} |`
+        );
+      }
+      lines.push('');
     }
-    lines.push('');
-    lines.push(
-      `Install: see https://docs.log10x.com/apps/cloud/optimizer/ — the optimizer runs as a forwarder sidecar. Compaction is transparent to downstream queries.`
-    );
-    lines.push('');
   }
 
   // Section 7: Risk / dependency check
@@ -828,7 +1029,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
       if (p.count < 10) {
         why.push(`only ${p.count} events in window — low confidence on statistical behavior`);
       }
-      lines.push(`- ${displayName(p.identity, p.template, input.aiPrettyNames)} — ${why.join('; ')}`);
+      lines.push(`- ${displayName(p.identity, p.template, input.aiPrettyNames, p.symbolMessage, setDiff.get(p.identity))} — ${why.join('; ')}`);
     }
     lines.push('');
   }
@@ -873,9 +1074,11 @@ export function renderPocReport(input: RenderInput): RenderResult {
   } else {
     lines.push('| identity | events | bytes | severity | service | sample |');
     lines.push('|---|---|---|---|---|---|');
-    for (const p of patterns.slice(0, 50)) {
+    const appendixSlice = patterns.slice(0, 50);
+    const croppedAppendix = buildCroppedDisplays(appendixSlice.map((p) => p.identity));
+    for (const p of appendixSlice) {
       lines.push(
-        `| ${displayNameCompact(p.identity, p.template, input.aiPrettyNames)} | ${fmtCount(p.count)} | ${fmtBytes(p.bytes)} | ${p.severity || '—'} | ${p.service || '—'} | \`${truncate(p.sampleEvent, 80).replace(/\|/g, '\\|')}\` |`
+        `| ${displayNameCompact(p.identity, p.template, input.aiPrettyNames, p.symbolMessage, croppedAppendix.get(p.identity), setDiff.get(p.identity))} | ${fmtCount(p.count)} | ${fmtBytes(p.bytes)} | ${p.severity || '—'} | ${p.service || '—'} | \`${truncate(p.sampleEvent, 80).replace(/\|/g, '\\|')}\` |`
       );
     }
     if (patterns.length > 50) {
@@ -893,7 +1096,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
   lines.push('### Methodology');
   lines.push('');
   lines.push(
-    '- **Pattern identity** is the Log10x `templateHash` — a stable field-set fingerprint computed from the token structure of the event. Identity stays constant across deploys, restarts, pod names, timestamps, and request IDs.'
+    '- **Pattern identity** is the engine\'s Reporter-tier `message_pattern` when the templater produced one (a stable symbol-lookup name; same identity across deploys, restarts, pod names, timestamps, and request IDs). When the templater did not produce one, identity falls back to the engine\'s short `templateHash`. Identity values shown here are emitted by the engine, never derived from the log body by this report.'
   );
   lines.push(
     '- **Cost model**: `bytes × analyzer_cost_per_gb` over the pulled window. Window cost is projected to weekly cost via `$/window × (168h / window_hours)`.'
@@ -994,7 +1197,19 @@ function enrichPatterns(input: RenderInput): EnrichedPattern[] {
     const costPerWeek = projectBilling(costPerWindow, input.windowHours, 24 * 7);
     // Mark unused to satisfy strict mode without altering semantics.
     void scaledBytesPerDay;
-    const identity = toSnakeCase(p.template, p.hash);
+    // Identity is the engine-emitted value the receiver matches on.
+    // Priority: Reporter-tier `symbolMessage` (default match field) >
+    // `tenxHash` / patternHash (alternate match field). We DO NOT fall
+    // back to the templater's internal `templateHash` — the receiver
+    // does not match against it and pasting it into mute YAML or
+    // downstream tool args produces silently broken rules.
+    const identity =
+      (p.symbolMessage && p.symbolMessage.length > 0 && p.symbolMessage) ||
+      (p.tenxHash && p.tenxHash.length > 0 && p.tenxHash) ||
+      // Last-ditch fallback only for legacy engine builds with no
+      // anchored encoded layout. Marked here so the YAML emitter can
+      // refuse to advertise this as a working mute identity.
+      p.hash;
     const lit = extractLiteralPhrase(p.template, identity);
     const severity = (p.severity || '').toUpperCase();
 
@@ -1072,29 +1287,6 @@ function projectBilling(windowCost: number, windowHours: number, targetHours: nu
   return windowCost * (targetHours / windowHours);
 }
 
-/** Approximate compact-form bytes: static template + variable values (no duplication). */
-function estimateCompactBytes(rawBytes: number, template: string): number {
-  // If template length >> variable lengths, compaction is aggressive.
-  // Heuristic: compact bytes = template bytes + 20% for values per event.
-  const templateBytes = Buffer.byteLength(template, 'utf8');
-  const variableFraction = 0.2;
-  // Compaction amortizes the template over all events — model as:
-  //   rawBytes * variableFraction + templateBytes (one-time overhead)
-  return Math.max(templateBytes, Math.round(rawBytes * variableFraction) + templateBytes);
-}
-
-function toSnakeCase(template: string, fallbackHash: string): string {
-  // Strip format specs, lowercase, replace non-word with _, collapse.
-  let s = template.replace(/\$\([^)]*\)/g, '');
-  s = s.trim().replace(/^(FATAL|ERROR|WARN(?:ING)?|INFO|DEBUG|TRACE|CRIT(?:ICAL)?)\b\s*/i, '');
-  s = s.replace(/([A-Za-z_][A-Za-z0-9_]*)=\$/g, '$1');
-  s = s.replace(/\$/g, '');
-  s = s.replace(/[^A-Za-z0-9]+/g, '_');
-  s = s.toLowerCase().replace(/_+/g, '_').replace(/^_+|_+$/g, '');
-  if (!s) return fallbackHash.slice(0, 16);
-  return s.slice(0, 120);
-}
-
 function groupBy<T, K>(arr: T[], key: (x: T) => K): Map<K, T[]> {
   const out = new Map<K, T[]>();
   for (const x of arr) {
@@ -1126,17 +1318,50 @@ function actionLabel(p: EnrichedPattern): string {
   return 'keep';
 }
 
+/**
+ * Quote a value for safe YAML emission. Engine templateHash values
+ * routinely contain YAML-significant chars (`[`, `]`, `{`, `}`, `*`,
+ * `?`, `&`, `!`, `#`, `:`, `|`, leading `-`, etc.) that would either
+ * parse as flow sequences/keys or break the line. JSON.stringify
+ * produces a double-quoted, backslash-escaped form that is also a
+ * valid YAML double-quoted scalar — safe across the board.
+ */
+function yamlQuote(s: string): string {
+  return JSON.stringify(s);
+}
+
 function receiverYaml(p: EnrichedPattern): string {
   const expirySec = Math.floor(Date.now() / 1000) + 30 * 86_400; // 30-day expiry
   const action = p.recommendedAction === 'mute' ? 'drop' : 'sample';
   const extra = action === 'sample' ? `    sampleRate: ${p.sampleRate}` : '';
+  // The install gate sits inside the fenced block (not as a section
+  // banner) so the prospect sees it at the exact moment they think
+  // about acting on the YAML — banners get skimmed past.
+  const installGate = '# Install 10x first (see https://docs.log10x.com/apps/cloud/optimizer/) and then save this entry to the receiver mute file.';
+  // Which engine field is this `pattern:` value? The receiver matches
+  // against it via `compactReceiverFieldNames`. We tell the user which
+  // field to configure so the rule actually fires in production.
+  let matchKeyNote: string;
+  if (p.symbolMessage && p.identity === p.symbolMessage) {
+    matchKeyNote = '# Identity below is the engine\'s `symbolMessage` (default receiver match key, no extra config needed).';
+  } else if (p.tenxHash && p.identity === p.tenxHash) {
+    matchKeyNote = '# Identity below is `tenx_hash` (patternHash). Configure: `compactReceiverFieldNames: [tenx_hash]` on the receiver.';
+  } else {
+    // p.identity fell back to templateHash. The receiver does NOT
+    // match against templateHash, so this rule is unmuteable as-is.
+    // Refuse to advertise it as a working mute entry — the comment
+    // tells the user this row needs an engine with the anchored
+    // encoded layout before mute YAML is producible.
+    matchKeyNote = '# WARNING: no engine `symbolMessage` or `tenx_hash` available for this template. The value below is the engine\'s internal `templateHash` and is NOT a valid receiver match key. Re-run with an engine that emits the anchored encoded layout (`pattern=`/`patternHash=` in apps/mcp/stdout).';
+  }
   return [
-    '# receiver mute file entry — commit to your GitOps ConfigMap',
-    `- pattern: ${p.identity}`,
+    installGate,
+    matchKeyNote,
+    `- pattern: ${yamlQuote(p.identity)}`,
     `  action: ${action}`,
     ...(extra ? [extra] : []),
     `  untilEpochSec: ${expirySec}   # auto-expires in 30d`,
-    `  reason: "${p.reasoning.replace(/"/g, '\\"')}"`,
+    `  reason: ${yamlQuote(p.reasoning)}`,
   ].join('\n');
 }
 
@@ -1355,96 +1580,6 @@ function extractLiteralPhrase(
 
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-/**
- * Pre-empt the most common trust-failure mode: prospect compares this
- * report's top-N to their SIEM's native pattern view (Datadog Patterns,
- * Splunk `cluster`, Elastic ML categorization, CloudWatch Insights
- * `pattern` keyword) and finds disagreement. Two pattern algorithms
- * built on different tokenizers will always disagree on edge cases.
- * Owning that upfront is cheaper than letting the prospect notice
- * mid-meeting and conclude the tool is broken.
- *
- * The text varies per SIEM because each native tool has its own
- * tokenization quirks and its own term for "pattern". When live API
- * integration ships per vendor (deferred to follow-up PRs), this
- * section will additionally include a side-by-side table.
- */
-function reconciliationSection(siem: SiemId): string {
-  const lines: string[] = [];
-  lines.push('## 1.5. Reconciliation with native pattern view');
-  lines.push('');
-  switch (siem) {
-    case 'datadog':
-      lines.push(
-        'Datadog has a built-in **Logs > Patterns** view that clusters log lines by template. Our top-N here will not match it line-for-line, and that is expected:'
-      );
-      lines.push('');
-      lines.push(
-        '- **Different tokenizers.** Datadog Patterns merges runs of digits and UUIDs aggressively; Log10x preserves field-level boundaries (`tenant=$ txId=$ ms=$`). The same log line resolves to a coarser Datadog pattern and a finer Log10x pattern.'
-      );
-      lines.push(
-        '- **Different sample.** Datadog Patterns runs over the indexed result set for the current Logs Explorer query. Our sample is a stratified random draw across your window. Different inputs → different distributions.'
-      );
-      lines.push(
-        '- **Different ranking.** Datadog ranks by event count; this report ranks by projected cost (count × bytes-per-event × $/GB). A high-frequency 50 B heartbeat outranks a low-frequency 5 KB stack trace in the Datadog view but not here.'
-      );
-      lines.push('');
-      lines.push(
-        'When you cross-check, expect ~7 of 10 patterns to overlap, 2-3 to differ on tokenization granularity, and rarely 1 to be missing from one side because the windows or scopes are not perfectly aligned.'
-      );
-      break;
-    case 'splunk':
-      lines.push(
-        'Splunk has a `cluster` SPL command (and the Patterns tab in the Search & Reporting app) that groups events by similarity threshold. Our top-N will not match it exactly:'
-      );
-      lines.push('');
-      lines.push(
-        '- **Different similarity model.** `cluster t=0.8` uses a Jaccard-style edit-distance threshold; Log10x extracts a structural template by identifying which positions vary. Edge-case inputs cluster differently.'
-      );
-      lines.push(
-        '- **Different sample.** `cluster` runs over the result set of the current SPL query in the UI. Our sample is a stratified random draw across your window.'
-      );
-      lines.push(
-        '- **Different ranking.** Patterns in the UI rank by event count; this report ranks by projected cost.'
-      );
-      break;
-    case 'elasticsearch':
-      lines.push(
-        'Elastic has ML-powered **categorization** in the Logs UI (`categorize_text` aggregation) that groups by message similarity. Our top-N will not match it exactly:'
-      );
-      lines.push('');
-      lines.push(
-        '- **Different categorization model.** `categorize_text` uses a Bayesian token classifier; Log10x extracts a structural template directly. Both produce templates, but the boundaries between categories differ on long-tail content.'
-      );
-      lines.push(
-        '- **Different sample.** Elastic categorization runs over the index hits for the active query. Our sample is a stratified random draw across your window.'
-      );
-      lines.push('- **Different ranking.** Categorize ranks by doc count; this report ranks by projected cost.');
-      break;
-    case 'cloudwatch':
-      lines.push(
-        'CloudWatch Insights has a **`pattern`** query keyword that groups by template. Our top-N will not match it exactly:'
-      );
-      lines.push('');
-      lines.push(
-        '- **Different sample.** CloudWatch Insights `pattern` runs over the events your Insights query selects. Our sample is a stratified random draw across your window and the same scope.'
-      );
-      lines.push(
-        '- **Different ranking.** CW Insights ranks by event count; this report ranks by projected cost (count × bytes × $/GB ingested).'
-      );
-      break;
-    default:
-      lines.push(
-        `Most log analyzers ship their own pattern/clustering view. Our top-N here is computed by a different algorithm on a different sample, so it will not match line-for-line. The two views are complementary: their pattern view ranks by event count over the result set; this report ranks by projected cost over a stratified random sample of your full window.`
-      );
-  }
-  lines.push('');
-  lines.push(
-    '_Mismatches across the two views are not bugs — they are different lenses. If you see a pattern here that you do not recognize from the native view, that is often the signal: the native view smoothed it into a coarser cluster._'
-  );
-  return lines.join('\n');
 }
 
 /**
