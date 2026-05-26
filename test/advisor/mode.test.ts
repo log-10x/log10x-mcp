@@ -28,6 +28,7 @@ function baseSnapshot(overrides: Partial<DiscoverySnapshot> = {}): DiscoverySnap
       log10xApps: [],
       storageClasses: ['gp3'],
       ingressClasses: ['alb'],
+      backendAgents: [],
       serviceAccountIrsa: [],
     },
     aws: { available: false, s3Buckets: [], sqsQueues: [], cwLogGroups: [] },

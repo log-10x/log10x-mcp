@@ -45,11 +45,11 @@ test('classifyForwarderImage: other forwarders', () => {
   );
 });
 
-test('classifyForwarderImage: vector is NOT supported (returns unknown)', () => {
-  // Vector has no log10x-repackaged image + no config-repo module,
-  // so the advisor doesn't support it today. Discovery surfaces it as
-  // unknown so the advisor falls back to "no existing forwarder".
-  assert.equal(classifyForwarderImage('timberio/vector:0.40.0-debian'), 'unknown');
+test('classifyForwarderImage: vector classifies as vector', () => {
+  // Vector is supported as a Receiver inline-overlay path (upstream
+  // vector/vector chart + tenx values overlay).
+  assert.equal(classifyForwarderImage('timberio/vector:0.40.0-debian'), 'vector');
+  assert.equal(classifyForwarderImage('datadog/vector:0.41.0'), 'vector');
 });
 
 test('classifyForwarderImage: unknown for random images', () => {

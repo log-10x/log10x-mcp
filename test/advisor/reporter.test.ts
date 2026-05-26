@@ -28,6 +28,7 @@ function baseSnapshot(overrides: Partial<DiscoverySnapshot> = {}): DiscoverySnap
       log10xApps: [],
       storageClasses: ['gp3'],
       ingressClasses: ['alb'],
+      backendAgents: [],
       serviceAccountIrsa: [],
     },
     aws: { available: false, s3Buckets: [], sqsQueues: [], cwLogGroups: [] },
@@ -48,19 +49,21 @@ const forwarders: ForwarderKind[] = [
   'otel-collector',
 ];
 
-// log10x-elastic/logstash@1.0.6 is chart-broken for sidecar mode — the
-// advisor emits a blocker for `forwarder=logstash` (no install steps).
-// Tests that iterate over forwarders and expect each to produce install
-// plans use `installableForwarders`; the logstash-blocker assertion
-// lives in its own dedicated test below.
-const installableForwarders: ForwarderKind[] = forwarders.filter((f) => f !== 'logstash');
+// Receiver wizard support status (matches src/lib/advisor/reporter.ts
+// blockers): fluentd is blocked (kustomize post-renderer not yet
+// wired), filebeat is blocked (upstream chart has no extraContainers
+// hook). Everything else is wizard-supported.
+const WIZARD_BLOCKED_RECEIVERS = new Set<ForwarderKind>(['fluentd', 'filebeat']);
+const installableForwarders: ForwarderKind[] = forwarders.filter(
+  (f) => !WIZARD_BLOCKED_RECEIVERS.has(f)
+);
 
 for (const fw of installableForwarders) {
   test(`plan for ${fw}: install + verify + teardown all present`, async () => {
     const plan = await buildReporterPlan({
       snapshot: baseSnapshot(),
       forwarder: fw,
-      apiKey: 'test-key',
+      licenseJwt: 'test-key',
       destination: 'mock',
     });
     assert.equal(plan.blockers.length, 0, `no blockers with api_key supplied; got: ${plan.blockers.join(', ')}`);
@@ -77,31 +80,36 @@ for (const fw of installableForwarders) {
   });
 }
 
-test('plan for logstash is blocked (chart-broken sidecar wiring)', async () => {
+test('Receiver plan for logstash is supported via the upstream chart sidecar overlay', async () => {
+  // The old log10x-elastic/logstash repackage was architecturally broken
+  // for sidecar mode. The new path uses the upstream elastic/logstash
+  // chart with extraContainers (pipe-string form) + secretMounts +
+  // logstashConfig + logstashPipeline. No blocker.
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
+    app: 'receiver',
     forwarder: 'logstash',
-    apiKey: 'test-key',
+    licenseJwt: 'test-key',
     destination: 'mock',
   });
-  assert.ok(
-    plan.blockers.some((b) => b.toLowerCase().includes('logstash')),
-    `expected logstash blocker; got: ${plan.blockers.join(' | ')}`
-  );
-  assert.equal(plan.install.length, 0, 'blocked plans should not emit install steps');
-  assert.ok(plan.verify.length > 0, 'verify probes still emitted');
-  assert.ok(plan.teardown.length > 0, 'teardown still emitted');
+  assert.equal(plan.blockers.length, 0, `no blockers expected; got: ${plan.blockers.join(' | ')}`);
+  const installText = JSON.stringify(plan.install);
+  assert.ok(installText.includes('elastic/logstash'), 'should reference the upstream elastic/logstash chart');
+  const content = plan.install.find((s) => s.file)!.file!.contents;
+  assert.ok(content.includes('extraContainers: |'), 'logstash uses extraContainers as a pipe-string');
+  assert.ok(content.includes('secretMounts:'), 'logstash uses secretMounts for the license');
+  assert.ok(content.includes('logstashPipeline:'), 'logstash overlay declares the ingest + destinations pipelines');
 });
 
-test('missing api_key adds a blocker', async () => {
+test('missing license_jwt adds a blocker', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
     forwarder: 'fluentbit',
   });
-  assert.ok(plan.blockers.some((b) => b.toLowerCase().includes('license key')));
+  assert.ok(plan.blockers.some((b) => b.toLowerCase().includes('license jwt')));
 });
 
-test('skipInstall means missing api_key does not block', async () => {
+test('skipInstall means missing license_jwt does not block', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
     forwarder: 'fluentbit',
@@ -132,20 +140,24 @@ test('release name collision flagged in preflight', async () => {
     forwarder: 'fluentbit',
     releaseName: 'my-reporter',
     namespace: 'logging',
-    apiKey: 'test',
+    licenseJwt: 'test',
   });
   const collision = plan.preflight.find((p) => p.name === 'release collision');
   assert.ok(collision);
   assert.equal(collision?.status, 'fail');
 });
 
-test('forwarder alignment warns when detected differs from requested', async () => {
+test('Receiver: forwarder alignment warns when detected differs from requested', async () => {
+  // Alignment check only matters for Receiver (sidecar must match the
+  // user's actual forwarder). Reporter is standalone — runs alongside
+  // any forwarder (or none), so its alignment check is always "ok".
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot({
       recommendations: { suggestedNamespace: 'demo', existingForwarder: 'fluentd', alreadyInstalled: {} },
     }),
+    app: 'receiver',
     forwarder: 'fluentbit',
-    apiKey: 'test',
+    licenseJwt: 'test',
   });
   const align = plan.preflight.find((p) => p.name === 'forwarder alignment');
   assert.ok(align);
@@ -158,7 +170,7 @@ test('splunk destination without hec_token blocks', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
     forwarder: 'fluentbit',
-    apiKey: 'test',
+    licenseJwt: 'test',
     destination: 'splunk',
   });
   assert.ok(plan.blockers.some((b) => b.toLowerCase().includes('splunk_hec_token')));
@@ -168,7 +180,7 @@ test('renderPlan for "install" omits verify and teardown', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
     forwarder: 'fluentbit',
-    apiKey: 'test',
+    licenseJwt: 'test',
   });
   const out = renderPlan(plan, 'install');
   assert.ok(out.includes('## Install'));
@@ -180,7 +192,7 @@ test('renderPlan for "teardown" omits install and verify', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
     forwarder: 'fluentbit',
-    apiKey: 'test',
+    licenseJwt: 'test',
     skipInstall: true,
     skipVerify: true,
   });
@@ -199,7 +211,7 @@ test('already-installed reporter triggers a note, not a blocker', async () => {
       },
     }),
     forwarder: 'fluentbit',
-    apiKey: 'test',
+    licenseJwt: 'test',
   });
   assert.equal(plan.blockers.length, 0);
   assert.ok(plan.notes.some((n) => n.toLowerCase().includes('already installed')));
@@ -214,7 +226,7 @@ test('values.yaml has no duplicate top-level keys (fluentd regression)', async (
     const plan = await buildReporterPlan({
       snapshot: baseSnapshot(),
       forwarder: fw,
-      apiKey: 'test',
+      licenseJwt: 'test',
       destination: 'mock',
     });
     const writeStep = plan.install.find((s) => s.file);
@@ -233,99 +245,120 @@ test('values.yaml has no duplicate top-level keys (fluentd regression)', async (
   }
 });
 
-test('every forwarder values file embeds gitToken (init-container secret mount)', async () => {
-  // Every log10x-repackaged chart mounts a tenx-git-token secret in an
-  // init container. If gitToken is empty the secret isn't created and
-  // pods hang in FailedMount. Every supported forwarder must emit a
-  // placeholder.
+test('forwarder values files do NOT embed gitToken or config.git noise', async () => {
+  // 2026-05: the gitToken / config.git block was legacy noise. Verify
+  // neither field appears in any wizard-supported receiver's rendered
+  // values. Reporter (STANDALONE_SPEC) intentionally omits gitToken too.
   for (const fw of installableForwarders) {
     const plan = await buildReporterPlan({
       snapshot: baseSnapshot(),
+      app: 'receiver',
       forwarder: fw,
-      apiKey: 'test',
+      licenseJwt: 'test',
       destination: 'mock',
     });
     const content = plan.install.find((s) => s.file)!.file!.contents;
     assert.ok(
-      content.includes('gitToken:'),
-      `${fw}: values must emit gitToken (even a placeholder) to satisfy chart init container`
+      !content.includes('gitToken:'),
+      `${fw}: rendered values should NOT emit gitToken (chart default works); got: ${content.slice(0, 400)}`
+    );
+    assert.ok(
+      !/config:\s*\n\s+git:/.test(content),
+      `${fw}: rendered values should NOT emit config.git block; got: ${content.slice(0, 400)}`
     );
   }
 });
 
-test('verify probes target the correct container per forwarder', async () => {
-  // Forwarder *identifier* (left) vs k8s *container name* in the upstream
-  // chart (right). For Fluent Bit the upstream chart names the container
-  // `fluent-bit` (with hyphen) even though our identifier is `fluentbit`.
-  const expected: Record<string, string> = {
-    'fluentbit': 'fluent-bit',
-    fluentd: 'fluentd',
-    filebeat: 'filebeat',
-    logstash: 'logstash',
-    'otel-collector': 'opentelemetry-collector',
-  };
+test('Receiver: verify probes target the log10x sidecar container', async () => {
+  // Migrated receivers all run a sidecar named `log10x`. At least one
+  // verify probe per forwarder should target it (the sidecar liveness
+  // check). The forwarder's own container is named per upstream chart
+  // convention (fluent-bit, vector, logstash, opentelemetry-collector) —
+  // probes that target it are still allowed, just not required.
   for (const fw of installableForwarders) {
     const plan = await buildReporterPlan({
       snapshot: baseSnapshot(),
+      app: 'receiver',
       forwarder: fw,
-      apiKey: 'test',
+      licenseJwt: 'test',
       destination: 'mock',
     });
     const probeCmds = plan.verify.flatMap((v) => v.commands).join(' ');
-    // At least one probe command must reference the expected container.
     assert.ok(
-      probeCmds.includes(`-c ${expected[fw]}`),
-      `${fw}: at least one verify probe should target container '${expected[fw]}', got: ${probeCmds.slice(0, 200)}`
+      probeCmds.includes('-c log10x'),
+      `${fw}: at least one verify probe should target the log10x sidecar container, got: ${probeCmds.slice(0, 400)}`
     );
   }
 });
 
-test('chart refs are the published names (no `-10x` suffix drift)', async () => {
-  const expected: Record<string, string> = {
-    'fluentbit': 'log10x-fluent/fluent-bit',
-    fluentd: 'log10x-fluent/fluentd',
-    filebeat: 'log10x-elastic/filebeat',
-    logstash: 'log10x-elastic/logstash',
-    'otel-collector': 'log10x-otel/opentelemetry-collector',
+test('Receiver: chart refs are the right published names', async () => {
+  // Receiver migration in flight: migrated forwarders target the UPSTREAM
+  // chart with a sidecar overlay (the new model per receiver/deploy.md);
+  // pre-migration forwarders still target log10x repackages. Reporter
+  // has its own chart (log10x/reporter-10x) and skips per-forwarder
+  // routing entirely.
+  const upstream: Partial<Record<ForwarderKind, string>> = {
+    'fluentbit': 'fluent/fluent-bit',
+    'otel-collector': 'open-telemetry/opentelemetry-collector',
+    'vector': 'vector/vector',
+    'logstash': 'elastic/logstash',
   };
   for (const fw of installableForwarders) {
     const plan = await buildReporterPlan({
       snapshot: baseSnapshot(),
+      app: 'receiver',
       forwarder: fw,
-      apiKey: 'test',
+      licenseJwt: 'test',
       destination: 'mock',
     });
     const installText = JSON.stringify(plan.install);
+    const expected = upstream[fw];
     assert.ok(
-      installText.includes(expected[fw]),
-      `${fw}: install plan must reference chart '${expected[fw]}', not found in: ${installText.slice(0, 400)}`
+      expected && installText.includes(expected),
+      `${fw}: install plan must reference chart '${expected}', not found in: ${installText.slice(0, 400)}`
     );
   }
 });
 
-test('values.yaml content is syntactically close to YAML', async () => {
-  // Smoke-test: generated values file has expected shape for each
-  // supported forwarder. All 5 use the embedded-image pattern with
-  // a top-level `tenx:` block.
+test('Receiver: values.yaml content has the expected shape per forwarder', async () => {
+  // Migration in flight: migrated forwarders emit a sidecar overlay
+  // (extraContainers/extraVolumes, no top-level `tenx:` block, license
+  // via Secret-mounted file). Pre-migration forwarders still emit the
+  // embedded-image `tenx:` block. (Reporter uses a flat layout — covered
+  // by the dedicated STANDALONE_SPEC test.)
+  const migrated = new Set<ForwarderKind>(['fluentbit', 'otel-collector', 'vector', 'logstash']);
   for (const fw of installableForwarders) {
     const plan = await buildReporterPlan({
       snapshot: baseSnapshot(),
+      app: 'receiver',
       forwarder: fw,
-      apiKey: 'test-key',
+      licenseJwt: 'test-key',
       destination: 'mock',
     });
     const writeStep = plan.install.find((s) => s.file);
     assert.ok(writeStep, `${fw} should have a file-write step`);
     const content = writeStep!.file!.contents;
-    assert.ok(content.includes('tenx:'), `${fw} file should declare tenx block`);
-    assert.ok(content.includes('apiKey: "test-key"'), `${fw} file should embed api key`);
+    if (migrated.has(fw)) {
+      assert.ok(content.includes('extraContainers:'), `${fw} should declare extraContainers (sidecar overlay)`);
+      assert.ok(content.includes('image: log10x/edge-10x'), `${fw} should mount the log10x/edge-10x sidecar`);
+      assert.ok(
+        content.includes('extraVolumes:') || content.includes('secretMounts:'),
+        `${fw} should mount the license Secret via extraVolumes or secretMounts`
+      );
+      assert.ok(content.includes('TENX_LICENSE_FILE'), `${fw} should set TENX_LICENSE_FILE in the sidecar env`);
+      assert.ok(!content.includes('licenseJwt: "test-key"'), `${fw} should NOT embed the JWT inline (license-Secret pattern)`);
+    } else {
+      assert.ok(content.includes('tenx:'), `${fw} file should declare tenx block (legacy embedded-image shape)`);
+      assert.ok(content.includes('licenseJwt: "test-key"'), `${fw} file should embed license JWT (legacy shape)`);
+    }
   }
 });
 
-test('shape=standalone installs reporter-10x regardless of detected forwarder', async () => {
-  // Standalone path: the chart is reporter-10x, not the log10x-repackaged
-  // forwarder chart. The detected forwarder (fluent-bit here) stays in
-  // the plan as context but does NOT drive chart selection.
+test('Reporter installs reporter-10x regardless of detected forwarder', async () => {
+  // Production intent (2026-05): Reporter is always the reporter-10x
+  // chart, parallel to whatever forwarder the user is running. The
+  // detected forwarder stays in the plan as context but does NOT drive
+  // chart selection.
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot({
       recommendations: {
@@ -334,59 +367,45 @@ test('shape=standalone installs reporter-10x regardless of detected forwarder', 
         alreadyInstalled: {},
       },
     }),
-    shape: 'standalone',
     forwarder: 'fluentbit',
-    apiKey: 'test-key',
+    licenseJwt: 'test-key',
   });
   assert.equal(plan.blockers.length, 0);
   const installText = JSON.stringify(plan.install);
   assert.ok(
     installText.includes('log10x/reporter-10x'),
-    `standalone install should use reporter-10x chart; got: ${installText.slice(0, 400)}`
+    `Reporter install should use reporter-10x chart; got: ${installText.slice(0, 400)}`
   );
   assert.ok(
     !installText.includes('log10x-fluent/fluent-bit'),
-    'standalone install should NOT reference the log10x-repackaged fluent-bit chart'
+    'Reporter install should NOT reference the log10x-repackaged fluent-bit chart'
   );
-  // Values file uses the flat reporter-10x layout: top-level log10xApiKey.
+  // Values file uses the flat reporter-10x layout: top-level
+  // log10xLicenseJwt, not nested under `tenx:`.
   const valuesContent = plan.install.find((s) => s.file)?.file?.contents ?? '';
-  assert.ok(valuesContent.includes('log10xApiKey:'), 'standalone values should use reporter-10x flat layout');
-});
-
-test('shape=standalone + app=receiver is blocked', async () => {
-  const plan = await buildReporterPlan({
-    snapshot: baseSnapshot(),
-    shape: 'standalone',
-    app: 'receiver',
-    apiKey: 'test',
-  });
-  // Blocker must call out that standalone is reporter-only.
   assert.ok(
-    plan.blockers.some(
-      (b) => b.toLowerCase().includes('standalone') && b.toLowerCase().includes('reporter')
-    ),
-    `expected standalone-is-reporter-only blocker; got: ${plan.blockers.join(' | ')}`
+    valuesContent.includes('log10xLicenseJwt:'),
+    'Reporter values should use reporter-10x flat layout (top-level log10xLicenseJwt)'
   );
-  assert.equal(plan.install.length, 0, 'blocked plan should not emit install steps');
 });
 
-test('shape=standalone + optimize=true is blocked', async () => {
+test('Reporter ignores optimize=true with a blocker (Receiver-only feature)', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
-    shape: 'standalone',
-    apiKey: 'test',
+    app: 'reporter',
+    licenseJwt: 'test',
     optimize: true,
   });
   assert.ok(
-    plan.blockers.some((b) => b.toLowerCase().includes('optimize') && b.toLowerCase().includes('standalone')),
-    `expected standalone+optimize blocker; got: ${plan.blockers.join(' | ')}`
+    plan.blockers.some((b) => b.toLowerCase().includes('optimize') && b.toLowerCase().includes('receiver')),
+    `expected reporter+optimize blocker; got: ${plan.blockers.join(' | ')}`
   );
 });
 
-test('shape=standalone + logstash does NOT emit the chart-broken blocker', async () => {
-  // The logstash chart-broken blocker only applies to inline (it's the
-  // inline sidecar layout that's broken). Standalone sidesteps the
-  // broken chart entirely by running reporter-10x in parallel.
+test('Reporter with detected logstash deploys cleanly (sidesteps the chart-broken bug)', async () => {
+  // The logstash chart-broken bug applies to Receiver (sidecar inside
+  // logstash). Reporter runs in parallel via reporter-10x, so it
+  // sidesteps the broken chart entirely.
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot({
       recommendations: {
@@ -395,9 +414,8 @@ test('shape=standalone + logstash does NOT emit the chart-broken blocker', async
         alreadyInstalled: {},
       },
     }),
-    shape: 'standalone',
     forwarder: 'logstash',
-    apiKey: 'test',
+    licenseJwt: 'test',
   });
-  assert.equal(plan.blockers.length, 0, `standalone should sidestep logstash blocker; got: ${plan.blockers.join(' | ')}`);
+  assert.equal(plan.blockers.length, 0, `Reporter should sidestep logstash blocker; got: ${plan.blockers.join(' | ')}`);
 });

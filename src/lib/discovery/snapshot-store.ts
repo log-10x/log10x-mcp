@@ -15,10 +15,12 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { DiscoverySnapshot } from './types.js';
+import type { DiscoverySnapshot, WizardSession } from './types.js';
 
 interface Entry {
   snapshot: DiscoverySnapshot;
+  /** Optional wizard session — accumulated user answers across turns. */
+  session?: WizardSession;
   expiresAt: number;
 }
 
@@ -44,11 +46,13 @@ function evictExpired(now: number): void {
     const keys = Array.from(store.keys());
     for (let i = 0; i < keys.length - MAX_ENTRIES; i++) store.delete(keys[i]);
   }
-  // Also sweep the disk tier.
+  // Also sweep the disk tier. Catches both snapshot files (`<id>.json`)
+  // and their paired session files (`<id>.session.json`).
   try {
     const dir = diskDir();
     for (const name of readdirSync(dir)) {
-      if (!name.startsWith('disc-') || !name.endsWith('.json')) continue;
+      if (!name.startsWith('disc-')) continue;
+      if (!name.endsWith('.json') && !name.endsWith('.session.json')) continue;
       const p = join(dir, name);
       try {
         const mtime = statSync(p).mtimeMs;
@@ -105,11 +109,69 @@ export function getSnapshot(id: string): DiscoverySnapshot | undefined {
     }
     const raw = readFileSync(p, 'utf8');
     const snap = JSON.parse(raw) as DiscoverySnapshot;
-    store.set(id, { snapshot: snap, expiresAt: mtime + TTL_MS });
+    // Also try to load any wizard session that was persisted alongside.
+    let session: WizardSession | undefined;
+    try {
+      const sp = join(diskDir(), `${id}.session.json`);
+      const sraw = readFileSync(sp, 'utf8');
+      session = JSON.parse(sraw) as WizardSession;
+    } catch {
+      // No session file is the common case for snapshots that never
+      // entered the wizard flow.
+    }
+    store.set(id, { snapshot: snap, session, expiresAt: mtime + TTL_MS });
     return snap;
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Get the wizard session attached to a snapshot, or undefined if no
+ * session has been started yet. The session shares the snapshot's TTL.
+ */
+export function getWizardSession(id: string): WizardSession | undefined {
+  // Touch via getSnapshot to refresh the memory cache from disk if needed,
+  // then read the session field from the entry.
+  const snap = getSnapshot(id);
+  if (!snap) return undefined;
+  return store.get(id)?.session;
+}
+
+/**
+ * Merge a partial answer into the wizard session for a snapshot. Creates
+ * the session on first call. Returns the merged session, or undefined if
+ * the snapshot is missing/expired (caller should re-run discovery).
+ *
+ * Merge semantics: shallow `{...existing, ...partial}`. Explicit
+ * `undefined` in `partial` does NOT clear a field; pass `null`-ish values
+ * via a follow-up `clearWizardField` call when we need explicit reset.
+ */
+export function updateWizardSession(
+  snapshotId: string,
+  partial: Partial<Omit<WizardSession, 'snapshotId' | 'updatedAt'>>
+): WizardSession | undefined {
+  const snap = getSnapshot(snapshotId);
+  if (!snap) return undefined;
+  const entry = store.get(snapshotId);
+  if (!entry) return undefined;
+  const merged: WizardSession = {
+    ...(entry.session ?? { snapshotId, updatedAt: new Date().toISOString() }),
+    ...partial,
+    snapshotId,
+    updatedAt: new Date().toISOString(),
+  };
+  entry.session = merged;
+  // Persist alongside the snapshot on disk so a CLI shim invocation can
+  // resume the session. Best-effort — disk failures don't break the
+  // in-memory flow.
+  try {
+    const dir = diskDir();
+    writeFileSync(join(dir, `${snapshotId}.session.json`), JSON.stringify(merged));
+  } catch {
+    // disk write failure is non-fatal
+  }
+  return merged;
 }
 
 /** For tests. Does NOT wipe the disk tier — tests use process.env to redirect it. */

@@ -17,10 +17,15 @@
  * write-back events to encode); `receiver` exposes the flags directly.
  */
 
-import type { DiscoverySnapshot, ForwarderKind } from '../discovery/types.js';
+import type {
+  DiscoverySnapshot,
+  ForwarderKind,
+  MetricsBackendKind,
+  BackendCredentialConfig,
+} from '../discovery/types.js';
 import type { AdvisePlan, PlanStep, VerifyProbe, PreflightCheck, GitopsExplainer } from './types.js';
 import {
-  REPORTER_FORWARDER_SPECS,
+  RECEIVER_FORWARDER_SPECS,
   STANDALONE_SPEC,
   type OutputDestination,
   type ForwarderSpec,
@@ -44,23 +49,32 @@ export type DeploymentShape = 'inline' | 'standalone';
 
 export interface ReporterAdviseArgs {
   snapshot: DiscoverySnapshot;
-  /** Which app this plan installs. Default: 'reporter'. */
-  app?: AdvisorApp;
   /**
-   * Deployment shape. Default: 'inline'. When 'standalone', the plan
-   * installs reporter-10x alongside the user's forwarder instead of
-   * replacing it — `forwarder` is kept in the plan as detected context
-   * only and receiver/optimize combinations become blockers.
+   * Which app this plan installs. Default: 'reporter'.
+   * - 'reporter' → standalone dedicated fluent-bit DaemonSet, read-only
+   * - 'receiver' → sidecar inside the user's existing forwarder
+   * Deployment shape is derived from app; no `shape` arg.
    */
-  shape?: DeploymentShape;
+  app?: AdvisorApp;
   /** Forwarder to target. If omitted, uses the snapshot's recommendation. */
   forwarder?: ForwarderKind;
   /** Helm release name. Default: `my-${app}`. */
   releaseName?: string;
   /** Target namespace. Default: snapshot's suggestedNamespace. */
   namespace?: string;
-  /** Log10x license key. Required for a complete install plan. */
-  apiKey?: string;
+  /**
+   * Log10x license JWT — mints from `POST /api/v1/license/demo` (anonymous)
+   * or `POST /api/v1/license` (Auth0-authed). Maps to the chart's
+   * `log10xLicenseJwt` value. Required for a complete install plan.
+   */
+  licenseJwt?: string;
+  /**
+   * True when the JWT came from the demo endpoint. Drives the secret-vs-inline
+   * decision in the chart values renderer: demo licenses inline the JWT
+   * (one-step setup, transient); real licenses point the chart at an
+   * out-of-band Kubernetes Secret the user creates before `helm upgrade`.
+   */
+  isDemoLicense?: boolean;
   /** Output destination flavor. Default: 'mock' (safe for dogfooding). */
   destination?: OutputDestination;
   /** Host for non-mock destinations (ES endpoint, Splunk HEC host, etc.). */
@@ -84,6 +98,39 @@ export interface ReporterAdviseArgs {
    * definition).
    */
   readOnly?: boolean;
+  /**
+   * Metrics backends the engine emits TenXSummary to. Multi-destination
+   * — a user can report to log10x SaaS AND their own Datadog/Prom/etc.
+   * simultaneously. Each entry maps to a `@run/output/metric/<backend>`
+   * CLI arg appended to the engine's launch args, plus any vendor-
+   * specific env vars (DD_API_KEY for datadog, ELASTIC_HOST for elastic,
+   * etc.). Default: `['log10x']`. When `airgapped=true`, `'log10x'`
+   * MUST NOT be in this list (engine sends nothing to log10x.com).
+   */
+  backends?: MetricsBackendKind[];
+  /**
+   * Per-backend credential configuration the wizard collected: secret
+   * name + plain-value overrides. The renderer threads this into the
+   * `tenx.extraEnv` block as `valueFrom.secretKeyRef` references.
+   * When unset for a selected backend, the renderer falls back to
+   * `<backend>-credentials` for the secret name and per-backend defaults
+   * for plain values.
+   */
+  backendCredentials?: Partial<Record<MetricsBackendKind, BackendCredentialConfig>>;
+  /**
+   * Run the engine fully airgapped — no outbound calls to log10x.com
+   * (no telemetry, no online license check, no update probes). Engine
+   * emits only to the user-configured `backend`. Reporter chart maps
+   * this to top-level `airgapped: true`; Receiver wires it via the
+   * `TENX_AIRGAPPED=true` env var on the engine sidecar.
+   *
+   * Hard product constraint surfaced at plan-render time, NOT blocked:
+   * demo / limited licenses cannot actually run airgapped — the engine
+   * logs a warning and downgrades to online mode. The wizard surfaces
+   * this softly and lets the user proceed without airgapped if they
+   * decline to sign in.
+   */
+  airgapped?: boolean;
   /** Skip install — for users who just want verify or teardown guidance. */
   skipInstall?: boolean;
   /** Skip teardown. */
@@ -96,10 +143,13 @@ export interface ReporterAdviseArgs {
 export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<AdvisePlan> {
   const snapshot = args.snapshot;
   const app: AdvisorApp = args.app ?? 'reporter';
-  const shape: DeploymentShape = args.shape ?? 'inline';
-  // Reporter app is sugar for "Receiver + readOnly=true"; the chart
-  // format unified around feature flags so there's nothing else to
-  // distinguish.
+  // Deployment shape is determined by app, not user choice:
+  //   - reporter → standalone dedicated fluent-bit DaemonSet (zero-touch,
+  //     production intent)
+  //   - receiver → inline sidecar inside the user's existing forwarder
+  // The `shape` arg is no longer accepted; it's derived. Keeping it as a
+  // local for downstream code that reads it.
+  const shape: DeploymentShape = app === 'reporter' ? 'standalone' : 'inline';
   const effectiveReadOnly = app === 'reporter' ? true : (args.readOnly ?? false);
   const effectiveOptimize = args.optimize ?? false;
   const releaseName = args.releaseName ?? `my-${app}`;
@@ -112,71 +162,59 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   const forwarder: ForwarderKind =
     forwarderCandidate === 'unknown' ? 'fluentbit' : forwarderCandidate;
 
-  // Spec selection splits on shape, not on forwarder kind. Standalone
-  // always resolves to the reporter-10x spec regardless of what
-  // forwarder was detected — the user's forwarder is kept as context
-  // in the plan output but does not drive chart selection.
+  // Reporter → STANDALONE_SPEC (always). Receiver → per-forwarder spec.
   const spec: ForwarderSpec | undefined =
-    shape === 'standalone'
+    app === 'reporter'
       ? STANDALONE_SPEC
-      : REPORTER_FORWARDER_SPECS[forwarder as Exclude<ForwarderKind, 'unknown'>];
+      : RECEIVER_FORWARDER_SPECS[forwarder as Exclude<ForwarderKind, 'unknown'>];
 
   const blockers: string[] = [];
   if (!spec) {
     blockers.push(
-      `No forwarder template for kind '${forwarder}'. Pass forwarder ∈ ${Object.keys(REPORTER_FORWARDER_SPECS).join('|')}.`
+      `No forwarder template for kind '${forwarder}'. Pass forwarder ∈ ${Object.keys(RECEIVER_FORWARDER_SPECS).join('|')}.`
     );
   }
-  // Shape=standalone only supports reporter (report-only). The
-  // reporter-10x chart has no hook into the user's forwarder output,
-  // so it can't filter/compact events — only emit metrics.
-  if (shape === 'standalone' && app === 'receiver') {
+  if (app === 'reporter' && args.optimize) {
     blockers.push(
-      'shape=standalone is only valid for app=reporter. The `log10x/reporter-10x` chart bundles its own fluent-bit + tenx-edge and reads container logs in parallel to your existing forwarder — it has no path to write filtered events back through that forwarder. Either switch to shape=inline (replaces your forwarder with a log10x-repackaged version) or app=reporter.'
-    );
-  }
-  if (shape === 'standalone' && args.optimize) {
-    blockers.push(
-      'optimize=true requires shape=inline. Compact encoding rewrites events emitted back through the forwarder — standalone runs alongside your forwarder without touching its event path, so there are no events to encode. Drop `optimize` or switch to shape=inline.'
+      'optimize=true is a Receiver-app feature (it encodes events emitted back through the forwarder). The Reporter app is standalone read-only — it only publishes aggregated TenXSummary metrics. Drop `optimize` or switch to `app=receiver`.'
     );
   }
   if (app === 'reporter' && args.readOnly) {
     blockers.push(
-      'mode=readonly is a Receiver-app concept. The Reporter app is read-only by definition (it never writes events back through the forwarder — it only publishes TenXSummary metrics). Drop `mode` or switch to `app=receiver` (Receiver).'
+      'mode=readonly is a Receiver-app concept. The Reporter app is read-only by definition. Drop `mode` or switch to `app=receiver`.'
     );
   }
   if (args.optimize && args.readOnly) {
     blockers.push(
-      'optimize=true is a no-op when mode=readonly. Compact encoding only matters when events are written back through the forwarder; in read-only mode the receiver emits metrics only and never writes events back. Pick one: optimize=true (read-write compact) OR mode=readonly (passive metrics).'
+      'optimize=true is a no-op when mode=readonly. Compact encoding only matters when events are written back through the forwarder; in read-only mode the receiver emits metrics only. Pick one: optimize=true OR mode=readonly.'
     );
   }
-  // logstash chart sidecar wiring is architecturally broken: tenx needs
-  // to be a child process of logstash (spawned by the `pipe` output
-  // plugin), but the chart runs tenx as an independent side container
-  // reading from its own stdin. Pipeline inits, then shuts down after
-  // ~9s with no input. Keep the blocker until the chart is refactored
-  // to use the pipe-output plugin launch pattern.
-  if (shape === 'inline' && spec && forwarder === 'logstash') {
+  // logstash receiver path is now supported via the upstream
+  // elastic/logstash chart + sidecar overlay (extraContainers as a
+  // pipe-string, secretMounts for the license, logstashConfig +
+  // logstashPipeline for the two-pipeline driver). The old log10x-elastic
+  // chart that ran tenx as a stdin-fed container was the broken path;
+  // it's gone. No blocker.
+
+  // fluentd receiver path is not yet wired. The upstream fluent/fluentd
+  // chart has no extraContainers hook, so the sidecar is injected via a
+  // kustomize post-renderer (see receiver/deploy.md fluentd section).
+  // That requires the wizard to emit FOUR files alongside the values
+  // overlay — kustomization.yaml, sidecar-patch.yaml, post-render.sh,
+  // post-render.cmd — which the install plan's single-file `file:` step
+  // model can't currently express. Block until that's wired.
+  if (app === 'receiver' && spec && forwarder === 'fluentd') {
     blockers.push(
-      "The log10x-elastic/logstash chart is architecturally broken for sidecar mode: tenx needs to be a child process of logstash (spawned by the `pipe` output plugin), but the chart runs it as a separate container reading from its own stdin. Pipeline inits then shuts down after ~9s with no input. Use fluentbit, fluentd, filebeat, or otel-collector, OR deploy `log10x/reporter-10x` (non-invasive, parallel DaemonSet) alongside your existing logstash."
+      "Fluentd receiver path isn't wired into the wizard yet. The upstream `fluent/fluentd` chart needs a kustomize post-renderer overlay (the sidecar is injected via a Strategic Merge Patch on the Deployment, not via an extraContainers values field). See `mksite/docs/apps/receiver/deploy.md` Fluentd section for the canonical setup — follow it by hand for now, or use a different forwarder (fluent-bit / otel-collector / vector / logstash all wizard-supported), or deploy the standalone Reporter alongside your existing Fluentd."
     );
   }
-  if (!args.apiKey && !args.skipInstall) {
+  if (!args.licenseJwt && !args.skipInstall) {
     blockers.push(
-      'Log10x license key is required to produce an install plan. Pass `api_key` or set the snapshot-wide default and re-run. (Teardown and verify plans work without it.)'
+      'Log10x license JWT is required to produce an install plan. Pass `license_jwt` (fetch one from `POST /api/v1/license/demo` for anonymous demo, or `POST /api/v1/license` with an Auth0 access token for a user-scoped one). Teardown and verify plans work without it.'
     );
   }
   if (destination === 'splunk' && !args.splunkHecToken && !args.skipInstall) {
     blockers.push('destination=splunk requires `splunk_hec_token`.');
-  }
-  // optimize=true path: every forwarder chart deploys the Receiver and
-  // exposes the optimize feature flag as `tenx.optimize: true`. No
-  // per-forwarder blocker remains (logstash is blocked above for the
-  // sidecar wiring bug, which applies regardless of optimize).
-  if (shape === 'inline' && args.optimize && app === 'reporter') {
-    blockers.push(
-      'optimize=true is a Receiver-app feature (it encodes events emitted back through the forwarder). The Reporter app does not emit events back through the forwarder — it only publishes aggregated TenXSummary metrics. Drop `optimize` or switch to `app=receiver`.'
-    );
   }
 
   const preflight = await runPreflight(
@@ -185,7 +223,7 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
     releaseName,
     namespace,
     spec,
-    shape
+    app
   );
 
   const notes: string[] = [];
@@ -213,27 +251,19 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   // chart level. The mock destination the advisor ships uses
   // `output.file: /tmp/tenx-mock-*`, which is safe; any non-stdout
   // output (elasticsearch, splunk, logstash, kafka, etc.) is also safe.
-  if (shape === 'inline' && forwarder === 'filebeat') {
+  if (app === 'receiver' && forwarder === 'filebeat') {
     notes.push(
       "Filebeat constraint: **do not configure `output.console`** in `filebeat.yml`. Filebeat's tenx integration uses its stdout as the pipe to the 10x engine (baked into the `log10x/filebeat-10x` Dockerfile entrypoint: `filebeat 2>&1 | tenx-edge run …`). Any output that writes to stdout corrupts that pipe. Use `output.elasticsearch`, `output.file`, `output.logstash`, `output.kafka`, etc. — the mock destination used by this plan is `output.file` (safe by default)."
     );
   }
-  // Surface the non-invasive alternative only when the plan is inline.
-  // Once shape='standalone' is selected this IS the non-invasive path,
-  // so re-recommending it would be noise.
-  if (shape === 'inline' && app === 'reporter') {
-    notes.push(
-      'Alternative: the `log10x/reporter-10x` chart deploys a standalone non-invasive DaemonSet (fluent-bit + tenx-edge) that tails the same container logs your existing forwarder reads, without replacing it. Call `log10x_advise_reporter` with `shape: "standalone"` or use `log10x_advise_install` to compare paths. Recommended when you don\'t want the 10x logic running inside your production forwarder.'
-    );
-  }
-  if (shape === 'standalone') {
+  if (app === 'reporter') {
     // Prefer the forwarder arg (what the caller is actually targeting /
     // what mode.ts picked) over the snapshot's existingForwarder field,
     // which may name a DIFFERENT workload than the one the plan is for
     // when the cluster runs multiple forwarder DaemonSets.
     const fwLabel = args.forwarder ?? snapshot.recommendations.existingForwarder ?? 'no forwarder';
     notes.push(
-      `This plan installs **standalone** — \`log10x/reporter-10x\` runs as a parallel DaemonSet alongside your existing ${fwLabel} deployment. No changes to your forwarder; the chart bundles its own fluent-bit to tail /var/log/containers/*.log. Report-mode only (metrics). For filtering/compaction you'd install the \`log10x-fluent/*\` inline variant in place of your forwarder.`
+      `This is the **standalone Reporter** install — a dedicated fluent-bit DaemonSet (\`log10x/reporter-10x\`) running alongside your existing ${fwLabel}. Zero touch to your forwarder; the chart bundles its own fluent-bit to tail /var/log/containers/*.log. Read-only — metrics only. For filtering/compaction install the Receiver as a sidecar in your existing forwarder.`
     );
   }
 
@@ -274,7 +304,7 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
     notes,
     blockers,
     gitopsExplainer:
-      app === 'receiver' && shape === 'inline' && blockers.length === 0
+      app === 'receiver' && blockers.length === 0
         ? buildCompactReceiverGitopsExplainer({ optimize: args.optimize === true })
         : undefined,
   };
@@ -341,9 +371,8 @@ async function runPreflight(
   releaseName: string,
   namespace: string,
   spec: ForwarderSpec | undefined,
-  shape: DeploymentShape
+  app: AdvisorApp
 ): Promise<PreflightCheck[]> {
-  const chartAvail = spec?.chartAvailability;
   const checks: PreflightCheck[] = [];
 
   // 1. Cluster reachable.
@@ -366,18 +395,17 @@ async function runPreflight(
   });
 
   // 3. Existing forwarder alignment.
-  // Standalone runs ALONGSIDE the user's forwarder by design — any
-  // detected forwarder is fine (even a mismatch), no forwarder is fine
-  // too (reporter-10x brings its own fluent-bit). Only inline plans
-  // care about alignment.
+  // Reporter runs ALONGSIDE the user's forwarder (standalone DaemonSet),
+  // so any detected forwarder is fine — even none (the chart bundles its
+  // own fluent-bit). Only the Receiver (sidecar) cares about alignment.
   const existing = snapshot.recommendations.existingForwarder;
-  if (shape === 'standalone') {
+  if (app === 'reporter') {
     checks.push({
       name: 'forwarder alignment',
       status: 'ok',
       detail: existing
-        ? `detected \`${existing}\` — reporter-10x runs in parallel, no conflict`
-        : 'no existing forwarder detected — reporter-10x bundles its own fluent-bit',
+        ? `detected \`${existing}\` — Reporter runs in parallel, no conflict`
+        : 'no existing forwarder detected — Reporter bundles its own fluent-bit',
     });
   } else {
     checks.push({
@@ -420,12 +448,12 @@ async function runPreflight(
     });
   }
 
-  // 6. API key hint.
+  // 6. License JWT hint.
   checks.push({
-    name: 'license key',
+    name: 'license JWT',
     status: 'unknown',
     detail:
-      'bring your own log10x license key via the `api_key` argument. The plan fails closed without it.',
+      'bring your own log10x license JWT via the `license_jwt` argument (mint via `POST /api/v1/license/demo` or `POST /api/v1/license`). The plan fails closed without it.',
   });
 
   return checks;
@@ -485,19 +513,38 @@ async function probeChartAvailability(spec: ForwarderSpec): Promise<PreflightChe
 }
 
 function buildInstallSteps(opts: {
-  spec: NonNullable<(typeof REPORTER_FORWARDER_SPECS)[keyof typeof REPORTER_FORWARDER_SPECS]>;
+  spec: NonNullable<(typeof RECEIVER_FORWARDER_SPECS)[keyof typeof RECEIVER_FORWARDER_SPECS]>;
   releaseName: string;
   namespace: string;
-  apiKey?: string;
+  licenseJwt?: string;
+  isDemoLicense?: boolean;
   destination: OutputDestination;
   outputHost?: string;
   splunkHecToken?: string;
   app: AdvisorApp;
   optimize?: boolean;
   readOnly?: boolean;
+  backends?: MetricsBackendKind[];
+  backendCredentials?: Partial<Record<MetricsBackendKind, BackendCredentialConfig>>;
+  airgapped?: boolean;
 }): PlanStep[] {
-  const { spec, releaseName, namespace, destination, outputHost, splunkHecToken, optimize, readOnly } = opts;
-  const apiKey = opts.apiKey ?? 'REPLACE_WITH_LICENSE_KEY';
+  const {
+    spec,
+    releaseName,
+    namespace,
+    destination,
+    outputHost,
+    splunkHecToken,
+    optimize,
+    readOnly,
+    backends,
+    backendCredentials,
+    airgapped,
+    isDemoLicense,
+  } = opts;
+  const licenseJwt = opts.licenseJwt ?? 'REPLACE_WITH_LICENSE_JWT';
+  const licenseSecretName = 'log10x-license';
+  const licenseSecretKey = 'license-jwt';
   const steps: PlanStep[] = [];
 
   steps.push({
@@ -516,13 +563,42 @@ function buildInstallSteps(opts: {
     commands: [`kubectl create namespace ${namespace} --dry-run=client -o yaml | kubectl apply -f -`],
   });
 
+  // Real (user) licenses are kept out of values.yaml — the chart reads them
+  // from an out-of-band Secret the user creates here. Demo licenses skip
+  // this step (transient JWT, fine inline).
+  if (isDemoLicense === false) {
+    steps.push({
+      title: 'Create license Secret',
+      rationale: `Your license JWT must not live in values.yaml. The chart's \`licenseSecret\` block points the engine at this Secret — create it once, replace the JWT later by re-applying. The \`--from-literal\` approach below puts the JWT on the command line; if shell-history exposure matters, write it to a file first with \`umask 077\` and use \`--from-file=${licenseSecretKey}=<path>\`.`,
+      commands: [
+        `kubectl create secret generic ${licenseSecretName} \\
+  -n ${namespace} \\
+  --from-literal=${licenseSecretKey}='${licenseJwt}'`,
+      ],
+    });
+  }
+
   const valuesFile = `${releaseName}-values.yaml`;
   steps.push({
     title: 'Write Helm values',
     rationale: `Tenx config + ${spec.label}-specific output destination (\`${destination}\`).`,
     file: {
       path: valuesFile,
-      contents: spec.renderValues({ apiKey, releaseName, destination, outputHost, splunkHecToken, optimize, readOnly }),
+      contents: spec.renderValues({
+        licenseJwt,
+        isDemoLicense,
+        licenseSecretName,
+        licenseSecretKey,
+        releaseName,
+        destination,
+        outputHost,
+        splunkHecToken,
+        optimize,
+        readOnly,
+        backends,
+        backendCredentials,
+        airgapped,
+      }),
       language: 'yaml',
     },
     commands: [],

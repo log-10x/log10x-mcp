@@ -9,7 +9,7 @@
 
 import { z } from 'zod';
 import { getSnapshot } from '../lib/discovery/snapshot-store.js';
-import { buildReporterPlan, type DeploymentShape } from '../lib/advisor/reporter.js';
+import { buildReporterPlan } from '../lib/advisor/reporter.js';
 import { renderPlan } from '../lib/advisor/render.js';
 import type { ForwarderKind } from '../lib/discovery/types.js';
 import type { OutputDestination } from '../lib/advisor/reporter-forwarders.js';
@@ -21,17 +21,11 @@ export const adviseReporterSchema = {
   snapshot_id: z
     .string()
     .describe('ID returned by `log10x_discover_env`. The snapshot is cached for 30 min.'),
-  shape: z
-    .enum(['inline', 'standalone'])
-    .optional()
-    .describe(
-      'Deployment shape. Default: `inline` — installs a log10x-repackaged version of the user\'s forwarder chart (tenx baked in), replacing the existing deployment. `standalone` — installs `log10x/reporter-10x` as a parallel DaemonSet alongside the user\'s forwarder (zero-touch, report-mode only). When unsure which to pick, call `log10x_advise_install` first.'
-    ),
   forwarder: z
-    .enum(['fluentbit', 'fluentd', 'filebeat', 'logstash', 'otel-collector'])
+    .enum(['fluentbit', 'fluentd', 'filebeat', 'logstash', 'otel-collector', 'vector'])
     .optional()
     .describe(
-      'Forwarder to target. Drives chart selection when shape=inline. When shape=standalone, stays in the plan as detected context only. If omitted, uses the forwarder detected in the snapshot (falls back to fluentbit when none is detected).'
+      'Existing forwarder kind, kept in the plan as detected context only — Reporter is a standalone dedicated fluent-bit DaemonSet that runs alongside any forwarder (or none). If omitted, uses the forwarder detected in the snapshot.'
     ),
   release_name: z
     .string()
@@ -43,10 +37,10 @@ export const adviseReporterSchema = {
     .describe(
       'Target namespace. Default: snapshot.recommendations.suggestedNamespace (usually `logging` or an existing forwarder namespace).'
     ),
-  api_key: z
+  license_jwt: z
     .string()
     .optional()
-    .describe('Log10x license key. Required for a complete install plan; verify/teardown plans work without it.'),
+    .describe('Log10x license JWT — mints from `POST /api/v1/license/demo` (anonymous) or `POST /api/v1/license` (Auth0-authed). Maps to the chart\'s `log10xLicenseJwt` value. Required for a complete install plan; verify/teardown plans work without it.'),
   destination: z
     .enum(['mock', 'elasticsearch', 'splunk', 'datadog', 'cloudwatch'])
     .optional()
@@ -98,11 +92,10 @@ export async function executeAdviseReporter(args: AdviseReporterArgs): Promise<s
 
   const plan = await buildReporterPlan({
     snapshot,
-    shape: args.shape as DeploymentShape | undefined,
     forwarder: args.forwarder as ForwarderKind | undefined,
     releaseName: args.release_name,
     namespace: args.namespace,
-    apiKey: args.api_key,
+    licenseJwt: args.license_jwt,
     destination: destination as OutputDestination,
     outputHost: args.output_host,
     splunkHecToken: args.splunk_hec_token,

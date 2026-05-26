@@ -79,6 +79,7 @@ function emptyKubectl(): KubectlProbes {
     storageClasses: [],
     ingressClasses: [],
     serviceAccountIrsa: [],
+    backendAgents: [],
   };
 }
 

@@ -546,13 +546,17 @@ CUSTOMER TIER LADDER (determines which tools are available)
 1. Dev CLI only — free local binary, no pipeline infrastructure.
    Available tools: log10x_resolve_batch (pasted-batch triage), log10x_dependency_check,
                     log10x_pattern_mitigate.
-2. Cloud Reporter — k8s CronJob sampling from the SIEM via REST API.
-   Adds: log10x_investigate (sampled fidelity), log10x_pattern_trend,
-         log10x_top_patterns, log10x_event_lookup, log10x_savings.
-3. Edge Reporter — forwarder pipeline sidecar.
-   Same tools as Cloud, but with full-fidelity metrics, ~5s inflection granularity, and
-   coverage of events dropped before the SIEM.
-4. Retriever (deployable with or without Reporter) — S3 archive with Bloom-filter index.
+2. Reporter — standalone dedicated fluent-bit DaemonSet alongside the user's forwarder
+   (zero-touch, read-only). Emits TenXSummary metrics for cost attribution + pattern
+   fingerprinting.
+   Adds: log10x_investigate, log10x_pattern_trend, log10x_top_patterns,
+         log10x_event_lookup, log10x_savings.
+3. Receiver — sidecar inside the user's existing forwarder (fluent-bit / fluentd /
+   filebeat / logstash / otel-collector / vector). Filters, samples, and optionally
+   losslessly compacts events in-flight. Replaces the legacy Regulator + Optimizer apps.
+   Same tools as Reporter, plus event modification on the forwarder's path.
+4. Retriever (deployable with or without Reporter/Receiver) — S3 archive with Bloom-filter
+   index. Product still being shaped.
    Adds: log10x_retriever_query (forensic retrieval), log10x_backfill_metric (new metric
          backfilled from archive + forward-emission handoff to the Reporter).
 
@@ -1313,19 +1317,13 @@ registerLog10xTool('log10x_advise_receiver', adviseReceiverSchema, (args) =>
 // ── Tool: log10x_advise_install (mode selector + front-end advisor) ──
 
 registerLog10xTool('log10x_advise_install', adviseInstallSchema, (args) =>
-  wrap('log10x_advise_install', () => executeAdviseInstall(args))
+  wrap('log10x_advise_install', () => executeAdviseInstall(args, getEnvs(), server))
 );
 
 // ── Tool: log10x_configure_compact (per-container compact decision PR author) ──
 
 registerLog10xTool('log10x_configure_compact', configureCompactSchema, (args) =>
   wrap('log10x_configure_compact', () => executeConfigureCompact(args))
-);
-
-// ── Tool: log10x_configure_regulator (per-container cap from $ budget) ──
-
-registerLog10xTool('log10x_configure_regulator', configureRegulatorSchema, (args) =>
-  wrap('log10x_configure_regulator', () => executeConfigureRegulator(args))
 );
 
 // ── Tool: log10x_pattern_mitigate (cost-reduction menu) ──
@@ -1378,9 +1376,9 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_poc_from_siem_status', intent: 'Poll or retrieve the final report from a log10x_poc_from_siem_submit run' },
   { name: 'log10x_poc_from_local', intent: 'Run the POC from local kubectl logs (no SIEM credentials needed); industry-pricing matrix instead of bill prediction' },
   { name: 'log10x_discover_env', intent: 'Read-only probe of k8s + AWS — returns a snapshot_id the advise_* tools consume' },
-  { name: 'log10x_advise_install', intent: 'Front-end install advisor — picks standalone vs inline + app + forwarder + optimize based on what was detected' },
-  { name: 'log10x_advise_reporter', intent: 'Reporter install/verify/teardown plan for a forwarder — inline or standalone (shape=standalone)' },
-  { name: 'log10x_advise_receiver', intent: 'Receiver install/verify/teardown plan — inline only, with optional compact encoding (optimize=true)' },
+  { name: 'log10x_advise_install', intent: 'Progressive install wizard — walks the user through app / forwarder / backends / airgapped / license, then emits a concrete helm plan' },
+  { name: 'log10x_advise_reporter', intent: 'Reporter install/verify/teardown plan — standalone dedicated fluent-bit DaemonSet alongside the user\'s forwarder (zero-touch, read-only)' },
+  { name: 'log10x_advise_receiver', intent: 'Receiver install/verify/teardown plan — sidecar inside the user\'s existing forwarder, with optional compact encoding (optimize=true)' },
   { name: 'log10x_advise_retriever', intent: 'Retriever install/verify/teardown plan — standalone S3 + SQS archive + query' },
   { name: 'log10x_configure_compact', intent: 'Resolve a service to its k8s_container set via Prometheus; emit a `gh` PR command against the compact cap-file CSV with per-container `true`/`false` decisions (engine hot-reloads the CSV without a pipeline restart)' },
   { name: 'log10x_configure_regulator', intent: 'Derive a per-container rate-regulator byte cap from a monthly dollar budget; validate against five Prometheus sanity checks; emit a `gh` PR command against the rate-cap CSV (engine hot-reloads it)' },

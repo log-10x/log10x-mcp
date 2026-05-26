@@ -1,43 +1,47 @@
 /**
- * Per-forwarder Helm repo + chart + values templates for the Reporter.
+ * Per-forwarder Helm install plans for the Log10x Receiver, plus the
+ * standalone Reporter chart.
  *
- * Design after first dogfood pass (2026-04-21):
- *   - Every values snippet is a SINGLE coherent YAML doc — no duplicate
- *     top-level keys. The fluentd template had two `tenx:` keys,
- *     silently dropping the real config. Never again.
- *   - Every chart requires `tenx.gitToken` even when pulling a public
- *     repo, because init containers unconditionally mount a secret
- *     derived from it. We default to `"public-repo-no-token-needed"`.
- *   - `primaryContainerName` tells verify probes which container tails
- *     events. 10x runs INSIDE that container in embedded-image mode —
- *     there is no separate `tenx` sidecar for fluent-bit, fluentd,
- *     filebeat, logstash, or the OTel collector. (Vector is the lone
- *     sidecar case and that chart is still WIP.)
- *   - `selectorLabel` returns the correct kubectl label selector for
- *     each chart family. log10x-elastic charts (filebeat/logstash) use
- *     legacy Helm labels (`app=<release>-<chart>,release=<release>`)
- *     rather than `app.kubernetes.io/instance=<release>`. The advisor
- *     must honor this or every `kubectl wait` / `rollout status` /
- *     teardown command silently matches nothing.
- *   - Chart refs correspond to published chart names:
- *       log10x-fluent/fluent-bit     (confirmed live)
- *       log10x-fluent/fluentd        (confirmed live)
- *       log10x-elastic/filebeat      (NOT `-10x`)
- *       log10x-elastic/logstash      (NOT `-10x`)
- *       log10x-otel/opentelemetry-collector  (NOT `otel-collector-10x`)
+ * Two deployment models live in this file:
  *
- * Sources:
- *   - https://github.com/log-10x/fluent-helm-charts
- *   - https://github.com/log-10x/elastic-helm-charts
- *   - https://github.com/log-10x/opentelemetry-helm-charts
+ *   1. RECEIVER — a `log10x/edge-10x` sidecar container injected into
+ *      the user's existing forwarder pod via a values overlay
+ *      (`extraContainers` + `extraVolumes` + per-chart config rewiring).
+ *      The forwarder chart is always the UPSTREAM one (no Log10x
+ *      repackages). The sidecar reads its license JWT from a
+ *      Kubernetes Secret mounted at `/etc/tenx/license/license.jwt`
+ *      via `TENX_LICENSE_FILE`. Each forwarder has a different
+ *      config-rewiring shape (Fluent Bit replaces `config:`, OTel
+ *      deep-merges `config:`, Vector replaces `customConfig`, Logstash
+ *      uses `logstashConfig` + `logstashPipeline`, Fluentd needs a
+ *      kustomize post-renderer that emits a sidecar-patch).
  *
- * Vector is intentionally NOT in this map: no log10x-repackaged Vector
- * chart, no log10x/vector-10x image, and no vector forwarder modules in
- * the config repo. If a customer runs Vector, discovery reports it as
- * `unknown` and the advisor asks them to pick a supported forwarder.
+ *      Filebeat is NOT supported in the Receiver wizard — the upstream
+ *      `elastic/filebeat` chart doesn't expose extraContainers/extraVolumes
+ *      hooks. Detection still reports it; the wizard surfaces a "not
+ *      yet" message and falls back to the Reporter.
+ *
+ *   2. REPORTER (`STANDALONE_SPEC`) — Log10x's own `log10x/reporter-10x`
+ *      chart bundles a fluent-bit + tenx-edge that tail
+ *      `/var/log/containers/*.log` in parallel to the user's forwarder.
+ *      Read-only, zero-touch. The chart uses a flat values layout with
+ *      `log10xLicenseJwt` at the top level and a `tenx:` block ONLY for
+ *      engine resource overrides / extraArgs / extraEnv. License
+ *      delivery: chart-managed Secret by default (JWT inlined into
+ *      `log10xLicenseJwt`), or user-supplied Secret via
+ *      `licenseSecret.{create:false, existingSecret, secretKey}` for
+ *      real (non-demo) licenses.
+ *
+ * Sources of truth:
+ *   - Receiver overlays: mksite/docs/apps/receiver/deploy.md
+ *   - Standalone Reporter chart: mksite/docs/apps/reporter/deploy.md
  */
 
-import type { ForwarderKind } from '../discovery/types.js';
+import type {
+  ForwarderKind,
+  MetricsBackendKind,
+  BackendCredentialConfig,
+} from '../discovery/types.js';
 
 export type OutputDestination = 'mock' | 'elasticsearch' | 'splunk' | 'datadog' | 'cloudwatch';
 
@@ -96,7 +100,26 @@ export interface ForwarderSpec {
    * filebeat, logstash) reads `tenx.optimize` / `tenx.readOnly` directly.
    */
   renderValues: (opts: {
-    apiKey: string;
+    /**
+     * Log10x license JWT — the credential the engine consumes. Fetched
+     * from the gateway's `/api/v1/license/demo` (anonymous) or
+     * `/api/v1/license` (Auth0-authed) endpoints. Not the same as the
+     * MCP's `LOG10X_API_KEY` env var, which is used for MCP↔gateway auth.
+     */
+    licenseJwt: string;
+    /**
+     * True when the JWT was minted from the demo endpoint (anonymous,
+     * 14-day, transient). Renderers inline the JWT for demo licenses
+     * (one-step setup, no Secret to manage). For real (user) licenses
+     * the renderer points the chart at an out-of-band Kubernetes Secret
+     * that the user creates before `helm upgrade` — the JWT itself is
+     * never written into values.yaml.
+     */
+    isDemoLicense?: boolean;
+    /** Name of the Kubernetes Secret holding the real license JWT (when isDemoLicense=false). */
+    licenseSecretName?: string;
+    /** Key inside the Secret whose value is the JWT (when isDemoLicense=false). */
+    licenseSecretKey?: string;
     releaseName: string;
     destination: OutputDestination;
     outputHost?: string;
@@ -114,6 +137,28 @@ export interface ForwarderSpec {
      * exclusive with `optimize`.
      */
     readOnly?: boolean;
+    /**
+     * Metrics backends the engine emits TenXSummary to. `['log10x']` is
+     * the chart default (SaaS Prometheus); additional / replacement
+     * backends are wired via `tenx.extraArgs` (`@run/output/metric/<b>`)
+     * and `tenx.extraEnv` (vendor-specific env vars).
+     */
+    backends?: MetricsBackendKind[];
+    /**
+     * Per-backend credential configuration (secret name + plain-value
+     * overrides). The wizard collects these from the user; if a backend
+     * is selected but no entry exists here, the renderer falls back to
+     * `<backend>-credentials` for the secret name and the per-backend
+     * defaults/placeholders for plain values.
+     */
+    backendCredentials?: Partial<Record<MetricsBackendKind, BackendCredentialConfig>>;
+    /**
+     * When true, the engine runs fully airgapped. For the standalone
+     * Reporter chart this is the top-level `airgapped: true` value;
+     * for Receiver inline overlays it's the `TENX_AIRGAPPED=true` env
+     * var on the engine sidecar.
+     */
+    airgapped?: boolean;
   }) => string;
   /** Verify probes — commands that, collectively, prove data is flowing. */
   verifyProbes: (opts: {
@@ -156,6 +201,167 @@ function renderTenxFeatureFlags(opts: { optimize?: boolean; readOnly?: boolean }
   return lines.length === 0 ? '' : '\n' + lines.join('\n');
 }
 
+/**
+ * Per-backend env-var contract — what the engine's metric output module
+ * reads from the container env. Sourced verbatim from
+ * `config/pipelines/run/output/metric/<backend>/config.yaml`. If the
+ * engine changes a name, update it HERE — the wizard, the renderer,
+ * and the elicitation form all key off this spec.
+ *
+ * Two classes of env vars:
+ *   - `secret`: sensitive (API keys, tokens, passwords) — emitted as
+ *     `valueFrom.secretKeyRef` so they're pulled from a k8s Secret.
+ *   - `plain`: non-sensitive (URLs, regions, namespaces) — emitted as
+ *     direct `value:` strings.
+ *
+ * Each `plain` entry can have a `default` (engine has a sensible
+ * fallback if the user doesn't override) or a `placeholder` (user
+ * MUST supply a value; the renderer emits a `<TODO>`-style marker so
+ * `helm upgrade` doesn't silently install with garbage).
+ */
+export interface BackendEnvSpec {
+  /** Sensitive env vars sourced via `valueFrom.secretKeyRef`. */
+  secret: Array<{ envVar: string; secretKey: string }>;
+  /** Non-sensitive env vars sourced via plain `value:`. */
+  plain: Array<{ envVar: string; default?: string; placeholder?: string }>;
+}
+
+export const BACKEND_ENV_SPECS: Partial<Record<MetricsBackendKind, BackendEnvSpec>> = {
+  // datadog — `config/pipelines/run/output/metric/datadog/config.yaml`
+  // reads DD_API_KEY + DD_APP_KEY (required) + DD_SITE (defaults to
+  // us5.datadoghq.com inside the engine config).
+  datadog: {
+    secret: [
+      { envVar: 'DD_API_KEY', secretKey: 'api-key' },
+      { envVar: 'DD_APP_KEY', secretKey: 'app-key' },
+    ],
+    plain: [{ envVar: 'DD_SITE', default: 'us5.datadoghq.com' }],
+  },
+
+  // elastic — `config/pipelines/run/output/metric/elastic/config.yaml`
+  // reads ELASTICSEARCH_HOST + ELASTIC_API_KEY (API-key auth — see Q3:
+  // we default to API key, the engine config also has a basic-auth
+  // path via ELASTIC_USERNAME/PASSWORD that we don't surface).
+  elastic: {
+    secret: [{ envVar: 'ELASTIC_API_KEY', secretKey: 'api-key' }],
+    plain: [
+      { envVar: 'ELASTICSEARCH_HOST', placeholder: '<https://your-elastic-host:9200>' },
+    ],
+  },
+
+  // cloudwatch — engine config reads AWS_ACCESS_KEY_ID +
+  // AWS_SECRET_ACCESS_KEY + CW_NAMESPACE. IRSA isn't wired in the
+  // engine module today (Q4: keep static-creds-only until the engine
+  // adds IRSA support).
+  cloudwatch: {
+    secret: [
+      { envVar: 'AWS_ACCESS_KEY_ID', secretKey: 'access-key-id' },
+      { envVar: 'AWS_SECRET_ACCESS_KEY', secretKey: 'secret-access-key' },
+    ],
+    plain: [{ envVar: 'CW_NAMESPACE', placeholder: '<your-cloudwatch-namespace>' }],
+  },
+
+  // signalfx — engine reads SIGNALFX_ACCESS_TOKEN + SIGNALFX_INGEST_URL
+  // (defaults to https://ingest.signalfx.com if unset).
+  signalfx: {
+    secret: [{ envVar: 'SIGNALFX_ACCESS_TOKEN', secretKey: 'access-token' }],
+    plain: [{ envVar: 'SIGNALFX_INGEST_URL', default: 'https://ingest.signalfx.com' }],
+  },
+
+  // prometheus (remote-write) — engine reads PROMETHEUS_REMOTE_WRITE_URL
+  // + USERNAME + PASSWORD. The URL has a localhost default but the
+  // wizard treats it as user-required (no sensible cluster-wide default).
+  prometheus: {
+    secret: [
+      { envVar: 'PROMETHEUS_REMOTE_WRITE_USERNAME', secretKey: 'username' },
+      { envVar: 'PROMETHEUS_REMOTE_WRITE_PASSWORD', secretKey: 'password' },
+    ],
+    plain: [
+      { envVar: 'PROMETHEUS_REMOTE_WRITE_URL', placeholder: '<https://your-prom/api/v1/write>' },
+    ],
+  },
+
+  // log10x intentionally not listed — the SaaS path uses the license
+  // JWT + the chart default; no extra env vars needed.
+};
+
+/** Default Secret name for a given backend when the wizard doesn't override. */
+export function defaultSecretNameFor(kind: MetricsBackendKind): string {
+  return `${kind}-credentials`;
+}
+
+/**
+ * Render the `tenx.extraArgs` + `tenx.extraEnv` blocks that wire up
+ * additional metrics backends (beyond the chart-default `log10x`) and
+ * the `TENX_AIRGAPPED` env var for Receiver inline overlays.
+ *
+ * Emits nothing when there's nothing to add (default `['log10x']` and
+ * not airgapped). Always emits 2-space-indented YAML to nest under
+ * `tenx:`.
+ *
+ * `log10x` is the chart default — we don't emit `@run/output/metric/log10x`
+ * because the chart already wires that pipeline. Only NON-log10x backends
+ * get an extraArg.
+ *
+ * Sensitive env vars are rendered as `valueFrom.secretKeyRef` referencing
+ * the user-supplied (or default `<backend>-credentials`) Secret. The user
+ * creates the Secret out-of-band before `helm upgrade`.
+ *
+ * The `airgappedAsEnvVar` flag is true for Receiver inline overlays
+ * (engine reads `TENX_AIRGAPPED`) and false for the standalone Reporter
+ * chart (which has a top-level `airgapped:` value instead).
+ */
+function renderTenxExtraArgsAndEnv(opts: {
+  backends?: MetricsBackendKind[];
+  backendCredentials?: Partial<Record<MetricsBackendKind, BackendCredentialConfig>>;
+  airgapped?: boolean;
+  airgappedAsEnvVar: boolean;
+}): string {
+  const nonLog10xBackends = (opts.backends ?? []).filter((b) => b !== 'log10x');
+  const lines: string[] = [];
+
+  if (nonLog10xBackends.length > 0) {
+    lines.push('  extraArgs:');
+    for (const b of nonLog10xBackends) {
+      lines.push(`    - "@run/output/metric/${b}"`);
+    }
+  }
+
+  const envLines: string[] = [];
+  for (const b of nonLog10xBackends) {
+    const spec = BACKEND_ENV_SPECS[b];
+    if (!spec) continue;
+    const creds = opts.backendCredentials?.[b];
+    const secretName = creds?.secretName ?? defaultSecretNameFor(b);
+    const plainOverrides = creds?.plainValues ?? {};
+
+    // Sensitive env vars — valueFrom.secretKeyRef.
+    for (const s of spec.secret) {
+      envLines.push(`    - name: ${s.envVar}`);
+      envLines.push(`      valueFrom:`);
+      envLines.push(`        secretKeyRef:`);
+      envLines.push(`          name: ${secretName}`);
+      envLines.push(`          key: ${s.secretKey}`);
+    }
+    // Plain env vars — direct `value:` strings.
+    for (const p of spec.plain) {
+      const v = plainOverrides[p.envVar] ?? p.default ?? p.placeholder ?? '';
+      envLines.push(`    - name: ${p.envVar}`);
+      envLines.push(`      value: "${v}"`);
+    }
+  }
+  if (opts.airgapped && opts.airgappedAsEnvVar) {
+    envLines.push(`    - name: TENX_AIRGAPPED`);
+    envLines.push(`      value: "true"`);
+  }
+  if (envLines.length > 0) {
+    lines.push('  extraEnv:');
+    lines.push(...envLines);
+  }
+
+  return lines.length === 0 ? '' : '\n' + lines.join('\n');
+}
+
 /** k8s-recommended selector: `app.kubernetes.io/instance=<release>`. */
 function k8sRecommendedSelector(releaseName: string): string {
   return `app.kubernetes.io/instance=${releaseName}`;
@@ -166,39 +372,170 @@ function legacyElasticSelector(releaseName: string, chartSubstring: string): str
   return `app=${releaseName}-${chartSubstring},release=${releaseName}`;
 }
 
+// ── Shared sidecar overlay ──
+
+/**
+ * Renders the `extraContainers[log10x]` + `extraVolumes[tenx-license]`
+ * block that every Receiver overlay needs. Per-forwarder specs supply
+ * the engine launch args (`@run/input/forwarder/<kind>` + `@apps/receiver`
+ * + optional `receiverOptimize true` for compact mode) and call this
+ * helper to emit the shared sidecar shape consistently.
+ *
+ * Indentation: emits each line with no leading indent. Callers paste
+ * it at column 0 of the values overlay. The two top-level keys it emits
+ * are `extraContainers:` and `extraVolumes:`.
+ *
+ * License delivery: always via the Secret-mounted file pattern
+ * (`TENX_LICENSE_FILE=/etc/tenx/license/license.jwt`). For demo licenses
+ * the caller's pre-install step still has to create the Secret — there
+ * is no "inline JWT" path for the Receiver. (The chart values are
+ * user-managed; we don't get to add a top-level field that the chart
+ * would interpret.)
+ */
+function renderLog10xSidecar(opts: {
+  /** Forwarder kind used in the engine's `@run/input/forwarder/<kind>` arg. */
+  forwarderKind: 'fluentbit' | 'fluentd' | 'otel-collector' | 'vector' | 'logstash';
+  /** When true, append `receiverOptimize true` to the engine args. */
+  optimize?: boolean;
+  /** When true, append `TENX_AIRGAPPED=true` to the sidecar env. */
+  airgapped?: boolean;
+  /** Name of the Kubernetes Secret holding the license JWT. */
+  licenseSecretName: string;
+  /** Key inside the Secret whose value is the JWT. */
+  licenseSecretKey: string;
+}): string {
+  const argLines: string[] = [
+    `      - "@run/input/forwarder/${opts.forwarderKind}"`,
+    `      - "@apps/receiver"`,
+  ];
+  if (opts.optimize) {
+    argLines.push(`      - "receiverOptimize"`);
+    argLines.push(`      - "true"`);
+  }
+  const envLines: string[] = [
+    `      - name: TENX_LICENSE_FILE`,
+    `        value: /etc/tenx/license/license.jwt`,
+  ];
+  if (opts.airgapped) {
+    envLines.push(`      - name: TENX_AIRGAPPED`);
+    envLines.push(`        value: "true"`);
+  }
+  return `extraContainers:
+  - name: log10x
+    image: log10x/edge-10x:latest
+    imagePullPolicy: IfNotPresent
+    args:
+${argLines.join('\n')}
+    env:
+${envLines.join('\n')}
+    volumeMounts:
+      - name: tenx-license
+        mountPath: /etc/tenx/license
+        readOnly: true
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits:   { cpu: 500m, memory: 512Mi }
+
+extraVolumes:
+  - name: tenx-license
+    secret:
+      secretName: ${opts.licenseSecretName}
+      items:
+        - key: ${opts.licenseSecretKey}
+          path: license.jwt`;
+}
+
 // ── The spec map ──
 
-export const REPORTER_FORWARDER_SPECS: Record<Exclude<ForwarderKind, 'unknown'>, ForwarderSpec> = {
+export const RECEIVER_FORWARDER_SPECS: Record<Exclude<ForwarderKind, 'unknown'>, ForwarderSpec> = {
   'fluentbit': {
     label: 'Fluent Bit',
     integrationMode:
-      'DaemonSet using the log10x-repackaged Fluent Bit image (`log10x/fluent-bit-10x`). 10x logic is baked into the container via a Lua filter — no separate sidecar.',
-    helmRepo: 'https://log-10x.github.io/fluent-helm-charts',
-    helmRepoAlias: 'log10x-fluent',
-    chartRef: 'log10x-fluent/fluent-bit',
+      'Sidecar (`log10x/edge-10x`) injected into the user\'s existing Fluent Bit pod via the upstream `fluent/fluent-bit` chart\'s `extraContainers` + `extraVolumes` hooks. The chart\'s `config:` is replaced to wire the sidecar bypass — events flow `[INPUT] tail → [OUTPUT] forward → sidecar → [INPUT] forward (Tag_Prefix tenx.) → [OUTPUT] (destination)`. Filters Match kube.* only so enrichment runs once.',
+    helmRepo: 'https://fluent.github.io/helm-charts',
+    helmRepoAlias: 'fluent',
+    chartRef: 'fluent/fluent-bit',
     chartAvailability: 'published',
-    primaryImageHint: 'ghcr.io/log-10x/fluent-bit-10x',
-    primaryContainerName: 'fluent-bit',
-    hasTenxSidecar: false,
+    primaryImageHint: 'log10x/edge-10x',
+    primaryContainerName: 'log10x',
+    hasTenxSidecar: true,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ apiKey, releaseName, destination, outputHost, splunkHecToken, gitToken, optimize, readOnly }) => {
-      const outputBlock = renderFluentBitOutput(destination, outputHost, splunkHecToken);
-      // The fluent-bit chart's values.yaml exposes optimize + readOnly
-      // booleans directly; the chart templates wire them to the matching
-      // engine launch args. Default (both false) is plain receiver.
-      const featureFlags = renderTenxFeatureFlags({ optimize, readOnly });
-      return `tenx:
-  enabled: true
-  apiKey: "${apiKey}"${featureFlags}
-  runtimeName: "${releaseName}"
-  gitToken: "${gitToken ?? DEFAULT_GIT_TOKEN}"
-  config:
-    git:
-      enabled: true
-      url: "https://github.com/log-10x/config.git"
+    renderValues: ({ destination, outputHost, splunkHecToken, optimize, airgapped, licenseSecretName, licenseSecretKey }) => {
+      const sidecar = renderLog10xSidecar({
+        forwarderKind: 'fluentbit',
+        optimize,
+        airgapped,
+        licenseSecretName: licenseSecretName ?? 'log10x-license',
+        licenseSecretKey: licenseSecretKey ?? 'license-jwt',
+      });
+      const destOutput = renderFluentBitDestinationOutput(destination, outputHost, splunkHecToken);
+      return `# Receiver overlay for Fluent Bit (upstream fluent/fluent-bit chart).
+# Layer on top of your existing values:
+#   helm upgrade --install <release> fluent/fluent-bit \\
+#     -f your-existing-fluent-bit-values.yaml \\
+#     -f my-receiver.yaml --namespace <namespace>
 
-${outputBlock}
+${sidecar}
+
+# Replace the chart's default config with the sidecar bypass pattern.
+# Inputs: tail your sources + receive processed events back from the
+# sidecar on :24225 with Tag_Prefix tenx. (so filters and the ingest
+# handoff Match kube.* and skip the returning tenx.*).
+# Filters: enrichment (kubernetes metadata) on kube.* only.
+# Outputs: handoff to the sidecar on 127.0.0.1:24224 + destination
+# for the returning tenx.* events.
+config:
+  service: |
+    [SERVICE]
+        Daemon Off
+        Flush {{ .Values.flush }}
+        Log_Level {{ .Values.logLevel }}
+        Parsers_File /fluent-bit/etc/parsers.conf
+        Parsers_File /fluent-bit/etc/conf/custom_parsers.conf
+        HTTP_Server On
+        HTTP_Listen 0.0.0.0
+        HTTP_Port {{ .Values.metricsPort }}
+        Health_Check On
+
+  inputs: |
+    [INPUT]
+        Name tail
+        Path /var/log/containers/*.log
+        Exclude_Path ${FORWARDER_EXCLUDE_GLOBS}
+        multiline.parser docker, cri
+        Tag kube.*
+        Mem_Buf_Limit 5MB
+        Skip_Long_Lines On
+
+    # Egress: returning events from the 10x sidecar. Tag_Prefix tenx.
+    # prevents enrichment filters and the sidecar-handoff output from
+    # re-firing (they Match kube.* only).
+    [INPUT]
+        Name forward
+        Listen 0.0.0.0
+        Port 24225
+        Tag_Prefix tenx.
+
+  filters: |
+    [FILTER]
+        Name kubernetes
+        Match kube.*
+        Merge_Log On
+        Keep_Log Off
+        K8S-Logging.Parser On
+        K8S-Logging.Exclude On
+
+  outputs: |
+    # Hand off to the Log10x sidecar.
+    [OUTPUT]
+        Name forward
+        Match kube.*
+        Host 127.0.0.1
+        Port 24224
+        Retry_Limit False
+
+${destOutput}
 `;
     },
     verifyProbes: ({ releaseName, namespace, destination, optimize }) => {
@@ -212,32 +549,38 @@ ${outputBlock}
       }> = [
         {
           name: 'pods-ready',
-          question: 'Are all Reporter DaemonSet pods Ready?',
+          question: 'Are all Fluent Bit pods Ready (with the log10x sidecar)?',
           commands: [`kubectl -n ${namespace} wait --for=condition=Ready pod -l ${sel} --timeout=5m`],
           expectOutput: 'condition met',
           timeoutSec: 300,
         },
         {
-          name: 'processor-alive',
-          question: 'Is the 10x Lua filter loaded and processing events?',
+          name: 'sidecar-alive',
+          question: 'Is the log10x sidecar running and processing events?',
           commands: [
-            `kubectl -n ${namespace} logs -l ${sel} -c fluent-bit --tail=400 | grep -E 'tenx|10x|pattern|lua' | head -20`,
+            `kubectl -n ${namespace} logs -l ${sel} -c log10x --tail=400 | grep -E 'tenx|pattern|receiver|template' | head -20`,
+          ],
+        },
+        {
+          name: 'forwarder-handoff',
+          question: 'Is Fluent Bit forwarding kube.* events to the sidecar on 127.0.0.1:24224?',
+          commands: [
+            `kubectl -n ${namespace} logs -l ${sel} -c fluent-bit --tail=400 | grep -E '\\\\[OUTPUT\\\\].*forward|127\\\\.0\\\\.0\\\\.1:24224' | head -10`,
           ],
         },
       ];
       if (destination === 'mock') {
         probes.push({
           name: 'tenx-mock-events',
-          question: 'Are tagged [TENX-MOCK] events reaching stdout?',
-          commands: [`kubectl -n ${namespace} logs -l ${sel} -c fluent-bit --tail=200 | grep -F 'TENX-MOCK' | head -5`],
-          expectOutput: 'TENX-MOCK',
+          question: 'Are returning tenx.* events reaching the stdout destination?',
+          commands: [
+            `kubectl -n ${namespace} logs -l ${sel} -c fluent-bit --tail=200 | grep -E '"tag":"tenx\\\\.' | head -5`,
+          ],
+          expectOutput: 'tenx.',
           timeoutSec: 120,
         });
       }
       if (optimize) {
-        // Grep for the compact encoded form — a `log` field whose value
-        // starts with `~<templateHash>,<timestamp>,...` (never happens
-        // for raw events, which are always JSON or plain text).
         probes.push({
           name: 'tenx-encoded-events',
           question: 'Are events emitted in compact encoded form (templateHash+vars)?',
@@ -255,74 +598,28 @@ ${outputBlock}
   fluentd: {
     label: 'Fluentd',
     integrationMode:
-      'DaemonSet using the log10x-repackaged Fluentd image (`log10x/fluentd-10x`). 10x logic runs inside the `fluentd` container — no separate sidecar.',
-    helmRepo: 'https://log-10x.github.io/fluent-helm-charts',
-    helmRepoAlias: 'log10x-fluent',
-    chartRef: 'log10x-fluent/fluentd',
-    chartAvailability: 'published',
-    primaryImageHint: 'ghcr.io/log-10x/fluentd-10x',
-    primaryContainerName: 'fluentd',
-    hasTenxSidecar: false,
+      'Sidecar pattern via upstream `fluent/fluentd` chart + a kustomize post-renderer overlay (the chart has no extraContainers hook, so the sidecar is injected via a Strategic Merge Patch on the Deployment). The wizard would need to emit four files alongside the values.yaml — kustomize.yaml, sidecar-patch.yaml, post-render.sh, post-render.cmd — which the install plan model doesn\'t yet support. Tracked as a follow-up.',
+    helmRepo: 'https://fluent.github.io/helm-charts',
+    helmRepoAlias: 'fluent',
+    chartRef: 'fluent/fluentd',
+    chartAvailability: 'wip',
+    primaryImageHint: 'log10x/edge-10x',
+    primaryContainerName: 'log10x',
+    hasTenxSidecar: true,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ apiKey, releaseName, destination, outputHost, splunkHecToken, gitToken, optimize, readOnly }) => {
-      // IMPORTANT: fluentd's output config lives UNDER `tenx:`, not
-      // as a second top-level `tenx:` block. A prior version of this
-      // template emitted two `tenx:` keys and YAML silently dropped
-      // the first — losing apiKey/runtimeName/git config entirely.
-      const outputConfig = renderFluentdOutputConfig(destination, outputHost, splunkHecToken);
-      const fluentdExcludePaths = FORWARDER_EXCLUDE_REGEX.map((g) => `/var/log/containers/${g.replace('.*', '*').replace('\\.log$', '.log')}`)
-        .map((g) => `"${g}"`)
-        .join(', ');
-      // Same as fluent-bit: chart values expose optimize + readOnly
-      // booleans directly; chart templates handle the engine wiring.
-      const featureFlags = renderTenxFeatureFlags({ optimize, readOnly });
-      return `tenx:
-  enabled: true
-  apiKey: "${apiKey}"${featureFlags}
-  runtimeName: "${releaseName}"
-  gitToken: "${gitToken ?? DEFAULT_GIT_TOKEN}"
-  config:
-    git:
-      enabled: true
-      url: "https://github.com/log-10x/config.git"
-  # Override the default container-log tail input to exclude all log-forwarder
-  # container logs (fluent-bit, fluentd, filebeat, logstash, otel-collector).
-  # Without this, when multiple forwarders share a node, each tails the other's
-  # stdout and events recurse — verified to crash the tenx aggregator on 40KB+
-  # self-referential events.
-  fileConfigs:
-    01_sources.conf: |-
-      <source>
-        @type tail
-        @id in_tail_container_logs
-        @label @CONCAT
-        path /var/log/containers/*.log
-        exclude_path [${fluentdExcludePaths}]
-        pos_file /var/log/fluentd-containers.log.pos
-        tag raw.kubernetes.*
-        read_from_head true
-        <parse>
-          @type multi_format
-          <pattern>
-            format json
-            time_key time
-            time_type string
-            time_format "%Y-%m-%dT%H:%M:%S.%NZ"
-            keep_time_key false
-          </pattern>
-          <pattern>
-            format regexp
-            expression /^(?<time>.+) (?<stream>stdout|stderr)( (?<logtag>.))? (?<log>.*)$/
-            time_format '%Y-%m-%dT%H:%M:%S.%N%:z'
-            keep_time_key false
-          </pattern>
-        </parse>
-        emit_unmatched_lines true
-      </source>
-  outputConfigs:
-    06_final_output.conf: |-
-${indent(outputConfig, 6)}
+    renderValues: () => {
+      // Placeholder — the wizard blocks the fluentd receiver path
+      // upstream of this (see reporter.ts), so this should never run.
+      // Keeping the function so the spec satisfies the ForwarderSpec
+      // type contract. Real overlay (per receiver/deploy.md) requires
+      // a kustomize post-renderer + a separate sidecar-patch.yaml file,
+      // which the current single-file `file:` step model can't emit.
+      return `# Fluentd receiver path is not yet wired into the wizard.
+# See receiver/deploy.md for the canonical kustomize-post-renderer
+# overlay shape; the install plan model needs to be extended to emit
+# multiple files (values.yaml + tenx-kustomize/{kustomization,sidecar-patch,post-render.sh,post-render.cmd})
+# before this can be wizard-emitted automatically.
 `;
     },
     verifyProbes: ({ releaseName, namespace, destination, optimize }) => {
@@ -386,21 +683,17 @@ ${indent(outputConfig, 6)}
     hasTenxSidecar: false,
     selectorStyle: 'legacy-helm',
     selectorLabel: (r) => legacyElasticSelector(r, 'filebeat'),
-    renderValues: ({ apiKey, releaseName, destination, outputHost, gitToken, optimize, readOnly }) => {
+    renderValues: ({ licenseJwt, releaseName, destination, outputHost, gitToken, optimize, readOnly, backends, backendCredentials, airgapped }) => {
       // Chart defaults reference Elasticsearch secrets/certs. For a mock
       // install we MUST override extraEnvs/secretMounts to empty so pods
       // don't hang in FailedMount.
       const outputBlock = renderFilebeatOutput(destination, outputHost);
       const featureFlags = renderTenxFeatureFlags({ optimize, readOnly });
+      const extras = renderTenxExtraArgsAndEnv({ backends, backendCredentials, airgapped, airgappedAsEnvVar: true });
       return `tenx:
   enabled: true
-  apiKey: "${apiKey}"
-  runtimeName: "${releaseName}"
-  gitToken: "${gitToken ?? DEFAULT_GIT_TOKEN}"
-  config:
-    git:
-      enabled: true
-      url: "https://github.com/log-10x/config.git"${featureFlags}
+  licenseJwt: "${licenseJwt}"
+  runtimeName: "${releaseName}"${featureFlags}${extras}
 
 # The chart's default readiness/liveness probes run \`filebeat test output\`
 # which doesn't support \`output.file\` (used by mock destination). Override
@@ -462,72 +755,311 @@ ${indent(outputBlock, 6)}
 
   logstash: {
     label: 'Logstash',
-    // The log10x-elastic/logstash chart is broken in sidecar mode. The
-    // chart runs tenx as a separate pod container reading from its own
-    // STDIN, but the tenx-logstash design expects tenx to be a CHILD
-    // PROCESS of logstash spawned by the `pipe` output plugin (so tenx's
-    // stdin is wired to logstash's pipe). With the chart's layout,
-    // tenx.stdin is a tty, it sees no input, and after ~9s the pipeline
-    // shuts down. Do NOT ship this path to users until the chart is
-    // fixed or a sidecar-capable launcher is added to tenx-edge.
     integrationMode:
-      'StatefulSet + `tenx` sidecar — CURRENTLY BROKEN: the chart runs tenx as a side container reading from its own stdin, but tenx-logstash expects to be spawned by the logstash `pipe` output plugin. Do not advise users to install this until the chart is fixed.',
-    helmRepo: 'https://log-10x.github.io/elastic-helm-charts',
-    helmRepoAlias: 'log10x-elastic',
-    chartRef: 'log10x-elastic/logstash',
-    chartAvailability: 'wip',
-    primaryImageHint: 'ghcr.io/log-10x/logstash-10x',
-    primaryContainerName: 'logstash',
-    hasTenxSidecar: false,
-    selectorStyle: 'legacy-helm',
-    selectorLabel: (r) => legacyElasticSelector(r, 'logstash'),
-    renderValues: ({ apiKey, releaseName, destination, outputHost, gitToken, optimize, readOnly }) => {
-      const output = renderLogstashOutput(destination, outputHost);
-      const featureFlags = renderTenxFeatureFlags({ optimize, readOnly });
-      return `tenx:
-  enabled: true
-  apiKey: "${apiKey}"
-  runtimeName: "${releaseName}"
-  gitToken: "${gitToken ?? DEFAULT_GIT_TOKEN}"
-  config:
-    git:
-      enabled: true
-      url: "https://github.com/log-10x/config.git"${featureFlags}
+      'Sidecar (`log10x/edge-10x`) injected into the user\'s existing Logstash pod via the upstream `elastic/logstash` chart. The chart uses `extraContainers` (as a YAML pipe-string) + `secretMounts` (not `extraVolumes`) for the license, plus `logstashConfig` (pipelines.yml) and `logstashPipeline` (per-pipeline .conf files). Two pipelines: `ingest` runs your filters once and hands events off to the sidecar over loopback TCP :5044; `destinations` is filter-free and receives processed events back from the sidecar on :5045 to ship to the real backends.',
+    helmRepo: 'https://helm.elastic.co',
+    helmRepoAlias: 'elastic',
+    chartRef: 'elastic/logstash',
+    chartAvailability: 'published',
+    primaryImageHint: 'log10x/edge-10x',
+    primaryContainerName: 'log10x',
+    hasTenxSidecar: true,
+    selectorStyle: 'k8s-recommended',
+    selectorLabel: (r) => k8sRecommendedSelector(r),
+    renderValues: ({ destination, outputHost, optimize, airgapped, licenseSecretName, licenseSecretKey }) => {
+      // Logstash chart quirks (vs the other receiver overlays):
+      //   - `extraContainers` is a YAML pipe-string, not a list. We inline
+      //     the log10x container block here rather than using the shared
+      //     renderLog10xSidecar helper (which emits a top-level list).
+      //   - License is mounted via the chart's `secretMounts` field, not
+      //     `extraVolumes`. The chart's `secretMounts[].subPath` projects a
+      //     single key from the Secret to a file path on disk.
+      const secretName = licenseSecretName ?? 'log10x-license';
+      const secretKey = licenseSecretKey ?? 'license-jwt';
+      const argLines: string[] = [
+        `      - "@run/input/forwarder/logstash"`,
+        `      - "@apps/receiver"`,
+      ];
+      if (optimize) {
+        argLines.push(`      - "receiverOptimize"`);
+        argLines.push(`      - "true"`);
+      }
+      const envLines: string[] = [
+        `      - name: TENX_LICENSE_FILE`,
+        `        value: /etc/tenx/license/license.jwt`,
+      ];
+      if (airgapped) {
+        envLines.push(`      - name: TENX_AIRGAPPED`);
+        envLines.push(`        value: "true"`);
+      }
+      const destOutput = renderLogstashDestinationOutput(destination, outputHost);
+      return `# Receiver overlay for Logstash (upstream elastic/logstash chart).
+# Layer on top of your existing values:
+#   helm upgrade --install <release> elastic/logstash \\
+#     -f your-existing-logstash-values.yaml \\
+#     -f my-receiver.yaml --namespace <namespace>
 
-# Avoid chart defaults hardcoding Elasticsearch credentials/mounts.
-extraEnvs: []
-secretMounts: []
+# elastic/logstash quirk: extraContainers is a YAML pipe-string, not a list.
+extraContainers: |
+  - name: log10x
+    image: log10x/edge-10x:latest
+    imagePullPolicy: IfNotPresent
+    args:
+${argLines.join('\n')}
+    env:
+${envLines.join('\n')}
+    volumeMounts:
+      - name: tenx-license
+        mountPath: /etc/tenx/license/license.jwt
+        subPath: license.jwt
+        readOnly: true
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits:   { cpu: 500m, memory: 512Mi }
+
+# License via the chart's secretMounts (not extraVolumes). subPath
+# projects the Secret's \`${secretKey}\` key to a single file.
+secretMounts:
+  - name: tenx-license
+    secretName: ${secretName}
+    path: /etc/tenx/license/license.jwt
+    subPath: ${secretKey}
+
+# Two-pipeline driver: ingest runs your filters and hands off to the
+# sidecar; destinations consumes returning events filter-free, so
+# enrichment runs exactly once.
+logstashConfig:
+  pipelines.yml: |
+    - pipeline.id: ingest
+      path.config: "/usr/share/logstash/pipeline/tenx-ingest.conf"
+    - pipeline.id: destinations
+      path.config: "/usr/share/logstash/pipeline/tenx-destinations.conf"
 
 logstashPipeline:
-  output.conf: |
-${indent(output, 4)}
+  tenx-ingest.conf: |
+    input {
+      # Replace with your real inputs (file, beats, http, ...). The
+      # \`tag\` field becomes the event's source inside Log10x.
+      file {
+        path  => "/var/log/containers/*.log"
+        codec => "json"
+        start_position => "beginning"
+      }
+    }
+    filter {
+      mutate {
+        add_field => { "cluster" => "$\{CLUSTER_NAME:unset\}" }
+        add_field => { "tag" => "k8s.containers" }
+      }
+    }
+    output {
+      tcp {
+        host  => "127.0.0.1"
+        port  => 5044
+        codec => json_lines
+      }
+    }
+  tenx-destinations.conf: |
+    input {
+      tcp {
+        host  => "0.0.0.0"
+        port  => 5045
+        codec => json_lines
+      }
+    }
+    output {
+${indent(destOutput, 6)}
+    }
 `;
     },
-    verifyProbes: ({ releaseName, namespace, destination }) => {
-      const sel = legacyElasticSelector(releaseName, 'logstash');
-      const probes = [
+    verifyProbes: ({ releaseName, namespace, destination, optimize }) => {
+      const sel = k8sRecommendedSelector(releaseName);
+      const probes: Array<{
+        name: string;
+        question: string;
+        commands: string[];
+        expectOutput?: string;
+        timeoutSec?: number;
+      }> = [
         {
           name: 'pods-ready',
-          question: 'Are all Logstash+Reporter StatefulSet pods Ready?',
+          question: 'Are all Logstash pods Ready (with the log10x sidecar)?',
           commands: [`kubectl -n ${namespace} wait --for=condition=Ready pod -l ${sel} --timeout=10m`],
           expectOutput: 'condition met',
           timeoutSec: 600,
         },
         {
-          name: 'processor-alive',
-          question: 'Is the 10x filter plugin loaded in the logstash container?',
+          name: 'sidecar-alive',
+          question: 'Is the log10x sidecar running and processing events?',
           commands: [
-            `kubectl -n ${namespace} logs -l ${sel} -c logstash --tail=400 | grep -iE 'tenx|10x|pattern' | head -20`,
+            `kubectl -n ${namespace} logs -l ${sel} -c log10x --tail=400 | grep -E 'tenx|pattern|receiver|template' | head -20`,
+          ],
+        },
+        {
+          name: 'pipeline-wired',
+          question: 'Are the ingest and destinations pipelines both running?',
+          commands: [
+            `kubectl -n ${namespace} logs -l ${sel} -c logstash --tail=400 | grep -E 'pipeline.id|tenx-ingest|tenx-destinations|5044|5045' | head -20`,
           ],
         },
       ];
       if (destination === 'mock') {
         probes.push({
           name: 'tenx-mock-events',
-          question: 'Are tagged [TENX-MOCK] events reaching stdout?',
-          commands: [`kubectl -n ${namespace} logs -l ${sel} -c logstash --tail=200 | grep -F 'TENX-MOCK' | head -5`],
-          expectOutput: 'TENX-MOCK',
+          question: 'Are returning events reaching the stdout destination?',
+          commands: [
+            `kubectl -n ${namespace} logs -l ${sel} -c logstash --tail=200 | grep -E 'tenx-destinations' | head -10`,
+          ],
           timeoutSec: 180,
+        });
+      }
+      if (optimize) {
+        probes.push({
+          name: 'tenx-encoded-events',
+          question: 'Are events emitted in compact encoded form (templateHash+vars)?',
+          commands: [
+            `kubectl -n ${namespace} logs -l ${sel} -c logstash --tail=500 | grep -oE '~[A-Za-z0-9]{5,20},[0-9]{10,}' | head -3`,
+          ],
+          expectOutput: '~',
+          timeoutSec: 120,
+        });
+      }
+      return probes;
+    },
+  },
+
+  // Vector — upstream `vector/vector` chart with a values overlay (per
+  // mksite/docs/apps/receiver/deploy.md). No log10x-repackaged Vector
+  // chart exists; the integration is done via overlay on top of the
+  // upstream chart. The exact `tenx:` overlay schema is still being
+  // shaped — TODO: lock down the values structure once the engine team
+  // publishes the canonical Vector sidecar config.
+  vector: {
+    label: 'Vector',
+    integrationMode:
+      'Sidecar (`log10x/edge-10x`) injected into the user\'s existing Vector pod via the upstream `vector/vector` chart\'s `extraContainers` + `extraVolumes` hooks. The chart\'s `customConfig` is replaced to wire the sidecar bypass — Vector\'s DAG IS the bypass: sources feed an `ingest` transform → `tenx_in` socket sink → the sidecar processes → returns via the `tenx_out` fluent source → destinations sinks consume `tenx_out` only.',
+    helmRepo: 'https://helm.vector.dev',
+    helmRepoAlias: 'vector',
+    chartRef: 'vector/vector',
+    chartAvailability: 'published',
+    primaryImageHint: 'log10x/edge-10x',
+    primaryContainerName: 'log10x',
+    hasTenxSidecar: true,
+    selectorStyle: 'k8s-recommended',
+    selectorLabel: (r) => k8sRecommendedSelector(r),
+    renderValues: ({ destination, outputHost, optimize, airgapped, licenseSecretName, licenseSecretKey }) => {
+      const sidecar = renderLog10xSidecar({
+        forwarderKind: 'vector',
+        optimize,
+        airgapped,
+        licenseSecretName: licenseSecretName ?? 'log10x-license',
+        licenseSecretKey: licenseSecretKey ?? 'license-jwt',
+      });
+      const destSink = renderVectorDestinationSink(destination, outputHost);
+      return `# Receiver overlay for Vector (upstream vector/vector chart).
+# Layer on top of your existing values:
+#   helm upgrade --install <release> vector/vector \\
+#     -f your-existing-vector-values.yaml \\
+#     -f my-receiver.yaml --namespace <namespace>
+
+${sidecar}
+
+# Replace the chart's default customConfig with the sidecar bypass.
+# Sources feed the \`ingest\` transform; sinks consume \`tenx_out\` so
+# enrichment runs exactly once. Vector's DAG IS the bypass.
+customConfig:
+  data_dir: /vector-data-dir
+
+  sources:
+    # Replace with your real sources (file, kubernetes_logs, journald,
+    # http_server, ...). All sources MUST feed the \`ingest\` transform —
+    # anything wired directly to a destination skips Log10x.
+    app_logs:
+      type: kubernetes_logs
+
+    # Returning events from the 10x sidecar. Bind on 0.0.0.0 so kubelet's
+    # tcpSocket probe reaches the port from the pod IP; the sidecar still
+    # connects via 127.0.0.1 (same pod, same netns).
+    tenx_out:
+      type: fluent
+      mode: tcp
+      address: 0.0.0.0:9001
+
+  transforms:
+    # Enrichment runs here exactly once before handoff. The return path
+    # skips this transform via the DAG wiring below.
+    ingest:
+      type: remap
+      inputs: [app_logs]
+      source: |
+        .cluster = get_env_var("CLUSTER_NAME") ?? "unset"
+        .tag = .source_type
+
+  sinks:
+    # Hand off to the Log10x sidecar.
+    tenx_in:
+      type: socket
+      inputs: [ingest]
+      mode: tcp
+      address: 127.0.0.1:9000
+      encoding: { codec: json }
+      framing: { method: newline_delimited }
+
+    # Destinations consume tenx_out ONLY (never the raw sources or
+    # \`ingest\`). That structural wiring is the enrichment bypass.
+${indent(destSink, 4)}
+`;
+    },
+    verifyProbes: ({ releaseName, namespace, destination, optimize }) => {
+      const sel = k8sRecommendedSelector(releaseName);
+      const probes: Array<{
+        name: string;
+        question: string;
+        commands: string[];
+        expectOutput?: string;
+        timeoutSec?: number;
+      }> = [
+        {
+          name: 'pods-ready',
+          question: 'Are all Vector pods Ready (with the log10x sidecar)?',
+          commands: [`kubectl -n ${namespace} wait --for=condition=Ready pod -l ${sel} --timeout=5m`],
+          expectOutput: 'condition met',
+          timeoutSec: 300,
+        },
+        {
+          name: 'sidecar-alive',
+          question: 'Is the log10x sidecar running and processing events?',
+          commands: [
+            `kubectl -n ${namespace} logs -l ${sel} -c log10x --tail=400 | grep -E 'tenx|pattern|receiver|template' | head -20`,
+          ],
+        },
+        {
+          name: 'pipeline-wired',
+          question: 'Is the tenx_in sink reaching the sidecar and tenx_out receiving returns?',
+          commands: [
+            `kubectl -n ${namespace} logs -l ${sel} -c vector --tail=400 | grep -E 'tenx_in|tenx_out|fluent' | head -10`,
+          ],
+        },
+      ];
+      if (destination === 'mock') {
+        probes.push({
+          name: 'tenx-mock-events',
+          question: 'Are returning events being printed by the console sink?',
+          commands: [
+            `kubectl -n ${namespace} logs -l ${sel} -c vector --tail=200 | grep -E 'destinations' | head -10`,
+          ],
+          timeoutSec: 120,
+        });
+      }
+      if (optimize) {
+        probes.push({
+          name: 'tenx-encoded-events',
+          question: 'Are events emitted in compact encoded form (templateHash+vars)?',
+          commands: [
+            `kubectl -n ${namespace} logs -l ${sel} -c vector --tail=500 | grep -oE '~[A-Za-z0-9]{5,20},[0-9]{10,}' | head -3`,
+          ],
+          expectOutput: '~',
+          timeoutSec: 120,
         });
       }
       return probes;
@@ -537,86 +1069,121 @@ ${indent(output, 4)}
   'otel-collector': {
     label: 'OTel Collector',
     integrationMode:
-      'DaemonSet using the log10x-repackaged chart `log10x-otel/opentelemetry-collector`. Uses the chart\'s hidden `logs/to-tenx` pipeline with a syslog exporter over a Unix socket; the 10x logic runs inside the collector container.',
-    helmRepo: 'https://log-10x.github.io/opentelemetry-helm-charts',
-    helmRepoAlias: 'log10x-otel',
-    chartRef: 'log10x-otel/opentelemetry-collector',
+      'Sidecar (`log10x/edge-10x`) injected into the user\'s existing OTel Collector pod via the upstream `open-telemetry/opentelemetry-collector` chart\'s `extraContainers` + `extraVolumes` hooks. The chart\'s `config:` is deep-merged: we add an `otlp/tenx` exporter (handoff to sidecar at 127.0.0.1:4317), an `otlp/tenx` receiver (return path on 0.0.0.0:24225), rewire the `logs` pipeline through `otlp/tenx`, and add a `logs/from-tenx` pipeline that ships the returning events to the user\'s real destinations. Both directions are OTLP/gRPC over loopback.',
+    helmRepo: 'https://open-telemetry.github.io/opentelemetry-helm-charts',
+    helmRepoAlias: 'open-telemetry',
+    chartRef: 'open-telemetry/opentelemetry-collector',
     chartAvailability: 'published',
-    primaryImageHint: 'ghcr.io/log-10x/opentelemetry-collector',
-    primaryContainerName: 'opentelemetry-collector',
-    hasTenxSidecar: false,
+    primaryImageHint: 'log10x/edge-10x',
+    primaryContainerName: 'log10x',
+    hasTenxSidecar: true,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ apiKey, releaseName, destination, outputHost, gitToken, optimize, readOnly }) => {
-      // The OTel chart doesn't auto-wire filelog unless the preset is
-      // on. We turn it on explicitly so the user's pipeline just works.
-      // image.repository is required by the chart and has no default.
-      const exporter = renderOtelExporter(destination, outputHost);
-      // Same as fluent-bit: chart values expose optimize + readOnly
-      // booleans directly; chart templates wire them to the matching
-      // engine launch args (and gate the fluentforward / from-tenx
-      // pipeline when readOnly is true).
-      const featureFlags = renderTenxFeatureFlags({ optimize, readOnly });
-      return `mode: "daemonset"
+    renderValues: ({ destination, outputHost, optimize, airgapped, licenseSecretName, licenseSecretKey }) => {
+      const sidecar = renderLog10xSidecar({
+        forwarderKind: 'otel-collector',
+        optimize,
+        airgapped,
+        licenseSecretName: licenseSecretName ?? 'log10x-license',
+        licenseSecretKey: licenseSecretKey ?? 'license-jwt',
+      });
+      // OTel destination exporter declaration + the exporter name(s) the
+      // from-tenx pipeline references. For mock we use the chart's built-in
+      // `debug` exporter (no extra config needed); for real destinations
+      // we declare a typed exporter block.
+      const { exporterName, exporterBlock } = renderOtelDestinationExporter(destination, outputHost);
+      return `# Receiver overlay for OTel Collector (upstream open-telemetry/opentelemetry-collector chart).
+# Layer on top of your existing values:
+#   helm upgrade --install <release> open-telemetry/opentelemetry-collector \\
+#     -f your-existing-otel-values.yaml \\
+#     -f my-receiver.yaml --namespace <namespace>
 
-# image.repository defaults in the chart's values.yaml to the upstream
-# contrib image (otel/opentelemetry-collector-contrib), which is
-# public. Override here if you want the log10x-repackaged image and
-# have configured the necessary imagePullSecrets.
+${sidecar}
 
-tenx:
-  enabled: true
-  apiKey: "${apiKey}"${featureFlags}
-  runtimeName: "${releaseName}"
-  gitToken: "${gitToken ?? DEFAULT_GIT_TOKEN}"
-  config:
-    git:
-      enabled: true
-      url: "https://github.com/log-10x/config.git"
-
-# Turn on the chart's filelog logsCollection preset so the receiver
-# is actually wired up; advising pipeline.receivers without this
-# results in "references receiver 'filelog' which is not configured".
-presets:
-  logsCollection:
-    enabled: true
-    includeCollectorLogs: false
-
+# config: is deep-merged with chart defaults and your existing values.
+# We add: an otlp/tenx exporter (handoff to the sidecar), an otlp/tenx
+# receiver (return path), rewire the logs pipeline through the sidecar,
+# and add a logs/from-tenx pipeline that ships returning events to
+# your real destinations.
 config:
+  receivers:
+    otlp/tenx:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:24225
+
   exporters:
-${indent(exporter, 4)}
+    otlp/tenx:
+      endpoint: 127.0.0.1:4317
+      tls:
+        insecure: true
+${exporterBlock ? `${indent(exporterBlock, 4)}\n` : ''}
   service:
     pipelines:
+      # Replace your existing logs pipeline (Helm merges these lists
+      # wholesale; spell out everything you need).
       logs:
-        receivers: [filelog]
-        processors: [memory_limiter, batch]
-        exporters: [${destination === 'mock' ? 'debug' : 'elasticsearch'}]
+        receivers: [filelog]                # ← your existing receivers
+        processors:
+          - memory_limiter
+          - batch
+        exporters: [otlp/tenx]
+
+      # New egress pipeline. Processor-free so enrichment runs exactly once.
+      logs/from-tenx:
+        receivers: [otlp/tenx]
+        exporters: [${exporterName}]
 `;
     },
-    verifyProbes: ({ releaseName, namespace, destination }) => {
+    verifyProbes: ({ releaseName, namespace, destination, optimize }) => {
       const sel = k8sRecommendedSelector(releaseName);
-      const probes = [
+      const probes: Array<{
+        name: string;
+        question: string;
+        commands: string[];
+        expectOutput?: string;
+        timeoutSec?: number;
+      }> = [
         {
           name: 'pods-ready',
-          question: 'Are all OTel Collector pods Ready?',
+          question: 'Are all OTel Collector pods Ready (with the log10x sidecar)?',
           commands: [`kubectl -n ${namespace} wait --for=condition=Ready pod -l ${sel} --timeout=5m`],
           expectOutput: 'condition met',
           timeoutSec: 300,
         },
         {
-          name: 'processor-alive',
-          question: 'Is the 10x syslog exporter pipeline wired and emitting?',
+          name: 'sidecar-alive',
+          question: 'Is the log10x sidecar running and processing events?',
           commands: [
-            `kubectl -n ${namespace} logs -l ${sel} -c opentelemetry-collector --tail=400 | grep -iE 'tenx|10x|pattern' | head -20`,
+            `kubectl -n ${namespace} logs -l ${sel} -c log10x --tail=400 | grep -E 'tenx|pattern|receiver|template' | head -20`,
+          ],
+        },
+        {
+          name: 'pipeline-wired',
+          question: 'Is the otlp/tenx receiver listening and the logs pipeline routing through it?',
+          commands: [
+            `kubectl -n ${namespace} logs -l ${sel} -c opentelemetry-collector --tail=400 | grep -E 'otlp/tenx|logs/from-tenx' | head -10`,
           ],
         },
       ];
       if (destination === 'mock') {
         probes.push({
           name: 'tenx-mock-events',
-          question: 'Are tagged [TENX-MOCK] events reaching the debug exporter?',
-          commands: [`kubectl -n ${namespace} logs -l ${sel} -c opentelemetry-collector --tail=200 | grep -F 'TENX-MOCK' | head -5`],
-          expectOutput: 'TENX-MOCK',
+          question: 'Are returning events being printed by the debug exporter?',
+          commands: [
+            `kubectl -n ${namespace} logs -l ${sel} -c opentelemetry-collector --tail=300 | grep -E 'debug' | head -10`,
+          ],
+          timeoutSec: 120,
+        });
+      }
+      if (optimize) {
+        probes.push({
+          name: 'tenx-encoded-events',
+          question: 'Are events emitted in compact encoded form (templateHash+vars)?',
+          commands: [
+            `kubectl -n ${namespace} logs -l ${sel} -c opentelemetry-collector --tail=500 | grep -oE '~[A-Za-z0-9]{5,20},[0-9]{10,}' | head -3`,
+          ],
+          expectOutput: '~',
           timeoutSec: 120,
         });
       }
@@ -635,7 +1202,7 @@ ${indent(exporter, 4)}
 // restart on their critical path.
 //
 // Kept as a separate export rather than a 6th entry in
-// REPORTER_FORWARDER_SPECS because the spec map is keyed by "which user
+// RECEIVER_FORWARDER_SPECS because the spec map is keyed by "which user
 // forwarder kind do we replace" — and standalone replaces none. It runs
 // alongside whatever the user has (or nothing). Callers select standalone
 // via `shape: 'standalone'` in ReporterAdviseArgs; `forwarder` stays in
@@ -658,22 +1225,49 @@ export const STANDALONE_SPEC: ForwarderSpec = {
   hasTenxSidecar: false,
   selectorStyle: 'k8s-recommended',
   selectorLabel: (r) => k8sRecommendedSelector(r),
-  renderValues: ({ apiKey, releaseName, gitToken }) => {
-    // reporter-10x uses a flat values layout: top-level log10xApiKey +
-    // runtimeName (NOT nested under `tenx:`). `config.git.enabled: false`
-    // tells the chart to use the image-baked config instead of cloning
-    // the public config repo at startup — faster boot, no outbound call.
-    // gitToken is still required (init container unconditionally mounts
-    // a secret derived from it) even though git.enabled is false.
+  renderValues: ({ licenseJwt, isDemoLicense, licenseSecretName, licenseSecretKey, releaseName, backends, backendCredentials, airgapped }) => {
+    // reporter-10x uses a flat values layout: top-level log10xLicenseJwt
+    // + runtimeName (NOT nested under `tenx:`). The chart turns the JWT
+    // into a Kubernetes Secret and mounts it as a file pointed at by
+    // TENX_LICENSE_FILE inside the engine container.
+    //
+    // Demo licenses (transient, 14-day, anonymous): inline the JWT in
+    // values.yaml — chart creates a Secret on its own from that value.
+    // One-step setup, fine for demos.
+    //
+    // Real (user) licenses: never write the JWT into values.yaml.
+    // Instead, point the chart at an existing Secret the user creates
+    // out-of-band. The chart's `licenseSecret.create=false` mode skips
+    // the auto-Secret generation and mounts the user's existing one.
+    //
+    // We intentionally DO NOT emit `gitToken` or `config.git` defaults
+    // — both match chart defaults and the chart's secret-template only
+    // creates the git-token Secret when `config.git.enabled` OR
+    // `symbols.git.enabled` is true (neither is by default), so the
+    // chart works fine without them. The engine reads config from a
+    // baked-in image path in default deployments.
+    //
+    // Airgapped is the chart's TOP-LEVEL `airgapped:` value (NOT a tenx
+    // env var as in the Receiver overlays); the chart secret-templates
+    // and engine launch args branch off it. Additional metrics backends
+    // wire via `tenx.extraArgs` + `tenx.extraEnv` — same shape as
+    // Receiver overlays.
+    const airgappedLine = airgapped ? `\nairgapped: true` : '';
+    const extras = renderTenxExtraArgsAndEnv({ backends, backendCredentials, airgapped, airgappedAsEnvVar: false });
+    const tenxBlock = extras
+      ? `\ntenx:${extras}\n`
+      : '';
+    const licenseBlock = isDemoLicense === false
+      ? `log10xLicenseJwt: ""          # Provided via the Secret below (create it before \`helm upgrade\`)
+licenseSecret:
+  create: false
+  existingSecret: ${licenseSecretName ?? 'log10x-license'}
+  secretKey: ${licenseSecretKey ?? 'license-jwt'}`
+      : `log10xLicenseJwt: "${licenseJwt}"`;
     return `# reporter-10x: non-invasive parallel DaemonSet.
 # Runs alongside the user's existing forwarder without touching it.
-log10xApiKey: "${apiKey}"
-runtimeName: "${releaseName}"
-gitToken: "${gitToken ?? DEFAULT_GIT_TOKEN}"
-config:
-  git:
-    enabled: false
-`;
+${licenseBlock}
+runtimeName: "${releaseName}"${airgappedLine}${tenxBlock}`;
   },
   verifyProbes: ({ releaseName, namespace }) => {
     const sel = k8sRecommendedSelector(releaseName);
@@ -724,6 +1318,67 @@ const FORWARDER_EXCLUDE_REGEX = [
   '.*otel-collector.*\\.log$',
   '.*opentelemetry-collector.*\\.log$',
 ];
+
+/**
+ * Renders the destination `[OUTPUT]` block for the Fluent Bit receiver
+ * overlay. This is the second [OUTPUT] in the chain — Match tenx.* —
+ * consuming the post-sidecar tagged events emitted back into Fluent Bit
+ * by the egress `[INPUT] forward Tag_Prefix tenx.`. The handoff
+ * `[OUTPUT] forward Match kube.*` (events going TO the sidecar) is
+ * constant and lives in the template body.
+ *
+ * Returns lines already indented with 4 spaces (config.outputs is a
+ * pipe-string in YAML; the renderer concatenates this onto the template).
+ */
+function renderFluentBitDestinationOutput(
+  destination: OutputDestination,
+  outputHost?: string,
+  splunkHecToken?: string
+): string {
+  if (destination === 'mock') {
+    return `    # Destination for processed tenx.* events. Replace with your real
+    # destination (es, splunk, kafka, s3, ...) — this stdout block is
+    # safe for dogfooding.
+    [OUTPUT]
+        Name stdout
+        Match tenx.*
+        Format json_lines`;
+  }
+  if (destination === 'elasticsearch') {
+    return `    [OUTPUT]
+        Name es
+        Match tenx.*
+        Host ${outputHost ?? 'elasticsearch-master'}
+        Logstash_Format On`;
+  }
+  if (destination === 'splunk') {
+    return `    [OUTPUT]
+        Name splunk
+        Match tenx.*
+        Host ${outputHost ?? 'splunk-hec.example.com'}
+        Port 8088
+        TLS On
+        Splunk_Token ${splunkHecToken ?? 'REPLACE_WITH_HEC_TOKEN'}`;
+  }
+  if (destination === 'datadog') {
+    return `    [OUTPUT]
+        Name datadog
+        Match tenx.*
+        Host http-intake.logs.datadoghq.com
+        TLS On
+        apikey \${DD_API_KEY}`;
+  }
+  if (destination === 'cloudwatch') {
+    return `    [OUTPUT]
+        Name cloudwatch_logs
+        Match tenx.*
+        region \${AWS_REGION:-us-east-1}
+        log_group_name ${outputHost ?? '/aws/log10x/receiver'}
+        log_stream_prefix ${'$\{POD_NAME\}'}-
+        auto_create_group On`;
+  }
+  return '';
+}
 
 function renderFluentBitOutput(
   destination: OutputDestination,
@@ -919,6 +1574,102 @@ output {
   return 'output { }';
 }
 
+/**
+ * Returns the inside-`output {...}` block for the Logstash receiver
+ * overlay's `tenx-destinations.conf` pipeline. Consumes returning
+ * processed events from the sidecar (on :5045) and ships them to the
+ * user's chosen backend. Caller wraps this in `output { ... }`.
+ * Indentation is 0 (caller indents).
+ */
+function renderLogstashDestinationOutput(destination: OutputDestination, outputHost?: string): string {
+  if (destination === 'mock') {
+    return `stdout { codec => json_lines }`;
+  }
+  if (destination === 'elasticsearch') {
+    return `elasticsearch {
+  hosts => ["${outputHost ?? 'elasticsearch-master'}:9200"]
+  index => "logs-%{+YYYY.MM.dd}"
+}`;
+  }
+  if (destination === 'splunk') {
+    return `http {
+  url => "https://${outputHost ?? 'splunk-hec.example.com'}:8088/services/collector/event"
+  format => "json_batch"
+  http_method => "post"
+  headers => { "Authorization" => "Splunk \${SPLUNK_HEC_TOKEN}" }
+}`;
+  }
+  if (destination === 'datadog') {
+    return `http {
+  url => "https://http-intake.logs.datadoghq.com/api/v2/logs"
+  format => "json_batch"
+  http_method => "post"
+  headers => { "DD-API-KEY" => "\${DD_API_KEY}" }
+}`;
+  }
+  if (destination === 'cloudwatch') {
+    return `# CloudWatch Logs from Logstash uses the
+    # logstash-output-cloudwatch_logs plugin (gem install required in
+    # a custom image). Replace this stdout with the cloudwatch_logs
+    # block once the plugin is installed.
+stdout { codec => json_lines }`;
+  }
+  return `stdout { codec => json_lines }`;
+}
+
+/**
+ * Returns the `destinations` sink block for the Vector receiver overlay.
+ * Consumes the `tenx_out` source (post-sidecar events) and writes them
+ * to the user's chosen backend. Indentation is 0 (caller indents).
+ */
+function renderVectorDestinationSink(destination: OutputDestination, outputHost?: string): string {
+  if (destination === 'mock') {
+    return `destinations:
+  type: console
+  inputs: [tenx_out]
+  encoding:
+    codec: json`;
+  }
+  if (destination === 'elasticsearch') {
+    return `destinations:
+  type: elasticsearch
+  inputs: [tenx_out]
+  endpoints: ["https://${outputHost ?? 'elasticsearch-master'}:9200"]
+  mode: bulk
+  bulk:
+    index: logs`;
+  }
+  if (destination === 'splunk') {
+    return `destinations:
+  type: splunk_hec_logs
+  inputs: [tenx_out]
+  endpoint: "https://${outputHost ?? 'splunk-hec.example.com'}:8088"
+  default_token: \${SPLUNK_HEC_TOKEN}`;
+  }
+  if (destination === 'datadog') {
+    return `destinations:
+  type: datadog_logs
+  inputs: [tenx_out]
+  default_api_key: \${DD_API_KEY}
+  site: \${DD_SITE:-datadoghq.com}`;
+  }
+  if (destination === 'cloudwatch') {
+    return `destinations:
+  type: aws_cloudwatch_logs
+  inputs: [tenx_out]
+  group_name: ${outputHost ?? '/aws/log10x/receiver'}
+  stream_name: log10x-receiver
+  region: \${AWS_REGION:-us-east-1}
+  encoding:
+    codec: json`;
+  }
+  return `destinations:
+  type: console
+  inputs: [tenx_out]
+  encoding:
+    codec: json`;
+}
+
 function renderOtelExporter(destination: OutputDestination, outputHost?: string): string {
   if (destination === 'mock') {
     return `debug:
@@ -930,6 +1681,57 @@ function renderOtelExporter(destination: OutputDestination, outputHost?: string)
   logs_index: logs`;
   }
   return '';
+}
+
+/**
+ * Returns the exporter name to reference from the `logs/from-tenx`
+ * pipeline plus the optional exporter block to add under
+ * `config.exporters`. `mock` uses the chart's built-in `debug` exporter
+ * (no extra block needed). Real destinations get a typed exporter block.
+ */
+function renderOtelDestinationExporter(
+  destination: OutputDestination,
+  outputHost?: string,
+): { exporterName: string; exporterBlock: string } {
+  if (destination === 'mock') {
+    return { exporterName: 'debug', exporterBlock: '' };
+  }
+  if (destination === 'elasticsearch') {
+    return {
+      exporterName: 'elasticsearch',
+      exporterBlock: `elasticsearch:
+  endpoints: ["https://${outputHost ?? 'elasticsearch-master'}:9200"]
+  logs_index: logs`,
+    };
+  }
+  if (destination === 'splunk') {
+    return {
+      exporterName: 'splunk_hec',
+      exporterBlock: `splunk_hec:
+  token: \${SPLUNK_HEC_TOKEN}
+  endpoint: "https://${outputHost ?? 'splunk-hec.example.com'}:8088/services/collector"`,
+    };
+  }
+  if (destination === 'datadog') {
+    return {
+      exporterName: 'datadog',
+      exporterBlock: `datadog:
+  api:
+    key: \${DD_API_KEY}
+    site: \${DD_SITE:-datadoghq.com}`,
+    };
+  }
+  if (destination === 'cloudwatch') {
+    return {
+      exporterName: 'awscloudwatchlogs',
+      exporterBlock: `awscloudwatchlogs:
+  log_group_name: ${outputHost ?? '/aws/log10x/receiver'}
+  log_stream_name: log10x-receiver
+  region: \${AWS_REGION:-us-east-1}`,
+    };
+  }
+  // Fallback to debug — should be unreachable since destination is enum-typed.
+  return { exporterName: 'debug', exporterBlock: '' };
 }
 
 /** Indent every line of `s` by `spaces` spaces. */

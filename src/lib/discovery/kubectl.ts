@@ -13,6 +13,7 @@
 
 import { run, runJson, type ShellResult } from './shell.js';
 import { classifyForwarderImage, classifyLog10xApp, isLog10xImage } from './forwarder-detect.js';
+import { detectBackendAgents } from './backend-detect.js';
 import type {
   DetectedForwarder,
   DetectedLog10xApp,
@@ -74,6 +75,7 @@ export async function probeKubectl(
         storageClasses: [],
         ingressClasses: [],
         serviceAccountIrsa: [],
+        backendAgents: [],
       },
       log,
     };
@@ -160,6 +162,22 @@ export async function probeKubectl(
     }
   }
 
+  // Step 8: detect metrics-backend agents (Datadog, Prometheus, etc.)
+  // No additional shell calls — runs off the helm releases + workload
+  // labels we already pulled.
+  const backendAgents = detectBackendAgents({
+    available: true,
+    namespaces: allNs,
+    probedNamespaces: probedNs,
+    forwarders,
+    helmReleases,
+    log10xApps,
+    storageClasses,
+    ingressClasses,
+    serviceAccountIrsa,
+    backendAgents: [],
+  });
+
   return {
     probes: {
       available: true,
@@ -173,6 +191,7 @@ export async function probeKubectl(
       storageClasses,
       ingressClasses,
       serviceAccountIrsa,
+      backendAgents,
     },
     log,
   };

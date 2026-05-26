@@ -1,6 +1,21 @@
 /**
  * Persistent credentials at `~/.log10x/credentials`.
  *
+ * This file holds the materials for BOTH gateway auth surfaces (see
+ * `./auth-model.ts` for the canonical model):
+ *
+ *   - **api_key** (user-action surface) — `apiKey` field, the long-lived
+ *     token used in `X-10X-Auth` for MCP↔gateway calls.
+ *   - **Auth0 access + refresh tokens** (the unified front door) — used
+ *     to mint license JWTs on demand for install plans (via
+ *     `./license-api.ts`) and to refresh themselves without forcing
+ *     the user to re-sign-in. Absent on the pasted-API-key signin path.
+ *
+ * Note that the **license JWT itself is NOT persisted here**. License
+ * JWTs are short-lived engine credentials minted on demand into helm
+ * values; this file only stores the longer-lived materials that can
+ * derive a fresh license when needed.
+ *
  * Written by `log10x_signin_complete` after the BE returns an API key
  * (or after the pasted-key path validates one), read by
  * `loadEnvironments` when no `LOG10X_API_KEY` env var is set, wiped by
@@ -18,12 +33,29 @@
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import './auth-model.js';
 
 export interface Credentials {
   /** Long-lived Log10x API key minted by the BE. */
   apiKey: string;
   /** ISO-8601 timestamp when these credentials were written. */
   signedInAt?: string;
+  /**
+   * Auth0 access token retained from the device-flow signin. Needed by
+   * the install wizard to mint a user-scoped license JWT via
+   * `POST /api/v1/license` (which only accepts Bearer Auth0 tokens, not
+   * the Log10x API key). Absent on the pasted-API-key signin path —
+   * the wizard falls back to the anonymous demo license in that case.
+   */
+  auth0AccessToken?: string;
+  /**
+   * Auth0 refresh token. The device flow asks for the `offline_access`
+   * scope so we get one. Used to refresh the access token when it
+   * expires (typically 24h) without forcing the user to re-sign in.
+   */
+  auth0RefreshToken?: string;
+  /** ISO-8601 expiry of `auth0AccessToken`. */
+  auth0AccessTokenExpiresAt?: string;
 }
 
 function credentialsPath(): string {
@@ -65,6 +97,14 @@ export async function readCredentials(): Promise<Credentials | null> {
   return {
     apiKey: c.apiKey,
     signedInAt: typeof c.signedInAt === 'string' ? c.signedInAt : undefined,
+    auth0AccessToken:
+      typeof c.auth0AccessToken === 'string' ? c.auth0AccessToken : undefined,
+    auth0RefreshToken:
+      typeof c.auth0RefreshToken === 'string' ? c.auth0RefreshToken : undefined,
+    auth0AccessTokenExpiresAt:
+      typeof c.auth0AccessTokenExpiresAt === 'string'
+        ? c.auth0AccessTokenExpiresAt
+        : undefined,
   };
 }
 

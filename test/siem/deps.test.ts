@@ -22,6 +22,16 @@ import {
 } from '../../src/lib/siem/deps/types.js';
 import { renderDepCheckResult } from '../../src/lib/siem/deps/index.js';
 import { executeDependencyCheck } from '../../src/tools/dependency-check.js';
+import type { StructuredOutput } from '../../src/lib/output-types.js';
+
+function asMarkdown(out: string | StructuredOutput): string {
+  if (typeof out === 'string') return out;
+  const md = (out.data as { markdown?: unknown }).markdown;
+  if (typeof md !== 'string') {
+    throw new Error(`tool returned envelope without data.markdown; got ${JSON.stringify(out).slice(0, 240)}`);
+  }
+  return md;
+}
 
 const VARS = [
   'DD_API_KEY', 'DD_APP_KEY',
@@ -150,9 +160,10 @@ test('dependency_check: no creds + no vendor → returns "vendor required" messa
     t.skip('ambient AWS credentials detected — "no creds" path cannot be exercised here');
     return;
   }
-  const out = await executeDependencyCheck({ pattern: 'Payment_Gateway_Timeout' });
-  assert.match(out, /vendor required/);
-  assert.match(out, /datadog, splunk, elasticsearch, cloudwatch/);
+  const out = await executeDependencyCheck({ pattern: 'Payment_Gateway_Timeout', view: 'markdown' });
+  const md = asMarkdown(out);
+  assert.match(md, /vendor required/);
+  assert.match(md, /datadog, splunk, elasticsearch, cloudwatch/);
 });
 
 test('dependency_check: explicit vendor with no creds → bash fallback', async () => {
@@ -161,10 +172,12 @@ test('dependency_check: explicit vendor with no creds → bash fallback', async 
   const out = await executeDependencyCheck({
     pattern: 'Payment_Gateway_Timeout',
     vendor: 'splunk',
+    view: 'markdown',
   });
-  assert.match(out, /paste-ready/);
-  assert.match(out, /siem-check-splunk\.py/);
-  assert.match(out, /SPLUNK_TOKEN/);
+  const md = asMarkdown(out);
+  assert.match(md, /paste-ready/);
+  assert.match(md, /siem-check-splunk\.py/);
+  assert.match(md, /SPLUNK_TOKEN/);
 });
 
 test('dependency_check: multiple SIEMs detected → ambiguous error', async () => {
@@ -174,11 +187,12 @@ test('dependency_check: multiple SIEMs detected → ambiguous error', async () =
   process.env.SPLUNK_TOKEN = 'tok';
   process.env.DD_API_KEY = 'k';
   process.env.DD_APP_KEY = 'a';
-  const out = await executeDependencyCheck({ pattern: 'Payment_Gateway_Timeout' });
-  assert.match(out, /Multiple SIEMs detected/);
-  assert.match(out, /splunk/);
-  assert.match(out, /datadog/);
-  assert.match(out, /Pass `vendor=/);
+  const out = await executeDependencyCheck({ pattern: 'Payment_Gateway_Timeout', view: 'markdown' });
+  const md = asMarkdown(out);
+  assert.match(md, /Multiple SIEMs detected/);
+  assert.match(md, /splunk/);
+  assert.match(md, /datadog/);
+  assert.match(md, /Pass `vendor=/);
 });
 
 test('dependency_check: ES detected but no Kibana → falls back to bash with explanation', async () => {
@@ -190,8 +204,10 @@ test('dependency_check: ES detected but no Kibana → falls back to bash with ex
   const out = await executeDependencyCheck({
     pattern: 'Payment_Gateway_Timeout',
     vendor: 'elasticsearch',
+    view: 'markdown',
   });
-  assert.match(out, /paste-ready/);
-  assert.match(out, /Kibana/);
-  assert.match(out, /siem-check-elasticsearch\.py/);
+  const md = asMarkdown(out);
+  assert.match(md, /paste-ready/);
+  assert.match(md, /Kibana/);
+  assert.match(md, /siem-check-elasticsearch\.py/);
 });

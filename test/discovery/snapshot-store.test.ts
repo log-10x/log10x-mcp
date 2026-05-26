@@ -28,6 +28,7 @@ function fixture(id: string): DiscoverySnapshot {
       log10xApps: [],
       storageClasses: [],
       ingressClasses: [],
+      backendAgents: [],
       serviceAccountIrsa: [],
     },
     aws: { available: false, s3Buckets: [], sqsQueues: [], cwLogGroups: [] },

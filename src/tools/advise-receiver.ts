@@ -25,7 +25,7 @@ export const adviseReceiverSchema = {
     .string()
     .describe('ID returned by `log10x_discover_env`. The snapshot is cached for 30 min.'),
   forwarder: z
-    .enum(['fluentbit', 'fluentd', 'filebeat', 'logstash', 'otel-collector'])
+    .enum(['fluentbit', 'fluentd', 'filebeat', 'logstash', 'otel-collector', 'vector'])
     .optional()
     .describe(
       'Forwarder to target. If omitted, uses the forwarder detected in the snapshot (falls back to fluentbit when none is detected).'
@@ -40,10 +40,10 @@ export const adviseReceiverSchema = {
     .describe(
       'Target namespace. Default: snapshot.recommendations.suggestedNamespace (usually `logging` or an existing forwarder namespace).'
     ),
-  api_key: z
+  license_jwt: z
     .string()
     .optional()
-    .describe('Log10x license key. Required for a complete install plan; verify/teardown plans work without it.'),
+    .describe('Log10x license JWT — mints from `POST /api/v1/license/demo` (anonymous) or `POST /api/v1/license` (Auth0-authed). Required for a complete install plan; verify/teardown plans work without it.'),
   destination: z
     .enum(['mock', 'elasticsearch', 'splunk', 'datadog', 'cloudwatch'])
     .optional()
@@ -59,14 +59,14 @@ export const adviseReceiverSchema = {
     .boolean()
     .optional()
     .describe(
-      'When true, emit events out of the forwarder in compact encoded form (templateHash+vars, ~20-40x volume reduction; see `config/modules/pipelines/run/units/transform/doc.md#compact`). Supported on all 5 forwarders via `tenx.optimize: true` in the chart values. Mutually exclusive with `mode=readonly` (chart fails install if both are set). Default: false.'
+      'When true, emit events out of the forwarder in compact encoded form (templateHash+vars, ~20-40x volume reduction; see `config/modules/pipelines/run/units/transform/doc.md#compact`). Wizard-supported on fluent-bit, otel-collector, vector, and logstash — appended to the log10x sidecar container\'s `args` as `receiverOptimize true`. Default: false.'
     ),
-  mode: z
-    .enum(['readonly', 'readwrite'])
-    .optional()
-    .describe(
-      'Receiver mode. `readwrite` (default): receive events, filter them, write them back through the forwarder (with optional compact encoding when `optimize=true`). `readonly`: receive events, emit `emitted_events`/`all_events` TenXSummary metrics, do NOT write events back — passive metrics-only deployment. Maps to `tenx.readOnly: true` in the chart values. The chart wires the engine flag that gates every event-output stream module (forward/unix/socket/stdout) so the return loop to the forwarder is never constructed. Mutually exclusive with `optimize=true`. For the parallel-DaemonSet observation pattern (separate pod, not in the forwarder pipeline), use `log10x_advise_reporter` with `shape=standalone` instead.'
-    ),
+  // `mode` (readonly/readwrite) was deliberately removed from the schema:
+  // the default is always readwrite, and surfacing the choice in the wizard
+  // (which Claude Desktop does automatically for every optional enum) was
+  // both confusing and not what most users want. Readonly is a niche
+  // observation-only mode; add it back via a different mechanism (e.g. a
+  // `goal` arg or a dedicated read-only tool) if/when needed.
   action: z
     .enum(['install', 'verify', 'teardown', 'all'])
     .optional()
@@ -111,12 +111,11 @@ export async function executeAdviseReceiver(args: AdviseReceiverArgs): Promise<s
     forwarder: args.forwarder as ForwarderKind | undefined,
     releaseName: args.release_name ?? 'my-receiver',
     namespace: args.namespace,
-    apiKey: args.api_key,
+    licenseJwt: args.license_jwt,
     destination: destination as OutputDestination,
     outputHost: args.output_host,
     splunkHecToken: args.splunk_hec_token,
     optimize: args.optimize,
-    readOnly: args.mode === 'readonly',
     skipInstall: action === 'verify' || action === 'teardown',
     skipVerify: action === 'install' || action === 'teardown',
     skipTeardown: action === 'install' || action === 'verify',

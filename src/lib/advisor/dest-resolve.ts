@@ -20,7 +20,7 @@ const ADVISOR_DEST_SIEMS: SiemId[] = ['datadog', 'splunk', 'elasticsearch', 'clo
 
 export type DestResolution =
   | { kind: 'resolved'; destination: AdvisorDestination; note?: string }
-  | { kind: 'ambiguous'; markdown: string };
+  | { kind: 'ambiguous'; markdown: string; candidates: SiemId[] };
 
 export async function resolveAdvisorDestination(
   explicit: AdvisorDestination | string | undefined
@@ -34,7 +34,11 @@ export async function resolveAdvisorDestination(
     return { kind: 'resolved', destination: 'mock' };
   }
   if (r.kind === 'ambiguous') {
-    return { kind: 'ambiguous', markdown: formatAmbiguousError(r.candidates, 'destination') };
+    return {
+      kind: 'ambiguous',
+      markdown: formatAmbiguousError(r.candidates, 'destination'),
+      candidates: r.candidates.map((c) => c.id),
+    };
   }
   // The 4 supported SIEM ids ARE the destination enum values for those vendors.
   return {
