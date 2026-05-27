@@ -30,6 +30,7 @@ import { fmtBytes as formatBytes } from '../lib/format.js';
 import { discoverAvailable } from '../lib/siem/index.js';
 import { resolveBackend, formatDetectionTrace } from '../lib/customer-metrics.js';
 import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { tenxAvailabilityHint } from '../lib/install-hints.js';
 
 export type CheckStatus = 'pass' | 'warn' | 'fail';
 
@@ -835,8 +836,8 @@ async function addPasteEndpointCheck(globalChecks: DoctorCheck[]): Promise<void>
       status: 'warn',
       message:
         'Local tenx CLI is not installed (or not on PATH / LOG10X_TENX_PATH). ' +
-        'privacy_mode: true (the default) will fail until tenx is installed.',
-      fix: installHintForPlatform(),
+        'privacy_mode: true (the default) will fail until tenx is available locally or via docker.',
+      fix: tenxAvailabilityHint(),
     });
   }
 
@@ -866,13 +867,6 @@ async function addPasteEndpointCheck(globalChecks: DoctorCheck[]): Promise<void>
       message: `Paste endpoint unreachable: ${(e as Error).message}. privacy_mode: false will fail; this is expected on air-gapped installs and only matters if you intended to use the demo endpoint.`,
     });
   }
-}
-
-function installHintForPlatform(): string {
-  if (process.platform === 'darwin') return 'brew install log-10x/tap/log10x';
-  if (process.platform === 'linux') return 'curl -fsSL https://install.log10x.com | sh — or use the apt/yum packages at https://docs.log10x.com/apps/dev/';
-  if (process.platform === 'win32') return 'iwr -useb https://install.log10x.com/install.ps1 | iex';
-  return 'see https://docs.log10x.com/apps/dev/ for install instructions';
 }
 
 async function isTenxAvailable(binary: string): Promise<{ ok: boolean; version?: string }> {

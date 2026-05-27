@@ -31,6 +31,8 @@ import { tmpdir } from 'os';
 import { basename, join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 
+import { tenxAvailabilityHint } from './install-hints.js';
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
@@ -52,12 +54,8 @@ export interface DevCliResult {
 export class DevCliNotInstalledError extends Error {
   constructor() {
     super(
-      "Log10x dev CLI (`tenx`) is not installed on this machine. Options: " +
-        "(1) install locally — `brew install log-10x/tap/log10x` on macOS, " +
-        "MSI installer on Windows (`irm https://raw.githubusercontent.com/log-10x/pipeline-releases/main/install.ps1 | iex`), " +
-        "or deb/rpm/install.sh on Linux — see https://docs.log10x.com/install/; " +
-        "(2) run tenx in Docker — set `LOG10X_TENX_MODE=docker` (requires Docker Desktop or a docker daemon); " +
-        "(3) set privacy_mode=false to route the batch through the public Log10x paste endpoint instead."
+      tenxAvailabilityHint() +
+        '\n\nOr bypass templating entirely: set privacy_mode=false to route the batch through the public Log10x paste endpoint.'
     );
     this.name = 'DevCliNotInstalledError';
   }
@@ -116,7 +114,7 @@ export class DevCliRunError extends Error {
  * the `LOG10X_MCP_OUTPUT_DIR` empty-path crash.
  */
 export async function runDevCliStdin(rawLogText: string): Promise<DevCliResult> {
-  const mode = resolveTenxMode();
+  const mode = await resolveTenxMode();
   const started = Date.now();
   let cliVersion: string | undefined;
   let stdout: string;
@@ -221,7 +219,7 @@ interface RunDevCliOptions {
 }
 
 async function runDevCliCore(opts: RunDevCliOptions): Promise<DevCliResult> {
-  const mode = resolveTenxMode();
+  const mode = await resolveTenxMode();
 
   if (!existsSync(opts.configPath)) {
     throw new Error(
@@ -297,14 +295,35 @@ async function runDevCliCore(opts: RunDevCliOptions): Promise<DevCliResult> {
 
 // ── Mode selection ──
 
-function resolveTenxMode(): 'local' | 'docker' {
+/**
+ * Pick the backend.
+ *
+ *   - Explicit `LOG10X_TENX_MODE=local|docker` wins.
+ *   - Unset: prefer docker (no host install, easy updates via `docker pull`)
+ *     and fall back to the local binary if docker isn't reachable.
+ *   - Invalid value throws.
+ *
+ * The auto-detect probe runs `docker info` with a short timeout. If a user
+ * wants to guarantee local mode (avoid the probe latency), they can set
+ * `LOG10X_TENX_MODE=local` explicitly.
+ */
+async function resolveTenxMode(): Promise<'local' | 'docker'> {
   const raw = (process.env.LOG10X_TENX_MODE || '').trim().toLowerCase();
-  if (!raw || raw === 'local') return 'local';
+  if (raw === 'local') return 'local';
   if (raw === 'docker') return 'docker';
-  throw new Error(
-    `Invalid LOG10X_TENX_MODE="${process.env.LOG10X_TENX_MODE}". ` +
-      `Valid values: "local" (default), "docker".`
-  );
+  if (raw) {
+    throw new Error(
+      `Invalid LOG10X_TENX_MODE="${process.env.LOG10X_TENX_MODE}". ` +
+        `Valid values: "local", "docker", or unset for auto-detect.`
+    );
+  }
+  // Unset — try docker first.
+  try {
+    await runCommand('docker', ['info'], { timeoutMs: 2_000 });
+    return 'docker';
+  } catch {
+    return 'local';
+  }
 }
 
 // ── apps/mcp backends (stdin → demuxed stdout) ──
@@ -394,8 +413,9 @@ function resolveInstallPaths(): { config: string; modules: string } {
   if (osDefaults) return osDefaults;
 
   throw new Error(
-    'Cannot locate tenx install. Set TENX_HOME or TENX_MODULES+TENX_CONFIG, ' +
-      'install via the official installer for your OS, or set LOG10X_TENX_MODE=docker.'
+    'Cannot locate tenx install on this machine. ' +
+      'If you have tenx installed but in a custom location, set TENX_HOME or TENX_MODULES+TENX_CONFIG to point at it.\n\n' +
+      tenxAvailabilityHint()
   );
 }
 
