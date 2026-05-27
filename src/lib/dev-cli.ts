@@ -359,6 +359,89 @@ async function runAppsMcpViaDocker(
   return { stdout, cliVersion: `docker:${image}` };
 }
 
+// ── Install path resolution ──
+
+/**
+ * Locate the user's tenx install (modules + config). Mirrors the engine's
+ * own resolver (https://doc.log10x.com/install/paths/), skipping
+ * TENX_INCLUDE_PATHS (we're setting that ourselves) and the working-dir
+ * step (not meaningful when spawned from the MCP).
+ *
+ * Precedence:
+ *   1. TENX_MODULES + TENX_CONFIG (both required)
+ *   2. TENX_HOME → $TENX_HOME/lib/app/modules (or /modules) + /config
+ *   3. Per-OS defaults — Linux /opt/tenx-{cloud,edge}, Windows %ProgramFiles%/TenX
+ *      (or %LOCALAPPDATA%/TenX), macOS Homebrew (/opt/homebrew or /usr/local)
+ */
+function resolveInstallPaths(): { config: string; modules: string } {
+  const envModules = process.env.TENX_MODULES;
+  const envConfig = process.env.TENX_CONFIG;
+  if (envModules && envConfig) {
+    return { config: envConfig, modules: envModules };
+  }
+
+  const tenxHome = process.env.TENX_HOME;
+  if (tenxHome) {
+    const libModules = join(tenxHome, 'lib', 'app', 'modules');
+    const flatModules = join(tenxHome, 'modules');
+    return {
+      config: join(tenxHome, 'config'),
+      modules: existsSync(libModules) ? libModules : flatModules,
+    };
+  }
+
+  const osDefaults = resolveOsDefaultInstall();
+  if (osDefaults) return osDefaults;
+
+  throw new Error(
+    'Cannot locate tenx install. Set TENX_HOME or TENX_MODULES+TENX_CONFIG, ' +
+      'install via the official installer for your OS, or set LOG10X_TENX_MODE=docker.'
+  );
+}
+
+function resolveOsDefaultInstall(): { config: string; modules: string } | null {
+  if (process.platform === 'linux') {
+    const config = '/etc/tenx/config';
+    for (const flavor of ['tenx-cloud', 'tenx-edge']) {
+      const modules = `/opt/${flavor}/lib/app/modules`;
+      if (existsSync(modules)) return { config, modules };
+    }
+    return null;
+  }
+  if (process.platform === 'win32') {
+    const programFiles = process.env.ProgramFiles || 'C:\\Program Files';
+    const programData = process.env.ProgramData || 'C:\\ProgramData';
+    const localAppData = process.env.LOCALAPPDATA;
+    const moduleBases = [programFiles, localAppData].filter((v): v is string => !!v);
+    const configBases = [programData, localAppData].filter((v): v is string => !!v);
+    // Try MSI installer layout (tenx-cloud / tenx-edge) and the engine's
+    // documented OS-default layout (TenX).
+    for (const mBase of moduleBases) {
+      for (const subdir of ['tenx-cloud', 'tenx-edge', 'TenX']) {
+        const modules = join(mBase, subdir, 'lib', 'app', 'modules');
+        if (!existsSync(modules)) continue;
+        for (const cBase of configBases) {
+          for (const cSubdir of ['tenx', 'TenX']) {
+            const config = join(cBase, cSubdir, 'config');
+            if (existsSync(config)) return { config, modules };
+          }
+        }
+      }
+    }
+    return null;
+  }
+  if (process.platform === 'darwin') {
+    // Homebrew prefix — try Apple Silicon first, then Intel.
+    for (const prefix of ['/opt/homebrew', '/usr/local']) {
+      const modules = `${prefix}/lib/tenx/modules`;
+      const config = `${prefix}/etc/tenx/config`;
+      if (existsSync(modules) && existsSync(config)) return { config, modules };
+    }
+    return null;
+  }
+  return null;
+}
+
 // ── Local binary backend (legacy file-mode path, used by extract-templates) ──
 
 async function runViaLocalBinary(
@@ -372,15 +455,11 @@ async function runViaLocalBinary(
 
   const cliVersion = await tryGetVersion(binary);
 
-  // TODO(dev-cli-os-portable): os-aware include-path construction. The
-  // hardcoded /usr/local/etc/tenx/config and /usr/local/Cellar/log10x/1.0.4
-  // defaults are Intel-Homebrew-only and break on Apple Silicon, Linux,
-  // and Windows. Follow-up commit replaces this with a buildIncludePaths()
-  // that respects TENX_HOME / TENX_MODULES / TENX_CONFIG and falls back
-  // to per-OS defaults matching PipelineIncludePathResolver.java.
-  const tenxConfig = process.env.TENX_CONFIG || '/usr/local/etc/tenx/config';
-  const tenxModules = process.env.TENX_MODULES
-    || '/usr/local/Cellar/log10x/1.0.4/lib/tenx/modules';
+  // Enumerate the install's modules+config so we can put tempDir FIRST
+  // in TENX_INCLUDE_PATHS for the shadow to win resolution. Setting
+  // TENX_INCLUDE_PATHS replaces the engine's own path resolver, so we
+  // have to spell out everything the engine would otherwise have found.
+  const { config: tenxConfig, modules: tenxModules } = resolveInstallPaths();
   const includePaths = [
     tempDir,
     tenxConfig,
