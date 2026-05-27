@@ -6,7 +6,6 @@
  * 2. Contribution > minContributionPct of total positive delta (default 5%)
  *
  * These are business rules, not statistical constants.
- * Ported from SlackPatternService.java.
  */
 
 export interface PatternWithDelta {

@@ -2,7 +2,6 @@
  * Edge/cloud environment resolution.
  *
  * Prefers edge reporter metrics when available, falls back to cloud.
- * Matches resolveEnv/resolveEnvAll in SlackPatternService.java.
  */
 
 import type { EnvConfig } from './environments.js';

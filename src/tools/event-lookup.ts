@@ -2,9 +2,7 @@
  * log10x_event_lookup — analyze a specific log pattern.
  *
  * Finds the pattern across all services, shows cost breakdown,
- * and requests AI analysis. Equivalent to `/log10x event {pattern}`.
- *
- * Ported from SlackPatternService.queryPatternAcrossServices().
+ * and requests AI analysis.
  */
 
 import { z } from 'zod';

@@ -1,8 +1,7 @@
 /**
  * PromQL query builders.
  *
- * Generates the PromQL queries used by each tool, matching the patterns
- * in SlackPatternService.java.
+ * Generates the PromQL queries used by each tool.
  *
  * Phase 2 of the CUSTOMER-PROM-BACKEND design: every builder now accepts
  * an optional `labels: LabelNameMap` parameter so per-env label renames

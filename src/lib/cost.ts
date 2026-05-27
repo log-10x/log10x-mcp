@@ -2,7 +2,6 @@
  * Cost calculation helpers.
  *
  * Converts bytes to dollars using the analyzer cost per GB.
- * Matches the formula in SlackPatternService.java.
  */
 
 const GB = 1024 * 1024 * 1024;

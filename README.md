@@ -224,7 +224,7 @@ You never call tools directly. Just ask your AI assistant a question in plain En
 
 ## Cost driver algorithm
 
-When you ask about cost spikes, the server runs the same algorithm as the Log10x Slack bot:
+When you ask about cost spikes, the server runs this algorithm:
 
 1. **Query current window** — bytes per pattern for the selected timeframe
 2. **Query baseline** — average of the 3 prior windows of the same size
