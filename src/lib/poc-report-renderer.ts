@@ -991,7 +991,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
       lines.push('');
     } else {
       lines.push(
-        `Numbers below are summed from the engine's actual \`encoded.log\` lines for these events. Not estimated. Each row's "compact bytes" is the total bytes the 10x forwarder would ship downstream for this pattern. Install: https://docs.log10x.com/apps/cloud/optimizer/`
+        `Numbers below are summed from the engine's actual \`encoded.log\` lines for these events. Not estimated. Each row's "compact bytes" is the total bytes the 10x forwarder would ship downstream for this pattern. Install: https://doc.log10x.com/apps/receiver/`
       );
       lines.push('');
       lines.push('| pattern | raw bytes | compact bytes | ratio | $ saved /window |');
@@ -1045,7 +1045,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
   lines.push('### Automated — log10x receiver (recommended)');
   lines.push('');
   lines.push(
-    '1. Install the Log10x Receiver in your forwarder pipeline — https://docs.log10x.com/apps/edge/receiver/'
+    '1. Install the Log10x Receiver in your forwarder pipeline — https://doc.log10x.com/apps/receiver/'
   );
   lines.push(
     '2. Commit the generated receiver YAML above into your GitOps repo (the receiver watches a ConfigMap)'
@@ -1338,7 +1338,7 @@ function receiverYaml(p: EnrichedPattern): string {
   // The install gate sits inside the fenced block (not as a section
   // banner) so the prospect sees it at the exact moment they think
   // about acting on the YAML — banners get skimmed past.
-  const installGate = '# Install 10x first (see https://docs.log10x.com/apps/cloud/optimizer/) and then save this entry to the receiver mute file.';
+  const installGate = '# Install 10x first (see https://doc.log10x.com/apps/receiver/) and then save this entry to the receiver mute file.';
   // Which engine field is this `pattern:` value? The receiver matches
   // against it via `compactReceiverFieldNames`. We tell the user which
   // field to configure so the rule actually fires in production.

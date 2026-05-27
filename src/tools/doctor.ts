@@ -302,7 +302,7 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
           status: 'warn',
           message:
             'No Reporter tier detected — investigate / cost_drivers / pattern_trend tools will be unavailable in this env.',
-          fix: 'Deploy Cloud Reporter (k8s CronJob) or Edge Reporter (forwarder pipeline) per https://docs.log10x.com/apps/.',
+          fix: 'Deploy Cloud Reporter (k8s CronJob) or Edge Reporter (forwarder pipeline) per https://doc.log10x.com/apps/reporter/.',
         });
       }
     }
