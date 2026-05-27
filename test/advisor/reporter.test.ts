@@ -50,10 +50,10 @@ const forwarders: ForwarderKind[] = [
 ];
 
 // Receiver wizard support status (matches src/lib/advisor/reporter.ts
-// blockers): fluentd is blocked (kustomize post-renderer not yet
-// wired), filebeat is blocked (upstream chart has no extraContainers
-// hook). Everything else is wizard-supported.
-const WIZARD_BLOCKED_RECEIVERS = new Set<ForwarderKind>(['fluentd', 'filebeat']);
+// blockers): filebeat is the only blocked forwarder (upstream chart has
+// no extraContainers hook). Everything else is wizard-supported — fluentd
+// via a kustomize post-renderer overlay; the rest via plain extraContainers.
+const WIZARD_BLOCKED_RECEIVERS = new Set<ForwarderKind>(['filebeat']);
 const installableForwarders: ForwarderKind[] = forwarders.filter(
   (f) => !WIZARD_BLOCKED_RECEIVERS.has(f)
 );
@@ -71,10 +71,18 @@ for (const fw of installableForwarders) {
     assert.ok(plan.verify.length >= 2, `verify should have ≥2 probes; got ${plan.verify.length}`);
     assert.ok(plan.teardown.length >= 2, `teardown should have ≥2 steps; got ${plan.teardown.length}`);
     // Every install step that writes a file must have a path + contents.
+    // Steps use either `file` (singular) or `files[]` (multi-file emit,
+    // e.g. fluentd's kustomize overlay) — assert both shapes.
     for (const s of plan.install) {
       if (s.file) {
         assert.ok(s.file.path.length > 0);
         assert.ok(s.file.contents.length > 0);
+      }
+      if (s.files) {
+        for (const f of s.files) {
+          assert.ok(f.path.length > 0, `every emitted file needs a path; step: ${s.title}`);
+          assert.ok(f.contents.length > 0, `every emitted file needs contents; path: ${f.path}`);
+        }
       }
     }
   });
@@ -95,7 +103,7 @@ test('Receiver plan for logstash is supported via the upstream chart sidecar ove
   assert.equal(plan.blockers.length, 0, `no blockers expected; got: ${plan.blockers.join(' | ')}`);
   const installText = JSON.stringify(plan.install);
   assert.ok(installText.includes('elastic/logstash'), 'should reference the upstream elastic/logstash chart');
-  const content = plan.install.find((s) => s.file)!.file!.contents;
+  const content = findValuesContents(plan);
   assert.ok(content.includes('extraContainers: |'), 'logstash uses extraContainers as a pipe-string');
   assert.ok(content.includes('secretMounts:'), 'logstash uses secretMounts for the license');
   assert.ok(content.includes('logstashPipeline:'), 'logstash overlay declares the ingest + destinations pipelines');
@@ -222,6 +230,10 @@ test('values.yaml has no duplicate top-level keys (fluentd regression)', async (
   // `tenx:` keys — YAML silently kept the second and dropped apiKey /
   // kind / runtimeName / git config entirely. Lock the invariant
   // across every forwarder: each top-level key appears at most once.
+  //
+  // Helper: locate the actual values.yaml regardless of whether the
+  // write step uses `file` (singular) or `files[]` (multi-file emit,
+  // used by fluentd's kustomize overlay).
   for (const fw of installableForwarders) {
     const plan = await buildReporterPlan({
       snapshot: baseSnapshot(),
@@ -229,8 +241,8 @@ test('values.yaml has no duplicate top-level keys (fluentd regression)', async (
       licenseJwt: 'test',
       destination: 'mock',
     });
-    const writeStep = plan.install.find((s) => s.file);
-    const content = writeStep!.file!.contents;
+    const content = findValuesContents(plan);
+    assert.ok(content.length > 0, `${fw}: expected to find a values.yaml in plan.install`);
     // Count lines starting at column 0 with `<word>:` (naive but
     // sufficient — our templates don't embed flow-style).
     const topLevelKeys = content
@@ -245,6 +257,28 @@ test('values.yaml has no duplicate top-level keys (fluentd regression)', async (
   }
 });
 
+/**
+ * Locate the `*-values.yaml` contents in a plan, whether emitted via
+ * the singular `file` slot (most receivers) or the `files[]` array
+ * (fluentd's kustomize multi-file emit). Returns '' if not found.
+ */
+function findValuesContents(plan: { install: Array<{ file?: { path: string; contents: string }; files?: Array<{ path: string; contents: string }> }> }): string {
+  for (const s of plan.install) {
+    if (s.file?.path.endsWith('-values.yaml')) return s.file.contents;
+    if (s.files) {
+      const v = s.files.find((f) => f.path.endsWith('-values.yaml'));
+      if (v) return v.contents;
+    }
+  }
+  // Fall back to whatever the first file-emitting step has (covers
+  // legacy single-file steps that don't end in -values.yaml).
+  for (const s of plan.install) {
+    if (s.file) return s.file.contents;
+    if (s.files && s.files.length > 0) return s.files[0].contents;
+  }
+  return '';
+}
+
 test('forwarder values files do NOT embed gitToken or config.git noise', async () => {
   // 2026-05: the gitToken / config.git block was legacy noise. Verify
   // neither field appears in any wizard-supported receiver's rendered
@@ -257,7 +291,7 @@ test('forwarder values files do NOT embed gitToken or config.git noise', async (
       licenseJwt: 'test',
       destination: 'mock',
     });
-    const content = plan.install.find((s) => s.file)!.file!.contents;
+    const content = findValuesContents(plan);
     assert.ok(
       !content.includes('gitToken:'),
       `${fw}: rendered values should NOT emit gitToken (chart default works); got: ${content.slice(0, 400)}`
@@ -302,6 +336,7 @@ test('Receiver: chart refs are the right published names', async () => {
     'otel-collector': 'open-telemetry/opentelemetry-collector',
     'vector': 'vector/vector',
     'logstash': 'elastic/logstash',
+    'fluentd': 'fluent/fluentd',
   };
   for (const fw of installableForwarders) {
     const plan = await buildReporterPlan({
@@ -320,13 +355,18 @@ test('Receiver: chart refs are the right published names', async () => {
   }
 });
 
-test('Receiver: values.yaml content has the expected shape per forwarder', async () => {
-  // Migration in flight: migrated forwarders emit a sidecar overlay
-  // (extraContainers/extraVolumes, no top-level `tenx:` block, license
-  // via Secret-mounted file). Pre-migration forwarders still emit the
-  // embedded-image `tenx:` block. (Reporter uses a flat layout — covered
-  // by the dedicated STANDALONE_SPEC test.)
-  const migrated = new Set<ForwarderKind>(['fluentbit', 'otel-collector', 'vector', 'logstash']);
+test('Receiver: values + overlay files have the expected shape per forwarder', async () => {
+  // Every wizard-supported receiver runs a log10x sidecar that reads its
+  // license from a Secret-mounted file via TENX_LICENSE_FILE. The
+  // chart-side surface differs:
+  //   - fluentbit, otel-collector, vector, logstash: extraContainers +
+  //     (extraVolumes | secretMounts) in values.yaml.
+  //   - fluentd: extraContainers does not exist on the upstream chart, so
+  //     the sidecar lives in tenx-kustomize/sidecar-patch.yaml emitted
+  //     alongside values.yaml; helm uses --post-renderer to weave them.
+  // Concatenate every file the write step emits so the shape assertions
+  // catch references regardless of which file they land in.
+  const migrated = new Set<ForwarderKind>(['fluentbit', 'otel-collector', 'vector', 'logstash', 'fluentd']);
   for (const fw of installableForwarders) {
     const plan = await buildReporterPlan({
       snapshot: baseSnapshot(),
@@ -335,19 +375,30 @@ test('Receiver: values.yaml content has the expected shape per forwarder', async
       licenseJwt: 'test-key',
       destination: 'mock',
     });
-    const writeStep = plan.install.find((s) => s.file);
+    const writeStep = plan.install.find((s) => s.file || (s.files && s.files.length > 0));
     assert.ok(writeStep, `${fw} should have a file-write step`);
-    const content = writeStep!.file!.contents;
+    const allFiles = writeStep!.files ?? (writeStep!.file ? [writeStep!.file] : []);
+    const allEmitted = allFiles.map((f) => f.contents).join('\n--\n');
     if (migrated.has(fw)) {
-      assert.ok(content.includes('extraContainers:'), `${fw} should declare extraContainers (sidecar overlay)`);
-      assert.ok(content.includes('image: log10x/edge-10x'), `${fw} should mount the log10x/edge-10x sidecar`);
-      assert.ok(
-        content.includes('extraVolumes:') || content.includes('secretMounts:'),
-        `${fw} should mount the license Secret via extraVolumes or secretMounts`
-      );
-      assert.ok(content.includes('TENX_LICENSE_FILE'), `${fw} should set TENX_LICENSE_FILE in the sidecar env`);
-      assert.ok(!content.includes('licenseJwt: "test-key"'), `${fw} should NOT embed the JWT inline (license-Secret pattern)`);
+      assert.ok(/name:\s*log10x\b/.test(allEmitted), `${fw} should declare a sidecar named log10x`);
+      assert.ok(allEmitted.includes('image: log10x/edge-10x'), `${fw} should mount the log10x/edge-10x sidecar`);
+      assert.ok(allEmitted.includes('TENX_LICENSE_FILE'), `${fw} should set TENX_LICENSE_FILE in the sidecar env`);
+      // The JWT must never appear inline in any emitted file — the
+      // license is mounted from a Kubernetes Secret.
+      assert.ok(!allEmitted.includes('licenseJwt: "test-key"'), `${fw} should NOT embed the JWT inline (license-Secret pattern)`);
+      // Plain-values forwarders express extraContainers + (extraVolumes
+      // | secretMounts) in values.yaml; fluentd splits across the
+      // kustomize patch (no extraContainers field on the upstream
+      // fluent/fluentd chart).
+      if (fw !== 'fluentd') {
+        assert.ok(allEmitted.includes('extraContainers:'), `${fw} should declare extraContainers (sidecar overlay)`);
+        assert.ok(
+          allEmitted.includes('extraVolumes:') || allEmitted.includes('secretMounts:'),
+          `${fw} should mount the license Secret via extraVolumes or secretMounts`
+        );
+      }
     } else {
+      const content = allFiles[0]?.contents ?? '';
       assert.ok(content.includes('tenx:'), `${fw} file should declare tenx block (legacy embedded-image shape)`);
       assert.ok(content.includes('licenseJwt: "test-key"'), `${fw} file should embed license JWT (legacy shape)`);
     }
@@ -382,7 +433,7 @@ test('Reporter installs reporter-10x regardless of detected forwarder', async ()
   );
   // Values file uses the flat reporter-10x layout: top-level
   // log10xLicenseJwt, not nested under `tenx:`.
-  const valuesContent = plan.install.find((s) => s.file)?.file?.contents ?? '';
+  const valuesContent = findValuesContents(plan);
   assert.ok(
     valuesContent.includes('log10xLicenseJwt:'),
     'Reporter values should use reporter-10x flat layout (top-level log10xLicenseJwt)'

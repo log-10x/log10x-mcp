@@ -129,11 +129,15 @@ function renderSteps(lines: string[], steps: AdvisePlan['install']): void {
     lines.push(`### ${i + 1}. ${s.title}`);
     lines.push(`_${s.rationale}_`);
     lines.push('');
-    if (s.file) {
-      lines.push(`Write \`${s.file.path}\`:`);
+    // `files` (plural) wins over `file` (singular). Same conventions
+    // for both — render each as a fenced code block with the path as
+    // the heading; surface a chmod hint for executable files.
+    const stepFiles: NonNullable<typeof s.files> = s.files ?? (s.file ? [s.file] : []);
+    for (const f of stepFiles) {
+      lines.push(`Write \`${f.path}\`${f.executable ? ' (then `chmod +x` it):' : ':'}`);
       lines.push('');
-      lines.push('```' + s.file.language);
-      lines.push(s.file.contents.trimEnd());
+      lines.push('```' + f.language);
+      lines.push(f.contents.trimEnd());
       lines.push('```');
       lines.push('');
     }

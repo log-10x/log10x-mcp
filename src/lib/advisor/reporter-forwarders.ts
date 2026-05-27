@@ -160,6 +160,40 @@ export interface ForwarderSpec {
      */
     airgapped?: boolean;
   }) => string;
+  /**
+   * Optional: extra files to emit alongside the values.yaml. Used by
+   * forwarders whose sidecar pattern requires more than a single
+   * values file — the Fluentd receiver overlay emits a kustomize
+   * post-renderer directory (`tenx-kustomize/{kustomization.yaml,
+   * sidecar-patch.yaml, post-render.sh, post-render.cmd}`) alongside
+   * its values file. Returning [] is equivalent to omitting the field.
+   *
+   * Paths are relative to the working directory the user runs
+   * `helm upgrade` from. The shell-shim file must declare
+   * `executable: true` so the renderer surfaces a chmod hint AND the
+   * AdvisePlanSummary surfaces `install_requires_chmod=true`.
+   */
+  renderExtraFiles?: (opts: {
+    releaseName: string;
+    namespace: string;
+    optimize?: boolean;
+    airgapped?: boolean;
+    licenseSecretName: string;
+    licenseSecretKey: string;
+  }) => import('./types.js').PlanFile[];
+  /**
+   * Optional: extra command-line flags appended to the
+   * `helm upgrade --install` invocation. Used by the Fluentd overlay
+   * to add `--post-renderer ./tenx-kustomize/post-render.sh`.
+   * Returning [] is equivalent to omitting.
+   */
+  extraHelmFlags?: (opts: { releaseName: string; namespace: string }) => string[];
+  /**
+   * Optional: commands to run BEFORE `helm upgrade` (within the
+   * "Install via Helm" step). Used by the Fluentd overlay to chmod
+   * the post-render shim. Returning [] is equivalent to omitting.
+   */
+  extraInstallCommands?: (opts: { releaseName: string; namespace: string }) => string[];
   /** Verify probes — commands that, collectively, prove data is flowing. */
   verifyProbes: (opts: {
     releaseName: string;
@@ -598,30 +632,226 @@ ${destOutput}
   fluentd: {
     label: 'Fluentd',
     integrationMode:
-      'Sidecar pattern via upstream `fluent/fluentd` chart + a kustomize post-renderer overlay (the chart has no extraContainers hook, so the sidecar is injected via a Strategic Merge Patch on the Deployment). The wizard would need to emit four files alongside the values.yaml — kustomize.yaml, sidecar-patch.yaml, post-render.sh, post-render.cmd — which the install plan model doesn\'t yet support. Tracked as a follow-up.',
+      'Sidecar (`log10x/edge-10x`) injected into the user\'s existing Fluentd pod via the upstream `fluent/fluentd` chart + a kustomize post-renderer (the upstream chart has no extraContainers hook, so the sidecar is patched onto the rendered Deployment manifest via Strategic Merge Patch). The wizard emits five files — values.yaml + tenx-kustomize/{kustomization.yaml, sidecar-patch.yaml, post-render.sh, post-render.cmd} — and the `helm upgrade` step uses `--post-renderer ./tenx-kustomize/post-render.sh`.',
     helmRepo: 'https://fluent.github.io/helm-charts',
     helmRepoAlias: 'fluent',
     chartRef: 'fluent/fluentd',
-    chartAvailability: 'wip',
+    chartAvailability: 'published',
     primaryImageHint: 'log10x/edge-10x',
     primaryContainerName: 'log10x',
     hasTenxSidecar: true,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: () => {
-      // Placeholder — the wizard blocks the fluentd receiver path
-      // upstream of this (see reporter.ts), so this should never run.
-      // Keeping the function so the spec satisfies the ForwarderSpec
-      // type contract. Real overlay (per receiver/deploy.md) requires
-      // a kustomize post-renderer + a separate sidecar-patch.yaml file,
-      // which the current single-file `file:` step model can't emit.
-      return `# Fluentd receiver path is not yet wired into the wizard.
-# See receiver/deploy.md for the canonical kustomize-post-renderer
-# overlay shape; the install plan model needs to be extended to emit
-# multiple files (values.yaml + tenx-kustomize/{kustomization,sidecar-patch,post-render.sh,post-render.cmd})
-# before this can be wizard-emitted automatically.
+    renderValues: ({ destination, outputHost, splunkHecToken }) => {
+      const destOutput = renderFluentdDestinationOutput(destination, outputHost, splunkHecToken);
+      return `# Receiver overlay for Fluentd (upstream fluent/fluentd chart).
+# Layered with a kustomize post-renderer (see tenx-kustomize/ files) —
+# the upstream chart has no extraContainers hook, so the sidecar is
+# injected via a Strategic Merge Patch on the rendered manifest.
+#
+# Run with:
+#   chmod +x tenx-kustomize/post-render.sh
+#   helm upgrade --install <release> fluent/fluentd \\
+#     -n <namespace> --create-namespace \\
+#     -f <release>-values.yaml \\
+#     --post-renderer ./tenx-kustomize/post-render.sh
+
+kind: Deployment            # or DaemonSet for host-log tailing
+replicaCount: 1
+
+# Plain upstream image; the 10x sidecar is a separate container added
+# via the kustomize overlay.
+image:
+  repository: fluent/fluentd
+  tag: v1.18-debian-1
+
+# No host log mounts in this example (the source below uses the
+# \`dummy\` plugin). For real container-log tailing flip these to true
+# and switch \`kind\` to DaemonSet.
+mountVarLogDirectory: false
+mountDockerContainersDirectory: false
+
+rbac:
+  create: false
+serviceAccount:
+  create: true
+service:
+  enabled: false
+podSecurityPolicy:
+  enabled: false
+
+# @INGEST runs your enrichment filters once and forwards events to
+# the 10x sidecar on :24224. @OUTPUT receives processed events back
+# on :24225 and writes them to your destinations.
+fileConfigs:
+  01_sources.conf: |-
+    # Replace this dummy source with your real sources (tail, http,
+    # k8s, ...). Every source MUST route to @INGEST.
+    <source>
+      @type dummy
+      @id in_dummy
+      tag k8s.demo
+      rate 1
+      dummy {"log":"hello from fluentd dummy plugin","level":"info"}
+      auto_increment_key seq
+      @label @INGEST
+    </source>
+
+  02_filters.conf: |-
+    <label @INGEST>
+      # Enrichment filters go here — k8s_metadata, parsers,
+      # record_transformer, etc. They fire exactly once per event;
+      # the return path skips this label.
+      <filter **>
+        @type record_transformer
+        enable_ruby false
+        <record>
+          cluster "$\{ENV['CLUSTER_NAME'] || 'unset'\}"
+        </record>
+      </filter>
+
+      # Hand off to the Log10x sidecar. \`keepalive true\` matters for
+      # the sidecar topology — otherwise Fluentd opens a fresh TCP
+      # connection per chunk on the loopback path.
+      <match **>
+        @type forward
+        @id out_to_tenx
+        keepalive true
+        keepalive_timeout 60s
+        send_timeout 5s
+        require_ack_response false
+        <server>
+          host 127.0.0.1
+          port 24224
+        </server>
+        <buffer>
+          @type memory
+          flush_interval 1s
+          flush_thread_count 1
+        </buffer>
+      </match>
+    </label>
+
+  03_dispatch.conf: |-
+    # Forward source receiving processed events back from Log10x.
+    # Bind on 0.0.0.0 so kubelet's tcpSocket probe can reach it from
+    # the pod IP. The sidecar still connects via 127.0.0.1.
+    <source>
+      @type forward
+      @id in_from_tenx
+      bind 0.0.0.0
+      port 24225
+      @label @OUTPUT
+    </source>
+
+  04_outputs.conf: |-
+    # @OUTPUT is the terminal label — replace with your real
+    # destinations (out_elasticsearch, out_splunk_hec, out_kafka2,
+    # out_s3, ...). Keep this label filter-free.
+    <label @OUTPUT>
+${indent(destOutput, 6)}
+    </label>
 `;
     },
+    renderExtraFiles: ({ releaseName, optimize, airgapped, licenseSecretName, licenseSecretKey }) => {
+      const deploymentName = `${releaseName}-fluentd`;
+      // engine args for the sidecar — same convention as
+      // renderLog10xSidecar but inline because the patch YAML lives
+      // outside the values file. Each list item is indented to match
+      // the surrounding Strategic Merge Patch structure.
+      const argLines: string[] = [
+        `                    - "@run/input/forwarder/fluentd"`,
+        `                    - "@apps/receiver"`,
+      ];
+      if (optimize) {
+        argLines.push(`                    - "receiverOptimize"`);
+        argLines.push(`                    - "true"`);
+      }
+      const envLines: string[] = [
+        `                    - name: TENX_LICENSE_FILE`,
+        `                      value: /etc/tenx/license/license.jwt`,
+      ];
+      if (airgapped) {
+        envLines.push(`                    - name: TENX_AIRGAPPED`);
+        envLines.push(`                      value: "true"`);
+      }
+      return [
+        {
+          path: 'tenx-kustomize/kustomization.yaml',
+          language: 'yaml',
+          contents: `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - helm-output.yaml          # populated by post-render.sh at install time
+patches:
+  - path: sidecar-patch.yaml
+    target: { kind: Deployment, name: ${deploymentName} }
+`,
+        },
+        {
+          path: 'tenx-kustomize/sidecar-patch.yaml',
+          language: 'yaml',
+          contents: `# Adds the log10x sidecar container to the Fluentd pod. Kubernetes
+# restarts the container automatically if the 10x process exits.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${deploymentName}
+spec:
+  template:
+    spec:
+      containers:
+        - name: log10x
+          image: log10x/edge-10x:latest
+          imagePullPolicy: IfNotPresent
+          args:
+${argLines.join('\n')}
+          env:
+${envLines.join('\n')}
+          volumeMounts:
+            - name: tenx-license
+              mountPath: /etc/tenx/license
+              readOnly: true
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits:   { cpu: 500m, memory: 512Mi }
+      volumes:
+        - name: tenx-license
+          secret:
+            secretName: ${licenseSecretName}
+            items:
+              - key: ${licenseSecretKey}
+                path: license.jwt
+`,
+        },
+        {
+          path: 'tenx-kustomize/post-render.sh',
+          language: 'bash',
+          executable: true,
+          contents: `#!/usr/bin/env bash
+# Bridges Helm's stdin/stdout post-renderer protocol to kustomize's
+# file-based model. Captures Helm's rendered manifests, then runs
+# \`kubectl kustomize\` to apply the patches.
+set -euo pipefail
+DIR="$(cd -- "$(dirname -- "\${BASH_SOURCE[0]}")" && pwd)"
+cat > "$DIR/helm-output.yaml"
+exec kubectl kustomize "$DIR"
+`,
+        },
+        {
+          path: 'tenx-kustomize/post-render.cmd',
+          language: 'batch',
+          contents: `@echo off
+REM Windows shim — Helm.exe can't directly exec a .sh on Windows.
+REM Use this path as \`--post-renderer\` on Windows; Linux/macOS use
+REM the .sh directly.
+bash "%~dp0post-render.sh"
+`,
+        },
+      ];
+    },
+    extraInstallCommands: () => ['chmod +x tenx-kustomize/post-render.sh'],
+    extraHelmFlags: () => ['--post-renderer ./tenx-kustomize/post-render.sh'],
     verifyProbes: ({ releaseName, namespace, destination, optimize }) => {
       const sel = k8sRecommendedSelector(releaseName);
       const probes: Array<{
@@ -633,25 +863,33 @@ ${destOutput}
       }> = [
         {
           name: 'pods-ready',
-          question: 'Are all Reporter DaemonSet pods Ready?',
+          question: 'Are all Fluentd pods Ready (with the log10x sidecar)?',
           commands: [`kubectl -n ${namespace} wait --for=condition=Ready pod -l ${sel} --timeout=5m`],
           expectOutput: 'condition met',
           timeoutSec: 300,
         },
         {
-          name: 'processor-alive',
-          question: 'Is the 10x Fluentd plugin initialized and processing records?',
+          name: 'sidecar-alive',
+          question: 'Is the log10x sidecar running and processing events?',
           commands: [
-            `kubectl -n ${namespace} logs -l ${sel} -c fluentd --tail=400 | grep -iE 'tenx|10x|pattern' | head -20`,
+            `kubectl -n ${namespace} logs -l ${sel} -c log10x --tail=400 | grep -E 'tenx|pattern|receiver|template' | head -20`,
+          ],
+        },
+        {
+          name: 'forwarder-handoff',
+          question: 'Is Fluentd forwarding @INGEST events to the sidecar on 127.0.0.1:24224?',
+          commands: [
+            `kubectl -n ${namespace} logs -l ${sel} -c fluentd --tail=400 | grep -E 'out_to_tenx|127\\\\.0\\\\.0\\\\.1:24224|@INGEST' | head -10`,
           ],
         },
       ];
       if (destination === 'mock') {
         probes.push({
           name: 'tenx-mock-events',
-          question: 'Are tagged [TENX-MOCK] events reaching stdout?',
-          commands: [`kubectl -n ${namespace} logs -l ${sel} -c fluentd --tail=200 | grep -F 'TENX-MOCK' | head -5`],
-          expectOutput: 'TENX-MOCK',
+          question: 'Are returning events reaching the @OUTPUT label?',
+          commands: [
+            `kubectl -n ${namespace} logs -l ${sel} -c fluentd --tail=200 | grep -E '@OUTPUT|in_from_tenx' | head -10`,
+          ],
           timeoutSec: 120,
         });
       }
@@ -660,7 +898,7 @@ ${destOutput}
           name: 'tenx-encoded-events',
           question: 'Are events emitted in compact encoded form (templateHash+vars)?',
           commands: [
-            `kubectl -n ${namespace} logs -l ${sel} -c fluentd --tail=500 | grep -oE '"log":"~[^"]{5,20},[0-9]{10,}' | head -3`,
+            `kubectl -n ${namespace} logs -l ${sel} -c fluentd --tail=500 | grep -oE '~[A-Za-z0-9]{5,20},[0-9]{10,}' | head -3`,
           ],
           expectOutput: '~',
           timeoutSec: 120,
@@ -1433,6 +1671,61 @@ function renderFluentBitOutput(
         Splunk_Token ${splunkHecToken ?? 'REPLACE_WITH_HEC_TOKEN'}`;
   }
   return '';
+}
+
+/**
+ * Returns the body of the @OUTPUT label for the Fluentd receiver
+ * overlay's 04_outputs.conf — the user's actual destination match. The
+ * caller wraps this in `<label @OUTPUT>...</label>`. Indentation is 0
+ * (caller indents). Matches the per-destination shape of the other
+ * forwarder dest renderers (renderFluentBitDestinationOutput, etc.).
+ */
+function renderFluentdDestinationOutput(
+  destination: OutputDestination,
+  outputHost?: string,
+  splunkHecToken?: string,
+): string {
+  if (destination === 'mock') {
+    return `<match **>
+  @type stdout
+  @id out_stdout
+</match>`;
+  }
+  if (destination === 'elasticsearch') {
+    return `<match **>
+  @type elasticsearch
+  host "${outputHost ?? 'elasticsearch-master'}"
+  port 9200
+  logstash_format true
+</match>`;
+  }
+  if (destination === 'splunk') {
+    return `<match **>
+  @type splunk_hec
+  hec_host ${outputHost ?? 'splunk-hec.example.com'}
+  hec_port 8088
+  hec_token ${splunkHecToken ?? 'REPLACE_WITH_HEC_TOKEN'}
+</match>`;
+  }
+  if (destination === 'datadog') {
+    return `<match **>
+  @type datadog
+  api_key "#{ENV['DD_API_KEY']}"
+  dd_source "log10x-receiver"
+</match>`;
+  }
+  if (destination === 'cloudwatch') {
+    return `<match **>
+  @type cloudwatch_logs
+  log_group_name ${outputHost ?? '/aws/log10x/receiver'}
+  log_stream_name log10x-receiver
+  auto_create_stream true
+  region "#{ENV['AWS_REGION'] || 'us-east-1'}"
+</match>`;
+  }
+  return `<match **>
+  @type stdout
+</match>`;
 }
 
 function renderFluentdOutputConfig(

@@ -20,6 +20,19 @@ export interface PreflightCheck {
   detail: string;
 }
 
+/** A single file emitted as part of an install step. */
+export interface PlanFile {
+  path: string;
+  contents: string;
+  language: 'yaml' | 'ini' | 'conf' | 'json' | 'toml' | 'bash' | 'batch';
+  /**
+   * When true, the user must `chmod +x` the file before running the
+   * commands that reference it. The renderer surfaces a chmod hint
+   * automatically; the script itself is still emitted verbatim.
+   */
+  executable?: boolean;
+}
+
 /** A single step the user (or a subagent) should execute. */
 export interface PlanStep {
   title: string;
@@ -28,10 +41,18 @@ export interface PlanStep {
   /** Commands to run, in order. Each is a shell string the user pastes verbatim. */
   commands: string[];
   /**
-   * Optional YAML/config blob to write to disk. The command list may
-   * reference the resulting filename.
+   * Optional single config blob to write to disk. The command list may
+   * reference the resulting filename. Most steps emit at most one file;
+   * use `files` (plural) when a step needs to write more than one
+   * (e.g. the Fluentd Receiver overlay emits a values.yaml + a
+   * kustomize/ directory of patches and post-render scripts).
+   *
+   * A step should set EITHER `file` OR `files`, not both. `files` wins
+   * if both are set.
    */
-  file?: { path: string; contents: string; language: 'yaml' | 'ini' | 'conf' | 'json' | 'toml' };
+  file?: PlanFile;
+  /** Optional multi-file emit. See `file` above for the convention. */
+  files?: PlanFile[];
   /** If set, this step should succeed within this many seconds. Used for `wait` commands. */
   expectDurationSec?: number;
 }
