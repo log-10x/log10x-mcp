@@ -152,15 +152,36 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   const shape: DeploymentShape = app === 'reporter' ? 'standalone' : 'inline';
   const effectiveReadOnly = app === 'reporter' ? true : (args.readOnly ?? false);
   const effectiveOptimize = args.optimize ?? false;
-  const releaseName = args.releaseName ?? `my-${app}`;
   const destination: OutputDestination = args.destination ?? 'mock';
-  const namespace =
-    args.namespace ?? snapshot.recommendations.suggestedNamespace ?? 'logging';
 
   const forwarderCandidate =
     args.forwarder ?? snapshot.recommendations.existingForwarder ?? 'fluentbit';
   const forwarder: ForwarderKind =
     forwarderCandidate === 'unknown' ? 'fluentbit' : forwarderCandidate;
+
+  // For app=receiver, the WHOLE POINT is to inject the log10x sidecar
+  // into the user's existing forwarder Helm release — NOT to deploy a
+  // second copy. Default the release name to the detected release and
+  // emit `helm upgrade --reuse-values <existing-release>` so the user's
+  // existing chart values stay intact; our overlay layers on top.
+  //
+  // Reporter (standalone) keeps the old "fresh release" behavior — it's
+  // a parallel DaemonSet that runs alongside the user's forwarder, not
+  // into it.
+  const detectedExisting: { releaseName: string; namespace: string } | undefined =
+    app === 'receiver'
+      ? detectExistingHelmRelease(snapshot, forwarder)
+      : undefined;
+  const installMode: 'upgrade-existing' | 'fresh-release' =
+    detectedExisting && !args.releaseName ? 'upgrade-existing' : 'fresh-release';
+  const releaseName =
+    args.releaseName ?? detectedExisting?.releaseName ?? `my-${app}`;
+  // When upgrading the existing release in-place, the namespace must
+  // match the existing one — overrides the suggestedNamespace fallback.
+  const namespace =
+    installMode === 'upgrade-existing' && detectedExisting
+      ? detectedExisting.namespace
+      : args.namespace ?? snapshot.recommendations.suggestedNamespace ?? 'logging';
 
   // Reporter → STANDALONE_SPEC (always). Receiver → per-forwarder spec.
   const spec: ForwarderSpec | undefined =
@@ -268,7 +289,17 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   const teardown: PlanStep[] = [];
 
   if (spec && !args.skipInstall && blockers.length === 0) {
-    install.push(...buildInstallSteps({ ...args, spec, releaseName, namespace, destination, app, optimize: effectiveOptimize, readOnly: effectiveReadOnly }));
+    install.push(...buildInstallSteps({ ...args, spec, releaseName, namespace, destination, app, optimize: effectiveOptimize, readOnly: effectiveReadOnly, installMode }));
+  }
+  // When the wizard is upgrading the user's existing forwarder release
+  // (the canonical Receiver path), surface a note so the agent flags
+  // "this is upgrading <release>, not creating a new one" to the user.
+  // Important guardrail against the prior bug where the wizard deployed
+  // a second forwarder alongside the user's existing one.
+  if (installMode === 'upgrade-existing' && detectedExisting) {
+    notes.push(
+      `This plan UPGRADES your existing Helm release \`${detectedExisting.releaseName}\` in \`${detectedExisting.namespace}\` to inject the log10x sidecar. Your existing chart values are preserved via \`--reuse-values\`; the overlay layers on top. The wizard does NOT deploy a second ${forwarder}.`
+    );
   }
   if (spec && !args.skipVerify) {
     verify.push(
@@ -316,6 +347,11 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
     namespace,
     context: snapshot.kubectl.context,
     licenseKind,
+    installMode,
+    existingHelmRelease:
+      installMode === 'upgrade-existing' && detectedExisting
+        ? { name: detectedExisting.releaseName, namespace: detectedExisting.namespace }
+        : undefined,
     preflight,
     install,
     verify,
@@ -342,6 +378,47 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
  * (to OPT OUT specific audit/compliance patterns), but the customer can
  * also skip GitOps entirely. We surface that trade-off in `whenToSkip`.
  */
+/**
+ * Find the user's existing Helm release for a given forwarder kind in
+ * the snapshot. Used by the Receiver path to default `releaseName` to
+ * the existing release name (so `helm upgrade` targets the user's real
+ * forwarder pod instead of deploying a second copy alongside it).
+ *
+ * Detection priority:
+ *   1. Match a `DetectedForwarder` of the chosen kind. Read the helm
+ *      release from its labels:
+ *        - `app.kubernetes.io/instance` (k8s-recommended, post-3.0)
+ *        - `release` (legacy Helm pre-3.0; still emitted by elastic
+ *          charts)
+ *   2. Cross-check the candidate against `snapshot.kubectl.helmReleases`
+ *      in the same namespace. If no matching release object is found,
+ *      treat as "detected workload but not helm-managed" and return
+ *      undefined — `helm upgrade --reuse-values` would fail with a
+ *      no-release error, so we fall back to a fresh release.
+ *
+ * Returns the release name + namespace, or undefined when no existing
+ * helm-managed release matches.
+ */
+function detectExistingHelmRelease(
+  snapshot: DiscoverySnapshot,
+  forwarder: ForwarderKind
+): { releaseName: string; namespace: string } | undefined {
+  if (forwarder === 'unknown') return undefined;
+  const matches = snapshot.kubectl.forwarders.filter((f) => f.kind === forwarder);
+  for (const m of matches) {
+    const releaseFromLabels =
+      m.labels['app.kubernetes.io/instance'] ?? m.labels['release'];
+    if (!releaseFromLabels) continue;
+    const helmRelease = snapshot.kubectl.helmReleases.find(
+      (h) => h.name === releaseFromLabels && h.namespace === m.namespace
+    );
+    if (helmRelease) {
+      return { releaseName: helmRelease.name, namespace: helmRelease.namespace };
+    }
+  }
+  return undefined;
+}
+
 function buildCompactReceiverGitopsExplainer(opts: { optimize: boolean }): GitopsExplainer {
   return {
     headline:
@@ -546,6 +623,14 @@ function buildInstallSteps(opts: {
   backends?: MetricsBackendKind[];
   backendCredentials?: Partial<Record<MetricsBackendKind, BackendCredentialConfig>>;
   airgapped?: boolean;
+  /**
+   * 'upgrade-existing' = helm upgrade --reuse-values against the user's
+   * detected forwarder release (Receiver path, canonical case — sidecar
+   * goes INTO their existing forwarder pod).
+   * 'fresh-release' = helm upgrade --install with a new release name
+   * (Reporter path, or Receiver fallback when no helm release detected).
+   */
+  installMode: 'upgrade-existing' | 'fresh-release';
 }): PlanStep[] {
   const {
     spec,
@@ -560,6 +645,7 @@ function buildInstallSteps(opts: {
     backendCredentials,
     airgapped,
     isDemoLicense,
+    installMode,
   } = opts;
   const licenseJwt = opts.licenseJwt ?? 'REPLACE_WITH_LICENSE_JWT';
   const licenseSecretName = 'log10x-license';
@@ -576,11 +662,15 @@ function buildInstallSteps(opts: {
     ],
   });
 
-  steps.push({
-    title: 'Create target namespace',
-    rationale: `The Reporter installs into \`${namespace}\`. \`--create-namespace\` on helm install will also do this, but a separate step makes retries idempotent.`,
-    commands: [`kubectl create namespace ${namespace} --dry-run=client -o yaml | kubectl apply -f -`],
-  });
+  if (installMode === 'fresh-release') {
+    steps.push({
+      title: 'Create target namespace',
+      rationale: `The Reporter installs into \`${namespace}\`. \`--create-namespace\` on helm install will also do this, but a separate step makes retries idempotent.`,
+      commands: [`kubectl create namespace ${namespace} --dry-run=client -o yaml | kubectl apply -f -`],
+    });
+  }
+  // installMode='upgrade-existing': skip the namespace step — the user's
+  // existing release is already in a real namespace; we just upgrade in place.
 
   // Real (user) licenses are kept out of values.yaml — the chart reads them
   // from an out-of-band Secret the user creates here. Demo licenses skip
@@ -650,16 +740,31 @@ function buildInstallSteps(opts: {
   const helmFlagSuffix = extraHelmFlags.length > 0
     ? ' \\\n  ' + extraHelmFlags.join(' \\\n  ')
     : '';
-  steps.push({
-    title: 'Install via Helm',
-    rationale: extraHelmFlags.length > 0
-      ? `Deploys the ${spec.label} chart with the 10x Receiver sidecar injected via the kustomize post-renderer (\`--post-renderer\` flag).`
-      : `Deploys the ${spec.label} chart with the 10x Reporter sidecar enabled.`,
-    commands: [
-      ...extraInstallCmds,
-      `helm upgrade --install ${releaseName} ${spec.chartRef} \\\n  -n ${namespace} --create-namespace \\\n  -f ${valuesFile}${helmFlagSuffix}`,
-    ],
-  });
+  // The receiver path upgrades the user's existing helm release with
+  // `--reuse-values` so their chart values stay intact; our overlay
+  // layers on top. The reporter path (or receiver fallback when no
+  // existing release was detected) deploys a fresh release.
+  if (installMode === 'upgrade-existing') {
+    steps.push({
+      title: `Upgrade the existing ${spec.label} release in-place`,
+      rationale: `Injects the log10x sidecar into the user's existing \`${releaseName}\` release in \`${namespace}\` via \`helm upgrade --reuse-values\` + our overlay${extraHelmFlags.length > 0 ? ' + the kustomize post-renderer' : ''}. The user's chart values are preserved; we layer the receiver overlay on top. NO second forwarder is deployed.`,
+      commands: [
+        ...extraInstallCmds,
+        `helm upgrade ${releaseName} ${spec.chartRef} \\\n  -n ${namespace} \\\n  --reuse-values \\\n  -f ${valuesFile}${helmFlagSuffix}`,
+      ],
+    });
+  } else {
+    steps.push({
+      title: 'Install via Helm',
+      rationale: extraHelmFlags.length > 0
+        ? `Deploys the ${spec.label} chart with the 10x Receiver sidecar injected via the kustomize post-renderer (\`--post-renderer\` flag).`
+        : `Deploys the ${spec.label} chart with the 10x Reporter sidecar enabled.`,
+      commands: [
+        ...extraInstallCmds,
+        `helm upgrade --install ${releaseName} ${spec.chartRef} \\\n  -n ${namespace} --create-namespace \\\n  -f ${valuesFile}${helmFlagSuffix}`,
+      ],
+    });
+  }
 
   steps.push({
     title: 'Wait for rollout',

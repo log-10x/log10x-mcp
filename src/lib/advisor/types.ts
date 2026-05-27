@@ -141,6 +141,24 @@ export interface AdvisePlan {
    *     license fetch deferred)
    */
   licenseKind?: 'user-scoped' | 'demo' | 'user-pasted' | 'placeholder';
+  /**
+   * How the helm command lands:
+   *   - 'upgrade-existing' — `helm upgrade --reuse-values <release>` against
+   *     the user's existing forwarder Helm release. Sidecar overlay layers
+   *     on top of their values. NO second forwarder is deployed. Receiver
+   *     path's canonical mode.
+   *   - 'fresh-release'   — `helm upgrade --install <new-release> --create-namespace`.
+   *     New release name + namespace. Used by the Reporter path (parallel
+   *     DaemonSet by design) and by Receiver as a fallback when no helm-
+   *     managed forwarder is detected.
+   */
+  installMode?: 'upgrade-existing' | 'fresh-release';
+  /**
+   * When installMode === 'upgrade-existing', the detected existing
+   * release name (same as `releaseName`). Surfaced separately so the
+   * agent can flag "this UPGRADES X" without needing to compare fields.
+   */
+  existingHelmRelease?: { name: string; namespace: string };
   /** Preflight checks the advisor ran against the snapshot. */
   preflight: PreflightCheck[];
   /** Install steps (ordered). */

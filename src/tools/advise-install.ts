@@ -416,6 +416,17 @@ function wizardEnvelopeMeta(data: WizardData): {
       if (needsSecret) {
         warnings.push('the plan references an out-of-band Kubernetes Secret (log10x-license) — create it with kubectl before running the helm upgrade step');
       }
+      // Install-mode awareness: when upgrade-existing, reassure the
+      // agent (and through it, the user) that this is NOT a second
+      // forwarder deploy. When fresh-release on the Receiver path with
+      // no existing release detected, surface a soft caveat so the
+      // agent can ask the user whether they really want a brand-new
+      // forwarder alongside whatever they have.
+      if (data.install_mode === 'upgrade-existing' && data.existing_helm_release) {
+        warnings.push(`this plan UPGRADES the existing Helm release \`${data.existing_helm_release.name}\` in \`${data.existing_helm_release.namespace}\` (sidecar goes INTO it) — no second ${data.forwarder ?? 'forwarder'} is deployed`);
+      } else if (data.install_mode === 'fresh-release' && data.app === 'receiver') {
+        warnings.push(`this plan deploys a FRESH ${data.forwarder ?? 'forwarder'} Helm release (no existing helm-managed forwarder was detected). If the user has a non-helm-managed forwarder running, this WILL create a second one alongside it. Confirm with the user before running the plan.`);
+      }
       return {
         headline: planHeadlineForWizard(data),
         actions,

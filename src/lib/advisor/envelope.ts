@@ -66,6 +66,23 @@ export interface AdvisePlanSummary {
    * for the substring "demo license".
    */
   license_kind?: PlanLicenseKind;
+  /**
+   * How the helm command lands. See AdvisePlan.installMode for the
+   * full description. Surfaced on the summary so agents can route on
+   * it directly.
+   *   - 'upgrade-existing' — sidecar goes INTO the user's existing
+   *     forwarder release. The wizard does NOT deploy a second one.
+   *   - 'fresh-release'   — new release name + namespace.
+   * Optional for back-compat with summaries built before the field
+   * existed.
+   */
+  install_mode?: 'upgrade-existing' | 'fresh-release';
+  /**
+   * When install_mode === 'upgrade-existing', the detected existing
+   * release the plan upgrades in-place. Lets agents say "this
+   * upgrades release X" without comparing fields.
+   */
+  existing_helm_release?: { name: string; namespace: string };
   verify_probe_count: number;
   teardown_step_count: number;
   blockers: string[];
@@ -137,6 +154,8 @@ function summarize(plan: AdvisePlan, action: AdviseAction): AdvisePlanSummary {
     install_file_count,
     install_requires_chmod,
     license_kind: plan.licenseKind,
+    install_mode: plan.installMode,
+    existing_helm_release: plan.existingHelmRelease,
     verify_probe_count: plan.verify.length,
     teardown_step_count: plan.teardown.length,
     blockers: plan.blockers,
