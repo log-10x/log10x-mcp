@@ -839,10 +839,19 @@ async function elicitMissingAnswers(
       session.airgapped = false;
     }
 
-    // Q6: license source — sign in, demo, or paste.
+    // Q6: license source — sign in (real), demo (transient), or paste.
+    //
+    // Picking the recommended option in Claude Desktop's elicit UI needs
+    // BOTH signals: the JSON-Schema `default` field (machine-readable;
+    // some hosts pick it programmatically) AND a "(Recommended)" suffix
+    // at the END of the enumName text (Claude Desktop's auto-rephraser
+    // pattern-matches that string). Without these, the host picks a
+    // recommendation on its own — typically the option with the simplest
+    // label (= demo), which is the opposite of what we want for real
+    // installs. Sign-in always wins for real Log10x deployments.
     if (!session.licenseSource) {
       const result = await (server as any).server.elicitInput({
-        message: 'How do you want to license the engine? The engine needs a Log10x license JWT to start — sign in to log10x for a real user-scoped license (recommended), mint an anonymous 14-day demo, or paste a JWT you already have.',
+        message: 'How should the engine get its license? Sign in to log10x.com for a real user-scoped license (Recommended for any actual install). The 14-day anonymous demo is a quick-trial path only — engine refuses to run airgapped on it. Or paste a license JWT you already have.',
         requestedSchema: {
           type: 'object',
           properties: {
@@ -851,10 +860,11 @@ async function elicitMissingAnswers(
               title: 'License source',
               enum: ['signin', 'demo', 'paste'],
               enumNames: [
-                'Sign in to Log10x — real license, recommended',
-                'Mint an anonymous 14-day demo license — transient, no airgapped',
-                "I'll paste a license JWT I already have",
+                'Sign in to log10x.com — real user-scoped license (Recommended)',
+                'Demo (14-day anonymous JWT, quick-trial only, no airgapped)',
+                'I already have a license JWT (paste it)',
               ],
+              default: 'signin',
             },
           },
           required: ['licenseSource'],
@@ -1154,6 +1164,8 @@ function nextQuestion(snapshot: DiscoverySnapshot, session: WizardSession): Next
   }
 
   // Q6: license source — sign in (recommended), demo, or paste.
+  // Same labeling convention as the elicit path above: "(Recommended)"
+  // suffix at the end + `recommended: true` on the typed choice.
   if (!session.licenseSource) {
     return {
       kind: 'ask',
@@ -1165,18 +1177,18 @@ function nextQuestion(snapshot: DiscoverySnapshot, session: WizardSession): Next
         choices: [
           {
             value: 'signin',
-            label: 'Sign in to Log10x — real license, recommended',
+            label: 'Sign in to log10x.com — real user-scoped license (Recommended)',
             recommended: true,
-            details: 'Call log10x_signin_start to open the device-code browser flow; after sign-in, re-invoke advise_install and the wizard mints a user-scoped license. Required for airgapped installs.',
+            details: 'Call log10x_signin_start to open the device-code browser flow; after sign-in, re-invoke advise_install and the wizard mints a user-scoped license. Required for any real install (the engine refuses to run airgapped on demo licenses).',
           },
           {
             value: 'demo',
-            label: 'Mint an anonymous 14-day demo license',
-            details: 'Quick + zero-setup. Transient (expires in 14 days). Cannot run airgapped — the engine downgrades to online mode with a warning.',
+            label: 'Demo (14-day anonymous JWT, quick-trial only, no airgapped)',
+            details: 'Quick + zero-setup. Transient (expires in 14 days). Cannot run airgapped — the engine downgrades to online mode with a warning. Use only for proof-of-concept runs.',
           },
           {
             value: 'paste',
-            label: "I'll paste a license JWT I already have",
+            label: "I already have a license JWT (paste it)",
             details: 'Re-invoke with license_source: "paste" and license_jwt_paste: "<jwt>". The wizard mounts it via a Kubernetes Secret.',
           },
         ],
