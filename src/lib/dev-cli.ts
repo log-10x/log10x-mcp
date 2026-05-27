@@ -232,28 +232,32 @@ async function runDevCliCore(opts: RunDevCliOptions): Promise<DevCliResult> {
 
   const tempDir = await mkdtemp(join(tmpdir(), 'log10x-mcp-'));
 
-  // Shadow the install's template config with empty files list.
-  // Same on-disk shape in both modes — docker mounts tempDir into the
-  // container so the shadow is visible there too.
-  const templateConfigDir = join(tempDir, 'run', 'template');
-  await mkdir(templateConfigDir, { recursive: true });
-  await fsWriteFile(
-    join(templateConfigDir, 'config.yaml'),
-    [
-      'tenx: run',
-      'template:',
-      '  files: []',
-      '  cacheSize: $=parseBytes("10MB")',
-      'var:',
-      '  placeholder: "$"',
-      '  maxRecurIndexes: 10',
-      'timestamp:',
-      '  prefix: (',
-      '  postfix: )',
-      '',
-    ].join('\n'),
-    'utf8'
-  );
+  // Local mode only: shadow the install's run/template/config.yaml with
+  // files: [] so previously-written templates under data/templates/ or
+  // data/sample/output/ don't pre-load into the cache. Docker is
+  // ephemeral — the image's bundled templates are deterministic per run
+  // and don't survive container exit — so no shadow is needed there.
+  if (mode === 'local') {
+    const templateConfigDir = join(tempDir, 'run', 'template');
+    await mkdir(templateConfigDir, { recursive: true });
+    await fsWriteFile(
+      join(templateConfigDir, 'config.yaml'),
+      [
+        'tenx: run',
+        'template:',
+        '  files: []',
+        '  cacheSize: $=parseBytes("10MB")',
+        'var:',
+        '  placeholder: "$"',
+        '  maxRecurIndexes: 10',
+        'timestamp:',
+        '  prefix: (',
+        '  postfix: )',
+        '',
+      ].join('\n'),
+      'utf8'
+    );
+  }
 
   const started = Date.now();
   let cliVersion: string | undefined;
@@ -422,21 +426,17 @@ async function runViaLocalBinary(
 
 /**
  * Run tenx inside a container. Opt-in via LOG10X_TENX_MODE=docker.
- *
- * The container provides its own tenx install (official image
- * `log10x/pipeline-10x:latest` — Cloud flavor per mksite/docs/install/docker.md),
- * so OS portability and the Intel-Homebrew path assumption are sidestepped.
- * The host contributes only the per-invocation tempdir and the MCP's
- * packaged YAML.
+ * Image is `log10x/pipeline-10x:latest` (override via LOG10X_TENX_IMAGE).
  *
  * Mounts:
- *   - <tempDir>              → /mcp/output  (rw) — shadow template + result files
+ *   - <tempDir>              → /mcp/output  (rw) — result files
  *   - <dirname(configPath)>  → /mcp/config  (ro) — the packaged YAML
  *   - <dirname(inputPath)>   → /mcp/input   (ro) — file mode only
  *
- * The image's baked install lives at /opt/tenx-cloud/lib/app/modules and
- * /etc/tenx/config; we build TENX_INCLUDE_PATHS with /mcp/output first so
- * the shadow template config overrides the image's default.
+ * No TENX_INCLUDE_PATHS override and no shadow template config: the
+ * container's baked install at /etc/tenx/config and /opt/tenx-cloud
+ * resolves modules on its own, and ephemerality means no cross-run
+ * template state to suppress.
  */
 async function runViaDocker(
   opts: RunDevCliOptions,
@@ -461,15 +461,6 @@ async function runViaDocker(
   const CONTAINER_OUTPUT = '/mcp/output';
   const CONTAINER_CONFIG_DIR = '/mcp/config';
   const CONTAINER_INPUT_DIR = '/mcp/input';
-
-  const containerIncludePaths = [
-    CONTAINER_OUTPUT,
-    '/etc/tenx/config',
-    '/etc/tenx/config/pipelines',
-    '/opt/tenx-cloud/lib/app/modules',
-    '/opt/tenx-cloud/lib/app/modules/pipelines',
-    '/opt/tenx-cloud/lib/app/modules/apps',
-  ].join(';');
 
   const args: string[] = ['run', '--rm', '-i'];
 
@@ -497,7 +488,6 @@ async function runViaDocker(
     containerInputPath = `${CONTAINER_INPUT_DIR}/${inName}`;
   }
 
-  args.push('-e', `TENX_INCLUDE_PATHS=${containerIncludePaths}`);
   args.push('-e', `LOG10X_MCP_OUTPUT_DIR=${CONTAINER_OUTPUT}`);
   args.push('-e', `LOG10X_MCP_RUNTIME_NAME=mcp-${Date.now()}`);
   if (containerInputPath) {
