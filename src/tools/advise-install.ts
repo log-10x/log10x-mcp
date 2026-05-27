@@ -68,7 +68,7 @@ import {
 } from '../lib/advisor/reporter-forwarders.js';
 import type { Environments } from '../lib/environments.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput, type ActionRole } from '../lib/output-types.js';
 
 // Forwarders the Receiver wizard knows how to install a sidecar into.
 // Filebeat is intentionally NOT here: the Receiver pattern is a values
@@ -138,7 +138,7 @@ export const adviseInstallSchema = {
     ),
   license_source: z
     .enum(['signin', 'demo', 'paste'])
-    .optional()
+    .default('signin')
     .describe(
       'How the wizard should acquire the engine\'s license JWT. **Defaults to `"signin"`** when omitted — the wizard tries to mint a user-scoped license via the user\'s Auth0 session, and emits `signin_required` mode (chain through `log10x_signin_start` then re-invoke) when no session exists. Pass **`"demo"`** ONLY when the user explicitly asks for a quick 14-day anonymous demo (transient, can\'t run airgapped). Pass **`"paste"`** with `license_jwt_paste: "<jwt>"` when the user already has a JWT.'
     ),
@@ -285,7 +285,7 @@ function wizardReturn(view: 'summary' | 'markdown', data: WizardData): Structure
  */
 function wizardEnvelopeMeta(data: WizardData): {
   headline: string;
-  actions: Array<{ tool: string; args: Record<string, unknown>; reason: string }>;
+  actions: Array<{ tool: string; args: Record<string, unknown>; reason: string; role: ActionRole }>;
   warnings: string[];
 } {
   switch (data.mode) {
@@ -293,7 +293,7 @@ function wizardEnvelopeMeta(data: WizardData): {
       return {
         headline: `Snapshot \`${data.snapshot_id}\` expired or not found (30-min TTL). Re-discover the cluster first.`,
         actions: [
-          { tool: 'log10x_discover_env', args: {}, reason: 'mint a fresh snapshot; then re-invoke log10x_advise_install with the new snapshot_id' },
+          { tool: 'log10x_discover_env', args: {}, reason: 'mint a fresh snapshot; then re-invoke log10x_advise_install with the new snapshot_id', role: 'required-next' },
         ],
         warnings: [],
       };
@@ -301,7 +301,7 @@ function wizardEnvelopeMeta(data: WizardData): {
       return {
         headline: `Wizard session failed to initialize for snapshot \`${data.snapshot_id}\` — re-discover and retry.`,
         actions: [
-          { tool: 'log10x_discover_env', args: {}, reason: 'mint a fresh snapshot — internal session-store state is unexpected' },
+          { tool: 'log10x_discover_env', args: {}, reason: 'mint a fresh snapshot — internal session-store state is unexpected', role: 'required-next' },
         ],
         warnings: ['unexpected internal error — the snapshot store is in a bad state for this snapshot_id'],
       };
@@ -309,7 +309,7 @@ function wizardEnvelopeMeta(data: WizardData): {
       return {
         headline: `Wizard cancelled mid-flow. Re-invoke log10x_advise_install with snapshot_id="${data.snapshot_id}" to resume — every prior answer is preserved.`,
         actions: [
-          { tool: 'log10x_advise_install', args: { snapshot_id: data.snapshot_id }, reason: 'resume the wizard — the session remembers every prior answer for 30 min' },
+          { tool: 'log10x_advise_install', args: { snapshot_id: data.snapshot_id }, reason: 'resume the wizard — the session remembers every prior answer for 30 min', role: 'recommended-next' },
         ],
         warnings: [],
       };
@@ -326,43 +326,55 @@ function wizardEnvelopeMeta(data: WizardData): {
             reason: meta
               ? `answer "${data.question_id}" by setting \`${meta.answer_field}\` and re-invoke; the session keeps every prior answer`
               : `answer "${data.question_id}" and re-invoke the wizard`,
+            role: 'required-next',
           },
         ],
         warnings: [],
       };
     }
     case 'license_error':
+      // Two alternative recovery paths the user picks between (sign in
+      // OR paste a JWT). Both labelled `alternative` so agents render
+      // them as a choice rather than chain them.
       return {
         headline: `License acquisition failed: ${data.error_message}. Sign in or paste an existing JWT to retry.`,
         actions: [
-          { tool: 'log10x_signin_start', args: {}, reason: 'sign in via the browser device flow to mint a user-scoped license' },
+          { tool: 'log10x_signin_start', args: {}, reason: 'sign in via the browser device flow to mint a user-scoped license', role: 'alternative' },
           {
             tool: 'log10x_advise_install',
             args: { snapshot_id: data.snapshot_id, license_source: 'paste', license_jwt_paste: '<your JWT>' },
             reason: 'retry with a license JWT you already have',
+            role: 'alternative',
           },
         ],
         warnings: [`license fetch failed: ${data.error_message}`],
       };
     case 'signin_required':
+      // The two actions form a strict ordered prerequisite chain:
+      // signin_start MUST complete before the re-invoke. Both
+      // `required-next` + array-order = chain. Agents that respect the
+      // role enum will not parallelize or skip.
       return {
         headline: `Wizard cannot mint a real license without sign-in. CHAIN: call log10x_signin_start NEXT, then re-invoke log10x_advise_install — every prior answer is preserved.`,
         actions: [
-          { tool: 'log10x_signin_start', args: {}, reason: 'REQUIRED NEXT CALL — opens the device-code browser flow to sign in to Log10x (gets Auth0 tokens needed to mint a user-scoped license)' },
-          { tool: 'log10x_advise_install', args: { snapshot_id: data.snapshot_id }, reason: 'CHAIN AFTER signin_start completes: re-invoke the wizard with the same snapshot_id; the wizard will auto-mint a real user-scoped license now that Auth0 tokens exist' },
+          { tool: 'log10x_signin_start', args: {}, reason: 'opens the device-code browser flow to sign in to Log10x (gets Auth0 tokens needed to mint a user-scoped license). Must complete before the next action.', role: 'required-next' },
+          { tool: 'log10x_advise_install', args: { snapshot_id: data.snapshot_id }, reason: 'after signin_start completes, re-invoke the wizard with the same snapshot_id; the wizard will auto-mint a real user-scoped license now that Auth0 tokens exist', role: 'required-next' },
         ],
         warnings: [
           'plan NOT emitted yet — the user picked sign-in, but the wizard cannot proceed until log10x_signin_start has been called and completed successfully. Do NOT proceed without it; do NOT silently fall back to demo.',
         ],
       };
     case 'demo_airgapped_warning':
+      // Two alternatives: switch to real license (signin_start +
+      // re-invoke) OR keep demo and drop airgapped. Labelled
+      // `alternative` so agent surfaces both, user picks.
       return {
         headline: data.is_signed_in
           ? `Demo license + airgapped doesn't enforce — your pasted-API-key sign-in lacks Auth0 tokens to mint a user license. Switch to device-flow sign-in, or drop airgapped.`
           : `Demo license + airgapped doesn't enforce: engine downgrades to online mode silently. Sign in for a real license, or drop airgapped.`,
         actions: [
-          { tool: 'log10x_signin_start', args: {}, reason: 'sign in to mint a real license that actually enforces airgapped (the engine refuses to run airgapped on demo licenses)' },
-          { tool: 'log10x_advise_install', args: { snapshot_id: data.snapshot_id, airgapped: false }, reason: 'or keep the demo license and proceed without airgapped' },
+          { tool: 'log10x_signin_start', args: {}, reason: 'sign in to mint a real license that actually enforces airgapped (the engine refuses to run airgapped on demo licenses)', role: 'alternative' },
+          { tool: 'log10x_advise_install', args: { snapshot_id: data.snapshot_id, airgapped: false }, reason: 'or keep the demo license and proceed without airgapped', role: 'alternative' },
         ],
         warnings: ['demo licenses cannot run airgapped — engine downgrades to online mode at startup with a warning log'],
       };
@@ -371,20 +383,23 @@ function wizardEnvelopeMeta(data: WizardData): {
       if (data.blockers.length > 0) {
         warnings.push(`plan has ${data.blockers.length} blocker${data.blockers.length !== 1 ? 's' : ''} — see data.blockers`);
       }
-      // The wizard's plan path may emit a real or demo license; if demo,
-      // surface it as a warning so the agent flags it to the user.
-      // (We can't read isDemoLicense from AdvisePlanSummary, so this is a
-      // soft heuristic — extract from notes when present.)
-      const demoNote = data.notes.find((n) => /demo license/i.test(n));
-      if (demoNote) {
+      // Use the typed `license_kind` field instead of grepping notes
+      // (back-compat: also fall back to the legacy notes-grep if
+      // license_kind isn't populated, which shouldn't happen on this
+      // branch but guards future renames).
+      const isDemoLicense =
+        data.license_kind === 'demo' ||
+        (data.license_kind === undefined && data.notes.some((n) => /demo license/i.test(n)));
+      if (isDemoLicense) {
         warnings.push('plan emitted with a demo license — re-run with `license_source: "signin"` before the 14-day window expires to get a user-scoped one');
       }
-      const actions: Array<{ tool: string; args: Record<string, unknown>; reason: string }> = [];
-      // Post-install health check is universal.
+      const actions: Array<{ tool: string; args: Record<string, unknown>; reason: string; role: ActionRole }> = [];
+      // Post-install health check is universal — optional follow-up.
       actions.push({
         tool: 'log10x_doctor',
         args: {},
         reason: 'verify the install once the helm release rolls out — checks engine pods Ready, metrics flowing, license-Secret mounted',
+        role: 'optional-followup',
       });
       // Receiver path: post-install pattern-mitigation is the natural follow-up.
       if (data.app === 'receiver') {
@@ -392,6 +407,7 @@ function wizardEnvelopeMeta(data: WizardData): {
           tool: 'log10x_top_patterns',
           args: {},
           reason: 'once events are flowing, see which patterns dominate cost and offer mitigation via log10x_pattern_mitigate',
+          role: 'optional-followup',
         });
       }
       // Real-license-Secret path requires the user to create the Secret BEFORE

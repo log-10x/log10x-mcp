@@ -15,6 +15,24 @@ import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../
  * `advise_retriever` then handles the wizard's plan output via the
  * same code path.
  */
+/**
+ * What kind of license JWT the plan ships with. Surfaced as a typed
+ * field so agents don't have to grep `notes[]` to know whether the
+ * install will run with a demo or a real user-scoped license — the
+ * difference is structurally meaningful (demo can't run airgapped,
+ * expires in 14 days, has rate limits).
+ *
+ *   - 'user-scoped' — minted from /api/v1/license with Auth0 tokens.
+ *     Production-grade. Can run airgapped. No expiry from us.
+ *   - 'demo'        — anonymous /api/v1/license/demo. 14-day, no
+ *     airgapped, reduced limits.
+ *   - 'user-pasted' — the user supplied the JWT via license_jwt_paste;
+ *     we don't introspect it.
+ *   - 'placeholder' — no real JWT (skipInstall=true, or license fetch
+ *     failed and the plan was emitted with REPLACE_WITH_LICENSE_JWT).
+ */
+export type PlanLicenseKind = 'user-scoped' | 'demo' | 'user-pasted' | 'placeholder';
+
 export interface AdvisePlanSummary {
   ok: boolean;
   app: 'reporter' | 'receiver' | 'retriever';
@@ -41,6 +59,13 @@ export interface AdvisePlanSummary {
    * the chmod ritual to the user even if they only skim the markdown.
    */
   install_requires_chmod: boolean;
+  /**
+   * License JWT kind baked into the plan. Optional only for
+   * back-compat with summaries built before this field existed; new
+   * emitters always populate it. Use this instead of grepping `notes`
+   * for the substring "demo license".
+   */
+  license_kind?: PlanLicenseKind;
   verify_probe_count: number;
   teardown_step_count: number;
   blockers: string[];
@@ -111,6 +136,7 @@ function summarize(plan: AdvisePlan, action: AdviseAction): AdvisePlanSummary {
     install_step_count: plan.install.length,
     install_file_count,
     install_requires_chmod,
+    license_kind: plan.licenseKind,
     verify_probe_count: plan.verify.length,
     teardown_step_count: plan.teardown.length,
     blockers: plan.blockers,

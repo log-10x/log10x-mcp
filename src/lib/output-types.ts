@@ -47,14 +47,50 @@ export const ViewEnum = z.enum(['summary', 'markdown']).default('summary');
 export type View = z.infer<typeof ViewEnum>;
 
 /**
+ * Action role — how the agent should treat a suggested next-tool call.
+ *
+ *   - 'required-next'    — MUST be invoked before the current workflow
+ *     can continue. Multiple `required-next` actions in the same
+ *     `actions[]` form an ordered prerequisite chain (call them in
+ *     array order). Skipping any of them leaves the workflow blocked.
+ *
+ *   - 'recommended-next' — Should be invoked next under normal
+ *     conditions, but the agent is free to skip if the user explicitly
+ *     opts out. Single recommended path per envelope is the norm.
+ *
+ *   - 'optional-followup' — Useful but non-blocking. Run after the
+ *     primary path completes (e.g. post-install health check).
+ *
+ *   - 'alternative'      — One of several mutually-exclusive paths the
+ *     user might pick. Agent surfaces the choices; user picks one.
+ */
+export const ActionRoleSchema = z.enum([
+  'required-next',
+  'recommended-next',
+  'optional-followup',
+  'alternative',
+]);
+export type ActionRole = z.infer<typeof ActionRoleSchema>;
+
+/**
  * Next-tool chaining hint. Agent reads `actions[]` and decides which
  * to follow up with. `args` is a partial — the agent fills in the
  * caller-supplied bits before invoking.
+ *
+ * `role` is the structural signal (don't NLP-parse `reason`).
+ * `reason` is the human-readable rationale — still typed (`string`)
+ * but is for display, not for routing decisions.
  */
 export const ActionSchema = z.object({
   tool: z.string(),
   args: z.record(z.unknown()).default({}),
   reason: z.string(),
+  /**
+   * Optional for back-compat with envelopes built before this field
+   * was added. New emitters should always set it. Absence is treated
+   * as `'recommended-next'` by routing-aware consumers.
+   */
+  role: ActionRoleSchema.optional(),
 });
 export type Action = z.infer<typeof ActionSchema>;
 

@@ -130,6 +130,17 @@ export interface AdvisePlan {
   namespace: string;
   /** Kubernetes context the plan targets, for display. */
   context?: string;
+  /**
+   * License kind the plan ships with. Surfaces directly into the typed
+   * envelope (AdvisePlanSummary.license_kind) so agents don't have to
+   * parse notes to know whether the install is demo-grade or real.
+   *   - 'user-scoped' — real license minted from /api/v1/license
+   *   - 'demo'        — anonymous 14-day demo license
+   *   - 'user-pasted' — user supplied via license_jwt_paste; opaque
+   *   - 'placeholder' — REPLACE_WITH_LICENSE_JWT (skipInstall mode or
+   *     license fetch deferred)
+   */
+  licenseKind?: 'user-scoped' | 'demo' | 'user-pasted' | 'placeholder';
   /** Preflight checks the advisor ran against the snapshot. */
   preflight: PreflightCheck[];
   /** Install steps (ordered). */

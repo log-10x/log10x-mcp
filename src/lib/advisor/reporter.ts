@@ -286,6 +286,28 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
     teardown.push(...buildTeardownSteps(releaseName, namespace, selectorLabel));
   }
 
+  // Derive the typed licenseKind from the inputs we know. Surfaces on
+  // AdvisePlanSummary.license_kind so agents don't grep `notes` for
+  // "demo license".
+  //
+  //   - no licenseJwt at all                       → 'placeholder'
+  //     (skipInstall mode, or fetch failed and the plan emitted the
+  //     REPLACE_WITH_LICENSE_JWT default)
+  //   - isDemoLicense === true                     → 'demo'
+  //   - isDemoLicense === false                    → 'user-scoped'
+  //     (the wizard sets this explicitly when acquireLicenseForWizard
+  //     returned a `signed-in-user` / `refreshed-then-user` reason)
+  //   - isDemoLicense undefined + licenseJwt set   → 'user-pasted'
+  //     (caller supplied a JWT but didn't tell us its kind; treat as
+  //     opaque)
+  const licenseKind: AdvisePlan['licenseKind'] = !args.licenseJwt
+    ? 'placeholder'
+    : args.isDemoLicense === true
+      ? 'demo'
+      : args.isDemoLicense === false
+        ? 'user-scoped'
+        : 'user-pasted';
+
   return {
     app,
     snapshotId: snapshot.snapshotId,
@@ -293,6 +315,7 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
     releaseName,
     namespace,
     context: snapshot.kubectl.context,
+    licenseKind,
     preflight,
     install,
     verify,
