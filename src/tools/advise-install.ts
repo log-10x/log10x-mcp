@@ -345,12 +345,14 @@ function wizardEnvelopeMeta(data: WizardData): {
       };
     case 'signin_required':
       return {
-        headline: `Sign-in required for a user-scoped license. Run log10x_signin_start, then re-invoke log10x_advise_install — every prior answer is preserved.`,
+        headline: `Wizard cannot mint a real license without sign-in. CHAIN: call log10x_signin_start NEXT, then re-invoke log10x_advise_install — every prior answer is preserved.`,
         actions: [
-          { tool: 'log10x_signin_start', args: {}, reason: 'open the device-code browser flow to sign in to Log10x' },
-          { tool: 'log10x_advise_install', args: { snapshot_id: data.snapshot_id }, reason: 'after sign-in, re-invoke the wizard with the same snapshot_id — it will auto-mint a real license' },
+          { tool: 'log10x_signin_start', args: {}, reason: 'REQUIRED NEXT CALL — opens the device-code browser flow to sign in to Log10x (gets Auth0 tokens needed to mint a user-scoped license)' },
+          { tool: 'log10x_advise_install', args: { snapshot_id: data.snapshot_id }, reason: 'CHAIN AFTER signin_start completes: re-invoke the wizard with the same snapshot_id; the wizard will auto-mint a real user-scoped license now that Auth0 tokens exist' },
         ],
-        warnings: [],
+        warnings: [
+          'plan NOT emitted yet — the user picked sign-in, but the wizard cannot proceed until log10x_signin_start has been called and completed successfully. Do NOT proceed without it; do NOT silently fall back to demo.',
+        ],
       };
     case 'demo_airgapped_warning':
       return {
@@ -534,32 +536,43 @@ export async function executeAdviseInstall(
   }
 
   // License acquisition. Three paths driven by session.licenseSource:
-  //   - 'signin' — the user said "sign me in". acquireLicenseForWizard
-  //     mints a user-scoped JWT IF they're already signed in; otherwise
-  //     it falls back to demo. We surface a clear "go sign in first"
-  //     message when the fallback to demo would happen, so the user
-  //     gets the real license they asked for rather than a silent demo.
+  //   - 'signin' — the user said "sign me in". We require a real
+  //     user-scoped license; if acquireLicenseForWizard would return a
+  //     demo (because the user isn't actually signed in via the device
+  //     flow, or is signed in only via a pasted API key with no Auth0
+  //     tokens), we surface signin_required INSTEAD of accepting the
+  //     demo. The previous gate (`envs.isDemoMode`) missed the
+  //     pasted-key case — that's why picking "sign in" still ended up
+  //     with a demo JWT in the plan.
   //   - 'demo' — explicit demo. Skip the signed-in check, mint a demo.
   //   - 'paste' — the user supplied license_jwt_paste; session.licenseJwt
   //     is already populated from that arg. Nothing to do here.
   if (!session.licenseJwt && session.licenseSource !== 'paste') {
-    if (session.licenseSource === 'signin' && envs.isDemoMode) {
-      const md = [
-        `# Install wizard — sign in to Log10x first`,
-        ``,
-        `You picked **Sign in** for the license. The wizard needs a Log10x account session to mint a user-scoped license — run \`log10x_signin_start\` in your next turn (it opens a browser to auth.log10x.com and exchanges the device-code for an API key).`,
-        ``,
-        `Once you're signed in, re-invoke \`log10x_advise_install\` with the same \`snapshot_id\`. Every answer you gave above is remembered — you won't have to redo any step.`,
-      ].join('\n');
-      return wizardReturn(view, {
-        mode: 'signin_required',
-        ok: false,
-        snapshot_id: args.snapshot_id,
-        markdown: md,
-      });
-    }
     try {
       const lic = await acquireLicenseForWizard();
+      const isRealUserLicense =
+        lic.reason === 'signed-in-user' || lic.reason === 'refreshed-then-user';
+      if (session.licenseSource === 'signin' && !isRealUserLicense) {
+        // Honest answer: the user picked "sign in" but acquireLicense
+        // didn't get a user-scoped JWT (no Auth0 tokens). Don't silently
+        // fall back to the demo JWT it returned — refuse and tell the
+        // agent to chain through log10x_signin_start first.
+        const md = [
+          `# Install wizard — sign in to Log10x first`,
+          ``,
+          lic.reason === 'pasted-key-fallback'
+            ? `You picked **Sign in** for the license. The wizard saw an existing Log10x API key but no Auth0 tokens (you signed in via pasted API key, which doesn't include the OAuth credentials needed to mint a user-scoped license). Run \`log10x_signin_start\` in your next turn — it opens the device-code browser flow and stores the Auth0 tokens.`
+            : `You picked **Sign in** for the license. The wizard found no Log10x account session — run \`log10x_signin_start\` in your next turn (it opens a browser to auth.log10x.com and exchanges the device-code for an API key + Auth0 tokens).`,
+          ``,
+          `Once you're signed in, re-invoke \`log10x_advise_install\` with the same \`snapshot_id\`. Every answer you gave above is remembered — you won't have to redo any step.`,
+        ].join('\n');
+        return wizardReturn(view, {
+          mode: 'signin_required',
+          ok: false,
+          snapshot_id: args.snapshot_id,
+          markdown: md,
+        });
+      }
       updateWizardSession(args.snapshot_id, {
         licenseJwt: lic.jwt,
         isDemoLicense: lic.isDemoLicense,
