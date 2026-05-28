@@ -424,7 +424,7 @@
     },
     "log10x_find_skew": {
       "title": "Find skew",
-      "description": "Identify patterns where one slot value dominates the field (>= 60% of events by default). Surfaces sampling opportunities: \"slot `verb` is `get` 78% of events — sample the get case at 1/10 and save volume without losing signal.\" Differentiated against analyzer field histograms because the engine groups by per-pattern field-set, so dominance is measured within the structural pattern, not globally. **Stage 1**: accepts events as a paste array (same shape as log10x_resolve_batch).",
+      "description": "Identify patterns where one slot value dominates the field (>= 60% of events by default). Surfaces sampling opportunities: \"slot `verb` is `get` 78% of events — sample the get case at 1/10 and save volume without losing signal.\" Differentiated against analyzer field histograms because the engine groups by per-pattern field-set, so dominance is measured within the structural pattern, not globally. **Stage 1**: accepts events as a paste array (same shape as log10x_resolve_batch). **Calibration honesty**: the 60% concentration floor and 1/10 sampling rate are hand-picked defaults tagged `unvalidated_default` in the output. The envelope surfaces the empirical `observed_dominant_pct_distribution` across all candidate slots so the agent can judge whether 0.6 is well above or below the noise floor for this dataset. See `docs/cross-pillar-primitives.md` for the agent behavior contract.",
       "annotations": {
         "title": "Find skew",
         "readOnlyHint": true,

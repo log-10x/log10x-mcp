@@ -36,6 +36,13 @@ export const PRIMITIVE_ERROR_TYPES = [
   'candidate_too_many',
   'schema_invalid',
   'partial_failure',
+  /** Paste-mode tools: input failed validation (empty events, malformed
+   * payload, exceeded size cap). Caller-side bug; do NOT retry. */
+  'input_invalid',
+  /** Paste-mode tools: local processing failed (templater error, parse
+   * failure, tenx CLI not installed). Surface to user; retry only if the
+   * underlying cause is resolved. */
+  'local_processing_failed',
   'unknown',
 ] as const;
 

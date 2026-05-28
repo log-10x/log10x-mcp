@@ -209,6 +209,54 @@ The investigate template uses observation-shaped headings:
 
 The `human_summary` field always includes the phrase "correlation, not proven cause" when a lead is identified. Agents reading this output and presenting it to a human MUST preserve that framing. Reframing as "the cause is X" violates the contract.
 
+## `log10x_find_skew` envelope additions
+
+`log10x_find_skew` is a paste-mode tool — the caller supplies events (raw strings or JSON), the tool templates them locally and surfaces patterns where one slot value dominates. It does NOT query a customer TSDB, so the network-shaped fields (`query_count`, `backend_pressure_hint`) are no-ops.
+
+It DOES share the same envelope shape and the same calibration honesty as the cross-pillar primitives:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `status` | enum | `success` / `no_signal` / `insufficient_data` / `error` |
+| `threshold_basis` | enum | `unvalidated_default` / `caller_override` |
+| `threshold_audit` | object | floor + observed distribution (see below) |
+| `input_ref` | object | echo of the input size: `n_events`, `n_patterns_after_templating`, `n_patterns_above_min_events` |
+| `query_count` | `0` | paste-mode tool, no backend queries |
+| `total_latency_ms` | number | wall time of the templating + detection |
+| `backend_pressure_hint` | `null` | not applicable |
+| `human_summary` | string | one paragraph; references floor + observed median when applicable |
+| `findings` | array | the skew findings (existing field) |
+| `error` | `PrimitiveError` | populated only when `status === "error"` |
+
+`threshold_audit` for find_skew:
+```ts
+threshold_audit: {
+  min_concentration: { value: number; basis: "unvalidated_default" | "caller_override" };
+  sample_n: { value: number; basis };
+  observed_dominant_pct_distribution: { n, min, p25, p50, p75, max } | null;
+  n_candidate_slots: number;
+}
+```
+
+How the agent reads it:
+- Floor 0.60, observed `{p50: 0.30, p75: 0.45}` → floor is well above the dataset's noise; treat findings as real signal.
+- Floor 0.60, observed `{p50: 0.75, p90: 0.95}` → almost every slot is dominated; the floor is too low for this dataset, treat the `findings` count with skepticism.
+- Floor 0.60, observed `{p50: 0.10, max: 0.40}` → no slot crossed; `status: "no_signal"` is the expected outcome.
+
+### find_skew-specific status semantics
+
+- `success`: ≥1 finding above the concentration floor.
+- `no_signal`: ≥1 pattern qualified (had ≥ min_events) but no slot crossed the floor. Stop searching — either widen the input or lower the floor.
+- `insufficient_data`: NO pattern had ≥ min_events after templating. Paste more events for the same patterns or widen the source.
+- `error`: input failed validation OR templater crashed. Read `data.error.error_type` (`input_invalid` / `local_processing_failed`).
+
+### find_skew error types
+
+| `error_type` | Meaning | Agent action |
+| --- | --- | --- |
+| `input_invalid` | Empty events, malformed payload, or input failed validation. | Do NOT retry the same input. |
+| `local_processing_failed` | Templater crashed (typically because the privacy_mode tenx CLI isn't installed or the input shape is unparseable). | Surface to user; retry only if the underlying cause is resolved. |
+
 ## Quick reference — output state cheatsheet
 
 ```
