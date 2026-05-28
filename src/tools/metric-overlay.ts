@@ -84,7 +84,7 @@ export type MetricOverlayStatus =
 
 interface MetricOverlaySummary {
   status: MetricOverlayStatus;
-  threshold_basis: 'default_uncalibrated' | 'caller_override';
+  threshold_basis: 'unvalidated_default' | 'caller_override';
   anchor_ref: {
     type: 'log10x_pattern' | 'customer_metric';
     expression: string;
@@ -158,8 +158,8 @@ export async function executeMetricOverlay(
   const fromSec = nowSec - Math.floor(tf.days * 86400);
 
   // metric_overlay has no thresholds, so threshold_basis is always
-  // default_uncalibrated (no caller can override what doesn't exist).
-  const thresholdBasis: 'default_uncalibrated' | 'caller_override' = 'default_uncalibrated';
+  // unvalidated_default (no caller can override what doesn't exist).
+  const thresholdBasis: 'unvalidated_default' | 'caller_override' = 'unvalidated_default';
 
   let queryCount = 0;
   let totalLatencyMs = 0;
@@ -403,7 +403,7 @@ function overlayErrorEnvelope(args: {
   candidate: string;
   window: string;
   stepSeconds: number;
-  thresholdBasis: 'default_uncalibrated' | 'caller_override';
+  thresholdBasis: 'unvalidated_default' | 'caller_override';
   queryCount: number;
   totalLatencyMs: number;
   throttledHit: boolean;
@@ -452,7 +452,7 @@ function overlayDispersionRefusal(args: {
   candidate: string;
   window: string;
   stepSeconds: number;
-  thresholdBasis: 'default_uncalibrated' | 'caller_override';
+  thresholdBasis: 'unvalidated_default' | 'caller_override';
   queryCount: number;
   totalLatencyMs: number;
   throttledHit: boolean;

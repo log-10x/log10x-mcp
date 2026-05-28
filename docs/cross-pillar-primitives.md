@@ -32,7 +32,8 @@ Every tool returns a `StructuredOutput` envelope. The `data` block always carrie
 | --- | --- | --- |
 | `status` | enum | Top-level call state. Branch on this BEFORE reading any other field. |
 | `threshold_used` | number | The numeric threshold applied (phase gap floor, phase-aligned floor). |
-| `threshold_basis` | `"default_uncalibrated"` \| `"caller_override"` | Provenance of the threshold. |
+| `threshold_basis` | `"unvalidated_default"` \| `"caller_override"` | Provenance of the threshold. |
+| `threshold_audit` | object | **Floor + observed-distribution disclosure.** See below. |
 | `anchor_ref` | `{ type, expression }` | Echo of the anchor used. Survives multi-tool chains so the agent doesn't lose context. |
 | `anchor_dispersion` | number | CV of the anchor over the window. Zero = no phase separation. |
 | `n_candidates_usable` | number | Candidates that produced usable signal (excludes evaluation_failed). |
@@ -40,10 +41,42 @@ Every tool returns a `StructuredOutput` envelope. The `data` block always carrie
 | `query_count` | number | Total backend queries the tool issued. |
 | `total_latency_ms` | number | Sum of per-query latencies. |
 | `backend_pressure_hint` | `"ok"` \| `"slow"` \| `"throttled"` \| `null` | Coarse rate-pacing signal. |
-| `human_summary` | string | One paragraph in plain prose for paste-to-user. |
+| `human_summary` | string | One paragraph in plain prose for paste-to-user. Always references both the floor and the observed distribution when applicable. |
 | `error` | `PrimitiveError` (optional) | Populated only when `status === "error"`. |
 
 Tool-specific fields (`moved[]`, `ranked[]`, `series[]`, `facts`) sit alongside the shared block.
+
+### `threshold_audit` — honest disclosure path
+
+The tools do NOT auto-calibrate. Every consult round on inline auto-calibration (median CV, P25, agent-supplied seeds) was rejected as statistical theater without external ground truth. Instead, the tools surface the data the caller would calibrate from, alongside the floor it was compared to. The agent (or human) reads the distribution next to the floor and decides per-call.
+
+Each tool's `threshold_audit` field shape:
+
+**`metrics_that_moved`**:
+```ts
+threshold_audit: {
+  phase_gap_floor: { value: number; basis: "unvalidated_default" | "caller_override" };
+  observed_phase_gap_distribution: { n, min, p25, p50, p75, max } | null;
+}
+```
+
+**`rank_by_shape_similarity`**:
+```ts
+threshold_audit: {
+  anchor_phase_aligned_floor: { value, basis };
+  lag_search_max_abs: { value, basis };
+  observed_pearson_magnitude_distribution: { n, min, p25, p50, p75, max } | null;
+  observed_anchor_phase_gap_distribution: { n, min, p25, p50, p75, max } | null;
+  n_lag_at_bound: number;  // candidates whose peak landed at the search boundary
+}
+```
+
+**`metric_overlay`** does not have thresholds and does not emit `threshold_audit`.
+
+How the agent reads this:
+- Floor 0.15, observed `{p50: 0.08, p75: 0.12, max: 0.85}` → floor is comfortably above the bulk of the noise; the candidate at 0.85 is a real mover.
+- Floor 0.15, observed `{p50: 0.22, p75: 0.38, max: 0.92}` → floor is BELOW the noise floor for this backend; most "moved" candidates are likely noise. Treat results with extreme skepticism, or raise the floor.
+- Floor 0.15, observed `{p50: 0.03, p75: 0.04, max: 0.07}` → no candidate crossed the floor. Either re-anchor or widen the candidate pool — the floor isn't the problem, the absence of movement is.
 
 ## Status branching — the agent contract
 
@@ -54,7 +87,7 @@ The math ran cleanly. Read tool-specific output.
 Agent SHOULD:
 - Read `human_summary` for a one-paragraph paste-to-user.
 - Read `moved[]` / `ranked[]` / `series` + `facts` for structured detail.
-- Check `threshold_basis`. If `default_uncalibrated`:
+- Check `threshold_basis`. If `unvalidated_default`:
   - Do NOT auto-mitigate based on this result alone.
   - When presenting to a human, include "thresholds are uncalibrated for this backend."
 - Check `low_candidate_count`. If `severe`, require corroboration from another signal (trace, deploy event, alert) before acting.
@@ -112,7 +145,7 @@ Agent SHOULD:
 
 The single most important rule:
 
-**An agent MUST NOT trigger auto-mitigation (rollback, restart, alert dismissal, scale-down) based on a primitive output where `threshold_basis === "default_uncalibrated"`.**
+**An agent MUST NOT trigger auto-mitigation (rollback, restart, alert dismissal, scale-down) based on a primitive output where `threshold_basis === "unvalidated_default"`.**
 
 The default thresholds (0.15 phase gap, 1800s lag search range) come from one synthetic chaos test. They are not calibrated for any specific customer backend. Acting on an uncalibrated finding risks false-positive rollbacks of services that didn't actually cause the problem.
 
@@ -160,11 +193,11 @@ Investigate composes its narrative from the same primitives plus a separate traj
 
 Investigate has its own threshold pile (clean-chain confidence floor, acute noise floor, drift slope per severity, max co-movers for lag, etc.) defined in `src/lib/thresholds.ts`. Provenance values:
 
-- `default_uncalibrated` — `LOG10X_THRESHOLDS_FILE` env var not set; using hand-picked SPEC_DEFAULTS.
+- `unvalidated_default` — `LOG10X_THRESHOLDS_FILE` env var not set; using hand-picked SPEC_DEFAULTS.
 - `config_file` — `LOG10X_THRESHOLDS_FILE` points at a calibrated config (operator took ownership).
 - `caller_override` — reserved for future per-call threshold overrides (not exposed yet).
 
-Same auto-mitigation gate applies: agents MUST NOT auto-mitigate when `threshold_basis === "default_uncalibrated"`.
+Same auto-mitigation gate applies: agents MUST NOT auto-mitigate when `threshold_basis === "unvalidated_default"`.
 
 ### Investigate output framing — observations, not verdicts
 
@@ -181,7 +214,7 @@ The `human_summary` field always includes the phrase "correlation, not proven ca
 ```
 status                          → agent next-action
 ─────────────────────────────────────────────────────────────────────────
-success + default_uncalibrated  → surface, do NOT auto-mitigate
+success + unvalidated_default  → surface, do NOT auto-mitigate
 success + caller_override       → trust within calibrated regime
 success + low_candidate_count   → require corroboration
 anchor_no_phase_separation      → re-anchor, do NOT retry same anchor

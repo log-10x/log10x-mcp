@@ -100,11 +100,11 @@ test('parseReport: empty input is safe', () => {
 
 // ── detectThresholdBasis ──────────────────────────────────────────────
 
-test('detectThresholdBasis: env var unset → default_uncalibrated', () => {
+test('detectThresholdBasis: env var unset → unvalidated_default', () => {
   const before = process.env.LOG10X_THRESHOLDS_FILE;
   delete process.env.LOG10X_THRESHOLDS_FILE;
   try {
-    assert.equal(detectThresholdBasis(), 'default_uncalibrated');
+    assert.equal(detectThresholdBasis(), 'unvalidated_default');
   } finally {
     if (before !== undefined) process.env.LOG10X_THRESHOLDS_FILE = before;
   }
@@ -151,16 +151,16 @@ test('buildHumanSummary: success with lead → strongest-evidence framing, not v
       chainLength: 2,
       coMoverCount: 3,
     },
-    'default_uncalibrated',
+    'unvalidated_default',
   );
   assert.match(summary, /strongest temporal evidence/i);
   assert.match(summary, /dns_lookup_failures/);
   assert.match(summary, /90s before/);
   assert.match(summary, /correlation, not proven cause/i);
-  assert.match(summary, /uncalibrated defaults/i);
+  assert.match(summary, /unvalidated defaults/i);
 });
 
-test('buildHumanSummary: success with caller_override → no uncalibrated tag', () => {
+test('buildHumanSummary: success with caller_override → no unvalidated tag', () => {
   const summary = buildHumanSummary(
     'foo',
     '1h',
@@ -175,23 +175,23 @@ test('buildHumanSummary: success with caller_override → no uncalibrated tag', 
     },
     'config_file',
   );
-  assert.doesNotMatch(summary, /uncalibrated/i);
+  assert.doesNotMatch(summary, /unvalidated/i);
 });
 
 test('buildHumanSummary: no_signal → "no co-movers above the noise floor", stop searching', () => {
-  const summary = buildHumanSummary('foo', '1h', 'no_signal', emptyParsed, 'default_uncalibrated');
+  const summary = buildHumanSummary('foo', '1h', 'no_signal', emptyParsed, 'unvalidated_default');
   assert.match(summary, /no co-movers above the noise floor/i);
   assert.match(summary, /widen the window|deep depth|no detectable lead/i);
-  assert.match(summary, /uncalibrated defaults/i);
+  assert.match(summary, /unvalidated defaults/i);
 });
 
 test('buildHumanSummary: insufficient_data → "could not produce a usable analysis"', () => {
-  const summary = buildHumanSummary('foo', '1h', 'insufficient_data', emptyParsed, 'default_uncalibrated');
+  const summary = buildHumanSummary('foo', '1h', 'insufficient_data', emptyParsed, 'unvalidated_default');
   assert.match(summary, /could not produce a usable analysis|widen the window|re-anchor/i);
 });
 
 test('buildHumanSummary: error → references data.error', () => {
-  const summary = buildHumanSummary('foo', '1h', 'error', emptyParsed, 'default_uncalibrated');
+  const summary = buildHumanSummary('foo', '1h', 'error', emptyParsed, 'unvalidated_default');
   assert.match(summary, /failed structurally|data\.error/i);
 });
 

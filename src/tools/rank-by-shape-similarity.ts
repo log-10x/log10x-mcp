@@ -50,7 +50,7 @@ export const rankByShapeSimilaritySchema = {
     .number()
     .min(0)
     .default(DEFAULT_LAG_SEARCH_MAX_ABS)
-    .describe('Maximum absolute lag in seconds to scan. Default 1800s — uncalibrated. Output is tagged `default_uncalibrated` when used as-is. Narrow it when the use case has a known tighter upper bound on cascade latency (e.g. 300 for sub-5-min cascades). See `docs/cross-pillar-primitives.md` for the calibration playbook.'),
+    .describe('Maximum absolute lag in seconds to scan. Default 1800s — uncalibrated. Output is tagged `unvalidated_default` when used as-is. Narrow it when the use case has a known tighter upper bound on cascade latency (e.g. 300 for sub-5-min cascades). See `docs/cross-pillar-primitives.md` for the calibration playbook.'),
   anchor_phase_aligned_floor: z
     .number()
     .min(0.0)
@@ -100,7 +100,7 @@ export type RankByShapeStatus =
 interface RankByShapeSummary {
   status: RankByShapeStatus;
   threshold_used: number;
-  threshold_basis: 'default_uncalibrated' | 'caller_override';
+  threshold_basis: 'unvalidated_default' | 'caller_override';
   anchor_ref: {
     type: 'log10x_pattern' | 'customer_metric';
     expression: string;
@@ -119,8 +119,39 @@ interface RankByShapeSummary {
   human_summary: string;
   ranked: RankedCandidate[];
   evaluation_failed: string[];
+  /**
+   * Threshold audit — the floors used and the empirical distributions
+   * of observed values across the ranked pool. Lets the agent see "the
+   * Pearson floor I'm comparing against is 0.15, but observed Pearson
+   * magnitudes across this run cluster at 0.85" vs "...cluster at 0.05."
+   * Honest disclosure path; the tool does NOT auto-calibrate.
+   */
+  threshold_audit?: ThresholdAudit;
   /** Populated only when `status === 'error'`. */
   error?: PrimitiveError;
+}
+
+interface ThresholdAudit {
+  anchor_phase_aligned_floor: {
+    value: number;
+    basis: 'unvalidated_default' | 'caller_override';
+  };
+  lag_search_max_abs: {
+    value: number;
+    basis: 'unvalidated_default' | 'caller_override';
+  };
+  observed_pearson_magnitude_distribution: Distribution | null;
+  observed_anchor_phase_gap_distribution: Distribution | null;
+  n_lag_at_bound: number;
+}
+
+interface Distribution {
+  n: number;
+  min: number;
+  p25: number;
+  p50: number;
+  p75: number;
+  max: number;
 }
 
 export async function executeRankByShapeSimilarity(
@@ -148,9 +179,9 @@ export async function executeRankByShapeSimilarity(
   const effectiveMaxAbs = offsetsForScan.length === 0
     ? 0
     : Math.max(...offsetsForScan.map((s) => Math.abs(s)));
-  const thresholdBasis: 'default_uncalibrated' | 'caller_override' =
+  const thresholdBasis: 'unvalidated_default' | 'caller_override' =
     phaseAlignedFloor === DEFAULT_ANCHOR_PHASE_ALIGNED_FLOOR && lagMaxAbs === DEFAULT_LAG_SEARCH_MAX_ABS
-      ? 'default_uncalibrated'
+      ? 'unvalidated_default'
       : 'caller_override';
 
   const tf = parseTimeframe(window);
@@ -334,14 +365,30 @@ export async function executeRankByShapeSimilarity(
   const anyMeaningfulCorr = ranked.some((r) => r.pearson_magnitude >= 0.1);
   const status: RankByShapeStatus = ranked.length === 0 || !anyMeaningfulCorr ? 'no_signal' : 'success';
   const top = ranked[0];
+
+  const pearsonDist = distribute(ranked.map((r) => r.pearson_magnitude));
+  const observedPearsonMedian = pearsonDist?.p50;
+  const observedFragment =
+    observedPearsonMedian !== undefined
+      ? ` Observed median |Pearson| across the pool: ${observedPearsonMedian.toFixed(2)}.`
+      : '';
+  const calibTag =
+    thresholdBasis === 'unvalidated_default'
+      ? ' Floor is an unvalidated default — compare against the observed distribution before acting.'
+      : '';
+
   const human_summary =
     status === 'no_signal'
-      ? `No candidate showed meaningful shape similarity to the anchor (|Pearson| ≥ 0.1). ${ranked.length} ranked, ${failed.length} failed. Stop searching — re-anchor or widen the candidate pool.${thresholdBasis === 'default_uncalibrated' ? ' Thresholds are uncalibrated defaults — calibrate per backend.' : ''}`
+      ? `No candidate showed meaningful shape similarity to the anchor (|Pearson| ≥ 0.1). ${ranked.length} ranked, ${failed.length} failed. Stop searching — re-anchor or widen the candidate pool.${observedFragment}${calibTag}`
       : `Ranked ${ranked.length} candidate(s) by |Pearson@lag|; ${failed.length} could not be evaluated.${
           top
             ? ` Top match: ${top.candidate} with |r|=${top.pearson_magnitude.toFixed(2)} at lag ${top.lag_seconds}s${top.lag_at_bound ? ' (boundary-pinned, real lag may be wider)' : ''}.`
             : ''
-        }${lowCandidateCount === 'severe' ? ' Very few candidates were usable — weak evidence.' : ''}${thresholdBasis === 'default_uncalibrated' ? ' Thresholds uncalibrated.' : ''}`;
+        }${observedFragment}${lowCandidateCount === 'severe' ? ' Very few candidates were usable — weak evidence.' : ''}${calibTag}`;
+
+
+  const phaseGapDist = distribute(ranked.map((r) => r.anchor_phase_gap));
+  const nAtBound = ranked.filter((r) => r.lag_at_bound).length;
 
   const data: RankByShapeSummary = {
     status,
@@ -362,6 +409,13 @@ export async function executeRankByShapeSimilarity(
     human_summary,
     ranked,
     evaluation_failed: failed,
+    threshold_audit: {
+      anchor_phase_aligned_floor: { value: phaseAlignedFloor, basis: thresholdBasis },
+      lag_search_max_abs: { value: lagMaxAbs, basis: thresholdBasis },
+      observed_pearson_magnitude_distribution: pearsonDist,
+      observed_anchor_phase_gap_distribution: phaseGapDist,
+      n_lag_at_bound: nAtBound,
+    },
   };
   const headline = `Ranked ${ranked.length} candidates by |Pearson@lag|. ${failed.length} could not be evaluated.`;
 
@@ -388,7 +442,7 @@ function rankErrorEnvelope(args: {
   window: string;
   stepSeconds: number;
   floor: number;
-  thresholdBasis: 'default_uncalibrated' | 'caller_override';
+  thresholdBasis: 'unvalidated_default' | 'caller_override';
   queryCount: number;
   totalLatencyMs: number;
   throttledHit: boolean;
@@ -421,6 +475,34 @@ function rankErrorEnvelope(args: {
     summary: { headline: `Error (${args.err.error_type}): ${args.err.hint.slice(0, 120)}` },
     data,
   });
+}
+
+/**
+ * Empirical distribution helper. Returns the min / p25 / median / p75 /
+ * max of a numeric series, or null when the input is empty. Used by
+ * the threshold_audit field so the agent can compare floors against
+ * observed values on this backend.
+ */
+function distribute(values: number[]): {
+  n: number;
+  min: number;
+  p25: number;
+  p50: number;
+  p75: number;
+  max: number;
+} | null {
+  const sorted = values.slice().sort((a, b) => a - b);
+  const n = sorted.length;
+  if (n === 0) return null;
+  const at = (q: number) => sorted[Math.min(n - 1, Math.floor(q * n))];
+  return {
+    n,
+    min: sorted[0],
+    p25: at(0.25),
+    p50: at(0.5),
+    p75: at(0.75),
+    max: sorted[n - 1],
+  };
 }
 
 function rankPressureHint(

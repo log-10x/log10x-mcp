@@ -441,7 +441,7 @@ test('GA: metrics_that_moved emits unified envelope with status, threshold_basis
     };
     assert.equal(d.status, 'success');
     assert.equal(d.threshold_used, 0.15);
-    assert.equal(d.threshold_basis, 'default_uncalibrated');
+    assert.equal(d.threshold_basis, 'unvalidated_default');
     assert.equal(d.anchor_ref.type, 'customer_metric');
     assert.equal(d.anchor_ref.expression, 'anchor');
     assert.ok(d.anchor_dispersion > 0.15, `expected dispersion > 0.15, got ${d.anchor_dispersion}`);
@@ -663,5 +663,113 @@ test('GA: metric_overlay emits status=no_signal when anchor returns nothing', as
     const d = out.data as { status: string; n_buckets_aligned: number };
     assert.equal(d.status, 'no_signal');
     assert.equal(d.n_buckets_aligned, 0);
+  });
+});
+
+// ── threshold_audit: floor + observed-distribution disclosure ──
+
+test('GA: metrics_that_moved emits threshold_audit with observed_phase_gap_distribution', async () => {
+  await withStub(async (stub) => {
+    const endTs = Math.floor(Date.now() / 1000);
+    const anchorVals = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19];
+    stub.setFixture('anchor', { values: buildSeries(anchorVals, 30, endTs) });
+    stub.setFixture('cand_co', {
+      values: buildSeries([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50], 30, endTs),
+    });
+    stub.setFixture('cand_flat', { values: buildSeries(Array(20).fill(7), 30, endTs) });
+    const out = await executeMetricsThatMoved(
+      {
+        anchor_type: 'customer_metric',
+        anchor: 'anchor',
+        candidates: ['cand_co', 'cand_flat'],
+        window: '10m',
+        step: '30s',
+      },
+      ENV,
+    );
+    if (typeof out === 'string') throw new Error('expected envelope');
+    const d = out.data as {
+      threshold_audit: {
+        phase_gap_floor: { value: number; basis: string };
+        observed_phase_gap_distribution: { n: number; min: number; p50: number; max: number } | null;
+      };
+    };
+    assert.ok(d.threshold_audit, 'threshold_audit must be present on success');
+    assert.equal(d.threshold_audit.phase_gap_floor.value, 0.15);
+    assert.equal(d.threshold_audit.phase_gap_floor.basis, 'unvalidated_default');
+    assert.ok(d.threshold_audit.observed_phase_gap_distribution !== null);
+    if (d.threshold_audit.observed_phase_gap_distribution) {
+      assert.equal(d.threshold_audit.observed_phase_gap_distribution.n, 2);
+      assert.ok(d.threshold_audit.observed_phase_gap_distribution.max >= d.threshold_audit.observed_phase_gap_distribution.min);
+    }
+  });
+});
+
+test('GA: metrics_that_moved human_summary explicitly references the floor AND observed median', async () => {
+  await withStub(async (stub) => {
+    const endTs = Math.floor(Date.now() / 1000);
+    const anchorVals = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19];
+    stub.setFixture('anchor', { values: buildSeries(anchorVals, 30, endTs) });
+    stub.setFixture('cand', {
+      values: buildSeries([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50], 30, endTs),
+    });
+    const out = await executeMetricsThatMoved(
+      {
+        anchor_type: 'customer_metric',
+        anchor: 'anchor',
+        candidates: ['cand'],
+        window: '10m',
+        step: '30s',
+      },
+      ENV,
+    );
+    if (typeof out === 'string') throw new Error('expected envelope');
+    const d = out.data as { human_summary: string };
+    assert.match(d.human_summary, /phase-gap floor/i);
+    assert.match(d.human_summary, /observed median phase_gap/i);
+    assert.match(d.human_summary, /unvalidated default/i);
+  });
+});
+
+test('GA: rank_by_shape_similarity emits threshold_audit with observed_pearson_magnitude_distribution', async () => {
+  await withStub(async (stub) => {
+    const endTs = Math.floor(Date.now() / 1000);
+    const shape = [0, 0, 1, 3, 8, 15, 20, 18, 10, 5, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0];
+    stub.setFixture('anchor', { values: buildSeries(shape, 30, endTs) });
+    stub.setFixture('cand1', { values: buildSeries(shape, 30, endTs) });
+    stub.setFixture('cand2', {
+      values: buildSeries([5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5], 30, endTs),
+    });
+    const out = await executeRankByShapeSimilarity(
+      {
+        anchor_type: 'customer_metric',
+        anchor: 'anchor',
+        candidates: ['cand1', 'cand2'],
+        window: '10m',
+        step: '30s',
+      },
+      ENV,
+    );
+    if (typeof out === 'string') throw new Error('expected envelope');
+    const d = out.data as {
+      threshold_audit: {
+        anchor_phase_aligned_floor: { value: number; basis: string };
+        lag_search_max_abs: { value: number; basis: string };
+        observed_pearson_magnitude_distribution: { n: number; max: number } | null;
+        n_lag_at_bound: number;
+      };
+    };
+    assert.ok(d.threshold_audit);
+    assert.equal(d.threshold_audit.anchor_phase_aligned_floor.value, 0.15);
+    assert.equal(d.threshold_audit.anchor_phase_aligned_floor.basis, 'unvalidated_default');
+    assert.equal(d.threshold_audit.lag_search_max_abs.value, 1800);
+    assert.ok(d.threshold_audit.observed_pearson_magnitude_distribution !== null);
+    if (d.threshold_audit.observed_pearson_magnitude_distribution) {
+      assert.ok(d.threshold_audit.observed_pearson_magnitude_distribution.max > 0.9);
+    }
+    // n_lag_at_bound can be > 0 — flat candidates have no preferred lag,
+    // so their Pearson-peak ties at the boundary by JS's stable sort.
+    // What we pin is the field's PRESENCE and type, not its value.
+    assert.ok(typeof d.threshold_audit.n_lag_at_bound === 'number');
   });
 });

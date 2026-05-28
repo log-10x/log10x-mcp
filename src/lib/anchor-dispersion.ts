@@ -39,7 +39,7 @@
  * Below this dispersion, the anchor has no real busy/quiet phase and
  * any phase-partition-based analysis is meaningless. Hand-picked from
  * the chaos-test calibration; surfaced in tool output as
- * `default_uncalibrated` so callers can override per backend.
+ * `unvalidated_default` so callers can override per backend.
  */
 export const ANCHOR_DISPERSION_FLOOR = 0.15;
 

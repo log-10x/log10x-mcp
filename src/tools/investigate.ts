@@ -89,9 +89,9 @@ export type InvestigateStatus = 'success' | 'no_signal' | 'insufficient_data' | 
  * (clean-chain confidence floor, acute noise floor, drift slope, etc.)
  * are hand-picked SPEC_DEFAULTS unless the operator points
  * LOG10X_THRESHOLDS_FILE at a calibrated config. Agents MUST NOT
- * auto-mitigate when threshold_basis === 'default_uncalibrated'.
+ * auto-mitigate when threshold_basis === 'unvalidated_default'.
  */
-export type ThresholdBasis = 'default_uncalibrated' | 'config_file' | 'caller_override';
+export type ThresholdBasis = 'unvalidated_default' | 'config_file' | 'caller_override';
 
 export interface ParsedReport {
   shape: string | null;
@@ -156,7 +156,7 @@ export function parseReport(md: string): ParsedReport {
 }
 
 export function detectThresholdBasis(): ThresholdBasis {
-  return process.env.LOG10X_THRESHOLDS_FILE ? 'config_file' : 'default_uncalibrated';
+  return process.env.LOG10X_THRESHOLDS_FILE ? 'config_file' : 'unvalidated_default';
 }
 
 export function buildHumanSummary(
@@ -167,8 +167,8 @@ export function buildHumanSummary(
   thresholdBasis: ThresholdBasis,
 ): string {
   const calibTag =
-    thresholdBasis === 'default_uncalibrated'
-      ? ' Thresholds are uncalibrated defaults — verify the finding manually before acting on it.'
+    thresholdBasis === 'unvalidated_default'
+      ? ' Thresholds are unvalidated defaults — compare the observed confidence against the clean-chain floor (default 0.70) before acting.'
       : '';
   if (status === 'insufficient_data') {
     return `Investigation of "${starting_point}" over ${window} could not produce a usable analysis. The anchor resolved but the window or backend coverage was too thin. Widen the window or re-anchor.${calibTag}`;
@@ -188,7 +188,7 @@ export function buildHumanSummary(
       : 'moved concurrently with the anchor';
   const confFragment =
     parsed.leadConfidence !== null
-      ? ` Confidence: ${(parsed.leadConfidence * 100).toFixed(0)}%${thresholdBasis === 'default_uncalibrated' ? ' (uncalibrated)' : ''}.`
+      ? ` Observed lead confidence: ${(parsed.leadConfidence * 100).toFixed(0)}% (clean-chain floor: 70%${thresholdBasis === 'unvalidated_default' ? ', unvalidated' : ''}).`
       : '';
   return `Strongest temporal evidence on "${starting_point}" (${window}): \`${parsed.leadPattern}\`${parsed.leadService ? ` in \`${parsed.leadService}\`` : ''} ${lagFragment}.${confFragment} ${parsed.chainLength} chain step(s), ${parsed.coMoverCount} additional lower-confidence co-mover(s). This is correlation, not proven cause — verify via traces / deploy timeline before acting.${calibTag}`;
 }
@@ -315,6 +315,14 @@ export async function executeInvestigate(
         : [],
       n_chain_steps: parsed.chainLength,
       n_co_movers: parsed.coMoverCount,
+      threshold_audit: {
+        clean_chain_threshold: {
+          value: DEFAULT_THRESHOLDS.cleanChainThreshold,
+          basis: thresholdBasis,
+        },
+        observed_top_confidence: parsed.leadConfidence,
+        observed_lead_lag_seconds: parsed.leadLagSeconds,
+      },
       // Existing fields kept for backward compat with downstream callers.
       ok: status === 'success',
       investigation_id: parsed.investigationId,

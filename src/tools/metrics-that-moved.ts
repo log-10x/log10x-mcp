@@ -55,7 +55,7 @@ export const metricsThatMovedSchema = {
     .min(0.0)
     .max(1.0)
     .default(DEFAULT_PHASE_GAP_FLOOR)
-    .describe('Relative gap floor between anchor-high and anchor-low phase means. Candidate is "moved" iff its gap ≥ this. Default 0.15 (=15%) is an uncalibrated default — output is tagged `default_uncalibrated` until a caller-side calibration overrides it. See `docs/cross-pillar-primitives.md` for the calibration playbook.'),
+    .describe('Relative gap floor between anchor-high and anchor-low phase means. Candidate is "moved" iff its gap ≥ this. Default 0.15 (=15%) is an uncalibrated default — output is tagged `unvalidated_default` until a caller-side calibration overrides it. See `docs/cross-pillar-primitives.md` for the calibration playbook.'),
   environment: z.string().optional(),
 };
 
@@ -99,7 +99,7 @@ export type MetricsThatMovedStatus =
 interface MetricsThatMovedSummary {
   status: MetricsThatMovedStatus;
   threshold_used: number;
-  threshold_basis: 'default_uncalibrated' | 'caller_override';
+  threshold_basis: 'unvalidated_default' | 'caller_override';
   anchor_ref: {
     type: 'log10x_pattern' | 'customer_metric';
     expression: string;
@@ -125,8 +125,38 @@ interface MetricsThatMovedSummary {
   /** Candidates that couldn't be evaluated (insufficient data on either
    * phase OR the backend errored on their fetch). */
   evaluation_failed: string[];
+  /**
+   * Threshold audit — the floor used and the empirical distribution of
+   * observed phase_gap values across the evaluated candidate pool. Lets
+   * the agent see "the floor I compared against was 0.15, the actual
+   * observed values clustered at 0.08 — the floor is well above noise
+   * on this backend" OR "...clustered at 0.22 — the floor is below
+   * noise; treat moved[] with extreme skepticism."
+   *
+   * This is the honest disclosure path. The tool does NOT auto-calibrate
+   * (every empirical calibration attempt was rejected by the consult as
+   * statistical theater without external ground truth). Instead it
+   * surfaces the data the caller would calibrate from, alongside the
+   * floor it compared to.
+   */
+  threshold_audit?: ThresholdAudit;
   /** Populated only when `status === 'error'`. */
   error?: PrimitiveError;
+}
+
+interface ThresholdAudit {
+  phase_gap_floor: {
+    value: number;
+    basis: 'unvalidated_default' | 'caller_override';
+  };
+  observed_phase_gap_distribution: {
+    n: number;
+    min: number;
+    p25: number;
+    p50: number;
+    p75: number;
+    max: number;
+  } | null;
 }
 
 export async function executeMetricsThatMoved(
@@ -151,8 +181,8 @@ export async function executeMetricsThatMoved(
   const stepStr = args.step ?? '30s';
   const stepSeconds = parseStep(stepStr);
   const floor = args.phase_gap_floor ?? DEFAULT_PHASE_GAP_FLOOR;
-  const thresholdBasis: 'default_uncalibrated' | 'caller_override' =
-    floor === DEFAULT_PHASE_GAP_FLOOR ? 'default_uncalibrated' : 'caller_override';
+  const thresholdBasis: 'unvalidated_default' | 'caller_override' =
+    floor === DEFAULT_PHASE_GAP_FLOOR ? 'unvalidated_default' : 'caller_override';
 
   const tf = parseTimeframe(window);
   const nowSec = Math.floor(Date.now() / 1000);
@@ -361,6 +391,8 @@ export async function executeMetricsThatMoved(
     lowCandidateCount,
   });
 
+  const observedDistribution = computeObservedPhaseGapDistribution(moved, notMoved);
+
   const data: MetricsThatMovedSummary = {
     status,
     threshold_used: floor,
@@ -382,6 +414,10 @@ export async function executeMetricsThatMoved(
     moved,
     not_moved: notMoved,
     evaluation_failed: failed,
+    threshold_audit: {
+      phase_gap_floor: { value: floor, basis: thresholdBasis },
+      observed_phase_gap_distribution: observedDistribution,
+    },
   };
 
   const headline = `${moved.length} of ${args.candidates.length} candidates moved with anchor (phase_gap ≥ ${floor}). ${notMoved.length} did not move. ${failed.length} could not be evaluated.`;
@@ -416,7 +452,7 @@ function errorEnvelope(args: {
   window: string;
   stepSeconds: number;
   floor: number;
-  thresholdBasis: 'default_uncalibrated' | 'caller_override';
+  thresholdBasis: 'unvalidated_default' | 'caller_override';
   queryCount: number;
   totalLatencyMs: number;
   throttledHit: boolean;
@@ -454,6 +490,39 @@ function errorEnvelope(args: {
 }
 
 /**
+ * Compute the empirical phase_gap distribution across all evaluated
+ * candidates (moved + not_moved). Returns null when no candidates
+ * produced a usable gap value. The agent compares this distribution
+ * against `phase_gap_floor` to judge whether the floor is well above
+ * noise on this backend, well below it (false positives), or at the
+ * boundary (treat with skepticism).
+ */
+function computeObservedPhaseGapDistribution(
+  moved: MovedCandidate[],
+  notMoved: MovedCandidate[],
+): {
+  n: number;
+  min: number;
+  p25: number;
+  p50: number;
+  p75: number;
+  max: number;
+} | null {
+  const gaps = [...moved, ...notMoved].map((c) => c.phase_gap).sort((a, b) => a - b);
+  const n = gaps.length;
+  if (n === 0) return null;
+  const at = (q: number) => gaps[Math.min(n - 1, Math.floor(q * n))];
+  return {
+    n,
+    min: gaps[0],
+    p25: at(0.25),
+    p50: at(0.5),
+    p75: at(0.75),
+    max: gaps[n - 1],
+  };
+}
+
+/**
  * Backend pressure hint. Rough heuristic so the agent can decide
  * whether to back off, not a calibrated rate-limit detector.
  *   - `throttled`: any HTTP 429 surfaced during the call.
@@ -482,16 +551,32 @@ function buildHumanSummary(args: {
   notMoved: MovedCandidate[];
   failed: string[];
   floor: number;
-  thresholdBasis: 'default_uncalibrated' | 'caller_override';
+  thresholdBasis: 'unvalidated_default' | 'caller_override';
   anchorDispersion: number;
   lowCandidateCount: 'severe' | 'medium' | null;
 }): string {
+  // Floor + observed-median framing: surface BOTH numbers so the agent
+  // can judge whether the floor is well above noise, at it, or below
+  // it on this backend. Honest disclosure replaces calibration ceremony.
+  const allEvaluated = [...args.moved, ...args.notMoved];
+  const observedMedian =
+    allEvaluated.length === 0
+      ? null
+      : (() => {
+          const sorted = allEvaluated.map((c) => c.phase_gap).sort((a, b) => a - b);
+          return sorted[Math.floor(sorted.length / 2)];
+        })();
+  const floorPct = (args.floor * 100).toFixed(0);
+  const observedFragment =
+    observedMedian !== null
+      ? ` Observed median phase_gap across the candidate pool: ${(observedMedian * 100).toFixed(0)}%.`
+      : '';
   const calibTag =
-    args.thresholdBasis === 'default_uncalibrated'
-      ? ' The threshold used is an uncalibrated default — calibrate it for this backend before treating the result as authoritative.'
+    args.thresholdBasis === 'unvalidated_default'
+      ? ` Floor is an unvalidated default — compare against the observed distribution before acting on the result.`
       : '';
   if (args.status === 'no_signal') {
-    return `No candidate metrics moved with the anchor at the ${(args.floor * 100).toFixed(0)}% phase-gap floor. ${args.notMoved.length} were evaluated but stayed flat, ${args.failed.length} could not be evaluated. Stop searching with this anchor; consider re-anchoring or widening the window.${calibTag}`;
+    return `No candidate metrics moved with the anchor at the ${floorPct}% phase-gap floor. ${args.notMoved.length} were evaluated but stayed flat, ${args.failed.length} could not be evaluated. Stop searching with this anchor; consider re-anchoring or widening the window.${observedFragment}${calibTag}`;
   }
   const lowTag =
     args.lowCandidateCount === 'severe'
@@ -503,7 +588,7 @@ function buildHumanSummary(args: {
   const topNote = top
     ? ` The strongest mover is ${top.candidate} with a ${(top.phase_gap * 100).toFixed(0)}% phase gap (direction: ${top.direction}).`
     : '';
-  return `${args.moved.length} candidate(s) moved with the anchor above the ${(args.floor * 100).toFixed(0)}% phase-gap floor. ${args.notMoved.length} stayed flat, ${args.failed.length} could not be evaluated.${topNote}${lowTag}${calibTag}`;
+  return `${args.moved.length} candidate(s) moved with the anchor above the ${floorPct}% phase-gap floor. ${args.notMoved.length} stayed flat, ${args.failed.length} could not be evaluated.${topNote}${observedFragment}${lowTag}${calibTag}`;
 }
 
 export interface AnchorPartition {
