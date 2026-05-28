@@ -29,6 +29,7 @@ import { bytesToCost, parsePrometheusValue } from '../lib/cost.js';
 import { fmtDollar, fmtBytes, parseTimeframe, costPeriodLabel } from '../lib/format.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
 
 /** S3 Standard default, matching the ROI dashboard's storageCost default ($/GB/month). */
 const DEFAULT_STORAGE_COST_PER_GB = 0.023;
@@ -80,6 +81,7 @@ export async function executeSavings(
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
   const view = args.view ?? 'summary';
+  const telemetry = newTelemetry();
   const sumOut: { data?: SavingsSummary } = {};
   const md = await executeSavingsInner(args, env, sumOut);
   if (view === 'markdown' || !sumOut.data) {
@@ -97,7 +99,7 @@ export async function executeSavings(
     tool: 'log10x_savings',
     view: 'summary',
     summary: { headline },
-    data: d,
+    data: { ...d, ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: headline }) },
     actions: [
       { tool: 'log10x_top_patterns', args: { timeRange: d.time_range, limit: 10 }, reason: 'see which patterns currently drive cost (where the savings come from)' },
       { tool: 'log10x_top_patterns', args: { timeRange: d.time_range, limit: 10, comparison_window: d.time_range }, reason: 'delta-versus-baseline view to check whether costs are growing' },

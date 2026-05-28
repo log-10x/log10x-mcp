@@ -28,6 +28,7 @@ import { computeConcentration, type PatternConcentration } from '../lib/variable
 import { fmtCount, fmtBytes } from '../lib/format.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
 
 export const resolveBatchSchema = {
   source: z
@@ -91,6 +92,7 @@ export async function executeResolveBatch(args: {
   view?: 'summary' | 'markdown';
 }): Promise<string | StructuredOutput> {
   const view = args.view ?? 'summary';
+  const telemetry = newTelemetry();
   const sumOut: { data?: ResolveBatchSummary } = {};
   const md = await executeResolveBatchInner(args, sumOut);
   if (view === 'markdown' || !sumOut.data) {
@@ -108,7 +110,7 @@ export async function executeResolveBatch(args: {
     tool: 'log10x_resolve_batch',
     view: 'summary',
     summary: { headline },
-    data: d,
+    data: { ...d, ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: headline }) },
     truncated: d.shown_pattern_count < d.resolved_pattern_count,
     warnings: d.drop_rate >= 0.2 ? [`templater dropped ${Math.round(d.drop_rate * 100)}% of input lines (engine GAPS G11) — treat as partial triage`] : [],
     actions: top && top.symbol_message

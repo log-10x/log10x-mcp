@@ -16,6 +16,7 @@ import { agentOnly } from '../lib/agent-only.js';
 import { lineChart } from '../lib/line-chart.js';
 import { patternDisplay } from '../lib/pattern-descriptor.js';
 import { buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
 
 export const trendSchema = {
   pattern: z.string().describe('Pattern name (e.g., "Payment_Gateway_Timeout")'),
@@ -48,6 +49,7 @@ export async function executeTrend(
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
   const view = args.view ?? 'summary';
+  const telemetry = newTelemetry();
   const sumOut: { data?: PatternTrendSummary } = {};
   const md = await executeTrendInner(args, env, sumOut);
   if (view === 'markdown' || !sumOut.data) {
@@ -87,7 +89,7 @@ export async function executeTrend(
     tool: 'log10x_pattern_trend',
     view: 'summary',
     summary: { headline },
-    data: d,
+    data: { ...d, ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: headline }) },
     render_hint: { chart: 'timeseries', units: 'bytes/sec' },
     images,
   });

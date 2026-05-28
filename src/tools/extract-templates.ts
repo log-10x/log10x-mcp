@@ -16,6 +16,7 @@ import { z } from 'zod';
 import { runDevCliStdin, runDevCliFile, DevCliNotInstalledError, DevCliRunError } from '../lib/dev-cli.js';
 import { agentOnly } from '../lib/agent-only.js';
 import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
 
 export const extractTemplatesSchema = {
   source: z.enum(['file', 'events', 'text']).describe(
@@ -75,6 +76,7 @@ interface ExtractTemplatesSummary {
 
 export async function executeExtractTemplates(args: ExtractArgs): Promise<string | StructuredOutput> {
   const view = args.view ?? 'summary';
+  const telemetry = newTelemetry();
   const sumOut: { data?: ExtractTemplatesSummary } = {};
   const md = await executeExtractTemplatesInner(args, sumOut);
   if (view === 'markdown' || !sumOut.data) {
@@ -90,7 +92,7 @@ export async function executeExtractTemplates(args: ExtractArgs): Promise<string
     tool: 'log10x_extract_templates',
     view: 'summary',
     summary: { headline },
-    data: d,
+    data: { ...d, ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: headline }) },
     truncated: d.shown_templates < d.distinct_templates,
     actions: d.templates.length > 0
       ? [

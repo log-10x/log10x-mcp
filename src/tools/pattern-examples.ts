@@ -41,6 +41,7 @@ import { LABELS } from '../lib/promql.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { parsePrometheusValue } from '../lib/cost.js';
 import { agentOnly } from '../lib/agent-only.js';
+import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
 
 /**
  * Resolve a pattern's AUTHORITATIVE tenx_hash from the 10x metrics.
@@ -206,6 +207,7 @@ export async function executePatternExamples(
   env: EnvConfig,
 ): Promise<string | import('../lib/output-types.js').StructuredOutput> {
   const view = rawArgs.view ?? 'summary';
+  const telemetry = newTelemetry();
   const sumOut: { data?: PatternExamplesSummary } = {};
   const md = await executePatternExamplesInner(rawArgs, env, sumOut);
   const { buildMarkdownEnvelope, buildEnvelope } = await import('../lib/output-types.js');
@@ -227,7 +229,7 @@ export async function executePatternExamples(
     tool: 'log10x_pattern_examples',
     view: 'summary',
     summary: { headline },
-    data: d,
+    data: { ...d, ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: headline }) },
     truncated,
   });
 }

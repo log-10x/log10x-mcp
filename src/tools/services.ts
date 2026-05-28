@@ -14,6 +14,7 @@ import { shareBar } from '../lib/pattern-render.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { agentOnly } from '../lib/agent-only.js';
 import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
 
 export const servicesSchema = {
   timeRange: z.enum(['15m', '1h', '6h', '1d', '7d', '30d']).default('7d').describe('Time range. Sub-day values available for incident-window service ranking.'),
@@ -44,6 +45,7 @@ export async function executeServices(
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
   const view = args.view ?? 'summary';
+  const telemetry = newTelemetry();
   const sumOut: { data?: ServicesSummary } = {};
   const md = await executeServicesInner(args, env, sumOut);
   if (view === 'markdown' || !sumOut.data) {
@@ -62,7 +64,7 @@ export async function executeServices(
     tool: 'log10x_services',
     view: 'summary',
     summary: { headline },
-    data: d,
+    data: { ...d, ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: headline }) },
     actions: top
       ? [
           { tool: 'log10x_top_patterns', args: { service: top.name }, reason: 'current top patterns for the highest-cost service' },

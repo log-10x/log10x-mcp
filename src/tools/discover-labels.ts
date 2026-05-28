@@ -15,6 +15,7 @@ import type { EnvConfig } from '../lib/environments.js';
 import { fetchLabels, fetchLabelValues } from '../lib/api.js';
 import { agentOnly } from '../lib/agent-only.js';
 import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
 
 export const discoverLabelsSchema = {
   label: z.string().optional().describe('If set, return distinct values for this label (e.g., "tenx_user_service" returns every service). If omitted, return the full label name list.'),
@@ -58,6 +59,7 @@ export async function executeDiscoverLabels(
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
   const view = args.view ?? 'summary';
+  const telemetry = newTelemetry();
   const sumOut: { data?: DiscoverLabelsSummary } = {};
   const md = await executeDiscoverLabelsInner(args, env, sumOut);
   if (view === 'markdown' || !sumOut.data) {
@@ -76,7 +78,7 @@ export async function executeDiscoverLabels(
     tool: 'log10x_discover_labels',
     view: 'summary',
     summary: { headline },
-    data: d,
+    data: { ...d, ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: headline }) },
     truncated: d.mode === 'label_values' && d.shown_count < d.total_count,
     actions:
       d.mode === 'label_names'

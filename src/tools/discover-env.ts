@@ -17,6 +17,7 @@ import { runDiscovery } from '../lib/discovery/orchestrate.js';
 import type { DiscoverySnapshot, ForwarderKind } from '../lib/discovery/types.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
 
 export const discoverEnvSchema = {
   namespaces: z
@@ -86,6 +87,7 @@ interface DiscoverEnvSummary {
 
 export async function executeDiscoverEnv(args: DiscoverEnvArgs & { view?: 'summary' | 'markdown' }): Promise<string | StructuredOutput> {
   const view = args.view ?? 'summary';
+  const telemetry = newTelemetry();
   const snapshot = await runDiscovery({
     kubectl: { namespaces: args.namespaces },
     aws: {
@@ -145,7 +147,7 @@ export async function executeDiscoverEnv(args: DiscoverEnvArgs & { view?: 'summa
     tool: 'log10x_discover_env',
     view: 'summary',
     summary: { headline },
-    data,
+    data: { ...data, ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: headline }) },
     actions,
   });
 }

@@ -37,6 +37,7 @@ import { fieldVariation } from '../lib/field-variation.js';
 import { renderTopPatterns, type TopPatternRow } from '../lib/top-volume-render.js';
 import { detectIncidents, type IncidentInput } from '../lib/detectors/incident-cluster.js';
 import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
 import type { ForwarderId } from '../lib/forwarder-snippets.js';
 import { resolveSiemSelection } from '../lib/siem/resolve.js';
 import {
@@ -446,6 +447,7 @@ export async function executeTopVolume(
 
   const markdown = lines.join('\n');
   const view = args.view ?? 'summary';
+  const telemetry = newTelemetry();
 
   // Build the structured-summary envelope from the same rows the
   // renderer used. This is the agent-default path; the markdown
@@ -633,6 +635,7 @@ export async function executeTopVolume(
       window: tf.label,
       pattern_count_shown: renderRows.length,
       pattern_count_total: patternCountTotal,
+      ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: headline }),
     },
     actions: nextActions.map((a) => ({ tool: a.tool, args: a.args, reason: a.reason })),
     render_hint: { chart: 'timeseries', units: '$/mo' },

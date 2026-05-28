@@ -41,6 +41,7 @@ import {
   renderDepCheckResult,
 } from '../lib/siem/deps/index.js';
 import type { SiemId } from '../lib/siem/pricing.js';
+import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
 
 export const dependencyCheckSchema = {
   pattern: z.string().describe('Pattern name (e.g., "Payment_Gateway_Timeout")'),
@@ -107,6 +108,7 @@ interface DependencyCheckSummary {
 
 export async function executeDependencyCheck(args: DependencyCheckArgs): Promise<string | import('../lib/output-types.js').StructuredOutput> {
   const view = args.view ?? 'summary';
+  const telemetry = newTelemetry();
   const sumOut: { data?: DependencyCheckSummary } = {};
   const md = await executeDependencyCheckInner(args, sumOut);
   const { buildMarkdownEnvelope, buildEnvelope } = await import('../lib/output-types.js');
@@ -123,7 +125,7 @@ export async function executeDependencyCheck(args: DependencyCheckArgs): Promise
     tool: 'log10x_dependency_check',
     view: 'summary',
     summary: { headline },
-    data: d,
+    data: { ...d, ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: headline }) },
   });
 }
 

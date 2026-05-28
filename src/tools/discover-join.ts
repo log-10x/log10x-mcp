@@ -31,6 +31,7 @@ import {
 import { getOrDiscoverJoin, discoverJoin, type JoinDiscoveryResult, type JoinPair } from '../lib/join-discovery.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
 
 export const discoverJoinSchema = {
   force_refresh: z
@@ -87,6 +88,7 @@ export async function executeDiscoverJoin(
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
   const view = args.view ?? 'summary';
+  const telemetry = newTelemetry();
   args.force_refresh = args.force_refresh ?? false;
   args.minimum_jaccard = args.minimum_jaccard ?? 0.7;
   const resolution = await resolveBackend();
@@ -99,18 +101,27 @@ export async function executeDiscoverJoin(
         markdown: md,
       });
     }
+    const unified = buildUnifiedFields({ status: 'error', telemetry, humanSummary: 'Customer metrics backend not configured.' });
     return buildEnvelope({
       tool: 'log10x_discover_join',
       view: 'summary',
       summary: { headline: 'Customer metrics backend not configured — discover_join cannot run.' },
       data: {
+        // Keep tool-specific `status` value ('not_configured'); the unified
+        // envelope's status (`error`) goes into a parallel field so the
+        // agent can read either. Both fields are honest about the call state.
         status: 'not_configured',
         cached: false,
         labels_probed_log10x: [],
         labels_probed_customer: [],
         runner_ups: [],
         top_below_threshold: [],
-      } satisfies DiscoverJoinSummary,
+        query_count: unified.query_count,
+        total_latency_ms: unified.total_latency_ms,
+        backend_pressure_hint: unified.backend_pressure_hint,
+        human_summary: unified.human_summary,
+        error: unified.error,
+      } satisfies DiscoverJoinSummary & Record<string, unknown>,
     });
   }
   const backend = resolution.backend;
@@ -150,11 +161,15 @@ export async function executeDiscoverJoin(
   const headline = data.join_key
     ? `Join key: ${data.join_key.log10x_side} ↔ ${data.join_key.customer_side} (Jaccard ${data.join_key.jaccard.toFixed(3)}, ${data.runner_ups.length} runner-up${data.runner_ups.length !== 1 ? 's' : ''}).`
     : `No join pair above Jaccard ${args.minimum_jaccard}. Cross-pillar primitives refuse for anchors that need a structural join.`;
+  const unified = buildUnifiedFields({ status: 'success', telemetry, humanSummary: headline });
+  // discover-join's `data.status` carries tool-specific values
+  // ('joined' / 'no_join_available'), so spread unified WITHOUT its status.
+  const { status: _unifiedStatus, ...unifiedRest } = unified;
   return buildEnvelope({
     tool: 'log10x_discover_join',
     view: 'summary',
     summary: { headline },
-    data,
+    data: { ...data, ...unifiedRest },
     actions: data.join_key
       ? [
           { tool: 'log10x_metrics_that_moved', args: {}, reason: 'first composition step: anchor a Log10x pattern, filter candidate customer metrics that actually moved with it' },

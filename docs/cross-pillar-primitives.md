@@ -315,6 +315,24 @@ This is the auto-mitigation gate sharpened for action-shaped tools. Agents SHOUL
 | `input_invalid` | Empty / whitespace-only pattern. | Do NOT retry the same input. Ask the user for the canonical pattern name. |
 | `local_processing_failed` | Env-load or snapshot fetch crashed unexpectedly. | Surface the hint to the user; investigate the local config. |
 
+## Low-woowoo data tools — envelope-consistency tier
+
+The 14 data tools (`top_patterns`, `top_volume`, `pattern_trend`, `event_lookup`, `pattern_examples`, `resolve_batch`, `extract_templates`, `services`, `savings`, `dependency_check`, `discover_env`, `discover_labels`, `discover_join`, `customer_metrics_query`) don't make calibrated judgments — they return data. They DO carry the shared envelope fields so the agent reads a consistent shape across the catalog:
+
+- `status` (generic enum: `success` / `no_signal` / `insufficient_data` / `error`, OR a tool-specific enum on the few tools that already had one like `discover_join`)
+- `query_count`, `total_latency_ms`, `backend_pressure_hint` (telemetry — agent paces subsequent calls)
+- `human_summary` (paste-to-user paragraph)
+- `error: PrimitiveError` (only when status === error)
+
+These were added via `src/lib/unified-envelope.ts`'s `buildUnifiedFields()` helper. The depth of the audit is intentionally shallower than the calibrated tools — these don't need `threshold_basis` / `threshold_audit` because they don't have calibrated thresholds.
+
+What this tier DOES NOT include (deferred to selective review):
+- Per-tool error envelope conversion of every failure path. Most tools still throw on backend errors; the throws propagate through the MCP wrapper.
+- Per-tool human_summary tailoring beyond reuse of the existing headline.
+- Per-tool `no_signal` semantics for nuanced cases (e.g. "0 patterns returned" vs "service has no data").
+
+The shared envelope-conformance test in `test/envelope-conformance.test.ts` exercises a subset of the tools (paste-mode ones that can run without a live backend) to pin the field presence in CI. The rest is pinned by the source-level presence of `buildUnifiedFields(...)` calls.
+
 ## Quick reference — output state cheatsheet
 
 ```

@@ -18,6 +18,7 @@
 import { z } from 'zod';
 import { resolveBackend, formatDetectionTrace, CustomerMetricsNotConfiguredError } from '../lib/customer-metrics.js';
 import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
 
 export const customerMetricsQuerySchema = {
   promql: z
@@ -75,6 +76,7 @@ export async function executeCustomerMetricsQuery(args: {
   view?: 'summary' | 'markdown';
 }): Promise<string | StructuredOutput> {
   const view = args.view ?? 'summary';
+  const telemetry = newTelemetry();
   const resolution = await resolveBackend();
   if (!resolution.backend) {
     throw new CustomerMetricsNotConfiguredError(formatDetectionTrace(resolution.trace));
@@ -112,7 +114,7 @@ export async function executeCustomerMetricsQuery(args: {
     tool: 'log10x_customer_metrics_query',
     view: 'summary',
     summary: { headline },
-    data,
+    data: { ...data, ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: headline }) },
     truncated: data.shown_count < data.series_count,
   });
 }
