@@ -60,10 +60,12 @@ import {
   executeCustomerMetricsQuery,
 } from './tools/customer-metrics-query.js';
 import { discoverJoinSchema, executeDiscoverJoin } from './tools/discover-join.js';
+import { metricOverlaySchema, executeMetricOverlay } from './tools/metric-overlay.js';
+import { metricsThatMovedSchema, executeMetricsThatMoved } from './tools/metrics-that-moved.js';
 import {
-  correlateCrossPillarSchema,
-  executeCorrelateCrossPillar,
-} from './tools/correlate-cross-pillar.js';
+  rankByShapeSimilaritySchema,
+  executeRankByShapeSimilarity,
+} from './tools/rank-by-shape-similarity.js';
 import {
   pocFromSiemSubmitSchema,
   pocFromSiemStatusSchema,
@@ -99,10 +101,6 @@ import { findUuidInBodySchema, executeFindUuidInBody } from './tools/find-uuid-i
 import { findIncidentClusterSchema, executeFindIncidentCluster } from './tools/find-incident-cluster.js';
 import { discoverLabelsSchema, executeDiscoverLabels } from './tools/discover-labels.js';
 import { extractTemplatesSchema, executeExtractTemplates } from './tools/extract-templates.js';
-import {
-  translateMetricToPatternsSchema,
-  executeTranslateMetricToPatterns,
-} from './tools/translate-metric-to-patterns.js';
 import { getStatus } from './resources/status.js';
 
 // ── Environment + cost cache ──
@@ -193,10 +191,11 @@ const METRIC_REQUIRING_TOOLS = new Set([
   'log10x_discover_labels',
   'log10x_investigate',
   'log10x_backfill_metric',
-  'log10x_correlate_cross_pillar',
+  'log10x_metric_overlay',
+  'log10x_metrics_that_moved',
+  'log10x_rank_by_shape_similarity',
   'log10x_discover_join',
   'log10x_customer_metrics_query',
-  'log10x_translate_metric_to_patterns',
   'log10x_retriever_query',
   'log10x_retriever_series',
 ]);
@@ -1202,25 +1201,39 @@ registerLog10xTool('log10x_discover_join', discoverJoinSchema, (args) =>
   })
 );
 
-// ── Tool: log10x_correlate_cross_pillar (v1.4) ──
+// ── Cross-pillar primitives ────────────────────────────────────────────
+//
+// Three deterministic primitives that compose to a cross-pillar flow:
+// filter movers → rank by shape → overlay top-K. The agent composes them;
+// the tools return raw arithmetic, no tier and no causal framing.
+//
+// Validated against a 58-candidate chaos test where the composition filtered
+// to 5 real signals (zero confounders, zero noise) and let an LLM judge
+// build a coherent SRE cascade narrative (DNS → retry → dep latency →
+// heap → GC → anchor).
 
-registerLog10xTool('log10x_correlate_cross_pillar', correlateCrossPillarSchema, (args) =>
-  wrap('log10x_correlate_cross_pillar', async () => {
+registerLog10xTool('log10x_metrics_that_moved', metricsThatMovedSchema, (args) =>
+  wrap('log10x_metrics_that_moved', async () => {
     const env = resolveEnv(getEnvs(), args.environment);
-    return executeCorrelateCrossPillar(args, env);
+    return executeMetricsThatMoved(args, env);
   })
 );
 
-// ── Tool: log10x_translate_metric_to_patterns ──
-
 registerLog10xTool(
-  'log10x_translate_metric_to_patterns',
-  translateMetricToPatternsSchema,
+  'log10x_rank_by_shape_similarity',
+  rankByShapeSimilaritySchema,
   (args) =>
-    wrap('log10x_translate_metric_to_patterns', async () => {
+    wrap('log10x_rank_by_shape_similarity', async () => {
       const env = resolveEnv(getEnvs(), args.environment);
-      return executeTranslateMetricToPatterns(args, env);
+      return executeRankByShapeSimilarity(args, env);
     })
+);
+
+registerLog10xTool('log10x_metric_overlay', metricOverlaySchema, (args) =>
+  wrap('log10x_metric_overlay', async () => {
+    const env = resolveEnv(getEnvs(), args.environment);
+    return executeMetricOverlay(args, env);
+  })
 );
 
 // ── Tool: log10x_poc_from_siem_submit / _status ──
@@ -1371,7 +1384,9 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_rotate_api_key', intent: 'Rotate the Log10x API key (destructive) — old key invalidated immediately, new one persisted to ~/.log10x/credentials' },
   { name: 'log10x_customer_metrics_query', intent: 'Direct PromQL passthrough to the customer metric backend (escape hatch for cross-pillar investigations)' },
   { name: 'log10x_discover_join', intent: 'Auto-discover the join label between Log10x pattern metrics and the customer metric backend via Jaccard similarity' },
-  { name: 'log10x_correlate_cross_pillar', intent: 'Bidirectional cross-pillar correlation with structural validation — confirmed / service-match / coincidence / unconfirmed tiering' },
+  { name: 'log10x_metrics_that_moved', intent: 'Deterministic phase-aware filter — given an anchor and N candidates, return only candidates whose mean during the anchor\'s incident phase differs from its quiet-phase mean by ≥15%. First step of the cross-pillar investigation; kills diurnal/seasonal confounders before any correlation runs' },
+  { name: 'log10x_rank_by_shape_similarity', intent: 'Rank candidates by Pearson + signed lag against an anchor. Returns raw arithmetic — pearson_signed, lag_seconds (negative = leads, possible cause), lag_tightness, lag_at_bound, anchor_phase_aligned. No tier, no causal framing — agent applies its own filter using the surfaced fields' },
+  { name: 'log10x_metric_overlay', intent: 'Return two timeseries aligned to the same timestamp grid + deterministic facts (peak_at, peak_offset_seconds, n_buckets_aligned). NO Pearson, NO tier. Equivalent to opening two Grafana panels side by side — the agent reads the curves directly. Use after rank_by_shape_similarity to verify lag direction visually for top candidates' },
   { name: 'log10x_poc_from_siem_submit', intent: 'Pull a sample from the user\'s SIEM, templatize, and render a full cost-optimization POC report (async)' },
   { name: 'log10x_poc_from_siem_status', intent: 'Poll or retrieve the final report from a log10x_poc_from_siem_submit run' },
   { name: 'log10x_poc_from_local', intent: 'Run the POC from local kubectl logs (no SIEM credentials needed); industry-pricing matrix instead of bill prediction' },

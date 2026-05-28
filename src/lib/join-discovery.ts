@@ -13,9 +13,10 @@
  * join, though runner-ups above 0.5 are surfaced for agent awareness.
  *
  * The join discovery result is cached per-session keyed by
- * `(environment, customer_backend_endpoint)` so `correlate_cross_pillar`
- * can auto-run it once and never re-probe during the same MCP process
- * lifetime.
+ * `(environment, customer_backend_endpoint)` so the cross-pillar
+ * primitives (metrics_that_moved, rank_by_shape_similarity,
+ * metric_overlay) can auto-run it once and never re-probe during the
+ * same MCP process lifetime.
  */
 
 import type { EnvConfig } from './environments.js';

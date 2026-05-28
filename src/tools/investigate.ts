@@ -589,9 +589,9 @@ function buildInvestigateNextActions(anchor?: string, window?: string): NextActi
       reason: 'check dashboards / alerts before any mute action',
     },
     {
-      tool: 'log10x_correlate_cross_pillar',
+      tool: 'log10x_metrics_that_moved',
       args: { anchor_type: 'log10x_pattern', anchor, ...(window ? { window } : {}) },
-      reason: 'find upstream metric anomaly co-moving with the pattern',
+      reason: 'first step of cross-pillar investigation — filter customer metrics to those that move with the anchor\'s incident phase. Compose with log10x_rank_by_shape_similarity + log10x_metric_overlay on the kept set',
     },
     {
       tool: 'log10x_pattern_trend',
@@ -985,9 +985,9 @@ async function renderEnvironmentAudit(
         reason: 'check refs before any mute on the top mover',
       },
       {
-        tool: 'log10x_correlate_cross_pillar',
+        tool: 'log10x_metrics_that_moved',
         args: { anchor_type: 'log10x_pattern', anchor: topPatternForChain, window: args.window },
-        reason: 'find upstream metric anomaly co-moving with the top mover',
+        reason: 'first step of cross-pillar investigation — filter customer metrics to those that move with the top mover\'s incident phase',
       },
     ];
     const block = renderNextActions(next);

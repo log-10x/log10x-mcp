@@ -237,7 +237,7 @@ async function executeTrendInner(
     lines.push(agentOnly(
       `Inflection or spike detected. Suggested next calls: ` +
       `Trace the cause — log10x_investigate({ starting_point: '${pattern}', window: '${timeRange}' }). ` +
-      `Find the upstream metric anomaly — log10x_correlate_cross_pillar({ anchor_type: 'log10x_pattern', anchor: '${pattern}', window: '${timeRange}' }).`
+      `Find which customer metrics moved with the spike — log10x_metrics_that_moved({ anchor_type: 'log10x_pattern', anchor: '${pattern}', window: '${timeRange}' }), then rank with log10x_rank_by_shape_similarity and overlay with log10x_metric_overlay.`
     ));
     nextActions.push({
       tool: 'log10x_investigate',
@@ -245,9 +245,9 @@ async function executeTrendInner(
       reason: spikePoint ? 'spike detected — trace the cause' : 'elevated vs baseline — trace the cause',
     });
     nextActions.push({
-      tool: 'log10x_correlate_cross_pillar',
+      tool: 'log10x_metrics_that_moved',
       args: { anchor_type: 'log10x_pattern', anchor: pattern, window: timeRange },
-      reason: 'find upstream metric anomaly co-moving with the spike',
+      reason: 'first composition step: deterministic filter on which customer metrics actually moved with the spike',
     });
   } else if (sustainedSlope) {
     lines.push('');

@@ -403,10 +403,10 @@ export async function executeTopVolume(
     });
   }
 
-  // (Removed spike-routed correlate_cross_pillar chain — top_volume no
+  // (Removed spike-routed cross-pillar chain — top_volume no
   // longer detects trajectory. For "what's spiking?" the agent chains to
-  // log10x_whats_changing first to find growth, then to correlate_cross_pillar
-  // anchored on the top changer.)
+  // log10x_whats_changing first to find growth, then to
+  // log10x_metrics_that_moved anchored on the top changer.)
 
   if (topActive) {
     nextActions.push({

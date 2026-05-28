@@ -3,10 +3,10 @@
  * customer metric backend.
  *
  * This is the agent's escape hatch. Most cross-pillar investigations go
- * through the higher-level tools (correlate_cross_pillar,
- * translate_metric_to_patterns), but exposing a pure passthrough ensures
- * the agent is never blocked on "the tool doesn't support the metric I
- * need."
+ * through the composable primitives (metrics_that_moved,
+ * rank_by_shape_similarity, metric_overlay), but exposing a pure
+ * passthrough ensures the agent is never blocked on "the tool doesn't
+ * support the metric I need."
  *
  * Returns the raw Prometheus response shape plus an `execution` block
  * identifying which backend served the query.

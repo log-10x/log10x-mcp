@@ -3,14 +3,13 @@
  * candidate set against an anchor by Pearson + lag, returning ONLY raw
  * arithmetic. No tier, no causal framing, no judgment.
  *
- * Design rationale (from the design-dilemma consult): Pearson IS
- * deterministic given inputs. The fuzzy parts of correlate_cross_pillar
- * were the TIER labels ("confirmed" / "service-match" / "coincidence")
- * and the implicit "this is the cause" framing — both compress what
- * the agent needs to judge. This primitive keeps the math, drops the
- * compression. The agent reads pearson_signed + lag_direction + flags
- * and decides. metric_overlay verifies the curves. metrics_that_moved
- * filters anchor-aligned movement.
+ * Design rationale: Pearson IS deterministic given inputs. The fuzzy
+ * compression is in TIER labels ("confirmed" / "service-match" /
+ * "coincidence") and implicit "this is the cause" framing — both
+ * compress what the agent needs to judge. This primitive keeps the
+ * math, drops the compression. The agent reads pearson_signed +
+ * lag_direction + flags and decides. metric_overlay verifies the
+ * curves. metrics_that_moved filters anchor-aligned movement.
  *
  * No tier. No "confirmed." No "coincidence." Just numbers.
  */
@@ -24,7 +23,7 @@ import { LABELS } from '../lib/promql.js';
 import { parseTimeframe } from '../lib/format.js';
 import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
-// Same lag offsets used by correlate_cross_pillar (post-v4).
+// Lag offsets widened to ±1800s to catch slow-moving upstream causes.
 const LAG_OFFSETS_SECONDS = [
   -1800, -1200, -600, -300, -180, -120, -60, -30, 0, 30, 60, 120, 180, 300, 600, 1200, 1800,
 ];

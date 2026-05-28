@@ -129,7 +129,7 @@ async function executeDiscoverLabelsInner(
   const lines: string[] = [];
   lines.push(`Queryable labels (${queryable.length})`);
   lines.push('');
-  lines.push('Featured — use these as filter keys in log10x_top_patterns, log10x_correlate_cross_pillar, etc.:');
+  lines.push('Featured — use these as filter keys in log10x_top_patterns, log10x_metrics_that_moved, etc.:');
   for (const feat of featured) {
     if (feat.available) {
       lines.push(`  ${feat.name.padEnd(22)} ${feat.hint}`);
@@ -149,7 +149,7 @@ async function executeDiscoverLabelsInner(
   lines.push(agentOnly(
     `Suggested next calls using these labels: ` +
     `Scope log10x_top_patterns to one label value → pass service: "..." or include the label in filter args. ` +
-    `Cross-pillar correlation on a label-keyed customer metric → log10x_correlate_cross_pillar.`
+    `Cross-pillar investigation on a label-keyed customer metric → compose log10x_metrics_that_moved → log10x_rank_by_shape_similarity → log10x_metric_overlay.`
   ));
 
   return lines.join('\n');

@@ -7,9 +7,10 @@
  * Datadog's Prometheus-compatible read API, etc.
  *
  * This module exposes a pluggable backend interface so the higher-level
- * tools (discover_join, correlate_cross_pillar, translate_metric_to_patterns)
- * don't carry per-backend conditionals. A backend instance is constructed
- * from env vars at tool-call time and cached per-process.
+ * tools (discover_join, metrics_that_moved, rank_by_shape_similarity,
+ * metric_overlay) don't carry per-backend conditionals. A backend
+ * instance is constructed from env vars at tool-call time and cached
+ * per-process.
  *
  * Explicit configuration (wins over any auto-detect):
  *   LOG10X_CUSTOMER_METRICS_URL           endpoint base URL
@@ -118,7 +119,8 @@ export class CustomerMetricsNotConfiguredError extends Error {
  *
  * customer_metrics_query (the human escape-hatch tool) keeps the throw
  * behavior intentionally — a user-issued PromQL passthrough should fail
- * loudly when the backend isn't there. correlate_cross_pillar and
+ * loudly when the backend isn't there. The cross-pillar primitives
+ * (metrics_that_moved, rank_by_shape_similarity, metric_overlay) and
  * discover_join (chain participants) call this helper instead.
  */
 export function customerMetricsNotConfiguredMessage(diagnostic?: string): string {

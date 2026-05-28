@@ -281,7 +281,7 @@
     },
     "log10x_customer_metrics_query": {
       "title": "Customer metrics query",
-      "description": "Low-level PromQL passthrough to the customer metric backend configured via LOG10X_CUSTOMER_METRICS_URL. Returns the raw Prometheus response shape plus metadata about which backend served the query. This is the escape hatch for cross-pillar investigations the higher-level tools don't cover — use it to explore the customer backend's label universe, run a one-off PromQL expression, or verify that a specific metric exists before correlating against it. For typical cross-pillar workflows, prefer `log10x_translate_metric_to_patterns` (customer metric → log patterns) or `log10x_correlate_cross_pillar` (bidirectional).",
+      "description": "Low-level PromQL passthrough to the customer metric backend configured via LOG10X_CUSTOMER_METRICS_URL. Returns the raw Prometheus response shape plus metadata about which backend served the query. This is the escape hatch for cross-pillar investigations the higher-level primitives don't cover — use it to explore the customer backend's label universe, run a one-off PromQL expression, or verify that a specific metric exists before correlating against it. For typical cross-pillar workflows, compose the deterministic primitives: `log10x_metrics_that_moved` → `log10x_rank_by_shape_similarity` → `log10x_metric_overlay`.",
       "annotations": {
         "title": "Customer metrics query",
         "readOnlyHint": true,
@@ -292,7 +292,7 @@
     },
     "log10x_discover_join": {
       "title": "Discover join label",
-      "description": "Auto-discover the structural join label between Log10x pattern metrics and the customer metric backend. Runs Jaccard similarity on label value sets across candidate label pairs, returns the best pair above the 0.7 threshold plus runner-ups above 0.5. The result is cached per-session keyed by (environment, customer-backend-endpoint) so the higher-level cross-pillar correlation tools can auto-run this once at session start and reuse the cached join without re-probing. Agents should normally NOT need to call this tool directly — `log10x_correlate_cross_pillar` and `log10x_translate_metric_to_patterns` call it internally. The explicit tool exists for power users who want to inspect the join universe or force a re-discovery after backend changes. When no pair crosses the threshold, returns a structured `no_join_available` response with the full probed-label matrix and recommended next actions.",
+      "description": "Auto-discover the structural join label between Log10x pattern metrics and the customer metric backend. Runs Jaccard similarity on label value sets across candidate label pairs, returns the best pair above the 0.7 threshold plus runner-ups above 0.5. The result is cached per-session keyed by (environment, customer-backend-endpoint) so the cross-pillar primitives (metrics_that_moved, rank_by_shape_similarity, metric_overlay) can auto-run this once at session start and reuse the cached join without re-probing. Agents should normally NOT need to call this tool directly — the primitives call it internally. The explicit tool exists for power users who want to inspect the join universe or force a re-discovery after backend changes. When no pair crosses the threshold, returns a structured `no_join_available` response with the full probed-label matrix and recommended next actions.",
       "annotations": {
         "title": "Discover join label",
         "readOnlyHint": true,
@@ -301,22 +301,33 @@
       },
       "category": "investigate"
     },
-    "log10x_correlate_cross_pillar": {
-      "title": "Correlate cross-pillar",
-      "description": "Bidirectional cross-pillar correlation with structural validation. Takes an anchor that's either a Log10x pattern (`anchor_type: \"log10x_pattern\"`) OR a customer metric expression (`anchor_type: \"customer_metric\"`) and returns ranked co-movers from the OTHER pillar, tiered by structural validation confidence. **Four output tiers**: `confirmed` (full structural overlap on join key + at least one additional label — highest confidence), `service-match` (join key match but partial overlap), `unconfirmed` (temporal match but required Log10x enrichment labels missing — do not drill autonomously), `coincidence` (temporal match with NO structural overlap — flagged as coincidence, not causation). The structural validation phase is the differentiating capability vs every other agent observability tool in 2026: every temporal Pearson ranker produces false positives on workloads that share a daily cycle; this filter eliminates them. When no structural join exists, returns a structured `no_join_available` refusal with diagnostics — never a fall-through to temporal-only ranking.",
+    "log10x_metrics_that_moved": {
+      "title": "Metrics that moved",
+      "description": "First step of cross-pillar investigation: deterministic filter on which customer metrics actually moved while an anchor was active. Anchor is either a Log10x pattern (`anchor_type: \"log10x_pattern\"`) OR a customer metric expression (`anchor_type: \"customer_metric\"`); candidates are all sibling series from the OTHER pillar. Partitions the anchor's window into high-phase / low-phase buckets by median rate and keeps only candidates whose mean value differs ≥15% between the two phases. Returns `moved[]`, `not_moved[]`, `evaluation_failed[]` — no Pearson, no tier, no causal framing. This is the cheap deterministic cut that pares the candidate set before the more expensive shape-similarity pass. Compose with `log10x_rank_by_shape_similarity` and `log10x_metric_overlay`.",
       "annotations": {
-        "title": "Correlate cross-pillar",
+        "title": "Metrics that moved",
         "readOnlyHint": true,
         "idempotentHint": true,
         "openWorldHint": true
       },
       "category": "investigate"
     },
-    "log10x_translate_metric_to_patterns": {
-      "title": "Translate metric to patterns",
-      "description": "Preset wrapper for the customer-metric-to-log-patterns direction of cross-pillar correlation. Given a customer APM / infra / business metric, return the Log10x patterns whose rate curves correspond to the metric's movements, with the same four-tier structural validation as `log10x_correlate_cross_pillar`. This is the \"agent looking at an APM metric asks what logs correspond\" workflow, which is the most common cross-pillar direction and worth routing via a descriptively-named tool rather than through the generic bidirectional primitive. Output is identical to `correlate_cross_pillar`: confirmed / service-match / unconfirmed / coincidence tiers with per-candidate confidence sub-scores.",
+    "log10x_rank_by_shape_similarity": {
+      "title": "Rank by shape similarity",
+      "description": "Second step of cross-pillar investigation: Pearson correlation + signed lag on a pre-filtered candidate set (typically the `moved[]` output of `log10x_metrics_that_moved`). Returns per-candidate: `pearson_magnitude`, `pearson_signed` (direction preserved), `lag_seconds` (signed: negative = candidate leads anchor, positive = candidate lags), `lag_at_bound` (flag: peak landed at search-window boundary), `lag_tightness` (how sharply the Pearson surface peaks), `anchor_phase_gap`, `anchor_phase_aligned` (flag: candidate value differs ≥15% between anchor's high-phase and low-phase buckets), `n_buckets`. No tier, no causal label — the agent reads the flags and decides. Compose with `log10x_metric_overlay` for the final per-candidate aligned-timeseries view.",
       "annotations": {
-        "title": "Translate metric to patterns",
+        "title": "Rank by shape similarity",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "category": "investigate"
+    },
+    "log10x_metric_overlay": {
+      "title": "Metric overlay",
+      "description": "Third step of cross-pillar investigation: return aligned anchor + candidate timeseries plus deterministic facts (`peak_at`, `peak_offset_seconds`, `n_buckets_aligned`). No Pearson, no tier — pure raw data for the agent to interpret. Use this once `log10x_rank_by_shape_similarity` has narrowed to a single suspect, or to manually verify any anchor/candidate pair side-by-side. Bucket size auto-selected from window length; both series are right-aligned to the same trailing bucket grid so a sparse anchor and dense candidate compare on the same chaos window.",
+      "annotations": {
+        "title": "Metric overlay",
         "readOnlyHint": true,
         "idempotentHint": true,
         "openWorldHint": true

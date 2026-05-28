@@ -547,7 +547,7 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
       name: 'cross_pillar_backend',
       status: 'warn',
       message:
-        'No customer metrics backend detected. Cross-pillar tools (log10x_correlate_cross_pillar, log10x_discover_join, log10x_customer_metrics_query) will return "not configured" until a backend is reachable.\n' +
+        'No customer metrics backend detected. Cross-pillar primitives (log10x_metrics_that_moved, log10x_rank_by_shape_similarity, log10x_metric_overlay, log10x_discover_join, log10x_customer_metrics_query) will return "not configured" until a backend is reachable.\n' +
         formatDetectionTrace(backendResolution.trace),
       fix:
         'Set LOG10X_CUSTOMER_METRICS_URL + LOG10X_CUSTOMER_METRICS_TYPE explicitly, or expose one of: GRAFANA_CLOUD_API_KEY (+URL), DD_API_KEY+DD_APP_KEY, AWS_REGION (with AMP workspace available), GOOGLE_APPLICATION_CREDENTIALS (GMP project), or PROMETHEUS_URL.',

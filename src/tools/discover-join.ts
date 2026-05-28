@@ -7,11 +7,12 @@
  * returns the best match above the 0.7 floor, plus runner-ups above 0.5.
  *
  * Cached per-session per (environment, customer-backend-endpoint) so
- * correlate_cross_pillar and translate_metric_to_patterns can auto-call
- * this once at the start of a session and never re-probe.
+ * the cross-pillar primitives (metrics_that_moved, rank_by_shape_similarity,
+ * metric_overlay) can auto-call this once at the start of a session and
+ * never re-probe.
  *
  * Agents should normally NOT need to call this tool directly — the
- * higher-level correlation tools run it internally via the session cache.
+ * cross-pillar primitives run it internally via the session cache.
  * The explicit tool exists for power users who want to inspect the join
  * universe before correlating, or to force a re-discovery.
  *
@@ -148,7 +149,7 @@ export async function executeDiscoverJoin(
   };
   const headline = data.join_key
     ? `Join key: ${data.join_key.log10x_side} ↔ ${data.join_key.customer_side} (Jaccard ${data.join_key.jaccard.toFixed(3)}, ${data.runner_ups.length} runner-up${data.runner_ups.length !== 1 ? 's' : ''}).`
-    : `No join pair above Jaccard ${args.minimum_jaccard}. Cross-pillar correlation refuses for anchors that need a structural join.`;
+    : `No join pair above Jaccard ${args.minimum_jaccard}. Cross-pillar primitives refuse for anchors that need a structural join.`;
   return buildEnvelope({
     tool: 'log10x_discover_join',
     view: 'summary',
@@ -156,8 +157,9 @@ export async function executeDiscoverJoin(
     data,
     actions: data.join_key
       ? [
-          { tool: 'log10x_correlate_cross_pillar', args: { anchor_type: 'log10x_pattern' }, reason: 'use the resolved join key to correlate a Log10x pattern against the customer backend' },
-          { tool: 'log10x_correlate_cross_pillar', args: { anchor_type: 'customer_metric' }, reason: 'reverse direction: pick a customer metric and find which Log10x patterns track it' },
+          { tool: 'log10x_metrics_that_moved', args: {}, reason: 'first composition step: anchor a Log10x pattern, filter candidate customer metrics that actually moved with it' },
+          { tool: 'log10x_rank_by_shape_similarity', args: {}, reason: 'second step on the filtered candidates: Pearson + signed lag, no tier framing' },
+          { tool: 'log10x_metric_overlay', args: {}, reason: 'third step: aligned anchor+candidate timeseries for the agent to interpret' },
         ]
       : [
           { tool: 'log10x_customer_metrics_query', args: {}, reason: 'explore the customer backend label universe to find a natural join dimension' },
@@ -221,19 +223,24 @@ function renderJoinResult(
       lines.push('');
     }
 
-    lines.push('**Next action**: the cross-pillar correlation tools will use this join key automatically. Call `log10x_correlate_cross_pillar` with an anchor (a Log10x pattern, or a customer metric via `anchor_type`) and it will reuse the cached result.');
+    lines.push('**Next action**: the cross-pillar primitives will reuse this join key automatically. Compose `log10x_metrics_that_moved` → `log10x_rank_by_shape_similarity` → `log10x_metric_overlay` starting from a Log10x pattern OR a customer metric anchor.');
     // Structured chain hint so autonomous walkers don't need to
     // prose-parse the markdown above.
     const next: NextAction[] = [
       {
-        tool: 'log10x_correlate_cross_pillar',
-        args: { anchor_type: 'log10x_pattern' },
-        reason: 'use the resolved join key to correlate a Log10x pattern against the customer metric backend',
+        tool: 'log10x_metrics_that_moved',
+        args: {},
+        reason: 'first composition step: deterministic filter on which candidates moved with the anchor',
       },
       {
-        tool: 'log10x_correlate_cross_pillar',
-        args: { anchor_type: 'customer_metric' },
-        reason: 'reverse direction: pick a customer metric and find which Log10x patterns track it',
+        tool: 'log10x_rank_by_shape_similarity',
+        args: {},
+        reason: 'second step on filtered candidates: Pearson + signed lag without tier framing',
+      },
+      {
+        tool: 'log10x_metric_overlay',
+        args: {},
+        reason: 'third step: aligned anchor+candidate timeseries for the agent to interpret',
       },
     ];
     const block = renderNextActions(next);

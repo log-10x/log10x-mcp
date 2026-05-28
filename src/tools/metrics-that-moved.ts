@@ -14,9 +14,8 @@
  * "anchor high-phase" (anchor > anchor median) and "anchor low-phase".
  * For each candidate, compute its mean during each phase. Keep the
  * candidate when |mean_high - mean_low| / max(|mean_high|, |mean_low|)
- * ≥ threshold (default 15%). This is the same `anchor_phase_aligned`
- * signal that correlate_cross_pillar surfaces as a flag — here it's
- * a standalone filter, returnable as a deterministic candidate list.
+ * ≥ threshold (default 15%). Surfaced as a standalone filter, returnable
+ * as a deterministic candidate list before any Pearson pass runs.
  *
  * NOT a correlation tool. Returns the list of metrics that moved with
  * the anchor's phase + the magnitude of the move. Pearson lives in

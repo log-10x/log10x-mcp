@@ -17,7 +17,7 @@ test('shouldRegisterTool: analysis tools also register in analysis_pending mode'
 test('shouldRegisterTool: analysis tools do NOT register in POC mode', () => {
   assert.equal(shouldRegisterTool('log10x_top_patterns', 'poc'), false);
   assert.equal(shouldRegisterTool('log10x_find_incident_cluster', 'poc'), false);
-  assert.equal(shouldRegisterTool('log10x_correlate_cross_pillar', 'poc'), false);
+  assert.equal(shouldRegisterTool('log10x_metrics_that_moved', 'poc'), false);
 });
 
 test('shouldRegisterTool: POC tools register in POC mode only', () => {

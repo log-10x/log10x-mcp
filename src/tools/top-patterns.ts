@@ -404,9 +404,9 @@ export async function executeTopPatterns(
   const topSpiking = renderRows.find(r => r.hash && (r.badge === 'NEW' || r.badge === 'ACUTE'));
   if (topSpiking) {
     nextActions.push({
-      tool: 'log10x_correlate_cross_pillar',
+      tool: 'log10x_metrics_that_moved',
       args: { anchor: topSpiking.pattern, anchor_type: 'log10x_pattern', timeRange: rcaWindow },
-      reason: 'find k8s/metric signals (deploys, pod restarts, OOM) co-moving with the top spike',
+      reason: 'find k8s/metric signals (deploys, pod restarts, OOM) that moved with the top spike. Compose with log10x_rank_by_shape_similarity + log10x_metric_overlay for direction',
     });
   }
 

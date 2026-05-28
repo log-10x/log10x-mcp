@@ -223,7 +223,9 @@ export const TOOL_MODES: Record<string, ('analysis' | 'analysis_pending' | 'poc'
   log10x_find_uuid_in_body: ['analysis', 'analysis_pending'],
   log10x_pattern_mitigate: ['analysis', 'analysis_pending'],
   log10x_dependency_check: ['analysis', 'analysis_pending'],
-  log10x_correlate_cross_pillar: ['analysis', 'analysis_pending'],
+  log10x_metrics_that_moved: ['analysis', 'analysis_pending'],
+  log10x_rank_by_shape_similarity: ['analysis', 'analysis_pending'],
+  log10x_metric_overlay: ['analysis', 'analysis_pending'],
 
   // ── Analysis (secondary / primitive / utility) ──
   log10x_pattern_mitigate_legacy: ['analysis', 'analysis_pending'], // alias if any
@@ -233,7 +235,6 @@ export const TOOL_MODES: Record<string, ('analysis' | 'analysis_pending' | 'poc'
   log10x_discover_labels: ['analysis', 'analysis_pending'],
   log10x_discover_join: ['analysis', 'analysis_pending'],
   log10x_customer_metrics_query: ['analysis', 'analysis_pending'],
-  log10x_translate_metric_to_patterns: ['analysis', 'analysis_pending'],
   log10x_resolve_batch: ['analysis', 'analysis_pending', 'poc'], // local-only, no TSDB needed
   log10x_extract_templates: ['analysis', 'analysis_pending', 'poc'], // local-only, no TSDB needed
   log10x_retriever_query: ['analysis', 'analysis_pending'],
