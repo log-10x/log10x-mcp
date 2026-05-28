@@ -159,6 +159,23 @@ export interface ForwarderSpec {
      * var on the engine sidecar.
      */
     airgapped?: boolean;
+    /**
+     * How the helm command lands. Per-forwarder renderers branch on
+     * this to emit either a full chart values file (fresh-release —
+     * Reporter or Receiver with no existing release detected) or a
+     * minimal overlay containing ONLY the keys we need to add/replace
+     * on top of the user's existing chart values (upgrade-existing —
+     * canonical Receiver path; the helm command uses --reuse-values to
+     * keep the user's existing config intact under our overlay).
+     *
+     * Most receiver overlays (fluentbit, otel, vector, logstash) are
+     * already minimal — they only declare extraContainers, extraVolumes,
+     * and the config block. They render the same shape regardless of
+     * mode. Only fluentd needs branched output (the kustomize-post-
+     * renderer chart's values vary substantially between fresh-deploy
+     * and overlay-on-existing).
+     */
+    installMode?: 'upgrade-existing' | 'fresh-release';
   }) => string;
   /**
    * Optional: extra files to emit alongside the values.yaml. Used by
@@ -642,48 +659,11 @@ ${destOutput}
     hasTenxSidecar: true,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ destination, outputHost, splunkHecToken }) => {
+    renderValues: ({ destination, outputHost, splunkHecToken, installMode }) => {
       const destOutput = renderFluentdDestinationOutput(destination, outputHost, splunkHecToken);
-      return `# Receiver overlay for Fluentd (upstream fluent/fluentd chart).
-# Layered with a kustomize post-renderer (see tenx-kustomize/ files) —
-# the upstream chart has no extraContainers hook, so the sidecar is
-# injected via a Strategic Merge Patch on the rendered manifest.
-#
-# Run with:
-#   chmod +x tenx-kustomize/post-render.sh
-#   helm upgrade --install <release> fluent/fluentd \\
-#     -n <namespace> --create-namespace \\
-#     -f <release>-values.yaml \\
-#     --post-renderer ./tenx-kustomize/post-render.sh
-
-kind: Deployment            # or DaemonSet for host-log tailing
-replicaCount: 1
-
-# Plain upstream image; the 10x sidecar is a separate container added
-# via the kustomize overlay.
-image:
-  repository: fluent/fluentd
-  tag: v1.18-debian-1
-
-# No host log mounts in this example (the source below uses the
-# \`dummy\` plugin). For real container-log tailing flip these to true
-# and switch \`kind\` to DaemonSet.
-mountVarLogDirectory: false
-mountDockerContainersDirectory: false
-
-rbac:
-  create: false
-serviceAccount:
-  create: true
-service:
-  enabled: false
-podSecurityPolicy:
-  enabled: false
-
-# @INGEST runs your enrichment filters once and forwards events to
-# the 10x sidecar on :24224. @OUTPUT receives processed events back
-# on :24225 and writes them to your destinations.
-fileConfigs:
+      // Shared fileConfigs body — used by both modes. Routes through
+      // the log10x sidecar via @INGEST → :24224 → :24225 → @OUTPUT.
+      const fileConfigsBlock = `fileConfigs:
   01_sources.conf: |-
     # Replace this dummy source with your real sources (tail, http,
     # k8s, ...). Every source MUST route to @INGEST.
@@ -752,6 +732,76 @@ fileConfigs:
 ${indent(destOutput, 6)}
     </label>
 `;
+
+      // upgrade-existing emits a MINIMAL overlay: only the fileConfigs
+      // block (the receiver bypass routing) on top of the user's
+      // existing release values. Everything else (kind, replicaCount,
+      // image, rbac, mounts) stays as they had it — preserved by
+      // `helm upgrade --reuse-values`. fresh-release emits the full
+      // chart values (needed when there's no existing release to
+      // inherit defaults from).
+      if (installMode === 'upgrade-existing') {
+        return `# Receiver overlay for Fluentd — UPGRADE-EXISTING mode.
+# Overlays JUST the keys the receiver needs on top of your existing
+# fluent/fluentd Helm release. Your existing values (image, kind,
+# replicaCount, rbac, mounts, etc.) stay as-is via --reuse-values; we
+# only replace fileConfigs to wire the sidecar bypass.
+#
+# Run with:
+#   chmod +x tenx-kustomize/post-render.sh
+#   helm upgrade <existing-release> fluent/fluentd \\
+#     -n <namespace> \\
+#     --reuse-values \\
+#     -f <release>-values.yaml \\
+#     --post-renderer ./tenx-kustomize/post-render.sh
+
+# @INGEST runs your enrichment filters once and forwards events to the
+# 10x sidecar on :24224. @OUTPUT receives processed events back on
+# :24225 and writes them to your destinations. This block REPLACES
+# your existing fileConfigs — adapt the source/filter rules to your
+# inputs.
+${fileConfigsBlock}`;
+      }
+      return `# Receiver overlay for Fluentd (upstream fluent/fluentd chart).
+# Layered with a kustomize post-renderer (see tenx-kustomize/ files) —
+# the upstream chart has no extraContainers hook, so the sidecar is
+# injected via a Strategic Merge Patch on the rendered manifest.
+#
+# Run with:
+#   chmod +x tenx-kustomize/post-render.sh
+#   helm upgrade --install <release> fluent/fluentd \\
+#     -n <namespace> --create-namespace \\
+#     -f <release>-values.yaml \\
+#     --post-renderer ./tenx-kustomize/post-render.sh
+
+kind: Deployment            # or DaemonSet for host-log tailing
+replicaCount: 1
+
+# Plain upstream image; the 10x sidecar is a separate container added
+# via the kustomize overlay.
+image:
+  repository: fluent/fluentd
+  tag: v1.18-debian-1
+
+# No host log mounts in this example (the source below uses the
+# \`dummy\` plugin). For real container-log tailing flip these to true
+# and switch \`kind\` to DaemonSet.
+mountVarLogDirectory: false
+mountDockerContainersDirectory: false
+
+rbac:
+  create: false
+serviceAccount:
+  create: true
+service:
+  enabled: false
+podSecurityPolicy:
+  enabled: false
+
+# @INGEST runs your enrichment filters once and forwards events to
+# the 10x sidecar on :24224. @OUTPUT receives processed events back
+# on :24225 and writes them to your destinations.
+${fileConfigsBlock}`;
     },
     renderExtraFiles: ({ releaseName, optimize, airgapped, licenseSecretName, licenseSecretKey }) => {
       const deploymentName = `${releaseName}-fluentd`;

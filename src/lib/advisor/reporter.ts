@@ -240,7 +240,8 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
     releaseName,
     namespace,
     spec,
-    app
+    app,
+    installMode
   );
 
   const notes: string[] = [];
@@ -467,7 +468,8 @@ async function runPreflight(
   releaseName: string,
   namespace: string,
   spec: ForwarderSpec | undefined,
-  app: AdvisorApp
+  app: AdvisorApp,
+  installMode: 'upgrade-existing' | 'fresh-release'
 ): Promise<PreflightCheck[]> {
   const checks: PreflightCheck[] = [];
 
@@ -516,17 +518,33 @@ async function runPreflight(
     });
   }
 
-  // 4. Release-name collision check.
-  const releaseCollision = snapshot.kubectl.helmReleases.some(
+  // 4. Release-name collision check — semantics depend on installMode:
+  //   - fresh-release   → release name MUST NOT already exist (would
+  //     either fail the install or accidentally upgrade something
+  //     unrelated). Existing release = FAIL.
+  //   - upgrade-existing → release name MUST already exist (we're
+  //     `helm upgrade`-ing into it). Existing release = OK, expected.
+  //     Missing release = FAIL (helm upgrade would error).
+  const releaseExists = snapshot.kubectl.helmReleases.some(
     (h) => h.name === releaseName && h.namespace === namespace
   );
-  checks.push({
-    name: 'release collision',
-    status: releaseCollision ? 'fail' : 'ok',
-    detail: releaseCollision
-      ? `a Helm release named \`${releaseName}\` already exists in \`${namespace}\` — pick a different release_name or uninstall the existing one first`
-      : `no \`${releaseName}\` release in \`${namespace}\` — clear to install`,
-  });
+  if (installMode === 'upgrade-existing') {
+    checks.push({
+      name: 'existing release for upgrade',
+      status: releaseExists ? 'ok' : 'fail',
+      detail: releaseExists
+        ? `\`${releaseName}\` exists in \`${namespace}\` — this plan upgrades it in-place with --reuse-values`
+        : `expected to upgrade \`${releaseName}\` in \`${namespace}\` but no such Helm release was detected; the snapshot may be stale, re-run log10x_discover_env`,
+    });
+  } else {
+    checks.push({
+      name: 'release collision',
+      status: releaseExists ? 'fail' : 'ok',
+      detail: releaseExists
+        ? `a Helm release named \`${releaseName}\` already exists in \`${namespace}\` — pick a different release_name or uninstall the existing one first`
+        : `no \`${releaseName}\` release in \`${namespace}\` — clear to install`,
+    });
+  }
 
   // 5. Chart availability — LIVE probe via `helm search repo`.
   // The prior static flag claimed `published: ok` for chart refs that
@@ -652,15 +670,22 @@ function buildInstallSteps(opts: {
   const licenseSecretKey = 'license-jwt';
   const steps: PlanStep[] = [];
 
-  steps.push({
-    title: `Add ${spec.label} Helm repo`,
-    rationale: `Makes the ${spec.chartRef} chart available to \`helm install\`.`,
-    commands: [
-      `helm repo add ${spec.helmRepoAlias} ${spec.helmRepo}`,
-      `helm repo update`,
-      `helm search repo ${spec.chartRef}`,
-    ],
-  });
+  // The helm-repo step is only needed for fresh-release installs.
+  // upgrade-existing means the user installed from this chart before,
+  // so the repo is already added — `helm upgrade --reuse-values` would
+  // resolve the chart from the locally cached repo. Skipping the step
+  // keeps the plan focused on what's NEW (the receiver overlay).
+  if (installMode === 'fresh-release') {
+    steps.push({
+      title: `Add ${spec.label} Helm repo`,
+      rationale: `Makes the ${spec.chartRef} chart available to \`helm install\`.`,
+      commands: [
+        `helm repo add ${spec.helmRepoAlias} ${spec.helmRepo}`,
+        `helm repo update`,
+        `helm search repo ${spec.chartRef}`,
+      ],
+    });
+  }
 
   if (installMode === 'fresh-release') {
     steps.push({
@@ -704,6 +729,7 @@ function buildInstallSteps(opts: {
       backends,
       backendCredentials,
       airgapped,
+      installMode,
     }),
     language: 'yaml' as const,
   };
