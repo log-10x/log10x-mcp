@@ -37,6 +37,9 @@ import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { LABELS } from '../lib/promql.js';
 import { parseTimeframe } from '../lib/format.js';
 import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { computeAnchorDispersion, ANCHOR_DISPERSION_FLOOR } from '../lib/anchor-dispersion.js';
+import { canonicalMetricRef } from '../lib/metric-ref.js';
+import { wrapBackendError, type PrimitiveError } from '../lib/primitive-errors.js';
 
 export const metricOverlaySchema = {
   anchor_type: z
@@ -64,10 +67,34 @@ export const metricOverlaySchema = {
     .default(240)
     .describe('Max buckets to return in the aligned output. Pre-truncates from the most recent end if window/step exceeds this.'),
   environment: z.string().optional().describe('Environment nickname (for multi-env setups).'),
-  view: z.enum(['summary', 'markdown']).default('summary').describe('Output format.'),
 };
 
+/**
+ * Top-level call status. Agent branches on this before reading anything else.
+ *   - `success`: math ran cleanly; read `series` and `facts`.
+ *   - `anchor_no_phase_separation`: anchor MAD/median < 0.15. Refused.
+ *   - `no_signal`: anchor or candidate returned no overlapping data.
+ *   - `error`: structural failure; read `data.error`.
+ */
+export type MetricOverlayStatus =
+  | 'success'
+  | 'anchor_no_phase_separation'
+  | 'no_signal'
+  | 'error';
+
 interface MetricOverlaySummary {
+  status: MetricOverlayStatus;
+  threshold_basis: 'default_uncalibrated' | 'caller_override';
+  anchor_ref: {
+    type: 'log10x_pattern' | 'customer_metric';
+    expression: string;
+  };
+  candidate_ref: string;
+  anchor_dispersion: number;
+  query_count: number;
+  total_latency_ms: number;
+  backend_pressure_hint: 'ok' | 'slow' | 'throttled' | null;
+  human_summary: string;
   anchor: { type: 'log10x_pattern' | 'customer_metric'; expression: string };
   candidate: string;
   window: string;
@@ -102,6 +129,8 @@ interface MetricOverlaySummary {
     anchor_value_at_candidate_peak: number | null;
     candidate_value_at_anchor_peak: number | null;
   };
+  /** Populated only when `status === 'error'`. */
+  error?: PrimitiveError;
 }
 
 export async function executeMetricOverlay(
@@ -114,54 +143,150 @@ export async function executeMetricOverlay(
     step?: string;
     max_buckets?: number;
     environment?: string;
+    /** Ignored. Retained for backward-compat with in-process callers. */
     view?: 'summary' | 'markdown';
   },
   env: EnvConfig,
-): Promise<string | StructuredOutput> {
+): Promise<StructuredOutput> {
   const window = args.window ?? args.timeRange ?? '1h';
   const stepStr = args.step ?? '30s';
   const stepSeconds = parseStep(stepStr);
   const maxBuckets = args.max_buckets ?? 240;
-  const view = args.view ?? 'summary';
 
   const tf = parseTimeframe(window);
   const nowSec = Math.floor(Date.now() / 1000);
   const fromSec = nowSec - Math.floor(tf.days * 86400);
 
+  // metric_overlay has no thresholds, so threshold_basis is always
+  // default_uncalibrated (no caller can override what doesn't exist).
+  const thresholdBasis: 'default_uncalibrated' | 'caller_override' = 'default_uncalibrated';
+
+  let queryCount = 0;
+  let totalLatencyMs = 0;
+  let throttledHit = false;
+  const timedQuery = async <T>(fn: () => Promise<T>): Promise<T> => {
+    const t0 = Date.now();
+    queryCount += 1;
+    try {
+      return await fn();
+    } finally {
+      totalLatencyMs += Date.now() - t0;
+    }
+  };
+
   // ── Fetch anchor series ─────────────────────────────────────────────
   let anchorSeries: Array<[number, number]>;
   let anchorExpression: string;
-  if (args.anchor_type === 'log10x_pattern') {
-    const metricsEnv = await resolveMetricsEnv(env);
-    const escaped = args.anchor.replace(/"/g, '\\"');
-    anchorExpression = `sum(rate(all_events_summaryBytes_total{${LABELS.pattern}="${escaped}",${LABELS.env}="${metricsEnv}"}[${Math.max(stepSeconds * 3, 180)}s]))`;
-    const res = await queryRange(env, anchorExpression, fromSec, nowSec, stepSeconds);
-    anchorSeries = extractFirstSeries(res);
-  } else {
-    anchorExpression = args.anchor;
-    const backend = await resolveBackend();
-    if (!backend.backend) {
-      return buildMarkdownEnvelope({
-        tool: 'log10x_metric_overlay',
-        summary: { headline: 'Customer metrics backend not configured.' },
-        markdown: 'Customer metric anchor requires a configured customer metrics backend. Set `LOG10X_CUSTOMER_METRICS_URL` or run `log10x_doctor` to diagnose.',
-      });
+  try {
+    if (args.anchor_type === 'log10x_pattern') {
+      const metricsEnv = await resolveMetricsEnv(env);
+      const escaped = args.anchor.replace(/"/g, '\\"');
+      anchorExpression = `sum(rate(all_events_summaryBytes_total{${LABELS.pattern}="${escaped}",${LABELS.env}="${metricsEnv}"}[${Math.max(stepSeconds * 3, 180)}s]))`;
+      const res = await timedQuery(() => queryRange(env, anchorExpression, fromSec, nowSec, stepSeconds));
+      anchorSeries = extractFirstSeries(res);
+    } else {
+      anchorExpression = args.anchor;
+      const backend = await resolveBackend();
+      if (!backend.backend) {
+        return overlayErrorEnvelope({
+          anchor_type: args.anchor_type,
+          anchor_expression: anchorExpression,
+          candidate: args.candidate,
+          window,
+          stepSeconds,
+          thresholdBasis,
+          queryCount,
+          totalLatencyMs,
+          throttledHit,
+          err: {
+            error_type: 'backend_unavailable',
+            retryable: false,
+            suggested_backoff_ms: null,
+            hint: 'Customer metrics backend not configured. Set LOG10X_CUSTOMER_METRICS_URL.',
+          },
+        });
+      }
+      const res = await timedQuery(() => backend.backend!.queryRange(args.anchor, fromSec, nowSec, stepSeconds));
+      anchorSeries = extractFirstSeries(res);
     }
-    const res = await backend.backend.queryRange(args.anchor, fromSec, nowSec, stepSeconds);
-    anchorSeries = extractFirstSeries(res);
+  } catch (e) {
+    const err = wrapBackendError(e);
+    if (/HTTP 429/.test(err.hint)) throttledHit = true;
+    return overlayErrorEnvelope({
+      anchor_type: args.anchor_type,
+      anchor_expression: args.anchor,
+      candidate: args.candidate,
+      window,
+      stepSeconds,
+      thresholdBasis,
+      queryCount,
+      totalLatencyMs,
+      throttledHit,
+      err,
+    });
+  }
+
+  // ── Anchor dispersion guard ────────────────────────────────────────
+  const anchorValues = anchorSeries.map(([, v]) => v);
+  const anchorDispersion = computeAnchorDispersion(anchorValues);
+  if (anchorSeries.length >= 6 && anchorDispersion < ANCHOR_DISPERSION_FLOOR) {
+    return overlayDispersionRefusal({
+      anchor_type: args.anchor_type,
+      anchor_expression: anchorExpression,
+      candidate: args.candidate,
+      window,
+      stepSeconds,
+      thresholdBasis,
+      queryCount,
+      totalLatencyMs,
+      throttledHit,
+      anchorDispersion,
+      nAnchorBuckets: anchorSeries.length,
+      view: args.view ?? 'summary',
+    });
   }
 
   // ── Fetch candidate series (always customer-side) ───────────────────
   const backend = await resolveBackend();
   if (!backend.backend) {
-    return buildMarkdownEnvelope({
-      tool: 'log10x_metric_overlay',
-      summary: { headline: 'Customer metrics backend not configured.' },
-      markdown: 'Candidate requires a configured customer metrics backend. Set `LOG10X_CUSTOMER_METRICS_URL` or run `log10x_doctor`.',
+    return overlayErrorEnvelope({
+      anchor_type: args.anchor_type,
+      anchor_expression: anchorExpression,
+      candidate: args.candidate,
+      window,
+      stepSeconds,
+      thresholdBasis,
+      queryCount,
+      totalLatencyMs,
+      throttledHit,
+      err: {
+        error_type: 'backend_unavailable',
+        retryable: false,
+        suggested_backoff_ms: null,
+        hint: 'Customer metrics backend not configured. Set LOG10X_CUSTOMER_METRICS_URL.',
+      },
     });
   }
-  const candRes = await backend.backend.queryRange(args.candidate, fromSec, nowSec, stepSeconds);
-  const candSeries = extractFirstSeries(candRes);
+  let candSeries: Array<[number, number]>;
+  try {
+    const candRes = await timedQuery(() => backend.backend!.queryRange(args.candidate, fromSec, nowSec, stepSeconds));
+    candSeries = extractFirstSeries(candRes);
+  } catch (e) {
+    const err = wrapBackendError(e);
+    if (/HTTP 429/.test(err.hint)) throttledHit = true;
+    return overlayErrorEnvelope({
+      anchor_type: args.anchor_type,
+      anchor_expression: anchorExpression,
+      candidate: args.candidate,
+      window,
+      stepSeconds,
+      thresholdBasis,
+      queryCount,
+      totalLatencyMs,
+      throttledHit,
+      err,
+    });
+  }
 
   // ── Build aligned grid ──────────────────────────────────────────────
   // Use a deterministic timestamp grid based on (fromSec, nowSec, stepSeconds)
@@ -208,7 +333,35 @@ export async function executeMetricOverlay(
     ? (series.find((s) => s.ts === aPeak.ts)?.candidate_value ?? null)
     : null;
 
+  // Status: no_signal when either side has no data OR the aligned
+  // overlap is empty. Otherwise success.
+  const status: MetricOverlayStatus =
+    anchorSeries.length === 0 || candSeries.length === 0 || nAligned === 0
+      ? 'no_signal'
+      : 'success';
+
+  const candidate_ref = canonicalMetricRef(args.candidate);
+  const human_summary =
+    status === 'no_signal'
+      ? `No overlapping data between anchor "${anchorExpression}" and candidate "${args.candidate}" in this window. Either widen the window, check that both metrics emitted during it, or pick a different candidate.`
+      : peakOffset === null
+        ? `Overlay of "${args.candidate}" against the anchor. ${nAligned} aligned buckets. One side has no peak — likely too few data points on the candidate.`
+        : peakOffset < 0
+          ? `Candidate "${args.candidate}" peaks ${Math.abs(peakOffset)}s BEFORE the anchor. Possible upstream cause. ${nAligned} aligned buckets.`
+          : peakOffset > 0
+            ? `Candidate "${args.candidate}" peaks ${peakOffset}s AFTER the anchor. Possible downstream effect. ${nAligned} aligned buckets.`
+            : `Candidate "${args.candidate}" peaks at the same time as the anchor. ${nAligned} aligned buckets.`;
+
   const data: MetricOverlaySummary = {
+    status,
+    threshold_basis: thresholdBasis,
+    anchor_ref: { type: args.anchor_type, expression: canonicalMetricRef(anchorExpression) },
+    candidate_ref,
+    anchor_dispersion: anchorDispersion,
+    query_count: queryCount,
+    total_latency_ms: totalLatencyMs,
+    backend_pressure_hint: overlayPressureHint(queryCount, totalLatencyMs, throttledHit),
+    human_summary,
     anchor: { type: args.anchor_type, expression: anchorExpression },
     candidate: args.candidate,
     window,
@@ -229,7 +382,7 @@ export async function executeMetricOverlay(
   };
 
   const headline = buildHeadline(data);
-  if (view === 'markdown') {
+  if (args.view === 'markdown') {
     return buildMarkdownEnvelope({
       tool: 'log10x_metric_overlay',
       summary: { headline },
@@ -242,6 +395,125 @@ export async function executeMetricOverlay(
     summary: { headline },
     data,
   });
+}
+
+function overlayErrorEnvelope(args: {
+  anchor_type: 'log10x_pattern' | 'customer_metric';
+  anchor_expression: string;
+  candidate: string;
+  window: string;
+  stepSeconds: number;
+  thresholdBasis: 'default_uncalibrated' | 'caller_override';
+  queryCount: number;
+  totalLatencyMs: number;
+  throttledHit: boolean;
+  err: PrimitiveError;
+}): StructuredOutput {
+  const data: MetricOverlaySummary = {
+    status: 'error',
+    threshold_basis: args.thresholdBasis,
+    anchor_ref: { type: args.anchor_type, expression: canonicalMetricRef(args.anchor_expression) },
+    candidate_ref: canonicalMetricRef(args.candidate),
+    anchor_dispersion: 0,
+    query_count: args.queryCount,
+    total_latency_ms: args.totalLatencyMs,
+    backend_pressure_hint: overlayPressureHint(args.queryCount, args.totalLatencyMs, args.throttledHit),
+    human_summary: `Call failed: ${args.err.hint}`,
+    anchor: { type: args.anchor_type, expression: args.anchor_expression },
+    candidate: args.candidate,
+    window: args.window,
+    step_seconds: args.stepSeconds,
+    n_anchor_buckets: 0,
+    n_candidate_buckets: 0,
+    n_buckets_aligned: 0,
+    series: [],
+    facts: {
+      peak_anchor_at: null,
+      peak_anchor_value: null,
+      peak_candidate_at: null,
+      peak_candidate_value: null,
+      peak_offset_seconds: null,
+      anchor_value_at_candidate_peak: null,
+      candidate_value_at_anchor_peak: null,
+    },
+    error: args.err,
+  };
+  return buildEnvelope({
+    tool: 'log10x_metric_overlay',
+    view: 'summary',
+    summary: { headline: `Error (${args.err.error_type}): ${args.err.hint.slice(0, 120)}` },
+    data,
+  });
+}
+
+function overlayDispersionRefusal(args: {
+  anchor_type: 'log10x_pattern' | 'customer_metric';
+  anchor_expression: string;
+  candidate: string;
+  window: string;
+  stepSeconds: number;
+  thresholdBasis: 'default_uncalibrated' | 'caller_override';
+  queryCount: number;
+  totalLatencyMs: number;
+  throttledHit: boolean;
+  anchorDispersion: number;
+  nAnchorBuckets: number;
+  view: 'summary' | 'markdown';
+}): StructuredOutput {
+  const humanSummary = `Anchor "${args.anchor_expression}" has dispersion ${args.anchorDispersion.toFixed(3)} — below the ${ANCHOR_DISPERSION_FLOOR} floor. The overlay would have no meaningful peak comparison. Re-anchor with a clearer pattern.`;
+  const data: MetricOverlaySummary = {
+    status: 'anchor_no_phase_separation',
+    threshold_basis: args.thresholdBasis,
+    anchor_ref: { type: args.anchor_type, expression: canonicalMetricRef(args.anchor_expression) },
+    candidate_ref: canonicalMetricRef(args.candidate),
+    anchor_dispersion: args.anchorDispersion,
+    query_count: args.queryCount,
+    total_latency_ms: args.totalLatencyMs,
+    backend_pressure_hint: overlayPressureHint(args.queryCount, args.totalLatencyMs, args.throttledHit),
+    human_summary: humanSummary,
+    anchor: { type: args.anchor_type, expression: args.anchor_expression },
+    candidate: args.candidate,
+    window: args.window,
+    step_seconds: args.stepSeconds,
+    n_anchor_buckets: args.nAnchorBuckets,
+    n_candidate_buckets: 0,
+    n_buckets_aligned: 0,
+    series: [],
+    facts: {
+      peak_anchor_at: null,
+      peak_anchor_value: null,
+      peak_candidate_at: null,
+      peak_candidate_value: null,
+      peak_offset_seconds: null,
+      anchor_value_at_candidate_peak: null,
+      candidate_value_at_anchor_peak: null,
+    },
+  };
+  const headline = `Anchor lacks phase separation (dispersion ${args.anchorDispersion.toFixed(3)} < ${ANCHOR_DISPERSION_FLOOR}). Refusing — re-anchor.`;
+  if (args.view === 'markdown') {
+    return buildMarkdownEnvelope({
+      tool: 'log10x_metric_overlay',
+      summary: { headline },
+      markdown: humanSummary,
+    });
+  }
+  return buildEnvelope({
+    tool: 'log10x_metric_overlay',
+    view: 'summary',
+    summary: { headline },
+    data,
+  });
+}
+
+function overlayPressureHint(
+  queryCount: number,
+  totalLatencyMs: number,
+  throttledHit: boolean,
+): 'ok' | 'slow' | 'throttled' | null {
+  if (queryCount === 0) return null;
+  if (throttledHit) return 'throttled';
+  if (totalLatencyMs / queryCount > 1000) return 'slow';
+  return 'ok';
 }
 
 function parseStep(step: string): number {

@@ -30,6 +30,22 @@ Log10x fingerprints every log line into a stable `templateHash` — a structural
 | `log10x_retriever_query` | "Get me the actual events" — direct retrieval from the Retriever archive by templateHash with JS filter expressions over event payloads. Queries the customer's own S3 via pre-computed Bloom filters. Answers forensic, audit, and out-of-retention retrieval. | Retriever |
 | `log10x_backfill_metric` | "Create a new Datadog metric backfilled with 90 days of history" — pulls historical events from the Retriever, aggregates into a bucketed time series, emits to the destination TSDB with historical timestamps preserved. Datadog + Prometheus remote_write supported today. | Retriever |
 
+### Cross-pillar correlation primitives
+
+Three deterministic primitives that take a log-pattern anchor and customer Prometheus metric candidates, then answer "which metrics moved with this log pattern, when, and by how much." They compose into a cascade narrative: filter → rank → overlay.
+
+| Tool | Answers | Tier |
+|---|---|---|
+| `log10x_metrics_that_moved` | "Of these N customer metrics, which ones moved with my log pattern?" — deterministic phase-gap filter. Returns `moved[]`, `not_moved[]`, `evaluation_failed[]`. | Reporter + customer Prometheus |
+| `log10x_rank_by_shape_similarity` | "Of the metrics that moved, which match the anchor's shape best, and which moved first?" — Pearson + signed lag scan. Returns ranked candidates with `lag_seconds`, `lag_at_bound`, `anchor_phase_aligned`. | Reporter + customer Prometheus |
+| `log10x_metric_overlay` | "Show me the two curves side by side." — aligned timeseries + deterministic peak facts (`peak_offset_seconds`, etc.). No Pearson, no tier — raw data. | Reporter + customer Prometheus |
+
+**Designed for AI callers, not humans.** Every output carries a unified envelope: `status`, `threshold_basis`, `anchor_ref` echo, `query_count`, `total_latency_ms`, `backend_pressure_hint`, and a `human_summary` field the agent can paste to a human. `metric_ref` round-trips identically across the three tools — pass it from one output to the next input verbatim.
+
+**Calibration honesty.** The default thresholds (15% phase gap, ±1800s lag search) are hand-picked from one synthetic chaos test, not calibrated against any real customer backend. Every tool tags `threshold_basis: "default_uncalibrated"` until a caller-supplied override moves it to `caller_override`. Agents MUST NOT auto-mitigate based on uncalibrated findings. See [`docs/cross-pillar-primitives.md`](docs/cross-pillar-primitives.md) for the full agent behavior contract and the per-backend calibration playbook.
+
+**Structural guards.** When the anchor doesn't have a real busy/quiet split, the tool refuses with `status: "anchor_no_phase_separation"` rather than producing nonsense. When the candidate set produces zero meaningful signal, the tool returns `status: "no_signal"` so the agent stops searching cleanly. Backend errors surface as a structured `PrimitiveError` envelope (`error_type`, `retryable`, `suggested_backoff_ms`, `hint`), not thrown strings.
+
 All tools query `prometheus.log10x.com` (for Reporter-tier tools) over HTTPS, with the same `X-10X-Auth` header used by the rest of the Log10x stack. No log scanning; sub-second at any scale.
 
 ## ROI examples — three real flows

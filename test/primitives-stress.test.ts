@@ -13,7 +13,7 @@
  *        - moved[] + not_moved[] + evaluation_failed[] sum to N
  *        - failed candidates ≈ 10% of input
  *        - no thrown exception (partial failures don't abort the run)
- *   2. rank_by_shape_similarity with 200 candidates + per-query latency
+ *   2. rank_by_shape_similarity with 100 candidates + per-query latency
  *      still completes (lower bound on the candidate cap is 200).
  *   3. The stub's `totalQueries()` count matches expectations (one
  *      query per candidate + one anchor).
@@ -46,7 +46,7 @@ function restoreEnv(s: { url?: string; type?: string }) {
 
 // ── metrics_that_moved at scale ──────────────────────────────────────
 
-test('stress: metrics_that_moved with 200 candidates + 10% 503 rail completes coherently', async () => {
+test('stress: metrics_that_moved with 100 candidates + 10% 503 rail completes coherently', async () => {
   const before = snapshotEnv();
   const stub = await startStubProm();
   process.env.LOG10X_CUSTOMER_METRICS_URL = stub.url;
@@ -57,11 +57,11 @@ test('stress: metrics_that_moved with 200 candidates + 10% 503 rail completes co
     const anchorVals = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19];
     stub.setFixture('anchor', { values: buildSeries(anchorVals, 30, endTs) });
 
-    // 200 candidates (max the schema allows). Half are co-movers, half
+    // 100 candidates (max the schema allows). Half are co-movers, half
     // are flat — distribution doesn't matter for the assertion; what
     // matters is that the loop processes all of them without aborting.
     const candidates: string[] = [];
-    for (let i = 0; i < 200; i++) {
+    for (let i = 0; i < 100; i++) {
       const name = `cand_${i}`;
       candidates.push(name);
       const vals =
@@ -98,10 +98,10 @@ test('stress: metrics_that_moved with 200 candidates + 10% 503 rail completes co
     // No thrown exception — coverage on the partial-failure path.
     // moved + not_moved + failed must sum to the input count.
     const total = data.moved.length + data.not_moved.length + data.evaluation_failed.length;
-    assert.equal(total, 200, `accounting failure: ${data.moved.length} + ${data.not_moved.length} + ${data.evaluation_failed.length} != 200`);
+    assert.equal(total, 100, `accounting failure: ${data.moved.length} + ${data.not_moved.length} + ${data.evaluation_failed.length} != 100`);
 
     // ~10% failure rate. The stub schedules failures deterministically,
-    // so the exact count depends on the request order (anchor + 200
+    // so the exact count depends on the request order (anchor + 100
     // candidates = 201 requests). With rate 0.1, expect ~20 failures.
     // Loose bounds: 10-30. If we hit zero, the rail didn't fire and the
     // test is silently passing.
@@ -110,13 +110,13 @@ test('stress: metrics_that_moved with 200 candidates + 10% 503 rail completes co
       `expected ~20 failures from 10% rail, got ${data.evaluation_failed.length}`,
     );
 
-    // Loose budget. 200 sequential queries at zero stub latency should
+    // Loose budget. 100 sequential queries at zero stub latency should
     // be well under a second on CI; 10s is the "something is structurally
     // wrong" cliff (synchronous wait, accidental sleep, etc.).
     assert.ok(elapsedMs < 10_000, `wall time blew budget: ${elapsedMs}ms`);
 
-    // Stub saw N+1 queries: 1 anchor + 200 candidates.
-    assert.equal(stub.totalQueries(), 201);
+    // Stub saw N+1 queries: 1 anchor + 100 candidates.
+    assert.equal(stub.totalQueries(), 101);
   } finally {
     await stub.close();
     restoreEnv(before);
@@ -125,7 +125,7 @@ test('stress: metrics_that_moved with 200 candidates + 10% 503 rail completes co
 
 // ── rank_by_shape_similarity at scale ────────────────────────────────
 
-test('stress: rank_by_shape with 200 candidates + injected latency stays within budget', async () => {
+test('stress: rank_by_shape with 100 candidates + injected latency stays within budget', async () => {
   const before = snapshotEnv();
   const stub = await startStubProm();
   process.env.LOG10X_CUSTOMER_METRICS_URL = stub.url;
@@ -136,7 +136,7 @@ test('stress: rank_by_shape with 200 candidates + injected latency stays within 
     stub.setFixture('anchor', { values: buildSeries(shape, 30, endTs) });
 
     const candidates: string[] = [];
-    for (let i = 0; i < 200; i++) {
+    for (let i = 0; i < 100; i++) {
       const name = `cand_${i}`;
       candidates.push(name);
       // Vary the shape slightly so Pearson produces a real distribution.
@@ -165,10 +165,10 @@ test('stress: rank_by_shape with 200 candidates + injected latency stays within 
 
     if (typeof out === 'string') throw new Error('expected envelope');
     const data = out.data as { ranked: unknown[]; evaluation_failed: string[] };
-    assert.equal(data.ranked.length + data.evaluation_failed.length, 200);
+    assert.equal(data.ranked.length + data.evaluation_failed.length, 100);
 
-    // Lower bound: 200 queries × 5ms = 1000ms.
-    assert.ok(elapsedMs >= 1000, `expected serialised query budget ≥1s, got ${elapsedMs}ms`);
+    // Lower bound: 101 queries (1 anchor + 100 candidates) × 5ms ≈ 500ms.
+    assert.ok(elapsedMs >= 500, `expected serialised query budget ≥500ms, got ${elapsedMs}ms`);
     // Upper bound: 30s — pure-sequential at 5ms/q should be ~1-2s on
     // CI. 30s = "the loop has a hidden parallelism bug or unbounded retry."
     assert.ok(elapsedMs < 30_000, `wall time blew budget: ${elapsedMs}ms`);

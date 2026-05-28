@@ -30,6 +30,12 @@ import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { LABELS } from '../lib/promql.js';
 import { parseTimeframe } from '../lib/format.js';
 import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { computeAnchorDispersion, ANCHOR_DISPERSION_FLOOR } from '../lib/anchor-dispersion.js';
+import { canonicalMetricRef } from '../lib/metric-ref.js';
+import { wrapBackendError, type PrimitiveError } from '../lib/primitive-errors.js';
+
+/** Default phase-gap floor. Hand-picked, uncalibrated — see README "Threshold provenance". */
+export const DEFAULT_PHASE_GAP_FLOOR = 0.15;
 
 export const metricsThatMovedSchema = {
   anchor_type: z
@@ -39,8 +45,8 @@ export const metricsThatMovedSchema = {
   candidates: z
     .array(z.string())
     .min(1)
-    .max(200)
-    .describe('Customer-side PromQL expressions to evaluate. Compose with `metrics_sharing_resource` or pull from `customer_metrics_query` to build this list.'),
+    .max(100)
+    .describe('Customer-side PromQL expressions to evaluate (max 100). An AI caller reasoning over results can\'t meaningfully digest more than a few dozen; the cap reflects that, not a backend constraint. Pre-filter with `metrics_sharing_resource` or label-scoped `customer_metrics_query` queries.'),
   window: z.string().default('1h').describe('Time window. Alias: `timeRange`.'),
   timeRange: z.string().optional(),
   step: z.string().default('30s').describe('Bucket step.'),
@@ -48,14 +54,17 @@ export const metricsThatMovedSchema = {
     .number()
     .min(0.0)
     .max(1.0)
-    .default(0.15)
-    .describe('Relative gap floor between anchor-high and anchor-low phase means. Candidate is "moved" iff its gap ≥ this. Default 0.15 (=15%).'),
+    .default(DEFAULT_PHASE_GAP_FLOOR)
+    .describe('Relative gap floor between anchor-high and anchor-low phase means. Candidate is "moved" iff its gap ≥ this. Default 0.15 (=15%) is an uncalibrated default — output is tagged `default_uncalibrated` until a caller-side calibration overrides it. See `docs/cross-pillar-primitives.md` for the calibration playbook.'),
   environment: z.string().optional(),
-  view: z.enum(['summary', 'markdown']).default('summary'),
 };
 
 interface MovedCandidate {
   candidate: string;
+  /** Canonical metric_ref string — round-trippable across the three
+   * cross-pillar primitives. Pass this verbatim to rank_by_shape_similarity
+   * or metric_overlay. */
+  metric_ref: string;
   /** Mean of candidate during anchor's high-phase buckets. */
   mean_anchor_high: number;
   /** Mean of candidate during anchor's low-phase buckets. */
@@ -71,21 +80,53 @@ interface MovedCandidate {
   n_low: number;
 }
 
+/**
+ * Top-level call status. Agent branches on this before reading anything else.
+ *   - `success`: math ran cleanly; read `moved[]` / `not_moved[]`.
+ *   - `anchor_no_phase_separation`: anchor MAD/median < 0.15. Refused.
+ *     Agent should re-anchor with a clearer log pattern.
+ *   - `no_signal`: search completed, but every candidate either failed or
+ *     fell below the threshold. Agent should stop, not retry.
+ *   - `error`: a structural failure (backend down, schema invalid, etc.).
+ *     Read `data.error` for the structured envelope.
+ */
+export type MetricsThatMovedStatus =
+  | 'success'
+  | 'anchor_no_phase_separation'
+  | 'no_signal'
+  | 'error';
+
 interface MetricsThatMovedSummary {
+  status: MetricsThatMovedStatus;
+  threshold_used: number;
+  threshold_basis: 'default_uncalibrated' | 'caller_override';
+  anchor_ref: {
+    type: 'log10x_pattern' | 'customer_metric';
+    expression: string;
+  };
+  anchor_dispersion: number;
   anchor_expression: string;
   window: string;
   step_seconds: number;
   phase_gap_floor: number;
   n_anchor_buckets: number;
   n_candidates_evaluated: number;
+  n_candidates_usable: number;
+  low_candidate_count: 'severe' | 'medium' | null;
+  query_count: number;
+  total_latency_ms: number;
+  backend_pressure_hint: 'ok' | 'slow' | 'throttled' | null;
+  human_summary: string;
   /** Candidates whose phase_gap ≥ floor. Sorted by gap descending. */
   moved: MovedCandidate[];
   /** Candidates whose phase_gap < floor. Returned for transparency so
    * the agent can see what was filtered out. */
   not_moved: MovedCandidate[];
   /** Candidates that couldn't be evaluated (insufficient data on either
-   * phase). Surface so the agent doesn't assume "absent = not moved." */
+   * phase OR the backend errored on their fetch). */
   evaluation_failed: string[];
+  /** Populated only when `status === 'error'`. */
+  error?: PrimitiveError;
 }
 
 export async function executeMetricsThatMoved(
@@ -98,48 +139,149 @@ export async function executeMetricsThatMoved(
     step?: string;
     phase_gap_floor?: number;
     environment?: string;
+    /** Ignored. Retained in the signature for backward-compat with
+     * existing in-process callers; the markdown view was removed from
+     * the public schema in favor of the structured `human_summary`
+     * field that lives inside the success envelope. */
     view?: 'summary' | 'markdown';
   },
   env: EnvConfig,
-): Promise<string | StructuredOutput> {
+): Promise<StructuredOutput> {
   const window = args.window ?? args.timeRange ?? '1h';
   const stepStr = args.step ?? '30s';
   const stepSeconds = parseStep(stepStr);
-  const floor = args.phase_gap_floor ?? 0.15;
-  const view = args.view ?? 'summary';
+  const floor = args.phase_gap_floor ?? DEFAULT_PHASE_GAP_FLOOR;
+  const thresholdBasis: 'default_uncalibrated' | 'caller_override' =
+    floor === DEFAULT_PHASE_GAP_FLOOR ? 'default_uncalibrated' : 'caller_override';
 
   const tf = parseTimeframe(window);
   const nowSec = Math.floor(Date.now() / 1000);
   const fromSec = nowSec - Math.floor(tf.days * 86400);
 
+  // Query telemetry — surfaced in the envelope so the agent can pace itself.
+  let queryCount = 0;
+  let totalLatencyMs = 0;
+  let throttledHit = false;
+  const timedQuery = async <T>(fn: () => Promise<T>): Promise<T> => {
+    const t0 = Date.now();
+    queryCount += 1;
+    try {
+      return await fn();
+    } finally {
+      totalLatencyMs += Date.now() - t0;
+    }
+  };
+
   // ── Anchor series ──────────────────────────────────────────────────
   let anchorExpression: string;
   let anchorSeries: Array<[number, number]>;
-  if (args.anchor_type === 'log10x_pattern') {
-    const metricsEnv = await resolveMetricsEnv(env);
-    const escaped = args.anchor.replace(/"/g, '\\"');
-    anchorExpression = `sum(rate(all_events_summaryBytes_total{${LABELS.pattern}="${escaped}",${LABELS.env}="${metricsEnv}"}[${Math.max(stepSeconds * 3, 180)}s]))`;
-    const res = await queryRange(env, anchorExpression, fromSec, nowSec, stepSeconds);
-    anchorSeries = extractFirstSeries(res);
-  } else {
-    anchorExpression = args.anchor;
-    const backendInfo = await resolveBackend();
-    if (!backendInfo.backend) {
-      return buildMarkdownEnvelope({
-        tool: 'log10x_metrics_that_moved',
-        summary: { headline: 'Customer metrics backend not configured.' },
-        markdown: 'Anchor of type `customer_metric` requires a configured customer metrics backend.',
-      });
+  try {
+    if (args.anchor_type === 'log10x_pattern') {
+      const metricsEnv = await resolveMetricsEnv(env);
+      const escaped = args.anchor.replace(/"/g, '\\"');
+      anchorExpression = `sum(rate(all_events_summaryBytes_total{${LABELS.pattern}="${escaped}",${LABELS.env}="${metricsEnv}"}[${Math.max(stepSeconds * 3, 180)}s]))`;
+      const res = await timedQuery(() => queryRange(env, anchorExpression, fromSec, nowSec, stepSeconds));
+      anchorSeries = extractFirstSeries(res);
+    } else {
+      anchorExpression = args.anchor;
+      const backendInfo = await resolveBackend();
+      if (!backendInfo.backend) {
+        return errorEnvelope({
+          tool: 'log10x_metrics_that_moved',
+          anchor_type: args.anchor_type,
+          anchor_expression: anchorExpression,
+          window,
+          stepSeconds,
+          floor,
+          thresholdBasis,
+          queryCount,
+          totalLatencyMs,
+          throttledHit,
+          err: {
+            error_type: 'backend_unavailable',
+            retryable: false,
+            suggested_backoff_ms: null,
+            hint: 'Customer metrics backend not configured. Set LOG10X_CUSTOMER_METRICS_URL.',
+          },
+        });
+      }
+      const res = await timedQuery(() => backendInfo.backend!.queryRange(args.anchor, fromSec, nowSec, stepSeconds));
+      anchorSeries = extractFirstSeries(res);
     }
-    const res = await backendInfo.backend.queryRange(args.anchor, fromSec, nowSec, stepSeconds);
-    anchorSeries = extractFirstSeries(res);
+  } catch (e) {
+    const err = wrapBackendError(e);
+    if (/HTTP 429/.test(err.hint)) throttledHit = true;
+    return errorEnvelope({
+      tool: 'log10x_metrics_that_moved',
+      anchor_type: args.anchor_type,
+      anchor_expression: args.anchor,
+      window,
+      stepSeconds,
+      floor,
+      thresholdBasis,
+      queryCount,
+      totalLatencyMs,
+      throttledHit,
+      err,
+    });
   }
 
   if (anchorSeries.length < 6) {
-    return buildMarkdownEnvelope({
+    return errorEnvelope({
       tool: 'log10x_metrics_that_moved',
-      summary: { headline: `Anchor has only ${anchorSeries.length} buckets — insufficient for phase analysis.` },
-      markdown: `Anchor returned ${anchorSeries.length} data points over the requested window. Need ≥6 to partition into high/low phases. Widen the window or check that the anchor actually emitted data during this window.`,
+      anchor_type: args.anchor_type,
+      anchor_expression: anchorExpression,
+      window,
+      stepSeconds,
+      floor,
+      thresholdBasis,
+      queryCount,
+      totalLatencyMs,
+      throttledHit,
+      err: {
+        error_type: 'anchor_not_found',
+        retryable: false,
+        suggested_backoff_ms: null,
+        hint: `Anchor returned only ${anchorSeries.length} buckets — need ≥6 to partition into high/low phases. Widen the window or pick a different anchor.`,
+      },
+    });
+  }
+
+  // ── Anchor dispersion guard ────────────────────────────────────────
+  // If the anchor doesn't have a real busy/quiet split, the phase
+  // partition is arbitrary and downstream movers are meaningless.
+  // Refuse with status: anchor_no_phase_separation.
+  const anchorValues = anchorSeries.map(([, v]) => v);
+  const anchorDispersion = computeAnchorDispersion(anchorValues);
+  if (anchorDispersion < ANCHOR_DISPERSION_FLOOR) {
+    const data: MetricsThatMovedSummary = {
+      status: 'anchor_no_phase_separation',
+      threshold_used: floor,
+      threshold_basis: thresholdBasis,
+      anchor_ref: { type: args.anchor_type, expression: canonicalMetricRef(anchorExpression) },
+      anchor_dispersion: anchorDispersion,
+      anchor_expression: anchorExpression,
+      window,
+      step_seconds: stepSeconds,
+      phase_gap_floor: floor,
+      n_anchor_buckets: anchorSeries.length,
+      n_candidates_evaluated: 0,
+      n_candidates_usable: 0,
+      low_candidate_count: null,
+      query_count: queryCount,
+      total_latency_ms: totalLatencyMs,
+      backend_pressure_hint: pressureHint(queryCount, totalLatencyMs, throttledHit),
+      human_summary: `Anchor "${anchorExpression}" has dispersion ${anchorDispersion.toFixed(3)} — below the ${ANCHOR_DISPERSION_FLOOR} floor for phase separation. No real busy/quiet split exists in this window, so the math is structurally meaningless. Re-anchor with a clearer log pattern or widen the time window.`,
+      moved: [],
+      not_moved: [],
+      evaluation_failed: [],
+    };
+    const headline = `Anchor lacks phase separation (dispersion ${anchorDispersion.toFixed(3)} < ${ANCHOR_DISPERSION_FLOOR}). Refusing — re-anchor with a clearer pattern.`;
+    return buildEnvelope({
+      tool: 'log10x_metrics_that_moved',
+      view: 'summary',
+      summary: { headline },
+      data,
     });
   }
 
@@ -150,10 +292,23 @@ export async function executeMetricsThatMoved(
   // ── Candidates ──────────────────────────────────────────────────────
   const customerBackend = await resolveBackend();
   if (!customerBackend.backend) {
-    return buildMarkdownEnvelope({
+    return errorEnvelope({
       tool: 'log10x_metrics_that_moved',
-      summary: { headline: 'Customer metrics backend not configured.' },
-      markdown: 'Candidate evaluation requires a configured customer metrics backend.',
+      anchor_type: args.anchor_type,
+      anchor_expression: anchorExpression,
+      window,
+      stepSeconds,
+      floor,
+      thresholdBasis,
+      queryCount,
+      totalLatencyMs,
+      throttledHit,
+      err: {
+        error_type: 'backend_unavailable',
+        retryable: false,
+        suggested_backoff_ms: null,
+        hint: 'Customer metrics backend not configured. Set LOG10X_CUSTOMER_METRICS_URL.',
+      },
     });
   }
 
@@ -163,7 +318,7 @@ export async function executeMetricsThatMoved(
 
   for (const cand of args.candidates) {
     try {
-      const res = await customerBackend.backend.queryRange(cand, fromSec, nowSec, stepSeconds);
+      const res = await timedQuery(() => customerBackend.backend!.queryRange(cand, fromSec, nowSec, stepSeconds));
       const candSeries = extractFirstSeries(res);
       const signal = computeMovedSignal(anchorPartition, candSeries, stepSeconds);
       if (signal.kind === 'failed') {
@@ -172,6 +327,7 @@ export async function executeMetricsThatMoved(
       }
       const row: MovedCandidate = {
         candidate: cand,
+        metric_ref: canonicalMetricRef(cand),
         mean_anchor_high: signal.meanHigh,
         mean_anchor_low: signal.meanLow,
         phase_gap: signal.phaseGap,
@@ -181,7 +337,8 @@ export async function executeMetricsThatMoved(
       };
       if (signal.phaseGap >= floor) moved.push(row);
       else notMoved.push(row);
-    } catch {
+    } catch (e) {
+      if (e instanceof Error && /HTTP 429/.test(e.message)) throttledHit = true;
       failed.push(cand);
     }
   }
@@ -189,13 +346,39 @@ export async function executeMetricsThatMoved(
   moved.sort((a, b) => b.phase_gap - a.phase_gap);
   notMoved.sort((a, b) => b.phase_gap - a.phase_gap);
 
+  const nUsable = moved.length + notMoved.length;
+  const lowCandidateCount: 'severe' | 'medium' | null =
+    nUsable < 10 ? 'severe' : nUsable < 20 ? 'medium' : null;
+  const status: MetricsThatMovedStatus = moved.length === 0 ? 'no_signal' : 'success';
+  const human_summary = buildHumanSummary({
+    status,
+    moved,
+    notMoved,
+    failed,
+    floor,
+    thresholdBasis,
+    anchorDispersion,
+    lowCandidateCount,
+  });
+
   const data: MetricsThatMovedSummary = {
+    status,
+    threshold_used: floor,
+    threshold_basis: thresholdBasis,
+    anchor_ref: { type: args.anchor_type, expression: canonicalMetricRef(anchorExpression) },
+    anchor_dispersion: anchorDispersion,
     anchor_expression: anchorExpression,
     window,
     step_seconds: stepSeconds,
     phase_gap_floor: floor,
     n_anchor_buckets: anchorSeries.length,
     n_candidates_evaluated: args.candidates.length - failed.length,
+    n_candidates_usable: nUsable,
+    low_candidate_count: lowCandidateCount,
+    query_count: queryCount,
+    total_latency_ms: totalLatencyMs,
+    backend_pressure_hint: pressureHint(queryCount, totalLatencyMs, throttledHit),
+    human_summary,
     moved,
     not_moved: notMoved,
     evaluation_failed: failed,
@@ -203,7 +386,10 @@ export async function executeMetricsThatMoved(
 
   const headline = `${moved.length} of ${args.candidates.length} candidates moved with anchor (phase_gap ≥ ${floor}). ${notMoved.length} did not move. ${failed.length} could not be evaluated.`;
 
-  if (view === 'markdown') {
+  // Markdown-view branch retained for backward-compat with in-process
+  // callers; deprecated from the public schema. New callers should
+  // read data.human_summary instead.
+  if (args.view === 'markdown') {
     return buildMarkdownEnvelope({
       tool: 'log10x_metrics_that_moved',
       summary: { headline },
@@ -216,6 +402,108 @@ export async function executeMetricsThatMoved(
     summary: { headline },
     data,
   });
+}
+
+/**
+ * Build the structured error envelope returned when a structural
+ * failure (backend down, schema invalid, etc.) prevents the analysis
+ * from running. Status='error', data.error is the typed PrimitiveError.
+ */
+function errorEnvelope(args: {
+  tool: string;
+  anchor_type: 'log10x_pattern' | 'customer_metric';
+  anchor_expression: string;
+  window: string;
+  stepSeconds: number;
+  floor: number;
+  thresholdBasis: 'default_uncalibrated' | 'caller_override';
+  queryCount: number;
+  totalLatencyMs: number;
+  throttledHit: boolean;
+  err: PrimitiveError;
+}): StructuredOutput {
+  const data: MetricsThatMovedSummary = {
+    status: 'error',
+    threshold_used: args.floor,
+    threshold_basis: args.thresholdBasis,
+    anchor_ref: { type: args.anchor_type, expression: canonicalMetricRef(args.anchor_expression) },
+    anchor_dispersion: 0,
+    anchor_expression: args.anchor_expression,
+    window: args.window,
+    step_seconds: args.stepSeconds,
+    phase_gap_floor: args.floor,
+    n_anchor_buckets: 0,
+    n_candidates_evaluated: 0,
+    n_candidates_usable: 0,
+    low_candidate_count: null,
+    query_count: args.queryCount,
+    total_latency_ms: args.totalLatencyMs,
+    backend_pressure_hint: pressureHint(args.queryCount, args.totalLatencyMs, args.throttledHit),
+    human_summary: `Call failed: ${args.err.hint}`,
+    moved: [],
+    not_moved: [],
+    evaluation_failed: [],
+    error: args.err,
+  };
+  return buildEnvelope({
+    tool: args.tool,
+    view: 'summary',
+    summary: { headline: `Error (${args.err.error_type}): ${args.err.hint.slice(0, 120)}` },
+    data,
+  });
+}
+
+/**
+ * Backend pressure hint. Rough heuristic so the agent can decide
+ * whether to back off, not a calibrated rate-limit detector.
+ *   - `throttled`: any HTTP 429 surfaced during the call.
+ *   - `slow`: average per-query latency exceeds 1000ms.
+ *   - `ok`: everything within budget.
+ *   - `null`: zero queries made (e.g. backend not configured path).
+ */
+function pressureHint(
+  queryCount: number,
+  totalLatencyMs: number,
+  throttledHit: boolean,
+): 'ok' | 'slow' | 'throttled' | null {
+  if (queryCount === 0) return null;
+  if (throttledHit) return 'throttled';
+  if (totalLatencyMs / queryCount > 1000) return 'slow';
+  return 'ok';
+}
+
+/**
+ * One-paragraph plain-English summary the agent can paste verbatim to
+ * a human user. No tables, no internal field names, no bikeshedding.
+ */
+function buildHumanSummary(args: {
+  status: MetricsThatMovedStatus;
+  moved: MovedCandidate[];
+  notMoved: MovedCandidate[];
+  failed: string[];
+  floor: number;
+  thresholdBasis: 'default_uncalibrated' | 'caller_override';
+  anchorDispersion: number;
+  lowCandidateCount: 'severe' | 'medium' | null;
+}): string {
+  const calibTag =
+    args.thresholdBasis === 'default_uncalibrated'
+      ? ' The threshold used is an uncalibrated default — calibrate it for this backend before treating the result as authoritative.'
+      : '';
+  if (args.status === 'no_signal') {
+    return `No candidate metrics moved with the anchor at the ${(args.floor * 100).toFixed(0)}% phase-gap floor. ${args.notMoved.length} were evaluated but stayed flat, ${args.failed.length} could not be evaluated. Stop searching with this anchor; consider re-anchoring or widening the window.${calibTag}`;
+  }
+  const lowTag =
+    args.lowCandidateCount === 'severe'
+      ? ' Only a handful of candidates were usable — treat the result as weak evidence, look for corroborating signals.'
+      : args.lowCandidateCount === 'medium'
+        ? ' Candidate sample was small — weight the result accordingly.'
+        : '';
+  const top = args.moved[0];
+  const topNote = top
+    ? ` The strongest mover is ${top.candidate} with a ${(top.phase_gap * 100).toFixed(0)}% phase gap (direction: ${top.direction}).`
+    : '';
+  return `${args.moved.length} candidate(s) moved with the anchor above the ${(args.floor * 100).toFixed(0)}% phase-gap floor. ${args.notMoved.length} stayed flat, ${args.failed.length} could not be evaluated.${topNote}${lowTag}${calibTag}`;
 }
 
 export interface AnchorPartition {

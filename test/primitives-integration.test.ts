@@ -402,6 +402,266 @@ test('metric_overlay: missing candidate returns the no-overlap headline', async 
       ENV,
     );
     if (typeof out === 'string') throw new Error('expected envelope');
-    assert.match(out.summary.headline, /no overlap|0 buckets|insufficient|no data/i);
+    assert.match(out.summary.headline, /no overlap|0 buckets|insufficient|no data|no_signal/i);
+  });
+});
+
+// ── GA-track: unified envelope, structural guards, structured errors ─
+
+test('GA: metrics_that_moved emits unified envelope with status, threshold_basis, anchor_ref, telemetry', async () => {
+  await withStub(async (stub) => {
+    const endTs = Math.floor(Date.now() / 1000);
+    const anchorVals = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19];
+    stub.setFixture('anchor', { values: buildSeries(anchorVals, 30, endTs) });
+    stub.setFixture('cand_co', {
+      values: buildSeries([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50], 30, endTs),
+    });
+    const out = await executeMetricsThatMoved(
+      {
+        anchor_type: 'customer_metric',
+        anchor: 'anchor',
+        candidates: ['cand_co'],
+        window: '10m',
+        step: '30s',
+      },
+      ENV,
+    );
+    if (typeof out === 'string') throw new Error('expected envelope');
+    const d = out.data as {
+      status: string;
+      threshold_used: number;
+      threshold_basis: string;
+      anchor_ref: { type: string; expression: string };
+      anchor_dispersion: number;
+      query_count: number;
+      total_latency_ms: number;
+      backend_pressure_hint: string | null;
+      human_summary: string;
+      moved: Array<{ metric_ref: string }>;
+    };
+    assert.equal(d.status, 'success');
+    assert.equal(d.threshold_used, 0.15);
+    assert.equal(d.threshold_basis, 'default_uncalibrated');
+    assert.equal(d.anchor_ref.type, 'customer_metric');
+    assert.equal(d.anchor_ref.expression, 'anchor');
+    assert.ok(d.anchor_dispersion > 0.15, `expected dispersion > 0.15, got ${d.anchor_dispersion}`);
+    assert.equal(d.query_count, 2, 'one anchor + one candidate query');
+    assert.ok(d.total_latency_ms >= 0);
+    assert.ok(d.backend_pressure_hint === 'ok' || d.backend_pressure_hint === 'slow');
+    assert.ok(d.human_summary.length > 0);
+    assert.equal(d.moved.length, 1);
+    assert.equal(d.moved[0].metric_ref, 'cand_co');
+  });
+});
+
+test('GA: anchor without phase separation → status=anchor_no_phase_separation, no threshold returned', async () => {
+  await withStub(async (stub) => {
+    const endTs = Math.floor(Date.now() / 1000);
+    // Flat anchor: same value throughout. CV = 0. Guard refuses.
+    stub.setFixture('flat_anchor', { values: buildSeries(Array(20).fill(7), 30, endTs) });
+    stub.setFixture('cand', { values: buildSeries(Array(20).fill(5), 30, endTs) });
+    const out = await executeMetricsThatMoved(
+      {
+        anchor_type: 'customer_metric',
+        anchor: 'flat_anchor',
+        candidates: ['cand'],
+        window: '10m',
+        step: '30s',
+      },
+      ENV,
+    );
+    if (typeof out === 'string') throw new Error('expected envelope');
+    const d = out.data as {
+      status: string;
+      anchor_dispersion: number;
+      moved: unknown[];
+      not_moved: unknown[];
+      evaluation_failed: unknown[];
+      human_summary: string;
+    };
+    assert.equal(d.status, 'anchor_no_phase_separation');
+    assert.equal(d.anchor_dispersion, 0);
+    assert.equal(d.moved.length, 0);
+    assert.equal(d.not_moved.length, 0);
+    assert.equal(d.evaluation_failed.length, 0);
+    assert.match(d.human_summary, /below.*floor|no.*phase|re-anchor/i);
+    assert.match(out.summary.headline, /lacks phase separation/i);
+  });
+});
+
+test('GA: every candidate below threshold → status=no_signal', async () => {
+  await withStub(async (stub) => {
+    const endTs = Math.floor(Date.now() / 1000);
+    const anchorVals = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19];
+    stub.setFixture('anchor', { values: buildSeries(anchorVals, 30, endTs) });
+    // Candidate flat across both phases — gap below 0.15 floor.
+    stub.setFixture('flat_cand', { values: buildSeries(Array(20).fill(7), 30, endTs) });
+    const out = await executeMetricsThatMoved(
+      {
+        anchor_type: 'customer_metric',
+        anchor: 'anchor',
+        candidates: ['flat_cand'],
+        window: '10m',
+        step: '30s',
+      },
+      ENV,
+    );
+    if (typeof out === 'string') throw new Error('expected envelope');
+    const d = out.data as { status: string; moved: unknown[]; not_moved: unknown[]; human_summary: string };
+    assert.equal(d.status, 'no_signal');
+    assert.equal(d.moved.length, 0);
+    assert.equal(d.not_moved.length, 1, 'flat candidate still gets evaluated, just below floor');
+    assert.match(d.human_summary, /no candidate.*moved|stop searching/i);
+  });
+});
+
+test('GA: backend 503 on anchor → status=error with PrimitiveError envelope, retryable=true', async () => {
+  await withStub(async (stub) => {
+    const endTs = Math.floor(Date.now() / 1000);
+    stub.setFixture('anchor', { values: buildSeries([1, 2, 3, 4, 5, 6, 7, 8], 30, endTs) });
+    stub.setFixture('cand', { values: buildSeries([1, 2, 3, 4, 5, 6, 7, 8], 30, endTs) });
+    // Hard fail every request — anchor will 503 first.
+    stub.setFailureRate(1.0);
+    const out = await executeMetricsThatMoved(
+      {
+        anchor_type: 'customer_metric',
+        anchor: 'anchor',
+        candidates: ['cand'],
+        window: '10m',
+        step: '30s',
+      },
+      ENV,
+    );
+    if (typeof out === 'string') throw new Error('expected envelope');
+    const d = out.data as {
+      status: string;
+      error?: { error_type: string; retryable: boolean; suggested_backoff_ms: number | null; hint: string };
+    };
+    assert.equal(d.status, 'error');
+    assert.ok(d.error, 'error envelope must be populated');
+    if (!d.error) return;
+    assert.equal(d.error.error_type, 'backend_unavailable');
+    assert.equal(d.error.retryable, true);
+    assert.ok((d.error.suggested_backoff_ms ?? 0) > 0);
+    assert.match(d.error.hint, /HTTP 503/);
+  });
+});
+
+test('GA: metric_ref round-trips across the three tools', async () => {
+  await withStub(async (stub) => {
+    const endTs = Math.floor(Date.now() / 1000);
+    const anchorVals = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19];
+    stub.setFixture('anchor', { values: buildSeries(anchorVals, 30, endTs) });
+    // PromQL with extra whitespace — canonicalMetricRef should collapse it.
+    const candWithSpace = 'rate(  http_requests_total{job="api"}[5m])';
+    const candCanonical = 'rate( http_requests_total{job="api"}[5m])';
+    stub.setFixture(candWithSpace, {
+      values: buildSeries([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50], 30, endTs),
+    });
+    // Also register under the canonical form so the rank/overlay calls
+    // can fetch it (the stub fixtures are keyed by exact match).
+    stub.setFixture(candCanonical, {
+      values: buildSeries([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50], 30, endTs),
+    });
+
+    // Step 1: metrics_that_moved
+    const r1 = await executeMetricsThatMoved(
+      {
+        anchor_type: 'customer_metric',
+        anchor: 'anchor',
+        candidates: [candWithSpace],
+        window: '10m',
+        step: '30s',
+      },
+      ENV,
+    );
+    if (typeof r1 === 'string') throw new Error('expected envelope');
+    const d1 = r1.data as { moved: Array<{ metric_ref: string }> };
+    assert.equal(d1.moved.length, 1);
+    const ref1 = d1.moved[0].metric_ref;
+    assert.equal(ref1, candCanonical, 'metric_ref must be canonical (whitespace collapsed)');
+
+    // Step 2: pass that ref to rank_by_shape_similarity
+    const r2 = await executeRankByShapeSimilarity(
+      {
+        anchor_type: 'customer_metric',
+        anchor: 'anchor',
+        candidates: [ref1],
+        window: '10m',
+        step: '30s',
+      },
+      ENV,
+    );
+    if (typeof r2 === 'string') throw new Error('expected envelope');
+    const d2 = r2.data as { ranked: Array<{ metric_ref: string }> };
+    assert.equal(d2.ranked.length, 1, 'rank_by_shape should fetch the canonical-ref candidate cleanly');
+    const ref2 = d2.ranked[0].metric_ref;
+    assert.equal(ref2, ref1, 'metric_ref must remain identical across tool calls');
+
+    // Step 3: pass that ref to metric_overlay
+    const r3 = await executeMetricOverlay(
+      {
+        anchor_type: 'customer_metric',
+        anchor: 'anchor',
+        candidate: ref2,
+        window: '10m',
+        step: '30s',
+      },
+      ENV,
+    );
+    if (typeof r3 === 'string') throw new Error('expected envelope');
+    const d3 = r3.data as { candidate_ref: string };
+    assert.equal(d3.candidate_ref, ref2, 'metric_ref preserved through full 3-tool chain');
+  });
+});
+
+test('GA: rank_by_shape includes anchor_ref echo and threshold_basis=caller_override when caller passes args', async () => {
+  await withStub(async (stub) => {
+    const endTs = Math.floor(Date.now() / 1000);
+    const shape = [0, 0, 1, 3, 8, 15, 20, 18, 10, 5, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0];
+    stub.setFixture('anchor', { values: buildSeries(shape, 30, endTs) });
+    stub.setFixture('cand', { values: buildSeries(shape, 30, endTs) });
+    const out = await executeRankByShapeSimilarity(
+      {
+        anchor_type: 'customer_metric',
+        anchor: 'anchor',
+        candidates: ['cand'],
+        window: '10m',
+        step: '30s',
+        anchor_phase_aligned_floor: 0.2, // caller override
+      },
+      ENV,
+    );
+    if (typeof out === 'string') throw new Error('expected envelope');
+    const d = out.data as {
+      threshold_basis: string;
+      threshold_used: number;
+      anchor_ref: { type: string; expression: string };
+    };
+    assert.equal(d.threshold_basis, 'caller_override');
+    assert.equal(d.threshold_used, 0.2);
+    assert.equal(d.anchor_ref.expression, 'anchor');
+  });
+});
+
+test('GA: metric_overlay emits status=no_signal when anchor returns nothing', async () => {
+  await withStub(async (stub) => {
+    // anchor not registered → empty matrix
+    const endTs = Math.floor(Date.now() / 1000);
+    stub.setFixture('cand', { values: buildSeries([1, 2, 3, 4, 5, 6, 7, 8], 30, endTs) });
+    const out = await executeMetricOverlay(
+      {
+        anchor_type: 'customer_metric',
+        anchor: 'missing_anchor',
+        candidate: 'cand',
+        window: '10m',
+        step: '30s',
+      },
+      ENV,
+    );
+    if (typeof out === 'string') throw new Error('expected envelope');
+    const d = out.data as { status: string; n_buckets_aligned: number };
+    assert.equal(d.status, 'no_signal');
+    assert.equal(d.n_buckets_aligned, 0);
   });
 });
