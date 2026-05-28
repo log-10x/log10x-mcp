@@ -339,8 +339,15 @@ const TOOL_TABLE: Record<string, ExecuteFn> = {
     executeCustomerMetricsQuery(parseArgs(customerMetricsQuerySchema, raw)),
   log10x_discover_env: async (raw) => executeDiscoverEnv(parseArgs(discoverEnvSchema, raw)),
   log10x_advise_retriever: async (raw) => executeAdviseRetriever(parseArgs(adviseRetrieverSchema, raw)),
-  log10x_advise_install: async (raw, ev) =>
-    executeAdviseInstall(parseArgs(adviseInstallSchema, raw), buildLoadedEnvs(ev)),
+  log10x_advise_install: async (raw, ev) => {
+    // Passthrough rather than strip — the wizard does its own unknown-arg
+    // detection with "did you mean" suggestions. Default Zod .strip() would
+    // silently swallow typos like `targets` (instead of `backends`) and
+    // bounce the agent through a question-back turn for an arg it already
+    // tried to supply.
+    const parsed = (z.object(adviseInstallSchema).passthrough().parse(raw)) as Parameters<typeof executeAdviseInstall>[0];
+    return executeAdviseInstall(parsed, buildLoadedEnvs(ev));
+  },
   log10x_configure_compact: async (raw) => executeConfigureCompact(parseArgs(configureCompactSchema, raw)),
 
   // envs object (full Environments shape)

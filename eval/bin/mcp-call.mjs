@@ -17,13 +17,12 @@
  * harness's in-process autonomous-runner is not exposed to them.
  */
 import { resolve, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const evalRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const { loadEvalEnv } = await import(resolve(evalRoot, 'build-eval/env.js'));
-const { invokeTool, TOOL_NAMES } = await import(
-  resolve(evalRoot, 'build-eval/tool-registry.js')
-);
+const buildUrl = (rel) => pathToFileURL(resolve(evalRoot, rel)).href;
+const { loadEvalEnv } = await import(buildUrl('build-eval/env.js'));
+const { invokeTool, TOOL_NAMES } = await import(buildUrl('build-eval/tool-registry.js'));
 
 function parseArgv(argv) {
   const out = { tool: null, args: '{}', list: false, help: false };

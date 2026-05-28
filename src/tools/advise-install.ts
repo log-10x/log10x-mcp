@@ -199,6 +199,15 @@ type WizardData =
   | { mode: 'license_error'; ok: false; snapshot_id: string; error_message: string; markdown: string }
   | { mode: 'signin_required'; ok: false; snapshot_id: string; markdown: string }
   | { mode: 'demo_airgapped_warning'; ok: true; snapshot_id: string; is_signed_in: boolean; markdown: string }
+  | {
+      mode: 'unknown_args';
+      ok: false;
+      snapshot_id?: string;
+      unknown_keys: string[];
+      suggestions: Array<{ unknown: string; did_you_mean: string | null }>;
+      valid_keys: string[];
+      markdown: string;
+    }
   // `ok` on the plan variant comes from AdvisePlanSummary (blockers.length === 0).
   // A "plan" return is always a successful wizard run — even when the plan
   // itself has blockers, the wizard's job (turning answers into a typed
@@ -255,6 +264,111 @@ const QUESTION_META: Record<QuestionId, { headline: string; answer_field: string
     answer_field: 'license_jwt_paste',
   },
 };
+
+/**
+ * Canonical arg names the wizard accepts. Derived from the schema
+ * itself so a new field added to `adviseInstallSchema` is automatically
+ * accepted by the unknown-key check.
+ *
+ * `api_key` and `environment` aren't in the wizard's schema but are
+ * routinely injected by MCP hosts (auth credentials, multi-env
+ * selectors). Blocking them would break the install flow on those
+ * hosts, so they're whitelisted here.
+ */
+const KNOWN_ARG_NAMES: ReadonlySet<string> = new Set([
+  ...Object.keys(adviseInstallSchema),
+  'api_key',
+  'environment',
+]);
+
+/**
+ * Common LLM hallucinations → canonical arg. Lexical distance (Levenshtein)
+ * misses these because they're semantically near but characterwise far
+ * (`targets` vs `backends` is edit-distance 7). Hand-curated from observed
+ * agent behavior across model families. Add new entries when an eval run
+ * surfaces a new wrong word.
+ */
+const ARG_SYNONYMS: ReadonlyMap<string, string> = new Map([
+  // backends — TSDB destinations for engine metrics
+  ['targets', 'backends'],
+  ['target', 'backends'],
+  ['destinations', 'backends'],
+  ['destination', 'backends'],
+  ['outputs', 'backends'],
+  ['output', 'backends'],
+  ['sinks', 'backends'],
+  ['sink', 'backends'],
+  ['tsdbs', 'backends'],
+  ['tsdb', 'backends'],
+  ['metrics_backends', 'backends'],
+  ['metric_backends', 'backends'],
+  // app — install variant (reporter vs receiver)
+  ['mode', 'app'],
+  ['kind', 'app'],
+  ['variant', 'app'],
+  ['install_type', 'app'],
+  ['type', 'app'],
+  // license — JWT / source
+  ['license', 'license_jwt_paste'],
+  ['license_jwt', 'license_jwt_paste'],
+  ['jwt', 'license_jwt_paste'],
+  ['license_mode', 'license_source'],
+  // misc
+  ['ns', 'namespace'],
+  ['release', 'release_name'],
+  ['name', 'release_name'],
+  ['airgap', 'airgapped'],
+  ['offline', 'airgapped'],
+  ['snapshot', 'snapshot_id'],
+  ['snapshotId', 'snapshot_id'],
+]);
+
+/**
+ * Levenshtein edit distance — used to suggest the closest known arg
+ * when an agent passes an unknown one. Tiny implementation; the inputs
+ * are short identifier strings so O(n*m) is fine.
+ */
+function levenshtein(a: string, b: string): number {
+  if (a === b) return 0;
+  if (a.length === 0) return b.length;
+  if (b.length === 0) return a.length;
+  const prev = new Array<number>(b.length + 1);
+  const curr = new Array<number>(b.length + 1);
+  for (let j = 0; j <= b.length; j++) prev[j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    curr[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a.charCodeAt(i - 1) === b.charCodeAt(j - 1) ? 0 : 1;
+      curr[j] = Math.min(curr[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost);
+    }
+    for (let j = 0; j <= b.length; j++) prev[j] = curr[j];
+  }
+  return prev[b.length];
+}
+
+/**
+ * Find the closest known arg name to an unknown one. Returns null if
+ * nothing is close enough to be a confident suggestion. The threshold
+ * scales with the unknown's length so short typos still match but
+ * unrelated words don't.
+ */
+function findClosestKnownArg(unknown: string): string | null {
+  // 1. Hand-curated semantic synonyms first — catches the cases where the
+  //    wrong word is semantically close but lexically far ('targets' vs
+  //    'backends'). Case-insensitive.
+  const synonym = ARG_SYNONYMS.get(unknown.toLowerCase());
+  if (synonym) return synonym;
+  // 2. Levenshtein fall-through for actual typos ('snapshot_di' → 'snapshot_id').
+  let best: { key: string; dist: number } | null = null;
+  const lower = unknown.toLowerCase();
+  for (const known of KNOWN_ARG_NAMES) {
+    const d = levenshtein(lower, known.toLowerCase());
+    if (!best || d < best.dist) best = { key: known, dist: d };
+  }
+  if (!best) return null;
+  const threshold = Math.max(2, Math.floor(unknown.length / 2));
+  return best.dist <= threshold ? best.key : null;
+}
 
 /**
  * Build a wizard StructuredOutput. The mode determines the headline,
@@ -364,6 +478,22 @@ function wizardEnvelopeMeta(data: WizardData): {
           'plan NOT emitted yet — the user picked sign-in, but the wizard cannot proceed until log10x_signin_start has been called and completed successfully. Do NOT proceed without it; do NOT silently fall back to demo.',
         ],
       };
+    case 'unknown_args': {
+      const suggestions = data.suggestions
+        .filter((s) => s.did_you_mean)
+        .map((s) => `'${s.unknown}' → '${s.did_you_mean}'`)
+        .join(', ');
+      return {
+        headline:
+          suggestions.length > 0
+            ? `Wizard rejected unknown arg${data.unknown_keys.length === 1 ? '' : 's'} (${data.unknown_keys.join(', ')}). Did you mean: ${suggestions}? Re-invoke with the canonical name.`
+            : `Wizard rejected unknown arg${data.unknown_keys.length === 1 ? '' : 's'} (${data.unknown_keys.join(', ')}). Valid args: ${data.valid_keys.join(', ')}. Re-invoke without the unknown key${data.unknown_keys.length === 1 ? '' : 's'}.`,
+        actions: [],
+        warnings: [
+          `unknown_args rejected: ${data.unknown_keys.join(', ')} — wizard will not parse partial / typo'd input; re-invoke with the canonical names`,
+        ],
+      };
+    }
     case 'demo_airgapped_warning':
       // Two alternatives: switch to real license (signin_start +
       // re-invoke) OR keep demo and drop airgapped. Labelled
@@ -455,6 +585,43 @@ export async function executeAdviseInstall(
   mcpServer?: McpServer
 ): Promise<string | StructuredOutput> {
   const view = args.view ?? 'summary';
+
+  // Surface unknown args up-front rather than silently dropping them.
+  // Agents reliably hallucinate field names ('targets' / 'destinations'
+  // for `backends`, 'mode' for `app`, etc.). Detecting the typo and
+  // returning a typed envelope with "did you mean" gets the next call
+  // right; silently dropping wastes a wizard round-trip.
+  const rawKeys = Object.keys(args as Record<string, unknown>);
+  const unknownKeys = rawKeys.filter((k) => !KNOWN_ARG_NAMES.has(k));
+  if (unknownKeys.length > 0) {
+    const suggestions = unknownKeys.map((k) => ({
+      unknown: k,
+      did_you_mean: findClosestKnownArg(k),
+    }));
+    const validKeys = [...KNOWN_ARG_NAMES].sort();
+    const lines: string[] = [`# Install wizard — unknown arg${unknownKeys.length === 1 ? '' : 's'}`, ''];
+    for (const s of suggestions) {
+      lines.push(
+        s.did_you_mean
+          ? `- \`${s.unknown}\` is not a valid arg. Did you mean \`${s.did_you_mean}\`?`
+          : `- \`${s.unknown}\` is not a valid arg.`
+      );
+    }
+    lines.push('');
+    lines.push(`Valid args: ${validKeys.map((k) => `\`${k}\``).join(', ')}.`);
+    lines.push('');
+    lines.push('Re-invoke `log10x_advise_install` with the canonical names.');
+    return wizardReturn(view, {
+      mode: 'unknown_args',
+      ok: false,
+      snapshot_id: typeof args.snapshot_id === 'string' ? args.snapshot_id : undefined,
+      unknown_keys: unknownKeys,
+      suggestions,
+      valid_keys: validKeys,
+      markdown: lines.join('\n'),
+    });
+  }
+
   const snapshot = getSnapshot(args.snapshot_id);
   if (!snapshot) {
     const md = [
