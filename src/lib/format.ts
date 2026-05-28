@@ -89,7 +89,7 @@ export function fmtPct(value: number): string {
   return `${Math.round(value)}%`;
 }
 
-/** Timeframe config matching SlackTimeframe.java. */
+/** Timeframe config. */
 export interface Timeframe {
   /** Window length in days. Fractional for sub-day windows (e.g., 1h = 1/24). */
   days: number;

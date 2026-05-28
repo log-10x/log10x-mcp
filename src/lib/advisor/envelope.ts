@@ -26,6 +26,21 @@ export interface AdvisePlanSummary {
   preflight: { name: string; status: 'ok' | 'warn' | 'fail' | 'unknown'; detail: string }[];
   preflight_summary: { ok: number; warn: number; fail: number; unknown: number };
   install_step_count: number;
+  /**
+   * Total number of files the install steps emit (sum of each step's
+   * `file` count + `files[]` length). A single overlay can require
+   * multiple files — the Fluentd Receiver path emits five (values.yaml
+   * + tenx-kustomize/{kustomization, sidecar-patch, post-render.sh,
+   * post-render.cmd}). Agents use this to know "the install plan is
+   * not a one-file paste".
+   */
+  install_file_count: number;
+  /**
+   * When the install plan emits ANY file the user must `chmod +x` (e.g.
+   * the kustomize post-render shell shim), `true` so the agent surfaces
+   * the chmod ritual to the user even if they only skim the markdown.
+   */
+  install_requires_chmod: boolean;
   verify_probe_count: number;
   teardown_step_count: number;
   blockers: string[];
@@ -74,6 +89,15 @@ function summarize(plan: AdvisePlan, action: AdviseAction): AdvisePlanSummary {
   const warn = plan.preflight.filter((p) => p.status === 'warn').length;
   const fail = plan.preflight.filter((p) => p.status === 'fail').length;
   const unknown = plan.preflight.filter((p) => p.status === 'unknown').length;
+  // Each step's file count: 0 (no file), 1 (`file`), or N (`files[]`).
+  // `files[]` wins over `file` when both present (matches render.ts).
+  let install_file_count = 0;
+  let install_requires_chmod = false;
+  for (const s of plan.install) {
+    const stepFiles = s.files ?? (s.file ? [s.file] : []);
+    install_file_count += stepFiles.length;
+    if (stepFiles.some((f) => f.executable)) install_requires_chmod = true;
+  }
   return {
     ok: plan.blockers.length === 0,
     app: plan.app,
@@ -85,6 +109,8 @@ function summarize(plan: AdvisePlan, action: AdviseAction): AdvisePlanSummary {
     preflight: plan.preflight.map((p) => ({ name: p.name, status: p.status, detail: p.detail })),
     preflight_summary: { ok, warn, fail, unknown },
     install_step_count: plan.install.length,
+    install_file_count,
+    install_requires_chmod,
     verify_probe_count: plan.verify.length,
     teardown_step_count: plan.teardown.length,
     blockers: plan.blockers,

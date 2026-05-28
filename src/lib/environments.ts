@@ -57,10 +57,9 @@ import {
 import { DEFAULT_LABELS, type LabelNameMap } from './promql.js';
 
 /**
- * The publicly-baked demo API key used by console.log10x.com's "explore
- * without signing up" experience. Hardcoded in the dotcom frontend
- * (dotcom/log10x/js/config.js), the console build (terraform/console),
- * and the demo-stats-cache lambda — so this isn't a secret.
+ * The publicly-baked demo API key used by console.log10x.com's "Try Live
+ * Demo" login on the account console. Hardcoded in the console build
+ * (terraform/console) — so this isn't a secret.
  *
  * Grants READ-only access to the shared "Log10x Demo" env. No writes.
  * Same data every demo user sees on the console.

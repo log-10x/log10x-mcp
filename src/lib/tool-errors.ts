@@ -11,6 +11,8 @@
  * generic right answer.
  */
 
+import { tenxAvailabilityHint } from './install-hints.js';
+
 export function describeToolError(toolName: string, raw: unknown): string {
   const msg = raw instanceof Error ? raw.message : String(raw);
   const suggestion = suggestForTool(toolName, msg);
@@ -61,7 +63,8 @@ function suggestForTool(toolName: string, msg: string): string | undefined {
         return 'Batch exceeds the 100 KB paste Lambda limit. Either trim to ~1-2K events, paginate across multiple calls, or set privacy_mode=true with a locally-installed `tenx` CLI for unlimited size.';
       }
       if (/CLI is not installed|tenx/i.test(msg)) {
-        return 'Local tenx CLI is missing. Options: (1) install locally (`brew install log-10x/tap/log10x` on macOS, MSI installer on Windows, deb/rpm/install.sh on Linux — see https://docs.log10x.com/install/); (2) run tenx in Docker by setting `LOG10X_TENX_MODE=docker`; (3) set privacy_mode=false to route through the public paste endpoint.';
+        return tenxAvailabilityHint() +
+          '\n\nOr bypass: set privacy_mode=false to route through the public paste endpoint.';
       }
       if (/No events provided/i.test(msg)) {
         return 'Pass `source: "text"` with the raw events as a `text` argument, or `source: "file"` with `path`, or `source: "events"` with an inline array.';
@@ -70,7 +73,7 @@ function suggestForTool(toolName: string, msg: string): string | undefined {
 
     case 'log10x_retriever_query':
       if (/not configured/i.test(msg)) {
-        return 'The Retriever is not deployed in this environment. For in-retention queries, use the customer\'s SIEM directly. For long-window retrieval, deploy the Retriever per https://docs.log10x.com/apps/cloud/retriever/ and set __SAVE_LOG10X_RETRIEVER_URL__.';
+        return 'The Retriever is not deployed in this environment. For in-retention queries, use the customer\'s SIEM directly. For long-window retrieval, deploy the Retriever per https://doc.log10x.com/apps/retriever/ and set __SAVE_LOG10X_RETRIEVER_URL__.';
       }
       if (/timed out/i.test(msg)) {
         return 'Query exceeded the wall-time budget. Narrow the window, add a more selective filter, or switch format to `count` or `aggregated` for a summary view instead of raw events.';

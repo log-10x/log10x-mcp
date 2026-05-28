@@ -196,18 +196,14 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   // chart that ran tenx as a stdin-fed container was the broken path;
   // it's gone. No blocker.
 
-  // fluentd receiver path is not yet wired. The upstream fluent/fluentd
-  // chart has no extraContainers hook, so the sidecar is injected via a
-  // kustomize post-renderer (see receiver/deploy.md fluentd section).
-  // That requires the wizard to emit FOUR files alongside the values
-  // overlay — kustomization.yaml, sidecar-patch.yaml, post-render.sh,
-  // post-render.cmd — which the install plan's single-file `file:` step
-  // model can't currently express. Block until that's wired.
-  if (app === 'receiver' && spec && forwarder === 'fluentd') {
-    blockers.push(
-      "Fluentd receiver path isn't wired into the wizard yet. The upstream `fluent/fluentd` chart needs a kustomize post-renderer overlay (the sidecar is injected via a Strategic Merge Patch on the Deployment, not via an extraContainers values field). See `mksite/docs/apps/receiver/deploy.md` Fluentd section for the canonical setup — follow it by hand for now, or use a different forwarder (fluent-bit / otel-collector / vector / logstash all wizard-supported), or deploy the standalone Reporter alongside your existing Fluentd."
-    );
-  }
+  // fluentd receiver path is now supported via the upstream fluent/fluentd
+  // chart + a kustomize post-renderer overlay (the upstream chart has no
+  // extraContainers hook, so the sidecar is patched onto the rendered
+  // Deployment via Strategic Merge Patch). The wizard emits values.yaml
+  // + tenx-kustomize/{kustomization,sidecar-patch,post-render.sh,
+  // post-render.cmd} via the per-step `files[]` model and tells `helm
+  // upgrade` to use `--post-renderer ./tenx-kustomize/post-render.sh`.
+  // No blocker.
   if (!args.licenseJwt && !args.skipInstall) {
     blockers.push(
       'Log10x license JWT is required to produce an install plan. Pass `license_jwt` (fetch one from `POST /api/v1/license/demo` for anonymous demo, or `POST /api/v1/license` with an Auth0 access token for a user-scoped one). Teardown and verify plans work without it.'
@@ -579,36 +575,66 @@ function buildInstallSteps(opts: {
   }
 
   const valuesFile = `${releaseName}-values.yaml`;
-  steps.push({
-    title: 'Write Helm values',
-    rationale: `Tenx config + ${spec.label}-specific output destination (\`${destination}\`).`,
-    file: {
-      path: valuesFile,
-      contents: spec.renderValues({
-        licenseJwt,
-        isDemoLicense,
+  const valuesPlanFile = {
+    path: valuesFile,
+    contents: spec.renderValues({
+      licenseJwt,
+      isDemoLicense,
+      licenseSecretName,
+      licenseSecretKey,
+      releaseName,
+      destination,
+      outputHost,
+      splunkHecToken,
+      optimize,
+      readOnly,
+      backends,
+      backendCredentials,
+      airgapped,
+    }),
+    language: 'yaml' as const,
+  };
+  // Some forwarders (Fluentd) need extra files alongside the values
+  // file — a kustomize post-renderer directory with sidecar-patch +
+  // shell shims. Forwarders that need them implement `renderExtraFiles`;
+  // others omit it and get the single-file step.
+  const extraFiles = spec.renderExtraFiles
+    ? spec.renderExtraFiles({
+        releaseName,
+        namespace,
+        optimize,
+        airgapped,
         licenseSecretName,
         licenseSecretKey,
-        releaseName,
-        destination,
-        outputHost,
-        splunkHecToken,
-        optimize,
-        readOnly,
-        backends,
-        backendCredentials,
-        airgapped,
-      }),
-      language: 'yaml',
-    },
+      })
+    : [];
+  const allFiles = [valuesPlanFile, ...extraFiles];
+  steps.push({
+    title: extraFiles.length > 0 ? 'Write Helm values + kustomize overlay' : 'Write Helm values',
+    rationale: extraFiles.length > 0
+      ? `Tenx config + ${spec.label}-specific config, plus a kustomize post-renderer overlay (the upstream chart has no extraContainers hook — sidecar injected via Strategic Merge Patch on the rendered manifest).`
+      : `Tenx config + ${spec.label}-specific output destination (\`${destination}\`).`,
+    files: allFiles,
     commands: [],
   });
 
+  const extraInstallCmds = spec.extraInstallCommands
+    ? spec.extraInstallCommands({ releaseName, namespace })
+    : [];
+  const extraHelmFlags = spec.extraHelmFlags
+    ? spec.extraHelmFlags({ releaseName, namespace })
+    : [];
+  const helmFlagSuffix = extraHelmFlags.length > 0
+    ? ' \\\n  ' + extraHelmFlags.join(' \\\n  ')
+    : '';
   steps.push({
     title: 'Install via Helm',
-    rationale: `Deploys the ${spec.label} chart with the 10x Reporter sidecar enabled.`,
+    rationale: extraHelmFlags.length > 0
+      ? `Deploys the ${spec.label} chart with the 10x Receiver sidecar injected via the kustomize post-renderer (\`--post-renderer\` flag).`
+      : `Deploys the ${spec.label} chart with the 10x Reporter sidecar enabled.`,
     commands: [
-      `helm upgrade --install ${releaseName} ${spec.chartRef} \\\n  -n ${namespace} --create-namespace \\\n  -f ${valuesFile}`,
+      ...extraInstallCmds,
+      `helm upgrade --install ${releaseName} ${spec.chartRef} \\\n  -n ${namespace} --create-namespace \\\n  -f ${valuesFile}${helmFlagSuffix}`,
     ],
   });
 
