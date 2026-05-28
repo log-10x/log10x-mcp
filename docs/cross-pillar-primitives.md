@@ -1,8 +1,12 @@
-# Cross-pillar primitives — agent behavior contract
+# Cross-pillar primitives + investigate — agent behavior contract
 
-The three cross-pillar primitives in this MCP server (`log10x_metrics_that_moved`, `log10x_rank_by_shape_similarity`, `log10x_metric_overlay`) take a log-pattern anchor and customer Prometheus metric candidates and answer "which metrics moved with this log pattern, when, and by how much."
+This contract covers the three cross-pillar primitives (`log10x_metrics_that_moved`, `log10x_rank_by_shape_similarity`, `log10x_metric_overlay`) AND the orchestrating `log10x_investigate` tool. They share the same envelope-shape principles and the same auto-mitigation gate.
 
 The realistic caller is an AI agent reasoning over an incident, not a human typing into a CLI. This document specifies how the agent SHOULD branch on each tool's output. It is part of the tool's API surface — schema descriptions reference it.
+
+The cross-pillar primitives take a log-pattern anchor and customer-TSDB metric candidates and answer "which metrics moved with this log pattern, when, and by how much." The `log10x_investigate` tool orchestrates a fuller narrative: anchor resolution, trajectory-shape detection, lag correlation, temporal-evidence chain, recommended next actions.
+
+**Customer TSDB** = the customer's metrics backend, accessed via a PromQL-compatible read API. Supported backends include self-hosted Prometheus, Mimir, Cortex, AWS Managed Prometheus, GCP Managed Prometheus, Grafana Cloud Mimir, Datadog (Prometheus-compatible read API), and Log10x Cloud. The tools work against any of these via the adapter layer in `src/lib/customer-metrics.ts`.
 
 ## Composition
 
@@ -123,13 +127,54 @@ Once a customer has calibrated the thresholds (overrides via `phase_gap_floor`, 
 
 The default thresholds are placeholders. For a real customer backend, calibrate per backend:
 
-1. Pick a metric in the customer's Prometheus that you know has a real busy/quiet split (e.g. `node_cpu_seconds_total` during a known incident window).
+1. Pick a metric in the customer's TSDB that you know has a real busy/quiet split (e.g. `node_cpu_seconds_total` during a known incident window).
 2. Run `log10x_metrics_that_moved` with a small candidate set you know co-moves with that anchor. Note the gaps the tool reports for true positives.
 3. Run again with candidates you know DON'T co-move (e.g. unrelated services). Note the gaps the tool reports for true negatives.
 4. Pick `phase_gap_floor` between the two distributions — typically the 95th percentile of the noise distribution.
 5. Repeat for `lag_search_max_abs` (longest known cascade time × 2) and `anchor_phase_aligned_floor` (same as `phase_gap_floor` is fine).
 
 The chaos generator at `backend/terraform/demo/chaos.tf` produces a known-shape signal you can use as a calibration anchor in a test environment. See `backend/terraform/demo/README.md` "First-customer-pilot validation playbook" for the 4-shape matrix.
+
+## `log10x_investigate` envelope additions
+
+Investigate composes its narrative from the same primitives plus a separate trajectory-shape and lag-correlation pipeline. Its envelope reuses the shared fields (`status`, `threshold_basis`, `anchor_ref`, `total_latency_ms`, `human_summary`) with these additions:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `findings[]` | array | Structured evidence rows. Each has `pattern`, `service`, `lag_seconds`, `confidence`, `evidence_strength` (strong/medium/weak), `kind`, and a `suggestion` for the agent's next move. |
+| `n_chain_steps` | number | Length of the temporal chain extracted from the report. |
+| `n_co_movers` | number | Lower-confidence co-mover count. |
+| `report_markdown` | string | Full long-form narrative for paste-to-user. |
+| `shape` | enum | `acute` / `drift` / `environment` / `no_significant_movement` / `empty`. |
+| `mode` | enum | `pattern` / `service` / `environment` / `raw_line`. |
+| `investigation_id` | uuid | Cache key for later retrieval. |
+
+### Investigate-specific status states
+
+`success`, `no_signal`, `insufficient_data`, `error` — same semantics as the primitives, plus:
+
+- `insufficient_data` fires when the anchor resolves but trajectory analysis can't produce a usable shape (window too short, sparse backend coverage, anchor below noise floor). Agent should widen the window or re-anchor.
+- `no_signal` fires when the anchor moved but no co-mover crossed the confidence threshold. The investigation IS valid but produced no leads. Agent should stop searching with this anchor.
+
+### Investigate-specific threshold provenance
+
+Investigate has its own threshold pile (clean-chain confidence floor, acute noise floor, drift slope per severity, max co-movers for lag, etc.) defined in `src/lib/thresholds.ts`. Provenance values:
+
+- `default_uncalibrated` — `LOG10X_THRESHOLDS_FILE` env var not set; using hand-picked SPEC_DEFAULTS.
+- `config_file` — `LOG10X_THRESHOLDS_FILE` points at a calibrated config (operator took ownership).
+- `caller_override` — reserved for future per-call threshold overrides (not exposed yet).
+
+Same auto-mitigation gate applies: agents MUST NOT auto-mitigate when `threshold_basis === "default_uncalibrated"`.
+
+### Investigate output framing — observations, not verdicts
+
+The investigate template uses observation-shaped headings:
+
+- "Strongest temporal evidence (lead by lag time, not proven cause)"
+- "Temporal chain (lead-time order, not proven cause)"
+- "Co-movers (lower confidence)"
+
+The `human_summary` field always includes the phrase "correlation, not proven cause" when a lead is identified. Agents reading this output and presenting it to a human MUST preserve that framing. Reframing as "the cause is X" violates the contract.
 
 ## Quick reference — output state cheatsheet
 

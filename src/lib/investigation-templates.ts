@@ -68,6 +68,10 @@ export function renderAcuteSpikeReport(input: AcuteSpikeReportInput): string {
     lines.push('');
     lines.push(`> ⚠ **Metric warning**: ${input.metricWarning}`);
   }
+  if (!process.env.LOG10X_THRESHOLDS_FILE) {
+    lines.push('');
+    lines.push('> ⚠ **Uncalibrated thresholds**: the confidence floors, noise floor, and lag bounds are spec defaults. They have not been calibrated against this customer TSDB. Treat findings as evidence, not verdicts. Do not auto-mitigate without verifying via traces, deploy timeline, or a second signal. To calibrate, point `LOG10X_THRESHOLDS_FILE` at a config file with backend-specific overrides.');
+  }
   lines.push('');
 
   // Fidelity annotations — tier-aware
@@ -93,7 +97,7 @@ export function renderAcuteSpikeReport(input: AcuteSpikeReportInput): string {
   // Pre-compute extras so the no-chain message can reference them accurately.
   const allExtras = input.correlation.coMovers.filter((m) => !chain.find((c) => c.mover.pattern === m.pattern));
 
-  lines.push('### Most likely lead (strongest temporal co-mover)');
+  lines.push('### Strongest temporal evidence (lead by lag time, not proven cause)');
   lines.push('');
   if (chain.length === 0) {
     if (allExtras.length > 0) {

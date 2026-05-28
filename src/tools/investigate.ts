@@ -52,7 +52,7 @@ export const investigateSchema = {
   window: z
     .string()
     .default('1h')
-    .describe('Analysis window. `1h` default for acute-spike cases; `30d` recommended for drift cases. Accepts any PromQL range string. Alias: `timeRange`.'),
+    .describe('Analysis window. `1h` default for acute-spike cases; `30d` recommended for drift cases. Accepts any PromQL-style duration string (`15m`, `1h`, `6h`, `24h`, `7d`). Alias: `timeRange`.'),
   timeRange: z
     .string()
     .optional()
@@ -67,10 +67,131 @@ export const investigateSchema = {
     .describe('`shallow`: anchor service only. `normal` (default): anchor service + immediate dependencies. `deep`: full environment-wide.'),
   environment: z.string().optional().describe('Environment nickname — required in multi-env setups.'),
   use_bytes: z.boolean().default(false).describe('Use byte-based rate instead of event-count. Event-count is strongly preferred; use only if the Reporter does not emit the count metric.'),
-  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.investigation_id, data.mode, data.starting_point, data.shape, data.findings_count, data.markdown). markdown wraps the rendered report in data.markdown.'),
 };
 
 type Mode = 'pattern' | 'service' | 'environment' | 'raw_line';
+
+/**
+ * Top-level call status. Agent branches on this before reading anything else.
+ *   - `success`: investigation produced a usable narrative. Read `findings`
+ *     and `human_summary`. Whether to ACT on the findings depends on
+ *     `threshold_basis` and the agent contract.
+ *   - `no_signal`: anchor resolved but no co-movers crossed the noise
+ *     floor. Stop searching.
+ *   - `insufficient_data`: anchor couldn't be resolved, window too short,
+ *     or backend returned too few buckets. Re-anchor or widen the window.
+ *   - `error`: structural failure. Read `data.error`.
+ */
+export type InvestigateStatus = 'success' | 'no_signal' | 'insufficient_data' | 'error';
+
+/**
+ * Threshold provenance. Calibration honesty: investigate's thresholds
+ * (clean-chain confidence floor, acute noise floor, drift slope, etc.)
+ * are hand-picked SPEC_DEFAULTS unless the operator points
+ * LOG10X_THRESHOLDS_FILE at a calibrated config. Agents MUST NOT
+ * auto-mitigate when threshold_basis === 'default_uncalibrated'.
+ */
+export type ThresholdBasis = 'default_uncalibrated' | 'config_file' | 'caller_override';
+
+export interface ParsedReport {
+  shape: string | null;
+  mode: string | null;
+  investigationId: string | null;
+  leadPattern: string | null;
+  leadService: string | null;
+  leadConfidence: number | null;
+  leadLagSeconds: number | null;
+  chainLength: number;
+  coMoverCount: number;
+  hasNoSignalMarker: boolean;
+}
+
+/**
+ * Best-effort extraction of structured signals from the rendered
+ * markdown. Used to populate the agent-facing envelope without
+ * refactoring the rendering pipeline. Regex-fragile by design — if a
+ * template changes, the agent gets `null` for that field and falls
+ * back to reading `data.report_markdown`.
+ */
+export function parseReport(md: string): ParsedReport {
+  // Match the template's "**Investigation id**: <uuid>" line OR the
+  // legacy "investigation_id: <uuid>" form.
+  const idMatch =
+    md.match(/\*\*Investigation id\*\*:\s*([0-9a-f-]{36})/i) ??
+    md.match(/investigation_id`?:?\s*`?([0-9a-f-]{36})/i);
+  const shapeMatch = md.match(/\*\*shape\*\*:\s*`?(acute|drift|environment|no_significant_movement|empty)`?/i);
+  const modeMatch = md.match(/\*\*mode\*\*:\s*`?(pattern|service|environment|raw_line)`?/i);
+  const leadPatternMatch = md.match(/\*\*Pattern\*\*:\s*`([^`]+)`(?:\s+in\s+`([^`]+)`)?/);
+  const confMatch = md.match(/\*\*Confidence\*\*:\s*(\d+)%/);
+  const lagMatch = md.match(/peaked\s+(\d+)s\s+before/i);
+  // Chain section: each link is rendered as `${idx}. \`pattern\` (...)`.
+  // Count numbered list items inside the section.
+  let chainCount = 0;
+  if (/^### Temporal chain/m.test(md)) {
+    const afterChain = md.split(/^### Temporal chain[^\n]*$/m)[1] ?? '';
+    const upToNextSection = afterChain.split(/^### /m)[0] ?? '';
+    chainCount = (upToNextSection.match(/^\d+\.\s+`/gm) ?? []).length;
+  }
+  // Co-mover section: each line is `- \`pattern\` ...`.
+  let coMoverCount = 0;
+  if (/^### Co-movers \(lower confidence\)/m.test(md)) {
+    const afterCM = md.split(/^### Co-movers[^\n]*$/m)[1] ?? '';
+    const upToNextSection = afterCM.split(/^### /m)[0] ?? '';
+    coMoverCount = (upToNextSection.match(/^- `/gm) ?? []).length;
+  }
+  const hasNoSignal =
+    /No co-movers exceeded|No co-movers crossed the noise floor/i.test(md);
+  return {
+    shape: shapeMatch?.[1] ?? null,
+    mode: modeMatch?.[1] ?? null,
+    investigationId: idMatch?.[1] ?? null,
+    leadPattern: leadPatternMatch?.[1] ?? null,
+    leadService: leadPatternMatch?.[2] ?? null,
+    leadConfidence: confMatch ? parseInt(confMatch[1], 10) / 100 : null,
+    leadLagSeconds: lagMatch ? -parseInt(lagMatch[1], 10) : null, // negative = leads
+    chainLength: chainCount,
+    coMoverCount: coMoverCount,
+    hasNoSignalMarker: hasNoSignal,
+  };
+}
+
+export function detectThresholdBasis(): ThresholdBasis {
+  return process.env.LOG10X_THRESHOLDS_FILE ? 'config_file' : 'default_uncalibrated';
+}
+
+export function buildHumanSummary(
+  starting_point: string,
+  window: string,
+  status: InvestigateStatus,
+  parsed: ParsedReport,
+  thresholdBasis: ThresholdBasis,
+): string {
+  const calibTag =
+    thresholdBasis === 'default_uncalibrated'
+      ? ' Thresholds are uncalibrated defaults — verify the finding manually before acting on it.'
+      : '';
+  if (status === 'insufficient_data') {
+    return `Investigation of "${starting_point}" over ${window} could not produce a usable analysis. The anchor resolved but the window or backend coverage was too thin. Widen the window or re-anchor.${calibTag}`;
+  }
+  if (status === 'no_signal') {
+    return `Investigation of "${starting_point}" over ${window} found no co-movers above the noise floor. Anchor moved, but nothing else moved with it in this window. Widen the window, switch to deep depth, or conclude there is no detectable lead.${calibTag}`;
+  }
+  if (status === 'error') {
+    return `Investigation of "${starting_point}" failed structurally. See data.error for details.${calibTag}`;
+  }
+  if (!parsed.leadPattern) {
+    return `Investigation of "${starting_point}" produced a ${parsed.shape ?? 'unknown'}-shape narrative over ${window}. No single lead pattern was identified.${calibTag}`;
+  }
+  const lagFragment =
+    parsed.leadLagSeconds !== null && parsed.leadLagSeconds < 0
+      ? `peaked ${Math.abs(parsed.leadLagSeconds)}s before the anchor`
+      : 'moved concurrently with the anchor';
+  const confFragment =
+    parsed.leadConfidence !== null
+      ? ` Confidence: ${(parsed.leadConfidence * 100).toFixed(0)}%${thresholdBasis === 'default_uncalibrated' ? ' (uncalibrated)' : ''}.`
+      : '';
+  return `Strongest temporal evidence on "${starting_point}" (${window}): \`${parsed.leadPattern}\`${parsed.leadService ? ` in \`${parsed.leadService}\`` : ''} ${lagFragment}.${confFragment} ${parsed.chainLength} chain step(s), ${parsed.coMoverCount} additional lower-confidence co-mover(s). This is correlation, not proven cause — verify via traces / deploy timeline before acting.${calibTag}`;
+}
 
 export async function executeInvestigate(
   args: {
@@ -81,32 +202,128 @@ export async function executeInvestigate(
     depth: 'shallow' | 'normal' | 'deep';
     environment?: string;
     use_bytes: boolean;
+    /** Ignored. Retained for backward-compat with in-process callers; the
+     * markdown view was removed from the public schema in favor of the
+     * structured `human_summary` field. */
     view?: 'summary' | 'markdown';
   },
   env: EnvConfig
-): Promise<string | import('../lib/output-types.js').StructuredOutput> {
-  const view = args.view ?? 'summary';
-  const md = await executeInvestigateInner(args, env);
+): Promise<import('../lib/output-types.js').StructuredOutput> {
+  const startedAt = Date.now();
+  const thresholdBasis = detectThresholdBasis();
   const { buildEnvelope: __be, buildMarkdownEnvelope: __bme } = await import('../lib/output-types.js');
-  const idMatch = md.match(/investigation_id`?:?\s*`?([0-9a-f-]{36})/i);
-  const shapeMatch = md.match(/\*\*shape\*\*:\s*`?(acute|drift|environment|no_significant_movement|empty)`?/i);
-  const modeMatch = md.match(/\*\*mode\*\*:\s*`?(pattern|service|environment|raw_line)`?/i);
-  if (view === 'markdown') {
-    return __bme({ tool: 'log10x_investigate', summary: { headline: `Investigation of "${args.starting_point}" (window=${args.window})` }, markdown: md });
+  const { wrapBackendError } = await import('../lib/primitive-errors.js');
+
+  // ── Structural failure path ────────────────────────────────────────
+  let md: string;
+  try {
+    md = await executeInvestigateInner(args, env);
+  } catch (e) {
+    const err = wrapBackendError(e);
+    return __be({
+      tool: 'log10x_investigate',
+      view: 'summary',
+      summary: {
+        headline: `Investigation of "${args.starting_point}" failed: ${err.error_type}`,
+      },
+      data: {
+        status: 'error' as InvestigateStatus,
+        threshold_basis: thresholdBasis,
+        anchor_ref: {
+          type: 'starting_point',
+          expression: args.starting_point,
+        },
+        starting_point: args.starting_point,
+        window: args.window,
+        depth: args.depth,
+        baseline_offset: args.baseline_offset,
+        use_bytes: args.use_bytes,
+        total_latency_ms: Date.now() - startedAt,
+        human_summary: `Investigation failed: ${err.hint}`,
+        error: err,
+        report_markdown: '',
+      },
+    });
   }
+
+  const parsed = parseReport(md);
+
+  // ── Status determination ──────────────────────────────────────────
+  let status: InvestigateStatus = 'success';
+  if (parsed.shape === 'empty' || parsed.shape === 'no_significant_movement') {
+    status = 'insufficient_data';
+  } else if (parsed.hasNoSignalMarker || (parsed.chainLength === 0 && parsed.coMoverCount === 0)) {
+    status = 'no_signal';
+  }
+
+  const human_summary = buildHumanSummary(
+    args.starting_point,
+    args.window,
+    status,
+    parsed,
+    thresholdBasis,
+  );
+
+  // ── Backward-compat markdown view ─────────────────────────────────
+  // Public schema dropped 'view'; retained for in-process callers
+  // (existing investigation-cache / debug tooling) that still ask
+  // for the rendered report directly.
+  if (args.view === 'markdown') {
+    return __bme({
+      tool: 'log10x_investigate',
+      summary: { headline: `Investigation of "${args.starting_point}" (window=${args.window})` },
+      markdown: md,
+    });
+  }
+
   return __be({
     tool: 'log10x_investigate',
     view: 'summary',
-    summary: { headline: `Investigation of "${args.starting_point}" (window=${args.window}): shape=${shapeMatch?.[1] ?? 'unknown'}${idMatch ? `, id=${idMatch[1].slice(0, 8)}` : ''}.` },
+    summary: {
+      headline: `Investigation of "${args.starting_point}" (window=${args.window}): status=${status}, shape=${parsed.shape ?? 'unknown'}${parsed.investigationId ? `, id=${parsed.investigationId.slice(0, 8)}` : ''}.`,
+    },
     data: {
-      ok: true,
-      investigation_id: idMatch?.[1],
+      status,
+      threshold_basis: thresholdBasis,
+      anchor_ref: {
+        type: 'starting_point',
+        expression: args.starting_point,
+      },
+      total_latency_ms: Date.now() - startedAt,
+      human_summary,
+      // Surfaced for agents that want to branch without parsing markdown.
+      findings: parsed.leadPattern
+        ? [
+            {
+              pattern: parsed.leadPattern,
+              service: parsed.leadService,
+              lag_seconds: parsed.leadLagSeconds,
+              confidence: parsed.leadConfidence,
+              evidence_strength:
+                parsed.leadConfidence !== null && parsed.leadConfidence >= 0.7
+                  ? 'strong'
+                  : parsed.leadConfidence !== null && parsed.leadConfidence >= 0.4
+                    ? 'medium'
+                    : 'weak',
+              kind: 'temporal_co_mover',
+              suggestion:
+                parsed.leadLagSeconds !== null && parsed.leadLagSeconds < 0
+                  ? 'Verify with traces or deploy timeline at the inflection — temporal lead suggests possible upstream cause, NOT proven cause.'
+                  : 'Co-movement is concurrent — could be common cause; verify with another signal.',
+            },
+          ]
+        : [],
+      n_chain_steps: parsed.chainLength,
+      n_co_movers: parsed.coMoverCount,
+      // Existing fields kept for backward compat with downstream callers.
+      ok: status === 'success',
+      investigation_id: parsed.investigationId,
       starting_point: args.starting_point,
       window: args.window,
       depth: args.depth,
       baseline_offset: args.baseline_offset,
-      mode: modeMatch?.[1],
-      shape: shapeMatch?.[1],
+      mode: parsed.mode,
+      shape: parsed.shape,
       use_bytes: args.use_bytes,
       report_markdown: md,
     },
@@ -233,7 +450,7 @@ async function executeInvestigateInner(
     const windowExceedsAuditCapability = windowSecs > 16 * 86400;
     if (exceedsPromRangeLimit || windowExceedsAuditCapability) {
       const reason = exceedsPromRangeLimit
-        ? `the combined window + baseline span (${args.window} + ${effectiveBaselineOffset}) exceeds the Prometheus backend's 32-day instant-query limit`
+        ? `the combined window + baseline span (${args.window} + ${effectiveBaselineOffset}) exceeds the customer TSDB's 32-day instant-query limit`
         : `a ${args.window} window cannot be compared against a prior ${args.window} (60d total span exceeds the backend limit), and a shorter baseline like 24h produces a ≈0% overlap comparison that silently hides multi-week regressions`;
       const routedReport = [
         `## Investigation: ${args.starting_point}, last ${args.window}`,
