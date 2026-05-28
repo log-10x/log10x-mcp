@@ -23,11 +23,18 @@ import { LABELS } from '../lib/promql.js';
 import { parseTimeframe } from '../lib/format.js';
 import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
-// Lag offsets widened to ±1800s to catch slow-moving upstream causes.
+// Default lag offsets, widened to ±1800s to catch slow-moving upstream
+// causes. Hand-picked from the 58-candidate chaos test (not calibrated
+// against customer data) — see README "Threshold provenance" for the
+// caveat. Callers can narrow the range via `lag_search_max_abs` when
+// the use case has a known tighter bound.
 export const LAG_OFFSETS_SECONDS = [
   -1800, -1200, -600, -300, -180, -120, -60, -30, 0, 30, 60, 120, 180, 300, 600, 1200, 1800,
 ];
-const LAG_SEARCH_MAX_ABS = Math.max(...LAG_OFFSETS_SECONDS.map((s) => Math.abs(s)));
+export const DEFAULT_LAG_SEARCH_MAX_ABS = Math.max(...LAG_OFFSETS_SECONDS.map((s) => Math.abs(s)));
+// Default phase-aligned flag floor. Same provenance caveat as the lag
+// list — derived from one chaos shape, not a customer-data calibration.
+export const DEFAULT_ANCHOR_PHASE_ALIGNED_FLOOR = 0.15;
 
 export const rankByShapeSimilaritySchema = {
   anchor_type: z.enum(['log10x_pattern', 'customer_metric']),
@@ -36,6 +43,17 @@ export const rankByShapeSimilaritySchema = {
   window: z.string().default('1h'),
   timeRange: z.string().optional(),
   step: z.string().default('30s'),
+  lag_search_max_abs: z
+    .number()
+    .min(0)
+    .default(DEFAULT_LAG_SEARCH_MAX_ABS)
+    .describe('Maximum absolute lag in seconds to scan. Restricts the offset list to entries within ±this. Default 1800s (=30 min) — hand-picked from one chaos test, not calibrated against customer data. Narrow it when the use case has a known tighter upper bound on cascade latency (e.g. 300 for sub-5-min cascades).'),
+  anchor_phase_aligned_floor: z
+    .number()
+    .min(0.0)
+    .max(1.0)
+    .default(DEFAULT_ANCHOR_PHASE_ALIGNED_FLOOR)
+    .describe('Relative phase-gap floor for the `anchor_phase_aligned` flag. Same provenance caveat as lag_search_max_abs. Default 0.15 (=15%).'),
   environment: z.string().optional(),
   view: z.enum(['summary', 'markdown']).default('summary'),
 };
@@ -80,6 +98,8 @@ export async function executeRankByShapeSimilarity(
     window?: string;
     timeRange?: string;
     step?: string;
+    lag_search_max_abs?: number;
+    anchor_phase_aligned_floor?: number;
     environment?: string;
     view?: 'summary' | 'markdown';
   },
@@ -89,6 +109,12 @@ export async function executeRankByShapeSimilarity(
   const stepStr = args.step ?? '30s';
   const stepSeconds = parseStep(stepStr);
   const view = args.view ?? 'summary';
+  const lagMaxAbs = args.lag_search_max_abs ?? DEFAULT_LAG_SEARCH_MAX_ABS;
+  const phaseAlignedFloor = args.anchor_phase_aligned_floor ?? DEFAULT_ANCHOR_PHASE_ALIGNED_FLOOR;
+  const offsetsForScan = LAG_OFFSETS_SECONDS.filter((s) => Math.abs(s) <= lagMaxAbs);
+  const effectiveMaxAbs = offsetsForScan.length === 0
+    ? 0
+    : Math.max(...offsetsForScan.map((s) => Math.abs(s)));
 
   const tf = parseTimeframe(window);
   const nowSec = Math.floor(Date.now() / 1000);
@@ -145,17 +171,17 @@ export async function executeRankByShapeSimilarity(
         failed.push(cand);
         continue;
       }
-      const corr = computeTemporalCorrelation(anchorSeries, candSeries, stepSeconds);
+      const corr = computeTemporalCorrelation(anchorSeries, candSeries, stepSeconds, offsetsForScan);
       const gap = anchorPhaseGap(anchorSeries, candSeries);
       ranked.push({
         candidate: cand,
         pearson_magnitude: Math.abs(corr.r),
         pearson_signed: corr.r,
         lag_seconds: corr.lagSeconds,
-        lag_at_bound: Math.abs(corr.lagSeconds) >= LAG_SEARCH_MAX_ABS,
+        lag_at_bound: Math.abs(corr.lagSeconds) >= effectiveMaxAbs && effectiveMaxAbs > 0,
         lag_tightness: corr.lagTightness,
         anchor_phase_gap: gap,
-        anchor_phase_aligned: gap >= 0.15,
+        anchor_phase_aligned: gap >= phaseAlignedFloor,
         n_buckets: candSeries.length,
       });
     } catch {
@@ -212,13 +238,18 @@ export interface TemporalResult {
   lagTightness: number;
 }
 
-export function computeTemporalCorrelation(anchor: number[], candidate: number[], step: number): TemporalResult {
+export function computeTemporalCorrelation(
+  anchor: number[],
+  candidate: number[],
+  step: number,
+  offsetsSeconds: number[] = LAG_OFFSETS_SECONDS,
+): TemporalResult {
   if (anchor.length === 0 || candidate.length === 0) return { r: 0, lagSeconds: 0, lagTightness: 0 };
   // Right-align (sparse-anchor vs dense-candidate alignment fix from v4).
   const n = Math.min(anchor.length, candidate.length);
   const a = anchor.slice(-n);
   const c = candidate.slice(-n);
-  const offsets = LAG_OFFSETS_SECONDS.map((s) => Math.round(s / step));
+  const offsets = offsetsSeconds.map((s) => Math.round(s / step));
   const rValues: Array<{ offset: number; r: number }> = [];
   for (const offset of offsets) {
     const r = pearsonWithOffset(a, c, offset);
