@@ -1,5 +1,4 @@
 // Dev helper — invoke MCP tools directly. Used for smoke tests.
-import { executeCorrelateCrossPillar } from './build/tools/correlate-cross-pillar.js';
 import { executeMetricOverlay } from './build/tools/metric-overlay.js';
 import { executeMetricsThatMoved } from './build/tools/metrics-that-moved.js';
 import { executeRankByShapeSimilarity } from './build/tools/rank-by-shape-similarity.js';
@@ -8,7 +7,6 @@ const tool = process.argv[2];
 const args = JSON.parse(process.argv[3] || '{}');
 
 const REGISTRY = {
-  correlate_cross_pillar:    { fn: executeCorrelateCrossPillar,    needsEnv: true },
   metric_overlay:            { fn: executeMetricOverlay,           needsEnv: true },
   metrics_that_moved:        { fn: executeMetricsThatMoved,        needsEnv: true },
   rank_by_shape_similarity:  { fn: executeRankByShapeSimilarity,   needsEnv: true },

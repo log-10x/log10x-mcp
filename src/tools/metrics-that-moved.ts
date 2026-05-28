@@ -143,15 +143,9 @@ export async function executeMetricsThatMoved(
     });
   }
 
-  // Compute anchor median (robust to long tails) and partition timestamps.
-  const sorted = anchorSeries.map(([, v]) => v).sort((a, b) => a - b);
-  const median = sorted[Math.floor(sorted.length / 2)];
-  const anchorHighTs = new Set<number>();
-  const anchorLowTs = new Set<number>();
-  for (const [ts, v] of anchorSeries) {
-    if (v > median) anchorHighTs.add(ts);
-    else anchorLowTs.add(ts);
-  }
+  const anchorPartition = partitionAnchorByMedian(anchorSeries);
+  const anchorHighTs = anchorPartition.highTs;
+  const anchorLowTs = anchorPartition.lowTs;
 
   // ── Candidates ──────────────────────────────────────────────────────
   const customerBackend = await resolveBackend();
@@ -171,48 +165,21 @@ export async function executeMetricsThatMoved(
     try {
       const res = await customerBackend.backend.queryRange(cand, fromSec, nowSec, stepSeconds);
       const candSeries = extractFirstSeries(res);
-      if (candSeries.length < 6) {
+      const signal = computeMovedSignal(anchorPartition, candSeries, stepSeconds);
+      if (signal.kind === 'failed') {
         failed.push(cand);
         continue;
       }
-      // Align candidate values to the anchor's timestamp partitions.
-      // Round each candidate ts to the step grid for matching.
-      let sumHigh = 0,
-        nHigh = 0,
-        sumLow = 0,
-        nLow = 0;
-      for (const [ts, v] of candSeries) {
-        const aligned = Math.round(ts / stepSeconds) * stepSeconds;
-        // Find the closest anchor bucket (within 1 step).
-        const matchedHigh = inSetWithin(anchorHighTs, aligned, stepSeconds);
-        const matchedLow = inSetWithin(anchorLowTs, aligned, stepSeconds);
-        if (matchedHigh) {
-          sumHigh += v;
-          nHigh += 1;
-        } else if (matchedLow) {
-          sumLow += v;
-          nLow += 1;
-        }
-      }
-      if (nHigh < 2 || nLow < 2) {
-        failed.push(cand);
-        continue;
-      }
-      const meanHigh = sumHigh / nHigh;
-      const meanLow = sumLow / nLow;
-      const scale = Math.max(Math.abs(meanHigh), Math.abs(meanLow), 1e-9);
-      const gap = Math.abs(meanHigh - meanLow) / scale;
-      const direction: 'co' | 'anti' = meanHigh - meanLow >= 0 ? 'co' : 'anti';
       const row: MovedCandidate = {
         candidate: cand,
-        mean_anchor_high: meanHigh,
-        mean_anchor_low: meanLow,
-        phase_gap: gap,
-        direction,
-        n_high: nHigh,
-        n_low: nLow,
+        mean_anchor_high: signal.meanHigh,
+        mean_anchor_low: signal.meanLow,
+        phase_gap: signal.phaseGap,
+        direction: signal.direction,
+        n_high: signal.nHigh,
+        n_low: signal.nLow,
       };
-      if (gap >= floor) moved.push(row);
+      if (signal.phaseGap >= floor) moved.push(row);
       else notMoved.push(row);
     } catch {
       failed.push(cand);
@@ -251,6 +218,65 @@ export async function executeMetricsThatMoved(
   });
 }
 
+export interface AnchorPartition {
+  median: number;
+  highTs: Set<number>;
+  lowTs: Set<number>;
+}
+
+export function partitionAnchorByMedian(anchorSeries: Array<[number, number]>): AnchorPartition {
+  const sorted = anchorSeries.map(([, v]) => v).sort((a, b) => a - b);
+  const median = sorted.length === 0 ? 0 : sorted[Math.floor(sorted.length / 2)];
+  const highTs = new Set<number>();
+  const lowTs = new Set<number>();
+  for (const [ts, v] of anchorSeries) {
+    if (v > median) highTs.add(ts);
+    else lowTs.add(ts);
+  }
+  return { median, highTs, lowTs };
+}
+
+export type MovedSignal =
+  | { kind: 'failed' }
+  | {
+      kind: 'evaluated';
+      meanHigh: number;
+      meanLow: number;
+      phaseGap: number;
+      direction: 'co' | 'anti';
+      nHigh: number;
+      nLow: number;
+    };
+
+export function computeMovedSignal(
+  anchor: AnchorPartition,
+  candSeries: Array<[number, number]>,
+  stepSeconds: number,
+): MovedSignal {
+  if (candSeries.length < 6) return { kind: 'failed' };
+  let sumHigh = 0;
+  let nHigh = 0;
+  let sumLow = 0;
+  let nLow = 0;
+  for (const [ts, v] of candSeries) {
+    const aligned = Math.round(ts / stepSeconds) * stepSeconds;
+    if (inSetWithin(anchor.highTs, aligned, stepSeconds)) {
+      sumHigh += v;
+      nHigh += 1;
+    } else if (inSetWithin(anchor.lowTs, aligned, stepSeconds)) {
+      sumLow += v;
+      nLow += 1;
+    }
+  }
+  if (nHigh < 2 || nLow < 2) return { kind: 'failed' };
+  const meanHigh = sumHigh / nHigh;
+  const meanLow = sumLow / nLow;
+  const scale = Math.max(Math.abs(meanHigh), Math.abs(meanLow), 1e-9);
+  const phaseGap = Math.abs(meanHigh - meanLow) / scale;
+  const direction: 'co' | 'anti' = meanHigh - meanLow >= 0 ? 'co' : 'anti';
+  return { kind: 'evaluated', meanHigh, meanLow, phaseGap, direction, nHigh, nLow };
+}
+
 function parseStep(step: string): number {
   const m = step.match(/^(\d+)(s|m|h)$/);
   if (!m) return 30;
@@ -269,7 +295,7 @@ function extractFirstSeries(
     .filter(([t, v]) => Number.isFinite(t) && Number.isFinite(v));
 }
 
-function inSetWithin(s: Set<number>, ts: number, tolerance: number): boolean {
+export function inSetWithin(s: Set<number>, ts: number, tolerance: number): boolean {
   if (s.has(ts)) return true;
   if (s.has(ts - tolerance)) return true;
   if (s.has(ts + tolerance)) return true;

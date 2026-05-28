@@ -260,7 +260,7 @@ function extractFirstSeries(
   return first.map(([t, v]) => [Number(t), parseFloat(v)] as [number, number]).filter(([t, v]) => Number.isFinite(t) && Number.isFinite(v));
 }
 
-function peakOf(points: Array<{ ts: number; v: number | null }>): { ts: number; v: number } | null {
+export function peakOf(points: Array<{ ts: number; v: number | null }>): { ts: number; v: number } | null {
   let best: { ts: number; v: number } | null = null;
   for (const p of points) {
     if (p.v === null) continue;

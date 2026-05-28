@@ -24,7 +24,7 @@ import { parseTimeframe } from '../lib/format.js';
 import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
 // Lag offsets widened to ±1800s to catch slow-moving upstream causes.
-const LAG_OFFSETS_SECONDS = [
+export const LAG_OFFSETS_SECONDS = [
   -1800, -1200, -600, -300, -180, -120, -60, -30, 0, 30, 60, 120, 180, 300, 600, 1200, 1800,
 ];
 const LAG_SEARCH_MAX_ABS = Math.max(...LAG_OFFSETS_SECONDS.map((s) => Math.abs(s)));
@@ -206,13 +206,13 @@ function extractValues(
   return first.map(([, v]) => parseFloat(v)).filter((v) => Number.isFinite(v));
 }
 
-interface TemporalResult {
+export interface TemporalResult {
   r: number;
   lagSeconds: number;
   lagTightness: number;
 }
 
-function computeTemporalCorrelation(anchor: number[], candidate: number[], step: number): TemporalResult {
+export function computeTemporalCorrelation(anchor: number[], candidate: number[], step: number): TemporalResult {
   if (anchor.length === 0 || candidate.length === 0) return { r: 0, lagSeconds: 0, lagTightness: 0 };
   // Right-align (sparse-anchor vs dense-candidate alignment fix from v4).
   const n = Math.min(anchor.length, candidate.length);
@@ -233,7 +233,7 @@ function computeTemporalCorrelation(anchor: number[], candidate: number[], step:
   return { r: peak.r, lagSeconds: peak.offset * step, lagTightness: tightness };
 }
 
-function pearsonWithOffset(a: number[], b: number[], offset: number): number {
+export function pearsonWithOffset(a: number[], b: number[], offset: number): number {
   let ax: number[], bx: number[];
   if (offset >= 0) {
     ax = a.slice(0, a.length - offset);
@@ -260,7 +260,7 @@ function pearsonWithOffset(a: number[], b: number[], offset: number): number {
   return num / Math.sqrt(denA * denB);
 }
 
-function anchorPhaseGap(anchor: number[], candidate: number[]): number {
+export function anchorPhaseGap(anchor: number[], candidate: number[]): number {
   const n = Math.min(anchor.length, candidate.length);
   if (n < 6) return 1;
   const a = anchor.slice(-n);
