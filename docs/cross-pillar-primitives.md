@@ -315,6 +315,27 @@ This is the auto-mitigation gate sharpened for action-shaped tools. Agents SHOUL
 | `input_invalid` | Empty / whitespace-only pattern. | Do NOT retry the same input. Ask the user for the canonical pattern name. |
 | `local_processing_failed` | Env-load or snapshot fetch crashed unexpectedly. | Surface the hint to the user; investigate the local config. |
 
+## POC tools — `poc_from_siem` + `poc_from_local`
+
+The POC tools generate full prospect-facing reports customers paste verbatim. Pre-launch audit focused on two surfaces:
+
+**Envelope (this pass)**:
+- `executePocSubmit`, `executePocStatus`, `executePocFromLocal` all return the unified envelope shape (`status`, `query_count`, `total_latency_ms`, `backend_pressure_hint`, `human_summary`).
+- Submit-side errors (SIEM not resolved, ambiguous SIEM, credential missing) surface as `status: "error"` with `error_type: "input_invalid"` / `"local_processing_failed"`. Agent reads `data.error.error_type` and branches.
+- Status-side unknown-snapshot errors return `status: "error"` with `input_invalid`. The agent does NOT re-poll a snapshot that no longer exists.
+- The poc_from_siem_status response keeps the existing snapshot lifecycle status (`pulling` / `templatizing` / `rendering` / `complete` / `failed`) under `data.status` AND emits a unified `envelope_status` field (`success` / `no_signal` / `error`) so the agent has both signals without overloading the field name.
+
+**Report framing (already in the renderer)**:
+The POC report uses `Projected`, `Potential savings`, cost ranges with explicit uncertainty bands, `⚠ flagged` markers, and a `Run log10x_dependency_check before muting` gate. No "will save", no "guaranteed", no verdict claims. Agents presenting the report to a user MUST preserve that framing; reframing projections as guarantees violates the contract.
+
+### POC error_type taxonomy
+
+| `error_type` | Meaning | Agent action |
+| --- | --- | --- |
+| `input_invalid` | SIEM unresolved, ambiguous SIEM, unknown snapshot_id, malformed args. | Do NOT retry the same input. Re-prompt for the missing detail. |
+| `local_processing_failed` | Templater or renderer crashed inside the background pipeline. | Surface the hint to the user. Retry only if the underlying cause is addressed. |
+| `backend_unavailable` | kubectl unreachable / kubeconfig missing (poc_from_local). | Retry after the connectivity issue is resolved. |
+
 ## Low-woowoo data tools — envelope-consistency tier
 
 The 14 data tools (`top_patterns`, `top_volume`, `pattern_trend`, `event_lookup`, `pattern_examples`, `resolve_batch`, `extract_templates`, `services`, `savings`, `dependency_check`, `discover_env`, `discover_labels`, `discover_join`, `customer_metrics_query`) don't make calibrated judgments — they return data. They DO carry the shared envelope fields so the agent reads a consistent shape across the catalog:

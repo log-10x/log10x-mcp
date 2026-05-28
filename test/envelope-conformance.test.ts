@@ -77,3 +77,36 @@ test('envelope conformance: extract_templates carries the unified fields on succ
   const d = out.data as Record<string, unknown>;
   assertUnifiedFields(d, 'extract_templates');
 });
+
+// ── POC tools ────────────────────────────────────────────────────────
+
+test('envelope conformance: poc_from_siem_status returns structured error on unknown snapshot_id', async () => {
+  const { executePocStatus } = await import('../src/tools/poc-from-siem.js');
+  const out = await executePocStatus({ snapshot_id: 'nonexistent-id-' + Date.now() });
+  if (typeof out === 'string') throw new Error('expected envelope');
+  const d = out.data as Record<string, unknown>;
+  assertUnifiedFields(d, 'poc_from_siem_status (unknown snapshot)');
+  assert.equal(d.status, 'error');
+  const err = d.error as { error_type: string; retryable: boolean };
+  assert.equal(err.error_type, 'input_invalid');
+  assert.equal(err.retryable, false);
+});
+
+test('envelope conformance: poc_from_siem_submit returns structured error when SIEM cannot be resolved', async () => {
+  const { executePocSubmit } = await import('../src/tools/poc-from-siem.js');
+  // No credentials in env, no siem arg → resolveSiemSelection returns 'none' → structured error.
+  // We can't reliably test this in CI because the test runner may have credentials configured.
+  // We can however pin the SHAPE: if status is 'error', the envelope must carry the unified fields.
+  const out = await executePocSubmit({
+    siem: 'datadog' as never, // valid SIEM but credentials likely missing in test env
+    window: '5m',
+    target_event_count: 100,
+    max_pull_minutes: 1,
+  } as never);
+  if (typeof out === 'string') throw new Error('expected envelope');
+  const d = out.data as Record<string, unknown>;
+  // Either status is 'success' (test env has datadog creds, kicks off pipeline) or 'error'.
+  // Both paths must carry the unified field set.
+  assertUnifiedFields(d, 'poc_from_siem_submit');
+  assert.ok(['success', 'error'].includes(d.status as string));
+});

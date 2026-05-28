@@ -28,6 +28,8 @@ import {
   formatNoneError,
 } from '../lib/siem/resolve.js';
 import type { SiemId } from '../lib/siem/pricing.js';
+import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
+import type { PrimitiveError } from '../lib/primitive-errors.js';
 import { SIEM_DISPLAY_NAMES, getAnalyzerCostForSiem } from '../lib/siem/pricing.js';
 import { extractPatterns, collapseBySymbolMessage } from '../lib/pattern-extraction.js';
 import {
@@ -264,22 +266,47 @@ export interface PocSubmitArgs {
   _mcpServer?: McpServer;
 }
 
-export async function executePocSubmit(args: PocSubmitArgs): Promise<string | import('../lib/output-types.js').StructuredOutput> {
+export async function executePocSubmit(args: PocSubmitArgs): Promise<import('../lib/output-types.js').StructuredOutput> {
   const { buildEnvelope: __be, buildMarkdownEnvelope: __bme } = await import('../lib/output-types.js');
+  const telemetry = newTelemetry();
   // Tool-level view fallback for callers passing { view } at the registration level.
   // The submit schema doesn't declare `view`, so we accept it as an extra field on args.
   const view = (args as unknown as { view?: 'summary' | 'markdown' }).view ?? 'summary';
-  const md = await executePocSubmitInner(args);
+  let md: string;
+  try {
+    md = await executePocSubmitInner(args);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    const err: PrimitiveError = {
+      error_type: /No.*SIEM|none/i.test(msg) ? 'input_invalid' : /ambiguous/i.test(msg) ? 'input_invalid' : 'local_processing_failed',
+      retryable: false,
+      suggested_backoff_ms: null,
+      hint: msg.slice(0, 400),
+    };
+    return __be({
+      tool: 'log10x_poc_from_siem_submit',
+      view: 'summary',
+      summary: { headline: `POC submit failed: ${err.error_type}` },
+      data: {
+        ok: false,
+        window: args.window,
+        scope: args.scope,
+        query: args.query,
+        ...buildUnifiedFields({ status: 'error', telemetry, humanSummary: `POC submit failed: ${err.hint}`, error: err }),
+      },
+    });
+  }
   const sidMatch = md.match(/snapshot_id\*\*: `(.+?)`/);
   const siemMatch = md.match(/siem_detected\*\*: (\S+)/);
   const durMatch = md.match(/estimated_duration_minutes\*\*: (\d+)/);
   if (view === 'markdown') {
     return __bme({ tool: 'log10x_poc_from_siem_submit', summary: { headline: `POC submitted${sidMatch ? ` (snapshot_id ${sidMatch[1]})` : ''}` }, markdown: md });
   }
+  const headline = `POC submit accepted${siemMatch ? ` for ${siemMatch[1]}` : ''}${sidMatch ? ` (snapshot_id ${sidMatch[1]})` : ''}; estimated ${durMatch?.[1] ?? '?'} min. Poll log10x_poc_from_siem_status.`;
   return __be({
     tool: 'log10x_poc_from_siem_submit',
     view: 'summary',
-    summary: { headline: `POC submit accepted${siemMatch ? ` for ${siemMatch[1]}` : ''}${sidMatch ? ` (snapshot_id ${sidMatch[1]})` : ''}; estimated ${durMatch?.[1] ?? '?'} min. Poll log10x_poc_from_siem_status.` },
+    summary: { headline },
     data: {
       ok: true,
       snapshot_id: sidMatch?.[1],
@@ -290,6 +317,7 @@ export async function executePocSubmit(args: PocSubmitArgs): Promise<string | im
       query: args.query,
       target_event_count: args.target_event_count,
       max_pull_minutes: args.max_pull_minutes,
+      ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: headline }),
     },
     actions: sidMatch ? [{ tool: 'log10x_poc_from_siem_status', args: { snapshot_id: sidMatch[1] }, reason: 'poll POC progress; phases: pulling -> templatizing -> rendering -> complete' }] : [],
   });
@@ -371,8 +399,9 @@ export interface PocStatusArgs {
   top_n?: number;
 }
 
-export async function executePocStatus(args: PocStatusArgs): Promise<string | import('../lib/output-types.js').StructuredOutput> {
+export async function executePocStatus(args: PocStatusArgs): Promise<import('../lib/output-types.js').StructuredOutput> {
   const { buildEnvelope: __be, buildMarkdownEnvelope: __bme } = await import('../lib/output-types.js');
+  const telemetry = newTelemetry();
   // poc_from_siem_status already has its own `view` enum (summary/full/yaml/configs/top/pattern).
   // The MCP envelope `view` is a SEPARATE control: how to package the output.
   // Convention: when the caller wants the typed envelope, they pass envelope_view='summary' or just omit it.
@@ -380,11 +409,47 @@ export async function executePocStatus(args: PocStatusArgs): Promise<string | im
   const envView = (args as unknown as { envelope_view?: 'summary' | 'markdown' }).envelope_view ?? 'summary';
   const s = SNAPSHOTS.get(args.snapshot_id);
   if (!s) {
-    throw new Error(
-      `Unknown snapshot_id "${args.snapshot_id}". Submit via log10x_poc_from_siem_submit first; snapshots live in-memory per MCP process.`
-    );
+    const err: PrimitiveError = {
+      error_type: 'input_invalid',
+      retryable: false,
+      suggested_backoff_ms: null,
+      hint: `Unknown snapshot_id "${args.snapshot_id}". Submit via log10x_poc_from_siem_submit first; snapshots live in-memory per MCP process.`,
+    };
+    return __be({
+      tool: 'log10x_poc_from_siem_status',
+      view: 'summary',
+      summary: { headline: `Unknown snapshot_id "${args.snapshot_id}".` },
+      data: {
+        snapshot_id: args.snapshot_id,
+        ...buildUnifiedFields({ status: 'error', telemetry, humanSummary: err.hint, error: err }),
+      },
+    });
   }
-  const md = await executePocStatusInner(args);
+  let md: string;
+  try {
+    md = await executePocStatusInner(args);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    const err: PrimitiveError = {
+      error_type: /view="pattern"/i.test(msg) ? 'input_invalid' : 'local_processing_failed',
+      retryable: false,
+      suggested_backoff_ms: null,
+      hint: msg.slice(0, 400),
+    };
+    const unified = buildUnifiedFields({ status: 'error', telemetry, humanSummary: err.hint, error: err });
+    const { status: _u, ...unifiedRest } = unified;
+    return __be({
+      tool: 'log10x_poc_from_siem_status',
+      view: 'summary',
+      summary: { headline: `POC status render failed: ${err.error_type}` },
+      data: {
+        snapshot_id: s.id,
+        status: s.status,
+        envelope_status: 'error' as const,
+        ...unifiedRest,
+      },
+    });
+  }
   if (envView === 'markdown') {
     return __bme({
       tool: 'log10x_poc_from_siem_status',
@@ -392,10 +457,24 @@ export async function executePocStatus(args: PocStatusArgs): Promise<string | im
       markdown: md,
     });
   }
+  // Map snapshot's internal phase to the unified envelope's status enum.
+  // 'complete' → 'success', 'failed' → 'error', else → 'no_signal'
+  // (in-progress, not yet actionable — agent should keep polling).
+  const unifiedStatus: 'success' | 'error' | 'no_signal' =
+    s.status === 'complete' ? 'success' : s.status === 'failed' ? 'error' : 'no_signal';
+  const unifiedError: PrimitiveError | undefined = s.status === 'failed'
+    ? {
+        error_type: 'local_processing_failed',
+        retryable: true,
+        suggested_backoff_ms: 30_000,
+        hint: s.error ?? 'POC pipeline failed; check error + retry_hint fields.',
+      }
+    : undefined;
+  const headline = `POC ${s.status} for snapshot_id ${s.id}${s.status === 'complete' ? ` (${args.view ?? 'summary'} view)` : `, progress=${s.progressPct}%, elapsed=${Math.round((Date.now() - s.startedAtMs) / 1000)}s`}.`;
   return __be({
     tool: 'log10x_poc_from_siem_status',
     view: 'summary',
-    summary: { headline: `POC ${s.status} for snapshot_id ${s.id}${s.status === 'complete' ? ` (${args.view ?? 'summary'} view)` : `, progress=${s.progressPct}%, elapsed=${Math.round((Date.now() - s.startedAtMs) / 1000)}s`}.` },
+    summary: { headline },
     data: {
       snapshot_id: s.id,
       status: s.status,
@@ -409,6 +488,20 @@ export async function executePocStatus(args: PocStatusArgs): Promise<string | im
       view_rendered: s.status === 'complete' ? (args.view ?? 'summary') : undefined,
       report_markdown: s.status === 'complete' ? md : undefined,
       partial_report_markdown: s.status === 'failed' ? s.partialReportMarkdown : undefined,
+      // Unified envelope fields. NOTE: snapshot's `status` and `error`
+      // keys above are tool-specific (the in-memory pipeline state); the
+      // unified envelope's `status` lives under a different key derived
+      // from the pipeline state. Spread last so the unified `error`
+      // overwrites the partial-string-error from snapshot.
+      query_count: telemetry.queryCount,
+      total_latency_ms: Date.now() - telemetry.startedAt,
+      backend_pressure_hint: null,
+      human_summary: headline,
+      // Don't overwrite snapshot's tool-specific `status` and `error`
+      // with the unified ones; agents read both. Unified status lives
+      // under `envelope_status` so the field name disambiguates.
+      envelope_status: unifiedStatus,
+      ...(unifiedError ? { envelope_error: unifiedError } : {}),
     },
     actions: s.status === 'complete'
       ? []

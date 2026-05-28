@@ -22,6 +22,8 @@ import { sampleFromKubectl, type LocalSourceOptions } from '../lib/local-source.
 import { extractPatterns } from '../lib/pattern-extraction.js';
 import { fmtBytes, fmtCount, fmtDollar, fmtPct } from '../lib/format.js';
 import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
+import type { PrimitiveError } from '../lib/primitive-errors.js';
 
 export const pocFromLocalSchema = {
   source: z
@@ -91,9 +93,30 @@ const INDUSTRY_PRICING: PriceRow[] = [
   { vendor: 'OpenSearch', perGb: 0.1, note: 'self-hosted compute baseline' },
 ];
 
-export async function executePocFromLocal(args: PocFromLocalArgs): Promise<string | StructuredOutput> {
+export async function executePocFromLocal(args: PocFromLocalArgs): Promise<StructuredOutput> {
   const view = args.view ?? 'summary';
-  const inner = await executePocFromLocalInner(args);
+  const telemetry = newTelemetry();
+  let inner: Awaited<ReturnType<typeof executePocFromLocalInner>>;
+  try {
+    inner = await executePocFromLocalInner(args);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    const err: PrimitiveError = {
+      error_type: /kubectl|kubeconfig|cluster/i.test(msg) ? 'backend_unavailable' : 'local_processing_failed',
+      retryable: /kubectl|cluster/i.test(msg),
+      suggested_backoff_ms: null,
+      hint: msg.slice(0, 400),
+    };
+    return buildEnvelope({
+      tool: 'log10x_poc_from_local',
+      view: 'summary',
+      summary: { headline: `POC from kubectl failed: ${err.error_type}` },
+      data: {
+        events_pulled: 0,
+        ...buildUnifiedFields({ status: 'error', telemetry, humanSummary: err.hint, error: err }),
+      },
+    });
+  }
   if (view === 'markdown') {
     return buildMarkdownEnvelope({
       tool: 'log10x_poc_from_local',
@@ -101,14 +124,16 @@ export async function executePocFromLocal(args: PocFromLocalArgs): Promise<strin
       markdown: inner.markdown,
     });
   }
+  const hasData = inner.events_pulled > 0;
+  const headline = hasData
+    ? `POC from kubectl: ${inner.events_pulled.toLocaleString()} lines from ${inner.pods_sampled} pod${inner.pods_sampled !== 1 ? 's' : ''} → ${inner.distinct_patterns} distinct pattern${inner.distinct_patterns !== 1 ? 's' : ''}, projected ${fmtDollar(inner.daily_dollar_projection_low ?? 0)}-${fmtDollar(inner.daily_dollar_projection_high ?? 0)}/day across vendors.`
+    : 'POC from kubectl: no log lines pulled. Check namespace + pod filter.';
   return buildEnvelope({
     tool: 'log10x_poc_from_local',
     view: 'summary',
-    summary: { headline: inner.events_pulled > 0
-      ? `POC from kubectl: ${inner.events_pulled.toLocaleString()} lines from ${inner.pods_sampled} pod${inner.pods_sampled !== 1 ? 's' : ''} → ${inner.distinct_patterns} distinct pattern${inner.distinct_patterns !== 1 ? 's' : ''}, projected ${fmtDollar(inner.daily_dollar_projection_low ?? 0)}-${fmtDollar(inner.daily_dollar_projection_high ?? 0)}/day across vendors.`
-      : 'POC from kubectl: no log lines pulled. Check namespace + pod filter.' },
-    data: inner,
-    actions: inner.events_pulled > 0
+    summary: { headline },
+    data: { ...inner, ...buildUnifiedFields({ status: hasData ? 'success' : 'no_signal', telemetry, humanSummary: headline }) },
+    actions: hasData
       ? [{ tool: 'log10x_resolve_batch', args: { source: 'text', text: '...' }, reason: 'run the same sample through resolve_batch for per-pattern variable concentration + next actions' }]
       : [],
   });
