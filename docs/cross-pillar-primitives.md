@@ -257,6 +257,64 @@ How the agent reads it:
 | `input_invalid` | Empty events, malformed payload, or input failed validation. | Do NOT retry the same input. |
 | `local_processing_failed` | Templater crashed (typically because the privacy_mode tenx CLI isn't installed or the input shape is unparseable). | Surface to user; retry only if the underlying cause is resolved. |
 
+## `log10x_pattern_mitigate` envelope additions
+
+`log10x_pattern_mitigate` is action-shaped: it doesn't perform the action itself, but it generates the menu of options + routes the agent to the right sub-tool for each. The audit work focuses on capability-detection provenance, not numerical thresholds.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `status` | enum | `success` / `no_signal` / `insufficient_data` / `error` |
+| `recommendation_basis` | enum | `env_config` / `env_config_plus_snapshot` / `snapshot` / `env_vars_only` / `unknown` — analogue of `threshold_basis` for action-shaped tools |
+| `recommendation_audit` | object | per-capability source + snapshot age (see below) |
+| `pattern_ref` | string | echo of the input pattern |
+| `query_count: 0`, `total_latency_ms`, `backend_pressure_hint: null` | — | paste-mode-style telemetry; no backend queries |
+| `human_summary` | string | references the basis prominently so the agent knows whether to auto-route |
+| `options[]` | array | the 4 mitigation paths with `enabled` + `disabled_reason` (existing field) |
+| `env_capabilities` | object | resolved capability flags (existing field) |
+| `error` | `PrimitiveError` | populated only when `status === "error"` |
+
+`recommendation_audit` shape:
+```ts
+{
+  basis: RecommendationBasis,
+  n_options_enabled: number,
+  n_options_dimmed: number,
+  capability_sources: {
+    gitops: "envs_json" | "env_var" | "snapshot" | "absent",
+    forwarder: "envs_json" | "env_var" | "snapshot" | "absent",
+    analyzer: "envs_json" | "env_var" | "snapshot" | "absent",
+    receiver: "snapshot" | "absent",
+    retriever: "snapshot" | "absent",
+  },
+  snapshot_id?: string,
+  snapshot_age_seconds: number | null,
+}
+```
+
+### pattern_mitigate-specific status semantics
+
+- `success`: ≥1 of the 4 options is enabled and routable.
+- `no_signal`: pattern is valid but NO option is reachable (zero env config, no snapshot, no env vars). `human_summary` carries the setup hint.
+- `insufficient_data`: pattern argument empty or whitespace-only.
+- `error`: env-load crashed or another structural failure.
+
+### pattern_mitigate-specific auto-mitigation gate
+
+This is the auto-mitigation gate sharpened for action-shaped tools. Agents SHOULD:
+
+1. Surface the option menu to the user. NEVER call the chosen sub-tool until the user picks.
+2. When `recommendation_basis === "env_vars_only"` or `"snapshot"`: warn that capability detection used a single source. The user should confirm before the agent routes.
+3. When `recommendation_basis === "env_config_plus_snapshot"` and `snapshot_age_seconds > 3600`: warn the snapshot is stale; capability flags may have drifted.
+4. When `recommendation_basis === "unknown"` and `status === "no_signal"`: tell the user the env is unconfigured and surface `human_summary` (which carries the setup hint).
+5. Always call `log10x_dependency_check` before any drop / mute path — already in the tool's `next_actions[]` chain.
+
+### pattern_mitigate error types
+
+| `error_type` | Meaning | Agent action |
+| --- | --- | --- |
+| `input_invalid` | Empty / whitespace-only pattern. | Do NOT retry the same input. Ask the user for the canonical pattern name. |
+| `local_processing_failed` | Env-load or snapshot fetch crashed unexpectedly. | Surface the hint to the user; investigate the local config. |
+
 ## Quick reference — output state cheatsheet
 
 ```

@@ -37,6 +37,7 @@ import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { loadEnvironments } from '../lib/environments.js';
 import { agentOnly } from '../lib/agent-only.js';
 import { fmtPattern, normalizePattern } from '../lib/format.js';
+import type { PrimitiveError } from '../lib/primitive-errors.js';
 
 export const patternMitigateSchema = {
   pattern: z
@@ -50,15 +51,57 @@ export const patternMitigateSchema = {
   snapshot_id: z
     .string()
     .optional()
-    .describe('Snapshot from log10x_discover_env. Used to detect which 10x components are deployed in the active env (receiver, retriever, GitOps wiring). Without it, the tool still works but may dim PR-based options if the active env\'s envs.json does not list a gitops repo.'),
-  view: z.enum(['summary', 'markdown']).default('summary').describe('Output format.'),
+    .describe('Snapshot from log10x_discover_env. Used to detect which 10x components are deployed in the active env (receiver, retriever, GitOps wiring). When passed, the envelope\'s `recommendation_audit.capability_sources` reflects which capabilities came from the snapshot vs envs.json. Without it, the tool still works but may dim PR-based options if the active env\'s envs.json does not list a gitops repo.'),
 };
 
 export interface PatternMitigateArgs {
   pattern: string;
   service?: string;
   snapshot_id?: string;
+  /** Ignored. Retained for backward-compat with in-process callers;
+   * the markdown view was dropped from the public schema in favor of
+   * the structured `human_summary` field. */
   view?: 'summary' | 'markdown';
+}
+
+/**
+ * Top-level call status. Agent branches on this BEFORE reading the menu.
+ *   - `success`: ≥1 mitigation option is enabled and routable.
+ *   - `no_signal`: pattern is valid but NO option crossed the capability
+ *     gate. Setup hint surfaces what's missing.
+ *   - `insufficient_data`: pattern arg failed validation.
+ *   - `error`: structural failure (env-load crashed, snapshot fetch
+ *     errored, etc.).
+ */
+export type PatternMitigateStatus = 'success' | 'no_signal' | 'insufficient_data' | 'error';
+
+/**
+ * Where the capability-detection facts came from. Same role as
+ * `threshold_basis` in the cross-pillar tools — surfaces the
+ * provenance the agent's decision is downstream of.
+ */
+export type RecommendationBasis =
+  | 'env_config'        // envs.json provided the capabilities
+  | 'snapshot'          // a passed snapshot_id provided them
+  | 'env_config_plus_snapshot'
+  | 'env_vars_only'     // no envs.json, no snapshot — only $LOG10X_* env vars
+  | 'unknown';          // no source resolved any capability
+
+interface CapabilitySources {
+  gitops: 'envs_json' | 'env_var' | 'snapshot' | 'absent';
+  forwarder: 'envs_json' | 'env_var' | 'snapshot' | 'absent';
+  analyzer: 'envs_json' | 'env_var' | 'snapshot' | 'absent';
+  receiver: 'snapshot' | 'absent';
+  retriever: 'snapshot' | 'absent';
+}
+
+interface RecommendationAudit {
+  basis: RecommendationBasis;
+  n_options_enabled: number;
+  n_options_dimmed: number;
+  capability_sources: CapabilitySources;
+  snapshot_id?: string;
+  snapshot_age_seconds: number | null;
 }
 
 interface Capabilities {
@@ -89,6 +132,11 @@ interface Capabilities {
   analyzerVendor?: string;
   /** Setup hint text when canMute/canCompact are false, explaining what's missing. */
   setupHint?: string;
+  /** Per-field provenance, populated as capabilities are resolved. */
+  sources: CapabilitySources;
+  /** Snapshot ID used (if any) and its observed age in seconds at lookup. */
+  snapshotIdUsed?: string;
+  snapshotAgeSeconds: number | null;
 }
 
 /**
@@ -123,7 +171,19 @@ function analyzerLabel(token: string | undefined): string | undefined {
 }
 
 async function detectCapabilities(snapshotId?: string): Promise<Capabilities> {
-  const out: Capabilities = { canMute: false, canCompact: false, hasRetrieverArchive: false };
+  const out: Capabilities = {
+    canMute: false,
+    canCompact: false,
+    hasRetrieverArchive: false,
+    sources: {
+      gitops: 'absent',
+      forwarder: 'absent',
+      analyzer: 'absent',
+      receiver: 'absent',
+      retriever: 'absent',
+    },
+    snapshotAgeSeconds: null,
+  };
 
   // Source 1: active env's gitops field + forwarder field (envs.json).
   // Wins over later sources because envs.json is user-declared per-env config.
@@ -133,14 +193,17 @@ async function detectCapabilities(snapshotId?: string): Promise<Capabilities> {
     if (active?.gitops?.repo) {
       out.gitopsRepo = active.gitops.repo;
       out.gitopsSource = 'envs.json';
+      out.sources.gitops = 'envs_json';
       out.canMute = true;
       out.canCompact = true;
     }
     if (active?.forwarder && active.forwarder !== 'unknown') {
       out.forwarderKind = active.forwarder;
+      out.sources.forwarder = 'envs_json';
     }
     if (active?.analyzer) {
       out.analyzerVendor = active.analyzer;
+      out.sources.analyzer = 'envs_json';
     }
   } catch {
     // ignore; fall through to env-var / snapshot
@@ -153,6 +216,7 @@ async function detectCapabilities(snapshotId?: string): Promise<Capabilities> {
   if (!out.gitopsRepo && process.env.LOG10X_GH_REPO) {
     out.gitopsRepo = process.env.LOG10X_GH_REPO;
     out.gitopsSource = 'env-var';
+    out.sources.gitops = 'env_var';
     out.canMute = true;
     out.canCompact = true;
   }
@@ -169,7 +233,10 @@ async function detectCapabilities(snapshotId?: string): Promise<Capabilities> {
       'otel-collector': 'otel-collector', 'opentelemetry-collector': 'otel-collector',
       vector: 'vector',
     };
-    if (map[raw]) out.forwarderKind = map[raw];
+    if (map[raw]) {
+      out.forwarderKind = map[raw];
+      out.sources.forwarder = 'env_var';
+    }
   }
   if (!out.analyzerVendor && process.env.LOG10X_ANALYZER) {
     // Same alias normalization as env-loader's parseAnalyzerEnv. Inline
@@ -194,6 +261,7 @@ async function detectCapabilities(snapshotId?: string): Promise<Capabilities> {
       victorialogs: 'victorialogs', 'victoria logs': 'victorialogs', vlog: 'victorialogs', vlogs: 'victorialogs',
     };
     out.analyzerVendor = aliases[s] ?? process.env.LOG10X_ANALYZER.trim();
+    out.sources.analyzer = 'env_var';
   }
 
   // Source 3: snapshot from kubectl discovery. Fills in retriever-archive
@@ -202,16 +270,30 @@ async function detectCapabilities(snapshotId?: string): Promise<Capabilities> {
   if (snapshotId) {
     const snap = getSnapshot(snapshotId);
     if (snap) {
+      out.snapshotIdUsed = snapshotId;
+      // Compute snapshot age if the snapshot carries a createdAt timestamp.
+      const createdAt = (snap as { createdAt?: number; created_at?: number }).createdAt
+        ?? (snap as { createdAt?: number; created_at?: number }).created_at;
+      if (typeof createdAt === 'number' && Number.isFinite(createdAt)) {
+        out.snapshotAgeSeconds = Math.max(0, Math.floor(Date.now() / 1000 - createdAt));
+      }
       if (!out.gitopsRepo && snap.recommendations.receiverGitopsRepo) {
         out.gitopsRepo = snap.recommendations.receiverGitopsRepo;
         out.gitopsSource = 'snapshot';
+        out.sources.gitops = 'snapshot';
         out.canMute = true;
         out.canCompact = true;
+      }
+      // Receiver presence: a snapshot with a receiverGitopsRepo means
+      // there's a receiver pod the GitOps PR will target.
+      if (snap.recommendations.receiverGitopsRepo) {
+        out.sources.receiver = 'snapshot';
       }
       // Retriever presence: a snapshot retains the bucket name when a
       // retriever app was discovered with an S3-target env var.
       if (snap.recommendations.retrieverS3Bucket) {
         out.hasRetrieverArchive = true;
+        out.sources.retriever = 'snapshot';
       }
       // Forwarder kind. `existingForwarder` is set by the discovery code's
       // `classifyForwarderImage` against running pods in the cluster.
@@ -221,6 +303,7 @@ async function detectCapabilities(snapshotId?: string): Promise<Capabilities> {
       // are user-explicit and should win.
       if (!out.forwarderKind && snap.recommendations.existingForwarder) {
         out.forwarderKind = snap.recommendations.existingForwarder;
+        out.sources.forwarder = 'snapshot';
       }
     }
   }
@@ -234,6 +317,14 @@ async function detectCapabilities(snapshotId?: string): Promise<Capabilities> {
 }
 
 interface PatternMitigateSummary {
+  status: PatternMitigateStatus;
+  recommendation_basis: RecommendationBasis;
+  recommendation_audit: RecommendationAudit;
+  pattern_ref: string;
+  query_count: 0;
+  total_latency_ms: number;
+  backend_pressure_hint: null;
+  human_summary: string;
   pattern: string;
   scope_service?: string;
   options: Array<{
@@ -250,14 +341,63 @@ interface PatternMitigateSummary {
     analyzer_vendor?: string;
     gitops_repo?: string;
   };
+  /** Populated only when `status === 'error'`. */
+  error?: PrimitiveError;
 }
 
-export async function executePatternMitigate(args: PatternMitigateArgs): Promise<string | import('../lib/output-types.js').StructuredOutput> {
-  const view = args.view ?? 'summary';
-  const sumOut: { data?: PatternMitigateSummary } = {};
-  const md = await executePatternMitigateInner(args, sumOut);
+/**
+ * Derive the recommendation_basis from per-capability sources. Reflects
+ * the dominant source: snapshot if any capability came from it, else
+ * env_config if any came from envs.json, else env_vars_only, else unknown.
+ */
+function deriveBasis(sources: CapabilitySources): RecommendationBasis {
+  const hasEnvJson = Object.values(sources).some((s) => s === 'envs_json');
+  const hasSnapshot = Object.values(sources).some((s) => s === 'snapshot');
+  const hasEnvVar = Object.values(sources).some((s) => s === 'env_var');
+  if (hasEnvJson && hasSnapshot) return 'env_config_plus_snapshot';
+  if (hasEnvJson) return 'env_config';
+  if (hasSnapshot) return 'snapshot';
+  if (hasEnvVar) return 'env_vars_only';
+  return 'unknown';
+}
+
+export async function executePatternMitigate(args: PatternMitigateArgs): Promise<import('../lib/output-types.js').StructuredOutput> {
+  const startedAt = Date.now();
   const { buildMarkdownEnvelope, buildEnvelope } = await import('../lib/output-types.js');
-  if (view === 'markdown' || !sumOut.data) {
+
+  // ── Input validation ───────────────────────────────────────────────
+  if (!args.pattern || args.pattern.trim().length === 0) {
+    return await errorEnvelope({
+      startedAt,
+      pattern: (args.pattern ?? '').trim(),
+      err: {
+        error_type: 'input_invalid',
+        retryable: false,
+        suggested_backoff_ms: null,
+        hint: 'pattern argument required (canonical pattern name from a prior cost / triage tool).',
+      },
+    });
+  }
+
+  const sumOut: { data?: PatternMitigateSummary } = {};
+  let md: string;
+  try {
+    md = await executePatternMitigateInner(args, sumOut, startedAt);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return await errorEnvelope({
+      startedAt,
+      pattern: args.pattern,
+      err: {
+        error_type: 'local_processing_failed',
+        retryable: false,
+        suggested_backoff_ms: null,
+        hint: msg.slice(0, 300),
+      },
+    });
+  }
+
+  if (args.view === 'markdown' || !sumOut.data) {
     return buildMarkdownEnvelope({
       tool: 'log10x_pattern_mitigate',
       summary: { headline: md.split('\n')[0]?.slice(0, 200) || 'pattern_mitigate result' },
@@ -265,8 +405,12 @@ export async function executePatternMitigate(args: PatternMitigateArgs): Promise
     });
   }
   const d = sumOut.data;
-  const enabledCount = d.options.filter(o => o.enabled).length;
-  const headline = `\`${d.pattern}\`: ${enabledCount} of ${d.options.length} mitigation options enabled (${d.options.filter(o => o.enabled).map(o => o.id).join(', ')})`;
+  const enabledCount = d.options.filter((o) => o.enabled).length;
+  const dimmedCount = d.options.length - enabledCount;
+  const headline =
+    d.status === 'no_signal'
+      ? `\`${d.pattern}\`: NO mitigation options available — ${dimmedCount} dimmed. Setup hint surfaces what's missing.`
+      : `\`${d.pattern}\`: ${enabledCount} of ${d.options.length} mitigation options enabled (${d.options.filter((o) => o.enabled).map((o) => o.id).join(', ')}).`;
   return buildEnvelope({
     tool: 'log10x_pattern_mitigate',
     view: 'summary',
@@ -275,7 +419,55 @@ export async function executePatternMitigate(args: PatternMitigateArgs): Promise
   });
 }
 
-async function executePatternMitigateInner(args: PatternMitigateArgs, sumOut?: { data?: PatternMitigateSummary }): Promise<string> {
+async function errorEnvelope(args: {
+  startedAt: number;
+  pattern: string;
+  err: PrimitiveError;
+}): Promise<import('../lib/output-types.js').StructuredOutput> {
+  const { buildEnvelope } = await import('../lib/output-types.js');
+  const data: PatternMitigateSummary = {
+    status: 'error',
+    recommendation_basis: 'unknown',
+    recommendation_audit: {
+      basis: 'unknown',
+      n_options_enabled: 0,
+      n_options_dimmed: 0,
+      capability_sources: {
+        gitops: 'absent',
+        forwarder: 'absent',
+        analyzer: 'absent',
+        receiver: 'absent',
+        retriever: 'absent',
+      },
+      snapshot_age_seconds: null,
+    },
+    pattern_ref: args.pattern,
+    query_count: 0,
+    total_latency_ms: Date.now() - args.startedAt,
+    backend_pressure_hint: null,
+    human_summary: `pattern_mitigate failed: ${args.err.hint}`,
+    pattern: args.pattern,
+    options: [],
+    env_capabilities: {
+      can_mute: false,
+      can_compact: false,
+      has_retriever_archive: false,
+    },
+    error: args.err,
+  };
+  return buildEnvelope({
+    tool: 'log10x_pattern_mitigate',
+    view: 'summary',
+    summary: { headline: `Error (${args.err.error_type}): ${args.err.hint.slice(0, 120)}` },
+    data,
+  });
+}
+
+async function executePatternMitigateInner(
+  args: PatternMitigateArgs,
+  sumOut?: { data?: PatternMitigateSummary },
+  startedAt: number = Date.now(),
+): Promise<string> {
   const pattern = normalizePattern(args.pattern);
   const displayPattern = fmtPattern(pattern);
   const scopeNote = args.service ? ` (service: ${args.service})` : '';
@@ -447,7 +639,36 @@ async function executePatternMitigateInner(args: PatternMitigateArgs, sumOut?: {
         label: 'Compact at 10x receiver',
       },
     ];
+    const nEnabled = options.filter((o) => o.enabled).length;
+    const nDimmed = options.length - nEnabled;
+    const basis = deriveBasis(caps.sources);
+    const status: PatternMitigateStatus = nEnabled === 0 ? 'no_signal' : 'success';
+    const human_summary = buildHumanSummary({
+      pattern: displayPattern,
+      status,
+      basis,
+      nEnabled,
+      nDimmed,
+      options,
+      setupHint: caps.setupHint,
+      snapshotAgeSeconds: caps.snapshotAgeSeconds,
+    });
     sumOut.data = {
+      status,
+      recommendation_basis: basis,
+      recommendation_audit: {
+        basis,
+        n_options_enabled: nEnabled,
+        n_options_dimmed: nDimmed,
+        capability_sources: caps.sources,
+        snapshot_id: caps.snapshotIdUsed,
+        snapshot_age_seconds: caps.snapshotAgeSeconds,
+      },
+      pattern_ref: pattern,
+      query_count: 0,
+      total_latency_ms: Date.now() - startedAt,
+      backend_pressure_hint: null,
+      human_summary,
       pattern,
       scope_service: args.service,
       options,
@@ -463,4 +684,41 @@ async function executePatternMitigateInner(args: PatternMitigateArgs, sumOut?: {
   }
 
   return lines.join('\n');
+}
+
+/**
+ * One-paragraph paste-to-user summary. Always names: pattern, enabled
+ * count, the recommendation basis, and (when no options enabled) the
+ * setup hint. Action-shaped tools surface the basis prominently so the
+ * agent knows whether to auto-route or wait for user confirmation.
+ */
+function buildHumanSummary(args: {
+  pattern: string;
+  status: PatternMitigateStatus;
+  basis: RecommendationBasis;
+  nEnabled: number;
+  nDimmed: number;
+  options: Array<{ id: string; enabled: boolean; label: string }>;
+  setupHint?: string;
+  snapshotAgeSeconds: number | null;
+}): string {
+  const basisFragment = (() => {
+    switch (args.basis) {
+      case 'env_config':
+        return 'Capability detection used envs.json only.';
+      case 'env_config_plus_snapshot':
+        return `Capability detection used envs.json + a discovery snapshot${args.snapshotAgeSeconds !== null ? ` (snapshot is ${args.snapshotAgeSeconds}s old)` : ''}.`;
+      case 'snapshot':
+        return `Capability detection used a discovery snapshot only${args.snapshotAgeSeconds !== null ? ` (${args.snapshotAgeSeconds}s old)` : ''} — confirm the env hasn't drifted since.`;
+      case 'env_vars_only':
+        return 'Capability detection used $LOG10X_* env vars only — no envs.json or snapshot. Verify the env vars match the live environment.';
+      case 'unknown':
+        return 'Capability detection found no source of capability facts (no envs.json, no snapshot, no env vars).';
+    }
+  })();
+  if (args.status === 'no_signal') {
+    return `\`${args.pattern}\`: no mitigation options are reachable in this environment. ${basisFragment} ${args.setupHint ?? 'Set up at least one delivery path (gitops repo, forwarder, or analyzer config) to enable options.'}`;
+  }
+  const enabledList = args.options.filter((o) => o.enabled).map((o) => o.label).join(', ');
+  return `\`${args.pattern}\`: ${args.nEnabled} of ${args.options.length} mitigation options available (${enabledList}). ${args.nDimmed > 0 ? `${args.nDimmed} dimmed. ` : ''}${basisFragment} Agent SHOULD wait for the user to pick before routing to the sub-tool.`;
 }
