@@ -68,7 +68,7 @@ import {
 } from '../lib/advisor/reporter-forwarders.js';
 import type { Environments } from '../lib/environments.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput, type ActionRole } from '../lib/output-types.js';
 
 // Forwarders the Receiver wizard knows how to install a sidecar into.
 // Filebeat is intentionally NOT here: the Receiver pattern is a values
@@ -138,9 +138,9 @@ export const adviseInstallSchema = {
     ),
   license_source: z
     .enum(['signin', 'demo', 'paste'])
-    .optional()
+    .default('signin')
     .describe(
-      'How the wizard should acquire the engine\'s license JWT. **signin** (recommended) returns a sign-in step the user runs in a separate `log10x_signin_start` call — re-invoking the wizard after sign-in auto-mints a user-scoped license. **demo** mints a 14-day anonymous demo JWT (transient, can\'t run airgapped). **paste** asks the user for an existing JWT via `license_jwt_paste`. When omitted, the wizard surfaces this as a question.'
+      'How the wizard should acquire the engine\'s license JWT. **Defaults to `"signin"`** when omitted — the wizard tries to mint a user-scoped license via the user\'s Auth0 session, and emits `signin_required` mode (chain through `log10x_signin_start` then re-invoke) when no session exists. Pass **`"demo"`** ONLY when the user explicitly asks for a quick 14-day anonymous demo (transient, can\'t run airgapped). Pass **`"paste"`** with `license_jwt_paste: "<jwt>"` when the user already has a JWT.'
     ),
   license_jwt_paste: z
     .string()
@@ -245,12 +245,13 @@ const QUESTION_META: Record<QuestionId, { headline: string; answer_field: string
     headline: 'Wizard Q5: run the engine fully airgapped (zero outbound calls to log10x.com)?',
     answer_field: 'airgapped',
   },
-  'license-source': {
-    headline: 'Wizard Q6: how should the engine get its license JWT — sign in (recommended), demo (transient), or paste an existing JWT?',
-    answer_field: 'license_source',
-  },
+  // 'license-source' is intentionally absent. The wizard no longer
+  // elicits the license source — signin is the implicit default and the
+  // wizard emits `signin_required` mode when no Auth0 session exists.
+  // Demo and paste remain accessible via the explicit `license_source`
+  // arg but never as a wizard-rendered question.
   'license-paste': {
-    headline: 'Wizard Q7: paste the license JWT you already have.',
+    headline: 'Wizard Q6: paste the license JWT you already have.',
     answer_field: 'license_jwt_paste',
   },
 };
@@ -284,7 +285,7 @@ function wizardReturn(view: 'summary' | 'markdown', data: WizardData): Structure
  */
 function wizardEnvelopeMeta(data: WizardData): {
   headline: string;
-  actions: Array<{ tool: string; args: Record<string, unknown>; reason: string }>;
+  actions: Array<{ tool: string; args: Record<string, unknown>; reason: string; role: ActionRole }>;
   warnings: string[];
 } {
   switch (data.mode) {
@@ -292,7 +293,7 @@ function wizardEnvelopeMeta(data: WizardData): {
       return {
         headline: `Snapshot \`${data.snapshot_id}\` expired or not found (30-min TTL). Re-discover the cluster first.`,
         actions: [
-          { tool: 'log10x_discover_env', args: {}, reason: 'mint a fresh snapshot; then re-invoke log10x_advise_install with the new snapshot_id' },
+          { tool: 'log10x_discover_env', args: {}, reason: 'mint a fresh snapshot; then re-invoke log10x_advise_install with the new snapshot_id', role: 'required-next' },
         ],
         warnings: [],
       };
@@ -300,7 +301,7 @@ function wizardEnvelopeMeta(data: WizardData): {
       return {
         headline: `Wizard session failed to initialize for snapshot \`${data.snapshot_id}\` — re-discover and retry.`,
         actions: [
-          { tool: 'log10x_discover_env', args: {}, reason: 'mint a fresh snapshot — internal session-store state is unexpected' },
+          { tool: 'log10x_discover_env', args: {}, reason: 'mint a fresh snapshot — internal session-store state is unexpected', role: 'required-next' },
         ],
         warnings: ['unexpected internal error — the snapshot store is in a bad state for this snapshot_id'],
       };
@@ -308,7 +309,7 @@ function wizardEnvelopeMeta(data: WizardData): {
       return {
         headline: `Wizard cancelled mid-flow. Re-invoke log10x_advise_install with snapshot_id="${data.snapshot_id}" to resume — every prior answer is preserved.`,
         actions: [
-          { tool: 'log10x_advise_install', args: { snapshot_id: data.snapshot_id }, reason: 'resume the wizard — the session remembers every prior answer for 30 min' },
+          { tool: 'log10x_advise_install', args: { snapshot_id: data.snapshot_id }, reason: 'resume the wizard — the session remembers every prior answer for 30 min', role: 'recommended-next' },
         ],
         warnings: [],
       };
@@ -325,43 +326,55 @@ function wizardEnvelopeMeta(data: WizardData): {
             reason: meta
               ? `answer "${data.question_id}" by setting \`${meta.answer_field}\` and re-invoke; the session keeps every prior answer`
               : `answer "${data.question_id}" and re-invoke the wizard`,
+            role: 'required-next',
           },
         ],
         warnings: [],
       };
     }
     case 'license_error':
+      // Two alternative recovery paths the user picks between (sign in
+      // OR paste a JWT). Both labelled `alternative` so agents render
+      // them as a choice rather than chain them.
       return {
         headline: `License acquisition failed: ${data.error_message}. Sign in or paste an existing JWT to retry.`,
         actions: [
-          { tool: 'log10x_signin_start', args: {}, reason: 'sign in via the browser device flow to mint a user-scoped license' },
+          { tool: 'log10x_signin_start', args: {}, reason: 'sign in via the browser device flow to mint a user-scoped license', role: 'alternative' },
           {
             tool: 'log10x_advise_install',
             args: { snapshot_id: data.snapshot_id, license_source: 'paste', license_jwt_paste: '<your JWT>' },
             reason: 'retry with a license JWT you already have',
+            role: 'alternative',
           },
         ],
         warnings: [`license fetch failed: ${data.error_message}`],
       };
     case 'signin_required':
+      // The two actions form a strict ordered prerequisite chain:
+      // signin_start MUST complete before the re-invoke. Both
+      // `required-next` + array-order = chain. Agents that respect the
+      // role enum will not parallelize or skip.
       return {
         headline: `Wizard cannot mint a real license without sign-in. CHAIN: call log10x_signin_start NEXT, then re-invoke log10x_advise_install — every prior answer is preserved.`,
         actions: [
-          { tool: 'log10x_signin_start', args: {}, reason: 'REQUIRED NEXT CALL — opens the device-code browser flow to sign in to Log10x (gets Auth0 tokens needed to mint a user-scoped license)' },
-          { tool: 'log10x_advise_install', args: { snapshot_id: data.snapshot_id }, reason: 'CHAIN AFTER signin_start completes: re-invoke the wizard with the same snapshot_id; the wizard will auto-mint a real user-scoped license now that Auth0 tokens exist' },
+          { tool: 'log10x_signin_start', args: {}, reason: 'opens the device-code browser flow to sign in to Log10x (gets Auth0 tokens needed to mint a user-scoped license). Must complete before the next action.', role: 'required-next' },
+          { tool: 'log10x_advise_install', args: { snapshot_id: data.snapshot_id }, reason: 'after signin_start completes, re-invoke the wizard with the same snapshot_id; the wizard will auto-mint a real user-scoped license now that Auth0 tokens exist', role: 'required-next' },
         ],
         warnings: [
           'plan NOT emitted yet — the user picked sign-in, but the wizard cannot proceed until log10x_signin_start has been called and completed successfully. Do NOT proceed without it; do NOT silently fall back to demo.',
         ],
       };
     case 'demo_airgapped_warning':
+      // Two alternatives: switch to real license (signin_start +
+      // re-invoke) OR keep demo and drop airgapped. Labelled
+      // `alternative` so agent surfaces both, user picks.
       return {
         headline: data.is_signed_in
           ? `Demo license + airgapped doesn't enforce — your pasted-API-key sign-in lacks Auth0 tokens to mint a user license. Switch to device-flow sign-in, or drop airgapped.`
           : `Demo license + airgapped doesn't enforce: engine downgrades to online mode silently. Sign in for a real license, or drop airgapped.`,
         actions: [
-          { tool: 'log10x_signin_start', args: {}, reason: 'sign in to mint a real license that actually enforces airgapped (the engine refuses to run airgapped on demo licenses)' },
-          { tool: 'log10x_advise_install', args: { snapshot_id: data.snapshot_id, airgapped: false }, reason: 'or keep the demo license and proceed without airgapped' },
+          { tool: 'log10x_signin_start', args: {}, reason: 'sign in to mint a real license that actually enforces airgapped (the engine refuses to run airgapped on demo licenses)', role: 'alternative' },
+          { tool: 'log10x_advise_install', args: { snapshot_id: data.snapshot_id, airgapped: false }, reason: 'or keep the demo license and proceed without airgapped', role: 'alternative' },
         ],
         warnings: ['demo licenses cannot run airgapped — engine downgrades to online mode at startup with a warning log'],
       };
@@ -370,20 +383,23 @@ function wizardEnvelopeMeta(data: WizardData): {
       if (data.blockers.length > 0) {
         warnings.push(`plan has ${data.blockers.length} blocker${data.blockers.length !== 1 ? 's' : ''} — see data.blockers`);
       }
-      // The wizard's plan path may emit a real or demo license; if demo,
-      // surface it as a warning so the agent flags it to the user.
-      // (We can't read isDemoLicense from AdvisePlanSummary, so this is a
-      // soft heuristic — extract from notes when present.)
-      const demoNote = data.notes.find((n) => /demo license/i.test(n));
-      if (demoNote) {
+      // Use the typed `license_kind` field instead of grepping notes
+      // (back-compat: also fall back to the legacy notes-grep if
+      // license_kind isn't populated, which shouldn't happen on this
+      // branch but guards future renames).
+      const isDemoLicense =
+        data.license_kind === 'demo' ||
+        (data.license_kind === undefined && data.notes.some((n) => /demo license/i.test(n)));
+      if (isDemoLicense) {
         warnings.push('plan emitted with a demo license — re-run with `license_source: "signin"` before the 14-day window expires to get a user-scoped one');
       }
-      const actions: Array<{ tool: string; args: Record<string, unknown>; reason: string }> = [];
-      // Post-install health check is universal.
+      const actions: Array<{ tool: string; args: Record<string, unknown>; reason: string; role: ActionRole }> = [];
+      // Post-install health check is universal — optional follow-up.
       actions.push({
         tool: 'log10x_doctor',
         args: {},
         reason: 'verify the install once the helm release rolls out — checks engine pods Ready, metrics flowing, license-Secret mounted',
+        role: 'optional-followup',
       });
       // Receiver path: post-install pattern-mitigation is the natural follow-up.
       if (data.app === 'receiver') {
@@ -391,6 +407,7 @@ function wizardEnvelopeMeta(data: WizardData): {
           tool: 'log10x_top_patterns',
           args: {},
           reason: 'once events are flowing, see which patterns dominate cost and offer mitigation via log10x_pattern_mitigate',
+          role: 'optional-followup',
         });
       }
       // Real-license-Secret path requires the user to create the Secret BEFORE
@@ -398,6 +415,17 @@ function wizardEnvelopeMeta(data: WizardData): {
       const needsSecret = data.notes.some((n) => /licenseSecret|log10x-license/i.test(n));
       if (needsSecret) {
         warnings.push('the plan references an out-of-band Kubernetes Secret (log10x-license) — create it with kubectl before running the helm upgrade step');
+      }
+      // Install-mode awareness: when upgrade-existing, reassure the
+      // agent (and through it, the user) that this is NOT a second
+      // forwarder deploy. When fresh-release on the Receiver path with
+      // no existing release detected, surface a soft caveat so the
+      // agent can ask the user whether they really want a brand-new
+      // forwarder alongside whatever they have.
+      if (data.install_mode === 'upgrade-existing' && data.existing_helm_release) {
+        warnings.push(`this plan UPGRADES the existing Helm release \`${data.existing_helm_release.name}\` in \`${data.existing_helm_release.namespace}\` (sidecar goes INTO it) — no second ${data.forwarder ?? 'forwarder'} is deployed`);
+      } else if (data.install_mode === 'fresh-release' && data.app === 'receiver') {
+        warnings.push(`this plan deploys a FRESH ${data.forwarder ?? 'forwarder'} Helm release (no existing helm-managed forwarder was detected). If the user has a non-helm-managed forwarder running, this WILL create a second one alongside it. Confirm with the user before running the plan.`);
       }
       return {
         headline: planHeadlineForWizard(data),
@@ -852,40 +880,27 @@ async function elicitMissingAnswers(
       session.airgapped = false;
     }
 
-    // Q6: license source — sign in (real), demo (transient), or paste.
+    // Q6: license source — IMPLICIT 'signin'.
     //
-    // Picking the recommended option in Claude Desktop's elicit UI needs
-    // BOTH signals: the JSON-Schema `default` field (machine-readable;
-    // some hosts pick it programmatically) AND a "(Recommended)" suffix
-    // at the END of the enumName text (Claude Desktop's auto-rephraser
-    // pattern-matches that string). Without these, the host picks a
-    // recommendation on its own — typically the option with the simplest
-    // label (= demo), which is the opposite of what we want for real
-    // installs. Sign-in always wins for real Log10x deployments.
+    // We deliberately do NOT elicit this. Three attempts to get Claude
+    // Desktop's UI to mark "sign in" as the recommended choice all
+    // failed: regardless of enumNames text, `default:` field, or
+    // "(Recommended)" suffix, the host's auto-rephraser keeps stripping
+    // our labels and applying its own "(Recommended)" badge to demo
+    // (the shortest-label / no-followup-required option). Letting the
+    // host overrule our intent means users routinely pick demo without
+    // realizing it's the wrong path for real installs.
+    //
+    // Resolution: signin is the IMPLICIT default. If acquireLicense
+    // can't mint a real user-scoped license, the wizard emits
+    // `signin_required` and stops — the agent chains through
+    // log10x_signin_start, then re-invokes. Demo and paste remain
+    // reachable via the schema's `license_source` arg, but as
+    // explicit escape hatches (the agent passes them when the USER
+    // says "I just want to play with demo" or "I have a JWT").
     if (!session.licenseSource) {
-      const result = await (server as any).server.elicitInput({
-        message: 'How should the engine get its license? Sign in to log10x.com for a real user-scoped license (Recommended for any actual install). The 14-day anonymous demo is a quick-trial path only — engine refuses to run airgapped on it. Or paste a license JWT you already have.',
-        requestedSchema: {
-          type: 'object',
-          properties: {
-            licenseSource: {
-              type: 'string',
-              title: 'License source',
-              enum: ['signin', 'demo', 'paste'],
-              enumNames: [
-                'Sign in to log10x.com — real user-scoped license (Recommended)',
-                'Demo (14-day anonymous JWT, quick-trial only, no airgapped)',
-                'I already have a license JWT (paste it)',
-              ],
-              default: 'signin',
-            },
-          },
-          required: ['licenseSource'],
-        },
-      });
-      if (result.action !== 'accept') return { kind: 'cancelled' };
-      session.licenseSource = result.content?.licenseSource as 'signin' | 'demo' | 'paste';
-      updateWizardSession(session.snapshotId, { licenseSource: session.licenseSource });
+      session.licenseSource = 'signin';
+      updateWizardSession(session.snapshotId, { licenseSource: 'signin' });
     }
 
     // Q7: paste path — ask for the JWT itself.
@@ -920,7 +935,7 @@ async function elicitMissingAnswers(
 
 // ── Question routing ──
 
-type QuestionId = 'app' | 'forwarder' | 'no-forwarder' | 'backends' | 'airgapped-log10x-conflict' | 'backend-credentials' | 'airgapped' | 'license-source' | 'license-paste';
+type QuestionId = 'app' | 'forwarder' | 'no-forwarder' | 'backends' | 'airgapped-log10x-conflict' | 'backend-credentials' | 'airgapped' | 'license-paste';
 
 /**
  * Structured rendering of the wizard's next question. The agent uses
@@ -1176,37 +1191,12 @@ function nextQuestion(snapshot: DiscoverySnapshot, session: WizardSession): Next
     session.airgapped = false;
   }
 
-  // Q6: license source — sign in (recommended), demo, or paste.
-  // Same labeling convention as the elicit path above: "(Recommended)"
-  // suffix at the end + `recommended: true` on the typed choice.
+  // Q6 (license source) — IMPLICIT 'signin'. Not elicited. See the
+  // matching block in elicitMissingAnswers() above for the rationale.
+  // Demo / paste remain accessible as explicit `license_source` args.
   if (!session.licenseSource) {
-    return {
-      kind: 'ask',
-      markdown: askLicenseSource(),
-      questionId: 'license-source',
-      shape: {
-        type: 'single-choice',
-        answer_field: 'license_source',
-        choices: [
-          {
-            value: 'signin',
-            label: 'Sign in to log10x.com — real user-scoped license (Recommended)',
-            recommended: true,
-            details: 'Call log10x_signin_start to open the device-code browser flow; after sign-in, re-invoke advise_install and the wizard mints a user-scoped license. Required for any real install (the engine refuses to run airgapped on demo licenses).',
-          },
-          {
-            value: 'demo',
-            label: 'Demo (14-day anonymous JWT, quick-trial only, no airgapped)',
-            details: 'Quick + zero-setup. Transient (expires in 14 days). Cannot run airgapped — the engine downgrades to online mode with a warning. Use only for proof-of-concept runs.',
-          },
-          {
-            value: 'paste',
-            label: "I already have a license JWT (paste it)",
-            details: 'Re-invoke with license_source: "paste" and license_jwt_paste: "<jwt>". The wizard mounts it via a Kubernetes Secret.',
-          },
-        ],
-      },
-    };
+    session.licenseSource = 'signin';
+    updateWizardSession(session.snapshotId, { licenseSource: 'signin' });
   }
 
   // Q7: when license_source=paste and the JWT hasn't been provided yet,
@@ -1419,19 +1409,10 @@ function askBackendCredentials(backends: MetricsBackendKind[]): string {
   return lines.join('\n');
 }
 
-function askLicenseSource(): string {
-  return [
-    '# Install wizard — how do you want to license the engine?',
-    '',
-    'The Log10x engine needs a license JWT to start. We need to know how you want to get one — there\'s a real Log10x license tied to your account (recommended), a transient demo, and a paste-an-existing-JWT path.',
-    '',
-    'Re-invoke `log10x_advise_install` with one of:',
-    '',
-    '- **`license_source: "signin"`** — recommended. The wizard will tell you to call `log10x_signin_start` to authenticate to Log10x; after sign-in, re-invoke and the wizard mints a user-scoped license automatically. Your other answers are remembered. Required for airgapped installs.',
-    '- **`license_source: "demo"`** — anonymous 14-day demo JWT. Quick and zero-setup, but transient, can\'t run airgapped, and the demo license tier has reduced limits.',
-    '- **`license_source: "paste"`** — you already have a JWT and want to use it. Re-invoke with `license_jwt_paste: "<the jwt>"`.',
-  ].join('\n');
-}
+// askLicenseSource() removed — the wizard no longer surfaces the
+// license-source choice as a question. Sign-in is the implicit default
+// (see signin_required mode); demo / paste remain accessible via the
+// explicit `license_source` arg on advise_install.
 
 function askLicensePaste(): string {
   return [

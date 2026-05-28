@@ -130,6 +130,35 @@ export interface AdvisePlan {
   namespace: string;
   /** Kubernetes context the plan targets, for display. */
   context?: string;
+  /**
+   * License kind the plan ships with. Surfaces directly into the typed
+   * envelope (AdvisePlanSummary.license_kind) so agents don't have to
+   * parse notes to know whether the install is demo-grade or real.
+   *   - 'user-scoped' — real license minted from /api/v1/license
+   *   - 'demo'        — anonymous 14-day demo license
+   *   - 'user-pasted' — user supplied via license_jwt_paste; opaque
+   *   - 'placeholder' — REPLACE_WITH_LICENSE_JWT (skipInstall mode or
+   *     license fetch deferred)
+   */
+  licenseKind?: 'user-scoped' | 'demo' | 'user-pasted' | 'placeholder';
+  /**
+   * How the helm command lands:
+   *   - 'upgrade-existing' — `helm upgrade --reuse-values <release>` against
+   *     the user's existing forwarder Helm release. Sidecar overlay layers
+   *     on top of their values. NO second forwarder is deployed. Receiver
+   *     path's canonical mode.
+   *   - 'fresh-release'   — `helm upgrade --install <new-release> --create-namespace`.
+   *     New release name + namespace. Used by the Reporter path (parallel
+   *     DaemonSet by design) and by Receiver as a fallback when no helm-
+   *     managed forwarder is detected.
+   */
+  installMode?: 'upgrade-existing' | 'fresh-release';
+  /**
+   * When installMode === 'upgrade-existing', the detected existing
+   * release name (same as `releaseName`). Surfaced separately so the
+   * agent can flag "this UPGRADES X" without needing to compare fields.
+   */
+  existingHelmRelease?: { name: string; namespace: string };
   /** Preflight checks the advisor ran against the snapshot. */
   preflight: PreflightCheck[];
   /** Install steps (ordered). */
