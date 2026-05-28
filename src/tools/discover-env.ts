@@ -136,7 +136,7 @@ export async function executeDiscoverEnv(args: DiscoverEnvArgs & { view?: 'summa
   if (!data.installed_components.reporter) {
     actions.push({ tool: 'log10x_advise_install', args: { snapshot_id: data.snapshot_id }, reason: 'no Reporter installed — pick the right install path' });
   } else if (!data.installed_components.receiver) {
-    actions.push({ tool: 'log10x_advise_receiver', args: { snapshot_id: data.snapshot_id }, reason: 'Reporter present, no Receiver — install for filter / compact / cap' });
+    actions.push({ tool: 'log10x_advise_install', args: { snapshot_id: data.snapshot_id, app: 'receiver' }, reason: 'Reporter present, no Receiver — install for filter / compact / cap' });
   }
   if (data.aws_available && data.s3_buckets.length > 0 && !data.installed_components.retriever) {
     actions.push({ tool: 'log10x_advise_retriever', args: { snapshot_id: data.snapshot_id }, reason: 'S3 + AWS available — Retriever installable for forensic retrieval' });
@@ -306,36 +306,23 @@ export function renderDiscoverReport(s: DiscoverySnapshot): string {
   lines.push('Pass this snapshot id to an advisor:');
   lines.push('');
   lines.push('```');
-  lines.push(`log10x_advise_install({ snapshot_id: "${s.snapshotId}" })   # picks the right shape automatically`);
-  lines.push(`log10x_advise_reporter({ snapshot_id: "${s.snapshotId}" })`);
-  lines.push(`log10x_advise_receiver({ snapshot_id: "${s.snapshotId}" })`);
-  lines.push(`log10x_advise_retriever({ snapshot_id: "${s.snapshotId}" })`);
+  lines.push(`log10x_advise_install({ snapshot_id: "${s.snapshotId}" })     # wizard for Reporter / Receiver`);
+  lines.push(`log10x_advise_retriever({ snapshot_id: "${s.snapshotId}" })   # archive install (S3 + SQS)`);
   lines.push('```');
   lines.push('');
   lines.push(
     `_Snapshot is cached in-memory for 30 min. Re-run \`log10x_discover_env\` for a fresh probe._`
   );
 
-  // Structured chain hint: install_advise is the meta-advisor that
-  // dispatches into the right specific advisor. Listing it as the
-  // primary hint lets autonomous walkers chain straight through to a
-  // real plan; listing the three specific advisors after gives the
-  // walker fallback options if it needs a particular tier.
+  // Structured chain hint: advise_install is the install wizard for the
+  // Reporter and Receiver; advise_retriever is the archive install (its
+  // inputs are AWS-only — S3 buckets, SQS URLs, IRSA — so it stays a
+  // separate tool).
   const nextActions: NextAction[] = [
     {
       tool: 'log10x_advise_install',
       args: { snapshot_id: s.snapshotId },
-      reason: 'meta-advisor: pick the right shape (standalone vs inline) and tier from the snapshot',
-    },
-    {
-      tool: 'log10x_advise_receiver',
-      args: { snapshot_id: s.snapshotId },
-      reason: 'Receiver (Reducer + Optimizer) inline install plan',
-    },
-    {
-      tool: 'log10x_advise_reporter',
-      args: { snapshot_id: s.snapshotId },
-      reason: 'Reporter install plan (inline or standalone)',
+      reason: 'install wizard: walks through app (Reporter / Receiver), forwarder, backends, airgapped, license — emits a helm plan',
     },
     {
       tool: 'log10x_advise_retriever',

@@ -439,7 +439,7 @@ function wizardEnvelopeMeta(data: WizardData): {
 /**
  * Plan-mode headline. Mirrors lib/advisor/envelope.ts's planHeadline
  * shape but tailored for the wizard's plan emit (the wizard always
- * emits app + forwarder; advise_reporter/receiver may not).
+ * emits app + forwarder).
  */
 function planHeadlineForWizard(data: { app: string; forwarder?: string; action: string; install_step_count: number; verify_probe_count: number; teardown_step_count: number; blockers: string[]; release_name: string; namespace: string }): string {
   const fwd = data.forwarder ? ` on ${data.forwarder}` : '';
@@ -650,8 +650,8 @@ export async function executeAdviseInstall(
   }
 
   // Everything answered. Emit the typed plan envelope — `data` mirrors
-  // AdvisePlanSummary so an agent that already handles
-  // advise_reporter/receiver/retriever consumes this identically.
+  // AdvisePlanSummary so an agent that already handles advise_retriever
+  // consumes this identically.
   const planResult = await renderInstallPlan(snapshot, session, args);
   const summary = buildPlanSummary(planResult.plan, planResult.action);
   return wizardReturn(view, {

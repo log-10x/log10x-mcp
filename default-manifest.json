@@ -378,33 +378,11 @@
       },
       "category": "install"
     },
-    "log10x_advise_reporter": {
-      "title": "Advise: Reporter install",
-      "description": "Given a DiscoverySnapshot (from `log10x_discover_env`) + a forwarder choice + a license JWT, produce a tailored install/verify/teardown plan for the Log10x Reporter. Supports 6 forwarders (fluent-bit, fluentd, filebeat, logstash, otel-collector, vector). The plan includes: preflight checks (namespace existence, release-name collision, chart availability, forwarder alignment); per-step install commands (helm repo, values.yaml, helm upgrade, rollout wait); verify probes that answer specific questions (pods ready? 10x sidecar processing events? forwarder emitting output?); and teardown commands (helm uninstall, PVC cleanup, residue check). Every step is paste-ready â€” no shell interpolation. Use `action: \"verify\"` or `action: \"teardown\"` to scope the output. Default destination is `mock` (forwarder stdout) which is safe for dogfooding; switch to `elasticsearch|splunk|datadog|cloudwatch` with `destination` + `output_host` for production installs. **Tier prerequisites**: none â€” this is a pre-install tool.",
-      "annotations": {
-        "title": "Advise: Reporter install",
-        "readOnlyHint": true,
-        "idempotentHint": true,
-        "openWorldHint": false
-      },
-      "category": "install"
-    },
     "log10x_advise_retriever": {
       "title": "Advise: Retriever install",
       "description": "Given a DiscoverySnapshot (from `log10x_discover_env`), produce an install/verify/teardown plan for the Log10x Retriever. Unlike Reporter + Receiver, the Retriever has no forwarder choice — it is a standalone set of workloads (indexer + query-handler + stream-worker + filter CronJobs) that read from S3 via SQS and serve an HTTP query endpoint. The advisor detects existing AWS infra (input bucket with `indexing-results/` prefix, four SQS queues — index/query/subquery/stream — and an IRSA-annotated ServiceAccount) from the discovery snapshot, or accepts explicit overrides. Preflight fails closed when any required resource is missing — the Retriever depends on Terraform-provisioned infra that this advisor does NOT create. Verify probes: pods Ready, indexer processing messages, query endpoint responding, S3 indexing-results/ getting writes, SQS queue drainage. Teardown uninstalls the Helm release but leaves AWS infra alone (Terraform's concern).",
       "annotations": {
         "title": "Advise: Retriever install",
-        "readOnlyHint": true,
-        "idempotentHint": true,
-        "openWorldHint": false
-      },
-      "category": "install"
-    },
-    "log10x_advise_receiver": {
-      "title": "Advise: Receiver install",
-      "description": "Given a DiscoverySnapshot (from `log10x_discover_env`) + a forwarder choice + a license JWT, produce a tailored install/verify/teardown plan for the Log10x Receiver. The Receiver runs as a `log10x/edge-10x` sidecar injected into the user's existing forwarder pod via the upstream chart's `extraContainers` + `extraVolumes` hooks — there are NO Log10x repackaged forwarder charts; the receiver is a pure sidecar overlay. Wizard-supported forwarders: fluent-bit (upstream `fluent/fluent-bit`), otel-collector (`open-telemetry/opentelemetry-collector`), vector (`vector/vector`), logstash (`elastic/logstash`). Fluentd and Filebeat are blocked: fluentd's upstream chart needs a kustomize post-renderer overlay that the install plan model doesn't yet emit; filebeat's upstream chart has no extraContainers hook. Receiver differs from Reporter by writing filtered events back through the forwarder (with optional compact encoding via `optimize=true`, which appends `receiverOptimize true` to the sidecar args). License JWT is mounted into the sidecar from a Kubernetes Secret at `/etc/tenx/license/license.jwt` (via `TENX_LICENSE_FILE`) — never inlined in values.yaml. Output shape mirrors `log10x_advise_reporter`: preflight, install steps, verify probes, teardown. **Tier prerequisites**: none — this is a pre-install tool.",
-      "annotations": {
-        "title": "Advise: Receiver install",
         "readOnlyHint": true,
         "idempotentHint": true,
         "openWorldHint": false

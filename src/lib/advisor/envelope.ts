@@ -1,7 +1,8 @@
 /**
- * Shared StructuredOutput builder for the advise_{reporter,receiver,retriever}
- * tools. They all produce an `AdvisePlan` (see ./types.ts) and render it the
- * same way, so the envelope shape is the same too.
+ * Shared StructuredOutput builder for the advise tools. `advise_install`
+ * (the wizard for Reporter / Receiver) and `advise_retriever` both
+ * produce an `AdvisePlan` (see ./types.ts) and render it the same way,
+ * so the envelope shape is the same too.
  */
 
 import type { AdvisePlan, AdviseAction } from './types.js';
@@ -9,11 +10,9 @@ import { renderPlan } from './render.js';
 import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../output-types.js';
 
 /**
- * Typed summary of an AdvisePlan. Exported so the install wizard
- * (`advise_install`) can mirror this shape on its final `plan` mode —
- * any agent that consumes `advise_reporter` / `advise_receiver` /
- * `advise_retriever` then handles the wizard's plan output via the
- * same code path.
+ * Typed summary of an AdvisePlan. Exported so both `advise_install` and
+ * `advise_retriever` mirror the same shape — any agent that handles one
+ * advisor's plan output handles the other through the same code path.
  */
 /**
  * What kind of license JWT the plan ships with. Surfaced as a typed

@@ -66,8 +66,6 @@ import {
   executeTranslateMetricToPatterns,
 } from '../../build/tools/translate-metric-to-patterns.js';
 import { discoverEnvSchema, executeDiscoverEnv } from '../../build/tools/discover-env.js';
-import { adviseReporterSchema, executeAdviseReporter } from '../../build/tools/advise-reporter.js';
-import { adviseReceiverSchema, executeAdviseReceiver } from '../../build/tools/advise-receiver.js';
 import { adviseRetrieverSchema, executeAdviseRetriever } from '../../build/tools/advise-retriever.js';
 import { adviseInstallSchema, executeAdviseInstall } from '../../build/tools/advise-install.js';
 import { configureCompactSchema, executeConfigureCompact } from '../../build/tools/configure-compact.js';
@@ -340,8 +338,6 @@ const TOOL_TABLE: Record<string, ExecuteFn> = {
   log10x_customer_metrics_query: async (raw) =>
     executeCustomerMetricsQuery(parseArgs(customerMetricsQuerySchema, raw)),
   log10x_discover_env: async (raw) => executeDiscoverEnv(parseArgs(discoverEnvSchema, raw)),
-  log10x_advise_reporter: async (raw) => executeAdviseReporter(parseArgs(adviseReporterSchema, raw)),
-  log10x_advise_receiver: async (raw) => executeAdviseReceiver(parseArgs(adviseReceiverSchema, raw)),
   log10x_advise_retriever: async (raw) => executeAdviseRetriever(parseArgs(adviseRetrieverSchema, raw)),
   log10x_advise_install: async (raw) => executeAdviseInstall(parseArgs(adviseInstallSchema, raw)),
   log10x_configure_compact: async (raw) => executeConfigureCompact(parseArgs(configureCompactSchema, raw)),
