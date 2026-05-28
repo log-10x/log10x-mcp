@@ -30,7 +30,7 @@ test('shouldRegisterTool: install advisors register in POC AND analysis_pending'
   assert.equal(shouldRegisterTool('log10x_advise_install', 'poc'), true);
   assert.equal(shouldRegisterTool('log10x_advise_install', 'analysis_pending'), true);
   assert.equal(shouldRegisterTool('log10x_advise_install', 'analysis'), false);
-  assert.equal(shouldRegisterTool('log10x_advise_reporter', 'analysis_pending'), true);
+  assert.equal(shouldRegisterTool('log10x_advise_retriever', 'analysis_pending'), true);
 });
 
 test('shouldRegisterTool: always-tools register in every mode', () => {

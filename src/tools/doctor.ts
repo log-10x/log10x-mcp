@@ -1092,11 +1092,9 @@ export function renderDoctorReport(report: DoctorReport): string {
   lines.push('');
   lines.push(agentOnly(
     `If a check failed or warned, suggest the relevant advisor: ` +
-    `Reporter (cloud-tier metric emission) → log10x_advise_reporter. ` +
-    `Receiver (edge-tier forwarder sidecar) → log10x_advise_receiver. ` +
+    `Reporter / Receiver install (forwarder, backends, license) → log10x_advise_install. ` +
     `Retriever (S3 archive + bloom index) → log10x_advise_retriever. ` +
     `Compact mode (per-container compaction config) → log10x_configure_compact. ` +
-    `First-time install / general questions → log10x_advise_install. ` +
     `Inspect current env config → log10x_discover_env.`
   ));
   return lines.join('\n');

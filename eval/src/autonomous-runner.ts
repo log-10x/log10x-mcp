@@ -118,8 +118,8 @@ CANONICAL TOOL CHAINS
   Forensic retrieval beyond SIEM retention:
     log10x_event_lookup → log10x_retriever_query
 
-  Install / receiver advisor:
-    log10x_discover_env → log10x_advise_install / log10x_advise_receiver
+  Install advisor:
+    log10x_discover_env → log10x_advise_install
 
 NUMBERS DISCIPLINE
 

@@ -76,8 +76,6 @@ const PAGE_PATH = {
   discover_env:        'install/discover-env.md',
   doctor:              'account/health-check.md',
   advise_install:      'install/advise-install.md',
-  advise_reporter:     'install/advise-reporter.md',
-  advise_receiver:     'install/advise-receiver.md',
   advise_retriever:    'install/advise-retriever.md',
   configure_compact:   'install/configure-compact.md',
   configure_regulator: 'install/configure-regulator.md',
