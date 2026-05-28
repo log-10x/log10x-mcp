@@ -182,3 +182,71 @@ export function patternDisplay(
   const identity = opts.hash ? `${pattern} · hash ${opts.hash}` : pattern;
   return { title, identity };
 }
+
+// ---------------------------------------------------------------------------
+// Identity descriptor (re-added post-merge) — universal pattern shape across
+// identity-tier tools (top_volume / whats_changing / whats_new / pattern_diff).
+// ---------------------------------------------------------------------------
+
+import { tenxHash } from './pattern-hash.js';
+
+export interface IdentityDescriptor {
+  pattern_hash: string;
+  symbol_message: string;
+  severities: string[];
+  first_seen_age_seconds: number | null;
+  services: ServiceIdentity[];
+}
+
+export interface ServiceIdentity {
+  name: string;
+  severity: string;
+}
+
+export interface RawPatternServiceRow {
+  symbolMessage: string;
+  service: string;
+  severity: string;
+}
+
+export interface GroupedPattern<R extends RawPatternServiceRow> {
+  pattern_hash: string;
+  symbol_message: string;
+  severities: string[];
+  first_seen_age_seconds: number | null;
+  rows_by_service: Map<string, R>;
+}
+
+/**
+ * Group per-(pattern, service) raw rows into per-pattern groups. Pure
+ * transformation: pattern_hash is derived locally via tenxHash(symbolMessage),
+ * severities are the unique set across the group, first_seen_age_seconds
+ * comes from the supplied batch.
+ */
+export function groupRowsByPattern<R extends RawPatternServiceRow>(
+  rows: R[],
+  firstSeenByHash: Map<string, { ageSeconds: number | null }>,
+): GroupedPattern<R>[] {
+  const groups = new Map<
+    string,
+    { symbolMessage: string; sevs: Set<string>; bySvc: Map<string, R> }
+  >();
+  for (const r of rows) {
+    if (!r.symbolMessage) continue;
+    const hash = tenxHash(r.symbolMessage);
+    let g = groups.get(hash);
+    if (!g) {
+      g = { symbolMessage: r.symbolMessage, sevs: new Set<string>(), bySvc: new Map() };
+      groups.set(hash, g);
+    }
+    if (r.severity) g.sevs.add(r.severity);
+    g.bySvc.set(r.service, r);
+  }
+  return Array.from(groups.entries()).map(([pattern_hash, g]) => ({
+    pattern_hash,
+    symbol_message: g.symbolMessage,
+    severities: Array.from(g.sevs).sort(),
+    first_seen_age_seconds: firstSeenByHash.get(pattern_hash)?.ageSeconds ?? null,
+    rows_by_service: g.bySvc,
+  }));
+}
