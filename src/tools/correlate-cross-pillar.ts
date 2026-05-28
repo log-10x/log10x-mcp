@@ -94,9 +94,40 @@ interface CorrelateCrossPillarSummary {
   candidates: Array<{
     name: string;
     tier: 'confirmed' | 'service-match' | 'unconfirmed' | 'coincidence';
+    /** Pearson r magnitude at the peak lag. Used in confidence math.
+     * For direction (co-move vs anti-correlate) see `pearson_signed`. */
     pearson_at_lag: number;
+    /** Signed Pearson r at the peak lag. Positive = co-moves with anchor.
+     * Negative = anti-correlated (gauge dropped when anchor rose). */
+    pearson_signed: number;
     structural_overlap: number | null;
+    /** Conservative reported lag (zeroed when below rate-window resolution). */
     lag_seconds: number;
+    /** Raw lag the math actually found, NOT zeroed when below rate-window.
+     * Negative = candidate leads anchor (possible cause).
+     * Positive = candidate lags anchor (possible effect).
+     * Weigh this against `lag_tightness` before acting on direction. */
+    lag_seconds_raw: number;
+    /** Lag tightness 0..1 — how concentrated the peak is. Low = the Pearson
+     * peak is broad across many offsets (direction is ambiguous). */
+    lag_tightness: number;
+    /** True when the lag peak landed at the bound of the search range
+     * (now ±1800s, was ±300s). Signals "the math couldn't localize the peak
+     * within the search window" — can mean the real lag is wider than
+     * the search range OR there's no real lag relationship. The agent
+     * disambiguates with `anchor_phase_aligned`, structural overlap,
+     * and Pearson magnitude. (No longer auto-demotes — both LLM judges
+     * asked for flag-don't-demote so the rows stay visible.) */
+    lag_at_bound: boolean;
+    /** True when the candidate's mean during the anchor's high-phase
+     * buckets meaningfully differs from its mean during the anchor's
+     * low-phase buckets (≥15% relative gap). FALSE = the candidate's
+     * value is invariant across the anchor's phases, so its Pearson
+     * correlation is a shape-accident rather than anchor-driven
+     * movement. Lets the agent dismiss diurnal/seasonal confounders that
+     * pass the Pearson threshold but aren't actually moving with the
+     * anchor's incident. */
+    anchor_phase_aligned: boolean;
     combined_confidence: number | null;
     moved: boolean;
   }>;
@@ -232,8 +263,13 @@ async function executeCorrelateCrossPillarInner(
         name: c.name,
         tier: c.tier,
         pearson_at_lag: c.subScores.temporal,
+        pearson_signed: c.subScores.temporalSigned,
         structural_overlap: c.subScores.structural,
         lag_seconds: c.lagSeconds,
+        lag_seconds_raw: c.lagSecondsRaw,
+        lag_tightness: c.subScores.lag,
+        lag_at_bound: c.lagAtBound,
+        anchor_phase_aligned: c.anchorPhaseAligned,
         combined_confidence: c.combinedConfidence,
         moved: c.evidence.moved,
       })),

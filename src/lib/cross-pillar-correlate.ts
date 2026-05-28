@@ -51,8 +51,16 @@ export type ConfidenceTier =
   | 'coincidence';
 
 export interface CandidateSubScores {
-  /** Pearson r on the rate curves. */
+  /** Pearson r magnitude on the rate curves (= |signed Pearson|). Used in
+   * the confidence math — the SIGN is preserved separately in
+   * `temporalSigned` so consumers can distinguish co-movement from
+   * anti-correlation. */
   temporal: number;
+  /** Signed Pearson r at the peak lag. Positive = co-moves with anchor.
+   * Negative = anti-correlated (e.g. a metric that dropped when the anchor
+   * rose). Anti-correlation by accident is a common confounder and the
+   * agent needs to see the sign to reason about it. */
+  temporalSigned: number;
   /** Lag tightness 0-1 (how concentrated the peak is around one offset). */
   lag: number;
   /** Structural overlap: 1.0 full, 0.5 partial, 0.0 none, null unknown. */
@@ -70,8 +78,39 @@ export interface CrossPillarCandidate {
   /** Combined confidence. `null` when structural = null (unconfirmed tier). */
   combinedConfidence: number | null;
   tier: ConfidenceTier;
-  /** Lag offset in seconds: negative = candidate leads anchor. */
+  /** Conservative reported lag offset in seconds (zeroed when the math's
+   * peak is below the rate-window resolution). Positive = candidate lags
+   * anchor; negative = candidate leads anchor. For the raw computed lag
+   * (sub-window peaks NOT zeroed), see `lagSecondsRaw`. */
   lagSeconds: number;
+  /** Raw lag offset the math actually found — surfaced even when below
+   * the rate-window blur threshold. Lets the agent see lead/lag direction
+   * at finer resolution than the conservative `lagSeconds`. The directional
+   * signal it carries needs to be weighed against `lag` (tightness) before
+   * acting on it. */
+  lagSecondsRaw: number;
+  /**
+   * True when the Pearson peak landed at the bound of the lag search range
+   * (±max searched offset). The math is signalling "I couldn't localize the
+   * peak inside my search window." This can mean the real lag is wider
+   * than the search range OR there's no real lag relationship — the agent
+   * disambiguates with `anchorPhaseAligned`, the structural overlap, and
+   * the Pearson magnitude.
+   */
+  lagAtBound: boolean;
+  /**
+   * True when the candidate's mean during the anchor's high-phase buckets
+   * differs by ≥ ANCHOR_PHASE_GAP_FLOOR from its mean during the anchor's
+   * low-phase buckets — i.e. the candidate's value tracks the anchor's
+   * incident phase. False when the candidate has the SAME mean in both
+   * phases (its Pearson correlation is then a shape-accident, not an
+   * anchor-driven movement).
+   *
+   * Surfaced as a field rather than used to auto-demote tier (both LLM
+   * judges asked for "flag, don't demote" — the agent reads this
+   * alongside Pearson and the bound flag to make the call).
+   */
+  anchorPhaseAligned: boolean;
   /**
    * #4 — explainability evidence: the basis behind the score so the
    * reader (human or agent) can judge it, rather than trust a headline.
@@ -137,7 +176,16 @@ export interface CorrelateOptions {
 }
 
 const DEFAULT_LOG10X_METRIC = 'all_events_summaryVolume_total';
-const LAG_OFFSETS_SECONDS = [-300, -120, -60, -30, 0, 30, 60, 120, 300];
+// Widened from ±300 to ±1800 per the chaos retest: incidents with lead/lag
+// >5min were all hitting the search bound, forcing the agent to either
+// dismiss them as artifacts (Grok did) or recognize the bounded behavior
+// and ask for a wider search (Claude did). Surfacing accurate lag direction
+// matters more than search cost — even at 30s step, 1800s = 60 offsets is
+// cheap (one Pearson computation per offset, all on local arrays).
+const LAG_OFFSETS_SECONDS = [
+  -1800, -1200, -600, -300, -180, -120, -60, -30, 0, 30, 60, 120, 180, 300, 600, 1200, 1800,
+];
+const LAG_SEARCH_MAX_ABS = Math.max(...LAG_OFFSETS_SECONDS.map((s) => Math.abs(s)));
 
 // #8 — volume significance. A candidate must show real relative movement
 // over the window to count as a co-mover; Pearson alone scores shape, not
@@ -147,6 +195,21 @@ const LAG_OFFSETS_SECONDS = [-300, -120, -60, -30, 0, 30, 60, 120, 300];
 // saturates at 1.0.
 const MOVED_FLOOR = 0.1;
 const VOLUME_FULL_AT = 0.3;
+/**
+ * Floor for anchor-phase gap: candidate's mean during anchor's high-phase
+ * buckets must differ from its mean during anchor's low-phase buckets by
+ * at least this relative magnitude to be considered anchor-aligned.
+ * Below this, the candidate's value didn't meaningfully track the anchor
+ * across the anchor's own variation — high Pearson is then a shape-
+ * accident, not anchor-driven movement.
+ *
+ * 0.15 = 15% relative gap. Chosen empirically: tight enough to kill
+ * diurnal confounders whose value is constant during a brief incident
+ * window, loose enough to admit real co-movers whose anti-correlation
+ * direction (Group E in the chaos test) still produces a meaningful
+ * phase gap.
+ */
+const ANCHOR_PHASE_GAP_FLOOR = 0.15;
 
 /** Relative spread of a series: (max - min) / |mean|. ~0 for a flat metric,
  * larger for one that ramped/spiked. Used as the magnitude-of-movement
@@ -162,6 +225,52 @@ function relativeSpread(series: number[]): number {
   const mean = sum / series.length;
   const denom = Math.abs(mean) > 1e-9 ? Math.abs(mean) : (max > 1e-9 ? max : 1);
   return (max - min) / denom;
+}
+
+/**
+ * Compute the relative gap between the candidate's mean during the anchor's
+ * high-phase buckets vs its mean during the anchor's low-phase buckets.
+ *
+ * Phase partition: buckets where anchor > anchor median = "high", buckets
+ * where anchor ≤ median = "low". Median is robust to the long-tailed
+ * distributions typical of bytes/sec timeseries.
+ *
+ * Returns 0 when there isn't enough variation in the anchor itself to
+ * meaningfully partition (e.g., anchor is constant) — falling back to a
+ * permissive pass-through, since with a flat anchor any correlation is
+ * already suspect on Pearson grounds.
+ *
+ * Returns the relative magnitude |mean_high - mean_low| / scale where
+ * scale is the larger of |mean_high|, |mean_low| (avoids div-by-zero
+ * for near-zero baselines). Range [0, ~1].
+ */
+function anchorPhaseGap(anchor: number[], candidate: number[]): number {
+  // RIGHT-align: when anchor and candidate have different lengths (common
+  // when the anchor pattern was only emitting during a recent incident
+  // window while the candidate gauge has values across the full query
+  // window), pair from the END not the START. The incident's recent
+  // timestamps are what we're correlating against.
+  const n = Math.min(anchor.length, candidate.length);
+  if (n < 6) return 1; // too few samples to filter — be permissive
+  const a = anchor.slice(-n);
+  const c = candidate.slice(-n);
+  const sorted = [...a].sort((x, y) => x - y);
+  const median = sorted[Math.floor(sorted.length / 2)];
+  let sumHigh = 0, nHigh = 0, sumLow = 0, nLow = 0;
+  for (let i = 0; i < n; i++) {
+    if (a[i] > median) {
+      sumHigh += c[i];
+      nHigh += 1;
+    } else {
+      sumLow += c[i];
+      nLow += 1;
+    }
+  }
+  if (nHigh < 2 || nLow < 2) return 1; // degenerate partition — permissive
+  const meanHigh = sumHigh / nHigh;
+  const meanLow = sumLow / nLow;
+  const scale = Math.max(Math.abs(meanHigh), Math.abs(meanLow), 1e-9);
+  return Math.abs(meanHigh - meanLow) / scale;
 }
 
 // #9 — metric-family de-duplication. A pod's CPU has four representations
@@ -316,8 +425,28 @@ export async function runCrossPillarCorrelation(
     const moved = spread >= MOVED_FLOOR;
     const volume = Math.min(1, spread / VOLUME_FULL_AT);
 
+    // Anchor-phase baseline check (deterministic same-window baseline filter).
+    //
+    // Recommendation from the design-dilemma consultation: even high-Pearson
+    // candidates are spurious when their value is INVARIANT across the anchor's
+    // own phases. A diurnal metric whose value is constant during the brief
+    // chaos window co-correlates by accident; an anchor-aligned metric's value
+    // is meaningfully DIFFERENT during the anchor's high-phase vs low-phase.
+    //
+    // Partition the window's buckets into anchor-high (anchor > anchor median)
+    // and anchor-low (anchor ≤ median). Compute candidate mean in each
+    // phase. The relative gap between the two phase-means tells us if the
+    // candidate's value tracks the anchor's phase at all.
+    //
+    // Kills diurnal confounders that pass moved+Pearson but don't actually
+    // change in response to the anchor's incident — exactly the failure
+    // mode that dominated the chaos-test result.
+    const phaseGap = anchorPhaseGap(anchorSeries, candidateSeries);
+    const anchorPhaseAligned = phaseGap >= ANCHOR_PHASE_GAP_FLOOR;
+
     const subScores: CandidateSubScores = {
       temporal: Math.abs(r),
+      temporalSigned: r,
       lag: lagTightness,
       structural: structural.score,
       volume,
@@ -350,13 +479,40 @@ export async function runCrossPillarCorrelation(
     const reportedLag =
       !moved || Math.abs(lagSeconds) < rateWindowSeconds ? 0 : lagSeconds;
 
+    // Surface lag-at-bound as a typed flag so agents can read it explicitly.
+    // The peak landed at the outermost searched offset (±LAG_SEARCH_MAX_ABS) —
+    // the math is signalling "I couldn't localize the relationship within my
+    // search range." Common at the search edge for two reasons:
+    //   (a) the real lag is OUTSIDE the search window (incident with a
+    //       longer lead/lag than ±300s); the candidate's relationship is
+    //       real but its exact direction can't be localized here
+    //   (b) the candidate has no real anchor-aligned relationship and the
+    //       Pearson edge value is just the best-of-bad-options
+    //
+    // Earlier this code auto-demoted (a) and (b) to `coincidence`. Both
+    // LLM judges in the chaos retest pushed back: high-Pearson real-cause
+    // candidates that happened to be at the bound got demoted along with
+    // genuine noise, and the agent then couldn't see them at all. Per
+    // their feedback ("the auto-demotion adds a column and removes
+    // information"), this code now ONLY surfaces the flag — the tier
+    // reflects the structural+temporal score honestly, and the agent
+    // applies its own judgment using the flag.
+    const lagAtBound = moved && Math.abs(lagSeconds) >= LAG_SEARCH_MAX_ABS;
+    // Anchor-phase alignment is similarly surfaced as a SIGNAL, not a
+    // tier override. The agent reads `anchor_phase_aligned` alongside the
+    // Pearson and flag fields and decides.
+    const adjustedTier = tier;
+
     candidates.push({
       name: candidate.name,
       labels: candidate.labels,
       subScores,
       combinedConfidence,
-      tier,
+      tier: adjustedTier,
       lagSeconds: reportedLag,
+      lagSecondsRaw: moved ? lagSeconds : 0,
+      lagAtBound,
+      anchorPhaseAligned,
       evidence: { rateWindowSeconds, movedSpread: spread, moved },
     });
   }
@@ -871,10 +1027,17 @@ function computeTemporalCorrelation(
   if (anchor.length === 0 || candidate.length === 0) {
     return { r: 0, lagSeconds: 0, lagTightness: 0 };
   }
-  // Align series to the shorter length.
+  // Align series to the shorter length. RIGHT-align — when anchor and
+  // candidate have different lengths (anchor pattern is sparse over the
+  // query window, candidate gauge is dense), the most recent timestamps
+  // are the ones that overlap. Left-alignment would compare the anchor's
+  // chaos-active period to the candidate's pre-chaos baseline period —
+  // a real bug that surfaced during the chaos test (real causes shifted
+  // their peak Pearson to the search bound to compensate for the
+  // mis-alignment).
   const n = Math.min(anchor.length, candidate.length);
-  const a = anchor.slice(0, n);
-  const c = candidate.slice(0, n);
+  const a = anchor.slice(-n);
+  const c = candidate.slice(-n);
 
   // Compute Pearson r at each supported lag offset (expressed in bucket counts).
   const offsets = LAG_OFFSETS_SECONDS.map((s) => Math.round(s / step));
