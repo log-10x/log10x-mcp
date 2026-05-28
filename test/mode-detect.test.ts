@@ -11,12 +11,12 @@ test('shouldRegisterTool: analysis tools register in analysis mode', () => {
 
 test('shouldRegisterTool: analysis tools also register in analysis_pending mode', () => {
   assert.equal(shouldRegisterTool('log10x_top_patterns', 'analysis_pending'), true);
-  assert.equal(shouldRegisterTool('log10x_find_uuid_in_body', 'analysis_pending'), true);
+  assert.equal(shouldRegisterTool('log10x_find_skew', 'analysis_pending'), true);
 });
 
 test('shouldRegisterTool: analysis tools do NOT register in POC mode', () => {
   assert.equal(shouldRegisterTool('log10x_top_patterns', 'poc'), false);
-  assert.equal(shouldRegisterTool('log10x_find_incident_cluster', 'poc'), false);
+  assert.equal(shouldRegisterTool('log10x_find_skew', 'poc'), false);
   assert.equal(shouldRegisterTool('log10x_metrics_that_moved', 'poc'), false);
 });
 

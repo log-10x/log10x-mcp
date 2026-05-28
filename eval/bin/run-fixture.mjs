@@ -36,15 +36,10 @@ import { readFileSync, appendFileSync, existsSync, writeFileSync } from 'node:fs
 import { spawnSync } from 'node:child_process';
 import { StructuredOutputSchema } from '/Users/talweiss/git/l1x-co/log10x-mcp/build/lib/output-types.js';
 import { executeFindSkew } from '/Users/talweiss/git/l1x-co/log10x-mcp/build/tools/find-skew.js';
-import { executeFindConstantSlots } from '/Users/talweiss/git/l1x-co/log10x-mcp/build/tools/find-constant-slots.js';
-import { executeFindUuidInBody } from '/Users/talweiss/git/l1x-co/log10x-mcp/build/tools/find-uuid-in-body.js';
-import { executeFindIncidentCluster } from '/Users/talweiss/git/l1x-co/log10x-mcp/build/tools/find-incident-cluster.js';
+// find_constant_slots / find_uuid_in_body / find_incident_cluster removed pre-launch.
 
 const TOOLS = {
   find_skew: executeFindSkew,
-  find_constant_slots: executeFindConstantSlots,
-  find_uuid_in_body: executeFindUuidInBody,
-  find_incident_cluster: executeFindIncidentCluster,
 };
 
 const fixturePath = process.argv[2];

@@ -76,9 +76,6 @@ const PLAN = {
 
   // ── DETECT (paste-mode; locally evaluable) ────────────────
   find_skew: { live: true, args: { events: makeSkewedEvents(), min_concentration: 0.6, top_n: 5, view: 'summary' } },
-  find_constant_slots: { live: true, args: { events: makeConstantSlotEvents(), top_n: 5, view: 'summary' } },
-  find_uuid_in_body: { live: true, args: { events: makeUuidEvents(), top_n: 5, view: 'summary' } },
-  find_incident_cluster: { live: true, args: { events: makeClusterEvents(), view: 'summary' } },
 
   // ── DROP ──────────────────────────────────────────────────
   pattern_mitigate:   { live: true, args: { pattern: 'cart_cartstore_ValkeyCartStore', view: 'summary' } },
@@ -122,26 +119,6 @@ function makeSkewedEvents() {
   events.push('audit verb=delete user=u10 status=204');
   return events;
 }
-function makeConstantSlotEvents() {
-  // apiVersion is constant across all events → constant-slot detector should flag it.
-  return Array.from({ length: 12 }, (_, i) => `apiVersion=audit.k8s.io/v1 kind=Event user=u${i} action=op${i % 3}`);
-}
-function makeUuidEvents() {
-  // auditID is a per-event UUID → uuid-in-body detector should flag it.
-  const events = [];
-  for (let i = 0; i < 12; i++) {
-    const u = `00000000-0000-0000-0000-${String(i).padStart(12, '0')}`;
-    events.push(`audit auditID=${u} verb=GET status=200`);
-  }
-  return events;
-}
-function makeClusterEvents() {
-  const events = [];
-  for (let i = 0; i < 4; i++) events.push(`k8s_audit endpoints kube_dns lookup failed for namespace=ns${i}`);
-  for (let i = 0; i < 4; i++) events.push(`k8s_audit services kube_dns timeout in namespace=ns${i}`);
-  return events;
-}
-
 const SYNTHETICS = {
   signin_start: {
     args: {},

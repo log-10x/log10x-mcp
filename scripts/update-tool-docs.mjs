@@ -62,9 +62,6 @@ const PAGE_PATH = {
   discover_join:                'investigation/discover-join.md',
   // detect
   find_skew:             'detect/find-skew.md',
-  find_constant_slots:   'detect/find-constant-slots.md',
-  find_uuid_in_body:     'detect/find-uuid-in-body.md',
-  find_incident_cluster: 'detect/find-incident-cluster.md',
   // drop
   pattern_mitigate:  'drop/pattern-mitigate.md',
   dependency_check:  'drop/dependency-check.md',

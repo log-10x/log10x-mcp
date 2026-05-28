@@ -4,10 +4,12 @@
  * generic, callable detector. Same algorithm; same conservative thresholds.
  *
  * Why it lives here:
- *   - the standalone `log10x_find_incident_cluster` tool calls this
- *     directly with `IncidentInput[]` synthesized from PromQL queries.
- *   - the existing top-patterns renderer also uses it; it re-imports
- *     `detectIncidents` from this module to keep one source of truth.
+ *   - top_patterns and top_volume surface an "N incident cluster(s)
+ *     detected" callout when consecutive high-cost patterns share an
+ *     incident root. They import `detectIncidents` from this module.
+ *   - the standalone `log10x_find_incident_cluster` TOOL was removed
+ *     pre-launch (the agent couldn't act on its output), but the
+ *     library is retained for the in-tool callout described above.
  *
  * Algorithm summary:
  *   Two patterns join into a cluster when they SHARE A SERVICE and meet

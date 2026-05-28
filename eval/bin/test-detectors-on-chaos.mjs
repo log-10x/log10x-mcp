@@ -14,9 +14,9 @@ import cwlPkg from '/Users/talweiss/git/l1x-co/log10x-mcp/node_modules/@aws-sdk/
 import { appendFileSync } from 'node:fs';
 const { CloudWatchLogsClient, FilterLogEventsCommand } = cwlPkg;
 import { executeFindSkew } from '/Users/talweiss/git/l1x-co/log10x-mcp/build/tools/find-skew.js';
-import { executeFindConstantSlots } from '/Users/talweiss/git/l1x-co/log10x-mcp/build/tools/find-constant-slots.js';
-import { executeFindUuidInBody } from '/Users/talweiss/git/l1x-co/log10x-mcp/build/tools/find-uuid-in-body.js';
-import { executeFindIncidentCluster } from '/Users/talweiss/git/l1x-co/log10x-mcp/build/tools/find-incident-cluster.js';
+// find_constant_slots / find_uuid_in_body / find_incident_cluster removed
+// pre-launch (2026-05-28). Their chaos scenarios still exist in the
+// injector for reference but are no longer evaluated by any tool.
 
 const RESULTS_PATH = process.env.EVAL_RESULTS_PATH ?? '/tmp/autonomous-run-19ecafa/eval-results.jsonl';
 const LOG_GROUP = '/aws/eks/log10x-otel-demo/cluster';
@@ -111,32 +111,8 @@ async function main() {
     console.error(`skew-78 scenario only has ${skewEvents.length} events — need >= 5`);
   }
 
-  // constant-slot scenario should trigger find_constant_slots (apiVersion + kind).
-  const constEvents = byScenario.get('constant-slot') ?? [];
-  if (constEvents.length >= 5) {
-    const r = await testDetector('find_constant_slots_on_chaos_constant_slot', executeFindConstantSlots, constEvents);
-    records.push(r);
-    console.log(JSON.stringify(r));
-  }
-
-  // uuid-in-body scenario should trigger find_uuid_in_body.
-  const uuidEvents = byScenario.get('uuid-in-body') ?? [];
-  if (uuidEvents.length >= 5) {
-    const r = await testDetector('find_uuid_in_body_on_chaos_uuid_in_body', executeFindUuidInBody, uuidEvents);
-    records.push(r);
-    console.log(JSON.stringify(r));
-  }
-
-  // incident-cluster + dns-failure scenarios mixed should trigger find_incident_cluster.
-  const incEvents = [
-    ...(byScenario.get('incident-cluster') ?? []),
-    ...(byScenario.get('dns-failure') ?? []),
-  ];
-  if (incEvents.length >= 5) {
-    const r = await testDetector('find_incident_cluster_on_chaos', executeFindIncidentCluster, incEvents.slice(0, 60));
-    records.push(r);
-    console.log(JSON.stringify(r));
-  }
+  // find_constant_slots / find_uuid_in_body / find_incident_cluster
+  // were removed pre-launch. Their chaos scenarios are skipped here.
 
   for (const r of records) {
     appendFileSync(RESULTS_PATH, JSON.stringify(r) + '\n');
