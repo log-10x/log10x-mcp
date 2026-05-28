@@ -10,15 +10,16 @@
  *                          [--reports-dir <path>]
  */
 import { resolve, dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { mkdirSync, writeFileSync } from 'node:fs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const evalRoot = resolve(__dirname, '..');
+const buildUrl = (rel) => pathToFileURL(resolve(evalRoot, rel)).href;
 
-const { loadAllScenarios } = await import(resolve(evalRoot, 'build-eval/fixture-loader.js'));
-const { loadEvalEnv } = await import(resolve(evalRoot, 'build-eval/env.js'));
-const { runScenario } = await import(resolve(evalRoot, 'build-eval/orchestrator.js'));
+const { loadAllScenarios } = await import(buildUrl('build-eval/fixture-loader.js'));
+const { loadEvalEnv } = await import(buildUrl('build-eval/env.js'));
+const { runScenario } = await import(buildUrl('build-eval/orchestrator.js'));
 
 function parseArgs(argv) {
   const out = { filter: null, mode: 'deterministic', judge: undefined, reportsDir: null };

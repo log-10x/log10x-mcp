@@ -1,0 +1,53 @@
+{
+  "id": "install-reporter-log10x-saas",
+  "title": "Install advisor — Reporter on Log10x SaaS (most basic)",
+  "description": "Simplest install path: user picks the standalone Reporter DaemonSet (zero-touch, runs alongside any existing forwarder) and sends TenXSummary metrics to the Log10x SaaS backend (no external TSDB credentials). With backends=['log10x'] there is no backend_credentials question, and the Reporter shape has no forwarder question (forwarder selection is Receiver-only) — so license acquisition is the only remaining structural decision (auto-minted via signin_required → log10x_signin_start, or pasted via license_source='paste'). Canonical chain: log10x_discover_env (snapshot k8s; skip_aws=true in CI) → log10x_advise_install (app=reporter, backends=['log10x']). Test enforces (1) discover_env runs and emits a snapshot id, (2) advise_install is called with that snapshot id, app=reporter, and 'log10x' in backends — across any of its calls in the conversation, (3) advise_install's last response is a structurally valid wizard outcome (plan envelope, signin_required, or a next_question asking only for license).",
+  "prompt": "Install the Log10x Reporter on this cluster. Just send the engine metrics to the Log10x SaaS backend — I don't need to wire up Datadog or any other TSDB.",
+  "initial_tool": {
+    "tool": "log10x_discover_env",
+    "args": { "skip_aws": true },
+    "reason": "Install chains start at discover_env. skip_aws=true keeps the eval-harness probe local-only on the demo env (we're not credentialed for AWS in CI)."
+  },
+  "tool_arg_defaults": {
+    "api_key": "{{env.apiKey}}"
+  },
+  "expected_sequence": {
+    "must_include": ["log10x_discover_env", "log10x_advise_install"],
+    "must_not_include": ["log10x_advise_retriever"],
+    "tolerance": 2
+  },
+  "ground_truth": [
+    {
+      "matcher_kind": "regex",
+      "description": "discover_env returns a snapshot id (disc-<hex>)",
+      "scope": "tool_result",
+      "tool": "log10x_discover_env",
+      "pattern": "disc-[a-f0-9]{6,}"
+    },
+    {
+      "matcher_kind": "regex",
+      "description": "advise_install was called with a snapshot_id arg referencing a disc- id (chain handoff from discover_env)",
+      "scope": "tool_call_args",
+      "tool": "log10x_advise_install",
+      "pattern": "\"snapshot_id\"\\s*:\\s*\"disc-"
+    },
+    {
+      "matcher_kind": "regex",
+      "description": "advise_install reached a structurally valid wizard outcome — plan envelope (Install plan / Verify / helm) OR a typed wizard mode (signin_required / next_question / license_paste)",
+      "scope": "tool_result",
+      "tool": "log10x_advise_install",
+      "pattern": "(## Install plan|## Verify|signin_required|license_paste|next_question|helm upgrade)",
+      "flags": "i"
+    }
+  ],
+  "quality_criteria": {
+    "reasoning": 0.6,
+    "value": 0.5,
+    "autonomy": 0.5,
+    "hallucination_max": 0.5
+  },
+  "optimal_steps": 3,
+  "max_steps": 8,
+  "error_policy": "continue",
+  "tags": ["install", "advise-install", "reporter", "log10x-backend", "wizard"]
+}

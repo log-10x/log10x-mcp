@@ -15,14 +15,15 @@
  * still exits 0 (covered in orchestrator.decidePassed).
  */
 import { resolve, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const evalRoot = resolve(__dirname, '..');
+const buildUrl = (rel) => pathToFileURL(resolve(evalRoot, rel)).href;
 
-const { loadScenario } = await import(resolve(evalRoot, 'build-eval/fixture-loader.js'));
-const { loadEvalEnv } = await import(resolve(evalRoot, 'build-eval/env.js'));
-const { runScenario } = await import(resolve(evalRoot, 'build-eval/orchestrator.js'));
+const { loadScenario } = await import(buildUrl('build-eval/fixture-loader.js'));
+const { loadEvalEnv } = await import(buildUrl('build-eval/env.js'));
+const { runScenario } = await import(buildUrl('build-eval/orchestrator.js'));
 
 function parseArgs(argv) {
   const out = { mode: 'deterministic', judge: undefined, reportsDir: null, model: null, fixture: null };

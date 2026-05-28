@@ -32,6 +32,44 @@ interface NextAction {
   reason?: string;
 }
 
+/**
+ * Extract chain hints from a tool result. Two paths:
+ *
+ *   1. HTML-comment `<!-- NEXT_ACTIONS: ... -->` block at the end of a
+ *      markdown response. Used by tools that emit markdown bodies
+ *      (pattern_mitigate, configure_compact, etc.) via renderNextActions().
+ *   2. Structured envelope's `actions: [...]` field. Used by tools that
+ *      return a StructuredOutput envelope (discover_env, advise_install,
+ *      top_patterns, etc.) via buildEnvelope().
+ *
+ * The HTML-comment path runs first to preserve backwards-compatible
+ * behavior; the JSON envelope path is a fallback so envelope-based tools
+ * can chain through the deterministic runner without burning tokens.
+ */
+function extractActionsFromResult(text: string): NextAction[] {
+  const fromComment = extractNextActions(text) as NextAction[];
+  if (fromComment.length > 0) return fromComment;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (parsed && typeof parsed === 'object') {
+      const actions = (parsed as { actions?: unknown }).actions;
+      if (Array.isArray(actions)) {
+        return actions.filter(
+          (a): a is NextAction =>
+            !!a &&
+            typeof a === 'object' &&
+            typeof (a as { tool?: unknown }).tool === 'string' &&
+            typeof (a as { args?: unknown }).args === 'object' &&
+            (a as { args: unknown }).args !== null
+        );
+      }
+    }
+  } catch {
+    // Not JSON — that's fine, just means there's no envelope and no hints.
+  }
+  return [];
+}
+
 export async function runDeterministic(
   scenario: Scenario,
   env: EvalEnv,
@@ -108,7 +146,7 @@ export async function runDeterministic(
     transcript.writeToolResult(useId, result.text, result.isError);
     lastText = result.text;
 
-    const hints = extractNextActions(result.text) as NextAction[];
+    const hints = extractActionsFromResult(result.text);
     const entry: StepLog = {
       step,
       kind: 'tool_call',

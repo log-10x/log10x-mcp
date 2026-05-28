@@ -339,7 +339,8 @@ const TOOL_TABLE: Record<string, ExecuteFn> = {
     executeCustomerMetricsQuery(parseArgs(customerMetricsQuerySchema, raw)),
   log10x_discover_env: async (raw) => executeDiscoverEnv(parseArgs(discoverEnvSchema, raw)),
   log10x_advise_retriever: async (raw) => executeAdviseRetriever(parseArgs(adviseRetrieverSchema, raw)),
-  log10x_advise_install: async (raw) => executeAdviseInstall(parseArgs(adviseInstallSchema, raw)),
+  log10x_advise_install: async (raw, ev) =>
+    executeAdviseInstall(parseArgs(adviseInstallSchema, raw), buildLoadedEnvs(ev)),
   log10x_configure_compact: async (raw) => executeConfigureCompact(parseArgs(configureCompactSchema, raw)),
 
   // envs object (full Environments shape)
