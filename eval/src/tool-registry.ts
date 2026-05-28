@@ -350,6 +350,46 @@ const TOOL_TABLE: Record<string, ExecuteFn> = {
 
 export const TOOL_NAMES = Object.keys(TOOL_TABLE).sort();
 
+/**
+ * Per-tool ZodObject schemas, suitable for JSON-Schema conversion.
+ *
+ * The autonomous runner uses this to advertise real `input_schema` blocks
+ * to the model (replacing the earlier additionalProperties:true stub).
+ * Exposing the actual property names is what lets the LLM read literal
+ * keys like `backends` off the schema instead of inventing plausible
+ * synonyms (`targets`, `destinations`, `outputs`).
+ *
+ * Adding a tool: pair it here with the same schema you registered in
+ * TOOL_TABLE. The two maps must stay in lockstep — the type system
+ * doesn't enforce it, but a runtime check at autonomous-runner boot does.
+ */
+export const TOOL_SCHEMAS: Record<string, z.ZodObject<z.ZodRawShape>> = {
+  log10x_event_lookup: z.object(eventLookupSchema),
+  log10x_pattern_examples: z.object(patternExamplesSchema),
+  log10x_savings: z.object(savingsSchema),
+  log10x_pattern_trend: z.object(trendSchema),
+  log10x_services: z.object(servicesSchema),
+  log10x_dependency_check: z.object(dependencyCheckSchema),
+  log10x_discover_labels: z.object(discoverLabelsSchema),
+  log10x_top_patterns: z.object(topPatternsSchema),
+  log10x_investigate: z.object(investigateSchema),
+  log10x_resolve_batch: z.object(resolveBatchSchema),
+  log10x_extract_templates: z.object(extractTemplatesSchema),
+  log10x_retriever_query: z.object(retrieverQuerySchema),
+  log10x_retriever_series: z.object(retrieverSeriesSchema),
+  log10x_backfill_metric: z.object(backfillMetricSchema),
+  log10x_doctor: z.object(doctorSchema),
+  log10x_customer_metrics_query: z.object(customerMetricsQuerySchema),
+  log10x_discover_join: z.object(discoverJoinSchema),
+  log10x_correlate_cross_pillar: z.object(correlateCrossPillarSchema),
+  log10x_translate_metric_to_patterns: z.object(translateMetricToPatternsSchema),
+  log10x_discover_env: z.object(discoverEnvSchema),
+  log10x_advise_retriever: z.object(adviseRetrieverSchema),
+  log10x_advise_install: z.object(adviseInstallSchema),
+  log10x_configure_compact: z.object(configureCompactSchema),
+  log10x_login_status: z.object(loginStatusSchema),
+};
+
 export class UnknownToolError extends Error {
   constructor(name: string) {
     super(

@@ -16,9 +16,10 @@
  * mode, so judge / sequence-diff / autonomy code is mode-agnostic.
  */
 import Anthropic from '@anthropic-ai/sdk';
+import { zodToJsonSchema } from 'zod-to-json-schema';
 import type { Scenario, RunOutcome, StepLog } from './types.js';
 import { interpolateEnvVars, type EvalEnv } from './env.js';
-import { invokeTool, TOOL_NAMES } from './tool-registry.js';
+import { invokeTool, TOOL_NAMES, TOOL_SCHEMAS } from './tool-registry.js';
 import type { TranscriptWriter, StepLogWriter } from './transcript-writer.js';
 
 const DEFAULT_MODEL = 'claude-sonnet-4-6';
@@ -33,26 +34,53 @@ export interface AutonomousResult {
 interface ToolDecl {
   name: string;
   description: string;
-  input_schema: { type: 'object'; additionalProperties: true };
+  input_schema: Record<string, unknown>;
 }
 
 /**
- * Build minimal tool declarations. We don't replicate the MCP server's
- * full Zod-derived schemas here because (a) the LLM uses the
- * description for routing, not the schema, and (b) the tool-registry
- * dispatches with `as never` — additional schema rigor wouldn't catch
- * extra/missing args before the actual tool body checks.
+ * Build tool declarations using each tool's real Zod-derived JSON Schema.
  *
- * If the agent passes invalid args the tool returns its own error
- * markdown, which is exactly the failure mode we want to grade.
+ * Why this matters for evaluation: a production MCP client (Claude
+ * Desktop, Cursor, etc.) sees the full schema with `properties` —
+ * including literal field names like `backends`, `app`, `snapshot_id`.
+ * When the harness advertised only `additionalProperties: true`, Sonnet
+ * had to recover field names from description prose alone, which lets
+ * common-API priors leak in (`targets` instead of `backends`, etc.). The
+ * eval should mirror production discoverability, not handicap the model.
+ *
+ * Tools missing from TOOL_SCHEMAS fall back to an open-object schema so
+ * the runner still works during incremental rollout — `missingSchemas`
+ * is logged once at the call site so the gap is visible.
  */
-function buildToolDecls(): ToolDecl[] {
-  return TOOL_NAMES.map((name) => ({
-    name,
-    description: `Log10x MCP tool ${name}. Pass valid args per the tool's documented schema. ` +
-      `On unrecognized args the tool returns an error markdown — read it and try a different call.`,
-    input_schema: { type: 'object' as const, additionalProperties: true },
-  }));
+function buildToolDecls(): { decls: ToolDecl[]; missingSchemas: string[] } {
+  const missingSchemas: string[] = [];
+  const decls = TOOL_NAMES.map((name) => {
+    const zodSchema = TOOL_SCHEMAS[name];
+    let input_schema: Record<string, unknown>;
+    if (zodSchema) {
+      // Cast the schema to the loose ZodTypeAny shape because zodToJsonSchema's
+      // generic return type is recursive and trips ts2589 on deeply-typed
+      // schemas. The JSON object we cast the result to is what we need anyway.
+      const jsonSchema = zodToJsonSchema(zodSchema as unknown as Parameters<typeof zodToJsonSchema>[0], {
+        $refStrategy: 'none',
+        target: 'openApi3',
+      }) as Record<string, unknown>;
+      // Strip the $schema / definitions wrappers — Anthropic's tool format
+      // expects a bare JSON Schema object, not a Draft-7 envelope.
+      delete jsonSchema.$schema;
+      delete jsonSchema.definitions;
+      input_schema = jsonSchema;
+    } else {
+      missingSchemas.push(name);
+      input_schema = { type: 'object', additionalProperties: true };
+    }
+    return {
+      name,
+      description: `Log10x MCP tool ${name}. Read input_schema.properties for the exact arg names and types.`,
+      input_schema,
+    };
+  });
+  return { decls, missingSchemas };
 }
 
 interface AnthropicLike {
@@ -143,7 +171,13 @@ export async function runAutonomous(
   transcript.writeUserPrompt(scenario.prompt);
 
   const client = new Anthropic() as unknown as AnthropicLike;
-  const tools = buildToolDecls();
+  const { decls: tools, missingSchemas } = buildToolDecls();
+  if (missingSchemas.length > 0) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[autonomous-runner] ${missingSchemas.length} tool(s) missing from TOOL_SCHEMAS — model will see additionalProperties:true fallback: ${missingSchemas.join(', ')}`
+    );
+  }
   const stepLogs: StepLog[] = [];
   const messages: Parameters<typeof client.messages.create>[0]['messages'] = [
     { role: 'user', content: scenario.prompt },
