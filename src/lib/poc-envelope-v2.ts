@@ -304,7 +304,7 @@ export function buildPocEnvelopeV2(
     member_pattern_indices: c.members
       .map((m) => identityToIndex.get(m.identity))
       .filter((i): i is number => i !== undefined),
-    combined_monthly_cost_usd: c.combinedMonthlyUsd,
+    combined_monthly_cost_usd: dollars(c.combinedMonthlyUsd),
     root_cause_hypothesis: inferRootCauseHypothesis(c),
   }));
 
@@ -359,9 +359,9 @@ export function buildPocEnvelopeV2(
         events_when_saturated: input.reasonStopped === 'source_exhausted' ? input.extraction.totalEvents : null,
       },
       coverage: {
-        events_with_timestamp_pct: withTimestamp / totalPatterns,
-        events_with_service_attribution_pct: withService / totalPatterns,
-        events_with_severity_attribution_pct: withSeverity / totalPatterns,
+        events_with_timestamp_pct: ratio(withTimestamp / totalPatterns),
+        events_with_service_attribution_pct: ratio(withService / totalPatterns),
+        events_with_severity_attribution_pct: ratio(withSeverity / totalPatterns),
       },
       methodology: {
         templater: input.extraction.executionMode === 'local_cli' ? 'engine_fingerprint' : 'paste_lambda',
@@ -429,16 +429,27 @@ function buildAggregates(
       serviceMap.set(svc, { cost: p.costPerWindow, count: 1, bytes: p.bytes, topPatternIndex: i, topPatternCost: p.costPerWindow });
     }
   }
+  // Total templater bytes — used to apportion the total monthly cost
+  // (which is scaled from rawIngestBytes when available) by each
+  // service's share of templater bytes. Without this apportionment,
+  // each service's cost is computed only from its templater bytes,
+  // which sums to ~$0.65/mo while the envelope's top-level total
+  // shows $3.13/mo (rawIngestBytes-based). The mismatch caused every
+  // service except the dominant one to round below $0.005 -> $0.
+  const totalServiceBytes = Array.from(serviceMap.values()).reduce((s, a) => s + a.bytes, 0);
   const byService: ServiceAggregate[] = [];
   for (const [service, agg] of serviceMap) {
-    const monthlyCost = agg.cost * (24 * 30) / Math.max(0.001, windowDurationSeconds / 3600);
+    // Each service's share of total templater bytes, applied to the
+    // calibrated total monthly cost. Sums to totalMonthlyCostUsd.
+    const shareOfBytes = totalServiceBytes > 0 ? agg.bytes / totalServiceBytes : 0;
+    const monthlyCost = totalMonthlyCostUsd * shareOfBytes;
     byService.push({
       service,
       monthly_cost_usd: dollars(monthlyCost),
       pattern_count: agg.count,
       top_pattern_index: agg.topPatternIndex,
       approx_bytes_per_sec: bps(agg.bytes / Math.max(1, windowDurationSeconds)),
-      share_of_total: ratio(monthlyCost / Math.max(0.001, totalMonthlyCostUsd)),
+      share_of_total: ratio(shareOfBytes),
     });
   }
   byService.sort((a, b) => b.monthly_cost_usd - a.monthly_cost_usd);
