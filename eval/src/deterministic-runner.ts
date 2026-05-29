@@ -33,6 +33,41 @@ interface NextAction {
 }
 
 /**
+ * Wizard-style tools (notably log10x_advise_install) return next-action
+ * args containing the literal placeholder `"<user answer>"` for the
+ * field the wizard is asking the user to fill. In autonomous mode the
+ * LLM resolves these from the user prompt; in deterministic mode there
+ * is no LLM, so a scenario can pre-supply them via `wizard_answers`.
+ *
+ * Substitution is top-level only — the wizard's placeholders live at
+ * the top of the action's args object (snapshot_id at root, app at
+ * root, etc.). No deep walk needed today.
+ *
+ * Missing answers stay as `"<user answer>"`, which the receiving tool
+ * will reject with a schema or unknown-args error — that's the right
+ * signal back to the fixture author that they need to extend
+ * wizard_answers.
+ */
+const USER_ANSWER_PLACEHOLDER = '<user answer>';
+function substituteWizardAnswers(
+  args: Record<string, unknown>,
+  wizardAnswers: Record<string, unknown> | undefined
+): Record<string, unknown> {
+  if (!wizardAnswers) return args;
+  let mutated = false;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(args)) {
+    if (v === USER_ANSWER_PLACEHOLDER && k in wizardAnswers) {
+      out[k] = wizardAnswers[k];
+      mutated = true;
+    } else {
+      out[k] = v;
+    }
+  }
+  return mutated ? out : args;
+}
+
+/**
  * Extract chain hints from a tool result. Two paths:
  *
  *   1. HTML-comment `<!-- NEXT_ACTIONS: ... -->` block at the end of a
@@ -166,9 +201,14 @@ export async function runDeterministic(
       break;
     }
 
-    // BFS-enqueue novel hints.
+    // BFS-enqueue novel hints. Wizard-style next_question actions carry
+    // `"<user answer>"` placeholders for the field the wizard wants
+    // filled; substitute them from scenario.wizard_answers so the
+    // deterministic runner can drive multi-turn wizards the same way an
+    // LLM would in autonomous mode.
     for (const hint of hints) {
-      const hintArgs = (hint.args ?? {}) as Record<string, unknown>;
+      const rawHintArgs = (hint.args ?? {}) as Record<string, unknown>;
+      const hintArgs = substituteWizardAnswers(rawHintArgs, scenario.wizard_answers);
       const k = `${hint.tool}|${stableStringify({
         ...(scenario.tool_arg_defaults ?? {}),
         ...hintArgs,

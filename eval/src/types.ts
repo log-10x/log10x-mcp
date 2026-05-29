@@ -91,6 +91,20 @@ export const scenarioSchema = z.object({
     })
     .optional(),
 
+  /**
+   * Pre-supplied answers for wizard-style tools (currently log10x_advise_install)
+   * so the deterministic runner can satisfy `next_question` envelopes the
+   * same way an LLM would in autonomous mode. When the wizard emits an
+   * action with a literal `"<user answer>"` placeholder at any top-level
+   * arg, the runner substitutes `wizard_answers[<that_key>]` before
+   * enqueueing the call. Autonomous mode ignores this block — Sonnet
+   * supplies its own answers from the user prompt.
+   *
+   * Key = the wizard's `answer_field` (e.g. "app", "backends", "airgapped").
+   * Value = whatever shape the schema expects (string / array / boolean).
+   */
+  wizard_answers: z.record(z.unknown()).optional(),
+
   tags: z.array(z.string()).default([]),
 });
 export type Scenario = z.infer<typeof scenarioSchema>;

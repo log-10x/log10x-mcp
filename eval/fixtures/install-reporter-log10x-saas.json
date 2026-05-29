@@ -11,10 +11,15 @@
   "tool_arg_defaults": {
     "api_key": "{{env.apiKey}}"
   },
+  "wizard_answers": {
+    "app": "reporter",
+    "backends": ["log10x"],
+    "airgapped": false
+  },
   "expected_sequence": {
     "must_include": ["log10x_discover_env", "log10x_advise_install"],
     "must_not_include": ["log10x_advise_retriever"],
-    "tolerance": 2
+    "tolerance": 4
   },
   "ground_truth": [
     {
@@ -30,6 +35,20 @@
       "scope": "tool_call_args",
       "tool": "log10x_advise_install",
       "pattern": "\"snapshot_id\"\\s*:\\s*\"disc-"
+    },
+    {
+      "matcher_kind": "regex",
+      "description": "advise_install was called with app='reporter' in at least one of its invocations — autonomous mode: Sonnet picks this from the prompt's 'Reporter' word; deterministic mode: the wizard's app next_question gets answered from wizard_answers.app",
+      "scope": "tool_call_args",
+      "tool": "log10x_advise_install",
+      "pattern": "\"app\"\\s*:\\s*\"reporter\""
+    },
+    {
+      "matcher_kind": "regex",
+      "description": "advise_install was called with backends containing 'log10x' — autonomous mode: Sonnet picks this from the prompt's 'Log10x SaaS' phrase; deterministic mode: the wizard's backends next_question gets answered from wizard_answers.backends",
+      "scope": "tool_call_args",
+      "tool": "log10x_advise_install",
+      "pattern": "\"backends\"\\s*:\\s*\\[[^\\]]*\"log10x\""
     },
     {
       "matcher_kind": "regex",
