@@ -91,6 +91,16 @@ export interface PocInput {
 }
 
 export interface PocOutput {
+  /**
+   * Optional host-agent enrichment block. Populated when the customer
+   * sets `enrich_with_host_agent=true` on the submit and the MCP host
+   * advertises the `sampling` capability. Contributions come from the
+   * host's own LLM using its tools (kubectl, source, dashboards) to
+   * add operational context the engine cannot see. Always
+   * non-throwing: when enrichment is skipped or fails, `metadata`
+   * carries the reason and `contributions` is empty.
+   */
+  agent_enrichment?: import('./poc-host-agent-enricher.js').AgentEnrichmentResult;
   aggregates: {
     totals: {
       monthly_cost_usd: number;

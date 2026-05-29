@@ -47,6 +47,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { checkDeps, DEP_CHECK_VENDORS } from '../lib/siem/deps/index.js';
 import { buildPocEnvelopeV2 } from '../lib/poc-envelope-v2.js';
 import { _enrichForEnvelope } from '../lib/poc-report-renderer.js';
+import { enrichWithHostAgent } from '../lib/poc-host-agent-enricher.js';
 
 const MCP_VERSION = readClientVersion();
 
@@ -161,6 +162,27 @@ export const pocFromSiemSubmitSchema = {
         'the host does not advertise the `sampling` capability; the report falls back to raw ' +
         'snake_case identities plus a note. Set false to skip unconditionally.'
     ),
+  enrich_with_host_agent: z
+    .boolean()
+    .default(true)
+    .describe(
+      'Default true: after the engine produces measured findings (per-pattern $/mo, growth, ' +
+        'incident clusters), ask the MCP host LLM via sampling to contribute operational context ' +
+        'the engine cannot see: kubectl events / deploys correlating with GROWING patterns, ' +
+        'alert / dashboard dependencies before recommending mute, code-level root-cause refinement ' +
+        'on code_fix patterns, and prioritization based on customer context. Single round-trip, ' +
+        'capped at 8000 output tokens. Skipped automatically when the host does not advertise ' +
+        'sampling; the v2 envelope still ships without enrichment. Contributions land in ' +
+        'output.agent_enrichment.contributions with an audit trail (tools_inspected) so the ' +
+        'customer sees what the agent says it looked at.'
+    ),
+  enrich_max_tokens: z
+    .number()
+    .int()
+    .min(1000)
+    .max(32000)
+    .default(8000)
+    .describe('Output token cap for the host-agent enrichment call. Default 8000.'),
   privacy_mode: z
     .boolean()
     .default(true)
@@ -250,6 +272,12 @@ interface Snapshot {
   error?: string;
   partialReportMarkdown?: string;
   retryHint?: string;
+  /**
+   * Host-agent enrichment result, computed once at the end of
+   * runPipeline. Read by the status path when building the v2
+   * envelope so we don't re-call the host LLM on every status poll.
+   */
+  hostAgentEnrichment?: import('../lib/poc-host-agent-enricher.js').AgentEnrichmentResult;
 }
 
 const SNAPSHOTS = new Map<string, Snapshot>();
@@ -284,6 +312,8 @@ export interface PocSubmitArgs {
   total_annual_gb?: number;
   auto_detect_volume?: boolean;
   ai_prettify: boolean;
+  enrich_with_host_agent?: boolean;
+  enrich_max_tokens?: number;
   privacy_mode: boolean;
   environment?: string;
   clickhouse_table?: string;
@@ -512,13 +542,20 @@ export async function executePocStatus(args: PocStatusArgs): Promise<import('../
   if (s.status === 'complete' && s.renderInput && (args.view ?? 'summary') === 'summary') {
     try {
       const { patterns, clusters, redundancyPairs } = _enrichForEnvelope(s.renderInput);
-      v2Result = buildPocEnvelopeV2(
+      const envelope = buildPocEnvelopeV2(
         s.renderInput,
         patterns as unknown as Parameters<typeof buildPocEnvelopeV2>[1],
         clusters,
         redundancyPairs,
         args.top_n ?? 50,
       );
+      // Attach pre-computed host-agent enrichment from the snapshot,
+      // when present. The enrichment is computed once at end of
+      // runPipeline so status polling is idempotent + free.
+      if (s.hostAgentEnrichment) {
+        envelope.output.agent_enrichment = s.hostAgentEnrichment;
+      }
+      v2Result = envelope;
     } catch (e) {
       // Fall back silently — v2 envelope is best-effort; the snapshot
       // metadata + markdown view always remains available as a recovery
@@ -905,6 +942,53 @@ export async function runPipeline(
     windowEndMs: pullStart,
   };
   snapshot.renderInput = renderInput;
+
+  // ── Host-agent enrichment ──
+  // After the engine measured everything it can, ask the host's LLM to
+  // contribute operational context it can see and we can't: deploy
+  // correlation, dependency-safety checks against dashboards/alerts,
+  // code-level fix refinement, prioritization. Single round-trip,
+  // capped at enrich_max_tokens. Skipped when the host doesn't
+  // advertise sampling, or when ai_prettify already failed (a useful
+  // signal that the host isn't sampling-capable in this session).
+  if (args.enrich_with_host_agent !== false && args._mcpServer) {
+    snapshot.stepDetail = 'enriching with host agent';
+    snapshot.progressPct = Math.max(snapshot.progressPct, 90);
+    try {
+      // Build the v2 envelope first; the enricher needs the structured
+      // findings to know which patterns to ask about. We re-enrich and
+      // re-build inside executePocStatusInner when summary view is
+      // requested, but the enrichment result attaches to the snapshot
+      // so it's not re-run on every status poll.
+      const { patterns, clusters, redundancyPairs } = _enrichForEnvelope(renderInput);
+      const previewEnvelope = buildPocEnvelopeV2(
+        renderInput,
+        patterns as unknown as Parameters<typeof buildPocEnvelopeV2>[1],
+        clusters,
+        redundancyPairs,
+        15,
+      );
+      const enrichment = await enrichWithHostAgent(previewEnvelope, {
+        server: args._mcpServer,
+        maxTokensTotal: args.enrich_max_tokens ?? 8000,
+        topN: 10,
+      });
+      snapshot.hostAgentEnrichment = enrichment;
+    } catch (e) {
+      // Never let enrichment break the POC; stash the error and proceed.
+      snapshot.hostAgentEnrichment = {
+        contributions: [],
+        metadata: {
+          host_capability: 'host_unavailable',
+          tokens_spent: 0,
+          calls_attempted: 0,
+          calls_succeeded: 0,
+          skipped_reason: `enrichment_threw: ${(e as Error).message.slice(0, 200)}`,
+        },
+      };
+    }
+  }
+
   const render = renderPocReport(renderInput);
 
   // ── Write file ──
