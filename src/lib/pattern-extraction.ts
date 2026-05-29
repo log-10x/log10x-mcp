@@ -16,6 +16,7 @@
 
 import { submitPaste, PASTE_MAX_BYTES } from './paste-api.js';
 import { runDevCli, runDevCliFileOutput, DevCliNotInstalledError } from './dev-cli.js';
+import { runChunkedTemplater } from './poc-chunked-templater.js';
 import {
   parseTemplates,
   parseEncoded,
@@ -133,6 +134,21 @@ export interface ExtractPatternsOptions {
    * `resolve_batch` semantics for small paste-style inputs.
    */
   useFileOutput?: boolean;
+  /**
+   * When true (with `privacyMode=true` and `useFileOutput=true`),
+   * split the input into chunks and run multiple tenx processes in
+   * parallel. Each chunk gets its own LOG10X_MCP_RUNTIME_NAME so
+   * output directories don't clash; outputs are merged by
+   * templateHash + tenx_hash. Cuts wall time roughly linearly with
+   * core count on multi-million-event pulls.
+   *
+   * Default false. Enable for SIEM POC pulls > 100MB.
+   */
+  chunkParallel?: boolean;
+  /** Target chunk size in bytes when chunkParallel=true. Default 32MB. */
+  chunkTargetBytes?: number;
+  /** Parallelism cap when chunkParallel=true. Default min(cpus-1, 8). */
+  chunkParallelism?: number;
 }
 
 /**
@@ -187,12 +203,18 @@ export async function extractPatterns(
     // Local CLI can absorb the full batch in one shot.
     const text = lines.join('\n');
     try {
-      // useFileOutput routes the run through @apps/mcp-file (engine
-      // writes templates/encoded/aggregated to disk, parser reads
-      // after exit). Scales to multi-million-event pulls because
-      // there's no stdout buffering. The stdin-based runDevCli is
-      // kept as default for back-compat with resolve_batch.
-      const local = opts.useFileOutput
+      // useFileOutput routes through @apps/mcp-file (engine writes
+      // templates/encoded/aggregated to disk, parser reads after
+      // exit). chunkParallel layers chunked parallelism on top — for
+      // GB-scale inputs, splits to N concurrent tenx processes and
+      // merges outputs by templateHash + tenx_hash. The stdin-based
+      // runDevCli stays default for resolve_batch back-compat.
+      const local = opts.chunkParallel && opts.useFileOutput
+        ? await runChunkedTemplater(text, {
+            parallelism: opts.chunkParallelism,
+            chunkTargetBytes: opts.chunkTargetBytes,
+          })
+        : opts.useFileOutput
         ? await runDevCliFileOutput(text)
         : await runDevCli(text);
       for (const [hash, tpl] of parseTemplates(local.templatesJson)) {

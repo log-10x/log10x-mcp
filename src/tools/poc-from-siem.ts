@@ -794,6 +794,17 @@ export async function runPipeline(
 
   let extraction;
   try {
+    // Approx raw input size in bytes to decide whether to chunk.
+    // Threshold: 64 MB. JVM cold-start dominates for smaller inputs,
+    // so single-process is faster there.
+    const approxRawBytes = pullResult.events.reduce<number>((sum, e) => {
+      if (typeof e === 'string') return sum + e.length + 1;
+      if (e && typeof e === 'object' && typeof (e as { message?: string }).message === 'string') {
+        return sum + (e as { message: string }).message.length + 1;
+      }
+      return sum + 200;
+    }, 0);
+    const chunkParallel = args.privacy_mode === true && approxRawBytes > 64 * 1024 * 1024;
     extraction = await extractPatterns(pullResult.events, {
       privacyMode: args.privacy_mode,
       autoBatch: true,
@@ -802,6 +813,11 @@ export async function runPipeline(
       // results to disk instead of buffering in stdout. Falls back to
       // stdin-based runner when privacy_mode=false (paste lambda).
       useFileOutput: args.privacy_mode === true,
+      // For GB-scale inputs (over 64 MB raw), split events into
+      // chunks and run N tenx processes in parallel. Outputs merge
+      // by templateHash + tenx_hash. JVM cold-start makes this a
+      // loss on small inputs so the threshold is hard-coded above.
+      chunkParallel,
     });
   } catch (e) {
     snapshot.status = 'failed';

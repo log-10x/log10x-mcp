@@ -56,6 +56,10 @@ if (args.help) {
   --refresh-pull             re-pull from SIEM, ignore cached events
   --refresh-templater        re-run templater, ignore cached output
   --refresh                  both
+  --chunk-parallel           split events into N chunks, run tenx in parallel
+                             (auto-on when raw text > 64 MB)
+  --chunk-parallelism <N>    cap concurrent tenx processes. default min(cpus-1, 8)
+  --chunk-target-mb <N>      target chunk size in MB. default 32
   --tenx-home <path>         TENX_HOME for the templater (default: auto)
 `);
   process.exit(0);
@@ -141,15 +145,31 @@ let tmplSource;
 // the build-from-merged helper from pattern-extraction.ts so we can skip
 // the CLI when the output files are on disk. For now, the events cache
 // alone saves the expensive SIEM pull (~14s → 0.1s).
-console.log(`[2/3] Templater: running on ${events.length} events (cache fast-path TODO)`);
+// Estimate input bytes to decide whether to auto-chunk. extractPatterns
+// re-stringifies inside, but the bytes-of-raw-text estimate is close
+// enough for the 64 MB heuristic.
+const approxRawBytes = events.reduce((sum, e) => {
+  if (typeof e === 'string') return sum + e.length + 1;
+  if (e && typeof e === 'object' && typeof e.message === 'string') return sum + e.message.length + 1;
+  return sum + 200; // fallback estimate
+}, 0);
+const autoChunk = approxRawBytes > 64 * 1024 * 1024;
+const chunkParallel = args['chunk-parallel'] || autoChunk;
+const chunkTargetBytes = args['chunk-target-mb'] ? args['chunk-target-mb'] * 1024 * 1024 : undefined;
+const chunkParallelism = args['chunk-parallelism'] || undefined;
+
+console.log(`[2/3] Templater: running on ${events.length} events (~${(approxRawBytes / 1024 / 1024).toFixed(1)} MB raw) chunk-parallel=${chunkParallel}`);
 const t0 = Date.now();
 extraction = await extractPatterns(events, {
   privacyMode: true,
   autoBatch: true,
   useFileOutput: true,
+  chunkParallel,
+  chunkParallelism,
+  chunkTargetBytes,
 });
 tmplWallMs = Date.now() - t0;
-tmplSource = 'templater';
+tmplSource = chunkParallel ? 'templater-chunked' : 'templater';
 console.log(`      ${extraction.patterns.length} templates / ${extraction.totalEvents} events / ${extraction.totalBytes} bytes in ${tmplWallMs}ms`);
 
 extraction.patterns = collapseBySymbolMessage(extraction.patterns);
