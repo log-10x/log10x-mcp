@@ -353,6 +353,40 @@ const TOOL_TABLE: Record<string, ExecuteFn> = {
   // envs object (full Environments shape)
   log10x_login_status: async (raw, ev) =>
     executeLoginStatus(parseArgs(loginStatusSchema, raw), buildLoadedEnvs(ev)),
+
+  // log10x_signin_start: synthetic stub. The real tool opens a browser
+  // device-code flow and writes Auth0 tokens to ~/.log10x/credentials —
+  // unmockable from a test process. The wizard's signin_required
+  // envelope emits this as a `required-next` action; without a stub the
+  // deterministic runner halts at unknown_tool there and the chain
+  // can't continue. The stub returns a success-shaped envelope so the
+  // chain progresses; the wizard's subsequent advise_install re-invoke
+  // still fails license-acquisition (no real Auth0 tokens were written)
+  // and surfaces signin_required again, but the cycle detector catches
+  // that repeat call instead of looping. Full coverage needs #3's
+  // license-path stub too.
+  log10x_signin_start: async () => {
+    return JSON.stringify(
+      {
+        schema_version: '1.0',
+        tool: 'log10x_signin_start',
+        view: 'summary',
+        summary: {
+          headline: 'Signin started (eval stub — no real Auth0 device flow opened).',
+        },
+        data: {
+          mode: 'stub',
+          message: 'eval-harness stub for log10x_signin_start: returns synthetic success so the deterministic runner does not halt at unknown_tool when the wizard chains through signin_required. The real device-flow that writes ~/.log10x/credentials cannot run from a test subprocess.',
+        },
+        actions: [],
+        warnings: [
+          'stub: no real Auth0 tokens were minted; advise_install re-invoke will hit signin_required again and the cycle detector will halt the chain harmlessly',
+        ],
+      },
+      null,
+      2
+    );
+  },
 };
 
 export const TOOL_NAMES = Object.keys(TOOL_TABLE).sort();
@@ -395,6 +429,9 @@ export const TOOL_SCHEMAS: Record<string, z.ZodObject<z.ZodRawShape>> = {
   log10x_advise_install: z.object(adviseInstallSchema),
   log10x_configure_compact: z.object(configureCompactSchema),
   log10x_login_status: z.object(loginStatusSchema),
+  // signin_start takes no required args; an empty object is the
+  // schema the production tool exposes (its `view` arg is optional).
+  log10x_signin_start: z.object({}).passthrough(),
 };
 
 export class UnknownToolError extends Error {

@@ -42,11 +42,15 @@ export interface RunOptions {
   model?: string;
   /**
    * Tool transport for autonomous mode:
-   *   - 'in-process' (default): tool fns are imported and called directly.
-   *     Fastest path; skips the MCP wire format.
-   *   - 'stdio': spawn build/index.js as a child process, talk over the
-   *     real MCP stdio + JSON-RPC transport. Mirrors what Claude Desktop
-   *     and Cursor actually do.
+   *   - 'stdio' (default): spawn build/index.js as a child process, talk
+   *     over the real MCP stdio + JSON-RPC transport. Mirrors what
+   *     Claude Desktop / Cursor / Cline actually do. Slightly slower
+   *     than in-process (~2-3s subprocess spawn) but tests the real
+   *     wire format, elicitation path, and SDK behavior.
+   *   - 'in-process': tool fns are imported and called directly. Fast
+   *     but skips the MCP wire format, the elicitation path, and
+   *     mode-gated registration. Use for fast iteration / smoke checks
+   *     when you don't need real-MCP fidelity.
    *
    * Deterministic mode ignores this — no model talks to the server.
    */
@@ -77,7 +81,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
   if (opts.mode === 'deterministic') {
     result = await runDeterministic(opts.scenario, opts.env, transcript, stepLog);
   } else {
-    const transport = opts.transport ?? 'in-process';
+    const transport = opts.transport ?? 'stdio';
     const harness = buildToolHarness(opts.env, transport, {
       ...(opts.serverEntryPath ? { serverEntryPath: opts.serverEntryPath } : {}),
       ...(opts.scenario.wizard_answers ? { wizardAnswers: opts.scenario.wizard_answers } : {}),

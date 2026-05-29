@@ -31,7 +31,7 @@ function parseArgs(argv) {
     judge: undefined,
     reportsDir: null,
     model: null,
-    transport: 'in-process',
+    transport: 'stdio',
     serverEntryPath: null,
     fixture: null,
   };

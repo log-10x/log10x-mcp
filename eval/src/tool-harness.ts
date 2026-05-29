@@ -288,12 +288,13 @@ export class StdioMcpHarness implements ToolHarness {
 // ─── Factory ───────────────────────────────────────────────────────────
 
 /**
- * Build a ToolHarness for the requested transport. Default
- * `transport='in-process'` keeps the original (fast) path. For
- * `transport='stdio'`, the caller must point `serverEntryPath` at the
- * built MCP server's index.js — we don't auto-discover the path
- * because the eval can be run against a non-default build location
- * during development.
+ * Build a ToolHarness for the requested transport. The orchestrator
+ * now defaults autonomous-mode runs to `'stdio'` so tests go through
+ * the real MCP wire by default (catches schema drift + exercises the
+ * elicitation path). `'in-process'` stays available for fast smoke
+ * checks. The default serverEntryPath is computed off this file's
+ * compiled location; callers can override via `opts.serverEntryPath`
+ * when running against a non-default build.
  */
 export function buildToolHarness(
   env: EvalEnv,
