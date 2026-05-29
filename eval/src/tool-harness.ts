@@ -27,6 +27,7 @@ import { invokeTool, TOOL_NAMES, TOOL_SCHEMAS } from './tool-registry.js';
 import type { EvalEnv } from './env.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 
 export type TransportKind = 'in-process' | 'stdio';
 
@@ -111,6 +112,23 @@ interface StdioOptions {
   /** Extra env vars to forward to the subprocess. Merged onto the
    *  baseline (LOG10X_* extracted from EvalEnv + inherited PATH). */
   extraEnv?: Record<string, string>;
+  /**
+   * Pre-supplied answers for the server's `elicitation/create` requests.
+   *
+   * Wizard-style tools (today: log10x_advise_install) call
+   * `server.elicitInput({ message, requestedSchema })` when they need
+   * an answer from the user. In a real host (Claude Desktop, Cursor),
+   * the host renders a form to the user and returns the answer over
+   * the MCP wire. In tests we play the role of the host: the harness
+   * registers an `ElicitRequestSchema` handler on the Client and
+   * answers from `wizardAnswers` keyed by the requested property name.
+   *
+   * Without this, the server's `clientSupportsElicitation()` returns
+   * false (capabilities empty) and the wizard falls back to its
+   * markdown-question path. That path is NOT what real users hit —
+   * Claude Desktop / Cursor users always go through elicitation.
+   */
+  wizardAnswers?: Record<string, unknown>;
 }
 
 export class StdioMcpHarness implements ToolHarness {
@@ -146,14 +164,19 @@ export class StdioMcpHarness implements ToolHarness {
           ...(this.opts.extraEnv ?? {}),
         },
       });
-      // Capabilities object intentionally empty — we only need the
-      // client side of tools/list + tools/call, which the SDK exposes
-      // unconditionally. Declaring tool/sampling capabilities here is
-      // for SERVERS, not clients.
+      // Declare elicitation capability so the server's
+      // `clientSupportsElicitation()` check passes and the wizard
+      // exercises its form-based question flow (the real-customer
+      // path) rather than falling back to markdown-question prose.
       const client = new Client(
         { name: 'log10x-eval-harness', version: '1.0.0' },
-        { capabilities: {} }
+        { capabilities: { elicitation: {} } }
       );
+      // Register the elicitation handler BEFORE connect so the server
+      // sees a capable client at handshake.
+      client.setRequestHandler(ElicitRequestSchema, async (request) => {
+        return this.handleElicitation(request.params);
+      });
       await client.connect(transport);
       this.client = client;
     })();
@@ -162,6 +185,48 @@ export class StdioMcpHarness implements ToolHarness {
     } finally {
       this.connecting = null;
     }
+  }
+
+  /**
+   * Respond to a server-initiated `elicitation/create` request. Real
+   * hosts render a form to the user; we look up answers in
+   * `opts.wizardAnswers` keyed by the requested property name (which
+   * matches the wizard's `answer_field` for each question).
+   *
+   * Three response shapes per the MCP spec:
+   *   - `{ action: 'accept', content }`  → user filled the form
+   *   - `{ action: 'decline' }`          → user explicitly said no
+   *   - `{ action: 'cancel' }`           → user closed the form
+   *
+   * We accept when we have ALL required properties; we decline (rather
+   * than partial-accept) when a required property is missing — the
+   * wizard's elicitation block treats a decline as "fall back to
+   * markdown" and the fixture author gets a clear signal that
+   * wizardAnswers needs to be extended.
+   */
+  private handleElicitation(
+    params: { message?: string; requestedSchema?: Record<string, unknown> }
+  ): { action: 'accept'; content: Record<string, unknown> } | { action: 'decline' } {
+    const answers = this.opts.wizardAnswers ?? {};
+    const schema = (params.requestedSchema ?? {}) as {
+      properties?: Record<string, unknown>;
+      required?: string[];
+    };
+    const properties = schema.properties ?? {};
+    const required = schema.required ?? [];
+    const content: Record<string, unknown> = {};
+    let missing = 0;
+    for (const key of Object.keys(properties)) {
+      if (key in answers) {
+        content[key] = answers[key];
+      } else if (required.includes(key)) {
+        missing++;
+      }
+    }
+    if (missing > 0) {
+      return { action: 'decline' };
+    }
+    return { action: 'accept', content };
   }
 
   async listTools(): Promise<{ tools: ToolDecl[]; missingSchemas: string[] }> {
@@ -249,6 +314,7 @@ export function buildToolHarness(
     serverEntryPath: opts?.serverEntryPath ?? defaultEntry,
     forceMode: opts?.forceMode,
     extraEnv: opts?.extraEnv,
+    wizardAnswers: opts?.wizardAnswers,
   });
 }
 

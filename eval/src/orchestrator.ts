@@ -78,7 +78,10 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
     result = await runDeterministic(opts.scenario, opts.env, transcript, stepLog);
   } else {
     const transport = opts.transport ?? 'in-process';
-    const harness = buildToolHarness(opts.env, transport, opts.serverEntryPath ? { serverEntryPath: opts.serverEntryPath } : undefined);
+    const harness = buildToolHarness(opts.env, transport, {
+      ...(opts.serverEntryPath ? { serverEntryPath: opts.serverEntryPath } : {}),
+      ...(opts.scenario.wizard_answers ? { wizardAnswers: opts.scenario.wizard_answers } : {}),
+    });
     try {
       result = await runAutonomous(opts.scenario, opts.env, transcript, stepLog, harness, opts.model);
     } finally {
