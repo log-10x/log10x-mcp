@@ -185,6 +185,18 @@ export async function enrichWithHostAgent(
   return result;
 }
 
+/**
+ * Exposed for testing / dry-runs. The standalone POC runner uses this
+ * to print the per-finding errand prompt for a real envelope without
+ * actually round-tripping to an MCP host.
+ */
+export function _buildEnrichmentPromptForTest(
+  envelope: PocEnvelopeV2,
+  patterns: PatternOutput[],
+): string {
+  return buildConsolidatedEnrichmentPrompt(envelope, patterns);
+}
+
 function buildConsolidatedEnrichmentPrompt(
   envelope: PocEnvelopeV2,
   patterns: PatternOutput[],
@@ -195,16 +207,30 @@ function buildConsolidatedEnrichmentPrompt(
     service: p.service,
     severity: p.severity,
     cost_per_month_usd: p.metrics.cost_per_month_usd,
+    events_in_window: p.metrics.events_in_window,
     emergence: p.emergence.category,
     acceleration_ratio: p.emergence.acceleration_ratio,
     first_seen_iso: p.emergence.first_seen_iso,
+    top_slot: p.top_slot
+      ? { name: p.top_slot.name, distinct_count: p.top_slot.distinct_count, unbounded: p.top_slot.unbounded }
+      : null,
     actions: {
       code_fix_applicable: p.actions.code_fix.applicable,
       code_fix_hypothesis: p.actions.code_fix.bug_hypothesis,
       forwarder_exclusion_applicable: p.actions.forwarder_exclusion.applicable,
+      regulate_cap_applicable: p.actions.regulate_cap.applicable,
+      regulate_cap_expected_drop_pct: p.actions.regulate_cap.expected_drop_pct,
       regulate_cap_rationale: p.actions.regulate_cap.rationale,
     },
   }));
+
+  // Per-finding errand instructions are computed from the engine's
+  // recommendation. The agent should follow these — they say
+  // exactly which tool to invoke and what to look for. Generic
+  // "use whatever tools you have" produces generic findings.
+  const errands = patterns
+    .map((p, i) => errandsForFinding(p, i))
+    .filter((e) => e.steps.length > 0);
 
   return [
     `# Engine POC findings — please contribute operational context`,
@@ -214,25 +240,32 @@ function buildConsolidatedEnrichmentPrompt(
     `- SIEM: ${envelope.input.siem}`,
     `- Window: ${envelope.input.window.start_iso} to ${envelope.input.window.end_iso} (${(envelope.input.window.duration_seconds / 86400).toFixed(1)} days)`,
     `- Events analyzed: ${envelope.input.scale.events_pulled.toLocaleString()}`,
-    `- Bytes analyzed: ${(envelope.input.scale.bytes_pulled / 1024 ** 3).toFixed(2)} GB`,
+    `- Bytes analyzed: ${(envelope.input.scale.bytes_pulled / 1024 ** 3).toFixed(3)} GB`,
     `- Distinct patterns surfaced: ${envelope.input.scale.distinct_patterns_surfaced.toLocaleString()}`,
     `- Methodology: deterministic engine fingerprints over the full window`,
-    `- Monthly cost projection (verified against measured bytes × analyzer rate): $${envelope.output.aggregates.totals.monthly_cost_usd.toFixed(2)}`,
+    `- Monthly cost projection: $${envelope.output.aggregates.totals.monthly_cost_usd.toFixed(2)}`,
     ``,
-    `## What you can contribute that the engine cannot see`,
+    `## Your job: run errands that produce facts the engine cannot see`,
     ``,
-    `Use whatever tools you have access to (kubectl, source code, helm, Grafana, PagerDuty, other MCPs).`,
-    `For each finding below, contribute one or more of:`,
-    `  1. **operational_context** — is there a recent deploy / restart / config change that explains a GROWING or NEW pattern?`,
-    `  2. **dependency_safety** — for any pattern we recommend muting (regulate_cap = drop_entirely), are there alerts / dashboards / saved queries that reference it? Muting would silence them.`,
-    `  3. **code_fix_refinement** — for patterns with code_fix.applicable = true, what's the specific code change?`,
-    `  4. **prioritization** — which 3 findings should the customer ship THIS sprint vs. backlog, given their context?`,
+    `You have tools the engine doesn't: kubectl, source code, helm release history,`,
+    `Grafana dashboards, alert rules, PagerDuty rotations, the customer's other MCPs.`,
+    `The engine has data you don't: deterministic pattern fingerprints, full-window`,
+    `cost measurements, emergence classification across 14 days.`,
     ``,
-    `## Findings to contribute on (top ${patterns.length}, by monthly cost)`,
+    `For each finding the engine surfaced, follow the per-finding errand below. Each`,
+    `errand specifies exactly which tool to use and what fact to extract. If a tool`,
+    `is unavailable in your environment, skip it and lower confidence — DO NOT`,
+    `fabricate. The audit trail (\`tools_inspected\`) is the customer's verification.`,
+    ``,
+    `## Findings (top ${patterns.length}, by monthly cost)`,
     ``,
     '```json',
     JSON.stringify(findings, null, 2),
     '```',
+    ``,
+    `## Per-finding errands`,
+    ``,
+    errands.map((e) => formatErrand(e)).join('\n\n'),
     ``,
     `## Output schema (respond with valid JSON in this exact shape)`,
     ``,
@@ -242,17 +275,104 @@ function buildConsolidatedEnrichmentPrompt(
     `    {`,
     `      "loop": "operational_context" | "dependency_safety" | "code_fix_refinement" | "prioritization",`,
     `      "target_pattern_indices": [0, 1, ...],`,
-    `      "tools_inspected": ["kubectl_events", "grafana_dashboards", "source_code", ...],`,
-    `      "findings": ["1-3 sentence finding strings"],`,
+    `      "tools_inspected": ["kubectl_events", "grafana_dashboards", "source_code", "helm_history", ...],`,
+    `      "findings": ["1-3 sentence finding strings, quoting the tool output verbatim where possible"],`,
     `      "confidence": "high" | "medium" | "low"`,
     `    }`,
     `  ]`,
     `}`,
     '```',
     ``,
-    `Be honest about what you actually inspected. If you can't reach kubectl from this context, don't claim you did — leave the tools_inspected list empty and lower the confidence. The customer trusts the audit trail.`,
+    `Confidence rubric:`,
+    `  - **high**: you ran the suggested tool and got an unambiguous result quoted in findings`,
+    `  - **medium**: you ran the tool but the result was ambiguous, or inferred from related signal`,
+    `  - **low**: tool unavailable, you guessed, OR you didn't actually look — be honest`,
     ``,
-    `Respond now with only the JSON, no other prose.`,
+    `Respond now with only the JSON object, no other prose.`,
+  ].join('\n');
+}
+
+interface FindingErrand {
+  index: number;
+  identity: string;
+  steps: string[];
+}
+
+/**
+ * Produce per-finding errand instructions keyed off the engine's
+ * recommendation. Each step is a concrete tool invocation the agent
+ * should attempt, not a vague "use your tools" hint. This is the
+ * core of the "errands" framing: the engine's measured facts gate
+ * which tools the agent should reach for.
+ */
+function errandsForFinding(p: PatternOutput, index: number): FindingErrand {
+  const steps: string[] = [];
+  const svc = p.service ?? '(unknown service)';
+
+  // 1) Emergence -> kubectl events around first_seen_iso. This is
+  // the highest-leverage errand: a deploy correlation collapses
+  // the agent's investigation surface from "all causes" to "what
+  // changed at T-30m before first_seen".
+  if (p.emergence.category === 'new' || p.emergence.category === 'recent_burst') {
+    const firstSeen = p.emergence.first_seen_iso ?? '(unknown)';
+    steps.push(
+      `**operational_context** — first_seen=${firstSeen} (emergence=${p.emergence.category}). ` +
+        `Run \`kubectl get events --field-selector involvedObject.kind=Deployment -A --sort-by='.lastTimestamp'\` ` +
+        `and look for a deploy / rollout / restart of ${svc} within 30 minutes BEFORE ${firstSeen}. ` +
+        `If found, quote the event reason and the involved object name.`,
+    );
+  }
+  if (p.emergence.category === 'growing' && p.emergence.acceleration_ratio && p.emergence.acceleration_ratio > 1.5) {
+    steps.push(
+      `**operational_context** — acceleration=${p.emergence.acceleration_ratio.toFixed(2)}x. ` +
+        `Run \`helm history ${svc} -n <namespace>\` to find recent upgrades. Quote the chart version and revision date.`,
+    );
+  }
+
+  // 2) regulate_cap dropping ~all volume -> dependency safety check.
+  // If we mute a pattern that drives an alert or dashboard panel,
+  // we silence the customer's operations. Catch this before the
+  // recommendation lands.
+  if (p.actions.regulate_cap.applicable && p.actions.regulate_cap.expected_drop_pct >= 0.95) {
+    steps.push(
+      `**dependency_safety** — engine recommends a cap that drops ${(p.actions.regulate_cap.expected_drop_pct * 100).toFixed(0)}% of this pattern's volume ($${p.metrics.cost_per_month_usd.toFixed(2)}/mo savings). ` +
+        `Before applying, grep the customer's Grafana JSON / Splunk saved searches / Datadog monitors / ` +
+        `PagerDuty alert rules for the pattern identity \`${p.identity.slice(0, 60)}\` or a meaningful substring. ` +
+        `If ANY reference exists, downgrade the recommendation to \`forwarder_exclusion\` and flag the conflict.`,
+    );
+  }
+
+  // 3) code_fix.applicable=true -> source code lookup. The
+  // engine gives a hypothesis ("missing retry / unbounded
+  // logging in tight loop"); the agent translates it into a
+  // concrete code change.
+  if (p.actions.code_fix.applicable && p.actions.code_fix.bug_hypothesis) {
+    steps.push(
+      `**code_fix_refinement** — engine hypothesis: "${p.actions.code_fix.bug_hypothesis}". ` +
+        `Search the ${svc} source for a log statement matching \`${p.identity.slice(0, 50)}\`. ` +
+        `Quote the file:line, the function name, and propose a specific 1-3 line change (rate-limit, ` +
+        `dedupe, add backoff, fix the underlying error). If you can't locate the source, say so explicitly.`,
+    );
+  }
+
+  // 4) top_slot=unbounded -> potential UUID/timestamp in body.
+  // The slot field name tells the agent WHICH log statement to
+  // look for.
+  if (p.top_slot && p.top_slot.unbounded && p.top_slot.distinct_count > 100) {
+    steps.push(
+      `**code_fix_refinement** — slot \`${p.top_slot.name}\` is unbounded (${p.top_slot.distinct_count} distinct values across ${p.metrics.events_in_window} events). ` +
+        `This is a high-cardinality variable embedded in the log body. Find the source line and either ` +
+        `pull the variable into a structured field, drop it, or sample it. Quote file:line.`,
+    );
+  }
+
+  return { index, identity: p.identity, steps };
+}
+
+function formatErrand(e: FindingErrand): string {
+  return [
+    `### Finding #${e.index} — \`${e.identity.slice(0, 80)}\``,
+    ...e.steps.map((s) => `- ${s}`),
   ].join('\n');
 }
 
