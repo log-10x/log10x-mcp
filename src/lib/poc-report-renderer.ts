@@ -12,6 +12,10 @@ import { SIEM_DISPLAY_NAMES } from './siem/pricing.js';
 import { fmtBytes, fmtCount, fmtDollar, fmtGb, fmtPct } from './format.js';
 import { renderNextActions, type NextAction } from './next-actions.js';
 import { agentOnly } from './agent-only.js';
+import { enrichForPoc, type PocEnrichment } from './poc-enrichers.js';
+import type { IncidentCluster } from './detectors/incident-cluster.js';
+import type { RedundancyPair } from './poc-enrichers.js';
+import { fmtAge } from './first-seen.js';
 
 export interface RenderInput {
   siem: SiemId;
@@ -75,6 +79,21 @@ export interface RenderInput {
   aiPrettyNames?: Record<string, string>;
   /** Error note from the AI prettify call, if any. Surfaced in the appendix. */
   aiPrettifyErrorNote?: string;
+  /**
+   * Per-pattern dependency-check counts, pre-warmed by the POC submit
+   * pipeline. When present, the action column refines `mute` →
+   * `blocked` for any identity with refs in monitors/dashboards/saved
+   * searches. Absence ≠ "no deps"; the renderer marks the cell
+   * `(not checked)` when the identity is missing from the map.
+   */
+  dependencyByIdentity?: Map<string, number>;
+  /**
+   * Per-pattern first-seen age in seconds, from engine history. Only
+   * resolvable when the POC submit pipeline also has an engine env
+   * configured AND the pattern has a `tenxHash` known to the engine.
+   * Otherwise the column reads `(unknown)` — a degraded, honest cell.
+   */
+  firstSeenByIdentity?: Map<string, number>;
 }
 
 export interface RenderResult {
@@ -366,6 +385,8 @@ interface EnrichedPattern extends ExtractedPattern {
   confidence: Confidence;
   /** Snake-case identity — for ready-to-paste receiver configs. */
   identity: string;
+  /** POC enrichment fields (incident cluster id, top slot, redundancy, dep-check, first-seen). */
+  poc: PocEnrichment;
   /**
    * Longest verbatim literal run from the template body, used as a
    * phrase-match anchor in exclusion configs. Indexed phrase queries
@@ -402,7 +423,7 @@ interface EnrichedPattern extends ExtractedPattern {
  * terminal screen.
  */
 export function renderPocSummary(input: RenderInput, topN = 5): string {
-  const patterns = enrichPatterns(input);
+  const { patterns, clusters, redundancyPairs } = enrichPatternsWithSections(input);
   const setDiff = setDifferenceLabels(patterns);
   const totalCost = patterns.reduce((s, p) => s + p.costPerWindow, 0);
   const projectedSavings = patterns.reduce((s, p) => s + p.projectedSavings, 0);
@@ -437,23 +458,80 @@ export function renderPocSummary(input: RenderInput, topN = 5): string {
   }
   lines.push('');
 
+  // Incident-grouping section — surfaces multi-pattern incidents
+  // before the top-N table so the agent sees co-occurring failures
+  // grouped. The detector itself sits in detectors/incident-cluster.ts.
+  if (clusters.length > 0) {
+    lines.push('### Same incident, multiple patterns');
+    lines.push('');
+    lines.push(
+      `${clusters.length} incident${clusters.length === 1 ? '' : 's'} detected — co-occurring patterns that share a service and overlap on descriptor tokens.`,
+    );
+    lines.push('');
+    lines.push('| Incident | Service | Patterns | Combined $/mo | Signal |');
+    lines.push('|---|---|---|---|---|');
+    for (let i = 0; i < clusters.length; i++) {
+      const c = clusters[i];
+      const label = truncate(c.representativeLabel, 60);
+      const ids = c.members.map((m) => `\`${shortIdentity(m.identity)}\``).join(', ');
+      lines.push(
+        `| ${i + 1}. ${label} | ${c.service} | ${ids} | ${fmtDollar(c.combinedMonthlyUsd)} | ${c.joinSignal} (${(c.confidence * 100).toFixed(0)}%) |`,
+      );
+    }
+    lines.push('');
+    lines.push(
+      '_When two patterns cluster as one incident, the right next step is usually a single upstream fix (broken dependency, missing config) rather than muting each pattern separately._',
+    );
+    lines.push('');
+  }
+
+  // Redundancy pairs — patterns whose event counts match 1:1 within
+  // the sample. Likely the same business event logged at two stages
+  // (request-received + transaction-complete, http-in + http-out).
+  if (redundancyPairs.length > 0) {
+    lines.push('### Redundant pairs');
+    lines.push('');
+    lines.push(
+      `${redundancyPairs.length} pair${redundancyPairs.length === 1 ? '' : 's'} of patterns fire ~1:1 in the sample — likely the same event logged at two stages. Keep one, drop the other.`,
+    );
+    lines.push('');
+    lines.push('| Pattern A | Pattern B | Count ratio | Min count |');
+    lines.push('|---|---|---|---|');
+    for (const pair of redundancyPairs.slice(0, 5)) {
+      lines.push(
+        `| \`${shortIdentity(pair.identityA)}\` | \`${shortIdentity(pair.identityB)}\` | ${pair.ratio.toFixed(2)} | ${fmtCount(pair.minCount)} |`,
+      );
+    }
+    lines.push('');
+  }
+
   // Top-N table.
   const top = patterns.slice(0, topN);
   if (top.length > 0) {
     lines.push(`### Top ${top.length} wins`);
     lines.push('');
-    lines.push('| # | Pattern | Service | Sev | % | Annual savings |');
-    lines.push('|---|---|---|---|---|---|');
+    // New columns: Action (refined from dep-check + severity), Slot fan-out
+    // (top cardinality), Age (first-seen from engine or `(unknown)`).
+    lines.push('| # | Pattern | Service | Sev | % | Action | Slot fan-out | Age | Annual savings |');
+    lines.push('|---|---|---|---|---|---|---|---|---|');
     for (let i = 0; i < top.length; i++) {
       const p = top[i];
       const name = resolveName(p.identity, p.template, input.aiPrettyNames, setDiff.get(p.identity));
       const annualSavings = projectBilling(p.projectedSavings, input.windowHours, 24 * 365);
       const flag = needsReview(p) ? ' ⚠' : '';
+      const cluster = p.poc.incidentClusterId !== null ? ` 🔗${p.poc.incidentClusterId + 1}` : '';
+      const action = renderActionCell(p);
+      const slot = renderSlotCell(p);
+      const age = renderAgeCell(p);
       lines.push(
-        `| ${i + 1} | ${name}${flag} | ${p.service || '—'} | ${p.severity || '—'} | ${fmtPct(p.pctOfTotal * 100)} | ${fmtDollar(annualSavings)} |`
+        `| ${i + 1} | ${name}${flag}${cluster} | ${p.service || '—'} | ${p.severity || '—'} | ${fmtPct(p.pctOfTotal * 100)} | ${action} | ${slot} | ${age} | ${fmtDollar(annualSavings)} |`,
       );
     }
     lines.push('');
+    if (clusters.length > 0) {
+      lines.push('_🔗N — row belongs to incident #N above._');
+      lines.push('');
+    }
   }
 
   // Risk flags.
@@ -1271,12 +1349,55 @@ function enrichPatterns(input: RenderInput): EnrichedPattern[] {
       identity,
       literalPhrase: lit.phrase,
       literalLeading: lit.leading,
+      // Placeholder; overwritten by the enricher pass below once the
+      // whole list is sorted and visible to the cross-pattern detectors.
+      poc: {
+        incidentClusterId: null,
+        topSlot: null,
+        redundantWith: [],
+        firstSeenAgeSeconds: null,
+        refinedAction: action,
+        dependencyCount: null,
+        dependencyChecked: false,
+      },
     };
   });
 
   // Rank: cost descending.
   enriched.sort((a, b) => b.costPerWindow - a.costPerWindow);
+
+  // Cross-pattern enrichment: incident clusters, redundancy pairs,
+  // top-slot cardinality, refined action with dep-check fold-in.
+  // Runs once per render; clusters + pairs are also returned via the
+  // renderer's section helpers (see `renderIncidentSection`,
+  // `renderRedundancySection`).
+  const { enrichments } = enrichForPoc(enriched, {
+    dependencyByIdentity: input.dependencyByIdentity,
+    firstSeenByIdentity: input.firstSeenByIdentity,
+  });
+  for (let i = 0; i < enriched.length; i++) {
+    enriched[i].poc = enrichments[i];
+  }
   return enriched;
+}
+
+/**
+ * Re-run the same enricher pass and return BOTH the enriched patterns
+ * AND the clusters / redundancy pairs. Used by the summary view to
+ * emit the "Same incident" + "Redundant pair" sections without
+ * re-running the templater.
+ */
+function enrichPatternsWithSections(input: RenderInput): {
+  patterns: EnrichedPattern[];
+  clusters: IncidentCluster[];
+  redundancyPairs: RedundancyPair[];
+} {
+  const patterns = enrichPatterns(input);
+  const { clusters, redundancyPairs } = enrichForPoc(patterns, {
+    dependencyByIdentity: input.dependencyByIdentity,
+    firstSeenByIdentity: input.firstSeenByIdentity,
+  });
+  return { patterns, clusters, redundancyPairs };
 }
 
 function costFromBytes(bytes: number, costPerGb: number): number {
@@ -1604,6 +1725,49 @@ function truncate(s: string, max: number): string {
   if (!s) return '';
   const flat = s.replace(/\s+/g, ' ');
   return flat.length <= max ? flat : flat.slice(0, max - 1) + '…';
+}
+
+/**
+ * Render the Action cell. Reads the refined action (post dep-check
+ * fold-in) and renders one of:
+ *   - **FIX** — ERROR-class with a dependency-failure descriptor
+ *   - **MUTE** / SAMPLE 1/N — cost-driven recommendation
+ *   - **BLOCKED** — dep-check found refs, do not auto-act
+ *   - KEEP — default for non-actionable rows
+ *
+ * Bolds destructive recommendations so a CLI reader scans them.
+ */
+function renderActionCell(p: EnrichedPattern): string {
+  const refined = p.poc.refinedAction;
+  if (refined === 'fix') return '**FIX**';
+  if (refined === 'blocked') return '**BLOCKED**';
+  if (refined === 'mute') return '**MUTE**';
+  if (refined === 'sample') return `SAMPLE 1/${p.sampleRate}`;
+  return 'KEEP';
+}
+
+/**
+ * Render the Slot fan-out cell. Shows the highest-cardinality slot for
+ * the pattern with its distinct count. Empty cell when the pattern has
+ * no slots (literal template).
+ */
+function renderSlotCell(p: EnrichedPattern): string {
+  const s = p.poc.topSlot;
+  if (!s) return '—';
+  const unbounded = s.distinctOverCount >= 0.9 ? ' 🔥' : '';
+  return `${s.slot}: ${fmtCount(s.distinctCount)}${unbounded}`;
+}
+
+/**
+ * Render the Age cell. Uses engine-side first-seen when available;
+ * degrades to `(unknown)` when the POC path didn't or couldn't query
+ * engine history. Bold STABLE marker when age >= 7 days.
+ */
+function renderAgeCell(p: EnrichedPattern): string {
+  const age = p.poc.firstSeenAgeSeconds;
+  if (age === null) return '(unknown)';
+  const formatted = fmtAge(age);
+  return age >= 7 * 86400 ? `**STABLE** (${formatted})` : formatted;
 }
 
 /**

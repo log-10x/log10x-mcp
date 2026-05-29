@@ -39,6 +39,15 @@ function fakePattern(overrides: Partial<_EnrichedPattern>): _EnrichedPattern {
     identity: 'fake_identity',
     literalPhrase: '',
     literalLeading: true,
+    poc: {
+      incidentClusterId: null,
+      topSlot: null,
+      redundantWith: [],
+      firstSeenAgeSeconds: null,
+      refinedAction: 'mute',
+      dependencyCount: null,
+      dependencyChecked: false,
+    },
     ...overrides,
   };
 }

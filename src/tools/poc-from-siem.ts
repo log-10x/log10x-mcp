@@ -44,6 +44,7 @@ import {
 import { prettifyPatterns } from '../lib/ai-prettify.js';
 import { readClientVersion } from '../lib/manifest.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { checkDeps, DEP_CHECK_VENDORS } from '../lib/siem/deps/index.js';
 
 const MCP_VERSION = readClientVersion();
 
@@ -725,6 +726,45 @@ export async function runPipeline(
     aiPrettifyErrorNote = result.errorNote;
   }
 
+  // ── Dependency pre-warm ──
+  // For the top N patterns, query the resolved vendor's dashboards /
+  // monitors / saved searches in parallel. Folds into the renderer's
+  // refined-action column: any pattern with refs flips from `mute` →
+  // `BLOCKED`. Only runs when the vendor is in DEP_CHECK_VENDORS;
+  // otherwise the renderer shows `(not checked)`.
+  let dependencyByIdentity: Map<string, number> | undefined;
+  if (DEP_CHECK_VENDORS.includes(connector.id as SiemId)) {
+    snapshot.status = 'rendering';
+    snapshot.stepDetail = 'pre-warming dependency check on top patterns';
+    snapshot.progressPct = Math.max(snapshot.progressPct, 80);
+    const topForDeps = extraction.patterns.slice(0, 10);
+    const depResults = await Promise.all(
+      topForDeps.map(async (p) => {
+        const identity =
+          (p.symbolMessage && p.symbolMessage.length > 0 && p.symbolMessage) ||
+          (p.tenxHash && p.tenxHash.length > 0 && p.tenxHash) ||
+          p.hash;
+        const tokens = identity.split(/[_-]+/).filter((t) => t.length >= 3);
+        try {
+          const scan = await checkDeps(connector.id as SiemId, {
+            pattern: identity,
+            tokens,
+            service: p.service,
+            severity: p.severity,
+          });
+          if (scan.error) return null;
+          return [identity, scan.matches.length] as const;
+        } catch {
+          return null;
+        }
+      }),
+    );
+    dependencyByIdentity = new Map();
+    for (const result of depResults) {
+      if (result) dependencyByIdentity.set(result[0], result[1]);
+    }
+  }
+
   // ── Render ──
   snapshot.status = 'rendering';
   snapshot.stepDetail = 'rendering report';
@@ -770,6 +810,12 @@ export async function runPipeline(
     volumeRangeMultiplier: volumeResult?.rangeMultiplier,
     aiPrettyNames,
     aiPrettifyErrorNote,
+    dependencyByIdentity,
+    // first-seen by identity requires engine history. The POC primary
+    // path (paste SIEM creds, no engine env configured) cannot resolve
+    // this; the renderer degrades to `(unknown)` and the row still
+    // displays. Wire from engine env when a future caller supplies it.
+    firstSeenByIdentity: undefined,
   };
   snapshot.renderInput = renderInput;
   const render = renderPocReport(renderInput);
