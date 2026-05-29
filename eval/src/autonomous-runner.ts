@@ -15,14 +15,19 @@
  * The runner emits the same JSONL transcript shape as deterministic
  * mode, so judge / sequence-diff / autonomy code is mode-agnostic.
  */
-import Anthropic from '@anthropic-ai/sdk';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 import type { Scenario, RunOutcome, StepLog } from './types.js';
 import { interpolateEnvVars, type EvalEnv } from './env.js';
 import { invokeTool, TOOL_NAMES, TOOL_SCHEMAS } from './tool-registry.js';
 import type { TranscriptWriter, StepLogWriter } from './transcript-writer.js';
-
-const DEFAULT_MODEL = 'claude-sonnet-4-6';
+import {
+  selectAgentClient,
+  type AgentContentBlock,
+  type AgentMessage,
+  type AgentToolResultBlock,
+  type AgentToolUseBlock,
+  type AgentTextBlock,
+} from './agent-clients.js';
 
 export interface AutonomousResult {
   outcome: RunOutcome;
@@ -36,6 +41,9 @@ interface ToolDecl {
   description: string;
   input_schema: Record<string, unknown>;
 }
+
+// Drop the AnthropicLike interface — selectAgentClient hands back the
+// vendor-neutral AgentClient that the loop below talks to.
 
 /**
  * Build tool declarations using each tool's real Zod-derived JSON Schema.
@@ -81,38 +89,6 @@ function buildToolDecls(): { decls: ToolDecl[]; missingSchemas: string[] } {
     };
   });
   return { decls, missingSchemas };
-}
-
-interface AnthropicLike {
-  messages: {
-    create(opts: {
-      model: string;
-      max_tokens: number;
-      system?: string;
-      tools: ToolDecl[];
-      messages: Array<{
-        role: 'user' | 'assistant';
-        content:
-          | string
-          | Array<
-              | { type: 'text'; text: string }
-              | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
-              | {
-                  type: 'tool_result';
-                  tool_use_id: string;
-                  content: string;
-                  is_error?: boolean;
-                }
-            >;
-      }>;
-    }): Promise<{
-      content: Array<
-        | { type: 'text'; text: string }
-        | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
-      >;
-      stop_reason: 'end_turn' | 'tool_use' | 'max_tokens' | 'stop_sequence';
-    }>;
-  };
 }
 
 // Mirrors the production MCP server's `instructions` (build/index.js) so
@@ -163,14 +139,12 @@ export async function runAutonomous(
   stepLog: StepLogWriter,
   modelOverride?: string
 ): Promise<AutonomousResult> {
-  if (!process.env.ANTHROPIC_API_KEY) {
-    throw new Error(
-      'runAutonomous requires ANTHROPIC_API_KEY env var (autonomous mode is gated).'
-    );
-  }
+  // Vendor key checks are owned by each AgentClient's constructor —
+  // selectAgentClient throws a vendor-specific error if the right env
+  // var is missing.
   transcript.writeUserPrompt(scenario.prompt);
 
-  const client = new Anthropic() as unknown as AnthropicLike;
+  const client = selectAgentClient(modelOverride);
   const { decls: tools, missingSchemas } = buildToolDecls();
   if (missingSchemas.length > 0) {
     // eslint-disable-next-line no-console
@@ -179,7 +153,7 @@ export async function runAutonomous(
     );
   }
   const stepLogs: StepLog[] = [];
-  const messages: Parameters<typeof client.messages.create>[0]['messages'] = [
+  const messages: AgentMessage[] = [
     { role: 'user', content: scenario.prompt },
   ];
 
@@ -188,23 +162,21 @@ export async function runAutonomous(
   let finalText = '';
 
   while (step < scenario.max_steps) {
-    const resp = await client.messages.create({
-      model: modelOverride || DEFAULT_MODEL,
-      max_tokens: 4000,
+    const resp = await client.call({
       system: SYSTEM_PROMPT,
       tools,
       messages,
+      maxTokens: 4000,
     });
 
     const assistantBlocks = resp.content;
-    messages.push({ role: 'assistant', content: assistantBlocks });
+    messages.push({ role: 'assistant', content: assistantBlocks as AgentContentBlock[] });
 
     const toolUses = assistantBlocks.filter(
-      (b): b is { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> } =>
-        b.type === 'tool_use'
+      (b): b is AgentToolUseBlock => b.type === 'tool_use'
     );
     const textBlocks = assistantBlocks.filter(
-      (b): b is { type: 'text'; text: string } => b.type === 'text'
+      (b): b is AgentTextBlock => b.type === 'text'
     );
 
     // Mirror tool_use blocks into the harness JSONL transcript before
@@ -213,7 +185,7 @@ export async function runAutonomous(
       transcript.writeToolUse(tu.id, tu.name, tu.input);
     }
 
-    if (resp.stop_reason === 'end_turn' || toolUses.length === 0) {
+    if (resp.stopReason === 'end_turn' || toolUses.length === 0) {
       finalText = textBlocks.map((b) => b.text).join('\n');
       transcript.writeFinalAssistantText(finalText, 'end_turn');
       outcome = 'completed';
@@ -221,12 +193,7 @@ export async function runAutonomous(
     }
 
     // Execute every tool_use, append tool_result blocks, loop.
-    const toolResults: Array<{
-      type: 'tool_result';
-      tool_use_id: string;
-      content: string;
-      is_error?: boolean;
-    }> = [];
+    const toolResults: AgentToolResultBlock[] = [];
     for (const tu of toolUses) {
       step++;
       const args = interpolateEnvVars(

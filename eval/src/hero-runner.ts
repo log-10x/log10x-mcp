@@ -217,7 +217,7 @@ export interface CostReport {
 export interface HeroRunReport {
   spec: HeroSpec;
   runnerModel: string;
-  runnerVendor: 'anthropic' | 'xai';
+  runnerVendor: 'anthropic' | 'xai' | 'openai' | 'google';
   startedAt: string;
   endedAt: string;
   durationMs: number;

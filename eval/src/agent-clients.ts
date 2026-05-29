@@ -70,12 +70,14 @@ export interface AgentResponse {
 
 export interface AgentClient {
   modelId: string;
-  vendor: 'anthropic' | 'xai';
+  vendor: 'anthropic' | 'xai' | 'openai' | 'google';
   call(req: AgentRequest): Promise<AgentResponse>;
 }
 
 const DEFAULT_CLAUDE_MODEL = 'claude-sonnet-4-6';
 const DEFAULT_GROK_MODEL = 'grok-4-latest';
+const DEFAULT_OPENAI_MODEL = 'gpt-5';
+const DEFAULT_GEMINI_MODEL = 'gemini-2.5-pro';
 
 export function selectAgentClient(modelSpec: string | undefined): AgentClient {
   const spec = (modelSpec ?? 'claude').toLowerCase();
@@ -87,8 +89,16 @@ export function selectAgentClient(modelSpec: string | undefined): AgentClient {
     const id = spec === 'grok' ? DEFAULT_GROK_MODEL : modelSpec!;
     return new GrokAgentClient(id);
   }
+  if (spec === 'openai' || spec === 'gpt' || spec.startsWith('gpt-') || spec.startsWith('o1') || spec.startsWith('o3')) {
+    const id = (spec === 'openai' || spec === 'gpt') ? DEFAULT_OPENAI_MODEL : modelSpec!;
+    return new OpenAIAgentClient(id);
+  }
+  if (spec === 'gemini' || spec === 'google' || spec.startsWith('gemini-')) {
+    const id = (spec === 'gemini' || spec === 'google') ? DEFAULT_GEMINI_MODEL : modelSpec!;
+    return new GeminiAgentClient(id);
+  }
   throw new Error(
-    `unknown agent model: ${modelSpec}. Use 'claude' | 'grok' or a specific model id.`
+    `unknown agent model: ${modelSpec}. Use 'claude' | 'grok' | 'openai' (or 'gpt') | 'gemini', or a specific model id.`
   );
 }
 
@@ -327,6 +337,343 @@ class GrokAgentClient implements AgentClient {
 }
 
 /**
+ * OpenAI agent client — same chat-completions wire format as Grok (xAI is
+ * OpenAI-compatible by design), so the conversion helpers are shared.
+ * Only the auth, endpoint, and per-vendor retry quirks differ.
+ */
+class OpenAIAgentClient implements AgentClient {
+  vendor = 'openai' as const;
+  private apiKey = process.env.OPENAI_API_KEY;
+  private baseUrl = 'https://api.openai.com/v1/chat/completions';
+
+  constructor(public modelId: string) {
+    if (!this.apiKey) {
+      throw new Error('OPENAI_API_KEY required for OpenAI runner');
+    }
+  }
+
+  async call(req: AgentRequest): Promise<AgentResponse> {
+    const openaiMessages = toOpenAIMessages(req.system, req.messages);
+    const openaiTools = req.tools.map((t) => ({
+      type: 'function',
+      function: { name: t.name, description: t.description, parameters: t.input_schema },
+    }));
+    // GPT-5 / o1 / o3 reject `max_tokens`; they require `max_completion_tokens`.
+    // Send the modern field for any model name that looks like it's in those
+    // families, and fall back to `max_tokens` for legacy gpt-4* etc.
+    const usesCompletionTokens =
+      /^gpt-5/i.test(this.modelId) || /^o[13]/i.test(this.modelId);
+    const body: Record<string, unknown> = {
+      model: this.modelId,
+      messages: openaiMessages,
+      tools: openaiTools,
+    };
+    if (usesCompletionTokens) {
+      body.max_completion_tokens = req.maxTokens;
+    } else {
+      body.max_tokens = req.maxTokens;
+    }
+
+    const retryStatuses = new Set([408, 425, 429, 500, 502, 503, 504, 520, 522, 524]);
+    const retryErrorCodes = new Set([
+      'UND_ERR_HEADERS_TIMEOUT',
+      'UND_ERR_BODY_TIMEOUT',
+      'UND_ERR_SOCKET',
+      'UND_ERR_CONNECT_TIMEOUT',
+      'ECONNRESET',
+      'ETIMEDOUT',
+    ]);
+    const maxRetries = 4;
+    let r: Response | undefined;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        r = await fetch(this.baseUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${this.apiKey}`,
+          },
+          body: JSON.stringify(body),
+        });
+      } catch (err) {
+        const code =
+          (err as { cause?: { code?: string }; code?: string }).cause?.code ??
+          (err as { code?: string }).code ??
+          '';
+        if (retryErrorCodes.has(code) && attempt < maxRetries) {
+          await new Promise((resolve) =>
+            setTimeout(resolve, Math.min(2000 * Math.pow(2, attempt), 30000))
+          );
+          continue;
+        }
+        throw err;
+      }
+      if (r.ok) break;
+      if (!retryStatuses.has(r.status) || attempt === maxRetries) {
+        const errText = await r.text();
+        throw new Error(`OpenAI API ${r.status}: ${errText.slice(0, 500)}`);
+      }
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.min(2000 * Math.pow(2, attempt), 30000))
+      );
+    }
+    if (!r || !r.ok) {
+      throw new Error('OpenAI API: exhausted retries without success');
+    }
+    const data = (await r.json()) as {
+      choices?: Array<{
+        message: { role: string; content?: string | null; tool_calls?: Array<{ id: string; type: string; function: { name: string; arguments: string } }> };
+        finish_reason: string;
+      }>;
+      usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+    };
+    const choice = data.choices?.[0];
+    if (!choice) {
+      throw new Error(`OpenAI: no choices in response: ${JSON.stringify(data).slice(0, 500)}`);
+    }
+    const m = choice.message;
+    const content: Array<AgentTextBlock | AgentToolUseBlock> = [];
+    if (m.content) content.push({ type: 'text', text: m.content });
+    if (m.tool_calls) {
+      for (const tc of m.tool_calls) {
+        let input: Record<string, unknown> = {};
+        try {
+          input = JSON.parse(tc.function.arguments);
+        } catch {
+          input = { _unparseable_arguments: tc.function.arguments };
+        }
+        content.push({ type: 'tool_use', id: tc.id, name: tc.function.name, input });
+      }
+    }
+    const stopReason: AgentResponse['stopReason'] =
+      choice.finish_reason === 'tool_calls'
+        ? 'tool_use'
+        : choice.finish_reason === 'stop'
+          ? 'end_turn'
+          : choice.finish_reason === 'length'
+            ? 'max_tokens'
+            : 'other';
+    const u = data.usage ?? {};
+    return {
+      content,
+      stopReason,
+      usage: {
+        inputTokens: u.prompt_tokens ?? 0,
+        outputTokens: u.completion_tokens ?? 0,
+      },
+    };
+  }
+}
+
+/**
+ * Gemini agent client — Google's generative-language API uses a different
+ * shape from Anthropic/OpenAI:
+ *   - `systemInstruction` instead of a system message
+ *   - `contents[]` with `parts[]` per turn (vs Anthropic blocks)
+ *   - tools wrapped in `{ function_declarations: [...] }`
+ *   - tool_use → `parts[].functionCall { name, args }`
+ *   - tool_result → user role with `parts[].functionResponse { name, response }`
+ *   - finishReason values are upper-case strings ("STOP", "TOOL_USE_ENDED").
+ *
+ * The conversion happens in toGeminiContents() below. We round-trip the
+ * Anthropic-shape internal `messages` array on send/receive so the rest
+ * of the runner doesn't have to care which vendor we're talking to.
+ */
+class GeminiAgentClient implements AgentClient {
+  vendor = 'google' as const;
+  private apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+  private baseUrl: string;
+
+  constructor(public modelId: string) {
+    if (!this.apiKey) {
+      throw new Error('GEMINI_API_KEY (or GOOGLE_API_KEY) required for Gemini runner');
+    }
+    this.baseUrl = `https://generativelanguage.googleapis.com/v1beta/models/${this.modelId}:generateContent?key=${this.apiKey}`;
+  }
+
+  async call(req: AgentRequest): Promise<AgentResponse> {
+    const contents = toGeminiContents(req.messages);
+    const body = {
+      systemInstruction: { parts: [{ text: req.system }] },
+      contents,
+      tools: [
+        {
+          function_declarations: req.tools.map((t) => ({
+            name: t.name,
+            description: t.description,
+            parameters: stripUnsupportedSchemaKeys(t.input_schema),
+          })),
+        },
+      ],
+      generationConfig: { maxOutputTokens: req.maxTokens },
+    };
+
+    const retryStatuses = new Set([408, 425, 429, 500, 502, 503, 504]);
+    const retryErrorCodes = new Set([
+      'UND_ERR_HEADERS_TIMEOUT',
+      'UND_ERR_BODY_TIMEOUT',
+      'UND_ERR_SOCKET',
+      'UND_ERR_CONNECT_TIMEOUT',
+      'ECONNRESET',
+      'ETIMEDOUT',
+    ]);
+    const maxRetries = 4;
+    let r: Response | undefined;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        r = await fetch(this.baseUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+      } catch (err) {
+        const code =
+          (err as { cause?: { code?: string }; code?: string }).cause?.code ??
+          (err as { code?: string }).code ??
+          '';
+        if (retryErrorCodes.has(code) && attempt < maxRetries) {
+          await new Promise((resolve) =>
+            setTimeout(resolve, Math.min(2000 * Math.pow(2, attempt), 30000))
+          );
+          continue;
+        }
+        throw err;
+      }
+      if (r.ok) break;
+      if (!retryStatuses.has(r.status) || attempt === maxRetries) {
+        const errText = await r.text();
+        throw new Error(`Gemini API ${r.status}: ${errText.slice(0, 500)}`);
+      }
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.min(2000 * Math.pow(2, attempt), 30000))
+      );
+    }
+    if (!r || !r.ok) {
+      throw new Error('Gemini API: exhausted retries without success');
+    }
+    const data = (await r.json()) as {
+      candidates?: Array<{
+        content?: { parts?: Array<{ text?: string; functionCall?: { name: string; args: Record<string, unknown> } }>; role?: string };
+        finishReason?: string;
+      }>;
+      usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
+    };
+    const candidate = data.candidates?.[0];
+    if (!candidate?.content?.parts) {
+      throw new Error(`Gemini: empty candidate in response: ${JSON.stringify(data).slice(0, 500)}`);
+    }
+    const content: Array<AgentTextBlock | AgentToolUseBlock> = [];
+    let toolUseSeq = 0;
+    for (const p of candidate.content.parts) {
+      if (p.text) content.push({ type: 'text', text: p.text });
+      if (p.functionCall) {
+        // Gemini doesn't return a tool_use id; synthesize one so the
+        // round-trip through the runner's tool_result message has a key.
+        content.push({
+          type: 'tool_use',
+          id: `gem-${Date.now()}-${toolUseSeq++}`,
+          name: p.functionCall.name,
+          input: p.functionCall.args ?? {},
+        });
+      }
+    }
+    const fr = candidate.finishReason ?? '';
+    const stopReason: AgentResponse['stopReason'] =
+      fr === 'STOP'
+        ? content.some((b) => b.type === 'tool_use') ? 'tool_use' : 'end_turn'
+        : fr === 'MAX_TOKENS' ? 'max_tokens' : 'other';
+    const u = data.usageMetadata ?? {};
+    return {
+      content,
+      stopReason,
+      usage: {
+        inputTokens: u.promptTokenCount ?? 0,
+        outputTokens: u.candidatesTokenCount ?? 0,
+      },
+    };
+  }
+}
+
+/**
+ * Convert the runner's internal Anthropic-shape messages into Gemini's
+ * `contents[]`. Tool results from prior turns become user-role messages
+ * with `functionResponse` parts; tool_use blocks the model emitted last
+ * turn become model-role messages with `functionCall` parts.
+ *
+ * Gemini's tool_use id has no equivalent in the wire format — they pair
+ * function calls and responses by `name` only, so we just emit the name
+ * and let the model match by position.
+ */
+function toGeminiContents(messages: AgentMessage[]): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = [];
+  for (const m of messages) {
+    if (typeof m.content === 'string') {
+      out.push({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] });
+      continue;
+    }
+    const parts: Array<Record<string, unknown>> = [];
+    let lookupName = '';
+    for (const block of m.content) {
+      if (block.type === 'text') {
+        parts.push({ text: block.text });
+      } else if (block.type === 'tool_use') {
+        parts.push({ functionCall: { name: block.name, args: block.input } });
+        lookupName = block.name;
+      } else if (block.type === 'tool_result') {
+        // Try to look up the name from the prior assistant message; if it
+        // isn't trivially available, fall back to "tool" as the name and
+        // let Gemini take it. Most fixtures only call one tool per turn.
+        const name =
+          findToolNameForUseId(out, block.tool_use_id) || lookupName || 'tool';
+        let responseObj: Record<string, unknown>;
+        try {
+          // Gemini wants a structured response; try to parse JSON, else
+          // wrap the string in a { result } object.
+          const parsed = JSON.parse(block.content);
+          responseObj = typeof parsed === 'object' && parsed !== null
+            ? (parsed as Record<string, unknown>)
+            : { result: parsed };
+        } catch {
+          responseObj = { result: block.content };
+        }
+        parts.push({ functionResponse: { name, response: responseObj } });
+      }
+    }
+    out.push({ role: m.role === 'assistant' ? 'model' : 'user', parts });
+  }
+  return out;
+}
+
+/** Walk previously-built Gemini contents to recover the tool name for a
+ *  given Anthropic tool_use id. Since we keep the Anthropic shape
+ *  internally, the prior `tool_use` block lives on an `assistant`-typed
+ *  message that hasn't yet been pushed to Gemini contents. As a
+ *  practical fallback we just return undefined here and let the caller's
+ *  `lookupName` heuristic handle it. */
+function findToolNameForUseId(_contents: unknown[], _id: string): string | undefined {
+  return undefined;
+}
+
+/**
+ * Gemini's tool-parameters validator rejects a few JSON Schema keys
+ * that OpenAI/Anthropic accept (notably `additionalProperties`, `$schema`,
+ * sometimes `default`). Strip the known-bad ones recursively before
+ * sending. Keep this list minimal — adding more breaks legitimate uses.
+ */
+function stripUnsupportedSchemaKeys(schema: unknown): unknown {
+  if (Array.isArray(schema)) return schema.map((x) => stripUnsupportedSchemaKeys(x));
+  if (schema && typeof schema === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(schema as Record<string, unknown>)) {
+      if (k === 'additionalProperties' || k === '$schema') continue;
+      out[k] = stripUnsupportedSchemaKeys(v);
+    }
+    return out;
+  }
+  return schema;
+}
+
+/**
  * Price table for the supported runner models, in USD per 1M tokens.
  * Used by hero-runner to convert per-call usage into a per-run cost.
  * Conservative numbers from the vendors' published pricing as of
@@ -341,6 +688,12 @@ export const RUNNER_MODEL_PRICING: Record<string, { inputPerMTok: number; output
   // xAI
   'grok-4-latest': { inputPerMTok: 3.0, outputPerMTok: 15.0 },
   'grok-4-0709': { inputPerMTok: 3.0, outputPerMTok: 15.0 },
+  // OpenAI — approx Q1 2026 list price
+  'gpt-5': { inputPerMTok: 2.5, outputPerMTok: 10.0 },
+  'gpt-5.2': { inputPerMTok: 2.5, outputPerMTok: 10.0 },
+  // Google — approx Q1 2026 list price
+  'gemini-2.5-pro': { inputPerMTok: 1.25, outputPerMTok: 5.0 },
+  'gemini-3.1-pro-preview': { inputPerMTok: 1.25, outputPerMTok: 5.0 },
 };
 
 export function computeCostUsd(
