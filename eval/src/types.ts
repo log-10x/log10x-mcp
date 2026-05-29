@@ -92,13 +92,23 @@ export const scenarioSchema = z.object({
     .optional(),
 
   /**
-   * Pre-supplied answers for wizard-style tools (currently log10x_advise_install)
-   * so the deterministic runner can satisfy `next_question` envelopes the
-   * same way an LLM would in autonomous mode. When the wizard emits an
-   * action with a literal `"<user answer>"` placeholder at any top-level
-   * arg, the runner substitutes `wizard_answers[<that_key>]` before
-   * enqueueing the call. Autonomous mode ignores this block — Sonnet
-   * supplies its own answers from the user prompt.
+   * Pre-supplied answers for wizard-style tools (currently log10x_advise_install).
+   * Consumed by both runners but via different paths:
+   *
+   *   - Deterministic runner: when the wizard's next_question action
+   *     carries a `"<user answer>"` placeholder, the runner substitutes
+   *     `wizard_answers[<that_key>]` before enqueueing the call.
+   *
+   *   - Autonomous + transport='stdio': the StdioMcpHarness declares
+   *     elicitation capability and registers an ElicitRequestSchema
+   *     handler that answers from `wizard_answers` keyed by the
+   *     requested property name. This is the real-customer code path
+   *     (Claude Desktop / Cursor users always go through elicitation).
+   *
+   *   - Autonomous + transport='in-process' (CI default): unused. The
+   *     in-process harness calls executeAdviseInstall without an
+   *     mcpServer, so the wizard falls back to its markdown-question
+   *     path and the LLM supplies answers from the user prompt.
    *
    * Key = the wizard's `answer_field` (e.g. "app", "backends", "airgapped").
    * Value = whatever shape the schema expects (string / array / boolean).

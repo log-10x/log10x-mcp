@@ -123,7 +123,11 @@ export const adviseInstallSchema = {
     ),
   backend_credentials: z
     .record(
-      z.string(),
+      // Key is constrained to the supported backend kinds — typos like
+      // `data-dog` or unknown keys are rejected up-front by the Zod
+      // parse, so the wizard's unknown-arg detector (which only walks
+      // top-level keys) doesn't have to recurse into this record.
+      z.enum(SUPPORTED_BACKENDS as unknown as [string, ...string[]]),
       z.object({
         secretName: z.string().describe('Name of the Kubernetes Secret holding sensitive env vars for this backend.'),
         plainValues: z
@@ -134,7 +138,7 @@ export const adviseInstallSchema = {
     )
     .optional()
     .describe(
-      'Per-backend credential configuration, keyed by backend kind. **Only set for non-`log10x` backends** — `log10x` SaaS uses the license JWT and needs no extra credentials. Each entry has a `secretName` (the Kubernetes Secret the user creates out-of-band holding sensitive env vars like `DD_API_KEY`; default per backend is `<backend>-credentials`) and optional `plainValues` (overrides for non-sensitive env vars like `DD_SITE`). Example: `{ "datadog": { "secretName": "datadog-secret", "plainValues": { "DD_SITE": "us5.datadoghq.com" } } }`.'
+      'Per-backend credential configuration, keyed by backend kind (must be one of: log10x, datadog, elastic, cloudwatch, signalfx, prometheus). **Only set for non-`log10x` backends** — `log10x` SaaS uses the license JWT and needs no extra credentials. Each entry has a `secretName` (the Kubernetes Secret the user creates out-of-band holding sensitive env vars like `DD_API_KEY`; default per backend is `<backend>-credentials`) and optional `plainValues` (overrides for non-sensitive env vars like `DD_SITE`). Example: `{ "datadog": { "secretName": "datadog-secret", "plainValues": { "DD_SITE": "us5.datadoghq.com" } } }`.'
     ),
   license_source: z
     .enum(['signin', 'demo', 'paste'])
@@ -1084,10 +1088,11 @@ async function elicitMissingAnswers(
     // reachable via the schema's `license_source` arg, but as
     // explicit escape hatches (the agent passes them when the USER
     // says "I just want to play with demo" or "I have a JWT").
-    if (!session.licenseSource) {
-      session.licenseSource = 'signin';
-      updateWizardSession(session.snapshotId, { licenseSource: 'signin' });
-    }
+    //
+    // The Zod schema `.default('signin')` on license_source already
+    // populates args.license_source on every call, and the session
+    // merge below folds it into session.licenseSource — no explicit
+    // defaulting needed here.
 
     // Q7: paste path — ask for the JWT itself.
     if (session.licenseSource === 'paste' && !session.licenseJwt) {
@@ -1380,10 +1385,9 @@ function nextQuestion(snapshot: DiscoverySnapshot, session: WizardSession): Next
   // Q6 (license source) — IMPLICIT 'signin'. Not elicited. See the
   // matching block in elicitMissingAnswers() above for the rationale.
   // Demo / paste remain accessible as explicit `license_source` args.
-  if (!session.licenseSource) {
-    session.licenseSource = 'signin';
-    updateWizardSession(session.snapshotId, { licenseSource: 'signin' });
-  }
+  // No explicit defaulting needed — the Zod schema's `.default('signin')`
+  // already populates args.license_source and the session merge folds
+  // it into session.licenseSource on every call.
 
   // Q7: when license_source=paste and the JWT hasn't been provided yet,
   // ask for it. (The agent passes it via `license_jwt_paste`, which the
