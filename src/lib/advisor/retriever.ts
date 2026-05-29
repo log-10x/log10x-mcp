@@ -21,7 +21,6 @@
 
 import type { DiscoverySnapshot } from '../discovery/types.js';
 import type { AdvisePlan, PlanStep, VerifyProbe, PreflightCheck } from './types.js';
-import { run } from '../discovery/shell.js';
 
 export interface RetrieverAdviseArgs {
   snapshot: DiscoverySnapshot;
@@ -248,28 +247,12 @@ async function runPreflight(
     });
   }
 
-  // Live chart availability probe.
-  try {
-    await run('helm', ['repo', 'add', RETRIEVER_CHART_ALIAS, RETRIEVER_CHART_REPO, '--force-update'], {
-      timeoutMs: 10_000,
-    });
-    await run('helm', ['repo', 'update', RETRIEVER_CHART_ALIAS], { timeoutMs: 10_000 });
-    const search = await run('helm', ['search', 'repo', RETRIEVER_CHART_REF, '-o', 'json'], {
-      timeoutMs: 10_000,
-    });
-    const found = search.exitCode === 0 && (search.stdout || '').includes('retriever');
-    checks.push({
-      name: 'chart availability',
-      status: found ? 'ok' : 'warn',
-      detail: found ? `\`${RETRIEVER_CHART_REF}\` is live in repo \`${RETRIEVER_CHART_ALIAS}\`` : `\`helm search repo ${RETRIEVER_CHART_REF}\` returned no matches — check repo URL`,
-    });
-  } catch (e) {
-    checks.push({
-      name: 'chart availability',
-      status: 'unknown',
-      detail: `helm CLI not available or probe errored: ${e instanceof Error ? e.message : String(e)}`,
-    });
-  }
+  // Chart availability used to LIVE-probe `helm search repo` here too.
+  // Removed for the same reason as the receiver path: retriever-10x is
+  // a chart WE publish under a name we control, so verifying it exists
+  // on every plan emit just added a slow side effect (mutates the
+  // user's helm config; blocks up to 30s when helm is offline). If the
+  // chart ref ever drifts, `helm install` surfaces it meaningfully.
 
   return checks;
 }

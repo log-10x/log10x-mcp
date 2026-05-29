@@ -30,7 +30,6 @@ import {
   type OutputDestination,
   type ForwarderSpec,
 } from './reporter-forwarders.js';
-import { run } from '../discovery/shell.js';
 
 export type AdvisorApp = 'reporter' | 'receiver';
 
@@ -546,23 +545,20 @@ async function runPreflight(
     });
   }
 
-  // 5. Chart availability — LIVE probe via `helm search repo`.
-  // The prior static flag claimed `published: ok` for chart refs that
-  // didn't exist (e.g., `filebeat-10x` when the real name is `filebeat`).
-  // We now add the repo and search for the chart; the check only
-  // passes if helm returns a matching entry.
-  if (spec) {
-    const liveCheck = await probeChartAvailability(spec);
-    checks.push(liveCheck);
-  } else {
-    checks.push({
-      name: 'chart availability',
-      status: 'unknown',
-      detail: 'no spec for this forwarder',
-    });
-  }
+  // Chart availability used to LIVE-probe `helm search repo` here. It
+  // was removed because the chart refs it checked are static constants
+  // in our own source (reporter-forwarders.ts):
+  //   - reporter-10x / retriever-10x are charts WE publish under names
+  //     we control.
+  //   - The receiver forwarder charts (fluent/fluent-bit, vector/vector,
+  //     open-telemetry/opentelemetry-collector, elastic/logstash) are
+  //     well-known upstream identifiers that don't change.
+  // The probe added the user's local helm repo entries on every plan
+  // emit, blocked the wizard for up to 30s when helm was offline, and
+  // checked constants we'd already shipped. If a future chart ref
+  // drifts, helm install will surface it meaningfully on its own.
 
-  // 6. License JWT hint.
+  // License JWT hint.
   checks.push({
     name: 'license JWT',
     status: 'unknown',
@@ -571,59 +567,6 @@ async function runPreflight(
   });
 
   return checks;
-}
-
-/**
- * Live chart availability probe. Adds the repo (idempotent), runs
- * `helm search repo <chartRef>`, and returns an `ok` status iff a
- * matching entry is found. The step exists BECAUSE the first dogfood
- * pass shipped chart refs that looked real but didn't resolve
- * (filebeat-10x vs filebeat, logstash-10x vs logstash,
- * otel-collector-10x vs opentelemetry-collector). Every chart-ref
- * drift now fails preflight instead of helm-install.
- */
-async function probeChartAvailability(spec: ForwarderSpec): Promise<PreflightCheck> {
-  try {
-    await run('helm', ['repo', 'add', spec.helmRepoAlias, spec.helmRepo, '--force-update'], {
-      timeoutMs: 10_000,
-    });
-    await run('helm', ['repo', 'update', spec.helmRepoAlias], { timeoutMs: 10_000 });
-    const search = await run('helm', ['search', 'repo', spec.chartRef, '-o', 'json'], {
-      timeoutMs: 10_000,
-    });
-    if (search.exitCode !== 0) {
-      return {
-        name: 'chart availability',
-        status: 'warn',
-        detail: `\`helm search repo ${spec.chartRef}\` failed (exit ${search.exitCode}): ${search.stderr.slice(0, 200)}`,
-      };
-    }
-    let parsed: Array<{ name: string; version: string; app_version: string }> = [];
-    try {
-      parsed = JSON.parse(search.stdout || '[]');
-    } catch {
-      parsed = [];
-    }
-    if (parsed.length === 0) {
-      return {
-        name: 'chart availability',
-        status: 'fail',
-        detail: `\`${spec.chartRef}\` returned 0 results from \`helm search repo\` — chart ref is wrong or the repo is offline`,
-      };
-    }
-    const hit = parsed[0];
-    return {
-      name: 'chart availability',
-      status: 'ok',
-      detail: `\`${hit.name}\` v${hit.version} (app ${hit.app_version}) is live in repo \`${spec.helmRepoAlias}\``,
-    };
-  } catch (e) {
-    return {
-      name: 'chart availability',
-      status: 'unknown',
-      detail: `helm CLI not available or probe errored: ${e instanceof Error ? e.message : String(e)}`,
-    };
-  }
 }
 
 function buildInstallSteps(opts: {
