@@ -36,6 +36,12 @@ export interface EnrichableForPoc {
   costPerWindow: number;
   costPerWeek: number;
   variables: Record<string, string[]>;
+  /**
+   * Per-slot TRUE distinct counts from the templater. When present,
+   * this is the source of truth for cardinality — `variables[k].length`
+   * is the sample size (capped at 20), not the distinct count.
+   */
+  slotDistinctCounts?: Record<string, number>;
   recommendedAction: 'mute' | 'sample' | 'keep';
   sampleRate: number;
   reasoning: string;
@@ -122,12 +128,16 @@ export interface PocEnrichment {
 export function computeTopSlot(
   variables: Record<string, string[]>,
   count: number,
+  slotDistinctCounts?: Record<string, number>,
 ): TopSlot | null {
   const entries = Object.entries(variables);
   if (entries.length === 0) return null;
   let best: TopSlot | null = null;
   for (const [slot, values] of entries) {
-    const distinct = values.length;
+    // Prefer the true distinct count when the templater provided it.
+    // Fall back to the sample length (capped at 20) only when the
+    // upstream extractor didn't carry the cardinality measurement.
+    const distinct = slotDistinctCounts?.[slot] ?? values.length;
     if (distinct === 0) continue;
     const score = distinct;
     if (best === null || score > best.distinctCount) {
@@ -342,7 +352,7 @@ export function enrichForPoc(
   }
 
   const enrichments: PocEnrichment[] = patterns.map((p) => {
-    const topSlot = computeTopSlot(p.variables, p.count);
+    const topSlot = computeTopSlot(p.variables, p.count, p.slotDistinctCounts);
     const dependencyCount = opts.dependencyByIdentity?.get(p.identity) ?? null;
     const dependencyChecked = opts.dependencyByIdentity?.has(p.identity) ?? false;
     const emergence =

@@ -797,6 +797,11 @@ export async function runPipeline(
     extraction = await extractPatterns(pullResult.events, {
       privacyMode: args.privacy_mode,
       autoBatch: true,
+      // POC pulls scale to 100K-1M events. Route through the file-
+      // output engine app (@apps/mcp-file) so the templater can stream
+      // results to disk instead of buffering in stdout. Falls back to
+      // stdin-based runner when privacy_mode=false (paste lambda).
+      useFileOutput: args.privacy_mode === true,
     });
   } catch (e) {
     snapshot.status = 'failed';

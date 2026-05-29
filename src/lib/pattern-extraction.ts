@@ -15,7 +15,7 @@
  */
 
 import { submitPaste, PASTE_MAX_BYTES } from './paste-api.js';
-import { runDevCli, DevCliNotInstalledError } from './dev-cli.js';
+import { runDevCli, runDevCliFileOutput, DevCliNotInstalledError } from './dev-cli.js';
 import {
   parseTemplates,
   parseEncoded,
@@ -77,8 +77,16 @@ export interface ExtractedPattern {
   encodedBytes?: number;
   /** One representative raw event (from the first encoded match). */
   sampleEvent: string;
-  /** Per-slot captured values (slot name or positional index → distinct values observed). */
+  /** Per-slot captured values (slot name or positional index → distinct values observed, capped at 20 samples). */
   variables: Record<string, string[]>;
+  /**
+   * Per-slot TRUE distinct-value count, not capped. The `variables`
+   * field holds at most 20 sample values to keep payloads bounded;
+   * this field carries the real cardinality measurement from the
+   * templater. Use this for unbounded-slot detection — `variables[k].length`
+   * is the sample size, not the cardinality.
+   */
+  slotDistinctCounts?: Record<string, number>;
   /** Epoch ms of the earliest event seen in the pulled window. `undefined` when no envelope timestamps were available. */
   firstSeenMs?: number;
   /** Epoch ms of the latest event seen in the pulled window. */
@@ -113,6 +121,18 @@ export interface ExtractPatternsOptions {
    * Default false to preserve existing `resolve_batch` semantics.
    */
   autoBatch?: boolean;
+  /**
+   * When true (only meaningful with `privacyMode=true`), route the
+   * templater run through the file-output engine app (@apps/mcp-file)
+   * instead of the stdout-based @apps/mcp. The CLI writes templates,
+   * encoded events, and aggregated rows to disk; the parser reads
+   * them after the process exits. Scales to multi-million-event pulls
+   * because no stdout buffering is involved.
+   *
+   * Use this for SIEM POC pulls. Default false to preserve existing
+   * `resolve_batch` semantics for small paste-style inputs.
+   */
+  useFileOutput?: boolean;
 }
 
 /**
@@ -167,7 +187,14 @@ export async function extractPatterns(
     // Local CLI can absorb the full batch in one shot.
     const text = lines.join('\n');
     try {
-      const local = await runDevCli(text);
+      // useFileOutput routes the run through @apps/mcp-file (engine
+      // writes templates/encoded/aggregated to disk, parser reads
+      // after exit). Scales to multi-million-event pulls because
+      // there's no stdout buffering. The stdin-based runDevCli is
+      // kept as default for back-compat with resolve_batch.
+      const local = opts.useFileOutput
+        ? await runDevCliFileOutput(text)
+        : await runDevCli(text);
       for (const [hash, tpl] of parseTemplates(local.templatesJson)) {
         mergedTemplates.set(hash, tpl);
       }
@@ -299,8 +326,13 @@ export async function extractPatterns(
       aggMatch?.severity;
 
     const variables: Record<string, string[]> = {};
+    const slotDistinctCounts: Record<string, number> = {};
     for (const [slot, set] of rec.variables) {
-      // Cap at 20 sample values per slot — enough for dependency analysis, not enough to blow context.
+      // Cap at 20 sample values per slot — enough for dependency
+      // analysis, not enough to blow context. Carry the true
+      // distinct count separately so downstream code can tell
+      // "20 sampled, 20 actual" from "20 sampled, 47K actual".
+      slotDistinctCounts[slot] = set.size;
       variables[slot] = Array.from(set).slice(0, 20);
     }
 
@@ -324,6 +356,7 @@ export async function extractPatterns(
       encodedBytes: rec.encodedBytes,
       sampleEvent: rec.sampleEvent,
       variables,
+      slotDistinctCounts,
       firstSeenMs: rec.firstSeenMs,
       lastSeenMs: rec.lastSeenMs,
       eventsByHour: rec.eventsByHour.size > 0 ? Object.fromEntries(rec.eventsByHour) : undefined,
@@ -395,10 +428,22 @@ function mergeExtractedPatterns(group: ExtractedPattern[]): ExtractedPattern {
   const longestTemplate = group.reduce((longest, p) =>
     p.template.length > longest.length ? p.template : longest, head.template);
   const variables: Record<string, string[]> = {};
+  // Slot-level distinct counts: sum across merged group members. Upper
+  // bound only (a value present in more than one member counts twice),
+  // but a tight upper bound is the right honest framing because the
+  // sample is capped at 20 per member and we can't dedupe beyond that.
+  // Preserves the "unbounded" signal where every member sees high-
+  // cardinality slots; the count never collapses to the sample cap.
+  const mergedSlotDistinctCounts: Record<string, number> = {};
   for (const p of group) {
     for (const [slot, vals] of Object.entries(p.variables)) {
       const merged = variables[slot] ? new Set([...variables[slot], ...vals]) : new Set(vals);
       variables[slot] = Array.from(merged).slice(0, 20);
+    }
+    if (p.slotDistinctCounts) {
+      for (const [slot, n] of Object.entries(p.slotDistinctCounts)) {
+        mergedSlotDistinctCounts[slot] = (mergedSlotDistinctCounts[slot] ?? 0) + n;
+      }
     }
   }
   // Merge first/last-seen across the group; union the per-hour buckets.
@@ -431,6 +476,7 @@ function mergeExtractedPatterns(group: ExtractedPattern[]): ExtractedPattern {
     encodedBytes: group.reduce((s, p) => s + (p.encodedBytes ?? 0), 0),
     sampleEvent: head.sampleEvent,
     variables,
+    slotDistinctCounts: Object.keys(mergedSlotDistinctCounts).length > 0 ? mergedSlotDistinctCounts : undefined,
     firstSeenMs,
     lastSeenMs,
     eventsByHour: Object.keys(mergedEventsByHour).length > 0 ? mergedEventsByHour : undefined,
