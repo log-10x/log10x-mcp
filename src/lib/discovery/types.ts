@@ -283,6 +283,24 @@ export interface WizardSession {
    */
   isDemoLicense?: boolean;
   /**
+   * Why `acquireLicenseForWizard` took the path it did — copied verbatim
+   * from `AcquireLicenseResult.reason`. The wizard's demo+airgapped
+   * warning branches on this to pick the right "here's why we couldn't
+   * mint a user license, and here's what to do" message. Distinguishing
+   * "no Auth0 tokens" (sign in via device flow) from "Auth0 tokens
+   * present but stale/refused" (retry, or sign in again) avoids
+   * misdirecting the user. Absent until the wizard has actually called
+   * the license endpoint.
+   */
+  licenseReason?:
+    | 'signed-in-user'
+    | 'refreshed-then-user'
+    | 'not-signed-in'
+    | 'pasted-key-fallback'
+    | 'access-token-expired-no-refresh'
+    | 'refresh-failed'
+    | 'user-license-fetch-failed';
+  /**
    * How the user chose to get the license JWT:
    *   - 'signin' — sign in to log10x first, then re-invoke (the
    *     recommended path; produces a real user-scoped license)

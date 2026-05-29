@@ -171,8 +171,35 @@ function parseLicenseResponse(raw: unknown): LicenseResult {
 export interface AcquireLicenseResult extends LicenseResult {
   /** True when the demo endpoint was used (anonymous, 14-day). */
   isDemoLicense: boolean;
-  /** Why this path was taken — surfaced in wizard output for transparency. */
-  reason: 'signed-in-user' | 'refreshed-then-user' | 'pasted-key-fallback' | 'not-signed-in';
+  /**
+   * Why this path was taken — surfaced in wizard output for transparency.
+   *
+   * User-scoped (`isDemoLicense: false`):
+   *   - 'signed-in-user'             — Auth0 access token worked first try
+   *   - 'refreshed-then-user'        — access token was stale, refresh succeeded
+   *
+   * Demo fallbacks (`isDemoLicense: true`) — distinguished so the wizard
+   * can give the user the right next step (sign in via device flow,
+   * retry, etc.) instead of a one-size-fits-all "you pasted your key"
+   * message:
+   *   - 'not-signed-in'                 — no credentials on disk at all
+   *   - 'pasted-key-fallback'           — API key present, but no Auth0 tokens
+   *                                       (sign-in was via pasted key)
+   *   - 'access-token-expired-no-refresh' — access token expired, no refresh token
+   *                                         to recover with (sign in again)
+   *   - 'refresh-failed'                — refresh attempt errored (network or
+   *                                       Auth0 rejection)
+   *   - 'user-license-fetch-failed'     — Auth0 worked, but /api/v1/license
+   *                                       errored (gateway issue)
+   */
+  reason:
+    | 'signed-in-user'
+    | 'refreshed-then-user'
+    | 'not-signed-in'
+    | 'pasted-key-fallback'
+    | 'access-token-expired-no-refresh'
+    | 'refresh-failed'
+    | 'user-license-fetch-failed';
 }
 
 export async function acquireLicenseForWizard(): Promise<AcquireLicenseResult> {
@@ -211,7 +238,7 @@ export async function acquireLicenseForWizard(): Promise<AcquireLicenseResult> {
       // back to demo and tell the user to sign in again.
       log.warn('license.access_token_expired_no_refresh');
       const lic = await fetchDemoLicense();
-      return { ...lic, isDemoLicense: true, reason: 'pasted-key-fallback' };
+      return { ...lic, isDemoLicense: true, reason: 'access-token-expired-no-refresh' };
     }
     try {
       const refreshed = await refreshAuth0AccessToken(creds.auth0RefreshToken);
@@ -235,12 +262,14 @@ export async function acquireLicenseForWizard(): Promise<AcquireLicenseResult> {
       log.warn('license.refresh_failed', { msg: (e as Error).message });
       // Refresh blew up. Demo fallback is the safe path.
       const lic = await fetchDemoLicense();
-      return { ...lic, isDemoLicense: true, reason: 'pasted-key-fallback' };
+      return { ...lic, isDemoLicense: true, reason: 'refresh-failed' };
     }
   }
 
   if (!accessToken) {
-    // Defensive — should be unreachable now.
+    // Defensive — should be unreachable (the needsRefresh branch above
+    // either rotated `accessToken` or returned early). Treat as the
+    // most-conservative "no Auth0 tokens" case.
     const lic = await fetchDemoLicense();
     return { ...lic, isDemoLicense: true, reason: 'pasted-key-fallback' };
   }
@@ -253,7 +282,7 @@ export async function acquireLicenseForWizard(): Promise<AcquireLicenseResult> {
       msg: (e as Error).message,
     });
     const demo = await fetchDemoLicense();
-    return { ...demo, isDemoLicense: true, reason: 'pasted-key-fallback' };
+    return { ...demo, isDemoLicense: true, reason: 'user-license-fetch-failed' };
   }
 }
 

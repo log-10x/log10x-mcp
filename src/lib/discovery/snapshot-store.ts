@@ -143,9 +143,12 @@ export function getWizardSession(id: string): WizardSession | undefined {
  * the session on first call. Returns the merged session, or undefined if
  * the snapshot is missing/expired (caller should re-run discovery).
  *
- * Merge semantics: shallow `{...existing, ...partial}`. Explicit
- * `undefined` in `partial` does NOT clear a field; pass `null`-ish values
- * via a follow-up `clearWizardField` call when we need explicit reset.
+ * Merge semantics: shallow per-key. Keys whose value is `undefined` in
+ * `partial` are SKIPPED (they do not clear the existing value) — the
+ * wizard's `next_question` actions carry only the field being answered
+ * this turn, with every other field implicitly absent; a naive spread
+ * would wipe previously-collected answers and trap the wizard in a loop
+ * re-asking Q1.
  */
 export function updateWizardSession(
   snapshotId: string,
@@ -155,9 +158,13 @@ export function updateWizardSession(
   if (!snap) return undefined;
   const entry = store.get(snapshotId);
   if (!entry) return undefined;
+  const definedPartial: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(partial)) {
+    if (v !== undefined) definedPartial[k] = v;
+  }
   const merged: WizardSession = {
     ...(entry.session ?? { snapshotId, updatedAt: new Date().toISOString() }),
-    ...partial,
+    ...(definedPartial as Partial<WizardSession>),
     snapshotId,
     updatedAt: new Date().toISOString(),
   };

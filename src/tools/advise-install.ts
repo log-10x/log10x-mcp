@@ -50,7 +50,7 @@ import { buildReporterPlan } from '../lib/advisor/reporter.js';
 import { renderPlan } from '../lib/advisor/render.js';
 import { buildPlanSummary, type AdvisePlanSummary } from '../lib/advisor/envelope.js';
 import type { AdvisePlan, AdviseAction } from '../lib/advisor/types.js';
-import { acquireLicenseForWizard, LicenseFetchError } from '../lib/license-api.js';
+import { acquireLicenseForWizard, LicenseFetchError, type AcquireLicenseResult } from '../lib/license-api.js';
 import '../lib/auth-model.js';
 import type {
   DiscoverySnapshot,
@@ -749,18 +749,23 @@ export async function executeAdviseInstall(
         lic.reason === 'signed-in-user' || lic.reason === 'refreshed-then-user';
       if (session.licenseSource === 'signin' && !isRealUserLicense) {
         // Honest answer: the user picked "sign in" but acquireLicense
-        // didn't get a user-scoped JWT (no Auth0 tokens). Don't silently
-        // fall back to the demo JWT it returned — refuse and tell the
-        // agent to chain through log10x_signin_start first.
+        // didn't get a user-scoped JWT. Don't silently fall back to the
+        // demo JWT it returned — refuse, and tell the agent the right
+        // recovery step for the SPECIFIC failure (sign in via device
+        // flow vs retry vs etc.). The per-reason copy avoids the prior
+        // bug where "you signed in via pasted API key" was shown for
+        // expired-refresh / refresh-failed / fetch-failed cases too.
         const md = [
           `# Install wizard — sign in to Log10x first`,
           ``,
-          lic.reason === 'pasted-key-fallback'
-            ? `You picked **Sign in** for the license. The wizard saw an existing Log10x API key but no Auth0 tokens (you signed in via pasted API key, which doesn't include the OAuth credentials needed to mint a user-scoped license). Run \`log10x_signin_start\` in your next turn — it opens the device-code browser flow and stores the Auth0 tokens.`
-            : `You picked **Sign in** for the license. The wizard found no Log10x account session — run \`log10x_signin_start\` in your next turn (it opens a browser to auth.log10x.com and exchanges the device-code for an API key + Auth0 tokens).`,
+          signinRequiredReasonMessage(lic.reason),
           ``,
           `Once you're signed in, re-invoke \`log10x_advise_install\` with the same \`snapshot_id\`. Every answer you gave above is remembered — you won't have to redo any step.`,
         ].join('\n');
+        // Persist the reason so the demo+airgapped warning (if reached
+        // on a future turn through 'demo' or 'paste') can branch on the
+        // same taxonomy. Not strictly needed for this path, but cheap.
+        updateWizardSession(args.snapshot_id, { licenseReason: lic.reason });
         return wizardReturn(view, {
           mode: 'signin_required',
           ok: false,
@@ -771,9 +776,11 @@ export async function executeAdviseInstall(
       updateWizardSession(args.snapshot_id, {
         licenseJwt: lic.jwt,
         isDemoLicense: lic.isDemoLicense,
+        licenseReason: lic.reason,
       });
       session.licenseJwt = lic.jwt;
       session.isDemoLicense = lic.isDemoLicense;
+      session.licenseReason = lic.reason;
     } catch (e) {
       const msg = e instanceof LicenseFetchError ? e.message : String(e);
       const md = [
@@ -806,12 +813,24 @@ export async function executeAdviseInstall(
   // signed-in-via-pasted-key users (fell back to demo because we lack
   // Auth0 tokens to mint a user license).
   if (session.airgapped === true && session.isDemoLicense === true) {
-    const md = renderDemoAirgappedWarning(session, !envs.isDemoMode);
+    // `is_signed_in` here means "had Auth0 tokens" — i.e., the device
+    // flow has been completed at least once. We derive it from the
+    // license-acquire reason rather than `envs.isDemoMode` because the
+    // latter is true for pasted-API-key users (who are technically
+    // "signed in" by API key but lack the Auth0 tokens needed to mint
+    // a user license — they still need to run the device flow). Falls
+    // back to `!envs.isDemoMode` when the wizard reached this mode via
+    // a path that didn't populate `licenseReason` (e.g., the user
+    // pasted a JWT and marked it demo).
+    const isSignedIn = session.licenseReason
+      ? hasAuth0TokensForReason(session.licenseReason)
+      : !envs.isDemoMode;
+    const md = renderDemoAirgappedWarning(session, isSignedIn);
     return wizardReturn(view, {
       mode: 'demo_airgapped_warning',
       ok: true,
       snapshot_id: args.snapshot_id,
-      is_signed_in: !envs.isDemoMode,
+      is_signed_in: isSignedIn,
       markdown: md,
     });
   }
@@ -1616,13 +1635,70 @@ function airgappedLog10xConflict(backends: MetricsBackendKind[]): string {
   ].join('\n');
 }
 
+/**
+ * Whether the user has at least one Auth0 token (access or refresh)
+ * stored, given the reason `acquireLicenseForWizard` returned. Used to
+ * derive `is_signed_in` for the demo+airgapped envelope: a pasted-API-key
+ * user is technically "signed in" by API key but lacks the Auth0 tokens
+ * needed to mint a user-scoped license, so we report them as "not signed
+ * in" for the purposes of this surface (the actionable next step is the
+ * device flow either way).
+ */
+function hasAuth0TokensForReason(
+  reason: NonNullable<WizardSession['licenseReason']>
+): boolean {
+  switch (reason) {
+    case 'signed-in-user':
+    case 'refreshed-then-user':
+    case 'access-token-expired-no-refresh':
+    case 'refresh-failed':
+    case 'user-license-fetch-failed':
+      return true;
+    case 'not-signed-in':
+    case 'pasted-key-fallback':
+      return false;
+  }
+}
+
+/**
+ * Per-reason markdown line for `signin_required` mode. Maps each demo-
+ * fallback reason to a concrete next step the user can act on, instead
+ * of the one-size-fits-all "you signed in via pasted API key" message
+ * the wizard used to emit for every fallback.
+ */
+function signinRequiredReasonMessage(
+  reason: AcquireLicenseResult['reason']
+): string {
+  switch (reason) {
+    case 'pasted-key-fallback':
+      return `You picked **Sign in** for the license. The wizard saw an existing Log10x API key but no Auth0 tokens (you signed in via pasted API key, which doesn't include the OAuth credentials needed to mint a user-scoped license). Run \`log10x_signin_start\` in your next turn — it opens the device-code browser flow and stores the Auth0 tokens.`;
+    case 'not-signed-in':
+      return `You picked **Sign in** for the license. The wizard found no Log10x account session — run \`log10x_signin_start\` in your next turn (it opens a browser to auth.log10x.com and exchanges the device-code for an API key + Auth0 tokens).`;
+    case 'access-token-expired-no-refresh':
+      return `You picked **Sign in** for the license. Your Auth0 access token has expired and there's no refresh token on file to recover with — most likely the prior sign-in was done a while ago and the refresh-token window has lapsed. Run \`log10x_signin_start\` to redo the device flow.`;
+    case 'refresh-failed':
+      return `You picked **Sign in** for the license. The wizard tried to refresh your Auth0 access token and the refresh call failed (network error, or Auth0 rejected the refresh token). Run \`log10x_signin_start\` to redo the device flow from scratch; if the refresh call keeps failing, that's a sign Auth0 has revoked the session.`;
+    case 'user-license-fetch-failed':
+      return `You picked **Sign in** for the license. Auth0 sign-in is fine, but the call to \`/api/v1/license\` (the endpoint that mints the user-scoped JWT) errored — typically a transient gateway problem. Re-invoke \`log10x_advise_install\` to retry; if it keeps failing, surface the error to the Log10x team. \`log10x_signin_start\` won't help in this case.`;
+    case 'signed-in-user':
+    case 'refreshed-then-user':
+      // Unreachable: signin_required only fires when isRealUserLicense
+      // is false. Conservative default so this never crashes on a
+      // future taxonomy change.
+      return `You picked **Sign in** for the license, but the wizard couldn't confirm a user-scoped JWT was minted. Run \`log10x_signin_start\` and retry.`;
+  }
+}
+
 function renderDemoAirgappedWarning(session: WizardSession, isSignedIn: boolean): string {
   const backendList =
     (session.backends ?? []).map((b) => `\`${b}\``).join(' + ') || 'your chosen backend';
 
-  const intro = isSignedIn
-    ? `You're signed in, but the wizard fell back to an anonymous demo license — usually because the sign-in was done via pasted API key, which doesn't give us the Auth0 access token needed to mint a user-scoped JWT.`
-    : `You're not signed in, so the wizard minted a 14-day anonymous demo JWT.`;
+  // Pick the intro line by the recorded license-acquire reason when we
+  // have one — that gives us "expired refresh", "refresh failed", etc.
+  // distinct from the generic "you pasted your key" message. Falls back
+  // to the boolean when the reason is absent (e.g. user pasted a JWT
+  // they already had and marked it demo).
+  const intro = introForReason(session.licenseReason, isSignedIn);
 
   const signinSuggestion = isSignedIn
     ? `1. **Sign in via the device flow** to upgrade to a user-scoped license (\`log10x_signin_start\` — it'll go through a browser OAuth that gives us the Auth0 tokens we need). Re-invoke this tool afterward. Your \`airgapped: true\` choice is remembered.`
@@ -1640,6 +1716,33 @@ function renderDemoAirgappedWarning(session: WizardSession, isSignedIn: boolean)
     '',
     "_Your other answers (app, forwarder, backends) are remembered — you don't need to re-pass them._",
   ].join('\n');
+}
+
+function introForReason(
+  reason: WizardSession['licenseReason'],
+  isSignedInFallback: boolean
+): string {
+  switch (reason) {
+    case 'pasted-key-fallback':
+      return `You're signed in via pasted API key, but the wizard fell back to an anonymous demo license — pasted-key sign-in doesn't give us the Auth0 access token needed to mint a user-scoped JWT.`;
+    case 'not-signed-in':
+      return `You're not signed in, so the wizard minted a 14-day anonymous demo JWT.`;
+    case 'access-token-expired-no-refresh':
+      return `Your Auth0 access token has expired and there's no refresh token on file to recover with, so the wizard fell back to an anonymous demo JWT.`;
+    case 'refresh-failed':
+      return `The wizard tried to refresh your Auth0 access token and the refresh call failed (network error, or Auth0 rejected the refresh token), so it fell back to an anonymous demo JWT.`;
+    case 'user-license-fetch-failed':
+      return `Auth0 sign-in succeeded, but the \`/api/v1/license\` call to mint a user-scoped JWT failed (typically a transient gateway error), so the wizard fell back to an anonymous demo JWT.`;
+    case 'signed-in-user':
+    case 'refreshed-then-user':
+    case undefined:
+      // Reason absent (or, defensively, a "user license minted" reason
+      // that shouldn't appear in this branch). Use the boolean to pick
+      // the previously-shipped phrasing.
+      return isSignedInFallback
+        ? `You're signed in, but the wizard fell back to an anonymous demo license — usually because the sign-in was done via pasted API key, which doesn't give us the Auth0 access token needed to mint a user-scoped JWT.`
+        : `You're not signed in, so the wizard minted a 14-day anonymous demo JWT.`;
+  }
 }
 
 // ── Plan rendering ──
