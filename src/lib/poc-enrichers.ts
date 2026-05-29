@@ -39,6 +39,32 @@ export interface EnrichableForPoc {
   recommendedAction: 'mute' | 'sample' | 'keep';
   sampleRate: number;
   reasoning: string;
+  /** Per-event timestamps from the SIEM pull, used for first-seen + growth signals. */
+  firstSeenMs?: number;
+  lastSeenMs?: number;
+  eventsByHour?: Record<number, number>;
+}
+
+/**
+ * Pattern emergence shape, derived from `firstSeenMs / lastSeenMs /
+ * eventsByHour` against the pulled window boundaries.
+ */
+export interface PatternEmergence {
+  /** ms since the pattern's first occurrence in the pulled window. */
+  ageInWindowMs: number;
+  /** ms span from first to last occurrence in the pulled window. */
+  durationMs: number;
+  /**
+   * Category derived from emergence + duration:
+   *   - `new` — appeared within the last 24h of the window
+   *   - `growing` — events/hr in last 24h ≥ 2x the window's average events/hr
+   *   - `stable` — fired throughout the window, no recent surge
+   *   - `recent_burst` — entire pattern fits in <40% of the window
+   *   - `unknown` — no timestamps available
+   */
+  category: 'new' | 'growing' | 'stable' | 'recent_burst' | 'unknown';
+  /** Ratio of events/hr in last 24h vs the window's average events/hr. */
+  accelerationRatio: number;
 }
 
 /** Slot with the highest distinct-value count for a pattern. */
@@ -79,6 +105,13 @@ export interface PocEnrichment {
   dependencyCount: number | null;
   /** Source of the dep-check result (or `null` when not run for this pattern). */
   dependencyChecked: boolean;
+  /**
+   * Emergence shape computed from per-event timestamps within the pulled
+   * window — `new` / `growing` / `stable` / `recent_burst` / `unknown`.
+   * Together with `accelerationRatio` this is the longitudinal signal
+   * that an unaided agent can't compute from a small sample.
+   */
+  emergence: PatternEmergence | null;
 }
 
 /**
@@ -159,6 +192,65 @@ export function detectRedundancyPairs(
 }
 
 /**
+ * Compute the pattern's emergence shape inside the pulled window. The
+ * window edges come from the caller — the pull layer knows when it
+ * started and ended; the per-event timestamps tell us where this
+ * pattern fired relative to those edges. Returns `null` when no
+ * timestamps are available (paste-Lambda fallback, older SIEM
+ * connectors, CloudWatch events without `timestamp` field, etc.).
+ *
+ * Categories:
+ *   - `new`            — first_seen within the last 24h of the window
+ *                        (pattern showed up recently — incident signal)
+ *   - `growing`        — last-24h rate >= 2x the window's average rate
+ *                        (pattern is accelerating)
+ *   - `stable`         — fired throughout the window, no recent surge
+ *                        (head-of-tail noise, safe sample/mute candidate)
+ *   - `recent_burst`   — entire activity fits in <40% of the window
+ *                        (transient, not steady-state — check correlation)
+ *   - `unknown`        — no timestamps in the pull
+ */
+export function computeEmergence(
+  p: { firstSeenMs?: number; lastSeenMs?: number; eventsByHour?: Record<number, number>; count: number },
+  windowStartMs: number,
+  windowEndMs: number,
+): PatternEmergence {
+  if (p.firstSeenMs === undefined || p.lastSeenMs === undefined) {
+    return { ageInWindowMs: 0, durationMs: 0, category: 'unknown', accelerationRatio: 0 };
+  }
+  const ageInWindowMs = windowEndMs - p.firstSeenMs;
+  const durationMs = p.lastSeenMs - p.firstSeenMs;
+  const windowSpanMs = Math.max(1, windowEndMs - windowStartMs);
+  const last24hStart = windowEndMs - 24 * 3_600_000;
+
+  // Last-24h event count from the per-hour buckets.
+  let last24hCount = 0;
+  if (p.eventsByHour) {
+    const last24hBucketStart = Math.floor(last24hStart / 3_600_000);
+    for (const [bucket, count] of Object.entries(p.eventsByHour)) {
+      if (Number(bucket) >= last24hBucketStart) last24hCount += count;
+    }
+  }
+
+  const windowAvgPerHour = p.count / (windowSpanMs / 3_600_000);
+  const last24hPerHour = last24hCount / 24;
+  const accelerationRatio = windowAvgPerHour > 0 ? last24hPerHour / windowAvgPerHour : 0;
+
+  let category: PatternEmergence['category'];
+  if (p.firstSeenMs >= last24hStart) {
+    category = 'new';
+  } else if (accelerationRatio >= 2.0 && last24hCount >= 10) {
+    category = 'growing';
+  } else if (durationMs < windowSpanMs * 0.4) {
+    category = 'recent_burst';
+  } else {
+    category = 'stable';
+  }
+
+  return { ageInWindowMs, durationMs, category, accelerationRatio };
+}
+
+/**
  * Refine the recommended action by folding in dependency-check
  * results + severity. The existing renderer logic returns mute / sample
  * / keep purely from cost-tier. This refiner adds:
@@ -211,6 +303,13 @@ export function enrichForPoc(
     dependencyByIdentity?: Map<string, number>;
     /** Per-identity first-seen ages from engine, when pre-computed. */
     firstSeenByIdentity?: Map<string, number>;
+    /**
+     * Window boundaries of the SIEM pull, in epoch ms. When set, each
+     * pattern's `emergence` field is computed against these bounds. When
+     * omitted, emergence falls back to `unknown`.
+     */
+    windowStartMs?: number;
+    windowEndMs?: number;
   } = {},
 ): { enrichments: PocEnrichment[]; clusters: IncidentCluster[]; redundancyPairs: RedundancyPair[] } {
   const incidentTopN = opts.incidentTopN ?? 20;
@@ -246,14 +345,25 @@ export function enrichForPoc(
     const topSlot = computeTopSlot(p.variables, p.count);
     const dependencyCount = opts.dependencyByIdentity?.get(p.identity) ?? null;
     const dependencyChecked = opts.dependencyByIdentity?.has(p.identity) ?? false;
+    const emergence =
+      opts.windowStartMs !== undefined && opts.windowEndMs !== undefined
+        ? computeEmergence(
+            { firstSeenMs: p.firstSeenMs, lastSeenMs: p.lastSeenMs, eventsByHour: p.eventsByHour, count: p.count },
+            opts.windowStartMs,
+            opts.windowEndMs,
+          )
+        : null;
     return {
       incidentClusterId: identityToCluster.get(p.identity) ?? null,
       topSlot,
       redundantWith: identityToRedundant.get(p.identity) ?? [],
-      firstSeenAgeSeconds: opts.firstSeenByIdentity?.get(p.identity) ?? null,
+      firstSeenAgeSeconds:
+        opts.firstSeenByIdentity?.get(p.identity) ??
+        (emergence && emergence.ageInWindowMs > 0 ? Math.floor(emergence.ageInWindowMs / 1000) : null),
       refinedAction: refineAction(p, dependencyCount),
       dependencyCount,
       dependencyChecked,
+      emergence,
     };
   });
 

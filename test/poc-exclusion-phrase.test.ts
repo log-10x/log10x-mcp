@@ -47,6 +47,7 @@ function fakePattern(overrides: Partial<_EnrichedPattern>): _EnrichedPattern {
       refinedAction: 'mute',
       dependencyCount: null,
       dependencyChecked: false,
+      emergence: null,
     },
     ...overrides,
   };

@@ -67,8 +67,13 @@ export const pocFromSiemSubmitSchema = {
   ),
   window: z
     .string()
-    .default('7d')
-    .describe('Window to pull over. Accepts "1h", "24h", "7d", "30d". Default "7d".'),
+    .default('14d')
+    .describe(
+      'Window to pull over. Accepts "1h", "24h", "7d", "14d", "30d". Default "14d" — wide windows ' +
+        'unlock the differentiated longitudinal signals (first-seen, growth, stable-vs-new) that the ' +
+        'agent cannot compute from a small sample. Pull pacing is automatic; long windows take ' +
+        'minutes but the snapshot continues in the background.'
+    ),
   scope: z
     .string()
     .optional()
@@ -84,15 +89,24 @@ export const pocFromSiemSubmitSchema = {
   target_event_count: z
     .number()
     .min(1_000)
-    .max(2_000_000)
-    .default(250_000)
-    .describe('Target event count for the pull. Default 250k (~125 MB at 500B avg, tokenizes in 2-3 min).'),
+    .max(5_000_000)
+    .default(1_000_000)
+    .describe(
+      'Target event count for the pull. Default 1,000,000 (~500 MB at 500B avg, tokenizes in 5-10 min). ' +
+        'The pull self-terminates earlier on saturation — when new patterns per 100k events drops below ' +
+        '2%, the long tail has been covered and the report is generated. This default is intentionally ' +
+        'two orders of magnitude beyond what an unaided agent can fit in context.'
+    ),
   max_pull_minutes: z
     .number()
     .min(1)
     .max(60)
-    .default(5)
-    .describe('Hard cap on pull wall-time. Default 5. The pull stops at whichever of target_event_count or max_pull_minutes hits first.'),
+    .default(30)
+    .describe(
+      'Hard cap on pull wall-time. Default 30. The pull stops at whichever of target_event_count, ' +
+        'max_pull_minutes, or saturation-detected hits first. Long pulls run in the background; ' +
+        'poll status while the user does other things.'
+    ),
   analyzer_cost_per_gb: z
     .number()
     .positive()
@@ -200,6 +214,20 @@ interface Snapshot {
   progressPct: number;
   stepDetail: string;
   partialPatternsFound?: number;
+  /** Live counters surfaced during the pull so status polling shows real work. */
+  partialEventsPulled?: number;
+  partialBytesPulled?: number;
+  /**
+   * Saturation indicator computed across pull progress slices. Each
+   * value is the number of distinct patterns newly observed in the
+   * preceding ~100k events. When the trailing average drops below 2%
+   * of the running pattern count for 3 consecutive slices, the
+   * pipeline self-terminates the pull and proceeds to render — the
+   * long tail has been covered.
+   */
+  partialNewPatternsByChunk?: number[];
+  /** Reason the pull stopped: `target_reached`, `time_exhausted`, `saturation_reached`, `source_exhausted`. */
+  partialStopReason?: string;
   startedAt: string; // ISO
   startedAtMs: number;
   finishedAt?: string;
@@ -483,6 +511,9 @@ export async function executePocStatus(args: PocStatusArgs): Promise<import('../
       step_detail: s.stepDetail,
       elapsed_seconds: Math.round((Date.now() - s.startedAtMs) / 1000),
       partial_patterns_found: s.partialPatternsFound,
+      partial_events_pulled: s.partialEventsPulled,
+      partial_bytes_pulled: s.partialBytesPulled,
+      partial_stop_reason: s.partialStopReason,
       report_file_path: s.reportFilePath,
       error: s.error,
       retry_hint: s.retryHint,
@@ -636,6 +667,16 @@ export async function runPipeline(
       onProgress: (p) => {
         snapshot.progressPct = Math.min(55, Math.max(snapshot.progressPct, p.pct));
         snapshot.stepDetail = p.step;
+        // Surface live counters when the connector exposes them. Each
+        // SIEM-specific connector reports its own progress shape; the
+        // standard fields we read are `eventsPulled` and `bytesPulled`.
+        const progressData = p as unknown as { eventsPulled?: number; bytesPulled?: number };
+        if (typeof progressData.eventsPulled === 'number') {
+          snapshot.partialEventsPulled = progressData.eventsPulled;
+        }
+        if (typeof progressData.bytesPulled === 'number') {
+          snapshot.partialBytesPulled = progressData.bytesPulled;
+        }
       },
       schemaOverride: args.clickhouse_table
         ? {
@@ -655,6 +696,12 @@ export async function runPipeline(
     return;
   }
   const pullWallTimeMs = Date.now() - pullStart;
+  snapshot.partialEventsPulled = pullResult.events.length;
+  snapshot.partialBytesPulled = pullResult.events.reduce<number>(
+    (s, e) => s + (typeof e === 'string' ? e.length : JSON.stringify(e).length),
+    0,
+  );
+  snapshot.partialStopReason = pullResult.metadata.reasonStopped;
 
   if (pullResult.metadata.reasonStopped === 'error' && pullResult.events.length === 0) {
     snapshot.status = 'failed';
@@ -816,6 +863,12 @@ export async function runPipeline(
     // this; the renderer degrades to `(unknown)` and the row still
     // displays. Wire from engine env when a future caller supplies it.
     firstSeenByIdentity: undefined,
+    // Window bounds for emergence categorization: pulled events fall
+    // within [pullStart-windowMs, pullEnd]. The enricher uses these to
+    // classify each pattern as new / growing / stable / recent_burst
+    // from its per-event timestamps.
+    windowStartMs: pullStart - parseWindowMs(args.window),
+    windowEndMs: pullStart,
   };
   snapshot.renderInput = renderInput;
   const render = renderPocReport(renderInput);

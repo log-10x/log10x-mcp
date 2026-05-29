@@ -79,6 +79,17 @@ export interface ExtractedPattern {
   sampleEvent: string;
   /** Per-slot captured values (slot name or positional index → distinct values observed). */
   variables: Record<string, string[]>;
+  /** Epoch ms of the earliest event seen in the pulled window. `undefined` when no envelope timestamps were available. */
+  firstSeenMs?: number;
+  /** Epoch ms of the latest event seen in the pulled window. */
+  lastSeenMs?: number;
+  /**
+   * Per-hour event counts within the pulled window. Keyed by epoch-hour
+   * (Math.floor(timestampMs / 3_600_000)). Used by `poc-enrichers` to
+   * compute growth rate, last-24h-vs-window-average acceleration, and
+   * a 24-bucket trajectory.
+   */
+  eventsByHour?: Record<number, number>;
 }
 
 export interface ExtractedPatterns {
@@ -201,6 +212,9 @@ export async function extractPatterns(
     lineIndices: number[];
     services: Map<string, number>;
     severities: Map<string, number>;
+    firstSeenMs?: number;
+    lastSeenMs?: number;
+    eventsByHour: Map<number, number>;
     // Reporter-tier message_pattern + tenx_hash, read directly off the
     // engine's anchored encoded line (`pattern=,<symbolMessage>,patternHash=,<tenxHash>`).
     // Per-template they're constant; we just keep the first non-empty.
@@ -219,6 +233,7 @@ export async function extractPatterns(
       lineIndices: [],
       services: new Map<string, number>(),
       severities: new Map<string, number>(),
+      eventsByHour: new Map<number, number>(),
     };
     rec.count += 1;
     // Measured encoded-line bytes for this event (the `~hash,val,val,...`
@@ -242,6 +257,13 @@ export async function extractPatterns(
     const enr = i < enrichments.length ? enrichments[i] : undefined;
     if (enr?.service) rec.services.set(enr.service, (rec.services.get(enr.service) || 0) + 1);
     if (enr?.severity) rec.severities.set(enr.severity, (rec.severities.get(enr.severity) || 0) + 1);
+    if (typeof enr?.timestampMs === 'number') {
+      const ts = enr.timestampMs;
+      if (rec.firstSeenMs === undefined || ts < rec.firstSeenMs) rec.firstSeenMs = ts;
+      if (rec.lastSeenMs === undefined || ts > rec.lastSeenMs) rec.lastSeenMs = ts;
+      const hourBucket = Math.floor(ts / 3_600_000);
+      rec.eventsByHour.set(hourBucket, (rec.eventsByHour.get(hourBucket) || 0) + 1);
+    }
 
     const tpl = mergedTemplates.get(ev.templateHash);
     for (let s = 0; s < ev.values.length; s++) {
@@ -302,6 +324,9 @@ export async function extractPatterns(
       encodedBytes: rec.encodedBytes,
       sampleEvent: rec.sampleEvent,
       variables,
+      firstSeenMs: rec.firstSeenMs,
+      lastSeenMs: rec.lastSeenMs,
+      eventsByHour: rec.eventsByHour.size > 0 ? Object.fromEntries(rec.eventsByHour) : undefined,
     });
   }
 
@@ -376,6 +401,24 @@ function mergeExtractedPatterns(group: ExtractedPattern[]): ExtractedPattern {
       variables[slot] = Array.from(merged).slice(0, 20);
     }
   }
+  // Merge first/last-seen across the group; union the per-hour buckets.
+  let firstSeenMs: number | undefined;
+  let lastSeenMs: number | undefined;
+  const mergedEventsByHour: Record<number, number> = {};
+  for (const p of group) {
+    if (p.firstSeenMs !== undefined && (firstSeenMs === undefined || p.firstSeenMs < firstSeenMs)) {
+      firstSeenMs = p.firstSeenMs;
+    }
+    if (p.lastSeenMs !== undefined && (lastSeenMs === undefined || p.lastSeenMs > lastSeenMs)) {
+      lastSeenMs = p.lastSeenMs;
+    }
+    if (p.eventsByHour) {
+      for (const [bucket, count] of Object.entries(p.eventsByHour)) {
+        const k = Number(bucket);
+        mergedEventsByHour[k] = (mergedEventsByHour[k] || 0) + count;
+      }
+    }
+  }
   return {
     hash: head.hash,
     symbolMessage: head.symbolMessage,
@@ -388,6 +431,9 @@ function mergeExtractedPatterns(group: ExtractedPattern[]): ExtractedPattern {
     encodedBytes: group.reduce((s, p) => s + (p.encodedBytes ?? 0), 0),
     sampleEvent: head.sampleEvent,
     variables,
+    firstSeenMs,
+    lastSeenMs,
+    eventsByHour: Object.keys(mergedEventsByHour).length > 0 ? mergedEventsByHour : undefined,
   };
 }
 
@@ -538,6 +584,8 @@ interface EnvelopeEnrichment {
   severity?: string;
   namespace?: string;
   pod?: string;
+  /** Event timestamp in epoch milliseconds. Used to compute first-seen / last-seen / growth per pattern. */
+  timestampMs?: number;
 }
 
 /**
@@ -565,6 +613,35 @@ function extractEnrichmentFromEnvelope(obj: Record<string, unknown>): EnvelopeEn
     if (!out.service && typeof attrs.service === 'string') out.service = attrs.service;
     if (!out.severity && typeof attrs.status === 'string') out.severity = attrs.status;
   }
+
+  // Timestamp extraction — each SIEM puts the event time somewhere different:
+  //   Datadog: top-level `timestamp` (epoch ms) or `attributes.timestamp` (ISO 8601)
+  //   Splunk: `_time` (ISO 8601)
+  //   CloudWatch: `timestamp` (epoch ms) directly
+  //   Elasticsearch: `@timestamp` (ISO 8601)
+  //   Azure: `TimeGenerated` (ISO 8601)
+  //   GCP: `timestamp` (ISO 8601)
+  //   Sumo: `_messagetime` (epoch ms)
+  const tryParseTs = (v: unknown): number | undefined => {
+    if (typeof v === 'number' && v > 0) {
+      // Guess s vs ms: epoch ms for 2001+ is > 1e12; below that is seconds.
+      return v < 1e12 ? v * 1000 : v;
+    }
+    if (typeof v === 'string' && v.length > 0) {
+      const parsed = Date.parse(v);
+      return Number.isFinite(parsed) ? parsed : undefined;
+    }
+    return undefined;
+  };
+  out.timestampMs =
+    tryParseTs(obj.timestamp) ??
+    tryParseTs(obj._time) ??
+    tryParseTs(obj['@timestamp']) ??
+    tryParseTs(obj.TimeGenerated) ??
+    tryParseTs(obj._messagetime) ??
+    (obj.attributes && typeof obj.attributes === 'object'
+      ? tryParseTs((obj.attributes as Record<string, unknown>).timestamp)
+      : undefined);
 
   // Fluent-bit / k8s envelope — check BEFORE the SIEM-specific fallbacks
   // (Splunk sourcetype, Azure role name) because when the envelope is
@@ -608,7 +685,7 @@ function extractEnrichmentFromEnvelope(obj: Record<string, unknown>): EnvelopeEn
 
   // CloudWatch events are `{ timestamp, message, ingestionTime }`. If the
   // message itself is JSON (fluent-bit-shaped), descend into it.
-  if (!out.service && typeof obj.message === 'string') {
+  if (typeof obj.message === 'string') {
     const msg = obj.message.trim();
     if (msg.startsWith('{') && msg.endsWith('}')) {
       try {
@@ -618,6 +695,7 @@ function extractEnrichmentFromEnvelope(obj: Record<string, unknown>): EnvelopeEn
         if (nested.severity && !out.severity) out.severity = nested.severity;
         if (nested.namespace && !out.namespace) out.namespace = nested.namespace;
         if (nested.pod && !out.pod) out.pod = nested.pod;
+        if (!out.timestampMs && nested.timestampMs) out.timestampMs = nested.timestampMs;
       } catch {
         // not JSON — ignore
       }

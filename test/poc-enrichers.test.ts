@@ -16,6 +16,7 @@ import {
   detectRedundancyPairs,
   refineAction,
   enrichForPoc,
+  computeEmergence,
   type EnrichableForPoc,
 } from '../src/lib/poc-enrichers.js';
 
@@ -228,4 +229,91 @@ test('enrichForPoc end-to-end on a 5-pattern fixture', () => {
 
   // transaction_complete + redundant_with should include charge_request_received.
   assert.ok(enrichments[3].redundantWith.includes('charge_request_received'));
+});
+
+// ── Emergence categorization ────────────────────────────────────────
+
+test('computeEmergence returns unknown when timestamps are missing', () => {
+  const result = computeEmergence({ count: 100 }, 0, 14 * 86400 * 1000);
+  assert.equal(result.category, 'unknown');
+  assert.equal(result.ageInWindowMs, 0);
+});
+
+test('computeEmergence marks pattern NEW when first-seen is within last 24h', () => {
+  const windowEnd = 14 * 86400 * 1000;
+  const windowStart = 0;
+  const lastHour = windowEnd - 3_600_000;
+  const result = computeEmergence(
+    { firstSeenMs: lastHour, lastSeenMs: windowEnd, eventsByHour: { [Math.floor(lastHour / 3_600_000)]: 100 }, count: 100 },
+    windowStart,
+    windowEnd,
+  );
+  assert.equal(result.category, 'new');
+});
+
+test('computeEmergence marks pattern GROWING when last-24h rate is 2x window average', () => {
+  const windowEnd = 14 * 86400 * 1000; // 14 days
+  const windowStart = 0;
+  // 14-day average: 10 events/hr. Last 24h: 100 events/hr (10x acceleration).
+  const eventsByHour: Record<number, number> = {};
+  for (let h = 0; h < 14 * 24 - 24; h++) eventsByHour[h] = 5; // first 13 days, low rate
+  const last24hBucket = Math.floor((windowEnd - 24 * 3_600_000) / 3_600_000);
+  for (let h = 0; h < 24; h++) eventsByHour[last24hBucket + h] = 200; // last 24h, high rate
+  const totalCount = Object.values(eventsByHour).reduce((s, n) => s + n, 0);
+  const result = computeEmergence(
+    {
+      firstSeenMs: windowStart + 3_600_000, // started early in window, not NEW
+      lastSeenMs: windowEnd,
+      eventsByHour,
+      count: totalCount,
+    },
+    windowStart,
+    windowEnd,
+  );
+  assert.equal(result.category, 'growing');
+  assert.ok(result.accelerationRatio >= 2.0);
+});
+
+test('computeEmergence marks pattern STABLE when fires throughout the window', () => {
+  const windowEnd = 14 * 86400 * 1000;
+  const windowStart = 0;
+  const eventsByHour: Record<number, number> = {};
+  for (let h = 0; h < 14 * 24; h++) eventsByHour[h] = 10; // steady rate
+  const result = computeEmergence(
+    {
+      firstSeenMs: windowStart + 60_000,
+      lastSeenMs: windowEnd - 60_000,
+      eventsByHour,
+      count: 14 * 24 * 10,
+    },
+    windowStart,
+    windowEnd,
+  );
+  assert.equal(result.category, 'stable');
+});
+
+test('computeEmergence marks pattern RECENT_BURST when activity fits in <40% of window', () => {
+  const windowEnd = 14 * 86400 * 1000;
+  const windowStart = 0;
+  // 24h burst centered ~5 days back. Activity ends well before the
+  // last-24h boundary, so last-24h count is 0 (not 'growing') and the
+  // first-seen is not within last 24h (not 'new'). Duration ~24h /
+  // 14d ~7% of window → category is recent_burst.
+  const burstStart = windowEnd - 5 * 86400 * 1000;
+  const burstEnd = burstStart + 86400 * 1000;
+  const eventsByHour: Record<number, number> = {};
+  for (let h = 0; h < 24; h++) {
+    eventsByHour[Math.floor(burstStart / 3_600_000) + h] = 20;
+  }
+  const result = computeEmergence(
+    {
+      firstSeenMs: burstStart,
+      lastSeenMs: burstEnd,
+      eventsByHour,
+      count: 24 * 20,
+    },
+    windowStart,
+    windowEnd,
+  );
+  assert.equal(result.category, 'recent_burst');
 });

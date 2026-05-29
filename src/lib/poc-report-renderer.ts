@@ -94,6 +94,14 @@ export interface RenderInput {
    * Otherwise the column reads `(unknown)` — a degraded, honest cell.
    */
   firstSeenByIdentity?: Map<string, number>;
+  /**
+   * Epoch-ms window bounds of the SIEM pull. When set, the renderer
+   * passes them to the enricher so per-pattern emergence (new / growing
+   * / stable / recent_burst) is computed from per-event timestamps
+   * inside the window rather than relying on engine history.
+   */
+  windowStartMs?: number;
+  windowEndMs?: number;
 }
 
 export interface RenderResult {
@@ -433,6 +441,17 @@ export function renderPocSummary(input: RenderInput, topN = 5): string {
   lines.push(`## POC — done. ${SIEM_DISPLAY_NAMES[input.siem]}, ${input.window} window.`);
   lines.push('');
 
+  // Scale-brag line + emergence categorization. The agent reading the
+  // report sees what was analyzed AT WHAT SCALE — the differentiator
+  // against an unaided AI that pulled a 5,000-line sample.
+  lines.push(renderScaleHeader(input, patterns));
+  lines.push('');
+  const emergence = countEmergence(patterns);
+  if (emergence.hasTimestamps) {
+    lines.push(renderEmergenceSummary(emergence));
+    lines.push('');
+  }
+
   if (input.totalDailyGb && input.totalDailyGb > 0) {
     const annualCost = projectBilling(totalCost, input.windowHours, 24 * 365);
     const annualSavings = projectBilling(projectedSavings, input.windowHours, 24 * 365);
@@ -522,7 +541,7 @@ export function renderPocSummary(input: RenderInput, topN = 5): string {
       const cluster = p.poc.incidentClusterId !== null ? ` 🔗${p.poc.incidentClusterId + 1}` : '';
       const action = renderActionCell(p);
       const slot = renderSlotCell(p);
-      const age = renderAgeCell(p);
+      const age = renderEmergenceCell(p);
       lines.push(
         `| ${i + 1} | ${name}${flag}${cluster} | ${p.service || '—'} | ${p.severity || '—'} | ${fmtPct(p.pctOfTotal * 100)} | ${action} | ${slot} | ${age} | ${fmtDollar(annualSavings)} |`,
       );
@@ -1359,6 +1378,7 @@ function enrichPatterns(input: RenderInput): EnrichedPattern[] {
         refinedAction: action,
         dependencyCount: null,
         dependencyChecked: false,
+        emergence: null,
       },
     };
   });
@@ -1374,6 +1394,8 @@ function enrichPatterns(input: RenderInput): EnrichedPattern[] {
   const { enrichments } = enrichForPoc(enriched, {
     dependencyByIdentity: input.dependencyByIdentity,
     firstSeenByIdentity: input.firstSeenByIdentity,
+    windowStartMs: input.windowStartMs,
+    windowEndMs: input.windowEndMs,
   });
   for (let i = 0; i < enriched.length; i++) {
     enriched[i].poc = enrichments[i];
@@ -1396,6 +1418,8 @@ function enrichPatternsWithSections(input: RenderInput): {
   const { clusters, redundancyPairs } = enrichForPoc(patterns, {
     dependencyByIdentity: input.dependencyByIdentity,
     firstSeenByIdentity: input.firstSeenByIdentity,
+    windowStartMs: input.windowStartMs,
+    windowEndMs: input.windowEndMs,
   });
   return { patterns, clusters, redundancyPairs };
 }
@@ -1725,6 +1749,86 @@ function truncate(s: string, max: number): string {
   if (!s) return '';
   const flat = s.replace(/\s+/g, ' ');
   return flat.length <= max ? flat : flat.slice(0, max - 1) + '…';
+}
+
+/**
+ * Render the scale-brag header — one line summarizing what 10x analyzed.
+ * Numbers come straight from the pulled extraction (events, bytes,
+ * patterns, window). The agent surfacing this report shows the prospect
+ * that we operated at a scale unaided tooling can't reach.
+ */
+function renderScaleHeader(input: RenderInput, patterns: EnrichedPattern[]): string {
+  const events = input.extraction.totalEvents.toLocaleString();
+  const bytes = fmtBytes(input.extraction.totalBytes);
+  const patternCount = patterns.length.toLocaleString();
+  return `Analyzed **${events} events** (${bytes}) across ${input.window}, surfacing **${patternCount} distinct patterns**.`;
+}
+
+interface EmergenceTally {
+  hasTimestamps: boolean;
+  newCount: number;
+  growingCount: number;
+  stableCount: number;
+  burstCount: number;
+  total: number;
+}
+
+/**
+ * Tally each emergence category across the enriched patterns. Used to
+ * render the "of these N patterns: X new, Y growing, Z stable" line
+ * that frames the report as a longitudinal analysis rather than a
+ * single snapshot.
+ */
+function countEmergence(patterns: EnrichedPattern[]): EmergenceTally {
+  const out: EmergenceTally = {
+    hasTimestamps: false,
+    newCount: 0,
+    growingCount: 0,
+    stableCount: 0,
+    burstCount: 0,
+    total: patterns.length,
+  };
+  for (const p of patterns) {
+    const e = p.poc.emergence;
+    if (!e || e.category === 'unknown') continue;
+    out.hasTimestamps = true;
+    if (e.category === 'new') out.newCount++;
+    else if (e.category === 'growing') out.growingCount++;
+    else if (e.category === 'stable') out.stableCount++;
+    else if (e.category === 'recent_burst') out.burstCount++;
+  }
+  return out;
+}
+
+function renderEmergenceSummary(t: EmergenceTally): string {
+  const parts: string[] = [];
+  if (t.newCount > 0) parts.push(`**${t.newCount} new** (last 24h, incident signal)`);
+  if (t.growingCount > 0) parts.push(`**${t.growingCount} growing** (≥2x window average, regression candidates)`);
+  if (t.stableCount > 0) parts.push(`${t.stableCount} stable (head-of-tail noise, sample/mute candidates)`);
+  if (t.burstCount > 0) parts.push(`${t.burstCount} bursty (transient, check correlation)`);
+  if (parts.length === 0) return '';
+  return `Of those patterns: ${parts.join('; ')}.`;
+}
+
+/**
+ * Render the Age cell content — combines first-seen-age (from engine
+ * or from the pulled sample's timestamps) with an emergence badge
+ * (NEW / GROWING / STABLE / BURST) so the agent sees the longitudinal
+ * shape at a glance. Falls back to the prior `(unknown)` text when no
+ * timestamp data is available.
+ */
+function renderEmergenceCell(p: EnrichedPattern): string {
+  const e = p.poc.emergence;
+  if (!e || e.category === 'unknown') {
+    return p.poc.firstSeenAgeSeconds !== null
+      ? fmtAge(p.poc.firstSeenAgeSeconds)
+      : '(unknown)';
+  }
+  const ageStr = e.ageInWindowMs > 0 ? fmtAge(Math.floor(e.ageInWindowMs / 1000)) : '<1s ago';
+  if (e.category === 'new') return `**NEW** (${ageStr})`;
+  if (e.category === 'growing') return `**GROWING** ${e.accelerationRatio.toFixed(1)}× (${ageStr})`;
+  if (e.category === 'stable') return `STABLE (${ageStr})`;
+  return `BURST (${ageStr})`;
 }
 
 /**
