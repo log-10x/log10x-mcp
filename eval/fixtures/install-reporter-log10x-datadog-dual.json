@@ -1,0 +1,75 @@
+{
+  "id": "install-reporter-log10x-datadog-dual",
+  "title": "Install advisor — Reporter dual-shipping to Log10x SaaS + Datadog",
+  "description": "Reporter DaemonSet emitting TenXSummary metrics to TWO backends in parallel: Log10x SaaS (no creds needed, just license JWT) AND Datadog (needs a K8s Secret name). Exercises the multi-backend path of the wizard, including the backend_credentials map only populating the non-`log10x` entry. Canonical chain: discover_env → advise_install (app=reporter, backends=['log10x','datadog'], backend_credentials.datadog only).",
+  "prompt": "Install the Log10x Reporter on this cluster. We want the engine metrics to ship to BOTH the Log10x SaaS backend AND our existing Datadog (so we can keep our current dashboards while we ramp up on Log10x). The Datadog credentials are in a Kubernetes Secret called `datadog-credentials`.",
+  "initial_tool": {
+    "tool": "log10x_discover_env",
+    "args": { "skip_aws": true },
+    "reason": "Install chains start at discover_env."
+  },
+  "tool_arg_defaults": {
+    "api_key": "{{env.apiKey}}"
+  },
+  "wizard_answers": {
+    "app": "reporter",
+    "backends": ["log10x", "datadog"],
+    "backend_credentials": {
+      "datadog": { "secretName": "datadog-credentials" }
+    },
+    "airgapped": false
+  },
+  "expected_sequence": {
+    "must_include": ["log10x_discover_env", "log10x_advise_install"],
+    "must_not_include": ["log10x_advise_retriever"],
+    "tolerance": 4
+  },
+  "ground_truth": [
+    {
+      "matcher_kind": "regex",
+      "description": "discover_env returns a snapshot id",
+      "scope": "tool_result",
+      "tool": "log10x_discover_env",
+      "pattern": "disc-[a-f0-9]{6,}"
+    },
+    {
+      "matcher_kind": "regex",
+      "description": "advise_install was called with a snapshot_id arg",
+      "scope": "tool_call_args",
+      "tool": "log10x_advise_install",
+      "pattern": "\"snapshot_id\"\\s*:\\s*\"disc-"
+    },
+    {
+      "matcher_kind": "regex",
+      "description": "advise_install was called with app='reporter'",
+      "scope": "tool_call_args",
+      "tool": "log10x_advise_install",
+      "pattern": "\"app\"\\s*:\\s*\"reporter\""
+    },
+    {
+      "matcher_kind": "regex",
+      "description": "advise_install was called with backends containing both 'log10x' AND 'datadog'",
+      "scope": "tool_call_args",
+      "tool": "log10x_advise_install",
+      "pattern": "\"backends\"\\s*:\\s*\\[(?=[^\\]]*\"log10x\")(?=[^\\]]*\"datadog\")"
+    },
+    {
+      "matcher_kind": "regex",
+      "description": "advise_install reached a structurally valid wizard outcome",
+      "scope": "tool_result",
+      "tool": "log10x_advise_install",
+      "pattern": "(## Install plan|## Verify|signin_required|license_paste|next_question|helm upgrade)",
+      "flags": "i"
+    }
+  ],
+  "quality_criteria": {
+    "reasoning": 0.6,
+    "value": 0.5,
+    "autonomy": 0.5,
+    "hallucination_max": 0.5
+  },
+  "optimal_steps": 3,
+  "max_steps": 12,
+  "error_policy": "continue",
+  "tags": ["install", "advise-install", "reporter", "multi-backend", "log10x-backend", "datadog-backend", "wizard"]
+}

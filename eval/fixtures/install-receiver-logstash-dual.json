@@ -1,0 +1,76 @@
+{
+  "id": "install-receiver-logstash-dual",
+  "title": "Install advisor — Receiver sidecar in Logstash, dual-shipping Log10x SaaS + Datadog",
+  "description": "Receiver sidecar in a Logstash forwarder, with TenXSummary metrics dual-shipped to BOTH Log10x SaaS and Datadog. Most complex of the install fixtures: combines a non-default forwarder, multi-backend, and a credential entry for the non-`log10x` backend only.",
+  "prompt": "Install the Log10x Receiver as a sidecar in our Logstash forwarder. Send the engine metrics to BOTH the Log10x SaaS backend AND our existing Datadog (so the SRE team keeps their current dashboards while we ramp up Log10x). DD credentials are in a Kubernetes Secret named `datadog-credentials`.",
+  "initial_tool": {
+    "tool": "log10x_discover_env",
+    "args": { "skip_aws": true, "forwarder_hint": "logstash" },
+    "reason": "forwarder_hint overrides demo's fluentd detection so the wizard auto-picks logstash."
+  },
+  "tool_arg_defaults": {
+    "api_key": "{{env.apiKey}}"
+  },
+  "wizard_answers": {
+    "app": "receiver",
+    "forwarder": "logstash",
+    "backends": ["log10x", "datadog"],
+    "backend_credentials": {
+      "datadog": { "secretName": "datadog-credentials" }
+    },
+    "airgapped": false
+  },
+  "expected_sequence": {
+    "must_include": ["log10x_discover_env", "log10x_advise_install"],
+    "must_not_include": ["log10x_advise_retriever"],
+    "tolerance": 4
+  },
+  "ground_truth": [
+    {
+      "matcher_kind": "regex",
+      "description": "discover_env returns a snapshot id",
+      "scope": "tool_result",
+      "tool": "log10x_discover_env",
+      "pattern": "disc-[a-f0-9]{6,}"
+    },
+    {
+      "matcher_kind": "regex",
+      "description": "advise_install was called with a snapshot_id arg",
+      "scope": "tool_call_args",
+      "tool": "log10x_advise_install",
+      "pattern": "\"snapshot_id\"\\s*:\\s*\"disc-"
+    },
+    {
+      "matcher_kind": "regex",
+      "description": "advise_install was called with app='receiver'",
+      "scope": "tool_call_args",
+      "tool": "log10x_advise_install",
+      "pattern": "\"app\"\\s*:\\s*\"receiver\""
+    },
+    {
+      "matcher_kind": "regex",
+      "description": "advise_install was called with backends containing both 'log10x' AND 'datadog'",
+      "scope": "tool_call_args",
+      "tool": "log10x_advise_install",
+      "pattern": "\"backends\"\\s*:\\s*\\[(?=[^\\]]*\"log10x\")(?=[^\\]]*\"datadog\")"
+    },
+    {
+      "matcher_kind": "regex",
+      "description": "advise_install reached a structurally valid wizard outcome",
+      "scope": "tool_result",
+      "tool": "log10x_advise_install",
+      "pattern": "(## Install plan|## Verify|signin_required|license_paste|next_question|helm upgrade)",
+      "flags": "i"
+    }
+  ],
+  "quality_criteria": {
+    "reasoning": 0.6,
+    "value": 0.5,
+    "autonomy": 0.5,
+    "hallucination_max": 0.5
+  },
+  "optimal_steps": 3,
+  "max_steps": 12,
+  "error_policy": "continue",
+  "tags": ["install", "advise-install", "receiver", "logstash-forwarder", "multi-backend", "log10x-backend", "datadog-backend", "wizard"]
+}
