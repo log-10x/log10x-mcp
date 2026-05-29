@@ -24,7 +24,7 @@
  */
 
 import { createHash } from 'crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync, openSync, writeSync, readSync, closeSync } from 'fs';
 import { join } from 'path';
 
 const CACHE_ROOT = process.env.LOG10X_POC_CACHE_DIR || '/tmp/log10x-poc-cache';
@@ -93,27 +93,76 @@ export function hasCachedEvents(dir: string): boolean {
 }
 
 export function writeCachedEvents(dir: string, events: unknown[]): void {
+  // Stream-write per event instead of one giant join + writeFileSync.
+  // V8 has a max string length around 512 MB on 64-bit; large pulls
+  // (400k+ events) overflow when stringified into a single string.
+  // Using openSync + writeSync per chunk avoids that ceiling and the
+  // file remains valid line-delimited JSON.
+  const fd = (() => {
+    try {
+      return openSync(join(dir, EVENTS_FILENAME), 'w');
+    } catch {
+      return -1;
+    }
+  })();
+  if (fd === -1) return;
   try {
-    const lines = events.map((e) => JSON.stringify(e)).join('\n');
-    writeFileSync(join(dir, EVENTS_FILENAME), lines);
+    const CHUNK = 1000;
+    for (let i = 0; i < events.length; i += CHUNK) {
+      const slice = events.slice(i, i + CHUNK);
+      const text = slice.map((e) => JSON.stringify(e)).join('\n') + (i + CHUNK < events.length ? '\n' : '');
+      writeSync(fd, text);
+    }
   } catch {
-    // ignore — cache write failures don't break the pipeline
+    // ignore — partial write is still useful
+  } finally {
+    try { closeSync(fd); } catch { /* ignore */ }
   }
 }
 
 export function readCachedEvents(dir: string): unknown[] {
+  // Stream-read line by line. The single-buffer readFileSync hits V8's
+  // ToLocalChecked limit at ~512 MB; cached 14d pulls of busy clusters
+  // routinely exceed that. We read a chunk at a time, split on
+  // newlines, and JSON-parse per line so the maximum live string is
+  // bounded by buffer size, not file size.
+  const path = join(dir, EVENTS_FILENAME);
+  const out: unknown[] = [];
+  let fd = -1;
   try {
-    const text = readFileSync(join(dir, EVENTS_FILENAME), 'utf8');
-    return text.split('\n').filter(Boolean).map((l) => {
-      try {
-        return JSON.parse(l);
-      } catch {
-        return l; // fall back to raw text for non-JSON lines
-      }
-    });
+    fd = openSync(path, 'r');
   } catch {
-    return [];
+    return out;
   }
+  try {
+    const BUF = Buffer.alloc(1024 * 1024); // 1 MB chunks
+    let leftover = '';
+    while (true) {
+      const n = readSync(fd, BUF, 0, BUF.length, null);
+      if (n <= 0) break;
+      const text = leftover + BUF.subarray(0, n).toString('utf8');
+      let start = 0;
+      for (let i = 0; i < text.length; i++) {
+        if (text.charCodeAt(i) === 10) {
+          const line = text.slice(start, i);
+          if (line) {
+            try { out.push(JSON.parse(line)); } catch { out.push(line); }
+          }
+          start = i + 1;
+        }
+      }
+      leftover = text.slice(start);
+    }
+    // Flush any final line not terminated by a newline.
+    if (leftover) {
+      try { out.push(JSON.parse(leftover)); } catch { out.push(leftover); }
+    }
+  } catch {
+    // partial-read result is still useful
+  } finally {
+    try { closeSync(fd); } catch { /* ignore */ }
+  }
+  return out;
 }
 
 // ── Phase 2: Templater output cache ──

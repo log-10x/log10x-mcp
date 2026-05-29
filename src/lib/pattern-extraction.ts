@@ -220,8 +220,11 @@ export async function extractPatterns(
       for (const [hash, tpl] of parseTemplates(local.templatesJson)) {
         mergedTemplates.set(hash, tpl);
       }
-      mergedEncoded.push(...parseEncoded(local.encodedLog));
-      mergedAggregated.push(...parseAggregated(local.aggregatedCsv));
+      // Avoid `arr.push(...other)` — V8's function-argument limit
+      // (~65k args) overflows on 400k+ event batches with
+      // "Maximum call stack size exceeded". A plain loop scales.
+      for (const ev of parseEncoded(local.encodedLog)) mergedEncoded.push(ev);
+      for (const row of parseAggregated(local.aggregatedCsv)) mergedAggregated.push(row);
       totalWallTimeMs += local.wallTimeMs;
     } catch (e) {
       if (e instanceof DevCliNotInstalledError) throw e;
@@ -246,8 +249,8 @@ export async function extractPatterns(
       for (const [hash, tpl] of parseTemplates(resp['templates.json'])) {
         if (!mergedTemplates.has(hash)) mergedTemplates.set(hash, tpl);
       }
-      mergedEncoded.push(...parseEncoded(resp['encoded.log']));
-      mergedAggregated.push(...parseAggregated(resp['aggregated.csv']));
+      for (const ev of parseEncoded(resp['encoded.log'])) mergedEncoded.push(ev);
+      for (const row of parseAggregated(resp['aggregated.csv'])) mergedAggregated.push(row);
     }
   }
 
@@ -447,8 +450,13 @@ export function collapseBySymbolMessage(patterns: ExtractedPattern[]): Extracted
 function mergeExtractedPatterns(group: ExtractedPattern[]): ExtractedPattern {
   const sorted = [...group].sort((a, b) => b.count - a.count);
   const head = sorted[0];
-  const longestTemplate = group.reduce((longest, p) =>
-    p.template.length > longest.length ? p.template : longest, head.template);
+  // Representative template: pick the highest-count member's template,
+  // not the longest. The longest-wins rule produced snippets that did
+  // not match the user-facing identity (e.g., a Postgres DB error
+  // template winning over a debug-exporter pattern just because the
+  // DB template body had more bytes). The dominant template is the
+  // one downstream consumers should grep against.
+  const representativeTemplate = head.template;
   const variables: Record<string, string[]> = {};
   // Slot-level distinct counts: sum across merged group members. Upper
   // bound only (a value present in more than one member counts twice),
@@ -490,7 +498,7 @@ function mergeExtractedPatterns(group: ExtractedPattern[]): ExtractedPattern {
     hash: head.hash,
     symbolMessage: head.symbolMessage,
     tenxHash: head.tenxHash,
-    template: longestTemplate,
+    template: representativeTemplate,
     severity: head.severity,
     service: head.service,
     count: group.reduce((s, p) => s + p.count, 0),
@@ -741,33 +749,43 @@ function extractEnrichmentFromEnvelope(obj: Record<string, unknown>): EnvelopeEn
   if (!out.namespace && typeof obj.namespace_name_s === 'string') out.namespace = obj.namespace_name_s;
   if (!out.pod && typeof obj.pod_name_s === 'string') out.pod = obj.pod_name_s;
 
-  // CloudWatch raw events expose `logStreamName` like
-  // `kube-apiserver-audit-<32hex>`, `authenticator-<32hex>`, `<app>-<id>`.
-  // The trailing hash is per-pod / per-instance noise; strip it to
-  // recover the service identity that a K8s envelope would have given
-  // us if a fluent-bit forwarder were in the path.
-  if (!out.service && typeof obj.logStreamName === 'string') {
-    const stripped = obj.logStreamName.replace(/-[a-f0-9]{20,}$/i, '');
-    out.service = stripped || obj.logStreamName;
-  }
-
-  // CloudWatch events are `{ timestamp, message, ingestionTime }`. If the
-  // message itself is JSON (fluent-bit-shaped), descend into it.
+  // CloudWatch events are `{ timestamp, message, ingestionTime }`. If
+  // the message itself is JSON (fluent-bit-shaped, fluentd-shaped,
+  // otel-collector-shaped), descend into it FIRST. The nested
+  // payload usually carries `kubernetes.container_name` which is the
+  // true emitter, whereas the outer `logStreamName` is just the
+  // forwarder's daemonset stream (e.g., `tenx-fluentd`). Picking the
+  // emitter is what makes `by_service` rollups and `owning_service`
+  // claims accurate.
   if (typeof obj.message === 'string') {
     const msg = obj.message.trim();
     if (msg.startsWith('{') && msg.endsWith('}')) {
       try {
         const inner = JSON.parse(msg) as Record<string, unknown>;
         const nested = extractEnrichmentFromEnvelope(inner);
-        if (nested.service && !out.service) out.service = nested.service;
+        // Nested service wins over any outer value already set —
+        // the inner k8s envelope is the emitter, the outer is the
+        // shipping layer.
+        if (nested.service) out.service = nested.service;
         if (nested.severity && !out.severity) out.severity = nested.severity;
         if (nested.namespace && !out.namespace) out.namespace = nested.namespace;
         if (nested.pod && !out.pod) out.pod = nested.pod;
         if (!out.timestampMs && nested.timestampMs) out.timestampMs = nested.timestampMs;
       } catch {
-        // not JSON — ignore
+        // not JSON — fall through to logStreamName fallback
       }
     }
+  }
+
+  // CloudWatch raw events expose `logStreamName` like
+  // `kube-apiserver-audit-<32hex>`, `authenticator-<32hex>`, `<app>-<id>`.
+  // The trailing hash is per-pod / per-instance noise; strip it. Used
+  // ONLY as the last-resort fallback when the inner message did not
+  // expose a kubernetes envelope (e.g., events emitted directly by
+  // an AWS-managed agent).
+  if (!out.service && typeof obj.logStreamName === 'string') {
+    const stripped = obj.logStreamName.replace(/-[a-f0-9]{20,}$/i, '');
+    out.service = stripped || obj.logStreamName;
   }
 
   return out;

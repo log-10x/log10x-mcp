@@ -20,6 +20,7 @@ import type { PocEnrichment, RedundancyPair } from './poc-enrichers.js';
 import type { ExtractedPattern } from './pattern-extraction.js';
 import type { SiemId } from './siem/pricing.js';
 import { datadogExclusionForPattern, splunkExclusionForPattern, cloudwatchExclusionForPattern, fluentBitForPattern } from './poc-action-snippets.js';
+import { dollars, ratio, bps, days as roundDays, countRatio } from './poc-round.js';
 
 // ── SIEM compactability map ──
 // Compact mode is licensable / value-relevant only when the SIEM
@@ -168,11 +169,19 @@ export interface PatternOutput {
   };
   emergence: {
     category: 'new' | 'growing' | 'stable' | 'recent_burst' | 'unknown';
-    first_seen_iso: string | null;
-    last_seen_iso: string | null;
-    age_days: number | null;
+    /**
+     * First occurrence of this pattern WITHIN THE STRATIFIED SAMPLE
+     * the connector pulled, not the pattern's true first emission
+     * time. The connector's 24 random sub-windows cover only ~25% of
+     * the requested window, so values here can lag the customer's
+     * actual first-emission by days. Use this for relative ordering,
+     * not as a definitive "this pattern appeared at time T" claim.
+     */
+    first_seen_in_sample_iso: string | null;
+    last_seen_in_sample_iso: string | null;
+    age_in_sample_days: number | null;
     acceleration_ratio: number;
-    duration_days: number | null;
+    duration_in_sample_days: number | null;
     events_by_hour_sparkline: number[] | null;
   };
   top_slot: {
@@ -198,7 +207,13 @@ export interface CodeFixAction {
   applicable: boolean;
   owning_service: string | null;
   bug_hypothesis: string | null;
-  fix_complexity_guess: 'config_change_or_dns_fix' | 'log_level_demotion' | 'rate_limiting' | 'unknown' | null;
+  fix_complexity_guess:
+    | 'config_change_or_dns_fix'
+    | 'log_level_demotion'
+    | 'rate_limiting'
+    | 'inspect_caller_then_demote_or_sample'
+    | 'unknown'
+    | null;
   expected_outcome: 'this_pattern_disappears' | 'this_pattern_drops_significantly' | null;
 }
 
@@ -206,7 +221,8 @@ export interface ExclusionAction {
   applicable: boolean;
   vendor: string | null;
   snippet: string | null;
-  expected_savings_usd_per_month: number;
+  /** Null when applicable=false. Real dollars (rounded to cents) when true. */
+  expected_savings_usd_per_month: number | null;
 }
 
 export interface CompactAction {
@@ -257,9 +273,15 @@ export function buildPocEnvelopeV2(
   }
   const totalPatterns = Math.max(1, input.extraction.patterns.length);
 
-  // Compute total cost (annualized then divided by 12 for monthly).
-  const totalCostPerWindow = enrichedPatterns.reduce((s, p) => s + p.costPerWindow, 0);
-  const monthlyCostUsd = totalCostPerWindow * (24 * 30) / Math.max(0.001, input.windowHours);
+  // Compute total cost. When the caller supplied rawIngestBytes (the
+  // size of the actual SIEM payload, envelope and all), project
+  // monthly cost from that — it matches the customer's bill. When
+  // absent, fall back to summing the templater-side per-pattern
+  // costPerWindow, which understates because it ignores the JSON
+  // envelope bytes around each event.
+  const monthlyCostUsd = input.rawIngestBytes && input.rawIngestBytes > 0 && input.windowHours > 0
+    ? (input.rawIngestBytes / (1024 ** 3)) * input.analyzerCostPerGb * (24 * 30) / input.windowHours
+    : enrichedPatterns.reduce((s, p) => s + p.costPerWindow, 0) * (24 * 30) / Math.max(0.001, input.windowHours);
 
   // Aggregations.
   const aggregates = buildAggregates(enrichedPatterns, redundancyPairs, topN, monthlyCostUsd, windowDurationSeconds);
@@ -303,7 +325,7 @@ export function buildPocEnvelopeV2(
     redundancyOutputs.push({
       pattern_a_index: ai,
       pattern_b_index: bi,
-      count_ratio: pair.ratio,
+      count_ratio: countRatio(pair.ratio),
       min_count: pair.minCount,
       service: topPatterns[ai].service || '(unattributed)',
       hypothesis: inferRedundancyHypothesis(topPatterns[ai].identity, topPatterns[bi].identity),
@@ -412,11 +434,11 @@ function buildAggregates(
     const monthlyCost = agg.cost * (24 * 30) / Math.max(0.001, windowDurationSeconds / 3600);
     byService.push({
       service,
-      monthly_cost_usd: monthlyCost,
+      monthly_cost_usd: dollars(monthlyCost),
       pattern_count: agg.count,
       top_pattern_index: agg.topPatternIndex,
-      approx_bytes_per_sec: agg.bytes / Math.max(1, windowDurationSeconds),
-      share_of_total: monthlyCost / Math.max(0.001, totalMonthlyCostUsd),
+      approx_bytes_per_sec: bps(agg.bytes / Math.max(1, windowDurationSeconds)),
+      share_of_total: ratio(monthlyCost / Math.max(0.001, totalMonthlyCostUsd)),
     });
   }
   byService.sort((a, b) => b.monthly_cost_usd - a.monthly_cost_usd);
@@ -431,14 +453,14 @@ function buildAggregates(
   }
   const bySeverity: Record<string, number> = {};
   if (totalBytes > 0) {
-    for (const [sev, bytes] of bySeverityBytes) bySeverity[sev] = bytes / totalBytes;
+    for (const [sev, bytes] of bySeverityBytes) bySeverity[sev] = ratio(bytes / totalBytes);
   }
 
   return {
     totals: {
-      monthly_cost_usd: totalMonthlyCostUsd,
-      top_n_monthly_cost_usd: topNMonthlyCostUsd,
-      head_concentration: { top_1: top1, top_5: top5, top_15: top15 },
+      monthly_cost_usd: dollars(totalMonthlyCostUsd),
+      top_n_monthly_cost_usd: dollars(topNMonthlyCostUsd),
+      head_concentration: { top_1: ratio(top1), top_5: ratio(top5), top_15: ratio(top15) },
     },
     emergence_tally: emergence,
     by_service: byService,
@@ -470,23 +492,37 @@ function buildPatternOutput(
   }
 
   // Build emergence section.
+  //
+  // Field naming carries an explicit `_in_sample` suffix on the
+  // surfaced-from-sample fields. The previous names (`first_seen_iso`,
+  // `last_seen_iso`, `age_days`, `duration_days`) were misleading on
+  // sampled pulls — they reflected the first and last event in the
+  // STRATIFIED SUB-WINDOWS the connector pulled, not when the pattern
+  // first or last existed in the customer's true log stream. The
+  // explicit suffix tells the host agent that these bounds are
+  // sample-bounded and not authoritative.
   const emergenceCat = p.poc.emergence?.category ?? 'unknown';
   const emergence: PatternOutput['emergence'] = {
     category: emergenceCat,
-    first_seen_iso: p.firstSeenMs ? new Date(p.firstSeenMs).toISOString() : null,
-    last_seen_iso: p.lastSeenMs ? new Date(p.lastSeenMs).toISOString() : null,
-    age_days: p.poc.emergence ? p.poc.emergence.ageInWindowMs / 86_400_000 : null,
-    acceleration_ratio: p.poc.emergence?.accelerationRatio ?? 0,
-    duration_days: p.poc.emergence ? p.poc.emergence.durationMs / 86_400_000 : null,
-    events_by_hour_sparkline: shouldEmitSparkline(emergenceCat) ? buildSparkline(p.eventsByHour, input.windowStartMs, input.windowEndMs, 14) : null,
+    first_seen_in_sample_iso: p.firstSeenMs ? new Date(p.firstSeenMs).toISOString() : null,
+    last_seen_in_sample_iso: p.lastSeenMs ? new Date(p.lastSeenMs).toISOString() : null,
+    age_in_sample_days: p.poc.emergence ? roundDays(p.poc.emergence.ageInWindowMs / 86_400_000) : null,
+    acceleration_ratio: ratio(p.poc.emergence?.accelerationRatio ?? 0),
+    duration_in_sample_days: p.poc.emergence ? roundDays(p.poc.emergence.durationMs / 86_400_000) : null,
+    // Sparkline now emits for stable patterns too — stability over the
+    // window is exactly what a sparkline visualizes best, and the
+    // previous "only new/growing/burst" gate left the highest-cost
+    // patterns with `null`.
+    events_by_hour_sparkline: buildSparkline(p.eventsByHour, input.windowStartMs, input.windowEndMs, 14),
   };
 
-  // Top-slot output.
+  // Top-slot output. distinct_over_event_count is rounded to 3 dp so
+  // values like 0.9995569666986636 stop looking like real precision.
   const topSlot = p.poc.topSlot
     ? {
         name: p.poc.topSlot.slot,
         distinct_count: p.poc.topSlot.distinctCount,
-        distinct_over_event_count: p.poc.topSlot.distinctOverCount,
+        distinct_over_event_count: ratio(p.poc.topSlot.distinctOverCount),
         unbounded: p.poc.topSlot.distinctOverCount >= 0.9,
       }
     : null;
@@ -502,12 +538,12 @@ function buildPatternOutput(
     severity: p.severity ?? null,
     metrics: {
       events_in_window: eventsInWindow,
-      events_per_day_avg: eventsPerDayAvg,
+      events_per_day_avg: Math.round(eventsPerDayAvg),
       events_last_24h: eventsLast24h,
       bytes_in_window: p.bytes,
-      cost_per_month_usd: monthlyCost,
-      cost_per_year_usd: monthlyCost * 12,
-      share_of_total: monthlyCost / Math.max(0.001, totalMonthlyCostUsd),
+      cost_per_month_usd: dollars(monthlyCost),
+      cost_per_year_usd: dollars(monthlyCost * 12),
+      share_of_total: ratio(monthlyCost / Math.max(0.001, totalMonthlyCostUsd)),
     },
     emergence,
     top_slot: topSlot,
@@ -515,11 +551,6 @@ function buildPatternOutput(
     redundancy_partner_indices: [],
     actions,
   };
-}
-
-function shouldEmitSparkline(cat: 'new' | 'growing' | 'stable' | 'recent_burst' | 'unknown'): boolean {
-  // Sparkline only emitted when there's something narratively relevant to look at.
-  return cat === 'new' || cat === 'growing' || cat === 'recent_burst';
 }
 
 function buildSparkline(
@@ -564,13 +595,26 @@ function buildActions(
         expected_outcome: 'this_pattern_disappears',
       };
     }
-    if (/DEBUG|TRACE/.test(sev)) {
+    if (/DEBUG/.test(sev)) {
       return {
         applicable: true,
         owning_service: p.service ?? null,
         bug_hypothesis: 'debug_logging_left_enabled_in_production',
         fix_complexity_guess: 'log_level_demotion',
         expected_outcome: 'this_pattern_disappears',
+      };
+    }
+    if (/TRACE/.test(sev)) {
+      // TRACE-level logs are typically OTel SDK tracer emissions
+      // wrapping the underlying call's severity. The upstream call
+      // may be info / debug — the agent should investigate before
+      // demoting. Recommend trace-sampling instead of log demotion.
+      return {
+        applicable: true,
+        owning_service: p.service ?? null,
+        bug_hypothesis: 'trace_level_emission_from_otel_sdk_wrapping',
+        fix_complexity_guess: 'inspect_caller_then_demote_or_sample',
+        expected_outcome: 'this_pattern_drops_significantly',
       };
     }
     // INFO that's a high-cardinality slot — often a missing rate-limit
@@ -592,16 +636,19 @@ function buildActions(
     };
   })();
 
-  // Forwarder + SIEM exclusions.
+  // Forwarder + SIEM exclusions. When not applicable the snippet and
+  // savings are null (not 0) so the agent doesn't read "we recommend
+  // this action with zero savings" — it reads "this action is not
+  // applicable, ignore it".
   const expectedSavings = p.poc.refinedAction === 'mute' ? monthlyCost : p.poc.refinedAction === 'sample' ? monthlyCost * (1 - 1 / Math.max(1, p.sampleRate)) : 0;
   const forwarderExclusion: ExclusionAction = (p.poc.refinedAction === 'mute' || p.poc.refinedAction === 'sample')
     ? {
         applicable: true,
         vendor: 'fluent-bit',
         snippet: fluentBitForPattern(p.identity, p.template),
-        expected_savings_usd_per_month: expectedSavings,
+        expected_savings_usd_per_month: dollars(expectedSavings),
       }
-    : { applicable: false, vendor: null, snippet: null, expected_savings_usd_per_month: 0 };
+    : { applicable: false, vendor: null, snippet: null, expected_savings_usd_per_month: null };
 
   const siemSnippet = siemSpecificSnippet(siem, p.identity, p.template);
   const siemExclusion: ExclusionAction = (p.poc.refinedAction === 'mute' || p.poc.refinedAction === 'sample') && siemSnippet
@@ -609,9 +656,9 @@ function buildActions(
         applicable: true,
         vendor: siem,
         snippet: siemSnippet,
-        expected_savings_usd_per_month: expectedSavings,
+        expected_savings_usd_per_month: dollars(expectedSavings),
       }
-    : { applicable: false, vendor: null, snippet: null, expected_savings_usd_per_month: 0 };
+    : { applicable: false, vendor: null, snippet: null, expected_savings_usd_per_month: null };
 
   // Compact — gated on SIEM.
   const compactApplicable = COMPACT_SUPPORTED_SIEMS.has(siem);
@@ -619,8 +666,8 @@ function buildActions(
     ? {
         applicable: true,
         reason: 'compact_supported_for_this_siem',
-        expected_compression_ratio: 0.3, // typical engine measurement; would be per-pattern in full impl
-        expected_savings_usd_per_month: monthlyCost * 0.7,
+        expected_compression_ratio: ratio(0.3), // typical engine measurement
+        expected_savings_usd_per_month: dollars(monthlyCost * 0.7),
       }
     : {
         applicable: false,
@@ -629,28 +676,32 @@ function buildActions(
         expected_savings_usd_per_month: null,
       };
 
-  // Regulate cap — applicable for all SIEMs. Proposed cap depends on action.
-  // For mute: cap at 0. For sample: cap at sampled rate. For keep: cap at observed p95.
+  // Regulate cap — when refinedAction is mute or fix, this action is
+  // NOT applicable (the action is to drop entirely or fix the source,
+  // not to apply a rate cap; recommending both produces a confusing
+  // two-action recipe). regulate_cap only applies when refinedAction
+  // is sample or keep.
   const observedBytesPerSec = (p as unknown as { bytes: number }).bytes / Math.max(1, _windowDurationSeconds);
-  const proposedCap = p.poc.refinedAction === 'mute' || p.poc.refinedAction === 'fix'
-    ? 0
-    : p.poc.refinedAction === 'sample'
-      ? observedBytesPerSec / Math.max(1, p.sampleRate)
-      : observedBytesPerSec * 1.2;
-  const regulateCap: RegulateCapAction = {
+  const capApplicable = p.poc.refinedAction === 'sample' || p.poc.refinedAction === 'keep';
+  const proposedCap = p.poc.refinedAction === 'sample'
+    ? observedBytesPerSec / Math.max(1, p.sampleRate)
+    : p.poc.refinedAction === 'keep'
+      ? observedBytesPerSec * 1.2
+      : 0;
+  const regulateCap: RegulateCapAction = capApplicable ? {
     applicable: true,
-    current_p95_bytes_per_sec: observedBytesPerSec * 1.5, // p95 heuristic from average
-    proposed_cap_bytes_per_sec: proposedCap,
-    rationale: p.poc.refinedAction === 'mute' || p.poc.refinedAction === 'fix'
-      ? 'drop_entirely_until_root_cause_fixed'
-      : p.poc.refinedAction === 'sample'
-        ? 'sample_to_retain_signal_at_lower_volume'
-        : 'allow_observed_steady_state_with_burst_headroom',
-    expected_drop_pct: p.poc.refinedAction === 'mute' || p.poc.refinedAction === 'fix'
-      ? 1.0
-      : p.poc.refinedAction === 'sample'
-        ? 1 - 1 / Math.max(1, p.sampleRate)
-        : 0,
+    current_p95_bytes_per_sec: bps(observedBytesPerSec * 1.5),
+    proposed_cap_bytes_per_sec: bps(proposedCap),
+    rationale: p.poc.refinedAction === 'sample'
+      ? 'sample_to_retain_signal_at_lower_volume'
+      : 'allow_observed_steady_state_with_burst_headroom',
+    expected_drop_pct: ratio(p.poc.refinedAction === 'sample' ? 1 - 1 / Math.max(1, p.sampleRate) : 0),
+  } : {
+    applicable: false,
+    current_p95_bytes_per_sec: bps(observedBytesPerSec * 1.5),
+    proposed_cap_bytes_per_sec: 0,
+    rationale: 'use_forwarder_exclusion_or_fix_root_cause_instead',
+    expected_drop_pct: 0,
   };
 
   return {

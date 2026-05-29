@@ -156,8 +156,10 @@ export async function runChunkedTemplater(
       }
 
       // Concat encoded.log lines (order doesn't matter for downstream parsing).
+      // Plain loop, not spread, to dodge V8's function-argument limit
+      // on large chunks (a 100k-event chunk has ~100k lines).
       const encodedLines = result.encodedLog.split('\n').filter(Boolean);
-      encodedParts.push(...encodedLines);
+      for (const line of encodedLines) encodedParts.push(line);
 
       // Sum aggregated rows by tenx_hash (primary key).
       const aggLines = result.aggregatedCsv.split('\n').filter(Boolean);

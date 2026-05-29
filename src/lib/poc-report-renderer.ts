@@ -29,6 +29,16 @@ export interface RenderInput {
   pullWallTimeMs: number;
   /** Wall time spent in the templater. */
   templateWallTimeMs: number;
+  /**
+   * Raw bytes the customer's SIEM actually ingested across the
+   * sampled events — i.e., the size of `events.jsonl` on disk, the
+   * outer CW envelope and all. Cost projections use this when
+   * present so the dollar figure matches what the vendor bills on,
+   * NOT the smaller templater-input size after coerceToLine strips
+   * the envelope. If absent, the envelope falls back to
+   * extraction.totalBytes (templater input) and notes the gap.
+   */
+  rawIngestBytes?: number;
   /** Reason the pull ended. */
   reasonStopped: 'target_reached' | 'time_exhausted' | 'source_exhausted' | 'error';
   /** Raw SIEM query string used. */

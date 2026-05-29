@@ -210,7 +210,7 @@ function buildConsolidatedEnrichmentPrompt(
     events_in_window: p.metrics.events_in_window,
     emergence: p.emergence.category,
     acceleration_ratio: p.emergence.acceleration_ratio,
-    first_seen_iso: p.emergence.first_seen_iso,
+    first_seen_in_sample_iso: p.emergence.first_seen_in_sample_iso,
     top_slot: p.top_slot
       ? { name: p.top_slot.name, distinct_count: p.top_slot.distinct_count, unbounded: p.top_slot.unbounded }
       : null,
@@ -314,9 +314,10 @@ function errandsForFinding(p: PatternOutput, index: number): FindingErrand {
   // the agent's investigation surface from "all causes" to "what
   // changed at T-30m before first_seen".
   if (p.emergence.category === 'new' || p.emergence.category === 'recent_burst') {
-    const firstSeen = p.emergence.first_seen_iso ?? '(unknown)';
+    const firstSeen = p.emergence.first_seen_in_sample_iso ?? '(unknown)';
     steps.push(
-      `**operational_context** — first_seen=${firstSeen} (emergence=${p.emergence.category}). ` +
+      `**operational_context** — first_seen_in_sample=${firstSeen} (emergence=${p.emergence.category}). ` +
+        `Sample is stratified across 24 random sub-windows so this is the first sample-bound observation, not necessarily the true emergence time. ` +
         `Run \`kubectl get events --field-selector involvedObject.kind=Deployment -A --sort-by='.lastTimestamp'\` ` +
         `and look for a deploy / rollout / restart of ${svc} within 30 minutes BEFORE ${firstSeen}. ` +
         `If found, quote the event reason and the involved object name.`,

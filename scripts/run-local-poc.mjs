@@ -133,6 +133,19 @@ if (events.length === 0) {
   process.exit(1);
 }
 
+// Raw ingest bytes = size of events.jsonl on disk = the customer's
+// actual SIEM payload size (CW envelope + message). Used as the
+// cost-projection basis instead of the templater's smaller measured
+// totalBytes, so the engine's $/mo matches what the vendor bills on.
+let rawIngestBytes = 0;
+try {
+  const { statSync } = await import('fs');
+  rawIngestBytes = statSync(join(entry.dir, 'events.jsonl')).size;
+  console.log(`      raw ingest bytes (events.jsonl on disk): ${(rawIngestBytes / 1024 / 1024).toFixed(2)} MB`);
+} catch {
+  // ignore — envelope falls back to templater bytes
+}
+
 // ── Step 3: Templater (cached) ──
 
 let extraction;
@@ -191,6 +204,7 @@ const renderInput = {
   targetEventCount: args['target-events'] || 50000,
   pullWallTimeMs: pullWallMs,
   templateWallTimeMs: tmplWallMs,
+  rawIngestBytes,
   reasonStopped: 'source_exhausted',
   queryUsed: args.query ?? '',
   windowHours: windowSec / 3600,

@@ -82,12 +82,29 @@ export function fluentBitForPattern(identity: string, template: string): string 
 }
 
 function literalPhrase(template: string): string {
-  // Longest literal run between $-marked slots. Lifted heuristic from
-  // poc-report-renderer.ts:extractLiteralPhrase, simplified.
+  // Longest literal run between $-marked slots, with hardening so we
+  // don't bake user-data values into a forwarder rule.
+  //
+  // The engine's templater sometimes embeds a specific event's slot
+  // value into the template body (e.g., the product ID
+  // `'L9ECAV7KIM'` showing up inside a recommendation-server
+  // pattern). Using such a phrase verbatim in `Exclude log` would
+  // create a rule that only matches that ONE product, not the
+  // pattern in general.
+  //
+  // Mitigation: truncate each run at the first occurrence of a
+  // delimiter that typically opens a value (quote, bracket, colon
+  // followed by space). The phrase that remains is structural log
+  // text the agent can grep against without baking in a value.
   const runs = template.split(/\$\([^)]*\)|\$/);
   let best = '';
   for (const r of runs) {
-    const trimmed = r.replace(/\s+/g, ' ').trim();
+    let trimmed = r.replace(/\s+/g, ' ').trim();
+    // Stop at the first opening of a likely value: quote, bracket,
+    // brace, or `: ` (a key-value separator). Everything after is
+    // probably the variable part the templater failed to abstract.
+    const cutAt = trimmed.search(/['"`\[\{]|:\s/);
+    if (cutAt > 0) trimmed = trimmed.slice(0, cutAt).trim();
     if (trimmed.length > best.length && /[A-Za-z]{3,}/.test(trimmed)) best = trimmed;
   }
   return best;

@@ -125,6 +125,26 @@ export interface PocEnrichment {
  * approaching 1.0 is effectively unbounded (every event carries a fresh
  * value — driver of analyzer cardinality cost).
  */
+/**
+ * Slot names that carry the event's own clock value (timestamp,
+ * @timestamp, ts, etc.). These are trivially unique per event — every
+ * log line gets a fresh timestamp by construction — and ranking them
+ * as "the unbounded slot" leads the host agent to recommend fixes
+ * like "pull the timestamp into a structured field", which is
+ * meaningless: the timestamp IS the field. Excluding them produces
+ * a top_slot that points at an actual variable (request_id, user_id,
+ * URL path, etc.) the customer can act on.
+ *
+ * The set is lowercase-matched so engine-emitted casing variants
+ * (`Timestamp`, `TS`, `@Timestamp`) all hit.
+ */
+const TIME_SLOT_NAMES = new Set([
+  'timestamp', '@timestamp', 'ts', 'time', 'datetime', 'date',
+  'event_time', 'eventtime', 'occurred_at', 'created_at', 'logged_at',
+  'iso8601', 'unixtime', 'epoch_ms', 'epoch_seconds', 'epoch',
+  'time_iso', 'time_ms', 'time_s',
+]);
+
 export function computeTopSlot(
   variables: Record<string, string[]>,
   count: number,
@@ -134,6 +154,10 @@ export function computeTopSlot(
   if (entries.length === 0) return null;
   let best: TopSlot | null = null;
   for (const [slot, values] of entries) {
+    // Time-keyed slots are unique-by-construction and tell the agent
+    // nothing actionable. Skip them entirely so the ranking falls to
+    // a real variable.
+    if (TIME_SLOT_NAMES.has(slot.toLowerCase())) continue;
     // Prefer the true distinct count when the templater provided it.
     // Fall back to the sample length (capped at 20) only when the
     // upstream extractor didn't carry the cardinality measurement.
