@@ -202,7 +202,14 @@ type WizardData =
     }
   | { mode: 'license_error'; ok: false; snapshot_id: string; error_message: string; markdown: string }
   | { mode: 'signin_required'; ok: false; snapshot_id: string; markdown: string }
-  | { mode: 'demo_airgapped_warning'; ok: true; snapshot_id: string; is_signed_in: boolean; markdown: string }
+  // demo_airgapped_warning is `ok: false`, matching every other halt-
+  // and-ask mode (signin_required, next_question, unknown_args,
+  // cancelled, missing_snapshot, session_error, license_error). No
+  // plan was emitted; the agent must decide between switching to a
+  // real license (signin) or dropping airgapped before the wizard
+  // resumes. Treating this halt as `ok: true` lets agents that gate
+  // on `data.ok` show a plan that doesn't exist.
+  | { mode: 'demo_airgapped_warning'; ok: false; snapshot_id: string; is_signed_in: boolean; markdown: string }
   | {
       mode: 'unknown_args';
       ok: false;
@@ -832,7 +839,7 @@ export async function executeAdviseInstall(
     const md = renderDemoAirgappedWarning(session, isSignedIn);
     return wizardReturn(view, {
       mode: 'demo_airgapped_warning',
-      ok: true,
+      ok: false,
       snapshot_id: args.snapshot_id,
       is_signed_in: isSignedIn,
       markdown: md,
