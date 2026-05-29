@@ -45,6 +45,8 @@ import { prettifyPatterns } from '../lib/ai-prettify.js';
 import { readClientVersion } from '../lib/manifest.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { checkDeps, DEP_CHECK_VENDORS } from '../lib/siem/deps/index.js';
+import { buildPocEnvelopeV2 } from '../lib/poc-envelope-v2.js';
+import { _enrichForEnvelope } from '../lib/poc-report-renderer.js';
 
 const MCP_VERSION = readClientVersion();
 
@@ -181,15 +183,18 @@ export const pocFromSiemSubmitSchema = {
 export const pocFromSiemStatusSchema = {
   snapshot_id: z.string().describe('Snapshot id returned by log10x_poc_from_siem_submit.'),
   view: z
-    .enum(['summary', 'full', 'yaml', 'configs', 'top', 'pattern'])
+    .enum(['summary', 'full', 'yaml', 'configs', 'top', 'pattern', 'markdown'])
     .default('summary')
     .describe(
-      "How much detail to render. Default `summary` — a ~30-line exec banner + top-5 table + " +
-        'available-views list. Use `full` for the complete 9-section report (~300 lines). ' +
-        'Use `yaml` for paste-ready receiver mute-file entries; `configs` for native SIEM ' +
-        "exclusion configs (Datadog exclusion filter, Splunk props.conf, etc.); `top` for an " +
-        "expanded N-row drivers table (combine with `top_n`); `pattern` for a deep-dive on " +
-        'one identity (requires `pattern` arg).'
+      "How to surface the report. Default `summary` returns the v2 structured envelope " +
+        '(`data.result` carries the full JSON: input section with scale + methodology + ' +
+        'coverage, output section with aggregates, incidents, per-pattern actions). ' +
+        'The agent reads this directly and writes prose in its own voice — no rendered ' +
+        'markdown is included in the summary path. Use `markdown` to receive the rendered ' +
+        '9-section markdown report (legacy / human-readable surface). `yaml` returns ' +
+        'paste-ready receiver mute-file entries; `configs` returns native SIEM exclusion ' +
+        "configs; `top` returns an expanded N-row drivers markdown; `pattern` deep-dives " +
+        "on one identity (requires `pattern` arg). `full` is kept as an alias for `markdown`."
     ),
   pattern: z
     .string()
@@ -499,6 +504,29 @@ export async function executePocStatus(args: PocStatusArgs): Promise<import('../
         hint: s.error ?? 'POC pipeline failed; check error + retry_hint fields.',
       }
     : undefined;
+  // v2 envelope: when status is complete AND view='summary' (default), build the
+  // structured input+output JSON the agent will quote. Prose surfaces (markdown,
+  // human_summary) are intentionally absent from the summary path — the agent's
+  // own writing is the report; we provide facts only.
+  let v2Result: unknown = undefined;
+  if (s.status === 'complete' && s.renderInput && (args.view ?? 'summary') === 'summary') {
+    try {
+      const { patterns, clusters, redundancyPairs } = _enrichForEnvelope(s.renderInput);
+      v2Result = buildPocEnvelopeV2(
+        s.renderInput,
+        patterns as unknown as Parameters<typeof buildPocEnvelopeV2>[1],
+        clusters,
+        redundancyPairs,
+        args.top_n ?? 50,
+      );
+    } catch (e) {
+      // Fall back silently — v2 envelope is best-effort; the snapshot
+      // metadata + markdown view always remains available as a recovery
+      // path. Surface the error only as `envelope_build_error` so the
+      // agent can see it and re-call with view='markdown' if needed.
+      v2Result = { build_error: (e as Error).message };
+    }
+  }
   const headline = `POC ${s.status} for snapshot_id ${s.id}${s.status === 'complete' ? ` (${args.view ?? 'summary'} view)` : `, progress=${s.progressPct}%, elapsed=${Math.round((Date.now() - s.startedAtMs) / 1000)}s`}.`;
   return __be({
     tool: 'log10x_poc_from_siem_status',
@@ -518,7 +546,13 @@ export async function executePocStatus(args: PocStatusArgs): Promise<import('../
       error: s.error,
       retry_hint: s.retryHint,
       view_rendered: s.status === 'complete' ? (args.view ?? 'summary') : undefined,
-      report_markdown: s.status === 'complete' ? md : undefined,
+      // v2 envelope under `result` for view='summary' (the default).
+      // Other views (markdown / full / yaml / configs / top / pattern)
+      // hit the alternate code path above and never land here.
+      result: v2Result,
+      // `report_markdown` retained for back-compat callers; v2 surface
+      // is `result`. Default-summary agents should ignore the markdown.
+      report_markdown: s.status === 'complete' && (args.view ?? 'summary') !== 'summary' ? md : undefined,
       partial_report_markdown: s.status === 'failed' ? s.partialReportMarkdown : undefined,
       // Unified envelope fields. NOTE: snapshot's `status` and `error`
       // keys above are tool-specific (the in-memory pipeline state); the

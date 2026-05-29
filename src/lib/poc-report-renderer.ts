@@ -1424,6 +1424,19 @@ function enrichPatternsWithSections(input: RenderInput): {
   return { patterns, clusters, redundancyPairs };
 }
 
+/**
+ * Public surface for the v2 envelope builder. Same shape as the
+ * internal `enrichPatternsWithSections`. Underscore prefix signals
+ * "internal but cross-module — may change."
+ */
+export function _enrichForEnvelope(input: RenderInput): {
+  patterns: EnrichedPattern[];
+  clusters: IncidentCluster[];
+  redundancyPairs: RedundancyPair[];
+} {
+  return enrichPatternsWithSections(input);
+}
+
 function costFromBytes(bytes: number, costPerGb: number): number {
   return (bytes / (1024 ** 3)) * costPerGb;
 }
