@@ -94,6 +94,110 @@ export class DevCliRunError extends Error {
 // ── Public API ──
 
 /**
+ * Run `tenx @apps/mcp-file` with batch piped to stdin and read the three
+ * artifact files the engine writes to
+ * `/tmp/log10x-mcp-pull/<runtimeName>/`:
+ *
+ *   encoded.log    — one anchored-encoded line per event
+ *   templates.json — one JSON-per-line: {"templateHash":"...","template":"..."}
+ *   aggregated.csv — one row per unique (severity, message_pattern, tenx_hash)
+ *
+ * Use this path when the input volume is too large for the stdout-based
+ * runner (which buffers everything in process memory). The file runner
+ * scales to multi-million-event pulls because the engine streams to disk
+ * and the parser reads the files after the CLI exits.
+ *
+ * `runtimeName` is the unique key in the output path. Defaults to
+ * `mcp-<timestamp>-<pid>` so multiple parallel invocations don't clash.
+ * Cleanup of the output directory is the caller's responsibility.
+ */
+export async function runDevCliFileOutput(
+  rawLogText: string,
+  runtimeName?: string,
+): Promise<DevCliResult & { encodedFile: string; templatesFile: string; aggregatedFile: string; runtimeName: string }> {
+  const mode = await resolveTenxMode();
+  const name = runtimeName ?? `mcp-${Date.now()}-${process.pid}`;
+  const outputDir = `/tmp/log10x-mcp-pull/${name}`;
+  await mkdir(outputDir, { recursive: true });
+  const started = Date.now();
+
+  let cliVersion: string | undefined;
+  if (mode === 'docker') {
+    ({ cliVersion } = await runAppsMcpFileViaDocker(rawLogText, name));
+  } else {
+    ({ cliVersion } = await runAppsMcpFileViaLocalBinary(rawLogText, name));
+  }
+
+  const [encodedLog, templatesRaw, aggregatedCsv] = await Promise.all([
+    readFile(join(outputDir, 'encoded.log'), 'utf8').catch(() => ''),
+    readFile(join(outputDir, 'templates.json'), 'utf8').catch(() => ''),
+    readFile(join(outputDir, 'aggregated.csv'), 'utf8').catch(() => ''),
+  ]);
+
+  // templates.json is one JSON object per line. Parser expects raw
+  // JSON-lines as a single string already — pass through.
+  return {
+    templatesJson: templatesRaw,
+    encodedLog,
+    decodedLog: '',
+    aggregatedCsv,
+    wallTimeMs: Date.now() - started,
+    cliVersion,
+    configPath: '@apps/mcp-file',
+    tempDir: outputDir,
+    encodedFile: join(outputDir, 'encoded.log'),
+    templatesFile: join(outputDir, 'templates.json'),
+    aggregatedFile: join(outputDir, 'aggregated.csv'),
+    runtimeName: name,
+  };
+}
+
+async function runAppsMcpFileViaLocalBinary(
+  rawLogText: string,
+  runtimeName: string,
+): Promise<{ cliVersion: string | undefined }> {
+  const binary = process.env.LOG10X_TENX_PATH || 'tenx';
+  if (!(await isBinaryOnPath(binary))) {
+    throw new DevCliNotInstalledError();
+  }
+  const cliVersion = await tryGetVersion(binary);
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    LOG10X_MCP_RUNTIME_NAME: runtimeName,
+  };
+  await runCommandWithStdin(
+    binary,
+    ['@apps/mcp-file'],
+    rawLogText,
+    { env, timeoutMs: 300_000, configPath: '@apps/mcp-file' },
+  );
+  return { cliVersion };
+}
+
+async function runAppsMcpFileViaDocker(
+  rawLogText: string,
+  runtimeName: string,
+): Promise<{ cliVersion: string | undefined }> {
+  try {
+    await runCommand('docker', ['info'], { timeoutMs: 5_000 });
+  } catch (e) {
+    throw new DockerNotAvailableError((e as Error).message || String(e));
+  }
+  const image = process.env.LOG10X_TENX_IMAGE || 'log10x/pipeline-10x:latest';
+  // Mount the host's /tmp/log10x-mcp-pull/<name> into the container so the
+  // engine's file writes land where the caller can read them.
+  const args = [
+    'run', '--rm', '-i',
+    '-e', `LOG10X_MCP_RUNTIME_NAME=${runtimeName}`,
+    '-v', `/tmp/log10x-mcp-pull/${runtimeName}:/tmp/log10x-mcp-pull/${runtimeName}`,
+    image,
+    '@apps/mcp-file',
+  ];
+  await runCommandWithStdin('docker', args, rawLogText, { timeoutMs: 300_000, configPath: '@apps/mcp-file' });
+  return { cliVersion: undefined };
+}
+
+/**
  * Run `tenx @apps/mcp` with batch piped to stdin and demultiplex the
  * resulting stdout into the four buffers the parser expects.
  *
