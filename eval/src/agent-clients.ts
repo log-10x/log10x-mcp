@@ -230,9 +230,17 @@ class GrokAgentClient implements AgentClient {
 
   async call(req: AgentRequest): Promise<AgentResponse> {
     const openaiMessages = toOpenAIMessages(req.system, req.messages);
+    // xAI's function-tools validator is stricter than Anthropic about
+    // shared sub-schemas. Apply the same strip pass we use for Gemini
+    // so $ref / $defs / additionalProperties don't trip the 400. Real
+    // MCP servers emit these for shared types; both vendors reject them.
     const openaiTools = req.tools.map((t) => ({
       type: 'function',
-      function: { name: t.name, description: t.description, parameters: t.input_schema },
+      function: {
+        name: t.name,
+        description: t.description,
+        parameters: stripUnsupportedSchemaKeys(t.input_schema),
+      },
     }));
 
     const body = {
@@ -663,9 +671,30 @@ function findToolNameForUseId(_contents: unknown[], _id: string): string | undef
 function stripUnsupportedSchemaKeys(schema: unknown): unknown {
   if (Array.isArray(schema)) return schema.map((x) => stripUnsupportedSchemaKeys(x));
   if (schema && typeof schema === 'object') {
+    const obj = schema as Record<string, unknown>;
+    // `const: X` → `enum: [X]`. Semantically equivalent JSON Schema,
+    // but Gemini's function_declarations validator only understands
+    // `enum`. Common with z.literal(...) in Zod-derived schemas.
+    if ('const' in obj) {
+      const value = obj.const;
+      const out: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(obj)) {
+        if (k === 'const') continue;
+        if (k === 'additionalProperties' || k === '$schema') continue;
+        out[k] = stripUnsupportedSchemaKeys(v);
+      }
+      out.enum = [value];
+      return out;
+    }
     const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(schema as Record<string, unknown>)) {
+    for (const [k, v] of Object.entries(obj)) {
       if (k === 'additionalProperties' || k === '$schema') continue;
+      // $ref + $defs/definitions: the MCP server emits these for shared
+      // sub-schemas. Gemini's validator rejects $ref outright. Strip
+      // both so the tool stays callable with a slightly looser schema
+      // at the ref-site; the top-level shape (what the model picks
+      // arg names from) is preserved.
+      if (k === '$ref' || k === '$defs' || k === 'definitions') continue;
       out[k] = stripUnsupportedSchemaKeys(v);
     }
     return out;

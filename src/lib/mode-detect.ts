@@ -69,6 +69,21 @@ export async function detectMode(opts?: {
   const probeTimeoutMs = opts?.probeTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
   const startedAt = Date.now();
 
+  // Operator / harness override. When set to a valid Mode value, skip
+  // the probe entirely and use the forced mode. Intended for the eval
+  // harness's stdio-transport tests (which need to register install
+  // advisors against the demo env's `analysis`-mode backend) and for
+  // debugging the registration cascade without running a real probe.
+  const forced = process.env.LOG10X_MCP_FORCE_MODE;
+  if (forced === 'analysis' || forced === 'analysis_pending' || forced === 'poc') {
+    return {
+      mode: forced,
+      trace: [{ path: 'forced_mode_env', status: 'matched', reason: `LOG10X_MCP_FORCE_MODE=${forced}` }],
+      reason: `Mode forced via LOG10X_MCP_FORCE_MODE=${forced}; backend probe skipped.`,
+      probeDurationMs: Date.now() - startedAt,
+    };
+  }
+
   // Step 1: resolve a backend (or not). Cheap, no network calls
   // beyond the existing customer-metrics autodetect (which can hit
   // AWS / GCP CLIs but each has its own timeout).

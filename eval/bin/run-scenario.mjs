@@ -26,7 +26,15 @@ const { loadEvalEnv } = await import(buildUrl('build-eval/env.js'));
 const { runScenario } = await import(buildUrl('build-eval/orchestrator.js'));
 
 function parseArgs(argv) {
-  const out = { mode: 'deterministic', judge: undefined, reportsDir: null, model: null, fixture: null };
+  const out = {
+    mode: 'deterministic',
+    judge: undefined,
+    reportsDir: null,
+    model: null,
+    transport: 'in-process',
+    serverEntryPath: null,
+    fixture: null,
+  };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--mode') out.mode = argv[++i];
@@ -34,6 +42,8 @@ function parseArgs(argv) {
     else if (a === '--judge') out.judge = true;
     else if (a === '--reports-dir') out.reportsDir = argv[++i];
     else if (a === '--model') out.model = argv[++i];
+    else if (a === '--transport') out.transport = argv[++i];
+    else if (a === '--server-entry') out.serverEntryPath = argv[++i];
     else if (!a.startsWith('--') && !out.fixture) out.fixture = a;
     else {
       console.error(`Unknown arg: ${a}`);
@@ -41,11 +51,15 @@ function parseArgs(argv) {
     }
   }
   if (!out.fixture) {
-    console.error('Usage: run-scenario.mjs <fixture.json> [--mode deterministic|autonomous] [--no-judge]');
+    console.error('Usage: run-scenario.mjs <fixture.json> [--mode deterministic|autonomous] [--no-judge] [--transport in-process|stdio]');
     process.exit(2);
   }
   if (!['deterministic', 'autonomous'].includes(out.mode)) {
     console.error(`--mode must be deterministic or autonomous, got: ${out.mode}`);
+    process.exit(2);
+  }
+  if (!['in-process', 'stdio'].includes(out.transport)) {
+    console.error(`--transport must be in-process or stdio, got: ${out.transport}`);
     process.exit(2);
   }
   return out;
@@ -58,7 +72,7 @@ const reportsRoot = opts.reportsDir ? resolve(opts.reportsDir) : resolve(evalRoo
 const scenario = loadScenario(resolve(opts.fixture));
 const env = loadEvalEnv();
 
-console.error(`[run-scenario] ${scenario.id} mode=${opts.mode} judge=${judgeEnabled} env=${env.mode}`);
+console.error(`[run-scenario] ${scenario.id} mode=${opts.mode} transport=${opts.transport} judge=${judgeEnabled} env=${env.mode}`);
 const report = await runScenario({
   mode: opts.mode,
   scenario,
@@ -66,6 +80,8 @@ const report = await runScenario({
   reportsRoot,
   judge: judgeEnabled,
   model: opts.model || undefined,
+  transport: opts.transport,
+  serverEntryPath: opts.serverEntryPath || undefined,
 });
 
 console.error(

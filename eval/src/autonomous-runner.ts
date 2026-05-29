@@ -1,24 +1,21 @@
 /**
- * Autonomous runner — drives Anthropic Messages API and lets the model
- * decide which tools to call. Tool execution happens via the SAME
- * tool-registry the deterministic runner uses (in-process, no stdio
- * MCP server) — this keeps the harness simple and avoids spinning up a
- * subprocess for every scenario.
+ * Autonomous runner — drives a model's tool-use loop and lets the model
+ * decide which tools to call. Tool discovery + execution go through a
+ * ToolHarness so the runner is transport-agnostic:
  *
- * Why local execution rather than the MCP-connector REST endpoint: the
- * connector requires the MCP server to be HTTP-reachable from
- * Anthropic's API, which means tunneling. We get equivalent semantics
- * (the model picks tools, args, and ordering) by exposing the same tools
- * via the regular Messages API tool_use loop. The judge cannot tell the
- * difference.
+ *   - InProcessToolHarness (default): calls build/tools/*.js directly
+ *     via tool-registry.ts. Fast, no subprocess, but skips the MCP wire
+ *     format.
+ *   - StdioMcpHarness: spawns build/index.js and talks over stdio +
+ *     JSON-RPC via @modelcontextprotocol/sdk. Mirrors what Claude
+ *     Desktop / Cursor / Cline actually do. Catches schema drift and
+ *     wire-format bugs.
  *
- * The runner emits the same JSONL transcript shape as deterministic
- * mode, so judge / sequence-diff / autonomy code is mode-agnostic.
+ * The runner emits the same JSONL transcript shape regardless of
+ * transport, so judge / sequence-diff / autonomy code is mode-agnostic.
  */
-import { zodToJsonSchema } from 'zod-to-json-schema';
 import type { Scenario, RunOutcome, StepLog } from './types.js';
 import { interpolateEnvVars, type EvalEnv } from './env.js';
-import { invokeTool, TOOL_NAMES, TOOL_SCHEMAS } from './tool-registry.js';
 import type { TranscriptWriter, StepLogWriter } from './transcript-writer.js';
 import {
   selectAgentClient,
@@ -28,67 +25,13 @@ import {
   type AgentToolUseBlock,
   type AgentTextBlock,
 } from './agent-clients.js';
+import type { ToolHarness } from './tool-harness.js';
 
 export interface AutonomousResult {
   outcome: RunOutcome;
   totalSteps: number;
   finalText: string;
   stepLogs: StepLog[];
-}
-
-interface ToolDecl {
-  name: string;
-  description: string;
-  input_schema: Record<string, unknown>;
-}
-
-// Drop the AnthropicLike interface — selectAgentClient hands back the
-// vendor-neutral AgentClient that the loop below talks to.
-
-/**
- * Build tool declarations using each tool's real Zod-derived JSON Schema.
- *
- * Why this matters for evaluation: a production MCP client (Claude
- * Desktop, Cursor, etc.) sees the full schema with `properties` —
- * including literal field names like `backends`, `app`, `snapshot_id`.
- * When the harness advertised only `additionalProperties: true`, Sonnet
- * had to recover field names from description prose alone, which lets
- * common-API priors leak in (`targets` instead of `backends`, etc.). The
- * eval should mirror production discoverability, not handicap the model.
- *
- * Tools missing from TOOL_SCHEMAS fall back to an open-object schema so
- * the runner still works during incremental rollout — `missingSchemas`
- * is logged once at the call site so the gap is visible.
- */
-function buildToolDecls(): { decls: ToolDecl[]; missingSchemas: string[] } {
-  const missingSchemas: string[] = [];
-  const decls = TOOL_NAMES.map((name) => {
-    const zodSchema = TOOL_SCHEMAS[name];
-    let input_schema: Record<string, unknown>;
-    if (zodSchema) {
-      // Cast the schema to the loose ZodTypeAny shape because zodToJsonSchema's
-      // generic return type is recursive and trips ts2589 on deeply-typed
-      // schemas. The JSON object we cast the result to is what we need anyway.
-      const jsonSchema = zodToJsonSchema(zodSchema as unknown as Parameters<typeof zodToJsonSchema>[0], {
-        $refStrategy: 'none',
-        target: 'openApi3',
-      }) as Record<string, unknown>;
-      // Strip the $schema / definitions wrappers — Anthropic's tool format
-      // expects a bare JSON Schema object, not a Draft-7 envelope.
-      delete jsonSchema.$schema;
-      delete jsonSchema.definitions;
-      input_schema = jsonSchema;
-    } else {
-      missingSchemas.push(name);
-      input_schema = { type: 'object', additionalProperties: true };
-    }
-    return {
-      name,
-      description: `Log10x MCP tool ${name}. Read input_schema.properties for the exact arg names and types.`,
-      input_schema,
-    };
-  });
-  return { decls, missingSchemas };
 }
 
 // Mirrors the production MCP server's `instructions` (build/index.js) so
@@ -137,6 +80,7 @@ export async function runAutonomous(
   env: EvalEnv,
   transcript: TranscriptWriter,
   stepLog: StepLogWriter,
+  harness: ToolHarness,
   modelOverride?: string
 ): Promise<AutonomousResult> {
   // Vendor key checks are owned by each AgentClient's constructor —
@@ -145,11 +89,11 @@ export async function runAutonomous(
   transcript.writeUserPrompt(scenario.prompt);
 
   const client = selectAgentClient(modelOverride);
-  const { decls: tools, missingSchemas } = buildToolDecls();
+  const { tools, missingSchemas } = await harness.listTools();
   if (missingSchemas.length > 0) {
     // eslint-disable-next-line no-console
     console.warn(
-      `[autonomous-runner] ${missingSchemas.length} tool(s) missing from TOOL_SCHEMAS — model will see additionalProperties:true fallback: ${missingSchemas.join(', ')}`
+      `[autonomous-runner] ${missingSchemas.length} tool(s) without Zod schemas — model will see additionalProperties:true fallback: ${missingSchemas.join(', ')}`
     );
   }
   const stepLogs: StepLog[] = [];
@@ -192,7 +136,9 @@ export async function runAutonomous(
       break;
     }
 
-    // Execute every tool_use, append tool_result blocks, loop.
+    // Execute every tool_use, append tool_result blocks, loop. The
+    // ToolHarness owns transport-specific failure shaping; we just
+    // mark unknown-tool failures so the stepLog records them as such.
     const toolResults: AgentToolResultBlock[] = [];
     for (const tu of toolUses) {
       step++;
@@ -200,15 +146,8 @@ export async function runAutonomous(
         { ...(scenario.tool_arg_defaults ?? {}), ...tu.input },
         env
       ) as Record<string, unknown>;
-      let result: { text: string; isError: boolean; durationMs: number };
-      try {
-        result = await invokeTool(tu.name, args, env);
-      } catch (e) {
-        result = {
-          text: `Tool ${tu.name} not registered in eval harness: ${(e as Error).message}`,
-          isError: true,
-          durationMs: 0,
-        };
+      const result = await harness.invoke(tu.name, args);
+      if (result.isError && /not registered|MCP callTool/.test(result.text)) {
         const entry: StepLog = {
           step,
           kind: 'unknown_tool',

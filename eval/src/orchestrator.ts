@@ -29,6 +29,7 @@ import { computeSequenceDiff, evaluateGroundTruth } from './scenario-validator.j
 import { computeAutonomy } from './autonomy-metrics.js';
 import { runJudge, normalizeJudgeScores } from './judge.js';
 import { writeRunReport } from './report-writer.js';
+import { buildToolHarness, type TransportKind } from './tool-harness.js';
 
 export interface RunOptions {
   mode: 'deterministic' | 'autonomous';
@@ -39,6 +40,19 @@ export interface RunOptions {
   judge: boolean;
   /** Optional model override for the autonomous runner. */
   model?: string;
+  /**
+   * Tool transport for autonomous mode:
+   *   - 'in-process' (default): tool fns are imported and called directly.
+   *     Fastest path; skips the MCP wire format.
+   *   - 'stdio': spawn build/index.js as a child process, talk over the
+   *     real MCP stdio + JSON-RPC transport. Mirrors what Claude Desktop
+   *     and Cursor actually do.
+   *
+   * Deterministic mode ignores this — no model talks to the server.
+   */
+  transport?: TransportKind;
+  /** Optional path to the MCP server's entry point for stdio mode. */
+  serverEntryPath?: string;
 }
 
 export async function runScenario(opts: RunOptions): Promise<RunReport> {
@@ -59,10 +73,18 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
   const startedAt = new Date().toISOString();
   const t0 = Date.now();
 
-  const result =
-    opts.mode === 'deterministic'
-      ? await runDeterministic(opts.scenario, opts.env, transcript, stepLog)
-      : await runAutonomous(opts.scenario, opts.env, transcript, stepLog, opts.model);
+  let result;
+  if (opts.mode === 'deterministic') {
+    result = await runDeterministic(opts.scenario, opts.env, transcript, stepLog);
+  } else {
+    const transport = opts.transport ?? 'in-process';
+    const harness = buildToolHarness(opts.env, transport, opts.serverEntryPath ? { serverEntryPath: opts.serverEntryPath } : undefined);
+    try {
+      result = await runAutonomous(opts.scenario, opts.env, transcript, stepLog, harness, opts.model);
+    } finally {
+      await harness.shutdown();
+    }
+  }
 
   await Promise.all([transcript.close(), stepLog.close()]);
   const durationMs = Date.now() - t0;
