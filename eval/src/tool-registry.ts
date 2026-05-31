@@ -356,6 +356,42 @@ const TOOL_TABLE: Record<string, ExecuteFn> = {
   log10x_login_status: async (raw, ev) =>
     executeLoginStatus(parseArgs(loginStatusSchema, raw), buildLoadedEnvs(ev)),
 
+  // log10x_cost_drivers: synthetic stub. The tool itself was cut in
+  // Tal's chk-15 catalog refactor — it no longer exists as a source
+  // file or production registration. But ~24 src/ files still emit
+  // `log10x_cost_drivers` in their NEXT_ACTIONS chains (a stale dangling
+  // reference). Without a stub the deterministic runner halts at
+  // `unknown_tool` whenever a chain reaches one of those references,
+  // most visibly on every install fixture's post-install plan
+  // (top_patterns -> investigate -> pattern_mitigate -> cost_drivers).
+  // The proper fix is to sweep src/ and rewrite the dangling references
+  // to top_patterns or similar; until that lands, the stub keeps
+  // fixtures runnable. The warning surfaces the issue in transcripts so
+  // it doesn't get silently forgotten.
+  log10x_cost_drivers: async () => {
+    return JSON.stringify(
+      {
+        schema_version: '1.0',
+        tool: 'log10x_cost_drivers',
+        view: 'summary',
+        summary: {
+          headline: 'cost_drivers stub — tool was cut, chain emitter is stale.',
+        },
+        data: {
+          mode: 'stub',
+          message:
+            'eval-harness stub for log10x_cost_drivers: the tool was removed in chk-15 but ~24 source files still emit it as a NEXT_ACTIONS hint. Stubbing keeps deterministic install fixtures from halting at unknown_tool. Real fix: rewrite the dangling references in src/ to log10x_top_patterns (or whichever tool actually serves the cost-drivers use case now).',
+        },
+        actions: [],
+        warnings: [
+          'stub: log10x_cost_drivers no longer exists as a real tool; the emitter that linked to it is stale and should be repointed at log10x_top_patterns',
+        ],
+      },
+      null,
+      2
+    );
+  },
+
   // log10x_signin_start: synthetic stub. The real tool opens a browser
   // device-code flow and writes Auth0 tokens to ~/.log10x/credentials —
   // unmockable from a test process. The wizard's signin_required
@@ -435,6 +471,9 @@ export const TOOL_SCHEMAS: Record<string, z.ZodObject<z.ZodRawShape>> = {
   // signin_start takes no required args; an empty object is the
   // schema the production tool exposes (its `view` arg is optional).
   log10x_signin_start: z.object({}).passthrough(),
+  // cost_drivers stub takes whatever args the stale callers send; we
+  // accept anything and return the synthetic stub envelope.
+  log10x_cost_drivers: z.object({}).passthrough(),
 };
 
 export class UnknownToolError extends Error {

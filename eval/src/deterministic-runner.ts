@@ -48,6 +48,14 @@ interface NextAction {
  * signal back to the fixture author that they need to extend
  * wizard_answers.
  */
+/**
+ * Tools whose hints get `wizard_answers` front-loaded into the call
+ * args. Today only the install wizard qualifies — its question loop is
+ * what the front-loading bypasses. Future multi-turn wizards (if any)
+ * can join this set.
+ */
+const WIZARD_STYLE_TOOLS: ReadonlySet<string> = new Set(['log10x_advise_install']);
+
 const USER_ANSWER_PLACEHOLDER = '<user answer>';
 function substituteWizardAnswers(
   args: Record<string, unknown>,
@@ -201,14 +209,36 @@ export async function runDeterministic(
       break;
     }
 
-    // BFS-enqueue novel hints. Wizard-style next_question actions carry
-    // `"<user answer>"` placeholders for the field the wizard wants
-    // filled; substitute them from scenario.wizard_answers so the
-    // deterministic runner can drive multi-turn wizards the same way an
-    // LLM would in autonomous mode.
+    // BFS-enqueue novel hints. Two transformations apply to wizard-style
+    // tools so the deterministic runner drives them the same way an LLM
+    // would in autonomous mode:
+    //
+    // 1. Front-load — when the hint targets a wizard-style tool, merge
+    //    scenario.wizard_answers under the hint's own args. The wizard
+    //    then receives every answer it would have asked about on the
+    //    FIRST call (snapshot_id from the chain + app / forwarder /
+    //    backends / airgapped / ... from wizard_answers) and skips its
+    //    question loop entirely. This also bypasses the kubectl-based
+    //    auto-pick for forwarder (which would otherwise overrule
+    //    wizard_answers.forwarder when only one supported forwarder is
+    //    detected in the snapshot — relevant when forwarder_hint on
+    //    discover_env sets recommendations.existingForwarder but
+    //    kubectl.forwarders[] still carries the actually-detected one).
+    //
+    // 2. Substitute — for any `"<user answer>"` placeholders the wizard
+    //    emits in its next_question hint, replace them with the matching
+    //    wizard_answers value. With front-loading this rarely fires
+    //    (the wizard rarely emits placeholders if it already has every
+    //    answer), but it stays as the back-compat path for fixtures
+    //    that don't front-load or for tools that emit placeholders
+    //    despite having answers.
     for (const hint of hints) {
       const rawHintArgs = (hint.args ?? {}) as Record<string, unknown>;
-      const hintArgs = substituteWizardAnswers(rawHintArgs, scenario.wizard_answers);
+      const frontLoaded =
+        WIZARD_STYLE_TOOLS.has(hint.tool) && scenario.wizard_answers
+          ? { ...scenario.wizard_answers, ...rawHintArgs }
+          : rawHintArgs;
+      const hintArgs = substituteWizardAnswers(frontLoaded, scenario.wizard_answers);
       const k = `${hint.tool}|${stableStringify({
         ...(scenario.tool_arg_defaults ?? {}),
         ...hintArgs,
