@@ -961,83 +961,171 @@ bash "%~dp0post-render.sh"
   filebeat: {
     label: 'Filebeat',
     integrationMode:
-      'DaemonSet using the log10x-repackaged Filebeat image (`log10x/filebeat-10x`). 10x logic runs inside the `filebeat` container via a processor. Chart is in the Elastic-style helm repo and uses legacy Helm labels.',
-    helmRepo: 'https://log-10x.github.io/elastic-helm-charts',
-    helmRepoAlias: 'log10x-elastic',
-    chartRef: 'log10x-elastic/filebeat',
+      'IMAGE SWAP (no sidecar) against the upstream `elastic/filebeat` chart. The chart\'s default `docker.elastic.co/beats/filebeat` image is replaced with the prebuilt `log10x/filebeat-10x` image, which wraps the Filebeat entrypoint in `filebeat ... 2>&1 | tenx run ...` so the 10x engine runs as a child process of Filebeat inside the same container. Wiring is a values overlay: top-level `image:` + `imageTag:` for the swap, `daemonset.extraEnvs` for TENX_LICENSE_FILE / TENX_RUN_ARGS / backend creds, `daemonset.extraVolumes` for the license Secret, and `daemonset.filebeatConfig.filebeat.yml` carrying the `tenx-receive.js` script processor on every `filebeat.input` so events flow through the engine and come back via the `unix` input loaded from the bundled `tenxNix.yml` snippet. `output.console` is forbidden — it would corrupt the stdout pipe the engine reads from.',
+    helmRepo: 'https://helm.elastic.co',
+    helmRepoAlias: 'elastic',
+    chartRef: 'elastic/filebeat',
     chartAvailability: 'published',
-    primaryImageHint: 'ghcr.io/log-10x/filebeat-10x',
+    primaryImageHint: 'log10x/filebeat-10x',
     primaryContainerName: 'filebeat',
+    // No log10x sidecar — the engine runs as a child of filebeat's
+    // entrypoint inside the same container via the image swap.
     hasTenxSidecar: false,
-    selectorStyle: 'legacy-helm',
-    selectorLabel: (r) => legacyElasticSelector(r, 'filebeat'),
-    renderValues: ({ licenseJwt, releaseName, destination, outputHost, gitToken, optimize, readOnly, backends, backendCredentials, airgapped }) => {
-      // Chart defaults reference Elasticsearch secrets/certs. For a mock
-      // install we MUST override extraEnvs/secretMounts to empty so pods
-      // don't hang in FailedMount.
-      const outputBlock = renderFilebeatOutput(destination, outputHost);
-      const featureFlags = renderTenxFeatureFlags({ optimize, readOnly });
-      const extras = renderTenxExtraArgsAndEnv({ backends, backendCredentials, airgapped, airgappedAsEnvVar: true });
-      return `tenx:
-  enabled: true
-  licenseJwt: "${licenseJwt}"
-  runtimeName: "${releaseName}"${featureFlags}${extras}
+    selectorStyle: 'k8s-recommended',
+    selectorLabel: (r) => k8sRecommendedSelector(r),
+    renderValues: ({ optimize, readOnly, backends, backendCredentials, airgapped, licenseSecretName, licenseSecretKey }) => {
+      // Build TENX_RUN_ARGS. Default args wire the filebeat input and
+      // the receiver app; optimize/readOnly add their mode flags;
+      // non-log10x backends append @run/output/metric/<b> entries so
+      // the in-container engine emits metrics to those backends in
+      // addition to log10x SaaS (the chart default).
+      const nonLog10xBackends = (backends ?? []).filter((b) => b !== 'log10x');
+      const runArgs = ['@run/input/forwarder/filebeat', '@apps/receiver'];
+      if (optimize) runArgs.push('receiverOptimize', 'true');
+      if (readOnly) runArgs.push('receiverReadOnly', 'true');
+      for (const b of nonLog10xBackends) runArgs.push(`@run/output/metric/${b}`);
 
-# The chart's default readiness/liveness probes run \`filebeat test output\`
-# which doesn't support \`output.file\` (used by mock destination). Override
-# to simple \`pgrep filebeat\` so the probes reflect actual process liveness.
-# These are TOP-LEVEL chart values, not under \`daemonset:\`.
-readinessProbe:
-  exec:
-    command: ["sh", "-c", "pgrep -x filebeat >/dev/null"]
-  initialDelaySeconds: 10
-  periodSeconds: 10
-livenessProbe:
-  exec:
-    command: ["sh", "-c", "pgrep -x filebeat >/dev/null"]
-  initialDelaySeconds: 30
-  periodSeconds: 30
+      // Build the daemonset.extraEnvs block. Always emits
+      // TENX_LICENSE_FILE + TENX_RUN_ARGS; appends TENX_AIRGAPPED and
+      // per-backend env vars (secret + plain) when applicable. The
+      // backend env-var contract is identical to the sidecar path —
+      // we reuse BACKEND_ENV_SPECS so DD_API_KEY/ELASTIC_API_KEY/etc.
+      // come from the same Kubernetes Secret the user creates
+      // out-of-band.
+      const envLines: string[] = [
+        `    - name: TENX_LICENSE_FILE`,
+        `      value: /etc/tenx/license/license.jwt`,
+        `    - name: TENX_RUN_ARGS`,
+        `      value: "${runArgs.join(' ')}"`,
+      ];
+      if (airgapped) {
+        envLines.push(`    - name: TENX_AIRGAPPED`);
+        envLines.push(`      value: "true"`);
+      }
+      for (const b of nonLog10xBackends) {
+        const spec = BACKEND_ENV_SPECS[b];
+        if (!spec) continue;
+        const creds = backendCredentials?.[b];
+        const secretName = creds?.secretName ?? defaultSecretNameFor(b);
+        const plainOverrides = creds?.plainValues ?? {};
+        for (const s of spec.secret) {
+          envLines.push(`    - name: ${s.envVar}`);
+          envLines.push(`      valueFrom:`);
+          envLines.push(`        secretKeyRef:`);
+          envLines.push(`          name: ${secretName}`);
+          envLines.push(`          key: ${s.secretKey}`);
+        }
+        for (const p of spec.plain) {
+          const v = plainOverrides[p.envVar] ?? p.default ?? p.placeholder ?? '';
+          envLines.push(`    - name: ${p.envVar}`);
+          envLines.push(`      value: "${v}"`);
+        }
+      }
+
+      const secretName = licenseSecretName ?? 'log10x-license';
+      const secretKey = licenseSecretKey ?? 'license-jwt';
+
+      return `# Receiver overlay for Filebeat (upstream elastic/filebeat chart).
+# Layer on top of your existing values:
+#   helm upgrade --install <release> elastic/filebeat \\
+#     -f your-existing-filebeat-values.yaml \\
+#     -f my-receiver.yaml --namespace <namespace>
+#
+# IMPORTANT — the filebeatConfig.filebeat.yml block below REPLACES your
+# existing filebeat.yml wholesale (helm values for that field don't deep-
+# merge YAML strings). Merge your existing filebeat.inputs into the
+# inputs[] list below before applying. Each input MUST keep the
+# tenx-receive.js script processor or events will never reach the engine.
+
+# Image swap: log10x/filebeat-10x wraps the entrypoint in
+# \`filebeat ... 2>&1 | tenx run "$TENX_RUN_ARGS"\` so the 10x engine
+# runs as a child of filebeat inside the same container.
+image: "log10x/filebeat-10x"
+imageTag: "latest"
+imagePullPolicy: IfNotPresent
 
 daemonset:
-  # Avoid chart defaults that hardcode elasticsearch-master-credentials / certs.
-  # Override to empty lists for mock/test; add back real refs for production ES.
-  extraEnvs: []
-  secretMounts: []
+  extraEnvs:
+${envLines.join('\n')}
+
+  extraVolumes:
+    - name: tenx-license
+      secret:
+        secretName: ${secretName}
+        items:
+          - key: ${secretKey}
+            path: license.jwt
+
+  extraVolumeMounts:
+    - name: tenx-license
+      mountPath: /etc/tenx/license
+      readOnly: true
+
+  # filebeat.config.inputs loads the unix-socket input that receives
+  # processed events back from the engine; the script processor on each
+  # filebeat.input tags + hands off to the engine via stdout.
+  #
+  # output.console MUST NOT be used — it collides with the stdout pipe
+  # that carries events to the in-container engine and corrupts the
+  # stream. Use any other output (elasticsearch / kafka / logstash /
+  # custom HTTP). The wizard's plan adds a preflight WARN to detect
+  # \`output.console\` in your existing values; resolve before applying.
   filebeatConfig:
     filebeat.yml: |
-${indent(outputBlock, 6)}
+      filebeat.config.inputs:
+        enabled: true
+        path: \${TENX_MODULES}/pipelines/run/modules/input/forwarder/filebeat/conf/tenxNix.yml
+
+      filebeat.inputs:
+      - type: container
+        paths:
+          - /var/log/containers/*.log
+        processors:
+        - add_kubernetes_metadata:
+            host: \${NODE_NAME}
+            matchers:
+            - logs_path:
+                logs_path: "/var/log/containers/"
+        # Hand every event off to Log10x via Filebeat's stdout.
+        # tenx-receive.js cancels the event locally so destinations
+        # only ship the version that comes back on the unix socket.
+        - script:
+            lang: javascript
+            file: \${TENX_MODULES}/pipelines/run/modules/input/forwarder/filebeat/script/tenx-receive.js
+
+      # Replace this with YOUR actual destination. output.console is
+      # forbidden (see comment above). Example below ships to Elastic;
+      # swap for logstash / kafka / http as appropriate.
+      output.elasticsearch:
+        hosts: ["<your-elasticsearch-host>"]
 `;
     },
-    verifyProbes: ({ releaseName, namespace, destination }) => {
-      const sel = legacyElasticSelector(releaseName, 'filebeat');
-      const probes = [
+    verifyProbes: ({ releaseName, namespace }) => {
+      const sel = k8sRecommendedSelector(releaseName);
+      return [
         {
           name: 'pods-ready',
-          question: 'Are all Reporter DaemonSet pods Ready?',
+          question: 'Are all Filebeat DaemonSet pods Ready?',
           commands: [`kubectl -n ${namespace} wait --for=condition=Ready pod -l ${sel} --timeout=5m`],
           expectOutput: 'condition met',
           timeoutSec: 300,
         },
         {
-          name: 'processor-alive',
-          question: 'Is the 10x processor initialized in the filebeat container?',
+          name: 'image-swapped',
+          question: 'Is the pod running the log10x/filebeat-10x image (not the upstream filebeat image)?',
+          commands: [
+            `kubectl -n ${namespace} get pod -l ${sel} -o jsonpath='{.items[0].spec.containers[?(@.name=="filebeat")].image}'`,
+          ],
+          expectOutput: 'log10x/filebeat-10x',
+        },
+        {
+          name: 'engine-alive',
+          question: 'Is the in-container 10x engine initialized and reading from filebeat\'s stdout?',
           commands: [
             `kubectl -n ${namespace} logs -l ${sel} -c filebeat --tail=400 | grep -iE 'tenx|10x|pattern' | head -20`,
           ],
         },
       ];
-      if (destination === 'mock') {
-        probes.push({
-          name: 'tenx-mock-events',
-          question: 'Are tagged [TENX-MOCK] events reaching stdout (via `output.file` path /tmp)?',
-          commands: [
-            `kubectl -n ${namespace} exec -it $(kubectl -n ${namespace} get pod -l ${sel} -o name | head -1) -c filebeat -- sh -c 'head -5 /tmp/tenx-mock.out 2>/dev/null || echo "no mock output yet"'`,
-          ],
-          expectOutput: 'TENX-MOCK',
-          timeoutSec: 120,
-        });
-      }
-      return probes;
     },
   },
 

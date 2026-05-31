@@ -545,6 +545,22 @@ async function runPreflight(
     });
   }
 
+  // 5. Filebeat-specific: output.console is forbidden because the image
+  // swap pipes filebeat stdout into the in-container engine. If the
+  // user's existing filebeat values use output.console (we can't tell
+  // from the discovery snapshot — `kubectl get values` isn't probed),
+  // applying our overlay produces a broken pod. Surface this as a WARN
+  // the user has to acknowledge by inspecting their existing values
+  // before they apply the plan.
+  if (forwarder === 'filebeat' && app === 'receiver') {
+    checks.push({
+      name: 'filebeat output.console check',
+      status: 'warn',
+      detail:
+        '`output.console` is FORBIDDEN with the image-swap integration — it collides with the stdout pipe carrying events to the in-container engine. Before applying the plan, inspect your existing values (`helm get values <release> -n <namespace>`) and confirm `output.console` is not configured. If it is, switch to `output.elasticsearch` / `output.kafka` / `output.logstash` / etc.',
+    });
+  }
+
   // Chart availability used to LIVE-probe `helm search repo` here. It
   // was removed because the chart refs it checked are static constants
   // in our own source (reporter-forwarders.ts):

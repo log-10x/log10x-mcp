@@ -70,16 +70,17 @@ import type { Environments } from '../lib/environments.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput, type ActionRole } from '../lib/output-types.js';
 
-// Forwarders the Receiver wizard knows how to install a sidecar into.
-// Filebeat is intentionally NOT here: the Receiver pattern is a values
-// overlay on the upstream chart with extraContainers + extraVolumes, and
-// the upstream elastic/filebeat chart doesn't expose those hooks. The
-// supported-via-fork path (log10x-elastic/filebeat) is deferred — the
-// wizard refuses Filebeat with a clear "not yet" message rather than
-// pretending it works.
+// Forwarders the Receiver wizard knows how to install into. All entries
+// use the official upstream chart for their forwarder — no forked
+// log10x charts are served from the wizard. Five use the sidecar
+// pattern (extraContainers + extraVolumes); filebeat uses image swap
+// against `elastic/filebeat` (the engine runs as a child of filebeat's
+// entrypoint inside the same container — see RECEIVER_FORWARDER_SPECS
+// for the per-forwarder integrationMode docstring).
 const SUPPORTED_FORWARDERS = [
   'fluentbit',
   'fluentd',
+  'filebeat',
   'logstash',
   'otel-collector',
   'vector',
@@ -931,8 +932,7 @@ async function elicitMissingAnswers(
       );
       if (supportedDetected.length === 0) {
         // Need to bail back to the markdown path which emits the helpful
-        // "no supported forwarder" / "filebeat-not-yet" message;
-        // elicitation can't render that.
+        // "no supported forwarder" message; elicitation can't render that.
         return { kind: 'failed' };
       }
       if (supportedDetected.length === 1) {
@@ -1464,14 +1464,11 @@ function unsupportedForwarderForReceiver(unsupported: DetectedForwarder[]): stri
   return [
     '# Install wizard — Receiver path not supported for your forwarder yet',
     '',
-    `Discovery found these forwarders in the cluster: **${kinds}**. The Receiver wizard can install a sidecar into ${SUPPORTED_FORWARDERS.join(' / ')}, but not into ${kinds}.`,
-    '',
-    'Filebeat specifically needs a forked helm chart (`log10x-elastic/filebeat`) because the upstream chart has no extraContainers/extraVolumes hooks — that path isn\'t wired into the wizard yet.',
+    `Discovery found these forwarders in the cluster: **${kinds}**. The Receiver wizard can install into ${SUPPORTED_FORWARDERS.join(' / ')}, but not into ${kinds}.`,
     '',
     'Options:',
     '- Switch to the dedicated DaemonSet: re-invoke with `app: "reporter"`. The Reporter runs alongside whatever forwarder you have today, zero-touch.',
     `- Add a supported forwarder to the cluster (${SUPPORTED_FORWARDERS.join(' / ')}), then re-run \`log10x_discover_env\` and \`log10x_advise_install\`.`,
-    '- Ask the Log10x team to prioritise the Filebeat receiver path.',
   ].join('\n');
 }
 

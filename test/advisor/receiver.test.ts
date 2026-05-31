@@ -57,19 +57,26 @@ const forwarders: ForwarderKind[] = [
 ];
 
 // Forwarders whose Receiver renderer has been migrated from the old
-// embedded-image `tenx:` block to the upstream-chart sidecar overlay
-// pattern (extraContainers + extraVolumes per deploy.md). Tests
-// assertion-branch on membership: migrated forwarders get sidecar-shape
-// assertions; the rest keep the legacy assertions until they're done.
-// Expand as each forwarder spec is rewritten.
+// embedded-image `tenx:` block to an upstream-chart overlay. All
+// supported forwarders are now on upstream charts — five use the
+// sidecar pattern (extraContainers + extraVolumes), filebeat uses the
+// image swap (no sidecar; engine runs as a child of filebeat inside
+// the same container, per the deploy.md doc). The sidecar-shape
+// assertions below skip filebeat since it has no log10x container to
+// look for.
 const MIGRATED_TO_SIDECAR = new Set<ForwarderKind>(['fluentbit', 'otel-collector', 'vector', 'logstash', 'fluentd']);
 
-// Receiver-path support status:
-//   - filebeat: BLOCKED — upstream elastic/filebeat chart has no
-//     extraContainers/extraVolumes hooks.
-//   - everything else: wizard-supported (fluentd via kustomize
-//     post-renderer overlay; the rest via plain extraContainers).
-const WIZARD_BLOCKED_RECEIVERS = new Set<ForwarderKind>(['filebeat']);
+// Filebeat uses image swap instead of a sidecar — the 10x engine runs
+// as a child of filebeat's entrypoint inside the same container. The
+// shape assertions for filebeat below check the image swap + the
+// daemonset.extraEnvs / extraVolumes / filebeatConfig overlay instead
+// of looking for a log10x container.
+const MIGRATED_TO_IMAGESWAP = new Set<ForwarderKind>(['filebeat']);
+
+// Every forwarder is wizard-supported now (no forked charts served).
+// Kept as a (currently empty) Set for forward compatibility when a
+// future forwarder lands as wizard-supported-but-not-yet-migrated.
+const WIZARD_BLOCKED_RECEIVERS = new Set<ForwarderKind>([]);
 const wizardSupportedReceivers = forwarders.filter((f) => !WIZARD_BLOCKED_RECEIVERS.has(f));
 
 /**
@@ -156,12 +163,27 @@ for (const fw of wizardSupportedReceivers) {
         ?? writeStep.file?.contents
         ?? '';
       assert.ok(!valuesContents.startsWith('tenx:'), `${fw} receiver overlays should NOT have a top-level tenx: block`);
+    } else if (MIGRATED_TO_IMAGESWAP.has(fw)) {
+      // Image-swap overlay shape (filebeat, per receiver/deploy.md): no
+      // sidecar container; the chart's default filebeat image is
+      // replaced with log10x/filebeat-10x and the engine runs as a
+      // child of filebeat's entrypoint inside that container. License,
+      // mode flags, and backend env vars all land on
+      // daemonset.extraEnvs / extraVolumes.
+      assert.ok(allEmitted.includes('image: "log10x/filebeat-10x"'), `${fw} should swap to the log10x/filebeat-10x image`);
+      assert.ok(allEmitted.includes('TENX_LICENSE_FILE'), `${fw} should read license via TENX_LICENSE_FILE in daemonset.extraEnvs`);
+      assert.ok(allEmitted.includes('TENX_RUN_ARGS'), `${fw} should set TENX_RUN_ARGS to drive @run/input/forwarder/filebeat @apps/receiver`);
+      assert.ok(allEmitted.includes('extraVolumes:'), `${fw} should mount the license Secret via daemonset.extraVolumes`);
+      // No log10x sidecar container in the image-swap path.
+      assert.ok(!/name:\s*log10x\b/.test(allEmitted), `${fw} should NOT declare a log10x sidecar container`);
+      assert.ok(!allEmitted.includes('image: log10x/edge-10x'), `${fw} should NOT reference the edge-10x sidecar image`);
     } else {
       // Unreachable: every wizardSupportedReceivers entry is in
-      // MIGRATED_TO_SIDECAR after the fluentd migration. Kept as a
-      // type-narrowing branch + future-proofing if a new forwarder lands
-      // in wizardSupportedReceivers before being added to the migrated set.
-      assert.fail(`${fw} is wizard-supported but not in MIGRATED_TO_SIDECAR — update the set`);
+      // MIGRATED_TO_SIDECAR or MIGRATED_TO_IMAGESWAP. Kept as a
+      // type-narrowing branch + future-proofing if a new forwarder
+      // lands in wizardSupportedReceivers before being added to either
+      // migrated set.
+      assert.fail(`${fw} is wizard-supported but not in MIGRATED_TO_SIDECAR or MIGRATED_TO_IMAGESWAP — update the set`);
     }
   });
 }
@@ -217,14 +239,13 @@ test('alreadyInstalled.receiver triggers a note, not a blocker', async () => {
 });
 
 test('receiver plan install commands reference the right chart', async () => {
-  // Only iterate the wizard-supported set; filebeat is blocked entirely
-  // and emits no install steps.
   const upstream: Partial<Record<ForwarderKind, string>> = {
     'fluentbit': 'fluent/fluent-bit',
     'otel-collector': 'open-telemetry/opentelemetry-collector',
     'vector': 'vector/vector',
     'logstash': 'elastic/logstash',
     'fluentd': 'fluent/fluentd',
+    'filebeat': 'elastic/filebeat',
   };
   for (const fw of wizardSupportedReceivers) {
     const plan = await buildReporterPlan({

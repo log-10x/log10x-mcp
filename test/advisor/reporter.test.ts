@@ -49,11 +49,12 @@ const forwarders: ForwarderKind[] = [
   'otel-collector',
 ];
 
-// Receiver wizard support status (matches src/lib/advisor/reporter.ts
-// blockers): filebeat is the only blocked forwarder (upstream chart has
-// no extraContainers hook). Everything else is wizard-supported — fluentd
-// via a kustomize post-renderer overlay; the rest via plain extraContainers.
-const WIZARD_BLOCKED_RECEIVERS = new Set<ForwarderKind>(['filebeat']);
+// All forwarders are wizard-supported now (no forked charts served).
+// Five use the sidecar pattern (extraContainers + extraVolumes);
+// filebeat uses image swap against elastic/filebeat. Kept as a
+// (currently empty) Set for forward compatibility if a future
+// forwarder lands as wizard-supported-but-not-yet-migrated.
+const WIZARD_BLOCKED_RECEIVERS = new Set<ForwarderKind>([]);
 const installableForwarders: ForwarderKind[] = forwarders.filter(
   (f) => !WIZARD_BLOCKED_RECEIVERS.has(f)
 );
@@ -303,12 +304,14 @@ test('forwarder values files do NOT embed gitToken or config.git noise', async (
   }
 });
 
-test('Receiver: verify probes target the log10x sidecar container', async () => {
-  // Migrated receivers all run a sidecar named `log10x`. At least one
-  // verify probe per forwarder should target it (the sidecar liveness
-  // check). The forwarder's own container is named per upstream chart
-  // convention (fluent-bit, vector, logstash, opentelemetry-collector) —
-  // probes that target it are still allowed, just not required.
+test('Receiver: verify probes target the log10x container or in-container engine', async () => {
+  // Sidecar-pattern receivers (fluentbit / fluentd / otel-collector /
+  // vector / logstash) run a sidecar named `log10x` — at least one
+  // verify probe should target it (sidecar liveness check). Image-swap
+  // receivers (filebeat) have no log10x sidecar; the engine runs as a
+  // child of the forwarder process inside the forwarder's own
+  // container, so the equivalent assertion is that at least one probe
+  // looks for tenx/10x/pattern in the forwarder container's logs.
   for (const fw of installableForwarders) {
     const plan = await buildReporterPlan({
       snapshot: baseSnapshot(),
@@ -318,10 +321,17 @@ test('Receiver: verify probes target the log10x sidecar container', async () => 
       destination: 'mock',
     });
     const probeCmds = plan.verify.flatMap((v) => v.commands).join(' ');
-    assert.ok(
-      probeCmds.includes('-c log10x'),
-      `${fw}: at least one verify probe should target the log10x sidecar container, got: ${probeCmds.slice(0, 400)}`
-    );
+    if (fw === 'filebeat') {
+      assert.ok(
+        /tenx|10x|pattern/.test(probeCmds) || probeCmds.includes('log10x/filebeat-10x'),
+        `${fw}: at least one verify probe should look for engine output in the filebeat container, got: ${probeCmds.slice(0, 400)}`
+      );
+    } else {
+      assert.ok(
+        probeCmds.includes('-c log10x'),
+        `${fw}: at least one verify probe should target the log10x sidecar container, got: ${probeCmds.slice(0, 400)}`
+      );
+    }
   }
 });
 
@@ -337,6 +347,7 @@ test('Receiver: chart refs are the right published names', async () => {
     'vector': 'vector/vector',
     'logstash': 'elastic/logstash',
     'fluentd': 'fluent/fluentd',
+    'filebeat': 'elastic/filebeat',
   };
   for (const fw of installableForwarders) {
     const plan = await buildReporterPlan({
@@ -356,17 +367,20 @@ test('Receiver: chart refs are the right published names', async () => {
 });
 
 test('Receiver: values + overlay files have the expected shape per forwarder', async () => {
-  // Every wizard-supported receiver runs a log10x sidecar that reads its
-  // license from a Secret-mounted file via TENX_LICENSE_FILE. The
-  // chart-side surface differs:
-  //   - fluentbit, otel-collector, vector, logstash: extraContainers +
-  //     (extraVolumes | secretMounts) in values.yaml.
-  //   - fluentd: extraContainers does not exist on the upstream chart, so
-  //     the sidecar lives in tenx-kustomize/sidecar-patch.yaml emitted
-  //     alongside values.yaml; helm uses --post-renderer to weave them.
-  // Concatenate every file the write step emits so the shape assertions
-  // catch references regardless of which file they land in.
-  const migrated = new Set<ForwarderKind>(['fluentbit', 'otel-collector', 'vector', 'logstash', 'fluentd']);
+  // Receiver overlays come in two shapes:
+  //   - SIDECAR (fluentbit, otel-collector, vector, logstash, fluentd):
+  //     a log10x container is injected via extraContainers + extraVolumes
+  //     (or secretMounts for logstash). Fluentd uses a kustomize patch
+  //     for the same effect because the upstream chart has no
+  //     extraContainers field.
+  //   - IMAGE SWAP (filebeat): no sidecar; the chart's default image is
+  //     replaced with log10x/filebeat-10x and the engine runs as a
+  //     child of filebeat's entrypoint inside that container. License
+  //     and run-args land on daemonset.extraEnvs / extraVolumes.
+  // Either way, the license JWT must never appear inline — it lives in
+  // a Kubernetes Secret the user creates out-of-band.
+  const migratedSidecar = new Set<ForwarderKind>(['fluentbit', 'otel-collector', 'vector', 'logstash', 'fluentd']);
+  const migratedImageSwap = new Set<ForwarderKind>(['filebeat']);
   for (const fw of installableForwarders) {
     const plan = await buildReporterPlan({
       snapshot: baseSnapshot(),
@@ -379,13 +393,13 @@ test('Receiver: values + overlay files have the expected shape per forwarder', a
     assert.ok(writeStep, `${fw} should have a file-write step`);
     const allFiles = writeStep!.files ?? (writeStep!.file ? [writeStep!.file] : []);
     const allEmitted = allFiles.map((f) => f.contents).join('\n--\n');
-    if (migrated.has(fw)) {
+    // Universal: the JWT must never appear inline. License is mounted
+    // from a Kubernetes Secret.
+    assert.ok(!allEmitted.includes('licenseJwt: "test-key"'), `${fw} should NOT embed the JWT inline (license-Secret pattern)`);
+    if (migratedSidecar.has(fw)) {
       assert.ok(/name:\s*log10x\b/.test(allEmitted), `${fw} should declare a sidecar named log10x`);
       assert.ok(allEmitted.includes('image: log10x/edge-10x'), `${fw} should mount the log10x/edge-10x sidecar`);
       assert.ok(allEmitted.includes('TENX_LICENSE_FILE'), `${fw} should set TENX_LICENSE_FILE in the sidecar env`);
-      // The JWT must never appear inline in any emitted file — the
-      // license is mounted from a Kubernetes Secret.
-      assert.ok(!allEmitted.includes('licenseJwt: "test-key"'), `${fw} should NOT embed the JWT inline (license-Secret pattern)`);
       // Plain-values forwarders express extraContainers + (extraVolumes
       // | secretMounts) in values.yaml; fluentd splits across the
       // kustomize patch (no extraContainers field on the upstream
@@ -397,10 +411,14 @@ test('Receiver: values + overlay files have the expected shape per forwarder', a
           `${fw} should mount the license Secret via extraVolumes or secretMounts`
         );
       }
+    } else if (migratedImageSwap.has(fw)) {
+      assert.ok(allEmitted.includes('image: "log10x/filebeat-10x"'), `${fw} should swap to the log10x/filebeat-10x image`);
+      assert.ok(allEmitted.includes('TENX_LICENSE_FILE'), `${fw} should set TENX_LICENSE_FILE in daemonset.extraEnvs`);
+      assert.ok(allEmitted.includes('TENX_RUN_ARGS'), `${fw} should drive @apps/receiver via TENX_RUN_ARGS`);
+      assert.ok(allEmitted.includes('extraVolumes:'), `${fw} should mount the license Secret via daemonset.extraVolumes`);
+      assert.ok(!/name:\s*log10x\b/.test(allEmitted), `${fw} should NOT declare a log10x sidecar container`);
     } else {
-      const content = allFiles[0]?.contents ?? '';
-      assert.ok(content.includes('tenx:'), `${fw} file should declare tenx block (legacy embedded-image shape)`);
-      assert.ok(content.includes('licenseJwt: "test-key"'), `${fw} file should embed license JWT (legacy shape)`);
+      assert.fail(`${fw} is wizard-supported but unmigrated — add it to migratedSidecar or migratedImageSwap`);
     }
   }
 });
