@@ -36,6 +36,7 @@ import {
 import { createLimiter } from '../lib/concurrency.js';
 import { fmtCount } from '../lib/format.js';
 import { retrieverNotConfiguredMessage } from './retriever-query.js';
+import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 
 /** Cap on group-by cardinality. Tail collapsed to "_other_". */
@@ -123,7 +124,9 @@ export async function executeRetrieverSeries(
     if (view === 'markdown') {
       return __bme({ tool: 'log10x_retriever_series', summary: { headline: 'Retriever not configured' }, markdown: md });
     }
-    return __be({ tool: 'log10x_retriever_series', view: 'summary', summary: { headline: 'Retriever not configured — series refused.' }, data: { ok: false, error: 'retriever_not_configured' } });
+    // Typed not_configured (status + advise_retriever action) so an agent
+    // branches on data.status, matching retriever_query and the framework.
+    return buildNotConfiguredEnvelope({ tool: 'log10x_retriever_series', kind: 'retriever', remediation: md });
   }
   // Defensive defaults — match retrieverSeriesSchema for non-SDK
   // callers. Narrow into a fully-populated args local so the helper

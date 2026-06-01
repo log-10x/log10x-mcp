@@ -29,6 +29,7 @@ import { aggregate, type AggregationType } from '../lib/aggregator.js';
 import { emitSeries, type Destination } from '../lib/metric-emitters.js';
 import { fmtCount, normalizePattern } from '../lib/format.js';
 import { retrieverNotConfiguredMessage } from './retriever-query.js';
+import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
 import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
 export const backfillMetricSchema = {
@@ -100,7 +101,9 @@ export async function executeBackfillMetric(
     if (view === 'markdown') {
       return buildMarkdownEnvelope({ tool: 'log10x_backfill_metric', summary: { headline: 'Retriever not configured' }, markdown: md });
     }
-    return buildEnvelope({ tool: 'log10x_backfill_metric', view: 'summary', summary: { headline: 'Retriever not configured — backfill requires archive access.' }, data: { ok: false, error: 'retriever_not_configured' } });
+    // Typed not_configured (status + advise_retriever action) so an agent
+    // branches on data.status, matching retriever_query and the framework.
+    return buildNotConfiguredEnvelope({ tool: 'log10x_backfill_metric', kind: 'retriever', remediation: md });
   }
   const sumOut: { data?: BackfillMetricSummary } = {};
   const md = await executeBackfillMetricInner(args, env, sumOut);
