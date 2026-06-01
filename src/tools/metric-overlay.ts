@@ -32,7 +32,8 @@
 import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
 import { queryRange } from '../lib/api.js';
-import { resolveBackend } from '../lib/customer-metrics.js';
+import { resolveBackend, customerMetricsNotConfiguredMessage, formatDetectionTrace } from '../lib/customer-metrics.js';
+import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { LABELS } from '../lib/promql.js';
 import { parseTimeframe } from '../lib/format.js';
@@ -188,22 +189,11 @@ export async function executeMetricOverlay(
       anchorExpression = args.anchor;
       const backend = await resolveBackend();
       if (!backend.backend) {
-        return overlayErrorEnvelope({
-          anchor_type: args.anchor_type,
-          anchor_expression: anchorExpression,
-          candidate: args.candidate,
-          window,
-          stepSeconds,
-          thresholdBasis,
-          queryCount,
-          totalLatencyMs,
-          throttledHit,
-          err: {
-            error_type: 'backend_unavailable',
-            retryable: false,
-            suggested_backoff_ms: null,
-            hint: 'Customer metrics backend not configured. Set LOG10X_CUSTOMER_METRICS_URL.',
-          },
+        // Expected not_configured state, not a failure; branchable envelope.
+        return buildNotConfiguredEnvelope({
+          tool: 'log10x_metric_overlay',
+          kind: 'customer_metrics',
+          remediation: customerMetricsNotConfiguredMessage(formatDetectionTrace(backend.trace)),
         });
       }
       const res = await timedQuery(() => backend.backend!.queryRange(args.anchor, fromSec, nowSec, stepSeconds));
@@ -249,22 +239,10 @@ export async function executeMetricOverlay(
   // ── Fetch candidate series (always customer-side) ───────────────────
   const backend = await resolveBackend();
   if (!backend.backend) {
-    return overlayErrorEnvelope({
-      anchor_type: args.anchor_type,
-      anchor_expression: anchorExpression,
-      candidate: args.candidate,
-      window,
-      stepSeconds,
-      thresholdBasis,
-      queryCount,
-      totalLatencyMs,
-      throttledHit,
-      err: {
-        error_type: 'backend_unavailable',
-        retryable: false,
-        suggested_backoff_ms: null,
-        hint: 'Customer metrics backend not configured. Set LOG10X_CUSTOMER_METRICS_URL.',
-      },
+    return buildNotConfiguredEnvelope({
+      tool: 'log10x_metric_overlay',
+      kind: 'customer_metrics',
+      remediation: customerMetricsNotConfiguredMessage(formatDetectionTrace(backend.trace)),
     });
   }
   let candSeries: Array<[number, number]>;

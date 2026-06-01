@@ -17,7 +17,8 @@
 import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
 import { queryRange } from '../lib/api.js';
-import { resolveBackend } from '../lib/customer-metrics.js';
+import { resolveBackend, customerMetricsNotConfiguredMessage, formatDetectionTrace } from '../lib/customer-metrics.js';
+import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { LABELS } from '../lib/promql.js';
 import { parseTimeframe } from '../lib/format.js';
@@ -215,22 +216,12 @@ export async function executeRankByShapeSimilarity(
       anchorExpression = args.anchor;
       const backendInfo = await resolveBackend();
       if (!backendInfo.backend) {
-        return rankErrorEnvelope({
-          anchor_type: args.anchor_type,
-          anchor_expression: anchorExpression,
-          window,
-          stepSeconds,
-          floor: phaseAlignedFloor,
-          thresholdBasis,
-          queryCount,
-          totalLatencyMs,
-          throttledHit,
-          err: {
-            error_type: 'backend_unavailable',
-            retryable: false,
-            suggested_backoff_ms: null,
-            hint: 'Customer metrics backend not configured. Set LOG10X_CUSTOMER_METRICS_URL.',
-          },
+        // Expected not_configured state, not a failure; branchable envelope
+        // so the chain continues (cross-pillar primitives are graceful).
+        return buildNotConfiguredEnvelope({
+          tool: 'log10x_rank_by_shape_similarity',
+          kind: 'customer_metrics',
+          remediation: customerMetricsNotConfiguredMessage(formatDetectionTrace(backendInfo.trace)),
         });
       }
       const res = await timedQuery(() => backendInfo.backend!.queryRange(args.anchor, fromSec, nowSec, stepSeconds));
@@ -307,22 +298,10 @@ export async function executeRankByShapeSimilarity(
   // ── Candidates ──────────────────────────────────────────────────────
   const customer = await resolveBackend();
   if (!customer.backend) {
-    return rankErrorEnvelope({
-      anchor_type: args.anchor_type,
-      anchor_expression: anchorExpression,
-      window,
-      stepSeconds,
-      floor: phaseAlignedFloor,
-      thresholdBasis,
-      queryCount,
-      totalLatencyMs,
-      throttledHit,
-      err: {
-        error_type: 'backend_unavailable',
-        retryable: false,
-        suggested_backoff_ms: null,
-        hint: 'Customer metrics backend not configured. Set LOG10X_CUSTOMER_METRICS_URL.',
-      },
+    return buildNotConfiguredEnvelope({
+      tool: 'log10x_rank_by_shape_similarity',
+      kind: 'customer_metrics',
+      remediation: customerMetricsNotConfiguredMessage(formatDetectionTrace(customer.trace)),
     });
   }
 

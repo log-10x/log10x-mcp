@@ -25,7 +25,8 @@
 import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
 import { queryRange } from '../lib/api.js';
-import { resolveBackend } from '../lib/customer-metrics.js';
+import { resolveBackend, customerMetricsNotConfiguredMessage, formatDetectionTrace } from '../lib/customer-metrics.js';
+import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { LABELS } from '../lib/promql.js';
 import { parseTimeframe } from '../lib/format.js';
@@ -216,23 +217,14 @@ export async function executeMetricsThatMoved(
       anchorExpression = args.anchor;
       const backendInfo = await resolveBackend();
       if (!backendInfo.backend) {
-        return errorEnvelope({
+        // Missing customer metrics backend is an expected not_configured
+        // state, not a failure: return a branchable envelope so the chain
+        // continues. (Design intent: the cross-pillar primitives are
+        // graceful chain participants, not loud throwers or error returns.)
+        return buildNotConfiguredEnvelope({
           tool: 'log10x_metrics_that_moved',
-          anchor_type: args.anchor_type,
-          anchor_expression: anchorExpression,
-          window,
-          stepSeconds,
-          floor,
-          thresholdBasis,
-          queryCount,
-          totalLatencyMs,
-          throttledHit,
-          err: {
-            error_type: 'backend_unavailable',
-            retryable: false,
-            suggested_backoff_ms: null,
-            hint: 'Customer metrics backend not configured. Set LOG10X_CUSTOMER_METRICS_URL.',
-          },
+          kind: 'customer_metrics',
+          remediation: customerMetricsNotConfiguredMessage(formatDetectionTrace(backendInfo.trace)),
         });
       }
       const res = await timedQuery(() => backendInfo.backend!.queryRange(args.anchor, fromSec, nowSec, stepSeconds));
@@ -322,23 +314,10 @@ export async function executeMetricsThatMoved(
   // ── Candidates ──────────────────────────────────────────────────────
   const customerBackend = await resolveBackend();
   if (!customerBackend.backend) {
-    return errorEnvelope({
+    return buildNotConfiguredEnvelope({
       tool: 'log10x_metrics_that_moved',
-      anchor_type: args.anchor_type,
-      anchor_expression: anchorExpression,
-      window,
-      stepSeconds,
-      floor,
-      thresholdBasis,
-      queryCount,
-      totalLatencyMs,
-      throttledHit,
-      err: {
-        error_type: 'backend_unavailable',
-        retryable: false,
-        suggested_backoff_ms: null,
-        hint: 'Customer metrics backend not configured. Set LOG10X_CUSTOMER_METRICS_URL.',
-      },
+      kind: 'customer_metrics',
+      remediation: customerMetricsNotConfiguredMessage(formatDetectionTrace(customerBackend.trace)),
     });
   }
 

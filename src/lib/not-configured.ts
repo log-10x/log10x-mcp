@@ -17,6 +17,12 @@
  */
 
 import type { Environments } from './environments.js';
+import {
+  buildEnvelope,
+  StructuredOutputSchema,
+  type StructuredOutput,
+  type Action,
+} from './output-types.js';
 
 export interface NotConfiguredOptions {
   /** The tool that's reporting the not-configured state, for context. */
@@ -76,4 +82,195 @@ export function notConfiguredMessageIfNeeded(envs: Environments, callingTool: st
     return renderNotConfigured({ callingTool });
   }
   return undefined;
+}
+
+// ── Typed not-configured envelope framework ───────────────────────────
+//
+// A tool that hits a missing precondition (no metrics backend, no SIEM
+// creds, no Retriever, no gitops repo) should hand the agent a
+// BRANCHABLE result, not an opaque error string, otherwise one missing
+// precondition aborts the whole autonomous chain. `not_configured` is an
+// EXPECTED state, not a failure: the envelope carries `data.status =
+// 'not_configured'`, a remediation block, and optional next-step
+// `actions[]`, and the call does NOT set `isError`. The agent reads the
+// status, surfaces the fix, and continues the chain without this tool.
+//
+// Two ways in:
+//   1. A tool returns `buildNotConfiguredEnvelope(...)` directly (the
+//      graceful path, what the cross-pillar primitives / discover_join do).
+//   2. A tool THROWS (the loud human-escape-hatch path, e.g.
+//      customer_metrics_query). `wrap()` in index.ts catches it, recognises
+//      it via `isNotConfiguredError`, and converts it with
+//      `notConfiguredEnvelopeFromError`, so even a deliberate throw reaches
+//      the agent as a structured, chain-safe envelope.
+
+/** Which precondition is missing. Drives the default remediation copy. */
+export type NotConfiguredKind =
+  | 'metrics_backend'
+  | 'customer_metrics'
+  | 'retriever'
+  | 'siem'
+  | 'gitops'
+  | 'generic';
+
+/**
+ * Throw this from a tool when a precondition is missing and you want the
+ * loud-failure path (the throw is caught at the `wrap()` chokepoint and
+ * converted to a structured `not_configured` envelope). Carries the kind,
+ * a remediation markdown block, and optional next-step actions so the
+ * chokepoint can build a rich envelope without re-deriving them.
+ */
+export class NotConfiguredError extends Error {
+  /** Stable discriminator read by `isNotConfiguredError` (survives bundling). */
+  readonly code = 'not_configured' as const;
+  readonly kind: NotConfiguredKind;
+  readonly remediation?: string;
+  readonly actions?: Action[];
+  constructor(
+    kind: NotConfiguredKind,
+    opts?: { message?: string; remediation?: string; actions?: Action[] },
+  ) {
+    super(opts?.message ?? `Precondition not configured: ${kind}.`);
+    this.name = 'NotConfiguredError';
+    this.kind = kind;
+    this.remediation = opts?.remediation;
+    this.actions = opts?.actions;
+  }
+}
+
+/**
+ * Recognise a "not configured" error at the `wrap()` chokepoint:
+ * precisely, by discriminator, NOT by fuzzy message matching (a stray
+ * "...is not configured" in some unrelated error must not be hijacked).
+ * Matches: our own `NotConfiguredError` (by `code`), and the engine's
+ * `CustomerMetricsNotConfiguredError` (by `name`). Matching by name keeps
+ * this base module dependency-free: it must not import customer-metrics.ts
+ * (this is a low-level module many tools import; pulling the heavy
+ * customer-metrics graph in here would bloat the import surface and risk a
+ * future cycle).
+ */
+export function isNotConfiguredError(e: unknown): boolean {
+  if (e instanceof NotConfiguredError) return true;
+  if (e && typeof e === 'object') {
+    const o = e as { code?: unknown; name?: unknown };
+    if (o.code === 'not_configured') return true;
+    if (o.name === 'CustomerMetricsNotConfiguredError') return true;
+  }
+  return false;
+}
+
+/**
+ * Build a structured `not_configured` envelope. `remediation` is the
+ * markdown the agent should surface; `actions` are the next-step tool
+ * calls that fix it. The headline tells the agent this is an expected
+ * state to branch on, not a failure to retry.
+ */
+export function buildNotConfiguredEnvelope(args: {
+  tool: string;
+  kind?: NotConfiguredKind;
+  remediation: string;
+  actions?: Action[];
+  diagnostic?: string;
+}): StructuredOutput {
+  const kind = args.kind ?? 'generic';
+  const remediation =
+    args.diagnostic ? `${args.remediation}\n\nDetection trace:\n${args.diagnostic}` : args.remediation;
+  return buildEnvelope({
+    tool: args.tool,
+    view: 'summary',
+    summary: {
+      headline:
+        `\`${args.tool}\` ran but its ${kind.replace(/_/g, ' ')} precondition is not configured. ` +
+        `This is an expected state, not a failure: read data.remediation, surface the fix, and ` +
+        `continue the chain without this tool.`,
+    },
+    data: {
+      status: 'not_configured',
+      precondition: kind,
+      remediation,
+    },
+    // Fall back to the per-kind default next step so EVERY not_configured
+    // envelope (primitives, chokepoint, demo-gate) carries a concrete action
+    // without each caller wiring it.
+    actions: args.actions ?? defaultActionsForKind(kind),
+    warnings: [
+      `${args.tool}: ${kind.replace(/_/g, ' ')} not configured, call did not fail (data.status = 'not_configured'). Do not retry verbatim; remediate or continue without it.`,
+    ],
+  });
+}
+
+/** Default remediation actions per kind, so the agent has a concrete next step. */
+export function defaultActionsForKind(kind: NotConfiguredKind): Action[] {
+  switch (kind) {
+    case 'metrics_backend':
+      return [
+        {
+          tool: 'log10x_configure_env',
+          args: {},
+          reason: 'configure a metrics backend (log10x / Prometheus / Mimir / AMP / Datadog / ...) then re-run',
+          role: 'required-next',
+        },
+      ];
+    case 'retriever':
+      return [
+        {
+          tool: 'log10x_advise_retriever',
+          args: {},
+          reason: 'stand up the Retriever S3 archive + index, then re-run',
+          role: 'required-next',
+        },
+      ];
+    // customer_metrics / siem / gitops / generic intentionally return no
+    // action: their remediation is shell/env-var setup (e.g.
+    // LOG10X_CUSTOMER_METRICS_URL, DD_API_KEY, AWS chain) that NO MCP tool
+    // performs. Pointing at log10x_configure_env would mislead (that tool
+    // configures the log-tier metrics_backend, a different backend). The
+    // remediation markdown spells out the env vars; the agent continues
+    // without the tool. Empty actions[] is the honest signal here.
+    default:
+      return [];
+  }
+}
+
+/**
+ * Convert a thrown error into a structured `not_configured` envelope.
+ * Used by the `wrap()` chokepoint so a deliberate throw (the loud
+ * human-escape-hatch path) still reaches the agent as a branchable,
+ * chain-safe result. Falls back to a generic envelope carrying the raw
+ * message when the throw isn't a recognised kind.
+ */
+export function notConfiguredEnvelopeFromError(tool: string, e: unknown): StructuredOutput {
+  if (e instanceof NotConfiguredError) {
+    return buildNotConfiguredEnvelope({
+      tool,
+      kind: e.kind,
+      remediation: e.remediation ?? e.message,
+      actions: e.actions ?? defaultActionsForKind(e.kind),
+    });
+  }
+  const name = (e as { name?: string } | null)?.name;
+  const message = e instanceof Error ? e.message : String(e);
+  if (name === 'CustomerMetricsNotConfiguredError') {
+    // The error's own message already carries the full env-var remediation.
+    return buildNotConfiguredEnvelope({ tool, kind: 'customer_metrics', remediation: message });
+  }
+  return buildNotConfiguredEnvelope({ tool, kind: 'generic', remediation: message });
+}
+
+/**
+ * Validate + shape a `not_configured` envelope into the MCP tool-result
+ * form (text channel carries the JSON; structured channel ships the
+ * typed envelope). Mirrors the success path in `wrap()`; kept here so the
+ * chokepoint stays a one-liner and the not-configured contract lives in
+ * one place. NOT `isError`: `not_configured` is an expected state.
+ */
+export function notConfiguredToolResult(env: StructuredOutput): {
+  content: Array<{ type: 'text'; text: string }>;
+  structuredContent: Record<string, unknown>;
+} {
+  const validated = StructuredOutputSchema.parse(env);
+  return {
+    content: [{ type: 'text' as const, text: JSON.stringify(validated, null, 2) }],
+    structuredContent: validated as unknown as Record<string, unknown>,
+  };
 }

@@ -38,7 +38,14 @@ import { trendSchema, executeTrend } from './tools/trend.js';
 import { patternExamplesSchema, executePatternExamples } from './tools/pattern-examples.js';
 import { dependencyCheckSchema, executeDependencyCheck } from './tools/dependency-check.js';
 import { configureEnvSchema, executeConfigureEnv } from './tools/configure-env.js';
-import { renderNotConfigured } from './lib/not-configured.js';
+import {
+  renderNotConfigured,
+  buildNotConfiguredEnvelope,
+  defaultActionsForKind,
+  isNotConfiguredError,
+  notConfiguredEnvelopeFromError,
+  notConfiguredToolResult,
+} from './lib/not-configured.js';
 
 function notConfiguredMessageForTool(toolName: string): string {
   return renderNotConfigured({ callingTool: toolName });
@@ -218,9 +225,18 @@ async function wrap(
   // flow instead of returning silent-demo data.
   if (METRIC_REQUIRING_TOOLS.has(toolName) && envs && envs.isDemoMode && !envs.demoFallbackReason) {
     log.info(`tool.${toolName}.not_configured`);
-    return {
-      content: [{ type: 'text' as const, text: notConfiguredMessageForTool(toolName) }],
-    };
+    // Structured not_configured envelope (status + remediation + actions),
+    // not a bare text blob; the agent branches on data.status and the MCP
+    // SDK requires structuredContent for tools that declare an outputSchema
+    // (a text-only return here is rejected as "no structured content").
+    return notConfiguredToolResult(
+      buildNotConfiguredEnvelope({
+        tool: toolName,
+        kind: 'metrics_backend',
+        remediation: notConfiguredMessageForTool(toolName),
+        actions: defaultActionsForKind('metrics_backend'),
+      }),
+    );
   }
   // Mode gate: if the boot-time mode-detect determined this tool is
   // not available in the current mode, return a clear out-of-mode
@@ -350,6 +366,15 @@ async function wrap(
   } catch (e) {
     const raw = e instanceof Error ? e.message : String(e);
     log.debug(`tool.${toolName}.raw_err`, { msg: raw });
+    // A deliberate "not configured" throw (the loud human-escape-hatch
+    // path, e.g. customer_metrics_query) must not abort the agent's chain
+    // as an opaque error. Convert it to a structured, branchable
+    // not_configured envelope (status + remediation + actions, NOT isError)
+    // so the agent reads data.status, surfaces the fix, and continues.
+    if (isNotConfiguredError(e)) {
+      log.info(`tool.${toolName}.not_configured`, { ms: Date.now() - started });
+      return notConfiguredToolResult(notConfiguredEnvelopeFromError(toolName, e));
+    }
     log.warn(`tool.${toolName}.err`, { ms: Date.now() - started, msg: raw });
     return {
       content: [{ type: 'text' as const, text: applyDemoBanner(describeToolError(toolName, e)) }],
