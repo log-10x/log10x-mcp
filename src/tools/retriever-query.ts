@@ -33,6 +33,8 @@ import {
 import { fmtCount } from '../lib/format.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { resolveMetricsEnv } from '../lib/resolve-env.js';
+import { getOffloadStatusBatch } from '../lib/offload-status.js';
 
 export const retrieverQuerySchema = {
   pattern: z
@@ -126,6 +128,23 @@ interface RetrieverQuerySummary {
     severity?: string;
     service?: string;
     text?: string;
+  }>;
+  /**
+   * Per-`tenx_hash` offload status for hashes that appear on the returned
+   * events. Populated best-effort via a single batched PromQL lookup
+   * (`getOffloadStatusBatch`) against the metric surface — the receiver
+   * stamps `isDropped="true"` on every event it routes to the
+   * customer-owned offload bucket, so a non-zero dropped share over the
+   * lookup window means the pattern is currently being offloaded.
+   *
+   * Absent when no events were returned, the lookup timed out, or no hash
+   * had non-zero `ok` data. Subset of `OffloadStatus` — only the fields
+   * a caller needs to route to retriever_query / advise_retriever.
+   */
+  offload_status_by_hash?: Record<string, {
+    is_offloaded: boolean;
+    dropped_share_pct: number;
+    last_seen_dropped_ts: number | null;
   }>;
 }
 
@@ -326,6 +345,83 @@ async function executeRetrieverQueryInner(
     }
   }
 
+  // Offload-status lookup: for each distinct tenx_hash that appeared on
+  // the returned events, ask the metric surface whether the receiver is
+  // currently routing it to forwarder offload. Best-effort, 2s budget;
+  // failures surface as `undefined` and never block the response.
+  let offloadByHash: Record<string, {
+    is_offloaded: boolean;
+    dropped_share_pct: number;
+    last_seen_dropped_ts: number | null;
+  }> | undefined;
+  let patternHashForNudge: string | undefined;
+  if (resp.events.length > 0) {
+    const hashes = new Set<string>();
+    for (const ev of resp.events) {
+      const h = (ev as unknown as Record<string, unknown>).tenx_hash;
+      if (typeof h === 'string' && h.length > 0) hashes.add(h);
+    }
+    if (hashes.size > 0) {
+      try {
+        const metricsEnv = await resolveMetricsEnv(env);
+        const batch = await getOffloadStatusBatch(env, {
+          patternHashes: [...hashes],
+          metricsEnv,
+          range: '24h',
+          timeoutMs: 2000,
+        });
+        const projected: Record<string, {
+          is_offloaded: boolean;
+          dropped_share_pct: number;
+          last_seen_dropped_ts: number | null;
+        }> = {};
+        for (const [h, s] of Object.entries(batch)) {
+          if (!s.ok) continue;
+          projected[h] = {
+            is_offloaded: s.is_offloaded,
+            dropped_share_pct: s.dropped_share_pct,
+            last_seen_dropped_ts: s.last_seen_dropped_ts,
+          };
+        }
+        if (Object.keys(projected).length > 0) offloadByHash = projected;
+
+        // Markdown nudge — fires only when the caller scoped to ONE
+        // pattern (args.pattern is set), that pattern's hash is in the
+        // offload-positive set, and the retriever is configured (we
+        // checked at the outer entry, so it is here). The hash is read
+        // off any event carrying args.pattern. See spec section B.
+        if (offloadByHash && args.pattern) {
+          for (const ev of resp.events) {
+            const evRec = ev as unknown as Record<string, unknown>;
+            const evPattern = evRec.tenx_user_pattern;
+            const evHash = evRec.tenx_hash;
+            if (typeof evPattern === 'string' && evPattern === args.pattern &&
+                typeof evHash === 'string' && offloadByHash[evHash]?.is_offloaded) {
+              patternHashForNudge = evHash;
+              break;
+            }
+          }
+          if (!patternHashForNudge) {
+            // Pattern name didn't ride on the event payload (older
+            // archive shape). Fall back to "any single hash is
+            // offloaded" — we already scoped the search to one pattern,
+            // so a single hash in the result set is overwhelmingly the
+            // same pattern.
+            const offloadedHashes = Object.entries(offloadByHash).filter(([, s]) => s.is_offloaded);
+            if (offloadedHashes.length === 1) patternHashForNudge = offloadedHashes[0][0];
+          }
+          if (patternHashForNudge) {
+            const share = offloadByHash[patternHashForNudge].dropped_share_pct;
+            lines.push('');
+            lines.push(
+              `> **Offload detected**: this pattern is currently routed to forwarder offload (~${share.toFixed(0)}% of recent volume marked \`isDropped\`). Live events flow to your offload bucket; re-run \`log10x_retriever_query{pattern: "${args.pattern}", from: "now-1h"}\` against the offloaded slice, or check \`log10x_advise_retriever\` for the bucket recipe.`,
+            );
+          }
+        }
+      } catch { /* best-effort */ }
+    }
+  }
+
   // Structured NEXT_ACTIONS for autonomous chains.
   const nextActions: NextAction[] = [];
   const partialDiag = (resp.diagnostics as RetrieverQueryDiagnostics & { partialResults?: boolean })?.partialResults;
@@ -341,6 +437,13 @@ async function executeRetrieverQueryInner(
       tool: 'log10x_retriever_series',
       args: { pattern: args.pattern, from: args.from, to: args.to, bucket_size: '1h' },
       reason: 'time-bucketed series across the same window (fidelity-aware: exact vs sampled)',
+    });
+  }
+  if (offloadByHash && Object.values(offloadByHash).some((s) => s.is_offloaded)) {
+    nextActions.push({
+      tool: 'log10x_advise_retriever',
+      args: {},
+      reason: 'pattern(s) currently routed to forwarder offload — verify the bucket recipe is wired',
     });
   }
   const block = renderNextActions(nextActions);
@@ -392,6 +495,7 @@ async function executeRetrieverQueryInner(
       by_service: Object.keys(byService).length > 0 ? byService : undefined,
       by_day: Object.keys(byDay).length > 0 ? byDay : undefined,
       events_preview: previewEvents,
+      offload_status_by_hash: offloadByHash,
     };
   }
 

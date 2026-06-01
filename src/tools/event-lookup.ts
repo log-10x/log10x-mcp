@@ -23,6 +23,8 @@ import { fetchOneSampleByHash } from '../lib/siem/sample.js';
 import { patternDisplay } from '../lib/pattern-descriptor.js';
 import { buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
+import { getOffloadStatus } from '../lib/offload-status.js';
+import { isRetrieverConfigured } from '../lib/retriever-api.js';
 
 export const eventLookupSchema = {
   pattern: z.string().optional().describe('Pattern name or search term to look up (e.g., "Payment_Gateway_Timeout"). Omit when passing `tenxHash` instead.'),
@@ -43,6 +45,12 @@ interface EventLookupSummary {
   totals: { bytes: number; cost_per_window_usd: number | null; cost_baseline_usd: number | null; events: number; service_count: number };
   rate_source: 'list_price' | 'customer_supplied' | 'unset';
   resolved_from_hash?: string;
+  offload_status?: {
+    is_offloaded: boolean;
+    dropped_share_pct_24h: number;
+    kept_share_pct_24h: number;
+    recommend_action: 'none' | 'use_retriever_query' | 'check_advise_retriever';
+  };
 }
 
 export async function executeEventLookup(
@@ -317,6 +325,50 @@ async function formatResults(
   rows.sort((a, b) => b.bytes - a.bytes);
   const maxBytes = rows.length ? Math.max(...rows.map(r => r.bytes)) : 0;
 
+  // Offload status (best-effort, 2s timeout). Resolve hash once: prefer
+  // the hash the caller arrived with (resolvedFromHash), otherwise one
+  // cheap topk(1) round-trip to recover it from the pattern name. On any
+  // failure / timeout the field stays absent — gates downstream render.
+  let offloadStatus: EventLookupSummary['offload_status'];
+  try {
+    let hashToQuery: string | undefined = resolvedFromHash;
+    if (!hashToQuery) {
+      const hq = `topk(1, sum by (${LABELS.hash}) (increase(all_events_summaryBytes_total{${LABELS.pattern}="${pattern.replace(/"/g, '\\"')}",${LABELS.env}="${metricsEnv}"}[24h])))`;
+      const hr = await queryInstant(env, hq).catch(() => null);
+      if (hr && hr.status === 'success' && hr.data.result.length > 0) {
+        const h = hr.data.result[0].metric[LABELS.hash];
+        if (typeof h === 'string' && h.length > 0) hashToQuery = h;
+      }
+    }
+    if (hashToQuery) {
+      const s = await getOffloadStatus(env, {
+        patternHash: hashToQuery,
+        metricsEnv,
+        range: '24h',
+        timeoutMs: 2000,
+      });
+      if (s.ok && s.is_offloaded) {
+        const total = s.kept_bytes_in_window + s.dropped_bytes_in_window;
+        const droppedShare = total > 0 ? (s.dropped_bytes_in_window / total) * 100 : 0;
+        const action: 'none' | 'use_retriever_query' | 'check_advise_retriever' =
+          isRetrieverConfigured() ? 'use_retriever_query' : 'check_advise_retriever';
+        offloadStatus = {
+          is_offloaded: true,
+          dropped_share_pct_24h: droppedShare,
+          kept_share_pct_24h: 100 - droppedShare,
+          recommend_action: action,
+        };
+      } else if (s.ok) {
+        offloadStatus = {
+          is_offloaded: false,
+          dropped_share_pct_24h: 0,
+          kept_share_pct_24h: 100,
+          recommend_action: 'none',
+        };
+      }
+    }
+  } catch { /* best-effort */ }
+
   // Populate the typed summary output for view='summary' callers.
   if (sumOut) {
     sumOut.data = {
@@ -344,6 +396,7 @@ async function formatResults(
       },
       rate_source: rateSource,
       resolved_from_hash: resolvedFromHash,
+      offload_status: offloadStatus,
     };
   }
 
@@ -400,6 +453,20 @@ async function formatResults(
     lines.push('');
   }
   if (lines[lines.length - 1] === '') lines.pop();
+
+  // Offload nudge — single line, declarative, only when the receiver is
+  // actively routing this pattern to forwarder offload. The recommended
+  // next call is retriever_query when the retriever is wired, otherwise
+  // advise_retriever for the bucket recipe.
+  if (offloadStatus && offloadStatus.is_offloaded) {
+    const dropped = fmtPct(offloadStatus.dropped_share_pct_24h);
+    const kept = fmtPct(offloadStatus.kept_share_pct_24h);
+    const tail = offloadStatus.recommend_action === 'use_retriever_query'
+      ? `Fetch the offloaded slice via \`log10x_retriever_query({ pattern: '${pattern}', from: 'now-24h' })\`.`
+      : `Check \`log10x_advise_retriever\` for the bucket recipe — the receiver is dropping but no retriever surface is configured.`;
+    lines.push('');
+    lines.push(`_Offload status (24h): ${dropped} of this pattern's volume is routed to forwarder offload via the receiver's isDropped marker (${kept} still flowing to the SIEM). ${tail}_`);
+  }
 
   // AI analysis
   try {

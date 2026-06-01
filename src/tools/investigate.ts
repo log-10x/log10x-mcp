@@ -43,7 +43,8 @@ import {
 } from '../lib/investigation-templates.js';
 import { recordInvestigation, getInvestigation, listInvestigations } from '../lib/investigation-cache.js';
 import { isRetrieverConfigured, runRetrieverQuery, parseTimeExpression } from '../lib/retriever-api.js';
-import { renderNextActions, type NextAction } from '../lib/next-actions.js';
+import { renderNextActions, extractNextActions, type NextAction } from '../lib/next-actions.js';
+import { getOffloadStatusBatch } from '../lib/offload-status.js';
 
 export const investigateSchema = {
   starting_point: z
@@ -193,6 +194,92 @@ export function buildHumanSummary(
   return `Strongest temporal evidence on "${starting_point}" (${window}): \`${parsed.leadPattern}\`${parsed.leadService ? ` in \`${parsed.leadService}\`` : ''} ${lagFragment}.${confFragment} ${parsed.chainLength} chain step(s), ${parsed.coMoverCount} additional lower-confidence co-mover(s). This is correlation, not proven cause — verify via traces / deploy timeline before acting.${calibTag}`;
 }
 
+/**
+ * Offload-status hint shape surfaced on the envelope. One entry per
+ * pattern (by name) that the env-mode top-N or the acute-spike chain
+ * reports as currently routed to forwarder offload. Best-effort; the
+ * field is absent on lookup failure.
+ */
+export interface TopOffloadedPattern {
+  pattern: string;
+  service: string | null;
+  tenx_hash: string;
+  dropped_share_pct_24h: number;
+  last_seen_dropped_ts: number | null;
+}
+
+/**
+ * Extract candidate pattern tokens from the rendered markdown. The
+ * `parseReport` lead pattern is added first; we then grep the Top
+ * movers / Co-movers / Temporal chain sections for backtick-quoted
+ * tokens. Capped at 10 distinct candidates so the downstream hash
+ * resolution stays bounded.
+ */
+function collectCandidatePatterns(md: string, parsed: ParsedReport): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const add = (p: string | null | undefined): void => {
+    if (!p) return;
+    const trimmed = p.trim();
+    if (!trimmed || seen.has(trimmed)) return;
+    if (trimmed.length > 200) return; // skip pathological tokens
+    seen.add(trimmed);
+    out.push(trimmed);
+  };
+  add(parsed.leadPattern);
+  for (const sectionHdr of [/^### Top movers/m, /^### Co-movers[^\n]*$/m, /^### Temporal chain[^\n]*$/m]) {
+    if (!sectionHdr.test(md)) continue;
+    const after = md.split(sectionHdr)[1] ?? '';
+    const upTo = after.split(/^### /m)[0] ?? '';
+    const matches = upTo.match(/`([^`\n]+)`/g) ?? [];
+    for (const m of matches) {
+      if (out.length >= 10) break;
+      add(m.slice(1, -1));
+    }
+    if (out.length >= 10) break;
+  }
+  return out.slice(0, 10);
+}
+
+/**
+ * Resolve pattern names to their `tenx_hash` values via topk(1) by
+ * total volume in the lookback window. One PromQL call per pattern,
+ * fired in parallel. Patterns whose hash can't be resolved are absent
+ * from the returned map. Per-call timeout matches the batch lookup.
+ */
+async function resolveHashesForPatterns(
+  env: EnvConfig,
+  patterns: string[],
+  metricsEnv: string,
+  timeoutMs = 2000,
+): Promise<Map<string, { hash: string; service: string | null }>> {
+  const out = new Map<string, { hash: string; service: string | null }>();
+  if (patterns.length === 0) return out;
+  const lookups = patterns.map(async (p) => {
+    const q =
+      `topk(1, sum by (${LABELS.hash}, ${LABELS.service}) ` +
+      `(increase(all_events_summaryBytes_total{${LABELS.env}="${metricsEnv}",${LABELS.pattern}="${escape(p)}"}[24h])))`;
+    try {
+      const racer = Promise.race([
+        queryInstant(env, q),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), timeoutMs)),
+      ]);
+      const res = await racer;
+      if (!res || res.status !== 'success') return;
+      const row = res.data.result[0];
+      if (!row) return;
+      const hash = row.metric[LABELS.hash];
+      if (!hash) return;
+      const service = row.metric[LABELS.service] ?? null;
+      out.set(p, { hash, service });
+    } catch {
+      /* best-effort */
+    }
+  });
+  await Promise.all(lookups);
+  return out;
+}
+
 export async function executeInvestigate(
   args: {
     starting_point: string;
@@ -247,6 +334,75 @@ export async function executeInvestigate(
   }
 
   const parsed = parseReport(md);
+
+  // ── Offload-status hint (best-effort, 2s outer timeout) ───────────
+  // Piggyback on the patterns the investigation already ranked: lead
+  // pattern + tokens grepped from Top movers / Co-movers / Temporal
+  // chain sections. Resolve names to tenx_hash, then one batched
+  // PromQL pair per cohort (kept + dropped) via getOffloadStatusBatch.
+  // Output: top_offloaded_patterns on the envelope + an appended
+  // markdown nudge when any candidate is offloaded. Lookup failure
+  // leaves the field undefined and the markdown untouched.
+  let topOffloaded: TopOffloadedPattern[] | undefined;
+  try {
+    const offloadResult = await Promise.race([
+      (async (): Promise<TopOffloadedPattern[] | undefined> => {
+        const candidates = collectCandidatePatterns(md, parsed);
+        if (candidates.length === 0) return undefined;
+        const metricsEnv = await resolveMetricsEnv(env);
+        const resolved = await resolveHashesForPatterns(env, candidates, metricsEnv);
+        if (resolved.size === 0) return undefined;
+        const hashes = [...new Set([...resolved.values()].map((v) => v.hash))];
+        const batch = await getOffloadStatusBatch(env, {
+          patternHashes: hashes,
+          metricsEnv,
+          range: '24h',
+          timeoutMs: 2000,
+        });
+        const offloaded: TopOffloadedPattern[] = [];
+        for (const pat of candidates) {
+          const r = resolved.get(pat);
+          if (!r) continue;
+          const status = batch[r.hash];
+          if (!status || !status.ok || !status.is_offloaded) continue;
+          offloaded.push({
+            pattern: pat,
+            service: r.service,
+            tenx_hash: r.hash,
+            dropped_share_pct_24h: status.dropped_share_pct,
+            last_seen_dropped_ts: status.last_seen_dropped_ts,
+          });
+        }
+        return offloaded.length > 0 ? offloaded : undefined;
+      })(),
+      new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 2000)),
+    ]);
+    topOffloaded = offloadResult;
+  } catch {
+    /* best-effort */
+  }
+
+  // Markdown nudge — append BEFORE the envelope build, AFTER parseReport
+  // (the regexes parseReport keys on do not appear in the nudge text,
+  // verified by inspection of investigate.ts:118-143).
+  if (topOffloaded && topOffloaded.length > 0) {
+    const names = topOffloaded
+      .map((t) => `\`${t.pattern}\` (${t.dropped_share_pct_24h.toFixed(0)}%)`)
+      .join(', ');
+    const nudge =
+      `\n\n> **Offload-aware routing**: ${topOffloaded.length} of the patterns above ` +
+      `are currently routed to forwarder offload. Fetch live events for them via ` +
+      `\`log10x_retriever_query{pattern: "<name>"}\` rather than the SIEM. ` +
+      `Offloaded: ${names}.`;
+    md = md + nudge;
+  }
+  const topOffloadedSample = topOffloaded?.[0];
+  if (topOffloadedSample) {
+    // Re-emit the trailing NEXT_ACTIONS block with the offload-pivot
+    // action threaded in. The original block was emitted by
+    // executeInvestigateInner before offload-status was known.
+    md = rewriteNextActionsWithOffload(md, topOffloadedSample);
+  }
 
   // ── Status determination ──────────────────────────────────────────
   let status: InvestigateStatus = 'success';
@@ -334,6 +490,7 @@ export async function executeInvestigate(
       shape: parsed.shape,
       use_bytes: args.use_bytes,
       report_markdown: md,
+      top_offloaded_patterns: topOffloaded,
     },
   });
 }
@@ -805,7 +962,11 @@ async function executeInvestigateInner(
 // emit the canonical post-investigation chain links so an orchestrator
 // reading the structured block can continue without prose-parsing the
 // markdown body.
-function buildInvestigateNextActions(anchor?: string, window?: string): NextAction[] {
+function buildInvestigateNextActions(
+  anchor?: string,
+  window?: string,
+  topOffloadedSample?: { pattern: string },
+): NextAction[] {
   if (!anchor) return [];
   const out: NextAction[] = [
     {
@@ -824,12 +985,63 @@ function buildInvestigateNextActions(anchor?: string, window?: string): NextActi
       reason: 'time series for the investigated pattern',
     },
   ];
+  if (topOffloadedSample) {
+    out.push({
+      tool: 'log10x_retriever_query',
+      args: { pattern: topOffloadedSample.pattern, from: 'now-24h' },
+      reason: 'top mover is currently routed to forwarder offload — pull live events from the offload bucket',
+    });
+  }
   return out;
 }
 
-function appendInvestigateNextActions(report: string, anchor?: string, window?: string): string {
-  const block = renderNextActions(buildInvestigateNextActions(anchor, window));
+function appendInvestigateNextActions(
+  report: string,
+  anchor?: string,
+  window?: string,
+  topOffloadedSample?: { pattern: string },
+): string {
+  const block = renderNextActions(buildInvestigateNextActions(anchor, window, topOffloadedSample));
   return block ? `${report}\n\n${block}` : report;
+}
+
+/**
+ * Rewrite the trailing NEXT_ACTIONS block in an already-rendered
+ * investigation report to include an offload-pivot action. Used by
+ * `executeInvestigate` after the offload-status lookup completes —
+ * the `appendInvestigateNextActions` / per-mode block was emitted
+ * before offload status was known, so we strip the trailing block,
+ * parse out the existing actions, append the offload-pivot, and
+ * re-emit. Works for both acute/drift (anchor-driven) and env-mode
+ * (no anchor) paths because we read the existing actions from the
+ * machine-parseable block rather than rebuilding from arguments.
+ *
+ * Best-effort: if the existing block can't be located the report is
+ * returned unchanged.
+ */
+function rewriteNextActionsWithOffload(
+  report: string,
+  topOffloadedSample: { pattern: string },
+): string {
+  // The block is the trailing pair of HTML-comment-guarded segments
+  // emitted by renderNextActions(); identify it by the leading
+  // PRESENT_OPEN marker. Strip from there to end-of-string, re-extract
+  // the existing actions, append the offload pivot, re-emit.
+  const PRESENT_OPEN = '<!-- NEXT_STEPS_FOR_USER:';
+  const idx = report.lastIndexOf(PRESENT_OPEN);
+  if (idx === -1) return report; // no existing block — nothing to splice
+  const existing = extractNextActions(report);
+  const trimmed = report.slice(0, idx).replace(/\s+$/, '');
+  const merged: NextAction[] = [
+    ...existing,
+    {
+      tool: 'log10x_retriever_query',
+      args: { pattern: topOffloadedSample.pattern, from: 'now-24h' },
+      reason: 'top mover is currently routed to forwarder offload — pull live events from the offload bucket',
+    },
+  ];
+  const fresh = renderNextActions(merged);
+  return fresh ? `${trimmed}\n\n${fresh}` : trimmed;
 }
 
 // ── Anchor resolution ──
