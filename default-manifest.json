@@ -400,27 +400,73 @@
       },
       "category": "install"
     },
-    "log10x_configure_compact": {
-      "title": "Configure compact",
-      "description": "Configure per-container compact-mode rules on a running 10x receiver. Hot-reloads via the receiver's CSV lookup (no pipeline restart). Use this when an operator wants to mark specific patterns as compact-mode candidates.",
+    "log10x_configure_engine": {
+      "title": "Configure engine",
+      "description": "Unified per-pattern action-plan PR author. Resolves a monthly $ budget against a per-destination cost model (Splunk, Datadog, Elasticsearch, CloudWatch, Azure, GCP, Sumo, ClickHouse) into a per-pattern action plan (pass | sample | compact | drop | tier_down) and emits a gitops PR. Supersedes log10x_configure_compact and log10x_configure_regulator; both remain registered as thin deprecated aliases for one release.",
       "annotations": {
-        "title": "Configure compact",
+        "title": "Configure engine",
         "readOnlyHint": false,
         "idempotentHint": true,
         "openWorldHint": true
       },
       "category": "install"
     },
-    "log10x_configure_regulator": {
-      "title": "Configure regulator",
-      "description": "Configure per-pattern rate-limit / sample / drop rules on a running 10x regulator (receiver) by deriving per-container caps from a monthly dollar budget. Use this after log10x_find_skew identifies high-skew patterns or when budget pressure forces sampling decisions.",
+    "log10x_estimate_savings": {
+      "title": "Estimate savings",
+      "description": "Two-mode savings estimator. `forecast` projects bytes_in -> bytes_out + $/mo for a proposed plan under the per-destination cost model. `verify` counts realized savings from the engine `isDropped` label over a window with cap-hit / drift / new-patterns / leakage attribution.",
       "annotations": {
-        "title": "Configure regulator",
+        "title": "Estimate savings",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "category": "cost"
+    },
+    "log10x_baseline": {
+      "title": "Baseline readiness",
+      "description": "Pre-flight readiness gate for cost-reduction tools. Verifies Reporter age (default 7d), pattern-coverage stability, and absence of acute anomalies before configure_engine / estimate_savings should run. Returns structured `not_ready` with the specific gate(s) that failed.",
+      "annotations": {
+        "title": "Baseline readiness",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "category": "cost"
+    },
+    "log10x_commitment_report": {
+      "title": "Commitment report",
+      "description": "CFO-facing weekly aggregate against a previously-opened commitment record. Applies a Bayesian Beta(2,2) prior to realized-savings estimates and renders a markdown summary suitable for sharing.",
+      "annotations": {
+        "title": "Commitment report",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "category": "cost"
+    },
+    "log10x_configure_compact": {
+      "title": "Configure compact (deprecated)",
+      "description": "DEPRECATED — thin alias to log10x_configure_engine kept for one release. Configure per-container compact-mode rules on a running 10x receiver. Hot-reloads via the receiver's CSV lookup (no pipeline restart).",
+      "annotations": {
+        "title": "Configure compact (deprecated)",
         "readOnlyHint": false,
         "idempotentHint": true,
         "openWorldHint": true
       },
-      "category": "install"
+      "category": "install",
+      "deprecated": true
+    },
+    "log10x_configure_regulator": {
+      "title": "Configure regulator (deprecated)",
+      "description": "DEPRECATED — thin alias to log10x_configure_engine kept for one release. Configure per-pattern rate-limit / sample / drop rules on a running 10x receiver by deriving per-container caps from a monthly dollar budget.",
+      "annotations": {
+        "title": "Configure regulator (deprecated)",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "category": "install",
+      "deprecated": true
     },
     "log10x_find_skew": {
       "title": "Find skew",

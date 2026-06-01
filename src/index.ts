@@ -85,6 +85,10 @@ import { adviseRetrieverSchema, executeAdviseRetriever } from './tools/advise-re
 import { adviseInstallSchema, executeAdviseInstall } from './tools/advise-install.js';
 import { configureCompactSchema, executeConfigureCompact } from './tools/configure-compact.js';
 import { configureRegulatorSchema, executeConfigureRegulator } from './tools/configure-regulator.js';
+import { configureEngineSchema, executeConfigureEngine } from './tools/configure-engine.js';
+import { estimateSavingsSchema, executeEstimateSavings } from './tools/estimate-savings.js';
+import { baselineSchema, executeBaseline } from './tools/baseline.js';
+import { commitmentReportSchema, executeCommitmentReport } from './tools/commitment-report.js';
 import { patternMitigateSchema, executePatternMitigate } from './tools/pattern-mitigate.js';
 import { loginStatusSchema, executeLoginStatus } from './tools/login-status.js';
 import {
@@ -1330,10 +1334,59 @@ registerLog10xTool('log10x_advise_install', adviseInstallSchema, (args) =>
   wrap('log10x_advise_install', () => executeAdviseInstall(args, getEnvs(), server))
 );
 
-// ── Tool: log10x_configure_compact (per-container compact decision PR author) ──
+// ── Tool: log10x_configure_engine (unified per-pattern action-plan PR author) ──
+//
+// Supersedes log10x_configure_compact + log10x_configure_regulator. The two
+// legacy tools below stay registered (manifest entries marked deprecated)
+// for one release as thin aliases so existing agent workflows don't 404.
+// See `/tmp/poc-comparison/14d-24-implementation-spec.md` §2.
+
+registerLog10xTool('log10x_configure_engine', configureEngineSchema, (args) =>
+  wrap('log10x_configure_engine', () => executeConfigureEngine(args))
+);
+
+// ── Tool: log10x_estimate_savings (forecast + verify modes) ──
+
+registerLog10xTool('log10x_estimate_savings', estimateSavingsSchema, (args) =>
+  wrap('log10x_estimate_savings', () => {
+    const env = resolveEnv(getEnvs(), args.environment);
+    return executeEstimateSavings(args, env);
+  })
+);
+
+// ── Tool: log10x_baseline (Reporter-age / coverage / anomaly readiness gates) ──
+
+registerLog10xTool('log10x_baseline', baselineSchema, (args) =>
+  wrap('log10x_baseline', () => {
+    const env = resolveEnv(getEnvs(), args.environment);
+    return executeBaseline(args, env);
+  })
+);
+
+// ── Tool: log10x_commitment_report (CFO-facing Bayesian weekly aggregate) ──
+
+registerLog10xTool('log10x_commitment_report', commitmentReportSchema, (args) =>
+  wrap('log10x_commitment_report', () => executeCommitmentReport(args))
+);
+
+// ── Tool: log10x_configure_compact (DEPRECATED alias → configure_engine) ──
+//
+// Kept registered for one release so existing agent workflows don't 404.
+// Manifest entry flagged deprecated; the handler is replaced by a
+// thin forwarder in the follow-up implementation patch (spec §10).
 
 registerLog10xTool('log10x_configure_compact', configureCompactSchema, (args) =>
   wrap('log10x_configure_compact', () => executeConfigureCompact(args))
+);
+
+// ── Tool: log10x_configure_regulator (DEPRECATED alias → configure_engine) ──
+//
+// Kept registered for one release so existing agent workflows don't 404.
+// Manifest entry flagged deprecated; the handler is replaced by a
+// thin forwarder in the follow-up implementation patch (spec §10).
+
+registerLog10xTool('log10x_configure_regulator', configureRegulatorSchema, (args) =>
+  wrap('log10x_configure_regulator', () => executeConfigureRegulator(args))
 );
 
 // ── Tool: log10x_pattern_mitigate (cost-reduction menu) ──
@@ -1390,8 +1443,12 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_discover_env', intent: 'Read-only probe of k8s + AWS — returns a snapshot_id the advise_* tools consume' },
   { name: 'log10x_advise_install', intent: 'Install wizard for Reporter / Receiver — walks the user through app / forwarder / backends / airgapped / license, then emits a concrete helm plan' },
   { name: 'log10x_advise_retriever', intent: 'Retriever install/verify/teardown plan — standalone S3 + SQS archive + query' },
-  { name: 'log10x_configure_compact', intent: 'Resolve a service to its k8s_container set via Prometheus; emit a `gh` PR command against the compact cap-file CSV with per-container `true`/`false` decisions (engine hot-reloads the CSV without a pipeline restart)' },
-  { name: 'log10x_configure_regulator', intent: 'Derive a per-container rate-regulator byte cap from a monthly dollar budget; validate against five Prometheus sanity checks; emit a `gh` PR command against the rate-cap CSV (engine hot-reloads it)' },
+  { name: 'log10x_configure_engine', intent: 'Unified per-pattern action-plan PR author — resolves a budget to a per-pattern plan (pass | sample | compact | drop | tier_down) under a per-destination cost model and emits a gitops PR. Supersedes configure_compact and configure_regulator.' },
+  { name: 'log10x_estimate_savings', intent: 'Two-mode savings estimator — forecast mode projects bytes_out + $/mo for a proposed plan under the per-destination cost model; verify mode counts realized savings from the engine `isDropped` label with cap-hit / drift / new-patterns / leakage attribution.' },
+  { name: 'log10x_baseline', intent: 'Pre-flight readiness gate for cost-reduction tools — verifies Reporter age (default 7d), pattern-coverage stability, and absence of acute anomalies; returns structured `not_ready` with the specific gate(s) that failed.' },
+  { name: 'log10x_commitment_report', intent: 'CFO-facing weekly aggregate against a commitment record — Bayesian Beta(2,2) confidence prior on realized savings, markdown report suitable for sharing.' },
+  { name: 'log10x_configure_compact', intent: 'DEPRECATED — kept as a thin alias to log10x_configure_engine for one release. Original: resolve a service to its k8s_container set via Prometheus; emit a `gh` PR command against the compact cap-file CSV with per-container `true`/`false` decisions.' },
+  { name: 'log10x_configure_regulator', intent: 'DEPRECATED — kept as a thin alias to log10x_configure_engine for one release. Original: derive a per-container rate-regulator byte cap from a monthly dollar budget; validate against five Prometheus sanity checks; emit a `gh` PR command against the rate-cap CSV.' },
   { name: 'log10x_pattern_mitigate', intent: 'Return the env-gated mitigation options + exact configs for a pattern (drop @ analyzer, drop @ forwarder, mute @ 10x, compact @ 10x) in user terms with env-capability gating' },
 ];
 

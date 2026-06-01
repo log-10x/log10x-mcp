@@ -60,6 +60,21 @@ export const topPatternsSchema = {
     .describe(
       'Output format. "summary" (default) returns a structured JSON envelope with patterns, incidents, totals, and chained-tool action hints. "markdown" returns the existing rendered cards for human-consumable deliverables.'
     ),
+  // DEP: feat/x-percent-mcp-cost-tooling — added per
+  //   /tmp/poc-comparison/14d-24-implementation-spec.md (item 7).
+  // The user's feat/investigative-sharpening branch also touches this
+  // file; this addition is strictly additive (new optional flag, new
+  // label selector injected via the existing `filters` map fed to
+  // buildSelector) so the merge stays clean. When false/absent, the
+  // PromQL emitted is byte-identical to the pre-change query — the
+  // verify-mode caller in estimate-savings.ts sets it true to read
+  // the engine-side "what would have been dropped" cohort.
+  isDropped: z
+    .boolean()
+    .optional()
+    .describe(
+      'When true, scope the query to events tagged isDropped="true" by the engine — i.e. the cohort the regulator marked for drop/down-tier. Use to verify post-deploy realised savings. When absent/false, behavior is unchanged.'
+    ),
 };
 
 /** Normalize the env's forwarder enum to the ForwarderId type the
@@ -82,6 +97,8 @@ export async function executeTopPatterns(
     siemScope?: string;
     verbose?: boolean;
     view?: 'summary' | 'markdown';
+    // DEP: feat/x-percent-mcp-cost-tooling — see schema comment above.
+    isDropped?: boolean;
   },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
@@ -103,6 +120,14 @@ export async function executeTopPatterns(
   const filters: Record<string, string> = {};
   if (args.service) filters[LABELS.service] = args.service;
   if (args.severity) filters[LABELS.severity] = args.severity;
+  // DEP: feat/x-percent-mcp-cost-tooling — additive isDropped scope.
+  // Injecting via the filters map flows through buildSelector(), so
+  // every PromQL call below (top, events, total, count, service
+  // rollup, baseline, service breadth) picks up the selector with
+  // zero call-site changes. The standalone trend range query below
+  // does NOT use buildSelector — it gets the suffix appended inline.
+  const isDroppedSelector = args.isDropped === true ? `,isDropped="true"` : '';
+  if (args.isDropped === true) filters['isDropped'] = 'true';
 
   const metricsEnv = Object.keys(filters).length > 0
     ? await resolveMetricsEnvFiltered(env, filters)
@@ -224,7 +249,7 @@ export async function executeTopPatterns(
       r.hash
         ? queryRange(
             env,
-            `sum by (${LABELS.hash}) (rate(emitted_events_summaryBytes_total{${LABELS.hash}="${r.hash}"}[5m]))`,
+            `sum by (${LABELS.hash}) (rate(emitted_events_summaryBytes_total{${LABELS.hash}="${r.hash}"${isDroppedSelector}}[5m]))`,
             trendStart,
             now,
             trendStepSec

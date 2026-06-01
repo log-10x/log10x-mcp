@@ -254,6 +254,16 @@ async function executeSavingsInner(
     lines.push('  ranking: the biggest patterns by cost, with a per-pattern reduce');
     lines.push('  menu (drop / compact / mute), are where booked savings would come');
     lines.push('  from once the pipeline is reducing volume.');
+    lines.push('');
+    lines.push('  Fast first win — k8s field drops at the engine:');
+    lines.push('  Edit `config/modules/pipelines/run/modules/initialize/k8s/settings.yaml`');
+    lines.push('  and drop these fields (high-cardinality / low-signal across CH and ES):');
+    lines.push('    kubernetes.labels, kubernetes.annotations, kubernetes.pod_id,');
+    lines.push('    kubernetes.docker_id, kubernetes.container_hash, kubernetes.container_image,');
+    lines.push('    tenx_tag, stream, time');
+    lines.push('  These are dropped engine-side (one config, all forwarders), not in each');
+    lines.push('  forwarder pipeline — keep fluent-bit / fluentd / filebeat / logstash /');
+    lines.push('  otel-collector configs untouched.');
   } else {
     lines.push('');
     lines.push(`  Total: ${fmtDollar(totalSaved)}${period} · ${fmtDollar(annualProjection)}/yr projected`);

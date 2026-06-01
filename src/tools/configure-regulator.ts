@@ -58,6 +58,26 @@ export const configureRegulatorSchema = {
     .number()
     .positive()
     .describe('Customer ingestion rate in $/GB. Converts dollar budget to byte budget.'),
+  reduction: z
+    .enum(['soft', 'hard'])
+    .default('soft')
+    .describe(
+      'How over-cap traffic is reduced. `soft` (default): compact it losslessly (still queryable, recoverable) — the safe choice. `hard`: drop it (gone). This is the one values knob; tiering (errors sampled, debug dropped, audit never-capped) is inferred from severity. Per-pattern exceptions go in `tier_overrides`.'
+    ),
+  tier_overrides: z
+    .array(
+      z.object({
+        pattern_hash: z.string().describe('Stable pattern identity (tenx_hash) to override.'),
+        tier: z
+          .enum(['audit', 'error', 'standard', 'debug', 'synthetic'])
+          .describe('audit=never cap (T0); error=sample-when-over (T1); standard=compact/soft-default (T2); debug=hard-drop (T3); synthetic=drop with 1/min floor (T4).'),
+        reason: z.string().optional(),
+      })
+    )
+    .optional()
+    .describe(
+      'Per-pattern tier overrides for patterns the severity-based default classifies wrong (e.g. a load-bearing DEBUG line that should be tier=error). First-match wins over the inferred tier. Keep this short — it is the exception list, not the policy.'
+    ),
   containers: z
     .array(z.string())
     .optional()
@@ -172,14 +192,16 @@ export async function executeConfigureRegulator(
     containers: args.containers.length,
   });
 
+  const reduction = args.reduction ?? 'soft';
+  const overCapAction = defaultAction(reduction);
   const md = renderResult(args, target.resolved, derivation, checks);
   if (view === 'markdown') {
-    return _buildMdEnvelope({ tool: 'log10x_configure_regulator', summary: { headline: `Cap derivation for ${args.containers.length} container${args.containers.length !== 1 ? 's' : ''}` }, markdown: md });
+    return _buildMdEnvelope({ tool: 'log10x_configure_regulator', summary: { headline: `Cap derivation for ${args.containers.length} container${args.containers.length !== 1 ? 's' : ''} (over-cap → ${overCapAction})` }, markdown: md });
   }
   return _buildEnvelope({
     tool: 'log10x_configure_regulator',
     view: 'summary',
-    summary: { headline: `Rate-cap derivation: $${args.budget}/mo budget across ${args.containers.length} container${args.containers.length !== 1 ? 's' : ''} → ${derivation.capHuman} per container.` },
+    summary: { headline: `Savings policy: $${args.budget}/mo across ${args.containers.length} container${args.containers.length !== 1 ? 's' : ''} → cap ${derivation.capHuman}, over-cap = ${overCapAction} (${reduction}).` },
     data: {
       ok: true,
       phase: 'pr_rendered',
@@ -189,6 +211,9 @@ export async function executeConfigureRegulator(
       lookup_path: target.resolved.lookup_path,
       derivation,
       checks,
+      reduction,
+      over_cap_action: overCapAction,
+      tier_overrides: args.tier_overrides ?? [],
     },
   });
 }
@@ -500,6 +525,41 @@ function deriveCap(p: {
   };
 }
 
+// ─── unified action model (regulator + compact, one decision) ──────────
+//
+// One over-cap action per tier, picked by the `reduction` knob. This is the
+// single coherent savings strategy that replaces the old split between
+// configure_regulator (cap/drop) and configure_compact (compact). The engine
+// regulator reads the per-row action; soft uses compact (lossless, recoverable),
+// hard uses drop (gone). Tier is inferred from severity unless overridden.
+type Tier = 'audit' | 'error' | 'standard' | 'debug' | 'synthetic';
+type Action = 'pass' | 'sample' | 'compact' | 'drop';
+
+// tier -> action, parameterized by the soft/hard reduction knob.
+function tierAction(tier: Tier, reduction: 'soft' | 'hard'): Action {
+  switch (tier) {
+    case 'audit':
+      return 'pass'; // T0: never capped
+    case 'error':
+      return 'sample'; // T1: keep a sampled fraction regardless of soft/hard
+    case 'standard':
+      return reduction === 'hard' ? 'drop' : 'compact'; // T2: the knob bites here
+    case 'debug':
+      return 'drop'; // T3
+    case 'synthetic':
+      return 'drop'; // T4 (engine applies the 1/min floor)
+    default:
+      return reduction === 'hard' ? 'drop' : 'compact';
+  }
+}
+
+// The over-cap action for the service-wide default (standard tier), driven by
+// the reduction knob. Per-pattern tier_overrides refine this at runtime via the
+// regulator; this is the row-level default written to the cap CSV.
+function defaultAction(reduction: 'soft' | 'hard'): Action {
+  return tierAction('standard', reduction);
+}
+
 // ─── rendering ────────────────────────────────────────────────────────
 function renderResult(
   args: ConfigureRegulatorArgs,
@@ -515,6 +575,21 @@ function renderResult(
     `**Containers** (${containers.length}): ${containers.map((c) => `\`${c}\``).join(', ')}`
   );
   out.push(`**Budget**: $${args.budget}/month at $${args.costPerGB}/GB`);
+  const reduction = args.reduction ?? 'soft';
+  const action = defaultAction(reduction);
+  out.push(
+    `**Over-cap action**: \`${action}\` (reduction = \`${reduction}\`) — ` +
+      (reduction === 'soft'
+        ? 'over-cap traffic is compacted losslessly (still queryable/recoverable).'
+        : 'over-cap traffic is dropped.') +
+      ' Errors are sampled, debug/synthetic dropped, audit never capped (by severity, unless overridden).'
+  );
+  if (args.tier_overrides && args.tier_overrides.length > 0) {
+    out.push(
+      `**Tier overrides** (${args.tier_overrides.length}): ` +
+        args.tier_overrides.map((o) => `\`${o.pattern_hash}\`→${o.tier}`).join(', ')
+    );
+  }
   out.push('');
 
   if (checks.warnings.length > 0) {
@@ -608,11 +683,16 @@ function renderPrCommand(
   const prBranch = `mcp/rate-cap-${slug(args.service)}-${Date.now()}`;
   const prTitle = `rate-cap: configure ${args.service} (${args.containers!.length} container${args.containers!.length === 1 ? '' : 's'})`;
 
+  const reduction = args.reduction ?? 'soft';
+  const action = defaultAction(reduction);
   const baseline = parseCsv(args.current_csv);
   const merged = new Map(baseline.rows);
   for (const c of args.containers!) {
-    // CSV row value: <bytes>::<reason>  (untilEpochSec empty = no expiry)
-    const value = `${Math.round(derivation.capBytes)}::${reason.replace(/,/g, ';')}`;
+    // CSV row value: <bytes>:<untilEpochSec>:<reason>:<action>
+    // untilEpochSec empty = no expiry. The trailing <action> (compact|drop|
+    // sample|pass) is the unified over-cap decision the engine regulator reads
+    // — this is what folds the old configure_compact into one coherent row.
+    const value = `${Math.round(derivation.capBytes)}::${reason.replace(/,/g, ';')}:${action}`;
     merged.set(c, value);
   }
   const newCsv = renderCsv(merged);

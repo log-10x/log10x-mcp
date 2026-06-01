@@ -25,6 +25,21 @@ export const trendSchema = {
   analyzerCost: z.number().optional().describe('SIEM ingestion cost in $/GB'),
   environment: z.string().optional().describe('Environment nickname'),
   view: z.enum(['summary', 'markdown']).default('summary').describe('Output format. summary returns structured envelope; markdown returns rendered chart + stats.'),
+  // DEP: feat/x-percent-mcp-cost-tooling — added per
+  //   /tmp/poc-comparison/14d-24-implementation-spec.md (item 8).
+  // feat/investigative-sharpening also touches this file; the addition
+  // is strictly additive (new optional flag, inline label suffix on the
+  // single range query) so the merge stays clean. When false/absent,
+  // the PromQL emitted is byte-identical to the pre-change query — the
+  // verify-mode caller in estimate-savings.ts sets it true to read the
+  // engine-side "what would have been dropped" per-pattern byte series
+  // over time (i.e. the overflow cohort).
+  isDropped: z
+    .boolean()
+    .optional()
+    .describe(
+      'When true, scope the trend to events tagged isDropped="true" by the engine — i.e. the per-pattern overflow byte series over time (the cohort the regulator marked for drop/down-tier). Use to verify post-deploy realised savings. When absent/false, behavior is unchanged.'
+    ),
 };
 
 interface PatternTrendSummary {
@@ -45,7 +60,7 @@ interface PatternTrendSummary {
 }
 
 export async function executeTrend(
-  args: { pattern: string; timeRange?: string; step?: string; analyzerCost?: number; view?: 'summary' | 'markdown' },
+  args: { pattern: string; timeRange?: string; step?: string; analyzerCost?: number; view?: 'summary' | 'markdown'; isDropped?: boolean },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
   const view = args.view ?? 'summary';
@@ -96,7 +111,7 @@ export async function executeTrend(
 }
 
 async function executeTrendInner(
-  args: { pattern: string; timeRange?: string; step?: string; analyzerCost?: number },
+  args: { pattern: string; timeRange?: string; step?: string; analyzerCost?: number; isDropped?: boolean },
   env: EnvConfig,
   sumOut?: { data?: PatternTrendSummary }
 ): Promise<string> {
@@ -116,7 +131,16 @@ async function executeTrendInner(
   const start = now - tf.days * 86400;
   const stepSeconds = parseStep(step);
 
-  const query = pql.patternBytesOverTime(pattern, metricsEnv, step);
+  // DEP: feat/x-percent-mcp-cost-tooling — additive isDropped scope.
+  // patternBytesOverTime doesn't take a selector map (single inline
+  // pattern selector), so when isDropped=true we splice the label into
+  // the existing `{...}` selector inline — same approach top-patterns
+  // uses for its standalone range query (top-patterns.ts:252). When
+  // absent/false, the emitted PromQL is byte-identical to before.
+  let query = pql.patternBytesOverTime(pattern, metricsEnv, step);
+  if (args.isDropped === true) {
+    query = query.replace(/\}\[/, `,isDropped="true"}[`);
+  }
   const res = await queryRange(env, query, start, now, stepSeconds);
 
   if (res.status !== 'success' || res.data.result.length === 0) {
