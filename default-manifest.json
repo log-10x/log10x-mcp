@@ -402,10 +402,11 @@
     },
     "log10x_configure_engine": {
       "title": "Configure engine",
-      "description": "Unified per-pattern action-plan PR author. Resolves a monthly $ budget against a per-destination cost model (Splunk, Datadog, Elasticsearch, CloudWatch, Azure, GCP, Sumo, ClickHouse) into a per-pattern action plan (pass | sample | compact | drop | tier_down) and emits a gitops PR. Supersedes log10x_configure_compact and log10x_configure_regulator; both remain registered as thin deprecated aliases for one release.",
+      "description": "Unified per-pattern action-plan PR author. Resolves a monthly $ budget against a per-destination cost model (Splunk, Datadog, Elasticsearch, CloudWatch, Azure, GCP, Sumo, ClickHouse) into a per-pattern action plan (pass | sample | compact | drop | tier_down) and emits a gitops PR. Defaults to auto-applying via `gh` CLI (industry-standard MCP write-tool behavior, mirrors github/github-mcp-server). Set `auto_apply: false` or `read_only: true` for evaluation / dry-run / headless contexts. Supersedes log10x_configure_compact and log10x_configure_regulator; both remain registered as thin deprecated aliases for one release.",
       "annotations": {
         "title": "Configure engine",
         "readOnlyHint": false,
+        "destructiveHint": true,
         "idempotentHint": true,
         "openWorldHint": true
       },
