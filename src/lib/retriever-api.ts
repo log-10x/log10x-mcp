@@ -144,6 +144,25 @@ export interface ExistingResultsResponse {
  * `_DONE.json` marker is missing, in which case the caller should poll
  * status diagnostics again before re-fetching.
  */
+/**
+ * The S3 location where a query's matched events land as JSONL objects:
+ * `{indexSubpath}/tenx/{target}/qr/{queryId}/`. This is the canonical
+ * "list of result objects" a caller reads to get the full match set
+ * beyond the in-context preview, and the handoff point for the
+ * customer's own S3 -> SIEM path. The engine writes one `*.jsonl` per
+ * stream worker plus a `_DONE.json` marker here.
+ */
+export async function retrieverResultsLocation(
+  target: string,
+  queryId: string,
+): Promise<{ bucket: string; prefix: string; uri: string }> {
+  const bucket = await getRetrieverBucket();
+  const indexSubpath = (process.env.LOG10X_RETRIEVER_INDEX_SUBPATH || 'indexing-results').replace(/^\/+|\/+$/g, '');
+  const basePrefix = indexSubpath ? `${indexSubpath}/` : '';
+  const prefix = `${basePrefix}tenx/${target}/qr/${queryId}/`;
+  return { bucket, prefix, uri: `s3://${bucket}/${prefix}` };
+}
+
 export async function fetchExistingResults(
   queryId: string,
   options?: { target?: string },

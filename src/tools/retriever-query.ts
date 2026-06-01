@@ -22,6 +22,7 @@ import {
   isRetrieverConfigured,
   normalizeTimeExpression,
   buildPatternSearch,
+  retrieverResultsLocation,
   type RetrieverQueryRequest,
   type RetrieverEvent,
 } from '../lib/retriever-api.js';
@@ -108,6 +109,14 @@ interface RetrieverQuerySummary {
   wall_time_ms: number;
   truncated: boolean;
   partial_results: boolean;
+  /**
+   * Where the FULL matched-event set lives in S3 (one `*.jsonl` per stream
+   * worker). `events_preview` is an in-context sample capped at `limit`;
+   * this is the complete object list a capable agent reads directly, or
+   * hands to the customer's own S3 -> SIEM path. Absent only when nothing
+   * was written (count-only / zero matches / not configured).
+   */
+  results_location?: { bucket: string; prefix: string; uri: string };
   diagnostics_zero_reason?: string;
   by_severity?: Record<string, number>;
   by_service?: Record<string, number>;
@@ -183,8 +192,7 @@ export async function executeRetrieverQuery(
   }
   if (d.pattern && d.events_matched > 0) {
     actions.push(
-      { tool: 'log10x_retriever_series', args: { pattern: d.pattern, from: d.from, to: d.to, bucket_size: '1h' }, reason: 'time-bucketed series across the same window' },
-      { tool: 'log10x_backfill_metric', args: { pattern: d.pattern, metric_name: `log10x.${d.pattern.toLowerCase()}_count`, destination: 'datadog', from: d.from, to: d.to }, reason: 'create a TSDB metric backfilled from these archive events' }
+      { tool: 'log10x_retriever_series', args: { pattern: d.pattern, from: d.from, to: d.to, bucket_size: '1h' }, reason: 'time-bucketed series across the same window (fidelity-aware: exact vs sampled)' }
     );
   }
   return buildEnvelope({
@@ -305,6 +313,19 @@ async function executeRetrieverQueryInner(
     }
   }
 
+  // Where the full result set lives in S3: the object list a capable
+  // agent reads directly (beyond the in-context preview), or hands to the
+  // customer's own S3 -> SIEM path. Computed for event-bearing formats.
+  let resultsLoc: { bucket: string; prefix: string; uri: string } | undefined;
+  if (args.format !== 'count' && resp.events.length > 0) {
+    resultsLoc = await retrieverResultsLocation(resp.target, resp.queryId).catch(() => undefined);
+    if (resultsLoc) {
+      lines.push('');
+      lines.push(`**Full results in S3** (${resp.execution.eventsMatched} matched, ${resp.execution.workerFiles} object(s)): \`${resultsLoc.uri}\``);
+      lines.push(`_The reply previews up to \`limit\` events; the full match set is the \`*.jsonl\` objects under that prefix. Read them directly, or point a SIEM S3-ingest / loader at the prefix._`);
+    }
+  }
+
   // Structured NEXT_ACTIONS for autonomous chains.
   const nextActions: NextAction[] = [];
   const partialDiag = (resp.diagnostics as RetrieverQueryDiagnostics & { partialResults?: boolean })?.partialResults;
@@ -312,25 +333,14 @@ async function executeRetrieverQueryInner(
     nextActions.push({
       tool: 'log10x_retriever_query_status',
       args: { queryId: resp.queryId, fetch_results: true, target: resp.target },
-      reason: 'partialResults — recover stranded events from S3 without resubmitting',
+      reason: 'partialResults: recover stranded events from S3 without resubmitting',
     });
   }
   if (args.pattern && resp.events.length > 0) {
     nextActions.push({
-      tool: 'log10x_backfill_metric',
-      args: {
-        pattern: args.pattern,
-        metric_name: `log10x.${args.pattern.toLowerCase()}_count`,
-        destination: 'datadog',
-        from: args.from,
-        to: args.to,
-      },
-      reason: 'create a TSDB metric backfilled from these archive events',
-    });
-    nextActions.push({
       tool: 'log10x_retriever_series',
       args: { pattern: args.pattern, from: args.from, to: args.to, bucket_size: '1h' },
-      reason: 'time-bucketed series across the same window',
+      reason: 'time-bucketed series across the same window (fidelity-aware: exact vs sampled)',
     });
   }
   const block = renderNextActions(nextActions);
@@ -376,6 +386,7 @@ async function executeRetrieverQueryInner(
       wall_time_ms: resp.execution.wallTimeMs,
       truncated: !!resp.execution.truncated,
       partial_results: !!(resp.diagnostics as RetrieverQueryDiagnostics & { partialResults?: boolean })?.partialResults,
+      results_location: resultsLoc,
       diagnostics_zero_reason: resp.events.length === 0 && resp.diagnostics ? (explainZeroResults(resp.diagnostics) ?? undefined) : undefined,
       by_severity: Object.keys(bySeverity).length > 0 ? bySeverity : undefined,
       by_service: Object.keys(byService).length > 0 ? byService : undefined,
