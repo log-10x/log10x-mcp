@@ -251,7 +251,9 @@ function recipeFluentBit(p: OffloadParams): OffloadRecipe {
 }
 
 // ---------------------------------------------------------------------------
-// otel-collector  (research shape: routing connector + awss3 exporter; contrib)
+// otel-collector  (smoke-tested live on the full contrib distro: routing
+// connector context:log + condition, transform strip, body-fold so tenx_hash
+// survives marshaler:body. Requires the FULL otelcol-contrib distro.)
 // ---------------------------------------------------------------------------
 function recipeOtelCollector(p: OffloadParams): OffloadRecipe {
   const prefix = p.prefix ?? DEFAULT_PREFIX;
@@ -261,14 +263,24 @@ function recipeOtelCollector(p: OffloadParams): OffloadRecipe {
   routing:
     default_pipelines: [logs/siem]
     table:
-      - statement: route() where attributes["isDropped"] == true
+      # context: log is REQUIRED — isDropped is a LOG attribute. The default
+      # resource context never matches it (every event falls through to default).
+      - context: log
+        condition: attributes["isDropped"] == true
         pipelines: [logs/offload]
 
 processors:
-  transform/strip_isdropped:
-    error_mode: ignore                          # tolerate records that never had it
+  transform/offload:
+    error_mode: ignore
     log_statements:
-      - delete_key(log.attributes, "isDropped") # marker did its job; tenx_hash kept
+      - delete_key(log.attributes, "isDropped")  # marker did its job; tenx_hash kept
+      - set(log.body, log.attributes)            # fold attrs into the body so tenx_hash
+                                                  # survives marshaler:body (it is a LOG
+                                                  # attribute; body-only would drop it)
+  transform/strip:
+    error_mode: ignore
+    log_statements:
+      - delete_key(log.attributes, "isDropped")  # SIEM path: just drop the marker
 
 exporters:
   awss3:
@@ -276,23 +288,23 @@ exporters:
       region: ${p.region}
       s3_bucket: ${p.bucket}
       s3_prefix: ${prefix}
-    # marshaler: see prerequisites — \`body\` drops ALL attributes (incl tenx_hash);
-    # pick a shape that preserves tenx_hash for the Retriever, then smoke-test.
+    marshaler: body                              # writes the folded flat-JSON body as JSONL
 
 service:
   pipelines:
     logs/in:      { receivers: [otlp], exporters: [routing] }
-    logs/offload: { receivers: [routing], processors: [transform/strip_isdropped], exporters: [awss3] }
-    logs/siem:    { receivers: [routing], processors: [transform/strip_isdropped], exporters: [<your_siem_exporter>] }`,
+    logs/offload: { receivers: [routing], processors: [transform/offload], exporters: [awss3] }
+    logs/siem:    { receivers: [routing], processors: [transform/strip], exporters: [<your_siem_exporter>] }`,
     placementNote:
-      'the routing connector reads 10x\'s OTLP return path; `isDropped` arrives ' +
-      'as a log-record attribute. `default_pipelines` carries the kept slice to ' +
-      'the SIEM. The strip processor runs on both output pipelines.',
+      'the routing connector reads 10x\'s OTLP return path, where 10x\'s fields ' +
+      'arrive as LOG attributes (body carries the message). The offload pipeline ' +
+      'strips the marker and folds attributes into the body so tenx_hash survives ' +
+      '`marshaler: body`; the SIEM pipeline just strips the marker.',
     prerequisites: [
       ...basePrereqs(p),
-      'Distribution: `routingconnector` + `awss3exporter` + `transformprocessor` are contrib components — requires `otelcol-contrib` (or the k8s distro), not core `otelcol`.',
-      'S3 marshaler caveat: `marshaler: body` writes only the log body, dropping ALL attributes including `tenx_hash` (which the Retriever correlates on). A record-preserving marshaler keeps attributes but is not forwarder-JSONL. Resolve the S3 layout (promote tenx_hash into the body upstream, or index the chosen marshaler shape) before relying on this.',
-      'SMOKE TEST REQUIRED: confirm the OTTL `== true` matches the stamped attribute type, AND that tenx_hash survives into the S3 object, on a real dropped event.',
+      'Distribution: requires the FULL otelcol-contrib distro (routingconnector + transformprocessor + awss3exporter). A minimal/custom "contrib" build can omit them — verified: a stripped otelcol-contrib had connectors:[] and no transform/awss3.',
+      'Routing MUST use `context: log` + `condition` (verified live). `statement: route() where ...` defaults to RESOURCE context and never matches the log attribute, so every event falls through to the SIEM.',
+      'tenx_hash is a LOG attribute; `marshaler: body` alone drops it. The offload pipeline folds attributes into the body (`set(log.body, log.attributes)`), verified to carry tenx_hash with isDropped removed. SMOKE TEST REQUIRED (S3 path): confirm the final S3-object shape (kvlist serialized to JSON by the awss3 body marshaler) against the Retriever ingest once a bucket is wired. Routing + strip + body-fold are already verified live.',
     ],
   };
 }
