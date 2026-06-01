@@ -57,6 +57,37 @@ test('each forwarder matches isDropped in its native boolean form', () => {
   }
 });
 
+test('each recipe strips isDropped on the output path, never tenx_hash', () => {
+  const stripForm: Record<OffloadForwarderId, RegExp> = {
+    vector: /except_fields\s*=\s*\["isDropped"\]/,
+    fluentd: /remove_keys isDropped/,
+    'fluent-bit': /Remove_key\s+isDropped/,
+    'otel-collector': /delete_key\(log\.attributes, "isDropped"\)/,
+    logstash: /remove_field => \["isDropped"\]/,
+    cribl: /Remove fields: isDropped/,
+  };
+  // A real removal of tenx_hash would name it as a field token (quoted in
+  // vector/otel/logstash, or `remove_keys tenx_hash` / `Remove_key tenx_hash`
+  // / `Remove fields: ... tenx_hash`). Comments say "tenx_hash kept" (bare),
+  // so guard the directive forms, not any mention.
+  const stripsTenxHash =
+    /"tenx_hash"|(?:remove_keys|Remove_key|Remove fields:)\s+tenx_hash/;
+  for (const fwd of OFFLOAD_FORWARDERS) {
+    const r = offloadRecipe(fwd, PARAMS);
+    assert.match(r.body, stripForm[fwd], `${fwd}: does not strip isDropped on the output path`);
+    assert.ok(!stripsTenxHash.test(r.body), `${fwd}: must NOT strip tenx_hash`);
+  }
+});
+
+test('fluentd routes to non-tenx tags (no rewrite loop)', () => {
+  const r = offloadRecipe('fluentd', PARAMS);
+  // dropped/kept go to offload.* / keep.* (outside tenx.**), so the rewrite
+  // rules never re-match their own output.
+  assert.match(r.body, /tag offload\.\$\{tag\}/);
+  assert.match(r.body, /tag keep\.\$\{tag\}/);
+  assert.ok(!/tag tenx\.offload/.test(r.body), 'fluentd retag must not stay inside tenx.** (loop)');
+});
+
 test('every recipe carries the engine offload-mode + IAM prerequisites', () => {
   for (const fwd of OFFLOAD_FORWARDERS) {
     const r = offloadRecipe(fwd, PARAMS);

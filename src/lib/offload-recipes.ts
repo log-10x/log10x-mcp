@@ -103,17 +103,21 @@ bucket      = "${p.bucket}"
 key_prefix  = "${prefix}/"
 region      = "${p.region}"
 compression = "none"
-encoding.codec       = "json"
-framing.method       = "newline_delimited"
+encoding.codec          = "json"
+encoding.except_fields  = ["isDropped"]   # marker did its job at the route; drop it (tenx_hash kept)
+framing.method          = "newline_delimited"
 
 # Everything else -> your existing SIEM sink (the implicit _unmatched route).
 [sinks.your_siem]
 inputs = ["tenx_offload_route._unmatched"]
+encoding.except_fields = ["isDropped"]     # strip the marker on the SIEM path too
 # ... your existing SIEM sink config ...`,
     placementNote:
       'add the `route` transform downstream of the source reading 10x\'s return ' +
       'path, then point your existing SIEM sink at `tenx_offload_route._unmatched` ' +
-      'so only the kept slice is billed. Validate with `vector validate <config>`.',
+      'so only the kept slice is billed. The marker is stripped at each sink via ' +
+      '`encoding.except_fields`, so no extra transform is needed. Validate with ' +
+      '`vector validate <config>`.',
     prerequisites: basePrereqs(p),
   };
 }
@@ -126,18 +130,31 @@ function recipeFluentd(p: OffloadParams): OffloadRecipe {
   return {
     language: 'xml',
     body: `<label @OUTPUT>
-  <!-- 1) retag the dropped slice into its own namespace -->
+  <!-- 1) route: dropped slice -> offload.* , the rest -> keep.* .
+       Both output tags are OUTSIDE the tenx.** space, so these rules never
+       re-match their own output (no rewrite loop). -->
   <match tenx.**>
     @type rewrite_tag_filter
     <rule>
       key isDropped
       pattern /^true$/        <!-- regex over the stringified boolean -->
-      tag tenx.offload.\${tag}
+      tag offload.\${tag}
+    </rule>
+    <rule>
+      key isDropped
+      pattern /.+/            <!-- false / anything else -> kept -->
+      tag keep.\${tag}
     </rule>
   </match>
 
-  <!-- 2) dropped slice -> customer-owned S3 as plain JSONL -->
-  <match tenx.offload.**>
+  <!-- 2) strip the now-constant marker on BOTH paths (tenx_hash kept) -->
+  <filter offload.** keep.**>
+    @type record_transformer
+    remove_keys isDropped
+  </filter>
+
+  <!-- 3) dropped slice -> customer-owned S3 as plain JSONL -->
+  <match offload.**>
     @type s3
     s3_bucket ${p.bucket}
     s3_region ${p.region}
@@ -153,15 +170,16 @@ function recipeFluentd(p: OffloadParams): OffloadRecipe {
     </buffer>
   </match>
 
-  <!-- 3) everything else -> your existing SIEM destination -->
-  <match tenx.**>
+  <!-- 4) kept slice -> your existing SIEM destination -->
+  <match keep.**>
     <!-- ... your existing destination <match> ... -->
   </match>
 </label>`,
     placementNote:
-      'inside the `@OUTPUT` label. The retag MUST come before the SIEM `<match ' +
-      'tenx.**>` so the dropped slice is pulled out first; fluentd matches ' +
-      'top-to-bottom and consumes on first match.',
+      'inside the `@OUTPUT` label. The two-rule rewrite routes every event to a ' +
+      '`offload.*` or `keep.*` tag (both outside `tenx.**`, so the rules never ' +
+      'loop on their own output), then one `record_transformer` strips the marker ' +
+      'on both paths before the destinations.',
     prerequisites: [
       ...basePrereqs(p),
       'Plugin: `fluent-plugin-s3` must be present (bundled in td-agent / fluent-package; on a vanilla OSS image run `fluent-gem install fluent-plugin-s3`).',
@@ -182,7 +200,15 @@ function recipeFluentBit(p: OffloadParams): OffloadRecipe {
     Match         tenx.*
     Rule          $isDropped ^true$ tenx.offload false
 
-# 2) dropped slice -> customer-owned S3 as JSONL
+# 2) strip the now-constant marker (tenx_hash kept). Match tenx.* spans both
+#    the retagged "tenx.offload" and the kept "tenx.*" records (the wildcard
+#    crosses dots), so one filter covers both paths.
+[FILTER]
+    Name          record_modifier
+    Match         tenx.*
+    Remove_key    isDropped
+
+# 3) dropped slice -> customer-owned S3 as JSONL
 [OUTPUT]
     Name          s3
     Match         tenx.offload
@@ -192,7 +218,7 @@ function recipeFluentBit(p: OffloadParams): OffloadRecipe {
     use_put_object On
     json_date_format iso8601
 
-# 3) your existing SIEM output stays Matched on tenx.* (the retagged
+# 4) your existing SIEM output stays Matched on tenx.* (the retagged
 #    events no longer carry that tag, so they are not double-sent)`,
     placementNote:
       'the `rewrite_tag` FILTER must sit on the 10x return path (`Match tenx.*`); ' +
@@ -219,28 +245,35 @@ function recipeOtelCollector(p: OffloadParams): OffloadRecipe {
       - statement: route() where attributes["isDropped"] == true
         pipelines: [logs/offload]
 
+processors:
+  transform/strip_isdropped:
+    error_mode: ignore                          # tolerate records that never had it
+    log_statements:
+      - delete_key(log.attributes, "isDropped") # marker did its job; tenx_hash kept
+
 exporters:
   awss3:
     s3uploader:
       region: ${p.region}
       s3_bucket: ${p.bucket}
       s3_prefix: ${prefix}
-    marshaler: body          # write the event body as JSONL, not an OTLP envelope
+    # marshaler: see prerequisites — \`body\` drops ALL attributes (incl tenx_hash);
+    # pick a shape that preserves tenx_hash for the Retriever, then smoke-test.
 
 service:
   pipelines:
     logs/in:      { receivers: [otlp], exporters: [routing] }
-    logs/offload: { receivers: [routing], exporters: [awss3] }
-    logs/siem:    { receivers: [routing], exporters: [<your_siem_exporter>] }`,
+    logs/offload: { receivers: [routing], processors: [transform/strip_isdropped], exporters: [awss3] }
+    logs/siem:    { receivers: [routing], processors: [transform/strip_isdropped], exporters: [<your_siem_exporter>] }`,
     placementNote:
       'the routing connector reads 10x\'s OTLP return path; `isDropped` arrives ' +
       'as a log-record attribute. `default_pipelines` carries the kept slice to ' +
-      'the SIEM.',
+      'the SIEM. The strip processor runs on both output pipelines.',
     prerequisites: [
       ...basePrereqs(p),
-      'Distribution: `routingconnector` + `awss3exporter` are contrib components — requires `otelcol-contrib` (or the k8s distro), not core `otelcol`.',
-      '`marshaler: body` is mandatory; the default writes OTLP JSON envelopes, not the JSONL the Retriever indexes.',
-      'SMOKE TEST REQUIRED: confirm the OTTL `== true` matches the stamped attribute type on a real dropped event.',
+      'Distribution: `routingconnector` + `awss3exporter` + `transformprocessor` are contrib components — requires `otelcol-contrib` (or the k8s distro), not core `otelcol`.',
+      'S3 marshaler caveat: `marshaler: body` writes only the log body, dropping ALL attributes including `tenx_hash` (which the Retriever correlates on). A record-preserving marshaler keeps attributes but is not forwarder-JSONL. Resolve the S3 layout (promote tenx_hash into the body upstream, or index the chosen marshaler shape) before relying on this.',
+      'SMOKE TEST REQUIRED: confirm the OTTL `== true` matches the stamped attribute type, AND that tenx_hash survives into the S3 object, on a real dropped event.',
     ],
   };
 }
@@ -252,8 +285,19 @@ function recipeLogstash(p: OffloadParams): OffloadRecipe {
   const prefix = p.prefix ?? DEFAULT_PREFIX;
   return {
     language: 'ruby',
-    body: `output {
+    body: `# Route + strip run in filter {} — mutate is a filter plugin and is NOT
+# valid inside output {}. The route decision is recorded in [@metadata]
+# (logstash-internal, never serialized to a destination), so no routing
+# field leaks into S3 or the SIEM.
+filter {
   if [isDropped] {                  # truthiness on the boolean (NOT a string compare)
+    mutate { add_field => { "[@metadata][tenx_route]" => "offload" } }
+  }
+  mutate { remove_field => ["isDropped"] }   # marker did its job; tenx_hash kept
+}
+
+output {
+  if [@metadata][tenx_route] == "offload" {
     s3 {
       bucket => "${p.bucket}"
       region => "${p.region}"
@@ -265,8 +309,10 @@ function recipeLogstash(p: OffloadParams): OffloadRecipe {
   }
 }`,
     placementNote:
-      'the conditional goes in the OUTPUT block of the destinations pipeline ' +
-      '(the one reading 10x\'s return path), not the filter block.',
+      'the route + strip go in the `filter {}` block of the destinations pipeline ' +
+      '(the one reading 10x\'s return path); `output {}` then routes on the ' +
+      '`[@metadata]` flag. `@metadata` is never shipped, so the routing signal does ' +
+      'not leak into S3 or the SIEM, and `isDropped` is removed before either.',
     prerequisites: [
       ...basePrereqs(p),
       'SMOKE TEST REQUIRED: confirm `[isDropped]` truthiness fires on a real dropped event (logstash typing of the boolean).',
@@ -297,11 +343,19 @@ S3 destination "tenx_offload_s3":
   Region:          ${p.region}
   Key prefix:      ${prefix}/
   Format:          JSON (newline-delimited)
-  Compression:     none`,
+  Compression:     none
+
+Strip the marker (both destinations):
+  Pipeline "tenx_strip_isdropped"  ->  one Eval function  ->  Remove fields: isDropped
+  Attach it as the Post-Processing Pipeline on BOTH tenx_offload_s3 AND the
+  SIEM destination. (Cribl S3/SIEM destinations have no native field-exclude,
+  so the strip is a destination-attached pipeline, after the route. tenx_hash kept.)`,
     placementNote:
       'add Route 1 above the SIEM route with Final=Yes so the dropped slice is ' +
-      'pulled out before the catch-all. Cribl S3 destinations are batch (staging ' +
-      'dir then flush), so objects appear on the flush interval, not per event.',
+      'pulled out before the catch-all. The route must still see `isDropped`, so ' +
+      'the strip is a Post-Processing Pipeline on each destination (after routing), ' +
+      'not in the route pipeline. Cribl S3 destinations are batch (staging dir then ' +
+      'flush), so objects appear on the flush interval, not per event.',
     prerequisites: [
       ...basePrereqs(p),
       'SMOKE TEST REQUIRED: confirm the Route filter `isDropped == true` matches the stamped boolean in Cribl before relying on this.',
