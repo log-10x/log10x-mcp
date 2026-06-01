@@ -125,8 +125,12 @@ export async function executePocFromLocal(args: PocFromLocalArgs): Promise<Struc
     });
   }
   const hasData = inner.events_pulled > 0;
+  // Headline leads with percent reduction (universal, vendor-independent),
+  // followed by the volume context, then a trailing "at list price" dollar
+  // band so the cost framing stays explicitly list-priced — not a customer-
+  // specific quote we cannot honestly produce from a kubectl sample.
   const headline = hasData
-    ? `POC from kubectl: ${inner.events_pulled.toLocaleString()} lines from ${inner.pods_sampled} pod${inner.pods_sampled !== 1 ? 's' : ''} → ${inner.distinct_patterns} distinct pattern${inner.distinct_patterns !== 1 ? 's' : ''}, projected ${fmtDollar(inner.daily_dollar_projection_low ?? 0)}-${fmtDollar(inner.daily_dollar_projection_high ?? 0)}/day across vendors.`
+    ? `POC from kubectl: ${Math.round(inner.daily_pct_reduction_low ?? 0)}-${Math.round(inner.daily_pct_reduction_high ?? 0)}% byte reduction across ${inner.distinct_patterns} pattern${inner.distinct_patterns !== 1 ? 's' : ''} (${inner.events_pulled.toLocaleString()} lines from ${inner.pods_sampled} pod${inner.pods_sampled !== 1 ? 's' : ''}). At list price across vendors: ${fmtDollar(inner.daily_dollar_projection_low ?? 0)}-${fmtDollar(inner.daily_dollar_projection_high ?? 0)}/day.`
     : 'POC from kubectl: no log lines pulled. Check namespace + pod filter.';
   return buildEnvelope({
     tool: 'log10x_poc_from_local',
@@ -152,6 +156,16 @@ interface PocFromLocalInner {
   daily_gb_projection: number;
   daily_dollar_projection_low?: number;
   daily_dollar_projection_high?: number;
+  // Per spec § percent-first: surface the reduction band as a percent
+  // alongside the dollar band. Computed from droppable-bytes / total-bytes
+  // with a +/- envelope to model heuristic uncertainty without leaking
+  // single-point precision.
+  daily_pct_reduction_low?: number;
+  daily_pct_reduction_expected?: number;
+  daily_pct_reduction_high?: number;
+  // Local-source POC only ever quotes list price — no customer-supplied
+  // rate path exists here (we sampled their cluster, not their bill).
+  rate_source: 'list_price';
   notes: string[];
   markdown: string;
 }
@@ -200,6 +214,7 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
       total_bytes: 0,
       distinct_patterns: 0,
       daily_gb_projection: 0,
+      rate_source: 'list_price',
       notes: sample.notes,
       markdown: lines.join('\n'),
     };
@@ -257,6 +272,8 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
 
   // Section: industry-pricing matrix.
   lines.push('## Projected savings at industry list pricing');
+  lines.push('');
+  lines.push('_Rate source: list price (vendors.json). Pass `effective_ingest_per_gb` on `log10x_estimate_savings` or `log10x_savings` once your real $/GB is known to convert these projections into a customer-specific quote._');
   lines.push('');
   lines.push(
     `If your full ingest mix matches this sample, ~${fmtPct(droppableFraction * 100)} of your byte volume is non-error high-frequency patterns — candidates for muting or sampling.`
@@ -318,6 +335,12 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
 
   const lowVendor = INDUSTRY_PRICING.reduce((min, r) => (r.perGb < min ? r.perGb : min), Infinity);
   const highVendor = INDUSTRY_PRICING.reduce((max, r) => (r.perGb > max ? r.perGb : max), 0);
+  // Percent reduction band: expected = droppable / total. Low/high apply a
+  // +/-15% heuristic envelope (matches the spec's "uncertainty range"
+  // around point estimates from local samples). Capped 0..100.
+  const expectedPct = droppableFraction * 100;
+  const lowPct = Math.max(0, expectedPct * 0.85);
+  const highPct = Math.min(100, expectedPct * 1.15);
   return {
     ok: true,
     source: 'kubectl',
@@ -331,6 +354,10 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     daily_gb_projection: dailyGbProjected,
     daily_dollar_projection_low: dailyGbProjected * lowVendor,
     daily_dollar_projection_high: dailyGbProjected * highVendor,
+    daily_pct_reduction_low: lowPct,
+    daily_pct_reduction_expected: expectedPct,
+    daily_pct_reduction_high: highPct,
+    rate_source: 'list_price',
     notes: sample.notes,
     markdown: lines.join('\n'),
   };

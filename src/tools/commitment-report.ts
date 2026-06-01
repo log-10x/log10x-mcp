@@ -206,6 +206,14 @@ export interface WeeklyVerifyResult {
     issue: 'leakage' | 'new_pattern_uncapped' | 'drift';
     suggested: string;
   }>;
+  /**
+   * Source of the $/GB rate used to compute `delivered_dollars` for the
+   * week. Propagated from estimate-savings.ts verify-mode output.
+   *  - 'customer_supplied' — caller passed effective_ingest_per_gb
+   *  - 'list_price'        — from vendors.json defaults
+   *  - 'unset'             — no rate; `delivered_dollars` is null
+   */
+  rate_source?: 'list_price' | 'customer_supplied' | 'unset';
 }
 
 /**
@@ -256,10 +264,23 @@ export interface CommitmentReportEnvelope {
    * For year-one committed contracts: the THEORETICAL dollar value of
    * the bytes saved (banked, not realized). For on-demand contracts and
    * post-term-end committed contracts: realized dollar savings.
+   *
+   * Null when `rate_source === 'unset'` — no $/GB rate available, the
+   * report leads with the byte/percent KPI and gates every dollar phrase.
    */
-  delivered_dollars: number;
+  delivered_dollars: number | null;
   delivered_dollars_kind: 'realized' | 'shadow_committed_year_one';
-  promised_dollars: number;
+  promised_dollars: number | null;
+  /**
+   * Aggregate rate source across the weekly slices. Reduced from each
+   * week's `rate_source`:
+   *  - all 'customer_supplied'   → 'customer_supplied'
+   *  - any 'unset' or mixed/none → 'unset'
+   *  - otherwise                  → 'list_price'
+   * Surfaced inline in the dollar paragraph and gates the list-price
+   * disclaimer.
+   */
+  rate_source: 'list_price' | 'customer_supplied' | 'unset';
   variance_attribution: {
     cap_fired_pct: number;
     drift_pct: number;
@@ -270,7 +291,8 @@ export interface CommitmentReportEnvelope {
     week_start: string;
     delivered_pct: number;
     delivered_bytes: number;
-    delivered_dollars: number;
+    delivered_dollars: number | null;
+    rate_source: 'list_price' | 'customer_supplied' | 'unset';
   }>;
   forward_confidence: {
     p10_next_90d_pct: number;
@@ -283,7 +305,7 @@ export interface CommitmentReportEnvelope {
     issue: 'leakage' | 'new_pattern_uncapped' | 'drift';
     recommended: string;
   }>;
-  annualized_dollars: number;
+  annualized_dollars: number | null;
   caveats: string[];
   markdown?: string;
 }
@@ -443,7 +465,8 @@ function inverseNormalCdf(p: number): number {
 function aggregateWeekly(weekly: WeeklyVerifyResult[]): {
   delivered_pct: number;
   delivered_bytes: number;
-  delivered_dollars: number;
+  delivered_dollars: number | null;
+  rate_source: 'list_price' | 'customer_supplied' | 'unset';
   attribution: {
     cap_fired_pct: number;
     drift_pct: number;
@@ -454,14 +477,29 @@ function aggregateWeekly(weekly: WeeklyVerifyResult[]): {
   let totalIn = 0;
   let totalDropped = 0;
   let totalDollars = 0;
+  let anyDollar = false;
   let capWeighted = 0;
   let driftWeighted = 0;
   let newPatWeighted = 0;
   let leakWeighted = 0;
+  // Reduce per-week rate_source: customer_supplied dominates iff ALL
+  // contributing weeks (with non-null dollars) are customer_supplied;
+  // any 'unset' or absent rate_source on a week with non-null dollars
+  // downgrades the aggregate to 'unset'.
+  let sawCustomer = false;
+  let sawList = false;
+  let sawUnsetOrMissing = false;
   for (const w of weekly) {
     totalIn += w.bytes_in;
     totalDropped += w.bytes_dropped;
-    totalDollars += w.delivered_dollars;
+    if (w.delivered_dollars != null && Number.isFinite(w.delivered_dollars)) {
+      totalDollars += w.delivered_dollars;
+      anyDollar = true;
+    }
+    const rs = w.rate_source;
+    if (rs === 'customer_supplied') sawCustomer = true;
+    else if (rs === 'list_price') sawList = true;
+    else sawUnsetOrMissing = true;
     const weight = w.bytes_in;
     capWeighted += w.attribution.cap_fired * weight;
     driftWeighted += w.attribution.drift * weight;
@@ -469,10 +507,16 @@ function aggregateWeekly(weekly: WeeklyVerifyResult[]): {
     leakWeighted += w.attribution.leakage * weight;
   }
   const denom = totalIn > 0 ? totalIn : 1;
+  let rate_source: 'list_price' | 'customer_supplied' | 'unset';
+  if (sawUnsetOrMissing || (!sawCustomer && !sawList)) rate_source = 'unset';
+  else if (sawCustomer && !sawList) rate_source = 'customer_supplied';
+  else if (sawList && !sawCustomer) rate_source = 'list_price';
+  else rate_source = 'unset'; // mixed list+customer → conservative
   return {
     delivered_pct: totalIn > 0 ? (totalDropped / totalIn) * 100 : 0,
     delivered_bytes: totalDropped,
-    delivered_dollars: totalDollars,
+    delivered_dollars: rate_source === 'unset' || !anyDollar ? null : totalDollars,
+    rate_source,
     attribution: {
       cap_fired_pct: (capWeighted / denom) * 100,
       drift_pct: (driftWeighted / denom) * 100,
@@ -563,7 +607,7 @@ function renderMarkdown(env: CommitmentReportEnvelope): string {
       : env.delivered_pct >= env.commitment.promised_pct * 0.9
         ? 'NEAR TARGET'
         : 'BEHIND';
-  const dollarLabel =
+  const kindLabel =
     env.delivered_dollars_kind === 'shadow_committed_year_one'
       ? 'shadow, committed-volume contract year-one'
       : 'realized';
@@ -575,13 +619,30 @@ function renderMarkdown(env: CommitmentReportEnvelope): string {
     `**Status:** ${status} — delivered **${env.delivered_pct.toFixed(1)}%** vs promised **${env.commitment.promised_pct.toFixed(1)}%** over ${env.period.days} days (${env.period.start.slice(0, 10)} to ${env.period.end.slice(0, 10)}).`
   );
   lines.push('');
-  lines.push(
-    `**Dollars (${dollarLabel}):** $${env.delivered_dollars.toFixed(0)} delivered vs $${env.promised_dollars.toFixed(0)} promised. Annualized run-rate $${env.annualized_dollars.toFixed(0)}.`
-  );
+  // Dollar paragraph: inline `(rate_source=X, kind=Y)`. When rate_source
+  // is unset, suppress the dollar figures and report bytes-banked only.
+  if (env.rate_source === 'unset' || env.delivered_dollars == null) {
+    lines.push(
+      `**Bytes delivered:** ${env.delivered_bytes.toLocaleString()} bytes saved. _(rate_source=unset, kind=${kindLabel} — pass effective_ingest_per_gb on log10x_estimate_savings to overlay dollar values.)_`
+    );
+  } else {
+    const promised = env.promised_dollars ?? 0;
+    const annualized = env.annualized_dollars ?? 0;
+    lines.push(
+      `**Dollars** _(rate_source=${env.rate_source}, kind=${kindLabel})_**:** $${env.delivered_dollars.toFixed(0)} delivered vs $${promised.toFixed(0)} promised. Annualized run-rate $${annualized.toFixed(0)}.`
+    );
+  }
   if (env.delivered_dollars_kind === 'shadow_committed_year_one') {
     lines.push('');
     lines.push(
       `> _Committed-volume contract, year-one. Dollar savings are tracked as bytes-banked headroom; realized dollars start at term-end._`
+    );
+  }
+  // List-price disclaimer (only when rate came from vendors.json).
+  if (env.rate_source === 'list_price') {
+    lines.push('');
+    lines.push(
+      `> _Dollar figures use list_price from vendors.json. Pass effective_ingest_per_gb on log10x_estimate_savings (verify) to use your contract rate._`
     );
   }
   lines.push('');
@@ -771,17 +832,33 @@ export async function executeCommitmentReport(
 
   // 7. Contract-aware dollar classification.
   const dollarKind = classifyDollarKind(commitment, period.end);
+  // promised_dollars and annualized_dollars only make sense when we have
+  // a rate. When rate_source==='unset', everything dollar-side is null.
   const promised_dollars =
-    commitment.baseline_usd_monthly *
-    (period.days / 30) *
-    (commitment.promised_pct / 100);
-  const annualized_dollars = annualizeDollars(agg.delivered_dollars, period.days);
+    agg.rate_source === 'unset'
+      ? null
+      : commitment.baseline_usd_monthly *
+        (period.days / 30) *
+        (commitment.promised_pct / 100);
+  const annualized_dollars =
+    agg.delivered_dollars == null
+      ? null
+      : annualizeDollars(agg.delivered_dollars, period.days);
 
   // 8. Caveats.
   const caveats: string[] = [];
   if (dollarKind === 'shadow_committed_year_one') {
     caveats.push(
       'Committed-volume contract, year-one: dollar savings are theoretical (bytes-banked headroom). Realized dollars kick in at contract term-end.'
+    );
+  }
+  if (agg.rate_source === 'list_price') {
+    caveats.push(
+      'Dollar figures use list_price from vendors.json. Pass effective_ingest_per_gb on log10x_estimate_savings (verify) to use your contract rate.'
+    );
+  } else if (agg.rate_source === 'unset') {
+    caveats.push(
+      'No $/GB rate available from upstream verify — dollar figures omitted. Pass effective_ingest_per_gb on log10x_estimate_savings to overlay them.'
     );
   }
   if (verifyErrors.length > 0) {
@@ -825,13 +902,23 @@ export async function executeCommitmentReport(
     delivered_dollars: agg.delivered_dollars,
     delivered_dollars_kind: dollarKind,
     promised_dollars,
+    rate_source: agg.rate_source,
     variance_attribution: agg.attribution,
-    weekly_series: weeklyResults.map((w) => ({
-      week_start: w.week_start,
-      delivered_pct: w.delivered_pct,
-      delivered_bytes: w.bytes_dropped,
-      delivered_dollars: w.delivered_dollars,
-    })),
+    weekly_series: weeklyResults.map((w) => {
+      const wRate = w.rate_source ?? 'unset';
+      return {
+        week_start: w.week_start,
+        delivered_pct: w.delivered_pct,
+        delivered_bytes: w.bytes_dropped,
+        delivered_dollars:
+          wRate === 'unset' ||
+          w.delivered_dollars == null ||
+          !Number.isFinite(w.delivered_dollars)
+            ? null
+            : w.delivered_dollars,
+        rate_source: wRate,
+      };
+    }),
     forward_confidence: {
       p10_next_90d_pct: forecast.p10,
       expected_next_90d_pct: forecast.expected,

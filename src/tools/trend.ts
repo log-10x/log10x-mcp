@@ -48,15 +48,21 @@ interface PatternTrendSummary {
   step: string;
   time_series: Array<{ ts: number; bytes: number }>;
   total_bytes: number;
-  total_cost_usd: number;
-  baseline_run_rate_usd: number;
-  recent_run_rate_usd: number;
+  // DEP: feat/x-percent-mcp-cost-tooling — dollar fields are now null when
+  // no rate is set (no `?? 1.0` lie). `rate_source` advertises the axis the
+  // dollar columns were computed against ('list_price' | 'customer_supplied'
+  // | 'unset'). Headline + markdown body lead with bytes/percent and gate
+  // the dollar clause on `rate_source !== 'unset'`.
+  total_cost_usd: number | null;
+  baseline_run_rate_usd: number | null;
+  recent_run_rate_usd: number | null;
   change_pct: number;
   spike_detected: boolean;
   spike_at_ts?: number;
   peak_bytes: number;
   low_bytes: number;
   sample_count: number;
+  rate_source: 'list_price' | 'customer_supplied' | 'unset';
 }
 
 export async function executeTrend(
@@ -75,7 +81,16 @@ export async function executeTrend(
     });
   }
   const d = sumOut.data;
-  const headline = `\`${d.pattern}\` over ${d.window}: $${d.total_cost_usd.toFixed(2)} measured spend, change ${d.change_pct >= 0 ? '+' : ''}${d.change_pct}% (last quarter vs first quarter run-rate)${d.spike_detected ? ', spike detected' : ''}`;
+  // Percent-first headline (TOOL-AUDIT cost-honesty pass). Bytes/change lead;
+  // the measured-spend clause is gated on `rate_source !== 'unset'` so we
+  // never print a $1.0/GB lie. When unset, suffix "(rate unset)" so the
+  // agent knows why the dollar number is missing.
+  const changeSign = d.change_pct >= 0 ? '+' : '';
+  const dollarClause =
+    d.rate_source !== 'unset' && d.total_cost_usd !== null
+      ? `, ${fmtDollar(d.total_cost_usd)} measured spend (at ${d.rate_source})`
+      : ', (rate unset)';
+  const headline = `\`${d.pattern}\` over ${d.window}: ${fmtBytes(d.total_bytes)}, change ${changeSign}${d.change_pct}% (last quarter vs first quarter run-rate)${dollarClause}${d.spike_detected ? ', spike detected' : ''}`;
   const { buildEnvelope } = await import('../lib/output-types.js');
   // G6: render a PNG timeseries chart of the trend so hosts that render
   // image content (Claude Desktop, ChatGPT Desktop) show it visually. The
@@ -119,7 +134,17 @@ async function executeTrendInner(
   const timeRange = args.timeRange ?? '7d';
   const step = args.step ?? '1h';
   const tf = parseTimeframe(timeRange);
-  const costPerGb = args.analyzerCost ?? 1.0;
+  // DEP: feat/x-percent-mcp-cost-tooling — drop the silent `?? 1.0` lie.
+  // When the caller provides an explicit $/GB via `analyzerCost`, the dollar
+  // axis is 'customer_supplied'. Otherwise it is 'unset' and every dollar
+  // field collapses to `null` (never 0, never 1). No list-price fallback
+  // here: trend has no destination-cost-model handle and no
+  // log10x_savings-style profile read. The headline + markdown render
+  // gate every dollar string on `rate_source !== 'unset'`.
+  const rateSource: 'customer_supplied' | 'unset' =
+    typeof args.analyzerCost === 'number' ? 'customer_supplied' : 'unset';
+  const costPerGb: number | null =
+    rateSource === 'customer_supplied' ? (args.analyzerCost as number) : null;
   const period = costPeriodLabel(tf.days);
   const metricsEnv = await resolveMetricsEnv(env);
 
@@ -160,7 +185,11 @@ async function executeTrendInner(
 
   // Compute stats
   const totalBytes = points.reduce((s, p) => s + p.bytes, 0);
-  const totalCost = bytesToCost(totalBytes, costPerGb);
+  // Dollar axes are null when `rate_source === 'unset'`. Every downstream
+  // print gates on this — naive `${totalCost}` interpolation would emit
+  // `$null`, which we explicitly avoid via the gated headline/body.
+  const totalCost: number | null =
+    costPerGb !== null ? bytesToCost(totalBytes, costPerGb) : null;
   const avgBytes = totalBytes / points.length;
   const maxPoint = points.reduce((max, p) => p.bytes > max.bytes ? p : max, points[0]);
   const minPoint = points.reduce((min, p) => p.bytes < min.bytes ? p : min, points[0]);
@@ -175,12 +204,16 @@ async function executeTrendInner(
   // Baseline: first quarter of points
   const baselineSlice = points.slice(0, Math.max(1, Math.floor(points.length / 4)));
   const baselineAvg = baselineSlice.reduce((s, p) => s + p.bytes, 0) / baselineSlice.length;
-  const baselineCost = bytesToCost(baselineAvg * (tf.days * 86400 / stepSeconds), costPerGb);
+  const baselineBytes = baselineAvg * (tf.days * 86400 / stepSeconds);
+  const baselineCost: number | null =
+    costPerGb !== null ? bytesToCost(baselineBytes, costPerGb) : null;
 
   // Current: last quarter of points
   const recentSlice = points.slice(-Math.max(1, Math.floor(points.length / 4)));
   const recentAvg = recentSlice.reduce((s, p) => s + p.bytes, 0) / recentSlice.length;
-  const recentCost = bytesToCost(recentAvg * (tf.days * 86400 / stepSeconds), costPerGb);
+  const recentBytes = recentAvg * (tf.days * 86400 / stepSeconds);
+  const recentCost: number | null =
+    costPerGb !== null ? bytesToCost(recentBytes, costPerGb) : null;
 
   // De-verdict (TOOL-AUDIT Phase 2): report the MEASURED change as a signed
   // delta + the two quarter run-rates, NOT an asserted RISING/FALLING/STABLE
@@ -191,12 +224,16 @@ async function executeTrendInner(
   // ACTUAL cost over the window; baseline/current are PROJECTED run-rates
   // from the first/last quarter (used only to gauge direction). "quarter" =
   // first/last 25% of the time window (not calendar Q).
+  // Percent direction is bytes-driven so it works whether or not a $/GB rate
+  // was supplied (cost is a linear function of bytes when set, so the
+  // bytes-ratio percent equals the dollar-ratio percent to the rounding
+  // precision we report).
   let pct = 0;
-  if (baselineCost > 0) {
-    pct = Math.round(((recentCost - baselineCost) / baselineCost) * 100);
+  if (baselineBytes > 0) {
+    pct = Math.round(((recentBytes - baselineBytes) / baselineBytes) * 100);
   }
   const changeStr =
-    baselineCost > 0
+    baselineBytes > 0
       ? `${pct >= 0 ? '+' : ''}${pct}% (last quarter vs first quarter run-rate)`
       : '(no first-quarter baseline to compare against)';
 
@@ -218,6 +255,7 @@ async function executeTrendInner(
       peak_bytes: maxPoint.bytes,
       low_bytes: minPoint.bytes,
       sample_count: points.length,
+      rate_source: rateSource,
     };
     void stepSecs;
   }
@@ -230,10 +268,21 @@ async function executeTrendInner(
   lines.push(`${patternDisplay(pattern).title} · trend over ${tf.label}`);
   lines.push(`Change over ${tf.label}: ${changeStr}${spikePoint ? `; peak ${(maxPoint.bytes / avgBytes).toFixed(1)}× the window average at ${formatTimestamp(spikePoint.ts)}` : ''}`);
   lines.push('');
-  lines.push(`  Measured spend over ${tf.label}: ${fmtDollar(totalCost)}  (${points.length} samples @ ${step})`);
+  // Bytes-first body. Dollar lines are gated on `rate_source !== 'unset'`
+  // (mirrors the headline rule). When unset we still show the volume
+  // direction check in bytes so the reader has a usable comparison.
+  lines.push(`  Measured volume over ${tf.label}: ${fmtBytes(totalBytes)}  (${points.length} samples @ ${step})`);
+  if (rateSource !== 'unset' && totalCost !== null) {
+    lines.push(`  Measured spend over ${tf.label}: ${fmtDollar(totalCost)} (at ${rateSource})`);
+  }
   lines.push(`  Direction check (extrapolated run-rate, NOT the bill, used only to gauge direction):`);
-  lines.push(`    first quarter ~${fmtDollar(baselineCost)}${period}  ->  last quarter ${fmtDollar(recentCost)}${period}`);
-  lines.push(`  _The two numbers differ on purpose: the first is the actual spend over the window; the run-rates annualize each quarter's average rate to judge rising/falling, so they will not equal the measured spend._`);
+  if (rateSource !== 'unset' && baselineCost !== null && recentCost !== null) {
+    lines.push(`    first quarter ~${fmtDollar(baselineCost)}${period}  ->  last quarter ${fmtDollar(recentCost)}${period}`);
+    lines.push(`  _The two numbers differ on purpose: the first is the actual spend over the window; the run-rates annualize each quarter's average rate to judge rising/falling, so they will not equal the measured spend._`);
+  } else {
+    lines.push(`    first quarter ~${fmtBytes(baselineBytes)}${period}  ->  last quarter ${fmtBytes(recentBytes)}${period}`);
+    lines.push(`  _Run-rates are bytes annualized from each quarter's average rate, used only to gauge direction. Pass \`analyzerCost\` to overlay $/period._`);
+  }
   lines.push(`  Peak ${fmtBytes(maxPoint.bytes)} @ ${formatTimestamp(maxPoint.ts)} · Low ${fmtBytes(minPoint.bytes)} @ ${formatTimestamp(minPoint.ts)}`);
 
   // Big line chart (the same one top_patterns uses). trend is a focused
@@ -255,8 +304,11 @@ async function executeTrendInner(
   // next_action hints — prose for human readers, structured NEXT_ACTIONS
   // block for autonomous-chain agents. Spike or sustained drift → suggest
   // investigate. Always recommend dependency_check before any mute action.
-  const elevated = baselineCost > 0 && recentCost > baselineCost * 1.5;
-  const sustainedSlope = baselineCost > 0 && recentCost > baselineCost * 1.2 && !spikePoint;
+  // Bytes-driven thresholds so spike/drift suggestions fire under
+  // rate_source='unset' too (the dollar values are a linear function of
+  // bytes when set, so the ratios are equivalent).
+  const elevated = baselineBytes > 0 && recentBytes > baselineBytes * 1.5;
+  const sustainedSlope = baselineBytes > 0 && recentBytes > baselineBytes * 1.2 && !spikePoint;
   const nextActions: NextAction[] = [];
   if (spikePoint || elevated) {
     lines.push('');

@@ -489,12 +489,17 @@ export async function runEstimateForecast(
 
     const savedBytes = monthlyBytes - actionRange.expected.bytes_out;
     // Range is intentionally swapped: high savings = low destination cost.
+    // total_dollars is now nullable; when unset we surface 0 here so the
+    // existing envelope compiles. Full rate_source propagation lands in the
+    // estimate-savings patch (step 6 of the build order).
     const dollarsLow =
-      passRange.low.total_dollars - actionRange.low.total_dollars;
+      (passRange.low.total_dollars ?? 0) - (actionRange.low.total_dollars ?? 0);
     const dollarsExpected =
-      passRange.expected.total_dollars - actionRange.expected.total_dollars;
+      (passRange.expected.total_dollars ?? 0) -
+      (actionRange.expected.total_dollars ?? 0);
     const dollarsHigh =
-      passRange.high.total_dollars - actionRange.high.total_dollars;
+      (passRange.high.total_dollars ?? 0) -
+      (actionRange.high.total_dollars ?? 0);
 
     if (
       row.action === 'compact' &&

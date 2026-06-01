@@ -26,7 +26,7 @@ import type { EnvConfig } from '../lib/environments.js';
 import { queryInstant } from '../lib/api.js';
 import * as pql from '../lib/promql.js';
 import { bytesToCost, parsePrometheusValue } from '../lib/cost.js';
-import { fmtDollar, fmtBytes, parseTimeframe, costPeriodLabel } from '../lib/format.js';
+import { fmtDollar, fmtBytes, fmtPct, parseTimeframe, costPeriodLabel } from '../lib/format.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
@@ -34,9 +34,13 @@ import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
 /** S3 Standard default, matching the ROI dashboard's storageCost default ($/GB/month). */
 const DEFAULT_STORAGE_COST_PER_GB = 0.023;
 
+/** Origin of the analyzer $/GB used in this run. Drives dollar-gating in headlines + markdown. */
+export type RateSource = 'list_price' | 'customer_supplied' | 'unset';
+
 export const savingsSchema = {
   timeRange: z.enum(['1d', '7d', '30d']).default('7d').describe('Time range'),
-  analyzerCost: z.number().optional().describe('SIEM ingestion cost in $/GB. Auto-detected from profile if omitted.'),
+  analyzerCost: z.number().optional().describe('DEPRECATED alias for effective_ingest_per_gb. SIEM ingestion cost in $/GB.'),
+  effective_ingest_per_gb: z.number().optional().describe('Customer-supplied SIEM ingestion cost in $/GB. When provided, rate_source=customer_supplied and dollars are populated. When omitted and no profile rate is available, rate_source=unset and the headline reports percent + bytes only (no dollars).'),
   storageCost: z.number().optional().describe('S3 storage cost in $/GB/month. Defaults to $0.023 (S3 Standard).'),
   environment: z.string().optional().describe('Environment nickname'),
   view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.totals, data.edge, data.retriever, data.run_rate). markdown wraps the rendered table in data.markdown.'),
@@ -44,31 +48,41 @@ export const savingsSchema = {
 
 interface SavingsSummary {
   time_range: string;
-  cost_per_gb: number;
+  /** Resolved $/GB used for dollar math. null when rate_source === 'unset'. */
+  cost_per_gb: number | null;
   storage_per_gb: number;
   period: string;
+  rate_source: RateSource;
   edge: {
     input_bytes: number;
     emitted_bytes: number;
     reduced_bytes: number;
-    savings_dollars: number;
+    reduction_pct: number;
+    /** null when rate_source === 'unset' (no $/GB known — no honest dollar figure). */
+    savings_dollars: number | null;
     emission_missing: boolean;
   };
   retriever: {
     indexed_bytes: number;
     streamed_bytes: number;
-    savings_dollars: number;
+    reduction_pct: number;
+    /** null when rate_source === 'unset'. */
+    savings_dollars: number | null;
     coverage: number;
     chunks_ok: number;
     chunks_total: number;
   };
   totals: {
-    realized_dollars: number;
-    annual_projection_dollars: number;
+    reduction_pct: number;
+    /** null when rate_source === 'unset'. */
+    realized_dollars: number | null;
+    /** null when rate_source === 'unset'. */
+    annual_projection_dollars: number | null;
     has_data: boolean;
   };
   run_rate?: {
-    seven_day_annualized: number;
+    /** null when rate_source === 'unset'. */
+    seven_day_annualized: number | null;
     ramping: boolean;
     coverage: number;
   };
@@ -77,7 +91,7 @@ interface SavingsSummary {
 }
 
 export async function executeSavings(
-  args: { timeRange?: string; analyzerCost?: number; storageCost?: number; view?: 'summary' | 'markdown' },
+  args: { timeRange?: string; analyzerCost?: number; effective_ingest_per_gb?: number; storageCost?: number; view?: 'summary' | 'markdown' },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
   const view = args.view ?? 'summary';
@@ -92,9 +106,21 @@ export async function executeSavings(
     });
   }
   const d = sumOut.data;
-  const headline = d.totals.has_data
-    ? `Pipeline savings (${d.time_range}): ${fmtDollar(d.totals.realized_dollars)}${d.period} realized, ${fmtDollar(d.totals.annual_projection_dollars)}/yr projected${d.run_rate?.ramping ? ' (volume ramping)' : ''}.`
-    : `No realized-savings metrics for this environment yet — pipeline has not booked any volume reduction.`;
+  // Percent-first headline; dollar clause is gated on rate_source !== 'unset'.
+  // When no $/GB is known we refuse to print a dollar number (no $1.0/GB lie).
+  let headline: string;
+  if (!d.totals.has_data) {
+    headline = `No realized-savings metrics for this environment yet — pipeline has not booked any volume reduction.`;
+  } else if (d.rate_source === 'unset') {
+    headline = `Pipeline savings (${d.time_range}): ${fmtPct(d.totals.reduction_pct)} of input bytes removed${d.run_rate?.ramping ? ' (volume ramping)' : ''}. Pass effective_ingest_per_gb to overlay dollars.`;
+  } else {
+    const realized = d.totals.realized_dollars;
+    const annual = d.totals.annual_projection_dollars;
+    const dollarClause = realized != null && annual != null
+      ? `, ${fmtDollar(realized)}${d.period} realized, ${fmtDollar(annual)}/yr projected at ${d.rate_source}`
+      : '';
+    headline = `Pipeline savings (${d.time_range}): ${fmtPct(d.totals.reduction_pct)} of input bytes removed${dollarClause}${d.run_rate?.ramping ? ' (volume ramping)' : ''}.`;
+  }
   return buildEnvelope({
     tool: 'log10x_savings',
     view: 'summary',
@@ -108,14 +134,21 @@ export async function executeSavings(
 }
 
 async function executeSavingsInner(
-  args: { timeRange?: string; analyzerCost?: number; storageCost?: number },
+  args: { timeRange?: string; analyzerCost?: number; effective_ingest_per_gb?: number; storageCost?: number },
   env: EnvConfig,
   sumOut?: { data?: SavingsSummary }
 ): Promise<string> {
   // Defensive defaults — match savingsSchema (timeRange:'7d').
   const timeRange = args.timeRange ?? '7d';
   const tf = parseTimeframe(timeRange);
-  const costPerGb = args.analyzerCost ?? 1.0;
+  // Resolve $/GB with rate_source attribution. No silent $1/GB fallback — if
+  // the caller supplies nothing and there is no profile rate to inherit, we
+  // emit rate_source='unset' and downstream dollar math returns null so the
+  // headline/markdown can refuse to print a dollar lie.
+  const overrideRate = args.effective_ingest_per_gb ?? args.analyzerCost;
+  const rateSource: RateSource =
+    overrideRate != null ? 'customer_supplied' : 'unset';
+  const costPerGb: number | null = overrideRate != null ? overrideRate : null;
   const storagePerGb = args.storageCost ?? DEFAULT_STORAGE_COST_PER_GB;
   const period = costPeriodLabel(tf.days);
 
@@ -195,26 +228,57 @@ async function executeSavingsInner(
   const pipeCount = pipeRes?.data?.result?.[0] ? parsePrometheusValue(pipeRes.data.result[0]) : 0;
   const svcCount = svcRes?.data?.result?.[0] ? parsePrometheusValue(svcRes.data.result[0]) : 0;
 
-  // Edge savings: bytes that entered the pipeline minus bytes that left it
+  // Edge savings: bytes that entered the pipeline minus bytes that left it.
+  // Bytes-saved is the truth signal; dollars are an overlay only when we know
+  // a $/GB rate.
   const edgeReducedBytes = Math.max(0, edgeIn - edgeEmitted);
-  const edgeSavings = bytesToCost(edgeReducedBytes, costPerGb);
+  const edgeReductionPct = edgeIn > 0 ? (edgeReducedBytes / edgeIn) * 100 : 0;
+  const edgeSavings: number | null =
+    costPerGb != null ? bytesToCost(edgeReducedBytes, costPerGb) : null;
 
   // Retriever savings: cost avoided by keeping data in S3 instead of the SIEM
   // = indexedBytes * (analyzerCost - storageCost) - streamedBytes * analyzerCost
-  const retrieverSavings = Math.max(
-    0,
-    bytesToCost(indexedBytes, costPerGb - storagePerGb) - bytesToCost(streamedBytes, costPerGb)
-  );
+  const retrieverInputBytes = indexedBytes + streamedBytes;
+  const retrieverReductionPct =
+    retrieverInputBytes > 0 ? (indexedBytes / retrieverInputBytes) * 100 : 0;
+  const retrieverSavings: number | null =
+    costPerGb != null
+      ? Math.max(
+          0,
+          bytesToCost(indexedBytes, costPerGb - storagePerGb) -
+            bytesToCost(streamedBytes, costPerGb)
+        )
+      : null;
 
   // Exclude edgeSavings from the headline total if there's no downstream
   // emission — unshipped potential is not realized savings.
   const edgeEmissionMissing = edgeIn > 0 && edgeEmitted === 0;
-  const realizedEdgeSavings = edgeEmissionMissing ? 0 : edgeSavings;
-  const totalSaved = realizedEdgeSavings + retrieverSavings;
-  const annualProjection = totalSaved * (365 / tf.days);
+  const realizedEdgeSavings: number | null =
+    edgeSavings == null ? null : edgeEmissionMissing ? 0 : edgeSavings;
+  const totalSaved: number | null =
+    realizedEdgeSavings == null || retrieverSavings == null
+      ? null
+      : realizedEdgeSavings + retrieverSavings;
+  const annualProjection: number | null =
+    totalSaved == null ? null : totalSaved * (365 / tf.days);
+  // Combined byte-share reduction across edge + retriever — used by the
+  // percent-first headline whether or not dollars are populated.
+  const totalReducedBytes = edgeReducedBytes + indexedBytes;
+  const totalInputBytes = edgeIn + retrieverInputBytes;
+  const totalReductionPct =
+    totalInputBytes > 0 ? (totalReducedBytes / totalInputBytes) * 100 : 0;
+  const hasData = totalReducedBytes > 0;
 
   const lines: string[] = [];
-  lines.push(`Pipeline Savings (${tf.label}) at ${fmtDollar(costPerGb)}/GB analyzer · ${fmtDollar(storagePerGb)}/GB storage`);
+  // Header: when rate_source is 'unset' we deliberately omit the $/GB clause
+  // (printing $0 or $1 here is the headline lie we are removing).
+  if (costPerGb != null) {
+    lines.push(
+      `Pipeline Savings (${tf.label}) at ${fmtDollar(costPerGb)}/GB analyzer (${rateSource}) · ${fmtDollar(storagePerGb)}/GB storage`
+    );
+  } else {
+    lines.push(`Pipeline Savings (${tf.label}) — rate unset, percent-only view`);
+  }
   lines.push('');
 
   // If edgeEmitted == 0 while edgeIn > 0, tenx-edge has no configured
@@ -229,18 +293,34 @@ async function executeSavingsInner(
   if (edgeEmissionMissing) {
     lines.push(`  Edge:      ${fmtBytes(edgeIn).padEnd(14)} input      → ⚠ no downstream emission detected`);
     lines.push(`             (input ${fmtBytes(edgeIn)} processed, but 0 B emitted to a SIEM target)`);
-    lines.push(`             _Potential savings if this were routed through the pipeline: ${fmtDollar(edgeSavings)}${period}._`);
+    if (edgeSavings != null) {
+      lines.push(`             _Potential savings if this were routed through the pipeline: ${fmtDollar(edgeSavings)}${period} at ${rateSource}._`);
+    } else {
+      lines.push(`             _Pass effective_ingest_per_gb to overlay a potential-savings dollar figure._`);
+    }
     lines.push(`             _To realize these savings, configure a downstream SIEM output (Splunk, Datadog, etc.) and measurements will populate within 24h._`);
   } else if (edgeReducedBytes > 0) {
-    lines.push(`  Edge:      ${fmtBytes(edgeReducedBytes).padEnd(14)} reduced    → ${fmtDollar(edgeSavings)}${period} saved`);
+    const dollarTail =
+      edgeSavings != null
+        ? ` → ${fmtDollar(edgeSavings)}${period} saved at ${rateSource}`
+        : '';
+    lines.push(
+      `  Edge:      ${fmtBytes(edgeReducedBytes).padEnd(14)} reduced (${fmtPct(edgeReductionPct)} of input)${dollarTail}`
+    );
     lines.push(`             (input ${fmtBytes(edgeIn)} − emitted ${fmtBytes(edgeEmitted)})`);
   }
   if (indexedBytes > 0 || streamedBytes > 0) {
-    lines.push(`  Retriever:  ${fmtBytes(indexedBytes).padEnd(14)} in S3      → ${fmtDollar(retrieverSavings)}${period} saved`);
+    const dollarTail =
+      retrieverSavings != null
+        ? ` → ${fmtDollar(retrieverSavings)}${period} saved at ${rateSource}`
+        : '';
+    lines.push(
+      `  Retriever:  ${fmtBytes(indexedBytes).padEnd(14)} in S3 (${fmtPct(retrieverReductionPct)} of retriever input)${dollarTail}`
+    );
     lines.push(`             (streamed back: ${fmtBytes(streamedBytes)})`);
   }
 
-  if (totalSaved === 0) {
+  if (!hasData) {
     lines.push('  No realized-savings metrics for this environment yet.');
     lines.push('');
     lines.push('  This tool measures savings the pipeline has ALREADY booked: edge');
@@ -266,7 +346,15 @@ async function executeSavingsInner(
     lines.push('  otel-collector configs untouched.');
   } else {
     lines.push('');
-    lines.push(`  Total: ${fmtDollar(totalSaved)}${period} · ${fmtDollar(annualProjection)}/yr projected`);
+    if (totalSaved != null && annualProjection != null) {
+      lines.push(
+        `  Total: ${fmtPct(totalReductionPct)} of input bytes removed · ${fmtDollar(totalSaved)}${period} · ${fmtDollar(annualProjection)}/yr projected at ${rateSource}`
+      );
+    } else {
+      lines.push(
+        `  Total: ${fmtPct(totalReductionPct)} of input bytes removed (rate unset — pass effective_ingest_per_gb to overlay dollars)`
+      );
+    }
     // Headline reliability caveat: if any retriever chunks in the MAIN query silently
     // failed, the headline number is an underestimate and the caller needs to know.
     // (Edge queries are single-shot, not chunked, so they either fully succeed or return null.)
@@ -293,13 +381,21 @@ async function executeSavingsInner(
       const edgeIn7d = edgeIn7dRes?.data?.result?.[0] ? parsePrometheusValue(edgeIn7dRes.data.result[0]) : 0;
       const edgeOut7d = edgeOut7dRes?.data?.result?.[0] ? parsePrometheusValue(edgeOut7dRes.data.result[0]) : 0;
       const edgeReduced7d = Math.max(0, edgeIn7d - edgeOut7d);
-      const edge7dSavings = bytesToCost(edgeReduced7d, costPerGb);
-      const retriever7dSavings = Math.max(
-        0,
-        bytesToCost(indexed7d, costPerGb - storagePerGb) - bytesToCost(streamed7d, costPerGb)
-      );
-      const total7d = edge7dSavings + retriever7dSavings;
-      const annual7d = total7d * (365 / 7);
+      // Ramp detection is a ratio on the trailing-window byte volume — it
+      // doesn't need a $/GB rate, so we compute it directly from reduced bytes.
+      // Annualized dollars are still emitted, but only when the rate is known.
+      const totalReducedBytes7d = edgeReduced7d + indexed7d;
+      const annualReducedBytes7d = totalReducedBytes7d * (365 / 7);
+      const annualReducedBytesTrailing = totalReducedBytes * (365 / tf.days);
+      const annual7d: number | null =
+        costPerGb != null
+          ? Math.max(
+              0,
+              bytesToCost(edgeReduced7d, costPerGb) +
+                (bytesToCost(indexed7d, costPerGb - storagePerGb) -
+                  bytesToCost(streamed7d, costPerGb))
+            ) * (365 / 7)
+          : null;
 
       // Coverage: edge contributes 2 queries (both must succeed). retriever contributes
       // 14 chunks (7 indexed + 7 streamed). If everything succeeded, coverage is 1.0.
@@ -309,24 +405,37 @@ async function executeSavingsInner(
       // value is >2×) is a risk, and only when partial coverage is low.
       const fullCoverage = edge7dOk && retriever7dCoverage >= 1;
       const enoughCoverage = edge7dOk && retriever7dCoverage >= 0.7; // 10 of 14 chunks min
+      const rampRatio =
+        annualReducedBytesTrailing > 0
+          ? annualReducedBytes7d / annualReducedBytesTrailing
+          : 0;
+      const isRamping = edge7dOk && rampRatio > 2;
 
       if (!edge7dOk) {
         lines.push('');
         lines.push(`  _Run-rate check skipped: edge 7d baseline query failed. Retry in 30s. Do NOT interpret the absence of a run-rate warning as confirmation of stable run-rate — the check could not execute._`);
-      } else if (annual7d > annualProjection * 2) {
+      } else if (isRamping) {
         // Partial or full — if the partial says ramping, the full definitely says ramping.
         const coverageNote = fullCoverage
           ? ''
           : ` _(retriever coverage: ${retriever7dChunksOk}/${retriever7dChunksTotal} chunks — this is a conservative underestimate; true rate is equal or higher)_`;
+        const dollarClause =
+          annual7d != null
+            ? `${fmtDollar(annual7d)}/yr — `
+            : '';
         lines.push('');
-        lines.push(`  **Run-rate note**: The last 7 days project to ${fmtDollar(annual7d)}/yr — ${Math.round(annual7d / annualProjection)}× higher than the ${tf.label} trailing average. Volume has been ramping. Use the 7-day figure for forward-looking projections.${coverageNote}`);
+        lines.push(`  **Run-rate note**: The last 7 days project to ${dollarClause}${Math.round(rampRatio)}× higher than the ${tf.label} trailing average. Volume has been ramping. Use the 7-day figure for forward-looking projections.${coverageNote}`);
       } else if (!enoughCoverage) {
         // Partial coverage AND the partial math was below threshold — this is the
         // failure mode where the true value could be above threshold. Warn.
+        const dollarClause =
+          annual7d != null
+            ? `${fmtDollar(annual7d)}/yr `
+            : '';
         lines.push('');
-        lines.push(`  _Run-rate check inconclusive: only ${retriever7dChunksOk}/${retriever7dChunksTotal} retriever chunks returned (coverage ${Math.round(retriever7dCoverage * 100)}%). Partial math projects ${fmtDollar(annual7d)}/yr (${(annual7d / annualProjection).toFixed(1)}× trailing), which is below the 2× ramp-up threshold — but the true value may be higher due to missing chunks. Retry in 30s to confirm whether the environment is stable or ramping._`);
+        lines.push(`  _Run-rate check inconclusive: only ${retriever7dChunksOk}/${retriever7dChunksTotal} retriever chunks returned (coverage ${Math.round(retriever7dCoverage * 100)}%). Partial math projects ${dollarClause}(${rampRatio.toFixed(1)}× trailing), which is below the 2× ramp-up threshold — but the true value may be higher due to missing chunks. Retry in 30s to confirm whether the environment is stable or ramping._`);
       }
-      // Full coverage AND annual7d <= threshold → stable. No note needed.
+      // Full coverage AND ramp <= threshold → stable. No note needed.
     }
   }
 
@@ -367,13 +476,25 @@ async function executeSavingsInner(
       const edgeIn7d = edgeIn7dRes?.data?.result?.[0] ? parsePrometheusValue(edgeIn7dRes.data.result[0]) : 0;
       const edgeOut7d = edgeOut7dRes?.data?.result?.[0] ? parsePrometheusValue(edgeOut7dRes.data.result[0]) : 0;
       const edgeReduced7d = Math.max(0, edgeIn7d - edgeOut7d);
-      const edge7dSavings = bytesToCost(edgeReduced7d, costPerGb);
-      const retriever7dSavings = Math.max(0, bytesToCost(indexed7d, costPerGb - storagePerGb) - bytesToCost(streamed7d, costPerGb));
-      const total7d = edge7dSavings + retriever7dSavings;
-      const annual7d = total7d * (365 / 7);
+      const totalReducedBytes7d = edgeReduced7d + indexed7d;
+      const annualReducedBytes7d = totalReducedBytes7d * (365 / 7);
+      const annualReducedBytesTrailing = totalReducedBytes * (365 / tf.days);
+      const rampRatio =
+        annualReducedBytesTrailing > 0
+          ? annualReducedBytes7d / annualReducedBytesTrailing
+          : 0;
+      const annual7d: number | null =
+        costPerGb != null
+          ? Math.max(
+              0,
+              bytesToCost(edgeReduced7d, costPerGb) +
+                (bytesToCost(indexed7d, costPerGb - storagePerGb) -
+                  bytesToCost(streamed7d, costPerGb))
+            ) * (365 / 7)
+          : null;
       runRate = {
         seven_day_annualized: annual7d,
-        ramping: edge7dOk && annual7d > annualProjection * 2,
+        ramping: edge7dOk && rampRatio > 2,
         coverage: retriever7dCoverage,
       };
     }
@@ -382,25 +503,29 @@ async function executeSavingsInner(
       cost_per_gb: costPerGb,
       storage_per_gb: storagePerGb,
       period,
+      rate_source: rateSource,
       edge: {
         input_bytes: edgeIn,
         emitted_bytes: edgeEmitted,
         reduced_bytes: edgeReducedBytes,
+        reduction_pct: edgeReductionPct,
         savings_dollars: realizedEdgeSavings,
         emission_missing: edgeEmissionMissing,
       },
       retriever: {
         indexed_bytes: indexedBytes,
         streamed_bytes: streamedBytes,
+        reduction_pct: retrieverReductionPct,
         savings_dollars: retrieverSavings,
         coverage: mainRetrieverCoverage,
         chunks_ok: mainRetrieverChunksOk,
         chunks_total: mainRetrieverChunksTotal,
       },
       totals: {
+        reduction_pct: totalReductionPct,
         realized_dollars: totalSaved,
         annual_projection_dollars: annualProjection,
-        has_data: totalSaved > 0,
+        has_data: hasData,
       },
       run_rate: runRate,
       pipeline_instances: pipeCount,

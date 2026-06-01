@@ -89,6 +89,39 @@ export function fmtPct(value: number): string {
   return `${Math.round(value)}%`;
 }
 
+/**
+ * Format a percent-reduction value. Alias of `fmtPct` semantics with an
+ * explicit name so headlines that lead with "% reduction" read in the
+ * source the way they render.
+ */
+export function fmtPctReduction(value: number): string {
+  return `${Math.round(value)}%`;
+}
+
+/**
+ * Render a low / expected / high percent triplet: "78% (72-84%)".
+ * Used by percent-first headlines that surface the uncertainty band
+ * around an expected reduction.
+ */
+export function fmtPctRange(low: number, expected: number, high: number): string {
+  return `${Math.round(expected)}% (${Math.round(low)}-${Math.round(high)}%)`;
+}
+
+/**
+ * Render a dollar amount tagged with the rate's provenance. Returns "—"
+ * when the rate is unset (no dollar value can honestly be quoted), and
+ * appends "(list)" or "(custom)" otherwise so downstream prose can stay
+ * percent-first without losing the rate-origin signal.
+ */
+export function fmtDollarWithSource(
+  amount: number | null,
+  source: 'list_price' | 'customer_supplied' | 'unset'
+): string {
+  if (amount == null || source === 'unset') return '—';
+  const tag = source === 'customer_supplied' ? 'custom' : 'list';
+  return `${fmtDollar(amount)} (${tag})`;
+}
+
 /** Timeframe config. */
 export interface Timeframe {
   /** Window length in days. Fractional for sub-day windows (e.g., 1h = 1/24). */

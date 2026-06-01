@@ -13,7 +13,8 @@ import { LABELS } from '../lib/promql.js';
 import { bytesToCost, parsePrometheusValue } from '../lib/cost.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import {
-  fmtDollar, fmtPattern, fmtSeverity, fmtCount, fmtBytes,
+  fmtDollar, fmtPattern, fmtSeverity, fmtCount, fmtBytes, fmtPct,
+  fmtDollarWithSource,
   parseTimeframe, costPeriodLabel, normalizePattern
 } from '../lib/format.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
@@ -28,7 +29,8 @@ export const eventLookupSchema = {
   tenxHash: z.string().optional().describe('A tenx_hash value (e.g. seen on an event in your SIEM / CloudWatch Logs). Resolved against the 10x metrics to recover the pattern, then the normal cost/services breakdown is shown. This is the reverse of the cross-pillar join: opaque SIEM hash → named pattern + cost.'),
   service: z.string().optional().describe('Service to scope the lookup'),
   timeRange: z.enum(['1d', '7d', '30d']).default('7d').describe('Time range'),
-  analyzerCost: z.number().optional().describe('SIEM ingestion cost in $/GB'),
+  analyzerCost: z.number().optional().describe('SIEM ingestion cost in $/GB (deprecated alias of `effective_ingest_per_gb`)'),
+  effective_ingest_per_gb: z.number().optional().describe('Customer-supplied SIEM ingest cost in $/GB. When set, dollar fields populate with rate_source=customer_supplied; when absent and no list rate is detected, dollar fields collapse to null and rate_source=unset.'),
   siemScope: z.string().optional().describe('SIEM scope for the live sample line on a tenxHash reverse lookup: a CloudWatch log group (`/aws/ecs/my-svc`), ES index, or Splunk index. When omitted, the detected SIEM connector uses its own default scope. Only consulted when `tenxHash` was passed (the cross-pillar correlation case).'),
   environment: z.string().optional().describe('Environment nickname'),
   view: z.enum(['summary', 'markdown']).default('summary').describe('Output format. summary returns a structured envelope; markdown returns the rendered table.'),
@@ -37,13 +39,14 @@ export const eventLookupSchema = {
 interface EventLookupSummary {
   pattern: string;
   window: string;
-  services: Array<{ service: string; severity: string; bytes: number; cost_per_window_usd: number; cost_baseline_usd: number; events: number; is_new: boolean }>;
-  totals: { bytes: number; cost_per_window_usd: number; cost_baseline_usd: number; events: number; service_count: number };
+  services: Array<{ service: string; severity: string; bytes: number; share_pct: number; cost_per_window_usd: number | null; cost_baseline_usd: number | null; events: number; is_new: boolean }>;
+  totals: { bytes: number; cost_per_window_usd: number | null; cost_baseline_usd: number | null; events: number; service_count: number };
+  rate_source: 'list_price' | 'customer_supplied' | 'unset';
   resolved_from_hash?: string;
 }
 
 export async function executeEventLookup(
-  args: { pattern?: string; tenxHash?: string; service?: string; timeRange?: string; analyzerCost?: number; siemScope?: string; view?: 'summary' | 'markdown' },
+  args: { pattern?: string; tenxHash?: string; service?: string; timeRange?: string; analyzerCost?: number; effective_ingest_per_gb?: number; siemScope?: string; view?: 'summary' | 'markdown' },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
   const view = args.view ?? 'summary';
@@ -67,7 +70,14 @@ export async function executeEventLookup(
     });
   }
   const d = sumOut.data;
-  const headline = `\`${d.pattern}\` over ${d.window}: $${d.totals.cost_per_window_usd.toFixed(2)} across ${d.totals.service_count} service${d.totals.service_count === 1 ? '' : 's'} (${d.totals.events} events, ${(d.totals.bytes / 1_000_000).toFixed(1)} MB)`;
+  // Headline leads with events / services / bytes (universal axes) and
+  // gates the dollar clause on rate_source so an unset rate yields a
+  // truthful percent-first headline instead of a fabricated "$0.00".
+  const svcWord = d.totals.service_count === 1 ? 'service' : 'services';
+  const dollarTail = fmtDollarWithSource(d.totals.cost_per_window_usd, d.rate_source);
+  const headline = dollarTail === '—'
+    ? `\`${d.pattern}\` over ${d.window}: ${d.totals.events} events across ${d.totals.service_count} ${svcWord} (${(d.totals.bytes / 1_000_000).toFixed(1)} MB)`
+    : `\`${d.pattern}\` over ${d.window}: ${d.totals.events} events across ${d.totals.service_count} ${svcWord} (${(d.totals.bytes / 1_000_000).toFixed(1)} MB) · ${dollarTail}`;
   const { buildEnvelope } = await import('../lib/output-types.js');
   return buildEnvelope({
     tool: 'log10x_event_lookup',
@@ -78,7 +88,7 @@ export async function executeEventLookup(
 }
 
 async function executeEventLookupInner(
-  args: { pattern?: string; tenxHash?: string; service?: string; timeRange?: string; analyzerCost?: number; siemScope?: string },
+  args: { pattern?: string; tenxHash?: string; service?: string; timeRange?: string; analyzerCost?: number; effective_ingest_per_gb?: number; siemScope?: string },
   env: EnvConfig,
   sumOut?: { data?: EventLookupSummary }
 ): Promise<string> {
@@ -87,7 +97,17 @@ async function executeEventLookupInner(
   // can land here with raw args. Match eventLookupSchema defaults.
   const timeRange = args.timeRange ?? '7d';
   const tf = parseTimeframe(timeRange);
-  const costPerGb = args.analyzerCost ?? 1.0;
+  // Rate resolution per spec § "no $1/GB lie": prefer customer override,
+  // fall back to deprecated alias (list price), else null → rate_source='unset'
+  // so dollar fields collapse to null instead of silently quoting $1/GB.
+  const rateSource: 'list_price' | 'customer_supplied' | 'unset' =
+    args.effective_ingest_per_gb != null
+      ? 'customer_supplied'
+      : args.analyzerCost != null
+        ? 'list_price'
+        : 'unset';
+  const costPerGb: number | null =
+    args.effective_ingest_per_gb ?? args.analyzerCost ?? null;
   const period = costPeriodLabel(tf.days);
   const metricsEnv = await resolveMetricsEnv(env);
 
@@ -190,10 +210,10 @@ async function executeEventLookupInner(
       return `No data found for pattern "${pattern}". Check the pattern name (use underscores, e.g., Payment_Gateway_Timeout).`;
     }
     // Use fuzzy results
-    return finalize(await formatResults(fuzzyRes.data.result, pattern, metricsEnv, tf, costPerGb, period, env, sumOut, resolvedFromHash));
+    return finalize(await formatResults(fuzzyRes.data.result, pattern, metricsEnv, tf, costPerGb, rateSource, period, env, sumOut, resolvedFromHash));
   }
 
-  return finalize(await formatResults(currentRes.data.result, pattern, metricsEnv, tf, costPerGb, period, env, sumOut, resolvedFromHash));
+  return finalize(await formatResults(currentRes.data.result, pattern, metricsEnv, tf, costPerGb, rateSource, period, env, sumOut, resolvedFromHash));
 }
 
 async function formatResults(
@@ -201,7 +221,8 @@ async function formatResults(
   pattern: string,
   metricsEnv: string,
   tf: ReturnType<typeof parseTimeframe>,
-  costPerGb: number,
+  costPerGb: number | null,
+  rateSource: 'list_price' | 'customer_supplied' | 'unset',
   period: string,
   env: EnvConfig,
   sumOut?: { data?: EventLookupSummary },
@@ -257,35 +278,43 @@ async function formatResults(
     }
   }
 
-  // Build service rows
+  // Build service rows. Cost fields collapse to null when rate_source='unset'
+  // so downstream renderers can gate the $-clause via fmtDollarWithSource
+  // instead of silently quoting bytes×0 or bytes×$1/GB.
   interface SvcRow {
     service: string; severity: string; bytes: number;
-    costNow: number; costBaseline: number; events: number; isNew: boolean;
+    costNow: number | null; costBaseline: number | null; events: number; isNew: boolean;
   }
   const rows: SvcRow[] = [];
-  let totalCostNow = 0;
-  let totalCostBase = 0;
+  let totalCostNow: number | null = rateSource === 'unset' ? null : 0;
+  let totalCostBase: number | null = rateSource === 'unset' ? null : 0;
   let totalEvents = 0;
   let totalBytes = 0;
 
   for (const [svc, bytes] of serviceBytes) {
-    const costNow = bytesToCost(bytes, costPerGb);
+    const costNow = costPerGb != null ? bytesToCost(bytes, costPerGb) : null;
     const baseWeeks = baselineByService.get(svc) || [];
     const isNew = baseWeeks.length === 0;
-    const costBase = isNew ? 0 : bytesToCost(
-      baseWeeks.reduce((a, b) => a + b, 0) / baseWeeks.length,
-      costPerGb
-    );
+    const costBase: number | null = costPerGb == null
+      ? null
+      : isNew
+        ? 0
+        : bytesToCost(
+            baseWeeks.reduce((a, b) => a + b, 0) / baseWeeks.length,
+            costPerGb
+          );
     const events = eventsBySvc.get(svc) || 0;
 
     rows.push({ service: svc, severity: serviceSev.get(svc)?.sev || '', bytes, costNow, costBaseline: costBase, events, isNew });
-    totalCostNow += costNow;
-    totalCostBase += costBase;
+    if (totalCostNow != null && costNow != null) totalCostNow += costNow;
+    if (totalCostBase != null && costBase != null) totalCostBase += costBase;
     totalEvents += events;
     totalBytes += bytes;
   }
 
-  rows.sort((a, b) => b.costNow - a.costNow);
+  // Sort by bytes (volume is the universal axis); cost-sort would silently
+  // randomize ordering when rate_source='unset' and every row's cost is null.
+  rows.sort((a, b) => b.bytes - a.bytes);
   const maxBytes = rows.length ? Math.max(...rows.map(r => r.bytes)) : 0;
 
   // Populate the typed summary output for view='summary' callers.
@@ -297,6 +326,10 @@ async function formatResults(
         service: r.service,
         severity: r.severity,
         bytes: r.bytes,
+        // share_pct = service bytes / pattern total bytes — surfaces the
+        // per-service contribution as a percent so the renderer can lead
+        // with byte-share before any dollar clause.
+        share_pct: totalBytes > 0 ? (r.bytes / totalBytes) * 100 : 0,
         cost_per_window_usd: r.costNow,
         cost_baseline_usd: r.costBaseline,
         events: r.events,
@@ -309,6 +342,7 @@ async function formatResults(
         events: totalEvents,
         service_count: rows.length,
       },
+      rate_source: rateSource,
       resolved_from_hash: resolvedFromHash,
     };
   }
@@ -318,8 +352,16 @@ async function formatResults(
   // service, then volume · baseline -> now · events.
   const lines: string[] = [];
   lines.push(`${patternDisplay(pattern).title}  ·  ${tf.label}`);
-  lines.push(`Total: ${fmtBytes(totalBytes)} over ${tf.label} · cost was ${fmtDollar(totalCostBase)} -> now ${fmtDollar(totalCostNow)}${period} · ${rows.length} service${rows.length !== 1 ? 's' : ''}`);
-  lines.push(`(cost: prior comparable ${tf.label} baseline -> current)`);
+  // Bytes first; share is implicit in the totals row (this IS the total).
+  // The cost clause appears only when a rate is resolved; otherwise we
+  // would be quoting bytes × $1/GB and calling it a baseline.
+  const totalCostBaseStr = fmtDollarWithSource(totalCostBase, rateSource);
+  const totalCostNowStr = fmtDollarWithSource(totalCostNow, rateSource);
+  const costClause = rateSource === 'unset'
+    ? ''
+    : ` · cost was ${totalCostBaseStr} -> now ${totalCostNowStr}${period}`;
+  lines.push(`Total: ${fmtBytes(totalBytes)} over ${tf.label}${costClause} · ${rows.length} service${rows.length !== 1 ? 's' : ''}`);
+  if (rateSource !== 'unset') lines.push(`(cost: prior comparable ${tf.label} baseline -> current)`);
   lines.push(`_Total across every service and severity over ${tf.label}; the "by severity" line below shows the split. A per-(pattern,service,severity) ranking (e.g. the top-patterns list) shows ONE severity row, so its number for this pattern equals one line of that split, not this total. That is expected, not a discrepancy._`);
   lines.push('');
 
@@ -332,10 +374,16 @@ async function formatResults(
     const head = [r.service || '(no service)'];
     if (r.isNew) head.push('NEW');
     lines.push(`${head.join(' · ')}`);
+    // Bytes + share of pattern total first; cost delta only when a rate
+    // is resolved, so unset-rate readers see the volume story instead
+    // of "was — -> now —" filler.
+    const sharePct = totalBytes > 0 ? (r.bytes / totalBytes) * 100 : 0;
     const m = [
-      fmtBytes(r.bytes),
-      `was ${fmtDollar(r.costBaseline)} -> now ${fmtDollar(r.costNow)}${period}`,
+      `${fmtBytes(r.bytes)} (${fmtPct(sharePct)} of pattern)`,
     ];
+    if (rateSource !== 'unset') {
+      m.push(`was ${fmtDollarWithSource(r.costBaseline, rateSource)} -> now ${fmtDollarWithSource(r.costNow, rateSource)}${period}`);
+    }
     if (r.events > 0) m.push(`${fmtCount(r.events)} events`);
     lines.push(`  ${m.join(' · ')}`);
     // Per-severity split so the all-severity total visibly decomposes,
@@ -362,7 +410,10 @@ async function formatResults(
     // asserted drop-recommendation the agent/user is better placed to judge
     // from the cost / severity / sample context this tool already returns.
     const aiPrompt = `Classify this log pattern. Pattern: ${pattern}. Provide: CATEGORY (error/debug/info/metric/health), CONFIDENCE (high/medium/low), EXPLANATION (one factual line on what the pattern represents, no recommendation).`;
-    const aiResult = await queryAi(env, queryResultJson, aiPrompt, costPerGb);
+    // queryAi expects a number; pass 0 when rate is unset (the AI prompt
+    // only uses cost for table rendering, which we disable with
+    // output_table=false, so the value is a no-op classifier-side).
+    const aiResult = await queryAi(env, queryResultJson, aiPrompt, costPerGb ?? 0);
 
     if (aiResult) {
       lines.push('');
@@ -384,10 +435,17 @@ async function formatResults(
   // chain handoffs (pattern_trend for time series, dependency_check before
   // any mute action) are appropriate.
   const nextActions: NextAction[] = [];
-  const shortElevated = totalCostBase > 0 && totalCostNow > totalCostBase * 2;
+  // Compare bytes when no rate is resolved — the regression signal is
+  // volume, not the rate that translates it. With a rate set, the same
+  // ratio holds (bytes×rate vs bytes×rate cancels), so this is equivalent
+  // to the prior cost comparison when costs are available.
+  const totalBytesBase = [...baselineByService.values()]
+    .flat()
+    .reduce((a, b) => a + b, 0) / Math.max(1, tf.baselineOffsets.length);
+  const shortElevated = totalBytesBase > 0 && totalBytes > totalBytesBase * 2;
   const hints: string[] = [];
   if (shortElevated) {
-    const pctChange = Math.round(((totalCostNow - totalCostBase) / totalCostBase) * 10) * 10; // nearest 10%: two adjacent live queries must not show 348 vs 347
+    const pctChange = Math.round(((totalBytes - totalBytesBase) / totalBytesBase) * 10) * 10; // nearest 10%: two adjacent live queries must not show 348 vs 347
     // The short baseline (prior comparable tf.label) is diurnal-noise-
     // prone, so a raw "up X%" off it contradicts the 7d view and reads
     // as a false regression. Corroborate against 7d-vs-prior-7d HERE so

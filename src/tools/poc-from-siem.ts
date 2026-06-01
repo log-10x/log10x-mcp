@@ -539,6 +539,7 @@ export async function executePocStatus(args: PocStatusArgs): Promise<import('../
   // human_summary) are intentionally absent from the summary path — the agent's
   // own writing is the report; we provide facts only.
   let v2Result: unknown = undefined;
+  let dailyProjection: DailyProjection | undefined = undefined;
   if (s.status === 'complete' && s.renderInput && (args.view ?? 'summary') === 'summary') {
     try {
       const { patterns, clusters, redundancyPairs } = _enrichForEnvelope(s.renderInput);
@@ -556,6 +557,15 @@ export async function executePocStatus(args: PocStatusArgs): Promise<import('../
         envelope.output.agent_enrichment = s.hostAgentEnrichment;
       }
       v2Result = envelope;
+      // Envelope-edge daily projection: dollar low/high (mirrors
+      // poc-from-local) plus pct reduction low/high. Computed off the
+      // same enriched patterns so the central point matches the
+      // renderer's totals. Range comes from the volume detector's
+      // multiplier when present, else collapses to a single point.
+      dailyProjection = computeDailyProjection(
+        s.renderInput,
+        patterns as unknown as ReadonlyArray<{ bytes: number; projectedSavings: number }>,
+      );
     } catch (e) {
       // Fall back silently — v2 envelope is best-effort; the snapshot
       // metadata + markdown view always remains available as a recovery
@@ -587,6 +597,12 @@ export async function executePocStatus(args: PocStatusArgs): Promise<import('../
       // Other views (markdown / full / yaml / configs / top / pattern)
       // hit the alternate code path above and never land here.
       result: v2Result,
+      // Envelope-edge daily projection — mirrors poc-from-local's
+      // `daily_dollar_projection_low/high` and adds the bytes-first
+      // `daily_pct_reduction_low/high` band. Present only when the
+      // snapshot has a renderInput and the v2 envelope built cleanly;
+      // omitted on partial/failed snapshots.
+      daily_projection: dailyProjection,
       // `report_markdown` retained for back-compat callers; v2 surface
       // is `result`. Default-summary agents should ignore the markdown.
       report_markdown: s.status === 'complete' && (args.view ?? 'summary') !== 'summary' ? md : undefined,
@@ -1114,6 +1130,81 @@ async function resolveVolume(
   } catch (e) {
     return { errorNote: `Auto-detect threw: ${(e as Error).message.slice(0, 200)}` };
   }
+}
+
+/**
+ * Envelope-edge daily projection. Dollar fields mirror
+ * poc-from-local.ts:153-154; percent-reduction fields are the
+ * bytes-first band added per the bytes-lead/dollars-overlay spec.
+ *
+ * Range semantics: when the volume detector returned a range
+ * multiplier (auto-detected with uncertainty), low/high reflect that
+ * multiplier. When the customer passed an explicit volume (or no
+ * volume), low===high===expected. Percent reduction is bound to
+ * [0, 100]; expected is `projectedSavings / totalCost`. Range is the
+ * same multiplier applied to projected savings vs total cost — when
+ * both axes scale by the same factor the percent is invariant, so the
+ * band collapses to a single point in that case. We still emit
+ * low===expected===high so callers can read the schema uniformly.
+ */
+interface DailyProjection {
+  daily_dollar_projection_low: number | null;
+  daily_dollar_projection_expected: number | null;
+  daily_dollar_projection_high: number | null;
+  daily_pct_reduction_low: number;
+  daily_pct_reduction_expected: number;
+  daily_pct_reduction_high: number;
+  /** 'auto_detected' | 'user_arg' | 'none' — provenance for the dollar axis. */
+  volume_source: 'auto_detected' | 'user_arg' | 'none';
+}
+
+function computeDailyProjection(
+  ri: RenderInput,
+  patterns: ReadonlyArray<{ bytes: number; projectedSavings: number }>,
+): DailyProjection {
+  const analyzerCost = ri.analyzerCostPerGb;
+  const totalBytes = ri.extraction?.totalBytes ?? 0;
+  const totalCostWindow = (totalBytes / 1024 ** 3) * analyzerCost;
+  const projectedSavingsWindow = patterns.reduce((s, p) => s + p.projectedSavings, 0);
+  const pctExpected = totalCostWindow > 0
+    ? Math.min(100, Math.max(0, (projectedSavingsWindow / totalCostWindow) * 100))
+    : 0;
+
+  // Dollar axis: scale the window cost to a daily figure using the
+  // customer's total daily volume when known. Without volume, the
+  // dollar projection is undefined (the renderer falls back to scenario
+  // brackets), so we emit null per the bytes-first spec.
+  let dollarLow: number | null = null;
+  let dollarExpected: number | null = null;
+  let dollarHigh: number | null = null;
+  let volumeSource: DailyProjection['volume_source'] = ri.volumeSource ?? 'none';
+  if (volumeSource !== 'none' && ri.totalDailyGb && ri.totalDailyGb > 0) {
+    const sampleGb = totalBytes / 1024 ** 3;
+    const dailyFactor = sampleGb > 0 ? ri.totalDailyGb / sampleGb : 0;
+    const expected = projectBilling(totalCostWindow * dailyFactor, ri.windowHours, 24);
+    dollarExpected = expected;
+    const m = ri.volumeRangeMultiplier;
+    dollarLow = m ? expected * m.low : expected;
+    dollarHigh = m ? expected * m.high : expected;
+  }
+
+  // Percent axis: same multiplier applied to both numerator and
+  // denominator cancels out; band collapses to a point. Emit
+  // low===expected===high for schema uniformity.
+  return {
+    daily_dollar_projection_low: dollarLow,
+    daily_dollar_projection_expected: dollarExpected,
+    daily_dollar_projection_high: dollarHigh,
+    daily_pct_reduction_low: pctExpected,
+    daily_pct_reduction_expected: pctExpected,
+    daily_pct_reduction_high: pctExpected,
+    volume_source: volumeSource,
+  };
+}
+
+function projectBilling(windowCost: number, windowHours: number, targetHours: number): number {
+  if (windowHours <= 0) return 0;
+  return windowCost * (targetHours / windowHours);
 }
 
 // Exposed for tests.

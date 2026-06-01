@@ -26,6 +26,8 @@ import {
   projectActionRange,
   degradeRatioForSmallEvents,
   annualizeDollars,
+  percentReduction,
+  projectSavings,
 } from '../src/lib/cost.js';
 
 const GB = 1024 * 1024 * 1024;
@@ -101,10 +103,14 @@ test('projectAction pass returns bytes_in unchanged with full cost', () => {
   });
   assert.equal(p.bytes_out, GB);
   // ingest only at $6/GB; splunk storage band is 0.10 -> +$0.10 with default 1-month retention.
-  assert.ok(Math.abs(p.ingest_dollars - 6) < 1e-9);
-  assert.ok(Math.abs(p.storage_dollars - 0.1) < 1e-9);
-  assert.ok(Math.abs(p.total_dollars - 6.1) < 1e-9);
+  assert.ok(Math.abs(p.ingest_dollars! - 6) < 1e-9);
+  assert.ok(Math.abs(p.storage_dollars! - 0.1) < 1e-9);
+  assert.ok(Math.abs(p.total_dollars! - 6.1) < 1e-9);
   assert.equal(p.basis, 'uncompressed-ingest');
+  // NEW: percent_reduction + rate_source land in v1 contract.
+  assert.equal(p.percent_reduction, 0);
+  assert.equal(p.rate_source.ingest, 'list');
+  assert.equal(p.rate_source.storage, 'list');
 });
 
 test('projectAction drop yields zero bytes and zero dollars', () => {
@@ -144,8 +150,8 @@ test('projectAction compact on splunk produces ~88% savings ($0.70 on 1GB)', () 
     destination: 'splunk',
   });
   assert.ok(p.bytes_out > 0 && p.bytes_out < GB);
-  assert.ok(Math.abs(p.ingest_dollars - 0.69) < 0.01, `ingest_dollars=${p.ingest_dollars}`);
-  assert.ok(Math.abs(p.total_dollars - 0.7015) < 0.02, `total_dollars=${p.total_dollars}`);
+  assert.ok(Math.abs(p.ingest_dollars! - 0.69) < 0.01, `ingest_dollars=${p.ingest_dollars}`);
+  assert.ok(Math.abs(p.total_dollars! - 0.7015) < 0.02, `total_dollars=${p.total_dollars}`);
 });
 
 test('projectAction compact on datadog is a no-op with caveat note', () => {
@@ -189,7 +195,7 @@ test('projectAction compact on clickhouse uses dict-udf-view band and stored-mon
   });
   assert.equal(p.basis, 'stored-month');
   assert.equal(p.ingest_dollars, 0);
-  assert.ok(Math.abs(p.storage_dollars - 0.26 * 0.023) < 1e-6);
+  assert.ok(Math.abs(p.storage_dollars! - 0.26 * 0.023) < 1e-6);
 });
 
 // ---------------------------------------------------------------------------
@@ -282,9 +288,9 @@ test('projectAction retention_months scales storage_dollars linearly', () => {
     destination: 'elasticsearch',
     retention_months: 6,
   });
-  assert.ok(Math.abs(six.storage_dollars - 6 * one.storage_dollars) < 1e-9);
+  assert.ok(Math.abs(six.storage_dollars! - 6 * one.storage_dollars!) < 1e-9);
   // ingest is one-time, unaffected
-  assert.ok(Math.abs(six.ingest_dollars - one.ingest_dollars) < 1e-9);
+  assert.ok(Math.abs(six.ingest_dollars! - one.ingest_dollars!) < 1e-9);
 });
 
 test('annualizeDollars scales window spend to a year', () => {
@@ -292,4 +298,96 @@ test('annualizeDollars scales window spend to a year', () => {
   assert.ok(Math.abs(annualizeDollars(30, 30) - 365) < 1e-9);
   assert.equal(annualizeDollars(100, 0), 0);
   assert.equal(annualizeDollars(100, -1), 0);
+});
+
+// ---------------------------------------------------------------------------
+// percent-first contract (v1: percentReduction, projectSavings, rate_source)
+// ---------------------------------------------------------------------------
+
+test('(a) percentReduction scalar (1000, 250) yields 75 across all axes', () => {
+  const pct = percentReduction(1000, 250);
+  assert.equal(pct.low, 75);
+  assert.equal(pct.expected, 75);
+  assert.equal(pct.high, 75);
+});
+
+test('(b) percentReduction triplet propagates per-axis', () => {
+  const pct = percentReduction(1000, { low: 500, expected: 250, high: 100 });
+  assert.equal(pct.low, 50);
+  assert.equal(pct.expected, 75);
+  assert.equal(pct.high, 90);
+});
+
+test('percentReduction clamps negatives and pass-bytes==0', () => {
+  // bytes_out > bytes_in (envelope overhead worst case) → clamp at 0.
+  assert.equal(percentReduction(100, 200).expected, 0);
+  // no input → no reduction to claim.
+  assert.equal(percentReduction(0, 0).expected, 0);
+});
+
+test('(c) projectSavings on datadog with no override → list_price', () => {
+  // Datadog has a vendor list rate, so absent any override the headline
+  // is tagged list_price.
+  const h = projectSavings({
+    destination: 'datadog',
+    bytes_in: 1e9,
+    action: 'compact',
+  });
+  assert.equal(h.rate_source, 'list_price');
+  assert.ok(h.dollars, 'list_price headline should include dollar overlay');
+  assert.ok(h.dollars!.list_expected !== undefined);
+});
+
+test('(e) projectSavings with effective_ingest_per_gb → customer_supplied', () => {
+  const h = projectSavings({
+    destination: 'splunk',
+    bytes_in: 1e9,
+    action: 'compact',
+    effective_ingest_per_gb: 0.4,
+  });
+  assert.equal(h.rate_source, 'customer_supplied');
+  assert.ok(h.dollars?.customer_expected !== undefined);
+  // Storage axis still on list → both list_* and customer_* present.
+  assert.ok(h.dollars?.list_expected !== undefined);
+});
+
+test('(f) projectActionRange ingest_per_gb_override flips only ingest axis', () => {
+  const range = projectActionRange({
+    destination: 'splunk',
+    bytes_in: 1e9,
+    action: 'compact',
+    customer_rate: { ingest_per_gb_override: 0.4 },
+  });
+  assert.equal(range.rate_source.ingest, 'customer_supplied');
+  assert.equal(range.rate_source.storage, 'list');
+  // percent_reduction triplet populated and bounded.
+  assert.ok(range.percent_reduction_expected > 0);
+  assert.ok(range.percent_reduction_expected <= 100);
+  assert.ok(range.percent_reduction_low <= range.percent_reduction_expected);
+  assert.ok(range.percent_reduction_expected <= range.percent_reduction_high);
+});
+
+test('projectActionRange surfaces percent_reduction triplet for plain compact', () => {
+  // Splunk mid-ratio ~0.115 → expected reduction ~88.5%.
+  const range = projectActionRange({
+    destination: 'splunk',
+    bytes_in: 1e9,
+    action: 'compact',
+  });
+  assert.ok(Math.abs(range.percent_reduction_expected - 88.5) < 1.5);
+  // Low-savings axis (high ratio = 0.15) → 85% reduction.
+  assert.ok(Math.abs(range.percent_reduction_low - 85) < 0.5);
+  // High-savings axis (low ratio = 0.08) → 92% reduction.
+  assert.ok(Math.abs(range.percent_reduction_high - 92) < 0.5);
+});
+
+test('projectActionRange hoists rate_source from expected to top level', () => {
+  const range = projectActionRange({
+    destination: 'datadog',
+    bytes_in: 1e9,
+    action: 'pass',
+  });
+  assert.equal(range.rate_source.ingest, 'list');
+  // Datadog has $0 list storage — still 'list', not 'unset'.
+  assert.equal(range.rate_source.storage, 'list');
 });

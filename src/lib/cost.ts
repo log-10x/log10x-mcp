@@ -116,13 +116,45 @@ export interface SavingsProjection {
   bytes_in: number;
   /** Post-action bytes leaving forwarder toward destination. */
   bytes_out: number;
-  ingest_dollars: number;
+  ingest_dollars: number | null;
   /** For the retention window the caller supplies (default 1 month). */
-  storage_dollars: number;
-  total_dollars: number;
+  storage_dollars: number | null;
+  total_dollars: number | null;
   basis: BillingBasis;
   confidence: 'low' | 'expected' | 'high';
+  /** Always populated. 0..100. */
+  percent_reduction: number;
+  /** Origin of each axis' rate. */
+  rate_source: {
+    ingest: 'list' | 'customer_supplied' | 'unset';
+    storage: 'list' | 'customer_supplied' | 'unset';
+  };
   notes?: string[];
+}
+
+/**
+ * Headline-shaped projection consumed by percent-first tool surfaces. Mixes
+ * percent (always present) with optional dollar overlays gated on whether the
+ * caller could supply a rate (customer-supplied) or fall back to vendors.json
+ * list. When neither is available, dollars are omitted entirely.
+ */
+export interface SavingsHeadline {
+  percent: { low: number; expected: number; high: number };
+  bytes: { in: number; out_expected: number };
+  dollars?: {
+    list_low?: number;
+    list_expected?: number;
+    list_high?: number;
+    customer_low?: number;
+    customer_expected?: number;
+    customer_high?: number;
+  };
+  rate_source: 'list_price' | 'customer_supplied' | 'unset';
+  range?: {
+    low: SavingsProjection;
+    expected: SavingsProjection;
+    high: SavingsProjection;
+  };
 }
 
 export type Action =
@@ -280,7 +312,7 @@ function midpoint(a: number, b: number): number {
   return (a + b) / 2;
 }
 
-interface ProjectActionArgs {
+export interface ProjectActionArgs {
   action: Action;
   bytes_in: number;
   avg_event_size_bytes?: number;
@@ -290,6 +322,43 @@ interface ProjectActionArgs {
   /** Default 1 month. */
   retention_months?: number;
   esPruned?: boolean;
+  /**
+   * Optional customer-supplied rate overrides. When present, the
+   * corresponding rate_source axis flips to 'customer_supplied'. When the
+   * destination has no list rate AND no override is supplied, that axis
+   * collapses to `null` dollars + `rate_source = 'unset'`.
+   */
+  customer_rate?: {
+    ingest_per_gb_override?: number;
+    storage_per_gb_month_override?: number;
+  };
+}
+
+/**
+ * Compute reduction as a 0..100 percent. Always non-negative and clamped to
+ * 100. When passBytes is 0, returns 0 (nothing to reduce, no inflation).
+ *
+ * Scalar form returns the same value across all three confidence axes so
+ * callers can splat into a triplet uniformly.
+ */
+export function percentReduction(
+  passBytes: number,
+  actionBytes: number | { low: number; expected: number; high: number }
+): { low: number; expected: number; high: number } {
+  const one = (out: number): number => {
+    if (passBytes <= 0) return 0;
+    const pct = ((passBytes - out) / passBytes) * 100;
+    return Math.max(0, Math.min(100, pct));
+  };
+  if (typeof actionBytes === 'number') {
+    const v = one(actionBytes);
+    return { low: v, expected: v, high: v };
+  }
+  return {
+    low: one(actionBytes.low),
+    expected: one(actionBytes.expected),
+    high: one(actionBytes.high),
+  };
 }
 
 function projectActionWithRatio(
@@ -357,9 +426,50 @@ function projectActionWithRatio(
 
   const months = args.retention_months ?? 1;
   const gbOut = bytes_out / GB;
-  const ingest_dollars = gbOut * model.ingest_per_gb;
-  const storage_dollars = gbOut * model.storage_per_gb_month * months;
-  const total_dollars = ingest_dollars + storage_dollars;
+
+  // Ingest axis: customer override > list rate > unset.
+  // model.ingest_per_gb is always a known number in COST_MODEL_BY_DESTINATION
+  // (clickhouse self-hosted is genuinely $0, not unknown). 'unset' is
+  // reserved for future destinations that come without a list rate.
+  const ingestOverride = args.customer_rate?.ingest_per_gb_override;
+  let ingest_dollars: number | null;
+  let ingestSource: 'list' | 'customer_supplied' | 'unset';
+  if (ingestOverride != null) {
+    ingest_dollars = gbOut * ingestOverride;
+    ingestSource = 'customer_supplied';
+  } else if (Number.isFinite(model.ingest_per_gb)) {
+    ingest_dollars = gbOut * model.ingest_per_gb;
+    ingestSource = 'list';
+  } else {
+    ingest_dollars = null;
+    ingestSource = 'unset';
+  }
+
+  // Storage axis: same precedence. storage_per_gb_month == 0 is a legitimate
+  // "vendor includes storage" signal (e.g. Datadog), so we emit 0 + 'list'
+  // there rather than null.
+  const storageOverride = args.customer_rate?.storage_per_gb_month_override;
+  let storage_dollars: number | null;
+  let storageSource: 'list' | 'customer_supplied' | 'unset';
+  if (storageOverride != null) {
+    storage_dollars = gbOut * storageOverride * months;
+    storageSource = 'customer_supplied';
+  } else if (model.storage_per_gb_month >= 0) {
+    storage_dollars = gbOut * model.storage_per_gb_month * months;
+    storageSource = 'list';
+  } else {
+    storage_dollars = null;
+    storageSource = 'unset';
+  }
+
+  // total nulls out if either axis is unset (cannot sum a known and an
+  // unknown without misrepresenting the unknown as zero).
+  const total_dollars =
+    ingest_dollars == null || storage_dollars == null
+      ? null
+      : ingest_dollars + storage_dollars;
+
+  const pct = percentReduction(args.bytes_in, bytes_out).expected;
 
   return {
     bytes_in: args.bytes_in,
@@ -369,6 +479,8 @@ function projectActionWithRatio(
     total_dollars,
     basis: model.billing_basis,
     confidence,
+    percent_reduction: pct,
+    rate_source: { ingest: ingestSource, storage: storageSource },
     notes: notes.length ? notes : undefined,
   };
 }
@@ -404,19 +516,121 @@ export function projectActionRange(args: ProjectActionArgs): {
   low: SavingsProjection;
   expected: SavingsProjection;
   high: SavingsProjection;
+  percent_reduction_low: number;
+  percent_reduction_expected: number;
+  percent_reduction_high: number;
+  rate_source: SavingsProjection['rate_source'];
 } {
   const model = getDestinationCostModel(args.destination, {
     esPruned: args.esPruned,
   });
+  const low = projectActionWithRatio(args, model.compact_ratio_high, 'low');
+  const expected = projectActionWithRatio(
+    args,
+    midpoint(model.compact_ratio_low, model.compact_ratio_high),
+    'expected'
+  );
+  const high = projectActionWithRatio(args, model.compact_ratio_low, 'high');
+  const pct = percentReduction(args.bytes_in, {
+    // 'high' compact ratio means MORE bytes through, i.e. LESS reduction —
+    // so percent_reduction_low pairs with the 'low' projection (which itself
+    // was built from the high ratio). Naming stays consistent: _low = worst
+    // case savings, _high = best case savings.
+    low: low.bytes_out,
+    expected: expected.bytes_out,
+    high: high.bytes_out,
+  });
   return {
-    low: projectActionWithRatio(args, model.compact_ratio_high, 'low'),
-    expected: projectActionWithRatio(
-      args,
-      midpoint(model.compact_ratio_low, model.compact_ratio_high),
-      'expected'
-    ),
-    high: projectActionWithRatio(args, model.compact_ratio_low, 'high'),
+    low,
+    expected,
+    high,
+    percent_reduction_low: pct.low,
+    percent_reduction_expected: pct.expected,
+    percent_reduction_high: pct.high,
+    // Hoist from expected — all three axes share the same rate_source by
+    // construction (same customer_rate + same destination).
+    rate_source: expected.rate_source,
   };
+}
+
+/**
+ * Percent-first headline wrapper around projectActionRange.
+ *
+ * Threads `effective_ingest_per_gb` (if supplied) through as an ingest
+ * override on the underlying projection. Top-level `rate_source` collapses
+ * the per-axis sources into a single tag callers can render:
+ *  - 'customer_supplied' if any axis was overridden
+ *  - 'list_price' if any axis used the vendor list rate (and none was
+ *    overridden)
+ *  - 'unset' if neither axis has a rate at all
+ *
+ * Both `dollars.list_*` and `dollars.customer_*` can be populated in mixed
+ * cases (e.g. customer overrides ingest only; storage still on list).
+ */
+export function projectSavings(
+  args: ProjectActionArgs & { effective_ingest_per_gb?: number }
+): SavingsHeadline {
+  const merged: ProjectActionArgs = {
+    ...args,
+    customer_rate: {
+      ...args.customer_rate,
+      ingest_per_gb_override:
+        args.customer_rate?.ingest_per_gb_override ??
+        args.effective_ingest_per_gb,
+    },
+  };
+
+  const range = projectActionRange(merged);
+  const rs = range.rate_source;
+
+  let top: SavingsHeadline['rate_source'];
+  if (rs.ingest === 'customer_supplied' || rs.storage === 'customer_supplied') {
+    top = 'customer_supplied';
+  } else if (rs.ingest === 'list' || rs.storage === 'list') {
+    top = 'list_price';
+  } else {
+    top = 'unset';
+  }
+
+  const headline: SavingsHeadline = {
+    percent: {
+      low: range.percent_reduction_low,
+      expected: range.percent_reduction_expected,
+      high: range.percent_reduction_high,
+    },
+    bytes: {
+      in: args.bytes_in,
+      out_expected: range.expected.bytes_out,
+    },
+    rate_source: top,
+    range: { low: range.low, expected: range.expected, high: range.high },
+  };
+
+  if (top !== 'unset') {
+    const dollars: NonNullable<SavingsHeadline['dollars']> = {};
+    const anyList = rs.ingest === 'list' || rs.storage === 'list';
+    const anyCustomer =
+      rs.ingest === 'customer_supplied' || rs.storage === 'customer_supplied';
+    if (anyList) {
+      // For the list-rate view we re-project without the override so callers
+      // see the unblended list-only total.
+      const listOnly = projectActionRange({
+        ...args,
+        customer_rate: undefined,
+      });
+      dollars.list_low = listOnly.low.total_dollars ?? undefined;
+      dollars.list_expected = listOnly.expected.total_dollars ?? undefined;
+      dollars.list_high = listOnly.high.total_dollars ?? undefined;
+    }
+    if (anyCustomer) {
+      dollars.customer_low = range.low.total_dollars ?? undefined;
+      dollars.customer_expected = range.expected.total_dollars ?? undefined;
+      dollars.customer_high = range.high.total_dollars ?? undefined;
+    }
+    headline.dollars = dollars;
+  }
+
+  return headline;
 }
 
 /**

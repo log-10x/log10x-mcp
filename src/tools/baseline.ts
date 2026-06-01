@@ -97,13 +97,23 @@ export type NotReadyReason =
   | 'no_destination'
   | 'no_data';
 
+export type RateSource = 'list_price' | 'customer_supplied' | 'unset';
+
 export interface BaselineTopContributor {
   pattern_hash: string;
   pattern: string;
   service: string;
   severity: string;
   share_pct: number;
-  monthly_usd: number;
+  /**
+   * Projected monthly $ for this contributor at the resolved `rate_source`.
+   * `null` when `rate_source === 'unset'` (no destination + no customer
+   * override). Aliased by `monthly_usd_at_list` for one release per the
+   * percent-first dual-field rule.
+   */
+  monthly_usd: number | null;
+  /** Alias of `monthly_usd` carried for one release while callers migrate. */
+  monthly_usd_at_list: number | null;
   avg_event_size_bytes: number;
   compactable: boolean;
 }
@@ -115,14 +125,26 @@ export interface BaselineEnvelopeData {
   coverage_pct: number;
   destination: SiemId | null;
   horizon: BaselineHorizon;
+  /**
+   * Origin of the $/GB used for all dollar math in this envelope. `unset`
+   * means no destination was resolved and no `effective_ingest_per_gb` was
+   * supplied — dollar fields are then `null` and the headline / markdown go
+   * percent-first.
+   */
+  rate_source: RateSource;
   current: {
     bytes_window: number;
     bytes_per_day_p50: number;
     bytes_per_day_p90: number;
-    monthly_usd: number;
+    /** `null` when `rate_source === 'unset'`. */
+    monthly_usd: number | null;
+    /** Alias of `monthly_usd` carried for one release. */
+    monthly_usd_at_list: number | null;
   };
   projection_no_action_90d: {
-    monthly_usd_in_90d: number;
+    /** `null` when `rate_source === 'unset'`. */
+    monthly_usd_in_90d: number | null;
+    monthly_usd_in_90d_at_list: number | null;
     growth_pct: number;
   };
   top_contributors: BaselineTopContributor[];
@@ -165,6 +187,13 @@ export const baselineSchema = {
     .describe(
       'Customer-stated daily SIEM ingest in GB. When supplied, the coverage gate compares observed bytes against this number; ≥80% passes, <80% returns `not_ready/coverage_low`. Omit to skip the coverage gate (the result still surfaces observed coverage as informational).'
     ),
+  effectiveIngestPerGb: z
+    .number()
+    .positive()
+    .optional()
+    .describe(
+      "Customer-negotiated $/GB for the destination. When supplied, baseline dollar projections use this rate and `rate_source` resolves to `customer_supplied`. Omit to fall back to vendors.json list pricing for the resolved destination (`rate_source: list_price`); omit BOTH this and `destination` to get a percent-first envelope (`rate_source: unset`, dollar fields null)."
+    ),
   environment: z
     .string()
     .optional()
@@ -184,6 +213,7 @@ export async function executeBaseline(
     horizon?: BaselineHorizon;
     destination?: SiemId;
     statedDailyGb?: number;
+    effectiveIngestPerGb?: number;
     view?: 'summary' | 'markdown';
   },
   env: EnvConfig
@@ -224,6 +254,7 @@ async function computeBaseline(
     horizon?: BaselineHorizon;
     destination?: SiemId;
     statedDailyGb?: number;
+    effectiveIngestPerGb?: number;
   },
   env: EnvConfig,
   horizon: BaselineHorizon
@@ -238,10 +269,19 @@ async function computeBaseline(
     return buildNotReadyEnvelope({
       reason: 'no_destination',
       horizon,
+      rateSource: 'unset',
       remediation:
         'Pass `destination` (splunk | datadog | elasticsearch | clickhouse | cloudwatch | azure-monitor | gcp-logging | sumo) or set the env profile `analyzer` field.',
     });
   }
+
+  // Resolve rate_source once for every downstream envelope (success +
+  // not_ready). Destination is non-null past Gate 0, so the fallback when
+  // no customer override is supplied is always `list_price`.
+  const rateSource: RateSource =
+    args.effectiveIngestPerGb && args.effectiveIngestPerGb > 0
+      ? 'customer_supplied'
+      : 'list_price';
 
   // ── Gate 1: Reporter age. ───────────────────────────────────────
   const minDays = readMinAgeOverride() ?? DEFAULT_MIN_REPORTER_AGE_DAYS;
@@ -252,6 +292,7 @@ async function computeBaseline(
       reason: 'reporter_too_new',
       destination,
       horizon,
+      rateSource,
       reporterAgeDays: 0,
       remediation:
         'Deploy Reporter (Tier 2) before running baseline. Once it has been emitting metrics for 7 days, re-run.',
@@ -262,6 +303,7 @@ async function computeBaseline(
       reason: 'reporter_too_new',
       destination,
       horizon,
+      rateSource,
       reporterAgeDays: reporterAge,
       remediation: `Wait until Reporter has ${minDays}d of data; current age=${reporterAge.toFixed(1)}d. Commitment-grade baseline requires ${minDays}d of history so percentile math is not dominated by cold-start noise.`,
     });
@@ -275,6 +317,7 @@ async function computeBaseline(
       reason: 'no_data',
       destination,
       horizon,
+      rateSource,
       reporterAgeDays: reporterAge,
       remediation:
         'Reporter is deployed but has not emitted bytes metrics yet in the chosen window. Verify the engine is wired to the metrics backend the MCP is reading from.',
@@ -297,6 +340,7 @@ async function computeBaseline(
         reason: 'coverage_low',
         destination,
         horizon,
+        rateSource,
         reporterAgeDays: reporterAge,
         coveragePct,
         remediation: `Observed ${observedDailyGb.toFixed(1)} GB/day vs stated ${args.statedDailyGb} GB/day (${coveragePct}% coverage). Commitment-grade baseline requires ≥${MIN_COVERAGE_PCT}% coverage so attribution is not biased by missing sources. Verify Reporter is wired to every forwarder feeding ${destination}.`,
@@ -311,6 +355,7 @@ async function computeBaseline(
       reason: 'anomaly_window',
       destination,
       horizon,
+      rateSource,
       reporterAgeDays: reporterAge,
       coveragePct,
       remediation: `Day ${anomaly.dayOffset} of the trailing ${horizonDays}d window had ${anomaly.multiplier.toFixed(1)}× the rolling 7d median bytes. Wait ${ANOMALY_COOLDOWN_DAYS}d after this anomaly window then re-run baseline; otherwise the percentile math will be biased by the spike.`,
@@ -323,10 +368,16 @@ async function computeBaseline(
   const p90 = percentile(sorted, 0.9);
 
   // Monthly $ = bytes/day_p50 × 30 × ($/GB ingest + $/GB-month storage).
+  // When the caller supplied `effective_ingest_per_gb` we honour it on the
+  // ingest axis; storage stays at list price (no per-customer storage
+  // override surface in baseline today — kept consistent with cost.ts).
   const model = getDestinationCostModel(destination);
+  const ingestPerGb =
+    rateSource === 'customer_supplied'
+      ? (args.effectiveIngestPerGb as number)
+      : model.ingest_per_gb;
   const monthlyGb = (p50 * DAYS_PER_MONTH) / (1024 ** 3);
-  const monthlyUsd =
-    monthlyGb * (model.ingest_per_gb + model.storage_per_gb_month);
+  const monthlyUsd = monthlyGb * (ingestPerGb + model.storage_per_gb_month);
 
   const growthPct = computeGrowthPct(validDays);
   const monthlyUsdIn90d = monthlyUsd * Math.pow(1 + growthPct, 3);
@@ -336,7 +387,8 @@ async function computeBaseline(
     metricsEnv,
     horizonDays,
     totalBytes,
-    destination
+    destination,
+    ingestPerGb
   );
 
   const recommended = recommendTargetRange(top);
@@ -347,14 +399,17 @@ async function computeBaseline(
     coverage_pct: coveragePct,
     destination,
     horizon,
+    rate_source: rateSource,
     current: {
       bytes_window: totalBytes,
       bytes_per_day_p50: p50,
       bytes_per_day_p90: p90,
       monthly_usd: monthlyUsd,
+      monthly_usd_at_list: monthlyUsd,
     },
     projection_no_action_90d: {
       monthly_usd_in_90d: monthlyUsdIn90d,
+      monthly_usd_in_90d_at_list: monthlyUsdIn90d,
       growth_pct: growthPct,
     },
     top_contributors: top,
@@ -518,7 +573,8 @@ async function fetchTopContributors(
   metricsEnv: 'edge' | 'cloud',
   horizonDays: number,
   totalBytes: number,
-  destination: SiemId
+  destination: SiemId,
+  ingestPerGb: number
 ): Promise<BaselineTopContributor[]> {
   const labels = env.labels;
   const range = `${horizonDays}d`;
@@ -553,11 +609,13 @@ async function fetchTopContributors(
     const avgSize = events > 0 ? bytes / events : 0;
     const sharePct = totalBytes > 0 ? (bytes / totalBytes) * 100 : 0;
 
-    // Monthly $ = (window_bytes ÷ horizonDays) × 30 × $/GB
+    // Monthly $ = (window_bytes ÷ horizonDays) × 30 × $/GB. Uses the rate
+    // resolved by `computeBaseline` (customer_supplied when supplied; else
+    // vendors.json list).
     const monthlyBytes = (bytes / horizonDays) * DAYS_PER_MONTH;
     const monthlyUsd =
       bytesToGb(monthlyBytes) *
-      (model.ingest_per_gb + model.storage_per_gb_month);
+      (ingestPerGb + model.storage_per_gb_month);
 
     // Compactable test: destination is not a no-op AND avg event ≥ floor.
     const compactable =
@@ -571,6 +629,7 @@ async function fetchTopContributors(
       severity: String(r.metric[labels.severity] ?? ''),
       share_pct: sharePct,
       monthly_usd: monthlyUsd,
+      monthly_usd_at_list: monthlyUsd,
       avg_event_size_bytes: avgSize,
       compactable,
     });
@@ -637,10 +696,16 @@ function buildNotReadyEnvelope(opts: {
   reason: NotReadyReason;
   destination?: SiemId;
   horizon?: BaselineHorizon;
+  rateSource: RateSource;
   reporterAgeDays?: number;
   coveragePct?: number;
   remediation: string;
 }): BaselineEnvelopeData {
+  // Dollar fields collapse to null when no rate is resolvable (no
+  // destination + no customer override). Keeps callers from reading 0 as a
+  // real projection.
+  const dollarsKnown = opts.rateSource !== 'unset';
+  const zeroMonthly = dollarsKnown ? 0 : null;
   return {
     status: 'not_ready',
     not_ready_reason: opts.reason,
@@ -648,14 +713,17 @@ function buildNotReadyEnvelope(opts: {
     coverage_pct: opts.coveragePct ?? 0,
     destination: opts.destination ?? null,
     horizon: opts.horizon ?? DEFAULT_HORIZON,
+    rate_source: opts.rateSource,
     current: {
       bytes_window: 0,
       bytes_per_day_p50: 0,
       bytes_per_day_p90: 0,
-      monthly_usd: 0,
+      monthly_usd: zeroMonthly,
+      monthly_usd_at_list: zeroMonthly,
     },
     projection_no_action_90d: {
-      monthly_usd_in_90d: 0,
+      monthly_usd_in_90d: zeroMonthly,
+      monthly_usd_in_90d_at_list: zeroMonthly,
       growth_pct: 0,
     },
     top_contributors: [],
@@ -672,13 +740,24 @@ function headlineFor(d: BaselineEnvelopeData): string {
       240
     );
   }
-  const monthly = fmtDollar(d.current.monthly_usd);
-  const future = fmtDollar(d.projection_no_action_90d.monthly_usd_in_90d);
+  // Percent-first: target reduction band leads. Volume (bytes) is the
+  // second beat. Dollars are an overlay gated on rate_source.
   const r = d.recommended_target_range;
   const band = r
-    ? ` · target band ${r.low_pct}-${r.high_pct}% (expected ${r.expected_pct}%)`
-    : '';
-  return `Baseline ready: ${monthly}/mo current, ${future}/mo projected 90d no-action${band}.`;
+    ? `target band ${r.low_pct}-${r.high_pct}% (expected ${r.expected_pct}%)`
+    : 'target band unavailable';
+  const volume = `${fmtBytes(d.current.bytes_per_day_p50)}/day p50`;
+  let dollarClause = '';
+  if (
+    d.rate_source !== 'unset' &&
+    d.current.monthly_usd != null &&
+    d.projection_no_action_90d.monthly_usd_in_90d != null
+  ) {
+    const monthly = fmtDollar(d.current.monthly_usd);
+    const future = fmtDollar(d.projection_no_action_90d.monthly_usd_in_90d);
+    dollarClause = ` · ${monthly}/mo current, ${future}/mo projected 90d no-action (at ${d.rate_source})`;
+  }
+  return `Baseline ready: ${band} · ${volume}${dollarClause}.`;
 }
 
 function renderBaselineMarkdown(d: BaselineEnvelopeData): string {
@@ -696,6 +775,7 @@ function renderBaselineMarkdown(d: BaselineEnvelopeData): string {
     if (d.destination) {
       lines.push(`- Destination: ${d.destination}`);
     }
+    lines.push(`- Rate source: ${d.rate_source}`);
     return lines.join('\n');
   }
 
@@ -706,15 +786,24 @@ function renderBaselineMarkdown(d: BaselineEnvelopeData): string {
   if (d.coverage_pct > 0) {
     lines.push(`- **Coverage**: ${d.coverage_pct}%`);
   }
+  lines.push(`- **Rate source**: ${d.rate_source}`);
   lines.push('');
 
-  lines.push('## Current spend');
+  // Section title flips to "Current scale" when no rate resolved — the
+  // section is then bytes-only and "spend" would be a lie.
+  const dollarsKnown =
+    d.rate_source !== 'unset' && d.current.monthly_usd != null;
+  lines.push(dollarsKnown ? '## Current spend' : '## Current scale');
   lines.push(
     `- Window total: ${fmtBytes(d.current.bytes_window)} over ${d.horizon}`
   );
   lines.push(`- Daily p50: ${fmtBytes(d.current.bytes_per_day_p50)}`);
   lines.push(`- Daily p90: ${fmtBytes(d.current.bytes_per_day_p90)}`);
-  lines.push(`- Monthly: ${fmtDollar(d.current.monthly_usd)}`);
+  if (dollarsKnown) {
+    lines.push(
+      `- Monthly: ${fmtDollar(d.current.monthly_usd as number)} _at ${d.rate_source}_`
+    );
+  }
   lines.push('');
 
   lines.push('## No-action 90d projection');
@@ -723,12 +812,17 @@ function renderBaselineMarkdown(d: BaselineEnvelopeData): string {
   lines.push(
     `- Organic growth (window trend): ${growth >= 0 ? '+' : ''}${growthFmt}%`
   );
-  lines.push(
-    `- Monthly run-rate in 90d: ${fmtDollar(d.projection_no_action_90d.monthly_usd_in_90d)}`
-  );
-  lines.push(
-    `- Annualized: ${fmtDollar(annualizeDollars(d.current.monthly_usd, DAYS_PER_MONTH))}`
-  );
+  if (
+    dollarsKnown &&
+    d.projection_no_action_90d.monthly_usd_in_90d != null
+  ) {
+    lines.push(
+      `- Monthly run-rate in 90d: ${fmtDollar(d.projection_no_action_90d.monthly_usd_in_90d)} _at ${d.rate_source}_`
+    );
+    lines.push(
+      `- Annualized: ${fmtDollar(annualizeDollars(d.current.monthly_usd as number, DAYS_PER_MONTH))} _at ${d.rate_source}_`
+    );
+  }
   lines.push('');
 
   if (d.recommended_target_range) {
@@ -747,17 +841,24 @@ function renderBaselineMarkdown(d: BaselineEnvelopeData): string {
   if (d.top_contributors.length > 0) {
     lines.push('## Top contributors');
     lines.push('');
+    // Share % is the primary sort key (already sorted by
+    // `fetchTopContributors`) and the lead column. $/mo stays as a column
+    // but renders `—` when `rate_source === 'unset'`.
     lines.push(
-      '| # | Service | Severity | Pattern | Share | $/mo | Avg size | Compactable |'
+      '| # | Share % | Service | Severity | Pattern | $/mo | Avg size | Compactable |'
     );
     lines.push(
-      '|---|---------|----------|---------|------:|-----:|---------:|-------------|'
+      '|---|--------:|---------|----------|---------|-----:|---------:|-------------|'
     );
     d.top_contributors.forEach((c, i) => {
       const patternPreview =
         c.pattern.length > 40 ? c.pattern.slice(0, 37) + '...' : c.pattern;
+      const dollar =
+        d.rate_source !== 'unset' && c.monthly_usd != null
+          ? fmtDollar(c.monthly_usd)
+          : '—';
       lines.push(
-        `| ${i + 1} | ${c.service || '-'} | ${c.severity || '-'} | \`${patternPreview}\` | ${c.share_pct.toFixed(1)}% | ${fmtDollar(c.monthly_usd)} | ${fmtBytes(c.avg_event_size_bytes)} | ${c.compactable ? 'yes' : 'no'} |`
+        `| ${i + 1} | ${c.share_pct.toFixed(1)}% | ${c.service || '-'} | ${c.severity || '-'} | \`${patternPreview}\` | ${dollar} | ${fmtBytes(c.avg_event_size_bytes)} | ${c.compactable ? 'yes' : 'no'} |`
       );
     });
     lines.push('');

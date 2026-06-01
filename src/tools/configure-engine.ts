@@ -584,9 +584,13 @@ export async function executeConfigureEngine(
       current_bytes_30d: Math.round(monthlyBytes),
       cap_bytes_per_window: Math.round(capBytesPerWindow),
       action,
-      projected_monthly_usd_low: roundCents(range.low.total_dollars),
-      projected_monthly_usd_expected: roundCents(range.expected.total_dollars),
-      projected_monthly_usd_high: roundCents(range.high.total_dollars),
+      // total_dollars is now nullable on SavingsProjection — null means the
+      // destination has no list rate and no customer override. Current
+      // surface still emits a number; full rate_source propagation lands in
+      // the configure-engine patch (step 8 of the build order).
+      projected_monthly_usd_low: roundCents(range.low.total_dollars ?? 0),
+      projected_monthly_usd_expected: roundCents(range.expected.total_dollars ?? 0),
+      projected_monthly_usd_high: roundCents(range.high.total_dollars ?? 0),
       floor_reason: floorReason,
       reason,
     });

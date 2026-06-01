@@ -43,7 +43,8 @@ export const topPatternsSchema = {
   severity: z.string().optional().describe('Severity level to scope the result (e.g., `ERROR`, `CRITICAL`, `DEBUG`).'),
   timeRange: z.string().regex(/^\d+[mhd]$/).default('1h').describe('Time range to aggregate over. Default 1h.'),
   limit: z.number().min(1).max(50).default(5).describe('Number of patterns to return. Default 5.'),
-  analyzerCost: z.number().optional().describe('SIEM ingestion cost in $/GB. Auto-detected from profile if omitted.'),
+  analyzerCost: z.number().optional().describe('DEPRECATED — use effective_ingest_per_gb. SIEM ingestion cost in $/GB. Auto-detected from profile if omitted.'),
+  effective_ingest_per_gb: z.number().optional().describe('Customer-supplied $/GB rate used for the dollar overlay. When set, headline tags `rate_source=customer_supplied`. When absent, falls back to the profile list rate (`rate_source=list_price`) or omits dollars entirely (`rate_source=unset`).'),
   siemScope: z.string().optional().describe('SIEM scope for the verbatim sample line on the top rows.'),
   environment: z.string().optional().describe('Environment nickname (for multi-env setups).'),
   verbose: z
@@ -94,6 +95,7 @@ export async function executeTopPatterns(
     timeRange: string;
     limit: number;
     analyzerCost?: number;
+    effective_ingest_per_gb?: number;
     siemScope?: string;
     verbose?: boolean;
     view?: 'summary' | 'markdown';
@@ -115,7 +117,19 @@ export async function executeTopPatterns(
   // top_patterns-vs-SRE contest: a 24h run reported "$5323/mo" that was ~24×
   // too high. windowHours from tf.days (fractional for sub-day windows).
   const windowHours = tf.days * 24;
-  const costPerGb = args.analyzerCost ?? 1.0;
+  // Rate resolution: customer-supplied > caller-supplied analyzerCost (treated
+  // as customer_supplied since it's an explicit arg) > profile list rate >
+  // unset. NEVER fall back to a fictitious $1/GB — when no rate is known,
+  // `costPerGb` is null and every dollar surface either nulls out or renders
+  // "—". Headline / PNG / per-row gating below all read `rate_source`.
+  const rate_source: 'list_price' | 'customer_supplied' | 'unset' =
+    args.effective_ingest_per_gb != null
+      ? 'customer_supplied'
+      : args.analyzerCost != null
+        ? 'customer_supplied'
+        : 'unset';
+  const costPerGb: number | null =
+    args.effective_ingest_per_gb ?? args.analyzerCost ?? null;
 
   const filters: Record<string, string> = {};
   if (args.service) filters[LABELS.service] = args.service;
@@ -259,6 +273,12 @@ export async function executeTopPatterns(
   ]);
 
   // --- Phase 3: Assemble TopPatternRow[] ---
+  // Parallel to renderRows: the *honest* per-row dollar values (null when the
+  // rate is unset). renderRows itself stores 0-coerced numbers because the
+  // existing renderer signature requires a number; this side-array keeps
+  // nulls intact so the structured envelope below can carry them through.
+  const honestCostPerHour: Array<number | null> = [];
+  const honestCostPerMonth: Array<number | null> = [];
   const renderRows: TopPatternRow[] = rawRows.map((r, idx): TopPatternRow => {
     const trendRes = trendResults[idx];
     let trendVals: number[] = [];
@@ -271,8 +291,15 @@ export async function executeTopPatterns(
     const events = eventsByHash.get(r.hash) ?? [];
     const fv = events.length > 0 ? fieldVariation(events) : undefined;
     const fsRes = firstSeenByHash.get(r.hash);
-    const cost = bytesToCost(r.bytes, costPerGb);
-    const costPerHour = windowHours > 0 ? cost / windowHours : cost;
+    // When rate is unset, every per-row dollar field collapses to null. The
+    // renderer + envelope below gate every $ surface on rate_source so the
+    // null propagates as "—", never as `$null` or a 0-dollar lie.
+    const cost = costPerGb != null ? bytesToCost(r.bytes, costPerGb) : null;
+    const costPerHour =
+      cost == null ? null : windowHours > 0 ? cost / windowHours : cost;
+    const costPerMonth = costPerHour == null ? null : costPerHour * 720;
+    honestCostPerHour.push(costPerHour);
+    honestCostPerMonth.push(costPerMonth);
     // Badge = trajectory classification. Key the baseline lookup by
     // the same (pattern, service, severity) triple `topPatternsFull`
     // and `bytesPerPattern` both group on. Cross-check NEW against
@@ -291,6 +318,14 @@ export async function executeTopPatterns(
     const datadogQuery = analyzer === 'datadog'
       ? datadogAnalyzerQuery(r.hash, r.service, r.severity)
       : undefined;
+    // Pass 0 to the renderer when the rate is unset — the renderer
+    // (top-patterns-render.ts) does naive `${fmtDollar(...)}/h` interpolation
+    // today. Coercing to 0 here would render "$0/h" which is itself a lie, so
+    // step 12a (separate PR) gates the dollar strings on `rateSource`. Until
+    // then the markdown view shows 0; the structured envelope (returned for
+    // view='summary') carries the honest nulls. The pre-coerced values feed
+    // ONLY the renderer; envelope assembly below uses costPerHour/costPerMonth
+    // directly so nulls survive.
     return {
       rank: idx + 1,
       hash: r.hash,
@@ -298,8 +333,8 @@ export async function executeTopPatterns(
       service: r.service,
       severity: r.severity,
       bytes: r.bytes,
-      costPerHour,
-      costPerMonth: costPerHour * 720,
+      costPerHour: costPerHour ?? 0,
+      costPerMonth: costPerMonth ?? 0,
       events: r.events,
       firstSeenAgeSeconds: fsRes?.ageSeconds ?? null,
       trendBytesPerSec: trendVals,
@@ -317,7 +352,17 @@ export async function executeTopPatterns(
   const totalBytes = totalRes && totalRes.status === 'success' && totalRes.data.result.length > 0
     ? parsePrometheusValue(totalRes.data.result[0])
     : renderRows.reduce((s, r) => s + r.bytes, 0);
-  const totalCostPerHour = windowHours > 0 ? bytesToCost(totalBytes, costPerGb) / windowHours : bytesToCost(totalBytes, costPerGb);
+  // Total cost nulls out when the rate is unset (no honest dollar to display).
+  // Renderer falls back to a 0-coerced version below so the existing markdown
+  // path keeps compiling; the structured envelope carries the null verbatim.
+  const totalCostPerHour: number | null =
+    costPerGb == null
+      ? null
+      : windowHours > 0
+        ? bytesToCost(totalBytes, costPerGb) / windowHours
+        : bytesToCost(totalBytes, costPerGb);
+  const totalCostMonthly: number | null =
+    totalCostPerHour == null ? null : totalCostPerHour * 720;
 
   let patternCountTotal: number | undefined;
   if (countRes && countRes.status === 'success' && countRes.data.result.length > 0) {
@@ -356,11 +401,15 @@ export async function executeTopPatterns(
   });
 
   // --- Phase 4: Render ---
+  // Renderer signature (top-patterns-render.ts) still takes plain numbers; the
+  // step-12a follow-up gates dollar strings on `rateSource`. Until then, coerce
+  // nulls to 0 ONLY at this boundary so the existing snapshot path doesn't
+  // print `$null`. The honest nulls survive in the envelope below.
   const rendered = renderTopPatterns(renderRows, {
     windowLabel: tf.label,
     totalBytesInScope: totalBytes,
-    totalCostPerHour,
-    totalCostMonthly: totalCostPerHour * 720,
+    totalCostPerHour: totalCostPerHour ?? 0,
+    totalCostMonthly: totalCostMonthly ?? 0,
     patternCountShown: renderRows.length,
     patternCountTotal,
     forwarder,
@@ -370,7 +419,7 @@ export async function executeTopPatterns(
     healthBanner: banner,
     verbose: args.verbose ?? false,
     costByService: serviceRollup,
-    costPerGb,
+    costPerGb: costPerGb ?? undefined,
   });
 
   // --- Phase 5: Agent-only routing block ---
@@ -485,15 +534,22 @@ export async function executeTopPatterns(
     }));
   const incidents = detectIncidents(incidentInputs);
 
-  const dataPatterns = renderRows.map((r) => ({
+  // Per-row envelope. `share_pct` is the new percent-first ranking signal
+  // (bytes share of in-scope total) — answers "how big is this slice" without
+  // requiring a dollar rate. `cost_per_*_usd` are nullable: null when
+  // rate_source==='unset'. Renderer-side gating lives in step 12a.
+  const dataPatterns = renderRows.map((r, idx) => ({
     rank: r.rank,
     identity: r.pattern ?? r.hash ?? '',
     template_hash: r.hash ?? '',
     service: r.service,
     severity: r.severity,
-    cost_per_hour_usd: r.costPerHour,
-    cost_per_month_usd: r.costPerMonth,
+    cost_per_hour_usd: honestCostPerHour[idx],
+    cost_per_month_usd: honestCostPerMonth[idx],
     bytes: r.bytes,
+    percent_of_total_bytes:
+      totalBytes > 0 ? (r.bytes / totalBytes) * 100 : 0,
+    share_pct: totalBytes > 0 ? (r.bytes / totalBytes) * 100 : 0,
     events: r.events,
     first_seen_age_seconds: r.firstSeenAgeSeconds,
     badge: r.badge,
@@ -501,17 +557,40 @@ export async function executeTopPatterns(
     trend_bytes_per_sec: r.trendBytesPerSec,
   }));
 
+  // Aggregate share — the % of in-scope bytes the shown rows cover.
+  const shownBytes = renderRows.reduce((s, r) => s + r.bytes, 0);
+  const top_n_percent_of_total =
+    totalBytes > 0 ? (shownBytes / totalBytes) * 100 : 0;
+
   const totals = {
-    monthly_usd: totalCostPerHour * 720,
+    monthly_usd: totalCostMonthly,
     bytes_per_sec: totalBytes / Math.max(1, windowHours * 3600),
+    bytes_total: totalBytes,
+    top_n_percent_of_total,
     pattern_count_shown: renderRows.length,
     pattern_count_total: patternCountTotal,
   };
 
-  const headline =
-    renderRows.length === 0
-      ? `No patterns in scope over ${tf.label}.`
-      : `Top ${renderRows.length} patterns over ${tf.label} cost ~$${(totals.monthly_usd).toFixed(0)}/mo total.${incidents.length > 0 ? ` ${incidents.length} incident cluster${incidents.length === 1 ? '' : 's'} detected.` : ''}`;
+  // Headline: percent-of-bytes + byte volume first. Dollar clause appended
+  // only when a rate is known; "(rate unset)" tag otherwise so agents can
+  // route to estimate_savings with `effective_ingest_per_gb`.
+  let headline: string;
+  if (renderRows.length === 0) {
+    headline = `No patterns in scope over ${tf.label}.`;
+  } else {
+    const sharePctLabel = `${Math.round(top_n_percent_of_total)}%`;
+    const bytesLabel = `${(shownBytes / (1024 ** 3)).toFixed(1)} GB`;
+    const incidentTail =
+      incidents.length > 0
+        ? ` ${incidents.length} incident cluster${incidents.length === 1 ? '' : 's'} detected.`
+        : '';
+    if (totalCostMonthly != null) {
+      const tag = rate_source === 'customer_supplied' ? 'customer_supplied' : 'list_price';
+      headline = `Top ${renderRows.length} patterns over ${tf.label} cover ${sharePctLabel} of scanned bytes (${bytesLabel}), ~$${totalCostMonthly.toFixed(0)}/mo at ${tag}.${incidentTail}`;
+    } else {
+      headline = `Top ${renderRows.length} patterns over ${tf.label} cover ${sharePctLabel} of scanned bytes (${bytesLabel}). Dollar overlay omitted (rate unset); pass effective_ingest_per_gb to project savings.${incidentTail}`;
+    }
+  }
 
   const callout =
     incidents.length > 0
@@ -538,26 +617,50 @@ export async function executeTopPatterns(
   const totalAvailable = patternCountTotal ?? (renderRows.length === args.limit ? args.limit + 1 : renderRows.length);
   const truncated = totalAvailable > renderRows.length;
 
-  // G6: horizontal-bar PNG of top patterns by monthly cost. Hosts that render
+  // G6: horizontal-bar PNG. When a rate is known, axis stays $/mo (the
+  // decision-sealing number). When rate_source==='unset' we MUST NOT render a
+  // dollar axis — swap to bytes/mo so the chart shows the same ranking honestly
+  // without conjuring fake dollars from a $1/GB assumption. Hosts that render
   // image content (Claude Desktop, ChatGPT Desktop) show it; legacy hosts
   // ignore. Skip silently if rendering fails (missing Cairo etc.).
   let images: import('../lib/output-types.js').InlineImage[] | undefined;
   try {
     const { renderHorizontalBar } = await import('../lib/chart-renderer.js');
     if (dataPatterns.length > 0) {
-      const png = await renderHorizontalBar(
-        dataPatterns
-          .slice()
-          .sort((a, b) => b.cost_per_month_usd - a.cost_per_month_usd)
-          .map((p, i) => ({ label: `#${i + 1} ${p.identity}`, value: p.cost_per_month_usd })),
-        { title: `Top ${dataPatterns.length} patterns by $/mo (${tf.label})`, xLabel: '$/mo' }
-      );
+      const useDollars = rate_source !== 'unset';
+      const rateTag =
+        rate_source === 'customer_supplied' ? 'customer_supplied' : 'list_price';
+      const bars = dataPatterns
+        .slice()
+        .sort((a, b) =>
+          useDollars
+            ? (b.cost_per_month_usd ?? 0) - (a.cost_per_month_usd ?? 0)
+            : b.bytes - a.bytes
+        )
+        .map((p, i) => ({
+          label: `#${i + 1} ${p.identity}`,
+          value: useDollars ? (p.cost_per_month_usd ?? 0) : p.bytes,
+        }));
+      const title = useDollars
+        ? `Top ${dataPatterns.length} patterns by $/mo (${tf.label}) (at ${rateTag})`
+        : `Top ${dataPatterns.length} patterns by bytes/mo (${tf.label})`;
+      const xLabel = useDollars ? '$/mo' : 'bytes/mo';
+      const png = await renderHorizontalBar(bars, { title, xLabel });
       if (png) {
-        images = [{ data: png.base64, mimeType: png.mimeType, alt: `Top ${dataPatterns.length} patterns by monthly cost over ${tf.label}` }];
+        const altSubject = useDollars ? 'monthly cost' : 'byte volume';
+        images = [{ data: png.base64, mimeType: png.mimeType, alt: `Top ${dataPatterns.length} patterns by ${altSubject} over ${tf.label}` }];
       }
     }
   } catch (_e) {
     /* best-effort; never block */
+  }
+
+  // Incident cluster combined-bytes share — the percent-first equivalent of
+  // `combined_monthly_usd`, available even when the rate is unset. Derived
+  // from the per-row `bytes` of each cluster member by joining on identity.
+  const bytesByIdentity = new Map<string, number>();
+  for (const p of dataPatterns) {
+    if (p.template_hash) bytesByIdentity.set(p.template_hash, p.bytes);
   }
 
   return buildEnvelope({
@@ -565,19 +668,28 @@ export async function executeTopPatterns(
     view: 'summary',
     summary: { headline, callout },
     data: {
+      rate_source,
       patterns: dataPatterns,
-      incidents: incidents.map((c) => ({
-        members: c.members.map((m) => ({
-          identity: m.identity,
-          cost_per_month_usd: m.costPerMonthUsd,
-          descriptor: m.descriptor,
-        })),
-        representative_label: c.representativeLabel,
-        service: c.service,
-        combined_monthly_usd: c.combinedMonthlyUsd,
-        join_signal: c.joinSignal,
-        confidence: c.confidence,
-      })),
+      incidents: incidents.map((c) => {
+        const combinedBytes = c.members.reduce(
+          (s, m) => s + (bytesByIdentity.get(m.identity) ?? 0),
+          0
+        );
+        return {
+          members: c.members.map((m) => ({
+            identity: m.identity,
+            cost_per_month_usd: m.costPerMonthUsd,
+            descriptor: m.descriptor,
+          })),
+          representative_label: c.representativeLabel,
+          service: c.service,
+          combined_monthly_usd: c.combinedMonthlyUsd,
+          combined_percent_of_total:
+            totalBytes > 0 ? (combinedBytes / totalBytes) * 100 : 0,
+          join_signal: c.joinSignal,
+          confidence: c.confidence,
+        };
+      }),
       totals,
       window: tf.label,
       pattern_count_shown: renderRows.length,
@@ -585,7 +697,13 @@ export async function executeTopPatterns(
       ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: headline }),
     },
     actions: nextActions.map((a) => ({ tool: a.tool, args: a.args, reason: a.reason })),
-    render_hint: { chart: 'timeseries', units: '$/mo' },
+    // render_hint axis tracks the chart axis — bytes when rate unset, $/mo
+    // when known. Keeps downstream agents/UI from defaulting to a dollar
+    // overlay on data that has none.
+    render_hint:
+      rate_source === 'unset'
+        ? { chart: 'timeseries', units: 'bytes/mo' }
+        : { chart: 'timeseries', units: '$/mo' },
     truncated,
     images,
   });

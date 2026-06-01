@@ -3,7 +3,7 @@
   "tools": {
     "log10x_event_lookup": {
       "title": "Event lookup",
-      "description": "Resolve a raw log line or pattern name to its stable identity (field-set), then return cost per service, before→after delta, first-seen timestamp within the observation window, and an AI classification (error/debug/info) with a recommended action (filter/keep/reduce). **Call this first** whenever a user pastes a SINGLE log line and asks \"what is this\", \"is this new\", or \"is this safe to drop\". The lookup is structural, not byte-exact — different timestamps/request IDs/user IDs on the same underlying pattern resolve to the same identity. If no match is returned, say so honestly. Use log10x_resolve_batch instead when the user pastes MULTIPLE events, a SIEM dump, or a batch to triage.",
+      "description": "Resolve a raw log line or pattern name to its stable identity (field-set), then return byte volume + share per service (with cost overlay when $/GB is set), before→after delta, first-seen timestamp within the observation window, and an AI classification (error/debug/info) with a recommended action (filter/keep/reduce). **Call this first** whenever a user pastes a SINGLE log line and asks \"what is this\", \"is this new\", or \"is this safe to drop\". The lookup is structural, not byte-exact — different timestamps/request IDs/user IDs on the same underlying pattern resolve to the same identity. If no match is returned, say so honestly. Use log10x_resolve_batch instead when the user pastes MULTIPLE events, a SIEM dump, or a batch to triage.",
       "annotations": {
         "title": "Event lookup",
         "readOnlyHint": true,
@@ -25,7 +25,7 @@
     },
     "log10x_savings": {
       "title": "Pipeline savings",
-      "description": "Show pipeline savings — how much the receiver (filtering + compaction) and retriever (indexing) are saving in dollars. Use for \"how much are we saving\", \"pipeline ROI\", or \"what is the Log10x stack worth financially\".",
+      "description": "Show pipeline savings — what percent of bytes the receiver (filtering + compaction) and retriever (indexing) are removing, with a dollar overlay when an analyzer $/GB rate is set (account profile list price, or per-call `effective_ingest_per_gb` override). Without a rate, the headline is percent-and-bytes only — never a fabricated $1/GB number. Use for \"how much are we saving\", \"pipeline ROI\", or \"what is the Log10x stack worth financially\".",
       "annotations": {
         "title": "Pipeline savings",
         "readOnlyHint": true,
@@ -36,7 +36,7 @@
     },
     "log10x_pattern_trend": {
       "title": "Pattern trend",
-      "description": "Return the volume + cost history for a single pattern over a chosen window (e.g. 1h, 24h, 7d, 30d), with a sparkline and spike detection. **Call this after log10x_event_lookup** when the user asks \"is this getting worse\", \"has it been louder before\", \"when did it start\", or wants temporal context on a pattern surfaced in an earlier step. Always state the observation window explicitly in the reply — \"flat at 2/h for the last 6 months of observation, spiked at 13:58 today\" — and never claim history older than the window.",
+      "description": "Return the volume history for a single pattern over a chosen window (e.g. 1h, 24h, 7d, 30d), with a sparkline and spike detection — ranked by byte volume (with cost overlay when $/GB is set). **Call this after log10x_event_lookup** when the user asks \"is this getting worse\", \"has it been louder before\", \"when did it start\", or wants temporal context on a pattern surfaced in an earlier step. Always state the observation window explicitly in the reply — \"flat at 2/h for the last 6 months of observation, spiked at 13:58 today\" — and never claim history older than the window.",
       "annotations": {
         "title": "Pattern trend",
         "readOnlyHint": true,
@@ -47,7 +47,7 @@
     },
     "log10x_services": {
       "title": "Services",
-      "description": "List every service the Log10x pipeline is watching, ranked by cost with per-service volume and share of total. Call first on open-ended cost questions, before drilling into a specific service.",
+      "description": "List every service the Log10x pipeline is watching, ranked by byte volume (with cost overlay when $/GB is set) with per-service share of total. Call first on open-ended cost questions, before drilling into a specific service.",
       "annotations": {
         "title": "Services",
         "readOnlyHint": true,
@@ -91,7 +91,7 @@
     },
     "log10x_top_patterns": {
       "title": "Top patterns",
-      "description": "Return the top N log patterns by current cost, optionally with a delta column vs a `comparison_window` baseline (week-over-week / day-over-day / 1h-vs-prior-1h). Use for \"what is expensive right now\", \"what are the noisy patterns in <service> this hour\", \"give me a snapshot of my loudest events\", \"what changed this week\", \"did the deploy add cost\". Can be scoped by service label. `timeRange` accepts free-form `<n><m|h|d>` durations (e.g., `48h`, `3d`, `15m`) — there's no enum snap. Pass `comparison_window` to get a per-row delta column; omit for current-rank-only.",
+      "description": "Return the top N log patterns ranked by byte volume (with cost overlay when $/GB is set), optionally with a delta column vs a `comparison_window` baseline (week-over-week / day-over-day / 1h-vs-prior-1h). Use for \"what is expensive right now\", \"what are the noisy patterns in <service> this hour\", \"give me a snapshot of my loudest events\", \"what changed this week\", \"did the deploy add cost\". Can be scoped by service label. `timeRange` accepts free-form `<n><m|h|d>` durations (e.g., `48h`, `3d`, `15m`) — there's no enum snap. Pass `comparison_window` to get a per-row delta column; omit for current-rank-only.",
       "annotations": {
         "title": "Top patterns",
         "readOnlyHint": true,
@@ -414,7 +414,7 @@
     },
     "log10x_estimate_savings": {
       "title": "Estimate savings",
-      "description": "Two-mode savings estimator. `forecast` projects bytes_in -> bytes_out + $/mo for a proposed plan under the per-destination cost model. `verify` counts realized savings from the engine `isDropped` label over a window with cap-hit / drift / new-patterns / leakage attribution.",
+      "description": "Two-mode savings estimator with percent-first reporting and a dollar overlay. `forecast` projects bytes_in -> bytes_out and percent reduction for a proposed plan; pass `effective_ingest_per_gb` (or rely on the account profile list-price rate) to overlay $/mo per pattern and in totals. `verify` counts realized savings from the engine `isDropped` label over a window with cap-hit / drift / new-patterns / leakage attribution, leading with percent and adding the dollar overlay only when a rate is set. Without a rate, dollar fields are emitted as null (never as a fabricated $1/GB number); the envelope carries `rate_source: list_price | customer_supplied | unset` so callers can show how the overlay was derived.",
       "annotations": {
         "title": "Estimate savings",
         "readOnlyHint": true,
@@ -482,7 +482,7 @@
     },
     "log10x_pattern_mitigate": {
       "title": "Pattern mitigate",
-      "description": "Given one pattern (identity or templateHash), return the env-gated menu of mitigation options: drop_at_analyzer, drop_at_forwarder, mute_at_10x, compact_at_10x. Each option carries enabled-or-not + reason + estimated $/mo savings + a paste-ready config snippet + follow-through tool calls (typically log10x_dependency_check before applying). The agent surfaces these to the user; the user picks. **Action-shaped tool — calibration honesty**: the envelope's `recommendation_basis` tells the agent WHERE the capability detection came from (envs.json, snapshot, env vars, or unknown). `recommendation_audit.capability_sources` carries the per-field source, and `snapshot_age_seconds` carries snapshot staleness. The agent SHOULD NOT auto-route to the chosen sub-tool until the user picks an option, and SHOULD verify the basis before treating capability detection as authoritative (e.g., a stale snapshot may mis-flag mute as enabled when the receiver was uninstalled). See `docs/cross-pillar-primitives.md` for the agent behavior contract. **Call this** when a previous tool surfaced a high-cost pattern and the user asks 'what should I do' / 'how do I drop this' / 'how do I reduce this'.",
+      "description": "Given one pattern (identity or templateHash), return the env-gated menu of mitigation options: drop_at_analyzer, drop_at_forwarder, mute_at_10x, compact_at_10x. Each option carries enabled-or-not + reason + estimated percent reduction (with $/mo overlay when $/GB is set) + a paste-ready config snippet + follow-through tool calls (typically log10x_dependency_check before applying). The agent surfaces these to the user; the user picks. **Action-shaped tool — calibration honesty**: the envelope's `recommendation_basis` tells the agent WHERE the capability detection came from (envs.json, snapshot, env vars, or unknown). `recommendation_audit.capability_sources` carries the per-field source, and `snapshot_age_seconds` carries snapshot staleness. The agent SHOULD NOT auto-route to the chosen sub-tool until the user picks an option, and SHOULD verify the basis before treating capability detection as authoritative (e.g., a stale snapshot may mis-flag mute as enabled when the receiver was uninstalled). See `docs/cross-pillar-primitives.md` for the agent behavior contract. **Call this** when a previous tool surfaced a high-cost pattern and the user asks 'what should I do' / 'how do I drop this' / 'how do I reduce this'.",
       "annotations": {
         "title": "Pattern mitigate",
         "readOnlyHint": true,
