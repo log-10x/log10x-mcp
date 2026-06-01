@@ -207,27 +207,48 @@ function recipeFluentd(p: OffloadParams): OffloadRecipe {
 }
 
 // ---------------------------------------------------------------------------
-// fluent-bit  (research shape: rewrite_tag -> s3 output; needs JSON encode)
+// fluent-bit  (smoke-tested live, v5: rewrite_tag's string regex CANNOT match
+// a msgpack boolean, so a lua filter stringifies isDropped to a routing key
+// first; KEEP must be true; a grep excludes the dropped slice from the SIEM.)
 // ---------------------------------------------------------------------------
 function recipeFluentBit(p: OffloadParams): OffloadRecipe {
   const prefix = p.prefix ?? DEFAULT_PREFIX;
   return {
     language: 'ini',
-    body: `# 1) retag the dropped slice (KEEP off so the original is consumed)
-[FILTER]
-    Name          rewrite_tag
-    Match         tenx.*
-    Rule          $isDropped ^true$ tenx.offload false
+    body: `[SERVICE]
+    Grace 5                # let the re-emitted chunk flush before shutdown
 
-# 2) strip the now-constant marker (tenx_hash kept). Match tenx.* spans both
-#    the retagged "tenx.offload" and the kept "tenx.*" records (the wildcard
-#    crosses dots), so one filter covers both paths.
+# 1) stringify the boolean marker to a routing key. rewrite_tag's Rule is a
+#    STRING regex and does NOT match a msgpack boolean, so map it first.
 [FILTER]
-    Name          record_modifier
-    Match         tenx.*
-    Remove_key    isDropped
+    Name    lua
+    Match   tenx.*
+    call    tag_route
+    code    function tag_route(tag,ts,rec) if rec["isDropped"]==true then rec["_drop"]="yes" else rec["_drop"]="no" end return 2,ts,rec end
 
-# 3) dropped slice -> customer-owned S3 as JSONL
+# 2) route the dropped slice to its own tag. KEEP=true (4th field): KEEP=false
+#    drops the re-emitted record entirely in fluent-bit. The original copy
+#    stays on tenx.app and is excluded from the SIEM in step 3.
+[FILTER]
+    Name    rewrite_tag
+    Match   tenx.*
+    Rule    $_drop ^yes$ tenx.offload true
+
+# 3) keep the dropped slice OUT of the SIEM path (the KEEP=true original)
+[FILTER]
+    Name    grep
+    Match   tenx.app
+    Exclude _drop yes
+
+# 4) strip both markers on both paths (tenx_hash kept). tenx.* spans the
+#    retagged "tenx.offload" and the kept "tenx.app" (the wildcard crosses dots).
+[FILTER]
+    Name       record_modifier
+    Match      tenx.*
+    Remove_key isDropped
+    Remove_key _drop
+
+# 5) dropped slice -> customer-owned S3 as JSONL
 [OUTPUT]
     Name          s3
     Match         tenx.offload
@@ -237,15 +258,16 @@ function recipeFluentBit(p: OffloadParams): OffloadRecipe {
     use_put_object On
     json_date_format iso8601
 
-# 4) your existing SIEM output stays Matched on tenx.* (the retagged
-#    events no longer carry that tag, so they are not double-sent)`,
+# 6) kept slice -> your existing SIEM output, Match tenx.app`,
     placementNote:
-      'the `rewrite_tag` FILTER must sit on the 10x return path (`Match tenx.*`); ' +
-      '`isDropped` only exists on post-sidecar records.',
+      'all FILTERs sit on the 10x return path (`Match tenx.*`); `isDropped` only ' +
+      'exists on post-sidecar records. The lua filter is required because ' +
+      'fluent-bit\'s `rewrite_tag` string regex cannot match a msgpack boolean ' +
+      '(verified live), so the marker is mapped to a string key `_drop` first.',
     prerequisites: [
       ...basePrereqs(p),
       'Encoding: the 10x return path must emit JSON (`fluentbitOutputEncodeType: json`), or the `isDropped` key is mangled in a delimited round-trip.',
-      'SMOKE TEST REQUIRED: confirm `rewrite_tag` matches the boolean `isDropped` on a real dropped event before relying on this in production.',
+      'The lua filter (boolean -> string routing key) and `KEEP=true` are both mandatory: rewrite_tag cannot regex-match a boolean, and KEEP=false drops the re-emitted record (both verified live on fluent-bit v5).',
     ],
   };
 }
@@ -324,7 +346,11 @@ filter {
   if [isDropped] {                  # truthiness on the boolean (NOT a string compare)
     mutate { add_field => { "[@metadata][tenx_route]" => "offload" } }
   }
-  mutate { remove_field => ["isDropped"] }   # marker did its job; tenx_hash kept
+  # marker did its job; drop it (tenx_hash kept). Also drop [event][original]:
+  # under ECS-compat v8 (Logstash 8.x default) the json codec stores the raw
+  # source line there, which still contains "isDropped" (verified leaking into
+  # both sinks). Or set pipeline.ecs_compatibility: disabled on this pipeline.
+  mutate { remove_field => ["isDropped", "[event][original]"] }
 }
 
 output {
@@ -346,7 +372,7 @@ output {
       'not leak into S3 or the SIEM, and `isDropped` is removed before either.',
     prerequisites: [
       ...basePrereqs(p),
-      'SMOKE TEST REQUIRED: confirm `[isDropped]` truthiness fires on a real dropped event (logstash typing of the boolean).',
+      'Verified live (logstash 8.x): routing + strip + tenx_hash. Under ECS-compat v8 the json codec adds `[event][original]` holding the raw line (with isDropped), so the strip removes it too — or set `pipeline.ecs_compatibility: disabled` on this pipeline.',
     ],
   };
 }
@@ -389,7 +415,7 @@ Strip the marker (both destinations):
       'flush), so objects appear on the flush interval, not per event.',
     prerequisites: [
       ...basePrereqs(p),
-      'SMOKE TEST REQUIRED: confirm the Route filter `isDropped == true` matches the stamped boolean in Cribl before relying on this.',
+      'Logic verified live via `cribl pipe` (Cribl 4.x real expression engine): Route filter `isDropped == true` matched the boolean, the Eval "Remove fields" dropped isDropped on both outputs, tenx_hash kept. This recipe ships as prose, not paste-ready config — build it in the Cribl UI/API. A full single-mode daemon run additionally needs an event-breaker ruleset + a file-monitor source scoped to your input.',
     ],
   };
 }
@@ -444,6 +470,101 @@ export function forwarderWriteIamPolicy(params: OffloadParams): ForwarderWriteIa
   };
 }
 
+/**
+ * Ready-to-apply Terraform module for the forwarder-write IAM: a role + the
+ * scoped PutObject policy + the EKS IRSA OIDC trust (assume-role bound to one
+ * ServiceAccount). Non-EKS attachment is noted at the bottom. The grant is
+ * additive — the Retriever's own role only reads the bucket. IRSA trust
+ * pattern verified against the AWS EKS docs.
+ */
+export function forwarderWriteTerraform(): string {
+  return `# Forwarder-write IAM for the offload loop. The forwarder PutObjects the
+# isDropped slice to the Retriever input bucket; the Retriever's own role only
+# READS it, so this is a SEPARATE, additive grant.
+
+variable "bucket" {
+  type        = string
+  description = "Retriever input bucket. Objects land at <bucket>/<prefix>/..."
+}
+variable "prefix" {
+  type        = string
+  default     = "app"
+  description = "Key prefix == Retriever target. PutObject is scoped to <bucket>/<prefix>/*."
+}
+variable "oidc_provider_arn" {
+  type        = string
+  description = "Cluster IAM OIDC provider ARN (arn:aws:iam::<acct>:oidc-provider/oidc.eks.<region>.amazonaws.com/id/<id>)."
+}
+variable "namespace"       { type = string }   # forwarder ServiceAccount namespace
+variable "service_account" { type = string }   # forwarder ServiceAccount name
+variable "name_prefix" {
+  type    = string
+  default = "tenx-forwarder-offload"
+}
+
+locals {
+  # IRSA conditions key on the issuer URL (no scheme): the part after oidc-provider/.
+  oidc_issuer = split("oidc-provider/", var.oidc_provider_arn)[1]
+}
+
+# PutObject scoped to <bucket>/<prefix>/*
+data "aws_iam_policy_document" "write" {
+  statement {
+    sid       = "TenxForwarderOffloadWrite"
+    effect    = "Allow"
+    actions   = ["s3:PutObject"]
+    resources = ["arn:aws:s3:::\${var.bucket}/\${var.prefix}/*"]
+  }
+}
+
+resource "aws_iam_policy" "write" {
+  name   = "\${var.name_prefix}-write"
+  policy = data.aws_iam_policy_document.write.json
+}
+
+# IRSA trust: OIDC-federated assume-role pinned to ONE ServiceAccount.
+data "aws_iam_policy_document" "trust" {
+  statement {
+    effect  = "Allow"
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+    principals {
+      type        = "Federated"
+      identifiers = [var.oidc_provider_arn]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "\${local.oidc_issuer}:sub"
+      values   = ["system:serviceaccount:\${var.namespace}:\${var.service_account}"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "\${local.oidc_issuer}:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "forwarder_offload" {
+  name               = var.name_prefix
+  assume_role_policy = data.aws_iam_policy_document.trust.json
+}
+
+resource "aws_iam_role_policy_attachment" "write" {
+  role       = aws_iam_role.forwarder_offload.name
+  policy_arn = aws_iam_policy.write.arn
+}
+
+# Annotate the forwarder ServiceAccount: eks.amazonaws.com/role-arn = <this arn>
+output "forwarder_offload_role_arn" {
+  value = aws_iam_role.forwarder_offload.arn
+}
+
+# Non-EKS: reuse aws_iam_policy.write unchanged; only the identity differs.
+#   EC2/self-managed:  attach it to the node instance-profile role.
+#   on-prem/outside AWS: attach it to an aws_iam_user + aws_iam_access_key,
+#                        feed the key into the forwarder's S3 output creds.`;
+}
+
 // ---------------------------------------------------------------------------
 // SIEM tier_down recipes  (down-tier in place, keyed on the SAME isDropped
 // marker — no second attribute needed for a binary premium/cheap split).
@@ -463,25 +584,49 @@ export function datadogFlexRecipe(opts: { flexRetentionDays?: number } = {}): Si
   return {
     target: 'datadog-flex',
     language: 'hcl',
-    body: `resource "datadog_logs_index" "tenx_offload_flex" {
+    body: `terraform {
+  required_providers {
+    datadog = {
+      source  = "DataDog/datadog"
+      version = ">= 4.6.0"   # flex_retention_days added in 3.45.0; 4.6.0 fixes flex=0 ignore
+    }
+  }
+}
+
+resource "datadog_logs_index" "tenx_offload_flex" {
   name = "tenx-offload"
 
   filter {
     query = "@isDropped:true"   # the slice 10x marked as low-value
   }
 
-  # retention waterfall: 0 days in the premium Standard index, then Flex.
+  # retention waterfall: 0 days Standard, then ${flex} days TOTAL (= ${flex} in Flex).
   retention_days      = 0
   flex_retention_days = ${flex}
+}
+
+# REQUIRED: log indexes are FIRST-MATCH-WINS. The dropped slice only lands in
+# this Flex index if it is ordered BEFORE the existing catch-all index.
+resource "datadog_logs_index_order" "tenx_offload_order" {
+  name    = "tenx-offload-order"
+  indexes = [
+    datadog_logs_index.tenx_offload_flex.id,   # must precede the broad index
+    # "<your existing catch-all index name>",  # then the existing index(es)
+  ]
 }`,
     note:
       'Cuts the dominant Datadog INDEX cost (not ingest; the $0.10/GB ingest ' +
       'meter is unchanged) while the slice stays queryable in the same Log ' +
-      'Explorer with no rehydration. Schema is a retention waterfall ' +
-      '(`retention_days=0` + `flex_retention_days>0`), not a tier toggle, and ' +
-      'needs a recent Datadog provider — verify against the live provider before ' +
-      'apply. Datadog markets Flex itself; the 10x value is the per-pattern ' +
-      'decision (which `pattern_hash` is safe to down-tier), not the routing.',
+      'Explorer with no rehydration. Schema verified against the live provider: ' +
+      'retention waterfall `retention_days=0` + `flex_retention_days` (a TOTAL, ' +
+      'Standard+Flex), provider `>= 4.6.0`. The `datadog_logs_index_order` ' +
+      'companion is REQUIRED: indexes are first-match-wins, so without ordering ' +
+      'the Flex index ahead of the catch-all the events never reach it. ' +
+      'Enablement caveats: Flex Logs must be turned on for the account first ' +
+      '(pick a Compute size on the Flex Logs page) or apply is rejected; some ' +
+      'accounts cannot create a new index via API (retarget retention on an ' +
+      'existing index instead). Datadog markets Flex itself; the 10x value is the ' +
+      'per-pattern decision (which `pattern_hash` is safe to down-tier), not the route.',
   };
 }
 
@@ -587,15 +732,12 @@ export function renderOffloadSection(
     );
   }
 
-  const iam = forwarderWriteIamPolicy(params);
   lines.push(
-    '**Forwarder write access** (the one new IAM grant — the Retriever\'s own role only READS the source bucket):',
+    '**Forwarder write access** (the one new IAM grant — the Retriever\'s own role only READS the source bucket). Ready-to-apply Terraform, EKS IRSA, non-EKS noted at the bottom:',
     '',
-    '```json',
-    iam.policyJson,
+    '```hcl',
+    forwarderWriteTerraform(),
     '```',
-    '',
-    iam.attachmentNote,
     ''
   );
 

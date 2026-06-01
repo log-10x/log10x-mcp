@@ -16,6 +16,7 @@ import {
   OFFLOAD_FORWARDERS,
   offloadRecipe,
   forwarderWriteIamPolicy,
+  forwarderWriteTerraform,
   datadogFlexRecipe,
   cloudwatchIaRecipe,
   otherOffloadForwarders,
@@ -46,7 +47,7 @@ test('each forwarder matches isDropped in its native boolean form', () => {
   const expected: Record<OffloadForwarderId, RegExp> = {
     vector: /\.isDropped == true/,
     fluentd: /key isDropped[\s\S]*pattern \/\^true\$\//,
-    'fluent-bit': /\$isDropped \^true\$/,
+    'fluent-bit': /rec\["isDropped"\]==true/,
     'otel-collector': /attributes\["isDropped"\] == true/,
     logstash: /if \[isDropped\]/,
     cribl: /isDropped == true/,
@@ -63,7 +64,7 @@ test('each recipe strips isDropped on the output path, never tenx_hash', () => {
     fluentd: /remove_keys isDropped/,
     'fluent-bit': /Remove_key\s+isDropped/,
     'otel-collector': /delete_key\(log\.attributes, "isDropped"\)/,
-    logstash: /remove_field => \["isDropped"\]/,
+    logstash: /remove_field => \["isDropped"/,
     cribl: /Remove fields: isDropped/,
   };
   // A real removal of tenx_hash would name it as a field token (quoted in
@@ -103,15 +104,15 @@ test('every recipe carries the engine offload-mode + IAM prerequisites', () => {
   }
 });
 
-test('verified-shape forwarders (vector, fluentd) carry NO smoke-test caveat; research ones DO', () => {
-  const verified: OffloadForwarderId[] = ['vector', 'fluentd'];
+test('after the smoke wave, only otel keeps a SMOKE TEST caveat (S3 path); the rest are verified live', () => {
+  const withCaveat: OffloadForwarderId[] = ['otel-collector'];
   for (const fwd of OFFLOAD_FORWARDERS) {
     const r = offloadRecipe(fwd, PARAMS);
     const hasCaveat = r.prerequisites.some(p => p.includes('SMOKE TEST REQUIRED'));
-    if (verified.includes(fwd)) {
-      assert.ok(!hasCaveat, `${fwd}: should be verified-shape (no smoke-test caveat)`);
+    if (withCaveat.includes(fwd)) {
+      assert.ok(hasCaveat, `${fwd}: should still flag the open S3-path smoke test`);
     } else {
-      assert.ok(hasCaveat, `${fwd}: research-derived recipe must flag SMOKE TEST REQUIRED`);
+      assert.ok(!hasCaveat, `${fwd}: verified live, should carry no SMOKE TEST caveat`);
     }
   }
 });
@@ -142,6 +143,22 @@ test('Datadog Flex recipe routes @isDropped:true via the retention waterfall', (
   assert.match(r.body, /flex_retention_days\s*=\s*30/);
   assert.ok(r.note.toLowerCase().includes('index'), 'should clarify index-not-ingest saving');
   assert.ok(!r.note.toLowerCase().includes('cuts the ingest'), 'must not claim ingest saving');
+});
+
+test('Datadog Flex recipe includes index_order companion + provider pin (first-match-wins)', () => {
+  const r = datadogFlexRecipe();
+  assert.match(r.body, /datadog_logs_index_order/);
+  assert.match(r.body, /version\s*=\s*">= 4\.6\.0"/);
+  assert.ok(r.note.toLowerCase().includes('first-match'), 'note must explain the first-match ordering requirement');
+});
+
+test('forwarder-write Terraform: role + scoped PutObject + IRSA ServiceAccount binding', () => {
+  const tf = forwarderWriteTerraform();
+  assert.match(tf, /resource "aws_iam_role"/);
+  assert.match(tf, /"s3:PutObject"/);
+  assert.match(tf, /arn:aws:s3:::\$\{var\.bucket\}\/\$\{var\.prefix\}\/\*/);
+  assert.match(tf, /system:serviceaccount:\$\{var\.namespace\}:\$\{var\.service_account\}/);
+  assert.match(tf, /sts:AssumeRoleWithWebIdentity/);
 });
 
 test('CloudWatch IA recipe creates an Infrequent-Access log group', () => {
