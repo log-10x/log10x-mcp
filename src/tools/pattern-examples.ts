@@ -36,10 +36,8 @@ import { buildHashQuery } from '../lib/siem/hash-query.js';
 import { fmtCount, normalizePattern } from '../lib/format.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { tenxHash } from '../lib/pattern-hash.js';
-import { queryInstant } from '../lib/api.js';
-import { LABELS } from '../lib/promql.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
-import { parsePrometheusValue } from '../lib/cost.js';
+import { resolveHashFromPattern, resolvePatternFromHash } from '../lib/hash-resolve.js';
 import { agentOnly } from '../lib/agent-only.js';
 import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
 
@@ -63,47 +61,7 @@ async function resolvePatternHashFromMetrics(
 ): Promise<string | undefined> {
   try {
     const metricsEnv = await resolveMetricsEnv(env);
-
-    const pickBest = (rows: Array<{ metric?: Record<string, string> }>): string | undefined => {
-      let best: { h: string; v: number } | undefined;
-      for (const row of rows) {
-        const h = row.metric?.[LABELS.hash];
-        if (!h) continue;
-        const v = parsePrometheusValue(row as { value?: [number, string] });
-        if (!best || v > best.v) best = { h, v };
-      }
-      return best?.h;
-    };
-
-    // 1) Exact match. The metric label is the snake_case Symbol-Message
-    //    identity — when it's the full string, this hits in one PromQL.
-    const p = canonicalPattern.replace(/"/g, '\\"');
-    const exactQ =
-      `count by (${LABELS.hash}) (increase(all_events_summaryBytes_total{` +
-      `${LABELS.pattern}="${p}",${LABELS.env}="${metricsEnv}"}[24h]))`;
-    const exact = await queryInstant(env, exactQ).catch(() => null);
-    const exactRows = exact?.data?.result ?? [];
-    const exactHit = pickBest(exactRows);
-    if (exactHit) return exactHit;
-
-    // 2) Prefix-anchor fallback. The Reporter truncates `message_pattern`
-    //    label values (~80 chars), so the full canonical pattern never
-    //    exact-matches — but the truncated label is a deterministic
-    //    PREFIX of the full pattern. Match by `^<first-60-chars>` (a
-    //    pure regex anchor, no wildcard softening — no fuzziness): all
-    //    truncated labels for this pattern still start with this
-    //    prefix, and the prefix is long+distinctive enough that
-    //    unrelated patterns won't collide. Most-emitting hash wins.
-    // Prometheus `=~` is FULLY anchored (^...$ implicit), so a leading
-    // `^` plus a prefix alone matches only the prefix exactly — we need
-    // `<prefix>.*` so the truncated label's tail is consumed.
-    const regexEsc = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const prefix = regexEsc(canonicalPattern.slice(0, 60));
-    const prefixQ =
-      `count by (${LABELS.hash}) (increase(all_events_summaryBytes_total{` +
-      `${LABELS.pattern}=~"${prefix}.*",${LABELS.env}="${metricsEnv}"}[24h]))`;
-    const prefixR = await queryInstant(env, prefixQ).catch(() => null);
-    return pickBest(prefixR?.data?.result ?? []);
+    return await resolveHashFromPattern(env, canonicalPattern, metricsEnv);
   } catch {
     return undefined;
   }
@@ -120,8 +78,15 @@ const EXAMPLES_VENDORS: readonly SiemId[] = [
 export const patternExamplesSchema = {
   pattern: z
     .string()
+    .optional()
     .describe(
-      'Pattern name (Symbol Message, e.g. `Payment_Gateway_Timeout`) or a pasted raw log line. Pasted lines resolve to the matching pattern via the same templater path as log10x_resolve_batch. Required.',
+      'Pattern name (Symbol Message, e.g. `Payment_Gateway_Timeout`) or a pasted raw log line. Pasted lines resolve to the matching pattern via the same templater path as log10x_resolve_batch. Omit when passing `tenxHash` instead.',
+    ),
+  tenxHash: z
+    .string()
+    .optional()
+    .describe(
+      'A `tenx_hash` value from log10x_top_patterns\' cross-pillar join keys, log10x_event_lookup, or seen on a SIEM/CloudWatch event. The moat path: the stamped identity is used directly as the exact SIEM probe key (no token guessing, no per-vendor query-syntax gaps) AND reverse-resolved to the pattern name for display. Prefer this over `pattern` whenever a hash is in hand.',
     ),
   vendor: z
     .enum(['splunk', 'datadog', 'elasticsearch', 'cloudwatch'])
@@ -164,7 +129,8 @@ interface ProgressNote {
 }
 
 interface PatternExamplesArgs {
-  pattern: string;
+  pattern?: string;
+  tenxHash?: string;
   vendor?: 'splunk' | 'datadog' | 'elasticsearch' | 'cloudwatch';
   service?: string;
   severity?: string;
@@ -272,14 +238,32 @@ async function executePatternExamplesInner(
   const vendor = resolution.id;
   const connector = getConnector(vendor);
 
-  // ── 2. Resolve pattern: pasted-line vs Symbol Message ──────────────
-  const looksLikeRawLogLine = /\s/.test(args.pattern) && /["'{}:/]/.test(args.pattern);
+  // ── 2. Resolve pattern: provided hash vs pasted-line vs Symbol Message ──
+  const providedHash = args.tenxHash?.trim() || undefined;
+  if (!providedHash && !args.pattern) {
+    return graceful('Pattern Examples: input required', [
+      'Pass `pattern` (a Symbol Message or pasted log line) or `tenxHash` (a stamped pattern identity, e.g. from log10x_top_patterns or log10x_event_lookup).',
+    ]);
+  }
+  const looksLikeRawLogLine =
+    !providedHash && !!args.pattern && /\s/.test(args.pattern) && /["'{}:/]/.test(args.pattern);
   let canonicalPattern: string;       // Display label for output rendering.
   let probeTokenSource: string;       // String to derive probe tokens from.
   let inputTemplateBody: string | undefined;
   let inputTemplateHash: string | undefined;
+  let resolvedFromHash: string | undefined;
 
-  if (looksLikeRawLogLine) {
+  if (providedHash) {
+    // Moat path: the caller already holds the stamped identity. Use it
+    // directly as the exact SIEM probe key (no token guessing, no
+    // per-vendor query gaps) and reverse-resolve it to the pattern name
+    // for display, the same hash→name lookup event_lookup does.
+    const metricsEnv = await resolveMetricsEnv(env);
+    const named = await resolvePatternFromHash(env, providedHash, metricsEnv, '24h');
+    canonicalPattern = named ?? `tenx_hash:${providedHash}`;
+    probeTokenSource = canonicalPattern;
+    resolvedFromHash = providedHash;
+  } else if (looksLikeRawLogLine) {
     // Pasted-line input: templatize once via tenx to discover the input
     // event's templateHash. The hash is the verification key. The probe
     // tokens come from the SAMPLE EVENT's content (the original raw text),
@@ -288,13 +272,14 @@ async function executePatternExamplesInner(
     // engine's template cache short-circuits the parser, so the sample
     // event is the only reliably-populated source of searchable words
     // for the probe.
+    const rawLine = args.pattern as string; // guarded by looksLikeRawLogLine
     try {
-      const resolved = await extractPatterns([args.pattern], { privacyMode: true });
+      const resolved = await extractPatterns([rawLine], { privacyMode: true });
       if (resolved.patterns[0]) {
         const p = resolved.patterns[0];
         canonicalPattern = p.hash;
-        probeTokenSource = p.sampleEvent || args.pattern;
-        inputTemplateBody = p.sampleEvent || args.pattern;
+        probeTokenSource = p.sampleEvent || rawLine;
+        inputTemplateBody = p.sampleEvent || rawLine;
         inputTemplateHash = p.hash;
       } else {
         return graceful('Pattern Examples — could not resolve pasted log line', [
@@ -309,7 +294,7 @@ async function executePatternExamplesInner(
       ]);
     }
   } else {
-    canonicalPattern = normalizePattern(args.pattern);
+    canonicalPattern = normalizePattern(args.pattern as string); // guarded above
     probeTokenSource = canonicalPattern; // tokens come from underscore-split below
   }
 
@@ -360,22 +345,34 @@ async function executePatternExamplesInner(
       onProgress,
     });
 
-  // Authoritative hash from the metrics (the value the forwarder also
-  // wrote to the SIEM) — falls back to the local pattern-name hash only
-  // if the metrics don't carry this pattern. For pasted raw lines the
-  // hash isn't a reliable probe key, so stay on content tokens.
-  const hashKey = looksLikeRawLogLine
-    ? undefined
-    : (await resolvePatternHashFromMetrics(env, canonicalPattern)) ?? tenxHash(canonicalPattern);
+  // Hash probe key, in priority order:
+  //   1. a tenx_hash the caller passed, already the stamped identity,
+  //      used verbatim (the moat path).
+  //   2. for a Symbol Message: the authoritative hash from the metrics
+  //      (the value the forwarder also wrote to the SIEM), falling back
+  //      to the local pattern-name hash if the metrics don't carry it.
+  //   3. for a pasted raw line: none, the hash isn't a reliable probe
+  //      key, stay on content tokens.
+  const hashKey = providedHash
+    ? providedHash
+    : looksLikeRawLogLine
+      ? undefined
+      : (await resolvePatternHashFromMetrics(env, canonicalPattern)) ?? tenxHash(canonicalPattern);
   const hashQuery = hashKey
     ? buildHashQuery(vendor, hashKey, args.service, args.severity)
     : undefined;
 
+  // When the input was a bare tenx_hash that didn't reverse-resolve to a
+  // name, the only "tokens" are from the `tenx_hash:<hash>` placeholder,
+  // so the content-token fallback would search garbage. Skip it: the exact
+  // hash probe is already authoritative; an empty result means the SIEM
+  // doesn't carry this identity in-window, not that tokens would do better.
+  const tokensAreUsable = !canonicalPattern.startsWith('tenx_hash:');
   let probe = await doProbe(hashQuery ?? vendorQuery);
   let probePath: 'tenx_hash-exact' | 'content-token' = hashQuery
     ? 'tenx_hash-exact'
     : 'content-token';
-  if (hashQuery && probe.events.length === 0) {
+  if (hashQuery && probe.events.length === 0 && tokensAreUsable) {
     if (probe.metadata.notes) probeNotes.push(...probe.metadata.notes);
     probe = await doProbe(vendorQuery);
     probePath = 'content-token';
@@ -510,6 +507,9 @@ async function executePatternExamplesInner(
   const lines: string[] = [];
   lines.push(`## Pattern Examples — ${vendor}`);
   lines.push('');
+  if (resolvedFromHash) {
+    lines.push(`**Resolved** tenx_hash \`${resolvedFromHash}\` → \`${canonicalPattern}\``);
+  }
   lines.push(`**Pattern**: \`${canonicalPattern}\``);
   lines.push(`**Window**: last ${args.timeRange}${args.service ? ` · service=${args.service}` : ''}${args.severity ? ` · severity=${args.severity}` : ''}`);
   lines.push(`**Probe**: ${fmtCount(probe.events.length)} events pulled · ${extracted.patterns.length} distinct templates`);

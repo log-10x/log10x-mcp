@@ -13,12 +13,19 @@ import { LABELS } from '../lib/promql.js';
 import { bytesToCost, parsePrometheusValue } from '../lib/cost.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import {
-  fmtDollar, fmtPattern, fmtSeverity, fmtCount, fmtBytes,
+  fmtDollar, fmtSeverity, fmtCount, fmtBytes,
   parseTimeframe, costPeriodLabel, normalizePattern
 } from '../lib/format.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { agentOnly } from '../lib/agent-only.js';
 import { fetchOneSampleByHash } from '../lib/siem/sample.js';
+import {
+  resolvePatternFromHash,
+  resolveHashFromPattern,
+  fetchFirstSeenObservation,
+  fmtAge,
+  type FirstSeenObservation,
+} from '../lib/hash-resolve.js';
 import { patternDisplay } from '../lib/pattern-descriptor.js';
 import { buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
@@ -40,6 +47,15 @@ interface EventLookupSummary {
   services: Array<{ service: string; severity: string; bytes: number; cost_per_window_usd: number; cost_baseline_usd: number; events: number; is_new: boolean }>;
   totals: { bytes: number; cost_per_window_usd: number; cost_baseline_usd: number; events: number; service_count: number };
   resolved_from_hash?: string;
+  first_seen?: {
+    /** Earliest observed bucket on the stamped identity, unix-seconds. */
+    unix: number | null;
+    age_seconds: number | null;
+    /** True = onset coincides with the env data horizon (predates retention;
+     * the date is a floor, not a birth). False = real onset inside retained
+     * history. Null = couldn't establish the horizon. */
+    predates_retention: boolean | null;
+  };
 }
 
 export async function executeEventLookup(
@@ -67,7 +83,11 @@ export async function executeEventLookup(
     });
   }
   const d = sumOut.data;
-  const headline = `\`${d.pattern}\` over ${d.window}: $${d.totals.cost_per_window_usd.toFixed(2)} across ${d.totals.service_count} service${d.totals.service_count === 1 ? '' : 's'} (${d.totals.events} events, ${(d.totals.bytes / 1_000_000).toFixed(1)} MB)`;
+  const newFragment =
+    d.first_seen && d.first_seen.predates_retention === false && d.first_seen.age_seconds !== null
+      ? ` · first observed ${fmtAge(d.first_seen.age_seconds)} (new in retained history)`
+      : '';
+  const headline = `\`${d.pattern}\` over ${d.window}: $${d.totals.cost_per_window_usd.toFixed(2)} across ${d.totals.service_count} service${d.totals.service_count === 1 ? '' : 's'} (${d.totals.events} events, ${(d.totals.bytes / 1_000_000).toFixed(1)} MB)${newFragment}`;
   const { buildEnvelope } = await import('../lib/output-types.js');
   return buildEnvelope({
     tool: 'log10x_event_lookup',
@@ -97,16 +117,16 @@ async function executeEventLookupInner(
   // this resolves the opaque hash back to a name + cost via the 10x metrics.
   let resolvedFromHash: string | undefined;
   let inputPattern = args.pattern;
-  if (args.tenxHash) {
+  // When both are passed an explicit `pattern` wins; `tenxHash` is the
+  // reverse-lookup used when no pattern is in hand. Matches
+  // log10x_pattern_trend's precedence so the sibling tools agree.
+  if (!inputPattern && args.tenxHash) {
     const h = args.tenxHash.trim();
-    const q = `count by (${LABELS.pattern}) (increase(all_events_summaryBytes_total{${LABELS.hash}="${h.replace(/"/g, '\\"')}",${LABELS.env}="${metricsEnv}"}[${tf.range}]))`;
-    const r = await queryInstant(env, q).catch(() => null);
-    const top = r && r.status === 'success'
-      ? r.data.result
-          .map((x) => ({ p: x.metric[LABELS.pattern] || '', v: parsePrometheusValue(x) }))
-          .filter((x) => x.p)
-          .sort((a, b) => b.v - a.v)[0]?.p
-      : undefined;
+    // Reverse cross-pillar lookup via the stamped identity, the moat
+    // primitive. An opaque SIEM hash means nothing to a generic agent;
+    // here it resolves to the named pattern the engine fingerprinted it
+    // as, because the engine persisted a series keyed to that hash.
+    const top = await resolvePatternFromHash(env, h, metricsEnv, tf.range);
     if (!top) {
       return `No pattern carries tenx_hash \`${h}\` in this env over the ${tf.label} window. The hash may be from a different env or outside the time range.`;
     }
@@ -144,6 +164,22 @@ async function executeEventLookupInner(
     if (!sample) return head;
     return `${head}\n\nLive sample from ${sample.displayName} (tenx_hash ${resolvedFromHash}):\n  ${sample.line}`;
   };
+
+  // First-seen on the stamped identity, the moat-grounded "is this
+  // new / when did it start" answer. Kicked off in parallel with the
+  // cost queries: resolve the authoritative tenx_hash (already known on
+  // the reverse path), then scan the per-fingerprint history for its
+  // onset, honest about the retention floor. Best-effort; null folds
+  // away silently.
+  const firstSeenPromise: Promise<FirstSeenObservation | undefined> = (async () => {
+    try {
+      const fsHash = resolvedFromHash ?? (await resolveHashFromPattern(env, pattern, metricsEnv));
+      if (!fsHash) return undefined;
+      return await fetchFirstSeenObservation(env, fsHash, { metricsEnv });
+    } catch {
+      return undefined;
+    }
+  })();
 
   // Current window: bytes per service for this pattern
   const currentRes = await queryInstant(env, pql.patternAcrossServices(pattern, metricsEnv, tf.range));
@@ -190,10 +226,10 @@ async function executeEventLookupInner(
       return `No data found for pattern "${pattern}". Check the pattern name (use underscores, e.g., Payment_Gateway_Timeout).`;
     }
     // Use fuzzy results
-    return finalize(await formatResults(fuzzyRes.data.result, pattern, metricsEnv, tf, costPerGb, period, env, sumOut, resolvedFromHash));
+    return finalize(await formatResults(fuzzyRes.data.result, pattern, metricsEnv, tf, costPerGb, period, env, sumOut, resolvedFromHash, await firstSeenPromise));
   }
 
-  return finalize(await formatResults(currentRes.data.result, pattern, metricsEnv, tf, costPerGb, period, env, sumOut, resolvedFromHash));
+  return finalize(await formatResults(currentRes.data.result, pattern, metricsEnv, tf, costPerGb, period, env, sumOut, resolvedFromHash, await firstSeenPromise));
 }
 
 async function formatResults(
@@ -205,7 +241,8 @@ async function formatResults(
   period: string,
   env: EnvConfig,
   sumOut?: { data?: EventLookupSummary },
-  resolvedFromHash?: string
+  resolvedFromHash?: string,
+  firstSeen?: FirstSeenObservation
 ): Promise<string> {
   // Aggregate bytes per service (multiple severity levels possible).
   // Also keep the per-severity split per service: a pattern's text
@@ -310,6 +347,13 @@ async function formatResults(
         service_count: rows.length,
       },
       resolved_from_hash: resolvedFromHash,
+      first_seen: firstSeen
+        ? {
+            unix: firstSeen.firstSeenUnix,
+            age_seconds: firstSeen.ageSeconds,
+            predates_retention: firstSeen.clampedToRetentionFloor,
+          }
+        : undefined,
     };
   }
 
@@ -320,6 +364,11 @@ async function formatResults(
   lines.push(`${patternDisplay(pattern).title}  ·  ${tf.label}`);
   lines.push(`Total: ${fmtBytes(totalBytes)} over ${tf.label} · cost was ${fmtDollar(totalCostBase)} -> now ${fmtDollar(totalCostNow)}${period} · ${rows.length} service${rows.length !== 1 ? 's' : ''}`);
   lines.push(`(cost: prior comparable ${tf.label} baseline -> current)`);
+  // First-seen on the stamped identity, the moat answer to "is this
+  // new". Grounded in the persisted per-fingerprint history, not a
+  // same-window guess, and honest about the retention floor.
+  const fsLine = renderFirstSeenLine(firstSeen);
+  if (fsLine) lines.push(fsLine);
   lines.push(`_Total across every service and severity over ${tf.label}; the "by severity" line below shows the split. A per-(pattern,service,severity) ranking (e.g. the top-patterns list) shows ONE severity row, so its number for this pattern equals one line of that split, not this total. That is expected, not a discrepancy._`);
   lines.push('');
 
@@ -443,4 +492,23 @@ async function formatResults(
   const block = renderNextActions(nextActions);
   if (block) lines.push('', block);
   return lines.join('\n');
+}
+
+/**
+ * One first-seen line from the per-fingerprint history. Three honest cases:
+ *   - onset inside the retained window → "First observed Nd ago" (a real birth)
+ *   - onset at the env data horizon     → predates retention, the date is a floor
+ *   - no horizon to compare against     → state the earliest seen, no claim
+ * Returns '' when first-seen couldn't be established.
+ */
+function renderFirstSeenLine(firstSeen?: FirstSeenObservation): string {
+  if (!firstSeen || firstSeen.ageSeconds === null) return '';
+  const age = fmtAge(firstSeen.ageSeconds);
+  if (firstSeen.clampedToRetentionFloor === true) {
+    return `First observed: at least ${age} (already firing at the start of retained history, true onset is older than the engine's persisted window)`;
+  }
+  if (firstSeen.clampedToRetentionFloor === false) {
+    return `First observed: ${age}, a real onset inside the retained history (the engine had been observing this env longer, but this pattern began firing then)`;
+  }
+  return `First observed: ${age} (earliest persisted datapoint for this stamped identity)`;
 }

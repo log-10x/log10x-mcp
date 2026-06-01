@@ -13,11 +13,17 @@
  *      Drift slope-similarity cohort analysis             (Phase 3-D)
  *   4. Causal chain construction (acute only)
  *   5. Confidence scoring
- *   6. Two-stage Retriever fallback (graceful degradation)
- *   7. Verification command generation
+ *   6. Cross-pillar correlation phase (folded in)             (lib/cross-pillar)
+ *   7. Two-stage Retriever fallback (graceful degradation)
+ *   8. Verification command generation
  *
- * Intelligence lives in the tool, not the model. Any MCP-aware client
- * should be able to call this one tool and get a coherent investigation.
+ * The moat is the orchestration over the engine's STAMPED pattern
+ * identity + persisted history, not the arithmetic. Cross-pillar
+ * correlation (the old metrics_that_moved / rank_by_shape_similarity /
+ * metric_overlay primitives) is folded in as an internal phase here, so
+ * a caller gets one differentiated investigation instead of being told
+ * to hand-compose three replicable PromQL primitives. Claude analyzes;
+ * 10x supplies the identity, the history, and the in-path actuator.
  */
 
 import { randomUUID } from 'crypto';
@@ -44,6 +50,7 @@ import {
 import { recordInvestigation, getInvestigation, listInvestigations } from '../lib/investigation-cache.js';
 import { isRetrieverConfigured, runRetrieverQuery, parseTimeExpression } from '../lib/retriever-api.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
+import { runCrossPillarPhase } from '../lib/cross-pillar.js';
 
 export const investigateSchema = {
   starting_point: z
@@ -678,6 +685,10 @@ async function executeInvestigateInner(
       driftThresholdApplied: driftFloor,
       drift,
     });
+    // Fold the cross-pillar correlation in here instead of steering the
+    // agent to compose three standalone primitives. Best-effort.
+    const driftCrossPillar = await runCrossPillarPhase(env, resolution.anchor, args.window);
+    const driftReport = driftCrossPillar ? `${report}\n\n${driftCrossPillar}` : report;
     recordInvestigation({
       investigationId,
       createdAt: Date.now(),
@@ -685,10 +696,10 @@ async function executeInvestigateInner(
       environment: env.nickname,
       reporterTier,
       shape: 'drift',
-      report,
+      report: driftReport,
       patternsReferenced: collectDriftPatternsReferenced(resolution.anchor, drift),
     });
-    return appendInvestigateNextActions(report, resolution.anchor, args.window);
+    return appendInvestigateNextActions(driftReport, resolution.anchor, args.window);
   }
 
   // ── Phase 3 — Acute-spike flow ──
@@ -786,6 +797,10 @@ async function executeInvestigateInner(
   // main analysis — historical vs current misattribution is the most
   // dangerous mis-interpretation for crashloop scenarios.
   const report = recencyWarning ? `${recencyWarning}\n\n---\n\n${baseReport}` : baseReport;
+  // Fold the cross-pillar correlation in here instead of steering the
+  // agent to compose three standalone primitives. Best-effort.
+  const acuteCrossPillar = await runCrossPillarPhase(env, resolution.anchor, args.window);
+  const acuteReport = acuteCrossPillar ? `${report}\n\n${acuteCrossPillar}` : report;
   recordInvestigation({
     investigationId,
     createdAt: Date.now(),
@@ -793,10 +808,10 @@ async function executeInvestigateInner(
     environment: env.nickname,
     reporterTier,
     shape: 'acute',
-    report,
+    report: acuteReport,
     patternsReferenced: collectPatternsReferenced(resolution.anchor, correlation),
   });
-  return appendInvestigateNextActions(report, resolution.anchor, args.window);
+  return appendInvestigateNextActions(acuteReport, resolution.anchor, args.window);
 }
 
 // ── Next-action generation for autonomous chains ──
@@ -807,6 +822,11 @@ async function executeInvestigateInner(
 // markdown body.
 function buildInvestigateNextActions(anchor?: string, window?: string): NextAction[] {
   if (!anchor) return [];
+  // Cross-pillar correlation is folded INTO this tool (see the
+  // "Cross-pillar correlation" section in the report), so we no longer
+  // steer the agent to compose metrics_that_moved + rank_by_shape +
+  // metric_overlay by hand. The follow-ups here are the differentiated
+  // ones: refs-before-mute, per-fingerprint history, live evidence.
   const out: NextAction[] = [
     {
       tool: 'log10x_dependency_check',
@@ -814,14 +834,14 @@ function buildInvestigateNextActions(anchor?: string, window?: string): NextActi
       reason: 'check dashboards / alerts before any mute action',
     },
     {
-      tool: 'log10x_metrics_that_moved',
-      args: { anchor_type: 'log10x_pattern', anchor, ...(window ? { window } : {}) },
-      reason: 'first step of cross-pillar investigation — filter customer metrics to those that move with the anchor\'s incident phase. Compose with log10x_rank_by_shape_similarity + log10x_metric_overlay on the kept set',
-    },
-    {
       tool: 'log10x_pattern_trend',
       args: { pattern: anchor },
-      reason: 'time series for the investigated pattern',
+      reason: 'per-fingerprint history for the investigated pattern, onset + trajectory',
+    },
+    {
+      tool: 'log10x_pattern_examples',
+      args: { pattern: anchor },
+      reason: 'live SIEM events for the stamped identity, concrete evidence behind the chain',
     },
   ];
   return out;
@@ -1210,9 +1230,9 @@ async function renderEnvironmentAudit(
         reason: 'check refs before any mute on the top mover',
       },
       {
-        tool: 'log10x_metrics_that_moved',
-        args: { anchor_type: 'log10x_pattern', anchor: topPatternForChain, window: args.window },
-        reason: 'first step of cross-pillar investigation — filter customer metrics to those that move with the top mover\'s incident phase',
+        tool: 'log10x_pattern_trend',
+        args: { pattern: topPatternForChain },
+        reason: 'per-fingerprint history for the top mover, onset + trajectory (cross-pillar correlation is folded into investigate itself)',
       },
     ];
     const block = renderNextActions(next);

@@ -369,8 +369,12 @@ export async function executeTopPatterns(
     lines.push('');
     lines.push(
       agentOnly(
-        `Cross-pillar join keys — ${LABELS.hash}: ${hashMap}. ` +
-        `Filter the SIEM / CloudWatch Logs on ${LABELS.hash}="<value>" — exact match.`
+        `Cross-pillar join keys, ${LABELS.hash} (the engine's stamped pattern identity, ` +
+        `not a name or a grep you'd reconstruct): ${hashMap}. ` +
+        `Filter the SIEM / CloudWatch Logs on ${LABELS.hash}="<value>" for an exact, ` +
+        `deploy-stable match, OR feed a hash straight to log10x_event_lookup({ tenxHash }), ` +
+        `log10x_pattern_trend({ tenxHash }), or log10x_pattern_examples({ tenxHash }) to pull ` +
+        `that one fingerprint's cost, history, and live events.`
       )
     );
   }
@@ -401,13 +405,17 @@ export async function executeTopPatterns(
     });
   }
 
-  // Cross-pillar: find k8s/metric signals co-moving with the top spike.
+  // Cross-pillar: trace the top spike. investigate builds the causal
+  // chain over the stamped pattern identities AND, where a customer
+  // metrics backend is configured, folds in the co-moving k8s/APM/infra
+  // metrics internally, one call instead of hand-composing phase-gap +
+  // Pearson + overlay primitives.
   const topSpiking = renderRows.find(r => r.hash && (r.badge === 'NEW' || r.badge === 'ACUTE'));
   if (topSpiking) {
     nextActions.push({
-      tool: 'log10x_metrics_that_moved',
-      args: { anchor: topSpiking.pattern, anchor_type: 'log10x_pattern', timeRange: rcaWindow },
-      reason: 'find k8s/metric signals (deploys, pod restarts, OOM) that moved with the top spike. Compose with log10x_rank_by_shape_similarity + log10x_metric_overlay for direction',
+      tool: 'log10x_investigate',
+      args: { starting_point: topSpiking.pattern, window: rcaWindow },
+      reason: 'trace the top spike, causal chain over stamped identities + internal cross-pillar co-movers (deploys, pod restarts, OOM) when a customer metrics backend is configured',
     });
   }
 
@@ -463,6 +471,12 @@ export async function executeTopPatterns(
   const dataPatterns = renderRows.map((r) => ({
     rank: r.rank,
     identity: r.pattern ?? r.hash ?? '',
+    // The stamped pattern identity, the cross-pillar join key. This is
+    // `pattern_hash` (= tenx_hash), the user-facing stable fingerprint,
+    // NOT an engine-internal template_hash. `template_hash` is retained
+    // as a deprecated alias for older consumers; new callers read
+    // `pattern_hash` and filter the SIEM on tenx_hash="<value>".
+    pattern_hash: r.hash ?? '',
     template_hash: r.hash ?? '',
     service: r.service,
     severity: r.severity,

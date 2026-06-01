@@ -10,16 +10,24 @@ import { queryRange } from '../lib/api.js';
 import * as pql from '../lib/promql.js';
 import { bytesToCost } from '../lib/cost.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
-import { fmtDollar, fmtPattern, fmtBytes, parseTimeframe, costPeriodLabel, normalizePattern } from '../lib/format.js';
+import { fmtDollar, fmtBytes, parseTimeframe, costPeriodLabel, normalizePattern } from '../lib/format.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { agentOnly } from '../lib/agent-only.js';
 import { lineChart } from '../lib/line-chart.js';
+import {
+  resolvePatternFromHash,
+  resolveHashFromPattern,
+  fetchFirstSeenObservation,
+  fmtAge,
+  type FirstSeenObservation,
+} from '../lib/hash-resolve.js';
 import { patternDisplay } from '../lib/pattern-descriptor.js';
 import { buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
 
 export const trendSchema = {
-  pattern: z.string().describe('Pattern name (e.g., "Payment_Gateway_Timeout")'),
+  pattern: z.string().optional().describe('Pattern name (e.g., "Payment_Gateway_Timeout"). Omit when passing `tenxHash` instead.'),
+  tenxHash: z.string().optional().describe('A `tenx_hash` value seen on a SIEM / CloudWatch event, or surfaced by log10x_top_patterns\' cross-pillar join keys. Resolved against the stamped identity to recover the pattern, then its persisted per-fingerprint history is returned. Feed a hash straight from the SIEM here, no need to name the pattern first.'),
   timeRange: z.enum(['15m', '1h', '6h', '1d', '7d', '30d']).default('7d').describe('Time range. Sub-day values show fine-grained trajectory around an incident.'),
   step: z.enum(['1m', '5m', '15m', '1h', '6h', '1d']).default('1h').describe('Data point interval. Use `1m`/`5m` for sub-day windows (15m/1h/6h), `1h`/`6h` for day-level, `1d` for week+ windows.'),
   analyzerCost: z.number().optional().describe('SIEM ingestion cost in $/GB'),
@@ -42,10 +50,18 @@ interface PatternTrendSummary {
   peak_bytes: number;
   low_bytes: number;
   sample_count: number;
+  resolved_from_hash?: string;
+  first_seen?: {
+    unix: number | null;
+    age_seconds: number | null;
+    /** True = predates retention (date is a floor). False = real onset in
+     * retained history. Null = horizon unknown. */
+    predates_retention: boolean | null;
+  };
 }
 
 export async function executeTrend(
-  args: { pattern: string; timeRange?: string; step?: string; analyzerCost?: number; view?: 'summary' | 'markdown' },
+  args: { pattern?: string; tenxHash?: string; timeRange?: string; step?: string; analyzerCost?: number; view?: 'summary' | 'markdown' },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
   const view = args.view ?? 'summary';
@@ -96,7 +112,7 @@ export async function executeTrend(
 }
 
 async function executeTrendInner(
-  args: { pattern: string; timeRange?: string; step?: string; analyzerCost?: number },
+  args: { pattern?: string; tenxHash?: string; timeRange?: string; step?: string; analyzerCost?: number },
   env: EnvConfig,
   sumOut?: { data?: PatternTrendSummary }
 ): Promise<string> {
@@ -108,13 +124,45 @@ async function executeTrendInner(
   const period = costPeriodLabel(tf.days);
   const metricsEnv = await resolveMetricsEnv(env);
 
+  // Reverse cross-pillar lookup: accept a tenx_hash straight from the
+  // SIEM or from top_patterns' join keys and resolve it to the stamped
+  // pattern before pulling history, opaque hash → its persisted
+  // per-fingerprint series, zero query setup. The moat.
+  let resolvedFromHash: string | undefined;
+  let inputPattern = args.pattern;
+  if (!inputPattern && args.tenxHash) {
+    const top = await resolvePatternFromHash(env, args.tenxHash, metricsEnv, tf.range);
+    if (!top) {
+      return `No pattern carries tenx_hash \`${args.tenxHash.trim()}\` in this env. The hash may be from a different env or older than the engine's retained history.`;
+    }
+    resolvedFromHash = args.tenxHash.trim();
+    inputPattern = top;
+  }
+  if (!inputPattern) {
+    return 'Pass either `pattern` (a pattern name) or `tenxHash` (a hash seen on a SIEM / CloudWatch event).';
+  }
+
   // Reporter pattern labels are always snake_case. Normalize in case an
   // agent re-fed a display form from top_patterns / cost_drivers.
-  const pattern = normalizePattern(args.pattern);
+  const pattern = normalizePattern(inputPattern);
 
   const now = Math.floor(Date.now() / 1000);
   const start = now - tf.days * 86400;
   const stepSeconds = parseStep(step);
+
+  // First-seen on the stamped identity, in parallel with the trend pull.
+  // Grounds "when did it start" in the persisted history (honest about
+  // the retention floor) instead of inferring onset from the in-window
+  // curve alone.
+  const firstSeenPromise: Promise<FirstSeenObservation | undefined> = (async () => {
+    try {
+      const fsHash = resolvedFromHash ?? (await resolveHashFromPattern(env, pattern, metricsEnv));
+      if (!fsHash) return undefined;
+      return await fetchFirstSeenObservation(env, fsHash, { metricsEnv });
+    } catch {
+      return undefined;
+    }
+  })();
 
   const query = pql.patternBytesOverTime(pattern, metricsEnv, step);
   const res = await queryRange(env, query, start, now, stepSeconds);
@@ -176,6 +224,8 @@ async function executeTrendInner(
       ? `${pct >= 0 ? '+' : ''}${pct}% (last quarter vs first quarter run-rate)`
       : '(no first-quarter baseline to compare against)';
 
+  const firstSeen = await firstSeenPromise;
+
   // Populate typed summary for view='summary' callers.
   if (sumOut) {
     const stepSecs = stepSeconds;
@@ -194,6 +244,14 @@ async function executeTrendInner(
       peak_bytes: maxPoint.bytes,
       low_bytes: minPoint.bytes,
       sample_count: points.length,
+      resolved_from_hash: resolvedFromHash,
+      first_seen: firstSeen
+        ? {
+            unix: firstSeen.firstSeenUnix,
+            age_seconds: firstSeen.ageSeconds,
+            predates_retention: firstSeen.clampedToRetentionFloor,
+          }
+        : undefined,
     };
     void stepSecs;
   }
@@ -203,8 +261,15 @@ async function executeTrendInner(
   // description, not the raw token. trend fetches no sample, so this is the
   // algorithmic token descriptor; the exact pattern id stays in the
   // agent-only next-action hints below for chaining.
+  if (resolvedFromHash) {
+    lines.push(`Resolved tenx_hash \`${resolvedFromHash}\` → \`${pattern}\``);
+  }
   lines.push(`${patternDisplay(pattern).title} · trend over ${tf.label}`);
   lines.push(`Change over ${tf.label}: ${changeStr}${spikePoint ? `; peak ${(maxPoint.bytes / avgBytes).toFixed(1)}× the window average at ${formatTimestamp(spikePoint.ts)}` : ''}`);
+  // First-seen on the stamped identity, the "when did it start" answer,
+  // grounded in persisted history and honest about the retention floor.
+  const fsLine = renderFirstSeenLine(firstSeen);
+  if (fsLine) lines.push(fsLine);
   lines.push('');
   lines.push(`  Measured spend over ${tf.label}: ${fmtDollar(totalCost)}  (${points.length} samples @ ${step})`);
   lines.push(`  Direction check (extrapolated run-rate, NOT the bill, used only to gauge direction):`);
@@ -237,19 +302,14 @@ async function executeTrendInner(
   if (spikePoint || elevated) {
     lines.push('');
     lines.push(agentOnly(
-      `Inflection or spike detected. Suggested next calls: ` +
-      `Trace the cause — log10x_investigate({ starting_point: '${pattern}', window: '${timeRange}' }). ` +
-      `Find which customer metrics moved with the spike — log10x_metrics_that_moved({ anchor_type: 'log10x_pattern', anchor: '${pattern}', window: '${timeRange}' }), then rank with log10x_rank_by_shape_similarity and overlay with log10x_metric_overlay.`
+      `Inflection or spike detected. Trace the cause: ` +
+      `log10x_investigate({ starting_point: '${pattern}', window: '${timeRange}' }). ` +
+      `investigate builds the causal chain over the stamped pattern identities and, where a customer metrics backend is configured, folds in the cross-pillar co-movers internally, one call, no manual phase-gap/Pearson composition.`
     ));
     nextActions.push({
       tool: 'log10x_investigate',
       args: { starting_point: pattern, window: timeRange },
-      reason: spikePoint ? 'spike detected — trace the cause' : 'elevated vs baseline — trace the cause',
-    });
-    nextActions.push({
-      tool: 'log10x_metrics_that_moved',
-      args: { anchor_type: 'log10x_pattern', anchor: pattern, window: timeRange },
-      reason: 'first composition step: deterministic filter on which customer metrics actually moved with the spike',
+      reason: spikePoint ? 'spike detected, trace the cause (causal chain + internal cross-pillar co-movers)' : 'elevated vs baseline, trace the cause',
     });
   } else if (sustainedSlope) {
     lines.push('');
@@ -281,6 +341,24 @@ async function executeTrendInner(
   const block = renderNextActions(nextActions);
   if (block) lines.push('', block);
   return lines.join('\n');
+}
+
+/**
+ * One first-seen line from the per-fingerprint history. Honest about
+ * the retention floor: an onset that coincides with the env's data
+ * horizon is reported as a floor, not a birth. Returns '' when first-seen
+ * couldn't be established.
+ */
+function renderFirstSeenLine(firstSeen?: FirstSeenObservation): string {
+  if (!firstSeen || firstSeen.ageSeconds === null) return '';
+  const age = fmtAge(firstSeen.ageSeconds);
+  if (firstSeen.clampedToRetentionFloor === true) {
+    return `First observed: at least ${age} ago (already firing when the retained history begins, true onset is older than the engine's persisted window)`;
+  }
+  if (firstSeen.clampedToRetentionFloor === false) {
+    return `First observed: ${age}, a real onset inside the retained history (the engine observed this env earlier; this pattern began firing then)`;
+  }
+  return `First observed: ${age} (earliest persisted datapoint for this stamped identity)`;
 }
 
 function parseStep(step: string): number {
