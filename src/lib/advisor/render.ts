@@ -79,6 +79,15 @@ export function renderPlan(plan: AdvisePlan, action: 'install' | 'verify' | 'tea
     renderGitopsExplainer(lines, plan.gitopsExplainer);
   }
 
+  // ── Forwarder offload ──
+  // Retriever only: how to route the isDropped slice to the customer's S3
+  // (the bucket the Retriever already reads), plus SIEM down-tier alternatives.
+  if ((action === 'install' || action === 'all') && plan.offloadMarkdown) {
+    lines.push('## Forwarder offload (lossless cost reduction)');
+    lines.push(plan.offloadMarkdown);
+    lines.push('');
+  }
+
   // ── Verify ──
   if ((action === 'verify' || action === 'all') && plan.verify.length > 0) {
     lines.push('## Verify');

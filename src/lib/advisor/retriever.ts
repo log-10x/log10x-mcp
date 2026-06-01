@@ -20,7 +20,27 @@
  */
 
 import type { DiscoverySnapshot } from '../discovery/types.js';
+import type { ForwarderKind } from '../discovery/types.js';
 import type { AdvisePlan, PlanStep, VerifyProbe, PreflightCheck } from './types.js';
+import { renderOffloadSection, type OffloadForwarderId } from '../offload-recipes.js';
+
+/** Map a detected forwarder kind to the offload-capable recipe set. filebeat
+ * has no native S3 output (it ships via logstash/ES) and `unknown` is a
+ * non-match, so both map to null — the section then shows the verified leads. */
+function mapForwarderToOffload(forwarders: { kind: ForwarderKind }[]): OffloadForwarderId | null {
+  const byKind: Partial<Record<ForwarderKind, OffloadForwarderId>> = {
+    fluentbit: 'fluent-bit',
+    fluentd: 'fluentd',
+    logstash: 'logstash',
+    'otel-collector': 'otel-collector',
+    vector: 'vector',
+  };
+  for (const f of forwarders) {
+    const id = byKind[f.kind];
+    if (id) return id;
+  }
+  return null;
+}
 
 export interface RetrieverAdviseArgs {
   snapshot: DiscoverySnapshot;
@@ -153,6 +173,18 @@ export async function buildRetrieverPlan(args: RetrieverAdviseArgs): Promise<Adv
     teardown.push(...buildTeardownSteps(releaseName, namespace));
   }
 
+  // Forwarder offload section: how to route the isDropped slice to the
+  // customer's own S3 (the bucket the Retriever reads) + SIEM down-tier
+  // alternatives. Only when we know the bucket + region to fill in.
+  const region = snapshot.aws?.region;
+  const offloadMarkdown =
+    inputBucket && region
+      ? renderOffloadSection(
+          { bucket: inputBucket, region, prefix: 'app' },
+          mapForwarderToOffload(snapshot.kubectl.forwarders)
+        )
+      : undefined;
+
   return {
     app: 'retriever',
     snapshotId: snapshot.snapshotId,
@@ -164,6 +196,7 @@ export async function buildRetrieverPlan(args: RetrieverAdviseArgs): Promise<Adv
     verify,
     teardown,
     notes,
+    offloadMarkdown,
     blockers,
   };
 }

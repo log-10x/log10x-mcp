@@ -170,6 +170,14 @@ export interface AdvisePlan {
   /** Freeform notes the advisor wants to surface above the steps. */
   notes: string[];
   /**
+   * Pre-rendered "Forwarder offload" markdown section (retriever only): the
+   * per-forwarder recipe to route the `isDropped` slice to the customer's own
+   * S3, the forwarder-write IAM grant, and the SIEM down-tier alternatives.
+   * Populated when an input bucket + region are known. Markdown-view only;
+   * the summary envelope does not surface it.
+   */
+  offloadMarkdown?: string;
+  /**
    * If the plan is incomplete (e.g., missing required input), the
    * advisor fills blockers instead of throwing. The CTA becomes
    * "provide X and re-run".
