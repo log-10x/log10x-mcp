@@ -420,17 +420,22 @@ async function executeRetrieverQueryInner(
             const projected = offloadByHash[patternHashForNudge];
             const share = projected.dropped_share_pct;
             lines.push('');
-            if (share === null || projected.kept_timed_out) {
-              // Partial-result: share math suppressed because the
-              // kept-cohort scan timed out on a heavy pattern. The
-              // is_offloaded signal is still credible (came from the
-              // dropped cohort), so the retriever_query nudge still fires.
+            // HONESTY: isDropped is the engine's drop/offload cohort and does
+            // NOT distinguish offload-to-S3 (fetchable here) from hard-drop
+            // (gone). So the nudge is RESULT-AWARE: events found => the slice is
+            // really in the bucket; zero events => the honest read is hard-drop
+            // or an unwired bucket, not "query again".
+            const sharePhrase =
+              share === null || projected.kept_timed_out
+                ? 'kept-side share query slow on a heavy cohort, share not computed'
+                : `~${share.toFixed(0)}% of recent volume marked \`isDropped\``;
+            if (resp.events.length === 0) {
               lines.push(
-                `> **Offload detected**: this pattern is currently routed to forwarder offload (kept-side share query slow on a heavy cohort, share not computed). Live events flow to your offload bucket; re-run \`log10x_retriever_query{pattern: "${args.pattern}", from: "now-1h"}\` against the offloaded slice, or check \`log10x_advise_retriever\` for the bucket recipe.`,
+                `> **Reduction detected, no events found**: this pattern is in the receiver's drop/offload cohort (${sharePhrase}), but this query returned no events. The likely reason: it was HARD-DROPPED (not archived), or the offload bucket is not wired into this retriever. Only patterns the receiver OFFLOADS to S3 are fetchable here — check \`log10x_advise_retriever\` for the bucket recipe.`,
               );
             } else {
               lines.push(
-                `> **Offload detected**: this pattern is currently routed to forwarder offload (~${share.toFixed(0)}% of recent volume marked \`isDropped\`). Live events flow to your offload bucket; re-run \`log10x_retriever_query{pattern: "${args.pattern}", from: "now-1h"}\` against the offloaded slice, or check \`log10x_advise_retriever\` for the bucket recipe.`,
+                `> **Reduction detected**: this pattern is in the receiver's drop/offload cohort (${sharePhrase}); this query found events, so the offloaded slice is in your bucket. Widen the window with \`log10x_retriever_query{pattern: "${args.pattern}", from: "now-1h"}\` for more, or check \`log10x_advise_retriever\`.`,
               );
             }
           }
@@ -460,7 +465,7 @@ async function executeRetrieverQueryInner(
     nextActions.push({
       tool: 'log10x_advise_retriever',
       args: {},
-      reason: 'pattern(s) currently routed to forwarder offload — verify the bucket recipe is wired',
+      reason: 'pattern(s) in the drop/offload cohort (isDropped) — verify the offload bucket recipe is wired; only patterns offloaded to S3 (not hard-dropped) are fetchable here',
     });
   }
   const block = renderNextActions(nextActions);

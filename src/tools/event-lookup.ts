@@ -477,19 +477,20 @@ async function formatResults(
   // next call is retriever_query when the retriever is wired, otherwise
   // advise_retriever for the bucket recipe.
   if (offloadStatus && offloadStatus.is_offloaded) {
+    // HONESTY: the isDropped marker is the engine's drop/offload cohort — it
+    // does NOT distinguish offload-to-S3 (recoverable) from hard-drop (gone).
+    // So we do not assert the bytes are archived/fetchable; we offer the fetch
+    // conditionally and flag that a zero result means it was hard-dropped.
     const tail = offloadStatus.recommend_action === 'use_retriever_query'
-      ? `Fetch the offloaded slice via \`log10x_retriever_query({ pattern: '${pattern}', from: 'now-24h' })\`.`
-      : `Check \`log10x_advise_retriever\` for the bucket recipe — the receiver is dropping but no retriever surface is configured.`;
+      ? `If your receiver offloads this pattern to S3 (not hard-drop), fetch it via \`log10x_retriever_query({ pattern: '${pattern}', from: 'now-24h' })\` — a zero result means it was hard-dropped, not archived.`
+      : `Check \`log10x_advise_retriever\` for the bucket recipe — the receiver is reducing this pattern but no retriever surface is configured.`;
     lines.push('');
     if (offloadStatus.kept_timed_out || offloadStatus.dropped_share_pct_24h === null || offloadStatus.kept_share_pct_24h === null) {
-      // Partial-result: dropped cohort confirmed offload, kept-cohort
-      // scan timed out (heavy pattern). Surface the actionable signal;
-      // the share split is not credible without both sides.
-      lines.push(`_Offload status (24h): this pattern is routed to forwarder offload via the receiver's isDropped marker (kept-side share query slow on a heavy cohort, share not computed). ${tail}_`);
+      lines.push(`_Reduction status (24h): this pattern is in the receiver's drop/offload cohort (isDropped marker; kept-side share query slow on a heavy cohort, share not computed). ${tail}_`);
     } else {
       const dropped = fmtPct(offloadStatus.dropped_share_pct_24h);
       const kept = fmtPct(offloadStatus.kept_share_pct_24h);
-      lines.push(`_Offload status (24h): ${dropped} of this pattern's volume is routed to forwarder offload via the receiver's isDropped marker (${kept} still flowing to the SIEM). ${tail}_`);
+      lines.push(`_Reduction status (24h): ${dropped} of this pattern's volume is in the receiver's drop/offload cohort (isDropped marker; ${kept} still flowing to the SIEM). ${tail}_`);
     }
   }
 
@@ -535,7 +536,7 @@ async function formatResults(
       nextActions.push({
         tool: 'log10x_retriever_query',
         args: { pattern, from: 'now-24h' },
-        reason: 'this pattern is in the offload cohort; fetch the offloaded slice back from the customer S3 archive',
+        reason: 'this pattern is in the drop/offload cohort; if it is offloaded to S3 (not hard-dropped), fetch the slice back — a zero result means it was hard-dropped, not archived',
       });
     } else {
       nextActions.push({
