@@ -130,6 +130,15 @@ test('rich snapshot + api_key produces a no-blocker plan', async () => {
   assert.ok(plan.install.length >= 4, 'install should have ≥4 steps');
   assert.ok(plan.verify.length >= 3, 'verify should have ≥3 probes');
   assert.ok(plan.teardown.length >= 3, 'teardown should have ≥3 steps');
+  // The loop's write side must be verifiable: a probe that the forwarder is
+  // offloading objects into the source bucket (app/), distinct from the
+  // read-side index-results probe, with a command that lists app/.
+  const offloadProbe = plan.verify.find((p) => p.name === 's3-offload-input');
+  assert.ok(offloadProbe, 'verify should include the s3-offload-input write-side probe');
+  assert.ok(
+    offloadProbe!.commands.some((c) => /s3:\/\/\S+\/app\//.test(c)),
+    'the offload-input probe should list the source bucket app/ prefix'
+  );
 });
 
 test('values file wires all four SQS queues + IRSA role + buckets', async () => {

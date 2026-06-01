@@ -426,11 +426,23 @@ function buildVerifyProbes(
   });
 
   if (inputBucket) {
+    // Write side of the loop, checked FIRST: is the forwarder actually
+    // offloading the dropped slice into the source bucket? Without this, an
+    // empty `indexing-results` reads as "retriever broken" when the real
+    // cause is "no input data — forwarder offload not wired". This probe
+    // disambiguates and points at the Forwarder offload section.
+    probes.push({
+      name: 's3-offload-input',
+      question: 'Is the forwarder offloading the dropped slice into the source bucket?',
+      commands: [
+        `aws s3 ls s3://${inputBucket}/app/ --recursive --summarize 2>/dev/null | tail -5 || echo "no objects under app/ yet — if this stays empty the forwarder offload is NOT wired. See the 'Forwarder offload' section: the receiver needs outputOffload=true, the per-forwarder recipe applied, and the forwarder-write IRSA (s3:PutObject to this bucket/app/)."`,
+      ],
+    });
     probes.push({
       name: 's3-indexing-results',
       question: 'Is the indexer writing to the index bucket?',
       commands: [
-        `aws s3 ls s3://${inputBucket}/indexing-results/ --summarize 2>/dev/null | tail -5 || echo "no index results yet (may take a few minutes after first index run)"`,
+        `aws s3 ls s3://${inputBucket}/indexing-results/ --summarize 2>/dev/null | tail -5 || echo "no index results yet (may take a few minutes after first index run). If s3-offload-input is also empty, fix the forwarder offload first — the indexer has nothing to index."`,
       ],
     });
   }
