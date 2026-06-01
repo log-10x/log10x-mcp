@@ -42,6 +42,8 @@ interface StubOpts {
   dropped: number;
   /** When true, `queryInstant` never resolves (forces timeout in the helper). */
   hang?: boolean;
+  /** When true, only the kept-cohort query hangs (dropped + timestamp resolve). */
+  hangKept?: boolean;
 }
 
 function makeEnv(opts: StubOpts): EnvConfig {
@@ -50,6 +52,12 @@ function makeEnv(opts: StubOpts): EnvConfig {
     endpoint: 'stub://offload-test',
     async queryInstant(promql: string): Promise<PrometheusResponse> {
       if (opts.hang) return await new Promise<PrometheusResponse>(() => {});
+      // Selective hang: only the kept-cohort scan stalls. Reproduces
+      // the heavy-pattern tail-latency mode the demo hit on
+      // AQwRuueOWbQ — dropped cohort comes back fast, kept does not.
+      if (opts.hangKept && promql.includes('isDropped!="true"')) {
+        return await new Promise<PrometheusResponse>(() => {});
+      }
       // Discriminate by which `isDropped` filter the query carries.
       // `timestamp(max(...))` queries go through the dropped branch too.
       if (promql.includes('isDropped="true"')) {
@@ -109,7 +117,7 @@ test('getOffloadStatus: 30% dropped → dropped_share_pct ≈ 30', async () => {
   assert.equal(s.is_offloaded, true);
   assert.equal(s.dropped_bytes_in_window, 300);
   assert.equal(s.kept_bytes_in_window, 700);
-  assert.ok(Math.abs(s.dropped_share_pct - 30) < 0.001, `expected ~30, got ${s.dropped_share_pct}`);
+  assert.ok(s.dropped_share_pct !== null && Math.abs(s.dropped_share_pct - 30) < 0.001, `expected ~30, got ${s.dropped_share_pct}`);
   assert.ok(s.last_seen_dropped_ts !== null && s.last_seen_dropped_ts > 0);
 });
 
@@ -152,4 +160,32 @@ test('getOffloadStatus: empty hash → ok=false short-circuit', async () => {
     timeoutMs: 200,
   });
   assert.equal(s.ok, false);
+});
+
+test('getOffloadStatus: kept times out, dropped resolves → partial result with kept_timed_out=true', async () => {
+  // Heavy-pattern tail-latency mode. The smoke surfaced this on demo
+  // pattern_hash AQwRuueOWbQ (21.55 GB dropped, ~3x next-largest):
+  // the dropped cohort returned in well under 2s, the kept-cohort
+  // PromQL scan did not. Before the fix the envelope collapsed
+  // entirely; after the fix is_offloaded survives, share math nulls out,
+  // kept_timed_out flag flips on.
+  const env = makeEnv({ kept: 1000, dropped: 500, hangKept: true });
+  const t0 = Date.now();
+  const s = await getOffloadStatus(env, {
+    patternHash: 'abc123',
+    metricsEnv: 'edge',
+    timeoutMs: 50,
+  });
+  const elapsed = Date.now() - t0;
+  assert.equal(s.ok, true, 'partial result must be ok=true so callers do not suppress UI');
+  assert.equal(s.is_offloaded, true, 'dropped cohort > 0 → is_offloaded survives');
+  assert.equal(s.dropped_bytes_in_window, 500);
+  assert.equal(s.kept_bytes_in_window, null, 'kept bytes nulled when kept query times out');
+  assert.equal(s.dropped_share_pct, null, 'share math suppressed without both sides');
+  assert.equal(s.kept_timed_out, true);
+  assert.equal(s.dropped_timed_out, undefined);
+  // last_seen_dropped_ts still populates from the dropped-timestamp query.
+  assert.ok(s.last_seen_dropped_ts !== null && s.last_seen_dropped_ts > 0);
+  // Bounded by the per-query timeout, not the sum of them.
+  assert.ok(elapsed < 500, `expected <500ms, got ${elapsed}ms`);
 });

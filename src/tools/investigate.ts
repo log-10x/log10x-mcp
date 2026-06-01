@@ -204,8 +204,11 @@ export interface TopOffloadedPattern {
   pattern: string;
   service: string | null;
   tenx_hash: string;
-  dropped_share_pct_24h: number;
+  /** Null when the kept-cohort scan timed out — share math suppressed. */
+  dropped_share_pct_24h: number | null;
   last_seen_dropped_ts: number | null;
+  /** True when the kept-cohort PromQL scan timed out on a heavy pattern. */
+  kept_timed_out?: boolean;
 }
 
 /**
@@ -371,6 +374,7 @@ export async function executeInvestigate(
             tenx_hash: r.hash,
             dropped_share_pct_24h: status.dropped_share_pct,
             last_seen_dropped_ts: status.last_seen_dropped_ts,
+            ...(status.kept_timed_out ? { kept_timed_out: true } : {}),
           });
         }
         return offloaded.length > 0 ? offloaded : undefined;
@@ -387,7 +391,15 @@ export async function executeInvestigate(
   // verified by inspection of investigate.ts:118-143).
   if (topOffloaded && topOffloaded.length > 0) {
     const names = topOffloaded
-      .map((t) => `\`${t.pattern}\` (${t.dropped_share_pct_24h.toFixed(0)}%)`)
+      .map((t) => {
+        // Partial-result: kept-cohort scan timed out on this heavy
+        // pattern. The offload signal is still credible (from the
+        // dropped cohort) — surface the pattern, omit the percent.
+        if (t.dropped_share_pct_24h === null || t.kept_timed_out) {
+          return `\`${t.pattern}\` (share n/a — kept query slow)`;
+        }
+        return `\`${t.pattern}\` (${t.dropped_share_pct_24h.toFixed(0)}%)`;
+      })
       .join(', ');
     const nudge =
       `\n\n> **Offload-aware routing**: ${topOffloaded.length} of the patterns above ` +

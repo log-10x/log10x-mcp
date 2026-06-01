@@ -1097,6 +1097,12 @@ export async function executeCommitmentReport(
         for (const row of agg.per_pattern_rows) {
           const status = batch[row.pattern_hash];
           if (!status || !status.ok || !status.is_offloaded) continue;
+          // `is_offloaded=true` is only ever set when dropped_bytes is
+          // populated (both happy-path and kept-cohort-timeout partial
+          // path). The dropped-cohort-timeout partial path forces
+          // is_offloaded=false, so this `continue` covers it. The null
+          // guard below is belt-and-braces for TS narrowing.
+          if (status.dropped_bytes_in_window === null) continue;
           // Move the row's bytes_saved out of its prior bucket; the
           // canonical magnitude for the offload bucket is the metric
           // `dropped_bytes_in_window` (per §B.3 step 3).

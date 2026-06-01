@@ -143,8 +143,11 @@ interface RetrieverQuerySummary {
    */
   offload_status_by_hash?: Record<string, {
     is_offloaded: boolean;
-    dropped_share_pct: number;
+    /** Null when the kept-cohort scan timed out on a heavy pattern. */
+    dropped_share_pct: number | null;
     last_seen_dropped_ts: number | null;
+    /** True when the kept-cohort PromQL scan timed out — share math suppressed. */
+    kept_timed_out?: boolean;
   }>;
 }
 
@@ -351,8 +354,9 @@ async function executeRetrieverQueryInner(
   // failures surface as `undefined` and never block the response.
   let offloadByHash: Record<string, {
     is_offloaded: boolean;
-    dropped_share_pct: number;
+    dropped_share_pct: number | null;
     last_seen_dropped_ts: number | null;
+    kept_timed_out?: boolean;
   }> | undefined;
   let patternHashForNudge: string | undefined;
   if (resp.events.length > 0) {
@@ -372,8 +376,9 @@ async function executeRetrieverQueryInner(
         });
         const projected: Record<string, {
           is_offloaded: boolean;
-          dropped_share_pct: number;
+          dropped_share_pct: number | null;
           last_seen_dropped_ts: number | null;
+          kept_timed_out?: boolean;
         }> = {};
         for (const [h, s] of Object.entries(batch)) {
           if (!s.ok) continue;
@@ -381,6 +386,7 @@ async function executeRetrieverQueryInner(
             is_offloaded: s.is_offloaded,
             dropped_share_pct: s.dropped_share_pct,
             last_seen_dropped_ts: s.last_seen_dropped_ts,
+            ...(s.kept_timed_out ? { kept_timed_out: true } : {}),
           };
         }
         if (Object.keys(projected).length > 0) offloadByHash = projected;
@@ -411,11 +417,22 @@ async function executeRetrieverQueryInner(
             if (offloadedHashes.length === 1) patternHashForNudge = offloadedHashes[0][0];
           }
           if (patternHashForNudge) {
-            const share = offloadByHash[patternHashForNudge].dropped_share_pct;
+            const projected = offloadByHash[patternHashForNudge];
+            const share = projected.dropped_share_pct;
             lines.push('');
-            lines.push(
-              `> **Offload detected**: this pattern is currently routed to forwarder offload (~${share.toFixed(0)}% of recent volume marked \`isDropped\`). Live events flow to your offload bucket; re-run \`log10x_retriever_query{pattern: "${args.pattern}", from: "now-1h"}\` against the offloaded slice, or check \`log10x_advise_retriever\` for the bucket recipe.`,
-            );
+            if (share === null || projected.kept_timed_out) {
+              // Partial-result: share math suppressed because the
+              // kept-cohort scan timed out on a heavy pattern. The
+              // is_offloaded signal is still credible (came from the
+              // dropped cohort), so the retriever_query nudge still fires.
+              lines.push(
+                `> **Offload detected**: this pattern is currently routed to forwarder offload (kept-side share query slow on a heavy cohort, share not computed). Live events flow to your offload bucket; re-run \`log10x_retriever_query{pattern: "${args.pattern}", from: "now-1h"}\` against the offloaded slice, or check \`log10x_advise_retriever\` for the bucket recipe.`,
+              );
+            } else {
+              lines.push(
+                `> **Offload detected**: this pattern is currently routed to forwarder offload (~${share.toFixed(0)}% of recent volume marked \`isDropped\`). Live events flow to your offload bucket; re-run \`log10x_retriever_query{pattern: "${args.pattern}", from: "now-1h"}\` against the offloaded slice, or check \`log10x_advise_retriever\` for the bucket recipe.`,
+              );
+            }
           }
         }
       } catch { /* best-effort */ }

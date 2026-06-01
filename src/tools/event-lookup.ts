@@ -47,9 +47,13 @@ interface EventLookupSummary {
   resolved_from_hash?: string;
   offload_status?: {
     is_offloaded: boolean;
-    dropped_share_pct_24h: number;
-    kept_share_pct_24h: number;
+    /** Null when the kept-cohort PromQL scan timed out — share math suppressed. */
+    dropped_share_pct_24h: number | null;
+    /** Null when the kept-cohort PromQL scan timed out — share math suppressed. */
+    kept_share_pct_24h: number | null;
     recommend_action: 'none' | 'use_retriever_query' | 'check_advise_retriever';
+    /** True when the kept-cohort PromQL scan timed out on a heavy pattern. */
+    kept_timed_out?: boolean;
   };
 }
 
@@ -348,16 +352,30 @@ async function formatResults(
         timeoutMs: 2000,
       });
       if (s.ok && s.is_offloaded) {
-        const total = s.kept_bytes_in_window + s.dropped_bytes_in_window;
-        const droppedShare = total > 0 ? (s.dropped_bytes_in_window / total) * 100 : 0;
         const action: 'none' | 'use_retriever_query' | 'check_advise_retriever' =
           isRetrieverConfigured() ? 'use_retriever_query' : 'check_advise_retriever';
-        offloadStatus = {
-          is_offloaded: true,
-          dropped_share_pct_24h: droppedShare,
-          kept_share_pct_24h: 100 - droppedShare,
-          recommend_action: action,
-        };
+        // Partial-result path: kept-cohort scan timed out on a heavy
+        // pattern (the smoke surfaced this on demo AQwRuueOWbQ at
+        // 21.55 GB dropped). dropped_bytes is populated; share is null;
+        // surface the actionable signal anyway.
+        if (s.kept_timed_out || s.kept_bytes_in_window === null || s.dropped_bytes_in_window === null) {
+          offloadStatus = {
+            is_offloaded: true,
+            dropped_share_pct_24h: null,
+            kept_share_pct_24h: null,
+            recommend_action: action,
+            kept_timed_out: true,
+          };
+        } else {
+          const total = s.kept_bytes_in_window + s.dropped_bytes_in_window;
+          const droppedShare = total > 0 ? (s.dropped_bytes_in_window / total) * 100 : 0;
+          offloadStatus = {
+            is_offloaded: true,
+            dropped_share_pct_24h: droppedShare,
+            kept_share_pct_24h: 100 - droppedShare,
+            recommend_action: action,
+          };
+        }
       } else if (s.ok) {
         offloadStatus = {
           is_offloaded: false,
@@ -459,13 +477,20 @@ async function formatResults(
   // next call is retriever_query when the retriever is wired, otherwise
   // advise_retriever for the bucket recipe.
   if (offloadStatus && offloadStatus.is_offloaded) {
-    const dropped = fmtPct(offloadStatus.dropped_share_pct_24h);
-    const kept = fmtPct(offloadStatus.kept_share_pct_24h);
     const tail = offloadStatus.recommend_action === 'use_retriever_query'
       ? `Fetch the offloaded slice via \`log10x_retriever_query({ pattern: '${pattern}', from: 'now-24h' })\`.`
       : `Check \`log10x_advise_retriever\` for the bucket recipe — the receiver is dropping but no retriever surface is configured.`;
     lines.push('');
-    lines.push(`_Offload status (24h): ${dropped} of this pattern's volume is routed to forwarder offload via the receiver's isDropped marker (${kept} still flowing to the SIEM). ${tail}_`);
+    if (offloadStatus.kept_timed_out || offloadStatus.dropped_share_pct_24h === null || offloadStatus.kept_share_pct_24h === null) {
+      // Partial-result: dropped cohort confirmed offload, kept-cohort
+      // scan timed out (heavy pattern). Surface the actionable signal;
+      // the share split is not credible without both sides.
+      lines.push(`_Offload status (24h): this pattern is routed to forwarder offload via the receiver's isDropped marker (kept-side share query slow on a heavy cohort, share not computed). ${tail}_`);
+    } else {
+      const dropped = fmtPct(offloadStatus.dropped_share_pct_24h);
+      const kept = fmtPct(offloadStatus.kept_share_pct_24h);
+      lines.push(`_Offload status (24h): ${dropped} of this pattern's volume is routed to forwarder offload via the receiver's isDropped marker (${kept} still flowing to the SIEM). ${tail}_`);
+    }
   }
 
   // AI analysis
