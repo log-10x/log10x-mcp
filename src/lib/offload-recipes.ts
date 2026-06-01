@@ -123,43 +123,48 @@ encoding.except_fields = ["isDropped"]     # strip the marker on the SIEM path t
 }
 
 // ---------------------------------------------------------------------------
-// fluentd  (verified shape: rewrite_tag_filter -> out_s3, store_as txt)
+// fluentd  (verified live: copy -> relabel -> grep + record_transformer.
+// CORE plugins only — no rewrite_tag_filter gem, no rewrite loop, explicit
+// label routing so nothing escapes to the root router.)
 // ---------------------------------------------------------------------------
 function recipeFluentd(p: OffloadParams): OffloadRecipe {
   const prefix = p.prefix ?? DEFAULT_PREFIX;
   return {
     language: 'xml',
     body: `<label @OUTPUT>
-  <!-- 1) route: dropped slice -> offload.* , the rest -> keep.* .
-       Both output tags are OUTSIDE the tenx.** space, so these rules never
-       re-match their own output (no rewrite loop). -->
+  <!-- 1) fan the 10x return stream to two labels; each keeps only its slice -->
   <match tenx.**>
-    @type rewrite_tag_filter
-    <rule>
-      key isDropped
-      pattern /^true$/        <!-- regex over the stringified boolean -->
-      tag offload.\${tag}
-    </rule>
-    <rule>
-      key isDropped
-      pattern /.+/            <!-- false / anything else -> kept -->
-      tag keep.\${tag}
-    </rule>
+    @type copy
+    <store>
+      @type relabel
+      @label @TENX_OFFLOAD
+    </store>
+    <store>
+      @type relabel
+      @label @TENX_SIEM
+    </store>
   </match>
+</label>
 
-  <!-- 2) strip the now-constant marker on BOTH paths (tenx_hash kept) -->
-  <filter offload.** keep.**>
-    @type record_transformer
-    remove_keys isDropped
+<!-- 2) dropped slice -> customer-owned S3 as plain JSONL -->
+<label @TENX_OFFLOAD>
+  <filter **>
+    @type grep
+    <regexp>
+      key isDropped
+      pattern /^true$/        <!-- keep only the dropped slice -->
+    </regexp>
   </filter>
-
-  <!-- 3) dropped slice -> customer-owned S3 as plain JSONL -->
-  <match offload.**>
+  <filter **>
+    @type record_transformer
+    remove_keys isDropped       <!-- marker did its job; tenx_hash kept -->
+  </filter>
+  <match **>
     @type s3
     s3_bucket ${p.bucket}
     s3_region ${p.region}
     path ${prefix}/
-    store_as txt              <!-- plain newline-delimited JSON, not gzip -->
+    store_as txt                <!-- plain newline-delimited JSON, not gzip -->
     <format>
       @type json
     </format>
@@ -169,20 +174,34 @@ function recipeFluentd(p: OffloadParams): OffloadRecipe {
       timekey_wait 10s
     </buffer>
   </match>
+</label>
 
-  <!-- 4) kept slice -> your existing SIEM destination -->
-  <match keep.**>
+<!-- 3) kept slice -> your existing SIEM destination -->
+<label @TENX_SIEM>
+  <filter **>
+    @type grep
+    <exclude>
+      key isDropped
+      pattern /^true$/        <!-- drop the offloaded slice from the SIEM path -->
+    </exclude>
+  </filter>
+  <filter **>
+    @type record_transformer
+    remove_keys isDropped
+  </filter>
+  <match **>
     <!-- ... your existing destination <match> ... -->
   </match>
 </label>`,
     placementNote:
-      'inside the `@OUTPUT` label. The two-rule rewrite routes every event to a ' +
-      '`offload.*` or `keep.*` tag (both outside `tenx.**`, so the rules never ' +
-      'loop on their own output), then one `record_transformer` strips the marker ' +
-      'on both paths before the destinations.',
+      'the `<match tenx.**>` copy goes in the `@OUTPUT` label; the two `@TENX_*` ' +
+      'labels go at root. `copy` duplicates every event to both labels and each ' +
+      '`grep` keeps only its slice, so routing is explicit (no rewrite_tag_filter, ' +
+      'no rewrite loop, nothing escapes to the root router). `record_transformer` ' +
+      'strips the marker on each path.',
     prerequisites: [
       ...basePrereqs(p),
-      'Plugin: `fluent-plugin-s3` must be present (bundled in td-agent / fluent-package; on a vanilla OSS image run `fluent-gem install fluent-plugin-s3`).',
+      'Plugin: `fluent-plugin-s3` must be present for the S3 output (bundled in td-agent / fluent-package; on a vanilla OSS image run `fluent-gem install fluent-plugin-s3`). copy / relabel / grep / record_transformer are core, no extra gem.',
     ],
   };
 }

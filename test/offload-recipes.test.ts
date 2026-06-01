@@ -79,13 +79,14 @@ test('each recipe strips isDropped on the output path, never tenx_hash', () => {
   }
 });
 
-test('fluentd routes to non-tenx tags (no rewrite loop)', () => {
+test('fluentd routes with CORE plugins (copy/relabel/grep, no rewrite_tag_filter gem)', () => {
   const r = offloadRecipe('fluentd', PARAMS);
-  // dropped/kept go to offload.* / keep.* (outside tenx.**), so the rewrite
-  // rules never re-match their own output.
-  assert.match(r.body, /tag offload\.\$\{tag\}/);
-  assert.match(r.body, /tag keep\.\$\{tag\}/);
-  assert.ok(!/tag tenx\.offload/.test(r.body), 'fluentd retag must not stay inside tenx.** (loop)');
+  // copy fans to two labels; grep keeps each slice. No rewrite_tag_filter
+  // (an extra gem) and no rewrite loop / root-router escape.
+  assert.match(r.body, /@type copy/);
+  assert.match(r.body, /@label @TENX_OFFLOAD/);
+  assert.match(r.body, /@label @TENX_SIEM/);
+  assert.ok(!/rewrite_tag_filter/.test(r.body), 'fluentd must not depend on the rewrite_tag_filter gem');
 });
 
 test('every recipe carries the engine offload-mode + IAM prerequisites', () => {
