@@ -326,7 +326,8 @@ service:
       ...basePrereqs(p),
       'Distribution: requires the FULL otelcol-contrib distro (routingconnector + transformprocessor + awss3exporter). A minimal/custom "contrib" build can omit them — verified: a stripped otelcol-contrib had connectors:[] and no transform/awss3.',
       'Routing MUST use `context: log` + `condition` (verified live). `statement: route() where ...` defaults to RESOURCE context and never matches the log attribute, so every event falls through to the SIEM.',
-      'tenx_hash is a LOG attribute; `marshaler: body` alone drops it. The offload pipeline folds attributes into the body (`set(log.body, log.attributes)`), verified to carry tenx_hash with isDropped removed. SMOKE TEST REQUIRED (S3 path): confirm the final S3-object shape (kvlist serialized to JSON by the awss3 body marshaler) against the Retriever ingest once a bucket is wired. Routing + strip + body-fold are already verified live.',
+      'tenx_hash is a LOG attribute; `marshaler: body` alone drops it, so the offload pipeline folds attributes into the body (`set(log.body, log.attributes)`). VERIFIED live against MinIO S3: the object is flat JSONL `{"...":...,"tenx_hash":"..."}` with isDropped removed (the awss3 body marshaler serializes the kvlist body to a flat JSON object).',
+      'Object layout: the awss3 exporter TIME-PARTITIONS the key under the prefix (e.g. `app/year=2026/month=06/day=01/...`), so the Retriever S3->SQS notification must fire recursively under `app/` (it does). Set `s3uploader.s3_partition_format` to flatten the layout if a specific key shape is required.',
     ],
   };
 }

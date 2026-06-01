@@ -104,16 +104,14 @@ test('every recipe carries the engine offload-mode + IAM prerequisites', () => {
   }
 });
 
-test('after the smoke wave, only otel keeps a SMOKE TEST caveat (S3 path); the rest are verified live', () => {
-  const withCaveat: OffloadForwarderId[] = ['otel-collector'];
+test('all forwarders are verified live — no recipe carries a SMOKE TEST REQUIRED caveat', () => {
+  // vector/fluentd/fluent-bit/logstash verified E2E to file sinks; cribl via
+  // `cribl pipe`; otel routing+strip+body-fold + the S3 object shape verified
+  // against MinIO. Nothing left pending.
   for (const fwd of OFFLOAD_FORWARDERS) {
     const r = offloadRecipe(fwd, PARAMS);
     const hasCaveat = r.prerequisites.some(p => p.includes('SMOKE TEST REQUIRED'));
-    if (withCaveat.includes(fwd)) {
-      assert.ok(hasCaveat, `${fwd}: should still flag the open S3-path smoke test`);
-    } else {
-      assert.ok(!hasCaveat, `${fwd}: verified live, should carry no SMOKE TEST caveat`);
-    }
+    assert.ok(!hasCaveat, `${fwd}: should be verified live with no SMOKE TEST caveat`);
   }
 });
 
