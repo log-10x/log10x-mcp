@@ -161,6 +161,13 @@ export async function executeTopPatterns(
         ? `,isDropped="${droppedFilter}"`
         : `,isDropped${droppedFilter.op}"${droppedFilter.val}"`;
 
+  // PL-12a — the 24h trend-range sparkline must read `all_events` for the
+  // dropped/both cohorts: dropped events are NOT in `emitted_events`, so
+  // `emitted_events{isDropped="true"}` is empty and the sparkline reads
+  // near-zero. `kept` == emitted, so emitted_events is correct there.
+  const trendMetric =
+    include === 'kept' ? 'emitted_events_summaryBytes_total' : 'all_events_summaryBytes_total';
+
   // resolveMetricsEnvFiltered still takes plain string filters (it
   // only probes label presence). Project the filters map down for it.
   const probeFilters: Record<string, string> = {};
@@ -332,7 +339,7 @@ export async function executeTopPatterns(
       r.hash
         ? queryRange(
             env,
-            `sum by (${LABELS.hash}) (rate(emitted_events_summaryBytes_total{${LABELS.hash}="${r.hash}"${isDroppedSelector}}[5m]))`,
+            `sum by (${LABELS.hash}) (rate(${trendMetric}{${LABELS.hash}="${r.hash}"${isDroppedSelector}}[5m]))`,
             trendStart,
             now,
             trendStepSec

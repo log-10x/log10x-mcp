@@ -527,6 +527,24 @@ async function formatResults(
   // chain handoffs (pattern_trend for time series, dependency_check before
   // any mute action) are appropriate.
   const nextActions: NextAction[] = [];
+  // Offload fetch-back as a STRUCTURED action (not just the prose tail above):
+  // event_lookup is a primary "what is this line" entry point, so an agent
+  // walking nextActions must be able to fetch the offloaded slice in one step.
+  if (offloadStatus && offloadStatus.is_offloaded) {
+    if (offloadStatus.recommend_action === 'use_retriever_query') {
+      nextActions.push({
+        tool: 'log10x_retriever_query',
+        args: { pattern, from: 'now-24h' },
+        reason: 'this pattern is in the offload cohort; fetch the offloaded slice back from the customer S3 archive',
+      });
+    } else {
+      nextActions.push({
+        tool: 'log10x_advise_retriever',
+        args: {},
+        reason: 'receiver is offloading this pattern but no retriever surface is configured — get the bucket recipe',
+      });
+    }
+  }
   // Compare bytes when no rate is resolved — the regression signal is
   // volume, not the rate that translates it. With a rate set, the same
   // ratio holds (bytes×rate vs bytes×rate cancels), so this is equivalent
