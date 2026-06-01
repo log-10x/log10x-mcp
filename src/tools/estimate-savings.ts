@@ -273,7 +273,17 @@ function escapeLabel(value: string): string {
 }
 
 function selectorWithEnv(env: EnvConfig, extra: string[] = []): string {
-  const parts = [...extra, `${env.labels.env}="${escapeLabel(env.envId)}"`];
+  // `env.labels.env` is the engine's pipeline-stage label (default tenx_env)
+  // and its values are 'edge' or 'cloud', NOT the env UUID. The auth header
+  // (`X-10X-Auth: <key>/<env_uuid>`) already scopes queries to the tenant on
+  // the backend side, so we filter by the pipeline stage where Receiver
+  // metrics live (edge) plus the receiver|reporter app filter so the merged
+  // engine architecture (Receiver took over Reporter's role) is matched.
+  const parts = [
+    ...extra,
+    `tenx_app=~"reporter|receiver"`,
+    `${env.labels.env}="edge"`,
+  ];
   return parts.join(',');
 }
 
@@ -355,6 +365,17 @@ export async function runEstimateForecast(
       'estimate_savings forecast requires either proposed_config or target_percent.'
     );
   }
+
+  // Apply defaults that the Zod schema would set at the MCP boundary, in
+  // case the function is called directly (e.g., from configure_engine's
+  // forecast-fold, the standalone runner, or a unit test). Without this
+  // every per-pattern projection runs with action=undefined and projects
+  // bytes_out as NaN, which serializes to null in the envelope.
+  args = {
+    ...args,
+    default_action: args.default_action ?? 'compact',
+    retention_months: args.retention_months ?? 1,
+  };
 
   const observationWindow = args.observation_window ?? '30d';
   const obsDays = parseWindowToDays(observationWindow);

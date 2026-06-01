@@ -406,7 +406,7 @@ async function fetchReporterAgeDays(
   // for range type queries". Use [30d:1d] — well within bounds — and treat
   // anything older than 30d as "ready" (cap return value at 30 with overflow
   // bit so the caller can still tell the gate is passed).
-  const q = `min(min_over_time(timestamp(all_events_summaryBytes_total{tenx_app="reporter",${env.labels.env}="${metricsEnv}"})[30d:1d]))`;
+  const q = `min(min_over_time(timestamp(all_events_summaryBytes_total{tenx_app=~"reporter|receiver",${env.labels.env}="${metricsEnv}"})[30d:1d]))`;
   try {
     const res = await queryInstant(env, q);
     const point = res?.data?.result?.[0];
@@ -434,7 +434,7 @@ async function fetchDailyBytes(
   const now = Math.floor(Date.now() / 1000);
   const start = now - days * 86400;
   const step = 86400; // 1 day
-  const q = `sum(increase(all_events_summaryBytes_total{tenx_app="reporter",${env.labels.env}="${metricsEnv}"}[1d]))`;
+  const q = `sum(increase(all_events_summaryBytes_total{tenx_app=~"reporter|receiver",${env.labels.env}="${metricsEnv}"}[1d]))`;
   try {
     const res = await queryRange(env, q, start, now, step);
     const series = res?.data?.result?.[0];
@@ -522,8 +522,8 @@ async function fetchTopContributors(
 ): Promise<BaselineTopContributor[]> {
   const labels = env.labels;
   const range = `${horizonDays}d`;
-  const bytesQ = `topk(10, sum by (${labels.pattern}, ${labels.service}, ${labels.severity}, ${labels.hash}) (increase(all_events_summaryBytes_total{tenx_app="reporter",${labels.env}="${metricsEnv}"}[${range}])))`;
-  const eventsQ = `sum by (${labels.pattern}, ${labels.service}, ${labels.severity}, ${labels.hash}) (increase(all_events_summaryVolume_total{tenx_app="reporter",${labels.env}="${metricsEnv}"}[${range}]))`;
+  const bytesQ = `topk(10, sum by (${labels.pattern}, ${labels.service}, ${labels.severity}, ${labels.hash}) (increase(all_events_summaryBytes_total{tenx_app=~"reporter|receiver",${labels.env}="${metricsEnv}"}[${range}])))`;
+  const eventsQ = `sum by (${labels.pattern}, ${labels.service}, ${labels.severity}, ${labels.hash}) (increase(all_events_summaryVolume_total{tenx_app=~"reporter|receiver",${labels.env}="${metricsEnv}"}[${range}]))`;
 
   let bytesRes;
   let eventsRes;
