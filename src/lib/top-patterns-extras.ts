@@ -184,7 +184,7 @@ function fmtRelativeAge(seconds: number): string {
  */
 export async function fetchBaselineBytes(
   env: EnvConfig,
-  filters: Record<string, string>,
+  filters: Record<string, pql.FilterValue>,
   metricsEnv: string,
   range: string,
   // Default to 1d/2d/3d offsets — short enough to be relevant ("is

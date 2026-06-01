@@ -61,22 +61,59 @@ function escapeLabel(value: string): string {
   return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
+/**
+ * Filter value: either a plain string (default exact-match `=`) or an
+ * object form `{op, val}` that lets callers emit `!=` selectors. Added
+ * for PL-12a/12b — the `kept` cohort needs absence-tolerant
+ * `isDropped!="true"` to include legacy series that pre-date the
+ * receiver's `isDropped` label stamping (engine modules `ad02ec6`).
+ */
+export type FilterValue = string | { op: '=' | '!='; val: string };
+
 function buildSelector(
-  filters: Record<string, string>,
+  filters: Record<string, FilterValue>,
   env: string,
   labels: LabelNameMap = DEFAULT_LABELS
 ): string {
   const parts: string[] = [];
   for (const [key, value] of Object.entries(filters)) {
-    parts.push(`${key}="${escapeLabel(value)}"`);
+    if (typeof value === 'string') {
+      parts.push(`${key}="${escapeLabel(value)}"`);
+    } else {
+      parts.push(`${key}${value.op}"${escapeLabel(value.val)}"`);
+    }
   }
   parts.push(`${labels.env}="${env}"`);
   return parts.join(',');
 }
 
+/**
+ * PL-12a/12b — map the user-facing `include` enum to a single
+ * `isDropped` filter-value (or null for the pre-decision union).
+ *
+ * `kept`    → `isDropped!="true"` (absence-tolerant; matches series with
+ *             no `isDropped` label AND `isDropped="false"`).
+ * `dropped` → `isDropped="true"` (exact).
+ * `both`    → no selector; caller runs a dual query to recover the
+ *             dropped slice for the `dropped_*` envelope fields.
+ *
+ * `runBoth` tells the executor whether to issue the second
+ * `isDropped="true"` query in parallel.
+ */
+export function includeToSelector(include: 'kept' | 'dropped' | 'both'): {
+  droppedFilter: FilterValue | null;
+  runBoth: boolean;
+} {
+  if (include === 'kept')
+    return { droppedFilter: { op: '!=', val: 'true' }, runBoth: false };
+  if (include === 'dropped')
+    return { droppedFilter: { op: '=', val: 'true' }, runBoth: false };
+  return { droppedFilter: null, runBoth: true };
+}
+
 /** Bytes per pattern for a time window, with optional offset in days. */
 export function bytesPerPattern(
-  filters: Record<string, string>,
+  filters: Record<string, FilterValue>,
   env: string,
   range: string,
   offsetDays?: number,
@@ -89,7 +126,7 @@ export function bytesPerPattern(
 
 /** Scope-total bytes for a time window — no grouping. Used by coverage probes. */
 export function totalBytesInScope(
-  filters: Record<string, string>,
+  filters: Record<string, FilterValue>,
   env: string,
   range: string,
   labels: LabelNameMap = DEFAULT_LABELS
@@ -100,7 +137,7 @@ export function totalBytesInScope(
 
 /** Event count per pattern for a time window. */
 export function eventsPerPattern(
-  filters: Record<string, string>,
+  filters: Record<string, FilterValue>,
   env: string,
   range: string,
   labels: LabelNameMap = DEFAULT_LABELS
@@ -164,7 +201,7 @@ export function bytesPerService(
  * the same subset, not the whole env). Used by the cost-center rollup
  * in log10x_top_patterns — the "where is the money" headline. */
 export function bytesPerServiceScoped(
-  filters: Record<string, string>,
+  filters: Record<string, FilterValue>,
   env: string,
   range: string,
   labels: LabelNameMap = DEFAULT_LABELS
@@ -199,7 +236,7 @@ export function edgeProbe(labels: LabelNameMap = DEFAULT_LABELS): string {
 
 /** Probe: does edge env have data for specific filters? */
 export function edgeProbeFiltered(
-  filters: Record<string, string>,
+  filters: Record<string, FilterValue>,
   labels: LabelNameMap = DEFAULT_LABELS
 ): string {
   const selector = buildSelector(filters, 'edge', labels);
@@ -283,7 +320,7 @@ export function retrieverStreamedBytesChunk(
 
 /** Top N patterns by bytes with service + severity labels retained. */
 export function topPatternsFull(
-  filters: Record<string, string>,
+  filters: Record<string, FilterValue>,
   env: string,
   range: string,
   limit: number,
@@ -309,7 +346,7 @@ export function topPatternsFull(
  * not an active cost driver.
  */
 export function recentRateByPattern(
-  filters: Record<string, string>,
+  filters: Record<string, FilterValue>,
   env: string,
   recentRange: string = '1h',
   labels: LabelNameMap = DEFAULT_LABELS
@@ -325,7 +362,7 @@ export function recentRateByPattern(
  * on the triple avoids over-counting on a pattern-only join).
  */
 export function eventsByPatternFull(
-  filters: Record<string, string>,
+  filters: Record<string, FilterValue>,
   env: string,
   range: string,
   labels: LabelNameMap = DEFAULT_LABELS
@@ -342,7 +379,7 @@ export function eventsByPatternFull(
  * passed as the increase() inner range AND the query_range step.
  */
 export function seriesByPatternFull(
-  filters: Record<string, string>,
+  filters: Record<string, FilterValue>,
   env: string,
   stepSeconds: number,
   labels: LabelNameMap = DEFAULT_LABELS
@@ -353,7 +390,7 @@ export function seriesByPatternFull(
 
 /** Count of distinct patterns in scope (for "N of M patterns shown"). */
 export function distinctPatternCount(
-  filters: Record<string, string>,
+  filters: Record<string, FilterValue>,
   env: string,
   range: string,
   labels: LabelNameMap = DEFAULT_LABELS
@@ -364,7 +401,7 @@ export function distinctPatternCount(
 
 /** Bytes per (pattern, service): which services each pattern impacts. */
 export function servicesByPatternFull(
-  filters: Record<string, string>,
+  filters: Record<string, FilterValue>,
   env: string,
   range: string,
   labels: LabelNameMap = DEFAULT_LABELS
@@ -376,7 +413,7 @@ export function servicesByPatternFull(
 /** Bytes grouped by an arbitrary label, ranked. */
 export function bytesByLabel(
   label: string,
-  filters: Record<string, string>,
+  filters: Record<string, FilterValue>,
   env: string,
   range: string,
   labels: LabelNameMap = DEFAULT_LABELS

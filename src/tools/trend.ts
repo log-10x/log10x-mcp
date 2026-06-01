@@ -25,20 +25,24 @@ export const trendSchema = {
   analyzerCost: z.number().optional().describe('SIEM ingestion cost in $/GB'),
   environment: z.string().optional().describe('Environment nickname'),
   view: z.enum(['summary', 'markdown']).default('summary').describe('Output format. summary returns structured envelope; markdown returns rendered chart + stats.'),
-  // DEP: feat/x-percent-mcp-cost-tooling — added per
-  //   /tmp/poc-comparison/14d-24-implementation-spec.md (item 8).
-  // feat/investigative-sharpening also touches this file; the addition
-  // is strictly additive (new optional flag, inline label suffix on the
-  // single range query) so the merge stays clean. When false/absent,
-  // the PromQL emitted is byte-identical to the pre-change query — the
-  // verify-mode caller in estimate-savings.ts sets it true to read the
-  // engine-side "what would have been dropped" per-pattern byte series
-  // over time (i.e. the overflow cohort).
-  isDropped: z
-    .boolean()
-    .optional()
+  // PL-12b — engine-decision cohort scope. Supersedes the prior binary
+  // `isDropped` flag. Three states: `kept` (default, pre-PL-12 behavior)
+  // = events the engine forwarded as-is (selector `isDropped!="true"`,
+  // absence-tolerant so legacy series without the label still match);
+  // `dropped` = events tagged isDropped="true" by the engine;
+  // `both` = the pre-decision union, with a parallel `dropped_*` series
+  // added to the envelope so a single call surfaces the offload share
+  // over time. The dual-query path runs both queries in parallel.
+  include: z
+    .enum(['kept', 'dropped', 'both'])
+    .default('kept')
     .describe(
-      'When true, scope the trend to events tagged isDropped="true" by the engine — i.e. the per-pattern overflow byte series over time (the cohort the regulator marked for drop/down-tier). Use to verify post-deploy realised savings. When absent/false, behavior is unchanged.'
+      'Which engine-decision cohort to scope the trend to. ' +
+      '`kept` (default) = events the engine forwarded as-is (isDropped!="true") — the pre-PL-12 behavior. ' +
+      '`dropped` = events tagged isDropped="true" by the engine (the offload/down-tier cohort). ' +
+      '`both` = the pre-decision union; envelope adds a parallel `dropped_time_series` and `dropped_share_pct` so one call shows offload share over time. ' +
+      'Use `dropped` to verify post-deploy realised savings or to chart "what we are offloading right now". ' +
+      'Use `both` to overlay kept vs dropped on the same window.'
     ),
 };
 
@@ -63,10 +67,21 @@ interface PatternTrendSummary {
   low_bytes: number;
   sample_count: number;
   rate_source: 'list_price' | 'customer_supplied' | 'unset';
+  // PL-12b — engine-decision cohort surface. `include` echoes the param
+  // so an agent reading the envelope knows which cohort `time_series`
+  // and `total_bytes` describe. The `kept_*` / `dropped_*` fields are
+  // populated only when `include === 'both'` (dual-query path); when
+  // `include === 'kept'` they are null; when `include === 'dropped'`
+  // `dropped_*` mirror the main fields and `kept_*` are null.
+  include: 'kept' | 'dropped' | 'both';
+  kept_bytes_total: number | null;
+  dropped_bytes_total: number | null;
+  dropped_share_pct: number | null;
+  dropped_time_series: Array<{ ts: number; bytes: number }> | null;
 }
 
 export async function executeTrend(
-  args: { pattern: string; timeRange?: string; step?: string; analyzerCost?: number; view?: 'summary' | 'markdown'; isDropped?: boolean },
+  args: { pattern: string; timeRange?: string; step?: string; analyzerCost?: number; view?: 'summary' | 'markdown'; include?: 'kept' | 'dropped' | 'both' },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
   const view = args.view ?? 'summary';
@@ -85,12 +100,24 @@ export async function executeTrend(
   // the measured-spend clause is gated on `rate_source !== 'unset'` so we
   // never print a $1.0/GB lie. When unset, suffix "(rate unset)" so the
   // agent knows why the dollar number is missing.
+  // PL-12b: headline branches on `include`. `kept` keeps the prior wording.
+  // `dropped` re-titles to "offloaded" so the reader sees that the bytes
+  // describe the cohort the engine flagged. `both` adds the offload-share %.
   const changeSign = d.change_pct >= 0 ? '+' : '';
   const dollarClause =
     d.rate_source !== 'unset' && d.total_cost_usd !== null
       ? `, ${fmtDollar(d.total_cost_usd)} measured spend (at ${d.rate_source})`
       : ', (rate unset)';
-  const headline = `\`${d.pattern}\` over ${d.window}: ${fmtBytes(d.total_bytes)}, change ${changeSign}${d.change_pct}% (last quarter vs first quarter run-rate)${dollarClause}${d.spike_detected ? ', spike detected' : ''}`;
+  const spikeClause = d.spike_detected ? ', spike detected' : '';
+  let headline: string;
+  if (d.include === 'dropped') {
+    headline = `\`${d.pattern}\` offloaded over ${d.window}: ${fmtBytes(d.total_bytes)} dropped, change ${changeSign}${d.change_pct}%${dollarClause}${spikeClause}`;
+  } else if (d.include === 'both' && d.dropped_share_pct !== null) {
+    const sharePct = Math.round(d.dropped_share_pct);
+    headline = `\`${d.pattern}\` over ${d.window}: ${fmtBytes(d.total_bytes)} union, ${sharePct}% currently offloaded, change ${changeSign}${d.change_pct}%${dollarClause}${spikeClause}`;
+  } else {
+    headline = `\`${d.pattern}\` over ${d.window}: ${fmtBytes(d.total_bytes)}, change ${changeSign}${d.change_pct}% (last quarter vs first quarter run-rate)${dollarClause}${spikeClause}`;
+  }
   const { buildEnvelope } = await import('../lib/output-types.js');
   // G6: render a PNG timeseries chart of the trend so hosts that render
   // image content (Claude Desktop, ChatGPT Desktop) show it visually. The
@@ -126,13 +153,14 @@ export async function executeTrend(
 }
 
 async function executeTrendInner(
-  args: { pattern: string; timeRange?: string; step?: string; analyzerCost?: number; isDropped?: boolean },
+  args: { pattern: string; timeRange?: string; step?: string; analyzerCost?: number; include?: 'kept' | 'dropped' | 'both' },
   env: EnvConfig,
   sumOut?: { data?: PatternTrendSummary }
 ): Promise<string> {
   // Defensive defaults — match trendSchema.
   const timeRange = args.timeRange ?? '7d';
   const step = args.step ?? '1h';
+  const include = args.include ?? 'kept';
   const tf = parseTimeframe(timeRange);
   // DEP: feat/x-percent-mcp-cost-tooling — drop the silent `?? 1.0` lie.
   // When the caller provides an explicit $/GB via `analyzerCost`, the dollar
@@ -156,17 +184,32 @@ async function executeTrendInner(
   const start = now - tf.days * 86400;
   const stepSeconds = parseStep(step);
 
-  // DEP: feat/x-percent-mcp-cost-tooling — additive isDropped scope.
-  // patternBytesOverTime doesn't take a selector map (single inline
-  // pattern selector), so when isDropped=true we splice the label into
-  // the existing `{...}` selector inline — same approach top-patterns
-  // uses for its standalone range query (top-patterns.ts:252). When
-  // absent/false, the emitted PromQL is byte-identical to before.
-  let query = pql.patternBytesOverTime(pattern, metricsEnv, step);
-  if (args.isDropped === true) {
-    query = query.replace(/\}\[/, `,isDropped="true"}[`);
+  // PL-12b — engine-decision cohort scope. patternBytesOverTime doesn't
+  // take a selector map (the pattern selector is inlined), so we splice
+  // the `isDropped` label into the existing `{...}` selector via
+  // string replace. `kept` uses the absence-tolerant `!=` form so legacy
+  // series without the label still match. `dropped` uses exact `=`.
+  // `both` runs two queries in parallel: the union (no `isDropped`
+  // selector) AND the dropped slice, joined by timestamp downstream.
+  const { droppedFilter, runBoth } = pql.includeToSelector(include);
+  const baseQuery = pql.patternBytesOverTime(pattern, metricsEnv, step);
+  const spliceIsDropped = (q: string, op: '=' | '!=', val: string) =>
+    q.replace(/\}\[/, `,isDropped${op}"${val}"}[`);
+  // `includeToSelector` only returns the object form (never a raw string)
+  // for `kept`/`dropped`, so narrow with a type guard the compiler accepts.
+  let primaryQuery: string;
+  if (droppedFilter !== null && typeof droppedFilter !== 'string') {
+    primaryQuery = spliceIsDropped(baseQuery, droppedFilter.op, droppedFilter.val);
+  } else {
+    primaryQuery = baseQuery;
   }
-  const res = await queryRange(env, query, start, now, stepSeconds);
+  const droppedQuery = runBoth ? spliceIsDropped(baseQuery, '=', 'true') : null;
+  const [res, droppedRes] = await Promise.all([
+    queryRange(env, primaryQuery, start, now, stepSeconds),
+    droppedQuery
+      ? queryRange(env, droppedQuery, start, now, stepSeconds).catch(() => null)
+      : Promise.resolve(null),
+  ]);
 
   if (res.status !== 'success' || res.data.result.length === 0) {
     return `No trend data for pattern "${pattern}" in the ${tf.label}.`;
@@ -181,6 +224,26 @@ async function executeTrendInner(
 
   if (points.length === 0) {
     return `No data points for pattern "${pattern}".`;
+  }
+
+  // PL-12b — extract the dropped-cohort series when `include === 'both'`.
+  // When `include === 'dropped'`, the primary series already IS the
+  // dropped slice; we mirror it into `droppedPoints` so the envelope's
+  // `dropped_time_series` is populated and downstream callers don't have
+  // to special-case the include value.
+  let droppedPoints: { ts: number; bytes: number }[] | null = null;
+  let droppedBytesTotal: number | null = null;
+  if (include === 'both' && droppedRes && droppedRes.status === 'success' && droppedRes.data.result.length > 0) {
+    droppedPoints = [];
+    for (const [ts, val] of (droppedRes.data.result[0].values || [])) {
+      droppedPoints.push({ ts, bytes: parseFloat(val) || 0 });
+    }
+    droppedBytesTotal = droppedPoints.reduce((s, p) => s + p.bytes, 0);
+  } else if (include === 'both') {
+    // Both requested but dropped query returned nothing — treat as zero
+    // offload (the union is fully `kept`).
+    droppedPoints = [];
+    droppedBytesTotal = 0;
   }
 
   // Compute stats
@@ -238,6 +301,34 @@ async function executeTrendInner(
       : '(no first-quarter baseline to compare against)';
 
   // Populate typed summary for view='summary' callers.
+  // PL-12b — fill the cohort fields per the include semantics:
+  //   kept     → dropped_* are null, kept_bytes_total = total_bytes
+  //   dropped  → kept_* null, dropped_* mirror the primary series
+  //   both     → both populated, dropped_share_pct = dropped / union
+  let keptBytesTotal: number | null;
+  let droppedBytesTotalOut: number | null;
+  let droppedSharePct: number | null;
+  let droppedTimeSeriesOut: Array<{ ts: number; bytes: number }> | null;
+  if (include === 'kept') {
+    keptBytesTotal = totalBytes;
+    droppedBytesTotalOut = null;
+    droppedSharePct = null;
+    droppedTimeSeriesOut = null;
+  } else if (include === 'dropped') {
+    keptBytesTotal = null;
+    droppedBytesTotalOut = totalBytes;
+    droppedSharePct = totalBytes > 0 ? 100 : null;
+    droppedTimeSeriesOut = points;
+  } else {
+    // include === 'both' — droppedBytesTotal was computed above (defaults
+    // to 0 when the dropped query was empty). The union is in totalBytes.
+    droppedBytesTotalOut = droppedBytesTotal ?? 0;
+    keptBytesTotal = Math.max(0, totalBytes - droppedBytesTotalOut);
+    droppedSharePct =
+      totalBytes > 0 ? (droppedBytesTotalOut / totalBytes) * 100 : null;
+    droppedTimeSeriesOut = droppedPoints ?? [];
+  }
+
   if (sumOut) {
     const stepSecs = stepSeconds;
     sumOut.data = {
@@ -256,6 +347,11 @@ async function executeTrendInner(
       low_bytes: minPoint.bytes,
       sample_count: points.length,
       rate_source: rateSource,
+      include,
+      kept_bytes_total: keptBytesTotal,
+      dropped_bytes_total: droppedBytesTotalOut,
+      dropped_share_pct: droppedSharePct,
+      dropped_time_series: droppedTimeSeriesOut,
     };
     void stepSecs;
   }
@@ -265,13 +361,22 @@ async function executeTrendInner(
   // description, not the raw token. trend fetches no sample, so this is the
   // algorithmic token descriptor; the exact pattern id stays in the
   // agent-only next-action hints below for chaining.
-  lines.push(`${patternDisplay(pattern).title} · trend over ${tf.label}`);
+  // PL-12b — title prefix when the trend describes the offload cohort, so
+  // a human reader sees the framing without having to read the param.
+  const titlePrefix = include === 'dropped' ? '[OFFLOADED] ' : '';
+  lines.push(`${titlePrefix}${patternDisplay(pattern).title} · trend over ${tf.label}`);
   lines.push(`Change over ${tf.label}: ${changeStr}${spikePoint ? `; peak ${(maxPoint.bytes / avgBytes).toFixed(1)}× the window average at ${formatTimestamp(spikePoint.ts)}` : ''}`);
   lines.push('');
   // Bytes-first body. Dollar lines are gated on `rate_source !== 'unset'`
   // (mirrors the headline rule). When unset we still show the volume
   // direction check in bytes so the reader has a usable comparison.
   lines.push(`  Measured volume over ${tf.label}: ${fmtBytes(totalBytes)}  (${points.length} samples @ ${step})`);
+  // PL-12b — one-line offload share callout. Only emitted on the `both`
+  // path so the default (kept) markdown is byte-identical to today, and
+  // the `dropped` path doesn't tautologically print "100%".
+  if (include === 'both' && droppedSharePct !== null && droppedBytesTotalOut !== null) {
+    lines.push(`  Currently offloaded: ${fmtBytes(droppedBytesTotalOut)} (${Math.round(droppedSharePct)}% of union)`);
+  }
   if (rateSource !== 'unset' && totalCost !== null) {
     lines.push(`  Measured spend over ${tf.label}: ${fmtDollar(totalCost)} (at ${rateSource})`);
   }

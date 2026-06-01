@@ -13,7 +13,7 @@ import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
 import { queryInstant, queryRange } from '../lib/api.js';
 import * as pql from '../lib/promql.js';
-import { LABELS } from '../lib/promql.js';
+import { LABELS, includeToSelector, type FilterValue } from '../lib/promql.js';
 import { bytesToCost, parsePrometheusValue } from '../lib/cost.js';
 import { resolveMetricsEnv, resolveMetricsEnvFiltered } from '../lib/resolve-env.js';
 import { parseTimeframe } from '../lib/format.js';
@@ -61,20 +61,22 @@ export const topPatternsSchema = {
     .describe(
       'Output format. "summary" (default) returns a structured JSON envelope with patterns, incidents, totals, and chained-tool action hints. "markdown" returns the existing rendered cards for human-consumable deliverables.'
     ),
-  // DEP: feat/x-percent-mcp-cost-tooling — added per
-  //   /tmp/poc-comparison/14d-24-implementation-spec.md (item 7).
-  // The user's feat/investigative-sharpening branch also touches this
-  // file; this addition is strictly additive (new optional flag, new
-  // label selector injected via the existing `filters` map fed to
-  // buildSelector) so the merge stays clean. When false/absent, the
-  // PromQL emitted is byte-identical to the pre-change query — the
-  // verify-mode caller in estimate-savings.ts sets it true to read
-  // the engine-side "what would have been dropped" cohort.
-  isDropped: z
-    .boolean()
-    .optional()
+  // PL-12a — three-way engine-decision cohort filter. Replaces the
+  // earlier boolean `isDropped` swap (which could only express
+  // kept-OR-dropped, not the union). Default 'kept' preserves pre-PL-12
+  // behavior. The `kept` path uses an absence-tolerant `isDropped!="true"`
+  // selector (see promql.includeToSelector) so series emitted before the
+  // receiver started stamping the `isDropped` label still match.
+  include: z
+    .enum(['kept', 'dropped', 'both'])
+    .default('kept')
     .describe(
-      'When true, scope the query to events tagged isDropped="true" by the engine — i.e. the cohort the regulator marked for drop/down-tier. Use to verify post-deploy realised savings. When absent/false, behavior is unchanged.'
+      'Which engine-decision cohort to scope to. ' +
+      '`kept` (default) = events the engine forwarded as-is (isDropped!="true") — the pre-PL-12 behavior. ' +
+      '`dropped` = events tagged isDropped="true" by the engine (the offload/down-tier cohort). ' +
+      '`both` = the pre-decision union; per-row output adds kept_bytes / dropped_bytes / dropped_share_pct. ' +
+      'Use `dropped` to verify post-deploy realised savings or to answer "which patterns are we offloading right now". ' +
+      'Use `both` to compute the offload share denominator in a single call.'
     ),
 };
 
@@ -99,8 +101,8 @@ export async function executeTopPatterns(
     siemScope?: string;
     verbose?: boolean;
     view?: 'summary' | 'markdown';
-    // DEP: feat/x-percent-mcp-cost-tooling — see schema comment above.
-    isDropped?: boolean;
+    // PL-12a — three-way cohort filter. See schema comment above.
+    include?: 'kept' | 'dropped' | 'both';
   },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
@@ -131,25 +133,55 @@ export async function executeTopPatterns(
   const costPerGb: number | null =
     args.effective_ingest_per_gb ?? args.analyzerCost ?? null;
 
-  const filters: Record<string, string> = {};
+  // PL-12a — resolve include mode and the `isDropped` selector once.
+  // `kept` (default) uses an absence-tolerant `!=` selector so series
+  // without the `isDropped` label still match. `dropped` exact-matches
+  // the engine-stamped cohort. `both` adds no selector here and triggers
+  // the dual-query path below (a second `isDropped="true"` pass is run
+  // in parallel and joined into the `dropped_*` envelope fields).
+  const include = args.include ?? 'kept';
+  const { droppedFilter, runBoth } = includeToSelector(include);
+
+  const filters: Record<string, FilterValue> = {};
   if (args.service) filters[LABELS.service] = args.service;
   if (args.severity) filters[LABELS.severity] = args.severity;
-  // DEP: feat/x-percent-mcp-cost-tooling — additive isDropped scope.
-  // Injecting via the filters map flows through buildSelector(), so
-  // every PromQL call below (top, events, total, count, service
-  // rollup, baseline, service breadth) picks up the selector with
-  // zero call-site changes. The standalone trend range query below
-  // does NOT use buildSelector — it gets the suffix appended inline.
-  const isDroppedSelector = args.isDropped === true ? `,isDropped="true"` : '';
-  if (args.isDropped === true) filters['isDropped'] = 'true';
+  // Inject the include filter into the shared filters map. Flows
+  // through buildSelector() so every PromQL call below (top, events,
+  // total, count, service rollup, baseline, service breadth) picks up
+  // the cohort selector with zero call-site changes. The standalone
+  // trend range query further below does NOT use buildSelector — it
+  // gets the inline suffix.
+  if (droppedFilter != null) filters['isDropped'] = droppedFilter;
+  // Inline selector tail for the trend-range query. Mirrors the same
+  // exact/negated semantics buildSelector emits.
+  const isDroppedSelector =
+    droppedFilter == null
+      ? ''
+      : typeof droppedFilter === 'string'
+        ? `,isDropped="${droppedFilter}"`
+        : `,isDropped${droppedFilter.op}"${droppedFilter.val}"`;
 
-  const metricsEnv = Object.keys(filters).length > 0
-    ? await resolveMetricsEnvFiltered(env, filters)
+  // resolveMetricsEnvFiltered still takes plain string filters (it
+  // only probes label presence). Project the filters map down for it.
+  const probeFilters: Record<string, string> = {};
+  for (const [k, v] of Object.entries(filters)) {
+    if (typeof v === 'string') probeFilters[k] = v;
+  }
+  const metricsEnv = Object.keys(probeFilters).length > 0
+    ? await resolveMetricsEnvFiltered(env, probeFilters)
     : await resolveMetricsEnv(env);
+
+  // PL-12a — `include='both'` needs a parallel pass with
+  // `isDropped="true"` to recover the dropped slice per (pattern,
+  // service, severity). The kept slice is `union - dropped`. When
+  // include is `kept` or `dropped`, the main query already scopes to
+  // the right cohort and we skip the dual query.
+  const droppedSliceFilters: Record<string, FilterValue> = { ...filters };
+  if (runBoth) droppedSliceFilters['isDropped'] = { op: '=', val: 'true' };
 
   // --- Phase 1: PromQL — ranking, event counts, total-in-scope, distinct,
   //              cost-by-service rollup ---
-  const [res, eventsRes, totalRes, countRes, serviceRollupRes] = await Promise.all([
+  const [res, eventsRes, totalRes, countRes, serviceRollupRes, droppedSliceRes, droppedTotalRes] = await Promise.all([
     queryInstant(env, pql.topPatternsFull(filters, metricsEnv, tf.range, args.limit)),
     queryInstant(env, pql.eventsByPatternFull(filters, metricsEnv, tf.range)).catch(() => null),
     queryInstant(env, pql.totalBytesInScope(filters, metricsEnv, tf.range)).catch(() => null),
@@ -159,6 +191,17 @@ export async function executeTopPatterns(
     // hand-roll (stats by container_name) and which the per-pattern
     // list buries under fragmentation.
     queryInstant(env, pql.bytesPerServiceScoped(filters, metricsEnv, tf.range)).catch(() => null),
+    // PL-12a `both` dual-query: per-(pattern, service, severity) bytes
+    // for the dropped cohort, so we can carry kept/dropped/share_pct
+    // on every row. Skipped when include != 'both'.
+    runBoth
+      ? queryInstant(env, pql.bytesPerPattern(droppedSliceFilters, metricsEnv, tf.range)).catch(() => null)
+      : Promise.resolve(null),
+    // PL-12a `both` totals: env-wide dropped bytes so the totals block
+    // and headline can report `dropped_share_pct` against the union.
+    runBoth
+      ? queryInstant(env, pql.totalBytesInScope(droppedSliceFilters, metricsEnv, tf.range)).catch(() => null)
+      : Promise.resolve(null),
   ]);
 
   if (res.status !== 'success' || res.data.result.length === 0) {
@@ -179,6 +222,32 @@ export async function executeTopPatterns(
       if (Number.isFinite(v) && v > 0) eventsByKey.set(k, v);
     }
   }
+
+  // PL-12a `both` — per-(pattern, service, severity) dropped bytes
+  // lookup. Joined into the row assembly so each row carries
+  // kept_bytes / dropped_bytes / dropped_share_pct. Empty map when
+  // include != 'both' or the dropped-slice query failed.
+  const droppedBytesByKey = new Map<string, number>();
+  if (runBoth && droppedSliceRes && droppedSliceRes.status === 'success') {
+    for (const r of droppedSliceRes.data.result) {
+      const k = key(
+        r.metric[LABELS.pattern] || '',
+        r.metric[LABELS.service] || '',
+        r.metric[LABELS.severity] || ''
+      );
+      const v = parsePrometheusValue(r);
+      if (Number.isFinite(v) && v > 0) droppedBytesByKey.set(k, v);
+    }
+  }
+  // Env-wide dropped total — used by the totals block + headline when
+  // include='both'. When include='dropped' this is just totalBytes
+  // (the main query already scopes to the dropped cohort). When
+  // include='kept' this is null.
+  const droppedTotalBytes: number | null = runBoth
+    ? droppedTotalRes && droppedTotalRes.status === 'success' && droppedTotalRes.data.result.length > 0
+      ? parsePrometheusValue(droppedTotalRes.data.result[0])
+      : 0
+    : null;
 
   // Build initial row list (sorted by cost desc)
   interface RawRow {
@@ -424,6 +493,23 @@ export async function executeTopPatterns(
 
   // --- Phase 5: Agent-only routing block ---
   const lines: string[] = [rendered, ''];
+  // PL-12a — include-aware framing line under the rendered cards.
+  // `kept` (default) emits nothing here, so the markdown is unchanged.
+  if (include === 'dropped') {
+    lines.push(
+      `_Scoped to events tagged \`isDropped="true"\` — the cohort the engine flagged for drop / down-tier. Pass \`include="kept"\` for the forwarded cohort, \`include="both"\` for the pre-decision union._`
+    );
+  } else if (include === 'both') {
+    // Compute the env-wide offload share inline here (the totals
+    // block below also computes it; this is the same denominator).
+    const offloadShare =
+      totalBytes > 0 && droppedTotalBytes != null
+        ? `${Math.round((droppedTotalBytes / totalBytes) * 100)}%`
+        : '0%';
+    lines.push(
+      `_Pre-decision union (kept ∪ dropped). ${offloadShare} of scanned bytes is currently flagged for offload (\`isDropped="true"\`). Per-pattern split in \`kept_bytes\` / \`dropped_bytes\` / \`dropped_share_pct\` below._`
+    );
+  }
   lines.push(
     `_Ranked by current cost, not by growth. To see what's rising or fading over time, ask for cost drivers over a longer window._`
   );
@@ -538,29 +624,126 @@ export async function executeTopPatterns(
   // (bytes share of in-scope total) — answers "how big is this slice" without
   // requiring a dollar rate. `cost_per_*_usd` are nullable: null when
   // rate_source==='unset'. Renderer-side gating lives in step 12a.
-  const dataPatterns = renderRows.map((r, idx) => ({
-    rank: r.rank,
-    identity: r.pattern ?? r.hash ?? '',
-    template_hash: r.hash ?? '',
-    service: r.service,
-    severity: r.severity,
-    cost_per_hour_usd: honestCostPerHour[idx],
-    cost_per_month_usd: honestCostPerMonth[idx],
-    bytes: r.bytes,
-    percent_of_total_bytes:
-      totalBytes > 0 ? (r.bytes / totalBytes) * 100 : 0,
-    share_pct: totalBytes > 0 ? (r.bytes / totalBytes) * 100 : 0,
-    events: r.events,
-    first_seen_age_seconds: r.firstSeenAgeSeconds,
-    badge: r.badge,
-    descriptor: r.pattern ?? r.hash ?? '',
-    trend_bytes_per_sec: r.trendBytesPerSec,
-  }));
+  //
+  // PL-12a — `kept_bytes`, `dropped_bytes`, `dropped_share_pct` carry the
+  // engine-decision split. Their meaning depends on `include`:
+  //   - include='kept'    → kept_bytes=bytes (the cohort), dropped_bytes=null,
+  //                          dropped_share_pct=0
+  //   - include='dropped' → kept_bytes=null, dropped_bytes=bytes (the cohort),
+  //                          dropped_share_pct=100
+  //   - include='both'    → kept_bytes = bytes - dropped_bytes (joined from
+  //                          the parallel `isDropped="true"` query on
+  //                          (pattern, service, severity)),
+  //                          dropped_share_pct = dropped / union * 100
+  // `dropped_bytes_monthly` / `dropped_events_monthly` are derived from the
+  // dropped slice (windowHours → 720h). `dropped_cost_per_month_usd` gates
+  // on rate_source — null when the rate is unset.
+  const dataPatterns = renderRows.map((r, idx) => {
+    const rawRow = rawRows[idx];
+    const k = key(rawRow.pattern, rawRow.service, rawRow.severity);
+    // Compute the kept/dropped split per the include semantics above.
+    let keptBytes: number | null;
+    let droppedBytes: number | null;
+    if (include === 'kept') {
+      keptBytes = r.bytes;
+      droppedBytes = null;
+    } else if (include === 'dropped') {
+      keptBytes = null;
+      droppedBytes = r.bytes;
+    } else {
+      // 'both' — r.bytes is the union; subtract the dropped slice for kept.
+      droppedBytes = droppedBytesByKey.get(k) ?? 0;
+      keptBytes = Math.max(0, r.bytes - droppedBytes);
+    }
+    const droppedSharePct =
+      include === 'kept'
+        ? 0
+        : include === 'dropped'
+          ? 100
+          : r.bytes > 0
+            ? ((droppedBytes ?? 0) / r.bytes) * 100
+            : 0;
+    // Monthly projections from the dropped slice. windowHours==0 (sub-second
+    // window) would NaN, so guard.
+    const monthlyScale = windowHours > 0 ? 720 / windowHours : 0;
+    const droppedBytesMonthly =
+      droppedBytes == null ? null : droppedBytes * monthlyScale;
+    // Events monthly: the events count is for the cohort `include` selected
+    // already. For include='dropped' the events count == dropped events; for
+    // 'kept' it's the kept events (dropped events not separately known
+    // without a third query). For 'both' we don't have a per-row dropped
+    // event count, so leave null.
+    const droppedEventsMonthly =
+      include === 'dropped' ? r.events * monthlyScale : null;
+    const droppedCostPerMonth =
+      droppedBytesMonthly == null || costPerGb == null
+        ? null
+        : bytesToCost(droppedBytesMonthly, costPerGb);
+    return {
+      rank: r.rank,
+      identity: r.pattern ?? r.hash ?? '',
+      template_hash: r.hash ?? '',
+      service: r.service,
+      severity: r.severity,
+      cost_per_hour_usd: honestCostPerHour[idx],
+      cost_per_month_usd: honestCostPerMonth[idx],
+      bytes: r.bytes,
+      percent_of_total_bytes:
+        totalBytes > 0 ? (r.bytes / totalBytes) * 100 : 0,
+      share_pct: totalBytes > 0 ? (r.bytes / totalBytes) * 100 : 0,
+      events: r.events,
+      first_seen_age_seconds: r.firstSeenAgeSeconds,
+      badge: r.badge,
+      descriptor: r.pattern ?? r.hash ?? '',
+      trend_bytes_per_sec: r.trendBytesPerSec,
+      // PL-12a additions.
+      kept_bytes: keptBytes,
+      dropped_bytes: droppedBytes,
+      dropped_share_pct: droppedSharePct,
+      dropped_bytes_monthly: droppedBytesMonthly,
+      dropped_events_monthly: droppedEventsMonthly,
+      dropped_cost_per_month_usd: droppedCostPerMonth,
+    };
+  });
 
   // Aggregate share — the % of in-scope bytes the shown rows cover.
   const shownBytes = renderRows.reduce((s, r) => s + r.bytes, 0);
   const top_n_percent_of_total =
     totalBytes > 0 ? (shownBytes / totalBytes) * 100 : 0;
+
+  // PL-12a — totals block dropped fields. Sums the per-row `dropped_bytes`
+  // across the SHOWN rows (not env-wide); the env-wide `dropped_share_pct`
+  // when include='both' uses the parallel `totalBytesInScope(isDropped=true)`
+  // query against the union from `totalBytes`. When include='kept', all
+  // three are null. When include='dropped', the cohort IS the dropped
+  // slice, so `dropped_bytes_total = shownBytes` and share=100.
+  let droppedBytesTotalShown: number | null;
+  let droppedShareTotalPct: number | null;
+  let droppedMonthlyUsd: number | null;
+  if (include === 'kept') {
+    droppedBytesTotalShown = null;
+    droppedShareTotalPct = null;
+    droppedMonthlyUsd = null;
+  } else if (include === 'dropped') {
+    droppedBytesTotalShown = shownBytes;
+    droppedShareTotalPct = 100;
+    droppedMonthlyUsd = totalCostMonthly;
+  } else {
+    droppedBytesTotalShown = dataPatterns.reduce(
+      (s, p) => s + (p.dropped_bytes ?? 0),
+      0
+    );
+    const denom = totalBytes;
+    droppedShareTotalPct =
+      denom > 0 && droppedTotalBytes != null
+        ? (droppedTotalBytes / denom) * 100
+        : 0;
+    const droppedMonthlyScale = windowHours > 0 ? 720 / windowHours : 0;
+    droppedMonthlyUsd =
+      costPerGb != null && droppedTotalBytes != null
+        ? bytesToCost(droppedTotalBytes * droppedMonthlyScale, costPerGb)
+        : null;
+  }
 
   const totals = {
     monthly_usd: totalCostMonthly,
@@ -569,11 +752,19 @@ export async function executeTopPatterns(
     top_n_percent_of_total,
     pattern_count_shown: renderRows.length,
     pattern_count_total: patternCountTotal,
+    // PL-12a additions.
+    dropped_bytes_total: droppedBytesTotalShown,
+    dropped_share_pct: droppedShareTotalPct,
+    dropped_monthly_usd: droppedMonthlyUsd,
   };
 
   // Headline: percent-of-bytes + byte volume first. Dollar clause appended
   // only when a rate is known; "(rate unset)" tag otherwise so agents can
   // route to estimate_savings with `effective_ingest_per_gb`.
+  //
+  // PL-12a — include-aware. `kept` keeps the pre-PL-12 headline. `dropped`
+  // pivots to "Top N OFFLOADED patterns ... flagged for drop/down-tier".
+  // `both` reports the union plus the currently-offloaded share.
   let headline: string;
   if (renderRows.length === 0) {
     headline = `No patterns in scope over ${tf.label}.`;
@@ -584,11 +775,33 @@ export async function executeTopPatterns(
       incidents.length > 0
         ? ` ${incidents.length} incident cluster${incidents.length === 1 ? '' : 's'} detected.`
         : '';
-    if (totalCostMonthly != null) {
-      const tag = rate_source === 'customer_supplied' ? 'customer_supplied' : 'list_price';
-      headline = `Top ${renderRows.length} patterns over ${tf.label} cover ${sharePctLabel} of scanned bytes (${bytesLabel}), ~$${totalCostMonthly.toFixed(0)}/mo at ${tag}.${incidentTail}`;
+    const rateTag =
+      rate_source === 'customer_supplied' ? 'customer_supplied' : 'list_price';
+    const rateUnsetTail =
+      ' Dollar overlay omitted (rate unset); pass effective_ingest_per_gb to project savings.';
+    if (include === 'dropped') {
+      if (totalCostMonthly != null) {
+        headline = `Top ${renderRows.length} OFFLOADED patterns over ${tf.label}: ${bytesLabel} flagged for drop/down-tier (${sharePctLabel} of scanned bytes in scope), ~$${totalCostMonthly.toFixed(0)}/mo at ${rateTag}.${incidentTail}`;
+      } else {
+        headline = `Top ${renderRows.length} OFFLOADED patterns over ${tf.label}: ${bytesLabel} flagged for drop/down-tier (${sharePctLabel} of scanned bytes in scope).${rateUnsetTail}${incidentTail}`;
+      }
+    } else if (include === 'both') {
+      const offloadShareLabel =
+        droppedShareTotalPct != null
+          ? `${Math.round(droppedShareTotalPct)}%`
+          : '0%';
+      if (totalCostMonthly != null) {
+        headline = `Top ${renderRows.length} patterns over ${tf.label}: ${bytesLabel} union (${offloadShareLabel} currently offloaded), ~$${totalCostMonthly.toFixed(0)}/mo total at ${rateTag}.${incidentTail}`;
+      } else {
+        headline = `Top ${renderRows.length} patterns over ${tf.label}: ${bytesLabel} union (${offloadShareLabel} currently offloaded).${rateUnsetTail}${incidentTail}`;
+      }
     } else {
-      headline = `Top ${renderRows.length} patterns over ${tf.label} cover ${sharePctLabel} of scanned bytes (${bytesLabel}). Dollar overlay omitted (rate unset); pass effective_ingest_per_gb to project savings.${incidentTail}`;
+      // kept (default) — preserves pre-PL-12 headline byte-for-byte.
+      if (totalCostMonthly != null) {
+        headline = `Top ${renderRows.length} patterns over ${tf.label} cover ${sharePctLabel} of scanned bytes (${bytesLabel}), ~$${totalCostMonthly.toFixed(0)}/mo at ${rateTag}.${incidentTail}`;
+      } else {
+        headline = `Top ${renderRows.length} patterns over ${tf.label} cover ${sharePctLabel} of scanned bytes (${bytesLabel}).${rateUnsetTail}${incidentTail}`;
+      }
     }
   }
 
@@ -641,9 +854,16 @@ export async function executeTopPatterns(
           label: `#${i + 1} ${p.identity}`,
           value: useDollars ? (p.cost_per_month_usd ?? 0) : p.bytes,
         }));
+      // PL-12a — chart title pivots when scoped to the offload cohort.
+      const cohortLabel =
+        include === 'dropped'
+          ? 'offloaded patterns'
+          : include === 'both'
+            ? 'patterns (union, kept + offloaded)'
+            : 'patterns';
       const title = useDollars
-        ? `Top ${dataPatterns.length} patterns by $/mo (${tf.label}) (at ${rateTag})`
-        : `Top ${dataPatterns.length} patterns by bytes/mo (${tf.label})`;
+        ? `Top ${dataPatterns.length} ${cohortLabel} by $/mo (${tf.label}) (at ${rateTag})`
+        : `Top ${dataPatterns.length} ${cohortLabel} by bytes/mo (${tf.label})`;
       const xLabel = useDollars ? '$/mo' : 'bytes/mo';
       const png = await renderHorizontalBar(bars, { title, xLabel });
       if (png) {
@@ -669,6 +889,10 @@ export async function executeTopPatterns(
     summary: { headline, callout },
     data: {
       rate_source,
+      // PL-12a — echo the resolved cohort so the agent can route follow-up
+      // calls (e.g. `include='dropped'` from a `'both'` audit) without
+      // re-deriving from the per-row fields.
+      include,
       patterns: dataPatterns,
       incidents: incidents.map((c) => {
         const combinedBytes = c.members.reduce(
