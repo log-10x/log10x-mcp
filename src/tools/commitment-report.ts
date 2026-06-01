@@ -51,8 +51,10 @@ import {
   CustomerMetricsNotConfiguredError,
   type CustomerMetricsBackend,
 } from '../lib/customer-metrics.js';
-import { annualizeDollars } from '../lib/cost.js';
+import { annualizeDollars, type Action } from '../lib/cost.js';
 import type { SiemId } from '../lib/siem/pricing.js';
+import { loadEnvironments, resolveEnv } from '../lib/environments.js';
+import { getOffloadStatusBatch } from '../lib/offload-status.js';
 
 // ─── input schema ────────────────────────────────────────────────────
 
@@ -214,6 +216,26 @@ export interface WeeklyVerifyResult {
    *  - 'unset'             — no rate; `delivered_dollars` is null
    */
   rate_source?: 'list_price' | 'customer_supplied' | 'unset';
+  /**
+   * Per-pattern breakdown sourced from the cap CSV `<bytes>::<reason>:<action>`
+   * row format (see project_unified_savings_tool.md). When the engine
+   * regulator JS does not parse the `:<action>` suffix yet, this field
+   * is absent — the commitment report falls back to attributing all
+   * `bytes_dropped` to the `drop` bucket (legacy behaviour) and pushes a
+   * caveat noting the breakdown is unavailable.
+   *
+   * When `action_taken` is omitted on a row, the report defaults it to
+   * `'pass'` and contributes 0 bytes to every bucket — preserves the
+   * §A.1 invariant (drop+compact+offload+tier_down ≈ delivered_pct)
+   * without double-counting unmarked patterns.
+   */
+  per_pattern_breakdown?: Array<{
+    pattern_hash: string;
+    action_taken?: Action;
+    bytes_saved: number;
+    dollars_saved?: number | null;
+    rate_source?: 'list_price' | 'customer_supplied' | 'unset';
+  }>;
 }
 
 /**
@@ -259,7 +281,40 @@ export interface CommitmentReportEnvelope {
   };
   period: { start: string; end: string; days: number };
   delivered_pct: number;
+  /**
+   * Share of `bytes_in` saved by each engine action, 0..100 percent.
+   *
+   * Each share is a percent of bytes_in (NOT a share of delivered_pct).
+   * Invariant: drop + compact + offload + tier_down ≈ delivered_pct
+   * within ±0.5pp rounding. Patterns whose cap CSV row omits the
+   * `:<action>` suffix default to `'pass'` and contribute 0 to every
+   * bucket — see §E.1 in the patch spec.
+   *
+   * The `offload` bucket is the metric-side `dropped_bytes_in_window`
+   * for patterns where `getOffloadStatusBatch` returned `is_offloaded`;
+   * the metric stamp overrides any cap-CSV action. On metric backend
+   * timeout the bucket is 0 and a soft-warning lands in `caveats`.
+   */
+  percent_reduction_by_action: {
+    drop: number;
+    compact: number;
+    offload: number;
+    tier_down: number;
+  };
   delivered_bytes: number;
+  /**
+   * Bytes saved by each engine action — bytes counterpart of
+   * `percent_reduction_by_action`. Sum to `delivered_bytes` by
+   * construction when the offload helper succeeds. On offload-helper
+   * timeout the offload bucket is 0 and a caveat surfaces that the
+   * contribution was omitted.
+   */
+  bytes_saved_by_action: {
+    drop: number;
+    compact: number;
+    offload: number;
+    tier_down: number;
+  };
   /**
    * For year-one committed contracts: the THEORETICAL dollar value of
    * the bytes saved (banked, not realized). For on-demand contracts and
@@ -304,6 +359,26 @@ export interface CommitmentReportEnvelope {
     pattern_hash: string;
     issue: 'leakage' | 'new_pattern_uncapped' | 'drift';
     recommended: string;
+  }>;
+  /**
+   * Per-pattern attribution rows merged across the report period.
+   *
+   * `action_taken` is sourced from the cap CSV `:<action>` suffix
+   * (project_unified_savings_tool.md), falling back to `'pass'` when
+   * absent. Patterns flagged by `getOffloadStatusBatch.is_offloaded`
+   * override to `'offload'` regardless of the cap CSV — the metric
+   * stamp is ground truth. `dollars_saved` is null whenever the row's
+   * `rate_source === 'unset'`.
+   *
+   * Empty when the upstream verify runner did not return
+   * `per_pattern_breakdown` for any week — see the caveat path in §E.1.
+   */
+  per_pattern_rows: Array<{
+    pattern_hash: string;
+    action_taken: Action;
+    bytes_saved: number;
+    dollars_saved: number | null;
+    rate_source: 'list_price' | 'customer_supplied' | 'unset';
   }>;
   annualized_dollars: number | null;
   caveats: string[];
@@ -462,6 +537,30 @@ function inverseNormalCdf(p: number): number {
 
 // ─── aggregation ────────────────────────────────────────────────────
 
+/**
+ * Merged per-pattern row used in the envelope's `per_pattern_rows`.
+ * Built up by `aggregateWeekly` and (optionally) overridden by the
+ * offload-status batch later in `executeCommitmentReport`.
+ */
+interface MergedPatternRow {
+  pattern_hash: string;
+  action_taken: Action;
+  bytes_saved: number;
+  dollars_saved: number | null;
+  rate_source: 'list_price' | 'customer_supplied' | 'unset';
+}
+
+interface ActionBuckets {
+  drop: number;
+  compact: number;
+  offload: number;
+  tier_down: number;
+}
+
+function emptyActionBuckets(): ActionBuckets {
+  return { drop: 0, compact: 0, offload: 0, tier_down: 0 };
+}
+
 function aggregateWeekly(weekly: WeeklyVerifyResult[]): {
   delivered_pct: number;
   delivered_bytes: number;
@@ -473,6 +572,15 @@ function aggregateWeekly(weekly: WeeklyVerifyResult[]): {
     new_patterns_pct: number;
     leakage_pct: number;
   };
+  bytes_saved_by_action: ActionBuckets;
+  per_pattern_rows: MergedPatternRow[];
+  /**
+   * True when at least one week supplied `per_pattern_breakdown`. When
+   * false, the four-way split degraded to legacy behaviour (all of
+   * `delivered_bytes` lands in the `drop` bucket) and the caller must
+   * push a caveat.
+   */
+  per_pattern_breakdown_available: boolean;
 } {
   let totalIn = 0;
   let totalDropped = 0;
@@ -489,6 +597,13 @@ function aggregateWeekly(weekly: WeeklyVerifyResult[]): {
   let sawCustomer = false;
   let sawList = false;
   let sawUnsetOrMissing = false;
+  const buckets = emptyActionBuckets();
+  // Merge per-pattern rows across weeks: same pattern_hash gets its
+  // bytes_saved + dollars_saved summed, action_taken latched to the
+  // most recent week (last write wins — the action a pattern carries
+  // at the end of the period is what FinOps wants to see).
+  const merged = new Map<string, MergedPatternRow>();
+  let perPatternAvailable = false;
   for (const w of weekly) {
     totalIn += w.bytes_in;
     totalDropped += w.bytes_dropped;
@@ -505,6 +620,59 @@ function aggregateWeekly(weekly: WeeklyVerifyResult[]): {
     driftWeighted += w.attribution.drift * weight;
     newPatWeighted += w.attribution.new_patterns * weight;
     leakWeighted += w.attribution.leakage * weight;
+
+    if (w.per_pattern_breakdown && w.per_pattern_breakdown.length > 0) {
+      perPatternAvailable = true;
+      for (const row of w.per_pattern_breakdown) {
+        // §E.1: missing action_taken defaults to 'pass'; pass rows
+        // contribute 0 to every bucket and 0 bytes_saved.
+        const action: Action = row.action_taken ?? 'pass';
+        const bytesSaved = Number.isFinite(row.bytes_saved) ? Math.max(0, row.bytes_saved) : 0;
+        if (action === 'drop') buckets.drop += bytesSaved;
+        else if (action === 'compact') buckets.compact += bytesSaved;
+        else if (action === 'offload') buckets.offload += bytesSaved;
+        else if (action === 'tier_down') buckets.tier_down += bytesSaved;
+        // 'pass' / 'sample' → 0 contribution (sample is a partial cut
+        // not represented in the four-way bucket break-out here).
+
+        const rowRate = row.rate_source ?? 'unset';
+        const rowDollars =
+          rowRate === 'unset' || row.dollars_saved == null || !Number.isFinite(row.dollars_saved)
+            ? null
+            : row.dollars_saved;
+        const prior = merged.get(row.pattern_hash);
+        if (!prior) {
+          merged.set(row.pattern_hash, {
+            pattern_hash: row.pattern_hash,
+            action_taken: action,
+            bytes_saved: bytesSaved,
+            dollars_saved: rowDollars,
+            rate_source: rowRate,
+          });
+        } else {
+          prior.bytes_saved += bytesSaved;
+          // Sum dollars when both sides have a rate; null sticks if
+          // either side was unset so the renderer keeps gating $.
+          if (prior.dollars_saved != null && rowDollars != null) {
+            prior.dollars_saved += rowDollars;
+          } else if (rowDollars != null && prior.dollars_saved == null) {
+            prior.dollars_saved = rowDollars;
+          }
+          // Latch the latest action_taken (last week wins).
+          prior.action_taken = action;
+          // Rate source: keep prior unless prior was unset.
+          if (prior.rate_source === 'unset' && rowRate !== 'unset') {
+            prior.rate_source = rowRate;
+          }
+        }
+      }
+    }
+  }
+  // §E.1 fallback: when no week supplied per_pattern_breakdown, the
+  // four-way split degrades to legacy behaviour — all delivered_bytes
+  // attributed to the `drop` bucket. per_pattern_rows is empty.
+  if (!perPatternAvailable) {
+    buckets.drop = totalDropped;
   }
   const denom = totalIn > 0 ? totalIn : 1;
   let rate_source: 'list_price' | 'customer_supplied' | 'unset';
@@ -523,6 +691,9 @@ function aggregateWeekly(weekly: WeeklyVerifyResult[]): {
       new_patterns_pct: (newPatWeighted / denom) * 100,
       leakage_pct: (leakWeighted / denom) * 100,
     },
+    bytes_saved_by_action: buckets,
+    per_pattern_rows: Array.from(merged.values()),
+    per_pattern_breakdown_available: perPatternAvailable,
   };
 }
 
@@ -618,6 +789,21 @@ function renderMarkdown(env: CommitmentReportEnvelope): string {
   lines.push(
     `**Status:** ${status} — delivered **${env.delivered_pct.toFixed(1)}%** vs promised **${env.commitment.promised_pct.toFixed(1)}%** over ${env.period.days} days (${env.period.start.slice(0, 10)} to ${env.period.end.slice(0, 10)}).`
   );
+  // §C.1: per-action breakdown beat. Print only non-zero buckets and
+  // suppress entirely when delivered_pct is 0 (BEHIND status carries
+  // that already). All four percents are share-of-bytes_in, pre-computed
+  // in the envelope by the aggregator.
+  if (env.delivered_pct > 0) {
+    const segs: string[] = [];
+    const pa = env.percent_reduction_by_action;
+    if (pa.drop > 0) segs.push(`drop ${pa.drop.toFixed(1)}%`);
+    if (pa.compact > 0) segs.push(`compact ${pa.compact.toFixed(1)}%`);
+    if (pa.offload > 0) segs.push(`offload ${pa.offload.toFixed(1)}%`);
+    if (pa.tier_down > 0) segs.push(`tier-down ${pa.tier_down.toFixed(1)}%`);
+    if (segs.length > 0) {
+      lines.push(`breakdown: ${segs.join(' · ')}`);
+    }
+  }
   lines.push('');
   // Dollar paragraph: inline `(rate_source=X, kind=Y)`. When rate_source
   // is unset, suppress the dollar figures and report bytes-banked only.
@@ -660,6 +846,63 @@ function renderMarkdown(env: CommitmentReportEnvelope): string {
   lines.push(`| Pattern drift          | ${env.variance_attribution.drift_pct.toFixed(1)}% |`);
   lines.push(`| New uncapped patterns  | ${env.variance_attribution.new_patterns_pct.toFixed(1)}% |`);
   lines.push(`| Leakage (under-firing) | ${env.variance_attribution.leakage_pct.toFixed(1)}% |`);
+
+  // §C.2: Savings-by-action table. Dollars column is gated on
+  // rate_source !== 'unset' (matches the existing dollar-paragraph
+  // rule on line 624-627). Zero-share rows stay in for completeness —
+  // FinOps wants to see the zeros to confirm nothing was missed.
+  // EXCEPT when the offload bucket is "unknown" (helper timed out),
+  // in which case we omit the offload row entirely — see §E.2. That
+  // condition is signalled by a specific caveat string, checked here.
+  const offloadTimedOut = env.caveats.some((c) =>
+    c.startsWith('Offload status lookup timed out')
+  );
+  const showDollars = env.rate_source !== 'unset' && env.delivered_dollars != null;
+  lines.push('');
+  lines.push('## Savings by action');
+  lines.push('');
+  const pa = env.percent_reduction_by_action;
+  const ba = env.bytes_saved_by_action;
+  // Per-action dollar fractions track byte fractions when delivered_bytes>0;
+  // when rate_source==='unset' the column is omitted entirely.
+  const dollarShare = (bytes: number): number => {
+    if (!showDollars || env.delivered_bytes <= 0 || env.delivered_dollars == null) return 0;
+    return env.delivered_dollars * (bytes / env.delivered_bytes);
+  };
+  if (showDollars) {
+    lines.push('| Action    | Share of bytes | Bytes saved | Dollars (rate_source) |');
+    lines.push('|-----------|----------------|-------------|-----------------------|');
+    lines.push(
+      `| Drop      | ${pa.drop.toFixed(1)}%           | ${ba.drop.toLocaleString()} | $${dollarShare(ba.drop).toFixed(0)} (${env.rate_source}) |`
+    );
+    lines.push(
+      `| Compact   | ${pa.compact.toFixed(1)}%           | ${ba.compact.toLocaleString()} | $${dollarShare(ba.compact).toFixed(0)} (${env.rate_source}) |`
+    );
+    if (!offloadTimedOut) {
+      lines.push(
+        `| Offload   | ${pa.offload.toFixed(1)}%           | ${ba.offload.toLocaleString()} | $${dollarShare(ba.offload).toFixed(0)} (${env.rate_source}) |`
+      );
+    }
+    lines.push(
+      `| Tier-down | ${pa.tier_down.toFixed(1)}%           | ${ba.tier_down.toLocaleString()} | $${dollarShare(ba.tier_down).toFixed(0)} (${env.rate_source}) |`
+    );
+  } else {
+    lines.push('| Action    | Share of bytes | Bytes saved |');
+    lines.push('|-----------|----------------|-------------|');
+    lines.push(`| Drop      | ${pa.drop.toFixed(1)}%           | ${ba.drop.toLocaleString()} |`);
+    lines.push(`| Compact   | ${pa.compact.toFixed(1)}%           | ${ba.compact.toLocaleString()} |`);
+    if (!offloadTimedOut) {
+      lines.push(`| Offload   | ${pa.offload.toFixed(1)}%           | ${ba.offload.toLocaleString()} |`);
+    }
+    lines.push(`| Tier-down | ${pa.tier_down.toFixed(1)}%           | ${ba.tier_down.toLocaleString()} |`);
+  }
+  // §C.3: Offload nudge — declarative wording, no "you / your".
+  if (ba.offload > 0) {
+    lines.push('');
+    lines.push(
+      '> _Offloaded volume is queryable via `log10x_retriever_query` for forensic access — pass the period start/end to scan the customer-owned archive._'
+    );
+  }
   lines.push('');
   lines.push('## Forward confidence (next 90 days)');
   lines.push('');
@@ -825,6 +1068,72 @@ export async function executeCommitmentReport(
   const agg = aggregateWeekly(weeklyResults);
   const atRisk = aggregateAtRiskActions(weeklyResults);
 
+  // 5b. Offload-bucket override via metric-surface stamp (§B.3).
+  // The receiver stamps `isDropped="true"` on every offloaded event;
+  // getOffloadStatusBatch reads that signal. Any pattern flagged as
+  // offloaded has its row's action_taken overridden to 'offload'
+  // REGARDLESS of what the cap CSV said — the metric stamp is ground
+  // truth. On metric backend timeout / env-load failure the bucket
+  // stays 0 and a caveat surfaces (§E.2).
+  let offloadHelperTimedOut = false;
+  if (agg.per_pattern_breakdown_available && agg.per_pattern_rows.length > 0) {
+    try {
+      const envs = await loadEnvironments();
+      const envCfg = resolveEnv(envs, args.environment);
+      const hashes = agg.per_pattern_rows.map((r) => r.pattern_hash);
+      const rangeHours = Math.max(1, period.days * 24);
+      const batch = await getOffloadStatusBatch(envCfg, {
+        patternHashes: hashes,
+        metricsEnv: commitment.env,
+        range: `${rangeHours}h`,
+        timeoutMs: 2000,
+      });
+      // Empty record == helper failed (per offload-status.ts:228). When
+      // every entry is ok:false the same caveat applies (§E.2).
+      const haveData = Object.values(batch).some((s) => s && s.ok);
+      if (!haveData) {
+        offloadHelperTimedOut = true;
+      } else {
+        for (const row of agg.per_pattern_rows) {
+          const status = batch[row.pattern_hash];
+          if (!status || !status.ok || !status.is_offloaded) continue;
+          // Move the row's bytes_saved out of its prior bucket; the
+          // canonical magnitude for the offload bucket is the metric
+          // `dropped_bytes_in_window` (per §B.3 step 3).
+          const priorAction = row.action_taken;
+          const priorBytes = row.bytes_saved;
+          if (priorAction === 'drop') agg.bytes_saved_by_action.drop -= priorBytes;
+          else if (priorAction === 'compact') agg.bytes_saved_by_action.compact -= priorBytes;
+          else if (priorAction === 'tier_down') agg.bytes_saved_by_action.tier_down -= priorBytes;
+          else if (priorAction === 'offload') agg.bytes_saved_by_action.offload -= priorBytes;
+          const metricBytes = Math.max(0, status.dropped_bytes_in_window);
+          agg.bytes_saved_by_action.offload += metricBytes;
+          row.action_taken = 'offload';
+          row.bytes_saved = metricBytes;
+        }
+        // Clamp negative bucket residuals to 0 — pathological if
+        // bytes_saved drifted below an offloaded row's prior contribution.
+        if (agg.bytes_saved_by_action.drop < 0) agg.bytes_saved_by_action.drop = 0;
+        if (agg.bytes_saved_by_action.compact < 0) agg.bytes_saved_by_action.compact = 0;
+        if (agg.bytes_saved_by_action.tier_down < 0) agg.bytes_saved_by_action.tier_down = 0;
+      }
+    } catch {
+      offloadHelperTimedOut = true;
+    }
+  }
+
+  // 5c. Compute percent_reduction_by_action — each bucket as a share of
+  // bytes_in (NOT a share of delivered_pct), per §A.1.
+  const bytesInTotal = weeklyResults.reduce((a, w) => a + w.bytes_in, 0);
+  const pctOfIn = (bytes: number): number =>
+    bytesInTotal > 0 ? Math.max(0, Math.min(100, (bytes / bytesInTotal) * 100)) : 0;
+  const percent_reduction_by_action = {
+    drop: pctOfIn(agg.bytes_saved_by_action.drop),
+    compact: pctOfIn(agg.bytes_saved_by_action.compact),
+    offload: pctOfIn(agg.bytes_saved_by_action.offload),
+    tier_down: pctOfIn(agg.bytes_saved_by_action.tier_down),
+  };
+
   // 6. Bayesian forward confidence (spec §5 Q4 default: weak Beta(2,2)).
   const forecast = bayesianForwardConfidence(
     weeklyResults.map((w) => ({ delivered_pct: w.delivered_pct }))
@@ -877,6 +1186,37 @@ export async function executeCommitmentReport(
       `Delivered ${agg.delivered_pct.toFixed(1)}% trails promised ${commitment.promised_pct.toFixed(1)}% by more than 5pp — investigate at-risk patterns.`
     );
   }
+  // §E.1: per-pattern breakdown unavailable from upstream verify.
+  if (!agg.per_pattern_breakdown_available) {
+    caveats.push(
+      'Per-pattern action breakdown unavailable — log10x_estimate_savings verify mode did not return per_pattern_breakdown for this period.'
+    );
+  }
+  // §E.2: offload-status helper timed out.
+  if (offloadHelperTimedOut) {
+    caveats.push(
+      'Offload status lookup timed out — offload contribution omitted. Re-run after metrics backend stabilizes.'
+    );
+  }
+  // §B.2: compact rows against a no-op destination signal config drift
+  // between the cap CSV and the destination cost model.
+  const compactNoOp = (() => {
+    const noOpDests: SiemId[] = ['datadog', 'cloudwatch', 'azure-monitor', 'gcp-logging', 'sumo'];
+    if (!noOpDests.includes(commitment.destination)) return false;
+    return agg.per_pattern_rows.some((r) => r.action_taken === 'compact');
+  })();
+  if (compactNoOp) {
+    caveats.push(
+      `Compact action found on ${commitment.destination} but the destination cost model is no-op for compact — likely cap CSV / destination config drift.`
+    );
+  }
+  // §B.4: tier_down bytes are tagged for downstream tier swap, not
+  // removed from ingest. Wording mirrors cost.ts:394.
+  if (agg.bytes_saved_by_action.tier_down > 0) {
+    caveats.push(
+      'tier_down bytes are tagged for downstream tier swap, not removed from ingest — savings realize on the destination-side storage tier.'
+    );
+  }
 
   // Hold a backend handle reference so unused-import linters stay quiet
   // when the runner stub isn't wired; otherwise `backend` is consumed by
@@ -898,7 +1238,9 @@ export async function executeCommitmentReport(
       days: period.days,
     },
     delivered_pct: agg.delivered_pct,
+    percent_reduction_by_action,
     delivered_bytes: agg.delivered_bytes,
+    bytes_saved_by_action: agg.bytes_saved_by_action,
     delivered_dollars: agg.delivered_dollars,
     delivered_dollars_kind: dollarKind,
     promised_dollars,
@@ -926,6 +1268,13 @@ export async function executeCommitmentReport(
       low_data_warning: forecast.low_data_warning,
     },
     at_risk_actions: atRisk,
+    per_pattern_rows: agg.per_pattern_rows.map((r) => ({
+      pattern_hash: r.pattern_hash,
+      action_taken: r.action_taken,
+      bytes_saved: r.bytes_saved,
+      dollars_saved: r.dollars_saved,
+      rate_source: r.rate_source,
+    })),
     annualized_dollars,
     caveats,
   };
