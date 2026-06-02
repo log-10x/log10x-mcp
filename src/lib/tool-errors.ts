@@ -26,7 +26,7 @@ function suggestForTool(toolName: string, msg: string): string | undefined {
     return 'Authentication failed. Run `log10x_doctor` to verify LOG10X_API_KEY is valid, or run `log10x_signin_start` to mint a fresh key via the Auth0 Device Flow with GitHub or Google (the model chains to `log10x_signin_complete` automatically once you confirm in the browser).';
   }
   if (/HTTP 5\d\d|fetch failed|ECONNREFUSED|ETIMEDOUT/i.test(msg)) {
-    return 'Transient gateway failure after retries. Run `log10x_doctor` to confirm prometheus.log10x.com is reachable, then try again. If this persists, the gateway may be degraded.';
+    return 'Transient backend failure after 3 retries with exponential backoff (30s timeout per attempt). Run `log10x_doctor` to verify backend reachability. If this persists, the gateway may be degraded.';
   }
   if (/EnvironmentValidationError/.test(msg)) {
     return 'Run `log10x_doctor` to see exactly which env var is missing or malformed.';
