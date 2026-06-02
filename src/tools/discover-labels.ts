@@ -43,7 +43,7 @@ const INTERNAL_LABELS = new Set([
 const FEATURED_LABELS = [
   { name: 'tenx_user_service', hint: 'the service that emitted the log' },
   { name: 'severity_level', hint: 'TRACE / DEBUG / INFO / WARN / ERROR / CRITICAL' },
-  { name: 'message_pattern', hint: 'the stable template hash — the unit of cost attribution' },
+  { name: 'message_pattern', hint: 'the stable pattern identity (symbolMessage; its hash is tenx_hash) — the unit of cost attribution' },
   { name: 'tenx_env', hint: 'edge or cloud' },
   { name: 'http_code', hint: 'HTTP response status (100–511)' },
   { name: 'k8s_namespace', hint: 'Kubernetes namespace (from enrichment)' },

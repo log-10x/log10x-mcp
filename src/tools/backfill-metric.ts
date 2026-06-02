@@ -35,7 +35,7 @@ import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../
 export const backfillMetricSchema = {
   pattern: z
     .string()
-    .describe('Pattern to backfill — templateHash or symbolMessage. Use log10x_event_lookup first to resolve a raw log line.'),
+    .describe('Pattern to backfill — the symbolMessage (pattern name) or its tenx_hash. Use log10x_event_lookup first to resolve a raw log line.'),
   metric_name: z
     .string()
     .describe('Destination metric name. Follow the destination TSDB\'s naming convention (e.g., `log10x.payment_retry_by_tenant`).'),

@@ -306,6 +306,9 @@ async function executeFullMode(
 const GROUP_BY_ALIAS: Record<string, string> = {
   severity: 'severity_level',
   service: 'tenx_user_service',
+  pattern: 'message_pattern',
+  // deprecated alias — `pattern` is canonical. This groups by the PATTERN
+  // (message_pattern / symbolMessage), not the engine template hash.
   templateHash: 'message_pattern',
 };
 

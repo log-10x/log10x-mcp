@@ -563,7 +563,7 @@ const server = new McpServer(
     // wants to use the channel on hosts that do support it.
     capabilities: { logging: {} },
     instructions: `Log10x is the observability memory for the user's logs. Every log line the pipeline
-has ever seen is fingerprinted into a stable pattern identity (field-set) that stays constant across
+has ever seen is fingerprinted into a stable pattern identity (the hash of a representing-token subset, so many template variants collapse to one) that stays constant across
 deploys, restarts, pod names, timestamps, and request IDs. That identity is the key to a Prometheus
 time series of volume and cost, so any pattern the user has ever emitted is instantly queryable by
 name, by history, or by sample line — with zero prior query setup.
@@ -1419,7 +1419,7 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_top_patterns', intent: 'Top N patterns by current cost, with per-row delta vs comparison_window and newly-emerged section' },
   { name: 'log10x_investigate', intent: 'Single-call root-cause — causal chain for acute spikes or cohort for drift' },
   { name: 'log10x_resolve_batch', intent: 'Pasted-batch triage — per-pattern variable concentration + next actions' },
-  { name: 'log10x_retriever_query', intent: 'Direct archive retrieval by templateHash with JS filter expressions' },
+  { name: 'log10x_retriever_query', intent: 'Direct archive retrieval by pattern identity (tenx_user_pattern) with JS filter expressions' },
   { name: 'log10x_retriever_series', intent: 'Fidelity-aware time series from the S3 archive — auto-selects exact aggregation vs sampled fan-out' },
   { name: 'log10x_backfill_metric', intent: 'Create a new Datadog / Prometheus metric backfilled from Retriever archive' },
   { name: 'log10x_doctor', intent: 'Startup health check — env config, gateway, tier, freshness, Retriever, paste endpoint, cross-pillar enrichment floor' },

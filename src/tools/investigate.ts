@@ -49,7 +49,7 @@ import { getOffloadStatusBatch } from '../lib/offload-status.js';
 export const investigateSchema = {
   starting_point: z
     .string()
-    .describe('The user\'s target, verbatim. Can be a raw log line, a pattern identity (symbolMessage or templateHash), a service name, or the literal string "environment"/"all"/"audit". The tool detects the mode automatically.'),
+    .describe('The user\'s target, verbatim. Can be a raw log line, a pattern identity (symbolMessage or tenx_hash), a service name, or the literal string "environment"/"all"/"audit". The tool detects the mode automatically.'),
   window: z
     .string()
     .default('1h')
@@ -693,7 +693,7 @@ async function executeInvestigateInner(
         '',
         '**Supported inputs**:',
         '- A raw log line (will be templatized and matched by structural identity)',
-        '- A pattern identity (symbolMessage / templateHash)',
+        '- A pattern identity (symbolMessage / tenx_hash)',
         '- A service name',
         '- The literal string `"environment"`, `"all"`, or `"audit"` for an env-wide sweep',
         '',
@@ -1083,7 +1083,7 @@ async function resolveAnchor(
     return { mode: 'environment', inputType: 'environment_literal', modeDetection: 'environment_audit' };
   }
 
-  // Pattern identity heuristic: templateHash (`~xxx`), underscore_separated
+  // Pattern identity heuristic: symbolMessage token (`~xxx`), underscore_separated
   // token, OR dash-separated service name (e.g., `product-reviews`, `ad-service`).
   // Services in k8s commonly use kebab-case, so the regex must accept dashes
   // or the resolver falls through to the fuzzy raw-log-line matcher and finds
