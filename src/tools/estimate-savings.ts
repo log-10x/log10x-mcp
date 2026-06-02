@@ -141,6 +141,14 @@ export const estimateSavingsSchema = {
     .describe(
       'forecast mode: action assigned to top patterns by the greedy solver when target_percent is used. Default: compact.'
     ),
+  pattern_limit: z
+    .number()
+    .int()
+    .positive()
+    .default(50)
+    .describe(
+      'forecast mode: maximum number of per_pattern rows returned. Default 50 when service is omitted; ignored (unlimited) when service is set. Totals and coverage_pct are always computed over the full solver result before slicing.'
+    ),
   destination: DEST_ENUM.optional().describe(
     'Destination SIEM. Required for both modes (used to look up ingest $/GB + compact ratio band).'
   ),
@@ -226,6 +234,20 @@ export interface ForecastResult {
   observation_window: string;
   target_percent?: number;
   per_pattern: ForecastRow[];
+  /** True when per_pattern was sliced to pattern_limit (service-omitted mode). */
+  per_pattern_truncated: boolean;
+  /** Total number of modeled patterns before the limit slice. */
+  per_pattern_total_count: number;
+  /**
+   * Per-service rollup. Populated when service is omitted; aggregated from
+   * per_pattern AFTER the solver over the full (pre-slice) result set.
+   */
+  per_service?: Array<{
+    service: string;
+    pattern_count: number;
+    bytes_saved_monthly: number;
+    dollars_saved_expected: number;
+  }>;
   totals: {
     bytes_in_monthly: number;
     bytes_saved_monthly: number;
@@ -509,6 +531,25 @@ function computeActionSplit(args: {
   return { buckets, rows, clamped };
 }
 
+// ─── errors ─────────────────────────────────────────────────────────────
+
+/**
+ * Thrown by runEstimateForecast when default_action is a no-op on the
+ * destination (e.g., action=compact on datadog where compact_mode=no-op).
+ * executeEstimateSavings catches this and returns a structured refusal
+ * envelope with a next-action suggestion instead of a generic failure.
+ */
+export class NoOpActionError extends Error {
+  readonly action: string;
+  readonly destination: string;
+  constructor(action: string, destination: string) {
+    super(`action=${action} is a no-op on ${destination}`);
+    this.name = 'NoOpActionError';
+    this.action = action;
+    this.destination = destination;
+  }
+}
+
 // ─── forecast ──────────────────────────────────────────────────────────
 
 export interface RunForecastArgs {
@@ -525,6 +566,11 @@ export interface RunForecastArgs {
   default_action: Action;
   /** PromQL range expression for the observation window. Default 30d. */
   observation_window?: string;
+  /**
+   * Maximum per_pattern rows to return. Default 50 when service is omitted;
+   * unlimited when service is set. Totals computed over full result before slice.
+   */
+  pattern_limit?: number;
 }
 
 /**
@@ -553,6 +599,25 @@ export async function runEstimateForecast(
     retention_months: args.retention_months ?? 1,
   };
 
+  // Early-exit: if the caller is running the greedy solver (target_percent)
+  // and default_action is a no-op on this destination, skip all Prometheus
+  // queries and throw a structured error. proposed_config callers can audit
+  // per-row no-op caveats in the projection loop below.
+  if (
+    args.target_percent !== undefined &&
+    !args.proposed_config
+  ) {
+    const earlyModel = getDestinationCostModel(args.destination, {
+      esPruned: args.es_pruned,
+    });
+    if (
+      args.default_action === 'compact' &&
+      earlyModel.compact_mode === 'no-op'
+    ) {
+      throw new NoOpActionError(args.default_action, args.destination);
+    }
+  }
+
   const observationWindow = args.observation_window ?? '30d';
   const obsDays = parseWindowToDays(observationWindow);
 
@@ -569,17 +634,64 @@ export async function runEstimateForecast(
   const eventsQuery = `sum by (${env.labels.hash}) (increase(${VOLUME_METRIC}{${selector}}[${observationWindow}]))`;
   const totalQuery = `sum(increase(${BYTES_METRIC}{${selector}}[${observationWindow}]))`;
 
-  const [bytesRes, eventsRes, totalRes] = await Promise.all([
+  // Per-hash service label query — used for per_service rollup when service
+  // is omitted. We need (hash → service) so we can group solver rows by service
+  // after projection. Query by both hash and service labels; take the dominant
+  // service per hash by bytes (same tie-break as extractHashContainerMap).
+  const hashServiceQuery = !args.service
+    ? `sum by (${env.labels.hash},${env.labels.service}) (increase(${BYTES_METRIC}{${selectorWithEnv(env)}}[${observationWindow}]))`
+    : null;
+
+  const parallelQueries: Array<Promise<unknown>> = [
     queryInstant(env, bytesQuery),
     queryInstant(env, eventsQuery),
     queryInstant(env, totalQuery),
-  ]);
+  ];
+  if (hashServiceQuery) {
+    parallelQueries.push(queryInstant(env, hashServiceQuery));
+  }
+
+  const queryResults = await Promise.all(parallelQueries);
+  const [bytesRes, eventsRes, totalRes] = queryResults as [
+    Parameters<typeof parsePromResult>[0],
+    Parameters<typeof parsePromResult>[0],
+    Parameters<typeof parseScalarSum>[0],
+  ];
+  const hashServiceRes = hashServiceQuery
+    ? (queryResults[3] as Parameters<typeof parsePromResult>[0])
+    : null;
 
   const bytesByHash = parsePromResult(bytesRes, env.labels.hash);
   const eventsByHash = parsePromResult(eventsRes, env.labels.hash);
   const totalBytesObserved = parseScalarSum(totalRes);
   // Scale observation to a 30-day month (the forecast quotes monthly dollars).
   const scale = MONTH_DAYS / obsDays;
+
+  // Build hash→service map for the per_service rollup (service-omitted mode).
+  // Dominant service per hash = highest bytes; ties broken lexicographically.
+  const hashToService = new Map<string, string>();
+  if (hashServiceRes) {
+    const svcRows = hashServiceRes?.data?.result ?? [];
+    const acc = new Map<string, { service: string; bytes: number }>();
+    for (const row of svcRows) {
+      const hash = row.metric?.[env.labels.hash];
+      const svc = row.metric?.[env.labels.service];
+      if (!hash || !svc) continue;
+      const v = row.value ? parseFloat(row.value[1]) : NaN;
+      const bytes = Number.isFinite(v) ? v : 0;
+      const prior = acc.get(hash);
+      if (
+        !prior ||
+        bytes > prior.bytes ||
+        (bytes === prior.bytes && svc.localeCompare(prior.service) < 0)
+      ) {
+        acc.set(hash, { service: svc, bytes });
+      }
+    }
+    for (const [hash, { service }] of acc.entries()) {
+      hashToService.set(hash, service);
+    }
+  }
 
   // Decide which rows to model.
   type Row = { pattern_hash: string; action: Action; sample_n?: number };
@@ -712,10 +824,66 @@ export async function runEstimateForecast(
   const totalObservedMonthly = totalBytesObserved * scale;
   const coverage_pct = safeDiv(totalIn, totalObservedMonthly);
 
+  // ── per_pattern limit + truncation ────────────────────────────────
+  // Sort full result by bytes_in_monthly DESC, then slice to the limit.
+  // Totals were accumulated above over the full set; slicing here is
+  // presentation-only and does not affect coverage_pct or dollar totals.
+  const per_pattern_total_count = per_pattern.length;
+  const effectiveLimit = args.service
+    ? per_pattern.length // unlimited when scoped to a service
+    : (args.pattern_limit ?? 50);
+  // Ensure descending sort before slice (greedy path is already sorted, but
+  // proposed_config may be in arbitrary order).
+  per_pattern.sort((a, b) => b.bytes_in_monthly - a.bytes_in_monthly);
+  const per_pattern_truncated = per_pattern.length > effectiveLimit;
+  const per_pattern_sliced = per_pattern_truncated
+    ? per_pattern.slice(0, effectiveLimit)
+    : per_pattern;
+
+  // ── per_service rollup ────────────────────────────────────────────
+  // Aggregated from the FULL (pre-slice) per_pattern set so the rollup
+  // totals match the headline dollar figures exactly.
+  let per_service:
+    | Array<{
+        service: string;
+        pattern_count: number;
+        bytes_saved_monthly: number;
+        dollars_saved_expected: number;
+      }>
+    | undefined;
+  if (!args.service) {
+    const svcMap = new Map<
+      string,
+      { pattern_count: number; bytes_saved_monthly: number; dollars_saved_expected: number }
+    >();
+    for (const row of per_pattern) {
+      const svc = hashToService.get(row.pattern_hash) ?? '(unknown)';
+      const prior = svcMap.get(svc) ?? {
+        pattern_count: 0,
+        bytes_saved_monthly: 0,
+        dollars_saved_expected: 0,
+      };
+      svcMap.set(svc, {
+        pattern_count: prior.pattern_count + 1,
+        bytes_saved_monthly: prior.bytes_saved_monthly + row.bytes_saved_monthly,
+        dollars_saved_expected:
+          prior.dollars_saved_expected + row.dollars_saved_expected,
+      });
+    }
+    per_service = Array.from(svcMap.entries())
+      .map(([service, v]) => ({ service, ...v }))
+      .sort((a, b) => b.dollars_saved_expected - a.dollars_saved_expected);
+  }
+
   const caveats: string[] = [];
   if (noOpCompactCount > 0) {
     caveats.push(
       `${noOpCompactCount} pattern${noOpCompactCount !== 1 ? 's' : ''} use action=compact on ${args.destination}, which is a no-op destination. Consider tier_down, sample, or drop.`
+    );
+  }
+  if (per_pattern_truncated) {
+    caveats.push(
+      `Showing top ${effectiveLimit} of ${per_pattern_total_count} patterns by volume. Totals and coverage_pct reflect all ${per_pattern_total_count} patterns.`
     );
   }
   if (coverage_pct < 0.6 && rows.length > 0) {
@@ -741,7 +909,10 @@ export async function runEstimateForecast(
     service: args.service,
     observation_window: observationWindow,
     target_percent: args.target_percent,
-    per_pattern,
+    per_pattern: per_pattern_sliced,
+    per_pattern_truncated,
+    per_pattern_total_count,
+    per_service,
     totals: {
       bytes_in_monthly: totalIn,
       bytes_saved_monthly: totalSavedBytes,
@@ -1105,10 +1276,14 @@ export async function executeEstimateSavings(
           proposed_config: proposed,
           target_percent: args.target_percent,
           default_action: (args.default_action ?? 'compact') as Action,
+          pattern_limit: args.pattern_limit,
         },
         env
       );
-      const headline = `Forecast (${args.destination}): ${fmtDollar(result.totals.dollars_expected_monthly)}/mo expected savings (at ${args.destination} list price — your bill may differ) on ${result.per_pattern.length} pattern${result.per_pattern.length !== 1 ? 's' : ''} (coverage ${fmtPct(result.coverage_pct)}).`;
+      const patternCountLabel = result.per_pattern_truncated
+        ? `top ${result.per_pattern.length} of ${result.per_pattern_total_count} patterns`
+        : `${result.per_pattern.length} pattern${result.per_pattern.length !== 1 ? 's' : ''}`;
+      const headline = `Forecast (${args.destination}): ${fmtDollar(result.totals.dollars_expected_monthly)}/mo expected savings (at ${args.destination} list price — your bill may differ) on ${patternCountLabel} (coverage ${fmtPct(result.coverage_pct)}).`;
       const human_summary = buildForecastHumanSummary(result, args.destination);
       return buildEnvelope({
         tool: 'log10x_estimate_savings',
@@ -1173,6 +1348,26 @@ export async function executeEstimateSavings(
       warnings: result.caveats,
     });
   } catch (e: unknown) {
+    if (e instanceof NoOpActionError) {
+      const { action, destination } = e;
+      return buildEnvelope({
+        tool: 'log10x_estimate_savings',
+        view: 'summary',
+        summary: {
+          headline: `estimate_savings refused: ${action} is a no-op on ${destination}. Use tier_down, sample, or drop instead.`,
+        },
+        data: {
+          ok: false,
+          phase: 'target_resolution',
+          error: `action=${action} is a no-op on ${destination} (compact_mode=no-op)`,
+          suggestion: {
+            use_instead: ['tier_down', 'sample', 'drop'],
+            reason: `COST_MODEL_BY_DESTINATION.${destination}.compact_mode === 'no-op' — the destination bills on compressed ingest; compaction yields 0% reduction.`,
+          },
+          human_summary: `compact is a no-op on ${destination}. Use tier_down, sample, or drop instead.`,
+        },
+      });
+    }
     const msg = e instanceof Error ? e.message : String(e);
     return buildEnvelope({
       tool: 'log10x_estimate_savings',
