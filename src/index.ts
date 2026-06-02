@@ -585,6 +585,16 @@ async function getAnalyzerCost(env: EnvConfig, override?: number): Promise<numbe
 // ── Server ──
 
 const SERVER_INFO = { name: 'log10x', version: readClientVersion() };
+
+// Build/version provenance, surfaced on GET /health and in the mcp.boot log so
+// anyone can confirm which image is running (e.g. to verify a redeploy rolled).
+// commit + builtAt are baked into the container image via Docker build-args;
+// they read 'unknown' on a local/stdio run that wasn't built that way.
+const BUILD_INFO = {
+  version: readClientVersion(),
+  commit: process.env.LOG10X_MCP_BUILD_SHA ?? 'unknown',
+  builtAt: process.env.LOG10X_MCP_BUILD_TIME ?? 'unknown',
+};
 const SERVER_OPTIONS = {
     // Declare the `logging` capability so calls to extra.sendNotification
     // ('notifications/message', ...) inside tool handlers don't throw
@@ -1734,8 +1744,10 @@ function startHttpServer(
     const path = (req.url ?? '/').split('?')[0];
 
     if (req.method === 'GET' && (path === '/health' || path === '/healthz')) {
-      res.writeHead(200, { 'content-type': 'text/plain' });
-      res.end('ok');
+      // 200 keeps the ALB health check happy (it matches on the status code);
+      // the JSON body lets anyone read the running version/commit via curl.
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ok', ...BUILD_INFO }));
       return;
     }
 
@@ -1850,6 +1862,8 @@ async function main() {
   const loaded = getEnvs();
   log.info('mcp.boot', {
     version: readClientVersion(),
+    commit: BUILD_INFO.commit,
+    built_at: BUILD_INFO.builtAt,
     tools: REGISTERED_TOOLS.length,
     envs: loaded.all.length,
     default_env: loaded.default.nickname,

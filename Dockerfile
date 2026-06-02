@@ -23,6 +23,12 @@ RUN npx tsc \
 FROM node:20-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
+# Build provenance — pass at build time; surfaced on /health and the boot log.
+#   --build-arg GIT_SHA=$(git rev-parse HEAD) --build-arg BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+ARG GIT_SHA=unknown
+ARG BUILD_TIME=unknown
+ENV LOG10X_MCP_BUILD_SHA=$GIT_SHA
+ENV LOG10X_MCP_BUILD_TIME=$BUILD_TIME
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 # build/ includes build/vendor (copied above); default-manifest.json + package.json
