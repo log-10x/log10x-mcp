@@ -203,6 +203,13 @@ export const estimateSavingsSchema = {
     .describe(
       "verify mode: override the destination model rate, e.g. customer's contracted $/GB."
     ),
+  // ── presentation ──────────────────────────────────────────────────
+  enforcement_mode: z
+    .enum(['engine', 'manual_report'])
+    .optional()
+    .describe(
+      "forecast mode: when manual_report, reframes the headline as a potential-savings estimate under external enforcement rather than engine enforcement. Headline reads 'If you enforce externally: X savings potential. Enforcement choice is yours.' instead of the standard forecast headline."
+    ),
   // ── shared ─────────────────────────────────────────────────────────
   environment: z
     .string()
@@ -1283,8 +1290,11 @@ export async function executeEstimateSavings(
       const patternCountLabel = result.per_pattern_truncated
         ? `top ${result.per_pattern.length} of ${result.per_pattern_total_count} patterns`
         : `${result.per_pattern.length} pattern${result.per_pattern.length !== 1 ? 's' : ''}`;
-      const headline = `Forecast (${args.destination}): ${fmtDollar(result.totals.dollars_expected_monthly)}/mo expected savings (at ${args.destination} list price — your bill may differ) on ${patternCountLabel} (coverage ${fmtPct(result.coverage_pct)}).`;
-      const human_summary = buildForecastHumanSummary(result, args.destination);
+      const headline =
+        args.enforcement_mode === 'manual_report'
+          ? `If you enforce externally: ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings potential on ${patternCountLabel} (coverage ${fmtPct(result.coverage_pct)}). Enforcement choice is yours.`
+          : `Forecast (${args.destination}): ${fmtDollar(result.totals.dollars_expected_monthly)}/mo expected savings (at ${args.destination} list price — your bill may differ) on ${patternCountLabel} (coverage ${fmtPct(result.coverage_pct)}).`;
+      const human_summary = buildForecastHumanSummary(result, args.destination, args.enforcement_mode);
       return buildEnvelope({
         tool: 'log10x_estimate_savings',
         view: 'summary',
@@ -1386,13 +1396,18 @@ export async function executeEstimateSavings(
 // ─── human_summary builders ────────────────────────────────────────────
 function buildForecastHumanSummary(
   result: ForecastResult,
-  destination: string
+  destination: string,
+  enforcement_mode?: string
 ): string {
   const patternWord = `${result.per_pattern.length} pattern${result.per_pattern.length === 1 ? '' : 's'}`;
   const coverage = `${fmtPct(result.coverage_pct)} coverage`;
   // ForecastResult does not yet carry rate_source (see TODO at top of file);
   // dollars are list-price until full propagation lands.
-  return `estimate_savings forecast on ${destination} projects ${fmtDollar(result.totals.dollars_expected_monthly)}/mo expected savings (range ${fmtDollar(result.totals.dollars_low_monthly)}–${fmtDollar(result.totals.dollars_high_monthly)}) across ${patternWord} at ${coverage}, using the engine list price.${result.caveats.length ? ` Caveats: ${result.caveats.length}.` : ''}`;
+  const lead =
+    enforcement_mode === 'manual_report'
+      ? `If you enforce externally on ${destination}: ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings potential (range ${fmtDollar(result.totals.dollars_low_monthly)}–${fmtDollar(result.totals.dollars_high_monthly)}). Enforcement is not automatic — this is the potential if the exclusion/drop is applied.`
+      : `estimate_savings forecast on ${destination} projects ${fmtDollar(result.totals.dollars_expected_monthly)}/mo expected savings (range ${fmtDollar(result.totals.dollars_low_monthly)}–${fmtDollar(result.totals.dollars_high_monthly)})`;
+  return `${lead} across ${patternWord} at ${coverage}, using the engine list price.${result.caveats.length ? ` Caveats: ${result.caveats.length}.` : ''}`;
 }
 
 function buildVerifyHumanSummary(
