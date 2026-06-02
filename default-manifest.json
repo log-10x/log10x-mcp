@@ -12,6 +12,28 @@
       },
       "category": "orient"
     },
+    "log10x_cost_options": {
+      "title": "Cost reduction options",
+      "description": "CALL THIS after the user picks 'show me what cutting costs would look like' from log10x_start. Returns the 7-mode action menu (drop / sample / compact / tier_down / offload / manual / pass), each gated by the customer's detected capabilities (receiver tier, SIEM type, offload bucket). Each mode carries a one-line description, who enforces it (engine / SIEM / forwarder / customer), what survives, and the routes_to tool. Manual mode routes to log10x_manual_options; all other modes route to log10x_estimate_savings with default_action pre-set. The envelope carries must_render_verbatim (show to user as-is), must_ask_user (numbered question), and forbidden_next_actions (do not call estimate_savings, configure_engine, pattern_mitigate, or manual_options until the user picks).",
+      "annotations": {
+        "title": "Cost reduction options",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "category": "cost"
+    },
+    "log10x_manual_options": {
+      "title": "Manual cost options",
+      "description": "CALL THIS when the user picks manual mode from log10x_cost_options. Returns the 3-path sub-menu: (1) report_only — engine marks patterns in metrics, agent shows savings potential, no enforcement; (2) forwarder_config — agent generates drop config for the detected forwarder (fluent-bit/fluentd/otel/vector/logstash) for the top N cost patterns, routes to log10x_pattern_mitigate per pattern; (3) siem_exclusion — agent generates native SIEM exclusion configs (Splunk props/transforms, Datadog log exclusion, Elastic ingest pipeline, CloudWatch subscription filter), routes to log10x_pattern_mitigate per pattern. forwarder_config gates on detected forwarder; siem_exclusion gates on detected SIEM credentials. forbidden_next_actions: log10x_configure_engine (manual mode means external enforcement, not engine enforcement).",
+      "annotations": {
+        "title": "Manual cost options",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "category": "cost"
+    },
     "log10x_event_lookup": {
       "title": "Event lookup",
       "description": "Resolve a raw log line or pattern name to its stable pattern identity (the hash of its representing-token subset), then return byte volume + share per service (with cost overlay when $/GB is set), before→after delta, first-seen timestamp within the observation window, an AI classification (error/debug/info) with a recommended action (filter/keep/reduce), and the current offload disposition (pass / sample / compact / drop) read from the Reporter `isDropped` label. **Call this first** whenever a user pastes a SINGLE log line and asks \"what is this\", \"is this new\", \"is this safe to drop\", or \"is this being dropped / offloaded\". The lookup is structural, not byte-exact — different timestamps/request IDs/user IDs on the same underlying pattern resolve to the same identity. If no match is returned, say so honestly. Use log10x_resolve_batch instead when the user pastes MULTIPLE events, a SIEM dump, or a batch to triage.",

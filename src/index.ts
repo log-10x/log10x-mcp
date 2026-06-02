@@ -121,6 +121,8 @@ import { findSkewSchema, executeFindSkew } from './tools/find-skew.js';
 import { discoverLabelsSchema, executeDiscoverLabels } from './tools/discover-labels.js';
 import { extractTemplatesSchema, executeExtractTemplates } from './tools/extract-templates.js';
 import { log10xStartSchema, executeLog10xStart } from './tools/log10x-start.js';
+import { costOptionsSchema, executeCostOptions } from './tools/cost-options.js';
+import { manualOptionsSchema, executeManualOptions } from './tools/manual-options.js';
 import { getStatus } from './resources/status.js';
 
 // ── Environment + cost cache ──
@@ -573,9 +575,9 @@ const server = new McpServer(
     // capability is correct hygiene and unblocks any other tool that
     // wants to use the channel on hosts that do support it.
     capabilities: { logging: {} },
-    instructions: `ROUTING RULE: For any user request involving cost reduction, savings targets (save X%, cut my bill), open-ended platform orientation (what should I do, where do I start, how can you help), or any first-time interaction in a fresh session, you MUST call log10x_start before any other tool. log10x_start returns a structured menu and a question for the user; surface its must_render_verbatim and must_ask_user fields directly without summarizing or pre-picking an option. Do not call estimate_savings, configure_engine, pattern_mitigate, or services until the user has answered log10x_start question.
+    instructions: `ROUTING RULE: For any user request involving cost reduction, savings targets (save X%, cut my bill), open-ended platform orientation (what should I do, where do I start, how can you help), or any first-time interaction in a fresh session, you MUST call log10x_start before any other tool. log10x_start returns a structured menu and a question for the user; surface its must_render_verbatim and must_ask_user fields directly without summarizing or pre-picking an option. Do not call estimate_savings, cost_options, manual_options, configure_engine, pattern_mitigate, or services until the user has answered log10x_start question.
 
-NEGATION: DO NOT call log10x_estimate_savings, log10x_configure_engine, log10x_pattern_mitigate, log10x_services, log10x_top_patterns, log10x_baseline, or log10x_commitment_report on the user first message of a fresh session if the message touches cost, savings, bill, expense, drop, compact, offload, tier-down, or any open-ended platform question. The orientation envelope from log10x_start surfaces the menu, the journey phase, the available action modes, and the structured question the user must answer. Skipping that step degrades the user experience to a black-box recommendation.
+NEGATION: DO NOT call log10x_estimate_savings, log10x_cost_options, log10x_manual_options, log10x_configure_engine, log10x_pattern_mitigate, log10x_services, log10x_top_patterns, log10x_baseline, or log10x_commitment_report on the user first message of a fresh session if the message touches cost, savings, bill, expense, drop, compact, offload, tier-down, or any open-ended platform question. The orientation envelope from log10x_start surfaces the menu, the journey phase, the available action modes, and the structured question the user must answer. Skipping that step degrades the user experience to a black-box recommendation.
 
 Log10x is the observability memory for the user's logs. Every log line the pipeline
 has ever seen is fingerprinted into a stable pattern identity (the hash of a representing-token subset, so many template variants collapse to one) that stays constant across
@@ -1162,6 +1164,29 @@ registerLog10xTool('log10x_backfill_metric', backfillMetricSchema, (args) =>
 
 registerLog10xTool('log10x_start', log10xStartSchema, (args) =>
   wrap('log10x_start', async () => executeLog10xStart(args))
+);
+
+// ── Tool: log10x_cost_options ──
+//
+// Called after the user picks option 1 from log10x_start. Returns the
+// 7-mode action menu (drop / sample / compact / tier_down / offload /
+// manual / pass) gated by the customer's detected capabilities.
+
+registerLog10xTool('log10x_cost_options', costOptionsSchema, (args) =>
+  wrap('log10x_cost_options', async () =>
+    executeCostOptions(args as { target_percent?: number; service?: string })
+  )
+);
+
+// ── Tool: log10x_manual_options ──
+//
+// Called when the user picks manual mode from log10x_cost_options.
+// Returns the 3-path sub-menu: report_only / forwarder_config / siem_exclusion.
+
+registerLog10xTool('log10x_manual_options', manualOptionsSchema, (args) =>
+  wrap('log10x_manual_options', async () =>
+    executeManualOptions(args as { service?: string; target_percent?: number })
+  )
 );
 
 // ── Tool: log10x_doctor ──

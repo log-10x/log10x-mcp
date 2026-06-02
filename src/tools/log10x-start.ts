@@ -255,7 +255,7 @@ function buildActionMenu(caps: CapabilitySummary, tier: Tier): ActionMenuItem[] 
       gated_reason: caps.cost_attribution_available
         ? undefined
         : `Requires Reporter tier (cost attribution). You are at tier "${tier}". The Reporter is a zero-touch DaemonSet — install it via log10x_advise_install.`,
-      routes_to: 'log10x_estimate_savings',
+      routes_to: 'log10x_cost_options',
     },
     {
       action: 'investigate_spike',
