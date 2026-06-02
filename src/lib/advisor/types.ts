@@ -86,9 +86,9 @@ export interface VerifyProbe {
  * via FileResourceLookup.reset() (no pipeline restart); .js / .yaml
  * changes call restartPipeline().
  *
- * The MCP's log10x_configure_compact and log10x_configure_regulator
- * tools author PRs against the customer repo. Once merged, the engine
- * picks up the change on the next poll. End-to-end seconds, no redeploy.
+ * The MCP's log10x_configure_engine tool authors PRs against the customer
+ * repo. Once merged, the engine picks up the change on the next poll.
+ * End-to-end seconds, no redeploy.
  */
 export interface GitopsExplainer {
   /** Headline — one sentence describing the value prop. */

@@ -3,8 +3,8 @@
  *
  * Two layers:
  *   - Back-compat layer (bytesToCost, bytesToGb, parsePrometheusValue):
- *     unchanged signatures, used by existing tools (savings, top-volume,
- *     top-patterns, event-lookup, trend, services, investigate, etc).
+ *     unchanged signatures, used by existing tools (savings, top-patterns,
+ *     event-lookup, trend, services, investigate, etc).
  *   - X% commitment layer (projectAction, projectActionRange,
  *     COST_MODEL_BY_DESTINATION, getDestinationCostModel, annualizeDollars):
  *     splits ingest vs storage, models per-destination compact ratios with

@@ -256,8 +256,6 @@ export const TOOL_MODES: Record<string, ('analysis' | 'analysis_pending' | 'poc'
   // ── Install advisors (POC + analysis_pending) ──
   log10x_advise_install: ['poc', 'analysis_pending'],
   log10x_advise_retriever: ['poc', 'analysis_pending'],
-  log10x_configure_compact: ['poc', 'analysis_pending'],
-  log10x_configure_regulator: ['poc', 'analysis_pending'],
   log10x_configure_engine: ['poc', 'analysis_pending', 'analysis'],
   log10x_estimate_savings: ['analysis', 'analysis_pending'],
   log10x_baseline: ['analysis', 'analysis_pending'],

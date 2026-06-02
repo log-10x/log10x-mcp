@@ -422,7 +422,7 @@ function detectExistingHelmRelease(
 function buildCompactReceiverGitopsExplainer(opts: { optimize: boolean }): GitopsExplainer {
   return {
     headline:
-      'The compactReceiver decides per-event whether to emit `encode()` (compact, ~20-40x smaller) or `fullText`. The decision is per-container: a CSV keyed by k8s_container name lists which containers to compact. Wire GitOps once and the MCP can author per-container PRs (`log10x_configure_compact`) — the engine hot-reloads the CSV without a pod restart.',
+      'The compactReceiver decides per-event whether to emit `encode()` (compact, ~20-40x smaller) or `fullText`. The decision is per-container: a CSV keyed by k8s_container name lists which containers to compact. Wire GitOps once and the MCP can author per-container PRs (`log10x_configure_engine`) — the engine hot-reloads the CSV without a pod restart.',
     whenToEnable: [
       'You want **selective** compaction — compact specific containers/services but preserve others (audit, compliance, debug).',
       'You want decisions to evolve over time without redeploying the receiver.',
@@ -449,9 +449,9 @@ function buildCompactReceiverGitopsExplainer(opts: { optimize: boolean }): Gitop
       { name: 'compactReceiverDefault', value: 'false', required: false, note: '`false`: cap-file entries opt INTO compaction. `true`: cap-file entries opt OUT (use with the chart `optimize` flag)' },
     ],
     mcpHandoff: {
-      tool: 'log10x_configure_compact',
+      tool: 'log10x_configure_engine',
       example:
-        'log10x_configure_compact \\\n  gitops_repo=your-org/your-config-repo \\\n  service=payment-service \\\n  decision=true \\\n  reason="OPS-5123: high-volume container"',
+        'log10x_configure_engine \\\n  gitops_repo=your-org/your-config-repo \\\n  service=payment-service \\\n  target_percent=30 \\\n  destination=datadog',
     },
     caveats: [
       'The default `paths` glob in `pipelines/gitops/config.yaml` is hardcoded to `test/*.csv` for local testing. Override either by forking the config repo and editing the glob, or by setting `GH_PATH=pipelines/run/receive/compact/*` (Gap A — env override is being wired up).',

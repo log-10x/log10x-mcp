@@ -1,11 +1,10 @@
 /**
  * log10x_configure_engine
  *
- * Single-tool replacement for `log10x_configure_regulator` +
- * `log10x_configure_compact`. Converts a `target_percent` (or `budget_usd`)
- * commitment into a per-pattern cap CSV and a `gh` PR command against the
- * customer gitops repo. The engine hot-reloads the CSV on the next gitops
- * poll; no pipeline restart, no event drops.
+ * Converts a `target_percent` (or `budget_usd`) commitment into a per-pattern
+ * cap CSV and a `gh` PR command against the customer gitops repo. The engine
+ * hot-reloads the CSV on the next gitops poll; no pipeline restart, no event
+ * drops.
  *
  * Solver: greedy v1, ordered by (current_bytes_30d * severity_weight) DESC,
  * where severity_weight = audit:1.0, error:0.8, standard:0.5, debug:0.2,

@@ -402,7 +402,7 @@
     },
     "log10x_configure_engine": {
       "title": "Configure engine",
-      "description": "Unified per-pattern action-plan PR author. Resolves a monthly $ budget against a per-destination cost model (Splunk, Datadog, Elasticsearch, CloudWatch, Azure, GCP, Sumo, ClickHouse) into a per-pattern action plan (pass | sample | compact | drop | tier_down) and emits a gitops PR. Defaults to auto-applying via `gh` CLI (industry-standard MCP write-tool behavior, mirrors github/github-mcp-server). Set `auto_apply: false` or `read_only: true` for evaluation / dry-run / headless contexts. Supersedes log10x_configure_compact and log10x_configure_regulator; both remain registered as thin deprecated aliases for one release.",
+      "description": "Unified per-pattern action-plan PR author. Resolves a monthly $ budget against a per-destination cost model (Splunk, Datadog, Elasticsearch, CloudWatch, Azure, GCP, Sumo, ClickHouse) into a per-pattern action plan (pass | sample | compact | drop | tier_down) and emits a gitops PR. Defaults to auto-applying via `gh` CLI (industry-standard MCP write-tool behavior, mirrors github/github-mcp-server). Set `auto_apply: false` or `read_only: true` for evaluation / dry-run / headless contexts.",
       "annotations": {
         "title": "Configure engine",
         "readOnlyHint": false,
@@ -444,30 +444,6 @@
         "openWorldHint": false
       },
       "category": "cost"
-    },
-    "log10x_configure_compact": {
-      "title": "Configure compact (deprecated)",
-      "description": "DEPRECATED — thin alias to log10x_configure_engine kept for one release. Configure per-container compact-mode rules on a running 10x receiver. Hot-reloads via the receiver's CSV lookup (no pipeline restart).",
-      "annotations": {
-        "title": "Configure compact (deprecated)",
-        "readOnlyHint": false,
-        "idempotentHint": true,
-        "openWorldHint": true
-      },
-      "category": "install",
-      "deprecated": true
-    },
-    "log10x_configure_regulator": {
-      "title": "Configure regulator (deprecated)",
-      "description": "DEPRECATED — thin alias to log10x_configure_engine kept for one release. Configure per-pattern rate-limit / sample / drop rules on a running 10x receiver by deriving per-container caps from a monthly dollar budget.",
-      "annotations": {
-        "title": "Configure regulator (deprecated)",
-        "readOnlyHint": true,
-        "idempotentHint": true,
-        "openWorldHint": true
-      },
-      "category": "install",
-      "deprecated": true
     },
     "log10x_find_skew": {
       "title": "Find skew",

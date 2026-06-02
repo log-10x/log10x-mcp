@@ -86,7 +86,7 @@ export interface DetectedLog10xApp {
    * are dropped — exposing secret refs would be unsafe and the
    * downstream consumers don't need them). The advisor uses this to
    * extract things like `GH_REPO` (gitops target repo) so MCP tools
-   * like `log10x_configure_compact` can default `gitops_repo` from the
+   * like `log10x_configure_engine` can default `gitops_repo` from the
    * running pod.
    */
   env?: Record<string, string>;

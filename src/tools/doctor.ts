@@ -1116,7 +1116,7 @@ export function renderDoctorReport(report: DoctorReport): string {
     `If a check failed or warned, suggest the relevant advisor: ` +
     `Reporter / Receiver install (forwarder, backends, license) → log10x_advise_install. ` +
     `Retriever (S3 archive + bloom index) → log10x_advise_retriever. ` +
-    `Compact mode (per-container compaction config) → log10x_configure_compact. ` +
+    `Per-pattern action plan (compact / sample / drop / tier_down) → log10x_configure_engine. ` +
     `Inspect current env config → log10x_discover_env.`
   ));
   return lines.join('\n');

@@ -343,11 +343,11 @@ export function renderDiscoverReport(s: DiscoverySnapshot): string {
   // advice. The tool also handles the service → containers resolution step,
   // so we hint at it without a specific service (the agent picks one).
   nextActions.push({
-    tool: 'log10x_configure_compact',
+    tool: 'log10x_configure_engine',
     args: { snapshot_id: s.snapshotId },
     reason: s.recommendations.receiverGitopsRepo
-      ? 'snapshot detected receiver with GitOps wired up — pick a service and let the tool resolve its containers + render the cap-file PR'
-      : 'configure_compact will return a truthful negative if GitOps is not yet wired (chain handoff is still informative)',
+      ? 'snapshot detected receiver with GitOps wired up — author a per-pattern action-plan PR'
+      : 'configure_engine will return a truthful negative if GitOps is not yet wired (chain handoff is still informative)',
   });
   const block = renderNextActions(nextActions);
   if (block) lines.push('', block);
