@@ -2,7 +2,7 @@
  * log10x_extract_templates — extract the template library from a log corpus.
  *
  * Runs the local tenx CLI against inline events, raw text, or a file path,
- * producing the full set of structural pattern identities (templateHash +
+ * producing the full set of structural templates (engine-internal templateHash +
  * template body) with per-template event counts and severity distribution.
  *
  * Doubles as a **validator** when optional `expected` assertions are

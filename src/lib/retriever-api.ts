@@ -260,6 +260,9 @@ export interface RetrieverEvent {
   // from the canonical enrichment fields inside runRetrieverQuery.
   service?: string;
   severity?: string;
+  /** Engine-INTERNAL field-set fingerprint that joins encoded events to
+   * templates.json. NOT the agent-facing identity — that is tenx_hash /
+   * pattern_hash. Do not surface as the event's stable ID. */
   templateHash?: string;
   enrichedFields?: Record<string, string>;
   values?: string[];

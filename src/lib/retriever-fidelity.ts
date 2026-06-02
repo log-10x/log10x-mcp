@@ -342,9 +342,9 @@ function formatLargeBytes(n: number): string {
  * Pull a pattern name out of a TenX search expression. Matches:
  *   tenx_user_pattern == "Foo"   → "Foo"
  *   tenx_user_pattern=="Foo"     → "Foo"
- * Anything else returns undefined (we don't try to resolve templateHash
- * back to pattern name; that requires a Reporter round-trip we'd rather
- * have the user do explicitly via event_lookup).
+ * Anything else returns undefined (we don't try to resolve a tenx_hash /
+ * pattern_hash back to its pattern name; that requires a Reporter round-trip
+ * we'd rather have the user do explicitly via event_lookup).
  */
 export function extractPatternName(search: string | undefined): string | undefined {
   if (!search) return undefined;

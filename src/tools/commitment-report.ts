@@ -199,7 +199,7 @@ export interface WeeklyVerifyResult {
   delivered_dollars: number; // estimate-savings verify-mode $ for the week
   attribution: {
     cap_fired: number; // share of delivered savings from configured caps firing as planned
-    drift: number; // share lost to pattern drift (template hash changed, cap missed)
+    drift: number; // share lost to pattern drift (pattern_hash changed, cap missed)
     new_patterns: number; // share lost to brand-new uncapped patterns
     leakage: number; // share lost to caps under-firing (lower than promised)
   };
