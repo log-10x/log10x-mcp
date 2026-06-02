@@ -42,6 +42,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join as joinPath } from 'node:path';
 import type { PrometheusResponse } from './api.js';
+import { backendJsonFetch } from './backend-fetch.js';
 
 const execFileP = promisify(execFile);
 
@@ -592,12 +593,11 @@ export class GrafanaCloudBackend implements CustomerMetricsBackend {
   }
 
   private async fetchJson<T>(url: string): Promise<T> {
-    const res = await fetch(url, { headers: { Authorization: this.authHeader } });
-    if (!res.ok) {
-      const body = await res.text().catch(() => '');
-      throw new Error(`grafana_cloud HTTP ${res.status}: ${body.slice(0, 400)}`);
-    }
-    return (await res.json()) as T;
+    return backendJsonFetch<T>(
+      url,
+      { method: 'GET', headers: { Authorization: this.authHeader } },
+      { kindLabel: 'grafana-cloud' }
+    );
   }
 }
 
@@ -669,12 +669,7 @@ export class GenericPromBackend implements CustomerMetricsBackend {
   private async fetchJson<T>(url: string): Promise<T> {
     const headers: Record<string, string> = {};
     if (this.authHeader) headers['Authorization'] = this.authHeader;
-    const res = await fetch(url, { headers });
-    if (!res.ok) {
-      const body = await res.text().catch(() => '');
-      throw new Error(`generic_prom HTTP ${res.status}: ${body.slice(0, 400)}`);
-    }
-    return (await res.json()) as T;
+    return backendJsonFetch<T>(url, { method: 'GET', headers }, { kindLabel: 'prom' });
   }
 }
 
@@ -736,12 +731,11 @@ export class Log10xBackend implements CustomerMetricsBackend {
   }
 
   private async fetchJson<T>(url: string): Promise<T> {
-    const res = await fetch(url, { headers: { 'X-10X-Auth': this.authHeader } });
-    if (!res.ok) {
-      const body = await res.text().catch(() => '');
-      throw new Error(`log10x HTTP ${res.status}: ${body.slice(0, 400)}`);
-    }
-    return (await res.json()) as T;
+    return backendJsonFetch<T>(
+      url,
+      { method: 'GET', headers: { 'X-10X-Auth': this.authHeader } },
+      { kindLabel: 'log10x' }
+    );
   }
 }
 
@@ -816,12 +810,11 @@ export class DatadogPromBackend implements CustomerMetricsBackend {
   }
 
   private async fetchJson<T>(url: string): Promise<T> {
-    const res = await fetch(url, { headers: this.headers });
-    if (!res.ok) {
-      const body = await res.text().catch(() => '');
-      throw new Error(`datadog_prom HTTP ${res.status}: ${body.slice(0, 400)}`);
-    }
-    return (await res.json()) as T;
+    return backendJsonFetch<T>(
+      url,
+      { method: 'GET', headers: this.headers },
+      { kindLabel: 'datadog' }
+    );
   }
 }
 
@@ -903,22 +896,22 @@ export class AmpBackend implements CustomerMetricsBackend {
           'or route through a sigv4-proxy sidecar and set LOG10X_CUSTOMER_METRICS_URL to it.'
       );
     }
-    const headers = sigV4Sign({
-      method: 'GET',
-      url,
-      region: this.region,
-      service: 'aps',
-      accessKeyId: creds.accessKeyId,
-      secretAccessKey: creds.secretAccessKey,
-      sessionToken: creds.sessionToken,
-      body: '',
-    });
-    const res = await fetch(url.toString(), { headers });
-    if (!res.ok) {
-      const body = await res.text().catch(() => '');
-      throw new Error(`amp HTTP ${res.status}: ${body.slice(0, 400)}`);
-    }
-    return (await res.json()) as T;
+    // Re-sign per attempt so SigV4 X-Amz-Date stays fresh across retries.
+    const region = this.region;
+    const reSignPerAttempt = async (): Promise<RequestInit> => {
+      const headers = sigV4Sign({
+        method: 'GET',
+        url,
+        region,
+        service: 'aps',
+        accessKeyId: creds.accessKeyId,
+        secretAccessKey: creds.secretAccessKey,
+        sessionToken: creds.sessionToken,
+        body: '',
+      });
+      return { method: 'GET', headers };
+    };
+    return backendJsonFetch<T>(url.toString(), {}, { kindLabel: 'amp', reSignPerAttempt });
   }
 }
 
@@ -988,13 +981,14 @@ export class GcpManagedPrometheusBackend implements CustomerMetricsBackend {
   }
 
   private async authedFetch<T>(url: URL): Promise<T> {
+    // accessToken() lives OUTSIDE the retry loop. The token cache is
+    // module-local and shouldn't be invalidated on transient 5xx.
     const token = await this.accessToken();
-    const res = await fetch(url.toString(), { headers: { Authorization: `Bearer ${token}` } });
-    if (!res.ok) {
-      const body = await res.text().catch(() => '');
-      throw new Error(`gcp_managed_prometheus HTTP ${res.status}: ${body.slice(0, 400)}`);
-    }
-    return (await res.json()) as T;
+    return backendJsonFetch<T>(
+      url.toString(),
+      { method: 'GET', headers: { Authorization: `Bearer ${token}` } },
+      { kindLabel: 'gcp-managed-prom' }
+    );
   }
 
   private async accessToken(): Promise<string> {

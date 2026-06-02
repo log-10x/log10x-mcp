@@ -23,6 +23,7 @@
  */
 
 import type { PrometheusResponse } from './api.js';
+import { backendJsonFetch } from './backend-fetch.js';
 
 // ── Config types ──────────────────────────────────────────────────────────
 
@@ -352,15 +353,11 @@ export function createMetricsBackend(config: MetricsBackendConfig): MetricsBacke
  * from a `PromAuth` value and runs a JSON fetch with consistent error
  * formatting.
  *
- * Wraps the fetch in retry-on-transient: 5xx or 429 → exponential
- * backoff with jitter, up to RETRY_ATTEMPTS. 4xx (other than 429) is
- * surfaced immediately because retrying won't help (auth, bad query).
- * Mirrors the retry semantics api.ts has always used for
- * prometheus.log10x.com.
+ * Delegates retry+timeout to `backend-fetch.ts`. Retry classes (5xx, 429,
+ * network, AbortError → timeout) and the error envelope shape live there.
+ * Tunable via env: LOG10X_RETRY_ATTEMPTS (default 3), LOG10X_RETRY_BASE_MS
+ * (default 250), LOG10X_REQUEST_TIMEOUT_MS (default 30000).
  */
-const RETRY_ATTEMPTS = 3;
-const RETRY_BASE_MS = parseInt(process.env.LOG10X_RETRY_BASE_MS || '250', 10) || 250;
-
 async function promJsonFetch<T>(
   kindLabel: string,
   url: URL,
@@ -368,33 +365,7 @@ async function promJsonFetch<T>(
   authHeaders: Record<string, string>
 ): Promise<T> {
   const headers = { ...extraHeaders, ...authHeaders };
-  let lastErr: Error | undefined;
-  for (let attempt = 0; attempt < RETRY_ATTEMPTS; attempt++) {
-    let res: Response;
-    try {
-      res = await fetch(url.toString(), { headers });
-    } catch (e) {
-      lastErr = e as Error;
-      if (attempt < RETRY_ATTEMPTS - 1) {
-        const backoff = RETRY_BASE_MS * Math.pow(2, attempt) + Math.floor(Math.random() * 100);
-        await new Promise((resolve) => setTimeout(resolve, backoff));
-      }
-      continue;
-    }
-    if (res.ok) return (await res.json()) as T;
-    const body = await res.text().catch(() => '');
-    // 4xx (other than 429) is a caller error — auth, bad query. Don't retry.
-    if (res.status < 500 && res.status !== 429) {
-      throw new Error(`${kindLabel} HTTP ${res.status} ${res.statusText}: ${body.slice(0, 400)}`);
-    }
-    // 5xx and 429 are retryable.
-    lastErr = new Error(`${kindLabel} HTTP ${res.status} ${res.statusText}: ${body.slice(0, 400)}`);
-    if (attempt < RETRY_ATTEMPTS - 1) {
-      const backoff = RETRY_BASE_MS * Math.pow(2, attempt) + Math.floor(Math.random() * 100);
-      await new Promise((resolve) => setTimeout(resolve, backoff));
-    }
-  }
-  throw lastErr || new Error(`${kindLabel}: fetch failed after ${RETRY_ATTEMPTS} attempts`);
+  return backendJsonFetch<T>(url.toString(), { headers }, { kindLabel });
 }
 
 function promAuthHeaders(auth: PromAuth): Record<string, string> {
