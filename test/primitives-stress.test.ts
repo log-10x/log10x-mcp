@@ -25,9 +25,22 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { startStubProm, buildSeries, STUB_ENV } from './helpers/stub-prom.js';
-import { executeMetricsThatMoved } from '../src/tools/metrics-that-moved.js';
-import { executeRankByShapeSimilarity } from '../src/tools/rank-by-shape-similarity.js';
 import type { EnvConfig } from '../src/lib/environments.js';
+
+// backend-fetch now retries 5xx up to LOG10X_RETRY_ATTEMPTS (default 3)
+// with exponential backoff. That retry layer is the feature under test
+// elsewhere (backend-retry.test.ts); here it would (a) absorb the diffuse
+// 10% rail so no candidate ever lands in evaluation_failed[], and (b) add
+// ~minutes of backoff+jitter on a heavy-failure run, blowing the wall-time
+// budget. Disable retry for the stress harness so the rail maps 1:1 to
+// terminal failures and the loop stays sequential-fast. Env vars are read
+// at backend-fetch module load, so set them BEFORE the dynamic import —
+// same idiom as backend-retry.test.ts.
+process.env.LOG10X_RETRY_ATTEMPTS = '1';
+process.env.LOG10X_RETRY_BASE_MS = '1';
+
+const { executeMetricsThatMoved } = await import('../src/tools/metrics-that-moved.js');
+const { executeRankByShapeSimilarity } = await import('../src/tools/rank-by-shape-similarity.js');
 
 const ENV = STUB_ENV as EnvConfig;
 
@@ -100,14 +113,15 @@ test('stress: metrics_that_moved with 100 candidates + 10% 503 rail completes co
     const total = data.moved.length + data.not_moved.length + data.evaluation_failed.length;
     assert.equal(total, 100, `accounting failure: ${data.moved.length} + ${data.not_moved.length} + ${data.evaluation_failed.length} != 100`);
 
-    // ~10% failure rate. The stub schedules failures deterministically,
-    // so the exact count depends on the request order (anchor + 100
-    // candidates = 201 requests). With rate 0.1, expect ~20 failures.
-    // Loose bounds: 10-30. If we hit zero, the rail didn't fire and the
-    // test is silently passing.
+    // ~10% failure rate, retries disabled for this harness (see top of
+    // file) so each injected 503 is a terminal failure. The stub
+    // schedules failures deterministically, so the exact count depends on
+    // the request order (anchor + 100 candidates = 101 requests). With
+    // rate 0.1, expect ~10 failures. Loose bounds: 5-30. If we hit zero,
+    // the rail didn't fire and the test is silently passing.
     assert.ok(
-      data.evaluation_failed.length >= 10 && data.evaluation_failed.length <= 30,
-      `expected ~20 failures from 10% rail, got ${data.evaluation_failed.length}`,
+      data.evaluation_failed.length >= 5 && data.evaluation_failed.length <= 30,
+      `expected ~10 failures from 10% rail, got ${data.evaluation_failed.length}`,
     );
 
     // Loose budget. 100 sequential queries at zero stub latency should
@@ -115,7 +129,9 @@ test('stress: metrics_that_moved with 100 candidates + 10% 503 rail completes co
     // wrong" cliff (synchronous wait, accidental sleep, etc.).
     assert.ok(elapsedMs < 10_000, `wall time blew budget: ${elapsedMs}ms`);
 
-    // Stub saw N+1 queries: 1 anchor + 100 candidates.
+    // Stub saw N+1 queries: 1 anchor + 100 candidates. Retries are
+    // disabled for this harness, so the physical request count equals the
+    // logical one.
     assert.equal(stub.totalQueries(), 101);
   } finally {
     await stub.close();

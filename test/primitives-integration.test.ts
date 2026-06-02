@@ -170,10 +170,13 @@ test('metrics_that_moved: 503 on candidate fetch → candidate lands in evaluati
     const anchorVals = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19];
     stub.setFixture('anchor', { values: buildSeries(anchorVals, 30, endTs) });
     // Register all candidates so they're known queries; then enable a
-    // 50% failure rail. Stub's deterministic counter: anchor c=1 (no
-    // fail), cand_a c=2 (fail), cand_b c=3 (no fail), cand_c c=4 (fail).
-    // The candidate loop's catch-block routes failed queries to
-    // evaluation_failed[]. Expect ≥1 failed.
+    // near-total failure rail. backend-fetch now retries 5xx up to 3
+    // attempts (LOG10X_RETRY_ATTEMPTS default), so a *single* transient
+    // 503 is absorbed by the retry and the candidate succeeds. Only a
+    // candidate whose every retry attempt 503s lands in
+    // evaluation_failed[]. rate=0.99 keeps the anchor (request 1) green
+    // but fails every subsequent attempt, so all three candidates
+    // exhaust their retries → evaluation_failed[]. Expect ≥1 failed.
     const flatVals = buildSeries(
       [5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
       30,
@@ -182,7 +185,7 @@ test('metrics_that_moved: 503 on candidate fetch → candidate lands in evaluati
     stub.setFixture('cand_a', { values: flatVals });
     stub.setFixture('cand_b', { values: flatVals });
     stub.setFixture('cand_c', { values: flatVals });
-    stub.setFailureRate(0.5);
+    stub.setFailureRate(0.99);
     const out = await executeMetricsThatMoved(
       {
         anchor_type: 'customer_metric',

@@ -148,7 +148,7 @@ test('top view emits a drivers table with $/year column', () => {
 test('pattern view returns detail for a known identity', () => {
   const patterns = renderPocReport(input()).markdown;
   // Pick an identity that should appear in the report: extract from receiver YAML block.
-  const m = /- pattern: ([a-z0-9_]+)/.exec(patterns);
+  const m = /- pattern: "([a-z0-9_]+)"/.exec(patterns);
   assert.ok(m, 'should find at least one identity in full report');
   const identity = m[1];
   const out = renderPocPattern(input(), identity);
@@ -203,12 +203,13 @@ test('heuristic strips literal timestamps baked into templates', () => {
 });
 
 test('AI pretty names take priority over heuristic', () => {
-  // Identity is derived from toSnakeCase(template, hash) — not the raw hash.
-  // For template "$(ts) INFO heartbeat every $ seconds from $" that's
-  // "heartbeat_every_seconds_from". We key aiPrettyNames on that.
+  // Identity is the engine-emitted match key, resolved in enrichPatterns()
+  // as `p.symbolMessage || p.tenxHash || p.hash` — NOT a renderer-derived
+  // snake_case of the template. The fixture's heartbeat pattern has no
+  // symbolMessage/tenxHash, so its identity is the raw hash `h_a`.
   const i = {
     ...input(),
-    aiPrettyNames: { heartbeat_every_seconds_from: 'Customer Heartbeat' },
+    aiPrettyNames: { h_a: 'Customer Heartbeat' },
   };
   const out = renderPocSummary(i);
   assert.ok(out.includes('Customer Heartbeat'), `AI name should win; got:\n${out}`);

@@ -21,7 +21,8 @@ test('renderNextActions wraps a single action in the HTML-comment block', () => 
   const out = renderNextActions([
     { tool: 'log10x_investigate', args: { starting_point: 'svc-a' }, reason: 'top driver' },
   ]);
-  assert.match(out, /^<!-- NEXT_ACTIONS:/);
+  assert.match(out, /^<!-- NEXT_STEPS_FOR_USER:/);
+  assert.match(out, /<!-- NEXT_ACTIONS:/);
   assert.match(out, /-->$/);
   assert.match(out, /log10x_investigate/);
 });

@@ -385,32 +385,57 @@ test('datadog adapter: sends DD-API-KEY + DD-APPLICATION-KEY headers', async () 
 
 // ── stub adapters throw with helpful messages ────────────────────────────
 
-test('amp adapter: phase-1 stub throws with pointer to customer-metrics impl', async () => {
+test('amp adapter: throws AWS-credentials error when no creds in env', async () => {
+  // AmpBackend is implemented (SigV4 against the `aps` service); with no
+  // AWS creds in the environment it surfaces a clear credentials error
+  // before any network call. awsCredentials() reads only AWS_ACCESS_KEY_ID
+  // + AWS_SECRET_ACCESS_KEY, so clearing them makes this deterministic.
+  delete process.env.AWS_ACCESS_KEY_ID;
+  delete process.env.AWS_SECRET_ACCESS_KEY;
   const b = createMetricsBackend({
     kind: 'amp',
     url: 'https://aps-workspaces.us-east-1.amazonaws.com/workspaces/ws-x/',
     region: 'us-east-1',
   });
-  await assert.rejects(() => b.queryInstant('up'), /not yet implemented in phase 1/);
+  await assert.rejects(() => b.queryInstant('up'), /AWS credentials/);
 });
 
-test('gcp_managed_prom adapter: phase-1 stub throws with pointer to customer-metrics impl', async () => {
-  const b = createMetricsBackend({
-    kind: 'gcp_managed_prom',
-    url: 'https://monitoring.googleapis.com/v1/projects/log10x-poc/location/global/prometheus',
-    projectId: 'log10x-poc',
-  });
-  await assert.rejects(() => b.queryInstant('up'), /not yet implemented in phase 1/);
+test('gcp_managed_prom adapter: requires accessToken or serviceAccountKeyFile', () => {
+  // GcpManagedPromBackend is implemented (OAuth2 JWT-bearer token minting).
+  // Its constructor refuses a config that provides neither a pre-minted
+  // accessToken nor a serviceAccountKeyFile, so the throw now happens at
+  // createMetricsBackend() time rather than on queryInstant().
+  assert.throws(
+    () =>
+      createMetricsBackend({
+        kind: 'gcp_managed_prom',
+        url: 'https://monitoring.googleapis.com/v1/projects/log10x-poc/location/global/prometheus',
+        projectId: 'log10x-poc',
+      }),
+    (err: Error) =>
+      err instanceof MetricsBackendConfigError &&
+      err.message.includes('accessToken') &&
+      err.message.includes('serviceAccountKeyFile')
+  );
 });
 
-test('grafana_cloud_prom adapter: phase-1 stub throws (deferred until creds available)', async () => {
+test('grafana_cloud_prom adapter: Basic auths with instance id as user + api key as password', async () => {
+  // GrafanaCloudBackend is now a thin Prometheus subclass: HTTP Basic with
+  // the grafana.com instance id as the user and the API key as the password.
+  // It performs a real prom query; mock fetch so the test is hermetic.
+  const { calls } = setupMockFetch([jsonResponse(PROM_OK)]);
   const b = createMetricsBackend({
     kind: 'grafana_cloud_prom',
     url: 'https://prometheus-prod-13.grafana.net/api/prom',
     user: '1234',
     apiKey: 'short',
   });
-  await assert.rejects(() => b.queryInstant('up'), /not yet implemented in phase 1/);
+  const res = await b.queryInstant('up');
+  assert.equal(res.status, 'success');
+  const headers = calls[0].init?.headers as Record<string, string>;
+  const expected = 'Basic ' + Buffer.from('1234:short').toString('base64');
+  assert.equal(headers.Authorization, expected);
+  assert.ok(calls[0].url.startsWith('https://prometheus-prod-13.grafana.net/api/prom/api/v1/query?query=up'));
 });
 
 // ── queryRange wiring ───────────────────────────────────────────────────

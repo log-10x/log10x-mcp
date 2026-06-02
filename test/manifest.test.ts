@@ -258,7 +258,7 @@ test('getPackageDefaultManifest: ships every registered tool with title + descri
   assert.equal(m.manifestVersion, 1);
   // Spot-check a few tools that index.ts registers
   const required = [
-    'log10x_cost_drivers',
+    'log10x_cost_options',
     'log10x_investigate',
     'log10x_signin_start',
     'log10x_signin_complete',
@@ -274,8 +274,8 @@ test('getPackageDefaultManifest: ships every registered tool with title + descri
 });
 
 test('getPackageDefaultTool: returns the entry for a known tool', () => {
-  const t = getPackageDefaultTool('log10x_cost_drivers');
-  assert.equal(t.title, 'Cost drivers');
+  const t = getPackageDefaultTool('log10x_cost_options');
+  assert.equal(t.title, 'Cost reduction options');
   assert.equal(t.annotations?.readOnlyHint, true);
 });
 

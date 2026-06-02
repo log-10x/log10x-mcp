@@ -18,7 +18,7 @@
     "start": "node build/index.js",
     "dev": "tsc --watch",
     "prepublishOnly": "npm run build",
-    "test": "tsc -p tsconfig.test.json && node --test test-build/test/*.test.js test-build/test/**/*.test.js",
+    "test": "tsc -p tsconfig.test.json && mkdir -p test-build/vendor/promql-parser && cp -r vendor/promql-parser/promql.js vendor/promql-parser/package.json test-build/vendor/promql-parser/ && node --test test-build/test/*.test.js test-build/test/**/*.test.js",
     "test:integration": "LOG10X_INTEGRATION_TESTS=1 npm test"
   },
   "keywords": [
