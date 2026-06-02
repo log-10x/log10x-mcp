@@ -30,7 +30,7 @@ import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { LABELS } from '../lib/promql.js';
 import { parseTimeframe } from '../lib/format.js';
-import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { computeAnchorDispersion, ANCHOR_DISPERSION_FLOOR } from '../lib/anchor-dispersion.js';
 import { canonicalMetricRef } from '../lib/metric-ref.js';
 import { wrapBackendError, type PrimitiveError } from '../lib/primitive-errors.js';
@@ -401,16 +401,6 @@ export async function executeMetricsThatMoved(
 
   const headline = `${moved.length} of ${args.candidates.length} candidates moved with anchor (phase_gap ≥ ${floor}). ${notMoved.length} did not move. ${failed.length} could not be evaluated.`;
 
-  // Markdown-view branch retained for backward-compat with in-process
-  // callers; deprecated from the public schema. New callers should
-  // read data.human_summary instead.
-  if (args.view === 'markdown') {
-    return buildMarkdownEnvelope({
-      tool: 'log10x_metrics_that_moved',
-      summary: { headline },
-      markdown: renderMarkdown(data),
-    });
-  }
   return buildEnvelope({
     tool: 'log10x_metrics_that_moved',
     view: 'summary',

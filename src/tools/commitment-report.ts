@@ -42,7 +42,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   buildEnvelope,
-  buildMarkdownEnvelope,
   type StructuredOutput,
 } from '../lib/output-types.js';
 import {
@@ -383,6 +382,11 @@ export interface CommitmentReportEnvelope {
   annualized_dollars: number | null;
   caveats: string[];
   markdown?: string;
+  /**
+   * One-paragraph plain-prose distillation. Populated on every success
+   * path. Dollar figures gated by rate_source.
+   */
+  human_summary?: string;
 }
 
 // ─── period resolution ──────────────────────────────────────────────
@@ -959,13 +963,6 @@ export async function executeCommitmentReport(
       '',
       'If a commitment already exists, the id is printed in the configure_engine output and lives at $LOG10X_ADVISOR_STATE_DIR/commitments/<id>.json (or $TMPDIR/log10x-advisor-snapshots/commitments/<id>.json).',
     ].join('\n');
-    if (format === 'cfo_md') {
-      return buildMarkdownEnvelope({
-        tool: 'log10x_commitment_report',
-        summary: { headline },
-        markdown: `# Commitment report unavailable\n\n${headline}\n\n${remediation}`,
-      });
-    }
     return buildEnvelope({
       tool: 'log10x_commitment_report',
       view: 'summary',
@@ -975,6 +972,7 @@ export async function executeCommitmentReport(
         phase: 'not_ready',
         reason: 'commitment_not_found',
         remediation,
+        human_summary: `commitment_report unavailable: ${headline} ${remediation.split('\n')[0]}`,
       },
     });
   }
@@ -991,13 +989,6 @@ export async function executeCommitmentReport(
     const msg = e instanceof Error ? e.message : String(e);
     const headline =
       'Customer metrics backend not configured — commitment_report cannot compute weekly verify.';
-    if (format === 'cfo_md') {
-      return buildMarkdownEnvelope({
-        tool: 'log10x_commitment_report',
-        summary: { headline },
-        markdown: `# Commitment report unavailable\n\n${headline}\n\n${msg}`,
-      });
-    }
     return buildEnvelope({
       tool: 'log10x_commitment_report',
       view: 'summary',
@@ -1007,6 +998,7 @@ export async function executeCommitmentReport(
         phase: 'not_ready',
         reason: 'metrics_backend_missing',
         error: msg,
+        human_summary: `commitment_report unavailable: ${headline}`,
       },
     });
   }
@@ -1026,13 +1018,6 @@ export async function executeCommitmentReport(
       'log10x_estimate_savings dependency not yet available — commitment_report cannot produce weekly verify.';
     const remediation =
       'commitment_report depends on log10x_estimate_savings (verify mode), shipped in the same x%-MCP-cost-tooling branch. Re-run npm run build after merging estimate-savings.';
-    if (format === 'cfo_md') {
-      return buildMarkdownEnvelope({
-        tool: 'log10x_commitment_report',
-        summary: { headline },
-        markdown: `# Commitment report unavailable\n\n${headline}\n\n${remediation}`,
-      });
-    }
     return buildEnvelope({
       tool: 'log10x_commitment_report',
       view: 'summary',
@@ -1042,6 +1027,7 @@ export async function executeCommitmentReport(
         phase: 'not_ready',
         reason: 'estimate_savings_dependency_missing',
         remediation,
+        human_summary: `commitment_report unavailable: ${headline} ${remediation}`,
       },
     });
   }
@@ -1285,17 +1271,22 @@ export async function executeCommitmentReport(
     caveats,
   };
 
-  // 9. Render output by format.
+  // 9. Render output. `cfo_md` populates the deliverable markdown field on
+  // the envelope (data.markdown) so CFO callers can pluck it; the typed
+  // envelope is the same shape across all format values.
   if (format === 'cfo_md') {
     envelope.markdown = renderMarkdown(envelope);
-    return buildMarkdownEnvelope({
-      tool: 'log10x_commitment_report',
-      summary: {
-        headline: `${commitment.service}: delivered ${agg.delivered_pct.toFixed(1)}% vs promised ${commitment.promised_pct.toFixed(1)}% over ${period.days}d.`,
-      },
-      markdown: envelope.markdown,
-    });
   }
+  envelope.human_summary = buildCommitmentReportHumanSummary({
+    service: commitment.service,
+    deliveredPct: agg.delivered_pct,
+    promisedPct: commitment.promised_pct,
+    days: period.days,
+    rateSource: envelope.rate_source,
+    deliveredDollars: envelope.delivered_dollars,
+    weekCount: envelope.weekly_series.length,
+    caveats: envelope.caveats,
+  });
 
   return buildEnvelope({
     tool: 'log10x_commitment_report',
@@ -1305,4 +1296,25 @@ export async function executeCommitmentReport(
     },
     data: envelope,
   });
+}
+
+// ─── human_summary builder ────────────────────────────────────────────
+function buildCommitmentReportHumanSummary(args: {
+  service: string;
+  deliveredPct: number;
+  promisedPct: number;
+  days: number;
+  rateSource: 'list_price' | 'customer_supplied' | 'unset';
+  deliveredDollars: number | null;
+  weekCount: number;
+  caveats: string[];
+}): string {
+  const verdict = args.deliveredPct >= args.promisedPct ? 'met' : 'short';
+  const lead = `Service ${args.service} delivered ${args.deliveredPct.toFixed(1)}% reduction vs ${args.promisedPct.toFixed(1)}% promised over the last ${args.days} days across ${args.weekCount} weekly slice${args.weekCount === 1 ? '' : 's'}, ${verdict} the commitment.`;
+  const dollars =
+    args.rateSource !== 'unset' && args.deliveredDollars != null
+      ? ` Realized savings: ${args.rateSource === 'customer_supplied' ? '$' + args.deliveredDollars.toFixed(0) + ' (customer-supplied rate)' : '$' + args.deliveredDollars.toFixed(0) + ' (list price)'}.`
+      : '';
+  const caveats = args.caveats.length > 0 ? ` Caveats: ${args.caveats.length}.` : '';
+  return `${lead}${dollars}${caveats}`;
 }

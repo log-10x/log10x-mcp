@@ -154,7 +154,6 @@ export const patternExamplesSchema = {
       'Vendor-specific scope (Splunk index, Datadog index, ES index pattern, CloudWatch log group). Defaults to a sensible per-vendor value when omitted.',
     ),
   environment: z.string().optional().describe('Environment nickname.'),
-  view: z.enum(['summary', 'markdown']).default('summary').describe('Output format. summary returns structured envelope; markdown returns rendered buckets.'),
 };
 
 interface ProgressNote {
@@ -172,7 +171,6 @@ interface PatternExamplesArgs {
   limit?: number;
   scope?: string;
   environment?: string;
-  view?: 'summary' | 'markdown';
 }
 
 interface PatternExamplesSummary {
@@ -205,17 +203,27 @@ interface PatternExamplesSummary {
 export async function executePatternExamples(
   rawArgs: PatternExamplesArgs,
   env: EnvConfig,
-): Promise<string | import('../lib/output-types.js').StructuredOutput> {
-  const view = rawArgs.view ?? 'summary';
+): Promise<import('../lib/output-types.js').StructuredOutput> {
   const telemetry = newTelemetry();
   const sumOut: { data?: PatternExamplesSummary } = {};
   const md = await executePatternExamplesInner(rawArgs, env, sumOut);
-  const { buildMarkdownEnvelope, buildEnvelope } = await import('../lib/output-types.js');
-  if (view === 'markdown' || !sumOut.data) {
-    return buildMarkdownEnvelope({
+  const { buildEnvelope } = await import('../lib/output-types.js');
+  if (!sumOut.data) {
+    // Graceful no-signal / error cases: the inner returns a markdown
+    // narrative. Strip the leading `## ` heading and collapse to a
+    // single-paragraph human_summary so the envelope stays typed.
+    const stripped = md
+      .replace(/^##\s*/m, '')
+      .split('\n')
+      .filter((l) => l.trim().length > 0 && !l.trim().startsWith('-'))
+      .join(' ')
+      .slice(0, 600);
+    const headline = md.split('\n')[0]?.replace(/^##\s*/, '').slice(0, 200) || 'pattern_examples — no result';
+    return buildEnvelope({
       tool: 'log10x_pattern_examples',
-      summary: { headline: md.split('\n')[0]?.slice(0, 200) || 'pattern_examples result' },
-      markdown: md,
+      view: 'summary',
+      summary: { headline },
+      data: { ...buildUnifiedFields({ status: 'no_signal', telemetry, humanSummary: stripped }) },
     });
   }
   const d = sumOut.data;

@@ -17,7 +17,7 @@
 
 import { z } from 'zod';
 import { resolveBackend, formatDetectionTrace, CustomerMetricsNotConfiguredError } from '../lib/customer-metrics.js';
-import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
 
 export const customerMetricsQuerySchema = {
@@ -40,10 +40,6 @@ export const customerMetricsQuerySchema = {
     .string()
     .optional()
     .describe('Bucket step for range queries, in seconds. Required when mode=range.'),
-  view: z
-    .enum(['summary', 'markdown'])
-    .default('summary')
-    .describe('summary returns the typed envelope (data.series[], data.backend, data.result_type). markdown wraps the rendered series view in data.markdown.'),
 };
 
 interface CustomerMetricsQuerySummary {
@@ -53,6 +49,7 @@ interface CustomerMetricsQuerySummary {
   result_type: string;
   series_count: number;
   shown_count: number;
+  human_summary: string;
   series: Array<{
     metric_name: string;
     labels: Record<string, string>;
@@ -73,12 +70,12 @@ export async function executeCustomerMetricsQuery(args: {
   start?: string;
   end?: string;
   step?: string;
-  view?: 'summary' | 'markdown';
 }): Promise<string | StructuredOutput> {
-  const view = args.view ?? 'summary';
   const telemetry = newTelemetry();
   const resolution = await resolveBackend();
   if (!resolution.backend) {
+    // KEEP (precondition): throw is the loud human-escape-hatch path;
+    // wrap() converts via isNotConfiguredError(name match) to a typed envelope.
     throw new CustomerMetricsNotConfiguredError(formatDetectionTrace(resolution.trace));
   }
   const backend = resolution.backend;
@@ -88,35 +85,40 @@ export async function executeCustomerMetricsQuery(args: {
     res = await backend.queryInstant(args.promql);
   } else {
     if (!args.start || !args.end || !args.step) {
+      // KEEP (schema-violation): cross-field requirement Zod can't express.
       throw new Error('mode=range requires start, end, and step.');
     }
     const start = parseTimeArg(args.start);
     const end = parseTimeArg(args.end);
     const step = parseInt(args.step, 10);
     if (!Number.isFinite(start) || !Number.isFinite(end) || !Number.isFinite(step) || step <= 0) {
+      // KEEP (schema-violation): freeform string parse, not Zod-expressible.
       throw new Error('Invalid start/end/step. Expect ISO8601 or UNIX seconds, and a positive integer step.');
     }
     res = await backend.queryRange(args.promql, start, end, step);
   }
 
   const data = buildCustomerMetricsSummary(args.promql, res, backend.backendType, args.mode);
-  const md = renderQueryResult(args.promql, res, backend.backendType);
-
-  if (view === 'markdown') {
-    return buildMarkdownEnvelope({
-      tool: 'log10x_customer_metrics_query',
-      summary: { headline: `Customer metrics (${backend.backendType}): ${data.series_count} series` },
-      markdown: md,
-    });
-  }
+  data.human_summary = buildCustomerMetricsQueryHumanSummary(data, args.promql);
   const headline = `${backend.backendType} query \`${args.promql.slice(0, 60)}${args.promql.length > 60 ? '…' : ''}\`: ${data.series_count} series returned (${data.result_type}).`;
   return buildEnvelope({
     tool: 'log10x_customer_metrics_query',
     view: 'summary',
     summary: { headline },
-    data: { ...data, ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: headline }) },
+    data: { ...data, ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: data.human_summary }) },
     truncated: data.shown_count < data.series_count,
   });
+}
+
+function buildCustomerMetricsQueryHumanSummary(data: CustomerMetricsQuerySummary, promql: string): string {
+  const qprev = promql.length > 60 ? `${promql.slice(0, 60)}…` : promql;
+  if (data.series_count === 0) {
+    return `Customer backend (${data.backend}) returned 0 series for \`${qprev}\` in ${data.mode} mode. Check label values or widen the window.`;
+  }
+  const top = data.series[0];
+  const topLabels = top ? Object.entries(top.labels).slice(0, 2).map(([k, v]) => `${k}="${v}"`).join(', ') : '';
+  const shownFrag = data.shown_count < data.series_count ? ` (showing first ${data.shown_count})` : '';
+  return `Customer backend (${data.backend}) returned ${data.series_count} ${data.result_type} series for \`${qprev}\` in ${data.mode} mode${shownFrag}.${top ? ` Sample: ${top.metric_name}{${topLabels}}.` : ''}`;
 }
 
 function buildCustomerMetricsSummary(
@@ -134,6 +136,7 @@ function buildCustomerMetricsSummary(
     result_type: res.data.resultType,
     series_count: res.data.result.length,
     shown_count: shown.length,
+    human_summary: '',
     series: shown.map((r) => {
       const labels: Record<string, string> = {};
       const metricName = (r.metric.__name__ as string | undefined) ?? 'result';
@@ -169,49 +172,3 @@ function parseTimeArg(raw: string): number {
   return NaN;
 }
 
-function renderQueryResult(
-  promql: string,
-  res: import('../lib/api.js').PrometheusResponse,
-  backendType: string
-): string {
-  const lines: string[] = [];
-  lines.push(`## Customer metric query result`);
-  lines.push('');
-  lines.push(`**Backend**: ${backendType}`);
-  lines.push(`**Query**: \`${promql}\``);
-  lines.push(`**Result type**: ${res.data.resultType}`);
-  lines.push(`**Series returned**: ${res.data.result.length}`);
-  lines.push('');
-
-  if (res.data.result.length === 0) {
-    lines.push('_No data._');
-    return lines.join('\n');
-  }
-
-  for (let i = 0; i < Math.min(res.data.result.length, 10); i++) {
-    const r = res.data.result[i];
-    const labelStr = Object.entries(r.metric)
-      .filter(([k]) => k !== '__name__')
-      .map(([k, v]) => `${k}="${v}"`)
-      .join(', ');
-    const name = r.metric.__name__ || 'result';
-    lines.push(`### ${i + 1}. ${name}{${labelStr}}`);
-    if (r.value) {
-      lines.push(`  instant value: ${r.value[1]} @ ${new Date(r.value[0] * 1000).toISOString()}`);
-    }
-    if (r.values && r.values.length > 0) {
-      lines.push(`  range: ${r.values.length} points from ${new Date(r.values[0][0] * 1000).toISOString()} to ${new Date(r.values[r.values.length - 1][0] * 1000).toISOString()}`);
-      const first = r.values.slice(0, 3).map(([t, v]) => `${v}@${t}`).join(', ');
-      const last = r.values.slice(-3).map(([t, v]) => `${v}@${t}`).join(', ');
-      lines.push(`  first 3: ${first}`);
-      lines.push(`  last 3: ${last}`);
-    }
-    lines.push('');
-  }
-
-  if (res.data.result.length > 10) {
-    lines.push(`_${res.data.result.length - 10} additional series omitted._`);
-  }
-
-  return lines.join('\n');
-}

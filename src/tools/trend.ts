@@ -15,7 +15,7 @@ import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { agentOnly } from '../lib/agent-only.js';
 import { lineChart } from '../lib/line-chart.js';
 import { patternDisplay } from '../lib/pattern-descriptor.js';
-import { buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
 
 export const trendSchema = {
@@ -24,7 +24,7 @@ export const trendSchema = {
   step: z.enum(['1m', '5m', '15m', '1h', '6h', '1d']).default('1h').describe('Data point interval. Use `1m`/`5m` for sub-day windows (15m/1h/6h), `1h`/`6h` for day-level, `1d` for week+ windows.'),
   analyzerCost: z.number().optional().describe('SIEM ingestion cost in $/GB'),
   environment: z.string().optional().describe('Environment nickname'),
-  view: z.enum(['summary', 'markdown']).default('summary').describe('Output format. summary returns structured envelope; markdown returns rendered chart + stats.'),
+  view: z.literal('summary').default('summary').optional().describe('Output format. Always "summary" — the structured envelope. Field retained for backward-compat.'),
   // PL-12b — engine-decision cohort scope. Supersedes the prior binary
   // `isDropped` flag. Three states: `kept` (default, pre-PL-12 behavior)
   // = events the engine forwarded as-is (selector `isDropped!="true"`,
@@ -81,18 +81,19 @@ interface PatternTrendSummary {
 }
 
 export async function executeTrend(
-  args: { pattern: string; timeRange?: string; step?: string; analyzerCost?: number; view?: 'summary' | 'markdown'; include?: 'kept' | 'dropped' | 'both' },
+  args: { pattern: string; timeRange?: string; step?: string; analyzerCost?: number; view?: 'summary'; include?: 'kept' | 'dropped' | 'both' },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
-  const view = args.view ?? 'summary';
   const telemetry = newTelemetry();
   const sumOut: { data?: PatternTrendSummary } = {};
-  const md = await executeTrendInner(args, env, sumOut);
-  if (view === 'markdown' || !sumOut.data) {
-    return buildMarkdownEnvelope({
+  await executeTrendInner(args, env, sumOut);
+  if (!sumOut.data) {
+    const headline = `No trend data available for \`${args.pattern}\` in this environment.`;
+    return buildEnvelope({
       tool: 'log10x_pattern_trend',
-      summary: { headline: md.split('\n')[0]?.slice(0, 200) || 'pattern_trend result' },
-      markdown: md,
+      view: 'summary',
+      summary: { headline },
+      data: { ...buildUnifiedFields({ status: 'insufficient_data', telemetry, humanSummary: headline }) },
     });
   }
   const d = sumOut.data;
@@ -118,7 +119,6 @@ export async function executeTrend(
   } else {
     headline = `\`${d.pattern}\` over ${d.window}: ${fmtBytes(d.total_bytes)}, change ${changeSign}${d.change_pct}% (last quarter vs first quarter run-rate)${dollarClause}${spikeClause}`;
   }
-  const { buildEnvelope } = await import('../lib/output-types.js');
   // G6: render a PNG timeseries chart of the trend so hosts that render
   // image content (Claude Desktop, ChatGPT Desktop) show it visually. The
   // chart is best-effort — if chart.js init fails (e.g. missing Cairo on

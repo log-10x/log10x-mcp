@@ -7,7 +7,7 @@
 
 import type { AdvisePlan, AdviseAction } from './types.js';
 import { renderPlan } from './render.js';
-import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../output-types.js';
+import { buildEnvelope, type StructuredOutput } from '../output-types.js';
 
 /**
  * Typed summary of an AdvisePlan. Exported so both `advise_install` and
@@ -87,6 +87,7 @@ export interface AdvisePlanSummary {
   blockers: string[];
   notes: string[];
   has_gitops_section: boolean;
+  human_summary: string;
 }
 
 /** Build the typed plan summary. Exported for the install wizard's plan-mode. */
@@ -101,20 +102,10 @@ export function buildPlanHeadline(plan: AdvisePlan, action: AdviseAction): strin
 
 export function buildAdvisePlanEnvelope(args: {
   tool: string;
-  view: 'summary' | 'markdown';
   plan: AdvisePlan;
   action: AdviseAction;
   destinationNote?: string;
 }): StructuredOutput {
-  const md = renderPlan(args.plan, args.action);
-  const finalMd = args.destinationNote ? `_${args.destinationNote}_\n\n${md}` : md;
-  if (args.view === 'markdown') {
-    return buildMarkdownEnvelope({
-      tool: args.tool,
-      summary: { headline: planHeadline(args.plan, args.action) },
-      markdown: finalMd,
-    });
-  }
   const data = summarize(args.plan, args.action);
   return buildEnvelope({
     tool: args.tool,
@@ -160,7 +151,27 @@ function summarize(plan: AdvisePlan, action: AdviseAction): AdvisePlanSummary {
     blockers: plan.blockers,
     notes: plan.notes,
     has_gitops_section: !!plan.gitopsExplainer,
+    human_summary: buildPlanHumanSummary(plan, action, { ok, warn, fail }, install_file_count),
   };
+}
+
+// Three sentences max, plain prose, no markdown syntax. What plan was
+// produced, what shape (steps / files / preflight verdict), and whether
+// it's blocked. No dollar figures — install plans are list-priced.
+function buildPlanHumanSummary(
+  plan: AdvisePlan,
+  action: AdviseAction,
+  pre: { ok: number; warn: number; fail: number },
+  fileCount: number,
+): string {
+  const fwd = plan.forwarder ? ` on ${plan.forwarder}` : '';
+  const stepCount = plan.install.length;
+  const verifyCount = plan.verify.length;
+  if (plan.blockers.length > 0) {
+    return `Built a ${plan.app} ${action} plan${fwd} for release "${plan.releaseName}" in namespace "${plan.namespace}". The plan is blocked by ${plan.blockers.length} item${plan.blockers.length !== 1 ? 's' : ''}: ${plan.blockers.slice(0, 3).join('; ')}. Resolve the blockers and re-run before applying.`;
+  }
+  const preflight = `Preflight: ${pre.ok} ok, ${pre.warn} warn, ${pre.fail} fail.`;
+  return `Built a ${plan.app} ${action} plan${fwd} for release "${plan.releaseName}" in namespace "${plan.namespace}". ${stepCount} install step${stepCount !== 1 ? 's' : ''} across ${fileCount} file${fileCount !== 1 ? 's' : ''}, ${verifyCount} verify probe${verifyCount !== 1 ? 's' : ''}, ${plan.teardown.length} teardown step${plan.teardown.length !== 1 ? 's' : ''}. ${preflight}`;
 }
 
 function planHeadline(plan: AdvisePlan, action: AdviseAction): string {

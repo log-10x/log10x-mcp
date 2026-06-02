@@ -16,7 +16,7 @@
 import { z } from 'zod';
 import { extractPatterns } from '../lib/pattern-extraction.js';
 import { findSkew, type SkewFinding } from '../lib/detectors/skew.js';
-import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import type { PrimitiveError } from '../lib/primitive-errors.js';
 
 /** Default minimum dominant-value fraction. Hand-picked, unvalidated. */
@@ -254,16 +254,6 @@ export async function executeFindSkew(args: FindSkewArgs): Promise<StructuredOut
         : status === 'insufficient_data'
           ? `Insufficient data — no pattern had ≥${minEvents} events after templating.`
           : `Error: ${data.error?.error_type ?? 'unknown'}.`;
-
-  // Markdown-view branch retained for in-process callers; deprecated
-  // from the public schema.
-  if (args.view === 'markdown') {
-    return buildMarkdownEnvelope({
-      tool: 'log10x_find_skew',
-      summary: { headline },
-      markdown: renderMarkdown(findings, args, minConcentration),
-    });
-  }
 
   return buildEnvelope({
     tool: 'log10x_find_skew',

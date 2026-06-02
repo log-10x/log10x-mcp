@@ -37,7 +37,7 @@ import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { LABELS } from '../lib/promql.js';
 import { parseTimeframe } from '../lib/format.js';
-import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { computeAnchorDispersion, ANCHOR_DISPERSION_FLOOR } from '../lib/anchor-dispersion.js';
 import { canonicalMetricRef } from '../lib/metric-ref.js';
 import { wrapBackendError, type PrimitiveError } from '../lib/primitive-errors.js';
@@ -360,13 +360,6 @@ export async function executeMetricOverlay(
   };
 
   const headline = buildHeadline(data);
-  if (args.view === 'markdown') {
-    return buildMarkdownEnvelope({
-      tool: 'log10x_metric_overlay',
-      summary: { headline },
-      markdown: renderMarkdown(data),
-    });
-  }
   return buildEnvelope({
     tool: 'log10x_metric_overlay',
     view: 'summary',
@@ -468,13 +461,6 @@ function overlayDispersionRefusal(args: {
     },
   };
   const headline = `Anchor lacks phase separation (dispersion ${args.anchorDispersion.toFixed(3)} < ${ANCHOR_DISPERSION_FLOOR}). Refusing — re-anchor.`;
-  if (args.view === 'markdown') {
-    return buildMarkdownEnvelope({
-      tool: 'log10x_metric_overlay',
-      summary: { headline },
-      markdown: humanSummary,
-    });
-  }
   return buildEnvelope({
     tool: 'log10x_metric_overlay',
     view: 'summary',

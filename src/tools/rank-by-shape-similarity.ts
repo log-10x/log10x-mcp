@@ -22,7 +22,7 @@ import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { LABELS } from '../lib/promql.js';
 import { parseTimeframe } from '../lib/format.js';
-import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { computeAnchorDispersion, ANCHOR_DISPERSION_FLOOR } from '../lib/anchor-dispersion.js';
 import { canonicalMetricRef } from '../lib/metric-ref.js';
 import { wrapBackendError, type PrimitiveError } from '../lib/primitive-errors.js';
@@ -166,7 +166,10 @@ export async function executeRankByShapeSimilarity(
     lag_search_max_abs?: number;
     anchor_phase_aligned_floor?: number;
     environment?: string;
-    /** Ignored. Retained for backward-compat with in-process callers. */
+    /** Ignored. Retained in the args type for backward-compat with
+     * in-process callers (tests, eval harness); the markdown view was
+     * removed from the public schema in favor of the structured
+     * `human_summary` field. */
     view?: 'summary' | 'markdown';
   },
   env: EnvConfig,
@@ -398,14 +401,6 @@ export async function executeRankByShapeSimilarity(
   };
   const headline = `Ranked ${ranked.length} candidates by |Pearson@lag|. ${failed.length} could not be evaluated.`;
 
-  // Markdown branch retained for in-process callers; deprecated.
-  if (args.view === 'markdown') {
-    return buildMarkdownEnvelope({
-      tool: 'log10x_rank_by_shape_similarity',
-      summary: { headline },
-      markdown: renderMarkdown(data),
-    });
-  }
   return buildEnvelope({
     tool: 'log10x_rank_by_shape_similarity',
     view: 'summary',
@@ -588,18 +583,3 @@ export function anchorPhaseGap(anchor: number[], candidate: number[]): number {
   return Math.abs(meanHigh - meanLow) / scale;
 }
 
-function renderMarkdown(d: RankByShapeSummary): string {
-  const lines: string[] = [];
-  lines.push(`## Shape similarity ranking`);
-  lines.push('');
-  lines.push(`**Anchor**: \`${d.anchor_expression}\``);
-  lines.push(`**Window**: ${d.window} · step ${d.step_seconds}s · anchor ${d.n_anchor_buckets} buckets`);
-  lines.push('');
-  lines.push('| Candidate | r | lag (s) | tightness | bound | phase-aligned |');
-  lines.push('|---|---:|---:|---:|---|---|');
-  for (const r of d.ranked.slice(0, 20)) {
-    const short = r.candidate.length > 50 ? r.candidate.slice(0, 47) + '...' : r.candidate;
-    lines.push(`| \`${short}\` | ${r.pearson_signed >= 0 ? '+' : ''}${r.pearson_signed.toFixed(2)} | ${r.lag_seconds} | ${r.lag_tightness.toFixed(2)} | ${r.lag_at_bound ? 'YES' : ''} | ${r.anchor_phase_aligned ? 'YES' : 'no'} |`);
-  }
-  return lines.join('\n');
-}

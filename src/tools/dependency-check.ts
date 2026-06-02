@@ -53,7 +53,6 @@ export const dependencyCheckSchema = {
     ),
   service: z.string().optional().describe('Service name to scope the scan'),
   severity: z.string().optional().describe('Severity level'),
-  view: z.enum(['summary', 'markdown']).default('summary').describe('Output format.'),
 };
 
 const VENDOR_CONFIG: Record<
@@ -93,7 +92,6 @@ export interface DependencyCheckArgs {
   vendor?: string;
   service?: string;
   severity?: string;
-  view?: 'summary' | 'markdown';
 }
 
 interface DependencyCheckSummary {
@@ -103,29 +101,63 @@ interface DependencyCheckSummary {
   scan_ran: boolean;
   dependencies: Array<{ kind: string; name: string; url?: string }>;
   safe_to_drop_recommendation: 'safe' | 'blocked' | 'unverifiable';
+  human_summary: string;
   note?: string;
 }
 
-export async function executeDependencyCheck(args: DependencyCheckArgs): Promise<string | import('../lib/output-types.js').StructuredOutput> {
-  const view = args.view ?? 'summary';
+// Three sentences max, plain prose. No markdown syntax. Distilled from
+// the structured data — what vendor was scanned, how many dependencies
+// were found, whether the safety verdict can be trusted.
+function buildHumanSummary(d: DependencyCheckSummary): string {
+  if (d.execution_mode === 'vendor_required') {
+    return `dependency_check could not run: no SIEM credentials detected and no vendor argument supplied. Pass vendor=<name> or set credentials for a supported SIEM (datadog, splunk, elasticsearch, cloudwatch). Recommendation is unverifiable until a scan runs.`;
+  }
+  if (d.execution_mode === 'ambiguous') {
+    return `dependency_check could not run: multiple SIEMs configured and no vendor argument supplied. Pass vendor=<name> to disambiguate. Recommendation is unverifiable until a scan runs.`;
+  }
+  if (d.execution_mode === 'paste_ready') {
+    return `dependency_check did not run in-process against ${d.vendor ?? 'the analyzer'} for \`${d.pattern}\`; a paste-ready scan command was returned instead. Recommendation is unverifiable until the user runs the command locally and reports back. Do not treat this as safe-to-drop.`;
+  }
+  const count = d.dependencies.length;
+  const verdict = d.safe_to_drop_recommendation;
+  return `Scanned ${d.vendor ?? 'analyzer'} for dependencies on \`${d.pattern}\` and found ${count} matching ${count === 1 ? 'dependency' : 'dependencies'}. Verdict: ${verdict}${verdict === 'blocked' ? ' — review the listed dashboards / alerts / saved searches before mute or drop.' : verdict === 'safe' ? ' — no dependencies blocking a mute or drop.' : '.'}`;
+}
+
+export async function executeDependencyCheck(args: DependencyCheckArgs): Promise<import('../lib/output-types.js').StructuredOutput> {
   const telemetry = newTelemetry();
   const sumOut: { data?: DependencyCheckSummary } = {};
-  const md = await executeDependencyCheckInner(args, sumOut);
-  const { buildMarkdownEnvelope, buildEnvelope } = await import('../lib/output-types.js');
-  if (view === 'markdown' || !sumOut.data) {
-    return buildMarkdownEnvelope({
+  await executeDependencyCheckInner(args, sumOut);
+  const { buildEnvelope } = await import('../lib/output-types.js');
+  if (!sumOut.data) {
+    const human_summary = `dependency_check failed: inner pass produced no structured data.`;
+    return buildEnvelope({
       tool: 'log10x_dependency_check',
-      summary: { headline: md.split('\n')[0]?.slice(0, 200) || 'dependency_check result' },
-      markdown: md,
+      view: 'summary',
+      summary: { headline: 'dependency_check: no data' },
+      data: {
+        ...buildUnifiedFields({
+          status: 'error',
+          telemetry,
+          humanSummary: human_summary,
+          error: {
+            error_type: 'local_processing_failed',
+            retryable: false,
+            suggested_backoff_ms: null,
+            hint: 'inner pass produced no structured data',
+          },
+        }),
+        human_summary,
+      },
     });
   }
   const d = sumOut.data;
+  d.human_summary = buildHumanSummary(d);
   const headline = `\`${d.pattern}\`: ${d.dependencies.length} dependencies found in ${d.vendor ?? 'analyzer'} (recommendation: ${d.safe_to_drop_recommendation})`;
   return buildEnvelope({
     tool: 'log10x_dependency_check',
     view: 'summary',
     summary: { headline },
-    data: { ...d, ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: headline }) },
+    data: { ...d, ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: d.human_summary }) },
   });
 }
 
@@ -143,6 +175,7 @@ async function executeDependencyCheckInner(args: DependencyCheckArgs, sumOut?: {
       sumOut.data = {
         pattern, execution_mode: 'vendor_required', scan_ran: false, dependencies: [],
         safe_to_drop_recommendation: 'unverifiable',
+        human_summary: '',
         note: 'no SIEM credentials detected and no vendor arg supplied',
       };
     }
@@ -157,6 +190,14 @@ async function executeDependencyCheckInner(args: DependencyCheckArgs, sumOut?: {
   }
 
   if (resolution.kind === 'ambiguous') {
+    if (sumOut) {
+      sumOut.data = {
+        pattern, execution_mode: 'ambiguous', scan_ran: false, dependencies: [],
+        safe_to_drop_recommendation: 'unverifiable',
+        human_summary: '',
+        note: `multiple SIEMs configured: ${resolution.candidates.map((c) => c.id).join(', ')}`,
+      };
+    }
     return formatAmbiguousError(resolution.candidates, 'vendor');
   }
 
@@ -204,7 +245,7 @@ async function executeDependencyCheckInner(args: DependencyCheckArgs, sumOut?: {
     },
   ];
   const block = renderNextActions(nextActions);
-  // Populate typed summary for view='summary' callers.
+  // Populate the typed summary the agent reads.
   if (sumOut) {
     const dependencies: DependencyCheckSummary['dependencies'] = scanRan && !scan.error
       ? (scan.matches ?? []).map(m => ({
@@ -223,6 +264,7 @@ async function executeDependencyCheckInner(args: DependencyCheckArgs, sumOut?: {
       scan_ran: scanRan,
       dependencies,
       safe_to_drop_recommendation: recommendation,
+      human_summary: '',
       note: resolution.note,
     };
   }

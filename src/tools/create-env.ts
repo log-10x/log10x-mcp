@@ -17,7 +17,7 @@ import { z } from 'zod';
 import type { Environments } from '../lib/environments.js';
 import { reloadEnvironmentsInPlace } from '../lib/environments.js';
 import { createEnvironment } from '../lib/api.js';
-import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
 export const createEnvSchema = {
   name: z
@@ -30,27 +30,36 @@ export const createEnvSchema = {
     .describe(
       'When true, the new env becomes the user\'s default — every tool call without an explicit `environment` arg routes here. The previous default is automatically un-defaulted by the backend. Defaults to false (new env is created but the existing default stays the default).'
     ),
-  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.ok, data.env_id, data.envs[]). markdown wraps the report in data.markdown.'),
 };
 
+function buildCreateEnvHumanSummary(inner: CreateEnvInner): string {
+  if (!inner.ok) {
+    return `create_env failed: ${inner.error ?? 'unknown reason'}.`;
+  }
+  const total = inner.total_envs ?? 0;
+  const defaultNote = inner.is_default ? ' and set as default' : '';
+  return `Env "${inner.name}" was created${defaultNote}; ${total} env${total === 1 ? '' : 's'} now on this account. Next step: install a Reporter / Receiver / Retriever via log10x_advise_install.`;
+}
+
 export async function executeCreateEnv(
-  args: { name: string; is_default?: boolean; view?: 'summary' | 'markdown' },
+  args: { name: string; is_default?: boolean },
   envs: Environments
 ): Promise<string | StructuredOutput> {
-  const view = args.view ?? 'summary';
   const inner = await executeCreateEnvInner(args, envs);
-  if (view === 'markdown') {
-    return buildMarkdownEnvelope({
-      tool: 'log10x_create_env',
-      summary: { headline: inner.ok ? `Created env "${inner.name}"` : `Create env refused: ${inner.error}` },
-      markdown: inner.markdown,
-    });
-  }
   return buildEnvelope({
     tool: 'log10x_create_env',
     view: 'summary',
     summary: { headline: inner.ok ? `Created env "${inner.name}" (env_id ${inner.env_id}${inner.is_default ? ', new default' : ''}).` : `Create env refused: ${inner.error}.` },
-    data: { ok: inner.ok, name: inner.name, env_id: inner.env_id, permissions: inner.permissions, is_default: inner.is_default, total_envs: inner.total_envs, error: inner.error },
+    data: {
+      ok: inner.ok,
+      name: inner.name,
+      env_id: inner.env_id,
+      permissions: inner.permissions,
+      is_default: inner.is_default,
+      total_envs: inner.total_envs,
+      error: inner.error,
+      human_summary: buildCreateEnvHumanSummary(inner),
+    },
     actions: inner.ok && inner.env_id ? [{ tool: 'log10x_advise_install', args: { environment: inner.name }, reason: 'pick the right Reporter / Receiver / Retriever install path for the new env' }] : [],
   });
 }

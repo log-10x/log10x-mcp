@@ -41,7 +41,6 @@ import { queryInstant, queryRange } from '../lib/api.js';
 import {
   bytesToGb,
   parsePrometheusValue,
-  annualizeDollars,
   getDestinationCostModel,
   type Action,
 } from '../lib/cost.js';
@@ -49,7 +48,6 @@ import type { SiemId } from '../lib/siem/pricing.js';
 import { fmtDollar, fmtBytes } from '../lib/format.js';
 import {
   buildEnvelope,
-  buildMarkdownEnvelope,
   type StructuredOutput,
 } from '../lib/output-types.js';
 import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
@@ -199,10 +197,11 @@ export const baselineSchema = {
     .optional()
     .describe('Environment nickname for multi-env setups.'),
   view: z
-    .enum(['summary', 'markdown'])
+    .literal('summary')
     .default('summary')
+    .optional()
     .describe(
-      'summary returns the typed envelope; markdown wraps the rendered report in data.markdown for human-consumable deliverables.'
+      'Output format. Always "summary" — the typed envelope. Field retained for backward-compat with callers that still pass `view: "summary"`.'
     ),
 };
 
@@ -214,23 +213,14 @@ export async function executeBaseline(
     destination?: SiemId;
     statedDailyGb?: number;
     effectiveIngestPerGb?: number;
-    view?: 'summary' | 'markdown';
+    view?: 'summary';
   },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
   const horizon: BaselineHorizon = args.horizon ?? DEFAULT_HORIZON;
-  const view = args.view ?? 'summary';
   const telemetry = newTelemetry();
 
   const result = await computeBaseline(args, env, horizon);
-
-  if (view === 'markdown') {
-    return buildMarkdownEnvelope({
-      tool: 'log10x_baseline',
-      summary: { headline: headlineFor(result) },
-      markdown: renderBaselineMarkdown(result),
-    });
-  }
 
   return buildEnvelope({
     tool: 'log10x_baseline',
@@ -758,118 +748,6 @@ function headlineFor(d: BaselineEnvelopeData): string {
     dollarClause = ` · ${monthly}/mo current, ${future}/mo projected 90d no-action (at ${d.rate_source})`;
   }
   return `Baseline ready: ${band} · ${volume}${dollarClause}.`;
-}
-
-function renderBaselineMarkdown(d: BaselineEnvelopeData): string {
-  const lines: string[] = [];
-
-  if (d.status === 'not_ready') {
-    lines.push(`# Baseline: not_ready — ${d.not_ready_reason}`);
-    lines.push('');
-    if (d.remediation) lines.push(d.remediation);
-    lines.push('');
-    lines.push(`- Reporter age: ${d.reporter_age_days.toFixed(1)}d`);
-    if (d.coverage_pct > 0) {
-      lines.push(`- Coverage: ${d.coverage_pct}%`);
-    }
-    if (d.destination) {
-      lines.push(`- Destination: ${d.destination}`);
-    }
-    lines.push(`- Rate source: ${d.rate_source}`);
-    return lines.join('\n');
-  }
-
-  lines.push(`# Baseline (${d.horizon}) — ready`);
-  lines.push('');
-  lines.push(`- **Destination**: ${d.destination}`);
-  lines.push(`- **Reporter age**: ${d.reporter_age_days.toFixed(1)}d`);
-  if (d.coverage_pct > 0) {
-    lines.push(`- **Coverage**: ${d.coverage_pct}%`);
-  }
-  lines.push(`- **Rate source**: ${d.rate_source}`);
-  lines.push('');
-
-  // Section title flips to "Current scale" when no rate resolved — the
-  // section is then bytes-only and "spend" would be a lie.
-  const dollarsKnown =
-    d.rate_source !== 'unset' && d.current.monthly_usd != null;
-  lines.push(dollarsKnown ? '## Current spend' : '## Current scale');
-  lines.push(
-    `- Window total: ${fmtBytes(d.current.bytes_window)} over ${d.horizon}`
-  );
-  lines.push(`- Daily p50: ${fmtBytes(d.current.bytes_per_day_p50)}`);
-  lines.push(`- Daily p90: ${fmtBytes(d.current.bytes_per_day_p90)}`);
-  if (dollarsKnown) {
-    lines.push(
-      `- Monthly: ${fmtDollar(d.current.monthly_usd as number)} _at ${d.rate_source}_`
-    );
-  }
-  lines.push('');
-
-  lines.push('## No-action 90d projection');
-  const growth = d.projection_no_action_90d.growth_pct;
-  const growthFmt = (growth * 100).toFixed(1);
-  lines.push(
-    `- Organic growth (window trend): ${growth >= 0 ? '+' : ''}${growthFmt}%`
-  );
-  if (
-    dollarsKnown &&
-    d.projection_no_action_90d.monthly_usd_in_90d != null
-  ) {
-    lines.push(
-      `- Monthly run-rate in 90d: ${fmtDollar(d.projection_no_action_90d.monthly_usd_in_90d)} _at ${d.rate_source}_`
-    );
-    lines.push(
-      `- Annualized: ${fmtDollar(annualizeDollars(d.current.monthly_usd as number, DAYS_PER_MONTH))} _at ${d.rate_source}_`
-    );
-  }
-  lines.push('');
-
-  if (d.recommended_target_range) {
-    const r = d.recommended_target_range;
-    lines.push('## Recommended target band');
-    lines.push(`- Low: ${r.low_pct}%`);
-    lines.push(`- Expected: ${r.expected_pct}%`);
-    lines.push(`- High: ${r.high_pct}%`);
-    lines.push('');
-    lines.push(
-      `_Heuristic: top-5 compactable share × 0.7, clamped to [${MIN_RECOMMENDED_PCT}, ${MAX_RECOMMENDED_PCT}]. Destinations with no-op compaction (datadog / cloudwatch / azure-monitor / gcp-logging / sumo) get a drop-only band (10-25%)._`
-    );
-    lines.push('');
-  }
-
-  if (d.top_contributors.length > 0) {
-    lines.push('## Top contributors');
-    lines.push('');
-    // Share % is the primary sort key (already sorted by
-    // `fetchTopContributors`) and the lead column. $/mo stays as a column
-    // but renders `—` when `rate_source === 'unset'`.
-    lines.push(
-      '| # | Share % | Service | Severity | Pattern | $/mo | Avg size | Compactable |'
-    );
-    lines.push(
-      '|---|--------:|---------|----------|---------|-----:|---------:|-------------|'
-    );
-    d.top_contributors.forEach((c, i) => {
-      const patternPreview =
-        c.pattern.length > 40 ? c.pattern.slice(0, 37) + '...' : c.pattern;
-      const dollar =
-        d.rate_source !== 'unset' && c.monthly_usd != null
-          ? fmtDollar(c.monthly_usd)
-          : '—';
-      lines.push(
-        `| ${i + 1} | ${c.share_pct.toFixed(1)}% | ${c.service || '-'} | ${c.severity || '-'} | \`${patternPreview}\` | ${dollar} | ${fmtBytes(c.avg_event_size_bytes)} | ${c.compactable ? 'yes' : 'no'} |`
-      );
-    });
-    lines.push('');
-  }
-
-  lines.push('---');
-  lines.push(
-    `_Next: pass \`target_percent\` from this band (or your own number) into \`log10x_configure_engine\` to derive per-pattern actions._`
-  );
-
-  return lines.join('\n');
 }
 
 // Re-export Action so callers that want to type per-contributor tier choices

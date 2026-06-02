@@ -14,14 +14,13 @@ import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
 import { fetchLabels, fetchLabelValues } from '../lib/api.js';
 import { agentOnly } from '../lib/agent-only.js';
-import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
 
 export const discoverLabelsSchema = {
   label: z.string().optional().describe('If set, return distinct values for this label (e.g., "tenx_user_service" returns every service). If omitted, return the full label name list.'),
   limit: z.number().min(1).max(200).default(100).describe('Max values to return when a label is specified.'),
   environment: z.string().optional().describe('Environment nickname (for multi-env setups).'),
-  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope. markdown wraps the rendered list in data.markdown.'),
 };
 
 interface DiscoverLabelsSummary {
@@ -32,6 +31,7 @@ interface DiscoverLabelsSummary {
   values?: string[];
   featured_labels?: Array<{ name: string; hint: string; available: boolean }>;
   other_labels?: string[];
+  human_summary: string;
 }
 
 // Labels that are infrastructure-level and uninteresting to an SRE writing queries.
@@ -54,22 +54,44 @@ const FEATURED_LABELS = [
   { name: 'symbol_origin', hint: 'source code file that emitted the log' },
 ];
 
+function buildDiscoverLabelsHumanSummary(d: DiscoverLabelsSummary): string {
+  if (d.mode === 'label_values') {
+    if (d.total_count === 0) {
+      return `Label "${d.label}" has no distinct values; check the label name or query in a different time window.`;
+    }
+    const shown = d.shown_count < d.total_count ? ` Showing ${d.shown_count} of ${d.total_count}.` : '';
+    return `Label "${d.label}" has ${d.total_count} distinct value${d.total_count === 1 ? '' : 's'}.${shown} Sample: ${(d.values ?? []).slice(0, 3).join(', ')}.`;
+  }
+  const featuredAvailable = d.featured_labels ? d.featured_labels.filter((f) => f.available).length : 0;
+  const otherCount = d.other_labels?.length ?? 0;
+  return `${d.total_count} queryable labels on this env: ${featuredAvailable} featured (use as filter keys) and ${otherCount} additional. Call again with a label name to enumerate its values.`;
+}
+
 export async function executeDiscoverLabels(
-  args: { label?: string; limit?: number; view?: 'summary' | 'markdown' },
+  args: { label?: string; limit?: number },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
-  const view = args.view ?? 'summary';
   const telemetry = newTelemetry();
   const sumOut: { data?: DiscoverLabelsSummary } = {};
-  const md = await executeDiscoverLabelsInner(args, env, sumOut);
-  if (view === 'markdown' || !sumOut.data) {
-    return buildMarkdownEnvelope({
+  await executeDiscoverLabelsInner(args, env, sumOut);
+  if (!sumOut.data) {
+    // Defensive: inner always populates sumOut.data on success; if it didn't,
+    // surface a typed error envelope rather than masking with markdown wrap.
+    return buildEnvelope({
       tool: 'log10x_discover_labels',
-      summary: { headline: md.split('\n').find((l) => l.trim().length > 0)?.slice(0, 200) ?? 'discover_labels result' },
-      markdown: md,
+      view: 'summary',
+      summary: { headline: 'discover_labels returned no structured result.' },
+      data: {
+        mode: 'label_names',
+        total_count: 0,
+        shown_count: 0,
+        ...buildUnifiedFields({ status: 'error', telemetry, humanSummary: 'discover_labels failed: inner produced no structured result.' }),
+        human_summary: 'discover_labels failed: inner produced no structured result.',
+      },
     });
   }
   const d = sumOut.data;
+  d.human_summary = buildDiscoverLabelsHumanSummary(d);
   const headline =
     d.mode === 'label_values'
       ? `Label "${d.label}": ${d.total_count} distinct value${d.total_count !== 1 ? 's' : ''}${d.shown_count < d.total_count ? ` (showing ${d.shown_count})` : ''}.`
@@ -78,7 +100,7 @@ export async function executeDiscoverLabels(
     tool: 'log10x_discover_labels',
     view: 'summary',
     summary: { headline },
-    data: { ...d, ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: headline }) },
+    data: { ...d, ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: d.human_summary }) },
     truncated: d.mode === 'label_values' && d.shown_count < d.total_count,
     actions:
       d.mode === 'label_names'
@@ -99,11 +121,11 @@ async function executeDiscoverLabelsInner(
   if (args.label) {
     const values = await fetchLabelValues(env, args.label);
     if (values.length === 0) {
-      if (sumOut) sumOut.data = { mode: 'label_values', label: args.label, total_count: 0, shown_count: 0, values: [] };
+      if (sumOut) sumOut.data = { mode: 'label_values', label: args.label, total_count: 0, shown_count: 0, values: [], human_summary: '' };
       return `Label "${args.label}" has no values. Check the label name or try a different time range by querying a tool that accepts filters.`;
     }
     const shown = values.slice(0, limit);
-    if (sumOut) sumOut.data = { mode: 'label_values', label: args.label, total_count: values.length, shown_count: shown.length, values: shown };
+    if (sumOut) sumOut.data = { mode: 'label_values', label: args.label, total_count: values.length, shown_count: shown.length, values: shown, human_summary: '' };
     const lines: string[] = [];
     lines.push(`Label "${args.label}" — ${values.length} distinct value${values.length !== 1 ? 's' : ''}${values.length > shown.length ? ` (showing ${shown.length})` : ''}`);
     lines.push('');
@@ -125,6 +147,7 @@ async function executeDiscoverLabelsInner(
       shown_count: queryable.length,
       featured_labels: featured,
       other_labels: rest,
+      human_summary: '',
     };
   }
 

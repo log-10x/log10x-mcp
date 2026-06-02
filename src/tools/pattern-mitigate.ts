@@ -58,10 +58,6 @@ export interface PatternMitigateArgs {
   pattern: string;
   service?: string;
   snapshot_id?: string;
-  /** Ignored. Retained for backward-compat with in-process callers;
-   * the markdown view was dropped from the public schema in favor of
-   * the structured `human_summary` field. */
-  view?: 'summary' | 'markdown';
 }
 
 /**
@@ -363,7 +359,7 @@ function deriveBasis(sources: CapabilitySources): RecommendationBasis {
 
 export async function executePatternMitigate(args: PatternMitigateArgs): Promise<import('../lib/output-types.js').StructuredOutput> {
   const startedAt = Date.now();
-  const { buildMarkdownEnvelope, buildEnvelope } = await import('../lib/output-types.js');
+  const { buildEnvelope } = await import('../lib/output-types.js');
 
   // ── Input validation ───────────────────────────────────────────────
   if (!args.pattern || args.pattern.trim().length === 0) {
@@ -380,9 +376,8 @@ export async function executePatternMitigate(args: PatternMitigateArgs): Promise
   }
 
   const sumOut: { data?: PatternMitigateSummary } = {};
-  let md: string;
   try {
-    md = await executePatternMitigateInner(args, sumOut, startedAt);
+    await executePatternMitigateInner(args, sumOut, startedAt);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     return await errorEnvelope({
@@ -397,11 +392,16 @@ export async function executePatternMitigate(args: PatternMitigateArgs): Promise
     });
   }
 
-  if (args.view === 'markdown' || !sumOut.data) {
-    return buildMarkdownEnvelope({
-      tool: 'log10x_pattern_mitigate',
-      summary: { headline: md.split('\n')[0]?.slice(0, 200) || 'pattern_mitigate result' },
-      markdown: md,
+  if (!sumOut.data) {
+    return await errorEnvelope({
+      startedAt,
+      pattern: args.pattern,
+      err: {
+        error_type: 'local_processing_failed',
+        retryable: false,
+        suggested_backoff_ms: null,
+        hint: 'pattern_mitigate inner pass produced no structured data.',
+      },
     });
   }
   const d = sumOut.data;
@@ -611,7 +611,7 @@ async function executePatternMitigateInner(
   lines.push('');
   lines.push(renderNextActions(nextActions));
 
-  // Populate typed summary for view='summary' callers.
+  // Populate the typed summary the agent reads.
   if (sumOut) {
     const options: PatternMitigateSummary['options'] = [
       {

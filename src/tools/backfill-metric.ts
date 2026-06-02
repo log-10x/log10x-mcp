@@ -30,7 +30,7 @@ import { emitSeries, type Destination } from '../lib/metric-emitters.js';
 import { fmtCount, normalizePattern } from '../lib/format.js';
 import { retrieverNotConfiguredMessage } from './retriever-query.js';
 import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
-import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
 export const backfillMetricSchema = {
   pattern: z
@@ -74,7 +74,11 @@ export const backfillMetricSchema = {
     .default(false)
     .describe('When true, wire the live Reporter to continue emitting the same metric from current events going forward. Default false in this build — the forward-emission handoff path to the Reporter config file is not yet implemented. Set true only after installing the Reporter config update path.'),
   environment: z.string().optional().describe('Environment nickname — required if multi-env.'),
-  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.metric_name, data.events_retrieved, data.points_emitted, data.view_url, data.warnings). markdown wraps the full report in data.markdown.'),
+  view: z
+    .literal('summary')
+    .default('summary')
+    .optional()
+    .describe('summary returns the typed envelope (data.metric_name, data.events_retrieved, data.points_emitted, data.view_url, data.warnings, data.human_summary). The deprecated markdown view was removed; data.human_summary carries the prose distillation for chat rendering.'),
 };
 
 export async function executeBackfillMetric(
@@ -91,24 +95,34 @@ export async function executeBackfillMetric(
     unique_field?: string;
     emit_forward?: boolean;
     environment?: string;
-    view?: 'summary' | 'markdown';
+    view?: 'summary';
   },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
-  const view = args.view ?? 'summary';
   if (!isRetrieverConfigured()) {
     const md = retrieverNotConfiguredMessage();
-    if (view === 'markdown') {
-      return buildMarkdownEnvelope({ tool: 'log10x_backfill_metric', summary: { headline: 'Retriever not configured' }, markdown: md });
-    }
     // Typed not_configured (status + advise_retriever action) so an agent
     // branches on data.status, matching retriever_query and the framework.
     return buildNotConfiguredEnvelope({ tool: 'log10x_backfill_metric', kind: 'retriever', remediation: md });
   }
   const sumOut: { data?: BackfillMetricSummary } = {};
-  const md = await executeBackfillMetricInner(args, env, sumOut);
-  if (view === 'markdown' || !sumOut.data) {
-    return buildMarkdownEnvelope({ tool: 'log10x_backfill_metric', summary: { headline: sumOut.data ? `Backfilled ${sumOut.data.metric_name} (${sumOut.data.points_emitted} points)` : 'backfill_metric result' }, markdown: md });
+  const innerMd = await executeBackfillMetricInner(args, env, sumOut);
+  if (!sumOut.data) {
+    // Zero-event early-return path: inner returned an explanation string
+    // without populating sumOut.data. Emit a typed envelope with the prose
+    // as human_summary so the agent can branch without parsing markdown.
+    const headline = innerMd.split('\n').find((l) => l.trim().length > 0)?.slice(0, 200) ?? 'backfill_metric: no events retrieved';
+    return buildEnvelope({
+      tool: 'log10x_backfill_metric',
+      view: 'summary',
+      summary: { headline },
+      data: {
+        ok: false,
+        precondition: 'no_events',
+        human_summary: buildBackfillNoEventsHumanSummary(args),
+      },
+      warnings: ['backfill_metric: Retriever returned zero events matching this pattern + filter + window — nothing was emitted to the destination TSDB.'],
+    });
   }
   const d = sumOut.data;
   return buildEnvelope({
@@ -122,6 +136,29 @@ export async function executeBackfillMetric(
       { tool: 'log10x_retriever_series', args: { pattern: d.pattern, from: d.window_from, to: d.window_to }, reason: 'sanity-check the backfilled buckets at finer granularity' },
     ],
   });
+}
+
+/**
+ * Three-sentence plain-prose distillation of a successful backfill_metric
+ * run. No markdown syntax, no dollar figures. Mirrors the canonical
+ * buildHumanSummary pattern in src/tools/find-skew.ts:216.
+ */
+function buildBackfillHumanSummary(d: Omit<BackfillMetricSummary, 'human_summary'>): string {
+  const first = `Backfilled metric ${d.metric_name} to ${d.destination} from pattern ${d.pattern} over ${d.window_from} to ${d.window_to}.`;
+  const second = `Retriever returned ${d.events_retrieved} events in ${d.retriever_wall_ms}ms; aggregator produced ${d.points_emitted} data points across ${d.series_count} series at ${d.bucket_seconds}s buckets (aggregation ${d.aggregation}).`;
+  const view = d.view_url ? ` View at ${d.view_url}.` : '';
+  const warnPart = d.warnings.length > 0 ? ` ${d.warnings.length} warning${d.warnings.length === 1 ? '' : 's'} from the destination emitter.` : '';
+  return `${first} ${second}${view}${warnPart}`;
+}
+
+function buildBackfillNoEventsHumanSummary(args: {
+  pattern: string;
+  metric_name: string;
+  destination: Destination;
+  from: string;
+  to?: string;
+}): string {
+  return `Backfill of ${args.metric_name} to ${args.destination} skipped: Retriever returned zero events for pattern ${args.pattern} over ${args.from} to ${args.to ?? 'now'}. Verify the pattern identity via log10x_event_lookup, widen the window or filter, or check whether the archive's retention covers the requested range.`;
 }
 
 interface BackfillMetricSummary {
@@ -145,6 +182,7 @@ interface BackfillMetricSummary {
   view_url?: string;
   warnings: string[];
   forward_emission_note: string;
+  human_summary: string;
 }
 
 async function executeBackfillMetricInner(
@@ -288,7 +326,7 @@ async function executeBackfillMetricInner(
   lines.push(`  - Run the same pattern again over the archive at finer granularity: \`log10x_retriever_series({ pattern: '${pattern}' })\` — useful for sanity-checking the backfilled buckets.`);
 
   if (sumOut) {
-    sumOut.data = {
+    const base: Omit<BackfillMetricSummary, 'human_summary'> = {
       ok: true,
       pattern,
       metric_name: args.metric_name,
@@ -310,6 +348,7 @@ async function executeBackfillMetricInner(
       warnings: emission.warnings,
       forward_emission_note: forwardNote,
     };
+    sumOut.data = { ...base, human_summary: buildBackfillHumanSummary(base) };
   }
 
   return lines.join('\n');

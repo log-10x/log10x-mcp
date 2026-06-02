@@ -68,7 +68,7 @@ import {
 } from '../lib/advisor/reporter-forwarders.js';
 import type { Environments } from '../lib/environments.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput, type ActionRole } from '../lib/output-types.js';
+import { buildEnvelope, type StructuredOutput, type ActionRole } from '../lib/output-types.js';
 
 // Forwarders the Receiver wizard knows how to install into. All entries
 // use the official upstream chart for their forwarder — no forked
@@ -168,7 +168,6 @@ export const adviseInstallSchema = {
     .enum(['install', 'verify', 'teardown', 'all'])
     .optional()
     .describe('Plan scope when the wizard is ready to emit. Default: `all`.'),
-  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.next_question / data.plan). markdown wraps the rendered prompt or plan as markdown.'),
 };
 
 const schemaObj = z.object(adviseInstallSchema);
@@ -388,19 +387,53 @@ function findClosestKnownArg(unknown: string): string | null {
  * (plan-level issues surfaced out-of-band so the agent doesn't have to
  * parse markdown). Same shape every wizard call.
  */
-function wizardReturn(view: 'summary' | 'markdown', data: WizardData): StructuredOutput {
+function wizardReturn(data: WizardData): StructuredOutput {
   const { headline, actions, warnings } = wizardEnvelopeMeta(data);
-  if (view === 'markdown') {
-    return buildMarkdownEnvelope({ tool: TOOL_NAME, summary: { headline }, markdown: data.markdown });
-  }
+  const human_summary = buildWizardHumanSummary(data, headline);
   return buildEnvelope({
     tool: TOOL_NAME,
     view: 'summary',
     summary: { headline },
-    data,
+    data: { ...data, human_summary },
     actions,
     warnings,
   });
+}
+
+// Three sentences max, plain prose. The wizard has many modes; one
+// distilled paragraph per mode that the agent can quote cold. The
+// `markdown` field of each WizardData variant remains the verbatim
+// renderer output; human_summary is the structured-data sibling.
+function buildWizardHumanSummary(data: WizardData, headline: string): string {
+  switch (data.mode) {
+    case 'plan': {
+      const fwd = data.forwarder ? ` on ${data.forwarder}` : '';
+      if (data.blockers.length > 0) {
+        return `Install wizard produced a ${data.app} ${data.action} plan${fwd} for release "${data.release_name}" in namespace "${data.namespace}". The plan is blocked by ${data.blockers.length} item${data.blockers.length !== 1 ? 's' : ''}: ${data.blockers.slice(0, 3).join('; ')}. Resolve the blockers before applying.`;
+      }
+      return `Install wizard produced a ${data.app} ${data.action} plan${fwd} for release "${data.release_name}" in namespace "${data.namespace}". ${data.install_step_count} install step${data.install_step_count !== 1 ? 's' : ''} across ${data.install_file_count} file${data.install_file_count !== 1 ? 's' : ''}, ${data.verify_probe_count} verify probe${data.verify_probe_count !== 1 ? 's' : ''}. Preflight: ${data.preflight_summary.ok} ok, ${data.preflight_summary.warn} warn, ${data.preflight_summary.fail} fail.`;
+    }
+    case 'next_question':
+      return `Install wizard needs an answer to question "${data.question_id}" before it can emit a plan. Re-invoke log10x_advise_install with the answer in tool args and the same snapshot_id. Answers already given are remembered.`;
+    case 'missing_snapshot':
+      return `Install wizard refused: snapshot ${data.snapshot_id} is missing or expired (snapshots live 30 minutes). Run log10x_discover_env again and re-invoke with the new snapshot_id.`;
+    case 'session_error':
+      return `Install wizard could not initialize the session for snapshot ${data.snapshot_id}. Re-run log10x_discover_env and retry.`;
+    case 'cancelled':
+      return `Install wizard was cancelled before the user finished answering. Re-invoke with the same snapshot_id to pick up where you left off; prior answers are remembered.`;
+    case 'license_error':
+      return `Install wizard could not acquire a license JWT: ${data.error_message.slice(0, 200)}. Sign in via log10x_signin_start, paste a JWT via license_source=paste, or retry — the gateway may be transiently unavailable.`;
+    case 'signin_required':
+      return `Install wizard requires a signed-in Log10x license before it can emit a non-demo plan. Run the device flow via log10x_signin_start, then re-invoke with the same snapshot_id.`;
+    case 'demo_airgapped_warning':
+      return `Install wizard refused to emit an airgapped plan against a demo license — the engine downgrades to online mode silently in this combination. ${data.is_signed_in ? 'Switch to a user-scoped license' : 'Sign in via log10x_signin_start'} or drop the airgapped flag before re-invoking.`;
+    case 'unknown_args': {
+      const list = data.unknown_keys.slice(0, 3).join(', ');
+      return `Install wizard received unknown arg${data.unknown_keys.length === 1 ? '' : 's'}: ${list}. Re-invoke with the canonical names (see data.valid_keys for the full list).`;
+    }
+    default:
+      return headline;
+  }
 }
 
 /**
@@ -595,9 +628,7 @@ export async function executeAdviseInstall(
   args: AdviseInstallArgs,
   envs: Environments,
   mcpServer?: McpServer
-): Promise<string | StructuredOutput> {
-  const view = args.view ?? 'summary';
-
+): Promise<StructuredOutput> {
   // Surface unknown args up-front rather than silently dropping them.
   // Agents reliably hallucinate field names ('targets' / 'destinations'
   // for `backends`, 'mode' for `app`, etc.). Detecting the typo and
@@ -623,7 +654,7 @@ export async function executeAdviseInstall(
     lines.push(`Valid args: ${validKeys.map((k) => `\`${k}\``).join(', ')}.`);
     lines.push('');
     lines.push('Re-invoke `log10x_advise_install` with the canonical names.');
-    return wizardReturn(view, {
+    return wizardReturn({
       mode: 'unknown_args',
       ok: false,
       snapshot_id: typeof args.snapshot_id === 'string' ? args.snapshot_id : undefined,
@@ -643,7 +674,7 @@ export async function executeAdviseInstall(
       ``,
       `Run \`log10x_discover_env\` again and pass the new snapshot_id.`,
     ].join('\n');
-    return wizardReturn(view, {
+    return wizardReturn({
       mode: 'missing_snapshot',
       ok: false,
       snapshot_id: args.snapshot_id,
@@ -679,7 +710,7 @@ export async function executeAdviseInstall(
   });
   if (!session) {
     // Should be unreachable — getSnapshot would've failed first.
-    return wizardReturn(view, {
+    return wizardReturn({
       mode: 'session_error',
       ok: false,
       snapshot_id: args.snapshot_id,
@@ -704,7 +735,7 @@ export async function executeAdviseInstall(
         '',
         'You closed the form before answering. Re-invoke `log10x_advise_install` with the same `snapshot_id` to pick up where you left off — answers you already gave are remembered.',
       ].join('\n');
-      return wizardReturn(view, {
+      return wizardReturn({
         mode: 'cancelled',
         ok: false,
         snapshot_id: args.snapshot_id,
@@ -716,7 +747,7 @@ export async function executeAdviseInstall(
       // The session has accumulated whatever was answered before the error.
       const next = nextQuestion(snapshot, session);
       if (next.kind === 'ask') {
-        return wizardReturn(view, {
+        return wizardReturn({
           mode: 'next_question',
           ok: false,
           snapshot_id: args.snapshot_id,
@@ -731,7 +762,7 @@ export async function executeAdviseInstall(
     // for re-invocation with the answer in tool args.
     const next = nextQuestion(snapshot, session);
     if (next.kind === 'ask') {
-      return wizardReturn(view, {
+      return wizardReturn({
         mode: 'next_question',
         ok: false,
         snapshot_id: args.snapshot_id,
@@ -778,7 +809,7 @@ export async function executeAdviseInstall(
         // on a future turn through 'demo' or 'paste') can branch on the
         // same taxonomy. Not strictly needed for this path, but cheap.
         updateWizardSession(args.snapshot_id, { licenseReason: lic.reason });
-        return wizardReturn(view, {
+        return wizardReturn({
           mode: 'signin_required',
           ok: false,
           snapshot_id: args.snapshot_id,
@@ -807,7 +838,7 @@ export async function executeAdviseInstall(
         `- Re-invoke with \`license_source: "paste"\` and \`license_jwt_paste: "<your-jwt>"\` if you have one`,
         `- Retry — the gateway may have been transiently unavailable`,
       ].join('\n');
-      return wizardReturn(view, {
+      return wizardReturn({
         mode: 'license_error',
         ok: false,
         snapshot_id: args.snapshot_id,
@@ -838,7 +869,7 @@ export async function executeAdviseInstall(
       ? hasAuth0TokensForReason(session.licenseReason)
       : !envs.isDemoMode;
     const md = renderDemoAirgappedWarning(session, isSignedIn);
-    return wizardReturn(view, {
+    return wizardReturn({
       mode: 'demo_airgapped_warning',
       ok: false,
       snapshot_id: args.snapshot_id,
@@ -852,7 +883,7 @@ export async function executeAdviseInstall(
   // consumes this identically.
   const planResult = await renderInstallPlan(snapshot, session, args);
   const summary = buildPlanSummary(planResult.plan, planResult.action);
-  return wizardReturn(view, {
+  return wizardReturn({
     ...summary,
     mode: 'plan',
     markdown: planResult.markdown,

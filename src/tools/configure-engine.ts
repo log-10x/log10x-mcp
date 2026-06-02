@@ -56,7 +56,6 @@ import { loadEnvironments } from '../lib/environments.js';
 import type { PrometheusResponse } from '../lib/api.js';
 import {
   buildEnvelope,
-  buildMarkdownEnvelope,
   type StructuredOutput,
   type Action as EnvelopeAction,
 } from '../lib/output-types.js';
@@ -220,12 +219,6 @@ export const configureEngineSchema = {
     .describe(
       'Existing CSV content (header + rows). If omitted, the tool computes the diff against an empty baseline and notes that.'
     ),
-  view: z
-    .enum(['summary', 'markdown'])
-    .default('markdown')
-    .describe(
-      '`summary` returns the typed envelope. `markdown` wraps the PR rendering in `data.markdown`. Default `markdown`.'
-    ),
   // ── auto-apply (industry-standard MCP write tool surface) ──
   // Verdict from /tmp/poc-comparison/14d-26-mcp-config-write-pattern-research.md:
   // GitHub MCP, Linear MCP, Atlassian MCP, Notion MCP and other vendor-shipped
@@ -313,18 +306,20 @@ interface ConfigureEngineData {
   };
   next_actions?: Array<{ tool: string; args: unknown; why: string }>;
   error?: string;
+  /**
+   * One-paragraph plain-prose distillation of the structured data.
+   * Agents quote this directly; dollars omitted unless feasible derivation ran.
+   */
+  human_summary: string;
 }
 
 // ─── main entry ───────────────────────────────────────────────────────
 export async function executeConfigureEngine(
   args: ConfigureEngineArgs
 ): Promise<string | StructuredOutput> {
-  const view = args.view ?? 'markdown';
-
   // Cross-validation: exactly one of target_percent / budget_usd.
   if (args.target_percent === undefined && args.budget_usd === undefined) {
     return notConfiguredEnvelope(
-      view,
       'target_resolution',
       'Specify either `target_percent` or `budget_usd` — one is required.',
       args.service
@@ -332,7 +327,6 @@ export async function executeConfigureEngine(
   }
   if (args.target_percent !== undefined && args.budget_usd !== undefined) {
     return notConfiguredEnvelope(
-      view,
       'target_resolution',
       'Pass exactly one of `target_percent` or `budget_usd`, not both.',
       args.service
@@ -342,13 +336,6 @@ export async function executeConfigureEngine(
   // Resolve gitops + destination.
   const target = await resolveTarget(args);
   if ('error' in target) {
-    if (view === 'markdown') {
-      return buildMarkdownEnvelope({
-        tool: 'log10x_configure_engine',
-        summary: { headline: 'configure_engine: target resolution failed' },
-        markdown: target.error,
-      });
-    }
     return buildEnvelope({
       tool: 'log10x_configure_engine',
       view: 'summary',
@@ -359,6 +346,7 @@ export async function executeConfigureEngine(
         service: args.service,
         containers: args.containers ?? [],
         error: firstLine(target.error),
+        human_summary: `configure_engine refused: ${firstLine(target.error)}`,
       } satisfies ConfigureEngineData,
     });
   }
@@ -372,17 +360,7 @@ export async function executeConfigureEngine(
     }
     backend = r.backend;
   } catch (e: any) {
-    const md = renderError(
-      'Customer metrics backend not configured',
-      e?.message ?? String(e)
-    );
-    if (view === 'markdown') {
-      return buildMarkdownEnvelope({
-        tool: 'log10x_configure_engine',
-        summary: { headline: 'Customer metrics backend not configured' },
-        markdown: md,
-      });
-    }
+    const msg = e?.message ?? String(e);
     return buildEnvelope({
       tool: 'log10x_configure_engine',
       view: 'summary',
@@ -395,21 +373,14 @@ export async function executeConfigureEngine(
         phase: 'backend',
         service: args.service,
         containers: args.containers ?? [],
-        error: e?.message ?? String(e),
+        error: msg,
+        human_summary: `configure_engine refused: customer metrics backend not configured. ${firstLine(msg)}`,
       } satisfies ConfigureEngineData,
     });
   }
 
   // Phase 1: container resolution.
   if (!args.containers || args.containers.length === 0) {
-    const md = await renderResolutionPrompt(args, backend);
-    if (view === 'markdown') {
-      return buildMarkdownEnvelope({
-        tool: 'log10x_configure_engine',
-        summary: { headline: `Phase 1: resolve "${args.service}" → containers` },
-        markdown: md,
-      });
-    }
     return buildEnvelope({
       tool: 'log10x_configure_engine',
       view: 'summary',
@@ -422,6 +393,7 @@ export async function executeConfigureEngine(
         service: args.service,
         containers: [],
         destination: target.resolved.destination,
+        human_summary: `Phase 1: configure_engine needs the container list for service "${args.service}" (destination ${target.resolved.destination}). Re-call with containers: [...] to derive the policy.`,
       } satisfies ConfigureEngineData,
     });
   }
@@ -454,7 +426,6 @@ export async function executeConfigureEngine(
     if (effectivePerGb <= 0) {
       // ClickHouse self-hosted has ingest_per_gb = 0 and tiny storage; bail.
       return notConfiguredEnvelope(
-        view,
         'target_resolution',
         `budget_usd cannot be used on ${destination}: effective $/GB is 0. Pass target_percent instead.`,
         args.service
@@ -647,11 +618,6 @@ export async function executeConfigureEngine(
     applied = await applyViaGh(prCommand);
   }
 
-  const projectedMonthlyUsd = rows.reduce(
-    (s, r) => s + r.projected_monthly_usd_expected,
-    0
-  );
-
   const nextActions: Array<{ tool: string; args: unknown; why: string }> = [
     {
       tool: 'log10x_estimate_savings',
@@ -712,22 +678,18 @@ export async function executeConfigureEngine(
     pr_command: prCommand,
     applied,
     next_actions: nextActions,
+    human_summary: buildConfigureEngineHumanSummary({
+      feasible,
+      targetPercent,
+      service: args.service,
+      containerCount: args.containers.length,
+      patternCount: rows.length,
+      destination,
+      remainingBytesToShed,
+      applied,
+    }),
   };
 
-  if (view === 'markdown') {
-    const md = renderMarkdown(args, target.resolved, data, projectedMonthlyUsd);
-    return buildMarkdownEnvelope({
-      tool: 'log10x_configure_engine',
-      summary: {
-        headline: feasible
-          ? `${targetPercent.toFixed(1)}% reduction on ${args.service} → ${rows.length} patterns capped (${args.containers.length} container${args.containers.length === 1 ? '' : 's'}, ${destination}).`
-          : `${targetPercent.toFixed(1)}% reduction infeasible — short by ${humanBytes(remainingBytesToShed)}/mo.`,
-      },
-      markdown: md,
-      actions: toEnvelopeActions(nextActions),
-      warnings,
-    });
-  }
   return buildEnvelope({
     tool: 'log10x_configure_engine',
     view: 'summary',
@@ -818,117 +780,6 @@ async function resolveTarget(
       destination,
     },
   };
-}
-
-// ─── service-to-container resolution (Phase 1) ───────────────────────
-interface Candidate {
-  container: string;
-  observedGB: number;
-  distinctPods: number;
-}
-
-async function renderResolutionPrompt(
-  args: ConfigureEngineArgs,
-  backend: CustomerMetricsBackend
-): Promise<string> {
-  const service = args.service;
-  const days = args.observationDays ?? 7;
-
-  const filter = `k8s_container=~".*${promEscape(service)}.*"`;
-  const bytesQ = `sum by (k8s_container)(increase(all_events_summaryBytes_total{${filter}}[${days}d])) / 1e9`;
-  const podsQ = `count by (k8s_container)(count by (k8s_container, k8s_pod)(rate(all_events_summaryBytes_total{${filter}}[5m]) > 0))`;
-
-  const [bytesRes, podsRes] = await Promise.all([
-    backend.queryInstant(bytesQ) as Promise<PrometheusResponse>,
-    backend.queryInstant(podsQ) as Promise<PrometheusResponse>,
-  ]);
-
-  const candidates = new Map<string, Candidate>();
-  for (const r of bytesRes.data.result) {
-    const k = r.metric.k8s_container;
-    if (!k) continue;
-    candidates.set(k, {
-      container: k,
-      observedGB: parseFloat(r.value?.[1] ?? '0'),
-      distinctPods: 0,
-    });
-  }
-  for (const r of podsRes.data.result) {
-    const k = r.metric.k8s_container;
-    if (!k) continue;
-    const cur = candidates.get(k) ?? {
-      container: k,
-      observedGB: 0,
-      distinctPods: 0,
-    };
-    cur.distinctPods = Math.round(parseFloat(r.value?.[1] ?? '0'));
-    candidates.set(k, cur);
-  }
-
-  if (candidates.size === 0) {
-    return renderError(
-      'no containers match the service',
-      `No \`k8s_container\` values matched substring \`${service}\` over the last ${days} days. Check the service name; list known services with \`log10x_services\`.`
-    );
-  }
-
-  const sorted = [...candidates.values()].sort(
-    (a, b) => b.observedGB - a.observedGB
-  );
-  const exact = candidates.get(service);
-
-  const lines: string[] = [];
-  lines.push(`# configure_engine — resolve \`service=${service}\` to containers`);
-  lines.push('');
-  lines.push(
-    `Found **${candidates.size}** k8s_container value(s) matching \`${service}\` over the last ${days} days:`
-  );
-  lines.push('');
-  lines.push('| k8s_container | observed (GB) | distinct pods |');
-  lines.push('|---|---:|---:|');
-  for (const c of sorted) {
-    const marker = c.container === service ? ' ← exact match' : '';
-    lines.push(
-      `| \`${c.container}\`${marker} | ${c.observedGB.toFixed(2)} | ${c.distinctPods} |`
-    );
-  }
-  lines.push('');
-
-  const reCallArgs: string[] = [`service="${service}"`];
-  if (args.target_percent !== undefined) reCallArgs.push(`target_percent=${args.target_percent}`);
-  if (args.budget_usd !== undefined) reCallArgs.push(`budget_usd=${args.budget_usd}`);
-  if (args.destination) reCallArgs.push(`destination="${args.destination}"`);
-
-  if (exact) {
-    lines.push(
-      `**Recommendation**: apply the policy to \`${service}\` only (the primary container).`
-    );
-    lines.push('');
-    lines.push('To proceed:');
-    lines.push('');
-    lines.push('```');
-    lines.push(
-      `configure_engine(${reCallArgs.join(', ')}, containers=["${service}"])`
-    );
-    lines.push('```');
-  } else {
-    lines.push(
-      `No exact match for \`${service}\`. Pick the container(s) the policy should apply to:`
-    );
-    lines.push('');
-    lines.push('```');
-    const allList = sorted.map((c) => `"${c.container}"`).join(', ');
-    lines.push(
-      `configure_engine(${reCallArgs.join(', ')}, containers=[${allList}])`
-    );
-    lines.push('```');
-  }
-  lines.push('');
-  lines.push(
-    `When you re-call with \`containers=[...]\`, the tool fetches per-pattern volume, runs the greedy solver, and emits the \`gh\` PR command against your gitops repo.`
-  );
-
-  return lines.join('\n');
 }
 
 // ─── per-pattern fetch ────────────────────────────────────────────────
@@ -1200,120 +1051,29 @@ function reconstructAfterCsv(diff: string, currentCsv: string | undefined): stri
   return renderCsv(merged);
 }
 
-// ─── markdown rendering ───────────────────────────────────────────────
-function renderMarkdown(
-  args: ConfigureEngineArgs,
-  resolved: ResolvedTarget,
-  data: ConfigureEngineData,
-  projectedMonthlyUsd: number
-): string {
-  const out: string[] = [];
-  const derivation = data.derivation!;
-  const checks = data.checks!;
-  const rows = data.per_pattern_rows!;
-
-  out.push(`# configure_engine — policy for \`${args.service}\``);
-  out.push('');
-  out.push(
-    `**Containers** (${args.containers!.length}): ${args.containers!.map((c) => `\`${c}\``).join(', ')}`
-  );
-  out.push(`**Destination**: \`${resolved.destination}\``);
-  out.push(
-    `**Target**: ${data.target_percent?.toFixed(1)}% reduction ` +
-      `(${humanBytes(derivation.target_monthly_bytes)}/mo ≈ $${derivation.target_monthly_usd.toFixed(2)}/mo)`
-  );
-  out.push(
-    `**Current**: ${humanBytes(derivation.current_monthly_bytes)}/mo ≈ $${derivation.current_monthly_usd.toFixed(2)}/mo`
-  );
-  out.push(
-    `**Reduction mode**: \`${args.reduction ?? 'hard'}\`  ·  **Floors**: ${derivation.floor_count} pattern${derivation.floor_count === 1 ? '' : 's'} pinned to \`pass\``
-  );
-  out.push('');
-
-  if (checks.warnings.length > 0) {
-    out.push('## Warnings');
-    out.push('');
-    for (const w of checks.warnings) out.push(`- ${w}`);
-    out.push('');
+// ─── human_summary builder ────────────────────────────────────────────
+function buildConfigureEngineHumanSummary(args: {
+  feasible: boolean;
+  targetPercent: number;
+  service: string;
+  containerCount: number;
+  patternCount: number;
+  destination: SiemId;
+  remainingBytesToShed: number;
+  applied?: ConfigureEngineData['applied'];
+}): string {
+  const containerWord = `${args.containerCount} container${args.containerCount === 1 ? '' : 's'}`;
+  if (!args.feasible) {
+    return `configure_engine could not hit ${args.targetPercent.toFixed(1)}% reduction on ${args.service} (${containerWord}, ${args.destination}); short by ${humanBytes(args.remainingBytesToShed)} per month. Adjust target, floors, or action defaults and re-run.`;
   }
-
-  if (!checks.feasible) {
-    out.push('## Result: solver could not hit target');
-    out.push('');
-    out.push(
-      checks.infeasible_reason ??
-        'Solver did not reach the requested reduction within ±10% tolerance.'
-    );
-    out.push('');
-    out.push('No PR command was emitted. Adjust inputs and re-call:');
-    out.push('');
-    out.push('- lower `target_percent`,');
-    out.push('- relax `signal_floor`,');
-    out.push('- or change `action_defaults.standard` to a more aggressive action (e.g. `drop`).');
-    out.push('');
+  const headline = `configure_engine derived a ${args.targetPercent.toFixed(1)}% reduction policy on ${args.service} across ${containerWord} (${args.destination}); ${args.patternCount} pattern${args.patternCount === 1 ? '' : 's'} capped.`;
+  if (args.applied?.ok && args.applied.pr_url) {
+    return `${headline} PR opened at ${args.applied.pr_url}; the engine hot-reloads the cap CSV on the next gitops poll, no pipeline restart.`;
   }
-
-  out.push('## Per-pattern policy');
-  out.push('');
-  out.push(
-    `Greedy solver ordered by (bytes × severity_weight). Coverage: ${(checks.coverage_pct * 100).toFixed(1)}% of observed monthly bytes.`
-  );
-  out.push('');
-  out.push('| pattern_hash | tier | bytes/mo | action | $/mo (low → high) |');
-  out.push('|---|---|---:|---|---|');
-  const topRows = rows.slice(0, 25);
-  for (const r of topRows) {
-    out.push(
-      `| \`${r.pattern_hash.slice(0, 12)}…\` | ${r.reason} | ${humanBytes(r.current_bytes_30d)} | \`${r.action}\`${r.floor_reason ? ' 🔒' : ''} | $${r.projected_monthly_usd_low.toFixed(2)} → $${r.projected_monthly_usd_high.toFixed(2)} |`
-    );
+  if (args.applied && !args.applied.ok) {
+    return `${headline} Auto-apply failed (${args.applied.error ?? 'unknown error'}); run pr_command manually to open the PR.`;
   }
-  if (rows.length > topRows.length) {
-    out.push(`| _…${rows.length - topRows.length} more rows_ | | | | |`);
-  }
-  out.push('');
-
-  const actionCounts = Object.entries(derivation.actions_used)
-    .map(([k, v]) => `\`${k}\`: ${v}`)
-    .join(', ');
-  out.push(`**Actions used**: ${actionCounts}`);
-  out.push(`**Projected total**: ~$${projectedMonthlyUsd.toFixed(2)}/mo (post-policy)`);
-  out.push('');
-
-  if (data.pr_command) {
-    out.push('## Apply via `gh`');
-    out.push('');
-    out.push(
-      `Creates a PR against \`${resolved.gitops_repo}\` (\`${resolved.gitops_branch}\`). Review and merge through your normal workflow. The engine hot-reloads the cap CSV on the next gitops poll; **no pipeline restart, no event drops**.`
-    );
-    out.push('');
-    out.push(data.pr_command);
-    out.push('');
-    if (!args.current_csv) {
-      out.push(
-        '> **Note**: `current_csv` was not provided. The tool computed the diff against an empty baseline. If the file already exists, fetch it first and re-call with `current_csv`:'
-      );
-      out.push('>');
-      out.push('> ```bash');
-      out.push(
-        `> gh api "/repos/${resolved.gitops_repo}/contents/${resolved.lookup_path}?ref=${resolved.gitops_branch}" --jq .content | base64 -d`
-      );
-      out.push('> ```');
-      out.push('');
-    }
-  } else if (checks.feasible) {
-    out.push(
-      '> **Zero-change PR**: target is already met by current state. No CSV write needed. (Per OPEN Q 8 default — emit `phase=pr_rendered` with `pr_command: null`.)'
-    );
-    out.push('');
-  }
-
-  out.push('## Next');
-  out.push('');
-  for (const a of data.next_actions ?? []) {
-    out.push(`- \`${a.tool}\` — ${a.why}`);
-  }
-
-  return out.join('\n');
+  return `${headline} Run pr_command to open the PR; the engine hot-reloads the cap CSV on the next gitops poll, no pipeline restart.`;
 }
 
 // ─── envelope helpers ─────────────────────────────────────────────────
@@ -1329,19 +1089,10 @@ function toEnvelopeActions(
 }
 
 function notConfiguredEnvelope(
-  view: 'summary' | 'markdown',
   phase: ConfigureEngineData['phase'],
   remediation: string,
   service: string
 ): StructuredOutput {
-  const md = renderError('configure_engine refused', remediation);
-  if (view === 'markdown') {
-    return buildMarkdownEnvelope({
-      tool: 'log10x_configure_engine',
-      summary: { headline: `configure_engine refused: ${firstLine(remediation)}` },
-      markdown: md,
-    });
-  }
   return buildEnvelope({
     tool: 'log10x_configure_engine',
     view: 'summary',
@@ -1352,6 +1103,7 @@ function notConfiguredEnvelope(
       service,
       containers: [],
       error: remediation,
+      human_summary: `configure_engine refused: ${firstLine(remediation)}`,
     } satisfies ConfigureEngineData,
   });
 }

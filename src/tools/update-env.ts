@@ -16,7 +16,7 @@ import { z } from 'zod';
 import type { Environments } from '../lib/environments.js';
 import { reloadEnvironmentsInPlace } from '../lib/environments.js';
 import { updateEnvironment } from '../lib/api.js';
-import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
 export const updateEnvSchema = {
   env_id: z
@@ -36,27 +36,36 @@ export const updateEnvSchema = {
     .describe(
       'When true, this env becomes the user\'s default — every tool call without an explicit `environment` arg routes here. The previous default is automatically un-defaulted by the backend. Optional — omit to leave the default flag unchanged.'
     ),
-  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.ok, data.before, data.after). markdown wraps the report in data.markdown.'),
 };
 
+function buildUpdateEnvHumanSummary(inner: UpdateEnvInner): string {
+  if (!inner.ok) {
+    return `update_env failed: ${inner.error ?? 'unknown reason'}.`;
+  }
+  if (inner.changes.length === 0) {
+    return `Env ${inner.env_id ?? ''} update was a no-op (nothing changed).`;
+  }
+  return `Env ${inner.env_id ?? ''} updated: ${inner.changes.join(', ')}.`;
+}
+
 export async function executeUpdateEnv(
-  args: { env_id: string; name?: string; is_default?: boolean; view?: 'summary' | 'markdown' },
+  args: { env_id: string; name?: string; is_default?: boolean },
   envs: Environments
 ): Promise<string | StructuredOutput> {
-  const view = args.view ?? 'summary';
   const inner = await executeUpdateEnvInner(args, envs);
-  if (view === 'markdown') {
-    return buildMarkdownEnvelope({
-      tool: 'log10x_update_env',
-      summary: { headline: inner.ok ? `Updated env ${inner.env_id}` : `Update env refused: ${inner.error ?? 'unknown'}` },
-      markdown: inner.markdown,
-    });
-  }
   return buildEnvelope({
     tool: 'log10x_update_env',
     view: 'summary',
     summary: { headline: inner.ok ? `Updated env ${inner.env_id}${inner.changes.length ? ': ' + inner.changes.join(', ') : ' (no-op)'}.` : `Update env refused: ${inner.error ?? 'unknown'}.` },
-    data: { ok: inner.ok, env_id: inner.env_id, before: inner.before, after: inner.after, changes: inner.changes, error: inner.error },
+    data: {
+      ok: inner.ok,
+      env_id: inner.env_id,
+      before: inner.before,
+      after: inner.after,
+      changes: inner.changes,
+      error: inner.error,
+      human_summary: buildUpdateEnvHumanSummary(inner),
+    },
   });
 }
 

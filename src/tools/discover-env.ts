@@ -16,7 +16,7 @@ import { z } from 'zod';
 import { runDiscovery } from '../lib/discovery/orchestrate.js';
 import type { DiscoverySnapshot, ForwarderKind } from '../lib/discovery/types.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
-import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
 
 export const discoverEnvSchema = {
@@ -57,7 +57,6 @@ export const discoverEnvSchema = {
     .optional()
     .describe('Skip all kubectl probes (for AWS-only discovery or when cluster access is restricted).'),
   skip_aws: z.boolean().optional().describe('Skip all AWS probes (for cluster-only discovery).'),
-  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.snapshot_id, data.forwarder, data.installed_components, data.aws). markdown wraps the rendered report in data.markdown.'),
 };
 
 const schemaObj = z.object(discoverEnvSchema);
@@ -83,10 +82,20 @@ interface DiscoverEnvSummary {
   sqs_queues: string[];
   log_groups_count: number;
   probe_log_entry_count: number;
+  human_summary: string;
 }
 
-export async function executeDiscoverEnv(args: DiscoverEnvArgs & { view?: 'summary' | 'markdown' }): Promise<string | StructuredOutput> {
-  const view = args.view ?? 'summary';
+function buildDiscoverEnvHumanSummary(d: Omit<DiscoverEnvSummary, 'human_summary'>): string {
+  const installed = Object.entries(d.installed_components).filter(([, v]) => v).map(([k]) => k);
+  const installedFrag = installed.length > 0 ? installed.join(', ') : 'none';
+  const fwd = d.forwarder_kind ?? 'none detected';
+  const awsFrag = d.aws_available
+    ? ` AWS: region ${d.region ?? 'unknown'}, ${d.s3_buckets.length} matching S3 bucket${d.s3_buckets.length === 1 ? '' : 's'}, ${d.sqs_queues.length} SQS queue${d.sqs_queues.length === 1 ? '' : 's'}.`
+    : ' AWS probes were unavailable.';
+  return `Discovery snapshot ${d.snapshot_id} done in ${d.namespaces_probed.length} namespace${d.namespaces_probed.length === 1 ? '' : 's'}: forwarder=${fwd}, log10x apps installed=${installedFrag}.${awsFrag}`;
+}
+
+export async function executeDiscoverEnv(args: DiscoverEnvArgs): Promise<string | StructuredOutput> {
   const telemetry = newTelemetry();
   const snapshot = await runDiscovery({
     kubectl: { namespaces: args.namespaces },
@@ -100,14 +109,6 @@ export async function executeDiscoverEnv(args: DiscoverEnvArgs & { view?: 'summa
     skipKubectl: args.skip_kubectl,
     skipAws: args.skip_aws,
   });
-  const md = renderDiscoverReport(snapshot);
-  if (view === 'markdown') {
-    return buildMarkdownEnvelope({
-      tool: 'log10x_discover_env',
-      summary: { headline: `Discovery snapshot ${snapshot.snapshotId}` },
-      markdown: md,
-    });
-  }
   const rec = snapshot.recommendations;
   const installedMap = rec.alreadyInstalled ?? {};
   const topForwarder = snapshot.kubectl?.forwarders?.[0];
@@ -131,7 +132,9 @@ export async function executeDiscoverEnv(args: DiscoverEnvArgs & { view?: 'summa
     sqs_queues: (snapshot.aws?.sqsQueues ?? []).map((q) => q.url),
     log_groups_count: snapshot.aws?.cwLogGroups?.length ?? 0,
     probe_log_entry_count: snapshot.probeLog?.length ?? 0,
+    human_summary: '',
   };
+  data.human_summary = buildDiscoverEnvHumanSummary(data);
   const installedList = Object.entries(data.installed_components).filter(([, v]) => v).map(([k]) => k);
   const headline = `Snapshot \`${data.snapshot_id}\`: forwarder=${data.forwarder_kind ?? 'none'}, installed=${installedList.length ? installedList.join(',') : 'none'}, kubectl=${data.kubectl_available ? 'ok' : 'unavailable'}, aws=${data.aws_available ? 'ok' : 'unavailable'}.`;
   const actions: Array<{ tool: string; args: Record<string, unknown>; reason: string }> = [];
@@ -147,7 +150,7 @@ export async function executeDiscoverEnv(args: DiscoverEnvArgs & { view?: 'summa
     tool: 'log10x_discover_env',
     view: 'summary',
     summary: { headline },
-    data: { ...data, ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: headline }) },
+    data: { ...data, ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: data.human_summary }) },
     actions,
   });
 }

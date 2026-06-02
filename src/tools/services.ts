@@ -13,14 +13,14 @@ import { fmtDollar, fmtBytes, fmtPct, parseTimeframe, costPeriodLabel } from '..
 import { shareBar } from '../lib/pattern-render.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { agentOnly } from '../lib/agent-only.js';
-import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
 
 export const servicesSchema = {
   timeRange: z.enum(['15m', '1h', '6h', '1d', '7d', '30d']).default('7d').describe('Time range. Sub-day values available for incident-window service ranking.'),
   analyzerCost: z.number().optional().describe('SIEM ingestion cost in $/GB'),
   environment: z.string().optional().describe('Environment nickname'),
-  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.services[], data.totals). markdown wraps the rendered table in data.markdown.'),
+  view: z.literal('summary').default('summary').optional().describe('Output format. Always "summary" — the typed envelope (data.services[], data.totals). Field retained for backward-compat.'),
 };
 
 interface ServicesSummary {
@@ -41,18 +41,19 @@ interface ServicesSummary {
 }
 
 export async function executeServices(
-  args: { timeRange?: string; analyzerCost?: number; view?: 'summary' | 'markdown' },
+  args: { timeRange?: string; analyzerCost?: number; view?: 'summary' },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
-  const view = args.view ?? 'summary';
   const telemetry = newTelemetry();
   const sumOut: { data?: ServicesSummary } = {};
-  const md = await executeServicesInner(args, env, sumOut);
-  if (view === 'markdown' || !sumOut.data) {
-    return buildMarkdownEnvelope({
+  await executeServicesInner(args, env, sumOut);
+  if (!sumOut.data) {
+    const headline = 'No service data available. Data appears after the first 24h of collection.';
+    return buildEnvelope({
       tool: 'log10x_services',
-      summary: { headline: md.split('\n').find((l) => l.trim().length > 0)?.slice(0, 200) ?? 'services result' },
-      markdown: md,
+      view: 'summary',
+      summary: { headline },
+      data: { ...buildUnifiedFields({ status: 'insufficient_data', telemetry, humanSummary: headline }) },
     });
   }
   const d = sumOut.data;
@@ -75,7 +76,7 @@ export async function executeServices(
 }
 
 async function executeServicesInner(
-  args: { timeRange?: string; analyzerCost?: number; view?: 'summary' | 'markdown' },
+  args: { timeRange?: string; analyzerCost?: number; view?: 'summary' },
   env: EnvConfig,
   sumOut?: { data?: ServicesSummary }
 ): Promise<string> {

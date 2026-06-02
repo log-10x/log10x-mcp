@@ -17,7 +17,7 @@ import { z } from 'zod';
 import type { Environments } from '../lib/environments.js';
 import { reloadEnvironmentsInPlace } from '../lib/environments.js';
 import { deleteEnvironment } from '../lib/api.js';
-import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
 export const deleteEnvSchema = {
   env_id: z
@@ -32,27 +32,33 @@ export const deleteEnvSchema = {
     .describe(
       'The exact display name of the env being deleted. Must match the current `name` (case-sensitive). This is a typo-prevention guard — if it does not match, the tool refuses without calling the backend, and shows the correct name so the LLM can confirm with the user before retrying.'
     ),
-  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.ok, data.deleted_env_id, data.remaining_envs). markdown wraps the report in data.markdown.'),
 };
 
+function buildDeleteEnvHumanSummary(inner: DeleteEnvInner): string {
+  if (!inner.ok) {
+    return `delete_env failed: ${inner.error ?? 'unknown reason'}.`;
+  }
+  const remaining = inner.remaining_envs ?? 0;
+  return `Env "${inner.deleted_name ?? inner.deleted_env_id ?? ''}" was deleted (irrecoverable); ${remaining} env${remaining === 1 ? '' : 's'} remain on this account.`;
+}
+
 export async function executeDeleteEnv(
-  args: { env_id: string; confirm_name: string; view?: 'summary' | 'markdown' },
+  args: { env_id: string; confirm_name: string },
   envs: Environments
 ): Promise<string | StructuredOutput> {
-  const view = args.view ?? 'summary';
   const inner = await executeDeleteEnvInner(args, envs);
-  if (view === 'markdown') {
-    return buildMarkdownEnvelope({
-      tool: 'log10x_delete_env',
-      summary: { headline: inner.ok ? `Deleted env ${inner.deleted_env_id}` : `Delete env refused: ${inner.error ?? 'unknown'}` },
-      markdown: inner.markdown,
-    });
-  }
   return buildEnvelope({
     tool: 'log10x_delete_env',
     view: 'summary',
     summary: { headline: inner.ok ? `Deleted env "${inner.deleted_name}" (${inner.deleted_env_id}), ${inner.remaining_envs ?? '?'} envs remain.` : `Delete env refused: ${inner.error ?? 'unknown'}.` },
-    data: { ok: inner.ok, deleted_env_id: inner.deleted_env_id, deleted_name: inner.deleted_name, remaining_envs: inner.remaining_envs, error: inner.error },
+    data: {
+      ok: inner.ok,
+      deleted_env_id: inner.deleted_env_id,
+      deleted_name: inner.deleted_name,
+      remaining_envs: inner.remaining_envs,
+      error: inner.error,
+      human_summary: buildDeleteEnvHumanSummary(inner),
+    },
     warnings: inner.ok ? ['env deletion is irrecoverable; metric history scoped to this env is also lost'] : [],
   });
 }

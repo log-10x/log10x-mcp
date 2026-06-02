@@ -21,7 +21,7 @@ import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { agentOnly } from '../lib/agent-only.js';
 import { fetchOneSampleByHash } from '../lib/siem/sample.js';
 import { patternDisplay } from '../lib/pattern-descriptor.js';
-import { buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
 import { getOffloadStatus } from '../lib/offload-status.js';
 import { isRetrieverConfigured } from '../lib/retriever-api.js';
@@ -35,7 +35,6 @@ export const eventLookupSchema = {
   effective_ingest_per_gb: z.number().optional().describe('Customer-supplied SIEM ingest cost in $/GB. When set, dollar fields populate with rate_source=customer_supplied; when absent and no list rate is detected, dollar fields collapse to null and rate_source=unset.'),
   siemScope: z.string().optional().describe('SIEM scope for the live sample line on a tenxHash reverse lookup: a CloudWatch log group (`/aws/ecs/my-svc`), ES index, or Splunk index. When omitted, the detected SIEM connector uses its own default scope. Only consulted when `tenxHash` was passed (the cross-pillar correlation case).'),
   environment: z.string().optional().describe('Environment nickname'),
-  view: z.enum(['summary', 'markdown']).default('summary').describe('Output format. summary returns a structured envelope; markdown returns the rendered table.'),
 };
 
 interface EventLookupSummary {
@@ -58,27 +57,28 @@ interface EventLookupSummary {
 }
 
 export async function executeEventLookup(
-  args: { pattern?: string; tenxHash?: string; service?: string; timeRange?: string; analyzerCost?: number; effective_ingest_per_gb?: number; siemScope?: string; view?: 'summary' | 'markdown' },
+  args: { pattern?: string; tenxHash?: string; service?: string; timeRange?: string; analyzerCost?: number; effective_ingest_per_gb?: number; siemScope?: string },
   env: EnvConfig
-): Promise<string | StructuredOutput> {
-  const view = args.view ?? 'summary';
+): Promise<StructuredOutput> {
   const telemetry = newTelemetry();
   const sumOut: { data?: EventLookupSummary } = {};
   const md = await executeEventLookupInner(args, env, sumOut);
-  if (view === 'markdown') {
-    return buildMarkdownEnvelope({
-      tool: 'log10x_event_lookup',
-      summary: { headline: md.split('\n')[0]?.slice(0, 200) || 'event_lookup result' },
-      markdown: md,
-    });
-  }
-  // Summary view: typed envelope when data was computed; fall back to
-  // markdown envelope for early-return cases (no data, raw line, etc).
+  // Early-return cases (no data, raw line, pattern not found): the inner
+  // produced a markdown narrative. Strip headings and collapse to a
+  // single-paragraph human_summary so the envelope stays typed.
   if (!sumOut.data) {
-    return buildMarkdownEnvelope({
+    const stripped = md
+      .replace(/^##\s*/m, '')
+      .split('\n')
+      .filter((l) => l.trim().length > 0 && !l.trim().startsWith('-') && !l.trim().startsWith('|'))
+      .join(' ')
+      .slice(0, 600);
+    const headline = md.split('\n')[0]?.replace(/^##\s*/, '').slice(0, 200) || 'event_lookup — no result';
+    return buildEnvelope({
       tool: 'log10x_event_lookup',
-      summary: { headline: md.split('\n')[0]?.slice(0, 200) || 'event_lookup result' },
-      markdown: md,
+      view: 'summary',
+      summary: { headline },
+      data: { ...buildUnifiedFields({ status: 'no_signal', telemetry, humanSummary: stripped }) },
     });
   }
   const d = sumOut.data;
@@ -90,7 +90,6 @@ export async function executeEventLookup(
   const headline = dollarTail === '—'
     ? `\`${d.pattern}\` over ${d.window}: ${d.totals.events} events across ${d.totals.service_count} ${svcWord} (${(d.totals.bytes / 1_000_000).toFixed(1)} MB)`
     : `\`${d.pattern}\` over ${d.window}: ${d.totals.events} events across ${d.totals.service_count} ${svcWord} (${(d.totals.bytes / 1_000_000).toFixed(1)} MB) · ${dollarTail}`;
-  const { buildEnvelope } = await import('../lib/output-types.js');
   return buildEnvelope({
     tool: 'log10x_event_lookup',
     view: 'summary',

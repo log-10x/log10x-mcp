@@ -10,9 +10,8 @@
 import { z } from 'zod';
 import { getSnapshot } from '../lib/discovery/snapshot-store.js';
 import { buildRetrieverPlan } from '../lib/advisor/retriever.js';
-import { renderPlan } from '../lib/advisor/render.js';
 import { buildAdvisePlanEnvelope } from '../lib/advisor/envelope.js';
-import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
 export const adviseRetrieverSchema = {
   snapshot_id: z
@@ -56,27 +55,27 @@ export const adviseRetrieverSchema = {
     .optional()
     .describe('SQS URL for stream operations. Default: auto-detected from snapshot.'),
   action: z.enum(['install', 'verify', 'teardown', 'all']).optional().describe('Default: `all`.'),
-  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.app, data.preflight[], data.install_step_count, data.blockers[]). markdown wraps the rendered plan in data.markdown.'),
 };
 
 const schemaObj = z.object(adviseRetrieverSchema);
 export type AdviseRetrieverArgs = z.infer<typeof schemaObj>;
 
-export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise<string | StructuredOutput> {
-  const view = args.view ?? 'summary';
+export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise<StructuredOutput> {
   const snapshot = getSnapshot(args.snapshot_id);
   if (!snapshot) {
-    const md = [
-      `# Retriever advisor — snapshot not found`,
-      ``,
-      `Snapshot \`${args.snapshot_id}\` is missing or expired (snapshots live 30 min).`,
-      ``,
-      `Run \`log10x_discover_env\` again and pass the new snapshot_id.`,
-    ].join('\n');
-    if (view === 'markdown') {
-      return buildMarkdownEnvelope({ tool: 'log10x_advise_retriever', summary: { headline: 'Retriever advisor: snapshot not found' }, markdown: md });
-    }
-    return buildEnvelope({ tool: 'log10x_advise_retriever', view: 'summary', summary: { headline: `Retriever advisor refused: snapshot ${args.snapshot_id} not found.` }, data: { ok: false, app: 'retriever', snapshot_id: args.snapshot_id, error: 'snapshot not found' } });
+    const human_summary = `Retriever advisor refused: snapshot ${args.snapshot_id} is missing or expired (snapshots live 30 minutes). Run log10x_discover_env again and pass the new snapshot_id.`;
+    return buildEnvelope({
+      tool: 'log10x_advise_retriever',
+      view: 'summary',
+      summary: { headline: `Retriever advisor refused: snapshot ${args.snapshot_id} not found.` },
+      data: {
+        ok: false,
+        app: 'retriever',
+        snapshot_id: args.snapshot_id,
+        error: 'snapshot not found',
+        human_summary,
+      },
+    });
   }
 
   const action = args.action ?? 'all';
@@ -99,5 +98,5 @@ export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise
     skipTeardown: action === 'install' || action === 'verify',
   });
 
-  return buildAdvisePlanEnvelope({ tool: 'log10x_advise_retriever', view, plan, action });
+  return buildAdvisePlanEnvelope({ tool: 'log10x_advise_retriever', plan, action });
 }

@@ -37,7 +37,6 @@ import { createLimiter } from '../lib/concurrency.js';
 import { fmtCount } from '../lib/format.js';
 import { retrieverNotConfiguredMessage } from './retriever-query.js';
 import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
-import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 
 /** Cap on group-by cardinality. Tail collapsed to "_other_". */
 const TOP_K_GROUPS = 1000;
@@ -92,7 +91,11 @@ export const retrieverSeriesSchema = {
       '`auto` (tool decides via Reporter volume + window length), `full` (force exact aggregation — may exceed Lambda budget), `per_window_sampled` (force sampling, default K=1000 per sub-window), or `per_window_sampled:K` (custom K).'
     ),
   environment: z.string().optional().describe('Environment nickname — required if multi-env.'),
-  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.mode, data.bucket_seconds, data.series_count, data.points_returned, data.top_groups, data.caveats). markdown wraps the full series rendering in data.markdown.'),
+  view: z
+    .literal('summary')
+    .default('summary')
+    .optional()
+    .describe('summary returns the typed envelope (data.mode, data.bucket_seconds, data.series_count, data.points_returned, data.top_groups, data.caveats, data.human_summary). The deprecated markdown view was removed; data.human_summary carries the prose distillation for chat rendering.'),
 };
 
 interface SeriesPoint {
@@ -113,17 +116,13 @@ export async function executeRetrieverSeries(
     group_by?: string;
     fidelity?: string;
     environment?: string;
-    view?: 'summary' | 'markdown';
+    view?: 'summary';
   },
   env: EnvConfig
 ): Promise<string | import('../lib/output-types.js').StructuredOutput> {
-  const view = rawArgs.view ?? 'summary';
-  const { buildEnvelope: __be, buildMarkdownEnvelope: __bme } = await import('../lib/output-types.js');
+  const { buildEnvelope: __be } = await import('../lib/output-types.js');
   if (!isRetrieverConfigured()) {
     const md = retrieverNotConfiguredMessage();
-    if (view === 'markdown') {
-      return __bme({ tool: 'log10x_retriever_series', summary: { headline: 'Retriever not configured' }, markdown: md });
-    }
     // Typed not_configured (status + advise_retriever action) so an agent
     // branches on data.status, matching retriever_query and the framework.
     return buildNotConfiguredEnvelope({ tool: 'log10x_retriever_series', kind: 'retriever', remediation: md });
@@ -172,11 +171,22 @@ export async function executeRetrieverSeries(
   });
 
   if (decision.mode === 'refused') {
-    const md = renderRefusal(decision, args, windowMs);
-    if (view === 'markdown') {
-      return __bme({ tool: 'log10x_retriever_series', summary: { headline: 'Series refused: window/volume exceeds budget' }, markdown: md });
-    }
-    return __be({ tool: 'log10x_retriever_series', view: 'summary', summary: { headline: `Series refused: ${decision.reason ?? 'window/volume exceeds Lambda budget'}. Narrow the window or add a more selective search expression.` }, data: { ok: false, mode: 'refused', from: args.from, to: args.to, window_ms: windowMs, reason: decision.reason } });
+    const reason = decision.reason ?? 'window/volume exceeds Lambda budget';
+    const refusal_human_summary = buildRefusalHumanSummary(decision, args, windowMs);
+    return __be({
+      tool: 'log10x_retriever_series',
+      view: 'summary',
+      summary: { headline: `Series refused: ${reason}. Narrow the window or add a more selective search expression.` },
+      data: {
+        ok: false,
+        mode: 'refused',
+        from: args.from,
+        to: args.to,
+        window_ms: windowMs,
+        reason: decision.reason,
+        human_summary: refusal_human_summary,
+      },
+    });
   }
 
   const startedMs = Date.now();
@@ -186,10 +196,6 @@ export async function executeRetrieverSeries(
       : await executeSampledMode(env, args, fromMs, toMs, decision.subWindows!, decision.eventsPerSubWindow!);
 
   const wallTimeMs = Date.now() - startedMs;
-  const md = renderSeries(result, decision, args, wallTimeMs, windowMs);
-  if (view === 'markdown') {
-    return __bme({ tool: 'log10x_retriever_series', summary: { headline: `Retriever series: ${result.series.length} bucket points, mode=${decision.mode}` }, markdown: md });
-  }
   const groupCounts: Record<string, number> = {};
   for (const p of result.series) {
     if (p.group) groupCounts[p.group] = (groupCounts[p.group] ?? 0) + p.count;
@@ -198,6 +204,14 @@ export async function executeRetrieverSeries(
     .sort((a, b) => b[1] - a[1])
     .slice(0, 10)
     .map(([group, count]) => ({ group, count }));
+  const human_summary = buildSeriesHumanSummary({
+    result,
+    decision,
+    args,
+    wallTimeMs,
+    windowMs,
+    topGroups,
+  });
   return __be({
     tool: 'log10x_retriever_series',
     view: 'summary',
@@ -219,6 +233,7 @@ export async function executeRetrieverSeries(
       sub_windows: decision.subWindows,
       events_per_sub_window: decision.eventsPerSubWindow,
       sub_window_results: result.subWindowResults,
+      human_summary,
     },
     actions: args.pattern ? [
       { tool: 'log10x_retriever_query', args: { pattern: args.pattern, from: args.from, to: args.to }, reason: 'fetch the actual events that built this series' },
@@ -589,214 +604,61 @@ function extractGroupValue(ev: RetrieverEvent, field: string): string {
   return JSON.stringify(v).slice(0, 64);
 }
 
-// ─── Renderers ───────────────────────────────────────────────────────────
+// ─── human_summary helpers ───────────────────────────────────────────
 
-function renderSeries(
-  result: SeriesResult,
-  decision: FidelityDecision,
-  args: { from: string; to: string; bucket_size: string; group_by?: string; search?: string; pattern?: string },
-  wallTimeMs: number,
-  windowMs: number
-): string {
-  const lines: string[] = [];
-  lines.push(`## Retriever Series`);
-  lines.push('');
-  lines.push(`**Window**: ${args.from} → ${args.to} (${formatDuration(windowMs)})`);
-  if (args.pattern) {
-    lines.push(`**Pattern**: \`${args.pattern}\` (auto-translated to \`${args.search}\`)`);
-  } else if (args.search) {
-    lines.push(`**Search**: \`${args.search}\``);
-  }
-  if (args.group_by) lines.push(`**Group by**: \`${args.group_by}\``);
-  lines.push(`**Bucket**: ${args.bucket_size}`);
-  lines.push('');
-
-  // Mode + reasoning block.
-  lines.push(`### Mode: \`${decision.mode}\``);
-  lines.push(`**Reason**: ${humanizeReason(decision.reason)}`);
-  if (decision.estimatedEvents !== undefined) {
-    lines.push(`**Estimated events in window**: ${fmtCount(decision.estimatedEvents)}`);
-  }
-  if (decision.estimatedBytes !== undefined) {
-    lines.push(`**Estimated fetch**: ${formatBytes(decision.estimatedBytes)}`);
-  }
-  if (decision.reporter?.note) {
-    lines.push(`**Reporter note**: ${decision.reporter.note}`);
-  } else if (decision.reporter?.pattern) {
-    lines.push(
-      `**Reporter pattern**: \`${decision.reporter.pattern}\` · ${
-        decision.reporter.rateEventsPerMinute !== undefined
-          ? `${fmtCount(Math.round(decision.reporter.rateEventsPerMinute))} events/min`
-          : 'rate unknown'
-      }${
-        decision.reporter.bytesPerEvent !== undefined
-          ? ` · ${formatBytes(decision.reporter.bytesPerEvent)}/event`
-          : ''
-      }`
-    );
-  }
-  if (decision.mode === 'per_window_sampled') {
-    lines.push(
-      `**Sampling**: ${decision.subWindows} sub-windows × ${decision.eventsPerSubWindow} events/sub-window (max ${
-        (decision.subWindows ?? 0) * (decision.eventsPerSubWindow ?? 0)
-      } total)`
-    );
-  }
-  lines.push('');
-
-  // Execution stats.
-  lines.push(`### Execution`);
-  lines.push(
-    `- **Events processed**: ${fmtCount(result.actualEvents)}` +
-      (result.truncated ? ' _(some workers truncated)_' : '')
-  );
-  lines.push(`- **Worker files**: ${result.workerFiles}`);
-  lines.push(`- **Wall time**: ${wallTimeMs}ms`);
-  if (result.groupCardinality > 0) {
-    lines.push(
-      `- **Group cardinality**: ${result.groupCardinality}` +
-        (result.groupCardinality > TOP_K_GROUPS ? ` _(top ${TOP_K_GROUPS} kept; tail in_ \`_other_\`)` : '')
-    );
-  }
-  lines.push('');
-
-  // Series body.
-  if (result.series.length === 0) {
-    lines.push(
-      '_Series is empty — no events with parseable timestamps. Verify the search expression matches and the window covers actual ingest._'
-    );
-  } else {
-    lines.push(`### Series (${result.series.length} points)`);
-    lines.push('');
-    if (args.group_by) {
-      // Top-K table per bucket — just dump as a flat list ordered by bucket then count.
-      lines.push('```');
-      lines.push(`bucket                      group                                 count`);
-      for (const p of result.series.slice(0, 200)) {
-        lines.push(
-          `${p.bucket.slice(0, 19).padEnd(20)}  ${(p.group ?? '').padEnd(40).slice(0, 40)}  ${String(p.count).padStart(8)}`
-        );
-      }
-      if (result.series.length > 200) {
-        lines.push(`... (${result.series.length - 200} additional rows omitted)`);
-      }
-      lines.push('```');
-    } else {
-      const max = result.series.reduce((m, p) => Math.max(m, p.count), 0);
-      lines.push('```');
-      for (const p of result.series.slice(0, 80)) {
-        const bar = max > 0 ? renderBar(p.count / max, 30) : '';
-        lines.push(`${p.bucket.slice(0, 19)}  ${String(p.count).padStart(8)}  ${bar}`);
-      }
-      if (result.series.length > 80) {
-        lines.push(`... (${result.series.length - 80} additional buckets omitted)`);
-      }
-      lines.push('```');
-    }
-  }
-  lines.push('');
-
-  // Fidelity caveats.
-  if (decision.mode === 'per_window_sampled') {
-    const k = decision.eventsPerSubWindow ?? 0;
-    const n = decision.subWindows ?? 0;
-    lines.push(`### Fidelity notes`);
-    lines.push(
-      `- **Time-distribution**: preserved by construction. Each of the ${n} sub-windows contributed up to ${k} events independently — the shape of the series reflects sub-window-relative rate variation.`
-    );
-    if (args.group_by) {
-      lines.push(
-        `- **Group ranking**: dominant ${args.group_by} values are ranked reliably. Groups with very few events in the window may be absent from any sub-window's sample. For exact tail visibility, narrow the query or use \`fidelity: "full"\` if the volume permits.`
-      );
-    }
-    lines.push(
-      `- **Bucket counts**: estimates, not exact. To upper-bound the absolute scale, multiply each bucket's count by (estimated events in that sub-window / events sampled from that sub-window).`
-    );
-    if (result.subWindowResults && result.subWindowResults.some((s) => s.eventsFetched < k)) {
-      const underfilled = result.subWindowResults.filter((s) => s.eventsFetched < k).length;
-      lines.push(
-        `- **Underfilled sub-windows**: ${underfilled}/${n} sub-windows returned fewer than K events, meaning the pattern's actual volume in those time slices is below the budget — counts there are exact, not sampled.`
-      );
-    }
-  } else if (decision.reason === 'window_length_short_fallback') {
-    lines.push(
-      `_Mode chosen via window-length fallback (Reporter had no per-pattern volume signal for this query). Counts are exact._`
-    );
-  }
-
-  // Structured NEXT_ACTIONS for autonomous chains. The natural follow-up
-  // after a series is to backfill the metric into a TSDB so dashboards /
-  // alerts can use it ongoing. Only emit when a pattern arg was supplied
-  // (the typical autonomous-chain path); free-form search expressions don't
-  // round-trip cleanly into backfill_metric without further translation.
-  const nextActions: NextAction[] = [];
-  if (args.pattern && result.actualEvents > 0) {
-    nextActions.push({
-      tool: 'log10x_backfill_metric',
-      args: {
-        pattern: args.pattern,
-        metric_name: `log10x.${args.pattern.toLowerCase()}_count`,
-        destination: 'datadog',
-        from: args.from,
-        to: args.to,
-        bucket_size: args.bucket_size,
-      },
-      reason: 'create a TSDB metric from this series so dashboards / alerts can consume it',
-    });
-  }
-  const block = renderNextActions(nextActions);
-  if (block) lines.push('', block);
-  return lines.join('\n');
+/**
+ * Three-sentence plain-prose distillation of a successful retriever_series
+ * run. No markdown syntax (no `#`, no `\n- `, no `|` table separators), no
+ * dollar figures. Mirrors the canonical buildHumanSummary pattern in
+ * src/tools/find-skew.ts:216.
+ */
+function buildSeriesHumanSummary(s: {
+  result: SeriesResult;
+  decision: FidelityDecision;
+  args: { from: string; to: string; bucket_size: string; group_by?: string; search?: string; pattern?: string };
+  wallTimeMs: number;
+  windowMs: number;
+  topGroups: Array<{ group: string; count: number }>;
+}): string {
+  const { result, decision, args, wallTimeMs, windowMs } = s;
+  const scope = args.pattern
+    ? `pattern ${args.pattern}`
+    : args.search
+      ? `search ${args.search}`
+      : 'open scan';
+  const first = `Retriever series for ${scope} over ${args.from} to ${args.to} (${formatDuration(windowMs)}) produced ${result.series.length} bucket points across ${result.groupCardinality} group${result.groupCardinality === 1 ? '' : 's'} in mode ${decision.mode} (wall ${wallTimeMs}ms).`;
+  const second = decision.mode === 'per_window_sampled'
+    ? `Sampled mode used ${decision.subWindows} sub-windows of up to ${decision.eventsPerSubWindow} events each; time-distribution shape is preserved but bucket counts are estimates.`
+    : `Full-aggregation mode returned exact counts over ${result.actualEvents} processed events${result.truncated ? ' (some workers truncated at the per-worker cap)' : ''}.`;
+  const top = s.topGroups[0];
+  const third = args.group_by && top
+    ? `Top ${args.group_by} value is ${top.group} with ${top.count} event${top.count === 1 ? '' : 's'}.`
+    : result.series.length === 0
+      ? 'Series is empty; verify the search expression matches and the window covers actual ingest.'
+      : `Worker files: ${result.workerFiles}.`;
+  return `${first} ${second} ${third}`;
 }
 
-function renderRefusal(
+/**
+ * Three-sentence plain-prose distillation of a refused retriever_series
+ * call. Mirrors buildSeriesHumanSummary but explains the budget refusal.
+ */
+function buildRefusalHumanSummary(
   refusal: RefusalDecision,
   args: { from: string; to: string; search?: string; pattern?: string },
-  windowMs: number
+  windowMs: number,
 ): string {
-  const lines: string[] = [];
-  lines.push(`## Retriever Series — Refused`);
-  lines.push('');
-  lines.push(`**Window**: ${args.from} → ${args.to} (${formatDuration(windowMs)})`);
-  if (args.pattern) {
-    lines.push(`**Pattern**: \`${args.pattern}\` (auto-translated to \`${args.search}\`)`);
-  } else if (args.search) {
-    lines.push(`**Search**: \`${args.search}\``);
-  }
-  lines.push('');
-  lines.push(`**Reason**: \`${refusal.reason}\``);
-  if (refusal.estimatedEvents !== undefined) {
-    lines.push(`**Estimated events**: ${fmtCount(refusal.estimatedEvents)}`);
-  }
-  if (refusal.estimatedBytes !== undefined) {
-    lines.push(`**Estimated fetch**: ${formatBytes(refusal.estimatedBytes)}`);
-  }
-  lines.push('');
-  lines.push(`**Recommendation**: ${refusal.recommendation}`);
-  return lines.join('\n');
-}
-
-function humanizeReason(r: string): string {
-  switch (r) {
-    case 'estimated_events_under_threshold':
-      return 'Reporter-estimated event count fits the full-aggregation budget.';
-    case 'estimated_events_exceeded_threshold':
-      return 'Reporter-estimated event count exceeds the full-aggregation budget — sampling per sub-window.';
-    case 'estimated_bytes_exceeded_threshold':
-      return 'Reporter-estimated fetch size exceeds the full-aggregation budget — sampling per sub-window.';
-    case 'window_length_short_fallback':
-      return 'No Reporter pattern signal; window short enough to attempt full aggregation.';
-    case 'window_length_long_fallback':
-      return 'No Reporter pattern signal; window long enough that sampling is the safer default.';
-    case 'pattern_volume_unknown_fallback':
-      return 'No Reporter pattern signal — fallback to window-length heuristic.';
-    case 'forced_full':
-      return 'User forced `fidelity: "full"`.';
-    case 'forced_per_window_sampled':
-      return 'User forced `fidelity: "per_window_sampled"`.';
-    default:
-      return r;
-  }
+  const scope = args.pattern
+    ? `pattern ${args.pattern}`
+    : args.search
+      ? `search ${args.search}`
+      : 'open scan';
+  const first = `Retriever series refused for ${scope} over ${args.from} to ${args.to} (${formatDuration(windowMs)}): ${refusal.reason}.`;
+  const second = refusal.estimatedEvents !== undefined
+    ? `Reporter-estimated event count for this window is ${fmtCount(refusal.estimatedEvents)}, which exceeds the Lambda budget.`
+    : `The estimator could not bound the window cost safely.`;
+  const third = `Recommendation: ${refusal.recommendation}`;
+  return `${first} ${second} ${third}`;
 }
 
 function formatDuration(ms: number): string {
@@ -808,14 +670,3 @@ function formatDuration(ms: number): string {
   return `${m.toFixed(1)}m`;
 }
 
-function formatBytes(n: number): string {
-  if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(1)} GB`;
-  if (n >= 1024 ** 2) return `${(n / 1024 ** 2).toFixed(1)} MB`;
-  if (n >= 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${Math.round(n)} B`;
-}
-
-function renderBar(ratio: number, width: number): string {
-  const filled = Math.max(0, Math.min(width, Math.round(ratio * width)));
-  return '█'.repeat(filled) + '░'.repeat(width - filled);
-}

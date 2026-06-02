@@ -29,7 +29,7 @@ import { agentOnly } from '../lib/agent-only.js';
 import { fmtBytes as formatBytes } from '../lib/format.js';
 import { discoverAvailable } from '../lib/siem/index.js';
 import { resolveBackend, formatDetectionTrace } from '../lib/customer-metrics.js';
-import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { tenxAvailabilityHint } from '../lib/install-hints.js';
 
 export type CheckStatus = 'pass' | 'warn' | 'fail';
@@ -57,20 +57,10 @@ export const doctorSchema = {
     .describe(
       'Optional environment nickname to probe. In multi-env setups, omit to run the checks against ALL configured environments; pass a specific nickname to check only that one.'
     ),
-  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.overall, data.checks_by_env, data.failing_checks, data.warning_checks). markdown wraps the rendered report in data.markdown.'),
 };
 
-export async function executeDoctor(args: { environment?: string; view?: 'summary' | 'markdown' }): Promise<string | StructuredOutput> {
-  const view = args.view ?? 'summary';
+export async function executeDoctor(args: { environment?: string }): Promise<string | StructuredOutput> {
   const report = await runDoctorChecks(args.environment);
-  const md = renderDoctorReport(report);
-  if (view === 'markdown') {
-    return buildMarkdownEnvelope({
-      tool: 'log10x_doctor',
-      summary: { headline: `Doctor: overall ${report.overall.toUpperCase()}` },
-      markdown: md,
-    });
-  }
   const allChecks = [
     ...report.globalChecks.map((c) => ({ env: 'global', ...c })),
     ...Object.entries(report.perEnvChecks).flatMap(([env, checks]) => checks.map((c) => ({ env, ...c }))),
@@ -81,6 +71,15 @@ export async function executeDoctor(args: { environment?: string; view?: 'summar
   const failing = allChecks.filter((c) => c.status === 'fail').map((c) => ({ env: c.env, name: c.name, message: c.message, fix: c.fix }));
   const warning = allChecks.filter((c) => c.status === 'warn').map((c) => ({ env: c.env, name: c.name, message: c.message, fix: c.fix }));
   const headline = `Doctor: overall ${report.overall.toUpperCase()} (${passCount} pass, ${warnCount} warn, ${failCount} fail).`;
+  const human_summary = buildDoctorHumanSummary({
+    overall: report.overall,
+    passCount,
+    warnCount,
+    failCount,
+    failing,
+    warning,
+    envCount: Object.keys(report.perEnvChecks).length,
+  });
   return buildEnvelope({
     tool: 'log10x_doctor',
     view: 'summary',
@@ -94,11 +93,34 @@ export async function executeDoctor(args: { environment?: string; view?: 'summar
       },
       failing_checks: failing,
       warning_checks: warning,
+      human_summary,
     },
     actions: report.overall === 'fail'
       ? [{ tool: 'log10x_login_status', args: {}, reason: 'verify credentials and env state if checks are failing on auth/connectivity' }]
       : [],
   });
+}
+
+function buildDoctorHumanSummary(args: {
+  overall: CheckStatus;
+  passCount: number;
+  warnCount: number;
+  failCount: number;
+  failing: Array<{ env: string; name: string }>;
+  warning: Array<{ env: string; name: string }>;
+  envCount: number;
+}): string {
+  const envWord = `${args.envCount} environment${args.envCount === 1 ? '' : 's'}`;
+  const lead = `Doctor overall: ${args.overall.toUpperCase()} across ${envWord} (${args.passCount} pass, ${args.warnCount} warn, ${args.failCount} fail).`;
+  const fails =
+    args.failing.length > 0
+      ? ` Failing: ${args.failing.slice(0, 3).map((f) => `${f.env}/${f.name}`).join(', ')}${args.failing.length > 3 ? `, +${args.failing.length - 3} more` : ''}.`
+      : '';
+  const warns =
+    args.warning.length > 0 && args.failing.length === 0
+      ? ` Warnings: ${args.warning.slice(0, 3).map((w) => `${w.env}/${w.name}`).join(', ')}${args.warning.length > 3 ? `, +${args.warning.length - 3} more` : ''}.`
+      : '';
+  return `${lead}${fails}${warns}`;
 }
 
 /** Runs the full check sequence and returns a structured report. */

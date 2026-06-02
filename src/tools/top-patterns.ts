@@ -17,15 +17,14 @@ import { LABELS, includeToSelector, type FilterValue } from '../lib/promql.js';
 import { bytesToCost, parsePrometheusValue } from '../lib/cost.js';
 import { resolveMetricsEnv, resolveMetricsEnvFiltered } from '../lib/resolve-env.js';
 import { parseTimeframe } from '../lib/format.js';
-import { renderNextActions, type NextAction } from '../lib/next-actions.js';
-import { agentOnly } from '../lib/agent-only.js';
+import { type NextAction } from '../lib/next-actions.js';
 import { fetchEventsByHashes } from '../lib/siem/sample.js';
 import { tenxHash } from '../lib/pattern-hash.js';
 import { fetchFirstSeenBatch } from '../lib/first-seen.js';
 import { fieldVariation } from '../lib/field-variation.js';
-import { renderTopPatterns, type TopPatternRow } from '../lib/top-patterns-render.js';
+import { type TopPatternRow } from '../lib/top-patterns-render.js';
 import { detectIncidents, type IncidentInput } from '../lib/detectors/incident-cluster.js';
-import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
 import type { ForwarderId } from '../lib/forwarder-snippets.js';
 import { resolveSiemSelection } from '../lib/siem/resolve.js';
@@ -56,10 +55,11 @@ export const topPatternsSchema = {
       'CTAs gated to where they earn their line, chart only on ACUTE/NEW patterns).'
     ),
   view: z
-    .enum(['summary', 'markdown'])
+    .literal('summary')
     .default('summary')
+    .optional()
     .describe(
-      'Output format. "summary" (default) returns a structured JSON envelope with patterns, incidents, totals, and chained-tool action hints. "markdown" returns the existing rendered cards for human-consumable deliverables.'
+      'Output format. Always "summary" — the structured JSON envelope with patterns, incidents, totals, and chained-tool action hints. Field retained for backward-compat with callers that still pass `view: "summary"`.'
     ),
   // PL-12a — three-way engine-decision cohort filter. Replaces the
   // earlier boolean `isDropped` swap (which could only express
@@ -100,7 +100,7 @@ export async function executeTopPatterns(
     effective_ingest_per_gb?: number;
     siemScope?: string;
     verbose?: boolean;
-    view?: 'summary' | 'markdown';
+    view?: 'summary';
     // PL-12a — three-way cohort filter. See schema comment above.
     include?: 'kept' | 'dropped' | 'both';
   },
@@ -476,72 +476,6 @@ export async function executeTopPatterns(
     eventsAvailable: eventsRes !== null && eventsRes.status === 'success',
   });
 
-  // --- Phase 4: Render ---
-  // Renderer signature (top-patterns-render.ts) still takes plain numbers; the
-  // step-12a follow-up gates dollar strings on `rateSource`. Until then, coerce
-  // nulls to 0 ONLY at this boundary so the existing snapshot path doesn't
-  // print `$null`. The honest nulls survive in the envelope below.
-  const rendered = renderTopPatterns(renderRows, {
-    windowLabel: tf.label,
-    totalBytesInScope: totalBytes,
-    totalCostPerHour: totalCostPerHour ?? 0,
-    totalCostMonthly: totalCostMonthly ?? 0,
-    patternCountShown: renderRows.length,
-    patternCountTotal,
-    forwarder,
-    analyzer,
-    hashField: LABELS.hash,
-    analyzerScope: args.siemScope,
-    healthBanner: banner,
-    verbose: args.verbose ?? false,
-    costByService: serviceRollup,
-    costPerGb: costPerGb ?? undefined,
-  });
-
-  // --- Phase 5: Agent-only routing block ---
-  const lines: string[] = [rendered, ''];
-  // PL-12a — include-aware framing line under the rendered cards.
-  // `kept` (default) emits nothing here, so the markdown is unchanged.
-  if (include === 'dropped') {
-    lines.push(
-      `_Scoped to events tagged \`isDropped="true"\` — the cohort the engine flagged for drop / down-tier. Pass \`include="kept"\` for the forwarded cohort, \`include="both"\` for the pre-decision union._`
-    );
-  } else if (include === 'both') {
-    // Compute the env-wide offload share inline here (the totals
-    // block below also computes it; this is the same denominator).
-    const offloadShare =
-      totalBytes > 0 && droppedTotalBytes != null
-        ? `${Math.round((droppedTotalBytes / totalBytes) * 100)}%`
-        : '0%';
-    lines.push(
-      `_Pre-decision union (kept ∪ dropped). ${offloadShare} of scanned bytes is currently flagged for offload (\`isDropped="true"\`). Per-pattern split in \`kept_bytes\` / \`dropped_bytes\` / \`dropped_share_pct\` below._`
-    );
-  }
-  lines.push(
-    `_Ranked by current cost, not by growth. To see what's rising or fading over time, ask for cost drivers over a longer window._`
-  );
-  lines.push(
-    agentOnly(
-      `Constraint: these rows are CURRENT RANK by cost over the window, not a growth/delta ranking. For growth use log10x_cost_drivers.`
-    )
-  );
-
-  // Cross-pillar join keys for agents
-  const hashMap = renderRows
-    .filter(r => r.hash)
-    .slice(0, 10)
-    .map(r => `${r.pattern} = ${r.hash}`)
-    .join('; ');
-  if (hashMap) {
-    lines.push('');
-    lines.push(
-      agentOnly(
-        `Cross-pillar join keys — ${LABELS.hash}: ${hashMap}. ` +
-        `Filter the SIEM / CloudWatch Logs on ${LABELS.hash}="<value>" — exact match.`
-      )
-    );
-  }
-
   // Next-action hints — pre-filled so a downstream agent with poor
   // context can EXECUTE the differentiated follow-ups instead of having
   // to compose the right call. Every arg is verified against the target
@@ -606,11 +540,6 @@ export async function executeTopPatterns(
     });
   }
 
-  const block = renderNextActions(nextActions);
-  if (block) lines.push('', block);
-
-  const markdown = lines.join('\n');
-  const view = args.view ?? 'summary';
   const telemetry = newTelemetry();
 
   // Build the structured-summary envelope from the same rows the
@@ -823,15 +752,6 @@ export async function executeTopPatterns(
           .map((c) => `${c.members.length} patterns in \`${c.service}\` share \`${c.representativeLabel.slice(0, 50)}\``)
           .join('; ')
       : undefined;
-
-  if (view === 'markdown') {
-    return buildMarkdownEnvelope({
-      tool: 'log10x_top_patterns',
-      summary: { headline, callout },
-      markdown,
-      actions: nextActions.map((a) => ({ tool: a.tool, args: a.args, reason: a.reason })),
-    });
-  }
 
   // Truncation signal: the engine query is capped at args.limit. If we got
   // a separate count of total patterns matching the filters, we can tell the

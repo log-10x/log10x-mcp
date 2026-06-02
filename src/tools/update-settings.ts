@@ -13,7 +13,7 @@ import { z } from 'zod';
 import type { Environments } from '../lib/environments.js';
 import { reloadEnvironmentsInPlace } from '../lib/environments.js';
 import { updateUserMetadata } from '../lib/api.js';
-import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
 export const updateSettingsSchema = {
   metadata: z
@@ -28,27 +28,33 @@ export const updateSettingsSchema = {
         'documented fields can be passed through. Existing fields not in the payload are ' +
         'preserved (PATCH-like semantics on the backend).'
     ),
-  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope. markdown wraps the message in data.markdown.'),
 };
 
+function buildUpdateSettingsHumanSummary(inner: UpdateSettingsInner): string {
+  if (!inner.ok) {
+    return `update_settings failed: ${inner.error ?? 'unknown reason'}.`;
+  }
+  const redactedFrag = inner.redacted_keys.length > 0 ? ` (${inner.redacted_keys.length} secret value${inner.redacted_keys.length === 1 ? '' : 's'} redacted in the response)` : '';
+  return `Updated ${inner.fields_updated} setting${inner.fields_updated === 1 ? '' : 's'} for ${inner.username ?? 'user'}${redactedFrag}; changes are live for subsequent tool calls in this session.`;
+}
+
 export async function executeUpdateSettings(
-  args: { metadata: Record<string, unknown>; view?: 'summary' | 'markdown' },
+  args: { metadata: Record<string, unknown> },
   envs: Environments
 ): Promise<string | StructuredOutput> {
-  const view = args.view ?? 'summary';
   const inner = await executeUpdateSettingsInner(args, envs);
-  if (view === 'markdown') {
-    return buildMarkdownEnvelope({
-      tool: 'log10x_update_settings',
-      summary: { headline: inner.ok ? `Updated ${inner.fields_updated} setting${inner.fields_updated !== 1 ? 's' : ''} for ${inner.username}.` : `Update settings refused: ${inner.error ?? 'unknown'}.` },
-      markdown: inner.markdown,
-    });
-  }
   return buildEnvelope({
     tool: 'log10x_update_settings',
     view: 'summary',
     summary: { headline: inner.ok ? `Updated ${inner.fields_updated} setting${inner.fields_updated !== 1 ? 's' : ''} for ${inner.username}.` : `Update settings refused: ${inner.error ?? 'unknown'}.` },
-    data: { ok: inner.ok, username: inner.username, fields_updated: inner.fields_updated, redacted_keys: inner.redacted_keys, error: inner.error },
+    data: {
+      ok: inner.ok,
+      username: inner.username,
+      fields_updated: inner.fields_updated,
+      redacted_keys: inner.redacted_keys,
+      error: inner.error,
+      human_summary: buildUpdateSettingsHumanSummary(inner),
+    },
   });
 }
 

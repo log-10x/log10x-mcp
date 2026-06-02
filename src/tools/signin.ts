@@ -41,7 +41,7 @@ import { tryOpenBrowser } from '../lib/open-browser.js';
 import { exchangeAuth0TokenForApiKey } from '../lib/auth-api.js';
 import { fetchUserProfile } from '../lib/api.js';
 import { log } from '../lib/log.js';
-import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
 /**
  * Default polling deadline for `_complete`. Auth0's device_code expiry
@@ -59,30 +59,27 @@ const MAX_WAIT_SECONDS = 900;
 
 // ── log10x_signin_start ──────────────────────────────────────────────
 
-export const signinStartSchema = {
-  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.user_code, data.verification_url, data.device_code). markdown wraps the message in data.markdown.'),
-};
+export const signinStartSchema = {};
 
 export interface SigninStartResult {
   markdown: string;
 }
 
-export async function executeSigninStart(args: { view?: 'summary' | 'markdown' } = {}): Promise<string | StructuredOutput> {
-  const view = args.view ?? 'summary';
+export async function executeSigninStart(_args: Record<string, never> = {}): Promise<string | StructuredOutput> {
   let device;
   try {
     device = await requestDeviceCode();
   } catch (e) {
     const msg = (e as Error).message;
-    const md = `## Sign-in failed to start\n\nCould not request a device code from Auth0: ${msg}`;
-    if (view === 'markdown') {
-      return buildMarkdownEnvelope({ tool: 'log10x_signin_start', summary: { headline: 'Sign-in failed to start' }, markdown: md });
-    }
     return buildEnvelope({
       tool: 'log10x_signin_start',
       view: 'summary',
       summary: { headline: `Sign-in failed to start: ${msg}` },
-      data: { ok: false, error: msg },
+      data: {
+        ok: false,
+        error: msg,
+        human_summary: `signin_start failed: could not request a device code from Auth0 (${msg}). Verify network access to ${LOG10X_AUTH0_DOMAIN}.`,
+      },
     });
   }
 
@@ -97,38 +94,7 @@ export async function executeSigninStart(args: { view?: 'summary' | 'markdown' }
     auth0_domain: LOG10X_AUTH0_DOMAIN,
   });
 
-  const lines: string[] = [];
-  lines.push('## Sign in to Log10x: confirm the code in your browser');
-  lines.push('');
-  lines.push(`**User code**: \`${device.user_code}\``);
-  lines.push('');
-  lines.push(`**Verification URL**: ${device.verification_uri_complete}`);
-  if (!opened) {
-    lines.push('');
-    lines.push('_(Auto-launch failed. Copy the URL above into your browser.)_');
-  }
-  lines.push('');
-  lines.push(
-    'Open the URL, verify the code on the Auth0 page matches the user code above, ' +
-      'pick **GitHub** or **Google** (or any other configured login), and click **Confirm**. ' +
-      `You have ${Math.min(device.expires_in, MAX_WAIT_SECONDS)} seconds before the code expires.`
-  );
-  lines.push('');
-  lines.push(
-    `Once the user confirms in the browser, call \`log10x_signin_complete\` with ` +
-      `\`{ device_code: "${device.device_code}" }\`. ` +
-      `The user does NOT need to ask for that step. The model should call ` +
-      `\`log10x_signin_complete\` automatically as the next action.`
-  );
-
-  const md = lines.join('\n');
-  if (view === 'markdown') {
-    return buildMarkdownEnvelope({
-      tool: 'log10x_signin_start',
-      summary: { headline: `Sign-in started — confirm code ${device.user_code} in browser` },
-      markdown: md,
-    });
-  }
+  const expiresIn = Math.min(device.expires_in, MAX_WAIT_SECONDS);
   return buildEnvelope({
     tool: 'log10x_signin_start',
     view: 'summary',
@@ -138,9 +104,10 @@ export async function executeSigninStart(args: { view?: 'summary' | 'markdown' }
       user_code: device.user_code,
       verification_url: device.verification_uri_complete,
       device_code: device.device_code,
-      expires_in_seconds: Math.min(device.expires_in, MAX_WAIT_SECONDS),
+      expires_in_seconds: expiresIn,
       browser_launched: opened,
       auth0_domain: LOG10X_AUTH0_DOMAIN,
+      human_summary: `Auth0 device flow started. Show user_code "${device.user_code}" to the user and have them confirm at ${device.verification_uri_complete} within ${expiresIn}s; browser auto-launch ${opened ? 'succeeded' : 'failed (user must paste URL)'}. Next step: call signin_complete with the device_code.`,
     },
     actions: [{ tool: 'log10x_signin_complete', args: { device_code: device.device_code }, reason: 'finish the device flow once the user confirms in their browser' }],
   });
@@ -172,25 +139,21 @@ export const signinCompleteSchema = {
     .describe(
       `Max seconds to poll for browser confirmation (only used when device_code is passed). Default ${DEFAULT_WAIT_SECONDS_COMPLETE}.`
     ),
-  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.ok, data.signed_in_as, data.credentials_path). markdown wraps the message in data.markdown.'),
 };
 
 export async function executeSigninComplete(
-  args: { device_code?: string; api_key?: string; wait_seconds?: number; view?: 'summary' | 'markdown' },
+  args: { device_code?: string; api_key?: string; wait_seconds?: number },
   envs: Environments
 ): Promise<string | StructuredOutput> {
-  const view = args.view ?? 'summary';
   const md = await executeSigninCompleteInner(args, envs);
   const okMatch = /^## Signed in to Log10x/m.test(md);
-  const usernameMatch = md.match(/signed in as \*\*(.+?)\*\*/);
-  const pathMatch = md.match(/saved to `(.+?)`/);
-  if (view === 'markdown') {
-    return buildMarkdownEnvelope({
-      tool: 'log10x_signin_complete',
-      summary: { headline: okMatch ? `Signed in${usernameMatch ? ` as ${usernameMatch[1]}` : ''}` : 'Sign-in did not complete (see body for details)' },
-      markdown: md,
-    });
-  }
+  const usernameMatch = md.match(/signed in as \*\*(.+?)\*\*/) || md.match(/Account\*\*: (.+?)\n/);
+  const pathMatch = md.match(/saved to `(.+?)`/) || md.match(/saved to ([^\s]+) successfully/);
+  const errorMessage = okMatch ? undefined : md.split('\n').find((l) => l.trim().length > 0 && !l.startsWith('#'));
+  const pathUsed = args.api_key ? 'pasted_api_key' : 'browser_device_flow';
+  const human_summary = okMatch
+    ? `Signed in${usernameMatch ? ` as ${usernameMatch[1]}` : ''} via ${pathUsed.replace(/_/g, ' ')}; credentials persisted to ${pathMatch?.[1] ?? '~/.log10x/credentials'}.`
+    : `signin_complete did not complete: ${errorMessage ?? 'unknown reason'}.`;
   return buildEnvelope({
     tool: 'log10x_signin_complete',
     view: 'summary',
@@ -199,8 +162,9 @@ export async function executeSigninComplete(
       ok: okMatch,
       signed_in_as: usernameMatch?.[1],
       credentials_path: pathMatch?.[1],
-      path_used: args.api_key ? 'pasted_api_key' : 'browser_device_flow',
-      error_message: okMatch ? undefined : md.split('\n').find((l) => l.trim().length > 0 && !l.startsWith('#')),
+      path_used: pathUsed,
+      error_message: errorMessage,
+      human_summary,
     },
     actions: okMatch ? [{ tool: 'log10x_login_status', args: {}, reason: 'verify env list and identity now that sign-in completed' }] : [],
   });

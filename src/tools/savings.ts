@@ -28,7 +28,7 @@ import * as pql from '../lib/promql.js';
 import { bytesToCost, parsePrometheusValue } from '../lib/cost.js';
 import { fmtDollar, fmtBytes, fmtPct, parseTimeframe, costPeriodLabel } from '../lib/format.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
-import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
 
 /** S3 Standard default, matching the ROI dashboard's storageCost default ($/GB/month). */
@@ -43,7 +43,7 @@ export const savingsSchema = {
   effective_ingest_per_gb: z.number().optional().describe('Customer-supplied SIEM ingestion cost in $/GB. When provided, rate_source=customer_supplied and dollars are populated. When omitted and no profile rate is available, rate_source=unset and the headline reports percent + bytes only (no dollars).'),
   storageCost: z.number().optional().describe('S3 storage cost in $/GB/month. Defaults to $0.023 (S3 Standard).'),
   environment: z.string().optional().describe('Environment nickname'),
-  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.totals, data.edge, data.retriever, data.run_rate). markdown wraps the rendered table in data.markdown.'),
+  view: z.literal('summary').default('summary').optional().describe('Output format. Always "summary" — the typed envelope (data.totals, data.edge, data.retriever, data.run_rate). Field retained for backward-compat.'),
 };
 
 interface SavingsSummary {
@@ -91,18 +91,22 @@ interface SavingsSummary {
 }
 
 export async function executeSavings(
-  args: { timeRange?: string; analyzerCost?: number; effective_ingest_per_gb?: number; storageCost?: number; view?: 'summary' | 'markdown' },
+  args: { timeRange?: string; analyzerCost?: number; effective_ingest_per_gb?: number; storageCost?: number; view?: 'summary' },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
-  const view = args.view ?? 'summary';
   const telemetry = newTelemetry();
   const sumOut: { data?: SavingsSummary } = {};
-  const md = await executeSavingsInner(args, env, sumOut);
-  if (view === 'markdown' || !sumOut.data) {
-    return buildMarkdownEnvelope({
+  await executeSavingsInner(args, env, sumOut);
+  if (!sumOut.data) {
+    // No structured data was assembled (the inner builder ran but data is
+    // unavailable — e.g. metrics backend returned empty). Emit a typed envelope
+    // with a human_summary explaining the missing-data state.
+    const headline = 'No realized-savings metrics available for this environment yet.';
+    return buildEnvelope({
       tool: 'log10x_savings',
-      summary: { headline: md.split('\n').find((l) => l.trim().length > 0)?.slice(0, 200) ?? 'savings result' },
-      markdown: md,
+      view: 'summary',
+      summary: { headline },
+      data: { ...buildUnifiedFields({ status: 'insufficient_data', telemetry, humanSummary: headline }) },
     });
   }
   const d = sumOut.data;

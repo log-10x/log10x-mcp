@@ -62,10 +62,9 @@ import {
 import type { SiemId } from '../lib/siem/pricing.js';
 import {
   buildEnvelope,
-  buildMarkdownEnvelope,
   type StructuredOutput,
 } from '../lib/output-types.js';
-import { fmtBytes, fmtDollar, fmtPct } from '../lib/format.js';
+import { fmtDollar, fmtPct } from '../lib/format.js';
 
 // ─── constants ──────────────────────────────────────────────────────────
 const BYTES_METRIC = 'all_events_summaryBytes_total';
@@ -194,12 +193,6 @@ export const estimateSavingsSchema = {
     .string()
     .optional()
     .describe('Environment nickname; routes to the right metrics backend.'),
-  view: z
-    .enum(['summary', 'markdown'])
-    .default('summary')
-    .describe(
-      'summary returns the typed envelope; markdown renders an inline report.'
-    ),
 };
 const schemaObj = z.object(estimateSavingsSchema);
 export type EstimateSavingsArgs = z.infer<typeof schemaObj>;
@@ -791,141 +784,16 @@ export async function runEstimateVerify(
 
 // ─── markdown rendering ────────────────────────────────────────────────
 
-function renderForecastMarkdown(r: ForecastResult): string {
-  const lines: string[] = [];
-  const dest = r.destination;
-  lines.push(
-    `# Forecast — ${dest}${r.service ? ` · service=${r.service}` : ''} · window=${r.observation_window}`
-  );
-  lines.push('');
-  if (r.target_percent !== undefined) {
-    lines.push(
-      `Target reduction: **${r.target_percent}%** (greedy solver, default_action=${r.per_pattern[0]?.action ?? 'compact'})`
-    );
-    lines.push('');
-  }
-  lines.push(
-    `Modeled: ${r.per_pattern.length} pattern${r.per_pattern.length !== 1 ? 's' : ''}, coverage ${fmtPct(r.coverage_pct)}.`
-  );
-  lines.push('');
-  lines.push('## Totals');
-  lines.push('');
-  lines.push(`- bytes-in/month: ${fmtBytes(r.totals.bytes_in_monthly)}`);
-  lines.push(`- bytes-saved/month: ${fmtBytes(r.totals.bytes_saved_monthly)}`);
-  lines.push(
-    `- $/month saved: low ${fmtDollar(r.totals.dollars_low_monthly)} · expected **${fmtDollar(r.totals.dollars_expected_monthly)}** · high ${fmtDollar(r.totals.dollars_high_monthly)}`
-  );
-  lines.push(
-    `- $/yr projected: ${fmtDollar(r.totals.annual_projection_expected)}`
-  );
-  lines.push('');
-  if (r.per_pattern.length > 0) {
-    lines.push('## Per-pattern (top 10)');
-    lines.push('');
-    lines.push('| pattern_hash | action | bytes/mo | saved/mo | $/mo (exp) |');
-    lines.push('|---|---|---:|---:|---:|');
-    const top = [...r.per_pattern]
-      .sort((a, b) => b.dollars_saved_expected - a.dollars_saved_expected)
-      .slice(0, 10);
-    for (const row of top) {
-      lines.push(
-        `| \`${row.pattern_hash.slice(0, 12)}\` | ${row.action} | ${fmtBytes(row.bytes_in_monthly)} | ${fmtBytes(row.bytes_saved_monthly)} | ${fmtDollar(row.dollars_saved_expected)} |`
-      );
-    }
-    lines.push('');
-  }
-  if (r.caveats.length > 0) {
-    lines.push('## Caveats');
-    lines.push('');
-    for (const c of r.caveats) lines.push(`- ${c}`);
-    lines.push('');
-  }
-  return lines.join('\n');
-}
-
-function renderVerifyMarkdown(r: VerifyResult): string {
-  const lines: string[] = [];
-  lines.push(
-    `# Verify — ${r.destination} · baseline=${r.baseline_window} · post=${r.post_window}`
-  );
-  lines.push('');
-  if (r.commitment_id) lines.push(`Commitment: \`${r.commitment_id}\``);
-  lines.push('');
-  lines.push(
-    `Delivered: **${(r.delivered_pct * 100).toFixed(1)}%** reduction (confidence ${(r.causal_confidence * 100).toFixed(0)}%).`
-  );
-  lines.push('');
-  lines.push('## Bytes');
-  lines.push('');
-  lines.push(
-    `- baseline (scaled to post window): ${fmtBytes(r.baseline_bytes_scaled)}`
-  );
-  lines.push(`- post passed: ${fmtBytes(r.post_passed_bytes)}`);
-  lines.push(`- post dropped (cap_fired): ${fmtBytes(r.post_dropped_bytes)}`);
-  lines.push('');
-  lines.push('## Attribution');
-  lines.push('');
-  lines.push(
-    `- cap_fired: ${fmtBytes(r.attribution.cap_fired_bytes)} (${(r.attribution_pct.cap_fired_bytes * 100).toFixed(0)}%)`
-  );
-  lines.push(
-    `- drift: ${fmtBytes(r.attribution.drift_bytes)} (${(r.attribution_pct.drift_bytes * 100).toFixed(0)}%)`
-  );
-  lines.push(
-    `- new_patterns: ${fmtBytes(r.attribution.new_patterns_bytes)} (${(r.attribution_pct.new_patterns_bytes * 100).toFixed(0)}%)`
-  );
-  lines.push(
-    `- leakage: ${fmtBytes(r.attribution.leakage_bytes)} (${(r.attribution_pct.leakage_bytes * 100).toFixed(0)}%)`
-  );
-  lines.push('');
-  lines.push('## Dollars');
-  lines.push('');
-  lines.push(
-    `- delivered $ (post window): ${fmtDollar(r.delivered_dollars_now)}`
-  );
-  lines.push(
-    `- annualized projection: ${fmtDollar(r.delivered_dollars_annual_projection)}`
-  );
-  if (r.delivered_dollars_at_renewal !== undefined) {
-    lines.push(
-      `- at-renewal projection (committed): ${fmtDollar(r.delivered_dollars_at_renewal)}`
-    );
-  }
-  lines.push('');
-  if (r.caveats.length > 0) {
-    lines.push('## Caveats');
-    lines.push('');
-    for (const c of r.caveats) lines.push(`- ${c}`);
-    lines.push('');
-  }
-  return lines.join('\n');
-}
-
 // ─── main entry ────────────────────────────────────────────────────────
 
 export async function executeEstimateSavings(
   args: EstimateSavingsArgs,
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
-  const view = args.view ?? 'summary';
   const mode = args.mode ?? 'forecast';
 
   // Destination is required in both modes.
   if (!args.destination) {
-    const md = [
-      '# estimate_savings: destination required',
-      '',
-      'Pass `destination` (splunk / datadog / elasticsearch / clickhouse / cloudwatch / azure-monitor / gcp-logging / sumo). The destination determines the ingest $/GB and the compact-ratio band.',
-      '',
-      'Optional but recommended: set `es_pruned: true` when destination=elasticsearch and compactable fields are excluded from `_source` (better savings band).',
-    ].join('\n');
-    if (view === 'markdown') {
-      return buildMarkdownEnvelope({
-        tool: 'log10x_estimate_savings',
-        summary: { headline: 'destination required' },
-        markdown: md,
-      });
-    }
     return buildEnvelope({
       tool: 'log10x_estimate_savings',
       view: 'summary',
@@ -936,6 +804,8 @@ export async function executeEstimateSavings(
         ok: false,
         phase: 'target_resolution',
         error: 'destination is required',
+        human_summary:
+          'estimate_savings refused: destination is required. Pass one of splunk, datadog, elasticsearch, clickhouse, cloudwatch, azure-monitor, gcp-logging, sumo.',
       },
     });
   }
@@ -943,18 +813,6 @@ export async function executeEstimateSavings(
   try {
     if (mode === 'forecast') {
       if (!args.proposed_config && args.target_percent === undefined) {
-        const md = [
-          '# estimate_savings forecast: input required',
-          '',
-          'Pass either `proposed_config` (explicit per-pattern rows) or `target_percent` (the greedy solver picks rows).',
-        ].join('\n');
-        if (view === 'markdown') {
-          return buildMarkdownEnvelope({
-            tool: 'log10x_estimate_savings',
-            summary: { headline: 'forecast input required' },
-            markdown: md,
-          });
-        }
         return buildEnvelope({
           tool: 'log10x_estimate_savings',
           view: 'summary',
@@ -966,6 +824,8 @@ export async function executeEstimateSavings(
             ok: false,
             phase: 'target_resolution',
             error: 'proposed_config or target_percent required',
+            human_summary:
+              'estimate_savings forecast needs either proposed_config (explicit per-pattern rows) or target_percent (greedy solver picks rows).',
           },
         });
       }
@@ -986,20 +846,13 @@ export async function executeEstimateSavings(
         },
         env
       );
-      const md = renderForecastMarkdown(result);
       const headline = `Forecast (${args.destination}): ${fmtDollar(result.totals.dollars_expected_monthly)}/mo expected savings on ${result.per_pattern.length} pattern${result.per_pattern.length !== 1 ? 's' : ''} (coverage ${fmtPct(result.coverage_pct)}).`;
-      if (view === 'markdown') {
-        return buildMarkdownEnvelope({
-          tool: 'log10x_estimate_savings',
-          summary: { headline },
-          markdown: md,
-        });
-      }
+      const human_summary = buildForecastHumanSummary(result, args.destination);
       return buildEnvelope({
         tool: 'log10x_estimate_savings',
         view: 'summary',
         summary: { headline },
-        data: { ok: true, ...result },
+        data: { ok: true, ...result, human_summary },
         warnings: result.caveats,
         actions: [
           {
@@ -1019,18 +872,6 @@ export async function executeEstimateSavings(
 
     // verify
     if (!args.baseline_window || !args.post_window) {
-      const md = [
-        '# estimate_savings verify: windows required',
-        '',
-        'Pass `baseline_window` (pre-merge) and `post_window` (post-merge), e.g. `baseline_window: "7d"`, `post_window: "7d"`.',
-      ].join('\n');
-      if (view === 'markdown') {
-        return buildMarkdownEnvelope({
-          tool: 'log10x_estimate_savings',
-          summary: { headline: 'verify windows required' },
-          markdown: md,
-        });
-      }
       return buildEnvelope({
         tool: 'log10x_estimate_savings',
         view: 'summary',
@@ -1042,6 +883,8 @@ export async function executeEstimateSavings(
           ok: false,
           phase: 'target_resolution',
           error: 'baseline_window and post_window required',
+          human_summary:
+            'estimate_savings verify needs baseline_window (pre-merge) and post_window (post-merge), for example baseline_window="7d" and post_window="7d".',
         },
       });
     }
@@ -1058,37 +901,47 @@ export async function executeEstimateSavings(
       },
       env
     );
-    const md = renderVerifyMarkdown(result);
     const headline = `Verify (${args.destination}): ${(result.delivered_pct * 100).toFixed(1)}% delivered reduction (${fmtDollar(result.delivered_dollars_annual_projection)}/yr projected, confidence ${(result.causal_confidence * 100).toFixed(0)}%).`;
-    if (view === 'markdown') {
-      return buildMarkdownEnvelope({
-        tool: 'log10x_estimate_savings',
-        summary: { headline },
-        markdown: md,
-      });
-    }
+    const human_summary = buildVerifyHumanSummary(result, args.destination);
     return buildEnvelope({
       tool: 'log10x_estimate_savings',
       view: 'summary',
       summary: { headline },
-      data: { ok: true, ...result },
+      data: { ok: true, ...result, human_summary },
       warnings: result.caveats,
     });
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
-    const md = ['# estimate_savings: error', '', msg].join('\n');
-    if (view === 'markdown') {
-      return buildMarkdownEnvelope({
-        tool: 'log10x_estimate_savings',
-        summary: { headline: 'estimate_savings failed' },
-        markdown: md,
-      });
-    }
     return buildEnvelope({
       tool: 'log10x_estimate_savings',
       view: 'summary',
       summary: { headline: 'estimate_savings failed.' },
-      data: { ok: false, phase: 'backend', error: msg },
+      data: {
+        ok: false,
+        phase: 'backend',
+        error: msg,
+        human_summary: `estimate_savings failed: ${msg}`,
+      },
     });
   }
+}
+
+// ─── human_summary builders ────────────────────────────────────────────
+function buildForecastHumanSummary(
+  result: ForecastResult,
+  destination: string
+): string {
+  const patternWord = `${result.per_pattern.length} pattern${result.per_pattern.length === 1 ? '' : 's'}`;
+  const coverage = `${fmtPct(result.coverage_pct)} coverage`;
+  // ForecastResult does not yet carry rate_source (see TODO at top of file);
+  // dollars are list-price until full propagation lands.
+  return `estimate_savings forecast on ${destination} projects ${fmtDollar(result.totals.dollars_expected_monthly)}/mo expected savings (range ${fmtDollar(result.totals.dollars_low_monthly)}–${fmtDollar(result.totals.dollars_high_monthly)}) across ${patternWord} at ${coverage}, using the engine list price.${result.caveats.length ? ` Caveats: ${result.caveats.length}.` : ''}`;
+}
+
+function buildVerifyHumanSummary(
+  result: VerifyResult,
+  destination: string
+): string {
+  const lead = `estimate_savings verify on ${destination} measured ${(result.delivered_pct * 100).toFixed(1)}% delivered reduction at causal confidence ${(result.causal_confidence * 100).toFixed(0)}%.`;
+  return `${lead} Annual projection ${fmtDollar(result.delivered_dollars_annual_projection)} using the engine list price.${result.caveats.length ? ` Caveats: ${result.caveats.length}.` : ''}`;
 }

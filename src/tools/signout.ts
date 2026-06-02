@@ -32,21 +32,18 @@ import { z } from 'zod';
 import type { Environments } from '../lib/environments.js';
 import { reloadEnvironmentsInPlace, clearOverridingEnvVar } from '../lib/environments.js';
 import { clearCredentials, getCredentialsPath } from '../lib/credentials.js';
-import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
-export const signoutSchema = {
-  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope. markdown wraps the message in data.markdown.'),
-};
+export const signoutSchema = {};
 
 export async function executeSignout(
-  args: { view?: 'summary' | 'markdown' } | Record<string, never>,
+  _args: Record<string, never>,
   envs: Environments
 ): Promise<string | StructuredOutput> {
-  const view = ('view' in args ? args.view : undefined) ?? 'summary';
-  return signoutImpl(view, envs);
+  return signoutImpl(envs);
 }
 
-async function signoutImpl(view: 'summary' | 'markdown', envs: Environments): Promise<StructuredOutput> {
+async function signoutImpl(envs: Environments): Promise<StructuredOutput> {
   const path = getCredentialsPath();
   const wasPresent = await clearCredentials();
 
@@ -116,14 +113,18 @@ async function signoutImpl(view: 'summary' | 'markdown', envs: Environments): Pr
       `key still exist on log10x.com — visit https://console.log10x.com → Profile ` +
       `→ API Settings to rotate or revoke.`
   );
-  const md = lines.join('\n');
-  if (view === 'markdown') {
-    return buildMarkdownEnvelope({
-      tool: 'log10x_signout',
-      summary: { headline: wasPresent || envVarWasSet ? 'Signed out of Log10x on this machine.' : 'Already signed out — no active credential.' },
-      markdown: md,
-    });
-  }
+  void lines;
+  const human_summary = (() => {
+    if (!wasPresent && !envVarWasSet) {
+      return 'Already signed out — no active credential of either kind on this machine.';
+    }
+    const fileFrag = wasPresent ? `credentials file at ${path} removed` : 'credentials file already absent';
+    const envFrag = envVarWasSet ? 'LOG10X_API_KEY cleared from this session' : 'no env-var override was set';
+    const demoFrag = envs.isDemoMode ? '; the MCP is now in demo mode' : '';
+    const reloadFrag = reloadErr ? ` (env reload failed: ${reloadErr})` : '';
+    const stickFrag = envVarWasSet ? ' To persist across host restarts, also remove LOG10X_API_KEY from the MCP host config.' : '';
+    return `Signed out of Log10x on this machine: ${fileFrag}, ${envFrag}${demoFrag}${reloadFrag}.${stickFrag}`;
+  })();
   return buildEnvelope({
     tool: 'log10x_signout',
     view: 'summary',
@@ -139,6 +140,7 @@ async function signoutImpl(view: 'summary' | 'markdown', envs: Environments): Pr
       now_in_demo_mode: envs.isDemoMode,
       reload_error: reloadErr,
       host_config_edit_needed: envVarWasSet,
+      human_summary,
     },
     actions: envs.isDemoMode ? [{ tool: 'log10x_signin_start', args: {}, reason: 'sign back in via Auth0 device flow' }] : [],
   });

@@ -42,7 +42,7 @@ import type { Environments } from '../lib/environments.js';
 import { reloadEnvironmentsInPlace, clearOverridingEnvVar } from '../lib/environments.js';
 import { writeCredentials, getCredentialsPath } from '../lib/credentials.js';
 import { rotateApiKey } from '../lib/api.js';
-import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
 export const rotateApiKeySchema = {
   confirm: z
@@ -50,22 +50,23 @@ export const rotateApiKeySchema = {
     .describe(
       'Pass the literal string `rotate-now` to confirm rotation. This is a typo-prevention guard. Rotation invalidates the previous key immediately on every machine and tool that uses it — only proceed when the user has explicitly asked for rotation, not as a chained side effect of another flow. **Always ask the user to confirm before calling this tool.**'
     ),
-  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.ok, data.new_api_key, data.credentials_path). markdown wraps the message in data.markdown.'),
 };
 
+function buildRotateHumanSummary(result: RotateResult): string {
+  if (!result.ok) {
+    return `rotate_api_key refused: ${result.error ?? 'unknown reason'}.`;
+  }
+  const userFrag = result.username ?? 'user';
+  const pathFrag = result.credentials_path ? `; new key persisted to ${result.credentials_path}` : '';
+  const stickFrag = result.host_config_edit_needed ? ' Also update LOG10X_API_KEY in the MCP host config so the rotation survives host restarts.' : '';
+  return `API key rotated for ${userFrag}; the previous key is invalidated immediately on every machine and tool that uses it${pathFrag}.${stickFrag}`;
+}
+
 export async function executeRotateApiKey(
-  args: { confirm: 'rotate-now'; view?: 'summary' | 'markdown' },
+  args: { confirm: 'rotate-now' },
   envs: Environments
 ): Promise<string | StructuredOutput> {
-  const view = args.view ?? 'summary';
   const result = await executeRotateApiKeyInner(args, envs);
-  if (view === 'markdown') {
-    return buildMarkdownEnvelope({
-      tool: 'log10x_rotate_api_key',
-      summary: { headline: result.ok ? `API key rotated for ${result.username ?? 'user'}.` : `Rotation refused: ${result.error ?? 'unknown reason'}.` },
-      markdown: result.markdown,
-    });
-  }
   return buildEnvelope({
     tool: 'log10x_rotate_api_key',
     view: 'summary',
@@ -78,6 +79,7 @@ export async function executeRotateApiKey(
       env_var_cleared: result.env_var_cleared,
       host_config_edit_needed: result.host_config_edit_needed,
       error: result.error,
+      human_summary: buildRotateHumanSummary(result),
     },
     warnings: result.ok ? ['rotation invalidates the previous key on every machine; update other MCP hosts, scripts, and CI secrets'] : [],
   });
