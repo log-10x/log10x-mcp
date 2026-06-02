@@ -102,6 +102,7 @@ import { updateEnvSchema, executeUpdateEnv } from './tools/update-env.js';
 import { deleteEnvSchema, executeDeleteEnv } from './tools/delete-env.js';
 import { rotateApiKeySchema, executeRotateApiKey } from './tools/rotate-api-key.js';
 import { servicesSchema, executeServices } from './tools/services.js';
+import { fetchCapCsvForEnv } from './lib/cap-csv-fetch.js';
 import { findSkewSchema, executeFindSkew } from './tools/find-skew.js';
 // find_constant_slots, find_uuid_in_body, find_incident_cluster removed
 // pre-launch (2026-05-28): produced findings the agent could not act on
