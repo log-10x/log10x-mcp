@@ -82,6 +82,21 @@ export const pocFromLocalSchema = {
         'Their bytes are subtracted from the achievable reduction pool used for the feasibility verdict. ' +
         'Matched case-insensitively against the pod / source name.'
     ),
+  pin_services: z
+    .record(z.string(), z.enum(['pass','sample','compact','tier_down','offload','drop']))
+    .optional()
+    .describe(
+      'Primary per-pod/source override surface. Map of pod / source name to action. Pins are applied AFTER ' +
+        'the destination default and AFTER exception_services. Feasibility reruns with the pins; ' +
+        'max_achievable shifts and reason cites the pins.'
+    ),
+  pin_patterns: z
+    .record(z.string(), z.enum(['pass','sample','compact','tier_down','offload','drop']))
+    .optional()
+    .describe(
+      'Advanced — most customers will not need this. Map of pattern_hash to action for rare per-pattern ' +
+        'overrides within a pod / source. Applied AFTER pin_services.'
+    ),
 };
 
 export interface PocFromLocalArgs {
@@ -94,6 +109,8 @@ export interface PocFromLocalArgs {
   ai_prettify?: boolean;
   target_percent_reduction?: number;
   exception_services?: string[];
+  pin_services?: Record<string, 'pass'|'sample'|'compact'|'tier_down'|'offload'|'drop'>;
+  pin_patterns?: Record<string, 'pass'|'sample'|'compact'|'tier_down'|'offload'|'drop'>;
 }
 
 /**
@@ -397,12 +414,20 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
   if (args.target_percent_reduction !== undefined) {
     const exceptions = args.exception_services ?? [];
     const exceptionSet = new Set(exceptions.map((s) => s.toLowerCase()));
+    const pinServices = args.pin_services ?? {};
+    const pinPatterns = args.pin_patterns ?? {};
+    const pinServicesLower = new Map<string, string>();
+    for (const [k, v] of Object.entries(pinServices)) pinServicesLower.set(k.toLowerCase(), v);
     // Pods that match the exception list contribute their bytes back to
     // the "must-keep" pool. Composition is keyed by pod / source name
     // and is the only service-grain signal available without a SIEM.
+    // pin_services with action='pass' subtracts the same way; other pin
+    // actions are still counted as reducible (pin only protects 'pass').
     let exceptionBytes = 0;
     for (const c of sample.composition) {
-      if (exceptionSet.has(c.source.toLowerCase())) exceptionBytes += c.bytes;
+      const src = c.source.toLowerCase();
+      if (exceptionSet.has(src)) { exceptionBytes += c.bytes; continue; }
+      if (pinServicesLower.get(src) === 'pass') { exceptionBytes += c.bytes; }
     }
     const exceptionShare = sample.totalBytes > 0 ? exceptionBytes / sample.totalBytes : 0;
     const maxAchievable = Math.max(0, expectedPct - exceptionShare * 100);
@@ -415,6 +440,12 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
       reasonParts.push(
         `${exceptions.length} exception pod(s) cover ${fmtPct(exceptionShare * 100)} of bytes and are pinned to pass.`,
       );
+    }
+    if (Object.keys(pinPatterns).length > 0) {
+      reasonParts.push(`${Object.keys(pinPatterns).length} pattern pin(s) applied.`);
+    }
+    if (pinServicesLower.size > 0) {
+      reasonParts.push(`${pinServicesLower.size} service pin(s) applied; max_achievable shifted accordingly.`);
     }
     reasonParts.push(
       feasible

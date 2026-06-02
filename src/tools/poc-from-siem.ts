@@ -214,6 +214,22 @@ export const pocFromSiemSubmitSchema = {
         'are pinned to pass on the envelope outputs and their bytes are subtracted from the achievable ' +
         'reduction pool used for the feasibility verdict.'
     ),
+  pin_services: z
+    .record(z.string(), z.enum(['pass','sample','compact','tier_down','offload','drop']))
+    .optional()
+    .describe(
+      'Primary per-service override surface. Map of service name to action. "Pin payment-svc to pass" → ' +
+        '{"payment-svc":"pass"}. Pins are applied AFTER the destination default and AFTER exception_services. ' +
+        'Feasibility math reruns with the pins; max_achievable_percent may shift and reason cites the pins.'
+    ),
+  pin_patterns: z
+    .record(z.string(), z.enum(['pass','sample','compact','tier_down','offload','drop']))
+    .optional()
+    .describe(
+      'Advanced — most customers will not need this. Map of pattern_hash to action for rare per-pattern ' +
+        'overrides within a service. Applied AFTER pin_services. Use only when a single pattern inside an ' +
+        'otherwise-reducible service must be excepted (e.g., audit-trail log line inside a chatty service).'
+    ),
   // ClickHouse-specific
   clickhouse_table: z.string().optional().describe('[ClickHouse] Required — table name holding log events.'),
   clickhouse_timestamp_column: z.string().optional().describe('[ClickHouse] Column holding the timestamp. Default auto-detected.'),
@@ -309,6 +325,15 @@ interface Snapshot {
    * lifecycle as targetPercentReduction.
    */
   exceptionServices?: string[];
+  /**
+   * Per-service action overrides (pin_services). Carried from submit
+   * through to the v2 envelope builder.
+   */
+  pinServices?: Record<string, 'pass'|'sample'|'compact'|'tier_down'|'offload'|'drop'>;
+  /**
+   * Per-pattern action overrides (pin_patterns).
+   */
+  pinPatterns?: Record<string, 'pass'|'sample'|'compact'|'tier_down'|'offload'|'drop'>;
 }
 
 const SNAPSHOTS = new Map<string, Snapshot>();
@@ -351,6 +376,10 @@ export interface PocSubmitArgs {
   target_percent_reduction?: number;
   /** Services pinned to action=pass on the envelope outputs. */
   exception_services?: string[];
+  /** Service-level action overrides (map of service → action). */
+  pin_services?: Record<string, 'pass'|'sample'|'compact'|'tier_down'|'offload'|'drop'>;
+  /** Per-pattern action overrides (map of pattern_hash → action). */
+  pin_patterns?: Record<string, 'pass'|'sample'|'compact'|'tier_down'|'offload'|'drop'>;
   clickhouse_table?: string;
   clickhouse_timestamp_column?: string;
   clickhouse_message_column?: string;
@@ -446,6 +475,8 @@ async function executePocSubmitInner(args: PocSubmitArgs): Promise<string> {
     startedAtMs: Date.now(),
     targetPercentReduction: args.target_percent_reduction,
     exceptionServices: args.exception_services,
+    pinServices: args.pin_services,
+    pinPatterns: args.pin_patterns,
   };
   retain(snapshot);
 
@@ -589,6 +620,8 @@ export async function executePocStatus(args: PocStatusArgs): Promise<import('../
         {
           targetPercentReduction: s.targetPercentReduction,
           exceptionServices: s.exceptionServices,
+          pinServices: s.pinServices,
+          pinPatterns: s.pinPatterns,
         },
       );
       // Attach pre-computed host-agent enrichment from the snapshot,
@@ -1048,6 +1081,8 @@ export async function runPipeline(
         {
           targetPercentReduction: args.target_percent_reduction,
           exceptionServices: args.exception_services,
+          pinServices: args.pin_services,
+          pinPatterns: args.pin_patterns,
         },
       );
       const enrichment = await enrichWithHostAgent(previewEnvelope, {

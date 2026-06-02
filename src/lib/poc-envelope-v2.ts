@@ -21,6 +21,22 @@ import type { ExtractedPattern } from './pattern-extraction.js';
 import type { SiemId } from './siem/pricing.js';
 import { dollars, ratio, bps, days as roundDays, countRatio } from './poc-round.js';
 import { getAllowedActionsForDestination, getDefaultActionForDestination, type Action as CostAction } from './cost.js';
+import { fmtBytes as formatBytes } from './format.js';
+
+/**
+ * Categories the POC did NOT verify. Forced into every feasibility
+ * verdict so the commitment artifact can't elide the disclaimer. The
+ * four highest-risk omissions: alert wiring, regulatory tagging,
+ * runbook references, and team criticality classification.
+ */
+const NOT_CHECKED_DEFAULT: readonly string[] = [
+  'alert_dependencies',
+  'regulatory_classification',
+  'oncall_runbook_references',
+  'customer_service_criticality',
+];
+const NOT_CHECKED_STATEMENT =
+  'This plan was NOT checked against: your alert dependencies, your regulatory tagging, your on-call runbook references, your team\'s classification of which services are critical. The exception list you provided is the only criticality input.';
 
 // ── Output shape ──
 
@@ -98,6 +114,17 @@ export interface PocOutput {
     redundancy_pairs: RedundancyPairOutput[];
   };
   incidents: IncidentOutput[];
+  /**
+   * Primary decision surface. One row per service with the consequence
+   * the customer is being asked to commit to: the action, where the bytes
+   * land in plain English, whether they're recoverable, the tool to
+   * recover them, the pattern count rolled up under this service, and
+   * whether the exception list pinned this row to pass.
+   *
+   * The renderer reads this — NOT patterns[] — to build the commitment
+   * artifact body. Patterns surface only in the appendix.
+   */
+  per_service_consequences: PerServiceConsequence[];
   patterns: PatternOutput[];
   /**
    * Feasibility verdict. Populated when the caller passed a
@@ -154,6 +181,26 @@ export interface FeasibilityVerdict {
   exception_services: string[];
   /** Monthly cost (USD) covered by the exception list. */
   exception_monthly_cost_usd: number;
+  /**
+   * Categories the POC did NOT verify. The agent must surface this
+   * verbatim in the commitment artifact so it can't hallucinate that
+   * "the tool checked everything." Default set below covers the four
+   * highest-risk omissions.
+   */
+  not_checked: string[];
+  /** Plain-English version of not_checked, ready to paste into the artifact. */
+  not_checked_statement: string;
+}
+
+export interface PerServiceConsequence {
+  service: string;
+  action: CostAction;
+  total_bytes_per_month: number;
+  destination_description: string;
+  recoverable: boolean;
+  recover_via: string | null;
+  pattern_count: number;
+  exception_applied: boolean;
 }
 
 export interface CommitmentArtifact {
@@ -282,6 +329,19 @@ export interface PatternActions {
    * the per-pattern view for agents inspecting individual rows.
    */
   cap_bytes_per_window: number;
+  /**
+   * Plain-English consequence of this pattern's recommended action.
+   * Mirrors per_service_consequences[].destination_description but at
+   * pattern grain. Renderer hides this from the commitment artifact
+   * body — it surfaces only in the "by pattern" appendix and feeds the
+   * savings report + overflow contents view + audit trail.
+   */
+  consequence: {
+    destination_description: string;
+    recoverable: boolean;
+    recover_via: string | null;
+    bytes_per_month: number;
+  };
 }
 
 // ── Build helpers ──
@@ -311,6 +371,16 @@ export function buildPocEnvelopeV2(
      * bytes are subtracted from the achievable pool.
      */
     exceptionServices?: string[];
+    /**
+     * Service-level action overrides. Applied AFTER destination default
+     * and AFTER exception_services. Map of service name → action.
+     */
+    pinServices?: Record<string, CostAction>;
+    /**
+     * Per-pattern action overrides (advanced). Applied AFTER pinServices.
+     * Map of pattern_hash → action.
+     */
+    pinPatterns?: Record<string, CostAction>;
   },
 ): PocEnvelopeV2 {
   const siem = input.siem as SiemId;
@@ -404,6 +474,8 @@ export function buildPocEnvelopeV2(
     for (const p of patternOutputs) {
       const svc = (p.service ?? '').toLowerCase();
       if (!svc || !exceptionSet.has(svc)) continue;
+      const passDesc = describeDestination(siem, 'pass');
+      const passMonthly = p.metrics.bytes_in_window * (24 * 30) / Math.max(0.001, windowDurationSeconds / 3600);
       p.actions = {
         recommended_action: 'pass',
         reason: 'service_pinned_by_exception_list',
@@ -414,9 +486,59 @@ export function buildPocEnvelopeV2(
         // divided across 4-minute windows so the rate receiver never
         // throttles it.
         cap_bytes_per_window: p.actions.cap_bytes_per_window,
+        consequence: {
+          destination_description: passDesc.text,
+          recoverable: passDesc.recoverable,
+          recover_via: passDesc.recoverVia,
+          bytes_per_month: Math.round(passMonthly),
+        },
       };
     }
   }
+
+  // ── pin_services / pin_patterns overrides ──
+  // Precedence: pin_patterns > pin_services > exception_services > default.
+  const pinServices = opts?.pinServices ?? {};
+  const pinPatterns = opts?.pinPatterns ?? {};
+  const pinServicesLower = new Map<string, CostAction>();
+  for (const [k, v] of Object.entries(pinServices)) pinServicesLower.set(k.toLowerCase(), v);
+  for (const p of patternOutputs) {
+    const hash = p.fingerprint_hash;
+    const svc = (p.service ?? '').toLowerCase();
+    let pinned: CostAction | undefined;
+    let pinReason: string | undefined;
+    if (hash && pinPatterns[hash]) {
+      pinned = pinPatterns[hash];
+      pinReason = 'pinned_by_pin_patterns';
+    } else if (svc && pinServicesLower.has(svc)) {
+      pinned = pinServicesLower.get(svc);
+      pinReason = 'pinned_by_pin_services';
+    }
+    if (!pinned || !pinReason) continue;
+    const monthlyBytes = p.metrics.bytes_in_window * (24 * 30) / Math.max(0.001, windowDurationSeconds / 3600);
+    const desc = describeDestination(siem, pinned);
+    const expectedSavings = monthlyBytes / 1024 ** 3 * input.analyzerCostPerGb * reductionCoefficient(pinned);
+    p.actions = {
+      recommended_action: pinned,
+      reason: pinReason,
+      expected_savings_usd_per_month: dollars(expectedSavings),
+      sample_n: pinned === 'sample' ? 10 : null,
+      cap_bytes_per_window: Math.round(capBytesPerWindow(pinned, monthlyBytes, 10)),
+      consequence: {
+        destination_description: desc.text,
+        recoverable: desc.recoverable,
+        recover_via: desc.recoverVia,
+        bytes_per_month: Math.round(monthlyBytes),
+      },
+    };
+  }
+
+  // ── Per-service consequence rollup ──
+  // Computed off the post-pin patternOutputs so it reflects the actual
+  // committed action surface, not the destination defaults.
+  const perServiceConsequences = buildPerServiceConsequences(
+    patternOutputs, siem, exceptionSet, windowDurationSeconds,
+  );
 
   // ── Feasibility verdict + commitment artifact stub ──
   // Both are emitted only when the caller passed target_percent_reduction.
@@ -436,11 +558,14 @@ export function buildPocEnvelopeV2(
       windowDurationSeconds,
       exceptionSet,
       opts.exceptionServices ?? [],
+      pinServicesLower,
+      pinPatterns,
     );
     commitmentArtifact = buildCommitmentArtifact(
       feasibility,
       input,
       monthlyCostUsd,
+      perServiceConsequences,
     );
     // cap_csv is composed from the per-pattern actions the renderer
     // emitted above. configure_engine(from_poc_id=…) reads this field
@@ -491,6 +616,7 @@ export function buildPocEnvelopeV2(
     output: {
       aggregates,
       incidents: incidentOutputs,
+      per_service_consequences: perServiceConsequences,
       patterns: patternOutputs,
       ...(feasibility ? { feasibility } : {}),
       ...(commitmentArtifact ? { commitment_artifact: commitmentArtifact } : {}),
@@ -522,6 +648,8 @@ function computeFeasibility(
   windowDurationSeconds: number,
   exceptionSet: Set<string>,
   exceptionServices: string[],
+  pinServicesLower: Map<string, CostAction>,
+  pinPatterns: Record<string, CostAction>,
 ): FeasibilityVerdict {
   // Convert per-pattern window cost → monthly cost using the same
   // factor the rest of the envelope uses.
@@ -539,37 +667,36 @@ function computeFeasibility(
     const monthly = p.costPerWindow * monthlyFactor;
     const svc = (p.service ?? '').toLowerCase();
 
-    if (svc && exceptionSet.has(svc)) {
+    // Precedence: pin_patterns > pin_services > exception_services > default.
+    let action: CostAction;
+    const pinByHash = p.hash ? pinPatterns[p.hash] : undefined;
+    const pinBySvc = svc ? pinServicesLower.get(svc) : undefined;
+    if (pinByHash) {
+      action = pinByHash;
+    } else if (pinBySvc) {
+      action = pinBySvc;
+    } else if (svc && exceptionSet.has(svc)) {
       exceptionMonthly += monthly;
       const slot = byAction.get('pass') ?? { monthly: 0, count: 0 };
       slot.monthly += monthly;
       slot.count += 1;
       byAction.set('pass', slot);
       continue;
-    }
-
-    // Map the enricher's recommendation onto the destination's
-    // hierarchy. ERROR-class rows stay pass (keep). High-volume
-    // info-class rows use level-1; medium-volume sample rows degrade
-    // to level-2 when level-2 exists (e.g. Splunk: sample becomes
-    // compact rather than offload, since envelope-compact preserves
-    // the sample's signal at lower cost). Without level-2 the
-    // enricher's verdict (mute/sample) drives the coefficient.
-    const refined = p.poc.refinedAction ?? p.recommendedAction;
-    let action: CostAction;
-    if (refined === 'fix' || refined === 'blocked' || refined === 'keep') {
-      action = 'pass';
-    } else if (refined === 'mute') {
-      // Mute maps onto the destination's preferred lever — drop the
-      // bytes via tier_down (Datadog Flex), offload (Splunk S3),
-      // compact (ClickHouse), or drop (no destination-side option).
-      action = level1;
-    } else if (refined === 'sample') {
-      // Sample keeps a slice. When the destination has a cheaper-tier
-      // option (compact / tier_down), prefer that over a flat sample.
-      action = level2 !== 'offload' && level2 !== 'drop' ? level2 : 'sample';
     } else {
-      action = level1;
+      // Map the enricher's recommendation onto the destination's
+      // hierarchy. ERROR-class rows stay pass (keep). High-volume
+      // info-class rows use level-1; medium-volume sample rows degrade
+      // to level-2 when level-2 exists.
+      const refined = p.poc.refinedAction ?? p.recommendedAction;
+      if (refined === 'fix' || refined === 'blocked' || refined === 'keep') {
+        action = 'pass';
+      } else if (refined === 'mute') {
+        action = level1;
+      } else if (refined === 'sample') {
+        action = level2 !== 'offload' && level2 !== 'drop' ? level2 : 'sample';
+      } else {
+        action = level1;
+      }
     }
 
     const coefficient = reductionCoefficient(action);
@@ -606,6 +733,16 @@ function computeFeasibility(
       `${exceptionServices.length} exception service(s) pinned to pass, removing $${dollars(exceptionMonthly).toFixed(2)}/mo from the achievable pool.`,
     );
   }
+  if (Object.keys(pinPatterns).length > 0) {
+    reasonParts.push(
+      `${Object.keys(pinPatterns).length} pattern pin(s) applied.`,
+    );
+  }
+  if (pinServicesLower.size > 0) {
+    reasonParts.push(
+      `${pinServicesLower.size} service pin(s) applied; max_achievable shifted accordingly.`,
+    );
+  }
   reasonParts.push(
     feasible
       ? `Achievable ${maxAchievablePercent.toFixed(1)}% meets target ${targetPercent}%.`
@@ -620,6 +757,8 @@ function computeFeasibility(
     achievable_by_action: achievableByAction,
     exception_services: exceptionServices,
     exception_monthly_cost_usd: dollars(exceptionMonthly),
+    not_checked: [...NOT_CHECKED_DEFAULT],
+    not_checked_statement: NOT_CHECKED_STATEMENT,
   };
 }
 
@@ -635,6 +774,137 @@ function reductionCoefficient(action: CostAction): number {
 }
 
 /**
+ * Plain-English destination description for a (siem, action) pair.
+ * Single source of truth used by per_service_consequences and
+ * patterns[].actions.consequence. Recoverable=true means the bytes are
+ * still queryable (maybe via a separate tool); recoverable=false means
+ * they're gone.
+ */
+interface DestinationDescription {
+  text: string;
+  recoverable: boolean;
+  recoverVia: string | null;
+}
+
+function describeDestination(siem: SiemId, action: CostAction): DestinationDescription {
+  // 'pass' and 'drop' are destination-independent.
+  if (action === 'pass') {
+    return { text: 'Stays in your SIEM (no change)', recoverable: true, recoverVia: null };
+  }
+  if (action === 'drop') {
+    return { text: 'Dropped at the forwarder (not recoverable)', recoverable: false, recoverVia: null };
+  }
+  switch (action) {
+    case 'tier_down': {
+      if (siem === 'datadog') {
+        return {
+          text: 'Datadog Flex tier (in-place query, ~70% cheaper than indexed)',
+          recoverable: true, recoverVia: null,
+        };
+      }
+      if (siem === 'cloudwatch') {
+        return {
+          text: 'CloudWatch Logs Infrequent Access tier (in-place query, ~50% cheaper than Standard)',
+          recoverable: true, recoverVia: null,
+        };
+      }
+      return { text: `${siem} cheaper tier (in-place query)`, recoverable: true, recoverVia: null };
+    }
+    case 'offload': {
+      return {
+        text: 'Your customer-owned S3 bucket (recoverable via log10x_retriever_query)',
+        recoverable: true, recoverVia: 'log10x_retriever_query',
+      };
+    }
+    case 'compact': {
+      if (siem === 'clickhouse') {
+        return {
+          text: 'ClickHouse, losslessly compacted via the 10x dict+UDF+view (queryable as-is)',
+          recoverable: true, recoverVia: null,
+        };
+      }
+      if (siem === 'splunk') {
+        return {
+          text: 'Splunk, envelope-compacted via the 10x app (queryable as-is, ~80-90% smaller)',
+          recoverable: true, recoverVia: null,
+        };
+      }
+      if (siem === 'elasticsearch') {
+        return {
+          text: 'Elasticsearch, envelope-compacted via the 10x plugin (queryable as-is, ~60-70% smaller)',
+          recoverable: true, recoverVia: null,
+        };
+      }
+      return { text: `${siem} losslessly compacted (queryable as-is)`, recoverable: true, recoverVia: null };
+    }
+    case 'sample': {
+      return {
+        text: 'Stays in your SIEM; rate regulator keeps 1/N (the rest dropped at the forwarder)',
+        recoverable: false, recoverVia: null,
+      };
+    }
+  }
+}
+
+function buildPerServiceConsequences(
+  patternOutputs: PatternOutput[],
+  siem: SiemId,
+  exceptionSet: Set<string>,
+  windowDurationSeconds: number,
+): PerServiceConsequence[] {
+  const monthlyFactor = (24 * 30) / Math.max(0.001, windowDurationSeconds / 3600);
+  const byService = new Map<string, {
+    bytes: number;
+    actionTally: Map<CostAction, number>;
+    patternCount: number;
+    isException: boolean;
+  }>();
+
+  for (const p of patternOutputs) {
+    const svc = (p.service ?? '(unattributed)').toLowerCase();
+    const isException = exceptionSet.has(svc);
+    const monthlyBytes = p.metrics.bytes_in_window * monthlyFactor;
+    const slot = byService.get(svc) ?? {
+      bytes: 0,
+      actionTally: new Map<CostAction, number>(),
+      patternCount: 0,
+      isException,
+    };
+    slot.bytes += monthlyBytes;
+    slot.patternCount += 1;
+    slot.actionTally.set(
+      p.actions.recommended_action,
+      (slot.actionTally.get(p.actions.recommended_action) ?? 0) + monthlyBytes,
+    );
+    byService.set(svc, slot);
+  }
+
+  const out: PerServiceConsequence[] = [];
+  for (const [service, slot] of byService) {
+    // dominant action = action carrying the most monthly bytes.
+    let dominant: CostAction = 'pass';
+    let maxBytes = -1;
+    for (const [a, b] of slot.actionTally) {
+      if (b > maxBytes) { dominant = a; maxBytes = b; }
+    }
+    if (slot.isException) dominant = 'pass';
+    const desc = describeDestination(siem, dominant);
+    out.push({
+      service,
+      action: dominant,
+      total_bytes_per_month: Math.round(slot.bytes),
+      destination_description: desc.text,
+      recoverable: desc.recoverable,
+      recover_via: desc.recoverVia,
+      pattern_count: slot.patternCount,
+      exception_applied: slot.isException,
+    });
+  }
+  out.sort((a, b) => b.total_bytes_per_month - a.total_bytes_per_month);
+  return out;
+}
+
+/**
  * Pre-deploy commitment artifact. Renders the verdict + per-action
  * breakdown + exceptions + next-step recommendation as one paste-ready
  * markdown block the agent can show the buyer alongside the verdict.
@@ -645,62 +915,66 @@ function buildCommitmentArtifact(
   f: FeasibilityVerdict,
   input: RenderInput,
   monthlyCostUsd: number,
+  perServiceConsequences: PerServiceConsequence[],
 ): CommitmentArtifact {
   const lines: string[] = [];
   lines.push(`## Projected commitment — ${input.siem} (${input.window} sample)`);
   lines.push('');
-  lines.push(`- **Target reduction**: ${f.target_percent_reduction}%`);
-  lines.push(
-    `- **Projected max achievable**: ${f.max_achievable_percent.toFixed(1)}% (${f.feasible ? 'feasible' : 'short of target'})`,
-  );
-  lines.push(
-    `- **Sample monthly cost analyzed**: $${dollars(monthlyCostUsd).toFixed(2)}`,
-  );
+
+  // FIRST: per-service consequence table (the body).
+  lines.push('### What would happen, per service');
   lines.push('');
-  lines.push('### Per-action breakdown');
-  lines.push('');
-  lines.push('| Action | Patterns | Monthly cost in pool ($) |');
-  lines.push('|---|---|---|');
-  for (const row of f.achievable_by_action) {
+  lines.push('| Service | Action | Where the bytes go | Recoverable | Patterns | Bytes/mo |');
+  lines.push('|---|---|---|---|---|---|');
+  for (const row of perServiceConsequences) {
+    const rec = row.recoverable
+      ? (row.recover_via ? `yes (via \`${row.recover_via}\`)` : 'yes')
+      : 'no';
+    const exTag = row.exception_applied ? ' _(exception)_' : '';
     lines.push(
-      `| \`${row.action}\` | ${row.pattern_count} | $${row.monthly_cost_usd.toFixed(2)} |`,
+      `| \`${row.service}\`${exTag} | \`${row.action}\` | ${row.destination_description} | ${rec} | ${row.pattern_count} | ${formatBytes(row.total_bytes_per_month)} |`,
     );
   }
   lines.push('');
-  if (f.exception_services.length > 0) {
-    lines.push('### Exception services (stay in SIEM, full retention)');
-    lines.push('');
-    for (const svc of f.exception_services) lines.push(`- \`${svc}\``);
-    lines.push('');
-    lines.push(
-      `_Removed $${f.exception_monthly_cost_usd.toFixed(2)}/mo from the achievable pool._`,
-    );
-    lines.push('');
-  }
+
+  // SECOND: not_checked disclaimer (verbatim).
+  lines.push('### What this plan did NOT check');
+  lines.push('');
+  lines.push(`_${f.not_checked_statement}_`);
+  lines.push('');
+
+  // THIRD: headline numbers.
+  const affectedBytes = perServiceConsequences.reduce(
+    (s, r) => r.action !== 'pass' ? s + r.total_bytes_per_month : s,
+    0,
+  );
+  lines.push('### Headline numbers');
+  lines.push('');
+  lines.push(`- Target reduction: **${f.target_percent_reduction}%**`);
+  lines.push(`- Projected max achievable: **${f.max_achievable_percent.toFixed(1)}%** (${f.feasible ? 'feasible' : 'short of target'})`);
+  lines.push(`- Total bytes affected (per month): **${formatBytes(affectedBytes)}**`);
+  lines.push(`- Sample monthly cost analyzed: **$${dollars(monthlyCostUsd).toFixed(2)}**`);
+  lines.push('');
+
+  // FOURTH: next step.
   lines.push('### Next step');
   lines.push('');
   if (f.feasible) {
-    lines.push(
-      '1. Run `log10x_advise_install` to provision the Receiver in your forwarder pipeline.',
-    );
-    lines.push(
-      '2. Run `log10x_configure_engine` to author the per-pattern action plan (cap CSV) that delivers the commitment.',
-    );
-    lines.push('');
-    lines.push(
-      '_This is a PRE-DEPLOY projection from a SIEM sample. Actual commitment requires Receiver deployment and per-pattern verification metrics over a 7-14 day baseline window._',
-    );
+    lines.push(`Commit with \`log10x_configure_engine(from_poc_id="${input.snapshotId}")\` — writes the cap CSV that delivers this plan.`);
   } else {
-    lines.push(
-      '1. Either lower `target_percent_reduction` to within the achievable band, or',
-    );
-    lines.push(
-      '2. Trim `exception_services` (each exception subtracts from the achievable pool), or',
-    );
-    lines.push(
-      '3. Pair the deployment with a destination-tier upgrade (e.g. ClickHouse compact, Splunk S3 offload) that unlocks a higher-coverage action than the current level-1.',
-    );
+    lines.push('Either lower `target_percent_reduction`, trim `exception_services`, or pin specific services via `pin_services` then resubmit.');
   }
+  lines.push('');
+
+  // Appendix: per-pattern detail behind a collapsed disclosure. Keeps
+  // the consequence-led principle that patterns are NOT the decision
+  // surface — the renderer only points at where to fetch them.
+  lines.push('<details><summary>By pattern (advanced — open only if you want the per-pattern view)</summary>');
+  lines.push('');
+  lines.push(`Per-pattern actions, consequences, and savings ship in \`output.patterns[].actions\` of this envelope. Re-render with \`view='top'\` for a markdown table, or call \`log10x_overflow_contents\` for the routing detail.`);
+  lines.push('');
+  lines.push('</details>');
+
   return {
     markdown: lines.join('\n'),
     next_step: f.feasible
@@ -997,6 +1271,7 @@ function buildActions(
   // re-deriving the cap.
   const monthlyBytes = (p as unknown as { bytes: number }).bytes * (24 * 30) / Math.max(0.001, _windowDurationSeconds / 3600);
   const cap = capBytesPerWindow(action, monthlyBytes, sampleN ?? 10);
+  const desc = describeDestination(siem, action);
 
   return {
     recommended_action: action,
@@ -1004,6 +1279,12 @@ function buildActions(
     expected_savings_usd_per_month: dollars(expectedSavings),
     sample_n: sampleN,
     cap_bytes_per_window: Math.round(cap),
+    consequence: {
+      destination_description: desc.text,
+      recoverable: desc.recoverable,
+      recover_via: desc.recoverVia,
+      bytes_per_month: Math.round(monthlyBytes),
+    },
   };
 }
 
