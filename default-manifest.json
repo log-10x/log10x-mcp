@@ -47,9 +47,20 @@
     },
     "log10x_services": {
       "title": "Services",
-      "description": "List every service the Log10x pipeline is watching, ranked by byte volume (with cost overlay when $/GB is set) with per-service share of total. Call first on open-ended cost questions, before drilling into a specific service.",
+      "description": "List every service the Log10x pipeline is watching, ranked by byte volume (with cost overlay when $/GB is set) plus per-service share of total AND the four action-axis columns (bytes_passed / bytes_offloaded / bytes_compacted / bytes_dropped) derived by joining isDropped events against the cap-CSV. Pass `exception_services` to mark customer-flagged services as current_mode=pass — their next_action points at log10x_pattern_mitigate instead of log10x_configure_engine. Call first on open-ended cost questions, before drilling into a specific service.",
       "annotations": {
         "title": "Services",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "category": "cost"
+    },
+    "log10x_overflow_contents": {
+      "title": "Overflow contents",
+      "description": "The contents view of the customer-owned offload S3 bucket — per-pattern bytes, event count, time-first-seen, time-last-seen, and growth rate. Filtered to action=offload via the cap-CSV the MCP wrote (`drop` patterns are NOT in S3; `compact` and `tier_down` route elsewhere). Call this as the maintenance-loop review: \"what's accumulating in my overflow queue?\" Routes the agent to log10x_retriever_query for rehydration when an incident or audit needs the data back in the SIEM.",
+      "annotations": {
+        "title": "Overflow contents",
         "readOnlyHint": true,
         "idempotentHint": true,
         "openWorldHint": true

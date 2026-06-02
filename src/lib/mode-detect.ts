@@ -244,6 +244,7 @@ export const TOOL_MODES: Record<string, ('analysis' | 'analysis_pending' | 'poc'
   log10x_savings: ['analysis', 'analysis_pending'],
   log10x_investigate: ['analysis', 'analysis_pending'],
   log10x_services: ['analysis', 'analysis_pending'],
+  log10x_overflow_contents: ['analysis', 'analysis_pending'],
   log10x_discover_labels: ['analysis', 'analysis_pending'],
   log10x_discover_join: ['analysis', 'analysis_pending'],
   log10x_customer_metrics_query: ['analysis', 'analysis_pending'],

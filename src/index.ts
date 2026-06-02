@@ -111,6 +111,7 @@ import { updateEnvSchema, executeUpdateEnv } from './tools/update-env.js';
 import { deleteEnvSchema, executeDeleteEnv } from './tools/delete-env.js';
 import { rotateApiKeySchema, executeRotateApiKey } from './tools/rotate-api-key.js';
 import { servicesSchema, executeServices } from './tools/services.js';
+import { overflowContentsSchema, executeOverflowContents } from './tools/overflow-contents.js';
 import { fetchCapCsvForEnv } from './lib/cap-csv-fetch.js';
 import { findSkewSchema, executeFindSkew } from './tools/find-skew.js';
 // find_constant_slots, find_uuid_in_body, find_incident_cluster removed
@@ -206,6 +207,7 @@ const METRIC_REQUIRING_TOOLS = new Set([
   'log10x_event_lookup',
   'log10x_savings',
   'log10x_services',
+  'log10x_overflow_contents',
   'log10x_discover_labels',
   'log10x_investigate',
   'log10x_backfill_metric',
@@ -1063,6 +1065,22 @@ registerLog10xTool('log10x_services', servicesSchema, (args) =>
   })
 );
 
+// ── Tool: log10x_overflow_contents ──
+//
+// Item 6 (cost-cutting close-list v2): the contents view of the
+// customer-owned offload bucket. Queries dropped-by-pattern from the
+// TSDB, joins to the cap-CSV to filter to action=offload only, and
+// routes the agent to log10x_retriever_query for rehydration. See
+// the long docstring on src/tools/overflow-contents.ts for the
+// design rationale + cap-CSV degraded-mode semantics.
+
+registerLog10xTool('log10x_overflow_contents', overflowContentsSchema, (args) =>
+  wrap('log10x_overflow_contents', async () => {
+    const env = resolveEnv(getEnvs(), args.environment);
+    return executeOverflowContents(args, env);
+  })
+);
+
 // ── Tool: log10x_discover_labels ──
 
 registerLog10xTool('log10x_discover_labels', discoverLabelsSchema, (args) =>
@@ -1488,6 +1506,7 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_baseline', intent: 'Pre-flight readiness gate for cost-reduction tools — verifies Reporter age (default 7d), pattern-coverage stability, and absence of acute anomalies; returns structured `not_ready` with the specific gate(s) that failed.' },
   { name: 'log10x_commitment_report', intent: 'CFO-facing weekly aggregate against a commitment record — Bayesian Beta(2,2) confidence prior on realized savings, markdown report suitable for sharing.' },
   { name: 'log10x_pattern_mitigate', intent: 'Return the env-gated mitigation options + exact configs for a pattern (drop @ analyzer, drop @ forwarder, mute @ 10x, compact @ 10x) in user terms with env-capability gating' },
+  { name: 'log10x_overflow_contents', intent: 'Contents view of the customer-owned offload S3 bucket — per-pattern bytes, event count, time-first/last-seen, growth-rate; filtered to action=offload via the cap-CSV. Routes the agent to retriever_query for rehydration.' },
 ];
 
 async function handleCliFlags(): Promise<boolean> {
