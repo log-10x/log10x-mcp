@@ -1108,7 +1108,7 @@ export async function executeEstimateSavings(
         },
         env
       );
-      const headline = `Forecast (${args.destination}): ${fmtDollar(result.totals.dollars_expected_monthly)}/mo expected savings on ${result.per_pattern.length} pattern${result.per_pattern.length !== 1 ? 's' : ''} (coverage ${fmtPct(result.coverage_pct)}).`;
+      const headline = `Forecast (${args.destination}): ${fmtDollar(result.totals.dollars_expected_monthly)}/mo expected savings (at ${args.destination} list price — your bill may differ) on ${result.per_pattern.length} pattern${result.per_pattern.length !== 1 ? 's' : ''} (coverage ${fmtPct(result.coverage_pct)}).`;
       const human_summary = buildForecastHumanSummary(result, args.destination);
       return buildEnvelope({
         tool: 'log10x_estimate_savings',
@@ -1163,7 +1163,7 @@ export async function executeEstimateSavings(
       },
       env
     );
-    const headline = `Verify (${args.destination}): ${(result.delivered_pct * 100).toFixed(1)}% delivered reduction (${fmtDollar(result.delivered_dollars_annual_projection)}/yr projected, confidence ${(result.causal_confidence * 100).toFixed(0)}%).`;
+    const headline = `Verify (${args.destination}): ${(result.delivered_pct * 100).toFixed(1)}% delivered reduction (${fmtDollar(result.delivered_dollars_annual_projection)}/yr projected at ${args.destination} list price — your bill may differ, confidence ${(result.causal_confidence * 100).toFixed(0)}%).`;
     const human_summary = buildVerifyHumanSummary(result, args.destination);
     return buildEnvelope({
       tool: 'log10x_estimate_savings',
