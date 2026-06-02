@@ -197,7 +197,7 @@
         "idempotentHint": true,
         "openWorldHint": true
       },
-      "category": "identify"
+      "category": "paste"
     },
     "log10x_extract_templates": {
       "title": "Extract templates",
@@ -208,7 +208,7 @@
         "idempotentHint": true,
         "openWorldHint": true
       },
-      "category": "identify"
+      "category": "paste"
     },
     "log10x_retriever_query": {
       "title": "Retriever query",
