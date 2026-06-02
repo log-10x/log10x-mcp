@@ -15,7 +15,8 @@ import { promises as fs } from 'fs';
 import { z } from 'zod';
 import { runDevCliStdin, runDevCliFile, DevCliNotInstalledError, DevCliRunError } from '../lib/dev-cli.js';
 import { agentOnly } from '../lib/agent-only.js';
-import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
 import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
 
 export const extractTemplatesSchema = {
@@ -37,7 +38,11 @@ export const extractTemplatesSchema = {
   }).optional().describe(
     'Optional assertions — turns extraction into validation. Each assertion reports pass/fail in the output.'
   ),
-  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.templates[], data.event_count, data.assertions). markdown wraps the rendered report in data.markdown.'),
+  view: z
+    .literal('summary')
+    .default('summary')
+    .optional()
+    .describe('summary returns the typed envelope (data.templates[], data.event_count, data.assertions, data.human_summary). The deprecated markdown view was removed; data.human_summary carries the prose distillation for chat rendering.'),
 };
 
 interface ExtractArgs {
@@ -51,7 +56,7 @@ interface ExtractArgs {
     required_patterns?: string[];
     forbidden_merges?: string[][];
   };
-  view?: 'summary' | 'markdown';
+  view?: 'summary';
 }
 
 interface ExtractTemplatesSummary {
@@ -72,27 +77,52 @@ interface ExtractTemplatesSummary {
     total: number;
     results: Array<{ kind: 'min_templates' | 'required_pattern' | 'forbidden_merge'; ok: boolean; detail: string }>;
   };
+  human_summary: string;
+}
+
+/**
+ * Three-sentence plain-prose distillation of a successful extract_templates
+ * run. No markdown syntax, no dollar figures. Mirrors the canonical
+ * buildHumanSummary pattern in src/tools/find-skew.ts:216.
+ */
+function buildHumanSummary(d: Omit<ExtractTemplatesSummary, 'human_summary'>): string {
+  const top = d.templates[0];
+  const head = `${d.event_count} events resolved to ${d.distinct_templates} distinct template${d.distinct_templates === 1 ? '' : 's'} in ${d.cli_wall_time_ms}ms.`;
+  const lead = top
+    ? ` Top template ${top.template_hash} accounts for ${top.event_count} event${top.event_count === 1 ? '' : 's'} (${top.share_pct.toFixed(1)}%).`
+    : ' No templates were produced from the input.';
+  const asserts = d.assertions ? ` Assertions: ${d.assertions.passed}/${d.assertions.total} passed.` : '';
+  return head + lead + asserts;
 }
 
 export async function executeExtractTemplates(args: ExtractArgs): Promise<string | StructuredOutput> {
-  const view = args.view ?? 'summary';
   const telemetry = newTelemetry();
-  const sumOut: { data?: ExtractTemplatesSummary } = {};
-  const md = await executeExtractTemplatesInner(args, sumOut);
-  if (view === 'markdown' || !sumOut.data) {
-    return buildMarkdownEnvelope({
-      tool: 'log10x_extract_templates',
-      summary: { headline: md.split('\n').find((l) => l.trim().length > 0)?.slice(0, 200) ?? 'extract_templates result' },
-      markdown: md,
-    });
+  const sumOut: { data?: Omit<ExtractTemplatesSummary, 'human_summary'> } = {};
+  try {
+    await executeExtractTemplatesInner(args, sumOut);
+  } catch (e) {
+    // Hard-error port: dev CLI missing is a precondition, not a runtime failure.
+    if (e instanceof DevCliNotInstalledError) {
+      return buildNotConfiguredEnvelope({
+        tool: 'log10x_extract_templates',
+        kind: 'generic',
+        remediation: e.message,
+      });
+    }
+    throw e;
   }
-  const d = sumOut.data;
+  if (!sumOut.data) {
+    throw new Error('extract_templates: inner pipeline returned no data.');
+  }
+  const base = sumOut.data;
+  const human_summary = buildHumanSummary(base);
+  const d: ExtractTemplatesSummary = { ...base, human_summary };
   const headline = `${d.event_count} events → ${d.distinct_templates} distinct template${d.distinct_templates !== 1 ? 's' : ''}${d.assertions ? ` (${d.assertions.passed}/${d.assertions.total} assertions passed)` : ''}.`;
   return buildEnvelope({
     tool: 'log10x_extract_templates',
     view: 'summary',
     summary: { headline },
-    data: { ...d, ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: headline }) },
+    data: { ...d, ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: human_summary }) },
     truncated: d.shown_templates < d.distinct_templates,
     actions: d.templates.length > 0
       ? [
@@ -102,7 +132,7 @@ export async function executeExtractTemplates(args: ExtractArgs): Promise<string
   });
 }
 
-async function executeExtractTemplatesInner(args: ExtractArgs, sumOut?: { data?: ExtractTemplatesSummary }): Promise<string> {
+async function executeExtractTemplatesInner(args: ExtractArgs, sumOut?: { data?: Omit<ExtractTemplatesSummary, 'human_summary'> }): Promise<string> {
   // ── 1. Run the CLI ──
   const result = args.source === 'file'
     ? await runFile(args)

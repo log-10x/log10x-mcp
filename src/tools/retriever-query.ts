@@ -32,7 +32,8 @@ import {
 } from '../lib/retriever-diagnostics.js';
 import { fmtCount } from '../lib/format.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
-import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { getOffloadStatusBatch } from '../lib/offload-status.js';
 
@@ -90,13 +91,15 @@ export const retrieverQuerySchema = {
     .describe('Bucket size when format=aggregated or ephemeral_series. Examples: `1m`, `5m`, `1h`, `1d`.'),
   environment: z.string().optional().describe('Environment nickname — required if multi-env.'),
   view: z
-    .enum(['summary', 'markdown'])
+    .literal('summary')
     .default('summary')
-    .describe('summary returns the typed envelope (data.events_matched, data.events[], data.query_id, data.diagnostics). markdown wraps the rendered report in data.markdown.'),
+    .optional()
+    .describe('summary returns the typed envelope (data.events_matched, data.events[], data.query_id, data.diagnostics, data.human_summary). The deprecated markdown view was removed; data.human_summary carries the prose distillation for chat rendering.'),
 };
 
 interface RetrieverQuerySummary {
   status: 'ok' | 'not_configured';
+  human_summary: string;
   query_id?: string;
   target?: string;
   from: string;
@@ -163,48 +166,25 @@ export async function executeRetrieverQuery(
     format?: 'events' | 'count' | 'aggregated' | 'ephemeral_series';
     bucket_size?: string;
     environment?: string;
-    view?: 'summary' | 'markdown';
+    view?: 'summary';
   },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
-  const view = args.view ?? 'summary';
   if (!isRetrieverConfigured()) {
-    const md = retrieverNotConfiguredMessage();
-    if (view === 'markdown') {
-      return buildMarkdownEnvelope({
-        tool: 'log10x_retriever_query',
-        summary: { headline: 'Retriever not configured.' },
-        markdown: md,
-      });
-    }
-    return buildEnvelope({
+    // Typed not_configured (status + advise_retriever action) so an agent
+    // branches on data.status; the framework chokepoint also normalises to
+    // the same shape if a tool throws a NotConfiguredError later.
+    return buildNotConfiguredEnvelope({
       tool: 'log10x_retriever_query',
-      view: 'summary',
-      summary: { headline: 'Retriever not configured — archive query refused.' },
-      data: {
-        status: 'not_configured',
-        from: args.from,
-        to: args.to,
-        filters: [],
-        format: args.format ?? 'events',
-        events_matched: 0,
-        events_returned: 0,
-        worker_files: 0,
-        wall_time_ms: 0,
-        truncated: false,
-        partial_results: false,
-        events_preview: [],
-      } satisfies RetrieverQuerySummary,
+      kind: 'retriever',
+      remediation: retrieverNotConfiguredMessage(),
     });
   }
   const sumOut: { data?: RetrieverQuerySummary } = {};
-  const md = await executeRetrieverQueryInner(args, env, sumOut);
-  if (view === 'markdown' || !sumOut.data) {
-    return buildMarkdownEnvelope({
-      tool: 'log10x_retriever_query',
-      summary: { headline: md.split('\n').find((l) => l.trim().length > 0)?.slice(0, 200) ?? 'retriever_query result' },
-      markdown: md,
-    });
+  await executeRetrieverQueryInner(args, env, sumOut);
+  if (!sumOut.data) {
+    // Internal-state safety net: inner ran without throwing but produced no data.
+    throw new Error('retriever_query: inner pipeline returned no data.');
   }
   const d = sumOut.data;
   const headline = `Retriever query \`${d.query_id ?? '?'}\` over ${d.from} → ${d.to}: ${fmtCount(d.events_matched)} events matched, ${d.events_returned} returned (${d.wall_time_ms}ms${d.truncated ? ', truncated' : ''}).`;
@@ -225,6 +205,47 @@ export async function executeRetrieverQuery(
     truncated: d.truncated || d.partial_results,
     actions,
   });
+}
+
+/**
+ * Three-sentence plain-prose distillation of a successful retriever_query
+ * run. No markdown syntax, no dollar figures. Mirrors the canonical
+ * buildHumanSummary pattern in src/tools/find-skew.ts:216.
+ */
+function buildRetrieverQueryHumanSummary(s: {
+  eventsMatched: number;
+  eventsReturned: number;
+  from: string;
+  to: string;
+  target: string;
+  truncated: boolean;
+  partialResults: boolean;
+  pattern?: string;
+  search?: string;
+  wallTimeMs: number;
+  offloadedHashCount: number;
+  zeroReason?: string;
+}): string {
+  const scope = s.pattern
+    ? `pattern ${s.pattern}`
+    : s.search
+      ? `search ${s.search}`
+      : 'open scan';
+  if (s.eventsMatched === 0) {
+    const reason = s.zeroReason ? ` ${s.zeroReason}` : '';
+    return `Retriever returned zero events for ${scope} over ${s.from} to ${s.to} on target ${s.target} (${s.wallTimeMs}ms).${reason} Widen the window or relax the filter before declaring the pattern absent.`;
+  }
+  const first = `Retriever matched ${fmtCount(s.eventsMatched)} events for ${scope} over ${s.from} to ${s.to} on target ${s.target}; returned ${fmtCount(s.eventsReturned)} in ${s.wallTimeMs}ms.`;
+  const flags: string[] = [];
+  if (s.truncated) flags.push('result set was truncated at the per-worker cap');
+  if (s.partialResults) flags.push('one or more workers were partial');
+  const second = flags.length > 0
+    ? `Caveats: ${flags.join('; ')} — narrow the search or re-run to resume.`
+    : `Wall time was clean and no worker reported partial results.`;
+  const third = s.offloadedHashCount > 0
+    ? `${s.offloadedHashCount} hash(es) in this result set are currently routed to forwarder offload; live events continue to land in the offload bucket.`
+    : `No hash in this result set is currently routed to forwarder offload.`;
+  return `${first} ${second} ${third}`;
 }
 
 async function executeRetrieverQueryInner(
@@ -495,8 +516,27 @@ async function executeRetrieverQueryInner(
       service: ev.tenx_user_service as string | undefined,
       text: typeof ev.text === 'string' ? (ev.text as string).slice(0, 240) : undefined,
     }));
+    const partialResults = !!(resp.diagnostics as RetrieverQueryDiagnostics & { partialResults?: boolean })?.partialResults;
+    const offloadedHashCount = offloadByHash
+      ? Object.values(offloadByHash).filter((s) => s.is_offloaded).length
+      : 0;
+    const human_summary = buildRetrieverQueryHumanSummary({
+      eventsMatched: resp.execution.eventsMatched,
+      eventsReturned: resp.events.length,
+      from: args.from,
+      to: args.to,
+      target: resp.target,
+      truncated: !!resp.execution.truncated,
+      partialResults,
+      pattern: args.pattern,
+      search: effectiveSearch,
+      wallTimeMs: resp.execution.wallTimeMs,
+      offloadedHashCount,
+      zeroReason: resp.events.length === 0 && resp.diagnostics ? (explainZeroResults(resp.diagnostics) ?? undefined) : undefined,
+    });
     sumOut.data = {
       status: 'ok',
+      human_summary,
       query_id: resp.queryId,
       target: resp.target,
       from: args.from,
@@ -510,7 +550,7 @@ async function executeRetrieverQueryInner(
       worker_files: resp.execution.workerFiles,
       wall_time_ms: resp.execution.wallTimeMs,
       truncated: !!resp.execution.truncated,
-      partial_results: !!(resp.diagnostics as RetrieverQueryDiagnostics & { partialResults?: boolean })?.partialResults,
+      partial_results: partialResults,
       results_location: resultsLoc,
       diagnostics_zero_reason: resp.events.length === 0 && resp.diagnostics ? (explainZeroResults(resp.diagnostics) ?? undefined) : undefined,
       by_severity: Object.keys(bySeverity).length > 0 ? bySeverity : undefined,

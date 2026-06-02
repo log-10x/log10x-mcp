@@ -27,7 +27,8 @@ import {
 import { computeConcentration, type PatternConcentration } from '../lib/variable-concentration.js';
 import { fmtCount, fmtBytes } from '../lib/format.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
-import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
 import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
 
 export const resolveBatchSchema = {
@@ -44,8 +45,7 @@ export const resolveBatchSchema = {
   top_n_patterns: z.number().min(1).max(50).default(20).describe('How many patterns to return in the ranked triage.'),
   include_next_actions: z.boolean().default(true).describe('Whether to generate next_action suggestions for each top pattern.'),
   environment: z.string().optional().describe('Environment nickname — used to build next_actions that call log10x_investigate.'),
-  privacy_mode: z.boolean().default(true).describe('When true (default), the batch is processed by a locally-installed `tenx` CLI — events never leave the machine. Set to false to route through the public Log10x paste Lambda instead (100 KB limit, requires network). If the local CLI is not installed, the call errors cleanly with an install hint.'),
-  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.patterns[], data.totals, data.warnings). markdown wraps the rendered triage in data.markdown.'),
+  privacy_mode: z.boolean().default(true).describe('When true (default), the batch is processed by a locally-installed `tenx` CLI — events never leave the machine. Set to false to route through the public Log10x paste Lambda instead (100 KB limit, requires network). If the local CLI is not installed, the call surfaces a typed not_configured envelope with an install hint.'),
 };
 
 interface ResolveBatchSummary {
@@ -60,6 +60,7 @@ interface ResolveBatchSummary {
   cli_wall_time_ms: number;
   severity_mix: Record<string, number>;
   overfit_warning: boolean;
+  human_summary: string;
   patterns: Array<{
     rank: number;
     template_hash: string;
@@ -80,6 +81,26 @@ interface ResolveBatchSummary {
   }>;
 }
 
+/**
+ * Three-sentence plain-prose distillation of a successful resolve_batch
+ * run. No markdown syntax, no dollar figures. Mirrors the canonical
+ * buildHumanSummary pattern in src/tools/find-skew.ts:216.
+ */
+function buildResolveBatchHumanSummary(d: Omit<ResolveBatchSummary, 'human_summary'>): string {
+  const top = d.patterns[0];
+  const patternsWord = d.resolved_pattern_count === 1 ? 'pattern' : 'patterns';
+  const first = `Resolved ${fmtCount(d.input_line_count)} events into ${d.resolved_pattern_count} ${patternsWord} via the ${d.execution_mode === 'local_cli' ? 'local tenx CLI' : 'paste Lambda'} (wall time ${d.cli_wall_time_ms}ms).`;
+  const second = top
+    ? `The top contributor is ${top.symbol_message ?? top.template_hash} at ${Math.round(top.share_pct)}% of the batch${top.dominant_severity ? `, dominant severity ${top.dominant_severity}` : ''}.`
+    : 'No ranked patterns were produced.';
+  const third = d.drop_rate >= 0.2
+    ? `Warning: the templater dropped ${Math.round(d.drop_rate * 100)}% of input lines (engine GAPS G11) — treat as a partial triage.`
+    : d.overfit_warning
+      ? 'Tiny-batch note: every event resolved to its own template; paste at least 50 events for a converged triage.'
+      : `${d.shown_pattern_count} of ${d.resolved_pattern_count} ${patternsWord} shown in the ranked output.`;
+  return `${first} ${second} ${third}`;
+}
+
 export async function executeResolveBatch(args: {
   source?: 'file' | 'events' | 'text';
   path?: string;
@@ -89,20 +110,46 @@ export async function executeResolveBatch(args: {
   include_next_actions: boolean;
   environment?: string;
   privacy_mode: boolean;
-  view?: 'summary' | 'markdown';
+  view?: 'summary';
 }): Promise<string | StructuredOutput> {
-  const view = args.view ?? 'summary';
   const telemetry = newTelemetry();
-  const sumOut: { data?: ResolveBatchSummary } = {};
-  const md = await executeResolveBatchInner(args, sumOut);
-  if (view === 'markdown' || !sumOut.data) {
-    return buildMarkdownEnvelope({
+  const sumOut: { data?: Omit<ResolveBatchSummary, 'human_summary'> } = {};
+  try {
+    await executeResolveBatchInner(args, sumOut);
+  } catch (e) {
+    // Hard-error port: dev CLI missing is a precondition, not a runtime failure.
+    // Caught at the tool boundary so the chokepoint doesn't need to know about
+    // the dev CLI error class. kind='generic' because the install hint + paste
+    // Lambda escape hatch are already in the error's own message.
+    if (e instanceof DevCliNotInstalledError) {
+      return buildNotConfiguredEnvelope({
+        tool: 'log10x_resolve_batch',
+        kind: 'generic',
+        remediation: e.message,
+      });
+    }
+    throw e;
+  }
+  if (!sumOut.data) {
+    // Early-return path: executeResolveBatchInner returned a "No patterns
+    // resolved" string before populating sumOut.data. Emit a typed envelope
+    // with the explanation as human_summary so the agent can branch without
+    // parsing prose.
+    const headline = 'resolve_batch returned no patterns';
+    return buildEnvelope({
       tool: 'log10x_resolve_batch',
-      summary: { headline: md.split('\n').find((l) => l.trim().length > 0)?.slice(0, 200) ?? 'resolve_batch result' },
-      markdown: md,
+      view: 'summary',
+      summary: { headline },
+      data: {
+        precondition: 'no_patterns',
+        ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: headline }),
+      },
+      warnings: ['resolve_batch: templater rejected the input — no patterns resolved. Check that events are raw log lines (one per line), not pre-formatted JSON blobs.'],
     });
   }
-  const d = sumOut.data;
+  const base = sumOut.data;
+  const human_summary = buildResolveBatchHumanSummary(base);
+  const d: ResolveBatchSummary = { ...base, human_summary };
   const top = d.patterns[0];
   const dropWarning = d.drop_rate >= 0.2 ? ` (${Math.round(d.drop_rate * 100)}% of input lines dropped by templater)` : '';
   const headline = `${fmtCount(d.input_line_count)} events → ${d.resolved_pattern_count} pattern${d.resolved_pattern_count !== 1 ? 's' : ''}${top ? `, top: ${top.symbol_message ?? top.template_hash} at ${Math.round(top.share_pct)}% of batch` : ''}${dropWarning}.`;
@@ -110,7 +157,7 @@ export async function executeResolveBatch(args: {
     tool: 'log10x_resolve_batch',
     view: 'summary',
     summary: { headline },
-    data: { ...d, ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: headline }) },
+    data: { ...d, ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: human_summary }) },
     truncated: d.shown_pattern_count < d.resolved_pattern_count,
     warnings: d.drop_rate >= 0.2 ? [`templater dropped ${Math.round(d.drop_rate * 100)}% of input lines (engine GAPS G11) — treat as partial triage`] : [],
     actions: top && top.symbol_message
@@ -131,15 +178,17 @@ async function executeResolveBatchInner(args: {
   include_next_actions: boolean;
   environment?: string;
   privacy_mode: boolean;
-}, sumOut?: { data?: ResolveBatchSummary }): Promise<string> {
+}, sumOut?: { data?: Omit<ResolveBatchSummary, 'human_summary'> }): Promise<string> {
   // ── 1. Materialize input text ──
   const text = await materialize(args);
   if (!text || text.trim().length === 0) {
+    // KEEP: schema-violation (missing input). Caught by wrap() in src/index.ts.
     throw new Error('No events provided. Pass source=file with path, source=events with an events array, or source=text with raw text.');
   }
   const bytes = Buffer.byteLength(text, 'utf8');
   const lineCount = text.split('\n').filter((l) => l.trim().length > 0).length;
   if (lineCount === 0) {
+    // KEEP: schema-violation (empty input). Caught by wrap().
     throw new Error('Input contained no non-empty lines.');
   }
 
@@ -163,19 +212,27 @@ async function executeResolveBatchInner(args: {
       executionMode = 'local_cli';
     } catch (e) {
       if (e instanceof DevCliNotInstalledError) {
+        // PORT: precondition (local tenx CLI not installed). Rethrow so the
+        // outer executeResolveBatch catches at the tool boundary and converts
+        // to buildNotConfiguredEnvelope (kind='generic'). The chokepoint
+        // doesn't need a framework name-match — the boundary catch keeps the
+        // not-configured contract self-contained to this tool.
         throw e;
       }
       if (e instanceof DevCliRunError) {
+        // KEEP: internal-state (CLI ran, returned non-zero). Caught by wrap().
         throw new Error(
           `Local tenx CLI exited with code ${e.exitCode}.\n` +
             `Config: ${e.configPath}\n` +
             `${e.stderr.slice(0, 2000)}`
         );
       }
+      // KEEP: internal-state (CLI invocation failed unexpectedly). Caught by wrap().
       throw new Error(`Local tenx CLI run failed: ${(e as Error).message}`);
     }
   } else {
     if (bytes > PASTE_MAX_BYTES) {
+      // KEEP: schema-violation (input size limit). Caught by wrap().
       throw new Error(
         `Batch too large: ${(bytes / 1024).toFixed(1)} KB exceeds the 100 KB paste Lambda limit. ` +
           `Trim to ~1-2K events, paginate across multiple calls, or set privacy_mode=true to route through ` +
@@ -455,6 +512,7 @@ async function materialize(args: {
   if (hasText) return args.text as string;
   if (hasPath) return fs.readFile(args.path as string, 'utf8');
 
+  // KEEP: schema-violation (no input variant present). Caught by wrap().
   throw new Error(
     'No usable input. Provide exactly one of: `events` (array of log lines), ' +
       '`text` (newline-separated string), or `path` (local file). ' +

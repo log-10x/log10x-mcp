@@ -28,9 +28,8 @@ import {
   formatDetectionTrace,
   customerMetricsNotConfiguredMessage,
 } from '../lib/customer-metrics.js';
-import { getOrDiscoverJoin, discoverJoin, type JoinDiscoveryResult, type JoinPair } from '../lib/join-discovery.js';
-import { renderNextActions, type NextAction } from '../lib/next-actions.js';
-import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { getOrDiscoverJoin, discoverJoin, type JoinPair } from '../lib/join-discovery.js';
+import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
 
 export const discoverJoinSchema = {
@@ -59,7 +58,6 @@ export const discoverJoinSchema = {
     .optional()
     .describe('Alias for `window` for consistency with other Log10x tools.'),
   environment: z.string().optional().describe('Environment nickname (for multi-env setups).'),
-  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope. markdown wraps the rendered discovery report in data.markdown.'),
 };
 
 interface DiscoverJoinSummary {
@@ -73,6 +71,7 @@ interface DiscoverJoinSummary {
   join_key?: { log10x_side: string; customer_side: string; jaccard: number; shared_values: number; log10x_only_values: number; customer_only_values: number };
   runner_ups: Array<{ log10x_side: string; customer_side: string; jaccard: number; shared_values: number; log10x_only_values: number; customer_only_values: number }>;
   top_below_threshold: Array<{ log10x_side: string; customer_side: string; jaccard: number; shared_values: number; log10x_only_values: number; customer_only_values: number }>;
+  human_summary: string;
 }
 
 export async function executeDiscoverJoin(
@@ -83,25 +82,18 @@ export async function executeDiscoverJoin(
     window?: string;
     timeRange?: string;
     environment?: string;
-    view?: 'summary' | 'markdown';
   },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
-  const view = args.view ?? 'summary';
   const telemetry = newTelemetry();
   args.force_refresh = args.force_refresh ?? false;
   args.minimum_jaccard = args.minimum_jaccard ?? 0.7;
   const resolution = await resolveBackend();
   if (!resolution.backend) {
-    const md = customerMetricsNotConfiguredMessage(formatDetectionTrace(resolution.trace));
-    if (view === 'markdown') {
-      return buildMarkdownEnvelope({
-        tool: 'log10x_discover_join',
-        summary: { headline: 'Customer metrics backend not configured.' },
-        markdown: md,
-      });
-    }
-    const unified = buildUnifiedFields({ status: 'error', telemetry, humanSummary: 'Customer metrics backend not configured.' });
+    // Detection trace kept available for the not-configured remediation hint
+    // surfaced through unified.error; markdown wrapping is no longer offered.
+    void customerMetricsNotConfiguredMessage(formatDetectionTrace(resolution.trace));
+    const unified = buildUnifiedFields({ status: 'error', telemetry, humanSummary: 'Customer metrics backend not configured — discover_join cannot run.' });
     return buildEnvelope({
       tool: 'log10x_discover_join',
       view: 'summary',
@@ -138,14 +130,6 @@ export async function executeDiscoverJoin(
     ? await discoverJoin(env, backend, opts)
     : await getOrDiscoverJoin(env, backend, opts);
 
-  const md = renderJoinResult(result, backend.backendType, backend.endpoint, windowSeconds);
-  if (view === 'markdown') {
-    return buildMarkdownEnvelope({
-      tool: 'log10x_discover_join',
-      summary: { headline: result.status === 'joined' && result.joinKey ? `Join key: ${result.joinKey.log10xSide} ↔ ${result.joinKey.customerSide} (Jaccard ${result.joinKey.jaccard.toFixed(3)})` : 'No join key found above Jaccard threshold.' },
-      markdown: md,
-    });
-  }
   const data: DiscoverJoinSummary = {
     status: result.status === 'joined' ? 'joined' : 'no_join_available',
     backend: backend.backendType,
@@ -157,11 +141,13 @@ export async function executeDiscoverJoin(
     join_key: result.joinKey ? joinPairToData(result.joinKey) : undefined,
     runner_ups: result.runnerUps.map(joinPairToData),
     top_below_threshold: result.status === 'no_join_available' ? result.probed.slice(0, 8).map(joinPairToData) : [],
+    human_summary: '',
   };
+  data.human_summary = buildHumanSummary(data, args.minimum_jaccard);
   const headline = data.join_key
     ? `Join key: ${data.join_key.log10x_side} ↔ ${data.join_key.customer_side} (Jaccard ${data.join_key.jaccard.toFixed(3)}, ${data.runner_ups.length} runner-up${data.runner_ups.length !== 1 ? 's' : ''}).`
     : `No join pair above Jaccard ${args.minimum_jaccard}. Cross-pillar primitives refuse for anchors that need a structural join.`;
-  const unified = buildUnifiedFields({ status: 'success', telemetry, humanSummary: headline });
+  const unified = buildUnifiedFields({ status: 'success', telemetry, humanSummary: data.human_summary });
   // discover-join's `data.status` carries tool-specific values
   // ('joined' / 'no_join_available'), so spread unified WITHOUT its status.
   const { status: _unifiedStatus, ...unifiedRest } = unified;
@@ -196,6 +182,7 @@ function joinPairToData(p: JoinPair) {
 /** Parse a Prometheus-style window string ("10m", "1h", "30s") to seconds. */
 function parseWindowToSeconds(s: string): number {
   const m = s.trim().match(/^(\d+)([smhdw])$/);
+  // KEEP (schema-violation): freeform string the Zod layer cannot pre-validate.
   if (!m) throw new Error(`Invalid window: "${s}". Expected format like "10m", "1h", "30s", "2d".`);
   const n = parseInt(m[1], 10);
   const unit = m[2];
@@ -203,91 +190,16 @@ function parseWindowToSeconds(s: string): number {
   return n * unitSeconds[unit];
 }
 
-function renderJoinResult(
-  result: JoinDiscoveryResult,
-  backendType: string,
-  endpoint: string,
-  windowSeconds?: number
-): string {
-  const lines: string[] = [];
-  lines.push('## Cross-pillar join discovery');
-  lines.push('');
-  lines.push(`**Customer backend**: ${backendType} (${endpoint})`);
-  lines.push(`**Cached**: ${result.cachedForSession ? 'yes (session cache)' : 'no (fresh probe)'}`);
-  if (windowSeconds) {
-    lines.push(`**Window**: last ${windowSeconds}s (stale label values excluded)`);
-  } else {
-    lines.push(`**Window**: all-time (stale label values from decommissioned series are included — pass \`window\` to filter)`);
+function buildHumanSummary(data: DiscoverJoinSummary, minimumJaccard: number): string {
+  if (data.status === 'joined' && data.join_key) {
+    const jk = data.join_key;
+    const runners = data.runner_ups.length;
+    return `Found a join key: log10x label \`${jk.log10x_side}\` matches customer label \`${jk.customer_side}\` at Jaccard ${jk.jaccard.toFixed(3)} (${jk.shared_values} shared values). ${runners} runner-up${runners !== 1 ? 's' : ''} above 0.5. Cross-pillar primitives will reuse this join automatically.`;
   }
-  lines.push(`**Labels probed on Log10x side**: ${result.probedLabelsLog10x.join(', ')}`);
-  lines.push(`**Labels probed on customer side**: ${result.probedLabelsCustomer.join(', ') || '(none — backend returned empty label universe)'}`);
-  lines.push('');
-
-  if (result.status === 'joined' && result.joinKey) {
-    lines.push(`### Primary join key`);
-    lines.push('');
-    lines.push(formatPair(result.joinKey));
-    lines.push('');
-
-    if (result.runnerUps.length > 0) {
-      lines.push('### Runner-ups (above 0.5 Jaccard)');
-      lines.push('');
-      for (const p of result.runnerUps) {
-        lines.push(formatPair(p));
-      }
-      lines.push('');
-    }
-
-    lines.push('**Next action**: the cross-pillar primitives will reuse this join key automatically. Compose `log10x_metrics_that_moved` → `log10x_rank_by_shape_similarity` → `log10x_metric_overlay` starting from a Log10x pattern OR a customer metric anchor.');
-    // Structured chain hint so autonomous walkers don't need to
-    // prose-parse the markdown above.
-    const next: NextAction[] = [
-      {
-        tool: 'log10x_metrics_that_moved',
-        args: {},
-        reason: 'first composition step: deterministic filter on which candidates moved with the anchor',
-      },
-      {
-        tool: 'log10x_rank_by_shape_similarity',
-        args: {},
-        reason: 'second step on filtered candidates: Pearson + signed lag without tier framing',
-      },
-      {
-        tool: 'log10x_metric_overlay',
-        args: {},
-        reason: 'third step: aligned anchor+candidate timeseries for the agent to interpret',
-      },
-    ];
-    const block = renderNextActions(next);
-    if (block) lines.push('', block);
-    return lines.join('\n');
-  }
-
-  // status === 'no_join_available'
-  lines.push('### Status: no_join_available');
-  lines.push('');
-  lines.push('**No label pair reached the Jaccard threshold.** Cross-pillar correlation cannot proceed for anchors that require a structural join. See the refusal response for details.');
-  lines.push('');
-  lines.push('### Top scoring pairs (below threshold, for reference)');
-  lines.push('');
-  const topProbed = result.probed.slice(0, 8);
-  if (topProbed.length === 0) {
-    lines.push('_No label pairs were probed. Either the Log10x side or the customer backend returned an empty label universe._');
-  } else {
-    for (const p of topProbed) {
-      lines.push(formatPair(p));
-    }
-  }
-  lines.push('');
-  lines.push('**Recommended actions**:');
-  lines.push('1. If your customer backend has service-level metrics (`service`, `service.name`, `app`), correlate against those instead of host/instance-level metrics.');
-  lines.push('2. Call `log10x_customer_metrics_query` with a broad PromQL expression to explore the backend\'s label universe and find a natural join dimension.');
-  lines.push('3. If you expected a join and none appeared, check `log10x_doctor` for the `cross_pillar_enrichment_floor` check to verify what labels Log10x has on this environment.');
-  lines.push('4. Re-run with `minimum_jaccard: 0.5` for exploratory discovery if you suspect the join is weak but still useful.');
-
-  return lines.join('\n');
-}
-
-function formatPair(p: JoinPair): string {
-  return `- \`${p.log10xSide}\` ↔ \`${p.customerSide}\` — Jaccard ${p.jaccard.toFixed(3)} (${p.sharedValues} shared, ${p.log10xOnlyValues} Log10x-only, ${p.customerOnlyValues} customer-only)`;
+  const probed = data.top_below_threshold.length;
+  const best = probed > 0 ? data.top_below_threshold[0] : undefined;
+  const bestHint = best
+    ? ` Best below-threshold pair: \`${best.log10x_side}\` ↔ \`${best.customer_side}\` at Jaccard ${best.jaccard.toFixed(3)}.`
+    : ' No label pairs were probed; one side returned an empty label universe.';
+  return `No label pair reached the Jaccard ${minimumJaccard} threshold across ${data.labels_probed_log10x.length} log10x-side and ${data.labels_probed_customer.length} customer-side labels.${bestHint} Cross-pillar correlation cannot proceed for anchors that need a structural join.`;
 }

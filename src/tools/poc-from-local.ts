@@ -21,7 +21,7 @@ import { z } from 'zod';
 import { sampleFromKubectl, type LocalSourceOptions } from '../lib/local-source.js';
 import { extractPatterns } from '../lib/pattern-extraction.js';
 import { fmtBytes, fmtCount, fmtDollar, fmtPct } from '../lib/format.js';
-import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
 import type { PrimitiveError } from '../lib/primitive-errors.js';
 
@@ -64,7 +64,6 @@ export const pocFromLocalSchema = {
     .optional()
     .default(true)
     .describe('Templatize via locally-installed `tenx` (true) or the public Log10x paste endpoint (false). Default true.'),
-  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.sample, data.patterns, data.projections). markdown wraps the rendered report in data.markdown.'),
 };
 
 export interface PocFromLocalArgs {
@@ -75,7 +74,6 @@ export interface PocFromLocalArgs {
   max_pods?: number;
   privacy_mode?: boolean;
   ai_prettify?: boolean;
-  view?: 'summary' | 'markdown';
 }
 
 interface PriceRow {
@@ -94,7 +92,6 @@ const INDUSTRY_PRICING: PriceRow[] = [
 ];
 
 export async function executePocFromLocal(args: PocFromLocalArgs): Promise<StructuredOutput> {
-  const view = args.view ?? 'summary';
   const telemetry = newTelemetry();
   let inner: Awaited<ReturnType<typeof executePocFromLocalInner>>;
   try {
@@ -107,21 +104,16 @@ export async function executePocFromLocal(args: PocFromLocalArgs): Promise<Struc
       suggested_backoff_ms: null,
       hint: msg.slice(0, 400),
     };
+    const human_summary = `poc_from_local failed: ${err.hint}`;
     return buildEnvelope({
       tool: 'log10x_poc_from_local',
       view: 'summary',
       summary: { headline: `POC from kubectl failed: ${err.error_type}` },
       data: {
         events_pulled: 0,
-        ...buildUnifiedFields({ status: 'error', telemetry, humanSummary: err.hint, error: err }),
+        ...buildUnifiedFields({ status: 'error', telemetry, humanSummary: human_summary, error: err }),
+        human_summary,
       },
-    });
-  }
-  if (view === 'markdown') {
-    return buildMarkdownEnvelope({
-      tool: 'log10x_poc_from_local',
-      summary: { headline: inner.events_pulled > 0 ? `POC from kubectl: ${inner.events_pulled} events, ${inner.distinct_patterns} patterns` : 'POC from kubectl: no log lines pulled' },
-      markdown: inner.markdown,
     });
   }
   const hasData = inner.events_pulled > 0;
@@ -132,15 +124,30 @@ export async function executePocFromLocal(args: PocFromLocalArgs): Promise<Struc
   const headline = hasData
     ? `POC from kubectl: ${Math.round(inner.daily_pct_reduction_low ?? 0)}-${Math.round(inner.daily_pct_reduction_high ?? 0)}% byte reduction across ${inner.distinct_patterns} pattern${inner.distinct_patterns !== 1 ? 's' : ''} (${inner.events_pulled.toLocaleString()} lines from ${inner.pods_sampled} pod${inner.pods_sampled !== 1 ? 's' : ''}). At list price across vendors: ${fmtDollar(inner.daily_dollar_projection_low ?? 0)}-${fmtDollar(inner.daily_dollar_projection_high ?? 0)}/day.`
     : 'POC from kubectl: no log lines pulled. Check namespace + pod filter.';
+  const human_summary = buildHumanSummary(inner, hasData);
   return buildEnvelope({
     tool: 'log10x_poc_from_local',
     view: 'summary',
     summary: { headline },
-    data: { ...inner, ...buildUnifiedFields({ status: hasData ? 'success' : 'no_signal', telemetry, humanSummary: headline }) },
+    data: { ...inner, ...buildUnifiedFields({ status: hasData ? 'success' : 'no_signal', telemetry, humanSummary: human_summary }), human_summary },
     actions: hasData
       ? [{ tool: 'log10x_resolve_batch', args: { source: 'text', text: '...' }, reason: 'run the same sample through resolve_batch for per-pattern variable concentration + next actions' }]
       : [],
   });
+}
+
+// Three sentences max, plain prose. POC is always list-price — kubectl
+// sample → industry pricing matrix, no customer rate involved — so
+// dollar figures are allowed per the §C rate_source rule.
+function buildHumanSummary(inner: PocFromLocalInner, hasData: boolean): string {
+  if (!hasData) {
+    return `POC from kubectl pulled 0 log lines across the requested window. Either no pods matched the namespace + pod filter, or kubectl is not reachable. Confirm the namespace and re-run with a wider window or pod selector.`;
+  }
+  const lo = Math.round(inner.daily_pct_reduction_low ?? 0);
+  const hi = Math.round(inner.daily_pct_reduction_high ?? 0);
+  const dlo = fmtDollar(inner.daily_dollar_projection_low ?? 0);
+  const dhi = fmtDollar(inner.daily_dollar_projection_high ?? 0);
+  return `Sampled ${inner.events_pulled.toLocaleString()} log lines from ${inner.pods_sampled} pod${inner.pods_sampled !== 1 ? 's' : ''} (${fmtBytes(inner.total_bytes)}) covering ${inner.distinct_patterns} distinct pattern${inner.distinct_patterns !== 1 ? 's' : ''}. Estimated byte reduction is ${lo}-${hi}% per day. At industry list price the same volume costs roughly ${dlo}-${dhi}/day across vendors.`;
 }
 
 interface PocFromLocalInner {

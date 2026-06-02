@@ -24,7 +24,7 @@ import {
 } from '../lib/metrics-backend.js';
 import { DEFAULT_LABELS, type LabelNameMap } from '../lib/promql.js';
 import { validateBackend, renderValidationResult } from '../lib/backend-validator.js';
-import { buildEnvelope, buildMarkdownEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
 const promAuthSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('none') }),
@@ -77,7 +77,6 @@ export const configureEnvSchema = {
     .describe(
       'When true, run validation and return the result but DO NOT write the env to `~/.log10x/envs.json`. Useful for dry-run checks during conversational onboarding.'
     ),
-  view: z.enum(['summary', 'markdown']).default('summary').describe('summary returns the typed envelope (data.ok, data.nickname, data.action, data.validation). markdown wraps the validation report in data.markdown.'),
 };
 
 interface ConfigureEnvArgs {
@@ -86,7 +85,6 @@ interface ConfigureEnvArgs {
   labels?: Partial<LabelNameMap>;
   isDefault?: boolean;
   validateOnly?: boolean;
-  view?: 'summary' | 'markdown';
 }
 
 function envsJsonPath(): string {
@@ -105,11 +103,13 @@ async function readEnvsJsonRaw(): Promise<EnvsJsonEntry[]> {
     const raw = await fs.readFile(envsJsonPath(), 'utf8');
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) {
+      // KEEP (internal-state): corrupt user file. Surfaced via wrap().
       throw new Error(`Existing ${envsJsonPath()} is not a JSON array.`);
     }
     return parsed as EnvsJsonEntry[];
   } catch (e: unknown) {
     if ((e as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    // KEEP (internal-state): unexpected fs read failure on user's envs.json.
     throw e;
   }
 }
@@ -121,16 +121,20 @@ async function writeEnvsJson(entries: EnvsJsonEntry[]): Promise<void> {
   await fs.writeFile(envsJsonPath(), content, { mode: 0o600 });
 }
 
-export async function executeConfigureEnv(args: ConfigureEnvArgs): Promise<string | StructuredOutput> {
-  const view = args.view ?? 'summary';
-  const result = await executeConfigureEnvInner(args);
-  if (view === 'markdown') {
-    return buildMarkdownEnvelope({
-      tool: 'log10x_configure_env',
-      summary: { headline: result.ok ? `Env "${result.nickname}" ${result.action} in envs.json` : `Configure env refused: ${result.error ?? 'validation failed'}` },
-      markdown: result.markdown,
-    });
+function buildHumanSummary(result: ConfigureEnvInner): string {
+  if (!result.ok) {
+    return `configure_env failed: ${result.error ?? 'validation failed'}.`;
   }
+  if (result.action === 'validated_only') {
+    return `Env "${result.nickname}" validated against the live backend; not persisted (validateOnly=true).`;
+  }
+  const envCount = result.total_envs ?? 0;
+  const defaultNote = result.is_default ? ` and set as default` : '';
+  return `Env "${result.nickname}" was ${result.action}${defaultNote}; ${envCount} env${envCount === 1 ? '' : 's'} now configured. Backend reachable and engine metrics validated.`;
+}
+
+export async function executeConfigureEnv(args: ConfigureEnvArgs): Promise<string | StructuredOutput> {
+  const result = await executeConfigureEnvInner(args);
   return buildEnvelope({
     tool: 'log10x_configure_env',
     view: 'summary',
@@ -144,6 +148,7 @@ export async function executeConfigureEnv(args: ConfigureEnvArgs): Promise<strin
       envs_json_path: result.envs_json_path,
       validation_passed: result.validation_passed,
       error: result.error,
+      human_summary: buildHumanSummary(result),
     },
   });
 }
@@ -169,6 +174,7 @@ async function executeConfigureEnvInner(args: ConfigureEnvArgs): Promise<Configu
       const md = `## Configuration error\n\n${e.message}\n\nFix and re-run \`log10x_configure_env\`.`;
       return { ok: false, nickname: args.nickname, error: e.message, markdown: md };
     }
+    // KEEP (internal-state): unexpected backend-construction failure.
     throw e;
   }
 
