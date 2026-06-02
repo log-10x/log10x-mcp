@@ -14,9 +14,8 @@
  *                            user explicitly picks one.
  *
  * routes_to:
- *   Apply   → configure_engine  (engine_* modes)
- *             pattern_mitigate  (siem_filter / forwarder_filter)
- *             advise_retriever  (engine_route_s3)
+ *   Apply   → configure_engine  (drop / sample / compact / tier_down / offload)
+ *             null              (observe_only — no apply step)
  *   Preview → log10x_preview_filter
  */
 
@@ -33,13 +32,12 @@ import type { MustAskUser } from './log10x-start.js';
 // ─── Schema ───────────────────────────────────────────────────────────────────
 
 export const EXPLAIN_MODES = [
-  'report_only',
-  'siem_filter',
-  'forwarder_filter',
-  'engine_in_path_drop',
-  'engine_in_path_sample',
-  'engine_route_s3',
-  'siem_tier_down',
+  'drop',
+  'sample',
+  'compact',
+  'tier_down',
+  'offload',
+  'observe_only',
 ] as const;
 
 export type ExplainMode = typeof EXPLAIN_MODES[number];
@@ -54,13 +52,12 @@ export const explainModeSchema = {
     .enum(EXPLAIN_MODES)
     .describe(
       'Which enforcement mode to explain. ' +
-      '`report_only` = 10x observes and fingerprints but does not act. ' +
-      '`siem_filter` = exclusion rule in the SIEM (Datadog/Splunk/CloudWatch/ES). ' +
-      '`forwarder_filter` = drop rule in the forwarder (Fluent Bit / Fluentd / OTel Collector). ' +
-      '`engine_in_path_drop` = engine receiver hard-drops matched patterns before the forwarder delivers them. ' +
-      '`engine_in_path_sample` = engine receiver passes 1-in-N events. ' +
-      '`engine_route_s3` = engine diverts matched events to a customer-owned S3 bucket (10x overflow). ' +
-      '`siem_tier_down` = engine stamps tenx_action marker; SIEM routes to a cheaper storage tier (Datadog Flex / CloudWatch IA).'
+      '`drop` = engine hard-drops matched patterns at the Receiver before delivery. ' +
+      '`sample` = engine passes 1-in-N events through to the SIEM. ' +
+      '`compact` = engine compresses events 5-10x losslessly; all events still reach the SIEM. ' +
+      '`tier_down` = engine stamps tenx_action marker; SIEM routes to a cheaper storage tier (Datadog Flex / CloudWatch IA). ' +
+      '`offload` = engine diverts matched events to a customer-owned S3 bucket; recoverable via log10x_retriever_query. ' +
+      '`observe_only` = engine observes and fingerprints but does not act; use to baseline volume before committing.'
     ),
   destination: z
     .string()
@@ -85,7 +82,7 @@ export interface ExplainModeEnvelope {
   must_ask_user: MustAskUser;
   forbidden_next_actions: string[];
   routes_to: {
-    apply: { tool: string; args: Record<string, unknown> };
+    apply: { tool: string; args: Record<string, unknown> } | null;
     preview: { tool: string; args: Record<string, unknown> };
   };
 }
@@ -96,55 +93,28 @@ interface ModeMetadata {
   what_it_does: string;
   what_you_need: string;
   who_enforces: 'engine' | 'SIEM' | 'forwarder';
-  apply_tool: string;
-  apply_args: (service: string, destination: string | null) => Record<string, unknown>;
+  apply_tool: string | null;
+  apply_args: ((service: string, destination: string | null) => Record<string, unknown>) | null;
+  what_survives: string;
 }
 
 const MODE_METADATA: Record<ExplainMode, ModeMetadata> = {
-  report_only: {
+  drop: {
     what_it_does:
-      '10x fingerprints every log pattern and publishes cost metrics. Nothing is filtered or suppressed. ' +
-      'Use this to see what your pipeline looks like before committing to any reduction.',
-    what_you_need:
-      'The 10x Reporter DaemonSet must be running alongside your forwarder. No other changes needed.',
-    who_enforces: 'engine',
-    apply_tool: 'log10x_configure_engine',
-    apply_args: (service) => ({ service, default_action: 'pass' }),
-  },
-  siem_filter: {
-    what_it_does:
-      '10x generates an exclusion rule for your log analyzer. Matched events stop being indexed ' +
-      'or stored, but they still travel through your pipeline up to that point.',
-    what_you_need:
-      'Access to apply a config in your log analyzer (Datadog exclusion filter, Splunk transforms.conf, ' +
-      'CloudWatch subscription filter, Elasticsearch index lifecycle policy).',
-    who_enforces: 'SIEM',
-    apply_tool: 'log10x_pattern_mitigate',
-    apply_args: (service) => ({ pattern: service }),
-  },
-  forwarder_filter: {
-    what_it_does:
-      '10x generates a drop rule for your forwarder (Fluent Bit, Fluentd, OpenTelemetry Collector, etc.). ' +
-      'Matched events never leave your environment, saving both analyzer ingest cost and outbound bandwidth.',
-    what_you_need:
-      'Access to reload your forwarder config (seconds to minutes). No cluster restart required.',
-    who_enforces: 'forwarder',
-    apply_tool: 'log10x_pattern_mitigate',
-    apply_args: (service) => ({ pattern: service }),
-  },
-  engine_in_path_drop: {
-    what_it_does:
-      '10x Receiver sits in-path and hard-drops matched patterns at the forwarder sidecar before delivery. ' +
-      'Events are discarded permanently — nothing reaches the analyzer.',
+      'No events reach the SIEM; engine drops at the Receiver. ' +
+      'The 10x Receiver sits in-path and hard-drops matched patterns at the forwarder sidecar before delivery. ' +
+      'Events are discarded permanently.',
     what_you_need:
       'The 10x Receiver sidecar must be installed alongside your forwarder (in-path). ' +
       'Requires a GitOps repo configured so 10x can open the action-plan PR.',
     who_enforces: 'engine',
     apply_tool: 'log10x_configure_engine',
     apply_args: (service) => ({ service, default_action: 'drop' }),
+    what_survives: 'No events reach the SIEM. Events are discarded at the Receiver.',
   },
-  engine_in_path_sample: {
+  sample: {
     what_it_does:
+      '1-in-N events reach the SIEM; trend remains valid. ' +
       '10x Receiver passes 1-in-N events through to your analyzer. ' +
       'Aggregate trends and alerting stay valid at a fraction of the ingest cost. ' +
       'Default sample rate is 1 in 10 (configurable).',
@@ -154,24 +124,27 @@ const MODE_METADATA: Record<ExplainMode, ModeMetadata> = {
     who_enforces: 'engine',
     apply_tool: 'log10x_configure_engine',
     apply_args: (service) => ({ service, default_action: 'sample' }),
+    what_survives: '1-in-N events reach the SIEM (default 1 in 10). Trend and alerting remain valid.',
   },
-  engine_route_s3: {
+  compact: {
     what_it_does:
-      '10x Receiver diverts matched events to a customer-owned S3 bucket instead of the analyzer. ' +
-      'Events stay recoverable on demand (incident replay, compliance audit) via log10x_retriever_query. ' +
-      'Nothing is permanently lost.',
+      'All events reach the SIEM, each compressed 5-10x. ' +
+      'Engine encodes events into the 10x compact wire format. ' +
+      'All events arrive in the SIEM; fields stay searchable.',
     what_you_need:
-      'The 10x Receiver sidecar in-path AND the 10x Retriever set up against your S3 bucket. ' +
+      'The 10x Receiver sidecar must be installed in-path. ' +
+      'Compatible SIEM (Splunk, Elasticsearch, ClickHouse, Azure Monitor, GCP Logging, Sumo Logic). ' +
       'GitOps repo configured for the action-plan PR.',
     who_enforces: 'engine',
-    apply_tool: 'log10x_advise_retriever',
-    apply_args: (_service, _dest) => ({}),
+    apply_tool: 'log10x_configure_engine',
+    apply_args: (service) => ({ service, default_action: 'compact' }),
+    what_survives: 'All events reach the SIEM, each compressed by 5-10x. Fully searchable.',
   },
-  siem_tier_down: {
+  tier_down: {
     what_it_does:
-      '10x Receiver stamps matched events with a tenx_action marker. ' +
-      'Your analyzer routes stamped events to a cheaper storage tier ' +
-      '(Datadog Flex Logs, CloudWatch Infrequent Access). ' +
+      'Events reach the SIEM at a cheaper storage tier (Datadog Flex / CloudWatch IA). ' +
+      'Engine stamps matched events with a tenx_action marker. ' +
+      'Your analyzer routes stamped events to a cheaper storage tier. ' +
       'Events remain searchable at the lower tier; only storage cost drops.',
     what_you_need:
       'The 10x Receiver in-path AND a compatible analyzer (Datadog or CloudWatch). ' +
@@ -179,6 +152,33 @@ const MODE_METADATA: Record<ExplainMode, ModeMetadata> = {
     who_enforces: 'engine',
     apply_tool: 'log10x_configure_engine',
     apply_args: (service) => ({ service, default_action: 'tier_down' }),
+    what_survives: 'Events reach the SIEM at a cheaper storage tier. Indexed fields preserved.',
+  },
+  offload: {
+    what_it_does:
+      'Events route to your S3 bucket; recoverable via log10x_retriever_query. ' +
+      '10x Receiver diverts matched events to a customer-owned S3 bucket instead of the analyzer. ' +
+      'Events stay recoverable on demand (incident replay, compliance audit). ' +
+      'Nothing is permanently lost.',
+    what_you_need:
+      'The 10x Receiver sidecar in-path AND the 10x Retriever set up against your S3 bucket. ' +
+      'GitOps repo configured for the action-plan PR.',
+    who_enforces: 'engine',
+    apply_tool: 'log10x_configure_engine',
+    apply_args: (service) => ({ service, default_action: 'offload' }),
+    what_survives: 'Events route to your S3 bucket instead of the SIEM. Recoverable via log10x_retriever_query.',
+  },
+  observe_only: {
+    what_it_does:
+      'All events pass unchanged; pattern metrics flow to TSDB. ' +
+      '10x fingerprints every log pattern and publishes cost metrics. Nothing is filtered or suppressed. ' +
+      'Use this to see what your pipeline looks like before committing to any reduction.',
+    what_you_need:
+      'The 10x Reporter DaemonSet must be running alongside your forwarder. No other changes needed.',
+    who_enforces: 'engine',
+    apply_tool: null,
+    apply_args: null,
+    what_survives: 'All events pass unchanged. Pattern metrics flow to TSDB.',
   },
 };
 
@@ -250,13 +250,12 @@ function renderVerbatim(args: {
   if (costPerMonth !== null && bytesPerMonth !== null && args.ratePerGb !== null) {
     // Rough mode-specific saving estimate — shown with explicit dollar math
     const savingsFrac: Record<ExplainMode, number> = {
-      report_only: 0,
-      siem_filter: 1.0,
-      forwarder_filter: 1.0,
-      engine_in_path_drop: 1.0,
-      engine_in_path_sample: 0.9,
-      engine_route_s3: 1.0,
-      siem_tier_down: 0.6,
+      observe_only: 0,
+      drop: 1.0,
+      sample: 0.9,
+      compact: 0.8,
+      offload: 1.0,
+      tier_down: 0.6,
     };
     const frac = savingsFrac[mode];
     if (frac > 0) {
@@ -266,7 +265,7 @@ function renderVerbatim(args: {
       savingsLine =
         `  Potential reduction: ${affectedGb.toFixed(1)} GB times $${args.ratePerGb.toFixed(2)}/GB = $${savingsUsd.toFixed(0)}/mo.`;
     } else {
-      savingsLine = `  report_only makes no change to cost — it is an observation-only mode.`;
+      savingsLine = `  observe_only makes no change to cost — it is an observation-only mode.`;
     }
   }
 
@@ -331,20 +330,29 @@ export async function executeExplainMode(args: {
     ratePerGb,
   });
 
-  const mustAskUser: MustAskUser = {
-    question: `Do you want to apply ${args.mode} to ${args.service}, or first preview which patterns would be affected?`,
-    options: [
-      `1. Apply — route to ${meta.apply_tool}`,
-      `2. Preview — show me the pattern list first (log10x_preview_filter)`,
-    ],
-  };
+  // observe_only has no apply step — nothing to enforce.
+  const applyRoute = meta.apply_tool && meta.apply_args
+    ? { tool: meta.apply_tool, args: meta.apply_args(args.service, destination) }
+    : null;
+
+  const mustAskUser: MustAskUser = applyRoute
+    ? {
+        question: `Do you want to apply ${args.mode} to ${args.service}, or first preview which patterns would be affected?`,
+        options: [
+          `1. Apply — route to ${meta.apply_tool}`,
+          `2. Preview — show me the pattern list first (log10x_preview_filter)`,
+        ],
+      }
+    : {
+        question: `${args.mode} is an observe-only mode — no enforcement applied. Do you want to see which patterns would be affected?`,
+        options: [
+          `1. Preview — show me the pattern list (log10x_preview_filter)`,
+        ],
+      };
 
   // routes_to block gives the agent precise next-call args for each branch
   const routesTo = {
-    apply: {
-      tool: meta.apply_tool,
-      args: meta.apply_args(args.service, destination),
-    },
+    apply: applyRoute,
     preview: {
       tool: 'log10x_preview_filter',
       args: { service: args.service, mode: args.mode },
@@ -375,16 +383,24 @@ export async function executeExplainMode(args: {
     (bytesPerMonth !== null
       ? `Service volume: ${(bytesPerMonth / (1024 ** 3)).toFixed(1)} GB/mo. `
       : '') +
-    `Awaiting user choice (Apply or Preview) before routing.`;
+    (applyRoute
+      ? `Awaiting user choice (Apply or Preview) before routing.`
+      : `observe_only mode — no apply step. Awaiting user choice.`);
+
+  const actions = applyRoute
+    ? [
+        { tool: applyRoute.tool, args: applyRoute.args, reason: 'Apply path — call after user picks Apply', role: 'alternative' as const },
+        { tool: 'log10x_preview_filter', args: routesTo.preview.args, reason: 'Preview path — call after user picks Preview', role: 'alternative' as const },
+      ]
+    : [
+        { tool: 'log10x_preview_filter', args: routesTo.preview.args, reason: 'Preview path — call after user picks Preview', role: 'alternative' as const },
+      ];
 
   return buildEnvelope({
     tool: 'log10x_explain_mode',
     view: 'summary',
     summary: { headline },
     data: envelope,
-    actions: [
-      { tool: routesTo.apply.tool, args: routesTo.apply.args, reason: 'Apply path — call after user picks Apply', role: 'alternative' },
-      { tool: 'log10x_preview_filter', args: routesTo.preview.args, reason: 'Preview path — call after user picks Preview', role: 'alternative' },
-    ],
+    actions,
   });
 }

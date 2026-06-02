@@ -90,7 +90,7 @@ test('GA pattern_mitigate: envelope shape — recommendation_audit + status vali
       basis: string;
       n_options_enabled: number;
       n_options_dimmed: number;
-      capability_sources: { gitops: string; forwarder: string; analyzer: string; receiver: string; retriever: string };
+      capability_sources: { gitops: string; forwarder: string; analyzer: string; receiver: string; retriever: string; receiver_in_path: string };
       snapshot_age_seconds: number | null;
     };
   };
@@ -104,9 +104,43 @@ test('GA pattern_mitigate: envelope shape — recommendation_audit + status vali
       ['envs_json', 'env_var', 'snapshot', 'absent'].includes(d.recommendation_audit.capability_sources[key]),
     );
   }
-  for (const key of ['receiver', 'retriever'] as const) {
+  for (const key of ['receiver', 'retriever', 'receiver_in_path'] as const) {
     assert.ok(['snapshot', 'absent'].includes(d.recommendation_audit.capability_sources[key]));
   }
+});
+
+// ── Receiver-gating tests ────────────────────────────────────────────
+
+test('GA pattern_mitigate: options 1 and 2 are dimmed when receiverInPath is false (no snapshot)', async () => {
+  const before = snapshotEnv();
+  clearAllLog10xEnv();
+  // No snapshot_id → receiverInPath stays false
+  process.env.LOG10X_GH_REPO = 'acme/config';
+  try {
+    const out = await executePatternMitigate({ pattern: 'payment_gateway_timeout' });
+    if (typeof out === 'string') throw new Error('expected envelope');
+    const d = out.data as { options: Array<{ id: string; enabled: boolean; disabled_reason?: string }> };
+    const opt1 = d.options.find((o) => o.id === 'drop_at_analyzer')!;
+    const opt2 = d.options.find((o) => o.id === 'drop_at_forwarder')!;
+    assert.equal(opt1.enabled, false, 'drop_at_analyzer must be dimmed without Receiver');
+    assert.equal(opt2.enabled, false, 'drop_at_forwarder must be dimmed without Receiver');
+    assert.ok(opt1.disabled_reason?.includes('Receiver'), 'disabled_reason must mention Receiver');
+    assert.ok(opt2.disabled_reason?.includes('Receiver'), 'disabled_reason must mention Receiver');
+  } finally {
+    restoreEnv(before);
+  }
+});
+
+test('GA pattern_mitigate: CapabilitySources includes receiver_in_path field', async () => {
+  const out = await executePatternMitigate({ pattern: 'some_pattern' });
+  if (typeof out === 'string') throw new Error('expected envelope');
+  const d = out.data as {
+    recommendation_audit: { capability_sources: { receiver_in_path: string } };
+  };
+  assert.ok(
+    ['snapshot', 'absent'].includes(d.recommendation_audit.capability_sources.receiver_in_path),
+    'receiver_in_path must be snapshot or absent',
+  );
 });
 
 // ── status: success via env_vars_only ────────────────────────────────

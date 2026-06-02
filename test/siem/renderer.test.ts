@@ -73,7 +73,7 @@ test('renderPocReport emits all 9 sections', () => {
     '## 3. Service-Level Breakdown',
     '## 4. Receiver Recommendations',
     '## 5. Native SIEM Exclusion Configs',
-    '## 6. Compaction Potential', // Splunk → present
+    '## 6. Compact-byte Ratio (Measured)', // Splunk → present
     '## 7. Risk / Dependency Check',
     '## 8. Deployment Paths',
     '## 9. Appendix',
@@ -105,7 +105,7 @@ test('renderPocReport omits compaction section for non-compacting SIEMs', () => 
     finishedAt: '2026-04-19T00:00:05Z',
     mcpVersion: '1.4.0',
   });
-  assert.ok(!out.markdown.includes('## 6. Compaction Potential'));
+  assert.ok(!out.markdown.includes('## 6. Compact-byte Ratio (Measured)'));
   // Native config block should render Datadog-specific exclusion JSON.
   assert.ok(out.markdown.includes('### Datadog'));
 });

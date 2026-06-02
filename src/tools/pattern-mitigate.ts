@@ -89,6 +89,7 @@ interface CapabilitySources {
   analyzer: 'envs_json' | 'env_var' | 'snapshot' | 'absent';
   receiver: 'snapshot' | 'absent';
   retriever: 'snapshot' | 'absent';
+  receiver_in_path: 'snapshot' | 'absent';
 }
 
 interface RecommendationAudit {
@@ -104,6 +105,12 @@ interface Capabilities {
   /** Receiver pod was discovered (snapshot has a receiver app) OR the active env has a gitops repo. Either way, the mute/compact PR options are reachable. */
   canMute: boolean;
   canCompact: boolean;
+  /**
+   * Whether the Receiver is confirmed to be in-path (stamping tenx_hash on every event).
+   * Options 1 (drop at analyzer) and 2 (drop at forwarder) key on tenx_hash — they are
+   * silently ineffective without the Receiver. When false, those options are dimmed.
+   */
+  receiverInPath: boolean;
   /** Retriever was discovered — muted events would land in S3 archive recoverably. */
   hasRetrieverArchive: boolean;
   /** Source of the gitops_repo, if any. Used in the rendered explanation so the user understands where the PR will be opened. */
@@ -134,6 +141,10 @@ interface Capabilities {
   snapshotIdUsed?: string;
   snapshotAgeSeconds: number | null;
 }
+
+const RECEIVER_REQUIRED_PROSE =
+  'Install the 10x Receiver in-path first. The drop rule keys on the tenx_hash field, ' +
+  'which the Receiver stamps. Without the Receiver, this rule matches nothing.';
 
 /**
  * SIEM vendors the exclusion_filter tool can generate native configs for.
@@ -170,6 +181,7 @@ async function detectCapabilities(snapshotId?: string): Promise<Capabilities> {
   const out: Capabilities = {
     canMute: false,
     canCompact: false,
+    receiverInPath: false,
     hasRetrieverArchive: false,
     sources: {
       gitops: 'absent',
@@ -177,6 +189,7 @@ async function detectCapabilities(snapshotId?: string): Promise<Capabilities> {
       analyzer: 'absent',
       receiver: 'absent',
       retriever: 'absent',
+      receiver_in_path: 'absent',
     },
     snapshotAgeSeconds: null,
   };
@@ -284,6 +297,9 @@ async function detectCapabilities(snapshotId?: string): Promise<Capabilities> {
       // there's a receiver pod the GitOps PR will target.
       if (snap.recommendations.receiverGitopsRepo) {
         out.sources.receiver = 'snapshot';
+        // Receiver is in-path when the snapshot discovered it as a running pod.
+        out.receiverInPath = true;
+        out.sources.receiver_in_path = 'snapshot';
       }
       // Retriever presence: a snapshot retains the bucket name when a
       // retriever app was discovered with an S3-target env var.
@@ -332,6 +348,7 @@ interface PatternMitigateSummary {
   env_capabilities: {
     can_mute: boolean;
     can_compact: boolean;
+    receiver_in_path: boolean;
     has_retriever_archive: boolean;
     forwarder_kind?: string;
     analyzer_vendor?: string;
@@ -438,6 +455,7 @@ async function errorEnvelope(args: {
         analyzer: 'absent',
         receiver: 'absent',
         retriever: 'absent',
+        receiver_in_path: 'absent',
       },
       snapshot_age_seconds: null,
     },
@@ -451,6 +469,7 @@ async function errorEnvelope(args: {
     env_capabilities: {
       can_mute: false,
       can_compact: false,
+      receiver_in_path: false,
       has_retriever_archive: false,
     },
     error: args.err,
@@ -480,11 +499,14 @@ async function executePatternMitigateInner(
   lines.push('Pick one. Each option trades off speed-to-effect, where in the pipeline it cuts, and what happens to your data.');
   lines.push('');
 
-  // Option 1 — SIEM-side. Always available conceptually; the wording
-  // depends on whether we know the user's specific analyzer.
+  // Option 1 — SIEM-side. Gated on Receiver being in-path (tenx_hash stamp required).
   const analyzerName = analyzerLabel(caps.analyzerVendor);
   const analyzerSupported = caps.analyzerVendor ? NATIVE_EXCLUSION_VENDORS.has(caps.analyzerVendor) : false;
-  if (analyzerName && analyzerSupported) {
+  if (!caps.receiverInPath) {
+    lines.push(
+      `**1. Drop it at your analyzer.** _Requires Receiver in-path._ ${RECEIVER_REQUIRED_PROSE}`
+    );
+  } else if (analyzerName && analyzerSupported) {
     lines.push(
       `**1. Drop it at ${analyzerName}.** Fastest. We generate a ready-to-apply ${analyzerName} exclusion config; you paste it (or apply via API) and the cost stops within minutes. Events still flow through your pipeline up to ${analyzerName} — they just don't get indexed or stored. Easy to undo in the same UI.`
     );
@@ -499,10 +521,7 @@ async function executePatternMitigateInner(
   }
   lines.push('');
 
-  // Option 2 — Forwarder-side. Generation is via the same exclusion_filter
-  // tool with the forwarder-vendor arg. If we know which forwarder the
-  // customer is running (from the snapshot), we name it; otherwise we
-  // list the supported ones and let the agent ask.
+  // Option 2 — Forwarder-side. Same Receiver gate as option 1.
   const knownForwarder = caps.forwarderKind && caps.forwarderKind !== 'unknown';
   const forwarderLabel: Record<NonNullable<Capabilities['forwarderKind']>, string> = {
     fluentbit: 'Fluent Bit',
@@ -513,7 +532,11 @@ async function executePatternMitigateInner(
     vector: 'Vector',
     unknown: 'forwarder',
   };
-  if (knownForwarder) {
+  if (!caps.receiverInPath) {
+    lines.push(
+      `**2. Drop it at your forwarder.** _Requires Receiver in-path._ ${RECEIVER_REQUIRED_PROSE}`
+    );
+  } else if (knownForwarder) {
     lines.push(
       `**2. Drop it at your forwarder (${forwarderLabel[caps.forwarderKind!]}).** Same idea as option 1 but one step earlier. The events never even leave your environment, so on top of analyzer savings you also save the bandwidth between your forwarder and your analyzer. Requires editing your ${forwarderLabel[caps.forwarderKind!]} config and reloading it (seconds to minutes).`
     );
@@ -616,14 +639,18 @@ async function executePatternMitigateInner(
     const options: PatternMitigateSummary['options'] = [
       {
         id: 'drop_at_analyzer',
-        enabled: analyzerSupported,
-        disabled_reason: analyzerSupported ? undefined : `Native exclusion config not generated for ${analyzerName ?? 'unknown analyzer'} (manual apply required).`,
+        enabled: caps.receiverInPath && analyzerSupported,
+        disabled_reason: !caps.receiverInPath
+          ? RECEIVER_REQUIRED_PROSE
+          : analyzerSupported ? undefined : `Native exclusion config not generated for ${analyzerName ?? 'unknown analyzer'} (manual apply required).`,
         label: `Drop at ${analyzerName ?? 'analyzer'}`,
       },
       {
         id: 'drop_at_forwarder',
-        enabled: Boolean(caps.forwarderKind && caps.forwarderKind !== 'unknown'),
-        disabled_reason: caps.forwarderKind && caps.forwarderKind !== 'unknown' ? undefined : 'forwarder not detected from env / snapshot',
+        enabled: caps.receiverInPath && Boolean(caps.forwarderKind && caps.forwarderKind !== 'unknown'),
+        disabled_reason: !caps.receiverInPath
+          ? RECEIVER_REQUIRED_PROSE
+          : (caps.forwarderKind && caps.forwarderKind !== 'unknown') ? undefined : 'forwarder not detected from env / snapshot',
         label: `Drop at ${caps.forwarderKind ?? 'forwarder'}`,
       },
       {
@@ -675,6 +702,7 @@ async function executePatternMitigateInner(
       env_capabilities: {
         can_mute: caps.canMute,
         can_compact: caps.canCompact,
+        receiver_in_path: caps.receiverInPath,
         has_retriever_archive: caps.hasRetrieverArchive,
         forwarder_kind: caps.forwarderKind,
         analyzer_vendor: caps.analyzerVendor,

@@ -14,7 +14,7 @@
     },
     "log10x_cost_options": {
       "title": "Cost reduction options",
-      "description": "CALL THIS after the user picks 'show me what cutting costs would look like' from log10x_start. Returns the 7-mode action menu (drop / sample / compact / tier_down / offload / manual / pass), each gated by the customer's detected capabilities (receiver tier, SIEM type, offload bucket). Each mode carries a one-line description, who enforces it (engine / SIEM / forwarder / customer), what survives, and the routes_to tool. Manual mode routes to log10x_manual_options; all other modes route to log10x_explain_mode (which explains the mode in service-level plain language, then offers Apply or Preview via log10x_preview_filter). The envelope carries must_render_verbatim (show to user as-is), must_ask_user (numbered question), and forbidden_next_actions (do not call estimate_savings, configure_engine, pattern_mitigate, explain_mode, or manual_options until the user picks).",
+      "description": "CALL THIS after the user picks 'show me what cutting costs would look like' from log10x_start. At Receiver/Retriever tier returns the 6-mode outcome-first menu (drop / sample / compact / tier_down / offload / observe_only), each gated by the customer's detected capabilities (receiver tier, SIEM type, offload bucket). At Reporter-only or Dev tier, collapses to 2 entries: observe_only + install_receiver (with prose explaining that the full 6-mode menu requires the Receiver in-path). All non-observe modes route to log10x_explain_mode. The envelope carries must_render_verbatim (show to user as-is), must_ask_user (numbered question), and forbidden_next_actions (do not call estimate_savings, configure_engine, or pattern_mitigate until the user picks).",
       "annotations": {
         "title": "Cost reduction options",
         "readOnlyHint": true,
@@ -23,20 +23,9 @@
       },
       "category": "cost"
     },
-    "log10x_manual_options": {
-      "title": "Manual cost options",
-      "description": "CALL THIS when the user picks manual mode from log10x_cost_options. Returns the 3-path sub-menu: (1) report_only — engine marks patterns in metrics, agent shows savings potential, no enforcement; (2) forwarder_config — agent generates drop config for the detected forwarder (fluent-bit/fluentd/otel/vector/logstash) for the top N cost patterns, routes to log10x_pattern_mitigate per pattern; (3) siem_exclusion — agent generates native SIEM exclusion configs (Splunk props/transforms, Datadog log exclusion, Elastic ingest pipeline, CloudWatch subscription filter), routes to log10x_pattern_mitigate per pattern. forwarder_config gates on detected forwarder; siem_exclusion gates on detected SIEM credentials. forbidden_next_actions: log10x_configure_engine (manual mode means external enforcement, not engine enforcement).",
-      "annotations": {
-        "title": "Manual cost options",
-        "readOnlyHint": true,
-        "idempotentHint": true,
-        "openWorldHint": true
-      },
-      "category": "cost"
-    },
     "log10x_explain_mode": {
       "title": "Explain enforcement mode",
-      "description": "CALL THIS AFTER log10x_cost_options when the user picks a non-manual mode. Explains the chosen enforcement mode (report_only / siem_filter / forwarder_filter / engine_in_path_drop / engine_in_path_sample / engine_route_s3 / siem_tier_down) in service-level plain language, with dollar math when byte metrics are available. Returns must_render_verbatim (plain-text three-section card, no markdown), must_ask_user (Apply or Preview choice), and forbidden_next_actions (locks apply tools and log10x_preview_filter until the user picks). routes_to.apply routes engine_* and siem_tier_down to log10x_configure_engine, siem_filter/forwarder_filter to log10x_pattern_mitigate, engine_route_s3 to log10x_advise_retriever. routes_to.preview routes to log10x_preview_filter with { service, mode }.",
+      "description": "CALL THIS AFTER log10x_cost_options when the user picks a mode. Explains the chosen enforcement mode (drop / sample / compact / tier_down / offload / observe_only) in service-level plain language, with dollar math when byte metrics are available. Returns must_render_verbatim (plain-text three-section card, no markdown), must_ask_user (Apply or Preview choice), and forbidden_next_actions (locks apply tools and log10x_preview_filter until the user picks). routes_to.apply routes all non-observe modes to log10x_configure_engine; observe_only has routes_to.apply === null (no enforcement step). routes_to.preview routes to log10x_preview_filter with { service, mode }.",
       "annotations": {
         "title": "Explain enforcement mode",
         "readOnlyHint": true,
