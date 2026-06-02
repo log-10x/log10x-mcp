@@ -30,7 +30,7 @@
  */
 
 import type { SiemId } from './siem/pricing.js';
-import { DEFAULT_ANALYZER_COST_PER_GB } from './siem/pricing.js';
+import { DEFAULT_ANALYZER_COST_PER_GB, SIEM_DISPLAY_NAMES } from './siem/pricing.js';
 
 const GB = 1024 * 1024 * 1024;
 
@@ -112,6 +112,62 @@ export interface DestinationCostModel {
   small_event_floor_bytes: number;
 }
 
+/**
+ * Provenance tag for any dollar value the pipeline emits.
+ *  - 'list_price'        — derived from vendor list $/GB (lib/siem/pricing).
+ *  - 'customer_supplied' — caller passed an explicit override rate.
+ *  - 'unset'             — no rate available; value is a placeholder (0/null).
+ */
+export type DollarSource = 'list_price' | 'customer_supplied' | 'unset';
+
+/**
+ * Envelope shape that every dollar field in an envelope MUST use.
+ *
+ * The plain-English `disclosure` rides alongside `value` so renderers cannot
+ * print a list-price number without the "may differ depending on discounts,
+ * commits, or contract tier" caveat. `disclosure` is null only when the rate
+ * came from the customer (no caveat needed).
+ */
+export interface DisclosedDollarValue {
+  value: number;
+  source: DollarSource;
+  /** Plain-English disclosure. null iff source === 'customer_supplied'. */
+  disclosure: string | null;
+}
+
+/**
+ * Build a DisclosedDollarValue. Single source-of-truth constructor — renderers
+ * NEVER inline an object literal of this shape.
+ *
+ *  - source='customer_supplied' → disclosure=null (caller owns the rate).
+ *  - source='unset'             → disclosure='(no $/GB rate configured)'.
+ *  - source='list_price'        → disclosure carries the SIEM label + list
+ *                                 rate + "may differ" caveat.
+ */
+export function buildDisclosedDollarValue(
+  value: number,
+  source: DollarSource,
+  siemLabel: string | null,
+  listRatePerGb: number | null,
+): DisclosedDollarValue {
+  if (source === 'customer_supplied') {
+    return { value, source, disclosure: null };
+  }
+  if (source === 'unset') {
+    return { value, source, disclosure: '(no $/GB rate configured)' };
+  }
+  const siem = siemLabel ?? 'SIEM';
+  const rate = listRatePerGb != null ? `$${listRatePerGb.toFixed(2)}/GB` : 'list price';
+  return {
+    value,
+    source,
+    disclosure: `(at ${siem} list price ${rate} — your actual bill may differ depending on discounts, commits, or contract tier)`,
+  };
+}
+
+/** Internal alias used during the migration. Renderers should call buildDisclosedDollarValue. */
+export const makeDisclosedDollar = buildDisclosedDollarValue;
+
 export interface SavingsProjection {
   bytes_in: number;
   /** Post-action bytes leaving forwarder toward destination. */
@@ -120,6 +176,12 @@ export interface SavingsProjection {
   /** For the retention window the caller supplies (default 1 month). */
   storage_dollars: number | null;
   total_dollars: number | null;
+  /** Disclosed-value mirror of total_dollars. Always populated when total_dollars is non-null. */
+  total_dollars_disclosed?: DisclosedDollarValue | null;
+  /** Disclosed-value mirror of ingest_dollars. */
+  ingest_dollars_disclosed?: DisclosedDollarValue | null;
+  /** Disclosed-value mirror of storage_dollars. */
+  storage_dollars_disclosed?: DisclosedDollarValue | null;
   basis: BillingBasis;
   confidence: 'low' | 'expected' | 'high';
   /** Always populated. 0..100. */
@@ -148,6 +210,19 @@ export interface SavingsHeadline {
     customer_low?: number;
     customer_expected?: number;
     customer_high?: number;
+  };
+  /**
+   * Disclosed-value mirror of `dollars`. Every numeric cell above is also
+   * available here wrapped in DisclosedDollarValue so renderers can call
+   * fmtDisclosedDollar without re-resolving rate_source + listRate.
+   */
+  dollars_disclosed?: {
+    list_low?: DisclosedDollarValue;
+    list_expected?: DisclosedDollarValue;
+    list_high?: DisclosedDollarValue;
+    customer_low?: DisclosedDollarValue;
+    customer_expected?: DisclosedDollarValue;
+    customer_high?: DisclosedDollarValue;
   };
   rate_source: 'list_price' | 'customer_supplied' | 'unset';
   range?: {
@@ -569,12 +644,49 @@ function projectActionWithRatio(
 
   const pct = percentReduction(args.bytes_in, bytes_out).expected;
 
+  // Build disclosed-value mirrors so renderers can call fmtDisclosedDollar
+  // directly without rediscovering rate provenance.
+  const siemLabel = SIEM_DISPLAY_NAMES[args.destination] ?? null;
+  const ingestRate = ingestOverride != null
+    ? ingestOverride
+    : (Number.isFinite(model.ingest_per_gb) ? model.ingest_per_gb : null);
+  const storageRate = storageOverride != null
+    ? storageOverride
+    : (model.storage_per_gb_month >= 0 ? model.storage_per_gb_month : null);
+  const toAxisSource = (s: 'list' | 'customer_supplied' | 'unset'): DollarSource =>
+    s === 'list' ? 'list_price' : s;
+  const ingest_dollars_disclosed = ingest_dollars == null
+    ? null
+    : buildDisclosedDollarValue(ingest_dollars, toAxisSource(ingestSource), siemLabel, ingestRate);
+  const storage_dollars_disclosed = storage_dollars == null
+    ? null
+    : buildDisclosedDollarValue(storage_dollars, toAxisSource(storageSource), siemLabel, storageRate);
+  // Total picks the strongest axis-provenance: if either axis is customer the
+  // total is customer-supplied (no caveat); else list_price if both are list;
+  // else unset.
+  let totalSource: DollarSource;
+  if (ingestSource === 'customer_supplied' || storageSource === 'customer_supplied') {
+    totalSource = 'customer_supplied';
+  } else if (ingestSource === 'list' && storageSource === 'list') {
+    totalSource = 'list_price';
+  } else if (ingestSource === 'list' || storageSource === 'list') {
+    totalSource = 'list_price';
+  } else {
+    totalSource = 'unset';
+  }
+  const total_dollars_disclosed = total_dollars == null
+    ? null
+    : buildDisclosedDollarValue(total_dollars, totalSource, siemLabel, null);
+
   return {
     bytes_in: args.bytes_in,
     bytes_out,
     ingest_dollars,
     storage_dollars,
     total_dollars,
+    ingest_dollars_disclosed,
+    storage_dollars_disclosed,
+    total_dollars_disclosed,
     basis: model.billing_basis,
     confidence,
     percent_reduction: pct,
@@ -706,6 +818,8 @@ export function projectSavings(
 
   if (top !== 'unset') {
     const dollars: NonNullable<SavingsHeadline['dollars']> = {};
+    const dollars_disclosed: NonNullable<SavingsHeadline['dollars_disclosed']> = {};
+    const siemLabel = SIEM_DISPLAY_NAMES[args.destination] ?? null;
     const anyList = rs.ingest === 'list' || rs.storage === 'list';
     const anyCustomer =
       rs.ingest === 'customer_supplied' || rs.storage === 'customer_supplied';
@@ -719,13 +833,38 @@ export function projectSavings(
       dollars.list_low = listOnly.low.total_dollars ?? undefined;
       dollars.list_expected = listOnly.expected.total_dollars ?? undefined;
       dollars.list_high = listOnly.high.total_dollars ?? undefined;
+      if (listOnly.low.total_dollars != null) {
+        dollars_disclosed.list_low =
+          buildDisclosedDollarValue(listOnly.low.total_dollars, 'list_price', siemLabel, null);
+      }
+      if (listOnly.expected.total_dollars != null) {
+        dollars_disclosed.list_expected =
+          buildDisclosedDollarValue(listOnly.expected.total_dollars, 'list_price', siemLabel, null);
+      }
+      if (listOnly.high.total_dollars != null) {
+        dollars_disclosed.list_high =
+          buildDisclosedDollarValue(listOnly.high.total_dollars, 'list_price', siemLabel, null);
+      }
     }
     if (anyCustomer) {
       dollars.customer_low = range.low.total_dollars ?? undefined;
       dollars.customer_expected = range.expected.total_dollars ?? undefined;
       dollars.customer_high = range.high.total_dollars ?? undefined;
+      if (range.low.total_dollars != null) {
+        dollars_disclosed.customer_low =
+          buildDisclosedDollarValue(range.low.total_dollars, 'customer_supplied', siemLabel, null);
+      }
+      if (range.expected.total_dollars != null) {
+        dollars_disclosed.customer_expected =
+          buildDisclosedDollarValue(range.expected.total_dollars, 'customer_supplied', siemLabel, null);
+      }
+      if (range.high.total_dollars != null) {
+        dollars_disclosed.customer_high =
+          buildDisclosedDollarValue(range.high.total_dollars, 'customer_supplied', siemLabel, null);
+      }
     }
     headline.dollars = dollars;
+    headline.dollars_disclosed = dollars_disclosed;
   }
 
   return headline;

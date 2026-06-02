@@ -112,6 +112,10 @@ export function fmtPctRange(low: number, expected: number, high: number): string
  * when the rate is unset (no dollar value can honestly be quoted), and
  * appends "(list)" or "(custom)" otherwise so downstream prose can stay
  * percent-first without losing the rate-origin signal.
+ *
+ * DEPRECATED: prefer `fmtDisclosedDollar` for any new code path. This shim
+ * stays until every renderer has been migrated to read the disclosed-value
+ * mirror off the envelope; flushing it is part of Piece A finalisation.
  */
 export function fmtDollarWithSource(
   amount: number | null,
@@ -120,6 +124,27 @@ export function fmtDollarWithSource(
   if (amount == null || source === 'unset') return '—';
   const tag = source === 'customer_supplied' ? 'custom' : 'list';
   return `${fmtDollar(amount)} (${tag})`;
+}
+
+/**
+ * Render a DisclosedDollarValue with its disclosure tail. This is the ONLY
+ * formatter that may print a dollar number derived from a list rate — it
+ * structurally cannot leave the disclosure off.
+ *
+ *  - null                       → "—"
+ *  - source='unset'             → "— (no $/GB rate configured)"
+ *  - source='list_price'        → "$1.8K (at Splunk list price $5.00/GB — …)"
+ *  - source='customer_supplied' → "$1.8K"  (no caveat; customer owns the rate)
+ */
+export function fmtDisclosedDollar(
+  d: { value: number; source: 'list_price' | 'customer_supplied' | 'unset'; disclosure: string | null } | null | undefined
+): string {
+  if (d == null) return '—';
+  if (d.source === 'unset') {
+    return `— ${d.disclosure ?? '(no $/GB rate configured)'}`;
+  }
+  const head = fmtDollar(d.value);
+  return d.disclosure ? `${head} ${d.disclosure}` : head;
 }
 
 /** Timeframe config. */
