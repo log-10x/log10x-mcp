@@ -120,6 +120,7 @@ import { findSkewSchema, executeFindSkew } from './tools/find-skew.js';
 // overlapped with log10x_investigate's trajectory + chain analysis.
 import { discoverLabelsSchema, executeDiscoverLabels } from './tools/discover-labels.js';
 import { extractTemplatesSchema, executeExtractTemplates } from './tools/extract-templates.js';
+import { log10xStartSchema, executeLog10xStart } from './tools/log10x-start.js';
 import { getStatus } from './resources/status.js';
 
 // ── Environment + cost cache ──
@@ -572,7 +573,11 @@ const server = new McpServer(
     // capability is correct hygiene and unblocks any other tool that
     // wants to use the channel on hosts that do support it.
     capabilities: { logging: {} },
-    instructions: `Log10x is the observability memory for the user's logs. Every log line the pipeline
+    instructions: `ROUTING RULE: For any user request involving cost reduction, savings targets (save X%, cut my bill), open-ended platform orientation (what should I do, where do I start, how can you help), or any first-time interaction in a fresh session, you MUST call log10x_start before any other tool. log10x_start returns a structured menu and a question for the user; surface its must_render_verbatim and must_ask_user fields directly without summarizing or pre-picking an option. Do not call estimate_savings, configure_engine, pattern_mitigate, or services until the user has answered log10x_start question.
+
+NEGATION: DO NOT call log10x_estimate_savings, log10x_configure_engine, log10x_pattern_mitigate, log10x_services, log10x_top_patterns, log10x_baseline, or log10x_commitment_report on the user first message of a fresh session if the message touches cost, savings, bill, expense, drop, compact, offload, tier-down, or any open-ended platform question. The orientation envelope from log10x_start surfaces the menu, the journey phase, the available action modes, and the structured question the user must answer. Skipping that step degrades the user experience to a black-box recommendation.
+
+Log10x is the observability memory for the user's logs. Every log line the pipeline
 has ever seen is fingerprinted into a stable pattern identity (the hash of a representing-token subset, so many template variants collapse to one) that stays constant across
 deploys, restarts, pod names, timestamps, and request IDs. That identity is the key to a Prometheus
 time series of volume and cost, so any pattern the user has ever emitted is instantly queryable by
@@ -1147,6 +1152,18 @@ registerLog10xTool('log10x_backfill_metric', backfillMetricSchema, (args) =>
   })
 );
 
+// ── Tool: log10x_start ──
+//
+// THE orientation tool the agent calls FIRST whenever a user expresses a
+// cost-cutting goal or open-ended platform question. Returns a structured
+// envelope with three compliance levers (must_render_verbatim,
+// must_ask_user, forbidden_next_actions) that pin the agent into the
+// orientation handshake before any other tool fires.
+
+registerLog10xTool('log10x_start', log10xStartSchema, (args) =>
+  wrap('log10x_start', async () => executeLog10xStart(args))
+);
+
 // ── Tool: log10x_doctor ──
 
 registerLog10xTool('log10x_doctor', doctorSchema, (args) =>
@@ -1469,6 +1486,7 @@ server.resource(
 // ── CLI flag handlers ──
 
 const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
+  { name: 'log10x_start', intent: 'CALL FIRST on any cost / orient / "where do I start" question — returns tier + action menu + must_ask_user question; agent must surface verbatim and wait for user pick before any other tool' },
   { name: 'log10x_event_lookup', intent: 'What is this single log line — resolve to stable identity + cost + AI classification' },
   { name: 'log10x_pattern_examples', intent: 'Recent live events for a pattern from the log analyzer with template-parsed slot values — bounded to 24h, for older use retriever_query' },
   { name: 'log10x_savings', intent: 'Pipeline ROI — how much receiver / retriever are saving in dollars' },

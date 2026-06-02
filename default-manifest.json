@@ -1,6 +1,17 @@
 {
   "manifestVersion": 1,
   "tools": {
+    "log10x_start": {
+      "title": "Log10x orientation",
+      "description": "CALL THIS FIRST whenever the user asks any open-ended cost question, says save X%, asks where do I start, what should I do, how can you help — before any other tool. Detects the customer's tier (Dev CLI / Reporter / Receiver / Retriever) via three live probes (gateway auth, Reporter metric counts, Retriever resolution), detects the SIEM, and returns a structured orientation envelope with three compliance levers the agent MUST obey: `must_render_verbatim` (markdown to surface to the user as-is, no summarising), `must_ask_user` (a numbered question the agent MUST ask before any follow-up tool call), and `forbidden_next_actions` (tool names the agent MUST NOT call until the user has picked an option). Also returns a 5-phase journey (Visibility → Attribution → Mitigation → Forensic → Commitment) showing where the customer is, an action menu gated by available capabilities (compact_installable, tier_down_available, offload_ready, forensic_query_available), and the resolved tier. The tool is read-only, takes an optional `intent_hint` (cost / forensic / install / orient), and is safe to call on any boot state — including when no env is configured yet (skips gateway/Reporter probes and treats the customer as Dev CLI tier).",
+      "annotations": {
+        "title": "Log10x orientation",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "category": "orient"
+    },
     "log10x_event_lookup": {
       "title": "Event lookup",
       "description": "Resolve a raw log line or pattern name to its stable pattern identity (the hash of its representing-token subset), then return byte volume + share per service (with cost overlay when $/GB is set), before→after delta, first-seen timestamp within the observation window, an AI classification (error/debug/info) with a recommended action (filter/keep/reduce), and the current offload disposition (pass / sample / compact / drop) read from the Reporter `isDropped` label. **Call this first** whenever a user pastes a SINGLE log line and asks \"what is this\", \"is this new\", \"is this safe to drop\", or \"is this being dropped / offloaded\". The lookup is structural, not byte-exact — different timestamps/request IDs/user IDs on the same underlying pattern resolve to the same identity. If no match is returned, say so honestly. Use log10x_resolve_batch instead when the user pastes MULTIPLE events, a SIEM dump, or a batch to triage.",
@@ -47,7 +58,7 @@
     },
     "log10x_services": {
       "title": "Services",
-      "description": "List every service the Log10x pipeline is watching, ranked by byte volume (with cost overlay when $/GB is set) plus per-service share of total AND the four action-axis columns (bytes_passed / bytes_offloaded / bytes_compacted / bytes_dropped) derived by joining isDropped events against the cap-CSV. Pass `exception_services` to mark customer-flagged services as current_mode=pass — their next_action points at log10x_pattern_mitigate instead of log10x_configure_engine. Call first on open-ended cost questions, before drilling into a specific service.",
+      "description": "[FRESH-SESSION ROUTING: if this is the user first cost question of the session, call log10x_start first instead — it returns the orientation menu the user needs before any per-tool action.] List every service the Log10x pipeline is watching, ranked by byte volume (with cost overlay when $/GB is set) plus per-service share of total AND the four action-axis columns (bytes_passed / bytes_offloaded / bytes_compacted / bytes_dropped) derived by joining isDropped events against the cap-CSV. Pass `exception_services` to mark customer-flagged services as current_mode=pass — their next_action points at log10x_pattern_mitigate instead of log10x_configure_engine. Call first on open-ended cost questions, before drilling into a specific service.",
       "annotations": {
         "title": "Services",
         "readOnlyHint": true,
@@ -413,7 +424,7 @@
     },
     "log10x_configure_engine": {
       "title": "Configure engine",
-      "description": "Unified per-pattern action-plan PR author. Resolves a monthly $ budget against a per-destination cost model (Splunk, Datadog, Elasticsearch, CloudWatch, Azure, GCP, Sumo, ClickHouse) into a per-pattern action plan (pass | sample | compact | drop | tier_down) and emits a gitops PR. Defaults to auto-applying via `gh` CLI (industry-standard MCP write-tool behavior, mirrors github/github-mcp-server). Set `auto_apply: false` or `read_only: true` for evaluation / dry-run / headless contexts.",
+      "description": "[FRESH-SESSION ROUTING: if this is the user first cost question of the session, call log10x_start first instead — it returns the orientation menu the user needs before any per-tool action.] Unified per-pattern action-plan PR author. Resolves a monthly $ budget against a per-destination cost model (Splunk, Datadog, Elasticsearch, CloudWatch, Azure, GCP, Sumo, ClickHouse) into a per-pattern action plan (pass | sample | compact | drop | tier_down) and emits a gitops PR. Defaults to auto-applying via `gh` CLI (industry-standard MCP write-tool behavior, mirrors github/github-mcp-server). Set `auto_apply: false` or `read_only: true` for evaluation / dry-run / headless contexts.",
       "annotations": {
         "title": "Configure engine",
         "readOnlyHint": false,
@@ -425,7 +436,7 @@
     },
     "log10x_estimate_savings": {
       "title": "Estimate savings",
-      "description": "Two-mode savings estimator with percent-first reporting and a dollar overlay. `forecast` projects bytes_in -> bytes_out and percent reduction for a proposed plan; pass `effective_ingest_per_gb` (or rely on the account profile list-price rate) to overlay $/mo per pattern and in totals. `verify` counts realized savings from the engine `isDropped` label over a window with cap-hit / drift / new-patterns / leakage attribution, leading with percent and adding the dollar overlay only when a rate is set. Without a rate, dollar fields are emitted as null (never as a fabricated $1/GB number); the envelope carries `rate_source: list_price | customer_supplied | unset` so callers can show how the overlay was derived.",
+      "description": "[FRESH-SESSION ROUTING: if this is the user first cost question of the session, call log10x_start first instead — it returns the orientation menu the user needs before any per-tool action.] Two-mode savings estimator with percent-first reporting and a dollar overlay. `forecast` projects bytes_in -> bytes_out and percent reduction for a proposed plan; pass `effective_ingest_per_gb` (or rely on the account profile list-price rate) to overlay $/mo per pattern and in totals. `verify` counts realized savings from the engine `isDropped` label over a window with cap-hit / drift / new-patterns / leakage attribution, leading with percent and adding the dollar overlay only when a rate is set. Without a rate, dollar fields are emitted as null (never as a fabricated $1/GB number); the envelope carries `rate_source: list_price | customer_supplied | unset` so callers can show how the overlay was derived.",
       "annotations": {
         "title": "Estimate savings",
         "readOnlyHint": true,
@@ -469,7 +480,7 @@
     },
     "log10x_pattern_mitigate": {
       "title": "Pattern mitigate",
-      "description": "Given one pattern (symbolMessage identity or tenx_hash), return the env-gated menu of mitigation options: drop_at_analyzer, drop_at_forwarder, mute_at_10x, compact_at_10x. Each option carries enabled-or-not + reason + estimated percent reduction (with $/mo overlay when $/GB is set) + a paste-ready config snippet + follow-through tool calls (typically log10x_dependency_check before applying). The agent surfaces these to the user; the user picks. **Action-shaped tool — calibration honesty**: the envelope's `recommendation_basis` tells the agent WHERE the capability detection came from (envs.json, snapshot, env vars, or unknown). `recommendation_audit.capability_sources` carries the per-field source, and `snapshot_age_seconds` carries snapshot staleness. The agent SHOULD NOT auto-route to the chosen sub-tool until the user picks an option, and SHOULD verify the basis before treating capability detection as authoritative (e.g., a stale snapshot may mis-flag mute as enabled when the receiver was uninstalled). See `docs/cross-pillar-primitives.md` for the agent behavior contract. **Call this** when a previous tool surfaced a high-cost pattern and the user asks 'what should I do' / 'how do I drop this' / 'how do I reduce this'.",
+      "description": "[FRESH-SESSION ROUTING: if this is the user first cost question of the session, call log10x_start first instead — it returns the orientation menu the user needs before any per-tool action.] Given one pattern (symbolMessage identity or tenx_hash), return the env-gated menu of mitigation options: drop_at_analyzer, drop_at_forwarder, mute_at_10x, compact_at_10x. Each option carries enabled-or-not + reason + estimated percent reduction (with $/mo overlay when $/GB is set) + a paste-ready config snippet + follow-through tool calls (typically log10x_dependency_check before applying). The agent surfaces these to the user; the user picks. **Action-shaped tool — calibration honesty**: the envelope's `recommendation_basis` tells the agent WHERE the capability detection came from (envs.json, snapshot, env vars, or unknown). `recommendation_audit.capability_sources` carries the per-field source, and `snapshot_age_seconds` carries snapshot staleness. The agent SHOULD NOT auto-route to the chosen sub-tool until the user picks an option, and SHOULD verify the basis before treating capability detection as authoritative (e.g., a stale snapshot may mis-flag mute as enabled when the receiver was uninstalled). See `docs/cross-pillar-primitives.md` for the agent behavior contract. **Call this** when a previous tool surfaced a high-cost pattern and the user asks 'what should I do' / 'how do I drop this' / 'how do I reduce this'.",
       "annotations": {
         "title": "Pattern mitigate",
         "readOnlyHint": true,
