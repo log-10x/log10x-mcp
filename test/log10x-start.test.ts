@@ -73,7 +73,7 @@ test('journey_phases are exactly the five ladder phases in order', async () => {
   const result = await executeLog10xStart({});
   const data = result.data as Log10xStartEnvelope;
   const names = data.journey_phases.map((p) => p.name);
-  assert.deepEqual(names, ['Visibility', 'Attribution', 'Mitigation', 'Forensic', 'Commitment']);
+  assert.deepEqual(names, ['Visibility', 'Attribution', 'Mitigation', 'Overflow', 'Commitment']);
   for (let i = 0; i < data.journey_phases.length; i++) {
     assert.equal(data.journey_phases[i].phase, i + 1, `phase ordinal at index ${i}`);
   }

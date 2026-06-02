@@ -268,11 +268,11 @@ function buildActionMenu(caps: CapabilitySummary, tier: Tier): ActionMenuItem[] 
     },
     {
       action: 'forensic_query',
-      label: 'Pull historical events from the S3 archive (forensic / out-of-retention)',
+      label: 'Fetch back events from your overflow bucket (incident / audit / debugging)',
       applicable: caps.forensic_query_available,
       gated_reason: caps.forensic_query_available
         ? undefined
-        : 'Requires Retriever tier. Install via log10x_advise_retriever.',
+        : 'Requires the overflow bucket to be set up. Install via log10x_advise_retriever.',
       routes_to: 'log10x_retriever_query',
     },
     {
@@ -289,10 +289,10 @@ function buildActionMenu(caps: CapabilitySummary, tier: Tier): ActionMenuItem[] 
     },
     {
       action: 'install_retriever',
-      label: 'Deploy the Retriever (S3 archive + Bloom index) for forensic queries',
+      label: 'Set up the overflow bucket (your own S3) — diverts noisy patterns out of the SIEM for cost savings; events stay recoverable',
       applicable: !caps.forensic_query_available,
       gated_reason: caps.forensic_query_available
-        ? 'Retriever is already reachable.'
+        ? 'Overflow bucket already set up and reachable.'
         : undefined,
       routes_to: 'log10x_advise_retriever',
     },
@@ -346,8 +346,8 @@ function buildJourneyPhases(tier: Tier, caps: CapabilitySummary): JourneyPhase[]
     },
     {
       phase: 4,
-      name: 'Forensic',
-      description: 'Retriever (S3 archive + Bloom index) lets you pull events past SIEM retention.',
+      name: 'Overflow',
+      description: 'Overflow bucket (your own S3) sits between the forwarder and the SIEM — engine-marked noisy patterns route here instead of paying SIEM ingest. Events stay recoverable via fetch-back on demand (incident / audit).',
       current_status: statusFor(retrieverComplete, reporterComplete),
     },
     {
@@ -372,7 +372,7 @@ function renderVerbatim(args: {
     dev: 'Dev CLI — local binary only. No pipeline infrastructure detected.',
     reporter: 'Reporter — cost attribution metrics flowing; in-path actions not yet wired.',
     receiver: 'Receiver — in-path; compact / sample / drop are deployable as cap-CSV plans.',
-    retriever: 'Retriever — full stack. Forensic queries + backfill available.',
+    retriever: 'Retriever — full stack. Overflow bucket is wired between forwarder and SIEM; fetch-back available on demand.',
   }[args.tier];
 
   const phaseLines = args.phases
