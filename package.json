@@ -14,7 +14,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc && mkdir -p build/vendor/promql-parser && cp -r vendor/promql-parser/{promql.js,package.json} build/vendor/promql-parser/ && chmod +x build/index.js",
+    "build": "tsc && mkdir -p build/vendor/promql-parser && cp -r vendor/promql-parser/promql.js vendor/promql-parser/package.json build/vendor/promql-parser/ && chmod +x build/index.js",
     "start": "node build/index.js",
     "dev": "tsc --watch",
     "prepublishOnly": "npm run build",
