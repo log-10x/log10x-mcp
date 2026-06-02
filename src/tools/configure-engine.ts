@@ -45,6 +45,9 @@
 import { spawn } from 'node:child_process';
 import { z } from 'zod';
 import { getSnapshot } from '../lib/discovery/snapshot-store.js';
+import { _getSnapshot as getPocSnapshot } from './poc-from-siem.js';
+import { buildPocEnvelopeV2 } from '../lib/poc-envelope-v2.js';
+import { _enrichForEnvelope as enrichForPocEnvelope } from '../lib/poc-report-renderer.js';
 import {
   resolveBackend,
   CustomerMetricsNotConfiguredError,
@@ -76,6 +79,18 @@ const GB = 1024 * 1024 * 1024;
 const FEASIBILITY_TOLERANCE_PCT = 0.1; // ±10% of target counts as "hit"
 const MIN_REPORTER_DAYS = 7;
 
+// ── refresh-mode constants (Item 7) ─────────────────────────────────
+// Commitment target is stored in the cap-CSV as a `# target_percent=N`
+// comment-line preamble. The engine's lookup parser ignores lines that
+// don't match `<key>,<value>` so the comment is engine-safe; the MCP-side
+// parser tolerates `#` lines explicitly (cap-csv-parser.ts).
+const TARGET_PREAMBLE_KEY = 'target_percent';
+const TARGET_PREAMBLE_RE = /^#\s*target_percent\s*=\s*(\d+(?:\.\d+)?)\s*$/;
+// Default tolerance band for refresh skips: if observed monthly volume is
+// within ±DEFAULT_REFRESH_TOLERANCE_PCT of the prior baseline, the refresh
+// emits no PR. Caller can override via `tolerance_pct`.
+const DEFAULT_REFRESH_TOLERANCE_PCT = 2;
+
 type Tier = 'audit' | 'error' | 'standard' | 'debug' | 'synthetic';
 
 // Severity-weighted ranking for the greedy solver (OPEN Q 5 default).
@@ -101,6 +116,20 @@ const DESTINATION_ENUM = [
 
 // ─── schema ───────────────────────────────────────────────────────────
 export const configureEngineSchema = {
+  mode: z
+    .enum(['configure', 'refresh'])
+    .default('configure')
+    .describe(
+      '`configure` (default) = derive a fresh per-pattern policy and open a PR. `refresh` = re-pull TSDB metrics for an already-deployed policy, compare observed volume to the cap-CSV preamble baseline, and open a delta PR only when the volume has drifted beyond `tolerance_pct`. Use `refresh` from cron/agent loops after the engine is live and 10x metrics are flowing. Requires `current_csv` carrying the prior `# target_percent=N` preamble; if absent, falls back to `target_percent` arg or returns target_resolution.'
+    ),
+  tolerance_pct: z
+    .number()
+    .min(0)
+    .max(50)
+    .optional()
+    .describe(
+      'Refresh-mode tolerance band. When observed monthly volume drifts less than this percent vs the cap-CSV baseline, no PR is emitted (phase=refresh_skipped). Default 2%. Ignored in `configure` mode.'
+    ),
   service: z
     .string()
     .describe(
@@ -219,6 +248,12 @@ export const configureEngineSchema = {
     .describe(
       'Existing CSV content (header + rows). If omitted, the tool computes the diff against an empty baseline and notes that.'
     ),
+  from_poc_id: z
+    .string()
+    .optional()
+    .describe(
+      'POC snapshot id returned by `log10x_poc_from_siem_submit` (or the from-local equivalent). When set and the snapshot carries a `cap_csv` (i.e., the POC was run with `target_percent_reduction`), the tool reads that CSV verbatim and renders it as the PR body — no Prometheus pull, no greedy re-derivation. Falls back to the live-Prometheus derivation when the snapshot has no cap_csv (or no `target_percent_reduction` was supplied to the POC).'
+    ),
   // ── auto-apply (industry-standard MCP write tool surface) ──
   // Verdict from /tmp/poc-comparison/14d-26-mcp-config-write-pattern-research.md:
   // GitHub MCP, Linear MCP, Atlassian MCP, Notion MCP and other vendor-shipped
@@ -267,7 +302,8 @@ interface ConfigureEngineData {
     | 'backend'
     | 'resolution_prompt'
     | 'solver_failed'
-    | 'pr_rendered';
+    | 'pr_rendered'
+    | 'refresh_skipped';
   service: string;
   containers: string[];
   destination?: SiemId;
@@ -290,6 +326,22 @@ interface ConfigureEngineData {
   };
   csv_diff?: string;
   pr_command?: string | null;
+  /**
+   * Refresh-mode delta diagnostics. Populated when `mode='refresh'` and the
+   * tool successfully read a prior baseline from the cap-CSV preamble.
+   * `skipped=true` means the volume drift was within tolerance and no PR
+   * was emitted; `skipped=false` means caps were recomputed and a PR
+   * rendered with the new policy.
+   */
+  refresh?: {
+    skipped: boolean;
+    prior_monthly_bytes?: number;
+    current_monthly_bytes: number;
+    drift_pct: number;
+    tolerance_pct: number;
+    committed_target_percent: number;
+    reason: string;
+  };
   /**
    * Auto-apply outcome. Set only when the tool actually executed the gh
    * script (auto_apply=true, read_only=false, feasible plan, prCommand
@@ -317,6 +369,33 @@ interface ConfigureEngineData {
 export async function executeConfigureEngine(
   args: ConfigureEngineArgs
 ): Promise<string | StructuredOutput> {
+  // ── Refresh-mode preamble resolution ──
+  // In refresh mode, the committed target lives in the cap-CSV preamble.
+  // Pull it out before cross-validating target_percent so that a refresh
+  // call without an explicit target_percent still works (the common case
+  // — cron-driven re-tune of a deployed policy).
+  let refreshState: RefreshState | undefined;
+  if (args.mode === 'refresh') {
+    const parsed = parsePreamble(args.current_csv);
+    if (parsed.target_percent === undefined && args.target_percent === undefined) {
+      return notConfiguredEnvelope(
+        'target_resolution',
+        'Refresh mode: no `# target_percent=N` preamble found in `current_csv`, and no `target_percent` arg supplied. Either pass `current_csv` from the gitops cap-CSV (preferred — it carries the originally committed target), or pass `target_percent` explicitly to seed a fresh baseline.',
+        args.service
+      );
+    }
+    refreshState = {
+      committedTargetPercent: parsed.target_percent ?? args.target_percent!,
+      priorBaselineMonthlyBytes: parsed.baseline_monthly_bytes,
+      tolerancePct: args.tolerance_pct ?? DEFAULT_REFRESH_TOLERANCE_PCT,
+    };
+    // Synthesize target_percent from the preamble so the rest of the
+    // pipeline (solver, feasibility, projection) runs unchanged.
+    if (args.target_percent === undefined && args.budget_usd === undefined) {
+      args = { ...args, target_percent: refreshState.committedTargetPercent };
+    }
+  }
+
   // Cross-validation: exactly one of target_percent / budget_usd.
   if (args.target_percent === undefined && args.budget_usd === undefined) {
     return notConfiguredEnvelope(
@@ -349,6 +428,22 @@ export async function executeConfigureEngine(
         human_summary: `configure_engine refused: ${firstLine(target.error)}`,
       } satisfies ConfigureEngineData,
     });
+  }
+
+  // ── from_poc_id consumer path ──
+  // When the caller threads a POC snapshot id through, the policy is
+  // already decided (the POC ran with `target_percent_reduction` and
+  // emitted a `cap_csv` in the 6-action vocab). Read that CSV verbatim,
+  // render it as the PR body, skip the Prometheus pull + greedy solver
+  // entirely. The re-derivation path remains the fallback (no
+  // cap_csv on the snapshot → POC ran in recommendation-only mode →
+  // configure_engine still needs to derive from live metrics).
+  if (args.from_poc_id) {
+    const pocConsumed = await tryConsumePocSnapshot(args, target.resolved);
+    if (pocConsumed) return pocConsumed;
+    // Fall through to live-derivation if the snapshot is absent /
+    // expired / has no cap_csv — surfaced as a warning in the envelope
+    // returned by the live path below.
   }
 
   // Resolve customer metrics backend.
@@ -413,6 +508,45 @@ export async function executeConfigureEngine(
   const totalObservedBytes = perPattern.reduce((s, p) => s + p.bytes, 0);
   const currentMonthlyBytes = totalObservedBytes * scaleToMonth;
   const model = getDestinationCostModel(destination, { esPruned: args.es_pruned });
+
+  // ── Refresh-mode tolerance check ──
+  // If the observed volume hasn't drifted enough vs the prior baseline to
+  // matter, skip emitting a PR. The engine is already serving the target;
+  // re-tuning would be churn without economic benefit.
+  if (refreshState && refreshState.priorBaselineMonthlyBytes !== undefined) {
+    const prior = refreshState.priorBaselineMonthlyBytes;
+    const driftPct = prior > 0
+      ? Math.abs(currentMonthlyBytes - prior) / prior * 100
+      : 0;
+    if (driftPct < refreshState.tolerancePct) {
+      const data: ConfigureEngineData = {
+        ok: true,
+        phase: 'refresh_skipped',
+        service: args.service,
+        containers: args.containers,
+        destination,
+        target_percent: refreshState.committedTargetPercent,
+        refresh: {
+          skipped: true,
+          prior_monthly_bytes: Math.round(prior),
+          current_monthly_bytes: Math.round(currentMonthlyBytes),
+          drift_pct: roundOne(driftPct),
+          tolerance_pct: refreshState.tolerancePct,
+          committed_target_percent: refreshState.committedTargetPercent,
+          reason: `Observed volume drift ${driftPct.toFixed(1)}% < tolerance ${refreshState.tolerancePct}%; current caps still deliver the ${refreshState.committedTargetPercent}% commitment.`,
+        },
+        human_summary: `configure_engine refresh skipped on ${args.service}: observed volume drift ${driftPct.toFixed(1)}% (${humanBytes(prior)} → ${humanBytes(currentMonthlyBytes)}/mo) is within the ${refreshState.tolerancePct}% tolerance band. No PR opened; current caps still deliver the committed ${refreshState.committedTargetPercent}% reduction.`,
+      };
+      return buildEnvelope({
+        tool: 'log10x_configure_engine',
+        view: 'summary',
+        summary: {
+          headline: `Refresh skipped on ${args.service}: drift ${driftPct.toFixed(1)}% within tolerance ${refreshState.tolerancePct}%.`,
+        },
+        data,
+      });
+    }
+  }
   const currentMonthlyUsd =
     (currentMonthlyBytes / GB) *
     (model.ingest_per_gb + model.storage_per_gb_month);
@@ -596,13 +730,16 @@ export async function executeConfigureEngine(
   // Zero-change PR: target already met by current config (OPEN Q 8 default).
   const targetMetByCurrent = targetShedBytes <= 0;
 
-  // CSV diff.
+  // CSV diff. Preamble captures the committed target + observed baseline so
+  // a later `mode='refresh'` call can compute volume drift without
+  // re-running the SIEM / live-Prometheus path against the original window.
   const csvDiff = renderCsvDiff(
     args.containers,
     args.current_csv,
     rows,
     effectiveStandardAction,
-    args.reduction ?? 'hard'
+    args.reduction ?? 'hard',
+    { targetPercent, baselineMonthlyBytes: currentMonthlyBytes }
   );
 
   const prCommand =
@@ -680,6 +817,30 @@ export async function executeConfigureEngine(
     csv_diff: csvDiff,
     pr_command: prCommand,
     applied,
+    refresh: refreshState
+      ? {
+          skipped: false,
+          prior_monthly_bytes: refreshState.priorBaselineMonthlyBytes !== undefined
+            ? Math.round(refreshState.priorBaselineMonthlyBytes)
+            : undefined,
+          current_monthly_bytes: Math.round(currentMonthlyBytes),
+          drift_pct: refreshState.priorBaselineMonthlyBytes !== undefined &&
+            refreshState.priorBaselineMonthlyBytes > 0
+            ? roundOne(
+                Math.abs(
+                  currentMonthlyBytes - refreshState.priorBaselineMonthlyBytes
+                ) /
+                  refreshState.priorBaselineMonthlyBytes *
+                  100
+              )
+            : 100,
+          tolerance_pct: refreshState.tolerancePct,
+          committed_target_percent: refreshState.committedTargetPercent,
+          reason: refreshState.priorBaselineMonthlyBytes !== undefined
+            ? `Volume drifted beyond ${refreshState.tolerancePct}% tolerance; re-tuned caps to keep delivering the ${refreshState.committedTargetPercent}% commitment.`
+            : `No prior baseline in cap-CSV preamble; recomputed caps from scratch against the ${refreshState.committedTargetPercent}% commitment.`,
+        }
+      : undefined,
     next_actions: nextActions,
     human_summary: buildConfigureEngineHumanSummary({
       feasible,
@@ -690,6 +851,7 @@ export async function executeConfigureEngine(
       destination,
       remainingBytesToShed,
       applied,
+      refreshMode: !!refreshState,
     }),
   };
 
@@ -705,6 +867,190 @@ export async function executeConfigureEngine(
     actions: toEnvelopeActions(nextActions),
     warnings,
   });
+}
+
+// ─── from_poc_id consumer path ────────────────────────────────────────
+/**
+ * When `from_poc_id` is set, attempt to read the POC snapshot's
+ * `cap_csv` field directly and render the PR around it — no
+ * Prometheus pull, no greedy re-derivation. Returns the wrapped
+ * envelope when successful, `undefined` when the snapshot is absent
+ * / expired / has no `cap_csv`, signalling the caller to fall through
+ * to the live-Prometheus path.
+ *
+ * The POC's `cap_csv` is composed in `poc-envelope-v2.ts:buildCapCsv`
+ * from the per-pattern 6-action recommendations the renderer emitted.
+ * We re-build the envelope here (cheap — patterns are already
+ * templatized and stored on the snapshot) so the cap_csv reflects the
+ * latest action mapping rules, not whatever the snapshot was
+ * serialized with.
+ */
+async function tryConsumePocSnapshot(
+  args: ConfigureEngineArgs,
+  resolved: ResolvedTarget,
+): Promise<StructuredOutput | undefined> {
+  if (!args.from_poc_id) return undefined;
+  const snap = getPocSnapshot(args.from_poc_id);
+  if (!snap || snap.status !== 'complete' || !snap.renderInput) return undefined;
+  if (snap.targetPercentReduction === undefined) return undefined;
+
+  // Rebuild the envelope so cap_csv reflects current action mapping.
+  let capCsv: string | undefined;
+  let feasibility: { feasible: boolean; max_achievable_percent: number; target_percent_reduction: number } | undefined;
+  try {
+    const { patterns, clusters, redundancyPairs } = enrichForPocEnvelope(snap.renderInput);
+    const envelope = buildPocEnvelopeV2(
+      snap.renderInput,
+      patterns as unknown as Parameters<typeof buildPocEnvelopeV2>[1],
+      clusters,
+      redundancyPairs,
+      50,
+      {
+        targetPercentReduction: snap.targetPercentReduction,
+        exceptionServices: snap.exceptionServices,
+      },
+    );
+    capCsv = envelope.output.cap_csv;
+    feasibility = envelope.output.feasibility;
+  } catch {
+    return undefined;
+  }
+  if (!capCsv) return undefined;
+
+  // Render the PR diff: the new CSV is the POC's cap_csv body, the
+  // baseline is whatever the caller passed in `current_csv` (or empty).
+  const baselineCsv = args.current_csv ?? '';
+  const diff = renderUnifiedDiff(baselineCsv, capCsv);
+
+  const prCommand = feasibility && feasibility.feasible
+    ? renderPrCommand(args, resolved, diff)
+    : null;
+
+  let applied: ConfigureEngineData['applied'];
+  if (prCommand && (args.auto_apply ?? true) && !(args.read_only ?? false)) {
+    applied = await applyViaGh(prCommand);
+  }
+
+  const warnings: string[] = [];
+  if (!feasibility || !feasibility.feasible) {
+    warnings.push(
+      `POC snapshot \`${args.from_poc_id}\` reported feasibility=${feasibility?.feasible ?? 'unknown'} ` +
+        `(max_achievable=${feasibility?.max_achievable_percent?.toFixed(1) ?? '?'}% vs target ` +
+        `${feasibility?.target_percent_reduction ?? '?'}%). PR not auto-applied.`,
+    );
+  }
+  if (snap.exceptionServices?.length) {
+    warnings.push(
+      `${snap.exceptionServices.length} exception service(s) pinned to action=pass from the POC submit: ${snap.exceptionServices.join(', ')}.`,
+    );
+  }
+
+  const targetPct = snap.targetPercentReduction;
+  const headline = feasibility?.feasible
+    ? `Wrote ${targetPct.toFixed(1)}% reduction policy from POC snapshot \`${args.from_poc_id}\` (${args.service}).`
+    : `POC snapshot \`${args.from_poc_id}\` infeasible at ${targetPct.toFixed(1)}%; PR not auto-applied.`;
+
+  const data: ConfigureEngineData = {
+    ok: feasibility?.feasible ?? false,
+    phase: feasibility?.feasible ? 'pr_rendered' : 'solver_failed',
+    service: args.service,
+    containers: args.containers ?? [],
+    destination: resolved.destination,
+    target_percent: targetPct,
+    csv_diff: diff,
+    pr_command: prCommand,
+    applied,
+    next_actions: [
+      {
+        tool: 'log10x_estimate_savings',
+        args: { mode: 'verify', service: args.service, destination: resolved.destination },
+        why: 'Verify the POC-derived policy against live receiver telemetry once the PR merges.',
+      },
+    ],
+    checks: {
+      coverage_pct: 1,
+      feasible: feasibility?.feasible ?? false,
+      blocking: feasibility?.feasible ? [] : ['poc_feasibility_short'],
+      warnings,
+    },
+    human_summary: feasibility?.feasible
+      ? `POC snapshot \`${args.from_poc_id}\` already decided the policy; configure_engine wrote ${capCsv.split('\n').length - 1} rows to the cap CSV at ${targetPct.toFixed(1)}% reduction without re-pulling Prometheus.`
+      : `POC snapshot \`${args.from_poc_id}\` reported feasibility short of target; PR rendered but not applied. Lower target or widen exceptions, then re-run the POC.`,
+  };
+
+  return buildEnvelope({
+    tool: 'log10x_configure_engine',
+    view: 'summary',
+    summary: { headline },
+    data,
+    actions: toEnvelopeActions(data.next_actions ?? []),
+    warnings,
+  });
+}
+
+// ─── refresh-mode helpers (Item 7) ────────────────────────────────────
+interface RefreshState {
+  /** Target percent the customer originally committed to. */
+  committedTargetPercent: number;
+  /**
+   * The monthly-bytes baseline captured at the original
+   * configure-mode run. Undefined when the cap-CSV is missing the
+   * `# baseline_monthly_bytes=N` preamble (first refresh, or hand-edited
+   * CSV); in that case the drift check is skipped and the refresh
+   * unconditionally re-derives + emits a PR.
+   */
+  priorBaselineMonthlyBytes?: number;
+  /** Tolerance band (percent). Drift below this skips the PR. */
+  tolerancePct: number;
+}
+
+interface PreambleData {
+  target_percent?: number;
+  baseline_monthly_bytes?: number;
+}
+
+/**
+ * Extract `# target_percent=N` and `# baseline_monthly_bytes=N` preamble
+ * lines from a cap-CSV. Order- and whitespace-tolerant; ignores any
+ * other `#` comment lines.
+ */
+function parsePreamble(csv: string | undefined): PreambleData {
+  const out: PreambleData = {};
+  if (!csv) return out;
+  const lines = csv.split(/\r?\n/);
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line.startsWith('#')) {
+      // The preamble is at the top of the file. Once we hit a non-comment
+      // non-blank line, stop scanning.
+      if (line.length > 0) break;
+      continue;
+    }
+    const tgt = TARGET_PREAMBLE_RE.exec(line);
+    if (tgt) {
+      const n = Number(tgt[1]);
+      if (Number.isFinite(n)) out.target_percent = n;
+      continue;
+    }
+    const m = /^#\s*baseline_monthly_bytes\s*=\s*(\d+(?:\.\d+)?)\s*$/.exec(line);
+    if (m) {
+      const n = Number(m[1]);
+      if (Number.isFinite(n)) out.baseline_monthly_bytes = n;
+    }
+  }
+  return out;
+}
+
+/**
+ * Build the preamble lines for the cap-CSV. Engine-safe: the engine's
+ * lookup parser ignores rows that don't match `<key>,<value>`.
+ */
+function renderPreamble(targetPercent: number, baselineMonthlyBytes: number): string[] {
+  return [
+    `# ${TARGET_PREAMBLE_KEY}=${roundOne(targetPercent)}`,
+    `# baseline_monthly_bytes=${Math.round(baselineMonthlyBytes)}`,
+    `# generated_by=log10x_configure_engine`,
+  ];
 }
 
 // ─── target resolution ────────────────────────────────────────────────
@@ -886,7 +1232,12 @@ interface CsvData {
 }
 function parseCsv(content?: string): CsvData {
   if (!content) return { header: ['container', 'cap'], rows: new Map() };
-  const lines = content.split(/\r?\n/).filter((l) => l.trim().length > 0);
+  // Strip preamble (`#`-prefixed) and blank lines BEFORE picking a header.
+  // Preamble lines carry refresh-mode commitment metadata; they must not
+  // be confused with data rows.
+  const lines = content
+    .split(/\r?\n/)
+    .filter((l) => l.trim().length > 0 && !l.trim().startsWith('#'));
   if (lines.length === 0) return { header: ['container', 'cap'], rows: new Map() };
   const header = lines[0].split(',');
   const rows = new Map<string, string>();
@@ -900,8 +1251,12 @@ function parseCsv(content?: string): CsvData {
   return { header, rows };
 }
 
-function renderCsv(rows: Map<string, string>): string {
-  const out = ['container,cap'];
+function renderCsv(rows: Map<string, string>, preamble?: string[]): string {
+  const out: string[] = [];
+  if (preamble && preamble.length > 0) {
+    for (const p of preamble) out.push(p);
+  }
+  out.push('container,cap');
   for (const [k, v] of [...rows.entries()].sort()) out.push(`${k},${v}`);
   return out.join('\n') + '\n';
 }
@@ -911,7 +1266,8 @@ function renderCsvDiff(
   currentCsv: string | undefined,
   rows: PerPatternRow[],
   defaultAction: Action,
-  reduction: 'soft' | 'hard'
+  reduction: 'soft' | 'hard',
+  commitment?: { targetPercent: number; baselineMonthlyBytes: number }
 ): string {
   const baseline = parseCsv(currentCsv);
   const merged = new Map(baseline.rows);
@@ -942,9 +1298,29 @@ function renderCsvDiff(
       );
     }
   }
-  const before = renderCsv(baseline.rows);
-  const after = renderCsv(merged);
+  // Preserve any existing preamble from the baseline (so refresh PRs
+  // round-trip the original `target_percent` without re-writing it). When
+  // `commitment` is provided (configure mode, fresh policy), the new
+  // preamble overrides whatever the baseline carried — that's how a
+  // user can re-anchor the target by re-running configure.
+  const baselinePre = parsePreamble(currentCsv);
+  const beforePre = renderPreambleFromParsed(baselinePre);
+  const afterPre = commitment
+    ? renderPreamble(commitment.targetPercent, commitment.baselineMonthlyBytes)
+    : beforePre;
+  const before = renderCsv(baseline.rows, beforePre);
+  const after = renderCsv(merged, afterPre);
   return renderUnifiedDiff(before, after);
+}
+
+/**
+ * Re-render a PreambleData back into preamble lines. Used to round-trip
+ * the original `target_percent` across refresh PRs when the caller didn't
+ * supply a new commitment block.
+ */
+function renderPreambleFromParsed(p: PreambleData): string[] {
+  if (p.target_percent === undefined) return [];
+  return renderPreamble(p.target_percent, p.baseline_monthly_bytes ?? 0);
 }
 
 function renderUnifiedDiff(before: string, after: string): string {
@@ -1034,10 +1410,18 @@ function renderPrCommand(
 function reconstructAfterCsv(diff: string, currentCsv: string | undefined): string {
   const baseline = parseCsv(currentCsv);
   const merged = new Map(baseline.rows);
+  // Track preamble changes from the diff so the reconstructed CSV
+  // carries the freshly-anchored commitment block forward to the PR.
+  const afterPreambleLines: string[] = [];
+  const removedPreambleLines = new Set<string>();
   const lines = diff.split('\n');
   for (const l of lines) {
     if (l.startsWith('+') && !l.startsWith('+++')) {
       const body = l.slice(1);
+      if (body.trim().startsWith('#')) {
+        afterPreambleLines.push(body);
+        continue;
+      }
       const idx = body.indexOf(',');
       if (idx < 0) continue;
       const k = body.slice(0, idx).trim();
@@ -1045,13 +1429,28 @@ function reconstructAfterCsv(diff: string, currentCsv: string | undefined): stri
       if (k && k !== 'container') merged.set(k, v);
     } else if (l.startsWith('-') && !l.startsWith('---')) {
       const body = l.slice(1);
+      if (body.trim().startsWith('#')) {
+        removedPreambleLines.add(body);
+        continue;
+      }
       const idx = body.indexOf(',');
       if (idx < 0) continue;
       const k = body.slice(0, idx).trim();
       if (k && k !== 'container') merged.delete(k);
     }
   }
-  return renderCsv(merged);
+  // Preamble resolution: prefer the diff's new preamble. If the diff
+  // didn't touch the preamble, keep whatever the baseline carried.
+  let preamble: string[];
+  if (afterPreambleLines.length > 0) {
+    preamble = afterPreambleLines;
+  } else {
+    const baselinePreamble = parsePreamble(currentCsv);
+    preamble = renderPreambleFromParsed(baselinePreamble).filter(
+      (l) => !removedPreambleLines.has(l)
+    );
+  }
+  return renderCsv(merged, preamble);
 }
 
 // ─── human_summary builder ────────────────────────────────────────────
@@ -1064,12 +1463,14 @@ function buildConfigureEngineHumanSummary(args: {
   destination: SiemId;
   remainingBytesToShed: number;
   applied?: ConfigureEngineData['applied'];
+  refreshMode?: boolean;
 }): string {
   const containerWord = `${args.containerCount} container${args.containerCount === 1 ? '' : 's'}`;
+  const verb = args.refreshMode ? 'refresh re-derived' : 'derived';
   if (!args.feasible) {
-    return `configure_engine could not hit ${args.targetPercent.toFixed(1)}% reduction on ${args.service} (${containerWord}, ${args.destination}); short by ${humanBytes(args.remainingBytesToShed)} per month. Adjust target, floors, or action defaults and re-run.`;
+    return `configure_engine ${args.refreshMode ? 'refresh' : ''} could not hit ${args.targetPercent.toFixed(1)}% reduction on ${args.service} (${containerWord}, ${args.destination}); short by ${humanBytes(args.remainingBytesToShed)} per month. Adjust target, floors, or action defaults and re-run.`;
   }
-  const headline = `configure_engine derived a ${args.targetPercent.toFixed(1)}% reduction policy on ${args.service} across ${containerWord} (${args.destination}); ${args.patternCount} pattern${args.patternCount === 1 ? '' : 's'} capped.`;
+  const headline = `configure_engine ${verb} a ${args.targetPercent.toFixed(1)}% reduction policy on ${args.service} across ${containerWord} (${args.destination}); ${args.patternCount} pattern${args.patternCount === 1 ? '' : 's'} capped.`;
   if (args.applied?.ok && args.applied.pr_url) {
     return `${headline} PR opened at ${args.applied.pr_url}; the engine hot-reloads the cap CSV on the next gitops poll, no pipeline restart.`;
   }
