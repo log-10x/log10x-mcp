@@ -203,8 +203,10 @@ test('exception_services pin patterns to action=pass and subtract from pool', ()
     'achievable shrinks when exceptions added',
   );
 
-  // Commitment artifact should list the exception explicitly.
-  assert.match(envelope.output.commitment_artifact!.markdown, /Exception services/);
+  // Commitment artifact should mark the exception in the consequence table.
+  // (Per the consequence-led envelope migration: legacy "### Exception services"
+  // section was replaced with "_(exception)_" tags on the per-service rows.)
+  assert.match(envelope.output.commitment_artifact!.markdown, /_\(exception\)_/);
   assert.match(envelope.output.commitment_artifact!.markdown, /payments/);
 });
 
