@@ -123,6 +123,9 @@ import { extractTemplatesSchema, executeExtractTemplates } from './tools/extract
 import { log10xStartSchema, executeLog10xStart } from './tools/log10x-start.js';
 import { costOptionsSchema, executeCostOptions } from './tools/cost-options.js';
 import { manualOptionsSchema, executeManualOptions } from './tools/manual-options.js';
+import { explainModeSchema, executeExplainMode } from './tools/explain-mode.js';
+import { previewFilterSchema, executePreviewFilter } from './tools/preview-filter.js';
+import { patternDetailSchema, executePatternDetail } from './tools/pattern-detail.js';
 import { getStatus } from './resources/status.js';
 
 // ── Environment + cost cache ──
@@ -694,6 +697,10 @@ NATURAL TOOL CHAINS
   Cost investigation:
     log10x_top_patterns  →  log10x_pattern_mitigate  →  log10x_dependency_check
 
+  Mode selection and preview:
+    log10x_start  →  log10x_cost_options  →  log10x_explain_mode  →  (apply) log10x_configure_engine / log10x_pattern_mitigate / log10x_advise_retriever
+                                                                    →  (preview) log10x_preview_filter  →  log10x_pattern_detail  →  apply
+
   Forensic retrieval across retention boundaries:
     log10x_event_lookup  →  log10x_retriever_query
 
@@ -1187,6 +1194,35 @@ registerLog10xTool('log10x_manual_options', manualOptionsSchema, (args) =>
   wrap('log10x_manual_options', async () =>
     executeManualOptions(args as { service?: string; target_percent?: number })
   )
+);
+
+// ── Tool: log10x_explain_mode ──
+//
+// Called after the user picks a mode from log10x_cost_options. Explains
+// the chosen enforcement mode in service-level plain language before any
+// action is taken, then offers Apply or Preview.
+
+registerLog10xTool('log10x_explain_mode', explainModeSchema, (args) =>
+  wrap('log10x_explain_mode', async () => executeExplainMode(args))
+);
+
+// ── Tool: log10x_preview_filter ──
+//
+// Shows the list of patterns that would be affected by the chosen mode
+// before any action is taken. Fixed-width plain-text table with trend
+// sparklines. Drills down to log10x_pattern_detail per row.
+
+registerLog10xTool('log10x_preview_filter', previewFilterSchema, (args) =>
+  wrap('log10x_preview_filter', async () => executePreviewFilter(args))
+);
+
+// ── Tool: log10x_pattern_detail ──
+//
+// Full single-pattern view: lineChart, cross-service bar chart, severity
+// breakdown, and sample events. Called from log10x_preview_filter rows.
+
+registerLog10xTool('log10x_pattern_detail', patternDetailSchema, (args) =>
+  wrap('log10x_pattern_detail', async () => executePatternDetail(args))
 );
 
 // ── Tool: log10x_doctor ──

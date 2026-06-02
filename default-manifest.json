@@ -14,7 +14,7 @@
     },
     "log10x_cost_options": {
       "title": "Cost reduction options",
-      "description": "CALL THIS after the user picks 'show me what cutting costs would look like' from log10x_start. Returns the 7-mode action menu (drop / sample / compact / tier_down / offload / manual / pass), each gated by the customer's detected capabilities (receiver tier, SIEM type, offload bucket). Each mode carries a one-line description, who enforces it (engine / SIEM / forwarder / customer), what survives, and the routes_to tool. Manual mode routes to log10x_manual_options; all other modes route to log10x_estimate_savings with default_action pre-set. The envelope carries must_render_verbatim (show to user as-is), must_ask_user (numbered question), and forbidden_next_actions (do not call estimate_savings, configure_engine, pattern_mitigate, or manual_options until the user picks).",
+      "description": "CALL THIS after the user picks 'show me what cutting costs would look like' from log10x_start. Returns the 7-mode action menu (drop / sample / compact / tier_down / offload / manual / pass), each gated by the customer's detected capabilities (receiver tier, SIEM type, offload bucket). Each mode carries a one-line description, who enforces it (engine / SIEM / forwarder / customer), what survives, and the routes_to tool. Manual mode routes to log10x_manual_options; all other modes route to log10x_explain_mode (which explains the mode in service-level plain language, then offers Apply or Preview via log10x_preview_filter). The envelope carries must_render_verbatim (show to user as-is), must_ask_user (numbered question), and forbidden_next_actions (do not call estimate_savings, configure_engine, pattern_mitigate, explain_mode, or manual_options until the user picks).",
       "annotations": {
         "title": "Cost reduction options",
         "readOnlyHint": true,
@@ -28,6 +28,39 @@
       "description": "CALL THIS when the user picks manual mode from log10x_cost_options. Returns the 3-path sub-menu: (1) report_only — engine marks patterns in metrics, agent shows savings potential, no enforcement; (2) forwarder_config — agent generates drop config for the detected forwarder (fluent-bit/fluentd/otel/vector/logstash) for the top N cost patterns, routes to log10x_pattern_mitigate per pattern; (3) siem_exclusion — agent generates native SIEM exclusion configs (Splunk props/transforms, Datadog log exclusion, Elastic ingest pipeline, CloudWatch subscription filter), routes to log10x_pattern_mitigate per pattern. forwarder_config gates on detected forwarder; siem_exclusion gates on detected SIEM credentials. forbidden_next_actions: log10x_configure_engine (manual mode means external enforcement, not engine enforcement).",
       "annotations": {
         "title": "Manual cost options",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "category": "cost"
+    },
+    "log10x_explain_mode": {
+      "title": "Explain enforcement mode",
+      "description": "CALL THIS AFTER log10x_cost_options when the user picks a non-manual mode. Explains the chosen enforcement mode (report_only / siem_filter / forwarder_filter / engine_in_path_drop / engine_in_path_sample / engine_route_s3 / siem_tier_down) in service-level plain language, with dollar math when byte metrics are available. Returns must_render_verbatim (plain-text three-section card, no markdown), must_ask_user (Apply or Preview choice), and forbidden_next_actions (locks apply tools and log10x_preview_filter until the user picks). routes_to.apply routes engine_* and siem_tier_down to log10x_configure_engine, siem_filter/forwarder_filter to log10x_pattern_mitigate, engine_route_s3 to log10x_advise_retriever. routes_to.preview routes to log10x_preview_filter with { service, mode }.",
+      "annotations": {
+        "title": "Explain enforcement mode",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "category": "cost"
+    },
+    "log10x_preview_filter": {
+      "title": "Preview filter patterns",
+      "description": "CALL THIS AFTER log10x_explain_mode when the user picks Preview. Shows the list of patterns that would be affected by applying a given enforcement mode to a service, before any action is taken. Returns a fixed-width plain-text table (no markdown pipes) with columns: rank, descriptor, volume, %, service, severity, first seen, trend sparkline. Writes a CSV to /tmp/log10x-preview-<mode>-<service>.csv. must_ask_user offers: drill into pattern #N (calls log10x_pattern_detail), Apply, or go back to pick a different mode. forbidden_next_actions locks log10x_configure_engine, log10x_pattern_mitigate, and log10x_advise_retriever until the user commits.",
+      "annotations": {
+        "title": "Preview filter patterns",
+        "readOnlyHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "category": "cost"
+    },
+    "log10x_pattern_detail": {
+      "title": "Pattern detail",
+      "description": "CALL THIS AFTER log10x_preview_filter when the user drills into a specific pattern by number. Returns a full single-pattern view: 24h line chart (up to 12 rows, 72 chars wide), ASCII horizontal bar chart for cross-service byte distribution (top 8 services), severity breakdown, and up to 5 sample events truncated to 120 chars each. Requires pattern_hash (tenx_hash from preview_filter.data.patterns[].tenx_hash). must_ask_user: Back to preview list, or Apply with this in the picture. actions[]: log10x_preview_filter (back) and log10x_configure_engine (apply).",
+      "annotations": {
+        "title": "Pattern detail",
         "readOnlyHint": true,
         "idempotentHint": true,
         "openWorldHint": true
