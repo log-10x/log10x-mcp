@@ -689,7 +689,10 @@ export async function executeTopPatterns(
     return {
       rank: r.rank,
       identity: r.pattern ?? r.hash ?? '',
-      template_hash: r.hash ?? '',
+      // pattern_hash = tenx_hash (hash of the representing-token subset), the
+      // user-facing stable identity. NOT template_hash (the engine-internal
+      // field-set join key) — many templates collapse to one pattern_hash.
+      pattern_hash: r.hash ?? '',
       service: r.service,
       severity: r.severity,
       cost_per_hour_usd: honestCostPerHour[idx],
@@ -887,7 +890,7 @@ export async function executeTopPatterns(
   // from the per-row `bytes` of each cluster member by joining on identity.
   const bytesByIdentity = new Map<string, number>();
   for (const p of dataPatterns) {
-    if (p.template_hash) bytesByIdentity.set(p.template_hash, p.bytes);
+    if (p.pattern_hash) bytesByIdentity.set(p.pattern_hash, p.bytes);
   }
 
   return buildEnvelope({
