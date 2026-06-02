@@ -293,16 +293,13 @@ export async function executeInvestigate(
     depth: 'shallow' | 'normal' | 'deep';
     environment?: string;
     use_bytes: boolean;
-    /** Ignored. Retained for backward-compat with in-process callers; the
-     * markdown view was removed from the public schema in favor of the
-     * structured `human_summary` field. */
-    view?: 'summary' | 'markdown';
+    effective_ingest_per_gb?: number;
   },
   env: EnvConfig
 ): Promise<import('../lib/output-types.js').StructuredOutput> {
   const startedAt = Date.now();
   const thresholdBasis = detectThresholdBasis();
-  const { buildEnvelope: __be, buildMarkdownEnvelope: __bme } = await import('../lib/output-types.js');
+  const { buildEnvelope: __be } = await import('../lib/output-types.js');
   const { wrapBackendError } = await import('../lib/primitive-errors.js');
 
   // ── Structural failure path ────────────────────────────────────────
@@ -433,18 +430,6 @@ export async function executeInvestigate(
     parsed,
     thresholdBasis,
   );
-
-  // ── Backward-compat markdown view ─────────────────────────────────
-  // Public schema dropped 'view'; retained for in-process callers
-  // (existing investigation-cache / debug tooling) that still ask
-  // for the rendered report directly.
-  if (args.view === 'markdown') {
-    return __bme({
-      tool: 'log10x_investigate',
-      summary: { headline: `Investigation of "${args.starting_point}" (window=${args.window})` },
-      markdown: md,
-    });
-  }
 
   return __be({
     tool: 'log10x_investigate',
