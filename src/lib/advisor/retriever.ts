@@ -79,6 +79,14 @@ export interface RetrieverAdviseArgs {
   skipTeardown?: boolean;
   /** Skip verify. */
   skipVerify?: boolean;
+  /**
+   * Destination SIEM the customer routes the kept slice to. Used to gate
+   * the SIEM down-tier sub-sections in the offload markdown
+   * (Datadog Flex only for `datadog`, CloudWatch IA only for `cloudwatch`,
+   * etc., per `DEFAULT_ACTION_BY_DESTINATION`). When omitted, the offload
+   * section falls back to showing both leads (historical behavior).
+   */
+  destination?: string;
 }
 
 const RETRIEVER_CHART_REPO = 'https://log-10x.github.io/helm-charts';
@@ -181,7 +189,8 @@ export async function buildRetrieverPlan(args: RetrieverAdviseArgs): Promise<Adv
     inputBucket && region
       ? renderOffloadSection(
           { bucket: inputBucket, region, prefix: 'app' },
-          mapForwarderToOffload(snapshot.kubectl.forwarders)
+          mapForwarderToOffload(snapshot.kubectl.forwarders),
+          args.destination
         )
       : undefined;
 

@@ -26,6 +26,8 @@
  *     identity the Retriever correlates on.
  */
 
+import { getAllowedActionsForDestination } from './cost.js';
+
 export type OffloadForwarderId =
   | 'vector'
   | 'fluentd'
@@ -695,7 +697,8 @@ function renderRecipeBlock(fwd: OffloadForwarderId, p: OffloadParams): string[] 
  */
 export function renderOffloadSection(
   params: OffloadParams,
-  forwarder: OffloadForwarderId | null
+  forwarder: OffloadForwarderId | null,
+  destination?: string
 ): string {
   const prefix = params.prefix ?? DEFAULT_PREFIX;
   const lines: string[] = [];
@@ -742,23 +745,48 @@ export function renderOffloadSection(
     ''
   );
 
-  const ddog = datadogFlexRecipe();
-  const cw = cloudwatchIaRecipe();
+  // Gate the SIEM down-tier sub-sections by DEFAULT_ACTION_BY_DESTINATION.
+  // Datadog Flex is only relevant on `datadog`; CloudWatch Infrequent
+  // Access only on `cloudwatch`. When the destination is unknown, fall
+  // back to the historical behavior (show both leads) so callers that
+  // do not yet thread destination keep working.
+  const showDatadog = destination
+    ? destination === 'datadog' && getAllowedActionsForDestination('datadog').includes('tier_down')
+    : true;
+  const showCloudWatch = destination
+    ? destination === 'cloudwatch' && getAllowedActionsForDestination('cloudwatch').includes('tier_down')
+    : true;
+
+  if (showDatadog || showCloudWatch) {
+    lines.push(
+      '**Or down-tier in the SIEM instead of offloading** (keep events in-platform at a cheaper tier, same `isDropped` marker, no second attribute):',
+      ''
+    );
+    if (showDatadog) {
+      const ddog = datadogFlexRecipe();
+      lines.push(
+        `_Datadog Flex_ — ${ddog.note}`,
+        '',
+        '```hcl',
+        ddog.body,
+        '```',
+        ''
+      );
+    }
+    if (showCloudWatch) {
+      const cw = cloudwatchIaRecipe();
+      lines.push(
+        `_CloudWatch Infrequent Access_ — ${cw.note}`,
+        '',
+        '```hcl',
+        cw.body,
+        '```',
+        ''
+      );
+    }
+  }
+
   lines.push(
-    '**Or down-tier in the SIEM instead of offloading** (keep events in-platform at a cheaper tier, same `isDropped` marker, no second attribute):',
-    '',
-    `_Datadog Flex_ — ${ddog.note}`,
-    '',
-    '```hcl',
-    ddog.body,
-    '```',
-    '',
-    `_CloudWatch Infrequent Access_ — ${cw.note}`,
-    '',
-    '```hcl',
-    cw.body,
-    '```',
-    '',
     'Fetch back: `log10x_retriever_query` by pattern identity returns the offloaded events from S3.'
   );
 

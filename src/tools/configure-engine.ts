@@ -61,6 +61,7 @@ import {
 import {
   COST_MODEL_BY_DESTINATION,
   getDestinationCostModel,
+  getDefaultActionForDestination,
   projectActionRange,
   type Action,
 } from '../lib/cost.js';
@@ -461,13 +462,16 @@ export async function executeConfigureEngine(
   const blocking: string[] = [];
 
   // If destination is no-op for compact and standard default is compact, fall
-  // back to drop and warn — picking compact when the destination silently
-  // ignores it is the canonical foot-gun the cost lib already flags.
+  // back to the destination's preferred level-1 action (per
+  // DEFAULT_ACTION_BY_DESTINATION) rather than the historical `drop`. This
+  // gives Datadog → tier_down, Splunk-no-app → offload, etc. Drop is only
+  // chosen when the destination table explicitly lists it (none currently
+  // do — drop remains an explicit user override).
   let effectiveStandardAction: Action = standardAction;
   if (standardAction === 'compact' && model.compact_mode === 'no-op') {
-    effectiveStandardAction = 'drop';
+    effectiveStandardAction = getDefaultActionForDestination(destination, 1);
     warnings.push(
-      `\`compact\` is a no-op on ${destination}; standard-tier default fell back to \`drop\`. Override via \`action_defaults.standard\` (e.g. \`tier_down\`, \`sample\`).`
+      `\`compact\` is a no-op on ${destination}; standard-tier default fell back to \`${effectiveStandardAction}\` (destination's preferred level-1 action). Override via \`action_defaults.standard\`.`
     );
   }
 

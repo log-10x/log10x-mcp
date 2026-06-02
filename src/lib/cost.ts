@@ -263,6 +263,104 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
   },
 };
 
+// ---------------------------------------------------------------------------
+// PER-DESTINATION DEFAULT ACTION HIERARCHY
+//
+// Where COST_MODEL_BY_DESTINATION answers "what does compact look like on
+// this destination", this table answers the prior question: "if no
+// per-pattern override applies, what is the *first* cost-reduction lever to
+// pull on this destination, and what is the level-2 fallback if level-1 is
+// unavailable?"
+//
+// The hierarchy comes from the cost-cutting product shape:
+//   - Datadog:                tier_down (Flex)  → offload
+//   - CloudWatch:             tier_down (IA)    → offload
+//   - Splunk Cloud / Ent:     offload           → compact (if 10x app installable)
+//   - Elasticsearch self / OpenSearch self:
+//                             offload           → compact (if 10x plugin installable)
+//   - Elasticsearch managed / OpenSearch managed:
+//                             offload                  (no compact on managed)
+//   - ClickHouse:             compact (CH UDF)  → offload
+//   - Sumo / NewRelic / Honeycomb / Grafana Cloud Logs / Loki:
+//                             offload                  (no level-2)
+//   - generic / unknown:      offload                  (safe fallback)
+//
+// Keyspace is wider than SiemId because the action hierarchy splits
+// `elasticsearch` into self-managed vs managed (only the self path can run
+// the 10x plugin). Callers that hold a SiemId pass it directly — it lands
+// in the same table.
+// ---------------------------------------------------------------------------
+
+/** Stable identity for the action-hierarchy table. Superset of SiemId. */
+export type DestinationKey =
+  | SiemId
+  | 'splunk_cloud'
+  | 'elasticsearch_self'
+  | 'elasticsearch_managed'
+  | 'opensearch_self'
+  | 'opensearch_managed'
+  | 'newrelic'
+  | 'honeycomb'
+  | 'grafana_cloud_logs'
+  | 'loki'
+  | 'generic';
+
+export const DEFAULT_ACTION_BY_DESTINATION: Record<DestinationKey, Action[]> = {
+  // SIEM-billed analyzers with cheap-tier in-platform options.
+  datadog: ['tier_down', 'offload'],
+  cloudwatch: ['tier_down', 'offload'],
+  // Splunk: 10x envelope-compact app installable on both Cloud and Enterprise.
+  splunk: ['offload', 'compact'],
+  splunk_cloud: ['offload', 'compact'],
+  // Self-hosted ES/OS can run the 10x plugin; managed offerings cannot.
+  elasticsearch: ['offload', 'compact'], // back-compat default = self-hosted assumption
+  elasticsearch_self: ['offload', 'compact'],
+  elasticsearch_managed: ['offload'],
+  opensearch_self: ['offload', 'compact'],
+  opensearch_managed: ['offload'],
+  // ClickHouse: the dict+UDF+view compact path is the level-1 lever (PoC: 70-78%).
+  clickhouse: ['compact', 'offload'],
+  // Single-lever destinations.
+  sumo: ['offload'],
+  newrelic: ['offload'],
+  honeycomb: ['offload'],
+  grafana_cloud_logs: ['offload'],
+  loki: ['offload'],
+  // Map the remaining SiemId entries to the safe single-lever default. These
+  // sit at the bottom because the table is keyed by the wider DestinationKey
+  // and TypeScript requires every key to be present.
+  'azure-monitor': ['offload'],
+  'gcp-logging': ['offload'],
+  generic: ['offload'],
+};
+
+/**
+ * Return the destination's preferred action at the given level (1-based).
+ * Level 1 = first lever to pull; level 2 = fallback when level-1 is
+ * unavailable. Unknown destinations and out-of-range levels fall back to
+ * 'offload' (the safe single-lever default).
+ */
+export function getDefaultActionForDestination(
+  destination: string,
+  level: number = 1
+): Action {
+  const list = DEFAULT_ACTION_BY_DESTINATION[destination as DestinationKey]
+    ?? DEFAULT_ACTION_BY_DESTINATION.generic;
+  const idx = Math.max(1, level) - 1;
+  return list[idx] ?? list[list.length - 1] ?? 'offload';
+}
+
+/**
+ * Return the full ordered hierarchy of allowed default actions for a
+ * destination. Used by the offload-section renderer to gate which
+ * down-tier / compact sub-sections are relevant (e.g. Datadog Flex only
+ * shows when 'tier_down' is allowed on 'datadog').
+ */
+export function getAllowedActionsForDestination(destination: string): Action[] {
+  return DEFAULT_ACTION_BY_DESTINATION[destination as DestinationKey]
+    ?? DEFAULT_ACTION_BY_DESTINATION.generic;
+}
+
 /**
  * Returns the cost model for a destination, with ES-unpruned override.
  *

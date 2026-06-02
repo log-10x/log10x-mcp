@@ -9,6 +9,7 @@
 import type { ExtractedPattern, ExtractedPatterns } from './pattern-extraction.js';
 import type { SiemId } from './siem/pricing.js';
 import { SIEM_DISPLAY_NAMES } from './siem/pricing.js';
+import { getDefaultActionForDestination, type Action as CostAction } from './cost.js';
 import { fmtBytes, fmtCount, fmtDollar, fmtGb, fmtPct } from './format.js';
 import { renderNextActions, type NextAction } from './next-actions.js';
 import { agentOnly } from './agent-only.js';
@@ -420,6 +421,14 @@ interface EnrichedPattern extends ExtractedPattern {
    * Exclusion configs prepend an approximation footnote in that case.
    */
   literalLeading: boolean;
+  /**
+   * The destination's preferred level-1 action (`tier_down`, `offload`,
+   * `compact`, …) per `DEFAULT_ACTION_BY_DESTINATION`. Surfaced in the
+   * reasoning string for high-volume info-class patterns so the reader
+   * sees the SIEM-appropriate lever (Datadog → tier_down, Splunk → offload,
+   * ClickHouse → compact, …) rather than a one-size `mute`/`sample` verdict.
+   */
+  destinationLevel1Action: CostAction;
 }
 
 /**
@@ -1276,6 +1285,12 @@ function enrichPatterns(input: RenderInput): EnrichedPattern[] {
   const total = input.extraction.totalEvents || 1;
   const totalBytes = input.extraction.totalBytes || 1;
   const analyzerCost = input.analyzerCostPerGb;
+  // Destination-aware level-1 lever (per DEFAULT_ACTION_BY_DESTINATION):
+  //   datadog/cloudwatch -> tier_down, clickhouse -> compact,
+  //   splunk / es / sumo / azure / gcp / managed offerings -> offload, …
+  // Threaded into reasoning for high-volume info-class patterns so the
+  // recommendation matches the SIEM's cheapest cost-cutting path.
+  const destinationAction: CostAction = getDefaultActionForDestination(input.siem, 1);
 
   // When the caller provides the customer's real daily volume, scale each
   // pattern's bytes from "sample-observed" to "projected-daily" by
@@ -1346,9 +1361,21 @@ function enrichPatterns(input: RenderInput): EnrichedPattern[] {
     } else if (isDebugInfo && isFrequent) {
       action = isHotLoop ? 'mute' : 'sample';
       sampleRate = action === 'sample' ? 20 : 1;
+      // Surface the destination's preferred level-1 lever in the reasoning
+      // so the reader sees the SIEM-appropriate verb (Datadog → tier_down to
+      // Flex, Splunk → offload to customer-owned S3, ClickHouse → compact via
+      // CH UDF, …) on top of the muting verdict.
+      const destinationLever =
+        destinationAction === 'tier_down'
+          ? ' — preferred lever on this destination: `tier_down` (cheaper in-platform tier).'
+          : destinationAction === 'offload'
+          ? ' — preferred lever on this destination: `offload` (route to customer-owned S3 before the SIEM bills it).'
+          : destinationAction === 'compact'
+          ? ' — preferred lever on this destination: `compact` (10x compaction on the destination).'
+          : '';
       reasoning = isHotLoop
-        ? `High-volume ${severity || 'info-class'} pattern (${fmtPct(pctOfTotal * 100)} of analyzed volume) — candidate for mute after dependency check.`
-        : `Moderate-volume ${severity || 'info-class'} pattern — sample 1/20 to retain a trickle for debug.`;
+        ? `High-volume ${severity || 'info-class'} pattern (${fmtPct(pctOfTotal * 100)} of analyzed volume) — candidate for mute after dependency check.${destinationLever}`
+        : `Moderate-volume ${severity || 'info-class'} pattern — sample 1/20 to retain a trickle for debug.${destinationLever}`;
     } else {
       action = 'keep';
       reasoning = 'Low volume or non-actionable signal — keep.';
@@ -1378,6 +1405,7 @@ function enrichPatterns(input: RenderInput): EnrichedPattern[] {
       identity,
       literalPhrase: lit.phrase,
       literalLeading: lit.leading,
+      destinationLevel1Action: destinationAction,
       // Placeholder; overwritten by the enricher pass below once the
       // whole list is sorted and visible to the cross-pattern detectors.
       poc: {

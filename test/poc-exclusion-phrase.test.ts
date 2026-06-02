@@ -39,6 +39,7 @@ function fakePattern(overrides: Partial<_EnrichedPattern>): _EnrichedPattern {
     identity: 'fake_identity',
     literalPhrase: '',
     literalLeading: true,
+    destinationLevel1Action: 'offload',
     poc: {
       incidentClusterId: null,
       topSlot: null,

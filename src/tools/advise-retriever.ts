@@ -55,6 +55,12 @@ export const adviseRetrieverSchema = {
     .optional()
     .describe('SQS URL for stream operations. Default: auto-detected from snapshot.'),
   action: z.enum(['install', 'verify', 'teardown', 'all']).optional().describe('Default: `all`.'),
+  destination: z
+    .string()
+    .optional()
+    .describe(
+      'Destination SIEM the kept slice routes to (e.g. `datadog`, `cloudwatch`, `splunk`, `elasticsearch_self`, `clickhouse`, `sumo`). Gates which down-tier sub-section renders in the offload markdown per `DEFAULT_ACTION_BY_DESTINATION` (Datadog Flex only for `datadog`, CloudWatch IA only for `cloudwatch`). When omitted, both leads are shown.'
+    ),
 };
 
 const schemaObj = z.object(adviseRetrieverSchema);
@@ -96,6 +102,7 @@ export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise
     skipInstall: action === 'verify' || action === 'teardown',
     skipVerify: action === 'install' || action === 'teardown',
     skipTeardown: action === 'install' || action === 'verify',
+    destination: args.destination,
   });
 
   return buildAdvisePlanEnvelope({ tool: 'log10x_advise_retriever', plan, action });
