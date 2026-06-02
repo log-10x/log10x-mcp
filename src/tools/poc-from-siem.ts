@@ -194,6 +194,26 @@ export const pocFromSiemSubmitSchema = {
         'not production log content (raw events are sent to a shared public Lambda).'
     ),
   environment: z.string().optional().describe('Optional environment nickname — cosmetic only, for the report header.'),
+  target_percent_reduction: z
+    .number()
+    .min(0)
+    .max(100)
+    .optional()
+    .describe(
+      'Customer-specified target reduction percent. If absent, POC produces a recommendation-only output. ' +
+        'If present, POC produces a feasibility verdict (`output.feasibility`) plus a pre-deploy commitment ' +
+        'artifact stub (`output.commitment_artifact`) the agent can surface alongside the per-pattern actions. ' +
+        'The cap CSV ready to commit ships in Item 4 of the cost-cutting close list.'
+    ),
+  exception_services: z
+    .array(z.string())
+    .optional()
+    .describe(
+      'Services flagged by the customer to stay in the SIEM with full retention (action=pass). Typically ' +
+        '1-3 services for audit, compliance, or executive dashboards. Patterns whose service is in this list ' +
+        'are pinned to pass on the envelope outputs and their bytes are subtracted from the achievable ' +
+        'reduction pool used for the feasibility verdict.'
+    ),
   // ClickHouse-specific
   clickhouse_table: z.string().optional().describe('[ClickHouse] Required — table name holding log events.'),
   clickhouse_timestamp_column: z.string().optional().describe('[ClickHouse] Column holding the timestamp. Default auto-detected.'),
@@ -278,6 +298,17 @@ interface Snapshot {
    * envelope so we don't re-call the host LLM on every status poll.
    */
   hostAgentEnrichment?: import('../lib/poc-host-agent-enricher.js').AgentEnrichmentResult;
+  /**
+   * Customer-specified reduction target (0-100) carried from submit
+   * through to the v2 envelope builder so the status path can emit a
+   * feasibility verdict + commitment artifact stub.
+   */
+  targetPercentReduction?: number;
+  /**
+   * Services pinned to action=pass on the envelope outputs. Same
+   * lifecycle as targetPercentReduction.
+   */
+  exceptionServices?: string[];
 }
 
 const SNAPSHOTS = new Map<string, Snapshot>();
@@ -316,6 +347,10 @@ export interface PocSubmitArgs {
   enrich_max_tokens?: number;
   privacy_mode: boolean;
   environment?: string;
+  /** Customer-specified target reduction (0-100). Triggers feasibility + commitment artifact emission. */
+  target_percent_reduction?: number;
+  /** Services pinned to action=pass on the envelope outputs. */
+  exception_services?: string[];
   clickhouse_table?: string;
   clickhouse_timestamp_column?: string;
   clickhouse_message_column?: string;
@@ -409,6 +444,8 @@ async function executePocSubmitInner(args: PocSubmitArgs): Promise<string> {
     stepDetail: 'initializing',
     startedAt: new Date().toISOString(),
     startedAtMs: Date.now(),
+    targetPercentReduction: args.target_percent_reduction,
+    exceptionServices: args.exception_services,
   };
   retain(snapshot);
 
@@ -549,6 +586,10 @@ export async function executePocStatus(args: PocStatusArgs): Promise<import('../
         clusters,
         redundancyPairs,
         args.top_n ?? 50,
+        {
+          targetPercentReduction: s.targetPercentReduction,
+          exceptionServices: s.exceptionServices,
+        },
       );
       // Attach pre-computed host-agent enrichment from the snapshot,
       // when present. The enrichment is computed once at end of
@@ -1004,6 +1045,10 @@ export async function runPipeline(
         clusters,
         redundancyPairs,
         15,
+        {
+          targetPercentReduction: args.target_percent_reduction,
+          exceptionServices: args.exception_services,
+        },
       );
       const enrichment = await enrichWithHostAgent(previewEnvelope, {
         server: args._mcpServer,

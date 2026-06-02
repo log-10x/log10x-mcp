@@ -64,6 +64,24 @@ export const pocFromLocalSchema = {
     .optional()
     .default(true)
     .describe('Templatize via locally-installed `tenx` (true) or the public Log10x paste endpoint (false). Default true.'),
+  target_percent_reduction: z
+    .number()
+    .min(0)
+    .max(100)
+    .optional()
+    .describe(
+      'Customer-specified target reduction percent. If absent, POC produces a recommendation-only output. ' +
+        'If present, POC produces a feasibility verdict + a pre-deploy commitment artifact stub the agent ' +
+        'can surface alongside the per-pod savings matrix. Cap CSV ships in Item 4.'
+    ),
+  exception_services: z
+    .array(z.string())
+    .optional()
+    .describe(
+      'Services / pods flagged by the customer to stay in the log analyzer with full retention (action=pass). ' +
+        'Their bytes are subtracted from the achievable reduction pool used for the feasibility verdict. ' +
+        'Matched case-insensitively against the pod / source name.'
+    ),
 };
 
 export interface PocFromLocalArgs {
@@ -74,6 +92,27 @@ export interface PocFromLocalArgs {
   max_pods?: number;
   privacy_mode?: boolean;
   ai_prettify?: boolean;
+  target_percent_reduction?: number;
+  exception_services?: string[];
+}
+
+/**
+ * Feasibility / commitment shape mirrored from poc-envelope-v2. Local
+ * POC produces its own struct (no SIEM destination) but holds the same
+ * field names so a downstream renderer can switch on either source.
+ */
+interface LocalFeasibility {
+  feasible: boolean;
+  target_percent_reduction: number;
+  max_achievable_percent: number;
+  reason: string;
+  exception_services: string[];
+  exception_share_of_bytes: number;
+}
+
+interface LocalCommitmentArtifact {
+  markdown: string;
+  next_step: { tool: 'log10x_advise_install' | 'log10x_configure_engine'; reason: string };
 }
 
 interface PriceRow {
@@ -175,6 +214,9 @@ interface PocFromLocalInner {
   rate_source: 'list_price';
   notes: string[];
   markdown: string;
+  /** Populated only when target_percent_reduction was supplied on submit. */
+  feasibility?: LocalFeasibility;
+  commitment_artifact?: LocalCommitmentArtifact;
 }
 
 async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFromLocalInner> {
@@ -348,6 +390,83 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
   const expectedPct = droppableFraction * 100;
   const lowPct = Math.max(0, expectedPct * 0.85);
   const highPct = Math.min(100, expectedPct * 1.15);
+
+  // ── Feasibility + commitment artifact (only when target supplied) ──
+  let feasibility: LocalFeasibility | undefined;
+  let commitment_artifact: LocalCommitmentArtifact | undefined;
+  if (args.target_percent_reduction !== undefined) {
+    const exceptions = args.exception_services ?? [];
+    const exceptionSet = new Set(exceptions.map((s) => s.toLowerCase()));
+    // Pods that match the exception list contribute their bytes back to
+    // the "must-keep" pool. Composition is keyed by pod / source name
+    // and is the only service-grain signal available without a SIEM.
+    let exceptionBytes = 0;
+    for (const c of sample.composition) {
+      if (exceptionSet.has(c.source.toLowerCase())) exceptionBytes += c.bytes;
+    }
+    const exceptionShare = sample.totalBytes > 0 ? exceptionBytes / sample.totalBytes : 0;
+    const maxAchievable = Math.max(0, expectedPct - exceptionShare * 100);
+    const feasible = maxAchievable >= args.target_percent_reduction;
+    const reasonParts = [
+      `Total sample bytes ${fmtBytes(sample.totalBytes)} across ${sample.composition.length} pod(s).`,
+      `Droppable fraction (non-error, ≥1% volume patterns): ${fmtPct(expectedPct)}.`,
+    ];
+    if (exceptions.length > 0) {
+      reasonParts.push(
+        `${exceptions.length} exception pod(s) cover ${fmtPct(exceptionShare * 100)} of bytes and are pinned to pass.`,
+      );
+    }
+    reasonParts.push(
+      feasible
+        ? `Achievable ${maxAchievable.toFixed(1)}% meets target ${args.target_percent_reduction}%.`
+        : `Achievable ${maxAchievable.toFixed(1)}% short of target ${args.target_percent_reduction}%; trim exceptions or widen the sample.`,
+    );
+    feasibility = {
+      feasible,
+      target_percent_reduction: args.target_percent_reduction,
+      max_achievable_percent: Math.round(maxAchievable * 10) / 10,
+      reason: reasonParts.join(' '),
+      exception_services: exceptions,
+      exception_share_of_bytes: Math.round(exceptionShare * 1000) / 1000,
+    };
+    const artLines: string[] = [];
+    artLines.push(`## Projected commitment — local (kubectl sample)`);
+    artLines.push('');
+    artLines.push(`- **Target reduction**: ${feasibility.target_percent_reduction}%`);
+    artLines.push(
+      `- **Projected max achievable**: ${feasibility.max_achievable_percent.toFixed(1)}% (${feasibility.feasible ? 'feasible' : 'short of target'})`,
+    );
+    artLines.push(`- **Sample bytes analyzed**: ${fmtBytes(sample.totalBytes)}`);
+    artLines.push('');
+    if (exceptions.length > 0) {
+      artLines.push('### Exception pods (stay in log analyzer, full retention)');
+      artLines.push('');
+      for (const svc of exceptions) artLines.push(`- \`${svc}\``);
+      artLines.push('');
+      artLines.push(
+        `_Removed ${fmtPct(feasibility.exception_share_of_bytes * 100)} of sample bytes from the achievable pool._`,
+      );
+      artLines.push('');
+    }
+    artLines.push('### Next step');
+    artLines.push('');
+    if (feasibility.feasible) {
+      artLines.push('1. Re-run `log10x_poc_from_siem` once log-analyzer credentials are available — the SIEM path produces the per-pattern action plan + native exclusion configs.');
+      artLines.push('2. Run `log10x_advise_install` to provision the Receiver in your forwarder pipeline.');
+    } else {
+      artLines.push('1. Lower `target_percent_reduction` to within the achievable band, or trim `exception_services`.');
+      artLines.push('2. Re-run with a wider `window` or `namespace: "*"` to confirm the sample is representative before negotiating the target.');
+    }
+    artLines.push('');
+    artLines.push('_This is a PRE-DEPLOY projection from a kubectl sample. Local-source feasibility carries higher uncertainty than the SIEM-attached path because it does not see CloudTrail / ALB / VM-hosted apps._');
+    commitment_artifact = {
+      markdown: artLines.join('\n'),
+      next_step: feasibility.feasible
+        ? { tool: 'log10x_advise_install', reason: 'feasibility passes; provision Receiver' }
+        : { tool: 'log10x_configure_engine', reason: 'target exceeds achievable; iterate on plan' },
+    };
+  }
+
   return {
     ok: true,
     source: 'kubectl',
@@ -367,6 +486,8 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     rate_source: 'list_price',
     notes: sample.notes,
     markdown: lines.join('\n'),
+    feasibility,
+    commitment_artifact,
   };
 }
 

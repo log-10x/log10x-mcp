@@ -1287,6 +1287,8 @@ registerLog10xTool('log10x_poc_from_siem_submit', pocFromSiemSubmitSchema, (args
       clickhouse_message_column: args.clickhouse_message_column,
       clickhouse_service_column: args.clickhouse_service_column,
       clickhouse_severity_column: args.clickhouse_severity_column,
+      target_percent_reduction: args.target_percent_reduction,
+      exception_services: args.exception_services,
     })
   )
 );
@@ -1320,6 +1322,8 @@ registerLog10xTool('log10x_poc_from_local', pocFromLocalSchema, (args) =>
       per_pod_limit: args.per_pod_limit ?? 5000,
       max_pods: args.max_pods ?? 20,
       privacy_mode: args.privacy_mode ?? true,
+      target_percent_reduction: args.target_percent_reduction,
+      exception_services: args.exception_services,
     })
   )
 );

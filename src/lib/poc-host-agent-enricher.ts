@@ -215,12 +215,15 @@ function buildConsolidatedEnrichmentPrompt(
       ? { name: p.top_slot.name, distinct_count: p.top_slot.distinct_count, unbounded: p.top_slot.unbounded }
       : null,
     actions: {
-      code_fix_applicable: p.actions.code_fix.applicable,
-      code_fix_hypothesis: p.actions.code_fix.bug_hypothesis,
-      forwarder_exclusion_applicable: p.actions.forwarder_exclusion.applicable,
-      regulate_cap_applicable: p.actions.regulate_cap.applicable,
-      regulate_cap_expected_drop_pct: p.actions.regulate_cap.expected_drop_pct,
-      regulate_cap_rationale: p.actions.regulate_cap.rationale,
+      // 6-action vocab — pass | sample | compact | tier_down | offload | drop.
+      // The host agent reads the engine's recommended action plus the
+      // reason string and decides whether to add operational context
+      // (dependency_safety, code_fix_refinement) on top.
+      recommended_action: p.actions.recommended_action,
+      reason: p.actions.reason,
+      expected_savings_usd_per_month: p.actions.expected_savings_usd_per_month,
+      sample_n: p.actions.sample_n,
+      cap_bytes_per_window: p.actions.cap_bytes_per_window,
     },
   }));
 
@@ -330,29 +333,17 @@ function errandsForFinding(p: PatternOutput, index: number): FindingErrand {
     );
   }
 
-  // 2) regulate_cap dropping ~all volume -> dependency safety check.
-  // If we mute a pattern that drives an alert or dashboard panel,
-  // we silence the customer's operations. Catch this before the
+  // 2) high-savings drop / offload / tier_down -> dependency safety
+  // check. If we silence a pattern that drives an alert or dashboard
+  // panel, we silence the customer's operations. Catch this before the
   // recommendation lands.
-  if (p.actions.regulate_cap.applicable && p.actions.regulate_cap.expected_drop_pct >= 0.95) {
+  const REDUCING_ACTIONS = new Set(['drop', 'offload', 'tier_down', 'compact']);
+  if (REDUCING_ACTIONS.has(p.actions.recommended_action) && p.actions.expected_savings_usd_per_month >= p.metrics.cost_per_month_usd * 0.5) {
     steps.push(
-      `**dependency_safety** — engine recommends a cap that drops ${(p.actions.regulate_cap.expected_drop_pct * 100).toFixed(0)}% of this pattern's volume ($${p.metrics.cost_per_month_usd.toFixed(2)}/mo savings). ` +
+      `**dependency_safety** — engine recommends \`${p.actions.recommended_action}\` ($${p.actions.expected_savings_usd_per_month.toFixed(2)}/mo savings of ${p.metrics.cost_per_month_usd.toFixed(2)}/mo cost). ` +
         `Before applying, grep the customer's Grafana JSON / Splunk saved searches / Datadog monitors / ` +
         `PagerDuty alert rules for the pattern identity \`${p.identity.slice(0, 60)}\` or a meaningful substring. ` +
-        `If ANY reference exists, downgrade the recommendation to \`forwarder_exclusion\` and flag the conflict.`,
-    );
-  }
-
-  // 3) code_fix.applicable=true -> source code lookup. The
-  // engine gives a hypothesis ("missing retry / unbounded
-  // logging in tight loop"); the agent translates it into a
-  // concrete code change.
-  if (p.actions.code_fix.applicable && p.actions.code_fix.bug_hypothesis) {
-    steps.push(
-      `**code_fix_refinement** — engine hypothesis: "${p.actions.code_fix.bug_hypothesis}". ` +
-        `Search the ${svc} source for a log statement matching \`${p.identity.slice(0, 50)}\`. ` +
-        `Quote the file:line, the function name, and propose a specific 1-3 line change (rate-limit, ` +
-        `dedupe, add backoff, fix the underlying error). If you can't locate the source, say so explicitly.`,
+        `If ANY reference exists, downgrade to \`pass\` or \`sample\` and flag the conflict.`,
     );
   }
 

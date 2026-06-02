@@ -19,30 +19,8 @@ import type { IncidentCluster } from './detectors/incident-cluster.js';
 import type { PocEnrichment, RedundancyPair } from './poc-enrichers.js';
 import type { ExtractedPattern } from './pattern-extraction.js';
 import type { SiemId } from './siem/pricing.js';
-import { datadogExclusionForPattern, splunkExclusionForPattern, cloudwatchExclusionForPattern, fluentBitForPattern } from './poc-action-snippets.js';
 import { dollars, ratio, bps, days as roundDays, countRatio } from './poc-round.js';
-
-// ── SIEM compactability map ──
-// Compact mode is licensable / value-relevant only when the SIEM
-// charges per-ingest with on-prem indexing. Cloud SIEMs that charge
-// per-event or per-byte ingested don't benefit from template encoding
-// because they bill BEFORE storage.
-const COMPACT_SUPPORTED_SIEMS = new Set<SiemId>([
-  'splunk',         // assumes self-hosted Enterprise; cloud Splunk is excluded by inspection
-  'elasticsearch',
-  'clickhouse',
-]);
-
-const COMPACT_NON_APPLICABLE_REASON: Record<SiemId, string> = {
-  datadog: 'datadog_cloud_per_ingest_charge',
-  cloudwatch: 'cloudwatch_per_ingest_charge',
-  'gcp-logging': 'gcp_per_ingest_charge',
-  'azure-monitor': 'azure_per_ingest_charge',
-  sumo: 'sumo_per_ingest_charge',
-  splunk: 'splunk_cloud_per_ingest_charge_when_cloud',
-  elasticsearch: 'elastic_cloud_per_ingest_charge_when_cloud',
-  clickhouse: 'compact_supported',
-};
+import { getAllowedActionsForDestination, getDefaultActionForDestination, type Action as CostAction } from './cost.js';
 
 // ── Output shape ──
 
@@ -121,6 +99,71 @@ export interface PocOutput {
   };
   incidents: IncidentOutput[];
   patterns: PatternOutput[];
+  /**
+   * Feasibility verdict. Populated when the caller passed a
+   * `target_percent_reduction` on the submit. When absent, the POC ran
+   * in recommendation-only mode (no commitment artifact, no verdict).
+   *
+   * `max_achievable_percent` is derived from head_concentration (top-N
+   * share of monthly cost) × per-destination action coverage (which
+   * patterns the level-1 default action can actually reduce) minus the
+   * exception pool (services pinned to action=pass). Feasibility holds
+   * when `max_achievable_percent >= target_percent_reduction`.
+   */
+  feasibility?: FeasibilityVerdict;
+  /**
+   * Projected commitment artifact. Pre-deploy markdown stub the agent
+   * surfaces alongside the verdict so the buyer sees the contractual
+   * shape of what they would be signing: target, max achievable,
+   * per-action breakdown, exceptions, and the recommended next step
+   * (deploy + configure_engine).
+   */
+  commitment_artifact?: CommitmentArtifact;
+  /**
+   * Ready-to-commit cap-CSV body in the format `configure_engine`
+   * writes. Composed from per-pattern recommendations (see
+   * `patterns[].actions`) plus a container-default row for each
+   * exception service. `configure_engine(from_poc_id=...)` reads this
+   * field verbatim instead of re-deriving the policy from
+   * `patterns[].actions`. Emitted only when the POC ran with a
+   * `target_percent_reduction` AND the feasibility verdict was reached.
+   *
+   * Row grammar (matches `cap-csv-parser.ts`):
+   *   container,cap                                   ← header
+   *   <container>,<bytes>::<reason>:<action>          ← container default
+   *   pat:<tenx_hash>,<bytes>::<reason>:<action>      ← per-pattern override
+   *
+   * Action vocab: pass | sample | compact | tier_down | offload | drop.
+   */
+  cap_csv?: string;
+}
+
+export interface FeasibilityVerdict {
+  feasible: boolean;
+  target_percent_reduction: number;
+  max_achievable_percent: number;
+  /** Plain-English explanation of how max_achievable_percent was derived. */
+  reason: string;
+  /** Per-action breakdown of the achievable pool (in monthly $). */
+  achievable_by_action: Array<{
+    action: CostAction;
+    monthly_cost_usd: number;
+    pattern_count: number;
+  }>;
+  /** Services excluded from the achievable pool (pinned to action=pass). */
+  exception_services: string[];
+  /** Monthly cost (USD) covered by the exception list. */
+  exception_monthly_cost_usd: number;
+}
+
+export interface CommitmentArtifact {
+  /** Markdown block, pre-deploy framing. */
+  markdown: string;
+  /** Recommended next-step tool call for the agent to chain into. */
+  next_step: {
+    tool: 'log10x_advise_install' | 'log10x_configure_engine';
+    reason: string;
+  };
 }
 
 export interface ServiceAggregate {
@@ -195,49 +238,50 @@ export interface PatternOutput {
   actions: PatternActions;
 }
 
+/**
+ * Per-pattern action recommendation, expressed in the 6-action vocab the
+ * cap-CSV writer / parser share. The renderer picks `recommended_action`
+ * by combining `DEFAULT_ACTION_BY_DESTINATION[siem]` with the head-
+ * concentration heuristic — high-volume info-class patterns land on
+ * the destination's level-1 action (Datadog → tier_down, Splunk →
+ * offload, ClickHouse → compact, …); error/audit and exception-pinned
+ * patterns land on `pass`; mid-volume info patterns land on `sample`.
+ *
+ * Replaces the prior bag of sub-action shapes (code_fix /
+ * forwarder_exclusion / siem_exclusion / compact / regulate_cap). The
+ * new shape is a single recommendation per pattern, ready to compose
+ * directly into the cap-CSV `pat:<hash>,<bytes>::<reason>:<action>` row.
+ */
 export interface PatternActions {
-  code_fix: CodeFixAction;
-  forwarder_exclusion: ExclusionAction;
-  siem_exclusion: ExclusionAction;
-  compact: CompactAction;
-  regulate_cap: RegulateCapAction;
-}
-
-export interface CodeFixAction {
-  applicable: boolean;
-  owning_service: string | null;
-  bug_hypothesis: string | null;
-  fix_complexity_guess:
-    | 'config_change_or_dns_fix'
-    | 'log_level_demotion'
-    | 'rate_limiting'
-    | 'inspect_caller_then_demote_or_sample'
-    | 'unknown'
-    | null;
-  expected_outcome: 'this_pattern_disappears' | 'this_pattern_drops_significantly' | null;
-}
-
-export interface ExclusionAction {
-  applicable: boolean;
-  vendor: string | null;
-  snippet: string | null;
-  /** Null when applicable=false. Real dollars (rounded to cents) when true. */
-  expected_savings_usd_per_month: number | null;
-}
-
-export interface CompactAction {
-  applicable: boolean;
+  /** 6-action recommendation for this pattern on this destination. */
+  recommended_action: CostAction;
+  /**
+   * Plain-prose explanation of why this action was selected. Cites the
+   * destination level-1 lever, head-concentration band, and any
+   * exception-service / floor pin in effect.
+   */
   reason: string;
-  expected_compression_ratio: number | null;
-  expected_savings_usd_per_month: number | null;
-}
-
-export interface RegulateCapAction {
-  applicable: boolean;
-  current_p95_bytes_per_sec: number;
-  proposed_cap_bytes_per_sec: number;
-  rationale: string;
-  expected_drop_pct: number;
+  /**
+   * Projected monthly dollar savings if the recommendation is committed,
+   * computed using the same reduction coefficients the feasibility
+   * verdict uses (drop=1.0, offload=1.0, compact=0.7, tier_down=0.6,
+   * sample=0.9, pass=0). Real dollars, rounded to cents.
+   */
+  expected_savings_usd_per_month: number;
+  /**
+   * Sample-keep denominator. Populated only when
+   * `recommended_action === 'sample'`; null otherwise. Matches the
+   * sampleN argument the cost lib uses (`bytes_out = bytes_in / N`).
+   */
+  sample_n: number | null;
+  /**
+   * Cap, expressed in bytes per 4-minute reset window, that
+   * configure_engine would write for this pattern. Used to construct
+   * the `pat:<hash>,<bytes>::<reason>:<action>` cap-CSV row. The
+   * configure_engine consumer reads `cap_csv` directly; this field is
+   * the per-pattern view for agents inspecting individual rows.
+   */
+  cap_bytes_per_window: number;
 }
 
 // ── Build helpers ──
@@ -254,6 +298,20 @@ export function buildPocEnvelopeV2(
   clusters: IncidentCluster[],
   redundancyPairs: RedundancyPair[],
   topN: number,
+  opts?: {
+    /**
+     * Customer-specified reduction target (0-100). When present, the
+     * envelope emits a feasibility verdict + commitment artifact stub.
+     * When absent, the POC stays in recommendation-only mode.
+     */
+    targetPercentReduction?: number;
+    /**
+     * Services flagged to stay in the SIEM with full retention. Patterns
+     * whose service is in this list are pinned to action=pass and their
+     * bytes are subtracted from the achievable pool.
+     */
+    exceptionServices?: string[];
+  },
 ): PocEnvelopeV2 {
   const siem = input.siem as SiemId;
   const windowDurationSeconds = Math.round(input.windowHours * 3600);
@@ -333,6 +391,63 @@ export function buildPocEnvelopeV2(
   }
   aggregates.redundancy_pairs = redundancyOutputs;
 
+  // ── Exception-services pinning ──
+  // Any pattern whose service is in the exception list is pinned to
+  // recommended_action='pass': the buyer flagged these services as
+  // audit / compliance / executive-dashboard critical and wants the raw
+  // stream to keep flowing into the SIEM. Pinning here overrides the
+  // destination-default-action selection that buildActions just ran.
+  const exceptionSet = new Set<string>(
+    (opts?.exceptionServices ?? []).map((s) => s.toLowerCase()),
+  );
+  if (exceptionSet.size > 0) {
+    for (const p of patternOutputs) {
+      const svc = (p.service ?? '').toLowerCase();
+      if (!svc || !exceptionSet.has(svc)) continue;
+      p.actions = {
+        recommended_action: 'pass',
+        reason: 'service_pinned_by_exception_list',
+        expected_savings_usd_per_month: 0,
+        sample_n: null,
+        // pass keeps the full per-window throughput unchanged — the cap
+        // is set to the pattern's own monthly-projected throughput
+        // divided across 4-minute windows so the rate receiver never
+        // throttles it.
+        cap_bytes_per_window: p.actions.cap_bytes_per_window,
+      };
+    }
+  }
+
+  // ── Feasibility verdict + commitment artifact stub ──
+  // Both are emitted only when the caller passed target_percent_reduction.
+  // The math: max_achievable = sum(monthly cost of patterns the
+  // destination's level-1/2 actions can act on, minus exception bytes).
+  // Exception-service patterns are pinned to action=pass and subtract
+  // from the achievable pool.
+  let feasibility: FeasibilityVerdict | undefined;
+  let commitmentArtifact: CommitmentArtifact | undefined;
+  let capCsv: string | undefined;
+  if (opts?.targetPercentReduction !== undefined) {
+    feasibility = computeFeasibility(
+      opts.targetPercentReduction,
+      enrichedPatterns,
+      siem,
+      monthlyCostUsd,
+      windowDurationSeconds,
+      exceptionSet,
+      opts.exceptionServices ?? [],
+    );
+    commitmentArtifact = buildCommitmentArtifact(
+      feasibility,
+      input,
+      monthlyCostUsd,
+    );
+    // cap_csv is composed from the per-pattern actions the renderer
+    // emitted above. configure_engine(from_poc_id=…) reads this field
+    // verbatim instead of re-deriving the policy.
+    capCsv = buildCapCsv(patternOutputs, siem, exceptionSet, windowDurationSeconds);
+  }
+
   return {
     tool: 'log10x_poc_from_siem',
     schema_version: '2.0',
@@ -377,7 +492,226 @@ export function buildPocEnvelopeV2(
       aggregates,
       incidents: incidentOutputs,
       patterns: patternOutputs,
+      ...(feasibility ? { feasibility } : {}),
+      ...(commitmentArtifact ? { commitment_artifact: commitmentArtifact } : {}),
+      ...(capCsv ? { cap_csv: capCsv } : {}),
     },
+  };
+}
+
+/**
+ * Derive max_achievable_percent from the FULL enriched-pattern list (not
+ * just top-N): for each pattern, look up the destination's level-1
+ * default action and treat its monthly cost as either fully reducible
+ * (drop / offload), partially reducible (sample, compact, tier_down),
+ * or non-reducible (pass — which is what exception_services force).
+ *
+ * Reducibility coefficients (multiply pattern monthly cost):
+ *   drop      → 1.00 (full removal)
+ *   offload   → 1.00 (destination sees nothing; S3 cost out of scope)
+ *   compact   → 0.70 (ClickHouse / Splunk envelope; matches cost.ts mid-band)
+ *   tier_down → 0.60 (Datadog Flex / CW IA; conservative cost-tier delta)
+ *   sample    → 0.90 (1-in-10 default keep rate is the common config)
+ *   pass      → 0.00 (no reduction)
+ */
+function computeFeasibility(
+  targetPercent: number,
+  patterns: Array<ExtractedPattern & { costPerWindow: number; pctOfTotal: number; poc: PocEnrichment; recommendedAction: 'mute' | 'sample' | 'keep' }>,
+  siem: SiemId,
+  totalMonthlyCostUsd: number,
+  windowDurationSeconds: number,
+  exceptionSet: Set<string>,
+  exceptionServices: string[],
+): FeasibilityVerdict {
+  // Convert per-pattern window cost → monthly cost using the same
+  // factor the rest of the envelope uses.
+  const monthlyFactor = (24 * 30) / Math.max(0.001, windowDurationSeconds / 3600);
+
+  const allowed = getAllowedActionsForDestination(siem);
+  const level1 = allowed[0] ?? 'offload';
+  const level2 = allowed[1] ?? level1;
+
+  const byAction = new Map<CostAction, { monthly: number; count: number }>();
+  let exceptionMonthly = 0;
+  let achievableMonthly = 0;
+
+  for (const p of patterns) {
+    const monthly = p.costPerWindow * monthlyFactor;
+    const svc = (p.service ?? '').toLowerCase();
+
+    if (svc && exceptionSet.has(svc)) {
+      exceptionMonthly += monthly;
+      const slot = byAction.get('pass') ?? { monthly: 0, count: 0 };
+      slot.monthly += monthly;
+      slot.count += 1;
+      byAction.set('pass', slot);
+      continue;
+    }
+
+    // Map the enricher's recommendation onto the destination's
+    // hierarchy. ERROR-class rows stay pass (keep). High-volume
+    // info-class rows use level-1; medium-volume sample rows degrade
+    // to level-2 when level-2 exists (e.g. Splunk: sample becomes
+    // compact rather than offload, since envelope-compact preserves
+    // the sample's signal at lower cost). Without level-2 the
+    // enricher's verdict (mute/sample) drives the coefficient.
+    const refined = p.poc.refinedAction ?? p.recommendedAction;
+    let action: CostAction;
+    if (refined === 'fix' || refined === 'blocked' || refined === 'keep') {
+      action = 'pass';
+    } else if (refined === 'mute') {
+      // Mute maps onto the destination's preferred lever — drop the
+      // bytes via tier_down (Datadog Flex), offload (Splunk S3),
+      // compact (ClickHouse), or drop (no destination-side option).
+      action = level1;
+    } else if (refined === 'sample') {
+      // Sample keeps a slice. When the destination has a cheaper-tier
+      // option (compact / tier_down), prefer that over a flat sample.
+      action = level2 !== 'offload' && level2 !== 'drop' ? level2 : 'sample';
+    } else {
+      action = level1;
+    }
+
+    const coefficient = reductionCoefficient(action);
+    achievableMonthly += monthly * coefficient;
+
+    const slot = byAction.get(action) ?? { monthly: 0, count: 0 };
+    slot.monthly += monthly;
+    slot.count += 1;
+    byAction.set(action, slot);
+  }
+
+  const maxAchievablePercent = totalMonthlyCostUsd > 0
+    ? Math.min(100, Math.max(0, (achievableMonthly / totalMonthlyCostUsd) * 100))
+    : 0;
+  const feasible = maxAchievablePercent >= targetPercent;
+
+  const achievableByAction = Array.from(byAction.entries())
+    .map(([action, agg]) => ({
+      action,
+      monthly_cost_usd: dollars(agg.monthly),
+      pattern_count: agg.count,
+    }))
+    .sort((a, b) => b.monthly_cost_usd - a.monthly_cost_usd);
+
+  const reasonParts: string[] = [];
+  reasonParts.push(
+    `Total monthly cost $${dollars(totalMonthlyCostUsd).toFixed(2)} across ${patterns.length} patterns.`,
+  );
+  reasonParts.push(
+    `Level-1 action on ${siem} is \`${level1}\`${level2 !== level1 ? ` (level-2: \`${level2}\`)` : ''}.`,
+  );
+  if (exceptionServices.length > 0) {
+    reasonParts.push(
+      `${exceptionServices.length} exception service(s) pinned to pass, removing $${dollars(exceptionMonthly).toFixed(2)}/mo from the achievable pool.`,
+    );
+  }
+  reasonParts.push(
+    feasible
+      ? `Achievable ${maxAchievablePercent.toFixed(1)}% meets target ${targetPercent}%.`
+      : `Achievable ${maxAchievablePercent.toFixed(1)}% short of target ${targetPercent}%; widen exceptions or raise destination tier coverage.`,
+  );
+
+  return {
+    feasible,
+    target_percent_reduction: targetPercent,
+    max_achievable_percent: ratio(maxAchievablePercent),
+    reason: reasonParts.join(' '),
+    achievable_by_action: achievableByAction,
+    exception_services: exceptionServices,
+    exception_monthly_cost_usd: dollars(exceptionMonthly),
+  };
+}
+
+function reductionCoefficient(action: CostAction): number {
+  switch (action) {
+    case 'drop': return 1.0;
+    case 'offload': return 1.0;
+    case 'compact': return 0.7;
+    case 'tier_down': return 0.6;
+    case 'sample': return 0.9;
+    case 'pass': return 0.0;
+  }
+}
+
+/**
+ * Pre-deploy commitment artifact. Renders the verdict + per-action
+ * breakdown + exceptions + next-step recommendation as one paste-ready
+ * markdown block the agent can show the buyer alongside the verdict.
+ * Item 4 will attach the cap CSV; this stub commits to the shape so
+ * the artifact is already a stable contract surface.
+ */
+function buildCommitmentArtifact(
+  f: FeasibilityVerdict,
+  input: RenderInput,
+  monthlyCostUsd: number,
+): CommitmentArtifact {
+  const lines: string[] = [];
+  lines.push(`## Projected commitment — ${input.siem} (${input.window} sample)`);
+  lines.push('');
+  lines.push(`- **Target reduction**: ${f.target_percent_reduction}%`);
+  lines.push(
+    `- **Projected max achievable**: ${f.max_achievable_percent.toFixed(1)}% (${f.feasible ? 'feasible' : 'short of target'})`,
+  );
+  lines.push(
+    `- **Sample monthly cost analyzed**: $${dollars(monthlyCostUsd).toFixed(2)}`,
+  );
+  lines.push('');
+  lines.push('### Per-action breakdown');
+  lines.push('');
+  lines.push('| Action | Patterns | Monthly cost in pool ($) |');
+  lines.push('|---|---|---|');
+  for (const row of f.achievable_by_action) {
+    lines.push(
+      `| \`${row.action}\` | ${row.pattern_count} | $${row.monthly_cost_usd.toFixed(2)} |`,
+    );
+  }
+  lines.push('');
+  if (f.exception_services.length > 0) {
+    lines.push('### Exception services (stay in SIEM, full retention)');
+    lines.push('');
+    for (const svc of f.exception_services) lines.push(`- \`${svc}\``);
+    lines.push('');
+    lines.push(
+      `_Removed $${f.exception_monthly_cost_usd.toFixed(2)}/mo from the achievable pool._`,
+    );
+    lines.push('');
+  }
+  lines.push('### Next step');
+  lines.push('');
+  if (f.feasible) {
+    lines.push(
+      '1. Run `log10x_advise_install` to provision the Receiver in your forwarder pipeline.',
+    );
+    lines.push(
+      '2. Run `log10x_configure_engine` to author the per-pattern action plan (cap CSV) that delivers the commitment.',
+    );
+    lines.push('');
+    lines.push(
+      '_This is a PRE-DEPLOY projection from a SIEM sample. Actual commitment requires Receiver deployment and per-pattern verification metrics over a 7-14 day baseline window._',
+    );
+  } else {
+    lines.push(
+      '1. Either lower `target_percent_reduction` to within the achievable band, or',
+    );
+    lines.push(
+      '2. Trim `exception_services` (each exception subtracts from the achievable pool), or',
+    );
+    lines.push(
+      '3. Pair the deployment with a destination-tier upgrade (e.g. ClickHouse compact, Splunk S3 offload) that unlocks a higher-coverage action than the current level-1.',
+    );
+  }
+  return {
+    markdown: lines.join('\n'),
+    next_step: f.feasible
+      ? {
+          tool: 'log10x_advise_install',
+          reason: 'feasibility passes; provision Receiver then author the per-pattern action plan',
+        }
+      : {
+          tool: 'log10x_configure_engine',
+          reason: 'target exceeds achievable; preview the action plan to negotiate target or exceptions',
+        },
   };
 }
 
@@ -583,154 +917,184 @@ function buildSparkline(
   return out;
 }
 
+// Cap is denominated in bytes per 4-minute reset window — the same
+// units configure_engine writes into the cap-CSV row. Eight windows per
+// hour × 24 × 30 = 5760 windows per month.
+const WINDOWS_PER_MONTH = 5760;
+
+/**
+ * Map per-pattern recommendation to one of the 6 actions using the
+ * destination's level-1/2 default action and the head-concentration
+ * heuristic (item-2's DEFAULT_ACTION_BY_DESTINATION + this function).
+ *
+ * The mapping rules:
+ *   - error / audit / floor-pinned    → pass
+ *   - high-volume info ("hot loop")   → destination level-1 action
+ *   - moderate-volume info            → sample (level-2 if cheaper)
+ *   - low-volume / WARN               → pass
+ *
+ * Sample defaults to N=10 (matches the cost-lib default and the value
+ * configure_engine uses).
+ */
 function buildActions(
-  p: { service?: string; severity?: string; template: string; symbolMessage?: string; identity: string; recommendedAction: string; sampleRate: number; poc: PocEnrichment },
+  p: { service?: string; severity?: string; template: string; symbolMessage?: string; identity: string; recommendedAction: string; sampleRate: number; poc: PocEnrichment; pctOfTotal: number; bytes: number },
   siem: SiemId,
   monthlyCost: number,
   _windowDurationSeconds: number,
 ): PatternActions {
-  const desc = `${p.symbolMessage || ''} ${p.template}`.toLowerCase();
+  const allowed = getAllowedActionsForDestination(siem);
+  const level1: CostAction = allowed[0] ?? getDefaultActionForDestination(siem, 1);
+  const level2: CostAction = allowed[1] ?? level1;
+
   const sev = (p.severity || '').toUpperCase();
   const isError = /ERROR|CRIT|FATAL/.test(sev);
-  const isDependencyFailure = isError &&
-    /\b(dial|timeout|no.such.host|refused|unreachable|deadline|connection.reset|broken.pipe)\b/.test(desc);
+  const isHotLoop = p.pctOfTotal >= 0.02;
+  const isFrequent = p.pctOfTotal >= 0.01;
+  const refined = p.poc.refinedAction ?? p.recommendedAction;
 
-  // Code fix recommendation.
-  const codeFix: CodeFixAction = (() => {
-    if (isDependencyFailure) {
-      return {
-        applicable: true,
-        owning_service: p.service ?? null,
-        bug_hypothesis: 'dependency_failure_retry_loop',
-        fix_complexity_guess: 'config_change_or_dns_fix',
-        expected_outcome: 'this_pattern_disappears',
-      };
+  // 1) Map refined verdict + head-concentration into the 6-action vocab.
+  let action: CostAction;
+  let reason: string;
+  let sampleN: number | null = null;
+
+  if (refined === 'fix' || refined === 'blocked' || refined === 'keep' || isError) {
+    action = 'pass';
+    reason = isError
+      ? `severity=${sev || 'error-class'} kept for incident diagnosis.`
+      : refined === 'blocked'
+        ? 'dependency_check found references; cannot reduce safely.'
+        : refined === 'fix'
+          ? 'recommended fix at source; engine pass until commit lands.'
+          : 'low volume or non-actionable signal — pass.';
+  } else if (refined === 'mute') {
+    // Mute = lean on the destination's preferred lever.
+    action = level1;
+    reason = isHotLoop
+      ? `high-volume ${sev || 'info-class'} pattern (${(p.pctOfTotal * 100).toFixed(1)}% of analyzed volume) — level-1 action \`${level1}\` on ${siem}.`
+      : `${sev || 'info-class'} pattern routed to destination level-1 action \`${level1}\`.`;
+  } else if (refined === 'sample') {
+    // Sample = use cheap level-2 tier when it's better than a flat
+    // sample-keep on this destination; otherwise stay on sample.
+    if (isFrequent && (level2 === 'compact' || level2 === 'tier_down')) {
+      action = level2;
+      reason = `moderate-volume ${sev || 'info-class'} pattern — destination level-2 \`${level2}\` is cheaper than a flat sample on ${siem}.`;
+    } else {
+      action = 'sample';
+      sampleN = Math.max(2, Math.round(p.sampleRate ?? 10));
+      reason = `moderate-volume ${sev || 'info-class'} pattern — keep 1/${sampleN} to retain signal at lower cost.`;
     }
-    if (/DEBUG/.test(sev)) {
-      return {
-        applicable: true,
-        owning_service: p.service ?? null,
-        bug_hypothesis: 'debug_logging_left_enabled_in_production',
-        fix_complexity_guess: 'log_level_demotion',
-        expected_outcome: 'this_pattern_disappears',
-      };
-    }
-    if (/TRACE/.test(sev)) {
-      // TRACE-level logs are typically OTel SDK tracer emissions
-      // wrapping the underlying call's severity. The upstream call
-      // may be info / debug — the agent should investigate before
-      // demoting. Recommend trace-sampling instead of log demotion.
-      return {
-        applicable: true,
-        owning_service: p.service ?? null,
-        bug_hypothesis: 'trace_level_emission_from_otel_sdk_wrapping',
-        fix_complexity_guess: 'inspect_caller_then_demote_or_sample',
-        expected_outcome: 'this_pattern_drops_significantly',
-      };
-    }
-    // INFO that's a high-cardinality slot — often a missing rate-limit
-    if (p.poc.topSlot && p.poc.topSlot.distinctOverCount > 0.7) {
-      return {
-        applicable: true,
-        owning_service: p.service ?? null,
-        bug_hypothesis: 'unbounded_variable_slot_drives_cardinality',
-        fix_complexity_guess: 'rate_limiting',
-        expected_outcome: 'this_pattern_drops_significantly',
-      };
-    }
-    return {
-      applicable: false,
-      owning_service: null,
-      bug_hypothesis: null,
-      fix_complexity_guess: null,
-      expected_outcome: null,
-    };
-  })();
+  } else {
+    action = 'pass';
+    reason = 'no qualifying reduction signal — pass.';
+  }
 
-  // Forwarder + SIEM exclusions. When not applicable the snippet and
-  // savings are null (not 0) so the agent doesn't read "we recommend
-  // this action with zero savings" — it reads "this action is not
-  // applicable, ignore it".
-  const expectedSavings = p.poc.refinedAction === 'mute' ? monthlyCost : p.poc.refinedAction === 'sample' ? monthlyCost * (1 - 1 / Math.max(1, p.sampleRate)) : 0;
-  const forwarderExclusion: ExclusionAction = (p.poc.refinedAction === 'mute' || p.poc.refinedAction === 'sample')
-    ? {
-        applicable: true,
-        vendor: 'fluent-bit',
-        snippet: fluentBitForPattern(p.identity, p.template),
-        expected_savings_usd_per_month: dollars(expectedSavings),
-      }
-    : { applicable: false, vendor: null, snippet: null, expected_savings_usd_per_month: null };
+  // 2) Project savings from the action coefficient (matches feasibility).
+  const expectedSavings = monthlyCost * reductionCoefficient(action) * (action === 'sample' && sampleN ? (1 - 1 / sampleN) / 0.9 : 1);
 
-  const siemSnippet = siemSpecificSnippet(siem, p.identity, p.template);
-  const siemExclusion: ExclusionAction = (p.poc.refinedAction === 'mute' || p.poc.refinedAction === 'sample') && siemSnippet
-    ? {
-        applicable: true,
-        vendor: siem,
-        snippet: siemSnippet,
-        expected_savings_usd_per_month: dollars(expectedSavings),
-      }
-    : { applicable: false, vendor: null, snippet: null, expected_savings_usd_per_month: null };
-
-  // Compact — gated on SIEM.
-  const compactApplicable = COMPACT_SUPPORTED_SIEMS.has(siem);
-  const compact: CompactAction = compactApplicable
-    ? {
-        applicable: true,
-        reason: 'compact_supported_for_this_siem',
-        expected_compression_ratio: ratio(0.3), // typical engine measurement
-        expected_savings_usd_per_month: dollars(monthlyCost * 0.7),
-      }
-    : {
-        applicable: false,
-        reason: COMPACT_NON_APPLICABLE_REASON[siem] ?? 'unknown_siem',
-        expected_compression_ratio: null,
-        expected_savings_usd_per_month: null,
-      };
-
-  // Regulate cap — when refinedAction is mute or fix, this action is
-  // NOT applicable (the action is to drop entirely or fix the source,
-  // not to apply a rate cap; recommending both produces a confusing
-  // two-action recipe). regulate_cap only applies when refinedAction
-  // is sample or keep.
-  const observedBytesPerSec = (p as unknown as { bytes: number }).bytes / Math.max(1, _windowDurationSeconds);
-  const capApplicable = p.poc.refinedAction === 'sample' || p.poc.refinedAction === 'keep';
-  const proposedCap = p.poc.refinedAction === 'sample'
-    ? observedBytesPerSec / Math.max(1, p.sampleRate)
-    : p.poc.refinedAction === 'keep'
-      ? observedBytesPerSec * 1.2
-      : 0;
-  const regulateCap: RegulateCapAction = capApplicable ? {
-    applicable: true,
-    current_p95_bytes_per_sec: bps(observedBytesPerSec * 1.5),
-    proposed_cap_bytes_per_sec: bps(proposedCap),
-    rationale: p.poc.refinedAction === 'sample'
-      ? 'sample_to_retain_signal_at_lower_volume'
-      : 'allow_observed_steady_state_with_burst_headroom',
-    expected_drop_pct: ratio(p.poc.refinedAction === 'sample' ? 1 - 1 / Math.max(1, p.sampleRate) : 0),
-  } : {
-    applicable: false,
-    current_p95_bytes_per_sec: bps(observedBytesPerSec * 1.5),
-    proposed_cap_bytes_per_sec: 0,
-    rationale: 'use_forwarder_exclusion_or_fix_root_cause_instead',
-    expected_drop_pct: 0,
-  };
+  // 3) Cap bytes per 4-minute reset window. Matches the math in
+  // configure-engine.ts:computeCapBytesPerWindow so configure_engine
+  // can read this directly from the snapshot's cap_csv without
+  // re-deriving the cap.
+  const monthlyBytes = (p as unknown as { bytes: number }).bytes * (24 * 30) / Math.max(0.001, _windowDurationSeconds / 3600);
+  const cap = capBytesPerWindow(action, monthlyBytes, sampleN ?? 10);
 
   return {
-    code_fix: codeFix,
-    forwarder_exclusion: forwarderExclusion,
-    siem_exclusion: siemExclusion,
-    compact,
-    regulate_cap: regulateCap,
+    recommended_action: action,
+    reason,
+    expected_savings_usd_per_month: dollars(expectedSavings),
+    sample_n: sampleN,
+    cap_bytes_per_window: Math.round(cap),
   };
 }
 
-function siemSpecificSnippet(siem: SiemId, identity: string, template: string): string | null {
-  switch (siem) {
-    case 'datadog': return datadogExclusionForPattern(identity, template);
-    case 'splunk': return splunkExclusionForPattern(identity, template);
-    case 'cloudwatch': return cloudwatchExclusionForPattern(identity, template);
-    default: return null;
+/**
+ * Mirror of configure-engine.ts:computeCapBytesPerWindow. Same
+ * coefficients per action so a POC-emitted cap_csv lands at identical
+ * bytes when configure_engine writes one for the same pattern.
+ */
+function capBytesPerWindow(action: CostAction, monthlyBytes: number, sampleN: number): number {
+  const perWindow = monthlyBytes / WINDOWS_PER_MONTH;
+  switch (action) {
+    case 'pass':
+      return Math.max(1, perWindow);
+    case 'sample':
+      return Math.max(1, perWindow / Math.max(1, sampleN));
+    case 'compact':
+      return Math.max(1, perWindow * 0.15);
+    case 'tier_down':
+      return Math.max(1, perWindow);
+    case 'offload':
+    case 'drop':
+    default:
+      return 0;
   }
+}
+
+/**
+ * Compose the cap-CSV body that `configure_engine(from_poc_id=...)`
+ * reads verbatim. Same row format as `renderCsvDiff` in
+ * configure-engine.ts:
+ *
+ *   container,cap                                       ← header
+ *   <container>,<bytes>::<reason>:<action>              ← container default
+ *   pat:<tenx_hash>,<bytes>::<reason>:<action>          ← per-pattern row
+ *
+ * Container-level rows are emitted one per distinct service observed
+ * across the top-N patterns. The default action is the destination's
+ * level-1 action (per DEFAULT_ACTION_BY_DESTINATION); exception
+ * services get `pass`. Per-pattern rows are emitted for every top-N
+ * pattern whose recommendation differs from the container default OR
+ * whose service is in the exception list — pinning rows so the engine
+ * keeps them flowing untouched.
+ */
+function buildCapCsv(
+  patterns: PatternOutput[],
+  siem: SiemId,
+  exceptionSet: Set<string>,
+  windowDurationSeconds: number,
+): string {
+  const level1: CostAction = getDefaultActionForDestination(siem, 1);
+  const services = new Map<string, { bytes: number; isException: boolean }>();
+  for (const p of patterns) {
+    const svc = (p.service ?? '').toLowerCase();
+    if (!svc) continue;
+    const existing = services.get(svc);
+    if (existing) {
+      existing.bytes += p.metrics.bytes_in_window;
+    } else {
+      services.set(svc, { bytes: p.metrics.bytes_in_window, isException: exceptionSet.has(svc) });
+    }
+  }
+
+  const lines: string[] = ['container,cap'];
+  // Container-default rows — one per service, sorted for stable diffs.
+  for (const [svc, agg] of [...services.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    const action: CostAction = agg.isException ? 'pass' : level1;
+    const reason = agg.isException
+      ? 'service_pinned_by_exception_list'
+      : `MCP poc_envelope (destination_level_1=${level1})`;
+    const monthlyBytes = agg.bytes * (24 * 30) / Math.max(0.001, windowDurationSeconds / 3600);
+    const cap = Math.round(capBytesPerWindow(action, monthlyBytes, 10));
+    lines.push(`${svc},${cap}::${reason.replace(/,/g, ';')}:${action}`);
+  }
+  // Per-pattern overrides — emitted when the action differs from the
+  // container default OR when the row is exception-pinned. Sorted by
+  // pattern_hash so the CSV is reproducible across builds.
+  const overrides: Array<{ hash: string; line: string }> = [];
+  for (const p of patterns) {
+    if (!p.fingerprint_hash) continue;
+    const svc = (p.service ?? '').toLowerCase();
+    const isException = svc && exceptionSet.has(svc);
+    const containerAction: CostAction = isException ? 'pass' : level1;
+    if (p.actions.recommended_action === containerAction && !isException) continue;
+    overrides.push({
+      hash: p.fingerprint_hash,
+      line: `pat:${p.fingerprint_hash},${p.actions.cap_bytes_per_window}::${p.actions.reason.replace(/,/g, ';')}:${p.actions.recommended_action}`,
+    });
+  }
+  overrides.sort((a, b) => a.hash.localeCompare(b.hash));
+  for (const o of overrides) lines.push(o.line);
+  return lines.join('\n') + '\n';
 }
 
 function inferRootCauseHypothesis(c: IncidentCluster): string {
