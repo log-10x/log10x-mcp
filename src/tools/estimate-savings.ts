@@ -65,6 +65,13 @@ import {
   type StructuredOutput,
 } from '../lib/output-types.js';
 import { fmtDollar, fmtPct } from '../lib/format.js';
+import {
+  parseCapCsv,
+  buildPatternActionLookup,
+  emptyActionBuckets,
+  totalAttributedBytes,
+  type ActionBytesBuckets,
+} from '../lib/cap-csv-parser.js';
 
 // ─── constants ──────────────────────────────────────────────────────────
 const BYTES_METRIC = 'all_events_summaryBytes_total';
@@ -256,6 +263,49 @@ export interface VerifyResult {
   attribution: VerifyAttribution;
   attribution_pct: VerifyAttribution;
   causal_confidence: number;
+  /**
+   * Source of the $/GB rate used to compute the dollar projections.
+   *  - 'customer_supplied' — caller passed `effective_ingest_per_gb`
+   *  - 'list_price'        — from `getDestinationCostModel().ingest_per_gb`
+   * Propagated by the commitment-report adapter into per-week
+   * `WeeklyVerifyResult.rate_source` (the verifier always has one).
+   */
+  rate_source: 'list_price' | 'customer_supplied';
+  /**
+   * Bytes saved by each engine action, joined from the cap-CSV (see
+   * cost-cutting-product-shape.md §6). Populated only when the caller
+   * passed `cap_csv_content`; absent otherwise.
+   *
+   * Parts-≤-whole invariant: `totalAttributedBytes(per_action_breakdown)`
+   * + `unattributed` ≤ `post_dropped_bytes` after the offload clamp;
+   * see `clampOffloadToResidual` for the residual rule.
+   */
+  per_action_breakdown?: ActionBytesBuckets;
+  /**
+   * Per-pattern attribution rows. One row per pattern_hash with
+   * non-zero isDropped="true" bytes in the post window. Action is
+   * sourced from the cap-CSV via `buildPatternActionLookup`; rows
+   * with no cap-CSV match are emitted with `action: 'drop'` and
+   * `action_source: 'unattributed'` so the offload clamp + caveat
+   * surfacing can identify them.
+   */
+  per_pattern_breakdown?: Array<{
+    pattern_hash: string;
+    action: Action;
+    delivered_bytes: number;
+    /**
+     * Expected bytes saved at this pattern's cap, scaled to the post
+     * window. Null when the cap-CSV has no row for this hash.
+     */
+    expected_bytes: number | null;
+    /**
+     * How the action was attributed:
+     *  - 'pat_row'      — from a `pat:<hash>` row in the cap-CSV
+     *  - 'container'    — from the container-default row
+     *  - 'unattributed' — no row matched; action defaulted to 'drop'
+     */
+    action_source: 'pat_row' | 'container' | 'unattributed';
+  }>;
   caveats: string[];
 }
 
@@ -324,6 +374,139 @@ function parseScalarSum(res: {
 
 function safeDiv(a: number, b: number): number {
   return b > 0 ? a / b : 0;
+}
+
+/**
+ * Pull (hash → container) pairs from a Prometheus result keyed by both
+ * labels. When a single pattern_hash is emitted from multiple containers
+ * (multi-tenant aggregator), the container with the largest dropped-bytes
+ * value wins — that's the one the cap-CSV container default most likely
+ * applies to. Ties are broken by lexicographic container name for stable
+ * test output.
+ */
+function extractHashContainerMap(
+  res: {
+    data?: {
+      result?: Array<{
+        metric: Record<string, string>;
+        value?: [number, string];
+      }>;
+    };
+  },
+  hashLabel: string,
+  containerLabel: string
+): Map<string, string> {
+  const acc = new Map<string, { container: string; bytes: number }>();
+  const rows = res?.data?.result ?? [];
+  for (const row of rows) {
+    const hash = row.metric?.[hashLabel];
+    const container = row.metric?.[containerLabel];
+    if (!hash || !container) continue;
+    const v = row.value ? parseFloat(row.value[1]) : NaN;
+    const bytes = Number.isFinite(v) ? v : 0;
+    const prior = acc.get(hash);
+    if (!prior) {
+      acc.set(hash, { container, bytes });
+      continue;
+    }
+    if (
+      bytes > prior.bytes ||
+      (bytes === prior.bytes && container.localeCompare(prior.container) < 0)
+    ) {
+      acc.set(hash, { container, bytes });
+    }
+  }
+  const out = new Map<string, string>();
+  for (const [hash, { container }] of acc.entries()) {
+    out.set(hash, container);
+  }
+  return out;
+}
+
+/**
+ * Action-split + parts-≤-whole guard. Walks the per-hash dropped-bytes
+ * series, attributes each hash's bytes to a bucket via the cap-CSV
+ * lookup, and clamps the offload bucket to the residual so the sum
+ * never exceeds `post_dropped_bytes`. Returns BOTH the bucket totals
+ * AND the per-pattern rows.
+ */
+function computeActionSplit(args: {
+  postDroppedByHash: Record<string, number>;
+  capCsvContent: string;
+  patternToContainer: Map<string, string>;
+  postDroppedBytes: number;
+}): {
+  buckets: ActionBytesBuckets;
+  rows: NonNullable<VerifyResult['per_pattern_breakdown']>;
+  clamped: boolean;
+} {
+  const parsed = parseCapCsv(args.capCsvContent);
+  const lookup = buildPatternActionLookup(parsed, args.patternToContainer);
+  const buckets = emptyActionBuckets();
+  const rows: NonNullable<VerifyResult['per_pattern_breakdown']> = [];
+
+  // Sort hashes by descending dropped bytes so the residual clamp acts
+  // on the SMALLEST offload contributions first (preserves the largest
+  // ones intact when the parts-sum approaches the whole).
+  const sortedHashes = Object.entries(args.postDroppedByHash)
+    .filter(([, b]) => Number.isFinite(b) && b > 0)
+    .sort((a, b) => b[1] - a[1]);
+
+  for (const [hash, droppedBytes] of sortedHashes) {
+    const action = lookup.get(hash);
+    const patRow = parsed.by_pattern.get(hash);
+    const container = args.patternToContainer.get(hash);
+    const containerRow = container
+      ? parsed.by_container.get(container)
+      : undefined;
+    let action_source: 'pat_row' | 'container' | 'unattributed';
+    let effectiveAction: Action;
+    let expectedBytes: number | null;
+    if (patRow) {
+      action_source = 'pat_row';
+      effectiveAction = patRow.action;
+      expectedBytes = patRow.bytes_cap;
+    } else if (containerRow) {
+      action_source = 'container';
+      effectiveAction = containerRow.action;
+      expectedBytes = containerRow.bytes_cap;
+    } else {
+      action_source = 'unattributed';
+      effectiveAction = action ?? 'drop';
+      expectedBytes = null;
+    }
+    if (action_source === 'unattributed') {
+      buckets.unattributed += droppedBytes;
+    } else {
+      // Bucket dispatch. The CSV grammar admits all six engine actions;
+      // 'pass' and 'sample' are no-op for delivered savings but we
+      // still surface the row so callers can audit unexpected configs.
+      buckets[effectiveAction] += droppedBytes;
+    }
+    rows.push({
+      pattern_hash: hash,
+      action: effectiveAction,
+      delivered_bytes: droppedBytes,
+      expected_bytes: expectedBytes,
+      action_source,
+    });
+  }
+
+  // Parts-≤-whole guard. The whole = post_dropped_bytes; the
+  // attributed parts ≤ whole by metric identity (each per-hash series
+  // is a subset of the total). In practice tiny FP drift can push the
+  // sum a hair above the whole; clamp the offload bucket to the
+  // residual (offload is the "softer" action, least confidence in its
+  // exact magnitude vs drop/compact which are deterministic).
+  const attributed = totalAttributedBytes(buckets) + buckets.unattributed;
+  let clamped = false;
+  if (attributed > args.postDroppedBytes && buckets.offload > 0) {
+    const overshoot = attributed - args.postDroppedBytes;
+    const trim = Math.min(buckets.offload, overshoot);
+    buckets.offload -= trim;
+    clamped = true;
+  }
+  return { buckets, rows, clamped };
 }
 
 // ─── forecast ──────────────────────────────────────────────────────────
@@ -583,6 +766,22 @@ export interface RunVerifyArgs {
   commitment_id?: string;
   contract_type?: 'committed' | 'on_demand';
   effective_ingest_per_gb?: number;
+  /**
+   * Optional cap-CSV content (verbatim string from the customer gitops
+   * repo at `lookup_path`). When present, the verify run joins the
+   * pattern-level isDropped="true" series against the CSV to populate
+   * `per_action_breakdown` + `per_pattern_breakdown` on VerifyResult.
+   * When absent, those fields are undefined and the commitment-report
+   * adapter falls back to its legacy single-bucket attribution.
+   */
+  cap_csv_content?: string | null;
+  /**
+   * Label name carrying the container value on the engine's metrics.
+   * Defaults to `k8s_container` (matches configure-engine.ts's PromQL
+   * shape). Exposed so a customer with a relabeled aggregator can pass
+   * the right label without us hard-coding the default in two places.
+   */
+  container_label?: string;
 }
 
 /**
@@ -643,6 +842,27 @@ export async function runEstimateVerify(
   const postDroppedBytes = parseScalarSum(postDroppedRes);
   const postPassedByHash = parsePromResult(postPassedByHashRes, hashLabel);
   const postDroppedByHash = parsePromResult(postDroppedByHashRes, hashLabel);
+
+  // 3. Optional per-(hash, container) drop query — only when a cap-CSV
+  //    was supplied AND there are dropped bytes to attribute. We skip the
+  //    extra Prometheus roundtrip otherwise.
+  const containerLabel = args.container_label ?? 'k8s_container';
+  let patternToContainer = new Map<string, string>();
+  if (args.cap_csv_content && postDroppedBytes > 0) {
+    const dropByPairQuery = `sum by (${hashLabel}, ${containerLabel}) (increase(${BYTES_METRIC}{${baseSelector},isDropped="true"}[${args.post_window}]))`;
+    try {
+      const pairRes = await queryInstant(env, dropByPairQuery);
+      patternToContainer = extractHashContainerMap(
+        pairRes,
+        hashLabel,
+        containerLabel
+      );
+    } catch {
+      // Best-effort: leave the map empty. The action-split path will
+      // emit `unattributed` rows for every dropped hash, which the
+      // caller surfaces as a caveat.
+    }
+  }
 
   // Scale baseline to the post window length for an apples-to-apples ratio.
   const baselineScaled = baselineBytes * (postDays / baseDays);
@@ -751,6 +971,45 @@ export async function runEstimateVerify(
 
   const pctOf = (x: number) => safeDiv(x, attrTotal);
 
+  // Action-split (Item 5). Runs only when a cap-CSV was supplied AND
+  // we observed dropped bytes. Surfaces a caveat when the CSV joined
+  // less than half the dropped bytes — that's a config drift signal
+  // FinOps should see in the commitment report.
+  let per_action_breakdown: ActionBytesBuckets | undefined;
+  let per_pattern_breakdown: VerifyResult['per_pattern_breakdown'];
+  if (args.cap_csv_content && postDroppedBytes > 0) {
+    const split = computeActionSplit({
+      postDroppedByHash: postDroppedByHash,
+      capCsvContent: args.cap_csv_content,
+      patternToContainer,
+      postDroppedBytes,
+    });
+    per_action_breakdown = split.buckets;
+    per_pattern_breakdown = split.rows;
+    if (split.clamped) {
+      caveats.push(
+        'Action-split offload bucket clamped to residual to enforce parts-≤-whole (sum of per-action bytes exceeded post_dropped_bytes by FP drift).'
+      );
+    }
+    if (
+      split.buckets.unattributed > 0 &&
+      split.buckets.unattributed / postDroppedBytes > 0.5
+    ) {
+      caveats.push(
+        `Cap-CSV join attributed <50% of dropped bytes (${(
+          ((postDroppedBytes - split.buckets.unattributed) /
+            postDroppedBytes) *
+          100
+        ).toFixed(1)}%). Likely cap-CSV drift vs the deployed engine config.`
+      );
+    }
+  }
+
+  const rate_source: 'list_price' | 'customer_supplied' =
+    args.effective_ingest_per_gb !== undefined
+      ? 'customer_supplied'
+      : 'list_price';
+
   return {
     mode: 'verify',
     destination: args.destination,
@@ -778,6 +1037,9 @@ export async function runEstimateVerify(
       leakage_bytes: pctOf(leakage),
     },
     causal_confidence: confidence,
+    rate_source,
+    per_action_breakdown,
+    per_pattern_breakdown,
     caveats,
   };
 }
