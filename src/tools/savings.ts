@@ -25,8 +25,8 @@ import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
 import { queryInstant } from '../lib/api.js';
 import * as pql from '../lib/promql.js';
-import { bytesToCost, parsePrometheusValue } from '../lib/cost.js';
-import { fmtDollar, fmtBytes, fmtPct, parseTimeframe, costPeriodLabel } from '../lib/format.js';
+import { bytesToCost, parsePrometheusValue, buildDisclosedDollarValue, type DisclosedDollarValue } from '../lib/cost.js';
+import { fmtDollar, fmtBytes, fmtPct, fmtDisclosedDollar, parseTimeframe, costPeriodLabel } from '../lib/format.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
@@ -60,6 +60,8 @@ interface SavingsSummary {
     reduction_pct: number;
     /** null when rate_source === 'unset' (no $/GB known — no honest dollar figure). */
     savings_dollars: number | null;
+    /** Disclosed-value mirror of savings_dollars. null when rate_source === 'unset'. */
+    savings_dollars_disclosed: DisclosedDollarValue | null;
     emission_missing: boolean;
   };
   retriever: {
@@ -68,6 +70,8 @@ interface SavingsSummary {
     reduction_pct: number;
     /** null when rate_source === 'unset'. */
     savings_dollars: number | null;
+    /** Disclosed-value mirror of savings_dollars. null when rate_source === 'unset'. */
+    savings_dollars_disclosed: DisclosedDollarValue | null;
     coverage: number;
     chunks_ok: number;
     chunks_total: number;
@@ -76,13 +80,19 @@ interface SavingsSummary {
     reduction_pct: number;
     /** null when rate_source === 'unset'. */
     realized_dollars: number | null;
+    /** Disclosed-value mirror of realized_dollars. null when rate_source === 'unset'. */
+    realized_dollars_disclosed: DisclosedDollarValue | null;
     /** null when rate_source === 'unset'. */
     annual_projection_dollars: number | null;
+    /** Disclosed-value mirror of annual_projection_dollars. null when rate_source === 'unset'. */
+    annual_projection_dollars_disclosed: DisclosedDollarValue | null;
     has_data: boolean;
   };
   run_rate?: {
     /** null when rate_source === 'unset'. */
     seven_day_annualized: number | null;
+    /** Disclosed-value mirror of seven_day_annualized. null when rate_source === 'unset'. */
+    seven_day_annualized_disclosed: DisclosedDollarValue | null;
     ramping: boolean;
     coverage: number;
   };
@@ -118,10 +128,10 @@ export async function executeSavings(
   } else if (d.rate_source === 'unset') {
     headline = `Pipeline savings (${d.time_range}): ${fmtPct(d.totals.reduction_pct)} of input bytes removed${d.run_rate?.ramping ? ' (volume ramping)' : ''}. Pass effective_ingest_per_gb to overlay dollars.`;
   } else {
-    const realized = d.totals.realized_dollars;
-    const annual = d.totals.annual_projection_dollars;
-    const dollarClause = realized != null && annual != null
-      ? `, ${fmtDollar(realized)}${d.period} realized, ${fmtDollar(annual)}/yr projected at ${d.rate_source}`
+    const realizedDisc = d.totals.realized_dollars_disclosed;
+    const annualDisc = d.totals.annual_projection_dollars_disclosed;
+    const dollarClause = realizedDisc != null && annualDisc != null
+      ? `, ${fmtDisclosedDollar(realizedDisc)}${d.period} realized, ${fmtDisclosedDollar(annualDisc)}/yr projected`
       : '';
     headline = `Pipeline savings (${d.time_range}): ${fmtPct(d.totals.reduction_pct)} of input bytes removed${dollarClause}${d.run_rate?.ramping ? ' (volume ramping)' : ''}.`;
   }
@@ -273,12 +283,37 @@ async function executeSavingsInner(
     totalInputBytes > 0 ? (totalReducedBytes / totalInputBytes) * 100 : 0;
   const hasData = totalReducedBytes > 0;
 
+  // Build disclosed mirrors up-front so emission sites can drop bare fmtDollar
+  // calls. siemLabel is null in this tool — when rate_source='customer_supplied'
+  // the disclosure tail is null anyway; when 'unset' the mirror itself is null.
+  const siemLabel: string | null = null;
+  const edgeSavingsDisclosed: DisclosedDollarValue | null =
+    edgeSavings != null
+      ? buildDisclosedDollarValue(edgeSavings, rateSource, siemLabel, costPerGb)
+      : null;
+  const retrieverSavingsDisclosed: DisclosedDollarValue | null =
+    retrieverSavings != null
+      ? buildDisclosedDollarValue(retrieverSavings, rateSource, siemLabel, costPerGb)
+      : null;
+  const realizedEdgeSavingsDisclosed: DisclosedDollarValue | null =
+    realizedEdgeSavings != null
+      ? buildDisclosedDollarValue(realizedEdgeSavings, rateSource, siemLabel, costPerGb)
+      : null;
+  const totalSavedDisclosed: DisclosedDollarValue | null =
+    totalSaved != null
+      ? buildDisclosedDollarValue(totalSaved, rateSource, siemLabel, costPerGb)
+      : null;
+  const annualProjectionDisclosed: DisclosedDollarValue | null =
+    annualProjection != null
+      ? buildDisclosedDollarValue(annualProjection, rateSource, siemLabel, costPerGb)
+      : null;
+
   const lines: string[] = [];
-  // Header: when rate_source is 'unset' we deliberately omit the $/GB clause
-  // (printing $0 or $1 here is the headline lie we are removing).
+  // Header: drop the inline "$N/GB analyzer (source)" clause — per-row
+  // disclosure tails carry rate provenance now.
   if (costPerGb != null) {
     lines.push(
-      `Pipeline Savings (${tf.label}) at ${fmtDollar(costPerGb)}/GB analyzer (${rateSource}) · ${fmtDollar(storagePerGb)}/GB storage`
+      `Pipeline Savings (${tf.label}) · ${fmtDollar(storagePerGb)}/GB storage`
     );
   } else {
     lines.push(`Pipeline Savings (${tf.label}) — rate unset, percent-only view`);
@@ -297,16 +332,16 @@ async function executeSavingsInner(
   if (edgeEmissionMissing) {
     lines.push(`  Edge:      ${fmtBytes(edgeIn).padEnd(14)} input      → ⚠ no downstream emission detected`);
     lines.push(`             (input ${fmtBytes(edgeIn)} processed, but 0 B emitted to a SIEM target)`);
-    if (edgeSavings != null) {
-      lines.push(`             _Potential savings if this were routed through the pipeline: ${fmtDollar(edgeSavings)}${period} at ${rateSource}._`);
+    if (edgeSavingsDisclosed != null) {
+      lines.push(`             _Potential savings if this were routed through the pipeline: ${fmtDisclosedDollar(edgeSavingsDisclosed)}${period}._`);
     } else {
       lines.push(`             _Pass effective_ingest_per_gb to overlay a potential-savings dollar figure._`);
     }
     lines.push(`             _To realize these savings, configure a downstream SIEM output (Splunk, Datadog, etc.) and measurements will populate within 24h._`);
   } else if (edgeReducedBytes > 0) {
     const dollarTail =
-      edgeSavings != null
-        ? ` → ${fmtDollar(edgeSavings)}${period} saved at ${rateSource}`
+      edgeSavingsDisclosed != null
+        ? ` → ${fmtDisclosedDollar(edgeSavingsDisclosed)}${period} saved`
         : '';
     lines.push(
       `  Edge:      ${fmtBytes(edgeReducedBytes).padEnd(14)} reduced (${fmtPct(edgeReductionPct)} of input)${dollarTail}`
@@ -315,8 +350,8 @@ async function executeSavingsInner(
   }
   if (indexedBytes > 0 || streamedBytes > 0) {
     const dollarTail =
-      retrieverSavings != null
-        ? ` → ${fmtDollar(retrieverSavings)}${period} saved at ${rateSource}`
+      retrieverSavingsDisclosed != null
+        ? ` → ${fmtDisclosedDollar(retrieverSavingsDisclosed)}${period} saved`
         : '';
     lines.push(
       `  Retriever:  ${fmtBytes(indexedBytes).padEnd(14)} in S3 (${fmtPct(retrieverReductionPct)} of retriever input)${dollarTail}`
@@ -350,9 +385,9 @@ async function executeSavingsInner(
     lines.push('  otel-collector configs untouched.');
   } else {
     lines.push('');
-    if (totalSaved != null && annualProjection != null) {
+    if (totalSavedDisclosed != null && annualProjectionDisclosed != null) {
       lines.push(
-        `  Total: ${fmtPct(totalReductionPct)} of input bytes removed · ${fmtDollar(totalSaved)}${period} · ${fmtDollar(annualProjection)}/yr projected at ${rateSource}`
+        `  Total: ${fmtPct(totalReductionPct)} of input bytes removed · ${fmtDisclosedDollar(totalSavedDisclosed)}${period} · ${fmtDisclosedDollar(annualProjectionDisclosed)}/yr projected`
       );
     } else {
       lines.push(
@@ -423,18 +458,26 @@ async function executeSavingsInner(
         const coverageNote = fullCoverage
           ? ''
           : ` _(retriever coverage: ${retriever7dChunksOk}/${retriever7dChunksTotal} chunks — this is a conservative underestimate; true rate is equal or higher)_`;
-        const dollarClause =
+        const annual7dDisclosed: DisclosedDollarValue | null =
           annual7d != null
-            ? `${fmtDollar(annual7d)}/yr — `
+            ? buildDisclosedDollarValue(annual7d, rateSource, siemLabel, costPerGb)
+            : null;
+        const dollarClause =
+          annual7dDisclosed != null
+            ? `${fmtDisclosedDollar(annual7dDisclosed)}/yr — `
             : '';
         lines.push('');
         lines.push(`  **Run-rate note**: The last 7 days project to ${dollarClause}${Math.round(rampRatio)}× higher than the ${tf.label} trailing average. Volume has been ramping. Use the 7-day figure for forward-looking projections.${coverageNote}`);
       } else if (!enoughCoverage) {
         // Partial coverage AND the partial math was below threshold — this is the
         // failure mode where the true value could be above threshold. Warn.
-        const dollarClause =
+        const annual7dDisclosed: DisclosedDollarValue | null =
           annual7d != null
-            ? `${fmtDollar(annual7d)}/yr `
+            ? buildDisclosedDollarValue(annual7d, rateSource, siemLabel, costPerGb)
+            : null;
+        const dollarClause =
+          annual7dDisclosed != null
+            ? `${fmtDisclosedDollar(annual7dDisclosed)}/yr `
             : '';
         lines.push('');
         lines.push(`  _Run-rate check inconclusive: only ${retriever7dChunksOk}/${retriever7dChunksTotal} retriever chunks returned (coverage ${Math.round(retriever7dCoverage * 100)}%). Partial math projects ${dollarClause}(${rampRatio.toFixed(1)}× trailing), which is below the 2× ramp-up threshold — but the true value may be higher due to missing chunks. Retry in 30s to confirm whether the environment is stable or ramping._`);
@@ -496,8 +539,13 @@ async function executeSavingsInner(
                   bytesToCost(streamed7d, costPerGb))
             ) * (365 / 7)
           : null;
+      const annual7dDisclosed: DisclosedDollarValue | null =
+        annual7d != null
+          ? buildDisclosedDollarValue(annual7d, rateSource, siemLabel, costPerGb)
+          : null;
       runRate = {
         seven_day_annualized: annual7d,
+        seven_day_annualized_disclosed: annual7dDisclosed,
         ramping: edge7dOk && rampRatio > 2,
         coverage: retriever7dCoverage,
       };
@@ -514,6 +562,7 @@ async function executeSavingsInner(
         reduced_bytes: edgeReducedBytes,
         reduction_pct: edgeReductionPct,
         savings_dollars: realizedEdgeSavings,
+        savings_dollars_disclosed: realizedEdgeSavingsDisclosed,
         emission_missing: edgeEmissionMissing,
       },
       retriever: {
@@ -521,6 +570,7 @@ async function executeSavingsInner(
         streamed_bytes: streamedBytes,
         reduction_pct: retrieverReductionPct,
         savings_dollars: retrieverSavings,
+        savings_dollars_disclosed: retrieverSavingsDisclosed,
         coverage: mainRetrieverCoverage,
         chunks_ok: mainRetrieverChunksOk,
         chunks_total: mainRetrieverChunksTotal,
@@ -528,7 +578,9 @@ async function executeSavingsInner(
       totals: {
         reduction_pct: totalReductionPct,
         realized_dollars: totalSaved,
+        realized_dollars_disclosed: totalSavedDisclosed,
         annual_projection_dollars: annualProjection,
+        annual_projection_dollars_disclosed: annualProjectionDisclosed,
         has_data: hasData,
       },
       run_rate: runRate,

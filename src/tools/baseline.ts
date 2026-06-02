@@ -42,10 +42,12 @@ import {
   bytesToGb,
   parsePrometheusValue,
   getDestinationCostModel,
+  buildDisclosedDollarValue,
   type Action,
+  type DisclosedDollarValue,
 } from '../lib/cost.js';
-import type { SiemId } from '../lib/siem/pricing.js';
-import { fmtDollar, fmtBytes } from '../lib/format.js';
+import { SIEM_DISPLAY_NAMES, type SiemId } from '../lib/siem/pricing.js';
+import { fmtBytes, fmtDisclosedDollar } from '../lib/format.js';
 import {
   buildEnvelope,
   type StructuredOutput,
@@ -138,11 +140,15 @@ export interface BaselineEnvelopeData {
     monthly_usd: number | null;
     /** Alias of `monthly_usd` carried for one release. */
     monthly_usd_at_list: number | null;
+    /** Disclosed-value mirror of `monthly_usd`. `null` when `rate_source === 'unset'`. */
+    monthly_usd_disclosed: DisclosedDollarValue | null;
   };
   projection_no_action_90d: {
     /** `null` when `rate_source === 'unset'`. */
     monthly_usd_in_90d: number | null;
     monthly_usd_in_90d_at_list: number | null;
+    /** Disclosed-value mirror of `monthly_usd_in_90d`. `null` when `rate_source === 'unset'`. */
+    monthly_usd_in_90d_disclosed: DisclosedDollarValue | null;
     growth_pct: number;
   };
   top_contributors: BaselineTopContributor[];
@@ -383,6 +389,22 @@ async function computeBaseline(
 
   const recommended = recommendTargetRange(top);
 
+  // Disclosed-value mirrors so renderers can call fmtDisclosedDollar
+  // without re-resolving rate_source + siemLabel + listRate.
+  const siemLabel = SIEM_DISPLAY_NAMES[destination] ?? null;
+  const monthlyUsdDisclosed = buildDisclosedDollarValue(
+    monthlyUsd,
+    rateSource,
+    siemLabel,
+    ingestPerGb
+  );
+  const monthlyUsdIn90dDisclosed = buildDisclosedDollarValue(
+    monthlyUsdIn90d,
+    rateSource,
+    siemLabel,
+    ingestPerGb
+  );
+
   return {
     status: 'ready',
     reporter_age_days: reporterAge,
@@ -396,10 +418,12 @@ async function computeBaseline(
       bytes_per_day_p90: p90,
       monthly_usd: monthlyUsd,
       monthly_usd_at_list: monthlyUsd,
+      monthly_usd_disclosed: monthlyUsdDisclosed,
     },
     projection_no_action_90d: {
       monthly_usd_in_90d: monthlyUsdIn90d,
       monthly_usd_in_90d_at_list: monthlyUsdIn90d,
+      monthly_usd_in_90d_disclosed: monthlyUsdIn90dDisclosed,
       growth_pct: growthPct,
     },
     top_contributors: top,
@@ -696,6 +720,9 @@ function buildNotReadyEnvelope(opts: {
   // real projection.
   const dollarsKnown = opts.rateSource !== 'unset';
   const zeroMonthly = dollarsKnown ? 0 : null;
+  // Disclosed mirrors are null whenever the underlying number is null —
+  // not_ready gate failures don't emit dollar lines anyway (the headline
+  // returns early on `not_ready`), so we don't synthesise a disclosure.
   return {
     status: 'not_ready',
     not_ready_reason: opts.reason,
@@ -710,10 +737,12 @@ function buildNotReadyEnvelope(opts: {
       bytes_per_day_p90: 0,
       monthly_usd: zeroMonthly,
       monthly_usd_at_list: zeroMonthly,
+      monthly_usd_disclosed: null,
     },
     projection_no_action_90d: {
       monthly_usd_in_90d: zeroMonthly,
       monthly_usd_in_90d_at_list: zeroMonthly,
+      monthly_usd_in_90d_disclosed: null,
       growth_pct: 0,
     },
     top_contributors: [],
@@ -740,12 +769,14 @@ function headlineFor(d: BaselineEnvelopeData): string {
   let dollarClause = '';
   if (
     d.rate_source !== 'unset' &&
-    d.current.monthly_usd != null &&
-    d.projection_no_action_90d.monthly_usd_in_90d != null
+    d.current.monthly_usd_disclosed != null &&
+    d.projection_no_action_90d.monthly_usd_in_90d_disclosed != null
   ) {
-    const monthly = fmtDollar(d.current.monthly_usd);
-    const future = fmtDollar(d.projection_no_action_90d.monthly_usd_in_90d);
-    dollarClause = ` · ${monthly}/mo current, ${future}/mo projected 90d no-action (at ${d.rate_source})`;
+    const monthly = fmtDisclosedDollar(d.current.monthly_usd_disclosed);
+    const future = fmtDisclosedDollar(
+      d.projection_no_action_90d.monthly_usd_in_90d_disclosed
+    );
+    dollarClause = ` · ${monthly}/mo current, ${future}/mo projected 90d no-action`;
   }
   return `Baseline ready: ${band} · ${volume}${dollarClause}.`;
 }

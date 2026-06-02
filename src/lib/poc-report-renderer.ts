@@ -9,8 +9,14 @@
 import type { ExtractedPattern, ExtractedPatterns } from './pattern-extraction.js';
 import type { SiemId } from './siem/pricing.js';
 import { SIEM_DISPLAY_NAMES } from './siem/pricing.js';
-import { getDefaultActionForDestination, type Action as CostAction } from './cost.js';
-import { fmtBytes, fmtCount, fmtDollar, fmtGb, fmtPct } from './format.js';
+import {
+  getDefaultActionForDestination,
+  type Action as CostAction,
+  type DollarSource,
+  type DisclosedDollarValue,
+  buildDisclosedDollarValue,
+} from './cost.js';
+import { fmtBytes, fmtCount, fmtDisclosedDollar, fmtGb, fmtPct } from './format.js';
 import { renderNextActions, type NextAction } from './next-actions.js';
 import { agentOnly } from './agent-only.js';
 import { enrichForPoc, type PocEnrichment } from './poc-enrichers.js';
@@ -48,6 +54,24 @@ export interface RenderInput {
   windowHours: number;
   /** Analyzer cost per GB for the detected SIEM. */
   analyzerCostPerGb: number;
+  /**
+   * Origin of `analyzerCostPerGb`. Threaded so every dollar emission can
+   * route through `fmtDisclosedDollar` with the right disclosure tail.
+   *  - 'list_price'        — pulled from vendors.json (needs caveat).
+   *  - 'customer_supplied' — caller passed an override rate (no caveat).
+   *  - 'unset'             — no rate available (dollar lines drop).
+   *
+   * TODO(Phase 1.4 upstream): wire from `cost.ts` rate_source upstream of
+   * `poc-envelope-v2.ts`; today most callers default to 'list_price' via
+   * the vendors.json lookup.
+   */
+  rateSource?: DollarSource;
+  /**
+   * Vendor display name for the disclosure tail (e.g. "Splunk", "Datadog").
+   * When null, the disclosure renders "at SIEM list price …". Resolved
+   * upstream from `SIEM_DISPLAY_NAMES[siem]` when not provided.
+   */
+  siemLabel?: string | null;
   snapshotId: string;
   startedAt: string;
   finishedAt: string;
@@ -127,6 +151,29 @@ export interface RenderResult {
 }
 
 type Confidence = 'high' | 'medium' | 'low';
+
+/**
+ * Local adapter: wrap a bare-number cost as a `DisclosedDollarValue` using
+ * the renderer-input's resolved `rateSource` + `siemLabel` + list rate.
+ *
+ * TODO(Phase 1.4 upstream): once `poc-envelope-v2.ts` and
+ * `poc-host-agent-enricher.ts` populate `_disclosed` mirrors on every
+ * per-pattern record, delete this adapter and read the mirror directly.
+ * Until then this is the single chokepoint so the renderer NEVER calls
+ * `fmtDollar` on a raw cost — every $ goes through `fmtDisclosedDollar`
+ * with a structurally-attached disclosure tail.
+ */
+function discloseCost(input: RenderInput, amount: number): DisclosedDollarValue | null {
+  const source: DollarSource = input.rateSource ?? 'list_price';
+  if (source === 'unset') return null;
+  const siemLabel = input.siemLabel ?? SIEM_DISPLAY_NAMES[input.siem] ?? null;
+  return buildDisclosedDollarValue(amount, source, siemLabel, input.analyzerCostPerGb);
+}
+
+/** Convenience: same as `discloseCost` but returns the formatted string. */
+function fmtCostDisclosed(input: RenderInput, amount: number): string {
+  return fmtDisclosedDollar(discloseCost(input, amount));
+}
 
 /**
  * Build a display string for a pattern identity. When an AI pretty name
@@ -478,7 +525,7 @@ export function renderPocSummary(input: RenderInput, topN = 5): string {
     const mode = input.volumeSource === 'auto_detected' ? 'auto-detected' : 'user-supplied';
     const m = input.volumeRangeMultiplier;
     lines.push(
-      `Projected annual cost: **${formatCostRange(annualCost, m)}** · Potential savings: **${formatCostRange(annualSavings, m)} (${savingsPct})** at ${fmtGb(input.totalDailyGb)}/day (${mode}).`
+      `Projected annual cost: **${formatCostRange(input, annualCost, m)}** · Potential savings: **${formatCostRange(input, annualSavings, m)} (${savingsPct})** at ${fmtGb(input.totalDailyGb)}/day (${mode}).`
     );
     if (m) {
       lines.push('');
@@ -491,7 +538,7 @@ export function renderPocSummary(input: RenderInput, topN = 5): string {
     const oneHundred = scaleCostToDaily(totalCost, input.extraction.totalBytes, 100, input.windowHours);
     const oneHundredSavings = scaleCostToDaily(projectedSavings, input.extraction.totalBytes, 100, input.windowHours);
     lines.push(
-      `No volume specified. At 100 GB/day the top-pattern muting would save **${fmtDollar(oneHundredSavings)}/yr** out of **${fmtDollar(oneHundred)}/yr** total cost. For a precise projection, pass \`total_daily_gb\`, \`total_monthly_gb\`, or \`total_annual_gb\` on submit (or call status with \`view: "full"\` to see the full scenario table).`
+      `No volume specified. At 100 GB/day the top-pattern muting would save **${fmtCostDisclosed(input, oneHundredSavings)}/yr** out of **${fmtCostDisclosed(input, oneHundred)}/yr** total cost. For a precise projection, pass \`total_daily_gb\`, \`total_monthly_gb\`, or \`total_annual_gb\` on submit (or call status with \`view: "full"\` to see the full scenario table).`
     );
   }
   lines.push('');
@@ -513,7 +560,7 @@ export function renderPocSummary(input: RenderInput, topN = 5): string {
       const label = truncate(c.representativeLabel, 60);
       const ids = c.members.map((m) => `\`${shortIdentity(m.identity)}\``).join(', ');
       lines.push(
-        `| ${i + 1}. ${label} | ${c.service} | ${ids} | ${fmtDollar(c.combinedMonthlyUsd)} | ${c.joinSignal} (${(c.confidence * 100).toFixed(0)}%) |`,
+        `| ${i + 1}. ${label} | ${c.service} | ${ids} | ${fmtCostDisclosed(input, c.combinedMonthlyUsd)} | ${c.joinSignal} (${(c.confidence * 100).toFixed(0)}%) |`,
       );
     }
     lines.push('');
@@ -562,7 +609,7 @@ export function renderPocSummary(input: RenderInput, topN = 5): string {
       const slot = renderSlotCell(p);
       const age = renderEmergenceCell(p);
       lines.push(
-        `| ${i + 1} | ${name}${flag}${cluster} | ${p.service || '—'} | ${p.severity || '—'} | ${fmtPct(p.pctOfTotal * 100)} | ${action} | ${slot} | ${age} | ${fmtDollar(annualSavings)} |`,
+        `| ${i + 1} | ${name}${flag}${cluster} | ${p.service || '—'} | ${p.severity || '—'} | ${fmtPct(p.pctOfTotal * 100)} | ${action} | ${slot} | ${age} | ${fmtCostDisclosed(input, annualSavings)} |`,
       );
     }
     lines.push('');
@@ -679,7 +726,7 @@ export function renderPocTop(input: RenderInput, topN = 20): string {
     const annual = projectBilling(p.costPerWindow, input.windowHours, 24 * 365);
     const flag = needsReview(p) ? ' ⚠' : '';
     lines.push(
-      `| ${i + 1} | ${name}${flag} | ${p.service || '—'} | ${p.severity || '—'} | ${fmtCount(p.count)} | ${fmtPct(p.pctOfTotal * 100)} | ${fmtDollar(weekly)} | ${fmtDollar(annual)} |`
+      `| ${i + 1} | ${name}${flag} | ${p.service || '—'} | ${p.severity || '—'} | ${fmtCount(p.count)} | ${fmtPct(p.pctOfTotal * 100)} | ${fmtCostDisclosed(input, weekly)} | ${fmtCostDisclosed(input, annual)} |`
     );
   }
   return lines.join('\n');
@@ -712,8 +759,8 @@ export function renderPocPattern(input: RenderInput, identity: string): string {
   lines.push(
     `**Stats**: ${p.severity || '—'} severity · ${fmtCount(p.count)} events · ${fmtPct(p.pctOfTotal * 100)} of sample volume · ${p.service || 'unknown service'}`
   );
-  if (p.costPerWindow > 0 || annualSavings > 0) {
-    lines.push(`**Projected cost**: ${fmtDollar(p.costPerWindow)}/window · **Savings if muted**: ${fmtDollar(annualSavings)}/year`);
+  if ((p.costPerWindow > 0 || annualSavings > 0) && (input.rateSource ?? 'list_price') !== 'unset') {
+    lines.push(`**Projected cost**: ${fmtCostDisclosed(input, p.costPerWindow)}/window · **Savings if muted**: ${fmtCostDisclosed(input, annualSavings)}/year`);
   }
   lines.push(`**Confidence**: ${p.confidence}`);
   lines.push('');
@@ -909,12 +956,12 @@ export function renderPocReport(input: RenderInput): RenderResult {
     const annualCost = projectBilling(totalCost, input.windowHours, 24 * 365);
     const annualSavings = projectBilling(projectedSavings, input.windowHours, 24 * 365);
     const m = input.volumeRangeMultiplier;
-    lines.push(`- **Projected daily cost**: ${formatCostRange(dailyCost, m)}`);
-    lines.push(`- **Projected monthly cost**: ${formatCostRange(monthlyCost, m)}`);
-    lines.push(`- **Projected annual cost**: ${formatCostRange(annualCost, m)}`);
+    lines.push(`- **Projected daily cost**: ${formatCostRange(input, dailyCost, m)}`);
+    lines.push(`- **Projected monthly cost**: ${formatCostRange(input, monthlyCost, m)}`);
+    lines.push(`- **Projected annual cost**: ${formatCostRange(input, annualCost, m)}`);
     void weeklyCost;
     lines.push(
-      `- **Potential annual savings**: **${formatCostRange(annualSavings, m)}** — ${fmtPct((annualSavings / Math.max(1, annualCost)) * 100)} of annual cost`
+      `- **Potential annual savings**: **${formatCostRange(input, annualSavings, m)}** — ${fmtPct((annualSavings / Math.max(1, annualCost)) * 100)} of annual cost`
     );
     if (m) {
       lines.push('');
@@ -952,18 +999,21 @@ export function renderPocReport(input: RenderInput): RenderResult {
       const annualSavings = projectBilling(projectedSavings * factor, input.windowHours, 24 * 365);
       const monthlyLabel = `${(sc.daily * 30).toLocaleString()} GB/mo`;
       lines.push(
-        `| ${sc.label} | ${monthlyLabel} | ${fmtDollar(annualCost)} | **${fmtDollar(annualSavings)}** |`
+        `| ${sc.label} | ${monthlyLabel} | ${fmtCostDisclosed(input, annualCost)} | **${fmtCostDisclosed(input, annualSavings)}** |`
       );
     }
     lines.push('');
     lines.push('_Sample-only costs (for reference)_:');
-    lines.push(`- **Observed sample cost (window)**: ${fmtDollar(totalCost)}`);
+    lines.push(`- **Observed sample cost (window)**: ${fmtCostDisclosed(input, totalCost)}`);
     lines.push(
-      `- **Sample potential savings (window)**: ${fmtDollar(projectedSavings)} — ${fmtPct((projectedSavings / Math.max(1, totalCost)) * 100)} of analyzed cost`
+      `- **Sample potential savings (window)**: ${fmtCostDisclosed(input, projectedSavings)} — ${fmtPct((projectedSavings / Math.max(1, totalCost)) * 100)} of analyzed cost`
     );
   }
+  // The analyzer rate is now structurally attached to every $ line above via
+  // `fmtDisclosedDollar`'s disclosure tail. The source-of-rate prose stays
+  // here so users still know it came from vendors.json and how to override.
   lines.push(
-    `- **Analyzer rate**: $${input.analyzerCostPerGb.toFixed(2)}/GB (from vendors.json; override via \`analyzer_cost_per_gb\`)`
+    `- **Analyzer rate source**: vendors.json (override via \`analyzer_cost_per_gb\`)`
   );
   lines.push('');
   if (top3.length > 0) {
@@ -975,7 +1025,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
         : p.recommendedAction === 'sample'
         ? `Sample ${dn} at 1/${p.sampleRate}`
         : `Keep ${dn}`;
-      const save = p.recommendedAction === 'keep' ? '' : ` → save ${fmtDollar(p.projectedSavings)}`;
+      const save = p.recommendedAction === 'keep' ? '' : ` → save ${fmtCostDisclosed(input, p.projectedSavings)}`;
       lines.push(`- ${label}${save}`);
     }
     lines.push('');
@@ -1001,7 +1051,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
       const p = patterns[i];
       const newFlag = p.count === 1 && input.extraction.totalEvents > 100 ? 'new?' : '';
       lines.push(
-        `| ${i + 1} | ${displayNameCompact(p.identity, p.template, input.aiPrettyNames, p.symbolMessage, cropped.get(p.identity), setDiff.get(p.identity))} | ${p.service || 'unknown'} | ${p.severity || '—'} | ${fmtCount(p.count)} | ${fmtPct(p.pctOfTotal * 100)} | ${fmtDollar(p.costPerWindow)} | ${fmtDollar(p.costPerWeek)} | ${newFlag} |`
+        `| ${i + 1} | ${displayNameCompact(p.identity, p.template, input.aiPrettyNames, p.symbolMessage, cropped.get(p.identity), setDiff.get(p.identity))} | ${p.service || 'unknown'} | ${p.severity || '—'} | ${fmtCount(p.count)} | ${fmtPct(p.pctOfTotal * 100)} | ${fmtCostDisclosed(input, p.costPerWindow)} | ${fmtCostDisclosed(input, p.costPerWeek)} | ${newFlag} |`
       );
     }
     lines.push('');
@@ -1026,7 +1076,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
     lines.push('| service | events | $/window | severity mix |');
     lines.push('|---|---|---|---|');
     for (const r of svcRows.slice(0, 15)) {
-      lines.push(`| ${r.svc} | ${fmtCount(r.events)} | ${fmtDollar(r.cost)} | ${r.severityMix || '—'} |`);
+      lines.push(`| ${r.svc} | ${fmtCount(r.events)} | ${fmtCostDisclosed(input, r.cost)} | ${r.severityMix || '—'} |`);
     }
     lines.push('');
     // Anomaly flag: any service with >50% of total cost?
@@ -1053,7 +1103,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
     lines.push('');
     lines.push(`- **Action**: ${actionLabel(p)}`);
     lines.push(`- **Reasoning**: ${p.reasoning}`);
-    lines.push(`- **Projected savings (window)**: ${fmtDollar(p.projectedSavings)}`);
+    lines.push(`- **Projected savings (window)**: ${fmtCostDisclosed(input, p.projectedSavings)}`);
     lines.push(
       `- **Dependency warning**: ${p.recommendedAction === 'keep' ? '—' : `run \`log10x_dependency_check(pattern: "${p.identity}")\` first to surface alerts/dashboards/saved searches referencing this pattern`}`
     );
@@ -1117,7 +1167,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
         const ratio = p.bytes > 0 ? p.bytes / Math.max(1, encBytes) : 1;
         const saveCost = costFromBytes(p.bytes - encBytes, input.analyzerCostPerGb);
         lines.push(
-          `| ${displayNameCompact(p.identity, p.template, input.aiPrettyNames, p.symbolMessage, undefined, setDiff.get(p.identity))} | ${fmtBytes(p.bytes)} | ${fmtBytes(encBytes)} | ${ratio.toFixed(1)}× | ${fmtDollar(saveCost)} |`
+          `| ${displayNameCompact(p.identity, p.template, input.aiPrettyNames, p.symbolMessage, undefined, setDiff.get(p.identity))} | ${fmtBytes(p.bytes)} | ${fmtBytes(encBytes)} | ${ratio.toFixed(1)}× | ${fmtCostDisclosed(input, saveCost)} |`
         );
       }
       lines.push('');
@@ -1270,9 +1320,9 @@ export function renderPocReport(input: RenderInput): RenderResult {
       top3Actions: top3.map((p) => {
         const name = resolveName(p.identity, p.template, input.aiPrettyNames);
         return p.recommendedAction === 'mute'
-          ? `Mute ${name} → save ${fmtDollar(p.projectedSavings)}`
+          ? `Mute ${name} → save ${fmtCostDisclosed(input, p.projectedSavings)}`
           : p.recommendedAction === 'sample'
-          ? `Sample ${name} at 1/${p.sampleRate} → save ${fmtDollar(p.projectedSavings)}`
+          ? `Sample ${name} at 1/${p.sampleRate} → save ${fmtCostDisclosed(input, p.projectedSavings)}`
           : `Keep ${name}`;
       }),
     },
@@ -1785,15 +1835,21 @@ function escapeRegex(s: string): string {
  * fallback estimator was used. The wide bracket is the point: it
  * pushes the user to provide better data (`total_daily_gb`, or grant
  * `usage_read` scope) instead of trusting a confidently-wrong number.
+ *
+ * Routes through `fmtDisclosedDollar` so the disclosure tail is
+ * structurally attached. In the range case the tail rides on each
+ * endpoint (spec calls for this — duplication beats stripping the
+ * caveat off either side of the range).
  */
 function formatCostRange(
+  input: RenderInput,
   cost: number,
   multiplier?: { low: number; high: number }
 ): string {
-  if (!multiplier) return fmtDollar(cost);
+  if (!multiplier) return fmtCostDisclosed(input, cost);
   const lo = cost * multiplier.low;
   const hi = cost * multiplier.high;
-  return `${fmtDollar(lo)} - ${fmtDollar(hi)}`;
+  return `${fmtCostDisclosed(input, lo)} - ${fmtCostDisclosed(input, hi)}`;
 }
 
 function truncate(s: string, max: number): string {

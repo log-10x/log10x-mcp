@@ -50,8 +50,14 @@ import {
   CustomerMetricsNotConfiguredError,
   type CustomerMetricsBackend,
 } from '../lib/customer-metrics.js';
-import { annualizeDollars, type Action } from '../lib/cost.js';
-import type { SiemId } from '../lib/siem/pricing.js';
+import {
+  annualizeDollars,
+  buildDisclosedDollarValue,
+  type Action,
+  type DisclosedDollarValue,
+} from '../lib/cost.js';
+import { fmtDisclosedDollar } from '../lib/format.js';
+import { DEFAULT_ANALYZER_COST_PER_GB, SIEM_DISPLAY_NAMES, type SiemId } from '../lib/siem/pricing.js';
 import { loadEnvironments, resolveEnv } from '../lib/environments.js';
 import { getOffloadStatusBatch } from '../lib/offload-status.js';
 
@@ -469,8 +475,12 @@ export interface CommitmentReportEnvelope {
    * report leads with the byte/percent KPI and gates every dollar phrase.
    */
   delivered_dollars: number | null;
+  /** Disclosed-value mirror of delivered_dollars; null when rate_source==='unset'. */
+  delivered_dollars_disclosed: DisclosedDollarValue | null;
   delivered_dollars_kind: 'realized' | 'shadow_committed_year_one';
   promised_dollars: number | null;
+  /** Disclosed-value mirror of promised_dollars; null when rate_source==='unset'. */
+  promised_dollars_disclosed: DisclosedDollarValue | null;
   /**
    * Aggregate rate source across the weekly slices. Reduced from each
    * week's `rate_source`:
@@ -526,6 +536,8 @@ export interface CommitmentReportEnvelope {
     rate_source: 'list_price' | 'customer_supplied' | 'unset';
   }>;
   annualized_dollars: number | null;
+  /** Disclosed-value mirror of annualized_dollars; null when rate_source==='unset'. */
+  annualized_dollars_disclosed: DisclosedDollarValue | null;
   caveats: string[];
   markdown?: string;
   /**
@@ -962,10 +974,10 @@ function renderMarkdown(env: CommitmentReportEnvelope): string {
       `**Bytes delivered:** ${env.delivered_bytes.toLocaleString()} bytes saved. _(rate_source=unset, kind=${kindLabel} — pass effective_ingest_per_gb on log10x_estimate_savings to overlay dollar values.)_`
     );
   } else {
-    const promised = env.promised_dollars ?? 0;
-    const annualized = env.annualized_dollars ?? 0;
+    // Disclosure tail carries rate_source semantics; only the contract-kind
+    // qualifier still needs an inline label.
     lines.push(
-      `**Dollars** _(rate_source=${env.rate_source}, kind=${kindLabel})_**:** $${env.delivered_dollars.toFixed(0)} delivered vs $${promised.toFixed(0)} promised. Annualized run-rate $${annualized.toFixed(0)}.`
+      `**Dollars** _(kind=${kindLabel})_**:** ${fmtDisclosedDollar(env.delivered_dollars_disclosed)} delivered vs ${fmtDisclosedDollar(env.promised_dollars_disclosed)} promised. Annualized run-rate ${fmtDisclosedDollar(env.annualized_dollars_disclosed)}.`
     );
   }
   if (env.delivered_dollars_kind === 'shadow_committed_year_one') {
@@ -1014,27 +1026,35 @@ function renderMarkdown(env: CommitmentReportEnvelope): string {
   const pa = env.percent_reduction_by_action;
   const ba = env.bytes_saved_by_action;
   // Per-action dollar fractions track byte fractions when delivered_bytes>0;
-  // when rate_source==='unset' the column is omitted entirely.
-  const dollarShare = (bytes: number): number => {
-    if (!showDollars || env.delivered_bytes <= 0 || env.delivered_dollars == null) return 0;
-    return env.delivered_dollars * (bytes / env.delivered_bytes);
+  // when rate_source==='unset' the column is omitted entirely. Wrap each
+  // share in a DisclosedDollarValue so the disclosure tail rides every cell
+  // (the rate_source / list-price caveat is no longer inlined per row).
+  const siemLabel = SIEM_DISPLAY_NAMES[env.commitment.destination] ?? null;
+  const listRatePerGb =
+    env.rate_source === 'list_price'
+      ? (DEFAULT_ANALYZER_COST_PER_GB[env.commitment.destination] ?? null)
+      : null;
+  const dollarShareDisclosed = (bytes: number): DisclosedDollarValue | null => {
+    if (!showDollars || env.delivered_bytes <= 0 || env.delivered_dollars == null) return null;
+    const value = env.delivered_dollars * (bytes / env.delivered_bytes);
+    return buildDisclosedDollarValue(value, env.rate_source, siemLabel, listRatePerGb);
   };
   if (showDollars) {
-    lines.push('| Action    | Share of bytes | Bytes saved | Dollars (rate_source) |');
-    lines.push('|-----------|----------------|-------------|-----------------------|');
+    lines.push('| Action    | Share of bytes | Bytes saved | Dollars |');
+    lines.push('|-----------|----------------|-------------|---------|');
     lines.push(
-      `| Drop      | ${pa.drop.toFixed(1)}%           | ${ba.drop.toLocaleString()} | $${dollarShare(ba.drop).toFixed(0)} (${env.rate_source}) |`
+      `| Drop      | ${pa.drop.toFixed(1)}%           | ${ba.drop.toLocaleString()} | ${fmtDisclosedDollar(dollarShareDisclosed(ba.drop))} |`
     );
     lines.push(
-      `| Compact   | ${pa.compact.toFixed(1)}%           | ${ba.compact.toLocaleString()} | $${dollarShare(ba.compact).toFixed(0)} (${env.rate_source}) |`
+      `| Compact   | ${pa.compact.toFixed(1)}%           | ${ba.compact.toLocaleString()} | ${fmtDisclosedDollar(dollarShareDisclosed(ba.compact))} |`
     );
     if (!offloadTimedOut) {
       lines.push(
-        `| Offload   | ${pa.offload.toFixed(1)}%           | ${ba.offload.toLocaleString()} | $${dollarShare(ba.offload).toFixed(0)} (${env.rate_source}) |`
+        `| Offload   | ${pa.offload.toFixed(1)}%           | ${ba.offload.toLocaleString()} | ${fmtDisclosedDollar(dollarShareDisclosed(ba.offload))} |`
       );
     }
     lines.push(
-      `| Tier-down | ${pa.tier_down.toFixed(1)}%           | ${ba.tier_down.toLocaleString()} | $${dollarShare(ba.tier_down).toFixed(0)} (${env.rate_source}) |`
+      `| Tier-down | ${pa.tier_down.toFixed(1)}%           | ${ba.tier_down.toLocaleString()} | ${fmtDisclosedDollar(dollarShareDisclosed(ba.tier_down))} |`
     );
   } else {
     lines.push('| Action    | Share of bytes | Bytes saved |');
@@ -1292,6 +1312,28 @@ export async function executeCommitmentReport(
       ? null
       : annualizeDollars(agg.delivered_dollars, period.days);
 
+  // Disclosed-value mirrors for the renderer / JSON consumers. siemLabel is
+  // resolved from the commitment destination; listRatePerGb is only carried
+  // when the aggregate rate_source is 'list_price' (customer_supplied
+  // disclosures are caveat-less by design; unset → null).
+  const siemLabel = SIEM_DISPLAY_NAMES[commitment.destination] ?? null;
+  const listRatePerGb =
+    agg.rate_source === 'list_price'
+      ? (DEFAULT_ANALYZER_COST_PER_GB[commitment.destination] ?? null)
+      : null;
+  const delivered_dollars_disclosed =
+    agg.delivered_dollars == null
+      ? null
+      : buildDisclosedDollarValue(agg.delivered_dollars, agg.rate_source, siemLabel, listRatePerGb);
+  const promised_dollars_disclosed =
+    promised_dollars == null
+      ? null
+      : buildDisclosedDollarValue(promised_dollars, agg.rate_source, siemLabel, listRatePerGb);
+  const annualized_dollars_disclosed =
+    annualized_dollars == null
+      ? null
+      : buildDisclosedDollarValue(annualized_dollars, agg.rate_source, siemLabel, listRatePerGb);
+
   // 8. Caveats.
   const caveats: string[] = [];
   if (dollarKind === 'shadow_committed_year_one') {
@@ -1380,8 +1422,10 @@ export async function executeCommitmentReport(
     delivered_bytes: agg.delivered_bytes,
     bytes_saved_by_action: agg.bytes_saved_by_action,
     delivered_dollars: agg.delivered_dollars,
+    delivered_dollars_disclosed,
     delivered_dollars_kind: dollarKind,
     promised_dollars,
+    promised_dollars_disclosed,
     rate_source: agg.rate_source,
     variance_attribution: agg.attribution,
     weekly_series: weeklyResults.map((w) => {
@@ -1414,6 +1458,7 @@ export async function executeCommitmentReport(
       rate_source: r.rate_source,
     })),
     annualized_dollars,
+    annualized_dollars_disclosed,
     caveats,
   };
 

@@ -108,25 +108,6 @@ export function fmtPctRange(low: number, expected: number, high: number): string
 }
 
 /**
- * Render a dollar amount tagged with the rate's provenance. Returns "—"
- * when the rate is unset (no dollar value can honestly be quoted), and
- * appends "(list)" or "(custom)" otherwise so downstream prose can stay
- * percent-first without losing the rate-origin signal.
- *
- * DEPRECATED: prefer `fmtDisclosedDollar` for any new code path. This shim
- * stays until every renderer has been migrated to read the disclosed-value
- * mirror off the envelope; flushing it is part of Piece A finalisation.
- */
-export function fmtDollarWithSource(
-  amount: number | null,
-  source: 'list_price' | 'customer_supplied' | 'unset'
-): string {
-  if (amount == null || source === 'unset') return '—';
-  const tag = source === 'customer_supplied' ? 'custom' : 'list';
-  return `${fmtDollar(amount)} (${tag})`;
-}
-
-/**
  * Render a DisclosedDollarValue with its disclosure tail. This is the ONLY
  * formatter that may print a dollar number derived from a list rate — it
  * structurally cannot leave the disclosure off.

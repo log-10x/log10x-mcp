@@ -10,11 +10,11 @@ import type { EnvConfig } from '../lib/environments.js';
 import { queryInstant, queryAi } from '../lib/api.js';
 import * as pql from '../lib/promql.js';
 import { LABELS } from '../lib/promql.js';
-import { bytesToCost, parsePrometheusValue } from '../lib/cost.js';
+import { bytesToCost, parsePrometheusValue, buildDisclosedDollarValue, type DisclosedDollarValue } from '../lib/cost.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import {
   fmtDollar, fmtPattern, fmtSeverity, fmtCount, fmtBytes, fmtPct,
-  fmtDollarWithSource,
+  fmtDisclosedDollar,
   parseTimeframe, costPeriodLabel, normalizePattern
 } from '../lib/format.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
@@ -40,8 +40,27 @@ export const eventLookupSchema = {
 interface EventLookupSummary {
   pattern: string;
   window: string;
-  services: Array<{ service: string; severity: string; bytes: number; share_pct: number; cost_per_window_usd: number | null; cost_baseline_usd: number | null; events: number; is_new: boolean }>;
-  totals: { bytes: number; cost_per_window_usd: number | null; cost_baseline_usd: number | null; events: number; service_count: number };
+  services: Array<{
+    service: string;
+    severity: string;
+    bytes: number;
+    share_pct: number;
+    cost_per_window_usd: number | null;
+    cost_baseline_usd: number | null;
+    cost_per_window_usd_disclosed: DisclosedDollarValue | null;
+    cost_baseline_usd_disclosed: DisclosedDollarValue | null;
+    events: number;
+    is_new: boolean;
+  }>;
+  totals: {
+    bytes: number;
+    cost_per_window_usd: number | null;
+    cost_baseline_usd: number | null;
+    cost_per_window_usd_disclosed: DisclosedDollarValue | null;
+    cost_baseline_usd_disclosed: DisclosedDollarValue | null;
+    events: number;
+    service_count: number;
+  };
   rate_source: 'list_price' | 'customer_supplied' | 'unset';
   resolved_from_hash?: string;
   offload_status?: {
@@ -86,10 +105,12 @@ export async function executeEventLookup(
   // gates the dollar clause on rate_source so an unset rate yields a
   // truthful percent-first headline instead of a fabricated "$0.00".
   const svcWord = d.totals.service_count === 1 ? 'service' : 'services';
-  const dollarTail = fmtDollarWithSource(d.totals.cost_per_window_usd, d.rate_source);
-  const headline = dollarTail === '—'
+  // Gate the dollar clause on rate_source: unset → drop the clause entirely
+  // (the disclosed mirror is null and fmtDisclosedDollar would emit a "—" tail
+  // which reads as missing data instead of an unconfigured rate).
+  const headline = d.rate_source === 'unset' || d.totals.cost_per_window_usd_disclosed == null
     ? `\`${d.pattern}\` over ${d.window}: ${d.totals.events} events across ${d.totals.service_count} ${svcWord} (${(d.totals.bytes / 1_000_000).toFixed(1)} MB)`
-    : `\`${d.pattern}\` over ${d.window}: ${d.totals.events} events across ${d.totals.service_count} ${svcWord} (${(d.totals.bytes / 1_000_000).toFixed(1)} MB) · ${dollarTail}`;
+    : `\`${d.pattern}\` over ${d.window}: ${d.totals.events} events across ${d.totals.service_count} ${svcWord} (${(d.totals.bytes / 1_000_000).toFixed(1)} MB) · ${fmtDisclosedDollar(d.totals.cost_per_window_usd_disclosed)}`;
   return buildEnvelope({
     tool: 'log10x_event_lookup',
     view: 'summary',
@@ -290,12 +311,21 @@ async function formatResults(
   }
 
   // Build service rows. Cost fields collapse to null when rate_source='unset'
-  // so downstream renderers can gate the $-clause via fmtDollarWithSource
-  // instead of silently quoting bytes×0 or bytes×$1/GB.
+  // so downstream renderers can gate the $-clause via fmtDisclosedDollar
+  // instead of silently quoting bytes×0 or bytes×$1/GB. The disclosed mirror
+  // rides alongside each numeric so the formatter cannot drop the disclosure tail.
   interface SvcRow {
     service: string; severity: string; bytes: number;
-    costNow: number | null; costBaseline: number | null; events: number; isNew: boolean;
+    costNow: number | null; costBaseline: number | null;
+    costNowDisclosed: DisclosedDollarValue | null;
+    costBaselineDisclosed: DisclosedDollarValue | null;
+    events: number; isNew: boolean;
   }
+  // Event-lookup does not detect the SIEM today (the rate side has the
+  // override / list price split, but no destination label). Pass null so
+  // the disclosure tail falls back to the generic "at SIEM list price …"
+  // form per buildDisclosedDollarValue.
+  const siemLabel: string | null = null;
   const rows: SvcRow[] = [];
   let totalCostNow: number | null = rateSource === 'unset' ? null : 0;
   let totalCostBase: number | null = rateSource === 'unset' ? null : 0;
@@ -315,13 +345,37 @@ async function formatResults(
             costPerGb
           );
     const events = eventsBySvc.get(svc) || 0;
+    const costNowDisclosed: DisclosedDollarValue | null = costNow == null
+      ? null
+      : buildDisclosedDollarValue(costNow, rateSource, siemLabel, costPerGb);
+    const costBaselineDisclosed: DisclosedDollarValue | null = costBase == null
+      ? null
+      : buildDisclosedDollarValue(costBase, rateSource, siemLabel, costPerGb);
 
-    rows.push({ service: svc, severity: serviceSev.get(svc)?.sev || '', bytes, costNow, costBaseline: costBase, events, isNew });
+    rows.push({
+      service: svc,
+      severity: serviceSev.get(svc)?.sev || '',
+      bytes,
+      costNow,
+      costBaseline: costBase,
+      costNowDisclosed,
+      costBaselineDisclosed,
+      events,
+      isNew,
+    });
     if (totalCostNow != null && costNow != null) totalCostNow += costNow;
     if (totalCostBase != null && costBase != null) totalCostBase += costBase;
     totalEvents += events;
     totalBytes += bytes;
   }
+  // Totals disclosed mirrors — built once after the per-row pass so the
+  // envelope carries both raw numbers (legacy field) and the disclosed form.
+  const totalCostNowDisclosed: DisclosedDollarValue | null = totalCostNow == null
+    ? null
+    : buildDisclosedDollarValue(totalCostNow, rateSource, siemLabel, costPerGb);
+  const totalCostBaseDisclosed: DisclosedDollarValue | null = totalCostBase == null
+    ? null
+    : buildDisclosedDollarValue(totalCostBase, rateSource, siemLabel, costPerGb);
 
   // Sort by bytes (volume is the universal axis); cost-sort would silently
   // randomize ordering when rate_source='unset' and every row's cost is null.
@@ -401,6 +455,8 @@ async function formatResults(
         share_pct: totalBytes > 0 ? (r.bytes / totalBytes) * 100 : 0,
         cost_per_window_usd: r.costNow,
         cost_baseline_usd: r.costBaseline,
+        cost_per_window_usd_disclosed: r.costNowDisclosed,
+        cost_baseline_usd_disclosed: r.costBaselineDisclosed,
         events: r.events,
         is_new: r.isNew,
       })),
@@ -408,6 +464,8 @@ async function formatResults(
         bytes: totalBytes,
         cost_per_window_usd: totalCostNow,
         cost_baseline_usd: totalCostBase,
+        cost_per_window_usd_disclosed: totalCostNowDisclosed,
+        cost_baseline_usd_disclosed: totalCostBaseDisclosed,
         events: totalEvents,
         service_count: rows.length,
       },
@@ -425,8 +483,8 @@ async function formatResults(
   // Bytes first; share is implicit in the totals row (this IS the total).
   // The cost clause appears only when a rate is resolved; otherwise we
   // would be quoting bytes × $1/GB and calling it a baseline.
-  const totalCostBaseStr = fmtDollarWithSource(totalCostBase, rateSource);
-  const totalCostNowStr = fmtDollarWithSource(totalCostNow, rateSource);
+  const totalCostBaseStr = fmtDisclosedDollar(totalCostBaseDisclosed);
+  const totalCostNowStr = fmtDisclosedDollar(totalCostNowDisclosed);
   const costClause = rateSource === 'unset'
     ? ''
     : ` · cost was ${totalCostBaseStr} -> now ${totalCostNowStr}${period}`;
@@ -452,7 +510,7 @@ async function formatResults(
       `${fmtBytes(r.bytes)} (${fmtPct(sharePct)} of pattern)`,
     ];
     if (rateSource !== 'unset') {
-      m.push(`was ${fmtDollarWithSource(r.costBaseline, rateSource)} -> now ${fmtDollarWithSource(r.costNow, rateSource)}${period}`);
+      m.push(`was ${fmtDisclosedDollar(r.costBaselineDisclosed)} -> now ${fmtDisclosedDollar(r.costNowDisclosed)}${period}`);
     }
     if (r.events > 0) m.push(`${fmtCount(r.events)} events`);
     lines.push(`  ${m.join(' · ')}`);

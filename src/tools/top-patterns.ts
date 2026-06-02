@@ -14,9 +14,9 @@ import type { EnvConfig } from '../lib/environments.js';
 import { queryInstant, queryRange } from '../lib/api.js';
 import * as pql from '../lib/promql.js';
 import { LABELS, includeToSelector, type FilterValue } from '../lib/promql.js';
-import { bytesToCost, parsePrometheusValue } from '../lib/cost.js';
+import { bytesToCost, parsePrometheusValue, buildDisclosedDollarValue, type DisclosedDollarValue } from '../lib/cost.js';
 import { resolveMetricsEnv, resolveMetricsEnvFiltered } from '../lib/resolve-env.js';
-import { parseTimeframe } from '../lib/format.js';
+import { parseTimeframe, fmtDisclosedDollar } from '../lib/format.js';
 import { type NextAction } from '../lib/next-actions.js';
 import { fetchEventsByHashes } from '../lib/siem/sample.js';
 import { tenxHash } from '../lib/pattern-hash.js';
@@ -297,9 +297,17 @@ export async function executeTopPatterns(
   // is cheap (no network); doing it here in parallel with the heavy
   // Phase-2 fetches saves a round-trip.
   let analyzer: string | null = null;
+  // siemLabel — display-name form for the disclosure tail rendered by
+  // fmtDisclosedDollar (e.g. "Splunk", "Datadog"). Falls through to null
+  // when no analyzer is detected; buildDisclosedDollarValue then renders
+  // a generic "SIEM" prefix.
+  let siemLabel: string | null = null;
   try {
     const sel = await resolveSiemSelection({});
-    if (sel.kind === 'resolved') analyzer = sel.id;
+    if (sel.kind === 'resolved') {
+      analyzer = sel.id;
+      siemLabel = sel.displayName;
+    }
   } catch {
     /* leave null */
   }
@@ -439,6 +447,15 @@ export async function executeTopPatterns(
         : bytesToCost(totalBytes, costPerGb);
   const totalCostMonthly: number | null =
     totalCostPerHour == null ? null : totalCostPerHour * 720;
+  // Disclosed-value mirror of the totals dollar. Null when the rate is
+  // unset (matches the existing "rate unset" headline gate below). When
+  // populated, fmtDisclosedDollar carries the SIEM list-price caveat /
+  // customer-supplied tag verbatim, so headline + envelope drop the
+  // inline `at ${rateTag}` suffix.
+  const totalCostMonthlyDisclosed: DisclosedDollarValue | null =
+    totalCostMonthly != null
+      ? buildDisclosedDollarValue(totalCostMonthly, rate_source, siemLabel, costPerGb)
+      : null;
 
   let patternCountTotal: number | undefined;
   if (countRes && countRes.status === 'success' && countRes.data.result.length > 0) {
@@ -615,6 +632,25 @@ export async function executeTopPatterns(
       droppedBytesMonthly == null || costPerGb == null
         ? null
         : bytesToCost(droppedBytesMonthly, costPerGb);
+    // Disclosed-value mirrors for every per-row $ field. Null when the
+    // rate is unset (honest pass-through of the existing null). JSON
+    // consumers reading data.patterns[] see the disclosure tail too;
+    // they MUST NOT re-format the bare cost_per_*_usd number without
+    // pairing it with the disclosed mirror.
+    const costPerHourRaw = honestCostPerHour[idx];
+    const costPerMonthRaw = honestCostPerMonth[idx];
+    const costPerHourDisclosed: DisclosedDollarValue | null =
+      costPerHourRaw != null
+        ? buildDisclosedDollarValue(costPerHourRaw, rate_source, siemLabel, costPerGb)
+        : null;
+    const costPerMonthDisclosed: DisclosedDollarValue | null =
+      costPerMonthRaw != null
+        ? buildDisclosedDollarValue(costPerMonthRaw, rate_source, siemLabel, costPerGb)
+        : null;
+    const droppedCostPerMonthDisclosed: DisclosedDollarValue | null =
+      droppedCostPerMonth != null
+        ? buildDisclosedDollarValue(droppedCostPerMonth, rate_source, siemLabel, costPerGb)
+        : null;
     return {
       rank: r.rank,
       identity: r.pattern ?? r.hash ?? '',
@@ -624,8 +660,10 @@ export async function executeTopPatterns(
       pattern_hash: r.hash ?? '',
       service: r.service,
       severity: r.severity,
-      cost_per_hour_usd: honestCostPerHour[idx],
-      cost_per_month_usd: honestCostPerMonth[idx],
+      cost_per_hour_usd: costPerHourRaw,
+      cost_per_month_usd: costPerMonthRaw,
+      cost_per_hour_usd_disclosed: costPerHourDisclosed,
+      cost_per_month_usd_disclosed: costPerMonthDisclosed,
       bytes: r.bytes,
       percent_of_total_bytes:
         totalBytes > 0 ? (r.bytes / totalBytes) * 100 : 0,
@@ -642,6 +680,7 @@ export async function executeTopPatterns(
       dropped_bytes_monthly: droppedBytesMonthly,
       dropped_events_monthly: droppedEventsMonthly,
       dropped_cost_per_month_usd: droppedCostPerMonth,
+      dropped_cost_per_month_usd_disclosed: droppedCostPerMonthDisclosed,
     };
   });
 
@@ -684,8 +723,17 @@ export async function executeTopPatterns(
         : null;
   }
 
+  // Disclosed mirror for the totals dropped-cohort $. Null when the
+  // rate is unset; otherwise carries the same SIEM/list-price caveat
+  // as the headline tail.
+  const droppedMonthlyUsdDisclosed: DisclosedDollarValue | null =
+    droppedMonthlyUsd != null
+      ? buildDisclosedDollarValue(droppedMonthlyUsd, rate_source, siemLabel, costPerGb)
+      : null;
+
   const totals = {
     monthly_usd: totalCostMonthly,
+    monthly_usd_disclosed: totalCostMonthlyDisclosed,
     bytes_per_sec: totalBytes / Math.max(1, windowHours * 3600),
     bytes_total: totalBytes,
     top_n_percent_of_total,
@@ -695,6 +743,7 @@ export async function executeTopPatterns(
     dropped_bytes_total: droppedBytesTotalShown,
     dropped_share_pct: droppedShareTotalPct,
     dropped_monthly_usd: droppedMonthlyUsd,
+    dropped_monthly_usd_disclosed: droppedMonthlyUsdDisclosed,
   };
 
   // Headline: percent-of-bytes + byte volume first. Dollar clause appended
@@ -714,13 +763,16 @@ export async function executeTopPatterns(
       incidents.length > 0
         ? ` ${incidents.length} incident cluster${incidents.length === 1 ? '' : 's'} detected.`
         : '';
-    const rateTag =
-      rate_source === 'customer_supplied' ? 'customer_supplied' : 'list_price';
     const rateUnsetTail =
       ' Dollar overlay omitted (rate unset); pass effective_ingest_per_gb to project savings.';
+    // Dollar tail rendered once. fmtDisclosedDollar carries the
+    // SIEM/list-price caveat (or customer_supplied tag) inline, so the
+    // pre-migration `at ${rateTag}` suffix is dropped — the disclosure
+    // covers source attribution.
+    const dollarTail = `${fmtDisclosedDollar(totalCostMonthlyDisclosed)}/mo`;
     if (include === 'dropped') {
-      if (totalCostMonthly != null) {
-        headline = `Top ${renderRows.length} OFFLOADED patterns over ${tf.label}: ${bytesLabel} flagged for drop/down-tier (${sharePctLabel} of scanned bytes in scope), ~$${totalCostMonthly.toFixed(0)}/mo at ${rateTag}.${incidentTail}`;
+      if (totalCostMonthlyDisclosed != null) {
+        headline = `Top ${renderRows.length} OFFLOADED patterns over ${tf.label}: ${bytesLabel} flagged for drop/down-tier (${sharePctLabel} of scanned bytes in scope), ~${dollarTail}.${incidentTail}`;
       } else {
         headline = `Top ${renderRows.length} OFFLOADED patterns over ${tf.label}: ${bytesLabel} flagged for drop/down-tier (${sharePctLabel} of scanned bytes in scope).${rateUnsetTail}${incidentTail}`;
       }
@@ -729,15 +781,16 @@ export async function executeTopPatterns(
         droppedShareTotalPct != null
           ? `${Math.round(droppedShareTotalPct)}%`
           : '0%';
-      if (totalCostMonthly != null) {
-        headline = `Top ${renderRows.length} patterns over ${tf.label}: ${bytesLabel} union (${offloadShareLabel} currently offloaded), ~$${totalCostMonthly.toFixed(0)}/mo total at ${rateTag}.${incidentTail}`;
+      if (totalCostMonthlyDisclosed != null) {
+        headline = `Top ${renderRows.length} patterns over ${tf.label}: ${bytesLabel} union (${offloadShareLabel} currently offloaded), ~${dollarTail} total.${incidentTail}`;
       } else {
         headline = `Top ${renderRows.length} patterns over ${tf.label}: ${bytesLabel} union (${offloadShareLabel} currently offloaded).${rateUnsetTail}${incidentTail}`;
       }
     } else {
-      // kept (default) — preserves pre-PL-12 headline byte-for-byte.
-      if (totalCostMonthly != null) {
-        headline = `Top ${renderRows.length} patterns over ${tf.label} cover ${sharePctLabel} of scanned bytes (${bytesLabel}), ~$${totalCostMonthly.toFixed(0)}/mo at ${rateTag}.${incidentTail}`;
+      // kept (default) — preserves pre-PL-12 headline byte-for-byte
+      // aside from the disclosure-tail swap.
+      if (totalCostMonthlyDisclosed != null) {
+        headline = `Top ${renderRows.length} patterns over ${tf.label} cover ${sharePctLabel} of scanned bytes (${bytesLabel}), ~${dollarTail}.${incidentTail}`;
       } else {
         headline = `Top ${renderRows.length} patterns over ${tf.label} cover ${sharePctLabel} of scanned bytes (${bytesLabel}).${rateUnsetTail}${incidentTail}`;
       }

@@ -8,9 +8,9 @@ import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
 import { queryRange } from '../lib/api.js';
 import * as pql from '../lib/promql.js';
-import { bytesToCost } from '../lib/cost.js';
+import { bytesToCost, buildDisclosedDollarValue, type DisclosedDollarValue } from '../lib/cost.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
-import { fmtDollar, fmtPattern, fmtBytes, parseTimeframe, costPeriodLabel, normalizePattern } from '../lib/format.js';
+import { fmtDollar, fmtPattern, fmtBytes, fmtDisclosedDollar, parseTimeframe, costPeriodLabel, normalizePattern } from '../lib/format.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { agentOnly } from '../lib/agent-only.js';
 import { lineChart } from '../lib/line-chart.js';
@@ -60,6 +60,16 @@ interface PatternTrendSummary {
   total_cost_usd: number | null;
   baseline_run_rate_usd: number | null;
   recent_run_rate_usd: number | null;
+  // Dollar-discipline migration: disclosed-value mirrors of every dollar
+  // field above. Renderers MUST consume these via `fmtDisclosedDollar`
+  // (the disclosure tail carries `rate_source` semantics — no inline
+  // "(at customer_supplied)" suffix). null iff the matching `*_usd`
+  // numeric is null (i.e. rate_source === 'unset'). trend has no
+  // destination context, so siemLabel passes through as null —
+  // customer_supplied cells render with disclosure=null per design.
+  total_cost_usd_disclosed: DisclosedDollarValue | null;
+  baseline_run_rate_usd_disclosed: DisclosedDollarValue | null;
+  recent_run_rate_usd_disclosed: DisclosedDollarValue | null;
   change_pct: number;
   spike_detected: boolean;
   spike_at_ts?: number;
@@ -105,9 +115,12 @@ export async function executeTrend(
   // `dropped` re-titles to "offloaded" so the reader sees that the bytes
   // describe the cohort the engine flagged. `both` adds the offload-share %.
   const changeSign = d.change_pct >= 0 ? '+' : '';
+  // Dollar-discipline: read the disclosed mirror; drop the inline
+  // `(at ${rate_source})` suffix (disclosure tail carries it for
+  // list_price; customer_supplied has disclosure=null by design).
   const dollarClause =
-    d.rate_source !== 'unset' && d.total_cost_usd !== null
-      ? `, ${fmtDollar(d.total_cost_usd)} measured spend (at ${d.rate_source})`
+    d.rate_source !== 'unset' && d.total_cost_usd_disclosed !== null
+      ? `, ${fmtDisclosedDollar(d.total_cost_usd_disclosed)} measured spend`
       : ', (rate unset)';
   const spikeClause = d.spike_detected ? ', spike detected' : '';
   let headline: string;
@@ -329,6 +342,21 @@ async function executeTrendInner(
     droppedTimeSeriesOut = droppedPoints ?? [];
   }
 
+  // Dollar-discipline migration: build the disclosed-value mirrors here so
+  // renderers consume `*_disclosed` via `fmtDisclosedDollar` instead of bare
+  // numbers + ad-hoc "(at X)" suffixes. trend has NO destination context
+  // (see the rateSource comment above), so siemLabel is null and the
+  // listRatePerGb argument is null too — the only non-unset path here is
+  // `customer_supplied`, whose disclosure is null by design. The
+  // `rate_source === 'unset'` branch collapses every mirror to null.
+  const toAxisSource = rateSource;
+  const totalCostDisclosed: DisclosedDollarValue | null =
+    totalCost !== null ? buildDisclosedDollarValue(totalCost, toAxisSource, null, null) : null;
+  const baselineCostDisclosed: DisclosedDollarValue | null =
+    baselineCost !== null ? buildDisclosedDollarValue(baselineCost, toAxisSource, null, null) : null;
+  const recentCostDisclosed: DisclosedDollarValue | null =
+    recentCost !== null ? buildDisclosedDollarValue(recentCost, toAxisSource, null, null) : null;
+
   if (sumOut) {
     const stepSecs = stepSeconds;
     sumOut.data = {
@@ -340,6 +368,9 @@ async function executeTrendInner(
       total_cost_usd: totalCost,
       baseline_run_rate_usd: baselineCost,
       recent_run_rate_usd: recentCost,
+      total_cost_usd_disclosed: totalCostDisclosed,
+      baseline_run_rate_usd_disclosed: baselineCostDisclosed,
+      recent_run_rate_usd_disclosed: recentCostDisclosed,
       change_pct: pct,
       spike_detected: !!spikePoint,
       spike_at_ts: spikePoint?.ts,
@@ -377,12 +408,14 @@ async function executeTrendInner(
   if (include === 'both' && droppedSharePct !== null && droppedBytesTotalOut !== null) {
     lines.push(`  Currently offloaded: ${fmtBytes(droppedBytesTotalOut)} (${Math.round(droppedSharePct)}% of union)`);
   }
-  if (rateSource !== 'unset' && totalCost !== null) {
-    lines.push(`  Measured spend over ${tf.label}: ${fmtDollar(totalCost)} (at ${rateSource})`);
+  if (rateSource !== 'unset' && totalCostDisclosed !== null) {
+    // Dollar-discipline: use the disclosed mirror; drop the inline
+    // `(at ${rateSource})` suffix — disclosure tail covers it.
+    lines.push(`  Measured spend over ${tf.label}: ${fmtDisclosedDollar(totalCostDisclosed)}`);
   }
   lines.push(`  Direction check (extrapolated run-rate, NOT the bill, used only to gauge direction):`);
-  if (rateSource !== 'unset' && baselineCost !== null && recentCost !== null) {
-    lines.push(`    first quarter ~${fmtDollar(baselineCost)}${period}  ->  last quarter ${fmtDollar(recentCost)}${period}`);
+  if (rateSource !== 'unset' && baselineCostDisclosed !== null && recentCostDisclosed !== null) {
+    lines.push(`    first quarter ~${fmtDisclosedDollar(baselineCostDisclosed)}${period}  ->  last quarter ${fmtDisclosedDollar(recentCostDisclosed)}${period}`);
     lines.push(`  _The two numbers differ on purpose: the first is the actual spend over the window; the run-rates annualize each quarter's average rate to judge rising/falling, so they will not equal the measured spend._`);
   } else {
     lines.push(`    first quarter ~${fmtBytes(baselineBytes)}${period}  ->  last quarter ${fmtBytes(recentBytes)}${period}`);
