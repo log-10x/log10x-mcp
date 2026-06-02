@@ -84,9 +84,18 @@ import { discoverEnvSchema, executeDiscoverEnv } from './tools/discover-env.js';
 import { adviseRetrieverSchema, executeAdviseRetriever } from './tools/advise-retriever.js';
 import { adviseInstallSchema, executeAdviseInstall } from './tools/advise-install.js';
 import { configureEngineSchema, executeConfigureEngine } from './tools/configure-engine.js';
-import { estimateSavingsSchema, executeEstimateSavings } from './tools/estimate-savings.js';
+import {
+  estimateSavingsSchema,
+  executeEstimateSavings,
+  runEstimateVerify,
+} from './tools/estimate-savings.js';
 import { baselineSchema, executeBaseline } from './tools/baseline.js';
-import { commitmentReportSchema, executeCommitmentReport } from './tools/commitment-report.js';
+import {
+  commitmentReportSchema,
+  executeCommitmentReport,
+  _setVerifyRunner,
+  adaptVerifyResultToWeekly,
+} from './tools/commitment-report.js';
 import { patternMitigateSchema, executePatternMitigate } from './tools/pattern-mitigate.js';
 import { loginStatusSchema, executeLoginStatus } from './tools/login-status.js';
 import {
@@ -1356,6 +1365,59 @@ registerLog10xTool('log10x_baseline', baselineSchema, (args) =>
     return executeBaseline(args, env);
   })
 );
+
+// ── Wire runEstimateVerify into commitment_report at module load ──
+//
+// commitment_report defers to a runner installed via `_setVerifyRunner`
+// so the weekly aggregator can be unit-tested with a stub. Without this
+// wiring, every commitment_report call hard-returns a not_ready envelope
+// (see commitment-report.ts:1016). The runner closure:
+//   1. Looks up the EnvConfig from the commitment's env nickname
+//      (envs are loaded once in initEnvs() before server.connect, so
+//      getEnvs() is safe inside this async body).
+//   2. Translates the (week_start, week_end) cursor into a post_window
+//      length runEstimateVerify accepts ("Nd"). The commitment's
+//      baseline_window is the pre-policy reference.
+//   3. Adapts VerifyResult → WeeklyVerifyResult.
+//
+// Known Item-5 gap (cost-cutting-prioritized-close-list-v2 §1.5):
+// runEstimateVerify queries `[range]` ending at "now", so every weekly
+// loop hits the same live snapshot. The arithmetic-reconciliation patch
+// (Item 5) is where week-specific windows + the per_pattern_breakdown
+// cap-CSV join land. Item 1 only unblocks the not_ready hard-return.
+
+_setVerifyRunner(async ({ commitment, week_start, week_end }) => {
+  const env = resolveEnv(getEnvs(), commitment.env);
+  const MS_PER_DAY = 24 * 60 * 60 * 1000;
+  const weekDays = Math.max(
+    1,
+    Math.round(
+      (Date.parse(week_end) - Date.parse(week_start)) / MS_PER_DAY
+    )
+  );
+  // Item 5: best-effort cap-CSV fetch for action-split. We pull the
+  // CSV via `gh api` against the env's gitops repo + lookup_path; on
+  // any failure (no gh, no repo, file not found) we pass undefined
+  // and the verify run skips the join — the report still works, the
+  // legacy single-bucket fallback in commitment-report kicks in.
+  const capCsv = await fetchCapCsvForEnv(env);
+  const vr = await runEstimateVerify(
+    {
+      destination: commitment.destination,
+      baseline_window: commitment.baseline_window || '7d',
+      post_window: `${weekDays}d`,
+      commitment_id: commitment.id,
+      contract_type: commitment.contract_type,
+      cap_csv_content: capCsv,
+    },
+    env
+  );
+  return adaptVerifyResultToWeekly(vr, week_start);
+});
+
+// Item 5 helper extracted to `src/lib/cap-csv-fetch.ts` so item 6
+// (services action axis + overflow_contents tool) can re-use the same
+// best-effort fetch path without duplicating the `gh api` call.
 
 // ── Tool: log10x_commitment_report (CFO-facing Bayesian weekly aggregate) ──
 

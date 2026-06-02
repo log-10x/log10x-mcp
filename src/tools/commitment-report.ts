@@ -267,6 +267,152 @@ export function _clearVerifyRunner(): void {
   runEstimateVerifyImpl = undefined;
 }
 
+/** Test hook — read the current runner (undefined when unwired). */
+export function _getVerifyRunner(): VerifyRunner | undefined {
+  return runEstimateVerifyImpl;
+}
+
+/**
+ * Minimal shape consumed from `runEstimateVerify` — typed locally so the
+ * adapter doesn't pull in the full `VerifyResult` import (keeps the
+ * runtime wire-up in index.ts as the only place that touches both
+ * modules together; avoids any future circular-import risk between
+ * `tools/commitment-report` and `tools/estimate-savings`).
+ *
+ * Fields kept narrow on purpose: the renamer (Item 5) will join the
+ * cap-CSV `:<action>` suffix to fill `per_pattern_breakdown`. Until
+ * then, this adapter leaves the per-pattern field unset and the
+ * aggregator's §E.1 fallback bucketizes everything into `drop` (with
+ * the caveat already wired at commitment-report.ts:1182).
+ */
+export interface VerifyResultLike {
+  destination: SiemId;
+  /** Fraction in [-∞, 1] from estimate-savings: 1 - postPassed/scaledBaseline. */
+  delivered_pct: number;
+  post_passed_bytes: number;
+  post_dropped_bytes: number;
+  delivered_dollars_now: number;
+  attribution_pct: {
+    cap_fired_bytes: number;
+    drift_bytes: number;
+    new_patterns_bytes: number;
+    leakage_bytes: number;
+  };
+  /** Source of the $/GB rate used inside runEstimateVerify. Item 5 will
+   * propagate this from estimate-savings; today the function chooses the
+   * list price unless the caller passes effective_ingest_per_gb, so the
+   * adapter encodes that choice with the right rate_source label. */
+  rate_source?: 'list_price' | 'customer_supplied' | 'unset';
+  /**
+   * Per-pattern action attribution from runEstimateVerify (Item 5). When
+   * present, the adapter populates WeeklyVerifyResult.per_pattern_breakdown
+   * so the commitment-report aggregator buckets bytes by engine action.
+   * Absent when the caller did not supply `cap_csv_content` to verify.
+   */
+  per_pattern_breakdown?: Array<{
+    pattern_hash: string;
+    action: Action;
+    delivered_bytes: number;
+    expected_bytes: number | null;
+    action_source: 'pat_row' | 'container' | 'unattributed';
+  }>;
+}
+
+/**
+ * Adapter: `VerifyResult` (estimate-savings.ts) → `WeeklyVerifyResult`
+ * (this file). Item-1 narrow scope:
+ *  - delivered_pct: VerifyResult.delivered_pct is a fraction (1 - x);
+ *    WeeklyVerifyResult is a percentage in [0, 100], clamped.
+ *  - bytes_in / bytes_dropped: from VerifyResult post-window totals.
+ *    Treating `post_passed + post_dropped` as the week's bytes_in is
+ *    correct when the post window IS the week being reported.
+ *  - attribution: VerifyResult.attribution_pct fields are already
+ *    fractions in [0,1] (estimate-savings.ts:775 pctOf), matching
+ *    WeeklyVerifyResult.attribution's normalized-fraction contract.
+ *  - per_pattern_breakdown: NOT populated. The cap-CSV `:<action>`
+ *    join lands in Item 5; until then the §E.1 fallback path in
+ *    `aggregateWeekly` (line 678) attributes all bytes_dropped to the
+ *    `drop` bucket and `executeCommitmentReport` pushes the caveat at
+ *    line 1182. The four-way action split is therefore arithmetically
+ *    a 1-bucket split today — that's the known Item-5 gap.
+ *
+ * `week_start` is propagated through verbatim so the weekly_series
+ * row labels match the report's enumerated week-boundary cursor.
+ */
+export function adaptVerifyResultToWeekly(
+  vr: VerifyResultLike,
+  week_start: string
+): WeeklyVerifyResult {
+  const bytesIn = Math.max(0, vr.post_passed_bytes + vr.post_dropped_bytes);
+  const bytesDropped = Math.max(0, vr.post_dropped_bytes);
+  // VerifyResult.delivered_pct can go negative (drift swamped the cap).
+  // WeeklyVerifyResult clamps to [0, 100] per its docstring.
+  const deliveredPct = Math.max(0, Math.min(100, vr.delivered_pct * 100));
+  const dollars = Number.isFinite(vr.delivered_dollars_now)
+    ? vr.delivered_dollars_now
+    : 0;
+  const rateSource = vr.rate_source ?? 'list_price';
+  // Item 5: when runEstimateVerify supplied per_pattern_breakdown
+  // (cap-CSV join), translate it into the WeeklyVerifyResult shape so
+  // the aggregator can attribute bytes to action buckets WITHOUT
+  // double-counting unmarked rows. `delivered_bytes` becomes
+  // `bytes_saved`; `expected_bytes` is dropped (the commitment-report
+  // aggregator does not need it once rate_source is per-row stable).
+  // Per-row dollars_saved is derived from bytes_saved × the same rate
+  // verify used, since runEstimateVerify already chose that rate.
+  let per_pattern_breakdown: WeeklyVerifyResult['per_pattern_breakdown'];
+  if (vr.per_pattern_breakdown && vr.per_pattern_breakdown.length > 0) {
+    // Per-row dollars: the verify already computed total
+    // `delivered_dollars_now` against `post_passed_bytes` (delivery-side
+    // billing). Per-pattern $ saved scales by the row's bytes against
+    // the post_dropped_bytes total; when rate_source is 'unset' we
+    // surface null. This keeps the commitment-report aggregator's
+    // dollars-by-action math reconcilable to the envelope's
+    // `delivered_dollars` (already weighted by bytes).
+    const totalDroppedFromRows = vr.per_pattern_breakdown.reduce(
+      (s, r) => s + (Number.isFinite(r.delivered_bytes) ? r.delivered_bytes : 0),
+      0
+    );
+    per_pattern_breakdown = vr.per_pattern_breakdown.map((r) => {
+      const safeBytes = Number.isFinite(r.delivered_bytes)
+        ? Math.max(0, r.delivered_bytes)
+        : 0;
+      const dollarsSaved =
+        rateSource === 'unset' ||
+        !Number.isFinite(dollars) ||
+        totalDroppedFromRows <= 0
+          ? null
+          : dollars * (safeBytes / totalDroppedFromRows);
+      return {
+        pattern_hash: r.pattern_hash,
+        action_taken: r.action,
+        bytes_saved: safeBytes,
+        dollars_saved: dollarsSaved,
+        rate_source: rateSource,
+      };
+    });
+  }
+
+  return {
+    week_start,
+    bytes_in: bytesIn,
+    bytes_dropped: bytesDropped,
+    delivered_pct: deliveredPct,
+    delivered_dollars: dollars,
+    attribution: {
+      cap_fired: Math.max(0, Math.min(1, vr.attribution_pct.cap_fired_bytes)),
+      drift: Math.max(0, Math.min(1, vr.attribution_pct.drift_bytes)),
+      new_patterns: Math.max(
+        0,
+        Math.min(1, vr.attribution_pct.new_patterns_bytes)
+      ),
+      leakage: Math.max(0, Math.min(1, vr.attribution_pct.leakage_bytes)),
+    },
+    rate_source: rateSource,
+    per_pattern_breakdown,
+  };
+}
+
 // ─── envelope types ──────────────────────────────────────────────────
 
 export interface CommitmentReportEnvelope {
