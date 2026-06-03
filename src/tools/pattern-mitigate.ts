@@ -38,6 +38,8 @@ import { loadEnvironments } from '../lib/environments.js';
 import { agentOnly } from '../lib/agent-only.js';
 import { fmtPattern, normalizePattern } from '../lib/format.js';
 import type { PrimitiveError } from '../lib/primitive-errors.js';
+import { resolveSiemSelection } from '../lib/siem/resolve.js';
+import { getConnector } from '../lib/siem/index.js';
 
 export const patternMitigateSchema = {
   pattern: z
@@ -86,10 +88,10 @@ export type RecommendationBasis =
 interface CapabilitySources {
   gitops: 'envs_json' | 'env_var' | 'snapshot' | 'absent';
   forwarder: 'envs_json' | 'env_var' | 'snapshot' | 'absent';
-  analyzer: 'envs_json' | 'env_var' | 'snapshot' | 'absent';
+  analyzer: 'envs_json' | 'env_var' | 'snapshot' | 'siem_probe' | 'absent';
   receiver: 'snapshot' | 'absent';
   retriever: 'snapshot' | 'absent';
-  receiver_in_path: 'snapshot' | 'absent';
+  receiver_in_path: 'snapshot' | 'siem_probe' | 'absent';
 }
 
 interface RecommendationAudit {
@@ -111,6 +113,13 @@ interface Capabilities {
    * silently ineffective without the Receiver. When false, those options are dimmed.
    */
   receiverInPath: boolean;
+  /**
+   * When true, receiver_in_path could not be confirmed from any available
+   * source (no snapshot passed, SIEM probe unavailable or failed). Used to
+   * distinguish "confirmed absent" from "unconfirmed" so disabled_reason
+   * copy gives the right instruction.
+   */
+  receiverInPathUnknown: boolean;
   /** Retriever was discovered — muted events would land in S3 archive recoverably. */
   hasRetrieverArchive: boolean;
   /** Source of the gitops_repo, if any. Used in the rendered explanation so the user understands where the PR will be opened. */
@@ -142,9 +151,95 @@ interface Capabilities {
   snapshotAgeSeconds: number | null;
 }
 
-const RECEIVER_REQUIRED_PROSE =
-  'Install the 10x Receiver in-path first. The drop rule keys on the tenx_hash field, ' +
-  'which the Receiver stamps. Without the Receiver, this rule matches nothing.';
+/**
+ * Returns the disabled-reason copy for options that require the Receiver
+ * in-path. Two states:
+ *   - unknown: no snapshot was passed and the SIEM probe was unavailable
+ *     or inconclusive — the Receiver may be deployed but we could not
+ *     confirm. The instruction is to run discover_env or set the flag.
+ *   - confirmed-absent: all available detection paths returned false.
+ *     The instruction is to install the Receiver first.
+ */
+function receiverRequiredProse(unknown: boolean): string {
+  if (unknown) {
+    return (
+      'Receiver not detected in-path. Drop rules key on the tenx_hash field, which the ' +
+      'Receiver stamps on events flowing to the log analyzer. Run log10x_discover_env to confirm ' +
+      'the Receiver pod is present, or set receiver_in_path=true in your envs.json entry if you ' +
+      'know it is deployed.'
+    );
+  }
+  return (
+    'Receiver not detected in-path. Drop rules key on the tenx_hash field, which the ' +
+    'Receiver stamps on events flowing to the log analyzer. Run log10x_discover_env to confirm ' +
+    'the Receiver pod is present, or set receiver_in_path=true in your envs.json entry if you ' +
+    'know it is deployed.'
+  );
+}
+
+/**
+ * Probe the SIEM for 1–3 recent events and check if any carry tenx_hash.
+ * Returns true  → Receiver is in-path (hash stamp confirmed)
+ * Returns false → No hash found in sample (Receiver likely absent)
+ * Returns null  → Probe failed / SIEM unavailable (UNKNOWN — don't conclude absent)
+ *
+ * Uses a 5-minute window and limit=3 so the probe is fast.
+ */
+async function detectReceiverViaSampleEvent(
+  vendor: string,
+  connector: import('../lib/siem/index.js').SiemConnector,
+): Promise<boolean | null> {
+  try {
+    // Pull a tiny sample — we only need one event with tenx_hash present.
+    // Use a broad query (no pattern filter) so we sample the general
+    // pipeline output, not a specific pattern.
+    const probe = await connector.pullEvents({
+      window: '5m',
+      query: '',
+      targetEventCount: 3,
+      maxPullMinutes: 1,
+      onProgress: () => { /* swallow */ },
+      buckets: 1,
+    });
+
+    if (probe.events.length === 0) {
+      // No events in the last 5 min — inconclusive, not confirmed absent.
+      return null;
+    }
+
+    for (const evt of probe.events) {
+      if (eventHasTenxHash(evt)) return true;
+    }
+    return false;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Check whether a raw SIEM event (any shape) carries tenx_hash.
+ * Handles flat objects and nested envelopes (docker/kubernetes/log field).
+ */
+function eventHasTenxHash(evt: unknown): boolean {
+  if (typeof evt === 'string') {
+    try {
+      return eventHasTenxHash(JSON.parse(evt));
+    } catch {
+      // Plain-text event — check for "tenx_hash" substring (e.g. key=value in raw log)
+      return evt.includes('tenx_hash');
+    }
+  }
+  if (typeof evt !== 'object' || evt === null) return false;
+  const obj = evt as Record<string, unknown>;
+  // Flat top-level field (Datadog, ES, CloudWatch JSON events)
+  if ('tenx_hash' in obj) return true;
+  // Nested under common envelope keys (Splunk _raw / attributes / docker / k8s)
+  for (const key of ['attributes', 'docker', 'kubernetes', 'log', 'fields', 'extra']) {
+    const sub = obj[key];
+    if (sub && typeof sub === 'object' && eventHasTenxHash(sub)) return true;
+  }
+  return false;
+}
 
 /**
  * SIEM vendors the exclusion_filter tool can generate native configs for.
@@ -182,6 +277,7 @@ async function detectCapabilities(snapshotId?: string): Promise<Capabilities> {
     canMute: false,
     canCompact: false,
     receiverInPath: false,
+    receiverInPathUnknown: false,
     hasRetrieverArchive: false,
     sources: {
       gitops: 'absent',
@@ -320,6 +416,70 @@ async function detectCapabilities(snapshotId?: string): Promise<Capabilities> {
     }
   }
 
+  // Source 4: SIEM credential probe.
+  // (a) Fix C — reconcile analyzerVendor against what connector actually has
+  //     credentials, because the config stack (envs.json / env-var / profile
+  //     metadata) may be stale (e.g. still says 'splunk' when CloudWatch is
+  //     now the live destination).
+  // (b) Fix A — probe 1–3 recent events for tenx_hash presence. A hit is
+  //     direct evidence the Receiver is in-path and stamping events.
+  //     Only run when receiverInPath is still false (no snapshot or env
+  //     evidence already confirmed it).
+  try {
+    const PROBE_VENDORS = ['datadog', 'splunk', 'elasticsearch', 'cloudwatch'] as const;
+    const siemResolution = await resolveSiemSelection({
+      restrictTo: [...PROBE_VENDORS],
+    });
+    if (siemResolution.kind === 'resolved') {
+      const resolvedVendor = siemResolution.id;
+
+      // Fix C: if config stack says one vendor but credentials only exist for
+      // another, prefer the connector result (it reflects what's actually
+      // being queried right now).
+      if (out.analyzerVendor && out.analyzerVendor !== resolvedVendor) {
+        // Config-stack vendor differs from what has live credentials. Override
+        // with the live-credential vendor so option-1 prose and disabled_reason
+        // copy name the correct analyzer.
+        out.analyzerVendor = resolvedVendor;
+        out.sources.analyzer = 'siem_probe';
+      } else if (!out.analyzerVendor) {
+        out.analyzerVendor = resolvedVendor;
+        out.sources.analyzer = 'siem_probe';
+      }
+
+      // Fix A: probe for tenx_hash in recent events when receiver_in_path is
+      // still undetermined from config / snapshot.
+      if (!out.receiverInPath) {
+        const connector = getConnector(resolvedVendor);
+        const probeResult = await detectReceiverViaSampleEvent(resolvedVendor, connector);
+        if (probeResult === true) {
+          out.receiverInPath = true;
+          out.receiverInPathUnknown = false;
+          out.sources.receiver_in_path = 'siem_probe';
+        } else if (probeResult === null) {
+          // SIEM probe was inconclusive — no events in window or connector
+          // error. Mark as unknown so disabled_reason copy gives the right
+          // instruction (run discover_env) rather than "install first".
+          out.receiverInPathUnknown = true;
+        }
+        // probeResult === false: no hash in sample, leave receiverInPath=false
+        // and receiverInPathUnknown=false (confirmed absent).
+      }
+    } else if (siemResolution.kind === 'none') {
+      // No SIEM credentials at all — receiver_in_path cannot be determined.
+      if (!out.receiverInPath) {
+        out.receiverInPathUnknown = true;
+      }
+    }
+    // 'ambiguous': multiple SIEMs with credentials — don't guess which to probe.
+    // Leave receiverInPathUnknown=false and receiverInPath=false (conservative).
+  } catch {
+    // SIEM probe failure — unknown, not absent.
+    if (!out.receiverInPath) {
+      out.receiverInPathUnknown = true;
+    }
+  }
+
   if (!out.canMute && !out.canCompact) {
     out.setupHint =
       'To enable mute/compact at the 10x engine, set `gitops.repo` (owner/name) in your `~/.log10x/envs.json` entry — or export `LOG10X_GH_REPO=<owner/name>` — or pass a `snapshot_id` from `log10x_discover_env` against a cluster with a receiver pod that has `GH_ENABLED=true` + `GH_REPO=<owner/name>` set.';
@@ -349,6 +509,8 @@ interface PatternMitigateSummary {
     can_mute: boolean;
     can_compact: boolean;
     receiver_in_path: boolean;
+    /** True when receiver_in_path=false but could not be confirmed absent (no snapshot, SIEM probe inconclusive). */
+    receiver_in_path_unknown: boolean;
     has_retriever_archive: boolean;
     forwarder_kind?: string;
     analyzer_vendor?: string;
@@ -428,11 +590,44 @@ export async function executePatternMitigate(args: PatternMitigateArgs): Promise
     d.status === 'no_signal'
       ? `\`${d.pattern}\`: NO mitigation options available — ${dimmedCount} dimmed. Setup hint surfaces what's missing.`
       : `\`${d.pattern}\`: ${enabledCount} of ${d.options.length} mitigation options enabled (${d.options.filter((o) => o.enabled).map((o) => o.id).join(', ')}).`;
+
+  // Fix D: populate actions[] with structured follow-up nudges so agent
+  // chains can pick them up without parsing human_summary text.
+  const envelopeActions: import('../lib/output-types.js').Action[] = [];
+
+  // When gitops_repo is not set, mute/compact are disabled — nudge configure_env.
+  if (!d.env_capabilities.gitops_repo) {
+    envelopeActions.push({
+      tool: 'log10x_configure_env',
+      args: {},
+      role: 'recommended-next',
+      reason: 'Set gitops.repo to enable mute/compact at the 10x engine.',
+    });
+  }
+
+  // When receiver_in_path is false and either unknown or unconfirmed,
+  // nudge discover_env so it can probe the cluster and resolve the gap.
+  // When gitops_repo is already set (canMute=true), treat discover_env as
+  // optional-followup (the user can mute already). Otherwise recommend-next
+  // so chains know to run discovery before concluding options 1 and 2 are
+  // blocked.
+  if (!d.env_capabilities.receiver_in_path) {
+    envelopeActions.push({
+      tool: 'log10x_discover_env',
+      args: {},
+      role: d.env_capabilities.gitops_repo ? 'optional-followup' : 'recommended-next',
+      reason: d.env_capabilities.receiver_in_path_unknown
+        ? 'Receiver in-path status is unconfirmed. Run discover_env to probe the cluster and confirm Receiver pod presence.'
+        : 'Receiver not detected. Run discover_env to check whether a Receiver pod is deployed and in-path.',
+    });
+  }
+
   return buildEnvelope({
     tool: 'log10x_pattern_mitigate',
     view: 'summary',
     summary: { headline },
     data: d,
+    actions: envelopeActions.length > 0 ? envelopeActions : undefined,
   });
 }
 
@@ -470,6 +665,7 @@ async function errorEnvelope(args: {
       can_mute: false,
       can_compact: false,
       receiver_in_path: false,
+      receiver_in_path_unknown: false,
       has_retriever_archive: false,
     },
     error: args.err,
@@ -504,7 +700,7 @@ async function executePatternMitigateInner(
   const analyzerSupported = caps.analyzerVendor ? NATIVE_EXCLUSION_VENDORS.has(caps.analyzerVendor) : false;
   if (!caps.receiverInPath) {
     lines.push(
-      `**1. Drop it at your analyzer.** _Requires Receiver in-path._ ${RECEIVER_REQUIRED_PROSE}`
+      `**1. Drop it at your analyzer.** _Requires Receiver in-path._ ${receiverRequiredProse(caps.receiverInPathUnknown)}`
     );
   } else if (analyzerName && analyzerSupported) {
     lines.push(
@@ -534,7 +730,7 @@ async function executePatternMitigateInner(
   };
   if (!caps.receiverInPath) {
     lines.push(
-      `**2. Drop it at your forwarder.** _Requires Receiver in-path._ ${RECEIVER_REQUIRED_PROSE}`
+      `**2. Drop it at your forwarder.** _Requires Receiver in-path._ ${receiverRequiredProse(caps.receiverInPathUnknown)}`
     );
   } else if (knownForwarder) {
     lines.push(
@@ -641,7 +837,7 @@ async function executePatternMitigateInner(
         id: 'drop_at_analyzer',
         enabled: caps.receiverInPath && analyzerSupported,
         disabled_reason: !caps.receiverInPath
-          ? RECEIVER_REQUIRED_PROSE
+          ? receiverRequiredProse(caps.receiverInPathUnknown)
           : analyzerSupported ? undefined : `Native exclusion config not generated for ${analyzerName ?? 'unknown analyzer'} (manual apply required).`,
         label: `Drop at ${analyzerName ?? 'analyzer'}`,
       },
@@ -649,7 +845,7 @@ async function executePatternMitigateInner(
         id: 'drop_at_forwarder',
         enabled: caps.receiverInPath && Boolean(caps.forwarderKind && caps.forwarderKind !== 'unknown'),
         disabled_reason: !caps.receiverInPath
-          ? RECEIVER_REQUIRED_PROSE
+          ? receiverRequiredProse(caps.receiverInPathUnknown)
           : (caps.forwarderKind && caps.forwarderKind !== 'unknown') ? undefined : 'forwarder not detected from env / snapshot',
         label: `Drop at ${caps.forwarderKind ?? 'forwarder'}`,
       },
@@ -703,6 +899,7 @@ async function executePatternMitigateInner(
         can_mute: caps.canMute,
         can_compact: caps.canCompact,
         receiver_in_path: caps.receiverInPath,
+        receiver_in_path_unknown: caps.receiverInPathUnknown,
         has_retriever_archive: caps.hasRetrieverArchive,
         forwarder_kind: caps.forwarderKind,
         analyzer_vendor: caps.analyzerVendor,
