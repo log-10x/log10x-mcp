@@ -16,7 +16,7 @@ import * as pql from '../lib/promql.js';
 import { LABELS, includeToSelector, type FilterValue } from '../lib/promql.js';
 import { bytesToCost, parsePrometheusValue, buildDisclosedDollarValue, type DisclosedDollarValue } from '../lib/cost.js';
 import { resolveMetricsEnv, resolveMetricsEnvFiltered } from '../lib/resolve-env.js';
-import { parseTimeframe, fmtDisclosedDollar } from '../lib/format.js';
+import { parseTimeframe, fmtDisclosedDollar, fmtBytes as fmtBytesShared } from '../lib/format.js';
 import { type NextAction } from '../lib/next-actions.js';
 import { fetchEventsByHashes } from '../lib/siem/sample.js';
 import { tenxHash } from '../lib/pattern-hash.js';
@@ -41,7 +41,8 @@ export const topPatternsSchema = {
   service: z.string().optional().describe('Service name to scope the result. Omit for all services.'),
   severity: z.string().optional().describe('Severity level to scope the result (e.g., `ERROR`, `CRITICAL`, `DEBUG`).'),
   timeRange: z.string().regex(/^\d+[mhd]$/).default('1h').describe('Time range to aggregate over. Default 1h.'),
-  limit: z.number().min(1).max(50).default(5).describe('Number of patterns to return. Default 5.'),
+  limit: z.number().min(1).max(50).default(10).describe('Number of patterns to return. Default 10.'),
+  offset: z.number().min(0).default(0).describe('Skip the first N patterns of the ranked result (for pagination). Default 0.'),
   analyzerCost: z.number().optional().describe('DEPRECATED — use effective_ingest_per_gb. SIEM ingestion cost in $/GB. Auto-detected from profile if omitted.'),
   effective_ingest_per_gb: z.number().optional().describe('Customer-supplied $/GB rate used for the dollar overlay. When set, headline tags `rate_source=customer_supplied`. When absent, falls back to the profile list rate (`rate_source=list_price`) or omits dollars entirely (`rate_source=unset`).'),
   siemScope: z.string().optional().describe('SIEM scope for the verbatim sample line on the top rows.'),
@@ -78,6 +79,12 @@ export const topPatternsSchema = {
       'Use `dropped` to verify post-deploy realised savings or to answer "which patterns are we offloading right now". ' +
       'Use `both` to compute the offload share denominator in a single call.'
     ),
+  include_chart: z
+    .boolean()
+    .default(false)
+    .describe(
+      'Set include_chart=true to embed the rendered chart inline (large; default false to avoid response truncation).'
+    ),
 };
 
 /** Normalize the env's forwarder enum to the ForwarderId type the
@@ -96,6 +103,7 @@ export async function executeTopPatterns(
     severity?: string;
     timeRange: string;
     limit: number;
+    offset?: number;
     analyzerCost?: number;
     effective_ingest_per_gb?: number;
     siemScope?: string;
@@ -103,13 +111,15 @@ export async function executeTopPatterns(
     view?: 'summary';
     // PL-12a — three-way cohort filter. See schema comment above.
     include?: 'kept' | 'dropped' | 'both';
+    include_chart?: boolean;
   },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
   if (!args.timeRange) (args as Record<string, unknown>).timeRange = '1h';
   if (!Number.isFinite(args.limit) || args.limit <= 0) {
-    (args as Record<string, unknown>).limit = 5;
+    (args as Record<string, unknown>).limit = 10;
   }
+  const offset = Math.max(0, Math.floor(args.offset ?? 0));
   const tf = parseTimeframe(args.timeRange);
   // Cost normalization. r.bytes / totalBytes are volumes over the WHOLE
   // window (tf), so the per-hour rate is window-cost / window-hours. The old
@@ -283,6 +293,12 @@ export async function executeTopPatterns(
   });
   rawRows.sort((a, b) => b.bytes - a.bytes);
 
+  // FIX 7 — apply offset before Phase 2 so all subsequent fetches only run
+  // for the rows the caller will see. The total count (patternCountTotal)
+  // is fetched separately via a Prometheus count query and is unaffected.
+  const rawRowsAll = rawRows.slice(); // full sorted list kept for heuristic fallback
+  if (offset > 0) rawRows.splice(0, offset);
+
   // --- Phase 2: first_seen + 24h trend + SIEM events + baseline bytes +
   //              services breadth + per-hash deps + analyzer detection
   //              (all parallel) ---
@@ -394,7 +410,7 @@ export async function executeTopPatterns(
     const baselineSamples = baselineByKey.get(baselineKey) ?? [];
     const firstSeenSec = fsRes?.ageSeconds ?? null;
     const badgeInfo = classifyBadge(r.bytes, baselineSamples, firstSeenSec);
-    const badge = badgeInfo.kind;
+    const state = badgeInfo.kind;
     const serviceCount = serviceBreadthByHash.get(r.hash);
     const deps = depsByHash?.get(r.hash);
     // Datadog inline snippet — only when the env's analyzer is
@@ -424,7 +440,7 @@ export async function executeTopPatterns(
       trendBytesPerSec: trendVals,
       sample: events[0],
       fieldVar: fv,
-      badge,
+      state,
       badgeInfo,
       serviceCount,
       deps,
@@ -520,7 +536,7 @@ export async function executeTopPatterns(
   }
 
   // Cross-pillar: find k8s/metric signals co-moving with the top spike.
-  const topSpiking = renderRows.find(r => r.hash && (r.badge === 'NEW' || r.badge === 'ACUTE'));
+  const topSpiking = renderRows.find(r => r.hash && (r.state === 'NEW' || r.state === 'ACUTE'));
   if (topSpiking) {
     nextActions.push({
       tool: 'log10x_metrics_that_moved',
@@ -670,7 +686,7 @@ export async function executeTopPatterns(
       share_pct: totalBytes > 0 ? (r.bytes / totalBytes) * 100 : 0,
       events: r.events,
       first_seen_age_seconds: r.firstSeenAgeSeconds,
-      badge: r.badge,
+      state: r.state,
       descriptor: r.pattern ?? r.hash ?? '',
       trend_bytes_per_sec: r.trendBytesPerSec,
       // PL-12a additions.
@@ -758,7 +774,7 @@ export async function executeTopPatterns(
     headline = `No patterns in scope over ${tf.label}.`;
   } else {
     const sharePctLabel = `${Math.round(top_n_percent_of_total)}%`;
-    const bytesLabel = `${(shownBytes / (1024 ** 3)).toFixed(1)} GB`;
+    const bytesLabel = fmtBytesShared(shownBytes);
     const incidentTail =
       incidents.length > 0
         ? ` ${incidents.length} incident cluster${incidents.length === 1 ? '' : 's'} detected.`
@@ -806,56 +822,58 @@ export async function executeTopPatterns(
           .join('; ')
       : undefined;
 
-  // Truncation signal: the engine query is capped at args.limit. If we got
-  // a separate count of total patterns matching the filters, we can tell the
-  // agent there's more to see; otherwise we fall back to "the query returned
-  // exactly limit rows" which is a reasonable heuristic for truncation.
-  const totalAvailable = patternCountTotal ?? (renderRows.length === args.limit ? args.limit + 1 : renderRows.length);
-  const truncated = totalAvailable > renderRows.length;
+  // FIX 7 — Truncation signal and pagination.
+  // totalAvailable: prefer the Prometheus count query; fall back to the full
+  // pre-offset rowset size as a conservative lower bound.
+  const totalAvailable = patternCountTotal ?? (rawRowsAll.length > offset + renderRows.length ? rawRowsAll.length : offset + renderRows.length);
+  const truncated = totalAvailable > offset + renderRows.length;
+  // Pagination footer for must_render_verbatim — only when there are more results.
+  const paginationFooter = truncated
+    ? `\nShowing patterns ${offset + 1}–${offset + renderRows.length} of ${patternCountTotal ?? '?'}. Reply 'more' to see the next ${args.limit}.`
+    : '';
 
-  // G6: horizontal-bar PNG. When a rate is known, axis stays $/mo (the
-  // decision-sealing number). When rate_source==='unset' we MUST NOT render a
-  // dollar axis — swap to bytes/mo so the chart shows the same ranking honestly
-  // without conjuring fake dollars from a $1/GB assumption. Hosts that render
-  // image content (Claude Desktop, ChatGPT Desktop) show it; legacy hosts
-  // ignore. Skip silently if rendering fails (missing Cairo etc.).
+  // FIX 1 — Gate chart PNG behind include_chart opt-in (default false) to
+  // avoid consuming a large fraction of the 25K response-token budget on
+  // every call. Hosts that render image content can pass include_chart=true.
   let images: import('../lib/output-types.js').InlineImage[] | undefined;
-  try {
-    const { renderHorizontalBar } = await import('../lib/chart-renderer.js');
-    if (dataPatterns.length > 0) {
-      const useDollars = rate_source !== 'unset';
-      const rateTag =
-        rate_source === 'customer_supplied' ? 'customer_supplied' : 'list_price';
-      const bars = dataPatterns
-        .slice()
-        .sort((a, b) =>
-          useDollars
-            ? (b.cost_per_month_usd ?? 0) - (a.cost_per_month_usd ?? 0)
-            : b.bytes - a.bytes
-        )
-        .map((p, i) => ({
-          label: `#${i + 1} ${p.identity}`,
-          value: useDollars ? (p.cost_per_month_usd ?? 0) : p.bytes,
-        }));
-      // PL-12a — chart title pivots when scoped to the offload cohort.
-      const cohortLabel =
-        include === 'dropped'
-          ? 'offloaded patterns'
-          : include === 'both'
-            ? 'patterns (union, kept + offloaded)'
-            : 'patterns';
-      const title = useDollars
-        ? `Top ${dataPatterns.length} ${cohortLabel} by $/mo (${tf.label}) (at ${rateTag})`
-        : `Top ${dataPatterns.length} ${cohortLabel} by bytes/mo (${tf.label})`;
-      const xLabel = useDollars ? '$/mo' : 'bytes/mo';
-      const png = await renderHorizontalBar(bars, { title, xLabel });
-      if (png) {
-        const altSubject = useDollars ? 'monthly cost' : 'byte volume';
-        images = [{ data: png.base64, mimeType: png.mimeType, alt: `Top ${dataPatterns.length} patterns by ${altSubject} over ${tf.label}` }];
+  if (args.include_chart !== false && args.include_chart === true) {
+    try {
+      const { renderHorizontalBar } = await import('../lib/chart-renderer.js');
+      if (dataPatterns.length > 0) {
+        const useDollars = rate_source !== 'unset';
+        const rateTag =
+          rate_source === 'customer_supplied' ? 'customer_supplied' : 'list_price';
+        const bars = dataPatterns
+          .slice()
+          .sort((a, b) =>
+            useDollars
+              ? (b.cost_per_month_usd ?? 0) - (a.cost_per_month_usd ?? 0)
+              : b.bytes - a.bytes
+          )
+          .map((p, i) => ({
+            label: `#${i + 1} ${p.identity}`,
+            value: useDollars ? (p.cost_per_month_usd ?? 0) : p.bytes,
+          }));
+        // PL-12a — chart title pivots when scoped to the offload cohort.
+        const cohortLabel =
+          include === 'dropped'
+            ? 'offloaded patterns'
+            : include === 'both'
+              ? 'patterns (union, kept + offloaded)'
+              : 'patterns';
+        const title = useDollars
+          ? `Top ${dataPatterns.length} ${cohortLabel} by $/mo (${tf.label}) (at ${rateTag})`
+          : `Top ${dataPatterns.length} ${cohortLabel} by bytes/mo (${tf.label})`;
+        const xLabel = useDollars ? '$/mo' : 'bytes/mo';
+        const png = await renderHorizontalBar(bars, { title, xLabel });
+        if (png) {
+          const altSubject = useDollars ? 'monthly cost' : 'byte volume';
+          images = [{ data: png.base64, mimeType: png.mimeType, alt: `Top ${dataPatterns.length} patterns by ${altSubject} over ${tf.label}` }];
+        }
       }
+    } catch (_e) {
+      /* best-effort; never block */
     }
-  } catch (_e) {
-    /* best-effort; never block */
   }
 
   // Incident cluster combined-bytes share — the percent-first equivalent of
@@ -869,7 +887,7 @@ export async function executeTopPatterns(
   return buildEnvelope({
     tool: 'log10x_top_patterns',
     view: 'summary',
-    summary: { headline, callout },
+    summary: { headline: headline + paginationFooter, callout },
     data: {
       rate_source,
       // PL-12a — echo the resolved cohort so the agent can route follow-up
@@ -901,9 +919,30 @@ export async function executeTopPatterns(
       window: tf.label,
       pattern_count_shown: renderRows.length,
       pattern_count_total: patternCountTotal,
+      offset,
       ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: headline }),
     },
-    actions: nextActions.map((a) => ({ tool: a.tool, args: a.args, reason: a.reason })),
+    actions: [
+      ...nextActions.map((a) => ({ tool: a.tool, args: a.args, reason: a.reason })),
+      // FIX 7 — next_page continuation action when results are truncated.
+      ...(truncated
+        ? [{
+            tool: 'log10x_top_patterns',
+            args: {
+              ...(args.service ? { service: args.service } : {}),
+              ...(args.severity ? { severity: args.severity } : {}),
+              timeRange: args.timeRange,
+              limit: args.limit,
+              offset: offset + renderRows.length,
+              ...(args.effective_ingest_per_gb != null ? { effective_ingest_per_gb: args.effective_ingest_per_gb } : {}),
+              ...(args.siemScope ? { siemScope: args.siemScope } : {}),
+              include: include,
+            },
+            reason: `Continue to patterns ${offset + renderRows.length + 1}–${offset + renderRows.length + args.limit} of ${patternCountTotal ?? '?'}`,
+            role: 'optional-followup' as const,
+          }]
+        : []),
+    ],
     // render_hint axis tracks the chart axis — bytes when rate unset, $/mo
     // when known. Keeps downstream agents/UI from defaulting to a dollar
     // overlay on data that has none.

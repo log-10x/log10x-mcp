@@ -44,6 +44,12 @@ export const trendSchema = {
       'Use `dropped` to verify post-deploy realised savings or to chart "what we are offloading right now". ' +
       'Use `both` to overlay kept vs dropped on the same window.'
     ),
+  include_chart: z
+    .boolean()
+    .default(false)
+    .describe(
+      'Set include_chart=true to embed the rendered chart inline (large; default false to avoid response truncation).'
+    ),
 };
 
 interface PatternTrendSummary {
@@ -91,7 +97,7 @@ interface PatternTrendSummary {
 }
 
 export async function executeTrend(
-  args: { pattern: string; timeRange?: string; step?: string; analyzerCost?: number; view?: 'summary'; include?: 'kept' | 'dropped' | 'both' },
+  args: { pattern: string; timeRange?: string; step?: string; analyzerCost?: number; view?: 'summary'; include?: 'kept' | 'dropped' | 'both'; include_chart?: boolean },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
   const telemetry = newTelemetry();
@@ -132,12 +138,10 @@ export async function executeTrend(
   } else {
     headline = `\`${d.pattern}\` over ${d.window}: ${fmtBytes(d.total_bytes)}, change ${changeSign}${d.change_pct}% (last quarter vs first quarter run-rate)${dollarClause}${spikeClause}`;
   }
-  // G6: render a PNG timeseries chart of the trend so hosts that render
-  // image content (Claude Desktop, ChatGPT Desktop) show it visually. The
-  // chart is best-effort — if chart.js init fails (e.g. missing Cairo on
-  // Linux) the renderer returns null and the result drops back to JSON
-  // envelope + ASCII sparkline only.
+  // FIX 1 — Gate chart PNG behind include_chart opt-in (default false) to
+  // avoid consuming response-token budget on every call.
   let images: import('../lib/output-types.js').InlineImage[] | undefined;
+  if (args.include_chart === true) {
   try {
     const { renderTimeseries } = await import('../lib/chart-renderer.js');
     const points = d.time_series.map((p) => ({
@@ -155,6 +159,7 @@ export async function executeTrend(
   } catch (_e) {
     /* chart rendering is best-effort; never block tool execution */
   }
+  } // end include_chart gate
   return buildEnvelope({
     tool: 'log10x_pattern_trend',
     view: 'summary',

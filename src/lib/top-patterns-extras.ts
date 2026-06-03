@@ -30,6 +30,7 @@ import { LABELS } from './promql.js';
 import { checkDeps, DEP_CHECK_VENDORS, type DepCheckResult } from './siem/deps/index.js';
 import type { SiemId } from './siem/pricing.js';
 
+/** Trajectory state label for a pattern row. Formerly called `Badge`. */
 export type Badge = 'NEW' | 'ACUTE' | 'GROWING' | 'STABLE' | 'SHRINKING';
 
 /**

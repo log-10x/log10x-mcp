@@ -75,7 +75,7 @@ export interface TopPatternRow {
   /** Per-field variation across N sampled events. */
   fieldVar?: FieldVariation;
   /** Trajectory classification (v3 — see top-patterns-extras.ts). */
-  badge: Badge;
+  state: Badge;
   /** Full BadgeInfo with ratio + first-seen-age for richer rendering
    * ("+85% vs baseline" instead of just "ACUTE"). Optional for
    * backward compat; renderers should prefer this when present. */
@@ -467,7 +467,7 @@ function renderList(rows: TopPatternRow[], descs: string[]): string {
     // back to the plain word form if some row doesn't have it.
     const badge = r.badgeInfo
       ? fmtBadgeInfo(r.badgeInfo)
-      : r.badge.toLowerCase();
+      : r.state.toLowerCase();
 
     lines.push(`${r.rank}. **${desc}** _[${svc} · ${sev}]_`);
     lines.push(`   ${cost} · ${bytes} · ${events} · ${badge}`);
@@ -585,8 +585,8 @@ function renderCard(
   // get the table sparkline + cost number, which already answer the
   // drop/sample question for stable trajectories).
   // Verbose mode: chart on every top-3 card (legacy behavior).
-  const isNew = r.badge === 'NEW';
-  const isAcute = r.badge === 'ACUTE';
+  const isNew = r.state === 'NEW';
+  const isAcute = r.state === 'ACUTE';
   const showChart = verbose
     ? (r.rank <= 3 || isNew) && r.trendBytesPerSec.length > 0
     : (isAcute || isNew) && r.trendBytesPerSec.length > 0;
@@ -834,11 +834,11 @@ function renderCard(
   // the CTA must be here for them too). sevUpper / isErrorish are
   // computed above.
   const investigateApplies =
-    isErrorish && (r.badge === 'ACUTE' || r.badge === 'NEW' || r.events >= 100);
+    isErrorish && (r.state === 'ACUTE' || r.state === 'NEW' || r.events >= 100);
   if (investigateApplies || verbose) {
     const subject =
-      r.badge === 'ACUTE' || r.badge === 'NEW'
-        ? `the ${r.badge.toLowerCase()} change in `
+      r.state === 'ACUTE' || r.state === 'NEW'
+        ? `the ${r.state.toLowerCase()} change in `
         : isErrorish
           ? 'the error loop in '
           : '';

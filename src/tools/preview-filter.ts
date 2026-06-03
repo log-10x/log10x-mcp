@@ -39,6 +39,7 @@ import { tenxHash } from '../lib/pattern-hash.js';
 import { fetchFirstSeenBatch } from '../lib/first-seen.js';
 import { sparkline } from '../lib/line-chart.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { fmtBytes as fmtBytesShared } from '../lib/format.js';
 import { EXPLAIN_MODES, type ExplainMode } from './explain-mode.js';
 
 // ─── Schema ───────────────────────────────────────────────────────────────────
@@ -384,7 +385,7 @@ export async function executePreviewFilter(args: {
     patterns.length === 0
       ? `preview_filter(${args.mode}, ${args.service}): no patterns found.`
       : `preview_filter(${args.mode}, ${args.service}): ${patterns.length} patterns shown, ` +
-        `${(totalServiceBytes / (1024 ** 3)).toFixed(1)} GB/mo total. ` +
+        `${fmtBytesShared(totalServiceBytes)}/mo total. ` +
         `CSV: ${csvPath ?? 'write failed'}.`;
 
   const envelope: PreviewFilterEnvelope = {

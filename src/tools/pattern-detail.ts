@@ -27,6 +27,7 @@ import { queryInstant, queryRange } from '../lib/api.js';
 import { LABELS } from '../lib/promql.js';
 import { parsePrometheusValue } from '../lib/cost.js';
 import { lineChart } from '../lib/line-chart.js';
+import { fmtBytes } from '../lib/format.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
 // ─── Schema ───────────────────────────────────────────────────────────────────
@@ -39,6 +40,11 @@ export const patternDetailSchema = {
     .boolean()
     .default(true)
     .describe('When true (default), attempts to fetch 3-5 sample events from the SIEM. Set false to skip the SIEM round-trip.'),
+  timeRange: z
+    .string()
+    .regex(/^\d+[mhd]$/)
+    .default('7d')
+    .describe('Time window for the volume trend and sample events lookback. Default 7d. Pattern: ^\\d+[mhd]$.'),
   environment: z.string().optional().describe('Environment nickname for multi-env setups.'),
 };
 
@@ -166,15 +172,22 @@ async function fetchFirstSeen(env: EnvConfig, hash: string): Promise<number | nu
   }
 }
 
-/** Fetch 24h trend (bytes/sec) for this hash at 10-minute resolution. */
+/** Fetch trend (bytes/sec) for this hash at adaptive resolution. */
 async function fetchTrend(
   env: EnvConfig,
   hash: string,
+  timeRange = '7d',
 ): Promise<Array<{ ts: number; bytes_per_sec: number }>> {
   try {
     const now = Math.floor(Date.now() / 1000);
-    const start = now - 24 * 3600;
-    const step = 600; // 10 minutes
+    // Parse timeRange to seconds: d=days, h=hours, m=minutes.
+    const trMatch = timeRange.match(/^(\d+)([mhd])$/);
+    const trSeconds = trMatch
+      ? Number(trMatch[1]) * ({ m: 60, h: 3600, d: 86400 } as Record<string, number>)[trMatch[2]]
+      : 7 * 86400;
+    const start = now - trSeconds;
+    // Adaptive step: target ~144 points regardless of window.
+    const step = Math.max(300, Math.round(trSeconds / 144));
     const q =
       `sum by (${LABELS.hash}) ` +
       `(rate(all_events_summaryBytes_total{` +
@@ -193,25 +206,34 @@ async function fetchTrend(
 /**
  * Best-effort: fetch 3-5 sample events from the SIEM for this hash.
  * Uses the same fetchEventsByHashes path that top_patterns uses.
- * Returns empty array when no SIEM is configured or query fails.
+ * Returns { events, siemKind } where siemKind describes the resolution status.
  */
 async function fetchSampleEvents(
   hash: string,
   patternName: string | null,
-): Promise<string[]> {
+  window = '7d',
+): Promise<{ events: string[]; siemKind: 'resolved' | 'unresolved' }> {
   try {
+    const { resolveSiemSelection } = await import('../lib/siem/resolve.js');
+    const sel = await resolveSiemSelection({});
+    if (sel.kind !== 'resolved') {
+      return { events: [], siemKind: 'unresolved' };
+    }
     const { fetchEventsByHashes } = await import('../lib/siem/sample.js');
     const results = await fetchEventsByHashes(
       [{ hash, service: undefined as unknown as string, severity: undefined as unknown as string }],
-      { perHash: 5 },
+      { perHash: 5, window },
     );
     const events = results.get(hash) ?? [];
-    return events.slice(0, 5).map((e) => {
-      const line = typeof e === 'string' ? e : ((e as unknown) as Record<string, string>)?.message ?? String(e);
-      return line.slice(0, 120);
-    });
+    return {
+      events: events.slice(0, 5).map((e) => {
+        const line = typeof e === 'string' ? e : ((e as unknown) as Record<string, string>)?.message ?? String(e);
+        return line.slice(0, 120);
+      }),
+      siemKind: 'resolved',
+    };
   } catch {
-    return [];
+    return { events: [], siemKind: 'unresolved' };
   }
 }
 
@@ -225,8 +247,10 @@ function renderVerbatim(args: {
   firstSeenAgeSeconds: number | null;
   trendSeries: Array<{ ts: number; bytes_per_sec: number }>;
   sampleEvents: string[];
+  timeRange: string;
+  siemKind: 'resolved' | 'unresolved';
 }): string {
-  const { patternName, hash, services, totalBytes, firstSeenAgeSeconds, trendSeries, sampleEvents } = args;
+  const { patternName, hash, services, totalBytes, firstSeenAgeSeconds, trendSeries, sampleEvents, timeRange, siemKind } = args;
 
   const lines: string[] = [];
 
@@ -239,17 +263,30 @@ function renderVerbatim(args: {
   }
   lines.push('');
 
-  // lineChart — larger view, up to 12 rows tall
+  // lineChart — FIX 8: use timeRange window label, adaptive step
+  const trMatch = timeRange.match(/^(\d+)([mhd])$/);
+  const trSeconds = trMatch
+    ? Number(trMatch[1]) * ({ m: 60, h: 3600, d: 86400 } as Record<string, number>)[trMatch[2]]
+    : 7 * 86400;
   const bytesPerSecVals = trendSeries.map((p) => p.bytes_per_sec);
-  const chart = lineChart(bytesPerSecVals, {
-    widthCap: 60,
-    maxTotalWidth: 72,
-    spanSeconds: 24 * 3600,
-  });
-  if (chart) {
-    lines.push('Volume trend (24h)');
-    lines.push(chart);
+  // FIX 5: insufficient history placeholder when < 2 data points.
+  if (bytesPerSecVals.filter((v) => v > 0).length < 2) {
+    lines.push(`Volume trend (${timeRange}): insufficient history (pattern emerged recently or no data in this window)`);
     lines.push('');
+  } else {
+    const chart = lineChart(bytesPerSecVals, {
+      widthCap: 60,
+      maxTotalWidth: 72,
+      spanSeconds: trSeconds,
+    });
+    if (chart) {
+      lines.push(`Volume trend (${timeRange})`);
+      lines.push(chart);
+      lines.push('');
+    } else {
+      lines.push(`Volume trend (${timeRange}): insufficient history (pattern emerged recently or no data in this window)`);
+      lines.push('');
+    }
   }
 
   // Cross-service distribution bar chart (top 8 services)
@@ -265,7 +302,7 @@ function renderVerbatim(args: {
     }
   }
 
-  // Severity breakdown
+  // FIX 4: Severity breakdown — use fmtBytes instead of raw GB division.
   const sevMap = new Map<string, number>();
   for (const s of services) {
     const k = s.severity || '(none)';
@@ -276,22 +313,24 @@ function renderVerbatim(args: {
       .sort((a, b) => b[1] - a[1])
       .map(([sev, bytes]) => {
         const pct = totalBytes > 0 ? ((bytes / totalBytes) * 100).toFixed(0) : '?';
-        const gb = (bytes / (1024 ** 3)).toFixed(2);
-        return `${sev}: ${gb}GB (${pct}%)`;
+        return `${sev}: ${fmtBytes(bytes)} (${pct}%)`;
       });
     lines.push(`Severity breakdown: ${sevParts.join('  |  ')}`);
     lines.push('');
   }
 
-  // Sample events
+  // FIX 9: Sample events — branched error messages by SIEM resolution state.
   if (sampleEvents.length > 0) {
     lines.push(`Sample events (${sampleEvents.length} shown, truncated to 120 chars):`);
     sampleEvents.forEach((evt, i) => {
       lines.push(`  ${i + 1}. ${evt}`);
     });
     lines.push('');
+  } else if (siemKind !== 'resolved') {
+    lines.push('Sample events: not available (no SIEM connector resolved — set LOG10X_METRICS_* or run log10x_discover_env).');
+    lines.push('');
   } else {
-    lines.push('Sample events: not available (no SIEM connector configured, or pattern not active in the last hour).');
+    lines.push(`Sample events: not available (no matching events in the last ${timeRange}; this is normal for bursty patterns with the window outside their burst, or for very low-volume patterns).`);
     lines.push('');
   }
 
@@ -303,9 +342,11 @@ function renderVerbatim(args: {
 export async function executePatternDetail(args: {
   pattern_hash: string;
   include_samples?: boolean;
+  timeRange?: string;
   environment?: string;
 }): Promise<StructuredOutput> {
   const includeSamples = args.include_samples !== false;
+  const timeRange = args.timeRange ?? '7d';
 
   let env: EnvConfig | undefined;
   try {
@@ -332,12 +373,12 @@ export async function executePatternDetail(args: {
     resolvePatternName(env, args.pattern_hash),
     fetchServiceBreakdown(env, args.pattern_hash),
     fetchFirstSeen(env, args.pattern_hash),
-    fetchTrend(env, args.pattern_hash),
+    fetchTrend(env, args.pattern_hash, timeRange),
   ]);
 
-  const sampleEvents: string[] = includeSamples
-    ? await fetchSampleEvents(args.pattern_hash, patternName)
-    : [];
+  const { events: sampleEvents, siemKind } = includeSamples
+    ? await fetchSampleEvents(args.pattern_hash, patternName, timeRange)
+    : { events: [] as string[], siemKind: 'unresolved' as const };
 
   const totalBytes = services.reduce((s, r) => s + r.bytes, 0);
 
@@ -349,6 +390,8 @@ export async function executePatternDetail(args: {
     firstSeenAgeSeconds,
     trendSeries,
     sampleEvents,
+    timeRange,
+    siemKind,
   });
 
   const mustAskUser = {
@@ -359,9 +402,10 @@ export async function executePatternDetail(args: {
     ],
   };
 
+  // FIX 4: headline uses fmtBytes instead of raw GB division.
   const headline =
     `pattern_detail(${patternName ?? args.pattern_hash.slice(0, 12)}): ` +
-    `${services.length} service(s), ${(totalBytes / (1024 ** 3)).toFixed(2)} GB/mo (30d). ` +
+    `${services.length} service(s), ${fmtBytes(totalBytes)}/mo (30d). ` +
     `${sampleEvents.length} sample event(s) fetched.`;
 
   const envelope: PatternDetailEnvelope = {
@@ -375,6 +419,15 @@ export async function executePatternDetail(args: {
     must_render_verbatim: verbatim,
     must_ask_user: mustAskUser,
   };
+
+  // FIX 6: Apply action uses the correct service field from breakdown,
+  // not the pattern name. When multiple services emit this hash, we omit
+  // the service arg and let the user pick (configure_engine will show
+  // the full list). When exactly one service is present, pass it directly.
+  const applyArgs: Record<string, unknown> = { pattern_hash: args.pattern_hash };
+  if (services.length === 1) {
+    applyArgs['service'] = services[0].service;
+  }
 
   return buildEnvelope({
     tool: 'log10x_pattern_detail',
@@ -390,8 +443,10 @@ export async function executePatternDetail(args: {
       },
       {
         tool: 'log10x_configure_engine',
-        args: { service: patternName ?? args.pattern_hash },
-        reason: 'Apply with this pattern in the picture',
+        args: applyArgs,
+        reason: services.length > 1
+          ? `Apply with this pattern in the picture (${services.length} services emit this hash — pick a service to scope)`
+          : 'Apply with this pattern in the picture',
         role: 'alternative',
       },
     ],
