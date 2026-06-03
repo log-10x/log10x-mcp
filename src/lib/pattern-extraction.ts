@@ -161,6 +161,15 @@ export interface ExtractPatternsOptions {
    * Default: false (back-compat).
    */
   preserveEnvelope?: boolean;
+  /**
+   * Hint: the upstream caller already knows the bucket's pattern_hash
+   * (e.g., pattern_examples queries by it). Older engine builds do not
+   * anchor `patternHash=` on encoded lines, so `rec.tenxHash` ends up
+   * undefined and the defensive value-based filter on the slot loop
+   * cannot fire. Pass this hint to feed the filter regardless.
+   * Default: undefined.
+   */
+  bucketHashHint?: string;
 }
 
 /**
@@ -369,7 +378,7 @@ export async function extractPatterns(
     // When that anchor is absent (older engine builds), fall back to the
     // aggregated CSV's tenx_hash column (already resolved in aggByHash above)
     // so the value-based guard below can still fire.
-    const bucketTenxHash = rec.tenxHash ?? aggMatch?.raw['tenx_hash'];
+    const bucketTenxHash = rec.tenxHash ?? aggMatch?.raw['tenx_hash'] ?? opts.bucketHashHint;
     for (const [slot, set] of rec.variables) {
       // tenx_hash is the engine's internal pattern identity field — it is never
       // useful as a slot variance signal and must not appear in slot_distribution.

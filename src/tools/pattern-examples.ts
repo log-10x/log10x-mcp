@@ -415,7 +415,7 @@ async function executePatternExamplesInner(
   const inputLineCount = probe.events.length;
   let extracted;
   try {
-    extracted = await extractPatterns(probe.events, { privacyMode: true, useFileOutput: true, preserveEnvelope: true });
+    extracted = await extractPatterns(probe.events, { privacyMode: true, useFileOutput: true, preserveEnvelope: true, bucketHashHint: hashKey });
   } catch (e) {
     return graceful('Pattern Examples — templater invocation failed', [
       `tenx CLI failed on ${probe.events.length} events: ${(e as Error).message.slice(0, 200)}`,
