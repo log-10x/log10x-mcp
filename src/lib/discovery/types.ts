@@ -6,7 +6,7 @@
  * wire-format change — bump `SNAPSHOT_SCHEMA_VERSION` below.
  */
 
-export const SNAPSHOT_SCHEMA_VERSION = 2;
+export const SNAPSHOT_SCHEMA_VERSION = 3;
 
 /** Which forwarder the customer is running. `unknown` = detection gave up. */
 export type ForwarderKind =
@@ -69,6 +69,21 @@ export interface DetectedForwarder {
   labels: Record<string, string>;
   /** Number of ready replicas at probe time. Not authoritative, just a hint. */
   readyReplicas: number;
+}
+
+/**
+ * Detail for a single installed log10x component, captured from the
+ * container-image probe (not just the helm-label path). Used by
+ * discover_env to populate `installed_components_detail`.
+ */
+export interface InstalledComponentDetail {
+  installed: true;
+  /** Pod name from the workload (workload name, not individual pod). */
+  pod: string;
+  namespace: string;
+  image: string;
+  /** Workload kind and name, e.g. "DaemonSet/tenx-fluentd". */
+  workload: string;
 }
 
 /** A log10x app already running in the cluster. */
@@ -202,6 +217,31 @@ export interface Recommendations {
    * path inside the GitOps repo.
    */
   receiverCompactLookupFile?: string;
+  /**
+   * Detailed component detection from the image-pattern probe.
+   * Keyed by component kind (reporter/receiver/retriever). Present only
+   * for components that were positively matched by image name heuristics.
+   * Supersedes the simpler `alreadyInstalled` boolean map when richer
+   * context is needed (pod name, image, workload reference).
+   */
+  installedComponentsDetail?: Partial<Record<'reporter' | 'receiver' | 'retriever', InstalledComponentDetail>>;
+  /**
+   * Whether the Receiver is actively stamping events flowing to the log
+   * analyzer (SIEM). Determined by probing recent events for tenx_hash.
+   *
+   * - true  → tenx_hash found in a recent sample event (Receiver in-path)
+   * - false → No hash in recent sample (Receiver deployed but bypassed, or not deployed)
+   * - null  → Probe inconclusive (no events in window, or SIEM credentials unavailable)
+   *
+   * Only populated when at least one SIEM credential set is available.
+   */
+  receiverInPath?: boolean | null;
+  /**
+   * Human-readable explanation of why receiverInPath is false when the
+   * Receiver appears to be installed. Only set when
+   * installedComponentsDetail.receiver is present AND receiverInPath === false.
+   */
+  receiverInPathReason?: string;
 }
 
 /**

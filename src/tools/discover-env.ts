@@ -62,6 +62,14 @@ export const discoverEnvSchema = {
 const schemaObj = z.object(discoverEnvSchema);
 export type DiscoverEnvArgs = z.infer<typeof schemaObj>;
 
+interface InstalledComponentDetailSummary {
+  installed: true;
+  pod: string;
+  namespace: string;
+  image: string;
+  workload: string;
+}
+
 interface DiscoverEnvSummary {
   snapshot_id: string;
   started_at: string;
@@ -75,6 +83,9 @@ interface DiscoverEnvSummary {
     receiver: boolean;
     retriever: boolean;
   };
+  installed_components_detail?: Partial<Record<'reporter' | 'receiver' | 'retriever', InstalledComponentDetailSummary>>;
+  receiver_in_path?: boolean | null;
+  receiver_in_path_reason?: string | null;
   namespaces_probed: string[];
   eks_cluster?: string;
   region?: string;
@@ -92,7 +103,13 @@ function buildDiscoverEnvHumanSummary(d: Omit<DiscoverEnvSummary, 'human_summary
   const awsFrag = d.aws_available
     ? ` AWS: region ${d.region ?? 'unknown'}, ${d.s3_buckets.length} matching S3 bucket${d.s3_buckets.length === 1 ? '' : 's'}, ${d.sqs_queues.length} SQS queue${d.sqs_queues.length === 1 ? '' : 's'}.`
     : ' AWS probes were unavailable.';
-  return `Discovery snapshot ${d.snapshot_id} done in ${d.namespaces_probed.length} namespace${d.namespaces_probed.length === 1 ? '' : 's'}: forwarder=${fwd}, log10x apps installed=${installedFrag}.${awsFrag}`;
+  let inPathFrag = '';
+  if (d.installed_components.receiver && d.receiver_in_path !== undefined && d.receiver_in_path !== null) {
+    inPathFrag = d.receiver_in_path ? ', receiver in-path' : ', receiver NOT in-path';
+  } else if (d.installed_components.receiver && d.receiver_in_path === null) {
+    inPathFrag = ', receiver in-path status unknown';
+  }
+  return `Discovery snapshot ${d.snapshot_id} done in ${d.namespaces_probed.length} namespace${d.namespaces_probed.length === 1 ? '' : 's'}: forwarder=${fwd}, log10x apps installed=${installedFrag}${inPathFrag}.${awsFrag}`;
 }
 
 export async function executeDiscoverEnv(args: DiscoverEnvArgs): Promise<string | StructuredOutput> {
@@ -112,6 +129,16 @@ export async function executeDiscoverEnv(args: DiscoverEnvArgs): Promise<string 
   const rec = snapshot.recommendations;
   const installedMap = rec.alreadyInstalled ?? {};
   const topForwarder = snapshot.kubectl?.forwarders?.[0];
+
+  // Compute installed_components: prefer installedComponentsDetail when present
+  // (image-probe result), fall back to alreadyInstalled (helm-label result).
+  const detail = rec.installedComponentsDetail ?? {};
+  const installedComponents = {
+    reporter: !!(detail.reporter || (installedMap as Record<string, string | undefined>).reporter),
+    receiver: !!(detail.receiver || (installedMap as Record<string, string | undefined>).receiver),
+    retriever: !!(detail.retriever || (installedMap as Record<string, string | undefined>).retriever),
+  };
+
   const data: DiscoverEnvSummary = {
     snapshot_id: snapshot.snapshotId,
     started_at: snapshot.startedAt,
@@ -120,11 +147,10 @@ export async function executeDiscoverEnv(args: DiscoverEnvArgs): Promise<string 
     aws_available: !!snapshot.aws?.available,
     forwarder_kind: rec.existingForwarder ?? topForwarder?.kind,
     forwarder_namespace: rec.existingForwarderNamespace ?? topForwarder?.namespace,
-    installed_components: {
-      reporter: !!(installedMap as Record<string, string | undefined>).reporter,
-      receiver: !!(installedMap as Record<string, string | undefined>).receiver,
-      retriever: !!(installedMap as Record<string, string | undefined>).retriever,
-    },
+    installed_components: installedComponents,
+    installed_components_detail: Object.keys(detail).length > 0 ? detail : undefined,
+    receiver_in_path: rec.receiverInPath,
+    receiver_in_path_reason: rec.receiverInPathReason ?? null,
     namespaces_probed: snapshot.kubectl?.probedNamespaces ?? [],
     eks_cluster: snapshot.aws?.eks?.name,
     region: snapshot.aws?.region,
@@ -136,12 +162,31 @@ export async function executeDiscoverEnv(args: DiscoverEnvArgs): Promise<string 
   };
   data.human_summary = buildDiscoverEnvHumanSummary(data);
   const installedList = Object.entries(data.installed_components).filter(([, v]) => v).map(([k]) => k);
-  const headline = `Snapshot \`${data.snapshot_id}\`: forwarder=${data.forwarder_kind ?? 'none'}, installed=${installedList.length ? installedList.join(',') : 'none'}, kubectl=${data.kubectl_available ? 'ok' : 'unavailable'}, aws=${data.aws_available ? 'ok' : 'unavailable'}.`;
+
+  // Build the installed fragment for the headline — when receiver is installed
+  // but not in-path, surface that state explicitly.
+  function installedLabel(k: string): string {
+    if (k === 'receiver' && data.receiver_in_path === false) return 'receiver(not in path)';
+    if (k === 'receiver' && data.receiver_in_path === null) return 'receiver(in-path unknown)';
+    return k;
+  }
+  const installedHeadlineFrag = installedList.length
+    ? installedList.map(installedLabel).join(',')
+    : 'none';
+  const headline = `Snapshot \`${data.snapshot_id}\`: forwarder=${data.forwarder_kind ?? 'none'}, installed=${installedHeadlineFrag}, kubectl=${data.kubectl_available ? 'ok' : 'unavailable'}, aws=${data.aws_available ? 'ok' : 'unavailable'}.`;
   const actions: Array<{ tool: string; args: Record<string, unknown>; reason: string }> = [];
   if (!data.installed_components.reporter) {
     actions.push({ tool: 'log10x_advise_install', args: { snapshot_id: data.snapshot_id }, reason: 'no Reporter installed — pick the right install path' });
   } else if (!data.installed_components.receiver) {
     actions.push({ tool: 'log10x_advise_install', args: { snapshot_id: data.snapshot_id, app: 'receiver' }, reason: 'Reporter present, no Receiver — install for filter / compact / cap' });
+  }
+  // When Receiver is installed but bypassed, surface a nudge to fix the forwarder wiring.
+  if (data.installed_components.receiver && data.receiver_in_path === false) {
+    actions.push({
+      tool: 'log10x_advise_install',
+      args: { snapshot_id: data.snapshot_id },
+      reason: 'Receiver installed but bypassed by forwarder. Verify the forwarder config wires log10x in-path.',
+    });
   }
   if (data.aws_available && data.s3_buckets.length > 0 && !data.installed_components.retriever) {
     actions.push({ tool: 'log10x_advise_retriever', args: { snapshot_id: data.snapshot_id }, reason: 'S3 + AWS available — Retriever installable for forensic retrieval' });

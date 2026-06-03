@@ -40,6 +40,7 @@ import { fmtPattern, normalizePattern } from '../lib/format.js';
 import type { PrimitiveError } from '../lib/primitive-errors.js';
 import { resolveSiemSelection } from '../lib/siem/resolve.js';
 import { getConnector } from '../lib/siem/index.js';
+import { probeReceiverInPath, eventHasTenxHash } from '../lib/receiver-probe.js';
 
 export const patternMitigateSchema = {
   pattern: z
@@ -177,69 +178,11 @@ function receiverRequiredProse(unknown: boolean): string {
   );
 }
 
-/**
- * Probe the SIEM for 1–3 recent events and check if any carry tenx_hash.
- * Returns true  → Receiver is in-path (hash stamp confirmed)
- * Returns false → No hash found in sample (Receiver likely absent)
- * Returns null  → Probe failed / SIEM unavailable (UNKNOWN — don't conclude absent)
- *
- * Uses a 5-minute window and limit=3 so the probe is fast.
- */
-async function detectReceiverViaSampleEvent(
-  vendor: string,
-  connector: import('../lib/siem/index.js').SiemConnector,
-): Promise<boolean | null> {
-  try {
-    // Pull a tiny sample — we only need one event with tenx_hash present.
-    // Use a broad query (no pattern filter) so we sample the general
-    // pipeline output, not a specific pattern.
-    const probe = await connector.pullEvents({
-      window: '5m',
-      query: '',
-      targetEventCount: 3,
-      maxPullMinutes: 1,
-      onProgress: () => { /* swallow */ },
-      buckets: 1,
-    });
-
-    if (probe.events.length === 0) {
-      // No events in the last 5 min — inconclusive, not confirmed absent.
-      return null;
-    }
-
-    for (const evt of probe.events) {
-      if (eventHasTenxHash(evt)) return true;
-    }
-    return false;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Check whether a raw SIEM event (any shape) carries tenx_hash.
- * Handles flat objects and nested envelopes (docker/kubernetes/log field).
- */
-function eventHasTenxHash(evt: unknown): boolean {
-  if (typeof evt === 'string') {
-    try {
-      return eventHasTenxHash(JSON.parse(evt));
-    } catch {
-      // Plain-text event — check for "tenx_hash" substring (e.g. key=value in raw log)
-      return evt.includes('tenx_hash');
-    }
-  }
-  if (typeof evt !== 'object' || evt === null) return false;
-  const obj = evt as Record<string, unknown>;
-  // Flat top-level field (Datadog, ES, CloudWatch JSON events)
-  if ('tenx_hash' in obj) return true;
-  // Nested under common envelope keys (Splunk _raw / attributes / docker / k8s)
-  for (const key of ['attributes', 'docker', 'kubernetes', 'log', 'fields', 'extra']) {
-    const sub = obj[key];
-    if (sub && typeof sub === 'object' && eventHasTenxHash(sub)) return true;
-  }
-  return false;
-}
+// detectReceiverViaSampleEvent and eventHasTenxHash have been extracted to
+// src/lib/receiver-probe.ts so discover_env can reuse the same probe logic.
+// The aliases below keep the call sites in detectCapabilities unchanged.
+const detectReceiverViaSampleEvent = probeReceiverInPath;
+// eventHasTenxHash is re-exported from receiver-probe and imported above.
 
 /**
  * SIEM vendors the exclusion_filter tool can generate native configs for.

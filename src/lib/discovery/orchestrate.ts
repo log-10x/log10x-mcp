@@ -11,12 +11,16 @@ import { newSnapshotId, putSnapshot } from './snapshot-store.js';
 import type {
   DiscoverySnapshot,
   ForwarderKind,
+  InstalledComponentDetail,
   KubectlProbes,
   AwsProbes,
   Recommendations,
   Log10xAppKind,
 } from './types.js';
 import { SNAPSHOT_SCHEMA_VERSION } from './types.js';
+import { probeReceiverInPath } from '../receiver-probe.js';
+import { resolveSiemSelection } from '../siem/resolve.js';
+import { getConnector } from '../siem/index.js';
 
 export interface DiscoverOpts {
   kubectl?: KubectlProbeOpts;
@@ -44,7 +48,21 @@ export async function runDiscovery(opts: DiscoverOpts = {}): Promise<DiscoverySn
 
   const [k, a] = await Promise.all([kubectlP, awsP]);
 
-  const recommendations = deriveRecommendations(k.probes, a.probes, opts);
+  // After kubectl probes complete, run the receiver-in-path SIEM probe.
+  // Best-effort: failure returns null (inconclusive) and never aborts discovery.
+  let receiverInPath: boolean | null = null;
+  try {
+    const PROBE_VENDORS = ['datadog', 'splunk', 'elasticsearch', 'cloudwatch'] as const;
+    const siemResolution = await resolveSiemSelection({ restrictTo: [...PROBE_VENDORS] });
+    if (siemResolution.kind === 'resolved') {
+      const connector = getConnector(siemResolution.id);
+      receiverInPath = await probeReceiverInPath(siemResolution.id, connector);
+    }
+  } catch {
+    // SIEM probe failure is non-fatal — leave receiverInPath as null.
+  }
+
+  const recommendations = deriveRecommendations(k.probes, a.probes, opts, receiverInPath);
   const finishedAt = new Date().toISOString();
 
   const snapshot: DiscoverySnapshot = {
@@ -101,12 +119,29 @@ function emptyAws(): AwsProbes {
 function deriveRecommendations(
   kubectl: KubectlProbes,
   aws: AwsProbes,
-  opts: DiscoverOpts
+  opts: DiscoverOpts,
+  receiverInPath: boolean | null = null
 ): Recommendations {
   const alreadyInstalled: Partial<Record<Log10xAppKind, string>> = {};
+  const installedComponentsDetail: Partial<Record<'reporter' | 'receiver' | 'retriever', InstalledComponentDetail>> = {};
+
   for (const app of kubectl.log10xApps) {
     // First wins — multiple components of the same app share a namespace.
     if (!alreadyInstalled[app.kind]) alreadyInstalled[app.kind] = app.namespace;
+
+    // Build installedComponentsDetail for concrete (non-unknown) kinds that
+    // map to the user-visible component set.
+    if (app.kind === 'reporter' || app.kind === 'receiver' || app.kind === 'retriever') {
+      if (!installedComponentsDetail[app.kind]) {
+        installedComponentsDetail[app.kind] = {
+          installed: true,
+          pod: app.workloadName,
+          namespace: app.namespace,
+          image: app.image,
+          workload: `${app.workloadKind}/${app.workloadName}`,
+        };
+      }
+    }
   }
 
   // Forwarder inference: if user supplied a hint, use it. Otherwise pick the
@@ -162,6 +197,17 @@ function deriveRecommendations(
     if (receiverGitopsRepo || receiverCompactLookupFile) break;
   }
 
+  // Build receiverInPathReason: only when receiver is installed but not in-path.
+  const receiverDetail = installedComponentsDetail.receiver;
+  let receiverInPathReason: string | undefined;
+  if (receiverDetail && receiverInPath === false) {
+    receiverInPathReason =
+      `Receiver pod is deployed but events flowing to the log analyzer` +
+      ` do not carry tenx_hash. Possible causes: forwarder bypassing` +
+      ` the Receiver (check fluentd/vector/logstash output config), or` +
+      ` the Receiver is unhealthy. Inspect: kubectl logs ${receiverDetail.pod} -c log10x.`;
+  }
+
   return {
     suggestedNamespace,
     existingForwarder,
@@ -171,5 +217,10 @@ function deriveRecommendations(
     receiverCompactLookupFile,
     retrieverSqsUrls: Object.keys(retrieverSqsUrls).length > 0 ? retrieverSqsUrls : undefined,
     alreadyInstalled,
+    installedComponentsDetail: Object.keys(installedComponentsDetail).length > 0
+      ? installedComponentsDetail
+      : undefined,
+    receiverInPath: receiverInPath,
+    receiverInPathReason,
   };
 }

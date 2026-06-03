@@ -74,6 +74,18 @@ export function classifyLog10xApp(
   // Compiler (edge compact sidecar) — classify but not in install-advisor scope.
   if (imgLc.includes('compiler-10x') || chart.includes('compiler')) return 'compiler';
 
+  // Receiver fallback: the pipeline-10x image (ghcr.io/log-10x/pipeline-10x-dev,
+  // ghcr.io/log-10x/pipeline-10x, log10x/pipeline-10x) is the Receiver / Reducer
+  // container. Match any workload whose primary container carries this image,
+  // including dev-branch builds where the helm instance label is absent or
+  // non-standard (e.g. tenx-fluentd DaemonSet on otel-demo).
+  if (imgLc.includes('pipeline-10x') || imgLc.includes('pipeline-tenx')) return 'receiver';
+
+  // Workload-name heuristics as a last resort when the image is a log-10x org
+  // image we couldn't pin by image name. The name label is the most reliable
+  // remaining signal — e.g. `app.kubernetes.io/name: tenx-receiver`.
+  if (nameLabel.includes('receiver') || nameLabel.includes('reducer')) return 'receiver';
+
   // Last resort: a log-10x image we couldn't pin to a specific app.
   return 'unknown';
 }
@@ -81,5 +93,11 @@ export function classifyLog10xApp(
 /** Is this image from the log10x image registries? */
 export function isLog10xImage(image: string): boolean {
   const s = image.toLowerCase();
-  return s.includes('log-10x/') || s.includes('log10x/') || s.includes('/tenx-');
+  // x8r1y5t9 is the ECR Public account alias for the log10x Lambda retriever image.
+  return (
+    s.includes('log-10x/') ||
+    s.includes('log10x/') ||
+    s.includes('/tenx-') ||
+    s.includes('x8r1y5t9/lambda-10x')
+  );
 }

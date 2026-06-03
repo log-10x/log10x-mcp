@@ -311,30 +311,28 @@ async function probeWorkloadsInNamespace(
     );
     if (log10xContainer) {
       const appKind = classifyLog10xApp(log10xContainer.image, labels, helmRel?.chart);
-      if (appKind !== 'unknown') {
-        // Capture literal-valued env on the matching container.
-        // valueFrom-based entries (secretKeyRef, configMapKeyRef, fieldRef)
-        // are intentionally dropped — exposing secret refs is unsafe and
-        // downstream consumers (e.g. configure-compact) only need literal
-        // settings like GH_REPO / compactReceiverLookupFile.
-        const env: Record<string, string> = {};
-        for (const e of (log10xContainer as ContainerLike).env ?? []) {
-          if (typeof e.value === 'string' && !e.valueFrom) {
-            env[e.name] = e.value;
-          }
+      // Capture literal-valued env on the matching container.
+      // valueFrom-based entries (secretKeyRef, configMapKeyRef, fieldRef)
+      // are intentionally dropped — exposing secret refs is unsafe and
+      // downstream consumers (e.g. configure-compact) only need literal
+      // settings like GH_REPO / compactReceiverLookupFile.
+      const env: Record<string, string> = {};
+      for (const e of (log10xContainer as ContainerLike).env ?? []) {
+        if (typeof e.value === 'string' && !e.valueFrom) {
+          env[e.name] = e.value;
         }
-        apps.push({
-          kind: appKind,
-          namespace,
-          workloadKind,
-          workloadName: w.metadata.name,
-          image: log10xContainer.image,
-          helmRelease: helmRel?.name,
-          labels,
-          env: Object.keys(env).length > 0 ? env : undefined,
-        });
-        return;
       }
+      apps.push({
+        kind: appKind,
+        namespace,
+        workloadKind,
+        workloadName: w.metadata.name,
+        image: log10xContainer.image,
+        helmRelease: helmRel?.name,
+        labels,
+        env: Object.keys(env).length > 0 ? env : undefined,
+      });
+      return;
     }
 
     // Second pass: classify forwarders (primary container only). CronJobs
