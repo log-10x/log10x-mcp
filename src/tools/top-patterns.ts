@@ -932,6 +932,19 @@ export async function executeTopPatterns(
       pattern_count_shown: renderRows.length,
       pattern_count_total: patternCountTotal,
       offset,
+      // Disclosure fields so an agent can explain why top_patterns (short window)
+      // and preview_filter/estimate_savings (30d window) may show different numbers.
+      bytes_source: {
+        metric: 'all_events_summaryBytes_total',
+        observation_window: tf.range,
+        cohort: include,
+        scope_filter: `${metricsEnv}`,
+      },
+      pattern_count_source: {
+        query: 'distinctPatternCount',
+        count: patternCountTotal ?? null,
+        window: tf.range,
+      },
       ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: headline }),
     },
     actions: [

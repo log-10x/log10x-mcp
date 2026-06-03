@@ -74,6 +74,9 @@ import {
 } from '../lib/cap-csv-parser.js';
 import { parseActionIntent } from '../lib/action-intent-parser.js';
 import { resolveSiemSelection } from '../lib/siem/resolve.js';
+import { resolveMetricsEnv, resolveMetricsEnvFiltered } from '../lib/resolve-env.js';
+import * as pql from '../lib/promql.js';
+import { type FilterValue } from '../lib/promql.js';
 
 // ─── constants ──────────────────────────────────────────────────────────
 const BYTES_METRIC = 'all_events_summaryBytes_total';
@@ -294,6 +297,25 @@ export interface ForecastResult {
    * (no caveat needed). Non-null for list_price.
    */
   rate_disclosure: string | null;
+  /**
+   * Provenance of the bytes data — allows an agent to explain why two tools
+   * show different numbers when called with different windows or cohorts.
+   */
+  bytes_source: {
+    metric: string;
+    observation_window: string;
+    cohort: 'kept';
+    scope_filter: string;
+  };
+  /**
+   * Pattern-universe count from the same scope as bytes_source. Null when the
+   * distinctPatternCount query failed or returned no data.
+   */
+  pattern_count_source: {
+    query: 'distinctPatternCount';
+    count: number | null;
+    window: string;
+  };
   caveats: string[];
 }
 
@@ -667,15 +689,16 @@ export async function runEstimateForecast(
     const earlyModel = getDestinationCostModel(args.destination, {
       esPruned: args.es_pruned,
     });
-    // Only throw when the caller explicitly supplied the no-op action.
-    // When default_action is the schema default ('compact') AND the destination
-    // has a different canonical first action, the solver will silently use the
-    // canonical action instead of throwing.
+    // Only throw when the destination's own canonical first action is also
+    // compact (i.e., no valid fallback exists — the solver would silently
+    // assign compact again, which is still a no-op).  When canonicalAction
+    // is something else (drop, sample, tier_down …) the solver will substitute
+    // it transparently and the caller should not be blocked.
     const canonicalAction = getDefaultActionForDestination(args.destination, 1);
     const actionIsExplicitlyBad =
       args.default_action === 'compact' &&
       earlyModel.compact_mode === 'no-op' &&
-      canonicalAction !== 'compact';
+      canonicalAction === 'compact';
     if (actionIsExplicitlyBad) {
       throw new NoOpActionError(args.default_action, args.destination);
     }
@@ -684,12 +707,39 @@ export async function runEstimateForecast(
   const observationWindow = args.observation_window ?? '30d';
   const obsDays = parseWindowToDays(observationWindow);
 
-  // Build the scope selector: env always, optionally service.
-  const extraFilters: string[] = [];
+  // Resolve the edge/cloud metrics env the same way top_patterns and
+  // preview_filter do — so queries land on the same backend that generated
+  // the numbers those tools show. The selectorWithEnv() helper hardcoded
+  // tenx_app=~"reporter|receiver",tenx_env="edge" which diverged from the
+  // kept-cohort isDropped!="true" selector the other tools use, causing
+  // total-bytes mismatch on the same service+window (DEFECT-22-DEEP).
+  const probeFilters: Record<string, string> = {};
+  if (args.service) probeFilters[env.labels.service] = args.service;
+  const metricsEnv = Object.keys(probeFilters).length > 0
+    ? await resolveMetricsEnvFiltered(env, probeFilters)
+    : await resolveMetricsEnv(env);
+
+  // Build the scope selector using the same buildSelector path as top_patterns:
+  // isDropped!="true" (absence-tolerant kept cohort) + optional service filter.
+  // This replaces selectorWithEnv() which used tenx_app=~"reporter|receiver".
+  const scopeFilters: Record<string, FilterValue> = {
+    isDropped: { op: '!=', val: 'true' },
+  };
   if (args.service) {
-    extraFilters.push(`${env.labels.service}="${escapeLabel(args.service)}"`);
+    scopeFilters[env.labels.service] = args.service;
   }
-  const selector = selectorWithEnv(env, extraFilters);
+  // Build a PromQL selector fragment for bytes queries. Re-use pql.bytesPerPattern
+  // shape but inline here so we can group by hash rather than pattern string.
+  // The selector is the isDropped+service part; metricsEnv is appended via
+  // the promql helpers internally. We build it manually to match the group-by-hash shape.
+  const selectorParts: string[] = [
+    `isDropped!="true"`,
+    `${env.labels.env}="${metricsEnv}"`,
+  ];
+  if (args.service) {
+    selectorParts.splice(1, 0, `${env.labels.service}="${escapeLabel(args.service)}"`);
+  }
+  const selector = selectorParts.join(',');
 
   // Per-pattern bytes + events over the observation window.
   // Group by the stable hash (env.labels.hash → tenx_hash by default).
@@ -697,32 +747,45 @@ export async function runEstimateForecast(
   const eventsQuery = `sum by (${env.labels.hash}) (increase(${VOLUME_METRIC}{${selector}}[${observationWindow}]))`;
   const totalQuery = `sum(increase(${BYTES_METRIC}{${selector}}[${observationWindow}]))`;
 
+  // Distinct pattern count — same scope as bytes query but grouped by pattern
+  // string for the pattern-universe disclosure field.
+  const distinctCountQuery = pql.distinctPatternCount(scopeFilters, metricsEnv, observationWindow);
+
   // Per-hash service label query — used for per_service rollup when service
   // is omitted. We need (hash → service) so we can group solver rows by service
   // after projection. Query by both hash and service labels; take the dominant
   // service per hash by bytes (same tie-break as extractHashContainerMap).
   const hashServiceQuery = !args.service
-    ? `sum by (${env.labels.hash},${env.labels.service}) (increase(${BYTES_METRIC}{${selectorWithEnv(env)}}[${observationWindow}]))`
+    ? `sum by (${env.labels.hash},${env.labels.service}) (increase(${BYTES_METRIC}{isDropped!="true",${env.labels.env}="${metricsEnv}"}[${observationWindow}]))`
     : null;
 
   const parallelQueries: Array<Promise<unknown>> = [
     queryInstant(env, bytesQuery),
     queryInstant(env, eventsQuery),
     queryInstant(env, totalQuery),
+    queryInstant(env, distinctCountQuery).catch(() => null),
   ];
   if (hashServiceQuery) {
     parallelQueries.push(queryInstant(env, hashServiceQuery));
   }
 
   const queryResults = await Promise.all(parallelQueries);
-  const [bytesRes, eventsRes, totalRes] = queryResults as [
+  const [bytesRes, eventsRes, totalRes, distinctCountRes] = queryResults as [
     Parameters<typeof parsePromResult>[0],
     Parameters<typeof parsePromResult>[0],
     Parameters<typeof parseScalarSum>[0],
+    Parameters<typeof parseScalarSum>[0] | null,
   ];
   const hashServiceRes = hashServiceQuery
-    ? (queryResults[3] as Parameters<typeof parsePromResult>[0])
+    ? (queryResults[4] as Parameters<typeof parsePromResult>[0])
     : null;
+
+  // Extract distinct pattern count from the count-of-counts query.
+  let patternUniverseCount: number | null = null;
+  if (distinctCountRes) {
+    const n = parseScalarSum(distinctCountRes);
+    if (Number.isFinite(n) && n > 0) patternUniverseCount = Math.round(n);
+  }
 
   const bytesByHash = parsePromResult(bytesRes, env.labels.hash);
   const eventsByHash = parsePromResult(eventsRes, env.labels.hash);
@@ -1046,6 +1109,17 @@ export async function runEstimateForecast(
     coverage_of_proposed_pct,
     rate_source: forecast_rate_source,
     rate_disclosure: forecast_rate_disclosure,
+    bytes_source: {
+      metric: BYTES_METRIC,
+      observation_window: observationWindow,
+      cohort: 'kept' as const,
+      scope_filter: selector,
+    },
+    pattern_count_source: {
+      query: 'distinctPatternCount' as const,
+      count: patternUniverseCount,
+      window: observationWindow,
+    },
     caveats,
   };
 }

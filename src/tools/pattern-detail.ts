@@ -206,12 +206,14 @@ async function fetchTrend(
 
 /**
  * Best-effort: fetch 3-5 sample events from the SIEM for this hash.
- * Uses the same fetchEventsByHashes path that top_patterns uses.
+ * Uses the same direct connector pull that pattern_examples uses:
+ * no buckets:1 cap, maxPullMinutes:2, and no fetchEventsByHashes wrapper
+ * that would limit scan depth on wide windows.
  * Returns { events, siemKind } where siemKind describes the resolution status.
  */
 async function fetchSampleEvents(
   hash: string,
-  patternName: string | null,
+  _patternName: string | null,
   window = '7d',
 ): Promise<{ events: string[]; siemKind: 'resolved' | 'unresolved' }> {
   try {
@@ -220,14 +222,24 @@ async function fetchSampleEvents(
     if (sel.kind !== 'resolved') {
       return { events: [], siemKind: 'unresolved' };
     }
-    const { fetchEventsByHashes } = await import('../lib/siem/sample.js');
-    const results = await fetchEventsByHashes(
-      [{ hash, service: undefined as unknown as string, severity: undefined as unknown as string }],
-      { perHash: 5, window },
-    );
-    const events = results.get(hash) ?? [];
+    const { getConnector } = await import('../lib/siem/index.js');
+    const { buildHashQuery } = await import('../lib/siem/hash-query.js');
+    const conn = getConnector(sel.id);
+    const q = buildHashQuery(sel.id, hash);
+    const probe = await conn.pullEvents({
+      window,
+      query: q,
+      targetEventCount: 5,
+      maxPullMinutes: 2,
+      onProgress: () => {},
+    });
+    // Defect 30 fix: render event bodies from the full event object, not just
+    // the first line of raw. oneLine unwraps transport envelopes (.log /
+    // .message / .body) before truncating, so multi-line JSON blocks whose
+    // SIEM connector delivers the opening "{" as a bare string are rendered
+    // via their parent envelope field rather than the bare "{" fragment.
     return {
-      events: events.slice(0, 5).map((e) => oneLine(e.raw, 120)),
+      events: probe.events.slice(0, 5).map((ev) => oneLine(ev, 120)),
       siemKind: 'resolved',
     };
   } catch {

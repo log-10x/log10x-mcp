@@ -91,6 +91,21 @@ export interface PreviewFilterEnvelope {
   forbidden_next_actions: string[];
   csv_path: string | null;
   data_source: 'tsdb' | 'poc_siem';
+  /**
+   * Pattern-universe count (all distinct patterns with nonzero bytes in the 30d
+   * window, not just top_n shown). Null when the TSDB query failed or not available.
+   */
+  pattern_count_total: number | null;
+  /**
+   * Provenance of the bytes data — allows an agent to explain why two tools
+   * show different numbers when called with different windows or cohorts.
+   */
+  bytes_source: {
+    metric: string;
+    observation_window: string;
+    cohort: 'kept';
+    scope_filter: string;
+  } | null;
 }
 
 // ─── Fixed-width table renderer ───────────────────────────────────────────────
@@ -195,43 +210,66 @@ function fmtRelativeAge(ageSeconds: number | null): string | null {
 
 // ─── TSDB data path ───────────────────────────────────────────────────────────
 
+interface TsdbResult {
+  rows: PreviewPatternRow[];
+  patternCountTotal: number | null;
+  metricsEnv: string;
+  scopeFilter: string;
+  timeRange: string;
+}
+
 /**
  * Query the metrics backend for top-N patterns scoped to service.
- * Returns rows sorted by bytes desc.
+ * Returns rows sorted by bytes desc plus metadata for the bytes_source envelope field.
  */
 async function fetchFromTsdb(
   env: EnvConfig,
   service: string,
   topN: number,
-): Promise<PreviewPatternRow[]> {
+): Promise<TsdbResult> {
   const metricsEnv = await resolveMetricsEnv(env);
   const timeRange = '30d';
 
-  // Top patterns scoped to service
-  const filters: Record<string, string> = {
-    [LABELS.service]: service,
-  };
+  // Scope selector — kept cohort, isDropped absence-tolerant.
+  const escapedService = service.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const scopeFilter = `${LABELS.service}="${escapedService}",${LABELS.env}="${metricsEnv}",isDropped!="true"`;
 
-  // topPatternsFull expects FilterValue map; use the raw PromQL here for
-  // simplicity (same query shape pql.topPatternsFull generates).
+  // Top patterns scoped to service
   const topQ =
     `topk(${topN}, sum by (${LABELS.pattern}, ${LABELS.service}, ${LABELS.severity}) ` +
-    `(increase(all_events_summaryBytes_total{` +
-    `${LABELS.service}="${service.replace(/"/g, '\\"')}",` +
-    `${LABELS.env}="${metricsEnv}",isDropped!="true"}[${timeRange}])))`;
+    `(increase(all_events_summaryBytes_total{${scopeFilter}}[${timeRange}])))`;
 
-  const [topRes, totalRes] = await Promise.all([
+  // Distinct pattern count for the pattern_count_total envelope field.
+  const distinctQ = pql.distinctPatternCount(
+    { [LABELS.service]: service, isDropped: { op: '!=', val: 'true' } },
+    metricsEnv,
+    timeRange,
+  );
+
+  const [topRes, totalRes, distinctRes] = await Promise.all([
     queryInstant(env, topQ),
     queryInstant(
       env,
-      `sum(increase(all_events_summaryBytes_total{` +
-      `${LABELS.service}="${service.replace(/"/g, '\\"')}",` +
-      `${LABELS.env}="${metricsEnv}",isDropped!="true"}[${timeRange}]))`,
+      `sum(increase(all_events_summaryBytes_total{${scopeFilter}}[${timeRange}]))`,
     ).catch(() => null),
+    queryInstant(env, distinctQ).catch(() => null),
   ]);
 
   if (topRes.status !== 'success' || topRes.data.result.length === 0) {
-    return [];
+    return {
+      rows: [],
+      patternCountTotal: null,
+      metricsEnv,
+      scopeFilter,
+      timeRange,
+    };
+  }
+
+  // Extract distinct pattern count.
+  let patternCountTotal: number | null = null;
+  if (distinctRes && distinctRes.status === 'success' && distinctRes.data.result.length > 0) {
+    const n = parsePrometheusValue(distinctRes.data.result[0]);
+    if (Number.isFinite(n) && n > 0) patternCountTotal = Math.round(n);
   }
 
   interface RawRow {
@@ -282,7 +320,7 @@ async function fetchFromTsdb(
   ]);
 
   // Assemble rows
-  return rawRows.map((r, idx): PreviewPatternRow => {
+  const rows = rawRows.map((r, idx): PreviewPatternRow => {
     const fsRes = firstSeenByHash.get(r.hash);
     const trendRes = trendResults[idx];
     let trendVals: number[] = [];
@@ -308,6 +346,7 @@ async function fetchFromTsdb(
       trend_sparkline: sparkline(trendVals, 8),
     };
   });
+  return { rows, patternCountTotal, metricsEnv, scopeFilter, timeRange };
 }
 
 // ─── Entry function ─────────────────────────────────────────────────────────────
@@ -332,10 +371,20 @@ export async function executePreviewFilter(args: {
 
   let patterns: PreviewPatternRow[] = [];
   let totalServiceBytes = 0;
+  let patternCountTotal: number | null = null;
+  let bytesSource: PreviewFilterEnvelope['bytes_source'] = null;
 
   if (env && dataSource === 'tsdb') {
     try {
-      patterns = await fetchFromTsdb(env, args.service, topN);
+      const tsdbResult = await fetchFromTsdb(env, args.service, topN);
+      patterns = tsdbResult.rows;
+      patternCountTotal = tsdbResult.patternCountTotal;
+      bytesSource = {
+        metric: 'all_events_summaryBytes_total',
+        observation_window: tsdbResult.timeRange,
+        cohort: 'kept',
+        scope_filter: tsdbResult.scopeFilter,
+      };
       totalServiceBytes = patterns.reduce((s, r) => s + r.bytes_per_month, 0);
     } catch {
       // Fall through to empty result; surface as no-signal
@@ -398,6 +447,8 @@ export async function executePreviewFilter(args: {
     forbidden_next_actions: forbiddenNextActions,
     csv_path: csvPath,
     data_source: dataSource,
+    pattern_count_total: patternCountTotal,
+    bytes_source: bytesSource,
   };
 
   return buildEnvelope({

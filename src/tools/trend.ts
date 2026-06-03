@@ -6,9 +6,10 @@
 
 import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
-import { queryRange } from '../lib/api.js';
+import { queryRange, queryInstant } from '../lib/api.js';
 import * as pql from '../lib/promql.js';
-import { bytesToCost, buildDisclosedDollarValue, type DisclosedDollarValue } from '../lib/cost.js';
+import { LABELS } from '../lib/promql.js';
+import { bytesToCost, buildDisclosedDollarValue, type DisclosedDollarValue, parsePrometheusValue } from '../lib/cost.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { fmtDollar, fmtPattern, fmtBytes, fmtDisclosedDollar, parseTimeframe, costPeriodLabel, normalizePattern } from '../lib/format.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
@@ -19,8 +20,9 @@ import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
 
 export const trendSchema = {
-  pattern: z.string().describe('Pattern name (e.g., "Payment_Gateway_Timeout")'),
-  timeRange: z.enum(['15m', '1h', '6h', '1d', '7d', '30d']).default('7d').describe('Time range. Sub-day values show fine-grained trajectory around an incident.'),
+  pattern: z.string().optional().describe('Pattern name (e.g., "Payment_Gateway_Timeout"). Provide either pattern or pattern_hash — pattern_hash is preferred when available (skips a metrics lookup).'),
+  pattern_hash: z.string().optional().describe('The tenx_hash of the pattern (11-char stable identity from top_patterns / preview_filter). Preferred over pattern when available.'),
+  timeRange: z.enum(['15m', '1h', '6h', '24h', '1d', '7d', '30d']).default('7d').describe("Time range. '24h' and '1d' are equivalent (one-day window). Sub-day values show fine-grained trajectory around an incident."),
   step: z.enum(['1m', '5m', '15m', '1h', '6h', '1d']).default('1h').describe('Data point interval. Use `1m`/`5m` for sub-day windows (15m/1h/6h), `1h`/`6h` for day-level, `1d` for week+ windows.'),
   analyzerCost: z.number().optional().describe('SIEM ingestion cost in $/GB'),
   environment: z.string().optional().describe('Environment nickname'),
