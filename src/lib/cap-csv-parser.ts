@@ -1,6 +1,5 @@
 /**
- * Rate cap-CSV parser — pulls per-pattern action attribution out of the
- * `<container>,<bytes>::<reason>:<action>` rows that
+ * Rate cap-CSV parser — reads the engine-only safety-floor file that
  * `log10x_configure_engine` writes to the customer gitops repo.
  *
  * THIS PARSER IS FOR THE RATE CAP CSV ONLY:
@@ -13,31 +12,35 @@
  * which uses a boolean per-pattern format, use `compact-csv-parser.ts`.
  *
  * Row format (set by configure-engine.ts):
- *   container,cap                                  ← header
- *   payment-service,2048::MCP default:compact      ← container default
- *   pat:abc123def,4096::keep audit floor:pass      ← per-pattern override
- *   pat:def456abc,128::tier_down dataset:tier_down
+ *   container,cap                              ← header
+ *   payment-service,2048::MCP default          ← container default
+ *   pat:abc123def,4096::keep audit floor       ← per-pattern override
+ *   pat:def456abc,128::tier_down dataset
  *
- * Value grammar: `<bytes>::<reason>:<action>`
+ * Value grammar: `<bytes>::<reason>`
  *   - bytes  — integer cap_bytes_per_window (>=0)
  *   - reason — free-text label (commas already replaced with `;` upstream)
- *   - action — one of pass | sample | compact | tier_down | offload | drop
+ *
+ * NOTE: The `:action` suffix that earlier versions of configure_engine
+ * appended to this file has been REMOVED. Action intent is now stored
+ * separately in `data/action-intent.json` (see action-intent-writer.ts
+ * and action-intent-parser.ts). Callers that need a pattern→action
+ * lookup must read action-intent.json, not this file. Legacy rows that
+ * still carry a `:action` suffix are parsed tolerantly — the suffix is
+ * ignored and `legacy_action_suffix` is set on the row for diagnostics.
  *
  * Two row shapes:
  *   - `pat:<hash>` rows — per-pattern overrides; the `key` field of
  *     CapCsvRow is the bare `<hash>` (the `pat:` prefix is stripped).
  *   - `<container>` rows — container-level defaults; the `key` field is
  *     the container name and `isContainerDefault=true`.
- *
- * Used by `runEstimateVerify` to attribute `isDropped="true"` bytes to
- * one of the four engine actions WITHOUT requiring the engine to emit a
- * second label. See cost-cutting-product-shape.md "Engine architecture
- * corrections" §6: action attribution is MCP-side via cap-CSV join.
  */
 
 import type { Action } from './cost.js';
 
-const VALID_ACTIONS: ReadonlySet<Action> = new Set<Action>([
+// Legacy action values recognised when stripping an old-format suffix.
+// Used only to detect and discard the suffix — NOT for action routing.
+const LEGACY_ACTIONS: ReadonlySet<string> = new Set<string>([
   'pass',
   'sample',
   'compact',
@@ -59,30 +62,33 @@ export interface CapCsvRow {
   /** Free-text reason label (commas already substituted to `;` upstream). */
   reason: string;
   /**
-   * The action the engine takes when this row's cap engages. Falls back
-   * to `'drop'` when the suffix is missing or unrecognized — matches the
-   * legacy interpretation of an unsuffixed cap (the rate receiver dropped
-   * over-cap bytes before the action grammar shipped).
+   * When a legacy `:action` suffix was present on this row (written by an
+   * older version of configure_engine), the stripped suffix value is
+   * preserved here for diagnostics. NOT used for action routing — see
+   * `data/action-intent.json` for the canonical action plan.
+   *
+   * @deprecated Action routing has moved to action-intent.json.
    */
-  action: Action;
-  /** True when the action suffix was missing or unparseable. */
-  action_suffix_missing: boolean;
+  legacy_action_suffix?: Action;
 }
 
 export interface ParseCapCsvResult {
   rows: CapCsvRow[];
   /**
-   * Pattern-hash → action lookup, populated only for `pat:<hash>` rows.
+   * Pattern-hash → CapCsvRow lookup, populated only for `pat:<hash>` rows.
    * Container-default rows are NOT inserted here — callers that want a
-   * per-pattern → action mapping with container fallback should use
-   * `buildPatternActionLookup` which threads the container default in
-   * via a separate (pattern_hash, container) → action map.
+   * per-pattern → bytes_cap mapping with container fallback should use
+   * `by_container` together with the pattern's container label.
+   *
+   * NOTE: This lookup no longer provides action attribution. For
+   * pattern → action, read `data/action-intent.json` via
+   * `fetchAndParseActionIntent` in `action-intent-parser.ts`.
    */
   by_pattern: Map<string, CapCsvRow>;
   /**
-   * Container → action lookup for the container-default rows. The
-   * `runEstimateVerify` join uses this as the fallback action when a
-   * dropped pattern_hash has no `pat:<hash>` override.
+   * Container → CapCsvRow lookup for the container-default rows. Used
+   * to resolve per-container byte caps when a pattern has no explicit
+   * `pat:<hash>` override row.
    */
   by_container: Map<string, CapCsvRow>;
   /**
@@ -161,8 +167,9 @@ export function parseCapCsv(content?: string | null): ParseCapCsvResult {
       isContainerDefault: !isPattern,
       bytes_cap: parsed.bytes_cap,
       reason: parsed.reason,
-      action: parsed.action,
-      action_suffix_missing: parsed.action_suffix_missing,
+      ...(parsed.legacy_action_suffix !== undefined
+        ? { legacy_action_suffix: parsed.legacy_action_suffix }
+        : {}),
     };
     result.rows.push(row);
     if (isPattern) {
@@ -177,30 +184,37 @@ export function parseCapCsv(content?: string | null): ParseCapCsvResult {
 interface ParsedValue {
   bytes_cap: number;
   reason: string;
-  action: Action;
-  action_suffix_missing: boolean;
+  /**
+   * When the row was written by a legacy version of configure_engine that
+   * appended `:<action>` to the reason field, this holds the stripped
+   * action value. Undefined for new-format rows. NOT used for routing —
+   * action intent lives in `data/action-intent.json`.
+   */
+  legacy_action_suffix?: Action;
 }
 
 /**
  * Parse the value column of a cap-CSV row.
- *   `<bytes>::<reason>:<action>`
+ *
+ * New format: `<bytes>::<reason>`
+ * Legacy format (old configure_engine): `<bytes>::<reason>:<action>`
  *
  * Returns null when `bytes` does not parse — that signals a malformed
- * row to the caller. Action suffix is optional; when absent we mark
- * `action_suffix_missing=true` and default the action to 'drop' (the
- * legacy interpretation of an unsuffixed cap).
+ * row to the caller.
+ *
+ * When a legacy `:action` suffix is detected (the last colon-segment is
+ * a known Action value), it is stripped from the reason and preserved in
+ * `legacy_action_suffix` for diagnostics only.
  */
 function parseCapValue(value: string): ParsedValue | null {
   const sepIdx = value.indexOf('::');
   if (sepIdx < 0) {
-    // Treat the whole value as bytes.
+    // Treat the whole value as bytes (no reason, no action).
     const n = Number(value);
     if (!Number.isFinite(n) || n < 0) return null;
     return {
       bytes_cap: Math.max(0, Math.round(n)),
       reason: '',
-      action: 'drop',
-      action_suffix_missing: true,
     };
   }
   const bytesStr = value.substring(0, sepIdx);
@@ -209,43 +223,42 @@ function parseCapValue(value: string): ParsedValue | null {
   if (!Number.isFinite(bytesNum) || bytesNum < 0) return null;
   const bytes_cap = Math.max(0, Math.round(bytesNum));
 
-  // Action is whatever follows the LAST colon in `rest`, IF it parses as a
-  // known Action. configure-engine writes `<reason>:<action>` and replaces
-  // any inner commas with `;`, so reasons with embedded colons would still
-  // round-trip correctly here.
+  // Detect and strip a legacy `:action` suffix. If the last colon-segment
+  // of `rest` is a known action token, peel it off and record it in
+  // `legacy_action_suffix`. This keeps the reason field clean for new
+  // code while remaining backward-compatible with existing CSV files.
   const lastColon = rest.lastIndexOf(':');
-  if (lastColon < 0) {
-    return {
-      bytes_cap,
-      reason: rest,
-      action: 'drop',
-      action_suffix_missing: true,
-    };
+  if (lastColon >= 0) {
+    const candidate = rest.substring(lastColon + 1).trim();
+    if (LEGACY_ACTIONS.has(candidate)) {
+      return {
+        bytes_cap,
+        reason: rest.substring(0, lastColon),
+        legacy_action_suffix: candidate as Action,
+      };
+    }
   }
-  const candidate = rest.substring(lastColon + 1).trim();
-  if (VALID_ACTIONS.has(candidate as Action)) {
-    return {
-      bytes_cap,
-      reason: rest.substring(0, lastColon),
-      action: candidate as Action,
-      action_suffix_missing: false,
-    };
-  }
+
   return {
     bytes_cap,
     reason: rest,
-    action: 'drop',
-    action_suffix_missing: true,
   };
 }
 
 /**
  * Build a pattern_hash → Action lookup with container-default fallback.
  *
- * Resolution order, per cost-cutting-product-shape.md §6:
- *   1. `pat:<hash>` row in the CSV → that row's action
- *   2. The pattern's container (passed in by the caller) → container default
- *   3. `'drop'` — legacy fallback for caps without an action suffix
+ * @deprecated Action attribution has moved to `data/action-intent.json`.
+ *   Use `fetchAndParseActionIntent` from `action-intent-parser.ts` to get
+ *   the canonical pattern → action map. This function is retained for
+ *   backward compatibility with legacy rows that still carry a
+ *   `legacy_action_suffix` field, and for callers that have not yet
+ *   migrated to the action-intent path.
+ *
+ * Resolution order (legacy):
+ *   1. `pat:<hash>` row in the CSV that has `legacy_action_suffix` → that value
+ *   2. The pattern's container default row `legacy_action_suffix` → that value
+ *   3. Absent from the map — callers treat absence as "unattributed"
  *
  * The caller knows which container a pattern_hash belongs to via the
  * TSDB query (the engine emits both `tenx_hash` and `k8s_container` as
@@ -258,17 +271,49 @@ export function buildPatternActionLookup(
   const out = new Map<string, Action>();
   for (const [hash, container] of patternToContainer.entries()) {
     const patRow = parsed.by_pattern.get(hash);
+    if (patRow?.legacy_action_suffix) {
+      out.set(hash, patRow.legacy_action_suffix);
+      continue;
+    }
+    const containerRow = parsed.by_container.get(container);
+    if (containerRow?.legacy_action_suffix) {
+      out.set(hash, containerRow.legacy_action_suffix);
+      continue;
+    }
+    // No legacy suffix — leave the hash out of the map; callers treat
+    // the absence as "unattributed" rather than defaulting to drop.
+  }
+  return out;
+}
+
+/**
+ * Build a pattern_hash → bytes_cap lookup with container-default fallback.
+ *
+ * This is the primary non-deprecated function for reading cap CSV data.
+ * It returns the bytes cap for each pattern, which is the engine safety
+ * floor, not the action intent (action intent is in action-intent.json).
+ *
+ * Resolution order:
+ *   1. `pat:<hash>` row → that row's bytes_cap
+ *   2. The pattern's container default row → container bytes_cap
+ *   3. Absent from the map — pattern has no known cap
+ */
+export function buildPatternBytesCapLookup(
+  parsed: ParseCapCsvResult,
+  patternToContainer: Map<string, string>
+): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const [hash, container] of patternToContainer.entries()) {
+    const patRow = parsed.by_pattern.get(hash);
     if (patRow) {
-      out.set(hash, patRow.action);
+      out.set(hash, patRow.bytes_cap);
       continue;
     }
     const containerRow = parsed.by_container.get(container);
     if (containerRow) {
-      out.set(hash, containerRow.action);
+      out.set(hash, containerRow.bytes_cap);
       continue;
     }
-    // No CSV row at all — leave the hash out of the map; callers treat
-    // the absence as "unattributed" rather than defaulting to drop.
   }
   return out;
 }

@@ -1,26 +1,32 @@
 /**
- * Shared cap-CSV fetch helper — pulls the per-pattern action plan that
- * `log10x_configure_engine` last committed to the env's gitops repo.
+ * Shared fetch helpers for MCP-managed gitops files.
  *
- * Used by:
- *   - `_setVerifyRunner` (commitment_report weekly aggregate)
- *   - `log10x_services` (per-service action-axis columns)
- *   - `log10x_overflow_contents` (filtering dropped patterns to the
- *     offload subset, not the drop subset)
+ * fetchCapCsvForEnv — pulls the rate cap CSV (engine safety floor):
+ *   `pipelines/run/receive/rate/caps.csv`
+ *   Used by commitment_report verify, services, and overflow_contents to
+ *   supply per-container byte caps for context. The cap CSV no longer
+ *   carries `:action` suffixes — action intent is in action-intent.json.
  *
- * Best-effort: returns `undefined` on any failure (no `gh` available, no
- * gitops repo configured, file not found, decode error). Callers MUST
- * treat undefined as "no CSV available — fall back to the unattributed
- * path" rather than throwing.
+ * fetchActionIntentForEnv — pulls the canonical per-pattern action plan:
+ *   `data/action-intent.json`
+ *   Used by services, overflow_contents, and estimate-savings to resolve
+ *   pattern→action attribution. Takes precedence over any legacy action
+ *   suffix that may still be in the cap CSV rows.
  *
- * The CSV is base64-decoded from the GitHub Contents API response. We
- * deliberately do NOT cache here — the freshness of the action attribution
- * matters more than the round-trip latency, and the gh request is sub-second
- * on any reasonable gitops repo.
+ * Both helpers are best-effort: return undefined on any failure (no `gh`
+ * available, no gitops repo configured, file not found, decode error).
+ * Callers MUST treat undefined as "no data available — fall back to the
+ * unattributed path" rather than throwing.
+ *
+ * Neither helper caches — the freshness of the action attribution matters
+ * more than round-trip latency, and gh requests are sub-second on any
+ * reasonable gitops repo.
  */
 
 import type { EnvConfig } from './environments.js';
+import { parseActionIntent, type ActionIntentParseResult } from './action-intent-parser.js';
 
+/** Fetch the rate cap CSV string from the gitops repo. */
 export async function fetchCapCsvForEnv(
   env: EnvConfig,
 ): Promise<string | undefined> {
@@ -47,6 +53,41 @@ export async function fetchCapCsvForEnv(
     // are stripped by Buffer.from.
     const decoded = Buffer.from(stdout.trim(), 'base64').toString('utf8');
     return decoded.length > 0 ? decoded : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Fetch and parse the action-intent.json from the gitops repo.
+ *
+ * Returns undefined on any failure. On success, returns the full
+ * ActionIntentParseResult so callers can use `by_pattern` directly
+ * (the canonical pattern→action Map).
+ *
+ * Default path: `data/action-intent.json`
+ */
+export async function fetchActionIntentForEnv(
+  env: EnvConfig,
+  path = 'data/action-intent.json'
+): Promise<ActionIntentParseResult | undefined> {
+  const repo = env.gitops?.repo;
+  if (!repo) return undefined;
+  try {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const exec = promisify(execFile);
+    const { stdout } = await exec(
+      'gh',
+      ['api', `/repos/${repo}/contents/${path}`, '--jq', '.content'],
+      { timeout: 8000, maxBuffer: 4 * 1024 * 1024 }
+    );
+    if (!stdout) return undefined;
+    const decoded = Buffer.from(stdout.trim(), 'base64').toString('utf8');
+    if (!decoded) return undefined;
+    const result = parseActionIntent(decoded);
+    if (result.json_parse_error) return undefined;
+    return result;
   } catch {
     return undefined;
   }

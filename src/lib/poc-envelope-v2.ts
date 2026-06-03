@@ -1349,6 +1349,7 @@ function buildCapCsv(
 
   const lines: string[] = ['container,cap'];
   // Container-default rows — one per service, sorted for stable diffs.
+  // No `:action` suffix — action intent is in data/action-intent.json.
   for (const [svc, agg] of [...services.entries()].sort(([a], [b]) => a.localeCompare(b))) {
     const action: CostAction = agg.isException ? 'pass' : level1;
     const reason = agg.isException
@@ -1356,11 +1357,12 @@ function buildCapCsv(
       : `MCP poc_envelope (destination_level_1=${level1})`;
     const monthlyBytes = agg.bytes * (24 * 30) / Math.max(0.001, windowDurationSeconds / 3600);
     const cap = Math.round(capBytesPerWindow(action, monthlyBytes, 10));
-    lines.push(`${svc},${cap}::${reason.replace(/,/g, ';')}:${action}`);
+    lines.push(`${svc},${cap}::${reason.replace(/,/g, ';')}`);
   }
   // Per-pattern overrides — emitted when the action differs from the
   // container default OR when the row is exception-pinned. Sorted by
   // pattern_hash so the CSV is reproducible across builds.
+  // No `:action` suffix — action intent is in data/action-intent.json.
   const overrides: Array<{ hash: string; line: string }> = [];
   for (const p of patterns) {
     if (!p.fingerprint_hash) continue;
@@ -1370,7 +1372,7 @@ function buildCapCsv(
     if (p.actions.recommended_action === containerAction && !isException) continue;
     overrides.push({
       hash: p.fingerprint_hash,
-      line: `pat:${p.fingerprint_hash},${p.actions.cap_bytes_per_window}::${p.actions.reason.replace(/,/g, ';')}:${p.actions.recommended_action}`,
+      line: `pat:${p.fingerprint_hash},${p.actions.cap_bytes_per_window}::${p.actions.reason.replace(/,/g, ';')}`,
     });
   }
   overrides.sort((a, b) => a.hash.localeCompare(b.hash));

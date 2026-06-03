@@ -310,10 +310,12 @@ export interface VerifyResultLike {
    * adapter encodes that choice with the right rate_source label. */
   rate_source?: 'list_price' | 'customer_supplied' | 'unset';
   /**
-   * Per-pattern action attribution from runEstimateVerify (Item 5). When
-   * present, the adapter populates WeeklyVerifyResult.per_pattern_breakdown
-   * so the commitment-report aggregator buckets bytes by engine action.
-   * Absent when the caller did not supply `cap_csv_content` to verify.
+   * Per-pattern action attribution from runEstimateVerify. When present,
+   * the adapter populates WeeklyVerifyResult.per_pattern_breakdown so the
+   * commitment-report aggregator buckets bytes by engine action. Actions
+   * are sourced from `data/action-intent.json` (canonical) with legacy
+   * cap-CSV suffix as fallback. Absent when neither `action_intent_content`
+   * nor `cap_csv_content` was supplied to verify.
    */
   per_pattern_breakdown?: Array<{
     pattern_hash: string;
@@ -335,12 +337,11 @@ export interface VerifyResultLike {
  *  - attribution: VerifyResult.attribution_pct fields are already
  *    fractions in [0,1] (estimate-savings.ts:775 pctOf), matching
  *    WeeklyVerifyResult.attribution's normalized-fraction contract.
- *  - per_pattern_breakdown: NOT populated. The cap-CSV `:<action>`
- *    join lands in Item 5; until then the §E.1 fallback path in
- *    `aggregateWeekly` (line 678) attributes all bytes_dropped to the
- *    `drop` bucket and `executeCommitmentReport` pushes the caveat at
- *    line 1182. The four-way action split is therefore arithmetically
- *    a 1-bucket split today — that's the known Item-5 gap.
+ *  - per_pattern_breakdown: populated when runEstimateVerify received
+ *    `action_intent_content` (canonical, from data/action-intent.json)
+ *    or legacy `cap_csv_content` rows with `:action` suffixes. When
+ *    neither is available, the §E.1 fallback in `aggregateWeekly`
+ *    attributes all bytes_dropped to the `drop` bucket.
  *
  * `week_start` is propagated through verbatim so the weekly_series
  * row labels match the report's enumerated week-boundary cursor.
@@ -437,13 +438,13 @@ export interface CommitmentReportEnvelope {
    *
    * Each share is a percent of bytes_in (NOT a share of delivered_pct).
    * Invariant: drop + compact + offload + tier_down ≈ delivered_pct
-   * within ±0.5pp rounding. Patterns whose cap CSV row omits the
-   * `:<action>` suffix default to `'pass'` and contribute 0 to every
-   * bucket — see §E.1 in the patch spec.
+   * within ±0.5pp rounding. Patterns not present in `data/action-intent.json`
+   * (and with no legacy cap-CSV action suffix) default to `'pass'` and
+   * contribute 0 to every bucket — see §E.1 in the patch spec.
    *
    * The `offload` bucket is the metric-side `dropped_bytes_in_window`
    * for patterns where `getOffloadStatusBatch` returned `is_offloaded`;
-   * the metric stamp overrides any cap-CSV action. On metric backend
+   * the metric stamp overrides any action-intent entry. On metric backend
    * timeout the bucket is 0 and a soft-warning lands in `caveats`.
    */
   percent_reduction_by_action: {
@@ -518,12 +519,13 @@ export interface CommitmentReportEnvelope {
   /**
    * Per-pattern attribution rows merged across the report period.
    *
-   * `action_taken` is sourced from the cap CSV `:<action>` suffix
-   * (project_unified_savings_tool.md), falling back to `'pass'` when
-   * absent. Patterns flagged by `getOffloadStatusBatch.is_offloaded`
-   * override to `'offload'` regardless of the cap CSV — the metric
-   * stamp is ground truth. `dollars_saved` is null whenever the row's
-   * `rate_source === 'unset'`.
+   * `action_taken` is sourced from `data/action-intent.json` (canonical)
+   * via the `runEstimateVerify` → `computeActionSplit` path, falling back
+   * to legacy cap-CSV action suffixes for rows written before the
+   * action-intent migration. Patterns flagged by
+   * `getOffloadStatusBatch.is_offloaded` override to `'offload'`
+   * regardless — the metric stamp is ground truth. `dollars_saved` is
+   * null whenever the row's `rate_source === 'unset'`.
    *
    * Empty when the upstream verify runner did not return
    * `per_pattern_breakdown` for any week — see the caveat path in §E.1.

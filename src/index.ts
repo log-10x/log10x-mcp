@@ -116,7 +116,7 @@ import { deleteEnvSchema, executeDeleteEnv } from './tools/delete-env.js';
 import { rotateApiKeySchema, executeRotateApiKey } from './tools/rotate-api-key.js';
 import { servicesSchema, executeServices } from './tools/services.js';
 import { overflowContentsSchema, executeOverflowContents } from './tools/overflow-contents.js';
-import { fetchCapCsvForEnv } from './lib/cap-csv-fetch.js';
+import { fetchCapCsvForEnv, fetchActionIntentForEnv } from './lib/cap-csv-fetch.js';
 import { findSkewSchema, executeFindSkew } from './tools/find-skew.js';
 // find_constant_slots, find_uuid_in_body, find_incident_cluster removed
 // pre-launch (2026-05-28): produced findings the agent could not act on
@@ -1514,12 +1514,16 @@ _setVerifyRunner(async ({ commitment, week_start, week_end }) => {
       (Date.parse(week_end) - Date.parse(week_start)) / MS_PER_DAY
     )
   );
-  // Item 5: best-effort cap-CSV fetch for action-split. We pull the
-  // CSV via `gh api` against the env's gitops repo + lookup_path; on
-  // any failure (no gh, no repo, file not found) we pass undefined
-  // and the verify run skips the join — the report still works, the
-  // legacy single-bucket fallback in commitment-report kicks in.
-  const capCsv = await fetchCapCsvForEnv(env);
+  // Best-effort fetch of action-intent.json (canonical action source) and
+  // cap CSV (byte-cap context + legacy action suffix fallback). Both are
+  // passed to runEstimateVerify for action-split attribution. On any
+  // failure (no gh, no repo, file not found) the respective field is
+  // undefined and the verify run falls back to the §E.1 single-bucket
+  // attribution in commitment-report.
+  const [capCsv, actionIntent] = await Promise.all([
+    fetchCapCsvForEnv(env).catch(() => undefined),
+    fetchActionIntentForEnv(env).catch(() => undefined),
+  ]);
   const vr = await runEstimateVerify(
     {
       destination: commitment.destination,
@@ -1528,15 +1532,17 @@ _setVerifyRunner(async ({ commitment, week_start, week_end }) => {
       commitment_id: commitment.id,
       contract_type: commitment.contract_type,
       cap_csv_content: capCsv,
+      action_intent_content: actionIntent
+        ? JSON.stringify({ entries: actionIntent.entries, schema_version: '1.0' })
+        : undefined,
     },
     env
   );
   return adaptVerifyResultToWeekly(vr, week_start);
 });
 
-// Item 5 helper extracted to `src/lib/cap-csv-fetch.ts` so item 6
-// (services action axis + overflow_contents tool) can re-use the same
-// best-effort fetch path without duplicating the `gh api` call.
+// Fetch helpers live in `src/lib/cap-csv-fetch.ts` so tools can re-use
+// them without duplicating the `gh api` call.
 
 // ── Tool: log10x_commitment_report (CFO-facing Bayesian weekly aggregate) ──
 

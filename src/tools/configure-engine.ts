@@ -73,6 +73,11 @@ import {
   RECEIVER_DEFAULT_RESET_MS,
   scaleObservedToReceiverWindow,
 } from '../lib/window-scaling.js';
+import {
+  writeActionIntent,
+  buildActionIntentEntries,
+  type ActionIntentEntry,
+} from '../lib/action-intent-writer.js';
 
 // ─── constants ────────────────────────────────────────────────────────
 const DEFAULT_LOOKUP_PATH = 'pipelines/run/receive/rate/caps.csv';
@@ -747,10 +752,23 @@ export async function executeConfigureEngine(
     { targetPercent, baselineMonthlyBytes: currentMonthlyBytes }
   );
 
+  // Build action-intent.json alongside the cap CSV. The intent file is the
+  // canonical source of pattern→action mapping; the cap CSV is now the
+  // engine-only safety-floor file (no `:action` suffix).
+  const actionIntentEntries: ActionIntentEntry[] = buildActionIntentEntries(
+    rows.map((r) => ({
+      pattern_hash: r.pattern_hash,
+      action: r.action,
+      service: args.service,
+      reason: r.floor_reason ?? r.reason,
+    }))
+  );
+  const actionIntentJson = writeActionIntent(actionIntentEntries);
+
   const prCommand =
     !feasible || targetMetByCurrent
       ? null
-      : renderPrCommand(args, target.resolved, csvDiff);
+      : renderPrCommand(args, target.resolved, csvDiff, actionIntentJson);
 
   // ── Auto-apply (industry-standard MCP write-tool behavior) ──
   // Convention: write-capable MCPs auto-execute by default; safety lives in
@@ -927,8 +945,11 @@ async function tryConsumePocSnapshot(
   const baselineCsv = args.current_csv ?? '';
   const diff = renderUnifiedDiff(baselineCsv, capCsv);
 
+  // TODO: build action-intent.json from the POC envelope when poc-envelope-v2
+  // exposes per-pattern action entries. Until then pass undefined — the PR
+  // script will write the cap CSV only.
   const prCommand = feasibility && feasibility.feasible
-    ? renderPrCommand(args, resolved, diff)
+    ? renderPrCommand(args, resolved, diff, undefined)
     : null;
 
   let applied: ConfigureEngineData['applied'];
@@ -1282,29 +1303,30 @@ function renderCsvDiff(
   const baseline = parseCsv(currentCsv);
   const merged = new Map(baseline.rows);
   // Container-level default row per container. Format:
-  // `<bytes>::<reason>:<action>` (matches configure_regulator's
-  // convention so the engine reads both files with the same parser).
+  // `<bytes>::<reason>` (no `:action` suffix — action intent lives in
+  // data/action-intent.json, not in the cap CSV).
   const avgCap = rows.length > 0
     ? Math.round(rows.reduce((s, r) => s + r.cap_bytes_per_window, 0) / rows.length)
     : 0;
   const reason = `MCP configure_engine (${reduction}, default=${defaultAction})`;
   for (const c of containers) {
-    const value = `${avgCap}::${reason.replace(/,/g, ';')}:${defaultAction}`;
+    const value = `${avgCap}::${reason.replace(/,/g, ';')}`;
     merged.set(c, value);
   }
   // Per-pattern overrides land in a sibling file keyed `pat:<hash>` so
   // the engine's lookup chain reads container-default first, then
   // pattern overrides. Spec L280 keys rows by pattern_hash.
+  // No `:action` suffix — action intent is in action-intent.json.
   for (const r of rows) {
     if (r.floor_reason) {
       merged.set(
         `pat:${r.pattern_hash}`,
-        `${r.cap_bytes_per_window}::${r.floor_reason.replace(/,/g, ';')}:pass`
+        `${r.cap_bytes_per_window}::${r.floor_reason.replace(/,/g, ';')}`
       );
     } else if (r.action !== defaultAction) {
       merged.set(
         `pat:${r.pattern_hash}`,
-        `${r.cap_bytes_per_window}::${r.reason.replace(/,/g, ';')}:${r.action}`
+        `${r.cap_bytes_per_window}::${r.reason.replace(/,/g, ';')}`
       );
     }
   }
@@ -1354,11 +1376,13 @@ function renderUnifiedDiff(before: string, after: string): string {
 function renderPrCommand(
   args: ConfigureEngineArgs,
   resolved: ResolvedTarget,
-  csvDiff: string
+  csvDiff: string,
+  actionIntentJson?: string
 ): string {
   const repo = resolved.gitops_repo;
   const branch = resolved.gitops_branch;
   const lookupPath = resolved.lookup_path;
+  const actionIntentPath = 'data/action-intent.json';
   const prBranch = `mcp/engine-policy-${slug(args.service)}-${Date.now()}`;
   const prTitle = `engine-policy: configure ${args.service} (${args.containers!.length} container${args.containers!.length === 1 ? '' : 's'})`;
 
@@ -1371,6 +1395,7 @@ function renderPrCommand(
   out.push(`REPO=${shellQuote(repo)}`);
   out.push(`BASE=${shellQuote(branch)}`);
   out.push(`LOOKUP_PATH=${shellQuote(lookupPath)}`);
+  out.push(`ACTION_INTENT_PATH=${shellQuote(actionIntentPath)}`);
   out.push(`BRANCH=${shellQuote(prBranch)}`);
   out.push(`PR_TITLE=${shellQuote(prTitle)}`);
   out.push('');
@@ -1379,6 +1404,23 @@ function renderPrCommand(
   out.push(newCsv.trimEnd());
   out.push('CSV_EOF');
   out.push('');
+
+  // action-intent.json block (written atomically before cap CSV so a
+  // partial-commit window always has intent available even if the CSV
+  // commit fails; the parser treats a missing CSV gracefully).
+  if (actionIntentJson) {
+    out.push('INTENT_TMPFILE=$(mktemp)');
+    out.push("cat > \"$INTENT_TMPFILE\" <<'INTENT_EOF'");
+    out.push(actionIntentJson.trimEnd());
+    out.push('INTENT_EOF');
+    out.push('');
+    out.push('# Resolve current action-intent.json SHA (empty if not yet created).');
+    out.push(
+      'INTENT_SHA=$(gh api "/repos/$REPO/contents/$ACTION_INTENT_PATH?ref=$BASE" --jq .sha 2>/dev/null || true)'
+    );
+    out.push('');
+  }
+
   out.push('# Resolve current file SHA (empty if the file does not exist yet).');
   out.push(
     'CUR_SHA=$(gh api "/repos/$REPO/contents/$LOOKUP_PATH?ref=$BASE" --jq .sha 2>/dev/null || true)'
@@ -1392,7 +1434,21 @@ function renderPrCommand(
   out.push('  -f ref="refs/heads/$BRANCH" \\');
   out.push('  -f sha="$BASE_SHA" >/dev/null 2>&1 || true');
   out.push('');
-  out.push('# Commit content via the contents API.');
+
+  if (actionIntentJson) {
+    // Commit action-intent.json FIRST (write intent before floor).
+    out.push('# Commit action-intent.json (written before cap CSV — intent is available even on partial commit).');
+    out.push('INTENT_B64=$(base64 < "$INTENT_TMPFILE" | tr -d "\\n")');
+    out.push('INTENT_ARGS=( -X PUT "/repos/$REPO/contents/$ACTION_INTENT_PATH"');
+    out.push('  -f branch="$BRANCH"');
+    out.push('  -f message="$PR_TITLE (action-intent.json)"');
+    out.push('  -f content="$INTENT_B64" )');
+    out.push('[ -n "$INTENT_SHA" ] && INTENT_ARGS+=( -f sha="$INTENT_SHA" )');
+    out.push('gh api "${INTENT_ARGS[@]}"');
+    out.push('');
+  }
+
+  out.push('# Commit cap CSV via the contents API.');
   out.push('CONTENT_B64=$(base64 < "$TMPFILE" | tr -d "\\n")');
   out.push('PUT_ARGS=( -X PUT "/repos/$REPO/contents/$LOOKUP_PATH"');
   out.push('  -f branch="$BRANCH"');

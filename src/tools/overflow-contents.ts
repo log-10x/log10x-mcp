@@ -47,7 +47,7 @@ import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { agentOnly } from '../lib/agent-only.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
-import { fetchCapCsvForEnv } from '../lib/cap-csv-fetch.js';
+import { fetchCapCsvForEnv, fetchActionIntentForEnv } from '../lib/cap-csv-fetch.js';
 import { parseCapCsv, buildPatternActionLookup } from '../lib/cap-csv-parser.js';
 import type { Action } from '../lib/cost.js';
 
@@ -147,7 +147,7 @@ export async function executeOverflowContents(
   const firstSeenQ = `min by (${LABELS.hash}) (timestamp(${BYTES_METRIC}{${baseSelector}}))`;
   const lastSeenQ = `max by (${LABELS.hash}) (timestamp(${BYTES_METRIC}{${baseSelector}}))`;
 
-  const [bytesRes, eventsRes, firstHalfRes, firstSeenRes, lastSeenRes, capCsvContent] =
+  const [bytesRes, eventsRes, firstHalfRes, firstSeenRes, lastSeenRes, capCsvContent, actionIntent] =
     await Promise.all([
       queryInstant(env, bytesByPatternQ).catch(() => null),
       queryInstant(env, eventsByPatternQ).catch(() => null),
@@ -155,12 +155,18 @@ export async function executeOverflowContents(
       queryInstant(env, firstSeenQ).catch(() => null),
       queryInstant(env, lastSeenQ).catch(() => null),
       fetchCapCsvForEnv(env).catch(() => undefined),
+      fetchActionIntentForEnv(env).catch(() => undefined),
     ]);
 
+  // action-intent.json is the canonical source for pattern→action.
+  // Fall back to legacy cap-CSV action suffixes when action-intent is absent.
+  const actionIntentLookup: Map<string, Action> = actionIntent?.by_pattern ?? new Map();
   const parsedCsv = capCsvContent ? parseCapCsv(capCsvContent) : null;
+  // Whether we have a usable action source for offload filtering.
+  const hasActionSource = actionIntentLookup.size > 0 || (parsedCsv !== null && parsedCsv.rows.length > 0);
   const capCsvStatus: OverflowContentsSummary['cap_csv_status'] = !env.gitops?.repo
     ? 'not_attempted'
-    : parsedCsv && parsedCsv.rows.length > 0
+    : hasActionSource
       ? 'applied'
       : 'unavailable';
 
@@ -278,16 +284,22 @@ export async function executeOverflowContents(
     }
   }
 
-  // Filter to the offload action via cap-CSV. When no CSV: all dropped
-  // bytes pass through with `action='offload'` flagged as a caveat in
-  // cap_csv_status.
-  const actionLookup = parsedCsv
+  // Build the action lookup: action-intent.json first, legacy cap-CSV suffix fallback.
+  // Rebuild with the full hashContainer map now that it's populated.
+  const legacyActionLookup: Map<string, Action> = parsedCsv
     ? buildPatternActionLookup(parsedCsv, hashContainer)
     : new Map<string, Action>();
+
+  // Filter to the offload action. When no action source: all dropped
+  // bytes pass through with `action='offload'` flagged as a caveat in
+  // cap_csv_status.
   const filtered: Aggr[] = [];
   for (const aggr of byHash.values()) {
     if (capCsvStatus === 'applied') {
-      const action = actionLookup.get(aggr.pattern_hash);
+      // Resolution order: action-intent.json (canonical) → legacy cap-CSV suffix.
+      const action =
+        actionIntentLookup.get(aggr.pattern_hash) ??
+        legacyActionLookup.get(aggr.pattern_hash);
       // Only `offload` patterns surface. `drop` is hard-killed (not in
       // S3). `compact` / `tier_down` route elsewhere. Missing entries
       // are treated as "not offload" — we'd rather under-report than

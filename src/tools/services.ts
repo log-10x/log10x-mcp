@@ -46,7 +46,7 @@ import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { agentOnly } from '../lib/agent-only.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
-import { fetchCapCsvForEnv } from '../lib/cap-csv-fetch.js';
+import { fetchCapCsvForEnv, fetchActionIntentForEnv } from '../lib/cap-csv-fetch.js';
 import { parseCapCsv, buildPatternActionLookup } from '../lib/cap-csv-parser.js';
 
 export const servicesSchema = {
@@ -189,16 +189,21 @@ async function executeServicesInner(
   const droppedPerServicePatternQ = `sum by (${LABELS.service}, ${LABELS.hash}, ${containerLabel}) (increase(all_events_summaryBytes_total{${LABELS.env}="${metricsEnv}",isDropped="true"}[${tf.range}]))`;
   const passedPerServiceQ = `sum by (${LABELS.service}) (increase(all_events_summaryBytes_total{${LABELS.env}="${metricsEnv}",isDropped!="true"}[${tf.range}]))`;
 
-  const [droppedRes, passedRes, capCsvContent] = await Promise.all([
+  const [droppedRes, passedRes, capCsvContent, actionIntent] = await Promise.all([
     queryInstant(env, droppedPerServicePatternQ).catch(() => null),
     queryInstant(env, passedPerServiceQ).catch(() => null),
     fetchCapCsvForEnv(env).catch(() => undefined),
+    fetchActionIntentForEnv(env).catch(() => undefined),
   ]);
 
+  // action-intent.json is the canonical source for pattern→action.
+  // Fall back to legacy cap-CSV action suffixes when action-intent is absent.
+  const actionIntentLookup: Map<string, Action> = actionIntent?.by_pattern ?? new Map();
   const parsedCsv = capCsvContent ? parseCapCsv(capCsvContent) : null;
+  const hasActionSource = actionIntentLookup.size > 0 || (parsedCsv !== null && parsedCsv.rows.length > 0);
   const capCsvStatus: ServicesSummary['cap_csv_status'] = !env.gitops?.repo
     ? 'not_attempted'
-    : parsedCsv && parsedCsv.rows.length > 0
+    : hasActionSource
       ? 'applied'
       : 'unavailable';
 
@@ -251,7 +256,8 @@ async function executeServicesInner(
         if (container) hashToContainer.set(hash, container);
       }
     }
-    const actionLookup = parsedCsv
+    // Build legacy cap-CSV lookup for fallback when action-intent is absent.
+    const legacyActionLookup = parsedCsv
       ? buildPatternActionLookup(parsedCsv, hashToContainer)
       : new Map<string, Action>();
 
@@ -265,7 +271,9 @@ async function executeServicesInner(
         had_csv_hit: false,
       };
       cur.had_drops = true;
-      const action = actionLookup.get(row.hash);
+      // Resolution order: action-intent.json (canonical) → legacy cap-CSV suffix.
+      const action =
+        actionIntentLookup.get(row.hash) ?? legacyActionLookup.get(row.hash);
       if (action === 'offload') {
         cur.bytes_offloaded += row.bytes;
         cur.had_csv_hit = true;

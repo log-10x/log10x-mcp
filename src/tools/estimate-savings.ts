@@ -67,11 +67,11 @@ import {
 import { fmtDollar, fmtPct } from '../lib/format.js';
 import {
   parseCapCsv,
-  buildPatternActionLookup,
   emptyActionBuckets,
   totalAttributedBytes,
   type ActionBytesBuckets,
 } from '../lib/cap-csv-parser.js';
+import { parseActionIntent } from '../lib/action-intent-parser.js';
 
 // ─── constants ──────────────────────────────────────────────────────────
 const BYTES_METRIC = 'all_events_summaryBytes_total';
@@ -454,14 +454,20 @@ function extractHashContainerMap(
 
 /**
  * Action-split + parts-≤-whole guard. Walks the per-hash dropped-bytes
- * series, attributes each hash's bytes to a bucket via the cap-CSV
- * lookup, and clamps the offload bucket to the residual so the sum
- * never exceeds `post_dropped_bytes`. Returns BOTH the bucket totals
- * AND the per-pattern rows.
+ * series, attributes each hash's bytes to an action bucket, and clamps
+ * the offload bucket to the residual so the sum never exceeds
+ * `post_dropped_bytes`. Returns BOTH the bucket totals AND the per-pattern rows.
+ *
+ * Action resolution order (canonical as of action-intent migration):
+ *   1. `actionIntentLookup` (from data/action-intent.json) — canonical
+ *   2. Legacy cap-CSV `legacy_action_suffix` on the `pat:<hash>` row — backward compat
+ *   3. Legacy cap-CSV `legacy_action_suffix` on the container-default row — backward compat
+ *   4. Unattributed — no intent record and no legacy suffix
  */
 function computeActionSplit(args: {
   postDroppedByHash: Record<string, number>;
-  capCsvContent: string;
+  capCsvContent?: string | null;
+  actionIntentLookup?: Map<string, Action>;
   patternToContainer: Map<string, string>;
   postDroppedBytes: number;
 }): {
@@ -469,8 +475,8 @@ function computeActionSplit(args: {
   rows: NonNullable<VerifyResult['per_pattern_breakdown']>;
   clamped: boolean;
 } {
-  const parsed = parseCapCsv(args.capCsvContent);
-  const lookup = buildPatternActionLookup(parsed, args.patternToContainer);
+  // Parse the cap CSV for byte-cap context and legacy action suffixes.
+  const parsed = args.capCsvContent ? parseCapCsv(args.capCsvContent) : null;
   const buckets = emptyActionBuckets();
   const rows: NonNullable<VerifyResult['per_pattern_breakdown']> = [];
 
@@ -482,32 +488,38 @@ function computeActionSplit(args: {
     .sort((a, b) => b[1] - a[1]);
 
   for (const [hash, droppedBytes] of sortedHashes) {
-    const action = lookup.get(hash);
-    const patRow = parsed.by_pattern.get(hash);
     const container = args.patternToContainer.get(hash);
-    const containerRow = container
-      ? parsed.by_container.get(container)
-      : undefined;
-    let action_source: 'pat_row' | 'container' | 'unattributed';
+    const patRow = parsed?.by_pattern.get(hash);
+    const containerRow =
+      container && parsed ? parsed.by_container.get(container) : undefined;
+
+    let action_source: 'action_intent' | 'pat_row' | 'container' | 'unattributed';
     let effectiveAction: Action;
-    let expectedBytes: number | null;
-    if (patRow) {
+    let expectedBytes: number | null = null;
+
+    // Resolution order: action-intent > legacy cap-CSV suffix > unattributed.
+    if (args.actionIntentLookup?.has(hash)) {
+      action_source = 'action_intent';
+      effectiveAction = args.actionIntentLookup.get(hash)!;
+      expectedBytes = patRow?.bytes_cap ?? containerRow?.bytes_cap ?? null;
+    } else if (patRow?.legacy_action_suffix) {
       action_source = 'pat_row';
-      effectiveAction = patRow.action;
+      effectiveAction = patRow.legacy_action_suffix;
       expectedBytes = patRow.bytes_cap;
-    } else if (containerRow) {
+    } else if (containerRow?.legacy_action_suffix) {
       action_source = 'container';
-      effectiveAction = containerRow.action;
+      effectiveAction = containerRow.legacy_action_suffix;
       expectedBytes = containerRow.bytes_cap;
     } else {
       action_source = 'unattributed';
-      effectiveAction = action ?? 'drop';
+      effectiveAction = 'drop'; // conservative default for display only
       expectedBytes = null;
     }
+
     if (action_source === 'unattributed') {
       buckets.unattributed += droppedBytes;
     } else {
-      // Bucket dispatch. The CSV grammar admits all six engine actions;
+      // Bucket dispatch. All six engine actions are admitted;
       // 'pass' and 'sample' are no-op for delivered savings but we
       // still surface the row so callers can audit unexpected configs.
       buckets[effectiveAction] += droppedBytes;
@@ -517,7 +529,7 @@ function computeActionSplit(args: {
       action: effectiveAction,
       delivered_bytes: droppedBytes,
       expected_bytes: expectedBytes,
-      action_source,
+      action_source: action_source === 'action_intent' ? 'pat_row' : action_source,
     });
   }
 
@@ -946,13 +958,27 @@ export interface RunVerifyArgs {
   effective_ingest_per_gb?: number;
   /**
    * Optional cap-CSV content (verbatim string from the customer gitops
-   * repo at `lookup_path`). When present, the verify run joins the
-   * pattern-level isDropped="true" series against the CSV to populate
-   * `per_action_breakdown` + `per_pattern_breakdown` on VerifyResult.
-   * When absent, those fields are undefined and the commitment-report
-   * adapter falls back to its legacy single-bucket attribution.
+   * repo at `lookup_path`). When present alongside `action_intent_content`,
+   * the verify run can also supply per-pattern byte-cap context for the
+   * attribution rows. The cap CSV no longer carries action tokens — see
+   * `action_intent_content` for action routing.
+   *
+   * Legacy rows that still contain a `:<action>` suffix are silently
+   * stripped; the suffix is stored in `legacy_action_suffix` on each row
+   * but NOT used for action routing. If `action_intent_content` is also
+   * absent but `cap_csv_content` is present with legacy suffixes, the
+   * split will fall back to those legacy values (backward compat).
    */
   cap_csv_content?: string | null;
+  /**
+   * Optional action-intent.json content (verbatim JSON from the customer
+   * gitops repo at `data/action-intent.json`). When present, this is the
+   * canonical source for per-pattern action attribution. Takes precedence
+   * over any legacy `:action` suffix that may still be in the cap CSV.
+   * When absent, the verify run falls back to cap-CSV legacy suffixes (if
+   * present) or marks all dropped bytes as `unattributed`.
+   */
+  action_intent_content?: string | null;
   /**
    * Label name carrying the container value on the engine's metrics.
    * Defaults to `k8s_container` (matches configure-engine.ts's PromQL
@@ -1021,12 +1047,15 @@ export async function runEstimateVerify(
   const postPassedByHash = parsePromResult(postPassedByHashRes, hashLabel);
   const postDroppedByHash = parsePromResult(postDroppedByHashRes, hashLabel);
 
-  // 3. Optional per-(hash, container) drop query — only when a cap-CSV
-  //    was supplied AND there are dropped bytes to attribute. We skip the
-  //    extra Prometheus roundtrip otherwise.
+  // 3. Optional per-(hash, container) drop query — only when an action
+  //    attribution source (cap-CSV or action-intent) was supplied AND
+  //    there are dropped bytes to attribute. We skip the extra Prometheus
+  //    roundtrip otherwise.
   const containerLabel = args.container_label ?? 'k8s_container';
+  const hasActionSource =
+    !!(args.cap_csv_content || args.action_intent_content);
   let patternToContainer = new Map<string, string>();
-  if (args.cap_csv_content && postDroppedBytes > 0) {
+  if (hasActionSource && postDroppedBytes > 0) {
     const dropByPairQuery = `sum by (${hashLabel}, ${containerLabel}) (increase(${BYTES_METRIC}{${baseSelector},isDropped="true"}[${args.post_window}]))`;
     try {
       const pairRes = await queryInstant(env, dropByPairQuery);
@@ -1041,6 +1070,12 @@ export async function runEstimateVerify(
       // caller surfaces as a caveat.
     }
   }
+
+  // Parse action-intent.json (canonical action source) when supplied.
+  const actionIntentLookup: Map<string, Action> | undefined =
+    args.action_intent_content
+      ? parseActionIntent(args.action_intent_content).by_pattern
+      : undefined;
 
   // Scale baseline to the post window length for an apples-to-apples ratio.
   const baselineScaled = baselineBytes * (postDays / baseDays);
@@ -1149,16 +1184,18 @@ export async function runEstimateVerify(
 
   const pctOf = (x: number) => safeDiv(x, attrTotal);
 
-  // Action-split (Item 5). Runs only when a cap-CSV was supplied AND
-  // we observed dropped bytes. Surfaces a caveat when the CSV joined
-  // less than half the dropped bytes — that's a config drift signal
-  // FinOps should see in the commitment report.
+  // Action-split. Runs when an action attribution source was supplied AND
+  // we observed dropped bytes. Prefers action-intent.json over legacy
+  // cap-CSV suffixes. Surfaces a caveat when the attribution joined less
+  // than half the dropped bytes — that's a config drift signal FinOps
+  // should see in the commitment report.
   let per_action_breakdown: ActionBytesBuckets | undefined;
   let per_pattern_breakdown: VerifyResult['per_pattern_breakdown'];
-  if (args.cap_csv_content && postDroppedBytes > 0) {
+  if (hasActionSource && postDroppedBytes > 0) {
     const split = computeActionSplit({
       postDroppedByHash: postDroppedByHash,
       capCsvContent: args.cap_csv_content,
+      actionIntentLookup,
       patternToContainer,
       postDroppedBytes,
     });
