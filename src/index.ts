@@ -129,6 +129,7 @@ import { costOptionsSchema, executeCostOptions } from './tools/cost-options.js';
 import { explainModeSchema, executeExplainMode } from './tools/explain-mode.js';
 import { previewFilterSchema, executePreviewFilter } from './tools/preview-filter.js';
 import { patternDetailSchema, executePatternDetail } from './tools/pattern-detail.js';
+import { measureCompactionSchema, executeMeasureCompaction } from './tools/measure-compaction.js';
 import { getStatus } from './resources/status.js';
 
 // ── Environment + cost cache ──
@@ -1242,6 +1243,19 @@ registerLog10xTool('log10x_preview_filter', previewFilterSchema, (args) =>
 
 registerLog10xTool('log10x_pattern_detail', patternDetailSchema, (args) =>
   wrap('log10x_pattern_detail', async () => executePatternDetail(args))
+);
+
+// ── Tool: log10x_measure_compaction ──
+//
+// Measures real per-pattern compaction ratios from live SIEM samples.
+// Requires the tenx CLI (for the engine run) and SIEM credentials (for the
+// event pull). Does not need a metrics backend — local CLI + SIEM only.
+
+registerLog10xTool('log10x_measure_compaction', measureCompactionSchema, (args) =>
+  wrap('log10x_measure_compaction', async () => {
+    const env = resolveEnv(getEnvs(), args.environment);
+    return executeMeasureCompaction(args, env);
+  })
 );
 
 // ── Tool: log10x_doctor ──

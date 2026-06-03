@@ -543,6 +543,17 @@
         "openWorldHint": false
       },
       "category": "install"
+    },
+    "log10x_measure_compaction": {
+      "title": "Measure compaction",
+      "description": "Measure real per-pattern compaction ratios from a SIEM sample. Pulls `sample_size` events for a service over `timeRange`, runs them through the local tenx engine, and returns per-pattern `compaction_ratio_x` (original bytes / encoded bytes) derived from actual measurements. Use this to replace generic 5-10x estimates in `log10x_estimate_savings` and `log10x_pattern_detail` with measured values for this customer environment. Requires: tenx CLI installed locally (LOG10X_TENX_PATH or `tenx` on PATH) AND SIEM credentials (same as `log10x_poc_from_siem`). Confidence tiers: high (>=50 events), medium (10-49), low (<10). Results flow into `log10x_estimate_savings` to improve savings projections.",
+      "annotations": {
+        "title": "Measure compaction",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "category": "detect"
     }
   }
 }

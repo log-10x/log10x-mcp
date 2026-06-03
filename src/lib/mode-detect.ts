@@ -233,6 +233,7 @@ export const TOOL_MODES: Record<string, ('analysis' | 'analysis_pending' | 'poc'
   log10x_pattern_trend: ['analysis', 'analysis_pending'],
   log10x_event_lookup: ['analysis', 'analysis_pending'],
   log10x_find_skew: ['analysis', 'analysis_pending'],
+  log10x_measure_compaction: ['analysis', 'analysis_pending', 'poc'], // local CLI + SIEM, no TSDB needed
   log10x_pattern_mitigate: ['analysis', 'analysis_pending'],
   log10x_dependency_check: ['analysis', 'analysis_pending'],
   log10x_metrics_that_moved: ['analysis', 'analysis_pending'],
