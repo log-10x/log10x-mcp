@@ -92,6 +92,8 @@ import {
   type InlineImage,
 } from './output-types.js';
 import { PRIMITIVE_ERROR_TYPES, type PrimitiveErrorType } from './primitive-errors.js';
+import { filterActionsByActiveMode } from './actions-filter.js';
+import type { Mode } from './mode-detect.js';
 
 // ── Version / epoch ────────────────────────────────────────────────────────────
 
@@ -539,6 +541,18 @@ export interface ChassisEnvelopeInput {
   images?: InlineImage[];
 
   /**
+   * Current boot mode. When provided, `buildChassisEnvelope()` filters
+   * `actions[]` to remove entries for tools not registered in this mode,
+   * and appends a warning for each dropped entry.
+   *
+   * Call sites that already have the boot mode available (e.g. those
+   * that call `getBootMode()`) should pass it here. When omitted (null /
+   * undefined), actions[] is passed through unfiltered — a safe default
+   * for tools that run before mode detection completes.
+   */
+  mode?: Mode | null;
+
+  /**
    * Back-compat mode. When true, `buildChassisEnvelope()` also spreads
    * `legacyExtraFields` into the `data` object alongside the chassis
    * fields. Allows a tool to return the new chassis shape while old
@@ -587,6 +601,12 @@ export function buildChassisEnvelope(input: ChassisEnvelopeInput): ChassisEnvelo
 
   // Warn at runtime (not throw) when status/error contract is violated.
   const warnings = input.warnings ? [...input.warnings] : [];
+
+  // Filter actions[] to only include tools registered in the current mode.
+  // Dropped entries emit warnings[] so the gap is auditable even when
+  // invisible to the agent. When mode is null/undefined, pass through
+  // unfiltered (boot-race or test-only override — defensive default).
+  const filteredActions = filterActionsByActiveMode(input.actions ?? [], input.mode ?? null, warnings);
   if (input.status === 'error' && !input.error) {
     // In development mode: fail fast so tool authors catch this at
     // test time rather than silently emitting an unbranchable error.
@@ -649,7 +669,7 @@ export function buildChassisEnvelope(input: ChassisEnvelopeInput): ChassisEnvelo
     view: input.view,
     summary,
     data: validatedData,
-    actions: input.actions ?? [],
+    actions: filteredActions,
     render_hint: input.render_hint,
     truncated: input.truncated ?? false,
     next_cursor: input.next_cursor,

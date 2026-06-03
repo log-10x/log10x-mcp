@@ -255,9 +255,12 @@ export const TOOL_MODES: Record<string, ('analysis' | 'analysis_pending' | 'poc'
   log10x_retriever_series: ['analysis', 'analysis_pending'],
   log10x_backfill_metric: ['analysis', 'analysis_pending'],
 
-  // ── Install advisors (POC + analysis_pending) ──
-  log10x_advise_install: ['poc', 'analysis_pending'],
-  log10x_advise_retriever: ['poc', 'analysis_pending'],
+  // ── Install advisors (all customer-facing modes) ──
+  // analysis is included because existing customers add the Retriever
+  // after reaching tier-receiver; gating to setup-only modes would block
+  // the documented phase-4 journey (log10x_start → advise_retriever).
+  log10x_advise_install: ['poc', 'analysis_pending', 'analysis'],
+  log10x_advise_retriever: ['poc', 'analysis_pending', 'analysis'],
   log10x_configure_engine: ['poc', 'analysis_pending', 'analysis'],
   log10x_setup_recurring: ['analysis', 'analysis_pending'],
   log10x_estimate_savings: ['analysis', 'analysis_pending'],

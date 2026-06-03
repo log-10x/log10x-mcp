@@ -1472,7 +1472,7 @@ registerLog10xTool('log10x_poc_from_local', pocFromLocalSchema, (args) =>
 // ── Tool: log10x_discover_env (install advisor) ──
 
 registerLog10xTool('log10x_discover_env', discoverEnvSchema, (args) =>
-  wrap('log10x_discover_env', () => executeDiscoverEnv(args))
+  wrap('log10x_discover_env', () => executeDiscoverEnv(args, bootMode?.mode ?? null))
 );
 
 // ── Tool: log10x_advise_retriever (install advisor) ──

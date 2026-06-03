@@ -18,6 +18,7 @@ import type { DiscoverySnapshot, ForwarderKind } from '../lib/discovery/types.js
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { type StructuredOutput } from '../lib/output-types.js';
 import { newChassisTelemetry, recordQuery, buildChassisEnvelope, buildChassisErrorEnvelope } from '../lib/chassis-envelope.js';
+import type { Mode } from '../lib/mode-detect.js';
 
 export const discoverEnvSchema = {
   namespaces: z
@@ -112,7 +113,7 @@ function buildDiscoverEnvHumanSummary(d: Omit<DiscoverEnvSummary, 'human_summary
   return `Discovery snapshot ${d.snapshot_id} done in ${d.namespaces_probed.length} namespace${d.namespaces_probed.length === 1 ? '' : 's'}: forwarder=${fwd}, log10x apps installed=${installedFrag}${inPathFrag}.${awsFrag}`;
 }
 
-export async function executeDiscoverEnv(args: DiscoverEnvArgs): Promise<string | StructuredOutput> {
+export async function executeDiscoverEnv(args: DiscoverEnvArgs, mode?: Mode | null): Promise<string | StructuredOutput> {
   const telemetry = newChassisTelemetry();
   const snapshot = await runDiscovery({
     kubectl: { namespaces: args.namespaces },
@@ -207,6 +208,7 @@ export async function executeDiscoverEnv(args: DiscoverEnvArgs): Promise<string 
     payload: data,
     human_summary: data.human_summary,
     actions,
+    mode,
     telemetry,
   });
 }

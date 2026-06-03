@@ -281,6 +281,37 @@ optional-followup     useful but not load-bearing
 
 Never put the next-action contract in markdown HTML comments (the legacy investigate pattern). Agents routinely skip it. Put it in `actions[]` with a real `args` object.
 
+### Mode filtering (REQUIRED)
+
+**actions[] entries MUST reference tools registered in the current mode.** The chassis builder filters them automatically; bypass at your own risk.
+
+Pass the current boot mode to `buildChassisEnvelope()` so stale or mis-gated entries are silently removed and surfaced in `warnings[]`:
+
+```ts
+return buildChassisEnvelope({
+  ...
+  actions: [
+    { tool: 'log10x_advise_retriever', args: { snapshot_id }, reason: '...' },
+  ],
+  mode,   // pass Mode | null — the builder calls filterActionsByActiveMode()
+  telemetry,
+});
+```
+
+When `mode` is omitted (or null), the filter is a no-op — safe for tools that run before mode detection completes. When a filtered entry is dropped, the builder appends a warning:
+
+```
+"Suggested log10x_advise_retriever in actions[] but it is not registered in analysis mode — entry dropped."
+```
+
+The helper is also importable directly for non-chassis call sites:
+
+```ts
+import { filterActionsByActiveMode } from '../lib/actions-filter.js';
+
+const safeActions = filterActionsByActiveMode(rawActions, mode, warnings);
+```
+
 ## Threshold audit
 
 If the tool has a numeric decision (a noise floor, a top-N cap, a similarity floor, a confidence interval), surface it in `decisions.threshold_audit`. Agents that auto-apply mitigations check the basis before acting on the result:
