@@ -199,11 +199,20 @@ function extractSlotsFromBody(body: string): VariableSlot[] {
  * `.name` and pattern-extraction.ts falls through to `slot_${N}`).
  */
 function inferSlotNameFromToken(tok: string, position: number, previousName?: string): string | undefined {
-  // Empty preceding token: do NOT apply multi-part inheritance here — leave
-  // slot.name unset so variable-concentration.ts's structured-key check (which
-  // has access to more context) gets a chance to run.  Returning undefined
-  // keeps behaviour identical to variable-concentration.ts's empty-tok branch.
-  if (!tok || !tok.trim()) {
+  // Empty or whitespace-only preceding token: if a previous slot name is known,
+  // this slot is a continuation of the previous slot's value (parts separated by
+  // a token whose only character ended the previous slot's value).  Restore the
+  // pre-15.D inheritance behaviour — it was guarded by `if (previousName)` so it
+  // cannot fire without a prior named slot, and the over-firing bug was in the
+  // separator-only NON-empty branch (fix #3), not here.
+  // Only reached when previousName is set; otherwise fall through to undefined.
+  if (!tok || /^\s*$/.test(tok)) {
+    if (previousName) {
+      const m = previousName.match(/_part(\d+)$/);
+      const next = m ? parseInt(m[1], 10) + 1 : 2;
+      const base = previousName.replace(/_part\d+$/, '');
+      return `${base}_part${next}`;
+    }
     return undefined;
   }
 

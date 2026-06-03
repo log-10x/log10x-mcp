@@ -365,10 +365,16 @@ export async function extractPatterns(
 
     const variables: Record<string, string[]> = {};
     const slotDistinctCounts: Record<string, number> = {};
+    const bucketTenxHash = rec.tenxHash;
     for (const [slot, set] of rec.variables) {
       // tenx_hash is the engine's internal pattern identity field — it is never
       // useful as a slot variance signal and must not appear in slot_distribution.
       if (slot === 'tenx_hash') continue;
+      // Value-based guard: if the naming heuristic mis-labelled the tenx_hash
+      // position with a nearby key name (e.g. kubernetes pod-template-hash label),
+      // the slot will contain exactly one distinct value equal to the bucket's
+      // canonical tenxHash.  Drop it regardless of its name.
+      if (bucketTenxHash && set.size === 1 && set.has(bucketTenxHash)) continue;
       // Cap at 20 sample values per slot — enough for dependency
       // analysis, not enough to blow context. Carry the true
       // distinct count separately so downstream code can tell
