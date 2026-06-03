@@ -36,6 +36,7 @@ import {
   datadogAnalyzerQuery,
   healthBanner,
 } from '../lib/top-patterns-extras.js';
+import { computeTrendDelta } from '../lib/trend-delta.js';
 
 export const topPatternsSchema = {
   service: z.string().optional().describe('Service name to scope the result. Omit for all services.'),
@@ -411,6 +412,7 @@ export async function executeTopPatterns(
     const firstSeenSec = fsRes?.ageSeconds ?? null;
     const badgeInfo = classifyBadge(r.bytes, baselineSamples, firstSeenSec);
     const state = badgeInfo.kind;
+    const trendDelta = computeTrendDelta(state, trendVals, firstSeenSec);
     const serviceCount = serviceBreadthByHash.get(r.hash);
     const deps = depsByHash?.get(r.hash);
     // Datadog inline snippet — only when the env's analyzer is
@@ -442,6 +444,7 @@ export async function executeTopPatterns(
       fieldVar: fv,
       state,
       badgeInfo,
+      trendDelta,
       serviceCount,
       deps,
       datadogAnalyzerQuery: datadogQuery,
@@ -687,6 +690,7 @@ export async function executeTopPatterns(
       events: r.events,
       first_seen_age_seconds: r.firstSeenAgeSeconds,
       state: r.state,
+      trend_delta: r.trendDelta,
       descriptor: r.pattern ?? r.hash ?? '',
       trend_bytes_per_sec: r.trendBytesPerSec,
       // PL-12a additions.

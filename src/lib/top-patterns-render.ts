@@ -53,6 +53,7 @@ import type { FieldVariation } from './field-variation.js';
 import type { ParsedSiemEvent } from './siem/sample.js';
 import { fmtAge } from './first-seen.js';
 import { type Badge, type BadgeInfo, fmtBadgeInfo } from './top-patterns-extras.js';
+import type { TrendDelta } from './trend-delta.js';
 import { detectIncidents as detectIncidentsGeneric } from './detectors/incident-cluster.js';
 import type { DepCheckResult } from './siem/deps/index.js';
 
@@ -80,6 +81,9 @@ export interface TopPatternRow {
    * ("+85% vs baseline" instead of just "ACUTE"). Optional for
    * backward compat; renderers should prefer this when present. */
   badgeInfo?: BadgeInfo;
+  /** Pre-computed trend delta for this row. Carries glyph, signed
+   * percent change (WoW or 1h), or age-in-days for NEW rows. */
+  trendDelta?: TrendDelta;
   /** Distinct services emitting this hash. >1 surfaces the breakdown CTA. */
   serviceCount?: number;
   /** Per-hash dependency-check result (token-AND match against the
@@ -462,15 +466,16 @@ function renderList(rows: TopPatternRow[], descs: string[]): string {
     const cost = `${fmtDollarMo(r.costPerMonth)}/mo`;
     const bytes = fmtBytes(r.bytes);
     const events = `${fmtCount(r.events)} events`;
-    // Use BadgeInfo when available (carries ratio + age for meaningful
-    // text like "+85% vs baseline" or "new (since 17h ago)"); fall
-    // back to the plain word form if some row doesn't have it.
-    const badge = r.badgeInfo
-      ? fmtBadgeInfo(r.badgeInfo)
-      : r.state.toLowerCase();
+    // Trend column: prefer trend_delta.label (glyph + compact value),
+    // fall back to BadgeInfo text, then plain state word.
+    const trend = r.trendDelta
+      ? `${r.trendDelta.glyph} ${r.trendDelta.label}`
+      : r.badgeInfo
+        ? fmtBadgeInfo(r.badgeInfo)
+        : r.state.toLowerCase();
 
     lines.push(`${r.rank}. **${desc}** _[${svc} · ${sev}]_`);
-    lines.push(`   ${cost} · ${bytes} · ${events} · ${badge}`);
+    lines.push(`   ${cost} · ${bytes} · ${events} · ${trend}`);
     lines.push('');
   });
   return lines.join('\n').trimEnd();
