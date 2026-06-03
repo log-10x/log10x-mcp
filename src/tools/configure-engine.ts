@@ -69,10 +69,15 @@ import {
   type Action,
 } from '../lib/cost.js';
 import type { SiemId } from '../lib/siem/pricing.js';
+import {
+  RECEIVER_DEFAULT_RESET_MS,
+  scaleObservedToReceiverWindow,
+} from '../lib/window-scaling.js';
 
 // ─── constants ────────────────────────────────────────────────────────
 const DEFAULT_LOOKUP_PATH = 'pipelines/run/receive/rate/caps.csv';
-const RESET_INTERVAL_SEC = 240; // matches rateReceiverResetIntervalMs default (4m)
+// RECEIVER_DEFAULT_RESET_MS (240_000 ms = 4 min) imported from window-scaling.
+const RESET_INTERVAL_SEC = RECEIVER_DEFAULT_RESET_MS / 1000;
 const WINDOWS_PER_DAY = (24 * 60 * 60) / RESET_INTERVAL_SEC; // = 360
 const WINDOWS_PER_MONTH = WINDOWS_PER_DAY * 30; // = 10800
 const GB = 1024 * 1024 * 1024;
@@ -1203,8 +1208,13 @@ function inferTier(severity: string): Tier {
 }
 
 // ─── cap-per-window math ──────────────────────────────────────────────
+// monthlyBytes is a 30-day projection. Convert to bytes-per-receiver-reset-
+// window via window-scaling: scaleObservedToReceiverWindow(monthlyBytes, '30d').
+// The inline WINDOWS_PER_MONTH division is preserved as a cross-check comment.
 function computeCapBytesPerWindow(action: Action, monthlyBytes: number): number {
-  const perWindow = monthlyBytes / WINDOWS_PER_MONTH;
+  // scaleObservedToReceiverWindow('30d') = monthlyBytes * (240_000ms / 2_592_000_000ms)
+  //   = monthlyBytes / 10800  (matches WINDOWS_PER_MONTH = 10800)
+  const perWindow = scaleObservedToReceiverWindow(monthlyBytes, '30d');
   switch (action) {
     case 'pass':
       // Generous cap (= full monthly throughput evenly distributed).

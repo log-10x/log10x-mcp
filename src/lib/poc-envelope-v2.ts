@@ -22,6 +22,7 @@ import type { SiemId } from './siem/pricing.js';
 import { dollars, ratio, bps, days as roundDays, countRatio } from './poc-round.js';
 import { getAllowedActionsForDestination, getDefaultActionForDestination, type Action as CostAction } from './cost.js';
 import { fmtBytes as formatBytes } from './format.js';
+import { scaleObservedToReceiverWindow } from './window-scaling.js';
 
 /**
  * Categories the POC did NOT verify. Forced into every feasibility
@@ -1192,9 +1193,8 @@ function buildSparkline(
 }
 
 // Cap is denominated in bytes per 4-minute reset window — the same
-// units configure_engine writes into the cap-CSV row. Eight windows per
-// hour × 24 × 30 = 5760 windows per month.
-const WINDOWS_PER_MONTH = 5760;
+// units configure_engine writes into the cap-CSV row. Fifteen windows per
+// hour × 24 × 30 = 10800 windows per month.
 
 /**
  * Map per-pattern recommendation to one of the 6 actions using the
@@ -1294,7 +1294,7 @@ function buildActions(
  * bytes when configure_engine writes one for the same pattern.
  */
 function capBytesPerWindow(action: CostAction, monthlyBytes: number, sampleN: number): number {
-  const perWindow = monthlyBytes / WINDOWS_PER_MONTH;
+  const perWindow = scaleObservedToReceiverWindow(monthlyBytes, '30d');
   switch (action) {
     case 'pass':
       return Math.max(1, perWindow);
