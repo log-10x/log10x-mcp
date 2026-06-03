@@ -134,8 +134,11 @@ export interface BaselineEnvelopeData {
   rate_source: RateSource;
   current: {
     bytes_window: number;
+    bytes_window_display: string;
     bytes_per_day_p50: number;
+    bytes_per_day_p50_display: string;
     bytes_per_day_p90: number;
+    bytes_per_day_p90_display: string;
     /** `null` when `rate_source === 'unset'`. */
     monthly_usd: number | null;
     /** Alias of `monthly_usd` carried for one release. */
@@ -443,8 +446,11 @@ async function computeBaseline(
     rate_source: rateSource,
     current: {
       bytes_window: totalBytes,
+      bytes_window_display: fmtBytes(totalBytes),
       bytes_per_day_p50: p50,
+      bytes_per_day_p50_display: fmtBytes(p50),
       bytes_per_day_p90: p90,
+      bytes_per_day_p90_display: fmtBytes(p90),
       monthly_usd: monthlyUsd,
       monthly_usd_at_list: monthlyUsd,
       monthly_usd_disclosed: monthlyUsdDisclosed,
@@ -762,8 +768,11 @@ function buildNotReadyEnvelope(opts: {
     rate_source: opts.rateSource,
     current: {
       bytes_window: 0,
+      bytes_window_display: fmtBytes(0),
       bytes_per_day_p50: 0,
+      bytes_per_day_p50_display: fmtBytes(0),
       bytes_per_day_p90: 0,
+      bytes_per_day_p90_display: fmtBytes(0),
       monthly_usd: zeroMonthly,
       monthly_usd_at_list: zeroMonthly,
       monthly_usd_disclosed: null,

@@ -27,7 +27,7 @@ import { queryInstant, queryRange } from '../lib/api.js';
 import { LABELS } from '../lib/promql.js';
 import { parsePrometheusValue } from '../lib/cost.js';
 import { lineChart } from '../lib/line-chart.js';
-import { fmtBytes, normalizePattern } from '../lib/format.js';
+import { fmtBytes, fmtPct, normalizePattern } from '../lib/format.js';
 import { type StructuredOutput } from '../lib/output-types.js';
 import {
   buildChassisEnvelope,
@@ -72,9 +72,12 @@ export interface PatternDetailEnvelope {
     service: string;
     severity: string;
     bytes: number;
+    bytes_display: string;
     share_pct: number;
+    share_pct_display: string;
   }>;
   total_bytes: number;
+  total_bytes_display: string;
   first_seen_age_seconds: number | null;
   /** Bytes/sec time series (24h, 10min step). */
   trend_time_series: Array<{ ts: number; bytes_per_sec: number }>;
@@ -144,7 +147,7 @@ async function resolvePatternName(
 async function fetchServiceBreakdown(
   env: EnvConfig,
   hash: string,
-): Promise<Array<{ service: string; severity: string; bytes: number; share_pct: number }>> {
+): Promise<Array<{ service: string; severity: string; bytes: number; bytes_display: string; share_pct: number; share_pct_display: string }>> {
   try {
     const metricsEnv = await resolveMetricsEnv(env);
     const q =
@@ -163,7 +166,9 @@ async function fetchServiceBreakdown(
     const total = rows.reduce((s, r) => s + r.bytes, 0);
     return rows.map((r) => ({
       ...r,
+      bytes_display: fmtBytes(r.bytes),
       share_pct: total > 0 ? (r.bytes / total) * 100 : 0,
+      share_pct_display: fmtPct(total > 0 ? (r.bytes / total) * 100 : 0),
     }));
   } catch {
     return [];
@@ -264,7 +269,7 @@ async function fetchSampleEvents(
 function renderVerbatim(args: {
   patternName: string | null;
   hash: string;
-  services: Array<{ service: string; severity: string; bytes: number; share_pct: number }>;
+  services: Array<{ service: string; severity: string; bytes: number; bytes_display: string; share_pct: number; share_pct_display: string }>;
   totalBytes: number;
   firstSeenAgeSeconds: number | null;
   trendSeries: Array<{ ts: number; bytes_per_sec: number }>;
@@ -510,6 +515,7 @@ export async function executePatternDetail(args: {
     pattern_name: patternName,
     services,
     total_bytes: totalBytes,
+    total_bytes_display: fmtBytes(totalBytes),
     first_seen_age_seconds: firstSeenAgeSeconds,
     trend_time_series: trendSeries,
     sample_events: sampleEvents,

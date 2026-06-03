@@ -70,7 +70,7 @@ import {
   newChassisTelemetry,
   recordQuery,
 } from '../lib/chassis-envelope.js';
-import { fmtDollar, fmtPct } from '../lib/format.js';
+import { fmtDollar, fmtPct, fmtBytes } from '../lib/format.js';
 import {
   parseCapCsv,
   emptyActionBuckets,
@@ -235,8 +235,11 @@ export interface ForecastRow {
   pattern_hash: string;
   action: Action;
   bytes_in_monthly: number;
+  bytes_in_monthly_display: string;
   bytes_saved_monthly: number;
+  bytes_saved_monthly_display: string;
   avg_event_size_bytes: number;
+  avg_event_size_bytes_display: string;
   dollars_saved_low: number;
   dollars_saved_expected: number;
   dollars_saved_high: number;
@@ -966,8 +969,11 @@ export async function runEstimateForecast(
       pattern_hash: row.pattern_hash,
       action: row.action,
       bytes_in_monthly: monthlyBytes,
+      bytes_in_monthly_display: fmtBytes(monthlyBytes),
       bytes_saved_monthly: Math.max(0, savedBytes),
+      bytes_saved_monthly_display: fmtBytes(Math.max(0, savedBytes)),
       avg_event_size_bytes: avgSize,
+      avg_event_size_bytes_display: fmtBytes(avgSize),
       dollars_saved_low: Math.max(0, dollarsLow),
       dollars_saved_expected: Math.max(0, dollarsExpected),
       dollars_saved_high: Math.max(0, dollarsHigh),

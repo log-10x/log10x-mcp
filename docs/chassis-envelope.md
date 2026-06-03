@@ -372,6 +372,16 @@ A few patterns that have caused real defects today, all banned:
    (pattern_count without pattern_count_source.kind is one example)
 ✗  Mislabeling a window — "monthly" when the actual aggregation covers
    ~93 hours is a credibility-killer
+✗  When both a categorical state label (STABLE/GROWING/SHRINKING/NEW) and a
+   quantified delta (trend_delta with glyph+value+scope) describe the same
+   fact, the payload MUST emit ONLY the quantified delta. The categorical
+   label is duplicative; agents render both naively.
+✗  Every raw numeric field in a payload that an agent might render to a
+   human MUST have a sibling *_display field pre-formatted by the shared
+   units helper (fmtBytes, fmtPct, fmtDollar from src/lib/format.ts). The
+   display sibling carries the correct units, significant-figure precision,
+   and trailing-zero rules so all agents render consistently. Raw bytes /
+   percent / dollar fields with no display sibling are a defect.
 ```
 
 The Zod schemas catch most of these at build time. The few that require runtime context (the source_disclosure-on-error-path one) are flagged by integration tests.

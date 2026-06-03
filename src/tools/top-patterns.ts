@@ -16,7 +16,7 @@ import * as pql from '../lib/promql.js';
 import { LABELS, includeToSelector, type FilterValue } from '../lib/promql.js';
 import { bytesToCost, parsePrometheusValue, buildDisclosedDollarValue, type DisclosedDollarValue } from '../lib/cost.js';
 import { resolveMetricsEnv, resolveMetricsEnvFiltered } from '../lib/resolve-env.js';
-import { parseTimeframe, fmtDisclosedDollar, fmtBytes as fmtBytesShared } from '../lib/format.js';
+import { parseTimeframe, fmtDisclosedDollar, fmtBytes as fmtBytesShared, fmtPct, fmtDollar } from '../lib/format.js';
 import { type NextAction } from '../lib/next-actions.js';
 import { fetchEventsByHashes } from '../lib/siem/sample.js';
 import { tenxHash } from '../lib/pattern-hash.js';
@@ -700,23 +700,29 @@ export async function executeTopPatterns(
       severity: r.severity,
       cost_per_hour_usd: costPerHourRaw,
       cost_per_month_usd: costPerMonthRaw,
+      cost_per_month_usd_display: costPerMonthRaw != null ? fmtDollar(costPerMonthRaw) : null,
       cost_per_hour_usd_disclosed: costPerHourDisclosed,
       cost_per_month_usd_disclosed: costPerMonthDisclosed,
       bytes: r.bytes,
+      bytes_display: fmtBytesShared(r.bytes),
       percent_of_total_bytes:
         totalBytes > 0 ? (r.bytes / totalBytes) * 100 : 0,
       share_pct: totalBytes > 0 ? (r.bytes / totalBytes) * 100 : 0,
+      share_pct_display: fmtPct(totalBytes > 0 ? (r.bytes / totalBytes) * 100 : 0),
       events: r.events,
       first_seen_age_seconds: r.firstSeenAgeSeconds,
-      state: r.state,
       trend_delta: r.trendDelta,
       descriptor: r.pattern ?? r.hash ?? '',
       trend_bytes_per_sec: r.trendBytesPerSec,
       // PL-12a additions.
       kept_bytes: keptBytes,
+      kept_bytes_display: keptBytes != null ? fmtBytesShared(keptBytes) : null,
       dropped_bytes: droppedBytes,
+      dropped_bytes_display: droppedBytes != null ? fmtBytesShared(droppedBytes) : null,
       dropped_share_pct: droppedSharePct,
+      dropped_share_pct_display: droppedSharePct != null ? fmtPct(droppedSharePct) : null,
       dropped_bytes_monthly: droppedBytesMonthly,
+      dropped_bytes_monthly_display: droppedBytesMonthly != null ? fmtBytesShared(droppedBytesMonthly) : null,
       dropped_events_monthly: droppedEventsMonthly,
       dropped_cost_per_month_usd: droppedCostPerMonth,
       dropped_cost_per_month_usd_disclosed: droppedCostPerMonthDisclosed,

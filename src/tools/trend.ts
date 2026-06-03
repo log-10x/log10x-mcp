@@ -66,6 +66,7 @@ interface PatternTrendSummary {
   step: string;
   time_series: Array<{ ts: number; bytes: number }>;
   total_bytes: number;
+  total_bytes_display: string;
   // DEP: feat/x-percent-mcp-cost-tooling — dollar fields are now null when
   // no rate is set (no `?? 1.0` lie). `rate_source` advertises the axis the
   // dollar columns were computed against ('list_price' | 'customer_supplied'
@@ -88,7 +89,9 @@ interface PatternTrendSummary {
   spike_detected: boolean;
   spike_at_ts?: number;
   peak_bytes: number;
+  peak_bytes_display: string;
   low_bytes: number;
+  low_bytes_display: string;
   sample_count: number;
   rate_source: 'list_price' | 'customer_supplied' | 'unset';
   // PL-12b — engine-decision cohort surface. `include` echoes the param
@@ -474,6 +477,7 @@ async function executeTrendInner(
       step,
       time_series: points,
       total_bytes: totalBytes,
+      total_bytes_display: fmtBytes(totalBytes),
       total_cost_usd: totalCost,
       baseline_run_rate_usd: baselineCost,
       recent_run_rate_usd: recentCost,
@@ -484,7 +488,9 @@ async function executeTrendInner(
       spike_detected: !!spikePoint,
       spike_at_ts: spikePoint?.ts,
       peak_bytes: maxPoint.bytes,
+      peak_bytes_display: fmtBytes(maxPoint.bytes),
       low_bytes: minPoint.bytes,
+      low_bytes_display: fmtBytes(minPoint.bytes),
       sample_count: points.length,
       rate_source: rateSource,
       include,

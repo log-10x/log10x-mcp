@@ -56,8 +56,11 @@ interface SavingsSummary {
   rate_source: RateSource;
   edge: {
     input_bytes: number;
+    input_bytes_display: string;
     emitted_bytes: number;
+    emitted_bytes_display: string;
     reduced_bytes: number;
+    reduced_bytes_display: string;
     reduction_pct: number;
     /** null when rate_source === 'unset' (no $/GB known — no honest dollar figure). */
     savings_dollars: number | null;
@@ -67,7 +70,9 @@ interface SavingsSummary {
   };
   retriever: {
     indexed_bytes: number;
+    indexed_bytes_display: string;
     streamed_bytes: number;
+    streamed_bytes_display: string;
     reduction_pct: number;
     /** null when rate_source === 'unset'. */
     savings_dollars: number | null;
@@ -583,8 +588,11 @@ async function executeSavingsInner(
       rate_source: rateSource,
       edge: {
         input_bytes: edgeIn,
+        input_bytes_display: fmtBytes(edgeIn),
         emitted_bytes: edgeEmitted,
+        emitted_bytes_display: fmtBytes(edgeEmitted),
         reduced_bytes: edgeReducedBytes,
+        reduced_bytes_display: fmtBytes(edgeReducedBytes),
         reduction_pct: edgeReductionPct,
         savings_dollars: realizedEdgeSavings,
         savings_dollars_disclosed: realizedEdgeSavingsDisclosed,
@@ -592,7 +600,9 @@ async function executeSavingsInner(
       },
       retriever: {
         indexed_bytes: indexedBytes,
+        indexed_bytes_display: fmtBytes(indexedBytes),
         streamed_bytes: streamedBytes,
+        streamed_bytes_display: fmtBytes(streamedBytes),
         reduction_pct: retrieverReductionPct,
         savings_dollars: retrieverSavings,
         savings_dollars_disclosed: retrieverSavingsDisclosed,
