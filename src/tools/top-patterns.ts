@@ -339,7 +339,7 @@ export async function executeTopPatterns(
     fetchFirstSeenBatch(env, hashes),
     fetchEventsByHashes(
       rawRows.map(r => ({ hash: r.hash, service: r.service, severity: r.severity })),
-      { scope: args.siemScope, perHash: 250 }
+      { scope: args.siemScope, perHash: 250, window: args.timeRange }
     ),
     // Baseline bytes at 7d/14d/21d offsets — drives the trajectory
     // badge (NEW / ACUTE / GROWING / STABLE / SHRINKING). Mirrors

@@ -15,6 +15,7 @@
 import { resolveSiemSelection } from './resolve.js';
 import { getConnector } from './index.js';
 import { buildHashQuery } from './hash-query.js';
+import { computePerHashBudgetMs, computeMaxPullMinutes } from '../sample-budget.js';
 
 export interface HashSample {
   vendor: string;
@@ -78,10 +79,10 @@ export function oneLine(ev: unknown, max = 220): string {
  * query; with a batch-level race that one query would sink every other
  * sample (observed: run-to-run flicker between all samples and none).
  * Per-hash bounding means a slow/empty hash costs only its own row.
- * The probe window is short on purpose: a recent sample is enough, and
- * an empty match fails fast instead of scanning hours.
+ * The probe window scales with the requested scan window (short for 1h,
+ * longer for 7d/30d) via computePerHashBudgetMs. See sample-budget.ts
+ * for the piecewise tiers.
  */
-const PER_HASH_MS = 2500;
 
 export interface HashSpec {
   hash: string;
@@ -117,17 +118,20 @@ export async function fetchSamplesByHashes(
     // fallback, so the top rows lost their sample entirely (worse than
     // a severity-mismatched sample). Run both in PARALLEL, prefer the
     // severity-matched result, fall back to the unconstrained one.
+    const effectiveWindow = opts.window ?? '1h';
+    const perHashMs = computePerHashBudgetMs(effectiveWindow);
+    const maxPullMinutes = computeMaxPullMinutes(effectiveWindow);
     const pullOnce = async (q: string): Promise<unknown> => {
       const res = await Promise.race([
         conn.pullEvents({
-          window: opts.window ?? '1h',
+          window: effectiveWindow,
           scope: opts.scope,
           query: q,
           targetEventCount: 1,
-          maxPullMinutes: 0.25,
+          maxPullMinutes,
           onProgress: () => {},
         }),
-        new Promise<null>(r => setTimeout(() => r(null), PER_HASH_MS)),
+        new Promise<null>(r => setTimeout(() => r(null), perHashMs)),
       ]);
       return (res as { events?: unknown[] } | null)?.events?.[0] ?? null;
     };
@@ -276,10 +280,11 @@ function parseEvent(ev: unknown): ParsedSiemEvent {
  * Per-hash timeout is wider than the single-sample case (5s vs 2.5s)
  * because 250 events is a heavier SIEM query than 1.
  */
-/** Per-hash timeout for the parsed-events batch fetch. Wider than the
- * single-sample timeout because 50–250 events is a heavier query than 1
- * and parallel SIEM queries can hit per-tenant rate limits. */
-const PER_HASH_BATCH_MS = 15000;
+/** Per-hash timeout for the parsed-events batch fetch is computed from
+ * opts.window via computePerHashBudgetMs (see sample-budget.ts). Wider
+ * than the single-sample case because 50-250 events is a heavier SIEM
+ * query; the budget is floored at 15000ms (the batch ceiling) for any
+ * window >= 72h. */
 
 export async function fetchEventsByHashes(
   specs: Array<HashSpec | string>,
@@ -299,6 +304,9 @@ export async function fetchEventsByHashes(
     if (sel.kind !== 'resolved') return out;
     const conn = getConnector(sel.id);
     const cwLike = sel.id === 'cloudwatch';
+    const effectiveBatchWindow = opts.window ?? '1h';
+    const perHashBatchMs = computePerHashBudgetMs(effectiveBatchWindow);
+    const batchMaxPullMinutes = computeMaxPullMinutes(effectiveBatchWindow);
 
     // Fetch one hash. Returns parsed events (possibly empty). Empty can
     // mean genuinely-no-events OR a transient timeout/slow CW query.
@@ -309,14 +317,14 @@ export async function fetchEventsByHashes(
           : buildHashQuery(sel.id, h, service, severity);
         const res = await Promise.race([
           conn.pullEvents({
-            window: opts.window ?? '1h',
+            window: effectiveBatchWindow,
             scope: opts.scope,
             query: q,
             targetEventCount: target,
-            maxPullMinutes: 0.5,
+            maxPullMinutes: batchMaxPullMinutes,
             // Single bucket = fast recent-window pull. The 24-bucket
             // representative sampling makes 100+ CW API calls across N
-            // parallel hashes and blows past PER_HASH_BATCH_MS, dropping
+            // parallel hashes and blows past the per-hash budget, dropping
             // most samples. A single bucket returns ~250 recent events
             // in ~3s. We trade time-representative spread for reliable
             // retrieval — the right call for descriptors + field-
@@ -324,7 +332,7 @@ export async function fetchEventsByHashes(
             buckets: 1,
             onProgress: () => {},
           }),
-          new Promise<null>(r => setTimeout(() => r(null), PER_HASH_BATCH_MS)),
+          new Promise<null>(r => setTimeout(() => r(null), perHashBatchMs)),
         ]);
         const events = (res as { events?: unknown[] } | null)?.events ?? [];
         if (events.length > 0) {
