@@ -366,6 +366,9 @@ export async function extractPatterns(
     const variables: Record<string, string[]> = {};
     const slotDistinctCounts: Record<string, number> = {};
     for (const [slot, set] of rec.variables) {
+      // tenx_hash is the engine's internal pattern identity field — it is never
+      // useful as a slot variance signal and must not appear in slot_distribution.
+      if (slot === 'tenx_hash') continue;
       // Cap at 20 sample values per slot — enough for dependency
       // analysis, not enough to blow context. Carry the true
       // distinct count separately so downstream code can tell

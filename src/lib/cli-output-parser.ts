@@ -151,7 +151,7 @@ function extractSlotsFromBody(body: string): VariableSlot[] {
         const specName = inferFormatSpecName(spec);
         slots.push({
           position,
-          precedingToken: preceding.slice(-40),
+          precedingToken: preceding.slice(-120),
           type: spec,
           name: specName,
         });
@@ -166,7 +166,7 @@ function extractSlotsFromBody(body: string): VariableSlot[] {
       // pattern-extraction.ts's `tpl.variableSlots[s].name` lookup gets a
       // meaningful value rather than falling through to `slot_${s}`.
       const preceding = body.slice(runStart, i);
-      const precedingToken = preceding.slice(-40);
+      const precedingToken = preceding.slice(-120);
       const inferredName = inferSlotNameFromToken(precedingToken, position, previousName);
       slots.push({
         position,
@@ -199,20 +199,18 @@ function extractSlotsFromBody(body: string): VariableSlot[] {
  * `.name` and pattern-extraction.ts falls through to `slot_${N}`).
  */
 function inferSlotNameFromToken(tok: string, position: number, previousName?: string): string | undefined {
+  // Empty preceding token: do NOT apply multi-part inheritance here — leave
+  // slot.name unset so variable-concentration.ts's structured-key check (which
+  // has access to more context) gets a chance to run.  Returning undefined
+  // keeps behaviour identical to variable-concentration.ts's empty-tok branch.
   if (!tok || !tok.trim()) {
-    // Empty preceding token with a known previous name: multi-part continuation.
-    if (previousName) {
-      const partMatch = previousName.match(/^(.+?)(?:_part(\d+))?$/);
-      if (partMatch) {
-        const base = partMatch[1];
-        const prev = partMatch[2] ? parseInt(partMatch[2], 10) : 1;
-        return `${base}_part${prev + 1}`;
-      }
-    }
     return undefined;
   }
 
   // Structured log key: ends with `":"`, `":`, `=`, `=\"`
+  // This check MUST come before multi-part inheritance so that a JSON key like
+  // `opentelemetry-collector-contrib` is captured rather than being shadowed by
+  // a _partN name derived from a previousName.
   const structured = tok.match(/([A-Za-z_][A-Za-z0-9_.-]*)["']?\s*[:=]\s*["']?$/);
   if (structured) return structured[1];
 
@@ -225,13 +223,14 @@ function inferSlotNameFromToken(tok: string, position: number, previousName?: st
 
   // Separator-only token (e.g. `-`, `.`, `/`, ` `) with a known previous name:
   // treat as a multi-part continuation and emit a _partN suffix.
+  // Only reached when neither the structured-key nor word-match branches fired.
   if (previousName && /^[.\-\s,\/]+$/.test(tok.trim() || tok)) {
-    const partMatch = previousName.match(/^(.+?)(?:_part(\d+))?$/);
-    if (partMatch) {
-      const base = partMatch[1];
-      const prev = partMatch[2] ? parseInt(partMatch[2], 10) : 1;
-      return `${base}_part${prev + 1}`;
-    }
+    const m = previousName.match(/_part(\d+)$/);
+    const next = m ? parseInt(m[1], 10) + 1 : 2;
+    const base = previousName.replace(/_part\d+$/, '');
+    // Avoid emitting the same name as previousName when previousName has no
+    // _partN suffix yet — always suffix with _part2 at minimum.
+    return `${base}_part${next}`;
   }
 
   return undefined;
