@@ -1565,6 +1565,14 @@ export async function executeCommitmentReport(
       },
       contextPayload: { ok: false, phase: 'not_ready', reason: 'commitment_not_found', remediation },
       source_disclosure: {},
+      actions: [
+        {
+          tool: 'log10x_configure_engine',
+          args: { service: args.service ?? '', target_percent: 29 },
+          reason: 'Create a commitment record first. configure_engine with target_percent persists the record this tool reads.',
+          role: 'recommended-next',
+        },
+      ],
     });
   }
 

@@ -28,8 +28,9 @@ import { isRetrieverConfigured } from '../lib/retriever-api.js';
 import { normalizeTimeRange } from '../lib/time-range.js';
 
 export const eventLookupSchema = {
-  pattern: z.string().optional().describe('Pattern name or search term to look up (e.g., "Payment_Gateway_Timeout"). Omit when passing `tenxHash` instead.'),
-  tenxHash: z.string().optional().describe('A tenx_hash value (e.g. seen on an event in your SIEM / CloudWatch Logs). Resolved against the 10x metrics to recover the pattern, then the normal cost/services breakdown is shown. This is the reverse of the cross-pillar join: opaque SIEM hash → named pattern + cost.'),
+  pattern: z.string().optional().describe('Pattern name or search term to look up (e.g., "Payment_Gateway_Timeout"). Omit when passing `pattern_hash` / `tenxHash` instead.'),
+  pattern_hash: z.string().optional().describe('Canonical 11-char hash seen on a SIEM / CloudWatch Logs event (e.g. "03ndjreM-sU"). Alias of `tenxHash`; both are accepted. Resolved against the 10x metrics to recover the pattern, then the normal cost/services breakdown is shown.'),
+  tenxHash: z.string().optional().describe('Legacy alias of `pattern_hash`. Both are accepted. Pass either the canonical `pattern_hash` form or this legacy form — they are treated identically.'),
   service: z.string().optional().describe('Service to scope the lookup'),
   timeRange: z.enum(['15m', '1h', '6h', '24h', '1d', '7d', '30d']).default('7d').describe("Time range. Sub-day values for incident-window lookups. '24h' and '1d' are equivalent."),
   analyzerCost: z.number().optional().describe('SIEM ingestion cost in $/GB (deprecated alias of `effective_ingest_per_gb`)'),
@@ -77,12 +78,15 @@ interface EventLookupSummary {
 }
 
 export async function executeEventLookup(
-  args: { pattern?: string; tenxHash?: string; service?: string; timeRange?: string; analyzerCost?: number; effective_ingest_per_gb?: number; siemScope?: string },
+  args: { pattern?: string; pattern_hash?: string; tenxHash?: string; service?: string; timeRange?: string; analyzerCost?: number; effective_ingest_per_gb?: number; siemScope?: string },
   env: EnvConfig
 ): Promise<StructuredOutput> {
+  // Normalize: pattern_hash is the canonical field; tenxHash is the legacy alias.
+  // Merge so downstream code only reads args.tenxHash.
+  const argsNormalized = { ...args, tenxHash: args.pattern_hash ?? args.tenxHash };
   const telemetry = newChassisTelemetry();
   const sumOut: { data?: EventLookupSummary } = {};
-  const md = await executeEventLookupInner(args, env, sumOut);
+  const md = await executeEventLookupInner(argsNormalized, env, sumOut);
   // Early-return cases (no data, raw line, pattern not found): the inner
   // produced a markdown narrative. Strip headings and collapse to a
   // single-paragraph human_summary so the envelope stays typed.
@@ -101,8 +105,8 @@ export async function executeEventLookup(
       status: 'no_signal',
       decisions: { threshold_used: null, threshold_basis: 'default' },
       source_disclosure: { bytes_source: 'tsdb' },
-      scope: { window: args.timeRange ?? '7d', window_basis: 'auto_default' },
-      payload: { pattern: args.pattern, tenx_hash: args.tenxHash },
+      scope: { window: argsNormalized.timeRange ?? '7d', window_basis: 'auto_default' },
+      payload: { pattern: argsNormalized.pattern, tenx_hash: argsNormalized.tenxHash },
       human_summary: stripped || headline,
       telemetry,
     });
@@ -146,7 +150,7 @@ export async function executeEventLookup(
 }
 
 async function executeEventLookupInner(
-  args: { pattern?: string; tenxHash?: string; service?: string; timeRange?: string; analyzerCost?: number; effective_ingest_per_gb?: number; siemScope?: string },
+  args: { pattern?: string; pattern_hash?: string; tenxHash?: string; service?: string; timeRange?: string; analyzerCost?: number; effective_ingest_per_gb?: number; siemScope?: string },
   env: EnvConfig,
   sumOut?: { data?: EventLookupSummary }
 ): Promise<string> {
@@ -193,7 +197,7 @@ async function executeEventLookupInner(
     inputPattern = top;
   }
   if (!inputPattern) {
-    return 'Pass either `pattern` (a pattern name) or `tenxHash` (a hash seen on a SIEM / CloudWatch Logs event).';
+    return 'Pass either `pattern` (a pattern name) or `pattern_hash` / `tenxHash` (an 11-char hash seen on a SIEM / CloudWatch Logs event).';
   }
 
   // Reporter pattern labels are always snake_case. The agent may have picked

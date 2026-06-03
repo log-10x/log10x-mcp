@@ -53,6 +53,7 @@ import {
 } from '../lib/output-types.js';
 import { newChassisTelemetry, buildChassisEnvelope } from '../lib/chassis-envelope.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
+import { resolveSiemSelection } from '../lib/siem/resolve.js';
 
 // ─── constants ────────────────────────────────────────────────────────
 
@@ -274,7 +275,21 @@ async function computeBaseline(
 
   // ── Gate 0: destination. ────────────────────────────────────────
   // Without a destination there is no $/GB to project against.
-  const destination = args.destination ?? autoDetectDestination(env);
+  // Resolution order:
+  //   1. Explicit arg (caller-supplied).
+  //   2. resolveSiemSelection auto-detect (same helper cost_options /
+  //      pattern_mitigate / estimate_savings use, reads env profile +
+  //      SIEM connector heuristics).
+  //   3. autoDetectDestination(env) env.analyzer string-match fallback.
+  //   4. Gate failure → not_ready/no_destination.
+  let destination: SiemId | undefined = args.destination;
+  if (!destination) {
+    const detected = await resolveSiemSelection({});
+    destination =
+      detected.kind === 'resolved'
+        ? (detected.id as SiemId)
+        : autoDetectDestination(env);
+  }
   if (!destination) {
     return buildNotReadyEnvelope({
       reason: 'no_destination',
