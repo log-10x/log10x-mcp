@@ -25,12 +25,13 @@ import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
 import { getOffloadStatus } from '../lib/offload-status.js';
 import { isRetrieverConfigured } from '../lib/retriever-api.js';
+import { normalizeTimeRange } from '../lib/time-range.js';
 
 export const eventLookupSchema = {
   pattern: z.string().optional().describe('Pattern name or search term to look up (e.g., "Payment_Gateway_Timeout"). Omit when passing `tenxHash` instead.'),
   tenxHash: z.string().optional().describe('A tenx_hash value (e.g. seen on an event in your SIEM / CloudWatch Logs). Resolved against the 10x metrics to recover the pattern, then the normal cost/services breakdown is shown. This is the reverse of the cross-pillar join: opaque SIEM hash → named pattern + cost.'),
   service: z.string().optional().describe('Service to scope the lookup'),
-  timeRange: z.enum(['1d', '7d', '30d']).default('7d').describe('Time range'),
+  timeRange: z.enum(['15m', '1h', '6h', '24h', '1d', '7d', '30d']).default('7d').describe("Time range. Sub-day values for incident-window lookups. '24h' and '1d' are equivalent."),
   analyzerCost: z.number().optional().describe('SIEM ingestion cost in $/GB (deprecated alias of `effective_ingest_per_gb`)'),
   effective_ingest_per_gb: z.number().optional().describe('Customer-supplied SIEM ingest cost in $/GB. When set, dollar fields populate with rate_source=customer_supplied; when absent and no list rate is detected, dollar fields collapse to null and rate_source=unset.'),
   siemScope: z.string().optional().describe('SIEM scope for the live sample line on a tenxHash reverse lookup: a CloudWatch log group (`/aws/ecs/my-svc`), ES index, or Splunk index. When omitted, the detected SIEM connector uses its own default scope. Only consulted when `tenxHash` was passed (the cross-pillar correlation case).'),
@@ -127,7 +128,8 @@ async function executeEventLookupInner(
   // Defensive defaults — schema defaults only apply at the MCP-SDK
   // boundary; chain-walkers, internal callers, and the eval harness
   // can land here with raw args. Match eventLookupSchema defaults.
-  const timeRange = args.timeRange ?? '7d';
+  // Normalise '1d' legacy alias → '24h'.
+  const timeRange = normalizeTimeRange(args.timeRange ?? '7d');
   const tf = parseTimeframe(timeRange);
   // Rate resolution per spec § "no $1/GB lie": prefer customer override,
   // fall back to deprecated alias (list price), else null → rate_source='unset'

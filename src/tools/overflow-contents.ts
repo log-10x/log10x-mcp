@@ -50,15 +50,16 @@ import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
 import { fetchCapCsvForEnv, fetchActionIntentForEnv } from '../lib/cap-csv-fetch.js';
 import { parseCapCsv, buildPatternActionLookup } from '../lib/cap-csv-parser.js';
 import type { Action } from '../lib/cost.js';
+import { normalizeTimeRange } from '../lib/time-range.js';
 
 const BYTES_METRIC = 'all_events_summaryBytes_total';
 const VOLUME_METRIC = 'all_events_summaryVolume_total';
 
 export const overflowContentsSchema = {
   timeRange: z
-    .enum(['1d', '7d', '30d'])
+    .enum(['15m', '1h', '6h', '24h', '1d', '7d', '30d'])
     .default('30d')
-    .describe('Window over which to compute overflow contents. 30d matches the maintenance-loop cadence; sub-30d windows for incident-window probes.'),
+    .describe("Window over which to compute overflow contents. 30d matches the maintenance-loop cadence; sub-30d windows for incident-window probes. '24h' and '1d' are equivalent."),
   service: z
     .string()
     .optional()
@@ -118,7 +119,8 @@ export async function executeOverflowContents(
   env: EnvConfig,
 ): Promise<string | StructuredOutput> {
   const telemetry = newTelemetry();
-  const timeRange = args.timeRange ?? '30d';
+  // Normalise '1d' legacy alias → '24h'.
+  const timeRange = normalizeTimeRange(args.timeRange ?? '30d');
   const tf = parseTimeframe(timeRange);
   const metricsEnv = await resolveMetricsEnv(env);
   const limit = args.limit ?? 50;

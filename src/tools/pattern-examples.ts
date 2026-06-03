@@ -36,14 +36,11 @@ import { buildHashQuery } from '../lib/siem/hash-query.js';
 import { fmtCount, normalizePattern } from '../lib/format.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { tenxHash } from '../lib/pattern-hash.js';
-import { queryInstant } from '../lib/api.js';
-import { LABELS } from '../lib/promql.js';
-import { resolveMetricsEnv } from '../lib/resolve-env.js';
-import { parsePrometheusValue } from '../lib/cost.js';
 import { resolvePatternHashFromMetrics } from '../lib/resolve-pattern-hash.js';
 import { agentOnly } from '../lib/agent-only.js';
 import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
 import { computeBucketInterpretation } from '../lib/bucket-interpretation.js';
+import { normalizeTimeRange } from '../lib/time-range.js';
 
 /** SIEM vendors supported by pattern_examples. Inherits from the dep-check / exclusion-filter list. */
 const EXAMPLES_VENDORS: readonly SiemId[] = [
@@ -74,9 +71,9 @@ export const patternExamplesSchema = {
     .optional()
     .describe('Optional severity scope (e.g., `ERROR`, `WARN`).'),
   timeRange: z
-    .enum(['15m', '1h', '6h', '24h'])
+    .enum(['15m', '1h', '6h', '24h', '1d', '7d', '30d'])
     .default('1h')
-    .describe('Window for the live SIEM probe. Capped at 24h. For older events, use log10x_retriever_query.'),
+    .describe("Window for the live SIEM probe. Capped at 24h. For older events, use log10x_retriever_query. '1d' is a legacy alias for '24h'."),
   limit: z
     .number()
     .min(1)
@@ -103,7 +100,7 @@ interface PatternExamplesArgs {
   vendor?: 'splunk' | 'datadog' | 'elasticsearch' | 'cloudwatch';
   service?: string;
   severity?: string;
-  timeRange?: '15m' | '1h' | '6h' | '24h';
+  timeRange?: string;
   limit?: number;
   scope?: string;
   environment?: string;
@@ -219,7 +216,8 @@ async function executePatternExamplesInner(
   // `${undefined}` template renders and `undefined * 5` NaN math.
   const args: Required<Pick<PatternExamplesArgs, 'timeRange' | 'limit'>> & PatternExamplesArgs = {
     ...rawArgs,
-    timeRange: rawArgs.timeRange ?? '1h',
+    // Normalise '1d' legacy alias → '24h'; cap is 24h for this tool.
+    timeRange: normalizeTimeRange(rawArgs.timeRange ?? '1h'),
     limit: rawArgs.limit ?? 10,
   };
   // ── 1. Resolve vendor ──────────────────────────────────────────────

@@ -48,9 +48,10 @@ import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
 import { fetchCapCsvForEnv, fetchActionIntentForEnv } from '../lib/cap-csv-fetch.js';
 import { parseCapCsv, buildPatternActionLookup } from '../lib/cap-csv-parser.js';
+import { normalizeTimeRange } from '../lib/time-range.js';
 
 export const servicesSchema = {
-  timeRange: z.enum(['15m', '1h', '6h', '1d', '7d', '30d']).default('7d').describe('Time range. Sub-day values available for incident-window service ranking.'),
+  timeRange: z.enum(['15m', '1h', '6h', '24h', '1d', '7d', '30d']).default('7d').describe("Time range. Sub-day values available for incident-window service ranking. '24h' and '1d' are equivalent."),
   analyzerCost: z.number().optional().describe('SIEM ingestion cost in $/GB'),
   environment: z.string().optional().describe('Environment nickname'),
   exception_services: z
@@ -157,7 +158,8 @@ async function executeServicesInner(
   sumOut?: { data?: ServicesSummary }
 ): Promise<string> {
   // Defensive defaults — match servicesSchema.
-  const timeRange = args.timeRange ?? '7d';
+  // Normalise '1d' legacy alias → '24h' before query.
+  const timeRange = normalizeTimeRange(args.timeRange ?? '7d');
   const tf = parseTimeframe(timeRange);
   const costPerGb = args.analyzerCost ?? 1.0;
   const period = costPeriodLabel(tf.days);

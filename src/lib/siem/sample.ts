@@ -31,11 +31,28 @@ export interface HashSample {
  * log; the wrapper is transport metadata. Unwrapping is more faithful
  * to "what is this pattern", not less. One level only, defensive. */
 export function oneLine(ev: unknown, max = 220): string {
+  /** True when a string is a bare JSON-fragment opener/closer (e.g. just
+   * "{" or "}"), indicating a multi-line log that was split by the container
+   * runtime — the real content is in a subsequent line. In that case the
+   * parent envelope's JSON (with kubernetes/docker context) is more readable
+   * than the bare brace. Threshold 4 chars: real log lines are rarely just
+   * 1-3 chars and "{}" / "}" are common multi-line JSON artifacts. */
+  const isUselessFragment = (s: string): boolean => s.trim().length <= 4;
+
   const pickStr = (v: unknown): string => {
     if (typeof v === 'string') return v;
     if (v && typeof v === 'object') {
       const o = v as Record<string, unknown>;
       const p = o.log ?? o.message ?? o._raw ?? o.body;
+      // When the envelope field exists but is a useless fragment (e.g. just
+      // "{" from a multi-line JSON split), fall back to the full envelope
+      // object so the caller sees container/service context instead of a bare
+      // brace. This is the Defect 30 fix: multi-line JSON payloads whose
+      // SIEM connector delivers the opening "{" as a bare string are rendered
+      // via their parent envelope (with kubernetes metadata) rather than the
+      // bare "{" fragment.
+      if (typeof p === 'string' && !isUselessFragment(p)) return p;
+      if (typeof p === 'string' && isUselessFragment(p)) return JSON.stringify(o);
       return typeof p === 'string' ? p : JSON.stringify(o);
     }
     return String(v);

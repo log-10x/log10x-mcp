@@ -18,6 +18,7 @@ import { lineChart } from '../lib/line-chart.js';
 import { patternDisplay } from '../lib/pattern-descriptor.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
+import { resolvePatternHashFromMetrics } from '../lib/resolve-pattern-hash.js';
 
 export const trendSchema = {
   pattern: z.string().optional().describe('Pattern name (e.g., "Payment_Gateway_Timeout"). Provide either pattern or pattern_hash — pattern_hash is preferred when available (skips a metrics lookup).'),
@@ -99,14 +100,52 @@ interface PatternTrendSummary {
 }
 
 export async function executeTrend(
-  args: { pattern: string; timeRange?: string; step?: string; analyzerCost?: number; view?: 'summary'; include?: 'kept' | 'dropped' | 'both'; include_chart?: boolean },
+  args: { pattern?: string; pattern_hash?: string; timeRange?: string; step?: string; analyzerCost?: number; view?: 'summary'; include?: 'kept' | 'dropped' | 'both'; include_chart?: boolean },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
   const telemetry = newTelemetry();
+
+  // Validate: at least one of pattern / pattern_hash must be provided.
+  if (!args.pattern && !args.pattern_hash) {
+    const headline = 'pattern_trend: provide either pattern (name) or pattern_hash.';
+    return buildEnvelope({
+      tool: 'log10x_pattern_trend',
+      view: 'summary',
+      summary: { headline },
+      data: { ...buildUnifiedFields({ status: 'insufficient_data', telemetry, humanSummary: headline }) },
+    });
+  }
+
+  // Resolve pattern name from hash when only pattern_hash is given.
+  // We need a name for the PromQL query (pattern label selector).
+  let patternName: string | undefined = args.pattern;
+  if (!patternName && args.pattern_hash) {
+    // Reverse-lookup: find the most-emitting pattern label for this hash.
+    const metricsEnv = await resolveMetricsEnv(env).catch(() => null);
+    if (metricsEnv) {
+      try {
+        const q =
+          `topk(1, sum by (${LABELS.pattern}) (increase(all_events_summaryBytes_total{` +
+          `${LABELS.hash}="${args.pattern_hash.replace(/"/g, '\\"')}",` +
+          `${LABELS.env}="${metricsEnv}"}[7d])))`;
+        const res = await queryInstant(env, q);
+        if (res.status === 'success' && res.data.result.length > 0) {
+          patternName = res.data.result[0].metric[LABELS.pattern];
+        }
+      } catch {
+        // fall through — pattern stays undefined, inner fn will return no data
+      }
+    }
+  }
+
+  // Normalise '1d' legacy alias to '24h' before passing to inner.
+  const normalizedTimeRange = args.timeRange === '1d' ? '24h' : args.timeRange;
+
   const sumOut: { data?: PatternTrendSummary } = {};
-  await executeTrendInner(args, env, sumOut);
+  await executeTrendInner({ ...args, pattern: patternName ?? '', timeRange: normalizedTimeRange }, env, sumOut);
   if (!sumOut.data) {
-    const headline = `No trend data available for \`${args.pattern}\` in this environment.`;
+    const id = patternName ?? args.pattern_hash ?? '(unknown)';
+    const headline = `No trend data available for \`${id}\` in this environment.`;
     return buildEnvelope({
       tool: 'log10x_pattern_trend',
       view: 'summary',
@@ -178,7 +217,8 @@ async function executeTrendInner(
   sumOut?: { data?: PatternTrendSummary }
 ): Promise<string> {
   // Defensive defaults — match trendSchema.
-  const timeRange = args.timeRange ?? '7d';
+  // Normalise '1d' legacy alias → '24h'.
+  const timeRange = (args.timeRange === '1d' ? '24h' : args.timeRange) ?? '7d';
   const step = args.step ?? '1h';
   const include = args.include ?? 'kept';
   const tf = parseTimeframe(timeRange);

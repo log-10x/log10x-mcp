@@ -27,16 +27,22 @@ import { queryInstant, queryRange } from '../lib/api.js';
 import { LABELS } from '../lib/promql.js';
 import { parsePrometheusValue } from '../lib/cost.js';
 import { lineChart } from '../lib/line-chart.js';
-import { fmtBytes } from '../lib/format.js';
+import { fmtBytes, normalizePattern } from '../lib/format.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { oneLine } from '../lib/siem/sample.js';
+import { resolvePatternHashFromMetrics } from '../lib/resolve-pattern-hash.js';
 
 // ─── Schema ───────────────────────────────────────────────────────────────────
 
 export const patternDetailSchema = {
   pattern_hash: z
     .string()
-    .describe('The tenx_hash of the pattern to drill into. Obtained from log10x_preview_filter data.patterns[].tenx_hash.'),
+    .optional()
+    .describe('The tenx_hash of the pattern to drill into. Obtained from log10x_preview_filter data.patterns[].tenx_hash. Preferred over pattern when available (skips a metrics lookup).'),
+  pattern: z
+    .string()
+    .optional()
+    .describe('Pattern name (Symbol Message, e.g. "Payment_Gateway_Timeout") as an alias for pattern_hash. Resolved to hash via metrics lookup. Provide either pattern or pattern_hash.'),
   include_samples: z
     .boolean()
     .default(true)
@@ -350,11 +356,22 @@ function renderVerbatim(args: {
 // ─── Entry function ─────────────────────────────────────────────────────────────
 
 export async function executePatternDetail(args: {
-  pattern_hash: string;
+  pattern_hash?: string;
+  pattern?: string;
   include_samples?: boolean;
   timeRange?: string;
   environment?: string;
 }): Promise<StructuredOutput> {
+  // Validate: at least one of pattern / pattern_hash must be provided.
+  if (!args.pattern_hash && !args.pattern) {
+    return buildEnvelope({
+      tool: 'log10x_pattern_detail',
+      view: 'summary',
+      summary: { headline: 'pattern_detail: provide either pattern_hash or pattern (name).' },
+      data: { error: 'missing_identifier' },
+    });
+  }
+
   const includeSamples = args.include_samples !== false;
   const timeRange = args.timeRange ?? '7d';
 
@@ -367,34 +384,54 @@ export async function executePatternDetail(args: {
   }
 
   if (!env) {
+    const id = args.pattern_hash ?? args.pattern ?? '?';
     return buildEnvelope({
       tool: 'log10x_pattern_detail',
       view: 'summary',
-      summary: { headline: `pattern_detail(${args.pattern_hash.slice(0, 12)}): no environment configured.` },
+      summary: { headline: `pattern_detail(${id.slice(0, 12)}): no environment configured.` },
       data: {
-        pattern_hash: args.pattern_hash,
+        pattern_hash: args.pattern_hash ?? null,
         error: 'no environment configured',
       },
     });
   }
 
+  // Resolve hash: prefer the explicit pattern_hash; fall back to name → hash
+  // via metrics lookup (same authoritative path as pattern_examples).
+  let resolvedHash: string;
+  if (args.pattern_hash) {
+    resolvedHash = args.pattern_hash;
+  } else {
+    const canonicalName = normalizePattern(args.pattern!);
+    const fromMetrics = await resolvePatternHashFromMetrics(env, canonicalName);
+    if (!fromMetrics) {
+      return buildEnvelope({
+        tool: 'log10x_pattern_detail',
+        view: 'summary',
+        summary: { headline: `pattern_detail: no metrics found for pattern "${canonicalName}". Try passing pattern_hash directly.` },
+        data: { error: 'pattern_not_found', pattern: canonicalName },
+      });
+    }
+    resolvedHash = fromMetrics;
+  }
+
   // Fetch all data in parallel
   const [patternName, services, firstSeenAgeSeconds, trendSeries] = await Promise.all([
-    resolvePatternName(env, args.pattern_hash),
-    fetchServiceBreakdown(env, args.pattern_hash),
-    fetchFirstSeen(env, args.pattern_hash),
-    fetchTrend(env, args.pattern_hash, timeRange),
+    resolvePatternName(env, resolvedHash),
+    fetchServiceBreakdown(env, resolvedHash),
+    fetchFirstSeen(env, resolvedHash),
+    fetchTrend(env, resolvedHash, timeRange),
   ]);
 
   const { events: sampleEvents, siemKind } = includeSamples
-    ? await fetchSampleEvents(args.pattern_hash, patternName, timeRange)
+    ? await fetchSampleEvents(resolvedHash, patternName, timeRange)
     : { events: [] as string[], siemKind: 'unresolved' as const };
 
   const totalBytes = services.reduce((s, r) => s + r.bytes, 0);
 
   const verbatim = renderVerbatim({
     patternName,
-    hash: args.pattern_hash,
+    hash: resolvedHash,
     services,
     totalBytes,
     firstSeenAgeSeconds,
@@ -414,12 +451,12 @@ export async function executePatternDetail(args: {
 
   // FIX 4: headline uses fmtBytes instead of raw GB division.
   const headline =
-    `pattern_detail(${patternName ?? args.pattern_hash.slice(0, 12)}): ` +
+    `pattern_detail(${patternName ?? resolvedHash.slice(0, 12)}): ` +
     `${services.length} service(s), ${fmtBytes(totalBytes)}/mo (30d). ` +
     `${sampleEvents.length} sample event(s) fetched.`;
 
   const envelope: PatternDetailEnvelope = {
-    pattern_hash: args.pattern_hash,
+    pattern_hash: resolvedHash,
     pattern_name: patternName,
     services,
     total_bytes: totalBytes,
@@ -434,7 +471,7 @@ export async function executePatternDetail(args: {
   // not the pattern name. When multiple services emit this hash, we omit
   // the service arg and let the user pick (configure_engine will show
   // the full list). When exactly one service is present, pass it directly.
-  const applyArgs: Record<string, unknown> = { pattern_hash: args.pattern_hash };
+  const applyArgs: Record<string, unknown> = { pattern_hash: resolvedHash };
   if (services.length === 1) {
     applyArgs['service'] = services[0].service;
   }

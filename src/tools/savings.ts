@@ -30,6 +30,7 @@ import { fmtDollar, fmtBytes, fmtPct, fmtDisclosedDollar, parseTimeframe, costPe
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
+import { normalizeTimeRange } from '../lib/time-range.js';
 
 /** S3 Standard default, matching the ROI dashboard's storageCost default ($/GB/month). */
 const DEFAULT_STORAGE_COST_PER_GB = 0.023;
@@ -38,7 +39,7 @@ const DEFAULT_STORAGE_COST_PER_GB = 0.023;
 export type RateSource = 'list_price' | 'customer_supplied' | 'unset';
 
 export const savingsSchema = {
-  timeRange: z.enum(['1d', '7d', '30d']).default('7d').describe('Time range'),
+  timeRange: z.enum(['15m', '1h', '6h', '24h', '1d', '7d', '30d']).default('7d').describe("Time range. '24h' and '1d' are equivalent."),
   analyzerCost: z.number().optional().describe('DEPRECATED alias for effective_ingest_per_gb. SIEM ingestion cost in $/GB.'),
   effective_ingest_per_gb: z.number().optional().describe('Customer-supplied SIEM ingestion cost in $/GB. When provided, rate_source=customer_supplied and dollars are populated. When omitted and no profile rate is available, rate_source=unset and the headline reports percent + bytes only (no dollars).'),
   storageCost: z.number().optional().describe('S3 storage cost in $/GB/month. Defaults to $0.023 (S3 Standard).'),
@@ -153,7 +154,8 @@ async function executeSavingsInner(
   sumOut?: { data?: SavingsSummary }
 ): Promise<string> {
   // Defensive defaults — match savingsSchema (timeRange:'7d').
-  const timeRange = args.timeRange ?? '7d';
+  // Normalise '1d' legacy alias → '24h'.
+  const timeRange = normalizeTimeRange(args.timeRange ?? '7d');
   const tf = parseTimeframe(timeRange);
   // Resolve $/GB with rate_source attribution. No silent $1/GB fallback — if
   // the caller supplies nothing and there is no profile rate to inherit, we
