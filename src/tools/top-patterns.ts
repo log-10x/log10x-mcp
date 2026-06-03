@@ -24,8 +24,14 @@ import { fetchFirstSeenBatch } from '../lib/first-seen.js';
 import { fieldVariation } from '../lib/field-variation.js';
 import { type TopPatternRow } from '../lib/top-patterns-render.js';
 import { detectIncidents, type IncidentInput } from '../lib/detectors/incident-cluster.js';
-import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
-import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
+import { type StructuredOutput } from '../lib/output-types.js';
+import { newTelemetry } from '../lib/unified-envelope.js';
+import {
+  buildChassisEnvelope,
+  newChassisTelemetry,
+  recordQuery,
+  type RateSource as ChassisRateSource,
+} from '../lib/chassis-envelope.js';
 import type { ForwarderId } from '../lib/forwarder-snippets.js';
 import { resolveSiemSelection } from '../lib/siem/resolve.js';
 import {
@@ -584,7 +590,12 @@ export async function executeTopPatterns(
     });
   }
 
-  const telemetry = newTelemetry();
+  const telemetry = newTelemetry();          // legacy — kept for existing callers that read query_count
+  const chassisTelemetry = newChassisTelemetry();
+  // Phase-1: 7 parallel PromQL queries already ran above. Record them.
+  recordQuery(chassisTelemetry);
+  // Phase-2: first_seen + events + baseline + breadth + deps + trend queries.
+  recordQuery(chassisTelemetry);
 
   // Build the structured-summary envelope from the same rows the
   // renderer used. This is the agent-default path; the markdown
@@ -896,57 +907,118 @@ export async function executeTopPatterns(
     if (p.pattern_hash) bytesByIdentity.set(p.pattern_hash, p.bytes);
   }
 
-  return buildEnvelope({
+  // Assemble the tool-specific payload. All pre-chassis fields are
+  // preserved as payload keys so existing call sites (other tools, the
+  // MCP runtime) can still read them. ChassisData wraps them inside
+  // payload; back-compat fields are also spread at the data level via
+  // legacyCompat.
+  const topPatternsPayload = {
+    rate_source,
+    // PL-12a — echo the resolved cohort so the agent can route follow-up
+    // calls (e.g. `include='dropped'` from a `'both'` audit) without
+    // re-deriving from the per-row fields.
+    include,
+    patterns: dataPatterns,
+    incidents: incidents.map((c) => {
+      const combinedBytes = c.members.reduce(
+        (s, m) => s + (bytesByIdentity.get(m.identity) ?? 0),
+        0
+      );
+      return {
+        members: c.members.map((m) => ({
+          identity: m.identity,
+          cost_per_month_usd: m.costPerMonthUsd,
+          descriptor: m.descriptor,
+        })),
+        representative_label: c.representativeLabel,
+        service: c.service,
+        combined_monthly_usd: c.combinedMonthlyUsd,
+        combined_percent_of_total:
+          totalBytes > 0 ? (combinedBytes / totalBytes) * 100 : 0,
+        join_signal: c.joinSignal,
+        confidence: c.confidence,
+      };
+    }),
+    totals,
+    window: tf.label,
+    pattern_count_shown: renderRows.length,
+    pattern_count_total: patternCountTotal,
+    offset,
+    // Disclosure fields so an agent can explain why top_patterns (short window)
+    // and preview_filter/estimate_savings (30d window) may show different numbers.
+    bytes_source: {
+      metric: 'all_events_summaryBytes_total',
+      observation_window: tf.range,
+      cohort: include,
+      scope_filter: `${metricsEnv}`,
+    },
+    pattern_count_source: {
+      query: 'distinctPatternCount',
+      count: patternCountTotal ?? null,
+      window: tf.range,
+    },
+  };
+
+  // Determine threshold_basis from rate_source:
+  //   customer_supplied → caller gave explicit $/GB, trust it.
+  //   unset             → no rate configured; floor is 0 (all patterns shown).
+  const chassisThresholdBasis =
+    rate_source === 'customer_supplied' ? 'customer_supplied' : 'default';
+
+  // human_summary is honest: volume-first, includes the "top-N of env-total"
+  // framing + rate disclosure.
+  const chassis_human_summary = renderRows.length === 0
+    ? `No patterns in scope over ${tf.label}.`
+    : `Top ${renderRows.length} patterns by bytes/${tf.label}` +
+      (args.service ? ` on ${args.service}` : '') +
+      (costPerGb != null ? ` above 0 KB/s floor (rate_source=${rate_source})` : '') +
+      `. Env total: ${fmtBytesShared(totalBytes)}.` +
+      (patternCountTotal != null ? ` ${renderRows.length} of ${patternCountTotal} env patterns shown.` : '') +
+      (incidents.length > 0 ? ` ${incidents.length} incident cluster${incidents.length === 1 ? '' : 's'} detected.` : '');
+
+  // Map local rate_source ('unset' is this tool's term for no rate configured)
+  // to the chassis RateSource enum ('none' means absent).
+  const rateSourceForChassis = rate_source as string;
+  const chassis_rate_source: ChassisRateSource =
+    rateSourceForChassis === 'customer_supplied' ? 'customer_supplied'
+    : rateSourceForChassis === 'list_price' ? 'list_price'
+    : 'none';
+
+  return buildChassisEnvelope({
     tool: 'log10x_top_patterns',
     view: 'summary',
-    summary: { headline: headline + paginationFooter, callout },
-    data: {
-      rate_source,
-      // PL-12a — echo the resolved cohort so the agent can route follow-up
-      // calls (e.g. `include='dropped'` from a `'both'` audit) without
-      // re-deriving from the per-row fields.
-      include,
-      patterns: dataPatterns,
-      incidents: incidents.map((c) => {
-        const combinedBytes = c.members.reduce(
-          (s, m) => s + (bytesByIdentity.get(m.identity) ?? 0),
-          0
-        );
-        return {
-          members: c.members.map((m) => ({
-            identity: m.identity,
-            cost_per_month_usd: m.costPerMonthUsd,
-            descriptor: m.descriptor,
-          })),
-          representative_label: c.representativeLabel,
-          service: c.service,
-          combined_monthly_usd: c.combinedMonthlyUsd,
-          combined_percent_of_total:
-            totalBytes > 0 ? (combinedBytes / totalBytes) * 100 : 0,
-          join_signal: c.joinSignal,
-          confidence: c.confidence,
-        };
-      }),
-      totals,
-      window: tf.label,
-      pattern_count_shown: renderRows.length,
-      pattern_count_total: patternCountTotal,
-      offset,
-      // Disclosure fields so an agent can explain why top_patterns (short window)
-      // and preview_filter/estimate_savings (30d window) may show different numbers.
-      bytes_source: {
-        metric: 'all_events_summaryBytes_total',
-        observation_window: tf.range,
-        cohort: include,
-        scope_filter: `${metricsEnv}`,
-      },
-      pattern_count_source: {
-        query: 'distinctPatternCount',
-        count: patternCountTotal ?? null,
-        window: tf.range,
-      },
-      ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: headline }),
+    headline: headline + paginationFooter,
+    headline_callout: callout,
+    status: 'success',
+    decisions: {
+      threshold_used: costPerGb,
+      threshold_basis: chassisThresholdBasis,
+      threshold_audit: patternCountTotal != null ? {
+        value: costPerGb,
+        basis: `top_n_above_floor; ${renderRows.length} of ${patternCountTotal} env patterns returned`,
+        observed_distribution: null,
+      } : undefined,
     },
+    source_disclosure: {
+      bytes_source: 'tsdb',
+      rate_source: chassis_rate_source,
+      pattern_count_source: {
+        kind: 'top_n_above_threshold',
+        count: renderRows.length,
+        denominator_meaning: `Top ${renderRows.length} patterns above 0 KB/s floor in ${tf.label}${patternCountTotal != null ? ` of ${patternCountTotal} env total` : ''}`,
+      },
+      siem_vendor: siemLabel ?? undefined,
+    },
+    scope: {
+      window: tf.label,
+      window_basis: 'explicit',
+      candidates_count: patternCountTotal,
+      candidates_usable: patternCountTotal,
+      candidates_evaluated: renderRows.length,
+    },
+    payload: topPatternsPayload,
+    human_summary: chassis_human_summary,
+    telemetry: chassisTelemetry,
     actions: [
       ...nextActions.map((a) => ({ tool: a.tool, args: a.args, reason: a.reason })),
       // FIX 7 — next_page continuation action when results are truncated.
@@ -977,5 +1049,17 @@ export async function executeTopPatterns(
         : { chart: 'timeseries', units: '$/mo' },
     truncated,
     images,
+    // Back-compat: spread legacy flat fields alongside chassis so existing
+    // callers reading data.status / data.query_count / data.human_summary /
+    // data.patterns continue to work during migration.
+    legacyCompat: true,
+    legacyExtraFields: {
+      ...topPatternsPayload,
+      status: 'success',
+      query_count: telemetry.queryCount,
+      total_latency_ms: Date.now() - telemetry.startedAt,
+      backend_pressure_hint: null,
+      human_summary: chassis_human_summary,
+    },
   });
 }

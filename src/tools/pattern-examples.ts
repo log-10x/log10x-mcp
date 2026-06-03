@@ -38,7 +38,13 @@ import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { tenxHash } from '../lib/pattern-hash.js';
 import { resolvePatternHashFromMetrics } from '../lib/resolve-pattern-hash.js';
 import { agentOnly } from '../lib/agent-only.js';
-import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
+import { newTelemetry } from '../lib/unified-envelope.js';
+import {
+  buildChassisEnvelope,
+  buildChassisErrorEnvelope,
+  newChassisTelemetry,
+  recordQuery,
+} from '../lib/chassis-envelope.js';
 import { computeBucketInterpretation } from '../lib/bucket-interpretation.js';
 import { normalizeTimeRange } from '../lib/time-range.js';
 
@@ -146,10 +152,13 @@ export async function executePatternExamples(
   rawArgs: PatternExamplesArgs,
   env: EnvConfig,
 ): Promise<import('../lib/output-types.js').StructuredOutput> {
-  const telemetry = newTelemetry();
+  const telemetry = newTelemetry();           // legacy — kept for back-compat reads of query_count
+  const chassisTelemetry = newChassisTelemetry();
   const sumOut: { data?: PatternExamplesSummary } = {};
   const md = await executePatternExamplesInner(rawArgs, env, sumOut);
-  const { buildEnvelope } = await import('../lib/output-types.js');
+  // The inner drove SIEM queries. Record one query for the probe pass.
+  recordQuery(chassisTelemetry);
+
   if (!sumOut.data) {
     // Graceful no-signal / error cases: the inner returns a markdown
     // narrative. Strip the leading `## ` heading and collapse to a
@@ -161,13 +170,21 @@ export async function executePatternExamples(
       .join(' ')
       .slice(0, 600);
     const headline = md.split('\n')[0]?.replace(/^##\s*/, '').slice(0, 200) || 'pattern_examples — no result';
-    return buildEnvelope({
+    return buildChassisErrorEnvelope({
       tool: 'log10x_pattern_examples',
-      view: 'summary',
-      summary: { headline },
-      data: { ...buildUnifiedFields({ status: 'no_signal', telemetry, humanSummary: stripped }) },
+      err: {
+        error_type: 'no_signal',
+        retryable: true,
+        suggested_backoff_ms: null,
+        hint: stripped.slice(0, 300) || 'No matching events found in the requested window.',
+      },
+      telemetry: chassisTelemetry,
+      scope: { window: rawArgs.timeRange ?? '1h', window_basis: 'explicit' },
+      contextPayload: { pattern_ref: rawArgs.pattern },
+      warnings: [`Original headline: ${headline}`],
     });
   }
+
   const d = sumOut.data;
   const headline = `\`${d.pattern}\` (${d.vendor}, ${d.window}): ${d.events_pulled} events pulled, ${d.retained_events} retained across ${d.retained_templates} templates via ${d.probe_path}`;
   // Truncation signal: the SIEM probe hit its limit (rawArgs.limit defaults to 5).
@@ -195,13 +212,63 @@ export async function executePatternExamples(
     });
   }
 
-  return buildEnvelope({
+  // Honest human_summary: event counts + bucket recommendation.
+  const topBucketAction = d.buckets[0]?.bucket_interpretation.recommended_action;
+  const chassis_human_summary =
+    `${d.events_pulled} events pulled, ${d.retained_events} retained across ${d.retained_templates} buckets` +
+    ` (${d.probe_path}, ${d.window} window).` +
+    (topBucketAction ? ` Top bucket recommends: ${topBucketAction}.` : '') +
+    (d.multi_line_detected ? ' Multi-line grouping detected.' : '');
+
+  return buildChassisEnvelope({
     tool: 'log10x_pattern_examples',
     view: 'summary',
-    summary: { headline },
-    data: { ...d, ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: headline }) },
+    headline,
+    status: 'success',
+    decisions: {
+      // pattern_examples has no numeric threshold — it's Jaccard-discriminated
+      // but that's an algorithm, not a user-configurable threshold.
+      threshold_used: null,
+      threshold_basis: 'default',
+    },
+    source_disclosure: {
+      // Bytes figures come from TSDB (tenx_hash query volume). SIEM events
+      // are used for content only, not for cost estimates.
+      bytes_source: 'tsdb',
+      // No rate-based dollar values in this tool.
+      pattern_count_source: {
+        kind: 'scoped_total',
+        count: d.retained_templates,
+        denominator_meaning: `Retained templateHash buckets passing Jaccard ≥ 0.85 out of ${d.distinct_templates} templates from SIEM probe`,
+      },
+      siem_vendor: d.vendor,
+    },
+    scope: {
+      window: d.window,
+      window_basis: 'explicit',
+      candidates_count: d.distinct_templates,
+      candidates_usable: d.retained_templates,
+      candidates_evaluated: d.buckets.length,
+      candidates_failed: d.dropped_jaccard_events > 0
+        ? [`${d.dropped_jaccard_events} events in ${d.distinct_templates - d.retained_templates} templates dropped on Jaccard`]
+        : undefined,
+    },
+    payload: d,
+    human_summary: chassis_human_summary,
+    telemetry: chassisTelemetry,
     actions: envelopeActions.length > 0 ? envelopeActions : undefined,
     truncated,
+    // Back-compat: spread legacy flat fields so existing callers reading
+    // data.pattern / data.buckets / data.status / data.human_summary etc. work.
+    legacyCompat: true,
+    legacyExtraFields: {
+      ...d,
+      status: 'success',
+      query_count: telemetry.queryCount,
+      total_latency_ms: Date.now() - telemetry.startedAt,
+      backend_pressure_hint: null,
+      human_summary: chassis_human_summary,
+    },
   });
 }
 

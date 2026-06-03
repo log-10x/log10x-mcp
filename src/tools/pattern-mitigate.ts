@@ -41,6 +41,12 @@ import type { PrimitiveError } from '../lib/primitive-errors.js';
 import { resolveSiemSelection } from '../lib/siem/resolve.js';
 import { getConnector } from '../lib/siem/index.js';
 import { probeReceiverInPath, eventHasTenxHash } from '../lib/receiver-probe.js';
+import {
+  buildChassisEnvelope,
+  buildChassisErrorEnvelope,
+  newChassisTelemetry,
+  recordQuery,
+} from '../lib/chassis-envelope.js';
 
 export const patternMitigateSchema = {
   pattern: z
@@ -481,49 +487,53 @@ function deriveBasis(sources: CapabilitySources): RecommendationBasis {
 
 export async function executePatternMitigate(args: PatternMitigateArgs): Promise<import('../lib/output-types.js').StructuredOutput> {
   const startedAt = Date.now();
-  const { buildEnvelope } = await import('../lib/output-types.js');
+  const chassisTelemetry = newChassisTelemetry();
 
   // ── Input validation ───────────────────────────────────────────────
   if (!args.pattern || args.pattern.trim().length === 0) {
-    return await errorEnvelope({
-      startedAt,
-      pattern: (args.pattern ?? '').trim(),
+    return buildChassisErrorEnvelope({
+      tool: 'log10x_pattern_mitigate',
       err: {
         error_type: 'input_invalid',
         retryable: false,
         suggested_backoff_ms: null,
         hint: 'pattern argument required (canonical pattern name from a prior cost / triage tool).',
       },
+      telemetry: chassisTelemetry,
     });
   }
 
   const sumOut: { data?: PatternMitigateSummary } = {};
   try {
     await executePatternMitigateInner(args, sumOut, startedAt);
+    // SIEM probe inside detectCapabilities counts as one query.
+    recordQuery(chassisTelemetry);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    return await errorEnvelope({
-      startedAt,
-      pattern: args.pattern,
+    return buildChassisErrorEnvelope({
+      tool: 'log10x_pattern_mitigate',
       err: {
         error_type: 'local_processing_failed',
         retryable: false,
         suggested_backoff_ms: null,
         hint: msg.slice(0, 300),
       },
+      telemetry: chassisTelemetry,
+      contextPayload: { pattern_ref: args.pattern },
     });
   }
 
   if (!sumOut.data) {
-    return await errorEnvelope({
-      startedAt,
-      pattern: args.pattern,
+    return buildChassisErrorEnvelope({
+      tool: 'log10x_pattern_mitigate',
       err: {
         error_type: 'local_processing_failed',
         retryable: false,
         suggested_backoff_ms: null,
         hint: 'pattern_mitigate inner pass produced no structured data.',
       },
+      telemetry: chassisTelemetry,
+      contextPayload: { pattern_ref: args.pattern },
     });
   }
   const d = sumOut.data;
@@ -578,59 +588,49 @@ export async function executePatternMitigate(args: PatternMitigateArgs): Promise
     });
   }
 
-  return buildEnvelope({
-    tool: 'log10x_pattern_mitigate',
-    view: 'summary',
-    summary: { headline },
-    data: d,
-    actions: envelopeActions.length > 0 ? envelopeActions : undefined,
-  });
-}
+  // Honest human_summary: M of N options reachable, plus next-step if applicable.
+  const chassis_human_summary =
+    d.status === 'no_signal'
+      ? `\`${d.pattern}\`: no mitigation options reachable on ${d.env_capabilities.analyzer_vendor ?? 'this env'}. ${dimmedCount} dimmed. ${d.recommendation_audit.basis === 'unknown' ? 'No capability source found — run log10x_discover_env.' : `Basis: ${d.recommendation_audit.basis}.`}`
+      : `\`${d.pattern}\`: ${enabledCount} of ${d.options.length} options reachable on ${d.env_capabilities.analyzer_vendor ?? 'this env'} (${d.options.filter((o) => o.enabled).map((o) => o.label).join(', ')}). ${dimmedCount > 0 ? `${dimmedCount} dimmed. ` : ''}Basis: ${d.recommendation_audit.basis}. Agent SHOULD wait for user pick before routing.`;
 
-async function errorEnvelope(args: {
-  startedAt: number;
-  pattern: string;
-  err: PrimitiveError;
-}): Promise<import('../lib/output-types.js').StructuredOutput> {
-  const { buildEnvelope } = await import('../lib/output-types.js');
-  const data: PatternMitigateSummary = {
-    status: 'error',
-    recommendation_basis: 'unknown',
-    recommendation_audit: {
-      basis: 'unknown',
-      n_options_enabled: 0,
-      n_options_dimmed: 0,
-      capability_sources: {
-        gitops: 'absent',
-        forwarder: 'absent',
-        analyzer: 'absent',
-        receiver: 'absent',
-        retriever: 'absent',
-        receiver_in_path: 'absent',
-      },
-      snapshot_age_seconds: null,
-    },
-    pattern_ref: args.pattern,
-    query_count: 0,
-    total_latency_ms: Date.now() - args.startedAt,
-    backend_pressure_hint: null,
-    human_summary: `pattern_mitigate failed: ${args.err.hint}`,
-    pattern: args.pattern,
-    options: [],
-    env_capabilities: {
-      can_mute: false,
-      can_compact: false,
-      receiver_in_path: false,
-      receiver_in_path_unknown: false,
-      has_retriever_archive: false,
-    },
-    error: args.err,
-  };
-  return buildEnvelope({
+  return buildChassisEnvelope({
     tool: 'log10x_pattern_mitigate',
     view: 'summary',
-    summary: { headline: `Error (${args.err.error_type}): ${args.err.hint.slice(0, 120)}` },
-    data,
+    headline,
+    status: d.status === 'no_signal' ? 'no_signal' : 'success',
+    decisions: {
+      // pattern_mitigate is a capability tool, not a numeric tool.
+      // threshold_used is null; capability_audit is in the payload.
+      threshold_used: null,
+      threshold_basis: 'default',
+    },
+    source_disclosure: {
+      // source_disclosure mostly empty — capability detection sources are
+      // in recommendation_audit.capability_sources inside the payload.
+      siem_vendor: d.env_capabilities.analyzer_vendor ?? undefined,
+    },
+    scope: {
+      window: 'current',
+      window_basis: 'auto_default',
+      candidates_count: d.options.length,
+      candidates_usable: enabledCount,
+      candidates_evaluated: d.options.length,
+      candidates_failed: d.options
+        .filter((o) => !o.enabled && o.disabled_reason)
+        .map((o) => `${o.id}: ${(o.disabled_reason ?? '').slice(0, 80)}`),
+    },
+    payload: d,
+    human_summary: chassis_human_summary,
+    telemetry: chassisTelemetry,
+    actions: envelopeActions.length > 0 ? envelopeActions : undefined,
+    // Back-compat: spread legacy flat fields so existing callers reading
+    // data.status / data.options / data.env_capabilities / data.human_summary work.
+    legacyCompat: true,
+    legacyExtraFields: {
+      ...d,
+      human_summary: chassis_human_summary,
+    },
   });
 }
 
