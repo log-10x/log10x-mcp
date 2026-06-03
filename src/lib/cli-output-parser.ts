@@ -173,7 +173,13 @@ function extractSlotsFromBody(body: string): VariableSlot[] {
         precedingToken,
         name: inferredName,
       });
-      previousName = inferredName;
+      // Mirror variable-concentration.ts's inferSlotName: when no confident name
+      // is derivable, fall back to the positional `slot_${N}` string so that
+      // previousName is always a non-undefined string.  Without this, a UUID-heavy
+      // pattern whose first slot has no preceding key sets previousName=undefined,
+      // which kills the separator-branch inheritance chain for all subsequent slots
+      // (the `previousName &&` guard at line 236 never fires).
+      previousName = inferredName ?? `slot_${position}`;
       position += 1;
       i += 1;
       runStart = i;
