@@ -16,8 +16,13 @@ import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { agentOnly } from '../lib/agent-only.js';
 import { lineChart } from '../lib/line-chart.js';
 import { patternDisplay } from '../lib/pattern-descriptor.js';
-import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { type StructuredOutput } from '../lib/output-types.js';
 import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
+import {
+  buildChassisEnvelope,
+  newChassisTelemetry,
+  recordQuery,
+} from '../lib/chassis-envelope.js';
 import { resolvePatternHashFromMetrics } from '../lib/resolve-pattern-hash.js';
 
 export const trendSchema = {
@@ -104,15 +109,28 @@ export async function executeTrend(
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
   const telemetry = newTelemetry();
+  const chassisTelemetry = newChassisTelemetry();
 
   // Validate: at least one of pattern / pattern_hash must be provided.
   if (!args.pattern && !args.pattern_hash) {
     const headline = 'pattern_trend: provide either pattern (name) or pattern_hash.';
-    return buildEnvelope({
+    return buildChassisEnvelope({
       tool: 'log10x_pattern_trend',
       view: 'summary',
-      summary: { headline },
-      data: { ...buildUnifiedFields({ status: 'insufficient_data', telemetry, humanSummary: headline }) },
+      headline,
+      status: 'error',
+      decisions: { threshold_used: null, threshold_basis: 'default' },
+      source_disclosure: {},
+      scope: { window: 'unknown', window_basis: 'auto_default' },
+      payload: { ...buildUnifiedFields({ status: 'insufficient_data', telemetry, humanSummary: headline }) },
+      human_summary: headline,
+      error: {
+        error_type: 'missing_identifier',
+        retryable: false,
+        suggested_backoff_ms: null,
+        hint: 'Pass pattern (Symbol Message name) or pattern_hash (11-char tenx_hash from top_patterns).',
+      },
+      telemetry: chassisTelemetry,
     });
   }
 
@@ -129,6 +147,7 @@ export async function executeTrend(
           `${LABELS.hash}="${args.pattern_hash.replace(/"/g, '\\"')}",` +
           `${LABELS.env}="${metricsEnv}"}[7d])))`;
         const res = await queryInstant(env, q);
+        recordQuery(chassisTelemetry);
         if (res.status === 'success' && res.data.result.length > 0) {
           patternName = res.data.result[0].metric[LABELS.pattern];
         }
@@ -140,17 +159,26 @@ export async function executeTrend(
 
   // Normalise '1d' legacy alias to '24h' before passing to inner.
   const normalizedTimeRange = args.timeRange === '1d' ? '24h' : args.timeRange;
+  const effectiveWindow = normalizedTimeRange ?? args.timeRange ?? '7d';
 
   const sumOut: { data?: PatternTrendSummary } = {};
   await executeTrendInner({ ...args, pattern: patternName ?? '', timeRange: normalizedTimeRange }, env, sumOut);
+  recordQuery(chassisTelemetry);
+
   if (!sumOut.data) {
     const id = patternName ?? args.pattern_hash ?? '(unknown)';
     const headline = `No trend data available for \`${id}\` in this environment.`;
-    return buildEnvelope({
+    return buildChassisEnvelope({
       tool: 'log10x_pattern_trend',
       view: 'summary',
-      summary: { headline },
-      data: { ...buildUnifiedFields({ status: 'insufficient_data', telemetry, humanSummary: headline }) },
+      headline,
+      status: 'no_signal',
+      decisions: { threshold_used: null, threshold_basis: 'default' },
+      source_disclosure: { bytes_source: 'tsdb' },
+      scope: { window: effectiveWindow, window_basis: 'explicit' },
+      payload: { ...buildUnifiedFields({ status: 'insufficient_data', telemetry, humanSummary: headline }) },
+      human_summary: headline,
+      telemetry: chassisTelemetry,
     });
   }
   const d = sumOut.data;
@@ -201,13 +229,45 @@ export async function executeTrend(
     /* chart rendering is best-effort; never block tool execution */
   }
   } // end include_chart gate
-  return buildEnvelope({
+
+  // Spike-detect threshold disclosure for decisions block.
+  const spikeThresholdInfo = d.spike_detected
+    ? { threshold_used: 3.0, threshold_basis: 'default' as const }
+    : { threshold_used: null, threshold_basis: 'default' as const };
+
+  const rateSourceForChassis = d.rate_source === 'customer_supplied'
+    ? 'customer_supplied' as const
+    : d.rate_source === 'list_price'
+      ? 'list_price' as const
+      : 'none' as const;
+
+  const human_summary = `${d.pattern} over ${d.window}: ${fmtBytes(d.total_bytes)} volume, change ${changeSign}${d.change_pct}%.` +
+    (d.spike_detected ? ' Spike detected.' : '') +
+    (d.dropped_share_pct !== null ? ` ${Math.round(d.dropped_share_pct)}% offloaded.` : '');
+
+  return buildChassisEnvelope({
     tool: 'log10x_pattern_trend',
     view: 'summary',
-    summary: { headline },
-    data: { ...d, ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: headline }) },
+    headline,
+    status: d.total_bytes > 0 ? 'success' : 'no_signal',
+    decisions: {
+      threshold_used: spikeThresholdInfo.threshold_used,
+      threshold_basis: spikeThresholdInfo.threshold_basis,
+    },
+    source_disclosure: {
+      bytes_source: 'tsdb',
+      rate_source: rateSourceForChassis,
+      siem_vendor: undefined,
+    },
+    scope: {
+      window: d.window,
+      window_basis: 'explicit',
+    },
+    payload: { ...d, ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: headline }) },
+    human_summary,
     render_hint: { chart: 'timeseries', units: 'bytes/sec' },
     images,
+    telemetry: chassisTelemetry,
   });
 }
 

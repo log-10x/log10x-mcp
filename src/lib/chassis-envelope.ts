@@ -672,6 +672,13 @@ export function buildChassisErrorEnvelope(opts: {
   /** Extra context already available (e.g. the input echo). */
   contextPayload?: Record<string, unknown>;
   warnings?: string[];
+  /**
+   * Partial source disclosure for fields known before the failure.
+   * Callers that resolved vendor selection or know the bytes source
+   * (e.g. 'tsdb') should pass what they have so the error envelope
+   * carries traceable provenance. Defaults to {} for back-compat.
+   */
+  source_disclosure?: Partial<SourceDisclosure>;
 }): ChassisEnvelope {
   const errHint = opts.err?.hint ?? 'Unknown error';
   const errType = opts.err?.error_type ?? 'unknown';
@@ -685,7 +692,7 @@ export function buildChassisErrorEnvelope(opts: {
       threshold_used: null,
       threshold_basis: 'default',
     },
-    source_disclosure: {},
+    source_disclosure: opts.source_disclosure ?? {},
     scope: {
       window: 'unknown',
       window_basis: 'auto_default',

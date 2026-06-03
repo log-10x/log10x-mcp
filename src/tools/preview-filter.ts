@@ -38,7 +38,12 @@ import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { tenxHash } from '../lib/pattern-hash.js';
 import { fetchFirstSeenBatch } from '../lib/first-seen.js';
 import { sparkline } from '../lib/line-chart.js';
-import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { type StructuredOutput } from '../lib/output-types.js';
+import {
+  buildChassisEnvelope,
+  newChassisTelemetry,
+  recordQuery,
+} from '../lib/chassis-envelope.js';
 import { fmtBytes as fmtBytesShared } from '../lib/format.js';
 import { EXPLAIN_MODES, type ExplainMode } from './explain-mode.js';
 
@@ -357,6 +362,7 @@ export async function executePreviewFilter(args: {
   top_n?: number;
   environment?: string;
 }): Promise<StructuredOutput> {
+  const telemetry = newChassisTelemetry();
   const topN = args.top_n ?? 20;
 
   let env: EnvConfig | undefined;
@@ -377,6 +383,7 @@ export async function executePreviewFilter(args: {
   if (env && dataSource === 'tsdb') {
     try {
       const tsdbResult = await fetchFromTsdb(env, args.service, topN);
+      recordQuery(telemetry);
       patterns = tsdbResult.rows;
       patternCountTotal = tsdbResult.patternCountTotal;
       bytesSource = {
@@ -430,12 +437,18 @@ export async function executePreviewFilter(args: {
     'log10x_advise_retriever',
   ];
 
+  const status = patterns.length === 0 ? 'no_signal' as const : 'success' as const;
   const headline =
     patterns.length === 0
       ? `preview_filter(${args.mode}, ${args.service}): no patterns found.`
       : `preview_filter(${args.mode}, ${args.service}): ${patterns.length} patterns shown, ` +
         `${fmtBytesShared(totalServiceBytes)}/mo total. ` +
         `CSV: ${csvPath ?? 'write failed'}.`;
+
+  const human_summary =
+    patterns.length === 0
+      ? `No patterns found for service "${args.service}" in mode "${args.mode}". Metrics may not be available yet.`
+      : `Top ${patterns.length} patterns matching mode "${args.mode}" for "${args.service}", ${fmtBytesShared(totalServiceBytes)}/mo total.`;
 
   const envelope: PreviewFilterEnvelope = {
     service: args.service,
@@ -451,12 +464,40 @@ export async function executePreviewFilter(args: {
     bytes_source: bytesSource,
   };
 
-  return buildEnvelope({
+  // Top-3 most useful actions only (defect 27: was 40-entry bloat).
+  const top3 = patterns.slice(0, 3);
+
+  return buildChassisEnvelope({
     tool: 'log10x_preview_filter',
     view: 'summary',
-    summary: { headline },
-    data: envelope,
-    actions: patterns.flatMap((p) => [
+    headline,
+    status,
+    decisions: {
+      threshold_used: topN,
+      threshold_basis: 'customer_supplied',
+    },
+    source_disclosure: {
+      bytes_source: 'tsdb',
+      pattern_count_source: patternCountTotal !== null
+        ? {
+            kind: 'scoped_total_above_threshold',
+            count: patternCountTotal,
+            denominator_meaning: `All distinct patterns for service "${args.service}" in 30d window`,
+          }
+        : undefined,
+    },
+    scope: {
+      window: '30d',
+      window_basis: 'auto_default',
+      candidates_count: patternCountTotal ?? undefined,
+      candidates_evaluated: patterns.length,
+    },
+    payload: envelope,
+    human_summary,
+    must_render_verbatim: verbatim,
+    must_ask_user: mustAskUser,
+    forbidden_next_actions: forbiddenNextActions,
+    actions: top3.flatMap((p) => [
       {
         tool: 'log10x_pattern_detail',
         args: { pattern_hash: p.tenx_hash },
@@ -466,9 +507,10 @@ export async function executePreviewFilter(args: {
       {
         tool: 'log10x_pattern_examples',
         args: { pattern: p.descriptor_full },
-        reason: 'Bucket sample events by slot value to see if a single slot value dominates (low-cardinality skew) — useful before deciding drop vs sample vs compact.',
+        reason: 'Bucket sample events by slot value to see if a single slot value dominates.',
         role: 'optional-followup' as const,
       },
     ]),
+    telemetry,
   });
 }

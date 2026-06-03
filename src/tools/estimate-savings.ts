@@ -62,9 +62,14 @@ import {
 } from '../lib/cost.js';
 import type { SiemId } from '../lib/siem/pricing.js';
 import {
-  buildEnvelope,
   type StructuredOutput,
 } from '../lib/output-types.js';
+import {
+  buildChassisEnvelope,
+  buildChassisErrorEnvelope,
+  newChassisTelemetry,
+  recordQuery,
+} from '../lib/chassis-envelope.js';
 import { fmtDollar, fmtPct } from '../lib/format.js';
 import {
   parseCapCsv,
@@ -1446,6 +1451,7 @@ export async function executeEstimateSavings(
   args: EstimateSavingsArgs,
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
+  const telemetry = newChassisTelemetry();
   const mode = args.mode ?? 'forecast';
 
   // Destination is required in both modes. When not passed explicitly, attempt
@@ -1460,54 +1466,83 @@ export async function executeEstimateSavings(
   let destination: ValidDest;
   if (!args.destination) {
     const detected = await resolveSiemSelection({});
+    recordQuery(telemetry);
     if (detected.kind === 'resolved') {
       const resolvedId = detected.id as string;
       // Validate the resolved id is in DEST_ENUM before accepting it.
       if (!(VALID_DESTS as readonly string[]).includes(resolvedId)) {
-        return buildEnvelope({
+        return buildChassisEnvelope({
           tool: 'log10x_estimate_savings',
           view: 'summary',
-          summary: { headline: 'estimate_savings refused: auto-detected destination not supported.' },
-          data: {
+          headline: 'estimate_savings refused: auto-detected destination not supported.',
+          status: 'error',
+          decisions: { threshold_used: null, threshold_basis: 'default' },
+          source_disclosure: {},
+          scope: { window: 'unknown', window_basis: 'auto_default' },
+          payload: {
             ok: false,
             phase: 'target_resolution',
             error: `auto-detected destination "${resolvedId}" is not in the supported set`,
-            human_summary:
-              `Auto-detected "${resolvedId}" but that destination is not supported by estimate_savings. Pass one of ${VALID_DESTS.join(', ')}.`,
           },
+          human_summary: `Auto-detected "${resolvedId}" but that destination is not supported by estimate_savings. Pass one of ${VALID_DESTS.join(', ')}.`,
+          error: {
+            error_type: 'unsupported_destination',
+            retryable: false,
+            suggested_backoff_ms: null,
+            hint: `Pass one of ${VALID_DESTS.join(', ')}.`,
+          },
+          telemetry,
         });
       }
       destination = resolvedId as ValidDest;
     } else if (detected.kind === 'ambiguous') {
       const names = detected.candidates.map((c) => c.displayName).join(', ');
-      return buildEnvelope({
+      return buildChassisEnvelope({
         tool: 'log10x_estimate_savings',
         view: 'summary',
-        summary: { headline: 'estimate_savings refused: multiple SIEMs detected — pass destination explicitly.' },
-        data: {
+        headline: 'estimate_savings refused: multiple SIEMs detected — pass destination explicitly.',
+        status: 'error',
+        decisions: { threshold_used: null, threshold_basis: 'default' },
+        source_disclosure: {},
+        scope: { window: 'unknown', window_basis: 'auto_default' },
+        payload: {
           ok: false,
           phase: 'target_resolution',
           error: 'ambiguous destination',
           candidates: detected.candidates.map((c) => ({ id: c.id, displayName: c.displayName, source: c.source })),
-          human_summary:
-            `Multiple configured SIEMs detected (${names}). Pass destination explicitly to specify which to use.`,
         },
+        human_summary: `Multiple configured SIEMs detected (${names}). Pass destination explicitly to specify which to use.`,
+        error: {
+          error_type: 'ambiguous_destination',
+          retryable: false,
+          suggested_backoff_ms: null,
+          hint: `Multiple SIEMs detected (${names}). Pass destination explicitly.`,
+        },
+        telemetry,
       });
     } else {
       // kind === 'none' — no credentials found, fall through to original refusal.
-      return buildEnvelope({
+      return buildChassisEnvelope({
         tool: 'log10x_estimate_savings',
         view: 'summary',
-        summary: {
-          headline: 'estimate_savings refused: destination not specified.',
-        },
-        data: {
+        headline: 'estimate_savings refused: destination not specified.',
+        status: 'error',
+        decisions: { threshold_used: null, threshold_basis: 'default' },
+        source_disclosure: {},
+        scope: { window: 'unknown', window_basis: 'auto_default' },
+        payload: {
           ok: false,
           phase: 'target_resolution',
           error: 'destination is required',
-          human_summary:
-            'estimate_savings refused: destination is required. Pass one of splunk, datadog, elasticsearch, clickhouse, cloudwatch, azure-monitor, gcp-logging, sumo.',
         },
+        human_summary: 'estimate_savings refused: destination is required. Pass one of splunk, datadog, elasticsearch, clickhouse, cloudwatch, azure-monitor, gcp-logging, sumo.',
+        error: {
+          error_type: 'missing_destination',
+          retryable: false,
+          suggested_backoff_ms: null,
+          hint: 'Pass destination explicitly. Supported: splunk, datadog, elasticsearch, clickhouse, cloudwatch, azure-monitor, gcp-logging, sumo.',
+        },
+        telemetry,
       });
     }
   } else {
@@ -1517,20 +1552,27 @@ export async function executeEstimateSavings(
   try {
     if (mode === 'forecast') {
       if (!args.proposed_config && args.target_percent === undefined) {
-        return buildEnvelope({
+        return buildChassisEnvelope({
           tool: 'log10x_estimate_savings',
           view: 'summary',
-          summary: {
-            headline:
-              'estimate_savings refused: pass proposed_config or target_percent.',
-          },
-          data: {
+          headline: 'estimate_savings refused: pass proposed_config or target_percent.',
+          status: 'error',
+          decisions: { threshold_used: null, threshold_basis: 'default' },
+          source_disclosure: { bytes_source: 'tsdb', siem_vendor: destination },
+          scope: { window: 'unknown', window_basis: 'auto_default' },
+          payload: {
             ok: false,
             phase: 'target_resolution',
             error: 'proposed_config or target_percent required',
-            human_summary:
-              'estimate_savings forecast needs either proposed_config (explicit per-pattern rows) or target_percent (greedy solver picks rows).',
           },
+          human_summary: 'estimate_savings forecast needs either proposed_config (explicit per-pattern rows) or target_percent (greedy solver picks rows).',
+          error: {
+            error_type: 'missing_input',
+            retryable: false,
+            suggested_backoff_ms: null,
+            hint: 'Pass proposed_config (explicit rows) or target_percent (greedy solver).',
+          },
+          telemetry,
         });
       }
       const proposed = args.proposed_config?.map((r) => ({
@@ -1552,6 +1594,7 @@ export async function executeEstimateSavings(
         },
         env
       );
+      recordQuery(telemetry);
       const patternCountLabel = result.per_pattern_truncated
         ? `top ${result.per_pattern.length} of ${result.per_pattern_total_count} patterns`
         : `${result.per_pattern.length} pattern${result.per_pattern.length !== 1 ? 's' : ''}`;
@@ -1563,12 +1606,32 @@ export async function executeEstimateSavings(
           ? `If you enforce externally: ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings potential on ${patternCountLabel} (${(result.coverage_of_env_pct * 100).toFixed(0)}% of monthly env bytes). Enforcement choice is yours.`
           : `Forecast (${destination}): ${fmtDollar(result.totals.dollars_expected_monthly)}/mo expected savings (at ${rateTag}) on ${patternCountLabel} (${(result.coverage_of_env_pct * 100).toFixed(0)}% of monthly env bytes).`;
       const human_summary = buildForecastHumanSummary(result, destination, args.enforcement_mode);
-      return buildEnvelope({
+      // Compute threshold_basis from rate_source for the decisions block.
+      const thresholdBasis = result.rate_source === 'customer_supplied'
+        ? 'customer_supplied' as const
+        : 'default' as const;
+      return buildChassisEnvelope({
         tool: 'log10x_estimate_savings',
         view: 'summary',
-        summary: { headline },
-        data: { ok: true, ...result, human_summary },
-        warnings: result.caveats,
+        headline,
+        status: result.totals.bytes_in_monthly > 0 ? 'success' : 'no_signal',
+        decisions: {
+          threshold_used: args.target_percent ?? null,
+          threshold_basis: args.target_percent !== undefined ? 'customer_supplied' : thresholdBasis,
+        },
+        source_disclosure: {
+          bytes_source: 'tsdb',
+          rate_source: result.rate_source === 'customer_supplied' ? 'customer_supplied' : 'list_price',
+          siem_vendor: destination,
+        },
+        scope: {
+          window: result.observation_window,
+          window_basis: 'auto_default',
+          candidates_count: result.per_pattern_total_count,
+          candidates_evaluated: result.per_pattern.length,
+        },
+        payload: { ok: true, ...result },
+        human_summary,
         actions: [
           {
             tool: 'log10x_configure_engine',
@@ -1578,29 +1641,37 @@ export async function executeEstimateSavings(
               target_percent: args.target_percent,
             },
             role: 'recommended-next',
-            reason:
-              'Turn this forecast into a per-pattern cap PR (configure_engine emits the gh command).',
+            reason: 'Turn this forecast into a per-pattern cap PR (configure_engine emits the gh command).',
           },
         ],
+        warnings: result.caveats,
+        telemetry,
       });
     }
 
     // verify
     if (!args.baseline_window || !args.post_window) {
-      return buildEnvelope({
+      return buildChassisEnvelope({
         tool: 'log10x_estimate_savings',
         view: 'summary',
-        summary: {
-          headline:
-            'estimate_savings refused: verify needs baseline_window + post_window.',
-        },
-        data: {
+        headline: 'estimate_savings refused: verify needs baseline_window + post_window.',
+        status: 'error',
+        decisions: { threshold_used: null, threshold_basis: 'default' },
+        source_disclosure: { bytes_source: 'tsdb', siem_vendor: destination },
+        scope: { window: 'unknown', window_basis: 'auto_default' },
+        payload: {
           ok: false,
           phase: 'target_resolution',
           error: 'baseline_window and post_window required',
-          human_summary:
-            'estimate_savings verify needs baseline_window (pre-merge) and post_window (post-merge), for example baseline_window="7d" and post_window="7d".',
         },
+        human_summary: 'estimate_savings verify needs baseline_window (pre-merge) and post_window (post-merge), for example baseline_window="7d" and post_window="7d".',
+        error: {
+          error_type: 'missing_input',
+          retryable: false,
+          suggested_backoff_ms: null,
+          hint: 'Pass baseline_window and post_window (e.g. "7d").',
+        },
+        telemetry,
       });
     }
     const result = await runEstimateVerify(
@@ -1616,47 +1687,78 @@ export async function executeEstimateSavings(
       },
       env
     );
+    recordQuery(telemetry);
     const headline = `Verify (${destination}): ${(result.delivered_pct * 100).toFixed(1)}% delivered reduction (${fmtDollar(result.delivered_dollars_annual_projection)}/yr projected at ${destination} list price — your bill may differ, confidence ${(result.causal_confidence * 100).toFixed(0)}%).`;
     const human_summary = buildVerifyHumanSummary(result, destination);
-    return buildEnvelope({
+    const verifyRateSource = result.rate_source === 'customer_supplied' ? 'customer_supplied' as const : 'list_price' as const;
+    return buildChassisEnvelope({
       tool: 'log10x_estimate_savings',
       view: 'summary',
-      summary: { headline },
-      data: { ok: true, ...result, human_summary },
+      headline,
+      status: result.post_passed_bytes > 0 ? 'success' : 'no_signal',
+      decisions: {
+        threshold_used: null,
+        threshold_basis: 'default',
+        threshold_audit: {
+          value: result.causal_confidence,
+          basis: `causal_confidence=${(result.causal_confidence * 100).toFixed(0)}% (based on cap_fired share of attribution)`,
+        },
+      },
+      source_disclosure: {
+        bytes_source: 'tsdb',
+        rate_source: verifyRateSource,
+        siem_vendor: destination,
+      },
+      scope: {
+        window: result.post_window,
+        window_basis: 'explicit',
+      },
+      payload: { ok: true, ...result },
+      human_summary,
       warnings: result.caveats,
+      telemetry,
     });
   } catch (e: unknown) {
     if (e instanceof NoOpActionError) {
-      const { action, destination } = e;
-      return buildEnvelope({
+      const { action, destination: noOpDest } = e;
+      return buildChassisEnvelope({
         tool: 'log10x_estimate_savings',
         view: 'summary',
-        summary: {
-          headline: `estimate_savings refused: ${action} is a no-op on ${destination}. Use tier_down, sample, or drop instead.`,
-        },
-        data: {
+        headline: `estimate_savings refused: ${action} is a no-op on ${noOpDest}. Use tier_down, sample, or drop instead.`,
+        status: 'error',
+        decisions: { threshold_used: null, threshold_basis: 'default' },
+        source_disclosure: { bytes_source: 'tsdb', siem_vendor: noOpDest },
+        scope: { window: 'unknown', window_basis: 'auto_default' },
+        payload: {
           ok: false,
           phase: 'target_resolution',
-          error: `action=${action} is a no-op on ${destination} (compact_mode=no-op)`,
+          error: `action=${action} is a no-op on ${noOpDest} (compact_mode=no-op)`,
           suggestion: {
             use_instead: ['tier_down', 'sample', 'drop'],
-            reason: `COST_MODEL_BY_DESTINATION.${destination}.compact_mode === 'no-op' — the destination bills on compressed ingest; compaction yields 0% reduction.`,
+            reason: `COST_MODEL_BY_DESTINATION.${noOpDest}.compact_mode === 'no-op' — the destination bills on compressed ingest; compaction yields 0% reduction.`,
           },
-          human_summary: `compact is a no-op on ${destination}. Use tier_down, sample, or drop instead.`,
         },
+        human_summary: `compact is a no-op on ${noOpDest}. Use tier_down, sample, or drop instead.`,
+        error: {
+          error_type: 'noop_action',
+          retryable: false,
+          suggested_backoff_ms: null,
+          hint: `Use tier_down, sample, or drop on ${noOpDest} instead of compact.`,
+        },
+        telemetry,
       });
     }
     const msg = e instanceof Error ? e.message : String(e);
-    return buildEnvelope({
+    return buildChassisErrorEnvelope({
       tool: 'log10x_estimate_savings',
-      view: 'summary',
-      summary: { headline: 'estimate_savings failed.' },
-      data: {
-        ok: false,
-        phase: 'backend',
-        error: msg,
-        human_summary: `estimate_savings failed: ${msg}`,
+      err: {
+        error_type: 'backend_error',
+        retryable: true,
+        suggested_backoff_ms: 2000,
+        hint: msg,
       },
+      telemetry,
+      source_disclosure: { bytes_source: 'tsdb' },
     });
   }
 }

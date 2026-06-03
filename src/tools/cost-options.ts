@@ -23,7 +23,12 @@ import { resolveRetriever } from '../lib/retriever-api.js';
 import { discoverAvailable } from '../lib/siem/index.js';
 import { loadEnvironments, type EnvConfig, type Environments } from '../lib/environments.js';
 import { LABELS } from '../lib/promql.js';
-import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { type StructuredOutput } from '../lib/output-types.js';
+import {
+  buildChassisEnvelope,
+  newChassisTelemetry,
+  recordQuery,
+} from '../lib/chassis-envelope.js';
 import type { CapabilitySummary, MustAskUser } from './log10x-start.js';
 import type { Action } from '../lib/cost.js';
 
@@ -438,6 +443,8 @@ export async function executeCostOptions(args: {
   service?: string;
   pattern_hash?: string;
 }): Promise<StructuredOutput> {
+  const telemetry = newChassisTelemetry();
+
   // Run probes — same pattern as executeLog10xStart.
   let env: EnvConfig | undefined;
   try {
@@ -460,15 +467,18 @@ export async function executeCostOptions(args: {
       probeRetriever(),
       probeSiem(),
     ]);
+    recordQuery(telemetry);
     gatewayOk = g;
     reporterTier = r;
     retrieverOk = ret;
     siemDetected = siem;
     if (reporterTier) {
       receiverProbe = await probeReceiverInPath(env, reporterTier);
+      recordQuery(telemetry);
     }
   } else {
     const [ret, siem] = await Promise.all([probeRetriever(), probeSiem()]);
+    recordQuery(telemetry);
     retrieverOk = ret;
     siemDetected = siem;
   }
@@ -508,13 +518,46 @@ export async function executeCostOptions(args: {
 
   const applicableCount = modes.filter((m) => m.applicable).length;
   const headline = `Cost options (${tier} tier): ${applicableCount} of ${modes.length} modes available. Awaiting user pick before routing.`;
+  const human_summary = siemDetected
+    ? `${applicableCount} of ${modes.length} modes available on ${siemDetected} (${tier} tier). Pick a mode.`
+    : `${applicableCount} of ${modes.length} modes available (${tier} tier, no SIEM detected). Pick a mode.`;
 
-  return buildEnvelope({
+  return buildChassisEnvelope({
     tool: 'log10x_cost_options',
     view: 'summary',
-    summary: { headline },
-    data: envelope,
-    actions: [],
+    headline,
+    status: 'success',
+    decisions: {
+      threshold_used: null,
+      threshold_basis: 'default',
+    },
+    source_disclosure: {
+      siem_vendor: siemDetected ?? undefined,
+    },
+    scope: {
+      window: 'n/a',
+      window_basis: 'auto_default',
+    },
+    payload: envelope,
+    human_summary,
+    must_render_verbatim: verbatim,
+    must_ask_user: mustAskUser,
+    forbidden_next_actions: forbidden,
+    actions: [
+      {
+        tool: 'log10x_estimate_savings',
+        args: {},
+        role: 'recommended-next',
+        reason: 'After user picks a mode, route here with destination + action to forecast savings.',
+      },
+    ],
+    legacyCompat: true,
+    legacyExtraFields: {
+      modes,
+      siem_detected: siemDetected,
+      capability_summary: capsSummary,
+    },
+    telemetry,
   });
 }
 

@@ -182,6 +182,13 @@ export async function executePatternExamples(
       scope: { window: rawArgs.timeRange ?? '1h', window_basis: 'explicit' },
       contextPayload: { pattern_ref: rawArgs.pattern },
       warnings: [`Original headline: ${headline}`],
+      // Pattern volume figures always come from TSDB regardless of whether
+      // the SIEM probe succeeded. Pass bytes_source so error envelopes carry
+      // the same provenance as success envelopes.
+      source_disclosure: {
+        bytes_source: 'tsdb',
+        ...(rawArgs.vendor ? { siem_vendor: rawArgs.vendor } : {}),
+      },
     });
   }
 

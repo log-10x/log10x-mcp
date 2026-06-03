@@ -28,7 +28,13 @@ import { LABELS } from '../lib/promql.js';
 import { parsePrometheusValue } from '../lib/cost.js';
 import { lineChart } from '../lib/line-chart.js';
 import { fmtBytes, normalizePattern } from '../lib/format.js';
-import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { type StructuredOutput } from '../lib/output-types.js';
+import {
+  buildChassisEnvelope,
+  buildChassisErrorEnvelope,
+  newChassisTelemetry,
+  recordQuery,
+} from '../lib/chassis-envelope.js';
 import { oneLine } from '../lib/siem/sample.js';
 import { resolvePatternHashFromMetrics } from '../lib/resolve-pattern-hash.js';
 
@@ -362,13 +368,27 @@ export async function executePatternDetail(args: {
   timeRange?: string;
   environment?: string;
 }): Promise<StructuredOutput> {
+  const telemetry = newChassisTelemetry();
+
   // Validate: at least one of pattern / pattern_hash must be provided.
   if (!args.pattern_hash && !args.pattern) {
-    return buildEnvelope({
+    return buildChassisEnvelope({
       tool: 'log10x_pattern_detail',
       view: 'summary',
-      summary: { headline: 'pattern_detail: provide either pattern_hash or pattern (name).' },
-      data: { error: 'missing_identifier' },
+      headline: 'pattern_detail: provide either pattern_hash or pattern (name).',
+      status: 'error',
+      decisions: { threshold_used: null, threshold_basis: 'default' },
+      source_disclosure: {},
+      scope: { window: 'unknown', window_basis: 'auto_default' },
+      payload: { error: 'missing_identifier' },
+      human_summary: 'pattern_detail requires either pattern_hash or pattern (name). Provide one.',
+      error: {
+        error_type: 'missing_identifier',
+        retryable: false,
+        suggested_backoff_ms: null,
+        hint: 'Pass pattern_hash (from top_patterns / preview_filter) or pattern (Symbol Message name).',
+      },
+      telemetry,
     });
   }
 
@@ -385,14 +405,23 @@ export async function executePatternDetail(args: {
 
   if (!env) {
     const id = args.pattern_hash ?? args.pattern ?? '?';
-    return buildEnvelope({
+    return buildChassisEnvelope({
       tool: 'log10x_pattern_detail',
       view: 'summary',
-      summary: { headline: `pattern_detail(${id.slice(0, 12)}): no environment configured.` },
-      data: {
-        pattern_hash: args.pattern_hash ?? null,
-        error: 'no environment configured',
+      headline: `pattern_detail(${id.slice(0, 12)}): no environment configured.`,
+      status: 'error',
+      decisions: { threshold_used: null, threshold_basis: 'default' },
+      source_disclosure: {},
+      scope: { window: 'unknown', window_basis: 'auto_default' },
+      payload: { pattern_hash: args.pattern_hash ?? null, error: 'no environment configured' },
+      human_summary: 'No environment configured. Run log10x_discover_env or set LOG10X_METRICS_* env vars.',
+      error: {
+        error_type: 'no_environment',
+        retryable: false,
+        suggested_backoff_ms: null,
+        hint: 'Run log10x_discover_env or set LOG10X_METRICS_URL / LOG10X_AUTH.',
       },
+      telemetry,
     });
   }
 
@@ -404,12 +433,19 @@ export async function executePatternDetail(args: {
   } else {
     const canonicalName = normalizePattern(args.pattern!);
     const fromMetrics = await resolvePatternHashFromMetrics(env, canonicalName);
+    recordQuery(telemetry);
     if (!fromMetrics) {
-      return buildEnvelope({
+      return buildChassisEnvelope({
         tool: 'log10x_pattern_detail',
         view: 'summary',
-        summary: { headline: `pattern_detail: no metrics found for pattern "${canonicalName}". Try passing pattern_hash directly.` },
-        data: { error: 'pattern_not_found', pattern: canonicalName },
+        headline: `pattern_detail: no metrics found for pattern "${canonicalName}". Try passing pattern_hash directly.`,
+        status: 'no_signal',
+        decisions: { threshold_used: null, threshold_basis: 'default' },
+        source_disclosure: { bytes_source: 'tsdb' },
+        scope: { window: timeRange, window_basis: 'explicit' },
+        payload: { error: 'pattern_not_found', pattern: canonicalName },
+        human_summary: `No metrics found for pattern "${canonicalName}" in TSDB. Try pattern_hash directly from top_patterns.`,
+        telemetry,
       });
     }
     resolvedHash = fromMetrics;
@@ -422,10 +458,15 @@ export async function executePatternDetail(args: {
     fetchFirstSeen(env, resolvedHash),
     fetchTrend(env, resolvedHash, timeRange),
   ]);
+  recordQuery(telemetry);
 
   const { events: sampleEvents, siemKind } = includeSamples
     ? await fetchSampleEvents(resolvedHash, patternName, timeRange)
     : { events: [] as string[], siemKind: 'unresolved' as const };
+
+  if (includeSamples && siemKind === 'resolved') {
+    recordQuery(telemetry);
+  }
 
   const totalBytes = services.reduce((s, r) => s + r.bytes, 0);
 
@@ -455,6 +496,11 @@ export async function executePatternDetail(args: {
     `${services.length} service(s), ${fmtBytes(totalBytes)}/mo (30d). ` +
     `${sampleEvents.length} sample event(s) fetched.`;
 
+  const human_summary =
+    `Pattern ${patternName ?? resolvedHash.slice(0, 12)} ` +
+    `(services=${services.length}, ${fmtBytes(totalBytes)}/mo). ` +
+    `${sampleEvents.length} sample event(s) fetched.`;
+
   const envelope: PatternDetailEnvelope = {
     pattern_hash: resolvedHash,
     pattern_name: patternName,
@@ -476,11 +522,29 @@ export async function executePatternDetail(args: {
     applyArgs['service'] = services[0].service;
   }
 
-  return buildEnvelope({
+  return buildChassisEnvelope({
     tool: 'log10x_pattern_detail',
     view: 'summary',
-    summary: { headline },
-    data: envelope,
+    headline,
+    status: totalBytes > 0 ? 'success' : 'no_signal',
+    decisions: {
+      threshold_used: null,
+      threshold_basis: 'default',
+    },
+    source_disclosure: {
+      bytes_source: 'tsdb',
+      siem_vendor: siemKind === 'resolved' ? 'detected' : undefined,
+    },
+    scope: {
+      window: timeRange,
+      window_basis: 'explicit',
+      candidates_count: services.length,
+      candidates_evaluated: services.length,
+    },
+    payload: envelope,
+    human_summary,
+    must_render_verbatim: verbatim,
+    must_ask_user: mustAskUser,
     actions: [
       {
         tool: 'log10x_preview_filter',
@@ -503,6 +567,7 @@ export async function executePatternDetail(args: {
         role: 'optional-followup',
       },
     ],
+    telemetry,
   });
 }
 
