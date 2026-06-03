@@ -21,8 +21,8 @@ import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { agentOnly } from '../lib/agent-only.js';
 import { fetchOneSampleByHash } from '../lib/siem/sample.js';
 import { patternDisplay } from '../lib/pattern-descriptor.js';
-import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
-import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
+import { type StructuredOutput } from '../lib/output-types.js';
+import { newChassisTelemetry, buildChassisEnvelope } from '../lib/chassis-envelope.js';
 import { getOffloadStatus } from '../lib/offload-status.js';
 import { isRetrieverConfigured } from '../lib/retriever-api.js';
 import { normalizeTimeRange } from '../lib/time-range.js';
@@ -80,7 +80,7 @@ export async function executeEventLookup(
   args: { pattern?: string; tenxHash?: string; service?: string; timeRange?: string; analyzerCost?: number; effective_ingest_per_gb?: number; siemScope?: string },
   env: EnvConfig
 ): Promise<StructuredOutput> {
-  const telemetry = newTelemetry();
+  const telemetry = newChassisTelemetry();
   const sumOut: { data?: EventLookupSummary } = {};
   const md = await executeEventLookupInner(args, env, sumOut);
   // Early-return cases (no data, raw line, pattern not found): the inner
@@ -94,11 +94,17 @@ export async function executeEventLookup(
       .join(' ')
       .slice(0, 600);
     const headline = md.split('\n')[0]?.replace(/^##\s*/, '').slice(0, 200) || 'event_lookup — no result';
-    return buildEnvelope({
+    return buildChassisEnvelope({
       tool: 'log10x_event_lookup',
       view: 'summary',
-      summary: { headline },
-      data: { ...buildUnifiedFields({ status: 'no_signal', telemetry, humanSummary: stripped }) },
+      headline,
+      status: 'no_signal',
+      decisions: { threshold_used: null, threshold_basis: 'default' },
+      source_disclosure: { bytes_source: 'tsdb' },
+      scope: { window: args.timeRange ?? '7d', window_basis: 'auto_default' },
+      payload: { pattern: args.pattern, tenx_hash: args.tenxHash },
+      human_summary: stripped || headline,
+      telemetry,
     });
   }
   const d = sumOut.data;
@@ -106,17 +112,36 @@ export async function executeEventLookup(
   // gates the dollar clause on rate_source so an unset rate yields a
   // truthful percent-first headline instead of a fabricated "$0.00".
   const svcWord = d.totals.service_count === 1 ? 'service' : 'services';
-  // Gate the dollar clause on rate_source: unset → drop the clause entirely
-  // (the disclosed mirror is null and fmtDisclosedDollar would emit a "—" tail
-  // which reads as missing data instead of an unconfigured rate).
   const headline = d.rate_source === 'unset' || d.totals.cost_per_window_usd_disclosed == null
     ? `\`${d.pattern}\` over ${d.window}: ${d.totals.events} events across ${d.totals.service_count} ${svcWord} (${(d.totals.bytes / 1_000_000).toFixed(1)} MB)`
     : `\`${d.pattern}\` over ${d.window}: ${d.totals.events} events across ${d.totals.service_count} ${svcWord} (${(d.totals.bytes / 1_000_000).toFixed(1)} MB) · ${fmtDisclosedDollar(d.totals.cost_per_window_usd_disclosed)}`;
-  return buildEnvelope({
+  const rateSourceMapped = d.rate_source === 'customer_supplied' ? 'customer_supplied' as const
+    : d.rate_source === 'list_price' ? 'list_price' as const
+    : 'none' as const;
+  return buildChassisEnvelope({
     tool: 'log10x_event_lookup',
     view: 'summary',
-    summary: { headline },
-    data: { ...d, ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: headline }) },
+    headline,
+    status: 'success',
+    decisions: { threshold_used: null, threshold_basis: 'default' },
+    source_disclosure: {
+      bytes_source: 'tsdb',
+      rate_source: rateSourceMapped,
+      pattern_count_source: {
+        kind: 'scoped_total',
+        count: d.totals.service_count,
+        denominator_meaning: `Services emitting ${d.pattern} over ${d.window}`,
+      },
+    },
+    scope: {
+      window: d.window,
+      window_basis: 'explicit',
+      candidates_count: d.totals.service_count,
+      candidates_usable: d.totals.service_count,
+    },
+    payload: d,
+    human_summary: headline,
+    telemetry,
   });
 }
 

@@ -49,10 +49,9 @@ import {
 import { SIEM_DISPLAY_NAMES, type SiemId } from '../lib/siem/pricing.js';
 import { fmtBytes, fmtDisclosedDollar } from '../lib/format.js';
 import {
-  buildEnvelope,
   type StructuredOutput,
 } from '../lib/output-types.js';
-import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
+import { newChassisTelemetry, buildChassisEnvelope } from '../lib/chassis-envelope.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 
 // ─── constants ────────────────────────────────────────────────────────
@@ -224,22 +223,37 @@ export async function executeBaseline(
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
   const horizon: BaselineHorizon = args.horizon ?? DEFAULT_HORIZON;
-  const telemetry = newTelemetry();
+  const telemetry = newChassisTelemetry();
 
   const result = await computeBaseline(args, env, horizon);
+  const headline = headlineFor(result);
+  const rateSourceMapped = result.rate_source === 'customer_supplied' ? 'customer_supplied' as const
+    : result.rate_source === 'list_price' ? 'list_price' as const
+    : 'none' as const;
 
-  return buildEnvelope({
+  return buildChassisEnvelope({
     tool: 'log10x_baseline',
     view: 'summary',
-    summary: { headline: headlineFor(result) },
-    data: {
-      ...result,
-      ...buildUnifiedFields({
-        status: result.status === 'ready' ? 'success' : 'insufficient_data',
-        telemetry,
-        humanSummary: headlineFor(result),
-      }),
+    headline,
+    status: result.status === 'ready' ? 'success' : 'insufficient_data',
+    decisions: {
+      threshold_used: null,
+      threshold_basis: result.rate_source === 'customer_supplied' ? 'customer_supplied' : 'default',
     },
+    source_disclosure: {
+      bytes_source: 'tsdb',
+      rate_source: rateSourceMapped,
+      siem_vendor: result.destination ?? undefined,
+    },
+    scope: {
+      window: horizon,
+      window_basis: 'explicit',
+      candidates_count: result.top_contributors.length,
+      candidates_usable: result.top_contributors.filter((c) => c.compactable).length,
+    },
+    payload: result,
+    human_summary: headline,
+    telemetry,
   });
 }
 

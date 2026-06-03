@@ -43,6 +43,33 @@ export const PRIMITIVE_ERROR_TYPES = [
    * failure, tenx CLI not installed). Surface to user; retry only if the
    * underlying cause is resolved. */
   'local_processing_failed',
+  /** Required identifier (pattern_hash / pattern name) was not passed. */
+  'missing_identifier',
+  /** No environment is configured; run discover_env first. */
+  'no_environment',
+  /** Tool requires a destination (SIEM vendor) but none was supplied or
+   * could be auto-detected. */
+  'missing_destination',
+  /** Auto-detected destination is not in this tool's supported set.
+   * Caller should pass the destination explicitly. */
+  'unsupported_destination',
+  /** Multiple SIEM vendors found; cannot choose automatically. Caller
+   * must supply destination explicitly. */
+  'ambiguous_destination',
+  /** A required numeric or scalar input was not supplied. */
+  'missing_input',
+  /** The requested action would be a no-op (e.g. all patterns already
+   * below threshold). Not a backend error; informational. */
+  'noop_action',
+  /** A required configuration value (API key, config file, env var) is
+   * absent. Different from no_environment: covers tool-level config that
+   * is not the environment identity. */
+  'config_missing',
+  /** Metric / data backend returned no signal for the query window. Tool
+   * ran successfully but there is nothing to show. */
+  'no_signal',
+  /** Generic backend-layer error not covered by more specific types. */
+  'backend_error',
   'unknown',
 ] as const;
 

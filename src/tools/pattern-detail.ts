@@ -378,7 +378,9 @@ export async function executePatternDetail(args: {
       headline: 'pattern_detail: provide either pattern_hash or pattern (name).',
       status: 'error',
       decisions: { threshold_used: null, threshold_basis: 'default' },
-      source_disclosure: {},
+      // bytes_source is TSDB for all pattern_detail metrics queries; carry it
+      // on validation-error envelopes so the provenance chain is unbroken.
+      source_disclosure: { bytes_source: 'tsdb' },
       scope: { window: 'unknown', window_basis: 'auto_default' },
       payload: { error: 'missing_identifier' },
       human_summary: 'pattern_detail requires either pattern_hash or pattern (name). Provide one.',
@@ -411,7 +413,9 @@ export async function executePatternDetail(args: {
       headline: `pattern_detail(${id.slice(0, 12)}): no environment configured.`,
       status: 'error',
       decisions: { threshold_used: null, threshold_basis: 'default' },
-      source_disclosure: {},
+      // Environment is absent so we cannot query TSDB yet, but the intended
+      // bytes_source for this tool is always tsdb.
+      source_disclosure: { bytes_source: 'tsdb' },
       scope: { window: 'unknown', window_basis: 'auto_default' },
       payload: { pattern_hash: args.pattern_hash ?? null, error: 'no environment configured' },
       human_summary: 'No environment configured. Run log10x_discover_env or set LOG10X_METRICS_* env vars.',

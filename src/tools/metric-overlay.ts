@@ -37,10 +37,11 @@ import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { LABELS } from '../lib/promql.js';
 import { parseTimeframe } from '../lib/format.js';
-import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { type StructuredOutput } from '../lib/output-types.js';
 import { computeAnchorDispersion, ANCHOR_DISPERSION_FLOOR } from '../lib/anchor-dispersion.js';
 import { canonicalMetricRef } from '../lib/metric-ref.js';
 import { wrapBackendError, type PrimitiveError } from '../lib/primitive-errors.js';
+import { buildChassisEnvelope } from '../lib/chassis-envelope.js';
 
 export const metricOverlaySchema = {
   anchor_type: z
@@ -372,11 +373,21 @@ export async function executeMetricOverlay(
   };
 
   const headline = buildHeadline(data);
-  return buildEnvelope({
+  return buildChassisEnvelope({
     tool: 'log10x_metric_overlay',
     view: 'summary',
-    summary: { headline },
-    data,
+    headline,
+    status: status === 'no_signal' ? 'no_signal' : 'success',
+    decisions: { threshold_used: null, threshold_basis: 'default' },
+    source_disclosure: {},
+    scope: {
+      window,
+      window_basis: 'explicit',
+      candidates_count: 1,
+      candidates_usable: nAligned > 0 ? 1 : 0,
+    },
+    payload: data,
+    human_summary,
   });
 }
 
@@ -421,11 +432,17 @@ function overlayErrorEnvelope(args: {
     },
     error: args.err,
   };
-  return buildEnvelope({
+  return buildChassisEnvelope({
     tool: 'log10x_metric_overlay',
     view: 'summary',
-    summary: { headline: `Error (${args.err.error_type}): ${args.err.hint.slice(0, 120)}` },
-    data,
+    headline: `Error (${args.err.error_type}): ${args.err.hint.slice(0, 120)}`,
+    status: 'error',
+    decisions: { threshold_used: null, threshold_basis: 'default' },
+    source_disclosure: {},
+    scope: { window: args.window, window_basis: 'explicit' },
+    payload: data,
+    human_summary: `Call failed: ${args.err.hint}`,
+    error: args.err,
   });
 }
 
@@ -473,11 +490,16 @@ function overlayDispersionRefusal(args: {
     },
   };
   const headline = `Anchor lacks phase separation (dispersion ${args.anchorDispersion.toFixed(3)} < ${ANCHOR_DISPERSION_FLOOR}). Refusing — re-anchor.`;
-  return buildEnvelope({
+  return buildChassisEnvelope({
     tool: 'log10x_metric_overlay',
     view: 'summary',
-    summary: { headline },
-    data,
+    headline,
+    status: 'insufficient_data',
+    decisions: { threshold_used: null, threshold_basis: 'default' },
+    source_disclosure: {},
+    scope: { window: args.window, window_basis: 'explicit', candidates_count: 1, candidates_usable: 0 },
+    payload: data,
+    human_summary: humanSummary,
   });
 }
 

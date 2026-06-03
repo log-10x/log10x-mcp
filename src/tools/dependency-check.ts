@@ -41,7 +41,7 @@ import {
   renderDepCheckResult,
 } from '../lib/siem/deps/index.js';
 import type { SiemId } from '../lib/siem/pricing.js';
-import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
+import { newChassisTelemetry, recordQuery, buildChassisEnvelope, buildChassisErrorEnvelope } from '../lib/chassis-envelope.js';
 
 export const dependencyCheckSchema = {
   pattern: z.string().describe('Pattern name (e.g., "Payment_Gateway_Timeout")'),
@@ -124,40 +124,56 @@ function buildHumanSummary(d: DependencyCheckSummary): string {
 }
 
 export async function executeDependencyCheck(args: DependencyCheckArgs): Promise<import('../lib/output-types.js').StructuredOutput> {
-  const telemetry = newTelemetry();
+  const telemetry = newChassisTelemetry();
   const sumOut: { data?: DependencyCheckSummary } = {};
   await executeDependencyCheckInner(args, sumOut);
-  const { buildEnvelope } = await import('../lib/output-types.js');
   if (!sumOut.data) {
-    const human_summary = `dependency_check failed: inner pass produced no structured data.`;
-    return buildEnvelope({
+    const hint = 'inner pass produced no structured data';
+    return buildChassisErrorEnvelope({
       tool: 'log10x_dependency_check',
-      view: 'summary',
-      summary: { headline: 'dependency_check: no data' },
-      data: {
-        ...buildUnifiedFields({
-          status: 'error',
-          telemetry,
-          humanSummary: human_summary,
-          error: {
-            error_type: 'local_processing_failed',
-            retryable: false,
-            suggested_backoff_ms: null,
-            hint: 'inner pass produced no structured data',
-          },
-        }),
-        human_summary,
-      },
+      err: { error_type: 'local_processing_failed', retryable: false, suggested_backoff_ms: null, hint },
+      telemetry,
+      source_disclosure: {},
     });
   }
   const d = sumOut.data;
   d.human_summary = buildHumanSummary(d);
   const headline = `\`${d.pattern}\`: ${d.dependencies.length} dependencies found in ${d.vendor ?? 'analyzer'} (recommendation: ${d.safe_to_drop_recommendation})`;
-  return buildEnvelope({
+
+  // Build scan_scope for defect 34A: surface what was actually scanned.
+  const scan_scope = {
+    surfaces_scanned: d.scan_ran
+      ? (['dashboards', 'alerts', 'saved_searches', 'monitors', 'metric_filters'] as string[])
+      : ([] as string[]),
+    surfaces_skipped: d.scan_ran ? [] : (['dashboards', 'alerts', 'saved_searches', 'monitors', 'metric_filters'] as string[]),
+    execution_mode: d.execution_mode,
+    scan_ran: d.scan_ran,
+    vendor: d.vendor,
+  };
+
+  return buildChassisEnvelope({
     tool: 'log10x_dependency_check',
     view: 'summary',
-    summary: { headline },
-    data: { ...d, ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: d.human_summary }) },
+    headline,
+    status: d.scan_ran ? 'success' : (d.execution_mode === 'vendor_required' || d.execution_mode === 'ambiguous' ? 'error' : 'partial'),
+    decisions: { threshold_used: null, threshold_basis: 'default' },
+    source_disclosure: { siem_vendor: d.vendor },
+    scope: {
+      window: 'point_in_time',
+      window_basis: 'auto_default',
+      candidates_failed: d.scan_ran ? [] : [d.execution_mode],
+    },
+    payload: { ...d, scan_scope },
+    human_summary: d.human_summary,
+    ...((!d.scan_ran && (d.execution_mode === 'vendor_required' || d.execution_mode === 'ambiguous')) ? {
+      error: {
+        error_type: d.execution_mode === 'ambiguous' ? 'ambiguous_destination' as const : 'missing_destination' as const,
+        retryable: false,
+        suggested_backoff_ms: null,
+        hint: d.note ?? `${d.execution_mode}: pass vendor= to disambiguate or set SIEM credentials`,
+      },
+    } : {}),
+    telemetry,
   });
 }
 

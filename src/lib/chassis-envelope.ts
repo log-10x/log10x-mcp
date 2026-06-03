@@ -91,6 +91,7 @@ import {
   type Summary,
   type InlineImage,
 } from './output-types.js';
+import { PRIMITIVE_ERROR_TYPES, type PrimitiveErrorType } from './primitive-errors.js';
 
 // ── Version / epoch ────────────────────────────────────────────────────────────
 
@@ -387,7 +388,11 @@ export const ChassisDataSchema = z.object({
   /** Structured error envelope. Present only when status === 'error'. */
   error: z
     .object({
-      error_type: z.string(),
+      /**
+       * Structured taxonomy from primitive-errors.ts. Agents branch on
+       * this value to decide retry/backoff/surface-to-user behaviour.
+       */
+      error_type: z.enum(PRIMITIVE_ERROR_TYPES),
       retryable: z.boolean(),
       suggested_backoff_ms: z.number().nullable(),
       hint: z.string(),
@@ -583,6 +588,14 @@ export function buildChassisEnvelope(input: ChassisEnvelopeInput): ChassisEnvelo
   // Warn at runtime (not throw) when status/error contract is violated.
   const warnings = input.warnings ? [...input.warnings] : [];
   if (input.status === 'error' && !input.error) {
+    // In development mode: fail fast so tool authors catch this at
+    // test time rather than silently emitting an unbranchable error.
+    if (process.env.NODE_ENV === 'development' || process.env.CHASSIS_STRICT === '1') {
+      throw new Error(
+        `chassis contract violation: status="error" on tool "${input.tool}" but no error block provided. ` +
+        'Pass an error: { error_type, retryable, suggested_backoff_ms, hint } when status="error".',
+      );
+    }
     warnings.push(
       'chassis: status=error but no error field provided. This is a tool-authoring bug.',
     );

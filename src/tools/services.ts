@@ -44,8 +44,8 @@ import { fmtDollar, fmtBytes, fmtPct, parseTimeframe, costPeriodLabel } from '..
 import { shareBar } from '../lib/pattern-render.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { agentOnly } from '../lib/agent-only.js';
-import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
-import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
+import { type StructuredOutput } from '../lib/output-types.js';
+import { newChassisTelemetry, buildChassisEnvelope, buildChassisErrorEnvelope } from '../lib/chassis-envelope.js';
 import { fetchCapCsvForEnv, fetchActionIntentForEnv } from '../lib/cap-csv-fetch.js';
 import { parseCapCsv, buildPatternActionLookup } from '../lib/cap-csv-parser.js';
 import { normalizeTimeRange } from '../lib/time-range.js';
@@ -121,16 +121,22 @@ export async function executeServices(
   args: { timeRange?: string; analyzerCost?: number; view?: 'summary'; exception_services?: string[] },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
-  const telemetry = newTelemetry();
+  const telemetry = newChassisTelemetry();
   const sumOut: { data?: ServicesSummary } = {};
   await executeServicesInner(args, env, sumOut);
   if (!sumOut.data) {
     const headline = 'No service data available. Data appears after the first 24h of collection.';
-    return buildEnvelope({
+    return buildChassisEnvelope({
       tool: 'log10x_services',
       view: 'summary',
-      summary: { headline },
-      data: { ...buildUnifiedFields({ status: 'insufficient_data', telemetry, humanSummary: headline }) },
+      headline,
+      status: 'insufficient_data',
+      decisions: { threshold_used: null, threshold_basis: 'default' },
+      source_disclosure: { bytes_source: 'tsdb' },
+      scope: { window: args.timeRange ?? '7d', window_basis: 'auto_default' },
+      payload: {},
+      human_summary: headline,
+      telemetry,
     });
   }
   const d = sumOut.data;
@@ -138,17 +144,34 @@ export async function executeServices(
   const headline = top
     ? `${d.service_count} services over ${d.time_range}: ${top.name} leads at ${fmtDollar(top.cost)}${d.period} (${Math.round(top.pct)}% of total ${fmtDollar(d.total_cost)}${d.period}).`
     : `No services with data in ${d.time_range}.`;
-  return buildEnvelope({
+  return buildChassisEnvelope({
     tool: 'log10x_services',
     view: 'summary',
-    summary: { headline },
-    data: { ...d, ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: headline }) },
+    headline,
+    status: d.service_count > 0 ? 'success' : 'no_signal',
+    decisions: {
+      threshold_used: d.cost_per_gb,
+      threshold_basis: args.analyzerCost != null ? 'customer_supplied' : 'default',
+    },
+    source_disclosure: {
+      bytes_source: 'tsdb',
+      rate_source: args.analyzerCost != null ? 'customer_supplied' : 'list_price',
+    },
+    scope: {
+      window: d.time_range,
+      window_basis: 'explicit',
+      candidates_count: d.service_count,
+      candidates_usable: d.service_count,
+    },
+    payload: d,
+    human_summary: headline,
     actions: top
       ? [
           { tool: 'log10x_top_patterns', args: { service: top.name }, reason: 'current top patterns for the highest-cost service' },
           { tool: 'log10x_investigate', args: { starting_point: top.name }, reason: 'causal-chain analysis on the top service' },
         ]
       : [],
+    telemetry,
   });
 }
 

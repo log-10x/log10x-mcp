@@ -57,10 +57,10 @@ import {
 import { loadEnvironments } from '../lib/environments.js';
 import type { PrometheusResponse } from '../lib/api.js';
 import {
-  buildEnvelope,
   type StructuredOutput,
   type Action as EnvelopeAction,
 } from '../lib/output-types.js';
+import { buildChassisEnvelope, buildChassisErrorEnvelope } from '../lib/chassis-envelope.js';
 import {
   COST_MODEL_BY_DESTINATION,
   getDestinationCostModel,
@@ -425,18 +425,19 @@ export async function executeConfigureEngine(
   // Resolve gitops + destination.
   const target = await resolveTarget(args);
   if ('error' in target) {
-    return buildEnvelope({
+    return buildChassisErrorEnvelope({
       tool: 'log10x_configure_engine',
-      view: 'summary',
-      summary: { headline: 'configure_engine refused: target resolution failed.' },
-      data: {
-        ok: false,
-        phase: 'target_resolution',
-        service: args.service,
-        containers: args.containers ?? [],
-        error: firstLine(target.error),
-        human_summary: `configure_engine refused: ${firstLine(target.error)}`,
-      } satisfies ConfigureEngineData,
+      err: {
+        error_type: 'config_missing',
+        retryable: false,
+        suggested_backoff_ms: null,
+        hint: `configure_engine refused: ${firstLine(target.error)}`,
+      },
+      contextPayload: {
+        ok: false, phase: 'target_resolution', service: args.service,
+        containers: args.containers ?? [], error: firstLine(target.error),
+      },
+      source_disclosure: {},
     });
   }
 
@@ -466,40 +467,36 @@ export async function executeConfigureEngine(
     backend = r.backend;
   } catch (e: any) {
     const msg = e?.message ?? String(e);
-    return buildEnvelope({
+    return buildChassisErrorEnvelope({
       tool: 'log10x_configure_engine',
-      view: 'summary',
-      summary: {
-        headline:
-          'Customer metrics backend not configured — configure_engine cannot run derivation.',
+      err: {
+        error_type: 'config_missing',
+        retryable: false,
+        suggested_backoff_ms: null,
+        hint: `configure_engine refused: customer metrics backend not configured. ${firstLine(msg)}`,
       },
-      data: {
-        ok: false,
-        phase: 'backend',
-        service: args.service,
-        containers: args.containers ?? [],
-        error: msg,
-        human_summary: `configure_engine refused: customer metrics backend not configured. ${firstLine(msg)}`,
-      } satisfies ConfigureEngineData,
+      contextPayload: { ok: false, phase: 'backend', service: args.service, containers: args.containers ?? [], error: msg },
+      source_disclosure: { bytes_source: 'tsdb' },
     });
   }
 
   // Phase 1: container resolution.
   if (!args.containers || args.containers.length === 0) {
-    return buildEnvelope({
+    const resPromptHeadline = `Phase 1: pick containers for service "${args.service}" — re-call with containers: ["..."] to derive policy.`;
+    return buildChassisEnvelope({
       tool: 'log10x_configure_engine',
       view: 'summary',
-      summary: {
-        headline: `Phase 1: pick containers for service "${args.service}" — re-call with containers: ["..."] to derive policy.`,
-      },
-      data: {
-        ok: true,
-        phase: 'resolution_prompt',
-        service: args.service,
-        containers: [],
-        destination: target.resolved.destination,
+      headline: resPromptHeadline,
+      status: 'partial',
+      decisions: { threshold_used: args.target_percent ?? null, threshold_basis: args.target_percent != null ? 'customer_supplied' : 'default' },
+      source_disclosure: { bytes_source: 'tsdb', siem_vendor: target.resolved.destination },
+      scope: { window: `${args.observationDays ?? 7}d`, window_basis: 'explicit' },
+      payload: {
+        ok: true, phase: 'resolution_prompt', service: args.service,
+        containers: [], destination: target.resolved.destination,
         human_summary: `Phase 1: configure_engine needs the container list for service "${args.service}" (destination ${target.resolved.destination}). Re-call with containers: [...] to derive the policy.`,
       } satisfies ConfigureEngineData,
+      human_summary: `Phase 1: configure_engine needs the container list for service "${args.service}" (destination ${target.resolved.destination}). Re-call with containers: [...] to derive the policy.`,
     });
   }
 
@@ -547,13 +544,16 @@ export async function executeConfigureEngine(
         },
         human_summary: `configure_engine refresh skipped on ${args.service}: observed volume drift ${driftPct.toFixed(1)}% (${humanBytes(prior)} → ${humanBytes(currentMonthlyBytes)}/mo) is within the ${refreshState.tolerancePct}% tolerance band. No PR opened; current caps still deliver the committed ${refreshState.committedTargetPercent}% reduction.`,
       };
-      return buildEnvelope({
+      return buildChassisEnvelope({
         tool: 'log10x_configure_engine',
         view: 'summary',
-        summary: {
-          headline: `Refresh skipped on ${args.service}: drift ${driftPct.toFixed(1)}% within tolerance ${refreshState.tolerancePct}%.`,
-        },
-        data,
+        headline: `Refresh skipped on ${args.service}: drift ${driftPct.toFixed(1)}% within tolerance ${refreshState.tolerancePct}%.`,
+        status: 'success',
+        decisions: { threshold_used: refreshState.committedTargetPercent, threshold_basis: 'snapshot' },
+        source_disclosure: { bytes_source: 'tsdb', siem_vendor: destination },
+        scope: { window: `${args.observationDays ?? 7}d`, window_basis: 'explicit' },
+        payload: data,
+        human_summary: data.human_summary ?? `Refresh skipped — drift ${driftPct.toFixed(1)}% within tolerance.`,
       });
     }
   }
@@ -878,15 +878,35 @@ export async function executeConfigureEngine(
     }),
   };
 
-  return buildEnvelope({
+  const configHeadline = feasible
+    ? `${targetPercent.toFixed(1)}% reduction policy derived for ${args.service} (${rows.length} patterns, ${args.containers.length} container${args.containers.length === 1 ? '' : 's'}).`
+    : `Cannot hit ${targetPercent.toFixed(1)}% target on ${args.service} without violating floors.`;
+  return buildChassisEnvelope({
     tool: 'log10x_configure_engine',
     view: 'summary',
-    summary: {
-      headline: feasible
-        ? `${targetPercent.toFixed(1)}% reduction policy derived for ${args.service} (${rows.length} patterns, ${args.containers.length} container${args.containers.length === 1 ? '' : 's'}).`
-        : `Cannot hit ${targetPercent.toFixed(1)}% target on ${args.service} without violating floors.`,
+    headline: configHeadline,
+    status: feasible ? 'success' : 'partial',
+    decisions: {
+      threshold_used: targetPercent,
+      threshold_basis: args.target_percent != null ? 'customer_supplied' : 'default',
     },
-    data,
+    source_disclosure: {
+      bytes_source: 'tsdb',
+      siem_vendor: destination,
+      pattern_count_source: {
+        kind: 'scoped_total_above_threshold',
+        count: rows.length,
+        denominator_meaning: `Patterns above floor for service "${args.service}" over ${args.observationDays ?? 7}d`,
+      },
+    },
+    scope: {
+      window: `${args.observationDays ?? 7}d`,
+      window_basis: 'explicit',
+      candidates_count: rows.length,
+      candidates_usable: rows.length,
+    },
+    payload: data,
+    human_summary: data.human_summary ?? configHeadline,
     actions: toEnvelopeActions(nextActions),
     warnings,
   });
@@ -1004,11 +1024,19 @@ async function tryConsumePocSnapshot(
       : `POC snapshot \`${args.from_poc_id}\` reported feasibility short of target; PR rendered but not applied. Lower target or widen exceptions, then re-run the POC.`,
   };
 
-  return buildEnvelope({
+  return buildChassisEnvelope({
     tool: 'log10x_configure_engine',
     view: 'summary',
-    summary: { headline },
-    data,
+    headline,
+    status: feasibility?.feasible ? 'success' : 'partial',
+    decisions: {
+      threshold_used: targetPct,
+      threshold_basis: 'snapshot',
+    },
+    source_disclosure: { bytes_source: 'engine_aggregated_csv', siem_vendor: resolved.destination },
+    scope: { window: 'poc_snapshot', window_basis: 'auto_default' },
+    payload: data,
+    human_summary: data.human_summary ?? headline,
     actions: toEnvelopeActions(data.next_actions ?? []),
     warnings,
   });
@@ -1563,18 +1591,19 @@ function notConfiguredEnvelope(
   remediation: string,
   service: string
 ): StructuredOutput {
-  return buildEnvelope({
+  return buildChassisErrorEnvelope({
     tool: 'log10x_configure_engine',
-    view: 'summary',
-    summary: { headline: `configure_engine refused: ${firstLine(remediation)}` },
-    data: {
-      ok: false,
-      phase,
-      service,
-      containers: [],
-      error: remediation,
+    err: {
+      error_type: 'config_missing',
+      retryable: false,
+      suggested_backoff_ms: null,
+      hint: `configure_engine refused: ${firstLine(remediation)}`,
+    },
+    contextPayload: {
+      ok: false, phase, service, containers: [], error: remediation,
       human_summary: `configure_engine refused: ${firstLine(remediation)}`,
     } satisfies ConfigureEngineData,
+    source_disclosure: {},
   });
 }
 

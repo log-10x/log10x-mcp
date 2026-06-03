@@ -16,8 +16,8 @@ import { z } from 'zod';
 import { runDiscovery } from '../lib/discovery/orchestrate.js';
 import type { DiscoverySnapshot, ForwarderKind } from '../lib/discovery/types.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
-import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
-import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
+import { type StructuredOutput } from '../lib/output-types.js';
+import { newChassisTelemetry, recordQuery, buildChassisEnvelope, buildChassisErrorEnvelope } from '../lib/chassis-envelope.js';
 
 export const discoverEnvSchema = {
   namespaces: z
@@ -113,7 +113,7 @@ function buildDiscoverEnvHumanSummary(d: Omit<DiscoverEnvSummary, 'human_summary
 }
 
 export async function executeDiscoverEnv(args: DiscoverEnvArgs): Promise<string | StructuredOutput> {
-  const telemetry = newTelemetry();
+  const telemetry = newChassisTelemetry();
   const snapshot = await runDiscovery({
     kubectl: { namespaces: args.namespaces },
     aws: {
@@ -191,12 +191,23 @@ export async function executeDiscoverEnv(args: DiscoverEnvArgs): Promise<string 
   if (data.aws_available && data.s3_buckets.length > 0 && !data.installed_components.retriever) {
     actions.push({ tool: 'log10x_advise_retriever', args: { snapshot_id: data.snapshot_id }, reason: 'S3 + AWS available — Retriever installable for forensic retrieval' });
   }
-  return buildEnvelope({
+  return buildChassisEnvelope({
     tool: 'log10x_discover_env',
     view: 'summary',
-    summary: { headline },
-    data: { ...data, ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: data.human_summary }) },
+    headline,
+    status: 'success',
+    decisions: { threshold_used: null, threshold_basis: 'default' },
+    source_disclosure: {},
+    scope: {
+      window: 'point_in_time',
+      window_basis: 'auto_default',
+      candidates_count: data.namespaces_probed.length,
+      candidates_usable: data.kubectl_available ? data.namespaces_probed.length : 0,
+    },
+    payload: data,
+    human_summary: data.human_summary,
     actions,
+    telemetry,
   });
 }
 

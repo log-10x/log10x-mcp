@@ -1477,7 +1477,9 @@ export async function executeEstimateSavings(
           headline: 'estimate_savings refused: auto-detected destination not supported.',
           status: 'error',
           decisions: { threshold_used: null, threshold_basis: 'default' },
-          source_disclosure: {},
+          // siem_vendor carries the detected (but unsupported) vendor name so
+          // agents and log readers can see what was resolved.
+          source_disclosure: { bytes_source: 'tsdb', siem_vendor: resolvedId },
           scope: { window: 'unknown', window_basis: 'auto_default' },
           payload: {
             ok: false,
@@ -1503,7 +1505,9 @@ export async function executeEstimateSavings(
         headline: 'estimate_savings refused: multiple SIEMs detected — pass destination explicitly.',
         status: 'error',
         decisions: { threshold_used: null, threshold_basis: 'default' },
-        source_disclosure: {},
+        // siem_vendor is intentionally absent: multiple vendors were found and
+        // we cannot resolve to one. bytes_source is still tsdb.
+        source_disclosure: { bytes_source: 'tsdb' },
         scope: { window: 'unknown', window_basis: 'auto_default' },
         payload: {
           ok: false,
@@ -1528,7 +1532,8 @@ export async function executeEstimateSavings(
         headline: 'estimate_savings refused: destination not specified.',
         status: 'error',
         decisions: { threshold_used: null, threshold_basis: 'default' },
-        source_disclosure: {},
+        // No vendor resolved at all; bytes_source is still tsdb for this tool.
+        source_disclosure: { bytes_source: 'tsdb' },
         scope: { window: 'unknown', window_basis: 'auto_default' },
         payload: {
           ok: false,

@@ -41,9 +41,9 @@ import { readFileSync, writeFileSync, readdirSync, mkdirSync, statSync } from 'n
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  buildEnvelope,
   type StructuredOutput,
 } from '../lib/output-types.js';
+import { buildChassisEnvelope, buildChassisErrorEnvelope } from '../lib/chassis-envelope.js';
 import {
   resolveBackend,
   formatDetectionTrace,
@@ -954,13 +954,16 @@ async function executeWeeklyDigest(
 
   envelope.markdown = renderWeeklyDigestMarkdown(envelope);
 
-  return buildEnvelope({
+  return buildChassisEnvelope({
     tool: 'log10x_commitment_report',
     view: 'summary',
-    summary: {
-      headline: human_summary,
-    },
-    data: envelope,
+    headline: human_summary,
+    status: 'success',
+    decisions: { threshold_used: null, threshold_basis: 'default' },
+    source_disclosure: {},
+    scope: { window: `${args.history_path ? '7d' : '30d'}`, window_basis: 'explicit' },
+    payload: envelope,
+    human_summary,
   });
 }
 
@@ -1552,17 +1555,16 @@ export async function executeCommitmentReport(
       '',
       'If a commitment already exists, the id is printed in the configure_engine output and lives at $LOG10X_ADVISOR_STATE_DIR/commitments/<id>.json (or $TMPDIR/log10x-advisor-snapshots/commitments/<id>.json).',
     ].join('\n');
-    return buildEnvelope({
+    return buildChassisErrorEnvelope({
       tool: 'log10x_commitment_report',
-      view: 'summary',
-      summary: { headline },
-      data: {
-        ok: false,
-        phase: 'not_ready',
-        reason: 'commitment_not_found',
-        remediation,
-        human_summary: `commitment_report unavailable: ${headline} ${remediation.split('\n')[0]}`,
+      err: {
+        error_type: 'missing_identifier',
+        retryable: false,
+        suggested_backoff_ms: null,
+        hint: `${headline} ${remediation.split('\n')[0]}`,
       },
+      contextPayload: { ok: false, phase: 'not_ready', reason: 'commitment_not_found', remediation },
+      source_disclosure: {},
     });
   }
 
@@ -1578,17 +1580,16 @@ export async function executeCommitmentReport(
     const msg = e instanceof Error ? e.message : String(e);
     const headline =
       'Customer metrics backend not configured — commitment_report cannot compute weekly verify.';
-    return buildEnvelope({
+    return buildChassisErrorEnvelope({
       tool: 'log10x_commitment_report',
-      view: 'summary',
-      summary: { headline },
-      data: {
-        ok: false,
-        phase: 'not_ready',
-        reason: 'metrics_backend_missing',
-        error: msg,
-        human_summary: `commitment_report unavailable: ${headline}`,
+      err: {
+        error_type: 'config_missing',
+        retryable: false,
+        suggested_backoff_ms: null,
+        hint: `commitment_report unavailable: ${headline}`,
       },
+      contextPayload: { ok: false, phase: 'not_ready', reason: 'metrics_backend_missing', error: msg },
+      source_disclosure: {},
     });
   }
 
@@ -1607,11 +1608,15 @@ export async function executeCommitmentReport(
       'log10x_estimate_savings dependency not yet available — commitment_report cannot produce weekly verify.';
     const remediation =
       'commitment_report depends on log10x_estimate_savings (verify mode), shipped in the same x%-MCP-cost-tooling branch. Re-run npm run build after merging estimate-savings.';
-    return buildEnvelope({
+    return buildChassisErrorEnvelope({
       tool: 'log10x_commitment_report',
-      view: 'summary',
-      summary: { headline },
-      data: {
+      err: {
+        error_type: 'config_missing',
+        retryable: false,
+        suggested_backoff_ms: null,
+        hint: `commitment_report unavailable: ${headline} ${remediation}`,
+      },
+      contextPayload: {
         ok: false,
         phase: 'not_ready',
         reason: 'estimate_savings_dependency_missing',
@@ -1902,13 +1907,33 @@ export async function executeCommitmentReport(
     caveats: envelope.caveats,
   });
 
-  return buildEnvelope({
+  const reportHeadline = `${commitment.service}: delivered ${agg.delivered_pct.toFixed(1)}% vs promised ${commitment.promised_pct.toFixed(1)}% over ${period.days}d.`;
+  const rateSourceMapped = agg.rate_source === 'customer_supplied' ? 'customer_supplied' as const
+    : agg.rate_source === 'list_price' ? 'list_price' as const
+    : 'none' as const;
+  return buildChassisEnvelope({
     tool: 'log10x_commitment_report',
     view: 'summary',
-    summary: {
-      headline: `${commitment.service}: delivered ${agg.delivered_pct.toFixed(1)}% vs promised ${commitment.promised_pct.toFixed(1)}% over ${period.days}d.`,
+    headline: reportHeadline,
+    status: agg.delivered_pct >= commitment.promised_pct - 5 ? 'success' : 'partial',
+    decisions: {
+      threshold_used: commitment.promised_pct,
+      threshold_basis: 'snapshot',
     },
-    data: envelope,
+    source_disclosure: {
+      bytes_source: 'tsdb',
+      rate_source: rateSourceMapped,
+      siem_vendor: commitment.destination,
+    },
+    scope: {
+      window: `${period.days}d`,
+      window_basis: 'explicit',
+      candidates_count: weeklyResults.length,
+      candidates_usable: weeklyResults.length - verifyErrors.length,
+    },
+    payload: envelope,
+    human_summary: envelope.human_summary ?? reportHeadline,
+    warnings: caveats.length > 0 ? caveats : undefined,
   });
 }
 

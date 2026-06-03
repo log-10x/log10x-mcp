@@ -31,7 +31,8 @@ import { getConnector } from '../lib/siem/index.js';
 import { runMcpAppOnEvents } from '../lib/mcp-app-runner.js';
 import { DevCliNotInstalledError } from '../lib/dev-cli.js';
 import { expandedByteLength } from '../lib/template-expander.js';
-import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { type StructuredOutput } from '../lib/output-types.js';
+import { buildChassisEnvelope } from '../lib/chassis-envelope.js';
 
 // ── Schema ──
 
@@ -271,18 +272,21 @@ export async function executeMeasureCompaction(
 
   const rawEvents = pullResult.events;
   if (rawEvents.length === 0) {
-    return buildEnvelope({
+    const noEventsHeadline = `No events found for service "${args.service}" in ${sel.displayName} over ${timeRange}.`;
+    return buildChassisEnvelope({
       tool: 'log10x_measure_compaction',
       view: 'summary',
-      summary: {
-        headline: `No events found for service "${args.service}" in ${sel.displayName} over ${timeRange}.`,
-        bullets: [
-          'Try a wider timeRange (e.g., "7d")',
-          'Verify the service name matches your SIEM labels',
-          'Check that the service is actively emitting logs',
-        ],
-      },
-      data: {
+      headline: noEventsHeadline,
+      headline_bullets: [
+        'Try a wider timeRange (e.g., "7d")',
+        'Verify the service name matches your SIEM labels',
+        'Check that the service is actively emitting logs',
+      ],
+      status: 'no_signal',
+      decisions: { threshold_used: null, threshold_basis: 'default' },
+      source_disclosure: { siem_vendor: sel.id },
+      scope: { window: timeRange, window_basis: 'explicit' },
+      payload: {
         service: args.service,
         sample_size_requested: sampleSize,
         sample_size_actual: 0,
@@ -292,6 +296,7 @@ export async function executeMeasureCompaction(
         engine_ms: 0,
         must_render_verbatim: '(no events found)',
       } as MeasureCompactionData,
+      human_summary: noEventsHeadline,
       actions: [],
     });
   }
@@ -411,35 +416,47 @@ export async function executeMeasureCompaction(
     );
   }
 
-  return buildEnvelope({
+  const compactionHeadline =
+    `Measured compaction for ${patterns.length} pattern(s) in service "${args.service}" ` +
+    `from ${rawEvents.length} SIEM events. ` +
+    `Volume-weighted average ratio: ${avgRatio}x (${(100 / Math.max(avgRatio, 0.001)).toFixed(1)}% of original size on wire).`;
+  const compactionHumanSummary =
+    `${patterns.length} pattern(s) measured for service "${args.service}" via ${sel.displayName} ` +
+    `(${rawEvents.length} events sampled over ${timeRange}). ` +
+    `Volume-weighted average compaction ratio: ${avgRatio}x. ` +
+    (lowConfidenceCount > 0 ? `${lowConfidenceCount} pattern(s) have low confidence — increase sample_size for accuracy.` : `All patterns have medium or high confidence.`);
+  return buildChassisEnvelope({
     tool: 'log10x_measure_compaction',
     view: 'summary',
-    summary: {
-      headline:
-        `Measured compaction for ${patterns.length} pattern(s) in service "${args.service}" ` +
-        `from ${rawEvents.length} SIEM events. ` +
-        `Volume-weighted average ratio: ${avgRatio}x (${(100 / Math.max(avgRatio, 0.001)).toFixed(1)}% of original size on wire).`,
-      bullets: [
-        `SIEM: ${sel.displayName}, window: ${timeRange}`,
-        `Patterns measured: ${patterns.length} (${patterns.filter((p) => p.confidence === 'high').length} high confidence)`,
-        `Encoded bytes / original bytes: see must_render_verbatim table`,
-      ],
+    headline: compactionHeadline,
+    headline_bullets: [
+      `SIEM: ${sel.displayName}, window: ${timeRange}`,
+      `Patterns measured: ${patterns.length} (${patterns.filter((p) => p.confidence === 'high').length} high confidence)`,
+      `Encoded bytes / original bytes: see must_render_verbatim table`,
+    ],
+    status: patterns.length > 0 ? 'success' : 'no_signal',
+    decisions: { threshold_used: null, threshold_basis: 'default' },
+    source_disclosure: { siem_vendor: sel.id, bytes_source: 'siem_direct' },
+    scope: {
+      window: timeRange,
+      window_basis: 'explicit',
+      candidates_count: rawEvents.length,
+      candidates_usable: patterns.length,
     },
-    data,
+    payload: data,
+    human_summary: compactionHumanSummary,
+    must_render_verbatim: table,
     warnings,
     actions: [
       {
         tool: 'log10x_estimate_savings',
         args: { service: args.service },
-        reason:
-          'Use measured compaction ratios to refine savings estimates for this service.',
-        role: 'recommended-next',
+        reason: 'Use measured compaction ratios to refine savings estimates for this service.',
       },
       {
         tool: 'log10x_pattern_detail',
         args: {},
         reason: 'Drill into a specific high-ratio pattern for action options.',
-        role: 'optional-followup',
       },
     ],
   });

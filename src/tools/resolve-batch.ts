@@ -27,9 +27,9 @@ import {
 import { computeConcentration, type PatternConcentration } from '../lib/variable-concentration.js';
 import { fmtCount, fmtBytes } from '../lib/format.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
-import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { type StructuredOutput } from '../lib/output-types.js';
 import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
-import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
+import { newChassisTelemetry, buildChassisEnvelope } from '../lib/chassis-envelope.js';
 
 export const resolveBatchSchema = {
   source: z
@@ -112,15 +112,11 @@ export async function executeResolveBatch(args: {
   privacy_mode: boolean;
   view?: 'summary';
 }): Promise<string | StructuredOutput> {
-  const telemetry = newTelemetry();
+  const telemetry = newChassisTelemetry();
   const sumOut: { data?: Omit<ResolveBatchSummary, 'human_summary'> } = {};
   try {
     await executeResolveBatchInner(args, sumOut);
   } catch (e) {
-    // Hard-error port: dev CLI missing is a precondition, not a runtime failure.
-    // Caught at the tool boundary so the chokepoint doesn't need to know about
-    // the dev CLI error class. kind='generic' because the install hint + paste
-    // Lambda escape hatch are already in the error's own message.
     if (e instanceof DevCliNotInstalledError) {
       return buildNotConfiguredEnvelope({
         tool: 'log10x_resolve_batch',
@@ -131,19 +127,17 @@ export async function executeResolveBatch(args: {
     throw e;
   }
   if (!sumOut.data) {
-    // Early-return path: executeResolveBatchInner returned a "No patterns
-    // resolved" string before populating sumOut.data. Emit a typed envelope
-    // with the explanation as human_summary so the agent can branch without
-    // parsing prose.
     const headline = 'resolve_batch returned no patterns';
-    return buildEnvelope({
+    return buildChassisEnvelope({
       tool: 'log10x_resolve_batch',
       view: 'summary',
-      summary: { headline },
-      data: {
-        precondition: 'no_patterns',
-        ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: headline }),
-      },
+      headline,
+      status: 'no_signal',
+      decisions: { threshold_used: null, threshold_basis: 'default' },
+      source_disclosure: {},
+      scope: { window: 'paste_batch', window_basis: 'auto_default' },
+      payload: { precondition: 'no_patterns' },
+      human_summary: headline,
       warnings: ['resolve_batch: templater rejected the input — no patterns resolved. Check that events are raw log lines (one per line), not pre-formatted JSON blobs.'],
     });
   }
@@ -153,11 +147,21 @@ export async function executeResolveBatch(args: {
   const top = d.patterns[0];
   const dropWarning = d.drop_rate >= 0.2 ? ` (${Math.round(d.drop_rate * 100)}% of input lines dropped by templater)` : '';
   const headline = `${fmtCount(d.input_line_count)} events → ${d.resolved_pattern_count} pattern${d.resolved_pattern_count !== 1 ? 's' : ''}${top ? `, top: ${top.symbol_message ?? top.template_hash} at ${Math.round(top.share_pct)}% of batch` : ''}${dropWarning}.`;
-  return buildEnvelope({
+  return buildChassisEnvelope({
     tool: 'log10x_resolve_batch',
     view: 'summary',
-    summary: { headline },
-    data: { ...d, ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: human_summary }) },
+    headline,
+    status: d.resolved_pattern_count > 0 ? 'success' : 'no_signal',
+    decisions: { threshold_used: null, threshold_basis: 'default' },
+    source_disclosure: {},
+    scope: {
+      window: 'paste_batch',
+      window_basis: 'auto_default',
+      candidates_count: d.resolved_pattern_count,
+      candidates_usable: d.resolved_pattern_count,
+    },
+    payload: d,
+    human_summary,
     truncated: d.shown_pattern_count < d.resolved_pattern_count,
     warnings: d.drop_rate >= 0.2 ? [`templater dropped ${Math.round(d.drop_rate * 100)}% of input lines (engine GAPS G11) — treat as partial triage`] : [],
     actions: top && top.symbol_message

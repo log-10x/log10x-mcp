@@ -15,9 +15,9 @@ import { promises as fs } from 'fs';
 import { z } from 'zod';
 import { runDevCliStdin, runDevCliFile, DevCliNotInstalledError, DevCliRunError } from '../lib/dev-cli.js';
 import { agentOnly } from '../lib/agent-only.js';
-import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { type StructuredOutput } from '../lib/output-types.js';
 import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
-import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
+import { newChassisTelemetry, buildChassisEnvelope } from '../lib/chassis-envelope.js';
 
 export const extractTemplatesSchema = {
   source: z.enum(['file', 'events', 'text']).describe(
@@ -96,12 +96,11 @@ function buildHumanSummary(d: Omit<ExtractTemplatesSummary, 'human_summary'>): s
 }
 
 export async function executeExtractTemplates(args: ExtractArgs): Promise<string | StructuredOutput> {
-  const telemetry = newTelemetry();
+  const telemetry = newChassisTelemetry();
   const sumOut: { data?: Omit<ExtractTemplatesSummary, 'human_summary'> } = {};
   try {
     await executeExtractTemplatesInner(args, sumOut);
   } catch (e) {
-    // Hard-error port: dev CLI missing is a precondition, not a runtime failure.
     if (e instanceof DevCliNotInstalledError) {
       return buildNotConfiguredEnvelope({
         tool: 'log10x_extract_templates',
@@ -118,11 +117,22 @@ export async function executeExtractTemplates(args: ExtractArgs): Promise<string
   const human_summary = buildHumanSummary(base);
   const d: ExtractTemplatesSummary = { ...base, human_summary };
   const headline = `${d.event_count} events → ${d.distinct_templates} distinct template${d.distinct_templates !== 1 ? 's' : ''}${d.assertions ? ` (${d.assertions.passed}/${d.assertions.total} assertions passed)` : ''}.`;
-  return buildEnvelope({
+  const assertionsFailed = d.assertions ? d.assertions.total - d.assertions.passed : 0;
+  return buildChassisEnvelope({
     tool: 'log10x_extract_templates',
     view: 'summary',
-    summary: { headline },
-    data: { ...d, ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: human_summary }) },
+    headline,
+    status: assertionsFailed > 0 ? 'partial' : d.distinct_templates > 0 ? 'success' : 'no_signal',
+    decisions: { threshold_used: null, threshold_basis: 'default' },
+    source_disclosure: {},
+    scope: {
+      window: 'paste_batch',
+      window_basis: 'auto_default',
+      candidates_count: d.event_count,
+      candidates_usable: d.distinct_templates,
+    },
+    payload: d,
+    human_summary,
     truncated: d.shown_templates < d.distinct_templates,
     actions: d.templates.length > 0
       ? [

@@ -120,7 +120,9 @@ export async function executeTrend(
       headline,
       status: 'error',
       decisions: { threshold_used: null, threshold_basis: 'default' },
-      source_disclosure: {},
+      // bytes_source is TSDB for all trend queries; known even before the
+      // query runs so we carry it on validation-error envelopes too.
+      source_disclosure: { bytes_source: 'tsdb' },
       scope: { window: 'unknown', window_basis: 'auto_default' },
       payload: { ...buildUnifiedFields({ status: 'insufficient_data', telemetry, humanSummary: headline }) },
       human_summary: headline,

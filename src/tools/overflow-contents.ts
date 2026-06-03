@@ -45,8 +45,8 @@ import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { parseTimeframe, fmtBytes } from '../lib/format.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { agentOnly } from '../lib/agent-only.js';
-import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
-import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
+import { type StructuredOutput } from '../lib/output-types.js';
+import { newChassisTelemetry, buildChassisEnvelope } from '../lib/chassis-envelope.js';
 import { fetchCapCsvForEnv, fetchActionIntentForEnv } from '../lib/cap-csv-fetch.js';
 import { parseCapCsv, buildPatternActionLookup } from '../lib/cap-csv-parser.js';
 import type { Action } from '../lib/cost.js';
@@ -118,7 +118,7 @@ export async function executeOverflowContents(
   args: { timeRange?: string; service?: string; limit?: number; view?: 'summary' },
   env: EnvConfig,
 ): Promise<string | StructuredOutput> {
-  const telemetry = newTelemetry();
+  const telemetry = newChassisTelemetry();
   // Normalise '1d' legacy alias → '24h'.
   const timeRange = normalizeTimeRange(args.timeRange ?? '30d');
   const tf = parseTimeframe(timeRange);
@@ -418,12 +418,23 @@ export async function executeOverflowContents(
       ? `Overflow queue empty over ${tf.label}${filterLabel}.`
       : `${filtered.length} overflow pattern${filtered.length !== 1 ? 's' : ''} over ${tf.label}: ${fmtBytes(total_bytes_in_window)} routed to S3${filterLabel}.`;
 
-  return buildEnvelope({
+  return buildChassisEnvelope({
     tool: 'log10x_overflow_contents',
     view: 'summary',
-    summary: { headline },
-    data: { ...data, ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: headline }) },
+    headline,
+    status: top.length > 0 ? 'success' : 'no_signal',
+    decisions: { threshold_used: null, threshold_basis: 'default' },
+    source_disclosure: { bytes_source: 'tsdb' },
+    scope: {
+      window: tf.label,
+      window_basis: 'explicit',
+      candidates_count: filtered.length,
+      candidates_usable: top.length,
+    },
+    payload: data,
+    human_summary: headline,
     actions: nextActions.map((a) => ({ tool: a.tool, args: a.args, reason: a.reason })),
+    telemetry,
   });
 }
 

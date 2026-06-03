@@ -28,8 +28,8 @@ import * as pql from '../lib/promql.js';
 import { bytesToCost, parsePrometheusValue, buildDisclosedDollarValue, type DisclosedDollarValue } from '../lib/cost.js';
 import { fmtDollar, fmtBytes, fmtPct, fmtDisclosedDollar, parseTimeframe, costPeriodLabel } from '../lib/format.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
-import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
-import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
+import { type StructuredOutput } from '../lib/output-types.js';
+import { newChassisTelemetry, buildChassisEnvelope, buildChassisErrorEnvelope } from '../lib/chassis-envelope.js';
 import { normalizeTimeRange } from '../lib/time-range.js';
 
 /** S3 Standard default, matching the ROI dashboard's storageCost default ($/GB/month). */
@@ -105,22 +105,28 @@ export async function executeSavings(
   args: { timeRange?: string; analyzerCost?: number; effective_ingest_per_gb?: number; storageCost?: number; view?: 'summary' },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
-  const telemetry = newTelemetry();
+  const telemetry = newChassisTelemetry();
   const sumOut: { data?: SavingsSummary } = {};
   await executeSavingsInner(args, env, sumOut);
   if (!sumOut.data) {
-    // No structured data was assembled (the inner builder ran but data is
-    // unavailable — e.g. metrics backend returned empty). Emit a typed envelope
-    // with a human_summary explaining the missing-data state.
     const headline = 'No realized-savings metrics available for this environment yet.';
-    return buildEnvelope({
+    return buildChassisEnvelope({
       tool: 'log10x_savings',
       view: 'summary',
-      summary: { headline },
-      data: { ...buildUnifiedFields({ status: 'insufficient_data', telemetry, humanSummary: headline }) },
+      headline,
+      status: 'insufficient_data',
+      decisions: { threshold_used: null, threshold_basis: 'default' },
+      source_disclosure: { bytes_source: 'tsdb' },
+      scope: { window: args.timeRange ?? '7d', window_basis: 'auto_default' },
+      payload: {},
+      human_summary: headline,
+      telemetry,
     });
   }
   const d = sumOut.data;
+  const rateSourceMapped = d.rate_source === 'customer_supplied' ? 'customer_supplied' as const
+    : d.rate_source === 'list_price' ? 'list_price' as const
+    : 'none' as const;
   // Percent-first headline; dollar clause is gated on rate_source !== 'unset'.
   // When no $/GB is known we refuse to print a dollar number (no $1.0/GB lie).
   let headline: string;
@@ -136,15 +142,32 @@ export async function executeSavings(
       : '';
     headline = `Pipeline savings (${d.time_range}): ${fmtPct(d.totals.reduction_pct)} of input bytes removed${dollarClause}${d.run_rate?.ramping ? ' (volume ramping)' : ''}.`;
   }
-  return buildEnvelope({
+  return buildChassisEnvelope({
     tool: 'log10x_savings',
     view: 'summary',
-    summary: { headline },
-    data: { ...d, ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: headline }) },
+    headline,
+    status: d.totals.has_data ? 'success' : 'no_signal',
+    decisions: {
+      threshold_used: d.cost_per_gb,
+      threshold_basis: d.rate_source === 'customer_supplied' ? 'customer_supplied' : 'default',
+    },
+    source_disclosure: {
+      bytes_source: 'tsdb',
+      rate_source: rateSourceMapped,
+    },
+    scope: {
+      window: d.time_range,
+      window_basis: 'explicit',
+      candidates_count: d.pipeline_instances,
+      candidates_usable: d.services_monitored,
+    },
+    payload: d,
+    human_summary: headline,
     actions: [
       { tool: 'log10x_top_patterns', args: { timeRange: d.time_range, limit: 10 }, reason: 'see which patterns currently drive cost (where the savings come from)' },
       { tool: 'log10x_top_patterns', args: { timeRange: d.time_range, limit: 10, comparison_window: d.time_range }, reason: 'delta-versus-baseline view to check whether costs are growing' },
     ],
+    telemetry,
   });
 }
 

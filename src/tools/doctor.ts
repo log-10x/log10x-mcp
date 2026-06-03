@@ -29,8 +29,9 @@ import { agentOnly } from '../lib/agent-only.js';
 import { fmtBytes as formatBytes } from '../lib/format.js';
 import { discoverAvailable } from '../lib/siem/index.js';
 import { resolveBackend, formatDetectionTrace } from '../lib/customer-metrics.js';
-import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { type StructuredOutput } from '../lib/output-types.js';
 import { tenxAvailabilityHint } from '../lib/install-hints.js';
+import { newChassisTelemetry, buildChassisEnvelope } from '../lib/chassis-envelope.js';
 
 export type CheckStatus = 'pass' | 'warn' | 'fail';
 
@@ -80,11 +81,21 @@ export async function executeDoctor(args: { environment?: string }): Promise<str
     warning,
     envCount: Object.keys(report.perEnvChecks).length,
   });
-  return buildEnvelope({
+  return buildChassisEnvelope({
     tool: 'log10x_doctor',
     view: 'summary',
-    summary: { headline },
-    data: {
+    headline,
+    status: report.overall === 'pass' ? 'success' : report.overall === 'warn' ? 'partial' : 'error',
+    decisions: { threshold_used: null, threshold_basis: 'default' },
+    source_disclosure: {},
+    scope: {
+      window: 'point_in_time',
+      window_basis: 'auto_default',
+      candidates_count: allChecks.length,
+      candidates_usable: passCount + warnCount,
+      candidates_failed: failing.map((f) => `${f.env}/${f.name}`),
+    },
+    payload: {
       overall: report.overall,
       counts: { pass: passCount, warn: warnCount, fail: failCount },
       checks_by_env: {
@@ -93,11 +104,22 @@ export async function executeDoctor(args: { environment?: string }): Promise<str
       },
       failing_checks: failing,
       warning_checks: warning,
-      human_summary,
     },
+    human_summary,
+    ...(report.overall === 'fail' ? {
+      error: {
+        error_type: 'config_missing' as const,
+        retryable: false,
+        suggested_backoff_ms: null,
+        hint: failing.length > 0
+          ? `${failing.length} check(s) failing: ${failing.slice(0, 2).map((f) => `${f.env}/${f.name}`).join(', ')}`
+          : 'Doctor checks failed',
+      },
+    } : {}),
     actions: report.overall === 'fail'
       ? [{ tool: 'log10x_login_status', args: {}, reason: 'verify credentials and env state if checks are failing on auth/connectivity' }]
       : [],
+    telemetry: newChassisTelemetry(),
   });
 }
 

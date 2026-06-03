@@ -45,6 +45,7 @@ import { recordInvestigation, getInvestigation, listInvestigations } from '../li
 import { isRetrieverConfigured, runRetrieverQuery, parseTimeExpression } from '../lib/retriever-api.js';
 import { renderNextActions, extractNextActions, type NextAction } from '../lib/next-actions.js';
 import { getOffloadStatusBatch } from '../lib/offload-status.js';
+import { buildChassisEnvelope } from '../lib/chassis-envelope.js';
 
 export const investigateSchema = {
   starting_point: z
@@ -299,7 +300,6 @@ export async function executeInvestigate(
 ): Promise<import('../lib/output-types.js').StructuredOutput> {
   const startedAt = Date.now();
   const thresholdBasis = detectThresholdBasis();
-  const { buildEnvelope: __be } = await import('../lib/output-types.js');
   const { wrapBackendError } = await import('../lib/primitive-errors.js');
 
   // ── Structural failure path ────────────────────────────────────────
@@ -308,29 +308,28 @@ export async function executeInvestigate(
     md = await executeInvestigateInner(args, env);
   } catch (e) {
     const err = wrapBackendError(e);
-    return __be({
+    return buildChassisEnvelope({
       tool: 'log10x_investigate',
       view: 'summary',
-      summary: {
-        headline: `Investigation of "${args.starting_point}" failed: ${err.error_type}`,
-      },
-      data: {
+      headline: `Investigation of "${args.starting_point}" failed: ${err.error_type}`,
+      status: 'error',
+      decisions: { threshold_used: null, threshold_basis: thresholdBasis === 'config_file' ? 'snapshot' : 'unvalidated_default' },
+      source_disclosure: {},
+      scope: { window: args.window, window_basis: 'explicit' },
+      payload: {
         status: 'error' as InvestigateStatus,
         threshold_basis: thresholdBasis,
-        anchor_ref: {
-          type: 'starting_point',
-          expression: args.starting_point,
-        },
+        anchor_ref: { type: 'starting_point', expression: args.starting_point },
         starting_point: args.starting_point,
         window: args.window,
         depth: args.depth,
         baseline_offset: args.baseline_offset,
         use_bytes: args.use_bytes,
         total_latency_ms: Date.now() - startedAt,
-        human_summary: `Investigation failed: ${err.hint}`,
-        error: err,
         report_markdown: '',
       },
+      human_summary: `Investigation failed: ${err.hint}`,
+      error: err,
     });
   }
 
@@ -431,21 +430,48 @@ export async function executeInvestigate(
     thresholdBasis,
   );
 
-  return __be({
+  const headline = `Investigation of "${args.starting_point}" (window=${args.window}): status=${status}, shape=${parsed.shape ?? 'unknown'}${parsed.investigationId ? `, id=${parsed.investigationId.slice(0, 8)}` : ''}.`;
+
+  // Defect 34: extract the NEXT_ACTIONS from the HTML comment block into
+  // the structured actions[] field so the agent protocol is typed, not scraped.
+  const embeddedActions = extractNextActions(md);
+
+  return buildChassisEnvelope({
     tool: 'log10x_investigate',
     view: 'summary',
-    summary: {
-      headline: `Investigation of "${args.starting_point}" (window=${args.window}): status=${status}, shape=${parsed.shape ?? 'unknown'}${parsed.investigationId ? `, id=${parsed.investigationId.slice(0, 8)}` : ''}.`,
+    headline,
+    status: status === 'success' ? 'success'
+      : status === 'no_signal' ? 'no_signal'
+      : status === 'insufficient_data' ? 'insufficient_data'
+      : 'error',
+    decisions: {
+      threshold_used: DEFAULT_THRESHOLDS.cleanChainThreshold,
+      threshold_basis: thresholdBasis === 'config_file' ? 'snapshot' : 'unvalidated_default',
+      threshold_audit: {
+        value: DEFAULT_THRESHOLDS.cleanChainThreshold,
+        basis: thresholdBasis,
+        observed_distribution: parsed.leadConfidence !== null ? {
+          n: parsed.chainLength + parsed.coMoverCount,
+          min: 0,
+          p25: parsed.leadConfidence * 0.5,
+          p50: parsed.leadConfidence,
+          p75: parsed.leadConfidence,
+          max: parsed.leadConfidence,
+        } : null,
+      },
     },
-    data: {
+    source_disclosure: {},
+    scope: {
+      window: args.window,
+      window_basis: 'explicit',
+      candidates_count: parsed.chainLength + parsed.coMoverCount,
+      candidates_usable: parsed.chainLength + parsed.coMoverCount,
+    },
+    payload: {
       status,
       threshold_basis: thresholdBasis,
-      anchor_ref: {
-        type: 'starting_point',
-        expression: args.starting_point,
-      },
+      anchor_ref: { type: 'starting_point', expression: args.starting_point },
       total_latency_ms: Date.now() - startedAt,
-      human_summary,
       // Surfaced for agents that want to branch without parsing markdown.
       findings: parsed.leadPattern
         ? [
@@ -471,14 +497,11 @@ export async function executeInvestigate(
       n_chain_steps: parsed.chainLength,
       n_co_movers: parsed.coMoverCount,
       threshold_audit: {
-        clean_chain_threshold: {
-          value: DEFAULT_THRESHOLDS.cleanChainThreshold,
-          basis: thresholdBasis,
-        },
+        clean_chain_threshold: { value: DEFAULT_THRESHOLDS.cleanChainThreshold, basis: thresholdBasis },
         observed_top_confidence: parsed.leadConfidence,
         observed_lead_lag_seconds: parsed.leadLagSeconds,
       },
-      // Existing fields kept for backward compat with downstream callers.
+      // Existing fields kept for backward compat.
       ok: status === 'success',
       investigation_id: parsed.investigationId,
       starting_point: args.starting_point,
@@ -491,6 +514,14 @@ export async function executeInvestigate(
       report_markdown: md,
       top_offloaded_patterns: topOffloaded,
     },
+    human_summary,
+    // Defect 34: structured actions[] pulled from the embedded NEXT_ACTIONS
+    // comment block so the agent protocol is typed, not scraped from markdown.
+    actions: embeddedActions.length > 0
+      ? embeddedActions.map((a) => ({ tool: a.tool, args: a.args, reason: a.reason }))
+      : (parsed.leadPattern
+          ? [{ tool: 'log10x_pattern_detail', args: { pattern: parsed.leadPattern }, reason: 'Drill into the lead pattern for cost/trend details' }]
+          : []),
   });
 }
 

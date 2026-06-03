@@ -22,10 +22,11 @@ import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { LABELS } from '../lib/promql.js';
 import { parseTimeframe } from '../lib/format.js';
-import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { type StructuredOutput } from '../lib/output-types.js';
 import { computeAnchorDispersion, ANCHOR_DISPERSION_FLOOR } from '../lib/anchor-dispersion.js';
 import { canonicalMetricRef } from '../lib/metric-ref.js';
 import { wrapBackendError, type PrimitiveError } from '../lib/primitive-errors.js';
+import { buildChassisEnvelope } from '../lib/chassis-envelope.js';
 
 // Default lag offsets, widened to ±1800s to catch slow-moving upstream
 // causes. Hand-picked from the 58-candidate chaos test (not calibrated
@@ -290,11 +291,16 @@ export async function executeRankByShapeSimilarity(
       evaluation_failed: [],
     };
     const headline = `Anchor lacks phase separation (dispersion ${anchorDispersion.toFixed(3)} < ${ANCHOR_DISPERSION_FLOOR}). Refusing — re-anchor.`;
-    return buildEnvelope({
+    return buildChassisEnvelope({
       tool: 'log10x_rank_by_shape_similarity',
       view: 'summary',
-      summary: { headline },
-      data,
+      headline,
+      status: 'insufficient_data',
+      decisions: { threshold_used: phaseAlignedFloor, threshold_basis: thresholdBasis === 'caller_override' ? 'customer_supplied' as const : thresholdBasis },
+      source_disclosure: {},
+      scope: { window, window_basis: 'explicit', candidates_count: args.candidates.length, candidates_usable: 0 },
+      payload: data,
+      human_summary: data.human_summary,
     });
   }
 
@@ -401,11 +407,31 @@ export async function executeRankByShapeSimilarity(
   };
   const headline = `Ranked ${ranked.length} candidates by |Pearson@lag|. ${failed.length} could not be evaluated.`;
 
-  return buildEnvelope({
+  return buildChassisEnvelope({
     tool: 'log10x_rank_by_shape_similarity',
     view: 'summary',
-    summary: { headline },
-    data,
+    headline,
+    status: status === 'no_signal' ? 'no_signal' : 'success',
+    decisions: {
+      threshold_used: phaseAlignedFloor,
+      threshold_basis: thresholdBasis === 'caller_override' ? 'customer_supplied' : thresholdBasis,
+      threshold_audit: data.threshold_audit ? {
+        value: data.threshold_audit.anchor_phase_aligned_floor.value,
+        basis: data.threshold_audit.anchor_phase_aligned_floor.basis,
+        observed_distribution: data.threshold_audit.observed_pearson_magnitude_distribution,
+      } : null,
+    },
+    source_disclosure: {},
+    scope: {
+      window,
+      window_basis: 'explicit',
+      candidates_count: args.candidates.length,
+      candidates_usable: nUsable,
+      candidates_evaluated: args.candidates.length - failed.length,
+      candidates_failed: failed,
+    },
+    payload: data,
+    human_summary,
   });
 }
 
@@ -443,11 +469,17 @@ function rankErrorEnvelope(args: {
     evaluation_failed: [],
     error: args.err,
   };
-  return buildEnvelope({
+  return buildChassisEnvelope({
     tool: 'log10x_rank_by_shape_similarity',
     view: 'summary',
-    summary: { headline: `Error (${args.err.error_type}): ${args.err.hint.slice(0, 120)}` },
-    data,
+    headline: `Error (${args.err.error_type}): ${args.err.hint.slice(0, 120)}`,
+    status: 'error',
+    decisions: { threshold_used: args.floor, threshold_basis: args.thresholdBasis === 'caller_override' ? 'customer_supplied' as const : args.thresholdBasis },
+    source_disclosure: {},
+    scope: { window: args.window, window_basis: 'explicit' },
+    payload: data,
+    human_summary: `Call failed: ${args.err.hint}`,
+    error: args.err,
   });
 }
 

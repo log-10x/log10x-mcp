@@ -16,8 +16,9 @@
 import { z } from 'zod';
 import { extractPatterns } from '../lib/pattern-extraction.js';
 import { findSkew, type SkewFinding } from '../lib/detectors/skew.js';
-import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { type StructuredOutput } from '../lib/output-types.js';
 import type { PrimitiveError } from '../lib/primitive-errors.js';
+import { buildChassisEnvelope } from '../lib/chassis-envelope.js';
 
 /** Default minimum dominant-value fraction. Hand-picked, unvalidated. */
 export const DEFAULT_MIN_CONCENTRATION = 0.6;
@@ -255,23 +256,47 @@ export async function executeFindSkew(args: FindSkewArgs): Promise<StructuredOut
           ? `Insufficient data — no pattern had ≥${minEvents} events after templating.`
           : `Error: ${data.error?.error_type ?? 'unknown'}.`;
 
-  return buildEnvelope({
+  return buildChassisEnvelope({
     tool: 'log10x_find_skew',
     view: 'summary',
-    summary: {
-      headline,
-      bullets: findings.slice(0, 3).map((f) => {
-        const top = f.skewedSlots[0]!;
-        return `\`${f.patternIdentity}\`: slot \`${top.slotName}\` is \`${top.dominantValue}\` ${Math.round(top.dominantPct * 100)}% of events — sample at 1/${sampleN} saves ~${Math.round(f.samplingOpportunityPct * 100)}% of bytes.`;
-      }),
+    headline,
+    headline_bullets: findings.slice(0, 3).map((f) => {
+      const top = f.skewedSlots[0]!;
+      return `\`${f.patternIdentity}\`: slot \`${top.slotName}\` is \`${top.dominantValue}\` ${Math.round(top.dominantPct * 100)}% of events — sample at 1/${sampleN} saves ~${Math.round(f.samplingOpportunityPct * 100)}% of bytes.`;
+    }),
+    status: status === 'success' ? 'success' : status === 'no_signal' ? 'no_signal' : status === 'insufficient_data' ? 'insufficient_data' : 'error',
+    decisions: {
+      threshold_used: minConcentration,
+      threshold_basis: thresholdBasis === 'caller_override' ? 'customer_supplied' : thresholdBasis,
+      threshold_audit: {
+        value: minConcentration,
+        basis: thresholdBasis,
+        observed_distribution: observedDistribution ? {
+          n: observedDistribution.n,
+          min: observedDistribution.min,
+          p25: observedDistribution.p25,
+          p50: observedDistribution.p50,
+          p75: observedDistribution.p75,
+          max: observedDistribution.max,
+        } : null,
+      },
     },
-    data,
+    source_disclosure: {},
+    scope: {
+      window: 'paste_batch',
+      window_basis: 'auto_default',
+      candidates_count: nPatternsAboveMinEvents,
+      candidates_usable: nPatternsAboveMinEvents,
+    },
+    payload: { ...data },
+    human_summary: human_summary,
     truncated: findings.length >= topN,
     actions: findings.slice(0, 3).map((f) => ({
       tool: 'log10x_pattern_mitigate',
       args: { pattern: f.patternIdentity },
       reason: `Apply sample 1/${sampleN} on the dominant value for this pattern.`,
     })),
+    ...(data.error ? { error: data.error } : {}),
   });
 }
 
@@ -304,11 +329,17 @@ function errorEnvelope(args: {
     findings: [],
     error: args.err,
   };
-  return buildEnvelope({
+  return buildChassisEnvelope({
     tool: 'log10x_find_skew',
     view: 'summary',
-    summary: { headline: `Error (${args.err.error_type}): ${args.err.hint.slice(0, 120)}` },
-    data,
+    headline: `Error (${args.err.error_type}): ${args.err.hint.slice(0, 120)}`,
+    status: 'error',
+    decisions: { threshold_used: args.minConcentration, threshold_basis: args.thresholdBasis === 'caller_override' ? 'customer_supplied' as const : args.thresholdBasis },
+    source_disclosure: {},
+    scope: { window: 'paste_batch', window_basis: 'auto_default' },
+    payload: { ...data },
+    human_summary: `find_skew failed: ${args.err.hint}`,
+    error: args.err,
   });
 }
 

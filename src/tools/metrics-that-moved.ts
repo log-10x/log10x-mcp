@@ -30,10 +30,11 @@ import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { LABELS } from '../lib/promql.js';
 import { parseTimeframe } from '../lib/format.js';
-import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { type StructuredOutput } from '../lib/output-types.js';
 import { computeAnchorDispersion, ANCHOR_DISPERSION_FLOOR } from '../lib/anchor-dispersion.js';
 import { canonicalMetricRef } from '../lib/metric-ref.js';
 import { wrapBackendError, type PrimitiveError } from '../lib/primitive-errors.js';
+import { buildChassisEnvelope } from '../lib/chassis-envelope.js';
 
 /** Default phase-gap floor. Hand-picked, uncalibrated — see README "Threshold provenance". */
 export const DEFAULT_PHASE_GAP_FLOOR = 0.15;
@@ -299,11 +300,16 @@ export async function executeMetricsThatMoved(
       evaluation_failed: [],
     };
     const headline = `Anchor lacks phase separation (dispersion ${anchorDispersion.toFixed(3)} < ${ANCHOR_DISPERSION_FLOOR}). Refusing — re-anchor with a clearer pattern.`;
-    return buildEnvelope({
+    return buildChassisEnvelope({
       tool: 'log10x_metrics_that_moved',
       view: 'summary',
-      summary: { headline },
-      data,
+      headline,
+      status: 'insufficient_data',
+      decisions: { threshold_used: floor, threshold_basis: thresholdBasis === 'caller_override' ? 'customer_supplied' as const : thresholdBasis },
+      source_disclosure: {},
+      scope: { window, window_basis: 'explicit', candidates_count: args.candidates.length, candidates_usable: 0 },
+      payload: data,
+      human_summary: data.human_summary,
     });
   }
 
@@ -401,11 +407,31 @@ export async function executeMetricsThatMoved(
 
   const headline = `${moved.length} of ${args.candidates.length} candidates moved with anchor (phase_gap ≥ ${floor}). ${notMoved.length} did not move. ${failed.length} could not be evaluated.`;
 
-  return buildEnvelope({
+  return buildChassisEnvelope({
     tool: 'log10x_metrics_that_moved',
     view: 'summary',
-    summary: { headline },
-    data,
+    headline,
+    status: moved.length > 0 ? 'success' : 'no_signal',
+    decisions: {
+      threshold_used: floor,
+      threshold_basis: thresholdBasis === 'caller_override' ? 'customer_supplied' : thresholdBasis,
+      threshold_audit: data.threshold_audit ? {
+        value: data.threshold_audit.phase_gap_floor.value,
+        basis: data.threshold_audit.phase_gap_floor.basis,
+        observed_distribution: data.threshold_audit.observed_phase_gap_distribution,
+      } : null,
+    },
+    source_disclosure: {},
+    scope: {
+      window,
+      window_basis: 'explicit',
+      candidates_count: args.candidates.length,
+      candidates_usable: nUsable,
+      candidates_evaluated: args.candidates.length - failed.length,
+      candidates_failed: failed,
+    },
+    payload: data,
+    human_summary,
   });
 }
 
@@ -450,11 +476,17 @@ function errorEnvelope(args: {
     evaluation_failed: [],
     error: args.err,
   };
-  return buildEnvelope({
+  return buildChassisEnvelope({
     tool: args.tool,
     view: 'summary',
-    summary: { headline: `Error (${args.err.error_type}): ${args.err.hint.slice(0, 120)}` },
-    data,
+    headline: `Error (${args.err.error_type}): ${args.err.hint.slice(0, 120)}`,
+    status: 'error',
+    decisions: { threshold_used: args.floor, threshold_basis: args.thresholdBasis === 'caller_override' ? 'customer_supplied' as const : args.thresholdBasis },
+    source_disclosure: {},
+    scope: { window: args.window, window_basis: 'explicit' },
+    payload: data,
+    human_summary: `Call failed: ${args.err.hint}`,
+    error: args.err,
   });
 }
 
