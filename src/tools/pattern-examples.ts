@@ -42,6 +42,7 @@ import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { parsePrometheusValue } from '../lib/cost.js';
 import { agentOnly } from '../lib/agent-only.js';
 import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
+import { computeBucketInterpretation } from '../lib/bucket-interpretation.js';
 
 /**
  * Resolve a pattern's AUTHORITATIVE tenx_hash from the 10x metrics.
@@ -196,6 +197,15 @@ interface PatternExamplesSummary {
     service?: string;
     sample_event: string;
     slot_distribution: Array<{ slot: string; distinct_count: number; is_constant: boolean; sample_values: string[]; naming_confidence: 'high' | 'medium' | 'low' }>;
+    bucket_interpretation: {
+      active_emitters: number;
+      emitter_type: 'pod' | 'container' | 'process' | 'host';
+      content_variance: 'none' | 'low' | 'high';
+      envelope_share_of_named_slots: number;
+      recommended_action: 'drop' | 'compact' | 'sample' | 'keep';
+      rationale: string;
+    };
+    human_summary: string;
   }>;
   probe_notes: string[];
 }
@@ -233,11 +243,32 @@ export async function executePatternExamples(
   // events the agent could see by widening the limit or narrowing the timeRange.
   const requestedLimit = rawArgs.limit ?? 5;
   const truncated = d.events_pulled >= requestedLimit;
+
+  // Build actions[] — when any bucket recommends drop or compact, surface
+  // log10x_pattern_mitigate as a recommended next step. Deduplicate: only
+  // emit the action once regardless of how many buckets qualify.
+  const envelopeActions: import('../lib/output-types.js').Action[] = [];
+  const needsMitigate = d.buckets.some(
+    (b) =>
+      b.bucket_interpretation.recommended_action === 'drop' ||
+      b.bucket_interpretation.recommended_action === 'compact',
+  );
+  if (needsMitigate) {
+    const topAction = d.buckets[0]?.bucket_interpretation.recommended_action ?? 'compact';
+    envelopeActions.push({
+      tool: 'log10x_pattern_mitigate',
+      args: { pattern: d.pattern },
+      role: 'recommended-next',
+      reason: `Bucket analysis recommends ${topAction} — pattern_mitigate applies the regulator rule.`,
+    });
+  }
+
   return buildEnvelope({
     tool: 'log10x_pattern_examples',
     view: 'summary',
     summary: { headline },
     data: { ...d, ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: headline }) },
+    actions: envelopeActions.length > 0 ? envelopeActions : undefined,
     truncated,
   });
 }
@@ -491,16 +522,8 @@ async function executePatternExamplesInner(
       retained_templates: retained.length,
       dropped_jaccard_events: dropped.reduce((s, b) => s + b.p.count, 0),
       multi_line_detected: isMultiLine,
-      buckets: topK.map((bucket, i) => ({
-        rank: i + 1,
-        template_hash: bucket.p.hash,
-        tenx_hash: bucket.p.tenxHash,
-        event_count: bucket.p.count,
-        jaccard: bucket.jaccard,
-        severity: bucket.p.severity,
-        service: bucket.p.service,
-        sample_event: bucket.p.sampleEvent.slice(0, 200),
-        slot_distribution: Object.entries(bucket.p.variables)
+      buckets: topK.map((bucket, i) => {
+        const slotDist = Object.entries(bucket.p.variables)
           .map(([slot, vals]) => ({
             slot,
             distinct_count: bucket.p.slotDistinctCounts?.[slot] ?? vals.length,
@@ -513,8 +536,34 @@ async function executePatternExamplesInner(
             const cr = confRank(a.naming_confidence) - confRank(b.naming_confidence);
             if (cr !== 0) return cr;
             return b.distinct_count - a.distinct_count;
-          }),
-      })),
+          });
+        const patternTotalEvents = retained.reduce((s, b) => s + b.p.count, 0);
+        const interpretation = computeBucketInterpretation({
+          eventCount: bucket.p.count,
+          patternEventCount: patternTotalEvents,
+          slotDistribution: slotDist,
+        });
+        return {
+          rank: i + 1,
+          template_hash: bucket.p.hash,
+          tenx_hash: bucket.p.tenxHash,
+          event_count: bucket.p.count,
+          jaccard: bucket.jaccard,
+          severity: bucket.p.severity,
+          service: bucket.p.service,
+          sample_event: bucket.p.sampleEvent.slice(0, 200),
+          slot_distribution: slotDist,
+          bucket_interpretation: {
+            active_emitters: interpretation.active_emitters,
+            emitter_type: interpretation.emitter_type,
+            content_variance: interpretation.content_variance,
+            envelope_share_of_named_slots: interpretation.envelope_share_of_named_slots,
+            recommended_action: interpretation.recommended_action,
+            rationale: interpretation.rationale,
+          },
+          human_summary: interpretation.human_summary,
+        };
+      }),
       probe_notes: probeNotes.slice(0, 5),
     };
   }
