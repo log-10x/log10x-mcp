@@ -18,11 +18,14 @@
 
 import type { Environments } from './environments.js';
 import {
-  buildEnvelope,
   StructuredOutputSchema,
   type StructuredOutput,
   type Action,
 } from './output-types.js';
+import {
+  buildChassisEnvelope,
+  type ChassisEnvelope,
+} from './chassis-envelope.js';
 
 export interface NotConfiguredOptions {
   /** The tool that's reporting the not-configured state, for context. */
@@ -164,6 +167,17 @@ export function isNotConfiguredError(e: unknown): boolean {
  * markdown the agent should surface; `actions` are the next-step tool
  * calls that fix it. The headline tells the agent this is an expected
  * state to branch on, not a failure to retry.
+ *
+ * Returns a ChassisEnvelope (which extends StructuredOutput) so every
+ * caller gets invocation_id, performance, and a valid ChassisData shape.
+ * The existing precondition + remediation fields are preserved in
+ * data.payload so agents that already read data.payload.status /
+ * data.payload.precondition / data.payload.remediation continue to work.
+ *
+ * Chassis wire-up: status=error, error_type=config_missing,
+ * retryable=false — the clean, branchable signal that the chassis
+ * verifier expects. NOT isError on the MCP transport; not_configured is
+ * an expected state.
  */
 export function buildNotConfiguredEnvelope(args: {
   tool: string;
@@ -171,30 +185,45 @@ export function buildNotConfiguredEnvelope(args: {
   remediation: string;
   actions?: Action[];
   diagnostic?: string;
-}): StructuredOutput {
+}): ChassisEnvelope {
   const kind = args.kind ?? 'generic';
   const remediation =
     args.diagnostic ? `${args.remediation}\n\nDetection trace:\n${args.diagnostic}` : args.remediation;
-  return buildEnvelope({
+  const headline =
+    `\`${args.tool}\` ran but its ${kind.replace(/_/g, ' ')} precondition is not configured. ` +
+    `This is an expected state, not a failure: read data.payload.remediation, surface the fix, and ` +
+    `continue the chain without this tool.`;
+  return buildChassisEnvelope({
     tool: args.tool,
     view: 'summary',
-    summary: {
-      headline:
-        `\`${args.tool}\` ran but its ${kind.replace(/_/g, ' ')} precondition is not configured. ` +
-        `This is an expected state, not a failure: read data.remediation, surface the fix, and ` +
-        `continue the chain without this tool.`,
+    headline,
+    status: 'error',
+    decisions: {
+      threshold_used: null,
+      threshold_basis: 'default',
     },
-    data: {
+    source_disclosure: {},
+    scope: {
+      window: 'unknown',
+      window_basis: 'auto_default',
+    },
+    payload: {
       status: 'not_configured',
       precondition: kind,
       remediation,
     },
-    // Fall back to the per-kind default next step so EVERY not_configured
-    // envelope (primitives, chokepoint, demo-gate) carries a concrete action
-    // without each caller wiring it.
+    human_summary:
+      `${kind.replace(/_/g, ' ')} precondition is not configured. ` +
+      `Read payload.remediation, surface the fix to the user, and continue without this tool.`,
+    error: {
+      error_type: 'config_missing',
+      retryable: false,
+      suggested_backoff_ms: null,
+      hint: `${kind.replace(/_/g, ' ')} not configured for tool \`${args.tool}\`. ${remediation.slice(0, 200)}`,
+    },
     actions: args.actions ?? defaultActionsForKind(kind),
     warnings: [
-      `${args.tool}: ${kind.replace(/_/g, ' ')} not configured, call did not fail (data.status = 'not_configured'). Do not retry verbatim; remediate or continue without it.`,
+      `${args.tool}: ${kind.replace(/_/g, ' ')} not configured, call did not fail (data.payload.status = 'not_configured'). Do not retry verbatim; remediate or continue without it.`,
     ],
   });
 }

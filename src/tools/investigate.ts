@@ -46,6 +46,7 @@ import { isRetrieverConfigured, runRetrieverQuery, parseTimeExpression } from '.
 import { renderNextActions, extractNextActions, type NextAction } from '../lib/next-actions.js';
 import { getOffloadStatusBatch } from '../lib/offload-status.js';
 import { buildChassisEnvelope } from '../lib/chassis-envelope.js';
+import type { Action, StructuredOutput } from '../lib/output-types.js';
 
 export const investigateSchema = {
   starting_point: z
@@ -297,7 +298,7 @@ export async function executeInvestigate(
     effective_ingest_per_gb?: number;
   },
   env: EnvConfig
-): Promise<import('../lib/output-types.js').StructuredOutput> {
+): Promise<StructuredOutput> {
   const startedAt = Date.now();
   const thresholdBasis = detectThresholdBasis();
   const { wrapBackendError } = await import('../lib/primitive-errors.js');
@@ -517,11 +518,41 @@ export async function executeInvestigate(
     human_summary,
     // Defect 34: structured actions[] pulled from the embedded NEXT_ACTIONS
     // comment block so the agent protocol is typed, not scraped from markdown.
+    //
+    // Fallback priority:
+    //   1. embeddedActions from the NEXT_ACTIONS HTML comment block (richest).
+    //   2. leadPattern from parsed output → log10x_pattern_detail.
+    //   3. no_signal + no leadPattern → default nudge: surface what IS active
+    //      so the agent can re-anchor.
     actions: embeddedActions.length > 0
       ? embeddedActions.map((a) => ({ tool: a.tool, args: a.args, reason: a.reason }))
-      : (parsed.leadPattern
+      : parsed.leadPattern
           ? [{ tool: 'log10x_pattern_detail', args: { pattern: parsed.leadPattern }, reason: 'Drill into the lead pattern for cost/trend details' }]
-          : []),
+          : (() => {
+              // Both embeddedActions and leadPattern are absent — no guidance
+              // for the agent. Surface a default nudge so actions[] is never empty.
+              const fallback: Action[] = [
+                {
+                  tool: 'log10x_top_patterns',
+                  args: { timeRange: args.window ?? '24h' },
+                  reason: 'No patterns moved with this anchor in the investigated window. Surface what IS active so you can re-anchor.',
+                  role: 'recommended-next',
+                },
+              ];
+              // Heuristic: if starting_point looks like a pattern name
+              // (alphanumeric + underscores only, contains at least one
+              // underscore), suggest pattern_examples as a secondary option
+              // so the agent can check whether the pattern exists at all.
+              if (/^[a-zA-Z0-9_]+$/.test(args.starting_point) && args.starting_point.includes('_')) {
+                fallback.push({
+                  tool: 'log10x_pattern_examples',
+                  args: { pattern: args.starting_point },
+                  reason: 'Verify the starting pattern exists and has recent traffic before widening the investigation window.',
+                  role: 'optional-followup',
+                });
+              }
+              return fallback;
+            })(),
   });
 }
 
