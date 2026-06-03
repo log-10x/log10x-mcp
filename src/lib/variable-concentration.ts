@@ -95,7 +95,8 @@ export function computeConcentration(
         pct: count / total,
       }));
 
-      const { inferredName, namingConfidence } = inferSlotName(slot, pos);
+      const prevName = slotResults.length > 0 ? slotResults[slotResults.length - 1].inferredName : undefined;
+      const { inferredName, namingConfidence } = inferSlotName(slot, pos, prevName);
       slotResults.push({
         slot: pos,
         precedingToken: slot.precedingToken,
@@ -135,11 +136,17 @@ export function computeConcentration(
  *
  * - structured-log key (`"tenant":"`, `pod_id=`) → high confidence, name from key
  * - natural-language word (`customer`, `tenant`) → medium, name from word + "(inferred)"
+ * - separator-only token with known previous name → medium, `<base>_part<N>` multi-part
  * - punctuation or whitespace only → low, name is `slot_N`
+ *
+ * @param previousName - the resolved name of the immediately preceding slot, used
+ *   to generate `<base>_part2`, `<base>_part3`, … names for compound values
+ *   (e.g. an IP address stored as three dot-separated slots).
  */
 function inferSlotName(
   slot: VariableSlot,
-  position: number
+  position: number,
+  previousName?: string,
 ): { inferredName: string; namingConfidence: 'high' | 'medium' | 'low' } {
   if (slot.name) {
     return { inferredName: slot.name, namingConfidence: 'high' };
@@ -163,6 +170,16 @@ function inferSlotName(
     if (word.length >= 3) {
       return { inferredName: `${word} (inferred)`, namingConfidence: 'medium' };
     }
+  }
+
+  // Separator-only token with a known previous name: generate a _partN suffix
+  // so compound values (IP segments, version numbers, multi-field IDs split by
+  // `.`, `-`, `/`, etc.) get a readable chain rather than opaque `slot_N` names.
+  if (previousName && /^[\.\-\s,\/]+$/.test(tok.trim())) {
+    const m = previousName.match(/_part(\d+)$/);
+    const next = m ? parseInt(m[1], 10) + 1 : 2;
+    const base = previousName.replace(/_part\d+$/, '');
+    return { inferredName: `${base}_part${next}`, namingConfidence: 'medium' };
   }
 
   return { inferredName: `slot_${position}`, namingConfidence: 'low' };

@@ -195,7 +195,7 @@ interface PatternExamplesSummary {
     severity?: string;
     service?: string;
     sample_event: string;
-    slot_distribution: Array<{ slot: string; distinct_count: number; is_constant: boolean; sample_values: string[] }>;
+    slot_distribution: Array<{ slot: string; distinct_count: number; is_constant: boolean; sample_values: string[]; naming_confidence: 'high' | 'medium' | 'low' }>;
   }>;
   probe_notes: string[];
 }
@@ -501,14 +501,19 @@ async function executePatternExamplesInner(
         service: bucket.p.service,
         sample_event: bucket.p.sampleEvent.slice(0, 200),
         slot_distribution: Object.entries(bucket.p.variables)
-          .sort((a, b) => b[1].length - a[1].length)
-          .slice(0, 6)
           .map(([slot, vals]) => ({
             slot,
-            distinct_count: vals.length,
-            is_constant: vals.length === 1,
+            distinct_count: bucket.p.slotDistinctCounts?.[slot] ?? vals.length,
+            is_constant: (bucket.p.slotDistinctCounts?.[slot] ?? vals.length) === 1,
             sample_values: vals.slice(0, 3),
-          })),
+            naming_confidence: slotNamingConfidence(slot),
+          }))
+          .sort((a, b) => {
+            const confRank = (c: 'high' | 'medium' | 'low') => c === 'high' ? 0 : c === 'medium' ? 1 : 2;
+            const cr = confRank(a.naming_confidence) - confRank(b.naming_confidence);
+            if (cr !== 0) return cr;
+            return b.distinct_count - a.distinct_count;
+          }),
       })),
       probe_notes: probeNotes.slice(0, 5),
     };
@@ -558,12 +563,20 @@ async function executePatternExamplesInner(
     lines.push(p.sampleEvent.slice(0, 200));
     lines.push('```');
     if (Object.keys(p.variables).length > 0) {
-      const slotsByCount = Object.entries(p.variables)
-        .sort((a, b) => b[1].length - a[1].length)
-        .slice(0, 6);
-      lines.push('**Slot distribution** (top 6 by distinct count):');
-      for (const [slot, vals] of slotsByCount) {
-        const distinct = vals.length === 1 ? 'constant' : `${vals.length} distinct`;
+      const allSlots = Object.entries(p.variables)
+        .map(([slot, vals]) => {
+          const trueDistinct = p.slotDistinctCounts?.[slot] ?? vals.length;
+          return { slot, vals, trueDistinct, conf: slotNamingConfidence(slot) };
+        })
+        .sort((a, b) => {
+          const confRank = (c: 'high' | 'medium' | 'low') => c === 'high' ? 0 : c === 'medium' ? 1 : 2;
+          const cr = confRank(a.conf) - confRank(b.conf);
+          if (cr !== 0) return cr;
+          return b.trueDistinct - a.trueDistinct;
+        });
+      lines.push(`**Slot distribution** (${allSlots.length} slot${allSlots.length === 1 ? '' : 's'}, named slots first):`);
+      for (const { slot, vals, trueDistinct } of allSlots) {
+        const distinct = trueDistinct === 1 ? 'constant' : `${trueDistinct} distinct`;
         const sample = vals.slice(0, 3).map((v) => `\`${v.slice(0, 30)}\``).join(', ');
         lines.push(`  - \`${slot}\` (${distinct}): ${sample}${vals.length > 3 ? `, …` : ''}`);
       }
@@ -718,6 +731,21 @@ function jaccardSimilarity(a: Set<string>, b: Set<string>): number {
 
 function graceful(title: string, lines: string[]): string {
   return [`## ${title}`, '', ...lines].join('\n');
+}
+
+/**
+ * Derive naming confidence from a slot name string.
+ *
+ * After FIX 1 (inferSlotNameFromToken wired into extractSlotsFromBody),
+ * slot names have predictable shapes:
+ *   - `slot_N`           → low (no preceding token could be decoded)
+ *   - `<word> (inferred)` → medium (natural-language word before the slot)
+ *   - anything else      → high (structured-log key or typed format spec)
+ */
+function slotNamingConfidence(slot: string): 'high' | 'medium' | 'low' {
+  if (/^slot_\d+$/.test(slot)) return 'low';
+  if (slot.endsWith(' (inferred)')) return 'medium';
+  return 'high';
 }
 
 // Exported for tests.

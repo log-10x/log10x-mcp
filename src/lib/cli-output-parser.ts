@@ -159,10 +159,16 @@ function extractSlotsFromBody(body: string): VariableSlot[] {
         continue;
       }
       // Bare `$` = untyped variable slot.
+      // Try to infer a semantic name from the preceding token so that
+      // pattern-extraction.ts's `tpl.variableSlots[s].name` lookup gets a
+      // meaningful value rather than falling through to `slot_${s}`.
       const preceding = body.slice(runStart, i);
+      const precedingToken = preceding.slice(-40);
+      const inferredName = inferSlotNameFromToken(precedingToken, position);
       slots.push({
         position,
-        precedingToken: preceding.slice(-40),
+        precedingToken,
+        name: inferredName,
       });
       position += 1;
       i += 1;
@@ -172,6 +178,35 @@ function extractSlotsFromBody(body: string): VariableSlot[] {
     i += 1;
   }
   return slots;
+}
+
+/**
+ * Infer a semantic name for a bare-$ variable slot from the static text
+ * immediately preceding it. Mirrors the logic in variable-concentration.ts's
+ * `inferSlotName` so that `extractSlotsFromBody` produces populated `.name`
+ * fields without creating a circular import.
+ *
+ * Returns `undefined` when no confident name can be derived (caller omits
+ * `.name` and pattern-extraction.ts falls through to `slot_${N}`).
+ */
+function inferSlotNameFromToken(tok: string, position: number): string | undefined {
+  if (!tok || !tok.trim()) return undefined;
+
+  // Structured log key: ends with `":"`, `":`, `=`, `=\"`
+  const structured = tok.match(/([A-Za-z_][A-Za-z0-9_.-]*)["']?\s*[:=]\s*["']?$/);
+  if (structured) return structured[1];
+
+  // Natural-language word right before the slot.
+  const wordMatch = tok.match(/\b([A-Za-z][A-Za-z0-9_]{1,})\s*[:=]?\s*$/);
+  if (wordMatch) {
+    const word = wordMatch[1].toLowerCase();
+    if (word.length >= 3) return `${word} (inferred)`;
+  }
+
+  // Separator-only token — no confident name for position 0; for later
+  // positions this is handled by the multi-part inheritance in
+  // variable-concentration.ts's inferSlotName.
+  return undefined;
 }
 
 /** Guess a name for a typed format spec like `yyyy-MM-dd'T'HH:mm:ss'Z'`. */
