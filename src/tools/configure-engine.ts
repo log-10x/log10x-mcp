@@ -425,19 +425,36 @@ export async function executeConfigureEngine(
   // Resolve gitops + destination.
   const target = await resolveTarget(args);
   if ('error' in target) {
+    const targetErrHint = firstLine(target.error);
+    // Nudge configure_env whenever the hint mentions gitops / GH_REPO —
+    // that is exactly the tool that fixes the gap (sets gitops.repo in
+    // envs.json or LOG10X_GH_REPO env var).
+    const targetActions: import('../lib/output-types.js').Action[] =
+      isGitopsHint(targetErrHint)
+        ? [
+            {
+              tool: 'log10x_configure_env',
+              args: {},
+              reason:
+                'Set gitops.repo in your envs.json (or LOG10X_GH_REPO env var) so configure_engine can write the per-pattern cap PR.',
+              role: 'recommended-next',
+            },
+          ]
+        : [];
     return buildChassisErrorEnvelope({
       tool: 'log10x_configure_engine',
       err: {
         error_type: 'config_missing',
         retryable: false,
         suggested_backoff_ms: null,
-        hint: `configure_engine refused: ${firstLine(target.error)}`,
+        hint: `configure_engine refused: ${targetErrHint}`,
       },
       contextPayload: {
         ok: false, phase: 'target_resolution', service: args.service,
-        containers: args.containers ?? [], error: firstLine(target.error),
+        containers: args.containers ?? [], error: targetErrHint,
       },
       source_disclosure: {},
+      actions: targetActions,
     });
   }
 
@@ -470,13 +487,22 @@ export async function executeConfigureEngine(
     return buildChassisErrorEnvelope({
       tool: 'log10x_configure_engine',
       err: {
-        error_type: 'config_missing',
-        retryable: false,
+        error_type: 'backend_unavailable',
+        retryable: true,
         suggested_backoff_ms: null,
         hint: `configure_engine refused: customer metrics backend not configured. ${firstLine(msg)}`,
       },
       contextPayload: { ok: false, phase: 'backend', service: args.service, containers: args.containers ?? [], error: msg },
       source_disclosure: { bytes_source: 'tsdb' },
+      actions: [
+        {
+          tool: 'log10x_doctor',
+          args: {},
+          reason:
+            'Run a health check to diagnose why the customer metrics backend is unreachable and confirm which components are live.',
+          role: 'recommended-next',
+        },
+      ],
     });
   }
 
@@ -1589,21 +1615,30 @@ function toEnvelopeActions(
 function notConfiguredEnvelope(
   phase: ConfigureEngineData['phase'],
   remediation: string,
-  service: string
+  service: string,
+  extraActions?: import('../lib/output-types.js').Action[]
 ): StructuredOutput {
+  const hint = firstLine(remediation);
+  // Auto-derive chain nudges from the hint text so error envelopes always
+  // carry an actionable breadcrumb for agent chains.
+  const actions: import('../lib/output-types.js').Action[] = [
+    ...(extraActions ?? []),
+    ...deriveActionsFromHint(hint),
+  ];
   return buildChassisErrorEnvelope({
     tool: 'log10x_configure_engine',
     err: {
       error_type: 'config_missing',
       retryable: false,
       suggested_backoff_ms: null,
-      hint: `configure_engine refused: ${firstLine(remediation)}`,
+      hint: `configure_engine refused: ${hint}`,
     },
     contextPayload: {
       ok: false, phase, service, containers: [], error: remediation,
-      human_summary: `configure_engine refused: ${firstLine(remediation)}`,
+      human_summary: `configure_engine refused: ${hint}`,
     } satisfies ConfigureEngineData,
     source_disclosure: {},
+    actions: actions.length > 0 ? actions : undefined,
   });
 }
 
@@ -1638,6 +1673,73 @@ function roundOne(n: number): number {
 }
 function roundPct(n: number): number {
   return Math.round(n * 1000) / 1000;
+}
+
+// ─── error-hint action derivation ────────────────────────────────────────────
+/**
+ * Returns true when the hint string signals a missing gitops repo —
+ * the canonical fix is log10x_configure_env (sets gitops.repo / GH_REPO).
+ */
+function isGitopsHint(hint: string): boolean {
+  return (
+    /gitops/i.test(hint) ||
+    /GH_REPO/i.test(hint) ||
+    /configure_env/i.test(hint)
+  );
+}
+
+/**
+ * Derives structured chain-next nudges from an error hint string.
+ *
+ * Mapping (aligned with defect-39 spec):
+ *   config_missing + gitops/GH_REPO mention  → log10x_configure_env
+ *   schema_invalid / "invalid" / "required"   → log10x_explain_mode + log10x_cost_options
+ *
+ * backend_unavailable is handled at its call site rather than here because
+ * it uses a distinct error_type and the log10x_doctor nudge is always
+ * applicable regardless of the hint wording.
+ */
+function deriveActionsFromHint(
+  hint: string
+): import('../lib/output-types.js').Action[] {
+  const acts: import('../lib/output-types.js').Action[] = [];
+
+  if (isGitopsHint(hint)) {
+    acts.push({
+      tool: 'log10x_configure_env',
+      args: {},
+      reason:
+        'Set gitops.repo in your envs.json (or LOG10X_GH_REPO env var) so configure_engine can write the per-pattern cap PR.',
+      role: 'recommended-next',
+    });
+    return acts; // gitops gap is the only blocker — don't pile on schema nudges
+  }
+
+  // Schema / input errors: surface explain_mode + cost_options so the agent
+  // can re-orient before retrying.
+  if (
+    /schema_invalid/i.test(hint) ||
+    /invalid/i.test(hint) ||
+    /required/i.test(hint) ||
+    /must be/i.test(hint)
+  ) {
+    acts.push({
+      tool: 'log10x_explain_mode',
+      args: {},
+      reason:
+        'Review the available action modes (pass/sample/compact/tier_down/offload/drop) and destination constraints before re-calling configure_engine.',
+      role: 'recommended-next',
+    });
+    acts.push({
+      tool: 'log10x_cost_options',
+      args: {},
+      reason:
+        'Inspect cost-option availability for the target destination to choose valid action_defaults.',
+      role: 'optional-followup',
+    });
+  }
+
+  return acts;
 }
 
 // Re-exports for sibling tools (estimate-savings, baseline) and tests.

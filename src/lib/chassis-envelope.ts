@@ -692,6 +692,13 @@ export function buildChassisErrorEnvelope(opts: {
    * carries traceable provenance. Defaults to {} for back-compat.
    */
   source_disclosure?: Partial<SourceDisclosure>;
+  /**
+   * Structured chain-next nudges. Error envelopes should populate this
+   * when an obvious remediation tool exists (e.g. config_missing →
+   * configure_env, backend_unavailable → doctor). Agents pick these up
+   * without parsing human_summary text.
+   */
+  actions?: Action[];
 }): ChassisEnvelope {
   const errHint = opts.err?.hint ?? 'Unknown error';
   const errType = opts.err?.error_type ?? 'unknown';
@@ -716,6 +723,7 @@ export function buildChassisErrorEnvelope(opts: {
     error: opts.err,
     telemetry: opts.telemetry,
     warnings: opts.warnings,
+    actions: opts.actions,
   });
 }
 
