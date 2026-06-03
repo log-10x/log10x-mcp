@@ -148,7 +148,8 @@ test('top view emits a drivers table with $/year column', () => {
 test('pattern view returns detail for a known identity', () => {
   const patterns = renderPocReport(input()).markdown;
   // Pick an identity that should appear in the report: extract from receiver YAML block.
-  const m = /- pattern: "([a-z0-9_]+)"/.exec(patterns);
+  // Identity may be quoted (yamlQuote uses JSON.stringify), so match both forms.
+  const m = /- pattern: "?([a-z0-9_]+)"?/.exec(patterns);
   assert.ok(m, 'should find at least one identity in full report');
   const identity = m[1];
   const out = renderPocPattern(input(), identity);

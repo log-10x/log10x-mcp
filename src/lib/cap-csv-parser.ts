@@ -1,9 +1,18 @@
 /**
- * Cap-CSV parser — pulls per-pattern action attribution out of the
+ * Rate cap-CSV parser — pulls per-pattern action attribution out of the
  * `<container>,<bytes>::<reason>:<action>` rows that
  * `log10x_configure_engine` writes to the customer gitops repo.
  *
- * Row format (set by configure-engine.ts:919-944):
+ * THIS PARSER IS FOR THE RATE CAP CSV ONLY:
+ *   File: `pipelines/run/receive/rate/caps.csv`
+ *   Header: `container,cap`
+ *   Format: numeric bytes-per-window, container-keyed (with optional
+ *           `pat:<hash>` per-pattern overrides)
+ *
+ * For the compact CSV (`pipelines/run/receive/compact/compact-cap.csv`),
+ * which uses a boolean per-pattern format, use `compact-csv-parser.ts`.
+ *
+ * Row format (set by configure-engine.ts):
  *   container,cap                                  ← header
  *   payment-service,2048::MCP default:compact      ← container default
  *   pat:abc123def,4096::keep audit floor:pass      ← per-pattern override

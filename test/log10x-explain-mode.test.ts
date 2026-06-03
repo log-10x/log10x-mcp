@@ -7,15 +7,16 @@
  *      must_ask_user, forbidden_next_actions, routes_to.
  *   3. must_render_verbatim: three labelled sections, NO pattern_hash anywhere.
  *   4. Dollar math: "X GB times $Y/GB = $Z" formula appears when rate is set.
- *   5. must_ask_user.options: Apply branch + Preview branch present.
+ *   5. must_ask_user.options: Apply branch + Preview branch present (except observe_only).
  *   6. forbidden_next_actions: all four required tools blocked.
- *   7. routes_to: apply routes to correct tool per mode group; preview always
- *      routes to log10x_preview_filter.
- *   8. actions[]: both branches emitted with role='alternative'.
- *   9. No pattern_hash in verbatim across all 7 modes.
- *  10. Engine modes route apply to log10x_configure_engine.
- *  11. siem_filter / forwarder_filter route apply to log10x_pattern_mitigate.
- *  12. engine_route_s3 routes apply to log10x_advise_retriever.
+ *   7. routes_to: apply routes to log10x_configure_engine for all non-observe modes;
+ *      observe_only has routes_to.apply === null.
+ *      preview always routes to log10x_preview_filter.
+ *   8. actions[]: branches emitted with role='alternative'.
+ *   9. No pattern_hash in verbatim across all 6 modes.
+ *  10. All non-observe modes route apply to log10x_configure_engine.
+ *  11. observe_only has no apply route.
+ *  12. New mode enum: drop/sample/compact/tier_down/offload/observe_only (6 entries).
  */
 
 import { test } from 'node:test';
@@ -40,10 +41,20 @@ async function runMode(mode: ExplainMode, service = 'payments'): Promise<{
   return { result, data };
 }
 
+// ── New enum shape ────────────────────────────────────────────────────────────────
+
+test('EXPLAIN_MODES has exactly 6 entries matching the outcome-first shape', () => {
+  assert.deepEqual(
+    [...EXPLAIN_MODES],
+    ['drop', 'sample', 'compact', 'tier_down', 'offload', 'observe_only'],
+    'EXPLAIN_MODES must match the 6-mode outcome-first enum',
+  );
+});
+
 // ── Schema compliance ────────────────────────────────────────────────────────────
 
 test('executeExplainMode returns a schema-valid StructuredOutput', async () => {
-  const { result } = await runMode('engine_in_path_drop');
+  const { result } = await runMode('drop');
   assert.ok(isStructuredOutput(result), 'expected a StructuredOutput envelope');
   StructuredOutputSchema.parse(result);
   assert.equal(result.tool, 'log10x_explain_mode');
@@ -54,9 +65,9 @@ test('executeExplainMode returns a schema-valid StructuredOutput', async () => {
 // ── Envelope data fields ─────────────────────────────────────────────────────────
 
 test('data carries all required ExplainModeEnvelope fields', async () => {
-  const { data } = await runMode('siem_filter', 'auth-service');
+  const { data } = await runMode('sample', 'auth-service');
   assert.equal(data.service, 'auth-service');
-  assert.equal(data.mode, 'siem_filter');
+  assert.equal(data.mode, 'sample');
   assert.ok('destination' in data, 'destination field must exist');
   assert.ok('service_bytes_per_month' in data, 'service_bytes_per_month must exist');
   assert.ok('service_cost_per_month_usd' in data, 'service_cost_per_month_usd must exist');
@@ -72,7 +83,7 @@ test('data carries all required ExplainModeEnvelope fields', async () => {
 // ── must_render_verbatim — three sections, NO pattern_hash ────────────────────────
 
 test('must_render_verbatim contains all three labelled sections', async () => {
-  const { data } = await runMode('engine_in_path_sample', 'api-gateway');
+  const { data } = await runMode('sample', 'api-gateway');
   const v = data.must_render_verbatim;
   assert.match(v, /What it does/i, 'section 1: "What it does" must appear');
   assert.match(v, /What you need/i, 'section 2: "What you need" must appear');
@@ -105,8 +116,7 @@ test('must_render_verbatim uses plain text — no markdown syntax', async () => 
 test('dollar math formula uses explicit "GB times $/GB" form when rate is available', async () => {
   // We cannot force TSDB bytes to be non-null in unit tests (no TSDB).
   // So we verify: when bytesPerMonth IS null, no dollar math formula appears.
-  // And when the spec formula appears in the text, it conforms to the expected pattern.
-  const { data } = await runMode('engine_in_path_drop');
+  const { data } = await runMode('drop');
   const v = data.must_render_verbatim;
   if (v.includes('GB times')) {
     // If dollar math is present, it must show "X GB times $Y/GB = $Z" pattern
@@ -127,29 +137,44 @@ test('dollar math formula uses explicit "GB times $/GB" form when rate is availa
 
 // ── must_ask_user ─────────────────────────────────────────────────────────────────
 
-test('must_ask_user has a question and exactly 2 options (Apply + Preview)', async () => {
-  const { data } = await runMode('siem_tier_down');
-  assert.ok(
-    typeof data.must_ask_user.question === 'string' && data.must_ask_user.question.length > 0,
-    'must_ask_user.question must be non-empty',
-  );
+test('must_ask_user for non-observe modes has a question and exactly 2 options (Apply + Preview)', async () => {
+  for (const mode of EXPLAIN_MODES.filter((m) => m !== 'observe_only')) {
+    const { data } = await runMode(mode);
+    assert.ok(
+      typeof data.must_ask_user.question === 'string' && data.must_ask_user.question.length > 0,
+      `mode ${mode}: must_ask_user.question must be non-empty`,
+    );
+    assert.equal(
+      data.must_ask_user.options.length,
+      2,
+      `mode ${mode}: must_ask_user must have exactly 2 options`,
+    );
+    const opts = data.must_ask_user.options;
+    assert.ok(opts.some((o) => o.toLowerCase().includes('apply')), `mode ${mode}: option 1 must be Apply`);
+    assert.ok(
+      opts.some((o) => o.includes('log10x_preview_filter')),
+      `mode ${mode}: option 2 must reference log10x_preview_filter`,
+    );
+  }
+});
+
+test('observe_only has no apply option — must_ask_user has 1 option (Preview only)', async () => {
+  const { data } = await runMode('observe_only');
   assert.equal(
     data.must_ask_user.options.length,
-    2,
-    'must_ask_user must have exactly 2 options',
+    1,
+    'observe_only must have exactly 1 option (Preview)',
   );
-  const opts = data.must_ask_user.options;
-  assert.ok(opts.some((o) => o.toLowerCase().includes('apply')), 'option 1 must be Apply');
   assert.ok(
-    opts.some((o) => o.includes('log10x_preview_filter')),
-    'option 2 must reference log10x_preview_filter',
+    data.must_ask_user.options[0].includes('log10x_preview_filter'),
+    'observe_only option must reference log10x_preview_filter',
   );
 });
 
 // ── forbidden_next_actions ────────────────────────────────────────────────────────
 
 test('forbidden_next_actions blocks all four required tools', async () => {
-  const { data } = await runMode('engine_in_path_sample');
+  const { data } = await runMode('sample');
   const required = [
     'log10x_configure_engine',
     'log10x_pattern_mitigate',
@@ -164,41 +189,29 @@ test('forbidden_next_actions blocks all four required tools', async () => {
   }
 });
 
-// ── routes_to routing per mode group ─────────────────────────────────────────────
+// ── routes_to routing per mode ─────────────────────────────────────────────────────
 
-test('engine_* modes route apply to log10x_configure_engine', async () => {
-  const engineModes: ExplainMode[] = [
-    'engine_in_path_drop',
-    'engine_in_path_sample',
-    'siem_tier_down',
-  ];
-  for (const mode of engineModes) {
+test('all non-observe_only modes route apply to log10x_configure_engine', async () => {
+  for (const mode of EXPLAIN_MODES.filter((m) => m !== 'observe_only')) {
     const { data } = await runMode(mode);
+    assert.ok(
+      data.routes_to.apply !== null,
+      `mode ${mode} must have a non-null apply route`,
+    );
     assert.equal(
-      data.routes_to.apply.tool,
+      data.routes_to.apply!.tool,
       'log10x_configure_engine',
       `mode ${mode} apply must route to log10x_configure_engine`,
     );
   }
 });
 
-test('siem_filter and forwarder_filter route apply to log10x_pattern_mitigate', async () => {
-  for (const mode of ['siem_filter', 'forwarder_filter'] as ExplainMode[]) {
-    const { data } = await runMode(mode);
-    assert.equal(
-      data.routes_to.apply.tool,
-      'log10x_pattern_mitigate',
-      `mode ${mode} apply must route to log10x_pattern_mitigate`,
-    );
-  }
-});
-
-test('engine_route_s3 routes apply to log10x_advise_retriever', async () => {
-  const { data } = await runMode('engine_route_s3');
+test('observe_only has no apply route (routes_to.apply is null)', async () => {
+  const { data } = await runMode('observe_only');
   assert.equal(
-    data.routes_to.apply.tool,
-    'log10x_advise_retriever',
-    'engine_route_s3 apply must route to log10x_advise_retriever',
+    data.routes_to.apply,
+    null,
+    'observe_only routes_to.apply must be null',
   );
 });
 
@@ -225,24 +238,30 @@ test('all modes route preview to log10x_preview_filter with service and mode', a
 
 // ── actions[] both branches with role='alternative' ──────────────────────────────
 
-test('actions[] contains both apply and preview branches as alternatives', async () => {
-  const result = await executeExplainMode({ service: 'payments', mode: 'engine_in_path_drop' });
+test('actions[] contains both apply and preview branches as alternatives (non-observe mode)', async () => {
+  const result = await executeExplainMode({ service: 'payments', mode: 'drop' });
   assert.ok(Array.isArray(result.actions), 'actions must be an array');
-  assert.equal(result.actions.length, 2, 'exactly 2 actions (apply + preview)');
+  assert.equal(result.actions.length, 2, 'exactly 2 actions (apply + preview) for non-observe mode');
   for (const action of result.actions) {
     assert.equal(action.role, 'alternative', 'every action must have role="alternative"');
     assert.ok(action.tool && action.tool.length > 0, 'every action must have a tool name');
   }
   const tools = result.actions.map((a) => a.tool);
-  // Apply branch present
   assert.ok(tools.includes('log10x_configure_engine'), 'apply action must be in actions[]');
-  // Preview branch present
   assert.ok(tools.includes('log10x_preview_filter'), 'preview action must be in actions[]');
 });
 
-// ── All 7 modes produce valid envelopes ───────────────────────────────────────────
+test('actions[] for observe_only contains only the preview branch', async () => {
+  const result = await executeExplainMode({ service: 'payments', mode: 'observe_only' });
+  assert.ok(Array.isArray(result.actions), 'actions must be an array');
+  assert.equal(result.actions.length, 1, 'observe_only must have exactly 1 action (preview only)');
+  assert.equal(result.actions[0].tool, 'log10x_preview_filter');
+  assert.equal(result.actions[0].role, 'alternative');
+});
 
-test('all 7 EXPLAIN_MODES produce a valid StructuredOutput with all required fields', async () => {
+// ── All 6 modes produce valid envelopes ───────────────────────────────────────────
+
+test('all 6 EXPLAIN_MODES produce a valid StructuredOutput with all required fields', async () => {
   for (const mode of EXPLAIN_MODES) {
     const result = await executeExplainMode({ service: 'orders', mode });
     assert.ok(isStructuredOutput(result), `mode ${mode}: expected StructuredOutput`);

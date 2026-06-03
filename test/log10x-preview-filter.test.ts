@@ -25,7 +25,7 @@ function asEnvelope(out: StructuredOutput): PreviewFilterEnvelope {
 // ─── envelope shape ───────────────────────────────────────────────────────────
 
 test('preview_filter: envelope has required top-level fields', async () => {
-  const out = await executePreviewFilter({ service: 'cart', mode: 'engine_in_path_drop' });
+  const out = await executePreviewFilter({ service: 'cart', mode: 'drop' });
   assert.ok(typeof out === 'object' && out !== null, 'expected envelope object');
   assert.ok('tool' in out, 'missing tool field');
   assert.ok('data' in out, 'missing data field');
@@ -35,9 +35,7 @@ test('preview_filter: envelope has required top-level fields', async () => {
   assert.equal(typeof d.service, 'string');
   assert.ok(
     [
-      'report_only', 'siem_filter', 'forwarder_filter',
-      'engine_in_path_drop', 'engine_in_path_sample',
-      'engine_route_s3', 'siem_tier_down',
+      'drop', 'sample', 'compact', 'tier_down', 'offload', 'observe_only',
     ].includes(d.mode),
     `unexpected mode: ${d.mode}`,
   );
@@ -52,7 +50,7 @@ test('preview_filter: envelope has required top-level fields', async () => {
 });
 
 test('preview_filter: tool field in envelope is log10x_preview_filter', async () => {
-  const out = await executePreviewFilter({ service: 'frontend', mode: 'siem_filter' });
+  const out = await executePreviewFilter({ service: 'frontend', mode: 'sample' });
   assert.equal(out.tool, 'log10x_preview_filter');
 });
 
@@ -63,7 +61,7 @@ test('preview_filter: must_render_verbatim is NOT a markdown table (no pipe char
   // patterns were present the table must have no markdown pipe separators.
   // We validate the contract on the renderer directly by inspecting the
   // verbatim string for absence of Markdown table syntax.
-  const out = await executePreviewFilter({ service: 'checkout', mode: 'forwarder_filter' });
+  const out = await executePreviewFilter({ service: 'checkout', mode: 'drop' });
   const d = asEnvelope(out);
   const verbatim = d.must_render_verbatim;
 
@@ -73,7 +71,7 @@ test('preview_filter: must_render_verbatim is NOT a markdown table (no pipe char
 });
 
 test('preview_filter: must_render_verbatim has no markdown separator line (no ---)', async () => {
-  const out = await executePreviewFilter({ service: 'checkout', mode: 'forwarder_filter', top_n: 5 });
+  const out = await executePreviewFilter({ service: 'checkout', mode: 'drop', top_n: 5 });
   const d = asEnvelope(out);
   const lines = d.must_render_verbatim.split('\n');
 
@@ -103,14 +101,14 @@ test('preview_filter: CSV path follows /tmp/log10x-preview-<mode>-<service> form
   // We test the formula by running with known inputs and asserting the path
   // structure if non-null.
   const service = 'my-service-01';
-  const mode = 'engine_in_path_sample';
+  const mode = 'sample';
   const out = await executePreviewFilter({ service, mode });
   const d = asEnvelope(out);
 
   if (d.csv_path !== null) {
     assert.match(
       d.csv_path,
-      /^\/tmp\/log10x-preview-engine_in_path_sample-my.service.01\.csv$/,
+      /^\/tmp\/log10x-preview-sample-my.service.01\.csv$/,
       `CSV path does not match expected formula. Got: ${d.csv_path}`,
     );
   }
@@ -121,7 +119,7 @@ test('preview_filter: CSV path follows /tmp/log10x-preview-<mode>-<service> form
 });
 
 test('preview_filter: CSV path is deterministic (same inputs → same path)', async () => {
-  const args = { service: 'auth-service', mode: 'siem_tier_down' } as const;
+  const args = { service: 'auth-service', mode: 'tier_down' } as const;
   const out1 = await executePreviewFilter(args);
   const out2 = await executePreviewFilter(args);
   assert.equal(
@@ -134,7 +132,7 @@ test('preview_filter: CSV path is deterministic (same inputs → same path)', as
 // ─── sparkline column ─────────────────────────────────────────────────────────
 
 test('preview_filter: every pattern row has a trend_sparkline of exactly 8 chars', async () => {
-  const out = await executePreviewFilter({ service: 'orders', mode: 'engine_in_path_drop', top_n: 20 });
+  const out = await executePreviewFilter({ service: 'orders', mode: 'drop', top_n: 20 });
   const d = asEnvelope(out);
 
   for (const row of d.patterns) {
@@ -148,7 +146,7 @@ test('preview_filter: every pattern row has a trend_sparkline of exactly 8 chars
 });
 
 test('preview_filter: when patterns present, must_render_verbatim contains sparkline column header', async () => {
-  const out = await executePreviewFilter({ service: 'orders', mode: 'engine_in_path_drop' });
+  const out = await executePreviewFilter({ service: 'orders', mode: 'drop' });
   const d = asEnvelope(out);
   if (d.patterns.length === 0) {
     // No live backend — skip content assertion
@@ -163,7 +161,7 @@ test('preview_filter: when patterns present, must_render_verbatim contains spark
 // ─── must_ask_user shape ──────────────────────────────────────────────────────
 
 test('preview_filter: must_ask_user has question string and 3 options', async () => {
-  const out = await executePreviewFilter({ service: 'inventory', mode: 'report_only' });
+  const out = await executePreviewFilter({ service: 'inventory', mode: 'observe_only' });
   const d = asEnvelope(out);
 
   assert.equal(typeof d.must_ask_user.question, 'string');
@@ -173,7 +171,7 @@ test('preview_filter: must_ask_user has question string and 3 options', async ()
 });
 
 test('preview_filter: must_ask_user options include drill, apply, and mode options', async () => {
-  const out = await executePreviewFilter({ service: 'inventory', mode: 'report_only' });
+  const out = await executePreviewFilter({ service: 'inventory', mode: 'observe_only' });
   const d = asEnvelope(out);
   const options = d.must_ask_user.options.map((o: string) => o.toLowerCase());
 
@@ -189,7 +187,7 @@ test('preview_filter: must_ask_user options include drill, apply, and mode optio
 // ─── forbidden_next_actions ───────────────────────────────────────────────────
 
 test('preview_filter: forbidden_next_actions locks the apply tools', async () => {
-  const out = await executePreviewFilter({ service: 'shipping', mode: 'engine_in_path_drop' });
+  const out = await executePreviewFilter({ service: 'shipping', mode: 'drop' });
   const d = asEnvelope(out);
 
   const forbidden = d.forbidden_next_actions;
@@ -204,7 +202,7 @@ test('preview_filter: forbidden_next_actions locks the apply tools', async () =>
 test('preview_filter: no-signal (no backend) produces text message not table', async () => {
   // Without a live TSDB, patterns will be empty.
   // The verbatim output must be a descriptive message, not a table header.
-  const out = await executePreviewFilter({ service: 'nonexistent-svc', mode: 'siem_filter' });
+  const out = await executePreviewFilter({ service: 'nonexistent-svc', mode: 'sample' });
   const d = asEnvelope(out);
 
   if (d.patterns.length === 0) {
@@ -222,7 +220,7 @@ test('preview_filter: no-signal (no backend) produces text message not table', a
 // ─── actions array ────────────────────────────────────────────────────────────
 
 test('preview_filter: actions[] entries reference log10x_pattern_detail', async () => {
-  const out = await executePreviewFilter({ service: 'cart', mode: 'engine_in_path_drop' });
+  const out = await executePreviewFilter({ service: 'cart', mode: 'drop' });
   const actions = (out as StructuredOutput & { actions?: Array<{ tool: string; role: string }> }).actions ?? [];
 
   for (const action of actions) {
@@ -232,7 +230,7 @@ test('preview_filter: actions[] entries reference log10x_pattern_detail', async 
 });
 
 test('preview_filter: actions[] count matches patterns count', async () => {
-  const out = await executePreviewFilter({ service: 'cart', mode: 'engine_in_path_drop', top_n: 10 });
+  const out = await executePreviewFilter({ service: 'cart', mode: 'drop', top_n: 10 });
   const d = asEnvelope(out);
   const actions = (out as StructuredOutput & { actions?: unknown[] }).actions ?? [];
   assert.equal(actions.length, d.patterns.length, 'one action per pattern row');
@@ -242,9 +240,7 @@ test('preview_filter: actions[] count matches patterns count', async () => {
 
 test('preview_filter: accepts all valid mode values without throwing', async () => {
   const modes = [
-    'report_only', 'siem_filter', 'forwarder_filter',
-    'engine_in_path_drop', 'engine_in_path_sample',
-    'engine_route_s3', 'siem_tier_down',
+    'drop', 'sample', 'compact', 'tier_down', 'offload', 'observe_only',
   ] as const;
 
   for (const mode of modes) {

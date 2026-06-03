@@ -435,7 +435,7 @@ function buildCompactReceiverGitopsExplainer(opts: { optimize: boolean }): Gitop
       'You will not be using the receiver app at all (this section is receiver-only).',
     ],
     repoLayout: [
-      { path: 'pipelines/run/receive/compact/compact-cap.csv', comment: 'MCP edits this — per-container CSV; in-place writes hot-reload (no restart)' },
+      { path: 'pipelines/run/receive/compact/compact-cap.csv', comment: 'MCP edits this — per-pattern CSV (pattern_hash key, boolean true|false value); in-place writes hot-reload (no restart)' },
       { path: 'pipelines/run/receive/compact/compact-object-cap.js', comment: 'predicate logic — JS change → pipeline restart (rarely needed; CSV covers most cases)' },
     ],
     envVars: [
@@ -444,8 +444,7 @@ function buildCompactReceiverGitopsExplainer(opts: { optimize: boolean }): Gitop
       { name: 'GH_TOKEN', value: '<github PAT>', required: true, note: 'PAT with Contents: Read scope; store as a k8s Secret + reference via valueFrom' },
       { name: 'GH_BRANCH', value: 'main', required: false, note: 'branch to pull from' },
       { name: 'GH_SYNC_INTERVAL', value: '30s', required: false, note: 'engine re-fetches the repo this often' },
-      { name: 'compactReceiverLookupFile', value: 'pipelines/run/receive/compact/compact-cap.csv', required: true, note: 'must match the path inside your GitOps repo (env var name kept for engine compatibility; content is now per-container)' },
-      { name: 'compactReceiverContainerField', value: 'k8s_container', required: false, note: 'event field whose value scopes the cap-file lookup; defaults to the k8s container name' },
+      { name: 'compactReceiverLookupFile', value: 'pipelines/run/receive/compact/compact-cap.csv', required: true, note: 'must match the path inside your GitOps repo; rows are per-pattern (pattern_hash key), boolean true|false value' },
       { name: 'compactReceiverDefault', value: 'false', required: false, note: '`false`: cap-file entries opt INTO compaction. `true`: cap-file entries opt OUT (use with the chart `optimize` flag)' },
     ],
     mcpHandoff: {

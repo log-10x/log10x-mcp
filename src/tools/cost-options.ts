@@ -1,10 +1,15 @@
 /**
- * log10x_cost_options — the 7-mode action menu.
+ * log10x_cost_options — the outcome-first action menu.
  *
  * Called after the user picks option 1 ("Show me what cutting costs would
- * look like") from log10x_start. Returns a structured menu of the seven
+ * look like") from log10x_start. Returns a structured menu of the six
  * enforcement modes (drop / sample / compact / tier_down / offload /
- * manual / pass), each gated by the customer's detected capabilities.
+ * observe_only), each gated by the customer's detected capabilities.
+ *
+ * At Receiver tier: 6 modes.
+ * At Reporter-only or Dev tier: 2-item collapsed menu (observe_only +
+ * install_receiver placeholder) with prose explaining that the full
+ * 6-mode menu requires the Receiver in-path.
  *
  * Three compliance levers (same shape as log10x_start):
  *   must_render_verbatim   — pre-rendered markdown the agent surfaces as-is.
@@ -48,8 +53,8 @@ export type CostOptionId =
   | 'compact'
   | 'tier_down'
   | 'offload'
-  | 'manual'
-  | 'pass';
+  | 'observe_only'
+  | 'install_receiver';
 
 export interface CostOptionItem {
   id: CostOptionId;
@@ -165,6 +170,8 @@ async function probeRetriever(): Promise<boolean> {
   }
 }
 
+export type CustomerTier = 'dev' | 'reporter' | 'receiver' | 'retriever';
+
 function buildCapabilities(args: {
   gatewayOk: boolean;
   reporterTier: 'edge' | 'cloud' | null;
@@ -172,8 +179,8 @@ function buildCapabilities(args: {
   receiverUncertain: boolean;
   retrieverOk: boolean;
   siemDetected: string | null;
-}): CapabilitySummary {
-  const tier =
+}): CapabilitySummary & { _tier: CustomerTier } {
+  const tier: CustomerTier =
     args.retrieverOk
       ? 'retriever'
       : args.receiverInPath
@@ -192,17 +199,19 @@ function buildCapabilities(args: {
     siem_query_available: args.siemDetected !== null,
     receiver_discrimination_uncertain:
       args.receiverUncertain && tier !== 'dev',
+    _tier: tier,
   };
 }
 
 // ─── Mode builder ──────────────────────────────────────────────────────────────
 
 function buildModes(
-  caps: CapabilitySummary,
+  caps: CapabilitySummary & { _tier?: CustomerTier },
   siemDetected: string | null,
   args: { target_percent?: number; service?: string }
 ): CostOptionItem[] {
   const { target_percent, service } = args;
+  const tier: CustomerTier = caps._tier ?? 'dev';
 
   const sharedArgs = (defaultAction: string): Record<string, unknown> => {
     const out: Record<string, unknown> = { default_action: defaultAction };
@@ -211,6 +220,33 @@ function buildModes(
     return out;
   };
 
+  // At dev / reporter tier, collapse to 2-item menu.
+  if (tier === 'dev' || tier === 'reporter') {
+    return [
+      {
+        id: 'observe_only',
+        label: 'Observe only — 10x marks patterns in metrics; nothing is dropped. Use this to baseline volume before committing to a mode.',
+        description:
+          'All events pass unchanged. Pattern metrics flow to TSDB so cost attribution is visible.',
+        who_enforces: 'engine',
+        applicable: true,
+        what_survives: 'All events pass unchanged; pattern metrics flow to TSDB.',
+        routes_to: { tool: 'log10x_estimate_savings', args: sharedArgs('pass') },
+      },
+      {
+        id: 'install_receiver',
+        label: 'Install the 10x Receiver — unlocks drop / sample / compact / tier_down / offload.',
+        description:
+          'Drop / sample / compact / tier_down / offload require the Receiver in-path. Install it first to unlock the rest.',
+        who_enforces: 'engine',
+        applicable: true,
+        what_survives: 'N/A — this option routes to the install wizard.',
+        routes_to: { tool: 'log10x_advise_install', args: {} },
+      },
+    ];
+  }
+
+  // Receiver / Retriever tier — full 6-mode menu.
   const compactApplicable =
     caps.compact_installable && siemSupportsCompact(siemDetected);
   const compactGatedReason = !caps.compact_installable
@@ -227,10 +263,6 @@ function buildModes(
     : siemDetected !== 'cloudwatch' && siemDetected !== 'datadog'
       ? `tier_down maps to a concrete billing reduction only on Datadog (Flex Logs) and CloudWatch (Infrequent Access). Detected SIEM: ${siemDetected ?? 'unknown'}.`
       : undefined;
-
-  const manualArgs: Record<string, unknown> = {};
-  if (service !== undefined) manualArgs.service = service;
-  if (target_percent !== undefined) manualArgs.target_percent = target_percent;
 
   return [
     {
@@ -296,19 +328,8 @@ function buildModes(
       routes_to: { tool: 'log10x_estimate_savings', args: sharedArgs('offload') },
     },
     {
-      id: 'manual',
-      label: 'Manual — engine marks patterns; you or your forwarder/SIEM applies the decision.',
-      description:
-        'Engine marks patterns with isDropped in metrics but does not enforce. You apply the exclusion or config on your own schedule.',
-      who_enforces: 'customer',
-      applicable: true,
-      what_survives:
-        'Up to you — engine marks patterns but does not enforce. Your forwarder or SIEM applies the decision.',
-      routes_to: { tool: 'log10x_manual_options', args: manualArgs },
-    },
-    {
-      id: 'pass',
-      label: 'Pass — no action. Useful to get the savings estimate as a null baseline.',
+      id: 'observe_only',
+      label: 'Observe only — 10x marks patterns in metrics; nothing is dropped. Use this to baseline volume before committing to a mode.',
       description:
         'All events pass unchanged. Run this to get the baseline volume before committing to any mode.',
       who_enforces: 'engine',
@@ -324,11 +345,14 @@ function buildModes(
 
 function renderVerbatim(
   modes: CostOptionItem[],
-  siemDetected: string | null
+  siemDetected: string | null,
+  tier?: CustomerTier
 ): string {
   const siemLine = siemDetected
     ? `SIEM detected: \`${siemDetected}\`.`
     : 'No SIEM credentials detected — destinations will need to be specified when you pick a mode.';
+
+  const isCollapsed = tier === 'dev' || tier === 'reporter';
 
   const modeLines = modes
     .map((m, i) => {
@@ -336,6 +360,20 @@ function renderVerbatim(
       return `  ${i + 1}. **${m.id}** — ${m.label}${gate}`;
     })
     .join('\n');
+
+  if (isCollapsed) {
+    return [
+      `### How do you want to handle the cost?`,
+      ``,
+      `**${siemLine}**`,
+      ``,
+      `Drop / sample / tier_down / offload / compact require the Receiver in-path. Install it first to unlock the rest.`,
+      ``,
+      modeLines,
+      ``,
+      `_(Pick a number.)_`,
+    ].join('\n');
+  }
 
   return [
     `### How do you want to handle the cost?`,
@@ -346,7 +384,7 @@ function renderVerbatim(
     ``,
     modeLines,
     ``,
-    `_(Pick a number. After you pick, I'll run the savings estimate — or show you the manual sub-paths for option 6.)_`,
+    `_(Pick a number. After you pick, I'll run the savings estimate.)_`,
   ].join('\n');
 }
 
@@ -357,7 +395,6 @@ function buildCostOptionsForbidden(): string[] {
     'log10x_estimate_savings',
     'log10x_configure_engine',
     'log10x_pattern_mitigate',
-    'log10x_manual_options',
   ];
 }
 
@@ -411,8 +448,9 @@ export async function executeCostOptions(args: {
     siemDetected,
   });
 
+  const tier: CustomerTier = caps._tier;
   const modes = buildModes(caps, siemDetected, args);
-  const verbatim = renderVerbatim(modes, siemDetected);
+  const verbatim = renderVerbatim(modes, siemDetected, tier);
 
   const mustAskUser: MustAskUser = {
     question:
@@ -422,17 +460,20 @@ export async function executeCostOptions(args: {
 
   const forbidden = buildCostOptionsForbidden();
 
+  // Strip the internal _tier field before exposing in the envelope.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const { _tier: _strippedTier, ...capsSummary } = caps;
   const envelope: CostOptionsEnvelope = {
     modes,
     siem_detected: siemDetected,
-    capability_summary: caps,
+    capability_summary: capsSummary,
     must_render_verbatim: verbatim,
     must_ask_user: mustAskUser,
     forbidden_next_actions: forbidden,
   };
 
   const applicableCount = modes.filter((m) => m.applicable).length;
-  const headline = `Cost options: ${applicableCount} of ${modes.length} modes available. Awaiting user pick before routing to estimate_savings or manual_options.`;
+  const headline = `Cost options (${tier} tier): ${applicableCount} of ${modes.length} modes available. Awaiting user pick before routing.`;
 
   return buildEnvelope({
     tool: 'log10x_cost_options',
