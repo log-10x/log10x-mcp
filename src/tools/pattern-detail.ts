@@ -29,6 +29,7 @@ import { parsePrometheusValue } from '../lib/cost.js';
 import { lineChart } from '../lib/line-chart.js';
 import { fmtBytes } from '../lib/format.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { oneLine } from '../lib/siem/sample.js';
 
 // ─── Schema ───────────────────────────────────────────────────────────────────
 
@@ -226,10 +227,7 @@ async function fetchSampleEvents(
     );
     const events = results.get(hash) ?? [];
     return {
-      events: events.slice(0, 5).map((e) => {
-        const line = typeof e === 'string' ? e : ((e as unknown) as Record<string, string>)?.message ?? String(e);
-        return line.slice(0, 120);
-      }),
+      events: events.slice(0, 5).map((e) => oneLine(e.raw, 120)),
       siemKind: 'resolved',
     };
   } catch {

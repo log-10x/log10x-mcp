@@ -29,7 +29,7 @@ export interface HashSample {
  * (or a JSON string of it). The `.log`/`.message` field is the actual
  * log; the wrapper is transport metadata. Unwrapping is more faithful
  * to "what is this pattern", not less. One level only, defensive. */
-function oneLine(ev: unknown, max = 220): string {
+export function oneLine(ev: unknown, max = 220): string {
   const pickStr = (v: unknown): string => {
     if (typeof v === 'string') return v;
     if (v && typeof v === 'object') {
