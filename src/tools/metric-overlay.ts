@@ -51,7 +51,13 @@ export const metricOverlaySchema = {
     .describe('The anchor identity. For `log10x_pattern`: the pattern symbol_message (e.g. `error_processing_payment_$`). For `customer_metric`: a PromQL expression (e.g. `apm_request_duration_p99{service="payments"}`).'),
   candidate: z
     .string()
-    .describe('The candidate metric to overlay against the anchor. Must be a customer-side PromQL expression that returns a single series (use `sum(...)` if needed to collapse multi-series results).'),
+    .optional()
+    .describe('The candidate metric to overlay against the anchor. Must be a customer-side PromQL expression that returns a single series. Alias of `candidates[0]` — pass either form (sibling tools metrics_that_moved and rank_by_shape_similarity use `candidates` array; this tool accepts both for consistency).'),
+  candidates: z
+    .array(z.string())
+    .min(1)
+    .optional()
+    .describe('Candidates array. Accepted for parity with metrics_that_moved + rank_by_shape_similarity. Only the first element is overlaid (metric_overlay is single-candidate by design — use rank_by_shape_similarity to rank N first, then overlay the winner).'),
   window: z
     .string()
     .default('1h')
@@ -135,10 +141,11 @@ interface MetricOverlaySummary {
 }
 
 export async function executeMetricOverlay(
-  args: {
+  argsInput: {
     anchor_type: 'log10x_pattern' | 'customer_metric';
     anchor: string;
-    candidate: string;
+    candidate?: string;
+    candidates?: string[];
     window?: string;
     timeRange?: string;
     step?: string;
@@ -149,6 +156,11 @@ export async function executeMetricOverlay(
   },
   env: EnvConfig,
 ): Promise<StructuredOutput> {
+  const candidateNormalized = argsInput.candidate ?? argsInput.candidates?.[0];
+  if (!candidateNormalized) {
+    throw new Error('metric_overlay requires `candidate` (string) or `candidates` (string[]) with at least one entry.');
+  }
+  const args = { ...argsInput, candidate: candidateNormalized };
   const window = args.window ?? args.timeRange ?? '1h';
   const stepStr = args.step ?? '30s';
   const stepSeconds = parseStep(stepStr);
