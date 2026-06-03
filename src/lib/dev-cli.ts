@@ -163,13 +163,23 @@ async function runAppsMcpFileViaLocalBinary(
   }
   const cliVersion = await tryGetVersion(binary);
   const configPath = resolveConfigPath('LOG10X_MCP_FILE_CONFIG_PATH', 'tenx-mcp-file.config.yaml');
+  const { config: tenxConfig, modules: tenxModules } = resolveInstallPaths();
+  const includePaths = [
+    tenxConfig,
+    join(tenxConfig, 'pipelines'),
+    tenxModules,
+    join(tenxModules, 'pipelines'),
+    join(tenxModules, 'apps'),
+  ].join(';');
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     LOG10X_MCP_RUNTIME_NAME: runtimeName,
+    TENX_INCLUDE_PATHS: includePaths,
+    LOG10X_MCP_OUTPUT_DIR: '/tmp/log10x-mcp-pull/' + runtimeName,
   };
   await runCommandWithStdin(
     binary,
-    [configPath],
+    ['@' + configPath],
     rawLogText,
     { env, timeoutMs: 300_000, configPath },
   );
@@ -188,19 +198,29 @@ async function runAppsMcpFileViaDocker(
   const image = process.env.LOG10X_TENX_IMAGE || 'log10x/pipeline-10x:latest';
   const hostConfigPath = resolveConfigPath('LOG10X_MCP_FILE_CONFIG_PATH', 'tenx-mcp-file.config.yaml');
   const containerConfigPath = '/mcp/config/tenx-mcp-file.config.yaml';
+  const hostOutputDir = `/tmp/log10x-mcp-pull/${runtimeName}`;
+  const containerOutputDir = hostOutputDir;
+  // Write the raw log text to a temp file so the file-input config can read it.
+  // The container mounts this file read-only at /mcp/input/events.log.
+  const hostInputFile = join(hostOutputDir, 'input.log');
+  await fsWriteFile(hostInputFile, rawLogText, 'utf8');
+  const containerInputFile = '/mcp/input/events.log';
   // Mount the host's /tmp/log10x-mcp-pull/<name> into the container so the
   // engine's file writes land where the caller can read them.
   // Also mount the packaged config so the container uses the resolved path,
   // not the @apps/mcp-file macro which requires TENX_HOME inside the container.
   const args = [
-    'run', '--rm', '-i',
+    'run', '--rm',
     '-e', `LOG10X_MCP_RUNTIME_NAME=${runtimeName}`,
-    '-v', `/tmp/log10x-mcp-pull/${runtimeName}:/tmp/log10x-mcp-pull/${runtimeName}`,
+    '-e', `LOG10X_MCP_OUTPUT_DIR=${containerOutputDir}`,
+    '-e', `LOG10X_MCP_INPUT_PATH=${containerInputFile}`,
+    '-v', `${hostOutputDir}:${containerOutputDir}`,
     '-v', `${hostConfigPath}:${containerConfigPath}:ro`,
+    '-v', `${hostInputFile}:${containerInputFile}:ro`,
     image,
-    containerConfigPath,
+    '@' + containerConfigPath,
   ];
-  await runCommandWithStdin('docker', args, rawLogText, { timeoutMs: 300_000, configPath: hostConfigPath });
+  await runCommandWithStdin('docker', args, null, { timeoutMs: 300_000, configPath: hostConfigPath });
   return { cliVersion: undefined };
 }
 
