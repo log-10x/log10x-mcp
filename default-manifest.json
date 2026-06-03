@@ -554,6 +554,17 @@
         "openWorldHint": false
       },
       "category": "detect"
+    },
+    "log10x_setup_recurring": {
+      "title": "Set up recurring cost-reduction",
+      "description": "Conversational wizard that configures a recurring autonomous cost-reduction agent. Walks the user through seven decisions — target services, savings target (%), tick schedule, scheduler runtime, gitops config repo, exception services, and final confirm — then emits two ready-to-commit artifacts: `policy.yaml` (the declarative policy the tick CLI consumes) and a scheduler manifest (Kubernetes CronJob YAML, GitHub Actions workflow, or crontab entry + wrapper script depending on the chosen scheduler). Each call merges the latest answer into the wizard session and either asks the next missing question or emits the artifacts once all answers are present. Re-invoke with the same `session_id` on every subsequent turn; sessions live 30 minutes. To skip interactive Q&A, supply all fields (`target_services`, `target_percent`, `schedule`, `scheduler`, `config_plane`, `confirm: true`) in a single call. Optional overrides: `exceptions` (services never touched), `min_delta_pp` (minimum savings delta before committing a new CSV, default 2pp), `env_id`, `namespace`, `secret_name`. Apply instructions for the chosen scheduler are in `data.apply_instructions`. After the first tick runs, call `log10x_commitment_report` to verify realized savings.",
+      "annotations": {
+        "title": "Set up recurring cost-reduction",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "category": "install"
     }
   }
 }

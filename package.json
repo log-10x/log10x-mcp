@@ -5,7 +5,8 @@
   "type": "module",
   "main": "build/index.js",
   "bin": {
-    "log10x-mcp": "build/index.js"
+    "log10x-mcp": "build/index.js",
+    "tenx-recur": "build/bin/tenx-recur.js"
   },
   "files": [
     "build",
@@ -14,7 +15,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc && mkdir -p build/vendor/promql-parser && cp -r vendor/promql-parser/promql.js vendor/promql-parser/package.json build/vendor/promql-parser/ && chmod +x build/index.js",
+    "build": "tsc && mkdir -p build/vendor/promql-parser && cp -r vendor/promql-parser/promql.js vendor/promql-parser/package.json build/vendor/promql-parser/ && chmod +x build/index.js && chmod +x build/bin/tenx-recur.js",
     "start": "node build/index.js",
     "dev": "tsc --watch",
     "prepublishOnly": "npm run build",

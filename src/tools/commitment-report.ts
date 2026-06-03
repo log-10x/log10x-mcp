@@ -60,6 +60,12 @@ import { fmtDisclosedDollar } from '../lib/format.js';
 import { DEFAULT_ANALYZER_COST_PER_GB, SIEM_DISPLAY_NAMES, type SiemId } from '../lib/siem/pricing.js';
 import { loadEnvironments, resolveEnv } from '../lib/environments.js';
 import { getOffloadStatusBatch } from '../lib/offload-status.js';
+import {
+  readHistorySince,
+  readRecentHistory,
+  type RecurRun,
+} from '../lib/recur-history-reader.js';
+import { parseActionIntent } from '../lib/action-intent-parser.js';
 
 // ─── input schema ────────────────────────────────────────────────────
 
@@ -81,10 +87,22 @@ export const commitmentReportSchema = {
     .default('90d')
     .describe('Reporting window. 30d=last 30 days, 90d=last 90 days, ytd=since Jan 1 of current year.'),
   format: z
-    .enum(['cfo_md', 'summary', 'json'])
+    .enum(['cfo_md', 'summary', 'json', 'weekly_digest'])
     .default('cfo_md')
     .describe(
-      'cfo_md=executive markdown with weekly chart and forward confidence; summary=typed envelope only; json=full structured data.'
+      'cfo_md=executive markdown with weekly chart and forward confidence; summary=typed envelope only; json=full structured data; weekly_digest=7-day operational digest from the recurring tick audit trail.'
+    ),
+  history_path: z
+    .string()
+    .optional()
+    .describe(
+      'Override path to the recurring-tick JSONL audit trail (default: $LOG10X_RECUR_HISTORY_PATH or /tmp/log10x-recur-history.jsonl). Used only when format=weekly_digest.'
+    ),
+  action_intent_path: z
+    .string()
+    .optional()
+    .describe(
+      'Override path to data/action-intent.json (relative to the gitops repo root or absolute). Used only when format=weekly_digest.'
     ),
   environment: z
     .string()
@@ -547,6 +565,403 @@ export interface CommitmentReportEnvelope {
    * path. Dollar figures gated by rate_source.
    */
   human_summary?: string;
+}
+
+// ─── weekly-digest types ─────────────────────────────────────────────
+
+/**
+ * Per-action attribution totals across the 7-day digest window.
+ * Sourced from `data/action-intent.json` entries active during the period.
+ */
+export interface DigestActionSplit {
+  /** Count of patterns actively assigned to this action. */
+  pattern_count: number;
+}
+
+/**
+ * A single tick run as it appears in the digest tick-history section.
+ */
+export interface DigestTickEntry {
+  /** ISO-8601 timestamp of the tick. */
+  ts: string;
+  /** Tick outcome status. */
+  status: 'no_change' | 'applied' | 'dry_run' | 'error';
+  /** Projected savings percentage at tick time. */
+  projected_savings_pct: number;
+  /** Number of patterns whose action changed vs. prior state. */
+  delta_patterns: number;
+  /** Change in savings pp. */
+  delta_pp: number;
+  /** Whether this tick wrote new CSV/intent files. */
+  changed: boolean;
+}
+
+/**
+ * A pattern that was not in the prior week's action-intent but appeared
+ * this week (new_this_week) or a pattern whose byte volume grew >5x
+ * week-over-week (anomaly).
+ */
+export interface DigestPatternNote {
+  pattern_hash: string;
+  kind: 'new_this_week' | 'anomaly_growth';
+  /**
+   * For anomaly_growth: ratio of current_week_savings_pct / prior_week_savings_pct.
+   * Undefined for new_this_week.
+   */
+  growth_ratio?: number;
+  /** Human-readable note. */
+  note: string;
+}
+
+/**
+ * The envelope produced by `format=weekly_digest`.
+ *
+ * Reads the recurring-tick audit trail (JSONL) plus the current
+ * `data/action-intent.json` and produces an operational summary for the
+ * last 7 days.
+ */
+export interface WeeklyDigestEnvelope {
+  /** ISO-8601 start of the 7-day window. */
+  window_start: string;
+  /** ISO-8601 end of the 7-day window (now). */
+  window_end: string;
+
+  /**
+   * Total bytes projected saved over the window (sum of
+   * `projected_savings_pct * total_bytes_proxy`).  This is a directional
+   * number derived from the tick projected_savings_pct values — the
+   * ground-truth byte count lives in the verify runner path; for a
+   * quick operational digest the projection is sufficient.
+   *
+   * Null when the history is empty (no ticks ran).
+   */
+  total_projected_savings_pct: number | null;
+
+  /**
+   * Number of ticks that ran during the window.
+   */
+  tick_count: number;
+
+  /**
+   * Number of ticks that applied a change (status==='applied').
+   */
+  applied_count: number;
+
+  /**
+   * Per-action count from the current `data/action-intent.json`.
+   * Key is the Action string ('drop' | 'compact' | 'sample' | 'offload' | 'tier_down' | 'pass').
+   */
+  action_distribution: Record<string, DigestActionSplit>;
+
+  /**
+   * Ordered tick history (oldest first) for ticks that ran within the window.
+   */
+  tick_history: DigestTickEntry[];
+
+  /**
+   * Patterns that are new this week (present in current intent but absent
+   * from the oldest tick snapshot's implied prior state) or that grew >5x
+   * in their savings contribution week-over-week (anomaly).
+   */
+  pattern_notes: DigestPatternNote[];
+
+  /** Caveats (missing history file, parse errors, empty intent, etc.). */
+  caveats: string[];
+
+  /** Rendered markdown digest. Populated when format=weekly_digest. */
+  markdown?: string;
+
+  /** One-paragraph plain-prose summary. */
+  human_summary: string;
+}
+
+// ─── weekly-digest builder ───────────────────────────────────────────
+
+/**
+ * Compute the action distribution from a parsed action-intent content
+ * string.  Returns an empty map when the content is absent or unparseable.
+ */
+function buildActionDistribution(
+  intentContent: string | null
+): Record<string, DigestActionSplit> {
+  if (!intentContent) return {};
+  const parsed = parseActionIntent(intentContent);
+  const dist: Record<string, DigestActionSplit> = {};
+  for (const entry of parsed.entries) {
+    const a = entry.action;
+    if (!dist[a]) dist[a] = { pattern_count: 0 };
+    dist[a]!.pattern_count += 1;
+  }
+  return dist;
+}
+
+/**
+ * Build pattern notes (new patterns + anomaly detection) from tick history.
+ *
+ * "New this week": patterns present in the current intent that were not
+ * present in the earliest tick in the window.  We use `delta_patterns` as
+ * a proxy since the full per-pattern snapshot is not embedded in the JSONL;
+ * if the earliest applied tick had delta_patterns > 0 we note the count as
+ * new patterns.
+ *
+ * "Anomaly growth": the projected_savings_pct grew >5x between the first
+ * and last tick in the window (whole-window signal, not per-pattern since
+ * per-pattern bytes are not in the JSONL).
+ */
+function buildPatternNotes(
+  runs: RecurRun[],
+  intentContent: string | null
+): DigestPatternNote[] {
+  const notes: DigestPatternNote[] = [];
+
+  if (runs.length === 0) return notes;
+
+  // New-this-week: collect pattern hashes from current intent that are
+  // newly assigned (use action-intent entries set_at_iso within the window).
+  if (intentContent) {
+    const parsed = parseActionIntent(intentContent);
+    const windowEnd = Date.now();
+    const windowStart = windowEnd - 7 * 24 * 60 * 60 * 1000;
+    for (const entry of parsed.entries) {
+      const setAt = entry.set_at_iso ? Date.parse(entry.set_at_iso) : 0;
+      if (setAt >= windowStart && setAt <= windowEnd) {
+        notes.push({
+          pattern_hash: entry.pattern_hash,
+          kind: 'new_this_week',
+          note: `Pattern ${entry.pattern_hash} added to ${entry.action} plan this week (set ${entry.set_at_iso}).`,
+        });
+      }
+    }
+  }
+
+  // Anomaly growth: compare first vs last applied tick's projected_savings_pct.
+  const applied = runs.filter((r) => r.status === 'applied');
+  if (applied.length >= 2) {
+    const first = applied[0]!;
+    const last = applied[applied.length - 1]!;
+    if (
+      first.projected_savings_pct > 0 &&
+      last.projected_savings_pct / first.projected_savings_pct >= 5
+    ) {
+      const ratio = last.projected_savings_pct / first.projected_savings_pct;
+      notes.push({
+        pattern_hash: '<aggregate>',
+        kind: 'anomaly_growth',
+        growth_ratio: parseFloat(ratio.toFixed(2)),
+        note: `Projected savings grew ${ratio.toFixed(1)}x over the week (${first.projected_savings_pct.toFixed(1)}% → ${last.projected_savings_pct.toFixed(1)}%) — more patterns came into scope.`,
+      });
+    }
+  }
+
+  return notes;
+}
+
+/**
+ * Render a markdown weekly-digest from the envelope.
+ */
+function renderWeeklyDigestMarkdown(env: WeeklyDigestEnvelope): string {
+  const lines: string[] = [];
+  lines.push('# Weekly Digest — Recurring Cost-Reduction Loop');
+  lines.push('');
+  lines.push(
+    `**Window:** ${env.window_start.slice(0, 10)} to ${env.window_end.slice(0, 10)}`
+  );
+  lines.push('');
+
+  // Summary beat
+  const savingsBeat =
+    env.total_projected_savings_pct != null
+      ? `**Projected savings:** ${env.total_projected_savings_pct.toFixed(1)}% (latest tick).`
+      : '_No tick runs in window — no projection available._';
+  lines.push(savingsBeat);
+  lines.push('');
+  lines.push(
+    `**Ticks ran:** ${env.tick_count} total, ${env.applied_count} applied changes.`
+  );
+  lines.push('');
+
+  // Action distribution
+  const actionKeys = Object.keys(env.action_distribution).sort();
+  if (actionKeys.length > 0) {
+    lines.push('## Current action-intent distribution');
+    lines.push('');
+    lines.push('| Action | Patterns |');
+    lines.push('|--------|----------|');
+    for (const k of actionKeys) {
+      const d = env.action_distribution[k];
+      if (d) {
+        lines.push(`| ${k} | ${d.pattern_count} |`);
+      }
+    }
+    lines.push('');
+  }
+
+  // Tick history
+  if (env.tick_history.length > 0) {
+    lines.push('## Tick history');
+    lines.push('');
+    lines.push('| Timestamp | Status | Savings % | Delta patterns | Delta pp |');
+    lines.push('|-----------|--------|-----------|----------------|----------|');
+    for (const t of env.tick_history) {
+      const ts = t.ts.slice(0, 19).replace('T', ' ');
+      lines.push(
+        `| ${ts} | ${t.status} | ${t.projected_savings_pct.toFixed(1)}% | ${t.delta_patterns} | ${t.delta_pp >= 0 ? '+' : ''}${t.delta_pp.toFixed(1)}pp |`
+      );
+    }
+    lines.push('');
+  } else {
+    lines.push('_No ticks ran in this window._');
+    lines.push('');
+  }
+
+  // New patterns / anomalies
+  const newPatterns = env.pattern_notes.filter((n) => n.kind === 'new_this_week');
+  const anomalies = env.pattern_notes.filter((n) => n.kind === 'anomaly_growth');
+
+  if (newPatterns.length > 0) {
+    lines.push('## New patterns this week');
+    lines.push('');
+    for (const p of newPatterns.slice(0, 20)) {
+      lines.push(`- \`${p.pattern_hash}\` — ${p.note}`);
+    }
+    if (newPatterns.length > 20) {
+      lines.push(`- _...and ${newPatterns.length - 20} more_`);
+    }
+    lines.push('');
+  }
+
+  if (anomalies.length > 0) {
+    lines.push('## Anomalies (>5x growth week-over-week)');
+    lines.push('');
+    for (const a of anomalies) {
+      lines.push(`- ${a.note}`);
+    }
+    lines.push('');
+  }
+
+  if (env.caveats.length > 0) {
+    lines.push('## Caveats');
+    lines.push('');
+    for (const c of env.caveats) lines.push(`- ${c}`);
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Execute the weekly-digest path.
+ *
+ * Does NOT require a commitment record or a live metrics backend.
+ * Reads only the JSONL audit trail and the current action-intent.json.
+ */
+async function executeWeeklyDigest(
+  args: CommitmentReportArgs
+): Promise<StructuredOutput> {
+  const caveats: string[] = [];
+
+  // 7-day window
+  const now = new Date();
+  const windowStart = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+
+  // Read tick history
+  const runs = readHistorySince(windowStart.getTime(), args.history_path);
+  if (runs.length === 0) {
+    caveats.push(
+      'No tick runs found in the last 7 days. Run tenx-recur at least once to populate the audit trail.'
+    );
+  }
+
+  // Read action-intent.json — try the supplied override path first, then
+  // fall back to LOG10X_GITOPS_REPO_PATH/data/action-intent.json, then
+  // the recurring-tick default temp path.
+  let intentContent: string | null = null;
+  const intentCandidates: string[] = [];
+
+  if (args.action_intent_path) {
+    intentCandidates.push(args.action_intent_path);
+  }
+  const gitopsRepo =
+    process.env['LOG10X_GITOPS_REPO_PATH'] ??
+    join(tmpdir(), 'log10x-recur-repo');
+  intentCandidates.push(join(gitopsRepo, 'data', 'action-intent.json'));
+
+  for (const candidate of intentCandidates) {
+    try {
+      intentContent = readFileSync(candidate, 'utf8');
+      break;
+    } catch {
+      // try next
+    }
+  }
+
+  if (!intentContent) {
+    caveats.push(
+      'data/action-intent.json not found — action distribution unavailable. Set LOG10X_GITOPS_REPO_PATH or pass action_intent_path.'
+    );
+  }
+
+  // Aggregate
+  const actionDistribution = buildActionDistribution(intentContent);
+  const patternNotes = buildPatternNotes(runs, intentContent);
+
+  const appliedRuns = runs.filter((r) => r.status === 'applied');
+  const latestRun = runs.length > 0 ? runs[runs.length - 1] : undefined;
+
+  // total_projected_savings_pct: report the latest tick's projected value
+  // (most recent applied state is the operational ground truth; averaging
+  // projections across ticks double-counts stable savings).
+  const totalProjectedSavingsPct =
+    latestRun != null ? latestRun.projected_savings_pct : null;
+
+  const tickHistory: DigestTickEntry[] = runs.map((r) => ({
+    ts: r.ts,
+    status: r.status,
+    projected_savings_pct: r.projected_savings_pct,
+    delta_patterns: r.delta_patterns,
+    delta_pp: r.delta_pp,
+    changed: r.status === 'applied',
+  }));
+
+  // Human summary
+  const savingsLine =
+    totalProjectedSavingsPct != null
+      ? `Latest projected savings: ${totalProjectedSavingsPct.toFixed(1)}%.`
+      : 'No savings projection available.';
+  const actionLine =
+    Object.keys(actionDistribution).length > 0
+      ? ` Active actions: ${Object.entries(actionDistribution)
+          .filter(([, v]) => v.pattern_count > 0)
+          .map(([k, v]) => `${k}=${v.pattern_count}`)
+          .join(', ')}.`
+      : '';
+  const tickLine = ` ${runs.length} tick(s) ran, ${appliedRuns.length} applied changes.`;
+  const noteCount = patternNotes.length;
+  const noteLine = noteCount > 0 ? ` ${noteCount} pattern note(s) flagged.` : '';
+  const human_summary = `Weekly digest (${windowStart.toISOString().slice(0, 10)} to ${now.toISOString().slice(0, 10)}). ${savingsLine}${tickLine}${actionLine}${noteLine}`;
+
+  const envelope: WeeklyDigestEnvelope = {
+    window_start: windowStart.toISOString(),
+    window_end: now.toISOString(),
+    total_projected_savings_pct: totalProjectedSavingsPct,
+    tick_count: runs.length,
+    applied_count: appliedRuns.length,
+    action_distribution: actionDistribution,
+    tick_history: tickHistory,
+    pattern_notes: patternNotes,
+    caveats,
+    human_summary,
+  };
+
+  envelope.markdown = renderWeeklyDigestMarkdown(envelope);
+
+  return buildEnvelope({
+    tool: 'log10x_commitment_report',
+    view: 'summary',
+    summary: {
+      headline: human_summary,
+    },
+    data: envelope,
+  });
 }
 
 // ─── period resolution ──────────────────────────────────────────────
@@ -1111,6 +1526,12 @@ export async function executeCommitmentReport(
   args: CommitmentReportArgs
 ): Promise<StructuredOutput> {
   const format = args.format ?? 'cfo_md';
+
+  // Dispatch: weekly_digest is a standalone path — no commitment record or
+  // live metrics backend required.
+  if (format === 'weekly_digest') {
+    return executeWeeklyDigest(args);
+  }
 
   // 1. Resolve commitment record.
   let commitment: CommitmentRecord | undefined;

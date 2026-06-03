@@ -130,6 +130,7 @@ import { explainModeSchema, executeExplainMode } from './tools/explain-mode.js';
 import { previewFilterSchema, executePreviewFilter } from './tools/preview-filter.js';
 import { patternDetailSchema, executePatternDetail } from './tools/pattern-detail.js';
 import { measureCompactionSchema, executeMeasureCompaction } from './tools/measure-compaction.js';
+import { setupRecurringSchema, executeSetupRecurring } from './tools/setup-recurring.js';
 import { getStatus } from './resources/status.js';
 
 // ── Environment + cost cache ──
@@ -1258,6 +1259,16 @@ registerLog10xTool('log10x_measure_compaction', measureCompactionSchema, (args) 
   })
 );
 
+// ── Tool: log10x_setup_recurring ──
+//
+// Conversational wizard that configures a recurring autonomous cost-reduction
+// agent. Emits policy.yaml + a scheduler manifest (CronJob / GHA / crontab).
+// Available in analysis + analysis_pending modes (requires a live deployment).
+
+registerLog10xTool('log10x_setup_recurring', setupRecurringSchema, (args) =>
+  wrap('log10x_setup_recurring', async () => executeSetupRecurring(args))
+);
+
 // ── Tool: log10x_doctor ──
 
 registerLog10xTool('log10x_doctor', doctorSchema, (args) =>
@@ -1615,6 +1626,7 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_commitment_report', intent: 'CFO-facing weekly aggregate against a commitment record — Bayesian Beta(2,2) confidence prior on realized savings, markdown report suitable for sharing.' },
   { name: 'log10x_pattern_mitigate', intent: 'Return the env-gated mitigation options + exact configs for a pattern (drop @ analyzer, drop @ forwarder, mute @ 10x, compact @ 10x) in user terms with env-capability gating' },
   { name: 'log10x_overflow_contents', intent: 'Contents view of the customer-owned offload S3 bucket — per-pattern bytes, event count, time-first/last-seen, growth-rate; filtered to action=offload via the cap-CSV. Routes the agent to retriever_query for rehydration.' },
+  { name: 'log10x_setup_recurring', intent: 'Progressive wizard to configure a recurring cost-reduction agent — target services, savings %, schedule, scheduler (k8s/GHA/crontab), gitops repo — emits policy.yaml + scheduler manifest' },
 ];
 
 async function handleCliFlags(): Promise<boolean> {
