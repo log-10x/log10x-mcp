@@ -25,6 +25,7 @@ import { loadEnvironments, type EnvConfig, type Environments } from '../lib/envi
 import { LABELS } from '../lib/promql.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import type { CapabilitySummary, MustAskUser } from './log10x-start.js';
+import type { Action } from '../lib/cost.js';
 
 // ─── Schema ───────────────────────────────────────────────────────────────────
 
@@ -42,6 +43,12 @@ export const costOptionsSchema = {
     .optional()
     .describe(
       'Scope to a service. Passed forward to estimate_savings when the user picks a mode.'
+    ),
+  pattern_hash: z
+    .string()
+    .optional()
+    .describe(
+      'Optional pattern hash to scope the cost option menu to a single pattern. When present, routes_to.args will include a proposed_config row for this hash.'
     ),
 };
 
@@ -208,15 +215,41 @@ function buildCapabilities(args: {
 function buildModes(
   caps: CapabilitySummary & { _tier?: CustomerTier },
   siemDetected: string | null,
-  args: { target_percent?: number; service?: string }
+  args: { target_percent?: number; service?: string; pattern_hash?: string }
 ): CostOptionItem[] {
-  const { target_percent, service } = args;
+  const { target_percent, service, pattern_hash } = args;
   const tier: CustomerTier = caps._tier ?? 'dev';
 
-  const sharedArgs = (defaultAction: string): Record<string, unknown> => {
-    const out: Record<string, unknown> = { default_action: defaultAction };
-    if (target_percent !== undefined) out.target_percent = target_percent;
+  /**
+   * Build the routes_to.args for a given action.
+   *
+   * When pattern_hash is known:
+   *   - Always uses proposed_config so estimate_savings can honour the
+   *     explicit per-pattern action without needing target_percent.
+   * When pattern_hash is absent but target_percent was supplied:
+   *   - Uses target_percent + the destination-appropriate default_action
+   *     (resolved from DEFAULT_ACTION_BY_DESTINATION) so the greedy solver
+   *     picks actions that are valid for the destination.
+   * When neither is available:
+   *   - routes_to still carries destination + service; the agent must supply
+   *     either proposed_config or target_percent before calling estimate_savings.
+   */
+  const sharedArgs = (action: Action): Record<string, unknown> => {
+    const out: Record<string, unknown> = {};
+    if (siemDetected) out.destination = siemDetected;
     if (service !== undefined) out.service = service;
+    if (pattern_hash) {
+      // Explicit single-pattern route: use proposed_config so estimate_savings
+      // doesn't need target_percent.
+      out.proposed_config = [{ pattern_hash, action }];
+    } else if (target_percent !== undefined) {
+      // Greedy solver route: pass target_percent + the canonical action for
+      // the destination so the solver doesn't pick compact on a no-op dest.
+      out.target_percent = target_percent;
+      out.default_action = action;
+    }
+    // When neither pattern_hash nor target_percent is known, the agent must
+    // add proposed_config or target_percent before calling estimate_savings.
     return out;
   };
 
@@ -403,6 +436,7 @@ function buildCostOptionsForbidden(): string[] {
 export async function executeCostOptions(args: {
   target_percent?: number;
   service?: string;
+  pattern_hash?: string;
 }): Promise<StructuredOutput> {
   // Run probes — same pattern as executeLog10xStart.
   let env: EnvConfig | undefined;

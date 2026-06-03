@@ -91,6 +91,21 @@ export type CompactMode =
   | 'index-pruned'
   | 'index-unpruned';
 
+/**
+ * Cheaper storage/ingest tier that tier_down routes events to.
+ * When present in a destination's cost model, projectActionWithRatio can
+ * compute meaningful dollar savings for tier_down (rather than returning
+ * zero with a caveat about "rule not yet configured").
+ */
+export interface TierDownTargetTier {
+  /** Human-readable tier name, e.g. "CloudWatch Logs Infrequent Access". */
+  name: string;
+  /** Cheaper ingest rate for this tier ($/GB). */
+  ingest_rate_usd_per_gb: number;
+  /** Cheaper storage rate for this tier ($/GB-month). */
+  storage_rate_usd_per_gb_month: number;
+}
+
 export interface DestinationCostModel {
   destination: SiemId;
   /** $/GB billed at ingest. */
@@ -110,6 +125,12 @@ export interface DestinationCostModel {
    * dominates). Default 100 bytes.
    */
   small_event_floor_bytes: number;
+  /**
+   * Cheaper tier that tier_down can route events to. When present,
+   * tier_down savings are computed as the delta between standard and tier
+   * rates. When absent, tier_down produces bytes_out=bytes_in with a caveat.
+   */
+  tier_down_target_tier?: TierDownTargetTier;
 }
 
 /**
@@ -298,13 +319,22 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
   },
   cloudwatch: {
     destination: 'cloudwatch',
-    ingest_per_gb: DEFAULT_ANALYZER_COST_PER_GB.cloudwatch,
-    storage_per_gb_month: 0.03,
+    ingest_per_gb: DEFAULT_ANALYZER_COST_PER_GB.cloudwatch, // $0.50/GB standard tier
+    storage_per_gb_month: 0.03, // standard tier
     billing_basis: 'compressed-ingest',
     compact_mode: 'no-op',
     compact_ratio_low: 1.0,
     compact_ratio_high: 1.0,
     small_event_floor_bytes: 100,
+    // CloudWatch Logs Infrequent Access (IA) tier:
+    // $0.25/GB ingest (50% reduction vs standard $0.50)
+    // $0.0075/GB-month storage (75% reduction vs standard $0.03)
+    // Destination-side routing rule required: tenx_action=tier_down
+    tier_down_target_tier: {
+      name: 'CloudWatch Logs Infrequent Access',
+      ingest_rate_usd_per_gb: 0.25,
+      storage_rate_usd_per_gb_month: 0.0075,
+    },
   },
   'azure-monitor': {
     destination: 'azure-monitor',
@@ -558,14 +588,23 @@ function projectActionWithRatio(
       break;
     }
     case 'tier_down':
-      // Savings depend on destination-side routing rule (e.g. Splunk index
-      // tier swap, Datadog Flex). The bytes leaving the forwarder are
-      // unchanged; the caller must swap storage_per_gb_month to the
-      // tier-down rate. Default chosen wire format: tenx_action=tier_down.
+      // Bytes leaving the forwarder are unchanged (events still reach the
+      // SIEM; only the storage/ingest tier changes). Savings come from the
+      // rate delta between standard and the cheaper destination tier.
+      // When tier_down_target_tier is defined in the cost model we compute
+      // the dollar delta below by substituting the tier rates. bytes_out is
+      // still set to bytes_in so the byte-reduction fields reflect 0 — the
+      // savings are entirely in the rate axis, not the byte axis.
       bytes_out = args.bytes_in;
-      notes.push(
-        'tier_down savings depend on destination-side routing rule not yet configured (tenx_action=tier_down)'
-      );
+      if (model.tier_down_target_tier) {
+        notes.push(
+          `tier_down: assumes ${model.tier_down_target_tier.name} ($${model.tier_down_target_tier.ingest_rate_usd_per_gb}/GB ingest + $${model.tier_down_target_tier.storage_rate_usd_per_gb_month}/GB-mo storage); destination-side routing rule must be configured to realize.`
+        );
+      } else {
+        notes.push(
+          'tier_down savings depend on destination-side routing rule and cheaper tier pricing not configured for this destination (tenx_action=tier_down)'
+        );
+      }
       break;
     case 'offload':
       // Destination sees nothing; S3 cost is OUT OF SCOPE here. Caller
@@ -600,7 +639,22 @@ function projectActionWithRatio(
   const months = args.retention_months ?? 1;
   const gbOut = bytes_out / GB;
 
-  // Ingest axis: customer override > list rate > unset.
+  // For tier_down: when the cost model has a tier_down_target_tier, use
+  // the cheaper tier's rates rather than the standard model rates. This
+  // makes the dollar cost represent what the SIEM bills after routing to
+  // the IA/Flex tier — so savings = standard_cost - tier_down_cost.
+  // When no tier_down_target_tier is present, fall through to standard rates
+  // (which will produce zero savings since bytes_out == bytes_in at the same rate).
+  const isTierDown = args.action === 'tier_down';
+  const tierTarget = isTierDown ? model.tier_down_target_tier : undefined;
+  const effectiveIngestRateList = tierTarget
+    ? tierTarget.ingest_rate_usd_per_gb
+    : model.ingest_per_gb;
+  const effectiveStorageRateList = tierTarget
+    ? tierTarget.storage_rate_usd_per_gb_month
+    : model.storage_per_gb_month;
+
+  // Ingest axis: customer override > list rate (effective for tier) > unset.
   // model.ingest_per_gb is always a known number in COST_MODEL_BY_DESTINATION
   // (clickhouse self-hosted is genuinely $0, not unknown). 'unset' is
   // reserved for future destinations that come without a list rate.
@@ -608,10 +662,16 @@ function projectActionWithRatio(
   let ingest_dollars: number | null;
   let ingestSource: 'list' | 'customer_supplied' | 'unset';
   if (ingestOverride != null) {
-    ingest_dollars = gbOut * ingestOverride;
+    // For tier_down with a customer override we scale the override by the
+    // same ratio as the tier discount so customer-rate savings are proportional.
+    const tierScaleFactor =
+      isTierDown && tierTarget && model.ingest_per_gb > 0
+        ? tierTarget.ingest_rate_usd_per_gb / model.ingest_per_gb
+        : 1;
+    ingest_dollars = gbOut * ingestOverride * tierScaleFactor;
     ingestSource = 'customer_supplied';
-  } else if (Number.isFinite(model.ingest_per_gb)) {
-    ingest_dollars = gbOut * model.ingest_per_gb;
+  } else if (Number.isFinite(effectiveIngestRateList)) {
+    ingest_dollars = gbOut * effectiveIngestRateList;
     ingestSource = 'list';
   } else {
     ingest_dollars = null;
@@ -625,10 +685,14 @@ function projectActionWithRatio(
   let storage_dollars: number | null;
   let storageSource: 'list' | 'customer_supplied' | 'unset';
   if (storageOverride != null) {
-    storage_dollars = gbOut * storageOverride * months;
+    const tierScaleFactor =
+      isTierDown && tierTarget && model.storage_per_gb_month > 0
+        ? tierTarget.storage_rate_usd_per_gb_month / model.storage_per_gb_month
+        : 1;
+    storage_dollars = gbOut * storageOverride * tierScaleFactor * months;
     storageSource = 'customer_supplied';
-  } else if (model.storage_per_gb_month >= 0) {
-    storage_dollars = gbOut * model.storage_per_gb_month * months;
+  } else if (effectiveStorageRateList >= 0) {
+    storage_dollars = gbOut * effectiveStorageRateList * months;
     storageSource = 'list';
   } else {
     storage_dollars = null;
@@ -647,12 +711,14 @@ function projectActionWithRatio(
   // Build disclosed-value mirrors so renderers can call fmtDisclosedDollar
   // directly without rediscovering rate provenance.
   const siemLabel = SIEM_DISPLAY_NAMES[args.destination] ?? null;
+  // For disclosure: use the effective (tier-aware) list rate, not the
+  // standard model rate, so the caveat string quotes the actual rate used.
   const ingestRate = ingestOverride != null
     ? ingestOverride
-    : (Number.isFinite(model.ingest_per_gb) ? model.ingest_per_gb : null);
+    : (Number.isFinite(effectiveIngestRateList) ? effectiveIngestRateList : null);
   const storageRate = storageOverride != null
     ? storageOverride
-    : (model.storage_per_gb_month >= 0 ? model.storage_per_gb_month : null);
+    : (effectiveStorageRateList >= 0 ? effectiveStorageRateList : null);
   const toAxisSource = (s: 'list' | 'customer_supplied' | 'unset'): DollarSource =>
     s === 'list' ? 'list_price' : s;
   const ingest_dollars_disclosed = ingest_dollars == null

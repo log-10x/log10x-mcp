@@ -56,6 +56,7 @@ import { queryInstant } from '../lib/api.js';
 import {
   projectActionRange,
   getDestinationCostModel,
+  getDefaultActionForDestination,
   annualizeDollars,
   type Action,
 } from '../lib/cost.js';
@@ -202,7 +203,7 @@ export const estimateSavingsSchema = {
     .positive()
     .optional()
     .describe(
-      "verify mode: override the destination model rate, e.g. customer's contracted $/GB."
+      "forecast and verify mode: override the destination list-price rate with the customer's contracted $/GB. When supplied, dollar projections use this rate and surface rate_source='customer_supplied'."
     ),
   // ── presentation ──────────────────────────────────────────────────
   enforcement_mode: z
@@ -264,7 +265,35 @@ export interface ForecastResult {
     dollars_high_monthly: number;
     annual_projection_expected: number;
   };
+  /**
+   * Fraction of TOTAL observed monthly env bytes that this forecast covers.
+   * For a single-pattern proposed_config this is typically small (e.g. 0.01
+   * = 1% of env bytes). Use coverage_of_proposed_pct for "how complete is
+   * this forecast relative to what was requested".
+   */
+  coverage_of_env_pct: number;
+  /**
+   * @deprecated use coverage_of_env_pct. Kept for backward compatibility.
+   */
   coverage_pct: number;
+  /**
+   * For the greedy/target_percent path: fraction of the total candidate bytes
+   * (all observed patterns) that the solver actually modeled. For the
+   * explicit proposed_config path this is always 1.0 (100%) because the
+   * caller specified every row they care about.
+   */
+  coverage_of_proposed_pct: number;
+  /**
+   * Source of the $/GB rate used to compute dollar projections.
+   *  - 'customer_supplied' — caller passed effective_ingest_per_gb
+   *  - 'list_price'        — from COST_MODEL_BY_DESTINATION.ingest_per_gb
+   */
+  rate_source: 'list_price' | 'customer_supplied';
+  /**
+   * Human-readable disclosure of the rate used. Null when customer_supplied
+   * (no caveat needed). Non-null for list_price.
+   */
+  rate_disclosure: string | null;
   caveats: string[];
 }
 
@@ -591,6 +620,12 @@ export interface RunForecastArgs {
    * unlimited when service is set. Totals computed over full result before slice.
    */
   pattern_limit?: number;
+  /**
+   * Customer-supplied ingest $/GB override. When provided, dollar projections
+   * use this rate instead of the destination list price (same as the verify path).
+   * Surfaces as rate_source='customer_supplied' in the result.
+   */
+  effective_ingest_per_gb?: number;
 }
 
 /**
@@ -620,9 +655,11 @@ export async function runEstimateForecast(
   };
 
   // Early-exit: if the caller is running the greedy solver (target_percent)
-  // and default_action is a no-op on this destination, skip all Prometheus
-  // queries and throw a structured error. proposed_config callers can audit
-  // per-row no-op caveats in the projection loop below.
+  // and the explicit default_action is a no-op on this destination, throw.
+  // NOTE: the solver itself will substitute the destination's canonical action
+  // (getDefaultActionForDestination) so the no-op path is only reachable when
+  // a caller explicitly passes default_action='compact' on a no-op destination.
+  // That is a user error; the structured error carries the right suggestion.
   if (
     args.target_percent !== undefined &&
     !args.proposed_config
@@ -630,10 +667,16 @@ export async function runEstimateForecast(
     const earlyModel = getDestinationCostModel(args.destination, {
       esPruned: args.es_pruned,
     });
-    if (
+    // Only throw when the caller explicitly supplied the no-op action.
+    // When default_action is the schema default ('compact') AND the destination
+    // has a different canonical first action, the solver will silently use the
+    // canonical action instead of throwing.
+    const canonicalAction = getDefaultActionForDestination(args.destination, 1);
+    const actionIsExplicitlyBad =
       args.default_action === 'compact' &&
-      earlyModel.compact_mode === 'no-op'
-    ) {
+      earlyModel.compact_mode === 'no-op' &&
+      canonicalAction !== 'compact';
+    if (actionIsExplicitlyBad) {
       throw new NoOpActionError(args.default_action, args.destination);
     }
   }
@@ -725,33 +768,56 @@ export async function runEstimateForecast(
     }));
   } else {
     // Greedy from target_percent. Sort patterns by 30d bytes DESC and
-    // assign default_action until cumulative savings >= target.
+    // assign the destination's canonical action until cumulative savings >= target.
+    //
+    // The canonical action comes from DEFAULT_ACTION_BY_DESTINATION (level 1),
+    // NOT from args.default_action — that field is an explicit caller override
+    // and the solver should not use it when the caller is cost_options building
+    // a routes_to hint (it will have passed a mode-appropriate action already).
+    // When the caller explicitly passes default_action AND it is valid for the
+    // destination, we honour it; otherwise we fall back to the canonical action.
+    const model = getDestinationCostModel(args.destination, {
+      esPruned: args.es_pruned,
+    });
+    const canonicalAction = getDefaultActionForDestination(args.destination, 1);
+    // Honour an explicit non-compact caller action even when the canonical
+    // differs, unless compact is a no-op (then override to canonical).
+    const solverAction: Action =
+      args.default_action === 'compact' && model.compact_mode === 'no-op'
+        ? canonicalAction
+        : args.default_action;
+
     const sorted = Object.entries(bytesByHash)
       .map(([hash, b]) => ({ hash, bytes: b * scale }))
       .sort((a, b) => b.bytes - a.bytes);
     const targetBytes =
       (args.target_percent! / 100) * (totalBytesObserved * scale);
-    const model = getDestinationCostModel(args.destination, {
-      esPruned: args.es_pruned,
-    });
-    // Use the EXPECTED reduction per byte for this action — for compact
-    // it's (1 - midpoint(low,high)) on supported dests, else 0.
+    // Use the EXPECTED reduction per byte for the resolved action.
     let expectedReductionPerByte = 0;
-    if (args.default_action === 'drop' || args.default_action === 'offload') {
+    if (solverAction === 'drop' || solverAction === 'offload') {
       expectedReductionPerByte = 1;
-    } else if (args.default_action === 'sample') {
+    } else if (solverAction === 'sample') {
       expectedReductionPerByte = 0.9; // 1 in 10 default
-    } else if (
-      args.default_action === 'compact' &&
-      model.compact_mode !== 'no-op'
-    ) {
+    } else if (solverAction === 'tier_down') {
+      // tier_down: estimate via the IA tier delta when available; fall back
+      // to a conservative 50% ingest reduction for destinations with a known
+      // cheap tier (CloudWatch IA) and 0 elsewhere.
+      if (model.tier_down_target_tier) {
+        const ingestDelta = model.ingest_per_gb - model.tier_down_target_tier.ingest_rate_usd_per_gb;
+        expectedReductionPerByte = model.ingest_per_gb > 0
+          ? ingestDelta / model.ingest_per_gb
+          : 0.5;
+      } else {
+        expectedReductionPerByte = 0.5;
+      }
+    } else if (solverAction === 'compact' && model.compact_mode !== 'no-op') {
       expectedReductionPerByte =
         1 - (model.compact_ratio_low + model.compact_ratio_high) / 2;
     }
     let saved = 0;
     for (const row of sorted) {
       if (saved >= targetBytes) break;
-      rows.push({ pattern_hash: row.hash, action: args.default_action });
+      rows.push({ pattern_hash: row.hash, action: solverAction });
       saved += row.bytes * expectedReductionPerByte;
     }
   }
@@ -778,12 +844,22 @@ export async function runEstimateForecast(
     // subtle bug where caller-supplied retention_months changes the
     // PASS leg dollars (it should, since both legs are at the same
     // retention) — savings is still (pass - action).
+    //
+    // When effective_ingest_per_gb is supplied, thread it through as a
+    // customer_rate override so dollar projections use the contracted rate
+    // rather than the destination list price. Both pass and action legs
+    // receive the same override so savings = (pass_cost - action_cost) at
+    // the customer rate.
+    const customerRate = args.effective_ingest_per_gb
+      ? { ingest_per_gb_override: args.effective_ingest_per_gb }
+      : undefined;
     const passRange = projectActionRange({
       action: 'pass',
       bytes_in: monthlyBytes,
       destination: args.destination,
       retention_months: args.retention_months,
       esPruned: args.es_pruned,
+      customer_rate: customerRate,
     });
     const actionRange = projectActionRange({
       action: row.action,
@@ -793,13 +869,11 @@ export async function runEstimateForecast(
       destination: args.destination,
       retention_months: args.retention_months,
       esPruned: args.es_pruned,
+      customer_rate: customerRate,
     });
 
     const savedBytes = monthlyBytes - actionRange.expected.bytes_out;
     // Range is intentionally swapped: high savings = low destination cost.
-    // total_dollars is now nullable; when unset we surface 0 here so the
-    // existing envelope compiles. Full rate_source propagation lands in the
-    // estimate-savings patch (step 6 of the build order).
     const dollarsLow =
       (passRange.low.total_dollars ?? 0) - (actionRange.low.total_dollars ?? 0);
     const dollarsExpected =
@@ -842,7 +916,18 @@ export async function runEstimateForecast(
   // forecast modeled. Patterns not in proposed_config and not picked by
   // the solver are unmodeled long-tail.
   const totalObservedMonthly = totalBytesObserved * scale;
-  const coverage_pct = safeDiv(totalIn, totalObservedMonthly);
+  const coverage_of_env_pct = safeDiv(totalIn, totalObservedMonthly);
+
+  // coverage_of_proposed_pct: for proposed_config callers this is always
+  // 1.0 (100%) because every row in the config was modeled. For the greedy
+  // solver the denominator is totalObservedMonthly (same as coverage_of_env_pct)
+  // since the solver selects from the full observed candidate set. The two
+  // values diverge only when the caller passes a sparse proposed_config that
+  // covers a small fraction of env bytes — in that case coverage_of_env_pct
+  // is small but coverage_of_proposed_pct = 1.0.
+  const coverage_of_proposed_pct = args.proposed_config && args.proposed_config.length > 0
+    ? 1.0
+    : coverage_of_env_pct; // greedy: same as env fraction (all candidates available)
 
   // ── per_pattern limit + truncation ────────────────────────────────
   // Sort full result by bytes_in_monthly DESC, then slice to the limit.
@@ -895,6 +980,16 @@ export async function runEstimateForecast(
       .sort((a, b) => b.dollars_saved_expected - a.dollars_saved_expected);
   }
 
+  // Rate source resolution for the forecast result.
+  const forecast_rate_source: 'list_price' | 'customer_supplied' =
+    args.effective_ingest_per_gb !== undefined ? 'customer_supplied' : 'list_price';
+  const forecast_rate_disclosure: string | null =
+    forecast_rate_source === 'customer_supplied'
+      ? null
+      : `at ${args.destination} list price $${
+          getDestinationCostModel(args.destination, { esPruned: args.es_pruned }).ingest_per_gb.toFixed(2)
+        }/GB — your actual bill may differ depending on discounts, commits, or contract tier`;
+
   const caveats: string[] = [];
   if (noOpCompactCount > 0) {
     caveats.push(
@@ -903,12 +998,12 @@ export async function runEstimateForecast(
   }
   if (per_pattern_truncated) {
     caveats.push(
-      `Showing top ${effectiveLimit} of ${per_pattern_total_count} patterns by volume. Totals and coverage_pct reflect all ${per_pattern_total_count} patterns.`
+      `Showing top ${effectiveLimit} of ${per_pattern_total_count} patterns by volume. Totals and coverage_of_env_pct reflect all ${per_pattern_total_count} patterns.`
     );
   }
-  if (coverage_pct < 0.6 && rows.length > 0) {
+  if (coverage_of_env_pct < 0.6 && rows.length > 0) {
     caveats.push(
-      `Forecast covers ${(coverage_pct * 100).toFixed(0)}% of monthly bytes. The long tail (${((1 - coverage_pct) * 100).toFixed(0)}%) is not modeled.`
+      `Forecast covers ${(coverage_of_env_pct * 100).toFixed(0)}% of monthly env bytes. The long tail (${((1 - coverage_of_env_pct) * 100).toFixed(0)}%) is not modeled.`
     );
   }
   if (smallEventPatterns.length > 0) {
@@ -919,6 +1014,11 @@ export async function runEstimateForecast(
   if (totalBytesObserved === 0) {
     caveats.push(
       'No bytes observed in the window. Either the Reporter is not deployed for this scope, or the service/env filters matched nothing.'
+    );
+  }
+  if (forecast_rate_source === 'list_price') {
+    caveats.push(
+      `Dollar projections use ${args.destination} list price. Pass effective_ingest_per_gb to use your contracted rate and align with top_patterns output.`
     );
   }
 
@@ -941,7 +1041,11 @@ export async function runEstimateForecast(
       dollars_high_monthly: totalHigh,
       annual_projection_expected: totalExpected * 12,
     },
-    coverage_pct,
+    coverage_of_env_pct,
+    coverage_pct: coverage_of_env_pct, // backward-compat alias
+    coverage_of_proposed_pct,
+    rate_source: forecast_rate_source,
+    rate_disclosure: forecast_rate_disclosure,
     caveats,
   };
 }
@@ -1370,16 +1474,20 @@ export async function executeEstimateSavings(
           target_percent: args.target_percent,
           default_action: (args.default_action ?? 'compact') as Action,
           pattern_limit: args.pattern_limit,
+          effective_ingest_per_gb: args.effective_ingest_per_gb,
         },
         env
       );
       const patternCountLabel = result.per_pattern_truncated
         ? `top ${result.per_pattern.length} of ${result.per_pattern_total_count} patterns`
         : `${result.per_pattern.length} pattern${result.per_pattern.length !== 1 ? 's' : ''}`;
+      const rateTag = result.rate_source === 'customer_supplied'
+        ? 'contracted rate'
+        : `${destination} list price — your bill may differ`;
       const headline =
         args.enforcement_mode === 'manual_report'
-          ? `If you enforce externally: ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings potential on ${patternCountLabel} (coverage ${fmtPct(result.coverage_pct)}). Enforcement choice is yours.`
-          : `Forecast (${destination}): ${fmtDollar(result.totals.dollars_expected_monthly)}/mo expected savings (at ${destination} list price — your bill may differ) on ${patternCountLabel} (coverage ${fmtPct(result.coverage_pct)}).`;
+          ? `If you enforce externally: ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings potential on ${patternCountLabel} (${(result.coverage_of_env_pct * 100).toFixed(0)}% of monthly env bytes). Enforcement choice is yours.`
+          : `Forecast (${destination}): ${fmtDollar(result.totals.dollars_expected_monthly)}/mo expected savings (at ${rateTag}) on ${patternCountLabel} (${(result.coverage_of_env_pct * 100).toFixed(0)}% of monthly env bytes).`;
       const human_summary = buildForecastHumanSummary(result, destination, args.enforcement_mode);
       return buildEnvelope({
         tool: 'log10x_estimate_savings',
@@ -1486,14 +1594,16 @@ function buildForecastHumanSummary(
   enforcement_mode?: string
 ): string {
   const patternWord = `${result.per_pattern.length} pattern${result.per_pattern.length === 1 ? '' : 's'}`;
-  const coverage = `${fmtPct(result.coverage_pct)} coverage`;
-  // ForecastResult does not yet carry rate_source (see TODO at top of file);
-  // dollars are list-price until full propagation lands.
+  const envCoverage = `${(result.coverage_of_env_pct * 100).toFixed(0)}% of monthly env bytes`;
+  const rateTag = result.rate_source === 'customer_supplied'
+    ? 'contracted rate'
+    : `${destination} list price`;
   const lead =
     enforcement_mode === 'manual_report'
       ? `If you enforce externally on ${destination}: ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings potential (range ${fmtDollar(result.totals.dollars_low_monthly)}–${fmtDollar(result.totals.dollars_high_monthly)}). Enforcement is not automatic — this is the potential if the exclusion/drop is applied.`
       : `estimate_savings forecast on ${destination} projects ${fmtDollar(result.totals.dollars_expected_monthly)}/mo expected savings (range ${fmtDollar(result.totals.dollars_low_monthly)}–${fmtDollar(result.totals.dollars_high_monthly)})`;
-  return `${lead} across ${patternWord} at ${coverage}, using the engine list price.${result.caveats.length ? ` Caveats: ${result.caveats.length}.` : ''}`;
+  const disclosureSuffix = result.rate_disclosure ? ` ${result.rate_disclosure}.` : '.';
+  return `${lead} across ${patternWord} covering ${envCoverage}, using ${rateTag}${disclosureSuffix}${result.caveats.length ? ` Caveats: ${result.caveats.length}.` : ''}`;
 }
 
 function buildVerifyHumanSummary(
