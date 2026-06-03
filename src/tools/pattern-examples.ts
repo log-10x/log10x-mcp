@@ -297,7 +297,7 @@ async function executePatternExamplesInner(
     // event is the only reliably-populated source of searchable words
     // for the probe.
     try {
-      const resolved = await extractPatterns([args.pattern], { privacyMode: true, useFileOutput: true });
+      const resolved = await extractPatterns([args.pattern], { privacyMode: true, useFileOutput: true, preserveEnvelope: true });
       if (resolved.patterns[0]) {
         const p = resolved.patterns[0];
         canonicalPattern = p.hash;
@@ -415,7 +415,7 @@ async function executePatternExamplesInner(
   const inputLineCount = probe.events.length;
   let extracted;
   try {
-    extracted = await extractPatterns(probe.events, { privacyMode: true, useFileOutput: true });
+    extracted = await extractPatterns(probe.events, { privacyMode: true, useFileOutput: true, preserveEnvelope: true });
   } catch (e) {
     return graceful('Pattern Examples — templater invocation failed', [
       `tenx CLI failed on ${probe.events.length} events: ${(e as Error).message.slice(0, 200)}`,

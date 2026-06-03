@@ -137,6 +137,7 @@ function extractSlotsFromBody(body: string): VariableSlot[] {
   let i = 0;
   let position = 0;
   let runStart = 0;
+  let previousName: string | undefined;
   while (i < body.length) {
     const c = body[i];
     if (c === '$') {
@@ -147,12 +148,14 @@ function extractSlotsFromBody(body: string): VariableSlot[] {
         if (end === -1) break;
         const spec = body.slice(i + 2, end);
         const preceding = body.slice(runStart, i);
+        const specName = inferFormatSpecName(spec);
         slots.push({
           position,
           precedingToken: preceding.slice(-40),
           type: spec,
-          name: inferFormatSpecName(spec),
+          name: specName,
         });
+        previousName = specName;
         position += 1;
         i = end + 1;
         runStart = i;
@@ -164,12 +167,13 @@ function extractSlotsFromBody(body: string): VariableSlot[] {
       // meaningful value rather than falling through to `slot_${s}`.
       const preceding = body.slice(runStart, i);
       const precedingToken = preceding.slice(-40);
-      const inferredName = inferSlotNameFromToken(precedingToken, position);
+      const inferredName = inferSlotNameFromToken(precedingToken, position, previousName);
       slots.push({
         position,
         precedingToken,
         name: inferredName,
       });
+      previousName = inferredName;
       position += 1;
       i += 1;
       runStart = i;
@@ -186,11 +190,27 @@ function extractSlotsFromBody(body: string): VariableSlot[] {
  * `inferSlotName` so that `extractSlotsFromBody` produces populated `.name`
  * fields without creating a circular import.
  *
+ * When `previousName` is provided and the preceding token is separator-only
+ * (e.g. `-`, `.`, `/`), the slot is treated as a continuation of the same
+ * multi-part value and gets a `_partN` suffix — matching the inheritance
+ * branch in variable-concentration.ts's `inferSlotName`.
+ *
  * Returns `undefined` when no confident name can be derived (caller omits
  * `.name` and pattern-extraction.ts falls through to `slot_${N}`).
  */
-function inferSlotNameFromToken(tok: string, position: number): string | undefined {
-  if (!tok || !tok.trim()) return undefined;
+function inferSlotNameFromToken(tok: string, position: number, previousName?: string): string | undefined {
+  if (!tok || !tok.trim()) {
+    // Empty preceding token with a known previous name: multi-part continuation.
+    if (previousName) {
+      const partMatch = previousName.match(/^(.+?)(?:_part(\d+))?$/);
+      if (partMatch) {
+        const base = partMatch[1];
+        const prev = partMatch[2] ? parseInt(partMatch[2], 10) : 1;
+        return `${base}_part${prev + 1}`;
+      }
+    }
+    return undefined;
+  }
 
   // Structured log key: ends with `":"`, `":`, `=`, `=\"`
   const structured = tok.match(/([A-Za-z_][A-Za-z0-9_.-]*)["']?\s*[:=]\s*["']?$/);
@@ -203,9 +223,17 @@ function inferSlotNameFromToken(tok: string, position: number): string | undefin
     if (word.length >= 3) return `${word} (inferred)`;
   }
 
-  // Separator-only token — no confident name for position 0; for later
-  // positions this is handled by the multi-part inheritance in
-  // variable-concentration.ts's inferSlotName.
+  // Separator-only token (e.g. `-`, `.`, `/`, ` `) with a known previous name:
+  // treat as a multi-part continuation and emit a _partN suffix.
+  if (previousName && /^[.\-\s,\/]+$/.test(tok.trim() || tok)) {
+    const partMatch = previousName.match(/^(.+?)(?:_part(\d+))?$/);
+    if (partMatch) {
+      const base = partMatch[1];
+      const prev = partMatch[2] ? parseInt(partMatch[2], 10) : 1;
+      return `${base}_part${prev + 1}`;
+    }
+  }
+
   return undefined;
 }
 

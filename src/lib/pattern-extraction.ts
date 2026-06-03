@@ -149,6 +149,18 @@ export interface ExtractPatternsOptions {
   chunkTargetBytes?: number;
   /** Parallelism cap when chunkParallel=true. Default min(cpus-1, 8). */
   chunkParallelism?: number;
+  /**
+   * When true, coerceObjectToLine does NOT recurse into nested JSON.
+   * For events whose structured-field variance lives in the envelope
+   * (e.g., CloudWatch fluentd-wrapped events with kubernetes labels
+   * embedded in the message field), the recursive descent would strip
+   * the envelope and lose all that signal. With preserveEnvelope=true,
+   * the function stops after the first unwrap and returns the JSON
+   * string of the envelope so the templater sees the full structure
+   * and extracts slots from across it.
+   * Default: false (back-compat).
+   */
+  preserveEnvelope?: boolean;
 }
 
 /**
@@ -170,9 +182,10 @@ export async function extractPatterns(
   // before we drop it. Fluent-bit / k8s envelopes carry service and severity
   // labels the templated text loses, so we keep them alongside for later
   // aggregation into per-pattern service/severity.
+  const coerceOpts = { preserveEnvelope: opts.preserveEnvelope };
   const pairs = events
     .map((e) => {
-      const line = coerceToLine(e);
+      const line = coerceToLine(e, coerceOpts);
       const enrichment = typeof e === 'object' && e !== null
         ? extractEnrichmentFromEnvelope(e as Record<string, unknown>)
         : {};
@@ -530,7 +543,7 @@ function mergeExtractedPatterns(group: ExtractedPattern[]): ExtractedPattern {
  * log), try parsing it and extracting again. Fluent-bit can wrap JSON-in-JSON
  * one level deep.
  */
-function coerceToLine(e: unknown): string {
+function coerceToLine(e: unknown, opts: { preserveEnvelope?: boolean } = {}): string {
   if (e == null) return '';
   if (typeof e === 'string') {
     // Try parsing as JSON — some connectors return the event as a pre-
@@ -541,7 +554,7 @@ function coerceToLine(e: unknown): string {
       try {
         const parsed = JSON.parse(trimmed);
         if (parsed && typeof parsed === 'object') {
-          return coerceObjectToLine(parsed as Record<string, unknown>);
+          return coerceObjectToLine(parsed as Record<string, unknown>, opts);
         }
       } catch {
         // fall through — not valid JSON, treat as plain
@@ -551,12 +564,12 @@ function coerceToLine(e: unknown): string {
   }
   if (typeof e === 'number' || typeof e === 'boolean') return String(e);
   if (typeof e === 'object') {
-    return coerceObjectToLine(e as Record<string, unknown>);
+    return coerceObjectToLine(e as Record<string, unknown>, opts);
   }
   return String(e);
 }
 
-function coerceObjectToLine(obj: Record<string, unknown>): string {
+function coerceObjectToLine(obj: Record<string, unknown>, opts: { preserveEnvelope?: boolean } = {}): string {
   // Common text-field candidates, in priority order. CloudWatch FilteredLogEvent
   // uses `message`; Datadog uses `attributes.message`; ES/fluent-bit uses `log`;
   // Splunk surfaces `_raw` which itself is often a JSON envelope.
@@ -581,10 +594,16 @@ function coerceObjectToLine(obj: Record<string, unknown>): string {
     // instead of paying for 3× byte count through the paste Lambda.
     const t = cand.trim();
     if ((t.startsWith('{') && t.endsWith('}')) || (t.startsWith('[') && t.endsWith(']'))) {
+      if (opts.preserveEnvelope) {
+        // Keep the envelope structure intact — the templater should see the
+        // full structured key set (kubernetes labels, container name, etc.)
+        // rather than only the innermost log string.
+        return t.replace(/\r?\n/g, ' ');
+      }
       try {
         const nested = JSON.parse(t);
         if (nested && typeof nested === 'object' && !Array.isArray(nested)) {
-          const inner = coerceObjectToLine(nested as Record<string, unknown>);
+          const inner = coerceObjectToLine(nested as Record<string, unknown>, opts);
           if (inner) return inner;
         }
       } catch {
