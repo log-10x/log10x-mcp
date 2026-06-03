@@ -57,18 +57,9 @@ import {
   executeCustomerMetricsQuery,
 } from '../../build/tools/customer-metrics-query.js';
 import { discoverJoinSchema, executeDiscoverJoin } from '../../build/tools/discover-join.js';
-import {
-  correlateCrossPillarSchema,
-  executeCorrelateCrossPillar,
-} from '../../build/tools/correlate-cross-pillar.js';
-import {
-  translateMetricToPatternsSchema,
-  executeTranslateMetricToPatterns,
-} from '../../build/tools/translate-metric-to-patterns.js';
 import { discoverEnvSchema, executeDiscoverEnv } from '../../build/tools/discover-env.js';
 import { adviseRetrieverSchema, executeAdviseRetriever } from '../../build/tools/advise-retriever.js';
 import { adviseInstallSchema, executeAdviseInstall } from '../../build/tools/advise-install.js';
-import { configureCompactSchema, executeConfigureCompact } from '../../build/tools/configure-compact.js';
 import { loginStatusSchema, executeLoginStatus } from '../../build/tools/login-status.js';
 import { patternMitigateSchema, executePatternMitigate } from '../../build/tools/pattern-mitigate.js';
 
@@ -320,16 +311,6 @@ const TOOL_TABLE: Record<string, ExecuteFn> = {
     const e = resolveEnv(buildLoadedEnvs(ev), args.environment);
     return executeDiscoverJoin(args, e);
   },
-  log10x_correlate_cross_pillar: async (raw, ev) => {
-    const args = parseArgs(correlateCrossPillarSchema, raw);
-    const e = resolveEnv(buildLoadedEnvs(ev), args.environment);
-    return executeCorrelateCrossPillar(args, e);
-  },
-  log10x_translate_metric_to_patterns: async (raw, ev) => {
-    const args = parseArgs(translateMetricToPatternsSchema, raw);
-    const e = resolveEnv(buildLoadedEnvs(ev), args.environment);
-    return executeTranslateMetricToPatterns(args, e);
-  },
 
   // args only (no env / no cost)
   log10x_dependency_check: async (raw) => executeDependencyCheck(parseArgs(dependencyCheckSchema, raw)),
@@ -349,7 +330,6 @@ const TOOL_TABLE: Record<string, ExecuteFn> = {
     const parsed = (z.object(adviseInstallSchema).passthrough().parse(raw)) as Parameters<typeof executeAdviseInstall>[0];
     return executeAdviseInstall(parsed, buildLoadedEnvs(ev));
   },
-  log10x_configure_compact: async (raw) => executeConfigureCompact(parseArgs(configureCompactSchema, raw)),
   log10x_pattern_mitigate: async (raw) => executePatternMitigate(parseArgs(patternMitigateSchema, raw)),
 
   // envs object (full Environments shape)
@@ -460,12 +440,9 @@ export const TOOL_SCHEMAS: Record<string, z.ZodObject<z.ZodRawShape>> = {
   log10x_doctor: z.object(doctorSchema),
   log10x_customer_metrics_query: z.object(customerMetricsQuerySchema),
   log10x_discover_join: z.object(discoverJoinSchema),
-  log10x_correlate_cross_pillar: z.object(correlateCrossPillarSchema),
-  log10x_translate_metric_to_patterns: z.object(translateMetricToPatternsSchema),
   log10x_discover_env: z.object(discoverEnvSchema),
   log10x_advise_retriever: z.object(adviseRetrieverSchema),
   log10x_advise_install: z.object(adviseInstallSchema),
-  log10x_configure_compact: z.object(configureCompactSchema),
   log10x_pattern_mitigate: z.object(patternMitigateSchema),
   log10x_login_status: z.object(loginStatusSchema),
   // signin_start takes no required args; an empty object is the

@@ -17,16 +17,23 @@ const STDIN_CONFIG = resolve(ASSETS_DIR, 'tenx-mcp-stdin.config.yaml');
 const FILE_CONFIG = resolve(ASSETS_DIR, 'tenx-mcp-file.config.yaml');
 
 const ORIG_TENX_PATH = process.env.LOG10X_TENX_PATH;
+const ORIG_TENX_MODE = process.env.LOG10X_TENX_MODE;
 const ORIG_STDIN_CONFIG = process.env.LOG10X_MCP_STDIN_CONFIG_PATH;
 const ORIG_FILE_CONFIG = process.env.LOG10X_MCP_FILE_CONFIG_PATH;
 beforeEach(() => {
   process.env.LOG10X_TENX_PATH = '/var/empty/nope-no-tenx-here';
+  // resolveTenxMode() now prefers docker when LOG10X_TENX_MODE is unset and a
+  // docker daemon is reachable; pin local so the bogus LOG10X_TENX_PATH forces
+  // the "tenx not installed" path on dev boxes + CI runners that have docker.
+  process.env.LOG10X_TENX_MODE = 'local';
   process.env.LOG10X_MCP_STDIN_CONFIG_PATH = STDIN_CONFIG;
   process.env.LOG10X_MCP_FILE_CONFIG_PATH = FILE_CONFIG;
 });
 afterEach(() => {
   if (ORIG_TENX_PATH === undefined) delete process.env.LOG10X_TENX_PATH;
   else process.env.LOG10X_TENX_PATH = ORIG_TENX_PATH;
+  if (ORIG_TENX_MODE === undefined) delete process.env.LOG10X_TENX_MODE;
+  else process.env.LOG10X_TENX_MODE = ORIG_TENX_MODE;
   if (ORIG_STDIN_CONFIG === undefined) delete process.env.LOG10X_MCP_STDIN_CONFIG_PATH;
   else process.env.LOG10X_MCP_STDIN_CONFIG_PATH = ORIG_STDIN_CONFIG;
   if (ORIG_FILE_CONFIG === undefined) delete process.env.LOG10X_MCP_FILE_CONFIG_PATH;
@@ -65,7 +72,7 @@ test('extractPatterns coerces object events by common fields', async () => {
         { privacyMode: true }
       );
     },
-    (e: Error) => /tenx.*not installed|CLI.*run failed/i.test(e.message)
+    (e: Error) => /tenx.*not (installed|available)|CLI.*run failed/i.test(e.message)
   );
 });
 

@@ -47,12 +47,12 @@ test('buildVendorQuery elasticsearch: bare phrases without service / severity', 
   assert.equal(q, '"Foo" AND "Bar"');
 });
 
-test('buildVendorQuery cloudwatch: filter @message like /escaped/ AND', () => {
-  // CloudWatch FilterLogEvents pattern syntax — quoted phrases joined with implicit AND.
-  // (The old @message like /regex/ was Logs Insights syntax, rejected by FilterLogEvents API.)
+test('buildVendorQuery cloudwatch: quoted-term filter-pattern search', () => {
+  // CloudWatch FilterLogEvents pattern syntax: quoted phrases joined by
+  // implicit AND (space-joined). The previous Logs-Insights regex syntax
+  // (`@message like /.../`) was rejected by the FilterLogEvents API.
   const q = buildVendorQuery('cloudwatch', ['Payment.Gateway', 'Timeout'], undefined, undefined);
-  assert.match(q, /"Payment\.Gateway"/);
-  assert.match(q, /"Timeout"/);
+  assert.equal(q, '"Payment.Gateway" "Timeout"');
 });
 
 test('buildVendorQuery: tokens with embedded quotes get escaped', () => {

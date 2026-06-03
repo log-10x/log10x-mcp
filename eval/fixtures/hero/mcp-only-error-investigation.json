@@ -7,7 +7,7 @@
   "budget_hint": "4-8 tool calls.",
   "expected_answer": {
     "summary": "Agent should call log10x_top_patterns(severity:ERROR) → identify #1 → log10x_pattern_trend → log10x_investigate. The #1 ERROR pattern in otel-demo is consistently 'service instance id service name otelcol contrib service version otelcol' or similar otel-collector infrastructure pattern. PASS = agent names the actual top ERROR pattern verbatim, reports the trend shape from tool stdout, and quotes investigate's causal chain (typically 2-3 co-firing patterns). FAIL = agent fabricates pattern names, invents trend numbers not in tool output, or escapes to kubectl/gh.",
-    "must_mention": [],
+    "must_mention": ["service_instance_id", "ERROR"],
     "expected_tool_chain": [
       "log10x_top_patterns",
       "log10x_pattern_trend",

@@ -204,7 +204,10 @@ test('heuristic strips literal timestamps baked into templates', () => {
 });
 
 test('AI pretty names take priority over heuristic', () => {
-  // Identity is symbolMessage || tenxHash || hash. Fixture uses only hash ('h_a').
+  // Identity is the engine-emitted match key, resolved in enrichPatterns()
+  // as `p.symbolMessage || p.tenxHash || p.hash` — NOT a renderer-derived
+  // snake_case of the template. The fixture's heartbeat pattern has no
+  // symbolMessage/tenxHash, so its identity is the raw hash `h_a`.
   const i = {
     ...input(),
     aiPrettyNames: { h_a: 'Customer Heartbeat' },

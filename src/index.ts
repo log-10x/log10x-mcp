@@ -9,6 +9,10 @@
 
 import { McpServer, type RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { randomUUID } from 'node:crypto';
 import { recordStart, withTelemetry, setEnvsProvider } from './lib/self-telemetry.js';
 import {
   loadManifest,
@@ -225,6 +229,12 @@ const METRIC_REQUIRING_TOOLS = new Set([
   'log10x_retriever_series',
 ]);
 
+// When set, the MCP is an intentional read-only demo playground: the metric
+// tools serve the public demo data instead of the not_configured onboarding
+// nag (see the gate in wrap()). isDemoMode stays true, so the demo banner still
+// renders — we just stop nagging. Set by the hosted deployment.
+const DEMO_PLAYGROUND = /^(1|true|yes)$/i.test(process.env.LOG10X_MCP_DEMO_PLAYGROUND ?? '');
+
 type WrapResult = {
   content: Array<
     | { type: 'text'; text: string }
@@ -240,9 +250,17 @@ async function wrap(
 ): Promise<WrapResult> {
   const started = Date.now();
   // Phase 5b gate: if this is a metric-requiring tool and the MCP is
-  // in pure-demo state, redirect to the conversational onboarding
-  // flow instead of returning silent-demo data.
-  if (METRIC_REQUIRING_TOOLS.has(toolName) && envs && envs.isDemoMode && !envs.demoFallbackReason) {
+  // in pure-demo state, redirect to the conversational onboarding flow
+  // instead of returning silent-demo data — UNLESS this is an intentional
+  // demo playground (LOG10X_MCP_DEMO_PLAYGROUND), which wants the demo data
+  // served (the gated tools are exactly the demo's headline surface).
+  if (
+    METRIC_REQUIRING_TOOLS.has(toolName) &&
+    envs &&
+    envs.isDemoMode &&
+    !envs.demoFallbackReason &&
+    !DEMO_PLAYGROUND
+  ) {
     log.info(`tool.${toolName}.not_configured`);
     // Structured not_configured envelope (status + remediation + actions),
     // not a bare text blob; the agent branches on data.status and the MCP
@@ -565,9 +583,18 @@ async function getAnalyzerCost(env: EnvConfig, override?: number): Promise<numbe
 
 // ── Server ──
 
-const server = new McpServer(
-  { name: 'log10x', version: readClientVersion() },
-  {
+const SERVER_INFO = { name: 'log10x', version: readClientVersion() };
+
+// Build/version provenance, surfaced on GET /health and in the mcp.boot log so
+// anyone can confirm which image is running (e.g. to verify a redeploy rolled).
+// commit + builtAt are baked into the container image via Docker build-args;
+// they read 'unknown' on a local/stdio run that wasn't built that way.
+const BUILD_INFO = {
+  version: readClientVersion(),
+  commit: process.env.LOG10X_MCP_BUILD_SHA ?? 'unknown',
+  builtAt: process.env.LOG10X_MCP_BUILD_TIME ?? 'unknown',
+};
+const SERVER_OPTIONS = {
     // Declare the `logging` capability so calls to extra.sendNotification
     // ('notifications/message', ...) inside tool handlers don't throw
     // synchronously from the SDK's assertNotificationCapability guard.
@@ -786,27 +813,24 @@ Decoding aids you may use:
 - Tokens containing \`_id_\`, \`_name_\`, \`_version_\` often indicate a log line carrying those keys as resource attributes — the severity label may reflect the wrapper severity, not a real error semantic. Flag this distinction when relevant.
 
 These are aids, not certainties. Cite the raw token; let the user verify.`,
-  }
-);
+};
 
-// ── Self-telemetry + manifest registry hook ──
-// Wrap every server.registerTool call so tool dispatches increment a counter
-// (log10x_mcp_tool_call_total) that the Log10x console reads to detect MCP activity.
-// Must run BEFORE any registerTool call. Silent no-op unless LOG10X_API_KEY +
-// PROMETHEUS_REMOTE_WRITE_URL (or LOG10X_TELEMETRY_URL) are both set.
+// Primary server instance. Used for the stdio transport (the published npm
+// entrypoint) and as the reference handle for the few tools that take a server
+// handle (poc_* / advise_install — gated off in the hosted demo). The HTTP
+// transport builds a fresh server per session via configureServer().
+const server = new McpServer(SERVER_INFO, SERVER_OPTIONS);
+
+// ── Self-telemetry ──
+// recordStart() arms the tool-call counter (log10x_mcp_tool_call_total) the
+// Log10x console reads to detect MCP activity. Silent no-op unless LOG10X_API_KEY
+// + PROMETHEUS_REMOTE_WRITE_URL (or LOG10X_TELEMETRY_URL) are set.
 //
-// Same wrapper also stashes the returned RegisteredTool in a registry map so
-// the manifest loader can patch description/title/annotations/enabled at boot
-// — see `applyManifestToTools` in main().
+// Per-call telemetry wrapping (withTelemetry) and the RegisteredTool registry
+// (consumed by applyManifestToTools) are applied per-server inside
+// applyToolRegistrations() / configureServer(), so the same logic serves both
+// the stdio server and the per-session servers the HTTP transport builds.
 recordStart();
-const registeredTools = new Map<string, RegisteredTool>();
-const _originalRegisterTool = server.registerTool.bind(server) as typeof server.registerTool;
-(server as any).registerTool = ((name: string, schema: any, handler: any) => {
-  const wrapped = withTelemetry(name, handler);
-  const registered = _originalRegisterTool(name as any, schema, wrapped);
-  registeredTools.set(name, registered);
-  return registered;
-}) as any;
 
 /**
  * Register a Log10x tool, pulling its title / description / annotations from
@@ -930,7 +954,10 @@ function readOperatorGate(): OperatorGate {
   return { enabledCategories: enabledSet, disabledCategories: disabled, disableWrite };
 }
 
-function applyToolRegistrations(): { registered: string[]; skipped: string[] } {
+function applyToolRegistrations(
+  target: McpServer,
+  registry: Map<string, RegisteredTool>
+): { registered: string[]; skipped: string[] } {
   const mode = bootMode?.mode;
   const gate = readOperatorGate();
   const registered: string[] = [];
@@ -979,7 +1006,7 @@ function applyToolRegistrations(): { registered: string[]; skipped: string[] } {
     // wrapper preserves the agent-facing JSON Schema and the handler's
     // typed args, so downstream code is unchanged.
     const coerciveInputSchema = makeShapeCoercive(t.inputSchema as Record<string, never>);
-    (server.registerTool as any)(
+    const registeredTool = (target.registerTool as any)(
       t.name,
       {
         title: meta.title,
@@ -989,8 +1016,9 @@ function applyToolRegistrations(): { registered: string[]; skipped: string[] } {
         annotations: meta.annotations,
         _meta: toolMeta,
       },
-      t.handler
+      withTelemetry(t.name, t.handler)
     );
+    registry.set(t.name, registeredTool);
     registered.push(t.name);
   }
   return { registered, skipped };
@@ -1523,17 +1551,7 @@ registerLog10xTool('log10x_pattern_mitigate', patternMitigateSchema, (args) =>
 );
 
 // ── Resource: log10x://status ──
-
-server.resource(
-  'pipeline-status',
-  'log10x://status',
-  { description: 'Current pipeline health and volume summary', mimeType: 'text/plain' },
-  async () => {
-    const env = getEnvs().default;
-    const text = await getStatus(env);
-    return { contents: [{ uri: 'log10x://status', text, mimeType: 'text/plain' }] };
-  }
-);
+// Registered per-server in configureServer() so HTTP-session servers get it too.
 
 // ── CLI flag handlers ──
 
@@ -1642,6 +1660,159 @@ async function handleCliFlags(): Promise<boolean> {
   return false;
 }
 
+// ── Server factory + transports ──
+
+/**
+ * Register all tools + the status resource onto a server instance and return
+ * the RegisteredTool registry (consumed by applyManifestToTools). Used for the
+ * stdio server and for each per-session server the HTTP transport builds.
+ */
+function configureServer(target: McpServer): Map<string, RegisteredTool> {
+  const registry = new Map<string, RegisteredTool>();
+  applyToolRegistrations(target, registry);
+  target.resource(
+    'pipeline-status',
+    'log10x://status',
+    { description: 'Current pipeline health and volume summary', mimeType: 'text/plain' },
+    async () => {
+      const env = getEnvs().default;
+      const text = await getStatus(env);
+      return { contents: [{ uri: 'log10x://status', text, mimeType: 'text/plain' }] };
+    }
+  );
+  return registry;
+}
+
+function readJsonBody(req: IncomingMessage): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    req.on('data', (c: Buffer) => {
+      size += c.length;
+      if (size > 4_000_000) {
+        req.destroy();
+        reject(new Error('request body too large'));
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('utf8');
+      if (!raw) return resolve(undefined);
+      try {
+        resolve(JSON.parse(raw));
+      } catch (e) {
+        reject(e);
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
+function sendJsonRpcError(res: ServerResponse, status: number, message: string): void {
+  if (res.headersSent) return;
+  res.writeHead(status, { 'content-type': 'application/json' });
+  res.end(JSON.stringify({ jsonrpc: '2.0', error: { code: -32000, message }, id: null }));
+}
+
+/**
+ * Remote Streamable HTTP transport (stateful sessions) for the hosted demo.
+ * Each MCP session gets its own McpServer + transport, keyed by the
+ * server-assigned Mcp-Session-Id; the heavy global init (env/mode/manifest) is
+ * already done once before this runs. GET /health is a plain ALB liveness
+ * probe. Enabled by LOG10X_MCP_HTTP_PORT. There is no auth in this layer —
+ * the hosted deployment fronts it with a TLS-terminating reverse proxy and
+ * serves only the read-only demo identity.
+ */
+function startHttpServer(
+  port: number,
+  manifest: Awaited<ReturnType<typeof loadManifest>>
+): void {
+  const transports = new Map<string, StreamableHTTPServerTransport>();
+  const maxSessions = Number(process.env.LOG10X_MCP_MAX_SESSIONS ?? '200');
+
+  const httpServer = createServer(async (req, res) => {
+    const path = (req.url ?? '/').split('?')[0];
+
+    if (req.method === 'GET' && (path === '/health' || path === '/healthz')) {
+      // 200 keeps the ALB health check happy (it matches on the status code);
+      // the JSON body lets anyone read the running version/commit via curl.
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ok', ...BUILD_INFO }));
+      return;
+    }
+
+    if (path !== '/mcp') {
+      res.writeHead(404, { 'content-type': 'text/plain' });
+      res.end('not found');
+      return;
+    }
+
+    try {
+      const sessionId = req.headers['mcp-session-id'] as string | undefined;
+
+      if (req.method === 'POST') {
+        const body = await readJsonBody(req);
+        let transport = sessionId ? transports.get(sessionId) : undefined;
+
+        if (!transport) {
+          if (!isInitializeRequest(body)) {
+            sendJsonRpcError(res, 400, 'No valid session — send an initialize request first.');
+            return;
+          }
+          if (transports.size >= maxSessions) {
+            sendJsonRpcError(res, 503, 'Demo server at session capacity; retry shortly.');
+            return;
+          }
+          transport = new StreamableHTTPServerTransport({
+            sessionIdGenerator: () => randomUUID(),
+            onsessioninitialized: (sid: string) => {
+              transports.set(sid, transport as StreamableHTTPServerTransport);
+              log.info('http.session_open', { sessions: transports.size });
+            },
+          });
+          transport.onclose = () => {
+            const sid = transport?.sessionId;
+            if (sid) transports.delete(sid);
+            log.info('http.session_close', { sessions: transports.size });
+          };
+          const sessionServer = new McpServer(SERVER_INFO, SERVER_OPTIONS);
+          const registry = configureServer(sessionServer);
+          if (manifest) applyManifestToTools(manifest, registry);
+          await sessionServer.connect(transport);
+        }
+
+        await transport.handleRequest(req, res, body);
+        return;
+      }
+
+      if (req.method === 'GET' || req.method === 'DELETE') {
+        const transport = sessionId ? transports.get(sessionId) : undefined;
+        if (!transport) {
+          sendJsonRpcError(res, 400, 'Unknown or missing Mcp-Session-Id.');
+          return;
+        }
+        await transport.handleRequest(req, res);
+        return;
+      }
+
+      res.writeHead(405, { 'content-type': 'text/plain' });
+      res.end('method not allowed');
+    } catch (e) {
+      log.warn('http.request_error', { msg: (e as Error).message });
+      sendJsonRpcError(res, 500, 'Internal server error');
+    }
+  });
+
+  httpServer.listen(port, () => {
+    log.info('mcp.http_listening', { port });
+    // eslint-disable-next-line no-console
+    console.error(
+      `[log10x-mcp] Streamable HTTP transport listening on :${port} (POST/GET/DELETE /mcp, health /health)`
+    );
+  });
+}
+
 // ── Start ──
 
 async function main() {
@@ -1670,34 +1841,25 @@ async function main() {
   // the module-scoped `bootMode` used by `wrap()` to gate out-of-mode
   // tool invocations with a clear reply rather than 5xx errors.
   await initBootMode();
-  // Drain the pending tool registration queue, gated by boot mode.
-  // Tools not allowed in this mode are skipped and will not appear
-  // in tools/list. Tools that ARE registered still pass through the
-  // wrap() handler-level mode gate as a defense-in-depth check.
-  const regResult = applyToolRegistrations();
-  log.info('mcp.tool_registration', {
-    mode: bootMode?.mode,
-    registered_count: regResult.registered.length,
-    skipped_count: regResult.skipped.length,
-    skipped: regResult.skipped,
-  });
   // Plumb the envs reference into self-telemetry so the wrapper can
   // resolve which env each tool call acted on, and flush can drop counters
   // from read-only envs (incl. demo). Must happen AFTER initEnvs so the
   // first telemetry flush has a populated env list.
   setEnvsProvider(getEnvs);
-  // Pull the remote manifest and patch tool metadata before the transport
-  // connects. Network failure / disabled / cache miss all silently fall
-  // through to the package-baked defaults — boot must succeed offline.
+  // Pull the remote manifest before any server is configured. Network failure
+  // / disabled / cache miss all silently fall through to the package-baked
+  // defaults — boot must succeed offline.
   const manifest = await loadManifest(readClientVersion());
-  if (manifest) applyManifestToTools(manifest, registeredTools);
   const loaded = getEnvs();
   log.info('mcp.boot', {
     version: readClientVersion(),
+    commit: BUILD_INFO.commit,
+    built_at: BUILD_INFO.builtAt,
     tools: REGISTERED_TOOLS.length,
     envs: loaded.all.length,
     default_env: loaded.default.nickname,
     demo_mode: loaded.isDemoMode,
+    demo_playground: DEMO_PLAYGROUND,
     manifest_loaded: manifest !== null,
     boot_mode: bootMode?.mode,
     boot_mode_backend: bootMode?.detectionPath,
@@ -1709,6 +1871,21 @@ async function main() {
     // eslint-disable-next-line no-console
     console.error(`[log10x-mcp] ${formatModeResolution(bootMode).split('\n')[0]}`);
   }
+
+  // Transport selection. LOG10X_MCP_HTTP_PORT → remote Streamable HTTP (the
+  // hosted demo playground; one McpServer per session). Otherwise the default
+  // stdio transport (the published npm entrypoint for local MCP hosts). Tool
+  // registration is gated by bootMode inside configureServer() either way.
+  const httpPort = process.env.LOG10X_MCP_HTTP_PORT
+    ? Number(process.env.LOG10X_MCP_HTTP_PORT)
+    : undefined;
+  if (httpPort && Number.isFinite(httpPort)) {
+    startHttpServer(httpPort, manifest);
+    return;
+  }
+
+  const registry = configureServer(server);
+  if (manifest) applyManifestToTools(manifest, registry);
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }

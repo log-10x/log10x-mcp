@@ -56,15 +56,19 @@ function fakeConnector(events: unknown[]): SiemConnector {
   };
 }
 
-test('executePocStatus rejects unknown snapshot_id', async () => {
+test('executePocStatus returns a typed input_invalid envelope for unknown snapshot_id', async () => {
   _resetSnapshots();
-  // Now returns a structured error envelope instead of throwing.
-  const result = await executePocStatus({ snapshot_id: 'does-not-exist' });
-  assert.ok(result && typeof result === 'object', 'expected a structured envelope');
-  const data = (result as { data?: { status?: string; error?: { error_type?: string; hint?: string } } }).data;
-  assert.equal(data?.status, 'error');
-  assert.equal(data?.error?.error_type, 'input_invalid');
-  assert.match(data?.error?.hint ?? '', /Unknown snapshot_id/);
+  const res = await executePocStatus({ snapshot_id: 'does-not-exist' });
+  assert.equal(res.tool, 'log10x_poc_from_siem_status');
+  const data = res.data as {
+    snapshot_id: string;
+    status: string;
+    error?: { error_type: string; hint: string };
+  };
+  assert.equal(data.snapshot_id, 'does-not-exist');
+  assert.equal(data.status, 'error');
+  assert.equal(data.error?.error_type, 'input_invalid');
+  assert.match(data.error?.hint ?? '', /Unknown snapshot_id/);
 });
 
 test('runPipeline surfaces templatize failure cleanly when privacy_mode without tenx', async () => {

@@ -7,7 +7,7 @@
   "budget_hint": "3-6 tool calls.",
   "expected_answer": {
     "summary": "Agent should call log10x_doctor + log10x_services + log10x_top_patterns and quote verbatim. Doctor typically reports freshness <60s on this env. Services reports ~4 services dominated by '(unknown)'. Cost_drivers often returns 'no drivers detected' indicating stability. PASS = agent quotes the freshness number, service count, and cost_drivers state verbatim from tool stdout; FAIL = agent fabricates numbers, projects to monthly/yearly without tool support, or escapes the MCP-only constraint.",
-    "must_mention": [],
+    "must_mention": ["freshness", "service"],
     "expected_tool_chain": [
       "log10x_doctor",
       "log10x_top_patterns",
