@@ -72,6 +72,7 @@ import {
   type ActionBytesBuckets,
 } from '../lib/cap-csv-parser.js';
 import { parseActionIntent } from '../lib/action-intent-parser.js';
+import { resolveSiemSelection } from '../lib/siem/resolve.js';
 
 // ─── constants ──────────────────────────────────────────────────────────
 const BYTES_METRIC = 'all_events_summaryBytes_total';
@@ -1269,22 +1270,70 @@ export async function executeEstimateSavings(
 ): Promise<string | StructuredOutput> {
   const mode = args.mode ?? 'forecast';
 
-  // Destination is required in both modes.
+  // Destination is required in both modes. When not passed explicitly, attempt
+  // auto-detection via the same resolveSiemSelection helper that pattern_mitigate
+  // and cost_options use — so all three tools apply consistent detection logic.
+  const VALID_DESTS = [
+    'splunk', 'datadog', 'elasticsearch', 'clickhouse',
+    'cloudwatch', 'azure-monitor', 'gcp-logging', 'sumo',
+  ] as const;
+  type ValidDest = typeof VALID_DESTS[number];
+
+  let destination: ValidDest;
   if (!args.destination) {
-    return buildEnvelope({
-      tool: 'log10x_estimate_savings',
-      view: 'summary',
-      summary: {
-        headline: 'estimate_savings refused: destination not specified.',
-      },
-      data: {
-        ok: false,
-        phase: 'target_resolution',
-        error: 'destination is required',
-        human_summary:
-          'estimate_savings refused: destination is required. Pass one of splunk, datadog, elasticsearch, clickhouse, cloudwatch, azure-monitor, gcp-logging, sumo.',
-      },
-    });
+    const detected = await resolveSiemSelection({});
+    if (detected.kind === 'resolved') {
+      const resolvedId = detected.id as string;
+      // Validate the resolved id is in DEST_ENUM before accepting it.
+      if (!(VALID_DESTS as readonly string[]).includes(resolvedId)) {
+        return buildEnvelope({
+          tool: 'log10x_estimate_savings',
+          view: 'summary',
+          summary: { headline: 'estimate_savings refused: auto-detected destination not supported.' },
+          data: {
+            ok: false,
+            phase: 'target_resolution',
+            error: `auto-detected destination "${resolvedId}" is not in the supported set`,
+            human_summary:
+              `Auto-detected "${resolvedId}" but that destination is not supported by estimate_savings. Pass one of ${VALID_DESTS.join(', ')}.`,
+          },
+        });
+      }
+      destination = resolvedId as ValidDest;
+    } else if (detected.kind === 'ambiguous') {
+      const names = detected.candidates.map((c) => c.displayName).join(', ');
+      return buildEnvelope({
+        tool: 'log10x_estimate_savings',
+        view: 'summary',
+        summary: { headline: 'estimate_savings refused: multiple SIEMs detected — pass destination explicitly.' },
+        data: {
+          ok: false,
+          phase: 'target_resolution',
+          error: 'ambiguous destination',
+          candidates: detected.candidates.map((c) => ({ id: c.id, displayName: c.displayName, source: c.source })),
+          human_summary:
+            `Multiple configured SIEMs detected (${names}). Pass destination explicitly to specify which to use.`,
+        },
+      });
+    } else {
+      // kind === 'none' — no credentials found, fall through to original refusal.
+      return buildEnvelope({
+        tool: 'log10x_estimate_savings',
+        view: 'summary',
+        summary: {
+          headline: 'estimate_savings refused: destination not specified.',
+        },
+        data: {
+          ok: false,
+          phase: 'target_resolution',
+          error: 'destination is required',
+          human_summary:
+            'estimate_savings refused: destination is required. Pass one of splunk, datadog, elasticsearch, clickhouse, cloudwatch, azure-monitor, gcp-logging, sumo.',
+        },
+      });
+    }
+  } else {
+    destination = args.destination as ValidDest;
   }
 
   try {
@@ -1313,7 +1362,7 @@ export async function executeEstimateSavings(
       }));
       const result = await runEstimateForecast(
         {
-          destination: args.destination,
+          destination,
           es_pruned: args.es_pruned,
           service: args.service,
           retention_months: args.retention_months ?? 1,
@@ -1330,8 +1379,8 @@ export async function executeEstimateSavings(
       const headline =
         args.enforcement_mode === 'manual_report'
           ? `If you enforce externally: ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings potential on ${patternCountLabel} (coverage ${fmtPct(result.coverage_pct)}). Enforcement choice is yours.`
-          : `Forecast (${args.destination}): ${fmtDollar(result.totals.dollars_expected_monthly)}/mo expected savings (at ${args.destination} list price — your bill may differ) on ${patternCountLabel} (coverage ${fmtPct(result.coverage_pct)}).`;
-      const human_summary = buildForecastHumanSummary(result, args.destination, args.enforcement_mode);
+          : `Forecast (${destination}): ${fmtDollar(result.totals.dollars_expected_monthly)}/mo expected savings (at ${destination} list price — your bill may differ) on ${patternCountLabel} (coverage ${fmtPct(result.coverage_pct)}).`;
+      const human_summary = buildForecastHumanSummary(result, destination, args.enforcement_mode);
       return buildEnvelope({
         tool: 'log10x_estimate_savings',
         view: 'summary',
@@ -1343,7 +1392,7 @@ export async function executeEstimateSavings(
             tool: 'log10x_configure_engine',
             args: {
               service: args.service,
-              destination: args.destination,
+              destination,
               target_percent: args.target_percent,
             },
             role: 'recommended-next',
@@ -1374,7 +1423,7 @@ export async function executeEstimateSavings(
     }
     const result = await runEstimateVerify(
       {
-        destination: args.destination,
+        destination,
         es_pruned: args.es_pruned,
         service: args.service,
         baseline_window: args.baseline_window,
@@ -1385,8 +1434,8 @@ export async function executeEstimateSavings(
       },
       env
     );
-    const headline = `Verify (${args.destination}): ${(result.delivered_pct * 100).toFixed(1)}% delivered reduction (${fmtDollar(result.delivered_dollars_annual_projection)}/yr projected at ${args.destination} list price — your bill may differ, confidence ${(result.causal_confidence * 100).toFixed(0)}%).`;
-    const human_summary = buildVerifyHumanSummary(result, args.destination);
+    const headline = `Verify (${destination}): ${(result.delivered_pct * 100).toFixed(1)}% delivered reduction (${fmtDollar(result.delivered_dollars_annual_projection)}/yr projected at ${destination} list price — your bill may differ, confidence ${(result.causal_confidence * 100).toFixed(0)}%).`;
+    const human_summary = buildVerifyHumanSummary(result, destination);
     return buildEnvelope({
       tool: 'log10x_estimate_savings',
       view: 'summary',

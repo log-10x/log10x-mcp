@@ -565,6 +565,19 @@ export async function executePatternMitigate(args: PatternMitigateArgs): Promise
     });
   }
 
+  // When at least one mitigation option is enabled, surface the cost_options
+  // action menu so agent chains can proceed to configure an action without
+  // parsing the human_summary text.
+  const anyEnabled = d.options.some((o) => o.enabled);
+  if (anyEnabled) {
+    envelopeActions.push({
+      tool: 'log10x_cost_options',
+      args: { pattern: d.pattern },
+      reason: 'One or more mitigation tiers are reachable. cost_options surfaces the WHAT-action menu (drop/sample/compact/tier_down/offload/observe_only).',
+      role: 'recommended-next',
+    });
+  }
+
   return buildEnvelope({
     tool: 'log10x_pattern_mitigate',
     view: 'summary',
