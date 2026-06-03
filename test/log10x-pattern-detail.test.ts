@@ -9,13 +9,14 @@
  *   - sample event truncation to 120 chars
  *   - envelope data shape (pattern_hash, services, sample_events, must_ask_user)
  *   - must_render_verbatim contains ASCII chart block chars (█/░)
- *   - actions[] contains log10x_preview_filter and log10x_configure_engine entries
+ *   - actions[] contains log10x_preview_filter, log10x_configure_engine, and log10x_pattern_examples entries
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { z } from 'zod';
 import { patternDetailSchema, executePatternDetail, __testables } from '../src/tools/pattern-detail.js';
+import type { StructuredOutput } from '../src/lib/output-types.js';
 
 const { renderAsciiBarChart } = __testables;
 
@@ -186,3 +187,29 @@ test('renderAsciiBarChart: capped at maxBarWidth columns of blocks per row', () 
     }
   }
 });
+
+// ── actions[] ─────────────────────────────────────────────────────────────────
+
+test('pattern_detail: actions[] includes log10x_preview_filter entry', async () => {
+  const out = await executePatternDetail({ pattern_hash: 'deadbeef0000' });
+  const actions = (out as StructuredOutput & { actions?: Array<{ tool: string }> }).actions ?? [];
+  const found = actions.some((a) => a.tool === 'log10x_preview_filter');
+  assert.ok(found, 'Expected a log10x_preview_filter entry in actions[]');
+});
+
+test('pattern_detail: actions[] includes log10x_configure_engine entry', async () => {
+  const out = await executePatternDetail({ pattern_hash: 'deadbeef0000' });
+  const actions = (out as StructuredOutput & { actions?: Array<{ tool: string }> }).actions ?? [];
+  const found = actions.some((a) => a.tool === 'log10x_configure_engine');
+  assert.ok(found, 'Expected a log10x_configure_engine entry in actions[]');
+});
+
+test('pattern_detail: actions[] includes log10x_pattern_examples entry with pattern arg', async () => {
+  const out = await executePatternDetail({ pattern_hash: 'deadbeef0000' });
+  const actions = (out as StructuredOutput & { actions?: Array<{ tool: string; args: Record<string, unknown>; role: string }> }).actions ?? [];
+  const entry = actions.find((a) => a.tool === 'log10x_pattern_examples');
+  assert.ok(entry !== undefined, 'Expected a log10x_pattern_examples entry in actions[]');
+  assert.equal(entry!.role, 'optional-followup');
+  assert.ok('pattern' in entry!.args, 'log10x_pattern_examples args must contain pattern key');
+});
+

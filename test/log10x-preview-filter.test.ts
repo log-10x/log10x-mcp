@@ -219,21 +219,33 @@ test('preview_filter: no-signal (no backend) produces text message not table', a
 
 // ─── actions array ────────────────────────────────────────────────────────────
 
-test('preview_filter: actions[] entries reference log10x_pattern_detail', async () => {
+test('preview_filter: actions[] alternative entries all reference log10x_pattern_detail', async () => {
   const out = await executePreviewFilter({ service: 'cart', mode: 'drop' });
   const actions = (out as StructuredOutput & { actions?: Array<{ tool: string; role: string }> }).actions ?? [];
+  const alternatives = actions.filter((a) => a.role === 'alternative');
 
-  for (const action of actions) {
-    assert.equal(action.tool, 'log10x_pattern_detail', `unexpected tool in actions: ${action.tool}`);
-    assert.equal(action.role, 'alternative');
+  for (const action of alternatives) {
+    assert.equal(action.tool, 'log10x_pattern_detail', `unexpected tool in alternative actions: ${action.tool}`);
   }
 });
 
-test('preview_filter: actions[] count matches patterns count', async () => {
+test('preview_filter: actions[] count is two entries per pattern (pattern_detail + pattern_examples)', async () => {
   const out = await executePreviewFilter({ service: 'cart', mode: 'drop', top_n: 10 });
   const d = asEnvelope(out);
   const actions = (out as StructuredOutput & { actions?: unknown[] }).actions ?? [];
-  assert.equal(actions.length, d.patterns.length, 'one action per pattern row');
+  assert.equal(actions.length, d.patterns.length * 2, 'two actions per pattern row (pattern_detail + pattern_examples)');
+});
+
+test('preview_filter: actions[] includes log10x_pattern_examples entries with pattern arg', async () => {
+  const out = await executePreviewFilter({ service: 'cart', mode: 'drop' });
+  const actions = (out as StructuredOutput & { actions?: Array<{ tool: string; args: Record<string, unknown>; role: string }> }).actions ?? [];
+  const examples = actions.filter((a) => a.tool === 'log10x_pattern_examples');
+
+  assert.ok(examples.length > 0, 'Expected at least one log10x_pattern_examples entry in actions[]');
+  for (const entry of examples) {
+    assert.equal(entry.role, 'optional-followup');
+    assert.ok('pattern' in entry.args, 'log10x_pattern_examples args must contain pattern key');
+  }
 });
 
 // ─── mode enum coverage ───────────────────────────────────────────────────────

@@ -447,6 +447,12 @@ export async function executePatternDetail(args: {
           : 'Apply with this pattern in the picture',
         role: 'alternative',
       },
+      {
+        tool: 'log10x_pattern_examples',
+        args: { pattern: patternName ?? args.pattern_hash },
+        reason: 'Bucket sample events by slot value to see if a single slot value dominates (low-cardinality skew) — useful before deciding drop vs sample vs compact.',
+        role: 'optional-followup',
+      },
     ],
   });
 }

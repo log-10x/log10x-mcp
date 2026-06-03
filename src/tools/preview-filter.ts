@@ -405,11 +405,19 @@ export async function executePreviewFilter(args: {
     view: 'summary',
     summary: { headline },
     data: envelope,
-    actions: patterns.map((p) => ({
-      tool: 'log10x_pattern_detail',
-      args: { pattern_hash: p.tenx_hash },
-      reason: `drill into pattern #${p.rank}: ${p.descriptor}`,
-      role: 'alternative' as const,
-    })),
+    actions: patterns.flatMap((p) => [
+      {
+        tool: 'log10x_pattern_detail',
+        args: { pattern_hash: p.tenx_hash },
+        reason: `drill into pattern #${p.rank}: ${p.descriptor}`,
+        role: 'alternative' as const,
+      },
+      {
+        tool: 'log10x_pattern_examples',
+        args: { pattern: p.descriptor_full },
+        reason: 'Bucket sample events by slot value to see if a single slot value dominates (low-cardinality skew) — useful before deciding drop vs sample vs compact.',
+        role: 'optional-followup' as const,
+      },
+    ]),
   });
 }
