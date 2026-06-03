@@ -37,7 +37,7 @@ import {
   datadogAnalyzerQuery,
   healthBanner,
 } from '../lib/top-patterns-extras.js';
-import { computeTrendDelta } from '../lib/trend-delta.js';
+import { computeTrendDelta, glyphForState } from '../lib/trend-delta.js';
 
 export const topPatternsSchema = {
   service: z.string().optional().describe('Service name to scope the result. Omit for all services.'),
@@ -418,6 +418,9 @@ export async function executeTopPatterns(
     // the envelope's `state` field is then re-derived from the WoW pct
     // so the two fields are always consistent.
     const state = classifyStateFromDelta(trendDelta.value, firstSeenSec);
+    // Defect 14.1: glyph must match state, not badgeInfo.kind. Re-derive
+    // after state is settled so they can never contradict.
+    trendDelta.glyph = glyphForState(state);
     const serviceCount = serviceBreadthByHash.get(r.hash);
     const deps = depsByHash?.get(r.hash);
     // Datadog inline snippet — only when the env's analyzer is

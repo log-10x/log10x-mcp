@@ -468,11 +468,20 @@ async function runAppsMcpViaLocalBinary(
   }
   const cliVersion = await tryGetVersion(binary);
 
-  // Don't inject TENX_INCLUDE_PATHS. Rely on the user's TENX_HOME /
-  // TENX_MODULES / TENX_CONFIG (or OS defaults) to resolve `apps/mcp`.
-  // Set a runtime name so the engine's log line carries a recognizable tag.
+  // TENX_INCLUDE_PATHS injected so the engine resolves apps/mcp without
+  // requiring user-set TENX_HOME in the MCP server's environment.
+  const { config: tenxConfig, modules: tenxModules } = resolveInstallPaths();
+  const includePaths = [
+    tenxConfig,
+    join(tenxConfig, 'pipelines'),
+    tenxModules,
+    join(tenxModules, 'pipelines'),
+    join(tenxModules, 'apps'),
+  ].join(';');
+
   const env: NodeJS.ProcessEnv = {
     ...process.env,
+    TENX_INCLUDE_PATHS: includePaths,
     LOG10X_MCP_RUNTIME_NAME: `mcp-${Date.now()}`,
   };
 
