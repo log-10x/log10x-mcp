@@ -30,6 +30,7 @@ import type { ForwarderId } from '../lib/forwarder-snippets.js';
 import { resolveSiemSelection } from '../lib/siem/resolve.js';
 import {
   classifyBadge,
+  classifyStateFromDelta,
   fetchBaselineBytes,
   fetchServiceBreadth,
   fetchDepsPerHash,
@@ -411,8 +412,12 @@ export async function executeTopPatterns(
     const baselineSamples = baselineByKey.get(baselineKey) ?? [];
     const firstSeenSec = fsRes?.ageSeconds ?? null;
     const badgeInfo = classifyBadge(r.bytes, baselineSamples, firstSeenSec);
-    const state = badgeInfo.kind;
-    const trendDelta = computeTrendDelta(state, trendVals, firstSeenSec);
+    const trendDelta = computeTrendDelta(badgeInfo.kind, trendVals, firstSeenSec);
+    // state is now strictly derived from trend_delta.value (defect 14).
+    // classifyBadge() drives the intermediate trendDelta computation;
+    // the envelope's `state` field is then re-derived from the WoW pct
+    // so the two fields are always consistent.
+    const state = classifyStateFromDelta(trendDelta.value, firstSeenSec);
     const serviceCount = serviceBreadthByHash.get(r.hash);
     const deps = depsByHash?.get(r.hash);
     // Datadog inline snippet — only when the env's analyzer is

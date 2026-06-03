@@ -112,6 +112,43 @@ export function classifyBadge(
   return { kind: 'STABLE', ratio, firstSeenAgeSeconds };
 }
 
+/** Seven days in seconds — the NEW threshold for classifyStateFromDelta. */
+const SEVEN_DAYS_SECONDS = 7 * 24 * 3600;
+
+/**
+ * Derive a Badge state from a trend_delta percent value and the
+ * pattern's first-seen age.
+ *
+ * This makes `state` strictly derived from `trend_delta.value` (the
+ * source of truth), replacing the older classifyBadge() derivation
+ * that went directly from baseline-bytes comparison.
+ *
+ * Thresholds (Tal, 2026-06-03):
+ *   NEW       — firstSeenAgeSeconds < 7d (regardless of delta)
+ *   ACUTE     — TODO: requires 1h delta input; not yet implemented.
+ *               Reserve the branch for when a separate 1h-delta field
+ *               is available on the row.
+ *   GROWING   — deltaPct > 15
+ *   SHRINKING — deltaPct < -15
+ *   STABLE    — |deltaPct| <= 15 (inclusive at ±15)
+ *
+ * Note: ACUTE cannot be derived from the WoW delta alone — it signals
+ * a short-window spike (last 1h vs prior 1h) that is orthogonal to the
+ * week-over-week trend. Until a 1h-delta input is wired, callers should
+ * treat ACUTE as a TODO and fall through to GROWING/STABLE/SHRINKING.
+ */
+export function classifyStateFromDelta(
+  deltaPct: number,
+  ageSeconds: number | null
+): Badge {
+  if (ageSeconds !== null && ageSeconds < SEVEN_DAYS_SECONDS) return 'NEW';
+  // ACUTE: deferred — requires a separate 1h delta input.
+  // TODO: if (h1DeltaPct > 100) return 'ACUTE';
+  if (deltaPct > 15) return 'GROWING';
+  if (deltaPct < -15) return 'SHRINKING';
+  return 'STABLE';
+}
+
 /**
  * Render the badge in the meaningful form for the new list shape.
  * Replaces the old `—` / `↑` glyphs that gave the Reader nothing

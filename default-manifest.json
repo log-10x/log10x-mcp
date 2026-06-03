@@ -565,6 +565,17 @@
         "openWorldHint": false
       },
       "category": "install"
+    },
+    "log10x_dev_restart": {
+      "title": "Restart MCP server (dev only)",
+      "description": "DEV ONLY — only registered when LOG10X_DEV_MODE=true. Exits the MCP server process after returning a confirmation envelope; the MCP host respawns the process so the updated build loads. Call with no arguments. Re-fetch tool schemas after the respawn — the new process may expose a different tool set. Never visible in production builds.",
+      "annotations": {
+        "title": "Restart MCP server (dev only)",
+        "readOnlyHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
+      "category": "orient"
     }
   }
 }

@@ -131,6 +131,7 @@ import { previewFilterSchema, executePreviewFilter } from './tools/preview-filte
 import { patternDetailSchema, executePatternDetail } from './tools/pattern-detail.js';
 import { measureCompactionSchema, executeMeasureCompaction } from './tools/measure-compaction.js';
 import { setupRecurringSchema, executeSetupRecurring } from './tools/setup-recurring.js';
+import { devRestartSchema, executeDevRestart } from './tools/dev-restart.js';
 import { getStatus } from './resources/status.js';
 
 // ── Environment + cost cache ──
@@ -1580,6 +1581,23 @@ registerLog10xTool('log10x_commitment_report', commitmentReportSchema, (args) =>
 registerLog10xTool('log10x_pattern_mitigate', patternMitigateSchema, (args) =>
   wrap('log10x_pattern_mitigate', () => executePatternMitigate(args))
 );
+
+// ── Tool: log10x_dev_restart (dev mode only) ──
+//
+// Only registered when LOG10X_DEV_MODE=true. Forces a process.exit(0)
+// so the MCP host respawns with an updated build. Never appears in
+// production tools/list.
+
+if (process.env.LOG10X_DEV_MODE === 'true') {
+  registerLog10xTool('log10x_dev_restart', devRestartSchema, () =>
+    wrap('log10x_dev_restart', async () => {
+      if (process.env.LOG10X_DEV_MODE !== 'true') {
+        throw new Error('log10x_dev_restart is not available in production builds');
+      }
+      return executeDevRestart();
+    })
+  );
+}
 
 // ── Resource: log10x://status ──
 // Registered per-server in configureServer() so HTTP-session servers get it too.
