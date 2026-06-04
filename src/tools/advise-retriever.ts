@@ -957,7 +957,9 @@ function renderInfraInstructions(
   session: RetrieverWizardSession
 ): string {
   const region = snapshot.aws?.region ?? 'us-east-1';
-  const account = snapshot.aws?.callerIdentity?.account ?? '123456789012';
+  const detectedAccount = snapshot.aws?.callerIdentity?.account;
+  const account = detectedAccount ?? '<ACCOUNT_ID>';
+  const accountAutoDetected = !!detectedAccount;
   const clusterName = snapshot.aws?.eks?.name ?? '<your-cluster>';
   // Use the OIDC issuer extracted from describe-cluster (no https:// prefix).
   // Falls back to the placeholder pattern if discovery didn't capture it yet.
@@ -965,7 +967,7 @@ function renderInfraInstructions(
     ?? `oidc.eks.${region}.amazonaws.com/id/<OIDC_ID>`;
 
   if (session.infraMode === 'terraform') {
-    return renderTerraformInstructions(clusterName, region, account, oidcProvider);
+    return renderTerraformInstructions(clusterName, region, account, oidcProvider, accountAutoDetected);
   }
   return renderCliInstructions(clusterName, region, account, oidcProvider);
 }
@@ -974,19 +976,34 @@ function renderTerraformInstructions(
   clusterName: string,
   region: string,
   account: string,
-  oidcProvider: string
+  oidcProvider: string,
+  accountAutoDetected: boolean = false
 ): string {
-  const envId = account.slice(-6);
+  const envId = account === '<ACCOUNT_ID>' ? 'xxxxxx' : account.slice(-6);
+  // Compute the full OIDC provider ARN required by oidc_provider_arn.
+  // Format: arn:aws:iam::<ACCOUNT_ID>:oidc-provider/<oidcProvider>
+  const oidcProviderArn = `arn:aws:iam::${account}:oidc-provider/${oidcProvider}`;
+
+  const accountWarning = !accountAutoDetected
+    ? [
+        '',
+        '> **Note:** The AWS account ID could not be auto-detected (sts:GetCallerIdentity failed during discovery).',
+        '> Replace `<ACCOUNT_ID>` in `oidc_provider_arn` with your 12-digit AWS account ID before running `terraform init`.',
+        '> You can get it by running: `aws sts get-caller-identity --query Account --output text`',
+      ]
+    : [];
+
   return [
     '# Retriever wizard — Step 3: Terraform provisioning',
     '',
     'Add the following to your Terraform workspace. The module creates the S3 bucket, four SQS queues, IAM role with IRSA binding, and CloudWatch log groups.',
+    ...accountWarning,
     '',
     '```hcl',
     `terraform {`,
     `  required_version = ">= 1.5.0"`,
     `  required_providers {`,
-    `    aws = { source = "hashicorp/aws", version = "~> 5.0" }`,
+    `    aws = { source = "hashicorp/aws", version = ">= 6.3.0" }`,
     `  }`,
     `}`,
     ``,
@@ -1003,6 +1020,7 @@ function renderTerraformInstructions(
     `  version = "~> 1.0"`,
     ``,
     `  oidc_provider     = "${oidcProvider}"`,
+    `  oidc_provider_arn = "${oidcProviderArn}"`,
     `  tenx_api_key      = var.tenx_api_key`,
     `  namespace         = "log10x"`,
     `  create_namespace  = true`,
