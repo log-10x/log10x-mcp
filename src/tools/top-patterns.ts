@@ -231,6 +231,130 @@ export async function executeTopPatterns(
   ]);
 
   if (res.status !== 'success' || res.data.result.length === 0) {
+    // When include='dropped', the empty-result cause is ambiguous:
+    //   A. enrichment_not_wired — receiver does not emit the isDropped label at all.
+    //   B. enrichment_wired_window_empty — label is wired but no dropped events in this window/scope.
+    //   C. onboarding_gate — engine is < 24h old and has no data yet (the original case).
+    //
+    // Distinguish them so an agent or user can take the right corrective action.
+    // States A and B require a meta probe; skip it for `kept` / `both` which fall
+    // through to the existing generic message (no dropped-label dependency there).
+    if (include === 'dropped') {
+      // Meta probe: count the number of distinct message_pattern series that carry
+      // the isDropped="true" label env-wide (no window scope — use a generous 24h
+      // lookback so a sparse env is not misclassified as unwired). If the count is
+      // zero the label is not being stamped by the receiver at all (state A).
+      let distinctDroppedPatternCount = 0;
+      try {
+        const metaProbeQuery = `count(count by (message_pattern) (all_events_summaryBytes_total{tenx_env="${metricsEnv}",isDropped="true"}[24h]))`;
+        const metaRes = await queryInstant(env, metaProbeQuery);
+        if (metaRes.status === 'success' && metaRes.data.result.length > 0) {
+          distinctDroppedPatternCount = Number(metaRes.data.result[0].value?.[1] ?? 0) || 0;
+        }
+      } catch {
+        // meta probe failure is non-fatal — fall through to generic message
+      }
+
+      let enrichmentState: 'enrichment_not_wired' | 'enrichment_wired_window_empty' | 'onboarding_gate' | 'unknown';
+      let message: string;
+
+      if (distinctDroppedPatternCount === 0) {
+        // State A: isDropped label never seen in this env.
+        enrichmentState = 'enrichment_not_wired';
+        message =
+          'isDropped enrichment is not wired on this env\'s Receiver — the receiver does not emit the isDropped label. ' +
+          'To enable, ensure the rate-receiver settings.yaml includes \'isDropped\' in enrichmentFields (it is on by default), ' +
+          'and the engine is on run-edge 1.1.0+ (the release that appends the isDropped label on the wire). ' +
+          'See docs/cross-pillar-primitives.md for setup details.';
+      } else {
+        // State B: label is wired, but the requested window/scope returned zero dropped events.
+        enrichmentState = 'enrichment_wired_window_empty';
+        const scopeDesc = args.service ? ` for service "${args.service}"` : '';
+        message =
+          `No dropped-cohort patterns in this ${tf.label} window${scopeDesc}. ` +
+          `The isDropped enrichment IS wired (${distinctDroppedPatternCount} distinct pattern${distinctDroppedPatternCount === 1 ? '' : 's'} observed env-wide in the last 24h) ` +
+          `but the current scope returned zero events. ` +
+          (args.service ? 'Try removing the service scope, or ' : 'Try ') +
+          'widening the time window (e.g. timeRange="24h").';
+      }
+
+      // Surface the state in a structured envelope so an agent can branch
+      // on data.payload.diagnostics.enrichment_state without parsing prose.
+      return buildChassisEnvelope({
+        tool: 'log10x_top_patterns',
+        view: 'summary',
+        headline: message,
+        status: 'no_signal',
+        decisions: {
+          threshold_used: null,
+          threshold_basis: 'default',
+        },
+        payload: {
+          rate_source,
+          include,
+          patterns: [],
+          incidents: [],
+          totals: {
+            monthly_usd: null,
+            monthly_usd_disclosed: null,
+            bytes_per_sec: 0,
+            bytes_total: 0,
+            top_n_percent_of_total: 0,
+            pattern_count_shown: 0,
+            pattern_count_total: undefined,
+            dropped_bytes_total: null,
+            dropped_share_pct: null,
+            dropped_monthly_usd: null,
+            dropped_monthly_usd_disclosed: null,
+          },
+          window: tf.label,
+          pattern_count_shown: 0,
+          pattern_count_total: undefined,
+          offset: 0,
+          diagnostics: {
+            enrichment_state: enrichmentState,
+            distinct_dropped_patterns_env_24h: distinctDroppedPatternCount,
+          },
+          bytes_source: {
+            metric: 'all_events_summaryBytes_total',
+            observation_window: tf.range,
+            cohort: include,
+            scope_filter: `${metricsEnv}`,
+          },
+          pattern_count_source: {
+            query: 'distinctPatternCount',
+            count: null,
+            window: tf.range,
+          },
+        },
+        human_summary: message,
+        source_disclosure: {
+          bytes_source: 'tsdb',
+          rate_source: 'none',
+          pattern_count_source: {
+            kind: 'top_n_above_threshold',
+            count: 0,
+            denominator_meaning: 'No dropped-cohort data in scope',
+          },
+        },
+        scope: {
+          window: tf.label,
+          window_basis: 'explicit',
+          candidates_count: 0,
+          candidates_usable: 0,
+          candidates_evaluated: 0,
+        },
+        actions: enrichmentState === 'enrichment_wired_window_empty' ? [
+          {
+            tool: 'log10x_top_patterns',
+            args: { include: 'dropped', timeRange: '24h', limit: args.limit },
+            reason: 'Widen to 24h to find dropped-cohort patterns across a longer window',
+          },
+        ] : [],
+        telemetry: newChassisTelemetry(),
+      });
+    }
+
     return 'No pattern data available. Patterns appear after the first 24h of data collection.';
   }
 

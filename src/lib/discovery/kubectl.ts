@@ -306,9 +306,28 @@ async function probeWorkloadsInNamespace(
     // classification entirely — this prevents fluent-bit sidecars inside
     // log10x retriever/receiver pods from being mis-detected as a customer
     // forwarder.
-    const log10xContainer = (containers ?? []).find(
-      (c) => isLog10xImage(c.image) || classifyLog10xApp(c.image, labels, helmRel?.chart) !== 'unknown'
-    );
+    //
+    // Container selection strategy (priority order):
+    //   1. A container named exactly "log10x" — this is the stable contract
+    //      name used across all forwarder flavors (tenx-fluentd DaemonSet,
+    //      fluent-bit DS, etc.). Matching by name avoids image-substring
+    //      collisions: custom ECR sidecar images containing "/tenx-" in the
+    //      registry path (e.g. tenx-demo-fluentd-cw-s3) would otherwise win
+    //      the isLog10xImage() probe before the real log10x container and
+    //      return kind='unknown', hiding the receiver entry.
+    //   2. Any container whose image passes isLog10xImage() or whose app kind
+    //      is classifiable — the legacy path for workloads that don't name
+    //      their container "log10x" (e.g. standalone retriever Deployments
+    //      where the pod template uses a different container name).
+    //
+    // The engine container name "log10x" is authoritative: it is referenced
+    // by that name in every DS spec and helm chart and is never renamed.
+    const log10xNamedContainer = (containers ?? []).find((c) => c.name === 'log10x');
+    const log10xContainer =
+      log10xNamedContainer ??
+      (containers ?? []).find(
+        (c) => isLog10xImage(c.image) || classifyLog10xApp(c.image, labels, helmRel?.chart) !== 'unknown'
+      );
     if (log10xContainer) {
       const appKind = classifyLog10xApp(log10xContainer.image, labels, helmRel?.chart);
       // Capture literal-valued env on the matching container.

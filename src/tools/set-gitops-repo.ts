@@ -127,6 +127,14 @@ export async function executeSetGitopsRepo(
       view: 'summary',
       summary: { headline: `set_gitops_repo failed: ${msg}` },
       data: { ok: false, error: msg },
+      actions: [
+        {
+          tool: 'log10x_configure_env',
+          args: {},
+          role: 'required-next',
+          reason: 'No envs.json yet — create the first env entry. set_gitops_repo can then update its gitops.repo field.',
+        },
+      ],
     });
   }
 
