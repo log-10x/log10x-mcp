@@ -13,6 +13,17 @@
  *
  * Requires __SAVE_LOG10X_RETRIEVER_URL__ and __SAVE_LOG10X_RETRIEVER_BUCKET__ to be set. Falls
  * back gracefully with a "not configured" message otherwise.
+ *
+ * SQS fallback: when the HTTP POST to the query-handler URL fails with a
+ * transport-level error (ENOTFOUND, ECONNREFUSED, ETIMEDOUT — typical when the
+ * helm probe resolved a ClusterIP address unreachable from outside the cluster),
+ * the tool automatically retries via the Quarkus ingress queue. Requires:
+ *   - LOG10X_RETRIEVER_QUERY_QUEUE_URL — the Quarkus ingress queue URL
+ *     (same as TENX_QUARKUS_QUERY_QUEUE_URL in the retriever pod env)
+ *   - sqs:SendMessage IAM permission on the queue for the MCP process's credentials
+ * Response delivery is identical regardless of transport — results land in S3
+ * under the same qr/{queryId}/ prefix. The transport used is recorded in
+ * data.source_disclosure.transport ("http" | "sqs").
  */
 
 import { z } from 'zod';
@@ -155,6 +166,19 @@ interface RetrieverQuerySummary {
     /** True when the kept-cohort PromQL scan timed out — share math suppressed. */
     kept_timed_out?: boolean;
   }>;
+  /**
+   * Which ingress path was used to deliver the query to the retriever engine.
+   * `"http"` — normal path (POST /streamer/query to the query-handler URL).
+   * `"sqs"` — fallback path (SQS ingress queue), used when the HTTP URL is
+   *   a ClusterIP address unreachable from outside the cluster.
+   * Absent on older callers that did not record transport.
+   */
+  transport?: 'http' | 'sqs';
+  /**
+   * Total wall time in ms from SQS SendMessage until S3 polling completed.
+   * Populated only when transport="sqs".
+   */
+  sqs_latency_ms?: number;
 }
 
 export async function executeRetrieverQuery(
@@ -190,6 +214,18 @@ export async function executeRetrieverQuery(
     await executeRetrieverQueryInner(args, env, sumOut);
   } catch (err: unknown) {
     const primitiveErr = wrapBackendError(err);
+    // Extract dual-failure breadcrumbs written by the SQS fallback path
+    // when both HTTP and SQS transports were attempted and both failed.
+    const dualErr = err as Record<string, unknown>;
+    const transportsBreadcrumbs =
+      Array.isArray(dualErr?.transports_attempted)
+        ? {
+            transports_attempted: dualErr.transports_attempted,
+            http_error_message: dualErr.http_error_message,
+            sqs_error_type: dualErr.sqs_error_type,
+            sqs_error_message: dualErr.sqs_error_message,
+          }
+        : {};
     return buildChassisErrorEnvelope({
       tool: 'log10x_retriever_query',
       err: primitiveErr,
@@ -201,6 +237,7 @@ export async function executeRetrieverQuery(
         target: args.target,
         format: args.format,
         environment: args.environment,
+        ...transportsBreadcrumbs,
       },
       source_disclosure: {},
     });
@@ -224,7 +261,14 @@ export async function executeRetrieverQuery(
     tool: 'log10x_retriever_query',
     view: 'summary',
     summary: { headline },
-    data: { ...d, source_disclosure: { retriever_state_source: retrieverState.source } },
+    data: {
+      ...d,
+      source_disclosure: {
+        retriever_state_source: retrieverState.source,
+        transport: d.transport ?? 'http',
+        ...(d.sqs_latency_ms !== undefined ? { sqs_latency_ms: d.sqs_latency_ms } : {}),
+      },
+    },
     truncated: d.truncated || d.partial_results,
     actions,
   });
@@ -582,6 +626,8 @@ async function executeRetrieverQueryInner(
       by_day: Object.keys(byDay).length > 0 ? byDay : undefined,
       events_preview: previewEvents,
       offload_status_by_hash: offloadByHash,
+      transport: resp.transport,
+      ...(resp.sqsLatencyMs !== undefined ? { sqs_latency_ms: resp.sqsLatencyMs } : {}),
     };
   }
 
