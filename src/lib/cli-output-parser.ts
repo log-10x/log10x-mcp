@@ -361,7 +361,7 @@ export function parseAggregated(text: string): AggregatedRow[] {
     'symbolmessage',
     'symbol_message',
   ]);
-  const idxCount = firstIndexOf(header, ['count', 'events', 'event_count']);
+  const idxCount = firstIndexOf(header, ['count', 'events', 'event_count', 'summaryvolume']);
   const idxBytes = firstIndexOf(header, ['bytes', 'total_bytes', 'totalbytes', 'sum_bytes']);
   const idxSeverity = firstIndexOf(header, ['severity', 'severitylevel', 'severity_level', 'level']);
 

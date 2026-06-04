@@ -126,6 +126,13 @@ interface FindSkewSummary {
   backend_pressure_hint: null;
   human_summary: string;
   findings: SkewFinding[];
+  /**
+   * Number of candidate slots that were filtered because distinctCount=1
+   * (tautological dominance — the slot had only one value so 100% "dominance"
+   * is meaningless). Exposed in the payload so callers can audit the filter.
+   * Present only when > 0.
+   */
+  filtered_singleton_slots?: number;
   /** Populated only when `status === 'error'`. */
   error?: PrimitiveError;
 }
@@ -261,6 +268,7 @@ export async function executeFindSkew(args: FindSkewArgs): Promise<StructuredOut
     backend_pressure_hint: null,
     human_summary,
     findings,
+    ...(filteredSingletonSlots > 0 ? { filtered_singleton_slots: filteredSingletonSlots } : {}),
   };
 
   // ── Headline ───────────────────────────────────────────────────────

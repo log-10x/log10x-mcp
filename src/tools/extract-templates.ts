@@ -211,9 +211,11 @@ async function executeExtractTemplatesInner(args: ExtractArgs, sumOut?: { data?:
   // summary= lines always arrive regardless of engine version because they use
   // a separate prefix path in the demux. Match by pattern identity (templateHash
   // or symbolMessage) to the templateMap keys.
+  let aggTotalFromCsv = 0;
   if (encodedLines.length === 0 && result.aggregatedCsv) {
     const aggRows = parseAggregated(result.aggregatedCsv);
     for (const row of aggRows) {
+      aggTotalFromCsv += row.count;
       // The aggregated row's `pattern` field may be a symbolMessage or a
       // templateHash depending on the CLI version. Try exact match first.
       if (templateMap.has(row.pattern)) {
@@ -233,9 +235,14 @@ async function executeExtractTemplatesInner(args: ExtractArgs, sumOut?: { data?:
   // Recompute the effective event count from all count sources merged.
   // When encoded lines are present they are authoritative (one line per event).
   // When absent, fall back to the sum of per-template counts from the aggregated CSV.
+  // If template-hash matching produced 0 (pattern identity mismatch between CLI
+  // versions), use the raw aggregated total (summaryVolume) as the event count.
+  const templateCountSum = [...templateMap.values()].reduce((s, t) => s + t.count, 0);
   const effectiveEventCount = encodedLines.length > 0
     ? encodedLines.length
-    : [...templateMap.values()].reduce((s, t) => s + t.count, 0);
+    : templateCountSum > 0
+      ? templateCountSum
+      : aggTotalFromCsv;
 
   const templates = [...templateMap.values()]
     .sort((a, b) => b.count - a.count)
