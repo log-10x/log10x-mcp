@@ -269,7 +269,7 @@ export const SourceDisclosureSchema = z.object({
    * overflow_contents) so an agent can tell whether the resolution came from
    * env vars, the discovery snapshot, a live kubectl probe, or was absent.
    */
-  retriever_state_source: z.enum(['env_var', 'snapshot', 'kubectl_probe', 'none']).optional(),
+  retriever_state_source: z.enum(['env_var', 'snapshot', 'helm_release_probe', 'kubectl_probe', 'none']).optional(),
   /**
    * Service count semantics. Mirrors pattern_count_source for tools that
    * surface a list of services. Without this field "12 services" is

@@ -359,7 +359,8 @@ export type RetrieverDetectionPath =
   | 'explicit_env'
   | 'aws_s3_bucket_pattern'
   | 'kubectl_service'
-  | 'terraform_state';
+  | 'terraform_state'
+  | 'helm_release_probe';
 
 export interface RetrieverResolution {
   url?: string;
@@ -457,6 +458,44 @@ export async function resolveRetriever(): Promise<RetrieverResolution> {
     trace.push({ path: 'kubectl_service', status: kRes.failed ? 'failed' : 'skipped', reason: kRes.reason });
   }
 
+  // Fix 83b — helm_release_probe fallback.
+  // getRetrieverState() reads both URL and bucket from the helm release
+  // (via `helm get values … tenx.bucket`). This covers the post-install
+  // gap where the MCP wizard has just deployed the Retriever but the user
+  // has not yet set the env vars — resolveRetriever()'s earlier paths all
+  // miss it (terraform state absent, AWS env not set, kubectl label probe
+  // returns 0 services because the Service's label set doesn't include the
+  // log10x-retriever selector used by tryDetectRetrieverUrlFromKubectl).
+  const { getRetrieverState } = await import('./retriever-state.js');
+  const helmState = await getRetrieverState(null);
+  if (helmState.installed && helmState.url && helmState.bucket) {
+    trace.push({
+      path: 'helm_release_probe',
+      status: 'matched',
+      reason: `getRetrieverState helm probe: url=${helmState.url} bucket=${helmState.bucket}`,
+    });
+    return {
+      url: helmState.url,
+      bucket: helmState.bucket,
+      target: process.env.__SAVE_LOG10X_RETRIEVER_TARGET__,
+      detectionPath: 'helm_release_probe',
+      trace,
+    };
+  }
+  if (helmState.installed && helmState.url) {
+    trace.push({
+      path: 'helm_release_probe',
+      status: 'skipped',
+      reason: `helm probe resolved url=${helmState.url} but no bucket — set __SAVE_LOG10X_RETRIEVER_BUCKET__ or add tenx.bucket to helm values`,
+    });
+  } else {
+    trace.push({
+      path: 'helm_release_probe',
+      status: helmState.source === 'none' ? 'skipped' : 'failed',
+      reason: `getRetrieverState: source=${helmState.source}, installed=${helmState.installed}`,
+    });
+  }
+
   return { trace };
 }
 
@@ -470,24 +509,26 @@ export function isRetrieverConfiguredSync(): boolean {
 }
 
 /**
- * Fix 83a — async gate that consults getRetrieverState so a kubectl-
- * discovered install (no env vars set) is treated as configured.
+ * Fix 83a/83b — async gate that consults resolveRetriever so a
+ * helm-probe-discovered install (no env vars set) is treated as configured.
  *
- * Resolution order:
+ * Resolution order (matches resolveRetriever()):
  *   1. Env-var fast-path — if both __SAVE_LOG10X_RETRIEVER_URL__ and
- *      __SAVE_LOG10X_RETRIEVER_BUCKET__ are set, return true immediately
- *      without spawning kubectl.
- *   2. getRetrieverState() — runs the full detection cascade (terraform
- *      state, AWS bucket pattern, kubectl probe). Returns true when the
- *      resolved state has both installed=true AND a reachable URL.
+ *      __SAVE_LOG10X_RETRIEVER_BUCKET__ are set, return true immediately.
+ *   2. resolveRetriever() — full cascade (terraform state, AWS bucket
+ *      pattern, kubectl probe, helm_release_probe). Returns true only when
+ *      BOTH url AND bucket are resolved, which is the same precondition
+ *      that runRetrieverQuery requires. This closes the 83a gap where
+ *      getRetrieverState() returned url-only (helm probe, no bucket) and
+ *      isRetrieverConfigured() returned true while the inner tool call still
+ *      threw RetrieverNotConfiguredError on the missing bucket.
  */
 export async function isRetrieverConfigured(): Promise<boolean> {
   // Fast-path: explicit env vars set — no kubectl needed.
   if (isRetrieverConfiguredSync()) return true;
-  // Full cascade via retriever-state.
-  const { getRetrieverState } = await import('./retriever-state.js');
-  const state = await getRetrieverState();
-  return state.installed && state.url != null;
+  // Full cascade — requires BOTH url and bucket.
+  const r = await resolveRetrieverCached();
+  return r.url != null && r.bucket != null;
 }
 
 export function formatRetrieverTrace(trace: RetrieverResolution['trace']): string {

@@ -2,19 +2,20 @@
  * retriever-state.ts — shared helper for resolving Retriever installation state.
  *
  * Resolution order (first fully-matched hit wins):
- *   1. env vars  — __SAVE_LOG10X_RETRIEVER_URL__ + __SAVE_LOG10X_RETRIEVER_BUCKET__
- *   2. snapshot  — installedComponentsDetail.retriever (namespace) + kubectl probe for URL
- *   3. kubectl probe — get svc by chart label, resolve LoadBalancer hostname or ClusterIP
- *   4. none      — no retriever reachable
+ *   1. env vars          — __SAVE_LOG10X_RETRIEVER_URL__ + __SAVE_LOG10X_RETRIEVER_BUCKET__
+ *   2. snapshot          — installedComponentsDetail.retriever (namespace) + kubectl probe for URL
+ *   3. helm_release_probe — helm list -A, filter chart=retriever-10x*, manifest parse, kubectl svc
+ *   4. kubectl probe     — get svc by chart label, resolve LoadBalancer hostname or ClusterIP
+ *   5. none              — no retriever reachable
  *
  * The `source` field on the returned state lets callers emit a
  * `source_disclosure.retriever_state_source` for audit.
  */
 
-import { runJson } from './discovery/shell.js';
+import { run, runJson } from './discovery/shell.js';
 import type { DiscoverySnapshot } from './discovery/types.js';
 
-export type RetrieverStateSource = 'env_var' | 'snapshot' | 'kubectl_probe' | 'none';
+export type RetrieverStateSource = 'env_var' | 'snapshot' | 'helm_release_probe' | 'kubectl_probe' | 'none';
 
 export interface RetrieverState {
   /** True when a URL + bucket pair was resolved. */
@@ -92,7 +93,22 @@ export async function getRetrieverState(snapshot?: DiscoverySnapshot | null): Pr
     trace.push('snapshot: not provided');
   }
 
-  // ── Step 3: kubectl probe (cluster-wide) ────────────────────────────────────
+  // ── Step 3: helm-release discovery (primary, no label dependency) ───────────
+  const hResult = await helmReleaseDiscovery();
+  if (hResult.url) {
+    trace.push(`helm_release_probe: matched — ${hResult.reason}`);
+    return {
+      installed: true,
+      url: hResult.url,
+      bucket: envBucket ?? hResult.bucket ?? undefined,
+      namespace: hResult.namespace,
+      source: 'helm_release_probe',
+      trace,
+    };
+  }
+  trace.push(`helm_release_probe: ${hResult.reason}`);
+
+  // ── Step 4: kubectl probe (cluster-wide) ────────────────────────────────────
   const kResult = await probeKubectlRetrieverSvcAll();
   if (kResult.url) {
     trace.push(`kubectl_probe: matched — ${kResult.reason}`);
@@ -107,12 +123,251 @@ export async function getRetrieverState(snapshot?: DiscoverySnapshot | null): Pr
   }
   trace.push(`kubectl_probe: no service found — ${kResult.reason}`);
 
-  // ── Step 4: nothing resolved ─────────────────────────────────────────────────
-  trace.push('none: retriever not reachable from env vars, snapshot, or kubectl probe');
+  // ── Step 5: nothing resolved ─────────────────────────────────────────────────
+  trace.push('none: retriever not reachable from env vars, snapshot, helm-release probe, or kubectl probe');
   return { installed: false, source: 'none', trace };
 }
 
 // ── private helpers ──────────────────────────────────────────────────────────
+
+// ── helmReleaseDiscovery ─────────────────────────────────────────────────────
+
+/**
+ * Helm-release–based discovery for the Retriever Service.
+ *
+ * Steps:
+ *   1. `helm list -A -o json` — find releases whose chart starts with "retriever-10x"
+ *   2. `helm get manifest -n <ns> <release>` — parse multi-doc YAML for Service resources
+ *   3. `kubectl get svc -n <ns> <name> -o json` — resolve an addressable endpoint
+ *   4. `helm get values -n <ns> <release> -o json` — try to read tenx.bucket
+ *
+ * Returns the first resolved URL + bucket pair, or a reason string on failure.
+ */
+async function helmReleaseDiscovery(): Promise<{
+  url?: string;
+  bucket?: string;
+  namespace?: string;
+  reason: string;
+}> {
+  // Step 1: list all helm releases
+  const { result: listResult, parsed: releases } = await runJson<HelmListEntry[]>(
+    'helm',
+    ['list', '-A', '-o', 'json'],
+    { timeoutMs: 12_000 },
+  );
+  if (listResult.exitCode !== 0) {
+    return { reason: `helm list failed (exit ${listResult.exitCode}): ${listResult.stderr.slice(0, 120)}` };
+  }
+  if (!Array.isArray(releases) || releases.length === 0) {
+    return { reason: 'helm list returned no releases' };
+  }
+
+  // Filter to retriever-10x charts (case-insensitive prefix match)
+  const retrieverReleases = releases.filter(
+    (r) => typeof r.chart === 'string' && r.chart.toLowerCase().startsWith('retriever-10x'),
+  );
+  if (retrieverReleases.length === 0) {
+    return { reason: 'no helm releases with chart starting with retriever-10x' };
+  }
+
+  // Step 2–3: for each matching release, get manifest and probe the Services
+  for (const release of retrieverReleases) {
+    const ns = release.namespace;
+    const name = release.name;
+
+    // Get manifest (multi-doc YAML)
+    const manifestResult = await run(
+      'helm',
+      ['get', 'manifest', '-n', ns, name],
+      { timeoutMs: 12_000 },
+    );
+    if (manifestResult.exitCode !== 0) {
+      // non-fatal; try next release
+      continue;
+    }
+
+    const serviceNames = extractServiceNamesFromManifest(manifestResult.stdout);
+    if (serviceNames.length === 0) {
+      continue;
+    }
+
+    // Step 3: probe each Service via kubectl
+    for (const svcName of serviceNames) {
+      const { result: svcResult, parsed: svcJson } = await runJson<KubeSingleSvc>(
+        'kubectl',
+        ['get', 'svc', '-n', ns, svcName, '-o', 'json'],
+        { timeoutMs: 8_000 },
+      );
+      if (svcResult.exitCode !== 0 || !svcJson) continue;
+
+      const url = resolveUrlFromSvcJson(svcJson, ns);
+      if (!url) continue;
+
+      // Step 4: try to get the tenx.bucket from helm values (best-effort)
+      const bucket = await tryReadHelmBucket(ns, name);
+
+      return {
+        url,
+        bucket,
+        namespace: ns,
+        reason: `helm release ${ns}/${name} (chart ${release.chart}) → svc ${ns}/${svcName}`,
+      };
+    }
+  }
+
+  return { reason: 'helm releases found but no addressable Retriever Service resolved from manifests' };
+}
+
+/** Minimal shape we need from `helm list -A -o json`. */
+interface HelmListEntry {
+  name: string;
+  namespace: string;
+  chart: string;
+  app_version?: string;
+  status?: string;
+  revision?: string | number;
+}
+
+/** Minimal shape of a single Service from `kubectl get svc ... -o json`. */
+interface KubeSingleSvc {
+  metadata?: { name?: string; namespace?: string };
+  spec?: {
+    type?: string;
+    clusterIP?: string;
+    ports?: Array<{ port?: number; name?: string }>;
+  };
+  status?: {
+    loadBalancer?: {
+      ingress?: Array<{ hostname?: string; ip?: string }>;
+    };
+  };
+}
+
+/**
+ * Parse multi-doc YAML from `helm get manifest` and return the metadata.name
+ * of every resource whose `kind` is `Service`.
+ *
+ * We do not depend on a YAML library — Kubernetes manifest YAML is predictably
+ * structured, so a line-scanning approach is robust enough here. Each document
+ * is split on `^---` and we look for `kind: Service` + `name:` within the
+ * same document.
+ */
+function extractServiceNamesFromManifest(manifest: string): string[] {
+  const names: string[] = [];
+  // Split on document separator lines (--- with optional trailing whitespace)
+  const docs = manifest.split(/^---\s*$/m);
+  for (const doc of docs) {
+    if (!doc.trim()) continue;
+    // Check if this document is a Service
+    if (!/^\s*kind\s*:\s*Service\s*$/m.test(doc)) continue;
+    // Extract metadata.name — look for `name:` within a `metadata:` block.
+    // We scan line by line; once we see `metadata:`, the next `name: <value>`
+    // at one deeper indentation level is the resource name.
+    const lines = doc.split('\n');
+    let inMetadata = false;
+    for (const line of lines) {
+      if (/^metadata\s*:/.test(line)) {
+        inMetadata = true;
+        continue;
+      }
+      if (inMetadata) {
+        // A new top-level key ends the metadata block
+        if (/^[a-zA-Z]/.test(line)) {
+          inMetadata = false;
+          continue;
+        }
+        const nameMatch = /^\s+name\s*:\s*(.+)$/.exec(line);
+        if (nameMatch) {
+          const val = nameMatch[1].trim().replace(/^["']|["']$/g, '');
+          if (val) names.push(val);
+          inMetadata = false; // only the first name under metadata matters
+        }
+      }
+    }
+  }
+  return names;
+}
+
+/**
+ * Resolve an HTTP endpoint URL from a parsed Service JSON object.
+ *
+ * Priority:
+ *   1. LoadBalancer hostname  → `http://<hostname>:<port>`
+ *   2. LoadBalancer IP        → `http://<ip>:<port>`
+ *   3. ClusterIP              → `http://<svc>.<ns>.svc.cluster.local:<port>`
+ *
+ * Returns undefined when none of the above are available.
+ */
+function resolveUrlFromSvcJson(svc: KubeSingleSvc, defaultNs: string): string | undefined {
+  const port = svc.spec?.ports?.[0]?.port ?? 8080;
+  const ns = svc.metadata?.namespace ?? defaultNs;
+  const name = svc.metadata?.name ?? '';
+
+  const lbIngress = svc.status?.loadBalancer?.ingress ?? [];
+  const hostname = lbIngress.find((e) => e.hostname)?.hostname;
+  if (hostname) return `http://${hostname}:${port}`;
+
+  const lbIp = lbIngress.find((e) => e.ip)?.ip;
+  if (lbIp) return `http://${lbIp}:${port}`;
+
+  const type = svc.spec?.type ?? 'ClusterIP';
+  if (type === 'ClusterIP') {
+    const clusterIp = svc.spec?.clusterIP;
+    if (clusterIp && clusterIp !== 'None' && name) {
+      return `http://${name}.${ns}.svc.cluster.local:${port}`;
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * Try to read the S3 results bucket from `helm get values`.
+ * Checks (in order):
+ *   1. tenx.bucket       — canonical field name used in newer chart versions
+ *   2. bucket            — top-level alias used in some chart versions
+ *   3. indexBucket       — the retriever-10x chart stores results as
+ *                          "<bucket>/<subpath>/" in this field; we split on
+ *                          the first "/" to extract just the bucket name and
+ *                          also set LOG10X_RETRIEVER_INDEX_SUBPATH in-process
+ *                          so downstream callers pick up the correct prefix.
+ * Returns undefined on any failure — this is always best-effort.
+ */
+async function tryReadHelmBucket(namespace: string, release: string): Promise<string | undefined> {
+  const { parsed } = await runJson<Record<string, unknown>>(
+    'helm',
+    ['get', 'values', '-n', namespace, release, '-o', 'json'],
+    { timeoutMs: 8_000 },
+  );
+  if (!parsed || typeof parsed !== 'object') return undefined;
+  // 1. tenx.bucket
+  const tenx = parsed['tenx'];
+  if (tenx && typeof tenx === 'object') {
+    const b = (tenx as Record<string, unknown>)['bucket'];
+    if (typeof b === 'string' && b) return b;
+  }
+  // 2. top-level bucket
+  const topLevel = parsed['bucket'];
+  if (typeof topLevel === 'string' && topLevel) return topLevel;
+  // 3. indexBucket — format is "<bucket>[/<subpath>/]"
+  const indexBucket = parsed['indexBucket'];
+  if (typeof indexBucket === 'string' && indexBucket) {
+    const slashIdx = indexBucket.indexOf('/');
+    if (slashIdx === -1) return indexBucket;
+    const bucket = indexBucket.slice(0, slashIdx);
+    const subpath = indexBucket.slice(slashIdx + 1).replace(/\/+$/, '');
+    if (bucket) {
+      // Propagate the subpath into the process env so retrieverResultsLocation
+      // builds the correct prefix for query-result polling. This is best-effort
+      // and only applies when running inside a single MCP process invocation.
+      if (subpath && !process.env.LOG10X_RETRIEVER_INDEX_SUBPATH) {
+        process.env.LOG10X_RETRIEVER_INDEX_SUBPATH = subpath;
+      }
+      return bucket;
+    }
+  }
+  return undefined;
+}
 
 type KubeSvcList = {
   items?: Array<{
