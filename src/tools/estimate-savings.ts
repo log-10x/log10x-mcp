@@ -149,7 +149,7 @@ export const estimateSavingsSchema = {
     .enum(['pass', 'sample', 'compact', 'tier_down', 'offload', 'drop'])
     .default('compact')
     .describe(
-      'forecast mode: action assigned to top patterns by the greedy solver when target_percent is used. Default: compact.'
+      'forecast mode: action assigned to top patterns by the greedy solver when target_percent is used. This is a hard constraint — every per_pattern row receives this action (subject to destination compatibility: compact is silently replaced by the destination canonical action when compact_mode=no-op). Default: compact.'
     ),
   pattern_limit: z
     .number()
@@ -172,7 +172,7 @@ export const estimateSavingsSchema = {
     .string()
     .optional()
     .describe(
-      'Scope the forecast to a service. If omitted, runs across all services.'
+      'Scope the target_percent greedy solver and coverage_pct to a single service. When present, only patterns from that service are candidates; coverage_of_env_pct and dollar totals reflect that service only. pattern_limit is ignored (all service patterns are returned). If omitted, runs across all services.'
     ),
   retention_months: z
     .number()
@@ -275,6 +275,15 @@ export interface ForecastResult {
     dollars_expected_monthly: number;
     dollars_high_monthly: number;
     annual_projection_expected: number;
+    /**
+     * Per-action breakdown of the forecast totals. Populated by the
+     * executeEstimateSavings path (FIX 86) so renderers can surface
+     * which dollar/byte contribution came from which action.
+     *
+     * tier_down.bytes_saved is always 0 (bytes still ingested at full rate;
+     * savings come from the storage-tier price differential only).
+     */
+    action_mix?: ActionMix;
   };
   /**
    * Fraction of TOTAL observed monthly env bytes that this forecast covers.
@@ -1022,6 +1031,10 @@ export async function runEstimateForecast(
   // ── per_service rollup ────────────────────────────────────────────
   // Aggregated from the FULL (pre-slice) per_pattern set so the rollup
   // totals match the headline dollar figures exactly.
+  //
+  // When service is omitted: group all patterns by service via hashToService.
+  // When service is specified: populate a single-entry array for the scoped
+  // service so callers can confirm scoping and get the rollup totals for it.
   let per_service:
     | Array<{
         service: string;
@@ -1052,6 +1065,18 @@ export async function runEstimateForecast(
     per_service = Array.from(svcMap.entries())
       .map(([service, v]) => ({ service, ...v }))
       .sort((a, b) => b.dollars_saved_expected - a.dollars_saved_expected);
+  } else {
+    // Service-scoped: single rollup entry for the specified service,
+    // aggregated over the full (pre-slice) per_pattern set.
+    const scopedTotals = per_pattern.reduce(
+      (acc, row) => ({
+        pattern_count: acc.pattern_count + 1,
+        bytes_saved_monthly: acc.bytes_saved_monthly + row.bytes_saved_monthly,
+        dollars_saved_expected: acc.dollars_saved_expected + row.dollars_saved_expected,
+      }),
+      { pattern_count: 0, bytes_saved_monthly: 0, dollars_saved_expected: 0 }
+    );
+    per_service = [{ service: args.service, ...scopedTotals }];
   }
 
   // Rate source resolution for the forecast result.
@@ -1612,11 +1637,49 @@ export async function executeEstimateSavings(
       const rateTag = result.rate_source === 'customer_supplied'
         ? 'contracted rate'
         : `${destination} list price — your bill may differ`;
-      const headline =
-        args.enforcement_mode === 'manual_report'
-          ? `If you enforce externally: ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings potential on ${patternCountLabel} (${(result.coverage_of_env_pct * 100).toFixed(0)}% of monthly env bytes). Enforcement choice is yours.`
-          : `Forecast (${destination}): ${fmtDollar(result.totals.dollars_expected_monthly)}/mo expected savings (at ${rateTag}) on ${patternCountLabel} (${(result.coverage_of_env_pct * 100).toFixed(0)}% of monthly env bytes).`;
-      const human_summary = buildForecastHumanSummary(result, destination, args.enforcement_mode);
+
+      // ── Action-mix disclosure (FIX 86) ──
+      // Compute per-action bucket totals from the full (pre-slice) per_pattern
+      // set so the mix reflects every row the solver touched, not just the
+      // displayed slice. We re-derive from per_pattern_sliced which is the
+      // displayed set; for totals we already have result.totals.bytes_saved_monthly.
+      const actionMix = buildActionMix(result.per_pattern);
+
+      // Add action_mix to totals payload so renderers can surface it directly.
+      result.totals.action_mix = actionMix;
+
+      // Check whether the mix is uniformly tier_down (or has zero combined
+      // bytes_saved_monthly across all patterns). tier_down does not reduce
+      // bytes; savings come from storage-tier price differential only.
+      const allTierDown =
+        result.per_pattern.length > 0 &&
+        result.per_pattern.every((r) => r.action === 'tier_down');
+      const zeroByteSaved = result.totals.bytes_saved_monthly === 0;
+      const tierDownOnly = allTierDown || (zeroByteSaved && actionMix.tier_down.pattern_count > 0 && actionMix.tier_down.pattern_count === result.per_pattern.length);
+
+      // ── Headline construction ──
+      const serviceTag = args.service ? ` on ${args.service}` : '';
+      const solverActionTag = args.target_percent !== undefined && !args.proposed_config
+        ? ` via ${(args.default_action ?? 'compact')}`
+        : '';
+
+      let headline: string;
+      if (args.enforcement_mode === 'manual_report') {
+        headline = `If you enforce externally: ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings potential${solverActionTag}${serviceTag} on ${patternCountLabel} (${(result.coverage_of_env_pct * 100).toFixed(0)}% of monthly env bytes). Enforcement choice is yours.`;
+      } else if (tierDownOnly) {
+        headline = `Forecast (${destination}): ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings${solverActionTag}${serviceTag} via tier_down (storage-tier price differential; bytes still ingested at full rate) on ${patternCountLabel}.`;
+      } else if (actionMix.tier_down.pattern_count > 0 && actionMix.tier_down.dollars > 0) {
+        // Mixed: some tier_down + other actions
+        const bytesSavingDollars = result.totals.dollars_expected_monthly - actionMix.tier_down.dollars;
+        const bytePct = totalBytesForMix(actionMix, ['drop', 'sample', 'compact', 'offload']);
+        const totalIn = result.totals.bytes_in_monthly;
+        const bytePctStr = totalIn > 0 ? `${((bytePct / totalIn) * 100).toFixed(0)}% bytes` : '';
+        headline = `Forecast (${destination}): ${fmtDollar(result.totals.dollars_expected_monthly)}/mo total savings (at ${rateTag})${serviceTag} — ${fmtDollar(bytesSavingDollars)} via byte reduction (${bytePctStr}), ${fmtDollar(actionMix.tier_down.dollars)} via tier_down (no bytes change) — on ${patternCountLabel}.`;
+      } else {
+        headline = `Forecast (${destination}): ${fmtDollar(result.totals.dollars_expected_monthly)}/mo expected savings (at ${rateTag})${solverActionTag}${serviceTag} on ${patternCountLabel} (${(result.coverage_of_env_pct * 100).toFixed(0)}% of monthly env bytes).`;
+      }
+
+      const human_summary = buildForecastHumanSummary(result, destination, args.enforcement_mode, actionMix);
       // Compute threshold_basis from rate_source for the decisions block.
       const thresholdBasis = result.rate_source === 'customer_supplied'
         ? 'customer_supplied' as const
@@ -1774,21 +1837,93 @@ export async function executeEstimateSavings(
   }
 }
 
+// ─── action-mix helpers (FIX 86) ──────────────────────────────────────
+
+export interface ActionMixBucket {
+  dollars: number;
+  bytes_saved: number;
+  pattern_count: number;
+}
+
+export interface ActionMix {
+  pass: ActionMixBucket;
+  sample: ActionMixBucket;
+  compact: ActionMixBucket;
+  tier_down: ActionMixBucket;
+  offload: ActionMixBucket;
+  drop: ActionMixBucket;
+}
+
+function emptyBucket(): ActionMixBucket {
+  return { dollars: 0, bytes_saved: 0, pattern_count: 0 };
+}
+
+export function buildActionMix(rows: ForecastRow[]): ActionMix {
+  const mix: ActionMix = {
+    pass: emptyBucket(),
+    sample: emptyBucket(),
+    compact: emptyBucket(),
+    tier_down: emptyBucket(),
+    offload: emptyBucket(),
+    drop: emptyBucket(),
+  };
+  for (const row of rows) {
+    const bucket = mix[row.action];
+    if (!bucket) continue;
+    bucket.pattern_count += 1;
+    bucket.bytes_saved += row.bytes_saved_monthly;
+    bucket.dollars += row.dollars_saved_expected;
+  }
+  return mix;
+}
+
+/** Sum bytes_saved across the specified actions. */
+function totalBytesForMix(mix: ActionMix, actions: (keyof ActionMix)[]): number {
+  let total = 0;
+  for (const a of actions) total += mix[a].bytes_saved;
+  return total;
+}
+
 // ─── human_summary builders ────────────────────────────────────────────
 function buildForecastHumanSummary(
   result: ForecastResult,
   destination: string,
-  enforcement_mode?: string
+  enforcement_mode?: string,
+  actionMix?: ActionMix,
 ): string {
   const patternWord = `${result.per_pattern.length} pattern${result.per_pattern.length === 1 ? '' : 's'}`;
   const envCoverage = `${(result.coverage_of_env_pct * 100).toFixed(0)}% of monthly env bytes`;
+  const serviceClause = result.service ? ` on service ${result.service}` : '';
   const rateTag = result.rate_source === 'customer_supplied'
     ? 'contracted rate'
     : `${destination} list price`;
+
+  // When action mix is uniformly tier_down (or bytes_saved is 0 and tier_down
+  // dominates), use the tier-down framing so callers understand savings come
+  // from the price differential, not byte reduction.
+  if (actionMix) {
+    const zeroByteSaved = result.totals.bytes_saved_monthly === 0;
+    const allTierDown =
+      result.per_pattern.length > 0 &&
+      result.per_pattern.every((r) => r.action === 'tier_down');
+    const tierDownOnly = allTierDown || (zeroByteSaved && actionMix.tier_down.pattern_count === result.per_pattern.length);
+    if (tierDownOnly) {
+      return `estimate_savings forecast on ${destination}${serviceClause}: ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings via tier_down (storage-tier price differential — bytes still ingested at full rate, not reduced). ${patternWord} covering ${envCoverage}.${result.caveats.length ? ` Caveats: ${result.caveats.length}.` : ''}`;
+    }
+    // Mixed actions: break down by byte-reducing vs tier_down.
+    if (actionMix.tier_down.pattern_count > 0 && actionMix.tier_down.dollars > 0) {
+      const byteReducingDollars = result.totals.dollars_expected_monthly - actionMix.tier_down.dollars;
+      const bytesPct = result.totals.bytes_in_monthly > 0
+        ? `${((result.totals.bytes_saved_monthly / result.totals.bytes_in_monthly) * 100).toFixed(0)}% bytes`
+        : '0% bytes';
+      return `estimate_savings forecast on ${destination}${serviceClause}: ${fmtDollar(result.totals.dollars_expected_monthly)}/mo total savings — ${fmtDollar(byteReducingDollars)} via byte-reducing actions (${bytesPct} reduced), ${fmtDollar(actionMix.tier_down.dollars)} via tier_down (no bytes change). ${patternWord} covering ${envCoverage}.${result.caveats.length ? ` Caveats: ${result.caveats.length}.` : ''}`;
+    }
+  }
+
   const lead =
     enforcement_mode === 'manual_report'
-      ? `If you enforce externally on ${destination}: ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings potential (range ${fmtDollar(result.totals.dollars_low_monthly)}–${fmtDollar(result.totals.dollars_high_monthly)}). Enforcement is not automatic — this is the potential if the exclusion/drop is applied.`
-      : `estimate_savings forecast on ${destination} projects ${fmtDollar(result.totals.dollars_expected_monthly)}/mo expected savings (range ${fmtDollar(result.totals.dollars_low_monthly)}–${fmtDollar(result.totals.dollars_high_monthly)})`;
+      ? `If you enforce externally on ${destination}${serviceClause}: ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings potential (range ${fmtDollar(result.totals.dollars_low_monthly)}–${fmtDollar(result.totals.dollars_high_monthly)}). Enforcement is not automatic — this is the potential if the exclusion/drop is applied.`
+      : `estimate_savings forecast on ${destination}${serviceClause} projects ${fmtDollar(result.totals.dollars_expected_monthly)}/mo expected savings (range ${fmtDollar(result.totals.dollars_low_monthly)}–${fmtDollar(result.totals.dollars_high_monthly)})`;
   const disclosureSuffix = result.rate_disclosure ? ` ${result.rate_disclosure}.` : '.';
   return `${lead} across ${patternWord} covering ${envCoverage}, using ${rateTag}${disclosureSuffix}${result.caveats.length ? ` Caveats: ${result.caveats.length}.` : ''}`;
 }

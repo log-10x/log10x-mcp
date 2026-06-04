@@ -195,12 +195,23 @@ async function runAppsMcpFileViaLocalBinary(
   // arg error ("apiKey ~NO-API-KEY"). Inject the env var explicitly so
   // bootstrap resolves the default through its env-var path (no positional
   // arg surface) rather than hitting the commandLine validator.
+  //
+  // Before injecting: check that a real API key is available. If not, throw
+  // DevCliConfigMissingError so the tool boundary converts it to a
+  // config_missing chassis envelope with a useful hint (FIX 68-residual).
+  const resolvedApiKey = process.env.TENX_API_KEY ?? process.env.LOG10X_API_KEY;
+  if (!resolvedApiKey || resolvedApiKey === 'NO-API-KEY') {
+    throw new DevCliConfigMissingError(
+      'LOG10X_API_KEY',
+      'LOG10X_API_KEY is not configured. paste-flow tools (resolve_batch, extract_templates) require a real API key. Either set LOG10X_API_KEY in the MCP server env, or pass privacy_mode=false to route through the public paste lambda.'
+    );
+  }
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     LOG10X_MCP_RUNTIME_NAME: runtimeName,
     TENX_INCLUDE_PATHS: includePaths,
     LOG10X_MCP_OUTPUT_DIR: '/tmp/log10x-mcp-pull/' + runtimeName,
-    TENX_API_KEY: process.env.TENX_API_KEY ?? process.env.LOG10X_API_KEY ?? 'NO-API-KEY',
+    TENX_API_KEY: resolvedApiKey,
   };
   await runCommandWithStdin(
     binary,
@@ -270,6 +281,19 @@ async function runAppsMcpFileViaDocker(
  * the `LOG10X_MCP_OUTPUT_DIR` empty-path crash.
  */
 export async function runDevCliStdin(rawLogText: string): Promise<DevCliResult> {
+  // Guard: require a real API key before running. Covers both local and docker
+  // mode — docker still needs the key injected as TENX_API_KEY so the engine
+  // can validate it (FIX 68-residual). Throw DevCliConfigMissingError so the
+  // tool boundary (executeResolveBatch / executeExtractTemplates) converts it
+  // to a config_missing chassis envelope.
+  const resolvedApiKey = process.env.TENX_API_KEY ?? process.env.LOG10X_API_KEY;
+  if (!resolvedApiKey || resolvedApiKey === 'NO-API-KEY') {
+    throw new DevCliConfigMissingError(
+      'LOG10X_API_KEY',
+      'LOG10X_API_KEY is not configured. paste-flow tools (resolve_batch, extract_templates) require a real API key. Either set LOG10X_API_KEY in the MCP server env, or pass privacy_mode=false to route through the public paste lambda.'
+    );
+  }
+
   const mode = await resolveTenxMode();
   const started = Date.now();
   let cliVersion: string | undefined;
@@ -493,6 +517,17 @@ async function runAppsMcpViaLocalBinary(
   }
   const cliVersion = await tryGetVersion(binary);
 
+  // Guard: if LOG10X_API_KEY is absent or equals the placeholder, throw
+  // DevCliConfigMissingError so the tool boundary emits a config_missing
+  // envelope (FIX 68-residual). Same guard as runAppsMcpFileViaLocalBinary.
+  const resolvedApiKey = process.env.TENX_API_KEY ?? process.env.LOG10X_API_KEY;
+  if (!resolvedApiKey || resolvedApiKey === 'NO-API-KEY') {
+    throw new DevCliConfigMissingError(
+      'LOG10X_API_KEY',
+      'LOG10X_API_KEY is not configured. paste-flow tools (resolve_batch, extract_templates) require a real API key. Either set LOG10X_API_KEY in the MCP server env, or pass privacy_mode=false to route through the public paste lambda.'
+    );
+  }
+
   // TENX_INCLUDE_PATHS injected so the engine resolves apps/mcp without
   // requiring user-set TENX_HOME in the MCP server's environment.
   const { config: tenxConfig, modules: tenxModules } = resolveInstallPaths();
@@ -508,6 +543,7 @@ async function runAppsMcpViaLocalBinary(
     ...process.env,
     TENX_INCLUDE_PATHS: includePaths,
     LOG10X_MCP_RUNTIME_NAME: `mcp-${Date.now()}`,
+    TENX_API_KEY: resolvedApiKey,
   };
 
   const stdout = await runCommandWithStdin(
@@ -656,12 +692,22 @@ async function runViaLocalBinary(
 
   // Same bootstrap apiKey fix as runAppsMcpFileViaLocalBinary — this path
   // also goes through tenx-mcp-file.config.yaml which includes run/bootstrap.
+  // Guard: if LOG10X_API_KEY is absent or equals the placeholder, throw
+  // DevCliConfigMissingError so the tool boundary emits a config_missing
+  // chassis envelope (FIX 68-residual).
+  const resolvedApiKey = process.env.TENX_API_KEY ?? process.env.LOG10X_API_KEY;
+  if (!resolvedApiKey || resolvedApiKey === 'NO-API-KEY') {
+    throw new DevCliConfigMissingError(
+      'LOG10X_API_KEY',
+      'LOG10X_API_KEY is not configured. paste-flow tools (resolve_batch, extract_templates) require a real API key. Either set LOG10X_API_KEY in the MCP server env, or pass privacy_mode=false to route through the public paste lambda.'
+    );
+  }
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     TENX_INCLUDE_PATHS: includePaths,
     LOG10X_MCP_OUTPUT_DIR: tempDir,
     LOG10X_MCP_RUNTIME_NAME: `mcp-${Date.now()}`,
-    TENX_API_KEY: process.env.TENX_API_KEY ?? process.env.LOG10X_API_KEY ?? 'NO-API-KEY',
+    TENX_API_KEY: resolvedApiKey,
   };
 
   if (opts.mode === 'file' && opts.inputPath) {

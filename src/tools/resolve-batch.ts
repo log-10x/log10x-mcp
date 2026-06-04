@@ -247,6 +247,11 @@ async function executeResolveBatchInner(args: {
         // not-configured contract self-contained to this tool.
         throw e;
       }
+      if (e instanceof DevCliConfigMissingError) {
+        // Rethrow typed so the outer executeResolveBatch converts it to a
+        // config_missing chassis envelope (FIX 68-residual).
+        throw e;
+      }
       if (e instanceof DevCliRunError) {
         // Rethrow typed so the outer executeResolveBatch can wrap it in a
         // chassis error envelope instead of emitting raw stderr text.
