@@ -30,6 +30,7 @@ import { emitSeries, type Destination } from '../lib/metric-emitters.js';
 import { fmtCount, normalizePattern } from '../lib/format.js';
 import { retrieverNotConfiguredMessage } from './retriever-query.js';
 import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
+import { getRetrieverState } from '../lib/retriever-state.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
 export const backfillMetricSchema = {
@@ -99,6 +100,8 @@ export async function executeBackfillMetric(
   },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
+  // Fix 83: resolve Retriever state for source_disclosure.
+  const retrieverState = await getRetrieverState(null);
   if (!isRetrieverConfigured()) {
     const md = retrieverNotConfiguredMessage();
     // Typed not_configured (status + advise_retriever action) so an agent
@@ -120,6 +123,7 @@ export async function executeBackfillMetric(
         ok: false,
         precondition: 'no_events',
         human_summary: buildBackfillNoEventsHumanSummary(args),
+        source_disclosure: { retriever_state_source: retrieverState.source },
       },
       warnings: ['backfill_metric: Retriever returned zero events matching this pattern + filter + window — nothing was emitted to the destination TSDB.'],
     });
@@ -129,7 +133,7 @@ export async function executeBackfillMetric(
     tool: 'log10x_backfill_metric',
     view: 'summary',
     summary: { headline: `Backfill ${d.metric_name} to ${d.destination}: ${d.events_retrieved} events → ${d.points_emitted} points (${d.series_count} series, ${d.bucket_seconds}s buckets), view at ${d.view_url ?? 'destination'}.` },
-    data: d,
+    data: { ...d, source_disclosure: { retriever_state_source: retrieverState.source } },
     warnings: d.warnings,
     actions: [
       { tool: 'log10x_pattern_trend', args: { pattern: d.pattern, timeRange: '30d' }, reason: 'verify the backfilled series — pattern_trend now extends full 90d' },

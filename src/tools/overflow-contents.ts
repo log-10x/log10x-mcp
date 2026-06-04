@@ -51,6 +51,7 @@ import { fetchCapCsvTagged, buildCapCsvStatus, type CapCsvStatus } from '../lib/
 import { parseCapCsv, buildPatternActionLookup } from '../lib/cap-csv-parser.js';
 import type { Action } from '../lib/cost.js';
 import { normalizeTimeRange } from '../lib/time-range.js';
+import { getRetrieverState, type RetrieverStateSource } from '../lib/retriever-state.js';
 
 const BYTES_METRIC = 'all_events_summaryBytes_total';
 const VOLUME_METRIC = 'all_events_summaryVolume_total';
@@ -137,6 +138,11 @@ export async function executeOverflowContents(
   env: EnvConfig,
 ): Promise<string | StructuredOutput> {
   const telemetry = newChassisTelemetry();
+  // Fix 83: resolve Retriever state once so the headline accurately reflects
+  // whether patterns are "routed to S3" (installed) vs "soft-dropped" (not
+  // installed). The source is surfaced in source_disclosure for audit.
+  const retrieverState = await getRetrieverState(null);
+  const retrieverStateSource: RetrieverStateSource = retrieverState.source;
   // Normalise '1d' legacy alias → '24h'.
   const timeRange = normalizeTimeRange(args.timeRange ?? '30d');
   const tf = parseTimeframe(timeRange);
@@ -460,16 +466,22 @@ export async function executeOverflowContents(
     }),
   };
 
-  // FIX 69 — headline reflects actual state, not assumed S3 routing.
+  // FIX 69 (completed by Fix 83) — headline reflects actual state:
+  //   - retrieverState.installed gates "routed to S3" vs "soft-dropped"
+  //   - cap-csv status further distinguishes confirmed-offload vs all-dropped
   let headline: string;
   if (top.length === 0) {
     headline = `Overflow queue empty over ${tf.label}${filterLabel}.`;
-  } else if (capCsvStatus.kind === 'loaded') {
-    // Cap-CSV confirms these patterns have action=offload — they ARE in S3.
+  } else if (capCsvStatus.kind === 'loaded' && retrieverState.installed) {
+    // Cap-CSV confirms offload action AND Retriever is reachable — patterns ARE in S3.
     headline = `${filtered.length} overflow pattern${filtered.length !== 1 ? 's' : ''} over ${tf.label}: ${fmtBytes(total_bytes_in_window)} routed to S3${filterLabel}.`;
+  } else if (capCsvStatus.kind === 'loaded' && !retrieverState.installed) {
+    // Cap-CSV says offload, but Retriever not detected — patterns are configured
+    // for offload but the archive may not be receiving them yet.
+    headline = `${filtered.length} overflow pattern${filtered.length !== 1 ? 's' : ''} over ${tf.label}: ${fmtBytes(total_bytes_in_window)} configured for S3 offload but Retriever not detected${filterLabel}. Deploy the Retriever to start archiving.`;
   } else {
-    // No gitops repo or fetch failed — cannot confirm S3 routing. These are
-    // dropped bytes but the offload vs hard-drop split is unverified.
+    // No cap-CSV — cannot confirm S3 routing. These are dropped bytes but the
+    // offload vs hard-drop split is unverified.
     const bucket = env.gitops?.repo;
     if (!bucket) {
       headline = `${filtered.length} overflow-eligible pattern${filtered.length !== 1 ? 's' : ''} over ${tf.label}: ${fmtBytes(total_bytes_in_window)} currently soft-dropped — no S3 offload bucket is configured${filterLabel}. Install the Retriever to start archiving these patterns.`;
@@ -485,7 +497,7 @@ export async function executeOverflowContents(
     headline,
     status: top.length > 0 ? 'success' : 'no_signal',
     decisions: { threshold_used: null, threshold_basis: 'default' },
-    source_disclosure: { bytes_source: 'tsdb' },
+    source_disclosure: { bytes_source: 'tsdb', retriever_state_source: retrieverStateSource },
     scope: {
       window: tf.label,
       window_basis: 'explicit',

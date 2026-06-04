@@ -569,15 +569,68 @@ function planHeadlineForWizard(data: {
 // ── nextQuestion routing ─────────────────────────────────────────────────────
 
 import type { DiscoverySnapshot } from '../lib/discovery/types.js';
+import { runJson } from '../lib/discovery/shell.js';
+
+// ── Fix 80: detect IAM role from ~/.kube/config ──────────────────────────────
+
+/**
+ * Detect the IAM role ARN that kubectl uses to authenticate to the cluster.
+ *
+ * Runs `kubectl config view --minify -o json` and parses the active user's
+ * exec block. If `--role <arn>` or `--role-arn=<arn>` appears in the args
+ * array, that ARN is returned so it can be injected into the emitted
+ * Terraform `exec` block.
+ *
+ * Returns `null` when:
+ *   - kubectl is not available
+ *   - the active user does not use exec authentication
+ *   - no --role / --role-arn argument is present (standard IRSA w/o cross-account)
+ */
+async function detectKubectlRole(_clusterName: string): Promise<string | null> {
+  type KubeConfigMinified = {
+    users?: Array<{
+      name?: string;
+      user?: {
+        exec?: {
+          args?: string[];
+        };
+      };
+    }>;
+  };
+  const { result, parsed } = await runJson<KubeConfigMinified>(
+    'kubectl',
+    ['config', 'view', '--minify', '-o', 'json'],
+    { timeoutMs: 8_000 },
+  );
+  if (result.exitCode !== 0 || !parsed) return null;
+  const users = parsed.users ?? [];
+  for (const u of users) {
+    const execArgs: string[] = u.user?.exec?.args ?? [];
+    for (let i = 0; i < execArgs.length; i++) {
+      const arg = execArgs[i];
+      // Handle --role-arn=<value> single-token form.
+      if (arg.startsWith('--role-arn=')) {
+        const arn = arg.slice('--role-arn='.length);
+        if (arn.startsWith('arn:')) return arn;
+      }
+      // Handle --role <value> two-token form (aws eks get-token style).
+      if ((arg === '--role' || arg === '--role-arn') && i + 1 < execArgs.length) {
+        const arn = execArgs[i + 1];
+        if (arn.startsWith('arn:')) return arn;
+      }
+    }
+  }
+  return null;
+}
 
 /**
  * Pure routing function: (snapshot, session) → next question or 'render'.
  * Every mandatory field is checked in dependency order; the first gap halts.
  */
-function nextQuestion(
+async function nextQuestion(
   snapshot: DiscoverySnapshot,
   session: RetrieverWizardSession
-): RetrieverNextStep {
+): Promise<RetrieverNextStep> {
 
   // Step 1 — OIDC provider check.
   // We surface this once (when infraMode is unknown and we haven't yet
@@ -660,7 +713,7 @@ function nextQuestion(
     if (notYetSupplied.length > 0) {
       return {
         kind: 'ask',
-        markdown: renderInfraInstructions(snapshot, session),
+        markdown: await renderInfraInstructions(snapshot, session),
         questionId: notYetSupplied.includes('index_source_bucket') ? 'input-bucket' : 'sqs-urls',
         shape: buildInfraMissingShape(session, notYetSupplied),
       };
@@ -952,10 +1005,10 @@ function renderInfraReview(
   ].join('\n');
 }
 
-function renderInfraInstructions(
+async function renderInfraInstructions(
   snapshot: DiscoverySnapshot,
   session: RetrieverWizardSession
-): string {
+): Promise<string> {
   const region = snapshot.aws?.region ?? 'us-east-1';
   const detectedAccount = snapshot.aws?.callerIdentity?.account;
   const account = detectedAccount ?? '<ACCOUNT_ID>';
@@ -967,7 +1020,9 @@ function renderInfraInstructions(
     ?? `oidc.eks.${region}.amazonaws.com/id/<OIDC_ID>`;
 
   if (session.infraMode === 'terraform') {
-    return renderTerraformInstructions(clusterName, region, account, oidcProvider, accountAutoDetected);
+    // Fix 80: detect cross-account role from active kubeconfig exec block.
+    const detectedRole = await detectKubectlRole(clusterName);
+    return renderTerraformInstructions(clusterName, region, account, oidcProvider, accountAutoDetected, detectedRole);
   }
   return renderCliInstructions(clusterName, region, account, oidcProvider);
 }
@@ -977,7 +1032,8 @@ function renderTerraformInstructions(
   region: string,
   account: string,
   oidcProvider: string,
-  accountAutoDetected: boolean = false
+  accountAutoDetected: boolean = false,
+  detectedRole: string | null = null
 ): string {
   const envId = account === '<ACCOUNT_ID>' ? 'xxxxxx' : account.slice(-6);
   // Compute the full OIDC provider ARN required by oidc_provider_arn.
@@ -993,21 +1049,77 @@ function renderTerraformInstructions(
       ]
     : [];
 
+  // Fix 80: build eks_exec_args with optional --role for cross-account clusters.
+  const eksExecArgsBase = [
+    `    "--region", "${region}",`,
+    `    "eks", "get-token",`,
+    `    "--cluster-name", "${clusterName}",`,
+  ];
+  const roleArgLines = detectedRole
+    ? [`    "--role", "${detectedRole}",`]
+    : [];
+  const eksExecArgLines = [...eksExecArgsBase, ...roleArgLines];
+  const roleNote = detectedRole
+    ? [``, `> **Note:** Cross-account role \`${detectedRole}\` detected from \`~/.kube/config\` exec block and injected into the \`eks_exec_args\` local.`]
+    : [];
+
+  // Fix 79: emit kubernetes + helm provider blocks so the TF module can create
+  // the Kubernetes namespace, ServiceAccount, and Helm release without the
+  // "dial tcp [::1]:80: connect: connection refused" error on `terraform apply`.
+  const k8sProviderBlock = [
+    `data "aws_eks_cluster" "log10x_cluster" {`,
+    `  name = "${clusterName}"`,
+    `}`,
+    ``,
+    `locals {`,
+    `  eks_exec_args = [`,
+    ...eksExecArgLines,
+    `  ]`,
+    `}`,
+    ``,
+    `provider "kubernetes" {`,
+    `  host                   = data.aws_eks_cluster.log10x_cluster.endpoint`,
+    `  cluster_ca_certificate = base64decode(data.aws_eks_cluster.log10x_cluster.certificate_authority[0].data)`,
+    `  exec {`,
+    `    api_version = "client.authentication.k8s.io/v1beta1"`,
+    `    command     = "aws"`,
+    `    args        = local.eks_exec_args`,
+    `  }`,
+    `}`,
+    ``,
+    `provider "helm" {`,
+    `  kubernetes = {`,
+    `    host                   = data.aws_eks_cluster.log10x_cluster.endpoint`,
+    `    cluster_ca_certificate = base64decode(data.aws_eks_cluster.log10x_cluster.certificate_authority[0].data)`,
+    `    exec = {`,
+    `      api_version = "client.authentication.k8s.io/v1beta1"`,
+    `      command     = "aws"`,
+    `      args        = local.eks_exec_args`,
+    `    }`,
+    `  }`,
+    `}`,
+  ];
+
   return [
     '# Retriever wizard — Step 3: Terraform provisioning',
     '',
     'Add the following to your Terraform workspace. The module creates the S3 bucket, four SQS queues, IAM role with IRSA binding, and CloudWatch log groups.',
     ...accountWarning,
+    ...roleNote,
     '',
     '```hcl',
     `terraform {`,
     `  required_version = ">= 1.5.0"`,
     `  required_providers {`,
-    `    aws = { source = "hashicorp/aws", version = ">= 6.3.0" }`,
+    `    aws        = { source = "hashicorp/aws",       version = ">= 6.3.0" }`,
+    `    kubernetes = { source = "hashicorp/kubernetes", version = ">= 2.23.0" }`,
+    `    helm       = { source = "hashicorp/helm",      version = ">= 2.12.0" }`,
     `  }`,
     `}`,
     ``,
     `provider "aws" { region = "${region}" }`,
+    ``,
+    ...k8sProviderBlock,
     ``,
     `variable "tenx_api_key" {`,
     `  type        = string`,
@@ -1303,7 +1415,7 @@ export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise
   }
 
   // Question routing.
-  const next = nextQuestion(snapshot, session);
+  const next = await nextQuestion(snapshot, session);
   if (next.kind === 'ask') {
     return wizardReturn({
       mode: 'next_question',

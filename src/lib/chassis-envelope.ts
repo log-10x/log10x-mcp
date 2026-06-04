@@ -261,6 +261,13 @@ export const SourceDisclosureSchema = z.object({
    * SIEM data so a reader knows the cost model and query dialect.
    */
   siem_vendor: z.string().optional(),
+  /**
+   * How the Retriever URL + bucket was resolved. Populated by tools that
+   * consume the Retriever (retriever_query, retriever_series, backfill_metric,
+   * overflow_contents) so an agent can tell whether the resolution came from
+   * env vars, the discovery snapshot, a live kubectl probe, or was absent.
+   */
+  retriever_state_source: z.enum(['env_var', 'snapshot', 'kubectl_probe', 'none']).optional(),
 });
 export type SourceDisclosure = z.infer<typeof SourceDisclosureSchema>;
 

@@ -23,6 +23,7 @@ import type { DiscoverySnapshot } from '../discovery/types.js';
 import type { ForwarderKind } from '../discovery/types.js';
 import type { AdvisePlan, PlanStep, VerifyProbe, PreflightCheck } from './types.js';
 import { renderOffloadSection, type OffloadForwarderId } from '../offload-recipes.js';
+import { run } from '../discovery/shell.js';
 
 /** Map a detected forwarder kind to the offload-capable recipe set. filebeat
  * has no native S3 output (it ships via logstash/ES) and `unknown` is a
@@ -96,10 +97,25 @@ const RETRIEVER_CHART_REF = 'log10x/retriever';
 export async function buildRetrieverPlan(args: RetrieverAdviseArgs): Promise<AdvisePlan> {
   const snapshot = args.snapshot;
   const releaseName = args.releaseName ?? 'my-retriever';
-  const namespace = args.namespace ?? snapshot.recommendations.suggestedNamespace ?? 'logging';
+
+  // Fix 81: for verify (and teardown) actions, prefer the actual installed
+  // namespace from installedComponentsDetail.retriever over suggestedNamespace,
+  // which is the forwarder namespace and may be wrong.
+  const installedDetail = snapshot.recommendations.installedComponentsDetail?.retriever;
+  const installedNamespace = installedDetail?.namespace;
+  const namespace =
+    args.namespace ??
+    (installedNamespace
+      ? installedNamespace   // actual pod namespace from discover_env
+      : snapshot.recommendations.suggestedNamespace ?? 'logging');
 
   // Infra: prefer caller-supplied values; fall back to snapshot-derived.
-  const inputBucket = args.inputBucket ?? snapshot.recommendations.retrieverS3Bucket;
+  // Fix 82: for verify, also try to resolve the bucket from the installed
+  // Helm release values if installedComponentsDetail.retriever is present.
+  const installedBucket = installedNamespace
+    ? await resolveInstalledBucket(releaseName, installedNamespace)
+    : undefined;
+  const inputBucket = args.inputBucket ?? installedBucket ?? snapshot.recommendations.retrieverS3Bucket;
   const indexBucket = args.indexBucket ?? (inputBucket ? `${inputBucket}/indexing-results/` : undefined);
   const irsaRoleArn =
     args.irsaRoleArn ??
@@ -151,6 +167,18 @@ export async function buildRetrieverPlan(args: RetrieverAdviseArgs): Promise<Adv
   if (snapshot.recommendations.alreadyInstalled.retriever) {
     notes.push(
       `A Retriever is already installed in namespace \`${snapshot.recommendations.alreadyInstalled.retriever}\`. Installing a second release requires a separate set of SQS queues + IRSA role — running two retrievers against the same queues will race.`
+    );
+  }
+  // Fix 81/82: audit trail for namespace + bucket resolution source.
+  if (installedNamespace) {
+    const bucketSource = args.inputBucket
+      ? 'caller-supplied'
+      : installedBucket
+        ? `helm get values (installed release in ${installedNamespace})`
+        : 'snapshot pattern-match (helm values not available)';
+    notes.push(
+      `Verify namespace \`${namespace}\` resolved from installed component detail (actual pod namespace). ` +
+      `Input bucket resolved via: ${bucketSource}.`
     );
   }
   notes.push(
@@ -501,4 +529,40 @@ function buildTeardownSteps(releaseName: string, namespace: string): PlanStep[] 
       ],
     },
   ];
+}
+
+// ── Fix 82: resolve the input bucket from the installed Helm release values ──
+
+/**
+ * Probe `helm get values` for the installed Retriever release and extract
+ * the `inputBucket` value. This gives verify probes the actual bucket the
+ * Terraform module created — not a name-pattern guess from the pre-install
+ * snapshot.
+ *
+ * Falls back gracefully to `undefined` when:
+ *   - helm is not available
+ *   - the release is not found in the namespace
+ *   - `inputBucket` is not set in the values (older chart deployments)
+ *
+ * Source is logged in the preflight detail so the user can audit which
+ * resolution path was used.
+ */
+async function resolveInstalledBucket(
+  releaseName: string,
+  namespace: string,
+): Promise<string | undefined> {
+  const result = await run(
+    'helm',
+    ['get', 'values', '-n', namespace, releaseName, '-o', 'json'],
+    { timeoutMs: 10_000 },
+  );
+  if (result.exitCode !== 0) return undefined;
+  try {
+    const values = JSON.parse(result.stdout) as Record<string, unknown>;
+    const bucket = values['inputBucket'];
+    if (typeof bucket === 'string' && bucket.length > 0) return bucket;
+  } catch {
+    // JSON parse failure — fall through
+  }
+  return undefined;
 }

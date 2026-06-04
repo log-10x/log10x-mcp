@@ -26,6 +26,7 @@ import {
   type RetrieverQueryRequest,
   type RetrieverEvent,
 } from '../lib/retriever-api.js';
+import { getRetrieverState } from '../lib/retriever-state.js';
 import {
   explainZeroResults,
   type RetrieverQueryDiagnostics,
@@ -170,6 +171,8 @@ export async function executeRetrieverQuery(
   },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
+  // Fix 83: resolve Retriever state for source_disclosure.
+  const retrieverState = await getRetrieverState(null);
   if (!isRetrieverConfigured()) {
     // Typed not_configured (status + advise_retriever action) so an agent
     // branches on data.status; the framework chokepoint also normalises to
@@ -201,7 +204,7 @@ export async function executeRetrieverQuery(
     tool: 'log10x_retriever_query',
     view: 'summary',
     summary: { headline },
-    data: d,
+    data: { ...d, source_disclosure: { retriever_state_source: retrieverState.source } },
     truncated: d.truncated || d.partial_results,
     actions,
   });

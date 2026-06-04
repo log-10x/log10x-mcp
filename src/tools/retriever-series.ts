@@ -26,6 +26,7 @@ import {
   type RetrieverQueryResponse,
   type RetrieverSummary,
 } from '../lib/retriever-api.js';
+import { getRetrieverState } from '../lib/retriever-state.js';
 import {
   decideFidelity,
   parseFidelityArg,
@@ -121,6 +122,8 @@ export async function executeRetrieverSeries(
   env: EnvConfig
 ): Promise<string | import('../lib/output-types.js').StructuredOutput> {
   const { buildEnvelope: __be } = await import('../lib/output-types.js');
+  // Fix 83: resolve Retriever state for source_disclosure.
+  const retrieverState = await getRetrieverState(null);
   if (!isRetrieverConfigured()) {
     const md = retrieverNotConfiguredMessage();
     // Typed not_configured (status + advise_retriever action) so an agent
@@ -234,6 +237,7 @@ export async function executeRetrieverSeries(
       events_per_sub_window: decision.eventsPerSubWindow,
       sub_window_results: result.subWindowResults,
       human_summary,
+      source_disclosure: { retriever_state_source: retrieverState.source },
     },
     actions: args.pattern ? [
       { tool: 'log10x_retriever_query', args: { pattern: args.pattern, from: args.from, to: args.to }, reason: 'fetch the actual events that built this series' },
