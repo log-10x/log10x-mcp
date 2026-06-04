@@ -26,7 +26,9 @@ import { LABELS } from '../lib/promql.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { parsePrometheusValue, COST_MODEL_BY_DESTINATION } from '../lib/cost.js';
 import type { SiemId } from '../lib/siem/pricing.js';
-import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { type StructuredOutput } from '../lib/output-types.js';
+import { newChassisTelemetry, buildChassisEnvelope } from '../lib/chassis-envelope.js';
+import { resolveSiemSelection } from '../lib/siem/resolve.js';
 import type { MustAskUser } from './log10x-start.js';
 
 // ─── Schema ───────────────────────────────────────────────────────────────────
@@ -284,16 +286,34 @@ export async function executeExplainMode(args: {
   mode: ExplainMode;
   destination?: string;
 }): Promise<StructuredOutput> {
+  const telemetry = newChassisTelemetry();
   const meta = MODE_METADATA[args.mode];
 
-  // Resolve destination: caller arg > env config > null
+  // Resolve destination: caller arg > resolveSiemSelection auto-detect > env.analyzer > null
   let destination: string | null = args.destination ?? null;
+  let destinationResolutionSource: 'explicit' | 'auto_detected' | 'env_config' | 'none' = 'none';
   let env: EnvConfig | undefined;
+
+  if (destination) {
+    destinationResolutionSource = 'explicit';
+  } else {
+    try {
+      const sel = await resolveSiemSelection({});
+      if (sel.kind === 'resolved') {
+        destination = sel.id;
+        destinationResolutionSource = 'auto_detected';
+      }
+    } catch {
+      // auto-detect best-effort; fall through to env.analyzer
+    }
+  }
+
   try {
     const envs = await loadEnvironments();
     env = envs.default;
     if (!destination && env?.analyzer) {
       destination = env.analyzer;
+      destinationResolutionSource = 'env_config';
     }
   } catch {
     env = undefined;
@@ -366,18 +386,6 @@ export async function executeExplainMode(args: {
     'log10x_preview_filter',
   ];
 
-  const envelope: ExplainModeEnvelope = {
-    service: args.service,
-    mode: args.mode,
-    destination,
-    service_bytes_per_month: bytesPerMonth,
-    service_cost_per_month_usd: costPerMonth,
-    must_render_verbatim: verbatim,
-    must_ask_user: mustAskUser,
-    forbidden_next_actions: forbiddenNextActions,
-    routes_to: routesTo,
-  };
-
   const headline =
     `explain_mode(${args.mode}) for service "${args.service}". ` +
     (bytesPerMonth !== null
@@ -396,11 +404,42 @@ export async function executeExplainMode(args: {
         { tool: 'log10x_preview_filter', args: routesTo.preview.args, reason: 'Preview path — call after user picks Preview', role: 'alternative' as const },
       ];
 
-  return buildEnvelope({
+  return buildChassisEnvelope({
     tool: 'log10x_explain_mode',
     view: 'summary',
-    summary: { headline },
-    data: envelope,
+    headline,
+    status: bytesPerMonth !== null ? 'success' : 'insufficient_data',
+    decisions: {
+      threshold_used: null,
+      threshold_basis: 'default',
+    },
+    source_disclosure: {
+      bytes_source: bytesPerMonth !== null ? 'tsdb' : undefined,
+      siem_vendor: destination ?? undefined,
+      rate_source: ratePerGb !== null ? 'list_price' : 'none',
+    },
+    scope: {
+      window: 'point_in_time',
+      window_basis: 'auto_default',
+    },
+    payload: {
+      service: args.service,
+      mode: args.mode,
+      destination,
+      destination_resolution_source: destinationResolutionSource,
+      service_bytes_per_month: bytesPerMonth,
+      service_cost_per_month_usd: costPerMonth,
+      routes_to: routesTo,
+    },
+    human_summary:
+      `Mode ${args.mode} for ${args.service}: ${meta.what_it_does.slice(0, 80)}...` +
+      (bytesPerMonth !== null
+        ? ` Service volume: ${(bytesPerMonth / (1024 ** 3)).toFixed(1)} GB/mo.`
+        : ' Volume data not yet available from metrics.'),
+    must_render_verbatim: verbatim,
+    must_ask_user: mustAskUser,
+    forbidden_next_actions: forbiddenNextActions,
     actions,
+    telemetry,
   });
 }

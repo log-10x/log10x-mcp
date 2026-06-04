@@ -173,7 +173,7 @@ export async function executeRetrieverQuery(
 ): Promise<string | StructuredOutput> {
   // Fix 83: resolve Retriever state for source_disclosure.
   const retrieverState = await getRetrieverState(null);
-  if (!isRetrieverConfigured()) {
+  if (!(await isRetrieverConfigured())) {
     // Typed not_configured (status + advise_retriever action) so an agent
     // branches on data.status; the framework chokepoint also normalises to
     // the same shape if a tool throws a NotConfiguredError later.

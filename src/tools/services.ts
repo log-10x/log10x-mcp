@@ -155,6 +155,12 @@ export async function executeServices(
     source_disclosure: {
       bytes_source: 'tsdb',
       rate_source: args.analyzerCost != null ? 'customer_supplied' : 'list_price',
+      service_count_source: {
+        kind: 'above_volume_floor',
+        count: d.service_count,
+        denominator_meaning:
+          'Services emitting >= 1 KB/s in the window (wait-for-* + low-volume init containers filtered)',
+      },
     },
     scope: {
       window: d.time_range,
@@ -466,6 +472,18 @@ async function executeServicesInner(
               args: { service: r.name },
               reason: `Re-tune the per-pattern action plan for "${r.name}" via configure_engine — the bulk-plan path that lands a refreshed cap-CSV in gitops.`,
             };
+        const droppedTotal = r.axis.bytes_offloaded + r.axis.bytes_compacted + r.axis.bytes_dropped;
+        let attribution_reason: string;
+        if (droppedTotal <= 0) {
+          attribution_reason = 'No dropped bytes in this window for this service.';
+        } else if (r.attribution === 'csv') {
+          attribution_reason = 'Drop counts available per pattern via cap-CSV / action-intent join on the receiver.';
+        } else if (r.attribution === 'unattributed') {
+          attribution_reason =
+            'Engine reported dropped bytes but no per-pattern attribution metric is available — confirm cap-CSV is configured + receiver_in_path.';
+        } else {
+          attribution_reason = 'No dropped bytes in this window for this service.';
+        }
         return {
           rank: i + 1,
           name: r.name,
@@ -478,6 +496,7 @@ async function executeServicesInner(
           bytes_dropped: r.axis.bytes_dropped,
           current_mode: r.current_mode,
           attribution: r.attribution,
+          attribution_reason,
           next_action,
         };
       }),

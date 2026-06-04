@@ -437,7 +437,7 @@ async function formatResults(
       });
       if (s.ok && s.is_offloaded) {
         const action: 'none' | 'use_retriever_query' | 'check_advise_retriever' =
-          isRetrieverConfigured() ? 'use_retriever_query' : 'check_advise_retriever';
+          (await isRetrieverConfigured()) ? 'use_retriever_query' : 'check_advise_retriever';
         // Partial-result path: kept-cohort scan timed out on a heavy
         // pattern (the smoke surfaced this on demo AQwRuueOWbQ at
         // 21.55 GB dropped). dropped_bytes is populated; share is null;

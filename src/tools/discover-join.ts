@@ -29,8 +29,8 @@ import {
   customerMetricsNotConfiguredMessage,
 } from '../lib/customer-metrics.js';
 import { getOrDiscoverJoin, discoverJoin, type JoinPair } from '../lib/join-discovery.js';
-import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
-import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
+import { type StructuredOutput } from '../lib/output-types.js';
+import { newChassisTelemetry, buildChassisEnvelope } from '../lib/chassis-envelope.js';
 
 export const discoverJoinSchema = {
   force_refresh: z
@@ -60,8 +60,9 @@ export const discoverJoinSchema = {
   environment: z.string().optional().describe('Environment nickname (for multi-env setups).'),
 };
 
-interface DiscoverJoinSummary {
-  status: 'joined' | 'no_join_available' | 'not_configured';
+interface DiscoverJoinPayload {
+  /** Tool-specific join status — distinct from chassis status. */
+  join_status: 'joined' | 'no_join_available' | 'not_configured';
   backend?: string;
   endpoint?: string;
   cached: boolean;
@@ -71,7 +72,6 @@ interface DiscoverJoinSummary {
   join_key?: { log10x_side: string; customer_side: string; jaccard: number; shared_values: number; log10x_only_values: number; customer_only_values: number };
   runner_ups: Array<{ log10x_side: string; customer_side: string; jaccard: number; shared_values: number; log10x_only_values: number; customer_only_values: number }>;
   top_below_threshold: Array<{ log10x_side: string; customer_side: string; jaccard: number; shared_values: number; log10x_only_values: number; customer_only_values: number }>;
-  human_summary: string;
 }
 
 export async function executeDiscoverJoin(
@@ -85,35 +85,41 @@ export async function executeDiscoverJoin(
   },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
-  const telemetry = newTelemetry();
+  const telemetry = newChassisTelemetry();
   args.force_refresh = args.force_refresh ?? false;
   args.minimum_jaccard = args.minimum_jaccard ?? 0.7;
   const resolution = await resolveBackend();
   if (!resolution.backend) {
-    // Detection trace kept available for the not-configured remediation hint
-    // surfaced through unified.error; markdown wrapping is no longer offered.
     void customerMetricsNotConfiguredMessage(formatDetectionTrace(resolution.trace));
-    const unified = buildUnifiedFields({ status: 'error', telemetry, humanSummary: 'Customer metrics backend not configured — discover_join cannot run.' });
-    return buildEnvelope({
+    return buildChassisEnvelope({
       tool: 'log10x_discover_join',
       view: 'summary',
-      summary: { headline: 'Customer metrics backend not configured — discover_join cannot run.' },
-      data: {
-        // Keep tool-specific `status` value ('not_configured'); the unified
-        // envelope's status (`error`) goes into a parallel field so the
-        // agent can read either. Both fields are honest about the call state.
-        status: 'not_configured',
+      headline: 'Customer metrics backend not configured — discover_join cannot run.',
+      status: 'error',
+      decisions: { threshold_used: null, threshold_basis: 'default' },
+      source_disclosure: { label_source: 'customer_prom' },
+      scope: {
+        window: 'all',
+        window_basis: 'auto_default',
+        candidates_count: 0,
+        candidates_usable: 0,
+      },
+      payload: {
+        join_status: 'not_configured',
         cached: false,
         labels_probed_log10x: [],
         labels_probed_customer: [],
         runner_ups: [],
         top_below_threshold: [],
-        query_count: unified.query_count,
-        total_latency_ms: unified.total_latency_ms,
-        backend_pressure_hint: unified.backend_pressure_hint,
-        human_summary: unified.human_summary,
-        error: unified.error,
-      } satisfies DiscoverJoinSummary & Record<string, unknown>,
+      } satisfies DiscoverJoinPayload,
+      human_summary: 'Customer metrics backend not configured — discover_join cannot run.',
+      error: {
+        error_type: 'config_missing',
+        retryable: false,
+        suggested_backoff_ms: null,
+        hint: 'LOG10X_CUSTOMER_METRICS_URL is not set. Configure the customer metrics backend first.',
+      },
+      telemetry,
     });
   }
   const backend = resolution.backend;
@@ -130,8 +136,8 @@ export async function executeDiscoverJoin(
     ? await discoverJoin(env, backend, opts)
     : await getOrDiscoverJoin(env, backend, opts);
 
-  const data: DiscoverJoinSummary = {
-    status: result.status === 'joined' ? 'joined' : 'no_join_available',
+  const payload: DiscoverJoinPayload = {
+    join_status: result.status === 'joined' ? 'joined' : 'no_join_available',
     backend: backend.backendType,
     endpoint: backend.endpoint,
     cached: result.cachedForSession,
@@ -141,22 +147,37 @@ export async function executeDiscoverJoin(
     join_key: result.joinKey ? joinPairToData(result.joinKey) : undefined,
     runner_ups: result.runnerUps.map(joinPairToData),
     top_below_threshold: result.status === 'no_join_available' ? result.probed.slice(0, 8).map(joinPairToData) : [],
-    human_summary: '',
   };
-  data.human_summary = buildHumanSummary(data, args.minimum_jaccard);
-  const headline = data.join_key
-    ? `Join key: ${data.join_key.log10x_side} ↔ ${data.join_key.customer_side} (Jaccard ${data.join_key.jaccard.toFixed(3)}, ${data.runner_ups.length} runner-up${data.runner_ups.length !== 1 ? 's' : ''}).`
+
+  const humanSummary = buildHumanSummary(payload, args.minimum_jaccard);
+  const headline = payload.join_key
+    ? `Join key: ${payload.join_key.log10x_side} ↔ ${payload.join_key.customer_side} (Jaccard ${payload.join_key.jaccard.toFixed(3)}, ${payload.runner_ups.length} runner-up${payload.runner_ups.length !== 1 ? 's' : ''}).`
     : `No join pair above Jaccard ${args.minimum_jaccard}. Cross-pillar primitives refuse for anchors that need a structural join.`;
-  const unified = buildUnifiedFields({ status: 'success', telemetry, humanSummary: data.human_summary });
-  // discover-join's `data.status` carries tool-specific values
-  // ('joined' / 'no_join_available'), so spread unified WITHOUT its status.
-  const { status: _unifiedStatus, ...unifiedRest } = unified;
-  return buildEnvelope({
+
+  const totalProbed = result.probedLabelsLog10x.length + result.probedLabelsCustomer.length;
+
+  return buildChassisEnvelope({
     tool: 'log10x_discover_join',
     view: 'summary',
-    summary: { headline },
-    data: { ...data, ...unifiedRest },
-    actions: data.join_key
+    headline,
+    status: payload.join_status === 'joined' ? 'success' : 'no_signal',
+    decisions: {
+      threshold_used: args.minimum_jaccard,
+      threshold_basis: 'customer_supplied',
+    },
+    source_disclosure: {
+      label_source: 'log10x_prom',
+      siem_vendor: backend.backendType,
+    },
+    scope: {
+      window: effectiveWindow ?? 'all',
+      window_basis: effectiveWindow ? 'explicit' : 'auto_default',
+      candidates_count: totalProbed,
+      candidates_usable: totalProbed,
+    },
+    payload,
+    human_summary: humanSummary,
+    actions: payload.join_key
       ? [
           { tool: 'log10x_metrics_that_moved', args: {}, reason: 'first composition step: anchor a Log10x pattern, filter candidate customer metrics that actually moved with it' },
           { tool: 'log10x_rank_by_shape_similarity', args: {}, reason: 'second step on the filtered candidates: Pearson + signed lag, no tier framing' },
@@ -165,6 +186,7 @@ export async function executeDiscoverJoin(
       : [
           { tool: 'log10x_customer_metrics_query', args: {}, reason: 'explore the customer backend label universe to find a natural join dimension' },
         ],
+    telemetry,
   });
 }
 
@@ -190,16 +212,16 @@ function parseWindowToSeconds(s: string): number {
   return n * unitSeconds[unit];
 }
 
-function buildHumanSummary(data: DiscoverJoinSummary, minimumJaccard: number): string {
-  if (data.status === 'joined' && data.join_key) {
-    const jk = data.join_key;
-    const runners = data.runner_ups.length;
+function buildHumanSummary(payload: DiscoverJoinPayload, minimumJaccard: number): string {
+  if (payload.join_status === 'joined' && payload.join_key) {
+    const jk = payload.join_key;
+    const runners = payload.runner_ups.length;
     return `Found a join key: log10x label \`${jk.log10x_side}\` matches customer label \`${jk.customer_side}\` at Jaccard ${jk.jaccard.toFixed(3)} (${jk.shared_values} shared values). ${runners} runner-up${runners !== 1 ? 's' : ''} above 0.5. Cross-pillar primitives will reuse this join automatically.`;
   }
-  const probed = data.top_below_threshold.length;
-  const best = probed > 0 ? data.top_below_threshold[0] : undefined;
+  const probed = payload.top_below_threshold.length;
+  const best = probed > 0 ? payload.top_below_threshold[0] : undefined;
   const bestHint = best
     ? ` Best below-threshold pair: \`${best.log10x_side}\` ↔ \`${best.customer_side}\` at Jaccard ${best.jaccard.toFixed(3)}.`
     : ' No label pairs were probed; one side returned an empty label universe.';
-  return `No label pair reached the Jaccard ${minimumJaccard} threshold across ${data.labels_probed_log10x.length} log10x-side and ${data.labels_probed_customer.length} customer-side labels.${bestHint} Cross-pillar correlation cannot proceed for anchors that need a structural join.`;
+  return `No label pair reached the Jaccard ${minimumJaccard} threshold across ${payload.labels_probed_log10x.length} log10x-side and ${payload.labels_probed_customer.length} customer-side labels.${bestHint} Cross-pillar correlation cannot proceed for anchors that need a structural join.`;
 }

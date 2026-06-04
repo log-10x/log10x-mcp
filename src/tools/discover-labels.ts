@@ -14,8 +14,8 @@ import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
 import { fetchLabels, fetchLabelValues } from '../lib/api.js';
 import { agentOnly } from '../lib/agent-only.js';
-import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
-import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
+import { type StructuredOutput } from '../lib/output-types.js';
+import { newChassisTelemetry, buildChassisEnvelope } from '../lib/chassis-envelope.js';
 
 export const discoverLabelsSchema = {
   label: z.string().optional().describe('If set, return distinct values for this label (e.g., "tenx_user_service" returns every service). If omitted, return the full label name list.'),
@@ -31,7 +31,6 @@ interface DiscoverLabelsSummary {
   values?: string[];
   featured_labels?: Array<{ name: string; hint: string; available: boolean }>;
   other_labels?: string[];
-  human_summary: string;
 }
 
 // Labels that are infrastructure-level and uninteresting to an SRE writing queries.
@@ -71,36 +70,66 @@ export async function executeDiscoverLabels(
   args: { label?: string; limit?: number },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
-  const telemetry = newTelemetry();
+  const telemetry = newChassisTelemetry();
   const sumOut: { data?: DiscoverLabelsSummary } = {};
   await executeDiscoverLabelsInner(args, env, sumOut);
+
   if (!sumOut.data) {
-    // Defensive: inner always populates sumOut.data on success; if it didn't,
-    // surface a typed error envelope rather than masking with markdown wrap.
-    return buildEnvelope({
+    return buildChassisEnvelope({
       tool: 'log10x_discover_labels',
       view: 'summary',
-      summary: { headline: 'discover_labels returned no structured result.' },
-      data: {
-        mode: 'label_names',
-        total_count: 0,
-        shown_count: 0,
-        ...buildUnifiedFields({ status: 'error', telemetry, humanSummary: 'discover_labels failed: inner produced no structured result.' }),
-        human_summary: 'discover_labels failed: inner produced no structured result.',
+      headline: 'discover_labels returned no structured result.',
+      status: 'error',
+      decisions: { threshold_used: null, threshold_basis: 'default' },
+      source_disclosure: { label_source: 'log10x_prom' },
+      scope: { window: 'all', window_basis: 'auto_default' },
+      payload: {},
+      human_summary: 'discover_labels failed: inner produced no structured result.',
+      error: {
+        error_type: 'unknown',
+        retryable: false,
+        suggested_backoff_ms: null,
+        hint: 'discover_labels inner produced no structured result.',
       },
+      telemetry,
     });
   }
+
   const d = sumOut.data;
-  d.human_summary = buildDiscoverLabelsHumanSummary(d);
+  const humanSummary = buildDiscoverLabelsHumanSummary(d);
+
   const headline =
     d.mode === 'label_values'
       ? `Label "${d.label}": ${d.total_count} distinct value${d.total_count !== 1 ? 's' : ''}${d.shown_count < d.total_count ? ` (showing ${d.shown_count})` : ''}.`
       : `${d.total_count} queryable labels${d.featured_labels ? ` (${d.featured_labels.filter((f) => f.available).length} featured)` : ''}.`;
-  return buildEnvelope({
+
+  return buildChassisEnvelope({
     tool: 'log10x_discover_labels',
     view: 'summary',
-    summary: { headline },
-    data: { ...d, ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: d.human_summary }) },
+    headline,
+    status: d.total_count > 0 ? 'success' : 'no_signal',
+    decisions: { threshold_used: null, threshold_basis: 'default' },
+    source_disclosure: {
+      label_source: 'log10x_prom',
+      ...(d.mode === 'label_values' && d.label === 'tenx_user_service'
+        ? {
+            service_count_source: {
+              kind: 'raw_label_universe',
+              count: d.total_count,
+              denominator_meaning:
+                'All distinct tenx_user_service values seen in the label universe (no volume floor)',
+            },
+          }
+        : {}),
+    },
+    scope: {
+      window: 'all',
+      window_basis: 'auto_default',
+      candidates_count: d.total_count,
+      candidates_usable: d.shown_count,
+    },
+    payload: d,
+    human_summary: humanSummary,
     truncated: d.mode === 'label_values' && d.shown_count < d.total_count,
     actions:
       d.mode === 'label_names'
@@ -108,6 +137,7 @@ export async function executeDiscoverLabels(
             { tool: 'log10x_discover_labels', args: { label: 'tenx_user_service' }, reason: 'list the services available as a filter scope' },
           ]
         : [],
+    telemetry,
   });
 }
 
@@ -121,11 +151,11 @@ async function executeDiscoverLabelsInner(
   if (args.label) {
     const values = await fetchLabelValues(env, args.label);
     if (values.length === 0) {
-      if (sumOut) sumOut.data = { mode: 'label_values', label: args.label, total_count: 0, shown_count: 0, values: [], human_summary: '' };
+      if (sumOut) sumOut.data = { mode: 'label_values', label: args.label, total_count: 0, shown_count: 0, values: [] };
       return `Label "${args.label}" has no values. Check the label name or try a different time range by querying a tool that accepts filters.`;
     }
     const shown = values.slice(0, limit);
-    if (sumOut) sumOut.data = { mode: 'label_values', label: args.label, total_count: values.length, shown_count: shown.length, values: shown, human_summary: '' };
+    if (sumOut) sumOut.data = { mode: 'label_values', label: args.label, total_count: values.length, shown_count: shown.length, values: shown };
     const lines: string[] = [];
     lines.push(`Label "${args.label}" — ${values.length} distinct value${values.length !== 1 ? 's' : ''}${values.length > shown.length ? ` (showing ${shown.length})` : ''}`);
     lines.push('');
@@ -147,7 +177,6 @@ async function executeDiscoverLabelsInner(
       shown_count: queryable.length,
       featured_labels: featured,
       other_labels: rest,
-      human_summary: '',
     };
   }
 

@@ -19,6 +19,8 @@ import { z } from 'zod';
 import { resolveBackend, formatDetectionTrace, CustomerMetricsNotConfiguredError } from '../lib/customer-metrics.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
+import { wrapBackendError } from '../lib/primitive-errors.js';
+import { newChassisTelemetry, buildChassisErrorEnvelope } from '../lib/chassis-envelope.js';
 
 export const customerMetricsQuerySchema = {
   promql: z
@@ -72,6 +74,7 @@ export async function executeCustomerMetricsQuery(args: {
   step?: string;
 }): Promise<string | StructuredOutput> {
   const telemetry = newTelemetry();
+  const chassisTelemetry = newChassisTelemetry();
   const resolution = await resolveBackend();
   if (!resolution.backend) {
     // KEEP (precondition): throw is the loud human-escape-hatch path;
@@ -81,21 +84,40 @@ export async function executeCustomerMetricsQuery(args: {
   const backend = resolution.backend;
 
   let res: import('../lib/api.js').PrometheusResponse;
-  if (args.mode === 'instant') {
-    res = await backend.queryInstant(args.promql);
-  } else {
-    if (!args.start || !args.end || !args.step) {
-      // KEEP (schema-violation): cross-field requirement Zod can't express.
-      throw new Error('mode=range requires start, end, and step.');
+  try {
+    if (args.mode === 'instant') {
+      res = await backend.queryInstant(args.promql);
+    } else {
+      if (!args.start || !args.end || !args.step) {
+        // KEEP (schema-violation): cross-field requirement Zod can't express.
+        throw new Error('mode=range requires start, end, and step.');
+      }
+      const start = parseTimeArg(args.start);
+      const end = parseTimeArg(args.end);
+      const step = parseInt(args.step, 10);
+      if (!Number.isFinite(start) || !Number.isFinite(end) || !Number.isFinite(step) || step <= 0) {
+        // KEEP (schema-violation): freeform string parse, not Zod-expressible.
+        throw new Error('Invalid start/end/step. Expect ISO8601 or UNIX seconds, and a positive integer step.');
+      }
+      res = await backend.queryRange(args.promql, start, end, step);
     }
-    const start = parseTimeArg(args.start);
-    const end = parseTimeArg(args.end);
-    const step = parseInt(args.step, 10);
-    if (!Number.isFinite(start) || !Number.isFinite(end) || !Number.isFinite(step) || step <= 0) {
-      // KEEP (schema-violation): freeform string parse, not Zod-expressible.
-      throw new Error('Invalid start/end/step. Expect ISO8601 or UNIX seconds, and a positive integer step.');
-    }
-    res = await backend.queryRange(args.promql, start, end, step);
+  } catch (e) {
+    const primitiveErr = wrapBackendError(e);
+    return buildChassisErrorEnvelope({
+      tool: 'log10x_customer_metrics_query',
+      err: primitiveErr,
+      telemetry: chassisTelemetry,
+      source_disclosure: { siem_vendor: backend.backendType },
+      scope: {
+        window: args.mode === 'range' ? `${args.start ?? '?'}..${args.end ?? '?'}` : 'instant',
+        window_basis: 'explicit',
+      },
+      contextPayload: {
+        promql: args.promql,
+        mode: args.mode,
+        debug_error: e instanceof Error ? e.message : String(e),
+      },
+    });
   }
 
   const data = buildCustomerMetricsSummary(args.promql, res, backend.backendType, args.mode);

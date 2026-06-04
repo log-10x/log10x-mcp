@@ -124,7 +124,7 @@ export async function executeRetrieverSeries(
   const { buildEnvelope: __be } = await import('../lib/output-types.js');
   // Fix 83: resolve Retriever state for source_disclosure.
   const retrieverState = await getRetrieverState(null);
-  if (!isRetrieverConfigured()) {
+  if (!(await isRetrieverConfigured())) {
     const md = retrieverNotConfiguredMessage();
     // Typed not_configured (status + advise_retriever action) so an agent
     // branches on data.status, matching retriever_query and the framework.

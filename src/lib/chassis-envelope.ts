@@ -234,6 +234,8 @@ export const PatternCountSourceSchema = z.object({
     'scoped_total_above_threshold',
     'env_total',
     'scoped_total',
+    'above_volume_floor',
+    'raw_label_universe',
   ]),
   count: z.number().int().nonnegative(),
   /**
@@ -268,6 +270,17 @@ export const SourceDisclosureSchema = z.object({
    * env vars, the discovery snapshot, a live kubectl probe, or was absent.
    */
   retriever_state_source: z.enum(['env_var', 'snapshot', 'kubectl_probe', 'none']).optional(),
+  /**
+   * Service count semantics. Mirrors pattern_count_source for tools that
+   * surface a list of services. Without this field "12 services" is
+   * ambiguous — 12 above what floor, from what universe?
+   */
+  service_count_source: PatternCountSourceSchema.optional(),
+  /**
+   * Label source — for label-domain tools (discover_labels, discover_join).
+   * Identifies which Prometheus backend the label universe came from.
+   */
+  label_source: z.enum(['log10x_prom', 'customer_prom']).optional(),
 });
 export type SourceDisclosure = z.infer<typeof SourceDisclosureSchema>;
 

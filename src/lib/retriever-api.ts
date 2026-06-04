@@ -460,11 +460,34 @@ export async function resolveRetriever(): Promise<RetrieverResolution> {
   return { trace };
 }
 
-export function isRetrieverConfigured(): boolean {
-  // Sync helper retained for callers that need a quick check before paying
-  // the cost of a full async resolve. Covers only the explicit-env path;
-  // `resolveRetriever()` for the full cascade.
+/**
+ * Fast-path synchronous check (explicit env vars only).
+ * Kept for back-compat with any callers that cannot await.
+ * For the full kubectl-probe cascade use isRetrieverConfigured().
+ */
+export function isRetrieverConfiguredSync(): boolean {
   return Boolean(process.env.__SAVE_LOG10X_RETRIEVER_URL__ && process.env.__SAVE_LOG10X_RETRIEVER_BUCKET__);
+}
+
+/**
+ * Fix 83a — async gate that consults getRetrieverState so a kubectl-
+ * discovered install (no env vars set) is treated as configured.
+ *
+ * Resolution order:
+ *   1. Env-var fast-path — if both __SAVE_LOG10X_RETRIEVER_URL__ and
+ *      __SAVE_LOG10X_RETRIEVER_BUCKET__ are set, return true immediately
+ *      without spawning kubectl.
+ *   2. getRetrieverState() — runs the full detection cascade (terraform
+ *      state, AWS bucket pattern, kubectl probe). Returns true when the
+ *      resolved state has both installed=true AND a reachable URL.
+ */
+export async function isRetrieverConfigured(): Promise<boolean> {
+  // Fast-path: explicit env vars set — no kubectl needed.
+  if (isRetrieverConfiguredSync()) return true;
+  // Full cascade via retriever-state.
+  const { getRetrieverState } = await import('./retriever-state.js');
+  const state = await getRetrieverState();
+  return state.installed && state.url != null;
 }
 
 export function formatRetrieverTrace(trace: RetrieverResolution['trace']): string {

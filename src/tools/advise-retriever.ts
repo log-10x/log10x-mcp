@@ -1471,7 +1471,16 @@ export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise
 
   // Resolve final infra values from session + snapshot fallbacks.
   const detectedQueues = snapshot.recommendations.retrieverSqsUrls ?? {};
-  const resolvedInputBucket = session.inputBucket ?? snapshot.recommendations.retrieverS3Bucket;
+  // Fix 82: when an installed namespace is present in the snapshot, do NOT
+  // pre-resolve the bucket from snapshot.recommendations.retrieverS3Bucket.
+  // buildRetrieverPlan will call resolveInstalledBucket() via the helm probe
+  // (kubectl / helm get values) to read the actual bucket from the live
+  // release — snapshot.recommendations.retrieverS3Bucket is the demo-cloud
+  // bucket (tenx-demo-cloud-retriever-*) and would override the real value.
+  const installedNamespace = snapshot.recommendations.installedComponentsDetail?.retriever?.namespace;
+  const resolvedInputBucket =
+    session.inputBucket
+    ?? (installedNamespace ? undefined : snapshot.recommendations.retrieverS3Bucket);
   const resolvedIrsaRoleArn =
     session.irsaRoleArn ??
     snapshot.kubectl.serviceAccountIrsa.find(

@@ -114,52 +114,99 @@ export async function getRetrieverState(snapshot?: DiscoverySnapshot | null): Pr
 
 // ── private helpers ──────────────────────────────────────────────────────────
 
+type KubeSvcList = {
+  items?: Array<{
+    metadata: { name: string; namespace: string };
+    spec?: { clusterIP?: string; ports?: Array<{ port: number; name?: string }> };
+    status?: { loadBalancer?: { ingress?: Array<{ hostname?: string; ip?: string }> } };
+  }>;
+};
+
+/**
+ * Run kubectl get svc with a given label selector and scope.
+ * Returns the parsed item list, or an empty list on failure.
+ *
+ * Fix 83b: the Helm chart published by log10x uses `app=retriever-10x`
+ * (not the Kubernetes-recommended `app.kubernetes.io/name=retriever-10x`).
+ * We try both selectors and merge results so the probe doesn't silently
+ * return 0 services regardless of which label form the deployed chart uses.
+ */
+type KubeSvcItem = NonNullable<KubeSvcList['items']>[number];
+
+async function kubectlGetSvc(
+  scope: string[],  // e.g. ['-n', 'log10x'] or ['-A']
+  label: string,
+  timeoutMs: number,
+): Promise<{ items: KubeSvcItem[]; reason: string; exitCode: number }> {
+  const { result, parsed } = await runJson<KubeSvcList>(
+    'kubectl',
+    ['get', 'svc', ...scope, '-l', label, '-o', 'json'],
+    { timeoutMs },
+  );
+  return {
+    items: (parsed?.items ?? []) as NonNullable<KubeSvcList['items']>,
+    reason: result.exitCode !== 0 ? result.stderr.slice(0, 120) : '',
+    exitCode: result.exitCode,
+  };
+}
+
+/**
+ * Merge two SvcList item arrays, deduplicating by namespace/name.
+ */
+function mergeSvcItems(
+  a: KubeSvcItem[],
+  b: KubeSvcItem[],
+): KubeSvcItem[] {
+  const seen = new Set<string>();
+  const result: KubeSvcItem[] = [];
+  for (const item of [...a, ...b]) {
+    const key = `${item.metadata.namespace}/${item.metadata.name}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      result.push(item);
+    }
+  }
+  return result;
+}
+
 /**
  * Probe for the Retriever query-handler Service in a specific namespace.
- * Matches the chart label `app.kubernetes.io/name=retriever-10x` (the chart's
- * app.kubernetes.io/name value).
+ *
+ * Fix 83b: tries both `app=retriever-10x` (chart label) and
+ * `app.kubernetes.io/name=retriever-10x` (recommended label). Merges
+ * results so it matches installs from either label form.
  */
 async function probeKubectlRetrieverSvc(
   namespace: string,
 ): Promise<{ url?: string; reason: string }> {
-  type SvcList = {
-    items?: Array<{
-      metadata: { name: string; namespace: string };
-      spec?: { clusterIP?: string; ports?: Array<{ port: number; name?: string }> };
-      status?: { loadBalancer?: { ingress?: Array<{ hostname?: string; ip?: string }> } };
-    }>;
-  };
-  const { result, parsed } = await runJson<SvcList>(
-    'kubectl',
-    ['get', 'svc', '-n', namespace, '-l', 'app.kubernetes.io/name=retriever-10x', '-o', 'json'],
-    { timeoutMs: 8_000 },
-  );
-  if (result.exitCode !== 0 || !parsed) {
-    return { reason: `kubectl get svc in ${namespace} failed (exit ${result.exitCode}): ${result.stderr.slice(0, 120)}` };
+  const scope = ['-n', namespace];
+  const [r1, r2] = await Promise.all([
+    kubectlGetSvc(scope, 'app=retriever-10x', 8_000),
+    kubectlGetSvc(scope, 'app.kubernetes.io/name=retriever-10x', 8_000),
+  ]);
+  if (r1.exitCode !== 0 && r2.exitCode !== 0) {
+    return { reason: `kubectl get svc in ${namespace} failed: ${r1.reason}` };
   }
-  return pickServiceUrl(parsed.items ?? [], namespace);
+  const items = mergeSvcItems(r1.items, r2.items);
+  return pickServiceUrl(items, namespace);
 }
 
 /**
  * Cluster-wide probe — searches all namespaces for the Retriever service.
+ *
+ * Fix 83b: tries both `app=retriever-10x` and
+ * `app.kubernetes.io/name=retriever-10x`, merges results.
  */
 async function probeKubectlRetrieverSvcAll(): Promise<{ url?: string; namespace?: string; reason: string }> {
-  type SvcList = {
-    items?: Array<{
-      metadata: { name: string; namespace: string };
-      spec?: { clusterIP?: string; ports?: Array<{ port: number; name?: string }> };
-      status?: { loadBalancer?: { ingress?: Array<{ hostname?: string; ip?: string }> } };
-    }>;
-  };
-  const { result, parsed } = await runJson<SvcList>(
-    'kubectl',
-    ['get', 'svc', '-A', '-l', 'app.kubernetes.io/name=retriever-10x', '-o', 'json'],
-    { timeoutMs: 10_000 },
-  );
-  if (result.exitCode !== 0 || !parsed) {
-    return { reason: `kubectl get svc -A failed (exit ${result.exitCode}): ${result.stderr.slice(0, 120)}` };
+  const scope = ['-A'];
+  const [r1, r2] = await Promise.all([
+    kubectlGetSvc(scope, 'app=retriever-10x', 10_000),
+    kubectlGetSvc(scope, 'app.kubernetes.io/name=retriever-10x', 10_000),
+  ]);
+  if (r1.exitCode !== 0 && r2.exitCode !== 0) {
+    return { reason: `kubectl get svc -A failed: ${r1.reason}` };
   }
-  const items = parsed.items ?? [];
+  const items = mergeSvcItems(r1.items, r2.items);
   const { url, reason } = pickServiceUrl(items, undefined);
   if (url && items.length > 0) {
     // Derive namespace from the chosen item — find the first match.
@@ -185,13 +232,13 @@ function pickServiceUrl(
   defaultNamespace: string | undefined,
 ): { url?: string; reason: string } {
   if (items.length === 0) {
-    return { reason: 'no services with label app.kubernetes.io/name=retriever-10x found' };
+    return { reason: 'no services matched (tried app=retriever-10x and app.kubernetes.io/name=retriever-10x)' };
   }
   const qh =
     items.find((i) => i.metadata.name.includes('query-handler') || i.metadata.name.endsWith('query')) ??
     (items.length === 1 ? items[0] : undefined);
   if (!qh) {
-    return { reason: `${items.length} retriever-10x services found — none clearly a query-handler` };
+    return { reason: `${items.length} retriever-10x service(s) found — none clearly a query-handler` };
   }
 
   const port = qh.spec?.ports?.[0]?.port ?? 8080;

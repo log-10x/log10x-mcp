@@ -819,7 +819,7 @@ async function addScaleAndCapabilityCheck(
 
     // Retriever capability enumeration — what this specific install unlocks.
     lines.push('');
-    if (isRetrieverConfigured()) {
+    if (await isRetrieverConfigured()) {
       lines.push('Retriever deployed — this MCP can answer:');
       lines.push('  - Historical events beyond SIEM retention (compliance, audit, long-window post-mortems)');
       lines.push('  - Events dropped by the forwarder upstream of the SIEM (visible in log10x metrics but not the SIEM)');
