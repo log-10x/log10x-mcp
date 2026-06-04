@@ -60,7 +60,7 @@ import {
   type StructuredOutput,
   type Action as EnvelopeAction,
 } from '../lib/output-types.js';
-import { buildChassisEnvelope, buildChassisErrorEnvelope } from '../lib/chassis-envelope.js';
+import { buildChassisEnvelope, buildChassisErrorEnvelope, sanitizeHeadline } from '../lib/chassis-envelope.js';
 import {
   COST_MODEL_BY_DESTINATION,
   getDestinationCostModel,
@@ -425,7 +425,10 @@ export async function executeConfigureEngine(
   // Resolve gitops + destination.
   const target = await resolveTarget(args);
   if ('error' in target) {
-    const targetErrHint = firstLine(target.error);
+    // Strip any `# configure_engine — ` heading prefix that renderError()
+    // may have prepended before we attach "configure_engine refused: ".
+    // Without this, the hint bleeds a markdown H1 into the chassis headline.
+    const targetErrHint = sanitizeHeadline(firstLine(target.error));
     // Nudge log10x_set_gitops_repo when the hint signals a missing gitops
     // repo. log10x_set_gitops_repo writes gitops.repo to envs.json;
     // log10x_configure_env only handles metricsBackend and cannot write

@@ -729,7 +729,7 @@ export function buildChassisEnvelope(input: ChassisEnvelopeInput): ChassisEnvelo
  * `human_summary` and `payload.remediation` so markdown renderers see
  * it intact — only the `headline` field is sanitized.
  */
-function sanitizeHeadline(msg: string): string {
+export function sanitizeHeadline(msg: string): string {
   const lines = msg.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
   const nonHeader = lines.find((l) => !l.startsWith('#'));
   return nonHeader ?? (lines[0]?.replace(/^#+\s*/, '') ?? msg);

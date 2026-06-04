@@ -47,7 +47,7 @@ import {
   type DisclosedDollarValue,
 } from '../lib/cost.js';
 import { SIEM_DISPLAY_NAMES, type SiemId } from '../lib/siem/pricing.js';
-import { fmtBytes, fmtDisclosedDollar } from '../lib/format.js';
+import { fmtBytes, fmtDollar, fmtDisclosedDollar } from '../lib/format.js';
 import {
   type StructuredOutput,
 } from '../lib/output-types.js';
@@ -653,6 +653,15 @@ async function fetchTopContributors(
   for (const r of bytesRes?.data?.result ?? []) {
     const bytes = parsePrometheusValue(r);
     if (bytes <= 0) continue;
+    // Drop rows where both pattern_hash and message_pattern are empty strings.
+    // These are aggregate or per-container rollup series (emitted by
+    // tenx_app="reporter|receiver") that carry no per-pattern labels and would
+    // appear as zero-identity contributor rows in the result.
+    // TODO: trace empty pattern_hash to its Prometheus query — likely
+    //       a metric series with missing message_pattern label
+    const rawHash    = String(r.metric[labels.hash]    ?? '');
+    const rawPattern = String(r.metric[labels.pattern] ?? '');
+    if (rawHash === '' && rawPattern === '') continue;
     const key = topKey(r.metric, labels);
     const events = eventsByKey.get(key) ?? 0;
     const avgSize = events > 0 ? bytes / events : 0;
@@ -810,11 +819,17 @@ function headlineFor(d: BaselineEnvelopeData): string {
     d.current.monthly_usd_disclosed != null &&
     d.projection_no_action_90d.monthly_usd_in_90d_disclosed != null
   ) {
-    const monthly = fmtDisclosedDollar(d.current.monthly_usd_disclosed);
-    const future = fmtDisclosedDollar(
-      d.projection_no_action_90d.monthly_usd_in_90d_disclosed
-    );
-    dollarClause = ` · ${monthly}/mo current, ${future}/mo projected 90d no-action`;
+    const cur = d.current.monthly_usd_disclosed;
+    const fut = d.projection_no_action_90d.monthly_usd_in_90d_disclosed;
+    // Format raw dollar amounts without the per-value disclosure tail so
+    // the parenthetical appears exactly once at the end of the clause.
+    const curAmt  = cur.source === 'unset'  ? '—' : fmtDollar(cur.value);
+    const futAmt  = fut.source === 'unset'  ? '—' : fmtDollar(fut.value);
+    // Pick whichever non-null disclosure string is available (both carry the
+    // same text when source === 'list_price'; neither fires for customer_supplied).
+    const disclosure = cur.disclosure ?? fut.disclosure ?? null;
+    const tail = disclosure ? ` ${disclosure}` : '';
+    dollarClause = ` · ${curAmt}/mo current, ${futAmt}/mo projected 90d no-action${tail}`;
   }
   return `Baseline ready: ${band} · ${volume}${dollarClause}.`;
 }

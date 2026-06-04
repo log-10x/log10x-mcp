@@ -111,6 +111,24 @@ interface MeasureCompactionData {
    * total_original_bytes descending (highest-volume patterns first).
    */
   must_render_verbatim: string;
+  /**
+   * Aggregate compaction ratio: sum(total_original_bytes) / sum(total_encoded_bytes)
+   * across all patterns. This is the true end-to-end wire ratio and the
+   * correct figure for total savings projections.
+   */
+  aggregate_compaction_ratio_x: number;
+  /**
+   * Volume-weighted average of per-pattern ratios:
+   * sum(ratio * orig_bytes) / sum(orig_bytes). Useful for "typical pattern"
+   * framing but will diverge from aggregate_compaction_ratio_x when
+   * small-volume patterns have outlier ratios.
+   */
+  weighted_avg_compaction_ratio_x: number;
+  /**
+   * Fraction of original bytes on wire: 1 / aggregate_compaction_ratio_x.
+   * Expressed as a decimal (0.40 = 40% of original size remains after compaction).
+   */
+  fraction_on_wire: number;
 }
 
 // ── Helpers ──
@@ -295,6 +313,9 @@ export async function executeMeasureCompaction(
         siem_pull_ms: siemPullMs,
         engine_ms: 0,
         must_render_verbatim: '(no events found)',
+        aggregate_compaction_ratio_x: 0,
+        weighted_avg_compaction_ratio_x: 0,
+        fraction_on_wire: 1,
       } as MeasureCompactionData,
       human_summary: noEventsHeadline,
       actions: [],
@@ -388,14 +409,30 @@ export async function executeMeasureCompaction(
   patterns.sort((a, b) => b.total_original_bytes - a.total_original_bytes);
 
   const table = buildTable(patterns);
-  const avgRatio =
+
+  // Weighted-average of per-pattern ratios (per-pattern UX frame).
+  const totalOrigBytes = patterns.reduce((s, p) => s + p.total_original_bytes, 0);
+  const totalEncBytes = patterns.reduce((s, p) => s + p.total_encoded_bytes, 0);
+  const weightedAvgRatio =
     patterns.length > 0
       ? Math.round(
           (patterns.reduce((s, p) => s + p.compaction_ratio_x * p.total_original_bytes, 0) /
-            Math.max(1, patterns.reduce((s, p) => s + p.total_original_bytes, 0))) *
+            Math.max(1, totalOrigBytes)) *
             10
         ) / 10
       : 0;
+
+  // Aggregate ratio: sum(orig) / sum(enc) — the true end-to-end wire ratio.
+  const aggregateRatio =
+    totalEncBytes > 0
+      ? Math.round((totalOrigBytes / totalEncBytes) * 10) / 10
+      : 0;
+
+  // Fraction of original bytes remaining on wire.
+  const fractionOnWire =
+    aggregateRatio > 0
+      ? Math.round((1 / aggregateRatio) * 1000) / 1000
+      : 1;
 
   const data: MeasureCompactionData = {
     service: args.service,
@@ -406,6 +443,9 @@ export async function executeMeasureCompaction(
     siem_pull_ms: siemPullMs,
     engine_ms: engineMs,
     must_render_verbatim: table,
+    aggregate_compaction_ratio_x: aggregateRatio,
+    weighted_avg_compaction_ratio_x: weightedAvgRatio,
+    fraction_on_wire: fractionOnWire,
   };
 
   const lowConfidenceCount = patterns.filter((p) => p.confidence === 'low').length;
@@ -417,13 +457,18 @@ export async function executeMeasureCompaction(
   }
 
   const compactionHeadline =
-    `Measured compaction for ${patterns.length} pattern(s) in service "${args.service}" ` +
-    `from ${rawEvents.length} SIEM events. ` +
-    `Volume-weighted average ratio: ${avgRatio}x (${(100 / Math.max(avgRatio, 0.001)).toFixed(1)}% of original size on wire).`;
+    `Aggregate compaction: ${aggregateRatio}x on ${patterns.length} pattern(s) ` +
+    `(${(fractionOnWire * 100).toFixed(1)}% of original bytes on wire). ` +
+    `Weighted-avg per-pattern ratio: ${weightedAvgRatio}x` +
+    (aggregateRatio !== weightedAvgRatio
+      ? ` — diverges when small-volume patterns have outlier ratios.`
+      : `.`);
   const compactionHumanSummary =
     `${patterns.length} pattern(s) measured for service "${args.service}" via ${sel.displayName} ` +
     `(${rawEvents.length} events sampled over ${timeRange}). ` +
-    `Volume-weighted average compaction ratio: ${avgRatio}x. ` +
+    `Aggregate compaction ratio: ${aggregateRatio}x (${(fractionOnWire * 100).toFixed(1)}% of original bytes on wire). ` +
+    `Weighted-avg per-pattern ratio: ${weightedAvgRatio}x. ` +
+    `Use aggregate_compaction_ratio_x for total savings projections; weighted_avg_compaction_ratio_x for per-pattern framing. ` +
     (lowConfidenceCount > 0 ? `${lowConfidenceCount} pattern(s) have low confidence — increase sample_size for accuracy.` : `All patterns have medium or high confidence.`);
   return buildChassisEnvelope({
     tool: 'log10x_measure_compaction',

@@ -62,7 +62,12 @@ export const discoverJoinSchema = {
 
 interface DiscoverJoinPayload {
   /** Tool-specific join status — distinct from chassis status. */
-  join_status: 'joined' | 'no_join_available' | 'not_configured';
+  join_status: 'joined' | 'no_join_available' | 'not_configured' | 'no_label_universe';
+  /**
+   * Machine-readable reason for join failures.
+   * Populated when join_status is 'no_label_universe' or 'no_join_available'.
+   */
+  failure_reason?: 'customer_side_empty' | 'log10x_side_empty' | 'below_threshold';
   backend?: string;
   endpoint?: string;
   cached: boolean;

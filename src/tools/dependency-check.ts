@@ -42,6 +42,8 @@ import {
 } from '../lib/siem/deps/index.js';
 import type { SiemId } from '../lib/siem/pricing.js';
 import { newChassisTelemetry, recordQuery, buildChassisEnvelope, buildChassisErrorEnvelope } from '../lib/chassis-envelope.js';
+import { loadEnvironments } from '../lib/environments.js';
+import { resolvePatternHashFromMetrics } from '../lib/resolve-pattern-hash.js';
 
 export const dependencyCheckSchema = {
   pattern: z.string().describe('Pattern name (e.g., "Payment_Gateway_Timeout")'),
@@ -103,6 +105,16 @@ interface DependencyCheckSummary {
   safe_to_drop_recommendation: 'safe' | 'blocked' | 'unverifiable';
   human_summary: string;
   note?: string;
+  /**
+   * Pattern existence validation result. `checked=true` means a metrics-backend
+   * query was issued; `exists` is null when not checked. When checked=true and
+   * exists=false, a warning is prepended to the headline.
+   */
+  pattern_validation: {
+    checked: boolean;
+    exists: boolean | null;
+    basis: 'metrics_backend' | 'not_checked';
+  };
 }
 
 // Three sentences max, plain prose. No markdown syntax. Distilled from
@@ -125,6 +137,29 @@ function buildHumanSummary(d: DependencyCheckSummary): string {
 
 export async function executeDependencyCheck(args: DependencyCheckArgs): Promise<import('../lib/output-types.js').StructuredOutput> {
   const telemetry = newChassisTelemetry();
+
+  // Pattern existence validation. Attempt a cheap metrics-backend probe when
+  // an env is configured — does NOT block the tool on failure, only discloses.
+  const patternValidation: DependencyCheckSummary['pattern_validation'] = {
+    checked: false,
+    exists: null,
+    basis: 'not_checked',
+  };
+  try {
+    const envs = await loadEnvironments();
+    const env = envs.default ?? envs.lastUsed;
+    if (env) {
+      const canonicalPattern = normalizePattern(args.pattern);
+      const hash = await resolvePatternHashFromMetrics(env, canonicalPattern);
+      patternValidation.checked = true;
+      patternValidation.exists = hash !== undefined;
+      patternValidation.basis = 'metrics_backend';
+      recordQuery(telemetry);
+    }
+  } catch {
+    // Non-fatal — patternValidation stays at not_checked defaults.
+  }
+
   const sumOut: { data?: DependencyCheckSummary } = {};
   await executeDependencyCheckInner(args, sumOut);
   if (!sumOut.data) {
@@ -138,7 +173,12 @@ export async function executeDependencyCheck(args: DependencyCheckArgs): Promise
   }
   const d = sumOut.data;
   d.human_summary = buildHumanSummary(d);
-  const headline = `\`${d.pattern}\`: ${d.dependencies.length} dependencies found in ${d.vendor ?? 'analyzer'} (recommendation: ${d.safe_to_drop_recommendation})`;
+  d.pattern_validation = patternValidation;
+  const patternNotFoundWarning =
+    patternValidation.checked && patternValidation.exists === false
+      ? `Warning: pattern \`${d.pattern}\` not found in metrics backend. Continuing with dependency scan, but verify the name before applying any action. `
+      : '';
+  const headline = `${patternNotFoundWarning}\`${d.pattern}\`: ${d.dependencies.length} dependencies found in ${d.vendor ?? 'analyzer'} (recommendation: ${d.safe_to_drop_recommendation})`;
 
   // Build scan_scope for defect 34A: surface what was actually scanned.
   const scan_scope = {
@@ -186,6 +226,9 @@ async function executeDependencyCheckInner(args: DependencyCheckArgs, sumOut?: {
     restrictTo: DEP_CHECK_VENDORS,
   });
 
+  const defaultPatternValidation: DependencyCheckSummary['pattern_validation'] = {
+    checked: false, exists: null, basis: 'not_checked',
+  };
   if (resolution.kind === 'none') {
     if (sumOut) {
       sumOut.data = {
@@ -193,6 +236,7 @@ async function executeDependencyCheckInner(args: DependencyCheckArgs, sumOut?: {
         safe_to_drop_recommendation: 'unverifiable',
         human_summary: '',
         note: 'no SIEM credentials detected and no vendor arg supplied',
+        pattern_validation: defaultPatternValidation,
       };
     }
     return [
@@ -212,6 +256,7 @@ async function executeDependencyCheckInner(args: DependencyCheckArgs, sumOut?: {
         safe_to_drop_recommendation: 'unverifiable',
         human_summary: '',
         note: `multiple SIEMs configured: ${resolution.candidates.map((c) => c.id).join(', ')}`,
+        pattern_validation: defaultPatternValidation,
       };
     }
     return formatAmbiguousError(resolution.candidates, 'vendor');
@@ -282,6 +327,7 @@ async function executeDependencyCheckInner(args: DependencyCheckArgs, sumOut?: {
       safe_to_drop_recommendation: recommendation,
       human_summary: '',
       note: resolution.note,
+      pattern_validation: defaultPatternValidation,
     };
   }
   return block ? `${result}\n\n${block}` : result;

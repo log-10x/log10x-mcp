@@ -29,7 +29,14 @@ interface DiscoverLabelsSummary {
   total_count: number;
   shown_count: number;
   values?: string[];
-  featured_labels?: Array<{ name: string; hint: string; available: boolean }>;
+  /** Featured labels that are present (available=true) in this environment. */
+  featured_labels?: Array<{ name: string; hint: string }>;
+  /**
+   * Featured labels defined in FEATURED_LABELS but not present in this
+   * environment. Kept in a separate field so the array length of
+   * featured_labels always matches the headline count.
+   */
+  featured_labels_unavailable?: Array<{ name: string; hint: string }>;
   other_labels?: string[];
 }
 
@@ -61,7 +68,8 @@ function buildDiscoverLabelsHumanSummary(d: DiscoverLabelsSummary): string {
     const shown = d.shown_count < d.total_count ? ` Showing ${d.shown_count} of ${d.total_count}.` : '';
     return `Label "${d.label}" has ${d.total_count} distinct value${d.total_count === 1 ? '' : 's'}.${shown} Sample: ${(d.values ?? []).slice(0, 3).join(', ')}.`;
   }
-  const featuredAvailable = d.featured_labels ? d.featured_labels.filter((f) => f.available).length : 0;
+  // featured_labels now contains only available entries (available=true ones were kept).
+  const featuredAvailable = d.featured_labels?.length ?? 0;
   const otherCount = d.other_labels?.length ?? 0;
   return `${d.total_count} queryable labels on this env: ${featuredAvailable} featured (use as filter keys) and ${otherCount} additional. Call again with a label name to enumerate its values.`;
 }
@@ -101,7 +109,7 @@ export async function executeDiscoverLabels(
   const headline =
     d.mode === 'label_values'
       ? `Label "${d.label}": ${d.total_count} distinct value${d.total_count !== 1 ? 's' : ''}${d.shown_count < d.total_count ? ` (showing ${d.shown_count})` : ''}.`
-      : `${d.total_count} queryable labels${d.featured_labels ? ` (${d.featured_labels.filter((f) => f.available).length} featured)` : ''}.`;
+      : `${d.total_count} queryable labels${d.featured_labels ? ` (${d.featured_labels.length} featured)` : ''}.`;
 
   return buildChassisEnvelope({
     tool: 'log10x_discover_labels',
@@ -167,7 +175,10 @@ async function executeDiscoverLabelsInner(
   const all = await fetchLabels(env);
   const queryable = all.filter((l) => !INTERNAL_LABELS.has(l)).sort();
 
-  const featured = FEATURED_LABELS.map((feat) => ({ name: feat.name, hint: feat.hint, available: queryable.includes(feat.name) }));
+  // Split featured labels into available (present in this env) and unavailable,
+  // so featured_labels.length always equals the headline "N featured" count.
+  const featuredAvail   = FEATURED_LABELS.filter((f) =>  queryable.includes(f.name)).map((f) => ({ name: f.name, hint: f.hint }));
+  const featuredUnavail = FEATURED_LABELS.filter((f) => !queryable.includes(f.name)).map((f) => ({ name: f.name, hint: f.hint }));
   const rest = queryable.filter((l) => !FEATURED_LABELS.some((f) => f.name === l));
 
   if (sumOut) {
@@ -175,7 +186,8 @@ async function executeDiscoverLabelsInner(
       mode: 'label_names',
       total_count: queryable.length,
       shown_count: queryable.length,
-      featured_labels: featured,
+      featured_labels: featuredAvail,
+      featured_labels_unavailable: featuredUnavail.length > 0 ? featuredUnavail : undefined,
       other_labels: rest,
     };
   }
@@ -184,10 +196,8 @@ async function executeDiscoverLabelsInner(
   lines.push(`Queryable labels (${queryable.length})`);
   lines.push('');
   lines.push('Featured — use these as filter keys in log10x_top_patterns, log10x_metrics_that_moved, etc.:');
-  for (const feat of featured) {
-    if (feat.available) {
-      lines.push(`  ${feat.name.padEnd(22)} ${feat.hint}`);
-    }
+  for (const feat of featuredAvail) {
+    lines.push(`  ${feat.name.padEnd(22)} ${feat.hint}`);
   }
 
   if (rest.length > 0) {

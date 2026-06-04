@@ -982,8 +982,9 @@ export async function executeTopPatterns(
     rate_source === 'customer_supplied' ? 'customer_supplied' : 'default';
 
   // Build must_render_verbatim monospace table.
-  // Columns: # | Pattern | Service | GB/mo | % | Trend | $/mo
+  // Columns: # | Pattern | Service | Vol/mo | % | Trend | $/mo
   // Uses *_display sibling fields throughout so formatting is consistent.
+  // Vol/mo header is unit-agnostic — bytes_display is adaptive (KB/MB/GB/TB).
   const topPatternsVerbatim = dataPatterns.length > 0
     ? renderMonospaceTable(
         dataPatterns,
@@ -991,7 +992,7 @@ export async function executeTopPatterns(
           { header: '#',       align: 'right',  get: (p) => String(p.rank) },
           { header: 'Pattern', align: 'left',   get: (p) => p.identity, max_width: 40 },
           { header: 'Service', align: 'left',   get: (p) => p.service ?? '', max_width: 24 },
-          { header: 'GB/mo',   align: 'right',  get: (p) => p.bytes_display },
+          { header: 'Vol/mo',  align: 'right',  get: (p) => p.bytes_display },
           { header: '%',       align: 'right',  get: (p) => p.share_pct_display },
           { header: 'Trend',   align: 'left',   get: (p) => p.trend_delta_display?.display ?? `${p.trend_delta?.glyph ?? ''} ${p.trend_delta?.label ?? '—'}`.trim() },
           { header: '$/mo',    align: 'right',  get: (p) => p.cost_per_month_usd_display ?? '—' },

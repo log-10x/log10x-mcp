@@ -32,7 +32,7 @@
  */
 
 import { z } from 'zod';
-import { getSnapshot } from '../lib/discovery/snapshot-store.js';
+import { getSnapshot, getMostRecentSnapshot } from '../lib/discovery/snapshot-store.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { loadEnvironments } from '../lib/environments.js';
 import { agentOnly } from '../lib/agent-only.js';
@@ -41,6 +41,7 @@ import type { PrimitiveError } from '../lib/primitive-errors.js';
 import { resolveSiemSelection } from '../lib/siem/resolve.js';
 import { getConnector } from '../lib/siem/index.js';
 import { probeReceiverInPath, eventHasTenxHash } from '../lib/receiver-probe.js';
+import { resolvePatternHashFromMetrics } from '../lib/resolve-pattern-hash.js';
 import {
   buildChassisEnvelope,
   buildChassisErrorEnvelope,
@@ -86,11 +87,12 @@ export type PatternMitigateStatus = 'success' | 'no_signal' | 'insufficient_data
  * provenance the agent's decision is downstream of.
  */
 export type RecommendationBasis =
-  | 'env_config'        // envs.json provided the capabilities
-  | 'snapshot'          // a passed snapshot_id provided them
+  | 'env_config'              // envs.json provided the capabilities
+  | 'snapshot'                // a passed snapshot_id provided them
+  | 'cached_snapshot'         // auto-resolved from the session snapshot cache
   | 'env_config_plus_snapshot'
-  | 'env_vars_only'     // no envs.json, no snapshot — only $LOG10X_* env vars
-  | 'unknown';          // no source resolved any capability
+  | 'env_vars_only'           // no envs.json, no snapshot — only $LOG10X_* env vars
+  | 'unknown';                // no source resolved any capability
 
 interface CapabilitySources {
   gitops: 'envs_json' | 'env_var' | 'snapshot' | 'absent';
@@ -108,6 +110,10 @@ interface RecommendationAudit {
   capability_sources: CapabilitySources;
   snapshot_id?: string;
   snapshot_age_seconds: number | null;
+  /** Set when capabilities were resolved from a session-cached snapshot (no explicit snapshot_id was passed). */
+  cached_snapshot_id?: string;
+  /** Age in seconds of the auto-resolved cached snapshot at the time of use. */
+  cached_snapshot_age_seconds?: number;
 }
 
 interface Capabilities {
@@ -156,6 +162,10 @@ interface Capabilities {
   /** Snapshot ID used (if any) and its observed age in seconds at lookup. */
   snapshotIdUsed?: string;
   snapshotAgeSeconds: number | null;
+  /** Set when capabilities were resolved from a session-cached snapshot (no explicit snapshot_id was passed). */
+  cachedSnapshotUsed?: boolean;
+  cachedSnapshotId?: string;
+  cachedSnapshotAgeSeconds?: number;
 }
 
 /**
@@ -321,6 +331,27 @@ async function detectCapabilities(snapshotId?: string): Promise<Capabilities> {
   // Source 3: snapshot from kubectl discovery. Fills in retriever-archive
   // detection always; only sets gitopsRepo if the env-side sources above
   // didn't already provide one.
+  //
+  // When no explicit snapshotId is provided, attempt to auto-resolve from
+  // the session snapshot cache (most recent snapshot within the 30-min TTL).
+  // This avoids requiring callers to thread snapshot_id through every call
+  // when discover_env was already run in the same session.
+  const CACHED_SNAPSHOT_MAX_AGE_S = 1800;
+  if (!snapshotId) {
+    const cachedSnap = getMostRecentSnapshot(CACHED_SNAPSHOT_MAX_AGE_S);
+    if (cachedSnap) {
+      snapshotId = cachedSnap.snapshotId;
+      out.cachedSnapshotUsed = true;
+      out.cachedSnapshotId = cachedSnap.snapshotId;
+      // Compute age from the snapshot's own createdAt if available.
+      const snapCreatedAt =
+        (cachedSnap as unknown as { createdAt?: number; created_at?: number }).createdAt ??
+        (cachedSnap as unknown as { createdAt?: number; created_at?: number }).created_at;
+      if (typeof snapCreatedAt === 'number' && Number.isFinite(snapCreatedAt)) {
+        out.cachedSnapshotAgeSeconds = Math.max(0, Math.floor(Date.now() / 1000 - snapCreatedAt));
+      }
+    }
+  }
   if (snapshotId) {
     const snap = getSnapshot(snapshotId);
     if (snap) {
@@ -465,6 +496,16 @@ interface PatternMitigateSummary {
     analyzer_vendor?: string;
     gitops_repo?: string;
   };
+  /**
+   * Pattern existence validation result. `checked=true` means a metrics-backend
+   * query was issued; `exists` is null when not checked. When checked=true and
+   * exists=false, the tool prepends a warning to the headline.
+   */
+  pattern_validation: {
+    checked: boolean;
+    exists: boolean | null;
+    basis: 'metrics_backend' | 'not_checked';
+  };
   /** Populated only when `status === 'error'`. */
   error?: PrimitiveError;
 }
@@ -473,14 +514,17 @@ interface PatternMitigateSummary {
  * Derive the recommendation_basis from per-capability sources. Reflects
  * the dominant source: snapshot if any capability came from it, else
  * env_config if any came from envs.json, else env_vars_only, else unknown.
+ * When `cachedSnapshotUsed` is true, returns 'cached_snapshot' instead of
+ * 'snapshot' so callers can distinguish an auto-resolved cache hit from an
+ * explicitly-passed snapshot_id.
  */
-function deriveBasis(sources: CapabilitySources): RecommendationBasis {
+function deriveBasis(sources: CapabilitySources, cachedSnapshotUsed?: boolean): RecommendationBasis {
   const hasEnvJson = Object.values(sources).some((s) => s === 'envs_json');
   const hasSnapshot = Object.values(sources).some((s) => s === 'snapshot');
   const hasEnvVar = Object.values(sources).some((s) => s === 'env_var');
   if (hasEnvJson && hasSnapshot) return 'env_config_plus_snapshot';
   if (hasEnvJson) return 'env_config';
-  if (hasSnapshot) return 'snapshot';
+  if (hasSnapshot) return cachedSnapshotUsed ? 'cached_snapshot' : 'snapshot';
   if (hasEnvVar) return 'env_vars_only';
   return 'unknown';
 }
@@ -539,32 +583,60 @@ export async function executePatternMitigate(args: PatternMitigateArgs): Promise
   const d = sumOut.data;
   const enabledCount = d.options.filter((o) => o.enabled).length;
   const dimmedCount = d.options.length - enabledCount;
+  const patternNotFoundWarning =
+    d.pattern_validation.checked && d.pattern_validation.exists === false
+      ? `Warning: pattern \`${d.pattern}\` not found in metrics backend. Continuing with the menu, but verify the name before applying any action. `
+      : '';
   const headline =
     d.status === 'no_signal'
-      ? `\`${d.pattern}\`: NO mitigation options available — ${dimmedCount} dimmed. Setup hint surfaces what's missing.`
-      : `\`${d.pattern}\`: ${enabledCount} of ${d.options.length} mitigation options enabled (${d.options.filter((o) => o.enabled).map((o) => o.id).join(', ')}).`;
+      ? `${patternNotFoundWarning}\`${d.pattern}\`: NO mitigation options available — ${dimmedCount} dimmed. Setup hint surfaces what's missing.`
+      : `${patternNotFoundWarning}\`${d.pattern}\`: ${enabledCount} of ${d.options.length} mitigation options enabled (${d.options.filter((o) => o.enabled).map((o) => o.id).join(', ')}).`;
 
   // Fix D: populate actions[] with structured follow-up nudges so agent
   // chains can pick them up without parsing human_summary text.
   const envelopeActions: import('../lib/output-types.js').Action[] = [];
 
-  // When gitops_repo is not set, mute/compact are disabled — nudge configure_env.
+  // Determine whether ALL capability sources are absent (no envs.json, no
+  // snapshot, no env vars resolved any capability). This is the state where
+  // discover_env is the cheapest first step — it auto-detects everything
+  // without requiring the user to know their gitops repo or SIEM credentials.
+  const allSourcesAbsent = d.recommendation_basis === 'unknown';
+
+  // When ALL capability sources are absent, emit discover_env as the primary
+  // recommended-next action BEFORE configure_env. discover_env auto-detects
+  // receiver / forwarder / gitops without any config writes — cheaper than
+  // configure_env for capability discovery.
+  if (allSourcesAbsent) {
+    envelopeActions.push({
+      tool: 'log10x_discover_env',
+      args: {},
+      role: 'recommended-next',
+      reason: 'Capability detection found no source. Auto-detect receiver/forwarder/gitops without writing config.',
+    });
+  }
+
+  // When gitops_repo is not set, mute/compact are disabled.
+  // In the all-absent case this is a fallback (user may already know their
+  // gitops repo and prefer to set it directly). Otherwise recommend-next.
   if (!d.env_capabilities.gitops_repo) {
     envelopeActions.push({
       tool: 'log10x_configure_env',
       args: {},
-      role: 'recommended-next',
-      reason: 'Set gitops.repo to enable mute/compact at the 10x engine.',
+      role: allSourcesAbsent ? 'optional-followup' : 'recommended-next',
+      reason: allSourcesAbsent
+        ? 'If you already know your gitops repo, set it here to enable mute/compact without running discover_env.'
+        : 'Set gitops.repo to enable mute/compact at the 10x engine.',
     });
   }
 
   // When receiver_in_path is false and either unknown or unconfirmed,
   // nudge discover_env so it can probe the cluster and resolve the gap.
+  // Skip this if we already emitted discover_env above (all-absent case).
   // When gitops_repo is already set (canMute=true), treat discover_env as
   // optional-followup (the user can mute already). Otherwise recommend-next
   // so chains know to run discovery before concluding options 1 and 2 are
   // blocked.
-  if (!d.env_capabilities.receiver_in_path) {
+  if (!d.env_capabilities.receiver_in_path && !allSourcesAbsent) {
     envelopeActions.push({
       tool: 'log10x_discover_env',
       args: {},
@@ -591,7 +663,7 @@ export async function executePatternMitigate(args: PatternMitigateArgs): Promise
   // Honest human_summary: M of N options reachable, plus next-step if applicable.
   const chassis_human_summary =
     d.status === 'no_signal'
-      ? `\`${d.pattern}\`: no mitigation options reachable on ${d.env_capabilities.analyzer_vendor ?? 'this env'}. ${dimmedCount} dimmed. ${d.recommendation_audit.basis === 'unknown' ? 'No capability source found — run log10x_discover_env.' : `Basis: ${d.recommendation_audit.basis}.`}`
+      ? `\`${d.pattern}\`: no mitigation options reachable on ${d.env_capabilities.analyzer_vendor ?? 'this env'}. ${dimmedCount} dimmed. ${allSourcesAbsent ? 'Capability detection found no source. Run discover_env to ambient-detect receiver/forwarder without writing config.' : `Basis: ${d.recommendation_audit.basis}.`}`
       : `\`${d.pattern}\`: ${enabledCount} of ${d.options.length} options reachable on ${d.env_capabilities.analyzer_vendor ?? 'this env'} (${d.options.filter((o) => o.enabled).map((o) => o.label).join(', ')}). ${dimmedCount > 0 ? `${dimmedCount} dimmed. ` : ''}Basis: ${d.recommendation_audit.basis}. Agent SHOULD wait for user pick before routing.`;
 
   return buildChassisEnvelope({
@@ -642,6 +714,26 @@ async function executePatternMitigateInner(
   const pattern = normalizePattern(args.pattern);
   const displayPattern = fmtPattern(pattern);
   const scopeNote = args.service ? ` (service: ${args.service})` : '';
+
+  // Pattern existence validation. Attempt a cheap metrics-backend probe when
+  // an env is configured — does NOT block the tool on failure, only discloses.
+  const patternValidation: PatternMitigateSummary['pattern_validation'] = {
+    checked: false,
+    exists: null,
+    basis: 'not_checked',
+  };
+  try {
+    const envs = await loadEnvironments();
+    const env = envs.default ?? envs.lastUsed;
+    if (env) {
+      const hash = await resolvePatternHashFromMetrics(env, pattern);
+      patternValidation.checked = true;
+      patternValidation.exists = hash !== undefined;
+      patternValidation.basis = 'metrics_backend';
+    }
+  } catch {
+    // Non-fatal — patternValidation stays at not_checked defaults.
+  }
 
   const caps = await detectCapabilities(args.snapshot_id);
 
@@ -820,7 +912,7 @@ async function executePatternMitigateInner(
     ];
     const nEnabled = options.filter((o) => o.enabled).length;
     const nDimmed = options.length - nEnabled;
-    const basis = deriveBasis(caps.sources);
+    const basis = deriveBasis(caps.sources, caps.cachedSnapshotUsed);
     const status: PatternMitigateStatus = nEnabled === 0 ? 'no_signal' : 'success';
     const human_summary = buildHumanSummary({
       pattern: displayPattern,
@@ -842,6 +934,10 @@ async function executePatternMitigateInner(
         capability_sources: caps.sources,
         snapshot_id: caps.snapshotIdUsed,
         snapshot_age_seconds: caps.snapshotAgeSeconds,
+        ...(caps.cachedSnapshotUsed && {
+          cached_snapshot_id: caps.cachedSnapshotId,
+          cached_snapshot_age_seconds: caps.cachedSnapshotAgeSeconds,
+        }),
       },
       pattern_ref: pattern,
       query_count: 0,
@@ -861,6 +957,7 @@ async function executePatternMitigateInner(
         analyzer_vendor: caps.analyzerVendor,
         gitops_repo: caps.gitopsRepo,
       },
+      pattern_validation: patternValidation,
     };
   }
 

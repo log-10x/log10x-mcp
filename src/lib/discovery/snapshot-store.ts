@@ -181,6 +181,32 @@ export function updateWizardSession(
   return merged;
 }
 
+/**
+ * Return the most recent non-expired snapshot from the in-memory store,
+ * or undefined when the store is empty or all entries have expired.
+ *
+ * Used by tools that can benefit from a cached discover_env result without
+ * requiring the caller to thread a snapshot_id explicitly.
+ *
+ * @param maxAgeSeconds - upper bound on snapshot age; defaults to 1800 (30 min,
+ *   matching TTL_MS). Callers that need fresher data can pass a smaller value.
+ */
+export function getMostRecentSnapshot(maxAgeSeconds = 1800): DiscoverySnapshot | undefined {
+  const now = Date.now();
+  const cutoff = now - maxAgeSeconds * 1000;
+  let best: { snapshot: DiscoverySnapshot; expiresAt: number } | undefined;
+  for (const entry of store.values()) {
+    if (entry.expiresAt <= now) continue;
+    // expiresAt = createdAt + TTL_MS, so createdAt = expiresAt - TTL_MS.
+    const createdAt = entry.expiresAt - TTL_MS;
+    if (createdAt < cutoff) continue;
+    if (!best || entry.expiresAt > best.expiresAt) {
+      best = entry;
+    }
+  }
+  return best?.snapshot;
+}
+
 /** For tests. Does NOT wipe the disk tier — tests use process.env to redirect it. */
 export function _clearSnapshotStore(): void {
   store.clear();
