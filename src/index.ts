@@ -65,6 +65,7 @@ import { log } from './lib/log.js';
 import { describeToolError } from './lib/tool-errors.js';
 import { retrieverQuerySchema, executeRetrieverQuery } from './tools/retriever-query.js';
 import { retrieverSeriesSchema, executeRetrieverSeries } from './tools/retriever-series.js';
+import { retrieverQueryStatusSchema, executeRetrieverQueryStatus } from './tools/retriever-query-status.js';
 import { backfillMetricSchema, executeBackfillMetric } from './tools/backfill-metric.js';
 import {
   customerMetricsQuerySchema,
@@ -1195,6 +1196,12 @@ registerLog10xTool('log10x_retriever_series', retrieverSeriesSchema, (args) =>
     const env = resolveEnv(getEnvs(), args.environment);
     return executeRetrieverSeries(args, env);
   })
+);
+
+// ── Tool: log10x_retriever_query_status ──
+
+registerLog10xTool('log10x_retriever_query_status', retrieverQueryStatusSchema, (args) =>
+  wrap('log10x_retriever_query_status', async () => executeRetrieverQueryStatus(args))
 );
 
 // ── Tool: log10x_backfill_metric ──

@@ -460,6 +460,58 @@ async function runPreflight(
   // user's helm config; blocks up to 30s when helm is offline). If the
   // chart ref ever drifts, `helm install` surfaces it meaningfully.
 
+  // queryLogGroup preflight: per-query CW observability.
+  // This is a warn (not fail) so install paths don't block on it.
+  {
+    let queryLogGroup: string | undefined;
+    try {
+      const helmResult = await run(
+        'helm',
+        ['get', 'values', releaseName, '-n', namespace, '-o', 'json'],
+        { timeoutMs: 8_000 }
+      );
+      if (helmResult.exitCode === 0) {
+        const parsed = JSON.parse(helmResult.stdout) as Record<string, unknown>;
+        const qlg = parsed['queryLogGroup'];
+        if (typeof qlg === 'string' && qlg.trim()) {
+          queryLogGroup = qlg.trim();
+        } else {
+          // Also check tenx.queryLogGroup nested form
+          const tenx = parsed['tenx'];
+          if (tenx && typeof tenx === 'object') {
+            const nested = (tenx as Record<string, unknown>)['queryLogGroup'];
+            if (typeof nested === 'string' && nested.trim()) {
+              queryLogGroup = nested.trim();
+            }
+          }
+        }
+      }
+    } catch {
+      // best-effort; helm may not be installed in all environments
+    }
+
+    if (queryLogGroup) {
+      checks.push({
+        name: 'queryLogGroup configured',
+        status: 'ok',
+        detail: `queryLogGroup = \`${queryLogGroup}\`. Per-query CloudWatch observability is enabled; log10x_retriever_query_status can fetch execution events for any queryId.`,
+      });
+    } else {
+      checks.push({
+        name: 'queryLogGroup configured',
+        status: 'warn',
+        detail: [
+          'queryLogGroup is empty in helm values. Per-query CloudWatch observability disabled; queryEventLog calls early-return without writing.',
+          'To enable, set:',
+          '  queryLogGroup: log10x-retriever-query-events  # CW log group (pre-create via Terraform or aws logs create-log-group)',
+          infra.irsaRoleArn
+            ? `AND ensure the retriever IRSA role (${infra.irsaRoleArn}) has logs:CreateLogStream and logs:PutLogEvents on arn:aws:logs:{region}:{account}:log-group:{logGroup}:*`
+            : 'AND ensure the retriever IRSA role has logs:CreateLogStream and logs:PutLogEvents on the log group ARN.',
+        ].join('\n'),
+      });
+    }
+  }
+
   return checks;
 }
 

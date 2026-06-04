@@ -280,6 +280,91 @@ async function addInfrastructureChecks(checks: DoctorCheck[]): Promise<void> {
       fix: 'Set DATADOG_API_KEY in the MCP server environment if you plan to backfill Datadog metrics. DD_SITE / DATADOG_SITE controls the region (defaults to datadoghq.com).',
     });
   }
+
+  // Retriever CW query logging check.
+  // Skip when the retriever is not installed (retriever_endpoint already warned).
+  if (retrieverRes.url && retrieverRes.bucket && retrieverRes.detectionPath) {
+    await addRetrieverCwLoggingCheck(checks);
+  }
+}
+
+/**
+ * Check whether per-query CloudWatch logging is enabled on the deployed Retriever.
+ * Requires helm + kubectl to be reachable. Fails gracefully when either is absent.
+ */
+async function addRetrieverCwLoggingCheck(checks: DoctorCheck[]): Promise<void> {
+  // Use the same helm-list probe that helmReleaseDiscovery uses in retriever-state.ts.
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const execFileP = promisify(execFile);
+
+  let releaseName: string | undefined;
+  let namespace: string | undefined;
+
+  try {
+    const { stdout } = await execFileP(
+      'helm',
+      ['list', '-A', '-o', 'json'],
+      { timeout: 10_000 }
+    );
+    const releases = JSON.parse(stdout) as Array<{ name: string; namespace: string; chart: string }>;
+    const r = releases.find((x) => x.chart.toLowerCase().startsWith('retriever-10x'));
+    if (r) {
+      releaseName = r.name;
+      namespace = r.namespace;
+    }
+  } catch {
+    // kubectl/helm not available — skip
+  }
+
+  if (!releaseName || !namespace) {
+    // Can't resolve the release name; skip without a spurious WARN.
+    return;
+  }
+
+  let queryLogGroup: string | undefined;
+  try {
+    const { stdout } = await execFileP(
+      'helm',
+      ['get', 'values', releaseName, '-n', namespace, '-o', 'json'],
+      { timeout: 8_000 }
+    );
+    const parsed = JSON.parse(stdout) as Record<string, unknown>;
+    const qlg = parsed['queryLogGroup'];
+    if (typeof qlg === 'string' && qlg.trim()) {
+      queryLogGroup = qlg.trim();
+    } else {
+      const tenx = parsed['tenx'];
+      if (tenx && typeof tenx === 'object') {
+        const nested = (tenx as Record<string, unknown>)['queryLogGroup'];
+        if (typeof nested === 'string' && nested.trim()) {
+          queryLogGroup = nested.trim();
+        }
+      }
+    }
+  } catch {
+    // helm get values failed — skip without a spurious WARN
+    return;
+  }
+
+  if (queryLogGroup) {
+    checks.push({
+      name: 'retriever_cw_logging',
+      status: 'pass',
+      message: `Retriever queryLogGroup = \`${queryLogGroup}\` (release ${namespace}/${releaseName}). Per-query CloudWatch observability is enabled; log10x_retriever_query_status can fetch execution logs for any queryId.`,
+    });
+  } else {
+    checks.push({
+      name: 'retriever_cw_logging',
+      status: 'warn',
+      message:
+        `Retriever is installed (release ${namespace}/${releaseName}) but queryLogGroup is not set. ` +
+        'Per-query CloudWatch logging is disabled; dispatcher failures will not appear in CloudWatch — only pod stdout is visible.',
+      fix:
+        'Set queryLogGroup in your retriever helm values (e.g. `queryLogGroup: log10x-retriever-query-events`) and ensure the IRSA role has logs:CreateLogStream and logs:PutLogEvents on the log group ARN. ' +
+        'Call log10x_advise_retriever for the complete helm + IAM snippet.',
+    });
+  }
 }
 
 /** Per-environment probes: gateway auth, tier detection, metric freshness. */

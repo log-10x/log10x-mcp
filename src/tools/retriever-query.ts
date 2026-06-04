@@ -257,6 +257,25 @@ export async function executeRetrieverQuery(
       { tool: 'log10x_retriever_series', args: { pattern: d.pattern, from: d.from, to: d.to, bucket_size: '1h' }, reason: 'time-bucketed series across the same window (fidelity-aware: exact vs sampled)' }
     );
   }
+  // Dispatcher-failure drill-in: zero events + tasks dispatched but nothing scanned.
+  // This is the chart 1.0.20 streamer->retriever rename signature detected in the
+  // inner pipeline via resp.diagnostics. Surface the query_status tool so an agent
+  // can confirm via pod logs without a separate manual step.
+  if (d.query_id && d.events_matched === 0) {
+    // The human_summary already explains the fingerprint when scanned=0 + streamReqs>0.
+    // Add the structured action so agents can chain directly without parsing prose.
+    if (d.human_summary && (
+      d.human_summary.includes('log10x_retriever_query_status') ||
+      d.human_summary.includes('dispatcher') ||
+      d.human_summary.includes('chart 1.0.20')
+    )) {
+      actions.push({
+        tool: 'log10x_retriever_query_status',
+        args: { query_id: d.query_id, target: d.target, include_pod_logs: true },
+        reason: '0 events matched — confirm chart 1.0.20 dispatcher-failure signature via pod logs and _DONE.json',
+      });
+    }
+  }
   return buildEnvelope({
     tool: 'log10x_retriever_query',
     view: 'summary',
@@ -292,6 +311,12 @@ function buildRetrieverQueryHumanSummary(s: {
   wallTimeMs: number;
   offloadedHashCount: number;
   zeroReason?: string;
+  /** queryId of the completed query — used to surface the dispatcher-failure
+   * diagnostic when scanned=0 + submittedTasks>0. */
+  queryId?: string;
+  /** Scan/dispatch stats from the _DONE.json equivalent (diagnostics object). */
+  diagnosticsScanned?: number;
+  diagnosticsSubmittedTasks?: number;
 }): string {
   const scope = s.pattern
     ? `pattern ${s.pattern}`
@@ -299,6 +324,22 @@ function buildRetrieverQueryHumanSummary(s: {
       ? `search ${s.search}`
       : 'open scan';
   if (s.eventsMatched === 0) {
+    // Dispatcher-failure detection: coordinator submitted tasks but nothing was scanned.
+    // This is the chart 1.0.20 incomplete-streamer-rename signature.
+    if (
+      s.diagnosticsScanned === 0 &&
+      s.diagnosticsSubmittedTasks !== undefined &&
+      s.diagnosticsSubmittedTasks > 0
+    ) {
+      return (
+        `Retriever returned 0 events but the coordinator submitted ${s.diagnosticsSubmittedTasks} scan task(s) ` +
+        `that scanned nothing. This is the chart 1.0.20 incomplete-streamer-rename signature — scan/stream workers ` +
+        `fail to launch because the cloud/streamer/subquery include was not renamed. ` +
+        `Verify via log10x_retriever_query_status({query_id: '${s.queryId ?? '?'}', include_pod_logs: true}) — ` +
+        `if the pod logs show 'could not resolve include: cloud/streamer/subquery', upgrade to chart 1.0.21+ ` +
+        `or apply the rename-residual fix in modules/feat/soft-drop.`
+      );
+    }
     const reason = s.zeroReason ? ` ${s.zeroReason}` : '';
     return `Retriever returned zero events for ${scope} over ${s.from} to ${s.to} on target ${s.target} (${s.wallTimeMs}ms).${reason} Widen the window or relax the filter before declaring the pattern absent.`;
   }
@@ -543,6 +584,17 @@ async function executeRetrieverQueryInner(
       reason: 'partialResults: recover stranded events from S3 without resubmitting',
     });
   }
+  // Zero-events + dispatcher-failure fingerprint: surface retriever_query_status drill-in.
+  if (resp.execution.eventsMatched === 0 && resp.diagnostics?.scanStats?.scanned === 0) {
+    const streamReqs = resp.diagnostics?.streamDispatch?.requests ?? 0;
+    if (streamReqs > 0) {
+      nextActions.push({
+        tool: 'log10x_retriever_query_status',
+        args: { query_id: resp.queryId, target: resp.target, include_pod_logs: true },
+        reason: `0 events scanned despite ${streamReqs} dispatch requests — confirm chart 1.0.20 dispatcher-failure via pod logs`,
+      });
+    }
+  }
   if (args.pattern && resp.events.length > 0) {
     nextActions.push({
       tool: 'log10x_retriever_series',
@@ -601,6 +653,11 @@ async function executeRetrieverQueryInner(
       wallTimeMs: resp.execution.wallTimeMs,
       offloadedHashCount,
       zeroReason: resp.events.length === 0 && resp.diagnostics ? (explainZeroResults(resp.diagnostics) ?? undefined) : undefined,
+      queryId: resp.queryId,
+      diagnosticsScanned: resp.diagnostics?.scanStats?.scanned,
+      diagnosticsSubmittedTasks: (resp.diagnostics?.streamDispatch?.requests !== undefined)
+        ? resp.diagnostics.streamDispatch.requests
+        : undefined,
     });
     sumOut.data = {
       status: 'ok',
