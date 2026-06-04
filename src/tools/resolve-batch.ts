@@ -16,7 +16,7 @@
 import { promises as fs } from 'fs';
 import { z } from 'zod';
 import { submitPaste, PASTE_MAX_BYTES, type PasteResponse } from '../lib/paste-api.js';
-import { runDevCli, DevCliNotInstalledError, DevCliRunError } from '../lib/dev-cli.js';
+import { runDevCli, DevCliNotInstalledError, DevCliRunError, DevCliConfigMissingError } from '../lib/dev-cli.js';
 import { agentOnly } from '../lib/agent-only.js';
 import {
   parseTemplates,
@@ -29,7 +29,7 @@ import { fmtCount, fmtBytes } from '../lib/format.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { type StructuredOutput } from '../lib/output-types.js';
 import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
-import { newChassisTelemetry, buildChassisEnvelope } from '../lib/chassis-envelope.js';
+import { newChassisTelemetry, buildChassisEnvelope, buildChassisErrorEnvelope } from '../lib/chassis-envelope.js';
 
 export const resolveBatchSchema = {
   source: z
@@ -122,6 +122,30 @@ export async function executeResolveBatch(args: {
         tool: 'log10x_resolve_batch',
         kind: 'generic',
         remediation: e.message,
+      });
+    }
+    if (e instanceof DevCliConfigMissingError) {
+      return buildChassisErrorEnvelope({
+        tool: 'log10x_resolve_batch',
+        err: {
+          error_type: 'config_missing',
+          retryable: false,
+          suggested_backoff_ms: null,
+          hint: e.hint,
+        },
+        actions: [{ tool: 'log10x_configure_env', args: {}, reason: 'configure the missing field' }],
+      });
+    }
+    if (e instanceof DevCliRunError) {
+      return buildChassisErrorEnvelope({
+        tool: 'log10x_resolve_batch',
+        err: {
+          error_type: 'backend_unavailable',
+          retryable: false,
+          suggested_backoff_ms: null,
+          hint: `Local tenx CLI exited with code ${e.exitCode}. Check that tenx v1.0.21+ is installed and TENX_API_KEY is set if required.`,
+        },
+        contextPayload: { debug_stderr: e.stderr.slice(0, 2000) },
       });
     }
     throw e;
@@ -224,12 +248,9 @@ async function executeResolveBatchInner(args: {
         throw e;
       }
       if (e instanceof DevCliRunError) {
-        // KEEP: internal-state (CLI ran, returned non-zero). Caught by wrap().
-        throw new Error(
-          `Local tenx CLI exited with code ${e.exitCode}.\n` +
-            `Config: ${e.configPath}\n` +
-            `${e.stderr.slice(0, 2000)}`
-        );
+        // Rethrow typed so the outer executeResolveBatch can wrap it in a
+        // chassis error envelope instead of emitting raw stderr text.
+        throw e;
       }
       // KEEP: internal-state (CLI invocation failed unexpectedly). Caught by wrap().
       throw new Error(`Local tenx CLI run failed: ${(e as Error).message}`);

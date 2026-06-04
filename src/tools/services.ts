@@ -46,7 +46,7 @@ import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { agentOnly } from '../lib/agent-only.js';
 import { type StructuredOutput } from '../lib/output-types.js';
 import { newChassisTelemetry, buildChassisEnvelope, buildChassisErrorEnvelope } from '../lib/chassis-envelope.js';
-import { fetchCapCsvForEnv, fetchActionIntentForEnv } from '../lib/cap-csv-fetch.js';
+import { fetchCapCsvForEnv, fetchActionIntentForEnv, buildCapCsvStatus, type CapCsvStatus } from '../lib/cap-csv-fetch.js';
 import { parseCapCsv, buildPatternActionLookup } from '../lib/cap-csv-parser.js';
 import { normalizeTimeRange } from '../lib/time-range.js';
 
@@ -106,12 +106,11 @@ interface ServicesSummary {
   service_count: number;
   top_n_share_pct: number;
   /**
-   * Whether the cap-CSV join completed for this env. `not_attempted` —
-   * gitops repo not configured. `unavailable` — fetch failed (no gh,
-   * 404, decode error). `applied` — at least one row got its action
-   * split from the CSV.
+   * Structured status for the cap-CSV / action-intent fetch.
+   * kind: 'loaded' means the action-split is applied.
+   * Other kinds mean dropped bytes are unattributed.
    */
-  cap_csv_status: 'applied' | 'unavailable' | 'not_attempted';
+  cap_csv_status: CapCsvStatus;
   /** Echo of the exception_services input so downstream UIs can highlight. */
   exception_services: string[];
   services: ServiceRow[];
@@ -226,11 +225,16 @@ async function executeServicesInner(
   const actionIntentLookup: Map<string, Action> = actionIntent?.by_pattern ?? new Map();
   const parsedCsv = capCsvContent ? parseCapCsv(capCsvContent) : null;
   const hasActionSource = actionIntentLookup.size > 0 || (parsedCsv !== null && parsedCsv.rows.length > 0);
-  const capCsvStatus: ServicesSummary['cap_csv_status'] = !env.gitops?.repo
-    ? 'not_attempted'
-    : hasActionSource
-      ? 'applied'
-      : 'unavailable';
+  // Both fetchers were called when env.gitops?.repo is set. When the repo
+  // is set but both returned undefined, it means the fetch failed.
+  const capCsvFetchAttempted = !!env.gitops?.repo;
+  const capCsvFetchSucceeded = capCsvContent !== undefined || actionIntent !== undefined;
+  const capCsvStatus: CapCsvStatus = buildCapCsvStatus(
+    env.gitops?.repo,
+    capCsvFetchAttempted,
+    capCsvFetchSucceeded,
+    hasActionSource,
+  );
 
   // Build a (service → action-axis) map from the per-(service, hash,
   // container) dropped result, using buildPatternActionLookup to resolve
@@ -402,12 +406,10 @@ async function executeServicesInner(
   );
   if (anyDrops) {
     lines.push('');
-    if (capCsvStatus === 'applied') {
+    if (capCsvStatus.kind === 'loaded') {
       lines.push(`  Action axis: split via cap-CSV (${env.gitops?.repo}${env.gitops?.lookupPath ? `:${env.gitops.lookupPath}` : ''}).`);
-    } else if (capCsvStatus === 'unavailable') {
-      lines.push('  Action axis: cap-CSV fetch failed — dropped bytes folded into bytes_dropped (unattributed).');
     } else {
-      lines.push('  Action axis: no gitops repo configured — dropped bytes folded into bytes_dropped (unattributed).');
+      lines.push(`  Action axis: ${capCsvStatus.reason} Dropped bytes folded into bytes_dropped (unattributed).`);
     }
   }
 

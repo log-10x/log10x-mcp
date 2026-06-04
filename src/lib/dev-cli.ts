@@ -91,6 +91,23 @@ export class DevCliRunError extends Error {
   }
 }
 
+/**
+ * Thrown before spawning the CLI when a required configuration value is
+ * absent (e.g. LOG10X_API_KEY unset and the bootstrap config path requires
+ * it). Callers convert this to a `config_missing` chassis error envelope
+ * rather than surfacing a raw CLI argument-validation error.
+ */
+export class DevCliConfigMissingError extends Error {
+  readonly field: string;
+  readonly hint: string;
+  constructor(field: string, hint: string) {
+    super(hint);
+    this.name = 'DevCliConfigMissingError';
+    this.field = field;
+    this.hint = hint;
+  }
+}
+
 // ── Public API ──
 
 /**
@@ -171,11 +188,19 @@ async function runAppsMcpFileViaLocalBinary(
     join(tenxModules, 'pipelines'),
     join(tenxModules, 'apps'),
   ].join(';');
+  // tenx-mcp-file.config.yaml includes apps/shared → run/bootstrap, which
+  // declares `apiKey` as a required commandLine argument. Bootstrap resolves
+  // it via TenXEnv.get("TENX_API_KEY", "NO-API-KEY"). When TENX_API_KEY is
+  // absent from the process env the engine emits a tilde-prefixed positional
+  // arg error ("apiKey ~NO-API-KEY"). Inject the env var explicitly so
+  // bootstrap resolves the default through its env-var path (no positional
+  // arg surface) rather than hitting the commandLine validator.
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     LOG10X_MCP_RUNTIME_NAME: runtimeName,
     TENX_INCLUDE_PATHS: includePaths,
     LOG10X_MCP_OUTPUT_DIR: '/tmp/log10x-mcp-pull/' + runtimeName,
+    TENX_API_KEY: process.env.TENX_API_KEY ?? process.env.LOG10X_API_KEY ?? 'NO-API-KEY',
   };
   await runCommandWithStdin(
     binary,
@@ -629,11 +654,14 @@ async function runViaLocalBinary(
     join(tenxModules, 'apps'),
   ].join(';');
 
+  // Same bootstrap apiKey fix as runAppsMcpFileViaLocalBinary — this path
+  // also goes through tenx-mcp-file.config.yaml which includes run/bootstrap.
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     TENX_INCLUDE_PATHS: includePaths,
     LOG10X_MCP_OUTPUT_DIR: tempDir,
     LOG10X_MCP_RUNTIME_NAME: `mcp-${Date.now()}`,
+    TENX_API_KEY: process.env.TENX_API_KEY ?? process.env.LOG10X_API_KEY ?? 'NO-API-KEY',
   };
 
   if (opts.mode === 'file' && opts.inputPath) {

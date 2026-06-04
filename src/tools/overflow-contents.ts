@@ -47,7 +47,7 @@ import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { agentOnly } from '../lib/agent-only.js';
 import { type StructuredOutput } from '../lib/output-types.js';
 import { newChassisTelemetry, buildChassisEnvelope } from '../lib/chassis-envelope.js';
-import { fetchCapCsvForEnv, fetchActionIntentForEnv } from '../lib/cap-csv-fetch.js';
+import { fetchCapCsvTagged, buildCapCsvStatus, type CapCsvStatus } from '../lib/cap-csv-fetch.js';
 import { parseCapCsv, buildPatternActionLookup } from '../lib/cap-csv-parser.js';
 import type { Action } from '../lib/cost.js';
 import { normalizeTimeRange } from '../lib/time-range.js';
@@ -88,7 +88,25 @@ interface OverflowPattern {
   event_count_in_window: number;
   time_window_first: string | null;
   time_window_last: string | null;
-  growth_rate_pct: number;
+  /**
+   * How to read time_window_first / time_window_last.
+   *   computed        — both are distinct timestamps from the TSDB window.
+   *   single_sample   — only one sample point; first and last are the same.
+   *   insufficient_samples — no TSDB data was returned for the hash; both null.
+   */
+  time_window_basis: 'computed' | 'single_sample' | 'insufficient_samples';
+  /**
+   * Percent change from the first half to the second half of the window.
+   * Null when the baseline is too small to produce a meaningful rate.
+   */
+  growth_rate_pct: number | null;
+  /**
+   * Describes why growth_rate_pct is null or should be read with caution.
+   *   computed            — normal half-window comparison, value is reliable.
+   *   new_pattern         — no first-half bytes at all; pattern appeared in the second half.
+   *   insufficient_baseline — first-half bytes below the minimum floor; value suppressed.
+   */
+  growth_rate_basis: 'computed' | 'new_pattern' | 'insufficient_baseline';
   /** Cap-CSV-derived action. Always `offload` in the returned list (filter); included for envelope-uniformity. */
   action: Action;
 }
@@ -106,11 +124,11 @@ interface OverflowContentsSummary {
   /** True when the result was truncated by `limit`. */
   truncated: boolean;
   /**
-   * Whether the cap-CSV join completed. `applied` — patterns filtered to
-   * the offload action. `unavailable` / `not_attempted` — every dropped
-   * pattern surfaces as the offload set with a caveat.
+   * Structured status for the cap-CSV / action-intent fetch.
+   * kind: 'loaded' means the action-split is applied.
+   * Other kinds mean every dropped pattern surfaces with a caveat.
    */
-  cap_csv_status: 'applied' | 'unavailable' | 'not_attempted';
+  cap_csv_status: CapCsvStatus;
   patterns: OverflowPattern[];
 }
 
@@ -149,28 +167,35 @@ export async function executeOverflowContents(
   const firstSeenQ = `min by (${LABELS.hash}) (timestamp(${BYTES_METRIC}{${baseSelector}}))`;
   const lastSeenQ = `max by (${LABELS.hash}) (timestamp(${BYTES_METRIC}{${baseSelector}}))`;
 
-  const [bytesRes, eventsRes, firstHalfRes, firstSeenRes, lastSeenRes, capCsvContent, actionIntent] =
+  const [bytesRes, eventsRes, firstHalfRes, firstSeenRes, lastSeenRes, taggedFetch] =
     await Promise.all([
       queryInstant(env, bytesByPatternQ).catch(() => null),
       queryInstant(env, eventsByPatternQ).catch(() => null),
       queryInstant(env, firstHalfBytesQ).catch(() => null),
       queryInstant(env, firstSeenQ).catch(() => null),
       queryInstant(env, lastSeenQ).catch(() => null),
-      fetchCapCsvForEnv(env).catch(() => undefined),
-      fetchActionIntentForEnv(env).catch(() => undefined),
+      fetchCapCsvTagged(env).catch(() => ({
+        csvContent: undefined,
+        actionIntent: undefined,
+        attempted: !!env.gitops?.repo,
+        succeeded: false,
+      })),
     ]);
 
   // action-intent.json is the canonical source for pattern→action.
   // Fall back to legacy cap-CSV action suffixes when action-intent is absent.
+  const capCsvContent = taggedFetch.csvContent;
+  const actionIntent = taggedFetch.actionIntent;
   const actionIntentLookup: Map<string, Action> = actionIntent?.by_pattern ?? new Map();
   const parsedCsv = capCsvContent ? parseCapCsv(capCsvContent) : null;
   // Whether we have a usable action source for offload filtering.
   const hasActionSource = actionIntentLookup.size > 0 || (parsedCsv !== null && parsedCsv.rows.length > 0);
-  const capCsvStatus: OverflowContentsSummary['cap_csv_status'] = !env.gitops?.repo
-    ? 'not_attempted'
-    : hasActionSource
-      ? 'applied'
-      : 'unavailable';
+  const capCsvStatus: CapCsvStatus = buildCapCsvStatus(
+    env.gitops?.repo,
+    taggedFetch.attempted,
+    taggedFetch.succeeded,
+    hasActionSource,
+  );
 
   interface Aggr {
     pattern_hash: string;
@@ -181,6 +206,8 @@ export async function executeOverflowContents(
     first_half_bytes: number;
     time_window_first: number | null;
     time_window_last: number | null;
+    /** Computed after the timestamp merge. */
+    time_window_basis?: 'computed' | 'single_sample' | 'insufficient_samples';
   }
   const byHash = new Map<string, Aggr>();
   const hashContainer = new Map<string, string>();
@@ -261,16 +288,19 @@ export async function executeOverflowContents(
       aggr.first_half_bytes = full > 0 ? firstHalf * (aggr.bytes_in_window / full) : 0;
     }
   }
+  // Build hash→timestamp maps first, then apply in a single O(n) pass.
+  // The previous O(n*m) nested-loop only set time_window_first on the
+  // first matching aggr for each hash; later (service, container) rows
+  // for the same hash kept null. Using a map and iterating byHash once
+  // sets every row that shares the hash.
+  const firstSeenByHash = new Map<string, number>();
+  const lastSeenByHash = new Map<string, number>();
   if (firstSeenRes && firstSeenRes.status === 'success') {
     for (const r of firstSeenRes.data.result) {
       const hash = r.metric[LABELS.hash] ?? '';
       const v = parseValue(r);
       if (!hash || v <= 0) continue;
-      for (const aggr of byHash.values()) {
-        if (aggr.pattern_hash === hash) {
-          aggr.time_window_first = v * 1000;
-        }
-      }
+      firstSeenByHash.set(hash, v * 1000);
     }
   }
   if (lastSeenRes && lastSeenRes.status === 'success') {
@@ -278,12 +308,14 @@ export async function executeOverflowContents(
       const hash = r.metric[LABELS.hash] ?? '';
       const v = parseValue(r);
       if (!hash || v <= 0) continue;
-      for (const aggr of byHash.values()) {
-        if (aggr.pattern_hash === hash) {
-          aggr.time_window_last = v * 1000;
-        }
-      }
+      lastSeenByHash.set(hash, v * 1000);
     }
+  }
+  for (const aggr of byHash.values()) {
+    const first = firstSeenByHash.get(aggr.pattern_hash) ?? null;
+    const last = lastSeenByHash.get(aggr.pattern_hash) ?? null;
+    aggr.time_window_first = first;
+    aggr.time_window_last = last;
   }
 
   // Build the action lookup: action-intent.json first, legacy cap-CSV suffix fallback.
@@ -297,7 +329,7 @@ export async function executeOverflowContents(
   // cap_csv_status.
   const filtered: Aggr[] = [];
   for (const aggr of byHash.values()) {
-    if (capCsvStatus === 'applied') {
+    if (capCsvStatus.kind === 'loaded') {
       // Resolution order: action-intent.json (canonical) → legacy cap-CSV suffix.
       const action =
         actionIntentLookup.get(aggr.pattern_hash) ??
@@ -325,10 +357,10 @@ export async function executeOverflowContents(
   lines.push('');
 
   if (top.length === 0) {
-    if (capCsvStatus === 'applied') {
+    if (capCsvStatus.kind === 'loaded') {
       lines.push('  No patterns currently routed to offload over the window.');
-    } else if (capCsvStatus === 'unavailable') {
-      lines.push('  No dropped patterns observed over the window. (cap-CSV fetch failed — could not filter to offload only.)');
+    } else if (capCsvStatus.kind === 'lookup_failed' || capCsvStatus.kind === 'configured_not_loaded') {
+      lines.push(`  No dropped patterns observed over the window. (${capCsvStatus.reason})`);
     } else {
       lines.push('  No dropped patterns observed over the window. (No gitops repo configured — could not filter to offload only.)');
     }
@@ -353,13 +385,9 @@ export async function executeOverflowContents(
     }
   }
 
-  if (capCsvStatus !== 'applied' && top.length > 0) {
+  if (capCsvStatus.kind !== 'loaded' && top.length > 0) {
     lines.push('');
-    lines.push(
-      capCsvStatus === 'unavailable'
-        ? '  Caveat: cap-CSV fetch failed; all dropped patterns shown (drop vs offload split unverified).'
-        : '  Caveat: no gitops repo configured; all dropped patterns shown (drop vs offload split unverified).',
-    );
+    lines.push(`  Caveat: ${capCsvStatus.reason} All dropped patterns shown (drop vs offload split unverified).`);
   }
 
   const nextActions: NextAction[] = [];
@@ -400,23 +428,56 @@ export async function executeOverflowContents(
     pattern_count: filtered.length,
     truncated,
     cap_csv_status: capCsvStatus,
-    patterns: top.map((p) => ({
-      pattern_hash: p.pattern_hash,
-      service: p.service,
-      container: p.container,
-      bytes_in_window: p.bytes_in_window,
-      event_count_in_window: p.event_count_in_window,
-      time_window_first: p.time_window_first ? new Date(p.time_window_first).toISOString() : null,
-      time_window_last: p.time_window_last ? new Date(p.time_window_last).toISOString() : null,
-      growth_rate_pct: growthPct(p.first_half_bytes, p.bytes_in_window),
-      action: 'offload',
-    })),
+    patterns: top.map((p) => {
+      // FIX 71 — time_window_basis: distinguish computed / single_sample / no-data.
+      let time_window_basis: OverflowPattern['time_window_basis'];
+      if (p.time_window_first === null && p.time_window_last === null) {
+        time_window_basis = 'insufficient_samples';
+      } else if (p.time_window_first !== null && p.time_window_last !== null &&
+                 p.time_window_first === p.time_window_last) {
+        time_window_basis = 'single_sample';
+      } else {
+        time_window_basis = 'computed';
+      }
+
+      // FIX 70 — growth_rate_basis: suppress artifact values.
+      const { pct: growth_rate_pct, basis: growth_rate_basis } =
+        growthPctWithBasis(p.first_half_bytes, p.bytes_in_window);
+
+      return {
+        pattern_hash: p.pattern_hash,
+        service: p.service,
+        container: p.container,
+        bytes_in_window: p.bytes_in_window,
+        event_count_in_window: p.event_count_in_window,
+        time_window_first: p.time_window_first ? new Date(p.time_window_first).toISOString() : null,
+        time_window_last: p.time_window_last ? new Date(p.time_window_last).toISOString() : null,
+        time_window_basis,
+        growth_rate_pct,
+        growth_rate_basis,
+        action: 'offload' as Action,
+      };
+    }),
   };
 
-  const headline =
-    top.length === 0
-      ? `Overflow queue empty over ${tf.label}${filterLabel}.`
-      : `${filtered.length} overflow pattern${filtered.length !== 1 ? 's' : ''} over ${tf.label}: ${fmtBytes(total_bytes_in_window)} routed to S3${filterLabel}.`;
+  // FIX 69 — headline reflects actual state, not assumed S3 routing.
+  let headline: string;
+  if (top.length === 0) {
+    headline = `Overflow queue empty over ${tf.label}${filterLabel}.`;
+  } else if (capCsvStatus.kind === 'loaded') {
+    // Cap-CSV confirms these patterns have action=offload — they ARE in S3.
+    headline = `${filtered.length} overflow pattern${filtered.length !== 1 ? 's' : ''} over ${tf.label}: ${fmtBytes(total_bytes_in_window)} routed to S3${filterLabel}.`;
+  } else {
+    // No gitops repo or fetch failed — cannot confirm S3 routing. These are
+    // dropped bytes but the offload vs hard-drop split is unverified.
+    const bucket = env.gitops?.repo;
+    if (!bucket) {
+      headline = `${filtered.length} overflow-eligible pattern${filtered.length !== 1 ? 's' : ''} over ${tf.label}: ${fmtBytes(total_bytes_in_window)} currently soft-dropped — no S3 offload bucket is configured${filterLabel}. Install the Retriever to start archiving these patterns.`;
+    } else {
+      // Repo configured but fetch failed — bucket exists but Retriever status unknown.
+      headline = `${filtered.length} overflow-eligible pattern${filtered.length !== 1 ? 's' : ''} over ${tf.label}: ${fmtBytes(total_bytes_in_window)} routing configured to ${bucket} but offload action split could not be verified — check log10x_doctor${filterLabel}.`;
+    }
+  }
 
   return buildChassisEnvelope({
     tool: 'log10x_overflow_contents',
@@ -468,23 +529,41 @@ function halfWindowLabel(range: string): string {
   return `${Math.max(1, Math.round(n / 2))}h`;
 }
 
-function growthPct(firstHalfBytes: number, fullBytes: number): number {
-  if (firstHalfBytes <= 0 && fullBytes <= 0) return 0;
+/**
+ * Minimum first-half byte floor below which the growth rate is unreliable.
+ * Near-zero baselines produce huge percentage blowups from tiny absolute
+ * changes. Floor at 1 KB — anything below that is rounding noise, not signal.
+ */
+const GROWTH_RATE_MIN_BASELINE_BYTES = 1024;
+
+interface GrowthResult {
+  pct: number | null;
+  basis: OverflowPattern['growth_rate_basis'];
+}
+
+function growthPctWithBasis(firstHalfBytes: number, fullBytes: number): GrowthResult {
+  if (firstHalfBytes <= 0 && fullBytes <= 0) {
+    return { pct: null, basis: 'insufficient_baseline' };
+  }
   const secondHalfBytes = Math.max(0, fullBytes - firstHalfBytes);
   if (firstHalfBytes <= 0) {
-    // Brand-new pattern (zero first-half) — surface a sentinel rather
-    // than divide-by-zero. +Infinity is misleading; we cap at 999 so
-    // the column stays sortable and the agent can still flag "new" via
-    // the time_window_first field.
-    return secondHalfBytes > 0 ? 999 : 0;
+    // Brand-new pattern — appeared in the second half only.
+    return { pct: null, basis: 'new_pattern' };
   }
-  return ((secondHalfBytes - firstHalfBytes) / firstHalfBytes) * 100;
+  if (firstHalfBytes < GROWTH_RATE_MIN_BASELINE_BYTES) {
+    // Near-zero baseline produces misleading large percentages from tiny changes.
+    return { pct: null, basis: 'insufficient_baseline' };
+  }
+  const computed = ((secondHalfBytes - firstHalfBytes) / firstHalfBytes) * 100;
+  return { pct: Math.round(computed * 10) / 10, basis: 'computed' };
 }
 
 function renderGrowth(firstHalfBytes: number, fullBytes: number): string {
-  const pct = growthPct(firstHalfBytes, fullBytes);
+  const { pct, basis } = growthPctWithBasis(firstHalfBytes, fullBytes);
+  if (pct === null) {
+    return basis === 'new_pattern' ? 'NEW' : '-';
+  }
   if (!Number.isFinite(pct)) return '-';
-  if (pct >= 999) return 'NEW';
   const sign = pct > 0 ? '+' : '';
   return `${sign}${Math.round(pct)}%`;
 }

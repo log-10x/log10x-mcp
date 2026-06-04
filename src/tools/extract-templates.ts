@@ -13,11 +13,11 @@
 
 import { promises as fs } from 'fs';
 import { z } from 'zod';
-import { runDevCliStdin, runDevCliFile, DevCliNotInstalledError, DevCliRunError } from '../lib/dev-cli.js';
+import { runDevCliStdin, runDevCliFile, DevCliNotInstalledError, DevCliRunError, DevCliConfigMissingError } from '../lib/dev-cli.js';
 import { agentOnly } from '../lib/agent-only.js';
 import { type StructuredOutput } from '../lib/output-types.js';
 import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
-import { newChassisTelemetry, buildChassisEnvelope } from '../lib/chassis-envelope.js';
+import { newChassisTelemetry, buildChassisEnvelope, buildChassisErrorEnvelope } from '../lib/chassis-envelope.js';
 
 export const extractTemplatesSchema = {
   source: z.enum(['file', 'events', 'text']).describe(
@@ -106,6 +106,30 @@ export async function executeExtractTemplates(args: ExtractArgs): Promise<string
         tool: 'log10x_extract_templates',
         kind: 'generic',
         remediation: e.message,
+      });
+    }
+    if (e instanceof DevCliConfigMissingError) {
+      return buildChassisErrorEnvelope({
+        tool: 'log10x_extract_templates',
+        err: {
+          error_type: 'config_missing',
+          retryable: false,
+          suggested_backoff_ms: null,
+          hint: e.hint,
+        },
+        actions: [{ tool: 'log10x_configure_env', args: {}, reason: 'configure the missing field' }],
+      });
+    }
+    if (e instanceof DevCliRunError) {
+      return buildChassisErrorEnvelope({
+        tool: 'log10x_extract_templates',
+        err: {
+          error_type: 'backend_unavailable',
+          retryable: false,
+          suggested_backoff_ms: null,
+          hint: `Local tenx CLI exited with code ${e.exitCode}. Check that tenx v1.0.21+ is installed and TENX_API_KEY is set if required.`,
+        },
+        contextPayload: { debug_stderr: e.stderr.slice(0, 2000) },
       });
     }
     throw e;
