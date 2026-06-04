@@ -351,18 +351,21 @@ function renderVerbatim(args: {
     // Sort sample events by timestamp descending (most recent first) when the
     // event strings contain parseable ISO timestamps. Best-effort: if no
     // timestamp is found, preserve the original connector order.
-    const tsPattern = /\b(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})/;
+    // Accept ISO 8601 ('T' separator) and CloudWatch-style space-separated timestamps.
+    const tsPattern = /\b(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})/;
     const sortedEvents = [...sampleEvents].sort((a, b) => {
       const ta = tsPattern.exec(a)?.[1];
       const tb = tsPattern.exec(b)?.[1];
       if (!ta || !tb) return 0;
-      return tb.localeCompare(ta); // lexicographic ISO sort is chronologically correct
+      // Normalise space-separated to 'T' so Date.parse works correctly.
+      return tb.replace(' ', 'T').localeCompare(ta.replace(' ', 'T')); // lexicographic ISO sort is chronologically correct
     });
 
     // Disclosure: if the latest sample is more than 24h old, note that events
     // are distributed across the probe window and not necessarily the most recent.
     let disclosureLine = '';
-    const latestTs = tsPattern.exec(sortedEvents[0])?.[1];
+    const latestTsRaw = tsPattern.exec(sortedEvents[0])?.[1];
+    const latestTs = latestTsRaw?.replace(' ', 'T');
     if (latestTs) {
       const latestMs = Date.parse(latestTs);
       const ageMs = Date.now() - latestMs;

@@ -572,10 +572,13 @@ async function executePatternExamplesInner(
           })
           .map((s) => collapsed.get(s.slot) ?? s);
 
-        // Filter: drop slots where naming_confidence === 'low' AND distinct_count === 1
-        // (constant unnamed slot_N positions — no discriminative value).
+        // Filter: drop slots where naming_confidence === 'low' AND either:
+        //   (a) distinct_count === 1 — constant noise with no meaningful label, or
+        //   (b) slot name matches /^slot_\d+$/ — positional placeholder with no
+        //       semantic meaning regardless of how many distinct values it carries
+        //       (numeric ID variants are uninterpretable without a name).
         const slotDist = dedupedSlots
-          .filter((s) => !(s.naming_confidence === 'low' && s.distinct_count === 1))
+          .filter((s) => !(s.naming_confidence === 'low' && (s.distinct_count === 1 || /^slot_\d+$/.test(s.slot ?? ''))))
           .sort((a, b) => {
             const confRank = (c: 'high' | 'medium' | 'low') => c === 'high' ? 0 : c === 'medium' ? 1 : 2;
             const cr = confRank(a.naming_confidence) - confRank(b.naming_confidence);

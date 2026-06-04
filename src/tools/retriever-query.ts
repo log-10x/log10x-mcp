@@ -37,6 +37,8 @@ import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { getOffloadStatusBatch } from '../lib/offload-status.js';
+import { buildChassisErrorEnvelope, sanitizeHeadline } from '../lib/chassis-envelope.js';
+import { wrapBackendError } from '../lib/primitive-errors.js';
 
 export const retrieverQuerySchema = {
   pattern: z
@@ -184,7 +186,25 @@ export async function executeRetrieverQuery(
     });
   }
   const sumOut: { data?: RetrieverQuerySummary } = {};
-  await executeRetrieverQueryInner(args, env, sumOut);
+  try {
+    await executeRetrieverQueryInner(args, env, sumOut);
+  } catch (err: unknown) {
+    const primitiveErr = wrapBackendError(err);
+    return buildChassisErrorEnvelope({
+      tool: 'log10x_retriever_query',
+      err: primitiveErr,
+      contextPayload: {
+        pattern: args.pattern,
+        search: args.search,
+        from: args.from,
+        to: args.to,
+        target: args.target,
+        format: args.format,
+        environment: args.environment,
+      },
+      source_disclosure: {},
+    });
+  }
   if (!sumOut.data) {
     // Internal-state safety net: inner ran without throwing but produced no data.
     throw new Error('retriever_query: inner pipeline returned no data.');
