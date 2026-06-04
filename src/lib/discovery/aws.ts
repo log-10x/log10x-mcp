@@ -78,7 +78,7 @@ export async function probeAws(
   let eks: EksCluster | undefined;
   if (opts.eksClusterName) {
     const d = await runJson<{
-      cluster: { name: string; endpoint: string; version: string };
+      cluster: { name: string; endpoint: string; version: string; identity?: { oidc?: { issuer?: string } } };
     }>(
       'aws',
       ['eks', 'describe-cluster', '--name', opts.eksClusterName, '--region', region, '--output', 'json'],
@@ -101,11 +101,15 @@ export async function probeAws(
         { timeoutMs }
       );
       record(ng.result);
+      const rawIssuer = d.parsed.cluster.identity?.oidc?.issuer;
+      // Strip the https:// prefix — the module input (oidc_provider) expects no scheme.
+      const oidcIssuer = rawIssuer ? rawIssuer.replace(/^https?:\/\//, '') : undefined;
       eks = {
         name: d.parsed.cluster.name,
         endpoint: d.parsed.cluster.endpoint,
         version: d.parsed.cluster.version,
         nodeGroups: ng.parsed?.nodegroups ?? [],
+        oidcIssuer,
       };
     }
   } else {
@@ -119,7 +123,7 @@ export async function probeAws(
     // Best guess: if there's exactly one cluster, describe it.
     if (list.parsed?.clusters?.length === 1) {
       const only = list.parsed.clusters[0];
-      const d = await runJson<{ cluster: { name: string; endpoint: string; version: string } }>(
+      const d = await runJson<{ cluster: { name: string; endpoint: string; version: string; identity?: { oidc?: { issuer?: string } } } }>(
         'aws',
         ['eks', 'describe-cluster', '--name', only, '--region', region, '--output', 'json'],
         { timeoutMs }
@@ -132,11 +136,14 @@ export async function probeAws(
           { timeoutMs }
         );
         record(ng.result);
+        const rawIssuer = d.parsed.cluster.identity?.oidc?.issuer;
+        const oidcIssuer = rawIssuer ? rawIssuer.replace(/^https?:\/\//, '') : undefined;
         eks = {
           name: d.parsed.cluster.name,
           endpoint: d.parsed.cluster.endpoint,
           version: d.parsed.cluster.version,
           nodeGroups: ng.parsed?.nodegroups ?? [],
+          oidcIssuer,
         };
       }
     }

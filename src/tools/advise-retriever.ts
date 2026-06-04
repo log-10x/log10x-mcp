@@ -60,38 +60,38 @@ export const adviseRetrieverSchema = {
     .describe(
       'How the customer provisions AWS infra. **terraform** = emit .tf module block. **cli** = emit aws-cli commands. **existing** = infra already provisioned, wizard skips infra steps and jumps to helm values. Auto-detected as "existing" when the snapshot already has all four SQS URLs + IRSA.'
     ),
-  input_bucket: z
+  index_source_bucket: z
     .string()
     .optional()
     .describe(
-      'S3 bucket for source logs. Auto-filled from snapshot.recommendations.retrieverS3Bucket when present.'
+      'S3 bucket for source logs (module output: index_source_bucket_name). Auto-filled from snapshot.recommendations.retrieverS3Bucket when present.'
     ),
   index_bucket: z
     .string()
     .optional()
     .describe(
-      'S3 path for indexed results (include prefix). Default: `<input_bucket>/indexing-results/`.'
+      'S3 path for indexed results (include prefix). Default: `<index_source_bucket>/indexing-results/`.'
     ),
-  irsa_role_arn: z
+  iam_role_arn: z
     .string()
     .optional()
-    .describe('IAM role ARN for the Retriever ServiceAccount (IRSA). Auto-detected from snapshot.'),
-  sqs_index_url: z
+    .describe('IAM role ARN for the Retriever ServiceAccount (IRSA) (module output: iam_role_arn). Auto-detected from snapshot.'),
+  index_queue_url: z
     .string()
     .optional()
-    .describe('SQS URL for index operations. Auto-detected from snapshot.'),
-  sqs_query_url: z
+    .describe('SQS URL for index operations (module output: index_queue_url). Auto-detected from snapshot.'),
+  query_queue_url: z
     .string()
     .optional()
-    .describe('SQS URL for query operations. Auto-detected from snapshot.'),
-  sqs_subquery_url: z
+    .describe('SQS URL for query operations (module output: query_queue_url). Auto-detected from snapshot.'),
+  subquery_queue_url: z
     .string()
     .optional()
-    .describe('SQS URL for sub-query operations. Auto-detected from snapshot.'),
-  sqs_stream_url: z
+    .describe('SQS URL for sub-query operations (module output: subquery_queue_url). Auto-detected from snapshot.'),
+  stream_queue_url: z
     .string()
     .optional()
-    .describe('SQS URL for stream operations. Auto-detected from snapshot.'),
+    .describe('SQS URL for stream operations (module output: stream_queue_url). Auto-detected from snapshot.'),
   // License fields — same pattern as advise_install.
   license_source: z
     .enum(['signin', 'demo', 'paste'])
@@ -305,15 +305,15 @@ const QUESTION_META: Record<RetrieverQuestionId, { headline: string; answer_fiel
   },
   'input-bucket': {
     headline: 'Step 4a — Confirm the S3 source bucket for Retriever input.',
-    answer_field: 'input_bucket',
+    answer_field: 'index_source_bucket',
   },
   'sqs-urls': {
     headline: 'Step 4b — Provide the four SQS queue URLs (index / query / subquery / stream).',
-    answer_field: 'sqs_index_url',
+    answer_field: 'index_queue_url',
   },
   'irsa-role': {
     headline: 'Step 5 — Provide the IRSA role ARN for the Retriever ServiceAccount.',
-    answer_field: 'irsa_role_arn',
+    answer_field: 'iam_role_arn',
   },
   'license-paste': {
     headline: 'Step 6 — Paste the license JWT you already have.',
@@ -330,14 +330,20 @@ const KNOWN_ARG_NAMES: ReadonlySet<string> = new Set([
 ]);
 
 const ARG_SYNONYMS: ReadonlyMap<string, string> = new Map([
-  ['bucket', 'input_bucket'],
-  ['source_bucket', 'input_bucket'],
-  ['s3_bucket', 'input_bucket'],
-  ['role', 'irsa_role_arn'],
-  ['iam_role', 'irsa_role_arn'],
-  ['role_arn', 'irsa_role_arn'],
-  ['queues', 'sqs_index_url'],
-  ['sqs_urls', 'sqs_index_url'],
+  ['bucket', 'index_source_bucket'],
+  ['source_bucket', 'index_source_bucket'],
+  ['s3_bucket', 'index_source_bucket'],
+  ['input_bucket', 'index_source_bucket'],
+  ['role', 'iam_role_arn'],
+  ['irsa_role_arn', 'iam_role_arn'],
+  ['iam_role', 'iam_role_arn'],
+  ['role_arn', 'iam_role_arn'],
+  ['queues', 'index_queue_url'],
+  ['sqs_urls', 'index_queue_url'],
+  ['sqs_index_url', 'index_queue_url'],
+  ['sqs_query_url', 'query_queue_url'],
+  ['sqs_subquery_url', 'subquery_queue_url'],
+  ['sqs_stream_url', 'stream_queue_url'],
   ['terraform', 'infra_mode'],
   ['provision_mode', 'infra_mode'],
   ['mode', 'infra_mode'],
@@ -648,14 +654,14 @@ function nextQuestion(
   if ((session.infraMode === 'terraform' || session.infraMode === 'cli') &&
       !allSessionInfraResolved(session)) {
     // Show the instructions markdown. The user performs the provisioning
-    // out-of-band, then re-invokes supplying input_bucket + sqs_*_url +
-    // irsa_role_arn. We surface that as the next question.
+    // out-of-band, then re-invokes supplying index_source_bucket + *_queue_url +
+    // iam_role_arn. We surface that as the next question.
     const notYetSupplied = missingInfraFields(snapshot, session);
     if (notYetSupplied.length > 0) {
       return {
         kind: 'ask',
         markdown: renderInfraInstructions(snapshot, session),
-        questionId: notYetSupplied.includes('input_bucket') ? 'input-bucket' : 'sqs-urls',
+        questionId: notYetSupplied.includes('index_source_bucket') ? 'input-bucket' : 'sqs-urls',
         shape: buildInfraMissingShape(session, notYetSupplied),
       };
     }
@@ -670,7 +676,7 @@ function nextQuestion(
       questionId: 'input-bucket',
       shape: {
         type: 'string',
-        answer_field: 'input_bucket',
+        answer_field: 'index_source_bucket',
         description: 'The S3 bucket name where the forwarder offloads the dropped log slice. The Retriever reads source logs from here.',
         example: 'my-logs-bucket',
       },
@@ -692,36 +698,36 @@ function nextQuestion(
       description: `All four SQS queue URLs are required. Missing: ${missingSqs.join(', ')}. Provide the full SQS URL (https://sqs.<region>.amazonaws.com/<account>/<queue-name>).`,
       fields: [
         {
-          name: 'sqs_index_url',
+          name: 'index_queue_url',
           type: 'string',
           description: 'SQS URL for index operations (receives new S3 object notifications).',
           required: !resolvedSqs.index,
           default: resolvedSqs.index,
-          example: 'https://sqs.us-east-1.amazonaws.com/123456789012/tenx-index',
+          example: 'https://sqs.us-east-1.amazonaws.com/123456789012/tenx-retriever-index',
         },
         {
-          name: 'sqs_query_url',
+          name: 'query_queue_url',
           type: 'string',
           description: 'SQS URL for query operations.',
           required: !resolvedSqs.query,
           default: resolvedSqs.query,
-          example: 'https://sqs.us-east-1.amazonaws.com/123456789012/tenx-query',
+          example: 'https://sqs.us-east-1.amazonaws.com/123456789012/tenx-retriever-query',
         },
         {
-          name: 'sqs_subquery_url',
+          name: 'subquery_queue_url',
           type: 'string',
           description: 'SQS URL for sub-query fan-out operations.',
           required: !resolvedSqs.subquery,
           default: resolvedSqs.subquery,
-          example: 'https://sqs.us-east-1.amazonaws.com/123456789012/tenx-subquery',
+          example: 'https://sqs.us-east-1.amazonaws.com/123456789012/tenx-retriever-subquery',
         },
         {
-          name: 'sqs_stream_url',
+          name: 'stream_queue_url',
           type: 'string',
           description: 'SQS URL for stream operations.',
           required: !resolvedSqs.stream,
           default: resolvedSqs.stream,
-          example: 'https://sqs.us-east-1.amazonaws.com/123456789012/tenx-stream',
+          example: 'https://sqs.us-east-1.amazonaws.com/123456789012/tenx-retriever-stream',
         },
       ],
     };
@@ -747,7 +753,7 @@ function nextQuestion(
       questionId: 'irsa-role',
       shape: {
         type: 'string',
-        answer_field: 'irsa_role_arn',
+        answer_field: 'iam_role_arn',
         description: 'The IAM role ARN the Retriever ServiceAccount will assume (OIDC IRSA binding). Must have s3:GetObject on the input bucket, s3:PutObject on the index prefix, and sqs:* on all four queues.',
         example: 'arn:aws:iam::123456789012:role/tenx-retriever-role',
       },
@@ -817,14 +823,14 @@ function missingInfraFields(
 ): string[] {
   const q = snapshot.recommendations.retrieverSqsUrls ?? {};
   const missing: string[] = [];
-  if (!session.inputBucket && !snapshot.recommendations.retrieverS3Bucket) missing.push('input_bucket');
-  if (!session.sqsIndexUrl && !q.index) missing.push('sqs_index_url');
-  if (!session.sqsQueryUrl && !q.query) missing.push('sqs_query_url');
-  if (!session.sqsSubqueryUrl && !q.subquery) missing.push('sqs_subquery_url');
-  if (!session.sqsStreamUrl && !q.stream) missing.push('sqs_stream_url');
+  if (!session.inputBucket && !snapshot.recommendations.retrieverS3Bucket) missing.push('index_source_bucket');
+  if (!session.sqsIndexUrl && !q.index) missing.push('index_queue_url');
+  if (!session.sqsQueryUrl && !q.query) missing.push('query_queue_url');
+  if (!session.sqsSubqueryUrl && !q.subquery) missing.push('subquery_queue_url');
+  if (!session.sqsStreamUrl && !q.stream) missing.push('stream_queue_url');
   if (!session.irsaRoleArn && !snapshot.kubectl.serviceAccountIrsa.some(
     (sa) => sa.name.toLowerCase().includes('retriever') || sa.name.toLowerCase().includes('tenx-retriever')
-  )) missing.push('irsa_role_arn');
+  )) missing.push('iam_role_arn');
   return missing;
 }
 
@@ -841,23 +847,23 @@ function buildInfraMissingShape(
   }> = [];
   for (const f of missingFields) {
     switch (f) {
-      case 'input_bucket':
-        fields.push({ name: 'input_bucket', type: 'string', description: 'S3 bucket name for source logs.', required: true, example: 'my-logs-bucket' });
+      case 'index_source_bucket':
+        fields.push({ name: 'index_source_bucket', type: 'string', description: 'S3 bucket name for source logs (module output: index_source_bucket_name).', required: true, example: 'tenx-retriever-input-123456789012' });
         break;
-      case 'sqs_index_url':
-        fields.push({ name: 'sqs_index_url', type: 'string', description: 'SQS URL for index queue.', required: true, example: 'https://sqs.us-east-1.amazonaws.com/123456789012/tenx-index' });
+      case 'index_queue_url':
+        fields.push({ name: 'index_queue_url', type: 'string', description: 'SQS URL for index queue (module output: index_queue_url).', required: true, example: 'https://sqs.us-east-1.amazonaws.com/123456789012/tenx-retriever-index' });
         break;
-      case 'sqs_query_url':
-        fields.push({ name: 'sqs_query_url', type: 'string', description: 'SQS URL for query queue.', required: true, example: 'https://sqs.us-east-1.amazonaws.com/123456789012/tenx-query' });
+      case 'query_queue_url':
+        fields.push({ name: 'query_queue_url', type: 'string', description: 'SQS URL for query queue (module output: query_queue_url).', required: true, example: 'https://sqs.us-east-1.amazonaws.com/123456789012/tenx-retriever-query' });
         break;
-      case 'sqs_subquery_url':
-        fields.push({ name: 'sqs_subquery_url', type: 'string', description: 'SQS URL for subquery queue.', required: true, example: 'https://sqs.us-east-1.amazonaws.com/123456789012/tenx-subquery' });
+      case 'subquery_queue_url':
+        fields.push({ name: 'subquery_queue_url', type: 'string', description: 'SQS URL for subquery queue (module output: subquery_queue_url).', required: true, example: 'https://sqs.us-east-1.amazonaws.com/123456789012/tenx-retriever-subquery' });
         break;
-      case 'sqs_stream_url':
-        fields.push({ name: 'sqs_stream_url', type: 'string', description: 'SQS URL for stream queue.', required: true, example: 'https://sqs.us-east-1.amazonaws.com/123456789012/tenx-stream' });
+      case 'stream_queue_url':
+        fields.push({ name: 'stream_queue_url', type: 'string', description: 'SQS URL for stream queue (module output: stream_queue_url).', required: true, example: 'https://sqs.us-east-1.amazonaws.com/123456789012/tenx-retriever-stream' });
         break;
-      case 'irsa_role_arn':
-        fields.push({ name: 'irsa_role_arn', type: 'string', description: 'IRSA role ARN for the Retriever ServiceAccount.', required: true, example: 'arn:aws:iam::123456789012:role/tenx-retriever-role' });
+      case 'iam_role_arn':
+        fields.push({ name: 'iam_role_arn', type: 'string', description: 'IAM role ARN for the Retriever ServiceAccount (module output: iam_role_arn).', required: true, example: 'arn:aws:iam::123456789012:role/tenx-retriever-role' });
         break;
     }
   }
@@ -940,7 +946,7 @@ function renderInfraReview(
     '## How to provision',
     '',
     'Re-invoke with `infra_mode: "terraform"`, `"cli"`, or `"existing"`:',
-    '- **`terraform`** — wizard emits a `terraform-aws-tenx-retriever-lambda` module block with pinned version.',
+    '- **`terraform`** — wizard emits a `log-10x/tenx-retriever/aws` module block with pinned version.',
     '- **`cli`** — wizard emits `aws iam`, `aws s3api`, `aws sqs` commands.',
     '- **`existing`** — all infra already exists; wizard jumps to helm values (supply ARNs/URLs in next step).',
   ].join('\n');
@@ -953,45 +959,80 @@ function renderInfraInstructions(
   const region = snapshot.aws?.region ?? 'us-east-1';
   const account = snapshot.aws?.callerIdentity?.account ?? '123456789012';
   const clusterName = snapshot.aws?.eks?.name ?? '<your-cluster>';
-  const oidcIssuer = `oidc.eks.${region}.amazonaws.com/id/<OIDC_ID>`;
+  // Use the OIDC issuer extracted from describe-cluster (no https:// prefix).
+  // Falls back to the placeholder pattern if discovery didn't capture it yet.
+  const oidcProvider = snapshot.aws?.eks?.oidcIssuer
+    ?? `oidc.eks.${region}.amazonaws.com/id/<OIDC_ID>`;
 
   if (session.infraMode === 'terraform') {
-    return renderTerraformInstructions(clusterName, region, account, oidcIssuer);
+    return renderTerraformInstructions(clusterName, region, account, oidcProvider);
   }
-  return renderCliInstructions(clusterName, region, account, oidcIssuer);
+  return renderCliInstructions(clusterName, region, account, oidcProvider);
 }
 
 function renderTerraformInstructions(
   clusterName: string,
   region: string,
   account: string,
-  oidcIssuer: string
+  oidcProvider: string
 ): string {
+  const envId = account.slice(-6);
   return [
     '# Retriever wizard — Step 3: Terraform provisioning',
     '',
     'Add the following to your Terraform workspace. The module creates the S3 bucket, four SQS queues, IAM role with IRSA binding, and CloudWatch log groups.',
     '',
     '```hcl',
-    `module "tenx_retriever_aws" {`,
-    `  source  = "log-10x/terraform-aws-tenx-retriever-lambda"`,
-    `  version = "~> 1.0"`,
-    ``,
-    `  cluster_name     = "${clusterName}"`,
-    `  region           = "${region}"`,
-    `  oidc_issuer      = "https://${oidcIssuer}"`,
+    `terraform {`,
+    `  required_version = ">= 1.5.0"`,
+    `  required_providers {`,
+    `    aws = { source = "hashicorp/aws", version = "~> 5.0" }`,
+    `  }`,
     `}`,
     ``,
-    `output "retriever_input_bucket" { value = module.tenx_retriever_aws.input_bucket_name }`,
-    `output "retriever_irsa_role_arn" { value = module.tenx_retriever_aws.irsa_role_arn }`,
-    `output "retriever_sqs_index_url"    { value = module.tenx_retriever_aws.sqs_index_url }`,
-    `output "retriever_sqs_query_url"    { value = module.tenx_retriever_aws.sqs_query_url }`,
-    `output "retriever_sqs_subquery_url" { value = module.tenx_retriever_aws.sqs_subquery_url }`,
-    `output "retriever_sqs_stream_url"   { value = module.tenx_retriever_aws.sqs_stream_url }`,
+    `provider "aws" { region = "${region}" }`,
+    ``,
+    `variable "tenx_api_key" {`,
+    `  type        = string`,
+    `  description = "Log10x engine API key."`,
+    `  sensitive   = true`,
+    `}`,
+    ``,
+    `module "tenx_retriever_aws" {`,
+    `  source  = "log-10x/tenx-retriever/aws"`,
+    `  version = "~> 1.0"`,
+    ``,
+    `  oidc_provider     = "${oidcProvider}"`,
+    `  tenx_api_key      = var.tenx_api_key`,
+    `  namespace         = "log10x"`,
+    `  create_namespace  = true`,
+    `  create_s3_buckets = true`,
+    ``,
+    `  iam_role_name                              = "tenx-retriever-role"`,
+    `  helm_release_name                          = "my-retriever"`,
+    `  tenx_retriever_index_queue_name            = "tenx-retriever-index-${envId}"`,
+    `  tenx_retriever_query_queue_name            = "tenx-retriever-query-${envId}"`,
+    `  tenx_retriever_subquery_queue_name         = "tenx-retriever-subquery-${envId}"`,
+    `  tenx_retriever_stream_queue_name           = "tenx-retriever-stream-${envId}"`,
+    `  tenx_retriever_index_results_bucket_name   = "tenx-retriever-input-${account}"`,
+    `}`,
+    ``,
+    `output "retriever_index_queue_url"     { value = module.tenx_retriever_aws.index_queue_url }`,
+    `output "retriever_query_queue_url"     { value = module.tenx_retriever_aws.query_queue_url }`,
+    `output "retriever_subquery_queue_url"  { value = module.tenx_retriever_aws.subquery_queue_url }`,
+    `output "retriever_stream_queue_url"    { value = module.tenx_retriever_aws.stream_queue_url }`,
+    `output "retriever_iam_role_arn"        { value = module.tenx_retriever_aws.iam_role_arn }`,
+    `output "retriever_index_source_bucket" { value = module.tenx_retriever_aws.index_source_bucket_name }`,
+    `output "retriever_helm_release_status" { value = module.tenx_retriever_aws.helm_release_status }`,
     '```',
     '',
     '```bash',
-    'terraform init && terraform apply',
+    '# Set your Log10x API key (do not inline in HCL — use -var or a .tfvars file):',
+    'export TENX_API_KEY="<your-log10x-api-key>"',
+    '',
+    'terraform init',
+    'terraform apply -var="tenx_api_key=$TENX_API_KEY"',
+    '',
     '# Capture outputs:',
     'terraform output -json | jq .',
     '```',
@@ -999,13 +1040,13 @@ function renderTerraformInstructions(
     'Once applied, re-invoke `log10x_advise_retriever` with the output values:',
     '```',
     `log10x_advise_retriever({`,
-    `  snapshot_id: "<id>",`,
-    `  input_bucket:    "<terraform output: retriever_input_bucket>",`,
-    `  irsa_role_arn:   "<terraform output: retriever_irsa_role_arn>",`,
-    `  sqs_index_url:    "<terraform output: retriever_sqs_index_url>",`,
-    `  sqs_query_url:    "<terraform output: retriever_sqs_query_url>",`,
-    `  sqs_subquery_url: "<terraform output: retriever_sqs_subquery_url>",`,
-    `  sqs_stream_url:   "<terraform output: retriever_sqs_stream_url>"`,
+    `  snapshot_id:         "<id>",`,
+    `  index_source_bucket: "<terraform output: retriever_index_source_bucket>",`,
+    `  iam_role_arn:        "<terraform output: retriever_iam_role_arn>",`,
+    `  index_queue_url:     "<terraform output: retriever_index_queue_url>",`,
+    `  query_queue_url:     "<terraform output: retriever_query_queue_url>",`,
+    `  subquery_queue_url:  "<terraform output: retriever_subquery_queue_url>",`,
+    `  stream_queue_url:    "<terraform output: retriever_stream_queue_url>"`,
     `})`,
     '```',
   ].join('\n');
@@ -1111,7 +1152,7 @@ function renderInputBucketQuestion(snapshot: DiscoverySnapshot): string {
   if (suggestions.length > 0) {
     lines.push('', 'Possible buckets detected in the account:', ...suggestions);
   }
-  lines.push('', 'Re-invoke with `input_bucket: "<bucket-name>"` to continue.');
+  lines.push('', 'Re-invoke with `index_source_bucket: "<bucket-name>"` to continue.');
   return lines.join('\n');
 }
 
@@ -1141,7 +1182,7 @@ function renderSqsQuestion(
     }
     lines.push('');
   }
-  lines.push('Re-invoke with `sqs_index_url`, `sqs_query_url`, `sqs_subquery_url`, `sqs_stream_url` to continue.');
+  lines.push('Re-invoke with `index_queue_url`, `query_queue_url`, `subquery_queue_url`, `stream_queue_url` to continue.');
   return lines.join('\n');
 }
 
@@ -1168,7 +1209,7 @@ function renderIrsaQuestion(
       lines.push(`- \`${sa.namespace}/${sa.name}\` → \`${sa.roleArn}\``);
     }
   }
-  lines.push('', 'Re-invoke with `irsa_role_arn: "arn:aws:iam::<account>:role/<name>"` to continue.');
+  lines.push('', 'Re-invoke with `iam_role_arn: "arn:aws:iam::<account>:role/<name>"` to continue.');
   return lines.join('\n');
 }
 
@@ -1223,13 +1264,13 @@ export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise
   // Merge answers into the Retriever wizard session.
   const session = updateRetrieverSession(args.snapshot_id, {
     infraMode: args.infra_mode,
-    inputBucket: args.input_bucket,
+    inputBucket: args.index_source_bucket,
     indexBucket: args.index_bucket,
-    irsaRoleArn: args.irsa_role_arn,
-    sqsIndexUrl: args.sqs_index_url,
-    sqsQueryUrl: args.sqs_query_url,
-    sqsSubqueryUrl: args.sqs_subquery_url,
-    sqsStreamUrl: args.sqs_stream_url,
+    irsaRoleArn: args.iam_role_arn,
+    sqsIndexUrl: args.index_queue_url,
+    sqsQueryUrl: args.query_queue_url,
+    sqsSubqueryUrl: args.subquery_queue_url,
+    sqsStreamUrl: args.stream_queue_url,
     licenseSource: args.license_source,
     licenseJwt: args.license_jwt_paste,
     releaseName: args.release_name,

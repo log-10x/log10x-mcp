@@ -147,6 +147,12 @@ export interface EksCluster {
   endpoint: string;
   version?: string;
   nodeGroups: string[];
+  /**
+   * OIDC provider URL without the https:// scheme prefix.
+   * e.g. "oidc.eks.us-east-1.amazonaws.com/id/EXAMPLED539D4633E53DE1B71EXAMPLE"
+   * Extracted from cluster.identity.oidc.issuer in describe-cluster JSON.
+   */
+  oidcIssuer?: string;
 }
 
 /** One shell command we ran, for audit + troubleshooting. */
