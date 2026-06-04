@@ -293,6 +293,7 @@ async function executeRetrieverQueryInner(
   args.limit = args.limit ?? 500;
   args.format = args.format ?? 'events';
   args.bucket_size = args.bucket_size ?? '5m';
+  args.to = args.to ?? 'now';
 
   try {
     normalizeTimeExpression(args.from);

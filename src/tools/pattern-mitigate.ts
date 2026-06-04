@@ -990,6 +990,8 @@ function buildHumanSummary(args: {
         return `Capability detection used a discovery snapshot only${args.snapshotAgeSeconds !== null ? ` (${args.snapshotAgeSeconds}s old)` : ''} — confirm the env hasn't drifted since.`;
       case 'env_vars_only':
         return 'Capability detection used $LOG10X_* env vars only — no envs.json or snapshot. Verify the env vars match the live environment.';
+      case 'cached_snapshot':
+        return 'Basis: cached_snapshot (capabilities from a prior discover_env call this session, no live re-probe).';
       case 'unknown':
         return 'Capability detection found no source of capability facts (no envs.json, no snapshot, no env vars).';
     }

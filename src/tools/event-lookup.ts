@@ -138,8 +138,8 @@ export async function executeEventLookup(
   // truthful percent-first headline instead of a fabricated "$0.00".
   const svcWord = d.totals.service_count === 1 ? 'service' : 'services';
   const headline = d.rate_source === 'unset' || d.totals.cost_per_window_usd_disclosed == null
-    ? `\`${d.pattern}\` over ${d.window}: ${d.totals.events} events across ${d.totals.service_count} ${svcWord} (${(d.totals.bytes / 1_000_000).toFixed(1)} MB)`
-    : `\`${d.pattern}\` over ${d.window}: ${d.totals.events} events across ${d.totals.service_count} ${svcWord} (${(d.totals.bytes / 1_000_000).toFixed(1)} MB) · ${fmtDisclosedDollar(d.totals.cost_per_window_usd_disclosed)}`;
+    ? `\`${d.pattern}\` over ${d.window}: ${fmtCount(d.totals.events)} events across ${d.totals.service_count} ${svcWord} (${(d.totals.bytes / 1_000_000).toFixed(1)} MB)`
+    : `\`${d.pattern}\` over ${d.window}: ${fmtCount(d.totals.events)} events across ${d.totals.service_count} ${svcWord} (${(d.totals.bytes / 1_000_000).toFixed(1)} MB) · ${fmtDisclosedDollar(d.totals.cost_per_window_usd_disclosed)}`;
   const rateSourceMapped = d.rate_source === 'customer_supplied' ? 'customer_supplied' as const
     : d.rate_source === 'list_price' ? 'list_price' as const
     : 'none' as const;

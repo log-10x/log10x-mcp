@@ -475,6 +475,14 @@ export async function executeExplainMode(args: {
     view: 'summary',
     headline,
     status: !compatible ? 'error' : bytesPerMonth !== null ? 'success' : 'insufficient_data',
+    ...(!compatible ? {
+      error: {
+        error_type: 'unsupported_destination' as const,
+        retryable: false,
+        suggested_backoff_ms: null,
+        hint: `mode ${args.mode} is not compatible with ${destination ?? 'this destination'}. Suggested modes: ${(compatibilityPayload?.suggested_modes as string[] | undefined ?? []).join(', ') || 'none'}.`,
+      },
+    } : {}),
     decisions: {
       threshold_used: null,
       threshold_basis: 'default',

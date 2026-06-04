@@ -661,7 +661,7 @@ async function fetchTopContributors(
     //       a metric series with missing message_pattern label
     const rawHash    = String(r.metric[labels.hash]    ?? '');
     const rawPattern = String(r.metric[labels.pattern] ?? '');
-    if (rawHash === '' && rawPattern === '') continue;
+    if (rawHash === '') continue;
     const key = topKey(r.metric, labels);
     const events = eventsByKey.get(key) ?? 0;
     const avgSize = events > 0 ? bytes / events : 0;
