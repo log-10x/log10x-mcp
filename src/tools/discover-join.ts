@@ -141,8 +141,60 @@ export async function executeDiscoverJoin(
     ? await discoverJoin(env, backend, opts)
     : await getOrDiscoverJoin(env, backend, opts);
 
+  // Empty-universe check: if either side returned zero labels, there is nothing
+  // to probe and the threshold-miss message would be misleading. Return a
+  // dedicated status so callers can distinguish "backend returned no labels"
+  // from "labels existed but no pair crossed Jaccard".
+  const log10xEmpty   = result.probedLabelsLog10x.length   === 0;
+  const customerEmpty = result.probedLabelsCustomer.length === 0;
+  if ((log10xEmpty || customerEmpty) && result.status !== 'joined') {
+    const failureReason: 'customer_side_empty' | 'log10x_side_empty' =
+      customerEmpty ? 'customer_side_empty' : 'log10x_side_empty';
+    const emptyPayload: DiscoverJoinPayload = {
+      join_status: 'no_label_universe',
+      failure_reason: failureReason,
+      backend: backend.backendType,
+      endpoint: backend.endpoint,
+      cached: result.cachedForSession,
+      window_seconds: windowSeconds,
+      labels_probed_log10x: result.probedLabelsLog10x,
+      labels_probed_customer: result.probedLabelsCustomer,
+      runner_ups: [],
+      top_below_threshold: [],
+    };
+    const side = customerEmpty ? 'Customer-side' : 'Log10x-side';
+    const emptyHeadline =
+      `${side} metrics backend returned 0 labels — cross-pillar join cannot be computed. ` +
+      `Verify ${customerEmpty ? 'customer_metrics_backend is configured and reaching a Prometheus with data' : 'the Log10x reporter is emitting metrics'}.`;
+    const emptyHumanSummary =
+      `${side} label universe is empty (0 labels returned). ` +
+      `Cross-pillar join requires at least one label on each side. ` +
+      `${customerEmpty ? 'Check that LOG10X_CUSTOMER_METRICS_URL points to a Prometheus instance with active series.' : 'Check that the Log10x reporter is running and emitting all_events_* metrics.'}`;
+    return buildChassisEnvelope({
+      tool: 'log10x_discover_join',
+      view: 'summary',
+      headline: emptyHeadline,
+      status: 'no_signal',
+      decisions: { threshold_used: args.minimum_jaccard, threshold_basis: 'customer_supplied' },
+      source_disclosure: { label_source: 'log10x_prom', siem_vendor: backend.backendType },
+      scope: {
+        window: effectiveWindow ?? 'all',
+        window_basis: effectiveWindow ? 'explicit' : 'auto_default',
+        candidates_count: 0,
+        candidates_usable: 0,
+      },
+      payload: emptyPayload,
+      human_summary: emptyHumanSummary,
+      actions: [
+        { tool: 'log10x_customer_metrics_query', args: {}, reason: 'inspect the customer metrics backend label universe directly to diagnose the empty-label condition' },
+      ],
+      telemetry,
+    });
+  }
+
   const payload: DiscoverJoinPayload = {
     join_status: result.status === 'joined' ? 'joined' : 'no_join_available',
+    failure_reason: result.status === 'no_join_available' ? 'below_threshold' : undefined,
     backend: backend.backendType,
     endpoint: backend.endpoint,
     cached: result.cachedForSession,

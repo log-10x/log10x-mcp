@@ -60,17 +60,23 @@ export function agentOnly(content: string): string {
 }
 
 /**
- * Strip every `<!-- agent-only: ... -->` block from a string. The
- * counterpart to `agentOnly()` — agents call this before relaying a
- * tool response to the user.
+ * Strip every agent-only HTML comment block from a string.
  *
- * Also strips the structured `<!-- NEXT_ACTIONS:[...] -->` block, since
- * that's likewise agent-only (programmatic chain hints).
+ * Strips:
+ *   - `<!-- agent-only: ... -->` — free-prose agent directives
+ *   - `<!-- NEXT_ACTIONS:[...] -->` — structured tool-chain JSON (canonical
+ *     form promoted to data.actions[] in the chassis envelope)
+ *   - `<!-- NEXT_STEPS_FOR_USER: ... -->` — rendering instructions for agents
+ *     (superseded by the human_summary / actions[] contract)
+ *
+ * Agents should call this before relaying a tool's report_markdown to
+ * the user so only clean prose reaches the screen.
  */
 export function stripAgentOnly(text: string): string {
   return text
     .replace(/<!-- agent-only:[\s\S]*?-->/g, '')
     .replace(/<!-- NEXT_ACTIONS:[\s\S]*?-->/g, '')
+    .replace(/<!-- NEXT_STEPS_FOR_USER:[\s\S]*?-->/g, '')
     // Collapse the blank lines that result from removing block-level comments.
     .replace(/\n{3,}/g, '\n\n')
     .trim();

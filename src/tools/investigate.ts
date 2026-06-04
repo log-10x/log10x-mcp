@@ -30,7 +30,7 @@ import { parsePrometheusValue } from '../lib/cost.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { DEFAULT_THRESHOLDS } from '../lib/thresholds.js';
 import { classifyTrajectory, runDriftCorrelation } from '../lib/drift.js';
-import { agentOnly } from '../lib/agent-only.js';
+import { agentOnly, stripAgentOnly } from '../lib/agent-only.js';
 import { runAcuteSpikeCorrelation } from '../lib/correlate.js';
 import { detectInflection } from '../lib/inflection.js';
 import { patternDisplay } from '../lib/pattern-descriptor.js';
@@ -433,9 +433,24 @@ export async function executeInvestigate(
 
   const headline = `Investigation of "${args.starting_point}" (window=${args.window}): status=${status}, shape=${parsed.shape ?? 'unknown'}${parsed.investigationId ? `, id=${parsed.investigationId.slice(0, 8)}` : ''}.`;
 
-  // Defect 34: extract the NEXT_ACTIONS from the HTML comment block into
-  // the structured actions[] field so the agent protocol is typed, not scraped.
+  // Extract structured next-actions BEFORE stripping the HTML comment blocks.
+  // (extractNextActions reads the NEXT_ACTIONS JSON comment from md.)
   const embeddedActions = extractNextActions(md);
+
+  // Extract agent-only diagnostic notes from <!-- agent-only: ... --> blocks
+  // before they are stripped, so they can be promoted to the structured payload.
+  const diagnosticNotes: string[] = [];
+  const agentOnlyRe = /<!-- agent-only:\s*([\s\S]*?)\s*-->/g;
+  let aoMatch: RegExpExecArray | null;
+  while ((aoMatch = agentOnlyRe.exec(md)) !== null) {
+    const note = aoMatch[1].replace(/--&gt;/g, '-->').trim();
+    if (note) diagnosticNotes.push(note);
+  }
+
+  // Strip all HTML comment blocks from report_markdown so it contains only
+  // clean human-readable prose. Agents read structured data from the envelope
+  // fields (actions[], diagnostic_notes); the markdown is for the user.
+  const cleanMd = stripAgentOnly(md);
 
   return buildChassisEnvelope({
     tool: 'log10x_investigate',
@@ -512,8 +527,12 @@ export async function executeInvestigate(
       mode: parsed.mode,
       shape: parsed.shape,
       use_bytes: args.use_bytes,
-      report_markdown: md,
+      // HTML comment blocks stripped — agents read actions[] and diagnostic_notes.
+      report_markdown: cleanMd,
       top_offloaded_patterns: topOffloaded,
+      // Agent-only directives promoted from <!-- agent-only: ... --> blocks.
+      // Never relay these verbatim to the user.
+      ...(diagnosticNotes.length > 0 ? { diagnostic_notes: diagnosticNotes } : {}),
     },
     human_summary,
     // Defect 34: structured actions[] pulled from the embedded NEXT_ACTIONS
