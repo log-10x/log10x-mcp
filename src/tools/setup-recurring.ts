@@ -304,10 +304,10 @@ function nextQuestion(session: RecurringWizardSession): NextQuestion | AllAnswer
         'Q3',
         'How often should the tick run?',
         [
-          '**daily-03utc** (default) — once a day at 03:00 UTC',
-          '**every-6h** — four times a day',
-          '**every-12h** — twice a day',
-          '**every-24h-localtz** — daily (UTC proxy; note: scheduler runtime is UTC)',
+          '**daily-03utc** (default): once a day at 03:00 UTC',
+          '**every-6h**: four times a day',
+          '**every-12h**: twice a day',
+          '**every-24h-localtz**: daily (UTC proxy; note: scheduler runtime is UTC)',
           'Or pass any 5-field cron expression, e.g. `"0 5 * * 1"` for every Monday at 05:00 UTC.',
           'Example: `schedule: "daily-03utc"`',
         ],
@@ -324,9 +324,9 @@ function nextQuestion(session: RecurringWizardSession): NextQuestion | AllAnswer
         'Q4',
         'Where should the tick run?',
         [
-          '**k8s_cron** — Kubernetes CronJob (recommended when `kubectl` is available)',
-          '**github_actions** — GitHub Actions scheduled workflow',
-          '**crontab** — crontab entry + wrapper script (simple, any Linux host)',
+          '**k8s_cron**: Kubernetes CronJob (recommended when `kubectl` is available)',
+          '**github_actions**: GitHub Actions scheduled workflow',
+          '**crontab**: crontab entry + wrapper script (simple, any Linux host)',
           'Example: `scheduler: "k8s_cron"`',
         ],
         'scheduler',
@@ -455,7 +455,7 @@ function buildApplyInstructions(session: RecurringWizardSession, opts: PolicyOpt
   switch (scheduler) {
     case 'k8s_cron':
       return [
-        `### Apply instructions — Kubernetes CronJob`,
+        `### Apply instructions: Kubernetes CronJob`,
         ``,
         `1. **Commit \`policy.yaml\`** to the root of your gitops repo (\`${opts.config_plane}\`).`,
         `2. **Apply the CronJob manifest:**`,
@@ -473,7 +473,7 @@ function buildApplyInstructions(session: RecurringWizardSession, opts: PolicyOpt
 
     case 'github_actions':
       return [
-        `### Apply instructions — GitHub Actions`,
+        `### Apply instructions: GitHub Actions`,
         ``,
         `1. **Commit \`policy.yaml\`** to the root of your gitops repo.`,
         `2. **Commit \`log10x-recurring.yml\`** to \`.github/workflows/\` in the same repo.`,
@@ -484,7 +484,7 @@ function buildApplyInstructions(session: RecurringWizardSession, opts: PolicyOpt
 
     case 'crontab':
       return [
-        `### Apply instructions — crontab`,
+        `### Apply instructions: crontab`,
         ``,
         `1. **Commit \`policy.yaml\`** to \`${opts.config_plane}\`.`,
         `2. **Install the wrapper script:**`,
@@ -597,8 +597,8 @@ function wizardReturn(data: WizardData): StructuredOutput {
 
   const headline =
     data.mode === 'next_question'
-      ? `Recurring wizard — question "${data.question_id}" (session ${data.session_id})`
-      : `Recurring policy emitted — ${data.scheduler_manifest_filename} + policy.yaml ready`;
+      ? `Recurring wizard: question "${data.question_id}" (session ${data.session_id})`
+      : `Recurring policy emitted: ${data.scheduler_manifest_filename} + policy.yaml ready`;
 
   return buildEnvelope({
     tool: TOOL_NAME,
@@ -656,7 +656,7 @@ function buildEmitMarkdown(session: RecurringWizardSession, result: EmitResult):
   const opts = buildPolicyOptions(session);
   const cronExpr = resolveCronExpression(opts.schedule);
   return [
-    `## Recurring cost-reduction policy — artifacts ready`,
+    `## Recurring cost-reduction policy: artifacts ready`,
     ``,
     buildConfigSummary(session),
     ``,

@@ -70,6 +70,32 @@ export const explainModeSchema = {
     ),
 };
 
+// ─── Destination compatibility matrix ─────────────────────────────────────────
+
+/**
+ * Destinations that support each enforcement mode. 'ALL' means the mode is
+ * destination-agnostic. compact has the tightest restrictions; tier_down
+ * requires SIEM-side routing support.
+ */
+const MODE_COMPAT: Partial<Record<ExplainMode, Set<string>>> = {
+  compact: new Set(['splunk', 'elasticsearch', 'clickhouse', 'azure-monitor', 'gcp-logging', 'sumo']),
+  tier_down: new Set(['datadog', 'cloudwatch', 'azure-monitor', 'gcp-logging', 'sumo', 'coralogix']),
+};
+
+function isModeCompatible(mode: ExplainMode, destination: string | null): boolean {
+  if (!destination) return true; // unknown destination — don't gate
+  const compat = MODE_COMPAT[mode];
+  if (!compat) return true; // no restriction for this mode (drop, sample, offload, observe_only)
+  return compat.has(destination.toLowerCase());
+}
+
+function getSuggestedModes(mode: ExplainMode, destination: string | null): ExplainMode[] {
+  if (!destination) return [];
+  return (['drop', 'sample', 'offload', 'tier_down'] as ExplainMode[]).filter(
+    (m) => m !== mode && isModeCompatible(m, destination),
+  );
+}
+
 // ─── Output types ─────────────────────────────────────────────────────────────
 
 export interface ExplainModeEnvelope {
@@ -264,8 +290,9 @@ function renderVerbatim(args: {
       const gb = (bytesPerMonth / (1024 ** 3));
       const savingsUsd = costPerMonth * frac;
       const affectedGb = gb * frac;
+      const savingsFormatted = savingsUsd >= 100 ? savingsUsd.toFixed(0) : savingsUsd.toFixed(2);
       savingsLine =
-        `  Potential reduction: ${affectedGb.toFixed(1)} GB times $${args.ratePerGb.toFixed(2)}/GB = $${savingsUsd.toFixed(0)}/mo.`;
+        `  Potential reduction: ${affectedGb.toFixed(1)} GB times $${args.ratePerGb.toFixed(2)}/GB = $${savingsFormatted}/mo.`;
     } else {
       savingsLine = `  observe_only makes no change to cost — it is an observation-only mode.`;
     }
@@ -350,12 +377,24 @@ export async function executeExplainMode(args: {
     ratePerGb,
   });
 
+  // Compatibility gate: some modes are not supported by all destinations.
+  // When incompatible, suppress apply/preview routes and surface alternatives.
+  const compatible = isModeCompatible(args.mode, destination);
+
   // observe_only has no apply step — nothing to enforce.
-  const applyRoute = meta.apply_tool && meta.apply_args
+  // Incompatible mode also suppresses the apply route.
+  const applyRoute = compatible && meta.apply_tool && meta.apply_args
     ? { tool: meta.apply_tool, args: meta.apply_args(args.service, destination) }
     : null;
 
-  const mustAskUser: MustAskUser = applyRoute
+  const mustAskUser: MustAskUser = !compatible
+    ? {
+        question: `${args.mode} is NOT compatible with destination "${destination ?? 'unknown'}". Choose an alternative mode.`,
+        options: getSuggestedModes(args.mode, destination).map(
+          (m, i) => `${i + 1}. ${m} — call log10x_explain_mode({ service: '${args.service}', mode: '${m}' })`,
+        ),
+      }
+    : applyRoute
     ? {
         question: `Do you want to apply ${args.mode} to ${args.service}, or first preview which patterns would be affected?`,
         options: [
@@ -370,45 +409,72 @@ export async function executeExplainMode(args: {
         ],
       };
 
-  // routes_to block gives the agent precise next-call args for each branch
+  // routes_to block gives the agent precise next-call args for each branch.
+  // When incompatible, both apply and preview are suppressed (null).
   const routesTo = {
     apply: applyRoute,
-    preview: {
-      tool: 'log10x_preview_filter',
-      args: { service: args.service, mode: args.mode },
-    },
+    preview: compatible
+      ? { tool: 'log10x_preview_filter', args: { service: args.service, mode: args.mode } }
+      : null,
   };
 
-  const forbiddenNextActions = [
-    'log10x_configure_engine',
-    'log10x_pattern_mitigate',
-    'log10x_advise_retriever',
-    'log10x_preview_filter',
-  ];
+  const forbiddenNextActions = !compatible
+    ? ['log10x_configure_engine', 'log10x_preview_filter', 'log10x_pattern_mitigate']
+    : [
+        'log10x_configure_engine',
+        'log10x_pattern_mitigate',
+        'log10x_advise_retriever',
+        'log10x_preview_filter',
+      ];
 
-  const headline =
-    `explain_mode(${args.mode}) for service "${args.service}". ` +
-    (bytesPerMonth !== null
-      ? `Service volume: ${(bytesPerMonth / (1024 ** 3)).toFixed(1)} GB/mo. `
-      : '') +
-    (applyRoute
-      ? `Awaiting user choice (Apply or Preview) before routing.`
-      : `observe_only mode — no apply step. Awaiting user choice.`);
+  // Build headline and incompatibility override if applicable.
+  let headline: string;
+  let compatibilityPayload: Record<string, unknown> | undefined;
+  if (!compatible) {
+    const suggested = getSuggestedModes(args.mode, destination);
+    headline =
+      `${args.mode} mode is NOT compatible with ${destination ?? 'this destination'}. ` +
+      `${destination ?? 'This SIEM'} does not support the ${args.mode} read path. ` +
+      (suggested.length > 0
+        ? `Use ${suggested.join(' or ')} instead.`
+        : 'Choose a different mode.');
+    compatibilityPayload = {
+      compatible: false,
+      reason: `${destination ?? 'unknown'} does not support ${args.mode} path`,
+      suggested_modes: suggested,
+    };
+  } else {
+    headline =
+      `explain_mode(${args.mode}) for service "${args.service}". ` +
+      (bytesPerMonth !== null
+        ? `Service volume: ${(bytesPerMonth / (1024 ** 3)).toFixed(1)} GB/mo. `
+        : '') +
+      (applyRoute
+        ? `Awaiting user choice (Apply or Preview) before routing.`
+        : `observe_only mode — no apply step. Awaiting user choice.`);
+  }
 
-  const actions = applyRoute
+  const actions = !compatible
+    ? getSuggestedModes(args.mode, destination).map((m) => ({
+        tool: 'log10x_explain_mode',
+        args: { service: args.service, mode: m },
+        reason: `${m} is compatible with ${destination ?? 'this destination'} — use instead of ${args.mode}`,
+        role: 'alternative' as const,
+      }))
+    : applyRoute
     ? [
         { tool: applyRoute.tool, args: applyRoute.args, reason: 'Apply path — call after user picks Apply', role: 'alternative' as const },
-        { tool: 'log10x_preview_filter', args: routesTo.preview.args, reason: 'Preview path — call after user picks Preview', role: 'alternative' as const },
+        ...(routesTo.preview ? [{ tool: 'log10x_preview_filter', args: routesTo.preview.args, reason: 'Preview path — call after user picks Preview', role: 'alternative' as const }] : []),
       ]
     : [
-        { tool: 'log10x_preview_filter', args: routesTo.preview.args, reason: 'Preview path — call after user picks Preview', role: 'alternative' as const },
+        ...(routesTo.preview ? [{ tool: 'log10x_preview_filter', args: routesTo.preview.args, reason: 'Preview path — call after user picks Preview', role: 'alternative' as const }] : []),
       ];
 
   return buildChassisEnvelope({
     tool: 'log10x_explain_mode',
     view: 'summary',
     headline,
-    status: bytesPerMonth !== null ? 'success' : 'insufficient_data',
+    status: !compatible ? 'error' : bytesPerMonth !== null ? 'success' : 'insufficient_data',
     decisions: {
       threshold_used: null,
       threshold_basis: 'default',
@@ -430,12 +496,15 @@ export async function executeExplainMode(args: {
       service_bytes_per_month: bytesPerMonth,
       service_cost_per_month_usd: costPerMonth,
       routes_to: routesTo,
+      ...(compatibilityPayload ? { compatibility: compatibilityPayload } : {}),
     },
     human_summary:
-      `Mode ${args.mode} for ${args.service}: ${meta.what_it_does.slice(0, 80)}...` +
-      (bytesPerMonth !== null
-        ? ` Service volume: ${(bytesPerMonth / (1024 ** 3)).toFixed(1)} GB/mo.`
-        : ' Volume data not yet available from metrics.'),
+      !compatible
+        ? headline
+        : `Mode ${args.mode} for ${args.service}: ${meta.what_it_does.slice(0, 80)}...` +
+          (bytesPerMonth !== null
+            ? ` Service volume: ${(bytesPerMonth / (1024 ** 3)).toFixed(1)} GB/mo.`
+            : ' Volume data not yet available from metrics.'),
     must_render_verbatim: verbatim,
     must_ask_user: mustAskUser,
     forbidden_next_actions: forbiddenNextActions,

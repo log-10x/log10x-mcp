@@ -32,6 +32,8 @@ import { retrieverNotConfiguredMessage } from './retriever-query.js';
 import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
 import { getRetrieverState } from '../lib/retriever-state.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { wrapBackendError } from '../lib/primitive-errors.js';
+import { newChassisTelemetry, buildChassisErrorEnvelope } from '../lib/chassis-envelope.js';
 
 export const backfillMetricSchema = {
   pattern: z
@@ -80,6 +82,10 @@ export const backfillMetricSchema = {
     .default('summary')
     .optional()
     .describe('summary returns the typed envelope (data.metric_name, data.events_retrieved, data.points_emitted, data.view_url, data.warnings, data.human_summary). The deprecated markdown view was removed; data.human_summary carries the prose distillation for chat rendering.'),
+  dry_run: z
+    .boolean()
+    .default(false)
+    .describe('When true, runs the Retriever fetch and aggregation but skips the emitSeries write. Returns the same envelope shape with dry_run=true and points_would_emit count so the caller can validate before committing the write. Use this to preview a backfill against a production TSDB endpoint without modifying it.'),
 };
 
 export async function executeBackfillMetric(
@@ -97,9 +103,31 @@ export async function executeBackfillMetric(
     emit_forward?: boolean;
     environment?: string;
     view?: 'summary';
+    dry_run?: boolean;
   },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
+  // Demo-env write guard: backfill_metric emits to an external TSDB; that
+  // write is irreversible. Block it on the public demo env so agents that
+  // chain cost_options → backfill_metric don't accidentally write to a
+  // production endpoint the user doesn't control.
+  const DEMO_ENV_ID = '6aa99191-f827-4579-a96a-c0ebdfe73884';
+  if (env.envId === DEMO_ENV_ID && !args.dry_run) {
+    const chassisTelemetry = newChassisTelemetry();
+    return buildChassisErrorEnvelope({
+      tool: 'log10x_backfill_metric',
+      err: {
+        error_type: 'write_not_allowed',
+        retryable: false,
+        suggested_backoff_ms: null,
+        hint: 'backfill_metric writes to an external TSDB and is not allowed on the read-only demo environment. Pass dry_run=true to preview the aggregation without writing, or sign in to your own environment first (call log10x_signin_start).',
+      },
+      telemetry: chassisTelemetry,
+      source_disclosure: {},
+      contextPayload: { env_id: env.envId, metric_name: args.metric_name, destination: args.destination },
+    });
+  }
+
   // Fix 83: resolve Retriever state for source_disclosure.
   const retrieverState = await getRetrieverState(null);
   if (!(await isRetrieverConfigured())) {
@@ -109,7 +137,24 @@ export async function executeBackfillMetric(
     return buildNotConfiguredEnvelope({ tool: 'log10x_backfill_metric', kind: 'retriever', remediation: md });
   }
   const sumOut: { data?: BackfillMetricSummary } = {};
-  const innerMd = await executeBackfillMetricInner(args, env, sumOut);
+  let innerMd: string;
+  try {
+    innerMd = await executeBackfillMetricInner(args, env, sumOut);
+  } catch (innerErr) {
+    // Structured network/backend error from the runRetrieverQuery try/catch.
+    const tagged = innerErr as Error & { primitiveErr?: ReturnType<typeof wrapBackendError>; chassisError?: boolean };
+    if (tagged.chassisError && tagged.primitiveErr) {
+      const chassisTelemetry = newChassisTelemetry();
+      return buildChassisErrorEnvelope({
+        tool: 'log10x_backfill_metric',
+        err: tagged.primitiveErr,
+        telemetry: chassisTelemetry,
+        source_disclosure: {},
+        contextPayload: { pattern: args.pattern, metric_name: args.metric_name, destination: args.destination, from: args.from, to: args.to ?? 'now' },
+      });
+    }
+    throw innerErr;
+  }
   if (!sumOut.data) {
     // Zero-event early-return path: inner returned an explanation string
     // without populating sumOut.data. Emit a typed envelope with the prose
@@ -167,6 +212,8 @@ function buildBackfillNoEventsHumanSummary(args: {
 
 interface BackfillMetricSummary {
   ok: boolean;
+  dry_run?: boolean;
+  points_would_emit?: number;
   pattern: string;
   metric_name: string;
   destination: string;
@@ -203,6 +250,7 @@ async function executeBackfillMetricInner(
     unique_field?: string;
     emit_forward?: boolean;
     environment?: string;
+    dry_run?: boolean;
   },
   env: EnvConfig,
   sumOut?: { data?: BackfillMetricSummary }
@@ -242,7 +290,20 @@ async function executeBackfillMetricInner(
     filters: args.filters,
     limit: 100_000,
   };
-  const retrieverResp = await runRetrieverQuery(env, retrieverReq, { timeoutMs: 300_000 });
+  let retrieverResp: Awaited<ReturnType<typeof runRetrieverQuery>>;
+  try {
+    retrieverResp = await runRetrieverQuery(env, retrieverReq, { timeoutMs: 300_000 });
+  } catch (fetchErr) {
+    const primitiveErr = wrapBackendError(fetchErr);
+    const chassisTelemetry = newChassisTelemetry();
+    // Return a string sentinel so the outer executeBackfillMetric wrapper
+    // detects the error via sumOut.data being unpopulated and re-wraps it.
+    // We throw here so the sumOut path is skipped cleanly.
+    throw Object.assign(
+      new Error(`retriever_fetch_failed: ${primitiveErr.hint}`),
+      { primitiveErr, chassisError: true }
+    );
+  }
   const events = retrieverResp.events || [];
   const retrieverWallMs = Date.now() - started;
 
@@ -266,14 +327,17 @@ async function executeBackfillMetricInner(
     uniqueField: args.unique_field,
   });
 
-  // ── 3. Emit to the destination ──
+  // ── 3. Emit to the destination (skipped when dry_run=true) ──
   const oldestMs = aggregated.points[0] ? aggregated.points[0].timestamp * 1000 : Date.now();
-  const emission = await emitSeries(aggregated.points, {
-    destination: args.destination,
-    metricName: args.metric_name,
-    earliestTimestampMs: oldestMs,
-    staticTags: { pattern: pattern.replace(/[^A-Za-z0-9_.-]/g, '_'), backfill: 'log10x' },
-  });
+  const isDryRun = args.dry_run === true;
+  const emission = isDryRun
+    ? { pointsEmitted: 0, seriesCount: 0, wallTimeMs: 0, bytesPosted: 0, viewUrl: undefined as string | undefined, warnings: ['dry_run=true: emitSeries skipped; no data was written to the destination TSDB.'] }
+    : await emitSeries(aggregated.points, {
+        destination: args.destination,
+        metricName: args.metric_name,
+        earliestTimestampMs: oldestMs,
+        staticTags: { pattern: pattern.replace(/[^A-Za-z0-9_.-]/g, '_'), backfill: 'log10x' },
+      });
 
   // ── 4. Forward-emission handoff (stub) ──
   const forwardNote = args.emit_forward
@@ -332,6 +396,7 @@ async function executeBackfillMetricInner(
   if (sumOut) {
     const base: Omit<BackfillMetricSummary, 'human_summary'> = {
       ok: true,
+      ...(isDryRun ? { dry_run: true, points_would_emit: aggregated.points.length } : {}),
       pattern,
       metric_name: args.metric_name,
       destination: args.destination,

@@ -70,6 +70,10 @@ export const PRIMITIVE_ERROR_TYPES = [
   'no_signal',
   /** Generic backend-layer error not covered by more specific types. */
   'backend_error',
+  /** The requested operation would write to an external system but is
+   * blocked by a read-only or demo-env guard. Pass dry_run=true to
+   * preview without writing, or switch to a non-demo environment. */
+  'write_not_allowed',
   'unknown',
 ] as const;
 

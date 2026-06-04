@@ -1568,7 +1568,7 @@ export async function executeCommitmentReport(
       actions: [
         {
           tool: 'log10x_configure_engine',
-          args: { service: args.service ?? '', target_percent: 29 },
+          args: { service: args.service ?? '' },
           reason: 'Create a commitment record first. configure_engine with target_percent persists the record this tool reads.',
           role: 'recommended-next',
         },

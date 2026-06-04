@@ -263,7 +263,7 @@ function buildModes(
     return [
       {
         id: 'observe_only',
-        label: 'Observe only — 10x marks patterns in metrics; nothing is dropped. Use this to baseline volume before committing to a mode.',
+        label: 'Observe only: 10x marks patterns in metrics; nothing is dropped. Use this to baseline volume before committing to a mode.',
         description:
           'All events pass unchanged. Pattern metrics flow to TSDB so cost attribution is visible.',
         who_enforces: 'engine',
@@ -273,12 +273,12 @@ function buildModes(
       },
       {
         id: 'install_receiver',
-        label: 'Install the 10x Receiver — unlocks drop / sample / compact / tier_down / offload.',
+        label: 'Install the 10x Receiver: unlocks drop / sample / compact / tier_down / offload.',
         description:
           'Drop / sample / compact / tier_down / offload require the Receiver in-path. Install it first to unlock the rest.',
         who_enforces: 'engine',
         applicable: true,
-        what_survives: 'N/A — this option routes to the install wizard.',
+        what_survives: 'N/A. This option routes to the install wizard.',
         routes_to: { tool: 'log10x_advise_install', args: {} },
       },
     ];
@@ -290,7 +290,7 @@ function buildModes(
   const compactGatedReason = !caps.compact_installable
     ? 'Requires Receiver tier (in-path forwarder sidecar). Install via log10x_advise_install.'
     : !siemSupportsCompact(siemDetected)
-      ? `compact mode is a no-op on ${siemDetected} — it does not reduce ingest cost on that destination.`
+      ? `compact mode is a no-op on ${siemDetected}: it does not reduce ingest cost on that destination.`
       : undefined;
 
   const tierDownApplicable =
@@ -305,7 +305,7 @@ function buildModes(
   return [
     {
       id: 'drop',
-      label: 'Drop — stop events at the forwarder. Nothing reaches the SIEM.',
+      label: 'Drop: stop events at the forwarder. Nothing reaches the SIEM.',
       description:
         'Engine caps the pattern at 0 bytes/s. Events are discarded at the Receiver before reaching the SIEM.',
       who_enforces: 'engine',
@@ -316,7 +316,7 @@ function buildModes(
     },
     {
       id: 'sample',
-      label: 'Sample — keep 1 in N events. Trends stay valid.',
+      label: 'Sample: keep 1 in N events. Trends stay valid.',
       description:
         'Engine passes 1 in N events (default 1 in 10) through to the SIEM. Aggregate alerting remains valid.',
       who_enforces: 'engine',
@@ -327,7 +327,7 @@ function buildModes(
     },
     {
       id: 'compact',
-      label: 'Compact — compress events ~5–10x. All events still land in the SIEM.',
+      label: 'Compact: compress events ~5-10x. All events still land in the SIEM.',
       description:
         'Engine encodes events into the 10x compact wire format (~5–10x smaller). All events arrive in the SIEM; fields stay searchable.',
       who_enforces: 'engine',
@@ -339,7 +339,7 @@ function buildModes(
     },
     {
       id: 'tier_down',
-      label: 'Tier-down — SIEM stores events at a cheaper storage tier.',
+      label: 'Tier-down: SIEM stores events at a cheaper storage tier.',
       description:
         'Engine stamps events with a tenx_action marker; the SIEM routes them to a cheaper tier (Flex Logs on Datadog, Infrequent Access on CloudWatch).',
       who_enforces: 'SIEM',
@@ -351,7 +351,7 @@ function buildModes(
     },
     {
       id: 'offload',
-      label: 'Offload — events route to your S3 bucket instead of the SIEM.',
+      label: 'Offload: events route to your S3 bucket instead of the SIEM.',
       description:
         'Engine diverts engine-marked events to a customer-owned S3 bucket. Events stay recoverable on demand via log10x_retriever_query.',
       who_enforces: 'engine',
@@ -367,7 +367,7 @@ function buildModes(
     },
     {
       id: 'observe_only',
-      label: 'Observe only — 10x marks patterns in metrics; nothing is dropped. Use this to baseline volume before committing to a mode.',
+      label: 'Observe only: 10x marks patterns in metrics; nothing is dropped. Use this to baseline volume before committing to a mode.',
       description:
         'All events pass unchanged. Run this to get the baseline volume before committing to any mode.',
       who_enforces: 'engine',

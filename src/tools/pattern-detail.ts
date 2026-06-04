@@ -348,8 +348,31 @@ function renderVerbatim(args: {
 
   // FIX 9: Sample events — branched error messages by SIEM resolution state.
   if (sampleEvents.length > 0) {
-    lines.push(`Sample events (${sampleEvents.length} shown, truncated to 120 chars):`);
-    sampleEvents.forEach((evt, i) => {
+    // Sort sample events by timestamp descending (most recent first) when the
+    // event strings contain parseable ISO timestamps. Best-effort: if no
+    // timestamp is found, preserve the original connector order.
+    const tsPattern = /\b(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})/;
+    const sortedEvents = [...sampleEvents].sort((a, b) => {
+      const ta = tsPattern.exec(a)?.[1];
+      const tb = tsPattern.exec(b)?.[1];
+      if (!ta || !tb) return 0;
+      return tb.localeCompare(ta); // lexicographic ISO sort is chronologically correct
+    });
+
+    // Disclosure: if the latest sample is more than 24h old, note that events
+    // are distributed across the probe window and not necessarily the most recent.
+    let disclosureLine = '';
+    const latestTs = tsPattern.exec(sortedEvents[0])?.[1];
+    if (latestTs) {
+      const latestMs = Date.parse(latestTs);
+      const ageMs = Date.now() - latestMs;
+      if (ageMs > 24 * 3600 * 1000) {
+        const ageDays = Math.round(ageMs / (24 * 3600 * 1000));
+        disclosureLine = `Sample events (${sortedEvents.length} shown, latest from ${ageDays}d ago; samples distributed across ${timeRange} SIEM probe):`;
+      }
+    }
+    lines.push(disclosureLine || `Sample events (${sortedEvents.length} shown, truncated to 120 chars):`);
+    sortedEvents.forEach((evt, i) => {
       lines.push(`  ${i + 1}. ${evt}`);
     });
     lines.push('');

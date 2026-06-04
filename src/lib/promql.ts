@@ -174,7 +174,21 @@ export function patternAcrossServices(
   offsetDays?: number,
   labels: LabelNameMap = DEFAULT_LABELS
 ): string {
-  const offset = offsetDays ? ` offset ${offsetDays}d` : '';
+  let offset = '';
+  if (offsetDays) {
+    // Prometheus only accepts integer offsets with unit suffixes (\d+[smhdwy]).
+    // Fractional day values (e.g. 0.04166...d for 1h) are rejected with HTTP 400.
+    // Convert sub-day offsets to seconds to guarantee an integer value.
+    const offsetSeconds = Math.round(offsetDays * 86400);
+    const offsetExpr = offsetSeconds < 86400
+      ? `${offsetSeconds}s`
+      : `${Math.round(offsetDays)}d`;
+    // Defensive assertion: must be a valid Prometheus duration literal.
+    if (!/^\d+[smhdwy]$/.test(offsetExpr)) {
+      throw new Error(`Invalid Prometheus offset expression derived: "${offsetExpr}" (from offsetDays=${offsetDays})`);
+    }
+    offset = ` offset ${offsetExpr}`;
+  }
   return `sum by (${labels.service}, ${labels.severity}) (increase(${BYTES_METRIC}{${labels.pattern}="${escapeLabel(pattern)}",${labels.env}="${env}"}[${range}]${offset}))`;
 }
 

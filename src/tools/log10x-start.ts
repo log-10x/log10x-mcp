@@ -442,27 +442,23 @@ export async function executeLog10xStart(
       `_(If you want to re-see the full menu, ask "show me the orientation again" and the agent will re-call log10x_start with session_state=fresh.)_`,
     ].join('\n');
 
-    const envelope: Log10xStartEnvelope = {
-      tier: 'dev',
-      siem_detected: null,
-      capability_summary: {
-        cost_attribution_available: false,
-        compact_installable: false,
-        tier_down_available: false,
-        forensic_query_available: false,
-        offload_ready: false,
-        siem_query_available: false,
-        receiver_discrimination_uncertain: false,
-      },
-      action_menu: [],
-      journey_phases: [],
+    // Midway mode: omit capability fields entirely rather than lying with
+    // all-false values. Downstream tools that read capability_summary would
+    // incorrectly block actions for a real Edge Reporter + CloudWatch env.
+    // Callers that need fresh capability state should pass session_state=fresh.
+    // Partial envelope: only emit fields that are honest in midway mode.
+    // Capability state is intentionally omitted — re-probing is skipped
+    // here, and fabricating all-false values would break downstream tools
+    // that read capability_summary for real Edge Reporter + CloudWatch envs.
+    const envelope = {
       must_render_verbatim: shortVerbatim,
       must_ask_user: {
         question: 'Already oriented — proceeding to the next step the user picked earlier.',
         options: [],
       },
-      forbidden_next_actions: [],
+      forbidden_next_actions: [] as string[],
       intent_hint: intent,
+      note: 'Capability state not re-probed in midway mode. Call with session_state=fresh to refresh.',
     };
 
     return buildEnvelope({

@@ -170,7 +170,7 @@ export async function executeSavings(
     human_summary: headline,
     actions: [
       { tool: 'log10x_top_patterns', args: { timeRange: d.time_range, limit: 10 }, reason: 'see which patterns currently drive cost (where the savings come from)' },
-      { tool: 'log10x_top_patterns', args: { timeRange: d.time_range, limit: 10, comparison_window: d.time_range }, reason: 'delta-versus-baseline view to check whether costs are growing' },
+      { tool: 'log10x_pattern_trend', args: { timeRange: d.time_range }, reason: 'trend view to check whether volume is growing or stable over this window' },
     ],
     telemetry,
   });
@@ -538,9 +538,9 @@ async function executeSavingsInner(
       reason: 'see which patterns currently drive cost (where the savings come from)',
     },
     {
-      tool: 'log10x_top_patterns',
-      args: { timeRange: tf.range, limit: 10, comparison_window: tf.range },
-      reason: 'delta-vs-baseline view to check whether costs are growing — savings projection assumes stable run-rate',
+      tool: 'log10x_pattern_trend',
+      args: { timeRange: tf.range },
+      reason: 'trend view to check whether volume is growing or stable over this window',
     },
   ];
   const block = renderNextActions(next);

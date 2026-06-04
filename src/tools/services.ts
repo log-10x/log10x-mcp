@@ -49,6 +49,7 @@ import { newChassisTelemetry, buildChassisEnvelope, buildChassisErrorEnvelope } 
 import { fetchCapCsvForEnv, fetchActionIntentForEnv, buildCapCsvStatus, type CapCsvStatus } from '../lib/cap-csv-fetch.js';
 import { parseCapCsv, buildPatternActionLookup } from '../lib/cap-csv-parser.js';
 import { normalizeTimeRange } from '../lib/time-range.js';
+import { renderMonospaceTable } from '../lib/render-table.js';
 
 export const servicesSchema = {
   timeRange: z.enum(['15m', '1h', '6h', '24h', '1d', '7d', '30d']).default('7d').describe("Time range. Sub-day values available for incident-window service ranking. '24h' and '1d' are equivalent."),
@@ -93,8 +94,10 @@ interface ServiceRow extends ServiceActionAxis {
    * matched (or no CSV was fetched).
    */
   attribution: 'csv' | 'unattributed' | 'no_drops';
-  /** Suggested next-tool call for the agent to chain on this row. */
-  next_action: NextAction;
+  /** Suggested next-tool call for the agent to chain on this row. Null for tail services below the signal floor. */
+  next_action: NextAction | null;
+  /** Reason next_action is null, when applicable. */
+  next_action_reason?: string;
 }
 
 interface ServicesSummary {
@@ -140,8 +143,16 @@ export async function executeServices(
   }
   const d = sumOut.data;
   const top = d.services[0];
+  // Compute how many services are in top-5 actionable tier vs tail.
+  const actionableCount = d.services.filter((s) => s.next_action !== null).length;
+  const tailCount = d.services.length - actionableCount;
+  const top5 = d.services.slice(0, Math.min(5, d.services.length));
+  const top5Share = top5.reduce((sum, s) => sum + s.pct, 0);
+  const tailNote = tailCount > 0
+    ? ` Top ${actionableCount} service${actionableCount !== 1 ? 's' : ''} account for ${Math.round(top5Share)}% of cost; ${tailCount} tail service${tailCount !== 1 ? 's' : ''} below signal floor.`
+    : '';
   const headline = top
-    ? `${d.service_count} services over ${d.time_range}: ${top.name} leads at ${fmtDollar(top.cost)}${d.period} (${Math.round(top.pct)}% of total ${fmtDollar(d.total_cost)}${d.period}).`
+    ? `${d.service_count} services over ${d.time_range}: ${top.name} leads at ${fmtDollar(top.cost)}${d.period} (${Math.round(top.pct)}% of total ${fmtDollar(d.total_cost)}${d.period}).${tailNote}`
     : `No services with data in ${d.time_range}.`;
   return buildChassisEnvelope({
     tool: 'log10x_services',
@@ -170,6 +181,25 @@ export async function executeServices(
     },
     payload: d,
     human_summary: headline,
+    must_render_verbatim: d.services.length > 0
+      ? renderMonospaceTable(
+          d.services,
+          [
+            { header: '#',             align: 'right',  get: (s) => String(s.rank) },
+            { header: 'Service',       align: 'left',   get: (s) => s.name, max_width: 32 },
+            { header: `Vol/${d.time_range}`, align: 'right', get: (s) => fmtBytes(s.bytes) },
+            { header: '%',             align: 'right',  get: (s) => fmtPct(s.pct) },
+            { header: `$/${d.time_range}`,  align: 'right', get: (s) => fmtDollar(s.cost) },
+            { header: 'Attribution',   align: 'left',   get: (s) => s.attribution },
+          ],
+          {
+            title: `Services — ${d.time_range}`,
+            footer: tailCount > 0
+              ? `${tailCount} tail service${tailCount !== 1 ? 's' : ''} below 0.1% signal floor omitted from next_action.`
+              : undefined,
+          },
+        )
+      : undefined,
     actions: top
       ? [
           { tool: 'log10x_top_patterns', args: { service: top.name }, reason: 'current top patterns for the highest-cost service' },
@@ -457,21 +487,36 @@ async function executeServicesInner(
       cap_csv_status: capCsvStatus,
       exception_services: exceptionServices,
       services: rows.map((r, i) => {
-        // Per-row next_action — exception services point at the
-        // per-pattern mitigation path (the customer's signal is "this
-        // service is special, don't bulk-throttle"); non-exception
-        // rows point at configure_engine for the bulk plan.
-        const next_action: NextAction = r.current_mode === 'pass'
-          ? {
-              tool: 'log10x_pattern_mitigate',
-              args: { service: r.name },
-              reason: `Per-pattern mitigation for exception service "${r.name}" — the customer flagged this service as pass, so each cost change is a per-pattern decision.`,
-            }
-          : {
-              tool: 'log10x_configure_engine',
-              args: { service: r.name },
-              reason: `Re-tune the per-pattern action plan for "${r.name}" via configure_engine — the bulk-plan path that lands a refreshed cap-CSV in gitops.`,
-            };
+        const rank = i + 1;
+        // Per-row next_action — tier-aware routing:
+        //   exception services → pattern_mitigate (per-pattern tuning)
+        //   rank 1-5 AND >= 0.1% share → configure_engine (bulk plan)
+        //   rank 6-10 AND >= 0.1% share → top_patterns (drill first)
+        //   rank 11+ OR < 0.1% share → null (below signal floor)
+        let next_action: NextAction | null;
+        if (r.current_mode === 'pass') {
+          next_action = {
+            tool: 'log10x_pattern_mitigate',
+            args: { service: r.name },
+            reason: `Per-pattern mitigation for exception service "${r.name}" — the customer flagged this service as pass, so each cost change is a per-pattern decision.`,
+          };
+        } else if (r.pct < 0.1) {
+          next_action = null;
+        } else if (rank <= 5) {
+          next_action = {
+            tool: 'log10x_configure_engine',
+            args: { service: r.name },
+            reason: `Re-tune the per-pattern action plan for "${r.name}" via configure_engine — the bulk-plan path that lands a refreshed cap-CSV in gitops.`,
+          };
+        } else if (rank <= 10) {
+          next_action = {
+            tool: 'log10x_top_patterns',
+            args: { service: r.name },
+            reason: `Drill into top patterns for "${r.name}" before deciding on a bulk action plan — mid-rank service, pattern-level breakdown first.`,
+          };
+        } else {
+          next_action = null;
+        }
         const droppedTotal = r.axis.bytes_offloaded + r.axis.bytes_compacted + r.axis.bytes_dropped;
         let attribution_reason: string;
         if (droppedTotal <= 0) {
@@ -484,8 +529,11 @@ async function executeServicesInner(
         } else {
           attribution_reason = 'No dropped bytes in this window for this service.';
         }
+        const next_action_reason = next_action === null
+          ? (r.pct < 0.1 ? 'below_signal_floor' : 'tail_rank')
+          : undefined;
         return {
-          rank: i + 1,
+          rank,
           name: r.name,
           bytes: r.bytes,
           cost: r.cost,
@@ -498,6 +546,7 @@ async function executeServicesInner(
           attribution: r.attribution,
           attribution_reason,
           next_action,
+          ...(next_action_reason !== undefined ? { next_action_reason } : {}),
         };
       }),
     };

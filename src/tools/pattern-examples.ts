@@ -194,10 +194,10 @@ export async function executePatternExamples(
 
   const d = sumOut.data;
   const headline = `\`${d.pattern}\` (${d.vendor}, ${d.window}): ${d.events_pulled} events pulled, ${d.retained_events} retained across ${d.retained_templates} templates via ${d.probe_path}`;
-  // Truncation signal: the SIEM probe hit its limit (rawArgs.limit defaults to 5).
-  // If events_pulled equals the requested limit, there are likely more matching
-  // events the agent could see by widening the limit or narrowing the timeRange.
-  const requestedLimit = rawArgs.limit ?? 5;
+  // Truncation signal: the SIEM probe hit its limit.
+  // Use the schema default (10) to avoid false-positive truncation on normal-size responses.
+  // rawArgs.limit ?? 10 matches the inner default at line ~295 and the schema default.
+  const requestedLimit = rawArgs.limit ?? 10;
   const truncated = d.events_pulled >= requestedLimit;
 
   // Build actions[] — when any bucket recommends drop or compact, surface
@@ -260,7 +260,12 @@ export async function executePatternExamples(
         ? [`${d.dropped_jaccard_events} events in ${d.distinct_templates - d.retained_templates} templates dropped on Jaccard`]
         : undefined,
     },
-    payload: d,
+    payload: {
+      ...d,
+      ...(truncated ? {
+        truncation_detail: `events_pulled (${d.events_pulled}) reached the requested limit (${requestedLimit}); there may be more matching events — widen limit or narrow timeRange`,
+      } : {}),
+    },
     human_summary: chassis_human_summary,
     telemetry: chassisTelemetry,
     actions: envelopeActions.length > 0 ? envelopeActions : undefined,
@@ -530,14 +535,47 @@ async function executePatternExamplesInner(
       dropped_jaccard_events: dropped.reduce((s, b) => s + b.p.count, 0),
       multi_line_detected: isMultiLine,
       buckets: topK.map((bucket, i) => {
-        const slotDist = Object.entries(bucket.p.variables)
-          .map(([slot, vals]) => ({
-            slot,
-            distinct_count: bucket.p.slotDistinctCounts?.[slot] ?? vals.length,
-            is_constant: (bucket.p.slotDistinctCounts?.[slot] ?? vals.length) === 1,
-            sample_values: vals.slice(0, 3),
-            naming_confidence: slotNamingConfidence(slot),
-          }))
+        // Build slot distribution with deduplication of _partN sequences and
+        // filtering of low-signal constant slots.
+        const rawSlots = Object.entries(bucket.p.variables).map(([slot, vals]) => ({
+          slot,
+          distinct_count: bucket.p.slotDistinctCounts?.[slot] ?? vals.length,
+          is_constant: (bucket.p.slotDistinctCounts?.[slot] ?? vals.length) === 1,
+          sample_values: vals.slice(0, 3),
+          naming_confidence: slotNamingConfidence(slot),
+        }));
+
+        // Collapse _part2/_part3/... sequences into the base slot when all
+        // parts are constant single-value slots sharing a common prefix.
+        // e.g. slot_4_part2, slot_4_part3 → folded into slot_4 with combined sample_values.
+        const partPattern = /^(.+)_part\d+$/;
+        const collapsed = new Map<string, typeof rawSlots[0]>();
+        const collapsedBases = new Set<string>();
+        for (const s of rawSlots) {
+          const m = partPattern.exec(s.slot);
+          if (m && s.is_constant) {
+            const base = m[1];
+            collapsedBases.add(base);
+            const existing = collapsed.get(base);
+            if (existing) {
+              existing.sample_values = [...new Set([...existing.sample_values, ...s.sample_values])].slice(0, 3);
+            } else {
+              collapsed.set(base, { ...s, slot: base });
+            }
+          }
+        }
+
+        const dedupedSlots = rawSlots
+          .filter((s) => {
+            const m = partPattern.exec(s.slot);
+            return !(m && s.is_constant && collapsedBases.has(m[1]));
+          })
+          .map((s) => collapsed.get(s.slot) ?? s);
+
+        // Filter: drop slots where naming_confidence === 'low' AND distinct_count === 1
+        // (constant unnamed slot_N positions — no discriminative value).
+        const slotDist = dedupedSlots
+          .filter((s) => !(s.naming_confidence === 'low' && s.distinct_count === 1))
           .sort((a, b) => {
             const confRank = (c: 'high' | 'medium' | 'low') => c === 'high' ? 0 : c === 'medium' ? 1 : 2;
             const cr = confRank(a.naming_confidence) - confRank(b.naming_confidence);

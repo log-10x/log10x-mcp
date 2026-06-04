@@ -218,6 +218,11 @@ function fmtRelativeAge(ageSeconds: number | null): string | null {
 interface TsdbResult {
   rows: PreviewPatternRow[];
   patternCountTotal: number | null;
+  /** Full-service byte total from the totalRes query (covers all patterns,
+   * not just the top-N slice). Use this for total_service_bytes_per_month. */
+  totalServiceBytes: number;
+  /** Sum of bytes for the top-N rows shown. Subset of totalServiceBytes. */
+  shownBytes: number;
   metricsEnv: string;
   scopeFilter: string;
   timeRange: string;
@@ -264,6 +269,8 @@ async function fetchFromTsdb(
     return {
       rows: [],
       patternCountTotal: null,
+      totalServiceBytes: 0,
+      shownBytes: 0,
       metricsEnv,
       scopeFilter,
       timeRange,
@@ -301,7 +308,10 @@ async function fetchFromTsdb(
       ? parsePrometheusValue(totalRes.data.result[0])
       : rawRows.reduce((s, r) => s + r.bytes, 0);
 
-  // Trend queries (24h, 10m step) — one per row in parallel
+  // Trend queries (24h, 10m step) — one per row in parallel.
+  // Primary metric: emitted_events_summaryBytes_total (kept/emitted cohort).
+  // Fallback: all_events_summaryBytes_total when the primary returns no data
+  // (covers patterns present in the volume metric but absent from emitted).
   const now = Math.floor(Date.now() / 1000);
   const trendWindowSec = 24 * 3600;
   const trendStep = 600;
@@ -309,7 +319,7 @@ async function fetchFromTsdb(
 
   const hashes = rawRows.map((r) => r.hash).filter(Boolean);
 
-  const [firstSeenByHash, ...trendResults] = await Promise.all([
+  const [firstSeenByHash, ...primaryTrendResults] = await Promise.all([
     fetchFirstSeenBatch(env, hashes),
     ...rawRows.map((r) =>
       r.hash
@@ -324,8 +334,33 @@ async function fetchFromTsdb(
     ),
   ]);
 
-  // Assemble rows
-  const rows = rawRows.map((r, idx): PreviewPatternRow => {
+  // Fallback: for rows with no primary data, query all_events_summaryBytes_total.
+  const fallbackNeeded = rawRows.map((r, idx) => {
+    const res = primaryTrendResults[idx];
+    return r.hash && (res === null || res.status !== 'success' || !res.data.result[0]?.values?.length);
+  });
+  const fallbackResults = await Promise.all(
+    rawRows.map((r, idx) =>
+      fallbackNeeded[idx]
+        ? queryRange(
+            env,
+            `sum by (${LABELS.hash}) (rate(all_events_summaryBytes_total{${LABELS.hash}="${r.hash}"}[5m]))`,
+            trendStart,
+            now,
+            trendStep,
+          ).catch(() => null)
+        : Promise.resolve(null),
+    ),
+  );
+
+  // Merge: prefer primary; use fallback when primary has no data.
+  const trendResults = primaryTrendResults.map((primary, idx) => {
+    if (primary && primary.status === 'success' && primary.data.result[0]?.values?.length) return primary;
+    return fallbackResults[idx] ?? primary;
+  });
+
+  // Assemble rows (descriptor disambiguation applied below)
+  const rawAssembled = rawRows.map((r, idx) => {
     const fsRes = firstSeenByHash.get(r.hash);
     const trendRes = trendResults[idx];
     let trendVals: number[] = [];
@@ -336,10 +371,8 @@ async function fetchFromTsdb(
       });
     }
     const pctOfService = totalBytes > 0 ? (r.bytes / totalBytes) * 100 : 0;
-    const descriptor36 = r.pattern.slice(0, 36);
     return {
       rank: idx + 1,
-      descriptor: descriptor36,
       descriptor_full: r.pattern,
       tenx_hash: r.hash,
       bytes_per_month: r.bytes,
@@ -351,7 +384,23 @@ async function fetchFromTsdb(
       trend_sparkline: sparkline(trendVals, 8),
     };
   });
-  return { rows, patternCountTotal, metricsEnv, scopeFilter, timeRange };
+
+  // Disambiguate descriptors: when two rows share a 36-char prefix, append
+  // the last 4 chars of tenx_hash in parens to make each row unique.
+  const descriptor36s = rawAssembled.map((r) => r.descriptor_full.slice(0, 36));
+  const seenPrefixes = new Map<string, number>();
+  for (const d of descriptor36s) seenPrefixes.set(d, (seenPrefixes.get(d) ?? 0) + 1);
+
+  const rows: PreviewPatternRow[] = rawAssembled.map((r) => {
+    const prefix = r.descriptor_full.slice(0, 36);
+    const needsDisambig = (seenPrefixes.get(prefix) ?? 0) > 1 && r.tenx_hash.length >= 4;
+    const descriptor = needsDisambig
+      ? `${r.descriptor_full.slice(0, 31)}(${r.tenx_hash.slice(-4)})`
+      : prefix;
+    return { ...r, descriptor };
+  });
+  const shownBytes = rows.reduce((s, r) => s + r.bytes_per_month, 0);
+  return { rows, patternCountTotal, totalServiceBytes: totalBytes, shownBytes, metricsEnv, scopeFilter, timeRange };
 }
 
 // ─── Entry function ─────────────────────────────────────────────────────────────
@@ -377,6 +426,7 @@ export async function executePreviewFilter(args: {
 
   let patterns: PreviewPatternRow[] = [];
   let totalServiceBytes = 0;
+  let shownBytesTotal = 0;
   let patternCountTotal: number | null = null;
   let bytesSource: PreviewFilterEnvelope['bytes_source'] = null;
 
@@ -392,7 +442,8 @@ export async function executePreviewFilter(args: {
         cohort: 'kept',
         scope_filter: tsdbResult.scopeFilter,
       };
-      totalServiceBytes = patterns.reduce((s, r) => s + r.bytes_per_month, 0);
+      totalServiceBytes = tsdbResult.totalServiceBytes;
+      shownBytesTotal = tsdbResult.shownBytes;
     } catch {
       // Fall through to empty result; surface as no-signal
       patterns = [];
@@ -442,13 +493,13 @@ export async function executePreviewFilter(args: {
     patterns.length === 0
       ? `preview_filter(${args.mode}, ${args.service}): no patterns found.`
       : `preview_filter(${args.mode}, ${args.service}): ${patterns.length} patterns shown, ` +
-        `${fmtBytesShared(totalServiceBytes)}/mo total. ` +
+        `${fmtBytesShared(shownBytesTotal)}/mo shown total (service total: ${fmtBytesShared(totalServiceBytes)}/mo). ` +
         `CSV: ${csvPath ?? 'write failed'}.`;
 
   const human_summary =
     patterns.length === 0
       ? `No patterns found for service "${args.service}" in mode "${args.mode}". Metrics may not be available yet.`
-      : `Top ${patterns.length} patterns matching mode "${args.mode}" for "${args.service}", ${fmtBytesShared(totalServiceBytes)}/mo total.`;
+      : `Top ${patterns.length} patterns matching mode "${args.mode}" for "${args.service}", ${fmtBytesShared(shownBytesTotal)}/mo shown total (${fmtBytesShared(totalServiceBytes)}/mo full service total).`;
 
   const envelope: PreviewFilterEnvelope = {
     service: args.service,

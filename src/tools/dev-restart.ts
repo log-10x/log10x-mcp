@@ -22,6 +22,29 @@
  * ~/.log10x/dev-restart-pending.json containing the current API key and
  * env ID. loadLegacyLog10x() reads and deletes the marker on boot,
  * re-injecting the credentials as if the env vars had been present.
+ *
+ * Limitation 96 — MCP client tool-schema cache is NOT refreshed.
+ * dev_restart respawns the SERVER process. It does NOT cause the MCP
+ * CLIENT (Claude Code, Claude Desktop, Cursor, etc.) to re-list the
+ * tool catalog. If the new build registered new tools, the client's
+ * cached tool schema list is stale until the client itself is
+ * restarted. Symptoms:
+ *   - A newly-registered tool is invisible to the client
+ *   - ToolSearch by exact name returns "No matching deferred tools found"
+ *   - The server logs show the tool registered correctly at boot
+ *
+ * The MCP spec defines a `tools/list_changed` notification the server
+ * MAY emit to ask the client to re-list — but most clients today
+ * either don't subscribe or don't honor it for an in-session server.
+ *
+ * Workaround: restart the MCP CLIENT after a dev_restart that adds or
+ * removes tools. For Claude Code: close + reopen the session. For
+ * Claude Desktop: quit and relaunch the app. For Cursor: reload the
+ * window. Existing tools whose schemas have NOT changed continue to
+ * work without a client restart — only catalog-shape changes trigger
+ * this.
+ *
+ * See docs/dev-mode-known-limitations.md for the full discussion.
  */
 
 import { writeFileSync, mkdirSync } from 'node:fs';

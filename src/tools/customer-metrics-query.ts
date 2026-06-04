@@ -77,9 +77,20 @@ export async function executeCustomerMetricsQuery(args: {
   const chassisTelemetry = newChassisTelemetry();
   const resolution = await resolveBackend();
   if (!resolution.backend) {
-    // KEEP (precondition): throw is the loud human-escape-hatch path;
-    // wrap() converts via isNotConfiguredError(name match) to a typed envelope.
-    throw new CustomerMetricsNotConfiguredError(formatDetectionTrace(resolution.trace));
+    // Return a typed chassis envelope so direct callers outside the MCP
+    // server wrap() also get a structured error instead of an uncaught throw.
+    return buildChassisErrorEnvelope({
+      tool: 'log10x_customer_metrics_query',
+      err: {
+        error_type: 'config_missing',
+        retryable: false,
+        suggested_backoff_ms: null,
+        hint: `Customer metrics backend is not configured. ${formatDetectionTrace(resolution.trace)} Run log10x_configure_env to set up a metrics backend.`,
+      },
+      telemetry: chassisTelemetry,
+      source_disclosure: {},
+      contextPayload: { promql: args.promql, mode: args.mode },
+    });
   }
   const backend = resolution.backend;
 

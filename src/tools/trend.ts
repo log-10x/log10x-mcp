@@ -204,13 +204,16 @@ export async function executeTrend(
       : ', (rate unset)';
   const spikeClause = d.spike_detected ? ', spike detected' : '';
   let headline: string;
+  // Cap the pattern name to ~60 chars for the headline so it stays readable.
+  // The full name is preserved in data.payload.pattern for callers that need it.
+  const shortPattern = d.pattern.length > 60 ? d.pattern.slice(0, 57) + '...' : d.pattern;
   if (d.include === 'dropped') {
-    headline = `\`${d.pattern}\` offloaded over ${d.window}: ${fmtBytes(d.total_bytes)} dropped, change ${changeSign}${d.change_pct}%${dollarClause}${spikeClause}`;
+    headline = `\`${shortPattern}\` offloaded over ${d.window}: ${fmtBytes(d.total_bytes)} dropped, change ${changeSign}${d.change_pct}%${dollarClause}${spikeClause}`;
   } else if (d.include === 'both' && d.dropped_share_pct !== null) {
     const sharePct = Math.round(d.dropped_share_pct);
-    headline = `\`${d.pattern}\` over ${d.window}: ${fmtBytes(d.total_bytes)} union, ${sharePct}% currently offloaded, change ${changeSign}${d.change_pct}%${dollarClause}${spikeClause}`;
+    headline = `\`${shortPattern}\` over ${d.window}: ${fmtBytes(d.total_bytes)} union, ${sharePct}% currently offloaded, change ${changeSign}${d.change_pct}%${dollarClause}${spikeClause}`;
   } else {
-    headline = `\`${d.pattern}\` over ${d.window}: ${fmtBytes(d.total_bytes)}, change ${changeSign}${d.change_pct}% (last quarter vs first quarter run-rate)${dollarClause}${spikeClause}`;
+    headline = `\`${shortPattern}\` over ${d.window}: ${fmtBytes(d.total_bytes)}, change ${changeSign}${d.change_pct}% (last quarter vs first quarter run-rate)${dollarClause}${spikeClause}`;
   }
   // FIX 1 — Gate chart PNG behind include_chart opt-in (default false) to
   // avoid consuming response-token budget on every call.
