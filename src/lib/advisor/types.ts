@@ -188,4 +188,11 @@ export interface AdvisePlan {
    * updates. Set for app=receiver; omitted for reporter/retriever.
    */
   gitopsExplainer?: GitopsExplainer;
+  /**
+   * Pre-rendered markdown section explaining how to reach the Retriever
+   * from outside the cluster (Fix 89 — ClusterIP external access). Only
+   * populated for Retriever plans where the MCP is not running inside the
+   * cluster. Rendered after the Verify section.
+   */
+  retrieverAccessMarkdown?: string;
 }

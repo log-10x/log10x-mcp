@@ -113,6 +113,7 @@ import { updateSettingsSchema, executeUpdateSettings } from './tools/update-sett
 import { createEnvSchema, executeCreateEnv } from './tools/create-env.js';
 import { updateEnvSchema, executeUpdateEnv } from './tools/update-env.js';
 import { deleteEnvSchema, executeDeleteEnv } from './tools/delete-env.js';
+import { setGitopsRepoSchema, executeSetGitopsRepo } from './tools/set-gitops-repo.js';
 import { rotateApiKeySchema, executeRotateApiKey } from './tools/rotate-api-key.js';
 import { servicesSchema, executeServices } from './tools/services.js';
 import { overflowContentsSchema, executeOverflowContents } from './tools/overflow-contents.js';
@@ -1091,6 +1092,18 @@ registerLog10xTool('log10x_configure_env', configureEnvSchema, (args) =>
   })
 );
 
+// ── Tool: log10x_set_gitops_repo ──
+// Write gitops.repo to ~/.log10x/envs.json so configure_engine can author
+// cap-CSV PRs. Separate from configure_env because configure_env requires
+// live-backend validation and is the wrong entry point for a gitops-only
+// field update on an already-configured env.
+
+registerLog10xTool('log10x_set_gitops_repo', setGitopsRepoSchema, (args) =>
+  wrap('log10x_set_gitops_repo', async () => {
+    return executeSetGitopsRepo(args);
+  })
+);
+
 // ── Tool: log10x_top_patterns ──
 
 registerLog10xTool('log10x_top_patterns', topPatternsSchema, (args) =>
@@ -1626,6 +1639,7 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_create_env', intent: 'Create a new Log10x environment on the account; pairs with log10x_advise_install for end-to-end provision-and-install' },
   { name: 'log10x_update_env', intent: 'Rename an env or change the default — requires backend PUT route (see backend PR #62)' },
   { name: 'log10x_delete_env', intent: 'Delete an env (destructive, irrecoverable) — requires confirm_name matching the env\'s name' },
+  { name: 'log10x_set_gitops_repo', intent: 'Write gitops.repo to ~/.log10x/envs.json so configure_engine can author cap-CSV PRs; confirm="set-now" required' },
   { name: 'log10x_rotate_api_key', intent: 'Rotate the Log10x API key (destructive) — old key invalidated immediately, new one persisted to ~/.log10x/credentials' },
   { name: 'log10x_customer_metrics_query', intent: 'Direct PromQL passthrough to the customer metric backend (escape hatch for cross-pillar investigations)' },
   { name: 'log10x_discover_join', intent: 'Auto-discover the join label between Log10x pattern metrics and the customer metric backend via Jaccard similarity' },

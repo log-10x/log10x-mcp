@@ -115,6 +115,15 @@ export function renderPlan(plan: AdvisePlan, action: 'install' | 'verify' | 'tea
     renderSteps(lines, plan.teardown);
   }
 
+  // ── Retriever external access guidance (Fix 89) ──
+  // Only populated when the MCP is not running inside the cluster (ClusterIP
+  // services are unreachable externally). Rendered after teardown so the
+  // user sees it as a reference section rather than a blocker.
+  if (plan.retrieverAccessMarkdown) {
+    lines.push(plan.retrieverAccessMarkdown);
+    lines.push('');
+  }
+
   // ── Footer ──
   lines.push('---');
   lines.push(`_Plan built from snapshot \`${plan.snapshotId}\`._`);

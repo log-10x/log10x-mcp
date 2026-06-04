@@ -426,17 +426,18 @@ export async function executeConfigureEngine(
   const target = await resolveTarget(args);
   if ('error' in target) {
     const targetErrHint = firstLine(target.error);
-    // Nudge configure_env whenever the hint mentions gitops / GH_REPO —
-    // that is exactly the tool that fixes the gap (sets gitops.repo in
-    // envs.json or LOG10X_GH_REPO env var).
+    // Nudge log10x_set_gitops_repo when the hint signals a missing gitops
+    // repo. log10x_set_gitops_repo writes gitops.repo to envs.json;
+    // log10x_configure_env only handles metricsBackend and cannot write
+    // that field.
     const targetActions: import('../lib/output-types.js').Action[] =
       isGitopsHint(targetErrHint)
         ? [
             {
-              tool: 'log10x_configure_env',
+              tool: 'log10x_set_gitops_repo',
               args: {},
               reason:
-                'Set gitops.repo in your envs.json (or LOG10X_GH_REPO env var) so configure_engine can write the per-pattern cap PR.',
+                'Write gitops.repo to envs.json so configure_engine knows which GitHub repo to open the cap-CSV PR against. After running, restart the MCP server and retry.',
               role: 'recommended-next',
             },
           ]
@@ -1187,7 +1188,12 @@ async function resolveTarget(
     return {
       error: renderError(
         'gitops repo not resolved',
-        'Pass `gitops_repo` (owner/name), set `gitops.repo` in `~/.log10x/envs.json` for a stable per-env default, or pass `snapshot_id` from `log10x_discover_env`.'
+        'configure_engine needs `gitops_repo` (owner/name) to author the cap-CSV PR. ' +
+        'Three options: ' +
+        '(1) Pass `gitops_repo` directly on this call. ' +
+        '(2) Run `log10x_set_gitops_repo` to write it to `~/.log10x/envs.json` — ' +
+        'then restart the MCP server (log10x_dev_restart) and retry. ' +
+        '(3) Set the `LOG10X_GH_REPO` environment variable on the MCP server process and restart.'
       ),
     };
   }
@@ -1692,12 +1698,16 @@ function isGitopsHint(hint: string): boolean {
  * Derives structured chain-next nudges from an error hint string.
  *
  * Mapping (aligned with defect-39 spec):
- *   config_missing + gitops/GH_REPO mention  → log10x_configure_env
+ *   config_missing + gitops/GH_REPO mention  → log10x_set_gitops_repo
  *   schema_invalid / "invalid" / "required"   → log10x_explain_mode + log10x_cost_options
  *
  * backend_unavailable is handled at its call site rather than here because
  * it uses a distinct error_type and the log10x_doctor nudge is always
  * applicable regardless of the hint wording.
+ *
+ * NOTE: the gitops action used to point to log10x_configure_env, but that
+ * tool only handles metricsBackend and cannot write the gitops field.
+ * log10x_set_gitops_repo is the correct target for this gap.
  */
 function deriveActionsFromHint(
   hint: string
@@ -1706,10 +1716,10 @@ function deriveActionsFromHint(
 
   if (isGitopsHint(hint)) {
     acts.push({
-      tool: 'log10x_configure_env',
+      tool: 'log10x_set_gitops_repo',
       args: {},
       reason:
-        'Set gitops.repo in your envs.json (or LOG10X_GH_REPO env var) so configure_engine can write the per-pattern cap PR.',
+        'Write gitops.repo to envs.json so configure_engine knows which GitHub repo to open the cap-CSV PR against. After running, restart the MCP server and retry.',
       role: 'recommended-next',
     });
     return acts; // gitops gap is the only blocker — don't pile on schema nudges

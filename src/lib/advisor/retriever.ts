@@ -185,6 +185,29 @@ export async function buildRetrieverPlan(args: RetrieverAdviseArgs): Promise<Adv
     'Retriever infra (S3 buckets, SQS queues, IAM role + IRSA binding, CloudWatch log groups) is provisioned via the Terraform module, NOT by this advisor. The plan below assumes infra already exists.'
   );
 
+  // Fix 88 — surface Receiver outputOffload requirement proactively.
+  // If the Receiver is installed, warn that the rate-only regulator config
+  // does NOT route bytes to S3 — the outputOffload module must be included.
+  // Without this, the S3 input bucket stays empty and the Retriever has
+  // nothing to index. The note appears above the preflight table so users
+  // see it before running any commands. The verify probe (receiver-offload-
+  // capability) will confirm the state after the Receiver config is updated.
+  const receiverDetail = snapshot.recommendations.installedComponentsDetail?.receiver;
+  if (receiverDetail) {
+    notes.push(
+      `**Receiver config update required for S3 offload.** ` +
+      `The Receiver is installed in namespace \`${receiverDetail.namespace}\` but may be ` +
+      `running in rate-only mode (soft-drop / sample). To route bytes to S3 so the Retriever ` +
+      `can index them, the Receiver's regulator config must include the outputOffload module. ` +
+      `Update the Receiver helm values:\n\n` +
+      `\`\`\`yaml\ntenx:\n  receiver:\n    regulator:\n      includeOffload: true  # adds run/modules/receive/offload\n` +
+      `      capLookup:\n        file: /etc/tenx/config/pipelines/run/regulate/rate/caps.csv\n\`\`\`\n\n` +
+      `Hot-reload requires the cap-CSV at a gitops-managed path (not a static ConfigMap mount). ` +
+      `See https://doc.log10x.com/run/regulate for the full config. ` +
+      `After updating, re-run log10x_advise_retriever with action: "verify" to confirm.`
+    );
+  }
+
   const install: PlanStep[] = [];
   const verify: VerifyProbe[] = [];
   const teardown: PlanStep[] = [];
@@ -203,7 +226,13 @@ export async function buildRetrieverPlan(args: RetrieverAdviseArgs): Promise<Adv
     );
   }
   if (!args.skipVerify) {
-    verify.push(...buildVerifyProbes(releaseName, namespace, inputBucket, sqsUrls.index));
+    // Pass the Receiver namespace so the offload-capability probe can inspect
+    // whether the Receiver ConfigMap has outputOffload wired (Fix 88).
+    const receiverNamespace =
+      snapshot.recommendations.installedComponentsDetail?.receiver?.namespace;
+    verify.push(
+      ...buildVerifyProbes(releaseName, namespace, inputBucket, sqsUrls.index, receiverNamespace)
+    );
   }
   if (!args.skipTeardown) {
     teardown.push(...buildTeardownSteps(releaseName, namespace));
@@ -222,6 +251,15 @@ export async function buildRetrieverPlan(args: RetrieverAdviseArgs): Promise<Adv
         )
       : undefined;
 
+  // Fix 89 — external access guidance when the MCP runs outside the cluster.
+  // The helm chart defaults to ClusterIP, which is unreachable from a laptop.
+  // KUBERNETES_SERVICE_HOST is injected by k8s into every in-cluster pod; its
+  // absence is a reliable signal that we are running outside the cluster.
+  const runningInsideCluster = process.env['KUBERNETES_SERVICE_HOST'] !== undefined;
+  const retrieverAccessMarkdown = !runningInsideCluster
+    ? buildRetrieverExternalAccessMarkdown(releaseName, namespace)
+    : undefined;
+
   return {
     app: 'retriever',
     snapshotId: snapshot.snapshotId,
@@ -234,8 +272,84 @@ export async function buildRetrieverPlan(args: RetrieverAdviseArgs): Promise<Adv
     teardown,
     notes,
     offloadMarkdown,
+    retrieverAccessMarkdown,
     blockers,
   };
+}
+
+/**
+ * Fix 89 — "How to query the Retriever from outside the cluster" section.
+ *
+ * The helm chart defaults Service spec.type to ClusterIP. The MCP server
+ * (and CLI) run on the user's laptop, not inside the cluster — the
+ * *.svc.cluster.local DNS does not resolve there. This function builds a
+ * reference markdown block covering the three options: kubectl port-forward
+ * (ephemeral dev/test), Service type LoadBalancer (persistent prod), and
+ * deploying the MCP server inside the cluster (cleanest for shared teams).
+ */
+function buildRetrieverExternalAccessMarkdown(
+  releaseName: string,
+  namespace: string
+): string {
+  const svcName = `${releaseName}-retriever-10x-all-in-one`;
+  return [
+    '## How to query the Retriever from outside the cluster',
+    '',
+    'The Retriever Service defaults to **ClusterIP** (cluster-internal only). ' +
+    '`log10x_retriever_query` and `log10x_retriever_series` send HTTP requests to the ' +
+    'Retriever — from your laptop the cluster-internal URL will fail with ENOTFOUND or ECONNREFUSED.',
+    '',
+    'Pick one option:',
+    '',
+    '### Option A — kubectl port-forward (dev/test, ephemeral)',
+    '',
+    '```bash',
+    `kubectl port-forward -n ${namespace} svc/${svcName} 18080:80`,
+    '```',
+    '',
+    'Then set the Retriever URL so the MCP server can reach it:',
+    '',
+    '```bash',
+    'export __SAVE_LOG10X_RETRIEVER_URL__=http://localhost:18080',
+    '```',
+    '',
+    'The port-forward is ephemeral — it stops when the terminal session ends. ' +
+    'Restart it whenever you need to run retriever queries.',
+    '',
+    '### Option B — Migrate the Service to LoadBalancer (persistent)',
+    '',
+    'Add to your Terraform module call or values file:',
+    '',
+    '```yaml',
+    '# retriever-values-lb.yaml',
+    'retriever:',
+    '  service:',
+    '    type: LoadBalancer',
+    '    annotations:',
+    '      service.beta.kubernetes.io/aws-load-balancer-type: "nlb"',
+    '```',
+    '',
+    'Apply with:',
+    '',
+    '```bash',
+    `helm upgrade ${releaseName} log10x/retriever -n ${namespace} -f retriever-values-lb.yaml`,
+    '```',
+    '',
+    'After the LoadBalancer is provisioned, run `kubectl -n ' +
+    `${namespace} get svc ${svcName}` +
+    '` to get the external hostname, then:',
+    '',
+    '```bash',
+    'export __SAVE_LOG10X_RETRIEVER_URL__=http://<external-hostname>',
+    '```',
+    '',
+    '### Option C — Deploy the MCP server inside the cluster',
+    '',
+    'When the MCP server runs as a pod in the same cluster, the chart-default ' +
+    'ClusterIP URL (`http://' + svcName + '.' + namespace + '.svc.cluster.local:80`) ' +
+    'resolves correctly with no additional configuration. ' +
+    'This is the cleanest path for shared teams and CI pipelines.',
+  ].join('\n');
 }
 
 async function runPreflight(
@@ -431,7 +545,9 @@ function buildVerifyProbes(
   releaseName: string,
   namespace: string,
   inputBucket: string | undefined,
-  indexQueueUrl: string | undefined
+  indexQueueUrl: string | undefined,
+  /** Namespace where the Receiver DaemonSet runs (if installed). Used to probe outputOffload config. */
+  receiverNamespace?: string
 ): VerifyProbe[] {
   const probes: VerifyProbe[] = [];
 
@@ -459,6 +575,37 @@ function buildVerifyProbes(
     question: 'Is the query endpoint responding?',
     commands: [
       `kubectl -n ${namespace} get ingress,svc -l app.kubernetes.io/instance=${releaseName}`,
+    ],
+  });
+
+  // Fix 89 — Retriever Service external-access probe.
+  // The helm chart defaults to ClusterIP. The MCP server (and CLI) run on
+  // the user's laptop, not inside the cluster, so *.svc.cluster.local DNS
+  // never resolves. This probe surfaces the spec.type and explains the
+  // options when it is ClusterIP.
+  //
+  // Detection: no /var/run/secrets/kubernetes.io mount → running outside
+  // the cluster. We check the env var as a secondary signal (KUBERNETES_SERVICE_HOST
+  // is injected by the pod infrastructure into every in-cluster container).
+  const runningInsideCluster =
+    process.env['KUBERNETES_SERVICE_HOST'] !== undefined;
+
+  // Probe question varies by whether the MCP is inside or outside the cluster.
+  const accessQuestion = runningInsideCluster
+    ? 'Is the Retriever Service reachable from outside the cluster?'
+    : 'Is the Retriever Service reachable from outside the cluster? If type=ClusterIP, use port-forward, LoadBalancer, or deploy the MCP server inside the cluster.';
+
+  probes.push({
+    name: 'retriever-service-accessibility',
+    question: accessQuestion,
+    commands: [
+      // Use jq when available; fall back to plain kubectl wide output.
+      // The agent reads the type= field from the output to determine if
+      // external access guidance applies.
+      `kubectl -n ${namespace} get svc -l app.kubernetes.io/instance=${releaseName} -o json 2>/dev/null` +
+        ` | jq -r '.items[] | "Service \\(.metadata.name): type=\\(.spec.type) port=\\(.spec.ports[0].port // "?")"'` +
+        ` 2>/dev/null` +
+        ` || kubectl -n ${namespace} get svc -l app.kubernetes.io/instance=${releaseName} -o wide`,
     ],
   });
 
@@ -490,6 +637,24 @@ function buildVerifyProbes(
       question: 'Is the index queue being drained (messages not piling up)?',
       commands: [
         `aws sqs get-queue-attributes --queue-url "${indexQueueUrl}" --attribute-names ApproximateNumberOfMessages --output json`,
+      ],
+    });
+  }
+
+  // Fix 88 — Receiver outputOffload capability probe.
+  // If a Receiver is installed, the user may be running it with the rate
+  // regulator only (soft-drop / sample) rather than the outputOffload mode
+  // that actually routes bytes to S3 for the Retriever to index. Without
+  // outputOffload the S3 bucket stays empty and the Retriever has nothing
+  // to index. This probe reads the Receiver's ConfigMap to detect the gap
+  // proactively, before the user discovers it via an empty s3-offload-input.
+  if (receiverNamespace) {
+    probes.push({
+      name: 'receiver-offload-capability',
+      question:
+        'Is the Receiver configured for outputOffload mode (required to route bytes to S3)?',
+      commands: [
+        `kubectl -n ${receiverNamespace} get configmap -o yaml 2>/dev/null | grep -A5 "outputOffload\\|offload\\|run/modules/receive/offload" || echo "outputOffload config not found — the Receiver may be running rate-only (soft-drop). To route bytes to S3, the Receiver config must include the offload module. See: https://doc.log10x.com/run/regulate"`,
       ],
     });
   }

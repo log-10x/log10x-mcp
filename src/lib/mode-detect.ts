@@ -224,6 +224,7 @@ export const TOOL_MODES: Record<string, ('analysis' | 'analysis_pending' | 'poc'
   log10x_update_env: ['always'],
   log10x_delete_env: ['always'],
   log10x_configure_env: ['always'],
+  log10x_set_gitops_repo: ['always'],
   log10x_doctor: ['always'],
   log10x_discover_env: ['always'],
 
