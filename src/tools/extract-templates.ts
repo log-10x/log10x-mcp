@@ -14,6 +14,7 @@
 import { promises as fs } from 'fs';
 import { z } from 'zod';
 import { runDevCliStdin, runDevCliFile, DevCliNotInstalledError, DevCliRunError, DevCliConfigMissingError } from '../lib/dev-cli.js';
+import { parseAggregated } from '../lib/cli-output-parser.js';
 import { agentOnly } from '../lib/agent-only.js';
 import { type StructuredOutput } from '../lib/output-types.js';
 import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
@@ -194,13 +195,47 @@ async function executeExtractTemplatesInner(args: ExtractArgs, sumOut?: { data?:
     } catch { /* skip unparseable */ }
   }
 
-  // Count events per template from encoded.log
+  // Count events per template from encoded.log.
+  // encodedLines requires the `encoded=` anchor prefix introduced in a specific
+  // engine version. Older docker images emit bare `~hash,...` lines that the
+  // demux at dev-cli.ts silently discards, leaving encodedLines empty.
   for (const line of encodedLines) {
     const hash = line.split(',')[0]?.replace(/^~/, '');
     if (hash && templateMap.has(hash)) {
       templateMap.get(hash)!.count++;
     }
   }
+
+  // Fallback: if encoded lines produced no counts (old image / missing anchor),
+  // populate per-template counts from the aggregated CSV summary rows. The
+  // summary= lines always arrive regardless of engine version because they use
+  // a separate prefix path in the demux. Match by pattern identity (templateHash
+  // or symbolMessage) to the templateMap keys.
+  if (encodedLines.length === 0 && result.aggregatedCsv) {
+    const aggRows = parseAggregated(result.aggregatedCsv);
+    for (const row of aggRows) {
+      // The aggregated row's `pattern` field may be a symbolMessage or a
+      // templateHash depending on the CLI version. Try exact match first.
+      if (templateMap.has(row.pattern)) {
+        templateMap.get(row.pattern)!.count += row.count;
+      } else {
+        // Try matching by prefix in case CLI version truncates hashes.
+        for (const [hash, entry] of templateMap) {
+          if (hash.startsWith(row.pattern) || row.pattern.startsWith(hash)) {
+            entry.count += row.count;
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  // Recompute the effective event count from all count sources merged.
+  // When encoded lines are present they are authoritative (one line per event).
+  // When absent, fall back to the sum of per-template counts from the aggregated CSV.
+  const effectiveEventCount = encodedLines.length > 0
+    ? encodedLines.length
+    : [...templateMap.values()].reduce((s, t) => s + t.count, 0);
 
   const templates = [...templateMap.values()]
     .sort((a, b) => b.count - a.count)
@@ -211,7 +246,7 @@ async function executeExtractTemplatesInner(args: ExtractArgs, sumOut?: { data?:
   lines.push(`## Template Extraction`);
   lines.push('');
   lines.push(
-    `${encodedLines.length} events → ${templateMap.size} distinct templates. ` +
+    `${effectiveEventCount} events → ${templateMap.size} distinct templates. ` +
     `CLI wall time: ${result.wallTimeMs}ms. CLI version: ${result.cliVersion || 'unknown'}.`
   );
   lines.push('');
@@ -221,8 +256,8 @@ async function executeExtractTemplatesInner(args: ExtractArgs, sumOut?: { data?:
     lines.push('');
     for (let i = 0; i < templates.length; i++) {
       const t = templates[i];
-      const pct = encodedLines.length > 0
-        ? ` (${((t.count / encodedLines.length) * 100).toFixed(1)}%)`
+      const pct = effectiveEventCount > 0
+        ? ` (${((t.count / effectiveEventCount) * 100).toFixed(1)}%)`
         : '';
       lines.push(`**#${i + 1}** \`${t.templateHash}\` · ${t.count} events${pct}`);
       lines.push(`  ${truncate(t.template, 200)}`);
@@ -320,7 +355,7 @@ async function executeExtractTemplatesInner(args: ExtractArgs, sumOut?: { data?:
       assertions = { passed, total: results.length, results };
     }
     sumOut.data = {
-      event_count: encodedLines.length,
+      event_count: effectiveEventCount,
       distinct_templates: templateMap.size,
       shown_templates: templates.length,
       cli_wall_time_ms: result.wallTimeMs,
@@ -330,7 +365,7 @@ async function executeExtractTemplatesInner(args: ExtractArgs, sumOut?: { data?:
         template_hash: t.templateHash,
         template: t.template,
         event_count: t.count,
-        share_pct: encodedLines.length > 0 ? (t.count / encodedLines.length) * 100 : 0,
+        share_pct: effectiveEventCount > 0 ? (t.count / effectiveEventCount) * 100 : 0,
       })),
       assertions,
     };

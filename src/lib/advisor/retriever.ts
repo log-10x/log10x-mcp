@@ -161,6 +161,7 @@ export async function buildRetrieverPlan(args: RetrieverAdviseArgs): Promise<Adv
     indexBucket,
     irsaRoleArn,
     sqsUrls,
+    skipInstall: args.skipInstall,
   });
 
   const notes: string[] = [];
@@ -361,6 +362,12 @@ async function runPreflight(
     indexBucket?: string;
     irsaRoleArn?: string;
     sqsUrls: Record<string, string | undefined>;
+    /**
+     * Fix 92 — when true, the release-collision check logic is inverted:
+     * an existing release is expected (verify/teardown) rather than a
+     * blocker (install). Derived from `args.skipInstall` in the caller.
+     */
+    skipInstall?: boolean;
   }
 ): Promise<PreflightCheck[]> {
   const checks: PreflightCheck[] = [];
@@ -385,13 +392,28 @@ async function runPreflight(
   const releaseCollision = snapshot.kubectl.helmReleases.some(
     (h) => h.name === releaseName && h.namespace === namespace
   );
-  checks.push({
-    name: 'release collision',
-    status: releaseCollision ? 'fail' : 'ok',
-    detail: releaseCollision
-      ? `a Helm release named \`${releaseName}\` already exists in \`${namespace}\` — pick a different release_name or uninstall the existing one first`
-      : `no \`${releaseName}\` release in \`${namespace}\` — clear to install`,
-  });
+  // Fix 92 — action-aware collision check.
+  // install / all: an existing release is a blocker (collision).
+  // verify / teardown (skipInstall=true): the release MUST exist — its
+  // absence is the failure case. A collision false-positive in verify
+  // mode was confusing users who ran verify immediately after install.
+  if (infra.skipInstall) {
+    checks.push({
+      name: 'release exists',
+      status: releaseCollision ? 'ok' : 'fail',
+      detail: releaseCollision
+        ? `release \`${releaseName}\` found in \`${namespace}\` — verify targets it`
+        : `no \`${releaseName}\` release found in \`${namespace}\` — install first before running verify or teardown`,
+    });
+  } else {
+    checks.push({
+      name: 'release collision',
+      status: releaseCollision ? 'fail' : 'ok',
+      detail: releaseCollision
+        ? `a Helm release named \`${releaseName}\` already exists in \`${namespace}\` — pick a different release_name or uninstall the existing one first`
+        : `no \`${releaseName}\` release in \`${namespace}\` — clear to install`,
+    });
+  }
 
   checks.push({
     name: 'AWS access',

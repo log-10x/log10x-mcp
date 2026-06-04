@@ -16,6 +16,7 @@
 import { z } from 'zod';
 import { extractPatterns } from '../lib/pattern-extraction.js';
 import { findSkew, type SkewFinding } from '../lib/detectors/skew.js';
+import { aggregateSlotsBySymbolMessage } from '../lib/detectors/slot-aggregation.js';
 import { type StructuredOutput } from '../lib/output-types.js';
 import type { PrimitiveError } from '../lib/primitive-errors.js';
 import { buildChassisEnvelope } from '../lib/chassis-envelope.js';
@@ -185,17 +186,18 @@ export async function executeFindSkew(args: FindSkewArgs): Promise<StructuredOut
     sampleN,
   });
 
-  // ── Empirical observed-distribution: scan every pattern's slots ────
+  // ── Empirical observed-distribution: scan every aggregated pattern's slots ────
   // BEFORE the threshold filter, so the agent can see the noise floor.
+  // We call aggregateSlotsBySymbolMessage directly (same path findSkew uses
+  // internally) so we read from AggregatedSlot.dominantPct — a field that
+  // actually exists — instead of the non-existent ExtractedPattern.slotDistribution.
+  const aggregated = aggregateSlotsBySymbolMessage(extraction.patterns, { minEvents });
   const observed: number[] = [];
   let nCandidateSlots = 0;
   let nPatternsAboveMinEvents = 0;
-  for (const p of extraction.patterns) {
-    const count = (p as { count?: number }).count ?? 0;
-    if (count < minEvents) continue;
+  for (const agg of aggregated) {
     nPatternsAboveMinEvents += 1;
-    const slots = (p as { slotDistribution?: Array<{ dominantPct?: number }> }).slotDistribution ?? [];
-    for (const s of slots) {
+    for (const s of agg.slots) {
       if (typeof s.dominantPct === 'number' && Number.isFinite(s.dominantPct)) {
         observed.push(s.dominantPct);
         nCandidateSlots += 1;
@@ -203,6 +205,19 @@ export async function executeFindSkew(args: FindSkewArgs): Promise<StructuredOut
     }
   }
   const observedDistribution = distribute(observed);
+
+  // ── Count singleton slots filtered by DEFECT-100 guard ────────────
+  // A slot with distinctCount=1 always reads as 100% dominant —
+  // tautological, not exploitable skew. Count them here so callers
+  // can audit how many were removed.
+  let filteredSingletonSlots = 0;
+  for (const agg of aggregated) {
+    for (const s of agg.slots) {
+      if (s.dominantPct >= minConcentration && s.distinctCount === 1) {
+        filteredSingletonSlots += 1;
+      }
+    }
+  }
 
   // ── Status determination ───────────────────────────────────────────
   let status: FindSkewStatus;
@@ -224,6 +239,7 @@ export async function executeFindSkew(args: FindSkewArgs): Promise<StructuredOut
     nEvents: args.events.length,
     nPatterns: extraction.patterns.length,
     nPatternsAboveMinEvents,
+    filteredSingletonSlots,
   });
 
   const data: FindSkewSummary = {
@@ -247,14 +263,20 @@ export async function executeFindSkew(args: FindSkewArgs): Promise<StructuredOut
     findings,
   };
 
-  const headline =
-    status === 'success'
-      ? `${findings.length} skew finding${findings.length === 1 ? '' : 's'} (floor ${(minConcentration * 100).toFixed(0)}%${thresholdBasis === 'unvalidated_default' ? ', unvalidated' : ''}). Top: \`${findings[0]!.patternIdentity}\` slot \`${findings[0]!.skewedSlots[0]!.slotName}\` is \`${findings[0]!.skewedSlots[0]!.dominantValue}\` ${Math.round(findings[0]!.skewedSlots[0]!.dominantPct * 100)}% of events.`
-      : status === 'no_signal'
-        ? `No slot crossed the ${(minConcentration * 100).toFixed(0)}% concentration floor. ${nPatternsAboveMinEvents} pattern(s) evaluated.`
-        : status === 'insufficient_data'
-          ? `Insufficient data — no pattern had ≥${minEvents} events after templating.`
-          : `Error: ${data.error?.error_type ?? 'unknown'}.`;
+  // ── Headline ───────────────────────────────────────────────────────
+  let headline: string;
+  if (status === 'success') {
+    headline = `${findings.length} skew finding${findings.length === 1 ? '' : 's'} (floor ${(minConcentration * 100).toFixed(0)}%${thresholdBasis === 'unvalidated_default' ? ', unvalidated' : ''}). Top: \`${findings[0]!.patternIdentity}\` slot \`${findings[0]!.skewedSlots[0]!.slotName}\` is \`${findings[0]!.skewedSlots[0]!.dominantValue}\` ${Math.round(findings[0]!.skewedSlots[0]!.dominantPct * 100)}% of events.`;
+  } else if (status === 'no_signal') {
+    const singletonNote = filteredSingletonSlots > 0
+      ? ` (${filteredSingletonSlots} single-value slot${filteredSingletonSlots === 1 ? '' : 's'} excluded — use pattern_mitigate to sample whole patterns)`
+      : '';
+    headline = `No exploitable skew found across ${nPatternsAboveMinEvents} pattern(s) evaluated.${singletonNote}`;
+  } else if (status === 'insufficient_data') {
+    headline = `Insufficient data — no pattern had ≥${minEvents} events after templating.`;
+  } else {
+    headline = `Error: ${data.error?.error_type ?? 'unknown'}.`;
+  }
 
   return buildChassisEnvelope({
     tool: 'log10x_find_skew',
@@ -271,6 +293,7 @@ export async function executeFindSkew(args: FindSkewArgs): Promise<StructuredOut
       threshold_audit: {
         value: minConcentration,
         basis: thresholdBasis,
+        n_candidate_slots: nCandidateSlots,
         observed_distribution: observedDistribution ? {
           n: observedDistribution.n,
           min: observedDistribution.min,
@@ -280,6 +303,7 @@ export async function executeFindSkew(args: FindSkewArgs): Promise<StructuredOut
           max: observedDistribution.max,
         } : null,
       },
+      ...(filteredSingletonSlots > 0 ? { filtered_singleton_slots: filteredSingletonSlots } : {}),
     },
     source_disclosure: {},
     scope: {
@@ -368,6 +392,7 @@ function buildHumanSummary(args: {
   nEvents: number;
   nPatterns: number;
   nPatternsAboveMinEvents: number;
+  filteredSingletonSlots?: number;
 }): string {
   const floorPct = (args.minConcentration * 100).toFixed(0);
   const observedFragment =
@@ -378,17 +403,21 @@ function buildHumanSummary(args: {
     args.thresholdBasis === 'unvalidated_default'
       ? ' Floor is an unvalidated default — compare against the observed distribution before treating the count as authoritative.'
       : '';
+  const singletonNote =
+    (args.filteredSingletonSlots ?? 0) > 0
+      ? ` ${args.filteredSingletonSlots} slot${args.filteredSingletonSlots === 1 ? '' : 's'} had a single value (distinctCount=1). Those are templater-classified literals, not skew — sampling the whole pattern, not a subset, is the right action there. Use pattern_mitigate to sample the entire pattern.`
+      : '';
   if (args.status === 'insufficient_data') {
     return `find_skew analyzed ${args.nEvents} event(s) but no pattern had ≥${args.findings.length > 0 ? args.findings[0]!.totalEvents : 'min_events'} events after templating. Paste more events for the same patterns OR widen the source.${calibTag}`;
   }
   if (args.status === 'no_signal') {
-    return `No slot crossed the ${floorPct}% concentration floor across ${args.nPatternsAboveMinEvents} pattern(s) evaluated.${observedFragment} ${args.thresholdBasis === 'unvalidated_default' ? 'The floor may be too strict for this dataset (compare with the observed distribution), or there is genuinely no skew to exploit here.' : 'No skew exists at this calibrated floor.'}`;
+    return `No exploitable skew found across ${args.nPatternsAboveMinEvents} pattern(s) evaluated.${observedFragment}${singletonNote} ${args.thresholdBasis === 'unvalidated_default' ? 'The floor may be too strict for this dataset (compare with the observed distribution), or there is genuinely no skew to exploit here.' : 'No skew exists at this calibrated floor.'}`;
   }
   const top = args.findings[0];
   const topNote = top
     ? ` Top finding: \`${top.patternIdentity}\` slot \`${top.skewedSlots[0]!.slotName}\` is \`${top.skewedSlots[0]!.dominantValue}\` ${Math.round(top.skewedSlots[0]!.dominantPct * 100)}% of events; sampling that case at 1/${args.sampleN} would save ~${Math.round(top.samplingOpportunityPct * 100)}% of this pattern's bytes.`
     : '';
-  return `${args.findings.length} pattern(s) showed slot skew above the ${floorPct}% concentration floor across ${args.nPatternsAboveMinEvents} evaluated.${topNote}${observedFragment}${calibTag}`;
+  return `${args.findings.length} pattern(s) showed slot skew above the ${floorPct}% concentration floor across ${args.nPatternsAboveMinEvents} evaluated.${topNote}${observedFragment}${singletonNote}${calibTag}`;
 }
 
 function renderMarkdown(

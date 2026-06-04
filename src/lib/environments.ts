@@ -632,13 +632,56 @@ async function tryReadEnvsJson(): Promise<EnvConfig[] | undefined> {
 
 // ── Legacy log10x paths (unchanged behavior — phase 7 tightens) ──────────
 
+/**
+ * Fix 95 — dev-restart marker file.
+ *
+ * `log10x_dev_restart` writes ~/.log10x/dev-restart-pending.json before
+ * calling process.exit(0). Some MCP hosts do not re-inject the .mcp.json
+ * `env` block when respawning, so LOG10X_API_KEY / LOG10X_ENV_ID would be
+ * absent in the fresh process, causing Path 5 (silent demo fallback) to
+ * fire and triggering the METRIC_REQUIRING_TOOLS not_configured gate.
+ *
+ * This function reads the marker, sets the env vars, and deletes the file
+ * so the next boot (without a preceding dev_restart) does not pick it up.
+ * Returns the apiKey from the marker, or undefined if no marker exists.
+ */
+async function consumeDevRestartMarker(): Promise<string | undefined> {
+  const marker = join(homedir(), '.log10x', 'dev-restart-pending.json');
+  try {
+    const raw = await fs.readFile(marker, 'utf8');
+    await fs.unlink(marker).catch(() => undefined); // delete before using
+    const parsed = JSON.parse(raw) as { apiKey?: unknown; envId?: unknown };
+    if (typeof parsed.apiKey !== 'string') return undefined;
+    // Re-inject into process.env so the rest of the boot sequence (including
+    // Path 3 below) sees them as if the MCP host had re-injected the .mcp.json
+    // env block.
+    process.env.LOG10X_API_KEY = parsed.apiKey;
+    if (typeof parsed.envId === 'string') process.env.LOG10X_ENV_ID = parsed.envId;
+    // eslint-disable-next-line no-console
+    console.info(
+      `[log10x-mcp] dev-restart marker found — restored LOG10X_API_KEY from ~/.log10x/dev-restart-pending.json`
+    );
+    return parsed.apiKey;
+  } catch {
+    return undefined; // file absent or malformed — ignore
+  }
+}
+
 async function loadLegacyLog10x(): Promise<Environments> {
+  // Fix 95: consume the dev-restart marker before reading the env var.
+  // If the marker was written, process.env.LOG10X_API_KEY is now set and
+  // Path 3 below will use it — same as if the MCP host had re-injected it.
+  await consumeDevRestartMarker();
+
   const apiKey = process.env.LOG10X_API_KEY;
 
   // Path 3: explicit `LOG10X_API_KEY`.
   if (apiKey) {
     try {
-      return await loadFromApi(apiKey, /*isDemoMode=*/ false);
+      const result = await loadFromApi(apiKey, /*isDemoMode=*/ false);
+      // eslint-disable-next-line no-console
+      console.info(`[log10x-mcp] metricsBackend resolved via env-vars (LOG10X_API_KEY)`);
+      return result;
     } catch (e) {
       if (!(e instanceof EnvironmentValidationError)) throw e;
       const reason = (e as Error).message;
@@ -653,6 +696,8 @@ async function loadLegacyLog10x(): Promise<Environments> {
           `  All tools will return data from the public Log10x demo env, NOT your account. ` +
           `Fix the key (or unset LOG10X_API_KEY entirely) to use your own data.\n`
       );
+      // eslint-disable-next-line no-console
+      console.info(`[log10x-mcp] metricsBackend resolved via demo (key-validation-failed-fallback)`);
       return demoEnvs;
     }
   }
@@ -668,11 +713,16 @@ async function loadLegacyLog10x(): Promise<Environments> {
     const reason = (e as Error).message;
     const demoEnvs = await loadFromApi(DEMO_API_KEY, /*isDemoMode=*/ true);
     demoEnvs.demoFallbackReason = reason;
+    // eslint-disable-next-line no-console
+    console.info(`[log10x-mcp] metricsBackend resolved via demo (credentials-file-error-fallback)`);
     return demoEnvs;
   }
   if (creds) {
     try {
-      return await loadFromApi(creds.apiKey, /*isDemoMode=*/ false);
+      const result = await loadFromApi(creds.apiKey, /*isDemoMode=*/ false);
+      // eslint-disable-next-line no-console
+      console.info(`[log10x-mcp] metricsBackend resolved via ~/.log10x/credentials`);
+      return result;
     } catch (e) {
       if (!(e instanceof EnvironmentValidationError)) throw e;
       const reason = (e as Error).message;
@@ -685,6 +735,8 @@ async function loadLegacyLog10x(): Promise<Environments> {
         `\`log10x_signin_complete\` directly with \`{ api_key: "<key>" }\` to paste a key from ` +
         `console.log10x.com → Profile → API Settings, or \`log10x_signout\` to clear and use demo. ` +
         `See \`log10x_login_status\` for the full breakdown.`;
+      // eslint-disable-next-line no-console
+      console.info(`[log10x-mcp] metricsBackend resolved via demo (credentials-key-failed-fallback)`);
       return demoEnvs;
     }
   }
@@ -692,6 +744,8 @@ async function loadLegacyLog10x(): Promise<Environments> {
   // Path 5: nothing set — pure demo mode. Public demo key so the
   // user can play without signing up. Phase 7 removes this silent
   // fallback in favor of an explicit "not configured" state.
+  // eslint-disable-next-line no-console
+  console.info(`[log10x-mcp] metricsBackend resolved via demo (no-credentials-configured)`);
   return await loadFromApi(DEMO_API_KEY, /*isDemoMode=*/ true);
 }
 

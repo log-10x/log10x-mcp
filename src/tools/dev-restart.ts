@@ -10,8 +10,23 @@
  * can be flushed to the MCP host before the process disappears.
  * After the respawn, re-fetch tool schemas — the new process may have
  * a different tool set if the build changed.
+ *
+ * Fix 95 — env-var survival across respawn:
+ * Some MCP hosts (e.g. Claude Desktop) do not re-inject the .mcp.json
+ * `env` block when respawning after a process.exit(). This means
+ * LOG10X_API_KEY and LOG10X_ENV_ID are absent in the child process,
+ * causing loadLegacyLog10x() to fall through to Path 5 (demo mode) and
+ * triggering the METRIC_REQUIRING_TOOLS not_configured gate.
+ *
+ * To avoid this, before exiting we write a marker file at
+ * ~/.log10x/dev-restart-pending.json containing the current API key and
+ * env ID. loadLegacyLog10x() reads and deletes the marker on boot,
+ * re-injecting the credentials as if the env vars had been present.
  */
 
+import { writeFileSync, mkdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
 export const devRestartSchema = {};
@@ -26,6 +41,28 @@ export function executeDevRestart(): StructuredOutput {
     data: {},
     actions: [],
   });
+
+  // Fix 95 — write marker file so env vars survive the respawn.
+  // Best-effort: if the write fails (e.g. no home dir, permissions), we
+  // still exit — the worst case is the fresh process falls back to demo
+  // mode, which is the pre-fix behavior and is recoverable.
+  try {
+    const apiKey = process.env.LOG10X_API_KEY;
+    const envId = process.env.LOG10X_ENV_ID;
+    if (apiKey) {
+      const dir = join(homedir(), '.log10x');
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      const marker = join(dir, 'dev-restart-pending.json');
+      writeFileSync(
+        marker,
+        JSON.stringify({ apiKey, ...(envId ? { envId } : {}) }),
+        { mode: 0o600 }
+      );
+    }
+  } catch {
+    // Swallow — non-fatal. The respawned process will fall back to
+    // demo mode if the marker wasn't written, which is recoverable.
+  }
 
   // Schedule exit after the envelope has been returned and serialised by
   // the MCP transport layer. 100ms is enough for the stdio flush.

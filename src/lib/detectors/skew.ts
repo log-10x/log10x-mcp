@@ -69,7 +69,7 @@ export function findSkew(
 
   const findings: SkewFinding[] = [];
   for (const agg of aggregated) {
-    const skewed = agg.slots.filter((s) => s.dominantPct >= minConcentration);
+    const skewed = agg.slots.filter((s) => s.dominantPct >= minConcentration && s.distinctCount > 1);
     if (skewed.length === 0) continue;
 
     // Sampling opportunity: maximum across the skewed slots. We pick

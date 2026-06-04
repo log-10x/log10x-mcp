@@ -5,7 +5,7 @@
  * so the envelope shape is the same too.
  */
 
-import type { AdvisePlan, AdviseAction } from './types.js';
+import type { AdvisePlan, AdviseAction, VerifyProbe } from './types.js';
 import { renderPlan } from './render.js';
 import { buildEnvelope, type StructuredOutput } from '../output-types.js';
 
@@ -83,6 +83,18 @@ export interface AdvisePlanSummary {
    */
   existing_helm_release?: { name: string; namespace: string };
   verify_probe_count: number;
+  /**
+   * Fix 93 — structured verify probe list.
+   *
+   * Each entry mirrors the `VerifyProbe` shape from types.ts. Exposed
+   * as a typed array so agents can iterate probes and execute them
+   * autonomously without parsing the markdown blob. `verify_probe_count`
+   * is kept for back-compat (equals `verify_probes.length`).
+   *
+   * Only populated when at least one verify probe was built (i.e. the
+   * plan action is `verify` or `all`). Empty array otherwise.
+   */
+  verify_probes: Pick<VerifyProbe, 'name' | 'question' | 'commands' | 'expectOutput' | 'timeoutSec'>[];
   teardown_step_count: number;
   blockers: string[];
   notes: string[];
@@ -147,6 +159,13 @@ function summarize(plan: AdvisePlan, action: AdviseAction): AdvisePlanSummary {
     install_mode: plan.installMode,
     existing_helm_release: plan.existingHelmRelease,
     verify_probe_count: plan.verify.length,
+    verify_probes: plan.verify.map((p) => ({
+      name: p.name,
+      question: p.question,
+      commands: p.commands,
+      ...(p.expectOutput !== undefined ? { expectOutput: p.expectOutput } : {}),
+      ...(p.timeoutSec !== undefined ? { timeoutSec: p.timeoutSec } : {}),
+    })),
     teardown_step_count: plan.teardown.length,
     blockers: plan.blockers,
     notes: plan.notes,

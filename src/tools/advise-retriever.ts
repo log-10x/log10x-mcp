@@ -41,7 +41,8 @@ import {
   updateWizardSession,
 } from '../lib/discovery/snapshot-store.js';
 import { buildRetrieverPlan } from '../lib/advisor/retriever.js';
-import { buildAdvisePlanEnvelope, buildPlanSummary } from '../lib/advisor/envelope.js';
+import { buildPlanSummary } from '../lib/advisor/envelope.js';
+import { renderPlan } from '../lib/advisor/render.js';
 import { acquireLicenseForWizard, LicenseFetchError } from '../lib/license-api.js';
 import { buildEnvelope, type StructuredOutput, type ActionRole } from '../lib/output-types.js';
 import type { WizardSession } from '../lib/discovery/types.js';
@@ -1428,7 +1429,24 @@ export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise
   }
 
   // All questions answered — license acquisition.
-  if (!session.licenseJwt && session.licenseSource !== 'paste') {
+  // Fix 91: skip the license gate entirely for verify mode when the
+  // Retriever is already installed. Verify probes only need kubectl/aws
+  // access — no JWT is required. This prevents the signin_required
+  // bounce when a user runs action:"verify" post-install on a machine
+  // that has no Auth0 session (e.g. a CI runner or a fresh laptop).
+  const retrieverAlreadyInstalled =
+    !!snapshot.recommendations.installedComponentsDetail?.retriever;
+  const isVerifyMode = (args.action ?? 'all') === 'verify';
+  const skipLicenseGate = isVerifyMode && retrieverAlreadyInstalled;
+  if (skipLicenseGate && !session.licenseJwt) {
+    session.licenseJwt = undefined; // explicit noop — no JWT needed
+    // Record the skip in notes so the audit trail is visible.
+    // notes is built below in buildRetrieverPlan; prepend via session.
+    // The plan's notes[] array is the correct surface for this message.
+    (session as { _licenseGateSkipNote?: string })._licenseGateSkipNote =
+      'License gate skipped (verify mode on installed retriever).';
+  }
+  if (!session.licenseJwt && session.licenseSource !== 'paste' && !skipLicenseGate) {
     try {
       const lic = await acquireLicenseForWizard();
       const isRealUserLicense =
@@ -1516,6 +1534,12 @@ export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise
     destination: args.destination,
   });
 
+  // Fix 91 audit note: surface license gate skip when it occurred.
+  const licenseSkipNote = (session as { _licenseGateSkipNote?: string })._licenseGateSkipNote;
+  if (licenseSkipNote) {
+    plan.notes.unshift(licenseSkipNote);
+  }
+
   // Emit infra-provision context as notes when terraform/cli mode was used.
   if (session.infraMode && session.infraMode !== 'existing') {
     plan.notes.unshift(
@@ -1524,9 +1548,13 @@ export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise
   }
 
   const summary = buildPlanSummary(plan, action);
-  const planEnvelope = buildAdvisePlanEnvelope({ tool: TOOL_NAME, plan, action });
-  // Re-wrap via wizardReturn so plan mode gets the wizard's action routing.
-  return wizardReturn({ ...summary, mode: 'plan', markdown: (planEnvelope.data as { markdown?: string })?.markdown ?? '' });
+  // Fix 94: use renderPlan() to build the full markdown so that
+  // retrieverAccessMarkdown (port-forward / ClusterIP guidance) is
+  // included unconditionally for all actions (install, verify, teardown,
+  // all), not just install. renderPlan gates offloadMarkdown on install/all
+  // but includes retrieverAccessMarkdown for every action.
+  const planMarkdown = renderPlan(plan, action);
+  return wizardReturn({ ...summary, mode: 'plan', markdown: planMarkdown });
 }
 
 // ── License reason copy ───────────────────────────────────────────────────────

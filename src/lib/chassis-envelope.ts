@@ -174,6 +174,12 @@ export const ThresholdAuditSchema = z
     value: z.number().nullable(),
     basis: z.string(),
     observed_distribution: ThresholdAuditDistributionSchema.optional(),
+    /**
+     * Number of candidate slots considered for the observed_distribution.
+     * Populated by find_skew (skew-concentration analysis) to show how
+     * many slots were scanned before the threshold was applied.
+     */
+    n_candidate_slots: z.number().int().nonnegative().optional(),
   })
   .nullable();
 export type ThresholdAudit = z.infer<typeof ThresholdAuditSchema>;
@@ -709,6 +715,27 @@ export function buildChassisEnvelope(input: ChassisEnvelopeInput): ChassisEnvelo
 // ── Error-case fast paths ──────────────────────────────────────────────────────
 
 /**
+ * Strip leading markdown H1/H2/... header lines from an error hint
+ * before it is inserted into the structured `summary.headline` field.
+ *
+ * Some error paths (e.g. configure-engine.ts's renderError()) format
+ * their output with a markdown heading as the first line, like
+ * `# configure_engine — gitops repo not resolved`. When that string
+ * flows verbatim into `buildChassisErrorEnvelope`, the H1 `# ` syntax
+ * bleeds into the headline. This helper skips any leading `#+`-prefixed
+ * lines and returns the first line of prose content.
+ *
+ * The original `errHint` (with the heading) is still passed to
+ * `human_summary` and `payload.remediation` so markdown renderers see
+ * it intact — only the `headline` field is sanitized.
+ */
+function sanitizeHeadline(msg: string): string {
+  const lines = msg.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
+  const nonHeader = lines.find((l) => !l.startsWith('#'));
+  return nonHeader ?? (lines[0]?.replace(/^#+\s*/, '') ?? msg);
+}
+
+/**
  * Convenience builder for structural error envelopes. Use when the
  * tool cannot produce a payload because a backend call failed.
  *
@@ -746,7 +773,7 @@ export function buildChassisErrorEnvelope(opts: {
   return buildChassisEnvelope({
     tool: opts.tool,
     view: 'summary',
-    headline: `Error (${errType}): ${errHint.slice(0, 120)}`,
+    headline: `Error (${errType}): ${sanitizeHeadline(errHint).slice(0, 120)}`,
     status: 'error',
     decisions: {
       threshold_used: null,
