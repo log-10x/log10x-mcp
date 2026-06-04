@@ -43,7 +43,8 @@ import {
   datadogAnalyzerQuery,
   healthBanner,
 } from '../lib/top-patterns-extras.js';
-import { computeTrendDelta, glyphForState } from '../lib/trend-delta.js';
+import { computeTrendDelta, glyphForState, fmtTrendDelta } from '../lib/trend-delta.js';
+import { renderMonospaceTable } from '../lib/render-table.js';
 
 export const topPatternsSchema = {
   service: z.string().optional().describe('Service name to scope the result. Omit for all services.'),
@@ -712,6 +713,15 @@ export async function executeTopPatterns(
       events: r.events,
       first_seen_age_seconds: r.firstSeenAgeSeconds,
       trend_delta: r.trendDelta,
+      trend_delta_display: (() => {
+        const { display, ageSource } = fmtTrendDelta(
+          r.trendDelta!,
+          r.firstSeenAgeSeconds,
+          r.trendBytesPerSec.length,
+          trendStepSec
+        );
+        return { display, first_seen_age_source: ageSource };
+      })(),
       descriptor: r.pattern ?? r.hash ?? '',
       trend_bytes_per_sec: r.trendBytesPerSec,
       // PL-12a additions.
@@ -971,6 +981,30 @@ export async function executeTopPatterns(
   const chassisThresholdBasis =
     rate_source === 'customer_supplied' ? 'customer_supplied' : 'default';
 
+  // Build must_render_verbatim monospace table.
+  // Columns: # | Pattern | Service | GB/mo | % | Trend | $/mo
+  // Uses *_display sibling fields throughout so formatting is consistent.
+  const topPatternsVerbatim = dataPatterns.length > 0
+    ? renderMonospaceTable(
+        dataPatterns,
+        [
+          { header: '#',       align: 'right',  get: (p) => String(p.rank) },
+          { header: 'Pattern', align: 'left',   get: (p) => p.identity, max_width: 40 },
+          { header: 'Service', align: 'left',   get: (p) => p.service ?? '', max_width: 24 },
+          { header: 'GB/mo',   align: 'right',  get: (p) => p.bytes_display },
+          { header: '%',       align: 'right',  get: (p) => p.share_pct_display },
+          { header: 'Trend',   align: 'left',   get: (p) => p.trend_delta_display?.display ?? `${p.trend_delta?.glyph ?? ''} ${p.trend_delta?.label ?? '—'}`.trim() },
+          { header: '$/mo',    align: 'right',  get: (p) => p.cost_per_month_usd_display ?? '—' },
+        ],
+        {
+          title: `Top patterns — ${tf.label}${args.service ? ` — ${args.service}` : ''}`,
+          footer: patternCountTotal != null && patternCountTotal > dataPatterns.length
+            ? `Showing ${dataPatterns.length} of ${patternCountTotal} patterns.${paginationFooter}`
+            : undefined,
+        }
+      )
+    : undefined;
+
   // human_summary is honest: volume-first, includes the "top-N of env-total"
   // framing + rate disclosure.
   const chassis_human_summary = renderRows.length === 0
@@ -1024,6 +1058,7 @@ export async function executeTopPatterns(
     },
     payload: topPatternsPayload,
     human_summary: chassis_human_summary,
+    must_render_verbatim: topPatternsVerbatim,
     telemetry: chassisTelemetry,
     actions: [
       ...nextActions.map((a) => ({ tool: a.tool, args: a.args, reason: a.reason })),

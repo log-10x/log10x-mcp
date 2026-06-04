@@ -28,6 +28,74 @@ export type TrendDelta = {
   label: string;
 };
 
+/**
+ * How the age was sourced for a NEW pattern's display string.
+ *   'engine_metric'          — firstSeenAgeSeconds came from the first-seen TSDB query
+ *   'derived_from_trend_window' — age derived from trend array length × step seconds
+ *   'unknown'                — neither source was available
+ */
+export type FirstSeenAgeSource = 'engine_metric' | 'derived_from_trend_window' | 'unknown';
+
+/**
+ * Build the pre-composed display string for a TrendDelta row.
+ *
+ * For GROWING/SHRINKING/STABLE/ACUTE: "${glyph} ${label}"
+ * For NEW with known engine age: "🆕 Xh ago" / "🆕 Xd ago"
+ * For NEW with unknown engine age but trend window available:
+ *   derives max age from trendLength × stepSec and emits "🆕 <Nh ago" / "🆕 ~Nmin ago"
+ * For NEW with no information: "🆕 (age unknown)"
+ *
+ * @param td             - The TrendDelta struct already computed by computeTrendDelta.
+ * @param ageSeconds     - firstSeenAgeSeconds from the engine metric, or null.
+ * @param trendLength    - Number of samples in the trend array (used for derivation).
+ * @param stepSec        - Seconds per trend sample (e.g. 600 for 10-min buckets).
+ */
+export function fmtTrendDelta(
+  td: TrendDelta,
+  ageSeconds: number | null,
+  trendLength: number,
+  stepSec: number
+): { display: string; ageSource: FirstSeenAgeSource } {
+  if (td.scope !== 'age') {
+    // GROWING / SHRINKING / STABLE / ACUTE — simple concatenation.
+    return {
+      display: `${td.glyph} ${td.label}`,
+      ageSource: 'unknown',
+    };
+  }
+
+  // NEW — build a human age string.
+  if (ageSeconds !== null && ageSeconds >= 0) {
+    const display = _ageDisplay(ageSeconds, '🆕', false);
+    return { display, ageSource: 'engine_metric' };
+  }
+
+  // Derive from trend window when engine age is unavailable.
+  if (trendLength > 1 && stepSec > 0) {
+    const maxAgeSeconds = trendLength * stepSec;
+    const display = _ageDisplay(maxAgeSeconds, '🆕', true);
+    return { display, ageSource: 'derived_from_trend_window' };
+  }
+
+  return { display: '🆕 (age unknown)', ageSource: 'unknown' };
+}
+
+/** Format a seconds-age as a readable suffix like "22h ago" or "3d ago". */
+function _ageDisplay(seconds: number, glyph: string, approximate: boolean): string {
+  const prefix = approximate ? '<' : '';
+  if (seconds < 60) return `${glyph} ${prefix}1min ago`;
+  if (seconds < 3600) {
+    const mins = Math.round(seconds / 60);
+    return `${glyph} ${prefix}${mins}min ago`;
+  }
+  if (seconds < 86400) {
+    const hours = Math.round(seconds / 3600);
+    return `${glyph} ${prefix}${hours}h ago`;
+  }
+  const days = Math.floor(seconds / 86400);
+  return `${glyph} ${prefix}${days}d ago`;
+}
+
 /** Map a Badge/State to its canonical glyph so glyph always matches state. */
 export function glyphForState(state: Badge): TrendDelta['glyph'] {
   switch (state) {

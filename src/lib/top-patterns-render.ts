@@ -56,6 +56,7 @@ import { type Badge, type BadgeInfo, fmtBadgeInfo } from './top-patterns-extras.
 import type { TrendDelta } from './trend-delta.js';
 import { detectIncidents as detectIncidentsGeneric } from './detectors/incident-cluster.js';
 import type { DepCheckResult } from './siem/deps/index.js';
+import { fmtBytes as fmtBytesShared } from './format.js';
 
 export interface TopPatternRow {
   rank: number;
@@ -878,12 +879,8 @@ function renderCard(
 
 // --- formatters --------------------------------------------------------
 
-function fmtBytes(n: number): string {
-  if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(1)} GB`;
-  if (n >= 1024 ** 2) return `${(n / 1024 ** 2).toFixed(1)} MB`;
-  if (n >= 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${n.toFixed(0)} B`;
-}
+// Use the shared fmtBytes from format.ts (3-sig-fig, correct unit thresholds).
+const fmtBytes = fmtBytesShared;
 
 function fmtCount(n: number): string {
   if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;

@@ -35,14 +35,40 @@ export function fmtGb(gb: number): string {
   return `${(abs / 1000).toFixed(1)} TB`;
 }
 
-/** Format bytes as human-readable: 1.2 GB, 450 MB, etc. */
+/**
+ * Trim trailing zeros after a decimal point.
+ * "0.0200" → "0.02", "110.0" → "110", "1.50" → "1.5".
+ * Integers (no ".") are returned unchanged.
+ */
+function trimZeros(s: string): string {
+  if (!s.includes('.')) return s;
+  return s.replace(/0+$/, '').replace(/\.$/, '');
+}
+
+/**
+ * Format bytes as human-readable with 3 significant figures.
+ *
+ * Thresholds (all base-2):
+ *   < 1 KiB          → "N B"   (integer)
+ *   < 100 KiB        → "X.XX KB"
+ *   < 100 MiB        → "X.XX MB"
+ *   >= 100 MiB       → "X.XX GB"  (includes < 1 GiB values — 110 MB → 0.108 GB)
+ *   >= 1 TiB         → "X.XX TB"
+ *
+ * Using toPrecision(3) throughout so 115_577_921 bytes →
+ *   mb = 110.2 → gb = 0.1076 → "0.108 GB"  (3 sig figs, not .toFixed(1) = "0.1")
+ */
 export function fmtBytes(bytes: number): string {
   const abs = Math.abs(bytes);
   if (abs < 1024) return `${Math.round(abs)} B`;
-  if (abs < 1024 * 1024) return `${(abs / 1024).toFixed(1)} KB`;
-  if (abs < 1024 * 1024 * 1024) return `${(abs / (1024 * 1024)).toFixed(1)} MB`;
-  if (abs < 1024 * 1024 * 1024 * 1024) return `${(abs / (1024 * 1024 * 1024)).toFixed(1)} GB`;
-  return `${(abs / (1024 * 1024 * 1024 * 1024)).toFixed(1)} TB`;
+  const kb = abs / 1024;
+  if (kb < 100) return `${trimZeros(kb.toPrecision(3))} KB`;
+  const mb = kb / 1024;
+  if (mb < 100) return `${trimZeros(mb.toPrecision(3))} MB`;
+  const gb = mb / 1024;
+  if (gb < 1024) return `${trimZeros(gb.toPrecision(3))} GB`;
+  const tb = gb / 1024;
+  return `${trimZeros(tb.toPrecision(3))} TB`;
 }
 
 /** Format event count: 1.2B, 450M, 12K, etc. */
