@@ -47,6 +47,35 @@ import {
 } from '../lib/chassis-envelope.js';
 import { computeBucketInterpretation } from '../lib/bucket-interpretation.js';
 import { normalizeTimeRange } from '../lib/time-range.js';
+import { queryInstant } from '../lib/api.js';
+import { LABELS } from '../lib/promql.js';
+import { resolveMetricsEnv } from '../lib/resolve-env.js';
+
+/**
+ * Resolve a pattern_hash to its dominant pattern name (Symbol Message)
+ * via TSDB. Mirrors `resolvePatternName` in pattern-detail.ts — topk(1)
+ * by total bytes over 7d. Returns null when no metrics carry the hash.
+ *
+ * pattern_examples accepts pattern_hash as a first-class input; this is
+ * the bridge to its existing pattern-name code path. See the executor
+ * entry in executePatternExamples for the call site.
+ */
+async function resolvePatternNameFromHash(env: EnvConfig, hash: string): Promise<string | null> {
+  try {
+    const metricsEnv = await resolveMetricsEnv(env);
+    const q =
+      `topk(1, sum by (${LABELS.pattern}) (increase(all_events_summaryBytes_total{` +
+      `${LABELS.hash}="${hash.replace(/"/g, '\\"')}",` +
+      `${LABELS.env}="${metricsEnv}"}[7d])))`;
+    const res = await queryInstant(env, q);
+    if (res.status === 'success' && res.data.result.length > 0) {
+      return res.data.result[0].metric[LABELS.pattern] ?? null;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
 
 /** SIEM vendors supported by pattern_examples. Inherits from the dep-check / exclusion-filter list. */
 const EXAMPLES_VENDORS: readonly SiemId[] = [
@@ -59,8 +88,15 @@ const EXAMPLES_VENDORS: readonly SiemId[] = [
 export const patternExamplesSchema = {
   pattern: z
     .string()
+    .optional()
     .describe(
-      'Pattern name (Symbol Message, e.g. `Payment_Gateway_Timeout`) or a pasted raw log line. Pasted lines resolve to the matching pattern via the same templater path as log10x_resolve_batch. Required.',
+      'Pattern name (Symbol Message, e.g. `Payment_Gateway_Timeout`) or a pasted raw log line. Pasted lines resolve to the matching pattern via the same templater path as log10x_resolve_batch. Either pattern or pattern_hash must be provided; pattern_hash is preferred when available.',
+    ),
+  pattern_hash: z
+    .string()
+    .optional()
+    .describe(
+      'Canonical 11-char hash. Either pattern (Symbol Message name) or pattern_hash must be provided; pattern_hash is preferred when available. Resolved to the pattern name via the 10x metrics (same path pattern_detail uses).',
     ),
   vendor: z
     .enum(['splunk', 'datadog', 'elasticsearch', 'cloudwatch'])
@@ -92,6 +128,13 @@ export const patternExamplesSchema = {
     .describe(
       'Vendor-specific scope (Splunk index, Datadog index, ES index pattern, CloudWatch log group). Defaults to a sensible per-vendor value when omitted.',
     ),
+  slot_filter: z
+    .object({
+      name: z.string().describe('Slot name as it appears in the slot_distribution (e.g. `userId`, `slot_4`).'),
+      value: z.string().describe('Slot value to filter for. Buckets are kept only when their slot_distribution[<name>].sample_values includes <value>.'),
+    })
+    .optional()
+    .describe('Optional slot-value filter. When provided, only buckets whose slot_distribution carries the given slot value pass through. Useful for drilling into a single dominant value from a previous pattern_examples call.'),
   environment: z.string().optional().describe('Environment nickname.'),
 };
 
@@ -102,13 +145,15 @@ interface ProgressNote {
 }
 
 interface PatternExamplesArgs {
-  pattern: string;
+  pattern?: string;
+  pattern_hash?: string;
   vendor?: 'splunk' | 'datadog' | 'elasticsearch' | 'cloudwatch';
   service?: string;
   severity?: string;
   timeRange?: string;
   limit?: number;
   scope?: string;
+  slot_filter?: { name: string; value: string };
   environment?: string;
 }
 
@@ -160,8 +205,59 @@ export async function executePatternExamples(
 ): Promise<import('../lib/output-types.js').StructuredOutput> {
   const telemetry = newTelemetry();           // legacy — kept for back-compat reads of query_count
   const chassisTelemetry = newChassisTelemetry();
+
+  // Input acceptance: accept pattern_hash as a first-class alternative to
+  // pattern (Symbol Message name). When pattern_hash is supplied and
+  // pattern is not, resolve the hash to its dominant pattern name via the
+  // same TSDB lookup pattern_detail uses (most-emitting pattern label for
+  // this hash over 7d). On resolution failure we fall through with a
+  // graceful no_signal envelope rather than blocking the call — the
+  // canonical-pattern path also gracefully degrades when no metrics carry
+  // the pattern.
+  let resolvedArgs: PatternExamplesArgs = rawArgs;
+  let hashResolutionNote: string | undefined;
+  if (rawArgs.pattern_hash && !rawArgs.pattern) {
+    const resolvedName = await resolvePatternNameFromHash(env, rawArgs.pattern_hash).catch(() => null);
+    if (resolvedName) {
+      resolvedArgs = { ...rawArgs, pattern: resolvedName };
+    } else {
+      // No metrics carry this hash. Surface an explicit no_signal envelope
+      // so the agent gets a clear "looked up by pattern_hash, none found
+      // in window" hint rather than the generic content-token fallback.
+      return buildChassisErrorEnvelope({
+        tool: 'log10x_pattern_examples',
+        err: {
+          error_type: 'no_signal',
+          retryable: true,
+          suggested_backoff_ms: null,
+          hint: `pattern_hash \`${rawArgs.pattern_hash}\` did not resolve to a pattern name via TSDB lookup (most-emitting label over 7d). The hash may be from a different environment or outside retention. Try passing \`pattern\` directly, or call log10x_top_patterns to surface active patterns.`,
+        },
+        telemetry: chassisTelemetry,
+        scope: { window: rawArgs.timeRange ?? '1h', window_basis: 'explicit' },
+        contextPayload: { pattern_hash: rawArgs.pattern_hash },
+        source_disclosure: { bytes_source: 'tsdb' },
+      });
+    }
+  } else if (!rawArgs.pattern && !rawArgs.pattern_hash) {
+    return buildChassisErrorEnvelope({
+      tool: 'log10x_pattern_examples',
+      err: {
+        error_type: 'missing_identifier',
+        retryable: false,
+        suggested_backoff_ms: null,
+        hint: 'pattern_examples requires either pattern (Symbol Message name / pasted log line) or pattern_hash (canonical 11-char hash).',
+      },
+      telemetry: chassisTelemetry,
+      scope: { window: rawArgs.timeRange ?? '1h', window_basis: 'explicit' },
+      source_disclosure: { bytes_source: 'tsdb' },
+    });
+  }
+  if (hashResolutionNote) {
+    /* reserved for future use */
+  }
+
   const sumOut: { data?: PatternExamplesSummary } = {};
-  const md = await executePatternExamplesInner(rawArgs, env, sumOut);
+  const md = await executePatternExamplesInner(resolvedArgs, env, sumOut);
   // The inner drove SIEM queries. Record one query for the probe pass.
   recordQuery(chassisTelemetry);
 
@@ -299,8 +395,18 @@ async function executePatternExamplesInner(
   // outside the MCP-SDK Zod boundary (chains, scripts, harness) can
   // land here with timeRange/limit unset; without these we'd hit
   // `${undefined}` template renders and `undefined * 5` NaN math.
-  const args: Required<Pick<PatternExamplesArgs, 'timeRange' | 'limit'>> & PatternExamplesArgs = {
+  // The outer executePatternExamples guarantees pattern is set (either
+  // pass-through or resolved from pattern_hash); we still narrow the
+  // type here so the rest of this function can treat args.pattern as
+  // string without `!` assertions.
+  if (!rawArgs.pattern) {
+    return graceful('Pattern Examples — missing identifier', [
+      'pattern_examples requires either `pattern` (Symbol Message name / pasted log line) or `pattern_hash` (canonical 11-char hash).',
+    ]);
+  }
+  const args: Required<Pick<PatternExamplesArgs, 'timeRange' | 'limit' | 'pattern'>> & PatternExamplesArgs = {
     ...rawArgs,
+    pattern: rawArgs.pattern,
     // Normalise '1d' legacy alias → '24h'; cap is 24h for this tool.
     timeRange: normalizeTimeRange(rawArgs.timeRange ?? '1h'),
     limit: rawArgs.limit ?? 10,
@@ -521,9 +627,40 @@ async function executePatternExamplesInner(
     ]);
   }
 
-  // Top 3 retained buckets.
-  const topK = retained.slice(0, 3);
-  const droppedFromTopK = retained.slice(3);
+  // ── 6b. Optional slot_filter ───────────────────────────────────────
+  // Drill-down: when the caller passes slot_filter={ name, value }, keep
+  // only buckets whose `variables[name]` contains `value` (string match,
+  // case-sensitive — slot values are taken verbatim from the templater).
+  // The slot name matches BOTH the raw slot key AND the collapsed base
+  // (e.g. `slot_4_part2` collapses to `slot_4` in the rendered output);
+  // we check both so a filter named for the collapsed form still hits.
+  // No buckets match → return a graceful no_signal narrative explaining
+  // the filter excluded everything.
+  let filteredRetained = retained;
+  if (rawArgs.slot_filter && rawArgs.slot_filter.name && rawArgs.slot_filter.value) {
+    const slotName = rawArgs.slot_filter.name;
+    const slotValue = rawArgs.slot_filter.value;
+    const partPrefixRe = new RegExp(`^${slotName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:_part\\d+)?$`);
+    filteredRetained = retained.filter((b) => {
+      for (const [key, vals] of Object.entries(b.p.variables)) {
+        if (key === slotName || partPrefixRe.test(key)) {
+          if (vals.includes(slotValue)) return true;
+        }
+      }
+      return false;
+    });
+    if (filteredRetained.length === 0) {
+      return graceful('Pattern Examples — no buckets match slot_filter', [
+        `slot_filter \`${slotName}\` = \`${slotValue}\` excluded all ${retained.length} retained bucket(s) in the ${args.timeRange} window on ${vendor}.`,
+        '',
+        'Either the slot value is not present in any current bucket, or the slot name does not appear in this pattern\'s slot_distribution. Drop the slot_filter to see the un-narrowed buckets and verify the slot name + value before re-applying.',
+      ]);
+    }
+  }
+
+  // Top 3 retained buckets (post slot_filter).
+  const topK = filteredRetained.slice(0, 3);
+  const droppedFromTopK = filteredRetained.slice(3);
 
   // Populate typed summary for view='summary' callers.
   if (sumOut) {
@@ -536,8 +673,12 @@ async function executePatternExamplesInner(
       probe_path: probePath,
       events_pulled: probe.events.length,
       distinct_templates: extracted.patterns.length,
-      retained_events: retained.reduce((s, b) => s + b.p.count, 0),
-      retained_templates: retained.length,
+      // When slot_filter is active these reflect the post-filter set so
+      // downstream renderers and chain steps see counts consistent with
+      // the buckets[] they receive. The un-filtered counts are recoverable
+      // via probe.events.length / extracted.patterns.length above.
+      retained_events: filteredRetained.reduce((s, b) => s + b.p.count, 0),
+      retained_templates: filteredRetained.length,
       dropped_jaccard_events: dropped.reduce((s, b) => s + b.p.count, 0),
       multi_line_detected: isMultiLine,
       // Re-emit the SIEM events already pulled by the probe (capped at 50).
@@ -653,7 +794,11 @@ async function executePatternExamplesInner(
           `Probe path: content-token (tenx_hash not present in this env's SIEM events, or pasted-line input). Results are phrase-match approximate; exact-hash correlation is unavailable on this env's data plane — do not claim hash-based precision.`,
         ),
   );
-  lines.push(`**Retained**: ${fmtCount(retained.reduce((s, b) => s + b.p.count, 0))} events across ${retained.length} matching templates (Jaccard ≥ threshold)`);
+  lines.push(`**Retained**: ${fmtCount(filteredRetained.reduce((s, b) => s + b.p.count, 0))} events across ${filteredRetained.length} matching templates (Jaccard ≥ threshold)`);
+  if (rawArgs.slot_filter && filteredRetained.length < retained.length) {
+    const excluded = retained.length - filteredRetained.length;
+    lines.push(`**slot_filter applied**: \`${rawArgs.slot_filter.name}\` = \`${rawArgs.slot_filter.value}\` (excluded ${excluded} bucket(s) of ${retained.length} retained)`);
+  }
   if (dropped.length > 0) {
     const droppedCount = dropped.reduce((s, b) => s + b.p.count, 0);
     lines.push(`**Dropped on Jaccard**: ${fmtCount(droppedCount)} events from ${dropped.length} unrelated templates`);
