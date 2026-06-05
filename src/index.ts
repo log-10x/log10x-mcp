@@ -67,6 +67,9 @@ import { retrieverQuerySchema, executeRetrieverQuery } from './tools/retriever-q
 import { retrieverSeriesSchema, executeRetrieverSeries } from './tools/retriever-series.js';
 import { retrieverQueryStatusSchema, executeRetrieverQueryStatus } from './tools/retriever-query-status.js';
 import { retrieverProbeSchema, executeRetrieverProbe } from './tools/retriever-probe.js';
+import { patternDiffSchema, executePatternDiff } from './tools/pattern-diff.js';
+import { whatsChangingSchema, executeWhatsChanging } from './tools/whats-changing.js';
+import { whatsNewSchema, executeWhatsNew } from './tools/whats-new.js';
 import { backfillMetricSchema, executeBackfillMetric } from './tools/backfill-metric.js';
 import {
   customerMetricsQuerySchema,
@@ -1116,6 +1119,51 @@ registerLog10xTool('log10x_top_patterns', topPatternsSchema, (args) =>
   })
 );
 
+// ── Tool: log10x_pattern_diff ──
+//
+// Set diff of patterns across a time boundary. Compares pattern presence in
+// two windows and returns new / retired / persistent / re_emerged sets plus
+// co_emergence_clusters (deploy fingerprint via first_seen clustering).
+// Coherent only because log10x pattern_hash is stable across queries;
+// competitors that re-cluster per query can't answer this.
+
+registerLog10xTool('log10x_pattern_diff', patternDiffSchema, (args) =>
+  wrap('log10x_pattern_diff', async () => {
+    const env = resolveEnv(getEnvs(), args.environment);
+    const cost = await getAnalyzerCost(env, args.analyzerCost);
+    return executePatternDiff({ ...args, analyzerCost: cost }, env);
+  })
+);
+
+// ── Tool: log10x_whats_changing ──
+//
+// Patterns ranked by delta vs a baseline window (not current cost). Restores
+// the capability of the deleted log10x_cost_drivers tool (commit 27dce7d)
+// using the modern StructuredOutput envelope. Brand-new patterns (no
+// baseline) are excluded — they go to log10x_whats_new.
+
+registerLog10xTool('log10x_whats_changing', whatsChangingSchema, (args) =>
+  wrap('log10x_whats_changing', async () => {
+    const env = resolveEnv(getEnvs(), args.environment);
+    const cost = await getAnalyzerCost(env, args.analyzerCost);
+    return executeWhatsChanging({ ...args, analyzerCost: cost }, env);
+  })
+);
+
+// ── Tool: log10x_whats_new ──
+//
+// Patterns whose first_seen timestamp falls inside a recency window. Sister
+// tool to whats_changing — new patterns have no baseline, so they get a
+// clean home that doesn't pollute the delta-vs-baseline surface.
+
+registerLog10xTool('log10x_whats_new', whatsNewSchema, (args) =>
+  wrap('log10x_whats_new', async () => {
+    const env = resolveEnv(getEnvs(), args.environment);
+    const cost = await getAnalyzerCost(env, args.analyzerCost);
+    return executeWhatsNew({ ...args, analyzerCost: cost }, env);
+  })
+);
+
 // ── Tool: log10x_services ──
 
 registerLog10xTool('log10x_services', servicesSchema, (args) =>
@@ -1645,6 +1693,9 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_pattern_trend', intent: 'Time series for a pattern — volume + cost history, spike detection, sparkline' },
   { name: 'log10x_dependency_check', intent: 'Scan SIEM + dashboards + alerts for refs to a pattern before muting / deleting it' },
   { name: 'log10x_top_patterns', intent: 'Top N patterns by current cost, with per-row delta vs comparison_window and newly-emerged section' },
+  { name: 'log10x_pattern_diff', intent: 'Set diff of patterns across a time boundary — new/retired/persistent/re_emerged + co_emergence_clusters (deploy fingerprint). Coherent across boundaries because pattern_hash is stable across queries.' },
+  { name: 'log10x_whats_changing', intent: 'Patterns ranked by delta vs baseline (growth/shrinkage). Brand-new patterns excluded — see log10x_whats_new for those. Restores the deleted log10x_cost_drivers capability.' },
+  { name: 'log10x_whats_new', intent: 'Patterns whose first_seen falls inside a recency window. Separate from delta-vs-baseline because new patterns have no baseline.' },
   { name: 'log10x_investigate', intent: 'Single-call root-cause — causal chain for acute spikes or cohort for drift' },
   { name: 'log10x_resolve_batch', intent: 'Pasted-batch triage — per-pattern variable concentration + next actions' },
   { name: 'log10x_retriever_query', intent: 'Direct archive retrieval by pattern identity (tenx_user_pattern) with JS filter expressions' },
