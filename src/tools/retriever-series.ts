@@ -132,6 +132,26 @@ export async function executeRetrieverSeries(
     // branches on data.status, matching retriever_query and the framework.
     return buildNotConfiguredEnvelope({ tool: 'log10x_retriever_series', kind: 'retriever', remediation: md });
   }
+  // Y2: Pre-flight retriever runtime probe. isRetrieverConfigured() only
+  // checks the env-var pair; it returns true on a stale install where the
+  // env vars are still set but the runtime has been retired (pods drained,
+  // ELB removed, archive frozen). Without this gate the call burns the full
+  // poll budget (~180s) on a hopeless POST and returns ok:true with
+  // actual_events=0 — indistinguishable from "real silent window" to a
+  // chain. The retriever_state helper's source field tells us whether the
+  // resolution chain actually found an addressable runtime: 'none' means
+  // nothing live answered. Surface that as data.status='not_configured'
+  // before any work.
+  if (retrieverState.source === 'none' || !retrieverState.installed) {
+    return buildNotConfiguredEnvelope({
+      tool: 'log10x_retriever_series',
+      kind: 'retriever',
+      remediation:
+        'Retriever runtime is not detected for this env — env vars may be set but no live pods / ELB / svc ' +
+        'answered the discovery probes (snapshot, helm_release_probe, kubectl_probe all came up empty). ' +
+        'Run log10x_advise_retriever for the redeploy / wiring recipe.',
+    });
+  }
   // Defensive defaults — match retrieverSeriesSchema for non-SDK
   // callers. Narrow into a fully-populated args local so the helper
   // functions can keep their non-optional bucket_size/fidelity types.

@@ -438,6 +438,36 @@ export async function executeRetrieverQueryStatus(
     });
   }
 
+  // Y2: Sentinel passthrough. retriever_query populates `query_id` =
+  // `error:<error_type>` on failure so the forward chain stays composable
+  // even when no real UUID was minted. Detect the sentinel here and return
+  // a typed chassis error envelope explaining that the upstream tool — not
+  // the runtime — produced this query id. Avoids a hopeless S3 _DONE.json
+  // probe on a non-existent prefix.
+  if (queryId.startsWith('error:')) {
+    const upstreamErrorType = queryId.slice('error:'.length) || 'unknown';
+    return buildChassisErrorEnvelope({
+      tool: 'log10x_retriever_query_status',
+      err: {
+        error_type: 'partial_failure',
+        retryable: false,
+        suggested_backoff_ms: null,
+        hint:
+          `The query_id is a sentinel emitted by log10x_retriever_query on an upstream failure ` +
+          `(upstream error_type='${upstreamErrorType}'). No real query was dispatched, so there is no _DONE.json ` +
+          `or qr/ prefix to probe. See the original log10x_retriever_query result for the actual error and ` +
+          `remediation; do not retry status against this sentinel id.`,
+      },
+      telemetry,
+      contextPayload: {
+        query_id: queryId,
+        target,
+        upstream_error_type: upstreamErrorType,
+      },
+      source_disclosure: {},
+    });
+  }
+
   const retrieverState = await getRetrieverState(null);
   if (!(await isRetrieverConfigured())) {
     return buildNotConfiguredEnvelope({
