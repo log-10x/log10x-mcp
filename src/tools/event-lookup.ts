@@ -59,6 +59,12 @@ interface EventLookupSummary {
     cost_baseline_usd_disclosed: DisclosedDollarValue | null;
     events: number;
     is_new: boolean;
+    // Stable pattern_hash echoed on every per-service row so cross-pillar
+    // chain steps (event_lookup → pattern_examples / retriever_query /
+    // customer_metrics_query) can join on hash without re-fetching the
+    // summary-level resolved_from_hash. Empty string when the pattern is
+    // not present in TSDB (same as the top-level pattern_hash sentinel).
+    pattern_hash: string;
   }>;
   totals: {
     bytes: number;
@@ -523,6 +529,14 @@ async function formatResults(
         cost_baseline_usd_disclosed: r.costBaselineDisclosed,
         events: r.events,
         is_new: r.isNew,
+        // Echo the resolved pattern_hash on every per-service row so
+        // chain steps that consume this payload (investigate's offload
+        // pivot, cross-pillar pattern_examples / retriever_query joins)
+        // can carry the stable identity without re-fetching the
+        // summary-level resolved_from_hash. Same string on all rows for
+        // a given call — that is by design: rows are slices of one
+        // pattern, not different patterns.
+        pattern_hash: summaryPatternHash,
       })),
       totals: {
         bytes: totalBytes,
