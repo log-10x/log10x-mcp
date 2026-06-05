@@ -281,6 +281,6 @@ function buildHumanSummary(payload: DiscoverJoinPayload, minimumJaccard: number)
   const best = probed > 0 ? payload.top_below_threshold[0] : undefined;
   const bestHint = best
     ? ` Best below-threshold pair: \`${best.log10x_side}\` ↔ \`${best.customer_side}\` at Jaccard ${best.jaccard.toFixed(3)}.`
-    : ' No label pairs were probed; one side returned an empty label universe.';
+    : ' No label pairs were probed; one side has no relevant metrics to join against.';
   return `No label pair reached the Jaccard ${minimumJaccard} threshold across ${payload.labels_probed_log10x.length} log10x-side and ${payload.labels_probed_customer.length} customer-side labels.${bestHint} Cross-pillar correlation cannot proceed for anchors that need a structural join.`;
 }

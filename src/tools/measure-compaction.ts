@@ -475,7 +475,7 @@ export async function executeMeasureCompaction(
     view: 'summary',
     headline: compactionHeadline,
     headline_bullets: [
-      `SIEM: ${sel.displayName}, window: ${timeRange}`,
+      `Log platform: ${sel.displayName}, window: ${timeRange}`,
       `Patterns measured: ${patterns.length} (${patterns.filter((p) => p.confidence === 'high').length} high confidence)`,
       `Encoded bytes / original bytes: see must_render_verbatim table`,
     ],

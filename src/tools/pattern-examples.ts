@@ -91,7 +91,7 @@ export const patternExamplesSchema = {
     .string()
     .optional()
     .describe(
-      'Pattern name (Symbol Message, e.g. `Payment_Gateway_Timeout`) or a pasted raw log line. Pasted lines resolve to the matching pattern via the same templater path as log10x_resolve_batch. Either pattern or pattern_hash must be provided; pattern_hash is preferred when available.',
+      'Pattern name (e.g. `Payment_Gateway_Timeout`) or a pasted raw log line. Pasted lines resolve to the matching pattern via the same pattern-extraction path as log10x_resolve_batch. Either pattern or pattern_hash must be provided; pattern_hash is preferred when available.',
     ),
   pattern_hash: z
     .string()
@@ -483,7 +483,7 @@ async function executePatternExamplesInner(
         inputTemplateHash = p.hash;
       } else {
         return graceful('Pattern Examples — could not resolve pasted log line', [
-          'The templater returned no patterns for the pasted line. Verify the line is well-formed and contains at least one recurring symbol.',
+          'The pattern extractor returned no patterns for the pasted line. Verify the line is well-formed and contains at least one recurring symbol.',
         ]);
       }
     } catch (e) {
@@ -594,7 +594,7 @@ async function executePatternExamplesInner(
   try {
     extracted = await extractPatterns(probe.events, { privacyMode: true, useFileOutput: true, preserveEnvelope: true, bucketHashHint: hashKey });
   } catch (e) {
-    return graceful('Pattern Examples — templater invocation failed', [
+    return graceful('Pattern Examples — pattern extractor invocation failed', [
       `tenx CLI failed on ${probe.events.length} events: ${(e as Error).message.slice(0, 200)}`,
       '',
       'Verify tenx is installed (`brew install log-10x/tap/log10x`) or set `LOG10X_TENX_MODE=docker`.',
@@ -608,7 +608,7 @@ async function executePatternExamplesInner(
 
   if (extracted.patterns.length === 0) {
     return graceful('Pattern Examples — no templates resolved', [
-      `Pulled ${probe.events.length} events but the templater produced no templates. The events may be malformed or the tenx version may not support this format.`,
+      `Pulled ${probe.events.length} events but the pattern extractor produced no patterns. The events may be malformed or the tenx version may not support this format.`,
     ]);
   }
 

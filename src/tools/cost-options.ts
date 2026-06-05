@@ -297,9 +297,9 @@ function buildModes(
     caps.tier_down_available &&
     (siemDetected === 'cloudwatch' || siemDetected === 'datadog');
   const tierDownGatedReason = !caps.tier_down_available
-    ? 'Requires Receiver tier (in-path) for the engine to stamp the tenx_action marker the SIEM reads.'
+    ? 'Requires Receiver tier (in-path) for the engine to stamp the tier marker your log platform reads.'
     : siemDetected !== 'cloudwatch' && siemDetected !== 'datadog'
-      ? `tier_down maps to a concrete billing reduction only on Datadog (Flex Logs) and CloudWatch (Infrequent Access). Detected SIEM: ${siemDetected ?? 'unknown'}.`
+      ? `tier_down maps to a concrete billing reduction only on Datadog (Flex Logs) and CloudWatch (Infrequent Access). Detected log platform: ${siemDetected ?? 'unknown'}.`
       : undefined;
 
   return [

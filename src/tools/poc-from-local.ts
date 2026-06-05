@@ -369,7 +369,7 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
   lines.push('## Top patterns in the sample');
   lines.push('');
   if (patterns.length === 0) {
-    lines.push('_No patterns resolved — the templater returned zero._');
+    lines.push('_No patterns resolved — the pattern extractor returned zero._');
   } else {
     lines.push('| # | Identity | Events | % | Bytes |');
     lines.push('|---|---|---|---|---|');
