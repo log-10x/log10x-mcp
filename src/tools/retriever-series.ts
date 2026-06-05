@@ -38,6 +38,8 @@ import { createLimiter } from '../lib/concurrency.js';
 import { fmtCount } from '../lib/format.js';
 import { retrieverNotConfiguredMessage } from './retriever-query.js';
 import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
+import { buildChassisErrorEnvelope } from '../lib/chassis-envelope.js';
+import { wrapBackendError, type PrimitiveError } from '../lib/primitive-errors.js';
 
 /** Cap on group-by cardinality. Tail collapsed to "_other_". */
 const TOP_K_GROUPS = 1000;
@@ -153,17 +155,55 @@ export async function executeRetrieverSeries(
 
   // Validate the time expressions early so a malformed window doesn't
   // ride all the way down to the retriever for a cryptic 400.
+  // Wave 2.G: bare schema-invalid throws (Invalid time window, Empty
+  // window) become structured chassis envelopes carrying status='error'
+  // and error_type='schema_invalid' so an agent branches on the typed
+  // error instead of getting an MCP protocol exception.
   try {
     normalizeTimeExpression(args.from);
     normalizeTimeExpression(args.to);
   } catch (e) {
-    throw new Error(`Invalid time window: ${(e as Error).message}`);
+    return buildChassisErrorEnvelope({
+      tool: 'log10x_retriever_series',
+      err: {
+        error_type: 'schema_invalid',
+        retryable: false,
+        suggested_backoff_ms: null,
+        hint: `Invalid time window: ${(e as Error).message}`.slice(0, 300),
+      },
+      scope: { window: `${args.from}..${args.to}`, window_basis: 'explicit' },
+      contextPayload: {
+        from: args.from,
+        to: args.to,
+        pattern: args.pattern,
+        search: args.search,
+      },
+      source_disclosure: { retriever_state_source: retrieverState.source },
+    });
   }
 
   const nowMs = Date.now();
   const fromMs = timeExprToMs(args.from, nowMs);
   const toMs = timeExprToMs(args.to, nowMs);
-  if (toMs <= fromMs) throw new Error(`Empty window: from=${args.from} to=${args.to}`);
+  if (toMs <= fromMs) {
+    return buildChassisErrorEnvelope({
+      tool: 'log10x_retriever_series',
+      err: {
+        error_type: 'schema_invalid',
+        retryable: false,
+        suggested_backoff_ms: null,
+        hint: `Empty window: from=${args.from} to=${args.to}`,
+      },
+      scope: { window: `${args.from}..${args.to}`, window_basis: 'explicit' },
+      contextPayload: {
+        from: args.from,
+        to: args.to,
+        pattern: args.pattern,
+        search: args.search,
+      },
+      source_disclosure: { retriever_state_source: retrieverState.source },
+    });
+  }
   const windowMs = toMs - fromMs;
 
   const decision = await decideFidelity(env, {
@@ -197,10 +237,55 @@ export async function executeRetrieverSeries(
   }
 
   const startedMs = Date.now();
-  const result =
-    decision.mode === 'full'
-      ? await executeFullMode(env, args, fromMs, toMs)
-      : await executeSampledMode(env, args, fromMs, toMs, decision.subWindows!, decision.eventsPerSubWindow!);
+  // Wave 2.E: wrap the dispatch of the actual retriever round-trip in
+  // wrapBackendError so HTTP-coded failures (503/504 ↔ backend_unavailable,
+  // 408/429 ↔ backend_timeout, network failures ↔ backend_unavailable)
+  // surface with structured retryable + suggested_backoff_ms instead of
+  // throwing through the MCP boundary. Highest blast radius of the four
+  // tools — both full and sampled modes go through here.
+  let result: SeriesResult;
+  try {
+    result =
+      decision.mode === 'full'
+        ? await executeFullMode(env, args, fromMs, toMs)
+        : await executeSampledMode(env, args, fromMs, toMs, decision.subWindows!, decision.eventsPerSubWindow!);
+  } catch (err: unknown) {
+    const wrapped: PrimitiveError = wrapBackendError(err);
+    // Preserve dual-transport breadcrumbs written by the SQS fallback path
+    // when both HTTP and SQS transports were attempted and both failed.
+    // Mirrors retriever-query.ts's dual-failure surface so an agent sees
+    // the same shape across the family.
+    const dualErr = err as Record<string, unknown>;
+    const transportsBreadcrumbs = Array.isArray(dualErr?.transports_attempted)
+      ? {
+          transports_attempted: dualErr.transports_attempted,
+          http_error_message: dualErr.http_error_message,
+          sqs_error_type: dualErr.sqs_error_type,
+          sqs_error_message: dualErr.sqs_error_message,
+        }
+      : {};
+    return buildChassisErrorEnvelope({
+      tool: 'log10x_retriever_series',
+      err: wrapped,
+      scope: { window: `${args.from}..${args.to}`, window_basis: 'explicit' },
+      contextPayload: {
+        // Echo the legacy back-compat boolean alongside the typed status so
+        // pre-chassis readers that check `data.ok` still see `false` on error.
+        ok: false,
+        status: 'error',
+        mode: decision.mode,
+        from: args.from,
+        to: args.to,
+        window_ms: windowMs,
+        pattern: args.pattern,
+        search: args.search,
+        sub_windows: decision.subWindows,
+        events_per_sub_window: decision.eventsPerSubWindow,
+        ...transportsBreadcrumbs,
+      },
+      source_disclosure: { retriever_state_source: retrieverState.source },
+    });
+  }
 
   const wallTimeMs = Date.now() - startedMs;
   const groupCounts: Record<string, number> = {};

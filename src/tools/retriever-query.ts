@@ -48,7 +48,7 @@ import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { getOffloadStatusBatch } from '../lib/offload-status.js';
-import { buildChassisErrorEnvelope, sanitizeHeadline } from '../lib/chassis-envelope.js';
+import { buildChassisErrorEnvelope } from '../lib/chassis-envelope.js';
 import { wrapBackendError } from '../lib/primitive-errors.js';
 
 export const retrieverQuerySchema = {
@@ -213,7 +213,22 @@ export async function executeRetrieverQuery(
   try {
     await executeRetrieverQueryInner(args, env, sumOut);
   } catch (err: unknown) {
-    const primitiveErr = wrapBackendError(err);
+    // Wave 2.F: classify time-window parse failures as schema_invalid
+    // instead of the generic 'unknown' wrapBackendError returns for
+    // non-HTTP/non-network errors. The inner throws `Invalid time window:
+    // ...` when normalizeTimeExpression rejects from/to; that's a caller-
+    // side input bug (retryable=false, no backoff) — distinct from a
+    // transient backend failure.
+    const errMsg = err instanceof Error ? err.message : String(err);
+    const isTimeWindowError = errMsg.startsWith('Invalid time window:');
+    const primitiveErr = isTimeWindowError
+      ? {
+          error_type: 'schema_invalid' as const,
+          retryable: false,
+          suggested_backoff_ms: null,
+          hint: errMsg.slice(0, 300),
+        }
+      : wrapBackendError(err);
     // Extract dual-failure breadcrumbs written by the SQS fallback path
     // when both HTTP and SQS transports were attempted and both failed.
     const dualErr = err as Record<string, unknown>;
