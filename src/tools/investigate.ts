@@ -61,6 +61,38 @@ function userVisibleStartingPoint(sp: string): string {
   return sp;
 }
 
+/**
+ * Resolve a non-empty, user-facing descriptor for the pattern under
+ * investigation. Used by buildHumanSummary so the no_signal prose names
+ * a real pattern (symbol_message text or the anchor name back-resolved
+ * from a hash lookup) instead of leaking the literal "this pattern"
+ * placeholder that userVisibleStartingPoint returns for hash-shaped
+ * inputs (Note 25 fix).
+ *
+ * Returns `null` when only an unresolved hash is known and no anchor/
+ * lead name is available from the rendered report — the caller must use
+ * a hash-free fallback phrase ("the pattern you anchored on") rather
+ * than echoing the hash or printing the placeholder.
+ */
+function resolvePatternDescriptor(
+  starting_point: string,
+  parsed: ParsedReport,
+): string | null {
+  const trimmed = starting_point.trim();
+  // Non-hash starting points are already human-readable: a pasted log
+  // line, a symbolMessage token, a service name, or the literal
+  // "environment". Use verbatim.
+  if (trimmed && !PATTERN_HASH_REGEX.test(trimmed)) {
+    return trimmed;
+  }
+  // Hash starting point: prefer the resolved anchor name extracted from
+  // the rendered report; fall back to the lead pattern if the anchor
+  // header wasn't emitted.
+  if (parsed.anchorPattern) return parsed.anchorPattern;
+  if (parsed.leadPattern) return parsed.leadPattern;
+  return null;
+}
+
 export const investigateSchema = {
   starting_point: z
     .string()
@@ -113,6 +145,12 @@ export interface ParsedReport {
   shape: string | null;
   mode: string | null;
   investigationId: string | null;
+  /** Resolved anchor pattern name (from `**Anchor**: \`name\`` line). Null
+   *  when the rendered report didn't carry an anchor header (e.g.,
+   *  pre-resolution failure path). Used by buildHumanSummary so the
+   *  no_signal prose can name the real pattern instead of falling back
+   *  to the literal hash from starting_point. */
+  anchorPattern: string | null;
   leadPattern: string | null;
   leadService: string | null;
   leadConfidence: number | null;
@@ -137,6 +175,11 @@ export function parseReport(md: string): ParsedReport {
     md.match(/investigation_id`?:?\s*`?([0-9a-f-]{36})/i);
   const shapeMatch = md.match(/\*\*shape\*\*:\s*`?(acute|drift|environment|no_significant_movement|empty)`?/i);
   const modeMatch = md.match(/\*\*mode\*\*:\s*`?(pattern|service|environment|raw_line)`?/i);
+  // Anchor header (emitted by both acute and drift renderers as
+  // `**Anchor**: \`<resolved-name>\``). Lets the no_signal human
+  // summary name the real pattern when starting_point was a raw hash
+  // (Note 25 fix).
+  const anchorMatch = md.match(/\*\*Anchor\*\*:\s*`([^`]+)`/);
   const leadPatternMatch = md.match(/\*\*Pattern\*\*:\s*`([^`]+)`(?:\s+in\s+`([^`]+)`)?/);
   const confMatch = md.match(/\*\*Confidence\*\*:\s*(\d+)%/);
   const lagMatch = md.match(/peaked\s+(\d+)s\s+before/i);
@@ -161,6 +204,7 @@ export function parseReport(md: string): ParsedReport {
     shape: shapeMatch?.[1] ?? null,
     mode: modeMatch?.[1] ?? null,
     investigationId: idMatch?.[1] ?? null,
+    anchorPattern: anchorMatch?.[1] ?? null,
     leadPattern: leadPatternMatch?.[1] ?? null,
     leadService: leadPatternMatch?.[2] ?? null,
     leadConfidence: confMatch ? parseInt(confMatch[1], 10) / 100 : null,
@@ -193,7 +237,14 @@ export function buildHumanSummary(
   }
   if (status === 'no_signal') {
     // Note 9: nothing was found, so the threshold story isn't load-bearing.
-    return `I looked at "${sp}" over the last ${window} to see if anything else in your environment moved at the same time. Nothing did — the issue may be isolated to this pattern, or the window's too short. Try widening to 24h.`;
+    // Note 25: must name a real pattern (symbol_message or back-resolved
+    // anchor), never echo the literal placeholder "this pattern" that
+    // userVisibleStartingPoint returns for hash-shaped inputs.
+    const patternDescriptor = resolvePatternDescriptor(starting_point, parsed);
+    const lead = patternDescriptor
+      ? `I looked at "${patternDescriptor}" over the last ${window}`
+      : `I looked at the pattern you anchored on over the last ${window}`;
+    return `${lead} to see if anything else in your environment moved at the same time. Nothing did — the issue may be isolated, or the window's too short. Try widening to 24h.`;
   }
   if (status === 'error') {
     return `Investigation of "${sp}" failed structurally. See data.error for details.`;

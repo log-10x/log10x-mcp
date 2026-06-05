@@ -127,6 +127,7 @@ const emptyParsed = {
   shape: null,
   mode: null,
   investigationId: null,
+  anchorPattern: null,
   leadPattern: null,
   leadService: null,
   leadConfidence: null,

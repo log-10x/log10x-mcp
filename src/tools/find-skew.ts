@@ -20,6 +20,7 @@ import { aggregateSlotsBySymbolMessage } from '../lib/detectors/slot-aggregation
 import { type StructuredOutput } from '../lib/output-types.js';
 import type { PrimitiveError } from '../lib/primitive-errors.js';
 import { buildChassisEnvelope } from '../lib/chassis-envelope.js';
+import { sanitizeUserProse } from '../lib/anti-jargon-prose.js';
 
 /** Default minimum dominant-value fraction. Hand-picked, unvalidated. */
 export const DEFAULT_MIN_CONCENTRATION = 0.6;
@@ -100,15 +101,15 @@ interface ThresholdAudit {
     basis: 'unvalidated_default' | 'caller_override';
   };
   /**
-   * Empirical distribution of the dominant-value percentage across ALL
-   * candidate slots evaluated (before filtering by min_concentration).
-   * Lets the agent see "floor 0.60 vs observed p50 0.30 — floor is well
-   * above typical noise" vs "floor 0.60 vs observed p50 0.85 — almost
-   * every slot is dominated by one value; floor is too low for this
-   * dataset."
+   * Machine-side: empirical distribution of the dominant-value percentage
+   * across ALL fields checked (before filtering by min_concentration).
+   * The agent can branch on this to judge whether the configured minimum
+   * dominance is well above or below the data's natural variation. Not
+   * surfaced in user prose — statistics belong here, not in the headline
+   * or human_summary.
    */
   observed_dominant_pct_distribution: Distribution | null;
-  /** Number of candidate slots evaluated (i.e. denominator for the distribution). */
+  /** Number of fields checked (denominator for the distribution). */
   n_candidate_slots: number;
 }
 
@@ -272,16 +273,22 @@ export async function executeFindSkew(args: FindSkewArgs): Promise<StructuredOut
   };
 
   // ── Headline ───────────────────────────────────────────────────────
+  // Lead with the finding. No raw statistics, no internal vocabulary.
   let headline: string;
   if (status === 'success') {
-    headline = `${findings.length} skew finding${findings.length === 1 ? '' : 's'} (floor ${(minConcentration * 100).toFixed(0)}%${thresholdBasis === 'unvalidated_default' ? ', unvalidated' : ''}). Top: \`${findings[0]!.patternIdentity}\` slot \`${findings[0]!.skewedSlots[0]!.slotName}\` is \`${findings[0]!.skewedSlots[0]!.dominantValue}\` ${Math.round(findings[0]!.skewedSlots[0]!.dominantPct * 100)}% of events.`;
+    const top = findings[0]!;
+    const topSlot = top.skewedSlots[0]!;
+    headline = sanitizeUserProse(
+      `Found skew on field \`${topSlot.slotName}\` — value \`${topSlot.dominantValue}\` covers ${Math.round(topSlot.dominantPct * 100)}% of events in pattern \`${top.patternIdentity}\`.`,
+    );
   } else if (status === 'no_signal') {
-    const singletonNote = filteredSingletonSlots > 0
-      ? ` (${filteredSingletonSlots} single-value slot${filteredSingletonSlots === 1 ? '' : 's'} excluded — use pattern_mitigate to sample whole patterns)`
-      : '';
-    headline = `No exploitable skew found across ${nPatternsAboveMinEvents} pattern(s) evaluated.${singletonNote}`;
+    headline = sanitizeUserProse(
+      `No skew found across ${nPatternsAboveMinEvents} pattern(s) — try \`log10x_pattern_mitigate\` to compact or sample uniformly.`,
+    );
   } else if (status === 'insufficient_data') {
-    headline = `Insufficient data — no pattern had ≥${minEvents} events after templating.`;
+    headline = sanitizeUserProse(
+      `Not enough events to check for skew — no pattern had ≥${minEvents} events after extraction.`,
+    );
   } else {
     headline = `Error: ${data.error?.error_type ?? 'unknown'}.`;
   }
@@ -292,7 +299,9 @@ export async function executeFindSkew(args: FindSkewArgs): Promise<StructuredOut
     headline,
     headline_bullets: findings.slice(0, 3).map((f) => {
       const top = f.skewedSlots[0]!;
-      return `\`${f.patternIdentity}\`: slot \`${top.slotName}\` is \`${top.dominantValue}\` ${Math.round(top.dominantPct * 100)}% of events — sample at 1/${sampleN} saves ~${Math.round(f.samplingOpportunityPct * 100)}% of bytes.`;
+      return sanitizeUserProse(
+        `\`${f.patternIdentity}\`: field \`${top.slotName}\` is \`${top.dominantValue}\` ${Math.round(top.dominantPct * 100)}% of events — smart sampling at 1/${sampleN} saves ~${Math.round(f.samplingOpportunityPct * 100)}% of bytes.`,
+      );
     }),
     status: status === 'success' ? 'success' : status === 'no_signal' ? 'no_signal' : status === 'insufficient_data' ? 'insufficient_data' : 'error',
     decisions: {
@@ -402,30 +411,31 @@ function buildHumanSummary(args: {
   nPatternsAboveMinEvents: number;
   filteredSingletonSlots?: number;
 }): string {
-  const floorPct = (args.minConcentration * 100).toFixed(0);
-  const observedFragment =
-    args.observedDistribution !== null
-      ? ` Observed median dominant-value share across candidate slots: ${(args.observedDistribution.p50 * 100).toFixed(0)}% (p75 ${(args.observedDistribution.p75 * 100).toFixed(0)}%).`
-      : '';
-  const calibTag =
-    args.thresholdBasis === 'unvalidated_default'
-      ? ' Floor is an unvalidated default — compare against the observed distribution before treating the count as authoritative.'
-      : '';
-  const singletonNote =
-    (args.filteredSingletonSlots ?? 0) > 0
-      ? ` ${args.filteredSingletonSlots} slot${args.filteredSingletonSlots === 1 ? '' : 's'} had a single value (distinctCount=1). Those are templater-classified literals, not skew — sampling the whole pattern, not a subset, is the right action there. Use pattern_mitigate to sample the entire pattern.`
-      : '';
+  // Lead with the concept, then the finding, then the next action.
+  // Statistics belong in machine fields (threshold_audit), not user prose.
+  const concept = 'Skew = when one specific value dominates a field (e.g., 95% of events come from one user).';
+
   if (args.status === 'insufficient_data') {
-    return `find_skew analyzed ${args.nEvents} event(s) but no pattern had ≥${args.findings.length > 0 ? args.findings[0]!.totalEvents : 'min_events'} events after templating. Paste more events for the same patterns OR widen the source.${calibTag}`;
+    return sanitizeUserProse(
+      `${concept} Not enough events to check — analyzed ${args.nEvents} event(s) and no pattern had ≥${args.findings.length > 0 ? args.findings[0]!.totalEvents : 'min_events'} events after extraction. Paste more events for the same patterns, or widen the source.`,
+    );
   }
+
   if (args.status === 'no_signal') {
-    return `No exploitable skew found across ${args.nPatternsAboveMinEvents} pattern(s) evaluated.${observedFragment}${singletonNote} ${args.thresholdBasis === 'unvalidated_default' ? 'The floor may be too strict for this dataset (compare with the observed distribution), or there is genuinely no skew to exploit here.' : 'No skew exists at this calibrated floor.'}`;
+    return sanitizeUserProse(
+      `${concept} No skew found: every field in this pattern has a single value, or no value dominates clearly enough to target. Smart-targeted sampling doesn't apply here. Better fit: compact the pattern or drop a percentage — run \`log10x_pattern_mitigate\` to see the options with cost impact.`,
+    );
   }
+
   const top = args.findings[0];
-  const topNote = top
-    ? ` Top finding: \`${top.patternIdentity}\` slot \`${top.skewedSlots[0]!.slotName}\` is \`${top.skewedSlots[0]!.dominantValue}\` ${Math.round(top.skewedSlots[0]!.dominantPct * 100)}% of events; sampling that case at 1/${args.sampleN} would save ~${Math.round(top.samplingOpportunityPct * 100)}% of this pattern's bytes.`
-    : '';
-  return `${args.findings.length} pattern(s) showed slot skew above the ${floorPct}% concentration floor across ${args.nPatternsAboveMinEvents} evaluated.${topNote}${observedFragment}${singletonNote}${calibTag}`;
+  if (!top) {
+    return sanitizeUserProse(`${concept} ${args.findings.length} pattern(s) showed skew. Run \`log10x_pattern_mitigate\` to apply smart sampling.`);
+  }
+  const slot = top.skewedSlots[0]!;
+  const dominantPct = Math.round(slot.dominantPct * 100);
+  return sanitizeUserProse(
+    `${concept} Found skew on field \`${slot.slotName}\` in pattern \`${top.patternIdentity}\`: \`${slot.dominantValue}\` covers ${dominantPct}% of events. Worth investigating — could be a bot, a specific client, or a real issue concentrated on one entity. Smart sampling that keeps the unusual events is a good fit here — run \`log10x_pattern_mitigate\` for the configured action.`,
+  );
 }
 
 function renderMarkdown(

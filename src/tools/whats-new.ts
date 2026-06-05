@@ -377,9 +377,28 @@ export async function executeWhatsNew(
   // Note 17 + Note 18: headline drops $ and hash. Lead with the descriptor
   // and the first-seen age. Brand-new patterns have meaningless cost; the
   // signal worth showing is "how many events, growing or not."
+  //
+  // Note 34: when the descriptor is short (< 15 chars or a single common
+  // word like "Configuring"), the user has no anchor for what it actually
+  // is. Append "(e.g. `<first 80 chars of raw sample>`)" so the user sees
+  // a concrete example. We use symbol_message as the raw sample fallback —
+  // that's the closest thing to a sample line available without fetching
+  // a separate query. Skip the e.g. block when the sample would just
+  // restate the descriptor verbatim.
+  const SHORT_DESCRIPTOR_CHARS = 15;
   const headlineDescriptor = (r: NewPatternRow) => {
     const sm = r.symbol_message || 'unnamed pattern';
-    return sm.length > 60 ? sm.slice(0, 57) + '…' : sm;
+    const descriptor = sm.length > 60 ? sm.slice(0, 57) + '…' : sm;
+    const isSingleWord = !/\s/.test(descriptor.trim());
+    const isShort = descriptor.length < SHORT_DESCRIPTOR_CHARS || isSingleWord;
+    if (!isShort) return descriptor;
+    const rawSample = (r.symbol_message || '').trim();
+    const sampleSlice = rawSample.length > 80 ? rawSample.slice(0, 80) + '…' : rawSample;
+    // Only append the e.g. when the sample adds information beyond the
+    // descriptor itself; otherwise we'd print "Configuring (e.g. `Configuring`)"
+    // which adds noise instead of context.
+    if (!sampleSlice || sampleSlice === descriptor) return descriptor;
+    return `${descriptor} (e.g. \`${sampleSlice}\`)`;
   };
   const headline =
     shown.length === 0
@@ -401,10 +420,18 @@ export async function executeWhatsNew(
     ...(backendErrors.length > 0 ? { backend_errors: backendErrors, partial: true } : {}),
   };
 
+  // Note 34: drop the "scanned N candidate patterns over the last 1h"
+  // framing — surface the universe as "N patterns active in the last hour"
+  // instead. The downstream sanitizer also catches "candidate patterns",
+  // but the explicit human_summary edit is clearer for the reader.
+  const activeBlurb =
+    rows.length > 0
+      ? ` Out of ${rows.length} pattern${rows.length === 1 ? '' : 's'} active in the last ${tf.label}, ${shown.length} ${shown.length === 1 ? 'is' : 'are'} brand new.`
+      : '';
   const humanSummaryBase =
     status === 'no_signal'
       ? `No patterns first seen within ${firstSeenWithin} over ${tf.label}.`
-      : `${shown.length} pattern${shown.length === 1 ? ' was' : 's were'} first seen within ${firstSeenWithin} over ${tf.label}. ` +
+      : `${shown.length} pattern${shown.length === 1 ? ' was' : 's were'} first seen within ${firstSeenWithin} over ${tf.label}.${activeBlurb} ` +
         `Newest: ${headlineDescriptor(shown[0])} (${shown[0].first_seen_age_label}, ${shown[0].events_now.toFixed(0)} events, ${trajectoryLabel(shown[0].trajectory)}). ` +
         `Inspect with log10x_pattern_examples or log10x_pattern_trend.`;
   const humanSummary =

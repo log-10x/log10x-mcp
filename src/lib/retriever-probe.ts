@@ -74,23 +74,28 @@ export interface ProbeResult {
 
 // ── Remedy table (keyed on assert name) ─────────────────────────────────────
 
+// Per-Note-32, remedies read as the "Likely cause: <remedy>" tail of the
+// broken-verdict headline. They state the user-visible cause in plain terms
+// and point at the next action (advise_retriever or a specific pod/IAM check
+// for operators who want to dig in), without leaning on engine-internal
+// vocabulary like "forwarder", "retriever pipeline", or "offload S3".
 export const REMEDIES: Record<string, string> = {
   offload_bucket_has_recent_data:
-    'No recent offload data in S3 bucket. Check fluentd/forwarder shipping. Run log10x_doctor forwarder_dark_zones check.',
+    'the agent that ships logs from your environment to log10x cold storage is not running or is misconfigured, so no new logs are landing in cold storage. Check the shipping agent in your cluster, or run log10x_advise_retriever for setup guidance.',
   indexer_pipeline_running:
-    'Retriever pod is not running the indexer pipeline. Check pod logs for boot errors. Confirm TENX_QUARKUS_INDEX_QUEUE_URL env var is set.',
+    'the log10x component that turns shipped logs into searchable history is not running, so new logs are landing in cold storage but never become queryable. Check the log10x pod logs for boot errors and confirm the queue URL env var is set.',
   sqs_queues_drained:
-    'SQS subquery or stream queue is backed up (depth > 10). Consumer may be slow or crashed. Check pod CPU/memory.',
+    'the work queue feeding log10x history search is backed up (more than 10 pending items), so queries take longer than they should or stall entirely. Check the log10x pod for CPU or memory pressure, or for a crashed consumer.',
   retriever_pod_ready:
-    'Retriever pod has unready containers. Check kubectl describe and recent pod events.',
+    'the log10x pod that serves history search has unready containers, so it cannot accept queries. Check the pod with kubectl describe and review recent pod events.',
   cw_scan_match:
-    'Bloom scan found no matches for the picked hash. Indexer may not have caught up yet — wait 60s and re-probe. Or the offload data does not contain this hash.',
+    'no matches were found for the test pattern. The history index may not have caught up yet (wait about 60 seconds and re-run this check), or the cold storage simply does not contain this pattern in the chosen window.',
   cw_stream_fetch:
-    'Stream consumer is not running. Check stream queue drains AND stream pipeline launches (kubectl logs for "starting pipeline - Tenx: @/apps/retriever/stream"). This is the chart 1.0.20 / runtime-name class of bug.',
+    'the log10x worker that streams matching events back from history is not running, so queries find matches but never return their bodies. Check that the worker pipeline launched (look for "starting pipeline - Tenx: @/apps/retriever/stream" in pod logs). This is the chart 1.0.20 / runtime-name class of bug.',
   s3_qr_jsonl_written:
-    'Stream worker ran but did not write results to qr/<queryId>/. Check IAM s3:PutObject on the retriever IRSA role. Confirm TENX_QUARKUS_INDEX_WRITE_CONTAINER env var matches the actual bucket.',
+    'the log10x worker ran but could not write results back to cold storage, so queries complete on the engine side but return no data. Check the IAM s3:PutObject permission on the log10x service-account role and confirm the write-bucket env var matches the actual bucket.',
   mcp_events_returned:
-    'MCP read path issue. Files exist in qr/ but MCP returned 0. Check the input_bucket arg matches the actual S3 write location.',
+    'results were written to cold storage but the read path could not find them, so log10x_retriever_query returns zero events. Check that the input_bucket arg matches the actual write location.',
 };
 
 // ── Injectable dependency surface ───────────────────────────────────────────

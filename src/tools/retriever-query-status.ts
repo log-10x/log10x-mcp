@@ -438,14 +438,16 @@ export async function executeRetrieverQueryStatus(
     });
   }
 
-  // Note 13: the previous log10x_retriever_query couldn't find the
-  // pattern the caller asked about — it returned a placeholder marker
-  // (`error:<error_type>`) as the query_id so the forward chain stays
-  // composable. There is no real query to check the status of; the work
-  // never started because the pattern wasn't in the indexed data. Tell
-  // the caller in plain English and point them at top_patterns so they
-  // can see which patterns ARE available, then re-run retriever_query
-  // with one of those.
+  // Note 13/31: the query_id is in the placeholder-marker form
+  // (`error:<error_type>`) that log10x_retriever_query emits when its
+  // pattern lookup fails before dispatch — so the forward chain stays
+  // composable. We can't tell from the id alone whether the caller is
+  // here because a real previous retriever_query call hit that case, or
+  // whether they passed this id manually (e.g. for testing). Either way,
+  // there is no real query to check status on. Soften the prose so it
+  // doesn't assert a recent failure that may not have happened, and
+  // point at top_patterns so the caller can pick a real pattern to
+  // re-run retriever_query against.
   if (queryId.startsWith('error:')) {
     const upstreamErrorType = queryId.slice('error:'.length) || 'unknown';
     return buildChassisErrorEnvelope({
@@ -455,10 +457,11 @@ export async function executeRetrieverQueryStatus(
         retryable: false,
         suggested_backoff_ms: null,
         hint:
-          `The previous log10x_retriever_query call couldn't find that pattern in your indexed data, ` +
-          `so there is nothing to check the status of. To recover: run log10x_top_patterns to see ` +
-          `which patterns are actually being tracked, then call log10x_retriever_query again with ` +
-          `one of those.`,
+          `The query_id you passed is the form log10x_retriever_query uses when its pattern lookup ` +
+          `fails before dispatch. So either you're seeing this because the previous retriever_query ` +
+          `call hit that case, or you passed this id manually — there's no real query to check status ` +
+          `on either way. To recover: run log10x_top_patterns to see which patterns are actually being ` +
+          `tracked, then call log10x_retriever_query again with one of those.`,
       },
       telemetry,
       contextPayload: {

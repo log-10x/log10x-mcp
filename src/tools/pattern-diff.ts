@@ -45,6 +45,7 @@ import { fetchFirstSeenBatch } from '../lib/first-seen.js';
 import { type StructuredOutput } from '../lib/output-types.js';
 import {
   groupRowsByPattern,
+  patternDescriptor,
   type ServiceIdentity,
   type RawPatternServiceRow,
 } from '../lib/pattern-descriptor.js';
@@ -522,9 +523,9 @@ export async function executePatternDiff(
 
   const callout =
     clusters.length > 0
-      ? `${clusters.length} co-emergence cluster${clusters.length === 1 ? '' : 's'} detected ` +
-        `(${minClusterSize}+ patterns sharing first_seen within ${coEmergeWindowSec}s) — ` +
-        `consider checking your deploy log around the cluster timestamps.`
+      ? `${clusters.length} group${clusters.length === 1 ? '' : 's'} of patterns appearing together ` +
+        `(${minClusterSize}+ patterns first appearing within ~${coEmergeWindowSec}s of each other) — ` +
+        `consider checking your deploy log around the group timestamps.`
       : reEmergedHashes.length > 0
       ? highChurn
         ? `High pattern churn this window — ${reEmergedHashes.length} patterns blinked back after silence (typical for a sparse env). Showing the top ${reEmergedRows.length} by silence-gap and current volume.`
@@ -551,14 +552,14 @@ export async function executePatternDiff(
   // attached when the co-emergence thresholds are still defaults.
   const calibTag =
     decisions.threshold_basis === 'unvalidated_default'
-      ? ' Co-emergence window + min-cluster-size are unvalidated defaults; treat clusters as hints, not deploys.'
+      ? ' Group window + min-group-size are unvalidated defaults; treat groups as hints, not confirmed deploys.'
       : '';
   const humanSummary =
     status === 'no_signal'
       ? `No pattern changes detected across ${afterLabel} vs ${beforeLabel}. The diff is structurally empty — either the workload is steady or the window is too narrow.${calibTag}`
       : `Pattern diff over ${tf.label}: ${trueNewHashes.length} new, ${retiredHashes.length} retired, ${reEmergedHashes.length} re-emerged, ${persistentHashes.length} persistent. ` +
         (clusters.length > 0
-          ? `${clusters.length} co-emergence cluster${clusters.length === 1 ? '' : 's'} flagged — check your deploy log around the cluster timestamps. `
+          ? `${clusters.length} group${clusters.length === 1 ? '' : 's'} of patterns appearing together flagged — check your deploy log around the group timestamps. `
           : reEmergedHashes.length > 0
           ? highChurn
             ? `High churn in a sparse env — showing the top ${reEmergedRows.length} re-emerged by silence gap and volume; the rest are likely sparse-emission blinks. `
@@ -590,7 +591,7 @@ export async function executePatternDiff(
           {
             tool: 'log10x_pattern_examples',
             args: { pattern: clusters[0].patterns[0], timeRange: tf.range },
-            reason: `inspect the first pattern in the largest co-emergence cluster (${clusters[0].cluster_size} patterns at ${new Date(clusters[0].first_seen_window_ts[0] * 1000).toISOString()})`,
+            reason: `inspect the first pattern in the largest group of patterns appearing together (${clusters[0].cluster_size} patterns at ${new Date(clusters[0].first_seen_window_ts[0] * 1000).toISOString()})`,
           },
         ]
       : []),
@@ -605,15 +606,36 @@ export async function executePatternDiff(
       `**Totals**: ${trueNewHashes.length} new · ${retiredHashes.length} retired · ${persistentHashes.length} persistent · ${reEmergedHashes.length} re-emerged`,
     ];
     if (clusters.length > 0) {
-      lines.push(``, `**Co-emergence clusters** (${clusters.length}):`);
-      for (const c of clusters) {
-        const t0 = new Date(c.first_seen_window_ts[0] * 1000).toISOString();
-        const t1 = new Date(c.first_seen_window_ts[1] * 1000).toISOString();
-        // Per Note 18, hashes stay machine-side — the user-visible line
-        // tells them WHEN and HOW MANY; the agent reads the patterns[]
-        // array from the structured payload to drill in.
-        lines.push(`- ${c.cluster_size} patterns first seen ${t0} – ${t1}`);
-      }
+      lines.push(
+        ``,
+        `**Groups of patterns appearing together** (${clusters.length}) — likely tied to deploys or config changes:`,
+      );
+      // Format per Note 33: "Group N (appeared around HH:MM UTC, K patterns)"
+      // followed by per-pattern lines `service · severity · short descriptor`.
+      // Hashes stay machine-side (Note 18); the agent reads the patterns[]
+      // array from the structured payload to drill in.
+      const fmtClusterTime = (epochSec: number) => {
+        const d = new Date(epochSec * 1000);
+        const hh = String(d.getUTCHours()).padStart(2, '0');
+        const mm = String(d.getUTCMinutes()).padStart(2, '0');
+        return `${hh}:${mm} UTC`;
+      };
+      clusters.forEach((c, idx) => {
+        const when = fmtClusterTime(c.first_seen_window_ts[0]);
+        lines.push(``, `**Group ${idx + 1}** (appeared around ${when}, ${c.cluster_size} patterns)`);
+        for (const hash of c.patterns) {
+          const g = groupByHash.get(hash);
+          const topSvc = g?.rows_by_service
+            ? Array.from(g.rows_by_service.values())[0]
+            : undefined;
+          const svc = topSvc?.service || '(unknown service)';
+          const sev = topSvc?.severity || (g?.severities[0] ?? '');
+          const sm = g?.symbol_message || '';
+          const descriptor = sm ? patternDescriptor(sm, '', 60) : '(no descriptor)';
+          const sevPart = sev ? ` · ${sev}` : '';
+          lines.push(`- ${svc}${sevPart} · ${descriptor}`);
+        }
+      });
     }
     const svcList = (r: DiffRow) => r.services.map((s) => s.name).join(', ');
     const sevList = (r: DiffRow) => r.severities.join('/');
@@ -666,6 +688,41 @@ export async function executePatternDiff(
     });
   }
 
+  // Surface group contents in must_render_verbatim for the summary view too
+  // (Note 33): a bare "3 groups detected" count without member listings is
+  // the entire defect. Same per-cluster format as the markdown view:
+  // "Group N (appeared around HH:MM UTC, K patterns)" then per-pattern
+  // `service · severity · short descriptor` lines. Hashes stay machine-side.
+  let summaryVerbatim: string | undefined;
+  if (clusters.length > 0) {
+    const fmtClusterTime = (epochSec: number) => {
+      const d = new Date(epochSec * 1000);
+      const hh = String(d.getUTCHours()).padStart(2, '0');
+      const mm = String(d.getUTCMinutes()).padStart(2, '0');
+      return `${hh}:${mm} UTC`;
+    };
+    const sumLines: string[] = [
+      `**Groups of patterns appearing together** (${clusters.length}) — likely tied to deploys or config changes:`,
+    ];
+    clusters.forEach((c, idx) => {
+      const when = fmtClusterTime(c.first_seen_window_ts[0]);
+      sumLines.push(``, `**Group ${idx + 1}** (appeared around ${when}, ${c.cluster_size} patterns)`);
+      for (const hash of c.patterns) {
+        const g = groupByHash.get(hash);
+        const topSvc = g?.rows_by_service
+          ? Array.from(g.rows_by_service.values())[0]
+          : undefined;
+        const svc = topSvc?.service || '(unknown service)';
+        const sev = topSvc?.severity || (g?.severities[0] ?? '');
+        const sm = g?.symbol_message || '';
+        const descriptor = sm ? patternDescriptor(sm, '', 60) : '(no descriptor)';
+        const sevPart = sev ? ` · ${sev}` : '';
+        sumLines.push(`- ${svc}${sevPart} · ${descriptor}`);
+      }
+    });
+    summaryVerbatim = sumLines.join('\n');
+  }
+
   return buildChassisEnvelope({
     tool: 'log10x_pattern_diff',
     view: 'summary',
@@ -677,6 +734,7 @@ export async function executePatternDiff(
     scope,
     payload: data,
     human_summary: humanSummary,
+    must_render_verbatim: summaryVerbatim,
     telemetry,
     actions: builtActions,
   });

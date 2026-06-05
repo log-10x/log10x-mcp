@@ -35,6 +35,11 @@ import { computeAnchorDispersion, ANCHOR_DISPERSION_FLOOR } from '../lib/anchor-
 import { canonicalMetricRef } from '../lib/metric-ref.js';
 import { wrapBackendError, type PrimitiveError } from '../lib/primitive-errors.js';
 import { buildChassisEnvelope } from '../lib/chassis-envelope.js';
+import {
+  suggestHigherVariationAnchors,
+  renderAnchorSuggestionsBlock,
+  type AnchorSuggestion,
+} from '../lib/anchor-suggestions.js';
 
 /** Default phase-gap floor. Hand-picked, uncalibrated — see README "Threshold provenance". */
 export const DEFAULT_PHASE_GAP_FLOOR = 0.15;
@@ -144,6 +149,14 @@ interface MetricsThatMovedSummary {
   threshold_audit?: ThresholdAudit;
   /** Populated only when `status === 'error'`. */
   error?: PrimitiveError;
+  /**
+   * Populated only when `status === 'anchor_no_phase_separation'`. Up to
+   * 3 patterns from the same env whose volume varies enough to be good
+   * starting points (CV ≥ 0.5). Empty array when the scan found none or
+   * errored — the refusal envelope still ships, the table just doesn't
+   * render. Per Note 30: "re-anchor" without suggestions is dead-end UX.
+   */
+  anchor_suggestions?: AnchorSuggestion[];
 }
 
 interface ThresholdAudit {
@@ -280,6 +293,24 @@ export async function executeMetricsThatMoved(
   const anchorValues = anchorSeries.map(([, v]) => v);
   const anchorDispersion = computeAnchorDispersion(anchorValues);
   if (anchorDispersion < ANCHOR_DISPERSION_FLOOR) {
+    // Per Note 30: refusing without alternatives is dead-end UX. Scan the
+    // env's recent top patterns for ones with enough variation to be
+    // good starting points, surface up to 3. Helper degrades to [] on
+    // any error so the refusal still ships even if the suggestion query
+    // fails.
+    const tfRefuse = parseTimeframe(window);
+    const windowSecondsForScan = Math.floor(tfRefuse.days * 86400);
+    const suggestions = await suggestHigherVariationAnchors(
+      env,
+      windowSecondsForScan,
+      stepSeconds,
+    );
+    const suggestionsBlock = renderAnchorSuggestionsBlock(suggestions);
+    const baseProse =
+      `The pattern we looked at is too steady over this window to compare against other metrics. Try a different starting pattern or widen the window.`;
+    const refuseSummary = suggestionsBlock
+      ? `${baseProse}\n${suggestionsBlock}`
+      : baseProse;
     const data: MetricsThatMovedSummary = {
       status: 'anchor_no_phase_separation',
       threshold_used: floor,
@@ -299,13 +330,14 @@ export async function executeMetricsThatMoved(
       backend_pressure_hint: pressureHint(queryCount, totalLatencyMs, throttledHit),
       // Per Notes 10-12: drop "anchor", "dispersion", raw PromQL expression
       // from user prose. The numeric audit lives in payload for the agent.
-      human_summary: `The pattern we looked at is too steady over this window to tell busy phases apart from quiet ones, so the math is meaningless. Try a different starting pattern or widen the window.`,
+      human_summary: refuseSummary,
       moved: [],
       not_moved: [],
       evaluation_failed: [],
+      anchor_suggestions: suggestions,
     };
     // Plain English per Notes 10-12: drop "anchor", "dispersion", "refusing".
-    const headline = `The pattern we looked at is too steady to tell apart busy vs quiet phases. Try a different starting pattern.`;
+    const headline = `The pattern we looked at is too steady to compare against other metrics. Try a different starting pattern.`;
     return buildChassisEnvelope({
       tool: 'log10x_metrics_that_moved',
       view: 'summary',

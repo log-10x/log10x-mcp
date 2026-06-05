@@ -132,6 +132,12 @@ export const configureEngineSchema = {
     .describe(
       '`configure` (default) = derive a fresh per-pattern policy and open a PR. `refresh` = re-pull TSDB metrics for an already-deployed policy, compare observed volume to the cap-CSV preamble baseline, and open a delta PR only when the volume has drifted beyond `tolerance_pct`. Use `refresh` from cron/agent loops after the engine is live and 10x metrics are flowing. Requires `current_csv` carrying the prior `# target_percent=N` preamble; if absent, falls back to `target_percent` arg or returns target_resolution.'
     ),
+  delivery: z
+    .enum(['gitops', 'kubectl_configmap', 'stdout_only'])
+    .default('gitops')
+    .describe(
+      'How the rendered policy is delivered. `gitops` (default) opens a PR against the customer gitops repo (requires `gitops_repo`). `kubectl_configmap` writes directly to a k8s ConfigMap on the active cluster (no GitHub needed). `stdout_only` returns the proposed config in the response without writing anywhere.'
+    ),
   tolerance_pct: z
     .number()
     .min(0)
@@ -1187,16 +1193,18 @@ async function resolveTarget(
     if (!destination && recs?.destination) destination = recs.destination as SiemId;
   }
 
-  if (!repo) {
+  // Gate the GitOps repo check on delivery mode. `kubectl_configmap` writes
+  // directly to a k8s ConfigMap on the active cluster and `stdout_only` just
+  // returns the proposed config — neither needs a GitHub repo. Only `gitops`
+  // delivery (the default) requires a resolved `gitops_repo`.
+  if (args.delivery === 'gitops' && !repo) {
     return {
       error: renderError(
         'gitops repo not resolved',
-        'configure_engine needs `gitops_repo` (owner/name) to author the cap-CSV PR. ' +
-        'Three options: ' +
-        '(1) Pass `gitops_repo` directly on this call. ' +
-        '(2) Run `log10x_set_gitops_repo` to write it to `~/.log10x/envs.json` — ' +
-        'then restart the MCP server (log10x_dev_restart) and retry. ' +
-        '(3) Set the `LOG10X_GH_REPO` environment variable on the MCP server process and restart.'
+        '`configure_engine` was called with `delivery=gitops` (the default), which opens a PR against a GitHub repository — and no `gitops_repo` is resolved. Three ways forward: ' +
+        '(1) Switch delivery mode — `delivery="kubectl_configmap"` writes the policy directly to a k8s ConfigMap on the active cluster (no GitHub needed), or `delivery="stdout_only"` returns the proposed config in the response without writing anywhere. ' +
+        '(2) Stay on gitops and pass `gitops_repo` directly on this call (owner/name, e.g. `acme/log10x-config`). ' +
+        '(3) Stay on gitops and run `log10x_set_gitops_repo` to write it to `~/.log10x/envs.json` — then restart the MCP server (`log10x_dev_restart`) and retry. The `LOG10X_GH_REPO` env var on the MCP server process is also honored.'
       ),
     };
   }
@@ -1212,7 +1220,12 @@ async function resolveTarget(
 
   return {
     resolved: {
-      gitops_repo: repo,
+      // For non-gitops delivery (`kubectl_configmap` / `stdout_only`) the
+      // repo may legitimately be unresolved — the gate above only requires
+      // it for `delivery === 'gitops'`. Fall back to an empty string so the
+      // resolved struct stays typed; downstream `renderPrCommand` is only
+      // invoked on the gitops path where `repo` was guaranteed to resolve.
+      gitops_repo: repo ?? '',
       lookup_path: lookupPath ?? args.lookup_path ?? DEFAULT_LOOKUP_PATH,
       gitops_branch: args.gitops_branch ?? 'main',
       destination,

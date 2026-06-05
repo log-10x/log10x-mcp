@@ -11,7 +11,7 @@
  *   - lineChart() output from src/lib/line-chart.ts (height up to 12 rows)
  *   - BarRow chart (ASCII horizontal bars) for cross-service distribution
  *   - Severity breakdown
- *   - 3-5 sample events truncated to 120 chars each
+ *   - up to 3 full sample events (uncropped at 2048 chars; quality over quantity)
  *
  * must_ask_user: "Back to preview list" or "Apply with this in the picture".
  *
@@ -52,7 +52,7 @@ export const patternDetailSchema = {
   include_samples: z
     .boolean()
     .default(true)
-    .describe('When true (default), attempts to fetch 3-5 sample events from the SIEM. Set false to skip the SIEM round-trip.'),
+    .describe('When true (default), attempts to fetch up to 3 full sample events from the SIEM. Set false to skip the SIEM round-trip.'),
   timeRange: z
     .string()
     .regex(/^\d+[mhd]$/)
@@ -81,7 +81,7 @@ export interface PatternDetailEnvelope {
   first_seen_age_seconds: number | null;
   /** Bytes/sec time series (24h, 10min step). */
   trend_time_series: Array<{ ts: number; bytes_per_sec: number }>;
-  /** Sample events truncated to 120 chars each. */
+  /** Full sample events, capped at 2048 chars each. Up to 3 shown. */
   sample_events: string[];
   must_render_verbatim: string;
   must_ask_user: { question: string; options: string[] };
@@ -222,7 +222,7 @@ async function fetchTrend(
 }
 
 /**
- * Best-effort: fetch 3-5 sample events from the SIEM for this hash.
+ * Best-effort: fetch up to 3 full sample events from the SIEM for this hash.
  * Uses the same direct connector pull that pattern_examples uses:
  * no buckets:1 cap, maxPullMinutes:2, and no fetchEventsByHashes wrapper
  * that would limit scan depth on wide windows.
@@ -246,7 +246,7 @@ async function fetchSampleEvents(
     const probe = await conn.pullEvents({
       window,
       query: q,
-      targetEventCount: 5,
+      targetEventCount: 3,
       maxPullMinutes: 2,
       onProgress: () => {},
     });
@@ -255,8 +255,11 @@ async function fetchSampleEvents(
     // .message / .body) before truncating, so multi-line JSON blocks whose
     // SIEM connector delivers the opening "{" as a bare string are rendered
     // via their parent envelope field rather than the bare "{" fragment.
+    // Note 20: cap raised from 120 → 2048 so the user sees the actual log
+    // content (fields, error detail, service context) rather than a teaser
+    // that ends with "...". Quality > quantity: 3 full samples beats 5 cropped.
     return {
-      events: probe.events.slice(0, 5).map((ev) => oneLine(ev, 120)),
+      events: probe.events.slice(0, 3).map((ev) => oneLine(ev, 2048)),
       siemKind: 'resolved',
     };
   } catch {
@@ -374,7 +377,7 @@ function renderVerbatim(args: {
         disclosureLine = `Sample events (${sortedEvents.length} shown, latest from ${ageDays}d ago; samples distributed across ${timeRange} SIEM probe):`;
       }
     }
-    lines.push(disclosureLine || `Sample events (${sortedEvents.length} shown, truncated to 120 chars):`);
+    lines.push(disclosureLine || `Sample events (${sortedEvents.length} shown):`);
     sortedEvents.forEach((evt, i) => {
       lines.push(`  ${i + 1}. ${evt}`);
     });

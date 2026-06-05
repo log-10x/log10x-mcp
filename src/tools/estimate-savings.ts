@@ -1591,7 +1591,7 @@ export async function executeEstimateSavings(
         return buildChassisEnvelope({
           tool: 'log10x_estimate_savings',
           view: 'summary',
-          headline: 'estimate_savings refused: pass proposed_config or target_percent.',
+          headline: 'estimate_savings needs target_percent or proposed_config — neither was passed.',
           status: 'error',
           decisions: { threshold_used: null, threshold_basis: 'default' },
           source_disclosure: { bytes_source: 'tsdb', siem_vendor: destination },
@@ -1599,14 +1599,38 @@ export async function executeEstimateSavings(
           payload: {
             ok: false,
             phase: 'target_resolution',
-            error: 'proposed_config or target_percent required',
+            error: 'target_percent or proposed_config required',
+            required_inputs: {
+              option_1: {
+                arg: 'target_percent',
+                description: 'a % reduction goal — the greedy solver picks which patterns to act on to hit it.',
+                example_call: 'log10x_estimate_savings({ target_percent: 30 })',
+              },
+              option_2: {
+                arg: 'proposed_config',
+                description: 'an explicit list of per-pattern rows (pattern_hash + action) — the forecast scores exactly that plan.',
+                example_call: 'log10x_estimate_savings({ proposed_config: [{ pattern_hash: "<hash>", action: "compact" }, ...] })',
+              },
+              gathering_tool: 'log10x_top_patterns',
+              gathering_note: 'Most starting points: call log10x_top_patterns first, pick the heavy patterns, then call estimate_savings with either a target_percent or those patterns as proposed_config rows.',
+            },
           },
-          human_summary: 'estimate_savings forecast needs either proposed_config (explicit per-pattern rows) or target_percent (greedy solver picks rows).',
+          human_summary:
+            'estimate_savings needs one of two inputs and neither was passed.\n\n' +
+            'Option 1 — a savings target. Tell me how much you want to save.\n' +
+            '  Example: log10x_estimate_savings({ target_percent: 30 }) — estimates what it would take to cut your bill by 30%.\n\n' +
+            'Option 2 — specific patterns to target. Tell me which patterns you would mitigate.\n' +
+            '  Example: log10x_estimate_savings({ proposed_config: [{ pattern_hash: "<hash>", action: "compact" }] }) — estimates savings if you mitigate those patterns.\n\n' +
+            'Most starting points: run log10x_top_patterns first, pick the heavy ones, then call this with their hashes.',
           error: {
             error_type: 'missing_input',
             retryable: false,
             suggested_backoff_ms: null,
-            hint: 'Pass proposed_config (explicit rows) or target_percent (greedy solver).',
+            hint:
+              'Pass one of two inputs:\n' +
+              '  • target_percent (number, 1-95): a % reduction goal. Example: log10x_estimate_savings({ target_percent: 30 }).\n' +
+              '  • proposed_config (array of {pattern_hash, action}): explicit per-pattern rows. Example: log10x_estimate_savings({ proposed_config: [{ pattern_hash: "<hash>", action: "compact" }] }).\n' +
+              'Gather candidate patterns first with log10x_top_patterns, then re-run with either input.',
           },
           telemetry,
         });

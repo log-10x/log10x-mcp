@@ -127,7 +127,19 @@ function buildHeadline(r: ProbeResult): string {
     return `Retriever end-to-end health check passed — picked pattern ${r.picked_hash ?? '?'}, ran query ${r.query_id ?? '?'}, all ${r.asserts.length} checks succeeded (${r.total_runtime_ms}ms).`;
   }
   if (r.verdict === 'broken') {
-    return `Retriever end-to-end health check failed — first failing step: ${r.first_failed_assert ?? '?'}. ${r.surfaced_remedy ?? ''}`;
+    // Note 32: lead with capability + impact in user terms, not engine-internal
+    // component names. "Long-term log search isn't working" is what the user
+    // experiences; the assert name + remedy live in the data envelope for
+    // anyone who wants to drill into the mechanism.
+    const remedy = r.surfaced_remedy ?? '';
+    return (
+      `Long-term log search isn't working right now. ` +
+      `I ran an end-to-end check on the part of log10x that lets you look up historical events, ` +
+      `and the step "${r.first_failed_assert ?? '?'}" failed. ` +
+      `What this means: any log10x_retriever_query or log10x_retriever_series call will return empty until this is fixed. ` +
+      (remedy ? `Likely cause: ${remedy} ` : '') +
+      `Try log10x_advise_retriever for setup guidance.`
+    );
   }
   // Note 14: explain WHAT this tool tried (end-to-end retriever pipeline
   // health check), WHY it couldn't (no metrics backend wired up to pick a

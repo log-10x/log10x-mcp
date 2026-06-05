@@ -50,6 +50,7 @@ import { normalizeTimeRange } from '../lib/time-range.js';
 import { queryInstant } from '../lib/api.js';
 import { LABELS } from '../lib/promql.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
+import { sanitizeUserProse } from '../lib/anti-jargon-prose.js';
 
 /**
  * Resolve a pattern_hash to its dominant pattern name (Symbol Message)
@@ -171,10 +172,12 @@ interface PatternExamplesSummary {
   dropped_jaccard_events: number;
   multi_line_detected: boolean;
   // Catalog-identity-handoff: the raw SIEM events pulled by the probe,
-  // re-emitted (capped at 50) so chain steps that need the live lines —
-  // e.g. resolve_batch, paste-triage, secondary templater passes — don't
-  // re-issue the same SIEM round-trip. Strings are stringified once at
-  // emit time (events arrive as `unknown[]` from the connector layer).
+  // re-emitted in full (Note 20 — no truncation) so chain steps that need
+  // the live lines — e.g. resolve_batch, paste-triage, secondary templater
+  // passes — don't re-issue the same SIEM round-trip. Upstream probe size
+  // is bounded by probeBatch + maxPullMinutes so there is no runaway-size
+  // risk. Strings are stringified once at emit time (events arrive as
+  // `unknown[]` from the connector layer).
   raw_events: string[];
   buckets: Array<{
     rank: number;
@@ -295,7 +298,15 @@ export async function executePatternExamples(
   }
 
   const d = sumOut.data;
-  const headline = `\`${d.pattern}\` (${d.vendor}, ${d.window}): ${d.events_pulled} events pulled, ${d.retained_events} retained across ${d.retained_templates} templates via ${d.probe_path}`;
+  // Note 22: this tool bypassed the chassis sanitize pass in batch 1.
+  // sanitizeUserProse is now invoked explicitly on the user-visible
+  // headline + human_summary strings before they reach buildChassisEnvelope.
+  // The chassis does not run sanitizeUserProse for us today (verified), so
+  // tool authors must call it at the build site. Pattern terms like
+  // "templates", "candidate", "Jaccard", "similarity gate", "SIEM" are
+  // rewritten to plain English via BANNED_PHRASE_REWRITES.
+  const rawHeadline = `\`${d.pattern}\` (${d.vendor}, ${d.window}): ${d.events_pulled} events pulled, ${d.retained_events} retained across ${d.retained_templates} templates via ${d.probe_path}`;
+  const headline = sanitizeUserProse(rawHeadline);
   // Truncation signal: the SIEM probe hit its limit.
   // Use the schema default (10) to avoid false-positive truncation on normal-size responses.
   // rawArgs.limit ?? 10 matches the inner default at line ~295 and the schema default.
@@ -322,12 +333,15 @@ export async function executePatternExamples(
   }
 
   // Honest human_summary: event counts + bucket recommendation.
+  // Note 22: explicit sanitize pass so banned vocabulary
+  // ("templates", "Jaccard", "SIEM" etc.) gets rewritten before emit.
   const topBucketAction = d.buckets[0]?.bucket_interpretation.recommended_action;
-  const chassis_human_summary =
+  const rawHumanSummary =
     `${d.events_pulled} events pulled, ${d.retained_events} retained across ${d.retained_templates} buckets` +
     ` (${d.probe_path}, ${d.window} window).` +
     (topBucketAction ? ` Top bucket recommends: ${topBucketAction}.` : '') +
     (d.multi_line_detected ? ' Multi-line grouping detected.' : '');
+  const chassis_human_summary = sanitizeUserProse(rawHumanSummary);
 
   return buildChassisEnvelope({
     tool: 'log10x_pattern_examples',
@@ -348,7 +362,12 @@ export async function executePatternExamples(
       pattern_count_source: {
         kind: 'scoped_total',
         count: d.retained_templates,
-        denominator_meaning: `Retained templateHash buckets passing Jaccard ≥ 0.85 out of ${d.distinct_templates} templates from SIEM probe`,
+        // Note 24: plain English. "Retained templateHash buckets passing
+        // Jaccard ≥ 0.85" was data-sci vocabulary the user has no model for.
+        // "Shape" is the user-facing word for what we previously called a
+        // template; "shape-match" replaces "Jaccard ≥ 0.85" per the
+        // anti-jargon-prose dictionary rewrites.
+        denominator_meaning: `Kept ${d.retained_templates} of ${d.distinct_templates} matching shapes from the log platform probe (others were a different variant of the error and held back to avoid mixing distinct issues)`,
       },
       siem_vendor: d.vendor,
     },
@@ -358,8 +377,11 @@ export async function executePatternExamples(
       candidates_count: d.distinct_templates,
       candidates_usable: d.retained_templates,
       candidates_evaluated: d.buckets.length,
+      // Note 24: plain English replacement for "X events in Y templates
+      // dropped on Jaccard". Users don't think in templates or Jaccard;
+      // they think in event variants.
       candidates_failed: d.dropped_jaccard_events > 0
-        ? [`${d.dropped_jaccard_events} events in ${d.distinct_templates - d.retained_templates} templates dropped on Jaccard`]
+        ? [`${d.dropped_jaccard_events} events from a different variant of the same error were kept separate to avoid mixing two distinct issues`]
         : undefined,
     },
     payload: {
@@ -681,11 +703,15 @@ async function executePatternExamplesInner(
       retained_templates: filteredRetained.length,
       dropped_jaccard_events: dropped.reduce((s, b) => s + b.p.count, 0),
       multi_line_detected: isMultiLine,
-      // Re-emit the SIEM events already pulled by the probe (capped at 50).
-      // Stringify defensively: connectors return `unknown[]` — some yield
-      // raw lines, others structured records — so coerce via String() with
-      // a JSON fallback for object shapes.
-      raw_events: probe.events.slice(0, 50).map((e) =>
+      // Re-emit the SIEM events already pulled by the probe.
+      // Note 20: surface ALL raw events without truncation. The previous
+      // .slice(0, 50) hid evidence the user needed to read; we already
+      // bounded probe.events upstream via probeBatch + maxPullMinutes,
+      // so there is no runaway-size risk. Stringify defensively:
+      // connectors return `unknown[]` — some yield raw lines, others
+      // structured records — so coerce via String() with a JSON fallback
+      // for object shapes.
+      raw_events: probe.events.map((e) =>
         typeof e === 'string'
           ? e
           : (() => {
@@ -753,6 +779,30 @@ async function executePatternExamplesInner(
           patternEventCount: patternTotalEvents,
           slotDistribution: slotDist,
         });
+        // Note 23: rewrite rationale + human_summary so they lead with the
+        // recommendation framed as a cost-saving action, tie to % impact for
+        // this pattern, and CTA to log10x_pattern_mitigate. The previous
+        // "Why compact:" framing read as product trivia, not a recommendation.
+        const shareOfPattern = patternTotalEvents > 0
+          ? Math.round((bucket.p.count / patternTotalEvents) * 100)
+          : 0;
+        const sharePhrase = shareOfPattern > 0
+          ? `roughly ${shareOfPattern}% of this pattern's volume`
+          : 'this bucket of events';
+        const action = interpretation.recommended_action;
+        const ctaTail = ' Run log10x_pattern_mitigate to apply this, or log10x_cost_options to see alternatives.';
+        let recommendation: string;
+        if (action === 'compact') {
+          recommendation = `Recommended: compact this pattern. It would cut ${sharePhrase} of your bill while preserving the signal — you'd still see the failure pattern and rate, just without the redundant copies.${ctaTail}`;
+        } else if (action === 'drop') {
+          recommendation = `Recommended: drop this pattern. It would remove ${sharePhrase} from your bill. The events carry no per-event signal (uniform stream from ${interpretation.active_emitters} ${interpretation.emitter_type}${interpretation.active_emitters !== 1 ? 's' : ''}).${ctaTail}`;
+        } else if (action === 'sample') {
+          recommendation = `Recommended: sample this pattern. It would cut ${sharePhrase} of your bill while keeping coverage — the events vary, so sampling preserves distribution shape without keeping every copy.${ctaTail}`;
+        } else {
+          recommendation = `Recommended: keep this pattern as-is. ${sharePhrase} of this pattern's volume; mixed content with per-event signal, so no safe reduction at this time.`;
+        }
+        const sanitizedRecommendation = sanitizeUserProse(recommendation);
+        const sanitizedHumanSummary = sanitizeUserProse(interpretation.human_summary);
         return {
           rank: i + 1,
           template_hash: bucket.p.hash,
@@ -761,7 +811,12 @@ async function executePatternExamplesInner(
           jaccard: bucket.jaccard,
           severity: bucket.p.severity,
           service: bucket.p.service,
-          sample_event: bucket.p.sampleEvent.slice(0, 200),
+          // Note 20: do not crop sample events. Showing the full payload is
+          // the whole point of pattern_examples; truncating at 200 chars hides
+          // the parts the user actually needs to read. raw_events[] surfaces
+          // the same events un-truncated; sample_event is the bucket-pinned
+          // canonical line and stays full-length here.
+          sample_event: bucket.p.sampleEvent,
           slot_distribution: slotDist,
           bucket_interpretation: {
             active_emitters: interpretation.active_emitters,
@@ -769,9 +824,9 @@ async function executePatternExamplesInner(
             content_variance: interpretation.content_variance,
             envelope_share_of_named_slots: interpretation.envelope_share_of_named_slots,
             recommended_action: interpretation.recommended_action,
-            rationale: interpretation.rationale,
+            rationale: sanitizedRecommendation,
           },
-          human_summary: interpretation.human_summary,
+          human_summary: sanitizedHumanSummary,
         };
       }),
       probe_notes: probeNotes.slice(0, 5),
@@ -821,9 +876,12 @@ async function executePatternExamplesInner(
     lines.push('');
     if (p.severity) lines.push(`**Severity**: ${p.severity}`);
     if (p.service) lines.push(`**Service**: ${p.service}`);
-    lines.push(`**Sample event** (truncated to 200 chars):`);
+    // Note 20: full sample event, no truncation. Cropping at 200 chars
+    // hid the part of the event the user actually needed (e.g. "Request
+    // failed. {service.instance.X" cut off the failure reason).
+    lines.push(`**Sample event**:`);
     lines.push('```');
-    lines.push(p.sampleEvent.slice(0, 200));
+    lines.push(p.sampleEvent);
     lines.push('```');
     if (Object.keys(p.variables).length > 0) {
       const allSlots = Object.entries(p.variables)

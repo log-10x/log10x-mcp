@@ -162,14 +162,16 @@ export async function executeDiscoverJoin(
       runner_ups: [],
       top_below_threshold: [],
     };
-    const side = customerEmpty ? 'Customer-side' : 'Log10x-side';
-    const emptyHeadline =
-      `${side} metrics backend returned 0 labels — cross-pillar join cannot be computed. ` +
-      `Verify ${customerEmpty ? 'customer_metrics_backend is configured and reaching a Prometheus with data' : 'the Log10x reporter is emitting metrics'}.`;
-    const emptyHumanSummary =
-      `${side} label universe is empty (0 labels returned). ` +
-      `Cross-pillar join requires at least one label on each side. ` +
-      `${customerEmpty ? 'Check that LOG10X_CUSTOMER_METRICS_URL points to a Prometheus instance with active series.' : 'Check that the Log10x reporter is running and emitting all_events_* metrics.'}`;
+    const emptyHeadline = customerEmpty
+      ? `The Prometheus endpoint at ${backend.endpoint} is reachable but doesn't have any metrics relevant to log-cost joining.`
+      : `Log10x-side metrics backend returned 0 labels — cross-pillar join cannot be computed. Verify the Log10x reporter is emitting metrics.`;
+    const emptyHumanSummary = customerEmpty
+      ? `The Prometheus endpoint at ${backend.endpoint} is reachable but doesn't have any metrics relevant to log-cost joining. ` +
+        `Common causes: your monitoring stack doesn't expose Prometheus on that endpoint; the endpoint is wrong; or the Prometheus is mostly empty. ` +
+        `Try log10x_discover_labels to see what's available, or update LOG10X_CUSTOMER_METRICS_URL to point at your APM Prometheus.`
+      : `Log10x-side label universe is empty (0 labels returned). ` +
+        `Cross-pillar join requires at least one label on each side. ` +
+        `Check that the Log10x reporter is running and emitting all_events_* metrics.`;
     return buildChassisEnvelope({
       tool: 'log10x_discover_join',
       view: 'summary',
