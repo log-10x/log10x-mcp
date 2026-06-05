@@ -16,6 +16,7 @@ import { fetchLabels, fetchLabelValues } from '../lib/api.js';
 import { agentOnly } from '../lib/agent-only.js';
 import { type StructuredOutput } from '../lib/output-types.js';
 import { newChassisTelemetry, buildChassisEnvelope } from '../lib/chassis-envelope.js';
+import { wrapBackendError, type PrimitiveError } from '../lib/primitive-errors.js';
 
 export const discoverLabelsSchema = {
   label: z.string().optional().describe('If set, return distinct values for this label (e.g., "tenx_user_service" returns every service). If omitted, return the full label name list.'),
@@ -79,10 +80,34 @@ export async function executeDiscoverLabels(
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
   const telemetry = newChassisTelemetry();
-  const sumOut: { data?: DiscoverLabelsSummary } = {};
-  await executeDiscoverLabelsInner(args, env, sumOut);
+  const sumOut: { data?: DiscoverLabelsSummary; error?: PrimitiveError } = {};
+  try {
+    await executeDiscoverLabelsInner(args, env, sumOut);
+  } catch (e) {
+    sumOut.error = wrapBackendError(e);
+  }
+
+  if (sumOut.error) {
+    const err = sumOut.error;
+    return buildChassisEnvelope({
+      tool: 'log10x_discover_labels',
+      view: 'summary',
+      headline: `discover_labels failed: ${err.error_type}`,
+      status: 'error',
+      decisions: { threshold_used: null, threshold_basis: 'default' },
+      source_disclosure: { label_source: 'log10x_prom' },
+      scope: { window: 'all', window_basis: 'auto_default' },
+      payload: {},
+      human_summary: `discover_labels failed: ${err.hint}`,
+      error: err,
+      telemetry,
+    });
+  }
 
   if (!sumOut.data) {
+    // No data and no error — treat as unknown failure with a typed envelope
+    // routed through wrapBackendError for consistency with the error path.
+    const err = wrapBackendError(new Error('discover_labels inner produced no structured result'));
     return buildChassisEnvelope({
       tool: 'log10x_discover_labels',
       view: 'summary',
@@ -93,12 +118,7 @@ export async function executeDiscoverLabels(
       scope: { window: 'all', window_basis: 'auto_default' },
       payload: {},
       human_summary: 'discover_labels failed: inner produced no structured result.',
-      error: {
-        error_type: 'unknown',
-        retryable: false,
-        suggested_backoff_ms: null,
-        hint: 'discover_labels inner produced no structured result.',
-      },
+      error: err,
       telemetry,
     });
   }
@@ -152,12 +172,19 @@ export async function executeDiscoverLabels(
 async function executeDiscoverLabelsInner(
   args: { label?: string; limit?: number },
   env: EnvConfig,
-  sumOut?: { data?: DiscoverLabelsSummary }
+  sumOut?: { data?: DiscoverLabelsSummary; error?: PrimitiveError }
 ): Promise<string> {
   const limit = args.limit ?? 100;
   // Mode 1: return values for a specific label.
   if (args.label) {
-    const values = await fetchLabelValues(env, args.label);
+    let values: string[];
+    try {
+      values = await fetchLabelValues(env, args.label);
+    } catch (e) {
+      const err = wrapBackendError(e);
+      if (sumOut) sumOut.error = err;
+      return `Failed to fetch values for label "${args.label}": ${err.hint}`;
+    }
     if (values.length === 0) {
       if (sumOut) sumOut.data = { mode: 'label_values', label: args.label, total_count: 0, shown_count: 0, values: [] };
       return `Label "${args.label}" has no values. Check the label name or try a different time range by querying a tool that accepts filters.`;
@@ -172,7 +199,14 @@ async function executeDiscoverLabelsInner(
   }
 
   // Mode 2: return the full label list, with featured labels annotated.
-  const all = await fetchLabels(env);
+  let all: string[];
+  try {
+    all = await fetchLabels(env);
+  } catch (e) {
+    const err = wrapBackendError(e);
+    if (sumOut) sumOut.error = err;
+    return `Failed to list labels: ${err.hint}`;
+  }
   const queryable = all.filter((l) => !INTERNAL_LABELS.has(l)).sort();
 
   // Split featured labels into available (present in this env) and unavailable,
