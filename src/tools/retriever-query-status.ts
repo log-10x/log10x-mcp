@@ -19,9 +19,14 @@ import {
 } from '@aws-sdk/client-cloudwatch-logs';
 import { getRetrieverState } from '../lib/retriever-state.js';
 import { isRetrieverConfigured } from '../lib/retriever-api.js';
-import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { type StructuredOutput } from '../lib/output-types.js';
 import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
-import { buildChassisErrorEnvelope } from '../lib/chassis-envelope.js';
+import {
+  buildChassisEnvelope,
+  buildChassisErrorEnvelope,
+  newChassisTelemetry,
+} from '../lib/chassis-envelope.js';
+import type { ChassisStatus } from '../lib/chassis-envelope.js';
 import { wrapBackendError } from '../lib/primitive-errors.js';
 import { run } from '../lib/discovery/shell.js';
 
@@ -32,6 +37,7 @@ const execFileP = promisify(execFile);
 export const retrieverQueryStatusSchema = {
   query_id: z
     .string()
+    .min(1)
     .describe(
       'UUID of a previously-submitted retriever query. Returned as data.query_id from log10x_retriever_query.'
     ),
@@ -115,18 +121,24 @@ async function s3Get(bucket: string, key: string): Promise<string> {
   return stdout;
 }
 
-async function s3List(bucket: string, prefix: string): Promise<S3ListEntry[]> {
+async function s3List(
+  bucket: string,
+  prefix: string,
+): Promise<{ entries: S3ListEntry[]; error?: ReturnType<typeof wrapBackendError> }> {
   try {
     const { stdout } = await execFileP(
       'aws',
       ['s3api', 'list-objects-v2', '--bucket', bucket, '--prefix', prefix, '--output', 'json'],
       { maxBuffer: 8 * 1024 * 1024 }
     );
-    if (!stdout.trim()) return [];
+    if (!stdout.trim()) return { entries: [] };
     const parsed = JSON.parse(stdout) as { Contents?: S3ListEntry[] };
-    return parsed.Contents || [];
-  } catch {
-    return [];
+    return { entries: parsed.Contents || [] };
+  } catch (e) {
+    // Preserve partial-failure provenance: wrap the thrown error so the
+    // envelope carries a structured error_type/retryable/hint instead of
+    // silently flattening to "0 objects found".
+    return { entries: [], error: wrapBackendError(e) };
   }
 }
 
@@ -403,9 +415,58 @@ export async function executeRetrieverQueryStatus(
     include_pod_logs?: boolean;
   }
 ): Promise<string | StructuredOutput> {
-  const queryId = args.query_id;
+  const queryId = (args.query_id ?? '').trim();
   const target = args.target ?? 'app';
   const includePodLogs = args.include_pod_logs ?? true;
+  const telemetry = newChassisTelemetry();
+
+  // Early-return chassis error envelope when query_id is empty after trim.
+  // The Zod schema's .min(1) guard prevents this at the SDK boundary; this
+  // catches direct callers (chain walkers, eval harness) that bypass Zod.
+  if (queryId === '') {
+    return buildChassisErrorEnvelope({
+      tool: 'log10x_retriever_query_status',
+      err: {
+        error_type: 'schema_invalid',
+        retryable: false,
+        suggested_backoff_ms: null,
+        hint: 'query_id is required and must not be empty. Pass the UUID returned as data.query_id from log10x_retriever_query.',
+      },
+      telemetry,
+      contextPayload: { query_id: args.query_id, target },
+      source_disclosure: {},
+    });
+  }
+
+  // Y2: Sentinel passthrough. retriever_query populates `query_id` =
+  // `error:<error_type>` on failure so the forward chain stays composable
+  // even when no real UUID was minted. Detect the sentinel here and return
+  // a typed chassis error envelope explaining that the upstream tool — not
+  // the runtime — produced this query id. Avoids a hopeless S3 _DONE.json
+  // probe on a non-existent prefix.
+  if (queryId.startsWith('error:')) {
+    const upstreamErrorType = queryId.slice('error:'.length) || 'unknown';
+    return buildChassisErrorEnvelope({
+      tool: 'log10x_retriever_query_status',
+      err: {
+        error_type: 'partial_failure',
+        retryable: false,
+        suggested_backoff_ms: null,
+        hint:
+          `The query_id is a sentinel emitted by log10x_retriever_query on an upstream failure ` +
+          `(upstream error_type='${upstreamErrorType}'). No real query was dispatched, so there is no _DONE.json ` +
+          `or qr/ prefix to probe. See the original log10x_retriever_query result for the actual error and ` +
+          `remediation; do not retry status against this sentinel id.`,
+      },
+      telemetry,
+      contextPayload: {
+        query_id: queryId,
+        target,
+        upstream_error_type: upstreamErrorType,
+      },
+      source_disclosure: {},
+    });
+  }
 
   const retrieverState = await getRetrieverState(null);
   if (!(await isRetrieverConfigured())) {
@@ -440,13 +501,20 @@ export async function executeRetrieverQueryStatus(
     }
 
     // Step c: list qr/ prefix for event files
-    const qrObjects = await s3List(bucket, qrPrefix);
-    const eventFiles = qrObjects.filter((o) => o.Key.endsWith('.jsonl'));
+    const qrList = await s3List(bucket, qrPrefix);
+    const eventFiles = qrList.entries.filter((o) => o.Key.endsWith('.jsonl'));
     const totalEventBytes = eventFiles.reduce((s, o) => s + (o.Size ?? 0), 0);
 
     // Step d: list q/ prefix for byte-count markers
-    const markerObjects = await s3List(bucket, markerPrefix);
-    const markerCount = markerObjects.length;
+    const markerList = await s3List(bucket, markerPrefix);
+    const markerCount = markerList.entries.length;
+
+    // Collect partial-failure provenance from s3List calls so the envelope's
+    // status can degrade to 'partial' when one of the two list operations
+    // failed (the other still produced usable data).
+    const s3ListErrors: Array<{ prefix: string; error: ReturnType<typeof wrapBackendError> }> = [];
+    if (qrList.error) s3ListErrors.push({ prefix: qrPrefix, error: qrList.error });
+    if (markerList.error) s3ListErrors.push({ prefix: markerPrefix, error: markerList.error });
 
     // Step e: CloudWatch events (if queryLogGroup configured)
     // Try helm values to get queryLogGroup
@@ -549,52 +617,101 @@ export async function executeRetrieverQueryStatus(
 
     const headline = `Retriever query status for ${queryId}: ${humanSummary.slice(0, 120)}`;
 
-    return buildEnvelope({
+    // Status map (per spec):
+    //   doneJson present + matched > 0           → 'success'
+    //   doneJson present + matched === 0         → 'no_signal'
+    //   doneJson missing                         → 'insufficient_data'
+    //   diagnostics.category in {dispatcher_failure, dispatch_failure,
+    //     results_not_uploaded}                  → 'partial'
+    // Also: any s3List failure forces 'partial' so an agent sees the
+    // partial-failure provenance from list-objects-v2 errors.
+    let status: ChassisStatus;
+    const matched = doneJson?.matched ?? 0;
+    const partialDiagnosticCategories = new Set([
+      'dispatcher_failure',
+      'dispatch_failure',
+      'results_not_uploaded',
+    ]);
+    if (partialDiagnosticCategories.has(diagnostics.category) || s3ListErrors.length > 0) {
+      status = 'partial';
+    } else if (doneJson) {
+      status = matched > 0 ? 'success' : 'no_signal';
+    } else {
+      status = 'insufficient_data';
+    }
+
+    const payload = {
+      query_id: queryId,
+      target,
+      bucket,
+      s3_done_key: doneKey,
+      stats,
+      done_read_error: doneError,
+      marker_count: markerCount,
+      event_files: {
+        count: eventFiles.length,
+        total_bytes: totalEventBytes,
+        keys: eventFiles.slice(0, 20).map((o) => o.Key),
+      },
+      cloudwatch_events: queryLogGroup
+        ? {
+            log_group: queryLogGroup,
+            event_count: cwEvents.length,
+            events: cwEvents.slice(0, 100),
+            error: cwError,
+          }
+        : {
+            log_group: null,
+            event_count: 0,
+            events: [],
+            advisory: 'queryLogGroup not set — CW per-query logging disabled',
+          },
+      diagnostics,
+      // Partial-failure provenance surfaces structured s3List errors so an
+      // agent can branch on retryable/error_type without parsing the prose
+      // summary. Empty array when both list-objects-v2 calls succeeded.
+      s3_list_errors: s3ListErrors,
+      namespace: namespace ?? null,
+    };
+
+    const warnings: string[] = [];
+    for (const e of s3ListErrors) {
+      warnings.push(`s3 list-objects-v2 failed for prefix ${e.prefix}: ${e.error.error_type} — ${e.error.hint.slice(0, 160)}`);
+    }
+
+    return buildChassisEnvelope({
       tool: 'log10x_retriever_query_status',
       view: 'summary',
-      summary: { headline },
-      data: {
-        status: doneJson ? 'done' : doneError ? 'not_found' : 'unknown',
-        query_id: queryId,
-        target,
-        bucket,
-        s3_done_key: doneKey,
-        stats,
-        done_read_error: doneError,
-        marker_count: markerCount,
-        event_files: {
-          count: eventFiles.length,
-          total_bytes: totalEventBytes,
-          keys: eventFiles.slice(0, 20).map((o) => o.Key),
-        },
-        cloudwatch_events: queryLogGroup
-          ? {
-              log_group: queryLogGroup,
-              event_count: cwEvents.length,
-              events: cwEvents.slice(0, 100),
-              error: cwError,
-            }
-          : {
-              log_group: null,
-              event_count: 0,
-              events: [],
-              advisory: 'queryLogGroup not set — CW per-query logging disabled',
-            },
-        diagnostics,
-        human_summary: humanSummary,
-        source_disclosure: {
-          retriever_state_source: retrieverState.source,
-          namespace: namespace ?? null,
-        },
+      headline,
+      status,
+      decisions: { threshold_used: null, threshold_basis: 'default' },
+      source_disclosure: {
+        retriever_state_source: retrieverState.source,
       },
-      truncated: cwEvents.length >= 100,
+      scope: {
+        window: '24h',
+        window_basis: 'auto_default',
+      },
+      payload,
+      human_summary: humanSummary,
       actions,
+      telemetry,
+      truncated: cwEvents.length >= 100,
+      warnings: warnings.length > 0 ? warnings : undefined,
+      legacyCompat: true,
+      legacyExtraFields: {
+        // Back-compat: pre-chassis callers read data.query_id / data.bucket /
+        // etc. flat off `data`. Spread them so the migration is non-breaking.
+        ...payload,
+        human_summary: humanSummary,
+      },
     });
   } catch (err: unknown) {
     const primitiveErr = wrapBackendError(err);
     return buildChassisErrorEnvelope({
       tool: 'log10x_retriever_query_status',
       err: primitiveErr,
+      telemetry,
       contextPayload: { query_id: queryId, target },
       source_disclosure: {},
     });

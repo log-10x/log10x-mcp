@@ -48,7 +48,7 @@ import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { getOffloadStatusBatch } from '../lib/offload-status.js';
-import { buildChassisErrorEnvelope, sanitizeHeadline } from '../lib/chassis-envelope.js';
+import { buildChassisErrorEnvelope } from '../lib/chassis-envelope.js';
 import { wrapBackendError } from '../lib/primitive-errors.js';
 
 export const retrieverQuerySchema = {
@@ -57,6 +57,12 @@ export const retrieverQuerySchema = {
     .optional()
     .describe(
       'Reporter-named pattern (Symbol Message) to scope the scan to. Auto-translated to `tenx_user_pattern == "<name>"` Bloom-filter expression. Use this when the agent has a pattern name from event_lookup / top_patterns / cost_drivers and wants archive events for it without authoring the Bloom expression by hand. Mutually exclusive with `search`; if both are provided, `search` wins and `pattern` is ignored. Example: `pattern: "Payment_Gateway_Timeout"`.'
+    ),
+  pattern_hash: z
+    .string()
+    .optional()
+    .describe(
+      'Canonical pattern_hash from top_patterns / event_lookup. When provided, search is auto-built as `tenx_hash == "<hash>"` and no name resolution runs. This is the chain-stable identity emitted by top_patterns.payload.patterns[].pattern_hash — bypasses the name→hash resolver entirely. Precedence: `search` > `pattern_hash` > `pattern`. Example: `pattern_hash: "4Kjc7PHLWqY"`.'
     ),
   search: z
     .string()
@@ -112,7 +118,7 @@ export const retrieverQuerySchema = {
 };
 
 interface RetrieverQuerySummary {
-  status: 'ok' | 'not_configured';
+  status: 'success' | 'no_signal' | 'error' | 'not_configured';
   human_summary: string;
   query_id?: string;
   target?: string;
@@ -184,6 +190,7 @@ interface RetrieverQuerySummary {
 export async function executeRetrieverQuery(
   args: {
     pattern?: string;
+    pattern_hash?: string;
     search?: string;
     from: string;
     to: string;
@@ -209,11 +216,38 @@ export async function executeRetrieverQuery(
       remediation: retrieverNotConfiguredMessage(),
     });
   }
+
+  // Y2: pattern_hash → search auto-build BEFORE the inner executor runs.
+  // Bypasses the name→hash resolver entirely so a chain that arrives with
+  // a canonical pattern_hash from top_patterns / event_lookup never enters
+  // the pattern_not_resolved error path. Precedence: explicit `search`
+  // wins (agent authored it), then `pattern_hash` (chain-stable identity),
+  // then `pattern` (Reporter name, may resolve later via buildPatternSearch).
+  if (!args.search && args.pattern_hash) {
+    const safeHash = args.pattern_hash.trim().replace(/"/g, '');
+    args.search = `tenx_hash == "${safeHash}"`;
+  }
+
   const sumOut: { data?: RetrieverQuerySummary } = {};
   try {
     await executeRetrieverQueryInner(args, env, sumOut);
   } catch (err: unknown) {
-    const primitiveErr = wrapBackendError(err);
+    // Wave 2.F: classify time-window parse failures as schema_invalid
+    // instead of the generic 'unknown' wrapBackendError returns for
+    // non-HTTP/non-network errors. The inner throws `Invalid time window:
+    // ...` when normalizeTimeExpression rejects from/to; that's a caller-
+    // side input bug (retryable=false, no backoff) — distinct from a
+    // transient backend failure.
+    const errMsg = err instanceof Error ? err.message : String(err);
+    const isTimeWindowError = errMsg.startsWith('Invalid time window:');
+    const primitiveErr = isTimeWindowError
+      ? {
+          error_type: 'schema_invalid' as const,
+          retryable: false,
+          suggested_backoff_ms: null,
+          hint: errMsg.slice(0, 300),
+        }
+      : wrapBackendError(err);
     // Extract dual-failure breadcrumbs written by the SQS fallback path
     // when both HTTP and SQS transports were attempted and both failed.
     const dualErr = err as Record<string, unknown>;
@@ -226,11 +260,19 @@ export async function executeRetrieverQuery(
             sqs_error_message: dualErr.sqs_error_message,
           }
         : {};
+    // Y2: Populate a `query_id` sentinel on the error envelope so the
+    // forward chain (retriever_query_status) stays composable even when
+    // the original query never produced a UUID. The sentinel encodes the
+    // error_type so the status tool can early-return a typed envelope
+    // without an opaque "not found" S3 probe. Format: `error:<error_type>`.
+    const sentinelQueryId = `error:${primitiveErr.error_type ?? 'unknown'}`;
     return buildChassisErrorEnvelope({
       tool: 'log10x_retriever_query',
       err: primitiveErr,
       contextPayload: {
+        query_id: sentinelQueryId,
         pattern: args.pattern,
+        pattern_hash: args.pattern_hash,
         search: args.search,
         from: args.from,
         to: args.to,
@@ -660,7 +702,7 @@ async function executeRetrieverQueryInner(
         : undefined,
     });
     sumOut.data = {
-      status: 'ok',
+      status: resp.events.length === 0 ? 'no_signal' : 'success',
       human_summary,
       query_id: resp.queryId,
       target: resp.target,

@@ -22,7 +22,8 @@ import { agentOnly } from '../lib/agent-only.js';
 import { fetchOneSampleByHash } from '../lib/siem/sample.js';
 import { patternDisplay } from '../lib/pattern-descriptor.js';
 import { type StructuredOutput } from '../lib/output-types.js';
-import { newChassisTelemetry, buildChassisEnvelope, buildChassisErrorEnvelope, sanitizeHeadline } from '../lib/chassis-envelope.js';
+import { newChassisTelemetry, buildChassisEnvelope, buildChassisErrorEnvelope } from '../lib/chassis-envelope.js';
+import { wrapBackendError } from '../lib/primitive-errors.js';
 import { getOffloadStatus } from '../lib/offload-status.js';
 import { isRetrieverConfigured } from '../lib/retriever-api.js';
 import { normalizeTimeRange } from '../lib/time-range.js';
@@ -102,15 +103,15 @@ export async function executeEventLookup(
   try {
     md = await executeEventLookupInner(argsNormalized, env, sumOut);
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
+    // Wave 2.D: route through wrapBackendError so HTTP-status-coded
+    // throws from queryInstant / queryAi (e.g. "HTTP 503: ...") classify
+    // as backend_unavailable/backend_timeout/schema_invalid/anchor_not_found
+    // with proper retryable + suggested_backoff_ms instead of always
+    // collapsing to a non-retryable 'backend_error'.
+    const wrapped = wrapBackendError(err);
     return buildChassisErrorEnvelope({
       tool: 'log10x_event_lookup',
-      err: {
-        error_type: 'backend_error',
-        retryable: false,
-        suggested_backoff_ms: null,
-        hint: sanitizeHeadline(msg).slice(0, 300),
-      },
+      err: wrapped,
       telemetry,
       contextPayload: {
         pattern: argsNormalized.pattern,
