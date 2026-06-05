@@ -28,7 +28,7 @@ import { queryRange } from '../lib/api.js';
 import { resolveBackend, customerMetricsNotConfiguredMessage, formatDetectionTrace } from '../lib/customer-metrics.js';
 import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
-import { LABELS } from '../lib/promql.js';
+import { buildPatternAnchorRateQuery } from '../lib/anchor-promql.js';
 import { parseTimeframe } from '../lib/format.js';
 import { type StructuredOutput } from '../lib/output-types.js';
 import { computeAnchorDispersion, ANCHOR_DISPERSION_FLOOR } from '../lib/anchor-dispersion.js';
@@ -43,7 +43,7 @@ export const metricsThatMovedSchema = {
   anchor_type: z
     .enum(['log10x_pattern', 'customer_metric'])
     .describe('Anchor side. `log10x_pattern` = anchor is a 10x pattern. `customer_metric` = anchor is a customer PromQL.'),
-  anchor: z.string().describe('Anchor identity (pattern symbol_message OR customer PromQL expression).'),
+  anchor: z.string().describe('Anchor identity. For `anchor_type=log10x_pattern`: the pattern Symbol Message NAME or its 11-char `pattern_hash` (= `tenx_hash`) — the tool detects shape and queries the correct PromQL label (`message_pattern` vs `tenx_hash`). For `anchor_type=customer_metric`: a customer PromQL expression.'),
   candidates: z
     .array(z.string())
     .min(1)
@@ -210,8 +210,11 @@ export async function executeMetricsThatMoved(
   try {
     if (args.anchor_type === 'log10x_pattern') {
       const metricsEnv = await resolveMetricsEnv(env);
-      const escaped = args.anchor.replace(/"/g, '\\"');
-      anchorExpression = `sum(rate(all_events_summaryBytes_total{${LABELS.pattern}="${escaped}",${LABELS.env}="${metricsEnv}"}[${Math.max(stepSeconds * 3, 180)}s]))`;
+      anchorExpression = buildPatternAnchorRateQuery(
+        args.anchor,
+        metricsEnv,
+        Math.max(stepSeconds * 3, 180),
+      );
       const res = await timedQuery(() => queryRange(env, anchorExpression, fromSec, nowSec, stepSeconds));
       anchorSeries = extractFirstSeries(res);
     } else {

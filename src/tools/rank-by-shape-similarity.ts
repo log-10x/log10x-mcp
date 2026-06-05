@@ -20,7 +20,7 @@ import { queryRange } from '../lib/api.js';
 import { resolveBackend, customerMetricsNotConfiguredMessage, formatDetectionTrace } from '../lib/customer-metrics.js';
 import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
-import { LABELS } from '../lib/promql.js';
+import { buildPatternAnchorRateQuery } from '../lib/anchor-promql.js';
 import { parseTimeframe } from '../lib/format.js';
 import { type StructuredOutput } from '../lib/output-types.js';
 import { computeAnchorDispersion, ANCHOR_DISPERSION_FLOOR } from '../lib/anchor-dispersion.js';
@@ -43,7 +43,7 @@ export const DEFAULT_ANCHOR_PHASE_ALIGNED_FLOOR = 0.15;
 
 export const rankByShapeSimilaritySchema = {
   anchor_type: z.enum(['log10x_pattern', 'customer_metric']),
-  anchor: z.string().describe('Anchor identity (pattern symbol_message OR customer PromQL).'),
+  anchor: z.string().describe('Anchor identity. For `anchor_type=log10x_pattern`: the pattern Symbol Message NAME or its 11-char `pattern_hash` (= `tenx_hash`) — the tool detects shape and queries the correct PromQL label (`message_pattern` vs `tenx_hash`). For `anchor_type=customer_metric`: a customer PromQL expression.'),
   candidates: z.array(z.string()).min(1).max(100).describe('Customer-side PromQL expressions to rank (max 100). An AI caller reasoning over results can\'t meaningfully digest more than a few dozen; the cap reflects that, not a backend constraint.'),
   window: z.string().default('1h'),
   timeRange: z.string().optional(),
@@ -212,8 +212,11 @@ export async function executeRankByShapeSimilarity(
   try {
     if (args.anchor_type === 'log10x_pattern') {
       const metricsEnv = await resolveMetricsEnv(env);
-      const escaped = args.anchor.replace(/"/g, '\\"');
-      anchorExpression = `sum(rate(all_events_summaryBytes_total{${LABELS.pattern}="${escaped}",${LABELS.env}="${metricsEnv}"}[${Math.max(stepSeconds * 3, 180)}s]))`;
+      anchorExpression = buildPatternAnchorRateQuery(
+        args.anchor,
+        metricsEnv,
+        Math.max(stepSeconds * 3, 180),
+      );
       const res = await timedQuery(() => queryRange(env, anchorExpression, fromSec, nowSec, stepSeconds));
       anchorSeries = extractValues(res);
     } else {
