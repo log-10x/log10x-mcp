@@ -66,6 +66,7 @@ import { describeToolError } from './lib/tool-errors.js';
 import { retrieverQuerySchema, executeRetrieverQuery } from './tools/retriever-query.js';
 import { retrieverSeriesSchema, executeRetrieverSeries } from './tools/retriever-series.js';
 import { retrieverQueryStatusSchema, executeRetrieverQueryStatus } from './tools/retriever-query-status.js';
+import { retrieverProbeSchema, executeRetrieverProbe } from './tools/retriever-probe.js';
 import { backfillMetricSchema, executeBackfillMetric } from './tools/backfill-metric.js';
 import {
   customerMetricsQuerySchema,
@@ -1204,6 +1205,18 @@ registerLog10xTool('log10x_retriever_query_status', retrieverQueryStatusSchema, 
   wrap('log10x_retriever_query_status', async () => executeRetrieverQueryStatus(args))
 );
 
+// ── Tool: log10x_retriever_probe ──
+//
+// End-to-end probe of the deployed retriever chain. Fires a synthetic query
+// and asserts every stage (offload bucket freshness, indexer pipeline running,
+// SQS depths, pod ready, CloudWatch scan/stream events, S3 qr/*.jsonl, MCP
+// events returned). Returns a structured verdict (green / broken / unknown)
+// with per-stage asserts and a remedy on the first failure.
+
+registerLog10xTool('log10x_retriever_probe', retrieverProbeSchema, (args) =>
+  wrap('log10x_retriever_probe', async () => executeRetrieverProbe(args))
+);
+
 // ── Tool: log10x_backfill_metric ──
 
 registerLog10xTool('log10x_backfill_metric', backfillMetricSchema, (args) =>
@@ -1636,6 +1649,7 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_resolve_batch', intent: 'Pasted-batch triage — per-pattern variable concentration + next actions' },
   { name: 'log10x_retriever_query', intent: 'Direct archive retrieval by pattern identity (tenx_user_pattern) with JS filter expressions' },
   { name: 'log10x_retriever_series', intent: 'Fidelity-aware time series from the S3 archive — auto-selects exact aggregation vs sampled fan-out' },
+  { name: 'log10x_retriever_probe', intent: 'End-to-end retriever chain probe — fires a synthetic query and asserts every stage (offload bucket, indexer pipeline, SQS, pod ready, CW scan/stream, S3 jsonl, MCP events). Returns green/broken/unknown with per-stage asserts and remedies.' },
   { name: 'log10x_backfill_metric', intent: 'Create a new Datadog / Prometheus metric backfilled from Retriever archive' },
   { name: 'log10x_doctor', intent: 'Startup health check — env config, gateway, tier, freshness, Retriever, paste endpoint, cross-pillar enrichment floor' },
   { name: 'log10x_login_status', intent: 'Report credential / env state — identity, env list with permissions, demo-mode upgrade guide if applicable' },

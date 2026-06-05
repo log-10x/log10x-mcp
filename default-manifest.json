@@ -243,6 +243,17 @@
       },
       "category": "retrieve"
     },
+    "log10x_retriever_probe": {
+      "title": "Retriever e2e probe",
+      "description": "End-to-end probe of the deployed Retriever chain. Fires a synthetic query at the picked top-volume tenx_hash (or an explicit target_hash) and asserts every stage in order: offload bucket has recent data, indexer pipeline is running (kubectl logs grep for 'starting pipeline - Tenx: @/apps/retriever/index'), SQS subquery + stream queues drained (depth ≤ 10), retriever pod containers all ready, then submits the query and asserts CloudWatch scan complete events have matched>0, CloudWatch stream worker complete events exist, S3 qr/<queryId>/*.jsonl files were written, and the MCP returned events_matched>0 AND events_returned>0. Returns a structured verdict (green / broken / unknown) with per-assert observed + remedy. Call this as the post-install verify step (chained from log10x_advise_retriever step_verify) OR as a deep doctor diagnostic when log10x_retriever_query returns 0 events and the cause is unclear. Catches the silent-failure shapes that take hours to debug manually: indexer not booted, chart 1.0.20 / runtime-name stream pipeline launch failures, IRSA s3:PutObject misconfigured, MCP input_bucket misaligned with engine write location.",
+      "annotations": {
+        "title": "Retriever e2e probe",
+        "readOnlyHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "category": "retrieve"
+    },
     "log10x_backfill_metric": {
       "title": "Backfill metric",
       "description": "Niche / legacy: write a historical metric (Datadog or Prometheus remote_write) backfilled from the Retriever archive. This is thin output-piping left from an earlier metric-rehydration use case, NOT the retriever's headline. Prefer `log10x_retriever_series` to get the time-bucketed series itself (the agent reads it directly); use this only when the customer specifically needs the series WRITTEN into their own TSDB for an existing dashboard/alert from day one and cannot backfill from the TSDB's own data. Shipping a series into a TSDB is ordinary piping the customer's environment can usually do itself. Datadog + Prometheus remote_write are wired; others return 'not yet implemented'. Do NOT call when the metric already exists in the destination.",

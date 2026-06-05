@@ -74,6 +74,11 @@ export const PRIMITIVE_ERROR_TYPES = [
    * blocked by a read-only or demo-env guard. Pass dry_run=true to
    * preview without writing, or switch to a non-demo environment. */
   'write_not_allowed',
+  /** Caller passed an argument key that is not declared in the tool's
+   * input schema. Detected at the executor entry point via `.strict()`
+   * validation. Caller-side bug — DO NOT retry; surface the rejected
+   * key(s) so the agent can correct the call. */
+  'unknown_arg',
   'unknown',
 ] as const;
 

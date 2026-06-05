@@ -111,6 +111,41 @@ export function includeToSelector(include: 'kept' | 'dropped' | 'both'): {
   return { droppedFilter: null, runBoth: true };
 }
 
+/**
+ * Convert a (possibly fractional) day offset into a valid Prometheus duration
+ * literal of the form `\d+[smhdwy]`. Prometheus rejects fractional units with
+ * HTTP 400 — see pattern_diff's 1h window case where offsetDays = 1/24 was
+ * being emitted as `offset 0.04166...d`.
+ *
+ * Picks the LARGEST integer-and-unit representation that exactly represents
+ * the value: days when seconds % 86400 === 0, else hours when % 3600 === 0,
+ * else minutes when % 60 === 0, else seconds. Returns a leading-space-prefixed
+ * ` offset <duration>` string suitable for direct interpolation into a PromQL
+ * vector selector, or an empty string when offsetDays is falsy/zero.
+ *
+ * Throws if the derived expression somehow fails the duration grammar — a
+ * defensive guardrail against future arithmetic regressions.
+ */
+export function formatPromOffset(offsetDays?: number): string {
+  if (!offsetDays) return '';
+  const offsetSeconds = Math.round(offsetDays * 86400);
+  if (offsetSeconds <= 0) return '';
+  let offsetExpr: string;
+  if (offsetSeconds % 86400 === 0) {
+    offsetExpr = `${offsetSeconds / 86400}d`;
+  } else if (offsetSeconds % 3600 === 0) {
+    offsetExpr = `${offsetSeconds / 3600}h`;
+  } else if (offsetSeconds % 60 === 0) {
+    offsetExpr = `${offsetSeconds / 60}m`;
+  } else {
+    offsetExpr = `${offsetSeconds}s`;
+  }
+  if (!/^\d+[smhdwy]$/.test(offsetExpr)) {
+    throw new Error(`Invalid Prometheus offset expression derived: "${offsetExpr}" (from offsetDays=${offsetDays})`);
+  }
+  return ` offset ${offsetExpr}`;
+}
+
 /** Bytes per pattern for a time window, with optional offset in days. */
 export function bytesPerPattern(
   filters: Record<string, FilterValue>,
@@ -119,7 +154,7 @@ export function bytesPerPattern(
   offsetDays?: number,
   labels: LabelNameMap = DEFAULT_LABELS
 ): string {
-  const offset = offsetDays ? ` offset ${offsetDays}d` : '';
+  const offset = formatPromOffset(offsetDays);
   const selector = buildSelector(filters, env, labels);
   return `sum by (${labels.pattern}, ${labels.service}, ${labels.severity}) (increase(${BYTES_METRIC}{${selector}}[${range}]${offset}))`;
 }
@@ -174,21 +209,7 @@ export function patternAcrossServices(
   offsetDays?: number,
   labels: LabelNameMap = DEFAULT_LABELS
 ): string {
-  let offset = '';
-  if (offsetDays) {
-    // Prometheus only accepts integer offsets with unit suffixes (\d+[smhdwy]).
-    // Fractional day values (e.g. 0.04166...d for 1h) are rejected with HTTP 400.
-    // Convert sub-day offsets to seconds to guarantee an integer value.
-    const offsetSeconds = Math.round(offsetDays * 86400);
-    const offsetExpr = offsetSeconds < 86400
-      ? `${offsetSeconds}s`
-      : `${Math.round(offsetDays)}d`;
-    // Defensive assertion: must be a valid Prometheus duration literal.
-    if (!/^\d+[smhdwy]$/.test(offsetExpr)) {
-      throw new Error(`Invalid Prometheus offset expression derived: "${offsetExpr}" (from offsetDays=${offsetDays})`);
-    }
-    offset = ` offset ${offsetExpr}`;
-  }
+  const offset = formatPromOffset(offsetDays);
   return `sum by (${labels.service}, ${labels.severity}) (increase(${BYTES_METRIC}{${labels.pattern}="${escapeLabel(pattern)}",${labels.env}="${env}"}[${range}]${offset}))`;
 }
 
@@ -309,7 +330,7 @@ export function retrieverIndexedBytesChunk(
   offsetDays: number,
   labels: LabelNameMap = DEFAULT_LABELS
 ): string {
-  const offset = offsetDays > 0 ? ` offset ${offsetDays}d` : '';
+  const offset = formatPromOffset(offsetDays);
   return `sum(increase(${INDEXED_METRIC}{tenx_app="retriever",${labels.env}="cloud"}[1d]${offset}))`;
 }
 
@@ -326,7 +347,7 @@ export function retrieverStreamedBytesChunk(
   offsetDays: number,
   labels: LabelNameMap = DEFAULT_LABELS
 ): string {
-  const offset = offsetDays > 0 ? ` offset ${offsetDays}d` : '';
+  const offset = formatPromOffset(offsetDays);
   return `sum(increase(${STREAMED_METRIC}{tenx_app="retriever",${labels.env}="cloud"}[1d]${offset}))`;
 }
 
