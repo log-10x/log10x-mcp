@@ -62,6 +62,12 @@ export const trendSchema = {
 
 interface PatternTrendSummary {
   pattern: string;
+  // Stable tenx_hash identity for this pattern — echoed here so the
+  // catalog-identity-handoff (top_patterns → trend → event_lookup) carries
+  // the hash through every chain step without a downstream re-resolve.
+  // Resolved from metrics during pattern lookup; empty string when the
+  // pattern is not present in TSDB (no_signal path).
+  pattern_hash: string;
   window: string;
   step: string;
   time_series: Array<{ ts: number; bytes: number }>;
@@ -141,7 +147,10 @@ export async function executeTrend(
 
   // Resolve pattern name from hash when only pattern_hash is given.
   // We need a name for the PromQL query (pattern label selector).
+  // Also capture the resolved hash for catalog-identity-handoff so the
+  // summary can echo it on both the name-input and hash-input paths.
   let patternName: string | undefined = args.pattern;
+  let resolvedHash: string | undefined = args.pattern_hash;
   if (!patternName && args.pattern_hash) {
     // Reverse-lookup: find the most-emitting pattern label for this hash.
     const metricsEnv = await resolveMetricsEnv(env).catch(() => null);
@@ -160,6 +169,15 @@ export async function executeTrend(
         // fall through — pattern stays undefined, inner fn will return no data
       }
     }
+  } else if (patternName && !resolvedHash) {
+    // Name-input path: forward-lookup the stable hash so the summary can
+    // echo it for downstream chain steps (event_lookup, pattern_examples).
+    try {
+      resolvedHash = await resolvePatternHashFromMetrics(env, normalizePattern(patternName));
+      recordQuery(chassisTelemetry);
+    } catch {
+      // Hash resolution is best-effort; absent hash collapses to '' in summary.
+    }
   }
 
   // Normalise '1d' legacy alias to '24h' before passing to inner.
@@ -167,7 +185,7 @@ export async function executeTrend(
   const effectiveWindow = normalizedTimeRange ?? args.timeRange ?? '7d';
 
   const sumOut: { data?: PatternTrendSummary } = {};
-  await executeTrendInner({ ...args, pattern: patternName ?? '', timeRange: normalizedTimeRange }, env, sumOut);
+  await executeTrendInner({ ...args, pattern: patternName ?? '', timeRange: normalizedTimeRange, pattern_hash: resolvedHash }, env, sumOut);
   recordQuery(chassisTelemetry);
 
   if (!sumOut.data) {
@@ -280,7 +298,7 @@ export async function executeTrend(
 }
 
 async function executeTrendInner(
-  args: { pattern: string; timeRange?: string; step?: string; analyzerCost?: number; include?: 'kept' | 'dropped' | 'both' },
+  args: { pattern: string; pattern_hash?: string; timeRange?: string; step?: string; analyzerCost?: number; include?: 'kept' | 'dropped' | 'both' },
   env: EnvConfig,
   sumOut?: { data?: PatternTrendSummary }
 ): Promise<string> {
@@ -472,10 +490,21 @@ async function executeTrendInner(
   const recentCostDisclosed: DisclosedDollarValue | null =
     recentCost !== null ? buildDisclosedDollarValue(recentCost, toAxisSource, null, null) : null;
 
+  // Catalog-identity-handoff: echo the stable tenx_hash on the summary so
+  // chained tools (event_lookup, pattern_examples) don't re-resolve it.
+  // Prefer the caller-supplied hash (forward- or reverse-resolved in
+  // executeTrend); fall back to an inner resolve, then to '' on miss.
+  let summaryHash = args.pattern_hash ?? '';
+  if (!summaryHash) {
+    const resolved = await resolvePatternHashFromMetrics(env, pattern).catch(() => undefined);
+    summaryHash = resolved ?? '';
+  }
+
   if (sumOut) {
     const stepSecs = stepSeconds;
     sumOut.data = {
       pattern,
+      pattern_hash: summaryHash,
       window: tf.label,
       step,
       time_series: points,

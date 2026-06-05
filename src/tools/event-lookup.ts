@@ -41,6 +41,12 @@ export const eventLookupSchema = {
 
 interface EventLookupSummary {
   pattern: string;
+  // Stable tenx_hash identity — promoted from `resolved_from_hash` so
+  // catalog-identity-handoff lands at the same top-level key on both the
+  // hash-input path (caller passed pattern_hash/tenxHash) AND the
+  // name-input/raw-line path (resolved internally from the pattern label).
+  // Empty string when the pattern is not present in TSDB.
+  pattern_hash: string;
   window: string;
   services: Array<{
     service: string;
@@ -438,7 +444,11 @@ async function formatResults(
   // the hash the caller arrived with (resolvedFromHash), otherwise one
   // cheap topk(1) round-trip to recover it from the pattern name. On any
   // failure / timeout the field stays absent — gates downstream render.
+  // The resolved hash is also promoted to the summary's top-level
+  // `pattern_hash` so the catalog-identity-handoff carries through on
+  // the raw-line / name-input path (which previously dropped the hash).
   let offloadStatus: EventLookupSummary['offload_status'];
+  let summaryPatternHash: string = resolvedFromHash ?? '';
   try {
     let hashToQuery: string | undefined = resolvedFromHash;
     if (!hashToQuery) {
@@ -449,6 +459,7 @@ async function formatResults(
         if (typeof h === 'string' && h.length > 0) hashToQuery = h;
       }
     }
+    if (hashToQuery && !summaryPatternHash) summaryPatternHash = hashToQuery;
     if (hashToQuery) {
       const s = await getOffloadStatus(env, {
         patternHash: hashToQuery,
@@ -496,6 +507,7 @@ async function formatResults(
   if (sumOut) {
     sumOut.data = {
       pattern,
+      pattern_hash: summaryPatternHash,
       window: tf.label,
       services: rows.map(r => ({
         service: r.service,

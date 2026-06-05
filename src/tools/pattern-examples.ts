@@ -125,6 +125,12 @@ interface PatternExamplesSummary {
   retained_templates: number;
   dropped_jaccard_events: number;
   multi_line_detected: boolean;
+  // Catalog-identity-handoff: the raw SIEM events pulled by the probe,
+  // re-emitted (capped at 50) so chain steps that need the live lines —
+  // e.g. resolve_batch, paste-triage, secondary templater passes — don't
+  // re-issue the same SIEM round-trip. Strings are stringified once at
+  // emit time (events arrive as `unknown[]` from the connector layer).
+  raw_events: string[];
   buckets: Array<{
     rank: number;
     template_hash: string;
@@ -534,6 +540,21 @@ async function executePatternExamplesInner(
       retained_templates: retained.length,
       dropped_jaccard_events: dropped.reduce((s, b) => s + b.p.count, 0),
       multi_line_detected: isMultiLine,
+      // Re-emit the SIEM events already pulled by the probe (capped at 50).
+      // Stringify defensively: connectors return `unknown[]` — some yield
+      // raw lines, others structured records — so coerce via String() with
+      // a JSON fallback for object shapes.
+      raw_events: probe.events.slice(0, 50).map((e) =>
+        typeof e === 'string'
+          ? e
+          : (() => {
+              try {
+                return JSON.stringify(e);
+              } catch {
+                return String(e);
+              }
+            })(),
+      ),
       buckets: topK.map((bucket, i) => {
         // Build slot distribution with deduplication of _partN sequences and
         // filtering of low-signal constant slots.
