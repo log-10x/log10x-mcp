@@ -17,6 +17,7 @@ import { LABELS } from './promql.js';
 import { parsePrometheusValue } from './cost.js';
 import { createLimiter } from './concurrency.js';
 import type { InvestigateThresholds } from './thresholds.js';
+import { wrapBackendError, type PrimitiveError } from './primitive-errors.js';
 
 export interface CoMover {
   pattern: string;
@@ -44,7 +45,26 @@ export interface ChainLink {
   confidence: number;
 }
 
+/**
+ * Outcome of the correlation engine. The agent-facing branches:
+ *
+ *   - `success`           — usable chain and/or co-movers.
+ *   - `no_signal`         — query ran cleanly but nothing crossed the
+ *                           rate-change / lag thresholds.
+ *   - `anchor_no_signal`  — Phase B (anchor rate-change reference) returned
+ *                           empty or a non-success Prometheus response, so
+ *                           the direction reference is unusable. The agent
+ *                           should re-anchor or widen the window.
+ *   - `error`             — structural failure (Phase A topk query failed,
+ *                           backend down, etc.). Read `error` for the typed
+ *                           envelope; do NOT trust `chain`/`coMovers`.
+ */
+export type CorrelationStatus = 'success' | 'no_signal' | 'anchor_no_signal' | 'error';
+
 export interface CorrelationResult {
+  status: CorrelationStatus;
+  /** Plain-English summary the agent or the report renderer can surface. */
+  human_summary: string;
   anchor: string;
   anchorRateChange: number;
   /** Sorted by lead time (most-leading first). The final entry is the anchor. */
@@ -58,6 +78,18 @@ export interface CorrelationResult {
     softTimeoutHit: boolean;
     hardTimeoutHit: boolean;
   };
+  /**
+   * Populated when `status === 'error'`. Structural failure the agent can
+   * branch on (retryable, backoff hint, etc.).
+   */
+  error?: PrimitiveError;
+  /**
+   * Sub-query failures that did NOT abort the correlation (Phase B anchor
+   * rate non-fatal swallow, Phase C per-(mover, offset) lag queries).
+   * Surfaced so the caller can see what got skipped instead of guessing
+   * from a degraded chain.
+   */
+  partialFailures?: PrimitiveError[];
 }
 
 export interface CorrelationOptions {
@@ -122,13 +154,30 @@ export async function runAcuteSpikeCorrelation(opts: CorrelationOptions): Promis
   let queriesExecuted = 0;
   let softTimeoutHit = false;
   let hardTimeoutHit = false;
+  const partialFailures: PrimitiveError[] = [];
 
   let topkRes: PrometheusResponse;
   try {
     topkRes = await queryInstant(opts.env, topkQuery);
     queriesExecuted += 1;
   } catch (e) {
-    throw new Error(`Correlation topk query failed: ${(e as Error).message}`);
+    const err = wrapBackendError(e);
+    return {
+      status: 'error',
+      human_summary: `Correlation topk query failed: ${err.hint}`,
+      anchor: opts.anchor,
+      anchorRateChange: 0,
+      chain: [],
+      coMovers: [],
+      metadata: {
+        patternsAnalyzed: 0,
+        queriesExecuted,
+        wallTimeMs: Date.now() - started,
+        softTimeoutHit,
+        hardTimeoutHit,
+      },
+      error: err,
+    };
   }
 
   const coMoversAll: CoMover[] = [];
@@ -157,14 +206,43 @@ export async function runAcuteSpikeCorrelation(opts: CorrelationOptions): Promis
     `sum(rate(${metric}{${envLabel},${LABELS.pattern}="${escape(opts.anchor)}"}[${opts.window}] offset ${baseOffset}))) - 1`;
 
   let anchorRateChange = 0;
+  let anchorRateRes: PrometheusResponse | null = null;
   try {
-    const res = await queryInstant(opts.env, anchorRateQuery);
+    anchorRateRes = await queryInstant(opts.env, anchorRateQuery);
     queriesExecuted += 1;
-    if (res.status === 'success' && res.data.result[0]) {
-      anchorRateChange = parsePrometheusValue(res.data.result[0]);
+    if (anchorRateRes.status === 'success' && anchorRateRes.data.result[0]) {
+      anchorRateChange = parsePrometheusValue(anchorRateRes.data.result[0]);
     }
-  } catch {
-    // non-fatal
+  } catch (e) {
+    // Non-fatal: anchor direction defaults to "up"; record so the caller
+    // can see we couldn't reference the anchor's direction.
+    partialFailures.push(wrapBackendError(e));
+  }
+
+  // Anchor-signal guard: if Phase B failed structurally (non-success
+  // Prometheus response) OR returned no series, the direction reference
+  // is unusable. Refuse with status: anchor_no_signal so the agent can
+  // re-anchor or widen the window — same pattern as
+  // metrics-that-moved's anchor_no_phase_separation refusal.
+  if (!anchorRateRes || anchorRateRes.status !== 'success' || anchorRateRes.data.result.length === 0) {
+    return {
+      status: 'anchor_no_signal',
+      human_summary:
+        `Anchor "${opts.anchor}" returned no rate-change reference series in window "${opts.window}". ` +
+        `Re-anchor with a clearer pattern or widen the time window.`,
+      anchor: opts.anchor,
+      anchorRateChange: 0,
+      chain: [],
+      coMovers: [],
+      metadata: {
+        patternsAnalyzed: coMoversAll.length,
+        queriesExecuted,
+        wallTimeMs: Date.now() - started,
+        softTimeoutHit,
+        hardTimeoutHit,
+      },
+      partialFailures: partialFailures.length > 0 ? partialFailures : undefined,
+    };
   }
 
   // Keep top N movers in the anchor's direction (or both if anchor direction ambiguous).
@@ -213,8 +291,11 @@ export async function runAcuteSpikeCorrelation(opts: CorrelationOptions): Promis
             profiles.get(mover.pattern)!.push({ offsetSeconds: offset, rateChange: rc });
           }
         }
-      } catch {
-        // skip
+      } catch (e) {
+        // Per-(mover, offset) lag query is non-fatal: the lag profile
+        // tolerates missing offsets. Record as partialFailure so the
+        // caller can see how many lag samples were lost.
+        partialFailures.push(wrapBackendError(e));
       }
     })
   );
@@ -253,7 +334,17 @@ export async function runAcuteSpikeCorrelation(opts: CorrelationOptions): Promis
     };
   });
 
+  const status: CorrelationStatus =
+    chain.length === 0 && topMovers.length === 0 ? 'no_signal' : 'success';
+  const human_summary =
+    status === 'success'
+      ? `Correlation found ${chain.length} chained link${chain.length === 1 ? '' : 's'} ` +
+        `from ${topMovers.length} co-mover${topMovers.length === 1 ? '' : 's'} for anchor "${opts.anchor}".`
+      : `Correlation found no co-movers above the rate-change floor for anchor "${opts.anchor}" in window "${opts.window}".`;
+
   return {
+    status,
+    human_summary,
     anchor: opts.anchor,
     anchorRateChange,
     chain,
@@ -265,6 +356,7 @@ export async function runAcuteSpikeCorrelation(opts: CorrelationOptions): Promis
       softTimeoutHit,
       hardTimeoutHit,
     },
+    partialFailures: partialFailures.length > 0 ? partialFailures : undefined,
   };
 }
 
