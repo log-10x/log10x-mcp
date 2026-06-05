@@ -72,6 +72,20 @@ interface NewPatternServiceRow extends ServiceIdentity {
   events_now: number;
 }
 
+/**
+ * Trajectory classification (Note 17). Computed from current-window vs
+ * prior-window event counts:
+ *   - `one-shot` — events_now == 1 (single emission so far)
+ *   - `growing` — events_now > 1.5 × events_prior (or events_prior == 0
+ *     and events_now ≥ 5)
+ *   - `shrinking` — events_now < 0.67 × events_prior
+ *   - `steady` — everything else
+ *
+ * The label set is intentionally tiny — it answers "should I look at this
+ * one?" not "what's the exact rate?".
+ */
+type Trajectory = 'one-shot' | 'growing' | 'steady' | 'shrinking';
+
 interface NewPatternRow {
   pattern_hash: string;
   symbol_message: string;
@@ -82,6 +96,8 @@ interface NewPatternRow {
   cost_now_usd: number;
   bytes_now: number;
   events_now: number;
+  events_prior: number;
+  trajectory: Trajectory;
   services: NewPatternServiceRow[];
 }
 
@@ -92,6 +108,31 @@ interface WhatsNewData {
   patterns: NewPatternRow[];
   pattern_count_total: number;
   pattern_count_shown: number;
+}
+
+/**
+ * Render trajectory as a single glyph + word for tables (Note 17). Kept as
+ * a tiny set so the column stays scannable.
+ */
+function trajectoryLabel(t: Trajectory): string {
+  switch (t) {
+    case 'growing': return '↑ growing';
+    case 'shrinking': return '↓ shrinking';
+    case 'one-shot': return '· one-shot';
+    case 'steady':
+    default: return '─ steady';
+  }
+}
+
+/**
+ * Classify trajectory from current vs prior event counts (Note 17).
+ */
+function classifyTrajectory(eventsNow: number, eventsPrior: number): Trajectory {
+  if (eventsNow <= 1 && eventsPrior === 0) return 'one-shot';
+  if (eventsPrior === 0 && eventsNow >= 5) return 'growing';
+  if (eventsPrior > 0 && eventsNow > eventsPrior * 1.5) return 'growing';
+  if (eventsPrior > 0 && eventsNow < eventsPrior * 0.67) return 'shrinking';
+  return 'steady';
 }
 
 function parseFirstSeenWithin(s: string): number {
@@ -200,10 +241,12 @@ export async function executeWhatsNew(
   // Raw per-(symbolMessage, service, severity) rows from PromQL. The hash
   // is derived locally via groupRowsByPattern (tenxHash(symbolMessage)),
   // so we don't conflate symbol_message and pattern_hash the way prior
-  // versions of this tool did.
+  // versions of this tool did. events_prior is the same metric over the
+  // immediately-preceding window (Note 17 — trajectory classification).
   interface BytesEventsRow extends RawPatternServiceRow {
     bytes: number;
     events: number;
+    events_prior: number;
   }
 
   // Event counts in the current window, keyed by (symbolMessage, service, severity)
@@ -215,24 +258,47 @@ export async function executeWhatsNew(
   // Failure here is non-fatal — the bytes-side answer is still useful — but
   // we surface it as a structured partial-failure flag instead of silently
   // dropping the error.
+  //
+  // Note 17 adds a prior-window events query (offset by tf.days) so we can
+  // classify trajectory (growing / steady / shrinking / one-shot) without
+  // adding a heavier range query. Failure of the prior-window probe is
+  // non-fatal too — we degrade trajectory to 'steady' (the safe default)
+  // and keep going.
   const backendErrors: Array<{ stage: string; error_type: string; hint: string }> = [];
   let eventsRes: Awaited<ReturnType<typeof queryInstant>> | null = null;
+  let eventsPriorRes: Awaited<ReturnType<typeof queryInstant>> | null = null;
   try {
-    eventsRes = await queryInstant(env, pql.eventsByPatternFull(filters, metricsEnv, tf.range));
+    [eventsRes, eventsPriorRes] = await Promise.all([
+      queryInstant(env, pql.eventsByPatternFull(filters, metricsEnv, tf.range)),
+      queryInstant(env, pql.eventsByPatternFull(filters, metricsEnv, tf.range, tf.days)),
+    ]);
+    recordQuery(telemetry);
     recordQuery(telemetry);
   } catch (e) {
     recordQuery(telemetry);
     const err = wrapBackendError(e);
     backendErrors.push({ stage: 'events_by_pattern_full', error_type: err.error_type, hint: err.hint });
     eventsRes = null;
+    eventsPriorRes = null;
   }
   const eventsKey = (sm: string, svc: string, sev: string) => `${sm}\x00${svc}\x00${sev}`;
   const eventsByKey = new Map<string, number>();
+  const eventsPriorByKey = new Map<string, number>();
   if (eventsRes && eventsRes.status === 'success') {
     for (const r of eventsRes.data.result) {
       const sm = r.metric[LABELS.pattern];
       if (!sm) continue;
       eventsByKey.set(
+        eventsKey(sm, r.metric[LABELS.service] || '', r.metric[LABELS.severity] || ''),
+        parsePrometheusValue(r),
+      );
+    }
+  }
+  if (eventsPriorRes && eventsPriorRes.status === 'success') {
+    for (const r of eventsPriorRes.data.result) {
+      const sm = r.metric[LABELS.pattern];
+      if (!sm) continue;
+      eventsPriorByKey.set(
         eventsKey(sm, r.metric[LABELS.service] || '', r.metric[LABELS.severity] || ''),
         parsePrometheusValue(r),
       );
@@ -245,12 +311,14 @@ export async function executeWhatsNew(
     if (!sm) continue;
     const svc = r.metric[LABELS.service] || '';
     const sev = r.metric[LABELS.severity] || '';
+    const k = eventsKey(sm, svc, sev);
     rawRows.push({
       symbolMessage: sm,
       service: svc,
       severity: sev,
       bytes: parsePrometheusValue(r),
-      events: eventsByKey.get(eventsKey(sm, svc, sev)) ?? 0,
+      events: eventsByKey.get(k) ?? 0,
+      events_prior: eventsPriorByKey.get(k) ?? 0,
     });
   }
 
@@ -270,10 +338,12 @@ export async function executeWhatsNew(
 
     let bytesTotal = 0;
     let eventsTotal = 0;
+    let eventsPriorTotal = 0;
     const services: NewPatternServiceRow[] = [];
     for (const [svc, raw] of g.rows_by_service) {
       bytesTotal += raw.bytes;
       eventsTotal += raw.events;
+      eventsPriorTotal += raw.events_prior;
       services.push({
         name: svc,
         severity: raw.severity,
@@ -294,6 +364,8 @@ export async function executeWhatsNew(
       cost_now_usd: bytesToCost(bytesTotal, costPerGb),
       bytes_now: bytesTotal,
       events_now: eventsTotal,
+      events_prior: eventsPriorTotal,
+      trajectory: classifyTrajectory(eventsTotal, eventsPriorTotal),
       services,
     });
   }
@@ -302,11 +374,18 @@ export async function executeWhatsNew(
   rows.sort((a, b) => a.first_seen_age_seconds - b.first_seen_age_seconds);
   const shown = rows.slice(0, limit);
 
+  // Note 17 + Note 18: headline drops $ and hash. Lead with the descriptor
+  // and the first-seen age. Brand-new patterns have meaningless cost; the
+  // signal worth showing is "how many events, growing or not."
+  const headlineDescriptor = (r: NewPatternRow) => {
+    const sm = r.symbol_message || 'unnamed pattern';
+    return sm.length > 60 ? sm.slice(0, 57) + '…' : sm;
+  };
   const headline =
     shown.length === 0
       ? `No patterns first seen within ${firstSeenWithin} over ${tf.label}.`
       : `${shown.length} new pattern${shown.length === 1 ? '' : 's'} first seen within ${firstSeenWithin}. ` +
-        `Newest: \`${shown[0].pattern_hash}\` (${shown[0].first_seen_age_label}, $${shown[0].cost_now_usd.toFixed(0)}/${tf.range}).`;
+        `Newest: ${headlineDescriptor(shown[0])} (${shown[0].first_seen_age_label}, ${shown[0].events_now.toFixed(0)} events, ${trajectoryLabel(shown[0].trajectory)}).`;
 
   const status: 'success' | 'no_signal' = shown.length === 0 ? 'no_signal' : 'success';
   const data: WhatsNewData & {
@@ -326,7 +405,7 @@ export async function executeWhatsNew(
     status === 'no_signal'
       ? `No patterns first seen within ${firstSeenWithin} over ${tf.label}.`
       : `${shown.length} pattern${shown.length === 1 ? ' was' : 's were'} first seen within ${firstSeenWithin} over ${tf.label}. ` +
-        `Newest: \`${shown[0].pattern_hash}\` (${shown[0].first_seen_age_label}, $${shown[0].cost_now_usd.toFixed(0)}/${tf.range}). ` +
+        `Newest: ${headlineDescriptor(shown[0])} (${shown[0].first_seen_age_label}, ${shown[0].events_now.toFixed(0)} events, ${trajectoryLabel(shown[0].trajectory)}). ` +
         `Inspect with log10x_pattern_examples or log10x_pattern_trend.`;
   const humanSummary =
     backendErrors.length > 0
@@ -334,19 +413,24 @@ export async function executeWhatsNew(
       : humanSummaryBase;
 
   if (view === 'markdown') {
+    // Note 17 + 18: Drop $ (meaningless on brand-new patterns). Drop the
+    // Bytes/1h column in favor of Events (count) and Trajectory. Pattern
+    // column shows symbol_message (descriptor), hash stays in machine
+    // fields only.
     const lines = [
       `## What's new — ${tf.label}`,
       ``,
       `Patterns first seen within ${firstSeenWithin}, ranked by recency.`,
       ``,
-      `| # | Pattern hash | Services | Sev | First seen | Cost now ($/${tf.range}) | Events |`,
-      `|---|--------------|----------|-----|------------|--------------------------|--------|`,
+      `| # | Pattern | Service | First seen | Events | Trajectory |`,
+      `|---|---------|---------|------------|--------|------------|`,
       ...shown.map((r, i) => {
         const svcList = r.services.map((s) => s.name).join(', ');
         const sevList = r.severities.join('/');
+        const svcCell = sevList ? `${svcList} (${sevList})` : svcList;
         return (
-          `| ${i + 1} | \`${r.pattern_hash}\` | ${svcList} | ${sevList} | ${r.first_seen_age_label} | ` +
-          `$${r.cost_now_usd.toFixed(0)} | ${r.events_now.toFixed(0)} |`
+          `| ${i + 1} | ${headlineDescriptor(r)} | ${svcCell} | ${r.first_seen_age_label} | ` +
+          `${r.events_now.toFixed(0)} | ${trajectoryLabel(r.trajectory)} |`
         );
       }),
     ];

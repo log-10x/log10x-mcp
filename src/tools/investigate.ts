@@ -46,7 +46,20 @@ import { isRetrieverConfigured, runRetrieverQuery, parseTimeExpression } from '.
 import { renderNextActions, extractNextActions, type NextAction } from '../lib/next-actions.js';
 import { getOffloadStatusBatch } from '../lib/offload-status.js';
 import { buildChassisEnvelope } from '../lib/chassis-envelope.js';
+import { PATTERN_HASH_REGEX } from '../lib/pattern-reference-resolver.js';
 import type { Action, StructuredOutput } from '../lib/output-types.js';
+
+/**
+ * Per Note 18: pattern_hash never appears in user-facing prose. When the
+ * starting_point looks like a raw 11-char hash, render it as a generic
+ * "this pattern" descriptor instead of echoing the hash. The actual hash
+ * stays in payload.anchor_ref.expression for round-trip identity.
+ */
+function userVisibleStartingPoint(sp: string): string {
+  const trimmed = sp.trim();
+  if (PATTERN_HASH_REGEX.test(trimmed)) return 'this pattern';
+  return sp;
+}
 
 export const investigateSchema = {
   starting_point: z
@@ -169,31 +182,34 @@ export function buildHumanSummary(
   parsed: ParsedReport,
   thresholdBasis: ThresholdBasis,
 ): string {
-  const calibTag =
-    thresholdBasis === 'unvalidated_default'
-      ? ' Thresholds are unvalidated defaults — compare the observed confidence against the clean-chain floor (default 0.70) before acting.'
-      : '';
+  const sp = userVisibleStartingPoint(starting_point);
+  // Per Note 9: drop calibration caveat on no_signal / insufficient_data
+  // entirely (it's load-bearing only when a finding landed near the
+  // match threshold and the agent might auto-act). Per Notes 10-12:
+  // drop "anchor", "co-mover", "noise floor", "clean-chain threshold",
+  // "unvalidated_default" from user prose. Machine fields keep them.
   if (status === 'insufficient_data') {
-    return `Investigation of "${starting_point}" over ${window} could not produce a usable analysis. The anchor resolved but the window or backend coverage was too thin. Widen the window or re-anchor.${calibTag}`;
+    return `I looked at "${sp}" over the last ${window} but couldn't produce a usable analysis. The pattern resolved but the window or backend coverage was too thin. Try widening the window or starting from a different pattern.`;
   }
   if (status === 'no_signal') {
-    return `Investigation of "${starting_point}" over ${window} found no co-movers above the noise floor. Anchor moved, but nothing else moved with it in this window. Widen the window, switch to deep depth, or conclude there is no detectable lead.${calibTag}`;
+    // Note 9: nothing was found, so the threshold story isn't load-bearing.
+    return `I looked at "${sp}" over the last ${window} to see if anything else in your environment moved at the same time. Nothing did — the issue may be isolated to this pattern, or the window's too short. Try widening to 24h.`;
   }
   if (status === 'error') {
-    return `Investigation of "${starting_point}" failed structurally. See data.error for details.${calibTag}`;
+    return `Investigation of "${sp}" failed structurally. See data.error for details.`;
   }
   if (!parsed.leadPattern) {
-    return `Investigation of "${starting_point}" produced a ${parsed.shape ?? 'unknown'}-shape narrative over ${window}. No single lead pattern was identified.${calibTag}`;
+    return `Investigation of "${sp}" produced a ${parsed.shape ?? 'unknown'}-shape narrative over ${window}. No single related pattern was identified.`;
   }
   const lagFragment =
     parsed.leadLagSeconds !== null && parsed.leadLagSeconds < 0
-      ? `peaked ${Math.abs(parsed.leadLagSeconds)}s before the anchor`
-      : 'moved concurrently with the anchor';
+      ? `peaked ${Math.abs(parsed.leadLagSeconds)}s earlier`
+      : 'moved at the same time';
   const confFragment =
     parsed.leadConfidence !== null
-      ? ` Observed lead confidence: ${(parsed.leadConfidence * 100).toFixed(0)}% (clean-chain floor: 70%${thresholdBasis === 'unvalidated_default' ? ', unvalidated' : ''}).`
+      ? ` Match strength: ${(parsed.leadConfidence * 100).toFixed(0)}%${thresholdBasis === 'unvalidated_default' ? ' (default match threshold, not yet tuned for your data)' : ''}.`
       : '';
-  return `Strongest temporal evidence on "${starting_point}" (${window}): \`${parsed.leadPattern}\`${parsed.leadService ? ` in \`${parsed.leadService}\`` : ''} ${lagFragment}.${confFragment} ${parsed.chainLength} chain step(s), ${parsed.coMoverCount} additional lower-confidence co-mover(s). This is correlation, not proven cause — verify via traces / deploy timeline before acting.${calibTag}`;
+  return `Strongest evidence on "${sp}" over ${window}: ${parsed.leadPattern}${parsed.leadService ? ` in ${parsed.leadService}` : ''} ${lagFragment}.${confFragment} ${parsed.chainLength} chain step(s), ${parsed.coMoverCount} additional related metric(s). This is correlation, not proven cause — verify via traces or deploy timeline before acting.`;
 }
 
 /**
@@ -312,7 +328,7 @@ export async function executeInvestigate(
     return buildChassisEnvelope({
       tool: 'log10x_investigate',
       view: 'summary',
-      headline: `Investigation of "${args.starting_point}" failed: ${err.error_type}`,
+      headline: `Investigation of "${userVisibleStartingPoint(args.starting_point)}" failed (${err.error_type}).`,
       status: 'error',
       decisions: { threshold_used: null, threshold_basis: thresholdBasis === 'config_file' ? 'snapshot' : 'unvalidated_default' },
       source_disclosure: {},
@@ -431,7 +447,22 @@ export async function executeInvestigate(
     thresholdBasis,
   );
 
-  const headline = `Investigation of "${args.starting_point}" (window=${args.window}): status=${status}, shape=${parsed.shape ?? 'unknown'}${parsed.investigationId ? `, id=${parsed.investigationId.slice(0, 8)}` : ''}.`;
+  // Plain-English headline per Notes 9 + 18: drop the investigation id slug
+  // (machine identifier, no meaning to the user — it's still in payload for
+  // round-trip). Use plain words for shape rather than the internal token.
+  // Hash-shaped starting_point is replaced with a generic descriptor.
+  const shapeWord =
+    parsed.shape === 'acute' ? 'sharp change'
+    : parsed.shape === 'drift' ? 'slow drift'
+    : parsed.shape === 'environment' ? 'environment-wide'
+    : parsed.shape === 'no_significant_movement' ? 'no significant movement'
+    : parsed.shape === 'empty' ? 'no significant movement'
+    : 'unknown shape';
+  const statusWord =
+    status === 'no_signal' ? 'no related movement'
+    : status === 'insufficient_data' ? 'not enough data'
+    : 'analysis complete';
+  const headline = `Investigation of "${userVisibleStartingPoint(args.starting_point)}" over ${args.window}: ${statusWord} (${shapeWord}).`;
 
   // Extract structured next-actions BEFORE stripping the HTML comment blocks.
   // (extractNextActions reads the NEXT_ACTIONS JSON comment from md.)

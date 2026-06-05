@@ -289,11 +289,14 @@ export async function executeRankByShapeSimilarity(
       query_count: queryCount,
       total_latency_ms: totalLatencyMs,
       backend_pressure_hint: rankPressureHint(queryCount, totalLatencyMs, throttledHit),
-      human_summary: `Anchor "${anchorExpression}" has dispersion ${anchorDispersion.toFixed(3)} — below the ${ANCHOR_DISPERSION_FLOOR} floor. The shape-similarity rank would be meaningless on this anchor. Re-anchor with a clearer pattern.`,
+      // Per Notes 10-12: drop "anchor", "dispersion", raw PromQL expression
+      // from user prose. The numeric audit lives in payload for the agent.
+      human_summary: `The pattern we looked at is too steady over this window to tell busy phases apart from quiet ones, so a shape match would be meaningless. Try a different starting pattern or widen the window.`,
       ranked: [],
       evaluation_failed: [],
     };
-    const headline = `Anchor lacks phase separation (dispersion ${anchorDispersion.toFixed(3)} < ${ANCHOR_DISPERSION_FLOOR}). Refusing — re-anchor.`;
+    // Plain English per Notes 10-12: drop "anchor", "dispersion", "refusing".
+    const headline = `The pattern we looked at is too steady to tell apart busy vs quiet phases. Try a different starting pattern.`;
     return buildChassisEnvelope({
       tool: 'log10x_rank_by_shape_similarity',
       view: 'summary',
@@ -358,24 +361,19 @@ export async function executeRankByShapeSimilarity(
   const top = ranked[0];
 
   const pearsonDist = distribute(ranked.map((r) => r.pearson_magnitude));
-  const observedPearsonMedian = pearsonDist?.p50;
-  const observedFragment =
-    observedPearsonMedian !== undefined
-      ? ` Observed median |Pearson| across the pool: ${observedPearsonMedian.toFixed(2)}.`
-      : '';
-  const calibTag =
-    thresholdBasis === 'unvalidated_default'
-      ? ' Floor is an unvalidated default — compare against the observed distribution before acting.'
-      : '';
 
+  // Per Notes 9-12: drop "Pearson", "@lag", "candidates", "anchor",
+  // "evaluated" from user prose. Drop the calibration caveat on
+  // no_signal entirely (Note 9). Numeric audit lives in
+  // decisions / threshold_audit for the agent to branch on.
   const human_summary =
     status === 'no_signal'
-      ? `No candidate showed meaningful shape similarity to the anchor (|Pearson| ≥ 0.1). ${ranked.length} ranked, ${failed.length} failed. Stop searching — re-anchor or widen the candidate pool.${observedFragment}${calibTag}`
-      : `Ranked ${ranked.length} candidate(s) by |Pearson@lag|; ${failed.length} could not be evaluated.${
+      ? `No metric matched the shape of this pattern over the window. ${ranked.length} checked${failed.length > 0 ? `, ${failed.length} couldn't be checked` : ''}. Try a different starting pattern or widen the metric pool.`
+      : `Matched ${ranked.length} metric(s) by shape over the window.${
           top
-            ? ` Top match: ${top.candidate} with |r|=${top.pearson_magnitude.toFixed(2)} at lag ${top.lag_seconds}s${top.lag_at_bound ? ' (boundary-pinned, real lag may be wider)' : ''}.`
+            ? ` Top match: ${top.candidate} (shape match ${top.pearson_magnitude.toFixed(2)}${top.lag_seconds !== 0 ? `, ${top.lag_seconds > 0 ? `lags by ${top.lag_seconds}s` : `leads by ${Math.abs(top.lag_seconds)}s`}` : ''}${top.lag_at_bound ? ', real offset may be wider' : ''}).`
             : ''
-        }${observedFragment}${lowCandidateCount === 'severe' ? ' Very few candidates were usable — weak evidence.' : ''}${calibTag}`;
+        }${failed.length > 0 ? ` ${failed.length} couldn't be checked.` : ''}${lowCandidateCount === 'severe' ? ' Very few metrics were usable — treat as weak evidence.' : ''}${thresholdBasis === 'unvalidated_default' ? ' Match threshold is a default (not yet tuned for your data).' : ''}`;
 
 
   const phaseGapDist = distribute(ranked.map((r) => r.anchor_phase_gap));
@@ -408,7 +406,11 @@ export async function executeRankByShapeSimilarity(
       n_lag_at_bound: nAtBound,
     },
   };
-  const headline = `Ranked ${ranked.length} candidates by |Pearson@lag|. ${failed.length} could not be evaluated.`;
+  // Plain English per Notes 10-12: drop "Pearson", "@lag", "candidates",
+  // "evaluated" from user prose. Counts stay in scope / payload.
+  const headline = ranked.length === 0
+    ? `No metrics matched the shape of this pattern over the window${failed.length > 0 ? ` (${failed.length} couldn't be checked)` : ''}.`
+    : `Matched ${ranked.length} metric(s) by shape over the window${failed.length > 0 ? ` (${failed.length} couldn't be checked)` : ''}.`;
 
   return buildChassisEnvelope({
     tool: 'log10x_rank_by_shape_similarity',

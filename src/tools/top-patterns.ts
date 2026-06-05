@@ -45,6 +45,7 @@ import {
 } from '../lib/top-patterns-extras.js';
 import { computeTrendDelta, glyphForState, fmtTrendDelta } from '../lib/trend-delta.js';
 import { renderMonospaceTable } from '../lib/render-table.js';
+import { sanitizeUserProse, stripHashFromVisible } from '../lib/anti-jargon-prose.js';
 
 export const topPatternsSchema = {
   service: z.string().optional().describe('Service name to scope the result. Omit for all services.'),
@@ -272,7 +273,7 @@ export async function executeTopPatterns(
         const scopeDesc = args.service ? ` for service "${args.service}"` : '';
         message =
           `No dropped-cohort patterns in this ${tf.label} window${scopeDesc}. ` +
-          `The isDropped enrichment IS wired (${distinctDroppedPatternCount} distinct pattern${distinctDroppedPatternCount === 1 ? '' : 's'} observed env-wide in the last 24h) ` +
+          `The isDropped enrichment IS wired (${distinctDroppedPatternCount} distinct pattern${distinctDroppedPatternCount === 1 ? '' : 's'} observed across the source in the last 24h) ` +
           `but the current scope returned zero events. ` +
           (args.service ? 'Try removing the service scope, or ' : 'Try ') +
           'widening the time window (e.g. timeRange="24h").';
@@ -702,7 +703,7 @@ export async function executeTopPatterns(
     reason: 'projected savings across the env if you act — drop vs compact vs sample',
   });
   nextActions.push({
-    tool: 'log10x_cost_drivers',
+    tool: 'log10x_whats_changing',
     args: { timeRange: '7d' },
     reason: 'growth/delta ranking over 7d — what is rising, vs the current-cost ranking shown here',
   });
@@ -966,12 +967,21 @@ export async function executeTopPatterns(
         headline = `Top ${renderRows.length} patterns over ${tf.label}: ${bytesLabel} union (${offloadShareLabel} currently offloaded).${rateUnsetTail}${incidentTail}`;
       }
     } else {
-      // kept (default) — preserves pre-PL-12 headline byte-for-byte
-      // aside from the disclosure-tail swap.
-      if (totalCostMonthlyDisclosed != null) {
-        headline = `Top ${renderRows.length} patterns over ${tf.label} cover ${sharePctLabel} of scanned bytes (${bytesLabel}), ~${dollarTail}.${incidentTail}`;
+      // kept (default) — Note 4 headline shape:
+      //   "Top 10 of <total> patterns cover ~$X/mo of $Y/mo total (Z%)"
+      // shownCostMonthly = $/mo for the rows we're showing (computed from
+      // shownBytes). totalCostMonthly = env-wide $/mo (totalBytes-based).
+      // Falls back to bytes-only framing when no rate is configured.
+      const totalLabel =
+        patternCountTotal != null ? ` of ${patternCountTotal}` : '';
+      if (totalCostMonthlyDisclosed != null && costPerGb != null && windowHours > 0) {
+        const shownCostMonthly =
+          (bytesToCost(shownBytes, costPerGb) / windowHours) * 720;
+        const shownDollarLabel = fmtDollar(shownCostMonthly);
+        const totalDollarLabel = fmtDisclosedDollar(totalCostMonthlyDisclosed);
+        headline = `Top ${renderRows.length}${totalLabel} patterns cover ~${shownDollarLabel}/mo of ${totalDollarLabel}/mo total (${sharePctLabel}).${incidentTail}`;
       } else {
-        headline = `Top ${renderRows.length} patterns over ${tf.label} cover ${sharePctLabel} of scanned bytes (${bytesLabel}).${rateUnsetTail}${incidentTail}`;
+        headline = `Top ${renderRows.length}${totalLabel} patterns cover ${sharePctLabel} of scanned bytes (${bytesLabel}).${rateUnsetTail}${incidentTail}`;
       }
     }
   }
@@ -990,9 +1000,16 @@ export async function executeTopPatterns(
   // pre-offset rowset size as a conservative lower bound.
   const totalAvailable = patternCountTotal ?? (rawRowsAll.length > offset + renderRows.length ? rawRowsAll.length : offset + renderRows.length);
   const truncated = totalAvailable > offset + renderRows.length;
+  // Note 2 + Note 4 — "more" expands, never redelivers the same chunk size.
+  // Initial 10 → next 25 → next 50. Detection uses the CURRENT args.limit
+  // (the one that just ran) to pick the next size. >=50 stays at 50 so
+  // pagination doesn't blow up unbounded; we still page through additional
+  // results, just at the schema max page size.
+  const nextLimit =
+    args.limit <= 10 ? 25 : args.limit <= 25 ? 50 : 50;
   // Pagination footer for must_render_verbatim — only when there are more results.
   const paginationFooter = truncated
-    ? `\nShowing patterns ${offset + 1}–${offset + renderRows.length} of ${patternCountTotal ?? '?'}. Reply 'more' to see the next ${args.limit}.`
+    ? `\nShowing patterns ${offset + 1}–${offset + renderRows.length} of ${patternCountTotal ?? '?'}. Reply 'more' to see the next ${nextLimit}.`
     : '';
 
   // FIX 1 — Gate chart PNG behind include_chart opt-in (default false) to
@@ -1114,7 +1131,11 @@ export async function executeTopPatterns(
         dataPatterns,
         [
           { header: '#',       align: 'right',  get: (p) => String(p.rank) },
-          { header: 'Pattern', align: 'left',   get: (p) => p.identity, max_width: 40 },
+          // Note 18 — `identity` may fall back to `pattern_hash` when the
+          // descriptor is missing. stripHashFromVisible ensures the 11-char
+          // hash never leaks into the visible cell; the hash stays in the
+          // structured `pattern_hash` field for tool-to-tool round-trip.
+          { header: 'Pattern', align: 'left',   get: (p) => stripHashFromVisible(p.identity) || '(unnamed pattern)', max_width: 40 },
           { header: 'Service', align: 'left',   get: (p) => p.service ?? '', max_width: 24 },
           { header: 'Vol/mo',  align: 'right',  get: (p) => p.bytes_display },
           { header: '%',       align: 'right',  get: (p) => p.share_pct_display },
@@ -1130,16 +1151,39 @@ export async function executeTopPatterns(
       )
     : undefined;
 
-  // human_summary is honest: volume-first, includes the "top-N of env-total"
-  // framing + rate disclosure.
-  const chassis_human_summary = renderRows.length === 0
+  // human_summary is honest: volume-first, includes the "top-N of total"
+  // framing + rate disclosure. Per Note 1 we drop "env" jargon at source
+  // (sanitizeUserProse on the envelope would catch it too, but writing it
+  // cleanly here keeps the prose readable for code reviewers).
+  // Per Note 4 + arc-rendering review: lead with rank-1 narrative
+  // (pattern, service, severity, suggested first move) before the table
+  // gets rendered, so the agent always surfaces a one-line orientation.
+  // Note 18 — hash NEVER falls into user-visible prose. When the pattern
+  // descriptor is missing we degrade to a generic label ("top pattern")
+  // rather than echoing the 11-char hash. stripHashFromVisible below
+  // catches any hash that slipped into the descriptor string itself.
+  const rank1 = renderRows[0];
+  const rank1Descriptor = rank1?.pattern || 'top pattern';
+  const rank1Narrative = rank1
+    ? `Rank 1: ${rank1Descriptor}` +
+      (rank1.service ? ` on ${rank1.service}` : '') +
+      (rank1.severity ? ` (${rank1.severity})` : '') +
+      `. First move: run log10x_pattern_mitigate on it to see drop/compact/offload options.`
+    : '';
+  const baseSummary = renderRows.length === 0
     ? `No patterns in scope over ${tf.label}.`
     : `Top ${renderRows.length} patterns by bytes/${tf.label}` +
       (args.service ? ` on ${args.service}` : '') +
       (costPerGb != null ? ` above 0 KB/s floor (rate_source=${rate_source})` : '') +
-      `. Env total: ${fmtBytesShared(totalBytes)}.` +
-      (patternCountTotal != null ? ` ${renderRows.length} of ${patternCountTotal} env patterns shown.` : '') +
+      `. Total: ${fmtBytesShared(totalBytes)}.` +
+      (patternCountTotal != null ? ` ${renderRows.length} of ${patternCountTotal} patterns shown.` : '') +
       (incidents.length > 0 ? ` ${incidents.length} incident cluster${incidents.length === 1 ? '' : 's'} detected.` : '');
+  // Apply sanitize + hash-strip explicitly on this tool's human_summary
+  // (chassis-envelope re-runs sanitizeUserProse idempotently; we add the
+  // hash-strip pass here because the chassis doesn't run it by default).
+  const chassis_human_summary = stripHashFromVisible(
+    sanitizeUserProse(rank1Narrative ? `${rank1Narrative} ${baseSummary}` : baseSummary)
+  );
 
   // Map local rate_source ('unset' is this tool's term for no rate configured)
   // to the chassis RateSource enum ('none' means absent).
@@ -1160,7 +1204,7 @@ export async function executeTopPatterns(
       threshold_basis: chassisThresholdBasis,
       threshold_audit: patternCountTotal != null ? {
         value: costPerGb,
-        basis: `top_n_above_floor; ${renderRows.length} of ${patternCountTotal} env patterns returned`,
+        basis: `top_n_above_floor; ${renderRows.length} of ${patternCountTotal} patterns returned`,
         observed_distribution: null,
       } : undefined,
     },
@@ -1170,7 +1214,7 @@ export async function executeTopPatterns(
       pattern_count_source: {
         kind: 'top_n_above_threshold',
         count: renderRows.length,
-        denominator_meaning: `Top ${renderRows.length} patterns above 0 KB/s floor in ${tf.label}${patternCountTotal != null ? ` of ${patternCountTotal} env total` : ''}`,
+        denominator_meaning: `Top ${renderRows.length} patterns above 0 KB/s floor in ${tf.label}${patternCountTotal != null ? ` of ${patternCountTotal} total` : ''}`,
       },
       siem_vendor: siemLabel ?? undefined,
     },
@@ -1188,6 +1232,8 @@ export async function executeTopPatterns(
     actions: [
       ...nextActions.map((a) => ({ tool: a.tool, args: a.args, reason: a.reason })),
       // FIX 7 — next_page continuation action when results are truncated.
+      // Note 2 + Note 4 — "more" expands (10 → 25 → 50), so the continuation
+      // bumps `limit` to `nextLimit` rather than echoing the current size.
       ...(truncated
         ? [{
             tool: 'log10x_top_patterns',
@@ -1195,13 +1241,13 @@ export async function executeTopPatterns(
               ...(args.service ? { service: args.service } : {}),
               ...(args.severity ? { severity: args.severity } : {}),
               timeRange: args.timeRange,
-              limit: args.limit,
+              limit: nextLimit,
               offset: offset + renderRows.length,
               ...(args.effective_ingest_per_gb != null ? { effective_ingest_per_gb: args.effective_ingest_per_gb } : {}),
               ...(args.siemScope ? { siemScope: args.siemScope } : {}),
               include: include,
             },
-            reason: `Continue to patterns ${offset + renderRows.length + 1}–${offset + renderRows.length + args.limit} of ${patternCountTotal ?? '?'}`,
+            reason: `Continue to patterns ${offset + renderRows.length + 1}–${offset + renderRows.length + nextLimit} of ${patternCountTotal ?? '?'}`,
             role: 'optional-followup' as const,
           }]
         : []),

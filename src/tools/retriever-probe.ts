@@ -90,12 +90,12 @@ export async function executeRetrieverProbe(args: {
       view: 'summary',
       summary: {
         headline:
-          'Retriever probe could not run: offload_bucket / input_bucket not resolvable. Pass both explicitly or set LOG10X_STREAMER_BUCKET.',
+          'Retriever end-to-end health check could not run — the S3 buckets it reads from and writes to could not be resolved. Pass offload_bucket and input_bucket explicitly, or set LOG10X_STREAMER_BUCKET and make sure the retriever helm release is reachable.',
       },
       data: {
         verdict: 'unknown',
         reason:
-          'offload_bucket / input_bucket not resolvable. Pass both args explicitly or set LOG10X_STREAMER_BUCKET and ensure the retriever helm release is reachable.',
+          'I tried to run an end-to-end health check on the retriever pipeline, but I could not figure out which S3 buckets it reads from and writes to. To run the check: pass offload_bucket and input_bucket explicitly, or set LOG10X_STREAMER_BUCKET and ensure the retriever helm release is reachable so the bucket names can be auto-discovered.',
         asserts: [],
         total_runtime_ms: 0,
       },
@@ -124,10 +124,20 @@ export async function executeRetrieverProbe(args: {
 
 function buildHeadline(r: ProbeResult): string {
   if (r.verdict === 'green') {
-    return `Retriever e2e probe GREEN — picked hash ${r.picked_hash ?? '?'}, query ${r.query_id ?? '?'}, ${r.asserts.length} asserts all passing (${r.total_runtime_ms}ms).`;
+    return `Retriever end-to-end health check passed — picked pattern ${r.picked_hash ?? '?'}, ran query ${r.query_id ?? '?'}, all ${r.asserts.length} checks succeeded (${r.total_runtime_ms}ms).`;
   }
   if (r.verdict === 'broken') {
-    return `Retriever e2e probe BROKEN — first failed: ${r.first_failed_assert ?? '?'}. ${r.surfaced_remedy ?? ''}`;
+    return `Retriever end-to-end health check failed — first failing step: ${r.first_failed_assert ?? '?'}. ${r.surfaced_remedy ?? ''}`;
   }
-  return `Retriever e2e probe UNKNOWN — ${r.reason ?? 'probe could not run to completion'}`;
+  // Note 14: explain WHAT this tool tried (end-to-end retriever pipeline
+  // health check), WHY it couldn't (no metrics backend wired up to pick a
+  // pattern to test against), and WHAT to do next (pass target_hash, or
+  // run top_patterns first so we can pick a pattern automatically).
+  const reasonTail = r.reason ?? 'I could not complete the check';
+  return (
+    `I tried to run an end-to-end health check on the retriever pipeline, ` +
+    `but I could not pick a pattern to test against on my own — ${reasonTail}. ` +
+    `To run the check, tell me which pattern to test: pass target_hash: "<hash>", ` +
+    `or run log10x_top_patterns first so I can pick the top pattern and re-run this check automatically.`
+  );
 }

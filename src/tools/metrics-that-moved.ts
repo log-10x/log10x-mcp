@@ -297,12 +297,15 @@ export async function executeMetricsThatMoved(
       query_count: queryCount,
       total_latency_ms: totalLatencyMs,
       backend_pressure_hint: pressureHint(queryCount, totalLatencyMs, throttledHit),
-      human_summary: `Anchor "${anchorExpression}" has dispersion ${anchorDispersion.toFixed(3)} — below the ${ANCHOR_DISPERSION_FLOOR} floor for phase separation. No real busy/quiet split exists in this window, so the math is structurally meaningless. Re-anchor with a clearer log pattern or widen the time window.`,
+      // Per Notes 10-12: drop "anchor", "dispersion", raw PromQL expression
+      // from user prose. The numeric audit lives in payload for the agent.
+      human_summary: `The pattern we looked at is too steady over this window to tell busy phases apart from quiet ones, so the math is meaningless. Try a different starting pattern or widen the window.`,
       moved: [],
       not_moved: [],
       evaluation_failed: [],
     };
-    const headline = `Anchor lacks phase separation (dispersion ${anchorDispersion.toFixed(3)} < ${ANCHOR_DISPERSION_FLOOR}). Refusing — re-anchor with a clearer pattern.`;
+    // Plain English per Notes 10-12: drop "anchor", "dispersion", "refusing".
+    const headline = `The pattern we looked at is too steady to tell apart busy vs quiet phases. Try a different starting pattern.`;
     return buildChassisEnvelope({
       tool: 'log10x_metrics_that_moved',
       view: 'summary',
@@ -408,7 +411,11 @@ export async function executeMetricsThatMoved(
     },
   };
 
-  const headline = `${moved.length} of ${args.candidates.length} candidates moved with anchor (phase_gap ≥ ${floor}). ${notMoved.length} did not move. ${failed.length} could not be evaluated.`;
+  // Plain English per Notes 10-12: drop "candidates", "anchor", "phase_gap".
+  // The structured threshold + counts still live in payload / decisions.
+  const headline = moved.length > 0
+    ? `${moved.length} of ${args.candidates.length} metric(s) moved with this pattern over the window.`
+    : `No metrics moved with this pattern over the window (${args.candidates.length} checked).`;
 
   return buildChassisEnvelope({
     tool: 'log10x_metrics_that_moved',
@@ -559,40 +566,36 @@ function buildHumanSummary(args: {
   anchorDispersion: number;
   lowCandidateCount: 'severe' | 'medium' | null;
 }): string {
-  // Floor + observed-median framing: surface BOTH numbers so the agent
-  // can judge whether the floor is well above noise, at it, or below
-  // it on this backend. Honest disclosure replaces calibration ceremony.
-  const allEvaluated = [...args.moved, ...args.notMoved];
-  const observedMedian =
-    allEvaluated.length === 0
-      ? null
-      : (() => {
-          const sorted = allEvaluated.map((c) => c.phase_gap).sort((a, b) => a - b);
-          return sorted[Math.floor(sorted.length / 2)];
-        })();
-  const floorPct = (args.floor * 100).toFixed(0);
-  const observedFragment =
-    observedMedian !== null
-      ? ` Observed median phase_gap across the candidate pool: ${(observedMedian * 100).toFixed(0)}%.`
-      : '';
-  const calibTag =
-    args.thresholdBasis === 'unvalidated_default'
-      ? ` Floor is an unvalidated default — compare against the observed distribution before acting on the result.`
-      : '';
+  // Per Notes 9-12: drop "candidate", "phase-gap floor", "anchor",
+  // "evaluated" from user prose. Drop the calibration caveat entirely on
+  // no_signal (Note 9 — not load-bearing when nothing was found).
   if (args.status === 'no_signal') {
-    return `No candidate metrics moved with the anchor at the ${floorPct}% phase-gap floor. ${args.notMoved.length} were evaluated but stayed flat, ${args.failed.length} could not be evaluated. Stop searching with this anchor; consider re-anchoring or widening the window.${observedFragment}${calibTag}`;
+    const notMovedNote = args.notMoved.length > 0
+      ? ` ${args.notMoved.length} stayed flat`
+      : '';
+    const failedNote = args.failed.length > 0
+      ? `${notMovedNote ? ',' : ''} ${args.failed.length} couldn't be checked`
+      : '';
+    return `No metrics moved with this pattern over the window.${notMovedNote}${failedNote}. Try a different starting pattern or widen the window.`;
   }
   const lowTag =
     args.lowCandidateCount === 'severe'
-      ? ' Only a handful of candidates were usable — treat the result as weak evidence, look for corroborating signals.'
+      ? ' Only a few metrics were usable. Treat as weak evidence and look for corroborating signals.'
       : args.lowCandidateCount === 'medium'
-        ? ' Candidate sample was small — weight the result accordingly.'
+        ? ' Metric sample was small. Weight the result accordingly.'
         : '';
   const top = args.moved[0];
   const topNote = top
-    ? ` The strongest mover is ${top.candidate} with a ${(top.phase_gap * 100).toFixed(0)}% phase gap (direction: ${top.direction}).`
+    ? ` The strongest match is ${top.candidate} (${top.direction === 'co' ? 'rose with' : 'dropped against'} the pattern).`
     : '';
-  return `${args.moved.length} candidate(s) moved with the anchor above the ${floorPct}% phase-gap floor. ${args.notMoved.length} stayed flat, ${args.failed.length} could not be evaluated.${topNote}${observedFragment}${lowTag}${calibTag}`;
+  const failedNote = args.failed.length > 0
+    ? ` ${args.failed.length} couldn't be checked.`
+    : '';
+  const calibTag =
+    args.thresholdBasis === 'unvalidated_default'
+      ? ' Match threshold is a default (not yet tuned for your data).'
+      : '';
+  return `${args.moved.length} metric(s) moved with this pattern over the window.${topNote}${failedNote}${lowTag}${calibTag}`;
 }
 
 export interface AnchorPartition {

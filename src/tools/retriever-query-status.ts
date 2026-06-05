@@ -438,25 +438,27 @@ export async function executeRetrieverQueryStatus(
     });
   }
 
-  // Y2: Sentinel passthrough. retriever_query populates `query_id` =
-  // `error:<error_type>` on failure so the forward chain stays composable
-  // even when no real UUID was minted. Detect the sentinel here and return
-  // a typed chassis error envelope explaining that the upstream tool — not
-  // the runtime — produced this query id. Avoids a hopeless S3 _DONE.json
-  // probe on a non-existent prefix.
+  // Note 13: the previous log10x_retriever_query couldn't find the
+  // pattern the caller asked about — it returned a placeholder marker
+  // (`error:<error_type>`) as the query_id so the forward chain stays
+  // composable. There is no real query to check the status of; the work
+  // never started because the pattern wasn't in the indexed data. Tell
+  // the caller in plain English and point them at top_patterns so they
+  // can see which patterns ARE available, then re-run retriever_query
+  // with one of those.
   if (queryId.startsWith('error:')) {
     const upstreamErrorType = queryId.slice('error:'.length) || 'unknown';
     return buildChassisErrorEnvelope({
       tool: 'log10x_retriever_query_status',
       err: {
-        error_type: 'partial_failure',
+        error_type: 'anchor_not_found',
         retryable: false,
         suggested_backoff_ms: null,
         hint:
-          `The query_id is a sentinel emitted by log10x_retriever_query on an upstream failure ` +
-          `(upstream error_type='${upstreamErrorType}'). No real query was dispatched, so there is no _DONE.json ` +
-          `or qr/ prefix to probe. See the original log10x_retriever_query result for the actual error and ` +
-          `remediation; do not retry status against this sentinel id.`,
+          `The previous log10x_retriever_query call couldn't find that pattern in your indexed data, ` +
+          `so there is nothing to check the status of. To recover: run log10x_top_patterns to see ` +
+          `which patterns are actually being tracked, then call log10x_retriever_query again with ` +
+          `one of those.`,
       },
       telemetry,
       contextPayload: {

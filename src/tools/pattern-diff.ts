@@ -335,15 +335,39 @@ export async function executePatternDiff(
   const nowSec = Math.floor(Date.now() / 1000);
   const beforeWindowStartSec = nowSec - 2 * tf.days * 86400;
 
+  // Re-emergence threshold tightening (Note 15): with a sparse env, half the
+  // patterns naturally blink in and out per window. "Re-emerged" should mean
+  // a pattern that was meaningfully persistent BEFORE it went silent AND was
+  // silent for a meaningful stretch. Defaults: persistent ≥ 6h before
+  // silence, silence ≥ 6h before re-emergence. We approximate "persistent
+  // before silence" by requiring first_seen to predate the before-window by
+  // at least MIN_PRIOR_PERSISTENCE_SEC (so the pattern had room to be
+  // persistent before it went quiet). The silence gap itself is the
+  // before-window length — anything shorter than MIN_SILENCE_SEC is filtered
+  // out as noise.
+  const MIN_PRIOR_PERSISTENCE_SEC = 6 * 3600;
+  const MIN_SILENCE_SEC = 6 * 3600;
+  const windowSec = tf.days * 86400;
+  const silenceGapSec = windowSec; // length of the before-window the pattern was absent from
+
   // Re-emergence: a "new" pattern whose first_seen predates the before
-  // window. That's "this pattern existed earlier, went silent for at least
-  // one window, and now it's back" — the silent regression signal.
+  // window AND has had time to be persistent before going quiet AND the
+  // silence gap itself is meaningful. Anything else is a sparse-emission
+  // blink and gets routed back into trueNewHashes for ranking sanity.
   const reEmergedHashes: string[] = [];
   const trueNewHashes: string[] = [];
+  // Cache the silence gap (seconds) per re-emerged hash for ranking below.
+  const silenceGapByHash = new Map<string, number>();
   for (const hash of newHashes) {
     const fs = firstSeenByHash.get(hash);
-    if (fs && fs.firstSeenUnix !== null && fs.firstSeenUnix < beforeWindowStartSec) {
+    const firstSeenOk =
+      fs &&
+      fs.firstSeenUnix !== null &&
+      fs.firstSeenUnix < beforeWindowStartSec - MIN_PRIOR_PERSISTENCE_SEC;
+    const silenceOk = silenceGapSec >= MIN_SILENCE_SEC;
+    if (firstSeenOk && silenceOk) {
       reEmergedHashes.push(hash);
+      silenceGapByHash.set(hash, silenceGapSec);
     } else {
       trueNewHashes.push(hash);
     }
@@ -441,7 +465,19 @@ export async function executePatternDiff(
   const newRows = sortDesc(trueNewHashes.map(buildRow), 'cost_now_usd').slice(0, limit);
   const retiredRows = sortDesc(retiredHashes.map(buildRow), 'cost_before_usd').slice(0, limit);
   const persistentRows = sortDesc(persistentHashes.map(buildRow), 'cost_now_usd').slice(0, limit);
-  const reEmergedRows = sortDesc(reEmergedHashes.map(buildRow), 'cost_now_usd').slice(0, limit);
+  // Re-emerged ranking (Note 15): rank by "surprise" = silence_gap × current
+  // volume. The longer the silence and the louder the return, the more
+  // likely this is a real regression worth surfacing. Cap displayed count
+  // tightly (max 10) so the user gets a focused list even when the raw
+  // re-emerged set is huge.
+  const RE_EMERGED_DISPLAY_CAP = Math.min(limit, 10);
+  const reEmergedAllRows = reEmergedHashes.map(buildRow);
+  reEmergedAllRows.sort((a, b) => {
+    const aGap = silenceGapByHash.get(a.pattern_hash) ?? 0;
+    const bGap = silenceGapByHash.get(b.pattern_hash) ?? 0;
+    return bGap * b.bytes_now - aGap * a.bytes_now;
+  });
+  const reEmergedRows = reEmergedAllRows.slice(0, RE_EMERGED_DISPLAY_CAP);
 
   const afterLabel = `last ${tf.range}`;
   const beforeLabel = `prior ${tf.range}`;
@@ -463,10 +499,24 @@ export async function executePatternDiff(
     },
   };
 
+  // Headline framing (Note 15): when re-emerged count is large (>30), the
+  // signal-to-noise of "silent regression" framing collapses — it's just
+  // high churn in a sparse env. Flip to "high pattern churn" framing and
+  // promise the top N most surprising ones. Below 30, the focused
+  // "re-emerged" framing still earns its keep.
+  const RE_EMERGED_CHURN_THRESHOLD = 30;
+  const highChurn = reEmergedHashes.length > RE_EMERGED_CHURN_THRESHOLD;
+
   const headlineParts: string[] = [];
   if (trueNewHashes.length > 0) headlineParts.push(`${trueNewHashes.length} new`);
   if (retiredHashes.length > 0) headlineParts.push(`${retiredHashes.length} retired`);
-  if (reEmergedHashes.length > 0) headlineParts.push(`${reEmergedHashes.length} re-emerged`);
+  if (reEmergedHashes.length > 0) {
+    headlineParts.push(
+      highChurn
+        ? `${reEmergedHashes.length} re-emerged (high churn)`
+        : `${reEmergedHashes.length} re-emerged`,
+    );
+  }
   headlineParts.push(`${persistentHashes.length} persistent`);
   const headline = `Pattern diff over ${tf.label}: ${headlineParts.join(', ')}.`;
 
@@ -476,8 +526,9 @@ export async function executePatternDiff(
         `(${minClusterSize}+ patterns sharing first_seen within ${coEmergeWindowSec}s) — ` +
         `consider checking your deploy log around the cluster timestamps.`
       : reEmergedHashes.length > 0
-      ? `${reEmergedHashes.length} pattern${reEmergedHashes.length === 1 ? '' : 's'} re-emerged after being silent — ` +
-        `silent-regression signal ("the bug we thought we fixed is back").`
+      ? highChurn
+        ? `High pattern churn this window — ${reEmergedHashes.length} patterns blinked back after silence (typical for a sparse env). Showing the top ${reEmergedRows.length} by silence-gap and current volume.`
+        : `${reEmergedHashes.length} pattern${reEmergedHashes.length === 1 ? '' : 's'} re-emerged after being silent — worth a look before assuming a regression.`
       : undefined;
 
   const totalChange =
@@ -509,7 +560,9 @@ export async function executePatternDiff(
         (clusters.length > 0
           ? `${clusters.length} co-emergence cluster${clusters.length === 1 ? '' : 's'} flagged — check your deploy log around the cluster timestamps. `
           : reEmergedHashes.length > 0
-          ? `Re-emerged patterns are the silent-regression signal — start there. `
+          ? highChurn
+            ? `High churn in a sparse env — showing the top ${reEmergedRows.length} re-emerged by silence gap and volume; the rest are likely sparse-emission blinks. `
+            : `Re-emerged patterns ranked by silence gap × current volume — start at the top. `
           : `Inspect the top new pattern with log10x_pattern_examples. `) +
         calibTag;
 
@@ -556,34 +609,44 @@ export async function executePatternDiff(
       for (const c of clusters) {
         const t0 = new Date(c.first_seen_window_ts[0] * 1000).toISOString();
         const t1 = new Date(c.first_seen_window_ts[1] * 1000).toISOString();
-        lines.push(`- ${c.cluster_size} patterns first seen ${t0} – ${t1}: \`${c.patterns.slice(0, 5).join('`, `')}\`${c.patterns.length > 5 ? ' …' : ''}`);
+        // Per Note 18, hashes stay machine-side — the user-visible line
+        // tells them WHEN and HOW MANY; the agent reads the patterns[]
+        // array from the structured payload to drill in.
+        lines.push(`- ${c.cluster_size} patterns first seen ${t0} – ${t1}`);
       }
     }
     const svcList = (r: DiffRow) => r.services.map((s) => s.name).join(', ');
     const sevList = (r: DiffRow) => r.severities.join('/');
+    // Pattern column shows the human-readable symbol_message, NOT the hash
+    // (Note 18 — hash stays in machine fields only). Truncate long symbol
+    // messages so the table column stays readable.
+    const patternLabel = (r: DiffRow) => {
+      const sm = r.symbol_message || '(unknown pattern)';
+      return sm.length > 60 ? sm.slice(0, 57) + '…' : sm;
+    };
     if (newRows.length > 0) {
       lines.push(``, `### New (${newRows.length} shown of ${trueNewHashes.length})`);
-      lines.push(`| Pattern hash | Services | Severity | Cost now ($) |`);
-      lines.push(`|--------------|----------|----------|--------------|`);
+      lines.push(`| Pattern | Services | Severity | Cost now ($) |`);
+      lines.push(`|---------|----------|----------|--------------|`);
       for (const r of newRows) {
-        lines.push(`| \`${r.pattern_hash}\` | ${svcList(r)} | ${sevList(r)} | $${r.cost_now_usd.toFixed(2)} |`);
+        lines.push(`| ${patternLabel(r)} | ${svcList(r)} | ${sevList(r)} | $${r.cost_now_usd.toFixed(2)} |`);
       }
     }
     if (reEmergedRows.length > 0) {
-      lines.push(``, `### Re-emerged (${reEmergedRows.length} shown of ${reEmergedHashes.length})`);
-      lines.push(`| Pattern hash | Services | Severity | Cost now ($) | First seen (age) |`);
-      lines.push(`|--------------|----------|----------|--------------|------------------|`);
+      lines.push(``, `### Re-emerged (top ${reEmergedRows.length} by silence-gap × volume, of ${reEmergedHashes.length})`);
+      lines.push(`| Pattern | Services | Severity | Cost now ($) | First seen (age) |`);
+      lines.push(`|---------|----------|----------|--------------|------------------|`);
       for (const r of reEmergedRows) {
         const age = r.first_seen_age_seconds !== null ? `${Math.floor(r.first_seen_age_seconds / 86400)}d ago` : '?';
-        lines.push(`| \`${r.pattern_hash}\` | ${svcList(r)} | ${sevList(r)} | $${r.cost_now_usd.toFixed(2)} | ${age} |`);
+        lines.push(`| ${patternLabel(r)} | ${svcList(r)} | ${sevList(r)} | $${r.cost_now_usd.toFixed(2)} | ${age} |`);
       }
     }
     if (retiredRows.length > 0) {
       lines.push(``, `### Retired (${retiredRows.length} shown of ${retiredHashes.length})`);
-      lines.push(`| Pattern hash | Services | Severity | Cost before ($) |`);
-      lines.push(`|--------------|----------|----------|-----------------|`);
+      lines.push(`| Pattern | Services | Severity | Cost before ($) |`);
+      lines.push(`|---------|----------|----------|-----------------|`);
       for (const r of retiredRows) {
-        lines.push(`| \`${r.pattern_hash}\` | ${svcList(r)} | ${sevList(r)} | $${r.cost_before_usd.toFixed(2)} |`);
+        lines.push(`| ${patternLabel(r)} | ${svcList(r)} | ${sevList(r)} | $${r.cost_before_usd.toFixed(2)} |`);
       }
     }
     return buildChassisEnvelope({

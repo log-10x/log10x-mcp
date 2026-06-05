@@ -431,9 +431,24 @@ export async function executeWhatsChanging(
   const combined = [...gated, ...shrinkers].sort((a, b) => Math.abs(b.delta_usd) - Math.abs(a.delta_usd));
   const shown = combined.slice(0, limit);
 
+  // Note 16: on no_signal, surface the top 5 by absolute delta from the
+  // full rows[] pool so the user can see whether the env was genuinely
+  // quiet ($5 max change) or just below their floor ($499 max change).
+  const allByAbsDelta = [...rows].sort(
+    (a, b) => Math.abs(b.delta_usd) - Math.abs(a.delta_usd),
+  );
+  const topAnyway = allByAbsDelta.slice(0, 5);
+  const topObservedDelta = topAnyway[0] ? Math.abs(topAnyway[0].delta_usd) : 0;
+  // Suggest a tuned floor at half the largest observed delta, rounded to a
+  // friendly number; minimum of $0.50 so we never propose a literal-zero
+  // floor that defeats the gate.
+  const suggestedFloor = Math.max(0.5, Math.round((topObservedDelta * 0.5) * 100) / 100);
+
   const headline =
     shown.length === 0
-      ? `No patterns changed by >$${minDeltaUsd} over ${tf.label} vs ${cwLabel}.`
+      ? topAnyway.length > 0
+        ? `Nothing crossed your $${minDeltaUsd} floor over ${tf.label}. Biggest change was $${Math.abs(topAnyway[0].delta_usd).toFixed(2)} (${topAnyway[0].symbol_message || 'pattern'}${topAnyway[0].services[0] ? ' on ' + topAnyway[0].services[0].name : ''}). Lower the floor to see more.`
+        : `No patterns changed by >$${minDeltaUsd} over ${tf.label} vs ${cwLabel}.`
       : `${shown.length} pattern${shown.length === 1 ? '' : 's'} changed by >$${minDeltaUsd} over ${tf.label} vs ${cwLabel}. ` +
         `Top: \`${shown[0].pattern_hash}\` ${shown[0].delta_usd >= 0 ? '+' : '-'}$${Math.abs(shown[0].delta_usd).toFixed(0)} ` +
         `(${shown[0].delta_pct >= 0 ? '+' : ''}${shown[0].delta_pct.toFixed(0)}%).`;
@@ -464,6 +479,8 @@ export async function executeWhatsChanging(
       delta_usd: ReturnType<typeof computeObservedDistribution>;
       delta_pct: ReturnType<typeof computeObservedDistribution>;
     };
+    top_anyway?: ChangingRow[];
+    suggested_floor_usd?: number;
   } = {
     time_range: tf.label,
     comparison_window: cwLabel,
@@ -475,6 +492,11 @@ export async function executeWhatsChanging(
     pattern_count_shown: shown.length,
     excluded_new_count: excludedNewCount,
     observed_distribution: { delta_usd: observedDeltaUsdDist, delta_pct: observedDeltaPctDist },
+    // Note 16: on no_signal, surface the top 5 by absolute delta so the
+    // agent has something to render even when nothing crossed the floor.
+    ...(status === 'no_signal' && topAnyway.length > 0
+      ? { top_anyway: topAnyway, suggested_floor_usd: suggestedFloor }
+      : {}),
     ...(backendErrors.length > 0 ? { backend_errors: backendErrors, partial: true } : {}),
   };
 
@@ -483,10 +505,12 @@ export async function executeWhatsChanging(
       ? `${excludedNewCount} brand-new pattern${excludedNewCount === 1 ? '' : 's'} excluded — see \`log10x_whats_new\`.`
       : undefined;
 
-  // Honest summary: lead with the result, add the calibration caveat when
-  // the gates are still at their hand-picked defaults, surface partial
-  // failure when any baseline offset or the events join failed.
-  const calibTag = gatesAtDefault
+  // Honest summary: lead with the result, surface partial failure when any
+  // baseline offset or the events join failed. Note 16 — on no_signal we
+  // drop the "hand-picked defaults" caveat: when nothing crossed, the
+  // actionable next step is "lower the floor", not "treat the threshold as
+  // suspect."
+  const calibTag = status !== 'no_signal' && gatesAtDefault
     ? ` Gates are at their hand-picked defaults; compare against the observed delta distribution before acting.`
     : '';
   const partialTag =
@@ -499,7 +523,11 @@ export async function executeWhatsChanging(
       : '';
   const humanSummary =
     status === 'no_signal'
-      ? `No patterns crossed the $${minDeltaUsd} delta floor over ${tf.label} vs ${cwLabel}. ${rows.length} patterns were evaluated.${newExclusionTag}${calibTag}${partialTag}`
+      ? topAnyway.length > 0
+        ? `Nothing crossed your $${minDeltaUsd} floor over ${tf.label} vs ${cwLabel}. ` +
+          `Biggest change was $${Math.abs(topAnyway[0].delta_usd).toFixed(2)} (${topAnyway[0].symbol_message || 'pattern'}${topAnyway[0].services[0] ? ' on ' + topAnyway[0].services[0].name : ''}). ` +
+          `Lower the floor (try $${suggestedFloor.toFixed(2)}) to see more.${newExclusionTag}${partialTag}`
+        : `No pattern changes detected over ${tf.label} vs ${cwLabel}. ${rows.length} patterns were checked.${newExclusionTag}${partialTag}`
       : `${shown.length} pattern${shown.length === 1 ? '' : 's'} changed by more than $${minDeltaUsd} over ${tf.label} vs ${cwLabel}. ` +
         `Top: \`${shown[0].pattern_hash}\` ${shown[0].delta_usd >= 0 ? '+' : '-'}$${Math.abs(shown[0].delta_usd).toFixed(0)} (${shown[0].delta_pct >= 0 ? '+' : ''}${shown[0].delta_pct.toFixed(0)}%). ` +
         `Inspect with log10x_pattern_trend.${newExclusionTag}${calibTag}${partialTag}`;
@@ -534,7 +562,23 @@ export async function executeWhatsChanging(
             ]
           : []),
       ]
-    : [];
+    : // Note 16: on no_signal, suggest a re-run at the tuned floor so the
+      // user has a one-click way to expand the view, plus a top_anyway-based
+      // drill-in to the biggest change we did observe.
+      status === 'no_signal' && topAnyway.length > 0
+      ? [
+          {
+            tool: 'log10x_whats_changing',
+            args: { timeRange: tf.range, min_delta_usd: suggestedFloor },
+            reason: `lower the floor to $${suggestedFloor.toFixed(2)} (half the largest observed change) to surface the top movers`,
+          },
+          {
+            tool: 'log10x_pattern_trend',
+            args: { pattern: topAnyway[0].pattern_hash, timeRange: tf.range },
+            reason: 'inspect the trajectory of the biggest observed change (below the floor)',
+          },
+        ]
+      : [];
 
   if (view === 'markdown') {
     const lines = [

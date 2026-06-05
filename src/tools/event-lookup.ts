@@ -21,7 +21,7 @@ import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { agentOnly } from '../lib/agent-only.js';
 import { fetchOneSampleByHash } from '../lib/siem/sample.js';
 import { patternDisplay } from '../lib/pattern-descriptor.js';
-import { type StructuredOutput } from '../lib/output-types.js';
+import { type StructuredOutput, type Action } from '../lib/output-types.js';
 import { newChassisTelemetry, buildChassisEnvelope, buildChassisErrorEnvelope } from '../lib/chassis-envelope.js';
 import { wrapBackendError } from '../lib/primitive-errors.js';
 import { getOffloadStatus } from '../lib/offload-status.js';
@@ -98,7 +98,7 @@ export async function executeEventLookup(
   // Merge so downstream code only reads args.tenxHash.
   const argsNormalized = { ...args, tenxHash: args.pattern_hash ?? args.tenxHash };
   const telemetry = newChassisTelemetry();
-  const sumOut: { data?: EventLookupSummary } = {};
+  const sumOut: { data?: EventLookupSummary; nextActions?: NextAction[] } = {};
   let md: string;
   try {
     md = await executeEventLookupInner(argsNormalized, env, sumOut);
@@ -156,6 +156,17 @@ export async function executeEventLookup(
   const rateSourceMapped = d.rate_source === 'customer_supplied' ? 'customer_supplied' as const
     : d.rate_source === 'list_price' ? 'list_price' as const
     : 'none' as const;
+  // Note 8: event_lookup is a hub — agents reading the result must be
+  // told where to go next. Convert the NextAction prose-hints into the
+  // structured actions[] block on the chassis envelope so a chain walker
+  // can branch without parsing markdown. Mapping is direct: NextAction
+  // { tool, args, reason } → Action { tool, args, reason, role }.
+  const chassisActions: Action[] = (sumOut.nextActions ?? []).map((a) => ({
+    tool: a.tool,
+    args: a.args as Record<string, unknown>,
+    reason: a.reason,
+    role: 'recommended-next' as const,
+  }));
   return buildChassisEnvelope({
     tool: 'log10x_event_lookup',
     view: 'summary',
@@ -179,6 +190,7 @@ export async function executeEventLookup(
     },
     payload: d,
     human_summary: headline,
+    actions: chassisActions,
     telemetry,
   });
 }
@@ -186,7 +198,7 @@ export async function executeEventLookup(
 async function executeEventLookupInner(
   args: { pattern?: string; pattern_hash?: string; tenxHash?: string; service?: string; timeRange?: string; analyzerCost?: number; effective_ingest_per_gb?: number; siemScope?: string },
   env: EnvConfig,
-  sumOut?: { data?: EventLookupSummary }
+  sumOut?: { data?: EventLookupSummary; nextActions?: NextAction[] }
 ): Promise<string> {
   // Defensive defaults — schema defaults only apply at the MCP-SDK
   // boundary; chain-walkers, internal callers, and the eval harness
@@ -322,7 +334,7 @@ async function formatResults(
   rateSource: 'list_price' | 'customer_supplied' | 'unset',
   period: string,
   env: EnvConfig,
-  sumOut?: { data?: EventLookupSummary },
+  sumOut?: { data?: EventLookupSummary; nextActions?: NextAction[] },
   resolvedFromHash?: string
 ): Promise<string> {
   // Aggregate bytes per service (multiple severity levels possible).
@@ -734,7 +746,17 @@ async function formatResults(
   nextActions.push({
     tool: 'log10x_pattern_trend',
     args: { pattern },
-    reason: 'time series for the resolved pattern',
+    reason: 'time series for the resolved pattern (volume + chart)',
+  });
+  // Note 8: pattern_examples is a hub partner of event_lookup — it
+  // returns real sample lines + slot variations for this pattern, the
+  // content-axis view that complements the time-axis (pattern_trend) and
+  // the cost-axis (event_lookup itself) views.
+  hints.push(`Sample lines + slot variations: log10x_pattern_examples({ pattern: '${pattern}' }).`);
+  nextActions.push({
+    tool: 'log10x_pattern_examples',
+    args: { pattern },
+    reason: 'real events + slot variations for this pattern (content view)',
   });
   hints.push(`Reduce the cost of this pattern: log10x_pattern_mitigate({ pattern: '${pattern}' }) — presents drop @ analyzer / drop @ forwarder / mute @ 10x / compact @ 10x, gated on env capabilities.`);
   nextActions.push({
@@ -742,10 +764,31 @@ async function formatResults(
     args: { pattern },
     reason: 'env-gated mitigation options + exact configs for this pattern',
   });
+  // Note 8: investigate is the hub partner for "what else moved with
+  // this pattern". The corroborated-regression path above already pushes
+  // an investigate action with a stronger reason; only add the generic
+  // entry when no regression-specific investigate is already queued so
+  // the chassis actions[] doesn't duplicate.
+  if (!nextActions.some((a) => a.tool === 'log10x_investigate')) {
+    hints.push(`What else moved with this pattern: log10x_investigate({ starting_point: '${pattern}' }).`);
+    nextActions.push({
+      tool: 'log10x_investigate',
+      args: { starting_point: pattern },
+      reason: 'cross-pillar trace for anything moving with this pattern',
+    });
+  }
   lines.push('');
   lines.push(agentOnly(`Suggested next calls: ${hints.join(' ')}`));
 
   const block = renderNextActions(nextActions);
   if (block) lines.push('', block);
+
+  // Surface the structured nextActions to the outer chassis envelope.
+  // Today the prose block (renderNextActions above) is the only way an
+  // agent learns about the follow-up handoffs; that leaves the envelope's
+  // typed actions[] empty (Note 8). Pass the list up through sumOut so
+  // executeEventLookup can map NextAction → Action and populate the
+  // chassis actions[] field.
+  if (sumOut) sumOut.nextActions = nextActions;
   return lines.join('\n');
 }

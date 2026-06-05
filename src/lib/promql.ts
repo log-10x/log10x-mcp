@@ -146,6 +146,48 @@ export function formatPromOffset(offsetDays?: number): string {
   return ` offset ${offsetExpr}`;
 }
 
+/**
+ * Auto-pick a query_range step for a given window so the resulting
+ * series carries ~12–30 buckets — enough resolution to see shape, not
+ * so many that the renderer chokes or the agent loses signal in noise.
+ *
+ * Decision table (from /tmp/arc-prose-notes.md Note 5):
+ *   - `15m`  → `1m`   (15 buckets)
+ *   - `1h`   → `5m`   (12 buckets)
+ *   - `6h`   → `15m`  (24 buckets)
+ *   - `24h`  → `1h`   (24 buckets)
+ *   - `1d`   → `1h`   (24 buckets, alias of 24h)
+ *   - `7d`   → `6h`   (28 buckets)
+ *   - `30d`  → `1d`   (30 buckets)
+ *
+ * Unknown windows fall through to `1h` — the historical default that
+ * existed before this helper was introduced, so callers that pass
+ * something we don't model never see worse behaviour than the prior code.
+ *
+ * Returned strings are valid `step` values for `trendSchema`'s enum
+ * (`'1m' | '5m' | '15m' | '1h' | '6h' | '1d'`) and parseable by
+ * `parseStep()` in trend.ts.
+ */
+export function autoStepForWindow(window: string): '1m' | '5m' | '15m' | '1h' | '6h' | '1d' {
+  switch (window) {
+    case '15m':
+      return '1m';
+    case '1h':
+      return '5m';
+    case '6h':
+      return '15m';
+    case '24h':
+    case '1d':
+      return '1h';
+    case '7d':
+      return '6h';
+    case '30d':
+      return '1d';
+    default:
+      return '1h';
+  }
+}
+
 /** Bytes per pattern for a time window, with optional offset in days. */
 export function bytesPerPattern(
   filters: Record<string, FilterValue>,
@@ -400,10 +442,12 @@ export function eventsByPatternFull(
   filters: Record<string, FilterValue>,
   env: string,
   range: string,
+  offsetDays?: number,
   labels: LabelNameMap = DEFAULT_LABELS
 ): string {
+  const offset = formatPromOffset(offsetDays);
   const selector = buildSelector(filters, env, labels);
-  return `sum by (${labels.pattern}, ${labels.service}, ${labels.severity}) (increase(${VOLUME_METRIC}{${selector}}[${range}]))`;
+  return `sum by (${labels.pattern}, ${labels.service}, ${labels.severity}) (increase(${VOLUME_METRIC}{${selector}}[${range}]${offset}))`;
 }
 
 /**
