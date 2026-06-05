@@ -181,6 +181,10 @@ export async function executeRetrieverSeries(
       view: 'summary',
       summary: { headline: `Series refused: ${reason}. Narrow the window or add a more selective search expression.` },
       data: {
+        // Harmonized chassis status (Wave 1.C). `ok` retained for
+        // back-compat with pre-status callers; new callers branch on
+        // data.status which has the same taxonomy as other Class A tools.
+        status: 'refused',
         ok: false,
         mode: 'refused',
         from: args.from,
@@ -215,11 +219,18 @@ export async function executeRetrieverSeries(
     windowMs,
     topGroups,
   });
+  // Status: 'success' when the run produced any actual events; 'no_signal'
+  // when the run completed cleanly but found nothing in the window. `ok`
+  // retained as a back-compat boolean.
+  const seriesStatus: 'success' | 'no_signal' =
+    result.actualEvents > 0 ? 'success' : 'no_signal';
   return __be({
     tool: 'log10x_retriever_series',
     view: 'summary',
     summary: { headline: `Retriever series for ${args.pattern ?? args.search ?? 'window'}: ${result.series.length} bucket point${result.series.length !== 1 ? 's' : ''}, ${result.groupCardinality} group${result.groupCardinality !== 1 ? 's' : ''}, mode=${decision.mode}, wall=${wallTimeMs}ms.` },
     data: {
+      // Harmonized chassis status (Wave 1.C). `ok` retained for back-compat.
+      status: seriesStatus,
       ok: true,
       mode: decision.mode,
       from: args.from,

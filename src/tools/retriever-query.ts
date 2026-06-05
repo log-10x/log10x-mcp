@@ -112,7 +112,7 @@ export const retrieverQuerySchema = {
 };
 
 interface RetrieverQuerySummary {
-  status: 'ok' | 'not_configured';
+  status: 'success' | 'no_signal' | 'error' | 'not_configured';
   human_summary: string;
   query_id?: string;
   target?: string;
@@ -660,7 +660,7 @@ async function executeRetrieverQueryInner(
         : undefined,
     });
     sumOut.data = {
-      status: 'ok',
+      status: resp.events.length === 0 ? 'no_signal' : 'success',
       human_summary,
       query_id: resp.queryId,
       target: resp.target,
