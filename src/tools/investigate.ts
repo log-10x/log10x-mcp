@@ -754,19 +754,40 @@ async function executeInvestigateInner(
         `- \`log10x_pattern_trend({ pattern: '${args.starting_point}', timeRange: '30d' })\` — see when it last fired`,
       );
     } else {
-      lines.push(
-        `**Result**: Could not resolve "${args.starting_point}" to a known pattern or service.`,
-        '',
-        '**Supported inputs**:',
-        '- A raw log line (will be templatized and matched by structural identity)',
-        '- A pattern identity (symbolMessage / tenx_hash)',
-        '- A service name',
-        '- The literal string `"environment"`, `"all"`, or `"audit"` for an env-wide sweep',
-        '',
-        '**Try next**:',
-        `- \`log10x_event_lookup({ pattern: '${args.starting_point}' })\` to search by substring`,
-        `- \`log10x_list_by_label({ label: 'tenx_user_service' })\` to list known services`,
-      );
+      // Hash-shaped input where the pattern_hash → name lookup also
+      // missed: tell the user that path was tried so they don't waste
+      // a retry on the same hash. The hash-detection sits at the top
+      // of resolveAnchor and only swaps anchor on a hit; on a miss the
+      // unresolved fall-through lands here.
+      const looksLikeHashSp =
+        /^[A-Za-z0-9_-]{11}$/.test(args.starting_point.trim()) &&
+        /[A-Z]/.test(args.starting_point.trim()) &&
+        /[a-z]/.test(args.starting_point.trim()) &&
+        /[0-9]/.test(args.starting_point.trim());
+      if (looksLikeHashSp) {
+        lines.push(
+          `**Result**: Could not resolve "${args.starting_point}" — looked up by pattern_hash, none found in the last 7d window of metrics. The hash may be from a different environment, outside retention, or mistyped.`,
+          '',
+          '**Try next**:',
+          `- \`log10x_top_patterns({ timeRange: '7d' })\` — surface active pattern hashes to copy a known-good one`,
+          `- \`log10x_event_lookup({ pattern_hash: '${args.starting_point}' })\` — same hash lookup, different cost/services view`,
+          `- \`log10x_pattern_examples({ pattern_hash: '${args.starting_point}' })\` — pull live SIEM events keyed on this hash if it's still in the analyzer`,
+        );
+      } else {
+        lines.push(
+          `**Result**: Could not resolve "${args.starting_point}" to a known pattern or service.`,
+          '',
+          '**Supported inputs**:',
+          '- A raw log line (will be templatized and matched by structural identity)',
+          '- A pattern identity (symbolMessage / pattern_hash — 11-char base64url)',
+          '- A service name',
+          '- The literal string `"environment"`, `"all"`, or `"audit"` for an env-wide sweep',
+          '',
+          '**Try next**:',
+          `- \`log10x_event_lookup({ pattern: '${args.starting_point}' })\` to search by substring`,
+          `- \`log10x_list_by_label({ label: 'tenx_user_service' })\` to list known services`,
+        );
+      }
     }
     const report = lines.join('\n');
     recordInvestigation({
@@ -1147,6 +1168,62 @@ async function resolveAnchor(
   // Environment-wide audit literal
   if (/^(environment|all|audit)$/i.test(sp)) {
     return { mode: 'environment', inputType: 'environment_literal', modeDetection: 'environment_audit' };
+  }
+
+  // Pattern_hash input: exactly 11 base64url chars (the engine's
+  // PatternHashEncoder output shape — see src/lib/pattern-hash.ts).
+  // When the starting_point matches this shape AND looks like an
+  // entropy-bearing hash (mixed case + digit, not a snake_case word),
+  // try resolving it to its dominant pattern name via TSDB FIRST. If
+  // the lookup hits, swap the anchor to the resolved name and let the
+  // normal pattern path take over. Caught by live execution wob5r7c71
+  // step 4 where starting_point="4Kjc7PHLWqY" (raw 11-char hash echoed
+  // by top_patterns) returned "Could not resolve" because the lookup
+  // querried the pattern label with the hash string as its value.
+  //
+  // The heuristic is intentionally conservative — a plain underscored
+  // pattern name like `db_lock_wait` is also 11 chars but won't have
+  // the mixed-case + digit signature. On a miss we fall through to the
+  // existing pattern/service resolver below so no behavior changes
+  // for non-hash inputs.
+  const looksLikeHash =
+    /^[A-Za-z0-9_-]{11}$/.test(sp) &&
+    /[A-Z]/.test(sp) &&
+    /[a-z]/.test(sp) &&
+    /[0-9]/.test(sp);
+  if (looksLikeHash) {
+    try {
+      const hashQ =
+        `topk(1, sum by (${LABELS.pattern}, ${LABELS.service}, ${LABELS.severity}) ` +
+        `(increase(all_events_summaryBytes_total{` +
+        `${LABELS.hash}="${escape(sp)}",` +
+        `${LABELS.env}="${metricsEnv}"}[7d])))`;
+      const res = await queryInstant(env, hashQ);
+      if (res.status === 'success' && res.data.result.length > 0) {
+        const row = res.data.result[0];
+        const resolvedName = row.metric[LABELS.pattern];
+        if (resolvedName) {
+          // Swap the anchor to the resolved Symbol Message and proceed
+          // as if the caller had passed the name directly. modeDetection
+          // records the lookup so the rendered report can show the hash
+          // → name handoff in the trail.
+          return {
+            mode: 'pattern',
+            anchor: resolvedName,
+            service: row.metric[LABELS.service],
+            severity: row.metric[LABELS.severity],
+            inputType: 'pattern_hash',
+            modeDetection: 'resolved_from_pattern_hash',
+          };
+        }
+      }
+    } catch {
+      // non-fatal — fall through to the existing resolver below
+    }
+    // The input matched the hash shape but no metrics carry it. Fall
+    // through to the existing pattern/service path; the un-resolved
+    // error renderer below will mention the pattern_hash lookup
+    // explicitly so the user knows that path was tried.
   }
 
   // Pattern identity heuristic: symbolMessage token (`~xxx`), underscore_separated
