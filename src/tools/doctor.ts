@@ -214,15 +214,33 @@ export async function runDoctorChecks(envNickname?: string): Promise<DoctorRepor
   await addSiemDiscoveryCheck(globalChecks);
   addNetworkEgressInventory(globalChecks, envs);
 
-  // 3. Per-environment checks.
+  // 3. Per-environment checks. byNickname includes aliases from
+  //    env-alias-bridge: SaaS env_id (UUID), on-prem env-config
+  //    nicknames bridged via env_id. So a user typing "otel-demo"
+  //    when the SaaS env is "10x Demo" with env_id 6aa99191-... still
+  //    resolves correctly.
   const targets: EnvConfig[] = envNickname
     ? (() => {
         const e = envs.byNickname.get(envNickname.toLowerCase());
         if (!e) {
+          // Build a deduped alias map so the error doesn't list every
+          // alias as if each were a separate env.
+          const aliasesByEnv = new Map<EnvConfig, string[]>();
+          for (const [k, v] of envs.byNickname.entries()) {
+            const list = aliasesByEnv.get(v) ?? [];
+            list.push(k);
+            aliasesByEnv.set(v, list);
+          }
+          const described = envs.all
+            .map((x) => {
+              const aliases = (aliasesByEnv.get(x) ?? []).filter((a) => a !== x.nickname.toLowerCase());
+              return aliases.length === 0 ? x.nickname : `${x.nickname} (also: ${aliases.join(', ')})`;
+            })
+            .join('; ');
           globalChecks.push({
             name: 'environment_resolution',
             status: 'fail',
-            message: `Unknown environment nickname "${envNickname}". Available: ${envs.all.map((x) => x.nickname).join(', ')}.`,
+            message: `Unknown environment nickname "${envNickname}". Available: ${described}.`,
           });
           return [];
         }

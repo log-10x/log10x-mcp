@@ -53,11 +53,7 @@ import {
   type OffloadDestination,
 } from '../lib/env-config/types.js';
 import type { EnvConfigStore, StoreKind } from '../lib/env-config/store-interface.js';
-import { LocalFileStore } from '../lib/env-config/store-local-file.js';
-import { K8sConfigMapStore } from '../lib/env-config/store-k8s.js';
-import { AwsSsmStore } from '../lib/env-config/store-aws-ssm.js';
-import { GcpSecretManagerStore } from '../lib/env-config/store-gcp-sm.js';
-import { AzureAppConfigStore } from '../lib/env-config/store-azure-ac.js';
+import { buildStore, buildDefaultStoreChain } from '../lib/env-config/stores.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
 /** The store kinds a caller may pin via `target_store`. Mirrors `StoreKind`. */
@@ -281,37 +277,6 @@ async function executeEnvRegisterInner(args: EnvRegisterArgs): Promise<EnvRegist
 }
 
 /** Instantiate the store for a pinned `target_store` arg. */
-function buildStore(kind: StoreKind): EnvConfigStore {
-  switch (kind) {
-    case 'k8s':
-      return new K8sConfigMapStore();
-    case 'aws_ssm':
-      return new AwsSsmStore();
-    case 'gcp_sm':
-      return new GcpSecretManagerStore();
-    case 'azure_ac':
-      return new AzureAppConfigStore();
-    case 'local':
-      return new LocalFileStore();
-  }
-}
-
-/**
- * The auto-pick chain. Order mirrors the resolver: cluster-native stores
- * first (most likely to be the right answer in a real deployment), local
- * file last as the dev fallback. The resolver returns the FIRST available
- * store — there's no merging or quorum, so order is policy.
- */
-function buildDefaultStoreChain(): EnvConfigStore[] {
-  return [
-    new K8sConfigMapStore(),
-    new AwsSsmStore(),
-    new GcpSecretManagerStore(),
-    new AzureAppConfigStore(),
-    new LocalFileStore(),
-  ];
-}
-
 /**
  * Compact zod error summary. Surfaces up to the first 5 issues with
  * dotted paths so the agent can fix the offending field without

@@ -939,14 +939,38 @@ export function resolveEnv(envs: Environments, nickname?: string): EnvConfig {
   if (nickname) {
     const env = envs.byNickname.get(nickname.toLowerCase());
     if (!env) {
-      const available = envs.all.map((e) => e.nickname).join(', ');
-      throw new Error(`Unknown environment "${nickname}". Available: ${available}`);
+      throw new Error(`Unknown environment "${nickname}". Available: ${describeAvailableEnvs(envs)}`);
     }
     envs.lastUsed = env;
     return env;
   }
   if (envs.lastUsed) return envs.lastUsed;
   return envs.default;
+}
+
+/**
+ * Dedup-aware "available envs" describer. Groups aliases by their
+ * underlying EnvConfig so "10x Demo" with aliases "otel-demo" + UUID
+ * renders as "10x Demo (also: otel-demo, 6aa99191-...)" rather than
+ * three separate-looking envs.
+ *
+ * Kept here (not in env-alias-bridge) to avoid the circular import that
+ * arises when resolveEnv itself wants to format the error message.
+ */
+function describeAvailableEnvs(envs: Environments): string {
+  const byEnv = new Map<EnvConfig, string[]>();
+  for (const [alias, env] of envs.byNickname.entries()) {
+    const aliases = byEnv.get(env) ?? [];
+    aliases.push(alias);
+    byEnv.set(env, aliases);
+  }
+  return envs.all
+    .map((env) => {
+      const aliases = (byEnv.get(env) ?? []).filter((a) => a !== env.nickname.toLowerCase());
+      if (aliases.length === 0) return env.nickname;
+      return `${env.nickname} (also: ${aliases.join(', ')})`;
+    })
+    .join('; ');
 }
 
 /** Programmatic override for tests or future "stick to this env" features. */
