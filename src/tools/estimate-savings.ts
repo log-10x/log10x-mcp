@@ -179,6 +179,19 @@ export const estimateSavingsSchema = {
     .positive()
     .default(1)
     .describe('Retention window for storage cost. Default 1 month.'),
+  observation_window: z
+    .string()
+    .regex(/^\d+[dh]$/)
+    .optional()
+    .describe(
+      'forecast mode: PromQL range expression for the observation window the solver/projection runs over. Default `30d`. Accepts `1h`, `24h`, `7d`, `30d`, etc. Alias: `timeRange`.'
+    ),
+  timeRange: z
+    .string()
+    .optional()
+    .describe(
+      'forecast mode: alias for `observation_window` for consistency with other Log10x tools. If both are set, `observation_window` wins.'
+    ),
   // ── verify inputs ──────────────────────────────────────────────────
   baseline_window: z
     .string()
@@ -1656,6 +1669,17 @@ export async function executeEstimateSavings(
         action: r.action as Action,
         sample_n: r.sample_n,
       }));
+      // Resolve effective observation window + basis. `timeRange` is an
+      // alias for `observation_window` (same precedence rule as
+      // log10x_investigate's window/timeRange aliasing). Without this
+      // plumbing the alias was silently dropped at the Zod boundary: the
+      // schema strips unknown keys, so a caller passing `{ timeRange: '7d' }`
+      // would fall through to the hard-coded `'30d'` default inside
+      // runEstimateForecast.
+      const explicitObservationWindow =
+        args.observation_window ?? args.timeRange;
+      const forecastWindowBasis: 'explicit' | 'auto_default' =
+        explicitObservationWindow ? 'explicit' : 'auto_default';
       const result = await runEstimateForecast(
         {
           destination,
@@ -1667,6 +1691,7 @@ export async function executeEstimateSavings(
           default_action: (args.default_action ?? 'compact') as Action,
           pattern_limit: args.pattern_limit,
           effective_ingest_per_gb: args.effective_ingest_per_gb,
+          observation_window: explicitObservationWindow,
         },
         env
       );
@@ -1740,7 +1765,7 @@ export async function executeEstimateSavings(
         },
         scope: {
           window: result.observation_window,
-          window_basis: 'auto_default',
+          window_basis: forecastWindowBasis,
           candidates_count: result.per_pattern_total_count,
           candidates_evaluated: result.per_pattern.length,
         },

@@ -99,8 +99,8 @@ export const investigateSchema = {
     .describe('The user\'s target, verbatim. Can be a raw log line, a pattern identity (symbolMessage or tenx_hash), a service name, or the literal string "environment"/"all"/"audit". The tool detects the mode automatically.'),
   window: z
     .string()
-    .default('1h')
-    .describe('Analysis window. `1h` default for acute-spike cases; `30d` recommended for drift cases. Accepts any PromQL-style duration string (`15m`, `1h`, `6h`, `24h`, `7d`). Alias: `timeRange`.'),
+    .optional()
+    .describe('Analysis window. Defaults to `1h` for acute-spike cases; `30d` recommended for drift cases. Accepts any PromQL-style duration string (`15m`, `1h`, `6h`, `24h`, `1d`, `7d`). Alias: `timeRange`. If neither is set, defaults to `1h`; if both are set, `window` wins.'),
   timeRange: z
     .string()
     .optional()
@@ -356,7 +356,7 @@ async function resolveHashesForPatterns(
 export async function executeInvestigate(
   args: {
     starting_point: string;
-    window: string;
+    window?: string;
     timeRange?: string;
     baseline_offset?: string;
     depth: 'shallow' | 'normal' | 'deep';
@@ -370,10 +370,29 @@ export async function executeInvestigate(
   const thresholdBasis = detectThresholdBasis();
   const { wrapBackendError } = await import('../lib/primitive-errors.js');
 
+  // Resolve effective window + basis BEFORE executeInvestigateInner runs.
+  // The schema now leaves `window` undefined when the caller does not set
+  // it (the `.default('1h')` was masking the alias path: with the default,
+  // `timeRange='1d'` was silently overridden by `window='1h'` because the
+  // existing alias guard `if (!args.window && args.timeRange)` never fired).
+  // Resolution order:
+  //   1. explicit `window`        → basis = 'explicit'
+  //   2. explicit `timeRange`     → basis = 'explicit' (alias honoured)
+  //   3. neither                  → basis = 'auto_default', window = '1h'
+  // (Envelope `window_basis` enum is `'explicit' | 'auto_default'`; see
+  //  chassis-envelope.ts.)
+  const windowBasis: 'explicit' | 'auto_default' =
+    args.window || args.timeRange ? 'explicit' : 'auto_default';
+  const effectiveWindow: string = args.window ?? args.timeRange ?? '1h';
+  // Forward the resolved value so executeInvestigateInner (and every
+  // downstream `args.window` reader) sees the explicit choice rather than
+  // a stale Zod default.
+  const innerArgs = { ...args, window: effectiveWindow };
+
   // ── Structural failure path ────────────────────────────────────────
   let md: string;
   try {
-    md = await executeInvestigateInner(args, env);
+    md = await executeInvestigateInner(innerArgs, env);
   } catch (e) {
     const err = wrapBackendError(e);
     return buildChassisEnvelope({
@@ -383,13 +402,13 @@ export async function executeInvestigate(
       status: 'error',
       decisions: { threshold_used: null, threshold_basis: thresholdBasis === 'config_file' ? 'snapshot' : 'unvalidated_default' },
       source_disclosure: {},
-      scope: { window: args.window, window_basis: 'explicit' },
+      scope: { window: effectiveWindow, window_basis: windowBasis },
       payload: {
         status: 'error' as InvestigateStatus,
         threshold_basis: thresholdBasis,
         anchor_ref: { type: 'starting_point', expression: args.starting_point },
         starting_point: args.starting_point,
-        window: args.window,
+        window: effectiveWindow,
         depth: args.depth,
         baseline_offset: args.baseline_offset,
         use_bytes: args.use_bytes,
@@ -492,7 +511,7 @@ export async function executeInvestigate(
 
   const human_summary = buildHumanSummary(
     args.starting_point,
-    args.window,
+    effectiveWindow,
     status,
     parsed,
     thresholdBasis,
@@ -513,7 +532,7 @@ export async function executeInvestigate(
     status === 'no_signal' ? 'no related movement'
     : status === 'insufficient_data' ? 'not enough data'
     : 'analysis complete';
-  const headline = `Investigation of "${userVisibleStartingPoint(args.starting_point)}" over ${args.window}: ${statusWord} (${shapeWord}).`;
+  const headline = `Investigation of "${userVisibleStartingPoint(args.starting_point)}" over ${effectiveWindow}: ${statusWord} (${shapeWord}).`;
 
   // Extract structured next-actions BEFORE stripping the HTML comment blocks.
   // (extractNextActions reads the NEXT_ACTIONS JSON comment from md.)
@@ -560,8 +579,8 @@ export async function executeInvestigate(
     },
     source_disclosure: {},
     scope: {
-      window: args.window,
-      window_basis: 'explicit',
+      window: effectiveWindow,
+      window_basis: windowBasis,
       candidates_count: parsed.chainLength + parsed.coMoverCount,
       candidates_usable: parsed.chainLength + parsed.coMoverCount,
     },
@@ -603,7 +622,7 @@ export async function executeInvestigate(
       ok: status === 'success',
       investigation_id: parsed.investigationId,
       starting_point: args.starting_point,
-      window: args.window,
+      window: effectiveWindow,
       depth: args.depth,
       baseline_offset: args.baseline_offset,
       mode: parsed.mode,
@@ -635,7 +654,7 @@ export async function executeInvestigate(
               const fallback: Action[] = [
                 {
                   tool: 'log10x_top_patterns',
-                  args: { timeRange: args.window ?? '24h' },
+                  args: { timeRange: effectiveWindow },
                   reason: 'No patterns moved with this anchor in the investigated window. Surface what IS active so you can re-anchor.',
                   role: 'recommended-next',
                 },

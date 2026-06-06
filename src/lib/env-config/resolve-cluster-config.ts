@@ -208,7 +208,7 @@ export async function resolveClusterConfig(
       // callers reading the failure don't have to guess from the message.
       const errMsg = err instanceof Error ? err.message : String(err);
       const warning =
-        `on-prem env-config document for "${candidate}" was present but unparseable ` +
+        `doc exists for "${candidate}" but could not be parsed ` +
         `(reason: ${errMsg}). Resolver did not fall through to env-var fallback for ` +
         `this candidate — fix or remove the corrupt doc.`;
       resolutionWarnings.push(warning);
@@ -251,8 +251,15 @@ function extractCorruptDocWarnings(
   for (const step of trace) {
     if (step.status !== 'failed') continue;
     if (!step.source.startsWith('store:')) continue;
+    // F8 text refinement: arc-v9 live test showed doctor saying "No env-config
+    // document resolved" / "no document for X" when the k8s ConfigMap had been
+    // malformed-JSON-patched. That conflates "store had nothing" (skipped /
+    // benign) with "store had a doc but we couldn't parse it" (failed / the
+    // user must act). A `failed` step on a `store:*` source means the doc DID
+    // exist at that store — the resolver just couldn't deserialize it. Lead
+    // with that fact so the user knows where to look.
     const warning =
-      `on-prem env-config document was present but unparseable in ${step.source} ` +
+      `doc exists at store ${step.source} but could not be parsed ` +
       `(reason: ${step.reason}). Resolver fell through to the next candidate / store; ` +
       `fix or remove the corrupt doc to make this env resolvable from its intended source.`;
     if (!out.includes(warning)) out.push(warning);
@@ -271,6 +278,44 @@ function extractCorruptDocWarnings(
  */
 export function pickActiveOffload(config: EnvironmentConfig): OffloadDestination | undefined {
   return config.offload_destinations.find(d => d.status === 'active');
+}
+
+/**
+ * Structured signal about whether multiple offload destinations are marked
+ * `status: 'active'`. Consumers like retriever_probe call this to surface a
+ * warning when the caller's intent (which active bucket?) is ambiguous: the
+ * runtime picker (`pickActiveOffload`) silently picks the first match, which
+ * is fine for the receiver but surprising for tools that print "the offload
+ * bucket" in their envelope.
+ *
+ * Shape contract:
+ *   - `multi_active` is true iff `active_count >= 2`.
+ *   - `active_nicknames` is in array order (the same order `pickActiveOffload`
+ *     walks), so `picked` is always `active_nicknames[0]` when non-empty.
+ *   - `picked` is the empty string when zero destinations are active — callers
+ *     that want a typed optional should branch on `active_count === 0`.
+ *
+ * Does NOT change `pickActiveOffload`'s behavior; this is a read-only
+ * diagnostic over the same array.
+ */
+export interface MultiActiveOffloadSignal {
+  multi_active: boolean;
+  active_count: number;
+  active_nicknames: string[];
+  picked: string;
+}
+
+export function detectMultiActiveOffload(
+  config: EnvironmentConfig,
+): MultiActiveOffloadSignal {
+  const active = config.offload_destinations.filter(d => d.status === 'active');
+  const nicknames = active.map(d => d.nickname);
+  return {
+    multi_active: active.length >= 2,
+    active_count: active.length,
+    active_nicknames: nicknames,
+    picked: nicknames[0] ?? '',
+  };
 }
 
 /**

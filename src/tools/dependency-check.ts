@@ -46,7 +46,7 @@ import { loadEnvironments } from '../lib/environments.js';
 import { resolvePatternHashFromMetrics } from '../lib/resolve-pattern-hash.js';
 
 export const dependencyCheckSchema = {
-  pattern: z.string().describe('Pattern name (e.g., "Payment_Gateway_Timeout")'),
+  pattern: z.string().min(1).describe('Pattern name (e.g., "Payment_Gateway_Timeout")'),
   vendor: z
     .enum(['datadog', 'splunk', 'elasticsearch', 'cloudwatch'])
     .optional()
@@ -137,6 +137,23 @@ function buildHumanSummary(d: DependencyCheckSummary): string {
 
 export async function executeDependencyCheck(args: DependencyCheckArgs): Promise<import('../lib/output-types.js').StructuredOutput> {
   const telemetry = newChassisTelemetry();
+
+  // Defense-in-depth: reject empty / whitespace-only pattern before any
+  // CloudWatch (or other vendor) scan. An empty needle matches every
+  // alarm/dashboard and produces bogus 'blocked' verdicts.
+  if (typeof args.pattern !== 'string' || args.pattern.trim().length === 0) {
+    return buildChassisErrorEnvelope({
+      tool: 'log10x_dependency_check',
+      err: {
+        error_type: 'input_invalid',
+        retryable: false,
+        suggested_backoff_ms: null,
+        hint: 'pattern is required and must be non-empty',
+      },
+      telemetry,
+      source_disclosure: {},
+    });
+  }
 
   // Pattern existence validation. Attempt a cheap metrics-backend probe when
   // an env is configured — does NOT block the tool on failure, only discloses.

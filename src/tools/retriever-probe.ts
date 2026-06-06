@@ -20,6 +20,7 @@ import {
   resolveClusterConfig,
   pickActiveOffload,
   detectStaleOffloadEnvVar,
+  detectMultiActiveOffload,
 } from '../lib/env-config/resolve-cluster-config.js';
 
 export const retrieverProbeSchema = {
@@ -89,6 +90,21 @@ export async function executeRetrieverProbe(args: {
         offloadBucket = active.bucket;
         const stale = detectStaleOffloadEnvVar(active.bucket);
         if (stale) warnings.push(stale);
+      }
+      // Multi-active offload: pickActiveOffload silently returns the FIRST
+      // status='active' entry. When the env-config has 2+ actives, the
+      // probe needs to surface (a) the ambiguous condition, (b) which
+      // bucket we ran the probe against, and (c) the array-order pick rule
+      // so the user can either re-run with an explicit offload_bucket arg
+      // or fix the env-config to leave only one entry active.
+      const multi = detectMultiActiveOffload(resolved.config);
+      if (multi.multi_active) {
+        warnings.push(
+          `multi-active offload destinations in resolved env-config ` +
+            `(${multi.active_count} entries with status="active": ${multi.active_nicknames.join(', ')}); ` +
+            `probe ran against the first one in array order ("${multi.picked}"). ` +
+            `Pass offload_bucket explicitly, or update the env-config so only one destination is active, to clear this warning.`,
+        );
       }
       for (const w of resolved.stale_env_var_warnings) {
         if (!warnings.includes(w)) warnings.push(w);

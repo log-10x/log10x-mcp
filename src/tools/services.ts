@@ -46,7 +46,7 @@ import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { agentOnly } from '../lib/agent-only.js';
 import { type StructuredOutput } from '../lib/output-types.js';
 import { newChassisTelemetry, buildChassisEnvelope, buildChassisErrorEnvelope } from '../lib/chassis-envelope.js';
-import { fetchCapCsvForEnv, fetchActionIntentForEnv, buildCapCsvStatus, type CapCsvStatus } from '../lib/cap-csv-fetch.js';
+import { fetchCapCsvForEnv, fetchActionIntentForEnv, buildCapCsvStatus, envWithResolvedGitops, type CapCsvStatus } from '../lib/cap-csv-fetch.js';
 import { parseCapCsv, buildPatternActionLookup } from '../lib/cap-csv-parser.js';
 import { normalizeTimeRange } from '../lib/time-range.js';
 import { renderMonospaceTable } from '../lib/render-table.js';
@@ -249,11 +249,17 @@ async function executeServicesInner(
   const droppedPerServicePatternQ = `sum by (${LABELS.service}, ${LABELS.hash}, ${containerLabel}) (increase(all_events_summaryBytes_total{${LABELS.env}="${metricsEnv}",isDropped="true"}[${tf.range}]))`;
   const passedPerServiceQ = `sum by (${LABELS.service}) (increase(all_events_summaryBytes_total{${LABELS.env}="${metricsEnv}",isDropped!="true"}[${tf.range}]))`;
 
+  // Resolve gitops repo via the same fallback chain configure_engine /
+  // pattern_mitigate use: envs.json field → LOG10X_GH_REPO env var →
+  // most-recent discover_env snapshot. Without this, services reported
+  // `cap_csv_status: not_configured` whenever envs.json lacked the field,
+  // even when a snapshot or env-var already exposed the repo.
+  const envForGitops = envWithResolvedGitops(env);
   const [droppedRes, passedRes, capCsvContent, actionIntent] = await Promise.all([
     queryInstant(env, droppedPerServicePatternQ).catch(() => null),
     queryInstant(env, passedPerServiceQ).catch(() => null),
-    fetchCapCsvForEnv(env).catch(() => undefined),
-    fetchActionIntentForEnv(env).catch(() => undefined),
+    fetchCapCsvForEnv(envForGitops).catch(() => undefined),
+    fetchActionIntentForEnv(envForGitops).catch(() => undefined),
   ]);
 
   // action-intent.json is the canonical source for pattern→action.
@@ -261,12 +267,13 @@ async function executeServicesInner(
   const actionIntentLookup: Map<string, Action> = actionIntent?.by_pattern ?? new Map();
   const parsedCsv = capCsvContent ? parseCapCsv(capCsvContent) : null;
   const hasActionSource = actionIntentLookup.size > 0 || (parsedCsv !== null && parsedCsv.rows.length > 0);
-  // Both fetchers were called when env.gitops?.repo is set. When the repo
-  // is set but both returned undefined, it means the fetch failed.
-  const capCsvFetchAttempted = !!env.gitops?.repo;
+  // Both fetchers were called when the resolved env exposes a gitops repo
+  // (envs.json field, LOG10X_GH_REPO, or snapshot fallback). When the
+  // repo is set but both returned undefined, it means the fetch failed.
+  const capCsvFetchAttempted = !!envForGitops.gitops?.repo;
   const capCsvFetchSucceeded = capCsvContent !== undefined || actionIntent !== undefined;
   const capCsvStatus: CapCsvStatus = buildCapCsvStatus(
-    env.gitops?.repo,
+    envForGitops.gitops?.repo,
     capCsvFetchAttempted,
     capCsvFetchSucceeded,
     hasActionSource,
@@ -443,7 +450,7 @@ async function executeServicesInner(
   if (anyDrops) {
     lines.push('');
     if (capCsvStatus.kind === 'loaded') {
-      lines.push(`  Action axis: split via cap-CSV (${env.gitops?.repo}${env.gitops?.lookupPath ? `:${env.gitops.lookupPath}` : ''}).`);
+      lines.push(`  Action axis: split via cap-CSV (${envForGitops.gitops?.repo}${envForGitops.gitops?.lookupPath ? `:${envForGitops.gitops.lookupPath}` : ''}).`);
     } else {
       lines.push(`  Action axis: ${capCsvStatus.reason} Dropped bytes folded into bytes_dropped (unattributed).`);
     }

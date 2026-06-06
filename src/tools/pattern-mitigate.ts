@@ -41,7 +41,7 @@ import type { PrimitiveError } from '../lib/primitive-errors.js';
 import { resolveSiemSelection } from '../lib/siem/resolve.js';
 import { getConnector } from '../lib/siem/index.js';
 import { probeReceiverInPath, eventHasTenxHash } from '../lib/receiver-probe.js';
-import { resolvePatternHashFromMetrics } from '../lib/resolve-pattern-hash.js';
+import { resolvePatternRefInMetrics } from '../lib/resolve-pattern-hash.js';
 import {
   buildChassisEnvelope,
   buildChassisErrorEnvelope,
@@ -715,8 +715,15 @@ async function executePatternMitigateInner(
   const displayPattern = fmtPattern(pattern);
   const scopeNote = args.service ? ` (service: ${args.service})` : '';
 
-  // Pattern existence validation. Attempt a cheap metrics-backend probe when
-  // an env is configured — does NOT block the tool on failure, only discloses.
+  // Pattern existence validation. Attempt a cheap metrics-backend probe
+  // when an env is configured — does NOT block the tool on failure, only
+  // discloses. Uses the shared `resolvePatternRefInMetrics` helper so the
+  // label / query shape matches what event_lookup / pattern_examples /
+  // pattern_detail issue for the same input: hash-shaped refs probe
+  // `LABELS.hash`, name-shaped refs probe `LABELS.pattern`. Without the
+  // shape switch the validator silently said "not found" for any
+  // hash the user pasted in (which the other tools resolve fine), and
+  // downstream code then collapsed the recommendation_basis to 'unknown'.
   const patternValidation: PatternMitigateSummary['pattern_validation'] = {
     checked: false,
     exists: null,
@@ -726,10 +733,15 @@ async function executePatternMitigateInner(
     const envs = await loadEnvironments();
     const env = envs.default ?? envs.lastUsed;
     if (env) {
-      const hash = await resolvePatternHashFromMetrics(env, pattern);
-      patternValidation.checked = true;
-      patternValidation.exists = hash !== undefined;
-      patternValidation.basis = 'metrics_backend';
+      const probe = await resolvePatternRefInMetrics(env, pattern);
+      // exists === null means the probe could not run (network / config
+      // failure); treat as "not checked" to match prior semantics rather
+      // than reporting false absence.
+      if (probe.exists !== null) {
+        patternValidation.checked = true;
+        patternValidation.exists = probe.exists;
+        patternValidation.basis = 'metrics_backend';
+      }
     }
   } catch {
     // Non-fatal — patternValidation stays at not_checked defaults.
@@ -912,7 +924,22 @@ async function executePatternMitigateInner(
     ];
     const nEnabled = options.filter((o) => o.enabled).length;
     const nDimmed = options.length - nEnabled;
-    const basis = deriveBasis(caps.sources, caps.cachedSnapshotUsed);
+    let basis = deriveBasis(caps.sources, caps.cachedSnapshotUsed);
+    // Basis floor: if the metrics-backend validation probe ran cleanly and
+    // the pattern exists, we have positive evidence that an env was
+    // resolvable (envs.json or $LOG10X_METRICS_* env vars). When none of
+    // the capability-tracked sources (gitops / forwarder / analyzer /
+    // receiver / retriever) populated `caps.sources`, deriveBasis lands
+    // on 'unknown' even though the env is plainly configured. That
+    // 'unknown' tag is what flips `allSourcesAbsent` further down and
+    // strips the mitigation NEXT_ACTIONS in favor of a discover_env
+    // nudge — silently demoting 3 of 4 options for a pattern the rest
+    // of the catalog resolves fine. Floor to 'env_vars_only' when the
+    // probe confirmed existence, matching the catalog convention that
+    // env-var-only configs report env_vars_only rather than unknown.
+    if (basis === 'unknown' && patternValidation.checked && patternValidation.exists === true) {
+      basis = 'env_vars_only';
+    }
     const status: PatternMitigateStatus = nEnabled === 0 ? 'no_signal' : 'success';
     const human_summary = buildHumanSummary({
       pattern: displayPattern,

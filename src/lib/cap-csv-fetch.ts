@@ -103,6 +103,78 @@ export function buildCapCsvStatus(
 
 import type { EnvConfig } from './environments.js';
 import { parseActionIntent, type ActionIntentParseResult } from './action-intent-parser.js';
+import { getMostRecentSnapshot } from './discovery/snapshot-store.js';
+
+// ── Gitops-repo auto-discovery ──────────────────────────────────────────
+//
+// Mirrors the resolution chain in pattern_mitigate's detectCapabilities and
+// configure_engine's resolveTarget. Sources, in order:
+//   1. env.gitops?.repo  (envs.json or LOG10X_GH_REPO env var, when present
+//      on the EnvConfig)
+//   2. process.env.LOG10X_GH_REPO  (env-var fallback for callers whose
+//      EnvConfig was built without the gitops field)
+//   3. Most-recent discover_env snapshot's `receiverGitopsRepo`
+//      (30-min TTL, matching pattern_mitigate's default).
+//
+// Tools whose only gitops surface is "read the cap-CSV" (services,
+// overflow_contents, etc.) should call `resolveGitopsRepoForEnv` to get
+// the same fallback chain that PR-emitting tools already use, instead of
+// reading `env.gitops?.repo` directly and reporting `not_configured`
+// whenever envs.json lacks the field.
+
+export type GitopsRepoSource = 'env' | 'env_var' | 'snapshot' | 'none';
+
+export interface ResolvedGitopsRepo {
+  /** Resolved owner/name, or undefined when no source produced a repo. */
+  repo: string | undefined;
+  /** Optional lookup path override (only ever sourced from env.gitops). */
+  lookupPath: string | undefined;
+  /** Which source the repo came from. `none` when unresolved. */
+  source: GitopsRepoSource;
+}
+
+/**
+ * Resolve a gitops repo for an env using the same chain as
+ * configure_engine / pattern_mitigate. Pure: does not mutate the env.
+ */
+export function resolveGitopsRepoForEnv(
+  env: EnvConfig,
+  opts: { snapshotMaxAgeSeconds?: number } = {},
+): ResolvedGitopsRepo {
+  const lookupPath = env.gitops?.lookupPath;
+  if (env.gitops?.repo) {
+    return { repo: env.gitops.repo, lookupPath, source: 'env' };
+  }
+  const envVar = process.env.LOG10X_GH_REPO?.trim();
+  if (envVar) {
+    return { repo: envVar, lookupPath, source: 'env_var' };
+  }
+  const snapshot = getMostRecentSnapshot(opts.snapshotMaxAgeSeconds ?? 1800);
+  const snapRepo = snapshot?.recommendations?.receiverGitopsRepo;
+  if (snapRepo) {
+    return { repo: snapRepo, lookupPath, source: 'snapshot' };
+  }
+  return { repo: undefined, lookupPath, source: 'none' };
+}
+
+/**
+ * Return a shallow clone of `env` with `gitops.repo` populated from the
+ * auto-discovery chain when the field was originally absent. Used by
+ * fetchers that key off `env.gitops?.repo` so they pick up the env-var
+ * and snapshot fallbacks without a signature change.
+ */
+export function envWithResolvedGitops(env: EnvConfig): EnvConfig {
+  if (env.gitops?.repo) return env;
+  const resolved = resolveGitopsRepoForEnv(env);
+  if (!resolved.repo) return env;
+  return {
+    ...env,
+    gitops: {
+      repo: resolved.repo,
+      ...(resolved.lookupPath ? { lookupPath: resolved.lookupPath } : {}),
+    },
+  };
+}
 
 /** Fetch the rate cap CSV string from the gitops repo. */
 export async function fetchCapCsvForEnv(

@@ -38,7 +38,6 @@ import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { tenxHash } from '../lib/pattern-hash.js';
 import { resolvePatternHashFromMetrics } from '../lib/resolve-pattern-hash.js';
 import { agentOnly } from '../lib/agent-only.js';
-import { newTelemetry } from '../lib/unified-envelope.js';
 import {
   buildChassisEnvelope,
   buildChassisErrorEnvelope,
@@ -136,6 +135,18 @@ export const patternExamplesSchema = {
     })
     .optional()
     .describe('Optional slot-value filter. When provided, only buckets whose slot_distribution carries the given slot value pass through. Useful for drilling into a single dominant value from a previous pattern_examples call.'),
+  view: z
+    .enum(['summary', 'detail'])
+    .default('summary')
+    .describe(
+      "Response shape. `summary` (default) returns slim top-3 buckets (rank, template_hash, tenx_hash, event_count, jaccard, severity, service, recommended_action, headline, ~200-char sample_event preview) plus pattern-level counts. No raw_events, no full sample_event, no slot_distribution, no rationale prose. Target: under 8K tokens. `detail` returns one fully-hydrated bucket (requires bucket_id); pair with retriever_query for raw events.",
+    ),
+  bucket_id: z
+    .string()
+    .optional()
+    .describe(
+      'Bucket identifier to fully hydrate. Accepts either the `template_hash` or the `tenx_hash` returned in a prior `view=summary` call. When supplied, the response carries one bucket with full sample_event, full slot_distribution (un-cropped sample_values), bucket_interpretation.rationale, and human_summary. Other buckets are omitted.',
+    ),
   environment: z.string().optional().describe('Environment nickname.'),
 };
 
@@ -155,6 +166,8 @@ interface PatternExamplesArgs {
   limit?: number;
   scope?: string;
   slot_filter?: { name: string; value: string };
+  view?: 'summary' | 'detail';
+  bucket_id?: string;
   environment?: string;
 }
 
@@ -206,7 +219,9 @@ export async function executePatternExamples(
   rawArgs: PatternExamplesArgs,
   env: EnvConfig,
 ): Promise<import('../lib/output-types.js').StructuredOutput> {
-  const telemetry = newTelemetry();           // legacy — kept for back-compat reads of query_count
+  // Legacy `telemetry = newTelemetry()` dropped along with legacyExtraFields:
+  // it only fed the now-removed legacy query_count / total_latency_ms spread,
+  // and chassisTelemetry drives the chassis Performance block.
   const chassisTelemetry = newChassisTelemetry();
 
   // Input acceptance: accept pattern_hash as a first-class alternative to
@@ -343,6 +358,98 @@ export async function executePatternExamples(
     (d.multi_line_detected ? ' Multi-line grouping detected.' : '');
   const chassis_human_summary = sanitizeUserProse(rawHumanSummary);
 
+  // ── View projection ───────────────────────────────────────────────
+  // Default `view='summary'` strips heavy fields. `view='detail'` (or a
+  // supplied bucket_id, which implies detail) hydrates one bucket fully.
+  // The audit identified these as the dominant token offenders:
+  //   - duplicate legacyExtraFields spread (~45% of bytes — removed
+  //     entirely below; the `payload` block is now the only carrier)
+  //   - raw_events[] of up to 100 full SIEM events (~30%)
+  //   - un-cropped sample_event per bucket (~8%)
+  //   - full slot_distribution per bucket (~6%)
+  //   - rationale + human_summary prose per bucket (~5%)
+  // Summary view drops or trims each of those; detail view hydrates one
+  // bucket so the agent can drill in without re-running the probe.
+  const requestedView: 'summary' | 'detail' =
+    rawArgs.view ?? (rawArgs.bucket_id ? 'detail' : 'summary');
+  const requestedBucketId = rawArgs.bucket_id;
+
+  const warnings: string[] = [];
+  let payload: Record<string, unknown>;
+
+  if (requestedView === 'detail') {
+    // Find the bucket by template_hash or tenx_hash. Both are valid
+    // identifiers — the audit redesign called for either; accepting both
+    // spares the caller a re-lookup when they already have one.
+    const target = requestedBucketId
+      ? d.buckets.find(
+          (b) => b.template_hash === requestedBucketId || b.tenx_hash === requestedBucketId,
+        )
+      : d.buckets[0];
+    if (!target) {
+      // bucket_id supplied but not found. Don't error — emit the slim
+      // summary with a warning explaining which bucket_ids are available.
+      // The summary still gives the agent enough to pick a valid bucket
+      // and re-call without another probe round-trip.
+      warnings.push(
+        `bucket_id \`${requestedBucketId ?? ''}\` not found in retained buckets. Available bucket_ids (template_hash or tenx_hash): ${
+          d.buckets
+            .map((b) => `${b.template_hash}${b.tenx_hash ? `/${b.tenx_hash}` : ''}`)
+            .join(', ') || '(none)'
+        }.`,
+      );
+      payload = buildSummaryPayload(d, truncated, requestedLimit);
+    } else {
+      payload = {
+        pattern: d.pattern,
+        pattern_hash: target.tenx_hash ?? target.template_hash,
+        vendor: d.vendor,
+        window: d.window,
+        service: d.service,
+        severity: d.severity,
+        probe_path: d.probe_path,
+        events_pulled: d.events_pulled,
+        retained_events: d.retained_events,
+        retained_templates: d.retained_templates,
+        multi_line_detected: d.multi_line_detected,
+        bucket: target, // fully hydrated: full sample_event, full slot_distribution, rationale, human_summary
+        details_available: {
+          raw_events_via: 'log10x_retriever_query',
+          raw_events_hint:
+            'For un-encoded live event payloads, call log10x_retriever_query with the same pattern + window.',
+          other_bucket_ids: d.buckets
+            .filter((b) => b !== target)
+            .map((b) => ({
+              template_hash: b.template_hash,
+              tenx_hash: b.tenx_hash,
+              event_count: b.event_count,
+            })),
+        },
+        probe_notes: d.probe_notes,
+        ...(truncated
+          ? {
+              truncation_detail: `events_pulled (${d.events_pulled}) reached the requested limit (${requestedLimit}); there may be more matching events — widen limit or narrow timeRange`,
+            }
+          : {}),
+      };
+    }
+  } else {
+    payload = buildSummaryPayload(d, truncated, requestedLimit);
+  }
+
+  // Token-budget warning. The audit set 8K tokens as the target for the
+  // default summary; estimate bytes/4 ≈ tokens (a conservative
+  // Anthropic-leaning approximation) and warn the agent if we blew the
+  // budget so it can decide whether to narrow scope (smaller limit,
+  // tighter timeRange) or call view=detail on a specific bucket.
+  const estimatedTokens = Math.ceil(JSON.stringify(payload).length / 4);
+  if (estimatedTokens > 8000) {
+    warnings.push(
+      `response payload ~${estimatedTokens} tokens, exceeds the 8K target for view='summary'. ` +
+        "Try narrower timeRange or smaller limit; for raw events use log10x_retriever_query.",
+    );
+  }
+
   return buildChassisEnvelope({
     tool: 'log10x_pattern_examples',
     view: 'summary',
@@ -380,32 +487,93 @@ export async function executePatternExamples(
       // Note 24: plain English replacement for "X events in Y templates
       // dropped on Jaccard". Users don't think in templates or Jaccard;
       // they think in event variants.
-      candidates_failed: d.dropped_jaccard_events > 0
-        ? [`${d.dropped_jaccard_events} events from a different variant of the same error were kept separate to avoid mixing two distinct issues`]
-        : undefined,
+      candidates_failed:
+        d.dropped_jaccard_events > 0
+          ? [
+              `${d.dropped_jaccard_events} events from a different variant of the same error were kept separate to avoid mixing two distinct issues`,
+            ]
+          : undefined,
     },
-    payload: {
-      ...d,
-      ...(truncated ? {
-        truncation_detail: `events_pulled (${d.events_pulled}) reached the requested limit (${requestedLimit}); there may be more matching events — widen limit or narrow timeRange`,
-      } : {}),
-    },
+    payload,
     human_summary: chassis_human_summary,
     telemetry: chassisTelemetry,
     actions: envelopeActions.length > 0 ? envelopeActions : undefined,
     truncated,
-    // Back-compat: spread legacy flat fields so existing callers reading
-    // data.pattern / data.buckets / data.status / data.human_summary etc. work.
-    legacyCompat: true,
-    legacyExtraFields: {
-      ...d,
-      status: 'success',
-      query_count: telemetry.queryCount,
-      total_latency_ms: Date.now() - telemetry.startedAt,
-      backend_pressure_hint: null,
-      human_summary: chassis_human_summary,
-    },
+    warnings: warnings.length > 0 ? warnings : undefined,
+    // legacyCompat dropped per audit finding: the legacyExtraFields
+    // spread was duplicating the entire payload (`d`) into chassisData
+    // alongside `payload`, doubling raw_events / sample_event /
+    // slot_distribution / rationale prose. Callers now read fields off
+    // `data.payload.*` (the chassis-canonical path); the legacy flat
+    // path is gone. chassisTelemetry continues to drive Performance, so
+    // query_count / total_latency_ms remain at `performance.*`.
   });
+}
+
+/**
+ * Build the slim default-view payload. Drops raw_events entirely (point
+ * callers at retriever_query), crops bucket sample_event to ~200 chars,
+ * removes slot_distribution + rationale prose. Keeps the headline-level
+ * fields the agent needs to decide whether to drill in.
+ */
+function buildSummaryPayload(
+  d: PatternExamplesSummary,
+  truncated: boolean,
+  requestedLimit: number,
+): Record<string, unknown> {
+  const SAMPLE_PREVIEW_CHARS = 200;
+  const slimBuckets = d.buckets.map((b) => ({
+    rank: b.rank,
+    template_hash: b.template_hash,
+    tenx_hash: b.tenx_hash,
+    event_count: b.event_count,
+    jaccard: b.jaccard,
+    severity: b.severity,
+    service: b.service,
+    recommended_action: b.bucket_interpretation.recommended_action,
+    // One-line headline from the interpretation summary, capped to keep
+    // the slim card light. The full prose lives on view='detail'.
+    headline:
+      b.human_summary.length > 160 ? b.human_summary.slice(0, 157) + '...' : b.human_summary,
+    sample_event_preview:
+      b.sample_event.length > SAMPLE_PREVIEW_CHARS
+        ? b.sample_event.slice(0, SAMPLE_PREVIEW_CHARS) + '...'
+        : b.sample_event,
+  }));
+
+  return {
+    pattern: d.pattern,
+    // Top-level pattern_hash mirrors the audit's "template_body (once)"
+    // anchor — agents can match against this identity without paging
+    // through buckets[].
+    pattern_hash: d.buckets[0]?.tenx_hash ?? d.buckets[0]?.template_hash,
+    vendor: d.vendor,
+    window: d.window,
+    service: d.service,
+    severity: d.severity,
+    probe_path: d.probe_path,
+    events_pulled: d.events_pulled,
+    distinct_templates: d.distinct_templates,
+    retained_events: d.retained_events,
+    retained_templates: d.retained_templates,
+    dropped_jaccard_events: d.dropped_jaccard_events,
+    multi_line_detected: d.multi_line_detected,
+    bucket_count: d.buckets.length,
+    buckets: slimBuckets,
+    details_available: {
+      // Tell the agent how to drill in without guessing.
+      bucket_ids: d.buckets.map((b) => b.tenx_hash ?? b.template_hash),
+      detail_view_hint:
+        "Call pattern_examples again with view='detail' and bucket_id=<template_hash or tenx_hash> for full sample_event + slot_distribution + rationale.",
+      raw_events_via: 'log10x_retriever_query',
+    },
+    probe_notes: d.probe_notes,
+    ...(truncated
+      ? {
+          truncation_detail: `events_pulled (${d.events_pulled}) reached the requested limit (${requestedLimit}); there may be more matching events — widen limit or narrow timeRange`,
+        }
+      : {}),
+  };
 }
 
 async function executePatternExamplesInner(

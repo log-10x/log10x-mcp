@@ -207,11 +207,12 @@ function detectStaleEnvVars(
       `env-var nickname "${envVarPartial.nickname}" disagrees with on-prem store "${storeConfig.nickname}" — env var is being ignored.`,
     );
   }
-  if (envVarPartial.streamer?.url && envVarPartial.streamer.url !== storeConfig.streamer.url) {
-    warnings.push(
-      `env-var streamer.url "${envVarPartial.streamer.url}" disagrees with on-prem store "${storeConfig.streamer.url}" — env var is being ignored.`,
-    );
-  }
+  // Catalog rename: the in-cluster "streamer" endpoint was folded into the
+  // retriever surface; we only emit the retriever.url disagreement now.
+  // (The duplicate streamer.url check that used to live here named a field
+  // whose meaning is now subsumed by retriever.url — surfacing both caused
+  // the retriever_probe envelope to print a stale "streamer.url disagrees"
+  // warning that no longer matched any tool's mental model.)
   if (envVarPartial.retriever?.url && envVarPartial.retriever.url !== storeConfig.retriever.url) {
     warnings.push(
       `env-var retriever.url "${envVarPartial.retriever.url}" disagrees with on-prem store "${storeConfig.retriever.url}" — env var is being ignored.`,

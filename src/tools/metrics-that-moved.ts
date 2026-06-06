@@ -44,6 +44,60 @@ import {
 /** Default phase-gap floor. Hand-picked, uncalibrated — see README "Threshold provenance". */
 export const DEFAULT_PHASE_GAP_FLOOR = 0.15;
 
+/**
+ * Prometheus meta-metric blacklist. These series describe the SCRAPER's
+ * own health (target up/down, scrape latency, federation traffic,
+ * tsdb/wal internals). They co-move with anchor patterns only by accident
+ * of scrape timing, never carry causal signal about application or
+ * platform incidents, and pollute the candidate pool — without this
+ * filter the tool would silently rate the call `low_candidate_count=
+ * severe` and the caller would never learn WHY.
+ *
+ * Match rule: case-insensitive against the candidate's leading metric
+ * name (the identifier before any `{` label selector or PromQL function
+ * wrapping). A candidate is rejected when its leading metric name:
+ *   - is exactly `up` (the canonical target-health gauge), OR
+ *   - starts with `scrape_` (scrape_duration_seconds, scrape_samples_scraped, etc.), OR
+ *   - starts with `prometheus_` (prometheus_tsdb_*, prometheus_remote_storage_*, etc.).
+ *
+ * The list deliberately does NOT include `go_*` / `process_*` — those
+ * are application-emitted runtime metrics that can legitimately co-move
+ * with a real incident (GC pauses, FD exhaustion). Only series produced
+ * BY Prometheus ABOUT Prometheus are rejected.
+ */
+const META_METRIC_NAME_REGEX = /^(?:up|scrape_[a-z0-9_]*|prometheus_[a-z0-9_]*)$/i;
+
+/**
+ * Extract the leading metric name from a PromQL candidate string. Strips
+ * a single layer of common rate-style wrappers (`rate(...)`, `sum(...)`,
+ * `avg(...)`, `irate(...)`, `increase(...)`) so wrapped meta-metrics
+ * like `rate(scrape_duration_seconds[5m])` still get caught. Returns
+ * null when no recognizable metric name leads the expression.
+ */
+export function extractLeadingMetricName(expr: string): string | null {
+  let s = expr.trim();
+  // Peel up to two layers of function wrappers.
+  for (let i = 0; i < 2; i++) {
+    const wrap = s.match(/^(?:rate|irate|increase|sum|avg|max|min|count|delta|deriv|topk|bottomk)\s*\(\s*(.+)\s*\)\s*$/i);
+    if (!wrap) break;
+    s = wrap[1].trim();
+    // Strip a trailing range selector like `[5m]` so the name is bare.
+    s = s.replace(/\[[^\]]+\]\s*$/, '').trim();
+  }
+  const nameMatch = s.match(/^([a-zA-Z_:][a-zA-Z0-9_:]*)/);
+  return nameMatch ? nameMatch[1] : null;
+}
+
+/**
+ * Return `true` when the candidate's leading metric name is on the
+ * Prometheus meta-metric blacklist (see `META_METRIC_NAME_REGEX`).
+ */
+export function isMetaMetricCandidate(expr: string): boolean {
+  const name = extractLeadingMetricName(expr);
+  if (!name) return false;
+  return META_METRIC_NAME_REGEX.test(name);
+}
+
 export const metricsThatMovedSchema = {
   anchor_type: z
     .enum(['log10x_pattern', 'customer_metric'])
@@ -130,6 +184,22 @@ interface MetricsThatMovedSummary {
   n_candidates_evaluated: number;
   n_candidates_usable: number;
   low_candidate_count: 'severe' | 'medium' | null;
+  /**
+   * Candidates rejected by the meta-metric preflight (Prometheus scraper
+   * health gauges: `up`, `scrape_*`, `prometheus_*`). These series describe
+   * the scraper, not the workload — they would silently pass the phase-gap
+   * math by accident of scrape timing and produce a `low_candidate_count`
+   * tag with no explanation. Empty when no meta-metrics were submitted.
+   */
+  meta_metrics_rejected: string[];
+  /**
+   * Populated when EVERY submitted candidate was a meta-metric. Plain-English
+   * guidance the caller should surface verbatim: explains that only Prometheus
+   * scraper-health series were passed, and that the right next step is to
+   * curate candidates from the anchor's `services` attribution (which carry
+   * the workload signal that meta-metrics cannot). null otherwise.
+   */
+  meta_metrics_only_guidance: string | null;
   query_count: number;
   total_latency_ms: number;
   backend_pressure_hint: 'ok' | 'slow' | 'throttled' | null;
@@ -229,6 +299,69 @@ export async function executeMetricsThatMoved(
       totalLatencyMs += Date.now() - t0;
     }
   };
+
+  // ── Candidate-quality preflight ───────────────────────────────────
+  // Reject Prometheus meta-metrics (`up`, `scrape_*`, `prometheus_*`) BEFORE
+  // any backend query runs. These are scraper-health gauges, not workload
+  // signal; passing them as candidates would silently inflate the failed/
+  // not_moved buckets and trip the `low_candidate_count` tag with no
+  // explanation. We filter them out and, when every submitted candidate
+  // was on the blacklist, return a guided refusal instead of grinding
+  // through meaningless queries.
+  const metaRejected: string[] = [];
+  const filteredCandidates: string[] = [];
+  for (const c of args.candidates) {
+    if (isMetaMetricCandidate(c)) metaRejected.push(c);
+    else filteredCandidates.push(c);
+  }
+  if (metaRejected.length > 0 && filteredCandidates.length === 0) {
+    const guidance =
+      `All ${metaRejected.length} candidate(s) were Prometheus scraper-health metrics (e.g. up, scrape_*, prometheus_*). These describe the scraper, not the workload, so they cannot move with a pattern. ` +
+      `Curate candidates from the anchor's services attribution instead — call log10x_services with this anchor, then pass the customer metrics emitted by its top services as candidates.`;
+    const data: MetricsThatMovedSummary = {
+      status: 'no_signal',
+      threshold_used: floor,
+      threshold_basis: thresholdBasis,
+      anchor_ref: { type: args.anchor_type, expression: canonicalMetricRef(args.anchor) },
+      anchor_dispersion: 0,
+      anchor_expression: args.anchor,
+      window,
+      step_seconds: stepSeconds,
+      phase_gap_floor: floor,
+      n_anchor_buckets: 0,
+      n_candidates_evaluated: 0,
+      n_candidates_usable: 0,
+      low_candidate_count: 'severe',
+      meta_metrics_rejected: metaRejected,
+      meta_metrics_only_guidance: guidance,
+      query_count: queryCount,
+      total_latency_ms: totalLatencyMs,
+      backend_pressure_hint: pressureHint(queryCount, totalLatencyMs, throttledHit),
+      human_summary: guidance,
+      moved: [],
+      not_moved: [],
+      evaluation_failed: [],
+    };
+    return buildChassisEnvelope({
+      tool: 'log10x_metrics_that_moved',
+      view: 'summary',
+      headline: `No workload metrics submitted — every candidate was a Prometheus scraper-health series.`,
+      status: 'no_signal',
+      decisions: {
+        threshold_used: floor,
+        threshold_basis: thresholdBasis === 'caller_override' ? 'customer_supplied' as const : thresholdBasis,
+      },
+      source_disclosure: {},
+      scope: {
+        window,
+        window_basis: 'explicit',
+        candidates_count: args.candidates.length,
+        candidates_usable: 0,
+      },
+      payload: data,
+      human_summary: guidance,
+    });
+  }
 
   // ── Anchor series ──────────────────────────────────────────────────
   let anchorExpression: string;
@@ -342,6 +475,8 @@ export async function executeMetricsThatMoved(
       n_candidates_evaluated: 0,
       n_candidates_usable: 0,
       low_candidate_count: null,
+      meta_metrics_rejected: metaRejected,
+      meta_metrics_only_guidance: null,
       query_count: queryCount,
       total_latency_ms: totalLatencyMs,
       backend_pressure_hint: pressureHint(queryCount, totalLatencyMs, throttledHit),
@@ -390,7 +525,7 @@ export async function executeMetricsThatMoved(
   const notMoved: MovedCandidate[] = [];
   const failed: string[] = [];
 
-  for (const cand of args.candidates) {
+  for (const cand of filteredCandidates) {
     try {
       const res = await timedQuery(() => customerBackend.backend!.queryRange(cand, fromSec, nowSec, stepSeconds));
       const candSeries = extractFirstSeries(res);
@@ -437,6 +572,14 @@ export async function executeMetricsThatMoved(
 
   const observedDistribution = computeObservedPhaseGapDistribution(moved, notMoved);
 
+  // Mixed-submission guidance: caller passed some meta-metrics plus some
+  // workload metrics. Workload metrics still get evaluated; we just nudge
+  // the caller toward fully workload-curated lists for the next call.
+  const mixedMetaGuidance =
+    metaRejected.length > 0
+      ? `${metaRejected.length} candidate(s) were Prometheus scraper-health metrics and were skipped. For sharper results, curate from log10x_services on this anchor.`
+      : null;
+
   const data: MetricsThatMovedSummary = {
     status,
     threshold_used: floor,
@@ -448,13 +591,15 @@ export async function executeMetricsThatMoved(
     step_seconds: stepSeconds,
     phase_gap_floor: floor,
     n_anchor_buckets: anchorSeries.length,
-    n_candidates_evaluated: args.candidates.length - failed.length,
+    n_candidates_evaluated: filteredCandidates.length - failed.length,
     n_candidates_usable: nUsable,
     low_candidate_count: lowCandidateCount,
+    meta_metrics_rejected: metaRejected,
+    meta_metrics_only_guidance: mixedMetaGuidance,
     query_count: queryCount,
     total_latency_ms: totalLatencyMs,
     backend_pressure_hint: pressureHint(queryCount, totalLatencyMs, throttledHit),
-    human_summary,
+    human_summary: mixedMetaGuidance ? `${human_summary} ${mixedMetaGuidance}` : human_summary,
     moved,
     not_moved: notMoved,
     evaluation_failed: failed,
@@ -467,8 +612,8 @@ export async function executeMetricsThatMoved(
   // Plain English per Notes 10-12: drop "candidates", "anchor", "phase_gap".
   // The structured threshold + counts still live in payload / decisions.
   const headline = moved.length > 0
-    ? `${moved.length} of ${args.candidates.length} metric(s) moved with this pattern over the window.`
-    : `No metrics moved with this pattern over the window (${args.candidates.length} checked).`;
+    ? `${moved.length} of ${filteredCandidates.length} metric(s) moved with this pattern over the window.`
+    : `No metrics moved with this pattern over the window (${filteredCandidates.length} checked).`;
 
   return buildChassisEnvelope({
     tool: 'log10x_metrics_that_moved',
@@ -490,11 +635,11 @@ export async function executeMetricsThatMoved(
       window_basis: 'explicit',
       candidates_count: args.candidates.length,
       candidates_usable: nUsable,
-      candidates_evaluated: args.candidates.length - failed.length,
+      candidates_evaluated: filteredCandidates.length - failed.length,
       candidates_failed: failed,
     },
     payload: data,
-    human_summary,
+    human_summary: data.human_summary,
   });
 }
 
@@ -530,6 +675,8 @@ function errorEnvelope(args: {
     n_candidates_evaluated: 0,
     n_candidates_usable: 0,
     low_candidate_count: null,
+    meta_metrics_rejected: [],
+    meta_metrics_only_guidance: null,
     query_count: args.queryCount,
     total_latency_ms: args.totalLatencyMs,
     backend_pressure_hint: pressureHint(args.queryCount, args.totalLatencyMs, args.throttledHit),

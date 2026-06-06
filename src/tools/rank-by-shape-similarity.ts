@@ -137,6 +137,23 @@ interface RankByShapeSummary {
   ranked: RankedCandidate[];
   evaluation_failed: string[];
   /**
+   * Candidate strings that did NOT resolve to a real metric series in
+   * the customer TSDB (no samples for `count(<candidate>)`, or the
+   * backend rejected the expression as invalid PromQL). Skipped before
+   * the shape pipeline so we never compare the anchor against a
+   * fabricated zero-series. Each entry carries the candidate string and
+   * a short reason tag the agent can surface to the user.
+   */
+  evaluation_unknown?: Array<{ candidate: string; reason: 'candidate_unknown'; detail: string }>;
+  /**
+   * Populated when `status === 'no_signal'` to disambiguate the empty
+   * result. `all_candidates_unknown` = none of the inputs existed in the
+   * TSDB; `no_correlated_match` = candidates existed but nothing crossed
+   * the correlation floor; `no_usable_buckets` = candidates existed but
+   * returned <3 buckets each.
+   */
+  no_signal_reason?: 'all_candidates_unknown' | 'no_correlated_match' | 'no_usable_buckets';
+  /**
    * Threshold audit — the floors used and the empirical distributions
    * of observed values across the ranked pool. Lets the agent see "the
    * Pearson floor I'm comparing against is 0.15, but observed Pearson
@@ -375,8 +392,32 @@ export async function executeRankByShapeSimilarity(
 
   const ranked: RankedCandidate[] = [];
   const failed: string[] = [];
-
+  // ── Candidate existence pre-pass ───────────────────────────────────
+  // Bug fix: the tool used to accept any string as a candidate and run
+  // the shape pipeline against whatever queryRange returned (often an
+  // empty / placeholder zero-series), producing meaningless ranks. We
+  // now ask the backend whether each candidate resolves to a real
+  // metric series via `count(<candidate>)`. Candidates that don't
+  // resolve are tagged `candidate_unknown` and skipped before any
+  // shape math runs. If NONE survive we short-circuit to `no_signal`
+  // with `no_signal_reason: 'all_candidates_unknown'`.
+  const unknown: Array<{ candidate: string; reason: 'candidate_unknown'; detail: string }> = [];
+  const survivors: string[] = [];
   for (const cand of args.candidates) {
+    const verdict = await validateCandidateExists(
+      cand,
+      customer.backend!,
+      timedQuery,
+    );
+    if (verdict.ok) {
+      survivors.push(cand);
+    } else {
+      if (verdict.throttled) throttledHit = true;
+      unknown.push({ candidate: cand, reason: 'candidate_unknown', detail: verdict.detail });
+    }
+  }
+
+  for (const cand of survivors) {
     try {
       const res = await timedQuery(() => customer.backend!.queryRange(cand, fromSec, nowSec, stepSeconds));
       const candSeries = extractValues(res);
@@ -408,9 +449,24 @@ export async function executeRankByShapeSimilarity(
   const nUsable = ranked.length;
   const lowCandidateCount: 'severe' | 'medium' | null =
     nUsable < 10 ? 'severe' : nUsable < 20 ? 'medium' : null;
-  // No-signal status: all candidates had near-zero correlation.
+  // No-signal status: all candidates had near-zero correlation, OR
+  // every candidate was rejected as `candidate_unknown` by the
+  // existence pre-pass (in which case `survivors.length === 0` and we
+  // short-circuit with a distinct reason tag).
   const anyMeaningfulCorr = ranked.some((r) => r.pearson_magnitude >= 0.1);
-  const status: RankByShapeStatus = ranked.length === 0 || !anyMeaningfulCorr ? 'no_signal' : 'success';
+  const status: RankByShapeStatus =
+    survivors.length === 0 || ranked.length === 0 || !anyMeaningfulCorr ? 'no_signal' : 'success';
+  // Disambiguate the no_signal envelope so the agent can choose between
+  // "widen the candidate set" (all_candidates_unknown) and "pick a
+  // different anchor" (no_correlated_match).
+  const noSignalReason: 'all_candidates_unknown' | 'no_correlated_match' | 'no_usable_buckets' | undefined =
+    status === 'no_signal'
+      ? survivors.length === 0
+        ? 'all_candidates_unknown'
+        : ranked.length === 0
+          ? 'no_usable_buckets'
+          : 'no_correlated_match'
+      : undefined;
   const top = ranked[0];
 
   const pearsonDist = distribute(ranked.map((r) => r.pearson_magnitude));
@@ -419,14 +475,17 @@ export async function executeRankByShapeSimilarity(
   // "evaluated" from user prose. Drop the calibration caveat on
   // no_signal entirely (Note 9). Numeric audit lives in
   // decisions / threshold_audit for the agent to branch on.
+  const unknownNote = unknown.length > 0 ? ` ${unknown.length} weren't found in the metrics backend` : '';
   const human_summary =
     status === 'no_signal'
-      ? `No metric matched the shape of this pattern over the window. ${ranked.length} checked${failed.length > 0 ? `, ${failed.length} couldn't be checked` : ''}. Try a different starting pattern or widen the metric pool.`
+      ? noSignalReason === 'all_candidates_unknown'
+        ? `None of the candidate metrics exist in the metrics backend over this window. Check the metric names or widen the metric pool.`
+        : `No metric matched the shape of this pattern over the window. ${ranked.length} checked${failed.length > 0 ? `, ${failed.length} couldn't be checked` : ''}${unknownNote ? `,${unknownNote}` : ''}. Try a different starting pattern or widen the metric pool.`
       : `Matched ${ranked.length} metric(s) by shape over the window.${
           top
             ? ` Top match: ${top.candidate} (shape match ${top.pearson_magnitude.toFixed(2)}${top.lag_seconds !== 0 ? `, ${top.lag_seconds > 0 ? `lags by ${top.lag_seconds}s` : `leads by ${Math.abs(top.lag_seconds)}s`}` : ''}${top.lag_at_bound ? ', real offset may be wider' : ''}).`
             : ''
-        }${failed.length > 0 ? ` ${failed.length} couldn't be checked.` : ''}${lowCandidateCount === 'severe' ? ' Very few metrics were usable — treat as weak evidence.' : ''}${thresholdBasis === 'unvalidated_default' ? ' Match threshold is a default (not yet tuned for your data).' : ''}`;
+        }${failed.length > 0 ? ` ${failed.length} couldn't be checked.` : ''}${unknownNote ? `${unknownNote}.` : ''}${lowCandidateCount === 'severe' ? ' Very few metrics were usable — treat as weak evidence.' : ''}${thresholdBasis === 'unvalidated_default' ? ' Match threshold is a default (not yet tuned for your data).' : ''}`;
 
 
   const phaseGapDist = distribute(ranked.map((r) => r.anchor_phase_gap));
@@ -442,7 +501,7 @@ export async function executeRankByShapeSimilarity(
     window,
     step_seconds: stepSeconds,
     n_anchor_buckets: anchorSeries.length,
-    n_candidates_evaluated: args.candidates.length - failed.length,
+    n_candidates_evaluated: survivors.length - failed.length,
     n_candidates_usable: nUsable,
     low_candidate_count: lowCandidateCount,
     query_count: queryCount,
@@ -451,6 +510,8 @@ export async function executeRankByShapeSimilarity(
     human_summary,
     ranked,
     evaluation_failed: failed,
+    evaluation_unknown: unknown.length > 0 ? unknown : undefined,
+    no_signal_reason: noSignalReason,
     threshold_audit: {
       anchor_phase_aligned_floor: { value: phaseAlignedFloor, basis: thresholdBasis },
       lag_search_max_abs: { value: lagMaxAbs, basis: thresholdBasis },
@@ -461,9 +522,12 @@ export async function executeRankByShapeSimilarity(
   };
   // Plain English per Notes 10-12: drop "Pearson", "@lag", "candidates",
   // "evaluated" from user prose. Counts stay in scope / payload.
-  const headline = ranked.length === 0
-    ? `No metrics matched the shape of this pattern over the window${failed.length > 0 ? ` (${failed.length} couldn't be checked)` : ''}.`
-    : `Matched ${ranked.length} metric(s) by shape over the window${failed.length > 0 ? ` (${failed.length} couldn't be checked)` : ''}.`;
+  const unknownHeadline = unknown.length > 0 ? `, ${unknown.length} not found in metrics backend` : '';
+  const headline = status === 'no_signal' && noSignalReason === 'all_candidates_unknown'
+    ? `None of the candidate metrics exist in the metrics backend over the window.`
+    : ranked.length === 0
+      ? `No metrics matched the shape of this pattern over the window${failed.length > 0 ? ` (${failed.length} couldn't be checked${unknownHeadline})` : unknown.length > 0 ? ` (${unknown.length} not found in metrics backend)` : ''}.`
+      : `Matched ${ranked.length} metric(s) by shape over the window${failed.length > 0 ? ` (${failed.length} couldn't be checked${unknownHeadline})` : unknown.length > 0 ? ` (${unknown.length} not found in metrics backend)` : ''}.`;
 
   return buildChassisEnvelope({
     tool: 'log10x_rank_by_shape_similarity',
@@ -485,12 +549,72 @@ export async function executeRankByShapeSimilarity(
       window_basis: 'explicit',
       candidates_count: args.candidates.length,
       candidates_usable: nUsable,
-      candidates_evaluated: args.candidates.length - failed.length,
+      candidates_evaluated: survivors.length - failed.length,
       candidates_failed: failed,
     },
     payload: data,
     human_summary,
   });
+}
+
+/**
+ * Verify that a candidate PromQL expression resolves to a real metric
+ * series in the customer TSDB. We wrap the candidate in `count(...)` and
+ * run it as an instant query: a passing candidate returns a vector with
+ * at least one finite, non-zero count; anything else (parse error from
+ * the backend, empty vector, all-NaN, sum to zero) is treated as
+ * `candidate_unknown` and skipped.
+ *
+ * Why `count(...)` and not just the raw expression: the candidate is
+ * already a rate / sum / quantile expression in most calls — running it
+ * directly costs the full evaluation. `count(...)` shortcircuits to
+ * series-existence and is cheap on every Prom-compatible backend we
+ * support. If the wrap itself parse-errors (rare; usually means the
+ * candidate is structurally invalid PromQL), we still get a
+ * `candidate_unknown` verdict — which is the right answer.
+ */
+async function validateCandidateExists(
+  candidate: string,
+  backend: { queryInstant(promql: string): Promise<{ status: string; data: { resultType: string; result: Array<{ value?: [number, string] }> } }> },
+  timedQuery: <T>(fn: () => Promise<T>) => Promise<T>,
+): Promise<{ ok: true } | { ok: false; detail: string; throttled: boolean }> {
+  // Defensive: reject the empty-string-as-candidate edge case so the
+  // backend doesn't see `count()`.
+  const trimmed = candidate.trim();
+  if (trimmed.length === 0) {
+    return { ok: false, detail: 'empty candidate expression', throttled: false };
+  }
+  try {
+    const res = await timedQuery(() => backend.queryInstant(`count(${trimmed})`));
+    if (!res || res.status !== 'success') {
+      return { ok: false, detail: 'backend returned non-success status', throttled: false };
+    }
+    const results = res.data?.result ?? [];
+    if (results.length === 0) {
+      return { ok: false, detail: 'no series resolve in TSDB over the window', throttled: false };
+    }
+    let totalCount = 0;
+    let anyFinite = false;
+    for (const r of results) {
+      const v = r.value?.[1];
+      if (v === undefined) continue;
+      const parsed = parseFloat(v);
+      if (!Number.isFinite(parsed)) continue;
+      anyFinite = true;
+      totalCount += parsed;
+    }
+    if (!anyFinite || totalCount <= 0) {
+      return { ok: false, detail: 'count(<candidate>) resolved to 0 series', throttled: false };
+    }
+    return { ok: true };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    const throttled = /HTTP 429/.test(msg);
+    // Parse errors from the backend (HTTP 4xx with "bad_data" / "parse
+    // error" in body) flow through here. Treat as candidate_unknown
+    // rather than aborting the whole call.
+    return { ok: false, detail: `validation query failed: ${msg.slice(0, 160)}`, throttled };
+  }
 }
 
 /** Same shape as metrics_that_moved's errorEnvelope, scoped to RankByShapeSummary. */
