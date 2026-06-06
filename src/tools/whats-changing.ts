@@ -121,6 +121,7 @@ interface WhatsChangingData {
   pattern_count_total: number;
   pattern_count_shown: number;
   excluded_new_count: number;
+  silent_in_baseline_count: number;
 }
 
 export async function executeWhatsChanging(
@@ -251,6 +252,7 @@ export async function executeWhatsChanging(
         pattern_count_total: 0,
         pattern_count_shown: 0,
         excluded_new_count: 0,
+        silent_in_baseline_count: 0,
       },
       human_summary: `No pattern data over ${tf.label}. Patterns surface after ~24h of metric collection — widen the window or wait for ingestion to catch up.`,
       telemetry,
@@ -360,6 +362,7 @@ export async function executeWhatsChanging(
   const rows: ChangingRow[] = [];
   let totalPositiveDelta = 0;
   let excludedNewCount = 0;
+  let silentInBaselineCount = 0;
 
   for (const g of groups) {
     let bytesNowTotal = 0;
@@ -391,8 +394,27 @@ export async function executeWhatsChanging(
       });
     }
     if (!hasAnyBaseline) {
-      excludedNewCount += 1;
-      continue;
+      // Gate on actual first_seen age, NOT on baseline-window emptiness.
+      // Prior code counted any pattern silent across the 1d/2d/3d anchor
+      // windows as "brand-new" and routed it to log10x_whats_new, even
+      // though the pattern may have existed for weeks (cron jobs, bursty
+      // workloads, weekend-quiet services). Decisive evidence: in a stable
+      // env, whats_new reports ~10 patterns <24h old but the prior logic
+      // reported 171 "excluded as new" at 1d and 1446 at 7d — the count
+      // grew with window width, which proves the check was measuring
+      // baseline-silence, not first-seen age.
+      const ageSec = firstSeenByHash.get(g.pattern_hash)?.ageSeconds ?? null;
+      const rangeSec = tf.days * 86400;
+      if (ageSec !== null && ageSec <= rangeSec) {
+        // Genuinely new — first_seen lands inside the current analysis
+        // window. Route to whats_new as before.
+        excludedNewCount += 1;
+        continue;
+      }
+      // Pre-existing pattern that was silent across all baseline anchors.
+      // Surface it as a 100% delta-pct row (current emit vs zero baseline)
+      // rather than discard it. The headline phrasing should explain.
+      silentInBaselineCount += 1;
     }
     services.sort((a, b) => Math.abs(b.delta_usd) - Math.abs(a.delta_usd));
     const costNow = bytesToCost(bytesNowTotal, costPerGb);
@@ -491,6 +513,7 @@ export async function executeWhatsChanging(
     pattern_count_total: rows.length,
     pattern_count_shown: shown.length,
     excluded_new_count: excludedNewCount,
+    silent_in_baseline_count: silentInBaselineCount,
     observed_distribution: { delta_usd: observedDeltaUsdDist, delta_pct: observedDeltaPctDist },
     // Note 16: on no_signal, surface the top 5 by absolute delta so the
     // agent has something to render even when nothing crossed the floor.
@@ -500,10 +523,18 @@ export async function executeWhatsChanging(
     ...(backendErrors.length > 0 ? { backend_errors: backendErrors, partial: true } : {}),
   };
 
-  const callout =
-    excludedNewCount > 0
-      ? `${excludedNewCount} brand-new pattern${excludedNewCount === 1 ? '' : 's'} excluded — see \`log10x_whats_new\`.`
-      : undefined;
+  const calloutParts: string[] = [];
+  if (excludedNewCount > 0) {
+    calloutParts.push(
+      `${excludedNewCount} brand-new pattern${excludedNewCount === 1 ? '' : 's'} excluded (first_seen inside the analysis window) — see \`log10x_whats_new\`.`
+    );
+  }
+  if (silentInBaselineCount > 0) {
+    calloutParts.push(
+      `${silentInBaselineCount} pre-existing pattern${silentInBaselineCount === 1 ? '' : 's'} was silent across all baseline anchor windows (1×/2×/3× timeRange offsets) — these are emitting now after a quiet stretch and treated as 100% deltas vs zero baseline.`
+    );
+  }
+  const callout = calloutParts.length > 0 ? calloutParts.join(' ') : undefined;
 
   // Honest summary: lead with the result, surface partial failure when any
   // baseline offset or the events join failed. Note 16 — on no_signal we
@@ -519,18 +550,22 @@ export async function executeWhatsChanging(
       : '';
   const newExclusionTag =
     excludedNewCount > 0
-      ? ` ${excludedNewCount} brand-new pattern${excludedNewCount === 1 ? '' : 's'} excluded (no baseline) — route to log10x_whats_new for those.`
+      ? ` ${excludedNewCount} brand-new pattern${excludedNewCount === 1 ? '' : 's'} excluded (first_seen inside the analysis window) — route to log10x_whats_new for those.`
+      : '';
+  const silentBaselineTag =
+    silentInBaselineCount > 0
+      ? ` ${silentInBaselineCount} pre-existing pattern${silentInBaselineCount === 1 ? '' : 's'} silent across all baseline anchor windows — surfaced as 100% deltas vs zero baseline (these are NOT new identities).`
       : '';
   const humanSummary =
     status === 'no_signal'
       ? topAnyway.length > 0
         ? `Nothing crossed your $${minDeltaUsd} floor over ${tf.label} vs ${cwLabel}. ` +
           `Biggest change was $${Math.abs(topAnyway[0].delta_usd).toFixed(2)} (${topAnyway[0].symbol_message || 'pattern'}${topAnyway[0].services[0] ? ' on ' + topAnyway[0].services[0].name : ''}). ` +
-          `Lower the floor (try $${suggestedFloor.toFixed(2)}) to see more.${newExclusionTag}${partialTag}`
-        : `No pattern changes detected over ${tf.label} vs ${cwLabel}. ${rows.length} patterns were checked.${newExclusionTag}${partialTag}`
+          `Lower the floor (try $${suggestedFloor.toFixed(2)}) to see more.${newExclusionTag}${silentBaselineTag}${partialTag}`
+        : `No pattern changes detected over ${tf.label} vs ${cwLabel}. ${rows.length} patterns were checked.${newExclusionTag}${silentBaselineTag}${partialTag}`
       : `${shown.length} pattern${shown.length === 1 ? '' : 's'} changed by more than $${minDeltaUsd} over ${tf.label} vs ${cwLabel}. ` +
         `Top: \`${shown[0].pattern_hash}\` ${shown[0].delta_usd >= 0 ? '+' : '-'}$${Math.abs(shown[0].delta_usd).toFixed(0)} (${shown[0].delta_pct >= 0 ? '+' : ''}${shown[0].delta_pct.toFixed(0)}%). ` +
-        `Inspect with log10x_pattern_trend.${newExclusionTag}${calibTag}${partialTag}`;
+        `Inspect with log10x_pattern_trend.${newExclusionTag}${silentBaselineTag}${calibTag}${partialTag}`;
 
   const scope = {
     ...scopeBase,
