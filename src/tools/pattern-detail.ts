@@ -4,7 +4,7 @@
  * Composes a full single-pattern view by calling three internal helpers:
  *   1. event_lookup   — identity, first_seen, per-service cost breakdown
  *   2. pattern_trend  — time series for the lineChart() render
- *   3. pattern_examples — sample events from the SIEM (when available)
+ *   3. pattern_examples — sample events from your stack (when available)
  *
  * must_render_verbatim:
  *   - "Pattern X" header (descriptor, not hash)
@@ -52,7 +52,7 @@ export const patternDetailSchema = {
   include_samples: z
     .boolean()
     .default(true)
-    .describe('When true (default), attempts to fetch up to 3 full sample events from the SIEM. Set false to skip the SIEM round-trip.'),
+    .describe('When true (default), attempts to fetch up to 3 full sample events from your stack. Set false to skip the stack round-trip.'),
   timeRange: z
     .string()
     .regex(/^\d+[mhd]$/)
@@ -222,7 +222,7 @@ async function fetchTrend(
 }
 
 /**
- * Best-effort: fetch up to 3 full sample events from the SIEM for this hash.
+ * Best-effort: fetch up to 3 full sample events from your stack for this hash.
  * Uses the same direct connector pull that pattern_examples uses:
  * no buckets:1 cap, maxPullMinutes:2, and no fetchEventsByHashes wrapper
  * that would limit scan depth on wide windows.
@@ -374,7 +374,7 @@ function renderVerbatim(args: {
       const ageMs = Date.now() - latestMs;
       if (ageMs > 24 * 3600 * 1000) {
         const ageDays = Math.round(ageMs / (24 * 3600 * 1000));
-        disclosureLine = `Sample events (${sortedEvents.length} shown, latest from ${ageDays}d ago; samples distributed across ${timeRange} SIEM probe):`;
+        disclosureLine = `Sample events (${sortedEvents.length} shown, latest from ${ageDays}d ago; samples distributed across ${timeRange} stack probe):`;
       }
     }
     lines.push(disclosureLine || `Sample events (${sortedEvents.length} shown):`);
@@ -383,7 +383,7 @@ function renderVerbatim(args: {
     });
     lines.push('');
   } else if (siemKind !== 'resolved') {
-    lines.push('Sample events: not available (no SIEM connector resolved — set LOG10X_METRICS_* or run log10x_discover_env).');
+    lines.push('Sample events: not available (no stack connector resolved — set LOG10X_METRICS_* or run log10x_discover_env).');
     lines.push('');
   } else {
     lines.push(`Sample events: not available (no matching events in the last ${timeRange}; this is normal for bursty patterns with the window outside their burst, or for very low-volume patterns).`);

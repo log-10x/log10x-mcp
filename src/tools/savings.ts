@@ -40,8 +40,8 @@ export type RateSource = 'list_price' | 'customer_supplied' | 'unset';
 
 export const savingsSchema = {
   timeRange: z.enum(['15m', '1h', '6h', '24h', '1d', '7d', '30d']).default('7d').describe("Time range. '24h' and '1d' are equivalent."),
-  analyzerCost: z.number().optional().describe('DEPRECATED alias for effective_ingest_per_gb. SIEM ingestion cost in $/GB.'),
-  effective_ingest_per_gb: z.number().optional().describe('Customer-supplied SIEM ingestion cost in $/GB. When provided, rate_source=customer_supplied and dollars are populated. When omitted and no profile rate is available, rate_source=unset and the headline reports percent + bytes only (no dollars).'),
+  analyzerCost: z.number().optional().describe('DEPRECATED alias for effective_ingest_per_gb. stack ingestion cost in $/GB.'),
+  effective_ingest_per_gb: z.number().optional().describe('Customer-supplied stack ingestion cost in $/GB. When provided, rate_source=customer_supplied and dollars are populated. When omitted and no profile rate is available, rate_source=unset and the headline reports percent + bytes only (no dollars).'),
   storageCost: z.number().optional().describe('S3 storage cost in $/GB/month. Defaults to $0.023 (S3 Standard).'),
   environment: z.string().optional().describe('Environment nickname'),
   view: z.literal('summary').default('summary').optional().describe('Output format. Always "summary" — the typed envelope (data.totals, data.edge, data.retriever, data.run_rate). Field retained for backward-compat.'),
@@ -280,7 +280,7 @@ async function executeSavingsInner(
   const edgeSavings: number | null =
     costPerGb != null ? bytesToCost(edgeReducedBytes, costPerGb) : null;
 
-  // Retriever savings: cost avoided by keeping data in S3 instead of the SIEM
+  // Retriever savings: cost avoided by keeping data in S3 instead of the stack
   // = indexedBytes * (analyzerCost - storageCost) - streamedBytes * analyzerCost
   const retrieverInputBytes = indexedBytes + streamedBytes;
   const retrieverReductionPct =
@@ -355,19 +355,19 @@ async function executeSavingsInner(
   // NOT realized savings — it's unshipped volume. Reporting a "saved" dollar
   // figure here destroys credibility when the customer realizes nothing was
   // actually emitted. Instead, show a warning banner and flag it as potential
-  // savings that cannot be attributed to a SIEM the customer is paying for.
+  // savings that cannot be attributed to a stack the customer is paying for.
   // Caught by S2 sub-agent: "I cannot reconcile $196K/wk saved against $196K
   // monitored spend — they are the same number." Was the same number because
   // emitted=0 in the demo env.
   if (edgeEmissionMissing) {
     lines.push(`  Edge:      ${fmtBytes(edgeIn).padEnd(14)} input      → ⚠ no downstream emission detected`);
-    lines.push(`             (input ${fmtBytes(edgeIn)} processed, but 0 B emitted to a SIEM target)`);
+    lines.push(`             (input ${fmtBytes(edgeIn)} processed, but 0 B emitted to a stack target)`);
     if (edgeSavingsDisclosed != null) {
       lines.push(`             _Potential savings if this were routed through the pipeline: ${fmtDisclosedDollar(edgeSavingsDisclosed)}${period}._`);
     } else {
       lines.push(`             _Pass effective_ingest_per_gb to overlay a potential-savings dollar figure._`);
     }
-    lines.push(`             _To realize these savings, configure a downstream SIEM output (Splunk, Datadog, etc.) and measurements will populate within 24h._`);
+    lines.push(`             _To realize these savings, configure a downstream stack output (Splunk, Datadog, etc.) and measurements will populate within 24h._`);
   } else if (edgeReducedBytes > 0) {
     const dollarTail =
       edgeSavingsDisclosed != null

@@ -77,7 +77,9 @@ const BANNED_PHRASE_REWRITES: ReadonlyArray<readonly [RegExp, string]> = [
   [/\benv total\b/gi, 'total'],
   [/\benv patterns\b/gi, 'patterns'],
   [/\benv-scoped\b/gi, 'scoped'],
-  [/\bSIEM\b/g, 'source'],
+  // Per CLAUDE.md anti-SIEM rule: SREs say "stack" (or log analyzer / platform) — not SIEM.
+  // User explicitly chose "stack" as the canonical user-facing term (2026-06-06 review).
+  [/\bSIEM\b/g, 'stack'],
 
   // Engineering verbs / artefacts (Note 13).
   [/\be2e probe\b/gi, 'end-to-end check'],

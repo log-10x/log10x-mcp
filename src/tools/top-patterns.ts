@@ -53,9 +53,9 @@ export const topPatternsSchema = {
   timeRange: z.string().regex(/^\d+[mhd]$/).default('1h').describe('Time range to aggregate over. Default 1h.'),
   limit: z.number().min(1).max(50).default(10).describe('Number of patterns to return. Default 10.'),
   offset: z.number().min(0).default(0).describe('Skip the first N patterns of the ranked result (for pagination). Default 0.'),
-  analyzerCost: z.number().optional().describe('DEPRECATED — use effective_ingest_per_gb. SIEM ingestion cost in $/GB. Auto-detected from profile if omitted.'),
+  analyzerCost: z.number().optional().describe('DEPRECATED — use effective_ingest_per_gb. stack ingestion cost in $/GB. Auto-detected from profile if omitted.'),
   effective_ingest_per_gb: z.number().optional().describe('Customer-supplied $/GB rate used for the dollar overlay. When set, headline tags `rate_source=customer_supplied`. When absent, falls back to the profile list rate (`rate_source=list_price`) or omits dollars entirely (`rate_source=unset`).'),
-  siemScope: z.string().optional().describe('SIEM scope for the verbatim sample line on the top rows.'),
+  siemScope: z.string().optional().describe('stack scope for the verbatim sample line on the top rows.'),
   environment: z.string().optional().describe('Environment nickname (for multi-env setups).'),
   verbose: z
     .boolean()

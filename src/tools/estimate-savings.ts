@@ -160,7 +160,7 @@ export const estimateSavingsSchema = {
       'forecast mode: maximum number of per_pattern rows returned. Default 50 when service is omitted; ignored (unlimited) when service is set. Totals and coverage_pct are always computed over the full solver result before slicing.'
     ),
   destination: DEST_ENUM.optional().describe(
-    'Destination SIEM. Required for both modes (used to look up ingest $/GB + compact ratio band).'
+    'Destination stack. Required for both modes (used to look up ingest $/GB + compact ratio band).'
   ),
   es_pruned: z
     .boolean()
@@ -233,6 +233,12 @@ export type EstimateSavingsArgs = z.infer<typeof schemaObj>;
 
 export interface ForecastRow {
   pattern_hash: string;
+  /** Dominant service for this pattern. User-facing renderers MUST use this
+   * (and symbol_message) on user-visible cells, never the raw pattern_hash. */
+  service: string;
+  /** Pattern descriptor (symbol_message). Empty string when the metric
+   * backend didn't surface a label value for this hash. */
+  symbol_message: string;
   action: Action;
   bytes_in_monthly: number;
   bytes_in_monthly_display: string;
@@ -768,13 +774,15 @@ export async function runEstimateForecast(
   // string for the pattern-universe disclosure field.
   const distinctCountQuery = pql.distinctPatternCount(scopeFilters, metricsEnv, observationWindow);
 
-  // Per-hash service label query — used for per_service rollup when service
-  // is omitted. We need (hash → service) so we can group solver rows by service
-  // after projection. Query by both hash and service labels; take the dominant
-  // service per hash by bytes (same tie-break as extractHashContainerMap).
-  const hashServiceQuery = !args.service
-    ? `sum by (${env.labels.hash},${env.labels.service}) (increase(${BYTES_METRIC}{isDropped!="true",${env.labels.env}="${metricsEnv}"}[${observationWindow}]))`
-    : null;
+  // Per-hash (service, descriptor) label query — used for per_service rollup
+  // AND to enrich per_pattern rows so they carry a user-readable descriptor
+  // (symbol_message) + service instead of just a raw hash. We always run this
+  // — even when args.service is set, we still need the descriptor to avoid
+  // leaking pattern_hash as the only identifier in user-facing rows.
+  // Group by hash + service + message_pattern; take the dominant (service,
+  // descriptor) per hash by bytes (same tie-break as extractHashContainerMap).
+  const hashServiceQuery =
+    `sum by (${env.labels.hash},${env.labels.service},${env.labels.pattern}) (increase(${BYTES_METRIC}{isDropped!="true",${env.labels.env}="${metricsEnv}"}[${observationWindow}]))`;
 
   const parallelQueries: Array<Promise<unknown>> = [
     queryInstant(env, bytesQuery),
@@ -782,9 +790,7 @@ export async function runEstimateForecast(
     queryInstant(env, totalQuery),
     queryInstant(env, distinctCountQuery).catch(() => null),
   ];
-  if (hashServiceQuery) {
-    parallelQueries.push(queryInstant(env, hashServiceQuery));
-  }
+  parallelQueries.push(queryInstant(env, hashServiceQuery));
 
   const queryResults = await Promise.all(parallelQueries);
   const [bytesRes, eventsRes, totalRes, distinctCountRes] = queryResults as [
@@ -793,9 +799,7 @@ export async function runEstimateForecast(
     Parameters<typeof parseScalarSum>[0],
     Parameters<typeof parseScalarSum>[0] | null,
   ];
-  const hashServiceRes = hashServiceQuery
-    ? (queryResults[4] as Parameters<typeof parsePromResult>[0])
-    : null;
+  const hashServiceRes = queryResults[4] as Parameters<typeof parsePromResult>[0];
 
   // Extract distinct pattern count from the count-of-counts query.
   let patternUniverseCount: number | null = null;
@@ -810,15 +814,19 @@ export async function runEstimateForecast(
   // Scale observation to a 30-day month (the forecast quotes monthly dollars).
   const scale = MONTH_DAYS / obsDays;
 
-  // Build hash→service map for the per_service rollup (service-omitted mode).
-  // Dominant service per hash = highest bytes; ties broken lexicographically.
+  // Build hash → (service, descriptor) maps for per_service rollup AND for
+  // enriching per_pattern rows with the user-facing symbol_message + service.
+  // Dominant (service, descriptor) per hash = highest bytes; ties broken
+  // lexicographically on service then descriptor.
   const hashToService = new Map<string, string>();
+  const hashToDescriptor = new Map<string, string>();
   if (hashServiceRes) {
     const svcRows = hashServiceRes?.data?.result ?? [];
-    const acc = new Map<string, { service: string; bytes: number }>();
+    const acc = new Map<string, { service: string; descriptor: string; bytes: number }>();
     for (const row of svcRows) {
       const hash = row.metric?.[env.labels.hash];
       const svc = row.metric?.[env.labels.service];
+      const desc = row.metric?.[env.labels.pattern] ?? '';
       if (!hash || !svc) continue;
       const v = row.value ? parseFloat(row.value[1]) : NaN;
       const bytes = Number.isFinite(v) ? v : 0;
@@ -826,13 +834,15 @@ export async function runEstimateForecast(
       if (
         !prior ||
         bytes > prior.bytes ||
-        (bytes === prior.bytes && svc.localeCompare(prior.service) < 0)
+        (bytes === prior.bytes && svc.localeCompare(prior.service) < 0) ||
+        (bytes === prior.bytes && svc === prior.service && desc.localeCompare(prior.descriptor) < 0)
       ) {
-        acc.set(hash, { service: svc, bytes });
+        acc.set(hash, { service: svc, descriptor: desc, bytes });
       }
     }
-    for (const [hash, { service }] of acc.entries()) {
+    for (const [hash, { service, descriptor }] of acc.entries()) {
       hashToService.set(hash, service);
+      if (descriptor) hashToDescriptor.set(hash, descriptor);
     }
   }
 
@@ -976,6 +986,12 @@ export async function runEstimateForecast(
 
     per_pattern.push({
       pattern_hash: row.pattern_hash,
+      // User-facing identifiers (Note 18: renderers MUST show these, not the
+      // hash, on user-visible cells). Service falls back to the args.service
+      // when the caller scoped the call; descriptor stays empty when the
+      // metric backend doesn't surface message_pattern for this hash.
+      service: hashToService.get(row.pattern_hash) ?? args.service ?? '',
+      symbol_message: hashToDescriptor.get(row.pattern_hash) ?? '',
       action: row.action,
       bytes_in_monthly: monthlyBytes,
       bytes_in_monthly_display: fmtBytes(monthlyBytes),
@@ -1533,7 +1549,7 @@ export async function executeEstimateSavings(
       return buildChassisEnvelope({
         tool: 'log10x_estimate_savings',
         view: 'summary',
-        headline: 'estimate_savings refused: multiple SIEMs detected — pass destination explicitly.',
+        headline: 'estimate_savings refused: multiple stacks detected — pass destination explicitly.',
         status: 'error',
         decisions: { threshold_used: null, threshold_basis: 'default' },
         // siem_vendor is intentionally absent: multiple vendors were found and
@@ -1546,12 +1562,12 @@ export async function executeEstimateSavings(
           error: 'ambiguous destination',
           candidates: detected.candidates.map((c) => ({ id: c.id, displayName: c.displayName, source: c.source })),
         },
-        human_summary: `Multiple configured SIEMs detected (${names}). Pass destination explicitly to specify which to use.`,
+        human_summary: `Multiple configured stacks detected (${names}). Pass destination explicitly to specify which to use.`,
         error: {
           error_type: 'ambiguous_destination',
           retryable: false,
           suggested_backoff_ms: null,
-          hint: `Multiple SIEMs detected (${names}). Pass destination explicitly.`,
+          hint: `Multiple stacks detected (${names}). Pass destination explicitly.`,
         },
         telemetry,
       });

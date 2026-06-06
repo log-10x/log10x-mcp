@@ -55,9 +55,9 @@ export const explainModeSchema = {
     .describe(
       'Which enforcement mode to explain. ' +
       '`drop` = engine hard-drops matched patterns at the Receiver before delivery. ' +
-      '`sample` = engine passes 1-in-N events through to the SIEM. ' +
-      '`compact` = engine compresses events 5-10x losslessly; all events still reach the SIEM. ' +
-      '`tier_down` = engine stamps tenx_action marker; SIEM routes to a cheaper storage tier (Datadog Flex / CloudWatch IA). ' +
+      '`sample` = engine passes 1-in-N events through to the stack. ' +
+      '`compact` = engine compresses events 5-10x losslessly; all events still reach the stack. ' +
+      '`tier_down` = engine stamps tenx_action marker; stack routes to a cheaper storage tier (Datadog Flex / CloudWatch IA). ' +
       '`offload` = engine diverts matched events to a customer-owned S3 bucket; recoverable via log10x_retriever_query. ' +
       '`observe_only` = engine observes and fingerprints but does not act; use to baseline volume before committing.'
     ),
@@ -65,7 +65,7 @@ export const explainModeSchema = {
     .string()
     .optional()
     .describe(
-      'Auto-detected destination SIEM or forwarder. When omitted the tool infers from envs.json / env vars. ' +
+      'Auto-detected destination stack or forwarder. When omitted the tool infers from envs.json / env vars. ' +
       'Used to name the specific vendor in the explanation ("your Datadog workspace", "your Splunk index", etc.).'
     ),
 };
@@ -129,7 +129,7 @@ interface ModeMetadata {
 const MODE_METADATA: Record<ExplainMode, ModeMetadata> = {
   drop: {
     what_it_does:
-      'No events reach the SIEM; engine drops at the Receiver. ' +
+      'No events reach the stack; engine drops at the Receiver. ' +
       'The 10x Receiver sits in-path and hard-drops matched patterns at the forwarder sidecar before delivery. ' +
       'Events are discarded permanently.',
     what_you_need:
@@ -138,11 +138,11 @@ const MODE_METADATA: Record<ExplainMode, ModeMetadata> = {
     who_enforces: 'engine',
     apply_tool: 'log10x_configure_engine',
     apply_args: (service) => ({ service, default_action: 'drop' }),
-    what_survives: 'No events reach the SIEM. Events are discarded at the Receiver.',
+    what_survives: 'No events reach the stack. Events are discarded at the Receiver.',
   },
   sample: {
     what_it_does:
-      '1-in-N events reach the SIEM; trend remains valid. ' +
+      '1-in-N events reach the stack; trend remains valid. ' +
       '10x Receiver passes 1-in-N events through to your analyzer. ' +
       'Aggregate trends and alerting stay valid at a fraction of the ingest cost. ' +
       'Default sample rate is 1 in 10 (configurable).',
@@ -152,25 +152,25 @@ const MODE_METADATA: Record<ExplainMode, ModeMetadata> = {
     who_enforces: 'engine',
     apply_tool: 'log10x_configure_engine',
     apply_args: (service) => ({ service, default_action: 'sample' }),
-    what_survives: '1-in-N events reach the SIEM (default 1 in 10). Trend and alerting remain valid.',
+    what_survives: '1-in-N events reach the stack (default 1 in 10). Trend and alerting remain valid.',
   },
   compact: {
     what_it_does:
-      'All events reach the SIEM, each compressed 5-10x. ' +
+      'All events reach the stack, each compressed 5-10x. ' +
       'Engine encodes events into the 10x compact wire format. ' +
-      'All events arrive in the SIEM; fields stay searchable.',
+      'All events arrive in the stack; fields stay searchable.',
     what_you_need:
       'The 10x Receiver sidecar must be installed in-path. ' +
-      'Compatible SIEM (Splunk, Elasticsearch, ClickHouse, Azure Monitor, GCP Logging, Sumo Logic). ' +
+      'Compatible stack (Splunk, Elasticsearch, ClickHouse, Azure Monitor, GCP Logging, Sumo Logic). ' +
       'GitOps repo configured for the action-plan PR.',
     who_enforces: 'engine',
     apply_tool: 'log10x_configure_engine',
     apply_args: (service) => ({ service, default_action: 'compact' }),
-    what_survives: 'All events reach the SIEM, each compressed by 5-10x. Fully searchable.',
+    what_survives: 'All events reach the stack, each compressed by 5-10x. Fully searchable.',
   },
   tier_down: {
     what_it_does:
-      'Events reach the SIEM at a cheaper storage tier (Datadog Flex / CloudWatch IA). ' +
+      'Events reach the stack at a cheaper storage tier (Datadog Flex / CloudWatch IA). ' +
       'Engine stamps matched events with a tenx_action marker. ' +
       'Your analyzer routes stamped events to a cheaper storage tier. ' +
       'Events remain searchable at the lower tier; only storage cost drops.',
@@ -180,7 +180,7 @@ const MODE_METADATA: Record<ExplainMode, ModeMetadata> = {
     who_enforces: 'engine',
     apply_tool: 'log10x_configure_engine',
     apply_args: (service) => ({ service, default_action: 'tier_down' }),
-    what_survives: 'Events reach the SIEM at a cheaper storage tier. Indexed fields preserved.',
+    what_survives: 'Events reach the stack at a cheaper storage tier. Indexed fields preserved.',
   },
   offload: {
     what_it_does:
@@ -194,7 +194,7 @@ const MODE_METADATA: Record<ExplainMode, ModeMetadata> = {
     who_enforces: 'engine',
     apply_tool: 'log10x_configure_engine',
     apply_args: (service) => ({ service, default_action: 'offload' }),
-    what_survives: 'Events route to your S3 bucket instead of the SIEM. Recoverable via log10x_retriever_query.',
+    what_survives: 'Events route to your S3 bucket instead of the stack. Recoverable via log10x_retriever_query.',
   },
   observe_only: {
     what_it_does:
@@ -434,7 +434,7 @@ export async function executeExplainMode(args: {
     const suggested = getSuggestedModes(args.mode, destination);
     headline =
       `${args.mode} mode is NOT compatible with ${destination ?? 'this destination'}. ` +
-      `${destination ?? 'This SIEM'} does not support the ${args.mode} read path. ` +
+      `${destination ?? 'This stack'} does not support the ${args.mode} read path. ` +
       (suggested.length > 0
         ? `Use ${suggested.join(' or ')} instead.`
         : 'Choose a different mode.');

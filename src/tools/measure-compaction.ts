@@ -2,12 +2,12 @@
  * log10x_measure_compaction — measure real per-pattern compaction ratios
  * from live SIEM samples.
  *
- * Pulls N events from the SIEM scoped to a service, runs them through the
+ * Pulls N events from the stack scoped to a service, runs them through the
  * tenx engine, and returns per-pattern compaction ratios derived from actual
  * byte measurements rather than hardcoded model estimates.
  *
  * Flow:
- *   1. Fetch `sample_size` events from the SIEM for the given service over
+ *   1. Fetch `sample_size` events from the stack for the given service over
  *      `timeRange` via the existing connector.pullEvents() plumbing.
  *   2. Run events through tenx @apps/mcp-file via runMcpAppOnEvents().
  *   3. Group encoded events by patternHash (tenxHash anchor on the encoded
@@ -40,7 +40,7 @@ export const measureCompactionSchema = {
   service: z
     .string()
     .describe(
-      'Service name to scope the SIEM sample to. Used as the query filter (e.g., Datadog `service:<name>`, Splunk `sourcetype=<name>`, CloudWatch stream prefix).'
+      'Service name to scope the stack sample to. Used as the query filter (e.g., Datadog `service:<name>`, Splunk `sourcetype=<name>`, CloudWatch stream prefix).'
     ),
   sample_size: z
     .number()
@@ -50,7 +50,7 @@ export const measureCompactionSchema = {
     .default(500)
     .optional()
     .describe(
-      'Number of events to pull from the SIEM for measurement. Default 500. Larger samples improve confidence (high confidence requires >=50 events per pattern) but take longer to pull and process.'
+      'Number of events to pull from the stack for measurement. Default 500. Larger samples improve confidence (high confidence requires >=50 events per pattern) but take longer to pull and process.'
     ),
   timeRange: z
     .string()
@@ -58,7 +58,7 @@ export const measureCompactionSchema = {
     .default('24h')
     .optional()
     .describe(
-      'Lookback window for the SIEM pull. Format: <N><unit> where unit is m (minutes), h (hours), or d (days). Default "24h".'
+      'Lookback window for the stack pull. Format: <N><unit> where unit is m (minutes), h (hours), or d (days). Default "24h".'
     ),
   environment: z
     .string()
@@ -102,7 +102,7 @@ interface MeasureCompactionData {
   sample_size_actual: number;
   timeRange: string;
   patterns: PatternCompactionResult[];
-  /** Wall time for the SIEM pull in ms. */
+  /** Wall time for the stack pull in ms. */
   siem_pull_ms: number;
   /** Wall time for the tenx engine run in ms. */
   engine_ms: number;
@@ -140,7 +140,7 @@ function confidenceTier(count: number): 'low' | 'medium' | 'high' {
 }
 
 /**
- * Coerce a SIEM event object to a raw log line string. Same logic as
+ * Coerce a stack event object to a raw log line string. Same logic as
  * pattern-extraction.ts coerceToLine — pulls the `message`/`log`/`_raw`
  * field out of transport envelopes before feeding to tenx.
  */
@@ -226,12 +226,12 @@ export async function executeMeasureCompaction(
   if (sel.kind === 'ambiguous') {
     throw new Error(
       formatAmbiguousError(sel.candidates, 'vendor') +
-        '\n\nPass the SIEM id explicitly via an environment override if needed.'
+        '\n\nPass the stack id explicitly via an environment override if needed.'
     );
   }
   if (sel.kind === 'none') {
     throw new Error(
-      formatNoneError(sel.probedIds, 'Run log10x_doctor for per-SIEM credential setup detail.')
+      formatNoneError(sel.probedIds, 'Run log10x_doctor for per-stack credential setup detail.')
     );
   }
 
@@ -283,7 +283,7 @@ export async function executeMeasureCompaction(
     });
   } catch (e) {
     throw new Error(
-      `SIEM pull failed for service="${args.service}" on ${sel.displayName}: ${(e as Error).message}`
+      `Stack pull failed for service="${args.service}" on ${sel.displayName}: ${(e as Error).message}`
     );
   }
   const siemPullMs = Date.now() - pullStart;
@@ -297,7 +297,7 @@ export async function executeMeasureCompaction(
       headline: noEventsHeadline,
       headline_bullets: [
         'Try a wider timeRange (e.g., "7d")',
-        'Verify the service name matches your SIEM labels',
+        "Verify the service name matches your stack's labels",
         'Check that the service is actively emitting logs',
       ],
       status: 'no_signal',

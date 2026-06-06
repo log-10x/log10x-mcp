@@ -20,7 +20,7 @@ export const updateSettingsSchema = {
     .record(z.string(), z.unknown())
     .describe(
       'Object of metadata key/value pairs to update on the user account. ' +
-        'Common fields: `analyzer_cost` (number, $/GB SIEM cost used for cost-driver math); ' +
+        'Common fields: `analyzer_cost` (number, $/GB stack cost used for cost-driver math); ' +
         '`ai_provider` (`openai` | `anthropic` | `xai` | `custom` | empty for Log10x-managed); ' +
         '`ai_api_key` (string, BYOK); `ai_endpoint` (string); `ai_model` (string); ' +
         '`ai_temperature` (number 0-1); `ai_disabled` (boolean, true to disable AI entirely); ' +

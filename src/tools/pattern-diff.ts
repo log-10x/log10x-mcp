@@ -87,7 +87,7 @@ export const patternDiffSchema = {
     .max(20)
     .default(3)
     .describe('Minimum cluster size to emit. Default 3 — 2 patterns sharing a timestamp is often coincidence.'),
-  analyzerCost: z.number().optional().describe('SIEM ingestion cost in $/GB. Auto-detected from profile.'),
+  analyzerCost: z.number().optional().describe('stack ingestion cost in $/GB. Auto-detected from profile.'),
   environment: z.string().optional().describe('Environment nickname (for multi-env setups).'),
   view: z.enum(['summary', 'markdown']).default('summary').describe('Output format.'),
 };

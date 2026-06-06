@@ -80,7 +80,7 @@ export interface CostOptionItem {
   applicable: boolean;
   /** When applicable=false, explains what's missing. */
   gated_reason?: string;
-  /** What events survive (land in SIEM / archive / nowhere). */
+  /** What events survive (land in stack / archive / nowhere). */
   what_survives: string;
   /** Tool + args to call when user picks this mode. */
   routes_to: { tool: string; args: Record<string, unknown> };
@@ -107,7 +107,7 @@ const COMPACT_SUPPORTED_SIEM = new Set([
 ]);
 
 function siemSupportsCompact(siem: string | null): boolean {
-  if (!siem) return true; // unknown SIEM — don't gate; estimate_savings will error if needed
+  if (!siem) return true; // unknown stack — don't gate; estimate_savings will error if needed
   return COMPACT_SUPPORTED_SIEM.has(siem);
 }
 
@@ -305,53 +305,53 @@ function buildModes(
   return [
     {
       id: 'drop',
-      label: 'Drop: stop events at the forwarder. Nothing reaches the SIEM.',
+      label: 'Drop: stop events at the forwarder. Nothing reaches the stack.',
       description:
-        'Engine caps the pattern at 0 bytes/s. Events are discarded at the Receiver before reaching the SIEM.',
+        'Engine caps the pattern at 0 bytes/s. Events are discarded at the Receiver before reaching the stack.',
       who_enforces: 'engine',
       applicable: true,
       what_survives:
-        'No events reach the SIEM. Events are gone (or offloaded to S3 if offload action used instead).',
+        'No events reach the stack. Events are gone (or offloaded to S3 if offload action used instead).',
       routes_to: { tool: 'log10x_estimate_savings', args: sharedArgs('drop') },
     },
     {
       id: 'sample',
       label: 'Sample: keep 1 in N events. Trends stay valid.',
       description:
-        'Engine passes 1 in N events (default 1 in 10) through to the SIEM. Aggregate alerting remains valid.',
+        'Engine passes 1 in N events (default 1 in 10) through to the stack. Aggregate alerting remains valid.',
       who_enforces: 'engine',
       applicable: true,
       what_survives:
-        '1 in N events reach the SIEM (default 1 in 10). Trend and alerting remain valid at reduced volume.',
+        '1 in N events reach the stack (default 1 in 10). Trend and alerting remain valid at reduced volume.',
       routes_to: { tool: 'log10x_estimate_savings', args: sharedArgs('sample') },
     },
     {
       id: 'compact',
-      label: 'Compact: compress events ~5-10x. All events still land in the SIEM.',
+      label: 'Compact: compress events ~5-10x. All events still land in the stack.',
       description:
-        'Engine encodes events into the 10x compact wire format (~5–10x smaller). All events arrive in the SIEM; fields stay searchable.',
+        'Engine encodes events into the 10x compact wire format (~5–10x smaller). All events arrive in the stack; fields stay searchable.',
       who_enforces: 'engine',
       applicable: compactApplicable,
       gated_reason: compactGatedReason,
       what_survives:
-        'All events reach the SIEM, each compressed by 5–10x. Fully searchable.',
+        'All events reach the stack, each compressed by 5–10x. Fully searchable.',
       routes_to: { tool: 'log10x_estimate_savings', args: sharedArgs('compact') },
     },
     {
       id: 'tier_down',
-      label: 'Tier-down: SIEM stores events at a cheaper storage tier.',
+      label: 'Tier-down: stack stores events at a cheaper storage tier.',
       description:
-        'Engine stamps events with a tenx_action marker; the SIEM routes them to a cheaper tier (Flex Logs on Datadog, Infrequent Access on CloudWatch).',
+        'Engine stamps events with a tenx_action marker; the stack routes them to a cheaper tier (Flex Logs on Datadog, Infrequent Access on CloudWatch).',
       who_enforces: 'SIEM',
       applicable: tierDownApplicable,
       gated_reason: tierDownGatedReason,
       what_survives:
-        'Events reach the SIEM at a cheaper storage tier (e.g. Flex Logs / Standard Tier). Indexed fields preserved.',
+        'Events reach the stack at a cheaper storage tier (e.g. Flex Logs / Standard Tier). Indexed fields preserved.',
       routes_to: { tool: 'log10x_estimate_savings', args: sharedArgs('tier_down') },
     },
     {
       id: 'offload',
-      label: 'Offload: events route to your S3 bucket instead of the SIEM.',
+      label: 'Offload: events route to your S3 bucket instead of the stack.',
       description:
         'Engine diverts engine-marked events to a customer-owned S3 bucket. Events stay recoverable on demand via log10x_retriever_query.',
       who_enforces: 'engine',
@@ -362,7 +362,7 @@ function buildModes(
           ? 'Requires the overflow bucket (Retriever) set up. Install via log10x_advise_retriever.'
           : 'Requires Receiver tier in-path so the engine can route events to S3. Install via log10x_advise_install.',
       what_survives:
-        'Events route to your S3 bucket instead of the SIEM. Recoverable via log10x_retriever_query on demand.',
+        'Events route to your S3 bucket instead of the stack. Recoverable via log10x_retriever_query on demand.',
       routes_to: { tool: 'log10x_estimate_savings', args: sharedArgs('offload') },
     },
     {
@@ -387,8 +387,8 @@ function renderVerbatim(
   tier?: CustomerTier
 ): string {
   const siemLine = siemDetected
-    ? `SIEM detected: \`${siemDetected}\`.`
-    : 'No SIEM credentials detected — destinations will need to be specified when you pick a mode.';
+    ? `Stack detected: \`${siemDetected}\`.`
+    : 'No stack credentials detected — destinations will need to be specified when you pick a mode.';
 
   const isCollapsed = tier === 'dev' || tier === 'reporter';
 
@@ -520,7 +520,7 @@ export async function executeCostOptions(args: {
   const headline = `Cost options (${tier} tier): ${applicableCount} of ${modes.length} modes available. Awaiting user pick before routing.`;
   const human_summary = siemDetected
     ? `${applicableCount} of ${modes.length} modes available on ${siemDetected} (${tier} tier). Pick a mode.`
-    : `${applicableCount} of ${modes.length} modes available (${tier} tier, no SIEM detected). Pick a mode.`;
+    : `${applicableCount} of ${modes.length} modes available (${tier} tier, no stack detected). Pick a mode.`;
 
   return buildChassisEnvelope({
     tool: 'log10x_cost_options',
