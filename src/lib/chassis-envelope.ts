@@ -736,6 +736,27 @@ export function sanitizeHeadline(msg: string): string {
 }
 
 /**
+ * Truncate a string at a sentence boundary at or before maxLen.
+ * Avoids mid-sentence cuts like "...So either" that confuse users.
+ * Falls back to a hard cap if no sentence break is found.
+ */
+function truncateAtSentence(text: string, maxLen: number): string {
+  if (text.length <= maxLen) return text;
+  const cut = text.slice(0, maxLen);
+  // Prefer the last ". " before the cap; else the last "; ", "! ", "? ".
+  const lastSentence = Math.max(
+    cut.lastIndexOf('. '),
+    cut.lastIndexOf('! '),
+    cut.lastIndexOf('? '),
+    cut.lastIndexOf('; '),
+  );
+  if (lastSentence > maxLen * 0.6) return cut.slice(0, lastSentence + 1);
+  // No good break — fall back to last space to avoid mid-word cut.
+  const lastSpace = cut.lastIndexOf(' ');
+  return (lastSpace > maxLen * 0.6 ? cut.slice(0, lastSpace) : cut) + '…';
+}
+
+/**
  * Convenience builder for structural error envelopes. Use when the
  * tool cannot produce a payload because a backend call failed.
  *
@@ -773,7 +794,7 @@ export function buildChassisErrorEnvelope(opts: {
   return buildChassisEnvelope({
     tool: opts.tool,
     view: 'summary',
-    headline: `Error (${errType}): ${sanitizeHeadline(errHint).slice(0, 120)}`,
+    headline: `Error (${errType}): ${truncateAtSentence(sanitizeHeadline(errHint), 200)}`,
     status: 'error',
     decisions: {
       threshold_used: null,

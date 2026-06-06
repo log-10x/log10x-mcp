@@ -178,7 +178,12 @@ export interface Timeframe {
  * investigation; day-level windows for cost and trend analysis.
  */
 export function parseTimeframe(input: string): Timeframe {
-  const match = input.match(/^(\d+)([mhd])$/);
+  // Defensive: when the humanized label ("last 24h" / "last 1d") flows
+  // back into parseTimeframe (e.g. via envelope.d.window being re-parsed
+  // by chart-render code), strip the "last " prefix and accept the raw
+  // form. Avoids the round-trip rejection seen on pattern_trend.
+  const normalized = input.replace(/^last\s+/i, '').trim();
+  const match = normalized.match(/^(\d+)([mhd])$/);
   if (!match) throw new Error(`Invalid timeframe: "${input}". Expected format like "15m", "1h", "6h", "1d", "7d", "30d".`);
 
   const n = parseInt(match[1], 10);

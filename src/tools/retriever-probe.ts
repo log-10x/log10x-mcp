@@ -127,15 +127,32 @@ function buildHeadline(r: ProbeResult): string {
     return `Retriever end-to-end health check passed — picked pattern ${r.picked_hash ?? '?'}, ran query ${r.query_id ?? '?'}, all ${r.asserts.length} checks succeeded (${r.total_runtime_ms}ms).`;
   }
   if (r.verdict === 'broken') {
-    // Note 32: lead with capability + impact in user terms, not engine-internal
-    // component names. "Long-term log search isn't working" is what the user
-    // experiences; the assert name + remedy live in the data envelope for
-    // anyone who wants to drill into the mechanism.
+    // Note 32 + 39: lead with capability + impact in user terms. Distinguish
+    // "new logs aren't being archived" (offload_bucket_has_recent_data failure)
+    // from "historical search is broken" (indexer/pod/query failures) —
+    // these are independent. Conflating them overstates impact when only
+    // the forward-shipping signal fails.
     const remedy = r.surfaced_remedy ?? '';
+    const failed = r.first_failed_assert ?? '?';
+    const passedCount = r.asserts.filter((a) => a.status === 'pass').length;
+    const totalCount = r.asserts.length;
+
+    // Forward-shipping failure: archive isn't getting new logs, but existing
+    // indexed data is still queryable.
+    if (failed === 'offload_bucket_has_recent_data') {
+      return (
+        `Long-term log archiving has stalled — no new logs have landed in cold storage recently ` +
+        `(${passedCount} of ${totalCount} health checks passed; the failed one was the new-arrivals check). ` +
+        `What this means: searching events from BEFORE the stall still works, but events FROM NOW are not being archived for later retrieval. ` +
+        (remedy ? `Likely cause: ${remedy} ` : '') +
+        `Try log10x_advise_retriever for setup guidance.`
+      );
+    }
+
+    // Backward / query-path failure: historical search is the affected capability.
     return (
-      `Long-term log search isn't working right now. ` +
-      `I ran an end-to-end check on the part of log10x that lets you look up historical events, ` +
-      `and the step "${r.first_failed_assert ?? '?'}" failed. ` +
+      `Long-term log search isn't working right now ` +
+      `(${passedCount} of ${totalCount} health checks passed; the failed one was "${failed}"). ` +
       `What this means: any log10x_retriever_query or log10x_retriever_series call will return empty until this is fixed. ` +
       (remedy ? `Likely cause: ${remedy} ` : '') +
       `Try log10x_advise_retriever for setup guidance.`
