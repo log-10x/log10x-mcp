@@ -59,6 +59,7 @@ import {
 import { fmtDisclosedDollar } from '../lib/format.js';
 import { DEFAULT_ANALYZER_COST_PER_GB, SIEM_DISPLAY_NAMES, type SiemId } from '../lib/siem/pricing.js';
 import { loadEnvironments, resolveEnv } from '../lib/environments.js';
+import { buildSourceDisclosureFromEnv } from '../lib/source-disclosure.js';
 import { getOffloadStatusBatch } from '../lib/offload-status.js';
 import {
   readHistorySince,
@@ -1919,6 +1920,23 @@ export async function executeCommitmentReport(
   const rateSourceMapped = agg.rate_source === 'customer_supplied' ? 'customer_supplied' as const
     : agg.rate_source === 'list_price' ? 'list_price' as const
     : 'none' as const;
+  // Build siem_vendor + source_label disambiguating WHICH instance of
+  // commitment.destination the report is for. The env-config doc resolved
+  // by configure_engine carries cluster.region + destination.ingest_url —
+  // surface them via the standard helper so a reader can tell "which
+  // Datadog org / which CloudWatch account" the delivered% applies to.
+  let envForLabel: import('../lib/environments.js').EnvConfig | undefined;
+  try {
+    const envs = await loadEnvironments();
+    envForLabel = resolveEnv(envs, args.environment);
+  } catch {
+    envForLabel = undefined;
+  }
+  const labelDisclosure = await buildSourceDisclosureFromEnv(
+    envForLabel,
+    commitment.destination,
+    { envIdOrNickname: commitment.env },
+  );
   return buildChassisEnvelope({
     tool: 'log10x_commitment_report',
     view: 'summary',
@@ -1932,6 +1950,7 @@ export async function executeCommitmentReport(
       bytes_source: 'tsdb',
       rate_source: rateSourceMapped,
       siem_vendor: commitment.destination,
+      ...(labelDisclosure.source_label ? { source_label: labelDisclosure.source_label } : {}),
     },
     scope: {
       window: `${period.days}d`,

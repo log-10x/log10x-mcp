@@ -28,6 +28,7 @@ import { parsePrometheusValue, COST_MODEL_BY_DESTINATION } from '../lib/cost.js'
 import type { SiemId } from '../lib/siem/pricing.js';
 import { type StructuredOutput } from '../lib/output-types.js';
 import { newChassisTelemetry, buildChassisEnvelope } from '../lib/chassis-envelope.js';
+import { buildSourceDisclosureFromEnv } from '../lib/source-disclosure.js';
 import { resolveSiemSelection } from '../lib/siem/resolve.js';
 import type { MustAskUser } from './log10x-start.js';
 
@@ -470,6 +471,11 @@ export async function executeExplainMode(args: {
         ...(routesTo.preview ? [{ tool: 'log10x_preview_filter', args: routesTo.preview.args, reason: 'Preview path — call after user picks Preview', role: 'alternative' as const }] : []),
       ];
 
+  // Build source_label from env hints + resolved cluster identity so the
+  // envelope disambiguates "which Datadog / which CloudWatch" the
+  // compatibility verdict applies to.
+  const envSourceDisclosure = await buildSourceDisclosureFromEnv(env, destination);
+
   return buildChassisEnvelope({
     tool: 'log10x_explain_mode',
     view: 'summary',
@@ -489,8 +495,8 @@ export async function executeExplainMode(args: {
     },
     source_disclosure: {
       bytes_source: bytesPerMonth !== null ? 'tsdb' : undefined,
-      siem_vendor: destination ?? undefined,
       rate_source: ratePerGb !== null ? 'list_price' : 'none',
+      ...envSourceDisclosure,
     },
     scope: {
       window: 'point_in_time',

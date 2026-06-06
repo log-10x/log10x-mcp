@@ -33,6 +33,7 @@ import { DevCliNotInstalledError } from '../lib/dev-cli.js';
 import { expandedByteLength } from '../lib/template-expander.js';
 import { type StructuredOutput } from '../lib/output-types.js';
 import { buildChassisEnvelope } from '../lib/chassis-envelope.js';
+import { buildSourceLabel } from '../lib/source-disclosure.js';
 
 // ── Schema ──
 
@@ -302,7 +303,19 @@ export async function executeMeasureCompaction(
       ],
       status: 'no_signal',
       decisions: { threshold_used: null, threshold_basis: 'default' },
-      source_disclosure: { siem_vendor: sel.id },
+      source_disclosure: {
+        siem_vendor: sel.id,
+        // sel.id is the bare vendor name (e.g. "datadog"); source_label
+        // appends the env nickname so reports across multiple Datadog
+        // orgs / CloudWatch accounts stay disambiguated. This tool reads
+        // SIEM directly (bytes_source: 'siem_direct' is on the main
+        // envelope below) so the label is the single highest-value
+        // identity surface in this envelope.
+        source_label: buildSourceLabel(sel.id, {
+          nickname: _env?.nickname,
+          endpoint: sel.displayName !== sel.id ? sel.displayName : undefined,
+        }),
+      },
       scope: { window: timeRange, window_basis: 'explicit' },
       payload: {
         service: args.service,
@@ -481,7 +494,19 @@ export async function executeMeasureCompaction(
     ],
     status: patterns.length > 0 ? 'success' : 'no_signal',
     decisions: { threshold_used: null, threshold_basis: 'default' },
-    source_disclosure: { siem_vendor: sel.id, bytes_source: 'siem_direct' },
+    source_disclosure: {
+      siem_vendor: sel.id,
+      bytes_source: 'siem_direct',
+      // bytes_source: 'siem_direct' means the numbers came from the customer's
+      // own stack — source_label tells the reader WHICH stack (which Datadog
+      // org / which CloudWatch account) the per-pattern ratios were measured
+      // against. Env nickname + the connector's display name are the cheapest
+      // disambiguators available without a probe call.
+      source_label: buildSourceLabel(sel.id, {
+        nickname: _env?.nickname,
+        endpoint: sel.displayName !== sel.id ? sel.displayName : undefined,
+      }),
+    },
     scope: {
       window: timeRange,
       window_basis: 'explicit',

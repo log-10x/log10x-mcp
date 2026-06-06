@@ -70,6 +70,7 @@ import {
   newChassisTelemetry,
   recordQuery,
 } from '../lib/chassis-envelope.js';
+import { buildSourceDisclosureFromEnv } from '../lib/source-disclosure.js';
 import { fmtDollar, fmtPct, fmtBytes } from '../lib/format.js';
 import {
   parseCapCsv,
@@ -673,6 +674,8 @@ export interface RunForecastArgs {
   default_action: Action;
   /** PromQL range expression for the observation window. Default 30d. */
   observation_window?: string;
+  /** Alias for `observation_window`. observation_window wins when both are set. */
+  timeRange?: string;
   /**
    * Maximum per_pattern rows to return. Default 50 when service is omitted;
    * unlimited when service is set. Totals computed over full result before slice.
@@ -740,7 +743,12 @@ export async function runEstimateForecast(
     }
   }
 
-  const observationWindow = args.observation_window ?? '30d';
+  // Honor `timeRange` as an alias for `observation_window` per the schema
+  // docstring (same precedence rule as the explicit-args path at line ~1706
+  // and as log10x_investigate's window/timeRange aliasing). Forecast mode
+  // had the alias declared but never read here — caller passing
+  // `{ timeRange: '1d' }` was silently overridden to '30d' (arc-v10 finding).
+  const observationWindow = args.observation_window ?? args.timeRange ?? '30d';
   const obsDays = parseWindowToDays(observationWindow);
 
   // Resolve the edge/cloud metrics env the same way top_patterns and
@@ -1514,6 +1522,31 @@ export async function executeEstimateSavings(
   const telemetry = newChassisTelemetry();
   const mode = args.mode ?? 'forecast';
 
+  // Helper: build a source_label from the EnvConfig nickname + cluster
+  // identity for whatever destination the call settled on. Called per
+  // emission site (forecast / verify / ambiguous / unsupported / no-op)
+  // because each site knows a different vendor string. Memoised within the
+  // call so the on-prem store resolution only runs once.
+  let cachedEnvLabel: Awaited<ReturnType<typeof buildSourceDisclosureFromEnv>> | undefined;
+  const labelForVendor = async (
+    vendor: string | undefined | null,
+  ): Promise<{ siem_vendor?: string; source_label?: string }> => {
+    if (!vendor) return {};
+    if (!cachedEnvLabel) {
+      cachedEnvLabel = await buildSourceDisclosureFromEnv(env, vendor);
+    }
+    // cachedEnvLabel was built against the first vendor the executor saw;
+    // when later sites pass a different vendor (e.g. the no-op refusal
+    // names a destination distinct from the eventually-chosen one) we
+    // honour the call-site's vendor but reuse the cached hints by
+    // overriding siem_vendor + recomputing source_label from the same
+    // bracketed suffix.
+    if (cachedEnvLabel.siem_vendor === vendor) return cachedEnvLabel;
+    const sl = cachedEnvLabel.source_label;
+    const suffix = sl && sl.includes(' [') ? sl.slice(sl.indexOf(' [')) : '';
+    return { siem_vendor: vendor, source_label: `${vendor}${suffix}` };
+  };
+
   // Destination is required in both modes. When not passed explicitly, attempt
   // auto-detection via the same resolveSiemSelection helper that pattern_mitigate
   // and cost_options use — so all three tools apply consistent detection logic.
@@ -1539,7 +1572,7 @@ export async function executeEstimateSavings(
           decisions: { threshold_used: null, threshold_basis: 'default' },
           // siem_vendor carries the detected (but unsupported) vendor name so
           // agents and log readers can see what was resolved.
-          source_disclosure: { bytes_source: 'tsdb', siem_vendor: resolvedId },
+          source_disclosure: { bytes_source: 'tsdb', ...(await labelForVendor(resolvedId)) },
           scope: { window: 'unknown', window_basis: 'auto_default' },
           payload: {
             ok: false,
@@ -1623,7 +1656,7 @@ export async function executeEstimateSavings(
           headline: 'estimate_savings needs target_percent or proposed_config — neither was passed.',
           status: 'error',
           decisions: { threshold_used: null, threshold_basis: 'default' },
-          source_disclosure: { bytes_source: 'tsdb', siem_vendor: destination },
+          source_disclosure: { bytes_source: 'tsdb', ...(await labelForVendor(destination)) },
           scope: { window: 'unknown', window_basis: 'auto_default' },
           payload: {
             ok: false,
@@ -1761,7 +1794,7 @@ export async function executeEstimateSavings(
         source_disclosure: {
           bytes_source: 'tsdb',
           rate_source: result.rate_source === 'customer_supplied' ? 'customer_supplied' : 'list_price',
-          siem_vendor: destination,
+          ...(await labelForVendor(destination)),
         },
         scope: {
           window: result.observation_window,
@@ -1796,7 +1829,7 @@ export async function executeEstimateSavings(
         headline: 'estimate_savings refused: verify needs baseline_window + post_window.',
         status: 'error',
         decisions: { threshold_used: null, threshold_basis: 'default' },
-        source_disclosure: { bytes_source: 'tsdb', siem_vendor: destination },
+        source_disclosure: { bytes_source: 'tsdb', ...(await labelForVendor(destination)) },
         scope: { window: 'unknown', window_basis: 'auto_default' },
         payload: {
           ok: false,
@@ -1846,7 +1879,7 @@ export async function executeEstimateSavings(
       source_disclosure: {
         bytes_source: 'tsdb',
         rate_source: verifyRateSource,
-        siem_vendor: destination,
+        ...(await labelForVendor(destination)),
       },
       scope: {
         window: result.post_window,
@@ -1866,7 +1899,7 @@ export async function executeEstimateSavings(
         headline: `estimate_savings refused: ${action} is a no-op on ${noOpDest}. Use tier_down, sample, or drop instead.`,
         status: 'error',
         decisions: { threshold_used: null, threshold_basis: 'default' },
-        source_disclosure: { bytes_source: 'tsdb', siem_vendor: noOpDest },
+        source_disclosure: { bytes_source: 'tsdb', ...(await labelForVendor(noOpDest)) },
         scope: { window: 'unknown', window_basis: 'auto_default' },
         payload: {
           ok: false,

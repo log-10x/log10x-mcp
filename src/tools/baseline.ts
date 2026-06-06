@@ -52,6 +52,7 @@ import {
   type StructuredOutput,
 } from '../lib/output-types.js';
 import { newChassisTelemetry, buildChassisEnvelope } from '../lib/chassis-envelope.js';
+import { buildSourceDisclosureFromEnv } from '../lib/source-disclosure.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { resolveSiemSelection } from '../lib/siem/resolve.js';
 
@@ -235,6 +236,11 @@ export async function executeBaseline(
     : result.rate_source === 'list_price' ? 'list_price' as const
     : 'none' as const;
 
+  // Build siem_vendor + source_label from the resolved env-config so a
+  // reader can tell WHICH instance of result.destination the baseline
+  // applies to (e.g. "datadog [prod-us | us-east-1]" vs the staging org).
+  const envDisclosure = await buildSourceDisclosureFromEnv(env, result.destination ?? undefined);
+
   return buildChassisEnvelope({
     tool: 'log10x_baseline',
     view: 'summary',
@@ -247,7 +253,7 @@ export async function executeBaseline(
     source_disclosure: {
       bytes_source: 'tsdb',
       rate_source: rateSourceMapped,
-      siem_vendor: result.destination ?? undefined,
+      ...envDisclosure,
     },
     scope: {
       window: horizon,

@@ -29,6 +29,7 @@ import {
   newChassisTelemetry,
   recordQuery,
 } from '../lib/chassis-envelope.js';
+import { buildSourceDisclosureFromEnv } from '../lib/source-disclosure.js';
 import type { CapabilitySummary, MustAskUser } from './log10x-start.js';
 import type { Action } from '../lib/cost.js';
 
@@ -522,6 +523,10 @@ export async function executeCostOptions(args: {
     ? `${applicableCount} of ${modes.length} modes available on ${siemDetected} (${tier} tier). Pick a mode.`
     : `${applicableCount} of ${modes.length} modes available (${tier} tier, no stack detected). Pick a mode.`;
 
+  // Build siem_vendor + source_label from the resolved env-config when
+  // available; falls back to siemDetected when the on-prem store is unreachable.
+  const sourceDisclosure = await buildSourceDisclosureFromEnv(env, siemDetected);
+
   return buildChassisEnvelope({
     tool: 'log10x_cost_options',
     view: 'summary',
@@ -531,9 +536,7 @@ export async function executeCostOptions(args: {
       threshold_used: null,
       threshold_basis: 'default',
     },
-    source_disclosure: {
-      siem_vendor: siemDetected ?? undefined,
-    },
+    source_disclosure: sourceDisclosure,
     scope: {
       window: 'n/a',
       window_basis: 'auto_default',
