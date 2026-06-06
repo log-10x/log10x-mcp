@@ -134,7 +134,7 @@ function buildHeadline(r: ProbeResult): string {
     // the forward-shipping signal fails.
     const remedy = r.surfaced_remedy ?? '';
     const failed = r.first_failed_assert ?? '?';
-    const passedCount = r.asserts.filter((a) => a.status === 'pass').length;
+    const passedCount = r.asserts.filter((a) => a.pass).length;
     const totalCount = r.asserts.length;
 
     // Forward-shipping failure: archive isn't getting new logs, but existing
