@@ -153,6 +153,15 @@ export interface EnvConfig {
    * generate a config.
    */
   analyzer?: string;
+  /**
+   * Customer-supplied analyzer $/GB rate. Rung 2 of the shared
+   * rate-resolution chain (see lib/rate-resolution.ts) — beats the
+   * destination list price and tags every cost-emitting tool's dollar
+   * surface as `rate_source='customer_supplied'`. Loadable from envs.json
+   * `analyzerCost` field; the env-var rung (`LOG10X_ANALYZER_COST`) is
+   * consulted directly by the resolver.
+   */
+  analyzerCost?: number;
 }
 
 /** Parsed environment list + default + mutable last-used slot. */
@@ -562,6 +571,11 @@ interface EnvsJsonEntry {
    * `EnvConfig.analyzer` for the full lookup-chain semantics.
    */
   analyzer?: string;
+  /**
+   * Customer-supplied analyzer $/GB rate — see `EnvConfig.analyzerCost`
+   * for the rate-resolution priority chain (rung 2).
+   */
+  analyzerCost?: number;
 }
 
 /**
@@ -627,6 +641,14 @@ async function tryReadEnvsJson(): Promise<EnvConfig[] | undefined> {
         : undefined;
       const forwarder = entry.forwarder ?? parseForwarderEnv(process.env.LOG10X_FORWARDER);
       const analyzer = entry.analyzer ?? parseAnalyzerEnv(process.env.LOG10X_ANALYZER);
+      // analyzerCost: envs.json field wins. The env-var rung
+      // (LOG10X_ANALYZER_COST) is consulted directly by the shared rate
+      // resolver in lib/rate-resolution.ts, so we don't fold it in here —
+      // that keeps per-env overrides possible in multi-env setups.
+      const analyzerCost =
+        typeof entry.analyzerCost === 'number' && Number.isFinite(entry.analyzerCost) && entry.analyzerCost > 0
+          ? entry.analyzerCost
+          : undefined;
       return {
         nickname: entry.nickname,
         metricsBackend: backend,
@@ -637,6 +659,7 @@ async function tryReadEnvsJson(): Promise<EnvConfig[] | undefined> {
         ...(gitops ? { gitops } : {}),
         ...(forwarder ? { forwarder } : {}),
         ...(analyzer ? { analyzer } : {}),
+        ...(analyzerCost !== undefined ? { analyzerCost } : {}),
       };
     } catch (e) {
       if (e instanceof MetricsBackendConfigError) {

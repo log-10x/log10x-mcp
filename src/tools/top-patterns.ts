@@ -15,6 +15,7 @@ import { queryInstant, queryRange } from '../lib/api.js';
 import * as pql from '../lib/promql.js';
 import { LABELS, includeToSelector, type FilterValue } from '../lib/promql.js';
 import { bytesToCost, parsePrometheusValue, buildDisclosedDollarValue, type DisclosedDollarValue } from '../lib/cost.js';
+import { resolveRate, destinationFromEnvAnalyzer } from '../lib/rate-resolution.js';
 import { resolveMetricsEnv, resolveMetricsEnvFiltered } from '../lib/resolve-env.js';
 import { parseTimeframe, fmtDisclosedDollar, fmtBytes as fmtBytesShared, fmtPct, fmtDollar } from '../lib/format.js';
 import { type NextAction } from '../lib/next-actions.js';
@@ -139,19 +140,20 @@ export async function executeTopPatterns(
   // top_patterns-vs-SRE contest: a 24h run reported "$5323/mo" that was ~24×
   // too high. windowHours from tf.days (fractional for sub-day windows).
   const windowHours = tf.days * 24;
-  // Rate resolution: customer-supplied > caller-supplied analyzerCost (treated
-  // as customer_supplied since it's an explicit arg) > profile list rate >
-  // unset. NEVER fall back to a fictitious $1/GB — when no rate is known,
-  // `costPerGb` is null and every dollar surface either nulls out or renders
-  // "—". Headline / PNG / per-row gating below all read `rate_source`.
-  const rate_source: 'list_price' | 'customer_supplied' | 'unset' =
-    args.effective_ingest_per_gb != null
-      ? 'customer_supplied'
-      : args.analyzerCost != null
-        ? 'customer_supplied'
-        : 'unset';
-  const costPerGb: number | null =
-    args.effective_ingest_per_gb ?? args.analyzerCost ?? null;
+  // SHARED rate resolver (lib/rate-resolution.ts). Priority chain (highest
+  // wins): caller arg → envs.json analyzerCost → LOG10X_ANALYZER_COST →
+  // destination list price → unset. NEVER falls back to a fictitious $1/GB —
+  // when no rate is known, costPerGb is null and every dollar surface either
+  // nulls out or renders "—". Headline / PNG / per-row gating below all
+  // read `rate_source`. services/event_lookup/explain_mode/estimate_savings
+  // walk the same chain — so the SAME env/window emits the SAME tag.
+  const rateResolved = resolveRate(
+    { effective_ingest_per_gb: args.effective_ingest_per_gb, analyzerCost: args.analyzerCost },
+    env,
+    destinationFromEnvAnalyzer(env),
+  );
+  const rate_source: 'list_price' | 'customer_supplied' | 'unset' = rateResolved.source;
+  const costPerGb: number | null = rateResolved.rate_per_gb;
 
   // PL-12a — resolve include mode and the `isDropped` selector once.
   // `kept` (default) uses an absence-tolerant `!=` selector so series

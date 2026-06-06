@@ -25,6 +25,7 @@ import { queryInstant } from '../lib/api.js';
 import { LABELS } from '../lib/promql.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { parsePrometheusValue, COST_MODEL_BY_DESTINATION } from '../lib/cost.js';
+import { resolveRate } from '../lib/rate-resolution.js';
 import type { SiemId } from '../lib/siem/pricing.js';
 import { type StructuredOutput } from '../lib/output-types.js';
 import { newChassisTelemetry, buildChassisEnvelope } from '../lib/chassis-envelope.js';
@@ -68,6 +69,14 @@ export const explainModeSchema = {
     .describe(
       'Auto-detected destination stack or forwarder. When omitted the tool infers from envs.json / env vars. ' +
       'Used to name the specific vendor in the explanation ("your Datadog workspace", "your Splunk index", etc.).'
+    ),
+  effective_ingest_per_gb: z
+    .number()
+    .optional()
+    .describe(
+      'Customer-supplied $/GB rate used for the dollar overlay. When set, ' +
+      "source_disclosure.rate_source='customer_supplied'. When absent, the shared rate resolver falls back to " +
+      'envs.json analyzerCost → LOG10X_ANALYZER_COST → destination list price → unset (no dollar overlay).'
     ),
 };
 
@@ -313,6 +322,7 @@ export async function executeExplainMode(args: {
   service: string;
   mode: ExplainMode;
   destination?: string;
+  effective_ingest_per_gb?: number;
 }): Promise<StructuredOutput> {
   const telemetry = newChassisTelemetry();
   const meta = MODE_METADATA[args.mode];
@@ -353,16 +363,27 @@ export async function executeExplainMode(args: {
     bytesPerMonth = await fetchServiceBytes(env, args.service);
   }
 
-  // Derive cost rate from COST_MODEL_BY_DESTINATION via the env's analyzer field.
-  // Falls back to null when analyzer is not set or not a recognized SiemId.
-  let ratePerGb: number | null = null;
+  // SHARED rate resolver (lib/rate-resolution.ts). Same priority chain as
+  // services / top_patterns / event_lookup / estimate_savings: caller arg →
+  // envs.json analyzerCost → LOG10X_ANALYZER_COST → destination list price →
+  // unset. Prior to this, explain_mode went straight to destination list
+  // (rung 4) and labeled it 'list_price' even when the other tools had
+  // already picked up a customer-supplied rate from the env — same env,
+  // same window, two tags. Chain walks B+C, 2026-06-06.
+  const rateResolved = resolveRate(
+    { effective_ingest_per_gb: args.effective_ingest_per_gb },
+    env,
+    destination,
+  );
+  // Validate destination is a known SIEM id for the unused-import shake — the
+  // typed lookup is no longer load-bearing for ratePerGb itself, but we keep
+  // the assertion so a typo in args.destination still surfaces.
   if (destination) {
-    const analyzerKey = destination.toLowerCase() as SiemId;
-    const model = COST_MODEL_BY_DESTINATION[analyzerKey];
-    if (model && Number.isFinite(model.ingest_per_gb) && model.ingest_per_gb > 0) {
-      ratePerGb = model.ingest_per_gb;
-    }
+    void (destination.toLowerCase() as SiemId);
+    void COST_MODEL_BY_DESTINATION;
   }
+  const ratePerGb: number | null = rateResolved.rate_per_gb;
+  const rateSourceTag: 'customer_supplied' | 'list_price' | 'unset' = rateResolved.source;
   let costPerMonth: number | null = null;
   if (bytesPerMonth !== null && ratePerGb !== null) {
     costPerMonth = (bytesPerMonth / (1024 ** 3)) * ratePerGb;
@@ -495,7 +516,15 @@ export async function executeExplainMode(args: {
     },
     source_disclosure: {
       bytes_source: bytesPerMonth !== null ? 'tsdb' : undefined,
-      rate_source: ratePerGb !== null ? 'list_price' : 'none',
+      // Routed through the shared rate resolver so explain_mode agrees with
+      // services / top_patterns / event_lookup / estimate_savings on the
+      // SAME tag for the same env/window. 'unset' collapses to undefined
+      // per the chassis schema (only customer_supplied / list_price emit).
+      rate_source: rateSourceTag === 'customer_supplied'
+        ? 'customer_supplied'
+        : rateSourceTag === 'list_price'
+          ? 'list_price'
+          : 'none',
       ...envSourceDisclosure,
     },
     scope: {

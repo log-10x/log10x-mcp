@@ -61,6 +61,7 @@ import {
   type Action,
 } from '../lib/cost.js';
 import type { SiemId } from '../lib/siem/pricing.js';
+import { resolveRate } from '../lib/rate-resolution.js';
 import {
   type StructuredOutput,
 } from '../lib/output-types.js';
@@ -1116,15 +1117,26 @@ export async function runEstimateForecast(
     per_service = [{ service: args.service, ...scopedTotals }];
   }
 
-  // Rate source resolution for the forecast result.
+  // SHARED rate resolver (lib/rate-resolution.ts). Same priority chain as
+  // services / top_patterns / event_lookup / explain_mode: caller arg →
+  // envs.json analyzerCost → LOG10X_ANALYZER_COST → destination list →
+  // unset. Prior to this, estimate_savings labeled the destination list
+  // price as 'list_price' even when the env carried a customer-supplied
+  // rate that the other tools surfaced as 'customer_supplied'. (chain
+  // walks B+C, 2026-06-06).
+  //
+  // forecast NEVER collapses to 'unset' because args.destination is required
+  // — rung 4 always returns the destination's list price as a safety net.
+  // The rung-2/3 env-supplied rate (envs.json analyzerCost or
+  // LOG10X_ANALYZER_COST) still wins when present.
+  const forecastRateResolved = resolveRate(
+    { effective_ingest_per_gb: args.effective_ingest_per_gb },
+    env,
+    args.destination,
+  );
   const forecast_rate_source: 'list_price' | 'customer_supplied' =
-    args.effective_ingest_per_gb !== undefined ? 'customer_supplied' : 'list_price';
-  const forecast_rate_disclosure: string | null =
-    forecast_rate_source === 'customer_supplied'
-      ? null
-      : `at ${args.destination} list price $${
-          getDestinationCostModel(args.destination, { esPruned: args.es_pruned }).ingest_per_gb.toFixed(2)
-        }/GB — your actual bill may differ depending on discounts, commits, or contract tier`;
+    forecastRateResolved.source === 'customer_supplied' ? 'customer_supplied' : 'list_price';
+  const forecast_rate_disclosure: string | null = forecastRateResolved.disclosure;
 
   const caveats: string[] = [];
   if (noOpCompactCount > 0) {
@@ -1378,11 +1390,20 @@ export async function runEstimateVerify(
     }
   }
 
-  // Dollars: deliver-side rate (passed bytes × $/GB).
-  const ingestRate =
-    args.effective_ingest_per_gb ??
-    getDestinationCostModel(args.destination, { esPruned: args.es_pruned })
-      .ingest_per_gb;
+  // Dollars: deliver-side rate (passed bytes × $/GB). Routed through the
+  // SHARED rate resolver (lib/rate-resolution.ts) so verify agrees with
+  // services / top_patterns / event_lookup / explain_mode on the SAME tag
+  // for the same env/window. Priority chain: caller arg → envs.json
+  // analyzerCost → LOG10X_ANALYZER_COST → destination list price → unset.
+  // verify NEVER lands on 'unset' because args.destination is required and
+  // rung 4 supplies the list price as a safety net.
+  const verifyRateResolved = resolveRate(
+    { effective_ingest_per_gb: args.effective_ingest_per_gb },
+    env,
+    args.destination,
+  );
+  const ingestRate = verifyRateResolved.rate_per_gb
+    ?? getDestinationCostModel(args.destination, { esPruned: args.es_pruned }).ingest_per_gb;
   const delivered_dollars_now = (postPassedBytes / GB) * ingestRate;
   const delivered_dollars_annual_projection = annualizeDollars(
     delivered_dollars_now,
@@ -1472,10 +1493,13 @@ export async function runEstimateVerify(
     }
   }
 
+  // SHARED rate resolver result drives the tag — agrees with the
+  // delivered_dollars_now computation above. Collapses to 'list_price'
+  // when neither caller arg, envs.json analyzerCost, nor
+  // LOG10X_ANALYZER_COST is set; verify never reports 'unset' because the
+  // destination list always provides a safety-net rate.
   const rate_source: 'list_price' | 'customer_supplied' =
-    args.effective_ingest_per_gb !== undefined
-      ? 'customer_supplied'
-      : 'list_price';
+    verifyRateResolved.source === 'customer_supplied' ? 'customer_supplied' : 'list_price';
 
   return {
     mode: 'verify',

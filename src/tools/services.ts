@@ -39,6 +39,7 @@ import * as pql from '../lib/promql.js';
 import { LABELS } from '../lib/promql.js';
 import { bytesToCost, bytesToGb, parsePrometheusValue } from '../lib/cost.js';
 import type { Action } from '../lib/cost.js';
+import { resolveRate, destinationFromEnvAnalyzer } from '../lib/rate-resolution.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { fmtDollar, fmtBytes, fmtPct, parseTimeframe, costPeriodLabel } from '../lib/format.js';
 import { shareBar } from '../lib/pattern-render.js';
@@ -79,7 +80,8 @@ interface ServiceRow extends ServiceActionAxis {
   rank: number;
   name: string;
   bytes: number;
-  cost: number;
+  /** Null when rate_source==='unset' (no $/GB rate configured). */
+  cost: number | null;
   pct: number;
   /**
    * Customer-supplied policy hint. `pass` when the service appears in
@@ -102,10 +104,16 @@ interface ServiceRow extends ServiceActionAxis {
 
 interface ServicesSummary {
   time_range: string;
-  cost_per_gb: number;
+  /** Null when rate_source==='unset'. */
+  cost_per_gb: number | null;
+  /** Provenance of cost_per_gb — set by the shared rate resolver. */
+  rate_source: 'customer_supplied' | 'list_price' | 'unset';
+  /** Plain-English caveat for cost_per_gb (null for customer_supplied). */
+  rate_disclosure: string | null;
   period: string;
   total_bytes: number;
-  total_cost: number;
+  /** Null when rate_source==='unset'. */
+  total_cost: number | null;
   service_count: number;
   top_n_share_pct: number;
   /**
@@ -120,7 +128,7 @@ interface ServicesSummary {
 }
 
 export async function executeServices(
-  args: { timeRange?: string; analyzerCost?: number; view?: 'summary'; exception_services?: string[] },
+  args: { timeRange?: string; analyzerCost?: number; effective_ingest_per_gb?: number; view?: 'summary'; exception_services?: string[] },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
   const telemetry = newChassisTelemetry();
@@ -151,8 +159,13 @@ export async function executeServices(
   const tailNote = tailCount > 0
     ? ` Top ${actionableCount} service${actionableCount !== 1 ? 's' : ''} account for ${Math.round(top5Share)}% of cost; ${tailCount} tail service${tailCount !== 1 ? 's' : ''} below signal floor.`
     : '';
+  // Headline collapses the dollar phrasing to volume-only when rate_source==='unset'
+  // (no fictitious $/GB lie). When the resolver gave us a rate, the dollar
+  // phrasing stays.
   const headline = top
-    ? `${d.service_count} services over ${d.time_range}: ${top.name} leads at ${fmtDollar(top.cost)}${d.period} (${Math.round(top.pct)}% of total ${fmtDollar(d.total_cost)}${d.period}).${tailNote}`
+    ? (d.rate_source === 'unset'
+      ? `${d.service_count} services over ${d.time_range}: ${top.name} leads at ${fmtBytes(top.bytes)} (${Math.round(top.pct)}% of total ${fmtBytes(d.total_bytes)}).${tailNote} (no $/GB rate configured — pass effective_ingest_per_gb to see dollars.)`
+      : `${d.service_count} services over ${d.time_range}: ${top.name} leads at ${fmtDollar(top.cost ?? 0)}${d.period} (${Math.round(top.pct)}% of total ${fmtDollar(d.total_cost ?? 0)}${d.period}).${tailNote}`)
     : `No services with data in ${d.time_range}.`;
   return buildChassisEnvelope({
     tool: 'log10x_services',
@@ -161,11 +174,19 @@ export async function executeServices(
     status: d.service_count > 0 ? 'success' : 'no_signal',
     decisions: {
       threshold_used: d.cost_per_gb,
-      threshold_basis: args.analyzerCost != null ? 'customer_supplied' : 'default',
+      threshold_basis: d.rate_source === 'customer_supplied' ? 'customer_supplied' : 'default',
     },
     source_disclosure: {
       bytes_source: 'tsdb',
-      rate_source: args.analyzerCost != null ? 'customer_supplied' : 'list_price',
+      // Routed through the shared rate resolver so services/top_patterns/
+      // event_lookup/explain_mode/estimate_savings agree on the SAME tag
+      // for the same env/window. 'unset' collapses to undefined here per
+      // the chassis schema (only customer_supplied/list_price are emitted).
+      rate_source: d.rate_source === 'customer_supplied'
+        ? 'customer_supplied'
+        : d.rate_source === 'list_price'
+          ? 'list_price'
+          : undefined,
       service_count_source: {
         kind: 'above_volume_floor',
         count: d.service_count,
@@ -189,7 +210,7 @@ export async function executeServices(
             { header: 'Service',       align: 'left',   get: (s) => s.name, max_width: 32 },
             { header: `Vol/${d.time_range}`, align: 'right', get: (s) => fmtBytes(s.bytes) },
             { header: '%',             align: 'right',  get: (s) => fmtPct(s.pct) },
-            { header: `$/${d.time_range}`,  align: 'right', get: (s) => fmtDollar(s.cost) },
+            { header: `$/${d.time_range}`,  align: 'right', get: (s) => s.cost == null ? '—' : fmtDollar(s.cost) },
             { header: 'Attribution',   align: 'left',   get: (s) => s.attribution },
           ],
           {
@@ -211,7 +232,7 @@ export async function executeServices(
 }
 
 async function executeServicesInner(
-  args: { timeRange?: string; analyzerCost?: number; view?: 'summary'; exception_services?: string[] },
+  args: { timeRange?: string; analyzerCost?: number; effective_ingest_per_gb?: number; view?: 'summary'; exception_services?: string[] },
   env: EnvConfig,
   sumOut?: { data?: ServicesSummary }
 ): Promise<string> {
@@ -219,7 +240,19 @@ async function executeServicesInner(
   // Normalise '1d' legacy alias → '24h' before query.
   const timeRange = normalizeTimeRange(args.timeRange ?? '7d');
   const tf = parseTimeframe(timeRange);
-  const costPerGb = args.analyzerCost ?? 1.0;
+  // SHARED rate resolver (lib/rate-resolution.ts) — every cost-emitting
+  // tool walks the SAME priority chain (caller arg → envs.json analyzerCost
+  // → LOG10X_ANALYZER_COST → destination list price → unset) so services,
+  // top_patterns, event_lookup, explain_mode, and estimate_savings tag the
+  // identical (env, window) rate with the SAME rate_source. Prior to this
+  // wiring, services fell back to a fictitious $1/GB AND mislabeled it
+  // 'list_price' when no arg was passed.
+  const rate = resolveRate(
+    { effective_ingest_per_gb: args.effective_ingest_per_gb, analyzerCost: args.analyzerCost },
+    env,
+    destinationFromEnvAnalyzer(env),
+  );
+  const costPerGb: number | null = rate.rate_per_gb;
   const period = costPeriodLabel(tf.days);
   const metricsEnv = await resolveMetricsEnv(env);
   const exceptionServices = (args.exception_services ?? []).filter(
@@ -371,7 +404,7 @@ async function executeServicesInner(
     }
   }
 
-  interface SvcRow { name: string; bytes: number; cost: number; pct: number; axis: ServiceActionAxis; attribution: ServiceRow['attribution']; current_mode?: Action }
+  interface SvcRow { name: string; bytes: number; cost: number | null; pct: number; axis: ServiceActionAxis; attribution: ServiceRow['attribution']; current_mode?: Action }
   const rows: SvcRow[] = [];
   let totalBytes = 0;
 
@@ -399,7 +432,9 @@ async function executeServicesInner(
         ? 'csv'
         : 'unattributed';
     const current_mode: Action | undefined = exceptionSet.has(name.toLowerCase()) ? 'pass' : undefined;
-    rows.push({ name, bytes, cost: bytesToCost(bytes, costPerGb), pct: 0, axis, attribution, current_mode });
+    // Cost collapses to null when the shared rate resolver returned 'unset'
+    // (no fictitious $1/GB fallback). Renderers + the envelope gate on this.
+    rows.push({ name, bytes, cost: costPerGb != null ? bytesToCost(bytes, costPerGb) : null, pct: 0, axis, attribution, current_mode });
   }
 
   // Calculate percentages
@@ -423,13 +458,18 @@ async function executeServicesInner(
     const vol = fmtBytes(r.bytes).padEnd(10);
     const pct = fmtPct(r.pct).padStart(5);
     const bar = shareBar(maxBytes > 0 ? r.bytes / maxBytes : 0, 16);
-    const cost = `${fmtDollar(r.cost)}${period}`;
+    const cost = r.cost == null ? '—' : `${fmtDollar(r.cost)}${period}`;
     lines.push(`  ${name} ${vol} ${pct}  ${bar}  ${cost}`);
   }
 
-  const totalCost = bytesToCost(totalBytes, costPerGb);
+  // Total cost collapses to null when the shared rate resolver returned 'unset'.
+  const totalCost: number | null = costPerGb != null ? bytesToCost(totalBytes, costPerGb) : null;
   lines.push('');
-  lines.push(`  ${rows.length} service${rows.length !== 1 ? 's' : ''} · ${fmtBytes(totalBytes)} total · ${fmtDollar(totalCost)}${period} at ${fmtDollar(costPerGb)}/GB`);
+  lines.push(
+    costPerGb != null
+      ? `  ${rows.length} service${rows.length !== 1 ? 's' : ''} · ${fmtBytes(totalBytes)} total · ${fmtDollar(totalCost ?? 0)}${period} at ${fmtDollar(costPerGb)}/GB`
+      : `  ${rows.length} service${rows.length !== 1 ? 's' : ''} · ${fmtBytes(totalBytes)} total · (no $/GB rate configured — pass effective_ingest_per_gb)`
+  );
 
   // Coverage line: how concentrated is the volume at the top? Tells the agent
   // whether a drill-down on the top few services captures the question or
@@ -486,6 +526,8 @@ async function executeServicesInner(
     sumOut.data = {
       time_range: tf.label,
       cost_per_gb: costPerGb,
+      rate_source: rate.source,
+      rate_disclosure: rate.disclosure,
       period,
       total_bytes: totalBytes,
       total_cost: totalCost,

@@ -11,6 +11,7 @@ import { queryInstant, queryAi } from '../lib/api.js';
 import * as pql from '../lib/promql.js';
 import { LABELS } from '../lib/promql.js';
 import { bytesToCost, parsePrometheusValue, buildDisclosedDollarValue, type DisclosedDollarValue } from '../lib/cost.js';
+import { resolveRate, destinationFromEnvAnalyzer } from '../lib/rate-resolution.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import {
   fmtDollar, fmtPattern, fmtSeverity, fmtCount, fmtBytes, fmtPct,
@@ -206,24 +207,20 @@ async function executeEventLookupInner(
   // Normalise '1d' legacy alias → '24h'.
   const timeRange = normalizeTimeRange(args.timeRange ?? '7d');
   const tf = parseTimeframe(timeRange);
-  // Rate resolution per spec § "no $1/GB lie": prefer customer override,
-  // fall back to deprecated alias (also customer-supplied since it's an
-  // explicit arg — analyzerCost is documented as a deprecated alias of
-  // effective_ingest_per_gb, so the provenance is the same), else null →
-  // rate_source='unset' so dollar fields collapse to null instead of
-  // silently quoting $1/GB.
-  // Must match top-patterns.ts rate resolution exactly — the two tools
-  // were diverging on the same env+hash+window, labeling the identical
-  // customer-supplied $/GB rate as 'list_price' here but 'customer_supplied'
-  // there. Math agreed; attribution didn't.
-  const rateSource: 'list_price' | 'customer_supplied' | 'unset' =
-    args.effective_ingest_per_gb != null
-      ? 'customer_supplied'
-      : args.analyzerCost != null
-        ? 'customer_supplied'
-        : 'unset';
-  const costPerGb: number | null =
-    args.effective_ingest_per_gb ?? args.analyzerCost ?? null;
+  // SHARED rate resolver (lib/rate-resolution.ts). Same priority chain as
+  // services/top_patterns/explain_mode/estimate_savings: caller arg →
+  // envs.json analyzerCost → LOG10X_ANALYZER_COST → destination list price
+  // → unset. Prior to this, event_lookup and top_patterns landed on
+  // different rate_source tags for the SAME env+hash+window (chain walks
+  // B + C, 2026-06-06): math agreed, attribution didn't. The shared
+  // resolver collapses that divergence.
+  const rateResolved = resolveRate(
+    { effective_ingest_per_gb: args.effective_ingest_per_gb, analyzerCost: args.analyzerCost },
+    env,
+    destinationFromEnvAnalyzer(env),
+  );
+  const rateSource: 'list_price' | 'customer_supplied' | 'unset' = rateResolved.source;
+  const costPerGb: number | null = rateResolved.rate_per_gb;
   const period = costPeriodLabel(tf.days);
   const metricsEnv = await resolveMetricsEnv(env);
 

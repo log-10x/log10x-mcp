@@ -298,6 +298,20 @@ export const configureEngineSchema = {
     .describe(
       'When `true`, behaves as if `auto_apply=false` regardless of other flags. Use for evaluation, audit, or in MCP contexts without an approval surface (cron, headless agents). Mirrors `github/github-mcp-server --read-only`.'
     ),
+  // ── view shape (arc-C defect 10 fix) ──
+  // The full envelope is ~84KB on a 119-pattern policy: pr_command (28.8KB
+  // multi-line gh script with the entire CSV inline), per_pattern_rows
+  // (27.3KB — 119 patterns × all numeric fields), csv_diff (5.3KB). The
+  // default summary view (~1-2KB) carries the action_mix, totals, the
+  // top-5 cost contributors, and a one-paragraph PR-command description.
+  // Callers that need the raw gh script or full per-pattern table pass
+  // `view='detail'`; `view='pr_command_only'` returns just the gh script.
+  view: z
+    .enum(['summary', 'detail', 'pr_command_only'])
+    .default('summary')
+    .describe(
+      'Response shape. `summary` (default) returns slim payload: phase, target_percent, action_mix counts, totals (bytes_in / bytes_saved / dollars_saved monthly), top_5_per_pattern, and a short PR-command prose summary. Target: under 8K tokens for a 119-pattern policy. `detail` returns the full envelope with pr_command, per_pattern_rows, and csv_diff included. `pr_command_only` returns ONLY the pr_command string for copy-paste callers.'
+    ),
 };
 
 const schemaObj = z.object(configureEngineSchema);
@@ -379,6 +393,34 @@ interface ConfigureEngineData {
   };
   next_actions?: Array<{ tool: string; args: unknown; why: string }>;
   error?: string;
+  /**
+   * Diagnostic record of how the caller's `action_defaults` mapped onto the
+   * actual tier distribution of the candidate patterns. Audit and error tiers
+   * carry hardcoded actions (`pass` and `sample(N=2)`), so a caller's
+   * `action_defaults.standard`/`debug`/`synthetic` only fires when at least
+   * one pattern is classified into that tier. When a requested default does
+   * not fire (e.g. caller asked for standard=`tier_down` but 0 patterns
+   * landed in the standard tier), the unused defaults are surfaced here so
+   * the agent can branch deterministically without parsing prose warnings.
+   */
+  action_default_resolution?: {
+    requested: {
+      standard: Action;
+      debug: Action;
+      synthetic: Action;
+    };
+    effective: {
+      standard: Action;
+      debug: Action;
+      synthetic: Action;
+    };
+    applied_count_by_tier: Record<Tier, number>;
+    unused_defaults: Array<{
+      tier: Tier;
+      requested: Action;
+      reason: string;
+    }>;
+  };
   /**
    * One-paragraph plain-prose distillation of the structured data.
    * Agents quote this directly; dollars omitted unless feasible derivation ran.
@@ -689,6 +731,17 @@ export async function executeConfigureEngine(
   // Run the greedy solver.
   const rows: PerPatternRow[] = [];
   const actionsUsed: Partial<Record<Action, number>> = {};
+  // Track per-tier classification counts so we can diagnose unused
+  // `action_defaults` after the loop (arc-C defect 9). A caller-supplied
+  // default that maps onto a tier with zero patterns silently no-ops
+  // unless we surface it.
+  const patternsByTier: Record<Tier, number> = {
+    audit: 0,
+    error: 0,
+    standard: 0,
+    debug: 0,
+    synthetic: 0,
+  };
   const targetShedBytes = Math.max(0, currentMonthlyBytes - targetMonthlyBytes);
   let remainingBytesToShed = targetShedBytes;
   let floorCount = 0;
@@ -697,6 +750,7 @@ export async function executeConfigureEngine(
   for (const c of candidates) {
     const monthlyBytes = c.bytes * scaleToMonth;
     coveredBytes += c.bytes;
+    patternsByTier[c.tier] += 1;
 
     // Resolve the action for this row.
     let action: Action;
@@ -786,6 +840,56 @@ export async function executeConfigureEngine(
       }
     }
   }
+
+  // ── action_defaults resolution diagnostic (arc-C defect 9) ──
+  // Build a structured record of which caller-requested defaults actually
+  // fired vs were swallowed because no pattern landed in that tier. Audit
+  // and error tiers carry hardcoded actions; only standard/debug/synthetic
+  // are caller-configurable, so those are the only tiers we surface as
+  // potentially-unused. We also push a human-readable warning per unused
+  // default so prose-only consumers see it too.
+  const totalPatternsClassified =
+    patternsByTier.audit +
+    patternsByTier.error +
+    patternsByTier.standard +
+    patternsByTier.debug +
+    patternsByTier.synthetic;
+  const classificationSummary =
+    `audit=${patternsByTier.audit}, error=${patternsByTier.error}, ` +
+    `standard=${patternsByTier.standard}, debug=${patternsByTier.debug}, ` +
+    `synthetic=${patternsByTier.synthetic}`;
+  const unusedDefaults: Array<{ tier: Tier; requested: Action; reason: string }> = [];
+  const configurableTiers: Array<{ tier: Tier; requested: Action; effective: Action }> = [
+    { tier: 'standard', requested: standardAction, effective: effectiveStandardAction },
+    { tier: 'debug', requested: debugAction, effective: debugAction },
+    { tier: 'synthetic', requested: syntheticAction, effective: syntheticAction },
+  ];
+  for (const { tier, requested } of configurableTiers) {
+    if (patternsByTier[tier] === 0) {
+      const reason =
+        `0 of ${totalPatternsClassified} patterns classified as ${tier}-tier; ` +
+        `your ${tier}='${requested}' default did not apply. ` +
+        `Patterns classified: ${classificationSummary}.`;
+      unusedDefaults.push({ tier, requested, reason });
+      warnings.push(
+        `action_defaults.${tier}='${requested}' did not fire: ${reason}`
+      );
+    }
+  }
+  const actionDefaultResolution: ConfigureEngineData['action_default_resolution'] = {
+    requested: {
+      standard: standardAction,
+      debug: debugAction,
+      synthetic: syntheticAction,
+    },
+    effective: {
+      standard: effectiveStandardAction,
+      debug: debugAction,
+      synthetic: syntheticAction,
+    },
+    applied_count_by_tier: patternsByTier,
+    unused_defaults: unusedDefaults,
+  };
 
   const coveragePct = totalObservedBytes > 0
     ? coveredBytes / totalObservedBytes
@@ -907,6 +1011,7 @@ export async function executeConfigureEngine(
     csv_diff: csvDiff,
     pr_command: prCommand,
     applied,
+    action_default_resolution: actionDefaultResolution,
     refresh: refreshState
       ? {
           skipped: false,
@@ -948,6 +1053,50 @@ export async function executeConfigureEngine(
   const configHeadline = feasible
     ? `${targetPercent.toFixed(1)}% reduction policy derived for ${args.service} (${rows.length} patterns, ${args.containers.length} container${args.containers.length === 1 ? '' : 's'}).`
     : `Cannot hit ${targetPercent.toFixed(1)}% target on ${args.service} without violating floors.`;
+
+  // ── View projection (arc-C defect 10) ─────────────────────────────
+  // Default `view='summary'` strips the three big payload offenders
+  // (pr_command ~28.8KB, per_pattern_rows ~27.3KB, csv_diff ~5.3KB) and
+  // emits the slim shape: action_mix counts + totals + top-5 cost
+  // contributors + PR-command prose. `view='detail'` keeps the full
+  // envelope. `view='pr_command_only'` returns just the gh script for
+  // copy-paste callers that don't render markdown. action_default_
+  // resolution stays in the summary view — it's a small structured
+  // field that helps the agent branch deterministically.
+  const view = args.view ?? 'summary';
+  const viewWarnings: string[] = [...warnings];
+  let payload: unknown;
+
+  if (view === 'pr_command_only') {
+    payload = { pr_command: prCommand };
+  } else if (view === 'detail') {
+    payload = data;
+  } else {
+    payload = buildSummaryPayload({
+      data,
+      rows,
+      prCommand,
+      target: target.resolved,
+      args,
+      currentMonthlyBytes,
+      targetMonthlyBytes,
+      currentMonthlyUsd,
+      model,
+      csvDiff,
+    });
+  }
+
+  // Token-budget warning. Estimate bytes/4 ≈ tokens; warn the agent if
+  // even the slim summary blew the 8K target so it can decide whether
+  // to narrow scope (smaller containers list, lower target_percent).
+  const estimatedTokens = Math.ceil(JSON.stringify(payload).length / 4);
+  if (view === 'summary' && estimatedTokens > 8000) {
+    viewWarnings.push(
+      `response payload ~${estimatedTokens} tokens, exceeds the 8K target for view='summary'. ` +
+        "Try a tighter containers scope or call view='pr_command_only' for just the gh script.",
+    );
+  }
+
   return buildChassisEnvelope({
     tool: 'log10x_configure_engine',
     view: 'summary',
@@ -972,11 +1121,149 @@ export async function executeConfigureEngine(
       candidates_count: rows.length,
       candidates_usable: rows.length,
     },
-    payload: data,
+    payload,
     human_summary: data.human_summary ?? configHeadline,
     actions: toEnvelopeActions(nextActions),
-    warnings,
+    warnings: viewWarnings,
   });
+}
+
+/**
+ * Build the slim default-view payload. Drops the three dominant token
+ * offenders (pr_command, per_pattern_rows, csv_diff — all behind
+ * `view='detail'`) and emits a compact summary: action_mix counts,
+ * totals (bytes_in / bytes_saved / dollars_saved), top-5 cost
+ * contributors, and a PR-command prose summary that names the repo +
+ * branch + addition/change counts without inlining the gh script.
+ */
+function buildSummaryPayload(params: {
+  data: ConfigureEngineData;
+  rows: PerPatternRow[];
+  prCommand: string | null;
+  target: ResolvedTarget;
+  args: ConfigureEngineArgs;
+  currentMonthlyBytes: number;
+  targetMonthlyBytes: number;
+  currentMonthlyUsd: number;
+  model: ReturnType<typeof getDestinationCostModel>;
+  csvDiff: string;
+}): Record<string, unknown> {
+  const { data, rows, prCommand, target, args, currentMonthlyBytes, targetMonthlyBytes, currentMonthlyUsd, model, csvDiff } = params;
+
+  // Action mix: count of patterns per action.
+  const actionMix: Partial<Record<Action, number>> = {};
+  for (const r of rows) {
+    actionMix[r.action] = (actionMix[r.action] ?? 0) + 1;
+  }
+
+  // Totals. bytes_saved = current - target (the budget the solver shed).
+  const bytesSavedMonthly = Math.max(0, currentMonthlyBytes - targetMonthlyBytes);
+  const targetMonthlyUsd =
+    (targetMonthlyBytes / GB) * (model.ingest_per_gb + model.storage_per_gb_month);
+  const dollarsSavedMonthly = Math.max(0, currentMonthlyUsd - targetMonthlyUsd);
+
+  // Top-5 cost contributors (DESC by current_bytes_30d). Descriptor
+  // truncated to 60 chars per spec — uses the row's `reason` field as
+  // the most-informative short label (e.g. "tier=standard",
+  // "tier=debug", "signal_floor: dashboard:payments-overview").
+  const top5 = [...rows]
+    .sort((a, b) => b.current_bytes_30d - a.current_bytes_30d)
+    .slice(0, 5)
+    .map((r) => ({
+      pattern_hash: r.pattern_hash,
+      descriptor: truncate(r.floor_reason ?? r.reason, 60),
+      action: r.action,
+      bytes_share_pct: currentMonthlyBytes > 0
+        ? roundOne((r.current_bytes_30d / currentMonthlyBytes) * 100)
+        : 0,
+    }));
+
+  // PR-command prose summary. Names the repo + branch + addition /
+  // change counts so the agent can describe what would happen without
+  // copy-pasting the 28.8KB gh script. `+ N` lines come from the
+  // unified diff (lines starting with `+` that aren't the header).
+  let prCommandSummary: string;
+  if (!prCommand) {
+    prCommandSummary = data.checks?.feasible === false
+      ? 'Plan is infeasible at the requested target; no PR command rendered. See checks.infeasible_reason.'
+      : 'Target already met by current config; no PR command rendered (zero-change PR).';
+  } else {
+    const additions = csvDiff
+      .split('\n')
+      .filter((l) => l.startsWith('+') && !l.startsWith('+++')).length;
+    const removals = csvDiff
+      .split('\n')
+      .filter((l) => l.startsWith('-') && !l.startsWith('---')).length;
+    const changeNote = removals > 0 ? `${additions} additions and ${removals} changes` : `${additions} additions`;
+    prCommandSummary =
+      `Opens a PR against ${target.gitops_repo} on branch ${target.gitops_branch} modifying ` +
+      `${target.lookup_path} with ${changeNote}.` +
+      (data.applied?.ok && data.applied.pr_url
+        ? ` PR already auto-applied: ${data.applied.pr_url}.`
+        : '');
+  }
+
+  // Strip the proposed_config row dump out of next_actions for the slim
+  // view (119 patterns × {pattern_hash, action, cap_bytes_per_window} =
+  // ~9.5KB of args). Replace it with a hint that the agent can re-run
+  // configure_engine view='detail' to recover the verbatim proposed_config
+  // for estimate_savings. Other next_actions (no proposed_config) pass
+  // through unchanged.
+  const slimNextActions = (data.next_actions ?? []).map((na) => {
+    if (
+      na.tool === 'log10x_estimate_savings' &&
+      typeof na.args === 'object' &&
+      na.args !== null &&
+      'proposed_config' in (na.args as Record<string, unknown>)
+    ) {
+      const { proposed_config: _omit, ...rest } = na.args as Record<string, unknown>;
+      void _omit;
+      return {
+        ...na,
+        args: {
+          ...rest,
+          proposed_config_hint: `Re-call log10x_configure_engine with view='detail' to recover the ${rows.length}-row proposed_config for estimate_savings.`,
+        },
+      };
+    }
+    return na;
+  });
+
+  return {
+    ok: data.ok,
+    phase: data.phase,
+    target_percent: data.target_percent,
+    destination: data.destination,
+    containers: data.containers,
+    service: data.service,
+    action_mix: actionMix,
+    totals: {
+      bytes_in_monthly: Math.round(currentMonthlyBytes),
+      bytes_saved_monthly: Math.round(bytesSavedMonthly),
+      dollars_saved_monthly: roundCents(dollarsSavedMonthly),
+    },
+    top_5_per_pattern: top5,
+    pr_command_summary: prCommandSummary,
+    derivation: data.derivation,
+    checks: data.checks,
+    applied: data.applied,
+    action_default_resolution: data.action_default_resolution,
+    refresh: data.refresh,
+    next_actions: slimNextActions,
+    human_summary: data.human_summary,
+    details_available: {
+      pr_command_via: "arg view='detail' (or view='pr_command_only' for just the gh script)",
+      per_pattern_rows_via: "arg view='detail'",
+      csv_diff_via: "arg view='detail'",
+      pattern_count: rows.length,
+    },
+  };
+}
+
+/** Truncate a string to maxLen chars; appends "..." when cut. */
+function truncate(s: string, maxLen: number): string {
+  if (s.length <= maxLen) return s;
+  return s.slice(0, maxLen - 3) + '...';
 }
 
 // ─── from_poc_id consumer path ────────────────────────────────────────
@@ -1091,6 +1378,58 @@ async function tryConsumePocSnapshot(
       : `POC snapshot \`${args.from_poc_id}\` reported feasibility short of target; PR rendered but not applied. Lower target or widen exceptions, then re-run the POC.`,
   };
 
+  // ── View projection (arc-C defect 10) ───────────────────────────
+  // POC consumer path emits csv_diff + pr_command (the two biggest
+  // POC-side offenders). Apply the same summary-first projection so
+  // the response stays under 8K tokens by default. POC path has no
+  // per_pattern_rows of its own, so top_5_per_pattern is sourced from
+  // the POC's cap_csv rows; we leave that to view='detail' to avoid a
+  // second cap_csv parse here.
+  const pocView = args.view ?? 'summary';
+  const pocWarnings: string[] = [...warnings];
+  let pocPayload: unknown;
+  if (pocView === 'pr_command_only') {
+    pocPayload = { pr_command: prCommand };
+  } else if (pocView === 'detail') {
+    pocPayload = data;
+  } else {
+    const additions = diff
+      .split('\n')
+      .filter((l) => l.startsWith('+') && !l.startsWith('+++')).length;
+    const removals = diff
+      .split('\n')
+      .filter((l) => l.startsWith('-') && !l.startsWith('---')).length;
+    const changeNote = removals > 0 ? `${additions} additions and ${removals} changes` : `${additions} additions`;
+    const prCommandSummary = prCommand
+      ? `Opens a PR against ${resolved.gitops_repo} on branch ${resolved.gitops_branch} modifying ${resolved.lookup_path} with ${changeNote}.` +
+        (data.applied?.ok && data.applied.pr_url ? ` PR already auto-applied: ${data.applied.pr_url}.` : '')
+      : 'POC snapshot reported feasibility short of target; no PR command rendered.';
+    pocPayload = {
+      ok: data.ok,
+      phase: data.phase,
+      target_percent: data.target_percent,
+      destination: data.destination,
+      containers: data.containers,
+      service: data.service,
+      pr_command_summary: prCommandSummary,
+      applied: data.applied,
+      checks: data.checks,
+      next_actions: data.next_actions,
+      human_summary: data.human_summary,
+      source: 'poc_snapshot',
+      details_available: {
+        pr_command_via: "arg view='detail' (or view='pr_command_only' for just the gh script)",
+        csv_diff_via: "arg view='detail'",
+      },
+    };
+  }
+  const pocEstTokens = Math.ceil(JSON.stringify(pocPayload).length / 4);
+  if (pocView === 'summary' && pocEstTokens > 8000) {
+    pocWarnings.push(
+      `response payload ~${pocEstTokens} tokens, exceeds the 8K target for view='summary'.`,
+    );
+  }
+
   return buildChassisEnvelope({
     tool: 'log10x_configure_engine',
     view: 'summary',
@@ -1102,10 +1441,10 @@ async function tryConsumePocSnapshot(
     },
     source_disclosure: { bytes_source: 'engine_aggregated_csv', siem_vendor: resolved.destination },
     scope: { window: 'poc_snapshot', window_basis: 'auto_default' },
-    payload: data,
+    payload: pocPayload,
     human_summary: data.human_summary ?? headline,
     actions: toEnvelopeActions(data.next_actions ?? []),
-    warnings,
+    warnings: pocWarnings,
   });
 }
 
