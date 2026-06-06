@@ -699,10 +699,19 @@ export class Log10xBackend implements CustomerMetricsBackend {
   readonly backendType = 'log10x';
   readonly endpoint: string;
   private authHeader: string;
+  /**
+   * Per-backend Prom query timeout. Scoped to this shared backend (where the
+   * latency symptom lives) so AMP/Grafana-Cloud/GCP timeouts stay at the
+   * global 30s default. Override via `LOG10X_PROM_TIMEOUT_MS` — typical
+   * cold-cache reads on prometheus.log10x.com can take 40-60s when the
+   * inner increase() scan is large (deep histories, broad container regex).
+   */
+  private timeoutMs: number;
 
   constructor(config: { endpoint: string; apiKey: string; envId: string }) {
     this.endpoint = config.endpoint.replace(/\/+$/, '');
     this.authHeader = `${config.apiKey}/${config.envId}`;
+    this.timeoutMs = parseInt(process.env.LOG10X_PROM_TIMEOUT_MS || '60000', 10) || 60000;
   }
 
   async queryInstant(promql: string): Promise<PrometheusResponse> {
@@ -750,7 +759,7 @@ export class Log10xBackend implements CustomerMetricsBackend {
     return backendJsonFetch<T>(
       url,
       { method: 'GET', headers: { 'X-10X-Auth': this.authHeader } },
-      { kindLabel: 'log10x' }
+      { kindLabel: 'log10x', timeoutMs: this.timeoutMs }
     );
   }
 }

@@ -55,6 +55,7 @@ import {
   type CustomerMetricsBackend,
 } from '../lib/customer-metrics.js';
 import { loadEnvironments } from '../lib/environments.js';
+import { LABELS } from '../lib/promql.js';
 import type { PrometheusResponse } from '../lib/api.js';
 import {
   type StructuredOutput,
@@ -572,7 +573,8 @@ export async function executeConfigureEngine(
   const perPattern = await fetchPerPatternBytes(
     backend,
     args.containers,
-    observationDays
+    observationDays,
+    target.resolved.envId
   );
 
   // Monthly projection from observation window.
@@ -1178,6 +1180,13 @@ interface ResolvedTarget {
   lookup_path: string;
   gitops_branch: string;
   destination: SiemId;
+  /**
+   * Active env id resolved from envs.json / env vars (LOG10X_ENV_ID). Used
+   * to anchor Prometheus selectors with `tenx_env="<envId>"` so per-pattern
+   * scans don't fan out across every tenant on the shared prom backend.
+   * Undefined for single-tenant prom backends (back-compat fallback).
+   */
+  envId?: string;
 }
 
 async function resolveTarget(
@@ -1186,24 +1195,33 @@ async function resolveTarget(
   let repo: string | undefined = args.gitops_repo;
   let lookupPath: string | undefined = args.lookup_path;
   let destination: SiemId | undefined = args.destination;
+  let envId: string | undefined;
 
-  // 1. Active env from envs.json.
-  if (!repo || !destination) {
-    try {
-      const envs = await loadEnvironments();
-      const active = (envs as any)?.activeEnv;
-      if (!repo && active?.gitops?.repo) {
-        repo = active.gitops.repo;
-      }
-      if (!lookupPath && active?.gitops?.lookupPath) {
-        lookupPath = active.gitops.lookupPath;
-      }
-      if (!destination && active?.destination) {
-        destination = active.destination as SiemId;
-      }
-    } catch {
-      // non-fatal — fall through to snapshot / explicit args
+  // 1. Active env from envs.json. Surface the env id alongside gitops/destination
+  //    so Prometheus selectors downstream can anchor with `tenx_env="<envId>"`
+  //    on shared backends (prometheus.log10x.com). Without this anchor the
+  //    per-pattern bytes scan fans out across every tenant whose containers
+  //    share the supplied name, which can push past the 30s backend timeout.
+  try {
+    const envs = await loadEnvironments();
+    const active = (envs as any)?.activeEnv;
+    if (!repo && active?.gitops?.repo) {
+      repo = active.gitops.repo;
     }
+    if (!lookupPath && active?.gitops?.lookupPath) {
+      lookupPath = active.gitops.lookupPath;
+    }
+    if (!destination && active?.destination) {
+      destination = active.destination as SiemId;
+    }
+    if (typeof active?.envId === 'string' && active.envId) {
+      envId = active.envId;
+    }
+  } catch {
+    // non-fatal — fall through to snapshot / explicit args / env var
+  }
+  if (!envId && typeof process.env.LOG10X_ENV_ID === 'string' && process.env.LOG10X_ENV_ID) {
+    envId = process.env.LOG10X_ENV_ID;
   }
 
   // 2. Snapshot fallback.
@@ -1258,6 +1276,7 @@ async function resolveTarget(
       lookup_path: lookupPath ?? args.lookup_path ?? DEFAULT_LOOKUP_PATH,
       gitops_branch: args.gitops_branch ?? 'main',
       destination,
+      envId,
     },
   };
 }
@@ -1280,10 +1299,27 @@ const PER_PATTERN_TOPK = parseInt(process.env.LOG10X_CONFIGURE_ENGINE_TOPK || '5
 async function fetchPerPatternBytes(
   backend: CustomerMetricsBackend,
   containers: string[],
-  observationDays: number
+  observationDays: number,
+  envId: string | undefined
 ): Promise<PerPattern[]> {
   const containerRegex = containers.map(promEscape).join('|');
-  const filter = `k8s_container=~"${containerRegex}"`;
+  // Anchor with `tenx_env="<envId>"` so Prometheus scans only the active
+  // tenant's series. On shared backends (prometheus.log10x.com) skipping
+  // this clause means the inner `sum by (...) (increase(...))` materializes
+  // every tenant whose containers happen to share the supplied name; the
+  // outer topk(500) can't slice until that inner result is fully built,
+  // which is what pushes per-attempt fetches past the 30s ceiling. Other
+  // tools (investigate, pattern-examples, doctor) all anchor on LABELS.env;
+  // this matches that canonical pattern.
+  if (!envId) {
+    console.warn(
+      '[configure_engine] No envId resolved (envs.json `activeEnv.envId` / LOG10X_ENV_ID); ' +
+      'per-pattern bytes query will scan all tenants on shared Prom backends — ' +
+      'consider setting LOG10X_ENV_ID or running log10x_discover_env first.'
+    );
+  }
+  const envClause = envId ? `${LABELS.env}="${promEscape(envId)}",` : '';
+  const filter = `${envClause}k8s_container=~"${containerRegex}"`;
   const window = `${observationDays}d`;
 
   // Pattern bytes (grouped by tenx_hash + severity_level to drive tier
@@ -1296,9 +1332,11 @@ async function fetchPerPatternBytes(
   // engine stops materializing series past rank N. For the greedy solver
   // this is loss-free at the budget level because the cut-off patterns
   // contribute negligibly to total bytes and are absorbed by the
-  // container-default cap row in the rendered CSV.
-  const bytesQ = `topk(${PER_PATTERN_TOPK}, sum by (tenx_hash, severity_level)(increase(all_events_summaryBytes_total{${filter}}[${window}])))`;
-  const eventsQ = `topk(${PER_PATTERN_TOPK}, sum by (tenx_hash)(increase(all_events_summaryVolume_total{${filter}}[${window}])))`;
+  // container-default cap row in the rendered CSV. Note topk is an OUTER
+  // operator — Prom must fully evaluate the inner increase() before
+  // slicing — so the tenx_env anchor above is the real cardinality cut.
+  const bytesQ = `topk(${PER_PATTERN_TOPK}, sum by (${LABELS.hash}, ${LABELS.severity})(increase(all_events_summaryBytes_total{${filter}}[${window}])))`;
+  const eventsQ = `topk(${PER_PATTERN_TOPK}, sum by (${LABELS.hash})(increase(all_events_summaryVolume_total{${filter}}[${window}])))`;
 
   const [bytesRes, eventsRes] = await Promise.all([
     backend.queryInstant(bytesQ) as Promise<PrometheusResponse>,
@@ -1307,17 +1345,17 @@ async function fetchPerPatternBytes(
 
   const eventsByHash = new Map<string, number>();
   for (const r of eventsRes.data.result) {
-    const h = r.metric.tenx_hash;
+    const h = r.metric[LABELS.hash];
     if (!h) continue;
     eventsByHash.set(h, parseFloat(r.value?.[1] ?? '0'));
   }
 
   const byHash = new Map<string, PerPattern>();
   for (const r of bytesRes.data.result) {
-    const h = r.metric.tenx_hash;
+    const h = r.metric[LABELS.hash];
     if (!h) continue;
     const bytes = parseFloat(r.value?.[1] ?? '0');
-    const severity = r.metric.severity_level ?? '';
+    const severity = r.metric[LABELS.severity] ?? '';
     const existing = byHash.get(h);
     if (existing) {
       existing.bytes += bytes;
