@@ -270,6 +270,17 @@ export const SourceDisclosureSchema = z.object({
    */
   siem_vendor: z.string().optional(),
   /**
+   * Human-readable label disambiguating WHICH instance of `siem_vendor`
+   * the tool spoke to / surfaced numbers from. The vendor name alone is
+   * ambiguous when a customer has multiple Datadog orgs / multiple
+   * CloudWatch accounts / multiple Splunk indexes; `source_label` carries
+   * the env nickname + region/account/endpoint hints so an agent or
+   * reader can tell "which Datadog" / "which CloudWatch log group" the
+   * envelope is talking about. Built via `buildSourceLabel()` in
+   * lib/source-disclosure.ts to keep the format consistent.
+   */
+  source_label: z.string().optional(),
+  /**
    * How the Retriever URL + bucket was resolved. Populated by tools that
    * consume the Retriever (retriever_query, retriever_series, backfill_metric,
    * overflow_contents) so an agent can tell whether the resolution came from
@@ -454,6 +465,13 @@ export interface ChassisEnvelope extends StructuredOutput {
    * harnesses that scan the outer envelope without deserializing `data`.
    */
   performance: Performance;
+  /**
+   * Top-level call status — mirror of `data.status`. Lifted to the
+   * envelope so agents and harnesses can branch on call outcome without
+   * descending into `data`. `data.status` is kept in place for
+   * back-compat with existing readers (toLegacyShape still works).
+   */
+  status: ChassisStatus;
   /** Typed override — data is always a ChassisData on these envelopes. */
   data: ChassisData;
 }
@@ -707,6 +725,10 @@ export function buildChassisEnvelope(input: ChassisEnvelopeInput): ChassisEnvelo
     ...outer,
     invocation_id: randomUUID(),
     performance,
+    // Mirror status at the envelope top so agents can branch on call
+    // outcome without descending into data. data.status is preserved
+    // for back-compat (toLegacyShape and existing readers).
+    status: validatedData.status,
     // Override data with the fully-typed validated block.
     data: validatedData,
   };
@@ -874,6 +896,11 @@ export function isChassisEnvelope(x: unknown): x is ChassisEnvelope {
 export const ChassisEnvelopeExtensionSchema = z.object({
   invocation_id: z.string().uuid(),
   performance: PerformanceSchema,
+  /**
+   * Top-level mirror of data.status. Lets agents branch on call
+   * outcome without descending into data. Same enum as ChassisData.status.
+   */
+  status: ChassisStatusSchema,
   data: ChassisDataSchema,
 });
 export type ChassisEnvelopeExtension = z.infer<typeof ChassisEnvelopeExtensionSchema>;

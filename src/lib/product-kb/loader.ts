@@ -50,6 +50,13 @@ interface Frontmatter {
  * Recursively walks `dir` and returns absolute paths for every .md
  * file underneath, excluding `_includes`, `assets`, and other mkdocs
  * machinery directories that shouldn't be searched as content.
+ *
+ * Also skips nested `docs` / `site` subdirectories. These show up only
+ * when a build copy step accidentally nests the docs root inside itself
+ * (e.g. `cp -r config/mksite/docs build/product-kb/docs` ran twice,
+ * producing `build/product-kb/docs/docs/`). Re-walking that nested copy
+ * produces duplicate Page entries with `docs/` -prefixed topics that
+ * compete with the canonical ones in the same corpus.
  */
 function walkMarkdown(dir: string): string[] {
   const out: string[] = [];
@@ -62,6 +69,8 @@ function walkMarkdown(dir: string): string[] {
   for (const name of entries) {
     if (name.startsWith('_')) continue; // _includes, _internal
     if (name === 'assets' || name === 'javascripts' || name === 'stylesheets') continue;
+    // Defence-in-depth against the nested-docs build-copy bug.
+    if (name === 'docs' || name === 'site') continue;
     const full = join(dir, name);
     let st;
     try {
@@ -191,13 +200,23 @@ export function loadCorpus(opts: LoadCorpusOptions): Page[] {
     ...walkMarkdown(opts.docsRoot),
     ...(opts.extraIncludes ?? []),
   ];
-  const seen = new Set<string>();
+  const seenFiles = new Set<string>();
+  const seenTopics = new Set<string>();
   const pages: Page[] = [];
   for (const file of files) {
-    if (seen.has(file)) continue;
-    seen.add(file);
+    if (seenFiles.has(file)) continue;
+    seenFiles.add(file);
     const page = loadPage(file, opts.docsRoot);
-    if (page) pages.push(page);
+    if (!page) continue;
+    // Belt-and-suspenders: even with walkMarkdown skipping nested
+    // `docs`/`site` directories, the same topic can arrive twice if
+    // `extraIncludes` overlaps with the walked tree, or if a symlink
+    // produces two distinct absolute paths pointing at the same content.
+    // The first occurrence wins; subsequent duplicates are dropped so
+    // search never has to disambiguate between two identical topics.
+    if (seenTopics.has(page.topic)) continue;
+    seenTopics.add(page.topic);
+    pages.push(page);
   }
   return pages;
 }

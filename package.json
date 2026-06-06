@@ -15,7 +15,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc && mkdir -p build/vendor/promql-parser && cp -r vendor/promql-parser/promql.js vendor/promql-parser/package.json build/vendor/promql-parser/ && chmod +x build/index.js && chmod +x build/bin/tenx-recur.js && mkdir -p build/product-kb && cp -r ../../../eclipse-workspace/l1x-co/config/mksite/docs build/product-kb/docs",
+    "build": "tsc && mkdir -p build/vendor/promql-parser && cp -r vendor/promql-parser/promql.js vendor/promql-parser/package.json build/vendor/promql-parser/ && chmod +x build/index.js && chmod +x build/bin/tenx-recur.js && rm -rf build/product-kb/docs && mkdir -p build/product-kb/docs && cp -R ../../../eclipse-workspace/l1x-co/config/mksite/docs/. build/product-kb/docs/",
     "start": "node build/index.js",
     "dev": "tsc --watch",
     "prepublishOnly": "npm run build",

@@ -17,10 +17,22 @@
  *     ONE chunk that answers their question, not an average over
  *     unrelated sections.
  *
- *   - Boosts:
- *       topic-slug exact match  → +50 (huge, dominates everything else)
- *       topic-slug token match  → +5 per token (smaller, additive)
- *       heading token match     → +2 per token (small, additive)
+ *   - Boosts (post 2026-06-06 ranking-weakness fix):
+ *       slug-token superset (every query token is a slug segment) → +50
+ *       slug-token tail subpath (>=2 contiguous trailing tokens)  → +25
+ *       per matched slug token                                    → +10
+ *       per matched heading token, focus-scaled                   → +4 * focus
+ *
+ *   - Per-page scores are length-normalized (raw / sqrt(pageTokens))
+ *     before boosts are applied. Without this, long body-heavy pages
+ *     win on token-shared queries against focused short pages that
+ *     are actually on-topic.
+ *
+ *   - Rare-token gate: a query token whose page-df is below 2% of the
+ *     corpus is "discriminating"; when ANY query token is rare (or
+ *     missing entirely) AND no rare token has a hit, the search
+ *     returns [] so the caller can surface a found:false envelope
+ *     instead of low-quality residual matches.
  *
  *   - SearchResult.matched_chunks contains ONLY the top-scoring chunks
  *     per page (max 3), not the whole page. Keeps the envelope small.
@@ -66,6 +78,21 @@ export interface SearchIndex {
   df: Map<string, number>;
   /** Total chunk count across the corpus (for IDF denominator). */
   totalChunks: number;
+  /**
+   * Per-page total token count (sum of TF over all chunks). Used as
+   * the document-length denominator in BM25-style length normalization,
+   * which prevents long body-heavy pages from outranking focused
+   * shorter pages on token-shared queries.
+   */
+  pageTotalTokens: number[];
+  /**
+   * token → number of distinct PAGES (not chunks) that contain it.
+   * Used as the rare-token denominator: a query token is "discriminating"
+   * when (pageDf / pages.length) is below a small fraction. The chunk-
+   * level df is too noisy for that decision because one big page can
+   * push a token into many chunk postings.
+   */
+  pageDf: Map<string, number>;
 }
 
 /**
@@ -75,9 +102,13 @@ export interface SearchIndex {
 export function buildIndex(pages: Page[]): SearchIndex {
   const postings = new Map<string, Array<{ ref: ChunkRef; tf: number }>>();
   const df = new Map<string, number>();
+  const pageDf = new Map<string, number>();
+  const pageTotalTokens: number[] = new Array(pages.length).fill(0);
   let totalChunks = 0;
   for (let pageIdx = 0; pageIdx < pages.length; pageIdx++) {
     const page = pages[pageIdx]!;
+    const pageTokensSeen = new Set<string>();
+    let pageTokenCount = 0;
     for (let chunkIdx = 0; chunkIdx < page.chunks.length; chunkIdx++) {
       const chunk = page.chunks[chunkIdx]!;
       totalChunks += 1;
@@ -98,10 +129,16 @@ export function buildIndex(pages: Page[]): SearchIndex {
         }
         list.push({ ref: { pageIdx, chunkIdx }, tf: count });
         df.set(tok, (df.get(tok) ?? 0) + 1);
+        pageTokensSeen.add(tok);
+        pageTokenCount += count;
       }
     }
+    pageTotalTokens[pageIdx] = pageTokenCount;
+    for (const tok of pageTokensSeen) {
+      pageDf.set(tok, (pageDf.get(tok) ?? 0) + 1);
+    }
   }
-  return { pages, postings, df, totalChunks };
+  return { pages, postings, df, totalChunks, pageTotalTokens, pageDf };
 }
 
 /** Score one chunk against a tokenised query using TF-IDF. */
@@ -124,10 +161,23 @@ function scoreChunk(
     const idf = Math.log((index.totalChunks + 1) / (docFreq + 1)) + 1;
     score += hit.tf * idf;
   }
-  // Heading boost — independent of TF.
-  const headingTokens = new Set(tokenize(chunk.heading));
-  for (const qt of queryTokens) {
-    if (headingTokens.has(qt)) score += 2;
+  // Heading boost — independent of TF. Two changes vs the old +2/token:
+  //   1. Raise the base boost to +4 per matched token (was +2). Short
+  //      on-point headings deserve more credit than weak body hits.
+  //   2. Scale by (queryTokenCount / headingTokenCount). A 2-word heading
+  //      "Splunk Optimization" matched by 2 of 3 query tokens scores
+  //      4 * 1.0 = 4. A 15-word heading that incidentally contains the
+  //      same tokens scores 4 * (3/15) = 0.8. Short on-point headings
+  //      now outrank long incidental ones.
+  const headingTokens = tokenize(chunk.heading);
+  if (headingTokens.length > 0 && queryTokens.length > 0) {
+    const headingSet = new Set(headingTokens);
+    let matched = 0;
+    for (const qt of queryTokens) if (headingSet.has(qt)) matched += 1;
+    if (matched > 0) {
+      const focus = queryTokens.length / headingTokens.length;
+      score += 4 * matched * focus;
+    }
   }
   return score;
 }
@@ -140,26 +190,91 @@ function scoreChunk(
  *              (faq / apps / engine / api / config / manage).
  *   maxPages — cap the number of pages returned (default 10).
  *   maxChunksPerPage — cap matched_chunks per page (default 3).
+ *   minScore — drop results whose final (length-normalized) score is
+ *              below this floor. Default 0.5. Without this, queries
+ *              whose only matching tokens are common filler words
+ *              return junk hits instead of falling through to the
+ *              found:false / similar_topics path in product-qa.
  */
 export interface SearchOptions {
   query: string;
   category?: string;
   maxPages?: number;
   maxChunksPerPage?: number;
+  minScore?: number;
 }
+
+/**
+ * Token frequency below which a query token is considered "rare" /
+ * "discriminating". When ANY query token is rare (or absent from the
+ * corpus entirely), at least one rare token must hit a posting list
+ * for the search to return results. This prevents low-quality fallback
+ * matches when the distinctive token in the query (e.g. a competitor
+ * name like "grepr") has df=0 and the score is carried entirely by
+ * common residual tokens.
+ */
+const RARE_TOKEN_PAGE_DF_FRACTION = 0.02;
+
+/** Default minScore floor — see SearchOptions.minScore. */
+const DEFAULT_MIN_SCORE = 0.5;
 
 /**
  * Run a TF-IDF search against an in-memory index.
  *
  * Returns the top-N SearchResult[] ordered by score descending. Each
  * result carries only its top-K matched_chunks to keep responses small.
+ *
+ * Scoring overview (after the 2026-06-06 ranking-weakness fix pass):
+ *
+ *   1. Per-chunk TF-IDF + heading-focus boost (see `scoreChunk`).
+ *   2. Per-page score = sum of top-K chunk scores, then divided by
+ *      `sqrt(pageTotalTokens)` so long body-heavy pages cannot drown
+ *      focused short FAQ pages on token-shared queries.
+ *   3. Slug boosts on the normalized score:
+ *        +50 when the slug is a token-superset of the query
+ *        +25 when the query tokens match a contiguous tail subpath
+ *        +10 per matched slug token otherwise (was +5)
+ *      The old "querySlug-as-string" comparison (querySlug retained
+ *      whitespace, so it never matched natural-language queries) is gone.
+ *   4. Rare-token gate: when any query token has df/totalChunks below
+ *      RARE_TOKEN_PAGE_DF_FRACTION (or is absent entirely), at least
+ *      one of those rare tokens must hit. Otherwise [] is returned so
+ *      the caller's fallback (found:false + similar_topics) fires.
+ *   5. minScore floor (default DEFAULT_MIN_SCORE) drops any normalized
+ *      result below the threshold.
  */
 export function searchIndex(index: SearchIndex, opts: SearchOptions): SearchResult[] {
   const queryTokens = tokenize(opts.query);
   if (queryTokens.length === 0) return [];
   const maxPages = opts.maxPages ?? 10;
   const maxChunksPerPage = opts.maxChunksPerPage ?? 3;
-  const querySlug = opts.query.toLowerCase().trim();
+  const minScore = opts.minScore ?? DEFAULT_MIN_SCORE;
+
+  // ── Rare-token gate ────────────────────────────────────────────────
+  // Identify the set of "rare" query tokens — those with low corpus
+  // page-frequency (or absent altogether). When the query carries any
+  // rare token, at least one must hit a posting list. If none do, the
+  // residual score comes entirely from common tokens (e.g. "pattern",
+  // "hash", "different" minus the absent "grepr") which produces junk
+  // hits like docs/run/input/extract. Return [] so product-qa's
+  // found:false + similar_topics fallback fires instead.
+  const totalPages = Math.max(index.pages.length, 1);
+  const rareTokens: string[] = [];
+  for (const qt of queryTokens) {
+    const pdf = index.pageDf.get(qt) ?? 0;
+    if (pdf === 0 || pdf / totalPages < RARE_TOKEN_PAGE_DF_FRACTION) {
+      rareTokens.push(qt);
+    }
+  }
+  if (rareTokens.length > 0) {
+    const anyRareHit = rareTokens.some((qt) => (index.pageDf.get(qt) ?? 0) > 0);
+    if (!anyRareHit) {
+      // The distinguishing token(s) are missing from the corpus.
+      // Bail out so the caller surfaces "not found" + similar_topics
+      // rather than residual common-token noise.
+      return [];
+    }
+  }
 
   // Per-page accumulator: chunkScores[pageIdx] = [{ chunkIdx, score }]
   const perPage = new Map<number, Array<{ chunkIdx: number; score: number }>>();
@@ -183,23 +298,78 @@ export function searchIndex(index: SearchIndex, opts: SearchOptions): SearchResu
     }
   }
 
-  // Build SearchResult[] with topic-slug boosts + category filter.
+  // Build SearchResult[] with slug-token boosts + category filter.
+  const querySlugTokenSet = new Set(queryTokens);
   const results: SearchResult[] = [];
   for (const [pageIdx, chunkScores] of perPage) {
     const page = index.pages[pageIdx]!;
     if (opts.category && page.category !== opts.category) continue;
     chunkScores.sort((a, b) => b.score - a.score);
     const topChunks = chunkScores.slice(0, maxChunksPerPage);
-    const pageScore = topChunks.reduce((a, b) => a + b.score, 0);
+    const rawPageScore = topChunks.reduce((a, b) => a + b.score, 0);
+    // Document-length normalization (BM25-style |d|^0.5). Without this
+    // a long body-heavy page like apps/receiver/deploy that mentions
+    // many query tokens many times wins over a short focused FAQ page
+    // that is actually on-topic. Use a sqrt rather than linear |d| so
+    // we still reward pages that carry strong evidence in absolute
+    // terms — pure linear normalization over-penalizes legitimately
+    // dense pages.
+    const totalTokens = index.pageTotalTokens[pageIdx] ?? 1;
+    const pageScore = rawPageScore / Math.sqrt(Math.max(totalTokens, 1));
+
+    // ── Slug boosts ──────────────────────────────────────────────────
+    // The old code compared a raw query string against the slug. That
+    // path was effectively dead for natural-language queries because
+    // the raw string never matched a "/"-joined slug. The new path
+    // works in slug-token space.
     let boost = 0;
-    // Topic-slug exact match — huge boost.
-    if (page.topic.toLowerCase() === querySlug) boost += 50;
-    else if (page.topic.toLowerCase().endsWith('/' + querySlug)) boost += 30;
-    // Topic-slug token overlap — small per-token boost.
-    const topicTokens = new Set(tokenize(page.topic));
-    for (const qt of queryTokens) {
-      if (topicTokens.has(qt)) boost += 5;
+    const slugTokens = tokenize(page.topic);
+    const slugTokenSet = new Set(slugTokens);
+    // (a) Superset boost: every query token appears as a slug segment.
+    let allInSlug = querySlugTokenSet.size > 0;
+    for (const qt of querySlugTokenSet) {
+      if (!slugTokenSet.has(qt)) {
+        allInSlug = false;
+        break;
+      }
     }
+    if (allInSlug) boost += 50;
+    // (b) Contiguous-tail boost: >=2 query tokens match a trailing
+    // subpath of the slug. Example: query "splunk optimization"
+    // tokenises to ["splunk", "optimization"]; slug
+    // "faq/stacks/splunk/optimization" tokenises to
+    // ["faq","stacks","splunk","optimization"] — tail subpath matches.
+    if (!allInSlug && slugTokens.length >= 2 && queryTokens.length >= 2) {
+      // For each contiguous tail of slugTokens of length >=2, check
+      // whether the trailing tokens of the query (in order) match.
+      const overlap = Math.min(slugTokens.length, queryTokens.length);
+      for (let k = 2; k <= overlap; k++) {
+        const slugTail = slugTokens.slice(slugTokens.length - k);
+        const queryTail = queryTokens.slice(queryTokens.length - k);
+        let match = true;
+        for (let i = 0; i < k; i++) {
+          if (slugTail[i] !== queryTail[i]) {
+            match = false;
+            break;
+          }
+        }
+        if (match) {
+          boost += 25;
+          break;
+        }
+      }
+    }
+    // (c) Per-matched-slug-token boost. Raised from +5 to +10 so a
+    // 2-of-3 slug overlap is meaningful even without the superset boost.
+    let perTokenBoost = 0;
+    for (const qt of queryTokens) {
+      if (slugTokenSet.has(qt)) perTokenBoost += 10;
+    }
+    boost += perTokenBoost;
+
+    const finalScore = pageScore + boost;
+    if (finalScore < minScore) continue;
+
     const matchedChunks: Chunk[] = topChunks.map((c) => page.chunks[c.chunkIdx]!);
     results.push({
       topic: page.topic,
@@ -207,7 +377,7 @@ export function searchIndex(index: SearchIndex, opts: SearchOptions): SearchResu
       canonical_url: page.canonical_url,
       summary: page.summary,
       matched_chunks: matchedChunks,
-      score: pageScore + boost,
+      score: finalScore,
     });
   }
   results.sort((a, b) => b.score - a.score);
