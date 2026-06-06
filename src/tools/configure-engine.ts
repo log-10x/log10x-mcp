@@ -57,6 +57,8 @@ import {
 import { loadEnvironments } from '../lib/environments.js';
 import { LABELS } from '../lib/promql.js';
 import type { PrometheusResponse } from '../lib/api.js';
+import { queryInstant } from '../lib/api.js';
+import type { EnvConfig } from '../lib/environments.js';
 import {
   type StructuredOutput,
   type Action as EnvelopeAction,
@@ -384,7 +386,8 @@ interface ConfigureEngineData {
 
 // ─── main entry ───────────────────────────────────────────────────────
 export async function executeConfigureEngine(
-  args: ConfigureEngineArgs
+  args: ConfigureEngineArgs,
+  env?: EnvConfig
 ): Promise<string | StructuredOutput> {
   // ── Aggregated preflight ──
   // Surface ALL missing required-for-this-mode args in one envelope
@@ -514,35 +517,26 @@ export async function executeConfigureEngine(
     // returned by the live path below.
   }
 
-  // Resolve customer metrics backend.
-  let backend: CustomerMetricsBackend;
-  try {
-    const r = await resolveBackend();
-    if (!r.backend) {
-      throw new CustomerMetricsNotConfiguredError(formatDetectionTrace(r.trace));
-    }
-    backend = r.backend;
-  } catch (e: any) {
-    const msg = e?.message ?? String(e);
+  // configure_engine queries the LOG10X metrics backend (where the engine's
+  // per-pattern emit `all_events_summaryBytes_total` lives), not the customer
+  // metrics backend. fetchPerPatternBytes uses `queryInstant(env, ...)` from
+  // src/lib/api.ts which routes to env.metricsBackend (Log10xBackend or the
+  // configured equivalent). The customer backend (LOG10X_CUSTOMER_METRICS_URL)
+  // is for cross-pillar tools that join log patterns to infrastructure metrics
+  // — not relevant here. Prior version mistakenly resolved the customer
+  // backend and queried `all_events_summaryBytes_total` against it, which
+  // returned empty (metric doesn't exist there) or timed out (URL unreachable).
+  if (!env) {
     return buildChassisErrorEnvelope({
       tool: 'log10x_configure_engine',
       err: {
-        error_type: 'backend_unavailable',
-        retryable: true,
+        error_type: 'no_environment',
+        retryable: false,
         suggested_backoff_ms: null,
-        hint: `configure_engine refused: customer metrics backend not configured. ${firstLine(msg)}`,
+        hint: 'configure_engine refused: no active environment resolved. Pass `environment` arg or configure ~/.log10x/envs.json.',
       },
-      contextPayload: { ok: false, phase: 'backend', service: args.service, containers: args.containers ?? [], error: msg },
+      contextPayload: { ok: false, phase: 'backend', service: args.service, containers: args.containers ?? [] },
       source_disclosure: { bytes_source: 'tsdb' },
-      actions: [
-        {
-          tool: 'log10x_doctor',
-          args: {},
-          reason:
-            'Run a health check to diagnose why the customer metrics backend is unreachable and confirm which components are live.',
-          role: 'recommended-next',
-        },
-      ],
     });
   }
 
@@ -571,7 +565,7 @@ export async function executeConfigureEngine(
   const observationDays = args.observationDays ?? 7;
 
   const perPattern = await fetchPerPatternBytes(
-    backend,
+    env,
     args.containers,
     observationDays,
     target.resolved.envId
@@ -1297,7 +1291,7 @@ interface PerPattern {
 const PER_PATTERN_TOPK = parseInt(process.env.LOG10X_CONFIGURE_ENGINE_TOPK || '500', 10) || 500;
 
 async function fetchPerPatternBytes(
-  backend: CustomerMetricsBackend,
+  env: EnvConfig,
   containers: string[],
   observationDays: number,
   envId: string | undefined
@@ -1339,8 +1333,8 @@ async function fetchPerPatternBytes(
   const eventsQ = `topk(${PER_PATTERN_TOPK}, sum by (${LABELS.hash})(increase(all_events_summaryVolume_total{${filter}}[${window}])))`;
 
   const [bytesRes, eventsRes] = await Promise.all([
-    backend.queryInstant(bytesQ) as Promise<PrometheusResponse>,
-    backend.queryInstant(eventsQ) as Promise<PrometheusResponse>,
+    queryInstant(env, bytesQ),
+    queryInstant(env, eventsQ),
   ]);
 
   const eventsByHash = new Map<string, number>();

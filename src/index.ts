@@ -1571,7 +1571,10 @@ registerLog10xTool('log10x_advise_install', adviseInstallSchema, (args) =>
 // ── Tool: log10x_configure_engine (unified per-pattern action-plan PR author) ──
 
 registerLog10xTool('log10x_configure_engine', configureEngineSchema, (args) =>
-  wrap('log10x_configure_engine', () => executeConfigureEngine(args))
+  wrap('log10x_configure_engine', () => {
+    const env = resolveEnv(getEnvs(), args.environment);
+    return executeConfigureEngine(args, env);
+  })
 );
 
 // ── Tool: log10x_estimate_savings (forecast + verify modes) ──
