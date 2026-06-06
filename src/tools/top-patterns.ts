@@ -30,6 +30,7 @@ import {
   buildChassisEnvelope,
   newChassisTelemetry,
   recordQuery,
+  buildSourceLabel,
   type RateSource as ChassisRateSource,
 } from '../lib/chassis-envelope.js';
 import type { ForwarderId } from '../lib/forwarder-snippets.js';
@@ -263,7 +264,7 @@ export async function executeTopPatterns(
         // State A: isDropped label never seen in this env.
         enrichmentState = 'enrichment_not_wired';
         message =
-          'isDropped enrichment is not wired on this env\'s Receiver — the receiver does not emit the isDropped label. ' +
+          'isDropped enrichment is not wired on the Receiver — the receiver does not emit the isDropped label. ' +
           'To enable, ensure the rate-receiver settings.yaml includes \'isDropped\' in enrichmentFields (it is on by default), ' +
           'and the engine is on run-edge 1.1.0+ (the release that appends the isDropped label on the wire). ' +
           'See docs/cross-pillar-primitives.md for setup details.';
@@ -1217,6 +1218,12 @@ export async function executeTopPatterns(
         denominator_meaning: `Top ${renderRows.length} patterns above 0 KB/s floor in ${tf.label}${patternCountTotal != null ? ` of ${patternCountTotal} total` : ''}`,
       },
       siem_vendor: siemLabel ?? undefined,
+      // Note 3 — source_label replaces "SIEM: <vendor>" prose with the
+      // actual source identity. We only have the vendor display name at
+      // this scope (no region/account/endpoint plumbed through), so the
+      // label degrades cleanly to the vendor name alone, which is still
+      // better than the bare jargon string.
+      source_label: siemLabel ? buildSourceLabel(siemLabel, {}) : undefined,
     },
     scope: {
       window: tf.label,

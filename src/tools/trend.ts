@@ -122,7 +122,7 @@ interface PatternTrendSummary {
 }
 
 export async function executeTrend(
-  args: { pattern?: string; pattern_hash?: string; timeRange?: string; step?: string; analyzerCost?: number; view?: 'summary'; include?: 'kept' | 'dropped' | 'both'; include_chart?: boolean },
+  args: { pattern?: string; pattern_hash?: string; timeRange?: string; step?: 'auto' | '1m' | '5m' | '15m' | '1h' | '6h' | '1d' | string; analyzerCost?: number; view?: 'summary'; include?: 'kept' | 'dropped' | 'both'; include_chart?: boolean },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
   const telemetry = newTelemetry();

@@ -94,6 +94,7 @@ import {
 import { PRIMITIVE_ERROR_TYPES, type PrimitiveErrorType } from './primitive-errors.js';
 import { filterActionsByActiveMode } from './actions-filter.js';
 import type { Mode } from './mode-detect.js';
+import { sanitizeUserProse } from './anti-jargon-prose.js';
 
 // ── Version / epoch ────────────────────────────────────────────────────────────
 
@@ -267,8 +268,33 @@ export const SourceDisclosureSchema = z.object({
   /**
    * SIEM vendor in scope. Populated by tools that query or surface
    * SIEM data so a reader knows the cost model and query dialect.
+   *
+   * BACK-COMPAT: retained as the structured machine-side field. The
+   * user-facing rendered string lives in `source_label`. See Note 3
+   * from the arc-rendering review — "SIEM" is jargon and the vendor
+   * class alone is insufficient specificity. Tools should populate
+   * BOTH fields during the migration; renderers should prefer
+   * `source_label` for user prose.
    */
   siem_vendor: z.string().optional(),
+  /**
+   * User-facing rendered source string. Replaces the
+   * "SIEM: Amazon CloudWatch Logs" prose (Note 3) with the actual
+   * source identity in the user's infra — region, account, endpoint,
+   * or user-given nickname — so the user can tell WHICH CloudWatch
+   * log group / WHICH Datadog org is being queried, not just the
+   * vendor class.
+   *
+   * Examples:
+   *   "Amazon CloudWatch Logs (us-east-1, account 351939435334)"
+   *   "Datadog (datadoghq.com)"
+   *   "Splunk Cloud (acme-prod.splunkcloud.com)"
+   *   "log10x demo env"
+   *
+   * Populate via `buildSourceLabel()` to keep rendering consistent
+   * across tools.
+   */
+  source_label: z.string().optional(),
   /**
    * How the Retriever URL + bucket was resolved. Populated by tools that
    * consume the Retriever (retriever_query, retriever_series, backfill_metric,
@@ -289,6 +315,86 @@ export const SourceDisclosureSchema = z.object({
   label_source: z.enum(['log10x_prom', 'customer_prom']).optional(),
 });
 export type SourceDisclosure = z.infer<typeof SourceDisclosureSchema>;
+
+/**
+ * Vendor → human-readable display name. Tools pass the canonical
+ * vendor token used in `siem_vendor` (datadog, splunk, cloudwatch,
+ * elasticsearch, opensearch, azure-monitor, new-relic, gcp-logging,
+ * dynatrace, log10x, …). Unknown tokens pass through verbatim.
+ */
+function vendorDisplayName(vendor: string): string {
+  const v = vendor.trim().toLowerCase();
+  if (v === 'cloudwatch' || v === 'aws cloudwatch' || v === 'cloudwatch logs')
+    return 'Amazon CloudWatch Logs';
+  if (v === 'datadog' || v === 'dd') return 'Datadog';
+  if (v === 'splunk' || v === 'splunk enterprise') return 'Splunk';
+  if (v === 'splunk-obs' || v === 'splunk observability') return 'Splunk Observability';
+  if (v === 'elasticsearch' || v === 'elastic' || v === 'elk') return 'Elasticsearch';
+  if (v === 'opensearch') return 'OpenSearch';
+  if (v === 'azure-monitor' || v === 'azure monitor' || v === 'sentinel')
+    return 'Azure Monitor';
+  if (v === 'new-relic' || v === 'newrelic') return 'New Relic';
+  if (v === 'gcp-logging' || v === 'gcp' || v === 'stackdriver')
+    return 'Google Cloud Logging';
+  if (v === 'dynatrace') return 'Dynatrace';
+  if (v === 'log10x') return 'log10x';
+  // Pass through verbatim for unknown / future vendors.
+  return vendor;
+}
+
+/**
+ * Specificity bits that turn a generic vendor name into the actual
+ * source identity in the user's infra. Mirrors the fields a typical
+ * `EnvConfig.metricsBackend` carries (region, account_id, endpoint
+ * URL, user-given nickname).
+ *
+ * Callers fill in only what they have. Empty / missing fields are
+ * skipped; if NO context is available, the renderer falls back to
+ * the vendor display name alone (which is still better than "SIEM:
+ * <vendor>" — Note 3).
+ */
+export interface SourceLabelContext {
+  /** Region identifier — e.g. "us-east-1", "eu-west-2". */
+  region?: string;
+  /** Account ID — AWS account, GCP project, Azure subscription. */
+  account_id?: string;
+  /** Endpoint URL or hostname — e.g. "datadoghq.com", "acme.splunkcloud.com". */
+  endpoint?: string;
+  /** User-given nickname from envs.json — e.g. "prod", "staging-eu". */
+  nickname?: string;
+}
+
+/**
+ * Render the user-facing source identity string per Note 3.
+ *
+ * Examples:
+ *   buildSourceLabel('cloudwatch', { region: 'us-east-1', account_id: '351939435334' })
+ *     → "Amazon CloudWatch Logs (us-east-1, account 351939435334)"
+ *
+ *   buildSourceLabel('datadog', { endpoint: 'datadoghq.com' })
+ *     → "Datadog (datadoghq.com)"
+ *
+ *   buildSourceLabel('splunk', { nickname: 'prod' })
+ *     → "Splunk (prod)"
+ *
+ *   buildSourceLabel('datadog', {})  // no context
+ *     → "Datadog"
+ *
+ * Pure function; safe to call at envelope-build time.
+ */
+export function buildSourceLabel(
+  vendor: string,
+  ctx: SourceLabelContext = {},
+): string {
+  const display = vendorDisplayName(vendor);
+  const bits: string[] = [];
+  if (ctx.region) bits.push(ctx.region);
+  if (ctx.account_id) bits.push(`account ${ctx.account_id}`);
+  if (ctx.endpoint) bits.push(ctx.endpoint);
+  if (ctx.nickname && !bits.length) bits.push(ctx.nickname);
+  if (bits.length === 0) return display;
+  return `${display} (${bits.join(', ')})`;
+}
 
 // ── Scope ─────────────────────────────────────────────────────────────────────
 
@@ -652,15 +758,53 @@ export function buildChassisEnvelope(input: ChassisEnvelopeInput): ChassisEnvelo
     );
   }
 
+  // Sanitize user-facing prose at envelope-build time. Per the
+  // arc-rendering review (Notes 9-13, 16-18) and CLAUDE.md's anti-data-
+  // science rule, every string a user reads goes through
+  // sanitizeUserProse before serialization. The pass is idempotent —
+  // tools that already authored plain English get the same string back.
+  const sanitizedHumanSummary = sanitizeUserProse(input.human_summary);
+  const sanitizedMustRenderVerbatim =
+    input.must_render_verbatim != null
+      ? sanitizeUserProse(input.must_render_verbatim)
+      : undefined;
+
+  // Sanitize the denominator_meaning prose inside source_disclosure too
+  // — it's a user-facing string ("X patterns above floor..."). Per Note 1,
+  // "env" is internal shorthand and should be dropped from user prose.
+  const sanitizedSourceDisclosure: SourceDisclosure = {
+    ...input.source_disclosure,
+    ...(input.source_disclosure.pattern_count_source
+      ? {
+          pattern_count_source: {
+            ...input.source_disclosure.pattern_count_source,
+            denominator_meaning: sanitizeUserProse(
+              input.source_disclosure.pattern_count_source.denominator_meaning,
+            ),
+          },
+        }
+      : {}),
+    ...(input.source_disclosure.service_count_source
+      ? {
+          service_count_source: {
+            ...input.source_disclosure.service_count_source,
+            denominator_meaning: sanitizeUserProse(
+              input.source_disclosure.service_count_source.denominator_meaning,
+            ),
+          },
+        }
+      : {}),
+  };
+
   const chassisData: Record<string, unknown> = {
     status: input.status,
     decisions: input.decisions,
-    source_disclosure: input.source_disclosure,
+    source_disclosure: sanitizedSourceDisclosure,
     scope: input.scope,
     payload: input.payload,
-    human_summary: input.human_summary,
-    ...(input.must_render_verbatim != null
-      ? { must_render_verbatim: input.must_render_verbatim }
+    human_summary: sanitizedHumanSummary,
+    ...(sanitizedMustRenderVerbatim != null
+      ? { must_render_verbatim: sanitizedMustRenderVerbatim }
       : {}),
     ...(input.must_ask_user != null ? { must_ask_user: input.must_ask_user } : {}),
     ...(input.forbidden_next_actions != null
@@ -684,10 +828,17 @@ export function buildChassisEnvelope(input: ChassisEnvelopeInput): ChassisEnvelo
   // schema drift immediately. In production, catch at the call site.
   const validatedData = ChassisDataSchema.parse(chassisData);
 
+  // Headline / bullets / callout are user-facing prose and also go
+  // through sanitizeUserProse. Idempotent on plain English; rewrites
+  // banned phrases and raw PromQL when authors slip.
   const summary: Summary = {
-    headline: input.headline,
-    ...(input.headline_bullets != null ? { bullets: input.headline_bullets } : {}),
-    ...(input.headline_callout != null ? { callout: input.headline_callout } : {}),
+    headline: sanitizeUserProse(input.headline),
+    ...(input.headline_bullets != null
+      ? { bullets: input.headline_bullets.map((b) => sanitizeUserProse(b)) }
+      : {}),
+    ...(input.headline_callout != null
+      ? { callout: sanitizeUserProse(input.headline_callout) }
+      : {}),
   };
 
   const outer = buildEnvelope({
