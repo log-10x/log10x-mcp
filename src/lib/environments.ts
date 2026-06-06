@@ -274,6 +274,25 @@ function parseAnalyzerEnv(raw: string | undefined): string | undefined {
  * demo, not their own.
  */
 export async function loadEnvironments(): Promise<Environments> {
+  // Outer entry point. Inner does the raw resolution; this wrapper
+  // applies the SaaS↔on-prem alias bridge so every caller (cached via
+  // getEnvs() OR fresh-loaded inside a tool like doctor) gets the
+  // same enriched byNickname map. Bridge is idempotent so repeat
+  // calls (doctor + initEnvs both call loadEnvironments) are safe.
+  const envs = await loadEnvironmentsRaw();
+  try {
+    const { enrichEnvAliasesFromOnPrem } = await import('./env-alias-bridge.js');
+    await enrichEnvAliasesFromOnPrem(envs);
+  } catch (e) {
+    // Bridge already swallows store-level errors; this is the
+    // last-resort guard for code-level faults. Boot proceeds.
+    // eslint-disable-next-line no-console
+    console.error('env-alias-bridge: unexpected failure during enrichment', e);
+  }
+  return envs;
+}
+
+async function loadEnvironmentsRaw(): Promise<Environments> {
   // Path 1 + 2: new-style configuration.
   const fromMetricsEnvVars = tryBuildFromMetricsEnvVars();
   const fromEnvsFile = await tryReadEnvsJson();

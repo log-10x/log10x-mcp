@@ -35,7 +35,6 @@ import {
 import { makeShapeCoercive } from './lib/input-coerce.js';
 
 import { loadEnvironments, resolveEnv, revalidateEnvironments, type EnvConfig, type Environments, EnvironmentValidationError } from './lib/environments.js';
-import { enrichEnvAliasesFromOnPrem } from './lib/env-alias-bridge.js';
 import { fetchAnalyzerCost } from './lib/api.js';
 import { eventLookupSchema, executeEventLookup } from './tools/event-lookup.js';
 import { savingsSchema, executeSavings } from './tools/savings.js';
@@ -170,20 +169,11 @@ let envs: Environments | undefined;
 let bootMode: ModeResolution | undefined;
 
 async function initEnvs(): Promise<void> {
+  // loadEnvironments() now applies the SaaS↔on-prem alias bridge
+  // internally so every caller (including tools like doctor that
+  // re-load envs on each call) sees the same enriched byNickname map.
+  // See src/lib/env-alias-bridge.ts.
   envs = await loadEnvironments();
-  // Bridge SaaS env identity (envs.json) with on-prem env-config docs
-  // (k8s ConfigMap / SSM / GCP-SM / Azure AC / local file) so a user
-  // who typed the on-prem nickname or the env_id UUID resolves to the
-  // matching SaaS EnvConfig. Non-fatal — store unavailability does not
-  // block boot. See src/lib/env-alias-bridge.ts.
-  try {
-    await enrichEnvAliasesFromOnPrem(envs);
-  } catch (e) {
-    // Defensive — the bridge already swallows store-level errors. Any
-    // exception here means a code-level fault. Log and proceed.
-    // eslint-disable-next-line no-console
-    console.error('env-alias-bridge: unexpected failure during enrichment', e);
-  }
 }
 
 /**
