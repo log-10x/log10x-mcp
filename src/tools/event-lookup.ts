@@ -207,13 +207,20 @@ async function executeEventLookupInner(
   const timeRange = normalizeTimeRange(args.timeRange ?? '7d');
   const tf = parseTimeframe(timeRange);
   // Rate resolution per spec § "no $1/GB lie": prefer customer override,
-  // fall back to deprecated alias (list price), else null → rate_source='unset'
-  // so dollar fields collapse to null instead of silently quoting $1/GB.
+  // fall back to deprecated alias (also customer-supplied since it's an
+  // explicit arg — analyzerCost is documented as a deprecated alias of
+  // effective_ingest_per_gb, so the provenance is the same), else null →
+  // rate_source='unset' so dollar fields collapse to null instead of
+  // silently quoting $1/GB.
+  // Must match top-patterns.ts rate resolution exactly — the two tools
+  // were diverging on the same env+hash+window, labeling the identical
+  // customer-supplied $/GB rate as 'list_price' here but 'customer_supplied'
+  // there. Math agreed; attribution didn't.
   const rateSource: 'list_price' | 'customer_supplied' | 'unset' =
     args.effective_ingest_per_gb != null
       ? 'customer_supplied'
       : args.analyzerCost != null
-        ? 'list_price'
+        ? 'customer_supplied'
         : 'unset';
   const costPerGb: number | null =
     args.effective_ingest_per_gb ?? args.analyzerCost ?? null;

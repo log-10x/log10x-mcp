@@ -236,7 +236,16 @@ export function stripHashFromVisible(
   // `$` if present so the pattern body matches at any position.
   const body = hashRegex.source.replace(/^\^/, '').replace(/\$$/, '');
   const flags = hashRegex.flags.includes('g') ? hashRegex.flags : hashRegex.flags + 'g';
-  const tokenRe = new RegExp(body, flags);
+
+  // Bare-token regex: bound the 11-char shape with explicit negative
+  // lookbehind / lookahead over [A-Za-z0-9_-] so the match only strips
+  // when the token stands ALONE. Standard `\b` would not help here
+  // because the hash alphabet includes `_` (word char) and `-` (non-word),
+  // so `\b` mis-fires on `terror_search_h` style descriptors. Without this
+  // bound, `descriptor.replace(tokenRe, '')` would shave any 11-char run
+  // out of the middle of a descriptor, leaving meaningless tails like
+  // "h" / "_instance" / "mponent". See bug: top_patterns table truncation.
+  const tokenRe = new RegExp('(?<![A-Za-z0-9_-])' + body + '(?![A-Za-z0-9_-])', flags);
 
   // Pass 1: strip backtick-wrapped hashes including their backticks.
   // Use a tightly-scoped regex: backtick, then exactly the hash shape,
@@ -244,14 +253,10 @@ export function stripHashFromVisible(
   const wrappedRe = new RegExp('`' + body + '`', flags);
   let out = text.replace(wrappedRe, '');
 
-  // Pass 2: bare tokens. Word-boundaries protect against accidentally
-  // shaving longer identifiers that happen to end in 11 base64url chars.
-  out = out.replace(tokenRe, (match) => {
-    // Skip if the match is part of a longer identifier (e.g. "abc..._xy"
-    // where the surrounding chars are also word chars). We only strip
-    // when the token stands alone.
-    return '';
-  });
+  // Pass 2: bare tokens. The lookbehind/lookahead in tokenRe protects
+  // against shaving longer identifiers that happen to contain an 11-char
+  // base64url run (the typical descriptor shape).
+  out = out.replace(tokenRe, '');
 
   // Pass 3: tidy artefacts — empty parens, double spaces, leading
   // punctuation orphans, dangling colons before nothing.

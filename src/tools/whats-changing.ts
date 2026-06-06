@@ -124,6 +124,26 @@ interface WhatsChangingData {
   silent_in_baseline_count: number;
 }
 
+/**
+ * Smart dollar precision for headline deltas: 2 decimals when |delta| < 10,
+ * 1 decimal otherwise. Avoids `.toFixed(0)` clobbering small but real
+ * deltas (e.g. -$0.14 rendering as "-$0").
+ */
+function formatHeadlineDollars(delta: number): string {
+  const abs = Math.abs(delta);
+  return abs < 10 ? abs.toFixed(2) : abs.toFixed(1);
+}
+
+/**
+ * User-facing descriptor for headlines. Pattern hash is opaque to users —
+ * lead with the symbol_message instead (truncated like pattern_trend's
+ * "..." style). Hash stays in the payload for round-trip.
+ */
+function formatHeadlineDescriptor(row: { pattern_hash: string; symbol_message: string }): string {
+  const raw = (row.symbol_message ?? '').trim() || 'pattern';
+  return raw.length > 60 ? raw.slice(0, 57) + '...' : raw;
+}
+
 export async function executeWhatsChanging(
   args: {
     timeRange?: string;
@@ -472,7 +492,7 @@ export async function executeWhatsChanging(
         ? `Nothing crossed your $${minDeltaUsd} floor over ${tf.label}. Biggest change was $${Math.abs(topAnyway[0].delta_usd).toFixed(2)} (${topAnyway[0].symbol_message || 'pattern'}${topAnyway[0].services[0] ? ' on ' + topAnyway[0].services[0].name : ''}). Lower the floor to see more.`
         : `No patterns changed by >$${minDeltaUsd} over ${tf.label} vs ${cwLabel}.`
       : `${shown.length} pattern${shown.length === 1 ? '' : 's'} changed by >$${minDeltaUsd} over ${tf.label} vs ${cwLabel}. ` +
-        `Top: \`${shown[0].pattern_hash}\` ${shown[0].delta_usd >= 0 ? '+' : '-'}$${Math.abs(shown[0].delta_usd).toFixed(0)} ` +
+        `Top: ${formatHeadlineDescriptor(shown[0])} ${shown[0].delta_usd >= 0 ? '+' : '-'}$${formatHeadlineDollars(shown[0].delta_usd)} ` +
         `(${shown[0].delta_pct >= 0 ? '+' : ''}${shown[0].delta_pct.toFixed(0)}%).`;
 
   const status: 'success' | 'no_signal' = shown.length === 0 ? 'no_signal' : 'success';
@@ -564,7 +584,7 @@ export async function executeWhatsChanging(
           `Lower the floor (try $${suggestedFloor.toFixed(2)}) to see more.${newExclusionTag}${silentBaselineTag}${partialTag}`
         : `No pattern changes detected over ${tf.label} vs ${cwLabel}. ${rows.length} patterns were checked.${newExclusionTag}${silentBaselineTag}${partialTag}`
       : `${shown.length} pattern${shown.length === 1 ? '' : 's'} changed by more than $${minDeltaUsd} over ${tf.label} vs ${cwLabel}. ` +
-        `Top: \`${shown[0].pattern_hash}\` ${shown[0].delta_usd >= 0 ? '+' : '-'}$${Math.abs(shown[0].delta_usd).toFixed(0)} (${shown[0].delta_pct >= 0 ? '+' : ''}${shown[0].delta_pct.toFixed(0)}%). ` +
+        `Top: ${formatHeadlineDescriptor(shown[0])} ${shown[0].delta_usd >= 0 ? '+' : '-'}$${formatHeadlineDollars(shown[0].delta_usd)} (${shown[0].delta_pct >= 0 ? '+' : ''}${shown[0].delta_pct.toFixed(0)}%). ` +
         `Inspect with log10x_pattern_trend.${newExclusionTag}${silentBaselineTag}${calibTag}${partialTag}`;
 
   const scope = {

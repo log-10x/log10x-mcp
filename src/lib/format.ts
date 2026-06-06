@@ -178,11 +178,13 @@ export interface Timeframe {
  * investigation; day-level windows for cost and trend analysis.
  */
 export function parseTimeframe(input: string): Timeframe {
-  // Defensive: when the humanized label ("last 24h" / "last 1d") flows
-  // back into parseTimeframe (e.g. via envelope.d.window being re-parsed
-  // by chart-render code), strip the "last " prefix and accept the raw
-  // form. Avoids the round-trip rejection seen on pattern_trend.
-  const normalized = input.replace(/^last\s+/i, '').trim();
+  // Defensive: when the humanized label ("last 24h" / "last 1d" / "this
+  // week") flows back into parseTimeframe (e.g. via envelope.d.window
+  // being re-parsed by chart-render code), strip the "last " prefix and
+  // map legacy human labels back to their raw form. Avoids the
+  // round-trip rejection seen on pattern_trend ("this week" → 7d).
+  let normalized = input.replace(/^last\s+/i, '').trim();
+  if (normalized === 'this week') normalized = '7d';
   const match = normalized.match(/^(\d+)([mhd])$/);
   if (!match) throw new Error(`Invalid timeframe: "${input}". Expected format like "15m", "1h", "6h", "1d", "7d", "30d".`);
 
@@ -197,7 +199,6 @@ export function parseTimeframe(input: string): Timeframe {
 
   let label: string;
   if (unit === 'd' && n === 1) label = 'last 24h';
-  else if (unit === 'd' && n === 7) label = 'this week';
   else if (unit === 'd') label = `last ${n}d`;
   else if (unit === 'h') label = `last ${n}h`;
   else label = `last ${n}m`;
