@@ -150,6 +150,7 @@ import { log10xStartSchema, executeLog10xStart } from './tools/log10x-start.js';
 import { costOptionsSchema, executeCostOptions } from './tools/cost-options.js';
 import { explainModeSchema, executeExplainMode } from './tools/explain-mode.js';
 import { previewFilterSchema, executePreviewFilter } from './tools/preview-filter.js';
+import { productQaSchema, executeProductQa } from './tools/product-qa.js';
 import { patternDetailSchema, executePatternDetail } from './tools/pattern-detail.js';
 import { measureCompactionSchema, executeMeasureCompaction } from './tools/measure-compaction.js';
 import { setupRecurringSchema, executeSetupRecurring } from './tools/setup-recurring.js';
@@ -1076,6 +1077,17 @@ registerLog10xTool('log10x_pattern_examples', patternExamplesSchema, (args) =>
     const env = resolveEnv(getEnvs(), args.environment);
     return executePatternExamples(args, env);
   })
+);
+
+// ── Tool: log10x_product_qa ──
+//
+// Local docs-corpus lookup. No env / TSDB / SIEM dependency — the
+// corpus is shipped inside the build at build/product-kb/docs (the
+// build script copies it from config/mksite/docs). See
+// src/lib/product-kb/index.ts for path resolution + override env.
+
+registerLog10xTool('log10x_product_qa', productQaSchema, (args) =>
+  wrap('log10x_product_qa', async () => executeProductQa(args))
 );
 
 // ── Tool: log10x_savings ──

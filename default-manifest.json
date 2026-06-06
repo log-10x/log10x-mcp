@@ -78,6 +78,17 @@
       },
       "category": "identify"
     },
+    "log10x_product_qa": {
+      "title": "Product Q&A from shipped docs",
+      "description": "Answer Log10x product questions from the docs corpus that ships inside the MCP build (chunked + indexed at install time). Use whenever the user asks a factual product question — \"what is the Receiver\", \"how is pattern_hash computed\", \"what data leaves my network\", \"does the Reporter modify data\" — instead of answering from training data. Inputs: `topic` for an exact docs-slug lookup (e.g. `faq/security/data-protection`), or `query` for natural-language TF-IDF search across the corpus. `category` narrows search to one of faq / apps / engine / api / config / manage. `max_results` caps the result count (default 3). Output is a standard chassis envelope with `found`, ranked `results` (each carrying matched chunks + canonical_url), and `similar_topics` as a did-you-mean fallback. Always cite `canonical_url` when surfacing an answer to the user. The corpus is shipped from `config/mksite/docs` at build time; in development the loader also honors `LOG10X_PRODUCT_KB_PATH`.",
+      "annotations": {
+        "title": "Product Q&A from shipped docs",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "category": "identify"
+    },
     "log10x_savings": {
       "title": "Pipeline savings",
       "description": "Show pipeline savings — what percent of bytes the receiver (filtering + compaction) and retriever (indexing) are removing, with a dollar overlay when an analyzer $/GB rate is set (account profile list price, or per-call `effective_ingest_per_gb` override). Without a rate, the headline is percent-and-bytes only — never a fabricated $1/GB number. Use for \"how much are we saving\", \"pipeline ROI\", or \"what is the Log10x stack worth financially\".",

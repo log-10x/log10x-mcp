@@ -234,6 +234,7 @@ export const TOOL_MODES: Record<string, ('analysis' | 'analysis_pending' | 'poc'
   log10x_retriever_register: ['always'],
   log10x_doctor: ['always'],
   log10x_discover_env: ['always'],
+  log10x_product_qa: ['always'], // local docs lookup, no backend needed
 
   // ── Analysis (default-loaded 11) ──
   log10x_top_patterns: ['analysis', 'analysis_pending'],
