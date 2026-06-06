@@ -405,7 +405,7 @@ export async function executeConfigureEngine(
     }
     if (missing.length >= 2) {
       return notConfiguredEnvelope(
-        'preflight',
+        'target_resolution',
         `configure_engine needs ${missing.length} more args to derive a policy. Pass these in one call instead of bouncing back per-arg:\n\n` +
           missing.map((m, i) => `${i + 1}. ${m}`).join('\n') +
           `\n\nExample full call: configure_engine({ service: "${args.service}", containers: ["${args.service}"], target_percent: 30, destination: "cloudwatch", delivery: "stdout_only", read_only: true })`,
