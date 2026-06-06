@@ -67,6 +67,7 @@ import { retrieverQuerySchema, executeRetrieverQuery } from './tools/retriever-q
 import { retrieverSeriesSchema, executeRetrieverSeries } from './tools/retriever-series.js';
 import { retrieverQueryStatusSchema, executeRetrieverQueryStatus } from './tools/retriever-query-status.js';
 import { retrieverProbeSchema, executeRetrieverProbe } from './tools/retriever-probe.js';
+import { retrieverRegisterSchema, executeRetrieverRegister } from './tools/retriever-register.js';
 import { patternDiffSchema, executePatternDiff } from './tools/pattern-diff.js';
 import { whatsChangingSchema, executeWhatsChanging } from './tools/whats-changing.js';
 import { whatsNewSchema, executeWhatsNew } from './tools/whats-new.js';
@@ -118,7 +119,22 @@ import { updateSettingsSchema, executeUpdateSettings } from './tools/update-sett
 import { createEnvSchema, executeCreateEnv } from './tools/create-env.js';
 import { updateEnvSchema, executeUpdateEnv } from './tools/update-env.js';
 import { deleteEnvSchema, executeDeleteEnv } from './tools/delete-env.js';
+import { envRegisterSchema, executeEnvRegister } from './tools/env-register.js';
 import { setGitopsRepoSchema, executeSetGitopsRepo } from './tools/set-gitops-repo.js';
+import {
+  destSetSchema,
+  executeDestSet,
+  envValidateSchema,
+  executeEnvValidate,
+  envDiffVsEnvvarsSchema,
+  executeEnvDiffVsEnvvars,
+} from './tools/env-config-manage.js';
+import {
+  offloadAddSchema,
+  executeOffloadAdd,
+  offloadArchiveSchema,
+  executeOffloadArchive,
+} from './tools/offload-manage.js';
 import { rotateApiKeySchema, executeRotateApiKey } from './tools/rotate-api-key.js';
 import { servicesSchema, executeServices } from './tools/services.js';
 import { overflowContentsSchema, executeOverflowContents } from './tools/overflow-contents.js';
@@ -1109,6 +1125,63 @@ registerLog10xTool('log10x_set_gitops_repo', setGitopsRepoSchema, (args) =>
   })
 );
 
+// ── Tool: log10x_dest_set ──
+// Edit the SIEM destination block on an env-config document. Separate
+// from configure_env (which validates the live metrics backend before
+// writing) so the agent can change destination fields without re-supplying
+// backend credentials.
+
+registerLog10xTool('log10x_dest_set', destSetSchema, (args) =>
+  wrap('log10x_dest_set', async () => {
+    return executeDestSet(args);
+  })
+);
+
+// ── Tool: log10x_env_validate ──
+// Schema + cross-field sanity over a stored env-config document. Catches
+// destination/region mismatches, ingest_url shape issues, cluster-vs-offload
+// type misalignments before downstream tools fail with vendor errors.
+
+registerLog10xTool('log10x_env_validate', envValidateSchema, (args) =>
+  wrap('log10x_env_validate', async () => {
+    return executeEnvValidate(args);
+  })
+);
+
+// ── Tool: log10x_env_diff_vs_envvars ──
+// Compare the stored env doc against the LOG10X_* env vars the bridge
+// would have produced. Surfaces "I set the env var but it's being ignored"
+// drift with per-field recommendations.
+
+registerLog10xTool('log10x_env_diff_vs_envvars', envDiffVsEnvvarsSchema, (args) =>
+  wrap('log10x_env_diff_vs_envvars', async () => {
+    return executeEnvDiffVsEnvvars(args);
+  })
+);
+
+// ── Tool: log10x_offload_add ──
+// Append a new entry to the env-config document's offload_destinations[].
+// Multi-target is the documented use case (drain a legacy bucket while a
+// new one is primary); the schema array stays non-empty by default.
+
+registerLog10xTool('log10x_offload_add', offloadAddSchema, (args) =>
+  wrap('log10x_offload_add', async () => {
+    return executeOffloadAdd(args);
+  })
+);
+
+// ── Tool: log10x_offload_archive ──
+// Flip one destination's status to `archived` (kept in the list as a
+// historical reference). Refuses when the target is the last active
+// destination — the Receiver needs at least one active destination to
+// route the dropped slice to.
+
+registerLog10xTool('log10x_offload_archive', offloadArchiveSchema, (args) =>
+  wrap('log10x_offload_archive', async () => {
+    return executeOffloadArchive(args);
+  })
+);
+
 // ── Tool: log10x_top_patterns ──
 
 registerLog10xTool('log10x_top_patterns', topPatternsSchema, (args) =>
@@ -1263,6 +1336,17 @@ registerLog10xTool('log10x_retriever_query_status', retrieverQueryStatusSchema, 
 
 registerLog10xTool('log10x_retriever_probe', retrieverProbeSchema, (args) =>
   wrap('log10x_retriever_probe', async () => executeRetrieverProbe(args))
+);
+
+// ── Tool: log10x_retriever_register ──
+//
+// Write the Retriever endpoint + queue coordinates onto an existing
+// environment-config document. Requires `log10x_env_register` to have
+// created the env first — refuses on env_not_found rather than
+// stamping a partial document the rest of the schema can't satisfy.
+
+registerLog10xTool('log10x_retriever_register', retrieverRegisterSchema, (args) =>
+  wrap('log10x_retriever_register', async () => executeRetrieverRegister(args))
 );
 
 // ── Tool: log10x_backfill_metric ──
@@ -1421,6 +1505,18 @@ registerLog10xTool('log10x_update_env', updateEnvSchema, (args) =>
 
 registerLog10xTool('log10x_delete_env', deleteEnvSchema, (args) =>
   wrap('log10x_delete_env', async () => executeDeleteEnv(args, getEnvs()))
+);
+
+// ── Tool: log10x_env_register ──
+//
+// Writes a full EnvironmentConfig document (cluster identity, SIEM
+// destination, offload destinations, streamer + retriever endpoints)
+// to whichever on-prem store the customer's cloud uses. Distinct from
+// create_env: that mints account-level identity on the SaaS backend;
+// this writes the cluster-side descriptor every tool resolves against.
+
+registerLog10xTool('log10x_env_register', envRegisterSchema, (args) =>
+  wrap('log10x_env_register', async () => executeEnvRegister(args))
 );
 
 // ── Tool: log10x_rotate_api_key ──
@@ -1715,6 +1811,10 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_update_env', intent: 'Rename an env or change the default — requires backend PUT route (see backend PR #62)' },
   { name: 'log10x_delete_env', intent: 'Delete an env (destructive, irrecoverable) — requires confirm_name matching the env\'s name' },
   { name: 'log10x_set_gitops_repo', intent: 'Write gitops.repo to ~/.log10x/envs.json so configure_engine can author cap-CSV PRs; confirm="set-now" required' },
+  { name: 'log10x_dest_set', intent: 'Update the SIEM destination block (siem_vendor / region / log_group_prefix / ingest_url) on an env-config document; idempotent, validates new doc against schema before write' },
+  { name: 'log10x_env_validate', intent: 'Schema parse + cross-field sanity check on a stored env-config document — region/vendor pairing, ingest_url shape, cluster vs offload type alignment, active-offload presence' },
+  { name: 'log10x_env_diff_vs_envvars', intent: 'Diff stored env-config doc against LOG10X_* env vars — surfaces silent-ignored env vars with per-field remediation; pure-on-prem-store configs return empty diff' },
+  { name: 'log10x_retriever_register', intent: 'Attach the Retriever endpoint + queue coordinates to an existing env-config document. Requires log10x_env_register to have created the env first.' },
   { name: 'log10x_rotate_api_key', intent: 'Rotate the Log10x API key (destructive) — old key invalidated immediately, new one persisted to ~/.log10x/credentials' },
   { name: 'log10x_customer_metrics_query', intent: 'Direct PromQL passthrough to the customer metric backend (escape hatch for cross-pillar investigations)' },
   { name: 'log10x_discover_join', intent: 'Auto-discover the join label between Log10x pattern metrics and the customer metric backend via Jaccard similarity' },
@@ -1734,6 +1834,8 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_pattern_mitigate', intent: 'Return the env-gated mitigation options + exact configs for a pattern (drop @ analyzer, drop @ forwarder, mute @ 10x, compact @ 10x) in user terms with env-capability gating' },
   { name: 'log10x_overflow_contents', intent: 'Contents view of the customer-owned offload S3 bucket — per-pattern bytes, event count, time-first/last-seen, growth-rate; filtered to action=offload via the cap-CSV. Routes the agent to retriever_query for rehydration.' },
   { name: 'log10x_setup_recurring', intent: 'Progressive wizard to configure a recurring cost-reduction agent — target services, savings %, schedule, scheduler (k8s/GHA/crontab), gitops repo — emits policy.yaml + scheduler manifest' },
+  { name: 'log10x_offload_add', intent: 'Append a new offload destination (s3 / gcs / azure_blob / file) to an env-config document\'s offload_destinations[]. Multi-target offload is allowed; nickname must be unique within the list.' },
+  { name: 'log10x_offload_archive', intent: 'Flip an offload destination\'s status to `archived` and stamp archived_at. Kept in the list as a historical reference. Refuses when the target is the only active destination — the Receiver requires at least one.' },
 ];
 
 async function handleCliFlags(): Promise<boolean> {

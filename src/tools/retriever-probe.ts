@@ -16,6 +16,11 @@ import { runRetrieverProbe, type ProbeArgs, type ProbeResult } from '../lib/retr
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { validateStrictArgs } from '../lib/strict-args.js';
 import { getRetrieverState } from '../lib/retriever-state.js';
+import {
+  resolveClusterConfig,
+  pickActiveOffload,
+  detectStaleOffloadEnvVar,
+} from '../lib/env-config/resolve-cluster-config.js';
 
 export const retrieverProbeSchema = {
   namespace: z
@@ -26,7 +31,7 @@ export const retrieverProbeSchema = {
     .string()
     .optional()
     .describe(
-      'S3 bucket the receiver offloads data to (the bucket the retriever indexer reads from). Default: read from LOG10X_STREAMER_BUCKET env.',
+      'S3 bucket the receiver offloads data to (the bucket the retriever indexer reads from). Default: pick the `status="active"` entry from the resolved env-config\'s `offload_destinations[]` (walking K8s ConfigMap → AWS SSM → GCP Secret Manager → Azure App Config → local file in that order). Falls back to the LOG10X_STREAMER_BUCKET / LOG10X_OFFLOAD_BUCKET env var when no env-config is reachable. When the env var disagrees with the resolved value, the env var is ignored AND a stale-env-var warning is emitted on `envelope.warnings`.',
     ),
   input_bucket: z
     .string()
@@ -65,8 +70,37 @@ export async function executeRetrieverProbe(args: {
   );
   if (strict.error) return strict.error;
 
-  // Resolve buckets from defaults / env / retriever state.
-  let offloadBucket = args.offload_bucket ?? process.env.LOG10X_STREAMER_BUCKET;
+  // Resolution chain for offload bucket:
+  //   1. explicit-arg          (args.offload_bucket — caller knows best)
+  //   2. on-prem-store         (env-config doc, active offload destination)
+  //   3. env-var fallback      (LOG10X_STREAMER_BUCKET / LOG10X_OFFLOAD_BUCKET)
+  //   4. fail-loudly           (envelope below explaining what to set)
+  //
+  // Stale-env-var nudge: when the env-config disagrees with the env var, the
+  // store wins and the env var becomes a warning rather than a silent
+  // override. This is the canonical "but I set the env var" footgun.
+  const warnings: string[] = [];
+  let offloadBucket = args.offload_bucket;
+  if (!offloadBucket) {
+    const resolved = await resolveClusterConfig();
+    if (resolved.ok) {
+      const active = pickActiveOffload(resolved.config);
+      if (active?.bucket) {
+        offloadBucket = active.bucket;
+        const stale = detectStaleOffloadEnvVar(active.bucket);
+        if (stale) warnings.push(stale);
+      }
+      for (const w of resolved.stale_env_var_warnings) {
+        if (!warnings.includes(w)) warnings.push(w);
+      }
+    }
+    // Env-var fallback only when the store path produced nothing usable.
+    if (!offloadBucket) {
+      offloadBucket =
+        process.env.LOG10X_OFFLOAD_BUCKET || process.env.LOG10X_STREAMER_BUCKET;
+    }
+  }
+
   let inputBucket = args.input_bucket;
   if (!inputBucket) {
     try {
@@ -90,15 +124,16 @@ export async function executeRetrieverProbe(args: {
       view: 'summary',
       summary: {
         headline:
-          'Retriever end-to-end health check could not run — the S3 buckets it reads from and writes to could not be resolved. Pass offload_bucket and input_bucket explicitly, or set LOG10X_STREAMER_BUCKET and make sure the retriever helm release is reachable.',
+          'Retriever end-to-end health check could not run — the S3 buckets it reads from and writes to could not be resolved. Pass offload_bucket and input_bucket explicitly, register an env-config (log10x_env_register), or set LOG10X_STREAMER_BUCKET and make sure the retriever helm release is reachable.',
       },
       data: {
         verdict: 'unknown',
         reason:
-          'I tried to run an end-to-end health check on the retriever pipeline, but I could not figure out which S3 buckets it reads from and writes to. To run the check: pass offload_bucket and input_bucket explicitly, or set LOG10X_STREAMER_BUCKET and ensure the retriever helm release is reachable so the bucket names can be auto-discovered.',
+          'I tried to run an end-to-end health check on the retriever pipeline, but I could not figure out which S3 buckets it reads from and writes to. To run the check: pass offload_bucket and input_bucket explicitly, register an env-config document so the active offload bucket is resolved automatically, or set LOG10X_STREAMER_BUCKET and ensure the retriever helm release is reachable so the bucket names can be auto-discovered.',
         asserts: [],
         total_runtime_ms: 0,
       },
+      warnings,
     });
   }
 
@@ -119,6 +154,7 @@ export async function executeRetrieverProbe(args: {
       headline: buildHeadline(result),
     },
     data: result,
+    warnings,
   });
 }
 

@@ -166,6 +166,72 @@
       },
       "category": "install"
     },
+    "log10x_dest_set": {
+      "title": "Set SIEM destination on env",
+      "description": "Update the SIEM destination block (siem_vendor, region, log_group_prefix, ingest_url) on a stored env-config document at `~/.log10x/envs/<env_id>.json`. **Call this when** the customer is switching SIEMs, moving regions, repointing the log_group_prefix, or onboarding a new self-hosted ingest_url. Args: `env_id` (required — env_id UUID or nickname), `siem_vendor` (required — one of splunk / datadog / elasticsearch / clickhouse / cloudwatch / azure-monitor / gcp-logging / sumo / other), `region` / `log_group_prefix` / `ingest_url` (all optional). The tool reads the doc, swaps the destination block, re-validates against the canonical zod schema, and writes the updated doc atomically. Idempotent — a no-op edit returns ok:true with empty changes. Pairs naturally with `log10x_env_validate` to confirm the new destination passes cross-field sanity (region required for cloudwatch/datadog/azure-monitor/gcp-logging; ingest_url shape sanity for splunk).",
+      "annotations": {
+        "title": "Set SIEM destination on env",
+        "readOnlyHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "category": "install"
+    },
+    "log10x_env_validate": {
+      "title": "Validate env config doc",
+      "description": "Run schema validation + cross-field sanity checks on a stored env-config document at `~/.log10x/envs/<env_id>.json`. **Call this** after any edit to the env doc (via `log10x_dest_set` / hand-edit / restore) or pre-flight before downstream tools that need a coherent config (commitment_report, configure_engine, offload-recipe emitters). Args: `env_id` (required — env_id UUID or nickname). Returns the canonical zod schema parse result PLUS findings across: destination.region required for vendors that need it (cloudwatch / datadog / azure-monitor / gcp-logging); ingest_url shape sanity (http(s):// prefix, splunk /services/collector suffix); streamer.url / retriever.url shape; cluster cloud type vs offload destination type alignment (eks↔s3, gke↔gcs, aks↔azure_blob); at-least-one active offload destination; SIEM region vs offload destination region (cross-region egress warning). Each finding carries severity (error / warning / info) and a remediation recommendation. Errors block downstream actions; warnings/info surface for the user.",
+      "annotations": {
+        "title": "Validate env config doc",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "category": "install"
+    },
+    "log10x_env_diff_vs_envvars": {
+      "title": "Diff env doc vs LOG10X_* env vars",
+      "description": "Compare the stored env-config document against the `LOG10X_*` environment variables the env-var bridge would have produced, and report per-field disagreements with remediation recommendations. **Call this when** the user says \"but I set the env var\" or downstream tools report a value the user thinks they overrode — the on-prem store wins over env vars per resolver precedence, and silent-override is the most common boot-time surprise. Args: `env_id` (required — env_id UUID or nickname). For each disagreeing field (env_id, nickname, cluster.*, destination.*, streamer.*, retriever.*, offload_destinations[0].*), returns `{ field, stored, envvar, recommendation }`. The recommendation tells the user to either unset the LOG10X_* env var (preferred — on-prem store is the source of truth) or to update the stored doc via the matching setter (log10x_dest_set for destination, log10x_set_gitops_repo for gitops). Pure-on-prem-store configs (no LOG10X_* env vars set) return ok:true with an empty diff and a note that no ambiguity is possible.",
+      "annotations": {
+        "title": "Diff env doc vs LOG10X_* env vars",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "category": "install"
+    },
+    "log10x_offload_add": {
+      "title": "Add offload destination to env",
+      "description": "Append a new entry to an env-config document's `offload_destinations[]` array. **Call this when** the customer is provisioning a new bucket for the Receiver to drain the `isDropped` slice into — a brand-new offload target, a regional bucket alongside an existing primary, or a second destination during a bucket-rotation. Args: `env_id` (required — env_id UUID or nickname), `nickname` (required — must be unique within the env's offload_destinations list), `type` (required — one of s3 / gcs / azure_blob / file), `bucket` / `prefix` / `region` / `auth` (optional, type-specific), `status` (optional, defaults to `active`). Resolves the env-config document via the store chain (k8s ConfigMap → AWS SSM → GCP Secret Manager → Azure App Config → local file) and writes the mutated document back to the same store. Refuses on nickname collision so the operator can address destinations by label. Multi-target is the documented use case — the schema allows multiple `active` destinations so a legacy bucket can be drained while a new one is primary. Pairs with `log10x_env_validate` to confirm cluster-type ↔ destination-type alignment (eks↔s3, gke↔gcs, aks↔azure_blob) after the write.",
+      "annotations": {
+        "title": "Add offload destination to env",
+        "readOnlyHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
+      "category": "install"
+    },
+    "log10x_offload_archive": {
+      "title": "Archive offload destination on env",
+      "description": "Flip one offload destination's `status` to `archived` on an env-config document and stamp `archived_at`. The entry is NOT removed from the list — it stays as a historical reference (e.g. for retroactive Retriever scans of the legacy bucket). **Call this when** the customer is rotating out a bucket and wants the Receiver to stop writing to it, but keep the bucket's existence in the document so audits and stale-pointer fetches still resolve. Args: `env_id` (required — env_id UUID or nickname), `nickname` (required — must match an existing destination exactly), `archived_at` (optional ISO-8601 timestamp, defaults to now), `note` (optional free-form note appended to the destination). **REFUSES when the target is the only active destination on the env** — the Receiver requires at least one active offload destination to route the dropped slice to, and silently stranding offload traffic is the failure mode this guard prevents. The error envelope names the non-active destinations so the agent can advise the user to activate one first (call `log10x_offload_add` or hand-edit a `draining`/`failed` entry back to `active`).",
+      "annotations": {
+        "title": "Archive offload destination on env",
+        "readOnlyHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
+      "category": "install"
+    },
+    "log10x_retriever_register": {
+      "title": "Register Retriever on env",
+      "description": "Attach the Retriever endpoint + queue coordinates to an existing environment-config document. **Call this after `log10x_advise_retriever` has produced the install plan and the user has deployed the Retriever.** Args: `env_id` (required — must already exist in the env-config store), `url` (required — Retriever query endpoint), `input_bucket` (required — S3 archive bucket), `query_queues` (required — the four SQS queues: `index`, `subquery`, `stream`, `query`), `input_prefix` (optional), `query_log_group` (optional CloudWatch log group), `helm_release` (optional `{name, namespace, chart_version?}`). Refuses with `env_not_found` if the env does not exist — the agent should call `log10x_env_register` first. Idempotent: re-running with the same env_id replaces the retriever block in place and refreshes `updated_at`. After success, follow up with `log10x_retriever_probe` to verify the endpoint is reachable.",
+      "annotations": {
+        "title": "Register Retriever on env",
+        "readOnlyHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "category": "install"
+    },
     "log10x_top_patterns": {
       "title": "Top patterns",
       "description": "Return the top N log patterns ranked by byte volume (with cost overlay when $/GB is set), optionally with a delta column vs a `comparison_window` baseline (week-over-week / day-over-day / 1h-vs-prior-1h). Use for \"what is expensive right now\", \"what are the noisy patterns in <service> this hour\", \"give me a snapshot of my loudest events\", \"what changed this week\", \"did the deploy add cost\". Can be scoped by service label. `timeRange` accepts free-form `<n><m|h|d>` durations (e.g., `48h`, `3d`, `15m`) — there's no enum snap. Pass `comparison_window` to get a per-row delta column; omit for current-rank-only. Pass `include` to choose which cohort to rank: `admitted` (default — what the receiver let through), `dropped` (the offloaded / overflow cohort alone), or `both` (total ingest pre-receiver). Use `dropped` for \"what is the receiver throwing away\" and `both` for an apples-to-apples pre/post comparison.",
@@ -394,6 +460,17 @@
         "title": "Delete environment",
         "readOnlyHint": false,
         "destructiveHint": true,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "category": "account"
+    },
+    "log10x_env_register": {
+      "title": "Register environment descriptor",
+      "description": "Persist a full EnvironmentConfig document — cluster identity, SIEM destination, offload destinations, streamer + retriever endpoints — to whichever on-prem env-config store the customer's cloud uses (Kubernetes ConfigMap, AWS SSM, GCP Secret Manager, Azure App Configuration, or a local file for dev). **Distinct from log10x_create_env**: that mints account-level identity on the SaaS backend; this writes the cluster-side descriptor every tool resolves against when it needs the streamer URL, retriever URL, SIEM kind, or offload bucket. **Call this for**: \"register my new cluster with log10x\", \"persist the env descriptor for prod\", \"wire up the staging cluster's env config\". Validates the document against the schema before any store write — partial writes are not allowed. Pin a backend with `target_store` to refuse silent fallback; omit it for first-available auto-pick (k8s → aws_ssm → gcp_sm → azure_ac → local).",
+      "annotations": {
+        "title": "Register environment descriptor",
+        "readOnlyHint": false,
         "idempotentHint": true,
         "openWorldHint": true
       },

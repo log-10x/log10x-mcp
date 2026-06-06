@@ -47,6 +47,12 @@ import { acquireLicenseForWizard, LicenseFetchError } from '../lib/license-api.j
 import { buildEnvelope, type StructuredOutput, type ActionRole } from '../lib/output-types.js';
 import type { WizardSession } from '../lib/discovery/types.js';
 import type { AdvisePlanSummary } from '../lib/advisor/envelope.js';
+import {
+  resolveClusterConfig,
+  pickActiveOffload,
+  detectStaleOffloadEnvVar,
+  detectStaleEnvVarForField,
+} from '../lib/env-config/resolve-cluster-config.js';
 
 // ── Schema ──────────────────────────────────────────────────────────────────
 
@@ -393,8 +399,15 @@ function findClosestKnownArg(unknown: string): string | null {
 
 // ── wizardReturn ─────────────────────────────────────────────────────────────
 
-function wizardReturn(data: RetrieverWizardData): StructuredOutput {
+function wizardReturn(data: RetrieverWizardData, extraWarnings: string[] = []): StructuredOutput {
   const { headline, actions, warnings } = wizardEnvelopeMeta(data);
+  // De-duplicate while preserving order — wizardEnvelopeMeta sometimes adds
+  // its own warnings (license-fetch failure, demo license) that may overlap
+  // with env-config advisories the caller passes through.
+  const combined: string[] = [];
+  for (const w of [...warnings, ...extraWarnings]) {
+    if (!combined.includes(w)) combined.push(w);
+  }
   const human_summary = buildRetrieverWizardHumanSummary(data, headline);
   return buildEnvelope({
     tool: TOOL_NAME,
@@ -402,7 +415,7 @@ function wizardReturn(data: RetrieverWizardData): StructuredOutput {
     summary: { headline },
     data: { ...data, human_summary },
     actions,
-    warnings,
+    warnings: combined,
   });
 }
 
@@ -1496,9 +1509,36 @@ export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise
   // release — snapshot.recommendations.retrieverS3Bucket is the demo-cloud
   // bucket (tenx-demo-cloud-retriever-*) and would override the real value.
   const installedNamespace = snapshot.recommendations.installedComponentsDetail?.retriever?.namespace;
+
+  // Env-config resolution chain. The wizard's verify-plan bucket / queue
+  // / IRSA references should come from the resolved env-config document
+  // when the session + snapshot didn't already supply them. Precedence:
+  //
+  //   explicit-arg (session field) > on-prem-store > env-var fallback > fail-loudly
+  //
+  // StoreKind discovery order: K8s → AWS SSM → GCP Secret Manager →
+  // Azure App Config → local file. Stale-env-var warnings are collected
+  // and forwarded onto the envelope so the user sees the "I set the env
+  // var but it's being ignored" nudge.
+  const envConfigWarnings: string[] = [];
+  const envCfgResolved = await resolveClusterConfig().catch(() => undefined);
+  const envCfgDoc = envCfgResolved?.ok ? envCfgResolved.config : undefined;
+  if (envCfgResolved?.ok) {
+    for (const w of envCfgResolved.stale_env_var_warnings) {
+      if (!envConfigWarnings.includes(w)) envConfigWarnings.push(w);
+    }
+  }
+  const envCfgActiveOffload = envCfgDoc ? pickActiveOffload(envCfgDoc) : undefined;
+
   const resolvedInputBucket =
     session.inputBucket
-    ?? (installedNamespace ? undefined : snapshot.recommendations.retrieverS3Bucket);
+    ?? (installedNamespace ? undefined : snapshot.recommendations.retrieverS3Bucket)
+    // env-config fallback: the active offload destination IS the input bucket
+    // for the retriever (receiver writes there, retriever reads from there).
+    ?? envCfgActiveOffload?.bucket
+    // last-ditch env-var fallback before letting buildRetrieverPlan fail loudly.
+    ?? process.env.LOG10X_OFFLOAD_BUCKET
+    ?? process.env.LOG10X_STREAMER_BUCKET;
   const resolvedIrsaRoleArn =
     session.irsaRoleArn ??
     snapshot.kubectl.serviceAccountIrsa.find(
@@ -1507,11 +1547,36 @@ export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise
         sa.name.toLowerCase().includes('tenx-retriever')
     )?.roleArn;
   const resolvedSqsUrls = {
-    index: session.sqsIndexUrl ?? detectedQueues.index,
-    query: session.sqsQueryUrl ?? detectedQueues.query,
-    subquery: session.sqsSubqueryUrl ?? detectedQueues.subquery,
-    stream: session.sqsStreamUrl ?? detectedQueues.stream,
+    index: session.sqsIndexUrl ?? detectedQueues.index ?? envCfgDoc?.retriever.query_queues.index,
+    query: session.sqsQueryUrl ?? detectedQueues.query ?? envCfgDoc?.retriever.query_queues.query,
+    subquery: session.sqsSubqueryUrl ?? detectedQueues.subquery ?? envCfgDoc?.retriever.query_queues.subquery,
+    stream: session.sqsStreamUrl ?? detectedQueues.stream ?? envCfgDoc?.retriever.query_queues.stream,
   };
+
+  // Stale-env-var nudges specific to bucket + retriever fields. These detect
+  // the case where the env-config doc has the canonical value but a
+  // LOG10X_* env var is still set to something different — the store wins
+  // silently, which is exactly the bug we want to flag.
+  if (envCfgDoc) {
+    const offloadStale = detectStaleOffloadEnvVar(envCfgActiveOffload?.bucket);
+    if (offloadStale && !envConfigWarnings.includes(offloadStale)) envConfigWarnings.push(offloadStale);
+    const retrieverInputStale = detectStaleEnvVarForField(
+      'retriever.input_bucket',
+      envCfgDoc.retriever.input_bucket,
+      'LOG10X_RETRIEVER_INPUT_BUCKET'
+    );
+    if (retrieverInputStale && !envConfigWarnings.includes(retrieverInputStale)) {
+      envConfigWarnings.push(retrieverInputStale);
+    }
+    const retrieverUrlStale = detectStaleEnvVarForField(
+      'retriever.url',
+      envCfgDoc.retriever.url,
+      'LOG10X_RETRIEVER_URL'
+    );
+    if (retrieverUrlStale && !envConfigWarnings.includes(retrieverUrlStale)) {
+      envConfigWarnings.push(retrieverUrlStale);
+    }
+  }
 
   const action = args.action ?? 'all';
   const plan = await buildRetrieverPlan({
@@ -1554,7 +1619,7 @@ export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise
   // all), not just install. renderPlan gates offloadMarkdown on install/all
   // but includes retrieverAccessMarkdown for every action.
   const planMarkdown = renderPlan(plan, action);
-  return wizardReturn({ ...summary, mode: 'plan', markdown: planMarkdown });
+  return wizardReturn({ ...summary, mode: 'plan', markdown: planMarkdown }, envConfigWarnings);
 }
 
 // ── License reason copy ───────────────────────────────────────────────────────

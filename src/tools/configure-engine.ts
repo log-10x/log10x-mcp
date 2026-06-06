@@ -82,6 +82,7 @@ import {
   buildActionIntentEntries,
   type ActionIntentEntry,
 } from '../lib/action-intent-writer.js';
+import { resolveClusterConfig } from '../lib/env-config/resolve-cluster-config.js';
 
 // ─── constants ────────────────────────────────────────────────────────
 const DEFAULT_LOOKUP_PATH = 'pipelines/run/receive/rate/caps.csv';
@@ -1221,6 +1222,31 @@ async function resolveTarget(
   }
   if (!envId && typeof process.env.LOG10X_ENV_ID === 'string' && process.env.LOG10X_ENV_ID) {
     envId = process.env.LOG10X_ENV_ID;
+  }
+
+  // 1b. Env-config doc destination (closes the auto-detect bug — most active
+  //     envs in `~/.log10x/envs.json` do NOT carry a `destination` field, but
+  //     the env-config document persisted to the on-prem store ALWAYS does,
+  //     because the schema requires it). Resolution chain matches every other
+  //     env-config-aware tool: explicit-arg > on-prem-store > env-var fallback.
+  //     We've already honored the explicit arg above; here we consult the
+  //     store before giving up on auto-detect.
+  if (!destination) {
+    try {
+      const resolved = await resolveClusterConfig({ envIdOrNickname: envId });
+      if (resolved.ok && resolved.config.destination?.siem_vendor) {
+        const vendor = resolved.config.destination.siem_vendor;
+        // env-config siem_vendor enum is a superset of the SiemId enum
+        // (`azure-monitor` / `gcp-logging` are in both; `other` is not a
+        // valid SiemId so it stays unresolved and we fall through to the
+        // "destination not resolved" error below).
+        if (vendor !== 'other') {
+          destination = vendor as SiemId;
+        }
+      }
+    } catch {
+      // non-fatal — fall through to snapshot / explicit args / "not resolved"
+    }
   }
 
   // 2. Snapshot fallback.

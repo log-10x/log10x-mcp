@@ -32,6 +32,12 @@ import { resolveBackend, formatDetectionTrace } from '../lib/customer-metrics.js
 import { type StructuredOutput } from '../lib/output-types.js';
 import { tenxAvailabilityHint } from '../lib/install-hints.js';
 import { newChassisTelemetry, buildChassisEnvelope } from '../lib/chassis-envelope.js';
+import {
+  resolveClusterConfig,
+  pickActiveOffload,
+  detectStaleOffloadEnvVar,
+  detectStaleEnvVarForField,
+} from '../lib/env-config/resolve-cluster-config.js';
 
 export type CheckStatus = 'pass' | 'warn' | 'fail';
 
@@ -233,6 +239,16 @@ export async function runDoctorChecks(envNickname?: string): Promise<DoctorRepor
 
 /** Checks that apply independent of a specific environment. */
 async function addInfrastructureChecks(checks: DoctorCheck[]): Promise<void> {
+  // Env-config resolution probe. Walks the StoreKind discovery order (K8s
+  // ConfigMap → AWS SSM → GCP Secret Manager → Azure App Config → local file)
+  // and reports which store served the document, plus any LOG10X_* env vars
+  // that disagree with the resolved values. The disagreements are surfaced
+  // here as advisory `warn` checks rather than silently winning — that's the
+  // canonical "but I set the env var" footgun for offload_bucket / streamer.url
+  // / retriever.input_bucket. Sits BEFORE the retriever probes because they
+  // (advise_retriever, retriever_probe) will read the same document.
+  await addEnvConfigResolutionCheck(checks);
+
   // Retriever endpoint configured? (informational, not required)
   const retrieverRes = await resolveRetriever().catch((e) => ({
     url: undefined,
@@ -285,6 +301,111 @@ async function addInfrastructureChecks(checks: DoctorCheck[]): Promise<void> {
   // Skip when the retriever is not installed (retriever_endpoint already warned).
   if (retrieverRes.url && retrieverRes.bucket && retrieverRes.detectionPath) {
     await addRetrieverCwLoggingCheck(checks);
+  }
+}
+
+/**
+ * Resolve the env-config document via the StoreKind chain (k8s → AWS SSM →
+ * GCP Secret Manager → Azure App Config → local file) and surface:
+ *   - which store served the document (`pass` when resolved)
+ *   - any LOG10X_* env var that disagrees with a resolved field (`warn`)
+ *
+ * The check NEVER fails — a missing env-config is a `warn`, not a `fail`,
+ * because tools fall through to LOG10X_* env vars when no store is reachable.
+ * Failing here would block doctor on a state every other tool tolerates.
+ */
+async function addEnvConfigResolutionCheck(checks: DoctorCheck[]): Promise<void> {
+  let resolved;
+  try {
+    resolved = await resolveClusterConfig();
+  } catch (e) {
+    checks.push({
+      name: 'env_config_resolution',
+      status: 'warn',
+      message: `Env-config resolver threw: ${(e as Error).message}`,
+      fix: 'Confirm one of the on-prem stores (K8s ConfigMap, AWS SSM, GCP Secret Manager, Azure App Config, ~/.log10x/envs) is reachable, or set the LOG10X_* env vars as a fallback.',
+    });
+    return;
+  }
+  if (!resolved.ok) {
+    // Render the per-store trace inline so the user sees exactly which
+    // stores were tried and why each was skipped.
+    const traceLines = resolved.resolution_trace
+      .map(t => `  - ${t.source}: ${t.status} (${t.reason})`)
+      .join('\n');
+    checks.push({
+      name: 'env_config_resolution',
+      status: 'warn',
+      message:
+        `No env-config document resolved (every store in the chain reported unavailable or had no matching document). ` +
+        `Tools that need cluster identifiers (retriever_probe, advise_retriever, configure_engine destination auto-detect) ` +
+        `will fall back to LOG10X_* env vars.\n\nResolution trace:\n${traceLines || '  (empty)'}`,
+      fix:
+        'Either register an env-config document via log10x_env_register (writes to whichever store is available) ' +
+        'or set the minimal LOG10X_* env-var set (LOG10X_ENV_ID, LOG10X_CLUSTER_TYPE, LOG10X_SIEM_VENDOR, LOG10X_OFFLOAD_TYPE, LOG10X_OFFLOAD_BUCKET, LOG10X_STREAMER_URL, LOG10X_RETRIEVER_URL + four LOG10X_RETRIEVER_Q_* queue URLs).',
+    });
+    return;
+  }
+
+  const cfg = resolved.config;
+  const storeKind = resolved.source_store_kind ?? '(env-var fallback)';
+  const active = pickActiveOffload(cfg);
+  const advisories: string[] = [];
+
+  // Pull warnings the resolver already detected (env_id / nickname /
+  // streamer.url / retriever.url / retriever.input_bucket /
+  // destination.siem_vendor disagreements). The resolver only checks fields
+  // it ALSO accepts from env-var fallback, so we add a couple of extras
+  // below that the resolver doesn't cover (active offload bucket — the
+  // LOG10X_STREAMER_BUCKET / LOG10X_OFFLOAD_BUCKET pair specifically).
+  for (const w of resolved.stale_env_var_warnings) advisories.push(w);
+
+  const offloadStale = detectStaleOffloadEnvVar(active?.bucket);
+  if (offloadStale) advisories.push(offloadStale);
+
+  const retrieverInputStale = detectStaleEnvVarForField(
+    'retriever.input_bucket',
+    cfg.retriever.input_bucket,
+    'LOG10X_RETRIEVER_INPUT_BUCKET'
+  );
+  if (retrieverInputStale) advisories.push(retrieverInputStale);
+
+  const retrieverUrlStale = detectStaleEnvVarForField(
+    'retriever.url',
+    cfg.retriever.url,
+    'LOG10X_RETRIEVER_URL'
+  );
+  if (retrieverUrlStale) advisories.push(retrieverUrlStale);
+
+  const streamerUrlStale = detectStaleEnvVarForField(
+    'streamer.url',
+    cfg.streamer.url,
+    'LOG10X_STREAMER_URL'
+  );
+  if (streamerUrlStale) advisories.push(streamerUrlStale);
+
+  const summary =
+    `Env-config resolved from ${storeKind} store (source: ${resolved.source}). ` +
+    `env_id="${cfg.env_id}" nickname="${cfg.nickname}" ` +
+    `destination.siem_vendor="${cfg.destination.siem_vendor}" ` +
+    `active_offload="${active?.nickname ?? '(none)'}/${active?.bucket ?? '?'}" ` +
+    `retriever.input_bucket="${cfg.retriever.input_bucket}".`;
+
+  if (advisories.length > 0) {
+    checks.push({
+      name: 'env_config_resolution',
+      status: 'warn',
+      message: `${summary}\n\n${advisories.length} stale-env-var advisor${advisories.length === 1 ? 'y' : 'ies'}:\n${advisories.map(w => `  - ${w}`).join('\n')}`,
+      fix:
+        'Unset the listed LOG10X_* env vars (or update the env-config document to match) so the on-prem store stays the single source of truth. ' +
+        'Tools always prefer the store; the env var becomes a no-op the moment it disagrees.',
+    });
+  } else {
+    checks.push({
+      name: 'env_config_resolution',
+      status: 'pass',
+      message: summary,
+    });
   }
 }
 
