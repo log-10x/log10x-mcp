@@ -176,7 +176,7 @@ export const configureEngineSchema = {
     .enum(DESTINATION_ENUM)
     .optional()
     .describe(
-      'Destination SIEM. Auto-detected from active env / snapshot recommendations when omitted; if auto-detect fails the tool returns a structured not-configured envelope.'
+      'Destination log platform. Auto-detect only works when a `snapshot_id` from log10x_discover_env is supplied (the snapshot carries `recommendations.destination`) or when the active env in `~/.log10x/envs.json` explicitly sets a `destination` field. Most active envs do NOT carry that field, so for typical use you should pass `destination` explicitly: `splunk` | `datadog` | `elasticsearch` | `clickhouse` | `cloudwatch` | `azure-monitor` | `gcp-logging` | `sumo`.'
     ),
   es_pruned: z
     .boolean()
@@ -385,6 +385,35 @@ interface ConfigureEngineData {
 export async function executeConfigureEngine(
   args: ConfigureEngineArgs
 ): Promise<string | StructuredOutput> {
+  // ── Aggregated preflight ──
+  // Surface ALL missing required-for-this-mode args in one envelope
+  // instead of bouncing the caller back per-arg (the prior behavior cost
+  // 3-4 round-trips before the first useful response). The detailed
+  // single-arg messages stay in place below as a safety net for partial
+  // calls; the preflight just shortcuts the common "first attempt with
+  // no scoping" case.
+  if (args.mode !== 'refresh') {
+    const missing: string[] = [];
+    if (args.target_percent === undefined && args.budget_usd === undefined) {
+      missing.push('`target_percent: 30` (or `budget_usd: 1500`) — exactly one is required');
+    }
+    if (!args.destination && !args.snapshot_id) {
+      missing.push('`destination: "cloudwatch"` (or splunk/datadog/elasticsearch/clickhouse/azure-monitor/gcp-logging/sumo)');
+    }
+    if (!args.containers || args.containers.length === 0) {
+      missing.push('`containers: ["<container_name>"]` — Phase 1 needs at least one. If you do not know the container, omit it and the tool will list candidates after this preflight clears.');
+    }
+    if (missing.length >= 2) {
+      return notConfiguredEnvelope(
+        'preflight',
+        `configure_engine needs ${missing.length} more args to derive a policy. Pass these in one call instead of bouncing back per-arg:\n\n` +
+          missing.map((m, i) => `${i + 1}. ${m}`).join('\n') +
+          `\n\nExample full call: configure_engine({ service: "${args.service}", containers: ["${args.service}"], target_percent: 30, destination: "cloudwatch", delivery: "stdout_only", read_only: true })`,
+        args.service
+      );
+    }
+  }
+
   // ── Refresh-mode preamble resolution ──
   // In refresh mode, the committed target lives in the cap-CSV preamble.
   // Pull it out before cross-validating target_percent so that a refresh
