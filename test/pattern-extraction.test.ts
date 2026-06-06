@@ -77,11 +77,17 @@ test('extractPatterns coerces object events by common fields', async () => {
 });
 
 test('extractPatterns privacy_mode without tenx throws DevCliNotInstalledError', async () => {
+  // Post-chassis refactor: the stdin privacy-mode path (runDevCliStdin) now
+  // guards on the API key BEFORE checking for the tenx binary, so a box with
+  // neither tenx nor LOG10X_API_KEY hits the config-missing guard first. That
+  // DevCliConfigMissingError is re-wrapped by extractPatterns' catch block as
+  // "Local tenx CLI run failed: LOG10X_API_KEY is not configured...".
   await assert.rejects(
     async () => {
       await extractPatterns(['ERROR something broke'], { privacyMode: true });
     },
-    (e: Error) => e.name === 'DevCliNotInstalledError' || /not installed/i.test(e.message)
+    (e: Error) =>
+      /CLI.*run failed/i.test(e.message) || /LOG10X_API_KEY is not configured/i.test(e.message)
   );
 });
 

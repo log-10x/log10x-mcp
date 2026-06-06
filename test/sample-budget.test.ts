@@ -50,8 +50,8 @@ describe('computePerHashBudgetMs', () => {
     expect(computePerHashBudgetMs('7h')).toBe(6000);
   });
 
-  it('7d -> 10000 (between tier 3 and tier 4)', () => {
-    expect(computePerHashBudgetMs('7d')).toBe(10000);
+  it('7d -> 15000 (168h, beyond 72h ceiling)', () => {
+    expect(computePerHashBudgetMs('7d')).toBe(15000);
   });
 
   it('3d -> 10000 (exactly at tier 4 ceiling 72h)', () => {

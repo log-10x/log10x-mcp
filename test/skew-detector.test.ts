@@ -39,7 +39,10 @@ test('findSkew: surfaces high-skew slot above threshold', () => {
       symbolMessage: 'sm1',
       count: 1000,
       bytes: 100000,
-      variables: { verb: ['get'] }, // 100% dominance
+      // Two distinct values: the detector now requires distinctCount > 1,
+      // and inverse-rank weighting gives the top value ~2/3 dominance
+      // (1 / (1 + 1/2) = 0.667) — above the 0.6 threshold.
+      variables: { verb: ['get', 'post'] },
     }),
   ];
   const out = findSkew(patterns);
@@ -48,9 +51,9 @@ test('findSkew: surfaces high-skew slot above threshold', () => {
   assert.equal(finding.skewedSlots.length, 1);
   assert.equal(finding.skewedSlots[0]!.slotName, 'verb');
   assert.equal(finding.skewedSlots[0]!.dominantValue, 'get');
-  assert.equal(finding.skewedSlots[0]!.dominantPct, 1.0);
-  // Sampling at 1/10 the dominant value drops (1 - 0.1) × 1.0 = 90% of events.
-  assert.ok(finding.samplingOpportunityPct > 0.85);
+  assert.equal(finding.skewedSlots[0]!.dominantPct, 0.667);
+  // Sampling at 1/10 the dominant value drops (1 - 0.1) × 0.667 ≈ 60% of events.
+  assert.ok(finding.samplingOpportunityPct > 0.55);
 });
 
 test('findSkew: ranks by bytes × dominance', () => {
@@ -60,14 +63,14 @@ test('findSkew: ranks by bytes × dominance', () => {
       symbolMessage: 'sm-small',
       count: 100,
       bytes: 1000, // small
-      variables: { verb: ['get'] },
+      variables: { verb: ['get', 'post'] },
     }),
     mk({
       hash: 'h2',
       symbolMessage: 'sm-big',
       count: 1000,
       bytes: 100000, // big
-      variables: { verb: ['get'] },
+      variables: { verb: ['get', 'post'] },
     }),
   ];
   const out = findSkew(patterns);
@@ -99,7 +102,7 @@ test('findSkew: respects topN cap', () => {
       symbolMessage: `sm${i}`,
       count: 100 + i,
       bytes: 10000,
-      variables: { verb: ['get'] },
+      variables: { verb: ['get', 'post'] },
     })
   );
   const out = findSkew(patterns, { topN: 5 });

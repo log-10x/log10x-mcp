@@ -35,18 +35,20 @@ pat:ghi789,512::high-volume noise:drop
 
   const container = parsed.by_container.get('payment-service');
   assert.ok(container);
-  assert.equal(container.action, 'compact');
+  // Action routing moved to action-intent.json; the legacy `:action` suffix is
+  // preserved (diagnostics only) in legacy_action_suffix.
+  assert.equal(container.legacy_action_suffix, 'compact');
   assert.equal(container.bytes_cap, 2048);
   assert.equal(container.isContainerDefault, true);
 
   const pat = parsed.by_pattern.get('abc123');
   assert.ok(pat);
-  assert.equal(pat.action, 'pass');
+  assert.equal(pat.legacy_action_suffix, 'pass');
   assert.equal(pat.bytes_cap, 4096);
   assert.equal(pat.isContainerDefault, false);
 
-  assert.equal(parsed.by_pattern.get('def456')?.action, 'tier_down');
-  assert.equal(parsed.by_pattern.get('ghi789')?.action, 'drop');
+  assert.equal(parsed.by_pattern.get('def456')?.legacy_action_suffix, 'tier_down');
+  assert.equal(parsed.by_pattern.get('ghi789')?.legacy_action_suffix, 'drop');
   assert.equal(parsed.malformed_lines.length, 0);
 });
 
@@ -65,27 +67,28 @@ weirdshape
   assert.ok(parsed.malformed_lines.length >= 3);
 });
 
-test('parseCapCsv: missing action suffix defaults to drop with flag', () => {
+test('parseCapCsv: new-format row (no legacy :action suffix) leaves legacy_action_suffix undefined', () => {
   const csv = `container,cap
 legacy-container,1024::pre-action-suffix-reason
 `;
   const parsed = parseCapCsv(csv);
   assert.equal(parsed.rows.length, 1);
   const row = parsed.rows[0];
-  assert.equal(row.action, 'drop');
-  assert.equal(row.action_suffix_missing, true);
+  // No legacy `:action` suffix present → undefined (the parser no longer
+  // fabricates a default action; routing lives in action-intent.json).
+  assert.equal(row.legacy_action_suffix, undefined);
   assert.equal(row.reason, 'pre-action-suffix-reason');
 });
 
-test('parseCapCsv: missing :: separator (just bytes) parses as drop', () => {
+test('parseCapCsv: missing :: separator (just bytes) parses with no reason or suffix', () => {
   const csv = `container,cap
 bare-cap,4096
 `;
   const parsed = parseCapCsv(csv);
   assert.equal(parsed.rows.length, 1);
   const row = parsed.rows[0];
-  assert.equal(row.action, 'drop');
-  assert.equal(row.action_suffix_missing, true);
+  assert.equal(row.legacy_action_suffix, undefined);
+  assert.equal(row.reason, '');
   assert.equal(row.bytes_cap, 4096);
 });
 

@@ -139,7 +139,9 @@ test('no pass mode id exists — renamed to observe_only', () => {
 
 test('observe_only routes to log10x_estimate_savings with default_action=pass (backend token)', () => {
   const caps = fullCaps();
-  const modes = buildModes(caps, 'splunk', {});
+  // default_action is only emitted on the greedy-solver route (target_percent set);
+  // with no target_percent the args carry only destination/service.
+  const modes = buildModes(caps, 'splunk', { target_percent: 30 });
   const observeOnly = modes.find((m) => m.id === 'observe_only')!;
   assert.equal(observeOnly.routes_to.tool, 'log10x_estimate_savings');
   assert.equal(observeOnly.routes_to.args.default_action, 'pass');

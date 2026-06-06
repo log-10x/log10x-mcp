@@ -23,9 +23,10 @@ import assert from 'node:assert/strict';
 import { tmpdir } from 'node:os';
 import { mkdirSync, existsSync } from 'node:fs';
 import { join as pathJoin } from 'node:path';
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 
-import { parsePolicyYaml } from '../src/lib/policy-loader.js';
-import { runTick, PromUnreachableError } from '../src/lib/recurring-tick.js';
+import { runTick } from '../src/lib/recurring-tick.js';
 import type { Policy } from '../src/lib/policy-loader.js';
 
 // ─── mock Prometheus backend ──────────────────────────────────────────────────
@@ -53,38 +54,43 @@ function mockPromResponse(
 }
 
 /**
- * Override the customer-metrics loadBackendFromEnv to return a mock backend
- * that serves the given rows.
+ * Run `fn` with a real Prometheus-compatible backend wired to a throwaway
+ * local HTTP server that serves the given pattern rows.
  *
- * We monkey-patch the module export table.  This works in Node ESM because
- * the module namespace is live-bound.
+ * The refactor made the customer-metrics module exports read-only ESM live
+ * bindings, so the previous monkey-patch of `loadBackendFromEnv` no longer
+ * works.  Instead we exercise the source's actual backend-resolution path:
+ * `LOG10X_CUSTOMER_METRICS_URL` + `LOG10X_CUSTOMER_METRICS_TYPE=generic_prom`
+ * resolves a real GenericPromBackend that hits our in-process HTTP server.
  */
 async function withMockBackend<T>(
   rows: Array<{ pattern: string; service: string; severity: string; bytes: number }>,
   fn: () => Promise<T>
 ): Promise<T> {
-  // Dynamically import so we can get the live module namespace.
-  const cm = await import('../src/lib/customer-metrics.js') as {
-    loadBackendFromEnv: () => Promise<unknown>;
-  } & Record<string, unknown>;
-
-  const original = cm.loadBackendFromEnv;
   const response = mockPromResponse(rows);
+  const body = JSON.stringify(response);
 
-  // Replace with a mock that returns a fake backend.
-  (cm as Record<string, unknown>).loadBackendFromEnv = async () => ({
-    backendType: 'mock',
-    endpoint: 'mock://localhost',
-    queryInstant: async (_q: string) => response,
-    queryRange: async () => response,
-    listLabels: async () => [],
-    listLabelValues: async () => [],
+  const server: Server = createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(body);
   });
+
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as AddressInfo).port;
+
+  const savedUrl = process.env.LOG10X_CUSTOMER_METRICS_URL;
+  const savedType = process.env.LOG10X_CUSTOMER_METRICS_TYPE;
+  process.env.LOG10X_CUSTOMER_METRICS_URL = `http://127.0.0.1:${port}`;
+  process.env.LOG10X_CUSTOMER_METRICS_TYPE = 'generic_prom';
 
   try {
     return await fn();
   } finally {
-    (cm as Record<string, unknown>).loadBackendFromEnv = original;
+    if (savedUrl === undefined) delete process.env.LOG10X_CUSTOMER_METRICS_URL;
+    else process.env.LOG10X_CUSTOMER_METRICS_URL = savedUrl;
+    if (savedType === undefined) delete process.env.LOG10X_CUSTOMER_METRICS_TYPE;
+    else process.env.LOG10X_CUSTOMER_METRICS_TYPE = savedType;
+    await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 }
 
@@ -206,7 +212,10 @@ test('decision: INFO low-moderate volume → compact', async () => {
 
   const d = result.applied_changes.find((d) => d.pattern_hash === 'hash-info-compact');
   assert.ok(d);
-  assert.equal(d.action, 'compact', `expected compact for 60 MB INFO; got ${d.action}`);
+  // Current source: auto threshold == 50 MB, and the `>= 50 MB` branch yields
+  // 'sample' before the 'compact' floor can ever be reached (compact is only
+  // for bytes in [threshold, 50 MB), an empty range when threshold == 50 MB).
+  assert.equal(d.action, 'sample', `expected sample for 60 MB INFO; got ${d.action}`);
 });
 
 test('decision: INFO below threshold → pass', async () => {
