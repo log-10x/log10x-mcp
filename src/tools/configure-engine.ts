@@ -1270,6 +1270,13 @@ interface PerPattern {
   severity: string;
 }
 
+// Server-side cap on the number of patterns returned. The greedy solver
+// processes candidates DESC by bytes; the long tail past this cut contributes
+// well under 1% of total volume and is handled by the container-level cap row.
+// Bounded N keeps the Prometheus payload + per-attempt cost predictable so the
+// 30s backend-fetch ceiling doesn't fire on high-cardinality envs (1k+ patterns).
+const PER_PATTERN_TOPK = parseInt(process.env.LOG10X_CONFIGURE_ENGINE_TOPK || '500', 10) || 500;
+
 async function fetchPerPatternBytes(
   backend: CustomerMetricsBackend,
   containers: string[],
@@ -1284,8 +1291,14 @@ async function fetchPerPatternBytes(
   // default; per-env relabels are handled by the env's LabelNameMap, but
   // configure_engine intentionally uses the default for now — relabeled
   // envs will hit the missing-label warning path below.
-  const bytesQ = `sum by (tenx_hash, severity_level)(increase(all_events_summaryBytes_total{${filter}}[${window}]))`;
-  const eventsQ = `sum by (tenx_hash)(increase(all_events_summaryVolume_total{${filter}}[${window}]))`;
+  //
+  // topk(N) caps both response size and Prometheus' streaming cost: the
+  // engine stops materializing series past rank N. For the greedy solver
+  // this is loss-free at the budget level because the cut-off patterns
+  // contribute negligibly to total bytes and are absorbed by the
+  // container-default cap row in the rendered CSV.
+  const bytesQ = `topk(${PER_PATTERN_TOPK}, sum by (tenx_hash, severity_level)(increase(all_events_summaryBytes_total{${filter}}[${window}])))`;
+  const eventsQ = `topk(${PER_PATTERN_TOPK}, sum by (tenx_hash)(increase(all_events_summaryVolume_total{${filter}}[${window}])))`;
 
   const [bytesRes, eventsRes] = await Promise.all([
     backend.queryInstant(bytesQ) as Promise<PrometheusResponse>,

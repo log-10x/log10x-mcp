@@ -64,6 +64,16 @@ export const metricsThatMovedSchema = {
     .default(DEFAULT_PHASE_GAP_FLOOR)
     .describe('Relative gap floor between anchor-high and anchor-low phase means. Candidate is "moved" iff its gap ≥ this. Default 0.15 (=15%) is an uncalibrated default — output is tagged `unvalidated_default` until a caller-side calibration overrides it. See `docs/cross-pillar-primitives.md` for the calibration playbook.'),
   environment: z.string().optional(),
+  customer_metrics_url: z
+    .string()
+    .optional()
+    .describe(
+      'Per-call override for the customer metrics backend URL. Wins over LOG10X_CUSTOMER_METRICS_URL env var. Use when MCP was launched with an empty/stale URL.'
+    ),
+  customer_metrics_type: z
+    .enum(['grafana_cloud', 'amp', 'datadog_prom', 'generic_prom', 'log10x'])
+    .optional(),
+  customer_metrics_auth: z.string().optional(),
 };
 
 interface MovedCandidate {
@@ -184,6 +194,9 @@ export async function executeMetricsThatMoved(
     step?: string;
     phase_gap_floor?: number;
     environment?: string;
+    customer_metrics_url?: string;
+    customer_metrics_type?: string;
+    customer_metrics_auth?: string;
     /** Ignored. Retained in the signature for backward-compat with
      * existing in-process callers; the markdown view was removed from
      * the public schema in favor of the structured `human_summary`
@@ -232,7 +245,11 @@ export async function executeMetricsThatMoved(
       anchorSeries = extractFirstSeries(res);
     } else {
       anchorExpression = args.anchor;
-      const backendInfo = await resolveBackend();
+      const backendInfo = await resolveBackend({
+        url: args.customer_metrics_url,
+        type: args.customer_metrics_type,
+        auth: args.customer_metrics_auth,
+      });
       if (!backendInfo.backend) {
         // Missing customer metrics backend is an expected not_configured
         // state, not a failure: return a branchable envelope so the chain
@@ -356,7 +373,11 @@ export async function executeMetricsThatMoved(
   const anchorLowTs = anchorPartition.lowTs;
 
   // ── Candidates ──────────────────────────────────────────────────────
-  const customerBackend = await resolveBackend();
+  const customerBackend = await resolveBackend({
+    url: args.customer_metrics_url,
+    type: args.customer_metrics_type,
+    auth: args.customer_metrics_auth,
+  });
   if (!customerBackend.backend) {
     return buildNotConfiguredEnvelope({
       tool: 'log10x_metrics_that_moved',

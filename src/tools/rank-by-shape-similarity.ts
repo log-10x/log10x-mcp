@@ -65,6 +65,16 @@ export const rankByShapeSimilaritySchema = {
     .default(DEFAULT_ANCHOR_PHASE_ALIGNED_FLOOR)
     .describe('Relative phase-gap floor for the `anchor_phase_aligned` flag. Default 0.15 — uncalibrated, same provenance caveat as lag_search_max_abs.'),
   environment: z.string().optional(),
+  customer_metrics_url: z
+    .string()
+    .optional()
+    .describe(
+      'Per-call override for the customer metrics backend URL. Wins over LOG10X_CUSTOMER_METRICS_URL env var. Use when MCP was launched with an empty/stale URL.'
+    ),
+  customer_metrics_type: z
+    .enum(['grafana_cloud', 'amp', 'datadog_prom', 'generic_prom', 'log10x'])
+    .optional(),
+  customer_metrics_auth: z.string().optional(),
 };
 
 interface RankedCandidate {
@@ -180,6 +190,9 @@ export async function executeRankByShapeSimilarity(
     lag_search_max_abs?: number;
     anchor_phase_aligned_floor?: number;
     environment?: string;
+    customer_metrics_url?: string;
+    customer_metrics_type?: string;
+    customer_metrics_auth?: string;
     /** Ignored. Retained in the args type for backward-compat with
      * in-process callers (tests, eval harness); the markdown view was
      * removed from the public schema in favor of the structured
@@ -234,7 +247,11 @@ export async function executeRankByShapeSimilarity(
       anchorSeries = extractValues(res);
     } else {
       anchorExpression = args.anchor;
-      const backendInfo = await resolveBackend();
+      const backendInfo = await resolveBackend({
+        url: args.customer_metrics_url,
+        type: args.customer_metrics_type,
+        auth: args.customer_metrics_auth,
+      });
       if (!backendInfo.backend) {
         // Expected not_configured state, not a failure; branchable envelope
         // so the chain continues (cross-pillar primitives are graceful).
@@ -343,7 +360,11 @@ export async function executeRankByShapeSimilarity(
   }
 
   // ── Candidates ──────────────────────────────────────────────────────
-  const customer = await resolveBackend();
+  const customer = await resolveBackend({
+    url: args.customer_metrics_url,
+    type: args.customer_metrics_type,
+    auth: args.customer_metrics_auth,
+  });
   if (!customer.backend) {
     return buildNotConfiguredEnvelope({
       tool: 'log10x_rank_by_shape_similarity',

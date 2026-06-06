@@ -58,6 +58,20 @@ export const discoverJoinSchema = {
     .optional()
     .describe('Alias for `window` for consistency with other Log10x tools.'),
   environment: z.string().optional().describe('Environment nickname (for multi-env setups).'),
+  customer_metrics_url: z
+    .string()
+    .optional()
+    .describe(
+      'Per-call override for the customer metrics backend URL. Wins over LOG10X_CUSTOMER_METRICS_URL env var. Use this when the MCP server was launched with an empty/stale URL and you want to redirect to a reachable Prometheus without restarting the server.'
+    ),
+  customer_metrics_type: z
+    .enum(['grafana_cloud', 'amp', 'datadog_prom', 'generic_prom', 'log10x'])
+    .optional()
+    .describe('Per-call override for the customer metrics backend type. Defaults to generic_prom if customer_metrics_url is supplied without a type.'),
+  customer_metrics_auth: z
+    .string()
+    .optional()
+    .describe('Per-call override for the customer metrics auth credential (bearer token, API key, or apiKey/envId for log10x type).'),
 };
 
 interface DiscoverJoinPayload {
@@ -87,13 +101,20 @@ export async function executeDiscoverJoin(
     window?: string;
     timeRange?: string;
     environment?: string;
+    customer_metrics_url?: string;
+    customer_metrics_type?: string;
+    customer_metrics_auth?: string;
   },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
   const telemetry = newChassisTelemetry();
   args.force_refresh = args.force_refresh ?? false;
   args.minimum_jaccard = args.minimum_jaccard ?? 0.7;
-  const resolution = await resolveBackend();
+  const resolution = await resolveBackend({
+    url: args.customer_metrics_url,
+    type: args.customer_metrics_type,
+    auth: args.customer_metrics_auth,
+  });
   if (!resolution.backend) {
     void customerMetricsNotConfiguredMessage(formatDetectionTrace(resolution.trace));
     return buildChassisEnvelope({

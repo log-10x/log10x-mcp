@@ -841,11 +841,13 @@ async function executeInvestigateInner(
       // a retry on the same hash. The hash-detection sits at the top
       // of resolveAnchor and only swaps anchor on a hit; on a miss the
       // unresolved fall-through lands here.
+      // Mirror of looksLikeHash in resolveAnchor — must stay in sync.
+      // Digit is NOT required; mixed-case alone discriminates from snake_case
+      // pattern names.
       const looksLikeHashSp =
         /^[A-Za-z0-9_-]{11}$/.test(args.starting_point.trim()) &&
         /[A-Z]/.test(args.starting_point.trim()) &&
-        /[a-z]/.test(args.starting_point.trim()) &&
-        /[0-9]/.test(args.starting_point.trim());
+        /[a-z]/.test(args.starting_point.trim());
       if (looksLikeHashSp) {
         lines.push(
           `**Result**: Could not resolve "${args.starting_point}" — looked up by pattern_hash, none found in the last 7d window of metrics. The hash may be from a different environment, outside retention, or mistyped.`,
@@ -1268,11 +1270,14 @@ async function resolveAnchor(
   // the mixed-case + digit signature. On a miss we fall through to the
   // existing pattern/service resolver below so no behavior changes
   // for non-hash inputs.
+  // base64url hash shape: 11 chars from [A-Za-z0-9_-] with mixed case.
+  // Digit is NOT required — ~15% of real engine hashes have no digit
+  // (P((54/64)^11) = 0.154), e.g. "srfVDPNhzZU". Pattern names are
+  // snake_case lowercase or ~-prefixed, so mixed-case alone discriminates.
   const looksLikeHash =
     /^[A-Za-z0-9_-]{11}$/.test(sp) &&
     /[A-Z]/.test(sp) &&
-    /[a-z]/.test(sp) &&
-    /[0-9]/.test(sp);
+    /[a-z]/.test(sp);
   if (looksLikeHash) {
     try {
       const hashQ =

@@ -75,6 +75,16 @@ export const metricOverlaySchema = {
     .default(240)
     .describe('Max buckets to return in the aligned output. Pre-truncates from the most recent end if window/step exceeds this.'),
   environment: z.string().optional().describe('Environment nickname (for multi-env setups).'),
+  customer_metrics_url: z
+    .string()
+    .optional()
+    .describe(
+      'Per-call override for the customer metrics backend URL. Wins over LOG10X_CUSTOMER_METRICS_URL env var. Use when MCP was launched with an empty/stale URL.'
+    ),
+  customer_metrics_type: z
+    .enum(['grafana_cloud', 'amp', 'datadog_prom', 'generic_prom', 'log10x'])
+    .optional(),
+  customer_metrics_auth: z.string().optional(),
 };
 
 /**
@@ -152,6 +162,9 @@ export async function executeMetricOverlay(
     step?: string;
     max_buckets?: number;
     environment?: string;
+    customer_metrics_url?: string;
+    customer_metrics_type?: string;
+    customer_metrics_auth?: string;
     /** Ignored. Retained for backward-compat with in-process callers. */
     view?: 'summary' | 'markdown';
   },
@@ -200,7 +213,11 @@ export async function executeMetricOverlay(
       anchorSeries = extractFirstSeries(res);
     } else {
       anchorExpression = args.anchor;
-      const backend = await resolveBackend();
+      const backend = await resolveBackend({
+        url: args.customer_metrics_url,
+        type: args.customer_metrics_type,
+        auth: args.customer_metrics_auth,
+      });
       if (!backend.backend) {
         // Expected not_configured state, not a failure; branchable envelope.
         return buildNotConfiguredEnvelope({
@@ -250,7 +267,11 @@ export async function executeMetricOverlay(
   }
 
   // ── Fetch candidate series (always customer-side) ───────────────────
-  const backend = await resolveBackend();
+  const backend = await resolveBackend({
+    url: args.customer_metrics_url,
+    type: args.customer_metrics_type,
+    auth: args.customer_metrics_auth,
+  });
   if (!backend.backend) {
     return buildNotConfiguredEnvelope({
       tool: 'log10x_metric_overlay',
