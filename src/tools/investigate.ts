@@ -173,7 +173,14 @@ export function parseReport(md: string): ParsedReport {
   const idMatch =
     md.match(/\*\*Investigation id\*\*:\s*([0-9a-f-]{36})/i) ??
     md.match(/investigation_id`?:?\s*`?([0-9a-f-]{36})/i);
-  const shapeMatch = md.match(/\*\*shape\*\*:\s*`?(acute|drift|environment|no_significant_movement|empty)`?/i);
+  // Shape: acute renderer emits `**Shape**: acute` (token); drift renderer
+  // emits `**Shape**: gradual drift (no discrete inflection)` (prose) —
+  // accept both. Without this, drift reports parse with shape=null and the
+  // downstream status logic treats them as no_signal even when the markdown
+  // is fully populated. (Fabrication bug surfaced 2026-06-06.)
+  const shapeMatch =
+    md.match(/\*\*shape\*\*:\s*`?(acute|drift|environment|no_significant_movement|empty)`?/i) ??
+    (/\*\*shape\*\*:\s*gradual\s+drift/i.test(md) ? ['', 'drift'] : null);
   const modeMatch = md.match(/\*\*mode\*\*:\s*`?(pattern|service|environment|raw_line)`?/i);
   // Anchor header (emitted by both acute and drift renderers as
   // `**Anchor**: \`<resolved-name>\``). Lets the no_signal human
@@ -191,12 +198,23 @@ export function parseReport(md: string): ParsedReport {
     const upToNextSection = afterChain.split(/^### /m)[0] ?? '';
     chainCount = (upToNextSection.match(/^\d+\.\s+`/gm) ?? []).length;
   }
-  // Co-mover section: each line is `- \`pattern\` ...`.
+  // Co-mover section. Two renderer outputs to recognize:
+  //   acute → `### Co-movers (lower confidence)` with `- \`pattern\` ...` list
+  //   drift → `### Co-drifting patterns (cohort)` with `| \`pattern\` | service | ... |` table
+  // Without the drift case, a fully-populated drift report parses as
+  // coMoverCount=0 and the envelope status flips to `no_signal` while the
+  // markdown carries 18 patterns — the fabrication shape surfaced 2026-06-06.
   let coMoverCount = 0;
   if (/^### Co-movers \(lower confidence\)/m.test(md)) {
     const afterCM = md.split(/^### Co-movers[^\n]*$/m)[1] ?? '';
     const upToNextSection = afterCM.split(/^### /m)[0] ?? '';
     coMoverCount = (upToNextSection.match(/^- `/gm) ?? []).length;
+  } else if (/^### Co-drifting patterns \(cohort\)/m.test(md)) {
+    const afterCohort = md.split(/^### Co-drifting patterns[^\n]*$/m)[1] ?? '';
+    const upToNextSection = afterCohort.split(/^### /m)[0] ?? '';
+    // Drift renderer emits a markdown table. Header row + separator row are
+    // skipped by the leading-backtick check; only `| \`pattern\` |` data rows match.
+    coMoverCount = (upToNextSection.match(/^\|\s*`[^`]+`\s*\|/gm) ?? []).length;
   }
   const hasNoSignal =
     /No co-movers exceeded|No co-movers crossed the noise floor/i.test(md);
@@ -509,6 +527,22 @@ export async function executeInvestigate(
     status = 'no_signal';
   }
 
+  // Defensive envelope-consistency check: if status flipped to no_signal
+  // but the markdown is substantial (>1KB of prose AND a drift/acute
+  // section header), the parser failed to recognize the renderer's output
+  // and the envelope is about to lie. Surface this as a structured warning
+  // so an agent reading the envelope can flag it rather than silently
+  // promoting the markdown's contradictory story. (Fabrication bug
+  // surfaced 2026-06-06 — drift report rendered fully but parser saw 0
+  // co-movers because Co-drifting table heading != Co-movers list.)
+  const envelopeIsLying =
+    status === 'no_signal' &&
+    md.length > 1024 &&
+    (/^### Co-drifting patterns/m.test(md) || /^### Temporal chain/m.test(md));
+  const envelopeConsistencyWarning = envelopeIsLying
+    ? `Envelope reports status=no_signal but report_markdown carries a populated investigation section (${md.length} chars). Parser likely failed to recognize the renderer's output shape — trust the structured fields, treat report_markdown as suspect.`
+    : null;
+
   const human_summary = buildHumanSummary(
     args.starting_point,
     effectiveWindow,
@@ -673,6 +707,7 @@ export async function executeInvestigate(
               }
               return fallback;
             })(),
+    warnings: envelopeConsistencyWarning ? [envelopeConsistencyWarning] : [],
   });
 }
 
