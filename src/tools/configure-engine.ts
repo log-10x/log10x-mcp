@@ -59,6 +59,7 @@ import { LABELS } from '../lib/promql.js';
 import type { PrometheusResponse } from '../lib/api.js';
 import { queryInstant } from '../lib/api.js';
 import type { EnvConfig } from '../lib/environments.js';
+import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import {
   type StructuredOutput,
   type Action as EnvelopeAction,
@@ -564,11 +565,15 @@ export async function executeConfigureEngine(
   const destination = target.resolved.destination;
   const observationDays = args.observationDays ?? 7;
 
+  // Resolve the actual tenx_env label value used by log10x metrics ('edge'
+  // or 'cloud'), not the env UUID. Matches what top_patterns / trend / etc.
+  // use in their selectors.
+  const metricsEnv = await resolveMetricsEnv(env);
   const perPattern = await fetchPerPatternBytes(
     env,
     args.containers,
     observationDays,
-    target.resolved.envId
+    metricsEnv
   );
 
   // Monthly projection from observation window.
