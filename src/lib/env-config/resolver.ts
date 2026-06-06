@@ -9,8 +9,10 @@
  *      first that reports `isAvailable` AND has a document for the requested
  *      env_id/nickname. This is the production path.
  *   3. **env_var_fallback** — a partial config built from LOG10X_* env vars.
- *      Only used when no store has the env. Must satisfy the schema after
- *      merging defaults or we fail loudly (no silent partials in prod).
+ *      Only used when no store has the env. Must (a) name the requested env
+ *      via `env_id` or `nickname` AND (b) satisfy the schema, or we fail
+ *      loudly (no silent partials, and no silently substituting a
+ *      different env's partial when the requested name typos through).
  *
  * Stale-env-var detection: if an on-prem store returned the config AND
  * LOG10X_* env vars are also set, we compare the overlapping fields and emit
@@ -126,27 +128,51 @@ export async function resolveEnvConfig(opts: ResolveOptions): Promise<ResolveRes
     };
   }
 
-  // 3. Env-var fallback. Must satisfy the schema to be accepted.
+  // 3. Env-var fallback. Must satisfy the schema AND name the requested
+  //    env (by env_id or nickname). Without the identity check, a typo in
+  //    `envIdOrNickname` would silently substitute whichever env happens to
+  //    be packaged in LOG10X_* vars (typically demo) — breaking the
+  //    docstring's "never returns a partial" promise by returning the WRONG
+  //    complete config.
   if (opts.envVarFallback) {
-    const parsed = environmentConfigSchema.safeParse(opts.envVarFallback);
-    if (parsed.success) {
+    const partial = opts.envVarFallback;
+    const envIdMatches = !!partial.env_id && partial.env_id === opts.envIdOrNickname;
+    const nicknameMatches = !!partial.nickname && partial.nickname === opts.envIdOrNickname;
+
+    if (!envIdMatches && !nicknameMatches) {
+      // Identity mismatch: the env-var partial describes a different env
+      // than the caller asked for. Surface it in the trace so callers can
+      // warn about stale/misconfigured env vars, then fall through to the
+      // not-found error rather than returning the wrong config.
       trace.push({
         source: 'env_var_fallback',
-        status: 'matched',
-        reason: 'env vars produced a complete config',
+        status: 'skipped',
+        reason:
+          `env-var partial env_id "${partial.env_id ?? '<unset>'}" / nickname ` +
+          `"${partial.nickname ?? '<unset>'}" does not match requested ` +
+          `"${opts.envIdOrNickname}"`,
       });
-      return {
-        config: parsed.data,
+    } else {
+      const parsed = environmentConfigSchema.safeParse(opts.envVarFallback);
+      if (parsed.success) {
+        trace.push({
+          source: 'env_var_fallback',
+          status: 'matched',
+          reason: 'env vars produced a complete config',
+        });
+        return {
+          config: parsed.data,
+          source: 'env_var_fallback',
+          stale_env_var_warnings: [],
+          resolution_trace: trace,
+        };
+      }
+      trace.push({
         source: 'env_var_fallback',
-        stale_env_var_warnings: [],
-        resolution_trace: trace,
-      };
+        status: 'failed',
+        reason: `env-var partial did not satisfy schema: ${summarizeZodIssues(parsed.error.issues)}`,
+      });
     }
-    trace.push({
-      source: 'env_var_fallback',
-      status: 'failed',
-      reason: `env-var partial did not satisfy schema: ${summarizeZodIssues(parsed.error.issues)}`,
-    });
   } else {
     trace.push({ source: 'env_var_fallback', status: 'skipped', reason: 'no env-var partial supplied' });
   }

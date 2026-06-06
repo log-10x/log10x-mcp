@@ -52,7 +52,22 @@ import {
   pickActiveOffload,
   detectStaleOffloadEnvVar,
   detectStaleEnvVarForField,
+  type ClusterConfigResolveResult,
 } from '../lib/env-config/resolve-cluster-config.js';
+
+// Test seam — allows tests to inject a deterministic env-config resolver
+// without monkey-patching the resolveClusterConfig module export. Setting
+// to `undefined` (default) uses the real chain. Set to a function to
+// override the chain inside this module.
+type ResolveClusterConfigFn = typeof resolveClusterConfig;
+let _resolverOverride: ResolveClusterConfigFn | undefined;
+/** TEST-ONLY — inject a custom resolver for env-config lookups. */
+export function _setResolveClusterConfigForTests(fn: ResolveClusterConfigFn | undefined): void {
+  _resolverOverride = fn;
+}
+async function _resolveClusterConfig(): Promise<ClusterConfigResolveResult> {
+  return (_resolverOverride ?? resolveClusterConfig)();
+}
 
 // ── Schema ──────────────────────────────────────────────────────────────────
 
@@ -640,10 +655,18 @@ async function detectKubectlRole(_clusterName: string): Promise<string | null> {
 /**
  * Pure routing function: (snapshot, session) → next question or 'render'.
  * Every mandatory field is checked in dependency order; the first gap halts.
+ *
+ * `envCfgBucket` (when supplied) is the env-config active offload bucket
+ * resolved BEFORE the question loop runs. When present and the session has
+ * no user-supplied bucket, the wizard skips the input-bucket question
+ * entirely (env-config is authoritative). When the user already supplied
+ * an input bucket that disagrees, the caller is responsible for surfacing
+ * the precedence-mismatch warning at plan-emission time.
  */
 async function nextQuestion(
   snapshot: DiscoverySnapshot,
-  session: RetrieverWizardSession
+  session: RetrieverWizardSession,
+  envCfgBucket?: string
 ): Promise<RetrieverNextStep> {
 
   // Step 1 — OIDC provider check.
@@ -735,7 +758,22 @@ async function nextQuestion(
   }
 
   // Step 4a — input bucket.
-  const resolvedInputBucket = session.inputBucket ?? snapshot.recommendations.retrieverS3Bucket;
+  //
+  // Env-config precedence: when the env-config doc has an active offload
+  // bucket, that bucket IS the retriever input (Receiver writes there,
+  // Retriever reads from there). We use it as the resolved value without
+  // asking the user. This prevents the bug where the user types a bucket,
+  // the wizard ALSO consults env-config later at plan-emission time, and
+  // env-config silently wins.
+  //
+  // If the user separately supplied session.inputBucket and it disagrees,
+  // executeAdviseRetriever surfaces the precedence-mismatch warning on the
+  // envelope at plan-emission time (env-config still wins, but the user
+  // sees that their typed answer was discarded).
+  const resolvedInputBucket =
+    envCfgBucket
+    ?? session.inputBucket
+    ?? snapshot.recommendations.retrieverS3Bucket;
   if (!resolvedInputBucket) {
     return {
       kind: 'ask',
@@ -1428,17 +1466,57 @@ export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise
     updateRetrieverSession(args.snapshot_id, { infraMode: 'existing' });
   }
 
+  // F4 fix — resolve env-config BEFORE the question loop so the wizard can
+  // (a) use envCfgActiveOffload.bucket as the authoritative input bucket
+  //     when present (skip the bucket question), and
+  // (b) surface a precedence-mismatch warning at plan-emission time when
+  //     the user-supplied session.inputBucket disagrees with env-config.
+  //
+  // Previously this resolution happened ONLY at plan-emission time, so
+  // nextQuestion couldn't see env-config and would ask the user even when
+  // the answer was already on file; THEN env-config silently overrode the
+  // user's typed answer without surfacing the discard.
+  const envConfigWarnings: string[] = [];
+  const envCfgResolved = await _resolveClusterConfig().catch(() => undefined);
+  const envCfgDoc = envCfgResolved?.ok ? envCfgResolved.config : undefined;
+  if (envCfgResolved?.ok) {
+    for (const w of envCfgResolved.stale_env_var_warnings) {
+      if (!envConfigWarnings.includes(w)) envConfigWarnings.push(w);
+    }
+  }
+  const envCfgActiveOffload = envCfgDoc ? pickActiveOffload(envCfgDoc) : undefined;
+
+  // Precedence-mismatch warning: user typed a bucket, env-config has a
+  // different active offload bucket. Env-config wins (it's the cluster's
+  // declared source of truth), but the user MUST see that their input was
+  // discarded — otherwise they'll wonder why their typed bucket isn't in
+  // the plan.
+  if (
+    session.inputBucket &&
+    envCfgActiveOffload?.bucket &&
+    session.inputBucket !== envCfgActiveOffload.bucket
+  ) {
+    const msg =
+      `User-supplied bucket "${session.inputBucket}" differs from env-config bucket ` +
+      `"${envCfgActiveOffload.bucket}"; using "${envCfgActiveOffload.bucket}" per env-config precedence. ` +
+      `Update the env-config (or omit index_source_bucket) to clear this warning.`;
+    if (!envConfigWarnings.includes(msg)) envConfigWarnings.push(msg);
+  }
+
   // Question routing.
-  const next = await nextQuestion(snapshot, session);
+  const next = await nextQuestion(snapshot, session, envCfgActiveOffload?.bucket);
   if (next.kind === 'ask') {
-    return wizardReturn({
-      mode: 'next_question',
-      ok: false,
-      snapshot_id: args.snapshot_id,
-      question_id: next.questionId,
-      markdown: next.markdown,
-      shape: next.shape,
-    });
+    return wizardReturn(
+      {
+        mode: 'next_question',
+        ok: false,
+        snapshot_id: args.snapshot_id,
+        question_id: next.questionId,
+        markdown: next.markdown,
+        shape: next.shape,
+      },
+      envConfigWarnings,
+    );
   }
 
   // All questions answered — license acquisition.
@@ -1510,32 +1588,23 @@ export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise
   // bucket (tenx-demo-cloud-retriever-*) and would override the real value.
   const installedNamespace = snapshot.recommendations.installedComponentsDetail?.retriever?.namespace;
 
-  // Env-config resolution chain. The wizard's verify-plan bucket / queue
-  // / IRSA references should come from the resolved env-config document
-  // when the session + snapshot didn't already supply them. Precedence:
+  // envCfgDoc + envCfgActiveOffload were resolved above (before nextQuestion);
+  // envConfigWarnings is populated with stale-env-var warnings and any
+  // precedence-mismatch warning produced when the user-supplied bucket
+  // disagrees with the env-config bucket.
   //
-  //   explicit-arg (session field) > on-prem-store > env-var fallback > fail-loudly
+  // Precedence chain for the input bucket:
   //
-  // StoreKind discovery order: K8s → AWS SSM → GCP Secret Manager →
-  // Azure App Config → local file. Stale-env-var warnings are collected
-  // and forwarded onto the envelope so the user sees the "I set the env
-  // var but it's being ignored" nudge.
-  const envConfigWarnings: string[] = [];
-  const envCfgResolved = await resolveClusterConfig().catch(() => undefined);
-  const envCfgDoc = envCfgResolved?.ok ? envCfgResolved.config : undefined;
-  if (envCfgResolved?.ok) {
-    for (const w of envCfgResolved.stale_env_var_warnings) {
-      if (!envConfigWarnings.includes(w)) envConfigWarnings.push(w);
-    }
-  }
-  const envCfgActiveOffload = envCfgDoc ? pickActiveOffload(envCfgDoc) : undefined;
-
+  //   env-config (active offload) > session.inputBucket > snapshot > env-var fallback
+  //
+  // env-config WINS when present — it's the cluster's declared source of
+  // truth and the Receiver routes there. When env-config disagrees with
+  // session.inputBucket, the warning emitted above tells the user their
+  // typed answer was discarded.
   const resolvedInputBucket =
-    session.inputBucket
+    envCfgActiveOffload?.bucket
+    ?? session.inputBucket
     ?? (installedNamespace ? undefined : snapshot.recommendations.retrieverS3Bucket)
-    // env-config fallback: the active offload destination IS the input bucket
-    // for the retriever (receiver writes there, retriever reads from there).
-    ?? envCfgActiveOffload?.bucket
     // last-ditch env-var fallback before letting buildRetrieverPlan fail loudly.
     ?? process.env.LOG10X_OFFLOAD_BUCKET
     ?? process.env.LOG10X_STREAMER_BUCKET;

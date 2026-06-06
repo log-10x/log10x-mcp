@@ -67,12 +67,37 @@ export interface ClusterConfigResolveSuccess {
    * "I read this env from <store>" line in doctor / debug envelopes.
    */
   resolution_trace: ResolveResult['resolution_trace'];
+  /**
+   * The envIdOrNickname the caller originally asked for (if any), preserved
+   * so callers can compare against the resolved config.env_id and surface
+   * "you asked for X, we resolved Y" when they disagree. Undefined when no
+   * explicit id was passed (i.e. the caller wanted whatever was discoverable).
+   */
+  requested_env_id_or_nickname?: string;
+  /**
+   * Soft warnings about the resolution itself (e.g. on-prem doc existed for
+   * the requested id but was corrupt and we fell through to env-var fallback).
+   * Distinct from `stale_env_var_warnings`, which is per-field disagreement.
+   */
+  resolution_warnings: string[];
 }
 
 export interface ClusterConfigResolveFailure {
   ok: false;
   error: string;
   resolution_trace: ResolveResult['resolution_trace'];
+  /**
+   * The envIdOrNickname the caller originally asked for, so a failure can
+   * say "you asked for X" rather than dumping the (possibly synthetic)
+   * candidate chain.
+   */
+  requested_env_id_or_nickname?: string;
+  /**
+   * Soft warnings about the resolution attempt (e.g. on-prem doc was present
+   * but unparseable for the requested id). These name the failure mode so
+   * callers don't have to grep the trace.
+   */
+  resolution_warnings: string[];
 }
 
 export type ClusterConfigResolveResult =
@@ -113,7 +138,13 @@ function resolveCandidateIds(envIdOrNickname?: string): string[] {
     candidates.push(process.env.LOG10X_ENV_NICKNAME);
   }
   // Final well-known fallback — used by the dev/local file store layout.
-  if (!candidates.includes('default')) candidates.push('default');
+  // ONLY when the caller (a) passed no explicit envIdOrNickname AND (b) has
+  // no LOG10X_ENV_ID / LOG10X_ENV_NICKNAME set. Unconditionally pushing
+  // 'default' caused silent substitution: an explicit "give me env X" that
+  // didn't match would fall through to ~/.log10x/envs/default.json and the
+  // resolver would report ok=true under source='on_prem_store' for a
+  // completely different env — looks legit, isn't.
+  if (candidates.length === 0) candidates.push('default');
   return candidates;
 }
 
@@ -136,6 +167,10 @@ export async function resolveClusterConfig(
 
   let lastTrace: ResolveResult['resolution_trace'] = [];
   let lastError: string | undefined;
+  // Soft warnings accumulated across candidate attempts — e.g. an on-prem
+  // doc existed for the requested id but failed to parse. We must surface
+  // these whether we ultimately succeed (via env-var fallback) or fail.
+  const resolutionWarnings: string[] = [];
 
   for (const candidate of candidates) {
     try {
@@ -145,6 +180,10 @@ export async function resolveClusterConfig(
         explicit: opts.explicit,
         envVarFallback,
       });
+      // F8: even on success, surface any corrupt-doc warnings collected from
+      // prior candidates so callers (and users) see "we used env-var
+      // fallback because env X's on-prem doc was unparseable".
+      extractCorruptDocWarnings(res.resolution_trace, resolutionWarnings);
       return {
         ok: true,
         config: res.config,
@@ -152,21 +191,33 @@ export async function resolveClusterConfig(
         source_store_kind: res.source_store_kind,
         stale_env_var_warnings: res.stale_env_var_warnings,
         resolution_trace: res.resolution_trace,
+        requested_env_id_or_nickname: opts.envIdOrNickname,
+        resolution_warnings: resolutionWarnings,
       };
     } catch (err) {
       if (err instanceof EnvConfigResolutionError) {
         lastTrace = err.trace;
         lastError = err.message;
+        extractCorruptDocWarnings(err.trace, resolutionWarnings);
         // Try the next candidate id — a different name may match.
         continue;
       }
       // Non-resolution errors (store auth, parse failure on a hand-edited
       // doc) should surface immediately rather than be swallowed by the
-      // candidate loop.
+      // candidate loop. F8: name the corrupt-doc scenario explicitly so
+      // callers reading the failure don't have to guess from the message.
+      const errMsg = err instanceof Error ? err.message : String(err);
+      const warning =
+        `on-prem env-config document for "${candidate}" was present but unparseable ` +
+        `(reason: ${errMsg}). Resolver did not fall through to env-var fallback for ` +
+        `this candidate — fix or remove the corrupt doc.`;
+      resolutionWarnings.push(warning);
       return {
         ok: false,
-        error: err instanceof Error ? err.message : String(err),
+        error: errMsg,
         resolution_trace: lastTrace,
+        requested_env_id_or_nickname: opts.envIdOrNickname,
+        resolution_warnings: resolutionWarnings,
       };
     }
   }
@@ -177,7 +228,35 @@ export async function resolveClusterConfig(
       lastError ??
       `Could not resolve any env-config document (tried candidates: ${candidates.join(', ') || '<none>'}).`,
     resolution_trace: lastTrace,
+    requested_env_id_or_nickname: opts.envIdOrNickname,
+    resolution_warnings: resolutionWarnings,
   };
+}
+
+/**
+ * Walk a resolution trace and lift any `status: 'failed'` store steps into
+ * human-readable corrupt-doc warnings. The resolver's per-store contract is
+ * that `failed` means "store was available AND we tried to read the doc
+ * AND something went wrong" — which is exactly the corrupt-doc / hand-edited
+ * / wrong-encoding case F8 cares about. `skipped` is benign (store
+ * unavailable, or no doc present), so we ignore it.
+ *
+ * Dedupes against the already-collected list so re-walking traces across
+ * candidate attempts doesn't double-report.
+ */
+function extractCorruptDocWarnings(
+  trace: ResolveResult['resolution_trace'],
+  out: string[],
+): void {
+  for (const step of trace) {
+    if (step.status !== 'failed') continue;
+    if (!step.source.startsWith('store:')) continue;
+    const warning =
+      `on-prem env-config document was present but unparseable in ${step.source} ` +
+      `(reason: ${step.reason}). Resolver fell through to the next candidate / store; ` +
+      `fix or remove the corrupt doc to make this env resolvable from its intended source.`;
+    if (!out.includes(warning)) out.push(warning);
+  }
 }
 
 /**

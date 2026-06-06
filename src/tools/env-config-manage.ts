@@ -18,14 +18,20 @@
  *
  * Why grouped: all three operate on the env-config document (env_id keyed),
  * not on the legacy `~/.log10x/envs.json` metrics-backend list. They share
- * the LocalFileStore resolution path and the same EnvironmentConfig zod
- * schema so a single file keeps the contract obvious.
+ * the resolver store-chain and the same EnvironmentConfig zod schema so a
+ * single file keeps the contract obvious.
  *
- * Store choice: these tools default to LocalFileStore (`~/.log10x/envs/<env_id>.json`).
- * The resolver chain (k8s/SSM/GCP-SM/Azure-AC) is plumbed in tools that
- * already wire credentials for those clouds; this set sticks to the
- * always-available local fallback so the file builds clean without pulling
- * cloud SDKs at import time.
+ * Store choice: all three walk the SAME store chain that `log10x_env_register`
+ * writes through (k8s ConfigMap → AWS SSM → GCP Secret Manager → Azure
+ * App Config → local file). Writers and readers MUST agree on the backing
+ * store — when env_register persists a doc to a k8s ConfigMap, env_diff_vs_envvars
+ * and env_validate read from k8s, and dest_set writes back to k8s. Hardcoding
+ * the LocalFileStore here is the bug that motivated this refactor: env_register
+ * wrote to k8s, the manage tools read from local, and the manage tools returned
+ * "no env doc found" against a freshly-registered doc.
+ *
+ * The `stores` parameter on each executor is for tests — production callers
+ * leave it undefined and inherit the default chain.
  */
 
 import { z } from 'zod';
@@ -34,26 +40,48 @@ import {
   type EnvironmentConfig,
   type SiemDestination,
 } from '../lib/env-config/types.js';
-import { LocalFileStore } from '../lib/env-config/store-local-file.js';
+import type { EnvConfigStore } from '../lib/env-config/store-interface.js';
+import { defaultClusterConfigStoreChain } from '../lib/env-config/resolve-cluster-config.js';
 import { envConfigFromEnvVars } from '../lib/env-config/env-var-bridge.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
 // ── shared store helpers ────────────────────────────────────────────────────
 
 /**
- * Resolve the env doc for the given env_id (or nickname — LocalFileStore
- * supports both) using the local-file store. Returns null when the doc
- * is absent so callers can render a clean "no such env" envelope without
- * crashing.
+ * Walk the store chain looking for an env doc keyed by env_id or nickname.
+ * Returns BOTH the document and the store that produced it so callers can
+ * write back to the SAME backend on edit — writing to a lower-precedence
+ * store would silently shadow the resolved doc on the next read.
+ *
+ * Skips stores that report `isAvailable: false` (no creds, no namespace,
+ * etc.) so a host that lacks k8s credentials cleanly falls through to SSM
+ * / GCP SM / Azure AC / local file.
+ *
+ * Returns `null` when every available store reported "no document for this
+ * env" — distinct from a store-level error which is surfaced via `throw`.
  */
-async function readEnvDoc(envIdOrNickname: string): Promise<EnvironmentConfig | null> {
-  const store = new LocalFileStore();
-  return store.read(envIdOrNickname);
-}
+async function findEnvDocInChain(
+  envIdOrNickname: string,
+  stores: EnvConfigStore[],
+): Promise<{ doc: EnvironmentConfig; store: EnvConfigStore } | null> {
+  for (const store of stores) {
+    const a = await store.isAvailable();
+    if (!a.available) continue;
 
-async function writeEnvDoc(config: EnvironmentConfig): Promise<void> {
-  const store = new LocalFileStore();
-  await store.write(config);
+    let doc: EnvironmentConfig | null = null;
+    try {
+      doc = await store.read(envIdOrNickname);
+    } catch {
+      // A store that errored mid-read is a real problem, but the resolver
+      // pattern is to swallow it and try the next backend so a single
+      // misconfigured store can't break the whole chain. The error path
+      // for "every store errored AND none matched" is the same as
+      // "no doc anywhere" — both surface as the envNotFoundEnvelope below.
+      continue;
+    }
+    if (doc) return { doc, store };
+  }
+  return null;
 }
 
 /**
@@ -68,8 +96,9 @@ function envNotFoundEnvelope(tool: string, envId: string): StructuredOutput {
     summary: { headline: `${tool}: no env doc found for "${envId}".` },
     data: {
       ok: false,
-      error: `No env-config document found for "${envId}" in the local file store. ` +
-        `Check ~/.log10x/envs/ for the canonical filename or call log10x_discover_env to list known envs.`,
+      error: `No env-config document found for "${envId}" in any configured store ` +
+        `(k8s / aws_ssm / gcp_sm / azure_ac / local). Call log10x_env_register first, ` +
+        `or log10x_discover_env to list known envs.`,
       env_id: envId,
     },
   });
@@ -101,7 +130,7 @@ export const destSetSchema = {
     .string()
     .min(1)
     .describe(
-      'Env identifier — either the `env_id` UUID or the `nickname` from the env-config document. Resolves via the local-file store (~/.log10x/envs/<env_id>.json).'
+      'Env identifier — either the `env_id` UUID or the `nickname` from the env-config document. Resolved by walking the store chain (k8s → aws_ssm → gcp_sm → azure_ac → local).'
     ),
   siem_vendor: z
     .enum(SIEM_VENDOR_ENUM)
@@ -136,9 +165,14 @@ interface DestSetArgs {
   ingest_url?: string;
 }
 
-export async function executeDestSet(args: DestSetArgs): Promise<StructuredOutput> {
-  const doc = await readEnvDoc(args.env_id);
-  if (!doc) return envNotFoundEnvelope('log10x_dest_set', args.env_id);
+export async function executeDestSet(
+  args: DestSetArgs,
+  storesOverride?: EnvConfigStore[],
+): Promise<StructuredOutput> {
+  const stores = storesOverride ?? defaultClusterConfigStoreChain();
+  const found = await findEnvDocInChain(args.env_id, stores);
+  if (!found) return envNotFoundEnvelope('log10x_dest_set', args.env_id);
+  const { doc, store } = found;
 
   const before: SiemDestination = doc.destination;
   const after: SiemDestination = {
@@ -192,15 +226,24 @@ export async function executeDestSet(args: DestSetArgs): Promise<StructuredOutpu
     });
   }
 
+  // Write back to the SAME store the read resolved against. Writing to a
+  // lower-precedence backend (e.g., local file when the source-of-truth is
+  // a k8s ConfigMap) would silently shadow the original doc on the next
+  // read — the resolver would still find the ConfigMap and ignore the
+  // local edit.
   try {
-    await writeEnvDoc(parsed.data);
+    await store.write(parsed.data);
   } catch (e) {
     const msg = (e as Error).message;
     return buildEnvelope({
       tool: 'log10x_dest_set',
       view: 'summary',
       summary: { headline: `log10x_dest_set failed: could not persist updated doc.` },
-      data: { ok: false, env_id: args.env_id, error: `write env doc: ${msg}` },
+      data: {
+        ok: false,
+        env_id: args.env_id,
+        error: `write env doc to ${store.kind} store: ${msg}`,
+      },
     });
   }
 
@@ -217,6 +260,7 @@ export async function executeDestSet(args: DestSetArgs): Promise<StructuredOutpu
       ok: true,
       env_id: doc.env_id,
       nickname: doc.nickname,
+      store_used: store.kind,
       before,
       after,
       changes,
@@ -242,7 +286,7 @@ export const envValidateSchema = {
     .string()
     .min(1)
     .describe(
-      'Env identifier — either the `env_id` UUID or the `nickname` from the env-config document. Resolves via the local-file store.'
+      'Env identifier — either the `env_id` UUID or the `nickname` from the env-config document. Resolved by walking the store chain (k8s → aws_ssm → gcp_sm → azure_ac → local).'
     ),
 };
 
@@ -388,13 +432,18 @@ function runCrossFieldSanity(doc: EnvironmentConfig): SanityFinding[] {
   return findings;
 }
 
-export async function executeEnvValidate(args: EnvValidateArgs): Promise<StructuredOutput> {
-  const doc = await readEnvDoc(args.env_id);
-  if (!doc) return envNotFoundEnvelope('log10x_env_validate', args.env_id);
+export async function executeEnvValidate(
+  args: EnvValidateArgs,
+  storesOverride?: EnvConfigStore[],
+): Promise<StructuredOutput> {
+  const stores = storesOverride ?? defaultClusterConfigStoreChain();
+  const found = await findEnvDocInChain(args.env_id, stores);
+  if (!found) return envNotFoundEnvelope('log10x_env_validate', args.env_id);
+  const { doc, store } = found;
 
   // 1) Schema parse — re-runs the canonical zod schema so an
   //    out-of-band edit to the file is caught here even though
-  //    LocalFileStore.read already parses on the way out.
+  //    most stores parse on the way out.
   const parsed = environmentConfigSchema.safeParse(doc);
   const schemaIssues = parsed.success
     ? []
@@ -425,6 +474,7 @@ export async function executeEnvValidate(args: EnvValidateArgs): Promise<Structu
       ok,
       env_id: doc.env_id,
       nickname: doc.nickname,
+      store_used: store.kind,
       schema_passed: parsed.success,
       schema_issues: schemaIssues,
       findings,
@@ -453,7 +503,7 @@ export const envDiffVsEnvvarsSchema = {
     .string()
     .min(1)
     .describe(
-      'Env identifier — either the `env_id` UUID or the `nickname` from the env-config document. Resolves via the local-file store.'
+      'Env identifier — either the `env_id` UUID or the `nickname` from the env-config document. Resolved by walking the store chain (k8s → aws_ssm → gcp_sm → azure_ac → local).'
     ),
 };
 
@@ -714,9 +764,14 @@ function buildFieldDiffs(
   return diffs;
 }
 
-export async function executeEnvDiffVsEnvvars(args: EnvDiffArgs): Promise<StructuredOutput> {
-  const doc = await readEnvDoc(args.env_id);
-  if (!doc) return envNotFoundEnvelope('log10x_env_diff_vs_envvars', args.env_id);
+export async function executeEnvDiffVsEnvvars(
+  args: EnvDiffArgs,
+  storesOverride?: EnvConfigStore[],
+): Promise<StructuredOutput> {
+  const stores = storesOverride ?? defaultClusterConfigStoreChain();
+  const found = await findEnvDocInChain(args.env_id, stores);
+  if (!found) return envNotFoundEnvelope('log10x_env_diff_vs_envvars', args.env_id);
+  const { doc, store } = found;
 
   const envvarPartial = envConfigFromEnvVars(process.env);
 
@@ -730,6 +785,7 @@ export async function executeEnvDiffVsEnvvars(args: EnvDiffArgs): Promise<Struct
         ok: true,
         env_id: doc.env_id,
         nickname: doc.nickname,
+        store_used: store.kind,
         any_envvars_set: false,
         diffs: [],
         recommendation:
@@ -760,6 +816,7 @@ export async function executeEnvDiffVsEnvvars(args: EnvDiffArgs): Promise<Struct
       ok,
       env_id: doc.env_id,
       nickname: doc.nickname,
+      store_used: store.kind,
       any_envvars_set: true,
       diffs,
       recommendation: overallRecommendation,

@@ -15,12 +15,13 @@
  * the schema. Surface the missing-env error verbatim so the agent
  * knows to call `log10x_env_register` first.
  *
- * Storage: writes through the LocalFileStore at `~/.log10x/envs/`,
- * which sits at the bottom of the resolver chain as the dev/local
- * fallback. Customers using the K8s ConfigMap / SSM / Secret Manager
- * stores will route through those higher-precedence implementations
- * once the install advisor wires them up; this tool intentionally
- * targets the simplest available store today.
+ * Storage: walks the SAME store chain `log10x_env_register` writes to —
+ * k8s ConfigMap → AWS SSM → GCP Secret Manager → Azure App Configuration
+ * → local file. Read finds the store that holds the env doc; write goes
+ * back to the SAME store so the merged document overlays the original
+ * (writing to a lower-precedence backend would silently shadow the source
+ * of truth — the resolver would still pick the k8s ConfigMap on the next
+ * read and ignore the local-file edit).
  *
  * Idempotent: calling twice with the same args replaces the retriever
  * block in place. `updated_at` is refreshed on every write so the
@@ -33,7 +34,8 @@ import {
   type EnvironmentConfig,
   type RetrieverConfig,
 } from '../lib/env-config/types.js';
-import { LocalFileStore } from '../lib/env-config/store-local-file.js';
+import type { EnvConfigStore } from '../lib/env-config/store-interface.js';
+import { defaultClusterConfigStoreChain } from '../lib/env-config/resolve-cluster-config.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
 export const retrieverRegisterSchema = {
@@ -122,9 +124,10 @@ function buildHumanSummary(inner: RetrieverRegisterInner): string {
 }
 
 export async function executeRetrieverRegister(
-  args: RetrieverRegisterArgs
+  args: RetrieverRegisterArgs,
+  storesOverride?: EnvConfigStore[],
 ): Promise<string | StructuredOutput> {
-  const inner = await executeRetrieverRegisterInner(args);
+  const inner = await executeRetrieverRegisterInner(args, storesOverride);
   return buildEnvelope({
     tool: 'log10x_retriever_register',
     view: 'summary',
@@ -166,30 +169,42 @@ export async function executeRetrieverRegister(
 }
 
 async function executeRetrieverRegisterInner(
-  args: RetrieverRegisterArgs
+  args: RetrieverRegisterArgs,
+  storesOverride?: EnvConfigStore[],
 ): Promise<RetrieverRegisterInner> {
-  const store = new LocalFileStore();
+  const stores = storesOverride ?? defaultClusterConfigStoreChain();
 
-  // 1. Load the existing env config. The resolver's full precedence
-  //    chain (k8s → SSM → ... → local) is overkill here — we are
-  //    writing, and the LocalFileStore is the only writeable target
-  //    today. If higher-precedence stores hold the env we'd want to
-  //    write back to them; that's a follow-up for the install
-  //    advisor's discover-then-route pass.
-  let existing: EnvironmentConfig | null;
-  try {
-    existing = await store.read(args.env_id);
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    return {
-      ok: false,
-      env_id: args.env_id,
-      error: `failed to read env config: ${msg}`,
-      error_type: 'store_write_failed',
-    };
+  // 1. Walk the chain looking for the env doc. We must read AND write
+  //    against the same store — if env_register wrote to a k8s ConfigMap
+  //    we have to update the ConfigMap, not the local file. Writing to
+  //    a lower-precedence backend would silently shadow the original on
+  //    the next read.
+  let existing: EnvironmentConfig | null = null;
+  let backingStore: EnvConfigStore | null = null;
+  for (const store of stores) {
+    const a = await store.isAvailable();
+    if (!a.available) continue;
+
+    let doc: EnvironmentConfig | null = null;
+    try {
+      doc = await store.read(args.env_id);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return {
+        ok: false,
+        env_id: args.env_id,
+        error: `failed to read env config from ${store.kind} store: ${msg}`,
+        error_type: 'store_write_failed',
+      };
+    }
+    if (doc) {
+      existing = doc;
+      backingStore = store;
+      break;
+    }
   }
 
-  if (!existing) {
+  if (!existing || !backingStore) {
     return {
       ok: false,
       env_id: args.env_id,
@@ -255,16 +270,16 @@ async function executeRetrieverRegisterInner(
     };
   }
 
-  // 5. Persist.
+  // 5. Persist back to the SAME store the read found the doc in.
   try {
-    await store.write(parsed.data);
+    await backingStore.write(parsed.data);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     return {
       ok: false,
       env_id: existing.env_id,
       nickname: existing.nickname,
-      error: `failed to write env config: ${msg}`,
+      error: `failed to write env config to ${backingStore.kind} store: ${msg}`,
       error_type: 'store_write_failed',
     };
   }
