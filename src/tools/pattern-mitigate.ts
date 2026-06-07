@@ -34,6 +34,7 @@
 import { z } from 'zod';
 import { getSnapshot, getMostRecentSnapshot } from '../lib/discovery/snapshot-store.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
+import { formatPatternLabel } from '../lib/pattern-label.js';
 import { loadEnvironments } from '../lib/environments.js';
 import { agentOnly } from '../lib/agent-only.js';
 import { fmtPattern, normalizePattern } from '../lib/format.js';
@@ -587,21 +588,12 @@ export async function executePatternMitigate(args: PatternMitigateArgs): Promise
     d.pattern_validation.checked && d.pattern_validation.exists === false
       ? `Warning: pattern \`${d.pattern}\` not found in metrics backend. Continuing with the menu, but verify the name before applying any action. `
       : '';
-  // Burned rule (memory: feedback_no_hash_in_user_headlines): lead with
-  // pattern name + service + state, not raw symbol/hash blobs. The
-  // d.pattern field is the underscore-joined symbol_message
-  // ("terror_v_logger_go_failed_t_resource_service_instance_id_...") —
-  // 130+ chars of machine output. Math-lens workflow wq54qh4ic flagged
-  // it; same shape we just fixed on whats_changing. Compose a service-
-  // led label with a short token hint as a parenthetical.
-  const buildPatternLabel = (): string => {
-    const svc = d.scope_service?.trim();
-    const hint = (d.pattern ?? '').trim().replace(/_/g, ' ');
-    const truncatedHint = hint.length > 40 ? hint.slice(0, 37) + '...' : hint;
-    if (svc) return `${svc} pattern (${truncatedHint})`;
-    return truncatedHint || 'pattern';
-  };
-  const patternLabel = buildPatternLabel();
+  // Delegates to the shared formatPatternLabel helper. See
+  // lib/pattern-label.ts for the burned-rule rationale.
+  const patternLabel = formatPatternLabel({
+    symbol_message: d.pattern,
+    service: d.scope_service,
+  });
   const headline =
     d.status === 'no_signal'
       ? `${patternNotFoundWarning}${patternLabel}: NO mitigation options available — ${dimmedCount} dimmed. Setup hint surfaces what's missing.`
@@ -1024,15 +1016,11 @@ function buildHumanSummary(args: {
   setupHint?: string;
   snapshotAgeSeconds: number | null;
 }): string {
-  // Burned rule (memory: feedback_no_hash_in_user_headlines): lead with
-  // pattern name + service + state. Math-lens workflow wq54qh4ic flagged
-  // the prior version which led with the raw underscored token blob.
-  const svc = args.service?.trim();
-  const hint = (args.pattern ?? '').trim().replace(/_/g, ' ');
-  const truncatedHint = hint.length > 40 ? hint.slice(0, 37) + '...' : hint;
-  const patternLabel = svc
-    ? `${svc} pattern (${truncatedHint})`
-    : truncatedHint || 'pattern';
+  // Delegates to the shared formatPatternLabel helper.
+  const patternLabel = formatPatternLabel({
+    symbol_message: args.pattern,
+    service: args.service,
+  });
   const basisFragment = (() => {
     switch (args.basis) {
       case 'env_config':

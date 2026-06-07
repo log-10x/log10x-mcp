@@ -15,6 +15,7 @@
 
 import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
+import { formatPatternLabel } from '../lib/pattern-label.js';
 import {
   buildPatternSearch,
   eventTimestampMs,
@@ -332,7 +333,7 @@ export async function executeRetrieverSeries(
   return __be({
     tool: 'log10x_retriever_series',
     view: 'summary',
-    summary: { headline: `Retriever series for ${args.pattern ?? args.search ?? 'window'}: ${result.series.length} bucket point${result.series.length !== 1 ? 's' : ''}, ${result.groupCardinality} group${result.groupCardinality !== 1 ? 's' : ''}, mode=${decision.mode}, wall=${wallTimeMs}ms.` },
+    summary: { headline: `Retriever series for ${formatPatternLabel({ symbol_message: args.pattern ?? args.search ?? 'window', maxHintChars: 50 })}: ${result.series.length} bucket point${result.series.length !== 1 ? 's' : ''}, ${result.groupCardinality} group${result.groupCardinality !== 1 ? 's' : ''}, mode=${decision.mode}, wall=${wallTimeMs}ms.` },
     data: {
       // Harmonized chassis status (Wave 1.C). `ok` retained for back-compat.
       status: seriesStatus,
@@ -746,7 +747,8 @@ function buildSeriesHumanSummary(s: {
     : args.search
       ? `search ${args.search}`
       : 'open scan';
-  const first = `Retriever series for ${scope} over ${args.from} to ${args.to} (${formatDuration(windowMs)}) produced ${result.series.length} bucket points across ${result.groupCardinality} group${result.groupCardinality === 1 ? '' : 's'} in mode ${decision.mode} (wall ${wallTimeMs}ms).`;
+  const scopeLabel = formatPatternLabel({ symbol_message: scope, maxHintChars: 50 });
+  const first = `Retriever series for ${scopeLabel} over ${args.from} to ${args.to} (${formatDuration(windowMs)}) produced ${result.series.length} bucket points across ${result.groupCardinality} group${result.groupCardinality === 1 ? '' : 's'} in mode ${decision.mode} (wall ${wallTimeMs}ms).`;
   const second = decision.mode === 'per_window_sampled'
     ? `Sampled mode used ${decision.subWindows} sub-windows of up to ${decision.eventsPerSubWindow} events each; time-distribution shape is preserved but bucket counts are estimates.`
     : `Full-aggregation mode returned exact counts over ${result.actualEvents} processed events${result.truncated ? ' (some workers truncated at the per-worker cap)' : ''}.`;

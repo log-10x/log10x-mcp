@@ -7,6 +7,7 @@
 import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
 import { queryRange, queryInstant } from '../lib/api.js';
+import { formatPatternLabel } from '../lib/pattern-label.js';
 import * as pql from '../lib/promql.js';
 import { LABELS } from '../lib/promql.js';
 import { bytesToCost, buildDisclosedDollarValue, type DisclosedDollarValue, parsePrometheusValue } from '../lib/cost.js';
@@ -242,8 +243,13 @@ export async function executeTrend(
   //       same offload-overreach; cohort is generic isDropped, not
   //       offload-specifically. Renamed to "<pattern> reduced cohort
   //       over <window>".
-  const patternHint = (d.pattern || '').trim().replace(/_/g, ' ');
-  const shortPattern = patternHint.length > 60 ? patternHint.slice(0, 57) + '...' : patternHint;
+  // Uses shared formatPatternLabel helper with 60-char cap. pattern_trend
+  // has no services[] context (single-pattern view), so we lean on the
+  // symbol_message as the only signal.
+  const shortPattern = formatPatternLabel({
+    symbol_message: d.pattern,
+    maxHintChars: 60,
+  });
   if (d.include === 'dropped') {
     headline = `\`${shortPattern}\` reduced cohort over ${d.window}: ${fmtBytes(d.total_bytes)} dropped, change ${changeSign}${d.change_pct}%${dollarClause}${spikeClause}`;
   } else if (d.include === 'both' && d.dropped_share_pct !== null) {

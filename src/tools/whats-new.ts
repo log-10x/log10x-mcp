@@ -24,6 +24,7 @@
 import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
 import { queryInstant } from '../lib/api.js';
+import { formatPatternLabelFromServices } from '../lib/pattern-label.js';
 import * as pql from '../lib/promql.js';
 import { LABELS } from '../lib/promql.js';
 import { bytesToCost, parsePrometheusValue } from '../lib/cost.js';
@@ -385,23 +386,14 @@ export async function executeWhatsNew(
   // that's the closest thing to a sample line available without fetching
   // a separate query. Skip the e.g. block when the sample would just
   // restate the descriptor verbatim.
-  // Burned rule (memory: feedback_no_hash_in_user_headlines): lead with
-  // pattern name + service + state, NOT raw symbol_message blobs. Math-lens
-  // workflow w1aem8inf flagged this as the FOURTH tool (after whats_changing,
-  // pattern_mitigate, top_patterns) with the same defect. Same fix shape
-  // applied: service-led label with a short token hint as a parenthetical.
-  const headlineDescriptor = (r: NewPatternRow) => {
-    const svc = r.services?.[0]?.name;
-    const sev = r.services?.[0]?.severity;
-    const lead = svc
-      ? sev && sev.length > 0
-        ? `${svc} ${sev} pattern`
-        : `${svc} pattern`
-      : 'pattern';
-    const raw = (r.symbol_message ?? '').trim().replace(/_/g, ' ');
-    const hint = raw.length > 40 ? raw.slice(0, 37) + '...' : raw;
-    return hint ? `${lead} (${hint})` : lead;
-  };
+  // Delegates to the shared formatPatternLabelFromServices helper —
+  // burned-rule fix (memory: feedback_no_hash_in_user_headlines) lives
+  // in one place. See lib/pattern-label.ts.
+  const headlineDescriptor = (r: NewPatternRow) =>
+    formatPatternLabelFromServices({
+      symbol_message: r.symbol_message,
+      services: r.services,
+    });
   const headline =
     shown.length === 0
       ? `No patterns first seen within ${firstSeenWithin} over ${tf.label}.`

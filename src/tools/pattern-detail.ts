@@ -22,6 +22,7 @@
 import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
 import { loadEnvironments } from '../lib/environments.js';
+import { formatPatternLabelFromServices } from '../lib/pattern-label.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { queryInstant, queryRange } from '../lib/api.js';
 import { LABELS } from '../lib/promql.js';
@@ -104,28 +105,13 @@ function patternDescriptor(
   services: Array<{ service: string; severity?: string }>,
   fallbackLabel: string,
 ): string {
-  // Burned rule (memory: feedback_no_hash_in_user_headlines): lead with
-  // pattern name + service + state, NOT raw underscored symbol_message
-  // blobs. Math-lens workflow wt3lz36ye flagged pattern_detail as the
-  // 5th tool with this defect. Same fix shape applied as
-  // whats_changing/pattern_mitigate/top_patterns/whats_new: service-led
-  // label, symbol_message as a parenthetical token hint (underscores
-  // -> spaces, capped at 40 chars).
-  const svc = services[0]?.service;
-  const sev = services[0]?.severity;
-  const lead = svc
-    ? sev && sev.length > 0
-      ? `${svc} ${sev} pattern`
-      : `${svc} pattern`
-    : null;
-  if (lead && patternName) {
-    const hint = patternName.trim().replace(/_/g, ' ');
-    const truncatedHint = hint.length > 40 ? hint.slice(0, 37) + '...' : hint;
-    return `${lead} (${truncatedHint})`;
-  }
-  if (lead) return lead;
-  if (patternName) return patternName;
-  return fallbackLabel;
+  // Delegates to the shared formatPatternLabelFromServices helper.
+  // See lib/pattern-label.ts for the burned-rule rationale.
+  return formatPatternLabelFromServices({
+    symbol_message: patternName,
+    services: services.map((s) => ({ name: s.service, severity: s.severity })),
+    fallback: fallbackLabel,
+  });
 }
 
 // ─── ASCII horizontal bar chart ───────────────────────────────────────────────

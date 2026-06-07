@@ -22,6 +22,7 @@
 import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
 import { queryInstant } from '../lib/api.js';
+import { formatPatternLabelFromServices } from '../lib/pattern-label.js';
 import * as pql from '../lib/promql.js';
 import { LABELS } from '../lib/promql.js';
 import { bytesToCost, parsePrometheusValue } from '../lib/cost.js';
@@ -135,37 +136,20 @@ function formatHeadlineDollars(delta: number): string {
 }
 
 /**
- * User-facing descriptor for headlines. Pattern hash is opaque to users —
- * burned rule (memory: feedback_no_hash_in_user_headlines): lead with
- * pattern name + service + state, NOT raw symbol/hash artifacts. The
- * symbol_message field contains underscore-joined tokens like
- * "terror_v_logger_go_failed_t_resource_service_instance_id..." which
- * read as machine-generated junk. Math-lens workflow wol3rcauh flagged
- * the prior version which surfaced exactly that.
- *
- * Format: "<top service> <SEVERITY pattern|pattern>" (e.g.
- * "opentelemetry-collector ERROR pattern", "payment pattern").
- * Symbol-message tokens are rendered as a parenthetical hint with
- * underscores replaced by spaces, capped at 40 chars, so the operator
- * still gets a clue to the cluster without the headline looking like
- * a raw blob.
+ * User-facing descriptor for headlines. Delegates to the shared
+ * formatPatternLabelFromServices helper in lib/pattern-label.ts so the
+ * burned-rule fix (memory: feedback_no_hash_in_user_headlines) lives in
+ * one place across all 5+ tools that produce pattern headlines.
  */
 function formatHeadlineDescriptor(row: {
   pattern_hash: string;
   symbol_message: string;
   services?: Array<{ name: string; severity?: string }>;
 }): string {
-  const topService = row.services?.[0];
-  const lead = topService?.name
-    ? topService.severity && topService.severity.length > 0
-      ? `${topService.name} ${topService.severity} pattern`
-      : `${topService.name} pattern`
-    : 'pattern';
-  const raw = (row.symbol_message ?? '').trim();
-  if (!raw) return lead;
-  const hint = raw.replace(/_/g, ' ');
-  const truncatedHint = hint.length > 40 ? hint.slice(0, 37) + '...' : hint;
-  return `${lead} (${truncatedHint})`;
+  return formatPatternLabelFromServices({
+    symbol_message: row.symbol_message,
+    services: row.services,
+  });
 }
 
 export async function executeWhatsChanging(
