@@ -126,7 +126,7 @@ describe('executeMeasureCompaction', () => {
       { service: 'my-service' },
       fakeEnv
     );
-    const data = result.data as any;
+    const data = (result.data as any).payload;
     expect(data.patterns).toHaveLength(3); // hashA, hashB, hashC
   });
 
@@ -135,21 +135,22 @@ describe('executeMeasureCompaction', () => {
       { service: 'my-service' },
       fakeEnv
     );
-    const data = result.data as any;
+    const data = (result.data as any).payload;
     const patA = data.patterns.find((p: any) => p.pattern_hash === 'hashA');
     expect(patA).toBeDefined();
     // total_encoded_bytes = 4 * 30 = 120
     expect(patA.total_encoded_bytes).toBe(120);
-    // total_original_bytes = 4 * expandedByteLength(template, values)
+    // total_original_bytes = sum of expandedByteLength(template, values)
     // template = 'ERROR Database connection failed: $'
+    // literal prefix 'ERROR Database connection failed: ' = 34 bytes
     // values vary: 'timeout', 'timeout', 'refused', 'reset'
     // Byte lengths: 'ERROR Database connection failed: timeout' = 41, x2
     //               'ERROR Database connection failed: refused' = 41
-    //               'ERROR Database connection failed: reset'   = 40
-    // total = 41+41+41+40 = 163
-    expect(patA.total_original_bytes).toBe(163);
-    // ratio = 163 / 120 ≈ 1.4 (rounded to 1 decimal)
-    expect(patA.compaction_ratio_x).toBeCloseTo(163 / 120, 1);
+    //               'ERROR Database connection failed: reset'   = 39
+    // total = 41+41+41+39 = 162
+    expect(patA.total_original_bytes).toBe(162);
+    // ratio = 162 / 120 ≈ 1.4 (rounded to 1 decimal)
+    expect(patA.compaction_ratio_x).toBeCloseTo(162 / 120, 1);
   });
 
   it('assigns confidence tiers correctly', async () => {
@@ -157,7 +158,7 @@ describe('executeMeasureCompaction', () => {
       { service: 'my-service' },
       fakeEnv
     );
-    const data = result.data as any;
+    const data = (result.data as any).payload;
     const patA = data.patterns.find((p: any) => p.pattern_hash === 'hashA');
     const patB = data.patterns.find((p: any) => p.pattern_hash === 'hashB');
     const patC = data.patterns.find((p: any) => p.pattern_hash === 'hashC');
@@ -191,7 +192,7 @@ describe('executeMeasureCompaction', () => {
     });
 
     const result = await executeMeasureCompaction({ service: 'svc' }, fakeEnv);
-    const data = result.data as any;
+    const data = (result.data as any).payload;
     const pat = data.patterns.find((p: any) => p.pattern_hash === 'hashX');
     expect(pat.confidence).toBe('medium');
     expect(pat.sample_count).toBe(15);
@@ -217,14 +218,14 @@ describe('executeMeasureCompaction', () => {
     });
 
     const result = await executeMeasureCompaction({ service: 'svc' }, fakeEnv);
-    const data = result.data as any;
+    const data = (result.data as any).payload;
     const pat = data.patterns.find((p: any) => p.pattern_hash === 'hashY');
     expect(pat.confidence).toBe('high');
   });
 
   it('includes must_render_verbatim table', async () => {
     const result = await executeMeasureCompaction({ service: 'svc' }, fakeEnv);
-    const data = result.data as any;
+    const data = (result.data as any).payload;
     expect(typeof data.must_render_verbatim).toBe('string');
     expect(data.must_render_verbatim).toContain('pattern_hash');
     expect(data.must_render_verbatim).toContain('ratio_x');
@@ -241,7 +242,7 @@ describe('executeMeasureCompaction', () => {
     });
 
     const result = await executeMeasureCompaction({ service: 'nonexistent' }, fakeEnv);
-    const data = result.data as any;
+    const data = (result.data as any).payload;
     expect(data.patterns).toHaveLength(0);
     expect(data.sample_size_actual).toBe(0);
     expect(result.summary.headline).toContain('No events found');
@@ -249,7 +250,7 @@ describe('executeMeasureCompaction', () => {
 
   it('records siem_pull_ms and engine_ms in the data envelope', async () => {
     const result = await executeMeasureCompaction({ service: 'svc' }, fakeEnv);
-    const data = result.data as any;
+    const data = (result.data as any).payload;
     expect(typeof data.siem_pull_ms).toBe('number');
     expect(typeof data.engine_ms).toBe('number');
   });
@@ -257,11 +258,13 @@ describe('executeMeasureCompaction', () => {
   it('uses default sample_size=500 and timeRange=24h when omitted', async () => {
     await executeMeasureCompaction({ service: 'svc' }, fakeEnv);
     const { getConnector } = await import('../src/lib/siem/index.js');
-    const connector = (getConnector as Mock).mock.results[0]?.value;
+    const connector = (getConnector as Mock).mock.results.at(-1)?.value;
     if (connector) {
       // The pull was invoked with the correct window.
       // We only assert sample_size reached the connector as targetEventCount.
-      const callArgs = (connector.pullEvents as Mock).mock.calls[0]?.[0];
+      // getConnector is a shared mockReturnValue, so pullEvents calls
+      // accumulate across the whole suite — read THIS test's call (the last).
+      const callArgs = (connector.pullEvents as Mock).mock.lastCall?.[0];
       if (callArgs) {
         expect(callArgs.targetEventCount).toBe(500);
         expect(callArgs.window).toBe('24h');

@@ -50,11 +50,14 @@ function clearAllLog10xEnv() {
 test('GA pattern_mitigate: empty pattern → status=error with input_invalid PrimitiveError', async () => {
   const out = await executePatternMitigate({ pattern: '' });
   if (typeof out === 'string') throw new Error('expected envelope');
+  // status + error live on the chassis data block; recommendation_basis /
+  // pattern_ref are NOT surfaced on the error envelope (no payload echo on
+  // the empty-pattern input_invalid fast path).
   const d = out.data as {
     status: string;
     error?: { error_type: string; retryable: boolean; suggested_backoff_ms: number | null; hint: string };
-    recommendation_basis: string;
-    pattern_ref: string;
+    recommendation_basis?: string;
+    pattern_ref?: string;
   };
   assert.equal(d.status, 'error');
   assert.ok(d.error);
@@ -63,8 +66,8 @@ test('GA pattern_mitigate: empty pattern → status=error with input_invalid Pri
   assert.equal(d.error.retryable, false);
   assert.equal(d.error.suggested_backoff_ms, null);
   assert.match(d.error.hint, /pattern argument required/i);
-  assert.equal(d.recommendation_basis, 'unknown');
-  assert.equal(d.pattern_ref, '');
+  assert.equal(d.recommendation_basis, undefined);
+  assert.equal(d.pattern_ref, undefined);
 });
 
 test('GA pattern_mitigate: whitespace-only pattern → status=error', async () => {
@@ -83,7 +86,9 @@ test('GA pattern_mitigate: envelope shape — recommendation_audit + status vali
   // envelope must have status/basis/audit/sources) not specific values.
   const out = await executePatternMitigate({ pattern: 'payment_gateway_timeout' });
   if (typeof out === 'string') throw new Error('expected envelope');
-  const d = out.data as {
+  // Tool-specific fields now live under the chassis `data.payload`, not on
+  // `data` directly (ChassisDataSchema.parse strips legacy flat fields).
+  const d = (out.data as { payload: unknown }).payload as {
     status: string;
     recommendation_basis: string;
     recommendation_audit: {
@@ -96,17 +101,20 @@ test('GA pattern_mitigate: envelope shape — recommendation_audit + status vali
   };
   assert.ok(['success', 'no_signal', 'insufficient_data', 'error'].includes(d.status));
   assert.ok(
-    ['env_config', 'env_config_plus_snapshot', 'snapshot', 'env_vars_only', 'unknown'].includes(d.recommendation_basis),
+    ['env_config', 'cached_snapshot', 'env_config_plus_snapshot', 'snapshot', 'env_vars_only', 'unknown'].includes(d.recommendation_basis),
   );
   assert.equal(d.recommendation_audit.n_options_enabled + d.recommendation_audit.n_options_dimmed, 4);
+  // analyzer can additionally resolve via the live SIEM credential probe.
   for (const key of ['gitops', 'forwarder', 'analyzer'] as const) {
     assert.ok(
-      ['envs_json', 'env_var', 'snapshot', 'absent'].includes(d.recommendation_audit.capability_sources[key]),
+      ['envs_json', 'env_var', 'snapshot', 'siem_probe', 'absent'].includes(d.recommendation_audit.capability_sources[key]),
     );
   }
-  for (const key of ['receiver', 'retriever', 'receiver_in_path'] as const) {
+  for (const key of ['receiver', 'retriever'] as const) {
     assert.ok(['snapshot', 'absent'].includes(d.recommendation_audit.capability_sources[key]));
   }
+  // receiver_in_path can also be confirmed via the SIEM tenx_hash probe.
+  assert.ok(['snapshot', 'siem_probe', 'absent'].includes(d.recommendation_audit.capability_sources.receiver_in_path));
 });
 
 // ── Receiver-gating tests ────────────────────────────────────────────
@@ -119,7 +127,7 @@ test('GA pattern_mitigate: options 1 and 2 are dimmed when receiverInPath is fal
   try {
     const out = await executePatternMitigate({ pattern: 'payment_gateway_timeout' });
     if (typeof out === 'string') throw new Error('expected envelope');
-    const d = out.data as { options: Array<{ id: string; enabled: boolean; disabled_reason?: string }> };
+    const d = (out.data as { payload: unknown }).payload as { options: Array<{ id: string; enabled: boolean; disabled_reason?: string }> };
     const opt1 = d.options.find((o) => o.id === 'drop_at_analyzer')!;
     const opt2 = d.options.find((o) => o.id === 'drop_at_forwarder')!;
     assert.equal(opt1.enabled, false, 'drop_at_analyzer must be dimmed without Receiver');
@@ -134,12 +142,12 @@ test('GA pattern_mitigate: options 1 and 2 are dimmed when receiverInPath is fal
 test('GA pattern_mitigate: CapabilitySources includes receiver_in_path field', async () => {
   const out = await executePatternMitigate({ pattern: 'some_pattern' });
   if (typeof out === 'string') throw new Error('expected envelope');
-  const d = out.data as {
+  const d = (out.data as { payload: unknown }).payload as {
     recommendation_audit: { capability_sources: { receiver_in_path: string } };
   };
   assert.ok(
-    ['snapshot', 'absent'].includes(d.recommendation_audit.capability_sources.receiver_in_path),
-    'receiver_in_path must be snapshot or absent',
+    ['snapshot', 'siem_probe', 'absent'].includes(d.recommendation_audit.capability_sources.receiver_in_path),
+    'receiver_in_path must be snapshot, siem_probe, or absent',
   );
 });
 
@@ -151,7 +159,7 @@ test('GA pattern_mitigate: when LOG10X_GH_REPO is set, mute + compact options ar
   try {
     const out = await executePatternMitigate({ pattern: 'payment_gateway_timeout' });
     if (typeof out === 'string') throw new Error('expected envelope');
-    const d = out.data as {
+    const d = (out.data as { payload: unknown }).payload as {
       status: string;
       env_capabilities: { can_mute: boolean; can_compact: boolean };
       recommendation_audit: { capability_sources: { gitops: string } };
@@ -177,7 +185,7 @@ test('GA pattern_mitigate: pattern_ref echoes the input, telemetry fields popula
   try {
     const out = await executePatternMitigate({ pattern: 'cart_cartstore_ValkeyCartStore' });
     if (typeof out === 'string') throw new Error('expected envelope');
-    const d = out.data as {
+    const d = (out.data as { payload: unknown }).payload as {
       pattern_ref: string;
       query_count: number;
       backend_pressure_hint: null;
@@ -201,7 +209,7 @@ test('GA pattern_mitigate: options[] still surfaces id + enabled + label for eac
   try {
     const out = await executePatternMitigate({ pattern: 'p' });
     if (typeof out === 'string') throw new Error('expected envelope');
-    const d = out.data as {
+    const d = (out.data as { payload: unknown }).payload as {
       options: Array<{ id: string; enabled: boolean; label: string }>;
     };
     assert.equal(d.options.length, 4);

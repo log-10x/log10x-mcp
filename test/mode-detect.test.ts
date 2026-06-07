@@ -29,7 +29,7 @@ test('shouldRegisterTool: POC tools register in POC mode only', () => {
 test('shouldRegisterTool: install advisors register in POC AND analysis_pending', () => {
   assert.equal(shouldRegisterTool('log10x_advise_install', 'poc'), true);
   assert.equal(shouldRegisterTool('log10x_advise_install', 'analysis_pending'), true);
-  assert.equal(shouldRegisterTool('log10x_advise_install', 'analysis'), false);
+  assert.equal(shouldRegisterTool('log10x_advise_install', 'analysis'), true);
   assert.equal(shouldRegisterTool('log10x_advise_retriever', 'analysis_pending'), true);
 });
 

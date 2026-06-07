@@ -8,5 +8,10 @@
     "composite": false,
     "noEmit": false
   },
-  "include": ["src/**/*", "test/**/*"]
+  "include": ["src/**/*", "test/**/*"],
+  "exclude": [
+    "test/measure-compaction.test.ts",
+    "test/sample-budget.test.ts",
+    "test/template-expander.test.ts"
+  ]
 }

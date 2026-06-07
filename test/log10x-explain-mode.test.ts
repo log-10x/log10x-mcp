@@ -31,13 +31,36 @@ import { isStructuredOutput, StructuredOutputSchema } from '../src/lib/output-ty
 
 // ── Helpers ─────────────────────────────────────────────────────────────────────
 
-/** Call the tool with no env configured (offline / no TSDB) */
+/**
+ * Post-chassis-refactor, executeExplainMode returns a ChassisEnvelope: the
+ * tool-specific fields (service, mode, destination, routes_to, byte/cost
+ * figures) live under `result.data.payload`, while the compliance levers
+ * (must_render_verbatim, must_ask_user, forbidden_next_actions) live at the
+ * top level of `result.data`. Flatten both into a single ExplainModeEnvelope
+ * view so the assertions below read fields off one object as before.
+ *
+ * An explicit compatible destination (azure-monitor — the one SIEM that
+ * supports both compact and tier_down) is passed so every mode resolves
+ * compatible regardless of any ambient SIEM creds auto-detected on the host.
+ */
+function flattenExplainData(result: Awaited<ReturnType<typeof executeExplainMode>>): ExplainModeEnvelope {
+  const d = result.data as Record<string, unknown>;
+  const payload = d.payload as Record<string, unknown>;
+  return {
+    ...payload,
+    must_render_verbatim: d.must_render_verbatim,
+    must_ask_user: d.must_ask_user,
+    forbidden_next_actions: d.forbidden_next_actions,
+  } as unknown as ExplainModeEnvelope;
+}
+
+/** Call the tool with an explicit all-mode-compatible destination */
 async function runMode(mode: ExplainMode, service = 'payments'): Promise<{
   result: Awaited<ReturnType<typeof executeExplainMode>>;
   data: ExplainModeEnvelope;
 }> {
-  const result = await executeExplainMode({ service, mode });
-  const data = result.data as ExplainModeEnvelope;
+  const result = await executeExplainMode({ service, mode, destination: 'azure-monitor' });
+  const data = flattenExplainData(result);
   return { result, data };
 }
 
@@ -239,7 +262,7 @@ test('all modes route preview to log10x_preview_filter with service and mode', a
 // ── actions[] both branches with role='alternative' ──────────────────────────────
 
 test('actions[] contains both apply and preview branches as alternatives (non-observe mode)', async () => {
-  const result = await executeExplainMode({ service: 'payments', mode: 'drop' });
+  const result = await executeExplainMode({ service: 'payments', mode: 'drop', destination: 'azure-monitor' });
   assert.ok(Array.isArray(result.actions), 'actions must be an array');
   assert.equal(result.actions.length, 2, 'exactly 2 actions (apply + preview) for non-observe mode');
   for (const action of result.actions) {
@@ -252,7 +275,7 @@ test('actions[] contains both apply and preview branches as alternatives (non-ob
 });
 
 test('actions[] for observe_only contains only the preview branch', async () => {
-  const result = await executeExplainMode({ service: 'payments', mode: 'observe_only' });
+  const result = await executeExplainMode({ service: 'payments', mode: 'observe_only', destination: 'azure-monitor' });
   assert.ok(Array.isArray(result.actions), 'actions must be an array');
   assert.equal(result.actions.length, 1, 'observe_only must have exactly 1 action (preview only)');
   assert.equal(result.actions[0].tool, 'log10x_preview_filter');
@@ -263,10 +286,10 @@ test('actions[] for observe_only contains only the preview branch', async () => 
 
 test('all 6 EXPLAIN_MODES produce a valid StructuredOutput with all required fields', async () => {
   for (const mode of EXPLAIN_MODES) {
-    const result = await executeExplainMode({ service: 'orders', mode });
+    const result = await executeExplainMode({ service: 'orders', mode, destination: 'azure-monitor' });
     assert.ok(isStructuredOutput(result), `mode ${mode}: expected StructuredOutput`);
     StructuredOutputSchema.parse(result);
-    const data = result.data as ExplainModeEnvelope;
+    const data = flattenExplainData(result);
     assert.equal(data.mode, mode, `data.mode must equal ${mode}`);
     assert.ok(data.must_render_verbatim.length > 0, `mode ${mode}: verbatim must be non-empty`);
     assert.ok(data.forbidden_next_actions.length >= 4, `mode ${mode}: forbidden_next_actions must have at least 4 entries`);

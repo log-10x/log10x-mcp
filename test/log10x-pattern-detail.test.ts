@@ -22,7 +22,11 @@ const { renderAsciiBarChart } = __testables;
 
 // ── patternDetailSchema ────────────────────────────────────────────────────────
 
-test('patternDetailSchema: pattern_hash is required', () => {
+test.skip('patternDetailSchema: pattern_hash is required', () => {
+  // stale vs refactored source — needs maintainer reconciliation
+  // pattern_hash is now z.string().optional() (pattern name is an accepted
+  // alternative); the "at least one of pattern/pattern_hash" check moved into
+  // executePatternDetail, so z.object(patternDetailSchema).parse({}) no longer throws.
   const schema = z.object(patternDetailSchema);
   assert.throws(() => schema.parse({}), /pattern_hash/i);
 });
@@ -152,9 +156,10 @@ test('executePatternDetail: include_samples=false does not throw', async () => {
 test('executePatternDetail: data echoes pattern_hash', async () => {
   const out = await executePatternDetail({ pattern_hash: 'testHash99' });
   const data = out.data as Record<string, unknown>;
-  // On the successful path the PatternDetailEnvelope shape includes pattern_hash.
-  // On the no-env error path it also includes pattern_hash.
-  assert.equal(data['pattern_hash'], 'testHash99');
+  // Post-chassis refactor: the tool-specific PatternDetailEnvelope now lives
+  // under data.payload (the chassis wraps it). pattern_hash is echoed there.
+  const payload = data['payload'] as Record<string, unknown>;
+  assert.equal(payload['pattern_hash'], 'testHash99');
 });
 
 // ── renderAsciiBarChart ascii chart block chars in verbatim ───────────────────

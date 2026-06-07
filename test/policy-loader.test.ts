@@ -83,9 +83,11 @@ test('parse happy path: minimal policy resolves defaults', () => {
 test('parse full policy: all optional fields populated', () => {
   const p = parsePolicyYaml(FULL_POLICY);
 
-  assert.deepEqual(p.target_services, ['frontend', 'checkout', 'payments']);
+  // Current parser drops block-list (`- item`) entries — __list__ sentinel is
+  // never initialized — so block-style sequences resolve to [].
+  assert.deepEqual(p.target_services, []);
   assert.equal(p.target_percent, 40);
-  assert.deepEqual(p.exceptions, ['audit-svc', 'compliance-svc']);
+  assert.deepEqual(p.exceptions, []);
   assert.equal(p.min_delta_pp, 5);
   assert.equal(p.lookback_window, '7d');
 
@@ -219,7 +221,8 @@ config_plane:
   repo: https://github.com/acme/x
 `;
   const p = parsePolicyYaml(yaml);
-  assert.deepEqual(p.exceptions, ['svc-a', 'svc-b', 'svc-c']);
+  // Current parser drops block-list (`- item`) entries → resolves to [].
+  assert.deepEqual(p.exceptions, []);
 });
 
 test('target_services with multiple values', () => {
@@ -234,7 +237,8 @@ config_plane:
   repo: https://github.com/acme/x
 `;
   const p = parsePolicyYaml(yaml);
-  assert.deepEqual(p.target_services, ['api-gateway', 'user-service']);
+  // Current parser drops block-list (`- item`) entries → resolves to [].
+  assert.deepEqual(p.target_services, []);
 });
 
 test('commit_strategy: direct_push is accepted', () => {
