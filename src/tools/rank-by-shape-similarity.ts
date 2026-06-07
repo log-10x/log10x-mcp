@@ -550,7 +550,17 @@ export async function executeRankByShapeSimilarity(
       candidates_count: args.candidates.length,
       candidates_usable: nUsable,
       candidates_evaluated: survivors.length - failed.length,
-      candidates_failed: failed,
+      // Math-lens workflow wxk3k628c: prior code left
+      // scope.candidates_failed=[] while payload.evaluation_unknown
+      // listed candidates that failed validation (metric doesn't exist).
+      // The sibling metrics_that_moved lumps unknown into
+      // candidates_failed — leaving scope-level empty here was a schema
+      // inconsistency on the same concept ("which candidates produced
+      // no result"). Merge unknowns into candidates_failed so the
+      // chassis surface agrees with metrics_that_moved; payload.
+      // evaluation_unknown stays for callers that want the
+      // unknown-vs-failed distinction.
+      candidates_failed: [...failed, ...unknown.map((u) => u.candidate)],
     },
     payload: data,
     human_summary,

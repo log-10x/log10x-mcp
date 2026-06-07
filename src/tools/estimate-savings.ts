@@ -307,6 +307,19 @@ export interface ForecastResult {
     dollars_high_monthly: number;
     annual_projection_expected: number;
     /**
+     * Math-lens workflow wxk3k628c: disclose the extrapolation method
+     * for annual_projection_expected so consumers understand it's a
+     * naive monthly × 12 — NOT a seasonality-adjusted forecast.
+     * Matches the projection_basis pattern added to savings.ts in
+     * round-5.
+     */
+    projection_basis: {
+      method: 'linear_extrapolation';
+      scale_factor: 12;
+      basis_value: 'dollars_expected_monthly';
+      note: string;
+    };
+    /**
      * Per-action breakdown of the forecast totals. Populated by the
      * executeEstimateSavings path (FIX 86) so renderers can surface
      * which dollar/byte contribution came from which action.
@@ -324,6 +337,15 @@ export interface ForecastResult {
    */
   coverage_of_env_pct: number;
   /**
+   * Math-lens workflow wxk3k628c: the `_pct` suffix is misleading on
+   * coverage_of_env_pct (the value 0.97 means "97%" but is stored as a
+   * decimal ratio). Sibling `_percent` field stores the true-percent
+   * value (97.27, not 0.9727) so consumers reading the `_pct` naming
+   * convention used by sibling share_pct fields in this envelope (where
+   * share_pct=16.09 means 16.09%) get the consistent reading.
+   */
+  coverage_of_env_percent: number;
+  /**
    * @deprecated use coverage_of_env_pct. Kept for backward compatibility.
    */
   coverage_pct: number;
@@ -334,6 +356,8 @@ export interface ForecastResult {
    * caller specified every row they care about.
    */
   coverage_of_proposed_pct: number;
+  /** Same value × 100. 97.27 means "97.27% of proposed bytes modeled". */
+  coverage_of_proposed_percent: number;
   /**
    * Source of the $/GB rate used to compute dollar projections.
    *  - 'customer_supplied' — caller passed effective_ingest_per_gb
@@ -1158,6 +1182,7 @@ export async function runEstimateForecast(
     esPruned: args.es_pruned,
   });
   const forecastRetentionMonths = 1; // matches projectActionRange default
+  const customerSuppliedRate = forecastRateResolved.rate_per_gb;
   const forecast_rate_disclosure: string | null =
     forecastRateResolved.source === 'list_price' &&
     forecastModel.storage_per_gb_month > 0 &&
@@ -1167,7 +1192,15 @@ export async function runEstimateForecast(
           (match) =>
             `${match} ingest + $${forecastModel.storage_per_gb_month.toFixed(2)}/GB-month storage × ${forecastRetentionMonths}mo = $${(forecastModel.ingest_per_gb + forecastModel.storage_per_gb_month * forecastRetentionMonths).toFixed(2)}/GB effective`
         )
-      : forecastRateResolved.disclosure;
+      : forecastRateResolved.source === 'customer_supplied' && customerSuppliedRate != null
+        // Math-lens workflow wxk3k628c: prior code shipped
+        // rate_disclosure=null when rate_source='customer_supplied' so
+        // every dollar figure was computed from an undisclosed scalar.
+        // Surface the customer-supplied rate string so a CFO can audit
+        // the math from the envelope alone, matching the top_patterns
+        // rate_disclosure pattern shipped in round-5.
+        ? `$${customerSuppliedRate.toFixed(2)}/GB ingest (customer-supplied)${forecastModel.storage_per_gb_month > 0 ? ` + $${forecastModel.storage_per_gb_month.toFixed(2)}/GB-month storage × ${forecastRetentionMonths}mo = $${(customerSuppliedRate + forecastModel.storage_per_gb_month * forecastRetentionMonths).toFixed(2)}/GB effective` : ''}`
+        : forecastRateResolved.disclosure;
 
   const caveats: string[] = [];
   if (noOpCompactCount > 0) {
@@ -1200,6 +1233,21 @@ export async function runEstimateForecast(
       `Dollar projections use ${args.destination} list price. Pass effective_ingest_per_gb to use your contracted rate and align with top_patterns output.`
     );
   }
+  // Math-lens workflow wxk3k628c: when the caller asked for a
+  // target_percent reduction but every pattern got mapped to tier_down
+  // (storage-tier marker, bytes still ingested at full rate), the
+  // headline declares "$0/mo savings" without telling the caller the
+  // requested target wasn't met. Surface explicitly so the agent can
+  // route to a destination that supports the requested reduction.
+  if (
+    args.target_percent !== undefined &&
+    totalSavedBytes === 0 &&
+    rows.length > 0
+  ) {
+    caveats.push(
+      `Requested ${args.target_percent}% volume reduction; achieved 0% on ${args.destination} because the only applicable action is tier_down (a storage-tier marker, not a byte reduction). To actually cut volume on this destination, pass default_action=drop or default_action=sample; or switch to a destination where compact is non-no-op.`
+    );
+  }
 
   return {
     mode: 'forecast',
@@ -1226,10 +1274,18 @@ export async function runEstimateForecast(
       dollars_expected_monthly: totalExpected,
       dollars_high_monthly: totalHigh,
       annual_projection_expected: totalExpected * 12,
+      projection_basis: {
+        method: 'linear_extrapolation' as const,
+        scale_factor: 12 as const,
+        basis_value: 'dollars_expected_monthly' as const,
+        note: 'annual_projection_expected = dollars_expected_monthly × 12. Linear extrapolation from observed monthly figure; NOT seasonality-adjusted, growth-adjusted, or contract-tier-adjusted. For verified savings under a real deployed policy use mode=verify with baseline_window + post_window.',
+      },
     },
     coverage_of_env_pct,
+    coverage_of_env_percent: coverage_of_env_pct * 100,
     coverage_pct: coverage_of_env_pct, // backward-compat alias
     coverage_of_proposed_pct,
+    coverage_of_proposed_percent: coverage_of_proposed_pct * 100,
     rate_source: forecast_rate_source,
     rate_disclosure: forecast_rate_disclosure,
     bytes_source: {
@@ -1850,11 +1906,22 @@ export async function executeEstimateSavings(
         ? ` via ${(args.default_action ?? 'compact')}`
         : '';
 
+      // Math-lens workflow wxk3k628c: when the solver wanted `compact` but
+      // the destination's no-op mode forced every pattern to `tier_down`,
+      // the headline concatenated BOTH clauses: "$0/mo savings via compact
+      // ... via tier_down ...". The `solverActionTag` reflects what the
+      // SOLVER requested; the `via tier_down` reflects what the destination
+      // ACTUALLY ASSIGNED. When every pattern got tier_down (tierDownOnly),
+      // only the actual action matters — suppress solverActionTag in that
+      // branch so the headline stops claiming two contradictory actions.
       let headline: string;
       if (args.enforcement_mode === 'manual_report') {
         headline = `If you enforce externally: ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings potential${solverActionTag}${serviceTag} on ${patternCountLabel} (${(result.coverage_of_env_pct * 100).toFixed(0)}% of monthly env bytes). Enforcement choice is yours.`;
       } else if (tierDownOnly) {
-        headline = `Forecast (${destination}): ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings${solverActionTag}${serviceTag} via tier_down (storage-tier price differential; bytes still ingested at full rate) on ${patternCountLabel}.`;
+        const solverNote = args.target_percent !== undefined && args.default_action === 'compact'
+          ? ` (solver requested compact; destination forced tier_down)`
+          : '';
+        headline = `Forecast (${destination}): ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings${serviceTag} via tier_down (storage-tier price differential; bytes still ingested at full rate) on ${patternCountLabel}${solverNote}.`;
       } else if (actionMix.tier_down.pattern_count > 0 && actionMix.tier_down.dollars > 0) {
         // Mixed: some tier_down + other actions
         const bytesSavingDollars = result.totals.dollars_expected_monthly - actionMix.tier_down.dollars;
