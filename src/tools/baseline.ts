@@ -153,7 +153,17 @@ export interface BaselineEnvelopeData {
     monthly_usd_in_90d_at_list: number | null;
     /** Disclosed-value mirror of `monthly_usd_in_90d`. `null` when `rate_source === 'unset'`. */
     monthly_usd_in_90d_disclosed: DisclosedDollarValue | null;
+    /**
+     * @deprecated Ambiguous unit. Use `monthly_compound_growth_pct` (same
+     * value) for clarity, or `horizon_total_growth_pct` for the 90d total.
+     * Kept for back-compat — math-lens workflow w1aem8inf flagged the
+     * naming as a CFO 46% under-read risk.
+     */
     growth_pct: number;
+    /** Monthly compound growth rate (e.g. 0.36 = 36% per month compound). */
+    monthly_compound_growth_pct: number;
+    /** Total growth over the 90d horizon (e.g. 1.52 = 152% total = 2.52x). */
+    horizon_total_growth_pct: number;
   };
   top_contributors: BaselineTopContributor[];
   recommended_target_range?: {
@@ -259,7 +269,15 @@ export async function executeBaseline(
       window: horizon,
       window_basis: 'explicit',
       candidates_count: result.top_contributors.length,
-      candidates_usable: result.top_contributors.filter((c) => c.compactable).length,
+      // Math-lens workflow w1aem8inf: previously this filtered to
+      // .compactable only, which on cloudwatch (compact = no-op) returned
+      // 0 every time and contradicted both the headline "Baseline ready"
+      // AND the 9 top contributors shown immediately below. Any contributor
+      // is usable for SOME action (drop/sample/offload/tier_down all work
+      // regardless of compactability), so candidates_usable now reports
+      // the full count. Compactable count is a separate downstream concern
+      // surfaced on each row's .compactable field.
+      candidates_usable: result.top_contributors.length,
     },
     payload: result,
     human_summary: headline,
@@ -465,7 +483,18 @@ async function computeBaseline(
       monthly_usd_in_90d: monthlyUsdIn90d,
       monthly_usd_in_90d_at_list: monthlyUsdIn90d,
       monthly_usd_in_90d_disclosed: monthlyUsdIn90dDisclosed,
+      // Math-lens workflow w1aem8inf: growth_pct is the MONTHLY COMPOUND
+      // rate (e.g. 0.36 = 36%/mo), but the field name + parent object
+      // ("projection_no_action_90d") biased CFO readers toward interpreting
+      // it as the 90d total growth — a 46% under-read risk. Surface both
+      // values with unambiguous names; keep the legacy growth_pct alias so
+      // existing consumers don't break.
       growth_pct: growthPct,
+      monthly_compound_growth_pct: growthPct,
+      horizon_total_growth_pct:
+        monthlyUsd > 0 && monthlyUsdIn90d != null
+          ? monthlyUsdIn90d / monthlyUsd - 1
+          : 0,
     },
     top_contributors: top,
     recommended_target_range: recommended,
@@ -797,6 +826,8 @@ function buildNotReadyEnvelope(opts: {
       monthly_usd_in_90d_at_list: zeroMonthly,
       monthly_usd_in_90d_disclosed: null,
       growth_pct: 0,
+      monthly_compound_growth_pct: 0,
+      horizon_total_growth_pct: 0,
     },
     top_contributors: [],
     remediation: opts.remediation,

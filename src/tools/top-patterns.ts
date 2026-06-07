@@ -889,10 +889,13 @@ export async function executeTopPatterns(
     droppedShareTotalPct = 100;
     droppedMonthlyUsd = totalCostMonthly;
   } else {
-    droppedBytesTotalShown = dataPatterns.reduce(
-      (s, p) => s + (p.dropped_bytes ?? 0),
-      0
-    );
+    // Math-lens workflow w1aem8inf: previously droppedBytesTotalShown
+    // summed top-N rows while droppedShareTotalPct used the env-wide
+    // droppedTotalBytes — scope-mix that made the displayed share
+    // inconsistent with the displayed bytes (4.83% vs the math 4.76%
+    // computed from the displayed numerator/denominator). Use the
+    // env-wide source for BOTH so they reconcile.
+    droppedBytesTotalShown = droppedTotalBytes;
     const denom = totalBytes;
     droppedShareTotalPct =
       denom > 0 && droppedTotalBytes != null
@@ -964,9 +967,9 @@ export async function executeTopPatterns(
           ? `${Math.round(droppedShareTotalPct)}%`
           : '0%';
       if (totalCostMonthlyDisclosed != null) {
-        headline = `Top ${renderRows.length} patterns over ${tf.label}: ${bytesLabel} union (${offloadShareLabel} currently offloaded), ~${dollarTail} total.${incidentTail}`;
+        headline = `Top ${renderRows.length} patterns over ${tf.label}: ${bytesLabel} union (${offloadShareLabel} currently reduced), ~${dollarTail} total.${incidentTail}`;
       } else {
-        headline = `Top ${renderRows.length} patterns over ${tf.label}: ${bytesLabel} union (${offloadShareLabel} currently offloaded).${rateUnsetTail}${incidentTail}`;
+        headline = `Top ${renderRows.length} patterns over ${tf.label}: ${bytesLabel} union (${offloadShareLabel} currently reduced).${rateUnsetTail}${incidentTail}`;
       }
     } else {
       // kept (default) — Note 4 headline shape:

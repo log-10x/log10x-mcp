@@ -385,20 +385,22 @@ export async function executeWhatsNew(
   // that's the closest thing to a sample line available without fetching
   // a separate query. Skip the e.g. block when the sample would just
   // restate the descriptor verbatim.
-  const SHORT_DESCRIPTOR_CHARS = 15;
+  // Burned rule (memory: feedback_no_hash_in_user_headlines): lead with
+  // pattern name + service + state, NOT raw symbol_message blobs. Math-lens
+  // workflow w1aem8inf flagged this as the FOURTH tool (after whats_changing,
+  // pattern_mitigate, top_patterns) with the same defect. Same fix shape
+  // applied: service-led label with a short token hint as a parenthetical.
   const headlineDescriptor = (r: NewPatternRow) => {
-    const sm = r.symbol_message || 'unnamed pattern';
-    const descriptor = sm.length > 60 ? sm.slice(0, 57) + '…' : sm;
-    const isSingleWord = !/\s/.test(descriptor.trim());
-    const isShort = descriptor.length < SHORT_DESCRIPTOR_CHARS || isSingleWord;
-    if (!isShort) return descriptor;
-    const rawSample = (r.symbol_message || '').trim();
-    const sampleSlice = rawSample.length > 80 ? rawSample.slice(0, 80) + '…' : rawSample;
-    // Only append the e.g. when the sample adds information beyond the
-    // descriptor itself; otherwise we'd print "Configuring (e.g. `Configuring`)"
-    // which adds noise instead of context.
-    if (!sampleSlice || sampleSlice === descriptor) return descriptor;
-    return `${descriptor} (e.g. \`${sampleSlice}\`)`;
+    const svc = r.services?.[0]?.name;
+    const sev = r.services?.[0]?.severity;
+    const lead = svc
+      ? sev && sev.length > 0
+        ? `${svc} ${sev} pattern`
+        : `${svc} pattern`
+      : 'pattern';
+    const raw = (r.symbol_message ?? '').trim().replace(/_/g, ' ');
+    const hint = raw.length > 40 ? raw.slice(0, 37) + '...' : raw;
+    return hint ? `${lead} (${hint})` : lead;
   };
   const headline =
     shown.length === 0

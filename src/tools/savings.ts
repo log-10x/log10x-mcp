@@ -78,7 +78,16 @@ interface SavingsSummary {
     savings_dollars: number | null;
     /** Disclosed-value mirror of savings_dollars. null when rate_source === 'unset'. */
     savings_dollars_disclosed: DisclosedDollarValue | null;
+    /**
+     * @deprecated Misleading field name — this is the chunk-fetch health
+     * ratio (chunks_ok / chunks_total), NOT byte-coverage of the retriever
+     * leg vs the edge emitted bytes. Use `chunks_ok_ratio` for the same
+     * value under an honest name. Will be removed once downstream
+     * consumers migrate.
+     */
     coverage: number;
+    /** Fraction of retriever chunks that resolved healthy (chunks_ok / chunks_total). */
+    chunks_ok_ratio: number;
     chunks_ok: number;
     chunks_total: number;
   };
@@ -606,7 +615,19 @@ async function executeSavingsInner(
         reduction_pct: retrieverReductionPct,
         savings_dollars: retrieverSavings,
         savings_dollars_disclosed: retrieverSavingsDisclosed,
+        // Math-lens workflow w1aem8inf: previously `coverage` here was the
+        // chunk-fetch health ratio (chunks_ok / chunks_total), but the
+        // field name reads as "byte coverage" — when chunks were healthy
+        // but no bytes were indexed/streamed, the envelope shipped
+        // coverage=1.0 alongside indexed_bytes=0 + streamed_bytes=0. A
+        // CFO reading the envelope concluded "100% covered" when the
+        // retriever leg was producing zero savings. Renamed to
+        // chunks_ok_ratio so the chunk-health signal stays available but
+        // doesn't masquerade as byte coverage. Legacy `coverage` field
+        // kept temporarily for back-compat, but holds the same value
+        // and will be removed in a future cut once consumers migrate.
         coverage: mainRetrieverCoverage,
+        chunks_ok_ratio: mainRetrieverCoverage,
         chunks_ok: mainRetrieverChunksOk,
         chunks_total: mainRetrieverChunksTotal,
       },

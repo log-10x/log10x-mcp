@@ -507,7 +507,22 @@ export async function executeCostOptions(args: {
 
   // Strip the internal _tier field before exposing in the envelope.
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const { _tier: _strippedTier, ...capsSummary } = caps;
+  const { _tier: _strippedTier, ...capsSummaryRaw } = caps;
+  // Math-lens workflow w1aem8inf: compact_installable was derived from
+  // "is the compact module loadable" without checking destination
+  // applicability. On cloudwatch (where compact is a documented no-op)
+  // we shipped compact_installable=true alongside modes[compact]
+  // .applicable=false — agents reading capability_summary still proposed
+  // compact on cloudwatch and wasted a turn. Make installable mean
+  // "binary present AND will do useful work here" — match the per-mode
+  // applicability.
+  const compactModeRow = modes.find((m) => m.id === 'compact');
+  const capsSummary = {
+    ...capsSummaryRaw,
+    compact_installable:
+      capsSummaryRaw.compact_installable === true &&
+      compactModeRow?.applicable === true,
+  };
   const envelope: CostOptionsEnvelope = {
     modes,
     siem_detected: siemDetected,
@@ -546,14 +561,16 @@ export async function executeCostOptions(args: {
     must_render_verbatim: verbatim,
     must_ask_user: mustAskUser,
     forbidden_next_actions: forbidden,
-    actions: [
-      {
-        tool: 'log10x_estimate_savings',
-        args: {},
-        role: 'recommended-next',
-        reason: 'After user picks a mode, route here with destination + action to forecast savings.',
-      },
-    ],
+    // Bug from math-lens workflow w1aem8inf: previously this list included
+    // log10x_estimate_savings as recommended-next, which directly
+    // contradicted forbidden_next_actions (which lists the same tool as
+    // FORBIDDEN until the user picks a mode). Agents reading both lists
+    // received mutually exclusive instructions for the same tool. The
+    // actual next-step path is per-mode via modes[].routes_to (the user
+    // picks first, THEN we route to estimate_savings with the picked
+    // action). Removing the top-level recommended-next eliminates the
+    // contradiction; the routes_to per mode still carries the chain.
+    actions: [],
     legacyCompat: true,
     legacyExtraFields: {
       modes,
