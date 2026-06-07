@@ -78,14 +78,6 @@ interface SavingsSummary {
     savings_dollars: number | null;
     /** Disclosed-value mirror of savings_dollars. null when rate_source === 'unset'. */
     savings_dollars_disclosed: DisclosedDollarValue | null;
-    /**
-     * @deprecated Misleading field name — this is the chunk-fetch health
-     * ratio (chunks_ok / chunks_total), NOT byte-coverage of the retriever
-     * leg vs the edge emitted bytes. Use `chunks_ok_ratio` for the same
-     * value under an honest name. Will be removed once downstream
-     * consumers migrate.
-     */
-    coverage: number;
     /** Fraction of retriever chunks that resolved healthy (chunks_ok / chunks_total). */
     chunks_ok_ratio: number;
     chunks_ok: number;
@@ -101,6 +93,22 @@ interface SavingsSummary {
     annual_projection_dollars: number | null;
     /** Disclosed-value mirror of annual_projection_dollars. null when rate_source === 'unset'. */
     annual_projection_dollars_disclosed: DisclosedDollarValue | null;
+    /**
+     * Math-lens workflow w58guv3e4: disclose the extrapolation method
+     * so consumers understand that `annual_projection_dollars` is a
+     * linear extrapolation from the observed window (realized * 365 /
+     * window_days), NOT a seasonality-adjusted forecast. The field also
+     * documents the actual scaling factor used so consumers can verify
+     * the arithmetic without having to guess between 52 weeks/yr (the
+     * "/wk" label invitation) and 52.143 (= 365/7, what the math
+     * actually does).
+     */
+    projection_basis: {
+      method: 'linear_extrapolation';
+      window_days: number;
+      scale_factor: number;
+      note: string;
+    };
     has_data: boolean;
   };
   run_rate?: {
@@ -172,8 +180,21 @@ export async function executeSavings(
     scope: {
       window: d.time_range,
       window_basis: 'explicit',
-      candidates_count: d.pipeline_instances,
-      candidates_usable: d.services_monitored,
+      // Math-lens workflow w58guv3e4: prior code wired
+      //   candidates_count := pipeline_instances (1)
+      //   candidates_usable := services_monitored (26)
+      // These are orthogonal cardinalities (forwarder pods vs
+      // distinct services emitting logs) with no subset
+      // relationship, violating ScopeSchema's documented
+      // "Subset of candidates_count" contract (candidates_usable
+      // > candidates_count is structurally wrong). savings has no
+      // candidate selection step — it aggregates across all
+      // services in the window — so the right move is to drop
+      // both fields per the schema doc ("Absent for tools that
+      // don't have a candidate selection step"). The real
+      // cardinalities live in payload.pipeline_instances and
+      // payload.services_monitored where their semantics aren't
+      // forced into a subset relationship.
     },
     payload: d,
     human_summary: headline,
@@ -615,18 +636,14 @@ async function executeSavingsInner(
         reduction_pct: retrieverReductionPct,
         savings_dollars: retrieverSavings,
         savings_dollars_disclosed: retrieverSavingsDisclosed,
-        // Math-lens workflow w1aem8inf: previously `coverage` here was the
-        // chunk-fetch health ratio (chunks_ok / chunks_total), but the
-        // field name reads as "byte coverage" — when chunks were healthy
-        // but no bytes were indexed/streamed, the envelope shipped
-        // coverage=1.0 alongside indexed_bytes=0 + streamed_bytes=0. A
-        // CFO reading the envelope concluded "100% covered" when the
-        // retriever leg was producing zero savings. Renamed to
-        // chunks_ok_ratio so the chunk-health signal stays available but
-        // doesn't masquerade as byte coverage. Legacy `coverage` field
-        // kept temporarily for back-compat, but holds the same value
-        // and will be removed in a future cut once consumers migrate.
-        coverage: mainRetrieverCoverage,
+        // Math-lens workflow w1aem8inf renamed coverage → chunks_ok_ratio
+        // because the field name read as "byte coverage" — when chunks were
+        // healthy but no bytes were indexed/streamed, the envelope shipped
+        // coverage=1.0 alongside indexed_bytes=0 + streamed_bytes=0 and a
+        // CFO concluded "100% covered" when the retriever leg was
+        // producing zero savings. Math-lens workflow w58guv3e4 (round 5)
+        // re-flagged the back-compat alias: a documented-misleading field
+        // in the envelope guarantees agent misreads. Removed for good.
         chunks_ok_ratio: mainRetrieverCoverage,
         chunks_ok: mainRetrieverChunksOk,
         chunks_total: mainRetrieverChunksTotal,
@@ -637,6 +654,12 @@ async function executeSavingsInner(
         realized_dollars_disclosed: totalSavedDisclosed,
         annual_projection_dollars: annualProjection,
         annual_projection_dollars_disclosed: annualProjectionDisclosed,
+        projection_basis: {
+          method: 'linear_extrapolation',
+          window_days: tf.days,
+          scale_factor: 365 / tf.days,
+          note: `annual = realized * (365 / ${tf.days}) = realized * ${(365 / tf.days).toFixed(3)}. Linear extrapolation from the observed window; not seasonality-adjusted. For "/wk" expectations note that 365/7 = 52.143, not 52 — a "$X/wk × 52" cross-check will drift from this figure by ~0.275%.`,
+        },
         has_data: hasData,
       },
       run_rate: runRate,

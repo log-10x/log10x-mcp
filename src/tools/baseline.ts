@@ -160,16 +160,49 @@ export interface BaselineEnvelopeData {
      * naming as a CFO 46% under-read risk.
      */
     growth_pct: number;
-    /** Monthly compound growth rate (e.g. 0.36 = 36% per month compound). */
+    /**
+     * Monthly compound growth rate as a DECIMAL RATIO (0.36 = 36%/mo).
+     * NOT a true percent — the `_pct` suffix is historical. For the
+     * field whose value matches a "percent" reading (36, not 0.36) use
+     * `monthly_compound_growth_percent`.
+     */
     monthly_compound_growth_pct: number;
-    /** Total growth over the 90d horizon (e.g. 1.52 = 152% total = 2.52x). */
+    /**
+     * Math-lens workflow w58guv3e4: same value × 100 for readers who
+     * trust the `_pct` naming convention used by sibling `share_pct`
+     * fields in the same envelope (where share_pct=16.09 means 16.09%).
+     * monthly_compound_growth_percent=36 means "36% growth per month
+     * compounded" — no ambiguity.
+     */
+    monthly_compound_growth_percent: number;
+    /**
+     * Total growth over the 90d horizon as a DECIMAL RATIO (1.52 =
+     * +152% total = 2.52× the starting cost). NOT a true percent —
+     * use `horizon_total_growth_percent` for the percent-shaped value.
+     */
     horizon_total_growth_pct: number;
+    /** Same value × 100. 152 means "+152% total growth over horizon". */
+    horizon_total_growth_percent: number;
   };
   top_contributors: BaselineTopContributor[];
   recommended_target_range?: {
     low_pct: number;
     expected_pct: number;
     high_pct: number;
+    /**
+     * Math-lens workflow w58guv3e4: provenance for the band so consumers
+     * can tell a calibrated heuristic from the hand-picked drop-only
+     * fallback. `drop_only_fallback` = no compactable contributors,
+     * range is the hardcoded {10/15/25}. `compactable_share_heuristic`
+     * = expected = share_top5_compactable_pct × 0.7.
+     */
+    basis: 'drop_only_fallback' | 'compactable_share_heuristic';
+    /** The exact formula that produced (low_pct, expected_pct, high_pct). */
+    formula: string;
+    /** Inputs the formula consumed. */
+    inputs: {
+      share_top5_compactable_pct: number;
+    };
   };
   remediation?: string;
 }
@@ -257,8 +290,26 @@ export async function executeBaseline(
     headline,
     status: result.status === 'ready' ? 'success' : 'insufficient_data',
     decisions: {
-      threshold_used: null,
-      threshold_basis: result.rate_source === 'customer_supplied' ? 'customer_supplied' : 'default',
+      // Math-lens workflow w58guv3e4: the prior code wired
+      //   threshold_used: null
+      //   threshold_basis: rate_source === 'customer_supplied' ? ... : 'default'
+      // which leaks rate-source provenance into the chassis decision
+      // block. rate_source belongs in source_disclosure.rate_source
+      // (it's already there). The chassis decision block describes the
+      // operationally meaningful THRESHOLD — here, the expected
+      // reduction target the recommendation surfaces.
+      threshold_used: result.status === 'ready' && result.recommended_target_range
+        ? result.recommended_target_range.expected_pct
+        : null,
+      threshold_basis: result.status === 'ready' && result.recommended_target_range
+        // Both branches are `unvalidated_default` against the chassis
+        // enum because the recommendation formula itself uses
+        // hand-picked coefficients (× 0.7, clamp [15, 60]) that aren't
+        // calibrated for any specific customer. Drill into
+        // payload.recommended_target_range.basis + .formula for the
+        // operational provenance (heuristic vs hardcoded fallback).
+        ? 'unvalidated_default'
+        : 'default',
     },
     source_disclosure: {
       bytes_source: 'tsdb',
@@ -377,8 +428,12 @@ async function computeBaseline(
   }
 
   const totalBytes = validDays.reduce((s, x) => s + x, 0);
-  const observedDailyGb =
-    totalBytes / Math.max(1, validDays.length) / (1024 ** 3);
+  // Math-lens workflow w58guv3e4: switch from binary GB (1024^3) to
+  // decimal GB (10^9) — matches the catalog-wide CloudWatch/Datadog/
+  // Splunk billing convention used by bytesToGb. Prior binary divisor
+  // here vs decimal divisor in fetchTopContributors caused ~7% drift
+  // between current.monthly_usd and the sum-of-contributors check.
+  const observedDailyGb = bytesToGb(totalBytes / Math.max(1, validDays.length));
 
   // ── Gate 2: coverage. ───────────────────────────────────────────
   let coveragePct = 100;
@@ -428,7 +483,20 @@ async function computeBaseline(
     rateSource === 'customer_supplied'
       ? (args.effectiveIngestPerGb as number)
       : model.ingest_per_gb;
-  const monthlyGb = (p50 * DAYS_PER_MONTH) / (1024 ** 3);
+  // Math-lens workflow w58guv3e4: two fixes here.
+  //  (1) Use decimal GB (bytesToGb) instead of binary 1024^3 — matches
+  //      the catalog convention and what fetchTopContributors uses.
+  //  (2) Use window MEAN bytes (totalBytes / validDays) × 30, not p50.
+  //      Per-contributor monthly_usd is mean-based (line 708: bytes /
+  //      horizonDays × 30) so deriving the total from p50 left the
+  //      sum-of-contributors disagreeing with current.monthly_usd by
+  //      ~6.6% on right-tailed log volume distributions (workflow
+  //      observed $505 sum vs $473.69 headline). Mean-based makes
+  //      the math consistent: sum(per-contributor monthly_usd) ≡
+  //      current.monthly_usd (within float tolerance). p50 stays as
+  //      bytes_per_day_p50 for tail planning, p90 stays for capacity.
+  const meanDailyBytes = totalBytes / Math.max(1, validDays.length);
+  const monthlyGb = bytesToGb(meanDailyBytes * DAYS_PER_MONTH);
   const monthlyUsd = monthlyGb * (ingestPerGb + model.storage_per_gb_month);
 
   const growthPct = computeGrowthPct(validDays);
@@ -491,9 +559,17 @@ async function computeBaseline(
       // existing consumers don't break.
       growth_pct: growthPct,
       monthly_compound_growth_pct: growthPct,
+      // Math-lens workflow w58guv3e4: emit the percent-shaped sibling
+      // so consumers reading `_pct` at face value (where share_pct=16.09
+      // means 16.09% in the same envelope) get the consistent reading.
+      monthly_compound_growth_percent: growthPct * 100,
       horizon_total_growth_pct:
         monthlyUsd > 0 && monthlyUsdIn90d != null
           ? monthlyUsdIn90d / monthlyUsd - 1
+          : 0,
+      horizon_total_growth_percent:
+        monthlyUsd > 0 && monthlyUsdIn90d != null
+          ? (monthlyUsdIn90d / monthlyUsd - 1) * 100
           : 0,
     },
     top_contributors: top,
@@ -761,6 +837,11 @@ function recommendTargetRange(top: BaselineTopContributor[]): {
   low_pct: number;
   expected_pct: number;
   high_pct: number;
+  basis: 'drop_only_fallback' | 'compactable_share_heuristic';
+  formula: string;
+  inputs: {
+    share_top5_compactable_pct: number;
+  };
 } {
   const top5 = top.slice(0, 5);
   const compactableShare = top5
@@ -769,8 +850,20 @@ function recommendTargetRange(top: BaselineTopContributor[]): {
 
   // Destination doesn't support compaction (or no compactable
   // top-5 contributors) → drop-only band.
+  // Math-lens workflow w58guv3e4: a hardcoded {10/15/25}% range was
+  // shipping without basis disclosure — surfacing as if it were
+  // calibrated when it's a hand-picked conservative fallback. Expose
+  // `basis` + `formula` + the input that drove the branch so a CFO
+  // reader can audit the recommendation instead of trusting the band.
   if (compactableShare <= 0) {
-    return { low_pct: 10, expected_pct: 15, high_pct: 25 };
+    return {
+      low_pct: 10,
+      expected_pct: 15,
+      high_pct: 25,
+      basis: 'drop_only_fallback',
+      formula: 'hardcoded_conservative_band',
+      inputs: { share_top5_compactable_pct: 0 },
+    };
   }
 
   // share_top5_compactable is already in percent (0..100); the formula
@@ -780,7 +873,14 @@ function recommendTargetRange(top: BaselineTopContributor[]): {
   const low = Math.max(MIN_RECOMMENDED_PCT, expected - 15);
   const high = Math.min(MAX_RECOMMENDED_PCT, expected + 15);
 
-  return { low_pct: low, expected_pct: expected, high_pct: high };
+  return {
+    low_pct: low,
+    expected_pct: expected,
+    high_pct: high,
+    basis: 'compactable_share_heuristic',
+    formula: 'expected = clamp(15, 60, share_top5_compactable_pct * 0.7); low = max(10, expected-15); high = min(80, expected+15)',
+    inputs: { share_top5_compactable_pct: compactableShare },
+  };
 }
 
 // ─── not-ready envelope builder ───────────────────────────────────────
@@ -827,7 +927,9 @@ function buildNotReadyEnvelope(opts: {
       monthly_usd_in_90d_disclosed: null,
       growth_pct: 0,
       monthly_compound_growth_pct: 0,
+      monthly_compound_growth_percent: 0,
       horizon_total_growth_pct: 0,
+      horizon_total_growth_percent: 0,
     },
     top_contributors: [],
     remediation: opts.remediation,
