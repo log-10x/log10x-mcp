@@ -284,9 +284,11 @@ export const SourceDisclosureSchema = z.object({
    * How the Retriever URL + bucket was resolved. Populated by tools that
    * consume the Retriever (retriever_query, retriever_series, backfill_metric,
    * overflow_contents) so an agent can tell whether the resolution came from
-   * env vars, the discovery snapshot, a live kubectl probe, or was absent.
+   * env vars, the discovery snapshot, a live kubectl probe, the resolved
+   * env-config document (K8s ConfigMap / AWS SSM / GCP SM / Azure AC / local
+   * file), or was absent.
    */
-  retriever_state_source: z.enum(['env_var', 'snapshot', 'helm_release_probe', 'kubectl_probe', 'none']).optional(),
+  retriever_state_source: z.enum(['env_var', 'snapshot', 'helm_release_probe', 'kubectl_probe', 'env_config', 'none']).optional(),
   /**
    * Service count semantics. Mirrors pattern_count_source for tools that
    * surface a list of services. Without this field "12 services" is

@@ -43,8 +43,7 @@ import { queryInstant, type PrometheusResponse } from '../lib/api.js';
 import { LABELS } from '../lib/promql.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { parseTimeframe, fmtBytes } from '../lib/format.js';
-import { renderNextActions, type NextAction } from '../lib/next-actions.js';
-import { agentOnly } from '../lib/agent-only.js';
+import { type NextAction } from '../lib/next-actions.js';
 import { type StructuredOutput } from '../lib/output-types.js';
 import { newChassisTelemetry, buildChassisEnvelope } from '../lib/chassis-envelope.js';
 import { fetchCapCsvTagged, buildCapCsvStatus, type CapCsvStatus } from '../lib/cap-csv-fetch.js';
@@ -52,6 +51,11 @@ import { parseCapCsv, buildPatternActionLookup } from '../lib/cap-csv-parser.js'
 import type { Action } from '../lib/cost.js';
 import { normalizeTimeRange } from '../lib/time-range.js';
 import { getRetrieverState, type RetrieverStateSource } from '../lib/retriever-state.js';
+import {
+  resolveClusterConfig,
+  pickActiveOffload,
+  detectStaleOffloadEnvVar,
+} from '../lib/env-config/resolve-cluster-config.js';
 
 const BYTES_METRIC = 'all_events_summaryBytes_total';
 const VOLUME_METRIC = 'all_events_summaryVolume_total';
@@ -143,6 +147,37 @@ export async function executeOverflowContents(
   // installed). The source is surfaced in source_disclosure for audit.
   const retrieverState = await getRetrieverState(null);
   const retrieverStateSource: RetrieverStateSource = retrieverState.source;
+
+  // Fix 84 (env-config bridge): resolve the active offload bucket from the
+  // cluster env-config doc (k8s ConfigMap → AWS SSM → GCP Secret Manager →
+  // Azure App Config → local file). Mirrors retriever-probe / advise-retriever /
+  // doctor — without this walk the tool sees a bucket only when the legacy
+  // LOG10X_OFFLOAD_BUCKET / LOG10X_STREAMER_BUCKET env vars are set, and
+  // wrongly tells users to "install the Retriever" when the bucket IS in fact
+  // configured (just declared via env-config rather than env vars).
+  const envConfigWarnings: string[] = [];
+  let offloadBucket: string | undefined;
+  try {
+    const resolved = await resolveClusterConfig();
+    if (resolved.ok) {
+      const active = pickActiveOffload(resolved.config);
+      if (active?.bucket) {
+        offloadBucket = active.bucket;
+        const stale = detectStaleOffloadEnvVar(active.bucket);
+        if (stale) envConfigWarnings.push(stale);
+      }
+      for (const w of resolved.stale_env_var_warnings) {
+        if (!envConfigWarnings.includes(w)) envConfigWarnings.push(w);
+      }
+    }
+  } catch {
+    // env-config walk threw — degrade silently to env-var fallback below.
+  }
+  if (!offloadBucket) {
+    offloadBucket =
+      process.env.LOG10X_OFFLOAD_BUCKET || process.env.LOG10X_STREAMER_BUCKET;
+  }
+
   // Normalise '1d' legacy alias → '24h'.
   const timeRange = normalizeTimeRange(args.timeRange ?? '30d');
   const tf = parseTimeframe(timeRange);
@@ -355,46 +390,11 @@ export async function executeOverflowContents(
   const truncated = filtered.length > limit;
   const top = filtered.slice(0, limit);
 
-  // Build the user-visible markdown.
-  const lines: string[] = [];
+  // Output shape is the typed chassis envelope (data.patterns[] + totals).
+  // The headline + nextActions below are the only user-visible artefacts;
+  // any markdown the agent wants to render is computed downstream from
+  // `data`. Tool no longer builds a parallel markdown string.
   const filterLabel = serviceFilter ? ` · service=${serviceFilter}` : '';
-  lines.push(`Overflow contents (${tf.label}${filterLabel})`);
-  lines.push('(patterns whose action is `offload` per the cap-CSV — these are in the customer-owned S3 archive, not the SIEM)');
-  lines.push('');
-
-  if (top.length === 0) {
-    if (capCsvStatus.kind === 'loaded') {
-      lines.push('  No patterns currently routed to offload over the window.');
-    } else if (capCsvStatus.kind === 'lookup_failed' || capCsvStatus.kind === 'configured_not_loaded') {
-      lines.push(`  No dropped patterns observed over the window. (${capCsvStatus.reason})`);
-    } else {
-      lines.push('  No dropped patterns observed over the window. (No gitops repo configured — could not filter to offload only.)');
-    }
-  } else {
-    for (const p of top) {
-      const hashCol = p.pattern_hash.length > 16 ? `${p.pattern_hash.slice(0, 14)}..` : p.pattern_hash.padEnd(16);
-      const svc = p.service.padEnd(20).slice(0, 20);
-      const ctn = (p.container || '-').padEnd(16).slice(0, 16);
-      const bytes = fmtBytes(p.bytes_in_window).padStart(10);
-      const evts = String(p.event_count_in_window).padStart(10);
-      const growth = renderGrowth(p.first_half_bytes, p.bytes_in_window);
-      lines.push(`  ${hashCol}  ${svc}  ${ctn}  ${bytes}  ${evts}  ${growth.padStart(7)}`);
-    }
-    lines.push('');
-    lines.push(
-      `  ${filtered.length} pattern${filtered.length !== 1 ? 's' : ''} in overflow · ` +
-        `${fmtBytes(total_bytes_in_window)} total · ` +
-        `${total_event_count_in_window.toLocaleString()} events`,
-    );
-    if (truncated) {
-      lines.push(`  (truncated to top ${limit}; pass limit=${Math.min(filtered.length, 500)} for the full list)`);
-    }
-  }
-
-  if (capCsvStatus.kind !== 'loaded' && top.length > 0) {
-    lines.push('');
-    lines.push(`  Caveat: ${capCsvStatus.reason} All dropped patterns shown (drop vs offload split unverified).`);
-  }
 
   const nextActions: NextAction[] = [];
   if (top[0]) {
@@ -413,20 +413,10 @@ export async function executeOverflowContents(
       args: { pattern_hash: t.pattern_hash, include: 'dropped' },
       reason: `Trend the top offload pattern's volume to spot growth or burst behaviour over a longer window.`,
     });
-    lines.push('');
-    lines.push(
-      agentOnly(
-        `Suggested next calls: ` +
-          `Rehydrate a specific overflow pattern — log10x_retriever_query({ pattern_hash: '${t.pattern_hash}', service: '${t.service}' }). ` +
-          `Trend its volume — log10x_pattern_trend({ pattern_hash: '${t.pattern_hash}', include: 'dropped' }).`,
-      ),
-    );
   }
-  const block = renderNextActions(nextActions);
-  if (block) lines.push('', block);
 
   const data: OverflowContentsSummary = {
-    bucket: env.gitops?.repo ?? null,
+    bucket: offloadBucket ?? null,
     time_range: tf.label,
     service_filter: serviceFilter,
     total_bytes_in_window,
@@ -466,9 +456,12 @@ export async function executeOverflowContents(
     }),
   };
 
-  // FIX 69 (completed by Fix 83) — headline reflects actual state:
-  //   - retrieverState.installed gates "routed to S3" vs "soft-dropped"
-  //   - cap-csv status further distinguishes confirmed-offload vs all-dropped
+  // FIX 69 (completed by Fix 83, refined by Fix 84) — headline reflects
+  // actual state. The S3 offload bucket is now resolved from the env-config
+  // doc (see env-config bridge block above), NOT from env.gitops?.repo
+  // (which points at the cap-CSV gitops repo, a different concern). The
+  // "no bucket configured → install the Retriever" branch only fires when
+  // the env-config walk AND the env-var fallback both came back empty.
   let headline: string;
   if (top.length === 0) {
     headline = `Overflow queue empty over ${tf.label}${filterLabel}.`;
@@ -479,16 +472,15 @@ export async function executeOverflowContents(
     // Cap-CSV says offload, but Retriever not detected — patterns are configured
     // for offload but the archive may not be receiving them yet.
     headline = `${filtered.length} overflow pattern${filtered.length !== 1 ? 's' : ''} over ${tf.label}: ${fmtBytes(total_bytes_in_window)} configured for S3 offload but Retriever not detected${filterLabel}. Deploy the Retriever to start archiving.`;
+  } else if (!offloadBucket) {
+    // No cap-CSV AND no offload bucket anywhere (env-config or env vars) —
+    // bytes are dropped with no archive to land in.
+    headline = `${filtered.length} overflow-eligible pattern${filtered.length !== 1 ? 's' : ''} over ${tf.label}: ${fmtBytes(total_bytes_in_window)} currently soft-dropped — no S3 offload bucket is configured${filterLabel}. Install the Retriever to start archiving these patterns.`;
   } else {
-    // No cap-CSV — cannot confirm S3 routing. These are dropped bytes but the
-    // offload vs hard-drop split is unverified.
-    const bucket = env.gitops?.repo;
-    if (!bucket) {
-      headline = `${filtered.length} overflow-eligible pattern${filtered.length !== 1 ? 's' : ''} over ${tf.label}: ${fmtBytes(total_bytes_in_window)} currently soft-dropped — no S3 offload bucket is configured${filterLabel}. Install the Retriever to start archiving these patterns.`;
-    } else {
-      // Repo configured but fetch failed — bucket exists but Retriever status unknown.
-      headline = `${filtered.length} overflow-eligible pattern${filtered.length !== 1 ? 's' : ''} over ${tf.label}: ${fmtBytes(total_bytes_in_window)} routing configured to ${bucket} but offload action split could not be verified — check log10x_doctor${filterLabel}.`;
-    }
+    // Bucket IS configured (via env-config or env-var) but cap-CSV split
+    // couldn't be loaded — bytes likely route to S3 but the offload-vs-
+    // hard-drop split is unverified.
+    headline = `${filtered.length} overflow-eligible pattern${filtered.length !== 1 ? 's' : ''} over ${tf.label}: ${fmtBytes(total_bytes_in_window)} routing configured to ${offloadBucket} but offload action split could not be verified — check log10x_doctor${filterLabel}.`;
   }
 
   return buildChassisEnvelope({
@@ -497,7 +489,10 @@ export async function executeOverflowContents(
     headline,
     status: top.length > 0 ? 'success' : 'no_signal',
     decisions: { threshold_used: null, threshold_basis: 'default' },
-    source_disclosure: { bytes_source: 'tsdb', retriever_state_source: retrieverStateSource },
+    source_disclosure: {
+      bytes_source: 'tsdb',
+      retriever_state_source: retrieverStateSource,
+    },
     scope: {
       window: tf.label,
       window_basis: 'explicit',
@@ -507,6 +502,7 @@ export async function executeOverflowContents(
     payload: data,
     human_summary: headline,
     actions: nextActions.map((a) => ({ tool: a.tool, args: a.args, reason: a.reason })),
+    warnings: envConfigWarnings.length > 0 ? envConfigWarnings : undefined,
     telemetry,
   });
 }
@@ -568,16 +564,6 @@ function growthPctWithBasis(firstHalfBytes: number, fullBytes: number): GrowthRe
   }
   const computed = ((secondHalfBytes - firstHalfBytes) / firstHalfBytes) * 100;
   return { pct: Math.round(computed * 10) / 10, basis: 'computed' };
-}
-
-function renderGrowth(firstHalfBytes: number, fullBytes: number): string {
-  const { pct, basis } = growthPctWithBasis(firstHalfBytes, fullBytes);
-  if (pct === null) {
-    return basis === 'new_pattern' ? 'NEW' : '-';
-  }
-  if (!Number.isFinite(pct)) return '-';
-  const sign = pct > 0 ? '+' : '';
-  return `${sign}${Math.round(pct)}%`;
 }
 
 void ({} as PrometheusResponse);

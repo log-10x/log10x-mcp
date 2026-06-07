@@ -67,6 +67,8 @@ import {
   type RecurRun,
 } from '../lib/recur-history-reader.js';
 import { parseActionIntent } from '../lib/action-intent-parser.js';
+import { DEFAULT_LABELS } from '../lib/promql.js';
+import { patternDescriptor } from '../lib/pattern-descriptor.js';
 
 // ─── input schema ────────────────────────────────────────────────────
 
@@ -534,6 +536,19 @@ export interface CommitmentReportEnvelope {
     pattern_hash: string;
     issue: 'leakage' | 'new_pattern_uncapped' | 'drift';
     recommended: string;
+    /**
+     * Service that emits the pattern (joined from TSDB after weekly
+     * aggregation). Surfaced in the CFO markdown at-risk bullet so the
+     * reader sees a service-anchored identity instead of the raw hash.
+     * Undefined when the descriptor join failed for this hash.
+     */
+    service?: string;
+    /**
+     * Engine `message_pattern` token string for the hash (joined from
+     * TSDB). Rendered through `patternDescriptor` into the at-risk
+     * bullet prose. Absent when the descriptor join returned no result.
+     */
+    symbol_message?: string;
   }>;
   /**
    * Per-pattern attribution rows merged across the report period.
@@ -610,6 +625,18 @@ export interface DigestPatternNote {
    * Undefined for new_this_week.
    */
   growth_ratio?: number;
+  /**
+   * Service that emits the pattern (joined from TSDB). Undefined when the
+   * descriptor join failed or the action-intent entry had no `service`
+   * field. Used as a fallback when `symbol_message` is unavailable.
+   */
+  service?: string;
+  /**
+   * Engine `message_pattern` token string for the hash (joined from TSDB).
+   * Source for the human-facing descriptor in the rendered prose. Absent
+   * when the descriptor join returned no result for this hash.
+   */
+  symbol_message?: string;
   /** Human-readable note. */
   note: string;
 }
@@ -711,7 +738,8 @@ function buildActionDistribution(
  */
 function buildPatternNotes(
   runs: RecurRun[],
-  intentContent: string | null
+  intentContent: string | null,
+  descriptors?: Map<string, PatternHashDescriptor>
 ): DigestPatternNote[] {
   const notes: DigestPatternNote[] = [];
 
@@ -719,6 +747,12 @@ function buildPatternNotes(
 
   // New-this-week: collect pattern hashes from current intent that are
   // newly assigned (use action-intent entries set_at_iso within the window).
+  //
+  // Hash-leak fix: the rendered `note` prose is the only field that
+  // surfaces in the digest markdown bullet AND in the structured
+  // pattern_notes payload. Lead with descriptor + service. The bare
+  // pattern_hash stays on the structured field (`note.pattern_hash`)
+  // for machine consumers; it never lands in the prose.
   if (intentContent) {
     const parsed = parseActionIntent(intentContent);
     const windowEnd = Date.now();
@@ -726,10 +760,19 @@ function buildPatternNotes(
     for (const entry of parsed.entries) {
       const setAt = entry.set_at_iso ? Date.parse(entry.set_at_iso) : 0;
       if (setAt >= windowStart && setAt <= windowEnd) {
+        const desc = descriptors?.get(entry.pattern_hash);
+        // Prefer the entry's own `service` (set by the writer at the
+        // moment of intent), fall back to the descriptor join, then to
+        // the renderPatternLabel "(unnamed pattern)" fallback.
+        const service = entry.service || desc?.service || '';
+        const symbol_message = desc?.symbol_message;
+        const label = renderPatternLabel(symbol_message, service);
         notes.push({
           pattern_hash: entry.pattern_hash,
           kind: 'new_this_week',
-          note: `Pattern ${entry.pattern_hash} added to ${entry.action} plan this week (set ${entry.set_at_iso}).`,
+          ...(service ? { service } : {}),
+          ...(symbol_message ? { symbol_message } : {}),
+          note: `${label} added to ${entry.action} plan this week (set ${entry.set_at_iso}).`,
         });
       }
     }
@@ -823,7 +866,10 @@ function renderWeeklyDigestMarkdown(env: WeeklyDigestEnvelope): string {
     lines.push('## New patterns this week');
     lines.push('');
     for (const p of newPatterns.slice(0, 20)) {
-      lines.push(`- \`${p.pattern_hash}\` — ${p.note}`);
+      // Hash-leak fix: `p.note` already leads with the descriptor +
+      // service label (or "(unnamed pattern)") via buildPatternNotes.
+      // Emit the note directly, no leading hash.
+      lines.push(`- ${p.note}`);
     }
     if (newPatterns.length > 20) {
       lines.push(`- _...and ${newPatterns.length - 20} more_`);
@@ -903,7 +949,50 @@ async function executeWeeklyDigest(
 
   // Aggregate
   const actionDistribution = buildActionDistribution(intentContent);
-  const patternNotes = buildPatternNotes(runs, intentContent);
+
+  // Hash-leak fix: collect the candidate hashes (intent entries set
+  // within the 7-day window) and best-effort fetch descriptors so the
+  // rendered notes lead with `descriptor (service)`, not the raw hash.
+  // Backend resolution failure → empty map → renderPatternLabel
+  // degrades to "(unnamed pattern)" rather than failing the digest.
+  let descriptors: Map<string, PatternHashDescriptor> | undefined;
+  if (intentContent) {
+    const parsed = parseActionIntent(intentContent);
+    const windowEnd = Date.now();
+    const windowStartMs = windowEnd - 7 * 24 * 60 * 60 * 1000;
+    const candidateHashes: string[] = [];
+    for (const entry of parsed.entries) {
+      const setAt = entry.set_at_iso ? Date.parse(entry.set_at_iso) : 0;
+      if (setAt >= windowStartMs && setAt <= windowEnd) {
+        candidateHashes.push(entry.pattern_hash);
+      }
+    }
+    if (candidateHashes.length > 0) {
+      try {
+        const r = await resolveBackend();
+        if (r.backend) {
+          // commitment.env not available in the digest path; default to
+          // the env nickname or 'prod' is wrong — instead, scope only by
+          // hash + isDropped filter (the env label is required by the
+          // selector). Read the env from args.environment when set;
+          // otherwise omit the env filter by passing a wildcard-ish
+          // env="" (callers without an explicit environment get whatever
+          // the backend's default scope matches).
+          const digestEnv = args.environment ?? '';
+          descriptors = await fetchHashDescriptors(
+            r.backend,
+            digestEnv,
+            candidateHashes,
+            '7d'
+          );
+        }
+      } catch {
+        // best-effort; leave descriptors undefined
+      }
+    }
+  }
+
+  const patternNotes = buildPatternNotes(runs, intentContent, descriptors);
 
   const appliedRuns = runs.filter((r) => r.status === 'applied');
   const latestRun = runs.length > 0 ? runs[runs.length - 1] : undefined;
@@ -1116,6 +1205,98 @@ function inverseNormalCdf(p: number): number {
     -(((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) /
     ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1)
   );
+}
+
+// ─── descriptor join ────────────────────────────────────────────────
+
+/**
+ * Per-hash descriptor row joined from TSDB. The bullet renderers in the
+ * weekly digest + CFO markdown use this to swap raw 11-char
+ * `pattern_hash` strings for a user-facing `descriptor + service` label
+ * (same primitive `top_patterns` and `pattern_diff` already rely on).
+ */
+export interface PatternHashDescriptor {
+  service: string;
+  symbol_message: string;
+}
+
+/**
+ * Resolve `pattern_hash → (service, symbol_message)` for a batch of
+ * hashes using the live customer metrics backend.
+ *
+ * Issues the same `sum by (hash, service, message_pattern)` PromQL that
+ * `estimate-savings` runs (estimate-savings.ts:807) and picks the
+ * dominant (service, descriptor) per hash by bytes, lexicographic
+ * tie-break on service then descriptor. Returns an empty map on any
+ * query error so the renderers degrade to "(unnamed pattern)" rather
+ * than failing the whole report.
+ */
+export async function fetchHashDescriptors(
+  backend: CustomerMetricsBackend,
+  metricsEnv: string,
+  hashes: string[],
+  range: string
+): Promise<Map<string, PatternHashDescriptor>> {
+  const out = new Map<string, PatternHashDescriptor>();
+  const uniq = Array.from(new Set(hashes.filter((h): h is string => typeof h === 'string' && h.length > 0)));
+  if (uniq.length === 0) return out;
+  const L = DEFAULT_LABELS;
+  const hashList = uniq.map((h) => h.replace(/[\\"]/g, (c) => `\\${c}`)).join('|');
+  const selector =
+    `${L.hash}=~"${hashList}",${L.env}="${metricsEnv}",isDropped!="true"`;
+  const query =
+    `sum by (${L.hash},${L.service},${L.pattern}) ` +
+    `(increase(all_events_summaryBytes_total{${selector}}[${range}]))`;
+  let res: Awaited<ReturnType<CustomerMetricsBackend['queryInstant']>>;
+  try {
+    res = await backend.queryInstant(query);
+  } catch {
+    return out;
+  }
+  const rows = res?.data?.result ?? [];
+  const acc = new Map<string, { service: string; symbol_message: string; bytes: number }>();
+  for (const row of rows) {
+    const hash = row.metric?.[L.hash];
+    const svc = row.metric?.[L.service] ?? '';
+    const sm = row.metric?.[L.pattern] ?? '';
+    if (!hash) continue;
+    const v = row.value ? parseFloat(row.value[1]) : NaN;
+    const bytes = Number.isFinite(v) ? v : 0;
+    const prior = acc.get(hash);
+    if (
+      !prior ||
+      bytes > prior.bytes ||
+      (bytes === prior.bytes && svc.localeCompare(prior.service) < 0) ||
+      (bytes === prior.bytes && svc === prior.service && sm.localeCompare(prior.symbol_message) < 0)
+    ) {
+      acc.set(hash, { service: svc, symbol_message: sm, bytes });
+    }
+  }
+  for (const [hash, { service, symbol_message }] of acc.entries()) {
+    out.set(hash, { service, symbol_message });
+  }
+  return out;
+}
+
+/**
+ * Render a hash-free human label from a joined descriptor row. Falls
+ * back to "(unnamed pattern)" when both the descriptor and service
+ * strings are empty so the rendered prose never leaks the bare hash.
+ *
+ * The output is the SAME shape every hash-free renderer in the catalog
+ * uses (top_patterns, pattern_diff): tokenized descriptor first, service
+ * trailing in parens when present.
+ */
+function renderPatternLabel(
+  symbol_message: string | undefined,
+  service: string | undefined
+): string {
+  const desc = symbol_message ? patternDescriptor(symbol_message, '', 60) : '';
+  const svc = service && service.trim() ? service.trim() : '';
+  if (desc && svc) return `${desc} (${svc})`;
+  if (desc) return desc;
+  if (svc) return svc;
+  return '(unnamed pattern)';
 }
 
 // ─── aggregation ────────────────────────────────────────────────────
@@ -1512,7 +1693,12 @@ function renderMarkdown(env: CommitmentReportEnvelope): string {
     lines.push('## At-risk patterns');
     lines.push('');
     for (const r of env.at_risk_actions.slice(0, 10)) {
-      lines.push(`- \`${r.pattern_hash}\` — **${r.issue.replace(/_/g, ' ')}**. ${r.recommended}`);
+      // Hash-leak fix: lead with descriptor + service, drop the raw
+      // hash from the rendered prose. The structured field
+      // `data.at_risk_actions[].pattern_hash` still carries the hash
+      // for machine consumers / downstream automation.
+      const label = renderPatternLabel(r.symbol_message, r.service);
+      lines.push(`- ${label} — **${r.issue.replace(/_/g, ' ')}**. ${r.recommended}`);
     }
   }
   if (env.caveats.length > 0) {
@@ -1655,7 +1841,33 @@ export async function executeCommitmentReport(
 
   // 5. Aggregate + attribution.
   const agg = aggregateWeekly(weeklyResults);
-  const atRisk = aggregateAtRiskActions(weeklyResults);
+  const atRiskRaw = aggregateAtRiskActions(weeklyResults);
+
+  // Hash-leak fix: join (service, symbol_message) descriptors for the
+  // at-risk hashes via the same `sum by (hash, service, message_pattern)`
+  // PromQL primitive top_patterns + pattern_diff use. The bare hash stays
+  // on the structured field; only the rendered CFO bullet drops it.
+  let atRiskDescriptors: Map<string, PatternHashDescriptor> = new Map();
+  if (atRiskRaw.length > 0) {
+    const hashes = atRiskRaw.map((r) => r.pattern_hash);
+    const rangeHours = Math.max(1, period.days * 24);
+    atRiskDescriptors = await fetchHashDescriptors(
+      backend,
+      commitment.env,
+      hashes,
+      `${rangeHours}h`
+    );
+  }
+  const atRisk = atRiskRaw.map((r) => {
+    const desc = atRiskDescriptors.get(r.pattern_hash);
+    return {
+      pattern_hash: r.pattern_hash,
+      issue: r.issue,
+      recommended: r.recommended,
+      ...(desc?.service ? { service: desc.service } : {}),
+      ...(desc?.symbol_message ? { symbol_message: desc.symbol_message } : {}),
+    };
+  });
 
   // 5b. Offload-bucket override via metric-surface stamp (§B.3).
   // The receiver stamps `isDropped="true"` on every offloaded event;

@@ -87,6 +87,28 @@ export interface PatternDetailEnvelope {
   must_ask_user: { question: string; options: string[] };
 }
 
+// ─── Descriptor fallback ──────────────────────────────────────────────────────
+
+/**
+ * User-facing descriptor for a pattern when we want to avoid echoing a raw
+ * hash slice in headlines, headers, or human_summary prose. Preference order:
+ *   1. patternName (Symbol Message resolved from metrics)
+ *   2. top service from the breakdown (e.g. "checkout-service")
+ *   3. fallbackLabel — e.g. "(unnamed pattern)" or "(no metrics in window)"
+ *
+ * The hash itself stays in the structured payload (pattern_hash) and
+ * actions[].args for round-trip identity; this helper is for prose only.
+ */
+function patternDescriptor(
+  patternName: string | null,
+  services: Array<{ service: string }>,
+  fallbackLabel: string,
+): string {
+  if (patternName) return patternName;
+  if (services.length > 0 && services[0].service) return services[0].service;
+  return fallbackLabel;
+}
+
 // ─── ASCII horizontal bar chart ───────────────────────────────────────────────
 
 /**
@@ -284,8 +306,11 @@ function renderVerbatim(args: {
 
   const lines: string[] = [];
 
-  // Header — descriptor (name), not hash
-  const displayName = patternName ?? `(hash: ${hash.slice(0, 16)})`;
+  // Header — descriptor (name), not hash. Prefer Symbol Message; fall back
+  // to the top emitting service; final fallback is a generic "(unnamed
+  // pattern)" so we never leak a raw hash slice into prose. The hash is
+  // still available in payload.pattern_hash for round-trip identity.
+  const displayName = patternDescriptor(patternName, services, '(unnamed pattern)');
   lines.push(`Pattern: ${displayName}`);
   if (firstSeenAgeSeconds !== null) {
     const days = Math.round(firstSeenAgeSeconds / 86400);
@@ -440,11 +465,14 @@ export async function executePatternDetail(args: {
   }
 
   if (!env) {
-    const id = args.pattern_hash ?? args.pattern ?? '?';
+    // Prefer the human-readable pattern name when the caller supplied one
+    // (args.pattern); only fall back to a generic descriptor when the caller
+    // supplied a hash. The hash stays in payload.pattern_hash + actions.
+    const id = args.pattern ?? '(unnamed pattern)';
     return buildChassisEnvelope({
       tool: 'log10x_pattern_detail',
       view: 'summary',
-      headline: `pattern_detail(${id.slice(0, 12)}): no environment configured.`,
+      headline: `pattern_detail(${id}): no environment configured.`,
       status: 'error',
       decisions: { threshold_used: null, threshold_basis: 'default' },
       // Environment is absent so we cannot query TSDB yet, but the intended
@@ -529,13 +557,17 @@ export async function executePatternDetail(args: {
   };
 
   // FIX 4: headline uses fmtBytes instead of raw GB division.
+  // Descriptor preference: patternName > top service > "(no metrics in window)"
+  // when no service breakdown came back either. The hash never appears in
+  // prose; it stays in payload.pattern_hash + actions[].args.
+  const descriptor = patternDescriptor(patternName, services, '(no metrics in window)');
   const headline =
-    `pattern_detail(${patternName ?? resolvedHash.slice(0, 12)}): ` +
+    `pattern_detail(${descriptor}): ` +
     `${services.length} service(s), ${fmtBytes(totalBytes)}/mo (30d). ` +
     `${sampleEvents.length} sample event(s) fetched.`;
 
   const human_summary =
-    `Pattern ${patternName ?? resolvedHash.slice(0, 12)} ` +
+    `Pattern ${descriptor} ` +
     `(services=${services.length}, ${fmtBytes(totalBytes)}/mo). ` +
     `${sampleEvents.length} sample event(s) fetched.`;
 

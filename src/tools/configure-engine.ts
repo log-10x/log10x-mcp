@@ -409,15 +409,67 @@ interface ConfigureEngineData {
       debug: Action;
       synthetic: Action;
     };
+    /**
+     * Per-tier default that ended up on at least one row. `null` when the
+     * caller's requested default never made it onto a row — either the tier
+     * had zero patterns (`unused_defaults`) or the tier had patterns but the
+     * solver bypassed the default (floor pin / hardcoded tier action /
+     * target-met downgrade — `defined_but_unused_defaults`). Reading
+     * `effective.standard` as the value the caller asked for when the action
+     * mix proves zero rows took it is a false positive — this field reflects
+     * what was actually applied.
+     */
     effective: {
-      standard: Action;
-      debug: Action;
-      synthetic: Action;
+      standard: Action | null;
+      debug: Action | null;
+      synthetic: Action | null;
     };
+    /**
+     * Count of candidate patterns classified into each tier (pre-solver).
+     * Same denominator that `unused_defaults` reasons against. Renamed from
+     * `applied_count_by_tier` to make the distinction with
+     * `applied_default_count_by_tier` explicit; kept on the envelope for
+     * back-compat with downstream consumers under the old name as well.
+     */
+    classified_count_by_tier: Record<Tier, number>;
+    /**
+     * Back-compat alias for `classified_count_by_tier`. Older consumers read
+     * `applied_count_by_tier` thinking it meant "rows that took the default";
+     * it never did — it meant "rows classified into the tier". Both fields
+     * carry the same number so existing callers don't break, and new callers
+     * should read `applied_default_count_by_tier` for the true applied count.
+     */
     applied_count_by_tier: Record<Tier, number>;
+    /**
+     * Count of rows whose final action came from the tier's caller-configured
+     * default (standard/debug/synthetic) and survived the target-met
+     * downgrade. Distinguishes "default actually drove output" from "patterns
+     * landed in this tier but the default was bypassed".
+     */
+    applied_default_count_by_tier: {
+      standard: number;
+      debug: number;
+      synthetic: number;
+    };
+    /** Tiers with zero candidate patterns — the requested default never had
+     * a row to apply to. */
     unused_defaults: Array<{
       tier: Tier;
       requested: Action;
+      reason: string;
+    }>;
+    /**
+     * Tiers that DID have candidate patterns but where the requested default
+     * never made it onto a final row. Common causes: every pattern in the
+     * tier was floor-pinned (`pass`), the target was met by higher-priority
+     * tiers (error sampling) before standard rows ran and they got
+     * downgraded, or `effectiveStandardAction` overrode a compact request on
+     * a destination where compact is a no-op. The reason names which.
+     */
+    defined_but_unused_defaults: Array<{
+      tier: Tier;
+      requested: Action;
+      classified_count: number;
       reason: string;
     }>;
   };
@@ -742,6 +794,17 @@ export async function executeConfigureEngine(
     debug: 0,
     synthetic: 0,
   };
+  // Track per-tier "default actually applied" count: rows whose final action
+  // came from the caller-configurable default (standard/debug/synthetic) and
+  // survived all subsequent overrides (floor pin pre-empts; target-met
+  // downgrade demotes to pass). Used by action_default_resolution to
+  // distinguish "default fired" from "tier had patterns but default never
+  // reached output" (Fix A — misleading effective field).
+  const appliedDefaultByTier: { standard: number; debug: number; synthetic: number } = {
+    standard: 0,
+    debug: 0,
+    synthetic: 0,
+  };
   const targetShedBytes = Math.max(0, currentMonthlyBytes - targetMonthlyBytes);
   let remainingBytesToShed = targetShedBytes;
   let floorCount = 0;
@@ -756,6 +819,11 @@ export async function executeConfigureEngine(
     let action: Action;
     let reason: string;
     let floorReason: string | undefined;
+    // Provenance: which caller-configurable default (if any) was chosen
+    // pre-downgrade. After the target-met downgrade fires we check if
+    // `action` still equals this default — if yes, the default actually
+    // drove output for this row (Fix A).
+    let defaultTier: 'standard' | 'debug' | 'synthetic' | null = null;
 
     const floorHit = floorSet.get(c.pattern_hash);
     if (floorHit !== undefined) {
@@ -772,12 +840,15 @@ export async function executeConfigureEngine(
     } else if (c.tier === 'standard') {
       action = effectiveStandardAction;
       reason = 'tier=standard';
+      defaultTier = 'standard';
     } else if (c.tier === 'debug') {
       action = debugAction;
       reason = 'tier=debug';
+      defaultTier = 'debug';
     } else {
       action = syntheticAction;
       reason = 'tier=synthetic';
+      defaultTier = 'synthetic';
     }
 
     // If target already met, downgrade further standard rows to pass.
@@ -791,6 +862,22 @@ export async function executeConfigureEngine(
     ) {
       action = 'pass';
       reason = `${reason} (target met)`;
+      // Downgrade clobbers the default — no longer counts as applied.
+      defaultTier = null;
+    }
+
+    // Tally per-tier "default actually applied" only when the final action
+    // still matches the configured default for the row's tier.
+    if (defaultTier !== null) {
+      const configuredDefault =
+        defaultTier === 'standard'
+          ? effectiveStandardAction
+          : defaultTier === 'debug'
+            ? debugAction
+            : syntheticAction;
+      if (action === configuredDefault) {
+        appliedDefaultByTier[defaultTier] += 1;
+      }
     }
 
     // Project savings range using the cost lib.
@@ -841,13 +928,22 @@ export async function executeConfigureEngine(
     }
   }
 
-  // ── action_defaults resolution diagnostic (arc-C defect 9) ──
+  // ── action_defaults resolution diagnostic (arc-C defect 9, Fix A) ──
   // Build a structured record of which caller-requested defaults actually
-  // fired vs were swallowed because no pattern landed in that tier. Audit
-  // and error tiers carry hardcoded actions; only standard/debug/synthetic
-  // are caller-configurable, so those are the only tiers we surface as
-  // potentially-unused. We also push a human-readable warning per unused
-  // default so prose-only consumers see it too.
+  // drove row output vs were swallowed. Two failure modes:
+  //   1. Tier had zero candidate patterns → `unused_defaults`.
+  //   2. Tier had patterns but every row that would have taken the default
+  //      was overridden (floor pin, target-met downgrade, or the
+  //      destination-compat fallback for the standard tier) →
+  //      `defined_but_unused_defaults`. Without this, `effective.standard`
+  //      reads as `offload` even when zero rows took it (the action_mix
+  //      proves the contradiction) — a false positive the agent can't
+  //      detect structurally. We also null out the corresponding
+  //      `effective` field in that case.
+  // Audit and error tiers carry hardcoded actions; only standard/debug/
+  // synthetic are caller-configurable, so those are the only tiers we
+  // surface as potentially-unused. Prose warnings still fire so non-
+  // structured consumers see the signal.
   const totalPatternsClassified =
     patternsByTier.audit +
     patternsByTier.error +
@@ -859,12 +955,44 @@ export async function executeConfigureEngine(
     `standard=${patternsByTier.standard}, debug=${patternsByTier.debug}, ` +
     `synthetic=${patternsByTier.synthetic}`;
   const unusedDefaults: Array<{ tier: Tier; requested: Action; reason: string }> = [];
-  const configurableTiers: Array<{ tier: Tier; requested: Action; effective: Action }> = [
-    { tier: 'standard', requested: standardAction, effective: effectiveStandardAction },
-    { tier: 'debug', requested: debugAction, effective: debugAction },
-    { tier: 'synthetic', requested: syntheticAction, effective: syntheticAction },
+  const definedButUnusedDefaults: Array<{
+    tier: Tier;
+    requested: Action;
+    classified_count: number;
+    reason: string;
+  }> = [];
+  type ConfigurableTier = 'standard' | 'debug' | 'synthetic';
+  const configurableTiers: Array<{
+    tier: ConfigurableTier;
+    requested: Action;
+    effective: Action;
+    bypassHint: string;
+  }> = [
+    {
+      tier: 'standard',
+      requested: standardAction,
+      effective: effectiveStandardAction,
+      bypassHint:
+        effectiveStandardAction !== standardAction
+          ? `standard-tier rows took \`${effectiveStandardAction}\` (destination-compat fallback) instead of your requested \`${standardAction}\``
+          : 'every standard-tier row was floor-pinned or downgraded to `pass` because the target was already met by error-tier sampling',
+    },
+    {
+      tier: 'debug',
+      requested: debugAction,
+      effective: debugAction,
+      bypassHint:
+        'every debug-tier row was floor-pinned or downgraded to `pass` because the target was already met by error-tier sampling',
+    },
+    {
+      tier: 'synthetic',
+      requested: syntheticAction,
+      effective: syntheticAction,
+      bypassHint:
+        'every synthetic-tier row was floor-pinned or downgraded to `pass` because the target was already met by error-tier sampling',
+    },
   ];
-  for (const { tier, requested } of configurableTiers) {
+  for (const { tier, requested, bypassHint } of configurableTiers) {
     if (patternsByTier[tier] === 0) {
       const reason =
         `0 of ${totalPatternsClassified} patterns classified as ${tier}-tier; ` +
@@ -873,6 +1001,21 @@ export async function executeConfigureEngine(
       unusedDefaults.push({ tier, requested, reason });
       warnings.push(
         `action_defaults.${tier}='${requested}' did not fire: ${reason}`
+      );
+    } else if (appliedDefaultByTier[tier] === 0) {
+      const reason =
+        `${patternsByTier[tier]} pattern${patternsByTier[tier] === 1 ? '' : 's'} ` +
+        `classified as ${tier}-tier but 0 took your ${tier}='${requested}' default; ` +
+        `${bypassHint}. Reading effective.${tier} as '${requested}' is a false ` +
+        `positive — the action_mix carries the truth.`;
+      definedButUnusedDefaults.push({
+        tier,
+        requested,
+        classified_count: patternsByTier[tier],
+        reason,
+      });
+      warnings.push(
+        `action_defaults.${tier}='${requested}' was defined but never applied: ${reason}`
       );
     }
   }
@@ -883,12 +1026,20 @@ export async function executeConfigureEngine(
       synthetic: syntheticAction,
     },
     effective: {
-      standard: effectiveStandardAction,
-      debug: debugAction,
-      synthetic: syntheticAction,
+      // Null when zero rows took the default (either tier was empty or every
+      // candidate row was overridden by a floor / target-met downgrade / the
+      // destination-compat fallback). Reading the requested action here when
+      // nothing actually applied it was the Fix-A false positive.
+      standard: appliedDefaultByTier.standard > 0 ? effectiveStandardAction : null,
+      debug: appliedDefaultByTier.debug > 0 ? debugAction : null,
+      synthetic: appliedDefaultByTier.synthetic > 0 ? syntheticAction : null,
     },
+    classified_count_by_tier: patternsByTier,
+    // Back-compat alias — same number under the historical (misleading) name.
     applied_count_by_tier: patternsByTier,
+    applied_default_count_by_tier: appliedDefaultByTier,
     unused_defaults: unusedDefaults,
+    defined_but_unused_defaults: definedButUnusedDefaults,
   };
 
   const coveragePct = totalObservedBytes > 0
@@ -1182,11 +1333,24 @@ function buildSummaryPayload(params: {
   // change counts so the agent can describe what would happen without
   // copy-pasting the 28.8KB gh script. `+ N` lines come from the
   // unified diff (lines starting with `+` that aren't the header).
+  // When the gitops repo is not configured (kubectl_configmap /
+  // stdout_only delivery, or unset `gitops.repo` in envs.json) the
+  // resolved repo is an empty string — falling through to the unguarded
+  // template produced "Opens a PR against  on branch main", a literal
+  // double-space gap. We now surface the not-configured signal instead
+  // of pretending a PR will open (Fix B). checks.warnings[] still
+  // carries the structured signal.
   let prCommandSummary: string;
   if (!prCommand) {
     prCommandSummary = data.checks?.feasible === false
       ? 'Plan is infeasible at the requested target; no PR command rendered. See checks.infeasible_reason.'
       : 'Target already met by current config; no PR command rendered (zero-change PR).';
+  } else if (!target.gitops_repo) {
+    prCommandSummary =
+      'gitops not configured — set `gitops.repo` in `~/.log10x/envs.json` ' +
+      '(or pass `gitops_repo` on this call) to enable PR creation. ' +
+      `Delivery mode \`${args.delivery ?? 'gitops'}\` does not require it; ` +
+      'the rendered policy is still available via `view=\'detail\'`.';
   } else {
     const additions = csvDiff
       .split('\n')
@@ -1400,10 +1564,25 @@ async function tryConsumePocSnapshot(
       .split('\n')
       .filter((l) => l.startsWith('-') && !l.startsWith('---')).length;
     const changeNote = removals > 0 ? `${additions} additions and ${removals} changes` : `${additions} additions`;
-    const prCommandSummary = prCommand
-      ? `Opens a PR against ${resolved.gitops_repo} on branch ${resolved.gitops_branch} modifying ${resolved.lookup_path} with ${changeNote}.` +
-        (data.applied?.ok && data.applied.pr_url ? ` PR already auto-applied: ${data.applied.pr_url}.` : '')
-      : 'POC snapshot reported feasibility short of target; no PR command rendered.';
+    // Fix B: guard the unguarded template — when the gitops repo is not
+    // configured (kubectl_configmap / stdout_only delivery, or unset
+    // `gitops.repo` in envs.json) `resolved.gitops_repo` is the
+    // back-compat empty-string fallback from resolveTarget, which used to
+    // render as "Opens a PR against  on branch main" (two-space gap).
+    let prCommandSummary: string;
+    if (!prCommand) {
+      prCommandSummary = 'POC snapshot reported feasibility short of target; no PR command rendered.';
+    } else if (!resolved.gitops_repo) {
+      prCommandSummary =
+        'gitops not configured — set `gitops.repo` in `~/.log10x/envs.json` ' +
+        '(or pass `gitops_repo` on this call) to enable PR creation. ' +
+        `Delivery mode \`${args.delivery ?? 'gitops'}\` does not require it; ` +
+        'the rendered policy is still available via `view=\'detail\'`.';
+    } else {
+      prCommandSummary =
+        `Opens a PR against ${resolved.gitops_repo} on branch ${resolved.gitops_branch} modifying ${resolved.lookup_path} with ${changeNote}.` +
+        (data.applied?.ok && data.applied.pr_url ? ` PR already auto-applied: ${data.applied.pr_url}.` : '');
+    }
     pocPayload = {
       ok: data.ok,
       phase: data.phase,

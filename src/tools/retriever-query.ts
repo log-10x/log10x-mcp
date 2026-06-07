@@ -37,7 +37,7 @@ import {
   type RetrieverQueryRequest,
   type RetrieverEvent,
 } from '../lib/retriever-api.js';
-import { getRetrieverState } from '../lib/retriever-state.js';
+import { getRetrieverState, type RetrieverStateSource } from '../lib/retriever-state.js';
 import {
   explainZeroResults,
   type RetrieverQueryDiagnostics,
@@ -50,6 +50,10 @@ import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { getOffloadStatusBatch } from '../lib/offload-status.js';
 import { buildChassisErrorEnvelope } from '../lib/chassis-envelope.js';
 import { wrapBackendError } from '../lib/primitive-errors.js';
+import {
+  resolveClusterConfig,
+  pickActiveOffload,
+} from '../lib/env-config/resolve-cluster-config.js';
 
 export const retrieverQuerySchema = {
   pattern: z
@@ -187,6 +191,93 @@ interface RetrieverQuerySummary {
   sqs_latency_ms?: number;
 }
 
+/**
+ * Bridge env-config (k8s ConfigMap / AWS SSM / GCP SM / Azure AC / local file)
+ * into the LOG10X_* / __SAVE_LOG10X_* env vars that retriever-api.ts +
+ * retriever-state.ts + retriever-diagnostics.ts read directly.
+ *
+ * Without this bridge, retriever_query would only see __SAVE_LOG10X_RETRIEVER_URL__
+ * / __SAVE_LOG10X_RETRIEVER_BUCKET__ / LOG10X_RETRIEVER_LOG_GROUP — leaving the
+ * on-prem env-config document (which env_register writes, retriever-probe /
+ * overflow-contents / doctor read) invisible to this tool. Same plumbing as
+ * retriever-probe, advise-retriever, and doctor: env-config is authoritative,
+ * env vars are fallback.
+ *
+ * Bridging is best-effort and one-way: an already-set env var is NEVER
+ * overwritten (the explicit env var wins, mirroring the resolver's
+ * precedence chain). Returns `true` when at least one env var was newly
+ * populated from env-config so the caller can override
+ * `source_disclosure.retriever_state_source` to `env_config`.
+ */
+async function bridgeEnvConfigToRetrieverEnvVars(): Promise<boolean> {
+  // Fast-path: every env var the downstream tools read is already set →
+  // env-config can't add anything. Skip the resolver to avoid spawning k8s /
+  // SSM clients on every query.
+  if (
+    process.env.__SAVE_LOG10X_RETRIEVER_URL__ &&
+    process.env.__SAVE_LOG10X_RETRIEVER_BUCKET__ &&
+    process.env.LOG10X_RETRIEVER_LOG_GROUP &&
+    (process.env.LOG10X_OFFLOAD_BUCKET || process.env.LOG10X_STREAMER_BUCKET)
+  ) {
+    return false;
+  }
+
+  let resolved;
+  try {
+    resolved = await resolveClusterConfig();
+  } catch {
+    // Resolver failures are non-fatal — we fall through to whatever env vars
+    // are set, and the existing not-configured envelope will fire if the
+    // result is incomplete. This matches the doctor / retriever-probe pattern.
+    return false;
+  }
+  if (!resolved.ok) return false;
+  const cfg = resolved.config;
+
+  let bridged = false;
+
+  // Retriever URL → __SAVE_LOG10X_RETRIEVER_URL__
+  if (!process.env.__SAVE_LOG10X_RETRIEVER_URL__ && cfg.retriever.url) {
+    process.env.__SAVE_LOG10X_RETRIEVER_URL__ = cfg.retriever.url.replace(/\/+$/, '');
+    bridged = true;
+  }
+
+  // Retriever input bucket (where qr/<id>/*.jsonl result objects land) →
+  // __SAVE_LOG10X_RETRIEVER_BUCKET__. This is the bucket retriever-api
+  // reads back for results polling; distinct from the offload bucket.
+  if (!process.env.__SAVE_LOG10X_RETRIEVER_BUCKET__ && cfg.retriever.input_bucket) {
+    process.env.__SAVE_LOG10X_RETRIEVER_BUCKET__ = cfg.retriever.input_bucket;
+    bridged = true;
+  }
+
+  // Retriever query log group → LOG10X_RETRIEVER_LOG_GROUP. Closes the
+  // "Diagnostics unavailable: LOG10X_RETRIEVER_LOG_GROUP not set" gap on
+  // zero-event queries: env_register writes this field, so a properly
+  // registered env-config doc lets diagnostics run without a separate env var.
+  if (!process.env.LOG10X_RETRIEVER_LOG_GROUP && cfg.retriever.query_log_group) {
+    process.env.LOG10X_RETRIEVER_LOG_GROUP = cfg.retriever.query_log_group;
+    bridged = true;
+  }
+
+  // Active offload bucket → LOG10X_STREAMER_BUCKET (legacy alias).
+  // The receiver writes offloaded events here; downstream tools that surface
+  // the offload bucket name (e.g., the "advise_retriever" recipe) read it via
+  // this env var. Skip when no active destination — multi-active picks the
+  // first per pickActiveOffload's documented order.
+  if (
+    !process.env.LOG10X_OFFLOAD_BUCKET &&
+    !process.env.LOG10X_STREAMER_BUCKET
+  ) {
+    const active = pickActiveOffload(cfg);
+    if (active?.bucket) {
+      process.env.LOG10X_STREAMER_BUCKET = active.bucket;
+      bridged = true;
+    }
+  }
+
+  return bridged;
+}
+
 export async function executeRetrieverQuery(
   args: {
     pattern?: string;
@@ -204,8 +295,19 @@ export async function executeRetrieverQuery(
   },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
+  // Bridge env-config → env vars BEFORE the configured check / state probe.
+  // env-config (k8s ConfigMap, AWS SSM, GCP SM, Azure AC, local file) is the
+  // on-prem source of truth that env_register writes and retriever-probe /
+  // overflow-contents / doctor read — this tool was the gap.
+  const envConfigBridged = await bridgeEnvConfigToRetrieverEnvVars();
+
   // Fix 83: resolve Retriever state for source_disclosure.
   const retrieverState = await getRetrieverState(null);
+  // When env-config supplied the bridged vars, prefer that label over the
+  // post-bridge `env_var` reading so the audit reflects the real upstream.
+  const retrieverStateSource: RetrieverStateSource = envConfigBridged
+    ? 'env_config'
+    : retrieverState.source;
   if (!(await isRetrieverConfigured())) {
     // Typed not_configured (status + advise_retriever action) so an agent
     // branches on data.status; the framework chokepoint also normalises to
@@ -325,7 +427,7 @@ export async function executeRetrieverQuery(
     data: {
       ...d,
       source_disclosure: {
-        retriever_state_source: retrieverState.source,
+        retriever_state_source: retrieverStateSource,
         transport: d.transport ?? 'http',
         ...(d.sqs_latency_ms !== undefined ? { sqs_latency_ms: d.sqs_latency_ms } : {}),
       },

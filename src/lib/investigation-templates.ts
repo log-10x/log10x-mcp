@@ -10,6 +10,30 @@
 
 import type { CorrelationResult, ChainLink } from './correlate.js';
 import type { DriftResult } from './drift.js';
+import { PATTERN_HASH_REGEX } from './anchor-promql.js';
+
+/**
+ * Per Note 18: pattern_hash never appears in user-facing prose. When the
+ * caller's `startingPoint` is an 11-char base64url hash, render the H2
+ * heading using the resolved anchor name (optionally suffixed with the
+ * service for disambiguation). Falls back to "(unnamed pattern)" only when
+ * no anchor is available — the raw hash slice never leaks into the heading.
+ *
+ * Non-hash starting points (Symbol Message, pasted log line, service name,
+ * the literal "environment") render verbatim.
+ */
+function headingStartingPoint(
+  startingPoint: string,
+  anchor?: string,
+  service?: string,
+): string {
+  const trimmed = startingPoint.trim();
+  if (!PATTERN_HASH_REGEX.test(trimmed)) return startingPoint;
+  if (anchor) {
+    return service ? `${anchor} (${service})` : anchor;
+  }
+  return '(unnamed pattern)';
+}
 
 export interface AcuteSpikeReportInput {
   investigationId: string;
@@ -52,7 +76,7 @@ export function renderAcuteSpikeReport(input: AcuteSpikeReportInput): string {
   const infMinsAgo = Math.max(0, Math.round((Date.now() / 1000 - input.inflectionTimestamp) / 60));
   const infIso = new Date(input.inflectionTimestamp * 1000).toISOString();
 
-  lines.push(`## Investigation: ${input.startingPoint}, last ${input.windowLabel}`);
+  lines.push(`## Investigation: ${headingStartingPoint(input.startingPoint, input.anchor, input.service)}, last ${input.windowLabel}`);
   lines.push('');
   lines.push(`**Investigation id**: ${input.investigationId}`);
   lines.push(`**Anchor**: \`${input.anchor}\` (resolved from ${input.inputType})`);
@@ -219,7 +243,7 @@ export function renderDriftReport(input: DriftReportInput): string {
   const slope = input.drift.anchorSlopePerWeek;
   const slopePct = (slope * 100).toFixed(1);
 
-  lines.push(`## Investigation: ${input.startingPoint}, last ${input.windowLabel}`);
+  lines.push(`## Investigation: ${headingStartingPoint(input.startingPoint, input.anchor, input.service)}, last ${input.windowLabel}`);
   lines.push('');
   lines.push(`**Investigation id**: ${input.investigationId}`);
   lines.push(`**Anchor**: \`${input.anchor}\` (resolved from ${input.inputType})`);
@@ -316,7 +340,14 @@ export function collectDriftPatternsReferenced(anchor: string, drift: DriftResul
   return Array.from(set);
 }
 
-export function renderEmpty(startingPoint: string, windowLabel: string, investigationId: string, noiseFloor: number): string {
+export function renderEmpty(
+  startingPoint: string,
+  windowLabel: string,
+  investigationId: string,
+  noiseFloor: number,
+  anchor?: string,
+  service?: string,
+): string {
   // Suggest concrete wider windows based on what was tried.
   const isShortWindow = /^(5m|15m|30m|1h|2h)$/.test(windowLabel);
   const nextWindows = isShortWindow
@@ -324,7 +355,7 @@ export function renderEmpty(startingPoint: string, windowLabel: string, investig
     : '`window: "30d"`';
 
   return [
-    `## Investigation: ${startingPoint}, last ${windowLabel}`,
+    `## Investigation: ${headingStartingPoint(startingPoint, anchor, service)}, last ${windowLabel}`,
     '',
     `**Investigation id**: ${investigationId}`,
     `**Result**: No significant pattern movement in the last ${windowLabel}. Nothing crossed the noise floor.`,

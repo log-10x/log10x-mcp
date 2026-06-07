@@ -834,7 +834,10 @@ async function executeInvestigateInner(
         ? `the combined window + baseline span (${args.window} + ${effectiveBaselineOffset}) exceeds the customer TSDB's 32-day instant-query limit`
         : `a ${args.window} window cannot be compared against a prior ${args.window} (60d total span exceeds the backend limit), and a shorter baseline like 24h produces a ≈0% overlap comparison that silently hides multi-week regressions`;
       const routedReport = [
-        `## Investigation: ${args.starting_point}, last ${args.window}`,
+        // Per Note 18: never echo a raw pattern_hash into H2 prose. When
+        // starting_point is hash-shaped, userVisibleStartingPoint substitutes
+        // "this pattern"; non-hash inputs pass through verbatim.
+        `## Investigation: ${userVisibleStartingPoint(args.starting_point)}, last ${args.window}`,
         '',
         `**Investigation id**: ${investigationId}`,
         `**Result**: Routed to \`log10x_cost_drivers\`.`,
@@ -876,7 +879,10 @@ async function executeInvestigateInner(
   if (!resolution.anchor) {
     const historical = resolution.modeDetection === 'unresolved_historical';
     const lines: string[] = [
-      `## Investigation: ${args.starting_point}, last ${args.window}`,
+      // Per Note 18: hash-shaped starting_points render as "this pattern" in
+      // the H2 heading. The raw hash is still echoed downstream inside the
+      // "Could not resolve" body so the operator sees what was looked up.
+      `## Investigation: ${userVisibleStartingPoint(args.starting_point)}, last ${args.window}`,
       '',
       `**Investigation id**: ${investigationId}`,
     ];
@@ -1019,7 +1025,17 @@ async function executeInvestigateInner(
   );
 
   if (shape.shape === 'flat') {
-    const emptyReport = renderEmpty(args.starting_point, args.window, investigationId, thresholds.acuteNoiseFloor);
+    // Pass resolved anchor + service so the H2 heading swaps a hash-shaped
+    // starting_point for the anchor name (Note 18). Non-hash starting points
+    // render verbatim inside renderEmpty regardless.
+    const emptyReport = renderEmpty(
+      args.starting_point,
+      args.window,
+      investigationId,
+      thresholds.acuteNoiseFloor,
+      resolution.anchor,
+      resolution.service,
+    );
     // If the anchor is historical (fired below noise floor in the last 5m)
     // AND a different pattern is currently active in the service, the flat
     // "no significant movement" result is dangerously misleading — it means

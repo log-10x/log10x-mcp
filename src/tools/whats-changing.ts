@@ -643,13 +643,13 @@ export async function executeWhatsChanging(
       `Gates: min_delta=$${minDeltaUsd}, min_contribution=${minDeltaContribPct}%`,
       `Excluded NEW patterns (no baseline): ${excludedNewCount}`,
       ``,
-      `| # | Pattern hash | Services | Sev | Now ($) | Baseline ($) | Δ ($) | Δ (%) | Events |`,
-      `|---|--------------|----------|-----|---------|--------------|-------|-------|--------|`,
+      `| # | Pattern | Services | Sev | Now ($) | Baseline ($) | Δ ($) | Δ (%) | Events |`,
+      `|---|---------|----------|-----|---------|--------------|-------|-------|--------|`,
       ...shown.map((r, i) => {
         const svcList = r.services.map((s) => s.name).join(', ');
         const sevList = r.severities.join('/');
         return (
-          `| ${i + 1} | \`${r.pattern_hash}\` | ${svcList} | ${sevList} | $${r.cost_now_usd.toFixed(0)} | ` +
+          `| ${i + 1} | ${formatHeadlineDescriptor(r)} | ${svcList} | ${sevList} | $${r.cost_now_usd.toFixed(0)} | ` +
           `$${r.cost_baseline_usd.toFixed(0)} | ${r.delta_usd >= 0 ? '+' : '-'}$${Math.abs(r.delta_usd).toFixed(0)} | ` +
           `${r.delta_pct >= 0 ? '+' : ''}${r.delta_pct.toFixed(0)}% | ${r.events_now.toFixed(0)} |`
         );

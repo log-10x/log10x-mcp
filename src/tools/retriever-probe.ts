@@ -21,7 +21,19 @@ import {
   pickActiveOffload,
   detectStaleOffloadEnvVar,
   detectMultiActiveOffload,
+  detectStaleEnvVarForField,
+  type ClusterConfigResolveSuccess,
 } from '../lib/env-config/resolve-cluster-config.js';
+
+/**
+ * Source-of-truth tag for each resolved field on this tool's source_disclosure.
+ *  - explicit_arg  : caller passed the value as an arg
+ *  - on_prem_store : value came from the env-config doc (K8s ConfigMap / SSM /
+ *                    GCP SM / Azure AC / local file) via resolveClusterConfig()
+ *  - env_var       : value came from a LOG10X_* process env var fallback
+ *  - none          : value could not be resolved
+ */
+type ResolvedSource = 'explicit_arg' | 'on_prem_store' | 'env_var' | 'none';
 
 export const retrieverProbeSchema = {
   namespace: z
@@ -38,7 +50,7 @@ export const retrieverProbeSchema = {
     .string()
     .optional()
     .describe(
-      'S3 bucket where the retriever WRITES qr/<id>/*.jsonl result objects. Default: read from retriever state (helm probe).',
+      'S3 bucket where the retriever WRITES qr/<id>/*.jsonl result objects. Default: read from the resolved env-config\'s `retriever.input_bucket` (walking K8s ConfigMap → AWS SSM → GCP Secret Manager → Azure App Config → local file in that order). Falls back to LOG10X_RETRIEVER_INPUT_BUCKET / __SAVE_LOG10X_RETRIEVER_BUCKET__ env vars and the helm-release probe when no env-config is reachable.',
     ),
   query_log_group: z
     .string()
@@ -71,23 +83,40 @@ export async function executeRetrieverProbe(args: {
   );
   if (strict.error) return strict.error;
 
-  // Resolution chain for offload bucket:
-  //   1. explicit-arg          (args.offload_bucket — caller knows best)
-  //   2. on-prem-store         (env-config doc, active offload destination)
-  //   3. env-var fallback      (LOG10X_STREAMER_BUCKET / LOG10X_OFFLOAD_BUCKET)
+  // Resolution chain for offload bucket AND retriever state (url/input_bucket):
+  //   1. explicit-arg          (args.* — caller knows best)
+  //   2. on-prem-store         (env-config doc, K8s CM → SSM → GCP SM → Azure → file)
+  //   3. env-var fallback      (LOG10X_STREAMER_BUCKET / LOG10X_OFFLOAD_BUCKET /
+  //                             LOG10X_RETRIEVER_INPUT_BUCKET / __SAVE_* via
+  //                             getRetrieverState)
   //   4. fail-loudly           (envelope below explaining what to set)
   //
   // Stale-env-var nudge: when the env-config disagrees with the env var, the
   // store wins and the env var becomes a warning rather than a silent
   // override. This is the canonical "but I set the env var" footgun.
   const warnings: string[] = [];
+
+  // Resolve the env-config doc ONCE and reuse it for both the offload bucket
+  // (status='active' destination) and the retriever block (input_bucket/url).
+  // Before this, only offload_bucket consulted resolveClusterConfig — the
+  // input_bucket path skipped straight to getRetrieverState(null), which never
+  // reads the env-config ConfigMap. That left the canonical "but I registered
+  // the env-config doc" footgun: env-config was authoritative for offload but
+  // an ignored sibling for retriever.
+  let resolved: ClusterConfigResolveSuccess | undefined;
+  if (!args.offload_bucket || !args.input_bucket) {
+    const r = await resolveClusterConfig();
+    if (r.ok) resolved = r;
+  }
+
   let offloadBucket = args.offload_bucket;
+  let offloadBucketSource: ResolvedSource = args.offload_bucket ? 'explicit_arg' : 'none';
   if (!offloadBucket) {
-    const resolved = await resolveClusterConfig();
-    if (resolved.ok) {
+    if (resolved) {
       const active = pickActiveOffload(resolved.config);
       if (active?.bucket) {
         offloadBucket = active.bucket;
+        offloadBucketSource = 'on_prem_store';
         const stale = detectStaleOffloadEnvVar(active.bucket);
         if (stale) warnings.push(stale);
       }
@@ -114,24 +143,49 @@ export async function executeRetrieverProbe(args: {
     if (!offloadBucket) {
       offloadBucket =
         process.env.LOG10X_OFFLOAD_BUCKET || process.env.LOG10X_STREAMER_BUCKET;
+      if (offloadBucket) offloadBucketSource = 'env_var';
     }
   }
 
   let inputBucket = args.input_bucket;
+  let retrieverStateSource: ResolvedSource = args.input_bucket ? 'explicit_arg' : 'none';
   if (!inputBucket) {
-    try {
-      const state = await getRetrieverState(null);
-      if (state.installed && state.bucket) {
-        inputBucket = state.bucket;
+    // (B.1) Prefer env-config's retriever block over env_var / helm probes.
+    // This is the exact gap Fix B closes: input_bucket previously skipped the
+    // env-config doc entirely and went straight to getRetrieverState(null),
+    // which only walks env vars + helm + kubectl. If a customer registered
+    // an env-config (via log10x_env_register / log10x_retriever_register),
+    // it must win here just like it does for offload_bucket above.
+    if (resolved?.config.retriever.input_bucket) {
+      inputBucket = resolved.config.retriever.input_bucket;
+      retrieverStateSource = 'on_prem_store';
+      const stale = detectStaleEnvVarForField(
+        'retriever.input_bucket',
+        resolved.config.retriever.input_bucket,
+        'LOG10X_RETRIEVER_INPUT_BUCKET',
+      );
+      if (stale && !warnings.includes(stale)) warnings.push(stale);
+    } else {
+      // (B.2) Env-config absent — fall back to the legacy resolution chain
+      // (env vars → snapshot → helm probe → kubectl probe). All of these
+      // collapse to retriever_state_source='env_var' in the disclosure
+      // since none of them consult the on-prem env-config doc.
+      try {
+        const state = await getRetrieverState(null);
+        if (state.installed && state.bucket) {
+          inputBucket = state.bucket;
+          retrieverStateSource = 'env_var';
+        }
+      } catch {
+        // ignore — surfaced below as missing arg
       }
-    } catch {
-      // ignore — surfaced below as missing arg
     }
   }
   if (!offloadBucket) {
     // Fall back to the same bucket as input_bucket when only one is known
     // — useful in single-bucket deployments where receive+index share s3.
     offloadBucket = inputBucket;
+    if (offloadBucket) offloadBucketSource = retrieverStateSource;
   }
 
   if (!offloadBucket || !inputBucket) {
@@ -148,6 +202,10 @@ export async function executeRetrieverProbe(args: {
           'I tried to run an end-to-end health check on the retriever pipeline, but I could not figure out which S3 buckets it reads from and writes to. To run the check: pass offload_bucket and input_bucket explicitly, register an env-config document so the active offload bucket is resolved automatically, or set LOG10X_STREAMER_BUCKET and ensure the retriever helm release is reachable so the bucket names can be auto-discovered.',
         asserts: [],
         total_runtime_ms: 0,
+        source_disclosure: {
+          retriever_state_source: retrieverStateSource,
+          offload_bucket_source: offloadBucketSource,
+        },
       },
       warnings,
     });
@@ -162,21 +220,38 @@ export async function executeRetrieverProbe(args: {
     window_minutes: args.window_minutes ?? 5,
   };
   const result = await runRetrieverProbe(probeArgs);
+  const callerProvidedTargetHash = Boolean(args.target_hash);
 
   return buildEnvelope({
     tool: 'log10x_retriever_probe',
     view: 'summary',
     summary: {
-      headline: buildHeadline(result),
+      headline: buildHeadline(result, callerProvidedTargetHash),
     },
-    data: result,
+    data: {
+      ...result,
+      source_disclosure: {
+        retriever_state_source: retrieverStateSource,
+        offload_bucket_source: offloadBucketSource,
+      },
+    },
     warnings,
   });
 }
 
-function buildHeadline(r: ProbeResult): string {
+function buildHeadline(r: ProbeResult, callerProvidedTargetHash: boolean): string {
+  // Fix A: never put the raw tenx_hash (e.g. "4Kjc7PHLWqY") in the
+  // user-facing headline — per the no-hash-in-headlines audit AND the
+  // smoke-test evidence where the picked hash leaked through as a
+  // bare token. The hash stays in `data.picked_hash` so renderers and
+  // follow-up tools can still consume it; the prose says what the user
+  // can act on ("the highest-volume pattern" / "the requested pattern").
+  const pickedPhrase = callerProvidedTargetHash
+    ? 'the requested pattern'
+    : 'the highest-volume pattern';
+
   if (r.verdict === 'green') {
-    return `Retriever end-to-end health check passed — picked pattern ${r.picked_hash ?? '?'}, ran query ${r.query_id ?? '?'}, all ${r.asserts.length} checks succeeded (${r.total_runtime_ms}ms).`;
+    return `Retriever end-to-end health check passed — picked ${pickedPhrase}, ran query ${r.query_id ?? '?'}, all ${r.asserts.length} checks succeeded (${r.total_runtime_ms}ms).`;
   }
   if (r.verdict === 'broken') {
     // Note 32 + 39: lead with capability + impact in user terms. Distinguish

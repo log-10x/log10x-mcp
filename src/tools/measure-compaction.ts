@@ -190,25 +190,40 @@ function coerceEventToLine(ev: unknown): string {
 
 /**
  * Build a readable ASCII table for must_render_verbatim.
- * Columns: pattern_hash (truncated), sample_count, original_bytes,
- *          encoded_bytes, ratio_x, confidence.
+ * Columns: Pattern (descriptor truncated to ~40 chars), sample_count,
+ *          original_bytes, encoded_bytes, ratio_x, confidence.
+ *
+ * Pattern column renders the symbol_message (or a short hash fallback when
+ * absent) — the raw 11-char hash is NOT a user-facing primary identifier.
+ * Hash stays in structured fields for machine consumers.
  */
 function buildTable(patterns: PatternCompactionResult[]): string {
   if (patterns.length === 0) {
     return '(no patterns measured)';
   }
+  const PATTERN_COL_WIDTH = 40;
   const header =
-    'pattern_hash        | samples | orig_bytes | enc_bytes | ratio_x | confidence';
+    'Pattern'.padEnd(PATTERN_COL_WIDTH) +
+    ' | samples | orig_bytes | enc_bytes | ratio_x | confidence';
   const sep =
-    '--------------------|---------|------------|-----------|---------|----------';
+    '-'.repeat(PATTERN_COL_WIDTH) +
+    '-|---------|------------|-----------|---------|----------';
   const rows = patterns.map((p) => {
-    const hash = p.pattern_hash.slice(0, 18).padEnd(18);
+    const descriptor =
+      p.symbol_message && p.symbol_message.trim().length > 0
+        ? p.symbol_message
+        : `(pattern ${p.pattern_hash.slice(0, 8)})`;
+    const truncated =
+      descriptor.length > PATTERN_COL_WIDTH
+        ? descriptor.slice(0, PATTERN_COL_WIDTH - 1) + '…'
+        : descriptor;
+    const pat = truncated.padEnd(PATTERN_COL_WIDTH);
     const samples = String(p.sample_count).padStart(7);
     const orig = String(p.total_original_bytes).padStart(10);
     const enc = String(p.total_encoded_bytes).padStart(9);
     const ratio = p.compaction_ratio_x.toFixed(1).padStart(7);
     const conf = p.confidence.padEnd(10);
-    return `${hash} | ${samples} | ${orig} | ${enc} | ${ratio} | ${conf}`;
+    return `${pat} | ${samples} | ${orig} | ${enc} | ${ratio} | ${conf}`;
   });
   return [header, sep, ...rows].join('\n');
 }
