@@ -151,13 +151,20 @@ export async function executeServices(
   }
   const d = sumOut.data;
   const top = d.services[0];
-  // Compute how many services are in top-5 actionable tier vs tail.
+  // Headline reconstructs from a SINGLE share number — the one in
+  // d.top_n_share_pct, which is computed over the actionable set (services
+  // with non-null next_action) so the headline's N and % tell the same
+  // story. Earlier the headline used Top-{actionableCount} services with
+  // a Top-5 share % — three different numbers for the same quantity.
   const actionableCount = d.services.filter((s) => s.next_action !== null).length;
   const tailCount = d.services.length - actionableCount;
-  const top5 = d.services.slice(0, Math.min(5, d.services.length));
-  const top5Share = top5.reduce((sum, s) => sum + s.pct, 0);
+  // tailCount counts services with null next_action, which is the union of
+  // two groups: ranks 11-13 above 0.1% (tail_rank) + ranks 14+ or <0.1%
+  // (below_signal_floor). Earlier the headline labeled all of them
+  // "below signal floor" which was wrong for the tail_rank group; now
+  // it just says "tail services omitted from next_action".
   const tailNote = tailCount > 0
-    ? ` Top ${actionableCount} service${actionableCount !== 1 ? 's' : ''} account for ${Math.round(top5Share)}% of cost; ${tailCount} tail service${tailCount !== 1 ? 's' : ''} below signal floor.`
+    ? ` Top ${actionableCount} service${actionableCount !== 1 ? 's' : ''} account for ${d.top_n_share_pct}% of cost; ${tailCount} tail service${tailCount !== 1 ? 's' : ''} omitted from next_action.`
     : '';
   // Headline collapses the dollar phrasing to volume-only when rate_source==='unset'
   // (no fictitious $/GB lie). When the resolver gave us a rate, the dollar
@@ -216,7 +223,7 @@ export async function executeServices(
           {
             title: `Services — ${d.time_range}`,
             footer: tailCount > 0
-              ? `${tailCount} tail service${tailCount !== 1 ? 's' : ''} below 0.1% signal floor omitted from next_action.`
+              ? `${tailCount} tail service${tailCount !== 1 ? 's' : ''} omitted from next_action (rank > 10 or < 0.1% share).`
               : undefined,
           },
         )
@@ -520,7 +527,22 @@ async function executeServicesInner(
   if (block) lines.push('', block);
 
   if (sumOut) {
-    const topN = Math.min(3, rows.length);
+    // top_n_share_pct: cost concentration in the ACTIONABLE set (services
+    // with a non-null next_action — the ones a CFO can act on this week).
+    // Surfaced by adversarial workflow wui9vouej, 2026-06-07: this field
+    // used to slice [0:3] and was rendered alongside a headline saying
+    // "Top {actionableCount}" — three different numbers for the same
+    // quantity in one envelope. N now matches the headline's actionable
+    // count so the field reconstructs from the data.
+    // Mirror the per-row next_action logic (rank <= 10 AND pct >= 0.1)
+    // so the share % counts exactly the services the per-row routing
+    // marks actionable. Exception-mode services aren't subtracted —
+    // they route to pattern_mitigate but still count as actionable.
+    const actionableRowCount = Math.min(
+      10,
+      rows.filter((r) => r.pct >= 0.1).length
+    );
+    const topN = actionableRowCount;
     const topBytes = rows.slice(0, topN).reduce((s, r) => s + r.bytes, 0);
     const topShare = totalBytes > 0 ? Math.round((topBytes / totalBytes) * 100) : 0;
     sumOut.data = {

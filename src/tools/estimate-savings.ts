@@ -88,7 +88,7 @@ import { type FilterValue } from '../lib/promql.js';
 // ─── constants ──────────────────────────────────────────────────────────
 const BYTES_METRIC = 'all_events_summaryBytes_total';
 const VOLUME_METRIC = 'all_events_summaryVolume_total';
-const GB = 1024 * 1024 * 1024;
+const GB = 1_000_000_000; // decimal GB — matches CloudWatch/Datadog/Splunk billing
 /** Forecast period is always normalized to a 30-day month. */
 const MONTH_DAYS = 30;
 

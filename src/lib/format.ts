@@ -48,26 +48,27 @@ function trimZeros(s: string): string {
 /**
  * Format bytes as human-readable with 3 significant figures.
  *
- * Thresholds (all base-2):
- *   < 1 KiB          → "N B"   (integer)
- *   < 100 KiB        → "X.XX KB"
- *   < 100 MiB        → "X.XX MB"
- *   >= 100 MiB       → "X.XX GB"  (includes < 1 GiB values — 110 MB → 0.108 GB)
- *   >= 1 TiB         → "X.XX TB"
+ * Thresholds use DECIMAL units (KB=10^3, MB=10^6, GB=10^9, TB=10^12),
+ * matching cost.ts's $/GB convention so the same byte value renders
+ * the same volume in the same envelope as the dollars derived from it.
+ * CloudWatch / Datadog / Splunk / Azure / GCP / Sumo all bill in
+ * decimal GB, so this also matches what the customer sees on their
+ * invoice. (Switched 2026-06-07 after adversarial workflow wui9vouej
+ * surfaced GiB-divisor-under-GB-label as a CFO-facing 6.87% miscount.)
  *
  * Using toPrecision(3) throughout so 115_577_921 bytes →
- *   mb = 110.2 → gb = 0.1076 → "0.108 GB"  (3 sig figs, not .toFixed(1) = "0.1")
+ *   mb = 115.6 → gb = 0.1156 → "0.116 GB"  (3 sig figs)
  */
 export function fmtBytes(bytes: number): string {
   const abs = Math.abs(bytes);
-  if (abs < 1024) return `${Math.round(abs)} B`;
-  const kb = abs / 1024;
+  if (abs < 1000) return `${Math.round(abs)} B`;
+  const kb = abs / 1000;
   if (kb < 100) return `${trimZeros(kb.toPrecision(3))} KB`;
-  const mb = kb / 1024;
+  const mb = kb / 1000;
   if (mb < 100) return `${trimZeros(mb.toPrecision(3))} MB`;
-  const gb = mb / 1024;
-  if (gb < 1024) return `${trimZeros(gb.toPrecision(3))} GB`;
-  const tb = gb / 1024;
+  const gb = mb / 1000;
+  if (gb < 1000) return `${trimZeros(gb.toPrecision(3))} GB`;
+  const tb = gb / 1000;
   return `${trimZeros(tb.toPrecision(3))} TB`;
 }
 

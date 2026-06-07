@@ -331,11 +331,15 @@ function formatLargeCount(n: number): string {
 }
 
 function formatLargeBytes(n: number): string {
-  const GB = 1024 * 1024 * 1024;
-  const MB = 1024 * 1024;
+  // Decimal units (GB = 10^9), matching format.ts fmtBytes + cost.ts so
+  // every byte/dollar surface in the catalog renders consistently with
+  // CloudWatch/Datadog/Splunk billing.
+  const GB = 1_000_000_000;
+  const MB = 1_000_000;
+  const KB = 1_000;
   if (n >= GB) return `${(n / GB).toFixed(1)} GB`;
   if (n >= MB) return `${(n / MB).toFixed(1)} MB`;
-  return `${Math.round(n / 1024)} KB`;
+  return `${Math.round(n / KB)} KB`;
 }
 
 /**

@@ -32,7 +32,12 @@
 import type { SiemId } from './siem/pricing.js';
 import { DEFAULT_ANALYZER_COST_PER_GB, SIEM_DISPLAY_NAMES } from './siem/pricing.js';
 
-const GB = 1024 * 1024 * 1024;
+// GB = 10^9 bytes (decimal). This is the unit CloudWatch / Datadog /
+// Splunk / Azure Monitor / GCP Logging / Sumo all bill in, so dollar
+// math here matches the customer's invoice. Using GiB (2^30) under a
+// `$/GB` label silently understates spend by ~6.87% (the bug surfaced
+// by adversarial math-lens workflow wui9vouej, 2026-06-07).
+const GB = 1_000_000_000;
 
 // ---------------------------------------------------------------------------
 // BACK-COMPAT LAYER — do not change signatures.

@@ -93,7 +93,7 @@ const DEFAULT_LOOKUP_PATH = 'pipelines/run/receive/rate/caps.csv';
 const RESET_INTERVAL_SEC = RECEIVER_DEFAULT_RESET_MS / 1000;
 const WINDOWS_PER_DAY = (24 * 60 * 60) / RESET_INTERVAL_SEC; // = 360
 const WINDOWS_PER_MONTH = WINDOWS_PER_DAY * 30; // = 10800
-const GB = 1024 * 1024 * 1024;
+const GB = 1_000_000_000; // decimal GB — matches CloudWatch/Datadog/Splunk billing
 const FEASIBILITY_TOLERANCE_PCT = 0.1; // ±10% of target counts as "hit"
 const MIN_REPORTER_DAYS = 7;
 
