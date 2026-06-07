@@ -1315,10 +1315,19 @@ export async function executeTopPatterns(
     headline_callout: callout,
     status: 'success',
     decisions: {
-      threshold_used: costPerGb,
-      threshold_basis: chassisThresholdBasis,
+      // Chain-integrity workflow wqtzszdg7: prior code aliased
+      // threshold_used := costPerGb (the $/GB rate). Rate is not a
+      // threshold and rate_source provenance belongs in
+      // source_disclosure. The operational threshold here is the
+      // ranking volume floor (0 KB/s by default), with the top_N cap
+      // as the effective cutoff. Reflect that honestly:
+      //   threshold_used: 0   (the volume floor — top_n_above_floor)
+      //   threshold_basis: 'unvalidated_default'  (hand-picked)
+      // Same fix shipped to services + savings in this round.
+      threshold_used: 0,
+      threshold_basis: 'unvalidated_default',
       threshold_audit: patternCountTotal != null ? {
-        value: costPerGb,
+        value: 0,
         basis: `top_n_above_floor; ${renderRows.length} of ${patternCountTotal} patterns returned`,
         observed_distribution: null,
       } : undefined,

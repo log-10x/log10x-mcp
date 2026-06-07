@@ -56,6 +56,12 @@ export const costOptionsSchema = {
     .describe(
       'Optional pattern hash to scope the cost option menu to a single pattern. When present, routes_to.args will include a proposed_config row for this hash.'
     ),
+  destination: z
+    .enum(['splunk', 'datadog', 'elasticsearch', 'clickhouse', 'cloudwatch', 'azure-monitor', 'gcp-logging', 'sumo'])
+    .optional()
+    .describe(
+      'Destination stack. When set, routes_to.args carries THIS destination forward to estimate_savings — overrides the env-auto-detected SIEM. Pass when the upstream tool (baseline / configure_engine) already established a destination that differs from the env default; without it, cost_options falls back to siem_detected and routes_to may carry a destination the upstream chain did not pick.'
+    ),
 };
 
 // ─── Output types ─────────────────────────────────────────────────────────────
@@ -221,10 +227,17 @@ function buildCapabilities(args: {
 function buildModes(
   caps: CapabilitySummary & { _tier?: CustomerTier },
   siemDetected: string | null,
-  args: { target_percent?: number; service?: string; pattern_hash?: string }
+  args: { target_percent?: number; service?: string; pattern_hash?: string; destination?: string }
 ): CostOptionItem[] {
   const { target_percent, service, pattern_hash } = args;
   const tier: CustomerTier = caps._tier ?? 'dev';
+  // Chain-integrity workflow wqtzszdg7: the caller-supplied destination
+  // (e.g. baseline established datadog as the target) must win over the
+  // env-auto-detected siem (which may be the env default cloudwatch).
+  // Without this, cost_options silently injects cloudwatch into
+  // routes_to.args while upstream tools were using datadog, breaking
+  // the destination cascade.
+  const effectiveDestination = args.destination ?? siemDetected;
 
   /**
    * Build the routes_to.args for a given action.
@@ -242,7 +255,7 @@ function buildModes(
    */
   const sharedArgs = (action: Action): Record<string, unknown> => {
     const out: Record<string, unknown> = {};
-    if (siemDetected) out.destination = siemDetected;
+    if (effectiveDestination) out.destination = effectiveDestination;
     if (service !== undefined) out.service = service;
     if (pattern_hash) {
       // Explicit single-pattern route: use proposed_config so estimate_savings
@@ -443,6 +456,7 @@ export async function executeCostOptions(args: {
   target_percent?: number;
   service?: string;
   pattern_hash?: string;
+  destination?: 'splunk' | 'datadog' | 'elasticsearch' | 'clickhouse' | 'cloudwatch' | 'azure-monitor' | 'gcp-logging' | 'sumo';
 }): Promise<StructuredOutput> {
   const telemetry = newChassisTelemetry();
 

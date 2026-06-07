@@ -58,6 +58,7 @@ import { loadEnvironments } from '../lib/environments.js';
 import { LABELS } from '../lib/promql.js';
 import type { PrometheusResponse } from '../lib/api.js';
 import { queryInstant } from '../lib/api.js';
+import { parsePrometheusValue } from '../lib/cost.js';
 import type { EnvConfig } from '../lib/environments.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import {
@@ -364,6 +365,17 @@ interface ConfigureEngineData {
   containers: string[];
   destination?: SiemId;
   target_percent?: number;
+  /**
+   * Chain-integrity workflow wqtzszdg7: when phase='resolution_prompt'
+   * the tool now discovers candidate containers from the metrics
+   * backend and surfaces them here so the agent can re-call without
+   * an external label-discovery hop.
+   */
+  container_candidates?: Array<{
+    k8s_container: string;
+    bytes_in_window: number;
+    share_of_service_pct: number;
+  }>;
   derivation?: {
     current_monthly_bytes: number;
     current_monthly_usd: number;
@@ -668,7 +680,39 @@ export async function executeConfigureEngine(
 
   // Phase 1: container resolution.
   if (!args.containers || args.containers.length === 0) {
-    const resPromptHeadline = `Phase 1: pick containers for service "${args.service}" — re-call with containers: ["..."] to derive policy.`;
+    // Chain-integrity workflow wqtzszdg7: prior code returned
+    // containers:[] + actions:[] — a dead-end envelope that told the
+    // agent "pick containers" but gave it nothing to pick from.
+    // Discover the candidate containers from the metrics backend so
+    // the agent can re-call with a concrete list (or, when the env
+    // has a single container, suggest it directly in the headline).
+    const observationDays = args.observationDays ?? 7;
+    const metricsEnv = await resolveMetricsEnv(env);
+    const envClause = metricsEnv ? `${LABELS.env}="${promEscape(metricsEnv)}",` : '';
+    const containerQ = `sum by (k8s_container)(increase(all_events_summaryBytes_total{${envClause}${LABELS.service}="${promEscape(args.service)}"}[${observationDays}d]))`;
+    let candidateContainers: Array<{ name: string; bytes: number }> = [];
+    try {
+      const res = await queryInstant(env, containerQ);
+      for (const r of res.data.result) {
+        const name = r.metric.k8s_container;
+        if (!name) continue;
+        const bytes = parsePrometheusValue(r);
+        if (Number.isFinite(bytes) && bytes > 0) {
+          candidateContainers.push({ name, bytes });
+        }
+      }
+      candidateContainers.sort((a, b) => b.bytes - a.bytes);
+    } catch {
+      candidateContainers = [];
+    }
+    const totalBytes = candidateContainers.reduce((s, c) => s + c.bytes, 0);
+    const containerLabels = candidateContainers.map((c) => c.name);
+    const hint = candidateContainers.length === 0
+      ? `No k8s_container labels found for service "${args.service}" in the last ${observationDays}d. The service name may be misspelled, or no bytes were emitted in the window.`
+      : candidateContainers.length === 1
+        ? `One container found: ["${containerLabels[0]}"]. Re-call with containers: ["${containerLabels[0]}"] to derive the policy.`
+        : `${candidateContainers.length} containers found. Re-call with containers: [${containerLabels.slice(0, 5).map((n) => `"${n}"`).join(', ')}${candidateContainers.length > 5 ? `, ...` : ''}] to derive the policy.`;
+    const resPromptHeadline = `Phase 1: pick containers for service "${args.service}" — ${hint}`;
     return buildChassisEnvelope({
       tool: 'log10x_configure_engine',
       view: 'summary',
@@ -676,13 +720,35 @@ export async function executeConfigureEngine(
       status: 'partial',
       decisions: { threshold_used: args.target_percent ?? null, threshold_basis: args.target_percent != null ? 'customer_supplied' : 'default' },
       source_disclosure: { bytes_source: 'tsdb', siem_vendor: target.resolved.destination },
-      scope: { window: `${args.observationDays ?? 7}d`, window_basis: 'explicit' },
+      scope: { window: `${observationDays}d`, window_basis: args.observationDays != null ? 'explicit' : 'auto_default' },
       payload: {
         ok: true, phase: 'resolution_prompt', service: args.service,
-        containers: [], destination: target.resolved.destination,
-        human_summary: `Phase 1: configure_engine needs the container list for service "${args.service}" (destination ${target.resolved.destination}). Re-call with containers: [...] to derive the policy.`,
+        containers: containerLabels, destination: target.resolved.destination,
+        container_candidates: candidateContainers.map((c) => ({
+          k8s_container: c.name,
+          bytes_in_window: c.bytes,
+          share_of_service_pct: totalBytes > 0 ? (c.bytes / totalBytes) * 100 : 0,
+        })),
+        human_summary: hint,
       } satisfies ConfigureEngineData,
-      human_summary: `Phase 1: configure_engine needs the container list for service "${args.service}" (destination ${target.resolved.destination}). Re-call with containers: [...] to derive the policy.`,
+      human_summary: hint,
+      actions: candidateContainers.length > 0
+        ? [{
+            tool: 'log10x_configure_engine',
+            args: {
+              service: args.service,
+              destination: target.resolved.destination,
+              containers: containerLabels,
+              ...(args.target_percent != null ? { target_percent: args.target_percent } : {}),
+              ...(args.auto_apply != null ? { auto_apply: args.auto_apply } : {}),
+              ...(args.delivery != null ? { delivery: args.delivery } : {}),
+            },
+            reason: candidateContainers.length === 1
+              ? `Re-call configure_engine with the single discovered container "${containerLabels[0]}".`
+              : `Re-call configure_engine with the ${candidateContainers.length} discovered containers (or a subset).`,
+            role: 'recommended-next',
+          }]
+        : [],
     });
   }
 

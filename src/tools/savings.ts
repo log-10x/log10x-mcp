@@ -170,8 +170,18 @@ export async function executeSavings(
     headline,
     status: d.totals.has_data ? 'success' : 'no_signal',
     decisions: {
-      threshold_used: d.cost_per_gb,
-      threshold_basis: d.rate_source === 'customer_supplied' ? 'customer_supplied' : 'default',
+      // Chain-integrity workflow wqtzszdg7: prior code aliased
+      // threshold_used := cost_per_gb (the $/GB rate). Rate is not a
+      // threshold — and the chassis decision block documents the
+      // OPERATIONAL THRESHOLD. savings doesn't gate decisions on any
+      // operational threshold; it aggregates reductions. Set both
+      // fields to the schema's absent-tool form so cross-tool
+      // comparisons of decisions.threshold_used don't conflate rate
+      // ($/GB) with target (%) or cutoff (rank). Same fix shipped to
+      // services in round-5 and top_patterns just below.
+      // rate_source provenance remains in source_disclosure.rate_source.
+      threshold_used: null,
+      threshold_basis: 'default',
     },
     source_disclosure: {
       bytes_source: 'tsdb',
