@@ -84,6 +84,8 @@ import {
 } from '../lib/action-intent-writer.js';
 import { resolveClusterConfig } from '../lib/env-config/resolve-cluster-config.js';
 import { requireWriteAccess } from '../lib/read-only-guard.js';
+import { putCommitment, type CommitmentRecord } from './commitment-report.js';
+import { randomUUID } from 'node:crypto';
 
 // ─── constants ────────────────────────────────────────────────────────
 const DEFAULT_LOOKUP_PATH = 'pipelines/run/receive/rate/caps.csv';
@@ -142,7 +144,19 @@ export const configureEngineSchema = {
     .enum(['gitops', 'kubectl_configmap', 'stdout_only'])
     .default('gitops')
     .describe(
-      'How the rendered policy is delivered. `gitops` (default) opens a PR against the customer gitops repo (requires `gitops_repo`). `kubectl_configmap` writes directly to a k8s ConfigMap on the active cluster (no GitHub needed). `stdout_only` returns the proposed config in the response without writing anywhere.'
+      'How the rendered policy is delivered. `gitops` (default) opens a PR against the customer gitops repo (requires `gitops_repo`). `kubectl_configmap` writes the cap-CSV + action-intent.json directly to a k8s ConfigMap on the active cluster (no GitHub needed; the engine\'s ConfigMap pull driver reads from the ConfigMap named via $K8S_CONFIGMAP, default `log10x-action-intent`). `stdout_only` returns the proposed config in the response without writing anywhere.'
+    ),
+  kubectl_namespace: z
+    .string()
+    .optional()
+    .describe(
+      'k8s namespace for the cap-CSV ConfigMap when delivery="kubectl_configmap". Defaults to the env-config doc\'s retriever.helm_release.namespace, then `default`. The engine\'s ConfigMap pull driver reads from this namespace.'
+    ),
+  kubectl_configmap_name: z
+    .string()
+    .optional()
+    .describe(
+      'k8s ConfigMap name when delivery="kubectl_configmap". Defaults to `log10x-action-intent` (matching the engine\'s default $K8S_CONFIGMAP env var). The ConfigMap holds two keys: `caps.csv` (engine\'s safety floor) and `action-intent.json` (per-pattern action mapping).'
     ),
   tolerance_pct: z
     .number()
@@ -391,7 +405,18 @@ interface ConfigureEngineData {
     pr_url?: string;
     branch?: string;
     error?: string;
+    /** Delivery mode actually exercised. Distinguishes the gh path from kubectl_configmap. */
+    delivery?: 'gitops' | 'kubectl_configmap';
+    /** kubectl_configmap path only: the ConfigMap apply landed at this namespace/name. */
+    configmap_location?: { namespace: string; name: string; keys: string[] };
   };
+  /**
+   * Commitment record id, set when apply succeeds (gitops PR-open OR
+   * kubectl_configmap write). The id keys the on-disk record at
+   * $LOG10X_ADVISOR_STATE_DIR/commitments/<id>.json that commitment_report
+   * reads to compute realized savings.
+   */
+  commitment_id?: string;
   next_actions?: Array<{ tool: string; args: unknown; why: string }>;
   error?: string;
   /**
@@ -1098,13 +1123,63 @@ export async function executeConfigureEngine(
   // the gh CLI token scope and the MCP client's approval UX. Per-call
   // opt-outs: auto_apply=false or read_only=true. Falls through silently
   // (no change in behavior) when prCommand is null (infeasible plan or
-  // zero-change PR).
+  // zero-change PR). The branch on args.delivery picks the actual writer:
+  // gitops → gh PR; kubectl_configmap → kubectl apply -f -.
   let applied: ConfigureEngineData['applied'];
-  if (prCommand && (args.auto_apply ?? true) && !(args.read_only ?? false)) {
+  let commitmentId: string | undefined;
+  const shouldApply =
+    (args.auto_apply ?? true) &&
+    !(args.read_only ?? false) &&
+    feasible &&
+    !targetMetByCurrent;
+  if (shouldApply && args.delivery === 'kubectl_configmap') {
+    requireWriteAccess(
+      'writes the cap-CSV + action-intent.json to a k8s ConfigMap (kubectl apply); engine\'s ConfigMap pull driver picks it up on next poll'
+    );
+    const newCsv = reconstructAfterCsv(csvDiff, args.current_csv);
+    const cmName = args.kubectl_configmap_name ?? 'log10x-action-intent';
+    // Namespace resolution: explicit arg → 'default'. Receiver pod's
+    // K8S_CONFIGMAP env var picks the ConfigMap name; the kubeconfig
+    // context picks the cluster. Operator supplies namespace when not
+    // 'default' (otel-demo uses 'demo' for its receiver DS).
+    const ns = args.kubectl_namespace ?? 'default';
+    const result = await applyViaKubectlConfigMap(
+      newCsv,
+      actionIntentJson,
+      cmName,
+      ns
+    );
+    applied = { ...result, delivery: 'kubectl_configmap' };
+    if (result.ok) {
+      commitmentId = persistCommitmentOnApply({
+        service: args.service,
+        envNickname: env.nickname,
+        destination,
+        targetPercent,
+        contractType: args.contract_type ?? 'on_demand',
+        baselineMonthlyBytes: currentMonthlyBytes,
+        baselineMonthlyUsd: currentMonthlyUsd,
+        observationDays: args.observationDays ?? 7,
+      });
+    }
+  } else if (shouldApply && prCommand) {
     requireWriteAccess(
       'opens a GitHub PR against the gitops repo (gh CLI) to modify the cap-CSV at pipelines/run/receive/rate/caps.csv'
     );
-    applied = await applyViaGh(prCommand);
+    const result = await applyViaGh(prCommand);
+    applied = { ...result, delivery: 'gitops' };
+    if (result.ok) {
+      commitmentId = persistCommitmentOnApply({
+        service: args.service,
+        envNickname: env.nickname,
+        destination,
+        targetPercent,
+        contractType: args.contract_type ?? 'on_demand',
+        baselineMonthlyBytes: currentMonthlyBytes,
+        baselineMonthlyUsd: currentMonthlyUsd,
+        observationDays: args.observationDays ?? 7,
+      });
+    }
   }
 
   const nextActions: Array<{ tool: string; args: unknown; why: string }> = [
@@ -1166,6 +1241,7 @@ export async function executeConfigureEngine(
     csv_diff: csvDiff,
     pr_command: prCommand,
     applied,
+    commitment_id: commitmentId,
     action_default_resolution: actionDefaultResolution,
     refresh: refreshState
       ? {
@@ -1415,6 +1491,7 @@ function buildSummaryPayload(params: {
     derivation: data.derivation,
     checks: data.checks,
     applied: data.applied,
+    commitment_id: data.commitment_id,
     action_default_resolution: data.action_default_resolution,
     refresh: data.refresh,
     next_actions: slimNextActions,
@@ -1495,11 +1572,32 @@ async function tryConsumePocSnapshot(
     : null;
 
   let applied: ConfigureEngineData['applied'];
-  if (prCommand && (args.auto_apply ?? true) && !(args.read_only ?? false)) {
+  let commitmentId: string | undefined;
+  const shouldApply =
+    (args.auto_apply ?? true) &&
+    !(args.read_only ?? false) &&
+    feasibility?.feasible === true;
+  if (shouldApply && args.delivery === 'kubectl_configmap') {
+    requireWriteAccess(
+      'writes the cap-CSV to a k8s ConfigMap (kubectl apply) from the POC snapshot; engine\'s ConfigMap pull driver picks it up on next poll'
+    );
+    const newCsv = reconstructAfterCsv(diff, args.current_csv);
+    const cmName = args.kubectl_configmap_name ?? 'log10x-action-intent';
+    const ns = args.kubectl_namespace ?? 'default';
+    const result = await applyViaKubectlConfigMap(newCsv, undefined, cmName, ns);
+    applied = { ...result, delivery: 'kubectl_configmap' };
+    // POC path: commitment persistence skipped here. The POC's renderInput
+    // doesn't carry baseline_monthly_bytes/_usd in the format the
+    // CommitmentRecord requires; wiring this end-to-end is a follow-on
+    // (poc-envelope-v2 needs to surface the same baseline fields).
+  } else if (shouldApply && prCommand) {
     requireWriteAccess(
       'opens a GitHub PR against the gitops repo (gh CLI) to modify the cap-CSV at pipelines/run/receive/rate/caps.csv'
     );
-    applied = await applyViaGh(prCommand);
+    const result = await applyViaGh(prCommand);
+    applied = { ...result, delivery: 'gitops' };
+    // Same POC-path constraint as above — commitment persistence requires
+    // baseline data the snap doesn't carry today.
   }
 
   const warnings: string[] = [];
@@ -1599,6 +1697,7 @@ async function tryConsumePocSnapshot(
       service: data.service,
       pr_command_summary: prCommandSummary,
       applied: data.applied,
+      commitment_id: data.commitment_id,
       checks: data.checks,
       next_actions: data.next_actions,
       human_summary: data.human_summary,
@@ -2423,6 +2522,140 @@ export { COST_MODEL_BY_DESTINATION, MIN_REPORTER_DAYS, WINDOWS_PER_DAY, WINDOWS_
  * `bash -s` (NOT `bash -c "<string>"`) so quoting/escaping inside the
  * script does not get mangled by the shell.
  */
+/**
+ * Apply via kubectl_configmap: write the cap-CSV + action-intent.json
+ * directly to a k8s ConfigMap. The engine's ConfigMap pull driver
+ * (configured via $K8S_CONFIGMAP env var on the receiver pod, default
+ * `log10x-action-intent`) reads from this ConfigMap and hot-reloads the
+ * policy without a pipeline restart.
+ *
+ * The ConfigMap carries TWO keys the engine expects:
+ *   - `caps.csv` (engine's safety floor — per-container + per-pattern caps)
+ *   - `action-intent.json` (canonical per-pattern action mapping)
+ *
+ * Uses `kubectl apply -f -` so existing ConfigMaps are updated in place
+ * (server-side apply semantics) and new ones are created. The actual
+ * cluster + namespace come from the caller's kubeconfig context — the
+ * MCP doesn't pick a context, the operator does.
+ */
+async function applyViaKubectlConfigMap(
+  capCsv: string,
+  actionIntentJson: string | undefined,
+  configMapName: string,
+  namespace: string
+): Promise<{
+  ok: boolean;
+  configmap_location?: { namespace: string; name: string; keys: string[] };
+  error?: string;
+}> {
+  const data: Record<string, string> = { 'caps.csv': capCsv };
+  if (actionIntentJson) data['action-intent.json'] = actionIntentJson;
+  const cm = {
+    apiVersion: 'v1',
+    kind: 'ConfigMap',
+    metadata: {
+      name: configMapName,
+      namespace,
+      labels: {
+        'app.kubernetes.io/managed-by': 'log10x-mcp',
+        'app.kubernetes.io/component': 'engine-policy',
+      },
+      annotations: {
+        'log10x.com/written-by': 'log10x_configure_engine',
+        'log10x.com/written-at': new Date().toISOString(),
+      },
+    },
+    data,
+  };
+  const yamlOrJson = JSON.stringify(cm);
+  return await new Promise((resolve) => {
+    let stderr = '';
+    let settled = false;
+    const child = spawn('kubectl', ['apply', '-f', '-'], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: process.env,
+    });
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          // ignore
+        }
+        resolve({ ok: false, error: 'kubectl apply timed out after 30s' });
+      }
+    }, 30_000);
+    child.stderr.on('data', (d) => {
+      stderr += d.toString();
+    });
+    child.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ ok: false, error: `kubectl spawn failed: ${err.message}` });
+    });
+    child.on('close', (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (code === 0) {
+        resolve({
+          ok: true,
+          configmap_location: {
+            namespace,
+            name: configMapName,
+            keys: Object.keys(data),
+          },
+        });
+      } else {
+        resolve({
+          ok: false,
+          error: `kubectl apply exited ${code}: ${stderr.trim() || 'no stderr'}`,
+        });
+      }
+    });
+    child.stdin.end(yamlOrJson);
+  });
+}
+
+/**
+ * Persist a commitment record on successful apply (gitops PR-open OR
+ * kubectl_configmap write). Builds the record from the args + derivation
+ * outputs and writes to $LOG10X_ADVISOR_STATE_DIR/commitments/<id>.json
+ * via putCommitment. commitment_report reads from this directory to
+ * compute realized savings against the baseline captured at apply time.
+ *
+ * Returns the commitment id so the apply path can surface it in the
+ * response envelope.
+ */
+function persistCommitmentOnApply(opts: {
+  service: string;
+  envNickname: string;
+  destination: SiemId;
+  targetPercent: number;
+  contractType: 'committed' | 'on_demand';
+  baselineMonthlyBytes: number;
+  baselineMonthlyUsd: number;
+  observationDays: number;
+}): string {
+  const id = randomUUID();
+  const rec: CommitmentRecord = {
+    id,
+    env: opts.envNickname,
+    service: opts.service,
+    destination: opts.destination,
+    promised_pct: opts.targetPercent,
+    contract_type: opts.contractType,
+    started_at: new Date().toISOString(),
+    baseline_window: `${opts.observationDays}d`,
+    baseline_bytes_30d: opts.baselineMonthlyBytes,
+    baseline_usd_monthly: opts.baselineMonthlyUsd,
+  };
+  putCommitment(rec);
+  return id;
+}
+
 async function applyViaGh(prCommand: string): Promise<{
   ok: boolean;
   pr_url?: string;
