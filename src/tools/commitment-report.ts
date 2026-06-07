@@ -469,10 +469,17 @@ export interface CommitmentReportEnvelope {
    * Share of `bytes_in` saved by each engine action, 0..100 percent.
    *
    * Each share is a percent of bytes_in (NOT a share of delivered_pct).
-   * Invariant: drop + compact + offload + tier_down ≈ delivered_pct
-   * within ±0.5pp rounding. Patterns not present in `data/action-intent.json`
-   * (and with no legacy cap-CSV action suffix) default to `'pass'` and
-   * contribute 0 to every bucket — see §E.1 in the patch spec.
+   * Invariant: drop + compact + offload + tier_down + sample ≈ delivered_pct
+   * within ±1pp rounding. `pass` always contributes 0 (the engine did not
+   * touch the bytes) but is surfaced for completeness so a caller can
+   * verify the bucket map covers every action label the per_pattern_rows
+   * carries — i.e. the bucket map is structurally exhaustive over the
+   * action enum, not the narrow "savings actions only" subset.
+   *
+   * On reconciliation failure (bucket sum diverges from delivered_pct by
+   * more than 1pp), a `reconciliation_warning` caveat is pushed; the
+   * envelope is rendered without modification so the CFO can see the
+   * mismatch instead of getting a silently-corrected number.
    *
    * The `offload` bucket is the metric-side `dropped_bytes_in_window`
    * for patterns where `getOffloadStatusBatch` returned `is_offloaded`;
@@ -484,6 +491,8 @@ export interface CommitmentReportEnvelope {
     compact: number;
     offload: number;
     tier_down: number;
+    sample: number;
+    pass: number;
   };
   delivered_bytes: number;
   /**
@@ -492,12 +501,17 @@ export interface CommitmentReportEnvelope {
    * construction when the offload helper succeeds. On offload-helper
    * timeout the offload bucket is 0 and a caveat surfaces that the
    * contribution was omitted.
+   *
+   * Same key set as `percent_reduction_by_action` — sample carries real
+   * bytes_saved (sample N=2 ≈ 50% reduction per pattern), pass stays 0.
    */
   bytes_saved_by_action: {
     drop: number;
     compact: number;
     offload: number;
     tier_down: number;
+    sample: number;
+    pass: number;
   };
   /**
    * For year-one committed contracts: the THEORETICAL dollar value of
@@ -574,6 +588,16 @@ export interface CommitmentReportEnvelope {
    *
    * Empty when the upstream verify runner did not return
    * `per_pattern_breakdown` for any week — see the caveat path in §E.1.
+   *
+   * `intent_observation_mismatch` flags rows where the configured
+   * intent (`action_taken='pass'`) disagrees with the observed
+   * dropped-bytes signal (`bytes_saved > 0`). This is the canonical
+   * policy-drift indicator: the engine is reducing bytes on a pattern
+   * the policy says to pass through, OR the new policy has not yet
+   * fully propagated to the cluster. The row is surfaced as-is — we
+   * do NOT zero out bytes_saved here because the drift signal is
+   * exactly what FinOps wants to see; rendering layers should call
+   * out the flag rather than hide it.
    */
   per_pattern_rows: Array<{
     pattern_hash: string;
@@ -581,6 +605,7 @@ export interface CommitmentReportEnvelope {
     bytes_saved: number;
     dollars_saved: number | null;
     rate_source: 'list_price' | 'customer_supplied' | 'unset';
+    intent_observation_mismatch?: boolean;
   }>;
   annualized_dollars: number | null;
   /** Disclosed-value mirror of annualized_dollars; null when rate_source==='unset'. */
@@ -1323,6 +1348,8 @@ interface MergedPatternRow {
   bytes_saved: number;
   dollars_saved: number | null;
   rate_source: 'list_price' | 'customer_supplied' | 'unset';
+  /** True when action_taken='pass' and bytes_saved > 0 (policy drift). */
+  intent_observation_mismatch?: boolean;
 }
 
 interface ActionBuckets {
@@ -1330,10 +1357,17 @@ interface ActionBuckets {
   compact: number;
   offload: number;
   tier_down: number;
+  sample: number;
+  pass: number;
 }
 
 function emptyActionBuckets(): ActionBuckets {
-  return { drop: 0, compact: 0, offload: 0, tier_down: 0 };
+  return { drop: 0, compact: 0, offload: 0, tier_down: 0, sample: 0, pass: 0 };
+}
+
+/** Sum of all action buckets in bytes. */
+function sumActionBuckets(b: ActionBuckets): number {
+  return b.drop + b.compact + b.offload + b.tier_down + b.sample + b.pass;
 }
 
 function aggregateWeekly(weekly: WeeklyVerifyResult[]): {
@@ -1399,16 +1433,21 @@ function aggregateWeekly(weekly: WeeklyVerifyResult[]): {
     if (w.per_pattern_breakdown && w.per_pattern_breakdown.length > 0) {
       perPatternAvailable = true;
       for (const row of w.per_pattern_breakdown) {
-        // §E.1: missing action_taken defaults to 'pass'; pass rows
-        // contribute 0 to every bucket and 0 bytes_saved.
+        // §E.1: missing action_taken defaults to 'pass'. Every action
+        // (including pass and sample) accumulates its bytes_saved into
+        // the matching bucket so the bucket map is structurally
+        // exhaustive over the action enum. pass rows with non-zero
+        // bytes_saved indicate engine/intent divergence — they land in
+        // the pass bucket here; the divergence flag on the per-pattern
+        // row is what surfaces the drift to the operator.
         const action: Action = row.action_taken ?? 'pass';
         const bytesSaved = Number.isFinite(row.bytes_saved) ? Math.max(0, row.bytes_saved) : 0;
         if (action === 'drop') buckets.drop += bytesSaved;
         else if (action === 'compact') buckets.compact += bytesSaved;
         else if (action === 'offload') buckets.offload += bytesSaved;
         else if (action === 'tier_down') buckets.tier_down += bytesSaved;
-        // 'pass' / 'sample' → 0 contribution (sample is a partial cut
-        // not represented in the four-way bucket break-out here).
+        else if (action === 'sample') buckets.sample += bytesSaved;
+        else if (action === 'pass') buckets.pass += bytesSaved;
 
         const rowRate = row.rate_source ?? 'unset';
         const rowDollars =
@@ -1448,6 +1487,15 @@ function aggregateWeekly(weekly: WeeklyVerifyResult[]): {
   // attributed to the `drop` bucket. per_pattern_rows is empty.
   if (!perPatternAvailable) {
     buckets.drop = totalDropped;
+  }
+  // Bug #2: stamp intent_observation_mismatch on rows where intent is
+  // 'pass' but bytes_saved is non-zero (engine is reducing bytes on a
+  // pattern the policy says to pass through). The row stays in the
+  // 'pass' bucket — the flag is what surfaces the drift.
+  for (const row of merged.values()) {
+    if (row.action_taken === 'pass' && row.bytes_saved > 0) {
+      row.intent_observation_mismatch = true;
+    }
   }
   const denom = totalIn > 0 ? totalIn : 1;
   let rate_source: 'list_price' | 'customer_supplied' | 'unset';
@@ -1934,6 +1982,8 @@ export async function executeCommitmentReport(
         if (agg.bytes_saved_by_action.drop < 0) agg.bytes_saved_by_action.drop = 0;
         if (agg.bytes_saved_by_action.compact < 0) agg.bytes_saved_by_action.compact = 0;
         if (agg.bytes_saved_by_action.tier_down < 0) agg.bytes_saved_by_action.tier_down = 0;
+        if (agg.bytes_saved_by_action.sample < 0) agg.bytes_saved_by_action.sample = 0;
+        if (agg.bytes_saved_by_action.pass < 0) agg.bytes_saved_by_action.pass = 0;
       }
     } catch {
       offloadHelperTimedOut = true;
@@ -1950,7 +2000,25 @@ export async function executeCommitmentReport(
     compact: pctOfIn(agg.bytes_saved_by_action.compact),
     offload: pctOfIn(agg.bytes_saved_by_action.offload),
     tier_down: pctOfIn(agg.bytes_saved_by_action.tier_down),
+    sample: pctOfIn(agg.bytes_saved_by_action.sample),
+    pass: pctOfIn(agg.bytes_saved_by_action.pass),
   };
+
+  // 5d. Reconciliation gap (bug #4 from the math-lens workflow). The
+  // bucket map and delivered_pct are computed from independent code
+  // paths; previously a wide gap between them would render a self-
+  // contradicting envelope ("delivered 3.8% / attributed 0%"). The gap
+  // is computed here and surfaced as a structured caveat in §8 below
+  // when it exceeds 1pp (matches the schema docstring's "±1pp
+  // rounding" claim).
+  const bucketSumPctForGuard =
+    percent_reduction_by_action.drop +
+    percent_reduction_by_action.compact +
+    percent_reduction_by_action.offload +
+    percent_reduction_by_action.tier_down +
+    percent_reduction_by_action.sample +
+    percent_reduction_by_action.pass;
+  const reconciliationGapPp = Math.abs(agg.delivered_pct - bucketSumPctForGuard);
 
   // 6. Bayesian forward confidence (spec §5 Q4 default: weak Beta(2,2)).
   const forecast = bayesianForwardConfidence(
@@ -2038,6 +2106,35 @@ export async function executeCommitmentReport(
       'Offload status lookup timed out — offload contribution omitted. Re-run after metrics backend stabilizes.'
     );
   }
+  // Reconciliation guard (bug #4 from the math-lens workflow): bucket
+  // sum vs delivered_pct disagreement. The schema invariant says they
+  // should agree within ±1pp; surface any wider gap as a caveat so the
+  // CFO/agent sees the disagreement instead of getting a silently-
+  // contradicting envelope. Typical root cause: intent/observation
+  // drift on per_pattern_rows (action_taken from action-intent.json,
+  // bytes_saved from observed-dropped TSDB).
+  if (reconciliationGapPp > 1 && agg.per_pattern_breakdown_available) {
+    caveats.push(
+      `Reconciliation gap: percent_reduction_by_action sums to ${bucketSumPctForGuard.toFixed(2)}% but delivered_pct is ${agg.delivered_pct.toFixed(2)}% (gap ${reconciliationGapPp.toFixed(2)}pp, >1pp tolerance). Likely cause: per-pattern action_taken sourced from configured intent (action-intent.json) while bytes_saved sourced from observed-dropped — engine has not yet propagated the new policy, or the policy diverged from observed behavior.`
+    );
+  }
+  // Bug #2: intent/observation mismatch tally. Counts rows where
+  // action_taken='pass' but bytes_saved > 0. The rows themselves
+  // carry the `intent_observation_mismatch` flag; this caveat is the
+  // human-readable summary so the operator sees the drift count
+  // without scanning every row.
+  const mismatchCount = agg.per_pattern_rows.filter(
+    (r) => r.intent_observation_mismatch
+  ).length;
+  if (mismatchCount > 0) {
+    const mismatchBytes = agg.per_pattern_rows
+      .filter((r) => r.intent_observation_mismatch)
+      .reduce((a, r) => a + r.bytes_saved, 0);
+    const mismatchBytesGb = (mismatchBytes / (1024 * 1024 * 1024)).toFixed(2);
+    caveats.push(
+      `Intent/observation drift: ${mismatchCount} pattern(s) have action_taken='pass' but the engine reduced ${mismatchBytesGb} GB on them in this window. Likely cause: new policy has not yet fully propagated, OR a sample/drop policy was reverted in action-intent.json while the engine still has the prior cap. Check the configmap generation timestamp vs the engine pod's last config reload.`
+    );
+  }
   // §B.2: compact rows against a no-op destination signal config drift
   // between the cap CSV and the destination cost model.
   const compactNoOp = (() => {
@@ -2116,6 +2213,7 @@ export async function executeCommitmentReport(
       bytes_saved: r.bytes_saved,
       dollars_saved: r.dollars_saved,
       rate_source: r.rate_source,
+      ...(r.intent_observation_mismatch ? { intent_observation_mismatch: true } : {}),
     })),
     annualized_dollars,
     annualized_dollars_disclosed,
