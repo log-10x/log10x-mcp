@@ -52,6 +52,16 @@ import { parseCapCsv, buildPatternActionLookup } from '../lib/cap-csv-parser.js'
 import { normalizeTimeRange } from '../lib/time-range.js';
 import { renderMonospaceTable } from '../lib/render-table.js';
 
+/**
+ * Math-lens workflow w58guv3e4: the rank cutoff that gates whether a
+ * service gets a next_action vs is "omitted from next_action" in the
+ * headline. Hand-picked at 10 — tagged as the operational threshold in
+ * the chassis decisions block so consumers can audit. The MIN_PCT_FLOOR
+ * below acts as the secondary cutoff for "below_signal_floor".
+ */
+export const NEXT_ACTION_RANK_CUTOFF = 10;
+const NEXT_ACTION_MIN_PCT_FLOOR = 0.1;
+
 export const servicesSchema = {
   timeRange: z.enum(['15m', '1h', '6h', '24h', '1d', '7d', '30d']).default('7d').describe("Time range. Sub-day values available for incident-window service ranking. '24h' and '1d' are equivalent."),
   analyzerCost: z.number().optional().describe('SIEM ingestion cost in $/GB'),
@@ -180,8 +190,16 @@ export async function executeServices(
     headline,
     status: d.service_count > 0 ? 'success' : 'no_signal',
     decisions: {
-      threshold_used: d.cost_per_gb,
-      threshold_basis: d.rate_source === 'customer_supplied' ? 'customer_supplied' : 'default',
+      // Math-lens workflow w58guv3e4: prior code aliased threshold_used
+      // to cost_per_gb — but rate is not a threshold. The chassis
+      // decision block describes the OPERATIONAL THRESHOLD: here, the
+      // tail-rank cutoff that determines which services get a
+      // next_action (rank ≤ 10) vs which are omitted (the "16 tail
+      // services omitted" headline phrase). 10 is hand-picked; tag as
+      // unvalidated_default. rate_source provenance stays in
+      // source_disclosure.rate_source where it belongs.
+      threshold_used: NEXT_ACTION_RANK_CUTOFF,
+      threshold_basis: 'unvalidated_default',
     },
     source_disclosure: {
       bytes_source: 'tsdb',
@@ -579,7 +597,7 @@ async function executeServicesInner(
             args: { service: r.name },
             reason: `Re-tune the per-pattern action plan for "${r.name}" via configure_engine — the bulk-plan path that lands a refreshed cap-CSV in gitops.`,
           };
-        } else if (rank <= 10) {
+        } else if (rank <= NEXT_ACTION_RANK_CUTOFF) {
           next_action = {
             tool: 'log10x_top_patterns',
             args: { service: r.name },

@@ -718,6 +718,29 @@ export async function executeTopPatterns(
     });
   }
 
+  // Math-lens workflow w58guv3e4: headline promised "Reply 'more' to see
+  // the next 50" but no machine-readable pagination action existed.
+  // Emit one when there are more patterns than shown so the chain is
+  // actionable without prose parsing.
+  if (
+    patternCountTotal != null &&
+    patternCountTotal > offset + renderRows.length
+  ) {
+    const remaining = patternCountTotal - (offset + renderRows.length);
+    nextActions.push({
+      tool: 'log10x_top_patterns',
+      args: {
+        timeRange: tf.range,
+        limit: Math.min(50, remaining),
+        offset: offset + renderRows.length,
+        include,
+        ...(args.service ? { service: args.service } : {}),
+        ...(args.severity ? { severity: args.severity } : {}),
+      },
+      reason: `next ${Math.min(50, remaining)} patterns below the current top ${renderRows.length} (${remaining} remaining of ${patternCountTotal} total)`,
+    });
+  }
+
   const telemetry = newTelemetry();          // legacy — kept for existing callers that read query_count
   const chassisTelemetry = newChassisTelemetry();
   // Phase-1: 7 parallel PromQL queries already ran above. Record them.
@@ -921,6 +944,27 @@ export async function executeTopPatterns(
     monthly_usd_disclosed: totalCostMonthlyDisclosed,
     bytes_per_sec: totalBytes / Math.max(1, windowHours * 3600),
     bytes_total: totalBytes,
+    // Math-lens workflow w58guv3e4: the headline "X GB union" was
+    // computed from shownBytes (sum of shown rows' bytes), but no named
+    // field carried that value — readers had to sum patterns[i].bytes
+    // by hand or derive from bytes_total × top_n_percent_of_total
+    // (which is mathematically equivalent but encoded indirectly).
+    // Surface explicitly so the headline maps to a named field.
+    bytes_shown: shownBytes,
+    // Math-lens workflow w58guv3e4: trend_bytes_per_sec arrays were
+    // sometimes shorter than the scope window (some patterns produced
+    // 130 buckets covering 21.65h, others 55 buckets covering 12.60h,
+    // while scope claimed 'last 24h'). Trend was a 24h rate(...) range
+    // query with a 5m rate window and 600s step — surface the step so
+    // consumers can audit per-pattern coverage as
+    //   array_length × trend_step_seconds = coverage_seconds
+    // and detect coverage gaps without reverse-engineering the query.
+    trend_basis: {
+      window_seconds: 24 * 3600,
+      step_seconds: trendStepSec,
+      rate_window: '5m',
+      note: 'trend_bytes_per_sec[i] is the average bytes/sec over a 5-minute rate window centered on bucket i. Coverage seconds = array_length × step_seconds; missing buckets indicate sparse data inside the trend window.',
+    },
     top_n_percent_of_total,
     pattern_count_shown: renderRows.length,
     pattern_count_total: patternCountTotal,
@@ -1090,24 +1134,64 @@ export async function executeTopPatterns(
   // MCP runtime) can still read them. ChassisData wraps them inside
   // payload; back-compat fields are also spread at the data level via
   // legacyCompat.
+  // Math-lens workflow w58guv3e4: build a set of pattern_hashes we
+  // actually serialize so incidents[].members can be filtered to only
+  // resolvable references. Prior code shipped incidents whose members
+  // pointed at pattern_hashes outside payload.patterns[] (envelope
+  // claimed pattern_count_shown=N but only K patterns serialized when
+  // pattern_count_shown > limit). Filtering keeps the envelope
+  // self-consistent.
+  const shownPatternHashes = new Set<string>();
+  for (const p of dataPatterns) {
+    if (p.pattern_hash) shownPatternHashes.add(p.pattern_hash);
+  }
   const topPatternsPayload = {
     rate_source,
+    // Math-lens workflow w58guv3e4: prior envelope tagged
+    // rate_source='customer_supplied' but didn't expose the underlying
+    // $/GB scalar — the entire dollar surface was computed from an
+    // undisclosed value. Surface it so a CFO can audit "did $92/wk =
+    // bytes × this rate". Null only when rate_source='unset'.
+    rate_disclosure: costPerGb != null
+      ? {
+          value_usd_per_gb: costPerGb,
+          tier: 'ingest_standard' as const,
+          currency: 'USD' as const,
+          source: rate_source,
+          applied_to: 'bytes_per_month' as const,
+        }
+      : null,
     // PL-12a — echo the resolved cohort so the agent can route follow-up
     // calls (e.g. `include='dropped'` from a `'both'` audit) without
     // re-deriving from the per-row fields.
     include,
     patterns: dataPatterns,
     incidents: incidents.map((c) => {
+      // Math-lens workflow w58guv3e4: drop dangling member references
+      // (pattern_hashes not in patterns[]) and surface the count of
+      // dropped members so the consumer knows the cluster is partial.
+      const allMembers = c.members;
+      const visibleMembers = allMembers.filter(
+        (m) => !m.identity || shownPatternHashes.has(m.identity)
+      );
+      const droppedReferenceCount = allMembers.length - visibleMembers.length;
       const combinedBytes = c.members.reduce(
         (s, m) => s + (bytesByIdentity.get(m.identity) ?? 0),
         0
       );
       return {
-        members: c.members.map((m) => ({
+        members: visibleMembers.map((m) => ({
           identity: m.identity,
           cost_per_month_usd: m.costPerMonthUsd,
           descriptor: m.descriptor,
         })),
+        ...(droppedReferenceCount > 0
+          ? {
+              members_outside_shown_set: droppedReferenceCount,
+              members_outside_shown_set_note:
+                'These pattern_hashes participate in the incident cluster but were not in the top-N shown. Call log10x_top_patterns with a larger limit to surface them.',
+            }
+          : {}),
         representative_label: c.representativeLabel,
         service: c.service,
         combined_monthly_usd: c.combinedMonthlyUsd,
@@ -1115,6 +1199,16 @@ export async function executeTopPatterns(
           totalBytes > 0 ? (combinedBytes / totalBytes) * 100 : 0,
         join_signal: c.joinSignal,
         confidence: c.confidence,
+        // Math-lens workflow w58guv3e4: confidence values without basis
+        // shipped as authoritative (0.7 round default for
+        // overlap_shared, 0.778 = 7/9 raw Jaccard for jaccard_direct).
+        // Two methods on a non-unified scale; tag each so the agent
+        // can distinguish a hand-picked default from a measured
+        // overlap fraction.
+        confidence_basis:
+          c.joinSignal === 'overlap_shared'
+            ? ('unvalidated_default' as const)
+            : ('jaccard_token_overlap_ratio' as const),
       };
     }),
     totals,
