@@ -299,21 +299,27 @@ function buildModes(
   }
 
   // Receiver / Retriever tier — full 6-mode menu.
+  // Gate on effectiveDestination (caller-supplied destination wins over the
+  // env-auto-detected SIEM), NOT siemDetected. Previously these gates keyed off
+  // siemDetected, so passing destination=splunk still gated compact/tier_down by
+  // the detected cloudwatch — e.g. compact came back "no-op on cloudwatch" while
+  // routes_to correctly carried splunk. The applicability verdict and the routing
+  // target must describe the SAME destination.
   const compactApplicable =
-    caps.compact_installable && siemSupportsCompact(siemDetected);
+    caps.compact_installable && siemSupportsCompact(effectiveDestination);
   const compactGatedReason = !caps.compact_installable
     ? 'Requires Receiver tier (in-path forwarder sidecar). Install via log10x_advise_install.'
-    : !siemSupportsCompact(siemDetected)
-      ? `compact mode is a no-op on ${siemDetected}: it does not reduce ingest cost on that destination.`
+    : !siemSupportsCompact(effectiveDestination)
+      ? `compact mode is a no-op on ${effectiveDestination}: it does not reduce ingest cost on that destination.`
       : undefined;
 
   const tierDownApplicable =
     caps.tier_down_available &&
-    (siemDetected === 'cloudwatch' || siemDetected === 'datadog');
+    (effectiveDestination === 'cloudwatch' || effectiveDestination === 'datadog');
   const tierDownGatedReason = !caps.tier_down_available
     ? 'Requires Receiver tier (in-path) for the engine to stamp the tier marker your log platform reads.'
-    : siemDetected !== 'cloudwatch' && siemDetected !== 'datadog'
-      ? `tier_down maps to a concrete billing reduction only on Datadog (Flex Logs) and CloudWatch (Infrequent Access). Detected log platform: ${siemDetected ?? 'unknown'}.`
+    : effectiveDestination !== 'cloudwatch' && effectiveDestination !== 'datadog'
+      ? `tier_down maps to a concrete billing reduction only on Datadog (Flex Logs) and CloudWatch (Infrequent Access). Target log platform: ${effectiveDestination ?? 'unknown'}.`
       : undefined;
 
   return [
@@ -397,11 +403,16 @@ function buildModes(
 
 function renderVerbatim(
   modes: CostOptionItem[],
+  effectiveDestination: string | null,
   siemDetected: string | null,
   tier?: CustomerTier
 ): string {
-  const siemLine = siemDetected
-    ? `Stack detected: \`${siemDetected}\`.`
+  const overridden =
+    !!effectiveDestination && !!siemDetected && effectiveDestination !== siemDetected;
+  const siemLine = effectiveDestination
+    ? overridden
+      ? `Target stack: \`${effectiveDestination}\` (overrides detected \`${siemDetected}\`).`
+      : `Stack detected: \`${effectiveDestination}\`.`
     : 'No stack credentials detected — destinations will need to be specified when you pick a mode.';
 
   const isCollapsed = tier === 'dev' || tier === 'reporter';
@@ -509,7 +520,12 @@ export async function executeCostOptions(args: {
 
   const tier: CustomerTier = caps._tier;
   const modes = buildModes(caps, siemDetected, args);
-  const verbatim = renderVerbatim(modes, siemDetected, tier);
+  // Header reflects the destination the menu actually describes (caller override
+  // wins), while the structured siem_detected field below stays the true
+  // detection. Prior code rendered "Stack detected: cloudwatch" even when the
+  // caller targeted splunk and the gates/routes were (now) splunk.
+  const effectiveDestination = args.destination ?? siemDetected;
+  const verbatim = renderVerbatim(modes, effectiveDestination, siemDetected, tier);
 
   const mustAskUser: MustAskUser = {
     question:
