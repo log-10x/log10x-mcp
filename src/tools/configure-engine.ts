@@ -735,13 +735,20 @@ export async function executeConfigureEngine(
       actions: candidateContainers.length > 0
         ? [{
             tool: 'log10x_configure_engine',
+            // Propagate the caller's FULL original intent, overriding only the
+            // two fields this resolution step actually resolves: destination
+            // (to the resolved value) and containers (to the discovered set).
+            // The prior allow-list (service/destination/containers/target_percent/
+            // auto_apply/delivery) silently DROPPED budget_usd, action_defaults,
+            // es_pruned, signal_floor, read_only, reduction, tier_overrides, etc.
+            // So an agent that re-called with this action verbatim lost the cost
+            // model entirely — e.g. budget_usd=3000 gone, hitting the
+            // cross-validation refusal "specify target_percent or budget_usd".
+            // Spreading args preserves every caller-supplied knob.
             args: {
-              service: args.service,
+              ...args,
               destination: target.resolved.destination,
               containers: containerLabels,
-              ...(args.target_percent != null ? { target_percent: args.target_percent } : {}),
-              ...(args.auto_apply != null ? { auto_apply: args.auto_apply } : {}),
-              ...(args.delivery != null ? { delivery: args.delivery } : {}),
             },
             reason: candidateContainers.length === 1
               ? `Re-call configure_engine with the single discovered container "${containerLabels[0]}".`
