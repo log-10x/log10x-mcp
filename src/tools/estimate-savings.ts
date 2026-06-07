@@ -1498,6 +1498,27 @@ export async function runEstimateVerify(
       `Delivered % is negative (${(delivered_pct * 100).toFixed(1)}%) — post-window passed bytes EXCEED scaled baseline. Likely drift/new_patterns swamped the cap.`
     );
   }
+  // Degenerate-window detection (math-lens workflow wq54qh4ic). When
+  // baseline_bytes_scaled equals post_passed_bytes to 8+ sig digits, the
+  // verify is comparing the policy against its own output — delivered_pct
+  // is algebraically forced to 0 regardless of whether bytes were actually
+  // dropped. Two common causes: (1) baseline_window == post_window AND
+  // both anchor to "now" (the same Prometheus range), (2) env grew by
+  // exactly the cap-fired byte count this window (coincidence; rare).
+  // In either case, the % view is meaningless; the $ view (computed from
+  // postDroppedBytes) is still correct. Surface a caveat + downgrade
+  // causal_confidence so the headline and CFO-facing renderers can't
+  // silently report "0% delivered reduction" alongside a positive $/yr.
+  const degenerateBaselinePassedMatch =
+    baselineScaled > 0 &&
+    postPassedBytes > 0 &&
+    Math.abs(baselineScaled - postPassedBytes) / baselineScaled < 1e-8;
+  if (degenerateBaselinePassedMatch && postDroppedBytes > 0) {
+    confidence = Math.min(confidence, 0.5);
+    caveats.push(
+      `Degenerate windowing: baseline_bytes_scaled (${baselineScaled.toFixed(0)}) equals post_passed_bytes (${postPassedBytes.toFixed(0)}) to ${(Math.abs(baselineScaled - postPassedBytes) / baselineScaled < 1e-12 ? 'full precision' : '8+ significant digits')}, forcing delivered_pct to 0 algebraically. Either baseline_window and post_window anchor to the same time range, OR the env grew by exactly the cap-fired byte count. The $ view (${(postDroppedBytes / GB).toFixed(2)} GB dropped) is unaffected — trust delivered_dollars_now. To get a meaningful % view, anchor baseline_window before the policy went live (use pre-policy data).`
+    );
+  }
 
   const pctOf = (x: number) => safeDiv(x, attrTotal);
 
@@ -1928,7 +1949,26 @@ export async function executeEstimateSavings(
       env
     );
     recordQuery(telemetry);
-    const headline = `Verify (${destination}): ${(result.delivered_pct * 100).toFixed(1)}% delivered reduction (${fmtDollar(result.delivered_dollars_annual_projection)}/yr projected at ${destination} list price — your bill may differ, confidence ${(result.causal_confidence * 100).toFixed(0)}%).`;
+    // Math-lens workflow wq54qh4ic: when delivered_pct=0 but the engine
+    // dropped non-zero bytes (typical when baseline == post_passed by
+    // construction or by env-growth coincidence), the old headline
+    // "0.0% delivered reduction ($52/yr projected)" was self-
+    // contradicting to a CFO. Reframe: lead with what actually moved
+    // (the $ value derived from dropped bytes) when delivered_pct is
+    // structurally zero, and call out the % view as washed.
+    const droppedBytesPositive =
+      result.post_dropped_bytes > 0 &&
+      Number.isFinite(result.post_dropped_bytes);
+    // Tolerance for "effectively zero" (math-lens workflow wq54qh4ic):
+    // when baseline_bytes_scaled differs from post_passed_bytes by a few
+    // hundred bytes out of ~50 GB (float noise + same-window-anchor
+    // artifact), delivered_pct lands at ~-5e-9 — close enough to zero
+    // that the CFO-facing narrative still applies.
+    const pctViewWashed =
+      Math.abs(result.delivered_pct) < 1e-6 && droppedBytesPositive;
+    const headline = pctViewWashed
+      ? `Verify (${destination}): cap fired on ${(result.post_dropped_bytes / 1_000_000_000).toFixed(2)} GB this window (${fmtDollar(result.delivered_dollars_annual_projection)}/yr projected at ${destination} list price — your bill may differ). Passed-byte ratio washed to 0% (see degenerate-windowing caveat); trust the $ figure. Confidence ${(result.causal_confidence * 100).toFixed(0)}%.`
+      : `Verify (${destination}): ${(result.delivered_pct * 100).toFixed(1)}% delivered reduction (${fmtDollar(result.delivered_dollars_annual_projection)}/yr projected at ${destination} list price — your bill may differ, confidence ${(result.causal_confidence * 100).toFixed(0)}%).`;
     const human_summary = buildVerifyHumanSummary(result, destination);
     const verifyRateSource = result.rate_source === 'customer_supplied' ? 'customer_supplied' as const : 'list_price' as const;
     return buildChassisEnvelope({
@@ -2098,6 +2138,15 @@ function buildVerifyHumanSummary(
   result: VerifyResult,
   destination: string
 ): string {
-  const lead = `estimate_savings verify on ${destination} measured ${(result.delivered_pct * 100).toFixed(1)}% delivered reduction at causal confidence ${(result.causal_confidence * 100).toFixed(0)}%.`;
+  // Same degenerate-windowing reframing as the headline (math-lens
+  // workflow wq54qh4ic): when the % view is washed to 0 by baseline
+  // equaling post_passed, lead with the $ figure instead.
+  const droppedBytesPositive =
+    result.post_dropped_bytes > 0 &&
+    Number.isFinite(result.post_dropped_bytes);
+  const pctViewWashed = Math.abs(result.delivered_pct) < 1e-6 && droppedBytesPositive;
+  const lead = pctViewWashed
+    ? `estimate_savings verify on ${destination} measured cap fired on ${(result.post_dropped_bytes / 1_000_000_000).toFixed(2)} GB this window (passed-byte ratio washed to 0% — see caveat) at causal confidence ${(result.causal_confidence * 100).toFixed(0)}%.`
+    : `estimate_savings verify on ${destination} measured ${(result.delivered_pct * 100).toFixed(1)}% delivered reduction at causal confidence ${(result.causal_confidence * 100).toFixed(0)}%.`;
   return `${lead} Annual projection ${fmtDollar(result.delivered_dollars_annual_projection)} using the engine list price.${result.caveats.length ? ` Caveats: ${result.caveats.length}.` : ''}`;
 }

@@ -587,10 +587,25 @@ export async function executePatternMitigate(args: PatternMitigateArgs): Promise
     d.pattern_validation.checked && d.pattern_validation.exists === false
       ? `Warning: pattern \`${d.pattern}\` not found in metrics backend. Continuing with the menu, but verify the name before applying any action. `
       : '';
+  // Burned rule (memory: feedback_no_hash_in_user_headlines): lead with
+  // pattern name + service + state, not raw symbol/hash blobs. The
+  // d.pattern field is the underscore-joined symbol_message
+  // ("terror_v_logger_go_failed_t_resource_service_instance_id_...") —
+  // 130+ chars of machine output. Math-lens workflow wq54qh4ic flagged
+  // it; same shape we just fixed on whats_changing. Compose a service-
+  // led label with a short token hint as a parenthetical.
+  const buildPatternLabel = (): string => {
+    const svc = d.scope_service?.trim();
+    const hint = (d.pattern ?? '').trim().replace(/_/g, ' ');
+    const truncatedHint = hint.length > 40 ? hint.slice(0, 37) + '...' : hint;
+    if (svc) return `${svc} pattern (${truncatedHint})`;
+    return truncatedHint || 'pattern';
+  };
+  const patternLabel = buildPatternLabel();
   const headline =
     d.status === 'no_signal'
-      ? `${patternNotFoundWarning}\`${d.pattern}\`: NO mitigation options available — ${dimmedCount} dimmed. Setup hint surfaces what's missing.`
-      : `${patternNotFoundWarning}\`${d.pattern}\`: ${enabledCount} of ${d.options.length} mitigation options enabled (${d.options.filter((o) => o.enabled).map((o) => o.id).join(', ')}).`;
+      ? `${patternNotFoundWarning}${patternLabel}: NO mitigation options available — ${dimmedCount} dimmed. Setup hint surfaces what's missing.`
+      : `${patternNotFoundWarning}${patternLabel}: ${enabledCount} of ${d.options.length} mitigation options enabled (${d.options.filter((o) => o.enabled).map((o) => o.id).join(', ')}).`;
 
   // Fix D: populate actions[] with structured follow-up nudges so agent
   // chains can pick them up without parsing human_summary text.
@@ -663,8 +678,8 @@ export async function executePatternMitigate(args: PatternMitigateArgs): Promise
   // Honest human_summary: M of N options reachable, plus next-step if applicable.
   const chassis_human_summary =
     d.status === 'no_signal'
-      ? `\`${d.pattern}\`: no mitigation options reachable on ${d.env_capabilities.analyzer_vendor ?? 'this env'}. ${dimmedCount} dimmed. ${allSourcesAbsent ? 'Capability detection found no source. Run discover_env to ambient-detect receiver/forwarder without writing config.' : `Basis: ${d.recommendation_audit.basis}.`}`
-      : `\`${d.pattern}\`: ${enabledCount} of ${d.options.length} options reachable on ${d.env_capabilities.analyzer_vendor ?? 'this env'} (${d.options.filter((o) => o.enabled).map((o) => o.label).join(', ')}). ${dimmedCount > 0 ? `${dimmedCount} dimmed. ` : ''}Basis: ${d.recommendation_audit.basis}. Agent SHOULD wait for user pick before routing.`;
+      ? `${patternLabel}: no mitigation options reachable on ${d.env_capabilities.analyzer_vendor ?? 'this env'}. ${dimmedCount} dimmed. ${allSourcesAbsent ? 'Capability detection found no source. Run discover_env to ambient-detect receiver/forwarder without writing config.' : `Basis: ${d.recommendation_audit.basis}.`}`
+      : `${patternLabel}: ${enabledCount} of ${d.options.length} options reachable on ${d.env_capabilities.analyzer_vendor ?? 'this env'} (${d.options.filter((o) => o.enabled).map((o) => o.label).join(', ')}). ${dimmedCount > 0 ? `${dimmedCount} dimmed. ` : ''}Basis: ${d.recommendation_audit.basis}. Agent SHOULD wait for user pick before routing.`;
 
   return buildChassisEnvelope({
     tool: 'log10x_pattern_mitigate',
@@ -943,6 +958,7 @@ async function executePatternMitigateInner(
     const status: PatternMitigateStatus = nEnabled === 0 ? 'no_signal' : 'success';
     const human_summary = buildHumanSummary({
       pattern: displayPattern,
+      service: args.service,
       status,
       basis,
       nEnabled,
@@ -999,6 +1015,7 @@ async function executePatternMitigateInner(
  */
 function buildHumanSummary(args: {
   pattern: string;
+  service?: string;
   status: PatternMitigateStatus;
   basis: RecommendationBasis;
   nEnabled: number;
@@ -1007,6 +1024,15 @@ function buildHumanSummary(args: {
   setupHint?: string;
   snapshotAgeSeconds: number | null;
 }): string {
+  // Burned rule (memory: feedback_no_hash_in_user_headlines): lead with
+  // pattern name + service + state. Math-lens workflow wq54qh4ic flagged
+  // the prior version which led with the raw underscored token blob.
+  const svc = args.service?.trim();
+  const hint = (args.pattern ?? '').trim().replace(/_/g, ' ');
+  const truncatedHint = hint.length > 40 ? hint.slice(0, 37) + '...' : hint;
+  const patternLabel = svc
+    ? `${svc} pattern (${truncatedHint})`
+    : truncatedHint || 'pattern';
   const basisFragment = (() => {
     switch (args.basis) {
       case 'env_config':
@@ -1024,8 +1050,8 @@ function buildHumanSummary(args: {
     }
   })();
   if (args.status === 'no_signal') {
-    return `\`${args.pattern}\`: no mitigation options are reachable in this environment. ${basisFragment} ${args.setupHint ?? 'Set up at least one delivery path (gitops repo, forwarder, or analyzer config) to enable options.'}`;
+    return `${patternLabel}: no mitigation options are reachable in this environment. ${basisFragment} ${args.setupHint ?? 'Set up at least one delivery path (gitops repo, forwarder, or analyzer config) to enable options.'}`;
   }
   const enabledList = args.options.filter((o) => o.enabled).map((o) => o.label).join(', ');
-  return `\`${args.pattern}\`: ${args.nEnabled} of ${args.options.length} mitigation options available (${enabledList}). ${args.nDimmed > 0 ? `${args.nDimmed} dimmed. ` : ''}${basisFragment} Agent SHOULD wait for the user to pick before routing to the sub-tool.`;
+  return `${patternLabel}: ${args.nEnabled} of ${args.options.length} mitigation options available (${enabledList}). ${args.nDimmed > 0 ? `${args.nDimmed} dimmed. ` : ''}${basisFragment} Agent SHOULD wait for the user to pick before routing to the sub-tool.`;
 }
