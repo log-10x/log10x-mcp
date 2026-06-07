@@ -243,6 +243,12 @@ export const configureEngineSchema = {
     })
     .default({})
     .describe('Tier-to-action defaults. Audit-tier is always `pass`; error-tier is always `sample(N=2)`.'),
+  respect_default_action: z
+    .boolean()
+    .default(false)
+    .describe(
+      'When false (default), the solver shortcuts to `pass` on standard/debug/synthetic rows once `target_percent` is met by error-tier sampling — minimum work, may ignore your configured `action_defaults`. When true, the solver applies `action_defaults` to EVERY non-floor row in the matching tier, even after target is already met. Use when you want a predictable action mix (e.g., "I asked for offload, give me offload") and are OK with the policy overshooting target_percent. Surfaces in `action_default_resolution.respect_default_action` for audit.'
+    ),
   reduction: z
     .enum(['soft', 'hard'])
     .default('hard')
@@ -498,6 +504,13 @@ interface ConfigureEngineData {
       classified_count: number;
       reason: string;
     }>;
+    /**
+     * Mirror of the `respect_default_action` arg the solver ran under.
+     * When true, the target-met downgrade was skipped and configured
+     * defaults applied to every non-floor row in the tier. Lets the
+     * agent reason about why the action mix may overshoot target_percent.
+     */
+    respect_default_action: boolean;
   };
   /**
    * One-paragraph plain-prose distillation of the structured data.
@@ -878,13 +891,16 @@ export async function executeConfigureEngine(
     }
 
     // If target already met, downgrade further standard rows to pass.
+    // Suppressed when respect_default_action=true so the configured
+    // defaults fire on every matching row regardless of target.
     if (
       action !== 'pass' &&
       action !== 'sample' &&
       floorHit === undefined &&
       c.tier !== 'audit' &&
       c.tier !== 'error' &&
-      remainingBytesToShed <= 0
+      remainingBytesToShed <= 0 &&
+      !args.respect_default_action
     ) {
       action = 'pass';
       reason = `${reason} (target met)`;
@@ -1066,6 +1082,7 @@ export async function executeConfigureEngine(
     applied_default_count_by_tier: appliedDefaultByTier,
     unused_defaults: unusedDefaults,
     defined_but_unused_defaults: definedButUnusedDefaults,
+    respect_default_action: args.respect_default_action ?? false,
   };
 
   const coveragePct = totalObservedBytes > 0
@@ -1160,6 +1177,7 @@ export async function executeConfigureEngine(
         baselineMonthlyBytes: currentMonthlyBytes,
         baselineMonthlyUsd: currentMonthlyUsd,
         observationDays: args.observationDays ?? 7,
+        deliveryTarget: { kind: 'configmap', namespace: ns, name: cmName },
       });
     }
   } else if (shouldApply && prCommand) {
@@ -1178,6 +1196,7 @@ export async function executeConfigureEngine(
         baselineMonthlyBytes: currentMonthlyBytes,
         baselineMonthlyUsd: currentMonthlyUsd,
         observationDays: args.observationDays ?? 7,
+        deliveryTarget: { kind: 'gitops', repo: env.gitops?.repo },
       });
     }
   }
@@ -2638,6 +2657,7 @@ function persistCommitmentOnApply(opts: {
   baselineMonthlyBytes: number;
   baselineMonthlyUsd: number;
   observationDays: number;
+  deliveryTarget?: CommitmentRecord['delivery_target'];
 }): string {
   const id = randomUUID();
   const rec: CommitmentRecord = {
@@ -2651,6 +2671,7 @@ function persistCommitmentOnApply(opts: {
     baseline_window: `${opts.observationDays}d`,
     baseline_bytes_30d: opts.baselineMonthlyBytes,
     baseline_usd_monthly: opts.baselineMonthlyUsd,
+    delivery_target: opts.deliveryTarget,
   };
   putCommitment(rec);
   return id;

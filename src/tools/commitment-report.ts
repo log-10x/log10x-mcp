@@ -145,6 +145,17 @@ export interface CommitmentRecord {
    * After this date, dollar savings switch from shadow to realized.
    */
   term_end?: string;
+  /**
+   * Where configure_engine wrote the policy. Lets the verify runner
+   * find the cap-CSV + action-intent.json regardless of delivery channel.
+   *  - 'gitops'    — fetch via `gh api /repos/<repo>/contents/<path>`
+   *  - 'configmap' — fetch via `kubectl get configmap <name> -n <ns>`
+   * Absent on records persisted before this field was added; verify
+   * falls back to env.gitops?.repo for those.
+   */
+  delivery_target?:
+    | { kind: 'gitops'; repo?: string }
+    | { kind: 'configmap'; namespace: string; name: string };
 }
 
 function commitmentsDir(): string {

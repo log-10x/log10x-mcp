@@ -243,6 +243,65 @@ export async function fetchActionIntentForEnv(
   }
 }
 
+// ── ConfigMap fetchers (kubectl_configmap delivery channel) ─────────────
+//
+// When configure_engine writes via delivery=kubectl_configmap, the
+// cap-CSV + action-intent.json live in a k8s ConfigMap (default
+// `log10x-action-intent` in ns `default`, both overridable). The verify
+// runner needs to read them back to populate per_pattern_breakdown.
+// These helpers shell out to `kubectl get configmap -o jsonpath` —
+// best-effort, undefined on any failure, no caching.
+
+async function kubectlGetConfigMapData(
+  name: string,
+  namespace: string,
+  key: string
+): Promise<string | undefined> {
+  try {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const exec = promisify(execFile);
+    // jsonpath escapes a dot in the key as \.; .data['caps.csv'] form is safer.
+    const { stdout } = await exec(
+      'kubectl',
+      [
+        'get',
+        'configmap',
+        name,
+        '-n',
+        namespace,
+        '-o',
+        `jsonpath={.data['${key.replace(/\./g, '\\.')}']}`,
+      ],
+      { timeout: 8000, maxBuffer: 4 * 1024 * 1024 }
+    );
+    if (!stdout || stdout.length === 0) return undefined;
+    return stdout;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Fetch the cap-CSV from a kubectl_configmap delivery target. */
+export async function fetchCapCsvFromConfigMap(
+  name: string,
+  namespace: string
+): Promise<string | undefined> {
+  return await kubectlGetConfigMapData(name, namespace, 'caps.csv');
+}
+
+/** Fetch + parse action-intent.json from a kubectl_configmap delivery target. */
+export async function fetchActionIntentFromConfigMap(
+  name: string,
+  namespace: string
+): Promise<ActionIntentParseResult | undefined> {
+  const raw = await kubectlGetConfigMapData(name, namespace, 'action-intent.json');
+  if (!raw) return undefined;
+  const result = parseActionIntent(raw);
+  if (result.json_parse_error) return undefined;
+  return result;
+}
+
 // ── Tagged fetch results (for structured cap_csv_status) ────────────────
 
 /** Result of a tagged cap-CSV fetch attempt. */

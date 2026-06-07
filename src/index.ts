@@ -140,7 +140,12 @@ import {
 import { rotateApiKeySchema, executeRotateApiKey } from './tools/rotate-api-key.js';
 import { servicesSchema, executeServices } from './tools/services.js';
 import { overflowContentsSchema, executeOverflowContents } from './tools/overflow-contents.js';
-import { fetchCapCsvForEnv, fetchActionIntentForEnv } from './lib/cap-csv-fetch.js';
+import {
+  fetchCapCsvForEnv,
+  fetchActionIntentForEnv,
+  fetchCapCsvFromConfigMap,
+  fetchActionIntentFromConfigMap,
+} from './lib/cap-csv-fetch.js';
 import { findSkewSchema, executeFindSkew } from './tools/find-skew.js';
 // find_constant_slots, find_uuid_in_body, find_incident_cluster removed
 // pre-launch (2026-05-28): produced findings the agent could not act on
@@ -1765,13 +1770,32 @@ _setVerifyRunner(async ({ commitment, week_start, week_end }) => {
   // Best-effort fetch of action-intent.json (canonical action source) and
   // cap CSV (byte-cap context + legacy action suffix fallback). Both are
   // passed to runEstimateVerify for action-split attribution. On any
-  // failure (no gh, no repo, file not found) the respective field is
-  // undefined and the verify run falls back to the §E.1 single-bucket
-  // attribution in commitment-report.
-  const [capCsv, actionIntent] = await Promise.all([
-    fetchCapCsvForEnv(env).catch(() => undefined),
-    fetchActionIntentForEnv(env).catch(() => undefined),
-  ]);
+  // failure the respective field is undefined and the verify run falls
+  // back to the §E.1 single-bucket attribution in commitment-report.
+  //
+  // Delivery channel comes from commitment.delivery_target captured at
+  // apply time:
+  //   - kind='configmap' → kubectl get configmap (the kubectl_configmap
+  //     delivery path; otel-demo and other k8s-native deploys)
+  //   - kind='gitops' or absent → gh api (the original PR-merge path;
+  //     also the back-compat path for commitments persisted before
+  //     delivery_target was added)
+  // When both channels are wired, gitops wins (PR is the durable source
+  // of truth and matches the source_disclosure label).
+  const target = commitment.delivery_target;
+  let capCsv: string | undefined;
+  let actionIntent: Awaited<ReturnType<typeof fetchActionIntentForEnv>>;
+  if (target?.kind === 'configmap') {
+    [capCsv, actionIntent] = await Promise.all([
+      fetchCapCsvFromConfigMap(target.name, target.namespace).catch(() => undefined),
+      fetchActionIntentFromConfigMap(target.name, target.namespace).catch(() => undefined),
+    ]);
+  } else {
+    [capCsv, actionIntent] = await Promise.all([
+      fetchCapCsvForEnv(env).catch(() => undefined),
+      fetchActionIntentForEnv(env).catch(() => undefined),
+    ]);
+  }
   const vr = await runEstimateVerify(
     {
       destination: commitment.destination,
