@@ -2297,7 +2297,13 @@ export async function executeCommitmentReport(
     caveats: envelope.caveats,
   });
 
-  const reportHeadline = `${commitment.service}: delivered ${agg.delivered_pct.toFixed(1)}% vs promised ${commitment.promised_pct.toFixed(1)}% over ${period.days}d.`;
+  // Under 2 weekly slices the "delivered X% vs promised Y%" framing reads as a
+  // verdict on a commitment too young to judge (period.days is the report
+  // window, not the commitment's age). Lead with the early-reading caveat.
+  const reportHeadline =
+    weeklyResults.length < 2
+      ? `${commitment.service}: ${agg.delivered_pct.toFixed(1)}% delivered so far vs ${commitment.promised_pct.toFixed(1)}% promised — under 2 weeks of data, too early to judge.`
+      : `${commitment.service}: delivered ${agg.delivered_pct.toFixed(1)}% vs promised ${commitment.promised_pct.toFixed(1)}% over ${period.days}d.`;
   const rateSourceMapped = agg.rate_source === 'customer_supplied' ? 'customer_supplied' as const
     : agg.rate_source === 'list_price' ? 'list_price' as const
     : 'none' as const;
@@ -2356,11 +2362,21 @@ function buildCommitmentReportHumanSummary(args: {
   weekCount: number;
   caveats: string[];
 }): string {
-  const verdict = args.deliveredPct >= args.promisedPct ? 'met' : 'short';
-  const lead = `Service ${args.service} delivered ${args.deliveredPct.toFixed(1)}% reduction vs ${args.promisedPct.toFixed(1)}% promised over the last ${args.days} days across ${args.weekCount} weekly slice${args.weekCount === 1 ? '' : 's'}, ${verdict} the commitment.`;
+  // Under 2 weeks of verify data, neither "met" nor "short" is a defensible
+  // verdict — a commitment minted hours ago will trivially read as "short the
+  // commitment" against a monthly promise. Lead with the insufficient-data
+  // framing instead of asserting under-delivery.
+  const lowData = args.weekCount < 2;
+  const verdict = args.deliveredPct >= args.promisedPct ? 'met' : 'short of';
+  const lead = lowData
+    ? `Service ${args.service} has under 2 weeks of verify data (${args.weekCount} weekly slice${args.weekCount === 1 ? '' : 's'}). Early reading: ${args.deliveredPct.toFixed(1)}% reduction vs ${args.promisedPct.toFixed(1)}% promised — too little data to judge delivery yet.`
+    : `Service ${args.service} delivered ${args.deliveredPct.toFixed(1)}% reduction vs ${args.promisedPct.toFixed(1)}% promised over the last ${args.days} days across ${args.weekCount} weekly slice${args.weekCount === 1 ? '' : 's'}, ${verdict} the commitment.`;
+  // Show sub-$1 realized savings with cents — toFixed(0) rounded $0.14 to "$0",
+  // which reads as "nothing delivered" when a (tiny) amount was.
+  const fmtRealized = (v: number) => (Math.abs(v) < 1 ? `$${v.toFixed(2)}` : `$${Math.round(v)}`);
   const dollars =
     args.rateSource !== 'unset' && args.deliveredDollars != null
-      ? ` Realized savings: ${args.rateSource === 'customer_supplied' ? '$' + args.deliveredDollars.toFixed(0) + ' (customer-supplied rate)' : '$' + args.deliveredDollars.toFixed(0) + ' (list price)'}.`
+      ? ` Realized savings: ${fmtRealized(args.deliveredDollars)} (${args.rateSource === 'customer_supplied' ? 'customer-supplied rate' : 'list price'}).`
       : '';
   const caveats = args.caveats.length > 0 ? ` Caveats: ${args.caveats.length}.` : '';
   return `${lead}${dollars}${caveats}`;

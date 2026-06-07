@@ -26,6 +26,7 @@ import { formatPatternLabelFromServices } from '../lib/pattern-label.js';
 import * as pql from '../lib/promql.js';
 import { LABELS } from '../lib/promql.js';
 import { bytesToCost, parsePrometheusValue } from '../lib/cost.js';
+import { resolveRate, destinationFromEnvAnalyzer } from '../lib/rate-resolution.js';
 import { applyCostDriverGates, DEFAULT_GATES } from '../lib/gates.js';
 import { resolveMetricsEnv, resolveMetricsEnvFiltered } from '../lib/resolve-env.js';
 import { parseTimeframe } from '../lib/format.js';
@@ -175,7 +176,19 @@ export async function executeWhatsChanging(
   const timeRange = args.timeRange ?? '7d';
   const limit = args.limit ?? 10;
   const tf = parseTimeframe(timeRange);
-  const costPerGb = args.analyzerCost ?? 1.0;
+  // Resolve $/GB via the shared chain (caller arg -> env analyzerCost ->
+  // LOG10X_ANALYZER_COST -> destination list price). Prior code hardcoded a
+  // fictitious $1.0 fallback, which fabricated dollar deltas on any env with
+  // no configured rate AND defeated getAnalyzerCost's "no rate -> undefined"
+  // contract (undefined ?? 1.0 = a made-up $1). rate_per_gb is the destination
+  // list price when no customer rate exists; 0 only when neither a rate nor a
+  // destination is known, so dollars read as 0 rather than an invented number.
+  const whatsChangingRate = resolveRate(
+    { analyzerCost: args.analyzerCost },
+    env,
+    destinationFromEnvAnalyzer(env),
+  );
+  const costPerGb = whatsChangingRate.rate_per_gb ?? 0;
   const view = args.view ?? 'summary';
 
   // Resolve baseline offsets from comparison_window arg.
