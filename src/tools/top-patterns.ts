@@ -988,12 +988,28 @@ export async function executeTopPatterns(
     }
   }
 
+  // representativeLabel is the dominant member's descriptor (incident-cluster.ts:162)
+  // — NOT a string the other members literally share. Earlier the callout
+  // read "N patterns share `<representativeLabel>`" which claimed something
+  // not in the data (math-lens workflow wych5vwsh). joinSignal carries the
+  // actual relationship — jaccard_direct = token-set overlap, overlap_shared
+  // = shared-token threshold, jaccard_with_correlation = co-trending. Phrase
+  // the callout in those terms so the claim matches what the detector did.
+  const joinPhrase = (s: 'jaccard_direct' | 'overlap_shared' | 'jaccard_with_correlation'): string =>
+    s === 'jaccard_direct'
+      ? 'similar tokens to'
+      : s === 'overlap_shared'
+        ? 'shared tokens with'
+        : 'co-trending with';
   const callout =
     incidents.length > 0
       ? `These look like ${incidents.length === 1 ? 'one incident' : `${incidents.length} incidents`}: ` +
         incidents
           .slice(0, 2)
-          .map((c) => `${c.members.length} patterns in \`${c.service}\` share \`${c.representativeLabel.slice(0, 50)}\``)
+          .map(
+            (c) =>
+              `${c.members.length} patterns in \`${c.service}\` (${joinPhrase(c.joinSignal)} \`${c.representativeLabel.slice(0, 50)}\`)`,
+          )
           .join('; ')
       : undefined;
 

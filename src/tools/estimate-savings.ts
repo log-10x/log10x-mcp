@@ -291,6 +291,16 @@ export interface ForecastResult {
   }>;
   totals: {
     bytes_in_monthly: number;
+    /**
+     * Env-wide observed monthly bytes — the denominator that
+     * `coverage_of_env_pct` divides into `bytes_in_monthly` to compute
+     * the coverage percent. When `args.service` is set, `bytes_in_monthly`
+     * is the service-scope total and this field is the wider env-wide
+     * total; when no service filter is set the two are equal. Exposed so
+     * the headline coverage % is reconstructible from the envelope
+     * without a hidden side query.
+     */
+    env_bytes_in_monthly: number;
     bytes_saved_monthly: number;
     dollars_low_monthly: number;
     dollars_expected_monthly: number;
@@ -1136,7 +1146,28 @@ export async function runEstimateForecast(
   );
   const forecast_rate_source: 'list_price' | 'customer_supplied' =
     forecastRateResolved.source === 'customer_supplied' ? 'customer_supplied' : 'list_price';
-  const forecast_rate_disclosure: string | null = forecastRateResolved.disclosure;
+  // Bug from math-lens workflow wych5vwsh: the resolved disclosure only
+  // names the ingest list rate ("$0.50/GB"), but projectActionRange returns
+  // total_dollars = ingest_dollars + storage_dollars × retention_months. A
+  // CFO reading the disclosure expects the totals to reconcile at $0.50/GB
+  // ingest, but they actually reconcile at ingest + storage = $0.53/GB on
+  // CloudWatch (and similarly on Splunk, ES, Azure, GCP, Sumo where
+  // storage_per_gb_month > 0). Augment the list-price disclosure to name
+  // the storage component when it materially affects the math.
+  const forecastModel = getDestinationCostModel(args.destination, {
+    esPruned: args.es_pruned,
+  });
+  const forecastRetentionMonths = 1; // matches projectActionRange default
+  const forecast_rate_disclosure: string | null =
+    forecastRateResolved.source === 'list_price' &&
+    forecastModel.storage_per_gb_month > 0 &&
+    forecastRateResolved.disclosure
+      ? forecastRateResolved.disclosure.replace(
+          /(\$[\d.]+\/GB)/,
+          (match) =>
+            `${match} ingest + $${forecastModel.storage_per_gb_month.toFixed(2)}/GB-month storage × ${forecastRetentionMonths}mo = $${(forecastModel.ingest_per_gb + forecastModel.storage_per_gb_month * forecastRetentionMonths).toFixed(2)}/GB effective`
+        )
+      : forecastRateResolved.disclosure;
 
   const caveats: string[] = [];
   if (noOpCompactCount > 0) {
@@ -1183,6 +1214,13 @@ export async function runEstimateForecast(
     per_service,
     totals: {
       bytes_in_monthly: totalIn,
+      // env_bytes_in_monthly is the denominator behind coverage_of_env_pct.
+      // Surfaced so the coverage % is reconstructible from the envelope
+      // without a hidden side query (math-lens workflow wych5vwsh). When
+      // args.service is set, bytes_in_monthly is the service-scope total
+      // and env_bytes_in_monthly is the env-wide total (larger). When no
+      // service filter is set the two are equal.
+      env_bytes_in_monthly: totalObservedMonthly,
       bytes_saved_monthly: totalSavedBytes,
       dollars_low_monthly: totalLow,
       dollars_expected_monthly: totalExpected,
