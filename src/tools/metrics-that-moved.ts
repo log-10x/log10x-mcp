@@ -556,8 +556,15 @@ export async function executeMetricsThatMoved(
   notMoved.sort((a, b) => b.phase_gap - a.phase_gap);
 
   const nUsable = moved.length + notMoved.length;
+  // Math-lens workflow wxk3k628c: same fix as rank_by_shape — gate
+  // low_candidate_count on having at least one EVALUABLE candidate so
+  // an all-candidates-failed call doesn't get tagged 'severe' (which
+  // misdirects remediation toward "widen the metric pool" when the
+  // actual failure is connectivity / metric-not-found).
   const lowCandidateCount: 'severe' | 'medium' | null =
-    nUsable < 10 ? 'severe' : nUsable < 20 ? 'medium' : null;
+    nUsable === 0 && failed.length === filteredCandidates.length
+      ? null  // all-failed case → distinct failure mode
+      : nUsable < 10 ? 'severe' : nUsable < 20 ? 'medium' : null;
   const status: MetricsThatMovedStatus = moved.length === 0 ? 'no_signal' : 'success';
   const human_summary = buildHumanSummary({
     status,
@@ -611,9 +618,19 @@ export async function executeMetricsThatMoved(
 
   // Plain English per Notes 10-12: drop "candidates", "anchor", "phase_gap".
   // The structured threshold + counts still live in payload / decisions.
+  // Math-lens workflow wxk3k628c: prior headline said "(N checked)" using
+  // filteredCandidates.length — but that count INCLUDES candidates that
+  // failed validation/query (couldn't actually be checked). When every
+  // candidate failed, the headline claimed "(2 checked)" while
+  // candidates_evaluated=0 and human_summary said "2 couldn't be checked".
+  // Use the evaluated count for the headline so it agrees with both
+  // structured fields and the prose.
+  const evaluatedCount = filteredCandidates.length - failed.length;
   const headline = moved.length > 0
-    ? `${moved.length} of ${filteredCandidates.length} metric(s) moved with this pattern over the window.`
-    : `No metrics moved with this pattern over the window (${filteredCandidates.length} checked).`;
+    ? `${moved.length} of ${evaluatedCount} metric(s) moved with this pattern over the window.`
+    : evaluatedCount > 0
+      ? `No metrics moved with this pattern over the window (${evaluatedCount} checked${failed.length > 0 ? `, ${failed.length} couldn't be checked` : ''}).`
+      : `No metrics could be checked (${failed.length} couldn't be evaluated, ${filteredCandidates.length - failed.length} returned no data).`;
 
   return buildChassisEnvelope({
     tool: 'log10x_metrics_that_moved',

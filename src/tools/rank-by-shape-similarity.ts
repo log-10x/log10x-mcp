@@ -447,8 +447,18 @@ export async function executeRankByShapeSimilarity(
   ranked.sort((a, b) => b.pearson_magnitude - a.pearson_magnitude);
 
   const nUsable = ranked.length;
+  // Math-lens workflow wxk3k628c: prior code emitted 'severe' whenever
+  // nUsable < 10, INCLUDING the degenerate case where ALL candidates
+  // were unknown to the backend (fetch failure, not a low-pool diagnostic).
+  // Reading 'severe' on an all-candidates-unknown call misdirects
+  // remediation toward "widen the metric pool" when the actual failure
+  // is connectivity. Gate the tier on having at least one EVALUABLE
+  // candidate; otherwise leave low_candidate_count=null and let
+  // no_signal_reason='all_candidates_unknown' drive the prose.
   const lowCandidateCount: 'severe' | 'medium' | null =
-    nUsable < 10 ? 'severe' : nUsable < 20 ? 'medium' : null;
+    nUsable === 0 && unknown.length === args.candidates.length
+      ? null  // all-unknown case → distinct failure mode
+      : nUsable < 10 ? 'severe' : nUsable < 20 ? 'medium' : null;
   // No-signal status: all candidates had near-zero correlation, OR
   // every candidate was rejected as `candidate_unknown` by the
   // existence pre-pass (in which case `survivors.length === 0` and we

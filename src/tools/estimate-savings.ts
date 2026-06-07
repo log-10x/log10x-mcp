@@ -1228,9 +1228,42 @@ export async function runEstimateForecast(
       'No bytes observed in the window. Either the Reporter is not deployed for this scope, or the service/env filters matched nothing.'
     );
   }
+  // Math-lens workflow wxk3k628c: pattern_count_source.count is the
+  // pattern universe from the distinct-count query (all patterns with
+  // ANY bytes in window); per_pattern_total_count is the post-filter
+  // set the forecast actually modeled (patterns with non-zero monthly
+  // bytes for the resolved scope). They disagree when patterns exist
+  // in the count but were filtered out (e.g. matched the scope but
+  // bytes rolled up to zero). Surface the gap so consumers know the
+  // forecast covered fewer rows than the count claims exist.
+  if (
+    patternUniverseCount != null &&
+    patternUniverseCount > per_pattern.length &&
+    per_pattern.length > 0
+  ) {
+    const dropped = patternUniverseCount - per_pattern.length;
+    caveats.push(
+      `pattern_count_source.count=${patternUniverseCount} but per_pattern_total_count=${per_pattern.length} — ${dropped} pattern${dropped !== 1 ? 's' : ''} exist in the count query but were filtered out of the forecast (bytes rolled up to zero in the resolved scope, or filtered by the destination action model).`
+    );
+  }
   if (forecast_rate_source === 'list_price') {
     caveats.push(
       `Dollar projections use ${args.destination} list price. Pass effective_ingest_per_gb to use your contracted rate and align with top_patterns output.`
+    );
+  }
+  // Math-lens workflow wxk3k628c: when EVERY row got tier_down and the
+  // destination cost model has NO tier_down_target_tier configured, the
+  // per-row `notes` already explain the $0 (cheaper tier price not
+  // configured) but a downstream agent reading totals/action_mix sees
+  // 0 with no top-level signal. Lift the config gap to caveats[] so
+  // automation can detect the structural invalidity at a single read.
+  const forecastModelForGap = getDestinationCostModel(args.destination, {
+    esPruned: args.es_pruned,
+  });
+  const everyRowTierDown = per_pattern.length > 0 && per_pattern.every((r) => r.action === 'tier_down');
+  if (everyRowTierDown && !forecastModelForGap.tier_down_target_tier) {
+    caveats.push(
+      `config_gap: every pattern was assigned tier_down but ${args.destination}'s cost model has no tier_down_target_tier configured. Dollar savings are $0 by configuration, not by forecast. Configure the cheaper tier rate, or switch default_action to drop/sample for a meaningful projection.`
     );
   }
   // Math-lens workflow wxk3k628c: when the caller asked for a
