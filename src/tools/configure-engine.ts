@@ -614,11 +614,25 @@ export async function executeConfigureEngine(
       isGitopsHint(targetErrHint)
         ? [
             {
+              // The actionable unblock for inspection: re-run with
+              // delivery="stdout_only" — returns the proposed per-pattern plan
+              // inline, no gitops repo and no write required. Carries the
+              // caller's full original intent (budget_usd, action_defaults, …)
+              // forward via the args spread. Previously the only offered action
+              // was set_gitops_repo with empty args, a dead-end for anyone who
+              // just wanted to see the plan.
+              tool: 'log10x_configure_engine',
+              args: { ...args, delivery: 'stdout_only' },
+              reason:
+                'Inspect the proposed policy without a gitops repo: re-run with delivery="stdout_only" to get the per-pattern plan inline (no PR, no write).',
+              role: 'recommended-next',
+            },
+            {
               tool: 'log10x_set_gitops_repo',
               args: {},
               reason:
-                'Write gitops.repo to envs.json so configure_engine knows which GitHub repo to open the cap-CSV PR against. After running, restart the MCP server and retry.',
-              role: 'recommended-next',
+                'Or, to deliver as a PR: write gitops.repo to envs.json so configure_engine knows which GitHub repo to open the cap-CSV PR against. After running, restart the MCP server and retry.',
+              role: 'alternative',
             },
           ]
         : [];
