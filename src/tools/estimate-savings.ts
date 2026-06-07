@@ -1390,13 +1390,19 @@ export async function runEstimateVerify(
     }
   }
 
-  // Dollars: deliver-side rate (passed bytes × $/GB). Routed through the
-  // SHARED rate resolver (lib/rate-resolution.ts) so verify agrees with
-  // services / top_patterns / event_lookup / explain_mode on the SAME tag
-  // for the same env/window. Priority chain: caller arg → envs.json
-  // analyzerCost → LOG10X_ANALYZER_COST → destination list price → unset.
-  // verify NEVER lands on 'unset' because args.destination is required and
-  // rung 4 supplies the list price as a safety net.
+  // Dollars: SAVINGS = dropped bytes × $/GB. Keeps the envelope internally
+  // consistent — commitment-report.delivered_bytes sources from
+  // post_dropped_bytes, so multiplying the same quantity by the same rate
+  // means delivered_dollars / delivered_bytes always reconciles to the
+  // disclosed rate (audit-friendly; CFO can divide the two and get $0.50/GB
+  // out the back).
+  //
+  // Routed through the SHARED rate resolver (lib/rate-resolution.ts) so
+  // verify agrees with services / top_patterns / event_lookup / explain_mode
+  // on the SAME tag for the same env/window. Priority chain: caller arg →
+  // envs.json analyzerCost → LOG10X_ANALYZER_COST → destination list price
+  // → unset. verify NEVER lands on 'unset' because args.destination is
+  // required and rung 4 supplies the list price as a safety net.
   const verifyRateResolved = resolveRate(
     { effective_ingest_per_gb: args.effective_ingest_per_gb },
     env,
@@ -1404,7 +1410,7 @@ export async function runEstimateVerify(
   );
   const ingestRate = verifyRateResolved.rate_per_gb
     ?? getDestinationCostModel(args.destination, { esPruned: args.es_pruned }).ingest_per_gb;
-  const delivered_dollars_now = (postPassedBytes / GB) * ingestRate;
+  const delivered_dollars_now = (postDroppedBytes / GB) * ingestRate;
   const delivered_dollars_annual_projection = annualizeDollars(
     delivered_dollars_now,
     postDays
