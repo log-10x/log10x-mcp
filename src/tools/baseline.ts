@@ -54,6 +54,7 @@ import {
 import { newChassisTelemetry, buildChassisEnvelope } from '../lib/chassis-envelope.js';
 import { buildSourceDisclosureFromEnv } from '../lib/source-disclosure.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
+import { resolveRate } from '../lib/rate-resolution.js';
 import { resolveSiemSelection } from '../lib/siem/resolve.js';
 
 // ─── constants ────────────────────────────────────────────────────────
@@ -381,10 +382,20 @@ async function computeBaseline(
   // Resolve rate_source once for every downstream envelope (success +
   // not_ready). Destination is non-null past Gate 0, so the fallback when
   // no customer override is supplied is always `list_price`.
-  const rateSource: RateSource =
-    args.effectiveIngestPerGb && args.effectiveIngestPerGb > 0
-      ? 'customer_supplied'
-      : 'list_price';
+  // Honor the SHARED rate resolver (lib/rate-resolution.ts) — the SAME
+  // priority chain services / top_patterns / estimate_savings walk: caller
+  // arg → envs.json analyzerCost → LOG10X_ANALYZER_COST → destination list.
+  // Prior to this, baseline rolled its own arg-only check and fell back to
+  // list_price even when a customer rate was configured on the env, so the
+  // SAME env showed services $1.50 customer_supplied vs baseline $0.50
+  // list_price. Destination is non-null past Gate 0, so resolveRate never
+  // returns 'unset' here (rung 4 yields the destination list price).
+  const resolvedRate = resolveRate(
+    { effective_ingest_per_gb: args.effectiveIngestPerGb },
+    env,
+    destination,
+  );
+  const rateSource: RateSource = resolvedRate.source;
 
   // ── Gate 1: Reporter age. ───────────────────────────────────────
   const minDays = readMinAgeOverride() ?? DEFAULT_MIN_REPORTER_AGE_DAYS;
@@ -481,7 +492,7 @@ async function computeBaseline(
   const model = getDestinationCostModel(destination);
   const ingestPerGb =
     rateSource === 'customer_supplied'
-      ? (args.effectiveIngestPerGb as number)
+      ? (resolvedRate.rate_per_gb as number)
       : model.ingest_per_gb;
   // Math-lens workflow w58guv3e4: two fixes here.
   //  (1) Use decimal GB (bytesToGb) instead of binary 1024^3 — matches

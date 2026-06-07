@@ -2226,10 +2226,19 @@ function buildForecastHumanSummary(
     }
   }
 
+  // Only surface a "(range $X–$Y)" band when the endpoints actually differ.
+  // Point-estimate actions (e.g. offload, where low=expected=high) were
+  // rendering "(range $49–$49)" — a single number dressed as a band, which
+  // reads as false rigor. Suppress the band when low and high are within a
+  // cent of each other.
+  const rangeClause =
+    Math.abs(result.totals.dollars_high_monthly - result.totals.dollars_low_monthly) >= 0.01
+      ? ` (range ${fmtDollar(result.totals.dollars_low_monthly)}–${fmtDollar(result.totals.dollars_high_monthly)})`
+      : '';
   const lead =
     enforcement_mode === 'manual_report'
-      ? `If you enforce externally on ${destination}${serviceClause}: ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings potential (range ${fmtDollar(result.totals.dollars_low_monthly)}–${fmtDollar(result.totals.dollars_high_monthly)}). Enforcement is not automatic — this is the potential if the exclusion/drop is applied.`
-      : `estimate_savings forecast on ${destination}${serviceClause} projects ${fmtDollar(result.totals.dollars_expected_monthly)}/mo expected savings (range ${fmtDollar(result.totals.dollars_low_monthly)}–${fmtDollar(result.totals.dollars_high_monthly)})`;
+      ? `If you enforce externally on ${destination}${serviceClause}: ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings potential${rangeClause}. Enforcement is not automatic — this is the potential if the exclusion/drop is applied.`
+      : `estimate_savings forecast on ${destination}${serviceClause} projects ${fmtDollar(result.totals.dollars_expected_monthly)}/mo expected savings${rangeClause}`;
   const disclosureSuffix = result.rate_disclosure ? ` ${result.rate_disclosure}.` : '.';
   return `${lead} across ${patternWord} covering ${envCoverage}, using ${rateTag}${disclosureSuffix}${result.caveats.length ? ` Caveats: ${result.caveats.length}.` : ''}`;
 }

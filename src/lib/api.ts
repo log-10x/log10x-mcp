@@ -26,7 +26,6 @@ import { log } from './log.js';
 import './auth-model.js';
 
 const DEFAULT_BASE = 'https://prometheus.log10x.com';
-const DEFAULT_COST_PER_GB = 2.50;
 const RETRY_ATTEMPTS = 3;
 /** Base backoff in ms. Override via LOG10X_RETRY_BASE_MS (tests set to 1). */
 const RETRY_BASE_MS = parseInt(process.env.LOG10X_RETRY_BASE_MS || '250', 10) || 250;
@@ -223,11 +222,18 @@ export async function fetchActiveLabelValues(
 }
 
 /**
- * Fetches the user's analyzer cost ($/GB) from the Log10x REST API.
+ * Fetches the user's configured analyzer cost ($/GB) from the Log10x REST API.
  * Stored in Auth0 user_metadata.analyzer_cost, returned by GET /api/v1/user.
- * Falls back to DEFAULT_COST_PER_GB on failure.
+ *
+ * Returns `null` when there is NO genuine customer rate (no metadata field,
+ * non-positive value, non-2xx response, or transport failure). Callers thread
+ * that null through as "rate unset" so the shared resolver falls back to the
+ * destination list price with its honest disclaimer — instead of fabricating a
+ * default $/GB and mislabeling it `customer_supplied`. Returning a non-null
+ * default here is what caused services/top_patterns/savings/baseline to quote a
+ * fictitious customer rate on tenants that never configured one.
  */
-export async function fetchAnalyzerCost(env: EnvConfig): Promise<number> {
+export async function fetchAnalyzerCost(env: EnvConfig): Promise<number | null> {
   try {
     const url = new URL('/api/v1/user', getBase());
     const res = await fetchWithRetry(
@@ -236,17 +242,17 @@ export async function fetchAnalyzerCost(env: EnvConfig): Promise<number> {
       'fetchAnalyzerCost'
     );
 
-    if (!res.ok) return DEFAULT_COST_PER_GB;
+    if (!res.ok) return null;
 
     const data = (await res.json()) as { user?: { metadata?: { analyzer_cost?: number | string } } };
     const raw = data.user?.metadata?.analyzer_cost;
 
-    if (raw === undefined || raw === null) return DEFAULT_COST_PER_GB;
+    if (raw === undefined || raw === null) return null;
 
     const cost = typeof raw === 'number' ? raw : parseFloat(raw);
-    return cost > 0 ? cost : DEFAULT_COST_PER_GB;
+    return Number.isFinite(cost) && cost > 0 ? cost : null;
   } catch {
-    return DEFAULT_COST_PER_GB;
+    return null;
   }
 }
 

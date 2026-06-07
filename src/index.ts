@@ -215,7 +215,7 @@ function getEnvs(): Environments {
   return envs;
 }
 
-const costCache = new Map<string, { cost: number; fetchedAt: number }>();
+const costCache = new Map<string, { cost: number | null; fetchedAt: number }>();
 const COST_REFRESH_MS = 3_600_000; // 1 hour
 
 /**
@@ -626,7 +626,11 @@ function applyDemoBanner(text: string): string {
   return text + `\n\n_(Demo mode — account-scoped tools query the read-only Log10x demo env. Call \`log10x_login_status\` to use your own data.)_`;
 }
 
-async function getAnalyzerCost(env: EnvConfig, override?: number): Promise<number> {
+// Returns the resolved customer $/GB, or `undefined` when no genuine customer
+// rate exists (so callers thread "rate unset" and the shared resolver falls to
+// destination list price rather than a fabricated default mislabeled
+// customer_supplied). An explicit caller override always wins verbatim.
+async function getAnalyzerCost(env: EnvConfig, override?: number): Promise<number | undefined> {
   if (override !== undefined) return override;
 
   const key = env.envId;
@@ -634,12 +638,12 @@ async function getAnalyzerCost(env: EnvConfig, override?: number): Promise<numbe
   const now = Date.now();
 
   if (cached && (now - cached.fetchedAt) < COST_REFRESH_MS) {
-    return cached.cost;
+    return cached.cost ?? undefined;
   }
 
   const cost = await fetchAnalyzerCost(env);
   costCache.set(key, { cost, fetchedAt: now });
-  return cost;
+  return cost ?? undefined;
 }
 
 // ── Server ──
@@ -1732,9 +1736,16 @@ registerLog10xTool('log10x_estimate_savings', estimateSavingsSchema, (args) =>
 // ── Tool: log10x_baseline (Reporter-age / coverage / anomaly readiness gates) ──
 
 registerLog10xTool('log10x_baseline', baselineSchema, (args) =>
-  wrap('log10x_baseline', () => {
+  wrap('log10x_baseline', async () => {
     const env = resolveEnv(getEnvs(), args.environment);
-    return executeBaseline(args, env);
+    // Thread the account-configured customer rate (profile metadata.analyzer_cost,
+    // cached via getAnalyzerCost) into effectiveIngestPerGb — the SAME pre-resolution
+    // every other cost tool does (services / top_patterns / event_lookup / savings /
+    // trend / pattern_diff). Baseline was the lone dispatcher that skipped it, so the
+    // SAME env reported services $1.50 customer_supplied vs baseline $0.50 list_price.
+    // An explicit caller arg still wins (getAnalyzerCost returns the override verbatim).
+    const cost = await getAnalyzerCost(env, args.effectiveIngestPerGb);
+    return executeBaseline({ ...args, effectiveIngestPerGb: cost }, env);
   })
 );
 

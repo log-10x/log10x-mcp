@@ -438,12 +438,24 @@ async function executeServicesInner(
     const bytes = parsePrometheusValue(r);
     totalBytes += bytes;
     const axisRaw = perService.get(name);
+    // Reconcile the action decomposition to the authoritative per-service
+    // total `bytes` (from bytesPerService). bytes_passed is DERIVED as the
+    // remainder so passed + offloaded + compacted + dropped == bytes exactly.
+    // Previously bytes_passed came from a SEPARATE `sum by(service,hash)`
+    // read, so two independently-rounded TSDB queries disagreed and the
+    // parts could overshoot the whole (e.g. payment bytes_passed > bytes
+    // with zero drops). Deriving the remainder makes the buckets sum to the
+    // reported total by construction; clamp at 0 for the rare case where the
+    // dropped-cohort read exceeds the total read.
     const axis: ServiceActionAxis = axisRaw
       ? {
-          bytes_passed: axisRaw.bytes_passed,
           bytes_offloaded: axisRaw.bytes_offloaded,
           bytes_compacted: axisRaw.bytes_compacted,
           bytes_dropped: axisRaw.bytes_dropped,
+          bytes_passed: Math.max(
+            0,
+            bytes - axisRaw.bytes_offloaded - axisRaw.bytes_compacted - axisRaw.bytes_dropped,
+          ),
         }
       : {
           bytes_passed: bytes,

@@ -91,7 +91,14 @@ export async function executeDoctor(args: { environment?: string }): Promise<str
     tool: 'log10x_doctor',
     view: 'summary',
     headline,
-    status: report.overall === 'pass' ? 'success' : report.overall === 'warn' ? 'partial' : 'error',
+    // overall:'warn' means every check RAN and only advisories fired —
+    // nothing could-not-execute — so the tool itself succeeded. Map to
+    // 'success', not 'partial'. 'partial' is reserved for incomplete data /
+    // checks that could not run. The warn signal is carried by
+    // payload.overall and the headline ("overall WARN"), not by the chassis
+    // status. Prior code emitted status:'partial' while the headline said
+    // WARN — two unreconciled health vocabularies for the same run.
+    status: report.overall === 'pass' || report.overall === 'warn' ? 'success' : 'error',
     decisions: { threshold_used: null, threshold_basis: 'default' },
     source_disclosure: {},
     scope: {
