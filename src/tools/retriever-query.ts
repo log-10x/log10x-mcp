@@ -391,15 +391,45 @@ export async function executeRetrieverQuery(
     throw new Error('retriever_query: inner pipeline returned no data.');
   }
   const d = sumOut.data;
-  const headline = `Retriever query \`${d.query_id ?? '?'}\` over ${d.from} → ${d.to}: ${fmtCount(d.events_matched)} events matched, ${d.events_returned} returned (${d.wall_time_ms}ms${d.truncated ? ', truncated' : ''}).`;
+  // Math-lens workflow wpv1ay324: headline used to say "X returned" for
+  // every format — meaningless for `count` (we don't return events at
+  // all), and misleading for `aggregated`/`ephemeral_series` (we return
+  // buckets, not raw events). Branch on format so the headline names
+  // the actual deliverable. Also surface a perf caveat when wall_time
+  // crosses the practical degradation floor (30s) so chain agents can
+  // pace themselves.
+  const formatLabel = d.format ?? 'events';
+  const deliverableClause =
+    formatLabel === 'count'
+      ? `count-only summary`
+      : formatLabel === 'aggregated'
+        ? `${d.events_returned} events bucketed`
+        : formatLabel === 'ephemeral_series'
+          ? `${d.events_returned} events as range-query series`
+          : `${d.events_returned} returned`;
+  const perfCaveat = d.wall_time_ms > 30000
+    ? `, slow scan — consider narrowing search or window`
+    : '';
+  const headline = `Retriever query \`${d.query_id ?? '?'}\` over ${d.from} → ${d.to}: ${fmtCount(d.events_matched)} events matched, ${deliverableClause} (${d.wall_time_ms}ms${d.truncated ? ', truncated' : ''}${perfCaveat}).`;
   const actions: Array<{ tool: string; args: Record<string, unknown>; reason: string }> = [];
   if (d.partial_results) {
     actions.push({ tool: 'log10x_retriever_query', args: { from: d.from, to: d.to, pattern: d.pattern, search: d.search, target: d.target }, reason: 'partialResults — re-run with same args to resume from cached scan progress' });
   }
-  if (d.pattern && d.events_matched > 0) {
-    actions.push(
-      { tool: 'log10x_retriever_series', args: { pattern: d.pattern, from: d.from, to: d.to, bucket_size: '1h' }, reason: 'time-bucketed series across the same window (fidelity-aware: exact vs sampled)' }
-    );
+  // Math-lens workflow wpv1ay324: prior code chained retriever_series
+  // only when `d.pattern` was set. Hash-keyed callers (pattern_hash auto-
+  // built a `tenx_hash == "..."` search) had pattern undefined and lost
+  // the follow-on action entirely. Use pattern_hash → search as the
+  // chained identity when pattern is absent.
+  if (d.events_matched > 0) {
+    if (d.pattern) {
+      actions.push(
+        { tool: 'log10x_retriever_series', args: { pattern: d.pattern, from: d.from, to: d.to, bucket_size: '1h' }, reason: 'time-bucketed series across the same window (fidelity-aware: exact vs sampled)' }
+      );
+    } else if (args.pattern_hash) {
+      actions.push(
+        { tool: 'log10x_retriever_series', args: { pattern_hash: args.pattern_hash, from: d.from, to: d.to, bucket_size: '1h' }, reason: 'time-bucketed series for the hash-keyed pattern across the same window' }
+      );
+    }
   }
   // Dispatcher-failure drill-in: zero events + tasks dispatched but nothing scanned.
   // This is the chart 1.0.20 streamer->retriever rename signature detected in the
@@ -774,12 +804,19 @@ async function executeRetrieverQueryInner(
         }
       }
     }
-    const previewEvents = resp.events.slice(0, 10).map((ev) => ({
-      timestamp: ev.timestamp as string | number | undefined,
-      severity: ev.severity_level as string | undefined,
-      service: ev.tenx_user_service as string | undefined,
-      text: typeof ev.text === 'string' ? (ev.text as string).slice(0, 240) : undefined,
-    }));
+    // Math-lens workflow wpv1ay324: when the caller asked for `count`,
+    // they wanted aggregates, not bodies. Returning events_preview from
+    // a count call ships event payloads the caller didn't ask for —
+    // bandwidth waste, and confusing in the envelope (the rollups
+    // disagree with what a 10-event preview suggests). Suppress.
+    const previewEvents = args.format === 'count'
+      ? []
+      : resp.events.slice(0, 10).map((ev) => ({
+          timestamp: ev.timestamp as string | number | undefined,
+          severity: ev.severity_level as string | undefined,
+          service: ev.tenx_user_service as string | undefined,
+          text: typeof ev.text === 'string' ? (ev.text as string).slice(0, 240) : undefined,
+        }));
     const partialResults = !!(resp.diagnostics as RetrieverQueryDiagnostics & { partialResults?: boolean })?.partialResults;
     const offloadedHashCount = offloadByHash
       ? Object.values(offloadByHash).filter((s) => s.is_offloaded).length

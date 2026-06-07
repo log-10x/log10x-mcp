@@ -333,11 +333,36 @@ export async function executeRetrieverSeries(
   return __be({
     tool: 'log10x_retriever_series',
     view: 'summary',
-    summary: { headline: `Retriever series for ${formatPatternLabel({ symbol_message: args.pattern ?? args.search ?? 'window', maxHintChars: 50 })}: ${result.series.length} bucket point${result.series.length !== 1 ? 's' : ''}, ${result.groupCardinality} group${result.groupCardinality !== 1 ? 's' : ''}, mode=${decision.mode}, wall=${wallTimeMs}ms.` },
+    summary: {
+      headline: (() => {
+        // Math-lens workflow wpv1ay324: when wall_time exceeds an empty-
+        // window budget and we have zero worker files / zero events, the
+        // headline must SAY so — leaving "wall=186546ms" as neutral
+        // telemetry next to "0 bucket points" let downstream renderers
+        // (and CFOs) treat the empty result as authoritative when it was
+        // actually a likely timeout. Append a perf advisory when the
+        // shape matches.
+        const baseHeadline = `Retriever series for ${formatPatternLabel({ symbol_message: args.pattern ?? args.search ?? 'window', maxHintChars: 50 })}: ${result.series.length} bucket point${result.series.length !== 1 ? 's' : ''}, ${result.groupCardinality} group${result.groupCardinality !== 1 ? 's' : ''}, mode=${decision.mode}, wall=${wallTimeMs}ms.`;
+        const degraded =
+          result.series.length === 0 &&
+          result.workerFiles === 0 &&
+          wallTimeMs > 30_000;
+        return degraded
+          ? `${baseHeadline} ⚠ Degraded: wall ${wallTimeMs}ms with 0 worker files suggests timeout/starvation, not a confirmed-empty window — treat as unknown.`
+          : baseHeadline;
+      })(),
+    },
     data: {
-      // Harmonized chassis status (Wave 1.C). `ok` retained for back-compat.
+      // Math-lens workflow wpv1ay324: previously ok=true on an empty
+      // result + huge wall_time + zero worker_files conflated "clean
+      // empty" with "retriever did not return". Now ok=false when the
+      // shape suggests timeout/starvation, so downstream renderers can
+      // gate on ok and not treat a degraded result as authoritative.
       status: seriesStatus,
-      ok: true,
+      ok:
+        !(result.series.length === 0 &&
+          result.workerFiles === 0 &&
+          wallTimeMs > 30_000),
       mode: decision.mode,
       from: args.from,
       to: args.to,
@@ -753,11 +778,33 @@ function buildSeriesHumanSummary(s: {
     ? `Sampled mode used ${decision.subWindows} sub-windows of up to ${decision.eventsPerSubWindow} events each; time-distribution shape is preserved but bucket counts are estimates.`
     : `Full-aggregation mode returned exact counts over ${result.actualEvents} processed events${result.truncated ? ' (some workers truncated at the per-worker cap)' : ''}.`;
   const top = s.topGroups[0];
-  const third = args.group_by && top
-    ? `Top ${args.group_by} value is ${top.group} with ${top.count} event${top.count === 1 ? '' : 's'}.`
-    : result.series.length === 0
-      ? 'Series is empty; verify the search expression matches and the window covers actual ingest.'
-      : `Worker files: ${result.workerFiles}.`;
+  // Math-lens workflow wpv1ay324: when the series is empty AND
+  // wall_time_ms is large vs window_ms, the dominant cause is almost
+  // certainly retriever_did_not_return (timeout, worker starvation,
+  // degraded archive), NOT search-expression mismatch. The earlier
+  // single-cause framing ("verify the search expression matches")
+  // made the empty result look like a query mistake when in fact the
+  // retriever had failed to fetch. Surface all three possible causes
+  // and lead with the most likely one based on the wall_time signal.
+  let third: string;
+  if (args.group_by && top) {
+    third = `Top ${args.group_by} value is ${top.group} with ${top.count} event${top.count === 1 ? '' : 's'}.`;
+  } else if (result.series.length === 0) {
+    const transportBound = wallTimeMs > 30_000 && result.workerFiles === 0;
+    if (transportBound) {
+      third =
+        `Series is empty AND wall_time ${wallTimeMs}ms with worker_files=0 — retriever likely did not return events for this pattern in this window (possible timeout, worker starvation, or stale archive index). ` +
+        `Less likely: pattern truly empty in window, OR search expression did not match. Check log10x_doctor retriever_forensic_health.`;
+    } else {
+      third =
+        `Series is empty. Three possible causes (most likely first): ` +
+        `(a) the pattern truly produced no events in this window, ` +
+        `(b) the search expression did not match the pattern's actual symbol_message, ` +
+        `(c) the retriever returned no rows for an unrelated reason — verify with log10x_retriever_query on the same window.`;
+    }
+  } else {
+    third = `Worker files: ${result.workerFiles}.`;
+  }
   return `${first} ${second} ${third}`;
 }
 

@@ -45,6 +45,7 @@ import {
   recordQuery,
 } from '../lib/chassis-envelope.js';
 import { fmtBytes as fmtBytesShared } from '../lib/format.js';
+import { formatPatternLabel } from '../lib/pattern-label.js';
 import { EXPLAIN_MODES, type ExplainMode } from './explain-mode.js';
 
 // ─── Schema ───────────────────────────────────────────────────────────────────
@@ -111,6 +112,17 @@ export interface PreviewFilterEnvelope {
     cohort: 'kept';
     scope_filter: string;
   } | null;
+  /**
+   * Math-lens workflow wpv1ay324: the workflow flagged that summing the
+   * per-row .percent_of_service column drifts vs the byte-derived ratio
+   * (71.92 vs 72.43% in the reference envelope) because per-row values
+   * are pre-rounded to 2dp before the table renders. This field is the
+   * authoritative byte-derived share so neither agents nor humans need
+   * to sum rounded column values. Computed as:
+   *   round(shown_bytes / total_service_bytes_per_month * 100, 2)
+   * Null when total_service_bytes_per_month is zero.
+   */
+  shown_share_of_service_pct: number | null;
 }
 
 // ─── Fixed-width table renderer ───────────────────────────────────────────────
@@ -138,11 +150,13 @@ function renderFixedWidthTable(
   const pad = (s: string, w: number): string => s.slice(0, w).padEnd(w, ' ');
   const padL = (s: string, w: number): string => s.slice(0, w).padStart(w, ' ');
 
-  const fmtBytes = (b: number): string => {
-    if (b >= 1024 ** 3) return `${(b / (1024 ** 3)).toFixed(1)}GB`;
-    if (b >= 1024 ** 2) return `${(b / (1024 ** 2)).toFixed(0)}MB`;
-    return `${(b / 1024).toFixed(0)}KB`;
-  };
+  // Math-lens workflow wpv1ay324: prior in-file fmtBytes used binary GB
+  // (2^30) while the envelope's headline + human_summary use decimal GB
+  // (10^9, the CloudWatch/Datadog/Splunk billing convention via the
+  // shared fmtBytesShared). The table's Volume column disagreeing with
+  // the headline is the same units bug the catalog-wide cost.ts fix
+  // already eliminated everywhere else. Use the shared formatter.
+  const fmtBytes = (b: number): string => fmtBytesShared(b);
 
   // Header
   const header = [
@@ -385,18 +399,32 @@ async function fetchFromTsdb(
     };
   });
 
-  // Disambiguate descriptors: when two rows share a 36-char prefix, append
-  // the last 4 chars of tenx_hash in parens to make each row unique.
-  const descriptor36s = rawAssembled.map((r) => r.descriptor_full.slice(0, 36));
+  // Math-lens workflow wpv1ay324: the table's Descriptor column used to
+  // blindly char-slice r.descriptor_full at 36 chars, surfacing raw
+  // underscored token blobs mid-word ("open_telemetry_opensearchexporter_cl",
+  // "retryable_error_Permanent_error_flus"). Burned rule (memory:
+  // feedback_no_hash_in_user_headlines) extends to table cells — they're
+  // user-facing too. Use the shared formatPatternLabel helper for a
+  // service-led, underscore-stripped, word-boundary-aware label, then
+  // disambiguate identical 36-char prefixes by appending the tenx_hash
+  // tail.
+  const descriptor36s = rawAssembled.map((r) =>
+    formatPatternLabel({
+      symbol_message: r.descriptor_full,
+      service: r.service,
+      severity: r.severity,
+      maxHintChars: 36,
+    })
+  );
   const seenPrefixes = new Map<string, number>();
   for (const d of descriptor36s) seenPrefixes.set(d, (seenPrefixes.get(d) ?? 0) + 1);
 
-  const rows: PreviewPatternRow[] = rawAssembled.map((r) => {
-    const prefix = r.descriptor_full.slice(0, 36);
-    const needsDisambig = (seenPrefixes.get(prefix) ?? 0) > 1 && r.tenx_hash.length >= 4;
+  const rows: PreviewPatternRow[] = rawAssembled.map((r, idx) => {
+    const base = descriptor36s[idx];
+    const needsDisambig = (seenPrefixes.get(base) ?? 0) > 1 && r.tenx_hash.length >= 4;
     const descriptor = needsDisambig
-      ? `${r.descriptor_full.slice(0, 31)}(${r.tenx_hash.slice(-4)})`
-      : prefix;
+      ? `${base.slice(0, Math.max(0, base.length - 6))} (${r.tenx_hash.slice(-4)})`
+      : base;
     return { ...r, descriptor };
   });
   const shownBytes = rows.reduce((s, r) => s + r.bytes_per_month, 0);
@@ -501,6 +529,9 @@ export async function executePreviewFilter(args: {
       ? `No patterns found for service "${args.service}" in mode "${args.mode}". Metrics may not be available yet.`
       : `Top ${patterns.length} patterns matching mode "${args.mode}" for "${args.service}", ${fmtBytesShared(shownBytesTotal)}/mo shown total (${fmtBytesShared(totalServiceBytes)}/mo full service total).`;
 
+  const shownShareOfServicePct = totalServiceBytes > 0
+    ? Math.round((shownBytesTotal / totalServiceBytes) * 100 * 100) / 100
+    : null;
   const envelope: PreviewFilterEnvelope = {
     service: args.service,
     mode: args.mode,
@@ -513,6 +544,7 @@ export async function executePreviewFilter(args: {
     data_source: dataSource,
     pattern_count_total: patternCountTotal,
     bytes_source: bytesSource,
+    shown_share_of_service_pct: shownShareOfServicePct,
   };
 
   // Top-3 most useful actions only (defect 27: was 40-entry bloat).

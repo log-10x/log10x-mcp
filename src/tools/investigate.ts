@@ -34,6 +34,7 @@ import { agentOnly, stripAgentOnly } from '../lib/agent-only.js';
 import { runAcuteSpikeCorrelation } from '../lib/correlate.js';
 import { detectInflection } from '../lib/inflection.js';
 import { patternDisplay } from '../lib/pattern-descriptor.js';
+import { formatPatternLabel } from '../lib/pattern-label.js';
 import {
   renderAcuteSpikeReport,
   renderDriftReport,
@@ -258,11 +259,33 @@ export function buildHumanSummary(
     // Note 25: must name a real pattern (symbol_message or back-resolved
     // anchor), never echo the literal placeholder "this pattern" that
     // userVisibleStartingPoint returns for hash-shaped inputs.
-    const patternDescriptor = resolvePatternDescriptor(starting_point, parsed);
+    // Math-lens workflow wpv1ay324: when the resolved descriptor is the
+    // raw underscored symbol_message (anchor was hash-shaped, back-
+    // resolved through parsed.anchorPattern), the prose leaks the token
+    // blob — the burned rule (feedback_no_hash_in_user_headlines)
+    // extends to symbol_message blobs. Wrap through formatPatternLabel
+    // for the same service-led, underscore-stripped, word-boundary-
+    // aware label all other tools now use.
+    const rawDescriptor = resolvePatternDescriptor(starting_point, parsed);
+    const patternDescriptor = rawDescriptor
+      ? formatPatternLabel({
+          symbol_message: rawDescriptor,
+          service: parsed.leadService,
+          maxHintChars: 60,
+          fallback: rawDescriptor,
+        })
+      : null;
     const lead = patternDescriptor
       ? `I looked at "${patternDescriptor}" over the last ${window}`
       : `I looked at the pattern you anchored on over the last ${window}`;
-    return `${lead} to see if anything else in your environment moved at the same time. Nothing did — the issue may be isolated, or the window's too short. Try widening to 24h.`;
+    // Calibration honesty: under unvalidated_default the "Nothing did"
+    // framing overstates certainty. The honest reading is that nothing
+    // crossed our default match-strength floor — which may or may not
+    // be the right floor for this data. Distinguish.
+    const noMatchClause = thresholdBasis === 'unvalidated_default'
+      ? `Nothing crossed our default match-strength floor (not yet tuned for your data) — could be that nothing related actually moved, or the floor is set too high for this dataset.`
+      : `Nothing did — the issue may be isolated, or the window's too short.`;
+    return `${lead} to see if anything else in your environment moved at the same time. ${noMatchClause} Try widening to 24h.`;
   }
   if (status === 'error') {
     return `Investigation of "${sp}" failed structurally. See data.error for details.`;
@@ -278,7 +301,18 @@ export function buildHumanSummary(
     parsed.leadConfidence !== null
       ? ` Match strength: ${(parsed.leadConfidence * 100).toFixed(0)}%${thresholdBasis === 'unvalidated_default' ? ' (default match threshold, not yet tuned for your data)' : ''}.`
       : '';
-  return `Strongest evidence on "${sp}" over ${window}: ${parsed.leadPattern}${parsed.leadService ? ` in ${parsed.leadService}` : ''} ${lagFragment}.${confFragment} ${parsed.chainLength} chain step(s), ${parsed.coMoverCount} additional related metric(s). This is correlation, not proven cause — verify via traces or deploy timeline before acting.`;
+  // Math-lens workflow wpv1ay324: parsed.leadPattern is the raw underscored
+  // symbol_message extracted from the renderer; wrap through
+  // formatPatternLabel so the success-path headline doesn't leak the
+  // token blob. The burned rule (feedback_no_hash_in_user_headlines)
+  // extends here.
+  const leadLabel = formatPatternLabel({
+    symbol_message: parsed.leadPattern,
+    service: parsed.leadService,
+    maxHintChars: 60,
+    fallback: parsed.leadPattern,
+  });
+  return `Strongest evidence on "${sp}" over ${window}: ${leadLabel} ${lagFragment}.${confFragment} ${parsed.chainLength} chain step(s), ${parsed.coMoverCount} additional related metric(s). This is correlation, not proven cause — verify via traces or deploy timeline before acting.`;
 }
 
 /**
