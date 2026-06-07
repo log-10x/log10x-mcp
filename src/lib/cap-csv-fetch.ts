@@ -74,9 +74,16 @@ export function buildCapCsvStatus(
     : null;
 
   if (!repo) {
+    // Math-lens workflow wt3lz36ye: the reason used to claim "set
+    // gitops.repo" was the only path to action-split attribution, but
+    // configure_engine also supports delivery='kubectl_configmap'
+    // (action-intent.json written directly to a k8s ConfigMap, no gh
+    // needed). Mention both paths so an operator using ConfigMap
+    // delivery doesn't conclude the catalog can't see their actions.
     return {
       kind: 'not_configured',
-      reason: 'No gitops repo is configured for this environment. Set gitops.repo in envs.json to enable action-split attribution.',
+      reason:
+        'No action source configured for this environment. Set gitops.repo in envs.json (for PR-based delivery) — or use configure_engine with delivery=kubectl_configmap to write action-intent.json directly to the cluster (no gitops repo required).',
       source: null,
     };
   }

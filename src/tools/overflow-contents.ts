@@ -112,8 +112,22 @@ interface OverflowPattern {
    *   insufficient_baseline — first-half bytes below the minimum floor; value suppressed.
    */
   growth_rate_basis: 'computed' | 'new_pattern' | 'insufficient_baseline';
-  /** Cap-CSV-derived action. Always `offload` in the returned list (filter); included for envelope-uniformity. */
-  action: Action;
+  /** Cap-CSV-derived action.
+   *
+   * Math-lens workflow wt3lz36ye: this field used to be hardcoded to
+   * `'offload'` on every row regardless of cap_csv_status, while the
+   * headline simultaneously hedged "offload action split could not be
+   * verified". Structured rows lied while the prose hedged. Now:
+   *   - When `cap_csv_status.kind === 'loaded'`, the row carries the
+   *     action looked up from action-intent.json (canonical) or the
+   *     legacy cap-CSV suffix as a fallback.
+   *   - Otherwise, action is `null` — the tool cannot prove the row's
+   *     disposition. Caller must surface this as unverified.
+   * `action_source` names where the action came from so consumers can
+   * gate on verification quality.
+   */
+  action: Action | null;
+  action_source: 'action_intent' | 'legacy_cap_csv' | 'unverified';
 }
 
 interface OverflowContentsSummary {
@@ -437,8 +451,45 @@ export async function executeOverflowContents(
       }
 
       // FIX 70 — growth_rate_basis: suppress artifact values.
-      const { pct: growth_rate_pct, basis: growth_rate_basis } =
+      // Math-lens workflow wt3lz36ye: growthPctWithBasis used to return
+      // basis='new_pattern' whenever firstHalfBytes<=0, which fires for
+      // pre-existing patterns whose volume was zero in the first half of
+      // the window (data-availability artifact, not identity-age signal).
+      // When time_window_basis flags degraded coverage, we now override
+      // basis to 'insufficient_window_data' instead of confidently
+      // asserting identity novelty.
+      let { pct: growth_rate_pct, basis: growth_rate_basis } =
         growthPctWithBasis(p.first_half_bytes, p.bytes_in_window);
+      if (
+        (time_window_basis === 'single_sample' ||
+          time_window_basis === 'insufficient_samples') &&
+        growth_rate_basis === 'new_pattern'
+      ) {
+        growth_rate_basis = 'insufficient_baseline';
+        growth_rate_pct = null;
+      }
+
+      // Math-lens workflow wt3lz36ye: action used to be hardcoded
+      // `'offload' as Action` on every row regardless of cap_csv_status.
+      // When status != 'loaded', the row label was unverified — but we
+      // stamped it anyway, contradicting the headline hedge. Now: only
+      // stamp action when cap_csv_status.kind === 'loaded' and the
+      // lookup returned a real action; otherwise action=null with
+      // action_source='unverified' so consumers can render the
+      // uncertainty rather than treat the stamp as authoritative.
+      let action: Action | null = null;
+      let action_source: 'action_intent' | 'legacy_cap_csv' | 'unverified' = 'unverified';
+      if (capCsvStatus.kind === 'loaded') {
+        const intentAction = actionIntentLookup.get(p.pattern_hash);
+        const legacyAction = legacyActionLookup.get(p.pattern_hash);
+        if (intentAction) {
+          action = intentAction;
+          action_source = 'action_intent';
+        } else if (legacyAction) {
+          action = legacyAction;
+          action_source = 'legacy_cap_csv';
+        }
+      }
 
       return {
         pattern_hash: p.pattern_hash,
@@ -451,7 +502,8 @@ export async function executeOverflowContents(
         time_window_basis,
         growth_rate_pct,
         growth_rate_basis,
-        action: 'offload' as Action,
+        action,
+        action_source,
       };
     }),
   };
@@ -483,6 +535,34 @@ export async function executeOverflowContents(
     headline = `${filtered.length} overflow-eligible pattern${filtered.length !== 1 ? 's' : ''} over ${tf.label}: ${fmtBytes(total_bytes_in_window)} routing configured to ${offloadBucket} but offload action split could not be verified — check log10x_doctor${filterLabel}.`;
   }
 
+  // Math-lens workflow wt3lz36ye: window-coverage caveat. When most or
+  // all surfaced rows have degraded time_window_basis (single_sample or
+  // insufficient_samples on a multi-day window), the headline numbers
+  // imply more confidence than the underlying samples justify. Surface
+  // this as a structured warning so the CFO/agent doesn't treat
+  // bytes_in_window as a stable 30d estimate when it's actually built
+  // from a one-time integration over very sparse points.
+  const allWarnings = [...envConfigWarnings];
+  const totalUsable = data.patterns.length;
+  if (totalUsable > 0) {
+    const singleSample = data.patterns.filter(
+      (p) => p.time_window_basis === 'single_sample'
+    ).length;
+    const insufficient = data.patterns.filter(
+      (p) => p.time_window_basis === 'insufficient_samples'
+    ).length;
+    const computed = totalUsable - singleSample - insufficient;
+    if (computed === 0 && (singleSample + insufficient) > 0) {
+      allWarnings.push(
+        `Window coverage degraded: 0 of ${totalUsable} surfaced patterns have multi-sample basis on ${tf.label} (${singleSample} single_sample + ${insufficient} insufficient_samples). bytes_in_window and growth_rate_pct are derived from sparse points; treat the headline total as an upper bound, not a stable estimate.`
+      );
+    } else if (computed / totalUsable < 0.5) {
+      allWarnings.push(
+        `Window coverage partial: only ${computed} of ${totalUsable} surfaced patterns have multi-sample basis on ${tf.label} (${singleSample} single_sample + ${insufficient} insufficient_samples). Patterns with degraded basis carry their data-availability flag on time_window_basis.`
+      );
+    }
+  }
+
   return buildChassisEnvelope({
     tool: 'log10x_overflow_contents',
     view: 'summary',
@@ -502,7 +582,7 @@ export async function executeOverflowContents(
     payload: data,
     human_summary: headline,
     actions: nextActions.map((a) => ({ tool: a.tool, args: a.args, reason: a.reason })),
-    warnings: envConfigWarnings.length > 0 ? envConfigWarnings : undefined,
+    warnings: allWarnings.length > 0 ? allWarnings : undefined,
     telemetry,
   });
 }

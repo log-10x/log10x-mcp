@@ -230,14 +230,25 @@ export async function executeTrend(
       : ', (rate unset)';
   const spikeClause = d.spike_detected ? ', spike detected' : '';
   let headline: string;
-  // Cap the pattern name to ~60 chars for the headline so it stays readable.
-  // The full name is preserved in data.payload.pattern for callers that need it.
-  const shortPattern = d.pattern.length > 60 ? d.pattern.slice(0, 57) + '...' : d.pattern;
+  // Math-lens workflow wt3lz36ye:
+  //   (1) Pattern name was embedded as a raw underscored blob — burned rule
+  //       (memory: feedback_no_hash_in_user_headlines). Replaced with
+  //       underscores-to-spaces hint, same shape as the other 5 tools we
+  //       fixed this session.
+  //   (2) "Currently offloaded" mislabels generic isDropped="true" bytes as
+  //       offload-specifically — same fix shape as top_patterns. Replaced
+  //       with action-neutral "currently reduced".
+  //   (3) "<pattern> offloaded over <window>" on include='dropped' headline:
+  //       same offload-overreach; cohort is generic isDropped, not
+  //       offload-specifically. Renamed to "<pattern> reduced cohort
+  //       over <window>".
+  const patternHint = (d.pattern || '').trim().replace(/_/g, ' ');
+  const shortPattern = patternHint.length > 60 ? patternHint.slice(0, 57) + '...' : patternHint;
   if (d.include === 'dropped') {
-    headline = `\`${shortPattern}\` offloaded over ${d.window}: ${fmtBytes(d.total_bytes)} dropped, change ${changeSign}${d.change_pct}%${dollarClause}${spikeClause}`;
+    headline = `\`${shortPattern}\` reduced cohort over ${d.window}: ${fmtBytes(d.total_bytes)} dropped, change ${changeSign}${d.change_pct}%${dollarClause}${spikeClause}`;
   } else if (d.include === 'both' && d.dropped_share_pct !== null) {
     const sharePct = Math.round(d.dropped_share_pct);
-    headline = `\`${shortPattern}\` over ${d.window}: ${fmtBytes(d.total_bytes)} union, ${sharePct}% currently offloaded, change ${changeSign}${d.change_pct}%${dollarClause}${spikeClause}`;
+    headline = `\`${shortPattern}\` over ${d.window}: ${fmtBytes(d.total_bytes)} union, ${sharePct}% currently reduced, change ${changeSign}${d.change_pct}%${dollarClause}${spikeClause}`;
   } else {
     headline = `\`${shortPattern}\` over ${d.window}: ${fmtBytes(d.total_bytes)}, change ${changeSign}${d.change_pct}% (last quarter vs first quarter run-rate)${dollarClause}${spikeClause}`;
   }
