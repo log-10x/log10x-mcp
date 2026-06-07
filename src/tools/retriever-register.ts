@@ -37,6 +37,7 @@ import {
 import type { EnvConfigStore } from '../lib/env-config/store-interface.js';
 import { defaultClusterConfigStoreChain } from '../lib/env-config/resolve-cluster-config.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { requireWriteAccess } from '../lib/read-only-guard.js';
 
 export const retrieverRegisterSchema = {
   env_id: z
@@ -127,6 +128,9 @@ export async function executeRetrieverRegister(
   args: RetrieverRegisterArgs,
   storesOverride?: EnvConfigStore[],
 ): Promise<string | StructuredOutput> {
+  requireWriteAccess(
+    'writes retriever endpoint + 4-queue config to the env-config document'
+  );
   const inner = await executeRetrieverRegisterInner(args, storesOverride);
   return buildEnvelope({
     tool: 'log10x_retriever_register',

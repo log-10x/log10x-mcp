@@ -83,6 +83,7 @@ import {
   type ActionIntentEntry,
 } from '../lib/action-intent-writer.js';
 import { resolveClusterConfig } from '../lib/env-config/resolve-cluster-config.js';
+import { requireWriteAccess } from '../lib/read-only-guard.js';
 
 // ─── constants ────────────────────────────────────────────────────────
 const DEFAULT_LOOKUP_PATH = 'pipelines/run/receive/rate/caps.csv';
@@ -1100,6 +1101,9 @@ export async function executeConfigureEngine(
   // zero-change PR).
   let applied: ConfigureEngineData['applied'];
   if (prCommand && (args.auto_apply ?? true) && !(args.read_only ?? false)) {
+    requireWriteAccess(
+      'opens a GitHub PR against the gitops repo (gh CLI) to modify the cap-CSV at pipelines/run/receive/rate/caps.csv'
+    );
     applied = await applyViaGh(prCommand);
   }
 
@@ -1492,6 +1496,9 @@ async function tryConsumePocSnapshot(
 
   let applied: ConfigureEngineData['applied'];
   if (prCommand && (args.auto_apply ?? true) && !(args.read_only ?? false)) {
+    requireWriteAccess(
+      'opens a GitHub PR against the gitops repo (gh CLI) to modify the cap-CSV at pipelines/run/receive/rate/caps.csv'
+    );
     applied = await applyViaGh(prCommand);
   }
 

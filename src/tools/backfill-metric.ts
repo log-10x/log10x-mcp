@@ -34,6 +34,7 @@ import { getRetrieverState } from '../lib/retriever-state.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { wrapBackendError } from '../lib/primitive-errors.js';
 import { newChassisTelemetry, buildChassisErrorEnvelope } from '../lib/chassis-envelope.js';
+import { requireWriteAccess } from '../lib/read-only-guard.js';
 
 export const backfillMetricSchema = {
   pattern: z
@@ -107,6 +108,14 @@ export async function executeBackfillMetric(
   },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
+  // Read-only mode guard — block the TSDB write when LOG10X_MCP_READ_ONLY is
+  // set. dry_run=true still previews the aggregation without writing, so
+  // skip the guard in that path.
+  if (!args.dry_run) {
+    requireWriteAccess(
+      'writes backfilled metrics to the configured backend (log10x prom or customer Datadog)'
+    );
+  }
   // Demo-env write guard: backfill_metric emits to an external TSDB; that
   // write is irreversible. Block it on the public demo env so agents that
   // chain cost_options → backfill_metric don't accidentally write to a

@@ -43,6 +43,7 @@ import { reloadEnvironmentsInPlace, clearOverridingEnvVar } from '../lib/environ
 import { writeCredentials, getCredentialsPath } from '../lib/credentials.js';
 import { rotateApiKey } from '../lib/api.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { requireWriteAccess } from '../lib/read-only-guard.js';
 
 export const rotateApiKeySchema = {
   confirm: z
@@ -66,6 +67,7 @@ export async function executeRotateApiKey(
   args: { confirm: 'rotate-now' },
   envs: Environments
 ): Promise<string | StructuredOutput> {
+  requireWriteAccess('rotates the API key on your Log10x account');
   const result = await executeRotateApiKeyInner(args, envs);
   return buildEnvelope({
     tool: 'log10x_rotate_api_key',

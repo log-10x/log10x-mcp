@@ -39,6 +39,7 @@ import { GcpSecretManagerStore } from '../lib/env-config/store-gcp-sm.js';
 import { AzureAppConfigStore } from '../lib/env-config/store-azure-ac.js';
 import { LocalFileStore } from '../lib/env-config/store-local-file.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { requireWriteAccess } from '../lib/read-only-guard.js';
 
 // ── Schemas ────────────────────────────────────────────────────────────────
 
@@ -271,6 +272,9 @@ export async function executeOffloadAdd(
   args: OffloadAddArgs,
   storeOverride?: EnvConfigStore[]
 ): Promise<string | StructuredOutput> {
+  requireWriteAccess(
+    'appends an offload destination to env-config offload_destinations[] and writes the updated document'
+  );
   const inner = await executeOffloadAddInner(args, storeOverride);
   return buildEnvelope({
     tool: 'log10x_offload_add',
@@ -415,6 +419,9 @@ export async function executeOffloadArchive(
   args: OffloadArchiveArgs,
   storeOverride?: EnvConfigStore[]
 ): Promise<string | StructuredOutput> {
+  requireWriteAccess(
+    'flips an offload destination to status=archived and writes the updated document'
+  );
   const inner = await executeOffloadArchiveInner(args, storeOverride);
   return buildEnvelope({
     tool: 'log10x_offload_archive',

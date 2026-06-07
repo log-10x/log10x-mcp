@@ -17,6 +17,7 @@ import type { Environments } from '../lib/environments.js';
 import { reloadEnvironmentsInPlace } from '../lib/environments.js';
 import { updateEnvironment } from '../lib/api.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { requireWriteAccess } from '../lib/read-only-guard.js';
 
 export const updateEnvSchema = {
   env_id: z
@@ -52,6 +53,7 @@ export async function executeUpdateEnv(
   args: { env_id: string; name?: string; is_default?: boolean },
   envs: Environments
 ): Promise<string | StructuredOutput> {
+  requireWriteAccess('updates the environment on your Log10x account');
   const inner = await executeUpdateEnvInner(args, envs);
   return buildEnvelope({
     tool: 'log10x_update_env',

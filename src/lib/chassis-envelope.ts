@@ -120,6 +120,11 @@ export const CHASSIS_VERSION = '1.0' as const;
  *                      too thin to produce a usable result. Widen or
  *                      re-anchor.
  *   - error          — structural failure; read data.error.
+ *   - demo_read_only — the MCP is running in the hosted demo playground
+ *                      with LOG10X_MCP_READ_ONLY=true; the writer tool
+ *                      refused to execute. data.error carries the
+ *                      `demo_read_only` discriminant and the would_have
+ *                      side-effect description.
  */
 export const ChassisStatusSchema = z.enum([
   'success',
@@ -127,6 +132,7 @@ export const ChassisStatusSchema = z.enum([
   'partial',
   'insufficient_data',
   'error',
+  'demo_read_only',
 ]);
 export type ChassisStatus = z.infer<typeof ChassisStatusSchema>;
 
@@ -653,22 +659,25 @@ export function buildChassisEnvelope(input: ChassisEnvelopeInput): ChassisEnvelo
   // invisible to the agent. When mode is null/undefined, pass through
   // unfiltered (boot-race or test-only override — defensive default).
   const filteredActions = filterActionsByActiveMode(input.actions ?? [], input.mode ?? null, warnings);
-  if (input.status === 'error' && !input.error) {
+  // The two status values that carry an error block: 'error' (structural
+  // failure) and 'demo_read_only' (writer blocked by read-only guard).
+  const isErrorBearing = input.status === 'error' || input.status === 'demo_read_only';
+  if (isErrorBearing && !input.error) {
     // In development mode: fail fast so tool authors catch this at
     // test time rather than silently emitting an unbranchable error.
     if (process.env.NODE_ENV === 'development' || process.env.CHASSIS_STRICT === '1') {
       throw new Error(
-        `chassis contract violation: status="error" on tool "${input.tool}" but no error block provided. ` +
-        'Pass an error: { error_type, retryable, suggested_backoff_ms, hint } when status="error".',
+        `chassis contract violation: status="${input.status}" on tool "${input.tool}" but no error block provided. ` +
+        'Pass an error: { error_type, retryable, suggested_backoff_ms, hint } when status carries an error block.',
       );
     }
     warnings.push(
-      'chassis: status=error but no error field provided. This is a tool-authoring bug.',
+      `chassis: status=${input.status} but no error field provided. This is a tool-authoring bug.`,
     );
   }
-  if (input.status !== 'error' && input.error) {
+  if (!isErrorBearing && input.error) {
     warnings.push(
-      'chassis: error field is present but status !== "error". The error field will be ignored by agents.',
+      'chassis: error field is present but status is not error-bearing. The error field will be ignored by agents.',
     );
   }
 
@@ -837,6 +846,75 @@ export function buildChassisErrorEnvelope(opts: {
     warnings: opts.warnings,
     actions: opts.actions,
   });
+}
+
+// ── Demo read-only envelope ────────────────────────────────────────────────────
+
+/**
+ * Build a `demo_read_only` envelope for a writer tool that was blocked
+ * by `requireWriteAccess()` while the MCP is running with
+ * `LOG10X_MCP_READ_ONLY=true`.
+ *
+ * The catalog stays "visible-but-locked": tool descriptions + schemas
+ * are still served, but calling a writer tool returns this envelope
+ * instead of executing. The shape is:
+ *
+ *   status: 'error'
+ *   data.status: 'demo_read_only'
+ *   data.error.error_type: 'demo_read_only'
+ *   data.error.retryable: false
+ *   data.error.suggested_backoff_ms: null
+ *   data.error.hint: full remediation string from DemoReadOnlyError
+ *   summary.headline: 'Demo read-only mode: <would_have>'
+ *
+ * `data.status` is one of the ChassisStatus enum values; we use 'error'
+ * since the call did not produce a payload. The `demo_read_only`
+ * discriminant lives on `data.error.error_type`, which is what agents
+ * branch on. Headline + hint surface the per-tool would_have phrase so
+ * a human reader knows exactly what side effect was blocked.
+ */
+export function buildDemoReadOnlyEnvelope(opts: {
+  tool: string;
+  /** The `would_have` phrase from the DemoReadOnlyError. */
+  would_have: string;
+  /** The full agent-facing hint from the DemoReadOnlyError. */
+  hint: string;
+  telemetry?: ChassisTelemetry;
+  /** Optional context echo of the call args. */
+  contextPayload?: Record<string, unknown>;
+  warnings?: string[];
+}): ChassisEnvelope {
+  // Build through the chassis to inherit invocation_id, performance,
+  // schema_version, and zod-validated data shape. Pass status='demo_read_only'
+  // so data.status carries the discriminant; then override the outer
+  // envelope status to 'error' so harnesses that branch on the top-level
+  // status field treat this as a non-success outcome.
+  const env = buildChassisEnvelope({
+    tool: opts.tool,
+    view: 'summary',
+    headline: `Demo read-only mode: ${opts.would_have}`,
+    status: 'demo_read_only',
+    decisions: {
+      threshold_used: null,
+      threshold_basis: 'default',
+    },
+    source_disclosure: {},
+    scope: {
+      window: 'unknown',
+      window_basis: 'auto_default',
+    },
+    payload: opts.contextPayload ?? {},
+    human_summary: opts.hint,
+    error: {
+      error_type: 'demo_read_only',
+      retryable: false,
+      suggested_backoff_ms: null,
+      hint: opts.hint,
+    },
+    telemetry: opts.telemetry,
+    warnings: opts.warnings,
+  });
+  return { ...env, status: 'error' as ChassisStatus };
 }
 
 // ── Back-compat helpers ────────────────────────────────────────────────────────

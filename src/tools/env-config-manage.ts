@@ -44,6 +44,7 @@ import type { EnvConfigStore } from '../lib/env-config/store-interface.js';
 import { defaultClusterConfigStoreChain } from '../lib/env-config/resolve-cluster-config.js';
 import { envConfigFromEnvVars } from '../lib/env-config/env-var-bridge.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { requireWriteAccess } from '../lib/read-only-guard.js';
 
 // ── shared store helpers ────────────────────────────────────────────────────
 
@@ -169,6 +170,9 @@ export async function executeDestSet(
   args: DestSetArgs,
   storesOverride?: EnvConfigStore[],
 ): Promise<StructuredOutput> {
+  requireWriteAccess(
+    'updates destination.siem_vendor + region + endpoint on the env-config document'
+  );
   const stores = storesOverride ?? defaultClusterConfigStoreChain();
   const found = await findEnvDocInChain(args.env_id, stores);
   if (!found) return envNotFoundEnvelope('log10x_dest_set', args.env_id);

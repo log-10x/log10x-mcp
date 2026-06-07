@@ -14,6 +14,7 @@ import type { Environments } from '../lib/environments.js';
 import { reloadEnvironmentsInPlace } from '../lib/environments.js';
 import { updateUserMetadata } from '../lib/api.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { requireWriteAccess } from '../lib/read-only-guard.js';
 
 export const updateSettingsSchema = {
   metadata: z
@@ -42,6 +43,8 @@ export async function executeUpdateSettings(
   args: { metadata: Record<string, unknown> },
   envs: Environments
 ): Promise<string | StructuredOutput> {
+  requireWriteAccess('updates user/account settings via /api/v1/user/settings');
+
   const inner = await executeUpdateSettingsInner(args, envs);
   return buildEnvelope({
     tool: 'log10x_update_settings',

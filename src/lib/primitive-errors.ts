@@ -79,6 +79,12 @@ export const PRIMITIVE_ERROR_TYPES = [
    * validation. Caller-side bug — DO NOT retry; surface the rejected
    * key(s) so the agent can correct the call. */
   'unknown_arg',
+  /** The MCP is running in the hosted demo playground with
+   * `LOG10X_MCP_READ_ONLY=true`. Writer tools refuse to execute and
+   * return a `demo_read_only` envelope describing what they WOULD have
+   * done. Catalog stays visible; execution is gated. Not retryable — the
+   * caller must run against a real environment with the env var unset. */
+  'demo_read_only',
   'unknown',
 ] as const;
 

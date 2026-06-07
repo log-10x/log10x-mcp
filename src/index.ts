@@ -63,6 +63,8 @@ import {
 import { doctorSchema, executeDoctor, runDoctorChecks, renderDoctorReport } from './tools/doctor.js';
 import { log } from './lib/log.js';
 import { describeToolError } from './lib/tool-errors.js';
+import { DemoReadOnlyError, isReadOnlyMode } from './lib/read-only-guard.js';
+import { buildDemoReadOnlyEnvelope } from './lib/chassis-envelope.js';
 import { retrieverQuerySchema, executeRetrieverQuery } from './tools/retriever-query.js';
 import { retrieverSeriesSchema, executeRetrieverSeries } from './tools/retriever-series.js';
 import { retrieverQueryStatusSchema, executeRetrieverQueryStatus } from './tools/retriever-query-status.js';
@@ -433,6 +435,30 @@ async function wrap(
   } catch (e) {
     const raw = e instanceof Error ? e.message : String(e);
     log.debug(`tool.${toolName}.raw_err`, { msg: raw });
+    // Demo read-only gate: a writer tool called `requireWriteAccess()` while
+    // the MCP is running with LOG10X_MCP_READ_ONLY=true. Return the canonical
+    // demo_read_only envelope (status='error', data.status='demo_read_only',
+    // data.error.error_type='demo_read_only') so the agent can branch on the
+    // typed discriminant without parsing prose. structuredContent is populated
+    // so MCP hosts that honor the 2025-03-26 revision see typed JSON directly.
+    if (e instanceof DemoReadOnlyError) {
+      log.info(`tool.${toolName}.demo_read_only`, {
+        ms: Date.now() - started,
+        would_have: e.would_have.slice(0, 200),
+      });
+      const envelope = buildDemoReadOnlyEnvelope({
+        tool: toolName,
+        would_have: e.would_have,
+        hint: e.hint,
+      });
+      const structuredContent = envelope as unknown as Record<string, unknown>;
+      return {
+        content: [
+          { type: 'text' as const, text: JSON.stringify(envelope, null, 2) },
+        ],
+        structuredContent,
+      };
+    }
     // A deliberate "not configured" throw (the loud human-escape-hatch
     // path, e.g. customer_metrics_query) must not abort the agent's chain
     // as an opaque error. Convert it to a structured, branchable
@@ -2117,11 +2143,22 @@ async function main() {
     default_env: loaded.default.nickname,
     demo_mode: loaded.isDemoMode,
     demo_playground: DEMO_PLAYGROUND,
+    read_only_mode: isReadOnlyMode(),
     manifest_loaded: manifest !== null,
     boot_mode: bootMode?.mode,
     boot_mode_backend: bootMode?.detectionPath,
     boot_mode_probe_ms: bootMode?.probeDurationMs,
   });
+  // Read-only playground banner. The structured `mcp.boot` line is
+  // gated behind LOG10X_MCP_LOG_LEVEL (silent by default), so operators
+  // would not see read-only state in stock installs. Force a stderr
+  // banner when the gate is on, regardless of log level.
+  if (isReadOnlyMode()) {
+    // eslint-disable-next-line no-console
+    console.error(
+      `[log10x-mcp] Running in read-only mode (LOG10X_MCP_READ_ONLY=${process.env.LOG10X_MCP_READ_ONLY}). Writer tools will return demo_read_only envelopes instead of executing.`,
+    );
+  }
   // Surface mode-detect resolution to stderr at boot so it shows up
   // in MCP-client logs without needing to call `log10x_doctor`.
   if (bootMode) {

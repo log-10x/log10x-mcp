@@ -55,6 +55,7 @@ import {
 import type { EnvConfigStore, StoreKind } from '../lib/env-config/store-interface.js';
 import { buildStore, buildDefaultStoreChain } from '../lib/env-config/stores.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { requireWriteAccess } from '../lib/read-only-guard.js';
 
 /** The store kinds a caller may pin via `target_store`. Mirrors `StoreKind`. */
 const targetStoreEnum = z.enum(['k8s', 'aws_ssm', 'gcp_sm', 'azure_ac', 'local']);
@@ -127,6 +128,9 @@ interface EnvRegisterInner {
 export async function executeEnvRegister(
   args: EnvRegisterArgs
 ): Promise<string | StructuredOutput> {
+  requireWriteAccess(
+    'writes the env-config document for env_id to the on-prem store (k8s ConfigMap log10x-env-config-{env_id} or equivalent)'
+  );
   const inner = await executeEnvRegisterInner(args);
 
   const headline = inner.ok
