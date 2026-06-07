@@ -1657,6 +1657,16 @@ function renderMarkdown(env: CommitmentReportEnvelope): string {
   lines.push('');
   lines.push('## Weekly delivery');
   lines.push('');
+  // Scope label (math-lens workflow wol3rcauh, cfo_md bug #3): the bar
+  // shows per-week delivered_pct (denominator = that week's bytes_in),
+  // which can diverge sharply from the period delivered_pct in the
+  // header when weekly_series is sparse. Earlier the CFO saw "delivered
+  // 3.7%" in the header and an 8.7% bar with no label and concluded
+  // there was a contradiction.
+  lines.push(
+    `_Each bar shows that week's delivered % vs that week's ingest (single-week scope). The header's delivered ${env.delivered_pct.toFixed(1)}% is the cumulative period average across all ${env.weekly_series.length} populated week${env.weekly_series.length === 1 ? '' : 's'}._`
+  );
+  lines.push('');
   lines.push('```');
   lines.push(renderAsciiChart(env.weekly_series, env.commitment.promised_pct));
   lines.push('```');
@@ -1700,32 +1710,48 @@ function renderMarkdown(env: CommitmentReportEnvelope): string {
     const value = env.delivered_dollars * (bytes / env.delivered_bytes);
     return buildDisclosedDollarValue(value, env.rate_source, siemLabel, listRatePerGb);
   };
+  // Bug from math-lens workflow wol3rcauh: this table previously hardcoded
+  // {Drop, Compact, Offload, Tier-down} as the four rows. When the engine's
+  // actual policy applies via sample (the error-tier default) or when
+  // bytes_saved gets attributed to pass via the intent_observation drift
+  // path, the rendered CFO table shows $0/0 bytes across every row even
+  // though delivered_bytes is non-zero. On the otel-demo run sample (66 MB)
+  // and pass (184 MB) carry 100% of the 250 MB delivered savings; the old
+  // table hid all of it. Driving the table off ba directly closes the gap.
+  type ActionKey = 'drop' | 'compact' | 'offload' | 'tier_down' | 'sample' | 'pass';
+  const actionRows: Array<{ key: ActionKey; label: string }> = [
+    { key: 'drop',      label: 'Drop' },
+    { key: 'compact',   label: 'Compact' },
+    { key: 'offload',   label: 'Offload' },
+    { key: 'tier_down', label: 'Tier-down' },
+    { key: 'sample',    label: 'Sample' },
+    { key: 'pass',      label: 'Pass' },
+  ];
+  // Show every row whose bucket is non-zero, plus drop/compact/tier-down as
+  // anchor rows so the CFO sees zeros explicitly where they exist. Offload
+  // row is suppressed when the offload-status helper timed out (the value
+  // is null-equivalent in that case).
+  const isAnchor = (k: ActionKey) => k === 'drop' || k === 'compact' || k === 'tier_down';
+  const visibleActions = actionRows.filter((r) => {
+    if (r.key === 'offload' && offloadTimedOut) return false;
+    return isAnchor(r.key) || ba[r.key] > 0;
+  });
   if (showDollars) {
     lines.push('| Action    | Share of bytes | Bytes saved | Dollars |');
     lines.push('|-----------|----------------|-------------|---------|');
-    lines.push(
-      `| Drop      | ${pa.drop.toFixed(1)}%           | ${ba.drop.toLocaleString()} | ${fmtDisclosedDollar(dollarShareDisclosed(ba.drop))} |`
-    );
-    lines.push(
-      `| Compact   | ${pa.compact.toFixed(1)}%           | ${ba.compact.toLocaleString()} | ${fmtDisclosedDollar(dollarShareDisclosed(ba.compact))} |`
-    );
-    if (!offloadTimedOut) {
+    for (const { key, label } of visibleActions) {
       lines.push(
-        `| Offload   | ${pa.offload.toFixed(1)}%           | ${ba.offload.toLocaleString()} | ${fmtDisclosedDollar(dollarShareDisclosed(ba.offload))} |`
+        `| ${label.padEnd(9)} | ${pa[key].toFixed(1)}%           | ${ba[key].toLocaleString()} | ${fmtDisclosedDollar(dollarShareDisclosed(ba[key]))} |`
       );
     }
-    lines.push(
-      `| Tier-down | ${pa.tier_down.toFixed(1)}%           | ${ba.tier_down.toLocaleString()} | ${fmtDisclosedDollar(dollarShareDisclosed(ba.tier_down))} |`
-    );
   } else {
     lines.push('| Action    | Share of bytes | Bytes saved |');
     lines.push('|-----------|----------------|-------------|');
-    lines.push(`| Drop      | ${pa.drop.toFixed(1)}%           | ${ba.drop.toLocaleString()} |`);
-    lines.push(`| Compact   | ${pa.compact.toFixed(1)}%           | ${ba.compact.toLocaleString()} |`);
-    if (!offloadTimedOut) {
-      lines.push(`| Offload   | ${pa.offload.toFixed(1)}%           | ${ba.offload.toLocaleString()} |`);
+    for (const { key, label } of visibleActions) {
+      lines.push(
+        `| ${label.padEnd(9)} | ${pa[key].toFixed(1)}%           | ${ba[key].toLocaleString()} |`
+      );
     }
-    lines.push(`| Tier-down | ${pa.tier_down.toFixed(1)}%           | ${ba.tier_down.toLocaleString()} |`);
   }
   // §C.3: Offload nudge — declarative wording, no "you / your".
   if (ba.offload > 0) {
@@ -2126,6 +2152,40 @@ export async function executeCommitmentReport(
   const mismatchCount = agg.per_pattern_rows.filter(
     (r) => r.intent_observation_mismatch
   ).length;
+  // Baseline-drift caveat (math-lens workflow wol3rcauh, cfo_md bug #2):
+  // promised_dollars is computed against commitment.baseline_usd_monthly
+  // (captured at apply time) while delivered_dollars is computed from
+  // actual observed dropped bytes over the post-window. When the cluster's
+  // ingest drifts substantially from apply-time baseline (e.g. lower
+  // traffic, throttle, or pre-policy ramp), the dollar ratio
+  // delivered_dollars/promised_dollars no longer tracks the byte ratio
+  // delivered_pct/promised_pct. A CFO comparing "$0.12 delivered vs $70
+  // promised" then sees 0.17% achievement when the actual byte delivery
+  // is 3.7% / 30% = 12.3% — a 70x apparent discrepancy that is
+  // arithmetically the result of two different denominators, NOT a
+  // policy failure. Surface it explicitly so the CFO doesn't panic.
+  if (
+    promised_dollars != null &&
+    agg.delivered_dollars != null &&
+    promised_dollars > 0 &&
+    commitment.promised_pct > 0
+  ) {
+    const dollarPctOfPromised = (agg.delivered_dollars / promised_dollars) * 100;
+    const bytePctOfPromised = (agg.delivered_pct / commitment.promised_pct) * 100;
+    const ratioOfRatios =
+      bytePctOfPromised > 0 ? dollarPctOfPromised / bytePctOfPromised : 1;
+    // Flag when dollar achievement and byte achievement diverge by 2x or
+    // more (catches the cluster-ramp / actual-vs-baseline-drift case).
+    if (
+      ratioOfRatios > 0 &&
+      (ratioOfRatios < 0.5 || ratioOfRatios > 2) &&
+      Number.isFinite(ratioOfRatios)
+    ) {
+      caveats.push(
+        `Baseline drift: dollar achievement (${dollarPctOfPromised.toFixed(2)}% of promised $) and byte achievement (${bytePctOfPromised.toFixed(2)}% of promised %) diverge by ${ratioOfRatios < 1 ? (1 / ratioOfRatios).toFixed(1) + 'x lower' : ratioOfRatios.toFixed(1) + 'x higher'}. Cause: promised_dollars uses commitment.baseline_usd_monthly captured at apply time, while delivered_dollars uses actual observed dropped bytes; when current ingest differs from the apply-time baseline, the two ratios decouple. Compare byte percent (delivered_pct vs promised_pct) for policy performance — the dollar gap reflects ingest drift, not policy failure.`
+      );
+    }
+  }
   if (mismatchCount > 0) {
     const mismatchBytes = agg.per_pattern_rows
       .filter((r) => r.intent_observation_mismatch)

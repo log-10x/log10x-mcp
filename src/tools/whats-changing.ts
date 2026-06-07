@@ -136,12 +136,36 @@ function formatHeadlineDollars(delta: number): string {
 
 /**
  * User-facing descriptor for headlines. Pattern hash is opaque to users —
- * lead with the symbol_message instead (truncated like pattern_trend's
- * "..." style). Hash stays in the payload for round-trip.
+ * burned rule (memory: feedback_no_hash_in_user_headlines): lead with
+ * pattern name + service + state, NOT raw symbol/hash artifacts. The
+ * symbol_message field contains underscore-joined tokens like
+ * "terror_v_logger_go_failed_t_resource_service_instance_id..." which
+ * read as machine-generated junk. Math-lens workflow wol3rcauh flagged
+ * the prior version which surfaced exactly that.
+ *
+ * Format: "<top service> <SEVERITY pattern|pattern>" (e.g.
+ * "opentelemetry-collector ERROR pattern", "payment pattern").
+ * Symbol-message tokens are rendered as a parenthetical hint with
+ * underscores replaced by spaces, capped at 40 chars, so the operator
+ * still gets a clue to the cluster without the headline looking like
+ * a raw blob.
  */
-function formatHeadlineDescriptor(row: { pattern_hash: string; symbol_message: string }): string {
-  const raw = (row.symbol_message ?? '').trim() || 'pattern';
-  return raw.length > 60 ? raw.slice(0, 57) + '...' : raw;
+function formatHeadlineDescriptor(row: {
+  pattern_hash: string;
+  symbol_message: string;
+  services?: Array<{ name: string; severity?: string }>;
+}): string {
+  const topService = row.services?.[0];
+  const lead = topService?.name
+    ? topService.severity && topService.severity.length > 0
+      ? `${topService.name} ${topService.severity} pattern`
+      : `${topService.name} pattern`
+    : 'pattern';
+  const raw = (row.symbol_message ?? '').trim();
+  if (!raw) return lead;
+  const hint = raw.replace(/_/g, ' ');
+  const truncatedHint = hint.length > 40 ? hint.slice(0, 37) + '...' : hint;
+  return `${lead} (${truncatedHint})`;
 }
 
 export async function executeWhatsChanging(
@@ -432,8 +456,11 @@ export async function executeWhatsChanging(
         continue;
       }
       // Pre-existing pattern that was silent across all baseline anchors.
-      // Surface it as a 100% delta-pct row (current emit vs zero baseline)
-      // rather than discard it. The headline phrasing should explain.
+      // Surface it with delta_pct=0 (percent-change is mathematically
+      // undefined against a zero baseline; we zero it for distribution
+      // stats stability). Dollar delta is the only meaningful magnitude
+      // for these rows — the callout names them explicitly so the
+      // operator doesn't read the 0% as "unchanged".
       silentInBaselineCount += 1;
     }
     services.sort((a, b) => Math.abs(b.delta_usd) - Math.abs(a.delta_usd));
@@ -550,8 +577,16 @@ export async function executeWhatsChanging(
     );
   }
   if (silentInBaselineCount > 0) {
+    // Math-lens workflow wol3rcauh, whats_changing bug #1: previous text
+    // said "treated as 100% deltas vs zero baseline" but the code (line
+    // 443: `costBaseline > 0 ? (delta / costBaseline) * 100 : 0`) returns
+    // 0%, not 100%, when baseline is zero. "100% delta" mathematically
+    // means current = 2 × baseline (doubled), which can't apply to a
+    // zero-baseline row at all. Honest framing: percent-change is
+    // undefined; only the dollar delta is meaningful for these rows.
+    const verb = silentInBaselineCount === 1 ? 'was' : 'were';
     calloutParts.push(
-      `${silentInBaselineCount} pre-existing pattern${silentInBaselineCount === 1 ? '' : 's'} was silent across all baseline anchor windows (1×/2×/3× timeRange offsets) — these are emitting now after a quiet stretch and treated as 100% deltas vs zero baseline.`
+      `${silentInBaselineCount} pre-existing pattern${silentInBaselineCount === 1 ? '' : 's'} ${verb} silent across all baseline anchor windows (1×/2×/3× timeRange offsets) — emitting now after a quiet stretch. Percent-change is undefined (zero baseline); only dollar delta is meaningful for these rows.`
     );
   }
   const callout = calloutParts.length > 0 ? calloutParts.join(' ') : undefined;
@@ -574,7 +609,7 @@ export async function executeWhatsChanging(
       : '';
   const silentBaselineTag =
     silentInBaselineCount > 0
-      ? ` ${silentInBaselineCount} pre-existing pattern${silentInBaselineCount === 1 ? '' : 's'} silent across all baseline anchor windows — surfaced as 100% deltas vs zero baseline (these are NOT new identities).`
+      ? ` ${silentInBaselineCount} pre-existing pattern${silentInBaselineCount === 1 ? '' : 's'} silent across all baseline anchor windows — emitting now after a quiet stretch (these are NOT new identities; percent-change is undefined against a zero baseline, only dollar delta is meaningful).`
       : '';
   const humanSummary =
     status === 'no_signal'
