@@ -458,20 +458,11 @@ interface ConfigureEngineData {
     };
     /**
      * Count of candidate patterns classified into each tier (pre-solver).
-     * Same denominator that `unused_defaults` reasons against. Renamed from
-     * `applied_count_by_tier` to make the distinction with
-     * `applied_default_count_by_tier` explicit; kept on the envelope for
-     * back-compat with downstream consumers under the old name as well.
+     * Same denominator that `unused_defaults` reasons against. For the
+     * count of rows that actually TOOK the configured default, read
+     * `applied_default_count_by_tier` instead.
      */
     classified_count_by_tier: Record<Tier, number>;
-    /**
-     * Back-compat alias for `classified_count_by_tier`. Older consumers read
-     * `applied_count_by_tier` thinking it meant "rows that took the default";
-     * it never did — it meant "rows classified into the tier". Both fields
-     * carry the same number so existing callers don't break, and new callers
-     * should read `applied_default_count_by_tier` for the true applied count.
-     */
-    applied_count_by_tier: Record<Tier, number>;
     /**
      * Count of rows whose final action came from the tier's caller-configured
      * default (standard/debug/synthetic) and survived the target-met
@@ -811,12 +802,16 @@ export async function executeConfigureEngine(
   // gives Datadog → tier_down, Splunk-no-app → offload, etc. Drop is only
   // chosen when the destination table explicitly lists it (none currently
   // do — drop remains an explicit user override).
+  //
+  // Bug A: the "fell back to X" warning is NOT pushed here — at this point
+  // we only know the mapping was proposed, not that any row survived the
+  // greedy target-met downgrade carrying that action. The warning is
+  // pushed after the solver loop, gated on standardFallbackSurvivors > 0.
   let effectiveStandardAction: Action = standardAction;
-  if (standardAction === 'compact' && model.compact_mode === 'no-op') {
+  const standardCompactNoOpFallbackFired =
+    standardAction === 'compact' && model.compact_mode === 'no-op';
+  if (standardCompactNoOpFallbackFired) {
     effectiveStandardAction = getDefaultActionForDestination(destination, 1);
-    warnings.push(
-      `\`compact\` is a no-op on ${destination}; standard-tier default fell back to \`${effectiveStandardAction}\` (destination's preferred level-1 action). Override via \`action_defaults.standard\`.`
-    );
   }
 
   // Run the greedy solver.
@@ -848,6 +843,10 @@ export async function executeConfigureEngine(
   let remainingBytesToShed = targetShedBytes;
   let floorCount = 0;
   let coveredBytes = 0;
+  // Bug A counter: standard-tier rows whose final action is the
+  // destination-compat fallback (effectiveStandardAction) AND survived
+  // the target-met downgrade. Drives the bypassHint phrasing below.
+  let standardFallbackSurvivors = 0;
 
   for (const c of candidates) {
     const monthlyBytes = c.bytes * scaleToMonth;
@@ -922,6 +921,23 @@ export async function executeConfigureEngine(
       }
     }
 
+    // Bug A: track standard-tier survivors whose final action is the
+    // destination-compat fallback (`effectiveStandardAction`). When the
+    // requested standard action is a no-op on this destination (e.g.
+    // compact on cloudwatch → tier_down), the fallback mapping fires
+    // before the target-met downgrade. If ALL of those rows then get
+    // downgraded to pass (zero survivors), the bypassHint must NOT
+    // claim "rows took tier_down" — it has to say "rows were initially
+    // mapped to tier_down then downgraded to pass". The hint logic
+    // below uses this counter to pick the right phrasing.
+    if (
+      c.tier === 'standard' &&
+      action === effectiveStandardAction &&
+      effectiveStandardAction !== standardAction
+    ) {
+      standardFallbackSurvivors += 1;
+    }
+
     // Project savings range using the cost lib.
     const range = projectActionRange({
       action,
@@ -970,6 +986,26 @@ export async function executeConfigureEngine(
     }
   }
 
+  // Bug A: now that the solver has run, emit the destination-compat
+  // fallback warning IF and only IF rows actually survived carrying the
+  // fallback action. When zero rows survived (every standard-tier row
+  // was demoted to pass by the target-met downgrade), we say so —
+  // claiming the fallback fired without survivors gives the agent a
+  // misleading mental model of the policy actually deployed.
+  if (standardCompactNoOpFallbackFired) {
+    if (standardFallbackSurvivors > 0) {
+      warnings.push(
+        `\`compact\` is a no-op on ${destination}; ${standardFallbackSurvivors} standard-tier row${standardFallbackSurvivors === 1 ? '' : 's'} took \`${effectiveStandardAction}\` (destination's preferred level-1 action). Override via \`action_defaults.standard\`.`
+      );
+    } else if (patternsByTier.standard > 0) {
+      warnings.push(
+        `\`compact\` is a no-op on ${destination}; the destination-compat fallback would map standard-tier rows to \`${effectiveStandardAction}\`, but all ${patternsByTier.standard} standard-tier row${patternsByTier.standard === 1 ? '' : 's'} were downgraded to \`pass\` because the target was already met by error-tier sampling. No fallback action survived in the final policy.`
+      );
+    }
+    // (No warning when patternsByTier.standard === 0 — the
+    // unused-default block below already covers it.)
+  }
+
   // ── action_defaults resolution diagnostic (arc-C defect 9, Fix A) ──
   // Build a structured record of which caller-requested defaults actually
   // drove row output vs were swallowed. Two failure modes:
@@ -1014,9 +1050,14 @@ export async function executeConfigureEngine(
       tier: 'standard',
       requested: standardAction,
       effective: effectiveStandardAction,
+      // Bug A: the bypassHint must reflect what the solver ACTUALLY did,
+      // not what the destination-compat fallback initially proposed. Four
+      // cases, narrowed by (fallback fired?) × (any survivor?):
       bypassHint:
         effectiveStandardAction !== standardAction
-          ? `standard-tier rows took \`${effectiveStandardAction}\` (destination-compat fallback) instead of your requested \`${standardAction}\``
+          ? standardFallbackSurvivors > 0
+            ? `standard-tier rows took \`${effectiveStandardAction}\` (destination-compat fallback) instead of your requested \`${standardAction}\` (${standardFallbackSurvivors} survived target-met downgrade)`
+            : `standard-tier rows were initially mapped to \`${effectiveStandardAction}\` (destination-compat fallback for \`${standardAction}\` on \`${destination}\`), then ALL downgraded to \`pass\` because the target was already met by error-tier sampling`
           : 'every standard-tier row was floor-pinned or downgraded to `pass` because the target was already met by error-tier sampling',
     },
     {
@@ -1077,8 +1118,6 @@ export async function executeConfigureEngine(
       synthetic: appliedDefaultByTier.synthetic > 0 ? syntheticAction : null,
     },
     classified_count_by_tier: patternsByTier,
-    // Back-compat alias — same number under the historical (misleading) name.
-    applied_count_by_tier: patternsByTier,
     applied_default_count_by_tier: appliedDefaultByTier,
     unused_defaults: unusedDefaults,
     defined_but_unused_defaults: definedButUnusedDefaults,
