@@ -340,7 +340,7 @@ const schemaObj = z.object(configureEngineSchema);
 export type ConfigureEngineArgs = z.infer<typeof schemaObj>;
 
 // ─── output types ─────────────────────────────────────────────────────
-interface PerPatternRow {
+export interface PerPatternRow {
   pattern_hash: string;
   current_bytes_30d: number;
   cap_bytes_per_window: number;
@@ -2297,7 +2297,7 @@ function renderCsv(rows: Map<string, string>, preamble?: string[]): string {
   return out.join('\n') + '\n';
 }
 
-function renderCsvDiff(
+export function renderCsvDiff(
   containers: string[],
   currentCsv: string | undefined,
   rows: PerPatternRow[],
@@ -2310,6 +2310,23 @@ function renderCsvDiff(
   // Container-level default row per container. Format:
   // `<bytes>::<reason>` (no `:action` suffix — action intent lives in
   // data/action-intent.json, not in the cap CSV).
+  //
+  // KEY BINDING: The engine's rate module reads caps.csv keyed by the
+  // value of `rateReceiverContainerField` (defaults to `k8s_container`).
+  // Each row's key MUST equal the actual container value that flows on
+  // the wire for the service being configured. The `containers` argument
+  // here is the resolved list of container values (caller passes either
+  // the explicit `args.containers` list, or — when a snapshot resolves
+  // service→container — the mapped containers; in the common case of
+  // service-name==container-name, both are identical). Anything else is
+  // a dead row that the engine cannot match against any event.
+  //
+  // Per-pattern action assignment (drop/compact/offload/tier_down) lives
+  // in data/action-intent.json — NOT in caps.csv. Earlier versions
+  // emitted `pat:<hash>,<cap>` rows here as "per-pattern overrides"; that
+  // was a bug — no event has `k8s_container=pat:<hash>`, so those rows
+  // never fired. They've been removed. The cap CSV is the per-container
+  // safety floor; action-intent.json is per-pattern dispatch.
   const avgCap = rows.length > 0
     ? Math.round(rows.reduce((s, r) => s + r.cap_bytes_per_window, 0) / rows.length)
     : 0;
@@ -2317,23 +2334,6 @@ function renderCsvDiff(
   for (const c of containers) {
     const value = `${avgCap}::${reason.replace(/,/g, ';')}`;
     merged.set(c, value);
-  }
-  // Per-pattern overrides land in a sibling file keyed `pat:<hash>` so
-  // the engine's lookup chain reads container-default first, then
-  // pattern overrides. Spec L280 keys rows by pattern_hash.
-  // No `:action` suffix — action intent is in action-intent.json.
-  for (const r of rows) {
-    if (r.floor_reason) {
-      merged.set(
-        `pat:${r.pattern_hash}`,
-        `${r.cap_bytes_per_window}::${r.floor_reason.replace(/,/g, ';')}`
-      );
-    } else if (r.action !== defaultAction) {
-      merged.set(
-        `pat:${r.pattern_hash}`,
-        `${r.cap_bytes_per_window}::${r.reason.replace(/,/g, ';')}`
-      );
-    }
   }
   // Preserve any existing preamble from the baseline (so refresh PRs
   // round-trip the original `target_percent` without re-writing it). When
