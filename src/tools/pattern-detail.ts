@@ -133,12 +133,15 @@ function renderAsciiBarChart(
   for (const r of rows) {
     const barLen = Math.round((r.value / maxVal) * maxBarWidth);
     const bar = '█'.repeat(barLen) + '░'.repeat(maxBarWidth - barLen);
+    // Decimal (SI) byte units to match every other tool's GB/MB rendering
+    // (services, baseline, top_patterns all use /1e9). Binary divisors here
+    // understated the same byte count by ~6.87% vs the rest of the envelope.
     const fmtVal =
-      r.value >= 1024 ** 3
-        ? `${(r.value / (1024 ** 3)).toFixed(1)}GB`
-        : r.value >= 1024 ** 2
-          ? `${(r.value / (1024 ** 2)).toFixed(0)}MB`
-          : `${(r.value / 1024).toFixed(0)}KB`;
+      r.value >= 1e9
+        ? `${(r.value / 1e9).toFixed(1)}GB`
+        : r.value >= 1e6
+          ? `${(r.value / 1e6).toFixed(0)}MB`
+          : `${(r.value / 1e3).toFixed(0)}KB`;
     lines.push(`${r.label.padEnd(labelW)}  ${bar}  ${fmtVal}`);
   }
   return lines.join('\n');

@@ -279,7 +279,7 @@ function renderVerbatim(args: {
   // Section 3: What it would mean for [service] — service-level numbers
   let volumeLine = '';
   if (bytesPerMonth !== null) {
-    const gb = (bytesPerMonth / (1024 ** 3)).toFixed(1);
+    const gb = (bytesPerMonth / (1e9)).toFixed(1);
     volumeLine = `  ${service} sends roughly ${gb} GB per month${destPhrase}.`;
   } else {
     volumeLine = `  Volume data for ${service} is not yet available from metrics.`;
@@ -297,7 +297,7 @@ function renderVerbatim(args: {
     };
     const frac = savingsFrac[mode];
     if (frac > 0) {
-      const gb = (bytesPerMonth / (1024 ** 3));
+      const gb = (bytesPerMonth / (1e9));
       const savingsUsd = costPerMonth * frac;
       const affectedGb = gb * frac;
       const savingsFormatted = savingsUsd >= 100 ? savingsUsd.toFixed(0) : savingsUsd.toFixed(2);
@@ -386,7 +386,7 @@ export async function executeExplainMode(args: {
   const rateSourceTag: 'customer_supplied' | 'list_price' | 'unset' = rateResolved.source;
   let costPerMonth: number | null = null;
   if (bytesPerMonth !== null && ratePerGb !== null) {
-    costPerMonth = (bytesPerMonth / (1024 ** 3)) * ratePerGb;
+    costPerMonth = (bytesPerMonth / (1e9)) * ratePerGb;
   }
 
   const verbatim = renderVerbatim({
@@ -469,7 +469,7 @@ export async function executeExplainMode(args: {
     headline =
       `explain_mode(${args.mode}) for service "${args.service}". ` +
       (bytesPerMonth !== null
-        ? `Service volume: ${(bytesPerMonth / (1024 ** 3)).toFixed(1)} GB/mo. `
+        ? `Service volume: ${(bytesPerMonth / (1e9)).toFixed(1)} GB/mo. `
         : '') +
       (applyRoute
         ? `Awaiting user choice (Apply or Preview) before routing.`
@@ -546,7 +546,7 @@ export async function executeExplainMode(args: {
         ? headline
         : `Mode ${args.mode} for ${args.service}: ${meta.what_it_does.slice(0, 80)}...` +
           (bytesPerMonth !== null
-            ? ` Service volume: ${(bytesPerMonth / (1024 ** 3)).toFixed(1)} GB/mo.`
+            ? ` Service volume: ${(bytesPerMonth / (1e9)).toFixed(1)} GB/mo.`
             : ' Volume data not yet available from metrics.'),
     must_render_verbatim: verbatim,
     must_ask_user: mustAskUser,

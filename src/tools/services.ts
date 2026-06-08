@@ -607,7 +607,7 @@ async function executeServicesInner(
           next_action = {
             tool: 'log10x_configure_engine',
             args: { service: r.name },
-            reason: `Re-tune the per-pattern action plan for "${r.name}" via configure_engine — the bulk-plan path that lands a refreshed cap-CSV in gitops.`,
+            reason: `Re-tune the per-pattern action plan for "${r.name}" via configure_engine — the bulk-plan path that lands a refreshed cap-CSV (gitops PR, or kubectl ConfigMap when no gitops repo is configured).`,
           };
         } else if (rank <= NEXT_ACTION_RANK_CUTOFF) {
           next_action = {
