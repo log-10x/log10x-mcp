@@ -162,7 +162,7 @@ export async function executeResolveBatch(args: {
       scope: { window: 'paste_batch', window_basis: 'auto_default' },
       payload: { precondition: 'no_patterns' },
       human_summary: headline,
-      warnings: ['resolve_batch: templater rejected the input — no patterns resolved. Check that events are raw log lines (one per line), not pre-formatted JSON blobs.'],
+      warnings: ['resolve_batch produced no per-pattern summary. Either the templater returned no patterns (check that events are raw log lines, one per line, not pre-formatted JSON), or the local engine image emits an output format this MCP build cannot parse (engine/MCP version skew). Run log10x_doctor to check the engine image version.'],
     });
   }
   const base = sumOut.data;
@@ -281,7 +281,7 @@ async function executeResolveBatchInner(args: {
   const aggregated = parseAggregated(resp['aggregated.csv']);
 
   if (templates.size === 0 || encoded.length === 0) {
-    return `No patterns resolved from ${lineCount} line(s). The templater may have rejected the input — check that the events are raw log lines (one per line) and not pre-formatted JSON blobs.`;
+    return `No patterns resolved from ${lineCount} line(s). Either the templater rejected the input (check that events are raw log lines, one per line, not pre-formatted JSON), or the engine output format does not match this MCP build (version skew).`;
   }
 
   // ── 4. Per-pattern concentration ──
