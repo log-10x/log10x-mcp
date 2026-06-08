@@ -322,11 +322,14 @@ export async function executePatternExamples(
   // rewritten to plain English via BANNED_PHRASE_REWRITES.
   const rawHeadline = `\`${d.pattern}\` (${d.vendor}, ${d.window}): ${d.events_pulled} events pulled, ${d.retained_events} retained across ${d.retained_templates} templates via ${d.probe_path}`;
   const headline = sanitizeUserProse(rawHeadline);
-  // Truncation signal: the SIEM probe hit its limit.
-  // Use the schema default (10) to avoid false-positive truncation on normal-size responses.
-  // rawArgs.limit ?? 10 matches the inner default at line ~295 and the schema default.
+  // Truncation signal: the SIEM probe hit its pull ceiling.
+  // The probe pulls up to probeBatch = max(limit*5, 100) events (see line ~705);
+  // `limit` only caps per-bucket DISPLAY, not the pull. Compare events_pulled
+  // against the actual pull target so the flag fires only when the probe was
+  // genuinely capped, not on every pattern with >= limit live events.
   const requestedLimit = rawArgs.limit ?? 10;
-  const truncated = d.events_pulled >= requestedLimit;
+  const probeBatchTarget = Math.max(requestedLimit * 5, 100);
+  const truncated = d.events_pulled >= probeBatchTarget;
 
   // Build actions[] — when any bucket recommends drop or compact, surface
   // log10x_pattern_mitigate as a recommended next step. Deduplicate: only
@@ -398,7 +401,7 @@ export async function executePatternExamples(
             .join(', ') || '(none)'
         }.`,
       );
-      payload = buildSummaryPayload(d, truncated, requestedLimit);
+      payload = buildSummaryPayload(d, truncated, probeBatchTarget);
     } else {
       payload = {
         pattern: d.pattern,
@@ -428,13 +431,13 @@ export async function executePatternExamples(
         probe_notes: d.probe_notes,
         ...(truncated
           ? {
-              truncation_detail: `events_pulled (${d.events_pulled}) reached the requested limit (${requestedLimit}); there may be more matching events — widen limit or narrow timeRange`,
+              truncation_detail: `events_pulled (${d.events_pulled}) reached the probe batch target (${probeBatchTarget}); there may be more matching events — widen limit or narrow timeRange`,
             }
           : {}),
       };
     }
   } else {
-    payload = buildSummaryPayload(d, truncated, requestedLimit);
+    payload = buildSummaryPayload(d, truncated, probeBatchTarget);
   }
 
   // Token-budget warning. The audit set 8K tokens as the target for the
@@ -519,7 +522,7 @@ export async function executePatternExamples(
 function buildSummaryPayload(
   d: PatternExamplesSummary,
   truncated: boolean,
-  requestedLimit: number,
+  probeBatchTarget: number,
 ): Record<string, unknown> {
   const SAMPLE_PREVIEW_CHARS = 200;
   const slimBuckets = d.buckets.map((b) => ({
@@ -545,8 +548,13 @@ function buildSummaryPayload(
     pattern: d.pattern,
     // Top-level pattern_hash mirrors the audit's "template_body (once)"
     // anchor — agents can match against this identity without paging
-    // through buckets[].
-    pattern_hash: d.buckets[0]?.tenx_hash ?? d.buckets[0]?.template_hash,
+    // through buckets[]. tenx_hash is the ONLY value valid under this
+    // user-facing key (pattern_hash === tenx_hash identity contract). On
+    // the content-token data plane tenx_hash is absent; we leave this
+    // undefined rather than substitute the engine-internal template_hash,
+    // which is mislabeling. template_hash stays available per-bucket and
+    // in details_available.bucket_ids as the drill-in key.
+    pattern_hash: d.buckets[0]?.tenx_hash,
     vendor: d.vendor,
     window: d.window,
     service: d.service,
@@ -570,7 +578,7 @@ function buildSummaryPayload(
     probe_notes: d.probe_notes,
     ...(truncated
       ? {
-          truncation_detail: `events_pulled (${d.events_pulled}) reached the requested limit (${requestedLimit}); there may be more matching events — widen limit or narrow timeRange`,
+          truncation_detail: `events_pulled (${d.events_pulled}) reached the probe batch target (${probeBatchTarget}); there may be more matching events — widen limit or narrow timeRange`,
         }
       : {}),
   };
@@ -734,6 +742,10 @@ async function executePatternExamplesInner(
     probePath = 'content-token';
   }
   if (probe.metadata.notes) probeNotes.push(...probe.metadata.notes);
+  // Sequential hash-exact + content-token probes can each emit the same
+  // connector note (e.g. CloudWatch scope auto-discovery). Dedup in place so
+  // probe_notes / empty-state lines / markdown don't surface the same string twice.
+  probeNotes.splice(0, probeNotes.length, ...new Set(probeNotes));
 
   if (probe.events.length === 0) {
     const lines: string[] = [

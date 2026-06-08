@@ -161,11 +161,12 @@ export async function executePatternDiff(
   // Resolve $/GB via the shared chain (caller arg → envs.json analyzerCost →
   // LOG10X_ANALYZER_COST → destination list price). No fabricated $1.0 fallback;
   // 0 only when neither a rate nor a destination is known.
-  const costPerGb = resolveRate(
+  const rateResolved = resolveRate(
     { analyzerCost: args.analyzerCost },
     env,
     destinationFromEnvAnalyzer(env),
-  ).rate_per_gb ?? 0;
+  );
+  const costPerGb = rateResolved.rate_per_gb ?? 0;
   const view = args.view ?? 'summary';
 
   const tf = parseTimeframe(timeRange);
@@ -185,8 +186,18 @@ export async function executePatternDiff(
       basis: `co_emergence_window_seconds=${coEmergeWindowSec}, min_co_emergence_cluster_size=${minClusterSize}`,
     },
   };
+  // Provenance for the dollar columns (cost_now_usd / cost_before_usd). The
+  // rate is resolved via the shared chain above; surface its source so the
+  // dollar surface is auditable, mirroring top_patterns/baseline/services.
+  // 'unset' is this module's term for no rate; the chassis enum calls it 'none'.
   const sourceDisclosure = {
     bytes_source: 'tsdb' as const,
+    rate_source:
+      rateResolved.source === 'customer_supplied'
+        ? ('customer_supplied' as const)
+        : rateResolved.source === 'list_price'
+          ? ('list_price' as const)
+          : ('none' as const),
   };
   const scopeBase = {
     window: tf.label,
@@ -731,6 +742,16 @@ export async function executePatternDiff(
     summaryVerbatim = sumLines.join('\n');
   }
 
+  // The displayed arrays are capped at `limit` (re_emerged at min(limit,10))
+  // while totals carry the full counts. Set the outer envelope truncated flag
+  // whenever any category's shown rows fall short of its total, so a consumer
+  // reading truncated:false can trust the arrays are complete.
+  const truncated =
+    newRows.length < data.totals.new ||
+    retiredRows.length < data.totals.retired ||
+    persistentRows.length < data.totals.persistent ||
+    reEmergedRows.length < data.totals.re_emerged;
+
   return buildChassisEnvelope({
     tool: 'log10x_pattern_diff',
     view: 'summary',
@@ -745,5 +766,6 @@ export async function executePatternDiff(
     must_render_verbatim: summaryVerbatim,
     telemetry,
     actions: builtActions,
+    truncated,
   });
 }

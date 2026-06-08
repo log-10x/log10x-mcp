@@ -1963,7 +1963,7 @@ export async function executeEstimateSavings(
         const solverNote = args.target_percent !== undefined && args.default_action === 'compact'
           ? ` (solver requested compact; destination forced tier_down)`
           : '';
-        headline = `Forecast (${destination}): ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings${serviceTag} via tier_down (storage-tier price differential; bytes still ingested at full rate) on ${patternCountLabel}${solverNote}.`;
+        headline = `Forecast (${destination}): ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings${serviceTag} via tier_down (cheaper destination tier — lower ingest + storage rate; byte volume unchanged) on ${patternCountLabel}${solverNote}.`;
       } else if (actionMix.tier_down.pattern_count > 0 && actionMix.tier_down.dollars > 0) {
         // Mixed: some tier_down + other actions
         const bytesSavingDollars = result.totals.dollars_expected_monthly - actionMix.tier_down.dollars;

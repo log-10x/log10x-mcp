@@ -627,12 +627,12 @@ export async function executePatternMitigate(args: PatternMitigateArgs): Promise
   // gitops repo and prefer to set it directly). Otherwise recommend-next.
   if (!d.env_capabilities.gitops_repo) {
     envelopeActions.push({
-      tool: 'log10x_configure_env',
+      tool: 'log10x_set_gitops_repo',
       args: {},
       role: allSourcesAbsent ? 'optional-followup' : 'recommended-next',
       reason: allSourcesAbsent
-        ? 'If you already know your gitops repo, set it here to enable mute/compact without running discover_env.'
-        : 'Set gitops.repo to enable mute/compact at the 10x engine.',
+        ? 'If you already know your gitops repo, set it here (gitops_repo=owner/repo, confirm="set-now") to enable mute/compact without running discover_env.'
+        : 'Set gitops.repo (gitops_repo=owner/repo, confirm="set-now") to enable mute/compact at the 10x engine.',
     });
   }
 
@@ -661,7 +661,7 @@ export async function executePatternMitigate(args: PatternMitigateArgs): Promise
   if (anyEnabled) {
     envelopeActions.push({
       tool: 'log10x_cost_options',
-      args: { pattern: d.pattern },
+      args: {},
       reason: 'One or more mitigation tiers are reachable. cost_options surfaces the WHAT-action menu (drop/sample/compact/tier_down/offload/observe_only).',
       role: 'recommended-next',
     });

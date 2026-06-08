@@ -463,6 +463,7 @@ export async function executeWhatsNew(
         );
       }),
     ];
+    const markdown = lines.join('\n');
     return buildChassisEnvelope({
       tool: 'log10x_whats_new',
       view: 'markdown',
@@ -475,9 +476,9 @@ export async function executeWhatsNew(
         candidates_count: rows.length,
         candidates_usable: shown.length,
       },
-      payload: data,
+      payload: { ...data, markdown },
       human_summary: humanSummary,
-      must_render_verbatim: lines.join('\n'),
+      must_render_verbatim: markdown,
       telemetry,
     });
   }
@@ -501,12 +502,12 @@ export async function executeWhatsNew(
       ? [
           {
             tool: 'log10x_pattern_examples',
-            args: { pattern: shown[0].pattern_hash, timeRange: tf.range },
+            args: { pattern_hash: shown[0].pattern_hash, timeRange: tf.range },
             reason: 'see what the newest pattern actually looks like',
           },
           {
             tool: 'log10x_pattern_trend',
-            args: { pattern: shown[0].pattern_hash, timeRange: tf.range },
+            args: { pattern_hash: shown[0].pattern_hash, timeRange: tf.range },
             reason: 'check the trajectory since first appearance',
           },
         ]
