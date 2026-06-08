@@ -30,7 +30,7 @@ import {
 } from '../lib/customer-metrics.js';
 import { getOrDiscoverJoin, discoverJoin, type JoinPair } from '../lib/join-discovery.js';
 import { type StructuredOutput } from '../lib/output-types.js';
-import { newChassisTelemetry, buildChassisEnvelope } from '../lib/chassis-envelope.js';
+import { newChassisTelemetry, buildChassisEnvelope, buildChassisErrorEnvelope } from '../lib/chassis-envelope.js';
 
 export const discoverJoinSchema = {
   force_refresh: z
@@ -168,6 +168,35 @@ export async function executeDiscoverJoin(
   // from "labels existed but no pair crossed Jaccard".
   const log10xEmpty   = result.probedLabelsLog10x.length   === 0;
   const customerEmpty = result.probedLabelsCustomer.length === 0;
+  // DJ-1: a connection-refused customer backend yields probedLabelsCustomer=[]
+  // because pickCustomerCandidateLabels() swallows the listLabels() rejection
+  // into []. That makes an unreachable backend indistinguishable from a
+  // genuinely-empty-but-reachable one, so the empty branch below would falsely
+  // claim the endpoint "is reachable but doesn't have any metrics". Re-probe
+  // reachability first; if it fails, surface a branchable backend_unavailable
+  // error (matching the sibling log10x_customer_metrics_query tool) instead of
+  // a misleading no_signal.
+  if (customerEmpty) {
+    let customerReachable = true;
+    try {
+      await backend.listLabels();
+    } catch {
+      customerReachable = false;
+    }
+    if (!customerReachable) {
+      return buildChassisErrorEnvelope({
+        tool: 'log10x_discover_join',
+        err: {
+          error_type: 'backend_unavailable',
+          retryable: true,
+          suggested_backoff_ms: 2000,
+          hint: `Customer metrics backend at ${backend.endpoint} is unreachable (connection failed). discover_join needs a reachable Prometheus-compatible backend to read the customer-side label universe. Verify LOG10X_CUSTOMER_METRICS_URL points at a live endpoint and that the backend is up.`,
+        },
+        contextPayload: { endpoint: backend.endpoint, backend: backend.backendType },
+        telemetry,
+      });
+    }
+  }
   if ((log10xEmpty || customerEmpty) && result.status !== 'joined') {
     const failureReason: 'customer_side_empty' | 'log10x_side_empty' =
       customerEmpty ? 'customer_side_empty' : 'log10x_side_empty';
