@@ -12,11 +12,21 @@ COPY tsconfig.json ./
 COPY vendor ./vendor
 COPY src ./src
 COPY default-manifest.json ./
+# Product Q&A docs corpus (for the log10x_product_qa tool). NOT vendored here — the
+# repo keeps only config/mksite/docs/.gitkeep so this COPY never fails. The deploy
+# workflow (backend/.github/workflows/deploy-public-demo-mcp.yml) checks out the
+# mksite repo and stages its latest .md docs into config/mksite/docs before
+# `docker build`, so the image always ships the current docs. A bare local build
+# (no staging) yields an empty corpus. The product-kb loader reads
+# build/product-kb/docs at runtime.
+COPY config/mksite/docs ./config/mksite/docs
 # Equivalent to `npm run build` but without the brace-expansion in that script
 # (Debian's /bin/sh is dash, which would not expand {promql.js,package.json}).
 RUN npx tsc \
  && mkdir -p build/vendor/promql-parser \
  && cp -r vendor/promql-parser/promql.js vendor/promql-parser/package.json build/vendor/promql-parser/ \
+ && mkdir -p build/product-kb/docs \
+ && cp -R config/mksite/docs/. build/product-kb/docs/ \
  && chmod +x build/index.js
 
 # --- runtime stage: prod deps + build output only ---
