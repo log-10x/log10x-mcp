@@ -64,7 +64,7 @@ import { log } from './lib/log.js';
 import { describeToolError } from './lib/tool-errors.js';
 import { DemoReadOnlyError, isReadOnlyMode } from './lib/read-only-guard.js';
 import { buildDemoReadOnlyEnvelope } from './lib/chassis-envelope.js';
-import { retrieverQuerySchema, executeRetrieverQuery } from './tools/retriever-query.js';
+import { retrieverQuerySchema, executeRetrieverQuery, retrieverNotConfiguredMessage } from './tools/retriever-query.js';
 import { retrieverSeriesSchema, executeRetrieverSeries } from './tools/retriever-series.js';
 import { retrieverQueryStatusSchema, executeRetrieverQueryStatus } from './tools/retriever-query-status.js';
 import { retrieverProbeSchema, executeRetrieverProbe } from './tools/retriever-probe.js';
@@ -300,12 +300,21 @@ async function wrap(
     // not a bare text blob; the agent branches on data.status and the MCP
     // SDK requires structuredContent for tools that declare an outputSchema
     // (a text-only return here is rejected as "no structured content").
+    // rq-1: retriever_query / retriever_series are forensic S3-archive paths,
+    // not metrics-backend queries. This wrap gate pre-empts their own correct
+    // kind:'retriever' gate, so branch the remediation here — a metrics-backend
+    // nag points the agent at the wrong subsystem entirely.
+    const isRetrieverTool =
+      toolName === 'log10x_retriever_query' || toolName === 'log10x_retriever_series';
+    const ncKind = isRetrieverTool ? 'retriever' : 'metrics_backend';
     return notConfiguredToolResult(
       buildNotConfiguredEnvelope({
         tool: toolName,
-        kind: 'metrics_backend',
-        remediation: notConfiguredMessageForTool(toolName),
-        actions: defaultActionsForKind('metrics_backend'),
+        kind: ncKind,
+        remediation: isRetrieverTool
+          ? retrieverNotConfiguredMessage()
+          : notConfiguredMessageForTool(toolName),
+        actions: defaultActionsForKind(ncKind),
       }),
     );
   }
