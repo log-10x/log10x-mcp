@@ -305,16 +305,23 @@ async function fetchFromTsdb(
     bytes: number;
     hash: string;
   }
-  const rawRows: RawRow[] = topRes.data.result.map((r): RawRow => {
-    const p = r.metric[LABELS.pattern] || '';
-    return {
-      pattern: p,
-      service: r.metric[LABELS.service] || service,
-      severity: r.metric[LABELS.severity] || '',
-      bytes: parsePrometheusValue(r),
-      hash: p ? tenxHash(p) : '',
-    };
-  });
+  const rawRows: RawRow[] = topRes.data.result
+    .map((r): RawRow => {
+      const p = r.metric[LABELS.pattern] || '';
+      return {
+        pattern: p,
+        service: r.metric[LABELS.service] || service,
+        severity: r.metric[LABELS.severity] || '',
+        bytes: parsePrometheusValue(r),
+        hash: p ? tenxHash(p) : '',
+      };
+    })
+    // Drop series with no pattern label: they carry volume but no stable
+    // tenx_hash/descriptor, so they cannot be ranked, drilled into
+    // (pattern_detail/pattern_examples both require an identity), or routed.
+    // Emitting them as ranked, actionable rows produces a phantom candidate
+    // line that inflates the shown total with an un-actionable identity.
+    .filter((r) => r.hash !== '');
   rawRows.sort((a, b) => b.bytes - a.bytes);
 
   const totalBytes =
@@ -557,7 +564,11 @@ export async function executePreviewFilter(args: {
     status,
     decisions: {
       threshold_used: topN,
-      threshold_basis: 'customer_supplied',
+      // top_n is a hand-picked cap (schema default 20), not a caller-asserted
+      // threshold. Zod fills the default before the handler sees args, so we
+      // cannot prove the caller supplied it. Tag it 'unvalidated_default' to
+      // match services / top-patterns / savings, not the false 'customer_supplied'.
+      threshold_basis: 'unvalidated_default',
     },
     source_disclosure: {
       bytes_source: 'tsdb',

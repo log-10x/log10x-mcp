@@ -130,6 +130,17 @@ function buildOverlapTail(nextBody: string): string {
  * @param topic Page topic slug, used to build chunk_id.
  */
 export function chunkMarkdown(body: string, topic: string): Chunk[] {
+  // Strip opaque base64 config-schema dumps before chunking. Pages like
+  // run/output/metric/cloudwatch and run/input/analyzer/cloudwatchLogs embed a
+  // `<template class="tenx-config-schema" data-encoding="base64">...</template>`
+  // blob (decoded client-side by the docs site) that is multi-KB of base64 an
+  // agent can never read. Carrying it into chunk.text blows the product_qa
+  // output token budget (a single CloudWatch query overflowed at ~74K chars,
+  // ~23K of it these blobs). Remove the blocks so the answer chunks stay small.
+  body = body.replace(
+    /<template\b[^>]*\bdata-encoding="base64"[^>]*>[\s\S]*?<\/template>/gi,
+    '',
+  );
   const lines = body.split('\n');
 
   // Pass 1 — group lines into sections. Each section is { heading, bodyLines }.

@@ -417,8 +417,9 @@ export async function executeOverflowContents(
       tool: 'log10x_retriever_query',
       args: {
         pattern_hash: t.pattern_hash,
-        service: t.service,
-        time_window: tf.label,
+        target: t.service,
+        from: `now-${tf.range}`,
+        to: 'now',
       },
       reason: `Rehydrate the top offload pattern back into the SIEM via the retriever — needed for incident / audit / debug.`,
     });

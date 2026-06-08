@@ -206,7 +206,16 @@ export async function executeFindSkew(args: FindSkewArgs): Promise<StructuredOut
   for (const agg of aggregated) {
     nPatternsAboveMinEvents += 1;
     for (const s of agg.slots) {
-      if (typeof s.dominantPct === 'number' && Number.isFinite(s.dominantPct)) {
+      // Exclude singleton slots (distinctCount === 1): their dominantPct is
+      // tautologically 1.0, which inflates the audit distribution to all-1.0
+      // and reads as "extreme skew everywhere" — the opposite of the no_signal
+      // verdict. Mirror the detector's own `distinctCount > 1` filter (skew.ts)
+      // so the noise-floor distribution matches the detection path.
+      if (
+        typeof s.dominantPct === 'number' &&
+        Number.isFinite(s.dominantPct) &&
+        s.distinctCount > 1
+      ) {
         observed.push(s.dominantPct);
         nCandidateSlots += 1;
       }

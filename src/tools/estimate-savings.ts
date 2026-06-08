@@ -2223,7 +2223,7 @@ function buildForecastHumanSummary(
       result.per_pattern.every((r) => r.action === 'tier_down');
     const tierDownOnly = allTierDown || (zeroByteSaved && actionMix.tier_down.pattern_count === result.per_pattern.length);
     if (tierDownOnly) {
-      return `estimate_savings forecast on ${destination}${serviceClause}: ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings via tier_down (storage-tier price differential — bytes still ingested at full rate, not reduced). ${patternWord} covering ${envCoverage}.${result.caveats.length ? ` Caveats: ${result.caveats.length}.` : ''}`;
+      return `estimate_savings forecast on ${destination}${serviceClause}: ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings via tier_down (cheaper destination tier — lower ingest + storage rate; byte volume unchanged). ${patternWord} covering ${envCoverage}.${result.caveats.length ? ` Caveats: ${result.caveats.length}.` : ''}`;
     }
     // Mixed actions: break down by byte-reducing vs tier_down.
     if (actionMix.tier_down.pattern_count > 0 && actionMix.tier_down.dollars > 0) {

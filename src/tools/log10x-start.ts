@@ -540,7 +540,7 @@ export async function executeLog10xStart(
   const mustAskUser: MustAskUser = {
     question:
       'Before I run any other tool, pick the path that matches what you want — answer with the number from the menu above.',
-    options: menu.map((m, i) => `${i + 1}. ${m.label}`),
+    options: menu.map((m, i) => `${i + 1}. ${m.label}${m.applicable ? '' : ` _(not available: ${m.gated_reason})_`}`),
   };
 
   const forbiddenNextActions = buildForbiddenNextActions();

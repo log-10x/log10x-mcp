@@ -535,12 +535,23 @@ export async function executeMeasureCompaction(
     actions: [
       {
         tool: 'log10x_estimate_savings',
-        args: { service: args.service },
+        args: {
+          service: args.service,
+          destination: sel.id,
+          target_percent: Math.round((1 - fractionOnWire) * 100),
+        },
         reason: 'Use measured compaction ratios to refine savings estimates for this service.',
       },
       {
         tool: 'log10x_pattern_detail',
-        args: {},
+        args:
+          patterns.length > 0
+            ? {
+                pattern_hash: patterns.reduce((a, b) =>
+                  b.compaction_ratio_x > a.compaction_ratio_x ? b : a
+                ).pattern_hash,
+              }
+            : {},
         reason: 'Drill into a specific high-ratio pattern for action options.',
       },
     ],

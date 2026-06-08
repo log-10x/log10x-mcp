@@ -661,7 +661,7 @@ export async function executeWhatsChanging(
           },
           {
             tool: 'log10x_pattern_trend',
-            args: { pattern: topAnyway[0].pattern_hash, timeRange: tf.range },
+            args: { pattern_hash: topAnyway[0].pattern_hash, timeRange: tf.range },
             reason: 'inspect the trajectory of the biggest observed change (below the floor)',
           },
         ]
