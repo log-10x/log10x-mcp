@@ -317,10 +317,10 @@ export function _getVerifyRunner(): VerifyRunner | undefined {
  * modules together; avoids any future circular-import risk between
  * `tools/commitment-report` and `tools/estimate-savings`).
  *
- * Fields kept narrow on purpose: the renamer (Item 5) will join the
+ * Fields kept narrow on purpose: a later change will join the
  * cap-CSV `:<action>` suffix to fill `per_pattern_breakdown`. Until
  * then, this adapter leaves the per-pattern field unset and the
- * aggregator's §E.1 fallback bucketizes everything into `drop` (with
+ * aggregator's single-bucket fallback bucketizes everything into `drop` (with
  * the caveat already wired at commitment-report.ts:1182).
  */
 export interface VerifyResultLike {
@@ -336,7 +336,7 @@ export interface VerifyResultLike {
     new_patterns_bytes: number;
     leakage_bytes: number;
   };
-  /** Source of the $/GB rate used inside runEstimateVerify. Item 5 will
+  /** Source of the $/GB rate used inside runEstimateVerify. a later change will
    * propagate this from estimate-savings; today the function chooses the
    * list price unless the caller passes effective_ingest_per_gb, so the
    * adapter encodes that choice with the right rate_source label. */
@@ -372,7 +372,7 @@ export interface VerifyResultLike {
  *  - per_pattern_breakdown: populated when runEstimateVerify received
  *    `action_intent_content` (canonical, from data/action-intent.json)
  *    or legacy `cap_csv_content` rows with `:action` suffixes. When
- *    neither is available, the §E.1 fallback in `aggregateWeekly`
+ *    neither is available, the single-bucket fallback in `aggregateWeekly`
  *    attributes all bytes_dropped to the `drop` bucket.
  *
  * `week_start` is propagated through verbatim so the weekly_series
@@ -391,7 +391,7 @@ export function adaptVerifyResultToWeekly(
     ? vr.delivered_dollars_now
     : 0;
   const rateSource = vr.rate_source ?? 'list_price';
-  // Item 5: when runEstimateVerify supplied per_pattern_breakdown
+  // When runEstimateVerify supplied per_pattern_breakdown
   // (cap-CSV join), translate it into the WeeklyVerifyResult shape so
   // the aggregator can attribute bytes to action buckets WITHOUT
   // double-counting unmarked rows. `delivered_bytes` becomes
@@ -587,7 +587,7 @@ export interface CommitmentReportEnvelope {
    * null whenever the row's `rate_source === 'unset'`.
    *
    * Empty when the upstream verify runner did not return
-   * `per_pattern_breakdown` for any week — see the caveat path in §E.1.
+   * `per_pattern_breakdown` for any week — see the caveat path in the single-bucket fallback.
    *
    * `intent_observation_mismatch` flags rows where the configured
    * intent (`action_taken='pass'`) disagrees with the observed
@@ -1433,7 +1433,7 @@ function aggregateWeekly(weekly: WeeklyVerifyResult[]): {
     if (w.per_pattern_breakdown && w.per_pattern_breakdown.length > 0) {
       perPatternAvailable = true;
       for (const row of w.per_pattern_breakdown) {
-        // §E.1: missing action_taken defaults to 'pass'. Every action
+        // Missing action_taken defaults to 'pass'. Every action
         // (including pass and sample) accumulates its bytes_saved into
         // the matching bucket so the bucket map is structurally
         // exhaustive over the action enum. pass rows with non-zero
@@ -1482,16 +1482,16 @@ function aggregateWeekly(weekly: WeeklyVerifyResult[]): {
       }
     }
   }
-  // §E.1 fallback: when no week supplied per_pattern_breakdown, the
+  // single-bucket fallback: when no week supplied per_pattern_breakdown, the
   // four-way split degrades to legacy behaviour — all delivered_bytes
   // attributed to the `drop` bucket. per_pattern_rows is empty.
   if (!perPatternAvailable) {
     buckets.drop = totalDropped;
   }
-  // Bug #2: stamp intent_observation_mismatch on rows where intent is
+  // Stamp intent_observation_mismatch on rows where intent is
   // 'pass' but bytes_saved is non-zero (engine is reducing bytes on a
   // pattern the policy says to pass through). The row stays in the
-  // 'pass' bucket — the flag is what surfaces the drift.
+  // 'pass' bucket; the flag is what surfaces the drift.
   for (const row of merged.values()) {
     if (row.action_taken === 'pass' && row.bytes_saved > 0) {
       row.intent_observation_mismatch = true;
@@ -1657,12 +1657,11 @@ function renderMarkdown(env: CommitmentReportEnvelope): string {
   lines.push('');
   lines.push('## Weekly delivery');
   lines.push('');
-  // Scope label (math-lens workflow wol3rcauh, cfo_md bug #3): the bar
-  // shows per-week delivered_pct (denominator = that week's bytes_in),
-  // which can diverge sharply from the period delivered_pct in the
-  // header when weekly_series is sparse. Earlier the CFO saw "delivered
-  // 3.7%" in the header and an 8.7% bar with no label and concluded
-  // there was a contradiction.
+  // Scope label: the bar shows per-week delivered_pct (denominator =
+  // that week's bytes_in), which can diverge sharply from the period
+  // delivered_pct in the header when weekly_series is sparse. Earlier
+  // the CFO saw "delivered 3.7%" in the header and an 8.7% bar with no
+  // label and concluded there was a contradiction.
   lines.push(
     `_Each bar shows that week's delivered % vs that week's ingest (single-week scope). The header's delivered ${env.delivered_pct.toFixed(1)}% is the cumulative period average across all ${env.weekly_series.length} populated week${env.weekly_series.length === 1 ? '' : 's'}._`
   );
@@ -1685,7 +1684,7 @@ function renderMarkdown(env: CommitmentReportEnvelope): string {
   // rule on line 624-627). Zero-share rows stay in for completeness —
   // FinOps wants to see the zeros to confirm nothing was missed.
   // EXCEPT when the offload bucket is "unknown" (helper timed out),
-  // in which case we omit the offload row entirely — see §E.2. That
+  // in which case we omit the offload row entirely — see the offload-row caveat. That
   // condition is signalled by a specific caveat string, checked here.
   const offloadTimedOut = env.caveats.some((c) =>
     c.startsWith('Offload status lookup timed out')
@@ -1710,7 +1709,7 @@ function renderMarkdown(env: CommitmentReportEnvelope): string {
     const value = env.delivered_dollars * (bytes / env.delivered_bytes);
     return buildDisclosedDollarValue(value, env.rate_source, siemLabel, listRatePerGb);
   };
-  // Bug from math-lens workflow wol3rcauh: this table previously hardcoded
+  // This table previously hardcoded
   // {Drop, Compact, Offload, Tier-down} as the four rows. When the engine's
   // actual policy applies via sample (the error-tier default) or when
   // bytes_saved gets attributed to pass via the intent_observation drift
@@ -1960,7 +1959,7 @@ export async function executeCommitmentReport(
   // offloaded has its row's action_taken overridden to 'offload'
   // REGARDLESS of what the cap CSV said — the metric stamp is ground
   // truth. On metric backend timeout / env-load failure the bucket
-  // stays 0 and a caveat surfaces (§E.2).
+  // stays 0 and a caveat surfaces (offload-row caveat).
   let offloadHelperTimedOut = false;
   if (agg.per_pattern_breakdown_available && agg.per_pattern_rows.length > 0) {
     try {
@@ -1975,7 +1974,7 @@ export async function executeCommitmentReport(
         timeoutMs: 2000,
       });
       // Empty record == helper failed (per offload-status.ts:228). When
-      // every entry is ok:false the same caveat applies (§E.2).
+      // every entry is ok:false the same caveat applies (offload-row caveat).
       const haveData = Object.values(batch).some((s) => s && s.ok);
       if (!haveData) {
         offloadHelperTimedOut = true;
@@ -2030,13 +2029,12 @@ export async function executeCommitmentReport(
     pass: pctOfIn(agg.bytes_saved_by_action.pass),
   };
 
-  // 5d. Reconciliation gap (bug #4 from the math-lens workflow). The
-  // bucket map and delivered_pct are computed from independent code
-  // paths; previously a wide gap between them would render a self-
-  // contradicting envelope ("delivered 3.8% / attributed 0%"). The gap
-  // is computed here and surfaced as a structured caveat in §8 below
-  // when it exceeds 1pp (matches the schema docstring's "±1pp
-  // rounding" claim).
+  // 5d. Reconciliation gap. The bucket map and delivered_pct are
+  // computed from independent code paths; previously a wide gap between
+  // them would render a self-contradicting envelope ("delivered 3.8% /
+  // attributed 0%"). The gap is computed here and surfaced as a
+  // structured caveat in section 8 below when it exceeds 1pp (matches
+  // the schema docstring's "±1pp rounding" claim).
   const bucketSumPctForGuard =
     percent_reduction_by_action.drop +
     percent_reduction_by_action.compact +
@@ -2120,31 +2118,30 @@ export async function executeCommitmentReport(
       `Delivered ${agg.delivered_pct.toFixed(1)}% trails promised ${commitment.promised_pct.toFixed(1)}% by more than 5pp — investigate at-risk patterns.`
     );
   }
-  // §E.1: per-pattern breakdown unavailable from upstream verify.
+  // Single-bucket fallback: per-pattern breakdown unavailable from upstream verify.
   if (!agg.per_pattern_breakdown_available) {
     caveats.push(
       'Per-pattern action breakdown unavailable — log10x_estimate_savings verify mode did not return per_pattern_breakdown for this period.'
     );
   }
-  // §E.2: offload-status helper timed out.
+  // Offload-status helper timed out.
   if (offloadHelperTimedOut) {
     caveats.push(
       'Offload status lookup timed out — offload contribution omitted. Re-run after metrics backend stabilizes.'
     );
   }
-  // Reconciliation guard (bug #4 from the math-lens workflow): bucket
-  // sum vs delivered_pct disagreement. The schema invariant says they
-  // should agree within ±1pp; surface any wider gap as a caveat so the
-  // CFO/agent sees the disagreement instead of getting a silently-
-  // contradicting envelope. Typical root cause: intent/observation
-  // drift on per_pattern_rows (action_taken from action-intent.json,
-  // bytes_saved from observed-dropped TSDB).
+  // Reconciliation guard: bucket sum vs delivered_pct disagreement. The
+  // schema invariant says they should agree within ±1pp; surface any
+  // wider gap as a caveat so the CFO/agent sees the disagreement instead
+  // of getting a silently-contradicting envelope. Typical root cause:
+  // intent/observation drift on per_pattern_rows (action_taken from
+  // action-intent.json, bytes_saved from observed-dropped TSDB).
   if (reconciliationGapPp > 1 && agg.per_pattern_breakdown_available) {
     caveats.push(
       `Reconciliation gap: percent_reduction_by_action sums to ${bucketSumPctForGuard.toFixed(2)}% but delivered_pct is ${agg.delivered_pct.toFixed(2)}% (gap ${reconciliationGapPp.toFixed(2)}pp, >1pp tolerance). Likely cause: per-pattern action_taken sourced from configured intent (action-intent.json) while bytes_saved sourced from observed-dropped — engine has not yet propagated the new policy, or the policy diverged from observed behavior.`
     );
   }
-  // Bug #2: intent/observation mismatch tally. Counts rows where
+  // Intent/observation mismatch tally. Counts rows where
   // action_taken='pass' but bytes_saved > 0. The rows themselves
   // carry the `intent_observation_mismatch` flag; this caveat is the
   // human-readable summary so the operator sees the drift count
@@ -2152,8 +2149,8 @@ export async function executeCommitmentReport(
   const mismatchCount = agg.per_pattern_rows.filter(
     (r) => r.intent_observation_mismatch
   ).length;
-  // Baseline-drift caveat (math-lens workflow wol3rcauh, cfo_md bug #2):
-  // promised_dollars is computed against commitment.baseline_usd_monthly
+  // Baseline-drift caveat: promised_dollars is computed against
+  // commitment.baseline_usd_monthly
   // (captured at apply time) while delivered_dollars is computed from
   // actual observed dropped bytes over the post-window. When the cluster's
   // ingest drifts substantially from apply-time baseline (e.g. lower

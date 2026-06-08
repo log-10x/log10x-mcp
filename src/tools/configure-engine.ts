@@ -9,7 +9,7 @@
  * Solver: greedy v1, ordered by (current_bytes_30d * severity_weight) DESC,
  * where severity_weight = audit:1.0, error:0.8, standard:0.5, debug:0.2,
  * synthetic:0.1. Replace with LP only if greedy is materially suboptimal
- * on a representative customer. (See OPEN Q 5 in 14d-24 spec.)
+ * on a representative customer.
  *
  * Per-destination action resolution honors the cost lib's CompactMode:
  *   - splunk           (envelope)         compact ⇒ encode-in-event
@@ -28,7 +28,7 @@
  *                          with `containers=[...]`
  *   - 'solver_failed'      target unreachable without violating floors
  *   - 'pr_rendered'        success — `pr_command` ready to paste (or null when
- *                          current state already meets target, OPEN Q 8)
+ *                          current state already meets target)
  *
  * Zero engine ask: every query runs against existing receive-aggregator
  * metrics (all_events_summaryBytes_total labeled by k8s_container,
@@ -99,7 +99,7 @@ const GB = 1_000_000_000; // decimal GB — matches CloudWatch/Datadog/Splunk bi
 const FEASIBILITY_TOLERANCE_PCT = 0.1; // ±10% of target counts as "hit"
 const MIN_REPORTER_DAYS = 7;
 
-// ── refresh-mode constants (Item 7) ─────────────────────────────────
+// ── refresh-mode constants ──────────────────────────────────────────
 // Commitment target is stored in the cap-CSV as a `# target_percent=N`
 // comment-line preamble. The engine's lookup parser ignores lines that
 // don't match `<key>,<value>` so the comment is engine-safe; the MCP-side
@@ -113,7 +113,7 @@ const DEFAULT_REFRESH_TOLERANCE_PCT = 2;
 
 type Tier = 'audit' | 'error' | 'standard' | 'debug' | 'synthetic';
 
-// Severity-weighted ranking for the greedy solver (OPEN Q 5 default).
+// Severity-weighted ranking for the greedy solver.
 const SEVERITY_WEIGHT: Record<Tier, number> = {
   audit: 1.0,
   error: 0.8,
@@ -204,7 +204,7 @@ export const configureEngineSchema = {
     .boolean()
     .optional()
     .describe(
-      'Elasticsearch only: are compactable fields excluded from `_source` via index template? Default `false` (unpruned). Auto-detection requires reading the customer index template; this knob is the explicit override. See OPEN Q 2 in the 14d-24 spec.'
+      'Elasticsearch only: are compactable fields excluded from `_source` via index template? Default `false` (unpruned). Auto-detection requires reading the customer index template; this knob is the explicit override.'
     ),
   contract_type: z
     .enum(['committed', 'on_demand'])
@@ -299,7 +299,6 @@ export const configureEngineSchema = {
       'POC snapshot id returned by `log10x_poc_from_siem_submit` (or the from-local equivalent). When set and the snapshot carries a `cap_csv` (i.e., the POC was run with `target_percent_reduction`), the tool reads that CSV verbatim and renders it as the PR body — no Prometheus pull, no greedy re-derivation. Falls back to the live-Prometheus derivation when the snapshot has no cap_csv (or no `target_percent_reduction` was supplied to the POC).'
     ),
   // ── auto-apply (industry-standard MCP write tool surface) ──
-  // Verdict from /tmp/poc-comparison/14d-26-mcp-config-write-pattern-research.md:
   // GitHub MCP, Linear MCP, Atlassian MCP, Notion MCP and other vendor-shipped
   // MCPs converged on auto-execute as the default for write-capable servers.
   // We follow that convention with two opt-outs:
@@ -321,7 +320,7 @@ export const configureEngineSchema = {
     .describe(
       'When `true`, behaves as if `auto_apply=false` regardless of other flags. Use for evaluation, audit, or in MCP contexts without an approval surface (cron, headless agents). Mirrors `github/github-mcp-server --read-only`.'
     ),
-  // ── view shape (arc-C defect 10 fix) ──
+  // ── view shape ──
   // The full envelope is ~84KB on a 119-pattern policy: pr_command (28.8KB
   // multi-line gh script with the entire CSV inline), per_pattern_rows
   // (27.3KB — 119 patterns × all numeric fields), csv_diff (5.3KB). The
@@ -372,10 +371,9 @@ interface ConfigureEngineData {
   destination?: SiemId;
   target_percent?: number;
   /**
-   * Chain-integrity workflow wqtzszdg7: when phase='resolution_prompt'
-   * the tool now discovers candidate containers from the metrics
-   * backend and surfaces them here so the agent can re-call without
-   * an external label-discovery hop.
+   * When phase='resolution_prompt' the tool now discovers candidate
+   * containers from the metrics backend and surfaces them here so the
+   * agent can re-call without an external label-discovery hop.
    */
   container_candidates?: Array<{
     k8s_container: string;
@@ -700,9 +698,9 @@ export async function executeConfigureEngine(
 
   // Phase 1: container resolution.
   if (!args.containers || args.containers.length === 0) {
-    // Chain-integrity workflow wqtzszdg7: prior code returned
-    // containers:[] + actions:[] — a dead-end envelope that told the
-    // agent "pick containers" but gave it nothing to pick from.
+    // Prior code returned containers:[] + actions:[], a dead-end
+    // envelope that told the agent "pick containers" but gave it
+    // nothing to pick from.
     // Discover the candidate containers from the metrics backend so
     // the agent can re-call with a concrete list (or, when the env
     // has a single container, suggest it directly in the headline).
@@ -931,9 +929,9 @@ export async function executeConfigureEngine(
   const rows: PerPatternRow[] = [];
   const actionsUsed: Partial<Record<Action, number>> = {};
   // Track per-tier classification counts so we can diagnose unused
-  // `action_defaults` after the loop (arc-C defect 9). A caller-supplied
-  // default that maps onto a tier with zero patterns silently no-ops
-  // unless we surface it.
+  // `action_defaults` after the loop. A caller-supplied default that
+  // maps onto a tier with zero patterns silently no-ops unless we
+  // surface it.
   const patternsByTier: Record<Tier, number> = {
     audit: 0,
     error: 0,
@@ -946,7 +944,7 @@ export async function executeConfigureEngine(
   // survived all subsequent overrides (floor pin pre-empts; target-met
   // downgrade demotes to pass). Used by action_default_resolution to
   // distinguish "default fired" from "tier had patterns but default never
-  // reached output" (Fix A — misleading effective field).
+  // reached output" (the misleading effective field).
   const appliedDefaultByTier: { standard: number; debug: number; synthetic: number } = {
     standard: 0,
     debug: 0,
@@ -972,8 +970,8 @@ export async function executeConfigureEngine(
     let floorReason: string | undefined;
     // Provenance: which caller-configurable default (if any) was chosen
     // pre-downgrade. After the target-met downgrade fires we check if
-    // `action` still equals this default — if yes, the default actually
-    // drove output for this row (Fix A).
+    // `action` still equals this default: if yes, the default actually
+    // drove output for this row.
     let defaultTier: 'standard' | 'debug' | 'synthetic' | null = null;
 
     const floorHit = floorSet.get(c.pattern_hash);
@@ -1109,7 +1107,7 @@ export async function executeConfigureEngine(
       // total_dollars is now nullable on SavingsProjection — null means the
       // destination has no list rate and no customer override. Current
       // surface still emits a number; full rate_source propagation lands in
-      // the configure-engine patch (step 8 of the build order).
+      // the configure-engine patch.
       projected_monthly_usd_low: roundCents(range.low.total_dollars ?? 0),
       projected_monthly_usd_expected: roundCents(range.expected.total_dollars ?? 0),
       projected_monthly_usd_high: roundCents(range.high.total_dollars ?? 0),
@@ -1144,7 +1142,7 @@ export async function executeConfigureEngine(
     // unused-default block below already covers it.)
   }
 
-  // ── action_defaults resolution diagnostic (arc-C defect 9, Fix A) ──
+  // ── action_defaults resolution diagnostic ──
   // Build a structured record of which caller-requested defaults actually
   // drove row output vs were swallowed. Two failure modes:
   //   1. Tier had zero candidate patterns → `unused_defaults`.
@@ -1279,7 +1277,7 @@ export async function executeConfigureEngine(
     blocking.push(infeasibleReason);
   }
 
-  // Zero-change PR: target already met by current config (OPEN Q 8 default).
+  // Zero-change PR: target already met by current config.
   const targetMetByCurrent = targetShedBytes <= 0;
 
   // CSV diff. Preamble captures the committed target + observed baseline so
@@ -1481,7 +1479,7 @@ export async function executeConfigureEngine(
     ? `${targetPercent.toFixed(1)}% reduction policy derived for ${args.service} (${rows.length} patterns, ${args.containers.length} container${args.containers.length === 1 ? '' : 's'}).`
     : `Cannot hit ${targetPercent.toFixed(1)}% target on ${args.service} without violating floors.`;
 
-  // ── View projection (arc-C defect 10) ─────────────────────────────
+  // ── View projection ───────────────────────────────────────────────
   // Default `view='summary'` strips the three big payload offenders
   // (pr_command ~28.8KB, per_pattern_rows ~27.3KB, csv_diff ~5.3KB) and
   // emits the slim shape: action_mix counts + totals + top-5 cost
@@ -1585,12 +1583,12 @@ function buildSummaryPayload(params: {
     actionMix[r.action] = (actionMix[r.action] ?? 0) + 1;
   }
 
-  // Totals (#1 + #2): report the solver's ACTUAL projected shed — the sum of
-  // the per-pattern plan — not the flat `current - target` budget. A `pass`
+  // Totals: report the solver's ACTUAL projected shed (the sum of the
+  // per-pattern plan), not the flat `current - target` budget. A `pass`
   // row sheds nothing, so it contributes zero: pass is no longer credited as
   // savings, and the headline reconciles with the per-pattern breakdown by
-  // construction. (The flat target still appears as derivation.target_monthly_*
-  // — clearly labelled as the GOAL, distinct from what the plan delivers.)
+  // construction. The flat target still appears as derivation.target_monthly_*,
+  // clearly labelled as the GOAL, distinct from what the plan delivers.
   const bytesSavedMonthly = rows.reduce((s, r) => s + r.saved_bytes_monthly, 0);
   const dollarsSavedMonthly = rows.reduce((s, r) => s + r.saved_dollars_monthly, 0);
   void targetMonthlyBytes;
@@ -1620,7 +1618,7 @@ function buildSummaryPayload(params: {
   // resolved repo is an empty string — falling through to the unguarded
   // template produced "Opens a PR against  on branch main", a literal
   // double-space gap. We now surface the not-configured signal instead
-  // of pretending a PR will open (Fix B). checks.warnings[] still
+  // of pretending a PR will open. checks.warnings[] still
   // carries the structured signal.
   let prCommandSummary: string;
   if (!prCommand) {
@@ -1766,8 +1764,8 @@ async function tryConsumePocSnapshot(
   const baselineCsv = args.current_csv ?? '';
   const diff = renderUnifiedDiff(baselineCsv, capCsv);
 
-  // TODO: build action-intent.json from the POC envelope when poc-envelope-v2
-  // exposes per-pattern action entries. Until then pass undefined — the PR
+  // TODO: build action-intent.json from the POC envelope once it exposes
+  // per-pattern action entries. Until then pass undefined; the PR
   // script will write the cap CSV only.
   const prCommand = feasibility && feasibility.feasible
     ? renderPrCommand(args, resolved, diff, undefined)
@@ -1791,7 +1789,7 @@ async function tryConsumePocSnapshot(
     // POC path: commitment persistence skipped here. The POC's renderInput
     // doesn't carry baseline_monthly_bytes/_usd in the format the
     // CommitmentRecord requires; wiring this end-to-end is a follow-on
-    // (poc-envelope-v2 needs to surface the same baseline fields).
+    // once the POC envelope surfaces the same baseline fields.
   } else if (shouldApply && prCommand) {
     requireWriteAccess(
       'opens a GitHub PR against the gitops repo (gh CLI) to modify the cap-CSV at pipelines/run/receive/rate/caps.csv'
@@ -1849,7 +1847,7 @@ async function tryConsumePocSnapshot(
       : `POC snapshot \`${args.from_poc_id}\` reported feasibility short of target; PR rendered but not applied. Lower target or widen exceptions, then re-run the POC.`,
   };
 
-  // ── View projection (arc-C defect 10) ───────────────────────────
+  // ── View projection ─────────────────────────────────────────────
   // POC consumer path emits csv_diff + pr_command (the two biggest
   // POC-side offenders). Apply the same summary-first projection so
   // the response stays under 8K tokens by default. POC path has no
@@ -1871,7 +1869,7 @@ async function tryConsumePocSnapshot(
       .split('\n')
       .filter((l) => l.startsWith('-') && !l.startsWith('---')).length;
     const changeNote = removals > 0 ? `${additions} additions and ${removals} changes` : `${additions} additions`;
-    // Fix B: guard the unguarded template — when the gitops repo is not
+    // Guard the unguarded template: when the gitops repo is not
     // configured (kubectl_configmap / stdout_only delivery, or unset
     // `gitops.repo` in envs.json) `resolved.gitops_repo` is the
     // back-compat empty-string fallback from resolveTarget, which used to
@@ -1935,7 +1933,7 @@ async function tryConsumePocSnapshot(
   });
 }
 
-// ─── refresh-mode helpers (Item 7) ────────────────────────────────────
+// ─── refresh-mode helpers ─────────────────────────────────────────────
 interface RefreshState {
   /** Target percent the customer originally committed to. */
   committedTargetPercent: number;
@@ -2644,7 +2642,7 @@ function isGitopsHint(hint: string): boolean {
 /**
  * Derives structured chain-next nudges from an error hint string.
  *
- * Mapping (aligned with defect-39 spec):
+ * Mapping:
  *   config_missing + gitops/GH_REPO mention  → log10x_set_gitops_repo
  *   schema_invalid / "invalid" / "required"   → log10x_explain_mode + log10x_cost_options
  *

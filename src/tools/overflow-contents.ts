@@ -2,10 +2,9 @@
  * log10x_overflow_contents — the contents view of the customer's S3
  * offload bucket.
  *
- * The cost-cutting-product-shape.md "Phase 5: Maintain" section calls
- * for a parity workflow with Datadog "Logs Without Limits" and CloudWatch
- * Logs IA: the cheap tier is the OVERFLOW QUEUE, not a search target.
- * The customer wants to REVIEW what's accumulating, not query it.
+ * Parity with Datadog "Logs Without Limits" and CloudWatch Logs IA: the
+ * cheap tier is the OVERFLOW QUEUE, not a search target. The customer
+ * wants to REVIEW what's accumulating, not query it.
  *
  * What this tool does:
  *   - Queries `all_events_summaryBytes_total{isDropped="true"}` grouped
@@ -114,14 +113,14 @@ interface OverflowPattern {
   growth_rate_basis: 'computed' | 'new_pattern' | 'insufficient_baseline';
   /** Cap-CSV-derived action.
    *
-   * Math-lens workflow wt3lz36ye: this field used to be hardcoded to
-   * `'offload'` on every row regardless of cap_csv_status, while the
-   * headline simultaneously hedged "offload action split could not be
-   * verified". Structured rows lied while the prose hedged. Now:
+   * This field used to be hardcoded to `'offload'` on every row
+   * regardless of cap_csv_status, while the headline simultaneously hedged
+   * "offload action split could not be verified". Structured rows lied
+   * while the prose hedged. Now:
    *   - When `cap_csv_status.kind === 'loaded'`, the row carries the
    *     action looked up from action-intent.json (canonical) or the
    *     legacy cap-CSV suffix as a fallback.
-   *   - Otherwise, action is `null` — the tool cannot prove the row's
+   *   - Otherwise, action is `null`: the tool cannot prove the row's
    *     disposition. Caller must surface this as unverified.
    * `action_source` names where the action came from so consumers can
    * gate on verification quality.
@@ -440,7 +439,7 @@ export async function executeOverflowContents(
     truncated,
     cap_csv_status: capCsvStatus,
     patterns: top.map((p) => {
-      // FIX 71 — time_window_basis: distinguish computed / single_sample / no-data.
+      // time_window_basis: distinguish computed / single_sample / no-data.
       let time_window_basis: OverflowPattern['time_window_basis'];
       if (p.time_window_first === null && p.time_window_last === null) {
         time_window_basis = 'insufficient_samples';
@@ -451,14 +450,12 @@ export async function executeOverflowContents(
         time_window_basis = 'computed';
       }
 
-      // FIX 70 — growth_rate_basis: suppress artifact values.
-      // Math-lens workflow wt3lz36ye: growthPctWithBasis used to return
-      // basis='new_pattern' whenever firstHalfBytes<=0, which fires for
-      // pre-existing patterns whose volume was zero in the first half of
-      // the window (data-availability artifact, not identity-age signal).
-      // When time_window_basis flags degraded coverage, we now override
-      // basis to 'insufficient_window_data' instead of confidently
-      // asserting identity novelty.
+      // growth_rate_basis: suppress artifact values. growthPctWithBasis used
+      // to return basis='new_pattern' whenever firstHalfBytes<=0, which fires
+      // for pre-existing patterns whose volume was zero in the first half of
+      // the window (data-availability artifact, not identity-age signal). When
+      // time_window_basis flags degraded coverage, we now override basis to
+      // 'insufficient_window_data' instead of confidently asserting identity novelty.
       let { pct: growth_rate_pct, basis: growth_rate_basis } =
         growthPctWithBasis(p.first_half_bytes, p.bytes_in_window);
       if (
@@ -470,14 +467,12 @@ export async function executeOverflowContents(
         growth_rate_pct = null;
       }
 
-      // Math-lens workflow wt3lz36ye: action used to be hardcoded
-      // `'offload' as Action` on every row regardless of cap_csv_status.
-      // When status != 'loaded', the row label was unverified — but we
-      // stamped it anyway, contradicting the headline hedge. Now: only
-      // stamp action when cap_csv_status.kind === 'loaded' and the
-      // lookup returned a real action; otherwise action=null with
-      // action_source='unverified' so consumers can render the
-      // uncertainty rather than treat the stamp as authoritative.
+      // action used to be hardcoded `'offload' as Action` on every row
+      // regardless of cap_csv_status. When status != 'loaded', the row label
+      // was unverified but we stamped it anyway, contradicting the headline
+      // hedge. Now: only stamp action when cap_csv_status.kind === 'loaded'
+      // and the lookup returned a real action; otherwise action=null with
+      // action_source='unverified' so consumers can render the unverified state.
       let action: Action | null = null;
       let action_source: 'action_intent' | 'legacy_cap_csv' | 'unverified' = 'unverified';
       if (capCsvStatus.kind === 'loaded') {
@@ -509,12 +504,12 @@ export async function executeOverflowContents(
     }),
   };
 
-  // FIX 69 (completed by Fix 83, refined by Fix 84) — headline reflects
-  // actual state. The S3 offload bucket is now resolved from the env-config
-  // doc (see env-config bridge block above), NOT from env.gitops?.repo
-  // (which points at the cap-CSV gitops repo, a different concern). The
-  // "no bucket configured → install the Retriever" branch only fires when
-  // the env-config walk AND the env-var fallback both came back empty.
+  // Headline reflects actual state. The S3 offload bucket is now resolved
+  // from the env-config doc (see env-config bridge block above), NOT from
+  // env.gitops?.repo (which points at the cap-CSV gitops repo, a different
+  // concern). The "no bucket configured → install the Retriever" branch
+  // only fires when the env-config walk AND the env-var fallback both came
+  // back empty.
   let headline: string;
   if (top.length === 0) {
     headline = `Overflow queue empty over ${tf.label}${filterLabel}.`;
@@ -536,13 +531,12 @@ export async function executeOverflowContents(
     headline = `${filtered.length} overflow-eligible pattern${filtered.length !== 1 ? 's' : ''} over ${tf.label}: ${fmtBytes(total_bytes_in_window)} routing configured to ${offloadBucket} but offload action split could not be verified — check log10x_doctor${filterLabel}.`;
   }
 
-  // Math-lens workflow wt3lz36ye: window-coverage caveat. When most or
-  // all surfaced rows have degraded time_window_basis (single_sample or
-  // insufficient_samples on a multi-day window), the headline numbers
-  // imply more confidence than the underlying samples justify. Surface
-  // this as a structured warning so the CFO/agent doesn't treat
-  // bytes_in_window as a stable 30d estimate when it's actually built
-  // from a one-time integration over very sparse points.
+  // Window-coverage caveat. When most or all surfaced rows have degraded
+  // time_window_basis (single_sample or insufficient_samples on a multi-day
+  // window), the headline numbers imply more confidence than the underlying
+  // samples justify. Surface this as a structured warning so the CFO/agent
+  // doesn't treat bytes_in_window as a stable 30d estimate when it's actually
+  // built from a one-time integration over very sparse points.
   const allWarnings = [...envConfigWarnings];
   const totalUsable = data.patterns.length;
   if (totalUsable > 0) {

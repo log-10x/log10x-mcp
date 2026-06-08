@@ -30,18 +30,18 @@
  *       "unvalidated_default" (as user-facing string),
  *       "evaluated" / "could not be evaluated",
  *       "env total" / "env patterns" / "env-scoped".
- *   - Note 3 — "SIEM" → "source".
- *   - Note 10 — raw PromQL → descriptor.
- *   - Note 13 — "sentinel" → "placeholder marker",
+ *   - "SIEM" → "source".
+ *   - raw PromQL → descriptor.
+ *   - "sentinel" → "placeholder marker",
  *     "dispatched" → "ran", "asserts" → "checks",
  *     "e2e probe" → "end-to-end check".
- *   - Note 18 — pattern_hash (11-char base64url) stripped from
+ *   - pattern_hash (11-char base64url) stripped from
  *     user-visible prose via `stripHashFromVisible`.
  *
  * DEFERRED
  *
- *   - Note 19 fuzzy-match + session-cache layer for pattern references
- *     (rank / free-text) — separate module
+ *   - Fuzzy-match + session-cache layer for pattern references
+ *     (rank / free-text) lives in a separate module
  *     (`pattern-reference-resolver.ts`).
  *   - Per-tool prose rewrites (chassis-prose contract migration) — done
  *     incrementally in each tool's executor; this module is the
@@ -63,7 +63,7 @@ import { PATTERN_HASH_REGEX } from './anchor-promql.js';
  * substrings (e.g. "could not be evaluated" before "evaluated").
  */
 const BANNED_PHRASE_REWRITES: ReadonlyArray<readonly [RegExp, string]> = [
-  // Longer compound phrases first (Note 10, 12).
+  // Longer compound phrases first.
   [/\bcould not be evaluated\b/gi, "couldn't check"],
   [/\bclean-chain threshold\b/gi, 'match threshold'],
   [/\bnoise floor\b/gi, 'minimum threshold'],
@@ -73,21 +73,21 @@ const BANNED_PHRASE_REWRITES: ReadonlyArray<readonly [RegExp, string]> = [
   [/\bPearson\b/gi, 'shape match score'],
   [/\b@lag\b/gi, ''],
 
-  // Audience-mismatch tokens (Note 1 — env, Note 3 — SIEM).
+  // Audience-mismatch tokens (env, SIEM).
   [/\benv total\b/gi, 'total'],
   [/\benv patterns\b/gi, 'patterns'],
   [/\benv-scoped\b/gi, 'scoped'],
-  // Per CLAUDE.md anti-SIEM rule: SREs say "stack" (or log analyzer / platform) — not SIEM.
-  // User explicitly chose "stack" as the canonical user-facing term (2026-06-06 review).
+  // Per CLAUDE.md anti-SIEM rule: SREs say "stack" (or log analyzer / platform), not SIEM.
+  // "stack" is the canonical user-facing term for SIEM.
   [/\bSIEM\b/g, 'stack'],
 
-  // Engineering verbs / artefacts (Note 13).
+  // Engineering verbs / artefacts.
   [/\be2e probe\b/gi, 'end-to-end check'],
   [/\bsentinel\b/gi, 'placeholder marker'],
   [/\basserts?\b/gi, 'checks'],
   [/\bdispatched\b/gi, 'ran'],
 
-  // Lone agent-vocabulary nouns (Note 10, 11, 12). Use word boundaries
+  // Lone agent-vocabulary nouns. Use word boundaries
   // so we don't rewrite "anchored" / "candidates_failed".
   [/\bco-movers?\b/gi, 'related metrics'],
   [/\bcandidates?\b/gi, 'metrics'],

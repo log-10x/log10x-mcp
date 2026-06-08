@@ -157,10 +157,10 @@ export async function executeEventLookup(
   const rateSourceMapped = d.rate_source === 'customer_supplied' ? 'customer_supplied' as const
     : d.rate_source === 'list_price' ? 'list_price' as const
     : 'none' as const;
-  // Note 8: event_lookup is a hub — agents reading the result must be
-  // told where to go next. Convert the NextAction prose-hints into the
-  // structured actions[] block on the chassis envelope so a chain walker
-  // can branch without parsing markdown. Mapping is direct: NextAction
+  // event_lookup is a hub: agents reading the result must be told where to
+  // go next. Convert the NextAction prose-hints into the structured
+  // actions[] block on the chassis envelope so a chain walker can branch
+  // without parsing markdown. Mapping is direct: NextAction
   // { tool, args, reason } → Action { tool, args, reason, role }.
   const chassisActions: Action[] = (sumOut.nextActions ?? []).map((a) => ({
     tool: a.tool,
@@ -211,9 +211,8 @@ async function executeEventLookupInner(
   // services/top_patterns/explain_mode/estimate_savings: caller arg →
   // envs.json analyzerCost → LOG10X_ANALYZER_COST → destination list price
   // → unset. Prior to this, event_lookup and top_patterns landed on
-  // different rate_source tags for the SAME env+hash+window (chain walks
-  // B + C, 2026-06-06): math agreed, attribution didn't. The shared
-  // resolver collapses that divergence.
+  // different rate_source tags for the SAME env+hash+window: math agreed,
+  // attribution didn't. The shared resolver collapses that divergence.
   const rateResolved = resolveRate(
     { effective_ingest_per_gb: args.effective_ingest_per_gb, analyzerCost: args.analyzerCost },
     env,
@@ -757,10 +756,10 @@ async function formatResults(
     args: { pattern },
     reason: 'time series for the resolved pattern (volume + chart)',
   });
-  // Note 8: pattern_examples is a hub partner of event_lookup — it
-  // returns real sample lines + slot variations for this pattern, the
-  // content-axis view that complements the time-axis (pattern_trend) and
-  // the cost-axis (event_lookup itself) views.
+  // pattern_examples is a hub partner of event_lookup: it returns real
+  // sample lines + slot variations for this pattern, the content-axis view
+  // that complements the time-axis (pattern_trend) and the cost-axis
+  // (event_lookup itself) views.
   hints.push(`Sample lines + slot variations: log10x_pattern_examples({ pattern: '${pattern}' }).`);
   nextActions.push({
     tool: 'log10x_pattern_examples',
@@ -773,11 +772,11 @@ async function formatResults(
     args: { pattern },
     reason: 'env-gated mitigation options + exact configs for this pattern',
   });
-  // Note 8: investigate is the hub partner for "what else moved with
-  // this pattern". The corroborated-regression path above already pushes
-  // an investigate action with a stronger reason; only add the generic
-  // entry when no regression-specific investigate is already queued so
-  // the chassis actions[] doesn't duplicate.
+  // investigate is the hub partner for "what else moved with this pattern".
+  // The corroborated-regression path above already pushes an investigate
+  // action with a stronger reason; only add the generic entry when no
+  // regression-specific investigate is already queued so the chassis
+  // actions[] doesn't duplicate.
   if (!nextActions.some((a) => a.tool === 'log10x_investigate')) {
     hints.push(`What else moved with this pattern: log10x_investigate({ starting_point: '${pattern}' }).`);
     nextActions.push({
@@ -795,9 +794,9 @@ async function formatResults(
   // Surface the structured nextActions to the outer chassis envelope.
   // Today the prose block (renderNextActions above) is the only way an
   // agent learns about the follow-up handoffs; that leaves the envelope's
-  // typed actions[] empty (Note 8). Pass the list up through sumOut so
-  // executeEventLookup can map NextAction → Action and populate the
-  // chassis actions[] field.
+  // typed actions[] empty. Pass the list up through sumOut so
+  // executeEventLookup can map NextAction → Action and populate the chassis
+  // actions[] field.
   if (sumOut) sumOut.nextActions = nextActions;
   return lines.join('\n');
 }

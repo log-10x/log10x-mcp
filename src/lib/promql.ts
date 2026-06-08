@@ -63,10 +63,9 @@ function escapeLabel(value: string): string {
 
 /**
  * Filter value: either a plain string (default exact-match `=`) or an
- * object form `{op, val}` that lets callers emit `!=` selectors. Added
- * for PL-12a/12b — the `kept` cohort needs absence-tolerant
- * `isDropped!="true"` to include legacy series that pre-date the
- * receiver's `isDropped` label stamping (engine modules `ad02ec6`).
+ * object form `{op, val}` that lets callers emit `!=` selectors: the
+ * `kept` cohort needs absence-tolerant `isDropped!="true"` to include
+ * legacy series that pre-date the receiver's `isDropped` label stamping.
  */
 export type FilterValue = string | { op: '=' | '!='; val: string };
 
@@ -88,8 +87,8 @@ function buildSelector(
 }
 
 /**
- * PL-12a/12b — map the user-facing `include` enum to a single
- * `isDropped` filter-value (or null for the pre-decision union).
+ * Map the user-facing `include` enum to a single `isDropped`
+ * filter-value (or null for the pre-decision union).
  *
  * `kept`    → `isDropped!="true"` (absence-tolerant; matches series with
  *             no `isDropped` label AND `isDropped="false"`).

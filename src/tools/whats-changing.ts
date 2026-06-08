@@ -10,10 +10,9 @@
  * from `log10x_top_volume`, which ranks by current cost — this tool ranks
  * by delta and applies gates that drop noise-level changes.
  *
- * Restores the capability of the deleted `log10x_cost_drivers` tool
- * (commit 27dce7d, chk-15) using the modern StructuredOutput envelope
- * and the shared baseline machinery in `top-volume-extras.ts` / gates
- * in `lib/gates.ts`.
+ * Restores the capability of the deleted `log10x_cost_drivers` tool using
+ * the modern StructuredOutput envelope and the shared baseline machinery in
+ * `top-volume-extras.ts` / gates in `lib/gates.ts`.
  *
  * Brand-new patterns (no baseline samples) are EXCLUDED from this tool's
  * output — they go to `log10x_whats_new` for clean separation of stories.
@@ -497,7 +496,7 @@ export async function executeWhatsChanging(
   const combined = [...gated, ...shrinkers].sort((a, b) => Math.abs(b.delta_usd) - Math.abs(a.delta_usd));
   const shown = combined.slice(0, limit);
 
-  // Note 16: on no_signal, surface the top 5 by absolute delta from the
+  // On no_signal, surface the top 5 by absolute delta from the
   // full rows[] pool so the user can see whether the env was genuinely
   // quiet ($5 max change) or just below their floor ($499 max change).
   const allByAbsDelta = [...rows].sort(
@@ -559,7 +558,7 @@ export async function executeWhatsChanging(
     excluded_new_count: excludedNewCount,
     silent_in_baseline_count: silentInBaselineCount,
     observed_distribution: { delta_usd: observedDeltaUsdDist, delta_pct: observedDeltaPctDist },
-    // Note 16: on no_signal, surface the top 5 by absolute delta so the
+    // On no_signal, surface the top 5 by absolute delta so the
     // agent has something to render even when nothing crossed the floor.
     ...(status === 'no_signal' && topAnyway.length > 0
       ? { top_anyway: topAnyway, suggested_floor_usd: suggestedFloor }
@@ -574,13 +573,12 @@ export async function executeWhatsChanging(
     );
   }
   if (silentInBaselineCount > 0) {
-    // Math-lens workflow wol3rcauh, whats_changing bug #1: previous text
-    // said "treated as 100% deltas vs zero baseline" but the code (line
-    // 443: `costBaseline > 0 ? (delta / costBaseline) * 100 : 0`) returns
-    // 0%, not 100%, when baseline is zero. "100% delta" mathematically
-    // means current = 2 × baseline (doubled), which can't apply to a
-    // zero-baseline row at all. Honest framing: percent-change is
-    // undefined; only the dollar delta is meaningful for these rows.
+    // Honest framing for zero-baseline rows: the percent-change formula
+    // (`costBaseline > 0 ? (delta / costBaseline) * 100 : 0`) returns 0%,
+    // not 100%, when baseline is zero. "100% delta" mathematically means
+    // current = 2x baseline (doubled), which can't apply to a zero-baseline
+    // row at all. Percent-change is undefined; only the dollar delta is
+    // meaningful for these rows.
     const verb = silentInBaselineCount === 1 ? 'was' : 'were';
     calloutParts.push(
       `${silentInBaselineCount} pre-existing pattern${silentInBaselineCount === 1 ? '' : 's'} ${verb} silent across all baseline anchor windows (1×/2×/3× timeRange offsets) — emitting now after a quiet stretch. Percent-change is undefined (zero baseline); only dollar delta is meaningful for these rows.`
@@ -589,7 +587,7 @@ export async function executeWhatsChanging(
   const callout = calloutParts.length > 0 ? calloutParts.join(' ') : undefined;
 
   // Honest summary: lead with the result, surface partial failure when any
-  // baseline offset or the events join failed. Note 16 — on no_signal we
+  // baseline offset or the events join failed. On no_signal we
   // drop the "hand-picked defaults" caveat: when nothing crossed, the
   // actionable next step is "lower the floor", not "treat the threshold as
   // suspect."
@@ -649,7 +647,7 @@ export async function executeWhatsChanging(
             ]
           : []),
       ]
-    : // Note 16: on no_signal, suggest a re-run at the tuned floor so the
+    : // On no_signal, suggest a re-run at the tuned floor so the
       // user has a one-click way to expand the view, plus a top_anyway-based
       // drill-in to the biggest change we did observe.
       status === 'no_signal' && topAnyway.length > 0

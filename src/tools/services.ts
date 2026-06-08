@@ -1,7 +1,7 @@
 /**
  * log10x_services — list all monitored services with volume + action-axis summary.
  *
- * Item 6 (cost-cutting close-list v2): per-service rows now carry the
+ * Per-service rows now carry the
  * four action-axis columns that let an agent / FinOps reader see where
  * each service's savings are coming from:
  *
@@ -53,11 +53,11 @@ import { normalizeTimeRange } from '../lib/time-range.js';
 import { renderMonospaceTable } from '../lib/render-table.js';
 
 /**
- * Math-lens workflow w58guv3e4: the rank cutoff that gates whether a
- * service gets a next_action vs is "omitted from next_action" in the
- * headline. Hand-picked at 10 — tagged as the operational threshold in
- * the chassis decisions block so consumers can audit. The MIN_PCT_FLOOR
- * below acts as the secondary cutoff for "below_signal_floor".
+ * The rank cutoff that gates whether a service gets a next_action vs is
+ * "omitted from next_action" in the headline. Hand-picked at 10, tagged as
+ * the operational threshold in the chassis decisions block so consumers can
+ * audit. The MIN_PCT_FLOOR below acts as the secondary cutoff for
+ * "below_signal_floor".
  */
 export const NEXT_ACTION_RANK_CUTOFF = 10;
 const NEXT_ACTION_MIN_PCT_FLOOR = 0.1;
@@ -190,11 +190,10 @@ export async function executeServices(
     headline,
     status: d.service_count > 0 ? 'success' : 'no_signal',
     decisions: {
-      // Math-lens workflow w58guv3e4: prior code aliased threshold_used
-      // to cost_per_gb — but rate is not a threshold. The chassis
-      // decision block describes the OPERATIONAL THRESHOLD: here, the
-      // tail-rank cutoff that determines which services get a
-      // next_action (rank ≤ 10) vs which are omitted (the "16 tail
+      // Prior code aliased threshold_used to cost_per_gb, but rate is not a
+      // threshold. The chassis decision block describes the OPERATIONAL
+      // THRESHOLD: here, the tail-rank cutoff that determines which services
+      // get a next_action (rank <= 10) vs which are omitted (the "16 tail
       // services omitted" headline phrase). 10 is hand-picked; tag as
       // unvalidated_default. rate_source provenance stays in
       // source_disclosure.rate_source where it belongs.
@@ -292,7 +291,7 @@ async function executeServicesInner(
     return 'No service data available. Data appears after the first 24h of collection.';
   }
 
-  // ── Action-axis queries (Item 6) ──
+  // ── Action-axis queries ──
   // Two parallel `sum by (service, hash)` queries (kept + dropped),
   // joined locally to the cap-CSV action lookup. We deliberately key on
   // BOTH service + hash so a pattern that fires in two services is
@@ -558,15 +557,14 @@ async function executeServicesInner(
 
   if (sumOut) {
     // top_n_share_pct: cost concentration in the ACTIONABLE set (services
-    // with a non-null next_action — the ones a CFO can act on this week).
-    // Surfaced by adversarial workflow wui9vouej, 2026-06-07: this field
-    // used to slice [0:3] and was rendered alongside a headline saying
-    // "Top {actionableCount}" — three different numbers for the same
+    // with a non-null next_action, the ones a CFO can act on this week).
+    // This field used to slice [0:3] and was rendered alongside a headline
+    // saying "Top {actionableCount}", three different numbers for the same
     // quantity in one envelope. N now matches the headline's actionable
     // count so the field reconstructs from the data.
     // Mirror the per-row next_action logic (rank <= 10 AND pct >= 0.1)
     // so the share % counts exactly the services the per-row routing
-    // marks actionable. Exception-mode services aren't subtracted —
+    // marks actionable. Exception-mode services aren't subtracted;
     // they route to pattern_mitigate but still count as actionable.
     const actionableRowCount = Math.min(
       10,

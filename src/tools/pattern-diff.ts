@@ -28,9 +28,6 @@
  * (Datadog Log Patterns, Cribl, Edge Delta), the "patterns" on each side of
  * the boundary aren't comparable — their IDs change every query. The diff
  * question is incoherent there; it works here.
- *
- * Both Grok 4.3 and a fresh Claude subagent independently called this the
- * highest-leverage first_seen primitive after reviewing the catalog.
  */
 
 import { z } from 'zod';
@@ -355,7 +352,7 @@ export async function executePatternDiff(
   const nowSec = Math.floor(Date.now() / 1000);
   const beforeWindowStartSec = nowSec - 2 * tf.days * 86400;
 
-  // Re-emergence threshold tightening (Note 15): with a sparse env, half the
+  // Re-emergence threshold tightening: with a sparse env, half the
   // patterns naturally blink in and out per window. "Re-emerged" should mean
   // a pattern that was meaningfully persistent BEFORE it went silent AND was
   // silent for a meaningful stretch. Defaults: persistent ≥ 6h before
@@ -485,7 +482,7 @@ export async function executePatternDiff(
   const newRows = sortDesc(trueNewHashes.map(buildRow), 'cost_now_usd').slice(0, limit);
   const retiredRows = sortDesc(retiredHashes.map(buildRow), 'cost_before_usd').slice(0, limit);
   const persistentRows = sortDesc(persistentHashes.map(buildRow), 'cost_now_usd').slice(0, limit);
-  // Re-emerged ranking (Note 15): rank by "surprise" = silence_gap × current
+  // Re-emerged ranking: rank by "surprise" = silence_gap × current
   // volume. The longer the silence and the louder the return, the more
   // likely this is a real regression worth surfacing. Cap displayed count
   // tightly (max 10) so the user gets a focused list even when the raw
@@ -519,7 +516,7 @@ export async function executePatternDiff(
     },
   };
 
-  // Headline framing (Note 15): when re-emerged count is large (>30), the
+  // Headline framing: when re-emerged count is large (>30), the
   // signal-to-noise of "silent regression" framing collapses — it's just
   // high churn in a sparse env. Flip to "high pattern churn" framing and
   // promise the top N most surprising ones. Below 30, the focused
@@ -629,9 +626,9 @@ export async function executePatternDiff(
         ``,
         `**Groups of patterns appearing together** (${clusters.length}) — likely tied to deploys or config changes:`,
       );
-      // Format per Note 33: "Group N (appeared around HH:MM UTC, K patterns)"
-      // followed by per-pattern lines `service · severity · short descriptor`.
-      // Hashes stay machine-side (Note 18); the agent reads the patterns[]
+      // Format: "Group N (appeared around HH:MM UTC, K patterns)" followed by
+      // per-pattern lines `service · severity · short descriptor`.
+      // Hashes stay machine-side; the agent reads the patterns[]
       // array from the structured payload to drill in.
       const fmtClusterTime = (epochSec: number) => {
         const d = new Date(epochSec * 1000);
@@ -659,7 +656,7 @@ export async function executePatternDiff(
     const svcList = (r: DiffRow) => r.services.map((s) => s.name).join(', ');
     const sevList = (r: DiffRow) => r.severities.join('/');
     // Pattern column shows the human-readable symbol_message, NOT the hash
-    // (Note 18 — hash stays in machine fields only). Truncate long symbol
+    // (hash stays in machine fields only). Truncate long symbol
     // messages so the table column stays readable.
     const patternLabel = (r: DiffRow) => {
       const sm = r.symbol_message || '(unknown pattern)';
@@ -707,9 +704,9 @@ export async function executePatternDiff(
     });
   }
 
-  // Surface group contents in must_render_verbatim for the summary view too
-  // (Note 33): a bare "3 groups detected" count without member listings is
-  // the entire defect. Same per-cluster format as the markdown view:
+  // Surface group contents in must_render_verbatim for the summary view too:
+  // a bare "3 groups detected" count without member listings is useless on its
+  // own. Same per-cluster format as the markdown view:
   // "Group N (appeared around HH:MM UTC, K patterns)" then per-pattern
   // `service · severity · short descriptor` lines. Hashes stay machine-side.
   let summaryVerbatim: string | undefined;

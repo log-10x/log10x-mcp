@@ -368,8 +368,8 @@ export async function executeExplainMode(args: {
   // envs.json analyzerCost → LOG10X_ANALYZER_COST → destination list price →
   // unset. Prior to this, explain_mode went straight to destination list
   // (rung 4) and labeled it 'list_price' even when the other tools had
-  // already picked up a customer-supplied rate from the env — same env,
-  // same window, two tags. Chain walks B+C, 2026-06-06.
+  // already picked up a customer-supplied rate from the env, same env,
+  // same window, two tags.
   const rateResolved = resolveRate(
     { effective_ingest_per_gb: args.effective_ingest_per_gb },
     env,

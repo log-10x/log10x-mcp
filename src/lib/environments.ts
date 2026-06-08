@@ -784,8 +784,8 @@ async function loadLegacyLog10x(): Promise<Environments> {
   }
 
   // Path 5: nothing set — pure demo mode. Public demo key so the
-  // user can play without signing up. Phase 7 removes this silent
-  // fallback in favor of an explicit "not configured" state.
+  // user can play without signing up. This silent fallback is slated to
+  // be replaced by an explicit "not configured" state.
   // eslint-disable-next-line no-console
   console.info(`[log10x-mcp] metricsBackend resolved via demo (no-credentials-configured)`);
   return await loadFromApi(DEMO_API_KEY, /*isDemoMode=*/ true);

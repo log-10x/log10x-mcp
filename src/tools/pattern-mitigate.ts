@@ -398,14 +398,14 @@ async function detectCapabilities(snapshotId?: string): Promise<Capabilities> {
   }
 
   // Source 4: SIEM credential probe.
-  // (a) Fix C — reconcile analyzerVendor against what connector actually has
-  //     credentials, because the config stack (envs.json / env-var / profile
-  //     metadata) may be stale (e.g. still says 'splunk' when CloudWatch is
-  //     now the live destination).
-  // (b) Fix A — probe 1–3 recent events for tenx_hash presence. A hit is
-  //     direct evidence the Receiver is in-path and stamping events.
-  //     Only run when receiverInPath is still false (no snapshot or env
-  //     evidence already confirmed it).
+  // (a) Reconcile analyzerVendor against what the connector actually has
+  //     credentials for, because the config stack (envs.json / env-var /
+  //     profile metadata) may be stale (e.g. still says 'splunk' when
+  //     CloudWatch is now the live destination).
+  // (b) Probe 1-3 recent events for tenx_hash presence. A hit is direct
+  //     evidence the Receiver is in-path and stamping events. Only run when
+  //     receiverInPath is still false (no snapshot or env evidence already
+  //     confirmed it).
   try {
     const PROBE_VENDORS = ['datadog', 'splunk', 'elasticsearch', 'cloudwatch'] as const;
     const siemResolution = await resolveSiemSelection({
@@ -414,7 +414,7 @@ async function detectCapabilities(snapshotId?: string): Promise<Capabilities> {
     if (siemResolution.kind === 'resolved') {
       const resolvedVendor = siemResolution.id;
 
-      // Fix C: if config stack says one vendor but credentials only exist for
+      // If the config stack says one vendor but credentials only exist for
       // another, prefer the connector result (it reflects what's actually
       // being queried right now).
       if (out.analyzerVendor && out.analyzerVendor !== resolvedVendor) {
@@ -428,7 +428,7 @@ async function detectCapabilities(snapshotId?: string): Promise<Capabilities> {
         out.sources.analyzer = 'siem_probe';
       }
 
-      // Fix A: probe for tenx_hash in recent events when receiver_in_path is
+      // Probe for tenx_hash in recent events when receiver_in_path is
       // still undetermined from config / snapshot.
       if (!out.receiverInPath) {
         const connector = getConnector(resolvedVendor);
@@ -599,7 +599,7 @@ export async function executePatternMitigate(args: PatternMitigateArgs): Promise
       ? `${patternNotFoundWarning}${patternLabel}: NO mitigation options available — ${dimmedCount} dimmed. Setup hint surfaces what's missing.`
       : `${patternNotFoundWarning}${patternLabel}: ${enabledCount} of ${d.options.length} mitigation options enabled (${d.options.filter((o) => o.enabled).map((o) => o.id).join(', ')}).`;
 
-  // Fix D: populate actions[] with structured follow-up nudges so agent
+  // Populate actions[] with structured follow-up nudges so agent
   // chains can pick them up without parsing human_summary text.
   const envelopeActions: import('../lib/output-types.js').Action[] = [];
 

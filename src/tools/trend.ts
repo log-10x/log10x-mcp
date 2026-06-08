@@ -214,7 +214,7 @@ export async function executeTrend(
     });
   }
   const d = sumOut.data;
-  // Percent-first headline (TOOL-AUDIT cost-honesty pass). Bytes/change lead;
+  // Percent-first headline. Bytes/change lead;
   // the measured-spend clause is gated on `rate_source !== 'unset'` so we
   // never print a $1.0/GB lie. When unset, suffix "(rate unset)" so the
   // agent knows why the dollar number is missing.
@@ -231,17 +231,15 @@ export async function executeTrend(
       : ', (rate unset)';
   const spikeClause = d.spike_detected ? ', spike detected' : '';
   let headline: string;
-  // Math-lens workflow wt3lz36ye:
-  //   (1) Pattern name was embedded as a raw underscored blob — burned rule
-  //       (memory: feedback_no_hash_in_user_headlines). Replaced with
-  //       underscores-to-spaces hint, same shape as the other 5 tools we
-  //       fixed this session.
+  //   (1) Pattern name was embedded as a raw underscored blob; the
+  //       no-hash-in-headlines rule applies. Replaced with an
+  //       underscores-to-spaces hint, same shape as the other dollar tools.
   //   (2) "Currently offloaded" mislabels generic isDropped="true" bytes as
-  //       offload-specifically — same fix shape as top_patterns. Replaced
-  //       with action-neutral "currently reduced".
+  //       offload-specific; same fix shape as top_patterns. Replaced with
+  //       action-neutral "currently reduced".
   //   (3) "<pattern> offloaded over <window>" on include='dropped' headline:
   //       same offload-overreach; cohort is generic isDropped, not
-  //       offload-specifically. Renamed to "<pattern> reduced cohort
+  //       offload-specific. Renamed to "<pattern> reduced cohort
   //       over <window>".
   // Uses shared formatPatternLabel helper with 60-char cap. pattern_trend
   // has no services[] context (single-pattern view), so we lean on the
@@ -302,7 +300,7 @@ export async function executeTrend(
   // no actual chart bytes — the host had to either re-render or fall
   // back to JSON. Plumb the same ASCII lineChart the markdown body
   // already produces into must_render_verbatim so the chart is the
-  // tool's primary visual artifact (see /tmp/arc-prose-notes.md Note 5).
+  // tool's primary visual artifact.
   //
   // The chart is built off `d.time_series` (already bucketed by the
   // auto-step path). lineChart's y-axis labels are per-hour rates, so we
@@ -334,8 +332,8 @@ export async function executeTrend(
 
   // ── actions[] ────────────────────────────────────────────────────
   // pattern_trend is the volume/time-axis view. The slot/content angle
-  // lives in pattern_examples (Note 6 + Note 7 decisions: NO slot data
-  // here; route to pattern_examples for it). Always include the
+  // lives in pattern_examples (no slot data here; route to
+  // pattern_examples for it). Always include the
   // examples handoff so an agent reading a trend envelope has a clear
   // next step for the content question.
   const trendActions: import('../lib/output-types.js').Action[] = [];
@@ -396,7 +394,7 @@ async function executeTrendInner(
   // Auto-step: when the caller passes `'auto'` (the schema default) we
   // pick a step that yields ~12–30 buckets per window. A coarse step
   // (e.g. `1h` on a `1h` window) produces a 2-point series with no
-  // usable trend shape — see /tmp/arc-prose-notes.md Note 5.
+  // usable trend shape.
   const requestedStep = args.step ?? 'auto';
   const step = requestedStep === 'auto' ? pql.autoStepForWindow(timeRange) : requestedStep;
   const include = args.include ?? 'kept';
@@ -517,7 +515,7 @@ async function executeTrendInner(
   const recentCost: number | null =
     costPerGb !== null ? bytesToCost(recentBytes, costPerGb) : null;
 
-  // De-verdict (TOOL-AUDIT Phase 2): report the MEASURED change as a signed
+  // Report the MEASURED change as a signed
   // delta + the two quarter run-rates, NOT an asserted RISING/FALLING/STABLE
   // label. The fine time series is trend's differentiated context; the
   // asserted trend word competed with the agent's live judgment and read as

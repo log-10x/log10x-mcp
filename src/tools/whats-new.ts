@@ -75,7 +75,7 @@ interface NewPatternServiceRow extends ServiceIdentity {
 }
 
 /**
- * Trajectory classification (Note 17). Computed from current-window vs
+ * Trajectory classification. Computed from current-window vs
  * prior-window event counts:
  *   - `one-shot` — events_now == 1 (single emission so far)
  *   - `growing` — events_now > 1.5 × events_prior (or events_prior == 0
@@ -113,7 +113,7 @@ interface WhatsNewData {
 }
 
 /**
- * Render trajectory as a single glyph + word for tables (Note 17). Kept as
+ * Render trajectory as a single glyph + word for tables. Kept as
  * a tiny set so the column stays scannable.
  */
 function trajectoryLabel(t: Trajectory): string {
@@ -127,7 +127,7 @@ function trajectoryLabel(t: Trajectory): string {
 }
 
 /**
- * Classify trajectory from current vs prior event counts (Note 17).
+ * Classify trajectory from current vs prior event counts.
  */
 function classifyTrajectory(eventsNow: number, eventsPrior: number): Trajectory {
   if (eventsNow <= 1 && eventsPrior === 0) return 'one-shot';
@@ -251,7 +251,7 @@ export async function executeWhatsNew(
   // is derived locally via groupRowsByPattern (tenxHash(symbolMessage)),
   // so we don't conflate symbol_message and pattern_hash the way prior
   // versions of this tool did. events_prior is the same metric over the
-  // immediately-preceding window (Note 17 — trajectory classification).
+  // immediately-preceding window (used for trajectory classification).
   interface BytesEventsRow extends RawPatternServiceRow {
     bytes: number;
     events: number;
@@ -268,7 +268,7 @@ export async function executeWhatsNew(
   // we surface it as a structured partial-failure flag instead of silently
   // dropping the error.
   //
-  // Note 17 adds a prior-window events query (offset by tf.days) so we can
+  // A prior-window events query (offset by tf.days) lets us
   // classify trajectory (growing / steady / shrinking / one-shot) without
   // adding a heavier range query. Failure of the prior-window probe is
   // non-fatal too — we degrade trajectory to 'steady' (the safe default)
@@ -383,20 +383,19 @@ export async function executeWhatsNew(
   rows.sort((a, b) => a.first_seen_age_seconds - b.first_seen_age_seconds);
   const shown = rows.slice(0, limit);
 
-  // Note 17 + Note 18: headline drops $ and hash. Lead with the descriptor
-  // and the first-seen age. Brand-new patterns have meaningless cost; the
-  // signal worth showing is "how many events, growing or not."
+  // Headline drops $ and hash. Lead with the descriptor and the first-seen
+  // age. Brand-new patterns have meaningless cost; the signal worth showing
+  // is "how many events, growing or not."
   //
-  // Note 34: when the descriptor is short (< 15 chars or a single common
-  // word like "Configuring"), the user has no anchor for what it actually
-  // is. Append "(e.g. `<first 80 chars of raw sample>`)" so the user sees
-  // a concrete example. We use symbol_message as the raw sample fallback —
-  // that's the closest thing to a sample line available without fetching
-  // a separate query. Skip the e.g. block when the sample would just
-  // restate the descriptor verbatim.
-  // Delegates to the shared formatPatternLabelFromServices helper —
-  // burned-rule fix (memory: feedback_no_hash_in_user_headlines) lives
-  // in one place. See lib/pattern-label.ts.
+  // When the descriptor is short (< 15 chars or a single common word like
+  // "Configuring"), the user has no anchor for what it actually is. Append
+  // "(e.g. `<first 80 chars of raw sample>`)" so the user sees a concrete
+  // example. We use symbol_message as the raw sample fallback, the closest
+  // thing to a sample line available without fetching a separate query.
+  // Skip the e.g. block when the sample would just restate the descriptor
+  // verbatim.
+  // Delegates to the shared formatPatternLabelFromServices helper so the
+  // no-hash-in-headlines fix lives in one place. See lib/pattern-label.ts.
   const headlineDescriptor = (r: NewPatternRow) =>
     formatPatternLabelFromServices({
       symbol_message: r.symbol_message,
@@ -422,10 +421,10 @@ export async function executeWhatsNew(
     ...(backendErrors.length > 0 ? { backend_errors: backendErrors, partial: true } : {}),
   };
 
-  // Note 34: drop the "scanned N candidate patterns over the last 1h"
-  // framing — surface the universe as "N patterns active in the last hour"
-  // instead. The downstream sanitizer also catches "candidate patterns",
-  // but the explicit human_summary edit is clearer for the reader.
+  // Drop the "scanned N candidate patterns over the last 1h" framing;
+  // surface the universe as "N patterns active in the last hour" instead.
+  // The downstream sanitizer also catches "candidate patterns", but the
+  // explicit human_summary edit is clearer for the reader.
   const activeBlurb =
     rows.length > 0
       ? ` Out of ${rows.length} pattern${rows.length === 1 ? '' : 's'} active in the last ${tf.label}, ${shown.length} ${shown.length === 1 ? 'is' : 'are'} brand new.`
@@ -442,10 +441,9 @@ export async function executeWhatsNew(
       : humanSummaryBase;
 
   if (view === 'markdown') {
-    // Note 17 + 18: Drop $ (meaningless on brand-new patterns). Drop the
-    // Bytes/1h column in favor of Events (count) and Trajectory. Pattern
-    // column shows symbol_message (descriptor), hash stays in machine
-    // fields only.
+    // Drop $ (meaningless on brand-new patterns). Drop the Bytes/1h column
+    // in favor of Events (count) and Trajectory. Pattern column shows
+    // symbol_message (descriptor), hash stays in machine fields only.
     const lines = [
       `## What's new — ${tf.label}`,
       ``,

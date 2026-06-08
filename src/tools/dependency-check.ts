@@ -197,10 +197,10 @@ export async function executeDependencyCheck(args: DependencyCheckArgs): Promise
       : '';
   const headline = `${patternNotFoundWarning}\`${d.pattern}\`: ${d.dependencies.length} dependencies found in ${d.vendor ?? 'analyzer'} (recommendation: ${d.safe_to_drop_recommendation})`;
 
-  // Build scan_scope for defect 34A: surface what was actually scanned.
-  // cycle-4 depcheck-surfaces: report the surfaces THIS vendor's scanner
-  // queries, not a fixed all-vendor union (e.g. CloudWatch has no
-  // saved_searches/monitors; Datadog has no metric_filters).
+  // Build scan_scope: surface what was actually scanned. Report the
+  // surfaces THIS vendor's scanner queries, not a fixed all-vendor union
+  // (e.g. CloudWatch has no saved_searches/monitors; Datadog has no
+  // metric_filters).
   const VENDOR_SURFACES: Record<string, string[]> = {
     cloudwatch: ['dashboards', 'alarms', 'metric_filters'],
     datadog: ['dashboards', 'monitors'],

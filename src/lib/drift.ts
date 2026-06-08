@@ -82,9 +82,9 @@ export async function classifyTrajectory(
   // not an absolute slope-of-rate. The renderer multiplies by 100 to express as
   // percent — if we don't normalize here, a steady ~40K events/sec pattern reads
   // as "+430,522%/week" because the absolute slope-of-rate is large in raw units
-  // while the actual week-over-week change is ~0. (Investigation fabrication bug
-  // surfaced 2026-06-06: drift markdown showed +430,522%/week on a pattern that
-  // pattern_trend correctly showed as -7% WoW.)
+  // while the actual week-over-week change is ~0. This guards against drift
+  // markdown reporting an absurd rate (e.g. +430,522%/week) on a pattern that
+  // pattern_trend shows as roughly flat.
   const slopeQuery =
     `(deriv(sum(rate(${metric}{${envLabel},${LABELS.pattern}="${escape(anchor)}"}[1h]))[${window}:1h]) * 604800) ` +
     `/ ` +

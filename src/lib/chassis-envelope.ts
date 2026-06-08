@@ -3,8 +3,7 @@
  *
  * WHY THIS EXISTS
  *
- * After a live walk on otel-demo (2026-06-03) we catalogued two tool
- * classes:
+ * There are two tool classes:
  *
  *   Class A (older, chaotic):
  *     top_patterns, pattern_examples, pattern_mitigate, cost_options,

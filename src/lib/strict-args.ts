@@ -8,10 +8,9 @@
  * tool runs with `args.pattern === undefined`, and the caller waits ~3 minutes
  * for a zero-event result that should have been a fast unknown_arg error.
  *
- * Verified live on 2026-06-04 against the demo retriever: `retriever_query`
- * with `pattern_hash: "FU1__vh8hbY"` returned 0 events after 185s — no error,
- * no warning, no hint that the arg was discarded. That's the foot-gun this
- * helper closes.
+ * Concretely: a `retriever_query` call with an undeclared `pattern_hash` arg
+ * runs for minutes and returns 0 events with no error, no warning, and no hint
+ * that the arg was discarded. That's the foot-gun this helper closes.
  *
  * Usage at the executor entry point:
  *

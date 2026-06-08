@@ -220,11 +220,10 @@ interface MetricsThatMovedSummary {
    * on this backend" OR "...clustered at 0.22 — the floor is below
    * noise; treat moved[] with extreme skepticism."
    *
-   * This is the honest disclosure path. The tool does NOT auto-calibrate
-   * (every empirical calibration attempt was rejected by the consult as
-   * statistical theater without external ground truth). Instead it
-   * surfaces the data the caller would calibrate from, alongside the
-   * floor it compared to.
+   * This is the honest disclosure path. The tool does NOT auto-calibrate:
+   * empirical calibration without external ground truth would be statistical
+   * theater. Instead it surfaces the data the caller would calibrate from,
+   * alongside the floor it compared to.
    */
   threshold_audit?: ThresholdAudit;
   /** Populated only when `status === 'error'`. */
@@ -233,8 +232,8 @@ interface MetricsThatMovedSummary {
    * Populated only when `status === 'anchor_no_phase_separation'`. Up to
    * 3 patterns from the same env whose volume varies enough to be good
    * starting points (CV ≥ 0.5). Empty array when the scan found none or
-   * errored — the refusal envelope still ships, the table just doesn't
-   * render. Per Note 30: "re-anchor" without suggestions is dead-end UX.
+   * errored (the refusal envelope still ships, the table just doesn't
+   * render). "Re-anchor" without suggestions is dead-end UX.
    */
   anchor_suggestions?: AnchorSuggestion[];
 }
@@ -444,7 +443,7 @@ export async function executeMetricsThatMoved(
   const anchorValues = anchorSeries.map(([, v]) => v);
   const anchorDispersion = computeAnchorDispersion(anchorValues);
   if (anchorDispersion < ANCHOR_DISPERSION_FLOOR) {
-    // Per Note 30: refusing without alternatives is dead-end UX. Scan the
+    // Refusing without alternatives is dead-end UX. Scan the
     // env's recent top patterns for ones with enough variation to be
     // good starting points, surface up to 3. Helper degrades to [] on
     // any error so the refusal still ships even if the suggestion query
@@ -481,7 +480,7 @@ export async function executeMetricsThatMoved(
       query_count: queryCount,
       total_latency_ms: totalLatencyMs,
       backend_pressure_hint: pressureHint(queryCount, totalLatencyMs, throttledHit),
-      // Per Notes 10-12: drop "anchor", "dispersion", raw PromQL expression
+      // Plain English: drop "anchor", "dispersion", raw PromQL expression
       // from user prose. The numeric audit lives in payload for the agent.
       human_summary: refuseSummary,
       moved: [],
@@ -489,7 +488,7 @@ export async function executeMetricsThatMoved(
       evaluation_failed: [],
       anchor_suggestions: suggestions,
     };
-    // Plain English per Notes 10-12: drop "anchor", "dispersion", "refusing".
+    // Plain English: drop "anchor", "dispersion", "refusing".
     const headline = `The pattern we looked at is too steady to compare against other metrics. Try a different starting pattern.`;
     return buildChassisEnvelope({
       tool: 'log10x_metrics_that_moved',
@@ -558,11 +557,11 @@ export async function executeMetricsThatMoved(
   notMoved.sort((a, b) => b.phase_gap - a.phase_gap);
 
   const nUsable = moved.length + notMoved.length;
-  // Math-lens workflow wxk3k628c: same fix as rank_by_shape — gate
-  // low_candidate_count on having at least one EVALUABLE candidate so
+  // Gate low_candidate_count on having at least one EVALUABLE candidate so
   // an all-candidates-failed call doesn't get tagged 'severe' (which
   // misdirects remediation toward "widen the metric pool" when the
-  // actual failure is connectivity / metric-not-found).
+  // actual failure is connectivity / metric-not-found). Same fix as
+  // rank_by_shape.
   const lowCandidateCount: 'severe' | 'medium' | null =
     nUsable === 0 && failed.length === filteredCandidates.length
       ? null  // all-failed case → distinct failure mode
@@ -618,15 +617,14 @@ export async function executeMetricsThatMoved(
     },
   };
 
-  // Plain English per Notes 10-12: drop "candidates", "anchor", "phase_gap".
+  // Plain English: drop "candidates", "anchor", "phase_gap".
   // The structured threshold + counts still live in payload / decisions.
-  // Math-lens workflow wxk3k628c: prior headline said "(N checked)" using
-  // filteredCandidates.length — but that count INCLUDES candidates that
-  // failed validation/query (couldn't actually be checked). When every
-  // candidate failed, the headline claimed "(2 checked)" while
-  // candidates_evaluated=0 and human_summary said "2 couldn't be checked".
-  // Use the evaluated count for the headline so it agrees with both
-  // structured fields and the prose.
+  // Use the evaluated count for the headline, not filteredCandidates.length,
+  // because the latter includes candidates that failed validation/query and
+  // could not actually be checked. When every candidate failed, the headline
+  // claimed "(2 checked)" while candidates_evaluated=0 and human_summary said
+  // "2 couldn't be checked". The evaluated count agrees with both structured
+  // fields and the prose.
   const evaluatedCount = filteredCandidates.length - failed.length;
   const headline = moved.length > 0
     ? `${moved.length} of ${evaluatedCount} metric(s) moved with this pattern over the window.`
@@ -787,9 +785,9 @@ function buildHumanSummary(args: {
   anchorDispersion: number;
   lowCandidateCount: 'severe' | 'medium' | null;
 }): string {
-  // Per Notes 9-12: drop "candidate", "phase-gap floor", "anchor",
+  // Plain English: drop "candidate", "phase-gap floor", "anchor",
   // "evaluated" from user prose. Drop the calibration caveat entirely on
-  // no_signal (Note 9 — not load-bearing when nothing was found).
+  // no_signal (not load-bearing when nothing was found).
   if (args.status === 'no_signal') {
     const notMovedNote = args.notMoved.length > 0
       ? ` ${args.notMoved.length} stayed flat`

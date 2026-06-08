@@ -8,7 +8,7 @@
  *
  * IMPORTANT: requires the `PUT /api/v1/user/env` route to be configured
  * in the API Gateway. Without it the call fails at the gateway layer
- * with a 4xx before the lambda is invoked. See backend PR #62
+ * with a 4xx before the lambda is invoked. See the backend PUT route
  * (fix(gateway): wire PUT /api/v1/user/env).
  */
 
@@ -104,10 +104,10 @@ async function executeUpdateEnvInner(args: { env_id: string; name?: string; is_d
       const md = '## Update env failed — backend route not yet deployed\n\n' +
         `${msg}\n\n` +
         'The \`PUT /api/v1/user/env\` route is not yet in the API Gateway. ' +
-        'This is fixed by backend PR #62 (`fix(gateway): wire PUT /api/v1/user/env`). ' +
+        'This is fixed once the backend PUT route ships. ' +
         'Once that PR ships to staging / prod, this tool will work. As a workaround, ' +
         'you can rename the env via the console: console.log10x.com → Profile → Environments.';
-      return { ok: false, env_id: args.env_id, changes: [], error: 'backend PUT route not deployed (see backend PR #62)', markdown: md };
+      return { ok: false, env_id: args.env_id, changes: [], error: 'backend PUT route not deployed', markdown: md };
     }
     return { ok: false, env_id: args.env_id, changes: [], error: msg, markdown: `## Update env failed\n\n${msg}` };
   }

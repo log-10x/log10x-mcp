@@ -280,14 +280,13 @@ async function fetchSampleEvents(
       maxPullMinutes: 2,
       onProgress: () => {},
     });
-    // Defect 30 fix: render event bodies from the full event object, not just
-    // the first line of raw. oneLine unwraps transport envelopes (.log /
-    // .message / .body) before truncating, so multi-line JSON blocks whose
-    // SIEM connector delivers the opening "{" as a bare string are rendered
-    // via their parent envelope field rather than the bare "{" fragment.
-    // Note 20: cap raised from 120 → 2048 so the user sees the actual log
-    // content (fields, error detail, service context) rather than a teaser
-    // that ends with "...". Quality > quantity: 3 full samples beats 5 cropped.
+    // Render event bodies from the full event object, not just the first line
+    // of raw. oneLine unwraps transport envelopes (.log / .message / .body)
+    // before truncating, so multi-line JSON blocks whose SIEM connector
+    // delivers the opening "{" as a bare string render via their parent
+    // envelope field rather than the bare "{" fragment.
+    // Cap raised to 2048 so the user sees the actual log content (fields,
+    // error detail, service context) rather than a teaser that ends with "...".
     return {
       events: probe.events.slice(0, 3).map((ev) => oneLine(ev, 2048)),
       siemKind: 'resolved',

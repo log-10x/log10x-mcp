@@ -72,7 +72,7 @@ export const pocFromLocalSchema = {
     .describe(
       'Customer-specified target reduction percent. If absent, POC produces a recommendation-only output. ' +
         'If present, POC produces a feasibility verdict + a pre-deploy commitment artifact stub the agent ' +
-        'can surface alongside the per-pod savings matrix. Cap CSV ships in Item 4.'
+        'can surface alongside the per-pod savings matrix. The cap CSV is attached by a later change.'
     ),
   exception_services: z
     .array(z.string())

@@ -123,7 +123,7 @@ const SEVEN_DAYS_SECONDS = 7 * 24 * 3600;
  * source of truth), replacing the older classifyBadge() derivation
  * that went directly from baseline-bytes comparison.
  *
- * Thresholds (Tal, 2026-06-03):
+ * Thresholds:
  *   NEW       — firstSeenAgeSeconds < 7d (regardless of delta)
  *   ACUTE     — TODO: requires 1h delta input; not yet implemented.
  *               Reserve the branch for when a separate 1h-delta field
@@ -142,8 +142,7 @@ export function classifyStateFromDelta(
   ageSeconds: number | null
 ): Badge {
   if (ageSeconds !== null && ageSeconds < SEVEN_DAYS_SECONDS) return 'NEW';
-  // ACUTE: deferred — requires a separate 1h delta input.
-  // TODO: if (h1DeltaPct > 100) return 'ACUTE';
+  // ACUTE: deferred, requires a separate 1h delta input.
   if (deltaPct > 15) return 'GROWING';
   if (deltaPct < -15) return 'SHRINKING';
   return 'STABLE';
@@ -314,12 +313,12 @@ export async function fetchServiceBreadth(
  * `error` set if the per-hash scan failed; the renderer handles that
  * shape).
  *
- * Honest note on precision (per the 2026-05-20 audit): the matcher is
- * `allTokensMatchExact` — token-AND on discrete tokens, mirroring the
- * templater's tokenization. Catches saved searches / alerts whose body
- * contains every pattern token as a discrete token. Misses references
- * by `tenx_hash` value (hash-only refs). False-positives possible on
- * common-word patterns. The renderer surfaces this caveat inline.
+ * Note on precision: the matcher is `allTokensMatchExact`, token-AND on
+ * discrete tokens, mirroring the templater's tokenization. Catches saved
+ * searches / alerts whose body contains every pattern token as a discrete
+ * token. Misses references by `tenx_hash` value (hash-only refs).
+ * False-positives possible on common-word patterns. The renderer surfaces
+ * this caveat inline.
  */
 export async function fetchDepsPerHash(
   analyzer: string | null,

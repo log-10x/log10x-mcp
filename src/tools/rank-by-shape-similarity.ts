@@ -167,8 +167,8 @@ interface RankByShapeSummary {
    * Populated only when `status === 'anchor_no_phase_separation'`. Up to
    * 3 patterns from the same env whose volume varies enough to be good
    * starting points (CV ≥ 0.5). Empty array when the scan found none or
-   * errored — the refusal envelope still ships, the table just doesn't
-   * render. Per Note 30: "re-anchor" without suggestions is dead-end UX.
+   * errored (the refusal envelope still ships, the table just doesn't
+   * render). "Re-anchor" without suggestions is dead-end UX.
    */
   anchor_suggestions?: AnchorSuggestion[];
 }
@@ -320,7 +320,7 @@ export async function executeRankByShapeSimilarity(
   // ── Anchor dispersion guard ────────────────────────────────────────
   const anchorDispersion = computeAnchorDispersion(anchorSeries);
   if (anchorDispersion < ANCHOR_DISPERSION_FLOOR) {
-    // Per Note 30: refusing without alternatives is dead-end UX. Scan the
+    // Refusing without alternatives is dead-end UX. Scan the
     // env's recent top patterns for ones with enough variation to be
     // good starting points, surface up to 3. Helper degrades to [] on
     // any error so the refusal still ships even if the suggestion query
@@ -448,14 +448,13 @@ export async function executeRankByShapeSimilarity(
   ranked.sort((a, b) => b.pearson_magnitude - a.pearson_magnitude);
 
   const nUsable = ranked.length;
-  // Math-lens workflow wxk3k628c: prior code emitted 'severe' whenever
-  // nUsable < 10, INCLUDING the degenerate case where ALL candidates
-  // were unknown to the backend (fetch failure, not a low-pool diagnostic).
-  // Reading 'severe' on an all-candidates-unknown call misdirects
-  // remediation toward "widen the metric pool" when the actual failure
-  // is connectivity. Gate the tier on having at least one EVALUABLE
-  // candidate; otherwise leave low_candidate_count=null and let
-  // no_signal_reason='all_candidates_unknown' drive the prose.
+  // Don't emit 'severe' whenever nUsable < 10: the degenerate case where ALL
+  // candidates are unknown to the backend is a fetch failure, not a low-pool
+  // diagnostic. Reading 'severe' there misdirects remediation toward "widen
+  // the metric pool" when the actual failure is connectivity. Gate the tier on
+  // having at least one EVALUABLE candidate; otherwise leave
+  // low_candidate_count=null and let no_signal_reason='all_candidates_unknown'
+  // drive the prose.
   const lowCandidateCount: 'severe' | 'medium' | null =
     nUsable === 0 && unknown.length === args.candidates.length
       ? null  // all-unknown case → distinct failure mode
@@ -482,10 +481,10 @@ export async function executeRankByShapeSimilarity(
 
   const pearsonDist = distribute(ranked.map((r) => r.pearson_magnitude));
 
-  // Per Notes 9-12: drop "Pearson", "@lag", "candidates", "anchor",
-  // "evaluated" from user prose. Drop the calibration caveat on
-  // no_signal entirely (Note 9). Numeric audit lives in
-  // decisions / threshold_audit for the agent to branch on.
+  // Plain English: drop "Pearson", "@lag", "candidates", "anchor",
+  // "evaluated" from user prose. Drop the calibration caveat entirely on
+  // no_signal (not load-bearing when nothing was found). The numeric audit
+  // lives in decisions / threshold_audit for the agent to branch on.
   const unknownNote = unknown.length > 0 ? ` ${unknown.length} weren't found in the metrics backend` : '';
   const human_summary =
     status === 'no_signal'
@@ -561,16 +560,12 @@ export async function executeRankByShapeSimilarity(
       candidates_count: args.candidates.length,
       candidates_usable: nUsable,
       candidates_evaluated: survivors.length - failed.length,
-      // Math-lens workflow wxk3k628c: prior code left
-      // scope.candidates_failed=[] while payload.evaluation_unknown
-      // listed candidates that failed validation (metric doesn't exist).
-      // The sibling metrics_that_moved lumps unknown into
-      // candidates_failed — leaving scope-level empty here was a schema
-      // inconsistency on the same concept ("which candidates produced
-      // no result"). Merge unknowns into candidates_failed so the
-      // chassis surface agrees with metrics_that_moved; payload.
-      // evaluation_unknown stays for callers that want the
-      // unknown-vs-failed distinction.
+      // Merge unknowns into candidates_failed so the chassis surface agrees
+      // with metrics_that_moved. Leaving scope.candidates_failed=[] while
+      // payload.evaluation_unknown listed candidates that failed validation
+      // (metric doesn't exist) was a schema inconsistency on the same concept
+      // ("which candidates produced no result"). payload.evaluation_unknown
+      // stays for callers that want the unknown-vs-failed distinction.
       candidates_failed: [...failed, ...unknown.map((u) => u.candidate)],
     },
     payload: data,

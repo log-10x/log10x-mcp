@@ -223,8 +223,8 @@ export async function runDoctorChecks(envNickname?: string): Promise<DoctorRepor
 
   // 3. Per-environment checks. byNickname includes aliases from
   //    env-alias-bridge: SaaS env_id (UUID), on-prem env-config
-  //    nicknames bridged via env_id. So a user typing "otel-demo"
-  //    when the SaaS env is "10x Demo" with env_id 6aa99191-... still
+  //    nicknames bridged via env_id. So when the SaaS env name differs
+  //    from the typed nickname but both bridge via env_id, it still
   //    resolves correctly.
   const targets: EnvConfig[] = envNickname
     ? (() => {
@@ -865,13 +865,12 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
     }
   }
 
-  // G9 mitigation: detect "a service's volume dropped to zero recently vs
-  // steady-state". This is the signature of the tenx-edge subprocess stale
-  // state bug caught 2026-04-15 — after a prolonged remote-write rejection
-  // (G8, now fixed), tenx-edge child processes accumulated poisoned write
-  // state that the exec_filter retry loop did not clear, so metrics stayed
-  // at zero even after the Lambda fix was deployed. Resolved by a fluentd
-  // DaemonSet rollout restart. We can't run kubectl to check for OOO errors,
+  // Detect "a service's volume dropped to zero recently vs steady-state".
+  // This is the signature of the tenx-edge subprocess stale state issue:
+  // after a prolonged remote-write rejection, tenx-edge child processes can
+  // accumulate poisoned write state that the exec_filter retry loop did not
+  // clear, so metrics stayed at zero. Resolved by a fluentd DaemonSet
+  // rollout restart. We can't run kubectl to check for OOO errors,
   // but we CAN spot the symptom via Prometheus: a service with non-zero
   // volume in the last 24h but zero volume in the last 15 minutes. This is
   // a "dark zone" signature that either means the service actually stopped
@@ -940,22 +939,21 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
     }
   }
 
-  // G12 mitigation: detect retriever false-negatives. We cannot run a real
-  // retriever query here without side effects, but we CAN check whether the
+  // Detect retriever false-negatives. We cannot run a real retriever
+  // query here without side effects, but we CAN check whether the
   // retriever endpoint is configured AND whether the paste endpoint's
   // health probe reports retriever index coverage for recent windows.
   // Live retriever probe: fire a lightweight count query (limit=1, last
-  // 1h window) and check whether the pipeline responds. Replaces the old
-  // hardcoded G12 WARN that was stale after the body-shape fix (PR #36)
-  // and the demo-env indexer fix (2026-04-16).
+  // 1h window) and check whether the pipeline responds. Replaces an older
+  // hardcoded WARN that went stale after the response body-shape and
+  // demo-env indexer changes.
   // Only probe the live retriever when BOTH URL + BUCKET are set. The
   // retriever_endpoint check above already WARNs about partial config;
   // running the forensic probe with a half-configured retriever just
-  // produces a redundant FAIL for the same root cause. Caught by
-  // doctor-health-check eval scenario: with only URL set (the default
-  // demo env config), the probe FAIL'd and flipped overall→fail, which
-  // surfaced an alarming "MCP cannot serve tool calls" verdict for what
-  // is really a missing-bucket-config WARN.
+  // produces a redundant FAIL for the same root cause. With only URL set
+  // (the default demo env config), the probe FAIL'd and flipped
+  // overall→fail, surfacing an alarming "MCP cannot serve tool calls"
+  // verdict for what is really a missing-bucket-config WARN.
   if (
     detectedTier &&
     process.env.__SAVE_LOG10X_RETRIEVER_URL__ &&

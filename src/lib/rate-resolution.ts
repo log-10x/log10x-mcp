@@ -3,14 +3,14 @@
  *
  * Background
  * ----------
- * Cross-cutting attribution audit (chain walks B + C, 2026-06-06) caught the
- * five dollar-emitting tools — services, top_patterns, event_lookup,
- * explain_mode, estimate_savings — labeling the *same* env / window / pattern
+ * The five dollar-emitting tools (services, top_patterns, event_lookup,
+ * explain_mode, estimate_savings) could label the *same* env / window / pattern
  * with *different* `rate_source` tags:
  *   - services / top_patterns: customer_supplied ($1.50/GB from somewhere)
  *   - event_lookup / explain_mode / estimate_savings: list_price
  *     (destination-specific $0.50/GB CloudWatch list)
- * Math agreed on absolute dollars; provenance didn't. Trust killer.
+ * The absolute dollars agreed; the provenance did not, which undermines
+ * trust in the numbers.
  *
  * Fix: every cost-emitting tool consults `resolveRate(...)` below and uses
  * the SAME priority chain (highest wins):

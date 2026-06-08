@@ -74,12 +74,12 @@ export function buildCapCsvStatus(
     : null;
 
   if (!repo) {
-    // Math-lens workflow wt3lz36ye: the reason used to claim "set
-    // gitops.repo" was the only path to action-split attribution, but
-    // configure_engine also supports delivery='kubectl_configmap'
-    // (action-intent.json written directly to a k8s ConfigMap, no gh
-    // needed). Mention both paths so an operator using ConfigMap
-    // delivery doesn't conclude the catalog can't see their actions.
+    // The reason must not claim "set gitops.repo" is the only path to
+    // action-split attribution: configure_engine also supports
+    // delivery='kubectl_configmap' (action-intent.json written directly
+    // to a k8s ConfigMap, no gh needed). Mention both paths so a
+    // ConfigMap-delivery operator doesn't conclude the catalog can't see
+    // their actions.
     return {
       kind: 'not_configured',
       reason:

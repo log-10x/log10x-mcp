@@ -180,7 +180,7 @@ export async function resolveClusterConfig(
         explicit: opts.explicit,
         envVarFallback,
       });
-      // F8: even on success, surface any corrupt-doc warnings collected from
+      // Even on success, surface any corrupt-doc warnings collected from
       // prior candidates so callers (and users) see "we used env-var
       // fallback because env X's on-prem doc was unparseable".
       extractCorruptDocWarnings(res.resolution_trace, resolutionWarnings);
@@ -251,8 +251,8 @@ function extractCorruptDocWarnings(
   for (const step of trace) {
     if (step.status !== 'failed') continue;
     if (!step.source.startsWith('store:')) continue;
-    // F8 text refinement: arc-v9 live test showed doctor saying "No env-config
-    // document resolved" / "no document for X" when the k8s ConfigMap had been
+    // Text refinement: doctor was saying "No env-config document resolved" /
+    // "no document for X" when the k8s ConfigMap had been
     // malformed-JSON-patched. That conflates "store had nothing" (skipped /
     // benign) with "store had a doc but we couldn't parse it" (failed / the
     // user must act). A `failed` step on a `store:*` source means the doc DID

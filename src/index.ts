@@ -147,7 +147,7 @@ import {
 } from './lib/cap-csv-fetch.js';
 import { findSkewSchema, executeFindSkew } from './tools/find-skew.js';
 // find_constant_slots, find_uuid_in_body, find_incident_cluster removed
-// pre-launch (2026-05-28): produced findings the agent could not act on
+// because they produced findings the agent could not act on
 // (engine-tokenization config changes need a human + redeploy) OR
 // overlapped with log10x_investigate's trajectory + chain analysis.
 import { discoverLabelsSchema, executeDiscoverLabels } from './tools/discover-labels.js';
@@ -232,9 +232,9 @@ function getEnvs(): Environments {
  * etc.). When the MCP is in pure-demo mode (no user configuration,
  * silently landed on the demo backend), these tools short-circuit
  * with a structured `not_configured` response instead of returning
- * demo data the user didn't ask for. Phase 5b — phase 7 will remove
- * the silent-demo path entirely; for now we surface the conversation
- * starter without breaking the demo-mode walkthrough.
+ * demo data the user didn't ask for. We surface the conversation
+ * starter without breaking the demo-mode walkthrough; the silent-demo
+ * path will be removed in a later release.
  *
  * Tools NOT in this set bypass the gate: configure_env (the
  * onboarding tool itself), doctor (status reporting works in any
@@ -283,9 +283,9 @@ async function wrap(
   fn: () => Promise<string | StructuredOutput>
 ): Promise<WrapResult> {
   const started = Date.now();
-  // Phase 5b gate: if this is a metric-requiring tool and the MCP is
+  // Demo-mode gate: if this is a metric-requiring tool and the MCP is
   // in pure-demo state, redirect to the conversational onboarding flow
-  // instead of returning silent-demo data — UNLESS this is an intentional
+  // instead of returning silent-demo data, UNLESS this is an intentional
   // demo playground (LOG10X_MCP_DEMO_PLAYGROUND), which wants the demo data
   // served (the gated tools are exactly the demo's headline surface).
   if (
@@ -1239,7 +1239,7 @@ registerLog10xTool('log10x_pattern_diff', patternDiffSchema, (args) =>
 // ── Tool: log10x_whats_changing ──
 //
 // Patterns ranked by delta vs a baseline window (not current cost). Restores
-// the capability of the deleted log10x_cost_drivers tool (commit 27dce7d)
+// the capability of the removed log10x_cost_drivers tool
 // using the modern StructuredOutput envelope. Brand-new patterns (no
 // baseline) are excluded — they go to log10x_whats_new.
 
@@ -1274,7 +1274,7 @@ registerLog10xTool('log10x_services', servicesSchema, (args) =>
 
 // ── Tool: log10x_overflow_contents ──
 //
-// Item 6 (cost-cutting close-list v2): the contents view of the
+// The contents view of the
 // customer-owned offload bucket. Queries dropped-by-pattern from the
 // TSDB, joins to the cap-CSV to filter to action=offload only, and
 // routes the agent to log10x_retriever_query to inspect the offloaded cohort. See
@@ -1730,11 +1730,10 @@ registerLog10xTool('log10x_baseline', baselineSchema, (args) =>
 //      baseline_window is the pre-policy reference.
 //   3. Adapts VerifyResult → WeeklyVerifyResult.
 //
-// Known Item-5 gap (cost-cutting-prioritized-close-list-v2 §1.5):
-// runEstimateVerify queries `[range]` ending at "now", so every weekly
-// loop hits the same live snapshot. The arithmetic-reconciliation patch
-// (Item 5) is where week-specific windows + the per_pattern_breakdown
-// cap-CSV join land. Item 1 only unblocks the not_ready hard-return.
+// Limitation: runEstimateVerify queries `[range]` ending at "now", so
+// every weekly loop hits the same live snapshot. Week-specific windows
+// and the per_pattern_breakdown cap-CSV join are not yet implemented;
+// this path only unblocks the not_ready hard-return.
 
 _setVerifyRunner(async ({ commitment, week_start, week_end }) => {
   const env = resolveEnv(getEnvs(), commitment.env);
@@ -1749,7 +1748,7 @@ _setVerifyRunner(async ({ commitment, week_start, week_end }) => {
   // cap CSV (byte-cap context + legacy action suffix fallback). Both are
   // passed to runEstimateVerify for action-split attribution. On any
   // failure the respective field is undefined and the verify run falls
-  // back to the §E.1 single-bucket attribution in commitment-report.
+  // back to single-bucket attribution in commitment-report.
   //
   // Delivery channel comes from commitment.delivery_target captured at
   // apply time:
@@ -1852,7 +1851,7 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_signout', intent: 'Wipe ~/.log10x/credentials and fall back to demo mode (or lower-priority config); does not revoke the key on the backend' },
   { name: 'log10x_update_settings', intent: 'Update user metadata (analyzer cost, AI provider, etc.) via POST /api/v1/user' },
   { name: 'log10x_create_env', intent: 'Create a new Log10x environment on the account; pairs with log10x_advise_install for end-to-end provision-and-install' },
-  { name: 'log10x_update_env', intent: 'Rename an env or change the default — requires backend PUT route (see backend PR #62)' },
+  { name: 'log10x_update_env', intent: 'Rename an env or change the default; requires the backend PUT route' },
   { name: 'log10x_delete_env', intent: 'Delete an env (destructive, irrecoverable) — requires confirm_name matching the env\'s name' },
   { name: 'log10x_set_gitops_repo', intent: 'Write gitops.repo to ~/.log10x/envs.json so configure_engine can author cap-CSV PRs; confirm="set-now" required' },
   { name: 'log10x_dest_set', intent: 'Update the SIEM destination block (siem_vendor / region / log_group_prefix / ingest_url) on an env-config document; idempotent, validates new doc against schema before write' },

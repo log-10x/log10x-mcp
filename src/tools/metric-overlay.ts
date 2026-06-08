@@ -450,12 +450,9 @@ export async function executeMetricOverlay(
     view: 'summary',
     headline,
     status: status === 'no_signal' ? 'no_signal' : 'success',
-    // Math-lens workflow wxk3k628c: prior code wired chassis
-    // decisions.threshold_basis='default' while payload.threshold_basis
-    // already shipped 'unvalidated_default'. Same envelope, two values
-    // for the same concept. The payload value is honest — the anchor
-    // dispersion floor (0.15) is hand-picked. Mirror it in the chassis
-    // decision so the two surfaces don't disagree.
+    // Mirror payload.threshold_basis ('unvalidated_default') into the chassis
+    // decision so the two surfaces don't disagree. The anchor dispersion floor
+    // (0.15) is hand-picked, so 'unvalidated_default' is the honest value.
     decisions: { threshold_used: ANCHOR_DISPERSION_FLOOR, threshold_basis: 'unvalidated_default' },
     source_disclosure: {},
     scope: {
@@ -598,12 +595,9 @@ function overlayErrorEnvelope(args: {
     view: 'summary',
     headline: `Error (${args.err.error_type}): ${args.err.hint.slice(0, 120)}`,
     status: 'error',
-    // Math-lens workflow wxk3k628c: prior code wired chassis
-    // decisions.threshold_basis='default' while payload.threshold_basis
-    // already shipped 'unvalidated_default'. Same envelope, two values
-    // for the same concept. The payload value is honest — the anchor
-    // dispersion floor (0.15) is hand-picked. Mirror it in the chassis
-    // decision so the two surfaces don't disagree.
+    // Mirror payload.threshold_basis ('unvalidated_default') into the chassis
+    // decision so the two surfaces don't disagree. The anchor dispersion floor
+    // (0.15) is hand-picked, so 'unvalidated_default' is the honest value.
     decisions: { threshold_used: ANCHOR_DISPERSION_FLOOR, threshold_basis: 'unvalidated_default' },
     source_disclosure: {},
     scope: { window: args.window, window_basis: 'explicit' },
@@ -663,12 +657,9 @@ function overlayDispersionRefusal(args: {
     view: 'summary',
     headline,
     status: 'insufficient_data',
-    // Math-lens workflow wxk3k628c: prior code wired chassis
-    // decisions.threshold_basis='default' while payload.threshold_basis
-    // already shipped 'unvalidated_default'. Same envelope, two values
-    // for the same concept. The payload value is honest — the anchor
-    // dispersion floor (0.15) is hand-picked. Mirror it in the chassis
-    // decision so the two surfaces don't disagree.
+    // Mirror payload.threshold_basis ('unvalidated_default') into the chassis
+    // decision so the two surfaces don't disagree. The anchor dispersion floor
+    // (0.15) is hand-picked, so 'unvalidated_default' is the honest value.
     decisions: { threshold_used: ANCHOR_DISPERSION_FLOOR, threshold_basis: 'unvalidated_default' },
     source_disclosure: {},
     scope: { window: args.window, window_basis: 'explicit', candidates_count: 1, candidates_usable: 0 },

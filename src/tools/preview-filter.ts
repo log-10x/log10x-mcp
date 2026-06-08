@@ -113,12 +113,11 @@ export interface PreviewFilterEnvelope {
     scope_filter: string;
   } | null;
   /**
-   * Math-lens workflow wpv1ay324: the workflow flagged that summing the
-   * per-row .percent_of_service column drifts vs the byte-derived ratio
-   * (71.92 vs 72.43% in the reference envelope) because per-row values
-   * are pre-rounded to 2dp before the table renders. This field is the
-   * authoritative byte-derived share so neither agents nor humans need
-   * to sum rounded column values. Computed as:
+   * Summing the per-row .percent_of_service column drifts vs the
+   * byte-derived ratio (e.g. 71.92 vs 72.43%) because per-row values are
+   * pre-rounded to 2dp before the table renders. This field is the
+   * authoritative byte-derived share so neither agents nor humans need to
+   * sum rounded column values. Computed as:
    *   round(shown_bytes / total_service_bytes_per_month * 100, 2)
    * Null when total_service_bytes_per_month is zero.
    */
@@ -150,12 +149,11 @@ function renderFixedWidthTable(
   const pad = (s: string, w: number): string => s.slice(0, w).padEnd(w, ' ');
   const padL = (s: string, w: number): string => s.slice(0, w).padStart(w, ' ');
 
-  // Math-lens workflow wpv1ay324: prior in-file fmtBytes used binary GB
-  // (2^30) while the envelope's headline + human_summary use decimal GB
-  // (10^9, the CloudWatch/Datadog/Splunk billing convention via the
-  // shared fmtBytesShared). The table's Volume column disagreeing with
-  // the headline is the same units bug the catalog-wide cost.ts fix
-  // already eliminated everywhere else. Use the shared formatter.
+  // Prior in-file fmtBytes used binary GB (2^30) while the envelope's
+  // headline + human_summary use decimal GB (10^9, the
+  // CloudWatch/Datadog/Splunk billing convention via the shared
+  // fmtBytesShared). The table's Volume column must not disagree with the
+  // headline. Use the shared formatter.
   const fmtBytes = (b: number): string => fmtBytesShared(b);
 
   // Header
@@ -406,15 +404,14 @@ async function fetchFromTsdb(
     };
   });
 
-  // Math-lens workflow wpv1ay324: the table's Descriptor column used to
-  // blindly char-slice r.descriptor_full at 36 chars, surfacing raw
-  // underscored token blobs mid-word ("open_telemetry_opensearchexporter_cl",
-  // "retryable_error_Permanent_error_flus"). Burned rule (memory:
-  // feedback_no_hash_in_user_headlines) extends to table cells — they're
-  // user-facing too. Use the shared formatPatternLabel helper for a
-  // service-led, underscore-stripped, word-boundary-aware label, then
-  // disambiguate identical 36-char prefixes by appending the tenx_hash
-  // tail.
+  // The table's Descriptor column used to blindly char-slice
+  // r.descriptor_full at 36 chars, surfacing raw underscored token blobs
+  // mid-word ("open_telemetry_opensearchexporter_cl",
+  // "retryable_error_Permanent_error_flus"). Table cells are user-facing, so
+  // the no-hash-in-user-text rule applies here too. Use the shared
+  // formatPatternLabel helper for a service-led, underscore-stripped,
+  // word-boundary-aware label, then disambiguate identical 36-char prefixes
+  // by appending the tenx_hash tail.
   const descriptor36s = rawAssembled.map((r) =>
     formatPatternLabel({
       symbol_message: r.descriptor_full,
@@ -554,7 +551,7 @@ export async function executePreviewFilter(args: {
     shown_share_of_service_pct: shownShareOfServicePct,
   };
 
-  // Top-3 most useful actions only (defect 27: was 40-entry bloat).
+  // Top-3 most useful actions only (was a 40-entry list).
   const top3 = patterns.slice(0, 3);
 
   return buildChassisEnvelope({

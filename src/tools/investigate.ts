@@ -51,7 +51,7 @@ import { PATTERN_HASH_REGEX } from '../lib/pattern-reference-resolver.js';
 import type { Action, StructuredOutput } from '../lib/output-types.js';
 
 /**
- * Per Note 18: pattern_hash never appears in user-facing prose. When the
+ * pattern_hash never appears in user-facing prose. When the
  * starting_point looks like a raw 11-char hash, render it as a generic
  * "this pattern" descriptor instead of echoing the hash. The actual hash
  * stays in payload.anchor_ref.expression for round-trip identity.
@@ -68,7 +68,7 @@ function userVisibleStartingPoint(sp: string): string {
  * a real pattern (symbol_message text or the anchor name back-resolved
  * from a hash lookup) instead of leaking the literal "this pattern"
  * placeholder that userVisibleStartingPoint returns for hash-shaped
- * inputs (Note 25 fix).
+ * inputs.
  *
  * Returns `null` when only an unresolved hash is known and no anchor/
  * lead name is available from the rendered report — the caller must use
@@ -178,15 +178,14 @@ export function parseReport(md: string): ParsedReport {
   // emits `**Shape**: gradual drift (no discrete inflection)` (prose) —
   // accept both. Without this, drift reports parse with shape=null and the
   // downstream status logic treats them as no_signal even when the markdown
-  // is fully populated. (Fabrication bug surfaced 2026-06-06.)
+  // is fully populated.
   const shapeMatch =
     md.match(/\*\*shape\*\*:\s*`?(acute|drift|environment|no_significant_movement|empty)`?/i) ??
     (/\*\*shape\*\*:\s*gradual\s+drift/i.test(md) ? ['', 'drift'] : null);
   const modeMatch = md.match(/\*\*mode\*\*:\s*`?(pattern|service|environment|raw_line)`?/i);
   // Anchor header (emitted by both acute and drift renderers as
   // `**Anchor**: \`<resolved-name>\``). Lets the no_signal human
-  // summary name the real pattern when starting_point was a raw hash
-  // (Note 25 fix).
+  // summary name the real pattern when starting_point was a raw hash.
   const anchorMatch = md.match(/\*\*Anchor\*\*:\s*`([^`]+)`/);
   const leadPatternMatch = md.match(/\*\*Pattern\*\*:\s*`([^`]+)`(?:\s+in\s+`([^`]+)`)?/);
   const confMatch = md.match(/\*\*Confidence\*\*:\s*(\d+)%/);
@@ -204,7 +203,9 @@ export function parseReport(md: string): ParsedReport {
   //   drift → `### Co-drifting patterns (cohort)` with `| \`pattern\` | service | ... |` table
   // Without the drift case, a fully-populated drift report parses as
   // coMoverCount=0 and the envelope status flips to `no_signal` while the
-  // markdown carries 18 patterns — the fabrication shape surfaced 2026-06-06.
+  // markdown carries 18 patterns. The drift report can render fully while
+  // the parser sees 0 co-movers when the "Co-drifting" table heading
+  // doesn't match the "Co-movers" list.
   let coMoverCount = 0;
   if (/^### Co-movers \(lower confidence\)/m.test(md)) {
     const afterCM = md.split(/^### Co-movers[^\n]*$/m)[1] ?? '';
@@ -246,26 +247,25 @@ export function buildHumanSummary(
   thresholdBasis: ThresholdBasis,
 ): string {
   const sp = userVisibleStartingPoint(starting_point);
-  // Per Note 9: drop calibration caveat on no_signal / insufficient_data
-  // entirely (it's load-bearing only when a finding landed near the
-  // match threshold and the agent might auto-act). Per Notes 10-12:
-  // drop "anchor", "co-mover", "noise floor", "clean-chain threshold",
-  // "unvalidated_default" from user prose. Machine fields keep them.
+  // Drop the calibration caveat on no_signal / insufficient_data
+  // entirely (it is load-bearing only when a finding landed near the
+  // match threshold and the agent might auto-act). Drop "anchor",
+  // "co-mover", "noise floor", "clean-chain threshold",
+  // "unvalidated_default" from user prose; machine fields keep them.
   if (status === 'insufficient_data') {
     return `I looked at "${sp}" over the last ${window} but couldn't produce a usable analysis. The pattern resolved but the window or backend coverage was too thin. Try widening the window or starting from a different pattern.`;
   }
   if (status === 'no_signal') {
-    // Note 9: nothing was found, so the threshold story isn't load-bearing.
-    // Note 25: must name a real pattern (symbol_message or back-resolved
-    // anchor), never echo the literal placeholder "this pattern" that
+    // Nothing was found, so the threshold story isn't load-bearing.
+    // Must name a real pattern (symbol_message or back-resolved anchor),
+    // never echo the literal placeholder "this pattern" that
     // userVisibleStartingPoint returns for hash-shaped inputs.
-    // Math-lens workflow wpv1ay324: when the resolved descriptor is the
-    // raw underscored symbol_message (anchor was hash-shaped, back-
-    // resolved through parsed.anchorPattern), the prose leaks the token
-    // blob — the burned rule (feedback_no_hash_in_user_headlines)
-    // extends to symbol_message blobs. Wrap through formatPatternLabel
-    // for the same service-led, underscore-stripped, word-boundary-
-    // aware label all other tools now use.
+    // When the resolved descriptor is the raw underscored symbol_message
+    // (anchor was hash-shaped, back-resolved through parsed.anchorPattern),
+    // the prose would leak the token blob. The no-hash-in-headlines rule
+    // extends to symbol_message blobs: wrap through formatPatternLabel
+    // for the same service-led, underscore-stripped, word-boundary-aware
+    // label all other tools use.
     const rawDescriptor = resolvePatternDescriptor(starting_point, parsed);
     const patternDescriptor = rawDescriptor
       ? formatPatternLabel({
@@ -301,10 +301,9 @@ export function buildHumanSummary(
     parsed.leadConfidence !== null
       ? ` Match strength: ${(parsed.leadConfidence * 100).toFixed(0)}%${thresholdBasis === 'unvalidated_default' ? ' (default match threshold, not yet tuned for your data)' : ''}.`
       : '';
-  // Math-lens workflow wpv1ay324: parsed.leadPattern is the raw underscored
-  // symbol_message extracted from the renderer; wrap through
-  // formatPatternLabel so the success-path headline doesn't leak the
-  // token blob. The burned rule (feedback_no_hash_in_user_headlines)
+  // parsed.leadPattern is the raw underscored symbol_message extracted
+  // from the renderer; wrap through formatPatternLabel so the success-path
+  // headline doesn't leak the token blob. The no-hash-in-headlines rule
   // extends here.
   const leadLabel = formatPatternLabel({
     symbol_message: parsed.leadPattern,
@@ -566,9 +565,9 @@ export async function executeInvestigate(
   // section header), the parser failed to recognize the renderer's output
   // and the envelope is about to lie. Surface this as a structured warning
   // so an agent reading the envelope can flag it rather than silently
-  // promoting the markdown's contradictory story. (Fabrication bug
-  // surfaced 2026-06-06 — drift report rendered fully but parser saw 0
-  // co-movers because Co-drifting table heading != Co-movers list.)
+  // promoting the markdown's contradictory story. The drift report can
+  // render fully while the parser sees 0 co-movers when the "Co-drifting"
+  // table heading doesn't match the "Co-movers" list.
   const envelopeIsLying =
     status === 'no_signal' &&
     md.length > 1024 &&
@@ -704,7 +703,7 @@ export async function executeInvestigate(
       ...(diagnosticNotes.length > 0 ? { diagnostic_notes: diagnosticNotes } : {}),
     },
     human_summary,
-    // Defect 34: structured actions[] pulled from the embedded NEXT_ACTIONS
+    // structured actions[] pulled from the embedded NEXT_ACTIONS
     // comment block so the agent protocol is typed, not scraped from markdown.
     //
     // Fallback priority:
@@ -774,12 +773,12 @@ async function executeInvestigateInner(
   // baseline_offset default depends on window magnitude. For short windows
   // (<= 1h), 24h-ago is the right incident baseline ("is this hour worse than
   // yesterday this hour"). For long windows (>= 7d), 24h-ago is WORSE than
-  // useless — it compares "last 30d" to "30d shifted by 1 day" (29 of 30 days
-  // overlap, so any inflection older than the shift is invisible). Caught by
-  // sub-agent S6 (drift scenario): a $30K/mo cart regression 6 days ago was
-  // completely missed by `investigate window=30d` with default 24h baseline,
-  // while `cost_drivers` immediately surfaced it as +28,000%. The investigate
-  // drift flow would have told the user "everything is fine, ±4%".
+  // useless: it compares "last 30d" to "30d shifted by 1 day" (29 of 30 days
+  // overlap, so any inflection older than the shift is invisible).
+  // Example failure: a large cost regression 6 days ago is completely
+  // missed by `investigate window=30d` with the default 24h baseline
+  // (29 of 30 days overlap), while a chunked range-query path surfaces it
+  // clearly.
   //
   // Heuristic: default baseline_offset = window for long windows, 24h for
   // short. Matches the "this month vs last month" / "this week vs last week"
@@ -855,10 +854,10 @@ async function executeInvestigateInner(
     // For windows longer than 16 days, route to cost_drivers. Two reasons:
     //   1. Prometheus instant-query 32-day span limit makes it IMPOSSIBLE to
     //      compare "last 30d" to "30d ago" (60d total span) in one query.
-    //   2. Even with a shorter offset like 1d, the ratio is meaningless — 29
+    //   2. Even with a shorter offset like 1d, the ratio is meaningless: 29
     //      of 30 days overlap, so any real inflection returns ≈0% change.
-    //      Caught by sub-agent S6: a $30K/mo cart regression 6 days ago was
-    //      reported as "-0%" because the comparison was 30d vs 30d-minus-1d.
+    //      Example: a real regression 6 days ago reports as "-0%" because
+    //      the comparison is 30d vs 30d-minus-1d (29 of 30 days overlap).
     // The correct tool for multi-week drift is cost_drivers (chunked range
     // query path). Route explicitly rather than produce a silently-broken
     // audit.
@@ -868,7 +867,7 @@ async function executeInvestigateInner(
         ? `the combined window + baseline span (${args.window} + ${effectiveBaselineOffset}) exceeds the customer TSDB's 32-day instant-query limit`
         : `a ${args.window} window cannot be compared against a prior ${args.window} (60d total span exceeds the backend limit), and a shorter baseline like 24h produces a ≈0% overlap comparison that silently hides multi-week regressions`;
       const routedReport = [
-        // Per Note 18: never echo a raw pattern_hash into H2 prose. When
+        // Never echo a raw pattern_hash into H2 prose. When
         // starting_point is hash-shaped, userVisibleStartingPoint substitutes
         // "this pattern"; non-hash inputs pass through verbatim.
         `## Investigation: ${userVisibleStartingPoint(args.starting_point)}, last ${args.window}`,
@@ -913,7 +912,7 @@ async function executeInvestigateInner(
   if (!resolution.anchor) {
     const historical = resolution.modeDetection === 'unresolved_historical';
     const lines: string[] = [
-      // Per Note 18: hash-shaped starting_points render as "this pattern" in
+      // Hash-shaped starting_points render as "this pattern" in
       // the H2 heading. The raw hash is still echoed downstream inside the
       // "Could not resolve" body so the operator sees what was looked up.
       `## Investigation: ${userVisibleStartingPoint(args.starting_point)}, last ${args.window}`,
@@ -987,10 +986,10 @@ async function executeInvestigateInner(
   // diagnosis, the top-cost-pattern over 24h may be a historical error that
   // has been suppressed (e.g. the libgssapi crash that was fixed but still
   // dominates yesterday's cost), while the CURRENT failure is a different
-  // pattern entirely. Caught by head-to-head test S11/S12: kubectl --previous
-  // correctly surfaced a Postgres duplicate-key bug as the CURRENT crashloop
-  // cause, while the MCP resolved to the Kerberos pattern (90% false
-  // confidence) because it was still the top-cost-pattern for the 24h window.
+  // pattern entirely. Example: the most-recent error (a duplicate-key
+  // crashloop) is the CURRENT cause, while the 24h top-cost-pattern
+  // resolver still points at an older, now-fixed pattern with high false
+  // confidence.
   //
   // Recency check: query the anchor's rate over the last 5 minutes. If it's
   // near zero while the pattern still accumulates cost in the wider window,
@@ -1060,7 +1059,7 @@ async function executeInvestigateInner(
 
   if (shape.shape === 'flat') {
     // Pass resolved anchor + service so the H2 heading swaps a hash-shaped
-    // starting_point for the anchor name (Note 18). Non-hash starting points
+    // starting_point for the anchor name. Non-hash starting points
     // render verbatim inside renderEmpty regardless.
     const emptyReport = renderEmpty(
       args.starting_point,
@@ -1072,12 +1071,13 @@ async function executeInvestigateInner(
     );
     // If the anchor is historical (fired below noise floor in the last 5m)
     // AND a different pattern is currently active in the service, the flat
-    // "no significant movement" result is dangerously misleading — it means
+    // "no significant movement" result is dangerously misleading: it means
     // "the HISTORICAL TOP-COST pattern is flat" not "nothing is happening".
     // Prepend the recency warning so an operator sees the live pattern
-    // pointer before the empty result. Caught by sub-agent S16 on the
-    // accounting crashloop rerun: the recency probe correctly found the
-    // live bug but the flat-path report dropped the warning.
+    // pointer before the empty result. Without this, the recency probe
+    // finds the live pattern but the flat-path report drops the warning,
+    // leaving the operator with a misleading "no significant movement"
+    // result.
     const report = recencyWarning ? `${recencyWarning}\n\n---\n\n${emptyReport}` : emptyReport;
     recordInvestigation({
       investigationId,
@@ -1193,10 +1193,11 @@ async function executeInvestigateInner(
         { timeoutMs: 30_000 }
       );
       retrieverFallback = 'stage_1_only';
-      // If Stage 1 reveals enough buckets with sustained movement, we'd
-      // normally fire Stage 2. The MVP stops at Stage 1 and annotates.
+      // When Stage 1 reveals enough buckets with sustained movement, Stage 2
+      // re-correlation would normally run. This path currently stops at
+      // Stage 1 and annotates the result.
       if ((stage1.buckets || []).length > 7) {
-        // TODO: full Stage 2 re-correlation in the historical inflection window.
+        // TODO: re-correlate co-movers within the historical inflection window (currently only the acute window is correlated).
         retrieverFallback = 'stage_1_only';
       }
     } catch {
@@ -1364,10 +1365,10 @@ async function resolveAnchor(
   // entropy-bearing hash (mixed case + digit, not a snake_case word),
   // try resolving it to its dominant pattern name via TSDB FIRST. If
   // the lookup hits, swap the anchor to the resolved name and let the
-  // normal pattern path take over. Caught by live execution wob5r7c71
-  // step 4 where starting_point="4Kjc7PHLWqY" (raw 11-char hash echoed
-  // by top_patterns) returned "Could not resolve" because the lookup
-  // querried the pattern label with the hash string as its value.
+  // normal pattern path take over. Without this resolution, a raw 11-char
+  // hash echoed by top_patterns (e.g. starting_point="4Kjc7PHLWqY")
+  // returns "Could not resolve" because the lookup queries the pattern
+  // label with the hash string as its value.
   //
   // The heuristic is intentionally conservative — a plain underscored
   // pattern name like `db_lock_wait` is also 11 chars but won't have
@@ -1460,7 +1461,7 @@ async function resolveAnchor(
     //
     // We bottom-guard the baseline with meaningfulBaselineFloor=0.01 events/s
     // to prevent near-zero baselines from inflating relative change to +9000%
-    // on trivial activity (GAPS G6, PR #25 correction).
+    // on trivial activity.
     const thresholds = (await import('../lib/thresholds.js')).DEFAULT_THRESHOLDS;
     const meaningfulBaselineFloor = thresholds.acuteNoiseFloor * 10;
     const signedChange =
@@ -1607,16 +1608,12 @@ async function renderEnvironmentAudit(
   // correctly ranked by magnitude but LOST THE SIGN. A pattern going from
   // 87 events/s (baseline) to 0 events/s (current) has rc = -1, abs(rc)=1,
   // and renders as "+100% vs 24h ago" even though it's a -100% decline.
-  // Caught by production investigation of cart_cartstore_ValkeyCartStore
-  // during the otel-demo swap session — the pattern went to zero because
-  // of an unrelated engine bug (see GAPS G8), and the "+100%" label was
-  // the opposite of what happened. Sign loss makes the output structurally
-  // dishonest.
+  // Sign loss makes the output structurally dishonest.
   //
-  // Fix: run two separate queries — topk(5, signed_change) for biggest
-  // growths, bottomk(5, signed_change) for biggest declines — then merge
+  // Fix: run two separate queries, topk(5, signed_change) for biggest
+  // growths and bottomk(5, signed_change) for biggest declines, then merge
   // and label each with its actual sign. Baseline guard retained so
-  // near-zero baselines don't amplify spurious +N% flags (GAPS G6).
+  // near-zero baselines don't amplify spurious +N% flags.
   const thresholds = (await import('../lib/thresholds.js')).DEFAULT_THRESHOLDS;
   const meaningfulBaselineFloor = thresholds.acuteNoiseFloor * 10;
   const signedChangeExpr =
@@ -1640,11 +1637,10 @@ async function renderEnvironmentAudit(
         if (!Number.isFinite(rc)) continue;
         const pattern = row.metric[LABELS.pattern];
         // Some series in Prometheus are missing the message_pattern label
-        // (ingest-side artifact — series gets written without it). Previously
+        // (ingest-side artifact: series gets written without it). Previously
         // we rendered those as `undefined (service)` in the Top movers list,
         // which is actively misleading: the operator tries to investigate
-        // "undefined" and hits a dead-end. Skip instead. Grok round-2 run
-        // surfaced this live on the otel-demo `payment` service.
+        // "undefined" and hits a dead-end. Skip instead.
         if (!pattern) continue;
         const service = row.metric[LABELS.service] || 'unknown';
         rows.push({ pattern, service, rc });
@@ -1730,8 +1726,8 @@ async function renderEnvironmentAudit(
       // Resolve the actual top mover for the prose hint (and for the
       // structured NEXT_ACTIONS appended by the caller). Earlier this
       // section printed the literal placeholder `<top_pattern_name>`,
-      // which the agent then echoed verbatim into the next call —
-      // caught by the env-sweep eval scenario.
+      // which the agent then echoed verbatim into the next call.
+      // Resolve the actual top mover here instead.
       const topMover = topMovers.find((m) => !m.collapsedCount || m.collapsedCount <= 1) ?? topMovers[0];
       topPatternForChain = topMover.pattern;
       lines.push('**Next action**: investigate the top mover individually:');

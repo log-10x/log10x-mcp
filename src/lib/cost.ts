@@ -35,8 +35,8 @@ import { DEFAULT_ANALYZER_COST_PER_GB, SIEM_DISPLAY_NAMES } from './siem/pricing
 // GB = 10^9 bytes (decimal). This is the unit CloudWatch / Datadog /
 // Splunk / Azure Monitor / GCP Logging / Sumo all bill in, so dollar
 // math here matches the customer's invoice. Using GiB (2^30) under a
-// `$/GB` label silently understates spend by ~6.87% (the bug surfaced
-// by adversarial math-lens workflow wui9vouej, 2026-06-07).
+// `$/GB` label silently understates spend by ~6.87%, so this constant
+// is decimal GB.
 const GB = 1_000_000_000;
 
 // ---------------------------------------------------------------------------
@@ -474,9 +474,9 @@ export function getAllowedActionsForDestination(destination: string): Action[] {
 /**
  * Returns the cost model for a destination, with ES-unpruned override.
  *
- * OPEN Q (default chosen, flag for product review): ES-unpruned ratios.
- * Default chosen 0.45-0.55. Pruning detection is the caller's job — read
- * the customer's index template or helm values for `_source.excludes`.
+ * ES-unpruned ratios default to the 0.45-0.55 band. Pruning detection is
+ * the caller's job: read the customer's index template or helm values for
+ * `_source.excludes`.
  *
  * @param dest      destination SIEM id
  * @param opts      esPruned: when destination is 'elasticsearch' and this

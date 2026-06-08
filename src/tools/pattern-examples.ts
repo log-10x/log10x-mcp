@@ -7,24 +7,17 @@
  * tier identification when the chain needs event evidence to form a
  * hypothesis.
  *
- * Design contract (committed in
- * memory/project_pattern_examples_design.md):
+ * Design contract:
  *   - Inputs: Symbol Message (pattern name) OR pasted log line.
  *   - Bounded to 24h window, log analyzer retention.
  *   - For the offloaded cohort of a pattern (events the Receiver routed to
  *     the overflow bucket) use log10x_retriever_query.
- *   - Mechanism: SIEM phrase-search probe → tenx → group by templateHash
- *     → content-token Jaccard ≥ 0.85 to discriminate → top 3 buckets by
- *     event count.
- *   - Honest output: per-bucket templateHash labels, recall counts,
- *     parseFailed markers when slot extraction fails per event.
+ *   - Mechanism: SIEM phrase-search probe, group by template, content-token
+ *     shape-match to discriminate, top 3 buckets by event count.
+ *   - Honest output: per-bucket template labels, recall counts, parseFailed
+ *     markers when slot extraction fails per event.
  *   - Multi-line group templates: head-line-only with explicit warning,
  *     detected via input_line_count vs encoded.log_row_count delta.
- *
- * Read the planning doc before changing this tool's contract. Several
- * positions were retracted during design (template_hash indexed-field
- * fast path, dashboard parity claim, hard-error on Symbol Message
- * ambiguity) — see the retracted-positions section.
  */
 
 import { z } from 'zod';
@@ -186,7 +179,7 @@ interface PatternExamplesSummary {
   dropped_jaccard_events: number;
   multi_line_detected: boolean;
   // Catalog-identity-handoff: the raw SIEM events pulled by the probe,
-  // re-emitted in full (Note 20 — no truncation) so chain steps that need
+  // re-emitted in full (no truncation) so chain steps that need
   // the live lines — e.g. resolve_batch, paste-triage, secondary templater
   // passes — don't re-issue the same SIEM round-trip. Upstream probe size
   // is bounded by probeBatch + maxPullMinutes so there is no runaway-size
@@ -314,13 +307,11 @@ export async function executePatternExamples(
   }
 
   const d = sumOut.data;
-  // Note 22: this tool bypassed the chassis sanitize pass in batch 1.
-  // sanitizeUserProse is now invoked explicitly on the user-visible
-  // headline + human_summary strings before they reach buildChassisEnvelope.
-  // The chassis does not run sanitizeUserProse for us today (verified), so
-  // tool authors must call it at the build site. Pattern terms like
-  // "templates", "candidate", "Jaccard", "similarity gate", "SIEM" are
-  // rewritten to plain English via BANNED_PHRASE_REWRITES.
+  // sanitizeUserProse is invoked explicitly on the user-visible headline +
+  // human_summary strings before they reach buildChassisEnvelope. The chassis
+  // does not run sanitizeUserProse itself, so tool authors must call it at the
+  // build site. Pattern terms like "templates", "candidate", "similarity gate"
+  // are rewritten to plain English via BANNED_PHRASE_REWRITES.
   const rawHeadline = `\`${d.pattern}\` (${d.vendor}, ${d.window}): ${d.events_pulled} events pulled, ${d.retained_events} retained across ${d.retained_templates} templates via ${d.probe_path}`;
   const headline = sanitizeUserProse(rawHeadline);
   // Truncation signal: the SIEM probe hit its pull ceiling.
@@ -352,8 +343,8 @@ export async function executePatternExamples(
   }
 
   // Honest human_summary: event counts + bucket recommendation.
-  // Note 22: explicit sanitize pass so banned vocabulary
-  // ("templates", "Jaccard", "SIEM" etc.) gets rewritten before emit.
+  // Explicit sanitize pass so banned vocabulary ("templates", "candidate"
+  // etc.) gets rewritten before emit.
   const topBucketAction = d.buckets[0]?.bucket_interpretation.recommended_action;
   const rawHumanSummary =
     `${d.events_pulled} events pulled, ${d.retained_events} retained across ${d.retained_templates} buckets` +
@@ -473,11 +464,10 @@ export async function executePatternExamples(
       pattern_count_source: {
         kind: 'scoped_total',
         count: d.retained_templates,
-        // Note 24: plain English. "Retained templateHash buckets passing
-        // Jaccard ≥ 0.85" was data-sci vocabulary the user has no model for.
-        // "Shape" is the user-facing word for what we previously called a
-        // template; "shape-match" replaces "Jaccard ≥ 0.85" per the
-        // anti-jargon-prose dictionary rewrites.
+        // Plain English: the data-sci phrasing for the kept buckets is
+        // vocabulary the user has no model for. "Shape" is the user-facing word
+        // for what we previously called a template; "shape-match" replaces the
+        // similarity-gate jargon per the anti-jargon-prose dictionary rewrites.
         denominator_meaning: `Kept ${d.retained_templates} of ${d.distinct_templates} matching shapes from the log platform probe (others were a different variant of the error and held back to avoid mixing distinct issues)`,
       },
       siem_vendor: d.vendor,
@@ -488,9 +478,8 @@ export async function executePatternExamples(
       candidates_count: d.distinct_templates,
       candidates_usable: d.retained_templates,
       candidates_evaluated: d.buckets.length,
-      // Note 24: plain English replacement for "X events in Y templates
-      // dropped on Jaccard". Users don't think in templates or Jaccard;
-      // they think in event variants.
+      // Plain English replacement for the data-sci phrasing. Users don't think
+      // in templates or similarity scores; they think in event variants.
       candidates_failed:
         d.dropped_jaccard_events > 0
           ? [
@@ -885,12 +874,12 @@ async function executePatternExamplesInner(
       dropped_jaccard_events: dropped.reduce((s, b) => s + b.p.count, 0),
       multi_line_detected: isMultiLine,
       // Re-emit the SIEM events already pulled by the probe.
-      // Note 20: surface ALL raw events without truncation. The previous
+      // Surface ALL raw events without truncation. The previous
       // .slice(0, 50) hid evidence the user needed to read; we already
       // bounded probe.events upstream via probeBatch + maxPullMinutes,
       // so there is no runaway-size risk. Stringify defensively:
-      // connectors return `unknown[]` — some yield raw lines, others
-      // structured records — so coerce via String() with a JSON fallback
+      // connectors return `unknown[]` (some yield raw lines, others
+      // structured records), so coerce via String() with a JSON fallback
       // for object shapes.
       raw_events: probe.events.map((e) =>
         typeof e === 'string'
@@ -960,10 +949,10 @@ async function executePatternExamplesInner(
           patternEventCount: patternTotalEvents,
           slotDistribution: slotDist,
         });
-        // Note 23: rewrite rationale + human_summary so they lead with the
-        // recommendation framed as a cost-saving action, tie to % impact for
-        // this pattern, and CTA to log10x_pattern_mitigate. The previous
-        // "Why compact:" framing read as product trivia, not a recommendation.
+        // Rationale + human_summary lead with the recommendation framed as a
+        // cost-saving action, tie to % impact for this pattern, and CTA to
+        // log10x_pattern_mitigate. The earlier "Why compact:" framing read as
+        // product trivia, not a recommendation.
         const shareOfPattern = patternTotalEvents > 0
           ? Math.round((bucket.p.count / patternTotalEvents) * 100)
           : 0;
@@ -992,11 +981,11 @@ async function executePatternExamplesInner(
           jaccard: bucket.jaccard,
           severity: bucket.p.severity,
           service: bucket.p.service,
-          // Note 20: do not crop sample events. Showing the full payload is
-          // the whole point of pattern_examples; truncating at 200 chars hides
-          // the parts the user actually needs to read. raw_events[] surfaces
-          // the same events un-truncated; sample_event is the bucket-pinned
-          // canonical line and stays full-length here.
+          // Do not crop sample events. Showing the full payload is the whole
+          // point of pattern_examples; truncating at 200 chars hides the parts
+          // the user actually needs to read. raw_events[] surfaces the same
+          // events un-truncated; sample_event is the bucket-pinned canonical
+          // line and stays full-length here.
           sample_event: bucket.p.sampleEvent,
           slot_distribution: slotDist,
           bucket_interpretation: {
@@ -1057,9 +1046,9 @@ async function executePatternExamplesInner(
     lines.push('');
     if (p.severity) lines.push(`**Severity**: ${p.severity}`);
     if (p.service) lines.push(`**Service**: ${p.service}`);
-    // Note 20: full sample event, no truncation. Cropping at 200 chars
-    // hid the part of the event the user actually needed (e.g. "Request
-    // failed. {service.instance.X" cut off the failure reason).
+    // Full sample event, no truncation. Cropping at 200 chars hid the part
+    // of the event the user actually needed (e.g. "Request failed.
+    // {service.instance.X" cut off the failure reason).
     lines.push(`**Sample event**:`);
     lines.push('```');
     lines.push(p.sampleEvent);

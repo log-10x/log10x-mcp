@@ -254,11 +254,11 @@ function buildHeadline(r: ProbeResult, callerProvidedTargetHash: boolean): strin
     return `Retriever end-to-end health check passed — picked ${pickedPhrase}, ran query ${r.query_id ?? '?'}, all ${r.asserts.length} checks succeeded (${r.total_runtime_ms}ms).`;
   }
   if (r.verdict === 'broken') {
-    // Note 32 + 39: lead with capability + impact in user terms. Distinguish
-    // "new logs aren't being archived" (offload_bucket_has_recent_data failure)
-    // from "historical search is broken" (indexer/pod/query failures) —
-    // these are independent. Conflating them overstates impact when only
-    // the forward-shipping signal fails.
+    // Lead with capability + impact in user terms. Distinguish "new logs
+    // aren't being archived" (offload_bucket_has_recent_data failure) from
+    // "historical search is broken" (indexer/pod/query failures): these are
+    // independent. Conflating them overstates impact when only the
+    // forward-shipping signal fails.
     const remedy = r.surfaced_remedy ?? '';
     const failed = r.first_failed_assert ?? '?';
     const passedCount = r.asserts.filter((a) => a.pass).length;
@@ -285,10 +285,10 @@ function buildHeadline(r: ProbeResult, callerProvidedTargetHash: boolean): strin
       `Try log10x_advise_retriever for setup guidance.`
     );
   }
-  // Note 14: explain WHAT this tool tried (end-to-end retriever pipeline
-  // health check), WHY it couldn't (no metrics backend wired up to pick a
-  // pattern to test against), and WHAT to do next (pass target_hash, or
-  // run top_patterns first so we can pick a pattern automatically).
+  // Explain WHAT this tool tried (end-to-end retriever pipeline health
+  // check), WHY it couldn't (no metrics backend wired up to pick a pattern
+  // to test against), and WHAT to do next (pass target_hash, or run
+  // top_patterns first so we can pick a pattern automatically).
   const reasonTail = r.reason ?? 'I could not complete the check';
   return (
     `I tried to run an end-to-end health check on the retriever pipeline, ` +

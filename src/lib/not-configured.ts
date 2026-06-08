@@ -10,7 +10,7 @@
  * `signin_start` already uses for the log10x backend's Auth0 device
  * flow.
  *
- * Phase 5b: surface when `envs.isDemoMode && !envs.demoFallbackReason`
+ * Demo-mode gate: surface when `envs.isDemoMode && !envs.demoFallbackReason`
  * (pure-demo state means nothing was configured and we silently
  * landed on the demo backend). Phase 7 makes the unconfigured state
  * explicit — no more silent demo.
@@ -73,7 +73,7 @@ export function renderNotConfigured(opts: NotConfiguredOptions): string {
  * state (no user configuration, silently landed on the demo backend);
  * returns undefined otherwise.
  *
- * Phase 5b: tools check this at the top of their execute() and
+ * Demo-mode gate: tools check this at the top of their execute() and
  * return the response immediately if defined.
  */
 export function notConfiguredMessageIfNeeded(envs: Environments, callingTool: string): string | undefined {

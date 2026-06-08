@@ -252,10 +252,10 @@ export async function executeFindSkew(args: FindSkewArgs): Promise<StructuredOut
   }
   const observedDistribution = distribute(observed);
 
-  // ── Count singleton slots filtered by DEFECT-100 guard ────────────
-  // A slot with distinctCount=1 always reads as 100% dominant —
-  // tautological, not exploitable skew. Count them here so callers
-  // can audit how many were removed.
+  // ── Count singleton slots filtered by the dominance guard ────────────
+  // A slot with distinctCount=1 always reads as 100% dominant: tautological,
+  // not exploitable skew. Count them here so callers can audit how many were
+  // removed.
   let filteredSingletonSlots = 0;
   for (const agg of aggregated) {
     for (const s of agg.slots) {

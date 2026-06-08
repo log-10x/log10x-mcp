@@ -37,16 +37,14 @@
  *                     capped (cap mis-set, no row, sample_n too loose)
  *
  * GRACEFUL-NOT-CONFIGURED NOTE
- *   The spec calls for `NotConfiguredError` from `lib/not-configured.ts`
- *   (the `feat/graceful-not-configured @ 87ab5e5` framework). That branch
- *   hasn't landed here; the equivalent existing primitive is
+ *   The spec calls for `NotConfiguredError` from `lib/not-configured.ts`.
+ *   That framework hasn't landed here; the equivalent existing primitive is
  *   `CustomerMetricsNotConfiguredError` thrown from `resolveBackend()`.
- *   We don't use that — our queries hit the env's own metrics backend
+ *   We don't use that: our queries hit the env's own metrics backend
  *   (Reporter / Receiver TenXSummary metrics live on `env.metricsBackend`,
  *   not the cross-pillar customer backend), same as `savings.ts` and
  *   `trend.ts`. Structured-error envelopes are emitted directly with
- *   `phase` + `error` fields, matching the pattern in
- *   `configure-regulator.ts`. When the graceful-not-configured framework
+ *   `phase` + `error` fields. When the graceful-not-configured framework
  *   lands, swap the inline envelopes for `notConfiguredEnvelopeFromError`.
  */
 
@@ -307,11 +305,10 @@ export interface ForecastResult {
     dollars_high_monthly: number;
     annual_projection_expected: number;
     /**
-     * Math-lens workflow wxk3k628c: disclose the extrapolation method
-     * for annual_projection_expected so consumers understand it's a
-     * naive monthly × 12 — NOT a seasonality-adjusted forecast.
-     * Matches the projection_basis pattern added to savings.ts in
-     * round-5.
+     * Disclose the extrapolation method for annual_projection_expected so
+     * consumers understand it's a naive monthly × 12, NOT a
+     * seasonality-adjusted forecast. Matches the projection_basis pattern
+     * in savings.ts.
      */
     projection_basis: {
       method: 'linear_extrapolation';
@@ -321,11 +318,13 @@ export interface ForecastResult {
     };
     /**
      * Per-action breakdown of the forecast totals. Populated by the
-     * executeEstimateSavings path (FIX 86) so renderers can surface
-     * which dollar/byte contribution came from which action.
+     * executeEstimateSavings path so renderers can surface which
+     * dollar/byte contribution came from which action.
      *
-     * tier_down.bytes_saved is always 0 (bytes still ingested at full rate;
-     * savings come from the storage-tier price differential only).
+     * tier_down.bytes_saved is always 0 (byte volume is unchanged); savings
+     * come from the lower per-GB rate at the cheaper destination tier, which
+     * cuts both the ingest and storage rate. cost.ts computes the full
+     * standard-vs-tier rate delta.
      */
     action_mix?: ActionMix;
   };
@@ -337,7 +336,7 @@ export interface ForecastResult {
    */
   coverage_of_env_pct: number;
   /**
-   * Math-lens workflow wxk3k628c: the `_pct` suffix is misleading on
+   * The `_pct` suffix is misleading on
    * coverage_of_env_pct (the value 0.97 means "97%" but is stored as a
    * decimal ratio). Sibling `_percent` field stores the true-percent
    * value (97.27, not 0.9727) so consumers reading the `_pct` naming
@@ -425,9 +424,9 @@ export interface VerifyResult {
    */
   rate_source: 'list_price' | 'customer_supplied';
   /**
-   * Bytes saved by each engine action, joined from the cap-CSV (see
-   * cost-cutting-product-shape.md §6). Populated only when the caller
-   * passed `cap_csv_content`; absent otherwise.
+   * Bytes saved by each engine action, joined from the cap-CSV.
+   * Populated only when the caller passed `cap_csv_content`; absent
+   * otherwise.
    *
    * Parts-≤-whole invariant: `totalAttributedBytes(per_action_breakdown)`
    * + `unattributed` ≤ `post_dropped_bytes` after the offload clamp;
@@ -781,8 +780,8 @@ export async function runEstimateForecast(
   // Honor `timeRange` as an alias for `observation_window` per the schema
   // docstring (same precedence rule as the explicit-args path at line ~1706
   // and as log10x_investigate's window/timeRange aliasing). Forecast mode
-  // had the alias declared but never read here — caller passing
-  // `{ timeRange: '1d' }` was silently overridden to '30d' (arc-v10 finding).
+  // had the alias declared but never read here; caller passing
+  // `{ timeRange: '1d' }` was silently overridden to '30d'.
   const observationWindow = args.observation_window ?? args.timeRange ?? '30d';
   const obsDays = parseWindowToDays(observationWindow);
 
@@ -791,7 +790,7 @@ export async function runEstimateForecast(
   // the numbers those tools show. The selectorWithEnv() helper hardcoded
   // tenx_app=~"reporter|receiver",tenx_env="edge" which diverged from the
   // kept-cohort isDropped!="true" selector the other tools use, causing
-  // total-bytes mismatch on the same service+window (DEFECT-22-DEEP).
+  // total-bytes mismatch on the same service+window.
   const probeFilters: Record<string, string> = {};
   if (args.service) probeFilters[env.labels.service] = args.service;
   const metricsEnv = Object.keys(probeFilters).length > 0
@@ -1056,7 +1055,7 @@ export async function runEstimateForecast(
 
     per_pattern.push({
       pattern_hash: row.pattern_hash,
-      // User-facing identifiers (Note 18: renderers MUST show these, not the
+      // User-facing identifiers (renderers MUST show these, not the
       // hash, on user-visible cells). Service falls back to the args.service
       // when the caller scoped the call; descriptor stays empty when the
       // metric backend doesn't surface message_pattern for this hash.
@@ -1170,16 +1169,15 @@ export async function runEstimateForecast(
   // envs.json analyzerCost → LOG10X_ANALYZER_COST → destination list →
   // unset. Prior to this, estimate_savings labeled the destination list
   // price as 'list_price' even when the env carried a customer-supplied
-  // rate that the other tools surfaced as 'customer_supplied'. (chain
-  // walks B+C, 2026-06-06).
+  // rate that the other tools surfaced as 'customer_supplied'.
   //
-  // forecast NEVER collapses to 'unset' because args.destination is required
-  // — rung 4 always returns the destination's list price as a safety net.
+  // forecast NEVER collapses to 'unset' because args.destination is required:
+  // rung 4 always returns the destination's list price as a safety net.
   // The rung-2/3 env-supplied rate (envs.json analyzerCost or
   // LOG10X_ANALYZER_COST) still wins when present.
   const forecast_rate_source: 'list_price' | 'customer_supplied' =
     forecastRateResolved.source === 'customer_supplied' ? 'customer_supplied' : 'list_price';
-  // Bug from math-lens workflow wych5vwsh: the resolved disclosure only
+  // The resolved disclosure only
   // names the ingest list rate ("$0.50/GB"), but projectActionRange returns
   // total_dollars = ingest_dollars + storage_dollars × retention_months. A
   // CFO reading the disclosure expects the totals to reconcile at $0.50/GB
@@ -1202,12 +1200,11 @@ export async function runEstimateForecast(
             `${match} ingest + $${forecastModel.storage_per_gb_month.toFixed(2)}/GB-month storage × ${forecastRetentionMonths}mo = $${(forecastModel.ingest_per_gb + forecastModel.storage_per_gb_month * forecastRetentionMonths).toFixed(2)}/GB effective`
         )
       : forecastRateResolved.source === 'customer_supplied' && customerSuppliedRate != null
-        // Math-lens workflow wxk3k628c: prior code shipped
-        // rate_disclosure=null when rate_source='customer_supplied' so
-        // every dollar figure was computed from an undisclosed scalar.
-        // Surface the customer-supplied rate string so a CFO can audit
-        // the math from the envelope alone, matching the top_patterns
-        // rate_disclosure pattern shipped in round-5.
+        // Prior code shipped rate_disclosure=null when
+        // rate_source='customer_supplied' so every dollar figure was
+        // computed from an undisclosed scalar. Surface the customer-supplied
+        // rate string so a CFO can audit the math from the envelope alone,
+        // matching the top_patterns rate_disclosure pattern.
         ? `$${customerSuppliedRate.toFixed(2)}/GB ingest (customer-supplied)${forecastModel.storage_per_gb_month > 0 ? ` + $${forecastModel.storage_per_gb_month.toFixed(2)}/GB-month storage × ${forecastRetentionMonths}mo = $${(customerSuppliedRate + forecastModel.storage_per_gb_month * forecastRetentionMonths).toFixed(2)}/GB effective` : ''}`
         : forecastRateResolved.disclosure;
 
@@ -1237,7 +1234,7 @@ export async function runEstimateForecast(
       'No bytes observed in the window. Either the Reporter is not deployed for this scope, or the service/env filters matched nothing.'
     );
   }
-  // Math-lens workflow wxk3k628c: pattern_count_source.count is the
+  // pattern_count_source.count is the
   // pattern universe from the distinct-count query (all patterns with
   // ANY bytes in window); per_pattern_total_count is the post-filter
   // set the forecast actually modeled (patterns with non-zero monthly
@@ -1260,7 +1257,7 @@ export async function runEstimateForecast(
       `Dollar projections use ${args.destination} list price. Pass effective_ingest_per_gb to use your contracted rate and align with top_patterns output.`
     );
   }
-  // Math-lens workflow wxk3k628c: when EVERY row got tier_down and the
+  // When EVERY row got tier_down and the
   // destination cost model has NO tier_down_target_tier configured, the
   // per-row `notes` already explain the $0 (cheaper tier price not
   // configured) but a downstream agent reading totals/action_mix sees
@@ -1275,12 +1272,12 @@ export async function runEstimateForecast(
       `config_gap: every pattern was assigned tier_down but ${args.destination}'s cost model has no tier_down_target_tier configured. Dollar savings are $0 by configuration, not by forecast. Configure the cheaper tier rate, or switch default_action to drop/sample for a meaningful projection.`
     );
   }
-  // Math-lens workflow wxk3k628c: when the caller asked for a
-  // target_percent reduction but every pattern got mapped to tier_down
-  // (storage-tier marker, bytes still ingested at full rate), the
-  // headline declares "$0/mo savings" without telling the caller the
-  // requested target wasn't met. Surface explicitly so the agent can
-  // route to a destination that supports the requested reduction.
+  // When the caller asked for a target_percent reduction but every
+  // pattern got mapped to tier_down (a routing marker that cuts the
+  // per-GB rate, not the byte volume), the headline declares "$0/mo
+  // savings" without telling the caller the requested target wasn't met.
+  // Surface explicitly so the agent can route to a destination that
+  // supports the requested reduction.
   if (
     args.target_percent !== undefined &&
     totalSavedBytes === 0 &&
@@ -1306,7 +1303,7 @@ export async function runEstimateForecast(
       bytes_in_monthly: totalIn,
       // env_bytes_in_monthly is the denominator behind coverage_of_env_pct.
       // Surfaced so the coverage % is reconstructible from the envelope
-      // without a hidden side query (math-lens workflow wych5vwsh). When
+      // without a hidden side query. When
       // args.service is set, bytes_in_monthly is the service-scope total
       // and env_bytes_in_monthly is the env-wide total (larger). When no
       // service filter is set the two are equal.
@@ -1410,8 +1407,8 @@ export async function runEstimateVerify(
   //    Engine 1.0.8+ emits literal label values isDropped="false" (kept) and
   //    isDropped="true" (capped). Pre-1.0.8 engines omit the label entirely.
   //    Using `isDropped!="true"` covers BOTH: matches "false" AND label-absent.
-  //    Live verified 2026-06-01 on prometheus.log10x.com — `isDropped=""`
-  //    matched zero series; `isDropped!="true"` matches the kept cohort.
+  //    `isDropped=""` matches zero series; `isDropped!="true"` matches the
+  //    kept cohort.
   const baselinePassedQuery = `sum(increase(${BYTES_METRIC}{${baseSelector},isDropped!="true"}[${args.baseline_window}]))`;
   const baselineByHashQuery = `sum by (${hashLabel}) (increase(${BYTES_METRIC}{${baseSelector},isDropped!="true"}[${args.baseline_window}]))`;
   // 2. Post: same query over post_window.
@@ -1596,17 +1593,17 @@ export async function runEstimateVerify(
       `Delivered % is negative (${(delivered_pct * 100).toFixed(1)}%) — post-window passed bytes EXCEED scaled baseline. Likely drift/new_patterns swamped the cap.`
     );
   }
-  // Degenerate-window detection (math-lens workflow wq54qh4ic). When
-  // baseline_bytes_scaled equals post_passed_bytes to 8+ sig digits, the
-  // verify is comparing the policy against its own output — delivered_pct
-  // is algebraically forced to 0 regardless of whether bytes were actually
-  // dropped. Two common causes: (1) baseline_window == post_window AND
-  // both anchor to "now" (the same Prometheus range), (2) env grew by
-  // exactly the cap-fired byte count this window (coincidence; rare).
-  // In either case, the % view is meaningless; the $ view (computed from
-  // postDroppedBytes) is still correct. Surface a caveat + downgrade
-  // causal_confidence so the headline and CFO-facing renderers can't
-  // silently report "0% delivered reduction" alongside a positive $/yr.
+  // Degenerate-window detection. When baseline_bytes_scaled equals
+  // post_passed_bytes to 8+ sig digits, the verify is comparing the policy
+  // against its own output: delivered_pct is algebraically forced to 0
+  // regardless of whether bytes were actually dropped. Two common causes:
+  // (1) baseline_window == post_window AND both anchor to "now" (the same
+  // Prometheus range), (2) env grew by exactly the cap-fired byte count
+  // this window (coincidence; rare). In either case the % view is
+  // meaningless; the $ view (computed from postDroppedBytes) is still
+  // correct. Surface a caveat + downgrade causal_confidence so the headline
+  // and CFO-facing renderers can't silently report "0% delivered reduction"
+  // alongside a positive $/yr.
   const degenerateBaselinePassedMatch =
     baselineScaled > 0 &&
     postPassedBytes > 0 &&
@@ -1923,7 +1920,7 @@ export async function executeEstimateSavings(
         ? 'contracted rate'
         : `${destination} list price — your bill may differ`;
 
-      // ── Action-mix disclosure (FIX 86) ──
+      // ── Action-mix disclosure ──
       // Compute per-action bucket totals from the full (pre-slice) per_pattern
       // set so the mix reflects every row the solver touched, not just the
       // displayed slice. We re-derive from per_pattern_sliced which is the
@@ -1935,7 +1932,8 @@ export async function executeEstimateSavings(
 
       // Check whether the mix is uniformly tier_down (or has zero combined
       // bytes_saved_monthly across all patterns). tier_down does not reduce
-      // bytes; savings come from storage-tier price differential only.
+      // byte volume; savings come from the lower per-GB rate at the cheaper
+      // destination tier (both ingest and storage rate).
       const allTierDown =
         result.per_pattern.length > 0 &&
         result.per_pattern.every((r) => r.action === 'tier_down');
@@ -1948,14 +1946,14 @@ export async function executeEstimateSavings(
         ? ` via ${(args.default_action ?? 'compact')}`
         : '';
 
-      // Math-lens workflow wxk3k628c: when the solver wanted `compact` but
-      // the destination's no-op mode forced every pattern to `tier_down`,
-      // the headline concatenated BOTH clauses: "$0/mo savings via compact
-      // ... via tier_down ...". The `solverActionTag` reflects what the
-      // SOLVER requested; the `via tier_down` reflects what the destination
-      // ACTUALLY ASSIGNED. When every pattern got tier_down (tierDownOnly),
-      // only the actual action matters — suppress solverActionTag in that
-      // branch so the headline stops claiming two contradictory actions.
+      // When the solver wanted `compact` but the destination's no-op mode
+      // forced every pattern to `tier_down`, the headline concatenated BOTH
+      // clauses: "$0/mo savings via compact ... via tier_down ...". The
+      // `solverActionTag` reflects what the SOLVER requested; the `via
+      // tier_down` reflects what the destination ACTUALLY ASSIGNED. When
+      // every pattern got tier_down (tierDownOnly), only the actual action
+      // matters; suppress solverActionTag in that branch so the headline
+      // stops claiming two contradictory actions.
       let headline: string;
       if (args.enforcement_mode === 'manual_report') {
         headline = `If you enforce externally: ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings potential${solverActionTag}${serviceTag} on ${patternCountLabel} (${(result.coverage_of_env_pct * 100).toFixed(0)}% of monthly env bytes). Enforcement choice is yours.`;
@@ -1963,7 +1961,7 @@ export async function executeEstimateSavings(
         const solverNote = args.target_percent !== undefined && args.default_action === 'compact'
           ? ` (solver requested compact; destination forced tier_down)`
           : '';
-        headline = `Forecast (${destination}): ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings${serviceTag} via tier_down (cheaper destination tier — lower ingest + storage rate; byte volume unchanged) on ${patternCountLabel}${solverNote}.`;
+        headline = `Forecast (${destination}): ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings${serviceTag} via tier_down (cheaper destination tier, lower ingest + storage rate; byte volume unchanged) on ${patternCountLabel}${solverNote}.`;
       } else if (actionMix.tier_down.pattern_count > 0 && actionMix.tier_down.dollars > 0) {
         // Mixed: some tier_down + other actions
         const bytesSavingDollars = result.totals.dollars_expected_monthly - actionMix.tier_down.dollars;
@@ -2058,9 +2056,9 @@ export async function executeEstimateSavings(
       env
     );
     recordQuery(telemetry);
-    // Math-lens workflow wq54qh4ic: when delivered_pct=0 but the engine
-    // dropped non-zero bytes (typical when baseline == post_passed by
-    // construction or by env-growth coincidence), the old headline
+    // When delivered_pct=0 but the engine dropped non-zero bytes (typical
+    // when baseline == post_passed by construction or by env-growth
+    // coincidence), the old headline
     // "0.0% delivered reduction ($52/yr projected)" was self-
     // contradicting to a CFO. Reframe: lead with what actually moved
     // (the $ value derived from dropped bytes) when delivered_pct is
@@ -2068,11 +2066,10 @@ export async function executeEstimateSavings(
     const droppedBytesPositive =
       result.post_dropped_bytes > 0 &&
       Number.isFinite(result.post_dropped_bytes);
-    // Tolerance for "effectively zero" (math-lens workflow wq54qh4ic):
-    // when baseline_bytes_scaled differs from post_passed_bytes by a few
-    // hundred bytes out of ~50 GB (float noise + same-window-anchor
-    // artifact), delivered_pct lands at ~-5e-9 — close enough to zero
-    // that the CFO-facing narrative still applies.
+    // Tolerance for "effectively zero": when baseline_bytes_scaled differs
+    // from post_passed_bytes by a few hundred bytes out of ~50 GB (float
+    // noise + same-window-anchor artifact), delivered_pct lands at ~-5e-9,
+    // close enough to zero that the CFO-facing narrative still applies.
     const pctViewWashed =
       Math.abs(result.delivered_pct) < 1e-6 && droppedBytesPositive;
     const headline = pctViewWashed
@@ -2152,7 +2149,7 @@ export async function executeEstimateSavings(
   }
 }
 
-// ─── action-mix helpers (FIX 86) ──────────────────────────────────────
+// ─── action-mix helpers ───────────────────────────────────────────────
 
 export interface ActionMixBucket {
   dollars: number;
@@ -2223,7 +2220,7 @@ function buildForecastHumanSummary(
       result.per_pattern.every((r) => r.action === 'tier_down');
     const tierDownOnly = allTierDown || (zeroByteSaved && actionMix.tier_down.pattern_count === result.per_pattern.length);
     if (tierDownOnly) {
-      return `estimate_savings forecast on ${destination}${serviceClause}: ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings via tier_down (cheaper destination tier — lower ingest + storage rate; byte volume unchanged). ${patternWord} covering ${envCoverage}.${result.caveats.length ? ` Caveats: ${result.caveats.length}.` : ''}`;
+      return `estimate_savings forecast on ${destination}${serviceClause}: ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings via tier_down (cheaper destination tier, lower ingest + storage rate; byte volume unchanged). ${patternWord} covering ${envCoverage}.${result.caveats.length ? ` Caveats: ${result.caveats.length}.` : ''}`;
     }
     // Mixed actions: break down by byte-reducing vs tier_down.
     if (actionMix.tier_down.pattern_count > 0 && actionMix.tier_down.dollars > 0) {
@@ -2256,9 +2253,9 @@ function buildVerifyHumanSummary(
   result: VerifyResult,
   destination: string
 ): string {
-  // Same degenerate-windowing reframing as the headline (math-lens
-  // workflow wq54qh4ic): when the % view is washed to 0 by baseline
-  // equaling post_passed, lead with the $ figure instead.
+  // Same degenerate-windowing reframing as the headline: when the % view
+  // is washed to 0 by baseline equaling post_passed, lead with the $
+  // figure instead.
   const droppedBytesPositive =
     result.post_dropped_bytes > 0 &&
     Number.isFinite(result.post_dropped_bytes);

@@ -41,8 +41,8 @@
  *
  *   - The session cache itself probably lives in `src/lib/session-cache.ts`
  *     (new file) with backing storage in `~/.log10x/session/` so the
- *     state survives across MCP process restarts in the same Claude
- *     Code session.
+ *     state survives across MCP process restarts within one client
+ *     session.
  *
  *   - The chassis `actions[]` emitter changes to produce
  *     "Reply `1` (or the pattern name) to drill into the OTEL collector

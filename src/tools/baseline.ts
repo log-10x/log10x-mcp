@@ -165,8 +165,8 @@ export interface BaselineEnvelopeData {
     /**
      * @deprecated Ambiguous unit. Use `monthly_compound_growth_pct` (same
      * value) for clarity, or `horizon_total_growth_pct` for the 90d total.
-     * Kept for back-compat — math-lens workflow w1aem8inf flagged the
-     * naming as a CFO 46% under-read risk.
+     * Kept for back-compat. The naming was flagged as a CFO 46% under-read
+     * risk.
      */
     growth_pct: number;
     /**
@@ -177,11 +177,10 @@ export interface BaselineEnvelopeData {
      */
     monthly_compound_growth_pct: number;
     /**
-     * Math-lens workflow w58guv3e4: same value × 100 for readers who
-     * trust the `_pct` naming convention used by sibling `share_pct`
-     * fields in the same envelope (where share_pct=16.09 means 16.09%).
-     * monthly_compound_growth_percent=36 means "36% growth per month
-     * compounded" — no ambiguity.
+     * Same value × 100 for readers who trust the `_pct` naming convention
+     * used by sibling `share_pct` fields in the same envelope (where
+     * share_pct=16.09 means 16.09%). monthly_compound_growth_percent=36
+     * means "36% growth per month compounded" with no ambiguity.
      */
     monthly_compound_growth_percent: number;
     /**
@@ -199,11 +198,11 @@ export interface BaselineEnvelopeData {
     expected_pct: number;
     high_pct: number;
     /**
-     * Math-lens workflow w58guv3e4: provenance for the band so consumers
-     * can tell a calibrated heuristic from the hand-picked drop-only
-     * fallback. `drop_only_fallback` = no compactable contributors,
-     * range is the hardcoded {10/15/25}. `compactable_share_heuristic`
-     * = expected = share_top5_compactable_pct × 0.7.
+     * Provenance for the band so consumers can tell a calibrated heuristic
+     * from the hand-picked drop-only fallback. `drop_only_fallback` = no
+     * compactable contributors, range is the hardcoded {10/15/25}.
+     * `compactable_share_heuristic` = expected = share_top5_compactable_pct
+     * × 0.7.
      */
     basis: 'drop_only_fallback' | 'compactable_share_heuristic';
     /** The exact formula that produced (low_pct, expected_pct, high_pct). */
@@ -299,13 +298,13 @@ export async function executeBaseline(
     headline,
     status: result.status === 'ready' ? 'success' : 'insufficient_data',
     decisions: {
-      // Math-lens workflow w58guv3e4: the prior code wired
+      // The prior code wired
       //   threshold_used: null
       //   threshold_basis: rate_source === 'customer_supplied' ? ... : 'default'
       // which leaks rate-source provenance into the chassis decision
       // block. rate_source belongs in source_disclosure.rate_source
       // (it's already there). The chassis decision block describes the
-      // operationally meaningful THRESHOLD — here, the expected
+      // operationally meaningful THRESHOLD: here, the expected
       // reduction target the recommendation surfaces.
       threshold_used: result.status === 'ready' && result.recommended_target_range
         ? result.recommended_target_range.expected_pct
@@ -329,14 +328,14 @@ export async function executeBaseline(
       window: horizon,
       window_basis: 'explicit',
       candidates_count: result.top_contributors.length,
-      // Math-lens workflow w1aem8inf: previously this filtered to
-      // .compactable only, which on cloudwatch (compact = no-op) returned
-      // 0 every time and contradicted both the headline "Baseline ready"
-      // AND the 9 top contributors shown immediately below. Any contributor
-      // is usable for SOME action (drop/sample/offload/tier_down all work
-      // regardless of compactability), so candidates_usable now reports
-      // the full count. Compactable count is a separate downstream concern
-      // surfaced on each row's .compactable field.
+      // Previously this filtered to .compactable only, which on cloudwatch
+      // (compact = no-op) returned 0 every time and contradicted both the
+      // headline "Baseline ready" AND the 9 top contributors shown
+      // immediately below. Any contributor is usable for SOME action
+      // (drop/sample/offload/tier_down all work regardless of
+      // compactability), so candidates_usable now reports the full count.
+      // Compactable count is a separate downstream concern surfaced on
+      // each row's .compactable field.
       candidates_usable: result.top_contributors.length,
     },
     payload: result,
@@ -447,11 +446,11 @@ async function computeBaseline(
   }
 
   const totalBytes = validDays.reduce((s, x) => s + x, 0);
-  // Math-lens workflow w58guv3e4: switch from binary GB (1024^3) to
-  // decimal GB (10^9) — matches the catalog-wide CloudWatch/Datadog/
-  // Splunk billing convention used by bytesToGb. Prior binary divisor
-  // here vs decimal divisor in fetchTopContributors caused ~7% drift
-  // between current.monthly_usd and the sum-of-contributors check.
+  // Switch from binary GB (1024^3) to decimal GB (10^9) to match the
+  // catalog-wide CloudWatch/Datadog/Splunk billing convention used by
+  // bytesToGb. Prior binary divisor here vs decimal divisor in
+  // fetchTopContributors caused ~7% drift between current.monthly_usd
+  // and the sum-of-contributors check.
   const observedDailyGb = bytesToGb(totalBytes / Math.max(1, validDays.length));
 
   // ── Gate 2: coverage. ───────────────────────────────────────────
@@ -502,18 +501,18 @@ async function computeBaseline(
     rateSource === 'customer_supplied'
       ? (resolvedRate.rate_per_gb as number)
       : model.ingest_per_gb;
-  // Math-lens workflow w58guv3e4: two fixes here.
-  //  (1) Use decimal GB (bytesToGb) instead of binary 1024^3 — matches
+  // Two fixes here.
+  //  (1) Use decimal GB (bytesToGb) instead of binary 1024^3 to match
   //      the catalog convention and what fetchTopContributors uses.
   //  (2) Use window MEAN bytes (totalBytes / validDays) × 30, not p50.
-  //      Per-contributor monthly_usd is mean-based (line 708: bytes /
-  //      horizonDays × 30) so deriving the total from p50 left the
-  //      sum-of-contributors disagreeing with current.monthly_usd by
-  //      ~6.6% on right-tailed log volume distributions (workflow
-  //      observed $505 sum vs $473.69 headline). Mean-based makes
-  //      the math consistent: sum(per-contributor monthly_usd) ≡
-  //      current.monthly_usd (within float tolerance). p50 stays as
-  //      bytes_per_day_p50 for tail planning, p90 stays for capacity.
+  //      Per-contributor monthly_usd is mean-based (bytes / horizonDays
+  //      × 30) so deriving the total from p50 left the sum-of-contributors
+  //      disagreeing with current.monthly_usd by ~6.6% on right-tailed
+  //      log volume distributions (observed $505 sum vs $473.69 headline).
+  //      Mean-based makes the math consistent: sum(per-contributor
+  //      monthly_usd) equals current.monthly_usd within float tolerance.
+  //      p50 stays as bytes_per_day_p50 for tail planning, p90 stays for
+  //      capacity.
   const meanDailyBytes = totalBytes / Math.max(1, validDays.length);
   const monthlyGb = bytesToGb(meanDailyBytes * DAYS_PER_MONTH);
   const monthlyUsd = monthlyGb * (ingestPerGb + model.storage_per_gb_month);
@@ -571,17 +570,16 @@ async function computeBaseline(
       monthly_usd_in_90d: monthlyUsdIn90d,
       monthly_usd_in_90d_at_list: monthlyUsdIn90d,
       monthly_usd_in_90d_disclosed: monthlyUsdIn90dDisclosed,
-      // Math-lens workflow w1aem8inf: growth_pct is the MONTHLY COMPOUND
-      // rate (e.g. 0.36 = 36%/mo), but the field name + parent object
-      // ("projection_no_action_90d") biased CFO readers toward interpreting
-      // it as the 90d total growth — a 46% under-read risk. Surface both
-      // values with unambiguous names; keep the legacy growth_pct alias so
-      // existing consumers don't break.
+      // growth_pct is the MONTHLY COMPOUND rate (e.g. 0.36 = 36%/mo), but
+      // the field name + parent object ("projection_no_action_90d") biased
+      // CFO readers toward interpreting it as the 90d total growth, a 46%
+      // under-read risk. Surface both values with unambiguous names; keep
+      // the legacy growth_pct alias so existing consumers don't break.
       growth_pct: growthPct,
       monthly_compound_growth_pct: growthPct,
-      // Math-lens workflow w58guv3e4: emit the percent-shaped sibling
-      // so consumers reading `_pct` at face value (where share_pct=16.09
-      // means 16.09% in the same envelope) get the consistent reading.
+      // Emit the percent-shaped sibling so consumers reading `_pct` at
+      // face value (where share_pct=16.09 means 16.09% in the same
+      // envelope) get the consistent reading.
       monthly_compound_growth_percent: growthPct * 100,
       horizon_total_growth_pct:
         monthlyUsd > 0 && monthlyUsdIn90d != null
@@ -788,8 +786,8 @@ async function fetchTopContributors(
     // These are aggregate or per-container rollup series (emitted by
     // tenx_app="reporter|receiver") that carry no per-pattern labels and would
     // appear as zero-identity contributor rows in the result.
-    // TODO: trace empty pattern_hash to its Prometheus query — likely
-    //       a metric series with missing message_pattern label
+    // TODO: handle empty pattern_hash (a metric series with a missing
+    //       message_pattern label).
     const rawHash    = String(r.metric[labels.hash]    ?? '');
     const rawPattern = String(r.metric[labels.pattern] ?? '');
     if (rawHash === '') continue;
@@ -870,11 +868,11 @@ function recommendTargetRange(top: BaselineTopContributor[]): {
 
   // Destination doesn't support compaction (or no compactable
   // top-5 contributors) → drop-only band.
-  // Math-lens workflow w58guv3e4: a hardcoded {10/15/25}% range was
-  // shipping without basis disclosure — surfacing as if it were
-  // calibrated when it's a hand-picked conservative fallback. Expose
-  // `basis` + `formula` + the input that drove the branch so a CFO
-  // reader can audit the recommendation instead of trusting the band.
+  // A hardcoded {10/15/25}% range was shipping without basis disclosure,
+  // surfacing as if it were calibrated when it's a hand-picked
+  // conservative fallback. Expose `basis` + `formula` + the input that
+  // drove the branch so a CFO reader can audit the recommendation
+  // instead of trusting the band.
   if (compactableShare <= 0) {
     return {
       low_pct: 10,

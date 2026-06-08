@@ -152,8 +152,8 @@ export type InlineImage = z.infer<typeof InlineImageSchema>;
  * buildChassisEnvelope) intact through `wrap()`'s validation step.
  * Without it, Zod's default `strip` mode silently removes those keys,
  * which leaves pattern_examples / pattern_trend / event_lookup
- * responses with status only at data.status — defeating the envelope.status
- * hoist added in 5ad98dd.
+ * responses with status only at data.status, defeating the envelope.status
+ * hoist.
  */
 export const StructuredOutputSchema = z
   .object({

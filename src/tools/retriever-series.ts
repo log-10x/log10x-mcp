@@ -258,12 +258,12 @@ export async function executeRetrieverSeries(
   }
 
   const startedMs = Date.now();
-  // Wave 2.E: wrap the dispatch of the actual retriever round-trip in
-  // wrapBackendError so HTTP-coded failures (503/504 ↔ backend_unavailable,
-  // 408/429 ↔ backend_timeout, network failures ↔ backend_unavailable)
-  // surface with structured retryable + suggested_backoff_ms instead of
-  // throwing through the MCP boundary. Highest blast radius of the four
-  // tools — both full and sampled modes go through here.
+  // Wrap the dispatch of the actual retriever round-trip in wrapBackendError
+  // so HTTP-coded failures (503/504 ↔ backend_unavailable, 408/429 ↔
+  // backend_timeout, network failures ↔ backend_unavailable) surface with
+  // structured retryable + suggested_backoff_ms instead of throwing through
+  // the MCP boundary. Highest blast radius of the four tools: both full and
+  // sampled modes go through here.
   let result: SeriesResult;
   try {
     result =
@@ -335,13 +335,12 @@ export async function executeRetrieverSeries(
     view: 'summary',
     summary: {
       headline: (() => {
-        // Math-lens workflow wpv1ay324: when wall_time exceeds an empty-
-        // window budget and we have zero worker files / zero events, the
-        // headline must SAY so — leaving "wall=186546ms" as neutral
-        // telemetry next to "0 bucket points" let downstream renderers
-        // (and CFOs) treat the empty result as authoritative when it was
-        // actually a likely timeout. Append a perf advisory when the
-        // shape matches.
+        // When wall_time exceeds an empty-window budget and we have zero
+        // worker files / zero events, the headline must say so. Leaving
+        // "wall=186546ms" as neutral telemetry next to "0 bucket points"
+        // let downstream renderers treat the empty result as authoritative
+        // when it was actually a likely timeout. Append a perf advisory
+        // when the shape matches.
         const baseHeadline = `Retriever series for ${formatPatternLabel({ symbol_message: args.pattern ?? args.search ?? 'window', maxHintChars: 50 })}: ${result.series.length} bucket point${result.series.length !== 1 ? 's' : ''}, ${result.groupCardinality} group${result.groupCardinality !== 1 ? 's' : ''}, mode=${decision.mode}, wall=${wallTimeMs}ms.`;
         const degraded =
           result.series.length === 0 &&
@@ -353,11 +352,11 @@ export async function executeRetrieverSeries(
       })(),
     },
     data: {
-      // Math-lens workflow wpv1ay324: previously ok=true on an empty
-      // result + huge wall_time + zero worker_files conflated "clean
-      // empty" with "retriever did not return". Now ok=false when the
-      // shape suggests timeout/starvation, so downstream renderers can
-      // gate on ok and not treat a degraded result as authoritative.
+      // Previously ok=true on an empty result + huge wall_time + zero
+      // worker_files conflated "clean empty" with "retriever did not
+      // return". Now ok=false when the shape suggests timeout/starvation,
+      // so downstream renderers can gate on ok and not treat a degraded
+      // result as authoritative.
       status: seriesStatus,
       ok:
         !(result.series.length === 0 &&
@@ -412,7 +411,7 @@ async function executeFullMode(
   // Summaries path: ~50–500x bandwidth reduction vs raw events because each
   // qrs/ record carries `summaryVolume` (count) + grouping fields directly,
   // skipping the per-event `text` payload. Gated by an env flag while the
-  // engine-side writer is rolling out (engine#36 / pipeline-extensions#6).
+  // engine-side summaries writer is rolling out.
   // Fall back to the events path on empty summaries so older retrievers
   // (no qrs/ writer) still produce a series.
   const useSummaries = process.env.LOG10X_RETRIEVER_SERIES_USE_SUMMARIES === 'true';
@@ -778,14 +777,12 @@ function buildSeriesHumanSummary(s: {
     ? `Sampled mode used ${decision.subWindows} sub-windows of up to ${decision.eventsPerSubWindow} events each; time-distribution shape is preserved but bucket counts are estimates.`
     : `Full-aggregation mode returned exact counts over ${result.actualEvents} processed events${result.truncated ? ' (some workers truncated at the per-worker cap)' : ''}.`;
   const top = s.topGroups[0];
-  // Math-lens workflow wpv1ay324: when the series is empty AND
-  // wall_time_ms is large vs window_ms, the dominant cause is almost
-  // certainly retriever_did_not_return (timeout, worker starvation,
-  // degraded archive), NOT search-expression mismatch. The earlier
-  // single-cause framing ("verify the search expression matches")
-  // made the empty result look like a query mistake when in fact the
-  // retriever had failed to fetch. Surface all three possible causes
-  // and lead with the most likely one based on the wall_time signal.
+  // When the series is empty AND wall_time_ms is large vs window_ms, the
+  // dominant cause is almost certainly retriever_did_not_return (timeout,
+  // worker starvation, degraded archive), NOT search-expression mismatch.
+  // The earlier single-cause framing ("verify the search expression
+  // matches") made the empty result look like a query mistake when in fact
+  // the retriever had failed to fetch. Surface all three possible causes.
   let third: string;
   if (args.group_by && top) {
     third = `Top ${args.group_by} value is ${top.group} with ${top.count} event${top.count === 1 ? '' : 's'}.`;

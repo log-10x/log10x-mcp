@@ -231,12 +231,11 @@ function buildModes(
 ): CostOptionItem[] {
   const { target_percent, service, pattern_hash } = args;
   const tier: CustomerTier = caps._tier ?? 'dev';
-  // Chain-integrity workflow wqtzszdg7: the caller-supplied destination
-  // (e.g. baseline established datadog as the target) must win over the
-  // env-auto-detected siem (which may be the env default cloudwatch).
-  // Without this, cost_options silently injects cloudwatch into
-  // routes_to.args while upstream tools were using datadog, breaking
-  // the destination cascade.
+  // The caller-supplied destination (e.g. baseline established datadog as
+  // the target) must win over the env-auto-detected siem (which may be the
+  // env default cloudwatch). Without this, cost_options silently injects
+  // cloudwatch into routes_to.args while upstream tools were using datadog,
+  // breaking the destination cascade.
   const effectiveDestination = args.destination ?? siemDetected;
 
   /**
@@ -538,13 +537,12 @@ export async function executeCostOptions(args: {
   // Strip the internal _tier field before exposing in the envelope.
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const { _tier: _strippedTier, ...capsSummaryRaw } = caps;
-  // Math-lens workflow w1aem8inf: compact_installable was derived from
-  // "is the compact module loadable" without checking destination
-  // applicability. On cloudwatch (where compact is a documented no-op)
-  // we shipped compact_installable=true alongside modes[compact]
-  // .applicable=false — agents reading capability_summary still proposed
-  // compact on cloudwatch and wasted a turn. Make installable mean
-  // "binary present AND will do useful work here" — match the per-mode
+  // compact_installable was derived from "is the compact module loadable"
+  // without checking destination applicability. On cloudwatch (where compact
+  // is a documented no-op) we shipped compact_installable=true alongside
+  // modes[compact].applicable=false, so agents reading capability_summary
+  // still proposed compact on cloudwatch and wasted a turn. Make installable
+  // mean "binary present AND will do useful work here" to match the per-mode
   // applicability.
   const compactModeRow = modes.find((m) => m.id === 'compact');
   const capsSummary = {
@@ -591,15 +589,15 @@ export async function executeCostOptions(args: {
     must_render_verbatim: verbatim,
     must_ask_user: mustAskUser,
     forbidden_next_actions: forbidden,
-    // Bug from math-lens workflow w1aem8inf: previously this list included
-    // log10x_estimate_savings as recommended-next, which directly
-    // contradicted forbidden_next_actions (which lists the same tool as
-    // FORBIDDEN until the user picks a mode). Agents reading both lists
-    // received mutually exclusive instructions for the same tool. The
-    // actual next-step path is per-mode via modes[].routes_to (the user
-    // picks first, THEN we route to estimate_savings with the picked
-    // action). Removing the top-level recommended-next eliminates the
-    // contradiction; the routes_to per mode still carries the chain.
+    // Previously this list included log10x_estimate_savings as
+    // recommended-next, which directly contradicted forbidden_next_actions
+    // (which lists the same tool as FORBIDDEN until the user picks a mode).
+    // Agents reading both lists received mutually exclusive instructions for
+    // the same tool. The actual next-step path is per-mode via
+    // modes[].routes_to (the user picks first, THEN we route to
+    // estimate_savings with the picked action). Removing the top-level
+    // recommended-next eliminates the contradiction; the routes_to per mode
+    // still carries the chain.
     actions: [],
     legacyCompat: true,
     legacyExtraFields: {

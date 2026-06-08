@@ -438,12 +438,12 @@ export async function executeRetrieverQueryStatus(
     });
   }
 
-  // Note 13/31: the query_id is in the placeholder-marker form
-  // (`error:<error_type>`) that log10x_retriever_query emits when its
-  // pattern lookup fails before dispatch — so the forward chain stays
-  // composable. We can't tell from the id alone whether the caller is
-  // here because a real previous retriever_query call hit that case, or
-  // whether they passed this id manually (e.g. for testing). Either way,
+  // The query_id is in the placeholder-marker form (`error:<error_type>`)
+  // that log10x_retriever_query emits when its pattern lookup fails before
+  // dispatch, so the forward chain stays composable. We can't tell from the
+  // id alone whether the caller is here because a real previous
+  // retriever_query call hit that case, or whether they passed this id
+  // manually (e.g. for testing). Either way,
   // there is no real query to check status on. Soften the prose so it
   // doesn't assert a recent failure that may not have happened, and
   // point at top_patterns so the caller can pick a real pattern to

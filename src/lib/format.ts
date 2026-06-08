@@ -53,8 +53,8 @@ function trimZeros(s: string): string {
  * the same volume in the same envelope as the dollars derived from it.
  * CloudWatch / Datadog / Splunk / Azure / GCP / Sumo all bill in
  * decimal GB, so this also matches what the customer sees on their
- * invoice. (Switched 2026-06-07 after adversarial workflow wui9vouej
- * surfaced GiB-divisor-under-GB-label as a CFO-facing 6.87% miscount.)
+ * invoice. Decimal units are used because a GiB divisor under a GB label
+ * understates the volume shown next to the dollars by ~6.87%.
  *
  * Using toPrecision(3) throughout so 115_577_921 bytes →
  *   mb = 115.6 → gb = 0.1156 → "0.116 GB"  (3 sig figs)

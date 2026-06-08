@@ -1,11 +1,10 @@
 /**
  * Structured error envelope for cross-pillar primitives.
  *
- * Today's pain (surfaced by the AI-as-user consult, 2026-05-28): the
- * primitives throw string errors when the customer backend fails. An
- * agent caller gets the string and has to NLP-parse it to decide
- * whether to retry, back off, or give up. Both consultants ranked
- * structured errors as the single highest-value addition.
+ * Without this, the primitives throw string errors when the customer
+ * backend fails. An agent caller gets the string and has to NLP-parse it
+ * to decide whether to retry, back off, or give up. A structured error
+ * envelope lets the agent branch on a typed category instead.
  *
  * This module defines:
  *   - `PrimitiveErrorType` — the taxonomy of error categories an agent

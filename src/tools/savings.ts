@@ -95,14 +95,13 @@ interface SavingsSummary {
     /** Disclosed-value mirror of annual_projection_dollars. null when rate_source === 'unset'. */
     annual_projection_dollars_disclosed: DisclosedDollarValue | null;
     /**
-     * Math-lens workflow w58guv3e4: disclose the extrapolation method
-     * so consumers understand that `annual_projection_dollars` is a
-     * linear extrapolation from the observed window (realized * 365 /
-     * window_days), NOT a seasonality-adjusted forecast. The field also
-     * documents the actual scaling factor used so consumers can verify
-     * the arithmetic without having to guess between 52 weeks/yr (the
-     * "/wk" label invitation) and 52.143 (= 365/7, what the math
-     * actually does).
+     * Disclose the extrapolation method so consumers understand that
+     * `annual_projection_dollars` is a linear extrapolation from the
+     * observed window (realized * 365 / window_days), NOT a
+     * seasonality-adjusted forecast. The field also documents the actual
+     * scaling factor used so consumers can verify the arithmetic without
+     * having to guess between 52 weeks/yr (the "/wk" label invitation) and
+     * 52.143 (= 365/7, what the math actually does).
      */
     projection_basis: {
       method: 'linear_extrapolation';
@@ -171,15 +170,13 @@ export async function executeSavings(
     headline,
     status: d.totals.has_data ? 'success' : 'no_signal',
     decisions: {
-      // Chain-integrity workflow wqtzszdg7: prior code aliased
-      // threshold_used := cost_per_gb (the $/GB rate). Rate is not a
-      // threshold — and the chassis decision block documents the
-      // OPERATIONAL THRESHOLD. savings doesn't gate decisions on any
-      // operational threshold; it aggregates reductions. Set both
-      // fields to the schema's absent-tool form so cross-tool
-      // comparisons of decisions.threshold_used don't conflate rate
-      // ($/GB) with target (%) or cutoff (rank). Same fix shipped to
-      // services in round-5 and top_patterns just below.
+      // Prior code aliased threshold_used := cost_per_gb (the $/GB rate).
+      // Rate is not a threshold, and the chassis decision block documents
+      // the OPERATIONAL THRESHOLD. savings doesn't gate decisions on any
+      // operational threshold; it aggregates reductions. Set both fields to
+      // the schema's absent-tool form so cross-tool comparisons of
+      // decisions.threshold_used don't conflate rate ($/GB) with target (%)
+      // or cutoff (rank). The same fix applies to services and top_patterns.
       // rate_source provenance remains in source_disclosure.rate_source.
       threshold_used: null,
       threshold_basis: 'default',
@@ -191,7 +188,7 @@ export async function executeSavings(
     scope: {
       window: d.time_range,
       window_basis: 'explicit',
-      // Math-lens workflow w58guv3e4: prior code wired
+      // Prior code wired
       //   candidates_count := pipeline_instances (1)
       //   candidates_usable := services_monitored (26)
       // These are orthogonal cardinalities (forwarder pods vs
@@ -199,8 +196,8 @@ export async function executeSavings(
       // relationship, violating ScopeSchema's documented
       // "Subset of candidates_count" contract (candidates_usable
       // > candidates_count is structurally wrong). savings has no
-      // candidate selection step — it aggregates across all
-      // services in the window — so the right move is to drop
+      // candidate selection step; it aggregates across all
+      // services in the window, so the right move is to drop
       // both fields per the schema doc ("Absent for tools that
       // don't have a candidate selection step"). The real
       // cardinalities live in payload.pipeline_instances and
@@ -246,10 +243,10 @@ async function executeSavingsInner(
   //
   // Chunks return { sum, succeeded, total } so callers can annotate coverage.
   // Intermittent Prometheus aggregation-limit errors (HTTP 422 "the query hit
-  // the aggregated data size limit") affect a subset of chunks deterministically
-  // — they are NOT caused by client-side concurrency (tested: throttling to 6
+  // the aggregated data size limit") affect a subset of chunks deterministically;
+  // they are NOT caused by client-side concurrency (tested: throttling to 6
   // concurrent requests quadruples wall time with zero improvement in coverage).
-  // The root cause is server-side and cannot be fixed from the client. PR #12's
+  // The root cause is server-side and cannot be fixed from the client. The
   // coverage annotation surfaces the partial-data honestly to the caller.
   const chunkOffsets = Array.from({ length: tf.days }, (_, i) => i);
   const chunkSum = async (builder: (off: number) => string): Promise<{ sum: number; succeeded: number; total: number }> => {
@@ -651,14 +648,13 @@ async function executeSavingsInner(
         reduction_pct: retrieverReductionPct,
         savings_dollars: retrieverSavings,
         savings_dollars_disclosed: retrieverSavingsDisclosed,
-        // Math-lens workflow w1aem8inf renamed coverage → chunks_ok_ratio
-        // because the field name read as "byte coverage" — when chunks were
-        // healthy but no bytes were indexed/streamed, the envelope shipped
-        // coverage=1.0 alongside indexed_bytes=0 + streamed_bytes=0 and a
-        // CFO concluded "100% covered" when the retriever leg was
-        // producing zero savings. Math-lens workflow w58guv3e4 (round 5)
-        // re-flagged the back-compat alias: a documented-misleading field
-        // in the envelope guarantees agent misreads. Removed for good.
+        // Renamed coverage to chunks_ok_ratio because the field name read as
+        // "byte coverage": when chunks were healthy but no bytes were
+        // indexed/streamed, the envelope shipped coverage=1.0 alongside
+        // indexed_bytes=0 + streamed_bytes=0 and a CFO concluded "100%
+        // covered" when the retriever leg was producing zero savings. A
+        // documented-misleading field in the envelope guarantees agent
+        // misreads, so the back-compat alias was removed for good.
         chunks_ok_ratio: mainRetrieverCoverage,
         chunks_ok: mainRetrieverChunksOk,
         chunks_total: mainRetrieverChunksTotal,
