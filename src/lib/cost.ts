@@ -180,14 +180,14 @@ export function buildDisclosedDollarValue(
     return { value, source, disclosure: null };
   }
   if (source === 'unset') {
-    return { value, source, disclosure: '(no $/GB rate configured)' };
+    return { value, source, disclosure: '(no $/GB rate configured — set `analyzerCost` in your env config or pass `effective_ingest_per_gb`)' };
   }
   const siem = siemLabel ?? 'SIEM';
   const rate = listRatePerGb != null ? `$${listRatePerGb.toFixed(2)}/GB` : 'list price';
   return {
     value,
     source,
-    disclosure: `(at ${siem} list price ${rate} — your actual bill may differ depending on discounts, commits, or contract tier)`,
+    disclosure: `(at ${siem} list price ${rate} — your actual bill may differ depending on discounts, commits, or contract tier. To use your real rate, set \`analyzerCost\` in your env config or pass \`effective_ingest_per_gb\`.)`,
   };
 }
 
