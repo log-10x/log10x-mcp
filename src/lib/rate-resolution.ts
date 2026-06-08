@@ -43,7 +43,9 @@ export type RateSource = 'customer_supplied' | 'list_price' | 'unset';
  *  - customer_supplied → null (no caveat needed; caller owns the rate)
  *  - list_price        → "(at <SIEM> list price $X.XX/GB — your actual bill
  *                         may differ depending on discounts, commits, or
- *                         contract tier)"
+ *                         contract tier. To use your real rate, set
+ *                         analyzerCost in your env config or pass
+ *                         effective_ingest_per_gb.)"
  *  - unset             → "(no $/GB rate configured — pass
  *                         effective_ingest_per_gb, set envs.json
  *                         analyzerCost, or export LOG10X_ANALYZER_COST)"
@@ -189,7 +191,12 @@ export function resolveRate(
     return {
       rate_per_gb: listRate,
       source: 'list_price',
-      disclosure: `(at ${siemLabel} list price $${listRate.toFixed(2)}/GB — your actual bill may differ depending on discounts, commits, or contract tier)`,
+      // No SIEM exposes a negotiated $/GB via API (confirmed: usage bytes yes,
+      // rate no, for every vendor), so list price is the honest default. The
+      // disclosure both states that AND tells the reader how to supply their
+      // real rate — the override the agent should relay when a user asks why
+      // the dollars look off.
+      disclosure: `(at ${siemLabel} list price $${listRate.toFixed(2)}/GB — your actual bill may differ depending on discounts, commits, or contract tier. To use your real rate, set \`analyzerCost\` in your env config or pass \`effective_ingest_per_gb\`.)`,
       origin: 'destination_list',
     };
   }

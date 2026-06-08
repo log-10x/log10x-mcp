@@ -28,6 +28,7 @@ import { formatPatternLabelFromServices } from '../lib/pattern-label.js';
 import * as pql from '../lib/promql.js';
 import { LABELS } from '../lib/promql.js';
 import { bytesToCost, parsePrometheusValue } from '../lib/cost.js';
+import { resolveRate, destinationFromEnvAnalyzer } from '../lib/rate-resolution.js';
 import { resolveMetricsEnv, resolveMetricsEnvFiltered } from '../lib/resolve-env.js';
 import { parseTimeframe } from '../lib/format.js';
 import { fetchFirstSeenBatch, fmtAge } from '../lib/first-seen.js';
@@ -165,7 +166,14 @@ export async function executeWhatsNew(
   const firstSeenWithin = args.first_seen_within ?? '1d';
   const limit = args.limit ?? 10;
   const tf = parseTimeframe(timeRange);
-  const costPerGb = args.analyzerCost ?? 1.0;
+  // Resolve $/GB via the shared chain (caller arg → envs.json analyzerCost →
+  // LOG10X_ANALYZER_COST → destination list price). No fabricated $1.0 fallback;
+  // 0 only when neither a rate nor a destination is known.
+  const costPerGb = resolveRate(
+    { analyzerCost: args.analyzerCost },
+    env,
+    destinationFromEnvAnalyzer(env),
+  ).rate_per_gb ?? 0;
   const view = args.view ?? 'summary';
   const windowSeconds = parseFirstSeenWithin(firstSeenWithin);
 

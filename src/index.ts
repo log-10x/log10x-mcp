@@ -35,7 +35,6 @@ import {
 import { makeShapeCoercive } from './lib/input-coerce.js';
 
 import { loadEnvironments, resolveEnv, revalidateEnvironments, type EnvConfig, type Environments, EnvironmentValidationError } from './lib/environments.js';
-import { fetchAnalyzerCost } from './lib/api.js';
 import { eventLookupSchema, executeEventLookup } from './tools/event-lookup.js';
 import { savingsSchema, executeSavings } from './tools/savings.js';
 import { trendSchema, executeTrend } from './tools/trend.js';
@@ -215,8 +214,6 @@ function getEnvs(): Environments {
   return envs;
 }
 
-const costCache = new Map<string, { cost: number | null; fetchedAt: number }>();
-const COST_REFRESH_MS = 3_600_000; // 1 hour
 
 /**
  * Wrap a tool implementation in a try/catch that produces actionable error
@@ -624,26 +621,6 @@ function applyDemoBanner(text: string): string {
   }
   // Pure demo: lighter footer; the user opted in by not setting a key.
   return text + `\n\n_(Demo mode — account-scoped tools query the read-only Log10x demo env. Call \`log10x_login_status\` to use your own data.)_`;
-}
-
-// Returns the resolved customer $/GB, or `undefined` when no genuine customer
-// rate exists (so callers thread "rate unset" and the shared resolver falls to
-// destination list price rather than a fabricated default mislabeled
-// customer_supplied). An explicit caller override always wins verbatim.
-async function getAnalyzerCost(env: EnvConfig, override?: number): Promise<number | undefined> {
-  if (override !== undefined) return override;
-
-  const key = env.envId;
-  const cached = costCache.get(key);
-  const now = Date.now();
-
-  if (cached && (now - cached.fetchedAt) < COST_REFRESH_MS) {
-    return cached.cost ?? undefined;
-  }
-
-  const cost = await fetchAnalyzerCost(env);
-  costCache.set(key, { cost, fetchedAt: now });
-  return cost ?? undefined;
 }
 
 // ── Server ──
@@ -1094,8 +1071,7 @@ function applyToolRegistrations(
 registerLog10xTool('log10x_event_lookup', eventLookupSchema, (args) =>
   wrap('log10x_event_lookup', async () => {
     const env = resolveEnv(getEnvs(), args.environment);
-    const cost = await getAnalyzerCost(env, args.analyzerCost);
-    return executeEventLookup({ ...args, analyzerCost: cost }, env);
+    return executeEventLookup(args, env);
   })
 );
 
@@ -1130,8 +1106,7 @@ registerLog10xTool('log10x_product_qa', productQaSchema, (args) =>
 registerLog10xTool('log10x_savings', savingsSchema, (args) =>
   wrap('log10x_savings', async () => {
     const env = resolveEnv(getEnvs(), args.environment);
-    const cost = await getAnalyzerCost(env, args.analyzerCost);
-    return executeSavings({ ...args, analyzerCost: cost }, env);
+    return executeSavings(args, env);
   })
 );
 
@@ -1140,8 +1115,7 @@ registerLog10xTool('log10x_savings', savingsSchema, (args) =>
 registerLog10xTool('log10x_pattern_trend', trendSchema, (args) =>
   wrap('log10x_pattern_trend', async () => {
     const env = resolveEnv(getEnvs(), args.environment);
-    const cost = await getAnalyzerCost(env, args.analyzerCost);
-    return executeTrend({ ...args, analyzerCost: cost }, env);
+    return executeTrend(args, env);
   })
 );
 
@@ -1238,8 +1212,7 @@ registerLog10xTool('log10x_offload_archive', offloadArchiveSchema, (args) =>
 registerLog10xTool('log10x_top_patterns', topPatternsSchema, (args) =>
   wrap('log10x_top_patterns', async () => {
     const env = resolveEnv(getEnvs(), args.environment);
-    const cost = await getAnalyzerCost(env, args.analyzerCost);
-    return executeTopPatterns({ ...args, analyzerCost: cost }, env);
+    return executeTopPatterns(args, env);
   })
 );
 
@@ -1254,8 +1227,7 @@ registerLog10xTool('log10x_top_patterns', topPatternsSchema, (args) =>
 registerLog10xTool('log10x_pattern_diff', patternDiffSchema, (args) =>
   wrap('log10x_pattern_diff', async () => {
     const env = resolveEnv(getEnvs(), args.environment);
-    const cost = await getAnalyzerCost(env, args.analyzerCost);
-    return executePatternDiff({ ...args, analyzerCost: cost }, env);
+    return executePatternDiff(args, env);
   })
 );
 
@@ -1269,8 +1241,7 @@ registerLog10xTool('log10x_pattern_diff', patternDiffSchema, (args) =>
 registerLog10xTool('log10x_whats_changing', whatsChangingSchema, (args) =>
   wrap('log10x_whats_changing', async () => {
     const env = resolveEnv(getEnvs(), args.environment);
-    const cost = await getAnalyzerCost(env, args.analyzerCost);
-    return executeWhatsChanging({ ...args, analyzerCost: cost }, env);
+    return executeWhatsChanging(args, env);
   })
 );
 
@@ -1283,8 +1254,7 @@ registerLog10xTool('log10x_whats_changing', whatsChangingSchema, (args) =>
 registerLog10xTool('log10x_whats_new', whatsNewSchema, (args) =>
   wrap('log10x_whats_new', async () => {
     const env = resolveEnv(getEnvs(), args.environment);
-    const cost = await getAnalyzerCost(env, args.analyzerCost);
-    return executeWhatsNew({ ...args, analyzerCost: cost }, env);
+    return executeWhatsNew(args, env);
   })
 );
 
@@ -1293,8 +1263,7 @@ registerLog10xTool('log10x_whats_new', whatsNewSchema, (args) =>
 registerLog10xTool('log10x_services', servicesSchema, (args) =>
   wrap('log10x_services', async () => {
     const env = resolveEnv(getEnvs(), args.environment);
-    const cost = await getAnalyzerCost(env, args.analyzerCost);
-    return executeServices({ ...args, analyzerCost: cost }, env);
+    return executeServices(args, env);
   })
 );
 
@@ -1736,16 +1705,9 @@ registerLog10xTool('log10x_estimate_savings', estimateSavingsSchema, (args) =>
 // ── Tool: log10x_baseline (Reporter-age / coverage / anomaly readiness gates) ──
 
 registerLog10xTool('log10x_baseline', baselineSchema, (args) =>
-  wrap('log10x_baseline', async () => {
+  wrap('log10x_baseline', () => {
     const env = resolveEnv(getEnvs(), args.environment);
-    // Thread the account-configured customer rate (profile metadata.analyzer_cost,
-    // cached via getAnalyzerCost) into effectiveIngestPerGb — the SAME pre-resolution
-    // every other cost tool does (services / top_patterns / event_lookup / savings /
-    // trend / pattern_diff). Baseline was the lone dispatcher that skipped it, so the
-    // SAME env reported services $1.50 customer_supplied vs baseline $0.50 list_price.
-    // An explicit caller arg still wins (getAnalyzerCost returns the override verbatim).
-    const cost = await getAnalyzerCost(env, args.effectiveIngestPerGb);
-    return executeBaseline({ ...args, effectiveIngestPerGb: cost }, env);
+    return executeBaseline(args, env);
   })
 );
 

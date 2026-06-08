@@ -26,6 +26,7 @@ import type { EnvConfig } from '../lib/environments.js';
 import { queryInstant } from '../lib/api.js';
 import * as pql from '../lib/promql.js';
 import { bytesToCost, parsePrometheusValue, buildDisclosedDollarValue, type DisclosedDollarValue } from '../lib/cost.js';
+import { resolveRate, destinationFromEnvAnalyzer } from '../lib/rate-resolution.js';
 import { fmtDollar, fmtBytes, fmtPct, fmtDisclosedDollar, parseTimeframe, costPeriodLabel } from '../lib/format.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { type StructuredOutput } from '../lib/output-types.js';
@@ -225,14 +226,18 @@ async function executeSavingsInner(
   // Normalise '1d' legacy alias → '24h'.
   const timeRange = normalizeTimeRange(args.timeRange ?? '7d');
   const tf = parseTimeframe(timeRange);
-  // Resolve $/GB with rate_source attribution. No silent $1/GB fallback — if
-  // the caller supplies nothing and there is no profile rate to inherit, we
-  // emit rate_source='unset' and downstream dollar math returns null so the
-  // headline/markdown can refuse to print a dollar lie.
-  const overrideRate = args.effective_ingest_per_gb ?? args.analyzerCost;
-  const rateSource: RateSource =
-    overrideRate != null ? 'customer_supplied' : 'unset';
-  const costPerGb: number | null = overrideRate != null ? overrideRate : null;
+  // Resolve $/GB via the shared chain (caller arg → envs.json analyzerCost →
+  // LOG10X_ANALYZER_COST → destination list price). list_price is the honest,
+  // disclosed default; 'unset' (dollars null, percent-only) only when no rate
+  // AND no destination is known. No fabricated $1/GB, and no log10x account-API
+  // call to learn the rate — it resolves locally.
+  const savingsRate = resolveRate(
+    { effective_ingest_per_gb: args.effective_ingest_per_gb, analyzerCost: args.analyzerCost },
+    env,
+    destinationFromEnvAnalyzer(env),
+  );
+  const rateSource: RateSource = savingsRate.source;
+  const costPerGb: number | null = savingsRate.rate_per_gb;
   const storagePerGb = args.storageCost ?? DEFAULT_STORAGE_COST_PER_GB;
   const period = costPeriodLabel(tf.days);
 

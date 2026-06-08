@@ -201,60 +201,29 @@ export async function fetchActiveLabelValues(
   // Note: requires Log10x pattern metric. If not present (e.g., no Reporter),
   // this returns empty, which causes join-discovery to fall back naturally.
   const promql = `group by (${labelName}) (increase(all_events_summaryBytes_total{tenx_env=~"edge|cloud"}[${range}]) > 0)`;
-  const url = new URL('/api/v1/query', getBase());
-  url.searchParams.set('query', promql);
-  const res = await fetchWithRetry(
-    url.toString(),
-    { headers: { 'X-10X-Auth': authHeader(env) } },
-    'fetchActiveLabelValues'
-  );
-  if (!res.ok) return [];
-  const data = (await res.json()) as {
-    status: string;
-    data: { resultType: string; result: Array<{ metric: Record<string, string> }> };
-  };
+  // Route through the env's metrics backend (the customer's own Prometheus for
+  // self-hosted envs), NOT getBase()/log10x. Previously this hardwired
+  // prometheus.log10x.com, so cross-pillar label discovery phoned the log10x
+  // API home even when the customer's metrics lived in their own store.
+  let resp: PrometheusResponse;
+  try {
+    resp = await env.metricsBackend.queryInstant(promql);
+  } catch {
+    return [];
+  }
   const out = new Set<string>();
-  for (const r of data.data?.result || []) {
+  for (const r of resp.data?.result || []) {
     const v = r.metric?.[labelName];
     if (v) out.add(v);
   }
   return Array.from(out);
 }
 
-/**
- * Fetches the user's configured analyzer cost ($/GB) from the Log10x REST API.
- * Stored in Auth0 user_metadata.analyzer_cost, returned by GET /api/v1/user.
- *
- * Returns `null` when there is NO genuine customer rate (no metadata field,
- * non-positive value, non-2xx response, or transport failure). Callers thread
- * that null through as "rate unset" so the shared resolver falls back to the
- * destination list price with its honest disclaimer — instead of fabricating a
- * default $/GB and mislabeling it `customer_supplied`. Returning a non-null
- * default here is what caused services/top_patterns/savings/baseline to quote a
- * fictitious customer rate on tenants that never configured one.
- */
-export async function fetchAnalyzerCost(env: EnvConfig): Promise<number | null> {
-  try {
-    const url = new URL('/api/v1/user', getBase());
-    const res = await fetchWithRetry(
-      url.toString(),
-      { headers: { 'X-10X-Auth': authHeader(env) } },
-      'fetchAnalyzerCost'
-    );
-
-    if (!res.ok) return null;
-
-    const data = (await res.json()) as { user?: { metadata?: { analyzer_cost?: number | string } } };
-    const raw = data.user?.metadata?.analyzer_cost;
-
-    if (raw === undefined || raw === null) return null;
-
-    const cost = typeof raw === 'number' ? raw : parseFloat(raw);
-    return Number.isFinite(cost) && cost > 0 ? cost : null;
-  } catch {
-    return null;
-  }
-}
+// fetchAnalyzerCost (GET /api/v1/user → metadata.analyzer_cost) was removed:
+// the cost tools must not phone the log10x account API to learn the customer's
+// $/GB. The rate now resolves locally and uniformly via resolveRate (caller arg
+// → envs.json analyzerCost → LOG10X_ANALYZER_COST → destination list price),
+// with list price as the honest, disclosed default.
 
 // ── User profile / env autodiscovery ──
 

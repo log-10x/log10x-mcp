@@ -58,6 +58,7 @@ import { loadEnvironments } from '../lib/environments.js';
 import { LABELS } from '../lib/promql.js';
 import type { PrometheusResponse } from '../lib/api.js';
 import { queryInstant } from '../lib/api.js';
+import { resolveRate } from '../lib/rate-resolution.js';
 import { parsePrometheusValue } from '../lib/cost.js';
 import type { EnvConfig } from '../lib/environments.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
@@ -793,6 +794,17 @@ export async function executeConfigureEngine(
   const totalObservedBytes = perPattern.reduce((s, p) => s + p.bytes, 0);
   const currentMonthlyBytes = totalObservedBytes * scaleToMonth;
   const model = getDestinationCostModel(destination, { esPruned: args.es_pruned });
+  // budget_usd is a DOLLAR promise → convert to bytes at the customer's real
+  // $/GB, not the destination list price. Resolve the ingest rate locally via
+  // the shared chain (caller arg → envs.json analyzerCost → LOG10X_ANALYZER_COST
+  // → destination list); NO log10x account-API call. Storage stays at list (no
+  // per-customer storage rate), matching baseline. When no customer rate is
+  // configured this is identical to the prior model.ingest_per_gb behavior.
+  const resolvedIngest = resolveRate({}, env, destination);
+  const ingestPerGb =
+    resolvedIngest.source === 'customer_supplied'
+      ? (resolvedIngest.rate_per_gb as number)
+      : model.ingest_per_gb;
 
   // ── Refresh-mode tolerance check ──
   // If the observed volume hasn't drifted enough vs the prior baseline to
@@ -837,14 +849,14 @@ export async function executeConfigureEngine(
   }
   const currentMonthlyUsd =
     (currentMonthlyBytes / GB) *
-    (model.ingest_per_gb + model.storage_per_gb_month);
+    (ingestPerGb + model.storage_per_gb_month);
 
   // Resolve target bytes.
   let targetPercent: number;
   let targetMonthlyBytes: number;
   if (args.budget_usd !== undefined) {
     const effectivePerGb =
-      model.ingest_per_gb + model.storage_per_gb_month;
+      ingestPerGb + model.storage_per_gb_month;
     if (effectivePerGb <= 0) {
       // ClickHouse self-hosted has ingest_per_gb = 0 and tiny storage; bail.
       return notConfiguredEnvelope(
@@ -1370,7 +1382,7 @@ export async function executeConfigureEngine(
       target_monthly_bytes: Math.round(targetMonthlyBytes),
       target_monthly_usd: roundCents(
         (targetMonthlyBytes / GB) *
-          (model.ingest_per_gb + model.storage_per_gb_month)
+          (ingestPerGb + model.storage_per_gb_month)
       ),
       floor_count: floorCount,
       actions_used: actionsUsed,
@@ -1458,6 +1470,7 @@ export async function executeConfigureEngine(
       targetMonthlyBytes,
       currentMonthlyUsd,
       model,
+      ingestPerGb,
       csvDiff,
     });
   }
@@ -1522,9 +1535,10 @@ function buildSummaryPayload(params: {
   targetMonthlyBytes: number;
   currentMonthlyUsd: number;
   model: ReturnType<typeof getDestinationCostModel>;
+  ingestPerGb: number;
   csvDiff: string;
 }): Record<string, unknown> {
-  const { data, rows, prCommand, target, args, currentMonthlyBytes, targetMonthlyBytes, currentMonthlyUsd, model, csvDiff } = params;
+  const { data, rows, prCommand, target, args, currentMonthlyBytes, targetMonthlyBytes, currentMonthlyUsd, model, ingestPerGb, csvDiff } = params;
 
   // Action mix: count of patterns per action.
   const actionMix: Partial<Record<Action, number>> = {};
@@ -1535,7 +1549,7 @@ function buildSummaryPayload(params: {
   // Totals. bytes_saved = current - target (the budget the solver shed).
   const bytesSavedMonthly = Math.max(0, currentMonthlyBytes - targetMonthlyBytes);
   const targetMonthlyUsd =
-    (targetMonthlyBytes / GB) * (model.ingest_per_gb + model.storage_per_gb_month);
+    (targetMonthlyBytes / GB) * (ingestPerGb + model.storage_per_gb_month);
   const dollarsSavedMonthly = Math.max(0, currentMonthlyUsd - targetMonthlyUsd);
 
   // Top-5 cost contributors (DESC by current_bytes_30d). Descriptor

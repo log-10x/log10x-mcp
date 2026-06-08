@@ -646,7 +646,11 @@ async function formatResults(
     }
   }
 
-  // AI analysis
+  // AI analysis — OPT-IN only. queryAi posts the sampled query results + a
+  // prompt to the log10x API (always log10x, never the customer's own backend),
+  // so it stays OFF by default to keep the cost path from phoning home. Enable
+  // with LOG10X_AI_SUMMARY=true (or wire a customer-owned AI provider later).
+  if (process.env.LOG10X_AI_SUMMARY === 'true') {
   try {
     const queryResultJson = JSON.stringify(results.slice(0, 5));
     // De-verdict (TOOL-AUDIT Phase 2): ask the classifier for the FACTUAL
@@ -669,6 +673,7 @@ async function formatResults(
     }
   } catch {
     // AI analysis is optional — skip silently
+  }
   }
 
   lines.push('');
