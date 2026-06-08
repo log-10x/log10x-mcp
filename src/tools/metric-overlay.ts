@@ -466,6 +466,7 @@ export async function executeMetricOverlay(
     },
     payload: data,
     human_summary,
+    telemetry: { startedAt: Date.now() - totalLatencyMs, queryCount, throttledHit },
   });
 }
 
@@ -609,6 +610,7 @@ function overlayErrorEnvelope(args: {
     payload: data,
     human_summary: `Call failed: ${args.err.hint}`,
     error: args.err,
+    telemetry: { startedAt: Date.now() - args.totalLatencyMs, queryCount: args.queryCount, throttledHit: args.throttledHit },
   });
 }
 
@@ -672,6 +674,7 @@ function overlayDispersionRefusal(args: {
     scope: { window: args.window, window_basis: 'explicit', candidates_count: 1, candidates_usable: 0 },
     payload: data,
     human_summary: humanSummary,
+    telemetry: { startedAt: Date.now() - args.totalLatencyMs, queryCount: args.queryCount, throttledHit: args.throttledHit },
   });
 }
 

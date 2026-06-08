@@ -373,6 +373,7 @@ export async function executeRankByShapeSimilarity(
       scope: { window, window_basis: 'explicit', candidates_count: args.candidates.length, candidates_usable: 0 },
       payload: data,
       human_summary: data.human_summary,
+      telemetry: { startedAt: Date.now() - totalLatencyMs, queryCount, throttledHit },
     });
   }
 
@@ -574,6 +575,7 @@ export async function executeRankByShapeSimilarity(
     },
     payload: data,
     human_summary,
+    telemetry: { startedAt: Date.now() - totalLatencyMs, queryCount, throttledHit },
   });
 }
 
@@ -682,6 +684,7 @@ function rankErrorEnvelope(args: {
     payload: data,
     human_summary: `Call failed: ${args.err.hint}`,
     error: args.err,
+    telemetry: { startedAt: Date.now() - args.totalLatencyMs, queryCount: args.queryCount, throttledHit: args.throttledHit },
   });
 }
 
