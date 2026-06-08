@@ -300,10 +300,10 @@ async function wrap(
     // not a bare text blob; the agent branches on data.status and the MCP
     // SDK requires structuredContent for tools that declare an outputSchema
     // (a text-only return here is rejected as "no structured content").
-    // rq-1: retriever_query / retriever_series are forensic S3-archive paths,
-    // not metrics-backend queries. This wrap gate pre-empts their own correct
-    // kind:'retriever' gate, so branch the remediation here — a metrics-backend
-    // nag points the agent at the wrong subsystem entirely.
+    // rq-1: retriever_query / retriever_series read the offload bucket (the
+    // held-back cohort), not the metrics backend. This wrap gate pre-empts their
+    // own correct kind:'retriever' gate, so branch the remediation here: a
+    // metrics-backend nag points the agent at the wrong subsystem entirely.
     const isRetrieverTool =
       toolName === 'log10x_retriever_query' || toolName === 'log10x_retriever_series';
     const ncKind = isRetrieverTool ? 'retriever' : 'metrics_backend';
@@ -679,10 +679,10 @@ CUSTOMER TIER LADDER (determines which tools are available)
    filebeat / logstash / otel-collector / vector). Filters, samples, and optionally
    losslessly compacts events in-flight. Replaces the legacy Regulator + Optimizer apps.
    Same tools as Reporter, plus event modification on the forwarder's path.
-4. Retriever (deployable with or without Reporter/Receiver) — S3 archive with Bloom-filter
-   index. Product still being shaped.
-   Adds: log10x_retriever_query (forensic retrieval), log10x_backfill_metric (new metric
-         backfilled from archive + forward-emission handoff to the Reporter).
+4. Retriever (deployable with or without Reporter/Receiver). Reads the customer-owned
+   overflow S3 bucket the Receiver's offload action writes to, indexed by Bloom filter.
+   Adds: log10x_retriever_query (read the offloaded cohort for a pattern, the events the
+         Receiver held back from the SIEM). log10x_backfill_metric is deprecated and dark.
 
 TOOL ROUTING BY USER INTENT
 
@@ -725,17 +725,16 @@ Cost investigation:
    since last week" framing.)
 - "pipeline savings / ROI"                                       → log10x_savings
 
-Forensic / audit / archive — ANY request for RAW EVENTS from the S3 archive:
-- "pull the actual log events", "get me the raw events", "retrieve events from S3",
-  "fetch events from the archive", "show me what was in the logs during <time window>",
-  "I need the events themselves, not aggregates"                 → log10x_retriever_query
-- "get me all <pattern> events from 90 days ago"                 → log10x_retriever_query
-- "get all events for customer X filtered by Y, 60d window"      → log10x_retriever_query
-- "backfill a new metric with 90d of history from the archive"   → log10x_backfill_metric
-  (Critical: when a user asks for raw events OR mentions S3 / archive / cold storage
-   explicitly, route to retriever_query even if the framing also mentions an incident.
-   investigate returns aggregate pattern analysis; retriever_query returns actual log
-   lines. "Post-mortem needs the actual log events" = retriever_query, not investigate.)
+Offloaded cohort: RAW EVENTS the Receiver held back from the SIEM (the overflow bucket):
+- "show me what's being offloaded for <pattern>", "sample the held-back events",
+  "pull the raw events the Receiver kept out of Datadog/Splunk",
+  "I need the offloaded events themselves, not aggregates"        → log10x_retriever_query
+- "sample the offloaded <pattern> events"                         → log10x_retriever_query
+- "verify the offload decision for customer X filtered by Y"      → log10x_retriever_query
+  (Critical: retriever_query reads the offload bucket, the cohort the SIEM never received.
+   It is not a mirror of indexed history. For events the SIEM still holds, the SIEM is the
+   source. investigate returns aggregate pattern analysis; retriever_query returns the
+   actual offloaded log lines. Re-ingest from the bucket is customer-driven, not an MCP action.)
 
 Root-cause across services (the investigate wedge):
 - user pastes an error, asks "what's causing the upstream"       → log10x_investigate
@@ -780,11 +779,8 @@ NATURAL TOOL CHAINS
     At reporter/dev tier log10x_cost_options returns 2 modes (observe_only + install_receiver);
     at receiver/retriever tier it returns 6 modes (drop/sample/compact/tier_down/offload/observe_only).
 
-  Forensic retrieval across retention boundaries:
+  Inspect the offloaded cohort for a pattern:
     log10x_event_lookup  →  log10x_retriever_query
-
-  New metric from historical archive:
-    log10x_top_patterns or log10x_investigate  →  log10x_backfill_metric
 
 RESPONSE STYLE
 
@@ -849,7 +845,7 @@ Tool responses carry rich label context per series (message_pattern, severity_le
 
 3. **Two tiers when the user asks for verification or audit.** A "**Facts:**" / "**Interpretation:**" split is appropriate when the user is auditing or debugging your synthesis. For a normal "show me X" request, write the decoded answer inline — facts and interpretation woven together — and skip the tiering. Default to terse, single-pass prose; reach for the two-tier layout only when warranted.
 
-4. **Refusal beats guess.** If you don't recognize a \`message_pattern\` token, severity, or label value with high confidence, say "symbol unknown" or "context unclear" and suggest pulling raw events via \`log10x_retriever_query\` (when Retriever is deployed) or running \`log10x_event_lookup\` for a known sample. Do not invent a plausible-sounding identity.
+4. **Refusal beats guess.** If you don't recognize a \`message_pattern\` token, severity, or label value with high confidence, say "symbol unknown" or "context unclear" and run \`log10x_event_lookup\` for a known sample. When the pattern is under an active offload action, \`log10x_retriever_query\` can sample the held-back events. Do not invent a plausible-sounding identity.
 
 5. **No reference to patterns/services/severities outside the response.** The label set in the tool result is the universe. Phrases like "you probably also have…" or "I'd expect to see…" are forbidden — they invite the user to look for problems that aren't in the data.
 
@@ -1281,7 +1277,7 @@ registerLog10xTool('log10x_services', servicesSchema, (args) =>
 // Item 6 (cost-cutting close-list v2): the contents view of the
 // customer-owned offload bucket. Queries dropped-by-pattern from the
 // TSDB, joins to the cap-CSV to filter to action=offload only, and
-// routes the agent to log10x_retriever_query for rehydration. See
+// routes the agent to log10x_retriever_query to inspect the offloaded cohort. See
 // the long docstring on src/tools/overflow-contents.ts for the
 // design rationale + cap-CSV degraded-mode semantics.
 
@@ -1835,7 +1831,7 @@ if (process.env.LOG10X_DEV_MODE === 'true') {
 const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_start', intent: 'CALL FIRST on any cost / orient / "where do I start" question — returns tier + action menu + must_ask_user question; agent must surface verbatim and wait for user pick before any other tool' },
   { name: 'log10x_event_lookup', intent: 'What is this single log line — resolve to stable identity + cost + AI classification' },
-  { name: 'log10x_pattern_examples', intent: 'Recent live events for a pattern from the log analyzer with template-parsed slot values — bounded to 24h, for older use retriever_query' },
+  { name: 'log10x_pattern_examples', intent: 'Recent live events for a pattern from the log analyzer with template-parsed slot values, bounded to 24h. When the pattern is offloaded, retriever_query samples the held-back cohort.' },
   { name: 'log10x_savings', intent: 'Pipeline ROI — how much receiver / retriever are saving in dollars' },
   { name: 'log10x_pattern_trend', intent: 'Time series for a pattern — volume + cost history, spike detection, sparkline' },
   { name: 'log10x_dependency_check', intent: 'Scan SIEM + dashboards + alerts for refs to a pattern before muting / deleting it' },
@@ -1845,10 +1841,10 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_whats_new', intent: 'Patterns whose first_seen falls inside a recency window. Separate from delta-vs-baseline because new patterns have no baseline.' },
   { name: 'log10x_investigate', intent: 'Single-call root-cause — causal chain for acute spikes or cohort for drift' },
   { name: 'log10x_resolve_batch', intent: 'Pasted-batch triage — per-pattern variable concentration + next actions' },
-  { name: 'log10x_retriever_query', intent: 'Direct archive retrieval by pattern identity (tenx_user_pattern) with JS filter expressions' },
-  { name: 'log10x_retriever_series', intent: 'Fidelity-aware time series from the S3 archive — auto-selects exact aggregation vs sampled fan-out' },
+  { name: 'log10x_retriever_query', intent: 'Read the offloaded cohort for a pattern (tenx_user_pattern) from the customer-owned overflow bucket with JS filter expressions: the events the Receiver held back from the SIEM' },
+  { name: 'log10x_retriever_series', intent: 'Time series over the offloaded cohort in the overflow bucket: auto-selects exact aggregation vs sampled parallel sub-window queries' },
   { name: 'log10x_retriever_probe', intent: 'End-to-end retriever chain probe — fires a synthetic query and asserts every stage (offload bucket, indexer pipeline, SQS, pod ready, CW scan/stream, S3 jsonl, MCP events). Returns green/broken/unknown with per-stage asserts and remedies.' },
-  { name: 'log10x_backfill_metric', intent: 'Create a new Datadog / Prometheus metric backfilled from Retriever archive' },
+  { name: 'log10x_backfill_metric', intent: 'Deprecated, kept dark. The live isDropped metric surface answers overflow-volume questions as a TSDB query.' },
   { name: 'log10x_doctor', intent: 'Startup health check — env config, gateway, tier, freshness, Retriever, paste endpoint, cross-pillar enrichment floor' },
   { name: 'log10x_login_status', intent: 'Report credential / env state — identity, env list with permissions, demo-mode upgrade guide if applicable' },
   { name: 'log10x_signin_start', intent: 'Step 1 of Auth0 Device Flow signup/signin: opens browser, returns the user_code + device_code so the model can surface them and chain to log10x_signin_complete' },
@@ -1874,13 +1870,13 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_poc_from_local', intent: 'Run the POC from local kubectl logs (no SIEM credentials needed); industry-pricing matrix instead of bill prediction' },
   { name: 'log10x_discover_env', intent: 'Read-only probe of k8s + AWS — returns a snapshot_id the advise_* tools consume' },
   { name: 'log10x_advise_install', intent: 'Install wizard for Reporter / Receiver — walks the user through app / forwarder / backends / airgapped / license, then emits a concrete helm plan' },
-  { name: 'log10x_advise_retriever', intent: 'Retriever install/verify/teardown plan — standalone S3 + SQS archive + query' },
+  { name: 'log10x_advise_retriever', intent: 'Retriever install/verify/teardown plan: standalone reader over the customer-owned offload S3 bucket (S3 + SQS indexer + query)' },
   { name: 'log10x_configure_engine', intent: 'Unified per-pattern action-plan PR author — resolves a budget to a per-pattern plan (pass | sample | compact | drop | tier_down) under a per-destination cost model and emits a gitops PR.' },
   { name: 'log10x_estimate_savings', intent: 'Two-mode savings estimator — forecast mode projects bytes_out + $/mo for a proposed plan under the per-destination cost model; verify mode counts realized savings from the engine `isDropped` label with cap-hit / drift / new-patterns / leakage attribution.' },
   { name: 'log10x_baseline', intent: 'Pre-flight readiness gate for cost-reduction tools — verifies Reporter age (default 7d), pattern-coverage stability, and absence of acute anomalies; returns structured `not_ready` with the specific gate(s) that failed.' },
   { name: 'log10x_commitment_report', intent: 'CFO-facing weekly aggregate against a commitment record — Bayesian Beta(2,2) confidence prior on realized savings, markdown report suitable for sharing.' },
   { name: 'log10x_pattern_mitigate', intent: 'Return the env-gated mitigation options + exact configs for a pattern (drop @ analyzer, drop @ forwarder, mute @ 10x, compact @ 10x) in user terms with env-capability gating' },
-  { name: 'log10x_overflow_contents', intent: 'Contents view of the customer-owned offload S3 bucket — per-pattern bytes, event count, time-first/last-seen, growth-rate; filtered to action=offload via the cap-CSV. Routes the agent to retriever_query for rehydration.' },
+  { name: 'log10x_overflow_contents', intent: 'Contents view of the customer-owned offload S3 bucket: per-pattern bytes, event count, time-first/last-seen, growth-rate; filtered to action=offload via the cap-CSV. Routes the agent to retriever_query to inspect the offloaded cohort.' },
   { name: 'log10x_setup_recurring', intent: 'Progressive wizard to configure a recurring cost-reduction agent — target services, savings %, schedule, scheduler (k8s/GHA/crontab), gitops repo — emits policy.yaml + scheduler manifest' },
   { name: 'log10x_offload_add', intent: 'Append a new offload destination (s3 / gcs / azure_blob / file) to an env-config document\'s offload_destinations[]. Multi-target offload is allowed; nickname must be unique within the list.' },
   { name: 'log10x_offload_archive', intent: 'Flip an offload destination\'s status to `archived` and stamp archived_at. Kept in the list as a historical reference. Refuses when the target is the only active destination — the Receiver requires at least one.' },

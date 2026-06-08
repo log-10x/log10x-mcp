@@ -1757,7 +1757,7 @@ function renderMarkdown(env: CommitmentReportEnvelope): string {
   if (ba.offload > 0) {
     lines.push('');
     lines.push(
-      '> _Offloaded volume is queryable via `log10x_retriever_query` for forensic access — pass the period start/end to scan the customer-owned archive._'
+      '> _The offloaded volume is inspectable via `log10x_retriever_query`. Pass the period start/end to read the offloaded cohort from the customer-owned overflow bucket._'
     );
   }
   lines.push('');

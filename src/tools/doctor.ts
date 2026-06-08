@@ -294,8 +294,8 @@ async function addInfrastructureChecks(checks: DoctorCheck[]): Promise<void> {
       name: 'retriever_endpoint',
       status: 'warn',
       message:
-        'Retriever not reachable from this MCP install. log10x_retriever_query and log10x_backfill_metric cannot retrieve raw events from the S3 archive in this session. ' +
-        'For events inside SIEM hot retention (typically <7d), the fastest workaround is direct SIEM query — do not block on retriever setup.\n' +
+        'Retriever not reachable from this MCP install. log10x_retriever_query and log10x_backfill_metric cannot read the offloaded cohort from the overflow bucket in this session. ' +
+        'The overflow bucket holds the cohort the engine routed out of the stack, so these events are not in the SIEM at any tier. For events the SIEM still holds, query the SIEM directly; do not block on retriever setup.\n' +
         formatRetrieverTrace(retrieverRes.trace),
       fix:
         'Options: (a) set __SAVE_LOG10X_RETRIEVER_URL__ + __SAVE_LOG10X_RETRIEVER_BUCKET__ explicitly; (b) expose AWS creds (AWS_REGION + IAM with s3:ListAllMyBuckets) so auto-detect can find a log10x-retriever-* bucket; (c) deploy the Retriever — https://doc.log10x.com/apps/cloud/retriever/',
@@ -972,15 +972,15 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
       const matchedCount = probeResult.execution.eventsMatched ?? 0;
       if (matchedCount > 0) {
         checks.push({
-          name: 'retriever_forensic_health',
+          name: 'retriever_overflow_health',
           status: 'pass',
           message:
-            `Retriever forensic retrieval is operational. Probe query returned ${matchedCount} event(s) in the last 1h. ` +
+            `Retriever overflow-bucket read path is operational. Probe query returned ${matchedCount} event(s) in the last 1h. ` +
             `Wall time: ${probeResult.execution.wallTimeMs}ms, worker files: ${probeResult.execution.workerFiles}.`,
         });
       } else {
         checks.push({
-          name: 'retriever_forensic_health',
+          name: 'retriever_overflow_health',
           status: 'warn',
           message:
             `Retriever endpoint responded but returned 0 events in the last 1h (wall time: ${probeResult.execution.wallTimeMs}ms). ` +
@@ -994,7 +994,7 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
     } catch (e) {
       const errMsg = (e as Error).message || String(e);
       checks.push({
-        name: 'retriever_forensic_health',
+        name: 'retriever_overflow_health',
         status: 'fail',
         message:
           `Retriever probe query failed: ${errMsg.slice(0, 300)}`,
@@ -1051,18 +1051,18 @@ async function addScaleAndCapabilityCheck(
     // Retriever capability enumeration — what this specific install unlocks.
     lines.push('');
     if (await isRetrieverConfigured()) {
-      lines.push('Retriever deployed — this MCP can answer:');
-      lines.push('  - Historical events beyond SIEM retention (compliance, audit, long-window post-mortems)');
-      lines.push('  - Events dropped by the forwarder upstream of the SIEM (visible in log10x metrics but not the SIEM)');
-      lines.push('  - Metrics backfilled from archive that were never collected live');
+      lines.push('Retriever deployed. This MCP can answer:');
+      lines.push('  - The offloaded cohort for a pattern: events the Receiver held back from the SIEM and routed to the overflow bucket (visible in 10x metrics but not the SIEM)');
+      lines.push('  - Verify an offload decision: sample what is being routed to the overflow bucket for a pattern');
+      lines.push('  - A new metric built from the offloaded events that the SIEM never indexed');
       lines.push('  - Sample-reversal verification when SIEM returns sampled results at high volume');
     } else {
-      lines.push('Retriever NOT deployed — these question types are out of reach:');
-      lines.push('  - Historical events beyond SIEM retention');
-      lines.push('  - Dropped-event recovery (forwarder-dropped, invisible to SIEM)');
-      lines.push('  - Metric backfill from archive');
+      lines.push('Retriever NOT deployed. These question types are out of reach:');
+      lines.push('  - Inspecting the offloaded cohort (events the Receiver routed to the overflow bucket, invisible to the SIEM)');
+      lines.push('  - Verifying an offload decision against the held-back events');
+      lines.push('  - A new metric built from the offloaded events');
       lines.push('  - Sample-reversal verification');
-      lines.push('For questions in these shapes, route to SIEM MCP (hot retention only) or recommend deploying the retriever.');
+      lines.push('For events the SIEM still holds, route to the SIEM MCP (hot retention only); for the offloaded cohort, recommend deploying the retriever.');
     }
 
     checks.push({
@@ -1368,7 +1368,7 @@ export function renderDoctorReport(report: DoctorReport): string {
   lines.push(agentOnly(
     `If a check failed or warned, suggest the relevant advisor: ` +
     `Reporter / Receiver install (forwarder, backends, license) → log10x_advise_install. ` +
-    `Retriever (S3 archive + bloom index) → log10x_advise_retriever. ` +
+    `Retriever (reader over the customer-owned offload bucket, bloom-indexed) → log10x_advise_retriever. ` +
     `Per-pattern action plan (compact / sample / drop / tier_down) → log10x_configure_engine. ` +
     `Inspect current env config → log10x_discover_env.`
   ));

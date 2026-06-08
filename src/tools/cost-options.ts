@@ -87,7 +87,7 @@ export interface CostOptionItem {
   applicable: boolean;
   /** When applicable=false, explains what's missing. */
   gated_reason?: string;
-  /** What events survive (land in stack / archive / nowhere). */
+  /** What events survive (land in stack / overflow bucket / nowhere). */
   what_survives: string;
   /** Tool + args to call when user picks this mode. */
   routes_to: { tool: string; args: Record<string, unknown> };
@@ -373,7 +373,7 @@ function buildModes(
       id: 'offload',
       label: 'Offload: events route to your S3 bucket instead of the stack.',
       description:
-        'Engine diverts engine-marked events to a customer-owned S3 bucket. Events stay recoverable on demand via log10x_retriever_query.',
+        'Engine diverts engine-marked events to a customer-owned S3 bucket. The offloaded events stay readable via log10x_retriever_query for inspection and to verify the decision.',
       who_enforces: 'engine',
       applicable: caps.offload_ready,
       gated_reason: caps.offload_ready
@@ -382,7 +382,7 @@ function buildModes(
           ? 'Requires the overflow bucket (Retriever) set up. Install via log10x_advise_retriever.'
           : 'Requires Receiver tier in-path so the engine can route events to S3. Install via log10x_advise_install.',
       what_survives:
-        'Events route to your S3 bucket instead of the stack. Recoverable via log10x_retriever_query on demand.',
+        'Events route to the S3 bucket instead of the stack. Readable via log10x_retriever_query for inspection.',
       routes_to: { tool: 'log10x_estimate_savings', args: sharedArgs('offload') },
     },
     {

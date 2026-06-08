@@ -11,7 +11,8 @@
  * memory/project_pattern_examples_design.md):
  *   - Inputs: Symbol Message (pattern name) OR pasted log line.
  *   - Bounded to 24h window, log analyzer retention.
- *   - For older / archive use log10x_retriever_query.
+ *   - For the offloaded cohort of a pattern (events the Receiver routed to
+ *     the overflow bucket) use log10x_retriever_query.
  *   - Mechanism: SIEM phrase-search probe → tenx → group by templateHash
  *     → content-token Jaccard ≥ 0.85 to discriminate → top 3 buckets by
  *     event count.
@@ -764,7 +765,7 @@ async function executePatternExamplesInner(
       if (probeNotes.length > 5) lines.push(`- ... (${probeNotes.length - 5} more notes truncated)`);
     }
     lines.push('');
-    lines.push('Try a longer `timeRange` (max 24h), or use `log10x_retriever_query` for events older than the analyzer\'s retention.');
+    lines.push('Try a longer `timeRange` (max 24h). If this pattern is offloaded, use `log10x_retriever_query` to inspect its events in the overflow bucket. Only offloaded events land there, not everything the analyzer aged out.');
     return graceful(`Pattern Examples — no events in ${args.timeRange} window`, lines);
   }
 

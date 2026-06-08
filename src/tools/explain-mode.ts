@@ -60,7 +60,7 @@ export const explainModeSchema = {
       '`sample` = engine passes 1-in-N events through to the stack. ' +
       '`compact` = engine compresses events 5-10x losslessly; all events still reach the stack. ' +
       '`tier_down` = engine stamps tenx_action marker; stack routes to a cheaper storage tier (Datadog Flex / CloudWatch IA). ' +
-      '`offload` = engine diverts matched events to a customer-owned S3 bucket; recoverable via log10x_retriever_query. ' +
+      '`offload` = engine diverts matched events to a customer-owned S3 bucket; readable via log10x_retriever_query. ' +
       '`observe_only` = engine observes and fingerprints but does not act; use to baseline volume before committing.'
     ),
   destination: z
@@ -194,10 +194,10 @@ const MODE_METADATA: Record<ExplainMode, ModeMetadata> = {
   },
   offload: {
     what_it_does:
-      'Events route to your S3 bucket; recoverable via log10x_retriever_query. ' +
-      '10x Receiver diverts matched events to a customer-owned S3 bucket instead of the analyzer. ' +
-      'Events stay recoverable on demand (incident replay, compliance audit). ' +
-      'Nothing is permanently lost.',
+      'Events route to a customer-owned S3 bucket instead of the analyzer; the offloaded cohort is readable via log10x_retriever_query. ' +
+      '10x Receiver diverts matched events to a customer-owned overflow bucket. ' +
+      'The held-back events stay inspectable: verify the offload decision, sample what was routed out. ' +
+      'Nothing is permanently lost. Re-ingest from the bucket is customer-driven.',
     what_you_need:
       'The 10x Receiver sidecar in-path AND the 10x Retriever set up against your S3 bucket. ' +
       'GitOps repo configured for the action-plan PR.',

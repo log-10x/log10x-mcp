@@ -1,11 +1,10 @@
 /**
- * log10x_retriever_query — direct retrieval from the Log10x Retriever archive.
+ * log10x_retriever_query reads the offloaded cohort from the customer-owned S3 overflow bucket.
  *
- * Forensic-retrieval entry point. Call when the user needs specific historical
- * events matching a search expression over a window that is outside the SIEM's
- * retention, or filtered on a variable value that is not a faceted dimension
- * in their SIEM, or that the SIEM never received because the edge optimizer
- * dropped it.
+ * Call when an agent needs the events the Receiver held back from the SIEM for a
+ * pattern (the offload action) and routed to S3. Surfaces the down-tiered or
+ * dropped cohort the SIEM never received, scoped by a Bloom-filter search
+ * expression or a Reporter-named pattern. Not a mirror of what the SIEM ingested.
  *
  * Engine contract: POST returns a queryId; results land in S3 as JSONL files
  * under {bucket}/tenx/{target}/qr/{queryId}/. The client polls the marker
@@ -60,7 +59,7 @@ export const retrieverQuerySchema = {
     .string()
     .optional()
     .describe(
-      'Reporter-named pattern (Symbol Message) to scope the scan to. Auto-translated to `tenx_user_pattern == "<name>"` Bloom-filter expression. Use this when the agent has a pattern name from event_lookup / top_patterns / cost_drivers and wants archive events for it without authoring the Bloom expression by hand. Mutually exclusive with `search`; if both are provided, `search` wins and `pattern` is ignored. Example: `pattern: "Payment_Gateway_Timeout"`.'
+      'Reporter-named pattern (Symbol Message) to scope the scan to. Auto-translated to `tenx_user_pattern == "<name>"` Bloom-filter expression. Use this when the agent has a pattern name from event_lookup / top_patterns / cost_drivers and wants the offloaded events for it without authoring the Bloom expression by hand. Mutually exclusive with `search`; if both are provided, `search` wins and `pattern` is ignored. Example: `pattern: "Payment_Gateway_Timeout"`.'
     ),
   pattern_hash: z
     .string()
@@ -423,7 +422,7 @@ export async function executeRetrieverQuery(
   if (d.events_matched > 0) {
     if (d.pattern) {
       actions.push(
-        { tool: 'log10x_retriever_series', args: { pattern: d.pattern, from: d.from, to: d.to, bucket_size: '1h' }, reason: 'time-bucketed series across the same window (fidelity-aware: exact vs sampled)' }
+        { tool: 'log10x_retriever_series', args: { pattern: d.pattern, from: d.from, to: d.to, bucket_size: '1h' }, reason: 'time-bucketed series across the same window (exact vs sampled)' }
       );
     } else if (args.pattern_hash) {
       actions.push(
@@ -773,7 +772,7 @@ async function executeRetrieverQueryInner(
     nextActions.push({
       tool: 'log10x_retriever_series',
       args: { pattern: args.pattern, from: args.from, to: args.to, bucket_size: '1h' },
-      reason: 'time-bucketed series across the same window (fidelity-aware: exact vs sampled)',
+      reason: 'time-bucketed series across the same window (exact vs sampled)',
     });
   }
   if (offloadByHash && Object.values(offloadByHash).some((s) => s.is_offloaded)) {
@@ -1069,21 +1068,20 @@ export function retrieverNotConfiguredMessage(): string {
   return [
     '## Retriever not configured',
     '',
-    "This MCP server doesn't currently have a Log10x Retriever endpoint configured. The Retriever is what lets this tool query historical events in the customer's S3 archive by Bloom-indexed variable values and template hashes.",
+    "This MCP server doesn't currently have a Log10x Retriever endpoint configured. The Retriever reads the customer-owned S3 overflow bucket where the Receiver routes the offloaded cohort, so this tool can fetch the events held back from the SIEM for a pattern by Bloom-indexed variable values and template hashes.",
     '',
     "**What's out of reach without the Retriever**:",
     '',
-    "- Events beyond the SIEM's hot retention (compliance, legal, audit, post-mortems older than ~30d)",
-    '- Events dropped by the forwarder upstream of the SIEM (log10x metrics see them, SIEM does not)',
-    '- New metrics backfilled from archive that were never collected live',
-    '- Historical baselines older than SIEM retention (WoW/MoM/YoY at long horizons)',
+    '- The offloaded cohort the Receiver routes to S3 for a pattern (the events held back from the SIEM)',
+    '- Events the forwarder dropped or down-tiered upstream of the SIEM (10x metrics see them, the SIEM does not)',
+    '- Verifying an offload decision by sampling what is being held back for a pattern',
     '- Sample-reversal verification when the SIEM returns sampled results at high volume',
     '',
     '**Options for the agent right now**:',
     '',
     "- (a) Deploy the Log10x Retriever — best long-term answer. Guide: https://doc.log10x.com/apps/cloud/retriever/",
-    "- (b) Rehydrate from the SIEM's cold-tier archive — slow, expensive, but preserves the current setup",
-    "- (c) Rescope the question to the SIEM's hot retention window and use the SIEM MCP directly",
+    "- (b) Point the customer's own pipeline at the offload bucket and re-ingest the held-back cohort, slow, but preserves the current setup",
+    "- (c) Rescope the question to what the SIEM still holds and use the SIEM MCP directly",
     '',
     '**To enable the Retriever later**:',
     '',

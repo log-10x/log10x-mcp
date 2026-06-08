@@ -421,7 +421,7 @@ export async function executeOverflowContents(
         from: `now-${tf.range}`,
         to: 'now',
       },
-      reason: `Rehydrate the top offload pattern back into the SIEM via the retriever — needed for incident / audit / debug.`,
+      reason: `Read the offloaded events for the top pattern from the overflow bucket to inspect what 10x has been holding back.`,
     });
     nextActions.push({
       tool: 'log10x_pattern_trend',

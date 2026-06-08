@@ -1,16 +1,17 @@
 /**
- * log10x_backfill_metric — create a new TSDB metric, backfilled from the Retriever archive.
+ * log10x_backfill_metric: DEPRECATED, kept dark. Builds a TSDB metric from the
+ * offloaded cohort in the customer's S3 overflow bucket. Not advertised: the live
+ * isDropped metric surface answers overflow-volume questions as a TSDB query.
+ * Retained only for the narrow custom-dimension case.
  *
- * Flagship "Log10x-only" composition tool. Pulls historical events from
- * the Retriever for a specified pattern + filter + window,
- * aggregates them into a bucketed time series, and emits the result to
- * the destination TSDB with historical timestamps preserved.
+ * Reads the offloaded cohort for a pattern from the overflow bucket over a window,
+ * aggregates it into a bucketed time series, and emits the result to the destination
+ * TSDB with original timestamps preserved.
  *
- * Optionally wires up forward emission via the live Reporter so the
- * metric continues populating from current events going forward. The
- * backfill + forward-emission hand-off is the full story: the customer
- * gets a continuous time series from 90-180 days ago through the present
- * instant, as if the metric had always existed.
+ * Optionally wires forward emission via the live Reporter so the metric keeps
+ * populating from current events. Coverage spans the window the offloaded bytes
+ * were retained in S3, so the series reaches back as far as the bucket holds the
+ * pattern, not further.
  *
  * Tier prerequisites: Retriever component required; Reporter required
  * only when emit_forward=true.
@@ -190,7 +191,7 @@ export async function executeBackfillMetric(
     data: { ...d, source_disclosure: { retriever_state_source: retrieverState.source } },
     warnings: d.warnings,
     actions: [
-      { tool: 'log10x_pattern_trend', args: { pattern: d.pattern, timeRange: '30d' }, reason: 'verify the backfilled series — pattern_trend now extends full 90d' },
+      { tool: 'log10x_pattern_trend', args: { pattern: d.pattern, timeRange: '30d' }, reason: 'verify the backfilled series; it now spans the offloaded history held in the bucket' },
       { tool: 'log10x_retriever_series', args: { pattern: d.pattern, from: d.window_from, to: d.window_to }, reason: 'sanity-check the backfilled buckets at finer granularity' },
     ],
   });
@@ -216,7 +217,7 @@ function buildBackfillNoEventsHumanSummary(args: {
   from: string;
   to?: string;
 }): string {
-  return `Backfill of ${args.metric_name} to ${args.destination} skipped: Retriever returned zero events for pattern ${args.pattern} over ${args.from} to ${args.to ?? 'now'}. Verify the pattern identity via log10x_event_lookup, widen the window or filter, or check whether the archive's retention covers the requested range.`;
+  return `Backfill of ${args.metric_name} to ${args.destination} skipped: the offload bucket held no events for pattern ${args.pattern} over ${args.from} to ${args.to ?? 'now'}. Verify the pattern identity via log10x_event_lookup, widen the window or filter, or confirm the Receiver is offloading this pattern to S3 rather than hard-dropping it (check log10x_overflow_contents).`;
 }
 
 interface BackfillMetricSummary {
@@ -285,7 +286,7 @@ async function executeBackfillMetricInner(
   // agent re-fed a display form (spaces) from top_patterns / cost_drivers.
   const pattern = normalizePattern(args.pattern);
 
-  // ── 1. Query the Retriever for historical events ──
+  // ── 1. Query the offload bucket for the offloaded cohort ──
   // Translate the user-facing pattern name into a Bloom-filter `search`
   // expression. The deprecated `pattern` field on RetrieverQueryRequest is
   // silently dropped by the body builder; without this translation the
@@ -324,7 +325,7 @@ async function executeBackfillMetricInner(
       '',
       `**Checked**: pattern=\`${pattern}\`, window=${args.from}→${args.to}, filters=${JSON.stringify(args.filters || [])}`,
       '',
-      `No points were emitted to ${args.destination}. Verify the pattern identity (call log10x_event_lookup on a raw sample line), check the window, or widen the filter expressions. If the Retriever archive's retention is shorter than the requested window, the missing portion is invisible to this tool.`,
+      `No points were emitted to ${args.destination}. Verify the pattern identity (call log10x_event_lookup on a raw sample line), check the window, or widen the filter expressions. If the offload bucket holds fewer days than the requested window, or this pattern is hard-dropped rather than offloaded, the missing portion is invisible to this tool.`,
     ].join('\n');
   }
 
@@ -395,12 +396,12 @@ async function executeBackfillMetricInner(
   lines.push('---');
   lines.push(
     `**Next action**: create an alert on \`${args.metric_name}\` in ${args.destination}. ` +
-      `The full 90-day history is now populated, so you can calibrate thresholds against real data instead of guessing from the first week.`
+      `The series now spans the offloaded history held in the bucket, so thresholds calibrate against real data rather than the first week alone.`
   );
   lines.push('');
   lines.push('**Other things you can do now**:');
-  lines.push(`  - Verify the backfilled series: \`log10x_pattern_trend({ pattern: '${pattern}', timeRange: '30d' })\` — the time series now extends the full 90d, not just from forward-emission start.`);
-  lines.push(`  - Run the same pattern again over the archive at finer granularity: \`log10x_retriever_series({ pattern: '${pattern}' })\` — useful for sanity-checking the backfilled buckets.`);
+  lines.push(`  - Verify the backfilled series: \`log10x_pattern_trend({ pattern: '${pattern}', timeRange: '30d' })\`. The time series now spans the offloaded history the bucket holds, not just from forward-emission start.`);
+  lines.push(`  - Run the same pattern again over the offload bucket at finer granularity: \`log10x_retriever_series({ pattern: '${pattern}' })\`. Useful for sanity-checking the backfilled buckets.`);
 
   if (sumOut) {
     const base: Omit<BackfillMetricSummary, 'human_summary'> = {
