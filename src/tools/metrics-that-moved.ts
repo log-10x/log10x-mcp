@@ -28,22 +28,81 @@ import { queryRange } from '../lib/api.js';
 import { resolveBackend, customerMetricsNotConfiguredMessage, formatDetectionTrace } from '../lib/customer-metrics.js';
 import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
-import { LABELS } from '../lib/promql.js';
+import { buildPatternAnchorRateQuery } from '../lib/anchor-promql.js';
 import { parseTimeframe } from '../lib/format.js';
 import { type StructuredOutput } from '../lib/output-types.js';
 import { computeAnchorDispersion, ANCHOR_DISPERSION_FLOOR } from '../lib/anchor-dispersion.js';
 import { canonicalMetricRef } from '../lib/metric-ref.js';
 import { wrapBackendError, type PrimitiveError } from '../lib/primitive-errors.js';
 import { buildChassisEnvelope } from '../lib/chassis-envelope.js';
+import {
+  suggestHigherVariationAnchors,
+  renderAnchorSuggestionsBlock,
+  type AnchorSuggestion,
+} from '../lib/anchor-suggestions.js';
 
 /** Default phase-gap floor. Hand-picked, uncalibrated — see README "Threshold provenance". */
 export const DEFAULT_PHASE_GAP_FLOOR = 0.15;
+
+/**
+ * Prometheus meta-metric blacklist. These series describe the SCRAPER's
+ * own health (target up/down, scrape latency, federation traffic,
+ * tsdb/wal internals). They co-move with anchor patterns only by accident
+ * of scrape timing, never carry causal signal about application or
+ * platform incidents, and pollute the candidate pool — without this
+ * filter the tool would silently rate the call `low_candidate_count=
+ * severe` and the caller would never learn WHY.
+ *
+ * Match rule: case-insensitive against the candidate's leading metric
+ * name (the identifier before any `{` label selector or PromQL function
+ * wrapping). A candidate is rejected when its leading metric name:
+ *   - is exactly `up` (the canonical target-health gauge), OR
+ *   - starts with `scrape_` (scrape_duration_seconds, scrape_samples_scraped, etc.), OR
+ *   - starts with `prometheus_` (prometheus_tsdb_*, prometheus_remote_storage_*, etc.).
+ *
+ * The list deliberately does NOT include `go_*` / `process_*` — those
+ * are application-emitted runtime metrics that can legitimately co-move
+ * with a real incident (GC pauses, FD exhaustion). Only series produced
+ * BY Prometheus ABOUT Prometheus are rejected.
+ */
+const META_METRIC_NAME_REGEX = /^(?:up|scrape_[a-z0-9_]*|prometheus_[a-z0-9_]*)$/i;
+
+/**
+ * Extract the leading metric name from a PromQL candidate string. Strips
+ * a single layer of common rate-style wrappers (`rate(...)`, `sum(...)`,
+ * `avg(...)`, `irate(...)`, `increase(...)`) so wrapped meta-metrics
+ * like `rate(scrape_duration_seconds[5m])` still get caught. Returns
+ * null when no recognizable metric name leads the expression.
+ */
+export function extractLeadingMetricName(expr: string): string | null {
+  let s = expr.trim();
+  // Peel up to two layers of function wrappers.
+  for (let i = 0; i < 2; i++) {
+    const wrap = s.match(/^(?:rate|irate|increase|sum|avg|max|min|count|delta|deriv|topk|bottomk)\s*\(\s*(.+)\s*\)\s*$/i);
+    if (!wrap) break;
+    s = wrap[1].trim();
+    // Strip a trailing range selector like `[5m]` so the name is bare.
+    s = s.replace(/\[[^\]]+\]\s*$/, '').trim();
+  }
+  const nameMatch = s.match(/^([a-zA-Z_:][a-zA-Z0-9_:]*)/);
+  return nameMatch ? nameMatch[1] : null;
+}
+
+/**
+ * Return `true` when the candidate's leading metric name is on the
+ * Prometheus meta-metric blacklist (see `META_METRIC_NAME_REGEX`).
+ */
+export function isMetaMetricCandidate(expr: string): boolean {
+  const name = extractLeadingMetricName(expr);
+  if (!name) return false;
+  return META_METRIC_NAME_REGEX.test(name);
+}
 
 export const metricsThatMovedSchema = {
   anchor_type: z
     .enum(['log10x_pattern', 'customer_metric'])
     .describe('Anchor side. `log10x_pattern` = anchor is a 10x pattern. `customer_metric` = anchor is a customer PromQL.'),
-  anchor: z.string().describe('Anchor identity (pattern symbol_message OR customer PromQL expression).'),
+  anchor: z.string().describe('Anchor identity. For `anchor_type=log10x_pattern`: the pattern Symbol Message NAME or its 11-char `pattern_hash` (= `tenx_hash`) — the tool detects shape and queries the correct PromQL label (`message_pattern` vs `tenx_hash`). For `anchor_type=customer_metric`: a customer PromQL expression.'),
   candidates: z
     .array(z.string())
     .min(1)
@@ -59,6 +118,16 @@ export const metricsThatMovedSchema = {
     .default(DEFAULT_PHASE_GAP_FLOOR)
     .describe('Relative gap floor between anchor-high and anchor-low phase means. Candidate is "moved" iff its gap ≥ this. Default 0.15 (=15%) is an uncalibrated default — output is tagged `unvalidated_default` until a caller-side calibration overrides it. See `docs/cross-pillar-primitives.md` for the calibration playbook.'),
   environment: z.string().optional(),
+  customer_metrics_url: z
+    .string()
+    .optional()
+    .describe(
+      'Per-call override for the customer metrics backend URL. Wins over LOG10X_CUSTOMER_METRICS_URL env var. Use when MCP was launched with an empty/stale URL.'
+    ),
+  customer_metrics_type: z
+    .enum(['grafana_cloud', 'amp', 'datadog_prom', 'generic_prom', 'log10x'])
+    .optional(),
+  customer_metrics_auth: z.string().optional(),
 };
 
 interface MovedCandidate {
@@ -115,6 +184,22 @@ interface MetricsThatMovedSummary {
   n_candidates_evaluated: number;
   n_candidates_usable: number;
   low_candidate_count: 'severe' | 'medium' | null;
+  /**
+   * Candidates rejected by the meta-metric preflight (Prometheus scraper
+   * health gauges: `up`, `scrape_*`, `prometheus_*`). These series describe
+   * the scraper, not the workload — they would silently pass the phase-gap
+   * math by accident of scrape timing and produce a `low_candidate_count`
+   * tag with no explanation. Empty when no meta-metrics were submitted.
+   */
+  meta_metrics_rejected: string[];
+  /**
+   * Populated when EVERY submitted candidate was a meta-metric. Plain-English
+   * guidance the caller should surface verbatim: explains that only Prometheus
+   * scraper-health series were passed, and that the right next step is to
+   * curate candidates from the anchor's `services` attribution (which carry
+   * the workload signal that meta-metrics cannot). null otherwise.
+   */
+  meta_metrics_only_guidance: string | null;
   query_count: number;
   total_latency_ms: number;
   backend_pressure_hint: 'ok' | 'slow' | 'throttled' | null;
@@ -135,15 +220,22 @@ interface MetricsThatMovedSummary {
    * on this backend" OR "...clustered at 0.22 — the floor is below
    * noise; treat moved[] with extreme skepticism."
    *
-   * This is the honest disclosure path. The tool does NOT auto-calibrate
-   * (every empirical calibration attempt was rejected by the consult as
-   * statistical theater without external ground truth). Instead it
-   * surfaces the data the caller would calibrate from, alongside the
-   * floor it compared to.
+   * This is the honest disclosure path. The tool does NOT auto-calibrate:
+   * empirical calibration without external ground truth would be statistical
+   * theater. Instead it surfaces the data the caller would calibrate from,
+   * alongside the floor it compared to.
    */
   threshold_audit?: ThresholdAudit;
   /** Populated only when `status === 'error'`. */
   error?: PrimitiveError;
+  /**
+   * Populated only when `status === 'anchor_no_phase_separation'`. Up to
+   * 3 patterns from the same env whose volume varies enough to be good
+   * starting points (CV ≥ 0.5). Empty array when the scan found none or
+   * errored (the refusal envelope still ships, the table just doesn't
+   * render). "Re-anchor" without suggestions is dead-end UX.
+   */
+  anchor_suggestions?: AnchorSuggestion[];
 }
 
 interface ThresholdAudit {
@@ -171,6 +263,9 @@ export async function executeMetricsThatMoved(
     step?: string;
     phase_gap_floor?: number;
     environment?: string;
+    customer_metrics_url?: string;
+    customer_metrics_type?: string;
+    customer_metrics_auth?: string;
     /** Ignored. Retained in the signature for backward-compat with
      * existing in-process callers; the markdown view was removed from
      * the public schema in favor of the structured `human_summary`
@@ -204,19 +299,90 @@ export async function executeMetricsThatMoved(
     }
   };
 
+  // ── Candidate-quality preflight ───────────────────────────────────
+  // Reject Prometheus meta-metrics (`up`, `scrape_*`, `prometheus_*`) BEFORE
+  // any backend query runs. These are scraper-health gauges, not workload
+  // signal; passing them as candidates would silently inflate the failed/
+  // not_moved buckets and trip the `low_candidate_count` tag with no
+  // explanation. We filter them out and, when every submitted candidate
+  // was on the blacklist, return a guided refusal instead of grinding
+  // through meaningless queries.
+  const metaRejected: string[] = [];
+  const filteredCandidates: string[] = [];
+  for (const c of args.candidates) {
+    if (isMetaMetricCandidate(c)) metaRejected.push(c);
+    else filteredCandidates.push(c);
+  }
+  if (metaRejected.length > 0 && filteredCandidates.length === 0) {
+    const guidance =
+      `All ${metaRejected.length} candidate(s) were Prometheus scraper-health metrics (e.g. up, scrape_*, prometheus_*). These describe the scraper, not the workload, so they cannot move with a pattern. ` +
+      `Curate candidates from the anchor's services attribution instead — call log10x_services with this anchor, then pass the customer metrics emitted by its top services as candidates.`;
+    const data: MetricsThatMovedSummary = {
+      status: 'no_signal',
+      threshold_used: floor,
+      threshold_basis: thresholdBasis,
+      anchor_ref: { type: args.anchor_type, expression: canonicalMetricRef(args.anchor) },
+      anchor_dispersion: 0,
+      anchor_expression: args.anchor,
+      window,
+      step_seconds: stepSeconds,
+      phase_gap_floor: floor,
+      n_anchor_buckets: 0,
+      n_candidates_evaluated: 0,
+      n_candidates_usable: 0,
+      low_candidate_count: 'severe',
+      meta_metrics_rejected: metaRejected,
+      meta_metrics_only_guidance: guidance,
+      query_count: queryCount,
+      total_latency_ms: totalLatencyMs,
+      backend_pressure_hint: pressureHint(queryCount, totalLatencyMs, throttledHit),
+      human_summary: guidance,
+      moved: [],
+      not_moved: [],
+      evaluation_failed: [],
+    };
+    return buildChassisEnvelope({
+      tool: 'log10x_metrics_that_moved',
+      view: 'summary',
+      headline: `No workload metrics submitted — every candidate was a Prometheus scraper-health series.`,
+      status: 'no_signal',
+      decisions: {
+        threshold_used: floor,
+        threshold_basis: thresholdBasis === 'caller_override' ? 'customer_supplied' as const : thresholdBasis,
+      },
+      source_disclosure: {},
+      scope: {
+        window,
+        window_basis: 'explicit',
+        candidates_count: args.candidates.length,
+        candidates_usable: 0,
+      },
+      payload: data,
+      human_summary: guidance,
+      telemetry: { startedAt: Date.now() - totalLatencyMs, queryCount, throttledHit },
+    });
+  }
+
   // ── Anchor series ──────────────────────────────────────────────────
   let anchorExpression: string;
   let anchorSeries: Array<[number, number]>;
   try {
     if (args.anchor_type === 'log10x_pattern') {
       const metricsEnv = await resolveMetricsEnv(env);
-      const escaped = args.anchor.replace(/"/g, '\\"');
-      anchorExpression = `sum(rate(all_events_summaryBytes_total{${LABELS.pattern}="${escaped}",${LABELS.env}="${metricsEnv}"}[${Math.max(stepSeconds * 3, 180)}s]))`;
+      anchorExpression = buildPatternAnchorRateQuery(
+        args.anchor,
+        metricsEnv,
+        Math.max(stepSeconds * 3, 180),
+      );
       const res = await timedQuery(() => queryRange(env, anchorExpression, fromSec, nowSec, stepSeconds));
       anchorSeries = extractFirstSeries(res);
     } else {
       anchorExpression = args.anchor;
-      const backendInfo = await resolveBackend();
+      const backendInfo = await resolveBackend({
+        url: args.customer_metrics_url,
+        type: args.customer_metrics_type,
+        auth: args.customer_metrics_auth,
+      });
       if (!backendInfo.backend) {
         // Missing customer metrics backend is an expected not_configured
         // state, not a failure: return a branchable envelope so the chain
@@ -277,6 +443,24 @@ export async function executeMetricsThatMoved(
   const anchorValues = anchorSeries.map(([, v]) => v);
   const anchorDispersion = computeAnchorDispersion(anchorValues);
   if (anchorDispersion < ANCHOR_DISPERSION_FLOOR) {
+    // Refusing without alternatives is dead-end UX. Scan the
+    // env's recent top patterns for ones with enough variation to be
+    // good starting points, surface up to 3. Helper degrades to [] on
+    // any error so the refusal still ships even if the suggestion query
+    // fails.
+    const tfRefuse = parseTimeframe(window);
+    const windowSecondsForScan = Math.floor(tfRefuse.days * 86400);
+    const suggestions = await suggestHigherVariationAnchors(
+      env,
+      windowSecondsForScan,
+      stepSeconds,
+    );
+    const suggestionsBlock = renderAnchorSuggestionsBlock(suggestions);
+    const baseProse =
+      `The pattern we looked at is too steady over this window to compare against other metrics. Try a different starting pattern or widen the window.`;
+    const refuseSummary = suggestionsBlock
+      ? `${baseProse}\n${suggestionsBlock}`
+      : baseProse;
     const data: MetricsThatMovedSummary = {
       status: 'anchor_no_phase_separation',
       threshold_used: floor,
@@ -291,15 +475,21 @@ export async function executeMetricsThatMoved(
       n_candidates_evaluated: 0,
       n_candidates_usable: 0,
       low_candidate_count: null,
+      meta_metrics_rejected: metaRejected,
+      meta_metrics_only_guidance: null,
       query_count: queryCount,
       total_latency_ms: totalLatencyMs,
       backend_pressure_hint: pressureHint(queryCount, totalLatencyMs, throttledHit),
-      human_summary: `Anchor "${anchorExpression}" has dispersion ${anchorDispersion.toFixed(3)} — below the ${ANCHOR_DISPERSION_FLOOR} floor for phase separation. No real busy/quiet split exists in this window, so the math is structurally meaningless. Re-anchor with a clearer log pattern or widen the time window.`,
+      // Plain English: drop "anchor", "dispersion", raw PromQL expression
+      // from user prose. The numeric audit lives in payload for the agent.
+      human_summary: refuseSummary,
       moved: [],
       not_moved: [],
       evaluation_failed: [],
+      anchor_suggestions: suggestions,
     };
-    const headline = `Anchor lacks phase separation (dispersion ${anchorDispersion.toFixed(3)} < ${ANCHOR_DISPERSION_FLOOR}). Refusing — re-anchor with a clearer pattern.`;
+    // Plain English: drop "anchor", "dispersion", "refusing".
+    const headline = `The pattern we looked at is too steady to compare against other metrics. Try a different starting pattern.`;
     return buildChassisEnvelope({
       tool: 'log10x_metrics_that_moved',
       view: 'summary',
@@ -310,6 +500,7 @@ export async function executeMetricsThatMoved(
       scope: { window, window_basis: 'explicit', candidates_count: args.candidates.length, candidates_usable: 0 },
       payload: data,
       human_summary: data.human_summary,
+      telemetry: { startedAt: Date.now() - totalLatencyMs, queryCount, throttledHit },
     });
   }
 
@@ -318,7 +509,11 @@ export async function executeMetricsThatMoved(
   const anchorLowTs = anchorPartition.lowTs;
 
   // ── Candidates ──────────────────────────────────────────────────────
-  const customerBackend = await resolveBackend();
+  const customerBackend = await resolveBackend({
+    url: args.customer_metrics_url,
+    type: args.customer_metrics_type,
+    auth: args.customer_metrics_auth,
+  });
   if (!customerBackend.backend) {
     return buildNotConfiguredEnvelope({
       tool: 'log10x_metrics_that_moved',
@@ -331,7 +526,7 @@ export async function executeMetricsThatMoved(
   const notMoved: MovedCandidate[] = [];
   const failed: string[] = [];
 
-  for (const cand of args.candidates) {
+  for (const cand of filteredCandidates) {
     try {
       const res = await timedQuery(() => customerBackend.backend!.queryRange(cand, fromSec, nowSec, stepSeconds));
       const candSeries = extractFirstSeries(res);
@@ -362,8 +557,15 @@ export async function executeMetricsThatMoved(
   notMoved.sort((a, b) => b.phase_gap - a.phase_gap);
 
   const nUsable = moved.length + notMoved.length;
+  // Gate low_candidate_count on having at least one EVALUABLE candidate so
+  // an all-candidates-failed call doesn't get tagged 'severe' (which
+  // misdirects remediation toward "widen the metric pool" when the
+  // actual failure is connectivity / metric-not-found). Same fix as
+  // rank_by_shape.
   const lowCandidateCount: 'severe' | 'medium' | null =
-    nUsable < 10 ? 'severe' : nUsable < 20 ? 'medium' : null;
+    nUsable === 0 && failed.length === filteredCandidates.length
+      ? null  // all-failed case → distinct failure mode
+      : nUsable < 10 ? 'severe' : nUsable < 20 ? 'medium' : null;
   const status: MetricsThatMovedStatus = moved.length === 0 ? 'no_signal' : 'success';
   const human_summary = buildHumanSummary({
     status,
@@ -378,6 +580,14 @@ export async function executeMetricsThatMoved(
 
   const observedDistribution = computeObservedPhaseGapDistribution(moved, notMoved);
 
+  // Mixed-submission guidance: caller passed some meta-metrics plus some
+  // workload metrics. Workload metrics still get evaluated; we just nudge
+  // the caller toward fully workload-curated lists for the next call.
+  const mixedMetaGuidance =
+    metaRejected.length > 0
+      ? `${metaRejected.length} candidate(s) were Prometheus scraper-health metrics and were skipped. For sharper results, curate from log10x_services on this anchor.`
+      : null;
+
   const data: MetricsThatMovedSummary = {
     status,
     threshold_used: floor,
@@ -389,13 +599,15 @@ export async function executeMetricsThatMoved(
     step_seconds: stepSeconds,
     phase_gap_floor: floor,
     n_anchor_buckets: anchorSeries.length,
-    n_candidates_evaluated: args.candidates.length - failed.length,
+    n_candidates_evaluated: filteredCandidates.length - failed.length,
     n_candidates_usable: nUsable,
     low_candidate_count: lowCandidateCount,
+    meta_metrics_rejected: metaRejected,
+    meta_metrics_only_guidance: mixedMetaGuidance,
     query_count: queryCount,
     total_latency_ms: totalLatencyMs,
     backend_pressure_hint: pressureHint(queryCount, totalLatencyMs, throttledHit),
-    human_summary,
+    human_summary: mixedMetaGuidance ? `${human_summary} ${mixedMetaGuidance}` : human_summary,
     moved,
     not_moved: notMoved,
     evaluation_failed: failed,
@@ -405,7 +617,20 @@ export async function executeMetricsThatMoved(
     },
   };
 
-  const headline = `${moved.length} of ${args.candidates.length} candidates moved with anchor (phase_gap ≥ ${floor}). ${notMoved.length} did not move. ${failed.length} could not be evaluated.`;
+  // Plain English: drop "candidates", "anchor", "phase_gap".
+  // The structured threshold + counts still live in payload / decisions.
+  // Use the evaluated count for the headline, not filteredCandidates.length,
+  // because the latter includes candidates that failed validation/query and
+  // could not actually be checked. When every candidate failed, the headline
+  // claimed "(2 checked)" while candidates_evaluated=0 and human_summary said
+  // "2 couldn't be checked". The evaluated count agrees with both structured
+  // fields and the prose.
+  const evaluatedCount = filteredCandidates.length - failed.length;
+  const headline = moved.length > 0
+    ? `${moved.length} of ${evaluatedCount} metric(s) moved with this pattern over the window.`
+    : evaluatedCount > 0
+      ? `No metrics moved with this pattern over the window (${evaluatedCount} checked${failed.length > 0 ? `, ${failed.length} couldn't be checked` : ''}).`
+      : `No metrics could be checked (${failed.length} couldn't be evaluated, ${filteredCandidates.length - failed.length} returned no data).`;
 
   return buildChassisEnvelope({
     tool: 'log10x_metrics_that_moved',
@@ -427,11 +652,12 @@ export async function executeMetricsThatMoved(
       window_basis: 'explicit',
       candidates_count: args.candidates.length,
       candidates_usable: nUsable,
-      candidates_evaluated: args.candidates.length - failed.length,
+      candidates_evaluated: filteredCandidates.length - failed.length,
       candidates_failed: failed,
     },
     payload: data,
-    human_summary,
+    human_summary: data.human_summary,
+    telemetry: { startedAt: Date.now() - totalLatencyMs, queryCount, throttledHit },
   });
 }
 
@@ -467,6 +693,8 @@ function errorEnvelope(args: {
     n_candidates_evaluated: 0,
     n_candidates_usable: 0,
     low_candidate_count: null,
+    meta_metrics_rejected: [],
+    meta_metrics_only_guidance: null,
     query_count: args.queryCount,
     total_latency_ms: args.totalLatencyMs,
     backend_pressure_hint: pressureHint(args.queryCount, args.totalLatencyMs, args.throttledHit),
@@ -487,6 +715,7 @@ function errorEnvelope(args: {
     payload: data,
     human_summary: `Call failed: ${args.err.hint}`,
     error: args.err,
+    telemetry: { startedAt: Date.now() - args.totalLatencyMs, queryCount: args.queryCount, throttledHit: args.throttledHit },
   });
 }
 
@@ -556,40 +785,36 @@ function buildHumanSummary(args: {
   anchorDispersion: number;
   lowCandidateCount: 'severe' | 'medium' | null;
 }): string {
-  // Floor + observed-median framing: surface BOTH numbers so the agent
-  // can judge whether the floor is well above noise, at it, or below
-  // it on this backend. Honest disclosure replaces calibration ceremony.
-  const allEvaluated = [...args.moved, ...args.notMoved];
-  const observedMedian =
-    allEvaluated.length === 0
-      ? null
-      : (() => {
-          const sorted = allEvaluated.map((c) => c.phase_gap).sort((a, b) => a - b);
-          return sorted[Math.floor(sorted.length / 2)];
-        })();
-  const floorPct = (args.floor * 100).toFixed(0);
-  const observedFragment =
-    observedMedian !== null
-      ? ` Observed median phase_gap across the candidate pool: ${(observedMedian * 100).toFixed(0)}%.`
-      : '';
-  const calibTag =
-    args.thresholdBasis === 'unvalidated_default'
-      ? ` Floor is an unvalidated default — compare against the observed distribution before acting on the result.`
-      : '';
+  // Plain English: drop "candidate", "phase-gap floor", "anchor",
+  // "evaluated" from user prose. Drop the calibration caveat entirely on
+  // no_signal (not load-bearing when nothing was found).
   if (args.status === 'no_signal') {
-    return `No candidate metrics moved with the anchor at the ${floorPct}% phase-gap floor. ${args.notMoved.length} were evaluated but stayed flat, ${args.failed.length} could not be evaluated. Stop searching with this anchor; consider re-anchoring or widening the window.${observedFragment}${calibTag}`;
+    const notMovedNote = args.notMoved.length > 0
+      ? ` ${args.notMoved.length} stayed flat`
+      : '';
+    const failedNote = args.failed.length > 0
+      ? `${notMovedNote ? ',' : ''} ${args.failed.length} couldn't be checked`
+      : '';
+    return `No metrics moved with this pattern over the window.${notMovedNote}${failedNote}. Try a different starting pattern or widen the window.`;
   }
   const lowTag =
     args.lowCandidateCount === 'severe'
-      ? ' Only a handful of candidates were usable — treat the result as weak evidence, look for corroborating signals.'
+      ? ' Only a few metrics were usable. Treat as weak evidence and look for corroborating signals.'
       : args.lowCandidateCount === 'medium'
-        ? ' Candidate sample was small — weight the result accordingly.'
+        ? ' Metric sample was small. Weight the result accordingly.'
         : '';
   const top = args.moved[0];
   const topNote = top
-    ? ` The strongest mover is ${top.candidate} with a ${(top.phase_gap * 100).toFixed(0)}% phase gap (direction: ${top.direction}).`
+    ? ` The strongest match is ${top.candidate} (${top.direction === 'co' ? 'rose with' : 'dropped against'} the pattern).`
     : '';
-  return `${args.moved.length} candidate(s) moved with the anchor above the ${floorPct}% phase-gap floor. ${args.notMoved.length} stayed flat, ${args.failed.length} could not be evaluated.${topNote}${observedFragment}${lowTag}${calibTag}`;
+  const failedNote = args.failed.length > 0
+    ? ` ${args.failed.length} couldn't be checked.`
+    : '';
+  const calibTag =
+    args.thresholdBasis === 'unvalidated_default'
+      ? ' Match threshold is a default (not yet tuned for your data).'
+      : '';
+  return `${args.moved.length} metric(s) moved with this pattern over the window.${topNote}${failedNote}${lowTag}${calibTag}`;
 }
 
 export interface AnchorPartition {

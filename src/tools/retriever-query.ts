@@ -1,11 +1,10 @@
 /**
- * log10x_retriever_query — direct retrieval from the Log10x Retriever archive.
+ * log10x_retriever_query reads the offloaded cohort from the customer-owned S3 overflow bucket.
  *
- * Forensic-retrieval entry point. Call when the user needs specific historical
- * events matching a search expression over a window that is outside the SIEM's
- * retention, or filtered on a variable value that is not a faceted dimension
- * in their SIEM, or that the SIEM never received because the edge optimizer
- * dropped it.
+ * Call when an agent needs the events the Receiver held back from the SIEM for a
+ * pattern (the offload action) and routed to S3. Surfaces the down-tiered or
+ * dropped cohort the SIEM never received, scoped by a Bloom-filter search
+ * expression or a Reporter-named pattern. Not a mirror of what the SIEM ingested.
  *
  * Engine contract: POST returns a queryId; results land in S3 as JSONL files
  * under {bucket}/tenx/{target}/qr/{queryId}/. The client polls the marker
@@ -37,7 +36,7 @@ import {
   type RetrieverQueryRequest,
   type RetrieverEvent,
 } from '../lib/retriever-api.js';
-import { getRetrieverState } from '../lib/retriever-state.js';
+import { getRetrieverState, type RetrieverStateSource } from '../lib/retriever-state.js';
 import {
   explainZeroResults,
   type RetrieverQueryDiagnostics,
@@ -48,15 +47,25 @@ import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { getOffloadStatusBatch } from '../lib/offload-status.js';
-import { buildChassisErrorEnvelope, sanitizeHeadline } from '../lib/chassis-envelope.js';
+import { buildChassisErrorEnvelope } from '../lib/chassis-envelope.js';
 import { wrapBackendError } from '../lib/primitive-errors.js';
+import {
+  resolveClusterConfig,
+  pickActiveOffload,
+} from '../lib/env-config/resolve-cluster-config.js';
 
 export const retrieverQuerySchema = {
   pattern: z
     .string()
     .optional()
     .describe(
-      'Reporter-named pattern (Symbol Message) to scope the scan to. Auto-translated to `tenx_user_pattern == "<name>"` Bloom-filter expression. Use this when the agent has a pattern name from event_lookup / top_patterns / cost_drivers and wants archive events for it without authoring the Bloom expression by hand. Mutually exclusive with `search`; if both are provided, `search` wins and `pattern` is ignored. Example: `pattern: "Payment_Gateway_Timeout"`.'
+      'Reporter-named pattern (Symbol Message) to scope the scan to. Auto-translated to `tenx_user_pattern == "<name>"` Bloom-filter expression. Use this when the agent has a pattern name from event_lookup / top_patterns / cost_drivers and wants the offloaded events for it without authoring the Bloom expression by hand. Mutually exclusive with `search`; if both are provided, `search` wins and `pattern` is ignored. Example: `pattern: "Payment_Gateway_Timeout"`.'
+    ),
+  pattern_hash: z
+    .string()
+    .optional()
+    .describe(
+      'Canonical pattern_hash from top_patterns / event_lookup. When provided, search is auto-built as `tenx_hash == "<hash>"` and no name resolution runs. This is the chain-stable identity emitted by top_patterns.payload.patterns[].pattern_hash — bypasses the name→hash resolver entirely. Precedence: `search` > `pattern_hash` > `pattern`. Example: `pattern_hash: "4Kjc7PHLWqY"`.'
     ),
   search: z
     .string()
@@ -112,7 +121,7 @@ export const retrieverQuerySchema = {
 };
 
 interface RetrieverQuerySummary {
-  status: 'ok' | 'not_configured';
+  status: 'success' | 'no_signal' | 'error' | 'not_configured';
   human_summary: string;
   query_id?: string;
   target?: string;
@@ -181,9 +190,97 @@ interface RetrieverQuerySummary {
   sqs_latency_ms?: number;
 }
 
+/**
+ * Bridge env-config (k8s ConfigMap / AWS SSM / GCP SM / Azure AC / local file)
+ * into the LOG10X_* / __SAVE_LOG10X_* env vars that retriever-api.ts +
+ * retriever-state.ts + retriever-diagnostics.ts read directly.
+ *
+ * Without this bridge, retriever_query would only see __SAVE_LOG10X_RETRIEVER_URL__
+ * / __SAVE_LOG10X_RETRIEVER_BUCKET__ / LOG10X_RETRIEVER_LOG_GROUP — leaving the
+ * on-prem env-config document (which env_register writes, retriever-probe /
+ * overflow-contents / doctor read) invisible to this tool. Same plumbing as
+ * retriever-probe, advise-retriever, and doctor: env-config is authoritative,
+ * env vars are fallback.
+ *
+ * Bridging is best-effort and one-way: an already-set env var is NEVER
+ * overwritten (the explicit env var wins, mirroring the resolver's
+ * precedence chain). Returns `true` when at least one env var was newly
+ * populated from env-config so the caller can override
+ * `source_disclosure.retriever_state_source` to `env_config`.
+ */
+async function bridgeEnvConfigToRetrieverEnvVars(): Promise<boolean> {
+  // Fast-path: every env var the downstream tools read is already set →
+  // env-config can't add anything. Skip the resolver to avoid spawning k8s /
+  // SSM clients on every query.
+  if (
+    process.env.__SAVE_LOG10X_RETRIEVER_URL__ &&
+    process.env.__SAVE_LOG10X_RETRIEVER_BUCKET__ &&
+    process.env.LOG10X_RETRIEVER_LOG_GROUP &&
+    (process.env.LOG10X_OFFLOAD_BUCKET || process.env.LOG10X_STREAMER_BUCKET)
+  ) {
+    return false;
+  }
+
+  let resolved;
+  try {
+    resolved = await resolveClusterConfig();
+  } catch {
+    // Resolver failures are non-fatal — we fall through to whatever env vars
+    // are set, and the existing not-configured envelope will fire if the
+    // result is incomplete. This matches the doctor / retriever-probe pattern.
+    return false;
+  }
+  if (!resolved.ok) return false;
+  const cfg = resolved.config;
+
+  let bridged = false;
+
+  // Retriever URL → __SAVE_LOG10X_RETRIEVER_URL__
+  if (!process.env.__SAVE_LOG10X_RETRIEVER_URL__ && cfg.retriever.url) {
+    process.env.__SAVE_LOG10X_RETRIEVER_URL__ = cfg.retriever.url.replace(/\/+$/, '');
+    bridged = true;
+  }
+
+  // Retriever input bucket (where qr/<id>/*.jsonl result objects land) →
+  // __SAVE_LOG10X_RETRIEVER_BUCKET__. This is the bucket retriever-api
+  // reads back for results polling; distinct from the offload bucket.
+  if (!process.env.__SAVE_LOG10X_RETRIEVER_BUCKET__ && cfg.retriever.input_bucket) {
+    process.env.__SAVE_LOG10X_RETRIEVER_BUCKET__ = cfg.retriever.input_bucket;
+    bridged = true;
+  }
+
+  // Retriever query log group → LOG10X_RETRIEVER_LOG_GROUP. Closes the
+  // "Diagnostics unavailable: LOG10X_RETRIEVER_LOG_GROUP not set" gap on
+  // zero-event queries: env_register writes this field, so a properly
+  // registered env-config doc lets diagnostics run without a separate env var.
+  if (!process.env.LOG10X_RETRIEVER_LOG_GROUP && cfg.retriever.query_log_group) {
+    process.env.LOG10X_RETRIEVER_LOG_GROUP = cfg.retriever.query_log_group;
+    bridged = true;
+  }
+
+  // Active offload bucket → LOG10X_STREAMER_BUCKET (legacy alias).
+  // The receiver writes offloaded events here; downstream tools that surface
+  // the offload bucket name (e.g., the "advise_retriever" recipe) read it via
+  // this env var. Skip when no active destination — multi-active picks the
+  // first per pickActiveOffload's documented order.
+  if (
+    !process.env.LOG10X_OFFLOAD_BUCKET &&
+    !process.env.LOG10X_STREAMER_BUCKET
+  ) {
+    const active = pickActiveOffload(cfg);
+    if (active?.bucket) {
+      process.env.LOG10X_STREAMER_BUCKET = active.bucket;
+      bridged = true;
+    }
+  }
+
+  return bridged;
+}
+
 export async function executeRetrieverQuery(
   args: {
     pattern?: string;
+    pattern_hash?: string;
     search?: string;
     from: string;
     to: string;
@@ -197,8 +294,19 @@ export async function executeRetrieverQuery(
   },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
+  // Bridge env-config → env vars BEFORE the configured check / state probe.
+  // env-config (k8s ConfigMap, AWS SSM, GCP SM, Azure AC, local file) is the
+  // on-prem source of truth that env_register writes and retriever-probe /
+  // overflow-contents / doctor read — this tool was the gap.
+  const envConfigBridged = await bridgeEnvConfigToRetrieverEnvVars();
+
   // Fix 83: resolve Retriever state for source_disclosure.
   const retrieverState = await getRetrieverState(null);
+  // When env-config supplied the bridged vars, prefer that label over the
+  // post-bridge `env_var` reading so the audit reflects the real upstream.
+  const retrieverStateSource: RetrieverStateSource = envConfigBridged
+    ? 'env_config'
+    : retrieverState.source;
   if (!(await isRetrieverConfigured())) {
     // Typed not_configured (status + advise_retriever action) so an agent
     // branches on data.status; the framework chokepoint also normalises to
@@ -209,11 +317,38 @@ export async function executeRetrieverQuery(
       remediation: retrieverNotConfiguredMessage(),
     });
   }
+
+  // Y2: pattern_hash → search auto-build BEFORE the inner executor runs.
+  // Bypasses the name→hash resolver entirely so a chain that arrives with
+  // a canonical pattern_hash from top_patterns / event_lookup never enters
+  // the pattern_not_resolved error path. Precedence: explicit `search`
+  // wins (agent authored it), then `pattern_hash` (chain-stable identity),
+  // then `pattern` (Reporter name, may resolve later via buildPatternSearch).
+  if (!args.search && args.pattern_hash) {
+    const safeHash = args.pattern_hash.trim().replace(/"/g, '');
+    args.search = `tenx_hash == "${safeHash}"`;
+  }
+
   const sumOut: { data?: RetrieverQuerySummary } = {};
   try {
     await executeRetrieverQueryInner(args, env, sumOut);
   } catch (err: unknown) {
-    const primitiveErr = wrapBackendError(err);
+    // Wave 2.F: classify time-window parse failures as schema_invalid
+    // instead of the generic 'unknown' wrapBackendError returns for
+    // non-HTTP/non-network errors. The inner throws `Invalid time window:
+    // ...` when normalizeTimeExpression rejects from/to; that's a caller-
+    // side input bug (retryable=false, no backoff) — distinct from a
+    // transient backend failure.
+    const errMsg = err instanceof Error ? err.message : String(err);
+    const isTimeWindowError = errMsg.startsWith('Invalid time window:');
+    const primitiveErr = isTimeWindowError
+      ? {
+          error_type: 'schema_invalid' as const,
+          retryable: false,
+          suggested_backoff_ms: null,
+          hint: errMsg.slice(0, 300),
+        }
+      : wrapBackendError(err);
     // Extract dual-failure breadcrumbs written by the SQS fallback path
     // when both HTTP and SQS transports were attempted and both failed.
     const dualErr = err as Record<string, unknown>;
@@ -226,11 +361,19 @@ export async function executeRetrieverQuery(
             sqs_error_message: dualErr.sqs_error_message,
           }
         : {};
+    // Y2: Populate a `query_id` sentinel on the error envelope so the
+    // forward chain (retriever_query_status) stays composable even when
+    // the original query never produced a UUID. The sentinel encodes the
+    // error_type so the status tool can early-return a typed envelope
+    // without an opaque "not found" S3 probe. Format: `error:<error_type>`.
+    const sentinelQueryId = `error:${primitiveErr.error_type ?? 'unknown'}`;
     return buildChassisErrorEnvelope({
       tool: 'log10x_retriever_query',
       err: primitiveErr,
       contextPayload: {
+        query_id: sentinelQueryId,
         pattern: args.pattern,
+        pattern_hash: args.pattern_hash,
         search: args.search,
         from: args.from,
         to: args.to,
@@ -247,15 +390,43 @@ export async function executeRetrieverQuery(
     throw new Error('retriever_query: inner pipeline returned no data.');
   }
   const d = sumOut.data;
-  const headline = `Retriever query \`${d.query_id ?? '?'}\` over ${d.from} → ${d.to}: ${fmtCount(d.events_matched)} events matched, ${d.events_returned} returned (${d.wall_time_ms}ms${d.truncated ? ', truncated' : ''}).`;
+  // Headline used to say "X returned" for every format, which is
+  // meaningless for `count` (we don't return events at all) and
+  // misleading for `aggregated`/`ephemeral_series` (we return buckets,
+  // not raw events). Branch on format so the headline names the actual
+  // deliverable. Also surface a perf caveat when wall_time crosses the
+  // practical degradation floor (30s) so chain agents can pace themselves.
+  const formatLabel = d.format ?? 'events';
+  const deliverableClause =
+    formatLabel === 'count'
+      ? `count-only summary`
+      : formatLabel === 'aggregated'
+        ? `${d.events_returned} events bucketed`
+        : formatLabel === 'ephemeral_series'
+          ? `${d.events_returned} events as range-query series`
+          : `${d.events_returned} returned`;
+  const perfCaveat = d.wall_time_ms > 30000
+    ? `, slow scan — consider narrowing search or window`
+    : '';
+  const headline = `Retriever query \`${d.query_id ?? '?'}\` over ${d.from} → ${d.to}: ${fmtCount(d.events_matched)} events matched, ${deliverableClause} (${d.wall_time_ms}ms${d.truncated ? ', truncated' : ''}${perfCaveat}).`;
   const actions: Array<{ tool: string; args: Record<string, unknown>; reason: string }> = [];
   if (d.partial_results) {
     actions.push({ tool: 'log10x_retriever_query', args: { from: d.from, to: d.to, pattern: d.pattern, search: d.search, target: d.target }, reason: 'partialResults — re-run with same args to resume from cached scan progress' });
   }
-  if (d.pattern && d.events_matched > 0) {
-    actions.push(
-      { tool: 'log10x_retriever_series', args: { pattern: d.pattern, from: d.from, to: d.to, bucket_size: '1h' }, reason: 'time-bucketed series across the same window (fidelity-aware: exact vs sampled)' }
-    );
+  // Prior code chained retriever_series only when `d.pattern` was set.
+  // Hash-keyed callers (pattern_hash auto-built a `tenx_hash == "..."`
+  // search) had pattern undefined and lost the follow-on action entirely.
+  // Use pattern_hash → search as the chained identity when pattern is absent.
+  if (d.events_matched > 0) {
+    if (d.pattern) {
+      actions.push(
+        { tool: 'log10x_retriever_series', args: { pattern: d.pattern, from: d.from, to: d.to, bucket_size: '1h' }, reason: 'time-bucketed series across the same window (exact vs sampled)' }
+      );
+    } else if (args.pattern_hash) {
+      actions.push(
+        { tool: 'log10x_retriever_series', args: { pattern_hash: args.pattern_hash, from: d.from, to: d.to, bucket_size: '1h' }, reason: 'time-bucketed series for the hash-keyed pattern across the same window' }
+      );
+    }
   }
   // Dispatcher-failure drill-in: zero events + tasks dispatched but nothing scanned.
   // This is the chart 1.0.20 streamer->retriever rename signature detected in the
@@ -283,7 +454,7 @@ export async function executeRetrieverQuery(
     data: {
       ...d,
       source_disclosure: {
-        retriever_state_source: retrieverState.source,
+        retriever_state_source: retrieverStateSource,
         transport: d.transport ?? 'http',
         ...(d.sqs_latency_ms !== undefined ? { sqs_latency_ms: d.sqs_latency_ms } : {}),
       },
@@ -599,7 +770,7 @@ async function executeRetrieverQueryInner(
     nextActions.push({
       tool: 'log10x_retriever_series',
       args: { pattern: args.pattern, from: args.from, to: args.to, bucket_size: '1h' },
-      reason: 'time-bucketed series across the same window (fidelity-aware: exact vs sampled)',
+      reason: 'time-bucketed series across the same window (exact vs sampled)',
     });
   }
   if (offloadByHash && Object.values(offloadByHash).some((s) => s.is_offloaded)) {
@@ -630,12 +801,19 @@ async function executeRetrieverQueryInner(
         }
       }
     }
-    const previewEvents = resp.events.slice(0, 10).map((ev) => ({
-      timestamp: ev.timestamp as string | number | undefined,
-      severity: ev.severity_level as string | undefined,
-      service: ev.tenx_user_service as string | undefined,
-      text: typeof ev.text === 'string' ? (ev.text as string).slice(0, 240) : undefined,
-    }));
+    // When the caller asked for `count`, they wanted aggregates, not bodies.
+    // Returning events_preview from a count call ships event payloads the
+    // caller didn't ask for (bandwidth waste, and confusing in the envelope
+    // because the rollups disagree with what a 10-event preview suggests).
+    // Suppress.
+    const previewEvents = args.format === 'count'
+      ? []
+      : resp.events.slice(0, 10).map((ev) => ({
+          timestamp: ev.timestamp as string | number | undefined,
+          severity: ev.severity_level as string | undefined,
+          service: ev.tenx_user_service as string | undefined,
+          text: typeof ev.text === 'string' ? (ev.text as string).slice(0, 240) : undefined,
+        }));
     const partialResults = !!(resp.diagnostics as RetrieverQueryDiagnostics & { partialResults?: boolean })?.partialResults;
     const offloadedHashCount = offloadByHash
       ? Object.values(offloadByHash).filter((s) => s.is_offloaded).length
@@ -660,7 +838,7 @@ async function executeRetrieverQueryInner(
         : undefined,
     });
     sumOut.data = {
-      status: 'ok',
+      status: resp.events.length === 0 ? 'no_signal' : 'success',
       human_summary,
       query_id: resp.queryId,
       target: resp.target,
@@ -888,21 +1066,20 @@ export function retrieverNotConfiguredMessage(): string {
   return [
     '## Retriever not configured',
     '',
-    "This MCP server doesn't currently have a Log10x Retriever endpoint configured. The Retriever is what lets this tool query historical events in the customer's S3 archive by Bloom-indexed variable values and template hashes.",
+    "This MCP server doesn't currently have a Log10x Retriever endpoint configured. The Retriever reads the customer-owned S3 overflow bucket where the Receiver routes the offloaded cohort, so this tool can fetch the events held back from the SIEM for a pattern by Bloom-indexed variable values and template hashes.",
     '',
     "**What's out of reach without the Retriever**:",
     '',
-    "- Events beyond the SIEM's hot retention (compliance, legal, audit, post-mortems older than ~30d)",
-    '- Events dropped by the forwarder upstream of the SIEM (log10x metrics see them, SIEM does not)',
-    '- New metrics backfilled from archive that were never collected live',
-    '- Historical baselines older than SIEM retention (WoW/MoM/YoY at long horizons)',
+    '- The offloaded cohort the Receiver routes to S3 for a pattern (the events held back from the SIEM)',
+    '- Events the forwarder dropped or down-tiered upstream of the SIEM (10x metrics see them, the SIEM does not)',
+    '- Verifying an offload decision by sampling what is being held back for a pattern',
     '- Sample-reversal verification when the SIEM returns sampled results at high volume',
     '',
     '**Options for the agent right now**:',
     '',
     "- (a) Deploy the Log10x Retriever — best long-term answer. Guide: https://doc.log10x.com/apps/cloud/retriever/",
-    "- (b) Rehydrate from the SIEM's cold-tier archive — slow, expensive, but preserves the current setup",
-    "- (c) Rescope the question to the SIEM's hot retention window and use the SIEM MCP directly",
+    "- (b) Point the customer's own pipeline at the offload bucket and re-ingest the held-back cohort, slow, but preserves the current setup",
+    "- (c) Rescope the question to what the SIEM still holds and use the SIEM MCP directly",
     '',
     '**To enable the Retriever later**:',
     '',

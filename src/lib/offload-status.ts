@@ -24,7 +24,7 @@
  *
  * Why not co-located with promql.ts: `promql.ts` is a pure query-builder
  * module (returns strings, no env / no executor). This helper needs both
- * the builder (for `includeToSelector` from PL-12) AND the executor
+ * the builder (`includeToSelector`) AND the executor
  * (`queryInstant`), so it sits one layer up.
  */
 
@@ -151,7 +151,7 @@ function failed(): OffloadStatus {
  * Lookup the offload status for a single `pattern_hash`.
  *
  * Issues two parallel Prometheus instant queries (kept + dropped cohorts)
- * via `includeToSelector('both')` from PL-12. Both calls share the
+ * via `includeToSelector('both')`. Both calls share the
  * `timeoutMs` budget (parallel, not sequential). If either cohort times
  * out the result is marked `ok: false`.
  */
@@ -167,7 +167,7 @@ export async function getOffloadStatus(
   if (!hash || !metricsEnv) return failed();
 
   const { droppedFilter } = includeToSelector('both');
-  // PL-12 contract: include='both' returns droppedFilter=null + runBoth=true,
+  // include='both' returns droppedFilter=null + runBoth=true,
   // meaning the caller (us) is responsible for issuing the two cohort
   // queries. We hand-build the two selectors with the kept/dropped
   // filters that includeToSelector('kept') and 'dropped' would have

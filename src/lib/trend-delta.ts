@@ -5,7 +5,7 @@
  * entirely from the existing state field + the 24h trend array already
  * fetched in Phase 2. No new Prometheus queries.
  *
- * Design contract (defect 13):
+ * Design contract:
  *   GROWING   → glyph ↗, scope 'wow', pct change from first half vs second half of trend array
  *   SHRINKING → glyph ↘, scope 'wow', signed negative pct
  *   STABLE    → glyph ─, scope 'wow', small pct near 0

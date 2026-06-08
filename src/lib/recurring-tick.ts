@@ -30,6 +30,7 @@ import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
 
 import type { Policy } from './policy-loader.js';
+import type { CustomerMetricsBackend } from './customer-metrics.js';
 import { emitCompactRows, type CompactCsvRow } from './compact-csv-writer.js';
 import { emitMuteRows, type MuteCsvRow } from './mute-csv-writer.js';
 import {
@@ -98,6 +99,38 @@ const HISTORY_FILE = pathJoin(tmpdir(), 'log10x-recur-history.jsonl');
 // threshold_bytes (reserved field — not yet in schema v1.0 but forward-safe).
 const DEFAULT_THRESHOLD_BYTES = 50 * 1024 * 1024;
 
+// ─── backend loader seam (dependency injection) ─────────────────────────────
+
+/**
+ * How the runner resolves its metrics backend. Defaults to the same
+ * ambient-env resolution the MCP tools use (`loadBackendFromEnv`).
+ *
+ * Tests inject a deterministic mock via `_setBackendLoader()` instead of
+ * monkey-patching the frozen `customer-metrics` ESM namespace (which throws
+ * under strict ESM). Mirrors the `_set*` runner-injection seam used by other
+ * libs in this package.
+ */
+type BackendLoader = () => Promise<CustomerMetricsBackend | undefined>;
+
+let backendLoader: BackendLoader = async () => {
+  // Resolve the metrics backend exactly as the MCP tools do.
+  const { loadBackendFromEnv } = await import('./customer-metrics.js');
+  return loadBackendFromEnv();
+};
+
+/** Test seam: override how the runner resolves its metrics backend. */
+export function _setBackendLoader(loader: BackendLoader): void {
+  backendLoader = loader;
+}
+
+/** Test seam: restore the default ambient-env backend loader. */
+export function _resetBackendLoader(): void {
+  backendLoader = async () => {
+    const { loadBackendFromEnv } = await import('./customer-metrics.js');
+    return loadBackendFromEnv();
+  };
+}
+
 // ─── Prometheus query ───────────────────────────────────────────────────────
 
 async function queryTopPatternsFromPrometheus(
@@ -107,9 +140,8 @@ async function queryTopPatternsFromPrometheus(
   limit: number,
   verbose: boolean
 ): Promise<PromRow[]> {
-  // Resolve the metrics backend exactly as the MCP tools do.
-  const { loadBackendFromEnv } = await import('./customer-metrics.js');
-  const backend = await loadBackendFromEnv();
+  // Resolve the metrics backend through the (overridable) loader seam.
+  const backend = await backendLoader();
   if (!backend) {
     throw new PromUnreachableError(
       'Prometheus backend not configured. Set LOG10X_CUSTOMER_METRICS_URL (or LOG10X_API_KEY + LOG10X_ENV_ID for hosted log10x).'

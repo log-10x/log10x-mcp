@@ -28,6 +28,7 @@ import { join } from 'path';
 import { homedir } from 'os';
 import { z } from 'zod';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { requireWriteAccess } from '../lib/read-only-guard.js';
 
 // ── Schema ───────────────────────────────────────────────────────────────────
 
@@ -117,6 +118,8 @@ async function writeEnvsJsonRaw(entries: RawEnvEntry[]): Promise<void> {
 export async function executeSetGitopsRepo(
   args: SetGitopsRepoArgs
 ): Promise<string | StructuredOutput> {
+  requireWriteAccess('writes gitops.repo to ~/.log10x/envs.json');
+
   let entries: RawEnvEntry[];
   try {
     entries = await readEnvsJsonRaw();

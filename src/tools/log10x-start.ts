@@ -39,7 +39,7 @@ export const IntentHintSchema = z
   .optional()
   .describe(
     'Optional hint at what brought the user here. `cost` = wants to cut/save bill; ' +
-      '`forensic` = wants to query historical archive; `install` = wants to deploy; ' +
+      '`forensic` = wants to read back the offloaded cohort from the overflow bucket; `install` = wants to deploy; ' +
       '`orient` = first-time session, open-ended. When omitted, the tool treats it as `orient`.'
   );
 
@@ -66,7 +66,7 @@ export interface CapabilitySummary {
   compact_installable: boolean;
   /** Receiver tier emits a `tenx_action` marker so the SIEM can tier_down by tag. */
   tier_down_available: boolean;
-  /** Retriever (S3 archive + Bloom index) reachable for forensic queries. */
+  /** Retriever reachable to read the offloaded cohort from the overflow S3 bucket. */
   forensic_query_available: boolean;
   /** Customer-owned offload S3 bucket detected (offload action target). */
   offload_ready: boolean;
@@ -311,7 +311,7 @@ function buildJourneyPhases(tier: Tier, caps: CapabilitySummary): JourneyPhase[]
   //   1. Visibility   (Reporter installed, metrics flowing)
   //   2. Attribution  (top patterns + savings estimable)
   //   3. Mitigation   (Receiver installed, can act in-path)
-  //   4. Forensic     (Retriever installed, archive + backfill)
+  //   4. Overflow     (Retriever installed, overflow bucket reader)
   //   5. Commitment   (commitment report + maintenance loop)
   const reporterComplete = caps.cost_attribution_available;
   const attributionComplete = caps.cost_attribution_available && caps.siem_query_available;
@@ -540,7 +540,7 @@ export async function executeLog10xStart(
   const mustAskUser: MustAskUser = {
     question:
       'Before I run any other tool, pick the path that matches what you want — answer with the number from the menu above.',
-    options: menu.map((m, i) => `${i + 1}. ${m.label}`),
+    options: menu.map((m, i) => `${i + 1}. ${m.label}${m.applicable ? '' : ` _(not available: ${m.gated_reason})_`}`),
   };
 
   const forbiddenNextActions = buildForbiddenNextActions();

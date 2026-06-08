@@ -30,7 +30,11 @@ import {
   projectSavings,
 } from '../src/lib/cost.js';
 
-const GB = 1024 * 1024 * 1024;
+// GB = 10^9 bytes (decimal), matching src/lib/cost.ts. This is the unit
+// CloudWatch / Datadog / Splunk / Azure / GCP / Sumo all bill in, so the
+// $/GB dollar math lines up with the customer invoice. (Was 2^30; the
+// source moved to 1e9 in commit 824d13a, math-lens workflow wui9vouej.)
+const GB = 1_000_000_000;
 
 // ---------------------------------------------------------------------------
 // back-compat surface

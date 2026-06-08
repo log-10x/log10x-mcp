@@ -34,6 +34,7 @@ import { agentOnly, stripAgentOnly } from '../lib/agent-only.js';
 import { runAcuteSpikeCorrelation } from '../lib/correlate.js';
 import { detectInflection } from '../lib/inflection.js';
 import { patternDisplay } from '../lib/pattern-descriptor.js';
+import { formatPatternLabel } from '../lib/pattern-label.js';
 import {
   renderAcuteSpikeReport,
   renderDriftReport,
@@ -46,7 +47,52 @@ import { isRetrieverConfigured, runRetrieverQuery, parseTimeExpression } from '.
 import { renderNextActions, extractNextActions, type NextAction } from '../lib/next-actions.js';
 import { getOffloadStatusBatch } from '../lib/offload-status.js';
 import { buildChassisEnvelope } from '../lib/chassis-envelope.js';
+import { PATTERN_HASH_REGEX } from '../lib/pattern-reference-resolver.js';
 import type { Action, StructuredOutput } from '../lib/output-types.js';
+
+/**
+ * pattern_hash never appears in user-facing prose. When the
+ * starting_point looks like a raw 11-char hash, render it as a generic
+ * "this pattern" descriptor instead of echoing the hash. The actual hash
+ * stays in payload.anchor_ref.expression for round-trip identity.
+ */
+function userVisibleStartingPoint(sp: string): string {
+  const trimmed = sp.trim();
+  if (PATTERN_HASH_REGEX.test(trimmed)) return 'this pattern';
+  return sp;
+}
+
+/**
+ * Resolve a non-empty, user-facing descriptor for the pattern under
+ * investigation. Used by buildHumanSummary so the no_signal prose names
+ * a real pattern (symbol_message text or the anchor name back-resolved
+ * from a hash lookup) instead of leaking the literal "this pattern"
+ * placeholder that userVisibleStartingPoint returns for hash-shaped
+ * inputs.
+ *
+ * Returns `null` when only an unresolved hash is known and no anchor/
+ * lead name is available from the rendered report — the caller must use
+ * a hash-free fallback phrase ("the pattern you anchored on") rather
+ * than echoing the hash or printing the placeholder.
+ */
+function resolvePatternDescriptor(
+  starting_point: string,
+  parsed: ParsedReport,
+): string | null {
+  const trimmed = starting_point.trim();
+  // Non-hash starting points are already human-readable: a pasted log
+  // line, a symbolMessage token, a service name, or the literal
+  // "environment". Use verbatim.
+  if (trimmed && !PATTERN_HASH_REGEX.test(trimmed)) {
+    return trimmed;
+  }
+  // Hash starting point: prefer the resolved anchor name extracted from
+  // the rendered report; fall back to the lead pattern if the anchor
+  // header wasn't emitted.
+  if (parsed.anchorPattern) return parsed.anchorPattern;
+  if (parsed.leadPattern) return parsed.leadPattern;
+  return null;
+}
 
 export const investigateSchema = {
   starting_point: z
@@ -54,8 +100,8 @@ export const investigateSchema = {
     .describe('The user\'s target, verbatim. Can be a raw log line, a pattern identity (symbolMessage or tenx_hash), a service name, or the literal string "environment"/"all"/"audit". The tool detects the mode automatically.'),
   window: z
     .string()
-    .default('1h')
-    .describe('Analysis window. `1h` default for acute-spike cases; `30d` recommended for drift cases. Accepts any PromQL-style duration string (`15m`, `1h`, `6h`, `24h`, `7d`). Alias: `timeRange`.'),
+    .optional()
+    .describe('Analysis window. Defaults to `1h` for acute-spike cases; `30d` recommended for drift cases. Accepts any PromQL-style duration string (`15m`, `1h`, `6h`, `24h`, `1d`, `7d`). Alias: `timeRange`. If neither is set, defaults to `1h`; if both are set, `window` wins.'),
   timeRange: z
     .string()
     .optional()
@@ -100,6 +146,12 @@ export interface ParsedReport {
   shape: string | null;
   mode: string | null;
   investigationId: string | null;
+  /** Resolved anchor pattern name (from `**Anchor**: \`name\`` line). Null
+   *  when the rendered report didn't carry an anchor header (e.g.,
+   *  pre-resolution failure path). Used by buildHumanSummary so the
+   *  no_signal prose can name the real pattern instead of falling back
+   *  to the literal hash from starting_point. */
+  anchorPattern: string | null;
   leadPattern: string | null;
   leadService: string | null;
   leadConfidence: number | null;
@@ -122,8 +174,19 @@ export function parseReport(md: string): ParsedReport {
   const idMatch =
     md.match(/\*\*Investigation id\*\*:\s*([0-9a-f-]{36})/i) ??
     md.match(/investigation_id`?:?\s*`?([0-9a-f-]{36})/i);
-  const shapeMatch = md.match(/\*\*shape\*\*:\s*`?(acute|drift|environment|no_significant_movement|empty)`?/i);
+  // Shape: acute renderer emits `**Shape**: acute` (token); drift renderer
+  // emits `**Shape**: gradual drift (no discrete inflection)` (prose) —
+  // accept both. Without this, drift reports parse with shape=null and the
+  // downstream status logic treats them as no_signal even when the markdown
+  // is fully populated.
+  const shapeMatch =
+    md.match(/\*\*shape\*\*:\s*`?(acute|drift|environment|no_significant_movement|empty)`?/i) ??
+    (/\*\*shape\*\*:\s*gradual\s+drift/i.test(md) ? ['', 'drift'] : null);
   const modeMatch = md.match(/\*\*mode\*\*:\s*`?(pattern|service|environment|raw_line)`?/i);
+  // Anchor header (emitted by both acute and drift renderers as
+  // `**Anchor**: \`<resolved-name>\``). Lets the no_signal human
+  // summary name the real pattern when starting_point was a raw hash.
+  const anchorMatch = md.match(/\*\*Anchor\*\*:\s*`([^`]+)`/);
   const leadPatternMatch = md.match(/\*\*Pattern\*\*:\s*`([^`]+)`(?:\s+in\s+`([^`]+)`)?/);
   const confMatch = md.match(/\*\*Confidence\*\*:\s*(\d+)%/);
   const lagMatch = md.match(/peaked\s+(\d+)s\s+before/i);
@@ -135,12 +198,25 @@ export function parseReport(md: string): ParsedReport {
     const upToNextSection = afterChain.split(/^### /m)[0] ?? '';
     chainCount = (upToNextSection.match(/^\d+\.\s+`/gm) ?? []).length;
   }
-  // Co-mover section: each line is `- \`pattern\` ...`.
+  // Co-mover section. Two renderer outputs to recognize:
+  //   acute → `### Co-movers (lower confidence)` with `- \`pattern\` ...` list
+  //   drift → `### Co-drifting patterns (cohort)` with `| \`pattern\` | service | ... |` table
+  // Without the drift case, a fully-populated drift report parses as
+  // coMoverCount=0 and the envelope status flips to `no_signal` while the
+  // markdown carries 18 patterns. The drift report can render fully while
+  // the parser sees 0 co-movers when the "Co-drifting" table heading
+  // doesn't match the "Co-movers" list.
   let coMoverCount = 0;
   if (/^### Co-movers \(lower confidence\)/m.test(md)) {
     const afterCM = md.split(/^### Co-movers[^\n]*$/m)[1] ?? '';
     const upToNextSection = afterCM.split(/^### /m)[0] ?? '';
     coMoverCount = (upToNextSection.match(/^- `/gm) ?? []).length;
+  } else if (/^### Co-drifting patterns \(cohort\)/m.test(md)) {
+    const afterCohort = md.split(/^### Co-drifting patterns[^\n]*$/m)[1] ?? '';
+    const upToNextSection = afterCohort.split(/^### /m)[0] ?? '';
+    // Drift renderer emits a markdown table. Header row + separator row are
+    // skipped by the leading-backtick check; only `| \`pattern\` |` data rows match.
+    coMoverCount = (upToNextSection.match(/^\|\s*`[^`]+`\s*\|/gm) ?? []).length;
   }
   const hasNoSignal =
     /No co-movers exceeded|No co-movers crossed the noise floor/i.test(md);
@@ -148,6 +224,7 @@ export function parseReport(md: string): ParsedReport {
     shape: shapeMatch?.[1] ?? null,
     mode: modeMatch?.[1] ?? null,
     investigationId: idMatch?.[1] ?? null,
+    anchorPattern: anchorMatch?.[1] ?? null,
     leadPattern: leadPatternMatch?.[1] ?? null,
     leadService: leadPatternMatch?.[2] ?? null,
     leadConfidence: confMatch ? parseInt(confMatch[1], 10) / 100 : null,
@@ -169,31 +246,72 @@ export function buildHumanSummary(
   parsed: ParsedReport,
   thresholdBasis: ThresholdBasis,
 ): string {
-  const calibTag =
-    thresholdBasis === 'unvalidated_default'
-      ? ' Thresholds are unvalidated defaults — compare the observed confidence against the clean-chain floor (default 0.70) before acting.'
-      : '';
+  const sp = userVisibleStartingPoint(starting_point);
+  // Drop the calibration caveat on no_signal / insufficient_data
+  // entirely (it is load-bearing only when a finding landed near the
+  // match threshold and the agent might auto-act). Drop "anchor",
+  // "co-mover", "noise floor", "clean-chain threshold",
+  // "unvalidated_default" from user prose; machine fields keep them.
   if (status === 'insufficient_data') {
-    return `Investigation of "${starting_point}" over ${window} could not produce a usable analysis. The anchor resolved but the window or backend coverage was too thin. Widen the window or re-anchor.${calibTag}`;
+    return `I looked at "${sp}" over the last ${window} but couldn't produce a usable analysis. The pattern resolved but the window or backend coverage was too thin. Try widening the window or starting from a different pattern.`;
   }
   if (status === 'no_signal') {
-    return `Investigation of "${starting_point}" over ${window} found no co-movers above the noise floor. Anchor moved, but nothing else moved with it in this window. Widen the window, switch to deep depth, or conclude there is no detectable lead.${calibTag}`;
+    // Nothing was found, so the threshold story isn't load-bearing.
+    // Must name a real pattern (symbol_message or back-resolved anchor),
+    // never echo the literal placeholder "this pattern" that
+    // userVisibleStartingPoint returns for hash-shaped inputs.
+    // When the resolved descriptor is the raw underscored symbol_message
+    // (anchor was hash-shaped, back-resolved through parsed.anchorPattern),
+    // the prose would leak the token blob. The no-hash-in-headlines rule
+    // extends to symbol_message blobs: wrap through formatPatternLabel
+    // for the same service-led, underscore-stripped, word-boundary-aware
+    // label all other tools use.
+    const rawDescriptor = resolvePatternDescriptor(starting_point, parsed);
+    const patternDescriptor = rawDescriptor
+      ? formatPatternLabel({
+          symbol_message: rawDescriptor,
+          service: parsed.leadService,
+          maxHintChars: 60,
+          fallback: rawDescriptor,
+        })
+      : null;
+    const lead = patternDescriptor
+      ? `I looked at "${patternDescriptor}" over the last ${window}`
+      : `I looked at the pattern you anchored on over the last ${window}`;
+    // Calibration honesty: under unvalidated_default the "Nothing did"
+    // framing overstates certainty. The honest reading is that nothing
+    // crossed our default match-strength floor — which may or may not
+    // be the right floor for this data. Distinguish.
+    const noMatchClause = thresholdBasis === 'unvalidated_default'
+      ? `Nothing crossed our default match-strength floor (not yet tuned for your data) — could be that nothing related actually moved, or the floor is set too high for this dataset.`
+      : `Nothing did — the issue may be isolated, or the window's too short.`;
+    return `${lead} to see if anything else in your environment moved at the same time. ${noMatchClause} Try widening to 24h.`;
   }
   if (status === 'error') {
-    return `Investigation of "${starting_point}" failed structurally. See data.error for details.${calibTag}`;
+    return `Investigation of "${sp}" failed structurally. See data.error for details.`;
   }
   if (!parsed.leadPattern) {
-    return `Investigation of "${starting_point}" produced a ${parsed.shape ?? 'unknown'}-shape narrative over ${window}. No single lead pattern was identified.${calibTag}`;
+    return `Investigation of "${sp}" produced a ${parsed.shape ?? 'unknown'}-shape narrative over ${window}. No single related pattern was identified.`;
   }
   const lagFragment =
     parsed.leadLagSeconds !== null && parsed.leadLagSeconds < 0
-      ? `peaked ${Math.abs(parsed.leadLagSeconds)}s before the anchor`
-      : 'moved concurrently with the anchor';
+      ? `peaked ${Math.abs(parsed.leadLagSeconds)}s earlier`
+      : 'moved at the same time';
   const confFragment =
     parsed.leadConfidence !== null
-      ? ` Observed lead confidence: ${(parsed.leadConfidence * 100).toFixed(0)}% (clean-chain floor: 70%${thresholdBasis === 'unvalidated_default' ? ', unvalidated' : ''}).`
+      ? ` Match strength: ${(parsed.leadConfidence * 100).toFixed(0)}%${thresholdBasis === 'unvalidated_default' ? ' (default match threshold, not yet tuned for your data)' : ''}.`
       : '';
-  return `Strongest temporal evidence on "${starting_point}" (${window}): \`${parsed.leadPattern}\`${parsed.leadService ? ` in \`${parsed.leadService}\`` : ''} ${lagFragment}.${confFragment} ${parsed.chainLength} chain step(s), ${parsed.coMoverCount} additional lower-confidence co-mover(s). This is correlation, not proven cause — verify via traces / deploy timeline before acting.${calibTag}`;
+  // parsed.leadPattern is the raw underscored symbol_message extracted
+  // from the renderer; wrap through formatPatternLabel so the success-path
+  // headline doesn't leak the token blob. The no-hash-in-headlines rule
+  // extends here.
+  const leadLabel = formatPatternLabel({
+    symbol_message: parsed.leadPattern,
+    service: parsed.leadService,
+    maxHintChars: 60,
+    fallback: parsed.leadPattern,
+  });
+  return `Strongest evidence on "${sp}" over ${window}: ${leadLabel} ${lagFragment}.${confFragment} ${parsed.chainLength} chain step(s), ${parsed.coMoverCount} additional related metric(s). This is correlation, not proven cause — verify via traces or deploy timeline before acting.`;
 }
 
 /**
@@ -289,7 +407,7 @@ async function resolveHashesForPatterns(
 export async function executeInvestigate(
   args: {
     starting_point: string;
-    window: string;
+    window?: string;
     timeRange?: string;
     baseline_offset?: string;
     depth: 'shallow' | 'normal' | 'deep';
@@ -303,26 +421,45 @@ export async function executeInvestigate(
   const thresholdBasis = detectThresholdBasis();
   const { wrapBackendError } = await import('../lib/primitive-errors.js');
 
+  // Resolve effective window + basis BEFORE executeInvestigateInner runs.
+  // The schema now leaves `window` undefined when the caller does not set
+  // it (the `.default('1h')` was masking the alias path: with the default,
+  // `timeRange='1d'` was silently overridden by `window='1h'` because the
+  // existing alias guard `if (!args.window && args.timeRange)` never fired).
+  // Resolution order:
+  //   1. explicit `window`        → basis = 'explicit'
+  //   2. explicit `timeRange`     → basis = 'explicit' (alias honoured)
+  //   3. neither                  → basis = 'auto_default', window = '1h'
+  // (Envelope `window_basis` enum is `'explicit' | 'auto_default'`; see
+  //  chassis-envelope.ts.)
+  const windowBasis: 'explicit' | 'auto_default' =
+    args.window || args.timeRange ? 'explicit' : 'auto_default';
+  const effectiveWindow: string = args.window ?? args.timeRange ?? '1h';
+  // Forward the resolved value so executeInvestigateInner (and every
+  // downstream `args.window` reader) sees the explicit choice rather than
+  // a stale Zod default.
+  const innerArgs = { ...args, window: effectiveWindow };
+
   // ── Structural failure path ────────────────────────────────────────
   let md: string;
   try {
-    md = await executeInvestigateInner(args, env);
+    md = await executeInvestigateInner(innerArgs, env);
   } catch (e) {
     const err = wrapBackendError(e);
     return buildChassisEnvelope({
       tool: 'log10x_investigate',
       view: 'summary',
-      headline: `Investigation of "${args.starting_point}" failed: ${err.error_type}`,
+      headline: `Investigation of "${userVisibleStartingPoint(args.starting_point)}" failed (${err.error_type}).`,
       status: 'error',
       decisions: { threshold_used: null, threshold_basis: thresholdBasis === 'config_file' ? 'snapshot' : 'unvalidated_default' },
       source_disclosure: {},
-      scope: { window: args.window, window_basis: 'explicit' },
+      scope: { window: effectiveWindow, window_basis: windowBasis },
       payload: {
         status: 'error' as InvestigateStatus,
         threshold_basis: thresholdBasis,
         anchor_ref: { type: 'starting_point', expression: args.starting_point },
         starting_point: args.starting_point,
-        window: args.window,
+        window: effectiveWindow,
         depth: args.depth,
         baseline_offset: args.baseline_offset,
         use_bytes: args.use_bytes,
@@ -423,15 +560,46 @@ export async function executeInvestigate(
     status = 'no_signal';
   }
 
+  // Defensive envelope-consistency check: if status flipped to no_signal
+  // but the markdown is substantial (>1KB of prose AND a drift/acute
+  // section header), the parser failed to recognize the renderer's output
+  // and the envelope is about to lie. Surface this as a structured warning
+  // so an agent reading the envelope can flag it rather than silently
+  // promoting the markdown's contradictory story. The drift report can
+  // render fully while the parser sees 0 co-movers when the "Co-drifting"
+  // table heading doesn't match the "Co-movers" list.
+  const envelopeIsLying =
+    status === 'no_signal' &&
+    md.length > 1024 &&
+    (/^### Co-drifting patterns/m.test(md) || /^### Temporal chain/m.test(md));
+  const envelopeConsistencyWarning = envelopeIsLying
+    ? `Envelope reports status=no_signal but report_markdown carries a populated investigation section (${md.length} chars). Parser likely failed to recognize the renderer's output shape — trust the structured fields, treat report_markdown as suspect.`
+    : null;
+
   const human_summary = buildHumanSummary(
     args.starting_point,
-    args.window,
+    effectiveWindow,
     status,
     parsed,
     thresholdBasis,
   );
 
-  const headline = `Investigation of "${args.starting_point}" (window=${args.window}): status=${status}, shape=${parsed.shape ?? 'unknown'}${parsed.investigationId ? `, id=${parsed.investigationId.slice(0, 8)}` : ''}.`;
+  // Plain-English headline per Notes 9 + 18: drop the investigation id slug
+  // (machine identifier, no meaning to the user — it's still in payload for
+  // round-trip). Use plain words for shape rather than the internal token.
+  // Hash-shaped starting_point is replaced with a generic descriptor.
+  const shapeWord =
+    parsed.shape === 'acute' ? 'sharp change'
+    : parsed.shape === 'drift' ? 'slow drift'
+    : parsed.shape === 'environment' ? 'environment-wide'
+    : parsed.shape === 'no_significant_movement' ? 'no significant movement'
+    : parsed.shape === 'empty' ? 'no significant movement'
+    : 'unknown shape';
+  const statusWord =
+    status === 'no_signal' ? 'no related movement'
+    : status === 'insufficient_data' ? 'not enough data'
+    : 'analysis complete';
+  const headline = `Investigation of "${userVisibleStartingPoint(args.starting_point)}" over ${effectiveWindow}: ${statusWord} (${shapeWord}).`;
 
   // Extract structured next-actions BEFORE stripping the HTML comment blocks.
   // (extractNextActions reads the NEXT_ACTIONS JSON comment from md.)
@@ -478,8 +646,8 @@ export async function executeInvestigate(
     },
     source_disclosure: {},
     scope: {
-      window: args.window,
-      window_basis: 'explicit',
+      window: effectiveWindow,
+      window_basis: windowBasis,
       candidates_count: parsed.chainLength + parsed.coMoverCount,
       candidates_usable: parsed.chainLength + parsed.coMoverCount,
     },
@@ -521,7 +689,7 @@ export async function executeInvestigate(
       ok: status === 'success',
       investigation_id: parsed.investigationId,
       starting_point: args.starting_point,
-      window: args.window,
+      window: effectiveWindow,
       depth: args.depth,
       baseline_offset: args.baseline_offset,
       mode: parsed.mode,
@@ -535,7 +703,7 @@ export async function executeInvestigate(
       ...(diagnosticNotes.length > 0 ? { diagnostic_notes: diagnosticNotes } : {}),
     },
     human_summary,
-    // Defect 34: structured actions[] pulled from the embedded NEXT_ACTIONS
+    // structured actions[] pulled from the embedded NEXT_ACTIONS
     // comment block so the agent protocol is typed, not scraped from markdown.
     //
     // Fallback priority:
@@ -553,7 +721,7 @@ export async function executeInvestigate(
               const fallback: Action[] = [
                 {
                   tool: 'log10x_top_patterns',
-                  args: { timeRange: args.window ?? '24h' },
+                  args: { timeRange: effectiveWindow },
                   reason: 'No patterns moved with this anchor in the investigated window. Surface what IS active so you can re-anchor.',
                   role: 'recommended-next',
                 },
@@ -572,6 +740,7 @@ export async function executeInvestigate(
               }
               return fallback;
             })(),
+    warnings: envelopeConsistencyWarning ? [envelopeConsistencyWarning] : [],
   });
 }
 
@@ -604,12 +773,12 @@ async function executeInvestigateInner(
   // baseline_offset default depends on window magnitude. For short windows
   // (<= 1h), 24h-ago is the right incident baseline ("is this hour worse than
   // yesterday this hour"). For long windows (>= 7d), 24h-ago is WORSE than
-  // useless — it compares "last 30d" to "30d shifted by 1 day" (29 of 30 days
-  // overlap, so any inflection older than the shift is invisible). Caught by
-  // sub-agent S6 (drift scenario): a $30K/mo cart regression 6 days ago was
-  // completely missed by `investigate window=30d` with default 24h baseline,
-  // while `cost_drivers` immediately surfaced it as +28,000%. The investigate
-  // drift flow would have told the user "everything is fine, ±4%".
+  // useless: it compares "last 30d" to "30d shifted by 1 day" (29 of 30 days
+  // overlap, so any inflection older than the shift is invisible).
+  // Example failure: a large cost regression 6 days ago is completely
+  // missed by `investigate window=30d` with the default 24h baseline
+  // (29 of 30 days overlap), while a chunked range-query path surfaces it
+  // clearly.
   //
   // Heuristic: default baseline_offset = window for long windows, 24h for
   // short. Matches the "this month vs last month" / "this week vs last week"
@@ -685,10 +854,10 @@ async function executeInvestigateInner(
     // For windows longer than 16 days, route to cost_drivers. Two reasons:
     //   1. Prometheus instant-query 32-day span limit makes it IMPOSSIBLE to
     //      compare "last 30d" to "30d ago" (60d total span) in one query.
-    //   2. Even with a shorter offset like 1d, the ratio is meaningless — 29
+    //   2. Even with a shorter offset like 1d, the ratio is meaningless: 29
     //      of 30 days overlap, so any real inflection returns ≈0% change.
-    //      Caught by sub-agent S6: a $30K/mo cart regression 6 days ago was
-    //      reported as "-0%" because the comparison was 30d vs 30d-minus-1d.
+    //      Example: a real regression 6 days ago reports as "-0%" because
+    //      the comparison is 30d vs 30d-minus-1d (29 of 30 days overlap).
     // The correct tool for multi-week drift is cost_drivers (chunked range
     // query path). Route explicitly rather than produce a silently-broken
     // audit.
@@ -698,7 +867,10 @@ async function executeInvestigateInner(
         ? `the combined window + baseline span (${args.window} + ${effectiveBaselineOffset}) exceeds the customer TSDB's 32-day instant-query limit`
         : `a ${args.window} window cannot be compared against a prior ${args.window} (60d total span exceeds the backend limit), and a shorter baseline like 24h produces a ≈0% overlap comparison that silently hides multi-week regressions`;
       const routedReport = [
-        `## Investigation: ${args.starting_point}, last ${args.window}`,
+        // Never echo a raw pattern_hash into H2 prose. When
+        // starting_point is hash-shaped, userVisibleStartingPoint substitutes
+        // "this pattern"; non-hash inputs pass through verbatim.
+        `## Investigation: ${userVisibleStartingPoint(args.starting_point)}, last ${args.window}`,
         '',
         `**Investigation id**: ${investigationId}`,
         `**Result**: Routed to \`log10x_cost_drivers\`.`,
@@ -740,7 +912,10 @@ async function executeInvestigateInner(
   if (!resolution.anchor) {
     const historical = resolution.modeDetection === 'unresolved_historical';
     const lines: string[] = [
-      `## Investigation: ${args.starting_point}, last ${args.window}`,
+      // Hash-shaped starting_points render as "this pattern" in
+      // the H2 heading. The raw hash is still echoed downstream inside the
+      // "Could not resolve" body so the operator sees what was looked up.
+      `## Investigation: ${userVisibleStartingPoint(args.starting_point)}, last ${args.window}`,
       '',
       `**Investigation id**: ${investigationId}`,
     ];
@@ -754,19 +929,42 @@ async function executeInvestigateInner(
         `- \`log10x_pattern_trend({ pattern: '${args.starting_point}', timeRange: '30d' })\` — see when it last fired`,
       );
     } else {
-      lines.push(
-        `**Result**: Could not resolve "${args.starting_point}" to a known pattern or service.`,
-        '',
-        '**Supported inputs**:',
-        '- A raw log line (will be templatized and matched by structural identity)',
-        '- A pattern identity (symbolMessage / tenx_hash)',
-        '- A service name',
-        '- The literal string `"environment"`, `"all"`, or `"audit"` for an env-wide sweep',
-        '',
-        '**Try next**:',
-        `- \`log10x_event_lookup({ pattern: '${args.starting_point}' })\` to search by substring`,
-        `- \`log10x_list_by_label({ label: 'tenx_user_service' })\` to list known services`,
-      );
+      // Hash-shaped input where the pattern_hash → name lookup also
+      // missed: tell the user that path was tried so they don't waste
+      // a retry on the same hash. The hash-detection sits at the top
+      // of resolveAnchor and only swaps anchor on a hit; on a miss the
+      // unresolved fall-through lands here.
+      // Mirror of looksLikeHash in resolveAnchor — must stay in sync.
+      // Digit is NOT required; mixed-case alone discriminates from snake_case
+      // pattern names.
+      const looksLikeHashSp =
+        /^[A-Za-z0-9_-]{11}$/.test(args.starting_point.trim()) &&
+        /[A-Z]/.test(args.starting_point.trim()) &&
+        /[a-z]/.test(args.starting_point.trim());
+      if (looksLikeHashSp) {
+        lines.push(
+          `**Result**: Could not resolve "${args.starting_point}" — looked up by pattern_hash, none found in the last 7d window of metrics. The hash may be from a different environment, outside retention, or mistyped.`,
+          '',
+          '**Try next**:',
+          `- \`log10x_top_patterns({ timeRange: '7d' })\` — surface active pattern hashes to copy a known-good one`,
+          `- \`log10x_event_lookup({ pattern_hash: '${args.starting_point}' })\` — same hash lookup, different cost/services view`,
+          `- \`log10x_pattern_examples({ pattern_hash: '${args.starting_point}' })\` — pull live SIEM events keyed on this hash if it's still in the analyzer`,
+        );
+      } else {
+        lines.push(
+          `**Result**: Could not resolve "${args.starting_point}" to a known pattern or service.`,
+          '',
+          '**Supported inputs**:',
+          '- A raw log line (will be templatized and matched by structural identity)',
+          '- A pattern identity (symbolMessage / pattern_hash — 11-char base64url)',
+          '- A service name',
+          '- The literal string `"environment"`, `"all"`, or `"audit"` for an env-wide sweep',
+          '',
+          '**Try next**:',
+          `- \`log10x_event_lookup({ pattern: '${args.starting_point}' })\` to search by substring`,
+          `- \`log10x_list_by_label({ label: 'tenx_user_service' })\` to list known services`,
+        );
+      }
     }
     const report = lines.join('\n');
     recordInvestigation({
@@ -788,10 +986,10 @@ async function executeInvestigateInner(
   // diagnosis, the top-cost-pattern over 24h may be a historical error that
   // has been suppressed (e.g. the libgssapi crash that was fixed but still
   // dominates yesterday's cost), while the CURRENT failure is a different
-  // pattern entirely. Caught by head-to-head test S11/S12: kubectl --previous
-  // correctly surfaced a Postgres duplicate-key bug as the CURRENT crashloop
-  // cause, while the MCP resolved to the Kerberos pattern (90% false
-  // confidence) because it was still the top-cost-pattern for the 24h window.
+  // pattern entirely. Example: the most-recent error (a duplicate-key
+  // crashloop) is the CURRENT cause, while the 24h top-cost-pattern
+  // resolver still points at an older, now-fixed pattern with high false
+  // confidence.
   //
   // Recency check: query the anchor's rate over the last 5 minutes. If it's
   // near zero while the pattern still accumulates cost in the wider window,
@@ -860,15 +1058,26 @@ async function executeInvestigateInner(
   );
 
   if (shape.shape === 'flat') {
-    const emptyReport = renderEmpty(args.starting_point, args.window, investigationId, thresholds.acuteNoiseFloor);
+    // Pass resolved anchor + service so the H2 heading swaps a hash-shaped
+    // starting_point for the anchor name. Non-hash starting points
+    // render verbatim inside renderEmpty regardless.
+    const emptyReport = renderEmpty(
+      args.starting_point,
+      args.window,
+      investigationId,
+      thresholds.acuteNoiseFloor,
+      resolution.anchor,
+      resolution.service,
+    );
     // If the anchor is historical (fired below noise floor in the last 5m)
     // AND a different pattern is currently active in the service, the flat
-    // "no significant movement" result is dangerously misleading — it means
+    // "no significant movement" result is dangerously misleading: it means
     // "the HISTORICAL TOP-COST pattern is flat" not "nothing is happening".
     // Prepend the recency warning so an operator sees the live pattern
-    // pointer before the empty result. Caught by sub-agent S16 on the
-    // accounting crashloop rerun: the recency probe correctly found the
-    // live bug but the flat-path report dropped the warning.
+    // pointer before the empty result. Without this, the recency probe
+    // finds the live pattern but the flat-path report drops the warning,
+    // leaving the operator with a misleading "no significant movement"
+    // result.
     const report = recencyWarning ? `${recencyWarning}\n\n---\n\n${emptyReport}` : emptyReport;
     recordInvestigation({
       investigationId,
@@ -992,10 +1201,11 @@ async function executeInvestigateInner(
         { timeoutMs: 30_000 }
       );
       retrieverFallback = 'stage_1_only';
-      // If Stage 1 reveals enough buckets with sustained movement, we'd
-      // normally fire Stage 2. The MVP stops at Stage 1 and annotates.
+      // When Stage 1 reveals enough buckets with sustained movement, Stage 2
+      // re-correlation would normally run. This path currently stops at
+      // Stage 1 and annotates the result.
       if ((stage1.buckets || []).length > 7) {
-        // TODO: full Stage 2 re-correlation in the historical inflection window.
+        // TODO: re-correlate co-movers within the historical inflection window (currently only the acute window is correlated).
         retrieverFallback = 'stage_1_only';
       }
     } catch {
@@ -1157,6 +1367,65 @@ async function resolveAnchor(
     return { mode: 'environment', inputType: 'environment_literal', modeDetection: 'environment_audit' };
   }
 
+  // Pattern_hash input: exactly 11 base64url chars (the engine's
+  // PatternHashEncoder output shape — see src/lib/pattern-hash.ts).
+  // When the starting_point matches this shape AND looks like an
+  // entropy-bearing hash (mixed case + digit, not a snake_case word),
+  // try resolving it to its dominant pattern name via TSDB FIRST. If
+  // the lookup hits, swap the anchor to the resolved name and let the
+  // normal pattern path take over. Without this resolution, a raw 11-char
+  // hash echoed by top_patterns (e.g. starting_point="4Kjc7PHLWqY")
+  // returns "Could not resolve" because the lookup queries the pattern
+  // label with the hash string as its value.
+  //
+  // The heuristic is intentionally conservative — a plain underscored
+  // pattern name like `db_lock_wait` is also 11 chars but won't have
+  // the mixed-case + digit signature. On a miss we fall through to the
+  // existing pattern/service resolver below so no behavior changes
+  // for non-hash inputs.
+  // base64url hash shape: 11 chars from [A-Za-z0-9_-] with mixed case.
+  // Digit is NOT required — ~15% of real engine hashes have no digit
+  // (P((54/64)^11) = 0.154), e.g. "srfVDPNhzZU". Pattern names are
+  // snake_case lowercase or ~-prefixed, so mixed-case alone discriminates.
+  const looksLikeHash =
+    /^[A-Za-z0-9_-]{11}$/.test(sp) &&
+    /[A-Z]/.test(sp) &&
+    /[a-z]/.test(sp);
+  if (looksLikeHash) {
+    try {
+      const hashQ =
+        `topk(1, sum by (${LABELS.pattern}, ${LABELS.service}, ${LABELS.severity}) ` +
+        `(increase(all_events_summaryBytes_total{` +
+        `${LABELS.hash}="${escape(sp)}",` +
+        `${LABELS.env}="${metricsEnv}"}[7d])))`;
+      const res = await queryInstant(env, hashQ);
+      if (res.status === 'success' && res.data.result.length > 0) {
+        const row = res.data.result[0];
+        const resolvedName = row.metric[LABELS.pattern];
+        if (resolvedName) {
+          // Swap the anchor to the resolved Symbol Message and proceed
+          // as if the caller had passed the name directly. modeDetection
+          // records the lookup so the rendered report can show the hash
+          // → name handoff in the trail.
+          return {
+            mode: 'pattern',
+            anchor: resolvedName,
+            service: row.metric[LABELS.service],
+            severity: row.metric[LABELS.severity],
+            inputType: 'pattern_hash',
+            modeDetection: 'resolved_from_pattern_hash',
+          };
+        }
+      }
+    } catch {
+      // non-fatal — fall through to the existing resolver below
+    }
+    // The input matched the hash shape but no metrics carry it. Fall
+    // through to the existing pattern/service path; the un-resolved
+    // error renderer below will mention the pattern_hash lookup
+    // explicitly so the user knows that path was tried.
+  }
+
   // Pattern identity heuristic: symbolMessage token (`~xxx`), underscore_separated
   // token, OR dash-separated service name (e.g., `product-reviews`, `ad-service`).
   // Services in k8s commonly use kebab-case, so the regex must accept dashes
@@ -1200,7 +1469,7 @@ async function resolveAnchor(
     //
     // We bottom-guard the baseline with meaningfulBaselineFloor=0.01 events/s
     // to prevent near-zero baselines from inflating relative change to +9000%
-    // on trivial activity (GAPS G6, PR #25 correction).
+    // on trivial activity.
     const thresholds = (await import('../lib/thresholds.js')).DEFAULT_THRESHOLDS;
     const meaningfulBaselineFloor = thresholds.acuteNoiseFloor * 10;
     const signedChange =
@@ -1347,16 +1616,12 @@ async function renderEnvironmentAudit(
   // correctly ranked by magnitude but LOST THE SIGN. A pattern going from
   // 87 events/s (baseline) to 0 events/s (current) has rc = -1, abs(rc)=1,
   // and renders as "+100% vs 24h ago" even though it's a -100% decline.
-  // Caught by production investigation of cart_cartstore_ValkeyCartStore
-  // during the otel-demo swap session — the pattern went to zero because
-  // of an unrelated engine bug (see GAPS G8), and the "+100%" label was
-  // the opposite of what happened. Sign loss makes the output structurally
-  // dishonest.
+  // Sign loss makes the output structurally dishonest.
   //
-  // Fix: run two separate queries — topk(5, signed_change) for biggest
-  // growths, bottomk(5, signed_change) for biggest declines — then merge
+  // Fix: run two separate queries, topk(5, signed_change) for biggest
+  // growths and bottomk(5, signed_change) for biggest declines, then merge
   // and label each with its actual sign. Baseline guard retained so
-  // near-zero baselines don't amplify spurious +N% flags (GAPS G6).
+  // near-zero baselines don't amplify spurious +N% flags.
   const thresholds = (await import('../lib/thresholds.js')).DEFAULT_THRESHOLDS;
   const meaningfulBaselineFloor = thresholds.acuteNoiseFloor * 10;
   const signedChangeExpr =
@@ -1380,11 +1645,10 @@ async function renderEnvironmentAudit(
         if (!Number.isFinite(rc)) continue;
         const pattern = row.metric[LABELS.pattern];
         // Some series in Prometheus are missing the message_pattern label
-        // (ingest-side artifact — series gets written without it). Previously
+        // (ingest-side artifact: series gets written without it). Previously
         // we rendered those as `undefined (service)` in the Top movers list,
         // which is actively misleading: the operator tries to investigate
-        // "undefined" and hits a dead-end. Skip instead. Grok round-2 run
-        // surfaced this live on the otel-demo `payment` service.
+        // "undefined" and hits a dead-end. Skip instead.
         if (!pattern) continue;
         const service = row.metric[LABELS.service] || 'unknown';
         rows.push({ pattern, service, rc });
@@ -1470,8 +1734,8 @@ async function renderEnvironmentAudit(
       // Resolve the actual top mover for the prose hint (and for the
       // structured NEXT_ACTIONS appended by the caller). Earlier this
       // section printed the literal placeholder `<top_pattern_name>`,
-      // which the agent then echoed verbatim into the next call —
-      // caught by the env-sweep eval scenario.
+      // which the agent then echoed verbatim into the next call.
+      // Resolve the actual top mover here instead.
       const topMover = topMovers.find((m) => !m.collapsedCount || m.collapsedCount <= 1) ?? topMovers[0];
       topPatternForChain = topMover.pattern;
       lines.push('**Next action**: investigate the top mover individually:');

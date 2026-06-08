@@ -46,7 +46,7 @@ import { loadEnvironments } from '../lib/environments.js';
 import { resolvePatternHashFromMetrics } from '../lib/resolve-pattern-hash.js';
 
 export const dependencyCheckSchema = {
-  pattern: z.string().describe('Pattern name (e.g., "Payment_Gateway_Timeout")'),
+  pattern: z.string().min(1).describe('Pattern name (e.g., "Payment_Gateway_Timeout")'),
   vendor: z
     .enum(['datadog', 'splunk', 'elasticsearch', 'cloudwatch'])
     .optional()
@@ -138,6 +138,23 @@ function buildHumanSummary(d: DependencyCheckSummary): string {
 export async function executeDependencyCheck(args: DependencyCheckArgs): Promise<import('../lib/output-types.js').StructuredOutput> {
   const telemetry = newChassisTelemetry();
 
+  // Defense-in-depth: reject empty / whitespace-only pattern before any
+  // CloudWatch (or other vendor) scan. An empty needle matches every
+  // alarm/dashboard and produces bogus 'blocked' verdicts.
+  if (typeof args.pattern !== 'string' || args.pattern.trim().length === 0) {
+    return buildChassisErrorEnvelope({
+      tool: 'log10x_dependency_check',
+      err: {
+        error_type: 'input_invalid',
+        retryable: false,
+        suggested_backoff_ms: null,
+        hint: 'pattern is required and must be non-empty',
+      },
+      telemetry,
+      source_disclosure: {},
+    });
+  }
+
   // Pattern existence validation. Attempt a cheap metrics-backend probe when
   // an env is configured — does NOT block the tool on failure, only discloses.
   const patternValidation: DependencyCheckSummary['pattern_validation'] = {
@@ -180,12 +197,22 @@ export async function executeDependencyCheck(args: DependencyCheckArgs): Promise
       : '';
   const headline = `${patternNotFoundWarning}\`${d.pattern}\`: ${d.dependencies.length} dependencies found in ${d.vendor ?? 'analyzer'} (recommendation: ${d.safe_to_drop_recommendation})`;
 
-  // Build scan_scope for defect 34A: surface what was actually scanned.
+  // Build scan_scope: surface what was actually scanned. Report the
+  // surfaces THIS vendor's scanner queries, not a fixed all-vendor union
+  // (e.g. CloudWatch has no saved_searches/monitors; Datadog has no
+  // metric_filters).
+  const VENDOR_SURFACES: Record<string, string[]> = {
+    cloudwatch: ['dashboards', 'alarms', 'metric_filters'],
+    datadog: ['dashboards', 'monitors'],
+    splunk: ['dashboards', 'alerts', 'saved_searches'],
+    elasticsearch: ['dashboards', 'alerts'],
+  };
+  const vendorSurfaces =
+    (d.vendor && VENDOR_SURFACES[d.vendor]) ||
+    ['dashboards', 'alerts', 'saved_searches', 'monitors', 'metric_filters'];
   const scan_scope = {
-    surfaces_scanned: d.scan_ran
-      ? (['dashboards', 'alerts', 'saved_searches', 'monitors', 'metric_filters'] as string[])
-      : ([] as string[]),
-    surfaces_skipped: d.scan_ran ? [] : (['dashboards', 'alerts', 'saved_searches', 'monitors', 'metric_filters'] as string[]),
+    surfaces_scanned: d.scan_ran ? vendorSurfaces : ([] as string[]),
+    surfaces_skipped: d.scan_ran ? [] : vendorSurfaces,
     execution_mode: d.execution_mode,
     scan_ran: d.scan_ran,
     vendor: d.vendor,

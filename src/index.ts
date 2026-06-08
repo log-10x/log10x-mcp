@@ -35,7 +35,6 @@ import {
 import { makeShapeCoercive } from './lib/input-coerce.js';
 
 import { loadEnvironments, resolveEnv, revalidateEnvironments, type EnvConfig, type Environments, EnvironmentValidationError } from './lib/environments.js';
-import { fetchAnalyzerCost } from './lib/api.js';
 import { eventLookupSchema, executeEventLookup } from './tools/event-lookup.js';
 import { savingsSchema, executeSavings } from './tools/savings.js';
 import { trendSchema, executeTrend } from './tools/trend.js';
@@ -63,9 +62,16 @@ import {
 import { doctorSchema, executeDoctor, runDoctorChecks, renderDoctorReport } from './tools/doctor.js';
 import { log } from './lib/log.js';
 import { describeToolError } from './lib/tool-errors.js';
-import { retrieverQuerySchema, executeRetrieverQuery } from './tools/retriever-query.js';
+import { DemoReadOnlyError, isReadOnlyMode } from './lib/read-only-guard.js';
+import { buildDemoReadOnlyEnvelope } from './lib/chassis-envelope.js';
+import { retrieverQuerySchema, executeRetrieverQuery, retrieverNotConfiguredMessage } from './tools/retriever-query.js';
 import { retrieverSeriesSchema, executeRetrieverSeries } from './tools/retriever-series.js';
 import { retrieverQueryStatusSchema, executeRetrieverQueryStatus } from './tools/retriever-query-status.js';
+import { retrieverProbeSchema, executeRetrieverProbe } from './tools/retriever-probe.js';
+import { retrieverRegisterSchema, executeRetrieverRegister } from './tools/retriever-register.js';
+import { patternDiffSchema, executePatternDiff } from './tools/pattern-diff.js';
+import { whatsChangingSchema, executeWhatsChanging } from './tools/whats-changing.js';
+import { whatsNewSchema, executeWhatsNew } from './tools/whats-new.js';
 import { backfillMetricSchema, executeBackfillMetric } from './tools/backfill-metric.js';
 import {
   customerMetricsQuerySchema,
@@ -114,14 +120,34 @@ import { updateSettingsSchema, executeUpdateSettings } from './tools/update-sett
 import { createEnvSchema, executeCreateEnv } from './tools/create-env.js';
 import { updateEnvSchema, executeUpdateEnv } from './tools/update-env.js';
 import { deleteEnvSchema, executeDeleteEnv } from './tools/delete-env.js';
+import { envRegisterSchema, executeEnvRegister } from './tools/env-register.js';
 import { setGitopsRepoSchema, executeSetGitopsRepo } from './tools/set-gitops-repo.js';
+import {
+  destSetSchema,
+  executeDestSet,
+  envValidateSchema,
+  executeEnvValidate,
+  envDiffVsEnvvarsSchema,
+  executeEnvDiffVsEnvvars,
+} from './tools/env-config-manage.js';
+import {
+  offloadAddSchema,
+  executeOffloadAdd,
+  offloadArchiveSchema,
+  executeOffloadArchive,
+} from './tools/offload-manage.js';
 import { rotateApiKeySchema, executeRotateApiKey } from './tools/rotate-api-key.js';
 import { servicesSchema, executeServices } from './tools/services.js';
 import { overflowContentsSchema, executeOverflowContents } from './tools/overflow-contents.js';
-import { fetchCapCsvForEnv, fetchActionIntentForEnv } from './lib/cap-csv-fetch.js';
+import {
+  fetchCapCsvForEnv,
+  fetchActionIntentForEnv,
+  fetchCapCsvFromConfigMap,
+  fetchActionIntentFromConfigMap,
+} from './lib/cap-csv-fetch.js';
 import { findSkewSchema, executeFindSkew } from './tools/find-skew.js';
 // find_constant_slots, find_uuid_in_body, find_incident_cluster removed
-// pre-launch (2026-05-28): produced findings the agent could not act on
+// because they produced findings the agent could not act on
 // (engine-tokenization config changes need a human + redeploy) OR
 // overlapped with log10x_investigate's trajectory + chain analysis.
 import { discoverLabelsSchema, executeDiscoverLabels } from './tools/discover-labels.js';
@@ -130,6 +156,7 @@ import { log10xStartSchema, executeLog10xStart } from './tools/log10x-start.js';
 import { costOptionsSchema, executeCostOptions } from './tools/cost-options.js';
 import { explainModeSchema, executeExplainMode } from './tools/explain-mode.js';
 import { previewFilterSchema, executePreviewFilter } from './tools/preview-filter.js';
+import { productQaSchema, executeProductQa } from './tools/product-qa.js';
 import { patternDetailSchema, executePatternDetail } from './tools/pattern-detail.js';
 import { measureCompactionSchema, executeMeasureCompaction } from './tools/measure-compaction.js';
 import { setupRecurringSchema, executeSetupRecurring } from './tools/setup-recurring.js';
@@ -149,6 +176,10 @@ let envs: Environments | undefined;
 let bootMode: ModeResolution | undefined;
 
 async function initEnvs(): Promise<void> {
+  // loadEnvironments() now applies the SaaS↔on-prem alias bridge
+  // internally so every caller (including tools like doctor that
+  // re-load envs on each call) sees the same enriched byNickname map.
+  // See src/lib/env-alias-bridge.ts.
   envs = await loadEnvironments();
 }
 
@@ -183,8 +214,6 @@ function getEnvs(): Environments {
   return envs;
 }
 
-const costCache = new Map<string, { cost: number; fetchedAt: number }>();
-const COST_REFRESH_MS = 3_600_000; // 1 hour
 
 /**
  * Wrap a tool implementation in a try/catch that produces actionable error
@@ -203,9 +232,9 @@ const COST_REFRESH_MS = 3_600_000; // 1 hour
  * etc.). When the MCP is in pure-demo mode (no user configuration,
  * silently landed on the demo backend), these tools short-circuit
  * with a structured `not_configured` response instead of returning
- * demo data the user didn't ask for. Phase 5b — phase 7 will remove
- * the silent-demo path entirely; for now we surface the conversation
- * starter without breaking the demo-mode walkthrough.
+ * demo data the user didn't ask for. We surface the conversation
+ * starter without breaking the demo-mode walkthrough; the silent-demo
+ * path will be removed in a later release.
  *
  * Tools NOT in this set bypass the gate: configure_env (the
  * onboarding tool itself), doctor (status reporting works in any
@@ -254,9 +283,9 @@ async function wrap(
   fn: () => Promise<string | StructuredOutput>
 ): Promise<WrapResult> {
   const started = Date.now();
-  // Phase 5b gate: if this is a metric-requiring tool and the MCP is
+  // Demo-mode gate: if this is a metric-requiring tool and the MCP is
   // in pure-demo state, redirect to the conversational onboarding flow
-  // instead of returning silent-demo data — UNLESS this is an intentional
+  // instead of returning silent-demo data, UNLESS this is an intentional
   // demo playground (LOG10X_MCP_DEMO_PLAYGROUND), which wants the demo data
   // served (the gated tools are exactly the demo's headline surface).
   if (
@@ -271,12 +300,21 @@ async function wrap(
     // not a bare text blob; the agent branches on data.status and the MCP
     // SDK requires structuredContent for tools that declare an outputSchema
     // (a text-only return here is rejected as "no structured content").
+    // rq-1: retriever_query / retriever_series read the offload bucket (the
+    // held-back cohort), not the metrics backend. This wrap gate pre-empts their
+    // own correct kind:'retriever' gate, so branch the remediation here: a
+    // metrics-backend nag points the agent at the wrong subsystem entirely.
+    const isRetrieverTool =
+      toolName === 'log10x_retriever_query' || toolName === 'log10x_retriever_series';
+    const ncKind = isRetrieverTool ? 'retriever' : 'metrics_backend';
     return notConfiguredToolResult(
       buildNotConfiguredEnvelope({
         tool: toolName,
-        kind: 'metrics_backend',
-        remediation: notConfiguredMessageForTool(toolName),
-        actions: defaultActionsForKind('metrics_backend'),
+        kind: ncKind,
+        remediation: isRetrieverTool
+          ? retrieverNotConfiguredMessage()
+          : notConfiguredMessageForTool(toolName),
+        actions: defaultActionsForKind(ncKind),
       }),
     );
   }
@@ -408,6 +446,30 @@ async function wrap(
   } catch (e) {
     const raw = e instanceof Error ? e.message : String(e);
     log.debug(`tool.${toolName}.raw_err`, { msg: raw });
+    // Demo read-only gate: a writer tool called `requireWriteAccess()` while
+    // the MCP is running with LOG10X_MCP_READ_ONLY=true. Return the canonical
+    // demo_read_only envelope (status='error', data.status='demo_read_only',
+    // data.error.error_type='demo_read_only') so the agent can branch on the
+    // typed discriminant without parsing prose. structuredContent is populated
+    // so MCP hosts that honor the 2025-03-26 revision see typed JSON directly.
+    if (e instanceof DemoReadOnlyError) {
+      log.info(`tool.${toolName}.demo_read_only`, {
+        ms: Date.now() - started,
+        would_have: e.would_have.slice(0, 200),
+      });
+      const envelope = buildDemoReadOnlyEnvelope({
+        tool: toolName,
+        would_have: e.would_have,
+        hint: e.hint,
+      });
+      const structuredContent = envelope as unknown as Record<string, unknown>;
+      return {
+        content: [
+          { type: 'text' as const, text: JSON.stringify(envelope, null, 2) },
+        ],
+        structuredContent,
+      };
+    }
     // A deliberate "not configured" throw (the loud human-escape-hatch
     // path, e.g. customer_metrics_query) must not abort the agent's chain
     // as an opaque error. Convert it to a structured, branchable
@@ -570,22 +632,6 @@ function applyDemoBanner(text: string): string {
   return text + `\n\n_(Demo mode — account-scoped tools query the read-only Log10x demo env. Call \`log10x_login_status\` to use your own data.)_`;
 }
 
-async function getAnalyzerCost(env: EnvConfig, override?: number): Promise<number> {
-  if (override !== undefined) return override;
-
-  const key = env.envId;
-  const cached = costCache.get(key);
-  const now = Date.now();
-
-  if (cached && (now - cached.fetchedAt) < COST_REFRESH_MS) {
-    return cached.cost;
-  }
-
-  const cost = await fetchAnalyzerCost(env);
-  costCache.set(key, { cost, fetchedAt: now });
-  return cost;
-}
-
 // ── Server ──
 
 const SERVER_INFO = { name: 'log10x', version: readClientVersion() };
@@ -633,10 +679,10 @@ CUSTOMER TIER LADDER (determines which tools are available)
    filebeat / logstash / otel-collector / vector). Filters, samples, and optionally
    losslessly compacts events in-flight. Replaces the legacy Regulator + Optimizer apps.
    Same tools as Reporter, plus event modification on the forwarder's path.
-4. Retriever (deployable with or without Reporter/Receiver) — S3 archive with Bloom-filter
-   index. Product still being shaped.
-   Adds: log10x_retriever_query (forensic retrieval), log10x_backfill_metric (new metric
-         backfilled from archive + forward-emission handoff to the Reporter).
+4. Retriever (deployable with or without Reporter/Receiver). Reads the customer-owned
+   overflow S3 bucket the Receiver's offload action writes to, indexed by Bloom filter.
+   Adds: log10x_retriever_query (read the offloaded cohort for a pattern, the events the
+         Receiver held back from the SIEM). log10x_backfill_metric is deprecated and dark.
 
 TOOL ROUTING BY USER INTENT
 
@@ -679,17 +725,16 @@ Cost investigation:
    since last week" framing.)
 - "pipeline savings / ROI"                                       → log10x_savings
 
-Forensic / audit / archive — ANY request for RAW EVENTS from the S3 archive:
-- "pull the actual log events", "get me the raw events", "retrieve events from S3",
-  "fetch events from the archive", "show me what was in the logs during <time window>",
-  "I need the events themselves, not aggregates"                 → log10x_retriever_query
-- "get me all <pattern> events from 90 days ago"                 → log10x_retriever_query
-- "get all events for customer X filtered by Y, 60d window"      → log10x_retriever_query
-- "backfill a new metric with 90d of history from the archive"   → log10x_backfill_metric
-  (Critical: when a user asks for raw events OR mentions S3 / archive / cold storage
-   explicitly, route to retriever_query even if the framing also mentions an incident.
-   investigate returns aggregate pattern analysis; retriever_query returns actual log
-   lines. "Post-mortem needs the actual log events" = retriever_query, not investigate.)
+Offloaded cohort: RAW EVENTS the Receiver held back from the SIEM (the overflow bucket):
+- "show me what's being offloaded for <pattern>", "sample the held-back events",
+  "pull the raw events the Receiver kept out of Datadog/Splunk",
+  "I need the offloaded events themselves, not aggregates"        → log10x_retriever_query
+- "sample the offloaded <pattern> events"                         → log10x_retriever_query
+- "verify the offload decision for customer X filtered by Y"      → log10x_retriever_query
+  (Critical: retriever_query reads the offload bucket, the cohort the SIEM never received.
+   It is not a mirror of indexed history. For events the SIEM still holds, the SIEM is the
+   source. investigate returns aggregate pattern analysis; retriever_query returns the
+   actual offloaded log lines. Re-ingest from the bucket is customer-driven, not an MCP action.)
 
 Root-cause across services (the investigate wedge):
 - user pastes an error, asks "what's causing the upstream"       → log10x_investigate
@@ -734,11 +779,8 @@ NATURAL TOOL CHAINS
     At reporter/dev tier log10x_cost_options returns 2 modes (observe_only + install_receiver);
     at receiver/retriever tier it returns 6 modes (drop/sample/compact/tier_down/offload/observe_only).
 
-  Forensic retrieval across retention boundaries:
+  Inspect the offloaded cohort for a pattern:
     log10x_event_lookup  →  log10x_retriever_query
-
-  New metric from historical archive:
-    log10x_top_patterns or log10x_investigate  →  log10x_backfill_metric
 
 RESPONSE STYLE
 
@@ -803,7 +845,7 @@ Tool responses carry rich label context per series (message_pattern, severity_le
 
 3. **Two tiers when the user asks for verification or audit.** A "**Facts:**" / "**Interpretation:**" split is appropriate when the user is auditing or debugging your synthesis. For a normal "show me X" request, write the decoded answer inline — facts and interpretation woven together — and skip the tiering. Default to terse, single-pass prose; reach for the two-tier layout only when warranted.
 
-4. **Refusal beats guess.** If you don't recognize a \`message_pattern\` token, severity, or label value with high confidence, say "symbol unknown" or "context unclear" and suggest pulling raw events via \`log10x_retriever_query\` (when Retriever is deployed) or running \`log10x_event_lookup\` for a known sample. Do not invent a plausible-sounding identity.
+4. **Refusal beats guess.** If you don't recognize a \`message_pattern\` token, severity, or label value with high confidence, say "symbol unknown" or "context unclear" and run \`log10x_event_lookup\` for a known sample. When the pattern is under an active offload action, \`log10x_retriever_query\` can sample the held-back events. Do not invent a plausible-sounding identity.
 
 5. **No reference to patterns/services/severities outside the response.** The label set in the tool result is the universe. Phrases like "you probably also have…" or "I'd expect to see…" are forbidden — they invite the user to look for problems that aren't in the data.
 
@@ -1034,8 +1076,7 @@ function applyToolRegistrations(
 registerLog10xTool('log10x_event_lookup', eventLookupSchema, (args) =>
   wrap('log10x_event_lookup', async () => {
     const env = resolveEnv(getEnvs(), args.environment);
-    const cost = await getAnalyzerCost(env, args.analyzerCost);
-    return executeEventLookup({ ...args, analyzerCost: cost }, env);
+    return executeEventLookup(args, env);
   })
 );
 
@@ -1054,13 +1095,23 @@ registerLog10xTool('log10x_pattern_examples', patternExamplesSchema, (args) =>
   })
 );
 
+// ── Tool: log10x_product_qa ──
+//
+// Local docs-corpus lookup. No env / TSDB / SIEM dependency — the
+// corpus is shipped inside the build at build/product-kb/docs (the
+// build script copies it from config/mksite/docs). See
+// src/lib/product-kb/index.ts for path resolution + override env.
+
+registerLog10xTool('log10x_product_qa', productQaSchema, (args) =>
+  wrap('log10x_product_qa', async () => executeProductQa(args))
+);
+
 // ── Tool: log10x_savings ──
 
 registerLog10xTool('log10x_savings', savingsSchema, (args) =>
   wrap('log10x_savings', async () => {
     const env = resolveEnv(getEnvs(), args.environment);
-    const cost = await getAnalyzerCost(env, args.analyzerCost);
-    return executeSavings({ ...args, analyzerCost: cost }, env);
+    return executeSavings(args, env);
   })
 );
 
@@ -1069,8 +1120,7 @@ registerLog10xTool('log10x_savings', savingsSchema, (args) =>
 registerLog10xTool('log10x_pattern_trend', trendSchema, (args) =>
   wrap('log10x_pattern_trend', async () => {
     const env = resolveEnv(getEnvs(), args.environment);
-    const cost = await getAnalyzerCost(env, args.analyzerCost);
-    return executeTrend({ ...args, analyzerCost: cost }, env);
+    return executeTrend(args, env);
   })
 );
 
@@ -1105,13 +1155,111 @@ registerLog10xTool('log10x_set_gitops_repo', setGitopsRepoSchema, (args) =>
   })
 );
 
+// ── Tool: log10x_dest_set ──
+// Edit the SIEM destination block on an env-config document. Separate
+// from configure_env (which validates the live metrics backend before
+// writing) so the agent can change destination fields without re-supplying
+// backend credentials.
+
+registerLog10xTool('log10x_dest_set', destSetSchema, (args) =>
+  wrap('log10x_dest_set', async () => {
+    return executeDestSet(args);
+  })
+);
+
+// ── Tool: log10x_env_validate ──
+// Schema + cross-field sanity over a stored env-config document. Catches
+// destination/region mismatches, ingest_url shape issues, cluster-vs-offload
+// type misalignments before downstream tools fail with vendor errors.
+
+registerLog10xTool('log10x_env_validate', envValidateSchema, (args) =>
+  wrap('log10x_env_validate', async () => {
+    return executeEnvValidate(args);
+  })
+);
+
+// ── Tool: log10x_env_diff_vs_envvars ──
+// Compare the stored env doc against the LOG10X_* env vars the bridge
+// would have produced. Surfaces "I set the env var but it's being ignored"
+// drift with per-field recommendations.
+
+registerLog10xTool('log10x_env_diff_vs_envvars', envDiffVsEnvvarsSchema, (args) =>
+  wrap('log10x_env_diff_vs_envvars', async () => {
+    return executeEnvDiffVsEnvvars(args);
+  })
+);
+
+// ── Tool: log10x_offload_add ──
+// Append a new entry to the env-config document's offload_destinations[].
+// Multi-target is the documented use case (drain a legacy bucket while a
+// new one is primary); the schema array stays non-empty by default.
+
+registerLog10xTool('log10x_offload_add', offloadAddSchema, (args) =>
+  wrap('log10x_offload_add', async () => {
+    return executeOffloadAdd(args);
+  })
+);
+
+// ── Tool: log10x_offload_archive ──
+// Flip one destination's status to `archived` (kept in the list as a
+// historical reference). Refuses when the target is the last active
+// destination — the Receiver needs at least one active destination to
+// route the dropped slice to.
+
+registerLog10xTool('log10x_offload_archive', offloadArchiveSchema, (args) =>
+  wrap('log10x_offload_archive', async () => {
+    return executeOffloadArchive(args);
+  })
+);
+
 // ── Tool: log10x_top_patterns ──
 
 registerLog10xTool('log10x_top_patterns', topPatternsSchema, (args) =>
   wrap('log10x_top_patterns', async () => {
     const env = resolveEnv(getEnvs(), args.environment);
-    const cost = await getAnalyzerCost(env, args.analyzerCost);
-    return executeTopPatterns({ ...args, analyzerCost: cost }, env);
+    return executeTopPatterns(args, env);
+  })
+);
+
+// ── Tool: log10x_pattern_diff ──
+//
+// Set diff of patterns across a time boundary. Compares pattern presence in
+// two windows and returns new / retired / persistent / re_emerged sets plus
+// co_emergence_clusters (deploy fingerprint via first_seen clustering).
+// Coherent only because log10x pattern_hash is stable across queries;
+// competitors that re-cluster per query can't answer this.
+
+registerLog10xTool('log10x_pattern_diff', patternDiffSchema, (args) =>
+  wrap('log10x_pattern_diff', async () => {
+    const env = resolveEnv(getEnvs(), args.environment);
+    return executePatternDiff(args, env);
+  })
+);
+
+// ── Tool: log10x_whats_changing ──
+//
+// Patterns ranked by delta vs a baseline window (not current cost). Restores
+// the capability of the removed log10x_cost_drivers tool
+// using the modern StructuredOutput envelope. Brand-new patterns (no
+// baseline) are excluded — they go to log10x_whats_new.
+
+registerLog10xTool('log10x_whats_changing', whatsChangingSchema, (args) =>
+  wrap('log10x_whats_changing', async () => {
+    const env = resolveEnv(getEnvs(), args.environment);
+    return executeWhatsChanging(args, env);
+  })
+);
+
+// ── Tool: log10x_whats_new ──
+//
+// Patterns whose first_seen timestamp falls inside a recency window. Sister
+// tool to whats_changing — new patterns have no baseline, so they get a
+// clean home that doesn't pollute the delta-vs-baseline surface.
+
+registerLog10xTool('log10x_whats_new', whatsNewSchema, (args) =>
+  wrap('log10x_whats_new', async () => {
+    const env = resolveEnv(getEnvs(), args.environment);
+    return executeWhatsNew(args, env);
   })
 );
 
@@ -1120,17 +1268,16 @@ registerLog10xTool('log10x_top_patterns', topPatternsSchema, (args) =>
 registerLog10xTool('log10x_services', servicesSchema, (args) =>
   wrap('log10x_services', async () => {
     const env = resolveEnv(getEnvs(), args.environment);
-    const cost = await getAnalyzerCost(env, args.analyzerCost);
-    return executeServices({ ...args, analyzerCost: cost }, env);
+    return executeServices(args, env);
   })
 );
 
 // ── Tool: log10x_overflow_contents ──
 //
-// Item 6 (cost-cutting close-list v2): the contents view of the
+// The contents view of the
 // customer-owned offload bucket. Queries dropped-by-pattern from the
 // TSDB, joins to the cap-CSV to filter to action=offload only, and
-// routes the agent to log10x_retriever_query for rehydration. See
+// routes the agent to log10x_retriever_query to inspect the offloaded cohort. See
 // the long docstring on src/tools/overflow-contents.ts for the
 // design rationale + cap-CSV degraded-mode semantics.
 
@@ -1202,6 +1349,29 @@ registerLog10xTool('log10x_retriever_series', retrieverSeriesSchema, (args) =>
 
 registerLog10xTool('log10x_retriever_query_status', retrieverQueryStatusSchema, (args) =>
   wrap('log10x_retriever_query_status', async () => executeRetrieverQueryStatus(args))
+);
+
+// ── Tool: log10x_retriever_probe ──
+//
+// End-to-end probe of the deployed retriever chain. Fires a synthetic query
+// and asserts every stage (offload bucket freshness, indexer pipeline running,
+// SQS depths, pod ready, CloudWatch scan/stream events, S3 qr/*.jsonl, MCP
+// events returned). Returns a structured verdict (green / broken / unknown)
+// with per-stage asserts and a remedy on the first failure.
+
+registerLog10xTool('log10x_retriever_probe', retrieverProbeSchema, (args) =>
+  wrap('log10x_retriever_probe', async () => executeRetrieverProbe(args))
+);
+
+// ── Tool: log10x_retriever_register ──
+//
+// Write the Retriever endpoint + queue coordinates onto an existing
+// environment-config document. Requires `log10x_env_register` to have
+// created the env first — refuses on env_not_found rather than
+// stamping a partial document the rest of the schema can't satisfy.
+
+registerLog10xTool('log10x_retriever_register', retrieverRegisterSchema, (args) =>
+  wrap('log10x_retriever_register', async () => executeRetrieverRegister(args))
 );
 
 // ── Tool: log10x_backfill_metric ──
@@ -1362,6 +1532,18 @@ registerLog10xTool('log10x_delete_env', deleteEnvSchema, (args) =>
   wrap('log10x_delete_env', async () => executeDeleteEnv(args, getEnvs()))
 );
 
+// ── Tool: log10x_env_register ──
+//
+// Writes a full EnvironmentConfig document (cluster identity, SIEM
+// destination, offload destinations, streamer + retriever endpoints)
+// to whichever on-prem store the customer's cloud uses. Distinct from
+// create_env: that mints account-level identity on the SaaS backend;
+// this writes the cluster-side descriptor every tool resolves against.
+
+registerLog10xTool('log10x_env_register', envRegisterSchema, (args) =>
+  wrap('log10x_env_register', async () => executeEnvRegister(args))
+);
+
 // ── Tool: log10x_rotate_api_key ──
 
 registerLog10xTool('log10x_rotate_api_key', rotateApiKeySchema, (args) =>
@@ -1510,7 +1692,10 @@ registerLog10xTool('log10x_advise_install', adviseInstallSchema, (args) =>
 // ── Tool: log10x_configure_engine (unified per-pattern action-plan PR author) ──
 
 registerLog10xTool('log10x_configure_engine', configureEngineSchema, (args) =>
-  wrap('log10x_configure_engine', () => executeConfigureEngine(args))
+  wrap('log10x_configure_engine', () => {
+    const env = resolveEnv(getEnvs(), args.environment);
+    return executeConfigureEngine(args, env);
+  })
 );
 
 // ── Tool: log10x_estimate_savings (forecast + verify modes) ──
@@ -1545,11 +1730,10 @@ registerLog10xTool('log10x_baseline', baselineSchema, (args) =>
 //      baseline_window is the pre-policy reference.
 //   3. Adapts VerifyResult → WeeklyVerifyResult.
 //
-// Known Item-5 gap (cost-cutting-prioritized-close-list-v2 §1.5):
-// runEstimateVerify queries `[range]` ending at "now", so every weekly
-// loop hits the same live snapshot. The arithmetic-reconciliation patch
-// (Item 5) is where week-specific windows + the per_pattern_breakdown
-// cap-CSV join land. Item 1 only unblocks the not_ready hard-return.
+// Limitation: runEstimateVerify queries `[range]` ending at "now", so
+// every weekly loop hits the same live snapshot. Week-specific windows
+// and the per_pattern_breakdown cap-CSV join are not yet implemented;
+// this path only unblocks the not_ready hard-return.
 
 _setVerifyRunner(async ({ commitment, week_start, week_end }) => {
   const env = resolveEnv(getEnvs(), commitment.env);
@@ -1563,13 +1747,32 @@ _setVerifyRunner(async ({ commitment, week_start, week_end }) => {
   // Best-effort fetch of action-intent.json (canonical action source) and
   // cap CSV (byte-cap context + legacy action suffix fallback). Both are
   // passed to runEstimateVerify for action-split attribution. On any
-  // failure (no gh, no repo, file not found) the respective field is
-  // undefined and the verify run falls back to the §E.1 single-bucket
-  // attribution in commitment-report.
-  const [capCsv, actionIntent] = await Promise.all([
-    fetchCapCsvForEnv(env).catch(() => undefined),
-    fetchActionIntentForEnv(env).catch(() => undefined),
-  ]);
+  // failure the respective field is undefined and the verify run falls
+  // back to single-bucket attribution in commitment-report.
+  //
+  // Delivery channel comes from commitment.delivery_target captured at
+  // apply time:
+  //   - kind='configmap' → kubectl get configmap (the kubectl_configmap
+  //     delivery path; otel-demo and other k8s-native deploys)
+  //   - kind='gitops' or absent → gh api (the original PR-merge path;
+  //     also the back-compat path for commitments persisted before
+  //     delivery_target was added)
+  // When both channels are wired, gitops wins (PR is the durable source
+  // of truth and matches the source_disclosure label).
+  const target = commitment.delivery_target;
+  let capCsv: string | undefined;
+  let actionIntent: Awaited<ReturnType<typeof fetchActionIntentForEnv>>;
+  if (target?.kind === 'configmap') {
+    [capCsv, actionIntent] = await Promise.all([
+      fetchCapCsvFromConfigMap(target.name, target.namespace).catch(() => undefined),
+      fetchActionIntentFromConfigMap(target.name, target.namespace).catch(() => undefined),
+    ]);
+  } else {
+    [capCsv, actionIntent] = await Promise.all([
+      fetchCapCsvForEnv(env).catch(() => undefined),
+      fetchActionIntentForEnv(env).catch(() => undefined),
+    ]);
+  }
   const vr = await runEstimateVerify(
     {
       destination: commitment.destination,
@@ -1627,16 +1830,20 @@ if (process.env.LOG10X_DEV_MODE === 'true') {
 const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_start', intent: 'CALL FIRST on any cost / orient / "where do I start" question — returns tier + action menu + must_ask_user question; agent must surface verbatim and wait for user pick before any other tool' },
   { name: 'log10x_event_lookup', intent: 'What is this single log line — resolve to stable identity + cost + AI classification' },
-  { name: 'log10x_pattern_examples', intent: 'Recent live events for a pattern from the log analyzer with template-parsed slot values — bounded to 24h, for older use retriever_query' },
+  { name: 'log10x_pattern_examples', intent: 'Recent live events for a pattern from the log analyzer with template-parsed slot values, bounded to 24h. When the pattern is offloaded, retriever_query samples the held-back cohort.' },
   { name: 'log10x_savings', intent: 'Pipeline ROI — how much receiver / retriever are saving in dollars' },
   { name: 'log10x_pattern_trend', intent: 'Time series for a pattern — volume + cost history, spike detection, sparkline' },
   { name: 'log10x_dependency_check', intent: 'Scan SIEM + dashboards + alerts for refs to a pattern before muting / deleting it' },
   { name: 'log10x_top_patterns', intent: 'Top N patterns by current cost, with per-row delta vs comparison_window and newly-emerged section' },
+  { name: 'log10x_pattern_diff', intent: 'Set diff of patterns across a time boundary — new/retired/persistent/re_emerged + co_emergence_clusters (deploy fingerprint). Coherent across boundaries because pattern_hash is stable across queries.' },
+  { name: 'log10x_whats_changing', intent: 'Patterns ranked by delta vs baseline (growth/shrinkage). Brand-new patterns excluded — see log10x_whats_new for those. Restores the deleted log10x_cost_drivers capability.' },
+  { name: 'log10x_whats_new', intent: 'Patterns whose first_seen falls inside a recency window. Separate from delta-vs-baseline because new patterns have no baseline.' },
   { name: 'log10x_investigate', intent: 'Single-call root-cause — causal chain for acute spikes or cohort for drift' },
   { name: 'log10x_resolve_batch', intent: 'Pasted-batch triage — per-pattern variable concentration + next actions' },
-  { name: 'log10x_retriever_query', intent: 'Direct archive retrieval by pattern identity (tenx_user_pattern) with JS filter expressions' },
-  { name: 'log10x_retriever_series', intent: 'Fidelity-aware time series from the S3 archive — auto-selects exact aggregation vs sampled fan-out' },
-  { name: 'log10x_backfill_metric', intent: 'Create a new Datadog / Prometheus metric backfilled from Retriever archive' },
+  { name: 'log10x_retriever_query', intent: 'Read the offloaded cohort for a pattern (tenx_user_pattern) from the customer-owned overflow bucket with JS filter expressions: the events the Receiver held back from the SIEM' },
+  { name: 'log10x_retriever_series', intent: 'Time series over the offloaded cohort in the overflow bucket: auto-selects exact aggregation vs sampled parallel sub-window queries' },
+  { name: 'log10x_retriever_probe', intent: 'End-to-end retriever chain probe — fires a synthetic query and asserts every stage (offload bucket, indexer pipeline, SQS, pod ready, CW scan/stream, S3 jsonl, MCP events). Returns green/broken/unknown with per-stage asserts and remedies.' },
+  { name: 'log10x_backfill_metric', intent: 'Deprecated, kept dark. The live isDropped metric surface answers overflow-volume questions as a TSDB query.' },
   { name: 'log10x_doctor', intent: 'Startup health check — env config, gateway, tier, freshness, Retriever, paste endpoint, cross-pillar enrichment floor' },
   { name: 'log10x_login_status', intent: 'Report credential / env state — identity, env list with permissions, demo-mode upgrade guide if applicable' },
   { name: 'log10x_signin_start', intent: 'Step 1 of Auth0 Device Flow signup/signin: opens browser, returns the user_code + device_code so the model can surface them and chain to log10x_signin_complete' },
@@ -1644,9 +1851,13 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_signout', intent: 'Wipe ~/.log10x/credentials and fall back to demo mode (or lower-priority config); does not revoke the key on the backend' },
   { name: 'log10x_update_settings', intent: 'Update user metadata (analyzer cost, AI provider, etc.) via POST /api/v1/user' },
   { name: 'log10x_create_env', intent: 'Create a new Log10x environment on the account; pairs with log10x_advise_install for end-to-end provision-and-install' },
-  { name: 'log10x_update_env', intent: 'Rename an env or change the default — requires backend PUT route (see backend PR #62)' },
+  { name: 'log10x_update_env', intent: 'Rename an env or change the default; requires the backend PUT route' },
   { name: 'log10x_delete_env', intent: 'Delete an env (destructive, irrecoverable) — requires confirm_name matching the env\'s name' },
   { name: 'log10x_set_gitops_repo', intent: 'Write gitops.repo to ~/.log10x/envs.json so configure_engine can author cap-CSV PRs; confirm="set-now" required' },
+  { name: 'log10x_dest_set', intent: 'Update the SIEM destination block (siem_vendor / region / log_group_prefix / ingest_url) on an env-config document; idempotent, validates new doc against schema before write' },
+  { name: 'log10x_env_validate', intent: 'Schema parse + cross-field sanity check on a stored env-config document — region/vendor pairing, ingest_url shape, cluster vs offload type alignment, active-offload presence' },
+  { name: 'log10x_env_diff_vs_envvars', intent: 'Diff stored env-config doc against LOG10X_* env vars — surfaces silent-ignored env vars with per-field remediation; pure-on-prem-store configs return empty diff' },
+  { name: 'log10x_retriever_register', intent: 'Attach the Retriever endpoint + queue coordinates to an existing env-config document. Requires log10x_env_register to have created the env first.' },
   { name: 'log10x_rotate_api_key', intent: 'Rotate the Log10x API key (destructive) — old key invalidated immediately, new one persisted to ~/.log10x/credentials' },
   { name: 'log10x_customer_metrics_query', intent: 'Direct PromQL passthrough to the customer metric backend (escape hatch for cross-pillar investigations)' },
   { name: 'log10x_discover_join', intent: 'Auto-discover the join label between Log10x pattern metrics and the customer metric backend via Jaccard similarity' },
@@ -1658,14 +1869,16 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_poc_from_local', intent: 'Run the POC from local kubectl logs (no SIEM credentials needed); industry-pricing matrix instead of bill prediction' },
   { name: 'log10x_discover_env', intent: 'Read-only probe of k8s + AWS — returns a snapshot_id the advise_* tools consume' },
   { name: 'log10x_advise_install', intent: 'Install wizard for Reporter / Receiver — walks the user through app / forwarder / backends / airgapped / license, then emits a concrete helm plan' },
-  { name: 'log10x_advise_retriever', intent: 'Retriever install/verify/teardown plan — standalone S3 + SQS archive + query' },
+  { name: 'log10x_advise_retriever', intent: 'Retriever install/verify/teardown plan: standalone reader over the customer-owned offload S3 bucket (S3 + SQS indexer + query)' },
   { name: 'log10x_configure_engine', intent: 'Unified per-pattern action-plan PR author — resolves a budget to a per-pattern plan (pass | sample | compact | drop | tier_down) under a per-destination cost model and emits a gitops PR.' },
   { name: 'log10x_estimate_savings', intent: 'Two-mode savings estimator — forecast mode projects bytes_out + $/mo for a proposed plan under the per-destination cost model; verify mode counts realized savings from the engine `isDropped` label with cap-hit / drift / new-patterns / leakage attribution.' },
   { name: 'log10x_baseline', intent: 'Pre-flight readiness gate for cost-reduction tools — verifies Reporter age (default 7d), pattern-coverage stability, and absence of acute anomalies; returns structured `not_ready` with the specific gate(s) that failed.' },
   { name: 'log10x_commitment_report', intent: 'CFO-facing weekly aggregate against a commitment record — Bayesian Beta(2,2) confidence prior on realized savings, markdown report suitable for sharing.' },
   { name: 'log10x_pattern_mitigate', intent: 'Return the env-gated mitigation options + exact configs for a pattern (drop @ analyzer, drop @ forwarder, mute @ 10x, compact @ 10x) in user terms with env-capability gating' },
-  { name: 'log10x_overflow_contents', intent: 'Contents view of the customer-owned offload S3 bucket — per-pattern bytes, event count, time-first/last-seen, growth-rate; filtered to action=offload via the cap-CSV. Routes the agent to retriever_query for rehydration.' },
+  { name: 'log10x_overflow_contents', intent: 'Contents view of the customer-owned offload S3 bucket: per-pattern bytes, event count, time-first/last-seen, growth-rate; filtered to action=offload via the cap-CSV. Routes the agent to retriever_query to inspect the offloaded cohort.' },
   { name: 'log10x_setup_recurring', intent: 'Progressive wizard to configure a recurring cost-reduction agent — target services, savings %, schedule, scheduler (k8s/GHA/crontab), gitops repo — emits policy.yaml + scheduler manifest' },
+  { name: 'log10x_offload_add', intent: 'Append a new offload destination (s3 / gcs / azure_blob / file) to an env-config document\'s offload_destinations[]. Multi-target offload is allowed; nickname must be unique within the list.' },
+  { name: 'log10x_offload_archive', intent: 'Flip an offload destination\'s status to `archived` and stamp archived_at. Kept in the list as a historical reference. Refuses when the target is the only active destination — the Receiver requires at least one.' },
 ];
 
 async function handleCliFlags(): Promise<boolean> {
@@ -1931,11 +2144,22 @@ async function main() {
     default_env: loaded.default.nickname,
     demo_mode: loaded.isDemoMode,
     demo_playground: DEMO_PLAYGROUND,
+    read_only_mode: isReadOnlyMode(),
     manifest_loaded: manifest !== null,
     boot_mode: bootMode?.mode,
     boot_mode_backend: bootMode?.detectionPath,
     boot_mode_probe_ms: bootMode?.probeDurationMs,
   });
+  // Read-only playground banner. The structured `mcp.boot` line is
+  // gated behind LOG10X_MCP_LOG_LEVEL (silent by default), so operators
+  // would not see read-only state in stock installs. Force a stderr
+  // banner when the gate is on, regardless of log level.
+  if (isReadOnlyMode()) {
+    // eslint-disable-next-line no-console
+    console.error(
+      `[log10x-mcp] Running in read-only mode (LOG10X_MCP_READ_ONLY=${process.env.LOG10X_MCP_READ_ONLY}). Writer tools will return demo_read_only envelopes instead of executing.`,
+    );
+  }
   // Surface mode-detect resolution to stderr at boot so it shows up
   // in MCP-client logs without needing to call `log10x_doctor`.
   if (bootMode) {

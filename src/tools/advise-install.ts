@@ -176,7 +176,7 @@ export type AdviseInstallArgs = z.infer<typeof schemaObj>;
 /**
  * Discriminated union over every possible wizard outcome. The agent
  * reads `data.mode` and narrows to the per-mode shape — every field
- * is typed. Mirrors the typed-data pattern Tal established for
+ * is typed. Mirrors the typed-data pattern used by
  * services / pattern_mitigate / dependency_check / etc.
  *
  * Every variant carries `markdown` so a host that wants the rendered

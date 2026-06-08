@@ -246,7 +246,9 @@ test('weekly_digest: empty history produces caveat and zero tick count', async (
     action_intent_path: pathJoin(tmpdir(), 'log10x-test-no-such-intent.json'),
   };
   const result = await executeCommitmentReport(args);
-  const env = result.data as WeeklyDigestEnvelope;
+  // commitment-report.ts returns a chassis envelope; the real
+  // WeeklyDigestEnvelope lives at result.data.payload (chassis migration).
+  const env = (result.data as { payload: WeeklyDigestEnvelope }).payload;
 
   assert.equal(env.tick_count, 0);
   assert.equal(env.applied_count, 0);
@@ -289,7 +291,9 @@ test('weekly_digest: applied ticks within window are aggregated', async () => {
     action_intent_path: pathJoin(tmpdir(), 'log10x-test-no-such-intent.json'),
   };
   const result = await executeCommitmentReport(args);
-  const env = result.data as WeeklyDigestEnvelope;
+  // commitment-report.ts returns a chassis envelope; the real
+  // WeeklyDigestEnvelope lives at result.data.payload (chassis migration).
+  const env = (result.data as { payload: WeeklyDigestEnvelope }).payload;
 
   assert.equal(env.tick_count, 3);
   assert.equal(env.applied_count, 2);
@@ -337,14 +341,28 @@ test('weekly_digest: action distribution from valid action-intent.json', async (
     action_intent_path: intentPath,
   };
   const result = await executeCommitmentReport(args);
-  const env = result.data as WeeklyDigestEnvelope;
+  // commitment-report.ts returns a chassis envelope; the real
+  // WeeklyDigestEnvelope lives at result.data.payload (chassis migration).
+  const env = (result.data as { payload: WeeklyDigestEnvelope }).payload;
 
   assert.equal(env.action_distribution['drop']?.pattern_count, 2);
   assert.equal(env.action_distribution['compact']?.pattern_count, 1);
 });
 
 test('weekly_digest: new-this-week patterns detected from recent set_at_iso', async () => {
-  const histPath = writeHistory('new-pattern', []);
+  // buildPatternNotes short-circuits when no tick runs exist
+  // (runs.length === 0 → no notes), so seed one applied tick in-window
+  // before exercising the action-intent-driven new_this_week path.
+  const histPath = writeHistory('new-pattern', [
+    {
+      ts: daysAgoIso(1),
+      status: 'applied',
+      projected_savings_pct: 12,
+      delta_patterns: 1,
+      delta_pp: 2,
+      message: 'tick',
+    },
+  ]);
   const intentPath = writeActionIntent('new-pattern', [
     {
       pattern_hash: 'new-hash-abc',
@@ -373,7 +391,9 @@ test('weekly_digest: new-this-week patterns detected from recent set_at_iso', as
     action_intent_path: intentPath,
   };
   const result = await executeCommitmentReport(args);
-  const env = result.data as WeeklyDigestEnvelope;
+  // commitment-report.ts returns a chassis envelope; the real
+  // WeeklyDigestEnvelope lives at result.data.payload (chassis migration).
+  const env = (result.data as { payload: WeeklyDigestEnvelope }).payload;
 
   const newNotes = env.pattern_notes.filter((n) => n.kind === 'new_this_week');
   assert.equal(newNotes.length, 1);
@@ -407,7 +427,9 @@ test('weekly_digest: anomaly growth detected when savings grow >5x', async () =>
     action_intent_path: pathJoin(tmpdir(), 'log10x-test-no-such-intent.json'),
   };
   const result = await executeCommitmentReport(args);
-  const env = result.data as WeeklyDigestEnvelope;
+  // commitment-report.ts returns a chassis envelope; the real
+  // WeeklyDigestEnvelope lives at result.data.payload (chassis migration).
+  const env = (result.data as { payload: WeeklyDigestEnvelope }).payload;
 
   const anomalies = env.pattern_notes.filter((n) => n.kind === 'anomaly_growth');
   assert.equal(anomalies.length, 1);
@@ -442,7 +464,9 @@ test('weekly_digest: no anomaly when savings grow <5x', async () => {
     action_intent_path: pathJoin(tmpdir(), 'log10x-test-no-such-intent.json'),
   };
   const result = await executeCommitmentReport(args);
-  const env = result.data as WeeklyDigestEnvelope;
+  // commitment-report.ts returns a chassis envelope; the real
+  // WeeklyDigestEnvelope lives at result.data.payload (chassis migration).
+  const env = (result.data as { payload: WeeklyDigestEnvelope }).payload;
 
   const anomalies = env.pattern_notes.filter((n) => n.kind === 'anomaly_growth');
   assert.equal(anomalies.length, 0);
@@ -467,7 +491,9 @@ test('weekly_digest: markdown is populated and contains expected sections', asyn
     action_intent_path: pathJoin(tmpdir(), 'log10x-test-no-such-intent.json'),
   };
   const result = await executeCommitmentReport(args);
-  const env = result.data as WeeklyDigestEnvelope;
+  // commitment-report.ts returns a chassis envelope; the real
+  // WeeklyDigestEnvelope lives at result.data.payload (chassis migration).
+  const env = (result.data as { payload: WeeklyDigestEnvelope }).payload;
 
   assert.ok(typeof env.markdown === 'string' && env.markdown.length > 0);
   assert.ok(env.markdown!.includes('Weekly Digest'));
@@ -484,7 +510,9 @@ test('weekly_digest: human_summary is a non-empty string', async () => {
     action_intent_path: pathJoin(tmpdir(), 'log10x-test-no-such-intent.json'),
   };
   const result = await executeCommitmentReport(args);
-  const env = result.data as WeeklyDigestEnvelope;
+  // commitment-report.ts returns a chassis envelope; the real
+  // WeeklyDigestEnvelope lives at result.data.payload (chassis migration).
+  const env = (result.data as { payload: WeeklyDigestEnvelope }).payload;
 
   assert.ok(typeof env.human_summary === 'string' && env.human_summary.length > 0);
   assert.ok(env.human_summary.includes('Weekly digest'));

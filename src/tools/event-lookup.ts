@@ -11,6 +11,7 @@ import { queryInstant, queryAi } from '../lib/api.js';
 import * as pql from '../lib/promql.js';
 import { LABELS } from '../lib/promql.js';
 import { bytesToCost, parsePrometheusValue, buildDisclosedDollarValue, type DisclosedDollarValue } from '../lib/cost.js';
+import { resolveRate, destinationFromEnvAnalyzer } from '../lib/rate-resolution.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import {
   fmtDollar, fmtPattern, fmtSeverity, fmtCount, fmtBytes, fmtPct,
@@ -21,8 +22,9 @@ import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { agentOnly } from '../lib/agent-only.js';
 import { fetchOneSampleByHash } from '../lib/siem/sample.js';
 import { patternDisplay } from '../lib/pattern-descriptor.js';
-import { type StructuredOutput } from '../lib/output-types.js';
-import { newChassisTelemetry, buildChassisEnvelope, buildChassisErrorEnvelope, sanitizeHeadline } from '../lib/chassis-envelope.js';
+import { type StructuredOutput, type Action } from '../lib/output-types.js';
+import { newChassisTelemetry, buildChassisEnvelope, buildChassisErrorEnvelope } from '../lib/chassis-envelope.js';
+import { wrapBackendError } from '../lib/primitive-errors.js';
 import { getOffloadStatus } from '../lib/offload-status.js';
 import { isRetrieverConfigured } from '../lib/retriever-api.js';
 import { normalizeTimeRange } from '../lib/time-range.js';
@@ -41,6 +43,12 @@ export const eventLookupSchema = {
 
 interface EventLookupSummary {
   pattern: string;
+  // Stable tenx_hash identity — promoted from `resolved_from_hash` so
+  // catalog-identity-handoff lands at the same top-level key on both the
+  // hash-input path (caller passed pattern_hash/tenxHash) AND the
+  // name-input/raw-line path (resolved internally from the pattern label).
+  // Empty string when the pattern is not present in TSDB.
+  pattern_hash: string;
   window: string;
   services: Array<{
     service: string;
@@ -53,6 +61,12 @@ interface EventLookupSummary {
     cost_baseline_usd_disclosed: DisclosedDollarValue | null;
     events: number;
     is_new: boolean;
+    // Stable pattern_hash echoed on every per-service row so cross-pillar
+    // chain steps (event_lookup → pattern_examples / retriever_query /
+    // customer_metrics_query) can join on hash without re-fetching the
+    // summary-level resolved_from_hash. Empty string when the pattern is
+    // not present in TSDB (same as the top-level pattern_hash sentinel).
+    pattern_hash: string;
   }>;
   totals: {
     bytes: number;
@@ -85,20 +99,20 @@ export async function executeEventLookup(
   // Merge so downstream code only reads args.tenxHash.
   const argsNormalized = { ...args, tenxHash: args.pattern_hash ?? args.tenxHash };
   const telemetry = newChassisTelemetry();
-  const sumOut: { data?: EventLookupSummary } = {};
+  const sumOut: { data?: EventLookupSummary; nextActions?: NextAction[] } = {};
   let md: string;
   try {
     md = await executeEventLookupInner(argsNormalized, env, sumOut);
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
+    // Wave 2.D: route through wrapBackendError so HTTP-status-coded
+    // throws from queryInstant / queryAi (e.g. "HTTP 503: ...") classify
+    // as backend_unavailable/backend_timeout/schema_invalid/anchor_not_found
+    // with proper retryable + suggested_backoff_ms instead of always
+    // collapsing to a non-retryable 'backend_error'.
+    const wrapped = wrapBackendError(err);
     return buildChassisErrorEnvelope({
       tool: 'log10x_event_lookup',
-      err: {
-        error_type: 'backend_error',
-        retryable: false,
-        suggested_backoff_ms: null,
-        hint: sanitizeHeadline(msg).slice(0, 300),
-      },
+      err: wrapped,
       telemetry,
       contextPayload: {
         pattern: argsNormalized.pattern,
@@ -143,6 +157,17 @@ export async function executeEventLookup(
   const rateSourceMapped = d.rate_source === 'customer_supplied' ? 'customer_supplied' as const
     : d.rate_source === 'list_price' ? 'list_price' as const
     : 'none' as const;
+  // event_lookup is a hub: agents reading the result must be told where to
+  // go next. Convert the NextAction prose-hints into the structured
+  // actions[] block on the chassis envelope so a chain walker can branch
+  // without parsing markdown. Mapping is direct: NextAction
+  // { tool, args, reason } → Action { tool, args, reason, role }.
+  const chassisActions: Action[] = (sumOut.nextActions ?? []).map((a) => ({
+    tool: a.tool,
+    args: a.args as Record<string, unknown>,
+    reason: a.reason,
+    role: 'recommended-next' as const,
+  }));
   return buildChassisEnvelope({
     tool: 'log10x_event_lookup',
     view: 'summary',
@@ -166,6 +191,7 @@ export async function executeEventLookup(
     },
     payload: d,
     human_summary: headline,
+    actions: chassisActions,
     telemetry,
   });
 }
@@ -173,7 +199,7 @@ export async function executeEventLookup(
 async function executeEventLookupInner(
   args: { pattern?: string; pattern_hash?: string; tenxHash?: string; service?: string; timeRange?: string; analyzerCost?: number; effective_ingest_per_gb?: number; siemScope?: string },
   env: EnvConfig,
-  sumOut?: { data?: EventLookupSummary }
+  sumOut?: { data?: EventLookupSummary; nextActions?: NextAction[] }
 ): Promise<string> {
   // Defensive defaults — schema defaults only apply at the MCP-SDK
   // boundary; chain-walkers, internal callers, and the eval harness
@@ -181,17 +207,19 @@ async function executeEventLookupInner(
   // Normalise '1d' legacy alias → '24h'.
   const timeRange = normalizeTimeRange(args.timeRange ?? '7d');
   const tf = parseTimeframe(timeRange);
-  // Rate resolution per spec § "no $1/GB lie": prefer customer override,
-  // fall back to deprecated alias (list price), else null → rate_source='unset'
-  // so dollar fields collapse to null instead of silently quoting $1/GB.
-  const rateSource: 'list_price' | 'customer_supplied' | 'unset' =
-    args.effective_ingest_per_gb != null
-      ? 'customer_supplied'
-      : args.analyzerCost != null
-        ? 'list_price'
-        : 'unset';
-  const costPerGb: number | null =
-    args.effective_ingest_per_gb ?? args.analyzerCost ?? null;
+  // SHARED rate resolver (lib/rate-resolution.ts). Same priority chain as
+  // services/top_patterns/explain_mode/estimate_savings: caller arg →
+  // envs.json analyzerCost → LOG10X_ANALYZER_COST → destination list price
+  // → unset. Prior to this, event_lookup and top_patterns landed on
+  // different rate_source tags for the SAME env+hash+window: math agreed,
+  // attribution didn't. The shared resolver collapses that divergence.
+  const rateResolved = resolveRate(
+    { effective_ingest_per_gb: args.effective_ingest_per_gb, analyzerCost: args.analyzerCost },
+    env,
+    destinationFromEnvAnalyzer(env),
+  );
+  const rateSource: 'list_price' | 'customer_supplied' | 'unset' = rateResolved.source;
+  const costPerGb: number | null = rateResolved.rate_per_gb;
   const period = costPeriodLabel(tf.days);
   const metricsEnv = await resolveMetricsEnv(env);
 
@@ -309,7 +337,7 @@ async function formatResults(
   rateSource: 'list_price' | 'customer_supplied' | 'unset',
   period: string,
   env: EnvConfig,
-  sumOut?: { data?: EventLookupSummary },
+  sumOut?: { data?: EventLookupSummary; nextActions?: NextAction[] },
   resolvedFromHash?: string
 ): Promise<string> {
   // Aggregate bytes per service (multiple severity levels possible).
@@ -438,7 +466,11 @@ async function formatResults(
   // the hash the caller arrived with (resolvedFromHash), otherwise one
   // cheap topk(1) round-trip to recover it from the pattern name. On any
   // failure / timeout the field stays absent — gates downstream render.
+  // The resolved hash is also promoted to the summary's top-level
+  // `pattern_hash` so the catalog-identity-handoff carries through on
+  // the raw-line / name-input path (which previously dropped the hash).
   let offloadStatus: EventLookupSummary['offload_status'];
+  let summaryPatternHash: string = resolvedFromHash ?? '';
   try {
     let hashToQuery: string | undefined = resolvedFromHash;
     if (!hashToQuery) {
@@ -449,6 +481,7 @@ async function formatResults(
         if (typeof h === 'string' && h.length > 0) hashToQuery = h;
       }
     }
+    if (hashToQuery && !summaryPatternHash) summaryPatternHash = hashToQuery;
     if (hashToQuery) {
       const s = await getOffloadStatus(env, {
         patternHash: hashToQuery,
@@ -496,6 +529,7 @@ async function formatResults(
   if (sumOut) {
     sumOut.data = {
       pattern,
+      pattern_hash: summaryPatternHash,
       window: tf.label,
       services: rows.map(r => ({
         service: r.service,
@@ -511,6 +545,14 @@ async function formatResults(
         cost_baseline_usd_disclosed: r.costBaselineDisclosed,
         events: r.events,
         is_new: r.isNew,
+        // Echo the resolved pattern_hash on every per-service row so
+        // chain steps that consume this payload (investigate's offload
+        // pivot, cross-pillar pattern_examples / retriever_query joins)
+        // can carry the stable identity without re-fetching the
+        // summary-level resolved_from_hash. Same string on all rows for
+        // a given call — that is by design: rows are slices of one
+        // pattern, not different patterns.
+        pattern_hash: summaryPatternHash,
       })),
       totals: {
         bytes: totalBytes,
@@ -603,7 +645,11 @@ async function formatResults(
     }
   }
 
-  // AI analysis
+  // AI analysis — OPT-IN only. queryAi posts the sampled query results + a
+  // prompt to the log10x API (always log10x, never the customer's own backend),
+  // so it stays OFF by default to keep the cost path from phoning home. Enable
+  // with LOG10X_AI_SUMMARY=true (or wire a customer-owned AI provider later).
+  if (process.env.LOG10X_AI_SUMMARY === 'true') {
   try {
     const queryResultJson = JSON.stringify(results.slice(0, 5));
     // De-verdict (TOOL-AUDIT Phase 2): ask the classifier for the FACTUAL
@@ -626,6 +672,7 @@ async function formatResults(
     }
   } catch {
     // AI analysis is optional — skip silently
+  }
   }
 
   lines.push('');
@@ -707,7 +754,17 @@ async function formatResults(
   nextActions.push({
     tool: 'log10x_pattern_trend',
     args: { pattern },
-    reason: 'time series for the resolved pattern',
+    reason: 'time series for the resolved pattern (volume + chart)',
+  });
+  // pattern_examples is a hub partner of event_lookup: it returns real
+  // sample lines + slot variations for this pattern, the content-axis view
+  // that complements the time-axis (pattern_trend) and the cost-axis
+  // (event_lookup itself) views.
+  hints.push(`Sample lines + slot variations: log10x_pattern_examples({ pattern: '${pattern}' }).`);
+  nextActions.push({
+    tool: 'log10x_pattern_examples',
+    args: { pattern },
+    reason: 'real events + slot variations for this pattern (content view)',
   });
   hints.push(`Reduce the cost of this pattern: log10x_pattern_mitigate({ pattern: '${pattern}' }) — presents drop @ analyzer / drop @ forwarder / mute @ 10x / compact @ 10x, gated on env capabilities.`);
   nextActions.push({
@@ -715,10 +772,31 @@ async function formatResults(
     args: { pattern },
     reason: 'env-gated mitigation options + exact configs for this pattern',
   });
+  // investigate is the hub partner for "what else moved with this pattern".
+  // The corroborated-regression path above already pushes an investigate
+  // action with a stronger reason; only add the generic entry when no
+  // regression-specific investigate is already queued so the chassis
+  // actions[] doesn't duplicate.
+  if (!nextActions.some((a) => a.tool === 'log10x_investigate')) {
+    hints.push(`What else moved with this pattern: log10x_investigate({ starting_point: '${pattern}' }).`);
+    nextActions.push({
+      tool: 'log10x_investigate',
+      args: { starting_point: pattern },
+      reason: 'cross-pillar trace for anything moving with this pattern',
+    });
+  }
   lines.push('');
   lines.push(agentOnly(`Suggested next calls: ${hints.join(' ')}`));
 
   const block = renderNextActions(nextActions);
   if (block) lines.push('', block);
+
+  // Surface the structured nextActions to the outer chassis envelope.
+  // Today the prose block (renderNextActions above) is the only way an
+  // agent learns about the follow-up handoffs; that leaves the envelope's
+  // typed actions[] empty. Pass the list up through sumOut so
+  // executeEventLookup can map NextAction → Action and populate the chassis
+  // actions[] field.
+  if (sumOut) sumOut.nextActions = nextActions;
   return lines.join('\n');
 }

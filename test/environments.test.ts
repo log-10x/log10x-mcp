@@ -58,7 +58,7 @@ test('resolveEnv: unknown nickname throws with available list', () => {
   const envs = makeEnvs();
   assert.throws(
     () => resolveEnv(envs, 'nonexistent'),
-    (err: Error) => /Unknown environment "nonexistent"/.test(err.message) && /prod, demo/.test(err.message)
+    (err: Error) => /Unknown environment "nonexistent"/.test(err.message) && /prod; demo/.test(err.message)
   );
 });
 

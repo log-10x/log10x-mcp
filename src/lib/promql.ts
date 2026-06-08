@@ -63,10 +63,9 @@ function escapeLabel(value: string): string {
 
 /**
  * Filter value: either a plain string (default exact-match `=`) or an
- * object form `{op, val}` that lets callers emit `!=` selectors. Added
- * for PL-12a/12b — the `kept` cohort needs absence-tolerant
- * `isDropped!="true"` to include legacy series that pre-date the
- * receiver's `isDropped` label stamping (engine modules `ad02ec6`).
+ * object form `{op, val}` that lets callers emit `!=` selectors: the
+ * `kept` cohort needs absence-tolerant `isDropped!="true"` to include
+ * legacy series that pre-date the receiver's `isDropped` label stamping.
  */
 export type FilterValue = string | { op: '=' | '!='; val: string };
 
@@ -88,8 +87,8 @@ function buildSelector(
 }
 
 /**
- * PL-12a/12b — map the user-facing `include` enum to a single
- * `isDropped` filter-value (or null for the pre-decision union).
+ * Map the user-facing `include` enum to a single `isDropped`
+ * filter-value (or null for the pre-decision union).
  *
  * `kept`    → `isDropped!="true"` (absence-tolerant; matches series with
  *             no `isDropped` label AND `isDropped="false"`).
@@ -111,6 +110,83 @@ export function includeToSelector(include: 'kept' | 'dropped' | 'both'): {
   return { droppedFilter: null, runBoth: true };
 }
 
+/**
+ * Convert a (possibly fractional) day offset into a valid Prometheus duration
+ * literal of the form `\d+[smhdwy]`. Prometheus rejects fractional units with
+ * HTTP 400 — see pattern_diff's 1h window case where offsetDays = 1/24 was
+ * being emitted as `offset 0.04166...d`.
+ *
+ * Picks the LARGEST integer-and-unit representation that exactly represents
+ * the value: days when seconds % 86400 === 0, else hours when % 3600 === 0,
+ * else minutes when % 60 === 0, else seconds. Returns a leading-space-prefixed
+ * ` offset <duration>` string suitable for direct interpolation into a PromQL
+ * vector selector, or an empty string when offsetDays is falsy/zero.
+ *
+ * Throws if the derived expression somehow fails the duration grammar — a
+ * defensive guardrail against future arithmetic regressions.
+ */
+export function formatPromOffset(offsetDays?: number): string {
+  if (!offsetDays) return '';
+  const offsetSeconds = Math.round(offsetDays * 86400);
+  if (offsetSeconds <= 0) return '';
+  let offsetExpr: string;
+  if (offsetSeconds % 86400 === 0) {
+    offsetExpr = `${offsetSeconds / 86400}d`;
+  } else if (offsetSeconds % 3600 === 0) {
+    offsetExpr = `${offsetSeconds / 3600}h`;
+  } else if (offsetSeconds % 60 === 0) {
+    offsetExpr = `${offsetSeconds / 60}m`;
+  } else {
+    offsetExpr = `${offsetSeconds}s`;
+  }
+  if (!/^\d+[smhdwy]$/.test(offsetExpr)) {
+    throw new Error(`Invalid Prometheus offset expression derived: "${offsetExpr}" (from offsetDays=${offsetDays})`);
+  }
+  return ` offset ${offsetExpr}`;
+}
+
+/**
+ * Auto-pick a query_range step for a given window so the resulting
+ * series carries ~12–30 buckets — enough resolution to see shape, not
+ * so many that the renderer chokes or the agent loses signal in noise.
+ *
+ * Decision table (from /tmp/arc-prose-notes.md Note 5):
+ *   - `15m`  → `1m`   (15 buckets)
+ *   - `1h`   → `5m`   (12 buckets)
+ *   - `6h`   → `15m`  (24 buckets)
+ *   - `24h`  → `1h`   (24 buckets)
+ *   - `1d`   → `1h`   (24 buckets, alias of 24h)
+ *   - `7d`   → `6h`   (28 buckets)
+ *   - `30d`  → `1d`   (30 buckets)
+ *
+ * Unknown windows fall through to `1h` — the historical default that
+ * existed before this helper was introduced, so callers that pass
+ * something we don't model never see worse behaviour than the prior code.
+ *
+ * Returned strings are valid `step` values for `trendSchema`'s enum
+ * (`'1m' | '5m' | '15m' | '1h' | '6h' | '1d'`) and parseable by
+ * `parseStep()` in trend.ts.
+ */
+export function autoStepForWindow(window: string): '1m' | '5m' | '15m' | '1h' | '6h' | '1d' {
+  switch (window) {
+    case '15m':
+      return '1m';
+    case '1h':
+      return '5m';
+    case '6h':
+      return '15m';
+    case '24h':
+    case '1d':
+      return '1h';
+    case '7d':
+      return '6h';
+    case '30d':
+      return '1d';
+    default:
+      return '1h';
+  }
+}
+
 /** Bytes per pattern for a time window, with optional offset in days. */
 export function bytesPerPattern(
   filters: Record<string, FilterValue>,
@@ -119,7 +195,7 @@ export function bytesPerPattern(
   offsetDays?: number,
   labels: LabelNameMap = DEFAULT_LABELS
 ): string {
-  const offset = offsetDays ? ` offset ${offsetDays}d` : '';
+  const offset = formatPromOffset(offsetDays);
   const selector = buildSelector(filters, env, labels);
   return `sum by (${labels.pattern}, ${labels.service}, ${labels.severity}) (increase(${BYTES_METRIC}{${selector}}[${range}]${offset}))`;
 }
@@ -174,21 +250,7 @@ export function patternAcrossServices(
   offsetDays?: number,
   labels: LabelNameMap = DEFAULT_LABELS
 ): string {
-  let offset = '';
-  if (offsetDays) {
-    // Prometheus only accepts integer offsets with unit suffixes (\d+[smhdwy]).
-    // Fractional day values (e.g. 0.04166...d for 1h) are rejected with HTTP 400.
-    // Convert sub-day offsets to seconds to guarantee an integer value.
-    const offsetSeconds = Math.round(offsetDays * 86400);
-    const offsetExpr = offsetSeconds < 86400
-      ? `${offsetSeconds}s`
-      : `${Math.round(offsetDays)}d`;
-    // Defensive assertion: must be a valid Prometheus duration literal.
-    if (!/^\d+[smhdwy]$/.test(offsetExpr)) {
-      throw new Error(`Invalid Prometheus offset expression derived: "${offsetExpr}" (from offsetDays=${offsetDays})`);
-    }
-    offset = ` offset ${offsetExpr}`;
-  }
+  const offset = formatPromOffset(offsetDays);
   return `sum by (${labels.service}, ${labels.severity}) (increase(${BYTES_METRIC}{${labels.pattern}="${escapeLabel(pattern)}",${labels.env}="${env}"}[${range}]${offset}))`;
 }
 
@@ -309,7 +371,7 @@ export function retrieverIndexedBytesChunk(
   offsetDays: number,
   labels: LabelNameMap = DEFAULT_LABELS
 ): string {
-  const offset = offsetDays > 0 ? ` offset ${offsetDays}d` : '';
+  const offset = formatPromOffset(offsetDays);
   return `sum(increase(${INDEXED_METRIC}{tenx_app="retriever",${labels.env}="cloud"}[1d]${offset}))`;
 }
 
@@ -326,7 +388,7 @@ export function retrieverStreamedBytesChunk(
   offsetDays: number,
   labels: LabelNameMap = DEFAULT_LABELS
 ): string {
-  const offset = offsetDays > 0 ? ` offset ${offsetDays}d` : '';
+  const offset = formatPromOffset(offsetDays);
   return `sum(increase(${STREAMED_METRIC}{tenx_app="retriever",${labels.env}="cloud"}[1d]${offset}))`;
 }
 
@@ -379,10 +441,12 @@ export function eventsByPatternFull(
   filters: Record<string, FilterValue>,
   env: string,
   range: string,
+  offsetDays?: number,
   labels: LabelNameMap = DEFAULT_LABELS
 ): string {
+  const offset = formatPromOffset(offsetDays);
   const selector = buildSelector(filters, env, labels);
-  return `sum by (${labels.pattern}, ${labels.service}, ${labels.severity}) (increase(${VOLUME_METRIC}{${selector}}[${range}]))`;
+  return `sum by (${labels.pattern}, ${labels.service}, ${labels.severity}) (increase(${VOLUME_METRIC}{${selector}}[${range}]${offset}))`;
 }
 
 /**

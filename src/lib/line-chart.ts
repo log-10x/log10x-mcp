@@ -127,16 +127,16 @@ export function lineChart(vals: number[], opts: LineChartOpts = {}): string | nu
   // Format y-axis values as volume per hour. `vals` are bytes/sec.
   // Adaptive unit: MB/h for typical patterns, KB/h when peak < 1 MB/h
   // so low-volume noise doesn't render as a row of "0.0 MB/h" labels.
-  const peakMbPerHr = (maxV * 3600) / (1024 ** 2);
+  const peakMbPerHr = (maxV * 3600) / 1e6;
   const useKb = peakMbPerHr < 1;
   const fmtY = (bytesPerSec: number): string => {
     if (useKb) {
-      const kbPerHr = (bytesPerSec * 3600) / 1024;
+      const kbPerHr = (bytesPerSec * 3600) / 1e3;
       if (kbPerHr >= 100) return `${kbPerHr.toFixed(0)} KB/h`;
       if (kbPerHr >= 10) return `${kbPerHr.toFixed(1)} KB/h`;
       return `${kbPerHr.toFixed(2)} KB/h`;
     }
-    const mbPerHr = (bytesPerSec * 3600) / (1024 ** 2);
+    const mbPerHr = (bytesPerSec * 3600) / 1e6;
     if (mbPerHr >= 100) return `${mbPerHr.toFixed(0)} MB/h`;
     if (mbPerHr >= 10) return `${mbPerHr.toFixed(1)} MB/h`;
     return `${mbPerHr.toFixed(1)} MB/h`;

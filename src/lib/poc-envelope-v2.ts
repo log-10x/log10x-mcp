@@ -909,7 +909,7 @@ function buildPerServiceConsequences(
  * Pre-deploy commitment artifact. Renders the verdict + per-action
  * breakdown + exceptions + next-step recommendation as one paste-ready
  * markdown block the agent can show the buyer alongside the verdict.
- * Item 4 will attach the cap CSV; this stub commits to the shape so
+ * A later change will attach the cap CSV; this stub commits to the shape so
  * the artifact is already a stable contract surface.
  */
 function buildCommitmentArtifact(

@@ -15,6 +15,7 @@ import { queryInstant, queryRange } from '../lib/api.js';
 import * as pql from '../lib/promql.js';
 import { LABELS, includeToSelector, type FilterValue } from '../lib/promql.js';
 import { bytesToCost, parsePrometheusValue, buildDisclosedDollarValue, type DisclosedDollarValue } from '../lib/cost.js';
+import { resolveRate, destinationFromEnvAnalyzer } from '../lib/rate-resolution.js';
 import { resolveMetricsEnv, resolveMetricsEnvFiltered } from '../lib/resolve-env.js';
 import { parseTimeframe, fmtDisclosedDollar, fmtBytes as fmtBytesShared, fmtPct, fmtDollar } from '../lib/format.js';
 import { type NextAction } from '../lib/next-actions.js';
@@ -45,6 +46,7 @@ import {
 } from '../lib/top-patterns-extras.js';
 import { computeTrendDelta, glyphForState, fmtTrendDelta } from '../lib/trend-delta.js';
 import { renderMonospaceTable } from '../lib/render-table.js';
+import { sanitizeUserProse, stripHashFromVisible } from '../lib/anti-jargon-prose.js';
 
 export const topPatternsSchema = {
   service: z.string().optional().describe('Service name to scope the result. Omit for all services.'),
@@ -52,9 +54,9 @@ export const topPatternsSchema = {
   timeRange: z.string().regex(/^\d+[mhd]$/).default('1h').describe('Time range to aggregate over. Default 1h.'),
   limit: z.number().min(1).max(50).default(10).describe('Number of patterns to return. Default 10.'),
   offset: z.number().min(0).default(0).describe('Skip the first N patterns of the ranked result (for pagination). Default 0.'),
-  analyzerCost: z.number().optional().describe('DEPRECATED — use effective_ingest_per_gb. SIEM ingestion cost in $/GB. Auto-detected from profile if omitted.'),
+  analyzerCost: z.number().optional().describe('DEPRECATED — use effective_ingest_per_gb. stack ingestion cost in $/GB. Auto-detected from profile if omitted.'),
   effective_ingest_per_gb: z.number().optional().describe('Customer-supplied $/GB rate used for the dollar overlay. When set, headline tags `rate_source=customer_supplied`. When absent, falls back to the profile list rate (`rate_source=list_price`) or omits dollars entirely (`rate_source=unset`).'),
-  siemScope: z.string().optional().describe('SIEM scope for the verbatim sample line on the top rows.'),
+  siemScope: z.string().optional().describe('stack scope for the verbatim sample line on the top rows.'),
   environment: z.string().optional().describe('Environment nickname (for multi-env setups).'),
   verbose: z
     .boolean()
@@ -138,19 +140,20 @@ export async function executeTopPatterns(
   // top_patterns-vs-SRE contest: a 24h run reported "$5323/mo" that was ~24×
   // too high. windowHours from tf.days (fractional for sub-day windows).
   const windowHours = tf.days * 24;
-  // Rate resolution: customer-supplied > caller-supplied analyzerCost (treated
-  // as customer_supplied since it's an explicit arg) > profile list rate >
-  // unset. NEVER fall back to a fictitious $1/GB — when no rate is known,
-  // `costPerGb` is null and every dollar surface either nulls out or renders
-  // "—". Headline / PNG / per-row gating below all read `rate_source`.
-  const rate_source: 'list_price' | 'customer_supplied' | 'unset' =
-    args.effective_ingest_per_gb != null
-      ? 'customer_supplied'
-      : args.analyzerCost != null
-        ? 'customer_supplied'
-        : 'unset';
-  const costPerGb: number | null =
-    args.effective_ingest_per_gb ?? args.analyzerCost ?? null;
+  // SHARED rate resolver (lib/rate-resolution.ts). Priority chain (highest
+  // wins): caller arg → envs.json analyzerCost → LOG10X_ANALYZER_COST →
+  // destination list price → unset. NEVER falls back to a fictitious $1/GB —
+  // when no rate is known, costPerGb is null and every dollar surface either
+  // nulls out or renders "—". Headline / PNG / per-row gating below all
+  // read `rate_source`. services/event_lookup/explain_mode/estimate_savings
+  // walk the same chain — so the SAME env/window emits the SAME tag.
+  const rateResolved = resolveRate(
+    { effective_ingest_per_gb: args.effective_ingest_per_gb, analyzerCost: args.analyzerCost },
+    env,
+    destinationFromEnvAnalyzer(env),
+  );
+  const rate_source: 'list_price' | 'customer_supplied' | 'unset' = rateResolved.source;
+  const costPerGb: number | null = rateResolved.rate_per_gb;
 
   // PL-12a — resolve include mode and the `isDropped` selector once.
   // `kept` (default) uses an absence-tolerant `!=` selector so series
@@ -272,7 +275,7 @@ export async function executeTopPatterns(
         const scopeDesc = args.service ? ` for service "${args.service}"` : '';
         message =
           `No dropped-cohort patterns in this ${tf.label} window${scopeDesc}. ` +
-          `The isDropped enrichment IS wired (${distinctDroppedPatternCount} distinct pattern${distinctDroppedPatternCount === 1 ? '' : 's'} observed env-wide in the last 24h) ` +
+          `The isDropped enrichment IS wired (${distinctDroppedPatternCount} distinct pattern${distinctDroppedPatternCount === 1 ? '' : 's'} observed across the source in the last 24h) ` +
           `but the current scope returned zero events. ` +
           (args.service ? 'Try removing the service scope, or ' : 'Try ') +
           'widening the time window (e.g. timeRange="24h").';
@@ -544,7 +547,7 @@ export async function executeTopPatterns(
     const firstSeenSec = fsRes?.ageSeconds ?? null;
     const badgeInfo = classifyBadge(r.bytes, baselineSamples, firstSeenSec);
     const trendDelta = computeTrendDelta(badgeInfo.kind, trendVals, firstSeenSec);
-    // state is now strictly derived from trend_delta.value (defect 14).
+    // state is now strictly derived from trend_delta.value.
     // classifyBadge() drives the intermediate trendDelta computation;
     // the envelope's `state` field is then re-derived from the WoW pct
     // so the two fields are always consistent.
@@ -702,7 +705,7 @@ export async function executeTopPatterns(
     reason: 'projected savings across the env if you act — drop vs compact vs sample',
   });
   nextActions.push({
-    tool: 'log10x_cost_drivers',
+    tool: 'log10x_whats_changing',
     args: { timeRange: '7d' },
     reason: 'growth/delta ranking over 7d — what is rising, vs the current-cost ranking shown here',
   });
@@ -712,6 +715,29 @@ export async function executeTopPatterns(
       tool: 'log10x_pattern_examples',
       args: { pattern: topActive.pattern },
       reason: 'deeper sample retrieval + slot distribution for the top pattern',
+    });
+  }
+
+  // Headline promised "Reply 'more' to see the next 50" but no
+  // machine-readable pagination action existed. Emit one when there are
+  // more patterns than shown so the chain is actionable without prose
+  // parsing.
+  if (
+    patternCountTotal != null &&
+    patternCountTotal > offset + renderRows.length
+  ) {
+    const remaining = patternCountTotal - (offset + renderRows.length);
+    nextActions.push({
+      tool: 'log10x_top_patterns',
+      args: {
+        timeRange: tf.range,
+        limit: Math.min(50, remaining),
+        offset: offset + renderRows.length,
+        include,
+        ...(args.service ? { service: args.service } : {}),
+        ...(args.severity ? { severity: args.severity } : {}),
+      },
+      reason: `next ${Math.min(50, remaining)} patterns below the current top ${renderRows.length} (${remaining} remaining of ${patternCountTotal} total)`,
     });
   }
 
@@ -886,10 +912,13 @@ export async function executeTopPatterns(
     droppedShareTotalPct = 100;
     droppedMonthlyUsd = totalCostMonthly;
   } else {
-    droppedBytesTotalShown = dataPatterns.reduce(
-      (s, p) => s + (p.dropped_bytes ?? 0),
-      0
-    );
+    // Previously droppedBytesTotalShown summed top-N rows while
+    // droppedShareTotalPct used the env-wide droppedTotalBytes, a
+    // scope-mix that made the displayed share inconsistent with the
+    // displayed bytes (4.83% vs the math 4.76% computed from the
+    // displayed numerator/denominator). Use the env-wide source for
+    // BOTH so they reconcile.
+    droppedBytesTotalShown = droppedTotalBytes;
     const denom = totalBytes;
     droppedShareTotalPct =
       denom > 0 && droppedTotalBytes != null
@@ -915,6 +944,26 @@ export async function executeTopPatterns(
     monthly_usd_disclosed: totalCostMonthlyDisclosed,
     bytes_per_sec: totalBytes / Math.max(1, windowHours * 3600),
     bytes_total: totalBytes,
+    // The headline "X GB union" was computed from shownBytes (sum of
+    // shown rows' bytes), but no named field carried that value:
+    // readers had to sum patterns[i].bytes by hand or derive from
+    // bytes_total × top_n_percent_of_total (which is mathematically
+    // equivalent but encoded indirectly). Surface explicitly so the
+    // headline maps to a named field.
+    bytes_shown: shownBytes,
+    // trend_bytes_per_sec arrays were sometimes shorter than the scope
+    // window (some patterns produced 130 buckets covering 21.65h, others
+    // 55 buckets covering 12.60h, while scope claimed 'last 24h'). Trend
+    // was a 24h rate(...) range query with a 5m rate window and 600s
+    // step. Surface the step so consumers can audit per-pattern coverage
+    // as array_length × trend_step_seconds = coverage_seconds and detect
+    // coverage gaps without reverse-engineering the query.
+    trend_basis: {
+      window_seconds: 24 * 3600,
+      step_seconds: trendStepSec,
+      rate_window: '5m',
+      note: 'trend_bytes_per_sec[i] is the average bytes/sec over a 5-minute rate window centered on bucket i. Coverage seconds = array_length × step_seconds; missing buckets indicate sparse data inside the trend window.',
+    },
     top_n_percent_of_total,
     pattern_count_shown: renderRows.length,
     pattern_count_total: patternCountTotal,
@@ -961,27 +1010,52 @@ export async function executeTopPatterns(
           ? `${Math.round(droppedShareTotalPct)}%`
           : '0%';
       if (totalCostMonthlyDisclosed != null) {
-        headline = `Top ${renderRows.length} patterns over ${tf.label}: ${bytesLabel} union (${offloadShareLabel} currently offloaded), ~${dollarTail} total.${incidentTail}`;
+        headline = `Top ${renderRows.length} patterns over ${tf.label}: ${bytesLabel} union (${offloadShareLabel} currently reduced), ~${dollarTail} total.${incidentTail}`;
       } else {
-        headline = `Top ${renderRows.length} patterns over ${tf.label}: ${bytesLabel} union (${offloadShareLabel} currently offloaded).${rateUnsetTail}${incidentTail}`;
+        headline = `Top ${renderRows.length} patterns over ${tf.label}: ${bytesLabel} union (${offloadShareLabel} currently reduced).${rateUnsetTail}${incidentTail}`;
       }
     } else {
-      // kept (default) — preserves pre-PL-12 headline byte-for-byte
-      // aside from the disclosure-tail swap.
-      if (totalCostMonthlyDisclosed != null) {
-        headline = `Top ${renderRows.length} patterns over ${tf.label} cover ${sharePctLabel} of scanned bytes (${bytesLabel}), ~${dollarTail}.${incidentTail}`;
+      // kept (default) headline shape:
+      //   "Top 10 of <total> patterns cover ~$X/mo of $Y/mo total (Z%)"
+      // shownCostMonthly = $/mo for the rows we're showing (computed from
+      // shownBytes). totalCostMonthly = env-wide $/mo (totalBytes-based).
+      // Falls back to bytes-only framing when no rate is configured.
+      const totalLabel =
+        patternCountTotal != null ? ` of ${patternCountTotal}` : '';
+      if (totalCostMonthlyDisclosed != null && costPerGb != null && windowHours > 0) {
+        const shownCostMonthly =
+          (bytesToCost(shownBytes, costPerGb) / windowHours) * 720;
+        const shownDollarLabel = fmtDollar(shownCostMonthly);
+        const totalDollarLabel = fmtDisclosedDollar(totalCostMonthlyDisclosed);
+        headline = `Top ${renderRows.length}${totalLabel} patterns cover ~${shownDollarLabel}/mo of ${totalDollarLabel}/mo total (${sharePctLabel}).${incidentTail}`;
       } else {
-        headline = `Top ${renderRows.length} patterns over ${tf.label} cover ${sharePctLabel} of scanned bytes (${bytesLabel}).${rateUnsetTail}${incidentTail}`;
+        headline = `Top ${renderRows.length}${totalLabel} patterns cover ${sharePctLabel} of scanned bytes (${bytesLabel}).${rateUnsetTail}${incidentTail}`;
       }
     }
   }
 
+  // representativeLabel is the dominant member's descriptor, NOT a string
+  // the other members literally share. Earlier the callout read "N patterns
+  // share `<representativeLabel>`" which claimed something not in the data.
+  // joinSignal carries the actual relationship: jaccard_direct = token-set
+  // overlap, overlap_shared = shared-token threshold,
+  // jaccard_with_correlation = co-trending. Phrase the callout in those
+  // terms so the claim matches what the detector did.
+  const joinPhrase = (s: 'jaccard_direct' | 'overlap_shared' | 'jaccard_with_correlation'): string =>
+    s === 'jaccard_direct'
+      ? 'similar tokens to'
+      : s === 'overlap_shared'
+        ? 'shared tokens with'
+        : 'co-trending with';
   const callout =
     incidents.length > 0
       ? `These look like ${incidents.length === 1 ? 'one incident' : `${incidents.length} incidents`}: ` +
         incidents
           .slice(0, 2)
-          .map((c) => `${c.members.length} patterns in \`${c.service}\` share \`${c.representativeLabel.slice(0, 50)}\``)
+          .map(
+            (c) =>
+              `${c.members.length} patterns in \`${c.service}\` (${joinPhrase(c.joinSignal)} \`${c.representativeLabel.slice(0, 50)}\`)`,
+          )
           .join('; ')
       : undefined;
 
@@ -990,9 +1064,16 @@ export async function executeTopPatterns(
   // pre-offset rowset size as a conservative lower bound.
   const totalAvailable = patternCountTotal ?? (rawRowsAll.length > offset + renderRows.length ? rawRowsAll.length : offset + renderRows.length);
   const truncated = totalAvailable > offset + renderRows.length;
+  // "more" expands, never redelivers the same chunk size. Initial 10 →
+  // next 25 → next 50. Detection uses the CURRENT args.limit (the one that
+  // just ran) to pick the next size. >=50 stays at 50 so pagination
+  // doesn't blow up unbounded; we still page through additional results,
+  // just at the schema max page size.
+  const nextLimit =
+    args.limit <= 10 ? 25 : args.limit <= 25 ? 50 : 50;
   // Pagination footer for must_render_verbatim — only when there are more results.
   const paginationFooter = truncated
-    ? `\nShowing patterns ${offset + 1}–${offset + renderRows.length} of ${patternCountTotal ?? '?'}. Reply 'more' to see the next ${args.limit}.`
+    ? `\nShowing patterns ${offset + 1}–${offset + renderRows.length} of ${patternCountTotal ?? '?'}. Reply 'more' to see the next ${nextLimit}.`
     : '';
 
   // FIX 1 — Gate chart PNG behind include_chart opt-in (default false) to
@@ -1052,24 +1133,63 @@ export async function executeTopPatterns(
   // MCP runtime) can still read them. ChassisData wraps them inside
   // payload; back-compat fields are also spread at the data level via
   // legacyCompat.
+  // Build a set of pattern_hashes we actually serialize so
+  // incidents[].members can be filtered to only resolvable references.
+  // Prior code shipped incidents whose members pointed at pattern_hashes
+  // outside payload.patterns[] (envelope claimed pattern_count_shown=N
+  // but only K patterns serialized when pattern_count_shown > limit).
+  // Filtering keeps the envelope self-consistent.
+  const shownPatternHashes = new Set<string>();
+  for (const p of dataPatterns) {
+    if (p.pattern_hash) shownPatternHashes.add(p.pattern_hash);
+  }
   const topPatternsPayload = {
     rate_source,
+    // Prior envelope tagged rate_source='customer_supplied' but didn't
+    // expose the underlying $/GB scalar: the entire dollar surface was
+    // computed from an undisclosed value. Surface it so a CFO can audit
+    // "did $92/wk = bytes × this rate". Null only when
+    // rate_source='unset'.
+    rate_disclosure: costPerGb != null
+      ? {
+          value_usd_per_gb: costPerGb,
+          tier: 'ingest_standard' as const,
+          currency: 'USD' as const,
+          source: rate_source,
+          applied_to: 'bytes_per_month' as const,
+        }
+      : null,
     // PL-12a — echo the resolved cohort so the agent can route follow-up
     // calls (e.g. `include='dropped'` from a `'both'` audit) without
     // re-deriving from the per-row fields.
     include,
     patterns: dataPatterns,
     incidents: incidents.map((c) => {
+      // Drop dangling member references (pattern_hashes not in
+      // patterns[]) and surface the count of dropped members so the
+      // consumer knows the cluster is partial.
+      const allMembers = c.members;
+      const visibleMembers = allMembers.filter(
+        (m) => !m.identity || shownPatternHashes.has(m.identity)
+      );
+      const droppedReferenceCount = allMembers.length - visibleMembers.length;
       const combinedBytes = c.members.reduce(
         (s, m) => s + (bytesByIdentity.get(m.identity) ?? 0),
         0
       );
       return {
-        members: c.members.map((m) => ({
+        members: visibleMembers.map((m) => ({
           identity: m.identity,
           cost_per_month_usd: m.costPerMonthUsd,
           descriptor: m.descriptor,
         })),
+        ...(droppedReferenceCount > 0
+          ? {
+              members_outside_shown_set: droppedReferenceCount,
+              members_outside_shown_set_note:
+                'These pattern_hashes participate in the incident cluster but were not in the top-N shown. Call log10x_top_patterns with a larger limit to surface them.',
+            }
+          : {}),
         representative_label: c.representativeLabel,
         service: c.service,
         combined_monthly_usd: c.combinedMonthlyUsd,
@@ -1077,6 +1197,15 @@ export async function executeTopPatterns(
           totalBytes > 0 ? (combinedBytes / totalBytes) * 100 : 0,
         join_signal: c.joinSignal,
         confidence: c.confidence,
+        // confidence values without basis shipped as authoritative (0.7
+        // round default for overlap_shared, 0.778 = 7/9 raw Jaccard for
+        // jaccard_direct). Two methods on a non-unified scale; tag each
+        // so the agent can distinguish a hand-picked default from a
+        // measured overlap fraction.
+        confidence_basis:
+          c.joinSignal === 'overlap_shared'
+            ? ('unvalidated_default' as const)
+            : ('jaccard_token_overlap_ratio' as const),
       };
     }),
     totals,
@@ -1114,7 +1243,11 @@ export async function executeTopPatterns(
         dataPatterns,
         [
           { header: '#',       align: 'right',  get: (p) => String(p.rank) },
-          { header: 'Pattern', align: 'left',   get: (p) => p.identity, max_width: 40 },
+          // `identity` may fall back to `pattern_hash` when the
+          // descriptor is missing. stripHashFromVisible ensures the 11-char
+          // hash never leaks into the visible cell; the hash stays in the
+          // structured `pattern_hash` field for tool-to-tool round-trip.
+          { header: 'Pattern', align: 'left',   get: (p) => stripHashFromVisible(p.identity) || '(unnamed pattern)', max_width: 40 },
           { header: 'Service', align: 'left',   get: (p) => p.service ?? '', max_width: 24 },
           { header: 'Vol/mo',  align: 'right',  get: (p) => p.bytes_display },
           { header: '%',       align: 'right',  get: (p) => p.share_pct_display },
@@ -1130,16 +1263,39 @@ export async function executeTopPatterns(
       )
     : undefined;
 
-  // human_summary is honest: volume-first, includes the "top-N of env-total"
-  // framing + rate disclosure.
-  const chassis_human_summary = renderRows.length === 0
+  // human_summary is honest: volume-first, includes the "top-N of total"
+  // framing + rate disclosure. We drop "env" jargon at source
+  // (sanitizeUserProse on the envelope would catch it too, but writing it
+  // cleanly here keeps the prose readable for code reviewers). Lead with
+  // rank-1 narrative (pattern, service, severity, suggested first move)
+  // before the table gets rendered, so the agent always surfaces a
+  // one-line orientation. The hash NEVER falls into user-visible prose.
+  // When the pattern descriptor is missing we degrade to a generic label
+  // ("top pattern") rather than echoing the 11-char hash.
+  // stripHashFromVisible below catches any hash that slipped into the
+  // descriptor string itself.
+  const rank1 = renderRows[0];
+  const rank1Descriptor = rank1?.pattern || 'top pattern';
+  const rank1Narrative = rank1
+    ? `Rank 1: ${rank1Descriptor}` +
+      (rank1.service ? ` on ${rank1.service}` : '') +
+      (rank1.severity ? ` (${rank1.severity})` : '') +
+      `. First move: run log10x_pattern_mitigate on it to see drop/compact/offload options.`
+    : '';
+  const baseSummary = renderRows.length === 0
     ? `No patterns in scope over ${tf.label}.`
     : `Top ${renderRows.length} patterns by bytes/${tf.label}` +
       (args.service ? ` on ${args.service}` : '') +
       (costPerGb != null ? ` above 0 KB/s floor (rate_source=${rate_source})` : '') +
-      `. Env total: ${fmtBytesShared(totalBytes)}.` +
-      (patternCountTotal != null ? ` ${renderRows.length} of ${patternCountTotal} env patterns shown.` : '') +
+      `. Total: ${fmtBytesShared(totalBytes)}.` +
+      (patternCountTotal != null ? ` ${renderRows.length} of ${patternCountTotal} patterns shown.` : '') +
       (incidents.length > 0 ? ` ${incidents.length} incident cluster${incidents.length === 1 ? '' : 's'} detected.` : '');
+  // Apply sanitize + hash-strip explicitly on this tool's human_summary
+  // (chassis-envelope re-runs sanitizeUserProse idempotently; we add the
+  // hash-strip pass here because the chassis doesn't run it by default).
+  const chassis_human_summary = stripHashFromVisible(
+    sanitizeUserProse(rank1Narrative ? `${rank1Narrative} ${baseSummary}` : baseSummary)
+  );
 
   // Map local rate_source ('unset' is this tool's term for no rate configured)
   // to the chassis RateSource enum ('none' means absent).
@@ -1156,11 +1312,19 @@ export async function executeTopPatterns(
     headline_callout: callout,
     status: 'success',
     decisions: {
-      threshold_used: costPerGb,
-      threshold_basis: chassisThresholdBasis,
+      // Prior code aliased threshold_used := costPerGb (the $/GB rate).
+      // Rate is not a threshold and rate_source provenance belongs in
+      // source_disclosure. The operational threshold here is the
+      // ranking volume floor (0 KB/s by default), with the top_N cap
+      // as the effective cutoff. Reflect that honestly:
+      //   threshold_used: 0   (the volume floor, top_n_above_floor)
+      //   threshold_basis: 'unvalidated_default'  (hand-picked)
+      // The same fix applies to services and savings.
+      threshold_used: 0,
+      threshold_basis: 'unvalidated_default',
       threshold_audit: patternCountTotal != null ? {
-        value: costPerGb,
-        basis: `top_n_above_floor; ${renderRows.length} of ${patternCountTotal} env patterns returned`,
+        value: 0,
+        basis: `top_n_above_floor; ${renderRows.length} of ${patternCountTotal} patterns returned`,
         observed_distribution: null,
       } : undefined,
     },
@@ -1170,7 +1334,7 @@ export async function executeTopPatterns(
       pattern_count_source: {
         kind: 'top_n_above_threshold',
         count: renderRows.length,
-        denominator_meaning: `Top ${renderRows.length} patterns above 0 KB/s floor in ${tf.label}${patternCountTotal != null ? ` of ${patternCountTotal} env total` : ''}`,
+        denominator_meaning: `Top ${renderRows.length} patterns above 0 KB/s floor in ${tf.label}${patternCountTotal != null ? ` of ${patternCountTotal} total` : ''}`,
       },
       siem_vendor: siemLabel ?? undefined,
     },
@@ -1187,7 +1351,9 @@ export async function executeTopPatterns(
     telemetry: chassisTelemetry,
     actions: [
       ...nextActions.map((a) => ({ tool: a.tool, args: a.args, reason: a.reason })),
-      // FIX 7 — next_page continuation action when results are truncated.
+      // next_page continuation action when results are truncated.
+      // "more" expands (10 → 25 → 50), so the continuation bumps `limit`
+      // to `nextLimit` rather than echoing the current size.
       ...(truncated
         ? [{
             tool: 'log10x_top_patterns',
@@ -1195,13 +1361,13 @@ export async function executeTopPatterns(
               ...(args.service ? { service: args.service } : {}),
               ...(args.severity ? { severity: args.severity } : {}),
               timeRange: args.timeRange,
-              limit: args.limit,
+              limit: nextLimit,
               offset: offset + renderRows.length,
               ...(args.effective_ingest_per_gb != null ? { effective_ingest_per_gb: args.effective_ingest_per_gb } : {}),
               ...(args.siemScope ? { siemScope: args.siemScope } : {}),
               include: include,
             },
-            reason: `Continue to patterns ${offset + renderRows.length + 1}–${offset + renderRows.length + args.limit} of ${patternCountTotal ?? '?'}`,
+            reason: `Continue to patterns ${offset + renderRows.length + 1}–${offset + renderRows.length + nextLimit} of ${patternCountTotal ?? '?'}`,
             role: 'optional-followup' as const,
           }]
         : []),

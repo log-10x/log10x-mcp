@@ -29,6 +29,7 @@ import {
   newChassisTelemetry,
   recordQuery,
 } from '../lib/chassis-envelope.js';
+import { buildSourceDisclosureFromEnv } from '../lib/source-disclosure.js';
 import type { CapabilitySummary, MustAskUser } from './log10x-start.js';
 import type { Action } from '../lib/cost.js';
 
@@ -55,6 +56,12 @@ export const costOptionsSchema = {
     .describe(
       'Optional pattern hash to scope the cost option menu to a single pattern. When present, routes_to.args will include a proposed_config row for this hash.'
     ),
+  destination: z
+    .enum(['splunk', 'datadog', 'elasticsearch', 'clickhouse', 'cloudwatch', 'azure-monitor', 'gcp-logging', 'sumo'])
+    .optional()
+    .describe(
+      'Destination stack. When set, routes_to.args carries THIS destination forward to estimate_savings — overrides the env-auto-detected SIEM. Pass when the upstream tool (baseline / configure_engine) already established a destination that differs from the env default; without it, cost_options falls back to siem_detected and routes_to may carry a destination the upstream chain did not pick.'
+    ),
 };
 
 // ─── Output types ─────────────────────────────────────────────────────────────
@@ -80,7 +87,7 @@ export interface CostOptionItem {
   applicable: boolean;
   /** When applicable=false, explains what's missing. */
   gated_reason?: string;
-  /** What events survive (land in SIEM / archive / nowhere). */
+  /** What events survive (land in stack / overflow bucket / nowhere). */
   what_survives: string;
   /** Tool + args to call when user picks this mode. */
   routes_to: { tool: string; args: Record<string, unknown> };
@@ -107,7 +114,7 @@ const COMPACT_SUPPORTED_SIEM = new Set([
 ]);
 
 function siemSupportsCompact(siem: string | null): boolean {
-  if (!siem) return true; // unknown SIEM — don't gate; estimate_savings will error if needed
+  if (!siem) return true; // unknown stack — don't gate; estimate_savings will error if needed
   return COMPACT_SUPPORTED_SIEM.has(siem);
 }
 
@@ -220,10 +227,16 @@ function buildCapabilities(args: {
 function buildModes(
   caps: CapabilitySummary & { _tier?: CustomerTier },
   siemDetected: string | null,
-  args: { target_percent?: number; service?: string; pattern_hash?: string }
+  args: { target_percent?: number; service?: string; pattern_hash?: string; destination?: string }
 ): CostOptionItem[] {
   const { target_percent, service, pattern_hash } = args;
   const tier: CustomerTier = caps._tier ?? 'dev';
+  // The caller-supplied destination (e.g. baseline established datadog as
+  // the target) must win over the env-auto-detected siem (which may be the
+  // env default cloudwatch). Without this, cost_options silently injects
+  // cloudwatch into routes_to.args while upstream tools were using datadog,
+  // breaking the destination cascade.
+  const effectiveDestination = args.destination ?? siemDetected;
 
   /**
    * Build the routes_to.args for a given action.
@@ -241,7 +254,7 @@ function buildModes(
    */
   const sharedArgs = (action: Action): Record<string, unknown> => {
     const out: Record<string, unknown> = {};
-    if (siemDetected) out.destination = siemDetected;
+    if (effectiveDestination) out.destination = effectiveDestination;
     if (service !== undefined) out.service = service;
     if (pattern_hash) {
       // Explicit single-pattern route: use proposed_config so estimate_savings
@@ -285,75 +298,81 @@ function buildModes(
   }
 
   // Receiver / Retriever tier — full 6-mode menu.
+  // Gate on effectiveDestination (caller-supplied destination wins over the
+  // env-auto-detected SIEM), NOT siemDetected. Previously these gates keyed off
+  // siemDetected, so passing destination=splunk still gated compact/tier_down by
+  // the detected cloudwatch — e.g. compact came back "no-op on cloudwatch" while
+  // routes_to correctly carried splunk. The applicability verdict and the routing
+  // target must describe the SAME destination.
   const compactApplicable =
-    caps.compact_installable && siemSupportsCompact(siemDetected);
+    caps.compact_installable && siemSupportsCompact(effectiveDestination);
   const compactGatedReason = !caps.compact_installable
     ? 'Requires Receiver tier (in-path forwarder sidecar). Install via log10x_advise_install.'
-    : !siemSupportsCompact(siemDetected)
-      ? `compact mode is a no-op on ${siemDetected}: it does not reduce ingest cost on that destination.`
+    : !siemSupportsCompact(effectiveDestination)
+      ? `compact mode is a no-op on ${effectiveDestination}: it does not reduce ingest cost on that destination.`
       : undefined;
 
   const tierDownApplicable =
     caps.tier_down_available &&
-    (siemDetected === 'cloudwatch' || siemDetected === 'datadog');
+    (effectiveDestination === 'cloudwatch' || effectiveDestination === 'datadog');
   const tierDownGatedReason = !caps.tier_down_available
-    ? 'Requires Receiver tier (in-path) for the engine to stamp the tenx_action marker the SIEM reads.'
-    : siemDetected !== 'cloudwatch' && siemDetected !== 'datadog'
-      ? `tier_down maps to a concrete billing reduction only on Datadog (Flex Logs) and CloudWatch (Infrequent Access). Detected SIEM: ${siemDetected ?? 'unknown'}.`
+    ? 'Requires Receiver tier (in-path) for the engine to stamp the tier marker your log platform reads.'
+    : effectiveDestination !== 'cloudwatch' && effectiveDestination !== 'datadog'
+      ? `tier_down maps to a concrete billing reduction only on Datadog (Flex Logs) and CloudWatch (Infrequent Access). Target log platform: ${effectiveDestination ?? 'unknown'}.`
       : undefined;
 
   return [
     {
       id: 'drop',
-      label: 'Drop: stop events at the forwarder. Nothing reaches the SIEM.',
+      label: 'Drop: stop events at the forwarder. Nothing reaches the stack.',
       description:
-        'Engine caps the pattern at 0 bytes/s. Events are discarded at the Receiver before reaching the SIEM.',
+        'Engine caps the pattern at 0 bytes/s. Events are discarded at the Receiver before reaching the stack.',
       who_enforces: 'engine',
       applicable: true,
       what_survives:
-        'No events reach the SIEM. Events are gone (or offloaded to S3 if offload action used instead).',
+        'No events reach the stack. Events are gone (or offloaded to S3 if offload action used instead).',
       routes_to: { tool: 'log10x_estimate_savings', args: sharedArgs('drop') },
     },
     {
       id: 'sample',
       label: 'Sample: keep 1 in N events. Trends stay valid.',
       description:
-        'Engine passes 1 in N events (default 1 in 10) through to the SIEM. Aggregate alerting remains valid.',
+        'Engine passes 1 in N events (default 1 in 10) through to the stack. Aggregate alerting remains valid.',
       who_enforces: 'engine',
       applicable: true,
       what_survives:
-        '1 in N events reach the SIEM (default 1 in 10). Trend and alerting remain valid at reduced volume.',
+        '1 in N events reach the stack (default 1 in 10). Trend and alerting remain valid at reduced volume.',
       routes_to: { tool: 'log10x_estimate_savings', args: sharedArgs('sample') },
     },
     {
       id: 'compact',
-      label: 'Compact: compress events ~5-10x. All events still land in the SIEM.',
+      label: 'Compact: compress events ~5-10x. All events still land in the stack.',
       description:
-        'Engine encodes events into the 10x compact wire format (~5–10x smaller). All events arrive in the SIEM; fields stay searchable.',
+        'Engine encodes events into the 10x compact wire format (~5–10x smaller). All events arrive in the stack; fields stay searchable.',
       who_enforces: 'engine',
       applicable: compactApplicable,
       gated_reason: compactGatedReason,
       what_survives:
-        'All events reach the SIEM, each compressed by 5–10x. Fully searchable.',
+        'All events reach the stack, each compressed by 5–10x. Fully searchable.',
       routes_to: { tool: 'log10x_estimate_savings', args: sharedArgs('compact') },
     },
     {
       id: 'tier_down',
-      label: 'Tier-down: SIEM stores events at a cheaper storage tier.',
+      label: 'Tier-down: stack stores events at a cheaper storage tier.',
       description:
-        'Engine stamps events with a tenx_action marker; the SIEM routes them to a cheaper tier (Flex Logs on Datadog, Infrequent Access on CloudWatch).',
+        'Engine stamps events with a tenx_action marker; the stack routes them to a cheaper tier (Flex Logs on Datadog, Infrequent Access on CloudWatch).',
       who_enforces: 'SIEM',
       applicable: tierDownApplicable,
       gated_reason: tierDownGatedReason,
       what_survives:
-        'Events reach the SIEM at a cheaper storage tier (e.g. Flex Logs / Standard Tier). Indexed fields preserved.',
+        'Events reach the stack at a cheaper storage tier (e.g. Flex Logs / Standard Tier). Indexed fields preserved.',
       routes_to: { tool: 'log10x_estimate_savings', args: sharedArgs('tier_down') },
     },
     {
       id: 'offload',
-      label: 'Offload: events route to your S3 bucket instead of the SIEM.',
+      label: 'Offload: events route to your S3 bucket instead of the stack.',
       description:
-        'Engine diverts engine-marked events to a customer-owned S3 bucket. Events stay recoverable on demand via log10x_retriever_query.',
+        'Engine diverts engine-marked events to a customer-owned S3 bucket. The offloaded events stay readable via log10x_retriever_query for inspection and to verify the decision.',
       who_enforces: 'engine',
       applicable: caps.offload_ready,
       gated_reason: caps.offload_ready
@@ -362,7 +381,7 @@ function buildModes(
           ? 'Requires the overflow bucket (Retriever) set up. Install via log10x_advise_retriever.'
           : 'Requires Receiver tier in-path so the engine can route events to S3. Install via log10x_advise_install.',
       what_survives:
-        'Events route to your S3 bucket instead of the SIEM. Recoverable via log10x_retriever_query on demand.',
+        'Events route to the S3 bucket instead of the stack. Readable via log10x_retriever_query for inspection.',
       routes_to: { tool: 'log10x_estimate_savings', args: sharedArgs('offload') },
     },
     {
@@ -383,12 +402,17 @@ function buildModes(
 
 function renderVerbatim(
   modes: CostOptionItem[],
+  effectiveDestination: string | null,
   siemDetected: string | null,
   tier?: CustomerTier
 ): string {
-  const siemLine = siemDetected
-    ? `SIEM detected: \`${siemDetected}\`.`
-    : 'No SIEM credentials detected — destinations will need to be specified when you pick a mode.';
+  const overridden =
+    !!effectiveDestination && !!siemDetected && effectiveDestination !== siemDetected;
+  const siemLine = effectiveDestination
+    ? overridden
+      ? `Target stack: \`${effectiveDestination}\` (overrides detected \`${siemDetected}\`).`
+      : `Stack detected: \`${effectiveDestination}\`.`
+    : 'No stack credentials detected — destinations will need to be specified when you pick a mode.';
 
   const isCollapsed = tier === 'dev' || tier === 'reporter';
 
@@ -442,6 +466,7 @@ export async function executeCostOptions(args: {
   target_percent?: number;
   service?: string;
   pattern_hash?: string;
+  destination?: 'splunk' | 'datadog' | 'elasticsearch' | 'clickhouse' | 'cloudwatch' | 'azure-monitor' | 'gcp-logging' | 'sumo';
 }): Promise<StructuredOutput> {
   const telemetry = newChassisTelemetry();
 
@@ -494,7 +519,12 @@ export async function executeCostOptions(args: {
 
   const tier: CustomerTier = caps._tier;
   const modes = buildModes(caps, siemDetected, args);
-  const verbatim = renderVerbatim(modes, siemDetected, tier);
+  // Header reflects the destination the menu actually describes (caller override
+  // wins), while the structured siem_detected field below stays the true
+  // detection. Prior code rendered "Stack detected: cloudwatch" even when the
+  // caller targeted splunk and the gates/routes were (now) splunk.
+  const effectiveDestination = args.destination ?? siemDetected;
+  const verbatim = renderVerbatim(modes, effectiveDestination, siemDetected, tier);
 
   const mustAskUser: MustAskUser = {
     question:
@@ -506,7 +536,21 @@ export async function executeCostOptions(args: {
 
   // Strip the internal _tier field before exposing in the envelope.
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const { _tier: _strippedTier, ...capsSummary } = caps;
+  const { _tier: _strippedTier, ...capsSummaryRaw } = caps;
+  // compact_installable was derived from "is the compact module loadable"
+  // without checking destination applicability. On cloudwatch (where compact
+  // is a documented no-op) we shipped compact_installable=true alongside
+  // modes[compact].applicable=false, so agents reading capability_summary
+  // still proposed compact on cloudwatch and wasted a turn. Make installable
+  // mean "binary present AND will do useful work here" to match the per-mode
+  // applicability.
+  const compactModeRow = modes.find((m) => m.id === 'compact');
+  const capsSummary = {
+    ...capsSummaryRaw,
+    compact_installable:
+      capsSummaryRaw.compact_installable === true &&
+      compactModeRow?.applicable === true,
+  };
   const envelope: CostOptionsEnvelope = {
     modes,
     siem_detected: siemDetected,
@@ -520,7 +564,11 @@ export async function executeCostOptions(args: {
   const headline = `Cost options (${tier} tier): ${applicableCount} of ${modes.length} modes available. Awaiting user pick before routing.`;
   const human_summary = siemDetected
     ? `${applicableCount} of ${modes.length} modes available on ${siemDetected} (${tier} tier). Pick a mode.`
-    : `${applicableCount} of ${modes.length} modes available (${tier} tier, no SIEM detected). Pick a mode.`;
+    : `${applicableCount} of ${modes.length} modes available (${tier} tier, no stack detected). Pick a mode.`;
+
+  // Build siem_vendor + source_label from the resolved env-config when
+  // available; falls back to siemDetected when the on-prem store is unreachable.
+  const sourceDisclosure = await buildSourceDisclosureFromEnv(env, siemDetected);
 
   return buildChassisEnvelope({
     tool: 'log10x_cost_options',
@@ -531,9 +579,7 @@ export async function executeCostOptions(args: {
       threshold_used: null,
       threshold_basis: 'default',
     },
-    source_disclosure: {
-      siem_vendor: siemDetected ?? undefined,
-    },
+    source_disclosure: sourceDisclosure,
     scope: {
       window: 'n/a',
       window_basis: 'auto_default',
@@ -543,14 +589,16 @@ export async function executeCostOptions(args: {
     must_render_verbatim: verbatim,
     must_ask_user: mustAskUser,
     forbidden_next_actions: forbidden,
-    actions: [
-      {
-        tool: 'log10x_estimate_savings',
-        args: {},
-        role: 'recommended-next',
-        reason: 'After user picks a mode, route here with destination + action to forecast savings.',
-      },
-    ],
+    // Previously this list included log10x_estimate_savings as
+    // recommended-next, which directly contradicted forbidden_next_actions
+    // (which lists the same tool as FORBIDDEN until the user picks a mode).
+    // Agents reading both lists received mutually exclusive instructions for
+    // the same tool. The actual next-step path is per-mode via
+    // modes[].routes_to (the user picks first, THEN we route to
+    // estimate_savings with the picked action). Removing the top-level
+    // recommended-next eliminates the contradiction; the routes_to per mode
+    // still carries the chain.
+    actions: [],
     legacyCompat: true,
     legacyExtraFields: {
       modes,

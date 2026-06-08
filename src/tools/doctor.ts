@@ -32,6 +32,12 @@ import { resolveBackend, formatDetectionTrace } from '../lib/customer-metrics.js
 import { type StructuredOutput } from '../lib/output-types.js';
 import { tenxAvailabilityHint } from '../lib/install-hints.js';
 import { newChassisTelemetry, buildChassisEnvelope } from '../lib/chassis-envelope.js';
+import {
+  resolveClusterConfig,
+  pickActiveOffload,
+  detectStaleOffloadEnvVar,
+  detectStaleEnvVarForField,
+} from '../lib/env-config/resolve-cluster-config.js';
 
 export type CheckStatus = 'pass' | 'warn' | 'fail';
 
@@ -85,7 +91,14 @@ export async function executeDoctor(args: { environment?: string }): Promise<str
     tool: 'log10x_doctor',
     view: 'summary',
     headline,
-    status: report.overall === 'pass' ? 'success' : report.overall === 'warn' ? 'partial' : 'error',
+    // overall:'warn' means every check RAN and only advisories fired —
+    // nothing could-not-execute — so the tool itself succeeded. Map to
+    // 'success', not 'partial'. 'partial' is reserved for incomplete data /
+    // checks that could not run. The warn signal is carried by
+    // payload.overall and the headline ("overall WARN"), not by the chassis
+    // status. Prior code emitted status:'partial' while the headline said
+    // WARN — two unreconciled health vocabularies for the same run.
+    status: report.overall === 'pass' || report.overall === 'warn' ? 'success' : 'error',
     decisions: { threshold_used: null, threshold_basis: 'default' },
     source_disclosure: {},
     scope: {
@@ -208,15 +221,33 @@ export async function runDoctorChecks(envNickname?: string): Promise<DoctorRepor
   await addSiemDiscoveryCheck(globalChecks);
   addNetworkEgressInventory(globalChecks, envs);
 
-  // 3. Per-environment checks.
+  // 3. Per-environment checks. byNickname includes aliases from
+  //    env-alias-bridge: SaaS env_id (UUID), on-prem env-config
+  //    nicknames bridged via env_id. So when the SaaS env name differs
+  //    from the typed nickname but both bridge via env_id, it still
+  //    resolves correctly.
   const targets: EnvConfig[] = envNickname
     ? (() => {
         const e = envs.byNickname.get(envNickname.toLowerCase());
         if (!e) {
+          // Build a deduped alias map so the error doesn't list every
+          // alias as if each were a separate env.
+          const aliasesByEnv = new Map<EnvConfig, string[]>();
+          for (const [k, v] of envs.byNickname.entries()) {
+            const list = aliasesByEnv.get(v) ?? [];
+            list.push(k);
+            aliasesByEnv.set(v, list);
+          }
+          const described = envs.all
+            .map((x) => {
+              const aliases = (aliasesByEnv.get(x) ?? []).filter((a) => a !== x.nickname.toLowerCase());
+              return aliases.length === 0 ? x.nickname : `${x.nickname} (also: ${aliases.join(', ')})`;
+            })
+            .join('; ');
           globalChecks.push({
             name: 'environment_resolution',
             status: 'fail',
-            message: `Unknown environment nickname "${envNickname}". Available: ${envs.all.map((x) => x.nickname).join(', ')}.`,
+            message: `Unknown environment nickname "${envNickname}". Available: ${described}.`,
           });
           return [];
         }
@@ -233,6 +264,16 @@ export async function runDoctorChecks(envNickname?: string): Promise<DoctorRepor
 
 /** Checks that apply independent of a specific environment. */
 async function addInfrastructureChecks(checks: DoctorCheck[]): Promise<void> {
+  // Env-config resolution probe. Walks the StoreKind discovery order (K8s
+  // ConfigMap → AWS SSM → GCP Secret Manager → Azure App Config → local file)
+  // and reports which store served the document, plus any LOG10X_* env vars
+  // that disagree with the resolved values. The disagreements are surfaced
+  // here as advisory `warn` checks rather than silently winning — that's the
+  // canonical "but I set the env var" footgun for offload_bucket / streamer.url
+  // / retriever.input_bucket. Sits BEFORE the retriever probes because they
+  // (advise_retriever, retriever_probe) will read the same document.
+  await addEnvConfigResolutionCheck(checks);
+
   // Retriever endpoint configured? (informational, not required)
   const retrieverRes = await resolveRetriever().catch((e) => ({
     url: undefined,
@@ -253,8 +294,8 @@ async function addInfrastructureChecks(checks: DoctorCheck[]): Promise<void> {
       name: 'retriever_endpoint',
       status: 'warn',
       message:
-        'Retriever not reachable from this MCP install. log10x_retriever_query and log10x_backfill_metric cannot retrieve raw events from the S3 archive in this session. ' +
-        'For events inside SIEM hot retention (typically <7d), the fastest workaround is direct SIEM query — do not block on retriever setup.\n' +
+        'Retriever not reachable from this MCP install. log10x_retriever_query and log10x_backfill_metric cannot read the offloaded cohort from the overflow bucket in this session. ' +
+        'The overflow bucket holds the cohort the engine routed out of the stack, so these events are not in the SIEM at any tier. For events the SIEM still holds, query the SIEM directly; do not block on retriever setup.\n' +
         formatRetrieverTrace(retrieverRes.trace),
       fix:
         'Options: (a) set __SAVE_LOG10X_RETRIEVER_URL__ + __SAVE_LOG10X_RETRIEVER_BUCKET__ explicitly; (b) expose AWS creds (AWS_REGION + IAM with s3:ListAllMyBuckets) so auto-detect can find a log10x-retriever-* bucket; (c) deploy the Retriever — https://doc.log10x.com/apps/cloud/retriever/',
@@ -285,6 +326,111 @@ async function addInfrastructureChecks(checks: DoctorCheck[]): Promise<void> {
   // Skip when the retriever is not installed (retriever_endpoint already warned).
   if (retrieverRes.url && retrieverRes.bucket && retrieverRes.detectionPath) {
     await addRetrieverCwLoggingCheck(checks);
+  }
+}
+
+/**
+ * Resolve the env-config document via the StoreKind chain (k8s → AWS SSM →
+ * GCP Secret Manager → Azure App Config → local file) and surface:
+ *   - which store served the document (`pass` when resolved)
+ *   - any LOG10X_* env var that disagrees with a resolved field (`warn`)
+ *
+ * The check NEVER fails — a missing env-config is a `warn`, not a `fail`,
+ * because tools fall through to LOG10X_* env vars when no store is reachable.
+ * Failing here would block doctor on a state every other tool tolerates.
+ */
+async function addEnvConfigResolutionCheck(checks: DoctorCheck[]): Promise<void> {
+  let resolved;
+  try {
+    resolved = await resolveClusterConfig();
+  } catch (e) {
+    checks.push({
+      name: 'env_config_resolution',
+      status: 'warn',
+      message: `Env-config resolver threw: ${(e as Error).message}`,
+      fix: 'Confirm one of the on-prem stores (K8s ConfigMap, AWS SSM, GCP Secret Manager, Azure App Config, ~/.log10x/envs) is reachable, or set the LOG10X_* env vars as a fallback.',
+    });
+    return;
+  }
+  if (!resolved.ok) {
+    // Render the per-store trace inline so the user sees exactly which
+    // stores were tried and why each was skipped.
+    const traceLines = resolved.resolution_trace
+      .map(t => `  - ${t.source}: ${t.status} (${t.reason})`)
+      .join('\n');
+    checks.push({
+      name: 'env_config_resolution',
+      status: 'warn',
+      message:
+        `No env-config document resolved (every store in the chain reported unavailable or had no matching document). ` +
+        `Tools that need cluster identifiers (retriever_probe, advise_retriever, configure_engine destination auto-detect) ` +
+        `will fall back to LOG10X_* env vars.\n\nResolution trace:\n${traceLines || '  (empty)'}`,
+      fix:
+        'Either register an env-config document via log10x_env_register (writes to whichever store is available) ' +
+        'or set the minimal LOG10X_* env-var set (LOG10X_ENV_ID, LOG10X_CLUSTER_TYPE, LOG10X_SIEM_VENDOR, LOG10X_OFFLOAD_TYPE, LOG10X_OFFLOAD_BUCKET, LOG10X_STREAMER_URL, LOG10X_RETRIEVER_URL + four LOG10X_RETRIEVER_Q_* queue URLs).',
+    });
+    return;
+  }
+
+  const cfg = resolved.config;
+  const storeKind = resolved.source_store_kind ?? '(env-var fallback)';
+  const active = pickActiveOffload(cfg);
+  const advisories: string[] = [];
+
+  // Pull warnings the resolver already detected (env_id / nickname /
+  // streamer.url / retriever.url / retriever.input_bucket /
+  // destination.siem_vendor disagreements). The resolver only checks fields
+  // it ALSO accepts from env-var fallback, so we add a couple of extras
+  // below that the resolver doesn't cover (active offload bucket — the
+  // LOG10X_STREAMER_BUCKET / LOG10X_OFFLOAD_BUCKET pair specifically).
+  for (const w of resolved.stale_env_var_warnings) advisories.push(w);
+
+  const offloadStale = detectStaleOffloadEnvVar(active?.bucket);
+  if (offloadStale) advisories.push(offloadStale);
+
+  const retrieverInputStale = detectStaleEnvVarForField(
+    'retriever.input_bucket',
+    cfg.retriever.input_bucket,
+    'LOG10X_RETRIEVER_INPUT_BUCKET'
+  );
+  if (retrieverInputStale) advisories.push(retrieverInputStale);
+
+  const retrieverUrlStale = detectStaleEnvVarForField(
+    'retriever.url',
+    cfg.retriever.url,
+    'LOG10X_RETRIEVER_URL'
+  );
+  if (retrieverUrlStale) advisories.push(retrieverUrlStale);
+
+  const streamerUrlStale = detectStaleEnvVarForField(
+    'streamer.url',
+    cfg.streamer.url,
+    'LOG10X_STREAMER_URL'
+  );
+  if (streamerUrlStale) advisories.push(streamerUrlStale);
+
+  const summary =
+    `Env-config resolved from ${storeKind} store (source: ${resolved.source}). ` +
+    `env_id="${cfg.env_id}" nickname="${cfg.nickname}" ` +
+    `destination.siem_vendor="${cfg.destination.siem_vendor}" ` +
+    `active_offload="${active?.nickname ?? '(none)'}/${active?.bucket ?? '?'}" ` +
+    `retriever.input_bucket="${cfg.retriever.input_bucket}".`;
+
+  if (advisories.length > 0) {
+    checks.push({
+      name: 'env_config_resolution',
+      status: 'warn',
+      message: `${summary}\n\n${advisories.length} stale-env-var advisor${advisories.length === 1 ? 'y' : 'ies'}:\n${advisories.map(w => `  - ${w}`).join('\n')}`,
+      fix:
+        'Unset the listed LOG10X_* env vars (or update the env-config document to match) so the on-prem store stays the single source of truth. ' +
+        'Tools always prefer the store; the env var becomes a no-op the moment it disagrees.',
+    });
+  } else {
+    checks.push({
+      name: 'env_config_resolution',
+      status: 'pass',
+      message: summary,
+    });
   }
 }
 
@@ -719,13 +865,12 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
     }
   }
 
-  // G9 mitigation: detect "a service's volume dropped to zero recently vs
-  // steady-state". This is the signature of the tenx-edge subprocess stale
-  // state bug caught 2026-04-15 — after a prolonged remote-write rejection
-  // (G8, now fixed), tenx-edge child processes accumulated poisoned write
-  // state that the exec_filter retry loop did not clear, so metrics stayed
-  // at zero even after the Lambda fix was deployed. Resolved by a fluentd
-  // DaemonSet rollout restart. We can't run kubectl to check for OOO errors,
+  // Detect "a service's volume dropped to zero recently vs steady-state".
+  // This is the signature of the tenx-edge subprocess stale state issue:
+  // after a prolonged remote-write rejection, tenx-edge child processes can
+  // accumulate poisoned write state that the exec_filter retry loop did not
+  // clear, so metrics stayed at zero. Resolved by a fluentd DaemonSet
+  // rollout restart. We can't run kubectl to check for OOO errors,
   // but we CAN spot the symptom via Prometheus: a service with non-zero
   // volume in the last 24h but zero volume in the last 15 minutes. This is
   // a "dark zone" signature that either means the service actually stopped
@@ -794,22 +939,21 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
     }
   }
 
-  // G12 mitigation: detect retriever false-negatives. We cannot run a real
-  // retriever query here without side effects, but we CAN check whether the
+  // Detect retriever false-negatives. We cannot run a real retriever
+  // query here without side effects, but we CAN check whether the
   // retriever endpoint is configured AND whether the paste endpoint's
   // health probe reports retriever index coverage for recent windows.
   // Live retriever probe: fire a lightweight count query (limit=1, last
-  // 1h window) and check whether the pipeline responds. Replaces the old
-  // hardcoded G12 WARN that was stale after the body-shape fix (PR #36)
-  // and the demo-env indexer fix (2026-04-16).
+  // 1h window) and check whether the pipeline responds. Replaces an older
+  // hardcoded WARN that went stale after the response body-shape and
+  // demo-env indexer changes.
   // Only probe the live retriever when BOTH URL + BUCKET are set. The
   // retriever_endpoint check above already WARNs about partial config;
   // running the forensic probe with a half-configured retriever just
-  // produces a redundant FAIL for the same root cause. Caught by
-  // doctor-health-check eval scenario: with only URL set (the default
-  // demo env config), the probe FAIL'd and flipped overall→fail, which
-  // surfaced an alarming "MCP cannot serve tool calls" verdict for what
-  // is really a missing-bucket-config WARN.
+  // produces a redundant FAIL for the same root cause. With only URL set
+  // (the default demo env config), the probe FAIL'd and flipped
+  // overall→fail, surfacing an alarming "MCP cannot serve tool calls"
+  // verdict for what is really a missing-bucket-config WARN.
   if (
     detectedTier &&
     process.env.__SAVE_LOG10X_RETRIEVER_URL__ &&
@@ -826,15 +970,15 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
       const matchedCount = probeResult.execution.eventsMatched ?? 0;
       if (matchedCount > 0) {
         checks.push({
-          name: 'retriever_forensic_health',
+          name: 'retriever_overflow_health',
           status: 'pass',
           message:
-            `Retriever forensic retrieval is operational. Probe query returned ${matchedCount} event(s) in the last 1h. ` +
+            `Retriever overflow-bucket read path is operational. Probe query returned ${matchedCount} event(s) in the last 1h. ` +
             `Wall time: ${probeResult.execution.wallTimeMs}ms, worker files: ${probeResult.execution.workerFiles}.`,
         });
       } else {
         checks.push({
-          name: 'retriever_forensic_health',
+          name: 'retriever_overflow_health',
           status: 'warn',
           message:
             `Retriever endpoint responded but returned 0 events in the last 1h (wall time: ${probeResult.execution.wallTimeMs}ms). ` +
@@ -848,7 +992,7 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
     } catch (e) {
       const errMsg = (e as Error).message || String(e);
       checks.push({
-        name: 'retriever_forensic_health',
+        name: 'retriever_overflow_health',
         status: 'fail',
         message:
           `Retriever probe query failed: ${errMsg.slice(0, 300)}`,
@@ -905,18 +1049,18 @@ async function addScaleAndCapabilityCheck(
     // Retriever capability enumeration — what this specific install unlocks.
     lines.push('');
     if (await isRetrieverConfigured()) {
-      lines.push('Retriever deployed — this MCP can answer:');
-      lines.push('  - Historical events beyond SIEM retention (compliance, audit, long-window post-mortems)');
-      lines.push('  - Events dropped by the forwarder upstream of the SIEM (visible in log10x metrics but not the SIEM)');
-      lines.push('  - Metrics backfilled from archive that were never collected live');
+      lines.push('Retriever deployed. This MCP can answer:');
+      lines.push('  - The offloaded cohort for a pattern: events the Receiver held back from the SIEM and routed to the overflow bucket (visible in 10x metrics but not the SIEM)');
+      lines.push('  - Verify an offload decision: sample what is being routed to the overflow bucket for a pattern');
+      lines.push('  - A new metric built from the offloaded events that the SIEM never indexed');
       lines.push('  - Sample-reversal verification when SIEM returns sampled results at high volume');
     } else {
-      lines.push('Retriever NOT deployed — these question types are out of reach:');
-      lines.push('  - Historical events beyond SIEM retention');
-      lines.push('  - Dropped-event recovery (forwarder-dropped, invisible to SIEM)');
-      lines.push('  - Metric backfill from archive');
+      lines.push('Retriever NOT deployed. These question types are out of reach:');
+      lines.push('  - Inspecting the offloaded cohort (events the Receiver routed to the overflow bucket, invisible to the SIEM)');
+      lines.push('  - Verifying an offload decision against the held-back events');
+      lines.push('  - A new metric built from the offloaded events');
       lines.push('  - Sample-reversal verification');
-      lines.push('For questions in these shapes, route to SIEM MCP (hot retention only) or recommend deploying the retriever.');
+      lines.push('For events the SIEM still holds, route to the SIEM MCP (hot retention only); for the offloaded cohort, recommend deploying the retriever.');
     }
 
     checks.push({
@@ -1222,7 +1366,7 @@ export function renderDoctorReport(report: DoctorReport): string {
   lines.push(agentOnly(
     `If a check failed or warned, suggest the relevant advisor: ` +
     `Reporter / Receiver install (forwarder, backends, license) → log10x_advise_install. ` +
-    `Retriever (S3 archive + bloom index) → log10x_advise_retriever. ` +
+    `Retriever (reader over the customer-owned offload bucket, bloom-indexed) → log10x_advise_retriever. ` +
     `Per-pattern action plan (compact / sample / drop / tier_down) → log10x_configure_engine. ` +
     `Inspect current env config → log10x_discover_env.`
   ));

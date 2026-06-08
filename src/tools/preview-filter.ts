@@ -45,6 +45,7 @@ import {
   recordQuery,
 } from '../lib/chassis-envelope.js';
 import { fmtBytes as fmtBytesShared } from '../lib/format.js';
+import { formatPatternLabel } from '../lib/pattern-label.js';
 import { EXPLAIN_MODES, type ExplainMode } from './explain-mode.js';
 
 // ─── Schema ───────────────────────────────────────────────────────────────────
@@ -111,6 +112,16 @@ export interface PreviewFilterEnvelope {
     cohort: 'kept';
     scope_filter: string;
   } | null;
+  /**
+   * Summing the per-row .percent_of_service column drifts vs the
+   * byte-derived ratio (e.g. 71.92 vs 72.43%) because per-row values are
+   * pre-rounded to 2dp before the table renders. This field is the
+   * authoritative byte-derived share so neither agents nor humans need to
+   * sum rounded column values. Computed as:
+   *   round(shown_bytes / total_service_bytes_per_month * 100, 2)
+   * Null when total_service_bytes_per_month is zero.
+   */
+  shown_share_of_service_pct: number | null;
 }
 
 // ─── Fixed-width table renderer ───────────────────────────────────────────────
@@ -138,11 +149,12 @@ function renderFixedWidthTable(
   const pad = (s: string, w: number): string => s.slice(0, w).padEnd(w, ' ');
   const padL = (s: string, w: number): string => s.slice(0, w).padStart(w, ' ');
 
-  const fmtBytes = (b: number): string => {
-    if (b >= 1024 ** 3) return `${(b / (1024 ** 3)).toFixed(1)}GB`;
-    if (b >= 1024 ** 2) return `${(b / (1024 ** 2)).toFixed(0)}MB`;
-    return `${(b / 1024).toFixed(0)}KB`;
-  };
+  // Prior in-file fmtBytes used binary GB (2^30) while the envelope's
+  // headline + human_summary use decimal GB (10^9, the
+  // CloudWatch/Datadog/Splunk billing convention via the shared
+  // fmtBytesShared). The table's Volume column must not disagree with the
+  // headline. Use the shared formatter.
+  const fmtBytes = (b: number): string => fmtBytesShared(b);
 
   // Header
   const header = [
@@ -291,16 +303,23 @@ async function fetchFromTsdb(
     bytes: number;
     hash: string;
   }
-  const rawRows: RawRow[] = topRes.data.result.map((r): RawRow => {
-    const p = r.metric[LABELS.pattern] || '';
-    return {
-      pattern: p,
-      service: r.metric[LABELS.service] || service,
-      severity: r.metric[LABELS.severity] || '',
-      bytes: parsePrometheusValue(r),
-      hash: p ? tenxHash(p) : '',
-    };
-  });
+  const rawRows: RawRow[] = topRes.data.result
+    .map((r): RawRow => {
+      const p = r.metric[LABELS.pattern] || '';
+      return {
+        pattern: p,
+        service: r.metric[LABELS.service] || service,
+        severity: r.metric[LABELS.severity] || '',
+        bytes: parsePrometheusValue(r),
+        hash: p ? tenxHash(p) : '',
+      };
+    })
+    // Drop series with no pattern label: they carry volume but no stable
+    // tenx_hash/descriptor, so they cannot be ranked, drilled into
+    // (pattern_detail/pattern_examples both require an identity), or routed.
+    // Emitting them as ranked, actionable rows produces a phantom candidate
+    // line that inflates the shown total with an un-actionable identity.
+    .filter((r) => r.hash !== '');
   rawRows.sort((a, b) => b.bytes - a.bytes);
 
   const totalBytes =
@@ -385,18 +404,31 @@ async function fetchFromTsdb(
     };
   });
 
-  // Disambiguate descriptors: when two rows share a 36-char prefix, append
-  // the last 4 chars of tenx_hash in parens to make each row unique.
-  const descriptor36s = rawAssembled.map((r) => r.descriptor_full.slice(0, 36));
+  // The table's Descriptor column used to blindly char-slice
+  // r.descriptor_full at 36 chars, surfacing raw underscored token blobs
+  // mid-word ("open_telemetry_opensearchexporter_cl",
+  // "retryable_error_Permanent_error_flus"). Table cells are user-facing, so
+  // the no-hash-in-user-text rule applies here too. Use the shared
+  // formatPatternLabel helper for a service-led, underscore-stripped,
+  // word-boundary-aware label, then disambiguate identical 36-char prefixes
+  // by appending the tenx_hash tail.
+  const descriptor36s = rawAssembled.map((r) =>
+    formatPatternLabel({
+      symbol_message: r.descriptor_full,
+      service: r.service,
+      severity: r.severity,
+      maxHintChars: 36,
+    })
+  );
   const seenPrefixes = new Map<string, number>();
   for (const d of descriptor36s) seenPrefixes.set(d, (seenPrefixes.get(d) ?? 0) + 1);
 
-  const rows: PreviewPatternRow[] = rawAssembled.map((r) => {
-    const prefix = r.descriptor_full.slice(0, 36);
-    const needsDisambig = (seenPrefixes.get(prefix) ?? 0) > 1 && r.tenx_hash.length >= 4;
+  const rows: PreviewPatternRow[] = rawAssembled.map((r, idx) => {
+    const base = descriptor36s[idx];
+    const needsDisambig = (seenPrefixes.get(base) ?? 0) > 1 && r.tenx_hash.length >= 4;
     const descriptor = needsDisambig
-      ? `${r.descriptor_full.slice(0, 31)}(${r.tenx_hash.slice(-4)})`
-      : prefix;
+      ? `${base.slice(0, Math.max(0, base.length - 6))} (${r.tenx_hash.slice(-4)})`
+      : base;
     return { ...r, descriptor };
   });
   const shownBytes = rows.reduce((s, r) => s + r.bytes_per_month, 0);
@@ -501,6 +533,9 @@ export async function executePreviewFilter(args: {
       ? `No patterns found for service "${args.service}" in mode "${args.mode}". Metrics may not be available yet.`
       : `Top ${patterns.length} patterns matching mode "${args.mode}" for "${args.service}", ${fmtBytesShared(shownBytesTotal)}/mo shown total (${fmtBytesShared(totalServiceBytes)}/mo full service total).`;
 
+  const shownShareOfServicePct = totalServiceBytes > 0
+    ? Math.round((shownBytesTotal / totalServiceBytes) * 100 * 100) / 100
+    : null;
   const envelope: PreviewFilterEnvelope = {
     service: args.service,
     mode: args.mode,
@@ -513,9 +548,10 @@ export async function executePreviewFilter(args: {
     data_source: dataSource,
     pattern_count_total: patternCountTotal,
     bytes_source: bytesSource,
+    shown_share_of_service_pct: shownShareOfServicePct,
   };
 
-  // Top-3 most useful actions only (defect 27: was 40-entry bloat).
+  // Top-3 most useful actions only (was a 40-entry list).
   const top3 = patterns.slice(0, 3);
 
   return buildChassisEnvelope({
@@ -525,7 +561,11 @@ export async function executePreviewFilter(args: {
     status,
     decisions: {
       threshold_used: topN,
-      threshold_basis: 'customer_supplied',
+      // top_n is a hand-picked cap (schema default 20), not a caller-asserted
+      // threshold. Zod fills the default before the handler sees args, so we
+      // cannot prove the caller supplied it. Tag it 'unvalidated_default' to
+      // match services / top-patterns / savings, not the false 'customer_supplied'.
+      threshold_basis: 'unvalidated_default',
     },
     source_disclosure: {
       bytes_source: 'tsdb',

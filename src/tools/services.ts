@@ -1,7 +1,7 @@
 /**
  * log10x_services — list all monitored services with volume + action-axis summary.
  *
- * Item 6 (cost-cutting close-list v2): per-service rows now carry the
+ * Per-service rows now carry the
  * four action-axis columns that let an agent / FinOps reader see where
  * each service's savings are coming from:
  *
@@ -39,6 +39,7 @@ import * as pql from '../lib/promql.js';
 import { LABELS } from '../lib/promql.js';
 import { bytesToCost, bytesToGb, parsePrometheusValue } from '../lib/cost.js';
 import type { Action } from '../lib/cost.js';
+import { resolveRate, destinationFromEnvAnalyzer } from '../lib/rate-resolution.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { fmtDollar, fmtBytes, fmtPct, parseTimeframe, costPeriodLabel } from '../lib/format.js';
 import { shareBar } from '../lib/pattern-render.js';
@@ -46,10 +47,20 @@ import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { agentOnly } from '../lib/agent-only.js';
 import { type StructuredOutput } from '../lib/output-types.js';
 import { newChassisTelemetry, buildChassisEnvelope, buildChassisErrorEnvelope } from '../lib/chassis-envelope.js';
-import { fetchCapCsvForEnv, fetchActionIntentForEnv, buildCapCsvStatus, type CapCsvStatus } from '../lib/cap-csv-fetch.js';
+import { fetchCapCsvForEnv, fetchActionIntentForEnv, buildCapCsvStatus, envWithResolvedGitops, type CapCsvStatus } from '../lib/cap-csv-fetch.js';
 import { parseCapCsv, buildPatternActionLookup } from '../lib/cap-csv-parser.js';
 import { normalizeTimeRange } from '../lib/time-range.js';
 import { renderMonospaceTable } from '../lib/render-table.js';
+
+/**
+ * The rank cutoff that gates whether a service gets a next_action vs is
+ * "omitted from next_action" in the headline. Hand-picked at 10, tagged as
+ * the operational threshold in the chassis decisions block so consumers can
+ * audit. The MIN_PCT_FLOOR below acts as the secondary cutoff for
+ * "below_signal_floor".
+ */
+export const NEXT_ACTION_RANK_CUTOFF = 10;
+const NEXT_ACTION_MIN_PCT_FLOOR = 0.1;
 
 export const servicesSchema = {
   timeRange: z.enum(['15m', '1h', '6h', '24h', '1d', '7d', '30d']).default('7d').describe("Time range. Sub-day values available for incident-window service ranking. '24h' and '1d' are equivalent."),
@@ -79,7 +90,8 @@ interface ServiceRow extends ServiceActionAxis {
   rank: number;
   name: string;
   bytes: number;
-  cost: number;
+  /** Null when rate_source==='unset' (no $/GB rate configured). */
+  cost: number | null;
   pct: number;
   /**
    * Customer-supplied policy hint. `pass` when the service appears in
@@ -102,10 +114,16 @@ interface ServiceRow extends ServiceActionAxis {
 
 interface ServicesSummary {
   time_range: string;
-  cost_per_gb: number;
+  /** Null when rate_source==='unset'. */
+  cost_per_gb: number | null;
+  /** Provenance of cost_per_gb — set by the shared rate resolver. */
+  rate_source: 'customer_supplied' | 'list_price' | 'unset';
+  /** Plain-English caveat for cost_per_gb (null for customer_supplied). */
+  rate_disclosure: string | null;
   period: string;
   total_bytes: number;
-  total_cost: number;
+  /** Null when rate_source==='unset'. */
+  total_cost: number | null;
   service_count: number;
   top_n_share_pct: number;
   /**
@@ -120,7 +138,7 @@ interface ServicesSummary {
 }
 
 export async function executeServices(
-  args: { timeRange?: string; analyzerCost?: number; view?: 'summary'; exception_services?: string[] },
+  args: { timeRange?: string; analyzerCost?: number; effective_ingest_per_gb?: number; view?: 'summary'; exception_services?: string[] },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
   const telemetry = newChassisTelemetry();
@@ -143,16 +161,28 @@ export async function executeServices(
   }
   const d = sumOut.data;
   const top = d.services[0];
-  // Compute how many services are in top-5 actionable tier vs tail.
+  // Headline reconstructs from a SINGLE share number — the one in
+  // d.top_n_share_pct, which is computed over the actionable set (services
+  // with non-null next_action) so the headline's N and % tell the same
+  // story. Earlier the headline used Top-{actionableCount} services with
+  // a Top-5 share % — three different numbers for the same quantity.
   const actionableCount = d.services.filter((s) => s.next_action !== null).length;
   const tailCount = d.services.length - actionableCount;
-  const top5 = d.services.slice(0, Math.min(5, d.services.length));
-  const top5Share = top5.reduce((sum, s) => sum + s.pct, 0);
+  // tailCount counts services with null next_action, which is the union of
+  // two groups: ranks 11-13 above 0.1% (tail_rank) + ranks 14+ or <0.1%
+  // (below_signal_floor). Earlier the headline labeled all of them
+  // "below signal floor" which was wrong for the tail_rank group; now
+  // it just says "tail services omitted from next_action".
   const tailNote = tailCount > 0
-    ? ` Top ${actionableCount} service${actionableCount !== 1 ? 's' : ''} account for ${Math.round(top5Share)}% of cost; ${tailCount} tail service${tailCount !== 1 ? 's' : ''} below signal floor.`
+    ? ` Top ${actionableCount} service${actionableCount !== 1 ? 's' : ''} account for ${d.top_n_share_pct}% of cost; ${tailCount} tail service${tailCount !== 1 ? 's' : ''} omitted from next_action.`
     : '';
+  // Headline collapses the dollar phrasing to volume-only when rate_source==='unset'
+  // (no fictitious $/GB lie). When the resolver gave us a rate, the dollar
+  // phrasing stays.
   const headline = top
-    ? `${d.service_count} services over ${d.time_range}: ${top.name} leads at ${fmtDollar(top.cost)}${d.period} (${Math.round(top.pct)}% of total ${fmtDollar(d.total_cost)}${d.period}).${tailNote}`
+    ? (d.rate_source === 'unset'
+      ? `${d.service_count} services over ${d.time_range}: ${top.name} leads at ${fmtBytes(top.bytes)} (${Math.round(top.pct)}% of total ${fmtBytes(d.total_bytes)}).${tailNote} (no $/GB rate configured — pass effective_ingest_per_gb to see dollars.)`
+      : `${d.service_count} services over ${d.time_range}: ${top.name} leads at ${fmtDollar(top.cost ?? 0)}${d.period} (${Math.round(top.pct)}% of total ${fmtDollar(d.total_cost ?? 0)}${d.period}).${tailNote}`)
     : `No services with data in ${d.time_range}.`;
   return buildChassisEnvelope({
     tool: 'log10x_services',
@@ -160,12 +190,27 @@ export async function executeServices(
     headline,
     status: d.service_count > 0 ? 'success' : 'no_signal',
     decisions: {
-      threshold_used: d.cost_per_gb,
-      threshold_basis: args.analyzerCost != null ? 'customer_supplied' : 'default',
+      // Prior code aliased threshold_used to cost_per_gb, but rate is not a
+      // threshold. The chassis decision block describes the OPERATIONAL
+      // THRESHOLD: here, the tail-rank cutoff that determines which services
+      // get a next_action (rank <= 10) vs which are omitted (the "16 tail
+      // services omitted" headline phrase). 10 is hand-picked; tag as
+      // unvalidated_default. rate_source provenance stays in
+      // source_disclosure.rate_source where it belongs.
+      threshold_used: NEXT_ACTION_RANK_CUTOFF,
+      threshold_basis: 'unvalidated_default',
     },
     source_disclosure: {
       bytes_source: 'tsdb',
-      rate_source: args.analyzerCost != null ? 'customer_supplied' : 'list_price',
+      // Routed through the shared rate resolver so services/top_patterns/
+      // event_lookup/explain_mode/estimate_savings agree on the SAME tag
+      // for the same env/window. 'unset' collapses to undefined here per
+      // the chassis schema (only customer_supplied/list_price are emitted).
+      rate_source: d.rate_source === 'customer_supplied'
+        ? 'customer_supplied'
+        : d.rate_source === 'list_price'
+          ? 'list_price'
+          : undefined,
       service_count_source: {
         kind: 'above_volume_floor',
         count: d.service_count,
@@ -189,13 +234,13 @@ export async function executeServices(
             { header: 'Service',       align: 'left',   get: (s) => s.name, max_width: 32 },
             { header: `Vol/${d.time_range}`, align: 'right', get: (s) => fmtBytes(s.bytes) },
             { header: '%',             align: 'right',  get: (s) => fmtPct(s.pct) },
-            { header: `$/${d.time_range}`,  align: 'right', get: (s) => fmtDollar(s.cost) },
+            { header: `$/${d.time_range}`,  align: 'right', get: (s) => s.cost == null ? '—' : fmtDollar(s.cost) },
             { header: 'Attribution',   align: 'left',   get: (s) => s.attribution },
           ],
           {
             title: `Services — ${d.time_range}`,
             footer: tailCount > 0
-              ? `${tailCount} tail service${tailCount !== 1 ? 's' : ''} below 0.1% signal floor omitted from next_action.`
+              ? `${tailCount} tail service${tailCount !== 1 ? 's' : ''} omitted from next_action (rank > 10 or < 0.1% share).`
               : undefined,
           },
         )
@@ -211,7 +256,7 @@ export async function executeServices(
 }
 
 async function executeServicesInner(
-  args: { timeRange?: string; analyzerCost?: number; view?: 'summary'; exception_services?: string[] },
+  args: { timeRange?: string; analyzerCost?: number; effective_ingest_per_gb?: number; view?: 'summary'; exception_services?: string[] },
   env: EnvConfig,
   sumOut?: { data?: ServicesSummary }
 ): Promise<string> {
@@ -219,7 +264,19 @@ async function executeServicesInner(
   // Normalise '1d' legacy alias → '24h' before query.
   const timeRange = normalizeTimeRange(args.timeRange ?? '7d');
   const tf = parseTimeframe(timeRange);
-  const costPerGb = args.analyzerCost ?? 1.0;
+  // SHARED rate resolver (lib/rate-resolution.ts) — every cost-emitting
+  // tool walks the SAME priority chain (caller arg → envs.json analyzerCost
+  // → LOG10X_ANALYZER_COST → destination list price → unset) so services,
+  // top_patterns, event_lookup, explain_mode, and estimate_savings tag the
+  // identical (env, window) rate with the SAME rate_source. Prior to this
+  // wiring, services fell back to a fictitious $1/GB AND mislabeled it
+  // 'list_price' when no arg was passed.
+  const rate = resolveRate(
+    { effective_ingest_per_gb: args.effective_ingest_per_gb, analyzerCost: args.analyzerCost },
+    env,
+    destinationFromEnvAnalyzer(env),
+  );
+  const costPerGb: number | null = rate.rate_per_gb;
   const period = costPeriodLabel(tf.days);
   const metricsEnv = await resolveMetricsEnv(env);
   const exceptionServices = (args.exception_services ?? []).filter(
@@ -234,7 +291,7 @@ async function executeServicesInner(
     return 'No service data available. Data appears after the first 24h of collection.';
   }
 
-  // ── Action-axis queries (Item 6) ──
+  // ── Action-axis queries ──
   // Two parallel `sum by (service, hash)` queries (kept + dropped),
   // joined locally to the cap-CSV action lookup. We deliberately key on
   // BOTH service + hash so a pattern that fires in two services is
@@ -249,11 +306,17 @@ async function executeServicesInner(
   const droppedPerServicePatternQ = `sum by (${LABELS.service}, ${LABELS.hash}, ${containerLabel}) (increase(all_events_summaryBytes_total{${LABELS.env}="${metricsEnv}",isDropped="true"}[${tf.range}]))`;
   const passedPerServiceQ = `sum by (${LABELS.service}) (increase(all_events_summaryBytes_total{${LABELS.env}="${metricsEnv}",isDropped!="true"}[${tf.range}]))`;
 
+  // Resolve gitops repo via the same fallback chain configure_engine /
+  // pattern_mitigate use: envs.json field → LOG10X_GH_REPO env var →
+  // most-recent discover_env snapshot. Without this, services reported
+  // `cap_csv_status: not_configured` whenever envs.json lacked the field,
+  // even when a snapshot or env-var already exposed the repo.
+  const envForGitops = envWithResolvedGitops(env);
   const [droppedRes, passedRes, capCsvContent, actionIntent] = await Promise.all([
     queryInstant(env, droppedPerServicePatternQ).catch(() => null),
     queryInstant(env, passedPerServiceQ).catch(() => null),
-    fetchCapCsvForEnv(env).catch(() => undefined),
-    fetchActionIntentForEnv(env).catch(() => undefined),
+    fetchCapCsvForEnv(envForGitops).catch(() => undefined),
+    fetchActionIntentForEnv(envForGitops).catch(() => undefined),
   ]);
 
   // action-intent.json is the canonical source for pattern→action.
@@ -261,12 +324,13 @@ async function executeServicesInner(
   const actionIntentLookup: Map<string, Action> = actionIntent?.by_pattern ?? new Map();
   const parsedCsv = capCsvContent ? parseCapCsv(capCsvContent) : null;
   const hasActionSource = actionIntentLookup.size > 0 || (parsedCsv !== null && parsedCsv.rows.length > 0);
-  // Both fetchers were called when env.gitops?.repo is set. When the repo
-  // is set but both returned undefined, it means the fetch failed.
-  const capCsvFetchAttempted = !!env.gitops?.repo;
+  // Both fetchers were called when the resolved env exposes a gitops repo
+  // (envs.json field, LOG10X_GH_REPO, or snapshot fallback). When the
+  // repo is set but both returned undefined, it means the fetch failed.
+  const capCsvFetchAttempted = !!envForGitops.gitops?.repo;
   const capCsvFetchSucceeded = capCsvContent !== undefined || actionIntent !== undefined;
   const capCsvStatus: CapCsvStatus = buildCapCsvStatus(
-    env.gitops?.repo,
+    envForGitops.gitops?.repo,
     capCsvFetchAttempted,
     capCsvFetchSucceeded,
     hasActionSource,
@@ -364,7 +428,7 @@ async function executeServicesInner(
     }
   }
 
-  interface SvcRow { name: string; bytes: number; cost: number; pct: number; axis: ServiceActionAxis; attribution: ServiceRow['attribution']; current_mode?: Action }
+  interface SvcRow { name: string; bytes: number; cost: number | null; pct: number; axis: ServiceActionAxis; attribution: ServiceRow['attribution']; current_mode?: Action }
   const rows: SvcRow[] = [];
   let totalBytes = 0;
 
@@ -373,12 +437,24 @@ async function executeServicesInner(
     const bytes = parsePrometheusValue(r);
     totalBytes += bytes;
     const axisRaw = perService.get(name);
+    // Reconcile the action decomposition to the authoritative per-service
+    // total `bytes` (from bytesPerService). bytes_passed is DERIVED as the
+    // remainder so passed + offloaded + compacted + dropped == bytes exactly.
+    // Previously bytes_passed came from a SEPARATE `sum by(service,hash)`
+    // read, so two independently-rounded TSDB queries disagreed and the
+    // parts could overshoot the whole (e.g. payment bytes_passed > bytes
+    // with zero drops). Deriving the remainder makes the buckets sum to the
+    // reported total by construction; clamp at 0 for the rare case where the
+    // dropped-cohort read exceeds the total read.
     const axis: ServiceActionAxis = axisRaw
       ? {
-          bytes_passed: axisRaw.bytes_passed,
           bytes_offloaded: axisRaw.bytes_offloaded,
           bytes_compacted: axisRaw.bytes_compacted,
           bytes_dropped: axisRaw.bytes_dropped,
+          bytes_passed: Math.max(
+            0,
+            bytes - axisRaw.bytes_offloaded - axisRaw.bytes_compacted - axisRaw.bytes_dropped,
+          ),
         }
       : {
           bytes_passed: bytes,
@@ -392,7 +468,9 @@ async function executeServicesInner(
         ? 'csv'
         : 'unattributed';
     const current_mode: Action | undefined = exceptionSet.has(name.toLowerCase()) ? 'pass' : undefined;
-    rows.push({ name, bytes, cost: bytesToCost(bytes, costPerGb), pct: 0, axis, attribution, current_mode });
+    // Cost collapses to null when the shared rate resolver returned 'unset'
+    // (no fictitious $1/GB fallback). Renderers + the envelope gate on this.
+    rows.push({ name, bytes, cost: costPerGb != null ? bytesToCost(bytes, costPerGb) : null, pct: 0, axis, attribution, current_mode });
   }
 
   // Calculate percentages
@@ -416,13 +494,18 @@ async function executeServicesInner(
     const vol = fmtBytes(r.bytes).padEnd(10);
     const pct = fmtPct(r.pct).padStart(5);
     const bar = shareBar(maxBytes > 0 ? r.bytes / maxBytes : 0, 16);
-    const cost = `${fmtDollar(r.cost)}${period}`;
+    const cost = r.cost == null ? '—' : `${fmtDollar(r.cost)}${period}`;
     lines.push(`  ${name} ${vol} ${pct}  ${bar}  ${cost}`);
   }
 
-  const totalCost = bytesToCost(totalBytes, costPerGb);
+  // Total cost collapses to null when the shared rate resolver returned 'unset'.
+  const totalCost: number | null = costPerGb != null ? bytesToCost(totalBytes, costPerGb) : null;
   lines.push('');
-  lines.push(`  ${rows.length} service${rows.length !== 1 ? 's' : ''} · ${fmtBytes(totalBytes)} total · ${fmtDollar(totalCost)}${period} at ${fmtDollar(costPerGb)}/GB`);
+  lines.push(
+    costPerGb != null
+      ? `  ${rows.length} service${rows.length !== 1 ? 's' : ''} · ${fmtBytes(totalBytes)} total · ${fmtDollar(totalCost ?? 0)}${period} at ${fmtDollar(costPerGb)}/GB`
+      : `  ${rows.length} service${rows.length !== 1 ? 's' : ''} · ${fmtBytes(totalBytes)} total · (no $/GB rate configured — pass effective_ingest_per_gb)`
+  );
 
   // Coverage line: how concentrated is the volume at the top? Tells the agent
   // whether a drill-down on the top few services captures the question or
@@ -443,7 +526,7 @@ async function executeServicesInner(
   if (anyDrops) {
     lines.push('');
     if (capCsvStatus.kind === 'loaded') {
-      lines.push(`  Action axis: split via cap-CSV (${env.gitops?.repo}${env.gitops?.lookupPath ? `:${env.gitops.lookupPath}` : ''}).`);
+      lines.push(`  Action axis: split via cap-CSV (${envForGitops.gitops?.repo}${envForGitops.gitops?.lookupPath ? `:${envForGitops.gitops.lookupPath}` : ''}).`);
     } else {
       lines.push(`  Action axis: ${capCsvStatus.reason} Dropped bytes folded into bytes_dropped (unattributed).`);
     }
@@ -473,12 +556,28 @@ async function executeServicesInner(
   if (block) lines.push('', block);
 
   if (sumOut) {
-    const topN = Math.min(3, rows.length);
+    // top_n_share_pct: cost concentration in the ACTIONABLE set (services
+    // with a non-null next_action, the ones a CFO can act on this week).
+    // This field used to slice [0:3] and was rendered alongside a headline
+    // saying "Top {actionableCount}", three different numbers for the same
+    // quantity in one envelope. N now matches the headline's actionable
+    // count so the field reconstructs from the data.
+    // Mirror the per-row next_action logic (rank <= 10 AND pct >= 0.1)
+    // so the share % counts exactly the services the per-row routing
+    // marks actionable. Exception-mode services aren't subtracted;
+    // they route to pattern_mitigate but still count as actionable.
+    const actionableRowCount = Math.min(
+      10,
+      rows.filter((r) => r.pct >= 0.1).length
+    );
+    const topN = actionableRowCount;
     const topBytes = rows.slice(0, topN).reduce((s, r) => s + r.bytes, 0);
     const topShare = totalBytes > 0 ? Math.round((topBytes / totalBytes) * 100) : 0;
     sumOut.data = {
       time_range: tf.label,
       cost_per_gb: costPerGb,
+      rate_source: rate.source,
+      rate_disclosure: rate.disclosure,
       period,
       total_bytes: totalBytes,
       total_cost: totalCost,
@@ -506,9 +605,9 @@ async function executeServicesInner(
           next_action = {
             tool: 'log10x_configure_engine',
             args: { service: r.name },
-            reason: `Re-tune the per-pattern action plan for "${r.name}" via configure_engine — the bulk-plan path that lands a refreshed cap-CSV in gitops.`,
+            reason: `Re-tune the per-pattern action plan for "${r.name}" via configure_engine — the bulk-plan path that lands a refreshed cap-CSV (gitops PR, or kubectl ConfigMap when no gitops repo is configured).`,
           };
-        } else if (rank <= 10) {
+        } else if (rank <= NEXT_ACTION_RANK_CUTOFF) {
           next_action = {
             tool: 'log10x_top_patterns',
             args: { service: r.name },

@@ -175,10 +175,25 @@ export interface BackendResolution {
 }
 
 /**
+ * Per-call overrides for the backend resolver. When supplied, they take
+ * priority over LOG10X_CUSTOMER_METRICS_* env vars but do NOT mutate
+ * process.env (other concurrent tool calls keep their env-derived view).
+ *
+ * Use case: an MCP launched with a stale or empty LOG10X_CUSTOMER_METRICS_URL
+ * can be redirected at tool-call time without restarting the server.
+ */
+export interface BackendOverrides {
+  url?: string;
+  type?: string;
+  auth?: string;
+  instanceId?: string;
+}
+
+/**
  * Resolve a customer-metrics backend from the ambient shell environment.
  *
  * Detection order (first hit wins):
- *   1. explicit `LOG10X_CUSTOMER_METRICS_URL`
+ *   1. explicit `LOG10X_CUSTOMER_METRICS_URL` (or per-call `overrides.url`)
  *   2. Grafana Cloud via `GRAFANA_CLOUD_API_KEY` / `GCLOUD_*` env or
  *      `~/.grafana/grafana-cli-config.yaml`
  *   3. Datadog Prometheus-compatible read API via `DD_API_KEY + DD_APP_KEY`
@@ -187,18 +202,19 @@ export interface BackendResolution {
  *      `gcloud config get project`
  *   6. Self-hosted Prometheus via `PROMETHEUS_URL`
  */
-export async function resolveBackend(): Promise<BackendResolution> {
+export async function resolveBackend(overrides?: BackendOverrides): Promise<BackendResolution> {
   const trace: BackendResolution['trace'] = [];
 
-  // 1. Explicit URL.
-  if (process.env.LOG10X_CUSTOMER_METRICS_URL) {
+  const explicitUrl = overrides?.url || process.env.LOG10X_CUSTOMER_METRICS_URL;
+  // 1. Explicit URL (per-call arg wins over env var).
+  if (explicitUrl) {
     try {
-      const backend = buildExplicitBackend();
+      const backend = buildExplicitBackend(overrides);
       if (backend) {
         trace.push({
           path: 'explicit_env',
           status: 'matched',
-          reason: `LOG10X_CUSTOMER_METRICS_URL set; backend type ${backend.backendType}`,
+          reason: `${overrides?.url ? 'per_call_arg' : 'LOG10X_CUSTOMER_METRICS_URL'} set; backend type ${backend.backendType}`,
         });
         return { backend, detectionPath: 'explicit_env', trace };
       }
@@ -209,7 +225,7 @@ export async function resolveBackend(): Promise<BackendResolution> {
       throw e;
     }
   } else {
-    trace.push({ path: 'explicit_env', status: 'skipped', reason: 'LOG10X_CUSTOMER_METRICS_URL not set' });
+    trace.push({ path: 'explicit_env', status: 'skipped', reason: 'LOG10X_CUSTOMER_METRICS_URL not set and no per_call_arg' });
   }
 
   // 2. Grafana Cloud.
@@ -285,13 +301,13 @@ export function formatDetectionTrace(trace: BackendResolution['trace']): string 
     .join('\n');
 }
 
-function buildExplicitBackend(): CustomerMetricsBackend | undefined {
-  const url = process.env.LOG10X_CUSTOMER_METRICS_URL;
+function buildExplicitBackend(overrides?: BackendOverrides): CustomerMetricsBackend | undefined {
+  const url = overrides?.url || process.env.LOG10X_CUSTOMER_METRICS_URL;
   if (!url) return undefined;
 
-  const rawType = (process.env.LOG10X_CUSTOMER_METRICS_TYPE || 'generic_prom').toLowerCase();
-  const auth = process.env.LOG10X_CUSTOMER_METRICS_AUTH;
-  const instanceId = process.env.LOG10X_CUSTOMER_METRICS_INSTANCE_ID;
+  const rawType = (overrides?.type || process.env.LOG10X_CUSTOMER_METRICS_TYPE || 'generic_prom').toLowerCase();
+  const auth = overrides?.auth || process.env.LOG10X_CUSTOMER_METRICS_AUTH;
+  const instanceId = overrides?.instanceId || process.env.LOG10X_CUSTOMER_METRICS_INSTANCE_ID;
 
   switch (rawType) {
     case 'grafana_cloud':
@@ -683,10 +699,19 @@ export class Log10xBackend implements CustomerMetricsBackend {
   readonly backendType = 'log10x';
   readonly endpoint: string;
   private authHeader: string;
+  /**
+   * Per-backend Prom query timeout. Scoped to this shared backend (where the
+   * latency symptom lives) so AMP/Grafana-Cloud/GCP timeouts stay at the
+   * global 30s default. Override via `LOG10X_PROM_TIMEOUT_MS` — typical
+   * cold-cache reads on prometheus.log10x.com can take 40-60s when the
+   * inner increase() scan is large (deep histories, broad container regex).
+   */
+  private timeoutMs: number;
 
   constructor(config: { endpoint: string; apiKey: string; envId: string }) {
     this.endpoint = config.endpoint.replace(/\/+$/, '');
     this.authHeader = `${config.apiKey}/${config.envId}`;
+    this.timeoutMs = parseInt(process.env.LOG10X_PROM_TIMEOUT_MS || '60000', 10) || 60000;
   }
 
   async queryInstant(promql: string): Promise<PrometheusResponse> {
@@ -734,7 +759,7 @@ export class Log10xBackend implements CustomerMetricsBackend {
     return backendJsonFetch<T>(
       url,
       { method: 'GET', headers: { 'X-10X-Auth': this.authHeader } },
-      { kindLabel: 'log10x' }
+      { kindLabel: 'log10x', timeoutMs: this.timeoutMs }
     );
   }
 }
