@@ -346,6 +346,11 @@ interface PerPatternRow {
   current_bytes_30d: number;
   cap_bytes_per_window: number;
   action: Action;
+  // Actual projected reduction for THIS pattern under its assigned action.
+  // A `pass` row sheds nothing, so both are 0 — pass is never credited as
+  // savings. Summed into the headline totals so they reconcile with the plan.
+  saved_bytes_monthly: number;
+  saved_dollars_monthly: number;
   projected_monthly_usd_low: number;
   projected_monthly_usd_expected: number;
   projected_monthly_usd_high: number;
@@ -1062,11 +1067,34 @@ export async function executeConfigureEngine(
 
     const capBytesPerWindow = computeCapBytesPerWindow(action, monthlyBytes);
 
+    // Baseline (no-action) cost in the SAME projection model as `range`, so the
+    // per-pattern dollar saving is internally consistent: dollars% tracks
+    // bytes% for byte-reducing actions, and tier_down's rate delta is still
+    // captured. pass → baseline == projected → 0.
+    const baselineExpectedUsd =
+      action === 'pass'
+        ? (range.expected.total_dollars ?? 0)
+        : (projectActionRange({
+            action: 'pass',
+            bytes_in: monthlyBytes,
+            avg_event_size_bytes: c.events > 0 ? c.bytes / c.events : undefined,
+            sample_n: 10,
+            destination,
+            retention_months: 1,
+            esPruned: args.es_pruned,
+          }).expected.total_dollars ?? 0);
+
     rows.push({
       pattern_hash: c.pattern_hash,
       current_bytes_30d: Math.round(monthlyBytes),
       cap_bytes_per_window: Math.round(capBytesPerWindow),
       action,
+      // Actual per-pattern shed. 0 bytes for pass / tier_down (no on-wire
+      // reduction); tier_down's saving shows up in dollars via the rate delta.
+      saved_bytes_monthly: Math.round(Math.max(0, monthlyBytes - range.expected.bytes_out)),
+      saved_dollars_monthly: roundCents(
+        Math.max(0, baselineExpectedUsd - (range.expected.total_dollars ?? 0))
+      ),
       // total_dollars is now nullable on SavingsProjection — null means the
       // destination has no list rate and no customer override. Current
       // surface still emits a number; full rate_source propagation lands in
@@ -1546,11 +1574,15 @@ function buildSummaryPayload(params: {
     actionMix[r.action] = (actionMix[r.action] ?? 0) + 1;
   }
 
-  // Totals. bytes_saved = current - target (the budget the solver shed).
-  const bytesSavedMonthly = Math.max(0, currentMonthlyBytes - targetMonthlyBytes);
-  const targetMonthlyUsd =
-    (targetMonthlyBytes / GB) * (ingestPerGb + model.storage_per_gb_month);
-  const dollarsSavedMonthly = Math.max(0, currentMonthlyUsd - targetMonthlyUsd);
+  // Totals (#1 + #2): report the solver's ACTUAL projected shed — the sum of
+  // the per-pattern plan — not the flat `current - target` budget. A `pass`
+  // row sheds nothing, so it contributes zero: pass is no longer credited as
+  // savings, and the headline reconciles with the per-pattern breakdown by
+  // construction. (The flat target still appears as derivation.target_monthly_*
+  // — clearly labelled as the GOAL, distinct from what the plan delivers.)
+  const bytesSavedMonthly = rows.reduce((s, r) => s + r.saved_bytes_monthly, 0);
+  const dollarsSavedMonthly = rows.reduce((s, r) => s + r.saved_dollars_monthly, 0);
+  void targetMonthlyBytes;
 
   // Top-5 cost contributors (DESC by current_bytes_30d). Descriptor
   // truncated to 60 chars per spec — uses the row's `reason` field as
