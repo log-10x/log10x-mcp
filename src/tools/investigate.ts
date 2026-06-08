@@ -1160,6 +1160,14 @@ async function executeInvestigateInner(
     metricName,
   });
 
+  // Preserve the old "throw → typed error envelope" behavior now that
+  // correlate.ts returns structural failures as a typed CorrelationResult
+  // with status==='error' instead of throwing. The outer executeInvestigate
+  // catch routes this through wrapBackendError into a chassis envelope.
+  if (correlation.status === 'error' && correlation.error) {
+    throw new Error(correlation.error.hint);
+  }
+
   // Per spec: if the inflection is inferred (no sharp change-point), cap all
   // chain-link confidences at "low" so the report doesn't overclaim causality.
   if (inflection.confidence === 'inferred') {
