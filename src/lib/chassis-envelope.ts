@@ -417,6 +417,15 @@ export const ChassisDataSchema = z.object({
   must_render_verbatim: z.string().optional(),
 
   /**
+   * Rendered markdown artifact for `view: 'markdown'` envelopes. The MCP
+   * wrapper (index.ts) surfaces this verbatim on the text channel and errors
+   * if a markdown-view envelope lacks it. Populated by buildChassisEnvelope
+   * from `must_render_verbatim` when view==='markdown' (see below), so tools
+   * only need to set must_render_verbatim.
+   */
+  markdown: z.string().optional(),
+
+  /**
    * Structured question the agent MUST surface before routing anywhere.
    * Replaces the HTML-comment pattern used in the legacy next-actions
    * protocol, which agents routinely skip.
@@ -696,6 +705,14 @@ export function buildChassisEnvelope(input: ChassisEnvelopeInput): ChassisEnvelo
       ? { forbidden_next_actions: input.forbidden_next_actions }
       : {}),
     ...(input.error != null ? { error: input.error } : {}),
+    // view:'markdown' envelopes MUST carry data.markdown (the MCP wrapper
+    // surfaces it verbatim and errors without it). Map it from the pre-rendered
+    // must_render_verbatim so every markdown-view tool works by setting just
+    // that one field. Previously NO chassis tool populated data.markdown, so
+    // every view:'markdown' call hard-errored "data.markdown is not a string".
+    ...(input.view === 'markdown' && input.must_render_verbatim != null
+      ? { markdown: input.must_render_verbatim }
+      : {}),
   };
 
   // Back-compat mode: spread legacy flat fields alongside chassis fields.
