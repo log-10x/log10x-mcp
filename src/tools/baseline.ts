@@ -134,6 +134,14 @@ export interface BaselineEnvelopeData {
    * percent-first.
    */
   rate_source: RateSource;
+  /**
+   * The resolved ingest $/GB actually used for all dollar math, stated
+   * explicitly so readers don't have to back it out of monthly_usd / bytes.
+   * `null` when rate_source === 'unset'. (services exposes the same via
+   * `cost_per_gb`; baseline carries it here for symmetry.) Optional: the
+   * not_ready envelope omits it (no rate computed before the gates pass).
+   */
+  effective_per_gb?: number | null;
   current: {
     bytes_window: number;
     bytes_window_display: string;
@@ -315,6 +323,11 @@ export async function executeBaseline(
     source_disclosure: {
       bytes_source: 'tsdb',
       rate_source: rateSourceMapped,
+      // State the resolved $/GB explicitly (parity with services.cost_per_gb)
+      // so customer_supplied rates aren't only inferable from the dollar math.
+      ...('effective_per_gb' in result && result.effective_per_gb != null
+        ? { effective_per_gb: result.effective_per_gb }
+        : {}),
       ...envDisclosure,
     },
     scope: {
@@ -547,6 +560,7 @@ async function computeBaseline(
     destination,
     horizon,
     rate_source: rateSource,
+    effective_per_gb: rateSource === 'unset' ? null : ingestPerGb,
     current: {
       bytes_window: totalBytes,
       bytes_window_display: fmtBytes(totalBytes),
