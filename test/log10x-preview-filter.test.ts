@@ -19,7 +19,10 @@ import type { StructuredOutput } from '../src/lib/output-types.js';
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
 function asEnvelope(out: StructuredOutput): PreviewFilterEnvelope {
-  return out.data as PreviewFilterEnvelope;
+  // The tool now returns a chassis envelope (buildChassisEnvelope) that nests
+  // the tool-specific payload under out.data.payload. The PreviewFilterEnvelope
+  // fields (service, mode, patterns, csv_path, data_source, ...) live there.
+  return (out.data as { payload: PreviewFilterEnvelope }).payload;
 }
 
 // ─── envelope shape ───────────────────────────────────────────────────────────
@@ -229,11 +232,18 @@ test('preview_filter: actions[] alternative entries all reference log10x_pattern
   }
 });
 
-test('preview_filter: actions[] count is two entries per pattern (pattern_detail + pattern_examples)', async () => {
+test('preview_filter: actions[] are two entries (pattern_detail + pattern_examples) for the top-3 patterns', async () => {
   const out = await executePreviewFilter({ service: 'cart', mode: 'drop', top_n: 10 });
   const d = asEnvelope(out);
   const actions = (out as StructuredOutput & { actions?: unknown[] }).actions ?? [];
-  assert.equal(actions.length, d.patterns.length * 2, 'two actions per pattern row (pattern_detail + pattern_examples)');
+  // Source caps actions to the top-3 patterns (defect 27: was 40-entry bloat),
+  // emitting exactly two entries each (pattern_detail + pattern_examples).
+  const expectedPatternCount = Math.min(d.patterns.length, 3);
+  assert.equal(
+    actions.length,
+    expectedPatternCount * 2,
+    'two actions per top-3 pattern row (pattern_detail + pattern_examples)',
+  );
 });
 
 test('preview_filter: actions[] includes log10x_pattern_examples entries with pattern arg', async () => {

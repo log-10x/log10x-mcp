@@ -207,10 +207,10 @@ function extractSlotsFromBody(body: string): VariableSlot[] {
 function inferSlotNameFromToken(tok: string, position: number, previousName?: string): string | undefined {
   // Empty or whitespace-only preceding token: if a previous slot name is known,
   // this slot is a continuation of the previous slot's value (parts separated by
-  // a token whose only character ended the previous slot's value).  Restore the
-  // pre-15.D inheritance behaviour — it was guarded by `if (previousName)` so it
-  // cannot fire without a prior named slot, and the over-firing bug was in the
-  // separator-only NON-empty branch (fix #3), not here.
+  // a token whose only character ended the previous slot's value).  This
+  // restores the inheritance behaviour, guarded by `if (previousName)` so it
+  // cannot fire without a prior named slot. The over-firing case is in the
+  // separator-only NON-empty branch, not here.
   // Only reached when previousName is set; otherwise fall through to undefined.
   if (!tok || /^\s*$/.test(tok)) {
     if (previousName) {

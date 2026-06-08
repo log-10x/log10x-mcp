@@ -1,6 +1,6 @@
 {
   "name": "log10x-mcp",
-  "version": "1.12.0",
+  "version": "1.12.3",
   "description": "Log10x MCP Server — per-pattern log cost attribution, root-cause investigation, pasted-batch triage, archive query/backfill, and cross-pillar correlation against customer metric backends (Grafana Cloud, Mimir, Thanos, AMP) with structural validation that refuses when it cannot prove linkage",
   "type": "module",
   "main": "build/index.js",
@@ -15,7 +15,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc && mkdir -p build/vendor/promql-parser && cp -r vendor/promql-parser/promql.js vendor/promql-parser/package.json build/vendor/promql-parser/ && chmod +x build/index.js && chmod +x build/bin/tenx-recur.js",
+    "build": "tsc && mkdir -p build/vendor/promql-parser && cp -r vendor/promql-parser/promql.js vendor/promql-parser/package.json build/vendor/promql-parser/ && chmod +x build/index.js && chmod +x build/bin/tenx-recur.js && rm -rf build/product-kb/docs && mkdir -p build/product-kb/docs && cp -R \"${LOG10X_PRODUCT_KB_SRC:-../mksite/docs}/.\" build/product-kb/docs/ 2>/dev/null || echo \"product-kb: no docs at ${LOG10X_PRODUCT_KB_SRC:-../mksite/docs} (product_qa corpus empty locally; check out the mksite sibling repo or set LOG10X_PRODUCT_KB_SRC)\"",
     "start": "node build/index.js",
     "dev": "tsc --watch",
     "prepublishOnly": "npm run build",
@@ -47,13 +47,16 @@
     "@aws-sdk/client-cloudwatch": "^3.1037.0",
     "@aws-sdk/client-cloudwatch-logs": "^3.1032.0",
     "@aws-sdk/client-sqs": "^3.1062.0",
+    "@aws-sdk/client-ssm": "^3.1063.0",
     "@aws-sdk/credential-providers": "^3.1032.0",
+    "@azure/app-configuration": "^1.11.0",
     "@azure/identity": "^4.13.1",
     "@azure/monitor-query": "^1.3.3",
     "@clickhouse/client": "^1.18.2",
     "@datadog/datadog-api-client": "^1.56.0",
     "@elastic/elasticsearch": "^9.3.4",
     "@google-cloud/logging": "^11.2.1",
+    "@google-cloud/secret-manager": "^6.1.3",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/exporter-trace-otlp-http": "^0.218.0",

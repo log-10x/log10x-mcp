@@ -33,6 +33,7 @@ import type { Environments } from '../lib/environments.js';
 import { reloadEnvironmentsInPlace, clearOverridingEnvVar } from '../lib/environments.js';
 import { clearCredentials, getCredentialsPath } from '../lib/credentials.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { requireWriteAccess } from '../lib/read-only-guard.js';
 
 export const signoutSchema = {};
 
@@ -40,6 +41,7 @@ export async function executeSignout(
   _args: Record<string, never>,
   envs: Environments
 ): Promise<string | StructuredOutput> {
+  requireWriteAccess('wipes ~/.log10x/credentials to sign out');
   return signoutImpl(envs);
 }
 

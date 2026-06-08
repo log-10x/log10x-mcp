@@ -34,7 +34,7 @@ export const extractTemplatesSchema = {
       'Substrings that must appear in at least one template body.'
     ),
     forbidden_merges: z.array(z.array(z.string()).min(2).max(2)).optional().describe(
-      'Pairs of substrings that must NOT appear in the same template body. Use to assert the templater never merges two structurally-distinct events into one identity.'
+      'Pairs of substrings that must NOT appear in the same template body. Use to assert the pattern extractor never merges two structurally-distinct events into one identity.'
     ),
   }).optional().describe(
     'Optional assertions — turns extraction into validation. Each assertion reports pass/fail in the output.'

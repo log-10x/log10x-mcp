@@ -48,26 +48,27 @@ function trimZeros(s: string): string {
 /**
  * Format bytes as human-readable with 3 significant figures.
  *
- * Thresholds (all base-2):
- *   < 1 KiB          → "N B"   (integer)
- *   < 100 KiB        → "X.XX KB"
- *   < 100 MiB        → "X.XX MB"
- *   >= 100 MiB       → "X.XX GB"  (includes < 1 GiB values — 110 MB → 0.108 GB)
- *   >= 1 TiB         → "X.XX TB"
+ * Thresholds use DECIMAL units (KB=10^3, MB=10^6, GB=10^9, TB=10^12),
+ * matching cost.ts's $/GB convention so the same byte value renders
+ * the same volume in the same envelope as the dollars derived from it.
+ * CloudWatch / Datadog / Splunk / Azure / GCP / Sumo all bill in
+ * decimal GB, so this also matches what the customer sees on their
+ * invoice. Decimal units are used because a GiB divisor under a GB label
+ * understates the volume shown next to the dollars by ~6.87%.
  *
  * Using toPrecision(3) throughout so 115_577_921 bytes →
- *   mb = 110.2 → gb = 0.1076 → "0.108 GB"  (3 sig figs, not .toFixed(1) = "0.1")
+ *   mb = 115.6 → gb = 0.1156 → "0.116 GB"  (3 sig figs)
  */
 export function fmtBytes(bytes: number): string {
   const abs = Math.abs(bytes);
-  if (abs < 1024) return `${Math.round(abs)} B`;
-  const kb = abs / 1024;
+  if (abs < 1000) return `${Math.round(abs)} B`;
+  const kb = abs / 1000;
   if (kb < 100) return `${trimZeros(kb.toPrecision(3))} KB`;
-  const mb = kb / 1024;
+  const mb = kb / 1000;
   if (mb < 100) return `${trimZeros(mb.toPrecision(3))} MB`;
-  const gb = mb / 1024;
-  if (gb < 1024) return `${trimZeros(gb.toPrecision(3))} GB`;
-  const tb = gb / 1024;
+  const gb = mb / 1000;
+  if (gb < 1000) return `${trimZeros(gb.toPrecision(3))} GB`;
+  const tb = gb / 1000;
   return `${trimZeros(tb.toPrecision(3))} TB`;
 }
 
@@ -178,7 +179,14 @@ export interface Timeframe {
  * investigation; day-level windows for cost and trend analysis.
  */
 export function parseTimeframe(input: string): Timeframe {
-  const match = input.match(/^(\d+)([mhd])$/);
+  // Defensive: when the humanized label ("last 24h" / "last 1d" / "this
+  // week") flows back into parseTimeframe (e.g. via envelope.d.window
+  // being re-parsed by chart-render code), strip the "last " prefix and
+  // map legacy human labels back to their raw form. Avoids the
+  // round-trip rejection seen on pattern_trend ("this week" → 7d).
+  let normalized = input.replace(/^last\s+/i, '').trim();
+  if (normalized === 'this week') normalized = '7d';
+  const match = normalized.match(/^(\d+)([mhd])$/);
   if (!match) throw new Error(`Invalid timeframe: "${input}". Expected format like "15m", "1h", "6h", "1d", "7d", "30d".`);
 
   const n = parseInt(match[1], 10);
@@ -192,7 +200,6 @@ export function parseTimeframe(input: string): Timeframe {
 
   let label: string;
   if (unit === 'd' && n === 1) label = 'last 24h';
-  else if (unit === 'd' && n === 7) label = 'this week';
   else if (unit === 'd') label = `last ${n}d`;
   else if (unit === 'h') label = `last ${n}h`;
   else label = `last ${n}m`;

@@ -26,6 +26,7 @@ import type { EnvConfig } from '../lib/environments.js';
 import { queryInstant } from '../lib/api.js';
 import * as pql from '../lib/promql.js';
 import { bytesToCost, parsePrometheusValue, buildDisclosedDollarValue, type DisclosedDollarValue } from '../lib/cost.js';
+import { resolveRate, destinationFromEnvAnalyzer } from '../lib/rate-resolution.js';
 import { fmtDollar, fmtBytes, fmtPct, fmtDisclosedDollar, parseTimeframe, costPeriodLabel } from '../lib/format.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { type StructuredOutput } from '../lib/output-types.js';
@@ -40,8 +41,8 @@ export type RateSource = 'list_price' | 'customer_supplied' | 'unset';
 
 export const savingsSchema = {
   timeRange: z.enum(['15m', '1h', '6h', '24h', '1d', '7d', '30d']).default('7d').describe("Time range. '24h' and '1d' are equivalent."),
-  analyzerCost: z.number().optional().describe('DEPRECATED alias for effective_ingest_per_gb. SIEM ingestion cost in $/GB.'),
-  effective_ingest_per_gb: z.number().optional().describe('Customer-supplied SIEM ingestion cost in $/GB. When provided, rate_source=customer_supplied and dollars are populated. When omitted and no profile rate is available, rate_source=unset and the headline reports percent + bytes only (no dollars).'),
+  analyzerCost: z.number().optional().describe('DEPRECATED alias for effective_ingest_per_gb. stack ingestion cost in $/GB.'),
+  effective_ingest_per_gb: z.number().optional().describe('Customer-supplied stack ingestion cost in $/GB. When provided, rate_source=customer_supplied and dollars are populated. When omitted and no profile rate is available, rate_source=unset and the headline reports percent + bytes only (no dollars).'),
   storageCost: z.number().optional().describe('S3 storage cost in $/GB/month. Defaults to $0.023 (S3 Standard).'),
   environment: z.string().optional().describe('Environment nickname'),
   view: z.literal('summary').default('summary').optional().describe('Output format. Always "summary" — the typed envelope (data.totals, data.edge, data.retriever, data.run_rate). Field retained for backward-compat.'),
@@ -78,7 +79,8 @@ interface SavingsSummary {
     savings_dollars: number | null;
     /** Disclosed-value mirror of savings_dollars. null when rate_source === 'unset'. */
     savings_dollars_disclosed: DisclosedDollarValue | null;
-    coverage: number;
+    /** Fraction of retriever chunks that resolved healthy (chunks_ok / chunks_total). */
+    chunks_ok_ratio: number;
     chunks_ok: number;
     chunks_total: number;
   };
@@ -92,6 +94,21 @@ interface SavingsSummary {
     annual_projection_dollars: number | null;
     /** Disclosed-value mirror of annual_projection_dollars. null when rate_source === 'unset'. */
     annual_projection_dollars_disclosed: DisclosedDollarValue | null;
+    /**
+     * Disclose the extrapolation method so consumers understand that
+     * `annual_projection_dollars` is a linear extrapolation from the
+     * observed window (realized * 365 / window_days), NOT a
+     * seasonality-adjusted forecast. The field also documents the actual
+     * scaling factor used so consumers can verify the arithmetic without
+     * having to guess between 52 weeks/yr (the "/wk" label invitation) and
+     * 52.143 (= 365/7, what the math actually does).
+     */
+    projection_basis: {
+      method: 'linear_extrapolation';
+      window_days: number;
+      scale_factor: number;
+      note: string;
+    };
     has_data: boolean;
   };
   run_rate?: {
@@ -153,8 +170,16 @@ export async function executeSavings(
     headline,
     status: d.totals.has_data ? 'success' : 'no_signal',
     decisions: {
-      threshold_used: d.cost_per_gb,
-      threshold_basis: d.rate_source === 'customer_supplied' ? 'customer_supplied' : 'default',
+      // Prior code aliased threshold_used := cost_per_gb (the $/GB rate).
+      // Rate is not a threshold, and the chassis decision block documents
+      // the OPERATIONAL THRESHOLD. savings doesn't gate decisions on any
+      // operational threshold; it aggregates reductions. Set both fields to
+      // the schema's absent-tool form so cross-tool comparisons of
+      // decisions.threshold_used don't conflate rate ($/GB) with target (%)
+      // or cutoff (rank). The same fix applies to services and top_patterns.
+      // rate_source provenance remains in source_disclosure.rate_source.
+      threshold_used: null,
+      threshold_basis: 'default',
     },
     source_disclosure: {
       bytes_source: 'tsdb',
@@ -163,8 +188,21 @@ export async function executeSavings(
     scope: {
       window: d.time_range,
       window_basis: 'explicit',
-      candidates_count: d.pipeline_instances,
-      candidates_usable: d.services_monitored,
+      // Prior code wired
+      //   candidates_count := pipeline_instances (1)
+      //   candidates_usable := services_monitored (26)
+      // These are orthogonal cardinalities (forwarder pods vs
+      // distinct services emitting logs) with no subset
+      // relationship, violating ScopeSchema's documented
+      // "Subset of candidates_count" contract (candidates_usable
+      // > candidates_count is structurally wrong). savings has no
+      // candidate selection step; it aggregates across all
+      // services in the window, so the right move is to drop
+      // both fields per the schema doc ("Absent for tools that
+      // don't have a candidate selection step"). The real
+      // cardinalities live in payload.pipeline_instances and
+      // payload.services_monitored where their semantics aren't
+      // forced into a subset relationship.
     },
     payload: d,
     human_summary: headline,
@@ -185,14 +223,18 @@ async function executeSavingsInner(
   // Normalise '1d' legacy alias → '24h'.
   const timeRange = normalizeTimeRange(args.timeRange ?? '7d');
   const tf = parseTimeframe(timeRange);
-  // Resolve $/GB with rate_source attribution. No silent $1/GB fallback — if
-  // the caller supplies nothing and there is no profile rate to inherit, we
-  // emit rate_source='unset' and downstream dollar math returns null so the
-  // headline/markdown can refuse to print a dollar lie.
-  const overrideRate = args.effective_ingest_per_gb ?? args.analyzerCost;
-  const rateSource: RateSource =
-    overrideRate != null ? 'customer_supplied' : 'unset';
-  const costPerGb: number | null = overrideRate != null ? overrideRate : null;
+  // Resolve $/GB via the shared chain (caller arg → envs.json analyzerCost →
+  // LOG10X_ANALYZER_COST → destination list price). list_price is the honest,
+  // disclosed default; 'unset' (dollars null, percent-only) only when no rate
+  // AND no destination is known. No fabricated $1/GB, and no log10x account-API
+  // call to learn the rate — it resolves locally.
+  const savingsRate = resolveRate(
+    { effective_ingest_per_gb: args.effective_ingest_per_gb, analyzerCost: args.analyzerCost },
+    env,
+    destinationFromEnvAnalyzer(env),
+  );
+  const rateSource: RateSource = savingsRate.source;
+  const costPerGb: number | null = savingsRate.rate_per_gb;
   const storagePerGb = args.storageCost ?? DEFAULT_STORAGE_COST_PER_GB;
   const period = costPeriodLabel(tf.days);
 
@@ -201,10 +243,10 @@ async function executeSavingsInner(
   //
   // Chunks return { sum, succeeded, total } so callers can annotate coverage.
   // Intermittent Prometheus aggregation-limit errors (HTTP 422 "the query hit
-  // the aggregated data size limit") affect a subset of chunks deterministically
-  // — they are NOT caused by client-side concurrency (tested: throttling to 6
+  // the aggregated data size limit") affect a subset of chunks deterministically;
+  // they are NOT caused by client-side concurrency (tested: throttling to 6
   // concurrent requests quadruples wall time with zero improvement in coverage).
-  // The root cause is server-side and cannot be fixed from the client. PR #12's
+  // The root cause is server-side and cannot be fixed from the client. The
   // coverage annotation surfaces the partial-data honestly to the caller.
   const chunkOffsets = Array.from({ length: tf.days }, (_, i) => i);
   const chunkSum = async (builder: (off: number) => string): Promise<{ sum: number; succeeded: number; total: number }> => {
@@ -280,7 +322,7 @@ async function executeSavingsInner(
   const edgeSavings: number | null =
     costPerGb != null ? bytesToCost(edgeReducedBytes, costPerGb) : null;
 
-  // Retriever savings: cost avoided by keeping data in S3 instead of the SIEM
+  // Retriever savings: cost avoided by keeping data in S3 instead of the stack
   // = indexedBytes * (analyzerCost - storageCost) - streamedBytes * analyzerCost
   const retrieverInputBytes = indexedBytes + streamedBytes;
   const retrieverReductionPct =
@@ -355,19 +397,19 @@ async function executeSavingsInner(
   // NOT realized savings — it's unshipped volume. Reporting a "saved" dollar
   // figure here destroys credibility when the customer realizes nothing was
   // actually emitted. Instead, show a warning banner and flag it as potential
-  // savings that cannot be attributed to a SIEM the customer is paying for.
+  // savings that cannot be attributed to a stack the customer is paying for.
   // Caught by S2 sub-agent: "I cannot reconcile $196K/wk saved against $196K
   // monitored spend — they are the same number." Was the same number because
   // emitted=0 in the demo env.
   if (edgeEmissionMissing) {
     lines.push(`  Edge:      ${fmtBytes(edgeIn).padEnd(14)} input      → ⚠ no downstream emission detected`);
-    lines.push(`             (input ${fmtBytes(edgeIn)} processed, but 0 B emitted to a SIEM target)`);
+    lines.push(`             (input ${fmtBytes(edgeIn)} processed, but 0 B emitted to a stack target)`);
     if (edgeSavingsDisclosed != null) {
       lines.push(`             _Potential savings if this were routed through the pipeline: ${fmtDisclosedDollar(edgeSavingsDisclosed)}${period}._`);
     } else {
       lines.push(`             _Pass effective_ingest_per_gb to overlay a potential-savings dollar figure._`);
     }
-    lines.push(`             _To realize these savings, configure a downstream SIEM output (Splunk, Datadog, etc.) and measurements will populate within 24h._`);
+    lines.push(`             _To realize these savings, configure a downstream stack output (Splunk, Datadog, etc.) and measurements will populate within 24h._`);
   } else if (edgeReducedBytes > 0) {
     const dollarTail =
       edgeSavingsDisclosed != null
@@ -606,7 +648,14 @@ async function executeSavingsInner(
         reduction_pct: retrieverReductionPct,
         savings_dollars: retrieverSavings,
         savings_dollars_disclosed: retrieverSavingsDisclosed,
-        coverage: mainRetrieverCoverage,
+        // Renamed coverage to chunks_ok_ratio because the field name read as
+        // "byte coverage": when chunks were healthy but no bytes were
+        // indexed/streamed, the envelope shipped coverage=1.0 alongside
+        // indexed_bytes=0 + streamed_bytes=0 and a CFO concluded "100%
+        // covered" when the retriever leg was producing zero savings. A
+        // documented-misleading field in the envelope guarantees agent
+        // misreads, so the back-compat alias was removed for good.
+        chunks_ok_ratio: mainRetrieverCoverage,
         chunks_ok: mainRetrieverChunksOk,
         chunks_total: mainRetrieverChunksTotal,
       },
@@ -616,6 +665,12 @@ async function executeSavingsInner(
         realized_dollars_disclosed: totalSavedDisclosed,
         annual_projection_dollars: annualProjection,
         annual_projection_dollars_disclosed: annualProjectionDisclosed,
+        projection_basis: {
+          method: 'linear_extrapolation',
+          window_days: tf.days,
+          scale_factor: 365 / tf.days,
+          note: `annual = realized * (365 / ${tf.days}) = realized * ${(365 / tf.days).toFixed(3)}. Linear extrapolation from the observed window; not seasonality-adjusted. For "/wk" expectations note that 365/7 = 52.143, not 52 — a "$X/wk × 52" cross-check will drift from this figure by ~0.275%.`,
+        },
         has_data: hasData,
       },
       run_rate: runRate,

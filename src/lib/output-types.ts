@@ -146,22 +146,32 @@ export type InlineImage = z.infer<typeof InlineImageSchema>;
  * these. Per-tool `data` is typed by a separate per-tool Zod schema;
  * here we accept z.unknown() because the envelope itself is
  * tool-agnostic.
+ *
+ * `.passthrough()` keeps fields the chassis builder lifts to the outer
+ * envelope (status, invocation_id, performance — see chassis-envelope.ts
+ * buildChassisEnvelope) intact through `wrap()`'s validation step.
+ * Without it, Zod's default `strip` mode silently removes those keys,
+ * which leaves pattern_examples / pattern_trend / event_lookup
+ * responses with status only at data.status, defeating the envelope.status
+ * hoist.
  */
-export const StructuredOutputSchema = z.object({
-  schema_version: z.literal(SCHEMA_VERSION),
-  schema_epoch: z.string(),
-  tool: z.string(),
-  generated_at: z.string(),
-  view: ViewEnum,
-  summary: SummarySchema,
-  data: z.unknown(),
-  actions: z.array(ActionSchema).default([]),
-  render_hint: RenderHintSchema,
-  truncated: z.boolean().default(false),
-  next_cursor: z.string().optional(),
-  warnings: z.array(z.string()).default([]),
-  images: z.array(InlineImageSchema).optional(),
-});
+export const StructuredOutputSchema = z
+  .object({
+    schema_version: z.literal(SCHEMA_VERSION),
+    schema_epoch: z.string(),
+    tool: z.string(),
+    generated_at: z.string(),
+    view: ViewEnum,
+    summary: SummarySchema,
+    data: z.unknown(),
+    actions: z.array(ActionSchema).default([]),
+    render_hint: RenderHintSchema,
+    truncated: z.boolean().default(false),
+    next_cursor: z.string().optional(),
+    warnings: z.array(z.string()).default([]),
+    images: z.array(InlineImageSchema).optional(),
+  })
+  .passthrough();
 
 export type StructuredOutput = z.infer<typeof StructuredOutputSchema>;
 

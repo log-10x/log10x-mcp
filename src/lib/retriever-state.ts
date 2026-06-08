@@ -15,7 +15,7 @@
 import { run, runJson } from './discovery/shell.js';
 import type { DiscoverySnapshot } from './discovery/types.js';
 
-export type RetrieverStateSource = 'env_var' | 'snapshot' | 'helm_release_probe' | 'kubectl_probe' | 'none';
+export type RetrieverStateSource = 'env_var' | 'snapshot' | 'helm_release_probe' | 'kubectl_probe' | 'env_config' | 'none';
 
 export interface RetrieverState {
   /** True when a URL + bucket pair was resolved. */

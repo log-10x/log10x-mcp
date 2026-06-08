@@ -34,6 +34,7 @@
 import { z } from 'zod';
 import { getSnapshot, getMostRecentSnapshot } from '../lib/discovery/snapshot-store.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
+import { formatPatternLabel } from '../lib/pattern-label.js';
 import { loadEnvironments } from '../lib/environments.js';
 import { agentOnly } from '../lib/agent-only.js';
 import { fmtPattern, normalizePattern } from '../lib/format.js';
@@ -41,7 +42,7 @@ import type { PrimitiveError } from '../lib/primitive-errors.js';
 import { resolveSiemSelection } from '../lib/siem/resolve.js';
 import { getConnector } from '../lib/siem/index.js';
 import { probeReceiverInPath, eventHasTenxHash } from '../lib/receiver-probe.js';
-import { resolvePatternHashFromMetrics } from '../lib/resolve-pattern-hash.js';
+import { resolvePatternRefInMetrics } from '../lib/resolve-pattern-hash.js';
 import {
   buildChassisEnvelope,
   buildChassisErrorEnvelope,
@@ -397,14 +398,14 @@ async function detectCapabilities(snapshotId?: string): Promise<Capabilities> {
   }
 
   // Source 4: SIEM credential probe.
-  // (a) Fix C — reconcile analyzerVendor against what connector actually has
-  //     credentials, because the config stack (envs.json / env-var / profile
-  //     metadata) may be stale (e.g. still says 'splunk' when CloudWatch is
-  //     now the live destination).
-  // (b) Fix A — probe 1–3 recent events for tenx_hash presence. A hit is
-  //     direct evidence the Receiver is in-path and stamping events.
-  //     Only run when receiverInPath is still false (no snapshot or env
-  //     evidence already confirmed it).
+  // (a) Reconcile analyzerVendor against what the connector actually has
+  //     credentials for, because the config stack (envs.json / env-var /
+  //     profile metadata) may be stale (e.g. still says 'splunk' when
+  //     CloudWatch is now the live destination).
+  // (b) Probe 1-3 recent events for tenx_hash presence. A hit is direct
+  //     evidence the Receiver is in-path and stamping events. Only run when
+  //     receiverInPath is still false (no snapshot or env evidence already
+  //     confirmed it).
   try {
     const PROBE_VENDORS = ['datadog', 'splunk', 'elasticsearch', 'cloudwatch'] as const;
     const siemResolution = await resolveSiemSelection({
@@ -413,7 +414,7 @@ async function detectCapabilities(snapshotId?: string): Promise<Capabilities> {
     if (siemResolution.kind === 'resolved') {
       const resolvedVendor = siemResolution.id;
 
-      // Fix C: if config stack says one vendor but credentials only exist for
+      // If the config stack says one vendor but credentials only exist for
       // another, prefer the connector result (it reflects what's actually
       // being queried right now).
       if (out.analyzerVendor && out.analyzerVendor !== resolvedVendor) {
@@ -427,7 +428,7 @@ async function detectCapabilities(snapshotId?: string): Promise<Capabilities> {
         out.sources.analyzer = 'siem_probe';
       }
 
-      // Fix A: probe for tenx_hash in recent events when receiver_in_path is
+      // Probe for tenx_hash in recent events when receiver_in_path is
       // still undetermined from config / snapshot.
       if (!out.receiverInPath) {
         const connector = getConnector(resolvedVendor);
@@ -587,12 +588,18 @@ export async function executePatternMitigate(args: PatternMitigateArgs): Promise
     d.pattern_validation.checked && d.pattern_validation.exists === false
       ? `Warning: pattern \`${d.pattern}\` not found in metrics backend. Continuing with the menu, but verify the name before applying any action. `
       : '';
+  // Delegates to the shared formatPatternLabel helper. See
+  // lib/pattern-label.ts for the burned-rule rationale.
+  const patternLabel = formatPatternLabel({
+    symbol_message: d.pattern,
+    service: d.scope_service,
+  });
   const headline =
     d.status === 'no_signal'
-      ? `${patternNotFoundWarning}\`${d.pattern}\`: NO mitigation options available — ${dimmedCount} dimmed. Setup hint surfaces what's missing.`
-      : `${patternNotFoundWarning}\`${d.pattern}\`: ${enabledCount} of ${d.options.length} mitigation options enabled (${d.options.filter((o) => o.enabled).map((o) => o.id).join(', ')}).`;
+      ? `${patternNotFoundWarning}${patternLabel}: NO mitigation options available — ${dimmedCount} dimmed. Setup hint surfaces what's missing.`
+      : `${patternNotFoundWarning}${patternLabel}: ${enabledCount} of ${d.options.length} mitigation options enabled (${d.options.filter((o) => o.enabled).map((o) => o.id).join(', ')}).`;
 
-  // Fix D: populate actions[] with structured follow-up nudges so agent
+  // Populate actions[] with structured follow-up nudges so agent
   // chains can pick them up without parsing human_summary text.
   const envelopeActions: import('../lib/output-types.js').Action[] = [];
 
@@ -620,12 +627,12 @@ export async function executePatternMitigate(args: PatternMitigateArgs): Promise
   // gitops repo and prefer to set it directly). Otherwise recommend-next.
   if (!d.env_capabilities.gitops_repo) {
     envelopeActions.push({
-      tool: 'log10x_configure_env',
+      tool: 'log10x_set_gitops_repo',
       args: {},
       role: allSourcesAbsent ? 'optional-followup' : 'recommended-next',
       reason: allSourcesAbsent
-        ? 'If you already know your gitops repo, set it here to enable mute/compact without running discover_env.'
-        : 'Set gitops.repo to enable mute/compact at the 10x engine.',
+        ? 'If you already know your gitops repo, set it here (gitops_repo=owner/repo, confirm="set-now") to enable mute/compact without running discover_env.'
+        : 'Set gitops.repo (gitops_repo=owner/repo, confirm="set-now") to enable mute/compact at the 10x engine.',
     });
   }
 
@@ -654,7 +661,7 @@ export async function executePatternMitigate(args: PatternMitigateArgs): Promise
   if (anyEnabled) {
     envelopeActions.push({
       tool: 'log10x_cost_options',
-      args: { pattern: d.pattern },
+      args: {},
       reason: 'One or more mitigation tiers are reachable. cost_options surfaces the WHAT-action menu (drop/sample/compact/tier_down/offload/observe_only).',
       role: 'recommended-next',
     });
@@ -663,8 +670,8 @@ export async function executePatternMitigate(args: PatternMitigateArgs): Promise
   // Honest human_summary: M of N options reachable, plus next-step if applicable.
   const chassis_human_summary =
     d.status === 'no_signal'
-      ? `\`${d.pattern}\`: no mitigation options reachable on ${d.env_capabilities.analyzer_vendor ?? 'this env'}. ${dimmedCount} dimmed. ${allSourcesAbsent ? 'Capability detection found no source. Run discover_env to ambient-detect receiver/forwarder without writing config.' : `Basis: ${d.recommendation_audit.basis}.`}`
-      : `\`${d.pattern}\`: ${enabledCount} of ${d.options.length} options reachable on ${d.env_capabilities.analyzer_vendor ?? 'this env'} (${d.options.filter((o) => o.enabled).map((o) => o.label).join(', ')}). ${dimmedCount > 0 ? `${dimmedCount} dimmed. ` : ''}Basis: ${d.recommendation_audit.basis}. Agent SHOULD wait for user pick before routing.`;
+      ? `${patternLabel}: no mitigation options reachable on ${d.env_capabilities.analyzer_vendor ?? 'this env'}. ${dimmedCount} dimmed. ${allSourcesAbsent ? 'Capability detection found no source. Run discover_env to ambient-detect receiver/forwarder without writing config.' : `Basis: ${d.recommendation_audit.basis}.`}`
+      : `${patternLabel}: ${enabledCount} of ${d.options.length} options reachable on ${d.env_capabilities.analyzer_vendor ?? 'this env'} (${d.options.filter((o) => o.enabled).map((o) => o.label).join(', ')}). ${dimmedCount > 0 ? `${dimmedCount} dimmed. ` : ''}Basis: ${d.recommendation_audit.basis}. Agent SHOULD wait for user pick before routing.`;
 
   return buildChassisEnvelope({
     tool: 'log10x_pattern_mitigate',
@@ -715,8 +722,15 @@ async function executePatternMitigateInner(
   const displayPattern = fmtPattern(pattern);
   const scopeNote = args.service ? ` (service: ${args.service})` : '';
 
-  // Pattern existence validation. Attempt a cheap metrics-backend probe when
-  // an env is configured — does NOT block the tool on failure, only discloses.
+  // Pattern existence validation. Attempt a cheap metrics-backend probe
+  // when an env is configured — does NOT block the tool on failure, only
+  // discloses. Uses the shared `resolvePatternRefInMetrics` helper so the
+  // label / query shape matches what event_lookup / pattern_examples /
+  // pattern_detail issue for the same input: hash-shaped refs probe
+  // `LABELS.hash`, name-shaped refs probe `LABELS.pattern`. Without the
+  // shape switch the validator silently said "not found" for any
+  // hash the user pasted in (which the other tools resolve fine), and
+  // downstream code then collapsed the recommendation_basis to 'unknown'.
   const patternValidation: PatternMitigateSummary['pattern_validation'] = {
     checked: false,
     exists: null,
@@ -726,10 +740,15 @@ async function executePatternMitigateInner(
     const envs = await loadEnvironments();
     const env = envs.default ?? envs.lastUsed;
     if (env) {
-      const hash = await resolvePatternHashFromMetrics(env, pattern);
-      patternValidation.checked = true;
-      patternValidation.exists = hash !== undefined;
-      patternValidation.basis = 'metrics_backend';
+      const probe = await resolvePatternRefInMetrics(env, pattern);
+      // exists === null means the probe could not run (network / config
+      // failure); treat as "not checked" to match prior semantics rather
+      // than reporting false absence.
+      if (probe.exists !== null) {
+        patternValidation.checked = true;
+        patternValidation.exists = probe.exists;
+        patternValidation.basis = 'metrics_backend';
+      }
     }
   } catch {
     // Non-fatal — patternValidation stays at not_checked defaults.
@@ -912,10 +931,26 @@ async function executePatternMitigateInner(
     ];
     const nEnabled = options.filter((o) => o.enabled).length;
     const nDimmed = options.length - nEnabled;
-    const basis = deriveBasis(caps.sources, caps.cachedSnapshotUsed);
+    let basis = deriveBasis(caps.sources, caps.cachedSnapshotUsed);
+    // Basis floor: if the metrics-backend validation probe ran cleanly and
+    // the pattern exists, we have positive evidence that an env was
+    // resolvable (envs.json or $LOG10X_METRICS_* env vars). When none of
+    // the capability-tracked sources (gitops / forwarder / analyzer /
+    // receiver / retriever) populated `caps.sources`, deriveBasis lands
+    // on 'unknown' even though the env is plainly configured. That
+    // 'unknown' tag is what flips `allSourcesAbsent` further down and
+    // strips the mitigation NEXT_ACTIONS in favor of a discover_env
+    // nudge — silently demoting 3 of 4 options for a pattern the rest
+    // of the catalog resolves fine. Floor to 'env_vars_only' when the
+    // probe confirmed existence, matching the catalog convention that
+    // env-var-only configs report env_vars_only rather than unknown.
+    if (basis === 'unknown' && patternValidation.checked && patternValidation.exists === true) {
+      basis = 'env_vars_only';
+    }
     const status: PatternMitigateStatus = nEnabled === 0 ? 'no_signal' : 'success';
     const human_summary = buildHumanSummary({
       pattern: displayPattern,
+      service: args.service,
       status,
       basis,
       nEnabled,
@@ -972,6 +1007,7 @@ async function executePatternMitigateInner(
  */
 function buildHumanSummary(args: {
   pattern: string;
+  service?: string;
   status: PatternMitigateStatus;
   basis: RecommendationBasis;
   nEnabled: number;
@@ -980,6 +1016,11 @@ function buildHumanSummary(args: {
   setupHint?: string;
   snapshotAgeSeconds: number | null;
 }): string {
+  // Delegates to the shared formatPatternLabel helper.
+  const patternLabel = formatPatternLabel({
+    symbol_message: args.pattern,
+    service: args.service,
+  });
   const basisFragment = (() => {
     switch (args.basis) {
       case 'env_config':
@@ -997,8 +1038,8 @@ function buildHumanSummary(args: {
     }
   })();
   if (args.status === 'no_signal') {
-    return `\`${args.pattern}\`: no mitigation options are reachable in this environment. ${basisFragment} ${args.setupHint ?? 'Set up at least one delivery path (gitops repo, forwarder, or analyzer config) to enable options.'}`;
+    return `${patternLabel}: no mitigation options are reachable in this environment. ${basisFragment} ${args.setupHint ?? 'Set up at least one delivery path (gitops repo, forwarder, or analyzer config) to enable options.'}`;
   }
   const enabledList = args.options.filter((o) => o.enabled).map((o) => o.label).join(', ');
-  return `\`${args.pattern}\`: ${args.nEnabled} of ${args.options.length} mitigation options available (${enabledList}). ${args.nDimmed > 0 ? `${args.nDimmed} dimmed. ` : ''}${basisFragment} Agent SHOULD wait for the user to pick before routing to the sub-tool.`;
+  return `${patternLabel}: ${args.nEnabled} of ${args.options.length} mitigation options available (${enabledList}). ${args.nDimmed > 0 ? `${args.nDimmed} dimmed. ` : ''}${basisFragment} Agent SHOULD wait for the user to pick before routing to the sub-tool.`;
 }

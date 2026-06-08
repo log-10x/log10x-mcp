@@ -101,7 +101,9 @@ test('at dev tier, modes collapses to observe_only + install_receiver', () => {
 test('at reporter tier, must_render_verbatim explains why drop/sample/tier_down/offload/compact require Receiver', () => {
   const caps = reporterCaps();
   const modes = buildModes(caps, 'splunk', {});
-  const verbatim = renderVerbatim(modes, 'splunk', 'reporter');
+  // renderVerbatim signature is (modes, effectiveDestination, siemDetected, tier?).
+  // Pass tier='reporter' so the collapsed branch (which lists the gated modes) renders.
+  const verbatim = renderVerbatim(modes, 'splunk', 'splunk', 'reporter');
   assert.match(verbatim, /Receiver/i, 'verbatim must mention Receiver');
   assert.match(verbatim, /Drop.*sample.*tier_down.*offload.*compact/i, 'verbatim must list gated modes');
 });
@@ -139,7 +141,10 @@ test('no pass mode id exists — renamed to observe_only', () => {
 
 test('observe_only routes to log10x_estimate_savings with default_action=pass (backend token)', () => {
   const caps = fullCaps();
-  const modes = buildModes(caps, 'splunk', {});
+  // default_action is only emitted on the greedy-solver route (target_percent set
+  // and no pattern_hash). Supply target_percent to exercise that path, mirroring
+  // the 'drop mode routes...' test below.
+  const modes = buildModes(caps, 'splunk', { target_percent: 40 });
   const observeOnly = modes.find((m) => m.id === 'observe_only')!;
   assert.equal(observeOnly.routes_to.tool, 'log10x_estimate_savings');
   assert.equal(observeOnly.routes_to.args.default_action, 'pass');
@@ -155,7 +160,7 @@ test('install_receiver at reporter tier routes to log10x_advise_install', () => 
 test('must_render_verbatim contains the header and 6 numbered entries at receiver tier', () => {
   const caps = fullCaps();
   const modes = buildModes(caps, 'splunk', {});
-  const verbatim = renderVerbatim(modes, 'splunk', 'receiver');
+  const verbatim = renderVerbatim(modes, 'splunk', 'splunk', 'receiver');
   assert.match(verbatim, /How do you want to handle the cost/);
   for (let i = 1; i <= 6; i++) {
     assert.match(verbatim, new RegExp(`${i}\\.`), `entry ${i} must render`);

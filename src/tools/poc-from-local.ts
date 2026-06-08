@@ -72,7 +72,7 @@ export const pocFromLocalSchema = {
     .describe(
       'Customer-specified target reduction percent. If absent, POC produces a recommendation-only output. ' +
         'If present, POC produces a feasibility verdict + a pre-deploy commitment artifact stub the agent ' +
-        'can surface alongside the per-pod savings matrix. Cap CSV ships in Item 4.'
+        'can surface alongside the per-pod savings matrix. The cap CSV is attached by a later change.'
     ),
   exception_services: z
     .array(z.string())
@@ -365,11 +365,11 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
   }
   lines.push('');
 
-  // Section: top patterns (terse — full report would belong to the SIEM-attached path).
+  // Section: top patterns (terse — full report would belong to the stack-attached path).
   lines.push('## Top patterns in the sample');
   lines.push('');
   if (patterns.length === 0) {
-    lines.push('_No patterns resolved — the templater returned zero._');
+    lines.push('_No patterns resolved — the pattern extractor returned zero._');
   } else {
     lines.push('| # | Identity | Events | % | Bytes |');
     lines.push('|---|---|---|---|---|');
@@ -383,7 +383,7 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     }
     lines.push('');
     lines.push(
-      `_For native SIEM exclusion configs, paste-ready Receiver YAML, and the full 9-section report, run \`log10x_poc_from_siem\` once you have credentials available._`
+      `_For native stack exclusion configs, paste-ready Receiver YAML, and the full 9-section report, run \`log10x_poc_from_siem\` once you have credentials available._`
     );
   }
   lines.push('');
@@ -482,14 +482,14 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     artLines.push('### Next step');
     artLines.push('');
     if (feasibility.feasible) {
-      artLines.push('1. Re-run `log10x_poc_from_siem` once log-analyzer credentials are available — the SIEM path produces the per-pattern action plan + native exclusion configs.');
+      artLines.push('1. Re-run `log10x_poc_from_siem` once log-analyzer credentials are available — the stack path produces the per-pattern action plan + native exclusion configs.');
       artLines.push('2. Run `log10x_advise_install` to provision the Receiver in your forwarder pipeline.');
     } else {
       artLines.push('1. Lower `target_percent_reduction` to within the achievable band, or trim `exception_services`.');
       artLines.push('2. Re-run with a wider `window` or `namespace: "*"` to confirm the sample is representative before negotiating the target.');
     }
     artLines.push('');
-    artLines.push('_This is a PRE-DEPLOY projection from a kubectl sample. Local-source feasibility carries higher uncertainty than the SIEM-attached path because it does not see CloudTrail / ALB / VM-hosted apps._');
+    artLines.push('_This is a PRE-DEPLOY projection from a kubectl sample. Local-source feasibility carries higher uncertainty than the stack-attached path because it does not see CloudTrail / ALB / VM-hosted apps._');
     commitment_artifact = {
       markdown: artLines.join('\n'),
       next_step: feasibility.feasible

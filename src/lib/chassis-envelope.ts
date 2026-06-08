@@ -3,8 +3,7 @@
  *
  * WHY THIS EXISTS
  *
- * After a live walk on otel-demo (2026-06-03) we catalogued two tool
- * classes:
+ * There are two tool classes:
  *
  *   Class A (older, chaotic):
  *     top_patterns, pattern_examples, pattern_mitigate, cost_options,
@@ -120,6 +119,11 @@ export const CHASSIS_VERSION = '1.0' as const;
  *                      too thin to produce a usable result. Widen or
  *                      re-anchor.
  *   - error          — structural failure; read data.error.
+ *   - demo_read_only — the MCP is running in the hosted demo playground
+ *                      with LOG10X_MCP_READ_ONLY=true; the writer tool
+ *                      refused to execute. data.error carries the
+ *                      `demo_read_only` discriminant and the would_have
+ *                      side-effect description.
  */
 export const ChassisStatusSchema = z.enum([
   'success',
@@ -127,6 +131,7 @@ export const ChassisStatusSchema = z.enum([
   'partial',
   'insufficient_data',
   'error',
+  'demo_read_only',
 ]);
 export type ChassisStatus = z.infer<typeof ChassisStatusSchema>;
 
@@ -270,12 +275,25 @@ export const SourceDisclosureSchema = z.object({
    */
   siem_vendor: z.string().optional(),
   /**
+   * Human-readable label disambiguating WHICH instance of `siem_vendor`
+   * the tool spoke to / surfaced numbers from. The vendor name alone is
+   * ambiguous when a customer has multiple Datadog orgs / multiple
+   * CloudWatch accounts / multiple Splunk indexes; `source_label` carries
+   * the env nickname + region/account/endpoint hints so an agent or
+   * reader can tell "which Datadog" / "which CloudWatch log group" the
+   * envelope is talking about. Built via `buildSourceLabel()` in
+   * lib/source-disclosure.ts to keep the format consistent.
+   */
+  source_label: z.string().optional(),
+  /**
    * How the Retriever URL + bucket was resolved. Populated by tools that
    * consume the Retriever (retriever_query, retriever_series, backfill_metric,
    * overflow_contents) so an agent can tell whether the resolution came from
-   * env vars, the discovery snapshot, a live kubectl probe, or was absent.
+   * env vars, the discovery snapshot, a live kubectl probe, the resolved
+   * env-config document (K8s ConfigMap / AWS SSM / GCP SM / Azure AC / local
+   * file), or was absent.
    */
-  retriever_state_source: z.enum(['env_var', 'snapshot', 'helm_release_probe', 'kubectl_probe', 'none']).optional(),
+  retriever_state_source: z.enum(['env_var', 'snapshot', 'helm_release_probe', 'kubectl_probe', 'env_config', 'none']).optional(),
   /**
    * Service count semantics. Mirrors pattern_count_source for tools that
    * surface a list of services. Without this field "12 services" is
@@ -398,6 +416,15 @@ export const ChassisDataSchema = z.object({
   must_render_verbatim: z.string().optional(),
 
   /**
+   * Rendered markdown artifact for `view: 'markdown'` envelopes. The MCP
+   * wrapper (index.ts) surfaces this verbatim on the text channel and errors
+   * if a markdown-view envelope lacks it. Populated by buildChassisEnvelope
+   * from `must_render_verbatim` when view==='markdown' (see below), so tools
+   * only need to set must_render_verbatim.
+   */
+  markdown: z.string().optional(),
+
+  /**
    * Structured question the agent MUST surface before routing anywhere.
    * Replaces the HTML-comment pattern used in the legacy next-actions
    * protocol, which agents routinely skip.
@@ -454,6 +481,13 @@ export interface ChassisEnvelope extends StructuredOutput {
    * harnesses that scan the outer envelope without deserializing `data`.
    */
   performance: Performance;
+  /**
+   * Top-level call status — mirror of `data.status`. Lifted to the
+   * envelope so agents and harnesses can branch on call outcome without
+   * descending into `data`. `data.status` is kept in place for
+   * back-compat with existing readers (toLegacyShape still works).
+   */
+  status: ChassisStatus;
   /** Typed override — data is always a ChassisData on these envelopes. */
   data: ChassisData;
 }
@@ -633,22 +667,25 @@ export function buildChassisEnvelope(input: ChassisEnvelopeInput): ChassisEnvelo
   // invisible to the agent. When mode is null/undefined, pass through
   // unfiltered (boot-race or test-only override — defensive default).
   const filteredActions = filterActionsByActiveMode(input.actions ?? [], input.mode ?? null, warnings);
-  if (input.status === 'error' && !input.error) {
+  // The two status values that carry an error block: 'error' (structural
+  // failure) and 'demo_read_only' (writer blocked by read-only guard).
+  const isErrorBearing = input.status === 'error' || input.status === 'demo_read_only';
+  if (isErrorBearing && !input.error) {
     // In development mode: fail fast so tool authors catch this at
     // test time rather than silently emitting an unbranchable error.
     if (process.env.NODE_ENV === 'development' || process.env.CHASSIS_STRICT === '1') {
       throw new Error(
-        `chassis contract violation: status="error" on tool "${input.tool}" but no error block provided. ` +
-        'Pass an error: { error_type, retryable, suggested_backoff_ms, hint } when status="error".',
+        `chassis contract violation: status="${input.status}" on tool "${input.tool}" but no error block provided. ` +
+        'Pass an error: { error_type, retryable, suggested_backoff_ms, hint } when status carries an error block.',
       );
     }
     warnings.push(
-      'chassis: status=error but no error field provided. This is a tool-authoring bug.',
+      `chassis: status=${input.status} but no error field provided. This is a tool-authoring bug.`,
     );
   }
-  if (input.status !== 'error' && input.error) {
+  if (!isErrorBearing && input.error) {
     warnings.push(
-      'chassis: error field is present but status !== "error". The error field will be ignored by agents.',
+      'chassis: error field is present but status is not error-bearing. The error field will be ignored by agents.',
     );
   }
 
@@ -667,6 +704,14 @@ export function buildChassisEnvelope(input: ChassisEnvelopeInput): ChassisEnvelo
       ? { forbidden_next_actions: input.forbidden_next_actions }
       : {}),
     ...(input.error != null ? { error: input.error } : {}),
+    // view:'markdown' envelopes MUST carry data.markdown (the MCP wrapper
+    // surfaces it verbatim and errors without it). Map it from the pre-rendered
+    // must_render_verbatim so every markdown-view tool works by setting just
+    // that one field. Previously NO chassis tool populated data.markdown, so
+    // every view:'markdown' call hard-errored "data.markdown is not a string".
+    ...(input.view === 'markdown' && input.must_render_verbatim != null
+      ? { markdown: input.must_render_verbatim }
+      : {}),
   };
 
   // Back-compat mode: spread legacy flat fields alongside chassis fields.
@@ -707,6 +752,10 @@ export function buildChassisEnvelope(input: ChassisEnvelopeInput): ChassisEnvelo
     ...outer,
     invocation_id: randomUUID(),
     performance,
+    // Mirror status at the envelope top so agents can branch on call
+    // outcome without descending into data. data.status is preserved
+    // for back-compat (toLegacyShape and existing readers).
+    status: validatedData.status,
     // Override data with the fully-typed validated block.
     data: validatedData,
   };
@@ -733,6 +782,27 @@ export function sanitizeHeadline(msg: string): string {
   const lines = msg.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
   const nonHeader = lines.find((l) => !l.startsWith('#'));
   return nonHeader ?? (lines[0]?.replace(/^#+\s*/, '') ?? msg);
+}
+
+/**
+ * Truncate a string at a sentence boundary at or before maxLen.
+ * Avoids mid-sentence cuts like "...So either" that confuse users.
+ * Falls back to a hard cap if no sentence break is found.
+ */
+function truncateAtSentence(text: string, maxLen: number): string {
+  if (text.length <= maxLen) return text;
+  const cut = text.slice(0, maxLen);
+  // Prefer the last ". " before the cap; else the last "; ", "! ", "? ".
+  const lastSentence = Math.max(
+    cut.lastIndexOf('. '),
+    cut.lastIndexOf('! '),
+    cut.lastIndexOf('? '),
+    cut.lastIndexOf('; '),
+  );
+  if (lastSentence > maxLen * 0.6) return cut.slice(0, lastSentence + 1);
+  // No good break — fall back to last space to avoid mid-word cut.
+  const lastSpace = cut.lastIndexOf(' ');
+  return (lastSpace > maxLen * 0.6 ? cut.slice(0, lastSpace) : cut) + '…';
 }
 
 /**
@@ -773,7 +843,7 @@ export function buildChassisErrorEnvelope(opts: {
   return buildChassisEnvelope({
     tool: opts.tool,
     view: 'summary',
-    headline: `Error (${errType}): ${sanitizeHeadline(errHint).slice(0, 120)}`,
+    headline: `Error (${errType}): ${truncateAtSentence(sanitizeHeadline(errHint), 200)}`,
     status: 'error',
     decisions: {
       threshold_used: null,
@@ -792,6 +862,75 @@ export function buildChassisErrorEnvelope(opts: {
     warnings: opts.warnings,
     actions: opts.actions,
   });
+}
+
+// ── Demo read-only envelope ────────────────────────────────────────────────────
+
+/**
+ * Build a `demo_read_only` envelope for a writer tool that was blocked
+ * by `requireWriteAccess()` while the MCP is running with
+ * `LOG10X_MCP_READ_ONLY=true`.
+ *
+ * The catalog stays "visible-but-locked": tool descriptions + schemas
+ * are still served, but calling a writer tool returns this envelope
+ * instead of executing. The shape is:
+ *
+ *   status: 'error'
+ *   data.status: 'demo_read_only'
+ *   data.error.error_type: 'demo_read_only'
+ *   data.error.retryable: false
+ *   data.error.suggested_backoff_ms: null
+ *   data.error.hint: full remediation string from DemoReadOnlyError
+ *   summary.headline: 'Demo read-only mode: <would_have>'
+ *
+ * `data.status` is one of the ChassisStatus enum values; we use 'error'
+ * since the call did not produce a payload. The `demo_read_only`
+ * discriminant lives on `data.error.error_type`, which is what agents
+ * branch on. Headline + hint surface the per-tool would_have phrase so
+ * a human reader knows exactly what side effect was blocked.
+ */
+export function buildDemoReadOnlyEnvelope(opts: {
+  tool: string;
+  /** The `would_have` phrase from the DemoReadOnlyError. */
+  would_have: string;
+  /** The full agent-facing hint from the DemoReadOnlyError. */
+  hint: string;
+  telemetry?: ChassisTelemetry;
+  /** Optional context echo of the call args. */
+  contextPayload?: Record<string, unknown>;
+  warnings?: string[];
+}): ChassisEnvelope {
+  // Build through the chassis to inherit invocation_id, performance,
+  // schema_version, and zod-validated data shape. Pass status='demo_read_only'
+  // so data.status carries the discriminant; then override the outer
+  // envelope status to 'error' so harnesses that branch on the top-level
+  // status field treat this as a non-success outcome.
+  const env = buildChassisEnvelope({
+    tool: opts.tool,
+    view: 'summary',
+    headline: `Demo read-only mode: ${opts.would_have}`,
+    status: 'demo_read_only',
+    decisions: {
+      threshold_used: null,
+      threshold_basis: 'default',
+    },
+    source_disclosure: {},
+    scope: {
+      window: 'unknown',
+      window_basis: 'auto_default',
+    },
+    payload: opts.contextPayload ?? {},
+    human_summary: opts.hint,
+    error: {
+      error_type: 'demo_read_only',
+      retryable: false,
+      suggested_backoff_ms: null,
+      hint: opts.hint,
+    },
+    telemetry: opts.telemetry,
+    warnings: opts.warnings,
+  });
+  return { ...env, status: 'error' as ChassisStatus };
 }
 
 // ── Back-compat helpers ────────────────────────────────────────────────────────
@@ -853,6 +992,11 @@ export function isChassisEnvelope(x: unknown): x is ChassisEnvelope {
 export const ChassisEnvelopeExtensionSchema = z.object({
   invocation_id: z.string().uuid(),
   performance: PerformanceSchema,
+  /**
+   * Top-level mirror of data.status. Lets agents branch on call
+   * outcome without descending into data. Same enum as ChassisData.status.
+   */
+  status: ChassisStatusSchema,
   data: ChassisDataSchema,
 });
 export type ChassisEnvelopeExtension = z.infer<typeof ChassisEnvelopeExtensionSchema>;

@@ -153,6 +153,15 @@ export interface EnvConfig {
    * generate a config.
    */
   analyzer?: string;
+  /**
+   * Customer-supplied analyzer $/GB rate. Rung 2 of the shared
+   * rate-resolution chain (see lib/rate-resolution.ts) — beats the
+   * destination list price and tags every cost-emitting tool's dollar
+   * surface as `rate_source='customer_supplied'`. Loadable from envs.json
+   * `analyzerCost` field; the env-var rung (`LOG10X_ANALYZER_COST`) is
+   * consulted directly by the resolver.
+   */
+  analyzerCost?: number;
 }
 
 /** Parsed environment list + default + mutable last-used slot. */
@@ -274,6 +283,25 @@ function parseAnalyzerEnv(raw: string | undefined): string | undefined {
  * demo, not their own.
  */
 export async function loadEnvironments(): Promise<Environments> {
+  // Outer entry point. Inner does the raw resolution; this wrapper
+  // applies the SaaS↔on-prem alias bridge so every caller (cached via
+  // getEnvs() OR fresh-loaded inside a tool like doctor) gets the
+  // same enriched byNickname map. Bridge is idempotent so repeat
+  // calls (doctor + initEnvs both call loadEnvironments) are safe.
+  const envs = await loadEnvironmentsRaw();
+  try {
+    const { enrichEnvAliasesFromOnPrem } = await import('./env-alias-bridge.js');
+    await enrichEnvAliasesFromOnPrem(envs);
+  } catch (e) {
+    // Bridge already swallows store-level errors; this is the
+    // last-resort guard for code-level faults. Boot proceeds.
+    // eslint-disable-next-line no-console
+    console.error('env-alias-bridge: unexpected failure during enrichment', e);
+  }
+  return envs;
+}
+
+async function loadEnvironmentsRaw(): Promise<Environments> {
   // Path 1 + 2: new-style configuration.
   const fromMetricsEnvVars = tryBuildFromMetricsEnvVars();
   const fromEnvsFile = await tryReadEnvsJson();
@@ -543,6 +571,11 @@ interface EnvsJsonEntry {
    * `EnvConfig.analyzer` for the full lookup-chain semantics.
    */
   analyzer?: string;
+  /**
+   * Customer-supplied analyzer $/GB rate — see `EnvConfig.analyzerCost`
+   * for the rate-resolution priority chain (rung 2).
+   */
+  analyzerCost?: number;
 }
 
 /**
@@ -608,6 +641,14 @@ async function tryReadEnvsJson(): Promise<EnvConfig[] | undefined> {
         : undefined;
       const forwarder = entry.forwarder ?? parseForwarderEnv(process.env.LOG10X_FORWARDER);
       const analyzer = entry.analyzer ?? parseAnalyzerEnv(process.env.LOG10X_ANALYZER);
+      // analyzerCost: envs.json field wins. The env-var rung
+      // (LOG10X_ANALYZER_COST) is consulted directly by the shared rate
+      // resolver in lib/rate-resolution.ts, so we don't fold it in here —
+      // that keeps per-env overrides possible in multi-env setups.
+      const analyzerCost =
+        typeof entry.analyzerCost === 'number' && Number.isFinite(entry.analyzerCost) && entry.analyzerCost > 0
+          ? entry.analyzerCost
+          : undefined;
       return {
         nickname: entry.nickname,
         metricsBackend: backend,
@@ -618,6 +659,7 @@ async function tryReadEnvsJson(): Promise<EnvConfig[] | undefined> {
         ...(gitops ? { gitops } : {}),
         ...(forwarder ? { forwarder } : {}),
         ...(analyzer ? { analyzer } : {}),
+        ...(analyzerCost !== undefined ? { analyzerCost } : {}),
       };
     } catch (e) {
       if (e instanceof MetricsBackendConfigError) {
@@ -742,8 +784,8 @@ async function loadLegacyLog10x(): Promise<Environments> {
   }
 
   // Path 5: nothing set — pure demo mode. Public demo key so the
-  // user can play without signing up. Phase 7 removes this silent
-  // fallback in favor of an explicit "not configured" state.
+  // user can play without signing up. This silent fallback is slated to
+  // be replaced by an explicit "not configured" state.
   // eslint-disable-next-line no-console
   console.info(`[log10x-mcp] metricsBackend resolved via demo (no-credentials-configured)`);
   return await loadFromApi(DEMO_API_KEY, /*isDemoMode=*/ true);
@@ -939,14 +981,38 @@ export function resolveEnv(envs: Environments, nickname?: string): EnvConfig {
   if (nickname) {
     const env = envs.byNickname.get(nickname.toLowerCase());
     if (!env) {
-      const available = envs.all.map((e) => e.nickname).join(', ');
-      throw new Error(`Unknown environment "${nickname}". Available: ${available}`);
+      throw new Error(`Unknown environment "${nickname}". Available: ${describeAvailableEnvs(envs)}`);
     }
     envs.lastUsed = env;
     return env;
   }
   if (envs.lastUsed) return envs.lastUsed;
   return envs.default;
+}
+
+/**
+ * Dedup-aware "available envs" describer. Groups aliases by their
+ * underlying EnvConfig so "10x Demo" with aliases "otel-demo" + UUID
+ * renders as "10x Demo (also: otel-demo, 6aa99191-...)" rather than
+ * three separate-looking envs.
+ *
+ * Kept here (not in env-alias-bridge) to avoid the circular import that
+ * arises when resolveEnv itself wants to format the error message.
+ */
+function describeAvailableEnvs(envs: Environments): string {
+  const byEnv = new Map<EnvConfig, string[]>();
+  for (const [alias, env] of envs.byNickname.entries()) {
+    const aliases = byEnv.get(env) ?? [];
+    aliases.push(alias);
+    byEnv.set(env, aliases);
+  }
+  return envs.all
+    .map((env) => {
+      const aliases = (byEnv.get(env) ?? []).filter((a) => a !== env.nickname.toLowerCase());
+      if (aliases.length === 0) return env.nickname;
+      return `${env.nickname} (also: ${aliases.join(', ')})`;
+    })
+    .join('; ');
 }
 
 /** Programmatic override for tests or future "stick to this env" features. */

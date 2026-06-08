@@ -13,13 +13,13 @@
  *
  * Statistic choice — CV (std/mean), not MAD/median.
  *
- * The Grok+Claude consults (2026-05-28) recommended MAD/median to avoid
- * the well-known "CV blows up near zero mean" failure. That's correct
- * for steady-state metric series with non-zero baselines. But MAD/median
- * has its own pathology: when more than half the anchor values sit at
- * the baseline (sparse-spike incident anchors — common for log patterns
- * that emit only during incidents), median = baseline and MAD = 0, so
- * MAD/median = 0 and the guard refuses anchors that ARE valid signals.
+ * MAD/median avoids the well-known "CV blows up near zero mean" failure,
+ * which is correct for steady-state metric series with non-zero
+ * baselines. But MAD/median has its own pathology: when more than half
+ * the anchor values sit at the baseline (sparse-spike incident anchors,
+ * common for log patterns that emit only during incidents), median =
+ * baseline and MAD = 0, so MAD/median = 0 and the guard refuses anchors
+ * that ARE valid signals.
  * Real chaos-shape anchors with zero baselines fall in this trap.
  *
  * CV handles those:

@@ -59,6 +59,7 @@ import {
 import { fmtDisclosedDollar } from '../lib/format.js';
 import { DEFAULT_ANALYZER_COST_PER_GB, SIEM_DISPLAY_NAMES, type SiemId } from '../lib/siem/pricing.js';
 import { loadEnvironments, resolveEnv } from '../lib/environments.js';
+import { buildSourceDisclosureFromEnv } from '../lib/source-disclosure.js';
 import { getOffloadStatusBatch } from '../lib/offload-status.js';
 import {
   readHistorySince,
@@ -66,6 +67,8 @@ import {
   type RecurRun,
 } from '../lib/recur-history-reader.js';
 import { parseActionIntent } from '../lib/action-intent-parser.js';
+import { DEFAULT_LABELS } from '../lib/promql.js';
+import { patternDescriptor } from '../lib/pattern-descriptor.js';
 
 // ─── input schema ────────────────────────────────────────────────────
 
@@ -142,6 +145,17 @@ export interface CommitmentRecord {
    * After this date, dollar savings switch from shadow to realized.
    */
   term_end?: string;
+  /**
+   * Where configure_engine wrote the policy. Lets the verify runner
+   * find the cap-CSV + action-intent.json regardless of delivery channel.
+   *  - 'gitops'    — fetch via `gh api /repos/<repo>/contents/<path>`
+   *  - 'configmap' — fetch via `kubectl get configmap <name> -n <ns>`
+   * Absent on records persisted before this field was added; verify
+   * falls back to env.gitops?.repo for those.
+   */
+  delivery_target?:
+    | { kind: 'gitops'; repo?: string }
+    | { kind: 'configmap'; namespace: string; name: string };
 }
 
 function commitmentsDir(): string {
@@ -303,10 +317,10 @@ export function _getVerifyRunner(): VerifyRunner | undefined {
  * modules together; avoids any future circular-import risk between
  * `tools/commitment-report` and `tools/estimate-savings`).
  *
- * Fields kept narrow on purpose: the renamer (Item 5) will join the
+ * Fields kept narrow on purpose: a later change will join the
  * cap-CSV `:<action>` suffix to fill `per_pattern_breakdown`. Until
  * then, this adapter leaves the per-pattern field unset and the
- * aggregator's §E.1 fallback bucketizes everything into `drop` (with
+ * aggregator's single-bucket fallback bucketizes everything into `drop` (with
  * the caveat already wired at commitment-report.ts:1182).
  */
 export interface VerifyResultLike {
@@ -322,7 +336,7 @@ export interface VerifyResultLike {
     new_patterns_bytes: number;
     leakage_bytes: number;
   };
-  /** Source of the $/GB rate used inside runEstimateVerify. Item 5 will
+  /** Source of the $/GB rate used inside runEstimateVerify. a later change will
    * propagate this from estimate-savings; today the function chooses the
    * list price unless the caller passes effective_ingest_per_gb, so the
    * adapter encodes that choice with the right rate_source label. */
@@ -358,7 +372,7 @@ export interface VerifyResultLike {
  *  - per_pattern_breakdown: populated when runEstimateVerify received
  *    `action_intent_content` (canonical, from data/action-intent.json)
  *    or legacy `cap_csv_content` rows with `:action` suffixes. When
- *    neither is available, the §E.1 fallback in `aggregateWeekly`
+ *    neither is available, the single-bucket fallback in `aggregateWeekly`
  *    attributes all bytes_dropped to the `drop` bucket.
  *
  * `week_start` is propagated through verbatim so the weekly_series
@@ -377,7 +391,7 @@ export function adaptVerifyResultToWeekly(
     ? vr.delivered_dollars_now
     : 0;
   const rateSource = vr.rate_source ?? 'list_price';
-  // Item 5: when runEstimateVerify supplied per_pattern_breakdown
+  // When runEstimateVerify supplied per_pattern_breakdown
   // (cap-CSV join), translate it into the WeeklyVerifyResult shape so
   // the aggregator can attribute bytes to action buckets WITHOUT
   // double-counting unmarked rows. `delivered_bytes` becomes
@@ -455,10 +469,17 @@ export interface CommitmentReportEnvelope {
    * Share of `bytes_in` saved by each engine action, 0..100 percent.
    *
    * Each share is a percent of bytes_in (NOT a share of delivered_pct).
-   * Invariant: drop + compact + offload + tier_down ≈ delivered_pct
-   * within ±0.5pp rounding. Patterns not present in `data/action-intent.json`
-   * (and with no legacy cap-CSV action suffix) default to `'pass'` and
-   * contribute 0 to every bucket — see §E.1 in the patch spec.
+   * Invariant: drop + compact + offload + tier_down + sample ≈ delivered_pct
+   * within ±1pp rounding. `pass` always contributes 0 (the engine did not
+   * touch the bytes) but is surfaced for completeness so a caller can
+   * verify the bucket map covers every action label the per_pattern_rows
+   * carries — i.e. the bucket map is structurally exhaustive over the
+   * action enum, not the narrow "savings actions only" subset.
+   *
+   * On reconciliation failure (bucket sum diverges from delivered_pct by
+   * more than 1pp), a `reconciliation_warning` caveat is pushed; the
+   * envelope is rendered without modification so the CFO can see the
+   * mismatch instead of getting a silently-corrected number.
    *
    * The `offload` bucket is the metric-side `dropped_bytes_in_window`
    * for patterns where `getOffloadStatusBatch` returned `is_offloaded`;
@@ -470,6 +491,8 @@ export interface CommitmentReportEnvelope {
     compact: number;
     offload: number;
     tier_down: number;
+    sample: number;
+    pass: number;
   };
   delivered_bytes: number;
   /**
@@ -478,12 +501,17 @@ export interface CommitmentReportEnvelope {
    * construction when the offload helper succeeds. On offload-helper
    * timeout the offload bucket is 0 and a caveat surfaces that the
    * contribution was omitted.
+   *
+   * Same key set as `percent_reduction_by_action` — sample carries real
+   * bytes_saved (sample N=2 ≈ 50% reduction per pattern), pass stays 0.
    */
   bytes_saved_by_action: {
     drop: number;
     compact: number;
     offload: number;
     tier_down: number;
+    sample: number;
+    pass: number;
   };
   /**
    * For year-one committed contracts: the THEORETICAL dollar value of
@@ -533,6 +561,19 @@ export interface CommitmentReportEnvelope {
     pattern_hash: string;
     issue: 'leakage' | 'new_pattern_uncapped' | 'drift';
     recommended: string;
+    /**
+     * Service that emits the pattern (joined from TSDB after weekly
+     * aggregation). Surfaced in the CFO markdown at-risk bullet so the
+     * reader sees a service-anchored identity instead of the raw hash.
+     * Undefined when the descriptor join failed for this hash.
+     */
+    service?: string;
+    /**
+     * Engine `message_pattern` token string for the hash (joined from
+     * TSDB). Rendered through `patternDescriptor` into the at-risk
+     * bullet prose. Absent when the descriptor join returned no result.
+     */
+    symbol_message?: string;
   }>;
   /**
    * Per-pattern attribution rows merged across the report period.
@@ -546,7 +587,17 @@ export interface CommitmentReportEnvelope {
    * null whenever the row's `rate_source === 'unset'`.
    *
    * Empty when the upstream verify runner did not return
-   * `per_pattern_breakdown` for any week — see the caveat path in §E.1.
+   * `per_pattern_breakdown` for any week — see the caveat path in the single-bucket fallback.
+   *
+   * `intent_observation_mismatch` flags rows where the configured
+   * intent (`action_taken='pass'`) disagrees with the observed
+   * dropped-bytes signal (`bytes_saved > 0`). This is the canonical
+   * policy-drift indicator: the engine is reducing bytes on a pattern
+   * the policy says to pass through, OR the new policy has not yet
+   * fully propagated to the cluster. The row is surfaced as-is — we
+   * do NOT zero out bytes_saved here because the drift signal is
+   * exactly what FinOps wants to see; rendering layers should call
+   * out the flag rather than hide it.
    */
   per_pattern_rows: Array<{
     pattern_hash: string;
@@ -554,6 +605,7 @@ export interface CommitmentReportEnvelope {
     bytes_saved: number;
     dollars_saved: number | null;
     rate_source: 'list_price' | 'customer_supplied' | 'unset';
+    intent_observation_mismatch?: boolean;
   }>;
   annualized_dollars: number | null;
   /** Disclosed-value mirror of annualized_dollars; null when rate_source==='unset'. */
@@ -609,6 +661,18 @@ export interface DigestPatternNote {
    * Undefined for new_this_week.
    */
   growth_ratio?: number;
+  /**
+   * Service that emits the pattern (joined from TSDB). Undefined when the
+   * descriptor join failed or the action-intent entry had no `service`
+   * field. Used as a fallback when `symbol_message` is unavailable.
+   */
+  service?: string;
+  /**
+   * Engine `message_pattern` token string for the hash (joined from TSDB).
+   * Source for the human-facing descriptor in the rendered prose. Absent
+   * when the descriptor join returned no result for this hash.
+   */
+  symbol_message?: string;
   /** Human-readable note. */
   note: string;
 }
@@ -710,7 +774,8 @@ function buildActionDistribution(
  */
 function buildPatternNotes(
   runs: RecurRun[],
-  intentContent: string | null
+  intentContent: string | null,
+  descriptors?: Map<string, PatternHashDescriptor>
 ): DigestPatternNote[] {
   const notes: DigestPatternNote[] = [];
 
@@ -718,6 +783,12 @@ function buildPatternNotes(
 
   // New-this-week: collect pattern hashes from current intent that are
   // newly assigned (use action-intent entries set_at_iso within the window).
+  //
+  // Hash-leak fix: the rendered `note` prose is the only field that
+  // surfaces in the digest markdown bullet AND in the structured
+  // pattern_notes payload. Lead with descriptor + service. The bare
+  // pattern_hash stays on the structured field (`note.pattern_hash`)
+  // for machine consumers; it never lands in the prose.
   if (intentContent) {
     const parsed = parseActionIntent(intentContent);
     const windowEnd = Date.now();
@@ -725,10 +796,19 @@ function buildPatternNotes(
     for (const entry of parsed.entries) {
       const setAt = entry.set_at_iso ? Date.parse(entry.set_at_iso) : 0;
       if (setAt >= windowStart && setAt <= windowEnd) {
+        const desc = descriptors?.get(entry.pattern_hash);
+        // Prefer the entry's own `service` (set by the writer at the
+        // moment of intent), fall back to the descriptor join, then to
+        // the renderPatternLabel "(unnamed pattern)" fallback.
+        const service = entry.service || desc?.service || '';
+        const symbol_message = desc?.symbol_message;
+        const label = renderPatternLabel(symbol_message, service);
         notes.push({
           pattern_hash: entry.pattern_hash,
           kind: 'new_this_week',
-          note: `Pattern ${entry.pattern_hash} added to ${entry.action} plan this week (set ${entry.set_at_iso}).`,
+          ...(service ? { service } : {}),
+          ...(symbol_message ? { symbol_message } : {}),
+          note: `${label} added to ${entry.action} plan this week (set ${entry.set_at_iso}).`,
         });
       }
     }
@@ -822,7 +902,10 @@ function renderWeeklyDigestMarkdown(env: WeeklyDigestEnvelope): string {
     lines.push('## New patterns this week');
     lines.push('');
     for (const p of newPatterns.slice(0, 20)) {
-      lines.push(`- \`${p.pattern_hash}\` — ${p.note}`);
+      // Hash-leak fix: `p.note` already leads with the descriptor +
+      // service label (or "(unnamed pattern)") via buildPatternNotes.
+      // Emit the note directly, no leading hash.
+      lines.push(`- ${p.note}`);
     }
     if (newPatterns.length > 20) {
       lines.push(`- _...and ${newPatterns.length - 20} more_`);
@@ -902,7 +985,50 @@ async function executeWeeklyDigest(
 
   // Aggregate
   const actionDistribution = buildActionDistribution(intentContent);
-  const patternNotes = buildPatternNotes(runs, intentContent);
+
+  // Hash-leak fix: collect the candidate hashes (intent entries set
+  // within the 7-day window) and best-effort fetch descriptors so the
+  // rendered notes lead with `descriptor (service)`, not the raw hash.
+  // Backend resolution failure → empty map → renderPatternLabel
+  // degrades to "(unnamed pattern)" rather than failing the digest.
+  let descriptors: Map<string, PatternHashDescriptor> | undefined;
+  if (intentContent) {
+    const parsed = parseActionIntent(intentContent);
+    const windowEnd = Date.now();
+    const windowStartMs = windowEnd - 7 * 24 * 60 * 60 * 1000;
+    const candidateHashes: string[] = [];
+    for (const entry of parsed.entries) {
+      const setAt = entry.set_at_iso ? Date.parse(entry.set_at_iso) : 0;
+      if (setAt >= windowStartMs && setAt <= windowEnd) {
+        candidateHashes.push(entry.pattern_hash);
+      }
+    }
+    if (candidateHashes.length > 0) {
+      try {
+        const r = await resolveBackend();
+        if (r.backend) {
+          // commitment.env not available in the digest path; default to
+          // the env nickname or 'prod' is wrong — instead, scope only by
+          // hash + isDropped filter (the env label is required by the
+          // selector). Read the env from args.environment when set;
+          // otherwise omit the env filter by passing a wildcard-ish
+          // env="" (callers without an explicit environment get whatever
+          // the backend's default scope matches).
+          const digestEnv = args.environment ?? '';
+          descriptors = await fetchHashDescriptors(
+            r.backend,
+            digestEnv,
+            candidateHashes,
+            '7d'
+          );
+        }
+      } catch {
+        // best-effort; leave descriptors undefined
+      }
+    }
+  }
+
+  const patternNotes = buildPatternNotes(runs, intentContent, descriptors);
 
   const appliedRuns = runs.filter((r) => r.status === 'applied');
   const latestRun = runs.length > 0 ? runs[runs.length - 1] : undefined;
@@ -1117,6 +1243,98 @@ function inverseNormalCdf(p: number): number {
   );
 }
 
+// ─── descriptor join ────────────────────────────────────────────────
+
+/**
+ * Per-hash descriptor row joined from TSDB. The bullet renderers in the
+ * weekly digest + CFO markdown use this to swap raw 11-char
+ * `pattern_hash` strings for a user-facing `descriptor + service` label
+ * (same primitive `top_patterns` and `pattern_diff` already rely on).
+ */
+export interface PatternHashDescriptor {
+  service: string;
+  symbol_message: string;
+}
+
+/**
+ * Resolve `pattern_hash → (service, symbol_message)` for a batch of
+ * hashes using the live customer metrics backend.
+ *
+ * Issues the same `sum by (hash, service, message_pattern)` PromQL that
+ * `estimate-savings` runs (estimate-savings.ts:807) and picks the
+ * dominant (service, descriptor) per hash by bytes, lexicographic
+ * tie-break on service then descriptor. Returns an empty map on any
+ * query error so the renderers degrade to "(unnamed pattern)" rather
+ * than failing the whole report.
+ */
+export async function fetchHashDescriptors(
+  backend: CustomerMetricsBackend,
+  metricsEnv: string,
+  hashes: string[],
+  range: string
+): Promise<Map<string, PatternHashDescriptor>> {
+  const out = new Map<string, PatternHashDescriptor>();
+  const uniq = Array.from(new Set(hashes.filter((h): h is string => typeof h === 'string' && h.length > 0)));
+  if (uniq.length === 0) return out;
+  const L = DEFAULT_LABELS;
+  const hashList = uniq.map((h) => h.replace(/[\\"]/g, (c) => `\\${c}`)).join('|');
+  const selector =
+    `${L.hash}=~"${hashList}",${L.env}="${metricsEnv}",isDropped!="true"`;
+  const query =
+    `sum by (${L.hash},${L.service},${L.pattern}) ` +
+    `(increase(all_events_summaryBytes_total{${selector}}[${range}]))`;
+  let res: Awaited<ReturnType<CustomerMetricsBackend['queryInstant']>>;
+  try {
+    res = await backend.queryInstant(query);
+  } catch {
+    return out;
+  }
+  const rows = res?.data?.result ?? [];
+  const acc = new Map<string, { service: string; symbol_message: string; bytes: number }>();
+  for (const row of rows) {
+    const hash = row.metric?.[L.hash];
+    const svc = row.metric?.[L.service] ?? '';
+    const sm = row.metric?.[L.pattern] ?? '';
+    if (!hash) continue;
+    const v = row.value ? parseFloat(row.value[1]) : NaN;
+    const bytes = Number.isFinite(v) ? v : 0;
+    const prior = acc.get(hash);
+    if (
+      !prior ||
+      bytes > prior.bytes ||
+      (bytes === prior.bytes && svc.localeCompare(prior.service) < 0) ||
+      (bytes === prior.bytes && svc === prior.service && sm.localeCompare(prior.symbol_message) < 0)
+    ) {
+      acc.set(hash, { service: svc, symbol_message: sm, bytes });
+    }
+  }
+  for (const [hash, { service, symbol_message }] of acc.entries()) {
+    out.set(hash, { service, symbol_message });
+  }
+  return out;
+}
+
+/**
+ * Render a hash-free human label from a joined descriptor row. Falls
+ * back to "(unnamed pattern)" when both the descriptor and service
+ * strings are empty so the rendered prose never leaks the bare hash.
+ *
+ * The output is the SAME shape every hash-free renderer in the catalog
+ * uses (top_patterns, pattern_diff): tokenized descriptor first, service
+ * trailing in parens when present.
+ */
+function renderPatternLabel(
+  symbol_message: string | undefined,
+  service: string | undefined
+): string {
+  const desc = symbol_message ? patternDescriptor(symbol_message, '', 60) : '';
+  const svc = service && service.trim() ? service.trim() : '';
+  if (desc && svc) return `${desc} (${svc})`;
+  if (desc) return desc;
+  if (svc) return svc;
+  return '(unnamed pattern)';
+}
+
 // ─── aggregation ────────────────────────────────────────────────────
 
 /**
@@ -1130,6 +1348,8 @@ interface MergedPatternRow {
   bytes_saved: number;
   dollars_saved: number | null;
   rate_source: 'list_price' | 'customer_supplied' | 'unset';
+  /** True when action_taken='pass' and bytes_saved > 0 (policy drift). */
+  intent_observation_mismatch?: boolean;
 }
 
 interface ActionBuckets {
@@ -1137,10 +1357,17 @@ interface ActionBuckets {
   compact: number;
   offload: number;
   tier_down: number;
+  sample: number;
+  pass: number;
 }
 
 function emptyActionBuckets(): ActionBuckets {
-  return { drop: 0, compact: 0, offload: 0, tier_down: 0 };
+  return { drop: 0, compact: 0, offload: 0, tier_down: 0, sample: 0, pass: 0 };
+}
+
+/** Sum of all action buckets in bytes. */
+function sumActionBuckets(b: ActionBuckets): number {
+  return b.drop + b.compact + b.offload + b.tier_down + b.sample + b.pass;
 }
 
 function aggregateWeekly(weekly: WeeklyVerifyResult[]): {
@@ -1206,16 +1433,21 @@ function aggregateWeekly(weekly: WeeklyVerifyResult[]): {
     if (w.per_pattern_breakdown && w.per_pattern_breakdown.length > 0) {
       perPatternAvailable = true;
       for (const row of w.per_pattern_breakdown) {
-        // §E.1: missing action_taken defaults to 'pass'; pass rows
-        // contribute 0 to every bucket and 0 bytes_saved.
+        // Missing action_taken defaults to 'pass'. Every action
+        // (including pass and sample) accumulates its bytes_saved into
+        // the matching bucket so the bucket map is structurally
+        // exhaustive over the action enum. pass rows with non-zero
+        // bytes_saved indicate engine/intent divergence — they land in
+        // the pass bucket here; the divergence flag on the per-pattern
+        // row is what surfaces the drift to the operator.
         const action: Action = row.action_taken ?? 'pass';
         const bytesSaved = Number.isFinite(row.bytes_saved) ? Math.max(0, row.bytes_saved) : 0;
         if (action === 'drop') buckets.drop += bytesSaved;
         else if (action === 'compact') buckets.compact += bytesSaved;
         else if (action === 'offload') buckets.offload += bytesSaved;
         else if (action === 'tier_down') buckets.tier_down += bytesSaved;
-        // 'pass' / 'sample' → 0 contribution (sample is a partial cut
-        // not represented in the four-way bucket break-out here).
+        else if (action === 'sample') buckets.sample += bytesSaved;
+        else if (action === 'pass') buckets.pass += bytesSaved;
 
         const rowRate = row.rate_source ?? 'unset';
         const rowDollars =
@@ -1250,11 +1482,20 @@ function aggregateWeekly(weekly: WeeklyVerifyResult[]): {
       }
     }
   }
-  // §E.1 fallback: when no week supplied per_pattern_breakdown, the
+  // single-bucket fallback: when no week supplied per_pattern_breakdown, the
   // four-way split degrades to legacy behaviour — all delivered_bytes
   // attributed to the `drop` bucket. per_pattern_rows is empty.
   if (!perPatternAvailable) {
     buckets.drop = totalDropped;
+  }
+  // Stamp intent_observation_mismatch on rows where intent is
+  // 'pass' but bytes_saved is non-zero (engine is reducing bytes on a
+  // pattern the policy says to pass through). The row stays in the
+  // 'pass' bucket; the flag is what surfaces the drift.
+  for (const row of merged.values()) {
+    if (row.action_taken === 'pass' && row.bytes_saved > 0) {
+      row.intent_observation_mismatch = true;
+    }
   }
   const denom = totalIn > 0 ? totalIn : 1;
   let rate_source: 'list_price' | 'customer_supplied' | 'unset';
@@ -1416,6 +1657,15 @@ function renderMarkdown(env: CommitmentReportEnvelope): string {
   lines.push('');
   lines.push('## Weekly delivery');
   lines.push('');
+  // Scope label: the bar shows per-week delivered_pct (denominator =
+  // that week's bytes_in), which can diverge sharply from the period
+  // delivered_pct in the header when weekly_series is sparse. Earlier
+  // the CFO saw "delivered 3.7%" in the header and an 8.7% bar with no
+  // label and concluded there was a contradiction.
+  lines.push(
+    `_Each bar shows that week's delivered % vs that week's ingest (single-week scope). The header's delivered ${env.delivered_pct.toFixed(1)}% is the cumulative period average across all ${env.weekly_series.length} populated week${env.weekly_series.length === 1 ? '' : 's'}._`
+  );
+  lines.push('');
   lines.push('```');
   lines.push(renderAsciiChart(env.weekly_series, env.commitment.promised_pct));
   lines.push('```');
@@ -1434,7 +1684,7 @@ function renderMarkdown(env: CommitmentReportEnvelope): string {
   // rule on line 624-627). Zero-share rows stay in for completeness —
   // FinOps wants to see the zeros to confirm nothing was missed.
   // EXCEPT when the offload bucket is "unknown" (helper timed out),
-  // in which case we omit the offload row entirely — see §E.2. That
+  // in which case we omit the offload row entirely — see the offload-row caveat. That
   // condition is signalled by a specific caveat string, checked here.
   const offloadTimedOut = env.caveats.some((c) =>
     c.startsWith('Offload status lookup timed out')
@@ -1459,38 +1709,54 @@ function renderMarkdown(env: CommitmentReportEnvelope): string {
     const value = env.delivered_dollars * (bytes / env.delivered_bytes);
     return buildDisclosedDollarValue(value, env.rate_source, siemLabel, listRatePerGb);
   };
+  // This table previously hardcoded
+  // {Drop, Compact, Offload, Tier-down} as the four rows. When the engine's
+  // actual policy applies via sample (the error-tier default) or when
+  // bytes_saved gets attributed to pass via the intent_observation drift
+  // path, the rendered CFO table shows $0/0 bytes across every row even
+  // though delivered_bytes is non-zero. On the otel-demo run sample (66 MB)
+  // and pass (184 MB) carry 100% of the 250 MB delivered savings; the old
+  // table hid all of it. Driving the table off ba directly closes the gap.
+  type ActionKey = 'drop' | 'compact' | 'offload' | 'tier_down' | 'sample' | 'pass';
+  const actionRows: Array<{ key: ActionKey; label: string }> = [
+    { key: 'drop',      label: 'Drop' },
+    { key: 'compact',   label: 'Compact' },
+    { key: 'offload',   label: 'Offload' },
+    { key: 'tier_down', label: 'Tier-down' },
+    { key: 'sample',    label: 'Sample' },
+    { key: 'pass',      label: 'Pass' },
+  ];
+  // Show every row whose bucket is non-zero, plus drop/compact/tier-down as
+  // anchor rows so the CFO sees zeros explicitly where they exist. Offload
+  // row is suppressed when the offload-status helper timed out (the value
+  // is null-equivalent in that case).
+  const isAnchor = (k: ActionKey) => k === 'drop' || k === 'compact' || k === 'tier_down';
+  const visibleActions = actionRows.filter((r) => {
+    if (r.key === 'offload' && offloadTimedOut) return false;
+    return isAnchor(r.key) || ba[r.key] > 0;
+  });
   if (showDollars) {
     lines.push('| Action    | Share of bytes | Bytes saved | Dollars |');
     lines.push('|-----------|----------------|-------------|---------|');
-    lines.push(
-      `| Drop      | ${pa.drop.toFixed(1)}%           | ${ba.drop.toLocaleString()} | ${fmtDisclosedDollar(dollarShareDisclosed(ba.drop))} |`
-    );
-    lines.push(
-      `| Compact   | ${pa.compact.toFixed(1)}%           | ${ba.compact.toLocaleString()} | ${fmtDisclosedDollar(dollarShareDisclosed(ba.compact))} |`
-    );
-    if (!offloadTimedOut) {
+    for (const { key, label } of visibleActions) {
       lines.push(
-        `| Offload   | ${pa.offload.toFixed(1)}%           | ${ba.offload.toLocaleString()} | ${fmtDisclosedDollar(dollarShareDisclosed(ba.offload))} |`
+        `| ${label.padEnd(9)} | ${pa[key].toFixed(1)}%           | ${ba[key].toLocaleString()} | ${fmtDisclosedDollar(dollarShareDisclosed(ba[key]))} |`
       );
     }
-    lines.push(
-      `| Tier-down | ${pa.tier_down.toFixed(1)}%           | ${ba.tier_down.toLocaleString()} | ${fmtDisclosedDollar(dollarShareDisclosed(ba.tier_down))} |`
-    );
   } else {
     lines.push('| Action    | Share of bytes | Bytes saved |');
     lines.push('|-----------|----------------|-------------|');
-    lines.push(`| Drop      | ${pa.drop.toFixed(1)}%           | ${ba.drop.toLocaleString()} |`);
-    lines.push(`| Compact   | ${pa.compact.toFixed(1)}%           | ${ba.compact.toLocaleString()} |`);
-    if (!offloadTimedOut) {
-      lines.push(`| Offload   | ${pa.offload.toFixed(1)}%           | ${ba.offload.toLocaleString()} |`);
+    for (const { key, label } of visibleActions) {
+      lines.push(
+        `| ${label.padEnd(9)} | ${pa[key].toFixed(1)}%           | ${ba[key].toLocaleString()} |`
+      );
     }
-    lines.push(`| Tier-down | ${pa.tier_down.toFixed(1)}%           | ${ba.tier_down.toLocaleString()} |`);
   }
   // §C.3: Offload nudge — declarative wording, no "you / your".
   if (ba.offload > 0) {
     lines.push('');
     lines.push(
-      '> _Offloaded volume is queryable via `log10x_retriever_query` for forensic access — pass the period start/end to scan the customer-owned archive._'
+      '> _The offloaded volume is inspectable via `log10x_retriever_query`. Pass the period start/end to read the offloaded cohort from the customer-owned overflow bucket._'
     );
   }
   lines.push('');
@@ -1511,7 +1777,12 @@ function renderMarkdown(env: CommitmentReportEnvelope): string {
     lines.push('## At-risk patterns');
     lines.push('');
     for (const r of env.at_risk_actions.slice(0, 10)) {
-      lines.push(`- \`${r.pattern_hash}\` — **${r.issue.replace(/_/g, ' ')}**. ${r.recommended}`);
+      // Hash-leak fix: lead with descriptor + service, drop the raw
+      // hash from the rendered prose. The structured field
+      // `data.at_risk_actions[].pattern_hash` still carries the hash
+      // for machine consumers / downstream automation.
+      const label = renderPatternLabel(r.symbol_message, r.service);
+      lines.push(`- ${label} — **${r.issue.replace(/_/g, ' ')}**. ${r.recommended}`);
     }
   }
   if (env.caveats.length > 0) {
@@ -1654,7 +1925,33 @@ export async function executeCommitmentReport(
 
   // 5. Aggregate + attribution.
   const agg = aggregateWeekly(weeklyResults);
-  const atRisk = aggregateAtRiskActions(weeklyResults);
+  const atRiskRaw = aggregateAtRiskActions(weeklyResults);
+
+  // Hash-leak fix: join (service, symbol_message) descriptors for the
+  // at-risk hashes via the same `sum by (hash, service, message_pattern)`
+  // PromQL primitive top_patterns + pattern_diff use. The bare hash stays
+  // on the structured field; only the rendered CFO bullet drops it.
+  let atRiskDescriptors: Map<string, PatternHashDescriptor> = new Map();
+  if (atRiskRaw.length > 0) {
+    const hashes = atRiskRaw.map((r) => r.pattern_hash);
+    const rangeHours = Math.max(1, period.days * 24);
+    atRiskDescriptors = await fetchHashDescriptors(
+      backend,
+      commitment.env,
+      hashes,
+      `${rangeHours}h`
+    );
+  }
+  const atRisk = atRiskRaw.map((r) => {
+    const desc = atRiskDescriptors.get(r.pattern_hash);
+    return {
+      pattern_hash: r.pattern_hash,
+      issue: r.issue,
+      recommended: r.recommended,
+      ...(desc?.service ? { service: desc.service } : {}),
+      ...(desc?.symbol_message ? { symbol_message: desc.symbol_message } : {}),
+    };
+  });
 
   // 5b. Offload-bucket override via metric-surface stamp (§B.3).
   // The receiver stamps `isDropped="true"` on every offloaded event;
@@ -1662,7 +1959,7 @@ export async function executeCommitmentReport(
   // offloaded has its row's action_taken overridden to 'offload'
   // REGARDLESS of what the cap CSV said — the metric stamp is ground
   // truth. On metric backend timeout / env-load failure the bucket
-  // stays 0 and a caveat surfaces (§E.2).
+  // stays 0 and a caveat surfaces (offload-row caveat).
   let offloadHelperTimedOut = false;
   if (agg.per_pattern_breakdown_available && agg.per_pattern_rows.length > 0) {
     try {
@@ -1677,7 +1974,7 @@ export async function executeCommitmentReport(
         timeoutMs: 2000,
       });
       // Empty record == helper failed (per offload-status.ts:228). When
-      // every entry is ok:false the same caveat applies (§E.2).
+      // every entry is ok:false the same caveat applies (offload-row caveat).
       const haveData = Object.values(batch).some((s) => s && s.ok);
       if (!haveData) {
         offloadHelperTimedOut = true;
@@ -1710,6 +2007,8 @@ export async function executeCommitmentReport(
         if (agg.bytes_saved_by_action.drop < 0) agg.bytes_saved_by_action.drop = 0;
         if (agg.bytes_saved_by_action.compact < 0) agg.bytes_saved_by_action.compact = 0;
         if (agg.bytes_saved_by_action.tier_down < 0) agg.bytes_saved_by_action.tier_down = 0;
+        if (agg.bytes_saved_by_action.sample < 0) agg.bytes_saved_by_action.sample = 0;
+        if (agg.bytes_saved_by_action.pass < 0) agg.bytes_saved_by_action.pass = 0;
       }
     } catch {
       offloadHelperTimedOut = true;
@@ -1726,7 +2025,24 @@ export async function executeCommitmentReport(
     compact: pctOfIn(agg.bytes_saved_by_action.compact),
     offload: pctOfIn(agg.bytes_saved_by_action.offload),
     tier_down: pctOfIn(agg.bytes_saved_by_action.tier_down),
+    sample: pctOfIn(agg.bytes_saved_by_action.sample),
+    pass: pctOfIn(agg.bytes_saved_by_action.pass),
   };
+
+  // 5d. Reconciliation gap. The bucket map and delivered_pct are
+  // computed from independent code paths; previously a wide gap between
+  // them would render a self-contradicting envelope ("delivered 3.8% /
+  // attributed 0%"). The gap is computed here and surfaced as a
+  // structured caveat in section 8 below when it exceeds 1pp (matches
+  // the schema docstring's "±1pp rounding" claim).
+  const bucketSumPctForGuard =
+    percent_reduction_by_action.drop +
+    percent_reduction_by_action.compact +
+    percent_reduction_by_action.offload +
+    percent_reduction_by_action.tier_down +
+    percent_reduction_by_action.sample +
+    percent_reduction_by_action.pass;
+  const reconciliationGapPp = Math.abs(agg.delivered_pct - bucketSumPctForGuard);
 
   // 6. Bayesian forward confidence (spec §5 Q4 default: weak Beta(2,2)).
   const forecast = bayesianForwardConfidence(
@@ -1802,16 +2118,78 @@ export async function executeCommitmentReport(
       `Delivered ${agg.delivered_pct.toFixed(1)}% trails promised ${commitment.promised_pct.toFixed(1)}% by more than 5pp — investigate at-risk patterns.`
     );
   }
-  // §E.1: per-pattern breakdown unavailable from upstream verify.
+  // Single-bucket fallback: per-pattern breakdown unavailable from upstream verify.
   if (!agg.per_pattern_breakdown_available) {
     caveats.push(
       'Per-pattern action breakdown unavailable — log10x_estimate_savings verify mode did not return per_pattern_breakdown for this period.'
     );
   }
-  // §E.2: offload-status helper timed out.
+  // Offload-status helper timed out.
   if (offloadHelperTimedOut) {
     caveats.push(
       'Offload status lookup timed out — offload contribution omitted. Re-run after metrics backend stabilizes.'
+    );
+  }
+  // Reconciliation guard: bucket sum vs delivered_pct disagreement. The
+  // schema invariant says they should agree within ±1pp; surface any
+  // wider gap as a caveat so the CFO/agent sees the disagreement instead
+  // of getting a silently-contradicting envelope. Typical root cause:
+  // intent/observation drift on per_pattern_rows (action_taken from
+  // action-intent.json, bytes_saved from observed-dropped TSDB).
+  if (reconciliationGapPp > 1 && agg.per_pattern_breakdown_available) {
+    caveats.push(
+      `Reconciliation gap: percent_reduction_by_action sums to ${bucketSumPctForGuard.toFixed(2)}% but delivered_pct is ${agg.delivered_pct.toFixed(2)}% (gap ${reconciliationGapPp.toFixed(2)}pp, >1pp tolerance). Likely cause: per-pattern action_taken sourced from configured intent (action-intent.json) while bytes_saved sourced from observed-dropped — engine has not yet propagated the new policy, or the policy diverged from observed behavior.`
+    );
+  }
+  // Intent/observation mismatch tally. Counts rows where
+  // action_taken='pass' but bytes_saved > 0. The rows themselves
+  // carry the `intent_observation_mismatch` flag; this caveat is the
+  // human-readable summary so the operator sees the drift count
+  // without scanning every row.
+  const mismatchCount = agg.per_pattern_rows.filter(
+    (r) => r.intent_observation_mismatch
+  ).length;
+  // Baseline-drift caveat: promised_dollars is computed against
+  // commitment.baseline_usd_monthly
+  // (captured at apply time) while delivered_dollars is computed from
+  // actual observed dropped bytes over the post-window. When the cluster's
+  // ingest drifts substantially from apply-time baseline (e.g. lower
+  // traffic, throttle, or pre-policy ramp), the dollar ratio
+  // delivered_dollars/promised_dollars no longer tracks the byte ratio
+  // delivered_pct/promised_pct. A CFO comparing "$0.12 delivered vs $70
+  // promised" then sees 0.17% achievement when the actual byte delivery
+  // is 3.7% / 30% = 12.3% — a 70x apparent discrepancy that is
+  // arithmetically the result of two different denominators, NOT a
+  // policy failure. Surface it explicitly so the CFO doesn't panic.
+  if (
+    promised_dollars != null &&
+    agg.delivered_dollars != null &&
+    promised_dollars > 0 &&
+    commitment.promised_pct > 0
+  ) {
+    const dollarPctOfPromised = (agg.delivered_dollars / promised_dollars) * 100;
+    const bytePctOfPromised = (agg.delivered_pct / commitment.promised_pct) * 100;
+    const ratioOfRatios =
+      bytePctOfPromised > 0 ? dollarPctOfPromised / bytePctOfPromised : 1;
+    // Flag when dollar achievement and byte achievement diverge by 2x or
+    // more (catches the cluster-ramp / actual-vs-baseline-drift case).
+    if (
+      ratioOfRatios > 0 &&
+      (ratioOfRatios < 0.5 || ratioOfRatios > 2) &&
+      Number.isFinite(ratioOfRatios)
+    ) {
+      caveats.push(
+        `Baseline drift: dollar achievement (${dollarPctOfPromised.toFixed(2)}% of promised $) and byte achievement (${bytePctOfPromised.toFixed(2)}% of promised %) diverge by ${ratioOfRatios < 1 ? (1 / ratioOfRatios).toFixed(1) + 'x lower' : ratioOfRatios.toFixed(1) + 'x higher'}. Cause: promised_dollars uses commitment.baseline_usd_monthly captured at apply time, while delivered_dollars uses actual observed dropped bytes; when current ingest differs from the apply-time baseline, the two ratios decouple. Compare byte percent (delivered_pct vs promised_pct) for policy performance — the dollar gap reflects ingest drift, not policy failure.`
+      );
+    }
+  }
+  if (mismatchCount > 0) {
+    const mismatchBytes = agg.per_pattern_rows
+      .filter((r) => r.intent_observation_mismatch)
+      .reduce((a, r) => a + r.bytes_saved, 0);
+    const mismatchBytesGb = (mismatchBytes / (1024 * 1024 * 1024)).toFixed(2);
+    caveats.push(
+      `Intent/observation drift: ${mismatchCount} pattern(s) have action_taken='pass' but the engine reduced ${mismatchBytesGb} GB on them in this window. Likely cause: new policy has not yet fully propagated, OR a sample/drop policy was reverted in action-intent.json while the engine still has the prior cap. Check the configmap generation timestamp vs the engine pod's last config reload.`
     );
   }
   // §B.2: compact rows against a no-op destination signal config drift
@@ -1892,6 +2270,7 @@ export async function executeCommitmentReport(
       bytes_saved: r.bytes_saved,
       dollars_saved: r.dollars_saved,
       rate_source: r.rate_source,
+      ...(r.intent_observation_mismatch ? { intent_observation_mismatch: true } : {}),
     })),
     annualized_dollars,
     annualized_dollars_disclosed,
@@ -1915,10 +2294,33 @@ export async function executeCommitmentReport(
     caveats: envelope.caveats,
   });
 
-  const reportHeadline = `${commitment.service}: delivered ${agg.delivered_pct.toFixed(1)}% vs promised ${commitment.promised_pct.toFixed(1)}% over ${period.days}d.`;
+  // Under 2 weekly slices the "delivered X% vs promised Y%" framing reads as a
+  // verdict on a commitment too young to judge (period.days is the report
+  // window, not the commitment's age). Lead with the early-reading caveat.
+  const reportHeadline =
+    weeklyResults.length < 2
+      ? `${commitment.service}: ${agg.delivered_pct.toFixed(1)}% delivered so far vs ${commitment.promised_pct.toFixed(1)}% promised — under 2 weeks of data, too early to judge.`
+      : `${commitment.service}: delivered ${agg.delivered_pct.toFixed(1)}% vs promised ${commitment.promised_pct.toFixed(1)}% over ${period.days}d.`;
   const rateSourceMapped = agg.rate_source === 'customer_supplied' ? 'customer_supplied' as const
     : agg.rate_source === 'list_price' ? 'list_price' as const
     : 'none' as const;
+  // Build siem_vendor + source_label disambiguating WHICH instance of
+  // commitment.destination the report is for. The env-config doc resolved
+  // by configure_engine carries cluster.region + destination.ingest_url —
+  // surface them via the standard helper so a reader can tell "which
+  // Datadog org / which CloudWatch account" the delivered% applies to.
+  let envForLabel: import('../lib/environments.js').EnvConfig | undefined;
+  try {
+    const envs = await loadEnvironments();
+    envForLabel = resolveEnv(envs, args.environment);
+  } catch {
+    envForLabel = undefined;
+  }
+  const labelDisclosure = await buildSourceDisclosureFromEnv(
+    envForLabel,
+    commitment.destination,
+    { envIdOrNickname: commitment.env },
+  );
   return buildChassisEnvelope({
     tool: 'log10x_commitment_report',
     view: 'summary',
@@ -1932,6 +2334,7 @@ export async function executeCommitmentReport(
       bytes_source: 'tsdb',
       rate_source: rateSourceMapped,
       siem_vendor: commitment.destination,
+      ...(labelDisclosure.source_label ? { source_label: labelDisclosure.source_label } : {}),
     },
     scope: {
       window: `${period.days}d`,
@@ -1956,11 +2359,21 @@ function buildCommitmentReportHumanSummary(args: {
   weekCount: number;
   caveats: string[];
 }): string {
-  const verdict = args.deliveredPct >= args.promisedPct ? 'met' : 'short';
-  const lead = `Service ${args.service} delivered ${args.deliveredPct.toFixed(1)}% reduction vs ${args.promisedPct.toFixed(1)}% promised over the last ${args.days} days across ${args.weekCount} weekly slice${args.weekCount === 1 ? '' : 's'}, ${verdict} the commitment.`;
+  // Under 2 weeks of verify data, neither "met" nor "short" is a defensible
+  // verdict — a commitment minted hours ago will trivially read as "short the
+  // commitment" against a monthly promise. Lead with the insufficient-data
+  // framing instead of asserting under-delivery.
+  const lowData = args.weekCount < 2;
+  const verdict = args.deliveredPct >= args.promisedPct ? 'met' : 'short of';
+  const lead = lowData
+    ? `Service ${args.service} has under 2 weeks of verify data (${args.weekCount} weekly slice${args.weekCount === 1 ? '' : 's'}). Early reading: ${args.deliveredPct.toFixed(1)}% reduction vs ${args.promisedPct.toFixed(1)}% promised — too little data to judge delivery yet.`
+    : `Service ${args.service} delivered ${args.deliveredPct.toFixed(1)}% reduction vs ${args.promisedPct.toFixed(1)}% promised over the last ${args.days} days across ${args.weekCount} weekly slice${args.weekCount === 1 ? '' : 's'}, ${verdict} the commitment.`;
+  // Show sub-$1 realized savings with cents — toFixed(0) rounded $0.14 to "$0",
+  // which reads as "nothing delivered" when a (tiny) amount was.
+  const fmtRealized = (v: number) => (Math.abs(v) < 1 ? `$${v.toFixed(2)}` : `$${Math.round(v)}`);
   const dollars =
     args.rateSource !== 'unset' && args.deliveredDollars != null
-      ? ` Realized savings: ${args.rateSource === 'customer_supplied' ? '$' + args.deliveredDollars.toFixed(0) + ' (customer-supplied rate)' : '$' + args.deliveredDollars.toFixed(0) + ' (list price)'}.`
+      ? ` Realized savings: ${fmtRealized(args.deliveredDollars)} (${args.rateSource === 'customer_supplied' ? 'customer-supplied rate' : 'list price'}).`
       : '';
   const caveats = args.caveats.length > 0 ? ` Caveats: ${args.caveats.length}.` : '';
   return `${lead}${dollars}${caveats}`;

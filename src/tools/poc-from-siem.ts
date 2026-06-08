@@ -203,7 +203,7 @@ export const pocFromSiemSubmitSchema = {
       'Customer-specified target reduction percent. If absent, POC produces a recommendation-only output. ' +
         'If present, POC produces a feasibility verdict (`output.feasibility`) plus a pre-deploy commitment ' +
         'artifact stub (`output.commitment_artifact`) the agent can surface alongside the per-pattern actions. ' +
-        'The cap CSV ready to commit ships in Item 4 of the cost-cutting close list.'
+        'The cap CSV ready to commit is attached by a later change.'
     ),
   exception_services: z
     .array(z.string())

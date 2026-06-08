@@ -1307,9 +1307,9 @@ ${indent(destOutput, 6)}
   // Vector — upstream `vector/vector` chart with a values overlay (per
   // mksite/docs/apps/receiver/deploy.md). No log10x-repackaged Vector
   // chart exists; the integration is done via overlay on top of the
-  // upstream chart. The exact `tenx:` overlay schema is still being
-  // shaped — TODO: lock down the values structure once the engine team
-  // publishes the canonical Vector sidecar config.
+  // upstream chart. The exact `tenx:` overlay schema is not yet
+  // finalized; the values structure follows the canonical Vector sidecar
+  // config once it is published.
   vector: {
     label: 'Vector',
     integrationMode:
@@ -1924,7 +1924,7 @@ function renderFilebeatOutput(destination: OutputDestination, outputHost?: strin
     // which is baked at a known location in every log10x/filebeat-10x
     // image.
     //
-    // CRITICAL (Dor, 2026-04-22): filebeat + log10x is INCOMPATIBLE with
+    // CRITICAL: filebeat + log10x is INCOMPATIBLE with
     // \`output.console\`. The tenx subprocess reads from filebeat's
     // stdout — the same channel \`output.console\` writes to — so a
     // console output corrupts the tenx input stream. Use output.file

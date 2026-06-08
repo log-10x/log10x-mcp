@@ -255,14 +255,16 @@ test('cap_csv emitted in 6-action vocab and parses back via cap-csv-parser', asy
   assert.equal(parsed.malformed_lines.length, 0, 'every row parses cleanly');
   // Container-level rows for each observed service.
   assert.ok(parsed.by_container.size >= 1, 'at least one container default row');
-  // The exception service (orders) should be a `pass` container row.
+  // The exception service (orders) gets an exception-pinned container row.
+  // Action attribution no longer lives in the cap CSV (it moved to
+  // data/action-intent.json per the e057eb1 refactor), so the exception is
+  // signaled via the reason field rather than a `:action` suffix.
   const orders = parsed.by_container.get('orders');
   assert.ok(orders, 'orders container row present (exception service)');
-  assert.equal(orders.action, 'pass');
-  // Action set across all rows is a subset of the 6-action vocab.
-  const allowed = new Set(['pass', 'sample', 'compact', 'tier_down', 'offload', 'drop']);
+  assert.equal(orders.reason, 'service_pinned_by_exception_list');
+  // The cap CSV no longer carries an action suffix on any row.
   for (const r of parsed.rows) {
-    assert.ok(allowed.has(r.action), `row action ${r.action} not in 6-action vocab`);
+    assert.equal(r.legacy_action_suffix, undefined, 'cap CSV carries no action suffix');
   }
 });
 

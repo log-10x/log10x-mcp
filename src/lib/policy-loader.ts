@@ -152,11 +152,20 @@ function parseSimpleYaml(text: string): Record<string, unknown> {
   const lines = text.split(/\r?\n/);
   const root: Record<string, unknown> = {};
 
-  // Stack tracks the nesting level.  Each entry is { indent, obj } where
-  // `obj` is the Record that owns key-value pairs at this indent level.
-  const stack: Array<{ indent: number; obj: Record<string, unknown> }> = [
-    { indent: -1, obj: root },
-  ];
+  // Stack tracks the nesting level.  Each entry describes the mapping that owns
+  // key-value pairs at this indent level:
+  //   - `obj`      : the Record that deeper mapping keys are written into.
+  //   - `owner`    : the parent Record that holds this frame's seed key (only
+  //                  set for frames opened by an empty-value key).
+  //   - `ownerKey` : the key in `owner` that this frame seeds.  A following
+  //                  block-sequence (`- item`) promotes `owner[ownerKey]` from
+  //                  the placeholder mapping into an array.
+  const stack: Array<{
+    indent: number;
+    obj: Record<string, unknown>;
+    owner?: Record<string, unknown>;
+    ownerKey?: string;
+  }> = [{ indent: -1, obj: root }];
 
   for (const raw of lines) {
     // Skip blank lines and comment-only lines.
@@ -166,27 +175,40 @@ function parseSimpleYaml(text: string): Record<string, unknown> {
     const indent = trimmed.length - trimmed.trimStart().length;
     const content = trimmed.trimStart();
 
-    // Pop stack until we're at the right level.
-    while (stack.length > 1 && stack[stack.length - 1].indent >= indent) {
+    const isListItem = content.startsWith('- ');
+
+    // Pop stack until we're at the right level.  A block-sequence item (`- `)
+    // may sit one indent level deeper than its owning key, or at the SAME
+    // indent (YAML allows both).  For list items keep the owning frame on the
+    // stack when its indent equals the item's indent (`>` pop); for mapping
+    // keys pop frames at the same-or-greater indent (`>=` pop).
+    while (
+      stack.length > 1 &&
+      (isListItem
+        ? stack[stack.length - 1].indent > indent
+        : stack[stack.length - 1].indent >= indent)
+    ) {
       stack.pop();
     }
 
-    const parent = stack[stack.length - 1].obj;
+    const frame = stack[stack.length - 1];
+    const parent = frame.obj;
 
-    // List item
-    if (content.startsWith('- ')) {
-      // The parent key's value should be an array; find the last key set on parent
-      // by looking at the value at the last inserted key.
+    // List item — promote the owning key's placeholder mapping into an array
+    // and append.  Items resolve against the frame opened by their owning key.
+    if (isListItem) {
       const val = content.slice(2).trim();
       const strippedVal = stripInlineComment(stripQuotes(val));
-      // Find the array attached to the current context.  By convention we
-      // store the "current list" on the stack under a sentinel key `__list__`.
-      const listHolder = stack[stack.length - 1] as unknown as { __list__?: string[] };
-      if (!listHolder.__list__) {
-        // Shouldn't happen with well-formed policy.yaml but be safe.
+      const owner = frame.owner;
+      const ownerKey = frame.ownerKey;
+      if (owner === undefined || ownerKey === undefined) {
+        // A `- item` with no preceding key to own it — malformed; skip safely.
         continue;
       }
-      listHolder.__list__.push(strippedVal);
+      if (!Array.isArray(owner[ownerKey])) {
+        owner[ownerKey] = [];
+      }
+      (owner[ownerKey] as string[]).push(strippedVal);
       continue;
     }
 
@@ -203,12 +225,13 @@ function parseSimpleYaml(text: string): Record<string, unknown> {
     }
 
     if (rest === '' || rest.startsWith('#')) {
-      // This key starts a sub-object (or will be followed by list items).
+      // This key starts a sub-object OR will be followed by block-sequence
+      // items.  Seed it with an empty mapping and push a frame whose `obj` is
+      // that child (so nested mapping keys land inside it) while remembering
+      // `owner`/`ownerKey` so a following `- item` promotes it to an array.
       const child: Record<string, unknown> = {};
       parent[key] = child;
-      stack.push({ indent, obj: child });
-      // We'll also attach __list__ as a sentintel when the child turns out
-      // to be a list rather than a mapping.
+      stack.push({ indent, obj: child, owner: parent, ownerKey: key });
       continue;
     }
 

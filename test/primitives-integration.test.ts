@@ -32,6 +32,15 @@ import type { EnvConfig } from '../src/lib/environments.js';
 
 const ENV = STUB_ENV as EnvConfig;
 
+// Post-ChassisEnvelope migration: the tools now return
+// buildChassisEnvelope({..., payload: data}), so the tool-specific result
+// rows live at out.data.payload.* (chassis-envelope.ts nests them under
+// `payload`; status/human_summary are mirrored at the chassis top level too).
+// These tests assert on the tool result rows, so read through `payload`.
+function payloadOf<T>(out: { data?: unknown }): T {
+  return (out.data as { payload: T }).payload;
+}
+
 // Stash the original env vars so concurrent test files don't poison
 // each other. Restored after each test.
 function snapshotEnv(): { url?: string; type?: string; auth?: string } {
@@ -95,11 +104,11 @@ test('metrics_that_moved: co-moving candidate ends up in moved[], flat candidate
       ENV,
     );
     if (typeof out === 'string') throw new Error('expected structured envelope');
-    const data = out.data as {
+    const data = payloadOf<{
       moved: Array<{ candidate: string; phase_gap: number; direction: string }>;
       not_moved: Array<{ candidate: string; phase_gap: number }>;
       evaluation_failed: string[];
-    };
+    }>(out);
     assert.equal(data.moved.length, 1, `expected 1 moved candidate, got ${JSON.stringify(data.moved)}`);
     assert.equal(data.moved[0].candidate, 'candidate_co');
     assert.equal(data.moved[0].direction, 'co');
@@ -156,7 +165,7 @@ test('metrics_that_moved: anti-correlated candidate is "moved" with direction=an
       ENV,
     );
     if (typeof out === 'string') throw new Error('expected envelope');
-    const data = out.data as { moved: Array<{ direction: string }> };
+    const data = payloadOf<{ moved: Array<{ direction: string }> }>(out);
     assert.equal(data.moved.length, 1);
     assert.equal(data.moved[0].direction, 'anti');
   });
@@ -198,7 +207,7 @@ test('metrics_that_moved: 503 on candidate fetch → candidate lands in evaluati
       ENV,
     );
     if (typeof out === 'string') throw new Error('expected envelope');
-    const data = out.data as { evaluation_failed: string[]; moved: unknown[]; not_moved: unknown[] };
+    const data = payloadOf<{ evaluation_failed: string[]; moved: unknown[]; not_moved: unknown[] }>(out);
     assert.ok(
       data.evaluation_failed.length >= 1,
       `expected ≥1 failed candidate from injected 503s, got ${JSON.stringify(data)}`,
@@ -229,9 +238,9 @@ test('rank_by_shape_similarity: identical-shape candidate ranks first', async ()
       ENV,
     );
     if (typeof out === 'string') throw new Error('expected envelope');
-    const data = out.data as {
+    const data = payloadOf<{
       ranked: Array<{ candidate: string; pearson_magnitude: number; lag_seconds: number; lag_at_bound: boolean }>;
-    };
+    }>(out);
     assert.ok(data.ranked.length >= 1);
     assert.equal(data.ranked[0].candidate, 'cand_match');
     assert.ok(data.ranked[0].pearson_magnitude > 0.95);
@@ -263,7 +272,7 @@ test('rank_by_shape_similarity: lag_search_max_abs narrows the lag scan', async 
       ENV,
     );
     if (typeof out === 'string') throw new Error('expected envelope');
-    const data = out.data as { ranked: Array<{ lag_seconds: number; lag_at_bound: boolean }> };
+    const data = payloadOf<{ ranked: Array<{ lag_seconds: number; lag_at_bound: boolean }> }>(out);
     assert.ok(Math.abs(data.ranked[0].lag_seconds) <= 30, `lag should be within ±30, got ${data.ranked[0].lag_seconds}`);
     // Peak at -30 = the boundary of the narrowed search → lag_at_bound true.
     assert.equal(data.ranked[0].lag_at_bound, true);
@@ -308,8 +317,8 @@ test('rank_by_shape_similarity: anchor_phase_aligned_floor controls the flag', a
       ENV,
     );
     if (typeof strict === 'string' || typeof loose === 'string') throw new Error('expected envelopes');
-    const strictData = strict.data as { ranked: Array<{ anchor_phase_aligned: boolean; anchor_phase_gap: number }> };
-    const looseData = loose.data as { ranked: Array<{ anchor_phase_aligned: boolean; anchor_phase_gap: number }> };
+    const strictData = payloadOf<{ ranked: Array<{ anchor_phase_aligned: boolean; anchor_phase_gap: number }> }>(strict);
+    const looseData = payloadOf<{ ranked: Array<{ anchor_phase_aligned: boolean; anchor_phase_gap: number }> }>(loose);
     assert.equal(strictData.ranked[0].anchor_phase_aligned, false, `gap was ${strictData.ranked[0].anchor_phase_gap}`);
     assert.equal(looseData.ranked[0].anchor_phase_aligned, true);
   });
@@ -337,11 +346,11 @@ test('metric_overlay: returns aligned anchor+candidate timeseries + peak facts',
       ENV,
     );
     if (typeof out === 'string') throw new Error('expected envelope');
-    const data = out.data as {
+    const data = payloadOf<{
       n_buckets_aligned: number;
       facts: { peak_offset_seconds: number | null };
       series: Array<{ ts: number; anchor_value: number | null; candidate_value: number | null }>;
-    };
+    }>(out);
     assert.ok(data.n_buckets_aligned >= 18, `expected ~20 buckets aligned, got ${data.n_buckets_aligned}`);
     assert.equal(data.facts.peak_offset_seconds, 0, 'identical shapes peak at the same ts');
     assert.ok(data.series.length >= 20);
@@ -377,10 +386,10 @@ test('metric_overlay: sparse anchor + dense candidate → right-aligns on traili
       ENV,
     );
     if (typeof out === 'string') throw new Error('expected envelope');
-    const data = out.data as {
+    const data = payloadOf<{
       n_buckets_aligned: number;
       facts: { peak_offset_seconds: number | null };
-    };
+    }>(out);
     // Aligned on the trailing 10 buckets (size of sparse anchor).
     assert.ok(data.n_buckets_aligned >= 8 && data.n_buckets_aligned <= 10);
     // Both peaks land on the same right-aligned bucket.
@@ -430,7 +439,7 @@ test('GA: metrics_that_moved emits unified envelope with status, threshold_basis
       ENV,
     );
     if (typeof out === 'string') throw new Error('expected envelope');
-    const d = out.data as {
+    const d = payloadOf<{
       status: string;
       threshold_used: number;
       threshold_basis: string;
@@ -441,7 +450,7 @@ test('GA: metrics_that_moved emits unified envelope with status, threshold_basis
       backend_pressure_hint: string | null;
       human_summary: string;
       moved: Array<{ metric_ref: string }>;
-    };
+    }>(out);
     assert.equal(d.status, 'success');
     assert.equal(d.threshold_used, 0.15);
     assert.equal(d.threshold_basis, 'unvalidated_default');
@@ -474,21 +483,30 @@ test('GA: anchor without phase separation → status=anchor_no_phase_separation,
       ENV,
     );
     if (typeof out === 'string') throw new Error('expected envelope');
-    const d = out.data as {
+    const d = payloadOf<{
       status: string;
       anchor_dispersion: number;
       moved: unknown[];
       not_moved: unknown[];
       evaluation_failed: unknown[];
       human_summary: string;
-    };
+    }>(out);
     assert.equal(d.status, 'anchor_no_phase_separation');
     assert.equal(d.anchor_dispersion, 0);
     assert.equal(d.moved.length, 0);
     assert.equal(d.not_moved.length, 0);
     assert.equal(d.evaluation_failed.length, 0);
-    assert.match(d.human_summary, /below.*floor|no.*phase|re-anchor/i);
-    assert.match(out.summary.headline, /lacks phase separation/i);
+    // Per Notes 9-12 the refusal prose was rewritten to plain English;
+    // the internal 'floor'/'phase'/'re-anchor' jargon was intentionally
+    // dropped. Assert on the current source copy (metrics-that-moved.ts
+    // baseProse): 'too steady over this window ... Try a different
+    // starting pattern or widen the window.'
+    assert.match(d.human_summary, /too steady over this window/i);
+    assert.match(d.human_summary, /different starting pattern|widen the window/i);
+    // Headline was also rewritten to plain English (source line 493):
+    // 'The pattern we looked at is too steady to compare against other
+    // metrics. Try a different starting pattern.'
+    assert.match(out.summary.headline, /too steady to compare/i);
   });
 });
 
@@ -510,11 +528,16 @@ test('GA: every candidate below threshold → status=no_signal', async () => {
       ENV,
     );
     if (typeof out === 'string') throw new Error('expected envelope');
-    const d = out.data as { status: string; moved: unknown[]; not_moved: unknown[]; human_summary: string };
+    const d = payloadOf<{ status: string; moved: unknown[]; not_moved: unknown[]; human_summary: string }>(out);
     assert.equal(d.status, 'no_signal');
     assert.equal(d.moved.length, 0);
     assert.equal(d.not_moved.length, 1, 'flat candidate still gets evaluated, just below floor');
-    assert.match(d.human_summary, /no candidate.*moved|stop searching/i);
+    // Per Notes 9-12 the no_signal prose was rewritten to plain English
+    // (buildHumanSummary no_signal branch). Assert on the current source
+    // copy: 'No metrics moved with this pattern over the window. N stayed
+    // flat. Try a different starting pattern or widen the window.'
+    assert.match(d.human_summary, /No metrics moved with this pattern/i);
+    assert.match(d.human_summary, /stayed flat/i);
   });
 });
 
@@ -536,10 +559,10 @@ test('GA: backend 503 on anchor → status=error with PrimitiveError envelope, r
       ENV,
     );
     if (typeof out === 'string') throw new Error('expected envelope');
-    const d = out.data as {
+    const d = payloadOf<{
       status: string;
       error?: { error_type: string; retryable: boolean; suggested_backoff_ms: number | null; hint: string };
-    };
+    }>(out);
     assert.equal(d.status, 'error');
     assert.ok(d.error, 'error envelope must be populated');
     if (!d.error) return;
@@ -579,7 +602,7 @@ test('GA: metric_ref round-trips across the three tools', async () => {
       ENV,
     );
     if (typeof r1 === 'string') throw new Error('expected envelope');
-    const d1 = r1.data as { moved: Array<{ metric_ref: string }> };
+    const d1 = payloadOf<{ moved: Array<{ metric_ref: string }> }>(r1);
     assert.equal(d1.moved.length, 1);
     const ref1 = d1.moved[0].metric_ref;
     assert.equal(ref1, candCanonical, 'metric_ref must be canonical (whitespace collapsed)');
@@ -596,7 +619,7 @@ test('GA: metric_ref round-trips across the three tools', async () => {
       ENV,
     );
     if (typeof r2 === 'string') throw new Error('expected envelope');
-    const d2 = r2.data as { ranked: Array<{ metric_ref: string }> };
+    const d2 = payloadOf<{ ranked: Array<{ metric_ref: string }> }>(r2);
     assert.equal(d2.ranked.length, 1, 'rank_by_shape should fetch the canonical-ref candidate cleanly');
     const ref2 = d2.ranked[0].metric_ref;
     assert.equal(ref2, ref1, 'metric_ref must remain identical across tool calls');
@@ -613,7 +636,7 @@ test('GA: metric_ref round-trips across the three tools', async () => {
       ENV,
     );
     if (typeof r3 === 'string') throw new Error('expected envelope');
-    const d3 = r3.data as { candidate_ref: string };
+    const d3 = payloadOf<{ candidate_ref: string }>(r3);
     assert.equal(d3.candidate_ref, ref2, 'metric_ref preserved through full 3-tool chain');
   });
 });
@@ -636,11 +659,11 @@ test('GA: rank_by_shape includes anchor_ref echo and threshold_basis=caller_over
       ENV,
     );
     if (typeof out === 'string') throw new Error('expected envelope');
-    const d = out.data as {
+    const d = payloadOf<{
       threshold_basis: string;
       threshold_used: number;
       anchor_ref: { type: string; expression: string };
-    };
+    }>(out);
     assert.equal(d.threshold_basis, 'caller_override');
     assert.equal(d.threshold_used, 0.2);
     assert.equal(d.anchor_ref.expression, 'anchor');
@@ -663,7 +686,7 @@ test('GA: metric_overlay emits status=no_signal when anchor returns nothing', as
       ENV,
     );
     if (typeof out === 'string') throw new Error('expected envelope');
-    const d = out.data as { status: string; n_buckets_aligned: number };
+    const d = payloadOf<{ status: string; n_buckets_aligned: number }>(out);
     assert.equal(d.status, 'no_signal');
     assert.equal(d.n_buckets_aligned, 0);
   });
@@ -691,12 +714,12 @@ test('GA: metrics_that_moved emits threshold_audit with observed_phase_gap_distr
       ENV,
     );
     if (typeof out === 'string') throw new Error('expected envelope');
-    const d = out.data as {
+    const d = payloadOf<{
       threshold_audit: {
         phase_gap_floor: { value: number; basis: string };
         observed_phase_gap_distribution: { n: number; min: number; p50: number; max: number } | null;
       };
-    };
+    }>(out);
     assert.ok(d.threshold_audit, 'threshold_audit must be present on success');
     assert.equal(d.threshold_audit.phase_gap_floor.value, 0.15);
     assert.equal(d.threshold_audit.phase_gap_floor.basis, 'unvalidated_default');
@@ -727,10 +750,15 @@ test('GA: metrics_that_moved human_summary explicitly references the floor AND o
       ENV,
     );
     if (typeof out === 'string') throw new Error('expected envelope');
-    const d = out.data as { human_summary: string };
-    assert.match(d.human_summary, /phase-gap floor/i);
-    assert.match(d.human_summary, /observed median phase_gap/i);
-    assert.match(d.human_summary, /unvalidated default/i);
+    const d = payloadOf<{ human_summary: string }>(out);
+    // Per Notes 9-12, buildHumanSummary intentionally dropped the internal
+    // jargon ('phase-gap floor', 'observed median phase_gap', 'unvalidated
+    // default') from user-facing prose. The calibration caveat is now the
+    // plain-English 'Match threshold is a default (not yet tuned for your
+    // data).' Assert on the current copy (source is the source of truth).
+    assert.match(d.human_summary, /moved with this pattern/i);
+    assert.match(d.human_summary, /strongest match/i);
+    assert.match(d.human_summary, /Match threshold is a default \(not yet tuned for your data\)/i);
   });
 });
 
@@ -754,14 +782,14 @@ test('GA: rank_by_shape_similarity emits threshold_audit with observed_pearson_m
       ENV,
     );
     if (typeof out === 'string') throw new Error('expected envelope');
-    const d = out.data as {
+    const d = payloadOf<{
       threshold_audit: {
         anchor_phase_aligned_floor: { value: number; basis: string };
         lag_search_max_abs: { value: number; basis: string };
         observed_pearson_magnitude_distribution: { n: number; max: number } | null;
         n_lag_at_bound: number;
       };
-    };
+    }>(out);
     assert.ok(d.threshold_audit);
     assert.equal(d.threshold_audit.anchor_phase_aligned_floor.value, 0.15);
     assert.equal(d.threshold_audit.anchor_phase_aligned_floor.basis, 'unvalidated_default');
