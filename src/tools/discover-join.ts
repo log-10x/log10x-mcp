@@ -45,8 +45,9 @@ export const discoverJoinSchema = {
     .describe('Minimum Jaccard similarity to accept as a primary join. Default 0.7. Lower to 0.5 for exploratory discovery, 0.3 for noisy environments with historical stale values.'),
   candidate_labels: z
     .array(z.string())
+    .max(100)
     .optional()
-    .describe('Optional subset of customer-side labels to probe. When omitted, all labels from the customer backend are probed in preferred-first order.'),
+    .describe('Optional subset of customer-side labels to probe (max 100). An AI caller reasoning over results can\'t meaningfully digest more than a few dozen; the cap reflects that, not a backend constraint. When omitted, all labels from the customer backend are probed in preferred-first order.'),
   window: z
     .string()
     .optional()
