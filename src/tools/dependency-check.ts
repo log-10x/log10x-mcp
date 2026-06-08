@@ -198,11 +198,21 @@ export async function executeDependencyCheck(args: DependencyCheckArgs): Promise
   const headline = `${patternNotFoundWarning}\`${d.pattern}\`: ${d.dependencies.length} dependencies found in ${d.vendor ?? 'analyzer'} (recommendation: ${d.safe_to_drop_recommendation})`;
 
   // Build scan_scope for defect 34A: surface what was actually scanned.
+  // cycle-4 depcheck-surfaces: report the surfaces THIS vendor's scanner
+  // queries, not a fixed all-vendor union (e.g. CloudWatch has no
+  // saved_searches/monitors; Datadog has no metric_filters).
+  const VENDOR_SURFACES: Record<string, string[]> = {
+    cloudwatch: ['dashboards', 'alarms', 'metric_filters'],
+    datadog: ['dashboards', 'monitors'],
+    splunk: ['dashboards', 'alerts', 'saved_searches'],
+    elasticsearch: ['dashboards', 'alerts'],
+  };
+  const vendorSurfaces =
+    (d.vendor && VENDOR_SURFACES[d.vendor]) ||
+    ['dashboards', 'alerts', 'saved_searches', 'monitors', 'metric_filters'];
   const scan_scope = {
-    surfaces_scanned: d.scan_ran
-      ? (['dashboards', 'alerts', 'saved_searches', 'monitors', 'metric_filters'] as string[])
-      : ([] as string[]),
-    surfaces_skipped: d.scan_ran ? [] : (['dashboards', 'alerts', 'saved_searches', 'monitors', 'metric_filters'] as string[]),
+    surfaces_scanned: d.scan_ran ? vendorSurfaces : ([] as string[]),
+    surfaces_skipped: d.scan_ran ? [] : vendorSurfaces,
     execution_mode: d.execution_mode,
     scan_ran: d.scan_ran,
     vendor: d.vendor,
