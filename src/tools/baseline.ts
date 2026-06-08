@@ -323,11 +323,6 @@ export async function executeBaseline(
     source_disclosure: {
       bytes_source: 'tsdb',
       rate_source: rateSourceMapped,
-      // State the resolved $/GB explicitly (parity with services.cost_per_gb)
-      // so customer_supplied rates aren't only inferable from the dollar math.
-      ...('effective_per_gb' in result && result.effective_per_gb != null
-        ? { effective_per_gb: result.effective_per_gb }
-        : {}),
       ...envDisclosure,
     },
     scope: {

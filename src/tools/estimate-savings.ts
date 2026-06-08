@@ -969,6 +969,17 @@ export async function runEstimateForecast(
   }
 
   // Project each row.
+  // Resolve the $/GB ONCE via the shared chain (caller arg → envs.json
+  // analyzerCost → LOG10X_ANALYZER_COST → destination list) and use it for BOTH
+  // the per-pattern dollar math (below) and the rate_source / rate_disclosure
+  // label (further down). Resolving in two places previously let the label and
+  // the math disagree.
+  const forecastRateResolved = resolveRate(
+    { effective_ingest_per_gb: args.effective_ingest_per_gb },
+    env,
+    args.destination,
+  );
+
   const per_pattern: ForecastRow[] = [];
   let totalIn = 0;
   let totalSavedBytes = 0;
@@ -991,14 +1002,17 @@ export async function runEstimateForecast(
     // PASS leg dollars (it should, since both legs are at the same
     // retention) — savings is still (pass - action).
     //
-    // When effective_ingest_per_gb is supplied, thread it through as a
-    // customer_rate override so dollar projections use the contracted rate
-    // rather than the destination list price. Both pass and action legs
-    // receive the same override so savings = (pass_cost - action_cost) at
-    // the customer rate.
-    const customerRate = args.effective_ingest_per_gb
-      ? { ingest_per_gb_override: args.effective_ingest_per_gb }
-      : undefined;
+    // Use the SHARED resolved rate (caller arg → envs.json analyzerCost →
+    // LOG10X_ANALYZER_COST → destination list), NOT just args.effective_ingest_per_gb.
+    // The rate_source / rate_disclosure LABEL already resolves this way, so if the
+    // dollar math used only the caller arg, a rate supplied via env var / env
+    // config flipped the label to customer_supplied ($1.53/GB) while the per-pattern
+    // dollars stayed at list ($0.53/GB) — a 2.9x understatement that contradicted
+    // the tool's own disclosure. Both pass and action legs get the same override.
+    const customerRate =
+      forecastRateResolved.source === 'customer_supplied'
+        ? { ingest_per_gb_override: forecastRateResolved.rate_per_gb as number }
+        : undefined;
     const passRange = projectActionRange({
       action: 'pass',
       bytes_in: monthlyBytes,
@@ -1163,11 +1177,6 @@ export async function runEstimateForecast(
   // — rung 4 always returns the destination's list price as a safety net.
   // The rung-2/3 env-supplied rate (envs.json analyzerCost or
   // LOG10X_ANALYZER_COST) still wins when present.
-  const forecastRateResolved = resolveRate(
-    { effective_ingest_per_gb: args.effective_ingest_per_gb },
-    env,
-    args.destination,
-  );
   const forecast_rate_source: 'list_price' | 'customer_supplied' =
     forecastRateResolved.source === 'customer_supplied' ? 'customer_supplied' : 'list_price';
   // Bug from math-lens workflow wych5vwsh: the resolved disclosure only
