@@ -99,7 +99,11 @@ export type ProductQaInput = z.infer<typeof productQaInputSchema>;
  */
 export interface ProductQaPayload {
   found: boolean;
-  results: SearchResult[];
+  // Present in full mode (depth='full') and on no-match (empty). Omitted in
+  // the short default, which carries `answer` + `citations` instead.
+  results?: SearchResult[];
+  answer?: string;
+  citations?: ProductQaCitation[];
   similar_topics?: string[];
   resolved_mode: 'topic' | 'query' | 'none';
   corpus_source: string;

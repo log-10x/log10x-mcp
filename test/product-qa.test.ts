@@ -140,14 +140,17 @@ describe('log10x_product_qa', () => {
     const env = executeProductQa({ topic: 'faq/apps/receiver' });
     const p = payload(env);
     assert.equal(p.found, true, 'should be a hit');
-    assert.equal(p.results.length, 1);
-    assert.equal(p.results[0]!.topic, 'faq/apps/receiver');
+    assert.equal(p.citations!.length, 1);
+    assert.equal(p.citations![0]!.topic, 'faq/apps/receiver');
     assert.equal(p.resolved_mode, 'topic');
     assert.ok(
-      p.results[0]!.canonical_url.startsWith('https://docs.log10x.com/'),
+      p.citations![0]!.canonical_url.startsWith('https://docs.log10x.com/'),
       'canonical_url present',
     );
-    assert.ok(p.results[0]!.matched_chunks.length > 0, 'has chunks');
+    assert.ok((p.answer ?? '').length > 0, 'short answer present');
+    // depth:'full' opts into the section bodies for that one page.
+    const full = payload(executeProductQa({ topic: 'faq/apps/receiver', depth: 'full' }));
+    assert.ok(full.results![0]!.matched_chunks.length > 0, 'full mode has chunks');
   });
 
   it('semantic query hits the right page via keyword match', () => {
@@ -155,18 +158,17 @@ describe('log10x_product_qa', () => {
     const env = executeProductQa({ query: 'what data leaves my network' });
     const p = payload(env);
     assert.equal(p.found, true);
-    assert.ok(p.results.length >= 1, 'at least one result');
+    assert.ok(p.citations!.length >= 1, 'at least one citation');
     assert.equal(
-      p.results[0]!.topic,
+      p.citations![0]!.topic,
       'faq/security/data-protection',
       'top hit should be data-protection page',
     );
-    // The matched chunk should be the one talking about "what data leaves".
-    const topChunk = p.results[0]!.matched_chunks[0]!;
+    // The short answer should carry the relevant text.
     assert.ok(
-      topChunk.text.toLowerCase().includes('leave') ||
-        topChunk.text.toLowerCase().includes('data'),
-      'matched chunk should contain relevant text',
+      (p.answer ?? '').toLowerCase().includes('leave') ||
+        (p.answer ?? '').toLowerCase().includes('data'),
+      'short answer should contain relevant text',
     );
   });
 
@@ -174,7 +176,7 @@ describe('log10x_product_qa', () => {
     const env = executeProductQa({ query: 'xylophone unicorn quantum supremacy' });
     const p = payload(env);
     assert.equal(p.found, false, 'no match expected');
-    assert.equal(p.results.length, 0);
+    assert.equal(p.results!.length, 0);
     assert.ok(Array.isArray(p.similar_topics), 'similar_topics is array');
   });
 
@@ -190,7 +192,7 @@ describe('log10x_product_qa', () => {
     const envOpen = executeProductQa({ query: 'receiver' });
     const pOpen = payload(envOpen);
     assert.equal(pOpen.found, true, 'unscoped query should still hit');
-    assert.equal(pOpen.results[0]!.topic, 'faq/apps/receiver');
+    assert.equal(pOpen.citations![0]!.topic, 'faq/apps/receiver');
   });
 
   it('mcp_qa:false excludes a page that would otherwise be included', () => {
