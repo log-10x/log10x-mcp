@@ -1,16 +1,22 @@
 /**
- * Item 5 acceptance test — cap-CSV parser handles container rows AND
- * pat:<hash> rows, AND the action-split arithmetic reconciles (parts ≤
- * whole) under synthetic data.
+ * cap-CSV parser acceptance test.
  *
- * Three scenarios:
- *   1. Mixed CSV (container default + pat:<hash> overrides) — both row
- *      kinds parse, by_pattern/by_container lookups populate correctly,
- *      buildPatternActionLookup follows pat:<hash> → container fallback.
+ * The cap CSV is the engine-only safety-floor file (`container,cap` with
+ * `<bytes>::<reason>` values). Per the e057eb1 refactor the per-row action
+ * attribution was REMOVED from this file and moved to
+ * `data/action-intent.json` (action-intent-parser.ts). Rows that still carry
+ * a legacy `:<action>` suffix are parsed tolerantly: the suffix is stripped
+ * off the reason and preserved in `legacy_action_suffix` for diagnostics
+ * only — it is NOT used for action routing.
+ *
+ * Scenarios:
+ *   1. Mixed CSV (container default + pat:<hash> overrides) — both row kinds
+ *      parse; legacy suffixes land in `legacy_action_suffix`; by_pattern /
+ *      by_container lookups populate; buildPatternActionLookup follows the
+ *      pat:<hash> → container fallback over the legacy suffix.
  *   2. Malformed rows — surfaced via `malformed_lines`, no throws.
- *   3. Synthetic action-split — drop+compact+offload+pass + an
- *      unattributed hash; total bytes attributed ≤ sum of all bytes;
- *      offload clamp engages when FP drift pushes parts > whole.
+ *   3. Bytes-only / no legacy suffix rows — parse cleanly with no suffix.
+ *   4. Action-bucket helpers — empty start + attributed-total arithmetic.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -21,7 +27,7 @@ import {
   totalAttributedBytes,
 } from '../src/lib/cap-csv-parser.js';
 
-test('parseCapCsv: container and pat:<hash> rows', () => {
+test('parseCapCsv: container and pat:<hash> rows (legacy suffix preserved)', () => {
   const csv = `container,cap
 payment-service,2048::MCP configure_engine (hard; default=compact):compact
 pat:abc123,4096::keep audit floor:pass
@@ -35,18 +41,18 @@ pat:ghi789,512::high-volume noise:drop
 
   const container = parsed.by_container.get('payment-service');
   assert.ok(container);
-  assert.equal(container.action, 'compact');
+  assert.equal(container.legacy_action_suffix, 'compact');
   assert.equal(container.bytes_cap, 2048);
   assert.equal(container.isContainerDefault, true);
 
   const pat = parsed.by_pattern.get('abc123');
   assert.ok(pat);
-  assert.equal(pat.action, 'pass');
+  assert.equal(pat.legacy_action_suffix, 'pass');
   assert.equal(pat.bytes_cap, 4096);
   assert.equal(pat.isContainerDefault, false);
 
-  assert.equal(parsed.by_pattern.get('def456')?.action, 'tier_down');
-  assert.equal(parsed.by_pattern.get('ghi789')?.action, 'drop');
+  assert.equal(parsed.by_pattern.get('def456')?.legacy_action_suffix, 'tier_down');
+  assert.equal(parsed.by_pattern.get('ghi789')?.legacy_action_suffix, 'drop');
   assert.equal(parsed.malformed_lines.length, 0);
 });
 
@@ -65,27 +71,27 @@ weirdshape
   assert.ok(parsed.malformed_lines.length >= 3);
 });
 
-test('parseCapCsv: missing action suffix defaults to drop with flag', () => {
+test('parseCapCsv: no legacy suffix parses cleanly with reason intact', () => {
   const csv = `container,cap
-legacy-container,1024::pre-action-suffix-reason
+new-container,1024::engine-only-safety-floor
 `;
   const parsed = parseCapCsv(csv);
   assert.equal(parsed.rows.length, 1);
   const row = parsed.rows[0];
-  assert.equal(row.action, 'drop');
-  assert.equal(row.action_suffix_missing, true);
-  assert.equal(row.reason, 'pre-action-suffix-reason');
+  assert.equal(row.legacy_action_suffix, undefined);
+  assert.equal(row.reason, 'engine-only-safety-floor');
+  assert.equal(row.bytes_cap, 1024);
 });
 
-test('parseCapCsv: missing :: separator (just bytes) parses as drop', () => {
+test('parseCapCsv: missing :: separator (just bytes) parses with empty reason', () => {
   const csv = `container,cap
 bare-cap,4096
 `;
   const parsed = parseCapCsv(csv);
   assert.equal(parsed.rows.length, 1);
   const row = parsed.rows[0];
-  assert.equal(row.action, 'drop');
-  assert.equal(row.action_suffix_missing, true);
+  assert.equal(row.legacy_action_suffix, undefined);
+  assert.equal(row.reason, '');
   assert.equal(row.bytes_cap, 4096);
 });
 
@@ -104,7 +110,7 @@ test('parseCapCsv: empty input returns empty result', () => {
   });
 });
 
-test('buildPatternActionLookup: pat:<hash> overrides container fallback', () => {
+test('buildPatternActionLookup: pat:<hash> legacy suffix overrides container fallback', () => {
   const csv = `container,cap
 payment-service,2048::default:compact
 checkout-service,1024::default:offload
@@ -150,7 +156,7 @@ test('action buckets: parts-≤-whole reconciles in synthetic split', () => {
   const postDroppedBytes = 200;
   assert.ok(
     attributedPlusUnattributed <= postDroppedBytes,
-    `parts (${attributedPlusUnattributed}) must be <= whole (${postDroppedBytes})`
+    `parts (${attributedPlusUnattributed}) must be <= whole (${postDroppedBytes})`,
   );
   // Sum of buckets exactly equals dropped: complete attribution.
   assert.equal(attributedPlusUnattributed, postDroppedBytes);
@@ -158,9 +164,6 @@ test('action buckets: parts-≤-whole reconciles in synthetic split', () => {
 
 test('action buckets: offload clamp keeps parts-≤-whole when FP drift overshoots', () => {
   // Build buckets totaling 201 against a whole of 200 (1-byte FP drift).
-  // The runEstimateVerify computeActionSplit path trims offload to the
-  // residual; here we replicate that clamp manually to assert the
-  // post-clamp invariant.
   const buckets = emptyActionBuckets();
   buckets.drop = 100;
   buckets.compact = 51; // FP drift
