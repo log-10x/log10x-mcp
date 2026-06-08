@@ -88,6 +88,9 @@ export interface RetrieverQueryRequest {
   //    stream. These are accepted but ignored by the new client.
   /** @deprecated use `search` instead */
   pattern?: string;
+  /** Per-query CloudWatch log-level escalation. Maps to the engine's `logLevels`
+   *  REST body field; set to escalate one query to DEBUG for 0-result triage. */
+  logLevels?: string;
   /** @deprecated format is now a client-side rollup */
   format?: 'events' | 'count' | 'aggregated';
   /** @deprecated bucket_size is now a client-side rollup */
@@ -1179,6 +1182,7 @@ export async function runRetrieverQuery(
     to: normalizeTimeExpression(req.to || 'now'),
     search: req.search || '',
     filters: req.filters || [],
+    ...(req.logLevels ? { logLevels: req.logLevels } : {}),
     writeResults,
     writeSummaries,
   };
