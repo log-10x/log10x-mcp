@@ -53,6 +53,8 @@ function makeRow(overrides: Partial<PerPatternRow>): PerPatternRow {
     current_bytes_30d: 1_000_000,
     cap_bytes_per_window: 1024,
     action: 'compact',
+    saved_bytes_monthly: 0,
+    saved_dollars_monthly: 0,
     projected_monthly_usd_low: 0,
     projected_monthly_usd_expected: 0,
     projected_monthly_usd_high: 0,
