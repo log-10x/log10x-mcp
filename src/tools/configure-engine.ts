@@ -810,6 +810,15 @@ export async function executeConfigureEngine(
     resolvedIngest.source === 'customer_supplied'
       ? (resolvedIngest.rate_per_gb as number)
       : model.ingest_per_gb;
+  // Thread the SAME resolved rate into projectActionRange so per-pattern dollar
+  // projections match current_monthly_usd (which uses ingestPerGb). Without it,
+  // projections fall back to destination LIST price while current uses the
+  // customer rate, so dollars% and bytes% diverge (a 56-point gap on the demo).
+  // estimate_savings already does this; configure_engine did not.
+  const customerRate =
+    resolvedIngest.source === 'customer_supplied'
+      ? { ingest_per_gb_override: resolvedIngest.rate_per_gb as number }
+      : undefined;
 
   // ── Refresh-mode tolerance check ──
   // If the observed volume hasn't drifted enough vs the prior baseline to
@@ -1051,6 +1060,7 @@ export async function executeConfigureEngine(
       destination,
       retention_months: 1,
       esPruned: args.es_pruned,
+      customer_rate: customerRate,
     });
 
     // Track shed bytes.
@@ -1082,6 +1092,7 @@ export async function executeConfigureEngine(
             destination,
             retention_months: 1,
             esPruned: args.es_pruned,
+            customer_rate: customerRate,
           }).expected.total_dollars ?? 0);
 
     rows.push({
