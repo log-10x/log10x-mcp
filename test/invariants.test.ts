@@ -809,15 +809,35 @@ function syntheticSkew(): ExtractedPatterns {
 // SECTION 1 — PASTE-MODE cases (no env, no backend).
 // ════════════════════════════════════════════════════════════════════════
 
+// paste-mode resolve_batch / extract_templates submit to the LIVE Paste Lambda.
+// A transient 5xx / network error from that external service is not an envelope
+// invariant violation — skip rather than red the hermetic sweep on infra flake.
+function isExternalUnavailable(e: unknown): boolean {
+  const m = e instanceof Error ? e.message : String(e);
+  return /HTTP 5\d\d|Service Unavailable|ECONNRESET|ETIMEDOUT|ENOTFOUND|fetch failed|network/i.test(m);
+}
+
 test('invariants §1 resolve_batch (success, paste-mode)', async (t) => {
   const events = ['GET /api/users 200', 'GET /api/users 200', 'POST /api/orders 201', 'POST /api/orders 201', 'GET /api/users 200'];
-  const out = await executeResolveBatch({ source: 'events', events, top_n_patterns: 10, include_next_actions: true, privacy_mode: false });
+  let out;
+  try {
+    out = await executeResolveBatch({ source: 'events', events, top_n_patterns: 10, include_next_actions: true, privacy_mode: false });
+  } catch (e) {
+    if (isExternalUnavailable(e)) return void t.skip(`Paste Lambda unavailable: ${(e as Error).message}`);
+    throw e;
+  }
   runInvariants({ tool: 'log10x_resolve_batch', out: asEnvelope(out, 'resolve_batch') }, (m) => t.diagnostic(m));
 });
 
 test('invariants §1 extract_templates (success or not_configured, paste-mode)', async (t) => {
   const events = ['user 1 logged in from IP', 'user 2 logged in from IP', 'user 3 logged in from IP'];
-  const out = await executeExtractTemplates({ source: 'events', events, top_n: 10 });
+  let out;
+  try {
+    out = await executeExtractTemplates({ source: 'events', events, top_n: 10 });
+  } catch (e) {
+    if (isExternalUnavailable(e)) return void t.skip(`Paste Lambda unavailable: ${(e as Error).message}`);
+    throw e;
+  }
   // not_configured (no local tenx) is a conformant terminal chassis envelope.
   runInvariants({ tool: 'log10x_extract_templates', out: asEnvelope(out, 'extract_templates') }, (m) => t.diagnostic(m));
 });
