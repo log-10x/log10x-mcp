@@ -39,7 +39,7 @@ import {
   searchIndex,
   type SearchResult,
 } from '../lib/product-kb/index.js';
-import type { StructuredOutput } from '../lib/output-types.js';
+import type { Action, StructuredOutput } from '../lib/output-types.js';
 
 // ── Schema ───────────────────────────────────────────────────────────────────
 
@@ -78,6 +78,15 @@ export const productQaSchema = {
     .max(20)
     .optional()
     .describe('Cap on the number of results returned. Default 3.'),
+  depth: z
+    .enum(['short', 'full'])
+    .optional()
+    .describe(
+      'Response detail. "short" (default) returns a tight grounded answer plus citation metadata ' +
+      '(topic + canonical_url, no section bodies) and offers a chained learn_more action per citation. ' +
+      '"full" returns the matched section bodies for one specific page and is requested via the ' +
+      'learn_more action the short response hands back (pass that action verbatim: `topic` + `depth: "full"`).',
+    ),
 };
 
 const productQaInputSchema = z.object(productQaSchema);
@@ -96,6 +105,126 @@ export interface ProductQaPayload {
   corpus_source: string;
 }
 
+/**
+ * A compact doc citation: metadata only, no section body. Roughly 120
+ * bytes each, so several stay well under the short-response budget.
+ */
+export interface ProductQaCitation {
+  topic: string;
+  category: string;
+  canonical_url: string;
+  heading: string;
+}
+
+/**
+ * Short-mode payload (depth='short', the default). Carries one grounded
+ * answer plus citation metadata and ZERO section bodies, which is the
+ * size fix: section text is emitted only on depth='full'.
+ */
+export interface ProductQaShortPayload {
+  found: boolean;
+  answer: string;
+  citations: ProductQaCitation[];
+  resolved_mode: 'topic' | 'query';
+  corpus_source: string;
+}
+
+// Max chars of the top section surfaced as the short grounded answer.
+const SHORT_ANSWER_BUDGET = 600;
+
+/**
+ * Build a tight, grounded answer from a result's best section. The text
+ * is verbatim-derived from a section the tool retrieved (nothing is
+ * fabricated): markdown noise is flattened to single spaces and the body
+ * is cut at a sentence boundary within SHORT_ANSWER_BUDGET chars. Falls
+ * back to the page summary when the result carries no section text.
+ */
+function shortAnswer(result: SearchResult): string {
+  const top = result.matched_chunks[0];
+  const flat = (top?.text ?? result.summary ?? '')
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (flat.length <= SHORT_ANSWER_BUDGET) return flat;
+  const window = flat.slice(0, SHORT_ANSWER_BUDGET);
+  const cut = Math.max(
+    window.lastIndexOf('. '),
+    window.lastIndexOf('! '),
+    window.lastIndexOf('? '),
+  );
+  return cut > 0 ? window.slice(0, cut + 1) : window.trimEnd();
+}
+
+/** Reduce a result to citation metadata only (no section body). */
+function toCitation(result: SearchResult): ProductQaCitation {
+  return {
+    topic: result.topic,
+    category: result.category,
+    canonical_url: result.canonical_url,
+    heading: result.matched_chunks[0]?.heading ?? '',
+  };
+}
+
+/**
+ * The chained learn_more action. Carries the exact slug the tool just
+ * returned plus depth='full', so the agent re-fires it with no blanks
+ * and lands on exactly one page's full sections.
+ */
+function learnMoreAction(result: SearchResult): Action {
+  return {
+    tool: 'log10x_product_qa',
+    args: { topic: result.topic, depth: 'full' },
+    reason: `Read the full matched sections of "${result.topic}" (cite ${result.canonical_url}).`,
+    role: 'recommended-next',
+  };
+}
+
+/**
+ * Assemble the short-default envelope shared by the topic-exact and query
+ * branches: a grounded answer + citation metadata + one learn_more action
+ * per citation. Emits no section bodies.
+ */
+function buildShortEnvelope(opts: {
+  results: SearchResult[];
+  mode: 'topic' | 'query';
+  corpusSource: string;
+  candidatesCount: number;
+  telemetry: ReturnType<typeof newChassisTelemetry>;
+}): StructuredOutput {
+  const { results, mode, corpusSource, candidatesCount, telemetry } = opts;
+  const top = results[0]!;
+  const citations = results.map(toCitation);
+  const topHeading = citations[0]!.heading;
+  return buildChassisEnvelope({
+    tool: 'log10x_product_qa',
+    view: 'summary',
+    headline: topHeading ? `${top.topic}: ${topHeading}` : `${top.topic}`,
+    status: 'success',
+    decisions: { threshold_used: null, threshold_basis: 'default' },
+    source_disclosure: {},
+    scope: {
+      window: 'point_in_time',
+      window_basis: 'auto_default',
+      candidates_count: candidatesCount,
+      candidates_evaluated: results.length,
+    },
+    payload: {
+      found: true,
+      answer: shortAnswer(top),
+      citations,
+      resolved_mode: mode,
+      corpus_source: corpusSource,
+    } satisfies ProductQaShortPayload,
+    human_summary:
+      'Answer the user from `answer` and cite the citation canonical_urls. ' +
+      'For the full section bodies of one page, follow the matching learn_more action in actions[] ' +
+      '(it carries the exact `topic` and `depth: "full"`).',
+    actions: citations.map((_c, i) => learnMoreAction(results[i]!)),
+    telemetry,
+  });
+}
+
 // ── Handler ──────────────────────────────────────────────────────────────────
 
 /**
@@ -109,6 +238,7 @@ export function executeProductQa(rawArgs: unknown): StructuredOutput {
   const telemetry = newChassisTelemetry();
   const args = productQaInputSchema.parse(rawArgs ?? {});
   const maxResults = args.max_results ?? 3;
+  const depth = args.depth ?? 'short';
 
   // At least one of topic / query must be present.
   if (!args.topic && !args.query) {
@@ -169,6 +299,17 @@ export function executeProductQa(rawArgs: unknown): StructuredOutput {
           telemetry,
         });
       }
+      // Short (default): grounded answer + one citation + a learn_more chain.
+      if (depth !== 'full') {
+        return buildShortEnvelope({
+          results: [hit],
+          mode: 'topic',
+          corpusSource: kb.source,
+          candidatesCount: kb.pages.length,
+          telemetry,
+        });
+      }
+      // Full: the long-form section bodies for this one page (opt-in).
       return buildChassisEnvelope({
         tool: 'log10x_product_qa',
         view: 'summary',
@@ -188,7 +329,7 @@ export function executeProductQa(rawArgs: unknown): StructuredOutput {
           resolved_mode: 'topic' as const,
           corpus_source: kb.source,
         } satisfies ProductQaPayload,
-        human_summary: `Exact-slug hit on "${hit.topic}". Cite ${hit.canonical_url} when surfacing this to the user.`,
+        human_summary: `Full sections of "${hit.topic}". Quote matched_chunks and cite ${hit.canonical_url}.`,
         telemetry,
       });
     }
@@ -258,6 +399,21 @@ export function executeProductQa(rawArgs: unknown): StructuredOutput {
     });
   }
 
+  // Short (default): one grounded answer + citation metadata for the top
+  // pages, each with a concrete learn_more chain. No section bodies.
+  if (depth !== 'full') {
+    return buildShortEnvelope({
+      results,
+      mode: 'query',
+      corpusSource: kb.source,
+      candidatesCount: kb.pages.length,
+      telemetry,
+    });
+  }
+
+  // Full: the long-form section bodies (opt-in). The emitted learn_more
+  // actions only ever carry a single topic, so the chained path stays
+  // one page at a time.
   return buildChassisEnvelope({
     tool: 'log10x_product_qa',
     view: 'summary',
