@@ -15,7 +15,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc && mkdir -p build/vendor/promql-parser && cp -r vendor/promql-parser/promql.js vendor/promql-parser/package.json build/vendor/promql-parser/ && chmod +x build/index.js && chmod +x build/bin/tenx-recur.js && rm -rf build/product-kb/docs && mkdir -p build/product-kb/docs && ( cp -R ../../../eclipse-workspace/l1x-co/config/mksite/docs/. build/product-kb/docs/ 2>/dev/null || echo 'note: product_qa docs corpus source (sibling mksite repo) not present — skipping corpus copy (CI/standalone build)' )",
+    "build": "tsc && mkdir -p build/vendor/promql-parser && cp -r vendor/promql-parser/promql.js vendor/promql-parser/package.json build/vendor/promql-parser/ && chmod +x build/index.js && chmod +x build/bin/tenx-recur.js && rm -rf build/product-kb/docs && mkdir -p build/product-kb/docs && cp -R \"${LOG10X_PRODUCT_KB_SRC:-../mksite/docs}/.\" build/product-kb/docs/ 2>/dev/null || echo \"product-kb: no docs at ${LOG10X_PRODUCT_KB_SRC:-../mksite/docs} (product_qa corpus empty locally; check out the mksite sibling repo or set LOG10X_PRODUCT_KB_SRC)\"",
     "start": "node build/index.js",
     "dev": "tsc --watch",
     "prepublishOnly": "npm run build",
