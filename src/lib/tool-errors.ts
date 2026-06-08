@@ -73,7 +73,7 @@ function suggestForTool(toolName: string, msg: string): string | undefined {
 
     case 'log10x_retriever_query':
       if (/not configured/i.test(msg)) {
-        return 'The Retriever is not deployed in this environment. For in-retention queries, use the customer\'s SIEM directly. For long-window retrieval, deploy the Retriever per https://doc.log10x.com/apps/retriever/ and set __SAVE_LOG10X_RETRIEVER_URL__.';
+        return 'The Retriever is not deployed in this environment. For events still in the stack, query the stack directly. To read the events the Receiver offloads to the overflow bucket, deploy the Retriever per https://doc.log10x.com/apps/retriever/ and set __SAVE_LOG10X_RETRIEVER_URL__.';
       }
       if (/timed out/i.test(msg)) {
         return 'Query exceeded the wall-time budget. Narrow the window, add a more selective filter, or switch format to `count` or `aggregated` for a summary view instead of raw events.';

@@ -24,44 +24,63 @@ import assert from 'node:assert/strict';
 import { executeResolveBatch } from '../src/tools/resolve-batch.js';
 import { executeExtractTemplates } from '../src/tools/extract-templates.js';
 
-// Post-chassis-refactor field locations. `status` and `human_summary` stay
-// inside `data` (ChassisData). The three performance fields (query_count,
-// total_latency_ms, backend_pressure_hint) were lifted to the top-level
-// `performance` block on chassis-based tools (buildChassisEnvelope). Tools
-// that still flatten the unified fields into `data` (the poc-from-siem
-// family) keep them there. assertUnifiedFields therefore reads status /
-// human_summary from `data` and the perf trio from `performance` first,
-// falling back to `data` for the flatten-style tools.
-const DATA_FIELDS = ['status', 'human_summary'] as const;
-const PERF_FIELDS = ['query_count', 'total_latency_ms', 'backend_pressure_hint'] as const;
+const UNIFIED_FIELDS = [
+  'status',
+  'query_count',
+  'total_latency_ms',
+  'backend_pressure_hint',
+  'human_summary',
+] as const;
 
-function assertUnifiedFields(out: { data: Record<string, unknown>; performance?: Record<string, unknown> }, tool: string) {
-  const d = out.data;
-  const perf = (out.performance ?? d) as Record<string, unknown>;
-  for (const f of DATA_FIELDS) {
-    assert.ok(f in d, `${tool}: missing field "${f}" — envelope conformance broken`);
+/**
+ * Resolve a unified field across both envelope shapes.
+ *
+ * Chassis-envelope tools (resolve_batch, extract_templates) put the three
+ * performance fields (query_count / total_latency_ms / backend_pressure_hint)
+ * on the envelope TOP LEVEL under `out.performance`, while status and
+ * human_summary live on `out.data`. The legacy buildUnifiedFields tools
+ * (poc_from_siem_*) spread all five fields flat onto `out.data` and carry
+ * no top-level `performance`. Looking up data-first then performance covers
+ * both: status/human_summary resolve from data in both shapes, and the perf
+ * fields fall through to out.performance for chassis envelopes.
+ */
+function unifiedField(out: { data?: unknown; performance?: unknown }, f: string): unknown {
+  const data = out.data as Record<string, unknown> | undefined;
+  if (data && f in data) return data[f];
+  const perf = out.performance as Record<string, unknown> | undefined;
+  if (perf && f in perf) return perf[f];
+  return undefined;
+}
+
+function unifiedFieldPresent(out: { data?: unknown; performance?: unknown }, f: string): boolean {
+  const data = out.data as Record<string, unknown> | undefined;
+  if (data && f in data) return true;
+  const perf = out.performance as Record<string, unknown> | undefined;
+  return !!(perf && f in perf);
+}
+
+function assertUnifiedFields(out: { data?: unknown; performance?: unknown }, tool: string) {
+  for (const f of UNIFIED_FIELDS) {
+    assert.ok(unifiedFieldPresent(out, f), `${tool}: missing field "${f}" — envelope conformance broken`);
   }
-  for (const f of PERF_FIELDS) {
-    const carrier = f in perf ? perf : d;
-    assert.ok(f in carrier, `${tool}: missing field "${f}" — envelope conformance broken`);
-  }
+  const status = unifiedField(out, 'status');
   assert.ok(
-    ['success', 'no_signal', 'partial', 'insufficient_data', 'error'].includes(d.status as string),
-    `${tool}: invalid status value ${String(d.status)}`,
+    ['success', 'no_signal', 'insufficient_data', 'error'].includes(status as string),
+    `${tool}: invalid status value ${String(status)}`,
   );
-  const queryCount = ('query_count' in perf ? perf : d).query_count;
-  const totalLatency = ('total_latency_ms' in perf ? perf : d).total_latency_ms;
-  const pressureHint = ('backend_pressure_hint' in perf ? perf : d).backend_pressure_hint;
-  assert.equal(typeof queryCount, 'number');
-  assert.equal(typeof totalLatency, 'number');
-  assert.ok((totalLatency as number) >= 0);
+  assert.equal(typeof unifiedField(out, 'query_count'), 'number');
+  const latency = unifiedField(out, 'total_latency_ms');
+  assert.equal(typeof latency, 'number');
+  assert.ok((latency as number) >= 0);
+  const pressure = unifiedField(out, 'backend_pressure_hint');
   assert.ok(
-    pressureHint === null ||
-      ['ok', 'slow', 'throttled'].includes(pressureHint as string),
-    `${tool}: invalid backend_pressure_hint ${String(pressureHint)}`,
+    pressure === null ||
+      ['ok', 'slow', 'throttled'].includes(pressure as string),
+    `${tool}: invalid backend_pressure_hint ${String(pressure)}`,
   );
-  assert.equal(typeof d.human_summary, 'string');
-  assert.ok((d.human_summary as string).length > 0);
+  const humanSummary = unifiedField(out, 'human_summary');
+  assert.equal(typeof humanSummary, 'string');
+  assert.ok((humanSummary as string).length > 0);
 }
 
 test('envelope conformance: resolve_batch carries the unified fields on success', async () => {
@@ -74,7 +93,7 @@ test('envelope conformance: resolve_batch carries the unified fields on success'
   ];
   const out = await executeResolveBatch({ source: 'events', events, top_n_patterns: 10, include_next_actions: false, privacy_mode: false });
   if (typeof out === 'string') throw new Error('expected envelope');
-  assertUnifiedFields(out as { data: Record<string, unknown>; performance?: Record<string, unknown> }, 'resolve_batch');
+  assertUnifiedFields(out, 'resolve_batch');
 });
 
 test('envelope conformance: extract_templates carries the unified fields on success', async () => {
@@ -90,10 +109,14 @@ test('envelope conformance: extract_templates carries the unified fields on succ
   // box (e.g. CI) it returns a well-formed not_configured envelope instead of a
   // success one. Accept that graceful-degradation envelope as conformant, and
   // only assert the unified fields on the success path (when tenx is present).
-  if (d.status === 'not_configured') {
-    assert.equal(typeof d.precondition, 'string');
+  // The not_configured marker is a chassis envelope: the `not_configured`
+  // string + the precondition live under data.payload (data.status itself is
+  // the chassis 'error' status). Detect via the payload.
+  const payload = d.payload as Record<string, unknown> | undefined;
+  if (payload?.status === 'not_configured') {
+    assert.equal(typeof payload.precondition, 'string');
   } else {
-    assertUnifiedFields(out as { data: Record<string, unknown>; performance?: Record<string, unknown> }, 'extract_templates');
+    assertUnifiedFields(out, 'extract_templates');
   }
 });
 
@@ -104,7 +127,7 @@ test('envelope conformance: poc_from_siem_status returns structured error on unk
   const out = await executePocStatus({ snapshot_id: 'nonexistent-id-' + Date.now() });
   if (typeof out === 'string') throw new Error('expected envelope');
   const d = out.data as Record<string, unknown>;
-  assertUnifiedFields(out as { data: Record<string, unknown>; performance?: Record<string, unknown> }, 'poc_from_siem_status (unknown snapshot)');
+  assertUnifiedFields(out, 'poc_from_siem_status (unknown snapshot)');
   assert.equal(d.status, 'error');
   const err = d.error as { error_type: string; retryable: boolean };
   assert.equal(err.error_type, 'input_invalid');
@@ -126,6 +149,6 @@ test('envelope conformance: poc_from_siem_submit returns structured error when S
   const d = out.data as Record<string, unknown>;
   // Either status is 'success' (test env has datadog creds, kicks off pipeline) or 'error'.
   // Both paths must carry the unified field set.
-  assertUnifiedFields(out as { data: Record<string, unknown>; performance?: Record<string, unknown> }, 'poc_from_siem_submit');
+  assertUnifiedFields(out, 'poc_from_siem_submit');
   assert.ok(['success', 'error'].includes(d.status as string));
 });

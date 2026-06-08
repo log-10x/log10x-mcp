@@ -42,6 +42,7 @@ import { exchangeAuth0TokenForApiKey } from '../lib/auth-api.js';
 import { fetchUserProfile } from '../lib/api.js';
 import { log } from '../lib/log.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { requireWriteAccess } from '../lib/read-only-guard.js';
 
 /**
  * Default polling deadline for `_complete`. Auth0's device_code expiry
@@ -66,6 +67,7 @@ export interface SigninStartResult {
 }
 
 export async function executeSigninStart(_args: Record<string, never> = {}): Promise<string | StructuredOutput> {
+  requireWriteAccess('starts an Auth0 device flow to sign you in to a real account');
   let device;
   try {
     device = await requestDeviceCode();
@@ -145,6 +147,7 @@ export async function executeSigninComplete(
   args: { device_code?: string; api_key?: string; wait_seconds?: number },
   envs: Environments
 ): Promise<string | StructuredOutput> {
+  requireWriteAccess('completes sign-in and writes ~/.log10x/credentials');
   const md = await executeSigninCompleteInner(args, envs);
   const okMatch = /^## Signed in to Log10x/m.test(md);
   const usernameMatch = md.match(/signed in as \*\*(.+?)\*\*/) || md.match(/Account\*\*: (.+?)\n/);

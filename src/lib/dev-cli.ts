@@ -274,7 +274,7 @@ async function runAppsMcpFileViaDocker(
  * Path resolution: the engine finds `apps/mcp` via the user's
  * `TENX_HOME` / `TENX_MODULES` / `TENX_CONFIG` env vars, or OS defaults.
  * See https://doc.log10x.com/install/paths/. Requires an engine release
- * with `apps/mcp` shipped (≥ the first release after PR #34).
+ * that ships `apps/mcp`.
  *
  * No tempdir, no shadow template config, no file I/O — eliminates the
  * macOS `/var/folders` config-resolver bug, the system-cache dedup, and

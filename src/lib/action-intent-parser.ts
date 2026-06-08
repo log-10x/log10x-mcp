@@ -76,7 +76,7 @@ export interface ActionIntentParseResult {
  *
  * Returns an empty result (no throws) on any input failure. Callers must
  * treat an empty `by_pattern` map as "no action plan available — fall back
- * to the cap-CSV container-default path or the §E.1 drop-bucket fallback".
+ * to the cap-CSV container-default path or the single-bucket drop fallback".
  *
  * @param content Raw JSON string from the gitops repo.
  * @param nowEpochSec Wall time for expiry evaluation. Defaults to `Date.now() / 1000`.

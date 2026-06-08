@@ -695,8 +695,7 @@ function authHeaders(env: EnvConfig): Record<string, string> {
  * Convert the MCP-level `from`/`to` expressions to a form the retriever engine
  * reliably parses.
  *
- * Empirical behavior of the retriever server (tested 2026-04-15 against the
- * demo env deployment):
+ * Empirical behavior of the retriever server:
  *   - `now("-1h")` / `now()`    → accepted, matches events
  *   - epoch millis as a string  → accepted, matches events
  *   - ISO8601 like `2026-04-15T11:00:00Z` → accepted (HTTP 200), runs the
@@ -720,7 +719,7 @@ export function normalizeTimeExpression(expr: string): string {
   // the string as a literal and fails to parse. Verified live on the
   // otel-demo env: CronJob-dispatched query bodies use `$=now("-5m")` /
   // `$=now()` and run correctly; the same bodies without the prefix get
-  // silently dropped. GAPS G12 root cause (client-side half).
+  // silently dropped (client-side root cause).
   if (trimmed === 'now') return '$=now()';
 
   const rel = trimmed.match(/^now\s*([+-])\s*(\d+)\s*([smhdwMy])$/);
@@ -985,8 +984,9 @@ function parseJsonl(content: string): RetrieverEvent[] {
  * current epoch in each unit so 13-digit millis values like 1776851170107
  * (2026-04-22) are correctly classified as millis instead of falsely
  * matching the looser `>1e12` micros boundary and dividing by 1000 to
- * land in 1970. (Bug discovered live during retriever_series testing
- * 2026-04-23 — the entire bucket histogram aliased to 1970-01-21.)
+ * land in 1970. Without the decade-below boundary, the entire bucket
+ * histogram aliases to 1970 because 13-digit millis falsely match the
+ * looser micros boundary and get divided by 1000.
  */
 export function eventTimestampMs(ev: RetrieverEvent): number {
   let ts: unknown = ev.timestamp;
@@ -1146,14 +1146,13 @@ export async function runRetrieverQuery(
   const timeoutMs =
     options?.timeoutMs ?? parseInt(process.env.LOG10X_RETRIEVER_TIMEOUT_MS || '180000', 10);
 
-  // Minimal body format — matches the shape the engine's query-handler
-  // actually expects (verified live on the otel-demo env 2026-04-15).
-  // Previously the MCP sent `target`, `readContainer`, `indexContainer`,
-  // `objectStorageName`, `processingTime`, `resultSize` fields which the
-  // engine silently ignored — but the missing `name` field caused the
-  // query-handler to drop the request without any log trace. The `name`
-  // field becomes `queryName` in the engine override chain and is used
-  // as the input stream handle inside the pipeline. GAPS G12.
+  // Minimal body format that matches the shape the engine's query-handler
+  // actually expects. Previously the MCP sent `target`, `readContainer`,
+  // `indexContainer`, `objectStorageName`, `processingTime`, `resultSize`
+  // fields which the engine silently ignored, but the missing `name` field
+  // caused the query-handler to drop the request without any log trace. The
+  // `name` field becomes `queryName` in the engine override chain and is used
+  // as the input stream handle inside the pipeline.
   //
   // Fields that belong in the body:
   //   name           — logical query name, used as the stream handle
@@ -1241,12 +1240,11 @@ export async function runRetrieverQuery(
   }
 
   // The engine's indexObjectPath builds `tenx/{target}/q(r)/{queryId}/`
-  // under the configured indexContainer. On the otek demo env the
-  // indexContainer is `tenx-demo-cloud-retriever-351939435334/indexing-results/`
-  // so the full S3 key is `indexing-results/tenx/{target}/...`. The
+  // under the configured indexContainer. When the indexContainer is
+  // `<account>-cloud-retriever/indexing-results/` the full S3 key is
+  // `indexing-results/tenx/{target}/...`. The
   // `LOG10X_RETRIEVER_INDEX_SUBPATH` env var lets deployments configure
-  // their own index sub-prefix; default to `indexing-results` to match
-  // the otek deploy.
+  // their own index sub-prefix; default to `indexing-results`.
   const indexSubpath = (process.env.LOG10X_RETRIEVER_INDEX_SUBPATH || 'indexing-results').replace(/^\/+|\/+$/g, '');
   const basePrefix = indexSubpath ? `${indexSubpath}/` : '';
   const markerPrefix = `${basePrefix}tenx/${target}/q/${queryId}/`;

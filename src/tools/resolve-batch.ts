@@ -94,7 +94,7 @@ function buildResolveBatchHumanSummary(d: Omit<ResolveBatchSummary, 'human_summa
     ? `The top contributor is ${top.symbol_message ?? top.template_hash} at ${Math.round(top.share_pct)}% of the batch${top.dominant_severity ? `, dominant severity ${top.dominant_severity}` : ''}.`
     : 'No ranked patterns were produced.';
   const third = d.drop_rate >= 0.2
-    ? `Warning: the templater dropped ${Math.round(d.drop_rate * 100)}% of input lines (engine GAPS G11) — treat as a partial triage.`
+    ? `Warning: the templater dropped ${Math.round(d.drop_rate * 100)}% of input lines, treat as a partial triage.`
     : d.overfit_warning
       ? 'Tiny-batch note: every event resolved to its own template; paste at least 50 events for a converged triage.'
       : `${d.shown_pattern_count} of ${d.resolved_pattern_count} ${patternsWord} shown in the ranked output.`;
@@ -162,7 +162,7 @@ export async function executeResolveBatch(args: {
       scope: { window: 'paste_batch', window_basis: 'auto_default' },
       payload: { precondition: 'no_patterns' },
       human_summary: headline,
-      warnings: ['resolve_batch: templater rejected the input — no patterns resolved. Check that events are raw log lines (one per line), not pre-formatted JSON blobs.'],
+      warnings: ['resolve_batch produced no per-pattern summary. Either the templater returned no patterns (check that events are raw log lines, one per line, not pre-formatted JSON), or the local engine image emits an output format this MCP build cannot parse (engine/MCP version skew). Run log10x_doctor to check the engine image version.'],
     });
   }
   const base = sumOut.data;
@@ -187,7 +187,7 @@ export async function executeResolveBatch(args: {
     payload: d,
     human_summary,
     truncated: d.shown_pattern_count < d.resolved_pattern_count,
-    warnings: d.drop_rate >= 0.2 ? [`templater dropped ${Math.round(d.drop_rate * 100)}% of input lines (engine GAPS G11) — treat as partial triage`] : [],
+    warnings: d.drop_rate >= 0.2 ? [`templater dropped ${Math.round(d.drop_rate * 100)}% of input lines, treat as partial triage`] : [],
     actions: top && top.symbol_message
       ? [
           { tool: 'log10x_event_lookup', args: { pattern: top.symbol_message }, reason: 'look up the top pattern against the live Reporter' },
@@ -281,7 +281,7 @@ async function executeResolveBatchInner(args: {
   const aggregated = parseAggregated(resp['aggregated.csv']);
 
   if (templates.size === 0 || encoded.length === 0) {
-    return `No patterns resolved from ${lineCount} line(s). The templater may have rejected the input — check that the events are raw log lines (one per line) and not pre-formatted JSON blobs.`;
+    return `No patterns resolved from ${lineCount} line(s). Either the templater rejected the input (check that events are raw log lines, one per line, not pre-formatted JSON), or the engine output format does not match this MCP build (version skew).`;
   }
 
   // ── 4. Per-pattern concentration ──
@@ -326,16 +326,17 @@ async function executeResolveBatchInner(args: {
   lines.push('');
   const modeLabel = executionMode === 'local_cli' ? 'local tenx CLI (privacy mode — no network egress)' : 'Log10x paste endpoint';
 
-  // G11 mitigation: the engine-side templatizer has a known bug where it
-  // silently drops input lines — up to ~70% of a 30-line batch on the
-  // otel-demo env. The tool previously trusted `concentrations` as the
-  // authoritative count without comparing against `lineCount`. That meant
-  // the header said "30 events, resolved into 7 patterns" even when those
-  // 7 patterns only accounted for 9 events — 21 input lines silently
-  // vanished with no warning. This mitigation compares the sum of pattern
-  // counts against the input line count and surfaces any gap as an
-  // explicit "uncategorized events" number so a caller cannot be misled.
-  // Does NOT fix the underlying templatizer; the engine team owns G11.
+  // The engine-side templatizer has a known limitation where it silently
+  // drops some input lines under certain conditions (up to ~70% of a
+  // 30-line batch on the otel-demo env). The tool previously trusted
+  // `concentrations` as the authoritative count without comparing against
+  // `lineCount`, so the header could say "30 events, resolved into 7
+  // patterns" even when those 7 patterns only accounted for 9 events,
+  // leaving 21 input lines silently vanished with no warning. This compares
+  // the sum of pattern counts against the input line count and surfaces any
+  // gap as an explicit "uncategorized events" number so a caller cannot be
+  // misled. It does NOT fix the underlying templatizer (an engine-side
+  // limitation).
   const accountedEvents = encoded.length;
   const droppedEvents = Math.max(0, lineCount - accountedEvents);
   const dropRate = lineCount > 0 ? droppedEvents / lineCount : 0;
@@ -352,7 +353,7 @@ async function executeResolveBatchInner(args: {
       lines.push(
         `> **${fmtCount(droppedEvents)} input lines (${pctLabel}) were not accounted for by the templatizer.** ` +
           `Per-pattern event counts sum to ${fmtCount(accountedEvents)}, less than the input line count (${fmtCount(lineCount)}). ` +
-          `Known engine-side bug (GAPS G11) — the templatizer silently drops lines under certain conditions ` +
+          `Known engine-side limitation: the templatizer silently drops lines under certain conditions ` +
           `(multi-line stack traces, event-boundary crossings, high-cardinality variant overfitting). ` +
           `The dropped lines may contain the most important signals.`
       );

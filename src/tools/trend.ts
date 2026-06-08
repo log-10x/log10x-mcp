@@ -7,6 +7,7 @@
 import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
 import { queryRange, queryInstant } from '../lib/api.js';
+import { formatPatternLabel } from '../lib/pattern-label.js';
 import * as pql from '../lib/promql.js';
 import { LABELS } from '../lib/promql.js';
 import { bytesToCost, buildDisclosedDollarValue, type DisclosedDollarValue, parsePrometheusValue } from '../lib/cost.js';
@@ -29,7 +30,15 @@ export const trendSchema = {
   pattern: z.string().optional().describe('Pattern name (e.g., "Payment_Gateway_Timeout"). Provide either pattern or pattern_hash — pattern_hash is preferred when available (skips a metrics lookup).'),
   pattern_hash: z.string().optional().describe('The tenx_hash of the pattern (11-char stable identity from top_patterns / preview_filter). Preferred over pattern when available.'),
   timeRange: z.enum(['15m', '1h', '6h', '24h', '1d', '7d', '30d']).default('7d').describe("Time range. '24h' and '1d' are equivalent (one-day window). Sub-day values show fine-grained trajectory around an incident."),
-  step: z.enum(['1m', '5m', '15m', '1h', '6h', '1d']).default('1h').describe('Data point interval. Use `1m`/`5m` for sub-day windows (15m/1h/6h), `1h`/`6h` for day-level, `1d` for week+ windows.'),
+  step: z
+    .enum(['auto', '1m', '5m', '15m', '1h', '6h', '1d'])
+    .default('auto')
+    .describe(
+      'Data point interval. Default `auto` sizes the step to give ~12–30 buckets per window ' +
+      '(1h→5m, 6h→15m, 1d/24h→1h, 7d→6h, 30d→1d). ' +
+      'Override only when a specific resolution is required; an over-coarse step (e.g. 1h on a 1h window) ' +
+      'produces a 2-point series with no usable trend shape.'
+    ),
   analyzerCost: z.number().optional().describe('SIEM ingestion cost in $/GB'),
   environment: z.string().optional().describe('Environment nickname'),
   view: z.literal('summary').default('summary').optional().describe('Output format. Always "summary" — the structured envelope. Field retained for backward-compat.'),
@@ -62,6 +71,12 @@ export const trendSchema = {
 
 interface PatternTrendSummary {
   pattern: string;
+  // Stable tenx_hash identity for this pattern — echoed here so the
+  // catalog-identity-handoff (top_patterns → trend → event_lookup) carries
+  // the hash through every chain step without a downstream re-resolve.
+  // Resolved from metrics during pattern lookup; empty string when the
+  // pattern is not present in TSDB (no_signal path).
+  pattern_hash: string;
   window: string;
   step: string;
   time_series: Array<{ ts: number; bytes: number }>;
@@ -141,7 +156,10 @@ export async function executeTrend(
 
   // Resolve pattern name from hash when only pattern_hash is given.
   // We need a name for the PromQL query (pattern label selector).
+  // Also capture the resolved hash for catalog-identity-handoff so the
+  // summary can echo it on both the name-input and hash-input paths.
   let patternName: string | undefined = args.pattern;
+  let resolvedHash: string | undefined = args.pattern_hash;
   if (!patternName && args.pattern_hash) {
     // Reverse-lookup: find the most-emitting pattern label for this hash.
     const metricsEnv = await resolveMetricsEnv(env).catch(() => null);
@@ -160,6 +178,15 @@ export async function executeTrend(
         // fall through — pattern stays undefined, inner fn will return no data
       }
     }
+  } else if (patternName && !resolvedHash) {
+    // Name-input path: forward-lookup the stable hash so the summary can
+    // echo it for downstream chain steps (event_lookup, pattern_examples).
+    try {
+      resolvedHash = await resolvePatternHashFromMetrics(env, normalizePattern(patternName));
+      recordQuery(chassisTelemetry);
+    } catch {
+      // Hash resolution is best-effort; absent hash collapses to '' in summary.
+    }
   }
 
   // Normalise '1d' legacy alias to '24h' before passing to inner.
@@ -167,7 +194,7 @@ export async function executeTrend(
   const effectiveWindow = normalizedTimeRange ?? args.timeRange ?? '7d';
 
   const sumOut: { data?: PatternTrendSummary } = {};
-  await executeTrendInner({ ...args, pattern: patternName ?? '', timeRange: normalizedTimeRange }, env, sumOut);
+  await executeTrendInner({ ...args, pattern: patternName ?? '', timeRange: normalizedTimeRange, pattern_hash: resolvedHash }, env, sumOut);
   recordQuery(chassisTelemetry);
 
   if (!sumOut.data) {
@@ -187,7 +214,7 @@ export async function executeTrend(
     });
   }
   const d = sumOut.data;
-  // Percent-first headline (TOOL-AUDIT cost-honesty pass). Bytes/change lead;
+  // Percent-first headline. Bytes/change lead;
   // the measured-spend clause is gated on `rate_source !== 'unset'` so we
   // never print a $1.0/GB lie. When unset, suffix "(rate unset)" so the
   // agent knows why the dollar number is missing.
@@ -204,14 +231,28 @@ export async function executeTrend(
       : ', (rate unset)';
   const spikeClause = d.spike_detected ? ', spike detected' : '';
   let headline: string;
-  // Cap the pattern name to ~60 chars for the headline so it stays readable.
-  // The full name is preserved in data.payload.pattern for callers that need it.
-  const shortPattern = d.pattern.length > 60 ? d.pattern.slice(0, 57) + '...' : d.pattern;
+  //   (1) Pattern name was embedded as a raw underscored blob; the
+  //       no-hash-in-headlines rule applies. Replaced with an
+  //       underscores-to-spaces hint, same shape as the other dollar tools.
+  //   (2) "Currently offloaded" mislabels generic isDropped="true" bytes as
+  //       offload-specific; same fix shape as top_patterns. Replaced with
+  //       action-neutral "currently reduced".
+  //   (3) "<pattern> offloaded over <window>" on include='dropped' headline:
+  //       same offload-overreach; cohort is generic isDropped, not
+  //       offload-specific. Renamed to "<pattern> reduced cohort
+  //       over <window>".
+  // Uses shared formatPatternLabel helper with 60-char cap. pattern_trend
+  // has no services[] context (single-pattern view), so we lean on the
+  // symbol_message as the only signal.
+  const shortPattern = formatPatternLabel({
+    symbol_message: d.pattern,
+    maxHintChars: 60,
+  });
   if (d.include === 'dropped') {
-    headline = `\`${shortPattern}\` offloaded over ${d.window}: ${fmtBytes(d.total_bytes)} dropped, change ${changeSign}${d.change_pct}%${dollarClause}${spikeClause}`;
+    headline = `\`${shortPattern}\` reduced cohort over ${d.window}: ${fmtBytes(d.total_bytes)} dropped, change ${changeSign}${d.change_pct}%${dollarClause}${spikeClause}`;
   } else if (d.include === 'both' && d.dropped_share_pct !== null) {
     const sharePct = Math.round(d.dropped_share_pct);
-    headline = `\`${shortPattern}\` over ${d.window}: ${fmtBytes(d.total_bytes)} union, ${sharePct}% currently offloaded, change ${changeSign}${d.change_pct}%${dollarClause}${spikeClause}`;
+    headline = `\`${shortPattern}\` over ${d.window}: ${fmtBytes(d.total_bytes)} union, ${sharePct}% currently reduced, change ${changeSign}${d.change_pct}%${dollarClause}${spikeClause}`;
   } else {
     headline = `\`${shortPattern}\` over ${d.window}: ${fmtBytes(d.total_bytes)}, change ${changeSign}${d.change_pct}% (last quarter vs first quarter run-rate)${dollarClause}${spikeClause}`;
   }
@@ -253,6 +294,67 @@ export async function executeTrend(
     (d.spike_detected ? ' Spike detected.' : '') +
     (d.dropped_share_pct !== null ? ` ${Math.round(d.dropped_share_pct)}% offloaded.` : '');
 
+  // ── must_render_verbatim ─────────────────────────────────────────
+  // render_hint.chart === 'timeseries' tells downstream renderers the
+  // envelope wants a chart. The chassis path was emitting that hint but
+  // no actual chart bytes — the host had to either re-render or fall
+  // back to JSON. Plumb the same ASCII lineChart the markdown body
+  // already produces into must_render_verbatim so the chart is the
+  // tool's primary visual artifact.
+  //
+  // The chart is built off `d.time_series` (already bucketed by the
+  // auto-step path). lineChart's y-axis labels are per-hour rates, so we
+  // feed it bytes-per-second (divide by step seconds) — identical to the
+  // legacy markdown body's prep step, kept consistent here.
+  const tfForChart = parseTimeframe(d.window);
+  const stepSecondsForChart = (() => {
+    const m = d.step.match(/^(\d+)(m|h|d)$/);
+    if (!m) return 3600;
+    const v = parseInt(m[1], 10);
+    return m[2] === 'm' ? v * 60 : m[2] === 'h' ? v * 3600 : v * 86400;
+  })();
+  const chartLines: string[] = [];
+  // Headline at top so the chart block is self-contained when a host
+  // renders must_render_verbatim verbatim (no JSON context around it).
+  chartLines.push(headline);
+  if (d.time_series.length > 0) {
+    const rates = d.time_series.map((p) => p.bytes / stepSecondsForChart);
+    const chart = lineChart(rates, { widthCap: 60, spanSeconds: tfForChart.days * 86400 });
+    if (chart) {
+      chartLines.push('');
+      chartLines.push('```text');
+      chartLines.push(chart);
+      chartLines.push('```');
+      chartLines.push(`${d.time_series.length} samples @ ${d.step}`);
+    }
+  }
+  const mustRenderVerbatim = chartLines.join('\n');
+
+  // ── actions[] ────────────────────────────────────────────────────
+  // pattern_trend is the volume/time-axis view. The slot/content angle
+  // lives in pattern_examples (no slot data here; route to
+  // pattern_examples for it). Always include the
+  // examples handoff so an agent reading a trend envelope has a clear
+  // next step for the content question.
+  const trendActions: import('../lib/output-types.js').Action[] = [];
+  if (d.pattern_hash) {
+    trendActions.push({
+      tool: 'log10x_pattern_examples',
+      args: { pattern_hash: d.pattern_hash },
+      reason: "content/slot angle — real events + slot variations for this pattern (the WHAT to pair with trend's WHEN)",
+      role: 'recommended-next',
+    });
+  } else if (d.pattern) {
+    // Fall-back when hash resolution missed (no_signal path) — still
+    // give the agent a routable handoff using the pattern name.
+    trendActions.push({
+      tool: 'log10x_pattern_examples',
+      args: { pattern: d.pattern },
+      reason: "content/slot angle — real events + slot variations for this pattern (the WHAT to pair with trend's WHEN)",
+      role: 'recommended-next',
+    });
+  }
+
   return buildChassisEnvelope({
     tool: 'log10x_pattern_trend',
     view: 'summary',
@@ -273,6 +375,8 @@ export async function executeTrend(
     },
     payload: { ...d, ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: headline }) },
     human_summary,
+    must_render_verbatim: mustRenderVerbatim,
+    actions: trendActions,
     render_hint: { chart: 'timeseries', units: 'bytes/sec' },
     images,
     telemetry: chassisTelemetry,
@@ -280,14 +384,19 @@ export async function executeTrend(
 }
 
 async function executeTrendInner(
-  args: { pattern: string; timeRange?: string; step?: string; analyzerCost?: number; include?: 'kept' | 'dropped' | 'both' },
+  args: { pattern: string; pattern_hash?: string; timeRange?: string; step?: string; analyzerCost?: number; include?: 'kept' | 'dropped' | 'both' },
   env: EnvConfig,
   sumOut?: { data?: PatternTrendSummary }
 ): Promise<string> {
   // Defensive defaults — match trendSchema.
   // Normalise '1d' legacy alias → '24h'.
   const timeRange = (args.timeRange === '1d' ? '24h' : args.timeRange) ?? '7d';
-  const step = args.step ?? '1h';
+  // Auto-step: when the caller passes `'auto'` (the schema default) we
+  // pick a step that yields ~12–30 buckets per window. A coarse step
+  // (e.g. `1h` on a `1h` window) produces a 2-point series with no
+  // usable trend shape.
+  const requestedStep = args.step ?? 'auto';
+  const step = requestedStep === 'auto' ? pql.autoStepForWindow(timeRange) : requestedStep;
   const include = args.include ?? 'kept';
   const tf = parseTimeframe(timeRange);
   // DEP: feat/x-percent-mcp-cost-tooling — drop the silent `?? 1.0` lie.
@@ -406,7 +515,7 @@ async function executeTrendInner(
   const recentCost: number | null =
     costPerGb !== null ? bytesToCost(recentBytes, costPerGb) : null;
 
-  // De-verdict (TOOL-AUDIT Phase 2): report the MEASURED change as a signed
+  // Report the MEASURED change as a signed
   // delta + the two quarter run-rates, NOT an asserted RISING/FALLING/STABLE
   // label. The fine time series is trend's differentiated context; the
   // asserted trend word competed with the agent's live judgment and read as
@@ -472,10 +581,21 @@ async function executeTrendInner(
   const recentCostDisclosed: DisclosedDollarValue | null =
     recentCost !== null ? buildDisclosedDollarValue(recentCost, toAxisSource, null, null) : null;
 
+  // Catalog-identity-handoff: echo the stable tenx_hash on the summary so
+  // chained tools (event_lookup, pattern_examples) don't re-resolve it.
+  // Prefer the caller-supplied hash (forward- or reverse-resolved in
+  // executeTrend); fall back to an inner resolve, then to '' on miss.
+  let summaryHash = args.pattern_hash ?? '';
+  if (!summaryHash) {
+    const resolved = await resolvePatternHashFromMetrics(env, pattern).catch(() => undefined);
+    summaryHash = resolved ?? '';
+  }
+
   if (sumOut) {
     const stepSecs = stepSeconds;
     sumOut.data = {
       pattern,
+      pattern_hash: summaryHash,
       window: tf.label,
       step,
       time_series: points,

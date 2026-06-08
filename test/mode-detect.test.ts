@@ -26,9 +26,11 @@ test('shouldRegisterTool: POC tools register in POC mode only', () => {
   assert.equal(shouldRegisterTool('log10x_poc_from_siem_submit', 'analysis_pending'), false);
 });
 
-test('shouldRegisterTool: install advisors register in POC AND analysis_pending', () => {
+test('shouldRegisterTool: install advisors register in POC, analysis_pending AND analysis', () => {
   assert.equal(shouldRegisterTool('log10x_advise_install', 'poc'), true);
   assert.equal(shouldRegisterTool('log10x_advise_install', 'analysis_pending'), true);
+  // analysis included since 2026-06-03 (f21fba2): existing tier-receiver
+  // customers add the Retriever from steady-state analysis mode.
   assert.equal(shouldRegisterTool('log10x_advise_install', 'analysis'), true);
   assert.equal(shouldRegisterTool('log10x_advise_retriever', 'analysis_pending'), true);
 });

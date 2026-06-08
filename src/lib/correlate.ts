@@ -94,9 +94,9 @@ export async function runAcuteSpikeCorrelation(opts: CorrelationOptions): Promis
   // The BASELINE side is guarded by a meaningful absolute floor (10× the
   // per-series noise floor). Without this, a baseline sum of ~1 sample
   // (0.0003 events/s) can inflate the relative change to +9000% even
-  // though the absolute rate is trivial. Caught by Live-S5 sub-agent
-  // (GAPS G6): the `environment` audit flagged several patterns as
-  // "+100%" spikes that per-service reruns immediately contradicted.
+  // though the absolute rate is trivial. The environment-wide audit
+  // flagged several patterns as "+100%" spikes that per-service reruns
+  // immediately contradicted.
   //
   // The CURRENT side is NOT guarded — a spike from a quiet baseline to
   // a moderate rate is a real, catchable incident. The tension: a bursty

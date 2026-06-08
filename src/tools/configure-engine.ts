@@ -9,7 +9,7 @@
  * Solver: greedy v1, ordered by (current_bytes_30d * severity_weight) DESC,
  * where severity_weight = audit:1.0, error:0.8, standard:0.5, debug:0.2,
  * synthetic:0.1. Replace with LP only if greedy is materially suboptimal
- * on a representative customer. (See OPEN Q 5 in 14d-24 spec.)
+ * on a representative customer.
  *
  * Per-destination action resolution honors the cost lib's CompactMode:
  *   - splunk           (envelope)         compact ⇒ encode-in-event
@@ -28,7 +28,7 @@
  *                          with `containers=[...]`
  *   - 'solver_failed'      target unreachable without violating floors
  *   - 'pr_rendered'        success — `pr_command` ready to paste (or null when
- *                          current state already meets target, OPEN Q 8)
+ *                          current state already meets target)
  *
  * Zero engine ask: every query runs against existing receive-aggregator
  * metrics (all_events_summaryBytes_total labeled by k8s_container,
@@ -55,7 +55,13 @@ import {
   type CustomerMetricsBackend,
 } from '../lib/customer-metrics.js';
 import { loadEnvironments } from '../lib/environments.js';
+import { LABELS } from '../lib/promql.js';
 import type { PrometheusResponse } from '../lib/api.js';
+import { queryInstant } from '../lib/api.js';
+import { resolveRate } from '../lib/rate-resolution.js';
+import { parsePrometheusValue } from '../lib/cost.js';
+import type { EnvConfig } from '../lib/environments.js';
+import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import {
   type StructuredOutput,
   type Action as EnvelopeAction,
@@ -78,6 +84,10 @@ import {
   buildActionIntentEntries,
   type ActionIntentEntry,
 } from '../lib/action-intent-writer.js';
+import { resolveClusterConfig } from '../lib/env-config/resolve-cluster-config.js';
+import { requireWriteAccess } from '../lib/read-only-guard.js';
+import { putCommitment, type CommitmentRecord } from './commitment-report.js';
+import { randomUUID } from 'node:crypto';
 
 // ─── constants ────────────────────────────────────────────────────────
 const DEFAULT_LOOKUP_PATH = 'pipelines/run/receive/rate/caps.csv';
@@ -85,11 +95,11 @@ const DEFAULT_LOOKUP_PATH = 'pipelines/run/receive/rate/caps.csv';
 const RESET_INTERVAL_SEC = RECEIVER_DEFAULT_RESET_MS / 1000;
 const WINDOWS_PER_DAY = (24 * 60 * 60) / RESET_INTERVAL_SEC; // = 360
 const WINDOWS_PER_MONTH = WINDOWS_PER_DAY * 30; // = 10800
-const GB = 1024 * 1024 * 1024;
+const GB = 1_000_000_000; // decimal GB — matches CloudWatch/Datadog/Splunk billing
 const FEASIBILITY_TOLERANCE_PCT = 0.1; // ±10% of target counts as "hit"
 const MIN_REPORTER_DAYS = 7;
 
-// ── refresh-mode constants (Item 7) ─────────────────────────────────
+// ── refresh-mode constants ──────────────────────────────────────────
 // Commitment target is stored in the cap-CSV as a `# target_percent=N`
 // comment-line preamble. The engine's lookup parser ignores lines that
 // don't match `<key>,<value>` so the comment is engine-safe; the MCP-side
@@ -103,7 +113,7 @@ const DEFAULT_REFRESH_TOLERANCE_PCT = 2;
 
 type Tier = 'audit' | 'error' | 'standard' | 'debug' | 'synthetic';
 
-// Severity-weighted ranking for the greedy solver (OPEN Q 5 default).
+// Severity-weighted ranking for the greedy solver.
 const SEVERITY_WEIGHT: Record<Tier, number> = {
   audit: 1.0,
   error: 0.8,
@@ -131,6 +141,24 @@ export const configureEngineSchema = {
     .default('configure')
     .describe(
       '`configure` (default) = derive a fresh per-pattern policy and open a PR. `refresh` = re-pull TSDB metrics for an already-deployed policy, compare observed volume to the cap-CSV preamble baseline, and open a delta PR only when the volume has drifted beyond `tolerance_pct`. Use `refresh` from cron/agent loops after the engine is live and 10x metrics are flowing. Requires `current_csv` carrying the prior `# target_percent=N` preamble; if absent, falls back to `target_percent` arg or returns target_resolution.'
+    ),
+  delivery: z
+    .enum(['gitops', 'kubectl_configmap', 'stdout_only'])
+    .default('gitops')
+    .describe(
+      'How the rendered policy is delivered. `gitops` (default) opens a PR against the customer gitops repo (requires `gitops_repo`). `kubectl_configmap` writes the cap-CSV + action-intent.json directly to a k8s ConfigMap on the active cluster (no GitHub needed; the engine\'s ConfigMap pull driver reads from the ConfigMap named via $K8S_CONFIGMAP, default `log10x-action-intent`). `stdout_only` returns the proposed config in the response without writing anywhere.'
+    ),
+  kubectl_namespace: z
+    .string()
+    .optional()
+    .describe(
+      'k8s namespace for the cap-CSV ConfigMap when delivery="kubectl_configmap". Defaults to the env-config doc\'s retriever.helm_release.namespace, then `default`. The engine\'s ConfigMap pull driver reads from this namespace.'
+    ),
+  kubectl_configmap_name: z
+    .string()
+    .optional()
+    .describe(
+      'k8s ConfigMap name when delivery="kubectl_configmap". Defaults to `log10x-action-intent` (matching the engine\'s default $K8S_CONFIGMAP env var). The ConfigMap holds two keys: `caps.csv` (engine\'s safety floor) and `action-intent.json` (per-pattern action mapping).'
     ),
   tolerance_pct: z
     .number()
@@ -170,13 +198,13 @@ export const configureEngineSchema = {
     .enum(DESTINATION_ENUM)
     .optional()
     .describe(
-      'Destination SIEM. Auto-detected from active env / snapshot recommendations when omitted; if auto-detect fails the tool returns a structured not-configured envelope.'
+      'Destination log platform. Auto-detect only works when a `snapshot_id` from log10x_discover_env is supplied (the snapshot carries `recommendations.destination`) or when the active env in `~/.log10x/envs.json` explicitly sets a `destination` field. Most active envs do NOT carry that field, so for typical use you should pass `destination` explicitly: `splunk` | `datadog` | `elasticsearch` | `clickhouse` | `cloudwatch` | `azure-monitor` | `gcp-logging` | `sumo`.'
     ),
   es_pruned: z
     .boolean()
     .optional()
     .describe(
-      'Elasticsearch only: are compactable fields excluded from `_source` via index template? Default `false` (unpruned). Auto-detection requires reading the customer index template; this knob is the explicit override. See OPEN Q 2 in the 14d-24 spec.'
+      'Elasticsearch only: are compactable fields excluded from `_source` via index template? Default `false` (unpruned). Auto-detection requires reading the customer index template; this knob is the explicit override.'
     ),
   contract_type: z
     .enum(['committed', 'on_demand'])
@@ -217,6 +245,12 @@ export const configureEngineSchema = {
     })
     .default({})
     .describe('Tier-to-action defaults. Audit-tier is always `pass`; error-tier is always `sample(N=2)`.'),
+  respect_default_action: z
+    .boolean()
+    .default(false)
+    .describe(
+      'When false (default), the solver shortcuts to `pass` on standard/debug/synthetic rows once `target_percent` is met by error-tier sampling — minimum work, may ignore your configured `action_defaults`. When true, the solver applies `action_defaults` to EVERY non-floor row in the matching tier, even after target is already met. Use when you want a predictable action mix (e.g., "I asked for offload, give me offload") and are OK with the policy overshooting target_percent. Surfaces in `action_default_resolution.respect_default_action` for audit.'
+    ),
   reduction: z
     .enum(['soft', 'hard'])
     .default('hard')
@@ -265,7 +299,6 @@ export const configureEngineSchema = {
       'POC snapshot id returned by `log10x_poc_from_siem_submit` (or the from-local equivalent). When set and the snapshot carries a `cap_csv` (i.e., the POC was run with `target_percent_reduction`), the tool reads that CSV verbatim and renders it as the PR body — no Prometheus pull, no greedy re-derivation. Falls back to the live-Prometheus derivation when the snapshot has no cap_csv (or no `target_percent_reduction` was supplied to the POC).'
     ),
   // ── auto-apply (industry-standard MCP write tool surface) ──
-  // Verdict from /tmp/poc-comparison/14d-26-mcp-config-write-pattern-research.md:
   // GitHub MCP, Linear MCP, Atlassian MCP, Notion MCP and other vendor-shipped
   // MCPs converged on auto-execute as the default for write-capable servers.
   // We follow that convention with two opt-outs:
@@ -287,6 +320,20 @@ export const configureEngineSchema = {
     .describe(
       'When `true`, behaves as if `auto_apply=false` regardless of other flags. Use for evaluation, audit, or in MCP contexts without an approval surface (cron, headless agents). Mirrors `github/github-mcp-server --read-only`.'
     ),
+  // ── view shape ──
+  // The full envelope is ~84KB on a 119-pattern policy: pr_command (28.8KB
+  // multi-line gh script with the entire CSV inline), per_pattern_rows
+  // (27.3KB — 119 patterns × all numeric fields), csv_diff (5.3KB). The
+  // default summary view (~1-2KB) carries the action_mix, totals, the
+  // top-5 cost contributors, and a one-paragraph PR-command description.
+  // Callers that need the raw gh script or full per-pattern table pass
+  // `view='detail'`; `view='pr_command_only'` returns just the gh script.
+  view: z
+    .enum(['summary', 'detail', 'pr_command_only'])
+    .default('summary')
+    .describe(
+      'Response shape. `summary` (default) returns slim payload: phase, target_percent, action_mix counts, totals (bytes_in / bytes_saved / dollars_saved monthly), top_5_per_pattern, and a short PR-command prose summary. Target: under 8K tokens for a 119-pattern policy. `detail` returns the full envelope with pr_command, per_pattern_rows, and csv_diff included. `pr_command_only` returns ONLY the pr_command string for copy-paste callers.'
+    ),
 };
 
 const schemaObj = z.object(configureEngineSchema);
@@ -298,6 +345,11 @@ interface PerPatternRow {
   current_bytes_30d: number;
   cap_bytes_per_window: number;
   action: Action;
+  // Actual projected reduction for THIS pattern under its assigned action.
+  // A `pass` row sheds nothing, so both are 0 — pass is never credited as
+  // savings. Summed into the headline totals so they reconcile with the plan.
+  saved_bytes_monthly: number;
+  saved_dollars_monthly: number;
   projected_monthly_usd_low: number;
   projected_monthly_usd_expected: number;
   projected_monthly_usd_high: number;
@@ -318,6 +370,16 @@ interface ConfigureEngineData {
   containers: string[];
   destination?: SiemId;
   target_percent?: number;
+  /**
+   * When phase='resolution_prompt' the tool now discovers candidate
+   * containers from the metrics backend and surfaces them here so the
+   * agent can re-call without an external label-discovery hop.
+   */
+  container_candidates?: Array<{
+    k8s_container: string;
+    bytes_in_window: number;
+    share_of_service_pct: number;
+  }>;
   derivation?: {
     current_monthly_bytes: number;
     current_monthly_usd: number;
@@ -365,9 +427,98 @@ interface ConfigureEngineData {
     pr_url?: string;
     branch?: string;
     error?: string;
+    /** Delivery mode actually exercised. Distinguishes the gh path from kubectl_configmap. */
+    delivery?: 'gitops' | 'kubectl_configmap';
+    /** kubectl_configmap path only: the ConfigMap apply landed at this namespace/name. */
+    configmap_location?: { namespace: string; name: string; keys: string[] };
   };
+  /**
+   * Commitment record id, set when apply succeeds (gitops PR-open OR
+   * kubectl_configmap write). The id keys the on-disk record at
+   * $LOG10X_ADVISOR_STATE_DIR/commitments/<id>.json that commitment_report
+   * reads to compute realized savings.
+   */
+  commitment_id?: string;
   next_actions?: Array<{ tool: string; args: unknown; why: string }>;
   error?: string;
+  /**
+   * Diagnostic record of how the caller's `action_defaults` mapped onto the
+   * actual tier distribution of the candidate patterns. Audit and error tiers
+   * carry hardcoded actions (`pass` and `sample(N=2)`), so a caller's
+   * `action_defaults.standard`/`debug`/`synthetic` only fires when at least
+   * one pattern is classified into that tier. When a requested default does
+   * not fire (e.g. caller asked for standard=`tier_down` but 0 patterns
+   * landed in the standard tier), the unused defaults are surfaced here so
+   * the agent can branch deterministically without parsing prose warnings.
+   */
+  action_default_resolution?: {
+    requested: {
+      standard: Action;
+      debug: Action;
+      synthetic: Action;
+    };
+    /**
+     * Per-tier default that ended up on at least one row. `null` when the
+     * caller's requested default never made it onto a row — either the tier
+     * had zero patterns (`unused_defaults`) or the tier had patterns but the
+     * solver bypassed the default (floor pin / hardcoded tier action /
+     * target-met downgrade — `defined_but_unused_defaults`). Reading
+     * `effective.standard` as the value the caller asked for when the action
+     * mix proves zero rows took it is a false positive — this field reflects
+     * what was actually applied.
+     */
+    effective: {
+      standard: Action | null;
+      debug: Action | null;
+      synthetic: Action | null;
+    };
+    /**
+     * Count of candidate patterns classified into each tier (pre-solver).
+     * Same denominator that `unused_defaults` reasons against. For the
+     * count of rows that actually TOOK the configured default, read
+     * `applied_default_count_by_tier` instead.
+     */
+    classified_count_by_tier: Record<Tier, number>;
+    /**
+     * Count of rows whose final action came from the tier's caller-configured
+     * default (standard/debug/synthetic) and survived the target-met
+     * downgrade. Distinguishes "default actually drove output" from "patterns
+     * landed in this tier but the default was bypassed".
+     */
+    applied_default_count_by_tier: {
+      standard: number;
+      debug: number;
+      synthetic: number;
+    };
+    /** Tiers with zero candidate patterns — the requested default never had
+     * a row to apply to. */
+    unused_defaults: Array<{
+      tier: Tier;
+      requested: Action;
+      reason: string;
+    }>;
+    /**
+     * Tiers that DID have candidate patterns but where the requested default
+     * never made it onto a final row. Common causes: every pattern in the
+     * tier was floor-pinned (`pass`), the target was met by higher-priority
+     * tiers (error sampling) before standard rows ran and they got
+     * downgraded, or `effectiveStandardAction` overrode a compact request on
+     * a destination where compact is a no-op. The reason names which.
+     */
+    defined_but_unused_defaults: Array<{
+      tier: Tier;
+      requested: Action;
+      classified_count: number;
+      reason: string;
+    }>;
+    /**
+     * Mirror of the `respect_default_action` arg the solver ran under.
+     * When true, the target-met downgrade was skipped and configured
+     * defaults applied to every non-floor row in the tier. Lets the
+     * agent reason about why the action mix may overshoot target_percent.
+     */
+    respect_default_action: boolean;
+  };
   /**
    * One-paragraph plain-prose distillation of the structured data.
    * Agents quote this directly; dollars omitted unless feasible derivation ran.
@@ -377,8 +528,38 @@ interface ConfigureEngineData {
 
 // ─── main entry ───────────────────────────────────────────────────────
 export async function executeConfigureEngine(
-  args: ConfigureEngineArgs
+  args: ConfigureEngineArgs,
+  env?: EnvConfig
 ): Promise<string | StructuredOutput> {
+  // ── Aggregated preflight ──
+  // Surface ALL missing required-for-this-mode args in one envelope
+  // instead of bouncing the caller back per-arg (the prior behavior cost
+  // 3-4 round-trips before the first useful response). The detailed
+  // single-arg messages stay in place below as a safety net for partial
+  // calls; the preflight just shortcuts the common "first attempt with
+  // no scoping" case.
+  if (args.mode !== 'refresh') {
+    const missing: string[] = [];
+    if (args.target_percent === undefined && args.budget_usd === undefined) {
+      missing.push('`target_percent: 30` (or `budget_usd: 1500`) — exactly one is required');
+    }
+    if (!args.destination && !args.snapshot_id) {
+      missing.push('`destination: "cloudwatch"` (or splunk/datadog/elasticsearch/clickhouse/azure-monitor/gcp-logging/sumo)');
+    }
+    if (!args.containers || args.containers.length === 0) {
+      missing.push('`containers: ["<container_name>"]` — Phase 1 needs at least one. If you do not know the container, omit it and the tool will list candidates after this preflight clears.');
+    }
+    if (missing.length >= 2) {
+      return notConfiguredEnvelope(
+        'target_resolution',
+        `configure_engine needs ${missing.length} more args to derive a policy. Pass these in one call instead of bouncing back per-arg:\n\n` +
+          missing.map((m, i) => `${i + 1}. ${m}`).join('\n') +
+          `\n\nExample full call: configure_engine({ service: "${args.service}", containers: ["${args.service}"], target_percent: 30, destination: "cloudwatch", delivery: "stdout_only", read_only: true })`,
+        args.service
+      );
+    }
+  }
+
   // ── Refresh-mode preamble resolution ──
   // In refresh mode, the committed target lives in the cap-CSV preamble.
   // Pull it out before cross-validating target_percent so that a refresh
@@ -437,11 +618,25 @@ export async function executeConfigureEngine(
       isGitopsHint(targetErrHint)
         ? [
             {
+              // The actionable unblock for inspection: re-run with
+              // delivery="stdout_only" — returns the proposed per-pattern plan
+              // inline, no gitops repo and no write required. Carries the
+              // caller's full original intent (budget_usd, action_defaults, …)
+              // forward via the args spread. Previously the only offered action
+              // was set_gitops_repo with empty args, a dead-end for anyone who
+              // just wanted to see the plan.
+              tool: 'log10x_configure_engine',
+              args: { ...args, delivery: 'stdout_only' },
+              reason:
+                'Inspect the proposed policy without a gitops repo: re-run with delivery="stdout_only" to get the per-pattern plan inline (no PR, no write).',
+              role: 'recommended-next',
+            },
+            {
               tool: 'log10x_set_gitops_repo',
               args: {},
               reason:
-                'Write gitops.repo to envs.json so configure_engine knows which GitHub repo to open the cap-CSV PR against. After running, restart the MCP server and retry.',
-              role: 'recommended-next',
+                'Or, to deliver as a PR: write gitops.repo to envs.json so configure_engine knows which GitHub repo to open the cap-CSV PR against. After running, restart the MCP server and retry.',
+              role: 'alternative',
             },
           ]
         : [];
@@ -478,41 +673,64 @@ export async function executeConfigureEngine(
     // returned by the live path below.
   }
 
-  // Resolve customer metrics backend.
-  let backend: CustomerMetricsBackend;
-  try {
-    const r = await resolveBackend();
-    if (!r.backend) {
-      throw new CustomerMetricsNotConfiguredError(formatDetectionTrace(r.trace));
-    }
-    backend = r.backend;
-  } catch (e: any) {
-    const msg = e?.message ?? String(e);
+  // configure_engine queries the LOG10X metrics backend (where the engine's
+  // per-pattern emit `all_events_summaryBytes_total` lives), not the customer
+  // metrics backend. fetchPerPatternBytes uses `queryInstant(env, ...)` from
+  // src/lib/api.ts which routes to env.metricsBackend (Log10xBackend or the
+  // configured equivalent). The customer backend (LOG10X_CUSTOMER_METRICS_URL)
+  // is for cross-pillar tools that join log patterns to infrastructure metrics
+  // — not relevant here. Prior version mistakenly resolved the customer
+  // backend and queried `all_events_summaryBytes_total` against it, which
+  // returned empty (metric doesn't exist there) or timed out (URL unreachable).
+  if (!env) {
     return buildChassisErrorEnvelope({
       tool: 'log10x_configure_engine',
       err: {
-        error_type: 'backend_unavailable',
-        retryable: true,
+        error_type: 'no_environment',
+        retryable: false,
         suggested_backoff_ms: null,
-        hint: `configure_engine refused: customer metrics backend not configured. ${firstLine(msg)}`,
+        hint: 'configure_engine refused: no active environment resolved. Pass `environment` arg or configure ~/.log10x/envs.json.',
       },
-      contextPayload: { ok: false, phase: 'backend', service: args.service, containers: args.containers ?? [], error: msg },
+      contextPayload: { ok: false, phase: 'backend', service: args.service, containers: args.containers ?? [] },
       source_disclosure: { bytes_source: 'tsdb' },
-      actions: [
-        {
-          tool: 'log10x_doctor',
-          args: {},
-          reason:
-            'Run a health check to diagnose why the customer metrics backend is unreachable and confirm which components are live.',
-          role: 'recommended-next',
-        },
-      ],
     });
   }
 
   // Phase 1: container resolution.
   if (!args.containers || args.containers.length === 0) {
-    const resPromptHeadline = `Phase 1: pick containers for service "${args.service}" — re-call with containers: ["..."] to derive policy.`;
+    // Prior code returned containers:[] + actions:[], a dead-end
+    // envelope that told the agent "pick containers" but gave it
+    // nothing to pick from.
+    // Discover the candidate containers from the metrics backend so
+    // the agent can re-call with a concrete list (or, when the env
+    // has a single container, suggest it directly in the headline).
+    const observationDays = args.observationDays ?? 7;
+    const metricsEnv = await resolveMetricsEnv(env);
+    const envClause = metricsEnv ? `${LABELS.env}="${promEscape(metricsEnv)}",` : '';
+    const containerQ = `sum by (k8s_container)(increase(all_events_summaryBytes_total{${envClause}${LABELS.service}="${promEscape(args.service)}"}[${observationDays}d]))`;
+    let candidateContainers: Array<{ name: string; bytes: number }> = [];
+    try {
+      const res = await queryInstant(env, containerQ);
+      for (const r of res.data.result) {
+        const name = r.metric.k8s_container;
+        if (!name) continue;
+        const bytes = parsePrometheusValue(r);
+        if (Number.isFinite(bytes) && bytes > 0) {
+          candidateContainers.push({ name, bytes });
+        }
+      }
+      candidateContainers.sort((a, b) => b.bytes - a.bytes);
+    } catch {
+      candidateContainers = [];
+    }
+    const totalBytes = candidateContainers.reduce((s, c) => s + c.bytes, 0);
+    const containerLabels = candidateContainers.map((c) => c.name);
+    const hint = candidateContainers.length === 0
+      ? `No k8s_container labels found for service "${args.service}" in the last ${observationDays}d. The service name may be misspelled, or no bytes were emitted in the window.`
+      : candidateContainers.length === 1
+        ? `One container found: ["${containerLabels[0]}"]. Re-call with containers: ["${containerLabels[0]}"] to derive the policy.`
+        : `${candidateContainers.length} containers found. Re-call with containers: [${containerLabels.slice(0, 5).map((n) => `"${n}"`).join(', ')}${candidateContainers.length > 5 ? `, ...` : ''}] to derive the policy.`;
+    const resPromptHeadline = `Phase 1: pick containers for service "${args.service}" — ${hint}`;
     return buildChassisEnvelope({
       tool: 'log10x_configure_engine',
       view: 'summary',
@@ -520,13 +738,42 @@ export async function executeConfigureEngine(
       status: 'partial',
       decisions: { threshold_used: args.target_percent ?? null, threshold_basis: args.target_percent != null ? 'customer_supplied' : 'default' },
       source_disclosure: { bytes_source: 'tsdb', siem_vendor: target.resolved.destination },
-      scope: { window: `${args.observationDays ?? 7}d`, window_basis: 'explicit' },
+      scope: { window: `${observationDays}d`, window_basis: args.observationDays != null ? 'explicit' : 'auto_default' },
       payload: {
         ok: true, phase: 'resolution_prompt', service: args.service,
-        containers: [], destination: target.resolved.destination,
-        human_summary: `Phase 1: configure_engine needs the container list for service "${args.service}" (destination ${target.resolved.destination}). Re-call with containers: [...] to derive the policy.`,
+        containers: containerLabels, destination: target.resolved.destination,
+        container_candidates: candidateContainers.map((c) => ({
+          k8s_container: c.name,
+          bytes_in_window: c.bytes,
+          share_of_service_pct: totalBytes > 0 ? (c.bytes / totalBytes) * 100 : 0,
+        })),
+        human_summary: hint,
       } satisfies ConfigureEngineData,
-      human_summary: `Phase 1: configure_engine needs the container list for service "${args.service}" (destination ${target.resolved.destination}). Re-call with containers: [...] to derive the policy.`,
+      human_summary: hint,
+      actions: candidateContainers.length > 0
+        ? [{
+            tool: 'log10x_configure_engine',
+            // Propagate the caller's FULL original intent, overriding only the
+            // two fields this resolution step actually resolves: destination
+            // (to the resolved value) and containers (to the discovered set).
+            // The prior allow-list (service/destination/containers/target_percent/
+            // auto_apply/delivery) silently DROPPED budget_usd, action_defaults,
+            // es_pruned, signal_floor, read_only, reduction, tier_overrides, etc.
+            // So an agent that re-called with this action verbatim lost the cost
+            // model entirely — e.g. budget_usd=3000 gone, hitting the
+            // cross-validation refusal "specify target_percent or budget_usd".
+            // Spreading args preserves every caller-supplied knob.
+            args: {
+              ...args,
+              destination: target.resolved.destination,
+              containers: containerLabels,
+            },
+            reason: candidateContainers.length === 1
+              ? `Re-call configure_engine with the single discovered container "${containerLabels[0]}".`
+              : `Re-call configure_engine with the ${candidateContainers.length} discovered containers (or a subset).`,
+            role: 'recommended-next',
+          }]
+        : [],
     });
   }
 
@@ -534,10 +781,15 @@ export async function executeConfigureEngine(
   const destination = target.resolved.destination;
   const observationDays = args.observationDays ?? 7;
 
+  // Resolve the actual tenx_env label value used by log10x metrics ('edge'
+  // or 'cloud'), not the env UUID. Matches what top_patterns / trend / etc.
+  // use in their selectors.
+  const metricsEnv = await resolveMetricsEnv(env);
   const perPattern = await fetchPerPatternBytes(
-    backend,
+    env,
     args.containers,
-    observationDays
+    observationDays,
+    metricsEnv
   );
 
   // Monthly projection from observation window.
@@ -545,6 +797,26 @@ export async function executeConfigureEngine(
   const totalObservedBytes = perPattern.reduce((s, p) => s + p.bytes, 0);
   const currentMonthlyBytes = totalObservedBytes * scaleToMonth;
   const model = getDestinationCostModel(destination, { esPruned: args.es_pruned });
+  // budget_usd is a DOLLAR promise → convert to bytes at the customer's real
+  // $/GB, not the destination list price. Resolve the ingest rate locally via
+  // the shared chain (caller arg → envs.json analyzerCost → LOG10X_ANALYZER_COST
+  // → destination list); NO log10x account-API call. Storage stays at list (no
+  // per-customer storage rate), matching baseline. When no customer rate is
+  // configured this is identical to the prior model.ingest_per_gb behavior.
+  const resolvedIngest = resolveRate({}, env, destination);
+  const ingestPerGb =
+    resolvedIngest.source === 'customer_supplied'
+      ? (resolvedIngest.rate_per_gb as number)
+      : model.ingest_per_gb;
+  // Thread the SAME resolved rate into projectActionRange so per-pattern dollar
+  // projections match current_monthly_usd (which uses ingestPerGb). Without it,
+  // projections fall back to destination LIST price while current uses the
+  // customer rate, so dollars% and bytes% diverge (a 56-point gap on the demo).
+  // estimate_savings already does this; configure_engine did not.
+  const customerRate =
+    resolvedIngest.source === 'customer_supplied'
+      ? { ingest_per_gb_override: resolvedIngest.rate_per_gb as number }
+      : undefined;
 
   // ── Refresh-mode tolerance check ──
   // If the observed volume hasn't drifted enough vs the prior baseline to
@@ -589,14 +861,14 @@ export async function executeConfigureEngine(
   }
   const currentMonthlyUsd =
     (currentMonthlyBytes / GB) *
-    (model.ingest_per_gb + model.storage_per_gb_month);
+    (ingestPerGb + model.storage_per_gb_month);
 
   // Resolve target bytes.
   let targetPercent: number;
   let targetMonthlyBytes: number;
   if (args.budget_usd !== undefined) {
     const effectivePerGb =
-      model.ingest_per_gb + model.storage_per_gb_month;
+      ingestPerGb + model.storage_per_gb_month;
     if (effectivePerGb <= 0) {
       // ClickHouse self-hosted has ingest_per_gb = 0 and tiny storage; bail.
       return notConfiguredEnvelope(
@@ -641,30 +913,66 @@ export async function executeConfigureEngine(
   // gives Datadog → tier_down, Splunk-no-app → offload, etc. Drop is only
   // chosen when the destination table explicitly lists it (none currently
   // do — drop remains an explicit user override).
+  //
+  // Bug A: the "fell back to X" warning is NOT pushed here — at this point
+  // we only know the mapping was proposed, not that any row survived the
+  // greedy target-met downgrade carrying that action. The warning is
+  // pushed after the solver loop, gated on standardFallbackSurvivors > 0.
   let effectiveStandardAction: Action = standardAction;
-  if (standardAction === 'compact' && model.compact_mode === 'no-op') {
+  const standardCompactNoOpFallbackFired =
+    standardAction === 'compact' && model.compact_mode === 'no-op';
+  if (standardCompactNoOpFallbackFired) {
     effectiveStandardAction = getDefaultActionForDestination(destination, 1);
-    warnings.push(
-      `\`compact\` is a no-op on ${destination}; standard-tier default fell back to \`${effectiveStandardAction}\` (destination's preferred level-1 action). Override via \`action_defaults.standard\`.`
-    );
   }
 
   // Run the greedy solver.
   const rows: PerPatternRow[] = [];
   const actionsUsed: Partial<Record<Action, number>> = {};
+  // Track per-tier classification counts so we can diagnose unused
+  // `action_defaults` after the loop. A caller-supplied default that
+  // maps onto a tier with zero patterns silently no-ops unless we
+  // surface it.
+  const patternsByTier: Record<Tier, number> = {
+    audit: 0,
+    error: 0,
+    standard: 0,
+    debug: 0,
+    synthetic: 0,
+  };
+  // Track per-tier "default actually applied" count: rows whose final action
+  // came from the caller-configurable default (standard/debug/synthetic) and
+  // survived all subsequent overrides (floor pin pre-empts; target-met
+  // downgrade demotes to pass). Used by action_default_resolution to
+  // distinguish "default fired" from "tier had patterns but default never
+  // reached output" (the misleading effective field).
+  const appliedDefaultByTier: { standard: number; debug: number; synthetic: number } = {
+    standard: 0,
+    debug: 0,
+    synthetic: 0,
+  };
   const targetShedBytes = Math.max(0, currentMonthlyBytes - targetMonthlyBytes);
   let remainingBytesToShed = targetShedBytes;
   let floorCount = 0;
   let coveredBytes = 0;
+  // Bug A counter: standard-tier rows whose final action is the
+  // destination-compat fallback (effectiveStandardAction) AND survived
+  // the target-met downgrade. Drives the bypassHint phrasing below.
+  let standardFallbackSurvivors = 0;
 
   for (const c of candidates) {
     const monthlyBytes = c.bytes * scaleToMonth;
     coveredBytes += c.bytes;
+    patternsByTier[c.tier] += 1;
 
     // Resolve the action for this row.
     let action: Action;
     let reason: string;
     let floorReason: string | undefined;
+    // Provenance: which caller-configurable default (if any) was chosen
+    // pre-downgrade. After the target-met downgrade fires we check if
+    // `action` still equals this default: if yes, the default actually
+    // drove output for this row.
+    let defaultTier: 'standard' | 'debug' | 'synthetic' | null = null;
 
     const floorHit = floorSet.get(c.pattern_hash);
     if (floorHit !== undefined) {
@@ -681,25 +989,64 @@ export async function executeConfigureEngine(
     } else if (c.tier === 'standard') {
       action = effectiveStandardAction;
       reason = 'tier=standard';
+      defaultTier = 'standard';
     } else if (c.tier === 'debug') {
       action = debugAction;
       reason = 'tier=debug';
+      defaultTier = 'debug';
     } else {
       action = syntheticAction;
       reason = 'tier=synthetic';
+      defaultTier = 'synthetic';
     }
 
     // If target already met, downgrade further standard rows to pass.
+    // Suppressed when respect_default_action=true so the configured
+    // defaults fire on every matching row regardless of target.
     if (
       action !== 'pass' &&
       action !== 'sample' &&
       floorHit === undefined &&
       c.tier !== 'audit' &&
       c.tier !== 'error' &&
-      remainingBytesToShed <= 0
+      remainingBytesToShed <= 0 &&
+      !args.respect_default_action
     ) {
       action = 'pass';
       reason = `${reason} (target met)`;
+      // Downgrade clobbers the default — no longer counts as applied.
+      defaultTier = null;
+    }
+
+    // Tally per-tier "default actually applied" only when the final action
+    // still matches the configured default for the row's tier.
+    if (defaultTier !== null) {
+      const configuredDefault =
+        defaultTier === 'standard'
+          ? effectiveStandardAction
+          : defaultTier === 'debug'
+            ? debugAction
+            : syntheticAction;
+      if (action === configuredDefault) {
+        appliedDefaultByTier[defaultTier] += 1;
+      }
+    }
+
+    // Bug A: track standard-tier survivors whose final action is the
+    // destination-compat fallback (`effectiveStandardAction`). When the
+    // requested standard action is a no-op on this destination (e.g.
+    // compact on cloudwatch → tier_down), the fallback mapping fires
+    // before the target-met downgrade. If ALL of those rows then get
+    // downgraded to pass (zero survivors), the bypassHint must NOT
+    // claim "rows took tier_down" — it has to say "rows were initially
+    // mapped to tier_down then downgraded to pass". The hint logic
+    // below uses this counter to pick the right phrasing.
+    if (
+      c.tier === 'standard' &&
+      action === effectiveStandardAction &&
+      effectiveStandardAction !== standardAction
+    ) {
+      standardFallbackSurvivors += 1;
     }
 
     // Project savings range using the cost lib.
@@ -711,6 +1058,7 @@ export async function executeConfigureEngine(
       destination,
       retention_months: 1,
       esPruned: args.es_pruned,
+      customer_rate: customerRate,
     });
 
     // Track shed bytes.
@@ -727,15 +1075,39 @@ export async function executeConfigureEngine(
 
     const capBytesPerWindow = computeCapBytesPerWindow(action, monthlyBytes);
 
+    // Baseline (no-action) cost in the SAME projection model as `range`, so the
+    // per-pattern dollar saving is internally consistent: dollars% tracks
+    // bytes% for byte-reducing actions, and tier_down's rate delta is still
+    // captured. pass → baseline == projected → 0.
+    const baselineExpectedUsd =
+      action === 'pass'
+        ? (range.expected.total_dollars ?? 0)
+        : (projectActionRange({
+            action: 'pass',
+            bytes_in: monthlyBytes,
+            avg_event_size_bytes: c.events > 0 ? c.bytes / c.events : undefined,
+            sample_n: 10,
+            destination,
+            retention_months: 1,
+            esPruned: args.es_pruned,
+            customer_rate: customerRate,
+          }).expected.total_dollars ?? 0);
+
     rows.push({
       pattern_hash: c.pattern_hash,
       current_bytes_30d: Math.round(monthlyBytes),
       cap_bytes_per_window: Math.round(capBytesPerWindow),
       action,
+      // Actual per-pattern shed. 0 bytes for pass / tier_down (no on-wire
+      // reduction); tier_down's saving shows up in dollars via the rate delta.
+      saved_bytes_monthly: Math.round(Math.max(0, monthlyBytes - range.expected.bytes_out)),
+      saved_dollars_monthly: roundCents(
+        Math.max(0, baselineExpectedUsd - (range.expected.total_dollars ?? 0))
+      ),
       // total_dollars is now nullable on SavingsProjection — null means the
       // destination has no list rate and no customer override. Current
       // surface still emits a number; full rate_source propagation lands in
-      // the configure-engine patch (step 8 of the build order).
+      // the configure-engine patch.
       projected_monthly_usd_low: roundCents(range.low.total_dollars ?? 0),
       projected_monthly_usd_expected: roundCents(range.expected.total_dollars ?? 0),
       projected_monthly_usd_high: roundCents(range.high.total_dollars ?? 0),
@@ -749,6 +1121,144 @@ export async function executeConfigureEngine(
       }
     }
   }
+
+  // Bug A: now that the solver has run, emit the destination-compat
+  // fallback warning IF and only IF rows actually survived carrying the
+  // fallback action. When zero rows survived (every standard-tier row
+  // was demoted to pass by the target-met downgrade), we say so —
+  // claiming the fallback fired without survivors gives the agent a
+  // misleading mental model of the policy actually deployed.
+  if (standardCompactNoOpFallbackFired) {
+    if (standardFallbackSurvivors > 0) {
+      warnings.push(
+        `\`compact\` is a no-op on ${destination}; ${standardFallbackSurvivors} standard-tier row${standardFallbackSurvivors === 1 ? '' : 's'} took \`${effectiveStandardAction}\` (destination's preferred level-1 action). Override via \`action_defaults.standard\`.`
+      );
+    } else if (patternsByTier.standard > 0) {
+      warnings.push(
+        `\`compact\` is a no-op on ${destination}; the destination-compat fallback would map standard-tier rows to \`${effectiveStandardAction}\`, but all ${patternsByTier.standard} standard-tier row${patternsByTier.standard === 1 ? '' : 's'} were downgraded to \`pass\` because the target was already met by error-tier sampling. No fallback action survived in the final policy.`
+      );
+    }
+    // (No warning when patternsByTier.standard === 0 — the
+    // unused-default block below already covers it.)
+  }
+
+  // ── action_defaults resolution diagnostic ──
+  // Build a structured record of which caller-requested defaults actually
+  // drove row output vs were swallowed. Two failure modes:
+  //   1. Tier had zero candidate patterns → `unused_defaults`.
+  //   2. Tier had patterns but every row that would have taken the default
+  //      was overridden (floor pin, target-met downgrade, or the
+  //      destination-compat fallback for the standard tier) →
+  //      `defined_but_unused_defaults`. Without this, `effective.standard`
+  //      reads as `offload` even when zero rows took it (the action_mix
+  //      proves the contradiction) — a false positive the agent can't
+  //      detect structurally. We also null out the corresponding
+  //      `effective` field in that case.
+  // Audit and error tiers carry hardcoded actions; only standard/debug/
+  // synthetic are caller-configurable, so those are the only tiers we
+  // surface as potentially-unused. Prose warnings still fire so non-
+  // structured consumers see the signal.
+  const totalPatternsClassified =
+    patternsByTier.audit +
+    patternsByTier.error +
+    patternsByTier.standard +
+    patternsByTier.debug +
+    patternsByTier.synthetic;
+  const classificationSummary =
+    `audit=${patternsByTier.audit}, error=${patternsByTier.error}, ` +
+    `standard=${patternsByTier.standard}, debug=${patternsByTier.debug}, ` +
+    `synthetic=${patternsByTier.synthetic}`;
+  const unusedDefaults: Array<{ tier: Tier; requested: Action; reason: string }> = [];
+  const definedButUnusedDefaults: Array<{
+    tier: Tier;
+    requested: Action;
+    classified_count: number;
+    reason: string;
+  }> = [];
+  type ConfigurableTier = 'standard' | 'debug' | 'synthetic';
+  const configurableTiers: Array<{
+    tier: ConfigurableTier;
+    requested: Action;
+    effective: Action;
+    bypassHint: string;
+  }> = [
+    {
+      tier: 'standard',
+      requested: standardAction,
+      effective: effectiveStandardAction,
+      // Bug A: the bypassHint must reflect what the solver ACTUALLY did,
+      // not what the destination-compat fallback initially proposed. Four
+      // cases, narrowed by (fallback fired?) × (any survivor?):
+      bypassHint:
+        effectiveStandardAction !== standardAction
+          ? standardFallbackSurvivors > 0
+            ? `standard-tier rows took \`${effectiveStandardAction}\` (destination-compat fallback) instead of your requested \`${standardAction}\` (${standardFallbackSurvivors} survived target-met downgrade)`
+            : `standard-tier rows were initially mapped to \`${effectiveStandardAction}\` (destination-compat fallback for \`${standardAction}\` on \`${destination}\`), then ALL downgraded to \`pass\` because the target was already met by error-tier sampling`
+          : 'every standard-tier row was floor-pinned or downgraded to `pass` because the target was already met by error-tier sampling',
+    },
+    {
+      tier: 'debug',
+      requested: debugAction,
+      effective: debugAction,
+      bypassHint:
+        'every debug-tier row was floor-pinned or downgraded to `pass` because the target was already met by error-tier sampling',
+    },
+    {
+      tier: 'synthetic',
+      requested: syntheticAction,
+      effective: syntheticAction,
+      bypassHint:
+        'every synthetic-tier row was floor-pinned or downgraded to `pass` because the target was already met by error-tier sampling',
+    },
+  ];
+  for (const { tier, requested, bypassHint } of configurableTiers) {
+    if (patternsByTier[tier] === 0) {
+      const reason =
+        `0 of ${totalPatternsClassified} patterns classified as ${tier}-tier; ` +
+        `your ${tier}='${requested}' default did not apply. ` +
+        `Patterns classified: ${classificationSummary}.`;
+      unusedDefaults.push({ tier, requested, reason });
+      warnings.push(
+        `action_defaults.${tier}='${requested}' did not fire: ${reason}`
+      );
+    } else if (appliedDefaultByTier[tier] === 0) {
+      const reason =
+        `${patternsByTier[tier]} pattern${patternsByTier[tier] === 1 ? '' : 's'} ` +
+        `classified as ${tier}-tier but 0 took your ${tier}='${requested}' default; ` +
+        `${bypassHint}. Reading effective.${tier} as '${requested}' is a false ` +
+        `positive — the action_mix carries the truth.`;
+      definedButUnusedDefaults.push({
+        tier,
+        requested,
+        classified_count: patternsByTier[tier],
+        reason,
+      });
+      warnings.push(
+        `action_defaults.${tier}='${requested}' was defined but never applied: ${reason}`
+      );
+    }
+  }
+  const actionDefaultResolution: ConfigureEngineData['action_default_resolution'] = {
+    requested: {
+      standard: standardAction,
+      debug: debugAction,
+      synthetic: syntheticAction,
+    },
+    effective: {
+      // Null when zero rows took the default (either tier was empty or every
+      // candidate row was overridden by a floor / target-met downgrade / the
+      // destination-compat fallback). Reading the requested action here when
+      // nothing actually applied it was the Fix-A false positive.
+      standard: appliedDefaultByTier.standard > 0 ? effectiveStandardAction : null,
+      debug: appliedDefaultByTier.debug > 0 ? debugAction : null,
+      synthetic: appliedDefaultByTier.synthetic > 0 ? syntheticAction : null,
+    },
+    classified_count_by_tier: patternsByTier,
+    applied_default_count_by_tier: appliedDefaultByTier,
+    unused_defaults: unusedDefaults,
+    defined_but_unused_defaults: definedButUnusedDefaults,
+    respect_default_action: args.respect_default_action ?? false,
+  };
 
   const coveragePct = totalObservedBytes > 0
     ? coveredBytes / totalObservedBytes
@@ -767,7 +1277,7 @@ export async function executeConfigureEngine(
     blocking.push(infeasibleReason);
   }
 
-  // Zero-change PR: target already met by current config (OPEN Q 8 default).
+  // Zero-change PR: target already met by current config.
   const targetMetByCurrent = targetShedBytes <= 0;
 
   // CSV diff. Preamble captures the committed target + observed baseline so
@@ -805,10 +1315,65 @@ export async function executeConfigureEngine(
   // the gh CLI token scope and the MCP client's approval UX. Per-call
   // opt-outs: auto_apply=false or read_only=true. Falls through silently
   // (no change in behavior) when prCommand is null (infeasible plan or
-  // zero-change PR).
+  // zero-change PR). The branch on args.delivery picks the actual writer:
+  // gitops → gh PR; kubectl_configmap → kubectl apply -f -.
   let applied: ConfigureEngineData['applied'];
-  if (prCommand && (args.auto_apply ?? true) && !(args.read_only ?? false)) {
-    applied = await applyViaGh(prCommand);
+  let commitmentId: string | undefined;
+  const shouldApply =
+    (args.auto_apply ?? true) &&
+    !(args.read_only ?? false) &&
+    feasible &&
+    !targetMetByCurrent;
+  if (shouldApply && args.delivery === 'kubectl_configmap') {
+    requireWriteAccess(
+      'writes the cap-CSV + action-intent.json to a k8s ConfigMap (kubectl apply); engine\'s ConfigMap pull driver picks it up on next poll'
+    );
+    const newCsv = reconstructAfterCsv(csvDiff, args.current_csv);
+    const cmName = args.kubectl_configmap_name ?? 'log10x-action-intent';
+    // Namespace resolution: explicit arg → 'default'. Receiver pod's
+    // K8S_CONFIGMAP env var picks the ConfigMap name; the kubeconfig
+    // context picks the cluster. Operator supplies namespace when not
+    // 'default' (otel-demo uses 'demo' for its receiver DS).
+    const ns = args.kubectl_namespace ?? 'default';
+    const result = await applyViaKubectlConfigMap(
+      newCsv,
+      actionIntentJson,
+      cmName,
+      ns
+    );
+    applied = { ...result, delivery: 'kubectl_configmap' };
+    if (result.ok) {
+      commitmentId = persistCommitmentOnApply({
+        service: args.service,
+        envNickname: env.nickname,
+        destination,
+        targetPercent,
+        contractType: args.contract_type ?? 'on_demand',
+        baselineMonthlyBytes: currentMonthlyBytes,
+        baselineMonthlyUsd: currentMonthlyUsd,
+        observationDays: args.observationDays ?? 7,
+        deliveryTarget: { kind: 'configmap', namespace: ns, name: cmName },
+      });
+    }
+  } else if (shouldApply && prCommand) {
+    requireWriteAccess(
+      'opens a GitHub PR against the gitops repo (gh CLI) to modify the cap-CSV at pipelines/run/receive/rate/caps.csv'
+    );
+    const result = await applyViaGh(prCommand);
+    applied = { ...result, delivery: 'gitops' };
+    if (result.ok) {
+      commitmentId = persistCommitmentOnApply({
+        service: args.service,
+        envNickname: env.nickname,
+        destination,
+        targetPercent,
+        contractType: args.contract_type ?? 'on_demand',
+        baselineMonthlyBytes: currentMonthlyBytes,
+        baselineMonthlyUsd: currentMonthlyUsd,
+        observationDays: args.observationDays ?? 7,
+        deliveryTarget: { kind: 'gitops', repo: env.gitops?.repo },
+      });
+    }
   }
 
   const nextActions: Array<{ tool: string; args: unknown; why: string }> = [
@@ -854,7 +1419,7 @@ export async function executeConfigureEngine(
       target_monthly_bytes: Math.round(targetMonthlyBytes),
       target_monthly_usd: roundCents(
         (targetMonthlyBytes / GB) *
-          (model.ingest_per_gb + model.storage_per_gb_month)
+          (ingestPerGb + model.storage_per_gb_month)
       ),
       floor_count: floorCount,
       actions_used: actionsUsed,
@@ -870,6 +1435,8 @@ export async function executeConfigureEngine(
     csv_diff: csvDiff,
     pr_command: prCommand,
     applied,
+    commitment_id: commitmentId,
+    action_default_resolution: actionDefaultResolution,
     refresh: refreshState
       ? {
           skipped: false,
@@ -911,6 +1478,51 @@ export async function executeConfigureEngine(
   const configHeadline = feasible
     ? `${targetPercent.toFixed(1)}% reduction policy derived for ${args.service} (${rows.length} patterns, ${args.containers.length} container${args.containers.length === 1 ? '' : 's'}).`
     : `Cannot hit ${targetPercent.toFixed(1)}% target on ${args.service} without violating floors.`;
+
+  // ── View projection ───────────────────────────────────────────────
+  // Default `view='summary'` strips the three big payload offenders
+  // (pr_command ~28.8KB, per_pattern_rows ~27.3KB, csv_diff ~5.3KB) and
+  // emits the slim shape: action_mix counts + totals + top-5 cost
+  // contributors + PR-command prose. `view='detail'` keeps the full
+  // envelope. `view='pr_command_only'` returns just the gh script for
+  // copy-paste callers that don't render markdown. action_default_
+  // resolution stays in the summary view — it's a small structured
+  // field that helps the agent branch deterministically.
+  const view = args.view ?? 'summary';
+  const viewWarnings: string[] = [...warnings];
+  let payload: unknown;
+
+  if (view === 'pr_command_only') {
+    payload = { pr_command: prCommand };
+  } else if (view === 'detail') {
+    payload = data;
+  } else {
+    payload = buildSummaryPayload({
+      data,
+      rows,
+      prCommand,
+      target: target.resolved,
+      args,
+      currentMonthlyBytes,
+      targetMonthlyBytes,
+      currentMonthlyUsd,
+      model,
+      ingestPerGb,
+      csvDiff,
+    });
+  }
+
+  // Token-budget warning. Estimate bytes/4 ≈ tokens; warn the agent if
+  // even the slim summary blew the 8K target so it can decide whether
+  // to narrow scope (smaller containers list, lower target_percent).
+  const estimatedTokens = Math.ceil(JSON.stringify(payload).length / 4);
+  if (view === 'summary' && estimatedTokens > 8000) {
+    viewWarnings.push(
+      `response payload ~${estimatedTokens} tokens, exceeds the 8K target for view='summary'. ` +
+        "Try a tighter containers scope or call view='pr_command_only' for just the gh script.",
+    );
+  }
+
   return buildChassisEnvelope({
     tool: 'log10x_configure_engine',
     view: 'summary',
@@ -935,11 +1547,168 @@ export async function executeConfigureEngine(
       candidates_count: rows.length,
       candidates_usable: rows.length,
     },
-    payload: data,
+    payload,
     human_summary: data.human_summary ?? configHeadline,
     actions: toEnvelopeActions(nextActions),
-    warnings,
+    warnings: viewWarnings,
   });
+}
+
+/**
+ * Build the slim default-view payload. Drops the three dominant token
+ * offenders (pr_command, per_pattern_rows, csv_diff — all behind
+ * `view='detail'`) and emits a compact summary: action_mix counts,
+ * totals (bytes_in / bytes_saved / dollars_saved), top-5 cost
+ * contributors, and a PR-command prose summary that names the repo +
+ * branch + addition/change counts without inlining the gh script.
+ */
+function buildSummaryPayload(params: {
+  data: ConfigureEngineData;
+  rows: PerPatternRow[];
+  prCommand: string | null;
+  target: ResolvedTarget;
+  args: ConfigureEngineArgs;
+  currentMonthlyBytes: number;
+  targetMonthlyBytes: number;
+  currentMonthlyUsd: number;
+  model: ReturnType<typeof getDestinationCostModel>;
+  ingestPerGb: number;
+  csvDiff: string;
+}): Record<string, unknown> {
+  const { data, rows, prCommand, target, args, currentMonthlyBytes, targetMonthlyBytes, currentMonthlyUsd, model, ingestPerGb, csvDiff } = params;
+
+  // Action mix: count of patterns per action.
+  const actionMix: Partial<Record<Action, number>> = {};
+  for (const r of rows) {
+    actionMix[r.action] = (actionMix[r.action] ?? 0) + 1;
+  }
+
+  // Totals: report the solver's ACTUAL projected shed (the sum of the
+  // per-pattern plan), not the flat `current - target` budget. A `pass`
+  // row sheds nothing, so it contributes zero: pass is no longer credited as
+  // savings, and the headline reconciles with the per-pattern breakdown by
+  // construction. The flat target still appears as derivation.target_monthly_*,
+  // clearly labelled as the GOAL, distinct from what the plan delivers.
+  const bytesSavedMonthly = rows.reduce((s, r) => s + r.saved_bytes_monthly, 0);
+  const dollarsSavedMonthly = rows.reduce((s, r) => s + r.saved_dollars_monthly, 0);
+  void targetMonthlyBytes;
+
+  // Top-5 cost contributors (DESC by current_bytes_30d). Descriptor
+  // truncated to 60 chars per spec — uses the row's `reason` field as
+  // the most-informative short label (e.g. "tier=standard",
+  // "tier=debug", "signal_floor: dashboard:payments-overview").
+  const top5 = [...rows]
+    .sort((a, b) => b.current_bytes_30d - a.current_bytes_30d)
+    .slice(0, 5)
+    .map((r) => ({
+      pattern_hash: r.pattern_hash,
+      descriptor: truncate(r.floor_reason ?? r.reason, 60),
+      action: r.action,
+      bytes_share_pct: currentMonthlyBytes > 0
+        ? roundOne((r.current_bytes_30d / currentMonthlyBytes) * 100)
+        : 0,
+    }));
+
+  // PR-command prose summary. Names the repo + branch + addition /
+  // change counts so the agent can describe what would happen without
+  // copy-pasting the 28.8KB gh script. `+ N` lines come from the
+  // unified diff (lines starting with `+` that aren't the header).
+  // When the gitops repo is not configured (kubectl_configmap /
+  // stdout_only delivery, or unset `gitops.repo` in envs.json) the
+  // resolved repo is an empty string — falling through to the unguarded
+  // template produced "Opens a PR against  on branch main", a literal
+  // double-space gap. We now surface the not-configured signal instead
+  // of pretending a PR will open. checks.warnings[] still
+  // carries the structured signal.
+  let prCommandSummary: string;
+  if (!prCommand) {
+    prCommandSummary = data.checks?.feasible === false
+      ? 'Plan is infeasible at the requested target; no PR command rendered. See checks.infeasible_reason.'
+      : 'Target already met by current config; no PR command rendered (zero-change PR).';
+  } else if (!target.gitops_repo) {
+    prCommandSummary =
+      'gitops not configured — set `gitops.repo` in `~/.log10x/envs.json` ' +
+      '(or pass `gitops_repo` on this call) to enable PR creation. ' +
+      `Delivery mode \`${args.delivery ?? 'gitops'}\` does not require it; ` +
+      'the rendered policy is still available via `view=\'detail\'`.';
+  } else {
+    const additions = csvDiff
+      .split('\n')
+      .filter((l) => l.startsWith('+') && !l.startsWith('+++')).length;
+    const removals = csvDiff
+      .split('\n')
+      .filter((l) => l.startsWith('-') && !l.startsWith('---')).length;
+    const changeNote = removals > 0 ? `${additions} additions and ${removals} changes` : `${additions} additions`;
+    prCommandSummary =
+      `Opens a PR against ${target.gitops_repo} on branch ${target.gitops_branch} modifying ` +
+      `${target.lookup_path} with ${changeNote}.` +
+      (data.applied?.ok && data.applied.pr_url
+        ? ` PR already auto-applied: ${data.applied.pr_url}.`
+        : '');
+  }
+
+  // Strip the proposed_config row dump out of next_actions for the slim
+  // view (119 patterns × {pattern_hash, action, cap_bytes_per_window} =
+  // ~9.5KB of args). Replace it with a hint that the agent can re-run
+  // configure_engine view='detail' to recover the verbatim proposed_config
+  // for estimate_savings. Other next_actions (no proposed_config) pass
+  // through unchanged.
+  const slimNextActions = (data.next_actions ?? []).map((na) => {
+    if (
+      na.tool === 'log10x_estimate_savings' &&
+      typeof na.args === 'object' &&
+      na.args !== null &&
+      'proposed_config' in (na.args as Record<string, unknown>)
+    ) {
+      const { proposed_config: _omit, ...rest } = na.args as Record<string, unknown>;
+      void _omit;
+      return {
+        ...na,
+        args: {
+          ...rest,
+          proposed_config_hint: `Re-call log10x_configure_engine with view='detail' to recover the ${rows.length}-row proposed_config for estimate_savings.`,
+        },
+      };
+    }
+    return na;
+  });
+
+  return {
+    ok: data.ok,
+    phase: data.phase,
+    target_percent: data.target_percent,
+    destination: data.destination,
+    containers: data.containers,
+    service: data.service,
+    action_mix: actionMix,
+    totals: {
+      bytes_in_monthly: Math.round(currentMonthlyBytes),
+      bytes_saved_monthly: Math.round(bytesSavedMonthly),
+      dollars_saved_monthly: roundCents(dollarsSavedMonthly),
+    },
+    top_5_per_pattern: top5,
+    pr_command_summary: prCommandSummary,
+    derivation: data.derivation,
+    checks: data.checks,
+    applied: data.applied,
+    commitment_id: data.commitment_id,
+    action_default_resolution: data.action_default_resolution,
+    refresh: data.refresh,
+    next_actions: slimNextActions,
+    human_summary: data.human_summary,
+    details_available: {
+      pr_command_via: "arg view='detail' (or view='pr_command_only' for just the gh script)",
+      per_pattern_rows_via: "arg view='detail'",
+      csv_diff_via: "arg view='detail'",
+      pattern_count: rows.length,
+    },
+  };
+}
+
+/** Truncate a string to maxLen chars; appends "..." when cut. */
+function truncate(s: string, maxLen: number): string {
+  if (s.length <= maxLen) return s;
+  return s.slice(0, maxLen - 3) + '...';
 }
 
 // ─── from_poc_id consumer path ────────────────────────────────────────
@@ -995,16 +1764,40 @@ async function tryConsumePocSnapshot(
   const baselineCsv = args.current_csv ?? '';
   const diff = renderUnifiedDiff(baselineCsv, capCsv);
 
-  // TODO: build action-intent.json from the POC envelope when poc-envelope-v2
-  // exposes per-pattern action entries. Until then pass undefined — the PR
+  // TODO: build action-intent.json from the POC envelope once it exposes
+  // per-pattern action entries. Until then pass undefined; the PR
   // script will write the cap CSV only.
   const prCommand = feasibility && feasibility.feasible
     ? renderPrCommand(args, resolved, diff, undefined)
     : null;
 
   let applied: ConfigureEngineData['applied'];
-  if (prCommand && (args.auto_apply ?? true) && !(args.read_only ?? false)) {
-    applied = await applyViaGh(prCommand);
+  let commitmentId: string | undefined;
+  const shouldApply =
+    (args.auto_apply ?? true) &&
+    !(args.read_only ?? false) &&
+    feasibility?.feasible === true;
+  if (shouldApply && args.delivery === 'kubectl_configmap') {
+    requireWriteAccess(
+      'writes the cap-CSV to a k8s ConfigMap (kubectl apply) from the POC snapshot; engine\'s ConfigMap pull driver picks it up on next poll'
+    );
+    const newCsv = reconstructAfterCsv(diff, args.current_csv);
+    const cmName = args.kubectl_configmap_name ?? 'log10x-action-intent';
+    const ns = args.kubectl_namespace ?? 'default';
+    const result = await applyViaKubectlConfigMap(newCsv, undefined, cmName, ns);
+    applied = { ...result, delivery: 'kubectl_configmap' };
+    // POC path: commitment persistence skipped here. The POC's renderInput
+    // doesn't carry baseline_monthly_bytes/_usd in the format the
+    // CommitmentRecord requires; wiring this end-to-end is a follow-on
+    // once the POC envelope surfaces the same baseline fields.
+  } else if (shouldApply && prCommand) {
+    requireWriteAccess(
+      'opens a GitHub PR against the gitops repo (gh CLI) to modify the cap-CSV at pipelines/run/receive/rate/caps.csv'
+    );
+    const result = await applyViaGh(prCommand);
+    applied = { ...result, delivery: 'gitops' };
+    // Same POC-path constraint as above — commitment persistence requires
+    // baseline data the snap doesn't carry today.
   }
 
   const warnings: string[] = [];
@@ -1054,6 +1847,74 @@ async function tryConsumePocSnapshot(
       : `POC snapshot \`${args.from_poc_id}\` reported feasibility short of target; PR rendered but not applied. Lower target or widen exceptions, then re-run the POC.`,
   };
 
+  // ── View projection ─────────────────────────────────────────────
+  // POC consumer path emits csv_diff + pr_command (the two biggest
+  // POC-side offenders). Apply the same summary-first projection so
+  // the response stays under 8K tokens by default. POC path has no
+  // per_pattern_rows of its own, so top_5_per_pattern is sourced from
+  // the POC's cap_csv rows; we leave that to view='detail' to avoid a
+  // second cap_csv parse here.
+  const pocView = args.view ?? 'summary';
+  const pocWarnings: string[] = [...warnings];
+  let pocPayload: unknown;
+  if (pocView === 'pr_command_only') {
+    pocPayload = { pr_command: prCommand };
+  } else if (pocView === 'detail') {
+    pocPayload = data;
+  } else {
+    const additions = diff
+      .split('\n')
+      .filter((l) => l.startsWith('+') && !l.startsWith('+++')).length;
+    const removals = diff
+      .split('\n')
+      .filter((l) => l.startsWith('-') && !l.startsWith('---')).length;
+    const changeNote = removals > 0 ? `${additions} additions and ${removals} changes` : `${additions} additions`;
+    // Guard the unguarded template: when the gitops repo is not
+    // configured (kubectl_configmap / stdout_only delivery, or unset
+    // `gitops.repo` in envs.json) `resolved.gitops_repo` is the
+    // back-compat empty-string fallback from resolveTarget, which used to
+    // render as "Opens a PR against  on branch main" (two-space gap).
+    let prCommandSummary: string;
+    if (!prCommand) {
+      prCommandSummary = 'POC snapshot reported feasibility short of target; no PR command rendered.';
+    } else if (!resolved.gitops_repo) {
+      prCommandSummary =
+        'gitops not configured — set `gitops.repo` in `~/.log10x/envs.json` ' +
+        '(or pass `gitops_repo` on this call) to enable PR creation. ' +
+        `Delivery mode \`${args.delivery ?? 'gitops'}\` does not require it; ` +
+        'the rendered policy is still available via `view=\'detail\'`.';
+    } else {
+      prCommandSummary =
+        `Opens a PR against ${resolved.gitops_repo} on branch ${resolved.gitops_branch} modifying ${resolved.lookup_path} with ${changeNote}.` +
+        (data.applied?.ok && data.applied.pr_url ? ` PR already auto-applied: ${data.applied.pr_url}.` : '');
+    }
+    pocPayload = {
+      ok: data.ok,
+      phase: data.phase,
+      target_percent: data.target_percent,
+      destination: data.destination,
+      containers: data.containers,
+      service: data.service,
+      pr_command_summary: prCommandSummary,
+      applied: data.applied,
+      commitment_id: data.commitment_id,
+      checks: data.checks,
+      next_actions: data.next_actions,
+      human_summary: data.human_summary,
+      source: 'poc_snapshot',
+      details_available: {
+        pr_command_via: "arg view='detail' (or view='pr_command_only' for just the gh script)",
+        csv_diff_via: "arg view='detail'",
+      },
+    };
+  }
+  const pocEstTokens = Math.ceil(JSON.stringify(pocPayload).length / 4);
+  if (pocView === 'summary' && pocEstTokens > 8000) {
+    pocWarnings.push(
+      `response payload ~${pocEstTokens} tokens, exceeds the 8K target for view='summary'.`,
+    );
+  }
+
   return buildChassisEnvelope({
     tool: 'log10x_configure_engine',
     view: 'summary',
@@ -1065,14 +1926,14 @@ async function tryConsumePocSnapshot(
     },
     source_disclosure: { bytes_source: 'engine_aggregated_csv', siem_vendor: resolved.destination },
     scope: { window: 'poc_snapshot', window_basis: 'auto_default' },
-    payload: data,
+    payload: pocPayload,
     human_summary: data.human_summary ?? headline,
     actions: toEnvelopeActions(data.next_actions ?? []),
-    warnings,
+    warnings: pocWarnings,
   });
 }
 
-// ─── refresh-mode helpers (Item 7) ────────────────────────────────────
+// ─── refresh-mode helpers ─────────────────────────────────────────────
 interface RefreshState {
   /** Target percent the customer originally committed to. */
   committedTargetPercent: number;
@@ -1143,6 +2004,13 @@ interface ResolvedTarget {
   lookup_path: string;
   gitops_branch: string;
   destination: SiemId;
+  /**
+   * Active env id resolved from envs.json / env vars (LOG10X_ENV_ID). Used
+   * to anchor Prometheus selectors with `tenx_env="<envId>"` so per-pattern
+   * scans don't fan out across every tenant on the shared prom backend.
+   * Undefined for single-tenant prom backends (back-compat fallback).
+   */
+  envId?: string;
 }
 
 async function resolveTarget(
@@ -1151,23 +2019,57 @@ async function resolveTarget(
   let repo: string | undefined = args.gitops_repo;
   let lookupPath: string | undefined = args.lookup_path;
   let destination: SiemId | undefined = args.destination;
+  let envId: string | undefined;
 
-  // 1. Active env from envs.json.
-  if (!repo || !destination) {
+  // 1. Active env from envs.json. Surface the env id alongside gitops/destination
+  //    so Prometheus selectors downstream can anchor with `tenx_env="<envId>"`
+  //    on shared backends (prometheus.log10x.com). Without this anchor the
+  //    per-pattern bytes scan fans out across every tenant whose containers
+  //    share the supplied name, which can push past the 30s backend timeout.
+  try {
+    const envs = await loadEnvironments();
+    const active = (envs as any)?.activeEnv;
+    if (!repo && active?.gitops?.repo) {
+      repo = active.gitops.repo;
+    }
+    if (!lookupPath && active?.gitops?.lookupPath) {
+      lookupPath = active.gitops.lookupPath;
+    }
+    if (!destination && active?.destination) {
+      destination = active.destination as SiemId;
+    }
+    if (typeof active?.envId === 'string' && active.envId) {
+      envId = active.envId;
+    }
+  } catch {
+    // non-fatal — fall through to snapshot / explicit args / env var
+  }
+  if (!envId && typeof process.env.LOG10X_ENV_ID === 'string' && process.env.LOG10X_ENV_ID) {
+    envId = process.env.LOG10X_ENV_ID;
+  }
+
+  // 1b. Env-config doc destination (closes the auto-detect bug — most active
+  //     envs in `~/.log10x/envs.json` do NOT carry a `destination` field, but
+  //     the env-config document persisted to the on-prem store ALWAYS does,
+  //     because the schema requires it). Resolution chain matches every other
+  //     env-config-aware tool: explicit-arg > on-prem-store > env-var fallback.
+  //     We've already honored the explicit arg above; here we consult the
+  //     store before giving up on auto-detect.
+  if (!destination) {
     try {
-      const envs = await loadEnvironments();
-      const active = (envs as any)?.activeEnv;
-      if (!repo && active?.gitops?.repo) {
-        repo = active.gitops.repo;
-      }
-      if (!lookupPath && active?.gitops?.lookupPath) {
-        lookupPath = active.gitops.lookupPath;
-      }
-      if (!destination && active?.destination) {
-        destination = active.destination as SiemId;
+      const resolved = await resolveClusterConfig({ envIdOrNickname: envId });
+      if (resolved.ok && resolved.config.destination?.siem_vendor) {
+        const vendor = resolved.config.destination.siem_vendor;
+        // env-config siem_vendor enum is a superset of the SiemId enum
+        // (`azure-monitor` / `gcp-logging` are in both; `other` is not a
+        // valid SiemId so it stays unresolved and we fall through to the
+        // "destination not resolved" error below).
+        if (vendor !== 'other') {
+          destination = vendor as SiemId;
+        }
       }
     } catch {
-      // non-fatal — fall through to snapshot / explicit args
+      // non-fatal — fall through to snapshot / explicit args / "not resolved"
     }
   }
 
@@ -1187,16 +2089,18 @@ async function resolveTarget(
     if (!destination && recs?.destination) destination = recs.destination as SiemId;
   }
 
-  if (!repo) {
+  // Gate the GitOps repo check on delivery mode. `kubectl_configmap` writes
+  // directly to a k8s ConfigMap on the active cluster and `stdout_only` just
+  // returns the proposed config — neither needs a GitHub repo. Only `gitops`
+  // delivery (the default) requires a resolved `gitops_repo`.
+  if (args.delivery === 'gitops' && !repo) {
     return {
       error: renderError(
         'gitops repo not resolved',
-        'configure_engine needs `gitops_repo` (owner/name) to author the cap-CSV PR. ' +
-        'Three options: ' +
-        '(1) Pass `gitops_repo` directly on this call. ' +
-        '(2) Run `log10x_set_gitops_repo` to write it to `~/.log10x/envs.json` — ' +
-        'then restart the MCP server (log10x_dev_restart) and retry. ' +
-        '(3) Set the `LOG10X_GH_REPO` environment variable on the MCP server process and restart.'
+        '`configure_engine` was called with `delivery=gitops` (the default), which opens a PR against a GitHub repository — and no `gitops_repo` is resolved. Three ways forward: ' +
+        '(1) Switch delivery mode — `delivery="kubectl_configmap"` writes the policy directly to a k8s ConfigMap on the active cluster (no GitHub needed), or `delivery="stdout_only"` returns the proposed config in the response without writing anywhere. ' +
+        '(2) Stay on gitops and pass `gitops_repo` directly on this call (owner/name, e.g. `acme/log10x-config`). ' +
+        '(3) Stay on gitops and run `log10x_set_gitops_repo` to write it to `~/.log10x/envs.json` — then restart the MCP server (`log10x_dev_restart`) and retry. The `LOG10X_GH_REPO` env var on the MCP server process is also honored.'
       ),
     };
   }
@@ -1212,10 +2116,16 @@ async function resolveTarget(
 
   return {
     resolved: {
-      gitops_repo: repo,
+      // For non-gitops delivery (`kubectl_configmap` / `stdout_only`) the
+      // repo may legitimately be unresolved — the gate above only requires
+      // it for `delivery === 'gitops'`. Fall back to an empty string so the
+      // resolved struct stays typed; downstream `renderPrCommand` is only
+      // invoked on the gitops path where `repo` was guaranteed to resolve.
+      gitops_repo: repo ?? '',
       lookup_path: lookupPath ?? args.lookup_path ?? DEFAULT_LOOKUP_PATH,
       gitops_branch: args.gitops_branch ?? 'main',
       destination,
+      envId,
     },
   };
 }
@@ -1228,13 +2138,37 @@ interface PerPattern {
   severity: string;
 }
 
+// Server-side cap on the number of patterns returned. The greedy solver
+// processes candidates DESC by bytes; the long tail past this cut contributes
+// well under 1% of total volume and is handled by the container-level cap row.
+// Bounded N keeps the Prometheus payload + per-attempt cost predictable so the
+// 30s backend-fetch ceiling doesn't fire on high-cardinality envs (1k+ patterns).
+const PER_PATTERN_TOPK = parseInt(process.env.LOG10X_CONFIGURE_ENGINE_TOPK || '500', 10) || 500;
+
 async function fetchPerPatternBytes(
-  backend: CustomerMetricsBackend,
+  env: EnvConfig,
   containers: string[],
-  observationDays: number
+  observationDays: number,
+  envId: string | undefined
 ): Promise<PerPattern[]> {
   const containerRegex = containers.map(promEscape).join('|');
-  const filter = `k8s_container=~"${containerRegex}"`;
+  // Anchor with `tenx_env="<envId>"` so Prometheus scans only the active
+  // tenant's series. On shared backends (prometheus.log10x.com) skipping
+  // this clause means the inner `sum by (...) (increase(...))` materializes
+  // every tenant whose containers happen to share the supplied name; the
+  // outer topk(500) can't slice until that inner result is fully built,
+  // which is what pushes per-attempt fetches past the 30s ceiling. Other
+  // tools (investigate, pattern-examples, doctor) all anchor on LABELS.env;
+  // this matches that canonical pattern.
+  if (!envId) {
+    console.warn(
+      '[configure_engine] No envId resolved (envs.json `activeEnv.envId` / LOG10X_ENV_ID); ' +
+      'per-pattern bytes query will scan all tenants on shared Prom backends — ' +
+      'consider setting LOG10X_ENV_ID or running log10x_discover_env first.'
+    );
+  }
+  const envClause = envId ? `${LABELS.env}="${promEscape(envId)}",` : '';
+  const filter = `${envClause}k8s_container=~"${containerRegex}"`;
   const window = `${observationDays}d`;
 
   // Pattern bytes (grouped by tenx_hash + severity_level to drive tier
@@ -1242,27 +2176,35 @@ async function fetchPerPatternBytes(
   // default; per-env relabels are handled by the env's LabelNameMap, but
   // configure_engine intentionally uses the default for now — relabeled
   // envs will hit the missing-label warning path below.
-  const bytesQ = `sum by (tenx_hash, severity_level)(increase(all_events_summaryBytes_total{${filter}}[${window}]))`;
-  const eventsQ = `sum by (tenx_hash)(increase(all_events_summaryVolume_total{${filter}}[${window}]))`;
+  //
+  // topk(N) caps both response size and Prometheus' streaming cost: the
+  // engine stops materializing series past rank N. For the greedy solver
+  // this is loss-free at the budget level because the cut-off patterns
+  // contribute negligibly to total bytes and are absorbed by the
+  // container-default cap row in the rendered CSV. Note topk is an OUTER
+  // operator — Prom must fully evaluate the inner increase() before
+  // slicing — so the tenx_env anchor above is the real cardinality cut.
+  const bytesQ = `topk(${PER_PATTERN_TOPK}, sum by (${LABELS.hash}, ${LABELS.severity})(increase(all_events_summaryBytes_total{${filter}}[${window}])))`;
+  const eventsQ = `topk(${PER_PATTERN_TOPK}, sum by (${LABELS.hash})(increase(all_events_summaryVolume_total{${filter}}[${window}])))`;
 
   const [bytesRes, eventsRes] = await Promise.all([
-    backend.queryInstant(bytesQ) as Promise<PrometheusResponse>,
-    backend.queryInstant(eventsQ) as Promise<PrometheusResponse>,
+    queryInstant(env, bytesQ),
+    queryInstant(env, eventsQ),
   ]);
 
   const eventsByHash = new Map<string, number>();
   for (const r of eventsRes.data.result) {
-    const h = r.metric.tenx_hash;
+    const h = r.metric[LABELS.hash];
     if (!h) continue;
     eventsByHash.set(h, parseFloat(r.value?.[1] ?? '0'));
   }
 
   const byHash = new Map<string, PerPattern>();
   for (const r of bytesRes.data.result) {
-    const h = r.metric.tenx_hash;
+    const h = r.metric[LABELS.hash];
     if (!h) continue;
     const bytes = parseFloat(r.value?.[1] ?? '0');
-    const severity = r.metric.severity_level ?? '';
+    const severity = r.metric[LABELS.severity] ?? '';
     const existing = byHash.get(h);
     if (existing) {
       existing.bytes += bytes;
@@ -1700,7 +2642,7 @@ function isGitopsHint(hint: string): boolean {
 /**
  * Derives structured chain-next nudges from an error hint string.
  *
- * Mapping (aligned with defect-39 spec):
+ * Mapping:
  *   config_missing + gitops/GH_REPO mention  → log10x_set_gitops_repo
  *   schema_invalid / "invalid" / "required"   → log10x_explain_mode + log10x_cost_options
  *
@@ -1780,6 +2722,142 @@ export { COST_MODEL_BY_DESTINATION, MIN_REPORTER_DAYS, WINDOWS_PER_DAY, WINDOWS_
  * `bash -s` (NOT `bash -c "<string>"`) so quoting/escaping inside the
  * script does not get mangled by the shell.
  */
+/**
+ * Apply via kubectl_configmap: write the cap-CSV + action-intent.json
+ * directly to a k8s ConfigMap. The engine's ConfigMap pull driver
+ * (configured via $K8S_CONFIGMAP env var on the receiver pod, default
+ * `log10x-action-intent`) reads from this ConfigMap and hot-reloads the
+ * policy without a pipeline restart.
+ *
+ * The ConfigMap carries TWO keys the engine expects:
+ *   - `caps.csv` (engine's safety floor — per-container + per-pattern caps)
+ *   - `action-intent.json` (canonical per-pattern action mapping)
+ *
+ * Uses `kubectl apply -f -` so existing ConfigMaps are updated in place
+ * (server-side apply semantics) and new ones are created. The actual
+ * cluster + namespace come from the caller's kubeconfig context — the
+ * MCP doesn't pick a context, the operator does.
+ */
+async function applyViaKubectlConfigMap(
+  capCsv: string,
+  actionIntentJson: string | undefined,
+  configMapName: string,
+  namespace: string
+): Promise<{
+  ok: boolean;
+  configmap_location?: { namespace: string; name: string; keys: string[] };
+  error?: string;
+}> {
+  const data: Record<string, string> = { 'caps.csv': capCsv };
+  if (actionIntentJson) data['action-intent.json'] = actionIntentJson;
+  const cm = {
+    apiVersion: 'v1',
+    kind: 'ConfigMap',
+    metadata: {
+      name: configMapName,
+      namespace,
+      labels: {
+        'app.kubernetes.io/managed-by': 'log10x-mcp',
+        'app.kubernetes.io/component': 'engine-policy',
+      },
+      annotations: {
+        'log10x.com/written-by': 'log10x_configure_engine',
+        'log10x.com/written-at': new Date().toISOString(),
+      },
+    },
+    data,
+  };
+  const yamlOrJson = JSON.stringify(cm);
+  return await new Promise((resolve) => {
+    let stderr = '';
+    let settled = false;
+    const child = spawn('kubectl', ['apply', '-f', '-'], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: process.env,
+    });
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          // ignore
+        }
+        resolve({ ok: false, error: 'kubectl apply timed out after 30s' });
+      }
+    }, 30_000);
+    child.stderr.on('data', (d) => {
+      stderr += d.toString();
+    });
+    child.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ ok: false, error: `kubectl spawn failed: ${err.message}` });
+    });
+    child.on('close', (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (code === 0) {
+        resolve({
+          ok: true,
+          configmap_location: {
+            namespace,
+            name: configMapName,
+            keys: Object.keys(data),
+          },
+        });
+      } else {
+        resolve({
+          ok: false,
+          error: `kubectl apply exited ${code}: ${stderr.trim() || 'no stderr'}`,
+        });
+      }
+    });
+    child.stdin.end(yamlOrJson);
+  });
+}
+
+/**
+ * Persist a commitment record on successful apply (gitops PR-open OR
+ * kubectl_configmap write). Builds the record from the args + derivation
+ * outputs and writes to $LOG10X_ADVISOR_STATE_DIR/commitments/<id>.json
+ * via putCommitment. commitment_report reads from this directory to
+ * compute realized savings against the baseline captured at apply time.
+ *
+ * Returns the commitment id so the apply path can surface it in the
+ * response envelope.
+ */
+function persistCommitmentOnApply(opts: {
+  service: string;
+  envNickname: string;
+  destination: SiemId;
+  targetPercent: number;
+  contractType: 'committed' | 'on_demand';
+  baselineMonthlyBytes: number;
+  baselineMonthlyUsd: number;
+  observationDays: number;
+  deliveryTarget?: CommitmentRecord['delivery_target'];
+}): string {
+  const id = randomUUID();
+  const rec: CommitmentRecord = {
+    id,
+    env: opts.envNickname,
+    service: opts.service,
+    destination: opts.destination,
+    promised_pct: opts.targetPercent,
+    contract_type: opts.contractType,
+    started_at: new Date().toISOString(),
+    baseline_window: `${opts.observationDays}d`,
+    baseline_bytes_30d: opts.baselineMonthlyBytes,
+    baseline_usd_monthly: opts.baselineMonthlyUsd,
+    delivery_target: opts.deliveryTarget,
+  };
+  putCommitment(rec);
+  return id;
+}
+
 async function applyViaGh(prCommand: string): Promise<{
   ok: boolean;
   pr_url?: string;

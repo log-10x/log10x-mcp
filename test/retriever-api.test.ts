@@ -48,6 +48,11 @@ test('parseTimeExpression is an alias for normalizeTimeExpression', () => {
 });
 
 test('isRetrieverConfiguredSync requires both __SAVE_LOG10X_RETRIEVER_URL__ and __SAVE_LOG10X_RETRIEVER_BUCKET__', () => {
+  // isRetrieverConfigured() became async on 2026-06-04 (Fix 83a/83b helm-probe
+  // cascade) and now resolves to true via the kubectl/helm probe even with no
+  // env vars set. isRetrieverConfiguredSync() is the env-only fast-path helper
+  // kept for exactly this back-compat contract, so the deterministic
+  // both-env-vars-required assertion targets it.
   const savedUrl = process.env.__SAVE_LOG10X_RETRIEVER_URL__;
   const savedBucket = process.env.__SAVE_LOG10X_RETRIEVER_BUCKET__;
   try {

@@ -101,15 +101,16 @@ test('stress: metrics_that_moved with 100 candidates + 10% 503 rail completes co
     const elapsedMs = Date.now() - startMs;
 
     if (typeof out === 'string') throw new Error('expected envelope');
-    // Chassis refactor: tool-specific result rows now live under
-    // out.data.payload (was out.data). The flat fields on data are the
-    // shared chassis surface (status/decisions/scope/...).
-    const data = (out.data as { payload: unknown }).payload as {
-      moved: unknown[];
-      not_moved: unknown[];
-      evaluation_failed: string[];
-      n_candidates_evaluated: number;
-    };
+    // ChassisEnvelope migration: tool result rows now nest under
+    // out.data.payload (buildChassisEnvelope sets data.payload = summary).
+    const data = (out.data as {
+      payload: {
+        moved: unknown[];
+        not_moved: unknown[];
+        evaluation_failed: string[];
+        n_candidates_evaluated: number;
+      };
+    }).payload;
 
     // No thrown exception — coverage on the partial-failure path.
     // moved + not_moved + failed must sum to the input count.
@@ -183,8 +184,8 @@ test('stress: rank_by_shape with 100 candidates + injected latency stays within 
     const elapsedMs = Date.now() - startMs;
 
     if (typeof out === 'string') throw new Error('expected envelope');
-    // Chassis refactor: result rows now live under out.data.payload.
-    const data = (out.data as { payload: unknown }).payload as { ranked: unknown[]; evaluation_failed: string[] };
+    // ChassisEnvelope migration: result rows nest under out.data.payload.
+    const data = (out.data as { payload: { ranked: unknown[]; evaluation_failed: string[] } }).payload;
     assert.equal(data.ranked.length + data.evaluation_failed.length, 100);
 
     // Lower bound: 101 queries (1 anchor + 100 candidates) × 5ms ≈ 500ms.
@@ -233,8 +234,8 @@ test('stress: every candidate 503s → ALL go to evaluation_failed[], no crash',
       ENV,
     );
     if (typeof out === 'string') throw new Error('expected envelope');
-    // Chassis refactor: result rows now live under out.data.payload.
-    const data = (out.data as { payload: unknown }).payload as { evaluation_failed: string[]; moved: unknown[]; not_moved: unknown[] };
+    // ChassisEnvelope migration: result rows nest under out.data.payload.
+    const data = (out.data as { payload: { evaluation_failed: string[]; moved: unknown[]; not_moved: unknown[] } }).payload;
     // At least 45/50 should fail at rate 0.99.
     assert.ok(
       data.evaluation_failed.length >= 45,

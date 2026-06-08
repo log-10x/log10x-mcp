@@ -25,6 +25,7 @@ import {
 import { DEFAULT_LABELS, type LabelNameMap } from '../lib/promql.js';
 import { validateBackend, renderValidationResult } from '../lib/backend-validator.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { requireWriteAccess } from '../lib/read-only-guard.js';
 
 const promAuthSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('none') }),
@@ -134,6 +135,7 @@ function buildHumanSummary(result: ConfigureEnvInner): string {
 }
 
 export async function executeConfigureEnv(args: ConfigureEnvArgs): Promise<string | StructuredOutput> {
+  requireWriteAccess('writes a new env entry to ~/.log10x/envs.json');
   const result = await executeConfigureEnvInner(args);
   return buildEnvelope({
     tool: 'log10x_configure_env',

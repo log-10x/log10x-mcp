@@ -51,10 +51,12 @@ import { writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { requireWriteAccess } from '../lib/read-only-guard.js';
 
 export const devRestartSchema = {};
 
 export function executeDevRestart(): StructuredOutput {
+  requireWriteAccess('exits the MCP server process to force a respawn (developer-only)');
   const envelope = buildEnvelope({
     tool: 'log10x_dev_restart',
     view: 'summary',

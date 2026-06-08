@@ -255,18 +255,16 @@ test('cap_csv emitted in 6-action vocab and parses back via cap-csv-parser', asy
   assert.equal(parsed.malformed_lines.length, 0, 'every row parses cleanly');
   // Container-level rows for each observed service.
   assert.ok(parsed.by_container.size >= 1, 'at least one container default row');
-  // The exception service (orders) is pinned as pass-through. Action routing
-  // moved out of the cap-CSV (into data/action-intent.json), so the row marks
-  // the exception via its reason rather than a structured per-row action field.
+  // The exception service (orders) gets an exception-pinned container row.
+  // Action attribution no longer lives in the cap CSV (it moved to
+  // data/action-intent.json per the e057eb1 refactor), so the exception is
+  // signaled via the reason field rather than a `:action` suffix.
   const orders = parsed.by_container.get('orders');
   assert.ok(orders, 'orders container row present (exception service)');
   assert.equal(orders.reason, 'service_pinned_by_exception_list');
-  // Every emitted row is well-formed: a finite, non-negative byte cap.
+  // The cap CSV no longer carries an action suffix on any row.
   for (const r of parsed.rows) {
-    assert.ok(
-      Number.isFinite(r.bytes_cap) && r.bytes_cap >= 0,
-      `row ${r.key} has invalid bytes_cap ${r.bytes_cap}`
-    );
+    assert.equal(r.legacy_action_suffix, undefined, 'cap CSV carries no action suffix');
   }
 });
 

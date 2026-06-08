@@ -19,8 +19,9 @@ import type { StructuredOutput } from '../src/lib/output-types.js';
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
 function asEnvelope(out: StructuredOutput): PreviewFilterEnvelope {
-  // After the chassis-envelope refactor, the tool-specific envelope lives
-  // under data.payload (ChassisData wraps it); data itself is the chassis.
+  // The tool now returns a chassis envelope (buildChassisEnvelope) that nests
+  // the tool-specific payload under out.data.payload. The PreviewFilterEnvelope
+  // fields (service, mode, patterns, csv_path, data_source, ...) live there.
   return (out.data as { payload: PreviewFilterEnvelope }).payload;
 }
 
@@ -231,22 +232,21 @@ test('preview_filter: actions[] alternative entries all reference log10x_pattern
   }
 });
 
-// stale vs refactored source — needs maintainer reconciliation
-// The second action per pattern (log10x_pattern_examples) is SIEM/backend-gated,
-// so the "×2 per pattern" count only holds with a live backend+SIEM present
-// (true locally, not on the clean CI runner → ×1 there). Same root as the skip below.
-test.skip('preview_filter: actions[] count is two entries per pattern (pattern_detail + pattern_examples)', async () => {
+test('preview_filter: actions[] are two entries (pattern_detail + pattern_examples) for the top-3 patterns', async () => {
   const out = await executePreviewFilter({ service: 'cart', mode: 'drop', top_n: 10 });
   const d = asEnvelope(out);
   const actions = (out as StructuredOutput & { actions?: unknown[] }).actions ?? [];
-  assert.equal(actions.length, d.patterns.length * 2, 'two actions per pattern row (pattern_detail + pattern_examples)');
+  // Source caps actions to the top-3 patterns (defect 27: was 40-entry bloat),
+  // emitting exactly two entries each (pattern_detail + pattern_examples).
+  const expectedPatternCount = Math.min(d.patterns.length, 3);
+  assert.equal(
+    actions.length,
+    expectedPatternCount * 2,
+    'two actions per top-3 pattern row (pattern_detail + pattern_examples)',
+  );
 });
 
-// stale vs refactored source — needs maintainer reconciliation
-// Requires patterns (and thus actions[]) to be non-empty, but without a live
-// metrics backend the source returns zero patterns → empty actions[], so no
-// log10x_pattern_examples entry can ever appear in this environment.
-test.skip('preview_filter: actions[] includes log10x_pattern_examples entries with pattern arg', async () => {
+test('preview_filter: actions[] includes log10x_pattern_examples entries with pattern arg', async () => {
   const out = await executePreviewFilter({ service: 'cart', mode: 'drop' });
   const actions = (out as StructuredOutput & { actions?: Array<{ tool: string; args: Record<string, unknown>; role: string }> }).actions ?? [];
   const examples = actions.filter((a) => a.tool === 'log10x_pattern_examples');

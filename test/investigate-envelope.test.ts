@@ -127,6 +127,7 @@ const emptyParsed = {
   shape: null,
   mode: null,
   investigationId: null,
+  anchorPattern: null,
   leadPattern: null,
   leadService: null,
   leadConfidence: null,
@@ -153,11 +154,11 @@ test('buildHumanSummary: success with lead → strongest-evidence framing, not v
     },
     'unvalidated_default',
   );
-  assert.match(summary, /strongest temporal evidence/i);
-  assert.match(summary, /dns_lookup_failures/);
-  assert.match(summary, /90s before/);
+  assert.match(summary, /strongest evidence/i);
+  assert.match(summary, /dns lookup failures/);
+  assert.match(summary, /90s earlier/);
   assert.match(summary, /correlation, not proven cause/i);
-  assert.match(summary, /unvalidated defaults/i);
+  assert.match(summary, /not yet tuned for your data/i);
 });
 
 test('buildHumanSummary: success with caller_override → no unvalidated tag', () => {
@@ -178,16 +179,16 @@ test('buildHumanSummary: success with caller_override → no unvalidated tag', (
   assert.doesNotMatch(summary, /unvalidated/i);
 });
 
-test('buildHumanSummary: no_signal → "no co-movers above the noise floor", stop searching', () => {
+test('buildHumanSummary: no_signal → "nothing crossed our default match-strength floor", suggests widening', () => {
   const summary = buildHumanSummary('foo', '1h', 'no_signal', emptyParsed, 'unvalidated_default');
-  assert.match(summary, /no co-movers above the noise floor/i);
-  assert.match(summary, /widen the window|deep depth|no detectable lead/i);
-  assert.match(summary, /unvalidated defaults/i);
+  assert.match(summary, /match-strength floor/i);
+  assert.match(summary, /widening to 24h/i);
+  assert.match(summary, /not yet tuned for your data/i);
 });
 
-test('buildHumanSummary: insufficient_data → "could not produce a usable analysis"', () => {
+test('buildHumanSummary: insufficient_data → "couldn\'t produce a usable analysis"', () => {
   const summary = buildHumanSummary('foo', '1h', 'insufficient_data', emptyParsed, 'unvalidated_default');
-  assert.match(summary, /could not produce a usable analysis|widen the window|re-anchor/i);
+  assert.match(summary, /couldn't produce a usable analysis|widening the window/i);
 });
 
 test('buildHumanSummary: error → references data.error', () => {

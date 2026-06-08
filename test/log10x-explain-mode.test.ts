@@ -32,35 +32,36 @@ import { isStructuredOutput, StructuredOutputSchema } from '../src/lib/output-ty
 // ── Helpers ─────────────────────────────────────────────────────────────────────
 
 /**
- * Post-chassis-refactor, executeExplainMode returns a ChassisEnvelope: the
- * tool-specific fields (service, mode, destination, routes_to, byte/cost
- * figures) live under `result.data.payload`, while the compliance levers
- * (must_render_verbatim, must_ask_user, forbidden_next_actions) live at the
- * top level of `result.data`. Flatten both into a single ExplainModeEnvelope
- * view so the assertions below read fields off one object as before.
+ * Call the tool and flatten the ChassisEnvelope back to the ExplainMode shape
+ * the assertions read.
  *
- * An explicit compatible destination (azure-monitor — the one SIEM that
- * supports both compact and tier_down) is passed so every mode resolves
- * compatible regardless of any ambient SIEM creds auto-detected on the host.
+ * The tool was migrated to buildChassisEnvelope, which nests the tool-specific
+ * rows (service, mode, destination, routes_to, service_bytes_per_month,
+ * service_cost_per_month_usd) under `data.payload.*`, while lifting the
+ * orientation fields (must_render_verbatim, must_ask_user,
+ * forbidden_next_actions, human_summary) to `data.*` top-level. We merge both
+ * levels so `data.service` / `data.routes_to` and `data.must_render_verbatim`
+ * all resolve. There is no key collision between the two levels.
+ *
+ * An explicit, fully-compatible destination ('azure-monitor' is in MODE_COMPAT
+ * for BOTH compact and tier_down) is passed so the call does not auto-detect a
+ * destination from the public demo backend — that auto-detect resolves to
+ * cloudwatch, which is incompatible with compact and would flip must_ask_user
+ * into the 4-option "choose an alternative" branch. Passing the destination
+ * also short-circuits the auto-detect network round-trip, keeping the run
+ * deterministic.
  */
-function flattenExplainData(result: Awaited<ReturnType<typeof executeExplainMode>>): ExplainModeEnvelope {
-  const d = result.data as Record<string, unknown>;
-  const payload = d.payload as Record<string, unknown>;
-  return {
-    ...payload,
-    must_render_verbatim: d.must_render_verbatim,
-    must_ask_user: d.must_ask_user,
-    forbidden_next_actions: d.forbidden_next_actions,
-  } as unknown as ExplainModeEnvelope;
-}
-
-/** Call the tool with an explicit all-mode-compatible destination */
-async function runMode(mode: ExplainMode, service = 'payments'): Promise<{
+async function runMode(
+  mode: ExplainMode,
+  service = 'payments',
+  destination = 'azure-monitor',
+): Promise<{
   result: Awaited<ReturnType<typeof executeExplainMode>>;
   data: ExplainModeEnvelope;
 }> {
-  const result = await executeExplainMode({ service, mode, destination: 'azure-monitor' });
-  const data = flattenExplainData(result);
+  const result = await executeExplainMode({ service, mode, destination });
+  const out = result.data as { payload?: Partial<ExplainModeEnvelope> } & Partial<ExplainModeEnvelope>;
+  const data = { ...(out.payload ?? {}), ...out } as ExplainModeEnvelope;
   return { result, data };
 }
 
@@ -262,7 +263,7 @@ test('all modes route preview to log10x_preview_filter with service and mode', a
 // ── actions[] both branches with role='alternative' ──────────────────────────────
 
 test('actions[] contains both apply and preview branches as alternatives (non-observe mode)', async () => {
-  const result = await executeExplainMode({ service: 'payments', mode: 'drop', destination: 'azure-monitor' });
+  const result = await executeExplainMode({ service: 'payments', mode: 'drop' });
   assert.ok(Array.isArray(result.actions), 'actions must be an array');
   assert.equal(result.actions.length, 2, 'exactly 2 actions (apply + preview) for non-observe mode');
   for (const action of result.actions) {
@@ -275,7 +276,7 @@ test('actions[] contains both apply and preview branches as alternatives (non-ob
 });
 
 test('actions[] for observe_only contains only the preview branch', async () => {
-  const result = await executeExplainMode({ service: 'payments', mode: 'observe_only', destination: 'azure-monitor' });
+  const result = await executeExplainMode({ service: 'payments', mode: 'observe_only' });
   assert.ok(Array.isArray(result.actions), 'actions must be an array');
   assert.equal(result.actions.length, 1, 'observe_only must have exactly 1 action (preview only)');
   assert.equal(result.actions[0].tool, 'log10x_preview_filter');
@@ -286,10 +287,9 @@ test('actions[] for observe_only contains only the preview branch', async () => 
 
 test('all 6 EXPLAIN_MODES produce a valid StructuredOutput with all required fields', async () => {
   for (const mode of EXPLAIN_MODES) {
-    const result = await executeExplainMode({ service: 'orders', mode, destination: 'azure-monitor' });
+    const { result, data } = await runMode(mode, 'orders');
     assert.ok(isStructuredOutput(result), `mode ${mode}: expected StructuredOutput`);
     StructuredOutputSchema.parse(result);
-    const data = flattenExplainData(result);
     assert.equal(data.mode, mode, `data.mode must equal ${mode}`);
     assert.ok(data.must_render_verbatim.length > 0, `mode ${mode}: verbatim must be non-empty`);
     assert.ok(data.forbidden_next_actions.length >= 4, `mode ${mode}: forbidden_next_actions must have at least 4 entries`);

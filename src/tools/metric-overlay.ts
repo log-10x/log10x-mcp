@@ -31,7 +31,7 @@
 
 import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
-import { queryRange } from '../lib/api.js';
+import { queryInstant, queryRange } from '../lib/api.js';
 import { resolveBackend, customerMetricsNotConfiguredMessage, formatDetectionTrace } from '../lib/customer-metrics.js';
 import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
@@ -42,6 +42,7 @@ import { computeAnchorDispersion, ANCHOR_DISPERSION_FLOOR } from '../lib/anchor-
 import { canonicalMetricRef } from '../lib/metric-ref.js';
 import { wrapBackendError, type PrimitiveError } from '../lib/primitive-errors.js';
 import { buildChassisEnvelope } from '../lib/chassis-envelope.js';
+import { looksLikePatternHash } from '../lib/anchor-promql.js';
 
 export const metricOverlaySchema = {
   anchor_type: z
@@ -75,6 +76,16 @@ export const metricOverlaySchema = {
     .default(240)
     .describe('Max buckets to return in the aligned output. Pre-truncates from the most recent end if window/step exceeds this.'),
   environment: z.string().optional().describe('Environment nickname (for multi-env setups).'),
+  customer_metrics_url: z
+    .string()
+    .optional()
+    .describe(
+      'Per-call override for the customer metrics backend URL. Wins over LOG10X_CUSTOMER_METRICS_URL env var. Use when MCP was launched with an empty/stale URL.'
+    ),
+  customer_metrics_type: z
+    .enum(['grafana_cloud', 'amp', 'datadog_prom', 'generic_prom', 'log10x'])
+    .optional(),
+  customer_metrics_auth: z.string().optional(),
 };
 
 /**
@@ -152,24 +163,66 @@ export async function executeMetricOverlay(
     step?: string;
     max_buckets?: number;
     environment?: string;
+    customer_metrics_url?: string;
+    customer_metrics_type?: string;
+    customer_metrics_auth?: string;
     /** Ignored. Retained for backward-compat with in-process callers. */
     view?: 'summary' | 'markdown';
   },
   env: EnvConfig,
 ): Promise<StructuredOutput> {
-  const candidateNormalized = argsInput.candidate ?? argsInput.candidates?.[0];
-  if (!candidateNormalized) {
-    throw new Error('metric_overlay requires `candidate` (string) or `candidates` (string[]) with at least one entry.');
-  }
-  const args = { ...argsInput, candidate: candidateNormalized };
-  const window = args.window ?? args.timeRange ?? '1h';
-  const stepStr = args.step ?? '30s';
+  let candidateNormalized = argsInput.candidate ?? argsInput.candidates?.[0];
+  // Track whether the candidate was auto-sourced from the anchor's top
+  // services (fallback path), so we can surface that in `human_summary`
+  // and the structured envelope. Null when the caller threaded the
+  // candidate in explicitly.
+  let candidateAutoSource: string | null = null;
+  const window = argsInput.window ?? argsInput.timeRange ?? '1h';
+  const stepStr = argsInput.step ?? '30s';
   const stepSeconds = parseStep(stepStr);
-  const maxBuckets = args.max_buckets ?? 240;
+  const maxBuckets = argsInput.max_buckets ?? 240;
 
   const tf = parseTimeframe(window);
   const nowSec = Math.floor(Date.now() / 1000);
   const fromSec = nowSec - Math.floor(tf.days * 86400);
+
+  // ── Auto-source fallback ────────────────────────────────────────────
+  // When no candidate is threaded in (common when the caller skipped
+  // rank_by_shape_similarity and went straight to overlay), try to source
+  // a candidate from the anchor's top emitting services rather than
+  // hard-erroring. Same code path rank_by_shape would use to discover
+  // candidates from anchor context: a log10x-side sum-by-service rate
+  // query keyed off the pattern label, with the top bytes-emitting
+  // service used as the overlay candidate.
+  //
+  // The fallback only fires for `log10x_pattern` anchors — `customer_metric`
+  // anchors have no log10x-side service attribution to query, so we
+  // surface the input_invalid envelope unchanged.
+  if (!candidateNormalized && argsInput.anchor_type === 'log10x_pattern') {
+    try {
+      const sourced = await sourceTopServiceCandidateForPatternAnchor(
+        argsInput.anchor,
+        env,
+        Math.max(stepSeconds * 3, 180),
+      );
+      if (sourced) {
+        candidateNormalized = sourced.candidatePromql;
+        candidateAutoSource = sourced.serviceLabel;
+      }
+    } catch {
+      // Auto-source is best-effort; fall through to input_invalid below.
+    }
+  }
+  if (!candidateNormalized) {
+    return overlayInputInvalidEnvelope({
+      anchor_type: argsInput.anchor_type,
+      anchor_expression: argsInput.anchor,
+      window,
+      stepSeconds,
+      thresholdBasis: 'unvalidated_default',
+    });
+  }
+  const args = { ...argsInput, candidate: candidateNormalized };
 
   // metric_overlay has no thresholds, so threshold_basis is always
   // unvalidated_default (no caller can override what doesn't exist).
@@ -200,7 +253,11 @@ export async function executeMetricOverlay(
       anchorSeries = extractFirstSeries(res);
     } else {
       anchorExpression = args.anchor;
-      const backend = await resolveBackend();
+      const backend = await resolveBackend({
+        url: args.customer_metrics_url,
+        type: args.customer_metrics_type,
+        auth: args.customer_metrics_auth,
+      });
       if (!backend.backend) {
         // Expected not_configured state, not a failure; branchable envelope.
         return buildNotConfiguredEnvelope({
@@ -249,19 +306,31 @@ export async function executeMetricOverlay(
     });
   }
 
-  // ── Fetch candidate series (always customer-side) ───────────────────
-  const backend = await resolveBackend();
-  if (!backend.backend) {
-    return buildNotConfiguredEnvelope({
-      tool: 'log10x_metric_overlay',
-      kind: 'customer_metrics',
-      remediation: customerMetricsNotConfiguredMessage(formatDetectionTrace(backend.trace)),
-    });
-  }
+  // ── Fetch candidate series ──────────────────────────────────────────
+  // Normal path: candidate is customer-side PromQL → customer backend.
+  // Auto-sourced fallback path: candidate is a log10x-side PromQL built
+  // from the anchor's top service → log10x Prometheus (queryRange(env,...)).
   let candSeries: Array<[number, number]>;
   try {
-    const candRes = await timedQuery(() => backend.backend!.queryRange(args.candidate, fromSec, nowSec, stepSeconds));
-    candSeries = extractFirstSeries(candRes);
+    if (candidateAutoSource) {
+      const candRes = await timedQuery(() => queryRange(env, args.candidate, fromSec, nowSec, stepSeconds));
+      candSeries = extractFirstSeries(candRes);
+    } else {
+      const backend = await resolveBackend({
+        url: args.customer_metrics_url,
+        type: args.customer_metrics_type,
+        auth: args.customer_metrics_auth,
+      });
+      if (!backend.backend) {
+        return buildNotConfiguredEnvelope({
+          tool: 'log10x_metric_overlay',
+          kind: 'customer_metrics',
+          remediation: customerMetricsNotConfiguredMessage(formatDetectionTrace(backend.trace)),
+        });
+      }
+      const candRes = await timedQuery(() => backend.backend!.queryRange(args.candidate, fromSec, nowSec, stepSeconds));
+      candSeries = extractFirstSeries(candRes);
+    }
   } catch (e) {
     const err = wrapBackendError(e);
     if (/HTTP 429/.test(err.hint)) throttledHit = true;
@@ -332,16 +401,19 @@ export async function executeMetricOverlay(
       : 'success';
 
   const candidate_ref = canonicalMetricRef(args.candidate);
+  const autoSourceSuffix = candidateAutoSource
+    ? ` Candidate auto-sourced from anchor's top service "${candidateAutoSource}" (no candidate was threaded in).`
+    : '';
   const human_summary =
     status === 'no_signal'
-      ? `No overlapping data between anchor "${anchorExpression}" and candidate "${args.candidate}" in this window. Either widen the window, check that both metrics emitted during it, or pick a different candidate.`
+      ? `No overlapping data between anchor "${anchorExpression}" and candidate "${args.candidate}" in this window. Either widen the window, check that both metrics emitted during it, or pick a different candidate.${autoSourceSuffix}`
       : peakOffset === null
-        ? `Overlay of "${args.candidate}" against the anchor. ${nAligned} aligned buckets. One side has no peak — likely too few data points on the candidate.`
+        ? `Overlay of "${args.candidate}" against the anchor. ${nAligned} aligned buckets. One side has no peak — likely too few data points on the candidate.${autoSourceSuffix}`
         : peakOffset < 0
-          ? `Candidate "${args.candidate}" peaks ${Math.abs(peakOffset)}s BEFORE the anchor. Possible upstream cause. ${nAligned} aligned buckets.`
+          ? `Candidate "${args.candidate}" peaks ${Math.abs(peakOffset)}s BEFORE the anchor. Possible upstream cause. ${nAligned} aligned buckets.${autoSourceSuffix}`
           : peakOffset > 0
-            ? `Candidate "${args.candidate}" peaks ${peakOffset}s AFTER the anchor. Possible downstream effect. ${nAligned} aligned buckets.`
-            : `Candidate "${args.candidate}" peaks at the same time as the anchor. ${nAligned} aligned buckets.`;
+            ? `Candidate "${args.candidate}" peaks ${peakOffset}s AFTER the anchor. Possible downstream effect. ${nAligned} aligned buckets.${autoSourceSuffix}`
+            : `Candidate "${args.candidate}" peaks at the same time as the anchor. ${nAligned} aligned buckets.${autoSourceSuffix}`;
 
   const data: MetricOverlaySummary = {
     status,
@@ -378,7 +450,10 @@ export async function executeMetricOverlay(
     view: 'summary',
     headline,
     status: status === 'no_signal' ? 'no_signal' : 'success',
-    decisions: { threshold_used: null, threshold_basis: 'default' },
+    // Mirror payload.threshold_basis ('unvalidated_default') into the chassis
+    // decision so the two surfaces don't disagree. The anchor dispersion floor
+    // (0.15) is hand-picked, so 'unvalidated_default' is the honest value.
+    decisions: { threshold_used: ANCHOR_DISPERSION_FLOOR, threshold_basis: 'unvalidated_default' },
     source_disclosure: {},
     scope: {
       window,
@@ -388,6 +463,89 @@ export async function executeMetricOverlay(
     },
     payload: data,
     human_summary,
+    telemetry: { startedAt: Date.now() - totalLatencyMs, queryCount, throttledHit },
+  });
+}
+
+/**
+ * Auto-source helper: given a `log10x_pattern` anchor (Symbol Message name
+ * OR 11-char `pattern_hash`/`tenx_hash`), find the top bytes-emitting
+ * service for that pattern in log10x's Prometheus and return a candidate
+ * PromQL expression for the service's overall log-byte rate. Same engine
+ * series rank_by_shape_similarity would query when sourcing per-service
+ * candidates — `sum by (tenx_user_service) (increase(...[1h]))` to pick
+ * the top, then `sum(rate(...[range]))` filtered to that service for the
+ * overlay candidate.
+ *
+ * Returns null when:
+ *   - the anchor returns no services in the last hour (likely not_found),
+ *   - the metrics-env resolution fails,
+ *   - any backend call errors (best-effort; caller falls back to
+ *     input_invalid envelope).
+ */
+async function sourceTopServiceCandidateForPatternAnchor(
+  anchor: string,
+  env: EnvConfig,
+  rateRangeSec: number,
+): Promise<{ candidatePromql: string; serviceLabel: string } | null> {
+  try {
+    const metricsEnv = await resolveMetricsEnv(env);
+    const selectorLabel = looksLikePatternHash(anchor) ? LABELS.hash : LABELS.pattern;
+    const escapedAnchor = anchor.replace(/"/g, '\\"');
+    const escapedEnv = metricsEnv.replace(/"/g, '\\"');
+    // Instant top-1 ranking by 1h bytes attributed to this pattern across
+    // services. Cheap on every Prom-compatible backend.
+    const rankQ =
+      `topk(1, sum by (${LABELS.service}) (increase(all_events_summaryBytes_total{` +
+      `${selectorLabel}="${escapedAnchor}",${LABELS.env}="${escapedEnv}"}[1h])))`;
+    const res = await queryInstant(env, rankQ);
+    if (res.status !== 'success' || !res.data?.result?.length) return null;
+    const topService = res.data.result[0]?.metric?.[LABELS.service];
+    if (!topService) return null;
+    const escapedService = topService.replace(/"/g, '\\"');
+    const candidatePromql =
+      `sum(rate(all_events_summaryBytes_total{` +
+      `${LABELS.service}="${escapedService}",${LABELS.env}="${escapedEnv}"}[${rateRangeSec}s]))`;
+    return { candidatePromql, serviceLabel: topService };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Branchable input_invalid envelope for the no-candidate / auto-source-
+ * failed path. Replaces the legacy `throw new Error(...)` so the parent
+ * chain can read `status: 'error'` + `error.error_type: 'input_invalid'`
+ * and surface a remediation hint rather than aborting on an uncaught
+ * exception.
+ */
+function overlayInputInvalidEnvelope(args: {
+  anchor_type: 'log10x_pattern' | 'customer_metric';
+  anchor_expression: string;
+  window: string;
+  stepSeconds: number;
+  thresholdBasis: 'unvalidated_default' | 'caller_override';
+}): StructuredOutput {
+  const hint =
+    args.anchor_type === 'log10x_pattern'
+      ? 'metric_overlay requires `candidate` (string) or `candidates` (string[]). Auto-sourcing from the anchor\'s top services found no eligible service — pass a candidate explicitly (e.g. from rank_by_shape_similarity) or pick a different anchor.'
+      : 'metric_overlay requires `candidate` (string) or `candidates` (string[]). Customer-metric anchors have no log10x-side service attribution to auto-source from — thread a candidate explicitly (e.g. via rank_by_shape_similarity).';
+  return overlayErrorEnvelope({
+    anchor_type: args.anchor_type,
+    anchor_expression: args.anchor_expression,
+    candidate: '',
+    window: args.window,
+    stepSeconds: args.stepSeconds,
+    thresholdBasis: args.thresholdBasis,
+    queryCount: 0,
+    totalLatencyMs: 0,
+    throttledHit: false,
+    err: {
+      error_type: 'input_invalid',
+      retryable: false,
+      suggested_backoff_ms: null,
+      hint,
+    },
   });
 }
 
@@ -437,12 +595,16 @@ function overlayErrorEnvelope(args: {
     view: 'summary',
     headline: `Error (${args.err.error_type}): ${args.err.hint.slice(0, 120)}`,
     status: 'error',
-    decisions: { threshold_used: null, threshold_basis: 'default' },
+    // Mirror payload.threshold_basis ('unvalidated_default') into the chassis
+    // decision so the two surfaces don't disagree. The anchor dispersion floor
+    // (0.15) is hand-picked, so 'unvalidated_default' is the honest value.
+    decisions: { threshold_used: ANCHOR_DISPERSION_FLOOR, threshold_basis: 'unvalidated_default' },
     source_disclosure: {},
     scope: { window: args.window, window_basis: 'explicit' },
     payload: data,
     human_summary: `Call failed: ${args.err.hint}`,
     error: args.err,
+    telemetry: { startedAt: Date.now() - args.totalLatencyMs, queryCount: args.queryCount, throttledHit: args.throttledHit },
   });
 }
 
@@ -495,11 +657,15 @@ function overlayDispersionRefusal(args: {
     view: 'summary',
     headline,
     status: 'insufficient_data',
-    decisions: { threshold_used: null, threshold_basis: 'default' },
+    // Mirror payload.threshold_basis ('unvalidated_default') into the chassis
+    // decision so the two surfaces don't disagree. The anchor dispersion floor
+    // (0.15) is hand-picked, so 'unvalidated_default' is the honest value.
+    decisions: { threshold_used: ANCHOR_DISPERSION_FLOOR, threshold_basis: 'unvalidated_default' },
     source_disclosure: {},
     scope: { window: args.window, window_basis: 'explicit', candidates_count: 1, candidates_usable: 0 },
     payload: data,
     human_summary: humanSummary,
+    telemetry: { startedAt: Date.now() - args.totalLatencyMs, queryCount: args.queryCount, throttledHit: args.throttledHit },
   });
 }
 

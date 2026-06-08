@@ -30,7 +30,7 @@ import {
 } from '../lib/customer-metrics.js';
 import { getOrDiscoverJoin, discoverJoin, type JoinPair } from '../lib/join-discovery.js';
 import { type StructuredOutput } from '../lib/output-types.js';
-import { newChassisTelemetry, buildChassisEnvelope } from '../lib/chassis-envelope.js';
+import { newChassisTelemetry, buildChassisEnvelope, buildChassisErrorEnvelope } from '../lib/chassis-envelope.js';
 
 export const discoverJoinSchema = {
   force_refresh: z
@@ -58,6 +58,20 @@ export const discoverJoinSchema = {
     .optional()
     .describe('Alias for `window` for consistency with other Log10x tools.'),
   environment: z.string().optional().describe('Environment nickname (for multi-env setups).'),
+  customer_metrics_url: z
+    .string()
+    .optional()
+    .describe(
+      'Per-call override for the customer metrics backend URL. Wins over LOG10X_CUSTOMER_METRICS_URL env var. Use this when the MCP server was launched with an empty/stale URL and you want to redirect to a reachable Prometheus without restarting the server.'
+    ),
+  customer_metrics_type: z
+    .enum(['grafana_cloud', 'amp', 'datadog_prom', 'generic_prom', 'log10x'])
+    .optional()
+    .describe('Per-call override for the customer metrics backend type. Defaults to generic_prom if customer_metrics_url is supplied without a type.'),
+  customer_metrics_auth: z
+    .string()
+    .optional()
+    .describe('Per-call override for the customer metrics auth credential (bearer token, API key, or apiKey/envId for log10x type).'),
 };
 
 interface DiscoverJoinPayload {
@@ -87,13 +101,20 @@ export async function executeDiscoverJoin(
     window?: string;
     timeRange?: string;
     environment?: string;
+    customer_metrics_url?: string;
+    customer_metrics_type?: string;
+    customer_metrics_auth?: string;
   },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
   const telemetry = newChassisTelemetry();
   args.force_refresh = args.force_refresh ?? false;
   args.minimum_jaccard = args.minimum_jaccard ?? 0.7;
-  const resolution = await resolveBackend();
+  const resolution = await resolveBackend({
+    url: args.customer_metrics_url,
+    type: args.customer_metrics_type,
+    auth: args.customer_metrics_auth,
+  });
   if (!resolution.backend) {
     void customerMetricsNotConfiguredMessage(formatDetectionTrace(resolution.trace));
     return buildChassisEnvelope({
@@ -147,6 +168,35 @@ export async function executeDiscoverJoin(
   // from "labels existed but no pair crossed Jaccard".
   const log10xEmpty   = result.probedLabelsLog10x.length   === 0;
   const customerEmpty = result.probedLabelsCustomer.length === 0;
+  // DJ-1: a connection-refused customer backend yields probedLabelsCustomer=[]
+  // because pickCustomerCandidateLabels() swallows the listLabels() rejection
+  // into []. That makes an unreachable backend indistinguishable from a
+  // genuinely-empty-but-reachable one, so the empty branch below would falsely
+  // claim the endpoint "is reachable but doesn't have any metrics". Re-probe
+  // reachability first; if it fails, surface a branchable backend_unavailable
+  // error (matching the sibling log10x_customer_metrics_query tool) instead of
+  // a misleading no_signal.
+  if (customerEmpty) {
+    let customerReachable = true;
+    try {
+      await backend.listLabels();
+    } catch {
+      customerReachable = false;
+    }
+    if (!customerReachable) {
+      return buildChassisErrorEnvelope({
+        tool: 'log10x_discover_join',
+        err: {
+          error_type: 'backend_unavailable',
+          retryable: true,
+          suggested_backoff_ms: 2000,
+          hint: `Customer metrics backend at ${backend.endpoint} is unreachable (connection failed). discover_join needs a reachable Prometheus-compatible backend to read the customer-side label universe. Verify LOG10X_CUSTOMER_METRICS_URL points at a live endpoint and that the backend is up.`,
+        },
+        contextPayload: { endpoint: backend.endpoint, backend: backend.backendType },
+        telemetry,
+      });
+    }
+  }
   if ((log10xEmpty || customerEmpty) && result.status !== 'joined') {
     const failureReason: 'customer_side_empty' | 'log10x_side_empty' =
       customerEmpty ? 'customer_side_empty' : 'log10x_side_empty';
@@ -162,14 +212,16 @@ export async function executeDiscoverJoin(
       runner_ups: [],
       top_below_threshold: [],
     };
-    const side = customerEmpty ? 'Customer-side' : 'Log10x-side';
-    const emptyHeadline =
-      `${side} metrics backend returned 0 labels — cross-pillar join cannot be computed. ` +
-      `Verify ${customerEmpty ? 'customer_metrics_backend is configured and reaching a Prometheus with data' : 'the Log10x reporter is emitting metrics'}.`;
-    const emptyHumanSummary =
-      `${side} label universe is empty (0 labels returned). ` +
-      `Cross-pillar join requires at least one label on each side. ` +
-      `${customerEmpty ? 'Check that LOG10X_CUSTOMER_METRICS_URL points to a Prometheus instance with active series.' : 'Check that the Log10x reporter is running and emitting all_events_* metrics.'}`;
+    const emptyHeadline = customerEmpty
+      ? `The Prometheus endpoint at ${backend.endpoint} is reachable but doesn't have any metrics relevant to log-cost joining.`
+      : `Log10x-side metrics backend returned 0 labels — cross-pillar join cannot be computed. Verify the Log10x reporter is emitting metrics.`;
+    const emptyHumanSummary = customerEmpty
+      ? `The Prometheus endpoint at ${backend.endpoint} is reachable but doesn't have any metrics relevant to log-cost joining. ` +
+        `Common causes: your monitoring stack doesn't expose Prometheus on that endpoint; the endpoint is wrong; or the Prometheus is mostly empty. ` +
+        `Try log10x_discover_labels to see what's available, or update LOG10X_CUSTOMER_METRICS_URL to point at your APM Prometheus.`
+      : `Log10x-side label universe is empty (0 labels returned). ` +
+        `Cross-pillar join requires at least one label on each side. ` +
+        `Check that the Log10x reporter is running and emitting all_events_* metrics.`;
     return buildChassisEnvelope({
       tool: 'log10x_discover_join',
       view: 'summary',
@@ -279,6 +331,6 @@ function buildHumanSummary(payload: DiscoverJoinPayload, minimumJaccard: number)
   const best = probed > 0 ? payload.top_below_threshold[0] : undefined;
   const bestHint = best
     ? ` Best below-threshold pair: \`${best.log10x_side}\` ↔ \`${best.customer_side}\` at Jaccard ${best.jaccard.toFixed(3)}.`
-    : ' No label pairs were probed; one side returned an empty label universe.';
+    : ' No label pairs were probed; one side has no relevant metrics to join against.';
   return `No label pair reached the Jaccard ${minimumJaccard} threshold across ${payload.labels_probed_log10x.length} log10x-side and ${payload.labels_probed_customer.length} customer-side labels.${bestHint} Cross-pillar correlation cannot proceed for anchors that need a structural join.`;
 }

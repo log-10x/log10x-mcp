@@ -22,13 +22,22 @@ const { renderAsciiBarChart } = __testables;
 
 // ── patternDetailSchema ────────────────────────────────────────────────────────
 
-test.skip('patternDetailSchema: pattern_hash is required', () => {
-  // stale vs refactored source — needs maintainer reconciliation
-  // pattern_hash is now z.string().optional() (pattern name is an accepted
-  // alternative); the "at least one of pattern/pattern_hash" check moved into
-  // executePatternDetail, so z.object(patternDetailSchema).parse({}) no longer throws.
+test('patternDetailSchema: pattern_hash is optional (pattern name is an alias)', () => {
+  // pattern_hash is .optional() because `pattern` (name) was added as an
+  // alternate identifier. The "at least one of pattern/pattern_hash" contract
+  // is now enforced at runtime in executePatternDetail, not at the Zod layer.
   const schema = z.object(patternDetailSchema);
-  assert.throws(() => schema.parse({}), /pattern_hash/i);
+  assert.doesNotThrow(() => schema.parse({}));
+  assert.equal(schema.parse({}).pattern_hash, undefined);
+});
+
+test('executePatternDetail: missing both pattern and pattern_hash returns missing_identifier error', async () => {
+  const out = await executePatternDetail({} as { pattern_hash?: string; pattern?: string });
+  const data = out.data as Record<string, unknown>;
+  // status is hoisted to the outer envelope and also stored on data by the chassis.
+  assert.equal(data['status'], 'error');
+  const payload = data['payload'] as Record<string, unknown>;
+  assert.equal(payload['error'], 'missing_identifier');
 });
 
 test('patternDetailSchema: include_samples defaults to true', () => {
@@ -81,21 +90,25 @@ test('renderAsciiBarChart: zero-value row uses only ░ blocks', () => {
   assert.match(out, /░{10}/);
 });
 
-test('renderAsciiBarChart: values >= 1 GB render as GB', () => {
+test('renderAsciiBarChart: values >= 1 GB render as GB (decimal SI units)', () => {
+  // renderAsciiBarChart divides by decimal SI (1e9) to match services/baseline/
+  // top_patterns. 1024^3 * 1.5 = 1610612736 bytes / 1e9 = 1.6GB.
   const gb = 1024 ** 3;
   const out = renderAsciiBarChart([{ label: 'svc', value: gb * 1.5 }], 'title');
-  assert.match(out, /1\.5GB/);
+  assert.match(out, /1\.6GB/);
 });
 
-test('renderAsciiBarChart: values >= 1 MB but < 1 GB render as MB', () => {
+test('renderAsciiBarChart: values >= 1 MB but < 1 GB render as MB (decimal SI units)', () => {
+  // 1024^2 * 50 = 52428800 bytes / 1e6 = 52.4 -> toFixed(0) = 52MB.
   const mb = 1024 ** 2;
   const out = renderAsciiBarChart([{ label: 'svc', value: mb * 50 }], 'title');
-  assert.match(out, /50MB/);
+  assert.match(out, /52MB/);
 });
 
-test('renderAsciiBarChart: values < 1 MB render as KB', () => {
+test('renderAsciiBarChart: values < 1 MB render as KB (decimal SI units)', () => {
+  // 512 * 1024 = 524288 bytes / 1e3 = 524.288 -> toFixed(0) = 524KB.
   const out = renderAsciiBarChart([{ label: 'svc', value: 512 * 1024 }], 'title');
-  assert.match(out, /512KB/);
+  assert.match(out, /524KB/);
 });
 
 test('renderAsciiBarChart: label is padded to max label width', () => {
@@ -156,8 +169,8 @@ test('executePatternDetail: include_samples=false does not throw', async () => {
 test('executePatternDetail: data echoes pattern_hash', async () => {
   const out = await executePatternDetail({ pattern_hash: 'testHash99' });
   const data = out.data as Record<string, unknown>;
-  // Post-chassis refactor: the tool-specific PatternDetailEnvelope now lives
-  // under data.payload (the chassis wraps it). pattern_hash is echoed there.
+  // buildChassisEnvelope nests the tool-specific PatternDetailEnvelope under
+  // data.payload, so pattern_hash lives at out.data.payload.pattern_hash.
   const payload = data['payload'] as Record<string, unknown>;
   assert.equal(payload['pattern_hash'], 'testHash99');
 });

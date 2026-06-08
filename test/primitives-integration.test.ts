@@ -32,12 +32,13 @@ import type { EnvConfig } from '../src/lib/environments.js';
 
 const ENV = STUB_ENV as EnvConfig;
 
-// The chassis refactor moved every tool-specific result field (moved[],
-// ranked[], status, threshold_audit, facts, …) under `data.payload`. The
-// outer chassis `data` now carries only status/decisions/scope/source_disclosure/
-// human_summary/error. Tests assert on the tool payload, so unwrap it here.
-function payloadOf<T = Record<string, unknown>>(out: { data?: unknown }): T {
-  return (out.data as { payload: unknown }).payload as T;
+// Post-ChassisEnvelope migration: the tools now return
+// buildChassisEnvelope({..., payload: data}), so the tool-specific result
+// rows live at out.data.payload.* (chassis-envelope.ts nests them under
+// `payload`; status/human_summary are mirrored at the chassis top level too).
+// These tests assert on the tool result rows, so read through `payload`.
+function payloadOf<T>(out: { data?: unknown }): T {
+  return (out.data as { payload: T }).payload;
 }
 
 // Stash the original env vars so concurrent test files don't poison
@@ -495,8 +496,17 @@ test('GA: anchor without phase separation → status=anchor_no_phase_separation,
     assert.equal(d.moved.length, 0);
     assert.equal(d.not_moved.length, 0);
     assert.equal(d.evaluation_failed.length, 0);
-    assert.match(d.human_summary, /below.*floor|no.*phase|re-anchor/i);
-    assert.match(out.summary.headline, /lacks phase separation/i);
+    // Per Notes 9-12 the refusal prose was rewritten to plain English;
+    // the internal 'floor'/'phase'/'re-anchor' jargon was intentionally
+    // dropped. Assert on the current source copy (metrics-that-moved.ts
+    // baseProse): 'too steady over this window ... Try a different
+    // starting pattern or widen the window.'
+    assert.match(d.human_summary, /too steady over this window/i);
+    assert.match(d.human_summary, /different starting pattern|widen the window/i);
+    // Headline was also rewritten to plain English (source line 493):
+    // 'The pattern we looked at is too steady to compare against other
+    // metrics. Try a different starting pattern.'
+    assert.match(out.summary.headline, /too steady to compare/i);
   });
 });
 
@@ -522,7 +532,12 @@ test('GA: every candidate below threshold → status=no_signal', async () => {
     assert.equal(d.status, 'no_signal');
     assert.equal(d.moved.length, 0);
     assert.equal(d.not_moved.length, 1, 'flat candidate still gets evaluated, just below floor');
-    assert.match(d.human_summary, /no candidate.*moved|stop searching/i);
+    // Per Notes 9-12 the no_signal prose was rewritten to plain English
+    // (buildHumanSummary no_signal branch). Assert on the current source
+    // copy: 'No metrics moved with this pattern over the window. N stayed
+    // flat. Try a different starting pattern or widen the window.'
+    assert.match(d.human_summary, /No metrics moved with this pattern/i);
+    assert.match(d.human_summary, /stayed flat/i);
   });
 });
 
@@ -735,10 +750,15 @@ test('GA: metrics_that_moved human_summary explicitly references the floor AND o
       ENV,
     );
     if (typeof out === 'string') throw new Error('expected envelope');
-    const d = out.data as { human_summary: string };
-    assert.match(d.human_summary, /phase-gap floor/i);
-    assert.match(d.human_summary, /observed median phase_gap/i);
-    assert.match(d.human_summary, /unvalidated default/i);
+    const d = payloadOf<{ human_summary: string }>(out);
+    // Per Notes 9-12, buildHumanSummary intentionally dropped the internal
+    // jargon ('phase-gap floor', 'observed median phase_gap', 'unvalidated
+    // default') from user-facing prose. The calibration caveat is now the
+    // plain-English 'Match threshold is a default (not yet tuned for your
+    // data).' Assert on the current copy (source is the source of truth).
+    assert.match(d.human_summary, /moved with this pattern/i);
+    assert.match(d.human_summary, /strongest match/i);
+    assert.match(d.human_summary, /Match threshold is a default \(not yet tuned for your data\)/i);
   });
 });
 

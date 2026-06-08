@@ -76,18 +76,22 @@ test('extractPatterns coerces object events by common fields', async () => {
   );
 });
 
-test('extractPatterns privacy_mode without tenx throws DevCliNotInstalledError', async () => {
-  // Post-chassis refactor: the stdin privacy-mode path (runDevCliStdin) now
-  // guards on the API key BEFORE checking for the tenx binary, so a box with
-  // neither tenx nor LOG10X_API_KEY hits the config-missing guard first. That
-  // DevCliConfigMissingError is re-wrapped by extractPatterns' catch block as
-  // "Local tenx CLI run failed: LOG10X_API_KEY is not configured...".
+test('extractPatterns privacy_mode without a usable local CLI throws a precondition error', async () => {
+  // privacy_mode=true routes through the local tenx CLI. Two preconditions
+  // gate that path, and either is a valid "can't run locally" failure:
+  //   1. runDevCliStdin's API-key guard (DevCliConfigMissingError) fires first
+  //      when LOG10X_API_KEY/TENX_API_KEY are unset — as they are in CI. That
+  //      error is wrapped by extractPatterns as "Local tenx CLI run failed: ...".
+  //   2. If a key IS present, the bogus LOG10X_TENX_PATH forces the binary
+  //      lookup to throw DevCliNotInstalledError.
   await assert.rejects(
     async () => {
       await extractPatterns(['ERROR something broke'], { privacyMode: true });
     },
     (e: Error) =>
-      /CLI.*run failed/i.test(e.message) || /LOG10X_API_KEY is not configured/i.test(e.message)
+      e.name === 'DevCliNotInstalledError' ||
+      /not installed/i.test(e.message) ||
+      /CLI run failed|not configured/i.test(e.message)
   );
 });
 

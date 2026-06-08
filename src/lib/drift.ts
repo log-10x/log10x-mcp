@@ -77,9 +77,18 @@ export async function classifyTrajectory(
     `/ ` +
     `sum(rate(${metric}{${envLabel},${LABELS.pattern}="${escape(anchor)}"}[${window}] offset ${baselineOffset}))`;
 
-  // Compute per-week growth rate via derivative over the window.
+  // Compute per-week FRACTIONAL growth rate via derivative over the window,
+  // normalized against current rate so the result is a fraction (0.05 = +5%/week),
+  // not an absolute slope-of-rate. The renderer multiplies by 100 to express as
+  // percent — if we don't normalize here, a steady ~40K events/sec pattern reads
+  // as "+430,522%/week" because the absolute slope-of-rate is large in raw units
+  // while the actual week-over-week change is ~0. This guards against drift
+  // markdown reporting an absurd rate (e.g. +430,522%/week) on a pattern that
+  // pattern_trend shows as roughly flat.
   const slopeQuery =
-    `deriv(sum(rate(${metric}{${envLabel},${LABELS.pattern}="${escape(anchor)}"}[1h]))[${window}:1h]) * 604800`;
+    `(deriv(sum(rate(${metric}{${envLabel},${LABELS.pattern}="${escape(anchor)}"}[1h]))[${window}:1h]) * 604800) ` +
+    `/ ` +
+    `clamp_min(sum(rate(${metric}{${envLabel},${LABELS.pattern}="${escape(anchor)}"}[1h])), 1)`;
 
   let rateChangeRatio = 1;
   let slopePerWeek = 0;
@@ -135,9 +144,13 @@ export async function runDriftCorrelation(opts: DriftOptions): Promise<DriftResu
   const sevKey = (opts.anchorSeverity || 'default').toLowerCase() as keyof typeof opts.thresholds.driftMinSlopePerWeek;
   const driftFloor = opts.thresholds.driftMinSlopePerWeek[sevKey] ?? opts.thresholds.driftMinSlopePerWeek.default;
 
-  // Anchor slope.
+  // Anchor slope, expressed as FRACTIONAL %/week (renderer multiplies by 100).
+  // See classifyTrajectory above for the bug story — without normalization a
+  // steady high-rate pattern reads as hundreds of thousands of percent.
   const anchorSlopeQ =
-    `deriv(sum(rate(${metric}{${envLabel},${LABELS.pattern}="${escape(opts.anchor)}"}[1h]))[${opts.window}:1h]) * 604800`;
+    `(deriv(sum(rate(${metric}{${envLabel},${LABELS.pattern}="${escape(opts.anchor)}"}[1h]))[${opts.window}:1h]) * 604800) ` +
+    `/ ` +
+    `clamp_min(sum(rate(${metric}{${envLabel},${LABELS.pattern}="${escape(opts.anchor)}"}[1h])), 1)`;
   let anchorSlopePerWeek = 0;
   let queriesExecuted = 1;
   try {
@@ -149,13 +162,17 @@ export async function runDriftCorrelation(opts: DriftOptions): Promise<DriftResu
     // fall through
   }
 
-  // Find co-drifters: compute per-pattern slope, rank by closeness to anchor slope.
+  // Find co-drifters: compute per-pattern FRACTIONAL slope, rank by closeness
+  // to anchor's fractional slope. Same normalization as anchorSlopeQ so the
+  // comparison is apples-to-apples in fractional %/week space.
+  const perPatternFractionalSlope =
+    `(deriv(sum by (${LABELS.pattern}, ${LABELS.service}, ${LABELS.severity}) (rate(${metric}{${envLabel}}[1h]))[${opts.window}:1h]) * 604800) ` +
+    `/ ` +
+    `clamp_min(sum by (${LABELS.pattern}, ${LABELS.service}, ${LABELS.severity}) (rate(${metric}{${envLabel}}[1h])), 1)`;
   const cohortQ =
     `topk(${opts.thresholds.maxCohortSize}, ` +
-    `-abs(` +
-    `deriv(sum by (${LABELS.pattern}, ${LABELS.service}, ${LABELS.severity}) (rate(${metric}{${envLabel}}[1h]))[${opts.window}:1h]) * 604800 ` +
-    `- ${anchorSlopePerWeek})` +
-    ` and deriv(sum by (${LABELS.pattern}, ${LABELS.service}, ${LABELS.severity}) (rate(${metric}{${envLabel}}[1h]))[${opts.window}:1h]) * 604800 > ${driftFloor}` +
+    `-abs(${perPatternFractionalSlope} - ${anchorSlopePerWeek})` +
+    ` and ${perPatternFractionalSlope} > ${driftFloor}` +
     `)`;
 
   let cohort: CoDrifter[] = [];
@@ -176,9 +193,13 @@ export async function runDriftCorrelation(opts: DriftOptions): Promise<DriftResu
           sev: row.metric[LABELS.severity] || '',
         });
       }
-      // Pull actual slopes in a single batch query.
+      // Pull actual fractional slopes per pattern. Same normalization as
+      // anchorSlopeQ so values are comparable.
       for (const pat of patterns) {
-        const slopeQ = `deriv(sum(rate(${metric}{${envLabel},${LABELS.pattern}="${escape(pat.p)}"}[1h]))[${opts.window}:1h]) * 604800`;
+        const slopeQ =
+          `(deriv(sum(rate(${metric}{${envLabel},${LABELS.pattern}="${escape(pat.p)}"}[1h]))[${opts.window}:1h]) * 604800) ` +
+          `/ ` +
+          `clamp_min(sum(rate(${metric}{${envLabel},${LABELS.pattern}="${escape(pat.p)}"}[1h])), 1)`;
         try {
           const r = await queryInstant(opts.env, slopeQ);
           queriesExecuted += 1;

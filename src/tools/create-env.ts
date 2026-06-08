@@ -18,6 +18,7 @@ import type { Environments } from '../lib/environments.js';
 import { reloadEnvironmentsInPlace } from '../lib/environments.js';
 import { createEnvironment } from '../lib/api.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { requireWriteAccess } from '../lib/read-only-guard.js';
 
 export const createEnvSchema = {
   name: z
@@ -45,6 +46,7 @@ export async function executeCreateEnv(
   args: { name: string; is_default?: boolean },
   envs: Environments
 ): Promise<string | StructuredOutput> {
+  requireWriteAccess('creates a new environment on your Log10x account');
   const inner = await executeCreateEnvInner(args, envs);
   return buildEnvelope({
     tool: 'log10x_create_env',

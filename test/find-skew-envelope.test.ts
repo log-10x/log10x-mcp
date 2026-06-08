@@ -1,5 +1,5 @@
 /**
- * Integration tests for log10x_find_skew's GA-track envelope.
+ * Integration tests for log10x_find_skew's GA-track chassis envelope.
  *
  * Covers the agent-facing contract introduced in the find_skew audit:
  *   - status field branching (success / no_signal / insufficient_data / error)
@@ -7,43 +7,112 @@
  *   - threshold_audit (floor + observed dominant_pct distribution)
  *   - input_ref echo
  *   - structured PrimitiveError for paste-mode failures
- *   - human_summary references the floor AND the observed median
+ *   - human_summary present + honest for every non-error status
  *
- * The detector math (concentration percentages) is covered by
- * test/skew-detector.test.ts. These tests pin the WRAPPER envelope
- * contract that the agent reads.
+ * SHAPE: find_skew returns a ChassisEnvelope (buildChassisEnvelope). The
+ * tool-specific summary lives at `out.data.payload.*`; only the chassis
+ * meta (status, decisions, source_disclosure, scope, payload, human_summary)
+ * sits directly on `out.data`. These tests read the payload accordingly.
+ *
+ * DETERMINISM: executeFindSkew runs the local templater (extractPatterns),
+ * which routes events through the paste Lambda (network) or a local tenx
+ * CLI — neither is available in CI/offline, and the paste templater treats
+ * literal tokens like `get`/`post` as fixed template text (no `verb` slot),
+ * so a hand-crafted event string cannot model intra-pattern slot skew.
+ * Instead we inject a synthetic ExtractedPatterns via the `_setExtractPatterns`
+ * seam (mirrors commitment-report's `_setVerifyRunner`) and drive the
+ * detector with a pattern carrying a genuine variable slot. The detector
+ * math itself is covered by test/skew-detector.test.ts.
+ *
+ * Slot-share math note: aggregateSlotsBySymbolMessage derives the dominant
+ * fraction from the COUNT of captured distinct values via a harmonic
+ * weight (1/(i+1)); see slot-aggregation.ts countValueOccurrences. Two
+ * distinct values → dominant ≈ 0.667 (above the 0.6 floor, distinctCount 2);
+ * many distinct values → dominant well below the floor (no_signal).
  */
 
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { executeFindSkew } from '../src/tools/find-skew.js';
+import { executeFindSkew, _setExtractPatterns } from '../src/tools/find-skew.js';
+import type { ExtractedPattern, ExtractedPatterns } from '../src/lib/pattern-extraction.js';
 
-// ── Helper: build a JSON event payload with a controllable dominant value ──
+// ── Chassis-envelope read helper ──────────────────────────────────────
+// find_skew returns buildChassisEnvelope(): the tool summary lives at
+// out.data.payload.*; chassis meta (status, error, human_summary) sits on
+// out.data. `out.data` is typed `unknown` on StructuredOutput, so we cast
+// to the chassis read-shape here, once.
+type ChassisRead = {
+  status: string;
+  human_summary: string;
+  error?: { error_type: string; retryable: boolean; suggested_backoff_ms: number | null; hint: string };
+  payload: Record<string, unknown>;
+};
+function asChassis(out: { data?: unknown }): ChassisRead {
+  return out.data as ChassisRead;
+}
 
-function skewedEvents(
-  dominantValue: string,
-  otherValues: string[],
-  dominantCount: number,
-  otherCount: number,
-): string[] {
-  const events: string[] = [];
-  for (let i = 0; i < dominantCount; i++) {
-    events.push(`audit verb=${dominantValue} path=/api/v1/${i} status=200`);
-  }
-  for (let i = 0; i < otherCount; i++) {
-    const v = otherValues[i % otherValues.length];
-    events.push(`audit verb=${v} path=/api/v1/${i + dominantCount} status=200`);
-  }
-  return events;
+// ── Synthetic templater fixtures ──────────────────────────────────────
+
+/**
+ * Build a synthetic ExtractedPatterns with one symbol-message pattern whose
+ * named slot `verb` carries `distinctValues` captured values. Two values
+ * → dominant ≈ 0.667 (above the 0.6 floor); use a positional name to model
+ * "no real slot" only when needed (not used here).
+ *
+ * `count` controls whether the pattern clears min_events.
+ */
+function syntheticPatterns(opts: {
+  slotName: string;
+  distinctValues: string[];
+  count: number;
+}): ExtractedPatterns {
+  const pattern: ExtractedPattern = {
+    hash: 'tplhash-audit-1',
+    symbolMessage: 'audit verb=$ path=$ status=$',
+    template: 'audit verb=$ path=$ status=$',
+    service: 'audit-service',
+    severity: 'INFO',
+    count: opts.count,
+    bytes: opts.count * 64,
+    sampleEvent: 'audit verb=get path=/api/v1/0 status=200',
+    variables: { [opts.slotName]: opts.distinctValues },
+    slotDistinctCounts: { [opts.slotName]: opts.distinctValues.length },
+  };
+  return {
+    patterns: [pattern],
+    totalEvents: opts.count,
+    totalBytes: opts.count * 64,
+    inputLineCount: opts.count,
+    templaterWallTimeMs: 0,
+    executionMode: 'paste_lambda',
+  };
+}
+
+/** Install a fixed synthetic templater result for the next call. */
+function stubTemplater(result: ExtractedPatterns): void {
+  _setExtractPatterns(async () => result);
+}
+
+afterEach(() => {
+  _setExtractPatterns(); // reset to the real templater
+});
+
+// Any non-empty events array — content is ignored because the templater
+// is stubbed. We still pass a plausible-length array so input_ref.n_events
+// echoes a real number.
+function nEvents(n: number): string[] {
+  return Array.from({ length: n }, (_, i) => `audit verb=get path=/api/v1/${i} status=200`);
 }
 
 // ── status: success ──────────────────────────────────────────────────
 
-// stale vs refactored source — needs maintainer reconciliation
-test.skip('GA find_skew: success path emits status + threshold_audit + observed distribution', async () => {
-  const events = skewedEvents('get', ['post', 'put'], 80, 20);
+test('GA find_skew: success path emits status + threshold_audit + observed distribution', async () => {
+  // Named slot `verb` with two captured values → dominant ≈ 0.667 > 0.6 floor.
+  stubTemplater(syntheticPatterns({ slotName: 'verb', distinctValues: ['get', 'post'], count: 100 }));
+  const events = nEvents(100);
   const out = await executeFindSkew({ events, min_concentration: 0.6, sample_n: 10, min_events: 10 });
-  const d = out.data as {
+  const c = asChassis(out);
+  const p = c.payload as {
     status: string;
     threshold_basis: string;
     threshold_audit: {
@@ -58,111 +127,128 @@ test.skip('GA find_skew: success path emits status + threshold_audit + observed 
     human_summary: string;
     findings: Array<{ patternIdentity: string; skewedSlots: Array<{ dominantPct: number }> }>;
   };
-  assert.equal(d.status, 'success');
-  assert.equal(d.threshold_basis, 'unvalidated_default');
-  assert.equal(d.threshold_audit.min_concentration.value, 0.6);
-  assert.equal(d.threshold_audit.min_concentration.basis, 'unvalidated_default');
-  assert.equal(d.threshold_audit.sample_n.value, 10);
-  assert.equal(d.query_count, 0);
-  assert.equal(d.backend_pressure_hint, null);
-  assert.equal(d.input_ref.n_events, events.length);
-  assert.ok(d.findings.length >= 1);
-  // human_summary must reference the floor + observed median when present
-  assert.match(d.human_summary, /concentration floor/i);
-  assert.match(d.human_summary, /unvalidated default/i);
+  assert.equal(c.status, 'success');
+  assert.equal(p.status, 'success');
+  assert.equal(p.threshold_basis, 'unvalidated_default');
+  assert.equal(p.threshold_audit.min_concentration.value, 0.6);
+  assert.equal(p.threshold_audit.min_concentration.basis, 'unvalidated_default');
+  assert.equal(p.threshold_audit.sample_n.value, 10);
+  assert.equal(p.query_count, 0);
+  assert.equal(p.backend_pressure_hint, null);
+  assert.equal(p.input_ref.n_events, events.length);
+  assert.ok(p.findings.length >= 1);
+  // The top finding's dominant slot must clear the floor.
+  assert.ok(p.findings[0].skewedSlots[0].dominantPct >= 0.6);
+  // human_summary is honest, plain-English, and routes to the next tool.
+  // (Statistics live in threshold_audit, NOT in prose — see find-skew.ts:424.)
+  assert.match(p.human_summary, /found skew on field/i);
+  assert.match(p.human_summary, /log10x_pattern_mitigate/);
 });
 
 test('GA find_skew: caller_override basis when caller passes non-default thresholds', async () => {
-  const events = skewedEvents('get', ['post', 'put'], 80, 20);
+  stubTemplater(syntheticPatterns({ slotName: 'verb', distinctValues: ['get', 'post'], count: 100 }));
+  const events = nEvents(100);
   const out = await executeFindSkew({ events, min_concentration: 0.75, sample_n: 5, min_events: 10 });
-  // Chassis refactor: the find_skew summary now lives under data.payload;
-  // data is the ChassisData wrapper (status / decisions / scope / payload).
-  const d = (out.data as { payload: { threshold_basis: string; threshold_audit: { min_concentration: { basis: string } } } }).payload;
-  assert.equal(d.threshold_basis, 'caller_override');
-  assert.equal(d.threshold_audit.min_concentration.basis, 'caller_override');
+  const p = asChassis(out).payload as { threshold_basis: string; threshold_audit: { min_concentration: { basis: string } } };
+  assert.equal(p.threshold_basis, 'caller_override');
+  assert.equal(p.threshold_audit.min_concentration.basis, 'caller_override');
 });
 
 // ── status: no_signal ────────────────────────────────────────────────
 
 test('GA find_skew: status=no_signal when no slot crosses the floor but candidates were evaluated', async () => {
-  // Single pattern, single varying slot with 100 distinct request_id
-  // values (each 1% dominant → well below the 0.6 floor).
-  const events: string[] = [];
-  for (let i = 0; i < 100; i++) {
-    events.push(`processing request id=${i}`);
-  }
-  const out = await executeFindSkew({ events, min_concentration: 0.6, min_events: 10 });
-  // Chassis refactor: status/human_summary surface on the ChassisData wrapper;
-  // findings live under data.payload.
-  const d = out.data as { status: string; human_summary: string; payload: { findings: unknown[] } };
-  assert.equal(d.status, 'no_signal');
-  assert.equal(d.payload.findings.length, 0);
-  assert.match(d.human_summary, /No exploitable skew found across .* pattern\(s\) evaluated/i);
+  // One pattern, one varying slot with 10 distinct values → harmonic
+  // dominant share ≈ 0.34, well below the 0.6 floor. distinctCount > 1
+  // so the slot is a real candidate (not a filtered singleton).
+  const distinct = Array.from({ length: 10 }, (_, i) => `req-${i}`);
+  stubTemplater(syntheticPatterns({ slotName: 'request_id', distinctValues: distinct, count: 100 }));
+  const out = await executeFindSkew({ events: nEvents(100), min_concentration: 0.6, min_events: 10 });
+  const c = asChassis(out);
+  const p = c.payload as { status: string; findings: unknown[]; human_summary: string };
+  assert.equal(c.status, 'no_signal');
+  assert.equal(p.status, 'no_signal');
+  assert.equal(p.findings.length, 0);
+  // Honest no-skew copy that routes to pattern_mitigate (no floor number in prose).
+  assert.match(p.human_summary, /no skew found/i);
+  assert.match(p.human_summary, /log10x_pattern_mitigate/);
 });
 
 // ── status: insufficient_data ───────────────────────────────────────
 
 test('GA find_skew: status=insufficient_data when too few events per pattern after templating', async () => {
-  // Only 5 events total, default min_events=10 → no pattern qualifies.
-  const events = ['audit verb=get path=/a', 'audit verb=get path=/b', 'audit verb=get path=/c', 'audit verb=get path=/d', 'audit verb=get path=/e'];
-  const out = await executeFindSkew({ events, min_concentration: 0.6, min_events: 10 });
-  // Chassis refactor: status surfaces on the wrapper; input_ref under data.payload.
-  const d = out.data as { status: string; payload: { input_ref: { n_patterns_above_min_events: number } } };
-  assert.equal(d.status, 'insufficient_data');
-  assert.equal(d.payload.input_ref.n_patterns_above_min_events, 0);
+  // The single pattern has count=5 < default min_events=10 → it is filtered
+  // before any slot is evaluated → no pattern clears the bar.
+  stubTemplater(syntheticPatterns({ slotName: 'verb', distinctValues: ['get'], count: 5 }));
+  const out = await executeFindSkew({ events: nEvents(5), min_concentration: 0.6, min_events: 10 });
+  const c = asChassis(out);
+  const p = c.payload as { status: string; input_ref: { n_patterns_above_min_events: number } };
+  assert.equal(c.status, 'insufficient_data');
+  assert.equal(p.status, 'insufficient_data');
+  assert.equal(p.input_ref.n_patterns_above_min_events, 0);
 });
 
 // ── status: error ────────────────────────────────────────────────────
 
 test('GA find_skew: empty events → status=error with input_invalid PrimitiveError', async () => {
+  // Empty input is rejected BEFORE the templater runs, so no stub needed.
   const out = await executeFindSkew({ events: [] });
-  const d = out.data as {
+  const c = asChassis(out);
+  const p = c.payload as {
     status: string;
     error?: { error_type: string; retryable: boolean; suggested_backoff_ms: number | null; hint: string };
   };
-  assert.equal(d.status, 'error');
-  assert.ok(d.error);
-  if (!d.error) return;
-  assert.equal(d.error.error_type, 'input_invalid');
-  assert.equal(d.error.retryable, false);
-  assert.equal(d.error.suggested_backoff_ms, null);
-  assert.match(d.error.hint, /No events supplied/i);
+  assert.equal(c.status, 'error');
+  assert.equal(p.status, 'error');
+  // The structured error is mirrored onto both data.error and payload.error.
+  const err = (c.error ?? p.error)!;
+  assert.ok(err);
+  assert.equal(err.error_type, 'input_invalid');
+  assert.equal(err.retryable, false);
+  assert.equal(err.suggested_backoff_ms, null);
+  assert.match(err.hint, /No events supplied/i);
 });
 
 // ── Telemetry fields ────────────────────────────────────────────────
 
 test('GA find_skew: query_count is always 0 (paste-mode tool, no backend queries)', async () => {
-  const events = skewedEvents('get', ['post'], 50, 10);
-  const out = await executeFindSkew({ events });
-  // Chassis refactor: telemetry fields live under data.payload (and are also
-  // mirrored on the top-level performance block).
-  const d = (out.data as { payload: { query_count: number; backend_pressure_hint: null; total_latency_ms: number } }).payload;
-  assert.equal(d.query_count, 0);
-  assert.equal(d.backend_pressure_hint, null);
-  assert.ok(d.total_latency_ms >= 0);
+  stubTemplater(syntheticPatterns({ slotName: 'verb', distinctValues: ['get', 'post'], count: 60 }));
+  const out = await executeFindSkew({ events: nEvents(60) });
+  const p = asChassis(out).payload as { query_count: number; backend_pressure_hint: null; total_latency_ms: number };
+  // query_count / backend_pressure_hint live on the payload AND on the
+  // top-level performance block of the chassis envelope.
+  assert.equal(p.query_count, 0);
+  assert.equal(p.backend_pressure_hint, null);
+  assert.ok(p.total_latency_ms >= 0);
 });
 
-// ── human_summary explicit-disclosure pin ──────────────────────────
+// ── human_summary plain-English disclosure pin ──────────────────────
 
-test('GA find_skew: human_summary references the floor for every non-error status', async () => {
-  for (const events of [
-    skewedEvents('get', ['post'], 80, 20), // success
-    skewedEvents('get', ['post', 'put', 'delete', 'patch'], 20, 80), // no_signal probably
-  ]) {
-    const out = await executeFindSkew({ events, min_concentration: 0.6 });
-    // Chassis refactor: human_summary surfaces on the ChassisData wrapper.
-    const d = out.data as { status: string; human_summary: string };
-    if (d.status === 'success') {
-      // success summary cites the concentration floor numerically.
-      assert.match(d.human_summary, /60%|0\.6/, `expected floor in human_summary for status=${d.status}: ${d.human_summary}`);
-    } else if (d.status === 'no_signal') {
-      // no_signal summary discloses the observed dominant-value distribution
-      // (the floor is not re-stated numerically on this branch post-refactor).
-      assert.match(
-        d.human_summary,
-        /Observed median dominant-value share/i,
-        `expected observed-distribution disclosure in human_summary for status=${d.status}: ${d.human_summary}`,
-      );
+test('GA find_skew: human_summary is present and plain-English for every non-error status', async () => {
+  const cases: Array<{ patterns: ExtractedPatterns; expect: string }> = [
+    // success: named slot, two values → above floor.
+    { patterns: syntheticPatterns({ slotName: 'verb', distinctValues: ['get', 'post'], count: 100 }), expect: 'success' },
+    // no_signal: many distinct values → below floor.
+    {
+      patterns: syntheticPatterns({
+        slotName: 'request_id',
+        distinctValues: Array.from({ length: 12 }, (_, i) => `r-${i}`),
+        count: 100,
+      }),
+      expect: 'no_signal',
+    },
+  ];
+  for (const c of cases) {
+    stubTemplater(c.patterns);
+    const out = await executeFindSkew({ events: nEvents(100), min_concentration: 0.6 });
+    const p = asChassis(out).payload as { status: string; human_summary: string };
+    assert.equal(p.status, c.expect, `expected status ${c.expect}, got ${p.status}`);
+    if (p.status === 'success' || p.status === 'no_signal') {
+      // The summary always opens with the plain-English concept line and
+      // never leaks the raw floor number into prose (numbers → machine fields).
+      assert.match(p.human_summary, /^Skew = when one specific value dominates a field/i,
+        `human_summary must lead with the concept for status=${p.status}: ${p.human_summary}`);
+      assert.doesNotMatch(p.human_summary, /\bconcentration floor\b/i,
+        `human_summary must NOT name the floor in prose for status=${p.status}: ${p.human_summary}`);
     }
   }
 });

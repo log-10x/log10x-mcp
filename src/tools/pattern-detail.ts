@@ -4,14 +4,14 @@
  * Composes a full single-pattern view by calling three internal helpers:
  *   1. event_lookup   — identity, first_seen, per-service cost breakdown
  *   2. pattern_trend  — time series for the lineChart() render
- *   3. pattern_examples — sample events from the SIEM (when available)
+ *   3. pattern_examples — sample events from your stack (when available)
  *
  * must_render_verbatim:
  *   - "Pattern X" header (descriptor, not hash)
  *   - lineChart() output from src/lib/line-chart.ts (height up to 12 rows)
  *   - BarRow chart (ASCII horizontal bars) for cross-service distribution
  *   - Severity breakdown
- *   - 3-5 sample events truncated to 120 chars each
+ *   - up to 3 full sample events (uncropped at 2048 chars; quality over quantity)
  *
  * must_ask_user: "Back to preview list" or "Apply with this in the picture".
  *
@@ -22,6 +22,7 @@
 import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
 import { loadEnvironments } from '../lib/environments.js';
+import { formatPatternLabelFromServices } from '../lib/pattern-label.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { queryInstant, queryRange } from '../lib/api.js';
 import { LABELS } from '../lib/promql.js';
@@ -52,7 +53,7 @@ export const patternDetailSchema = {
   include_samples: z
     .boolean()
     .default(true)
-    .describe('When true (default), attempts to fetch 3-5 sample events from the SIEM. Set false to skip the SIEM round-trip.'),
+    .describe('When true (default), attempts to fetch up to 3 full sample events from your stack. Set false to skip the stack round-trip.'),
   timeRange: z
     .string()
     .regex(/^\d+[mhd]$/)
@@ -81,10 +82,36 @@ export interface PatternDetailEnvelope {
   first_seen_age_seconds: number | null;
   /** Bytes/sec time series (24h, 10min step). */
   trend_time_series: Array<{ ts: number; bytes_per_sec: number }>;
-  /** Sample events truncated to 120 chars each. */
+  /** Full sample events, capped at 2048 chars each. Up to 3 shown. */
   sample_events: string[];
   must_render_verbatim: string;
   must_ask_user: { question: string; options: string[] };
+}
+
+// ─── Descriptor fallback ──────────────────────────────────────────────────────
+
+/**
+ * User-facing descriptor for a pattern when we want to avoid echoing a raw
+ * hash slice in headlines, headers, or human_summary prose. Preference order:
+ *   1. patternName (Symbol Message resolved from metrics)
+ *   2. top service from the breakdown (e.g. "checkout-service")
+ *   3. fallbackLabel — e.g. "(unnamed pattern)" or "(no metrics in window)"
+ *
+ * The hash itself stays in the structured payload (pattern_hash) and
+ * actions[].args for round-trip identity; this helper is for prose only.
+ */
+function patternDescriptor(
+  patternName: string | null,
+  services: Array<{ service: string; severity?: string }>,
+  fallbackLabel: string,
+): string {
+  // Delegates to the shared formatPatternLabelFromServices helper.
+  // See lib/pattern-label.ts for the burned-rule rationale.
+  return formatPatternLabelFromServices({
+    symbol_message: patternName,
+    services: services.map((s) => ({ name: s.service, severity: s.severity })),
+    fallback: fallbackLabel,
+  });
 }
 
 // ─── ASCII horizontal bar chart ───────────────────────────────────────────────
@@ -106,12 +133,15 @@ function renderAsciiBarChart(
   for (const r of rows) {
     const barLen = Math.round((r.value / maxVal) * maxBarWidth);
     const bar = '█'.repeat(barLen) + '░'.repeat(maxBarWidth - barLen);
+    // Decimal (SI) byte units to match every other tool's GB/MB rendering
+    // (services, baseline, top_patterns all use /1e9). Binary divisors here
+    // understated the same byte count by ~6.87% vs the rest of the envelope.
     const fmtVal =
-      r.value >= 1024 ** 3
-        ? `${(r.value / (1024 ** 3)).toFixed(1)}GB`
-        : r.value >= 1024 ** 2
-          ? `${(r.value / (1024 ** 2)).toFixed(0)}MB`
-          : `${(r.value / 1024).toFixed(0)}KB`;
+      r.value >= 1e9
+        ? `${(r.value / 1e9).toFixed(1)}GB`
+        : r.value >= 1e6
+          ? `${(r.value / 1e6).toFixed(0)}MB`
+          : `${(r.value / 1e3).toFixed(0)}KB`;
     lines.push(`${r.label.padEnd(labelW)}  ${bar}  ${fmtVal}`);
   }
   return lines.join('\n');
@@ -222,7 +252,7 @@ async function fetchTrend(
 }
 
 /**
- * Best-effort: fetch 3-5 sample events from the SIEM for this hash.
+ * Best-effort: fetch up to 3 full sample events from your stack for this hash.
  * Uses the same direct connector pull that pattern_examples uses:
  * no buckets:1 cap, maxPullMinutes:2, and no fetchEventsByHashes wrapper
  * that would limit scan depth on wide windows.
@@ -246,17 +276,19 @@ async function fetchSampleEvents(
     const probe = await conn.pullEvents({
       window,
       query: q,
-      targetEventCount: 5,
+      targetEventCount: 3,
       maxPullMinutes: 2,
       onProgress: () => {},
     });
-    // Defect 30 fix: render event bodies from the full event object, not just
-    // the first line of raw. oneLine unwraps transport envelopes (.log /
-    // .message / .body) before truncating, so multi-line JSON blocks whose
-    // SIEM connector delivers the opening "{" as a bare string are rendered
-    // via their parent envelope field rather than the bare "{" fragment.
+    // Render event bodies from the full event object, not just the first line
+    // of raw. oneLine unwraps transport envelopes (.log / .message / .body)
+    // before truncating, so multi-line JSON blocks whose SIEM connector
+    // delivers the opening "{" as a bare string render via their parent
+    // envelope field rather than the bare "{" fragment.
+    // Cap raised to 2048 so the user sees the actual log content (fields,
+    // error detail, service context) rather than a teaser that ends with "...".
     return {
-      events: probe.events.slice(0, 5).map((ev) => oneLine(ev, 120)),
+      events: probe.events.slice(0, 3).map((ev) => oneLine(ev, 2048)),
       siemKind: 'resolved',
     };
   } catch {
@@ -281,8 +313,11 @@ function renderVerbatim(args: {
 
   const lines: string[] = [];
 
-  // Header — descriptor (name), not hash
-  const displayName = patternName ?? `(hash: ${hash.slice(0, 16)})`;
+  // Header — descriptor (name), not hash. Prefer Symbol Message; fall back
+  // to the top emitting service; final fallback is a generic "(unnamed
+  // pattern)" so we never leak a raw hash slice into prose. The hash is
+  // still available in payload.pattern_hash for round-trip identity.
+  const displayName = patternDescriptor(patternName, services, '(unnamed pattern)');
   lines.push(`Pattern: ${displayName}`);
   if (firstSeenAgeSeconds !== null) {
     const days = Math.round(firstSeenAgeSeconds / 86400);
@@ -371,16 +406,16 @@ function renderVerbatim(args: {
       const ageMs = Date.now() - latestMs;
       if (ageMs > 24 * 3600 * 1000) {
         const ageDays = Math.round(ageMs / (24 * 3600 * 1000));
-        disclosureLine = `Sample events (${sortedEvents.length} shown, latest from ${ageDays}d ago; samples distributed across ${timeRange} SIEM probe):`;
+        disclosureLine = `Sample events (${sortedEvents.length} shown, latest from ${ageDays}d ago; samples distributed across ${timeRange} stack probe):`;
       }
     }
-    lines.push(disclosureLine || `Sample events (${sortedEvents.length} shown, truncated to 120 chars):`);
+    lines.push(disclosureLine || `Sample events (${sortedEvents.length} shown):`);
     sortedEvents.forEach((evt, i) => {
       lines.push(`  ${i + 1}. ${evt}`);
     });
     lines.push('');
   } else if (siemKind !== 'resolved') {
-    lines.push('Sample events: not available (no SIEM connector resolved — set LOG10X_METRICS_* or run log10x_discover_env).');
+    lines.push('Sample events: not available (no stack connector resolved — set LOG10X_METRICS_* or run log10x_discover_env).');
     lines.push('');
   } else {
     lines.push(`Sample events: not available (no matching events in the last ${timeRange}; this is normal for bursty patterns with the window outside their burst, or for very low-volume patterns).`);
@@ -437,11 +472,14 @@ export async function executePatternDetail(args: {
   }
 
   if (!env) {
-    const id = args.pattern_hash ?? args.pattern ?? '?';
+    // Prefer the human-readable pattern name when the caller supplied one
+    // (args.pattern); only fall back to a generic descriptor when the caller
+    // supplied a hash. The hash stays in payload.pattern_hash + actions.
+    const id = args.pattern ?? '(unnamed pattern)';
     return buildChassisEnvelope({
       tool: 'log10x_pattern_detail',
       view: 'summary',
-      headline: `pattern_detail(${id.slice(0, 12)}): no environment configured.`,
+      headline: `pattern_detail(${id}): no environment configured.`,
       status: 'error',
       decisions: { threshold_used: null, threshold_basis: 'default' },
       // Environment is absent so we cannot query TSDB yet, but the intended
@@ -526,13 +564,17 @@ export async function executePatternDetail(args: {
   };
 
   // FIX 4: headline uses fmtBytes instead of raw GB division.
+  // Descriptor preference: patternName > top service > "(no metrics in window)"
+  // when no service breakdown came back either. The hash never appears in
+  // prose; it stays in payload.pattern_hash + actions[].args.
+  const descriptor = patternDescriptor(patternName, services, '(no metrics in window)');
   const headline =
-    `pattern_detail(${patternName ?? resolvedHash.slice(0, 12)}): ` +
+    `pattern_detail(${descriptor}): ` +
     `${services.length} service(s), ${fmtBytes(totalBytes)}/mo (30d). ` +
     `${sampleEvents.length} sample event(s) fetched.`;
 
   const human_summary =
-    `Pattern ${patternName ?? resolvedHash.slice(0, 12)} ` +
+    `Pattern ${descriptor} ` +
     `(services=${services.length}, ${fmtBytes(totalBytes)}/mo). ` +
     `${sampleEvents.length} sample event(s) fetched.`;
 

@@ -10,8 +10,10 @@
   },
   "include": ["src/**/*", "test/**/*"],
   "exclude": [
-    "test/measure-compaction.test.ts",
-    "test/sample-budget.test.ts",
-    "test/template-expander.test.ts"
+    "// TODO(ci): convert to node:test — measure-compaction mocks read-only ESM",
+    "// module-namespace exports across a module boundary, which throws under",
+    "// strict ESM. Re-enable once the tool exposes an injection seam (or the",
+    "// test script passes --experimental-test-module-mocks). See file header.",
+    "test/measure-compaction.test.ts"
   ]
 }

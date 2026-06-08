@@ -14,13 +14,14 @@ import type { Environments } from '../lib/environments.js';
 import { reloadEnvironmentsInPlace } from '../lib/environments.js';
 import { updateUserMetadata } from '../lib/api.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { requireWriteAccess } from '../lib/read-only-guard.js';
 
 export const updateSettingsSchema = {
   metadata: z
     .record(z.string(), z.unknown())
     .describe(
       'Object of metadata key/value pairs to update on the user account. ' +
-        'Common fields: `analyzer_cost` (number, $/GB SIEM cost used for cost-driver math); ' +
+        'Common fields: `analyzer_cost` (number, $/GB stack cost used for cost-driver math); ' +
         '`ai_provider` (`openai` | `anthropic` | `xai` | `custom` | empty for Log10x-managed); ' +
         '`ai_api_key` (string, BYOK); `ai_endpoint` (string); `ai_model` (string); ' +
         '`ai_temperature` (number 0-1); `ai_disabled` (boolean, true to disable AI entirely); ' +
@@ -42,6 +43,8 @@ export async function executeUpdateSettings(
   args: { metadata: Record<string, unknown> },
   envs: Environments
 ): Promise<string | StructuredOutput> {
+  requireWriteAccess('updates user/account settings via /api/v1/user/settings');
+
   const inner = await executeUpdateSettingsInner(args, envs);
   return buildEnvelope({
     tool: 'log10x_update_settings',

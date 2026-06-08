@@ -39,9 +39,11 @@ test('findSkew: surfaces high-skew slot above threshold', () => {
       symbolMessage: 'sm1',
       count: 1000,
       bytes: 100000,
-      // Two distinct values: the detector now requires distinctCount > 1,
-      // and inverse-rank weighting gives the top value ~2/3 dominance
-      // (1 / (1 + 1/2) = 0.667) — above the 0.6 threshold.
+      // Two-value slot: inverse-rank weighting gives the top value
+      // ~0.667 dominance (distinctCount 2), above the 0.6 floor. A
+      // single-value slot is a CONSTANT (distinctCount 1) and is
+      // excluded from skew findings — you cannot sample away the only
+      // value a slot ever holds.
       variables: { verb: ['get', 'post'] },
     }),
   ];
@@ -51,8 +53,9 @@ test('findSkew: surfaces high-skew slot above threshold', () => {
   assert.equal(finding.skewedSlots.length, 1);
   assert.equal(finding.skewedSlots[0]!.slotName, 'verb');
   assert.equal(finding.skewedSlots[0]!.dominantValue, 'get');
-  assert.equal(finding.skewedSlots[0]!.dominantPct, 0.667);
-  // Sampling at 1/10 the dominant value drops (1 - 0.1) × 0.667 ≈ 60% of events.
+  assert.equal(finding.skewedSlots[0]!.distinctCount, 2);
+  assert.ok(finding.skewedSlots[0]!.dominantPct > 0.6);
+  // Sampling at 1/10 the dominant value drops (1 - 0.1) × 0.667 ≈ 60%.
   assert.ok(finding.samplingOpportunityPct > 0.55);
 });
 

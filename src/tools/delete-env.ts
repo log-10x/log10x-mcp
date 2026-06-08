@@ -18,6 +18,7 @@ import type { Environments } from '../lib/environments.js';
 import { reloadEnvironmentsInPlace } from '../lib/environments.js';
 import { deleteEnvironment } from '../lib/api.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
+import { requireWriteAccess } from '../lib/read-only-guard.js';
 
 export const deleteEnvSchema = {
   env_id: z
@@ -46,6 +47,7 @@ export async function executeDeleteEnv(
   args: { env_id: string; confirm_name: string },
   envs: Environments
 ): Promise<string | StructuredOutput> {
+  requireWriteAccess('PERMANENTLY DELETES the environment from your Log10x account');
   const inner = await executeDeleteEnvInner(args, envs);
   return buildEnvelope({
     tool: 'log10x_delete_env',

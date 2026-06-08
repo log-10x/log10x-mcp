@@ -20,13 +20,18 @@ import { queryRange } from '../lib/api.js';
 import { resolveBackend, customerMetricsNotConfiguredMessage, formatDetectionTrace } from '../lib/customer-metrics.js';
 import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
-import { LABELS } from '../lib/promql.js';
+import { buildPatternAnchorRateQuery } from '../lib/anchor-promql.js';
 import { parseTimeframe } from '../lib/format.js';
 import { type StructuredOutput } from '../lib/output-types.js';
 import { computeAnchorDispersion, ANCHOR_DISPERSION_FLOOR } from '../lib/anchor-dispersion.js';
 import { canonicalMetricRef } from '../lib/metric-ref.js';
 import { wrapBackendError, type PrimitiveError } from '../lib/primitive-errors.js';
 import { buildChassisEnvelope } from '../lib/chassis-envelope.js';
+import {
+  suggestHigherVariationAnchors,
+  renderAnchorSuggestionsBlock,
+  type AnchorSuggestion,
+} from '../lib/anchor-suggestions.js';
 
 // Default lag offsets, widened to ±1800s to catch slow-moving upstream
 // causes. Hand-picked from the 58-candidate chaos test (not calibrated
@@ -43,7 +48,7 @@ export const DEFAULT_ANCHOR_PHASE_ALIGNED_FLOOR = 0.15;
 
 export const rankByShapeSimilaritySchema = {
   anchor_type: z.enum(['log10x_pattern', 'customer_metric']),
-  anchor: z.string().describe('Anchor identity (pattern symbol_message OR customer PromQL).'),
+  anchor: z.string().describe('Anchor identity. For `anchor_type=log10x_pattern`: the pattern Symbol Message NAME or its 11-char `pattern_hash` (= `tenx_hash`) — the tool detects shape and queries the correct PromQL label (`message_pattern` vs `tenx_hash`). For `anchor_type=customer_metric`: a customer PromQL expression.'),
   candidates: z.array(z.string()).min(1).max(100).describe('Customer-side PromQL expressions to rank (max 100). An AI caller reasoning over results can\'t meaningfully digest more than a few dozen; the cap reflects that, not a backend constraint.'),
   window: z.string().default('1h'),
   timeRange: z.string().optional(),
@@ -60,6 +65,16 @@ export const rankByShapeSimilaritySchema = {
     .default(DEFAULT_ANCHOR_PHASE_ALIGNED_FLOOR)
     .describe('Relative phase-gap floor for the `anchor_phase_aligned` flag. Default 0.15 — uncalibrated, same provenance caveat as lag_search_max_abs.'),
   environment: z.string().optional(),
+  customer_metrics_url: z
+    .string()
+    .optional()
+    .describe(
+      'Per-call override for the customer metrics backend URL. Wins over LOG10X_CUSTOMER_METRICS_URL env var. Use when MCP was launched with an empty/stale URL.'
+    ),
+  customer_metrics_type: z
+    .enum(['grafana_cloud', 'amp', 'datadog_prom', 'generic_prom', 'log10x'])
+    .optional(),
+  customer_metrics_auth: z.string().optional(),
 };
 
 interface RankedCandidate {
@@ -122,6 +137,23 @@ interface RankByShapeSummary {
   ranked: RankedCandidate[];
   evaluation_failed: string[];
   /**
+   * Candidate strings that did NOT resolve to a real metric series in
+   * the customer TSDB (no samples for `count(<candidate>)`, or the
+   * backend rejected the expression as invalid PromQL). Skipped before
+   * the shape pipeline so we never compare the anchor against a
+   * fabricated zero-series. Each entry carries the candidate string and
+   * a short reason tag the agent can surface to the user.
+   */
+  evaluation_unknown?: Array<{ candidate: string; reason: 'candidate_unknown'; detail: string }>;
+  /**
+   * Populated when `status === 'no_signal'` to disambiguate the empty
+   * result. `all_candidates_unknown` = none of the inputs existed in the
+   * TSDB; `no_correlated_match` = candidates existed but nothing crossed
+   * the correlation floor; `no_usable_buckets` = candidates existed but
+   * returned <3 buckets each.
+   */
+  no_signal_reason?: 'all_candidates_unknown' | 'no_correlated_match' | 'no_usable_buckets';
+  /**
    * Threshold audit — the floors used and the empirical distributions
    * of observed values across the ranked pool. Lets the agent see "the
    * Pearson floor I'm comparing against is 0.15, but observed Pearson
@@ -131,6 +163,14 @@ interface RankByShapeSummary {
   threshold_audit?: ThresholdAudit;
   /** Populated only when `status === 'error'`. */
   error?: PrimitiveError;
+  /**
+   * Populated only when `status === 'anchor_no_phase_separation'`. Up to
+   * 3 patterns from the same env whose volume varies enough to be good
+   * starting points (CV ≥ 0.5). Empty array when the scan found none or
+   * errored (the refusal envelope still ships, the table just doesn't
+   * render). "Re-anchor" without suggestions is dead-end UX.
+   */
+  anchor_suggestions?: AnchorSuggestion[];
 }
 
 interface ThresholdAudit {
@@ -167,6 +207,9 @@ export async function executeRankByShapeSimilarity(
     lag_search_max_abs?: number;
     anchor_phase_aligned_floor?: number;
     environment?: string;
+    customer_metrics_url?: string;
+    customer_metrics_type?: string;
+    customer_metrics_auth?: string;
     /** Ignored. Retained in the args type for backward-compat with
      * in-process callers (tests, eval harness); the markdown view was
      * removed from the public schema in favor of the structured
@@ -212,13 +255,20 @@ export async function executeRankByShapeSimilarity(
   try {
     if (args.anchor_type === 'log10x_pattern') {
       const metricsEnv = await resolveMetricsEnv(env);
-      const escaped = args.anchor.replace(/"/g, '\\"');
-      anchorExpression = `sum(rate(all_events_summaryBytes_total{${LABELS.pattern}="${escaped}",${LABELS.env}="${metricsEnv}"}[${Math.max(stepSeconds * 3, 180)}s]))`;
+      anchorExpression = buildPatternAnchorRateQuery(
+        args.anchor,
+        metricsEnv,
+        Math.max(stepSeconds * 3, 180),
+      );
       const res = await timedQuery(() => queryRange(env, anchorExpression, fromSec, nowSec, stepSeconds));
       anchorSeries = extractValues(res);
     } else {
       anchorExpression = args.anchor;
-      const backendInfo = await resolveBackend();
+      const backendInfo = await resolveBackend({
+        url: args.customer_metrics_url,
+        type: args.customer_metrics_type,
+        auth: args.customer_metrics_auth,
+      });
       if (!backendInfo.backend) {
         // Expected not_configured state, not a failure; branchable envelope
         // so the chain continues (cross-pillar primitives are graceful).
@@ -270,6 +320,24 @@ export async function executeRankByShapeSimilarity(
   // ── Anchor dispersion guard ────────────────────────────────────────
   const anchorDispersion = computeAnchorDispersion(anchorSeries);
   if (anchorDispersion < ANCHOR_DISPERSION_FLOOR) {
+    // Refusing without alternatives is dead-end UX. Scan the
+    // env's recent top patterns for ones with enough variation to be
+    // good starting points, surface up to 3. Helper degrades to [] on
+    // any error so the refusal still ships even if the suggestion query
+    // fails.
+    const tfRefuse = parseTimeframe(window);
+    const windowSecondsForScan = Math.floor(tfRefuse.days * 86400);
+    const suggestions = await suggestHigherVariationAnchors(
+      env,
+      windowSecondsForScan,
+      stepSeconds,
+    );
+    const suggestionsBlock = renderAnchorSuggestionsBlock(suggestions);
+    const baseProse =
+      `The pattern we looked at is too steady over this window to compare its shape against other metrics. Try a different starting pattern or widen the window.`;
+    const refuseSummary = suggestionsBlock
+      ? `${baseProse}\n${suggestionsBlock}`
+      : baseProse;
     const data: RankByShapeSummary = {
       status: 'anchor_no_phase_separation',
       threshold_used: phaseAlignedFloor,
@@ -286,11 +354,15 @@ export async function executeRankByShapeSimilarity(
       query_count: queryCount,
       total_latency_ms: totalLatencyMs,
       backend_pressure_hint: rankPressureHint(queryCount, totalLatencyMs, throttledHit),
-      human_summary: `Anchor "${anchorExpression}" has dispersion ${anchorDispersion.toFixed(3)} — below the ${ANCHOR_DISPERSION_FLOOR} floor. The shape-similarity rank would be meaningless on this anchor. Re-anchor with a clearer pattern.`,
+      // Per Notes 10-12: drop "anchor", "dispersion", raw PromQL expression
+      // from user prose. The numeric audit lives in payload for the agent.
+      human_summary: refuseSummary,
       ranked: [],
       evaluation_failed: [],
+      anchor_suggestions: suggestions,
     };
-    const headline = `Anchor lacks phase separation (dispersion ${anchorDispersion.toFixed(3)} < ${ANCHOR_DISPERSION_FLOOR}). Refusing — re-anchor.`;
+    // Plain English per Notes 10-12: drop "anchor", "dispersion", "refusing".
+    const headline = `The pattern we looked at is too steady to compare against other metrics. Try a different starting pattern.`;
     return buildChassisEnvelope({
       tool: 'log10x_rank_by_shape_similarity',
       view: 'summary',
@@ -301,11 +373,16 @@ export async function executeRankByShapeSimilarity(
       scope: { window, window_basis: 'explicit', candidates_count: args.candidates.length, candidates_usable: 0 },
       payload: data,
       human_summary: data.human_summary,
+      telemetry: { startedAt: Date.now() - totalLatencyMs, queryCount, throttledHit },
     });
   }
 
   // ── Candidates ──────────────────────────────────────────────────────
-  const customer = await resolveBackend();
+  const customer = await resolveBackend({
+    url: args.customer_metrics_url,
+    type: args.customer_metrics_type,
+    auth: args.customer_metrics_auth,
+  });
   if (!customer.backend) {
     return buildNotConfiguredEnvelope({
       tool: 'log10x_rank_by_shape_similarity',
@@ -316,8 +393,32 @@ export async function executeRankByShapeSimilarity(
 
   const ranked: RankedCandidate[] = [];
   const failed: string[] = [];
-
+  // ── Candidate existence pre-pass ───────────────────────────────────
+  // Bug fix: the tool used to accept any string as a candidate and run
+  // the shape pipeline against whatever queryRange returned (often an
+  // empty / placeholder zero-series), producing meaningless ranks. We
+  // now ask the backend whether each candidate resolves to a real
+  // metric series via `count(<candidate>)`. Candidates that don't
+  // resolve are tagged `candidate_unknown` and skipped before any
+  // shape math runs. If NONE survive we short-circuit to `no_signal`
+  // with `no_signal_reason: 'all_candidates_unknown'`.
+  const unknown: Array<{ candidate: string; reason: 'candidate_unknown'; detail: string }> = [];
+  const survivors: string[] = [];
   for (const cand of args.candidates) {
+    const verdict = await validateCandidateExists(
+      cand,
+      customer.backend!,
+      timedQuery,
+    );
+    if (verdict.ok) {
+      survivors.push(cand);
+    } else {
+      if (verdict.throttled) throttledHit = true;
+      unknown.push({ candidate: cand, reason: 'candidate_unknown', detail: verdict.detail });
+    }
+  }
+
+  for (const cand of survivors) {
     try {
       const res = await timedQuery(() => customer.backend!.queryRange(cand, fromSec, nowSec, stepSeconds));
       const candSeries = extractValues(res);
@@ -347,32 +448,54 @@ export async function executeRankByShapeSimilarity(
   ranked.sort((a, b) => b.pearson_magnitude - a.pearson_magnitude);
 
   const nUsable = ranked.length;
+  // Don't emit 'severe' whenever nUsable < 10: the degenerate case where ALL
+  // candidates are unknown to the backend is a fetch failure, not a low-pool
+  // diagnostic. Reading 'severe' there misdirects remediation toward "widen
+  // the metric pool" when the actual failure is connectivity. Gate the tier on
+  // having at least one EVALUABLE candidate; otherwise leave
+  // low_candidate_count=null and let no_signal_reason='all_candidates_unknown'
+  // drive the prose.
   const lowCandidateCount: 'severe' | 'medium' | null =
-    nUsable < 10 ? 'severe' : nUsable < 20 ? 'medium' : null;
-  // No-signal status: all candidates had near-zero correlation.
+    nUsable === 0 && unknown.length === args.candidates.length
+      ? null  // all-unknown case → distinct failure mode
+      : nUsable < 10 ? 'severe' : nUsable < 20 ? 'medium' : null;
+  // No-signal status: all candidates had near-zero correlation, OR
+  // every candidate was rejected as `candidate_unknown` by the
+  // existence pre-pass (in which case `survivors.length === 0` and we
+  // short-circuit with a distinct reason tag).
   const anyMeaningfulCorr = ranked.some((r) => r.pearson_magnitude >= 0.1);
-  const status: RankByShapeStatus = ranked.length === 0 || !anyMeaningfulCorr ? 'no_signal' : 'success';
+  const status: RankByShapeStatus =
+    survivors.length === 0 || ranked.length === 0 || !anyMeaningfulCorr ? 'no_signal' : 'success';
+  // Disambiguate the no_signal envelope so the agent can choose between
+  // "widen the candidate set" (all_candidates_unknown) and "pick a
+  // different anchor" (no_correlated_match).
+  const noSignalReason: 'all_candidates_unknown' | 'no_correlated_match' | 'no_usable_buckets' | undefined =
+    status === 'no_signal'
+      ? survivors.length === 0
+        ? 'all_candidates_unknown'
+        : ranked.length === 0
+          ? 'no_usable_buckets'
+          : 'no_correlated_match'
+      : undefined;
   const top = ranked[0];
 
   const pearsonDist = distribute(ranked.map((r) => r.pearson_magnitude));
-  const observedPearsonMedian = pearsonDist?.p50;
-  const observedFragment =
-    observedPearsonMedian !== undefined
-      ? ` Observed median |Pearson| across the pool: ${observedPearsonMedian.toFixed(2)}.`
-      : '';
-  const calibTag =
-    thresholdBasis === 'unvalidated_default'
-      ? ' Floor is an unvalidated default — compare against the observed distribution before acting.'
-      : '';
 
+  // Plain English: drop "Pearson", "@lag", "candidates", "anchor",
+  // "evaluated" from user prose. Drop the calibration caveat entirely on
+  // no_signal (not load-bearing when nothing was found). The numeric audit
+  // lives in decisions / threshold_audit for the agent to branch on.
+  const unknownNote = unknown.length > 0 ? ` ${unknown.length} weren't found in the metrics backend` : '';
   const human_summary =
     status === 'no_signal'
-      ? `No candidate showed meaningful shape similarity to the anchor (|Pearson| ≥ 0.1). ${ranked.length} ranked, ${failed.length} failed. Stop searching — re-anchor or widen the candidate pool.${observedFragment}${calibTag}`
-      : `Ranked ${ranked.length} candidate(s) by |Pearson@lag|; ${failed.length} could not be evaluated.${
+      ? noSignalReason === 'all_candidates_unknown'
+        ? `None of the candidate metrics exist in the metrics backend over this window. Check the metric names or widen the metric pool.`
+        : `No metric matched the shape of this pattern over the window. ${ranked.length} checked${failed.length > 0 ? `, ${failed.length} couldn't be checked` : ''}${unknownNote ? `,${unknownNote}` : ''}. Try a different starting pattern or widen the metric pool.`
+      : `Matched ${ranked.length} metric(s) by shape over the window.${
           top
-            ? ` Top match: ${top.candidate} with |r|=${top.pearson_magnitude.toFixed(2)} at lag ${top.lag_seconds}s${top.lag_at_bound ? ' (boundary-pinned, real lag may be wider)' : ''}.`
+            ? ` Top match: ${top.candidate} (shape match ${top.pearson_magnitude.toFixed(2)}${top.lag_seconds !== 0 ? `, ${top.lag_seconds > 0 ? `lags by ${top.lag_seconds}s` : `leads by ${Math.abs(top.lag_seconds)}s`}` : ''}${top.lag_at_bound ? ', real offset may be wider' : ''}).`
             : ''
-        }${observedFragment}${lowCandidateCount === 'severe' ? ' Very few candidates were usable — weak evidence.' : ''}${calibTag}`;
+        }${failed.length > 0 ? ` ${failed.length} couldn't be checked.` : ''}${unknownNote ? `${unknownNote}.` : ''}${lowCandidateCount === 'severe' ? ' Very few metrics were usable — treat as weak evidence.' : ''}${thresholdBasis === 'unvalidated_default' ? ' Match threshold is a default (not yet tuned for your data).' : ''}`;
 
 
   const phaseGapDist = distribute(ranked.map((r) => r.anchor_phase_gap));
@@ -388,7 +511,7 @@ export async function executeRankByShapeSimilarity(
     window,
     step_seconds: stepSeconds,
     n_anchor_buckets: anchorSeries.length,
-    n_candidates_evaluated: args.candidates.length - failed.length,
+    n_candidates_evaluated: survivors.length - failed.length,
     n_candidates_usable: nUsable,
     low_candidate_count: lowCandidateCount,
     query_count: queryCount,
@@ -397,6 +520,8 @@ export async function executeRankByShapeSimilarity(
     human_summary,
     ranked,
     evaluation_failed: failed,
+    evaluation_unknown: unknown.length > 0 ? unknown : undefined,
+    no_signal_reason: noSignalReason,
     threshold_audit: {
       anchor_phase_aligned_floor: { value: phaseAlignedFloor, basis: thresholdBasis },
       lag_search_max_abs: { value: lagMaxAbs, basis: thresholdBasis },
@@ -405,7 +530,14 @@ export async function executeRankByShapeSimilarity(
       n_lag_at_bound: nAtBound,
     },
   };
-  const headline = `Ranked ${ranked.length} candidates by |Pearson@lag|. ${failed.length} could not be evaluated.`;
+  // Plain English per Notes 10-12: drop "Pearson", "@lag", "candidates",
+  // "evaluated" from user prose. Counts stay in scope / payload.
+  const unknownHeadline = unknown.length > 0 ? `, ${unknown.length} not found in metrics backend` : '';
+  const headline = status === 'no_signal' && noSignalReason === 'all_candidates_unknown'
+    ? `None of the candidate metrics exist in the metrics backend over the window.`
+    : ranked.length === 0
+      ? `No metrics matched the shape of this pattern over the window${failed.length > 0 ? ` (${failed.length} couldn't be checked${unknownHeadline})` : unknown.length > 0 ? ` (${unknown.length} not found in metrics backend)` : ''}.`
+      : `Matched ${ranked.length} metric(s) by shape over the window${failed.length > 0 ? ` (${failed.length} couldn't be checked${unknownHeadline})` : unknown.length > 0 ? ` (${unknown.length} not found in metrics backend)` : ''}.`;
 
   return buildChassisEnvelope({
     tool: 'log10x_rank_by_shape_similarity',
@@ -427,12 +559,79 @@ export async function executeRankByShapeSimilarity(
       window_basis: 'explicit',
       candidates_count: args.candidates.length,
       candidates_usable: nUsable,
-      candidates_evaluated: args.candidates.length - failed.length,
-      candidates_failed: failed,
+      candidates_evaluated: survivors.length - failed.length,
+      // Merge unknowns into candidates_failed so the chassis surface agrees
+      // with metrics_that_moved. Leaving scope.candidates_failed=[] while
+      // payload.evaluation_unknown listed candidates that failed validation
+      // (metric doesn't exist) was a schema inconsistency on the same concept
+      // ("which candidates produced no result"). payload.evaluation_unknown
+      // stays for callers that want the unknown-vs-failed distinction.
+      candidates_failed: [...failed, ...unknown.map((u) => u.candidate)],
     },
     payload: data,
     human_summary,
+    telemetry: { startedAt: Date.now() - totalLatencyMs, queryCount, throttledHit },
   });
+}
+
+/**
+ * Verify that a candidate PromQL expression resolves to a real metric
+ * series in the customer TSDB. We wrap the candidate in `count(...)` and
+ * run it as an instant query: a passing candidate returns a vector with
+ * at least one finite, non-zero count; anything else (parse error from
+ * the backend, empty vector, all-NaN, sum to zero) is treated as
+ * `candidate_unknown` and skipped.
+ *
+ * Why `count(...)` and not just the raw expression: the candidate is
+ * already a rate / sum / quantile expression in most calls — running it
+ * directly costs the full evaluation. `count(...)` shortcircuits to
+ * series-existence and is cheap on every Prom-compatible backend we
+ * support. If the wrap itself parse-errors (rare; usually means the
+ * candidate is structurally invalid PromQL), we still get a
+ * `candidate_unknown` verdict — which is the right answer.
+ */
+async function validateCandidateExists(
+  candidate: string,
+  backend: { queryInstant(promql: string): Promise<{ status: string; data: { resultType: string; result: Array<{ value?: [number, string] }> } }> },
+  timedQuery: <T>(fn: () => Promise<T>) => Promise<T>,
+): Promise<{ ok: true } | { ok: false; detail: string; throttled: boolean }> {
+  // Defensive: reject the empty-string-as-candidate edge case so the
+  // backend doesn't see `count()`.
+  const trimmed = candidate.trim();
+  if (trimmed.length === 0) {
+    return { ok: false, detail: 'empty candidate expression', throttled: false };
+  }
+  try {
+    const res = await timedQuery(() => backend.queryInstant(`count(${trimmed})`));
+    if (!res || res.status !== 'success') {
+      return { ok: false, detail: 'backend returned non-success status', throttled: false };
+    }
+    const results = res.data?.result ?? [];
+    if (results.length === 0) {
+      return { ok: false, detail: 'no series resolve in TSDB over the window', throttled: false };
+    }
+    let totalCount = 0;
+    let anyFinite = false;
+    for (const r of results) {
+      const v = r.value?.[1];
+      if (v === undefined) continue;
+      const parsed = parseFloat(v);
+      if (!Number.isFinite(parsed)) continue;
+      anyFinite = true;
+      totalCount += parsed;
+    }
+    if (!anyFinite || totalCount <= 0) {
+      return { ok: false, detail: 'count(<candidate>) resolved to 0 series', throttled: false };
+    }
+    return { ok: true };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    const throttled = /HTTP 429/.test(msg);
+    // Parse errors from the backend (HTTP 4xx with "bad_data" / "parse
+    // error" in body) flow through here. Treat as candidate_unknown
+    // rather than aborting the whole call.
+    return { ok: false, detail: `validation query failed: ${msg.slice(0, 160)}`, throttled };
+  }
 }
 
 /** Same shape as metrics_that_moved's errorEnvelope, scoped to RankByShapeSummary. */
@@ -480,6 +679,7 @@ function rankErrorEnvelope(args: {
     payload: data,
     human_summary: `Call failed: ${args.err.hint}`,
     error: args.err,
+    telemetry: { startedAt: Date.now() - args.totalLatencyMs, queryCount: args.queryCount, throttledHit: args.throttledHit },
   });
 }
 

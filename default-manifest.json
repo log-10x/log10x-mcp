@@ -78,6 +78,17 @@
       },
       "category": "identify"
     },
+    "log10x_product_qa": {
+      "title": "Product Q&A from shipped docs",
+      "description": "Answer Log10x product questions from the docs corpus that ships inside the MCP build (chunked + indexed at install time). Use whenever the user asks a factual product question — \"what is the Receiver\", \"how is pattern_hash computed\", \"what data leaves my network\", \"does the Reporter modify data\" — instead of answering from training data. Inputs: `topic` for an exact docs-slug lookup (e.g. `faq/security/data-protection`), or `query` for natural-language TF-IDF search across the corpus. `category` narrows search to one of faq / apps / engine / api / config / manage. `max_results` caps the result count (default 3). Output is a standard chassis envelope with `found`, ranked `results` (each carrying matched chunks + canonical_url), and `similar_topics` as a did-you-mean fallback. Always cite `canonical_url` when surfacing an answer to the user. The corpus is shipped from `config/mksite/docs` at build time; in development the loader also honors `LOG10X_PRODUCT_KB_PATH`.",
+      "annotations": {
+        "title": "Product Q&A from shipped docs",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "category": "identify"
+    },
     "log10x_savings": {
       "title": "Pipeline savings",
       "description": "Show pipeline savings — what percent of bytes the receiver (filtering + compaction) and retriever (indexing) are removing, with a dollar overlay when an analyzer $/GB rate is set (account profile list price, or per-call `effective_ingest_per_gb` override). Without a rate, the headline is percent-and-bytes only — never a fabricated $1/GB number. Use for \"how much are we saving\", \"pipeline ROI\", or \"what is the Log10x stack worth financially\".",
@@ -166,11 +177,110 @@
       },
       "category": "install"
     },
+    "log10x_dest_set": {
+      "title": "Set SIEM destination on env",
+      "description": "Update the SIEM destination block (siem_vendor, region, log_group_prefix, ingest_url) on a stored env-config document at `~/.log10x/envs/<env_id>.json`. **Call this when** the customer is switching SIEMs, moving regions, repointing the log_group_prefix, or onboarding a new self-hosted ingest_url. Args: `env_id` (required — env_id UUID or nickname), `siem_vendor` (required — one of splunk / datadog / elasticsearch / clickhouse / cloudwatch / azure-monitor / gcp-logging / sumo / other), `region` / `log_group_prefix` / `ingest_url` (all optional). The tool reads the doc, swaps the destination block, re-validates against the canonical zod schema, and writes the updated doc atomically. Idempotent — a no-op edit returns ok:true with empty changes. Pairs naturally with `log10x_env_validate` to confirm the new destination passes cross-field sanity (region required for cloudwatch/datadog/azure-monitor/gcp-logging; ingest_url shape sanity for splunk).",
+      "annotations": {
+        "title": "Set SIEM destination on env",
+        "readOnlyHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "category": "install"
+    },
+    "log10x_env_validate": {
+      "title": "Validate env config doc",
+      "description": "Run schema validation + cross-field sanity checks on a stored env-config document at `~/.log10x/envs/<env_id>.json`. **Call this** after any edit to the env doc (via `log10x_dest_set` / hand-edit / restore) or pre-flight before downstream tools that need a coherent config (commitment_report, configure_engine, offload-recipe emitters). Args: `env_id` (required — env_id UUID or nickname). Returns the canonical zod schema parse result PLUS findings across: destination.region required for vendors that need it (cloudwatch / datadog / azure-monitor / gcp-logging); ingest_url shape sanity (http(s):// prefix, splunk /services/collector suffix); streamer.url / retriever.url shape; cluster cloud type vs offload destination type alignment (eks↔s3, gke↔gcs, aks↔azure_blob); at-least-one active offload destination; SIEM region vs offload destination region (cross-region egress warning). Each finding carries severity (error / warning / info) and a remediation recommendation. Errors block downstream actions; warnings/info surface for the user.",
+      "annotations": {
+        "title": "Validate env config doc",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "category": "install"
+    },
+    "log10x_env_diff_vs_envvars": {
+      "title": "Diff env doc vs LOG10X_* env vars",
+      "description": "Compare the stored env-config document against the `LOG10X_*` environment variables the env-var bridge would have produced, and report per-field disagreements with remediation recommendations. **Call this when** the user says \"but I set the env var\" or downstream tools report a value the user thinks they overrode — the on-prem store wins over env vars per resolver precedence, and silent-override is the most common boot-time surprise. Args: `env_id` (required — env_id UUID or nickname). For each disagreeing field (env_id, nickname, cluster.*, destination.*, streamer.*, retriever.*, offload_destinations[0].*), returns `{ field, stored, envvar, recommendation }`. The recommendation tells the user to either unset the LOG10X_* env var (preferred — on-prem store is the source of truth) or to update the stored doc via the matching setter (log10x_dest_set for destination, log10x_set_gitops_repo for gitops). Pure-on-prem-store configs (no LOG10X_* env vars set) return ok:true with an empty diff and a note that no ambiguity is possible.",
+      "annotations": {
+        "title": "Diff env doc vs LOG10X_* env vars",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "category": "install"
+    },
+    "log10x_offload_add": {
+      "title": "Add offload destination to env",
+      "description": "Append a new entry to an env-config document's `offload_destinations[]` array. **Call this when** the customer is provisioning a new bucket for the Receiver to drain the `isDropped` slice into — a brand-new offload target, a regional bucket alongside an existing primary, or a second destination during a bucket-rotation. Args: `env_id` (required — env_id UUID or nickname), `nickname` (required — must be unique within the env's offload_destinations list), `type` (required — one of s3 / gcs / azure_blob / file), `bucket` / `prefix` / `region` / `auth` (optional, type-specific), `status` (optional, defaults to `active`). Resolves the env-config document via the store chain (k8s ConfigMap → AWS SSM → GCP Secret Manager → Azure App Config → local file) and writes the mutated document back to the same store. Refuses on nickname collision so the operator can address destinations by label. Multi-target is the documented use case — the schema allows multiple `active` destinations so a legacy bucket can be drained while a new one is primary. Pairs with `log10x_env_validate` to confirm cluster-type ↔ destination-type alignment (eks↔s3, gke↔gcs, aks↔azure_blob) after the write.",
+      "annotations": {
+        "title": "Add offload destination to env",
+        "readOnlyHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
+      "category": "install"
+    },
+    "log10x_offload_archive": {
+      "title": "Archive offload destination on env",
+      "description": "Flip one offload destination's `status` to `archived` on an env-config document and stamp `archived_at`. The entry is NOT removed from the list — it stays as a historical reference (e.g. for retroactive Retriever scans of the legacy bucket). **Call this when** the customer is rotating out a bucket and wants the Receiver to stop writing to it, but keep the bucket's existence in the document so audits and stale-pointer fetches still resolve. Args: `env_id` (required — env_id UUID or nickname), `nickname` (required — must match an existing destination exactly), `archived_at` (optional ISO-8601 timestamp, defaults to now), `note` (optional free-form note appended to the destination). **REFUSES when the target is the only active destination on the env** — the Receiver requires at least one active offload destination to route the dropped slice to, and silently stranding offload traffic is the failure mode this guard prevents. The error envelope names the non-active destinations so the agent can advise the user to activate one first (call `log10x_offload_add` or hand-edit a `draining`/`failed` entry back to `active`).",
+      "annotations": {
+        "title": "Archive offload destination on env",
+        "readOnlyHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
+      "category": "install"
+    },
+    "log10x_retriever_register": {
+      "title": "Register Retriever on env",
+      "description": "Attach the Retriever endpoint + queue coordinates to an existing environment-config document. **Call this after `log10x_advise_retriever` has produced the install plan and the user has deployed the Retriever.** Args: `env_id` (required — must already exist in the env-config store), `url` (required — Retriever query endpoint), `input_bucket` (required — S3 archive bucket), `query_queues` (required — the four SQS queues: `index`, `subquery`, `stream`, `query`), `input_prefix` (optional), `query_log_group` (optional CloudWatch log group), `helm_release` (optional `{name, namespace, chart_version?}`). Refuses with `env_not_found` if the env does not exist — the agent should call `log10x_env_register` first. Idempotent: re-running with the same env_id replaces the retriever block in place and refreshes `updated_at`. After success, follow up with `log10x_retriever_probe` to verify the endpoint is reachable.",
+      "annotations": {
+        "title": "Register Retriever on env",
+        "readOnlyHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "category": "install"
+    },
     "log10x_top_patterns": {
       "title": "Top patterns",
       "description": "Return the top N log patterns ranked by byte volume (with cost overlay when $/GB is set), optionally with a delta column vs a `comparison_window` baseline (week-over-week / day-over-day / 1h-vs-prior-1h). Use for \"what is expensive right now\", \"what are the noisy patterns in <service> this hour\", \"give me a snapshot of my loudest events\", \"what changed this week\", \"did the deploy add cost\". Can be scoped by service label. `timeRange` accepts free-form `<n><m|h|d>` durations (e.g., `48h`, `3d`, `15m`) — there's no enum snap. Pass `comparison_window` to get a per-row delta column; omit for current-rank-only. Pass `include` to choose which cohort to rank: `admitted` (default — what the receiver let through), `dropped` (the offloaded / overflow cohort alone), or `both` (total ingest pre-receiver). Use `dropped` for \"what is the receiver throwing away\" and `both` for an apples-to-apples pre/post comparison.",
       "annotations": {
         "title": "Top patterns",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "category": "cost"
+    },
+    "log10x_pattern_diff": {
+      "title": "Pattern diff (set diff across a time boundary)",
+      "description": "Set diff of patterns across a time boundary. Compares pattern presence in two windows (the most recent `timeRange` window as \"after\" vs the immediately preceding `timeRange` window as \"before\") and returns four sets: `new` (present after, absent before), `retired` (present before, absent after), `persistent` (present in both), and `re_emerged` (flagged as new but actually existed prior to the before-window — the \"the bug we thought we fixed is back\" case, derived by checking first_seen against the before-window boundary). Plus `co_emergence_clusters`: groups of 3+ patterns whose first_seen timestamps cluster within ±co_emergence_window_seconds (default 60s). That cluster is a deploy fingerprint — no CI/CD integration required; the agent can then query the customer's deploy system externally with the cluster timestamp. This tool is coherent ONLY because log10x pattern_hash is stable across queries; competitors that re-cluster per query (Datadog Log Patterns, Cribl, Edge Delta) can't answer the diff question because their \"patterns\" on either side of the boundary aren't comparable. Use for \"what changed since last deploy\", \"which patterns disappeared this week\", \"did the rollback bring back the old errors\", or paired with log10x_pattern_examples on a flagged hash to see slot distribution. Scoping: `service` and `severity` narrow the universe; `limit` caps rows per category. Returns structured envelope under `data.diff` with the four sets plus an `incidents` block when co_emergence clusters are detected.",
+      "annotations": {
+        "title": "Pattern diff (set diff across a time boundary)",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "category": "cost"
+    },
+    "log10x_whats_changing": {
+      "title": "What's changing — patterns ranked by delta vs baseline",
+      "description": "Patterns ranked by delta vs a baseline window — the \"what grew (or shrank) the most since X\" question. Distinct from `log10x_top_patterns` which ranks by current cost; this tool ranks by delta and applies gates (`min_delta_usd`, `min_delta_contribution_pct`) that drop noise-level changes. `comparison_window: \"auto\"` (default) averages three offsets (1×, 2×, 3× the timeRange) for noise smoothing; specific offsets like `\"7d\"` compare to a single anchor — e.g. `{timeRange: \"1d\", comparison_window: \"1d\"}` is today vs yesterday (deploy-delta), `{timeRange: \"7d\", comparison_window: \"7d\"}` is this week vs last week. Brand-new patterns (no baseline samples) are EXCLUDED — they go to `log10x_whats_new` for clean separation of stories. Restores the capability of the deleted log10x_cost_drivers tool (commit 27dce7d, chk-15) using the modern StructuredOutput envelope and the shared baseline machinery in `top-volume-extras.ts` / gates in `lib/gates.ts`. Use for \"what grew most this week\", \"which patterns regressed after the deploy\", \"what's driving cost up since yesterday\". Returns patterns with per-row delta_usd, baseline_usd, current_usd, delta_pct, and a flag for whether each row crossed the contribution gate.",
+      "annotations": {
+        "title": "What's changing — patterns ranked by delta vs baseline",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "category": "cost"
+    },
+    "log10x_whats_new": {
+      "title": "What's new — patterns by first_seen recency",
+      "description": "Patterns whose first_seen timestamp falls inside a recency window — the \"what showed up recently\" question. Distinct from `log10x_top_patterns` (current cost ranking) and `log10x_whats_changing` (delta vs baseline). New patterns have no baseline, so delta math is meaningless; this tool exists so they get a clean home and don't pollute the changing-vs-baseline surface. Implementation: queries bytes_per_pattern in the current `timeRange` window to find candidate hashes, then for each hash queries the 30-day history to find the earliest non-zero datapoint via `fetchFirstSeenBatch`. A pattern is \"new\" when its first_seen timestamp is younger than `first_seen_within` (default `1d`). Default sort: by first_seen recency descending (most recent first). Use `first_seen_within: \"1h\"` for incident triage, `\"1d\"` for daily-deploy review, `\"7d\"+` for weekly observability hygiene. Returns patterns with first_seen, age, cost_now_usd, bytes_now, events_now, and the service + severity attribution.",
+      "annotations": {
+        "title": "What's new — patterns by first_seen recency",
         "readOnlyHint": true,
         "idempotentHint": true,
         "openWorldHint": true
@@ -239,6 +349,17 @@
         "title": "Retriever query status",
         "readOnlyHint": true,
         "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "category": "retrieve"
+    },
+    "log10x_retriever_probe": {
+      "title": "Retriever e2e probe",
+      "description": "End-to-end probe of the deployed Retriever chain. Fires a synthetic query at the picked top-volume tenx_hash (or an explicit target_hash) and asserts every stage in order: offload bucket has recent data, indexer pipeline is running (kubectl logs grep for 'starting pipeline - Tenx: @/apps/retriever/index'), SQS subquery + stream queues drained (depth ≤ 10), retriever pod containers all ready, then submits the query and asserts CloudWatch scan complete events have matched>0, CloudWatch stream worker complete events exist, S3 qr/<queryId>/*.jsonl files were written, and the MCP returned events_matched>0 AND events_returned>0. Returns a structured verdict (green / broken / unknown) with per-assert observed + remedy. Call this as the post-install verify step (chained from log10x_advise_retriever step_verify) OR as a deep doctor diagnostic when log10x_retriever_query returns 0 events and the cause is unclear. Catches the silent-failure shapes that take hours to debug manually: indexer not booted, chart 1.0.20 / runtime-name stream pipeline launch failures, IRSA s3:PutObject misconfigured, MCP input_bucket misaligned with engine write location.",
+      "annotations": {
+        "title": "Retriever e2e probe",
+        "readOnlyHint": true,
+        "idempotentHint": false,
         "openWorldHint": true
       },
       "category": "retrieve"
@@ -350,6 +471,17 @@
         "title": "Delete environment",
         "readOnlyHint": false,
         "destructiveHint": true,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "category": "account"
+    },
+    "log10x_env_register": {
+      "title": "Register environment descriptor",
+      "description": "Persist a full EnvironmentConfig document — cluster identity, SIEM destination, offload destinations, streamer + retriever endpoints — to whichever on-prem env-config store the customer's cloud uses (Kubernetes ConfigMap, AWS SSM, GCP Secret Manager, Azure App Configuration, or a local file for dev). **Distinct from log10x_create_env**: that mints account-level identity on the SaaS backend; this writes the cluster-side descriptor every tool resolves against when it needs the streamer URL, retriever URL, SIEM kind, or offload bucket. **Call this for**: \"register my new cluster with log10x\", \"persist the env descriptor for prod\", \"wire up the staging cluster's env config\". Validates the document against the schema before any store write — partial writes are not allowed. Pin a backend with `target_store` to refuse silent fallback; omit it for first-available auto-pick (k8s → aws_ssm → gcp_sm → azure_ac → local).",
+      "annotations": {
+        "title": "Register environment descriptor",
+        "readOnlyHint": false,
         "idempotentHint": true,
         "openWorldHint": true
       },
@@ -546,7 +678,7 @@
     },
     "log10x_pattern_mitigate": {
       "title": "Pattern mitigate",
-      "description": "[FRESH-SESSION ROUTING: if this is the user first cost question of the session, call log10x_start first instead — it returns the orientation menu the user needs before any per-tool action.] Given one pattern (symbolMessage identity or tenx_hash), return the env-gated menu of mitigation options: drop_at_analyzer, drop_at_forwarder, mute_at_10x, compact_at_10x. Each option carries enabled-or-not + reason + estimated percent reduction (with $/mo overlay when $/GB is set) + a paste-ready config snippet + follow-through tool calls (typically log10x_dependency_check before applying). The agent surfaces these to the user; the user picks. **Action-shaped tool — calibration honesty**: the envelope's `recommendation_basis` tells the agent WHERE the capability detection came from (envs.json, snapshot, env vars, or unknown). `recommendation_audit.capability_sources` carries the per-field source, and `snapshot_age_seconds` carries snapshot staleness. The agent SHOULD NOT auto-route to the chosen sub-tool until the user picks an option, and SHOULD verify the basis before treating capability detection as authoritative (e.g., a stale snapshot may mis-flag mute as enabled when the receiver was uninstalled). See `docs/cross-pillar-primitives.md` for the agent behavior contract. **Call this** when a previous tool surfaced a high-cost pattern and the user asks 'what should I do' / 'how do I drop this' / 'how do I reduce this'.",
+      "description": "[FRESH-SESSION ROUTING: if this is the user first cost question of the session, call log10x_start first instead — it returns the orientation menu the user needs before any per-tool action.] Given one pattern (symbolMessage identity or tenx_hash), return the env-gated CAPABILITY MENU of which mitigation paths are reachable: drop_at_analyzer, drop_at_forwarder, mute_at_10x, compact_at_10x. Each option carries `enabled` (true/false), `label`, and `disabled_reason` when not reachable. This is a REACHABILITY-FIRST router: it answers \"which of the four tiers can I use right now given my env wiring\" — NOT \"how much would each save\". Per-option estimated savings (% reduction, $/mo) and paste-ready config snippets are surfaced by the next-tool chain (log10x_cost_options for the action menu, then the specific action tool for the snippet) — NOT this envelope. The agent surfaces the menu to the user; the user picks; chain to log10x_cost_options for the action-level breakdown. **Action-shaped tool — calibration honesty**: the envelope's `recommendation_basis` tells the agent WHERE the capability detection came from (envs.json, snapshot, env vars, or unknown). `recommendation_audit.capability_sources` carries the per-field source, and `snapshot_age_seconds` carries snapshot staleness. The agent SHOULD NOT auto-route to the chosen sub-tool until the user picks an option, and SHOULD verify the basis before treating capability detection as authoritative (e.g., a stale snapshot may mis-flag mute as enabled when the receiver was uninstalled). See `docs/cross-pillar-primitives.md` for the agent behavior contract. **Call this** when a previous tool surfaced a high-cost pattern and the user asks 'what should I do' / 'how do I drop this' / 'how do I reduce this'.",
       "annotations": {
         "title": "Pattern mitigate",
         "readOnlyHint": true,

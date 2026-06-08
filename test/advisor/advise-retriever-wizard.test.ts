@@ -5,7 +5,7 @@
  *   - Step advancement: each answer advances the wizard to the next question
  *   - Snapshot expiry: missing snapshot returns 'missing_snapshot' mode
  *   - infra_mode branches: terraform / cli / existing all reach plan emission
- *   - IRSA verification step: step 5 asks for irsa_role_arn, shape is 'string'
+ *   - IRSA verification step: step 5 asks for iam_role_arn, shape is 'string'
  *   - markdown is non-empty at each step (must_render_verbatim equivalent)
  *   - shape/question_id present when a decision is pending (must_ask_user equivalent)
  *   - actions point back to log10x_advise_retriever (not mis-routing to other tools)
@@ -317,10 +317,10 @@ test('wizard step 5: all infra except IRSA => irsa-role question with string sha
     'irsa-role shape must be type:string');
   assert.equal(shape.answer_field, 'iam_role_arn',
     'irsa-role shape.answer_field must be iam_role_arn');
-  // Markdown must mention IRSA role ARN.
+  // Markdown must mention IRSA role ARN (rewrite renders "IRSA" uppercase).
   assert.ok(
-    typeof d.markdown === 'string' && (d.markdown as string).includes('IRSA'),
-    'irsa-role markdown must mention IRSA'
+    typeof d.markdown === 'string' && (d.markdown as string).toLowerCase().includes('irsa'),
+    'irsa-role markdown must mention irsa'
   );
   // The answer in the next call with iam_role_arn advances past this step.
   const step2 = await call(id, {

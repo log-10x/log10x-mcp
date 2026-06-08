@@ -15,6 +15,7 @@
 
 import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
+import { formatPatternLabel } from '../lib/pattern-label.js';
 import {
   buildPatternSearch,
   eventTimestampMs,
@@ -38,6 +39,8 @@ import { createLimiter } from '../lib/concurrency.js';
 import { fmtCount } from '../lib/format.js';
 import { retrieverNotConfiguredMessage } from './retriever-query.js';
 import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
+import { buildChassisErrorEnvelope } from '../lib/chassis-envelope.js';
+import { wrapBackendError, type PrimitiveError } from '../lib/primitive-errors.js';
 
 /** Cap on group-by cardinality. Tail collapsed to "_other_". */
 const TOP_K_GROUPS = 1000;
@@ -130,6 +133,26 @@ export async function executeRetrieverSeries(
     // branches on data.status, matching retriever_query and the framework.
     return buildNotConfiguredEnvelope({ tool: 'log10x_retriever_series', kind: 'retriever', remediation: md });
   }
+  // Y2: Pre-flight retriever runtime probe. isRetrieverConfigured() only
+  // checks the env-var pair; it returns true on a stale install where the
+  // env vars are still set but the runtime has been retired (pods drained,
+  // ELB removed, archive frozen). Without this gate the call burns the full
+  // poll budget (~180s) on a hopeless POST and returns ok:true with
+  // actual_events=0 — indistinguishable from "real silent window" to a
+  // chain. The retriever_state helper's source field tells us whether the
+  // resolution chain actually found an addressable runtime: 'none' means
+  // nothing live answered. Surface that as data.status='not_configured'
+  // before any work.
+  if (retrieverState.source === 'none' || !retrieverState.installed) {
+    return buildNotConfiguredEnvelope({
+      tool: 'log10x_retriever_series',
+      kind: 'retriever',
+      remediation:
+        'Retriever runtime is not detected for this env — env vars may be set but no live pods / ELB / svc ' +
+        'answered the discovery probes (snapshot, helm_release_probe, kubectl_probe all came up empty). ' +
+        'Run log10x_advise_retriever for the redeploy / wiring recipe.',
+    });
+  }
   // Defensive defaults — match retrieverSeriesSchema for non-SDK
   // callers. Narrow into a fully-populated args local so the helper
   // functions can keep their non-optional bucket_size/fidelity types.
@@ -153,17 +176,55 @@ export async function executeRetrieverSeries(
 
   // Validate the time expressions early so a malformed window doesn't
   // ride all the way down to the retriever for a cryptic 400.
+  // Wave 2.G: bare schema-invalid throws (Invalid time window, Empty
+  // window) become structured chassis envelopes carrying status='error'
+  // and error_type='schema_invalid' so an agent branches on the typed
+  // error instead of getting an MCP protocol exception.
   try {
     normalizeTimeExpression(args.from);
     normalizeTimeExpression(args.to);
   } catch (e) {
-    throw new Error(`Invalid time window: ${(e as Error).message}`);
+    return buildChassisErrorEnvelope({
+      tool: 'log10x_retriever_series',
+      err: {
+        error_type: 'schema_invalid',
+        retryable: false,
+        suggested_backoff_ms: null,
+        hint: `Invalid time window: ${(e as Error).message}`.slice(0, 300),
+      },
+      scope: { window: `${args.from}..${args.to}`, window_basis: 'explicit' },
+      contextPayload: {
+        from: args.from,
+        to: args.to,
+        pattern: args.pattern,
+        search: args.search,
+      },
+      source_disclosure: { retriever_state_source: retrieverState.source },
+    });
   }
 
   const nowMs = Date.now();
   const fromMs = timeExprToMs(args.from, nowMs);
   const toMs = timeExprToMs(args.to, nowMs);
-  if (toMs <= fromMs) throw new Error(`Empty window: from=${args.from} to=${args.to}`);
+  if (toMs <= fromMs) {
+    return buildChassisErrorEnvelope({
+      tool: 'log10x_retriever_series',
+      err: {
+        error_type: 'schema_invalid',
+        retryable: false,
+        suggested_backoff_ms: null,
+        hint: `Empty window: from=${args.from} to=${args.to}`,
+      },
+      scope: { window: `${args.from}..${args.to}`, window_basis: 'explicit' },
+      contextPayload: {
+        from: args.from,
+        to: args.to,
+        pattern: args.pattern,
+        search: args.search,
+      },
+      source_disclosure: { retriever_state_source: retrieverState.source },
+    });
+  }
   const windowMs = toMs - fromMs;
 
   const decision = await decideFidelity(env, {
@@ -181,6 +242,10 @@ export async function executeRetrieverSeries(
       view: 'summary',
       summary: { headline: `Series refused: ${reason}. Narrow the window or add a more selective search expression.` },
       data: {
+        // Harmonized chassis status (Wave 1.C). `ok` retained for
+        // back-compat with pre-status callers; new callers branch on
+        // data.status which has the same taxonomy as other Class A tools.
+        status: 'refused',
         ok: false,
         mode: 'refused',
         from: args.from,
@@ -193,10 +258,55 @@ export async function executeRetrieverSeries(
   }
 
   const startedMs = Date.now();
-  const result =
-    decision.mode === 'full'
-      ? await executeFullMode(env, args, fromMs, toMs)
-      : await executeSampledMode(env, args, fromMs, toMs, decision.subWindows!, decision.eventsPerSubWindow!);
+  // Wrap the dispatch of the actual retriever round-trip in wrapBackendError
+  // so HTTP-coded failures (503/504 ↔ backend_unavailable, 408/429 ↔
+  // backend_timeout, network failures ↔ backend_unavailable) surface with
+  // structured retryable + suggested_backoff_ms instead of throwing through
+  // the MCP boundary. Highest blast radius of the four tools: both full and
+  // sampled modes go through here.
+  let result: SeriesResult;
+  try {
+    result =
+      decision.mode === 'full'
+        ? await executeFullMode(env, args, fromMs, toMs)
+        : await executeSampledMode(env, args, fromMs, toMs, decision.subWindows!, decision.eventsPerSubWindow!);
+  } catch (err: unknown) {
+    const wrapped: PrimitiveError = wrapBackendError(err);
+    // Preserve dual-transport breadcrumbs written by the SQS fallback path
+    // when both HTTP and SQS transports were attempted and both failed.
+    // Mirrors retriever-query.ts's dual-failure surface so an agent sees
+    // the same shape across the family.
+    const dualErr = err as Record<string, unknown>;
+    const transportsBreadcrumbs = Array.isArray(dualErr?.transports_attempted)
+      ? {
+          transports_attempted: dualErr.transports_attempted,
+          http_error_message: dualErr.http_error_message,
+          sqs_error_type: dualErr.sqs_error_type,
+          sqs_error_message: dualErr.sqs_error_message,
+        }
+      : {};
+    return buildChassisErrorEnvelope({
+      tool: 'log10x_retriever_series',
+      err: wrapped,
+      scope: { window: `${args.from}..${args.to}`, window_basis: 'explicit' },
+      contextPayload: {
+        // Echo the legacy back-compat boolean alongside the typed status so
+        // pre-chassis readers that check `data.ok` still see `false` on error.
+        ok: false,
+        status: 'error',
+        mode: decision.mode,
+        from: args.from,
+        to: args.to,
+        window_ms: windowMs,
+        pattern: args.pattern,
+        search: args.search,
+        sub_windows: decision.subWindows,
+        events_per_sub_window: decision.eventsPerSubWindow,
+        ...transportsBreadcrumbs,
+      },
+      source_disclosure: { retriever_state_source: retrieverState.source },
+    });
+  }
 
   const wallTimeMs = Date.now() - startedMs;
   const groupCounts: Record<string, number> = {};
@@ -215,12 +325,43 @@ export async function executeRetrieverSeries(
     windowMs,
     topGroups,
   });
+  // Status: 'success' when the run produced any actual events; 'no_signal'
+  // when the run completed cleanly but found nothing in the window. `ok`
+  // retained as a back-compat boolean.
+  const seriesStatus: 'success' | 'no_signal' =
+    result.actualEvents > 0 ? 'success' : 'no_signal';
   return __be({
     tool: 'log10x_retriever_series',
     view: 'summary',
-    summary: { headline: `Retriever series for ${args.pattern ?? args.search ?? 'window'}: ${result.series.length} bucket point${result.series.length !== 1 ? 's' : ''}, ${result.groupCardinality} group${result.groupCardinality !== 1 ? 's' : ''}, mode=${decision.mode}, wall=${wallTimeMs}ms.` },
+    summary: {
+      headline: (() => {
+        // When wall_time exceeds an empty-window budget and we have zero
+        // worker files / zero events, the headline must say so. Leaving
+        // "wall=186546ms" as neutral telemetry next to "0 bucket points"
+        // let downstream renderers treat the empty result as authoritative
+        // when it was actually a likely timeout. Append a perf advisory
+        // when the shape matches.
+        const baseHeadline = `Retriever series for ${formatPatternLabel({ symbol_message: args.pattern ?? args.search ?? 'window', maxHintChars: 50 })}: ${result.series.length} bucket point${result.series.length !== 1 ? 's' : ''}, ${result.groupCardinality} group${result.groupCardinality !== 1 ? 's' : ''}, mode=${decision.mode}, wall=${wallTimeMs}ms.`;
+        const degraded =
+          result.series.length === 0 &&
+          result.workerFiles === 0 &&
+          wallTimeMs > 30_000;
+        return degraded
+          ? `${baseHeadline} ⚠ Degraded: wall ${wallTimeMs}ms with 0 worker files suggests timeout/starvation, not a confirmed-empty window — treat as unknown.`
+          : baseHeadline;
+      })(),
+    },
     data: {
-      ok: true,
+      // Previously ok=true on an empty result + huge wall_time + zero
+      // worker_files conflated "clean empty" with "retriever did not
+      // return". Now ok=false when the shape suggests timeout/starvation,
+      // so downstream renderers can gate on ok and not treat a degraded
+      // result as authoritative.
+      status: seriesStatus,
+      ok:
+        !(result.series.length === 0 &&
+          result.workerFiles === 0 &&
+          wallTimeMs > 30_000),
       mode: decision.mode,
       from: args.from,
       to: args.to,
@@ -270,7 +411,7 @@ async function executeFullMode(
   // Summaries path: ~50–500x bandwidth reduction vs raw events because each
   // qrs/ record carries `summaryVolume` (count) + grouping fields directly,
   // skipping the per-event `text` payload. Gated by an env flag while the
-  // engine-side writer is rolling out (engine#36 / pipeline-extensions#6).
+  // engine-side summaries writer is rolling out.
   // Fall back to the events path on empty summaries so older retrievers
   // (no qrs/ writer) still produce a series.
   const useSummaries = process.env.LOG10X_RETRIEVER_SERIES_USE_SUMMARIES === 'true';
@@ -630,16 +771,37 @@ function buildSeriesHumanSummary(s: {
     : args.search
       ? `search ${args.search}`
       : 'open scan';
-  const first = `Retriever series for ${scope} over ${args.from} to ${args.to} (${formatDuration(windowMs)}) produced ${result.series.length} bucket points across ${result.groupCardinality} group${result.groupCardinality === 1 ? '' : 's'} in mode ${decision.mode} (wall ${wallTimeMs}ms).`;
+  const scopeLabel = formatPatternLabel({ symbol_message: scope, maxHintChars: 50 });
+  const first = `Retriever series for ${scopeLabel} over ${args.from} to ${args.to} (${formatDuration(windowMs)}) produced ${result.series.length} bucket points across ${result.groupCardinality} group${result.groupCardinality === 1 ? '' : 's'} in mode ${decision.mode} (wall ${wallTimeMs}ms).`;
   const second = decision.mode === 'per_window_sampled'
     ? `Sampled mode used ${decision.subWindows} sub-windows of up to ${decision.eventsPerSubWindow} events each; time-distribution shape is preserved but bucket counts are estimates.`
     : `Full-aggregation mode returned exact counts over ${result.actualEvents} processed events${result.truncated ? ' (some workers truncated at the per-worker cap)' : ''}.`;
   const top = s.topGroups[0];
-  const third = args.group_by && top
-    ? `Top ${args.group_by} value is ${top.group} with ${top.count} event${top.count === 1 ? '' : 's'}.`
-    : result.series.length === 0
-      ? 'Series is empty; verify the search expression matches and the window covers actual ingest.'
-      : `Worker files: ${result.workerFiles}.`;
+  // When the series is empty AND wall_time_ms is large vs window_ms, the
+  // dominant cause is almost certainly retriever_did_not_return (timeout,
+  // worker starvation, degraded archive), NOT search-expression mismatch.
+  // The earlier single-cause framing ("verify the search expression
+  // matches") made the empty result look like a query mistake when in fact
+  // the retriever had failed to fetch. Surface all three possible causes.
+  let third: string;
+  if (args.group_by && top) {
+    third = `Top ${args.group_by} value is ${top.group} with ${top.count} event${top.count === 1 ? '' : 's'}.`;
+  } else if (result.series.length === 0) {
+    const transportBound = wallTimeMs > 30_000 && result.workerFiles === 0;
+    if (transportBound) {
+      third =
+        `Series is empty AND wall_time ${wallTimeMs}ms with worker_files=0 — retriever likely did not return events for this pattern in this window (possible timeout, worker starvation, or stale archive index). ` +
+        `Less likely: pattern truly empty in window, OR search expression did not match. Check log10x_doctor retriever_forensic_health.`;
+    } else {
+      third =
+        `Series is empty. Three possible causes (most likely first): ` +
+        `(a) the pattern truly produced no events in this window, ` +
+        `(b) the search expression did not match the pattern's actual symbol_message, ` +
+        `(c) the retriever returned no rows for an unrelated reason — verify with log10x_retriever_query on the same window.`;
+    }
+  } else {
+    third = `Worker files: ${result.workerFiles}.`;
+  }
   return `${first} ${second} ${third}`;
 }
 
