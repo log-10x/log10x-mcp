@@ -5,7 +5,7 @@
  *   - Step advancement: each answer advances the wizard to the next question
  *   - Snapshot expiry: missing snapshot returns 'missing_snapshot' mode
  *   - infra_mode branches: terraform / cli / existing all reach plan emission
- *   - IRSA verification step: step 5 asks for irsa_role_arn, shape is 'string'
+ *   - IRSA verification step: step 5 asks for iam_role_arn, shape is 'string'
  *   - markdown is non-empty at each step (must_render_verbatim equivalent)
  *   - shape/question_id present when a decision is pending (must_ask_user equivalent)
  *   - actions point back to log10x_advise_retriever (not mis-routing to other tools)
@@ -315,16 +315,16 @@ test('wizard step 5: all infra except IRSA => irsa-role question with string sha
   const shape = d.shape as { type: string; answer_field?: string };
   assert.equal(shape.type, 'string',
     'irsa-role shape must be type:string');
-  assert.equal(shape.answer_field, 'irsa_role_arn',
-    'irsa-role shape.answer_field must be irsa_role_arn');
-  // Markdown must mention IRSA role ARN.
+  assert.equal(shape.answer_field, 'iam_role_arn',
+    'irsa-role shape.answer_field must be iam_role_arn');
+  // Markdown must mention IRSA role ARN (rewrite renders "IRSA" uppercase).
   assert.ok(
-    typeof d.markdown === 'string' && (d.markdown as string).includes('irsa'),
+    typeof d.markdown === 'string' && (d.markdown as string).toLowerCase().includes('irsa'),
     'irsa-role markdown must mention irsa'
   );
-  // The answer in the next call with irsa_role_arn advances past this step.
+  // The answer in the next call with iam_role_arn advances past this step.
   const step2 = await call(id, {
-    irsa_role_arn: 'arn:aws:iam::111:role/tenx-retriever',
+    iam_role_arn: 'arn:aws:iam::111:role/tenx-retriever',
   });
   const d2 = data(step2);
   // Should no longer be asking for irsa-role.
@@ -370,12 +370,12 @@ test('wizard: terraform infra mode + all infra supplied + pasted license => emit
   // Supply all infra values in one call (legacy one-shot compat + terraform mode).
   const out = await call(id, {
     infra_mode: 'terraform',
-    input_bucket: 'tenx-logs-111',
-    sqs_index_url: 'https://sqs.us-east-1.amazonaws.com/111/tenx-index',
-    sqs_query_url: 'https://sqs.us-east-1.amazonaws.com/111/tenx-query',
-    sqs_subquery_url: 'https://sqs.us-east-1.amazonaws.com/111/tenx-subquery',
-    sqs_stream_url: 'https://sqs.us-east-1.amazonaws.com/111/tenx-stream',
-    irsa_role_arn: 'arn:aws:iam::111:role/tenx-retriever',
+    index_source_bucket: 'tenx-logs-111',
+    index_queue_url: 'https://sqs.us-east-1.amazonaws.com/111/tenx-index',
+    query_queue_url: 'https://sqs.us-east-1.amazonaws.com/111/tenx-query',
+    subquery_queue_url: 'https://sqs.us-east-1.amazonaws.com/111/tenx-subquery',
+    stream_queue_url: 'https://sqs.us-east-1.amazonaws.com/111/tenx-stream',
+    iam_role_arn: 'arn:aws:iam::111:role/tenx-retriever',
     license_source: 'paste',
     license_jwt_paste: 'eyJtb2NrIjoidGVzdCJ9',
   });
@@ -406,12 +406,12 @@ test('wizard: cli infra mode + all infra supplied + pasted license => emits plan
 
   const out = await call(id, {
     infra_mode: 'cli',
-    input_bucket: 'tenx-logs-111',
-    sqs_index_url: 'https://sqs.us-east-1.amazonaws.com/111/tenx-index',
-    sqs_query_url: 'https://sqs.us-east-1.amazonaws.com/111/tenx-query',
-    sqs_subquery_url: 'https://sqs.us-east-1.amazonaws.com/111/tenx-subquery',
-    sqs_stream_url: 'https://sqs.us-east-1.amazonaws.com/111/tenx-stream',
-    irsa_role_arn: 'arn:aws:iam::111:role/tenx-retriever',
+    index_source_bucket: 'tenx-logs-111',
+    index_queue_url: 'https://sqs.us-east-1.amazonaws.com/111/tenx-index',
+    query_queue_url: 'https://sqs.us-east-1.amazonaws.com/111/tenx-query',
+    subquery_queue_url: 'https://sqs.us-east-1.amazonaws.com/111/tenx-subquery',
+    stream_queue_url: 'https://sqs.us-east-1.amazonaws.com/111/tenx-stream',
+    iam_role_arn: 'arn:aws:iam::111:role/tenx-retriever',
     license_source: 'paste',
     license_jwt_paste: 'eyJtb2NrIjoidGVzdCJ9',
   });
@@ -456,8 +456,8 @@ test('wizard: session accumulates answers across calls', async () => {
     `call 2: expected input-bucket or sqs-urls; got ${String(d2.question_id)}`
   );
 
-  // Call 3: supply input_bucket; infra_mode remembered from call 2.
-  const c3 = await call(id, { input_bucket: 'my-logs-bucket' });
+  // Call 3: supply index_source_bucket; infra_mode remembered from call 2.
+  const c3 = await call(id, { index_source_bucket: 'my-logs-bucket' });
   const d3 = data(c3);
   assert.equal(d3.mode, 'next_question');
   // Should now be asking for SQS URLs.
@@ -468,10 +468,10 @@ test('wizard: session accumulates answers across calls', async () => {
 
   // Call 4: supply all SQS URLs.
   const c4 = await call(id, {
-    sqs_index_url: 'https://sqs.us-east-1.amazonaws.com/111/tenx-index',
-    sqs_query_url: 'https://sqs.us-east-1.amazonaws.com/111/tenx-query',
-    sqs_subquery_url: 'https://sqs.us-east-1.amazonaws.com/111/tenx-subquery',
-    sqs_stream_url: 'https://sqs.us-east-1.amazonaws.com/111/tenx-stream',
+    index_queue_url: 'https://sqs.us-east-1.amazonaws.com/111/tenx-index',
+    query_queue_url: 'https://sqs.us-east-1.amazonaws.com/111/tenx-query',
+    subquery_queue_url: 'https://sqs.us-east-1.amazonaws.com/111/tenx-subquery',
+    stream_queue_url: 'https://sqs.us-east-1.amazonaws.com/111/tenx-stream',
   });
   const d4 = data(c4);
   assert.equal(d4.mode, 'next_question');
@@ -480,7 +480,7 @@ test('wizard: session accumulates answers across calls', async () => {
 
   // Call 5: supply IRSA ARN.
   const c5 = await call(id, {
-    irsa_role_arn: 'arn:aws:iam::111:role/tenx-retriever',
+    iam_role_arn: 'arn:aws:iam::111:role/tenx-retriever',
     license_source: 'paste',
     license_jwt_paste: 'eyJtb2NrIjoidGVzdCJ9',
   });
@@ -581,18 +581,18 @@ test('wizard: unknown arg returns unknown_args mode with suggestions', async () 
   const out = await executeAdviseRetriever({
     snapshot_id: id,
     license_source: 'demo',
-    // 'role_arn' is a known synonym for 'irsa_role_arn'.
+    // 'role_arn' is a known synonym for 'iam_role_arn'.
     role_arn: 'arn:aws:iam::111:role/tenx-retriever',
   } as unknown as Parameters<typeof executeAdviseRetriever>[0]);
   const d = data(out);
   assert.equal(d.mode, 'unknown_args');
   assert.ok(Array.isArray(d.unknown_keys));
   assert.ok((d.unknown_keys as string[]).includes('role_arn'));
-  // Suggestion must point to irsa_role_arn.
+  // Suggestion must point to iam_role_arn.
   const sugs = d.suggestions as Array<{ unknown: string; did_you_mean: string | null }>;
   const match = sugs.find((s) => s.unknown === 'role_arn');
-  assert.ok(match && match.did_you_mean === 'irsa_role_arn',
-    `expected suggestion irsa_role_arn; got ${String(match?.did_you_mean)}`);
+  assert.ok(match && match.did_you_mean === 'iam_role_arn',
+    `expected suggestion iam_role_arn; got ${String(match?.did_you_mean)}`);
 });
 
 // ── Auto-skip to existing when all infra detected ─────────────────────────────

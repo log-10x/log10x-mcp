@@ -25,7 +25,12 @@ import { mkdirSync, existsSync } from 'node:fs';
 import { join as pathJoin } from 'node:path';
 
 import { parsePolicyYaml } from '../src/lib/policy-loader.js';
-import { runTick, PromUnreachableError } from '../src/lib/recurring-tick.js';
+import {
+  runTick,
+  PromUnreachableError,
+  _setBackendLoader,
+  _resetBackendLoader,
+} from '../src/lib/recurring-tick.js';
 import type { Policy } from '../src/lib/policy-loader.js';
 
 // ─── mock Prometheus backend ──────────────────────────────────────────────────
@@ -53,38 +58,36 @@ function mockPromResponse(
 }
 
 /**
- * Override the customer-metrics loadBackendFromEnv to return a mock backend
- * that serves the given rows.
+ * Run `fn` with a deterministic mock metrics backend serving the given rows.
  *
- * We monkey-patch the module export table.  This works in Node ESM because
- * the module namespace is live-bound.
+ * Uses the runner's dependency-injection seam (`_setBackendLoader`) rather
+ * than monkey-patching the frozen `customer-metrics` ESM namespace — that
+ * assignment throws "Cannot assign to read only property" under strict ESM,
+ * and the runner re-imports the binding internally so a namespace patch
+ * would never be observed anyway.
  */
 async function withMockBackend<T>(
   rows: Array<{ pattern: string; service: string; severity: string; bytes: number }>,
   fn: () => Promise<T>
 ): Promise<T> {
-  // Dynamically import so we can get the live module namespace.
-  const cm = await import('../src/lib/customer-metrics.js') as {
-    loadBackendFromEnv: () => Promise<unknown>;
-  } & Record<string, unknown>;
-
-  const original = cm.loadBackendFromEnv;
   const response = mockPromResponse(rows);
 
-  // Replace with a mock that returns a fake backend.
-  (cm as Record<string, unknown>).loadBackendFromEnv = async () => ({
+  // Inject a mock backend through the runner's seam.
+  _setBackendLoader(async () => ({
     backendType: 'mock',
     endpoint: 'mock://localhost',
     queryInstant: async (_q: string) => response,
     queryRange: async () => response,
     listLabels: async () => [],
     listLabelValues: async () => [],
-  });
+    remoteWriteUrl: () => undefined,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  }) as any);
 
   try {
     return await fn();
   } finally {
-    (cm as Record<string, unknown>).loadBackendFromEnv = original;
+    _resetBackendLoader();
   }
 }
 
@@ -193,8 +196,22 @@ test('decision: INFO moderate volume → sample', async () => {
   assert.equal(d.action, 'sample', `expected sample for 100 MB INFO; got ${d.action}`);
 });
 
-test('decision: INFO low-moderate volume → compact', async () => {
-  const policy = makePolicy({ target_percent: 95 });
+test('decision: explicit severity_rules compact → compact', async () => {
+  // In auto mode the threshold gate (50 MB) sits at the sample cutoff, so the
+  // bytes-magnitude tiers only ever yield drop/sample/pass. The 'compact'
+  // action is reached via an explicit per-severity rule, which is what this
+  // test exercises against the current source.
+  const policy = makePolicy({
+    target_percent: 95,
+    severity_rules: {
+      ERROR: 'keep',
+      CRITICAL: 'keep',
+      WARN: 'auto',
+      INFO: 'compact',
+      DEBUG: 'auto',
+      TRACE: 'auto',
+    },
+  });
   process.env.LOG10X_ENV_ID = 'test-env';
 
   const result = await withMockBackend(
@@ -206,7 +223,7 @@ test('decision: INFO low-moderate volume → compact', async () => {
 
   const d = result.applied_changes.find((d) => d.pattern_hash === 'hash-info-compact');
   assert.ok(d);
-  assert.equal(d.action, 'compact', `expected compact for 60 MB INFO; got ${d.action}`);
+  assert.equal(d.action, 'compact', `expected compact for INFO:compact rule; got ${d.action}`);
 });
 
 test('decision: INFO below threshold → pass', async () => {

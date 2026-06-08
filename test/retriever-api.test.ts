@@ -8,7 +8,7 @@
 
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { parseTimeExpression, normalizeTimeExpression, isRetrieverConfigured, eventTimestampMs, buildPatternSearch } from '../src/lib/retriever-api.js';
+import { parseTimeExpression, normalizeTimeExpression, isRetrieverConfiguredSync, eventTimestampMs, buildPatternSearch } from '../src/lib/retriever-api.js';
 
 test('normalizeTimeExpression: bare `now` becomes $=now()', () => {
   assert.equal(normalizeTimeExpression('now'), '$=now()');
@@ -47,19 +47,24 @@ test('parseTimeExpression is an alias for normalizeTimeExpression', () => {
   assert.equal(parseTimeExpression('now-1h'), normalizeTimeExpression('now-1h'));
 });
 
-test('isRetrieverConfigured requires both __SAVE_LOG10X_RETRIEVER_URL__ and __SAVE_LOG10X_RETRIEVER_BUCKET__', () => {
+test('isRetrieverConfiguredSync requires both __SAVE_LOG10X_RETRIEVER_URL__ and __SAVE_LOG10X_RETRIEVER_BUCKET__', () => {
+  // isRetrieverConfigured() became async on 2026-06-04 (Fix 83a/83b helm-probe
+  // cascade) and now resolves to true via the kubectl/helm probe even with no
+  // env vars set. isRetrieverConfiguredSync() is the env-only fast-path helper
+  // kept for exactly this back-compat contract, so the deterministic
+  // both-env-vars-required assertion targets it.
   const savedUrl = process.env.__SAVE_LOG10X_RETRIEVER_URL__;
   const savedBucket = process.env.__SAVE_LOG10X_RETRIEVER_BUCKET__;
   try {
     delete process.env.__SAVE_LOG10X_RETRIEVER_URL__;
     delete process.env.__SAVE_LOG10X_RETRIEVER_BUCKET__;
-    assert.equal(isRetrieverConfigured(), false);
+    assert.equal(isRetrieverConfiguredSync(), false);
 
     process.env.__SAVE_LOG10X_RETRIEVER_URL__ = 'http://example.com';
-    assert.equal(isRetrieverConfigured(), false); // still missing bucket
+    assert.equal(isRetrieverConfiguredSync(), false); // still missing bucket
 
     process.env.__SAVE_LOG10X_RETRIEVER_BUCKET__ = 'my-bucket';
-    assert.equal(isRetrieverConfigured(), true);
+    assert.equal(isRetrieverConfiguredSync(), true);
   } finally {
     if (savedUrl === undefined) delete process.env.__SAVE_LOG10X_RETRIEVER_URL__;
     else process.env.__SAVE_LOG10X_RETRIEVER_URL__ = savedUrl;

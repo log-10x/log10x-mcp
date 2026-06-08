@@ -88,7 +88,16 @@ export async function startStubProm(): Promise<StubProm> {
 
     if (path === '/api/v1/query_range' || path === '/api/v1/query') {
       const promql = url.searchParams.get('query') || '';
-      const fixture = fixtures.get(promql);
+      // rank_by_shape_similarity probes candidate existence with an
+      // instant `count(<candidate>)` query before fetching the range.
+      // Real Prometheus evaluates that against the inner series; the stub
+      // keys fixtures by the bare metric expression, so unwrap a single
+      // `count(...)` envelope and resolve against the inner fixture. The
+      // count handler below returns a 1-sample vector when the inner
+      // series exists, which is what the existence check needs.
+      const countMatch = path === '/api/v1/query' ? /^count\((.+)\)$/.exec(promql.trim()) : null;
+      const lookupKey = countMatch ? countMatch[1].trim() : promql;
+      const fixture = fixtures.get(lookupKey);
       if (!fixture) {
         // Unknown query → empty matrix. Same shape Prometheus returns
         // for a real metric that has no data in the window.
@@ -107,6 +116,23 @@ export async function startStubProm(): Promise<StubProm> {
                   values: fixture.values.map(([t, v]) => [t, String(v)]),
                 },
               ],
+            },
+          }),
+        );
+      } else if (countMatch) {
+        // count(<candidate>) existence probe → scalar-ish vector whose
+        // value is the number of resolving series (1 for a single
+        // fixture). The rank existence check requires totalCount > 0, so
+        // a registered fixture must report a non-zero count regardless of
+        // its last sample value (which can legitimately be 0).
+        const last = fixture.values[fixture.values.length - 1];
+        const ts = last ? last[0] : Math.floor(Date.now() / 1000);
+        res.end(
+          JSON.stringify({
+            status: 'success',
+            data: {
+              resultType: 'vector',
+              result: [{ metric: {}, value: [ts, '1'] }],
             },
           }),
         );

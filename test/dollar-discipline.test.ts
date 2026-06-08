@@ -129,7 +129,7 @@ test('buildDisclosedDollarValue disclosure-by-source contract', () => {
 
   const u = buildDisclosedDollarValue(0, 'unset', null, null);
   assert.equal(u.source, 'unset');
-  assert.equal(u.disclosure, '(no $/GB rate configured)');
+  assert.equal(u.disclosure, '(no $/GB rate configured — set `analyzerCost` in your env config or pass `effective_ingest_per_gb`)');
 });
 
 test('buildDisclosedDollarValue falls back to "SIEM" + "list price" when label/rate are null', () => {

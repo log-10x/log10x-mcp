@@ -116,7 +116,7 @@ export const patternExamplesSchema = {
   timeRange: z
     .enum(['15m', '1h', '6h', '24h', '1d', '7d', '30d'])
     .default('1h')
-    .describe("Window for the live SIEM probe. Capped at 24h. For older events, use log10x_retriever_query. '1d' is a legacy alias for '24h'."),
+    .describe("Window for the live SIEM probe. Capped at 24h. To sample a pattern's offloaded cohort (events the Receiver routed to the overflow bucket, which the SIEM never received), use log10x_retriever_query. '1d' is a legacy alias for '24h'."),
   limit: z
     .number()
     .min(1)

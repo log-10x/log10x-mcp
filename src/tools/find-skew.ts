@@ -16,6 +16,7 @@
 import { z } from 'zod';
 import { extractPatterns } from '../lib/pattern-extraction.js';
 import { findSkew, type SkewFinding } from '../lib/detectors/skew.js';
+import type { ExtractedPatterns, ExtractPatternsOptions } from '../lib/pattern-extraction.js';
 import { aggregateSlotsBySymbolMessage } from '../lib/detectors/slot-aggregation.js';
 import { type StructuredOutput } from '../lib/output-types.js';
 import type { PrimitiveError } from '../lib/primitive-errors.js';
@@ -138,6 +139,34 @@ interface FindSkewSummary {
   error?: PrimitiveError;
 }
 
+/**
+ * Templater seam (dependency injection).
+ *
+ * `executeFindSkew` runs the local templater via `extractPatterns`, which
+ * routes events through the paste Lambda (network) or a local `tenx` CLI.
+ * Neither is available deterministically in CI / offline test runs, and
+ * the paste-templater's literal-token handling makes it impossible to
+ * hand-craft an event string that yields a genuine intra-pattern slot
+ * with a controllable dominant percentage.
+ *
+ * This seam lets tests inject a synthetic `ExtractedPatterns` result so
+ * the envelope + detector wrapper can be exercised without a backend.
+ * Mirrors the `_setVerifyRunner` injection pattern in commitment-report.ts.
+ * Production code path is unchanged: the default impl is the real
+ * `extractPatterns`.
+ */
+type ExtractPatternsFn = (
+  events: unknown[],
+  opts?: ExtractPatternsOptions,
+) => Promise<ExtractedPatterns>;
+
+let extractPatternsImpl: ExtractPatternsFn = extractPatterns;
+
+/** Test-only seam: override the templater. Pass nothing to reset. */
+export function _setExtractPatterns(impl?: ExtractPatternsFn): void {
+  extractPatternsImpl = impl ?? extractPatterns;
+}
+
 export async function executeFindSkew(args: FindSkewArgs): Promise<StructuredOutput> {
   const startedAt = Date.now();
   const minConcentration = args.min_concentration ?? DEFAULT_MIN_CONCENTRATION;
@@ -169,7 +198,7 @@ export async function executeFindSkew(args: FindSkewArgs): Promise<StructuredOut
   // ── Local templater pass ───────────────────────────────────────────
   let extraction: Awaited<ReturnType<typeof extractPatterns>>;
   try {
-    extraction = await extractPatterns(args.events, { privacyMode: args.privacy_mode });
+    extraction = await extractPatternsImpl(args.events, { privacyMode: args.privacy_mode });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     return errorEnvelope({
