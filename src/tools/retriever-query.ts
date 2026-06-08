@@ -118,6 +118,10 @@ export const retrieverQuerySchema = {
     .default('summary')
     .optional()
     .describe('summary returns the typed envelope (data.events_matched, data.events[], data.query_id, data.diagnostics, data.human_summary). The deprecated markdown view was removed; data.human_summary carries the prose distillation for chat rendering.'),
+  debug: z
+    .boolean()
+    .optional()
+    .describe('Escalate the CloudWatch log level to DEBUG for THIS query only — per-blob Bloom decisions, per-fetch S3 reads, per-event results-writer samples. Use only when normal-run diagnostics cannot explain a 0-result or truncated outcome (volume is ~100x higher). Default false.'),
 };
 
 interface RetrieverQuerySummary {
@@ -291,6 +295,7 @@ export async function executeRetrieverQuery(
     bucket_size?: string;
     environment?: string;
     view?: 'summary';
+    debug?: boolean;
   },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
@@ -539,6 +544,7 @@ async function executeRetrieverQueryInner(
     format?: 'events' | 'count' | 'aggregated' | 'ephemeral_series';
     bucket_size?: string;
     environment?: string;
+    debug?: boolean;
   },
   env: EnvConfig,
   sumOut?: { data?: RetrieverQuerySummary }
@@ -572,6 +578,7 @@ async function executeRetrieverQueryInner(
     filters: args.filters,
     target: args.target,
     limit: args.limit,
+    logLevels: args.debug ? 'ERROR,INFO,PERF,DEBUG' : undefined,
   };
 
   const resp = await runRetrieverQuery(env, req);
