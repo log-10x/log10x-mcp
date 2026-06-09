@@ -3,7 +3,7 @@
  *
  * The Retriever's query API is two-phase:
  *
- *   1. POST /retriever/query with a body shaped like QueryRequest.java accepts.
+ *   1. POST /streamer/query with a body shaped like QueryRequest.java accepts.
  *      The body carries a client-generated `id` field which the engine uses
  *      as the canonical queryId and echoes back in the response.
  *
