@@ -25,7 +25,6 @@ import { z } from 'zod';
 import { resolveEnv, type EnvConfig, type Environments } from '../../build/lib/environments.js';
 import { createMetricsBackend } from '../../build/lib/metrics-backend.js';
 import { DEFAULT_LABELS } from '../../build/lib/promql.js';
-import { fetchAnalyzerCost } from '../../build/lib/api.js';
 import type { EvalEnv } from './env.js';
 
 // ─── Tool imports (pulled from build/tools/*.js) ────────────────────────
@@ -132,24 +131,6 @@ function buildLoadedEnvs(env: EvalEnv): Environments {
   };
 }
 
-// ─── Cost cache (matches index.js behavior) ─────────────────────────────
-
-const costCache = new Map<string, { cost: number; fetchedAt: number }>();
-const COST_REFRESH_MS = 3_600_000;
-
-async function getAnalyzerCost(env: EnvConfig, override: number | undefined): Promise<number> {
-  if (override !== undefined) return override;
-  const key = env.envId;
-  const cached = costCache.get(key);
-  const now = Date.now();
-  if (cached && now - cached.fetchedAt < COST_REFRESH_MS) {
-    return cached.cost;
-  }
-  const cost = await fetchAnalyzerCost(env);
-  costCache.set(key, { cost, fetchedAt: now });
-  return cost;
-}
-
 // ─── Dispatch table ─────────────────────────────────────────────────────
 
 /**
@@ -247,32 +228,27 @@ const TOOL_TABLE: Record<string, ExecuteFn> = {
   log10x_event_lookup: async (raw, ev) => {
     const args = parseArgs(eventLookupSchema, raw);
     const e = resolveEnv(buildLoadedEnvs(ev), args.environment);
-    const cost = await getAnalyzerCost(e, args.analyzerCost);
-    return executeEventLookup({ ...args, analyzerCost: cost }, e);
+    return executeEventLookup(args, e);
   },
   log10x_savings: async (raw, ev) => {
     const args = parseArgs(savingsSchema, raw);
     const e = resolveEnv(buildLoadedEnvs(ev), args.environment);
-    const cost = await getAnalyzerCost(e, args.analyzerCost);
-    return executeSavings({ ...args, analyzerCost: cost }, e);
+    return executeSavings(args, e);
   },
   log10x_pattern_trend: async (raw, ev) => {
     const args = parseArgs(trendSchema, raw);
     const e = resolveEnv(buildLoadedEnvs(ev), args.environment);
-    const cost = await getAnalyzerCost(e, args.analyzerCost);
-    return executeTrend({ ...args, analyzerCost: cost }, e);
+    return executeTrend(args, e);
   },
   log10x_services: async (raw, ev) => {
     const args = parseArgs(servicesSchema, raw);
     const e = resolveEnv(buildLoadedEnvs(ev), args.environment);
-    const cost = await getAnalyzerCost(e, args.analyzerCost);
-    return executeServices({ ...args, analyzerCost: cost }, e);
+    return executeServices(args, e);
   },
   log10x_top_patterns: async (raw, ev) => {
     const args = parseArgs(topPatternsSchema, raw);
     const e = resolveEnv(buildLoadedEnvs(ev), args.environment);
-    const cost = await getAnalyzerCost(e, args.analyzerCost);
-    return executeTopPatterns({ ...args, analyzerCost: cost }, e);
+    return executeTopPatterns(args, e);
   },
   log10x_backfill_metric: async (raw, ev) => {
     const args = parseArgs(backfillMetricSchema, raw);
