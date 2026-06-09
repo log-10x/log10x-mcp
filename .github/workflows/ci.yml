@@ -12,6 +12,11 @@ on:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    # A fork PR on a public repo cannot read secrets, so the mksite deploy key
+    # is absent there. Gate docs-staging on its presence: same-repo branches
+    # build the real corpus and enforce it; fork PRs build + test without docs.
+    env:
+      HAS_DEPLOY_KEY: ${{ secrets.MKSITE_DOCS_DEPLOY_KEY != '' }}
     strategy:
       matrix:
         # Node 18 dropped 2026-04-25: @elastic/elasticsearch@9 → @elastic/transport@9
@@ -31,25 +36,20 @@ jobs:
         run: npm ci
 
       # product_qa's docs corpus lives in the separate (private) log-10x/mksite
-      # repo and is never vendored here. Stage it so the build is representative
+      # repo and is never vendored here. Stage it via a read-only deploy key
+      # scoped to mksite (MKSITE_DOCS_DEPLOY_KEY) so the build is representative
       # of what publish.yml ships — see that workflow for the rationale.
-      - name: Generate GitHub App token (read-only org CI app)
-        id: app-token
-        uses: actions/create-github-app-token@v3
-        with:
-          client-id: ${{ secrets.LOG10X_CI_READONLY_APP_ID }}
-          private-key: ${{ secrets.LOG10X_CI_READONLY_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-
       - name: Checkout mksite (product_qa docs corpus)
+        if: env.HAS_DEPLOY_KEY == 'true'
         uses: actions/checkout@v4
         with:
           repository: log-10x/mksite
-          token: ${{ steps.app-token.outputs.token }}
+          ssh-key: ${{ secrets.MKSITE_DOCS_DEPLOY_KEY }}
           path: mksite-src
           fetch-depth: 1
 
       - name: Stage latest mksite docs into the build source
+        if: env.HAS_DEPLOY_KEY == 'true'
         run: |
           set -euo pipefail
           rm -rf config/mksite/docs
@@ -64,13 +64,16 @@ jobs:
         env:
           LOG10X_PRODUCT_KB_SRC: ${{ github.workspace }}/config/mksite/docs
 
+      # Only enforce a non-empty corpus when the key was available (same-repo
+      # branches). Fork PRs legitimately build without docs and must stay green.
       - name: Verify docs corpus is non-empty
+        if: env.HAS_DEPLOY_KEY == 'true'
         run: |
           set -euo pipefail
           count=$(find build/product-kb/docs -name '*.md' 2>/dev/null | wc -l | tr -d ' ')
           echo "build/product-kb/docs contains $count markdown files"
           if [ "$count" -lt 1 ]; then
-            echo "::error::Docs corpus is empty — mksite checkout/staging failed."
+            echo "::error::Docs corpus is empty — mksite deploy-key checkout/staging failed."
             exit 1
           fi
 

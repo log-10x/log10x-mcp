@@ -86,23 +86,19 @@ jobs:
       # repo and is NEVER vendored here — the repo keeps only
       # config/mksite/docs/.gitkeep. Without this, `npm run build` copies an
       # empty corpus and the published package ships zero docs (docs-search
-      # returns no hits). Mirrors the hosted-demo image build in
-      # backend/.github/workflows/deploy-public-demo-mcp.yml.
-      - name: Generate GitHub App token (read-only org CI app)
-        id: app-token
-        if: steps.ver.outputs.already_shipped == 'false'
-        uses: actions/create-github-app-token@v3
-        with:
-          client-id: ${{ secrets.LOG10X_CI_READONLY_APP_ID }}
-          private-key: ${{ secrets.LOG10X_CI_READONLY_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-
+      # returns no hits).
+      #
+      # Auth: a read-only SSH deploy key scoped to ONLY log-10x/mksite, stored
+      # as the MKSITE_DOCS_DEPLOY_KEY secret. Deliberately NOT the org-wide
+      # read CI app — this repo is public, so a leaked credential should expose
+      # mksite-read and nothing more. This job runs on push to main only, so
+      # the secret is always available (no fork-PR concern).
       - name: Checkout mksite (product_qa docs corpus)
         if: steps.ver.outputs.already_shipped == 'false'
         uses: actions/checkout@v4
         with:
           repository: log-10x/mksite
-          token: ${{ steps.app-token.outputs.token }}
+          ssh-key: ${{ secrets.MKSITE_DOCS_DEPLOY_KEY }}
           path: mksite-src
           fetch-depth: 1
 
