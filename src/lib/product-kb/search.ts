@@ -161,25 +161,40 @@ function scoreChunk(
     const idf = Math.log((index.totalChunks + 1) / (docFreq + 1)) + 1;
     score += hit.tf * idf;
   }
-  // Heading boost — independent of TF. Two changes vs the old +2/token:
-  //   1. Raise the base boost to +4 per matched token (was +2). Short
-  //      on-point headings deserve more credit than weak body hits.
-  //   2. Scale by (queryTokenCount / headingTokenCount). A 2-word heading
-  //      "Splunk Optimization" matched by 2 of 3 query tokens scores
-  //      4 * 1.0 = 4. A 15-word heading that incidentally contains the
-  //      same tokens scores 4 * (3/15) = 0.8. Short on-point headings
-  //      now outrank long incidental ones.
-  const headingTokens = tokenize(chunk.heading);
-  if (headingTokens.length > 0 && queryTokens.length > 0) {
-    const headingSet = new Set(headingTokens);
-    let matched = 0;
-    for (const qt of queryTokens) if (headingSet.has(qt)) matched += 1;
-    if (matched > 0) {
-      const focus = queryTokens.length / headingTokens.length;
-      score += 4 * matched * focus;
-    }
-  }
   return score;
+}
+
+/**
+ * Heading-match boost for one chunk — applied POST-normalization in
+ * `searchIndex()` (alongside the slug boosts), NOT inside the chunk's
+ * TF-IDF score.
+ *
+ * Why post-normalization: with admonition-level chunking (one chunk per
+ * FAQ question) the chunk heading IS the question, and a near-complete
+ * heading match is the single strongest relevance signal in this corpus.
+ * Inside the chunk score it gets divided by sqrt(pageTokens) and a long
+ * FAQ page's on-point question loses to a short junk page with one
+ * matching slug token (+10, un-normalized). Post-normalization the two
+ * signals compete on the same scale: a 5-of-6-token question match
+ * scores ~2 * 5 * (6/8) * coverage ≈ 7-15, an incidental 1-token match
+ * on a long heading stays under 1.
+ *
+ * Formula: 2 * matched * focus * coverage, where
+ *   matched  — # query tokens present in the heading
+ *   focus    — queryTokens / headingTokens (short on-point headings win)
+ *   coverage — matched / queryTokens (full-question matches win over
+ *              partial ones; a 1-of-6 match is scaled down hard)
+ */
+function headingBoost(heading: string, queryTokens: string[]): number {
+  const headingTokens = tokenize(heading);
+  if (headingTokens.length === 0 || queryTokens.length === 0) return 0;
+  const headingSet = new Set(headingTokens);
+  let matched = 0;
+  for (const qt of queryTokens) if (headingSet.has(qt)) matched += 1;
+  if (matched === 0) return 0;
+  const focus = queryTokens.length / headingTokens.length;
+  const coverage = matched / queryTokens.length;
+  return 2 * matched * focus * coverage;
 }
 
 /**
@@ -317,6 +332,15 @@ export function searchIndex(index: SearchIndex, opts: SearchOptions): SearchResu
     const totalTokens = index.pageTotalTokens[pageIdx] ?? 1;
     const pageScore = rawPageScore / Math.sqrt(Math.max(totalTokens, 1));
 
+    // ── Heading boost (post-normalization) ───────────────────────────
+    // Max over the page's top chunks: the page should win because ONE
+    // of its questions matches, not because several match weakly.
+    let hBoost = 0;
+    for (const c of topChunks) {
+      const b = headingBoost(page.chunks[c.chunkIdx]!.heading, queryTokens);
+      if (b > hBoost) hBoost = b;
+    }
+
     // ── Slug boosts ──────────────────────────────────────────────────
     // The old code compared a raw query string against the slug. That
     // path was effectively dead for natural-language queries because
@@ -367,7 +391,7 @@ export function searchIndex(index: SearchIndex, opts: SearchOptions): SearchResu
     }
     boost += perTokenBoost;
 
-    const finalScore = pageScore + boost;
+    const finalScore = pageScore + boost + hBoost;
     if (finalScore < minScore) continue;
 
     const matchedChunks: Chunk[] = topChunks.map((c) => page.chunks[c.chunkIdx]!);
