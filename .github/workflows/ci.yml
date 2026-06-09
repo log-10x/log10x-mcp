@@ -30,8 +30,49 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # product_qa's docs corpus lives in the separate (private) log-10x/mksite
+      # repo and is never vendored here. Stage it so the build is representative
+      # of what publish.yml ships — see that workflow for the rationale.
+      - name: Generate GitHub App token (read-only org CI app)
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.LOG10X_CI_READONLY_APP_ID }}
+          private-key: ${{ secrets.LOG10X_CI_READONLY_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Checkout mksite (product_qa docs corpus)
+        uses: actions/checkout@v4
+        with:
+          repository: log-10x/mksite
+          token: ${{ steps.app-token.outputs.token }}
+          path: mksite-src
+          fetch-depth: 1
+
+      - name: Stage latest mksite docs into the build source
+        run: |
+          set -euo pipefail
+          rm -rf config/mksite/docs
+          mkdir -p config/mksite/docs
+          cp -R mksite-src/docs/. config/mksite/docs/
+          find config/mksite/docs -type f ! -name '*.md' -delete
+          find config/mksite/docs -type d -empty -delete
+          echo "Staged $(find config/mksite/docs -name '*.md' | wc -l) docs from mksite@$(git -C mksite-src rev-parse --short HEAD)"
+
       - name: Build
         run: npm run build
+        env:
+          LOG10X_PRODUCT_KB_SRC: ${{ github.workspace }}/config/mksite/docs
+
+      - name: Verify docs corpus is non-empty
+        run: |
+          set -euo pipefail
+          count=$(find build/product-kb/docs -name '*.md' 2>/dev/null | wc -l | tr -d ' ')
+          echo "build/product-kb/docs contains $count markdown files"
+          if [ "$count" -lt 1 ]; then
+            echo "::error::Docs corpus is empty — mksite checkout/staging failed."
+            exit 1
+          fi
 
       - name: Unit tests
         run: npm test
