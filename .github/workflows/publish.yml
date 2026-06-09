@@ -82,9 +82,56 @@ jobs:
         if: steps.ver.outputs.already_shipped == 'false'
         run: npm ci
 
+      # product_qa's docs corpus lives in the separate (private) log-10x/mksite
+      # repo and is NEVER vendored here — the repo keeps only
+      # config/mksite/docs/.gitkeep. Without this, `npm run build` copies an
+      # empty corpus and the published package ships zero docs (docs-search
+      # returns no hits).
+      #
+      # Auth: a read-only SSH deploy key scoped to ONLY log-10x/mksite, stored
+      # as the MKSITE_DOCS_DEPLOY_KEY secret. Deliberately NOT the org-wide
+      # read CI app — this repo is public, so a leaked credential should expose
+      # mksite-read and nothing more. This job runs on push to main only, so
+      # the secret is always available (no fork-PR concern).
+      - name: Checkout mksite (product_qa docs corpus)
+        if: steps.ver.outputs.already_shipped == 'false'
+        uses: actions/checkout@v4
+        with:
+          repository: log-10x/mksite
+          ssh-key: ${{ secrets.MKSITE_DOCS_DEPLOY_KEY }}
+          path: mksite-src
+          fetch-depth: 1
+
+      - name: Stage latest mksite docs into the build source
+        if: steps.ver.outputs.already_shipped == 'false'
+        run: |
+          set -euo pipefail
+          rm -rf config/mksite/docs
+          mkdir -p config/mksite/docs
+          cp -R mksite-src/docs/. config/mksite/docs/
+          # Loader only reads .md — drop images/assets to keep the npm tarball lean.
+          find config/mksite/docs -type f ! -name '*.md' -delete
+          find config/mksite/docs -type d -empty -delete
+          echo "Staged $(find config/mksite/docs -name '*.md' | wc -l) docs from mksite@$(git -C mksite-src rev-parse --short HEAD)"
+
       - name: Build
         if: steps.ver.outputs.already_shipped == 'false'
         run: npm run build
+        env:
+          LOG10X_PRODUCT_KB_SRC: ${{ github.workspace }}/config/mksite/docs
+
+      # Fail loudly rather than publishing an empty corpus. This is the guard
+      # whose absence let every prior version ship without docs.
+      - name: Verify docs corpus is non-empty
+        if: steps.ver.outputs.already_shipped == 'false'
+        run: |
+          set -euo pipefail
+          count=$(find build/product-kb/docs -name '*.md' 2>/dev/null | wc -l | tr -d ' ')
+          echo "build/product-kb/docs contains $count markdown files"
+          if [ "$count" -lt 1 ]; then
+            echo "::error::Docs corpus is empty — refusing to publish. mksite checkout/staging failed (check LOG10X_CI_READONLY_APP_* secrets and mksite access)."
+            exit 1
+          fi
 
       - name: Test
         if: steps.ver.outputs.already_shipped == 'false'
