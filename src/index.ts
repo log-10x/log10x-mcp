@@ -152,6 +152,7 @@ import { findSkewSchema, executeFindSkew } from './tools/find-skew.js';
 // overlapped with log10x_investigate's trajectory + chain analysis.
 import { discoverLabelsSchema, executeDiscoverLabels } from './tools/discover-labels.js';
 import { extractTemplatesSchema, executeExtractTemplates } from './tools/extract-templates.js';
+import { compileSchema, executeCompile } from './tools/compile.js';
 import { log10xStartSchema, executeLog10xStart } from './tools/log10x-start.js';
 import { costOptionsSchema, executeCostOptions } from './tools/cost-options.js';
 import { explainModeSchema, executeExplainMode } from './tools/explain-mode.js';
@@ -977,7 +978,7 @@ function buildToolMeta(
 ): Record<string, unknown> {
   const tier =
     category === 'retrieve' ? 'retriever' :
-    category === 'detect' ? 'cli' :
+    (category === 'detect' || category === 'compile') ? 'cli' :
     (category === 'install' || category === 'poc' || category === 'account') ? 'none' :
     'reporter';
   const confirmationRequired =
@@ -1319,6 +1320,12 @@ registerLog10xTool('log10x_find_skew', findSkewSchema, (args) =>
 
 registerLog10xTool('log10x_resolve_batch', resolveBatchSchema, (args) =>
   wrap('log10x_resolve_batch', async () => executeResolveBatch(args))
+);
+
+// ── Tool: log10x_compile ──
+
+registerLog10xTool('log10x_compile', compileSchema, (args) =>
+  wrap('log10x_compile', async () => executeCompile(args))
 );
 
 // ── Tool: log10x_extract_templates ──
@@ -1879,6 +1886,7 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_setup_recurring', intent: 'Progressive wizard to configure a recurring cost-reduction agent — target services, savings %, schedule, scheduler (k8s/GHA/crontab), gitops repo — emits policy.yaml + scheduler manifest' },
   { name: 'log10x_offload_add', intent: 'Append a new offload destination (s3 / gcs / azure_blob / file) to an env-config document\'s offload_destinations[]. Multi-target offload is allowed; nickname must be unique within the list.' },
   { name: 'log10x_offload_archive', intent: 'Flip an offload destination\'s status to `archived` and stamp archived_at. Kept in the list as a historical reference. Refuses when the target is the only active destination — the Receiver requires at least one.' },
+  { name: 'log10x_compile', intent: 'Compile a symbol library from a local source folder via the Cloud-flavor Compiler app (Docker log10x/pipeline-10x or a local cloud tenx) — scans code/binaries, emits .10x.json units + a linked .10x.tar. Edge flavor is refused.' },
 ];
 
 async function handleCliFlags(): Promise<boolean> {
@@ -1930,9 +1938,10 @@ async function handleCliFlags(): Promise<boolean> {
         '  LOG10X_API_BASE           Override Prometheus gateway URL',
         '  __SAVE_LOG10X_RETRIEVER_URL__       Retriever query endpoint (optional)',
         '  LOG10X_PASTE_URL          Override Log10x paste endpoint (optional)',
-        '  LOG10X_TENX_MODE          `local` (default) or `docker` — backend for privacy-mode tools',
-        '  LOG10X_TENX_PATH          Path to local tenx CLI (used when LOG10X_TENX_MODE=local)',
+        '  LOG10X_TENX_MODE          `local`, `docker`, or unset (auto-detect, prefers docker) — backend for tenx-running tools (privacy-mode + compile)',
+        '  LOG10X_TENX_PATH          Path to local tenx CLI (used in local mode; compile requires the cloud flavor)',
         '  LOG10X_TENX_IMAGE         Docker image when LOG10X_TENX_MODE=docker (default: log10x/pipeline-10x:latest)',
+        '  TENX_LICENSE_KEY          License key passed through to the compiler app (log10x_compile); omit to use the image built-in limited license',
         '  LOG10X_THRESHOLDS_FILE    JSON file overriding investigate engine thresholds',
         '  LOG10X_MCP_LOG_LEVEL      stderr log level (silent | error | warn | info | debug)',
         '  DATADOG_API_KEY           Datadog API key for backfill_metric destination',

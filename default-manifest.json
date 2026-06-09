@@ -320,6 +320,18 @@
       },
       "category": "paste"
     },
+    "log10x_compile": {
+      "title": "Compile symbol library",
+      "description": "Run the Log10x Compiler app to generate a symbol library from a LOCAL folder of source code / binaries — the AOT artifact the 10x runtime later uses to assign hidden classes (TenXTemplates) to events. Scans the folder (Java, Go, Python, JS/TS, Scala, C/C++, C#, plus binaries) and writes per-file `.10x.json` symbol units plus a single linked `.10x.tar` library, returning their paths, the unit count, and a tail of the engine log. REQUIRES the CLOUD flavor: it runs the cloud image `docker run log10x/pipeline-10x @apps/compiler` by default (cloud-flavor by construction), or a locally-installed cloud-flavor `tenx` if you set mode=\"local\" (the Edge native/JIT flavor lacks the compiler and is refused with remediation). No Kubernetes, no deployed app, and no Log10x account needed. v1 scope: a single local source folder in, local artifacts out — it does NOT pull from GitHub/Helm/Docker registries or push the library anywhere. Note: `.jar` files are not scanned directly — provide extracted `.class` files. First compile of a large codebase runs ~10–30 min; subsequent runs are near-instant via checksum reuse (raise `timeout_ms` for very large trees).",
+      "annotations": {
+        "title": "Compile symbol library",
+        "readOnlyHint": false,
+        "idempotentHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      },
+      "category": "compile"
+    },
     "log10x_retriever_query": {
       "title": "Retriever query",
       "description": "Forensic retrieval / rehydration from the Log10x Retriever archive (the customer's own S3 bucket) by the engine's STABLE pattern identity. The use case: events the receiver offloaded to the archive instead of the SIEM, or that aged out of SIEM retention, recovered by querying the stamped identity over a historical window. Pre-computed Bloom filters scope the scan to the matching pattern identity (tenx_user_pattern) so only relevant byte ranges are fetched (the moat: query-side token precision, not a full S3 scan). Matched events land as a list of `*.jsonl` objects in the customer's S3; the tool returns an in-context preview (capped by `limit`) PLUS `data.results_location` (the S3 bucket + prefix holding the full object set). A capable agent reads those objects directly to answer, or hands the S3 object list to the customer's own S3-to-SIEM path. No re-ingestion pipeline, no proprietary format. The envelope additionally carries per-pattern `offload_status` so retrieval results agree with the live metric-surface disposition (pass / sample / compact / drop) without a second tool call. Call for: events matching a pattern OUTSIDE SIEM retention; events filtered by a variable value that is not a faceted SIEM dimension (e.g. 'all payment_retry events for customer acme-corp 90 days ago'); compliance / audit / forensic exact retrieval; confirming what the receiver actually offloaded for a given pattern. Optional JavaScript `filters` refine over payloads after the Bloom-scoped fetch. For a time-bucketed series instead of raw events, use `log10x_retriever_series`.",

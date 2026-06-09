@@ -487,7 +487,7 @@ async function runDevCliCore(opts: RunDevCliOptions): Promise<DevCliResult> {
  * wants to guarantee local mode (avoid the probe latency), they can set
  * `LOG10X_TENX_MODE=local` explicitly.
  */
-async function resolveTenxMode(): Promise<'local' | 'docker'> {
+export async function resolveTenxMode(): Promise<'local' | 'docker'> {
   const raw = (process.env.LOG10X_TENX_MODE || '').trim().toLowerCase();
   if (raw === 'local') return 'local';
   if (raw === 'docker') return 'docker';
@@ -593,7 +593,7 @@ async function runAppsMcpViaDocker(
  *   3. Per-OS defaults — Linux /opt/tenx-{cloud,edge}, Windows %ProgramFiles%/TenX
  *      (or %LOCALAPPDATA%/TenX), macOS Homebrew (/opt/homebrew or /usr/local)
  */
-function resolveInstallPaths(): { config: string; modules: string } {
+export function resolveInstallPaths(): { config: string; modules: string } {
   const envModules = process.env.TENX_MODULES;
   const envConfig = process.env.TENX_CONFIG;
   if (envModules && envConfig) {
@@ -840,7 +840,7 @@ function resolveConfigPath(envVar: string, defaultFilename: string): string {
 
 // ── Binary helpers ──
 
-async function isBinaryOnPath(binary: string): Promise<boolean> {
+export async function isBinaryOnPath(binary: string): Promise<boolean> {
   if (binary.startsWith('/') || binary.match(/^[A-Za-z]:\\/)) {
     return existsSync(binary);
   }
