@@ -1,0 +1,192 @@
+{
+ "description": "Calibration cases for the two-check product-QA judge. Each case seeds a known-good or known-bad answer; `expect` records whether each check must pass (score 2) for the judge to be considered calibrated.",
+ "cases": [
+  {
+   "id": "cal-01-clean-pricing",
+   "question": "How does node-based pricing work",
+   "ground_truth": {
+    "answer_md": "A node = any host running a Log10x collector, regardless of instance size:\n\n- **Kubernetes:** 1 worker node = 1 billing unit (DaemonSet deployment)\n- **VMs / bare metal:** 1 host running a collector = 1 billing unit\n- **ECS:** 1 container instance = 1 billing unit\n\nInstance size (vCPU, memory) does not affect count. One question determines your tier: \"How many nodes run log collection?\"\n\nEverything else is unlimited -- log volume, traffic spikes, applications, environments, queries, destinations.",
+    "url": "https://doc.log10x.com/faq/pricing/overview/",
+    "source_file": "faq/pricing/overview.md"
+   },
+   "answer": "A node is any host running a collector: each Kubernetes worker node, VM, bare-metal host, or ECS container instance counts as one billing unit. Instance size doesn't matter, and everything else is unlimited: log volume, spikes, applications, environments, queries, and destinations. Your tier is set by one question: how many nodes run log collection.",
+   "expect": {
+    "sourced_pass": true,
+    "on_message_pass": true,
+    "note": "clean paraphrase must pass both"
+   }
+  },
+  {
+   "id": "cal-02-fabricated-overage",
+   "question": "How does node-based pricing work",
+   "ground_truth": {
+    "answer_md": "A node = any host running a Log10x collector, regardless of instance size:\n\n- **Kubernetes:** 1 worker node = 1 billing unit (DaemonSet deployment)\n- **VMs / bare metal:** 1 host running a collector = 1 billing unit\n- **ECS:** 1 container instance = 1 billing unit\n\nInstance size (vCPU, memory) does not affect count. One question determines your tier: \"How many nodes run log collection?\"\n\nEverything else is unlimited -- log volume, traffic spikes, applications, environments, queries, destinations.",
+    "url": "https://doc.log10x.com/faq/pricing/overview/",
+    "source_file": "faq/pricing/overview.md"
+   },
+   "answer": "Each node running a collector is one billing unit, and log volume is unlimited up to 10TB per month; beyond that a $0.10/GB overage applies.",
+   "expect": {
+    "sourced_pass": false,
+    "on_message_pass": false,
+    "note": "invented overage: fabrication + R5 per-GB violation"
+   }
+  },
+  {
+   "id": "cal-03-naming-per-env",
+   "question": "How does node-based pricing work",
+   "ground_truth": {
+    "answer_md": "A node = any host running a Log10x collector, regardless of instance size:\n\n- **Kubernetes:** 1 worker node = 1 billing unit (DaemonSet deployment)\n- **VMs / bare metal:** 1 host running a collector = 1 billing unit\n- **ECS:** 1 container instance = 1 billing unit\n\nInstance size (vCPU, memory) does not affect count. One question determines your tier: \"How many nodes run log collection?\"\n\nEverything else is unlimited -- log volume, traffic spikes, applications, environments, queries, destinations.",
+    "url": "https://doc.log10x.com/faq/pricing/overview/",
+    "source_file": "faq/pricing/overview.md"
+   },
+   "answer": "Log10x's Receiver is licensed per environment, so you pay one license for each environment you deploy.",
+   "expect": {
+    "sourced_pass": false,
+    "on_message_pass": false,
+    "note": "R1 naming + R5 per-environment, contradicts excerpt"
+   }
+  },
+  {
+   "id": "cal-04-clean-tero",
+   "question": "How does 10x compare to Tero?",
+   "ground_truth": {
+    "answer_md": "**What Tero is:** a piece of software that sits between your apps and your log tools and screens the log traffic. You write rules that tell it to drop lines, sample them, rate-limit them, or blank out sensitive fields before they reach those tools.\n\n- **Keeping your data:** Tero cuts the amount of log data one way, by deleting lines before they reach your log tool, and what it deletes is gone. 10x can cut the same amount while keeping every line, and it drops or samples only when you choose. It groups your logs into patterns (a pattern is one kind of log line, all the lines that say the same thing with different timestamps and IDs), and for each pattern it picks the cheapest way to keep that line, based on the log tool you use:\n  - **Compact (shrink the line where it sits):** on Splunk, self-hosted Elasticsearch or OpenSearch, and ClickHouse, 10x shrinks each line to a fraction of its size, and your tool still stores it, searches it, and shows the full original line.\n  - **Tier down (move the line to a cheaper storage class):** when your tool sells a lower-cost storage class you can still search, like Datadog Flex or CloudWatch Infrequent Access, 10x moves the line into it.\n  - **Offload (park the line in storage you own):** with any tool, 10x sends the line to an S3 bucket (cheap cloud storage) in your own account. When you need those lines again, you fetch the exact originals back instantly, with no slow restore step and nothing loaded back into your log tool.\n- **No way back with Tero:** Tero keeps no copy, so nothing it deletes can be brought back.\n- **Setup and upkeep:** with Tero you write reduction rules for each source, and someone revises them whenever a log's format changes. 10x needs no per-source rules: it decides what to do with each pattern by itself, and you set a budget for your log spend and approve the plan it proposes.\n- **Pricing:** Tero publishes no price; you book an assessment and a sales engineer gives you a number. 10x's price is published and charged per node (a node is a machine, host, or pod running a log collector), and it depends on how many nodes you have, not on how much log data you send.",
+    "url": "https://doc.log10x.com/faq/competitive/",
+    "source_file": "faq/competitive/index.md"
+   },
+   "answer": "Tero reduces volume by removing events before they reach your log tool (drop, sample, rate-limit), and what it removes is gone with no copy to recover. 10x can cut the same volume while keeping the line: it compacts events in place on Splunk, self-hosted Elasticsearch or OpenSearch, and ClickHouse, moves them to a cheaper searchable tier where one exists, or offloads them to an S3 bucket in your own account and fetches the exact originals back when needed. 10x decides what to do per pattern on its own; you set a budget and approve the plan. Tero publishes no price, while 10x's per-node price is public.",
+   "expect": {
+    "sourced_pass": true,
+    "on_message_pass": true,
+    "note": "faithful summary must pass both"
+   }
+  },
+  {
+   "id": "cal-05-universal-lossless",
+   "question": "How does 10x compare to Tero?",
+   "ground_truth": {
+    "answer_md": "**What Tero is:** a piece of software that sits between your apps and your log tools and screens the log traffic. You write rules that tell it to drop lines, sample them, rate-limit them, or blank out sensitive fields before they reach those tools.\n\n- **Keeping your data:** Tero cuts the amount of log data one way, by deleting lines before they reach your log tool, and what it deletes is gone. 10x can cut the same amount while keeping every line, and it drops or samples only when you choose. It groups your logs into patterns (a pattern is one kind of log line, all the lines that say the same thing with different timestamps and IDs), and for each pattern it picks the cheapest way to keep that line, based on the log tool you use:\n  - **Compact (shrink the line where it sits):** on Splunk, self-hosted Elasticsearch or OpenSearch, and ClickHouse, 10x shrinks each line to a fraction of its size, and your tool still stores it, searches it, and shows the full original line.\n  - **Tier down (move the line to a cheaper storage class):** when your tool sells a lower-cost storage class you can still search, like Datadog Flex or CloudWatch Infrequent Access, 10x moves the line into it.\n  - **Offload (park the line in storage you own):** with any tool, 10x sends the line to an S3 bucket (cheap cloud storage) in your own account. When you need those lines again, you fetch the exact originals back instantly, with no slow restore step and nothing loaded back into your log tool.\n- **No way back with Tero:** Tero keeps no copy, so nothing it deletes can be brought back.\n- **Setup and upkeep:** with Tero you write reduction rules for each source, and someone revises them whenever a log's format changes. 10x needs no per-source rules: it decides what to do with each pattern by itself, and you set a budget for your log spend and approve the plan it proposes.\n- **Pricing:** Tero publishes no price; you book an assessment and a sales engineer gives you a number. 10x's price is published and charged per node (a node is a machine, host, or pod running a log collector), and it depends on how many nodes you have, not on how much log data you send.",
+    "url": "https://doc.log10x.com/faq/competitive/",
+    "source_file": "faq/competitive/index.md"
+   },
+   "answer": "Unlike Tero, 10x is fully lossless: it never drops a single event, ever, so you can deploy it without thinking about data loss.",
+   "expect": {
+    "sourced_pass": false,
+    "on_message_pass": false,
+    "note": "R3 absolute losslessness; excerpt says drops/samples when you choose"
+   }
+  },
+  {
+   "id": "cal-06-kudos",
+   "question": "How does 10x compare to Tero?",
+   "ground_truth": {
+    "answer_md": "**What Tero is:** a piece of software that sits between your apps and your log tools and screens the log traffic. You write rules that tell it to drop lines, sample them, rate-limit them, or blank out sensitive fields before they reach those tools.\n\n- **Keeping your data:** Tero cuts the amount of log data one way, by deleting lines before they reach your log tool, and what it deletes is gone. 10x can cut the same amount while keeping every line, and it drops or samples only when you choose. It groups your logs into patterns (a pattern is one kind of log line, all the lines that say the same thing with different timestamps and IDs), and for each pattern it picks the cheapest way to keep that line, based on the log tool you use:\n  - **Compact (shrink the line where it sits):** on Splunk, self-hosted Elasticsearch or OpenSearch, and ClickHouse, 10x shrinks each line to a fraction of its size, and your tool still stores it, searches it, and shows the full original line.\n  - **Tier down (move the line to a cheaper storage class):** when your tool sells a lower-cost storage class you can still search, like Datadog Flex or CloudWatch Infrequent Access, 10x moves the line into it.\n  - **Offload (park the line in storage you own):** with any tool, 10x sends the line to an S3 bucket (cheap cloud storage) in your own account. When you need those lines again, you fetch the exact originals back instantly, with no slow restore step and nothing loaded back into your log tool.\n- **No way back with Tero:** Tero keeps no copy, so nothing it deletes can be brought back.\n- **Setup and upkeep:** with Tero you write reduction rules for each source, and someone revises them whenever a log's format changes. 10x needs no per-source rules: it decides what to do with each pattern by itself, and you set a budget for your log spend and approve the plan it proposes.\n- **Pricing:** Tero publishes no price; you book an assessment and a sales engineer gives you a number. 10x's price is published and charged per node (a node is a machine, host, or pod running a log collector), and it depends on how many nodes you have, not on how much log data you send.",
+    "url": "https://doc.log10x.com/faq/competitive/",
+    "source_file": "faq/competitive/index.md"
+   },
+   "answer": "Tero, built by the creators of Vector, is an excellent and battle-tested governance layer. 10x differs by keeping the data: it compacts, tiers down, or offloads to your own S3 instead of deleting.",
+   "expect": {
+    "sourced_pass": false,
+    "on_message_pass": false,
+    "note": "R12 kudos/pedigree; Vector pedigree unsupported by excerpt"
+   }
+  },
+  {
+   "id": "cal-07-clean-retriever",
+   "question": "What is Retriever and how does it work",
+   "ground_truth": {
+    "answer_md": "Retriever stores logs in [S3 or any S3-compatible object storage](https://doc.log10x.com/run/input/objectstorage/){target=\"_blank\"} (MinIO, Ceph, Azure Blob) and indexes them at ingest time.\n\nWhen you query, the system scans the index to find which files contain matching data. Only those files are streamed to your SIEM.\n\nIngestion costs apply only to what you query -- typically 5-30% of total volume -- not all your logs.",
+    "url": "https://doc.log10x.com/apps/retriever/faq/",
+    "source_file": "apps/retriever/faq.md"
+   },
+   "answer": "Retriever stores logs in S3 or any S3-compatible object store (MinIO, Ceph, Azure Blob) and indexes them at ingest. At query time it scans the index to find which files hold matching data and streams only those files to your SIEM, so ingestion cost applies only to what you query, typically 5-30% of total volume.",
+   "expect": {
+    "sourced_pass": true,
+    "on_message_pass": true,
+    "note": "clean paraphrase must pass both"
+   }
+  },
+  {
+   "id": "cal-08-archive-framing",
+   "question": "What is Retriever and how does it work",
+   "ground_truth": {
+    "answer_md": "Retriever stores logs in [S3 or any S3-compatible object storage](https://doc.log10x.com/run/input/objectstorage/){target=\"_blank\"} (MinIO, Ceph, Azure Blob) and indexes them at ingest time.\n\nWhen you query, the system scans the index to find which files contain matching data. Only those files are streamed to your SIEM.\n\nIngestion costs apply only to what you query -- typically 5-30% of total volume -- not all your logs.",
+    "url": "https://doc.log10x.com/apps/retriever/faq/",
+    "source_file": "apps/retriever/faq.md"
+   },
+   "answer": "Retriever is 10x's forensic archive: it replaces your SIEM's cold-storage retention tier, holding everything forever so you can decommission Splunk frozen buckets.",
+   "expect": {
+    "sourced_pass": false,
+    "on_message_pass": false,
+    "note": "R7 archive/replacement framing, unsupported"
+   }
+  },
+  {
+   "id": "cal-09-fake-identifiers",
+   "question": "What is Retriever and how does it work",
+   "ground_truth": {
+    "answer_md": "Retriever stores logs in [S3 or any S3-compatible object storage](https://doc.log10x.com/run/input/objectstorage/){target=\"_blank\"} (MinIO, Ceph, Azure Blob) and indexes them at ingest time.\n\nWhen you query, the system scans the index to find which files contain matching data. Only those files are streamed to your SIEM.\n\nIngestion costs apply only to what you query -- typically 5-30% of total volume -- not all your logs.",
+    "url": "https://doc.log10x.com/apps/retriever/faq/",
+    "source_file": "apps/retriever/faq.md"
+   },
+   "answer": "Retriever works with the Receiver's compact mode, which gives a 20-40x reduction, and you can track what it saved via the bytes_offloaded metric.",
+   "expect": {
+    "sourced_pass": false,
+    "on_message_pass": false,
+    "note": "R4 banned ratio + R8 invented metric"
+   }
+  },
+  {
+   "id": "cal-10-correct-decline",
+   "question": "Does 10x integrate with IBM QRadar?",
+   "ground_truth": null,
+   "answer": "The documentation does not cover an IBM QRadar integration, so I can't confirm one exists.",
+   "expect": {
+    "sourced_pass": true,
+    "on_message_pass": true,
+    "note": "outside-corpus PURE decline must pass both (no ungrounded additions)"
+   }
+  },
+  {
+   "id": "cal-11-confident-invention",
+   "question": "Does 10x integrate with IBM QRadar?",
+   "ground_truth": null,
+   "answer": "Yes, 10x ships a native QRadar plugin: point the Receiver's output at your QRadar event collector and events flow in QLEEF format automatically.",
+   "expect": {
+    "sourced_pass": false,
+    "on_message_pass": true,
+    "note": "tests check independence: ungrounded invention fails sourced; R8 is scoped to known-false identifiers so on_message passes"
+   }
+  },
+  {
+   "id": "cal-12-needless-decline",
+   "question": "How does node-based pricing work",
+   "ground_truth": {
+    "answer_md": "A node = any host running a Log10x collector, regardless of instance size:\n\n- **Kubernetes:** 1 worker node = 1 billing unit (DaemonSet deployment)\n- **VMs / bare metal:** 1 host running a collector = 1 billing unit\n- **ECS:** 1 container instance = 1 billing unit\n\nInstance size (vCPU, memory) does not affect count. One question determines your tier: \"How many nodes run log collection?\"\n\nEverything else is unlimited -- log volume, traffic spikes, applications, environments, queries, destinations.",
+    "url": "https://doc.log10x.com/faq/pricing/overview/",
+    "source_file": "faq/pricing/overview.md"
+   },
+   "answer": "I'm not able to find pricing details in the documentation, so I can't answer that.",
+   "expect": {
+    "sourced_pass": false,
+    "on_message_pass": true,
+    "note": "retrieval miss: decline despite ground truth = sourced 1, on-message clean"
+   }
+  },
+  {
+   "id": "cal-13-flex-dollars",
+   "question": "What is Retriever and how does it work",
+   "ground_truth": {
+    "answer_md": "Retriever stores logs in [S3 or any S3-compatible object storage](https://doc.log10x.com/run/input/objectstorage/){target=\"_blank\"} (MinIO, Ceph, Azure Blob) and indexes them at ingest time.\n\nWhen you query, the system scans the index to find which files contain matching data. Only those files are streamed to your SIEM.\n\nIngestion costs apply only to what you query -- typically 5-30% of total volume -- not all your logs.",
+    "url": "https://doc.log10x.com/apps/retriever/faq/",
+    "source_file": "apps/retriever/faq.md"
+   },
+   "answer": "Retriever stores logs in S3 and streams only queried files to your SIEM. Combined with tiering to Datadog Flex, it is guaranteed to save you $4,200 per month, about 70% of your bill.",
+   "expect": {
+    "sourced_pass": false,
+    "on_message_pass": false,
+    "note": "R6 Flex dollar figure + R11 guaranteed savings, unsupported"
+   }
+  }
+ ]
+}
