@@ -24,10 +24,10 @@ jobs:
         node-version: ['20.x', '22.x']
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Setup Node ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: ${{ matrix.node-version }}
           cache: 'npm'
@@ -41,7 +41,7 @@ jobs:
       # of what publish.yml ships — see that workflow for the rationale.
       - name: Checkout mksite (product_qa docs corpus)
         if: env.HAS_DEPLOY_KEY == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: log-10x/mksite
           ssh-key: ${{ secrets.MKSITE_DOCS_DEPLOY_KEY }}
@@ -101,7 +101,7 @@ jobs:
   version-bump-check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 

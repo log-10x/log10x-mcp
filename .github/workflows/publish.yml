@@ -41,7 +41,7 @@ jobs:
       # token that npm verifies against its trusted-publisher config.
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           # Need full history so `git rev-parse v<version>` can see all tags.
           fetch-depth: 0
@@ -62,7 +62,7 @@ jobs:
 
       - name: Setup Node 20 with npm registry
         if: steps.ver.outputs.already_shipped == 'false'
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: '20.x'
           registry-url: 'https://registry.npmjs.org'
@@ -95,7 +95,7 @@ jobs:
       # the secret is always available (no fork-PR concern).
       - name: Checkout mksite (product_qa docs corpus)
         if: steps.ver.outputs.already_shipped == 'false'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: log-10x/mksite
           ssh-key: ${{ secrets.MKSITE_DOCS_DEPLOY_KEY }}
