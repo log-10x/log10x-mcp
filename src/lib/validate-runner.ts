@@ -10,7 +10,9 @@
  * and any TenXConsole.log output.
  *
  * Requires:
- *   - `tenx` on PATH (Homebrew `brew install log10x/tap/tenx` or equivalent)
+ *   - a local Log10x engine: `tenx` on PATH (install for macOS/Linux/Windows:
+ *     https://doc.log10x.com/install/) or a local Docker container
+ *     (LOG10X_TENX_MODE=docker)
  *   - the workspace config + modules tree already on disk. By default we
  *     point at `LOG10X_TENX_CONFIG_ROOT` / `LOG10X_TENX_MODULES_ROOT`; fall
  *     back to opinionated paths that match the shipped repo layout.

@@ -57,7 +57,7 @@ export const findSkewSchema = {
     .describe(
       'Sampling rate N for the savings projection (1/N of the dominant case kept). Default 10. Same calibration caveat — sample_n=10 is a defensible starting point but not validated for any specific cost target.'
     ),
-  privacy_mode: z.boolean().default(false).describe('Route events through a locally-installed tenx CLI instead of the paste Lambda.'),
+  privacy_mode: z.boolean().default(false).describe('Route events through a local Log10x engine (native `tenx`, or local Docker via `LOG10X_TENX_MODE=docker`) instead of the paste Lambda.'),
 };
 
 export type FindSkewArgs = {

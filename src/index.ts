@@ -1440,8 +1440,9 @@ registerLog10xTool('log10x_pattern_detail', patternDetailSchema, (args) =>
 // ── Tool: log10x_measure_compaction ──
 //
 // Measures real per-pattern compaction ratios from live SIEM samples.
-// Requires the tenx CLI (for the engine run) and SIEM credentials (for the
-// event pull). Does not need a metrics backend — local CLI + SIEM only.
+// Requires a local Log10x engine (native tenx CLI or Docker, for the engine
+// run) and SIEM credentials (for the event pull). Does not need a metrics
+// backend: local engine + SIEM only.
 
 registerLog10xTool('log10x_measure_compaction', measureCompactionSchema, (args) =>
   wrap('log10x_measure_compaction', async () => {
@@ -1930,7 +1931,7 @@ async function handleCliFlags(): Promise<boolean> {
         '  LOG10X_API_BASE           Override Prometheus gateway URL',
         '  __SAVE_LOG10X_RETRIEVER_URL__       Retriever query endpoint (optional)',
         '  LOG10X_PASTE_URL          Override Log10x paste endpoint (optional)',
-        '  LOG10X_TENX_MODE          `local` (default) or `docker` — backend for privacy-mode tools',
+        '  LOG10X_TENX_MODE          `local` or `docker` backend for privacy-mode tools; when unset, auto-detects and prefers `docker`, falling back to a native `tenx` install',
         '  LOG10X_TENX_PATH          Path to local tenx CLI (used when LOG10X_TENX_MODE=local)',
         '  LOG10X_TENX_IMAGE         Docker image when LOG10X_TENX_MODE=docker (default: log10x/pipeline-10x:latest)',
         '  LOG10X_THRESHOLDS_FILE    JSON file overriding investigate engine thresholds',
