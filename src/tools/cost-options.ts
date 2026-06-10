@@ -360,7 +360,7 @@ function buildModes(
       id: 'tier_down',
       label: 'Tier-down: stack stores events at a cheaper storage tier.',
       description:
-        'Engine stamps events with a tenx_action marker; the stack routes them to a cheaper tier (Flex Logs on Datadog, Infrequent Access on CloudWatch).',
+        'Engine stamps events with the isDropped marker; a routing rule moves them to a cheaper tier (Flex Logs on Datadog, Infrequent Access on CloudWatch).',
       who_enforces: 'SIEM',
       applicable: tierDownApplicable,
       gated_reason: tierDownGatedReason,

@@ -334,7 +334,7 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
     // CloudWatch Logs Infrequent Access (IA) tier:
     // $0.25/GB ingest (50% reduction vs standard $0.50)
     // $0.0075/GB-month storage (75% reduction vs standard $0.03)
-    // Destination-side routing rule required: tenx_action=tier_down
+    // Destination-side routing rule required (keyed on the isDropped marker)
     tier_down_target_tier: {
       name: 'CloudWatch Logs Infrequent Access',
       ingest_rate_usd_per_gb: 0.25,
@@ -607,7 +607,7 @@ function projectActionWithRatio(
         );
       } else {
         notes.push(
-          'tier_down savings depend on destination-side routing rule and cheaper tier pricing not configured for this destination (tenx_action=tier_down)'
+          'tier_down savings depend on a destination-side routing rule (keyed on the isDropped marker) and cheaper tier pricing not configured for this destination'
         );
       }
       break;

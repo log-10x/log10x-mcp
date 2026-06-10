@@ -64,7 +64,7 @@ export interface CapabilitySummary {
   cost_attribution_available: boolean;
   /** Receiver tier installed (in-path) so compact/sample/drop CAN take effect. */
   compact_installable: boolean;
-  /** Receiver tier emits a `tenx_action` marker so the SIEM can tier_down by tag. */
+  /** Receiver tier emits the `isDropped` marker so the SIEM can tier_down by routing rule. */
   tier_down_available: boolean;
   /** Retriever reachable to read the offloaded cohort from the overflow S3 bucket. */
   forensic_query_available: boolean;
