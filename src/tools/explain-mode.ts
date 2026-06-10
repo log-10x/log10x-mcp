@@ -58,8 +58,8 @@ export const explainModeSchema = {
       'Which enforcement mode to explain. ' +
       '`drop` = engine hard-drops matched patterns at the Receiver before delivery. ' +
       '`sample` = engine passes 1-in-N events through to the stack. ' +
-      '`compact` = engine compresses events 5-10x losslessly; all events still reach the stack. ' +
-      '`tier_down` = engine stamps tenx_action marker; stack routes to a cheaper storage tier (Datadog Flex / CloudWatch IA). ' +
+      '`compact` = engine compresses events ~50-80% losslessly; all events still reach the stack. ' +
+      '`tier_down` = engine stamps the isDropped marker; a routing rule moves those events to a cheaper storage tier (Datadog Flex / CloudWatch IA). ' +
       '`offload` = engine diverts matched events to a customer-owned S3 bucket; readable via log10x_retriever_query. ' +
       '`observe_only` = engine observes and fingerprints but does not act; use to baseline volume before committing.'
     ),
@@ -166,7 +166,7 @@ const MODE_METADATA: Record<ExplainMode, ModeMetadata> = {
   },
   compact: {
     what_it_does:
-      'All events reach the stack, each compressed 5-10x. ' +
+      'All events reach the stack, each ~50-80% smaller. ' +
       'Engine encodes events into the 10x compact wire format. ' +
       'All events arrive in the stack; fields stay searchable.',
     what_you_need:
@@ -176,12 +176,12 @@ const MODE_METADATA: Record<ExplainMode, ModeMetadata> = {
     who_enforces: 'engine',
     apply_tool: 'log10x_configure_engine',
     apply_args: (service) => ({ service, default_action: 'compact' }),
-    what_survives: 'All events reach the stack, each compressed by 5-10x. Fully searchable.',
+    what_survives: 'All events reach the stack, each ~50-80% smaller. Fully searchable.',
   },
   tier_down: {
     what_it_does:
       'Events reach the stack at a cheaper storage tier (Datadog Flex / CloudWatch IA). ' +
-      'Engine stamps matched events with a tenx_action marker. ' +
+      'Engine stamps matched events with the isDropped marker. ' +
       'Your analyzer routes stamped events to a cheaper storage tier. ' +
       'Events remain searchable at the lower tier; only storage cost drops.',
     what_you_need:

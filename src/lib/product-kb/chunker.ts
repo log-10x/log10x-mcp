@@ -78,6 +78,17 @@ function parseSplitHeading(line: string): string | null {
   if (line.startsWith('### ') && !line.startsWith('#### ')) {
     return cleanHeadingText(line.slice(4));
   }
+  // Top-level admonition — split-eligible, heading = the quoted title.
+  // FAQ pages are streams of `??? tenx-x "Question"` blocks with NO
+  // H2/H3 between them; without this rule a whole FAQ page collapses
+  // into one giant heading-less chunk, so (a) the question text never
+  // participates in heading-boost ranking and (b) length normalization
+  // buries the page. One chunk per question is the natural retrieval
+  // unit for this corpus. Column-0 check excludes nested admonitions.
+  const adm = line.match(/^\?\?\?\+?\s+[A-Za-z0-9_-]+\s+"(.+)"(?:\s*\{[^}]*\})?\s*$/);
+  if (adm) {
+    return cleanHeadingText(adm[1]!.replace(/\\"/g, '"'));
+  }
   return null;
 }
 

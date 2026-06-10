@@ -346,21 +346,21 @@ function buildModes(
     },
     {
       id: 'compact',
-      label: 'Compact: compress events ~5-10x. All events still land in the stack.',
+      label: 'Compact: compress events ~50-80% smaller. All events still land in the stack.',
       description:
-        'Engine encodes events into the 10x compact wire format (~5–10x smaller). All events arrive in the stack; fields stay searchable.',
+        'Engine encodes events into the 10x compact wire format (~50-80% smaller, lossless). All events arrive in the stack; fields stay searchable.',
       who_enforces: 'engine',
       applicable: compactApplicable,
       gated_reason: compactGatedReason,
       what_survives:
-        'All events reach the stack, each compressed by 5–10x. Fully searchable.',
+        'All events reach the stack, each ~50-80% smaller. Fully searchable.',
       routes_to: { tool: 'log10x_estimate_savings', args: sharedArgs('compact') },
     },
     {
       id: 'tier_down',
       label: 'Tier-down: stack stores events at a cheaper storage tier.',
       description:
-        'Engine stamps events with a tenx_action marker; the stack routes them to a cheaper tier (Flex Logs on Datadog, Infrequent Access on CloudWatch).',
+        'Engine stamps events with the isDropped marker; a routing rule moves them to a cheaper tier (Flex Logs on Datadog, Infrequent Access on CloudWatch).',
       who_enforces: 'SIEM',
       applicable: tierDownApplicable,
       gated_reason: tierDownGatedReason,

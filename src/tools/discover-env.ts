@@ -190,7 +190,7 @@ export async function executeDiscoverEnv(args: DiscoverEnvArgs, mode?: Mode | nu
     });
   }
   if (data.aws_available && data.s3_buckets.length > 0 && !data.installed_components.retriever) {
-    actions.push({ tool: 'log10x_advise_retriever', args: { snapshot_id: data.snapshot_id }, reason: 'S3 + AWS available — Retriever installable for forensic retrieval' });
+    actions.push({ tool: 'log10x_advise_retriever', args: { snapshot_id: data.snapshot_id }, reason: 'S3 and AWS available, Retriever installable to fetch offloaded events back on demand' });
   }
   return buildChassisEnvelope({
     tool: 'log10x_discover_env',
@@ -370,7 +370,7 @@ export function renderDiscoverReport(s: DiscoverySnapshot): string {
   lines.push('');
   lines.push('```');
   lines.push(`log10x_advise_install({ snapshot_id: "${s.snapshotId}" })     # wizard for Reporter / Receiver`);
-  lines.push(`log10x_advise_retriever({ snapshot_id: "${s.snapshotId}" })   # archive install (S3 + SQS)`);
+  lines.push(`log10x_advise_retriever({ snapshot_id: "${s.snapshotId}" })   # offload-and-fetch install (S3 + SQS)`);
   lines.push('```');
   lines.push('');
   lines.push(
@@ -378,7 +378,7 @@ export function renderDiscoverReport(s: DiscoverySnapshot): string {
   );
 
   // Structured chain hint: advise_install is the install wizard for the
-  // Reporter and Receiver; advise_retriever is the archive install (its
+  // Reporter and Receiver; advise_retriever is the offload-and-fetch install (its
   // inputs are AWS-only — S3 buckets, SQS URLs, IRSA — so it stays a
   // separate tool).
   const nextActions: NextAction[] = [
@@ -390,7 +390,7 @@ export function renderDiscoverReport(s: DiscoverySnapshot): string {
     {
       tool: 'log10x_advise_retriever',
       args: { snapshot_id: s.snapshotId },
-      reason: 'Retriever (S3 archive) install plan',
+      reason: 'Retriever (offload-and-fetch) install plan',
     },
   ];
   // Compact configuration hint: scoped on the snapshot. When GitOps is wired
