@@ -187,6 +187,51 @@
     "on_message_pass": false,
     "note": "R6 Flex dollar figure + R11 guaranteed savings, unsupported"
    }
+  },
+  {
+   "id": "cal-14-r7-fetch-to-siem",
+   "question": "How do engineers search S3 data?",
+   "ground_truth": {
+    "answer_md": "Retriever stores logs in [S3 or any S3-compatible object storage](https://doc.log10x.com/run/input/objectstorage/){target=\"_blank\"} (MinIO, Ceph, Azure Blob) and indexes them at ingest time.\n\nWhen you query, the system scans the index to find which files contain matching data. Only those files are streamed to your SIEM.\n\nIngestion costs apply only to what you query -- typically 5-30% of total volume -- not all your logs.",
+    "url": "https://doc.log10x.com/apps/retriever/faq/",
+    "source_file": "apps/retriever/faq.md"
+   },
+   "answer": "The Retriever fetches the specific offloaded events you ask for from your own S3 bucket and streams them back to your SIEM (Splunk, Elasticsearch) on demand, with no rehydration step and no bulk re-ingest of the whole slice.",
+   "expect": {
+    "sourced_pass": true,
+    "on_message_pass": true,
+    "note": "R7 refined: fetch-back-to-SIEM on demand is correct behavior, must PASS on-message"
+   }
+  },
+  {
+   "id": "cal-15-r3-buffer-reliability",
+   "question": "What happens if index building falls behind uploads?",
+   "ground_truth": {
+    "answer_md": "SQS buffers pending work \u2014 no events are lost. Index worker pods scale up automatically via HPA, and unindexed files remain queryable (full scan, slower). See the [Kubernetes deployment guide](https://doc.log10x.com/apps/retriever/deploy/k8s/#step-4-configure-application){target=\"_blank\"} for scaling configuration.",
+    "url": "https://doc.log10x.com/apps/retriever/faq/",
+    "source_file": "apps/retriever/faq.md"
+   },
+   "answer": "If indexing falls behind uploads, SQS buffers the pending work so no events are lost while the index catches up; queries against not-yet-indexed objects return partial results until the backlog clears.",
+   "expect": {
+    "sourced_pass": true,
+    "on_message_pass": true,
+    "note": "R3 refined: infra-reliability buffering is not a data-reduction losslessness claim, must PASS on-message"
+   }
+  },
+  {
+   "id": "cal-16-r7-archive-still-fails",
+   "question": "What is Retriever and how does it work?",
+   "ground_truth": {
+    "answer_md": "Retriever stores logs in [S3 or any S3-compatible object storage](https://doc.log10x.com/run/input/objectstorage/){target=\"_blank\"} (MinIO, Ceph, Azure Blob) and indexes them at ingest time.\n\nWhen you query, the system scans the index to find which files contain matching data. Only those files are streamed to your SIEM.\n\nIngestion costs apply only to what you query -- typically 5-30% of total volume -- not all your logs.",
+    "url": "https://doc.log10x.com/apps/retriever/faq/",
+    "source_file": "apps/retriever/faq.md"
+   },
+   "answer": "Retriever is your forensic archive: a cold-storage retention tier that permanently holds every event in S3 so you can decommission your SIEM and rely on it as the long-term system of record.",
+   "expect": {
+    "sourced_pass": false,
+    "on_message_pass": false,
+    "note": "archive/retention-tier framing must STILL fail R7 after refinement (guards against over-loosening)"
+   }
   }
  ]
 }
