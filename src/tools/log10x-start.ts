@@ -78,7 +78,7 @@ export interface CapabilitySummary {
 
 export interface ActionMenuItem {
   /** Stable action identifier the user picks by number. */
-  action: 'estimate_savings' | 'investigate_spike' | 'forensic_query' | 'install_receiver' | 'install_retriever' | 'orient_only';
+  action: 'estimate_savings' | 'investigate_spike' | 'forensic_query' | 'install_receiver' | 'install_retriever' | 'explore_receiver' | 'explore_overflow' | 'orient_only';
   /** Short label rendered to the user in the menu. */
   label: string;
   /** Whether the user's current tier supports this action without further setup. */
@@ -275,27 +275,39 @@ function buildActionMenu(caps: CapabilitySummary, tier: Tier): ActionMenuItem[] 
         : 'Requires the overflow bucket to be set up. Install via log10x_advise_retriever.',
       routes_to: 'log10x_retriever_query',
     },
-    {
-      action: 'install_receiver',
-      label: 'Deploy the Receiver so 10x can compact / sample / drop in-flight',
-      applicable: tier === 'reporter',
-      gated_reason:
-        tier === 'reporter'
-          ? undefined
-          : tier === 'dev'
-            ? 'Install Reporter first (zero-touch DaemonSet) before adding the Receiver sidecar.'
-            : `You are already at tier "${tier}" — Receiver capability is in place.`,
-      routes_to: 'log10x_advise_install',
-    },
-    {
-      action: 'install_retriever',
-      label: 'Set up the overflow bucket (your own S3) — diverts noisy patterns out of the SIEM for cost savings; events stay recoverable',
-      applicable: !caps.forensic_query_available,
-      gated_reason: caps.forensic_query_available
-        ? 'Overflow bucket already set up and reachable.'
-        : undefined,
-      routes_to: 'log10x_advise_retriever',
-    },
+    // Receiver slot: an INSTALLED capability is an invitation to explore it,
+    // not a grayed-out install. Status is not a feature; the next action is.
+    tier === 'receiver' || tier === 'retriever'
+      ? {
+          action: 'explore_receiver',
+          label: 'Explore the Receiver: compact, sample, drop, tier down, offload',
+          applicable: true,
+          routes_to: 'log10x_explain_mode',
+        }
+      : {
+          action: 'install_receiver',
+          label: 'Deploy the Receiver so 10x can compact / sample / drop in-flight',
+          applicable: tier === 'reporter',
+          gated_reason:
+            tier === 'reporter'
+              ? undefined
+              : 'Install Reporter first (zero-touch DaemonSet) before adding the Receiver sidecar.',
+          routes_to: 'log10x_advise_install',
+        },
+    // Overflow-bucket slot: same rule as the Receiver slot above.
+    caps.forensic_query_available
+      ? {
+          action: 'explore_overflow',
+          label: 'Explore the overflow bucket: contents, fetch-back, controls',
+          applicable: true,
+          routes_to: 'log10x_overflow_contents',
+        }
+      : {
+          action: 'install_retriever',
+          label: 'Set up the overflow bucket (your own S3) — diverts noisy patterns out of the SIEM for cost savings; events stay recoverable',
+          applicable: true,
+          routes_to: 'log10x_advise_retriever',
+        },
     {
       action: 'orient_only',
       label: 'Just orient me — explain what 10x does and what I should ask next',
