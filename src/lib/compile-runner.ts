@@ -121,6 +121,8 @@ export class NotCloudFlavorError extends Error {
         '  1. Docker (recommended): set LOG10X_TENX_MODE=docker (or call this tool with mode="docker") to run the cloud compiler image log10x/compiler-10x.',
         '  2. Install the Cloud flavor locally: https://doc.log10x.com/install/ ' +
           "(e.g. `brew install --cask log10x-cloud` on macOS, or the install script with `--flavor cloud`).",
+        '',
+        'Note: a local install provides only the compiler engine. Local-folder compilation works with it, but full capabilities — pulling source from GitHub / Helm / Docker registries — also need git, docker, and helm on the host. The docker compiler-10x image (option 1) bundles all of these.',
       ].join('\n'),
     );
     this.name = 'NotCloudFlavorError';
