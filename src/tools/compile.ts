@@ -14,9 +14,13 @@
  *   - docker/OCI images (`docker_images`), pulled DAEMONLESSLY by the podman
  *     bundled in compiler-10x — no host docker socket; the tool adds
  *     `--cap-add SYS_ADMIN` to the compile container automatically, and
- *     registry creds are optional (public images pull anonymously).
- * Helm-chart / Artifactory / gomod pull are the remaining axes; the runner's
- * CompileConfig descriptor carries the seams.
+ *     registry creds are optional (public images pull anonymously),
+ *   - Helm charts (`helm_charts`) — a meta-source: the engine renders the
+ *     chart and pulls the docker images + GitHub source repos it references.
+ *     OCI/URL chart refs resolve standalone; bare `repo/chart` names need a
+ *     matching `helm_repos` entry (added in a pre-step).
+ * Artifactory / gomod pull are the remaining axes; the runner's CompileConfig
+ * descriptor carries the seams.
  *
  * Backend: Docker-first. By default it runs the cloud image
  * log10x/compiler-10x (which is cloud-flavor by construction); if the caller
@@ -38,8 +42,10 @@ import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
 import {
   runCompile,
   NotCloudFlavorError,
+  HelmRepoAddError,
   type CompileConfig,
   type CompileRunResult,
+  type HelmRepo,
 } from '../lib/compile-runner.js';
 import { DevCliNotInstalledError, DockerNotAvailableError } from '../lib/dev-cli.js';
 
@@ -86,13 +92,37 @@ export const compileSchema = {
     .string()
     .optional()
     .describe(
-      'Registry username for docker_images login (authenticates the default registry — Docker Hub). Falls back to DOCKER_USERNAME from the MCP server environment. Omit for public images. The engine logs in only when BOTH username and token are non-blank. Reaches the compiler as process environment only.',
+      'Registry username for docker_images login — also used for private images a Helm chart references (helm_pull_images). Authenticates the default registry (Docker Hub). Falls back to DOCKER_USERNAME from the MCP server environment. Omit for public images. The engine logs in only when BOTH username and token are non-blank. Reaches the compiler as process environment only.',
     ),
   docker_token: z
     .string()
     .optional()
     .describe(
       'Registry token/password for docker_images (fed to `docker login --password-stdin` against the default registry, Docker Hub). Falls back to DOCKER_TOKEN from the MCP server environment. Omit for public images; pair with docker_username. Reaches the compiler as process environment only.',
+    ),
+  helm_charts: z
+    .array(z.string())
+    .optional()
+    .describe(
+      'Helm charts to render and scan, as chart refs. A meta-source: the compiler runs `helm template` / `helm show chart` to extract the docker images and GitHub source repos the chart references, then (by default) pulls those too. OCI refs (e.g. "oci://ghcr.io/nginxinc/charts/nginx-ingress") and full URLs resolve standalone; a bare "repo/chart" (e.g. "ingress-nginx/ingress-nginx") needs a matching helm_repos entry. Combines freely with the other sources. In mode=local the host needs the helm CLI and must have the repos already `helm repo add`-ed.',
+    ),
+  helm_repos: z
+    .array(z.string())
+    .optional()
+    .describe(
+      'Helm chart repositories to register before resolving helm_charts, each as "name=url" (e.g. ["ingress-nginx=https://kubernetes.github.io/ingress-nginx"]). Required for bare "repo/chart" names; unnecessary for OCI/URL refs. Added via `helm repo add` in pre-step containers (docker mode only — in mode=local the host helm config is used as-is). url must be an http(s):// chart-repo index URL; for an OCI registry, put the oci://… ref directly in helm_charts (`helm repo add` does not support oci://).',
+    ),
+  helm_pull_images: z
+    .boolean()
+    .default(true)
+    .describe(
+      'Whether to pull + scan the docker images a chart references (the richest symbol source for a chart). Default true. When true the tool grants the compile container `--cap-add SYS_ADMIN` (daemonless podman), same as docker_images. Set false to scan only the chart template/values text.',
+    ),
+  helm_pull_repos: z
+    .boolean()
+    .default(false)
+    .describe(
+      'Whether to pull + scan the GitHub source repos a chart references (via org.opencontainers.image.source annotations). Default false because it REQUIRES a GitHub token (engine refuses an empty token) — enabling it without github_token / GH_TOKEN returns not_configured.',
     ),
   output_path: z
     .string()
@@ -132,6 +162,10 @@ interface CompileArgs {
   docker_images?: string[];
   docker_username?: string;
   docker_token?: string;
+  helm_charts?: string[];
+  helm_repos?: string[];
+  helm_pull_images: boolean;
+  helm_pull_repos: boolean;
   output_path?: string;
   library_name: string;
   mode: 'auto' | 'docker' | 'local';
@@ -139,6 +173,7 @@ interface CompileArgs {
 }
 
 const GITHUB_REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+const HELM_REPO_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 // Loose ref shape: host (optional :port) / repo path, optional :tag and/or
 // @sha256 digest. The `(:\d+)?` after the first component is what lets a
 // port-bearing registry host through (localhost:5000/app, harbor.corp:8443/x).
@@ -148,6 +183,56 @@ const DOCKER_IMAGE_RE =
 /** Pure predicate over a docker/OCI image ref, exported for unit tests. */
 export function isValidDockerImageRef(ref: string): boolean {
   return DOCKER_IMAGE_RE.test(ref);
+}
+
+/**
+ * Parse helm_repos "name=url" strings into {name,url}, validating the name
+ * shape and the url scheme. Returns an error string on the first bad entry.
+ * Exported for unit tests.
+ */
+export function parseHelmRepos(entries: string[]): { repos: HelmRepo[] } | { error: string } {
+  const repos: HelmRepo[] = [];
+  for (const e of entries) {
+    const eq = e.indexOf('=');
+    if (eq <= 0) {
+      return { error: `helm_repos entries must be "name=url"; got: ${JSON.stringify(e)}.` };
+    }
+    const name = e.slice(0, eq).trim();
+    const url = e.slice(eq + 1).trim();
+    if (!HELM_REPO_NAME_RE.test(name)) {
+      return { error: `helm_repos name must be alphanumeric/._-; got: ${JSON.stringify(name)}.` };
+    }
+    // http(s) only: `helm repo add` does NOT support oci:// (OCI registries
+    // aren't "added" — reference an OCI chart directly in helm_charts as
+    // oci://...). Accepting oci here would fail the whole compile at repo-add.
+    if (!/^https?:\/\/\S+$/i.test(url)) {
+      return {
+        error: `helm_repos url must be an http(s):// chart-repo index URL (no spaces); got: ${JSON.stringify(url)}. For an OCI registry, put the oci://… ref directly in helm_charts instead.`,
+      };
+    }
+    repos.push({ name, url });
+  }
+  return { repos };
+}
+
+/**
+ * Classify a helm chart ref: 'standalone' (oci:// or http(s):// — resolves
+ * with no repo add), {bareRepo} (a `repo/chart` short name that needs its repo
+ * in helm_repos), or 'invalid' (empty, contains whitespace, an unsupported
+ * scheme, or a bare single name). Exported for tests.
+ */
+export function classifyHelmChartRef(
+  ref: string,
+): 'standalone' | { bareRepo: string } | 'invalid' {
+  if (!ref || /\s/.test(ref)) return 'invalid';
+  const scheme = ref.match(/^([a-z][a-z0-9+.-]*):\/\//i);
+  if (scheme) {
+    const s = scheme[1].toLowerCase();
+    return s === 'oci' || s === 'http' || s === 'https' ? 'standalone' : 'invalid';
+  }
+  const slash = ref.indexOf('/');
+  if (slash > 0 && slash < ref.length - 1) return { bareRepo: ref.slice(0, slash) };
+  return 'invalid';
 }
 
 /** Human description of what the compile read, for headlines/summaries. */
@@ -165,6 +250,9 @@ function describeSources(args: CompileArgs): string {
   }
   if (args.docker_images?.length) {
     parts.push(`images ${args.docker_images.join(', ')}`);
+  }
+  if (args.helm_charts?.length) {
+    parts.push(`Helm ${args.helm_charts.join(', ')}`);
   }
   return parts.join(' + ');
 }
@@ -208,14 +296,15 @@ export async function executeCompile(args: CompileArgs): Promise<string | Struct
   // ── 1. Validate sources ──
   const hasGithub = (args.github_repos?.length ?? 0) > 0;
   const hasDockerImages = (args.docker_images?.length ?? 0) > 0;
-  if (!args.source_path && !hasGithub && !hasDockerImages) {
+  const hasHelm = (args.helm_charts?.length ?? 0) > 0;
+  if (!args.source_path && !hasGithub && !hasDockerImages && !hasHelm) {
     return buildChassisErrorEnvelope({
       tool: TOOL,
       err: {
         error_type: 'input_invalid',
         retryable: false,
         suggested_backoff_ms: null,
-        hint: 'No source given. Pass source_path (a local folder), github_repos (owner/repo list), docker_images (image refs), or any combination.',
+        hint: 'No source given. Pass source_path (a local folder), github_repos (owner/repo list), docker_images (image refs), helm_charts (chart refs), or any combination.',
       },
     });
   }
@@ -263,14 +352,55 @@ export async function executeCompile(args: CompileArgs): Promise<string | Struct
     }
   }
 
-  // Resolve a GitHub token when EITHER github_repos (required) or docker_images
-  // (optional — unlocks the image's org.opencontainers.image.source repo scan)
-  // is present. A pure local compile resolves none, so an ambient GH_TOKEN is
-  // never injected into a container that can't use it.
-  let githubToken: string | undefined =
-    hasGithub || hasDockerImages
-      ? args.github_token || process.env.GH_TOKEN || process.env.GITHUB_TOKEN
-      : undefined;
+  // Parse + validate helm sources up front (helm_repos shape, chart-repo URLs).
+  let helmRepos: HelmRepo[] = [];
+  if (hasHelm && args.helm_repos?.length) {
+    const parsed = parseHelmRepos(args.helm_repos);
+    if ('error' in parsed) {
+      return buildChassisErrorEnvelope({
+        tool: TOOL,
+        err: {
+          error_type: 'input_invalid',
+          retryable: false,
+          suggested_backoff_ms: null,
+          hint: parsed.error,
+        },
+      });
+    }
+    helmRepos = parsed.repos;
+  }
+  if (hasHelm) {
+    const repoNames = new Set(helmRepos.map((r) => r.name));
+    for (const c of args.helm_charts!) {
+      const cls = classifyHelmChartRef(c);
+      if (cls === 'invalid') {
+        return buildChassisErrorEnvelope({
+          tool: TOOL,
+          err: {
+            error_type: 'input_invalid',
+            retryable: false,
+            suggested_backoff_ms: null,
+            hint: `helm_charts entries must be an oci://… ref, an http(s):// chart URL, or "repo/chart"; got: ${JSON.stringify(c)}.`,
+          },
+        });
+      }
+      // A bare repo/chart resolves in docker mode only if we pre-add its repo.
+      // (Local mode uses the host's helm config, which may already have it.)
+      if (typeof cls === 'object' && args.mode !== 'local' && !repoNames.has(cls.bareRepo)) {
+        return buildChassisErrorEnvelope({
+          tool: TOOL,
+          err: {
+            error_type: 'input_invalid',
+            retryable: false,
+            suggested_backoff_ms: null,
+            hint: `helm chart ${JSON.stringify(c)} is a bare "repo/chart" but no helm_repos entry defines "${cls.bareRepo}". Add helm_repos: ["${cls.bareRepo}=https://<repo-index-url>"], or pass an oci://… / https://… chart ref that resolves standalone.`,
+          },
+        });
+      }
+    }
+  }
+  const helmNeedsToken = hasHelm && args.helm_pull_repos;
+
   if (hasGithub) {
     const malformed = args.github_repos!.filter((r) => !GITHUB_REPO_RE.test(r));
     if (malformed.length > 0) {
@@ -284,22 +414,37 @@ export async function executeCompile(args: CompileArgs): Promise<string | Struct
         },
       });
     }
-    // The engine hard-refuses an empty GitHub token ("empty GitHub API
-    // token"), even for public repos — gate up front with remediation
-    // instead of burning a container start on a guaranteed failure.
-    if (!githubToken) {
-      return buildNotConfiguredEnvelope({
-        tool: TOOL,
-        kind: 'generic',
-        remediation: [
-          'GitHub pull needs an access token — the compiler requires one even for public repos.',
-          'Ask the user for a GitHub token (a fine-grained token with read-only Contents access to the target repos suffices; https://github.com/settings/tokens) and either:',
-          '  1. pass it as the `github_token` argument of this tool, or',
-          '  2. set GH_TOKEN (or GITHUB_TOKEN) in the MCP server environment and retry.',
-          'The token is forwarded to the compiler as process environment only — never written to disk or argv.',
-        ].join('\n'),
-      });
-    }
+  }
+
+  // Resolve a GitHub token only for sources that can actually use it:
+  // github_repos, docker_images' source-repo scan, and helm only when it pulls
+  // referenced repos or images (both consult org.opencontainers.image.source).
+  // A chart-text-only or pure-local compile resolves none, so an ambient
+  // GH_TOKEN is never injected into a container that can't use it.
+  const githubToken: string | undefined =
+    hasGithub ||
+    hasDockerImages ||
+    (hasHelm && (args.helm_pull_repos || args.helm_pull_images))
+      ? args.github_token || process.env.GH_TOKEN || process.env.GITHUB_TOKEN
+      : undefined;
+  // The engine hard-refuses an empty GitHub token ("empty GitHub API token"),
+  // even for public repos — so it is REQUIRED for github_repos and for helm
+  // pulling referenced source repos. Gate up front instead of burning a
+  // container start on a guaranteed failure.
+  if ((hasGithub || helmNeedsToken) && !githubToken) {
+    return buildNotConfiguredEnvelope({
+      tool: TOOL,
+      kind: 'generic',
+      remediation: [
+        hasGithub
+          ? 'GitHub pull needs an access token — the compiler requires one even for public repos.'
+          : 'Pulling the GitHub source repos a Helm chart references (helm_pull_repos) needs a GitHub access token — the compiler refuses an empty one. Either provide a token, or set helm_pull_repos=false to scan only the chart and its docker images.',
+        'Ask the user for a GitHub token (a fine-grained token with read-only Contents access suffices; https://github.com/settings/tokens) and either:',
+        '  1. pass it as the `github_token` argument of this tool, or',
+        '  2. set GH_TOKEN (or GITHUB_TOKEN) in the MCP server environment and retry.',
+        'The token is forwarded to the compiler as process environment only — never written to disk or argv.',
+      ].join('\n'),
+    });
   }
 
   // ── 2. Build the compile config ──
@@ -318,10 +463,23 @@ export async function executeCompile(args: CompileArgs): Promise<string | Struct
   if (hasDockerImages) {
     inputs.push({ kind: 'dockerImage', images: args.docker_images! });
   }
-  const dockerUsername = hasDockerImages
+  if (hasHelm) {
+    inputs.push({
+      kind: 'helm',
+      charts: args.helm_charts!,
+      repos: helmRepos.length > 0 ? helmRepos : undefined,
+      pullImages: args.helm_pull_images,
+      pullRepos: args.helm_pull_repos,
+    });
+  }
+  // Registry creds are used by a direct docker_images pull AND by a Helm chart
+  // pulling its referenced (possibly private) images, which goes through the
+  // same docker pull module.
+  const needsDockerCreds = hasDockerImages || (hasHelm && args.helm_pull_images);
+  const dockerUsername = needsDockerCreds
     ? args.docker_username || process.env.DOCKER_USERNAME
     : undefined;
-  const dockerToken = hasDockerImages
+  const dockerToken = needsDockerCreds
     ? args.docker_token || process.env.DOCKER_TOKEN
     : undefined;
   const credentials =
@@ -351,6 +509,17 @@ export async function executeCompile(args: CompileArgs): Promise<string | Struct
       e instanceof NotCloudFlavorError
     ) {
       return buildNotConfiguredEnvelope({ tool: TOOL, kind: 'generic', remediation: e.message });
+    }
+    if (e instanceof HelmRepoAddError) {
+      return buildChassisErrorEnvelope({
+        tool: TOOL,
+        err: {
+          error_type: 'input_invalid',
+          retryable: false,
+          suggested_backoff_ms: null,
+          hint: `${e.message}. Check the helm_repos url (an http(s):// chart-repo index) and that the repo is reachable.`,
+        },
+      });
     }
     throw e;
   }
@@ -382,6 +551,14 @@ export async function executeCompile(args: CompileArgs): Promise<string | Struct
         }
       : null,
     docker_images: hasDockerImages ? args.docker_images! : null,
+    helm: hasHelm
+      ? {
+          charts: args.helm_charts!,
+          repos: args.helm_repos ?? [],
+          pull_images: args.helm_pull_images,
+          pull_repos: args.helm_pull_repos,
+        }
+      : null,
     output: {
       folder: output.folder,
       unit_count: output.unitCount,
@@ -452,6 +629,7 @@ export async function executeCompile(args: CompileArgs): Promise<string | Struct
         args.source_path ? 'local' : null,
         hasGithub ? 'github' : null,
         hasDockerImages ? 'images' : null,
+        hasHelm ? 'helm' : null,
       ]
         .filter(Boolean)
         .join('+') + '_compile',

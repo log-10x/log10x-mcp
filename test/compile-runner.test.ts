@@ -11,6 +11,8 @@ import {
   renderScannersOverlay,
   renderGithubPullOverlay,
   renderDockerPullOverlay,
+  renderHelmPullOverlay,
+  needsContainerEngine,
   compileEnvVars,
   scanSymbolOutputs,
   type CompileConfig,
@@ -155,6 +157,30 @@ test('buildDockerArgs grants CAP_SYS_ADMIN + vfs storage ONLY when a dockerImage
   assert.ok(!githubOnly.includes('--cap-add'));
 });
 
+test('needsContainerEngine / cap-add tracks helm pullImages, not helm alone', () => {
+  const helmWithImages = fixtureConfig({
+    inputs: [{ kind: 'helm', charts: ['oci://x/y'], pullImages: true, pullRepos: false }],
+  });
+  const helmNoImages = fixtureConfig({
+    inputs: [{ kind: 'helm', charts: ['oci://x/y'], pullImages: false, pullRepos: false }],
+  });
+  assert.equal(needsContainerEngine(helmWithImages), true);
+  assert.equal(needsContainerEngine(helmNoImages), false);
+  assert.ok(buildDockerArgs(helmWithImages, 'img').includes('--cap-add'));
+  assert.ok(!buildDockerArgs(helmNoImages, 'img').includes('--cap-add'));
+});
+
+test('buildDockerArgs mounts the helm-home + HELM_* env only when given', () => {
+  const cfg = fixtureConfig({
+    inputs: [{ kind: 'helm', charts: ['ingress-nginx/ingress-nginx'], pullImages: true, pullRepos: false }],
+  });
+  const args = buildDockerArgs(cfg, 'img', { helmHomeHostDir: '/tmp/hh' });
+  assert.ok(args.includes('/tmp/hh:/helm-home'));
+  assert.ok(args.includes('HELM_REPOSITORY_CONFIG=/helm-home/repositories.yaml'));
+  assert.ok(args.includes('HELM_REPOSITORY_CACHE=/helm-home/cache'));
+  assert.ok(!buildDockerArgs(cfg, 'img').some((a) => a.includes('helm-home')));
+});
+
 test('buildDockerArgs passes registry creds as bare -e pass-throughs, only when set', () => {
   const cfg = fixtureConfig({
     inputs: [{ kind: 'dockerImage', images: ['docker.io/acme/private:1'] }],
@@ -271,6 +297,38 @@ test('renderDockerPullOverlay pins the docker CLI path when a command is supplie
 test('renderDockerPullOverlay renders an explicit empty list (not a null images key) for no images', () => {
   const yaml = renderDockerPullOverlay({ kind: 'dockerImage', images: [] });
   assert.match(yaml, /^ {2}images: \[\]$/m);
+});
+
+// ── renderHelmPullOverlay ────────────────────────────────────────────────
+
+test('renderHelmPullOverlay lists charts and reflects the pull toggles', () => {
+  const yaml = renderHelmPullOverlay({
+    kind: 'helm',
+    charts: ['oci://ghcr.io/nginxinc/charts/nginx-ingress', 'ingress-nginx/ingress-nginx'],
+    pullImages: true,
+    pullRepos: false,
+  });
+  assert.match(yaml, /^tenx: compile$/m);
+  assert.match(yaml, /^helm:$/m);
+  assert.match(yaml, /^ {2}chartNames:$/m);
+  assert.match(yaml, /- 'oci:\/\/ghcr\.io\/nginxinc\/charts\/nginx-ingress'/);
+  assert.match(yaml, /- 'ingress-nginx\/ingress-nginx'/);
+  assert.match(yaml, /^ {4}dockerImages: true$/m);
+  assert.match(yaml, /^ {6}repos: false$/m);
+  assert.match(yaml, /token: \$=TenXEnv\.get\("GH_TOKEN"\)/);
+  // No helmCommand override — the image default (/usr/local/bin/helm) is correct.
+  assert.ok(!yaml.includes('command:'));
+});
+
+test('renderHelmPullOverlay honors pullRepos=true / pullImages=false', () => {
+  const yaml = renderHelmPullOverlay({
+    kind: 'helm',
+    charts: ['oci://x/y'],
+    pullImages: false,
+    pullRepos: true,
+  });
+  assert.match(yaml, /^ {4}dockerImages: false$/m);
+  assert.match(yaml, /^ {6}repos: true$/m);
 });
 
 // ── buildLocalIncludePaths ───────────────────────────────────────────────

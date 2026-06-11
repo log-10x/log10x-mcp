@@ -98,13 +98,43 @@ export interface CompileDockerImageInput {
   images: string[];
 }
 
+/** A `helm repo add` target — needed to resolve a bare `repo/chart` name. */
+export interface HelmRepo {
+  name: string;
+  url: string;
+}
+
 /**
- * Where the compiler reads sources from. Local folder, GitHub pull, and
- * docker-image pull are implemented; future kinds (helm / artifactory /
+ * Helm charts to render (`helm template` + `helm show chart`) and scan. A
+ * meta-source: the engine extracts the docker images and GitHub source repos
+ * the chart references and (optionally) pulls THOSE too.
+ */
+export interface CompileHelmInput {
+  kind: 'helm';
+  /**
+   * Chart refs. OCI (`oci://...`) and full URLs resolve standalone; a bare
+   * `repo/chart` needs a matching entry in `repos`.
+   */
+  charts: string[];
+  /** `helm repo add` targets, so bare `repo/chart` names resolve. */
+  repos?: HelmRepo[];
+  /** Pull + scan docker images the charts reference (needs CAP_SYS_ADMIN). */
+  pullImages: boolean;
+  /** Pull + scan GitHub source repos the charts reference (needs a token). */
+  pullRepos: boolean;
+}
+
+/**
+ * Where the compiler reads sources from. Local folder, GitHub pull, docker-
+ * image pull, and Helm pull are implemented; future kinds (artifactory /
  * gomod) slot in here as union members — the appliers branch on `kind` and
  * emit the matching pull-config overlay.
  */
-export type CompileInput = CompileLocalInput | CompileGithubInput | CompileDockerImageInput;
+export type CompileInput =
+  | CompileLocalInput
+  | CompileGithubInput
+  | CompileDockerImageInput
+  | CompileHelmInput;
 
 export interface CompileConfig {
   /** Inputs to scan — any mix of local folders, GitHub pulls, and docker-image pulls. */
@@ -183,11 +213,23 @@ export class NotCloudFlavorError extends Error {
         '  2. Install the Cloud flavor locally: https://doc.log10x.com/install/ ' +
           "(e.g. `brew install --cask log10x-cloud` on macOS, or the install script with `--flavor cloud`).",
         '',
-        'Note: with a local cloud install, local-folder compilation and GitHub pull (REST API + token) work out of the box; docker_images pull additionally needs a container engine (podman or docker) on the host. The docker compiler-10x image (option 1) bundles it — podman included, daemonless.',
+        'Note: with a local cloud install, local-folder compilation and GitHub pull (REST API + token) work out of the box; docker_images pull additionally needs a container engine (podman or docker) on the host, and helm_charts pull needs the helm CLI (plus a container engine if pulling the charts’ referenced images). The docker compiler-10x image (option 1) bundles all of these — podman included, daemonless.',
       ].join('\n'),
     );
     this.name = 'NotCloudFlavorError';
     this.flavor = flavor;
+  }
+}
+
+/**
+ * Thrown when a `helm repo add` pre-step fails (bad name/url, unreachable repo,
+ * or it ran past the shared deadline). The message is agent-facing; `detail`
+ * has URL userinfo redacted so an embedded `user:pass@` can't leak.
+ */
+export class HelmRepoAddError extends Error {
+  constructor(repoName: string, detail: string) {
+    super(`helm repo add for '${repoName}' failed: ${detail.replace(/(\/\/)[^/@\s]+@/g, '$1***@')}`);
+    this.name = 'HelmRepoAddError';
   }
 }
 
@@ -208,6 +250,12 @@ const CONTAINER_DOCKER_PULL_CONFIG = '/etc/tenx/config/pipelines/compile/pull/do
 const DOCKER_PULL_CONFIG_REL = ['compile', 'pull', 'docker', 'config.yaml'];
 /** compiler-10x's podman, symlinked at the docker default path. */
 const IN_IMAGE_DOCKER_COMMAND = '/usr/local/bin/docker';
+/** The baked helm pull config our rendered overlay replaces (docker mode). */
+const CONTAINER_HELM_PULL_CONFIG = '/etc/tenx/config/pipelines/compile/pull/helm/config.yaml';
+/** The helm pull config's path relative to a TENX_INCLUDE_PATHS root (local mode). */
+const HELM_PULL_CONFIG_REL = ['compile', 'pull', 'helm', 'config.yaml'];
+/** Where we mount the shared helm home (repositories.yaml + index cache). */
+const CONTAINER_HELM_HOME = '/helm-home';
 
 // ── Public entrypoint ──────────────────────────────────────────────────────
 
@@ -236,6 +284,9 @@ async function resolveMode(modeOverride?: 'auto' | 'docker' | 'local'): Promise<
 async function runDockerCompile(cfg: CompileConfig): Promise<CompileRunResult> {
   await probeDocker();
   const image = process.env.LOG10X_COMPILER_IMAGE || process.env.LOG10X_TENX_IMAGE || DEFAULT_IMAGE;
+  // One absolute deadline shared by the helm pre-steps AND the compile run, so
+  // the caller's timeout is a true total wall-cap (not per-container).
+  const deadline = Date.now() + cfg.timeoutMs;
 
   // Pull-config overlays are written to a host temp dir and bind-mounted
   // OVER the corresponding baked config file (wholesale replacement — the
@@ -244,10 +295,12 @@ async function runDockerCompile(cfg: CompileConfig): Promise<CompileRunResult> {
   const dockerImageInput = cfg.inputs.find(
     (i): i is CompileDockerImageInput => i.kind === 'dockerImage',
   );
+  const helmInput = cfg.inputs.find((i): i is CompileHelmInput => i.kind === 'helm');
   const configMounts: Array<{ hostPath: string; containerPath: string }> = [];
   let overlayDir: string | undefined;
+  let helmHomeDir: string | undefined;
   try {
-    if (githubInput || dockerImageInput) {
+    if (githubInput || dockerImageInput || helmInput) {
       overlayDir = await mkdtemp(join(tmpdir(), 'log10x-mcp-compile-pull-'));
     }
     if (githubInput) {
@@ -264,6 +317,18 @@ async function runDockerCompile(cfg: CompileConfig): Promise<CompileRunResult> {
       );
       configMounts.push({ hostPath, containerPath: CONTAINER_DOCKER_PULL_CONFIG });
     }
+    if (helmInput) {
+      const hostPath = join(overlayDir!, 'helm-config.yaml');
+      await writeFile(hostPath, renderHelmPullOverlay(helmInput), 'utf8');
+      configMounts.push({ hostPath, containerPath: CONTAINER_HELM_PULL_CONFIG });
+      // A bare `repo/chart` only resolves if its repo is known to helm, and
+      // the engine never runs `helm repo add`. Populate a shared helm-home
+      // (repositories.yaml + cached index) in pre-step containers, then mount
+      // it into the compile so the engine's `helm template` resolves it.
+      if (helmInput.repos && helmInput.repos.length > 0) {
+        helmHomeDir = await prepHelmHome(image, helmInput.repos, linuxUserMapping(), deadline);
+      }
+    }
 
     // Named so a timeout can reap the container: `docker run` does NOT
     // forward SIGKILL to the container, so killing the client on timeout
@@ -274,6 +339,7 @@ async function runDockerCompile(cfg: CompileConfig): Promise<CompileRunResult> {
       linuxUser: linuxUserMapping(),
       configMounts,
       containerName,
+      helmHomeHostDir: helmHomeDir,
     });
 
     // Secrets ride the docker client's own env via bare `-e VAR` pass-through
@@ -287,7 +353,10 @@ async function runDockerCompile(cfg: CompileConfig): Promise<CompileRunResult> {
       Object.keys(credEnv).length > 0 ? { ...process.env, ...credEnv } : undefined;
 
     const t0 = Date.now();
-    const r = await execCapture('docker', args, { env, timeoutMs: cfg.timeoutMs });
+    const r = await execCapture('docker', args, {
+      env,
+      timeoutMs: Math.max(1, deadline - Date.now()),
+    });
     const wallTimeMs = Date.now() - t0;
 
     // The killed client doesn't stop the container; reap it (best-effort).
@@ -315,7 +384,74 @@ async function runDockerCompile(cfg: CompileConfig): Promise<CompileRunResult> {
     };
   } finally {
     if (overlayDir) await rm(overlayDir, { recursive: true, force: true }).catch(() => {});
+    if (helmHomeDir) await rm(helmHomeDir, { recursive: true, force: true }).catch(() => {});
   }
+}
+
+/**
+ * Populate a host helm-home (repositories.yaml + per-repo index cache) by
+ * running `helm repo add` in one throwaway container per repo. Each invocation
+ * passes the repo name/url as ARGV (no shell), so a hostile name/url can't
+ * inject. The directory is mounted into the compile run so the engine's
+ * `helm template <repo>/<chart>` resolves against it. Returns the host dir
+ * (caller cleans it up); a failed/timed-out `repo add` throws HelmRepoAddError.
+ *
+ * `deadline` is the absolute end-time SHARED with the compile run, so N repo
+ * adds + the compile together honour the caller's single timeout budget (each
+ * step gets the remaining time). Each pre-step is named so a timed-out add can
+ * be reaped — `docker run` doesn't forward the client SIGKILL to the container.
+ */
+async function prepHelmHome(
+  image: string,
+  repos: HelmRepo[],
+  linuxUser: string | undefined,
+  deadline: number,
+): Promise<string> {
+  const hostDir = await mkdtemp(join(tmpdir(), 'log10x-mcp-compile-helm-'));
+  const helmEnv = [
+    '-e',
+    `HELM_REPOSITORY_CONFIG=${CONTAINER_HELM_HOME}/repositories.yaml`,
+    '-e',
+    `HELM_REPOSITORY_CACHE=${CONTAINER_HELM_HOME}/cache`,
+  ];
+  for (const repo of repos) {
+    const containerName = `log10x-helmadd-${randomUUID()}`;
+    const args = ['run', '--rm', '--name', containerName];
+    if (linuxUser) args.push('--user', linuxUser);
+    args.push(
+      '-v',
+      `${hostDir}:${CONTAINER_HELM_HOME}`,
+      ...helmEnv,
+      '--entrypoint',
+      'helm',
+      image,
+      'repo',
+      'add',
+      repo.name,
+      repo.url,
+    );
+    const r = await execCapture('docker', args, { timeoutMs: Math.max(1, deadline - Date.now()) });
+    if (r.timedOut) {
+      await execCapture('docker', ['kill', containerName], { timeoutMs: 15_000 }).catch(() => {});
+      throw new HelmRepoAddError(repo.name, 'timed out (the chart repo may be unreachable)');
+    }
+    if (r.exitCode !== 0) {
+      const tail = (r.stderr.trim() || r.stdout.trim()).split('\n').slice(-1)[0] ?? `exit ${r.exitCode}`;
+      throw new HelmRepoAddError(repo.name, tail);
+    }
+  }
+  return hostDir;
+}
+
+/**
+ * True when the compile pulls a container image and therefore needs the
+ * daemonless in-image podman: a direct dockerImage input, or a Helm chart
+ * configured to pull its referenced images. Pure / testable.
+ */
+export function needsContainerEngine(cfg: CompileConfig): boolean {
+  return cfg.inputs.some(
+    (i) => i.kind === 'dockerImage' || (i.kind === 'helm' && i.pullImages),
+  );
 }
 
 /**
@@ -329,16 +465,17 @@ async function runDockerCompile(cfg: CompileConfig): Promise<CompileRunResult> {
  * bundled scan/link configs already read via `TenXEnv.get`, pointed at a
  * single mounted `/work/symbols`.
  *
- * Credential env vars (GH_TOKEN / DOCKER_USERNAME / DOCKER_TOKEN) are passed
- * as BARE `-e VAR` (docker's env pass-through) so the secrets ride the
- * spawned client's environment, not the argv — argv is visible in process
- * listings.
+ * Credential env vars (GH_TOKEN / DOCKER_USERNAME / DOCKER_TOKEN) and the
+ * license are passed as BARE `-e VAR` (docker's env pass-through) so the
+ * secrets ride the spawned client's environment, not the argv — argv is
+ * visible in process listings.
  *
- * A dockerImage input adds `--cap-add SYS_ADMIN` + `STORAGE_DRIVER=vfs`:
- * the in-image podman pulls daemonlessly (no host socket) but needs the
- * user-namespace clone capability, and vfs storage avoids a /dev/fuse
- * device requirement. Only that input pays the privilege — local/github
- * compiles stay unprivileged.
+ * `needsContainerEngine` inputs (dockerImage, or Helm-with-images) add
+ * `--cap-add SYS_ADMIN` + `STORAGE_DRIVER=vfs`: the in-image podman pulls
+ * daemonlessly (no host socket) but needs the user-namespace clone
+ * capability, and vfs avoids a /dev/fuse device requirement. Only those
+ * inputs pay the privilege. `opts.helmHomeHostDir` mounts a pre-populated
+ * helm home so the engine's `helm template <repo>/<chart>` resolves.
  *
  * Pure (no I/O) so it is unit-testable.
  */
@@ -349,12 +486,15 @@ export function buildDockerArgs(
     linuxUser?: string;
     configMounts?: Array<{ hostPath: string; containerPath: string }>;
     containerName?: string;
+    helmHomeHostDir?: string;
   } = {},
 ): string[] {
   const args = ['run', '--rm'];
   if (opts.containerName) args.push('--name', opts.containerName);
   if (opts.linuxUser) args.push('--user', opts.linuxUser);
-  if (cfg.inputs.some((i) => i.kind === 'dockerImage')) {
+  // Daemonless podman needs the cap for any image pull — a direct dockerImage
+  // input OR a Helm chart that pulls its referenced images.
+  if (needsContainerEngine(cfg)) {
     args.push('--cap-add', 'SYS_ADMIN', '-e', 'STORAGE_DRIVER=vfs');
   }
 
@@ -365,6 +505,17 @@ export function buildDockerArgs(
   }
   for (const m of opts.configMounts ?? []) {
     args.push('-v', `${m.hostPath}:${m.containerPath}:ro`);
+  }
+  // Shared helm-home (pre-populated repos) + the env pointing helm at it.
+  if (opts.helmHomeHostDir) {
+    args.push(
+      '-v',
+      `${opts.helmHomeHostDir}:${CONTAINER_HELM_HOME}`,
+      '-e',
+      `HELM_REPOSITORY_CONFIG=${CONTAINER_HELM_HOME}/repositories.yaml`,
+      '-e',
+      `HELM_REPOSITORY_CACHE=${CONTAINER_HELM_HOME}/cache`,
+    );
   }
   args.push('-v', `${cfg.output.folder}:${CONTAINER_OUTPUT_PATH}`);
 
@@ -474,6 +625,20 @@ async function runLocalCompile(cfg: CompileConfig): Promise<CompileRunResult> {
         renderDockerPullOverlay(dockerImageInput, {}),
         'utf8',
       );
+    }
+
+    const helmInput = cfg.inputs.find((i): i is CompileHelmInput => i.kind === 'helm');
+    if (helmInput) {
+      const helmDir = join(overlayDir, ...HELM_PULL_CONFIG_REL.slice(0, -1));
+      await mkdir(helmDir, { recursive: true });
+      await writeFile(
+        join(overlayDir, ...HELM_PULL_CONFIG_REL),
+        renderHelmPullOverlay(helmInput),
+        'utf8',
+      );
+      // Local mode uses the host's own helm config — `helm_repos` are NOT
+      // auto-added here, so a bare `repo/chart` only resolves if the user has
+      // already `helm repo add`-ed it (OCI / URL chart refs always resolve).
     }
 
     const env: NodeJS.ProcessEnv = {
@@ -598,6 +763,36 @@ export function renderDockerPullOverlay(
     for (const img of input.images) lines.push(`    - ${q(img)}`);
   }
   lines.push('  remove: false', '  githubRepoToken: $=TenXEnv.get("GH_TOKEN")', '');
+  return lines.join('\n');
+}
+
+/**
+ * Render the helm pull config that replaces the baked
+ * `compile/pull/helm/config.yaml` wholesale. The default `helmCommand`
+ * (/usr/local/bin/helm) is already correct in compiler-10x, so the overlay
+ * only carries chartNames + the pull toggles. `pull.dockerImages` and
+ * `pull.github.repos` control whether the engine also pulls the images /
+ * source repos a chart references; the GitHub token stays an env reference.
+ *
+ * Pure (no I/O) so it is unit-testable.
+ */
+export function renderHelmPullOverlay(input: CompileHelmInput): string {
+  const q = (s: string) => `'${s.replace(/'/g, "''")}'`;
+  const lines = ['tenx: compile', 'helm:'];
+  if (input.charts.length === 0) {
+    lines.push('  chartNames: []');
+  } else {
+    lines.push('  chartNames:');
+    for (const c of input.charts) lines.push(`    - ${q(c)}`);
+  }
+  lines.push(
+    '  pull:',
+    `    dockerImages: ${input.pullImages ? 'true' : 'false'}`,
+    '    github:',
+    `      repos: ${input.pullRepos ? 'true' : 'false'}`,
+    '      token: $=TenXEnv.get("GH_TOKEN")',
+    '',
+  );
   return lines.join('\n');
 }
 
