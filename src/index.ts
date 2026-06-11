@@ -1886,7 +1886,7 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_setup_recurring', intent: 'Progressive wizard to configure a recurring cost-reduction agent — target services, savings %, schedule, scheduler (k8s/GHA/crontab), gitops repo — emits policy.yaml + scheduler manifest' },
   { name: 'log10x_offload_add', intent: 'Append a new offload destination (s3 / gcs / azure_blob / file) to an env-config document\'s offload_destinations[]. Multi-target offload is allowed; nickname must be unique within the list.' },
   { name: 'log10x_offload_archive', intent: 'Flip an offload destination\'s status to `archived` and stamp archived_at. Kept in the list as a historical reference. Refuses when the target is the only active destination — the Receiver requires at least one.' },
-  { name: 'log10x_compile', intent: 'Compile a symbol library from a local source folder and/or GitHub repos via the Cloud-flavor Compiler app (Docker log10x/compiler-10x or a local cloud tenx) — scans code/binaries, emits .10x.json units + a linked .10x.tar. GitHub pull needs a token (github_token arg or GH_TOKEN env, required even for public repos). Edge flavor is refused.' },
+  { name: 'log10x_compile', intent: 'Compile a symbol library from any mix of a local source folder, GitHub repos, and docker/OCI images via the Cloud-flavor Compiler app (Docker log10x/compiler-10x or a local cloud tenx) — scans code/binaries, emits .10x.json units + a linked .10x.tar. GitHub pull needs a token (github_token arg or GH_TOKEN env, required even for public repos); docker-image pull is daemonless (bundled podman, auto --cap-add SYS_ADMIN) and public images need no creds. Edge flavor is refused.' },
 ];
 
 async function handleCliFlags(): Promise<boolean> {
@@ -1944,6 +1944,8 @@ async function handleCliFlags(): Promise<boolean> {
         '  LOG10X_COMPILER_IMAGE     Docker image for log10x_compile (default: log10x/compiler-10x:latest; falls back to LOG10X_TENX_IMAGE)',
         '  TENX_LICENSE_KEY          License key passed through to the compiler app (log10x_compile); omit to use the image built-in limited license',
         '  GH_TOKEN                  GitHub token for log10x_compile github_repos pull (or pass the github_token arg; required even for public repos)',
+        '  DOCKER_USERNAME           Registry username for log10x_compile docker_images pull (or pass the docker_username arg; omit for public images)',
+        '  DOCKER_TOKEN              Registry token/password for log10x_compile docker_images pull (or pass the docker_token arg; omit for public images)',
         '  LOG10X_THRESHOLDS_FILE    JSON file overriding investigate engine thresholds',
         '  LOG10X_MCP_LOG_LEVEL      stderr log level (silent | error | warn | info | debug)',
         '  DATADOG_API_KEY           Datadog API key for backfill_metric destination',

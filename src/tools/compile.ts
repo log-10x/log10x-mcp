@@ -6,11 +6,17 @@
  * units plus a linked `.10x.tar` — that the 10x runtime later uses to assign
  * hidden classes (TenXTemplates) to events.
  *
- * Sources: a local folder (`source_path`) and/or GitHub repositories pulled
- * via the GitHub REST API (`github_repos`, token required — the engine
- * refuses an empty token even for public repos). The two combine freely.
- * Helm-chart / Docker-image / Artifactory pull are the remaining axes; the
- * runner's CompileConfig descriptor carries the seams.
+ * Sources — all combine freely:
+ *   - a local folder (`source_path`),
+ *   - GitHub repositories pulled via the GitHub REST API (`github_repos`,
+ *     token required — the engine refuses an empty token even for public
+ *     repos),
+ *   - docker/OCI images (`docker_images`), pulled DAEMONLESSLY by the podman
+ *     bundled in compiler-10x — no host docker socket; the tool adds
+ *     `--cap-add SYS_ADMIN` to the compile container automatically, and
+ *     registry creds are optional (public images pull anonymously).
+ * Helm-chart / Artifactory / gomod pull are the remaining axes; the runner's
+ * CompileConfig descriptor carries the seams.
  *
  * Backend: Docker-first. By default it runs the cloud image
  * log10x/compiler-10x (which is cloud-flavor by construction); if the caller
@@ -68,7 +74,25 @@ export const compileSchema = {
     .string()
     .optional()
     .describe(
-      'GitHub access token for github_repos (a fine-grained token with read-only Contents access to the target repos suffices). Falls back to GH_TOKEN / GITHUB_TOKEN from the MCP server environment. Reaches the compiler as process environment only — never written to disk or argv.',
+      'GitHub access token for github_repos (a fine-grained token with read-only Contents access to the target repos suffices). Falls back to GH_TOKEN / GITHUB_TOKEN from the MCP server environment. Reaches the compiler as process environment only — never written to disk or argv. When docker_images are given too, this same token additionally lets the compiler pull + scan each image\'s source repo (the org.opencontainers.image.source annotation); without it that extra scan is skipped silently.',
+    ),
+  docker_images: z
+    .array(z.string())
+    .optional()
+    .describe(
+      'Docker/OCI images to pull and scan for symbols, as image refs — fully-qualified recommended (e.g. ["docker.io/grafana/grafana:11.1.0"]; a port-bearing host like "harbor.corp:8443/team/app:2.1" is fine, and a bare "alpine" resolves against the engine default registry). The pull is daemonless — podman inside the compiler-10x image, no host docker socket — and the tool automatically grants the compile container `--cap-add SYS_ADMIN` (needed by podman; only when this arg is used). Public images need no credentials. docker_username + docker_token `docker login` to the DEFAULT registry (Docker Hub), so they cover private Docker Hub repos; images on a different private registry must be pre-authenticated on the host/engine. In mode=local the host needs a docker/podman CLI with a working engine, and pulled images are left in its store (remove:false). Combines freely with source_path and github_repos.',
+    ),
+  docker_username: z
+    .string()
+    .optional()
+    .describe(
+      'Registry username for docker_images login (authenticates the default registry — Docker Hub). Falls back to DOCKER_USERNAME from the MCP server environment. Omit for public images. The engine logs in only when BOTH username and token are non-blank. Reaches the compiler as process environment only.',
+    ),
+  docker_token: z
+    .string()
+    .optional()
+    .describe(
+      'Registry token/password for docker_images (fed to `docker login --password-stdin` against the default registry, Docker Hub). Falls back to DOCKER_TOKEN from the MCP server environment. Omit for public images; pair with docker_username. Reaches the compiler as process environment only.',
     ),
   output_path: z
     .string()
@@ -86,7 +110,7 @@ export const compileSchema = {
     .enum(['auto', 'docker', 'local'])
     .default('auto')
     .describe(
-      'Execution backend. `auto` (default) prefers Docker (cloud image, guaranteed cloud flavor) and falls back to a local cloud-flavor tenx. `docker` forces the image (LOG10X_COMPILER_IMAGE or LOG10X_TENX_IMAGE, default log10x/compiler-10x:latest). `local` forces the binary (LOG10X_TENX_PATH or `tenx` on PATH) and refuses if it is not the cloud flavor. With a local install, local-folder compilation and GitHub pull (REST API + token) both work out of the box; Helm-chart pull additionally needs `helm` on the host and Docker-image pull needs a container engine (podman or docker). The docker `compiler-10x` image bundles all of those — podman included, daemonless — which is why Docker is the default.',
+      'Execution backend. `auto` (default) prefers Docker (cloud image, guaranteed cloud flavor) and falls back to a local cloud-flavor tenx. `docker` forces the image (LOG10X_COMPILER_IMAGE or LOG10X_TENX_IMAGE, default log10x/compiler-10x:latest). `local` forces the binary (LOG10X_TENX_PATH or `tenx` on PATH) and refuses if it is not the cloud flavor. With a local install, local-folder compilation and GitHub pull (REST API + token) work out of the box; docker_images pull additionally needs a container engine (podman or docker) on the host. The docker `compiler-10x` image bundles all of those — podman included, daemonless — which is why Docker is the default.',
     ),
   timeout_ms: z
     .number()
@@ -105,6 +129,9 @@ interface CompileArgs {
   github_branch?: string;
   github_folders?: string[];
   github_token?: string;
+  docker_images?: string[];
+  docker_username?: string;
+  docker_token?: string;
   output_path?: string;
   library_name: string;
   mode: 'auto' | 'docker' | 'local';
@@ -112,6 +139,16 @@ interface CompileArgs {
 }
 
 const GITHUB_REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+// Loose ref shape: host (optional :port) / repo path, optional :tag and/or
+// @sha256 digest. The `(:\d+)?` after the first component is what lets a
+// port-bearing registry host through (localhost:5000/app, harbor.corp:8443/x).
+const DOCKER_IMAGE_RE =
+  /^[a-z0-9][a-z0-9._-]*(:\d+)?(\/[a-z0-9._-]+)*(:[\w.-]+)?(@sha256:[a-f0-9]{64})?$/i;
+
+/** Pure predicate over a docker/OCI image ref, exported for unit tests. */
+export function isValidDockerImageRef(ref: string): boolean {
+  return DOCKER_IMAGE_RE.test(ref);
+}
 
 /** Human description of what the compile read, for headlines/summaries. */
 function describeSources(args: CompileArgs): string {
@@ -126,6 +163,9 @@ function describeSources(args: CompileArgs): string {
       `GitHub ${args.github_repos.join(', ')}${qualifiers.length ? ` (${qualifiers.join('; ')})` : ''}`,
     );
   }
+  if (args.docker_images?.length) {
+    parts.push(`images ${args.docker_images.join(', ')}`);
+  }
   return parts.join(' + ');
 }
 
@@ -138,13 +178,24 @@ function defaultOutputDir(runtimeName: string): string {
   return join(tmpdir(), 'log10x-mcp-compile', `${runtimeName}-${Date.now()}-${process.pid}`, 'symbols');
 }
 
-/** Last `n` non-empty lines of the combined engine log, for the result. */
-function logTail(result: CompileRunResult, n: number): string[] {
-  const merged = `${result.stdout}\n${result.stderr}`
+/**
+ * Last `n` non-empty lines of the combined engine log, for the result.
+ *
+ * `secrets` are scrubbed first: on a failed pipeline launch the engine dumps
+ * its RESOLVED options to stderr — including credential values like
+ * githubPullToken / dockerPassword — and without redaction those would ride
+ * log_tail straight back into the agent conversation.
+ */
+function logTail(result: CompileRunResult, n: number, secrets: Array<string | undefined>): string[] {
+  let merged = `${result.stdout}\n${result.stderr}`;
+  for (const s of secrets) {
+    if (s && s.length >= 4) merged = merged.split(s).join('***');
+  }
+  return merged
     .split('\n')
     .map((l) => l.trimEnd())
-    .filter((l) => l.length > 0);
-  return merged.slice(-n);
+    .filter((l) => l.length > 0)
+    .slice(-n);
 }
 
 function humanByteSize(bytes: number): string {
@@ -156,14 +207,15 @@ function humanByteSize(bytes: number): string {
 export async function executeCompile(args: CompileArgs): Promise<string | StructuredOutput> {
   // ── 1. Validate sources ──
   const hasGithub = (args.github_repos?.length ?? 0) > 0;
-  if (!args.source_path && !hasGithub) {
+  const hasDockerImages = (args.docker_images?.length ?? 0) > 0;
+  if (!args.source_path && !hasGithub && !hasDockerImages) {
     return buildChassisErrorEnvelope({
       tool: TOOL,
       err: {
         error_type: 'input_invalid',
         retryable: false,
         suggested_backoff_ms: null,
-        hint: 'No source given. Pass source_path (a local folder), github_repos (owner/repo list), or both.',
+        hint: 'No source given. Pass source_path (a local folder), github_repos (owner/repo list), docker_images (image refs), or any combination.',
       },
     });
   }
@@ -196,7 +248,29 @@ export async function executeCompile(args: CompileArgs): Promise<string | Struct
     }
   }
 
-  let githubToken: string | undefined;
+  if (hasDockerImages) {
+    const malformed = args.docker_images!.filter((r) => !isValidDockerImageRef(r));
+    if (malformed.length > 0) {
+      return buildChassisErrorEnvelope({
+        tool: TOOL,
+        err: {
+          error_type: 'input_invalid',
+          retryable: false,
+          suggested_backoff_ms: null,
+          hint: `docker_images entries must be image refs like docker.io/grafana/grafana:11.1.0 (fully-qualified recommended); got: ${malformed.join(', ')}.`,
+        },
+      });
+    }
+  }
+
+  // Resolve a GitHub token when EITHER github_repos (required) or docker_images
+  // (optional — unlocks the image's org.opencontainers.image.source repo scan)
+  // is present. A pure local compile resolves none, so an ambient GH_TOKEN is
+  // never injected into a container that can't use it.
+  let githubToken: string | undefined =
+    hasGithub || hasDockerImages
+      ? args.github_token || process.env.GH_TOKEN || process.env.GITHUB_TOKEN
+      : undefined;
   if (hasGithub) {
     const malformed = args.github_repos!.filter((r) => !GITHUB_REPO_RE.test(r));
     if (malformed.length > 0) {
@@ -213,7 +287,6 @@ export async function executeCompile(args: CompileArgs): Promise<string | Struct
     // The engine hard-refuses an empty GitHub token ("empty GitHub API
     // token"), even for public repos — gate up front with remediation
     // instead of burning a container start on a guaranteed failure.
-    githubToken = args.github_token || process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
     if (!githubToken) {
       return buildNotConfiguredEnvelope({
         tool: TOOL,
@@ -242,6 +315,19 @@ export async function executeCompile(args: CompileArgs): Promise<string | Struct
       folders: args.github_folders,
     });
   }
+  if (hasDockerImages) {
+    inputs.push({ kind: 'dockerImage', images: args.docker_images! });
+  }
+  const dockerUsername = hasDockerImages
+    ? args.docker_username || process.env.DOCKER_USERNAME
+    : undefined;
+  const dockerToken = hasDockerImages
+    ? args.docker_token || process.env.DOCKER_TOKEN
+    : undefined;
+  const credentials =
+    githubToken || dockerUsername || dockerToken
+      ? { githubToken, dockerUsername, dockerToken }
+      : undefined;
   const cfg: CompileConfig = {
     inputs,
     output: {
@@ -250,7 +336,7 @@ export async function executeCompile(args: CompileArgs): Promise<string | Struct
       runtimeName,
     },
     license: process.env.TENX_LICENSE_KEY || process.env.LOG10X_LICENSE_KEY || undefined,
-    credentials: githubToken ? { githubToken } : undefined,
+    credentials,
     timeoutMs: args.timeout_ms,
   };
 
@@ -295,13 +381,16 @@ export async function executeCompile(args: CompileArgs): Promise<string | Struct
           folders: args.github_folders ?? [],
         }
       : null,
+    docker_images: hasDockerImages ? args.docker_images! : null,
     output: {
       folder: output.folder,
       unit_count: output.unitCount,
       empty_unit_count: output.emptyUnitCount,
       library_files: output.libraries,
     },
-    log_tail: logTail(result, 40),
+    // Scrub actual secrets only — NOT dockerUsername, which is non-sensitive
+    // and (being a short, possibly-common string) would over-redact the log.
+    log_tail: logTail(result, 40, [githubToken, dockerToken, cfg.license]),
   };
 
   if (!ok && !producedSymbols) {
@@ -359,7 +448,11 @@ export async function executeCompile(args: CompileArgs): Promise<string | Struct
     decisions: { threshold_used: null, threshold_basis: 'default' },
     source_disclosure: {},
     scope: {
-      window: [args.source_path ? 'local' : null, hasGithub ? 'github' : null]
+      window: [
+        args.source_path ? 'local' : null,
+        hasGithub ? 'github' : null,
+        hasDockerImages ? 'images' : null,
+      ]
         .filter(Boolean)
         .join('+') + '_compile',
       window_basis: 'explicit',

@@ -36,6 +36,20 @@
  * The engine hard-refuses an empty token ("empty GitHub API token"), even
  * for public repos, so callers must gate on a token being present.
  *
+ * Docker-image pull: the engine materializes an image's filesystem by
+ * shelling out to `docker manifest inspect` → `docker create` → `docker
+ * export` (no `docker pull`, no registry HTTP client), configured by
+ * `pull/docker/config.yaml` — replaced the same way as github. The
+ * compiler-10x image bundles podman symlinked as /usr/local/bin/docker, so
+ * the pull is DAEMONLESS — no host docker socket — but podman needs
+ * CAP_SYS_ADMIN (user-namespace clone) + vfs storage, so docker mode adds
+ * `--cap-add SYS_ADMIN -e STORAGE_DRIVER=vfs` ONLY when a dockerImage input
+ * is present; the other sources stay unprivileged. Registry creds are
+ * optional (public images pull anonymously); when given they travel as
+ * DOCKER_USERNAME / DOCKER_TOKEN process env, same pattern as GH_TOKEN.
+ * Local mode renders the overlay without a `command` override (the engine's
+ * platform default applies) and needs a docker/podman CLI on the host.
+ *
  * The cloud-flavor gate: the compiler is absent from the Edge (native /
  * JIT) flavor — its scanners (ANTLR, bytecode, archive, executable) and
  * the link stage need the full JRE-packaged cloud distribution. Docker
@@ -45,6 +59,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -76,16 +91,23 @@ export interface CompileGithubInput {
   folders?: string[];
 }
 
+/** Docker/OCI images to pull (daemonless via podman in-image) and scan. */
+export interface CompileDockerImageInput {
+  kind: 'dockerImage';
+  /** Fully-qualified image refs (e.g. `docker.io/grafana/grafana:11.1.0`). */
+  images: string[];
+}
+
 /**
- * Where the compiler reads sources from. Local folder and GitHub pull are
- * implemented; future kinds (helm / dockerImage / artifactory) slot in here
- * as union members — the appliers branch on `kind` and emit the matching
- * pull-config overlay.
+ * Where the compiler reads sources from. Local folder, GitHub pull, and
+ * docker-image pull are implemented; future kinds (helm / artifactory /
+ * gomod) slot in here as union members — the appliers branch on `kind` and
+ * emit the matching pull-config overlay.
  */
-export type CompileInput = CompileLocalInput | CompileGithubInput;
+export type CompileInput = CompileLocalInput | CompileGithubInput | CompileDockerImageInput;
 
 export interface CompileConfig {
-  /** Inputs to scan — any mix of local folders and GitHub pulls. */
+  /** Inputs to scan — any mix of local folders, GitHub pulls, and docker-image pulls. */
   inputs: CompileInput[];
   /** Output artifact locations (host paths). */
   output: {
@@ -107,6 +129,10 @@ export interface CompileConfig {
   credentials?: {
     /** GitHub access token, surfaced to the engine as GH_TOKEN. */
     githubToken?: string;
+    /** Registry login for docker-image pull, surfaced as DOCKER_USERNAME. */
+    dockerUsername?: string;
+    /** Registry token/password for docker-image pull, surfaced as DOCKER_TOKEN. */
+    dockerToken?: string;
   };
   /** Hard cap on compile wall time in ms. */
   timeoutMs: number;
@@ -157,7 +183,7 @@ export class NotCloudFlavorError extends Error {
         '  2. Install the Cloud flavor locally: https://doc.log10x.com/install/ ' +
           "(e.g. `brew install --cask log10x-cloud` on macOS, or the install script with `--flavor cloud`).",
         '',
-        'Note: with a local cloud install, local-folder compilation and GitHub pull (REST API + token) work out of the box; Helm-chart pull additionally needs `helm` on the host, and Docker-image pull needs a container engine (podman or docker). The docker compiler-10x image (option 1) bundles all of these — podman included, daemonless.',
+        'Note: with a local cloud install, local-folder compilation and GitHub pull (REST API + token) work out of the box; docker_images pull additionally needs a container engine (podman or docker) on the host. The docker compiler-10x image (option 1) bundles it — podman included, daemonless.',
       ].join('\n'),
     );
     this.name = 'NotCloudFlavorError';
@@ -176,6 +202,12 @@ const CONTAINER_OUTPUT_PATH = '/work/symbols';
 const CONTAINER_GITHUB_PULL_CONFIG = '/etc/tenx/config/pipelines/compile/pull/github/config.yaml';
 /** The github pull config's path relative to a TENX_INCLUDE_PATHS root (local mode). */
 const GITHUB_PULL_CONFIG_REL = ['compile', 'pull', 'github', 'config.yaml'];
+/** The baked docker pull config our rendered overlay replaces (docker mode). */
+const CONTAINER_DOCKER_PULL_CONFIG = '/etc/tenx/config/pipelines/compile/pull/docker/config.yaml';
+/** The docker pull config's path relative to a TENX_INCLUDE_PATHS root (local mode). */
+const DOCKER_PULL_CONFIG_REL = ['compile', 'pull', 'docker', 'config.yaml'];
+/** compiler-10x's podman, symlinked at the docker default path. */
+const IN_IMAGE_DOCKER_COMMAND = '/usr/local/bin/docker';
 
 // ── Public entrypoint ──────────────────────────────────────────────────────
 
@@ -209,27 +241,60 @@ async function runDockerCompile(cfg: CompileConfig): Promise<CompileRunResult> {
   // OVER the corresponding baked config file (wholesale replacement — the
   // engine reads one config.yaml per pull source).
   const githubInput = cfg.inputs.find((i): i is CompileGithubInput => i.kind === 'github');
+  const dockerImageInput = cfg.inputs.find(
+    (i): i is CompileDockerImageInput => i.kind === 'dockerImage',
+  );
   const configMounts: Array<{ hostPath: string; containerPath: string }> = [];
   let overlayDir: string | undefined;
   try {
-    if (githubInput) {
+    if (githubInput || dockerImageInput) {
       overlayDir = await mkdtemp(join(tmpdir(), 'log10x-mcp-compile-pull-'));
-      const hostPath = join(overlayDir, 'github-config.yaml');
+    }
+    if (githubInput) {
+      const hostPath = join(overlayDir!, 'github-config.yaml');
       await writeFile(hostPath, renderGithubPullOverlay(githubInput), 'utf8');
       configMounts.push({ hostPath, containerPath: CONTAINER_GITHUB_PULL_CONFIG });
     }
+    if (dockerImageInput) {
+      const hostPath = join(overlayDir!, 'docker-config.yaml');
+      await writeFile(
+        hostPath,
+        renderDockerPullOverlay(dockerImageInput, { command: IN_IMAGE_DOCKER_COMMAND }),
+        'utf8',
+      );
+      configMounts.push({ hostPath, containerPath: CONTAINER_DOCKER_PULL_CONFIG });
+    }
 
-    const args = buildDockerArgs(cfg, image, { linuxUser: linuxUserMapping(), configMounts });
+    // Named so a timeout can reap the container: `docker run` does NOT
+    // forward SIGKILL to the container, so killing the client on timeout
+    // would otherwise leave the compile running — holding CAP_SYS_ADMIN and
+    // the output mount — to completion.
+    const containerName = `log10x-compile-${randomUUID()}`;
+    const args = buildDockerArgs(cfg, image, {
+      linuxUser: linuxUserMapping(),
+      configMounts,
+      containerName,
+    });
 
-    // Credentials ride the docker client's own env via bare `-e GH_TOKEN`
-    // pass-through (buildDockerArgs) so the secret never appears in argv.
-    const env: NodeJS.ProcessEnv | undefined = cfg.credentials?.githubToken
-      ? { ...process.env, GH_TOKEN: cfg.credentials.githubToken }
-      : undefined;
+    // Secrets ride the docker client's own env via bare `-e VAR` pass-through
+    // (buildDockerArgs) so the values never appear in argv.
+    const credEnv: Record<string, string> = {};
+    if (cfg.credentials?.githubToken) credEnv.GH_TOKEN = cfg.credentials.githubToken;
+    if (cfg.credentials?.dockerUsername) credEnv.DOCKER_USERNAME = cfg.credentials.dockerUsername;
+    if (cfg.credentials?.dockerToken) credEnv.DOCKER_TOKEN = cfg.credentials.dockerToken;
+    if (cfg.license) credEnv.TENX_LICENSE_KEY = cfg.license;
+    const env: NodeJS.ProcessEnv | undefined =
+      Object.keys(credEnv).length > 0 ? { ...process.env, ...credEnv } : undefined;
 
     const t0 = Date.now();
     const r = await execCapture('docker', args, { env, timeoutMs: cfg.timeoutMs });
     const wallTimeMs = Date.now() - t0;
+
+    // The killed client doesn't stop the container; reap it (best-effort).
+    // `--rm` then removes it once stopped.
+    if (r.timedOut) {
+      await execCapture('docker', ['kill', containerName], { timeoutMs: 15_000 }).catch(() => {});
+    }
 
     const scanned = await scanSymbolOutputs(cfg.output.folder);
     return {
@@ -264,9 +329,16 @@ async function runDockerCompile(cfg: CompileConfig): Promise<CompileRunResult> {
  * bundled scan/link configs already read via `TenXEnv.get`, pointed at a
  * single mounted `/work/symbols`.
  *
- * The GitHub token is passed as a BARE `-e GH_TOKEN` (docker's env
- * pass-through) so the secret rides the spawned client's environment, not
- * the argv — argv is visible in process listings.
+ * Credential env vars (GH_TOKEN / DOCKER_USERNAME / DOCKER_TOKEN) are passed
+ * as BARE `-e VAR` (docker's env pass-through) so the secrets ride the
+ * spawned client's environment, not the argv — argv is visible in process
+ * listings.
+ *
+ * A dockerImage input adds `--cap-add SYS_ADMIN` + `STORAGE_DRIVER=vfs`:
+ * the in-image podman pulls daemonlessly (no host socket) but needs the
+ * user-namespace clone capability, and vfs storage avoids a /dev/fuse
+ * device requirement. Only that input pays the privilege — local/github
+ * compiles stay unprivileged.
  *
  * Pure (no I/O) so it is unit-testable.
  */
@@ -276,10 +348,15 @@ export function buildDockerArgs(
   opts: {
     linuxUser?: string;
     configMounts?: Array<{ hostPath: string; containerPath: string }>;
+    containerName?: string;
   } = {},
 ): string[] {
   const args = ['run', '--rm'];
+  if (opts.containerName) args.push('--name', opts.containerName);
   if (opts.linuxUser) args.push('--user', opts.linuxUser);
+  if (cfg.inputs.some((i) => i.kind === 'dockerImage')) {
+    args.push('--cap-add', 'SYS_ADMIN', '-e', 'STORAGE_DRIVER=vfs');
+  }
 
   for (const input of cfg.inputs) {
     if (input.kind === 'local') {
@@ -291,14 +368,18 @@ export function buildDockerArgs(
   }
   args.push('-v', `${cfg.output.folder}:${CONTAINER_OUTPUT_PATH}`);
 
+  // Non-secret output env carries values; secrets (license + creds) use a
+  // bare `-e VAR` pass-through so their values never land in argv.
   const env = compileEnvVars({
     outputFolder: CONTAINER_OUTPUT_PATH,
     libraryFile: `${CONTAINER_OUTPUT_PATH}/${cfg.output.runtimeName}.10x.tar`,
     runtimeName: cfg.output.runtimeName,
-    license: cfg.license,
   });
   for (const [k, v] of Object.entries(env)) args.push('-e', `${k}=${v}`);
+  if (cfg.license) args.push('-e', 'TENX_LICENSE_KEY');
   if (cfg.credentials?.githubToken) args.push('-e', 'GH_TOKEN');
+  if (cfg.credentials?.dockerUsername) args.push('-e', 'DOCKER_USERNAME');
+  if (cfg.credentials?.dockerToken) args.push('-e', 'DOCKER_TOKEN');
 
   args.push(image, '@apps/compiler');
   return args;
@@ -379,6 +460,22 @@ async function runLocalCompile(cfg: CompileConfig): Promise<CompileRunResult> {
       );
     }
 
+    const dockerImageInput = cfg.inputs.find(
+      (i): i is CompileDockerImageInput => i.kind === 'dockerImage',
+    );
+    if (dockerImageInput) {
+      const dockerDir = join(overlayDir, ...DOCKER_PULL_CONFIG_REL.slice(0, -1));
+      await mkdir(dockerDir, { recursive: true });
+      // No `command` override locally — the engine's platform default docker
+      // path applies; the host must have a docker/podman CLI with a working
+      // engine behind it.
+      await writeFile(
+        join(overlayDir, ...DOCKER_PULL_CONFIG_REL),
+        renderDockerPullOverlay(dockerImageInput, {}),
+        'utf8',
+      );
+    }
+
     const env: NodeJS.ProcessEnv = {
       ...process.env,
       TENX_INCLUDE_PATHS: buildLocalIncludePaths(resolveInstallPaths(), overlayDir),
@@ -386,10 +483,12 @@ async function runLocalCompile(cfg: CompileConfig): Promise<CompileRunResult> {
         outputFolder: cfg.output.folder,
         libraryFile: cfg.output.libraryFile,
         runtimeName: cfg.output.runtimeName,
-        license: cfg.license,
       }),
     };
+    if (cfg.license) env.TENX_LICENSE_KEY = cfg.license;
     if (cfg.credentials?.githubToken) env.GH_TOKEN = cfg.credentials.githubToken;
+    if (cfg.credentials?.dockerUsername) env.DOCKER_USERNAME = cfg.credentials.dockerUsername;
+    if (cfg.credentials?.dockerToken) env.DOCKER_TOKEN = cfg.credentials.dockerToken;
 
     const t0 = Date.now();
     const r = await execCapture(binary, ['@apps/compiler'], { env, timeoutMs: cfg.timeoutMs });
@@ -465,6 +564,44 @@ export function renderGithubPullOverlay(input: CompileGithubInput): string {
 }
 
 /**
+ * Render the docker pull config that replaces the baked
+ * `compile/pull/docker/config.yaml` wholesale. Credentials stay
+ * `$=TenXEnv.get(...)` env references — blank means "pre-authenticated /
+ * anonymous" and the engine skips `docker login` (public images pull with no
+ * creds). `githubRepoToken` rides GH_TOKEN too: when present, the engine
+ * also pulls + scans the source repo named by the image's
+ * `org.opencontainers.image.source` annotation; when blank it skips that,
+ * silently. `remove` stays false — in docker mode the pulled image lives in
+ * the throwaway container's vfs store, and local-mode users keep their cache.
+ *
+ * `opts.command` pins the docker CLI path (docker mode pins the in-image
+ * podman symlink); omitted, the engine's platform default applies.
+ *
+ * Pure (no I/O) so it is unit-testable.
+ */
+export function renderDockerPullOverlay(
+  input: CompileDockerImageInput,
+  opts: { command?: string } = {},
+): string {
+  const q = (s: string) => `'${s.replace(/'/g, "''")}'`;
+  const lines = [
+    'tenx: compile',
+    'docker:',
+    '  username: $=TenXEnv.get("DOCKER_USERNAME")',
+    '  password: $=TenXEnv.get("DOCKER_TOKEN")',
+  ];
+  if (opts.command) lines.push(`  command: ${q(opts.command)}`);
+  if (input.images.length === 0) {
+    lines.push('  images: []');
+  } else {
+    lines.push('  images:');
+    for (const img of input.images) lines.push(`    - ${q(img)}`);
+  }
+  lines.push('  remove: false', '  githubRepoToken: $=TenXEnv.get("GH_TOKEN")', '');
+  return lines.join('\n');
+}
+
+/**
  * Build TENX_INCLUDE_PATHS for local mode, overlay dir FIRST so its
  * `compile/scanners/config.yaml` shadows the install's copy. Mirrors the
  * include-path spelling in dev-cli's local runner. Separator is `;` on all
@@ -527,10 +664,13 @@ export function isCloudFlavorOutput(output: string): boolean {
 // ── Shared env builder ─────────────────────────────────────────────────────
 
 /**
- * The TENX_* env the bundled compiler config reads via `TenXEnv.get`. Shared
- * by both appliers (docker maps these to `-e` flags; local spreads them into
- * the child env). `TENX_LOG_APPENDER=tenxConsoleAppender` routes the engine's
- * progress log to stdout so the tool can capture and tail it.
+ * The non-secret TENX_* output env the bundled compiler config reads via
+ * `TenXEnv.get`. Shared by both appliers (docker maps these to value-bearing
+ * `-e` flags; local spreads them into the child env).
+ * `TENX_LOG_APPENDER=tenxConsoleAppender` routes the engine's progress log to
+ * stdout so the tool can capture and tail it. The license is NOT here — it is
+ * a secret and rides a bare `-e` (docker) / direct env assignment (local) so
+ * its value never lands in argv.
  *
  * Pure so it is unit-testable.
  */
@@ -538,16 +678,13 @@ export function compileEnvVars(p: {
   outputFolder: string;
   libraryFile: string;
   runtimeName: string;
-  license?: string;
 }): Record<string, string> {
-  const env: Record<string, string> = {
+  return {
     TENX_OUTPUT_SYMBOL_FOLDER: p.outputFolder,
     TENX_OUTPUT_SYMBOL_LIBRARY_FILE: p.libraryFile,
     TENX_RUNTIME_NAME: p.runtimeName,
     TENX_LOG_APPENDER: 'tenxConsoleAppender',
   };
-  if (p.license) env.TENX_LICENSE_KEY = p.license;
-  return env;
 }
 
 // ── Output scanning ────────────────────────────────────────────────────────

@@ -10,6 +10,7 @@ import {
   buildLocalIncludePaths,
   renderScannersOverlay,
   renderGithubPullOverlay,
+  renderDockerPullOverlay,
   compileEnvVars,
   scanSymbolOutputs,
   type CompileConfig,
@@ -81,11 +82,20 @@ test('buildDockerArgs adds --user only when a linuxUser mapping is supplied', ()
   assert.ok(!withoutUser.includes('--user'));
 });
 
-test('buildDockerArgs passes TENX_LICENSE_KEY only when set', () => {
+test('buildDockerArgs passes the license as a bare -e (name only — value never in argv)', () => {
   const withLicense = buildDockerArgs(fixtureConfig({ license: 'jwt-123' }), 'img');
-  assert.ok(withLicense.includes('TENX_LICENSE_KEY=jwt-123'));
+  const i = withLicense.indexOf('TENX_LICENSE_KEY');
+  assert.ok(i > 0 && withLicense[i - 1] === '-e', 'bare -e TENX_LICENSE_KEY expected');
+  assert.ok(!withLicense.some((a) => a.includes('jwt-123')), 'license value must not appear in argv');
   const withoutLicense = buildDockerArgs(fixtureConfig(), 'img');
-  assert.ok(!withoutLicense.some((a) => a.startsWith('TENX_LICENSE_KEY=')));
+  assert.ok(!withoutLicense.includes('TENX_LICENSE_KEY'));
+});
+
+test('buildDockerArgs adds --name only when a containerName is supplied', () => {
+  const named = buildDockerArgs(fixtureConfig(), 'img', { containerName: 'log10x-compile-xyz' });
+  const i = named.indexOf('log10x-compile-xyz');
+  assert.ok(i > 0 && named[i - 1] === '--name', '--name <containerName> expected');
+  assert.ok(!buildDockerArgs(fixtureConfig(), 'img').includes('--name'));
 });
 
 test('buildDockerArgs mounts pull-config overlays read-only over their baked paths', () => {
@@ -123,6 +133,45 @@ test('buildDockerArgs mounts no source dir for a github-only compile', () => {
   assert.ok(!args.some((a) => a.endsWith('/etc/tenx/config/data/compile/sources:ro')));
   // Output mount is always present.
   assert.ok(args.some((a) => a.endsWith(':/work/symbols')));
+});
+
+test('buildDockerArgs grants CAP_SYS_ADMIN + vfs storage ONLY when a dockerImage input is present', () => {
+  const withImages = buildDockerArgs(
+    fixtureConfig({ inputs: [{ kind: 'dockerImage', images: ['docker.io/library/alpine:latest'] }] }),
+    'img',
+  );
+  const capIdx = withImages.indexOf('SYS_ADMIN');
+  assert.ok(capIdx > 0 && withImages[capIdx - 1] === '--cap-add', '--cap-add SYS_ADMIN expected');
+  assert.ok(withImages.includes('STORAGE_DRIVER=vfs'));
+
+  // local / github compiles stay unprivileged.
+  const localOnly = buildDockerArgs(fixtureConfig(), 'img');
+  assert.ok(!localOnly.includes('--cap-add'));
+  assert.ok(!localOnly.includes('STORAGE_DRIVER=vfs'));
+  const githubOnly = buildDockerArgs(
+    fixtureConfig({ inputs: [{ kind: 'github', repos: ['a/b'] }] }),
+    'img',
+  );
+  assert.ok(!githubOnly.includes('--cap-add'));
+});
+
+test('buildDockerArgs passes registry creds as bare -e pass-throughs, only when set', () => {
+  const cfg = fixtureConfig({
+    inputs: [{ kind: 'dockerImage', images: ['docker.io/acme/private:1'] }],
+    credentials: { dockerUsername: 'acme', dockerToken: 'dckr_secret' },
+  });
+  const args = buildDockerArgs(cfg, 'img');
+  for (const v of ['DOCKER_USERNAME', 'DOCKER_TOKEN']) {
+    const i = args.indexOf(v);
+    assert.ok(i > 0 && args[i - 1] === '-e', `bare -e ${v} expected`);
+  }
+  assert.ok(!args.some((a) => a.includes('dckr_secret')), 'token value must not appear in argv');
+  const anonymous = buildDockerArgs(
+    fixtureConfig({ inputs: [{ kind: 'dockerImage', images: ['docker.io/library/alpine:latest'] }] }),
+    'img',
+  );
+  assert.ok(!anonymous.includes('DOCKER_USERNAME'));
+  assert.ok(!anonymous.includes('DOCKER_TOKEN'));
 });
 
 // ── compileEnvVars ───────────────────────────────────────────────────────
@@ -189,6 +238,39 @@ test('renderGithubPullOverlay renders branch and folders when given, single-quot
   assert.match(yaml, /- 'src\/gen'/);
   // Embedded single quotes are YAML-escaped by doubling.
   assert.match(yaml, /- 'weird\/o''brien'/);
+});
+
+// ── renderDockerPullOverlay ──────────────────────────────────────────────
+
+test('renderDockerPullOverlay lists images and keeps all creds as env references', () => {
+  const yaml = renderDockerPullOverlay({
+    kind: 'dockerImage',
+    images: ['docker.io/library/alpine:latest', 'docker.io/grafana/grafana:11.1.0'],
+  });
+  assert.match(yaml, /^tenx: compile$/m);
+  assert.match(yaml, /^docker:$/m);
+  // Secrets never land in the rendered file — only env hooks.
+  assert.match(yaml, /username: \$=TenXEnv\.get\("DOCKER_USERNAME"\)/);
+  assert.match(yaml, /password: \$=TenXEnv\.get\("DOCKER_TOKEN"\)/);
+  assert.match(yaml, /githubRepoToken: \$=TenXEnv\.get\("GH_TOKEN"\)/);
+  assert.match(yaml, /- 'docker\.io\/library\/alpine:latest'/);
+  assert.match(yaml, /- 'docker\.io\/grafana\/grafana:11\.1\.0'/);
+  assert.match(yaml, /^ {2}remove: false$/m);
+  // No command override unless requested (local mode uses the engine default).
+  assert.ok(!yaml.includes('command:'));
+});
+
+test('renderDockerPullOverlay pins the docker CLI path when a command is supplied (docker mode)', () => {
+  const yaml = renderDockerPullOverlay(
+    { kind: 'dockerImage', images: ['docker.io/library/alpine:latest'] },
+    { command: '/usr/local/bin/docker' },
+  );
+  assert.match(yaml, /^ {2}command: '\/usr\/local\/bin\/docker'$/m);
+});
+
+test('renderDockerPullOverlay renders an explicit empty list (not a null images key) for no images', () => {
+  const yaml = renderDockerPullOverlay({ kind: 'dockerImage', images: [] });
+  assert.match(yaml, /^ {2}images: \[\]$/m);
 });
 
 // ── buildLocalIncludePaths ───────────────────────────────────────────────
