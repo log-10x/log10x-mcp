@@ -7,7 +7,7 @@
  * to assign hidden classes (TenXTemplates) to events.
  *
  * Backend: Docker-first. By default it runs the cloud image
- * log10x/pipeline-10x (which is cloud-flavor by construction); if the caller
+ * log10x/compiler-10x (which is cloud-flavor by construction); if the caller
  * has a local CLOUD-flavor `tenx` it can use that instead. The Edge (native /
  * JIT) flavor cannot compile and is refused with a clear remediation.
  *
@@ -59,7 +59,7 @@ export const compileSchema = {
     .enum(['auto', 'docker', 'local'])
     .default('auto')
     .describe(
-      'Execution backend. `auto` (default) prefers Docker (cloud image, guaranteed cloud flavor) and falls back to a local cloud-flavor tenx. `docker` forces the image (LOG10X_TENX_IMAGE, default log10x/pipeline-10x:latest). `local` forces the binary (LOG10X_TENX_PATH or `tenx` on PATH) and refuses if it is not the cloud flavor.',
+      'Execution backend. `auto` (default) prefers Docker (cloud image, guaranteed cloud flavor) and falls back to a local cloud-flavor tenx. `docker` forces the image (LOG10X_COMPILER_IMAGE or LOG10X_TENX_IMAGE, default log10x/compiler-10x:latest). `local` forces the binary (LOG10X_TENX_PATH or `tenx` on PATH) and refuses if it is not the cloud flavor.',
     ),
   timeout_ms: z
     .number()

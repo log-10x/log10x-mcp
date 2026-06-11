@@ -1,7 +1,7 @@
 /**
  * Compiler app runner — runs `tenx @apps/compiler` (CLOUD flavor only) to
  * scan a local source folder and emit a symbol library (`.10x.json` units +
- * a linked `.10x.tar`). Docker-first (the cloud image log10x/pipeline-10x),
+ * a linked `.10x.tar`). Docker-first (the cloud compiler image log10x/compiler-10x),
  * with a local CLOUD-flavor `tenx` binary as an opt-in fallback.
  *
  * Why a dedicated runner (not dev-cli's runners): the streaming apps
@@ -118,7 +118,7 @@ export class NotCloudFlavorError extends Error {
         `The local tenx at '${binary}' is the '${flavor}' flavor, but the Compiler app requires the Cloud flavor.`,
         '',
         'Two ways forward:',
-        '  1. Docker (recommended): set LOG10X_TENX_MODE=docker (or call this tool with mode="docker") to run the cloud image log10x/pipeline-10x.',
+        '  1. Docker (recommended): set LOG10X_TENX_MODE=docker (or call this tool with mode="docker") to run the cloud compiler image log10x/compiler-10x.',
         '  2. Install the Cloud flavor locally: https://doc.log10x.com/install/ ' +
           "(e.g. `brew install --cask log10x-cloud` on macOS, or the install script with `--flavor cloud`).",
       ].join('\n'),
@@ -130,7 +130,7 @@ export class NotCloudFlavorError extends Error {
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
-const DEFAULT_IMAGE = 'log10x/pipeline-10x:latest';
+const DEFAULT_IMAGE = 'log10x/compiler-10x:latest';
 /** The bundled @apps/compiler config's default inputPaths location inside the image. */
 const CONTAINER_SOURCES_PATH = '/etc/tenx/config/data/compile/sources';
 /** Where we mount the host output folder inside the container. */
@@ -162,7 +162,7 @@ async function resolveMode(modeOverride?: 'auto' | 'docker' | 'local'): Promise<
 
 async function runDockerCompile(cfg: CompileConfig): Promise<CompileRunResult> {
   await probeDocker();
-  const image = process.env.LOG10X_TENX_IMAGE || DEFAULT_IMAGE;
+  const image = process.env.LOG10X_COMPILER_IMAGE || process.env.LOG10X_TENX_IMAGE || DEFAULT_IMAGE;
   const args = buildDockerArgs(cfg, image, { linuxUser: linuxUserMapping() });
 
   const t0 = Date.now();
