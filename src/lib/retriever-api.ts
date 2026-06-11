@@ -204,11 +204,17 @@ export async function fetchExistingResults(
     }
   }
 
+  // Download the per-worker JSONL results concurrently (bounded pool) instead
+  // of one-at-a-time. Order-preserving + flattened, so the downstream sort +
+  // cap is byte-identical to the old serial loop — just faster when the query
+  // fanned out across many workers.
   const events: RetrieverEvent[] = [];
-  for (const key of jsonlKeys) {
-    const content = await s3Get(bucket, key);
-    events.push(...parseJsonl(content));
-  }
+  const eventChunks = await mapWithConcurrency(
+    jsonlKeys,
+    RETRIEVER_DOWNLOAD_CONCURRENCY,
+    async (key) => parseJsonl(await s3Get(bucket, key)),
+  );
+  for (const chunk of eventChunks) events.push(...chunk);
 
   events.sort((a, b) => eventTimestampMs(a) - eventTimestampMs(b));
 
@@ -905,6 +911,48 @@ async function s3Get(bucket: string, key: string): Promise<string> {
   return stdout;
 }
 
+/**
+ * Run `fn` over `items` with at most `concurrency` calls in flight, preserving
+ * input order in the returned array. The first rejection propagates and an
+ * abort flag stops idle workers from pulling new items — so one failed S3 read
+ * aborts the whole fetch (matching the old serial loop's throw-on-error
+ * semantics) instead of silently returning a partial result set.
+ *
+ * Why bounded (not Promise.all over everything): the Retriever fans out to
+ * dozens of stream workers, each writing its own JSONL. An unbounded fan-in
+ * would spawn an `aws s3 cp` subprocess per file simultaneously (each buffering
+ * up to 64 MB) and can trip S3 503 SlowDown on a hot prefix. A small pool
+ * captures the bandwidth win without the blowup.
+ */
+export async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  let aborted = false;
+  async function worker(): Promise<void> {
+    while (!aborted) {
+      const i = next++;
+      if (i >= items.length) return;
+      try {
+        results[i] = await fn(items[i], i);
+      } catch (e) {
+        aborted = true;
+        throw e;
+      }
+    }
+  }
+  const pool = Math.max(1, Math.min(concurrency, items.length));
+  await Promise.all(Array.from({ length: pool }, () => worker()));
+  return results;
+}
+
+/** Bounded concurrency for the per-worker S3 result downloads. */
+const RETRIEVER_DOWNLOAD_CONCURRENCY =
+  Number(process.env.LOG10X_RETRIEVER_DOWNLOAD_CONCURRENCY) || 8;
+
 function parseJsonl(content: string): RetrieverEvent[] {
   const events: RetrieverEvent[] = [];
   for (const line of content.split(/\r?\n/)) {
@@ -1292,11 +1340,17 @@ export async function runRetrieverQuery(
     }
   }
 
+  // Download the per-worker JSONL results concurrently (bounded pool) instead
+  // of one-at-a-time. Order-preserving + flattened, so the downstream sort +
+  // cap is byte-identical to the old serial loop — just faster when the query
+  // fanned out across many workers.
   const events: RetrieverEvent[] = [];
-  for (const key of jsonlKeys) {
-    const content = await s3Get(bucket, key);
-    events.push(...parseJsonl(content));
-  }
+  const eventChunks = await mapWithConcurrency(
+    jsonlKeys,
+    RETRIEVER_DOWNLOAD_CONCURRENCY,
+    async (key) => parseJsonl(await s3Get(bucket, key)),
+  );
+  for (const chunk of eventChunks) events.push(...chunk);
 
   events.sort((a, b) => eventTimestampMs(a) - eventTimestampMs(b));
 
@@ -1312,12 +1366,19 @@ export async function runRetrieverQuery(
     const summaryObjects = await s3List(bucket, summariesPrefix);
     summaries = [];
     const distinctSlices = new Set<string>();
-    for (const obj of summaryObjects) {
-      if (!obj.Key.endsWith('.jsonl')) continue;
-      const sliceSegment = parseSliceSegment(obj.Key, summariesPrefix);
-      if (!sliceSegment) continue;
+    // Download summary files concurrently too; order-preserving so the pushed
+    // summary order matches the old serial loop.
+    const summaryFiles = summaryObjects
+      .filter((obj) => obj.Key.endsWith('.jsonl'))
+      .map((obj) => ({ obj, seg: parseSliceSegment(obj.Key, summariesPrefix) }))
+      .filter((x): x is { obj: S3ListEntry; seg: NonNullable<typeof x.seg> } => x.seg !== null);
+    const summaryContents = await mapWithConcurrency(
+      summaryFiles,
+      RETRIEVER_DOWNLOAD_CONCURRENCY,
+      async ({ obj, seg }) => ({ seg, content: await s3Get(bucket, obj.Key) }),
+    );
+    for (const { seg: sliceSegment, content } of summaryContents) {
       distinctSlices.add(`${sliceSegment.fromMs}_${sliceSegment.toMs}`);
-      const content = await s3Get(bucket, obj.Key);
       for (const line of content.split(/\r?\n/)) {
         const trimmed = line.trim();
         if (!trimmed) continue;
