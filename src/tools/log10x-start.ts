@@ -412,19 +412,20 @@ function renderVerbatim(args: {
     })
     .join('\n');
 
-  const siemLine = args.siemDetected
-    ? `SIEM credentials detected: \`${args.siemDetected}\`.`
-    : 'No SIEM credentials detected — dependency_check will return paste-ready commands instead of executed scans.';
-  const lensLine = args.lens?.lensed && args.lens.display
-    ? `**Lens:** pricing presented for ${args.lens.display} (your stack); the connected pipeline's destination stays ${args.siemDetected ?? 'unknown'}. Volumes are real; per-action applicability for ${args.lens.display} is shown when you pick a cost mode.`
-    : null;
+  // Under a lens, the user's selected stack LEADS and the pipeline's actual
+  // destination is the parenthetical. Two separate lines (detected: X, then
+  // lens: Y) read as the product ignoring the user's selection.
+  const siemLine = args.lens?.lensed && args.lens.display
+    ? `Stack: ${args.lens.display} (selected) · pipeline destination: \`${args.siemDetected ?? 'unknown'}\`. Volumes are real; pricing follows ${args.lens.display} list rates.`
+    : args.siemDetected
+      ? `SIEM credentials detected: \`${args.siemDetected}\`.`
+      : 'No SIEM credentials detected — dependency_check will return paste-ready commands instead of executed scans.';
 
   return [
     `### Log10x orientation`,
     ``,
     `**Tier:** ${tierLine}`,
     `**${siemLine}**`,
-    ...(lensLine ? [``, lensLine] : []),
     ``,
     `**Journey:**`,
     phaseLines,
