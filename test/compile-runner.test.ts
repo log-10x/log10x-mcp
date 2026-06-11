@@ -9,6 +9,7 @@ import {
   buildDockerArgs,
   buildLocalIncludePaths,
   renderScannersOverlay,
+  renderGithubPullOverlay,
   compileEnvVars,
   scanSymbolOutputs,
   type CompileConfig,
@@ -87,6 +88,43 @@ test('buildDockerArgs passes TENX_LICENSE_KEY only when set', () => {
   assert.ok(!withoutLicense.some((a) => a.startsWith('TENX_LICENSE_KEY=')));
 });
 
+test('buildDockerArgs mounts pull-config overlays read-only over their baked paths', () => {
+  const args = buildDockerArgs(fixtureConfig(), 'img', {
+    configMounts: [
+      {
+        hostPath: '/tmp/ov/github-config.yaml',
+        containerPath: '/etc/tenx/config/pipelines/compile/pull/github/config.yaml',
+      },
+    ],
+  });
+  assert.ok(
+    args.includes(
+      '/tmp/ov/github-config.yaml:/etc/tenx/config/pipelines/compile/pull/github/config.yaml:ro',
+    ),
+  );
+});
+
+test('buildDockerArgs passes GH_TOKEN as a bare -e pass-through (never the value in argv)', () => {
+  const cfg = fixtureConfig({
+    inputs: [{ kind: 'github', repos: ['apache/commons-cli'] }],
+    credentials: { githubToken: 'ghp_secret' },
+  });
+  const args = buildDockerArgs(cfg, 'img');
+  const tokenFlagIdx = args.indexOf('GH_TOKEN');
+  assert.ok(tokenFlagIdx > 0 && args[tokenFlagIdx - 1] === '-e', 'bare -e GH_TOKEN expected');
+  assert.ok(!args.some((a) => a.includes('ghp_secret')), 'token value must not appear in argv');
+  const withoutToken = buildDockerArgs(fixtureConfig(), 'img');
+  assert.ok(!withoutToken.includes('GH_TOKEN'));
+});
+
+test('buildDockerArgs mounts no source dir for a github-only compile', () => {
+  const cfg = fixtureConfig({ inputs: [{ kind: 'github', repos: ['apache/commons-cli'] }] });
+  const args = buildDockerArgs(cfg, 'img');
+  assert.ok(!args.some((a) => a.endsWith('/etc/tenx/config/data/compile/sources:ro')));
+  // Output mount is always present.
+  assert.ok(args.some((a) => a.endsWith(':/work/symbols')));
+});
+
 // ── compileEnvVars ───────────────────────────────────────────────────────
 
 test('compileEnvVars builds the TENX_* env hooks the bundled compiler config reads', () => {
@@ -121,6 +159,38 @@ test('renderScannersOverlay single-quotes paths and escapes embedded quotes (Win
   assert.match(escaped, /- '\/weird\/o''brien'/);
 });
 
+// ── renderGithubPullOverlay ──────────────────────────────────────────────
+
+test('renderGithubPullOverlay lists repos and keeps the token as an env reference', () => {
+  const yaml = renderGithubPullOverlay({
+    kind: 'github',
+    repos: ['apache/commons-cli', 'log-10x/engine'],
+  });
+  assert.match(yaml, /^tenx: compile$/m);
+  assert.match(yaml, /^githubPull:$/m);
+  // The secret never lands in the rendered file — only the env hook.
+  assert.match(yaml, /- token: \$=TenXEnv\.get\("GH_TOKEN"\)/);
+  assert.match(yaml, /- 'apache\/commons-cli'/);
+  assert.match(yaml, /- 'log-10x\/engine'/);
+  assert.match(yaml, /^ {4}branch: null$/m);
+  assert.match(yaml, /^ {4}folders: \[\]$/m);
+});
+
+test('renderGithubPullOverlay renders branch and folders when given, single-quoted', () => {
+  const yaml = renderGithubPullOverlay({
+    kind: 'github',
+    repos: ["weird/o'brien"],
+    branch: 'release-1.x',
+    folders: ['src/main/java', 'src/gen'],
+  });
+  assert.match(yaml, /branch: 'release-1\.x'/);
+  assert.match(yaml, /^ {4}folders:$/m);
+  assert.match(yaml, /- 'src\/main\/java'/);
+  assert.match(yaml, /- 'src\/gen'/);
+  // Embedded single quotes are YAML-escaped by doubling.
+  assert.match(yaml, /- 'weird\/o''brien'/);
+});
+
 // ── buildLocalIncludePaths ───────────────────────────────────────────────
 
 test('buildLocalIncludePaths puts the overlay dir first so it shadows the shipped scanners config', () => {
@@ -147,6 +217,7 @@ test('scanSymbolOutputs counts .10x.json units and collects .10x.tar libraries w
 
     const out = await scanSymbolOutputs(dir);
     assert.equal(out.unitCount, 2);
+    assert.equal(out.emptyUnitCount, 0);
     assert.equal(out.libraries.length, 1);
     assert.ok(out.libraries[0].path.endsWith('mylib.10x.tar'));
     assert.equal(out.libraries[0].bytes, Buffer.byteLength('TARDATA'));
@@ -155,7 +226,21 @@ test('scanSymbolOutputs counts .10x.json units and collects .10x.tar libraries w
   }
 });
 
+test('scanSymbolOutputs reports zero-byte units as empty, not as symbols (the green-but-empty trap)', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'log10x-compile-scan-empty-'));
+  try {
+    await fs.writeFile(path.join(dir, 'real.go.10x.json'), '{"symbols":[1]}');
+    await fs.writeFile(path.join(dir, 'hollow.go.10x.json'), '');
+
+    const out = await scanSymbolOutputs(dir);
+    assert.equal(out.unitCount, 1);
+    assert.equal(out.emptyUnitCount, 1);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('scanSymbolOutputs returns zeros for a missing directory (a no-symbol compile is no_signal, not an error)', async () => {
   const out = await scanSymbolOutputs(path.join(os.tmpdir(), 'log10x-compile-does-not-exist-' + process.pid));
-  assert.deepEqual(out, { unitCount: 0, libraries: [] });
+  assert.deepEqual(out, { unitCount: 0, emptyUnitCount: 0, libraries: [] });
 });

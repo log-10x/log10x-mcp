@@ -13,18 +13,28 @@
  * single-sourced, but the compile invocation, mounts, and output handling
  * live here.
  *
- * Extensibility (v1 is local-source / local-artifacts only):
+ * Extensibility:
  *   The `CompileConfig` descriptor + the two per-mode appliers
- *   (`runDockerCompile` / `runLocalCompile`) are the seam for the deferred
- *   axes. Each future axis — GitHub/Helm/Docker-image PULL, GitHub PUSH,
- *   scan/link tuning — adds an optional field on `CompileConfig` plus a
- *   small renderer that emits one of four injection primitives:
- *     1. env vars            (e.g. TENX_OUTPUT_SYMBOL_*),
- *     2. file replacements   (shadow configs, e.g. the inputPaths overlay),
+ *   (`runDockerCompile` / `runLocalCompile`) are the seam for source axes.
+ *   Each axis — GitHub pull (implemented), Helm / Docker-image pull, GitHub
+ *   PUSH, scan/link tuning — adds an optional field on `CompileConfig` plus
+ *   a small renderer that emits one of four injection primitives:
+ *     1. env vars            (e.g. TENX_OUTPUT_SYMBOL_*, GH_TOKEN),
+ *     2. file replacements   (shadow configs: the inputPaths overlay local-
+ *                             side, the pull/<source>/config.yaml overlays),
  *     3. @overlay launch args(the engine's native config layering),
  *     4. mounts              (docker only).
  *   Mode selection, the cloud-flavor gate, process exec, and output
  *   scanning are written once and don't change as axes are added.
+ *
+ * GitHub pull: the engine's github scanner uses the GitHub REST API (no git
+ * binary involved), configured by `pull/github/config.yaml`. We replace that
+ * file wholesale — bind-mount over it in docker mode, shadow it via
+ * TENX_INCLUDE_PATHS in local mode — listing the requested repos/branch/
+ * folders. The token stays an `$=TenXEnv.get("GH_TOKEN")` reference in the
+ * rendered YAML (never written to disk); the value travels as process env.
+ * The engine hard-refuses an empty token ("empty GitHub API token"), even
+ * for public repos, so callers must gate on a token being present.
  *
  * The cloud-flavor gate: the compiler is absent from the Edge (native /
  * JIT) flavor — its scanners (ANTLR, bytecode, archive, executable) and
@@ -48,22 +58,34 @@ import {
 
 // ── Config descriptor (the extension seam) ─────────────────────────────────
 
-/** A local source folder on disk to scan. v1's only input kind. */
+/** A local source folder on disk to scan. */
 export interface CompileLocalInput {
   kind: 'local';
   /** Absolute host path to the folder of source code / binaries. */
   path: string;
 }
 
+/** GitHub repositories to pull (REST API) and scan. */
+export interface CompileGithubInput {
+  kind: 'github';
+  /** Repositories as `owner/repo` (e.g. `apache/commons-cli`). */
+  repos: string[];
+  /** Branch to pull for ALL repos; omit for each repo's default branch. */
+  branch?: string;
+  /** Folders within each repo to pull; omit for the entire repo. */
+  folders?: string[];
+}
+
 /**
- * Where the compiler reads sources from. v1: exactly one local folder.
- * Future kinds (github / helm / dockerImage) slot in here as a union; the
- * appliers branch on `kind` and emit the matching pull config.
+ * Where the compiler reads sources from. Local folder and GitHub pull are
+ * implemented; future kinds (helm / dockerImage / artifactory) slot in here
+ * as union members — the appliers branch on `kind` and emit the matching
+ * pull-config overlay.
  */
-export type CompileInput = CompileLocalInput;
+export type CompileInput = CompileLocalInput | CompileGithubInput;
 
 export interface CompileConfig {
-  /** Inputs to scan. v1 carries a single CompileLocalInput. */
+  /** Inputs to scan — any mix of local folders and GitHub pulls. */
   inputs: CompileInput[];
   /** Output artifact locations (host paths). */
   output: {
@@ -76,6 +98,16 @@ export interface CompileConfig {
   };
   /** TENX_LICENSE_KEY to pass through. Omit to use the image's built-in limited license. */
   license?: string;
+  /**
+   * Credentials the active pull sources need. Values travel as process env
+   * (docker: bare `-e` pass-through; local: child env) — never argv, never
+   * disk. githubToken is REQUIRED when a github input is present (the engine
+   * refuses an empty token, even for public repos).
+   */
+  credentials?: {
+    /** GitHub access token, surfaced to the engine as GH_TOKEN. */
+    githubToken?: string;
+  };
   /** Hard cap on compile wall time in ms. */
   timeoutMs: number;
 }
@@ -97,7 +129,10 @@ export interface CompileRunResult {
   stderr: string;
   output: {
     folder: string;
+    /** Symbol units with actual content (zero-byte units are excluded). */
     unitCount: number;
+    /** Units the scanners emitted EMPTY — every symbol was filtered out. */
+    emptyUnitCount: number;
     libraries: Array<{ path: string; bytes: number }>;
   };
   runtimeName: string;
@@ -122,7 +157,7 @@ export class NotCloudFlavorError extends Error {
         '  2. Install the Cloud flavor locally: https://doc.log10x.com/install/ ' +
           "(e.g. `brew install --cask log10x-cloud` on macOS, or the install script with `--flavor cloud`).",
         '',
-        'Note: a local install provides only the compiler engine. Local-folder compilation works with it, but full capabilities — pulling source from GitHub / Helm / Docker registries — also need git, docker, and helm on the host. The docker compiler-10x image (option 1) bundles all of these.',
+        'Note: with a local cloud install, local-folder compilation and GitHub pull (REST API + token) work out of the box; Helm-chart pull additionally needs `helm` on the host, and Docker-image pull needs a container engine (podman or docker). The docker compiler-10x image (option 1) bundles all of these — podman included, daemonless.',
       ].join('\n'),
     );
     this.name = 'NotCloudFlavorError';
@@ -137,6 +172,10 @@ const DEFAULT_IMAGE = 'log10x/compiler-10x:latest';
 const CONTAINER_SOURCES_PATH = '/etc/tenx/config/data/compile/sources';
 /** Where we mount the host output folder inside the container. */
 const CONTAINER_OUTPUT_PATH = '/work/symbols';
+/** The baked github pull config our rendered overlay replaces (docker mode). */
+const CONTAINER_GITHUB_PULL_CONFIG = '/etc/tenx/config/pipelines/compile/pull/github/config.yaml';
+/** The github pull config's path relative to a TENX_INCLUDE_PATHS root (local mode). */
+const GITHUB_PULL_CONFIG_REL = ['compile', 'pull', 'github', 'config.yaml'];
 
 // ── Public entrypoint ──────────────────────────────────────────────────────
 
@@ -165,46 +204,79 @@ async function resolveMode(modeOverride?: 'auto' | 'docker' | 'local'): Promise<
 async function runDockerCompile(cfg: CompileConfig): Promise<CompileRunResult> {
   await probeDocker();
   const image = process.env.LOG10X_COMPILER_IMAGE || process.env.LOG10X_TENX_IMAGE || DEFAULT_IMAGE;
-  const args = buildDockerArgs(cfg, image, { linuxUser: linuxUserMapping() });
 
-  const t0 = Date.now();
-  const r = await execCapture('docker', args, { timeoutMs: cfg.timeoutMs });
-  const wallTimeMs = Date.now() - t0;
+  // Pull-config overlays are written to a host temp dir and bind-mounted
+  // OVER the corresponding baked config file (wholesale replacement — the
+  // engine reads one config.yaml per pull source).
+  const githubInput = cfg.inputs.find((i): i is CompileGithubInput => i.kind === 'github');
+  const configMounts: Array<{ hostPath: string; containerPath: string }> = [];
+  let overlayDir: string | undefined;
+  try {
+    if (githubInput) {
+      overlayDir = await mkdtemp(join(tmpdir(), 'log10x-mcp-compile-pull-'));
+      const hostPath = join(overlayDir, 'github-config.yaml');
+      await writeFile(hostPath, renderGithubPullOverlay(githubInput), 'utf8');
+      configMounts.push({ hostPath, containerPath: CONTAINER_GITHUB_PULL_CONFIG });
+    }
 
-  const scanned = await scanSymbolOutputs(cfg.output.folder);
-  return {
-    mode: 'docker',
-    image,
-    // The cloud image is cloud-flavor by contract — we don't pay a second
-    // container start to probe it. A non-cloud LOG10X_TENX_IMAGE override is
-    // the operator's responsibility; @apps/compiler will fail loudly there.
-    flavor: undefined,
-    flavorVerified: false,
-    exitCode: r.exitCode,
-    timedOut: r.timedOut,
-    wallTimeMs,
-    stdout: r.stdout,
-    stderr: r.stderr,
-    output: { folder: cfg.output.folder, ...scanned },
-    runtimeName: cfg.output.runtimeName,
-  };
+    const args = buildDockerArgs(cfg, image, { linuxUser: linuxUserMapping(), configMounts });
+
+    // Credentials ride the docker client's own env via bare `-e GH_TOKEN`
+    // pass-through (buildDockerArgs) so the secret never appears in argv.
+    const env: NodeJS.ProcessEnv | undefined = cfg.credentials?.githubToken
+      ? { ...process.env, GH_TOKEN: cfg.credentials.githubToken }
+      : undefined;
+
+    const t0 = Date.now();
+    const r = await execCapture('docker', args, { env, timeoutMs: cfg.timeoutMs });
+    const wallTimeMs = Date.now() - t0;
+
+    const scanned = await scanSymbolOutputs(cfg.output.folder);
+    return {
+      mode: 'docker',
+      image,
+      // The cloud image is cloud-flavor by contract — we don't pay a second
+      // container start to probe it. A non-cloud LOG10X_TENX_IMAGE override is
+      // the operator's responsibility; @apps/compiler will fail loudly there.
+      flavor: undefined,
+      flavorVerified: false,
+      exitCode: r.exitCode,
+      timedOut: r.timedOut,
+      wallTimeMs,
+      stdout: r.stdout,
+      stderr: r.stderr,
+      output: { folder: cfg.output.folder, ...scanned },
+      runtimeName: cfg.output.runtimeName,
+    };
+  } finally {
+    if (overlayDir) await rm(overlayDir, { recursive: true, force: true }).catch(() => {});
+  }
 }
 
 /**
- * Build the `docker run` argv. v1 realizes a local input by bind-mounting
+ * Build the `docker run` argv. A local input is realized by bind-mounting
  * it at the image's DEFAULT sources path, so the bundled `inputPaths:
  * path("data/compile/sources")` picks it up with no CLI/overlay override —
  * sidestepping the `OverwrittenOptionException` that a CLI `inputPaths`
- * would trigger (the scan unit is `allowMultiple: false`). Outputs are
- * driven entirely by env vars the bundled scan/link configs already read
- * via `TenXEnv.get`, pointed at a single mounted `/work/symbols`.
+ * would trigger (the scan unit is `allowMultiple: false`). Pull sources are
+ * realized as `configMounts`: rendered pull configs bind-mounted (read-only)
+ * over their baked counterparts. Outputs are driven entirely by env vars the
+ * bundled scan/link configs already read via `TenXEnv.get`, pointed at a
+ * single mounted `/work/symbols`.
+ *
+ * The GitHub token is passed as a BARE `-e GH_TOKEN` (docker's env
+ * pass-through) so the secret rides the spawned client's environment, not
+ * the argv — argv is visible in process listings.
  *
  * Pure (no I/O) so it is unit-testable.
  */
 export function buildDockerArgs(
   cfg: CompileConfig,
   image: string,
-  opts: { linuxUser?: string } = {},
+  opts: {
+    linuxUser?: string;
+    configMounts?: Array<{ hostPath: string; containerPath: string }>;
+  } = {},
 ): string[] {
   const args = ['run', '--rm'];
   if (opts.linuxUser) args.push('--user', opts.linuxUser);
@@ -213,6 +285,9 @@ export function buildDockerArgs(
     if (input.kind === 'local') {
       args.push('-v', `${input.path}:${CONTAINER_SOURCES_PATH}:ro`);
     }
+  }
+  for (const m of opts.configMounts ?? []) {
+    args.push('-v', `${m.hostPath}:${m.containerPath}:ro`);
   }
   args.push('-v', `${cfg.output.folder}:${CONTAINER_OUTPUT_PATH}`);
 
@@ -223,6 +298,7 @@ export function buildDockerArgs(
     license: cfg.license,
   });
   for (const [k, v] of Object.entries(env)) args.push('-e', `${k}=${v}`);
+  if (cfg.credentials?.githubToken) args.push('-e', 'GH_TOKEN');
 
   args.push(image, '@apps/compiler');
   return args;
@@ -270,16 +346,38 @@ async function runLocalCompile(cfg: CompileConfig): Promise<CompileRunResult> {
     throw new NotCloudFlavorError(binary, flavor);
   }
 
-  // Local mode can't bind-mount, so override inputPaths via a shadow of
-  // `compile/scanners/config.yaml` placed FIRST on TENX_INCLUDE_PATHS — the
-  // same first-match-wins shadow trick dev-cli uses for run/template. Outputs
-  // ride the same TENX_OUTPUT_SYMBOL_* env hooks the bundled config reads.
+  // Local mode can't bind-mount, so config injection rides a temp overlay
+  // dir placed FIRST on TENX_INCLUDE_PATHS (first-match-wins shadowing — the
+  // same trick dev-cli uses for run/template): a shadow of
+  // `compile/scanners/config.yaml` overrides inputPaths for local sources
+  // (written only when local sources exist — a pull-only compile keeps the
+  // bundled default), and a shadow of `compile/pull/github/config.yaml`
+  // configures the GitHub pull. Outputs ride the same TENX_OUTPUT_SYMBOL_*
+  // env hooks the bundled config reads.
   const overlayDir = await mkdtemp(join(tmpdir(), 'log10x-mcp-compile-cfg-'));
   try {
-    const scannersPath = join(overlayDir, 'compile', 'scanners', 'config.yaml');
-    await mkdir(join(overlayDir, 'compile', 'scanners'), { recursive: true });
-    const sourcePaths = cfg.inputs.filter((i) => i.kind === 'local').map((i) => i.path);
-    await writeFile(scannersPath, renderScannersOverlay(sourcePaths), 'utf8');
+    const sourcePaths = cfg.inputs
+      .filter((i): i is CompileLocalInput => i.kind === 'local')
+      .map((i) => i.path);
+    if (sourcePaths.length > 0) {
+      await mkdir(join(overlayDir, 'compile', 'scanners'), { recursive: true });
+      await writeFile(
+        join(overlayDir, 'compile', 'scanners', 'config.yaml'),
+        renderScannersOverlay(sourcePaths),
+        'utf8',
+      );
+    }
+
+    const githubInput = cfg.inputs.find((i): i is CompileGithubInput => i.kind === 'github');
+    if (githubInput) {
+      const githubDir = join(overlayDir, ...GITHUB_PULL_CONFIG_REL.slice(0, -1));
+      await mkdir(githubDir, { recursive: true });
+      await writeFile(
+        join(overlayDir, ...GITHUB_PULL_CONFIG_REL),
+        renderGithubPullOverlay(githubInput),
+        'utf8',
+      );
+    }
 
     const env: NodeJS.ProcessEnv = {
       ...process.env,
@@ -291,6 +389,7 @@ async function runLocalCompile(cfg: CompileConfig): Promise<CompileRunResult> {
         license: cfg.license,
       }),
     };
+    if (cfg.credentials?.githubToken) env.GH_TOKEN = cfg.credentials.githubToken;
 
     const t0 = Date.now();
     const r = await execCapture(binary, ['@apps/compiler'], { env, timeoutMs: cfg.timeoutMs });
@@ -333,6 +432,35 @@ export function renderScannersOverlay(sourcePaths: string[]): string {
     'outputSymbolFolder: $=TenXEnv.get("TENX_OUTPUT_SYMBOL_FOLDER", path("data/shared/symbols", "<tenx.io.tmpdir>"))',
     '',
   );
+  return lines.join('\n');
+}
+
+/**
+ * Render the github pull config that replaces the baked
+ * `compile/pull/github/config.yaml` wholesale. The token field stays an
+ * `$=TenXEnv.get("GH_TOKEN")` env reference — the secret value travels as
+ * process env, never onto disk. Repos/branch/folders are single-quoted so
+ * they can't be parsed as `$=` expressions.
+ *
+ * Pure (no I/O) so it is unit-testable.
+ */
+export function renderGithubPullOverlay(input: CompileGithubInput): string {
+  const q = (s: string) => `'${s.replace(/'/g, "''")}'`;
+  const lines = [
+    'tenx: compile',
+    'githubPull:',
+    '  - token: $=TenXEnv.get("GH_TOKEN")',
+    '    repos:',
+  ];
+  for (const r of input.repos) lines.push(`      - ${q(r)}`);
+  lines.push(`    branch: ${input.branch ? q(input.branch) : 'null'}`);
+  if (input.folders && input.folders.length > 0) {
+    lines.push('    folders:');
+    for (const f of input.folders) lines.push(`      - ${q(f)}`);
+  } else {
+    lines.push('    folders: []');
+  }
+  lines.push('');
   return lines.join('\n');
 }
 
@@ -426,24 +554,41 @@ export function compileEnvVars(p: {
 
 /**
  * Walk the output folder for the artifacts the compiler produced: `.10x.json`
- * symbol units (counted) and `.10x.tar` libraries (path + byte size). Tolerant
- * of a missing/empty dir (returns zeros), since a compile that produced
- * nothing is a valid `no_signal` outcome, not an error.
+ * symbol units and `.10x.tar` libraries (path + byte size). Tolerant of a
+ * missing/empty dir (returns zeros), since a compile that produced nothing is
+ * a valid `no_signal` outcome, not an error.
+ *
+ * Zero-byte units are counted separately (`emptyUnitCount`), NOT as units:
+ * the scanners write an empty `.10x.json` when every symbol in a file was
+ * filtered out (e.g. only method/package tokens, which the default
+ * `symbol.types` drops) — counting those as success is the "green but empty"
+ * trap.
  */
 export async function scanSymbolOutputs(
   dir: string,
-): Promise<{ unitCount: number; libraries: Array<{ path: string; bytes: number }> }> {
+): Promise<{
+  unitCount: number;
+  emptyUnitCount: number;
+  libraries: Array<{ path: string; bytes: number }>;
+}> {
   let entries: string[];
   try {
     entries = await readdir(dir, { recursive: true });
   } catch {
-    return { unitCount: 0, libraries: [] };
+    return { unitCount: 0, emptyUnitCount: 0, libraries: [] };
   }
   let unitCount = 0;
+  let emptyUnitCount = 0;
   const libraries: Array<{ path: string; bytes: number }> = [];
   for (const rel of entries) {
     if (rel.endsWith('.10x.json')) {
-      unitCount++;
+      try {
+        const st = await stat(join(dir, rel));
+        if (st.size > 0) unitCount++;
+        else emptyUnitCount++;
+      } catch {
+        // race / vanished file — skip
+      }
     } else if (rel.endsWith('.10x.tar')) {
       const full = join(dir, rel);
       try {
@@ -454,7 +599,7 @@ export async function scanSymbolOutputs(
       }
     }
   }
-  return { unitCount, libraries };
+  return { unitCount, emptyUnitCount, libraries };
 }
 
 // ── Process exec ───────────────────────────────────────────────────────────
