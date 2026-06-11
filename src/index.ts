@@ -324,7 +324,7 @@ async function wrap(
   // all tools in `tools/list` (client-side tool-search ranks them per
   // query, so cognitive surface is not the concern); the gate just
   // ensures wrong-mode calls produce a useful response.
-  if (bootMode && !shouldRegisterTool(toolName, bootMode.mode)) {
+  if (bootMode && !shouldRegisterTool(toolName, bootMode.mode, { demoFallback: bootMode.demoFallback })) {
     log.info(`tool.${toolName}.wrong_mode`, { mode: bootMode.mode });
     return {
       content: [
@@ -1017,7 +1017,7 @@ function applyToolRegistrations(
   // ignore it. Pair with `structuredContent` on every result in wrap().
   const envelopeOutputSchema = StructuredOutputSchema.shape;
   for (const t of pendingTools) {
-    const allowed = mode ? shouldRegisterTool(t.name, mode) : true;
+    const allowed = mode ? shouldRegisterTool(t.name, mode, { demoFallback: bootMode?.demoFallback }) : true;
     if (!allowed) {
       skipped.push(t.name);
       continue;
@@ -2165,7 +2165,7 @@ async function main() {
   // in MCP-client logs without needing to call `log10x_doctor`.
   if (bootMode) {
     // eslint-disable-next-line no-console
-    console.error(`[log10x-mcp] ${formatModeResolution(bootMode).split('\n')[0]}`);
+    console.error(`[log10x-mcp] ${formatModeResolution(bootMode).split('\n').slice(0, 2).join(' — ')}`);
   }
 
   // Transport selection. LOG10X_MCP_HTTP_PORT → remote Streamable HTTP (the

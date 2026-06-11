@@ -26,6 +26,7 @@
 
 import { z } from 'zod';
 import { resolveSiemLens, SIEM_LENS_ENUM, type SiemLensResolution } from '../lib/siem/lens.js';
+import { isDemoFallbackActive } from '../lib/demo-env.js';
 import { queryInstant } from '../lib/api.js';
 import { resolveRetriever } from '../lib/retriever-api.js';
 import { discoverAvailable } from '../lib/siem/index.js';
@@ -421,11 +422,16 @@ function renderVerbatim(args: {
       ? `SIEM credentials detected: \`${args.siemDetected}\`.`
       : 'No SIEM credentials detected — dependency_check will return paste-ready commands instead of executed scans.';
 
+  const demoLine = isDemoFallbackActive()
+    ? `_Demo dataset (read-only) — the public 10x pipeline, same data as the website console. Sign in to connect your own environment._`
+    : null;
+
   return [
     `### Log10x orientation`,
     ``,
     `**Tier:** ${tierLine}`,
     `**${siemLine}**`,
+    ...(demoLine ? [demoLine] : []),
     ``,
     `**Journey:**`,
     phaseLines,

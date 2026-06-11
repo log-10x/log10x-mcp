@@ -31,6 +31,7 @@
 
 import type { CustomerMetricsBackend } from './customer-metrics.js';
 import { resolveBackend, formatDetectionTrace } from './customer-metrics.js';
+import { applyDemoEnv, DEMO_ENV, DEMO_FALLBACK_DENYLIST } from './demo-env.js';
 
 export type Mode = 'analysis' | 'analysis_pending' | 'poc';
 
@@ -46,6 +47,12 @@ export interface ModeResolution {
   reason: string;
   /** Wall-clock duration of the probe in milliseconds. */
   probeDurationMs: number;
+  /**
+   * True when no backend/key was configured and the server attached
+   * read-only to the public demo dataset instead of falling to POC mode.
+   * Mutating tools are denylisted while this is set.
+   */
+  demoFallback?: boolean;
 }
 
 const DEFAULT_PROBE_TIMEOUT_MS = 5000;
@@ -106,6 +113,45 @@ export async function detectMode(opts?: {
   }
 
   if (!resolution.backend) {
+    // Keyless first-run: attach read-only to the public demo dataset so the
+    // first experience is the real orientation on real data, not an empty
+    // POC shell. LOG10X_DEMO_FALLBACK=off opts out (pure POC mode).
+    // "Keyless" includes the case where the env layer's own demo fallback
+    // already injected the PUBLIC demo key as a side effect (environments.ts
+    // sets LOG10X_API_KEY for its secret-guard) — that is not user config.
+    const k = process.env.LOG10X_API_KEY;
+    const keyless = !k || k === DEMO_ENV.apiKey;
+    const fallbackEnabled = process.env.LOG10X_DEMO_FALLBACK !== 'off';
+    if (keyless && fallbackEnabled) {
+      // eslint-disable-next-line no-console
+      console.error('[log10x-mcp] keyless boot: attaching to the public demo dataset (read-only)');
+      applyDemoEnv();
+      let demoResolution;
+      try {
+        demoResolution = await resolveBackend();
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.error(`[log10x-mcp] demo fallback backend resolution threw: ${(e as Error).message}`);
+        demoResolution = undefined;
+      }
+      if (demoResolution?.backend) {
+        const demoProbe = await probeTenxSeriesCount(demoResolution.backend, probeTimeoutMs);
+        const seriesCount = demoProbe.outcome === 'ok' ? demoProbe.seriesCount : -1;
+        return {
+          mode: seriesCount === 0 ? 'analysis_pending' : 'analysis',
+          backend: demoResolution.backend,
+          detectionPath: demoResolution.detectionPath,
+          trace: [...resolution.trace, ...demoResolution.trace],
+          reason:
+            'No API key or metrics backend configured; attached READ-ONLY to the public 10x demo dataset ' +
+            '(same data as the website console). Mutating tools are disabled. ' +
+            'Sign in (log10x_signin_start) or set LOG10X_API_KEY to connect your own environment; ' +
+            'set LOG10X_DEMO_FALLBACK=off to boot in POC mode instead.',
+          probeDurationMs: Date.now() - startedAt,
+          demoFallback: true,
+        };
+      }
+    }
     return {
       mode: 'poc',
       trace: resolution.trace,
@@ -285,7 +331,14 @@ export const TOOL_MODES: Record<string, ('analysis' | 'analysis_pending' | 'poc'
 /**
  * Should this tool register in the given mode?
  */
-export function shouldRegisterTool(toolName: string, mode: Mode): boolean {
+export function shouldRegisterTool(
+  toolName: string,
+  mode: Mode,
+  opts?: { demoFallback?: boolean }
+): boolean {
+  // Shared public demo account: never register mutators (UX guardrail; the
+  // read credentials are public regardless).
+  if (opts?.demoFallback && DEMO_FALLBACK_DENYLIST.has(toolName)) return false;
   const modes = TOOL_MODES[toolName];
   if (!modes) {
     // Unknown tool: register defensively in analysis mode, skip in others.
