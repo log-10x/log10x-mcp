@@ -263,6 +263,27 @@ export async function runDoctorChecks(envNickname?: string): Promise<DoctorRepor
 }
 
 /** Checks that apply independent of a specific environment. */
+/**
+ * True when a URL's host is only routable inside a Kubernetes cluster
+ * (the shape the helm_release_probe Retriever fallback emits). Used to
+ * distinguish "resolved an endpoint" from "resolved a REACHABLE endpoint".
+ */
+export function isClusterInternalUrl(url: string): boolean {
+  let host: string;
+  try {
+    host = new URL(url).hostname;
+  } catch {
+    return false;
+  }
+  return (
+    host.endsWith('.svc.cluster.local') ||
+    host.endsWith('.svc') ||
+    host.endsWith('.cluster.local') ||
+    host.endsWith('.local') ||
+    host.endsWith('.internal')
+  );
+}
+
 async function addInfrastructureChecks(checks: DoctorCheck[]): Promise<void> {
   // Env-config resolution probe. Walks the StoreKind discovery order (K8s
   // ConfigMap → AWS SSM → GCP Secret Manager → Azure App Config → local file)
@@ -282,13 +303,39 @@ async function addInfrastructureChecks(checks: DoctorCheck[]): Promise<void> {
     trace: [{ path: 'explicit_env' as const, status: 'failed' as const, reason: (e as Error).message }],
   }));
   if (retrieverRes.url && retrieverRes.bucket && retrieverRes.detectionPath) {
-    checks.push({
-      name: 'retriever_endpoint',
-      status: 'pass',
-      message:
-        `Retriever resolved via ${retrieverRes.detectionPath}: url=${retrieverRes.url}, bucket=${retrieverRes.bucket}. ` +
-        'log10x_retriever_query and log10x_backfill_metric will route here.',
-    });
+    // "Resolved a URL" is NOT the same as "reachable from this MCP host". The
+    // helm_release_probe fallback returns the in-cluster Service DNS name
+    // (e.g. *.svc.cluster.local), which only resolves INSIDE the Kubernetes
+    // cluster. If this MCP runs outside the cluster (no KUBERNETES_SERVICE_HOST)
+    // and no SQS query queue is registered as a fallback, retriever_query will
+    // fail with a connection error even though doctor "resolved" an endpoint —
+    // which is exactly how a fully-deployed Retriever reads as a false PASS.
+    const inCluster = !!process.env.KUBERNETES_SERVICE_HOST;
+    const sqsQueueConfigured = !!process.env.LOG10X_RETRIEVER_QUERY_QUEUE_URL;
+    const clusterInternal = isClusterInternalUrl(retrieverRes.url);
+    if (clusterInternal && !inCluster && !sqsQueueConfigured) {
+      checks.push({
+        name: 'retriever_endpoint',
+        status: 'warn',
+        message:
+          `Retriever resolved to a CLUSTER-INTERNAL address via ${retrieverRes.detectionPath}: url=${retrieverRes.url}. ` +
+          'That hostname only resolves inside the Kubernetes cluster, and this MCP host is outside it (no KUBERNETES_SERVICE_HOST). ' +
+          'With no SQS query queue registered as a fallback, log10x_retriever_query and log10x_backfill_metric will fail with a connection error — the Retriever may be fully deployed, but its query path is unreachable from here. ' +
+          'The S3 overflow bucket itself is fine; only the query SERVICE is unreachable.',
+        fix:
+          'Register the deployed Retriever so the MCP routes via SQS (not the in-cluster HTTP URL): run log10x_retriever_register with the HTTP ingress URL + the 4 SQS queue URLs, or set LOG10X_RETRIEVER_QUERY_QUEUE_URL to the Quarkus query queue. Find the coordinates via log10x_advise_retriever (its preflight lists the live SQS queue URLs). Or run this MCP inside the cluster.',
+      });
+    } else {
+      checks.push({
+        name: 'retriever_endpoint',
+        status: 'pass',
+        message:
+          `Retriever resolved via ${retrieverRes.detectionPath}: url=${retrieverRes.url}, bucket=${retrieverRes.bucket}` +
+          (clusterInternal && sqsQueueConfigured ? ' (HTTP url is cluster-internal; queries route via the registered SQS queue)' : '') +
+          `${inCluster ? ' (MCP runs in-cluster)' : ''}. ` +
+          'log10x_retriever_query and log10x_backfill_metric will route here.',
+      });
+    }
   } else {
     checks.push({
       name: 'retriever_endpoint',
