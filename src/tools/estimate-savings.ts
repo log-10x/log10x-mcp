@@ -447,6 +447,8 @@ export interface VerifyResult {
    */
   per_pattern_breakdown?: Array<{
     pattern_hash: string;
+    /** Human pattern name (TSDB pattern label); falls back to the hash. */
+    pattern: string;
     action: Action;
     delivered_bytes: number;
     /**
@@ -591,8 +593,9 @@ function extractHashContainerMap(
  *   3. Legacy cap-CSV `legacy_action_suffix` on the container-default row — backward compat
  *   4. Unattributed — no intent record and no legacy suffix
  */
-function computeActionSplit(args: {
+export function computeActionSplit(args: {
   postDroppedByHash: Record<string, number>;
+  hashToPattern?: Map<string, string>;
   capCsvContent?: string | null;
   actionIntentLookup?: Map<string, Action>;
   patternToContainer: Map<string, string>;
@@ -653,6 +656,7 @@ function computeActionSplit(args: {
     }
     rows.push({
       pattern_hash: hash,
+      pattern: args.hashToPattern?.get(hash) || hash,
       action: effectiveAction,
       delivered_bytes: droppedBytes,
       expected_bytes: expectedBytes,
@@ -1423,7 +1427,8 @@ export async function runEstimateVerify(
   const postPassedQuery = `sum(increase(${BYTES_METRIC}{${baseSelector},isDropped!="true"}[${args.post_window}]))`;
   const postDroppedQuery = `sum(increase(${BYTES_METRIC}{${baseSelector},isDropped="true"}[${args.post_window}]))`;
   const postPassedByHashQuery = `sum by (${hashLabel}) (increase(${BYTES_METRIC}{${baseSelector},isDropped!="true"}[${args.post_window}]))`;
-  const postDroppedByHashQuery = `sum by (${hashLabel}) (increase(${BYTES_METRIC}{${baseSelector},isDropped="true"}[${args.post_window}]))`;
+  const patternLabel = env.labels.pattern;
+  const postDroppedByHashQuery = `sum by (${hashLabel}, ${patternLabel}) (increase(${BYTES_METRIC}{${baseSelector},isDropped="true"}[${args.post_window}]))`;
 
   const [
     baselineTotalRes,
@@ -1450,6 +1455,17 @@ export async function runEstimateVerify(
   const postDroppedBytes = parseScalarSum(postDroppedRes);
   const postPassedByHash = parsePromResult(postPassedByHashRes, hashLabel);
   const postDroppedByHash = parsePromResult(postDroppedByHashRes, hashLabel);
+  // Human pattern names ride the same series (hash -> name is 1:1); the
+  // breakdown rows carry them so downstream renderers (commitment_report's
+  // CFO tables) lead with the name, never the hash.
+  const hashToPattern = new Map<string, string>();
+  if (postDroppedByHashRes.status === 'success') {
+    for (const r of postDroppedByHashRes.data.result) {
+      const h = r.metric[hashLabel];
+      const p = r.metric[patternLabel];
+      if (h && p && !hashToPattern.has(h)) hashToPattern.set(h, p);
+    }
+  }
 
   // 3. Optional per-(hash, container) drop query — only when an action
   //    attribution source (cap-CSV or action-intent) was supplied AND
@@ -1635,6 +1651,7 @@ export async function runEstimateVerify(
   if (hasActionSource && postDroppedBytes > 0) {
     const split = computeActionSplit({
       postDroppedByHash: postDroppedByHash,
+      hashToPattern,
       capCsvContent: args.cap_csv_content,
       actionIntentLookup,
       patternToContainer,

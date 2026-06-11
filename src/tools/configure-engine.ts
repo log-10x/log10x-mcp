@@ -342,6 +342,8 @@ export type ConfigureEngineArgs = z.infer<typeof schemaObj>;
 // ─── output types ─────────────────────────────────────────────────────
 export interface PerPatternRow {
   pattern_hash: string;
+  /** Human pattern name — renderers lead with this, never the hash. */
+  pattern: string;
   current_bytes_30d: number;
   cap_bytes_per_window: number;
   action: Action;
@@ -1095,6 +1097,7 @@ export async function executeConfigureEngine(
 
     rows.push({
       pattern_hash: c.pattern_hash,
+      pattern: c.pattern,
       current_bytes_30d: Math.round(monthlyBytes),
       cap_bytes_per_window: Math.round(capBytesPerWindow),
       action,
@@ -2133,6 +2136,8 @@ async function resolveTarget(
 // ─── per-pattern fetch ────────────────────────────────────────────────
 interface PerPattern {
   pattern_hash: string;
+  /** Human pattern name (TSDB pattern label); falls back to the hash. */
+  pattern: string;
   bytes: number;
   events: number;
   severity: string;
@@ -2184,7 +2189,7 @@ async function fetchPerPatternBytes(
   // container-default cap row in the rendered CSV. Note topk is an OUTER
   // operator — Prom must fully evaluate the inner increase() before
   // slicing — so the tenx_env anchor above is the real cardinality cut.
-  const bytesQ = `topk(${PER_PATTERN_TOPK}, sum by (${LABELS.hash}, ${LABELS.severity})(increase(all_events_summaryBytes_total{${filter}}[${window}])))`;
+  const bytesQ = `topk(${PER_PATTERN_TOPK}, sum by (${LABELS.hash}, ${LABELS.pattern}, ${LABELS.severity})(increase(all_events_summaryBytes_total{${filter}}[${window}])))`;
   const eventsQ = `topk(${PER_PATTERN_TOPK}, sum by (${LABELS.hash})(increase(all_events_summaryVolume_total{${filter}}[${window}])))`;
 
   const [bytesRes, eventsRes] = await Promise.all([
@@ -2212,6 +2217,7 @@ async function fetchPerPatternBytes(
     } else {
       byHash.set(h, {
         pattern_hash: h,
+        pattern: r.metric[LABELS.pattern] || h,
         bytes,
         events: eventsByHash.get(h) ?? 0,
         severity,

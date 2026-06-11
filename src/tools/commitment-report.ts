@@ -268,6 +268,8 @@ export interface WeeklyVerifyResult {
    */
   per_pattern_breakdown?: Array<{
     pattern_hash: string;
+    /** Human pattern name; renderers lead with this, never the hash. */
+    pattern?: string;
     action_taken?: Action;
     bytes_saved: number;
     dollars_saved?: number | null;
@@ -351,6 +353,8 @@ export interface VerifyResultLike {
    */
   per_pattern_breakdown?: Array<{
     pattern_hash: string;
+    /** Human pattern name (TSDB pattern label); falls back to the hash. */
+    pattern?: string;
     action: Action;
     delivered_bytes: number;
     expected_bytes: number | null;
@@ -424,6 +428,7 @@ export function adaptVerifyResultToWeekly(
           : dollars * (safeBytes / totalDroppedFromRows);
       return {
         pattern_hash: r.pattern_hash,
+        pattern: r.pattern,
         action_taken: r.action,
         bytes_saved: safeBytes,
         dollars_saved: dollarsSaved,
@@ -601,6 +606,8 @@ export interface CommitmentReportEnvelope {
    */
   per_pattern_rows: Array<{
     pattern_hash: string;
+    /** Human pattern name; renderers lead with this, never the hash. */
+    pattern: string;
     action_taken: Action;
     bytes_saved: number;
     dollars_saved: number | null;
@@ -1344,6 +1351,8 @@ function renderPatternLabel(
  */
 interface MergedPatternRow {
   pattern_hash: string;
+  /** Human pattern name; falls back to the hash when no week supplied one. */
+  pattern: string;
   action_taken: Action;
   bytes_saved: number;
   dollars_saved: number | null;
@@ -1458,6 +1467,7 @@ function aggregateWeekly(weekly: WeeklyVerifyResult[]): {
         if (!prior) {
           merged.set(row.pattern_hash, {
             pattern_hash: row.pattern_hash,
+            pattern: row.pattern || row.pattern_hash,
             action_taken: action,
             bytes_saved: bytesSaved,
             dollars_saved: rowDollars,
@@ -1474,6 +1484,10 @@ function aggregateWeekly(weekly: WeeklyVerifyResult[]): {
           }
           // Latch the latest action_taken (last week wins).
           prior.action_taken = action;
+          // Upgrade the name if an earlier week only had the hash.
+          if (row.pattern && prior.pattern === prior.pattern_hash) {
+            prior.pattern = row.pattern;
+          }
           // Rate source: keep prior unless prior was unset.
           if (prior.rate_source === 'unset' && rowRate !== 'unset') {
             prior.rate_source = rowRate;
@@ -2266,6 +2280,7 @@ export async function executeCommitmentReport(
     at_risk_actions: atRisk,
     per_pattern_rows: agg.per_pattern_rows.map((r) => ({
       pattern_hash: r.pattern_hash,
+      pattern: r.pattern,
       action_taken: r.action_taken,
       bytes_saved: r.bytes_saved,
       dollars_saved: r.dollars_saved,
