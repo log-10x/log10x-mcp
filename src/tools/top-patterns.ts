@@ -16,6 +16,7 @@ import * as pql from '../lib/promql.js';
 import { LABELS, includeToSelector, type FilterValue } from '../lib/promql.js';
 import { bytesToCost, parsePrometheusValue, buildDisclosedDollarValue, type DisclosedDollarValue } from '../lib/cost.js';
 import { resolveRate, destinationFromEnvAnalyzer } from '../lib/rate-resolution.js';
+import { resolveSiemLens, lensDisclosure, SIEM_LENS_ENUM } from '../lib/siem/lens.js';
 import { resolveMetricsEnv, resolveMetricsEnvFiltered } from '../lib/resolve-env.js';
 import { parseTimeframe, fmtDisclosedDollar, fmtBytes as fmtBytesShared, fmtPct, fmtDollar } from '../lib/format.js';
 import { type NextAction } from '../lib/next-actions.js';
@@ -57,6 +58,7 @@ export const topPatternsSchema = {
   analyzerCost: z.number().optional().describe('DEPRECATED — use effective_ingest_per_gb. stack ingestion cost in $/GB. Auto-detected from profile if omitted.'),
   effective_ingest_per_gb: z.number().optional().describe('Customer-supplied $/GB rate used for the dollar overlay. When set, headline tags `rate_source=customer_supplied`. When absent, falls back to the profile list rate (`rate_source=list_price`) or omits dollars entirely (`rate_source=unset`).'),
   siemScope: z.string().optional().describe('stack scope for the verbatim sample line on the top rows.'),
+  siem_lens: z.enum(SIEM_LENS_ENUM).optional().describe('What-if destination lens: keep the real volumes, price the $/mo columns at this destination\'s list rates (env-configured rates never cross destinations). Envelope stamps siem_actual vs siem_lens.'),
   environment: z.string().optional().describe('Environment nickname (for multi-env setups).'),
   verbose: z
     .boolean()
@@ -123,6 +125,7 @@ export async function executeTopPatterns(
     // PL-12a — three-way cohort filter. See schema comment above.
     include?: 'kept' | 'dropped' | 'both';
     include_chart?: boolean;
+    siem_lens?: string;
   },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
@@ -147,11 +150,35 @@ export async function executeTopPatterns(
   // nulls out or renders "—". Headline / PNG / per-row gating below all
   // read `rate_source`. services/event_lookup/explain_mode/estimate_savings
   // walk the same chain — so the SAME env/window emits the SAME tag.
+  // Resolve the lens ONCE against the best-known actual destination:
+  // credentials detection (resolveSiemSelection, cheap/no-network) beats the
+  // env profile's declared analyzer when they disagree. The same lens verdict
+  // then drives the rate, the dollar labels, the headline marker, and the
+  // envelope stamp — so they can never disagree.
+  let analyzer: string | null = null;
+  let siemLabel: string | null = null;
+  try {
+    const sel = await resolveSiemSelection({});
+    if (sel.kind === 'resolved') {
+      analyzer = sel.id;
+      siemLabel = sel.displayName;
+    }
+  } catch {
+    /* leave null */
+  }
+  const lens = resolveSiemLens(args.siem_lens, analyzer ?? env.analyzer);
   const rateResolved = resolveRate(
     { effective_ingest_per_gb: args.effective_ingest_per_gb, analyzerCost: args.analyzerCost },
     env,
-    destinationFromEnvAnalyzer(env),
+    lens.effective ?? destinationFromEnvAnalyzer(env),
+    { lensed: lens.lensed },
   );
+  // The dollar label must name the destination that PRICED the run.
+  if (rateResolved.source === 'list_price' && lens.display) {
+    siemLabel = lens.display;
+  } else if (lens.lensed && lens.display) {
+    siemLabel = lens.display;
+  }
   const rate_source: 'list_price' | 'customer_supplied' | 'unset' = rateResolved.source;
   const costPerGb: number | null = rateResolved.rate_per_gb;
 
@@ -334,6 +361,7 @@ export async function executeTopPatterns(
         source_disclosure: {
           bytes_source: 'tsdb',
           rate_source: 'none',
+          ...lensDisclosure(lens),
           pattern_count_source: {
             kind: 'top_n_above_threshold',
             count: 0,
@@ -358,7 +386,21 @@ export async function executeTopPatterns(
       });
     }
 
-    return 'No pattern data available. Patterns appear after the first 24h of data collection.';
+    {
+      const message = 'No pattern data available. Patterns appear after the first 24h of data collection.';
+      return buildChassisEnvelope({
+        tool: 'log10x_top_patterns',
+        view: 'summary',
+        headline: message,
+        status: 'insufficient_data',
+        decisions: { threshold_used: null, threshold_basis: 'default' },
+        source_disclosure: { bytes_source: 'tsdb', rate_source: 'none', ...lensDisclosure(lens) },
+        scope: { window: tf.range, window_basis: args.timeRange ? 'explicit' : 'auto_default' },
+        payload: {},
+        human_summary: message,
+        telemetry: newChassisTelemetry(),
+      });
+    }
   }
 
   // Build event-count lookup (pattern, service, severity) -> events
@@ -444,25 +486,7 @@ export async function executeTopPatterns(
   const trendStepSec = 600;
   const trendStart = now - trendWindowSec;
 
-  // Detect analyzer up-front (best-effort) so we can decide whether to
-  // run dep_check + emit Datadog inline snippet. resolveSiemSelection
-  // is cheap (no network); doing it here in parallel with the heavy
-  // Phase-2 fetches saves a round-trip.
-  let analyzer: string | null = null;
-  // siemLabel — display-name form for the disclosure tail rendered by
-  // fmtDisclosedDollar (e.g. "Splunk", "Datadog"). Falls through to null
-  // when no analyzer is detected; buildDisclosedDollarValue then renders
-  // a generic "SIEM" prefix.
-  let siemLabel: string | null = null;
-  try {
-    const sel = await resolveSiemSelection({});
-    if (sel.kind === 'resolved') {
-      analyzer = sel.id;
-      siemLabel = sel.displayName;
-    }
-  } catch {
-    /* leave null */
-  }
+  // (analyzer + lens + label resolved up-front, before the rate — see top.)
 
   const [
     firstSeenByHash,
@@ -1305,6 +1329,9 @@ export async function executeTopPatterns(
     : rateSourceForChassis === 'list_price' ? 'list_price'
     : 'none';
 
+  if (lens.lensed && lens.display) {
+    headline = `[lens: ${lens.display}] ` + headline;
+  }
   return buildChassisEnvelope({
     tool: 'log10x_top_patterns',
     view: 'summary',
@@ -1336,7 +1363,8 @@ export async function executeTopPatterns(
         count: renderRows.length,
         denominator_meaning: `Top ${renderRows.length} patterns above 0 KB/s floor in ${tf.label}${patternCountTotal != null ? ` of ${patternCountTotal} total` : ''}`,
       },
-      siem_vendor: siemLabel ?? undefined,
+      siem_vendor: (lens.lensed ? lens.display : siemLabel) ?? undefined,
+      ...lensDisclosure(lens),
     },
     scope: {
       window: tf.label,

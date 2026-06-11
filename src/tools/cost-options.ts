@@ -21,6 +21,8 @@ import { z } from 'zod';
 import { queryInstant } from '../lib/api.js';
 import { resolveRetriever } from '../lib/retriever-api.js';
 import { discoverAvailable } from '../lib/siem/index.js';
+import { resolveSiemLens, lensDisclosure, SIEM_LENS_ENUM } from '../lib/siem/lens.js';
+import { COST_MODEL_BY_DESTINATION } from '../lib/cost.js';
 import { loadEnvironments, type EnvConfig, type Environments } from '../lib/environments.js';
 import { LABELS } from '../lib/promql.js';
 import { type StructuredOutput } from '../lib/output-types.js';
@@ -61,6 +63,12 @@ export const costOptionsSchema = {
     .optional()
     .describe(
       'Destination stack. When set, routes_to.args carries THIS destination forward to estimate_savings — overrides the env-auto-detected SIEM. Pass when the upstream tool (baseline / configure_engine) already established a destination that differs from the env default; without it, cost_options falls back to siem_detected and routes_to may carry a destination the upstream chain did not pick.'
+    ),
+  siem_lens: z
+    .enum(SIEM_LENS_ENUM)
+    .optional()
+    .describe(
+      'What-if destination lens (alias of `destination` with provenance stamping): gate the 6-mode menu and downstream pricing for THIS destination while the connected pipeline keeps its actual one. The envelope stamps siem_actual vs siem_lens so receipts show the lens.'
     ),
 };
 
@@ -103,19 +111,20 @@ export interface CostOptionsEnvelope {
 }
 
 // ─── SIEM compact support gate ────────────────────────────────────────────────
-
-const COMPACT_SUPPORTED_SIEM = new Set([
-  'splunk',
-  'elasticsearch',
-  'clickhouse',
-  'azure-monitor',
-  'gcp-logging',
-  'sumo',
-]);
+//
+// Derived from COST_MODEL_BY_DESTINATION (lib/cost.ts), the single source of
+// truth: compact is real only where compact_mode !== 'no-op' (splunk envelope,
+// self-hosted elasticsearch index-pruned, clickhouse dict-udf-view). The old
+// hand-maintained set here drifted to also claim azure-monitor / gcp-logging /
+// sumo, where the engine models compact as a no-op — a false "lossless +
+// everything stays searchable" promise that estimate_savings then refused
+// one step later.
 
 function siemSupportsCompact(siem: string | null): boolean {
   if (!siem) return true; // unknown stack — don't gate; estimate_savings will error if needed
-  return COMPACT_SUPPORTED_SIEM.has(siem);
+  const model = COST_MODEL_BY_DESTINATION[siem as keyof typeof COST_MODEL_BY_DESTINATION];
+  if (!model) return true; // not modeled — defer to estimate_savings
+  return model.compact_mode !== 'no-op';
 }
 
 // ─── Probe helpers (mirrors log10x-start.ts) ──────────────────────────────────
@@ -467,8 +476,12 @@ export async function executeCostOptions(args: {
   service?: string;
   pattern_hash?: string;
   destination?: 'splunk' | 'datadog' | 'elasticsearch' | 'clickhouse' | 'cloudwatch' | 'azure-monitor' | 'gcp-logging' | 'sumo';
+  siem_lens?: 'splunk' | 'datadog' | 'elasticsearch' | 'clickhouse' | 'cloudwatch' | 'azure-monitor' | 'gcp-logging' | 'sumo';
 }): Promise<StructuredOutput> {
   const telemetry = newChassisTelemetry();
+  // siem_lens is a stamped alias of destination: same gating override, plus
+  // actual-vs-lens provenance in the envelope.
+  if (args.siem_lens && !args.destination) args.destination = args.siem_lens;
 
   // Run probes — same pattern as executeLog10xStart.
   let env: EnvConfig | undefined;
@@ -569,6 +582,8 @@ export async function executeCostOptions(args: {
   // Build siem_vendor + source_label from the resolved env-config when
   // available; falls back to siemDetected when the on-prem store is unreachable.
   const sourceDisclosure = await buildSourceDisclosureFromEnv(env, siemDetected);
+  const lensRes = resolveSiemLens(args.siem_lens, env?.analyzer ?? siemDetected);
+  Object.assign(sourceDisclosure, lensDisclosure(lensRes));
 
   return buildChassisEnvelope({
     tool: 'log10x_cost_options',

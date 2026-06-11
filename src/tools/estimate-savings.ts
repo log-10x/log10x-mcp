@@ -60,6 +60,7 @@ import {
 } from '../lib/cost.js';
 import type { SiemId } from '../lib/siem/pricing.js';
 import { resolveRate } from '../lib/rate-resolution.js';
+import { resolveSiemLens, lensDisclosure, SIEM_LENS_ENUM } from '../lib/siem/lens.js';
 import {
   type StructuredOutput,
 } from '../lib/output-types.js';
@@ -162,6 +163,9 @@ export const estimateSavingsSchema = {
   destination: DEST_ENUM.optional().describe(
     'Destination stack. Required for both modes (used to look up ingest $/GB + compact ratio band).'
   ),
+  siem_lens: z.enum(SIEM_LENS_ENUM).optional().describe(
+    'What-if destination lens (alias of `destination` with provenance stamping): price the projection for THIS destination while the pipeline keeps its actual one. Envelope stamps siem_actual vs siem_lens.'
+  ),
   es_pruned: z
     .boolean()
     .optional()
@@ -262,7 +266,7 @@ export interface ForecastRow {
   dollars_saved_low: number;
   dollars_saved_expected: number;
   dollars_saved_high: number;
-  notes?: string[];
+  notes?: string[];  siem_lens?: string;
 }
 
 export interface ForecastResult {
@@ -720,7 +724,8 @@ export interface RunForecastArgs {
    * use this rate instead of the destination list price (same as the verify path).
    * Surfaces as rate_source='customer_supplied' in the result.
    */
-  effective_ingest_per_gb?: number;
+  effective_ingest_per_gb?: number;  /** SIEM lens active: skip env-configured rates (they belong to the actual destination). */
+  lensed?: boolean;
 }
 
 /**
@@ -977,6 +982,7 @@ export async function runEstimateForecast(
     { effective_ingest_per_gb: args.effective_ingest_per_gb },
     env,
     args.destination,
+    { lensed: args.lensed === true },
   );
 
   const per_pattern: ForecastRow[] = [];
@@ -1382,7 +1388,8 @@ export interface RunVerifyArgs {
    * shape). Exposed so a customer with a relabeled aggregator can pass
    * the right label without us hard-coding the default in two places.
    */
-  container_label?: string;
+  container_label?: string;  /** SIEM lens active: skip env-configured rates (they belong to the actual destination). */
+  lensed?: boolean;
 }
 
 /**
@@ -1540,6 +1547,7 @@ export async function runEstimateVerify(
     { effective_ingest_per_gb: args.effective_ingest_per_gb },
     env,
     args.destination,
+    { lensed: args.lensed === true },
   );
   const ingestRate = verifyRateResolved.rate_per_gb
     ?? getDestinationCostModel(args.destination, { esPruned: args.es_pruned }).ingest_per_gb;
@@ -1705,6 +1713,10 @@ export async function executeEstimateSavings(
 ): Promise<string | StructuredOutput> {
   const telemetry = newChassisTelemetry();
   const mode = args.mode ?? 'forecast';
+  // siem_lens: stamped alias of destination (same pricing/gating override,
+  // plus actual-vs-lens provenance on every emission site).
+  if (args.siem_lens && !args.destination) (args as { destination?: string }).destination = args.siem_lens as never;
+  const lensRes = resolveSiemLens(args.siem_lens, env?.analyzer);
 
   // Helper: build a source_label from the EnvConfig nickname + cluster
   // identity for whatever destination the call settled on. Called per
@@ -1756,7 +1768,7 @@ export async function executeEstimateSavings(
           decisions: { threshold_used: null, threshold_basis: 'default' },
           // siem_vendor carries the detected (but unsupported) vendor name so
           // agents and log readers can see what was resolved.
-          source_disclosure: { bytes_source: 'tsdb', ...(await labelForVendor(resolvedId)) },
+          source_disclosure: { ...lensDisclosure(lensRes), bytes_source: 'tsdb', ...(await labelForVendor(resolvedId)) },
           scope: { window: 'unknown', window_basis: 'auto_default' },
           payload: {
             ok: false,
@@ -1784,7 +1796,7 @@ export async function executeEstimateSavings(
         decisions: { threshold_used: null, threshold_basis: 'default' },
         // siem_vendor is intentionally absent: multiple vendors were found and
         // we cannot resolve to one. bytes_source is still tsdb.
-        source_disclosure: { bytes_source: 'tsdb' },
+        source_disclosure: { bytes_source: 'tsdb', ...lensDisclosure(lensRes) },
         scope: { window: 'unknown', window_basis: 'auto_default' },
         payload: {
           ok: false,
@@ -1810,7 +1822,7 @@ export async function executeEstimateSavings(
         status: 'error',
         decisions: { threshold_used: null, threshold_basis: 'default' },
         // No vendor resolved at all; bytes_source is still tsdb for this tool.
-        source_disclosure: { bytes_source: 'tsdb' },
+        source_disclosure: { bytes_source: 'tsdb', ...lensDisclosure(lensRes) },
         scope: { window: 'unknown', window_basis: 'auto_default' },
         payload: {
           ok: false,
@@ -1840,7 +1852,7 @@ export async function executeEstimateSavings(
           headline: 'estimate_savings needs target_percent or proposed_config — neither was passed.',
           status: 'error',
           decisions: { threshold_used: null, threshold_basis: 'default' },
-          source_disclosure: { bytes_source: 'tsdb', ...(await labelForVendor(destination)) },
+          source_disclosure: { ...lensDisclosure(lensRes), bytes_source: 'tsdb', ...(await labelForVendor(destination)) },
           scope: { window: 'unknown', window_basis: 'auto_default' },
           payload: {
             ok: false,
@@ -1899,6 +1911,7 @@ export async function executeEstimateSavings(
         explicitObservationWindow ? 'explicit' : 'auto_default';
       const result = await runEstimateForecast(
         {
+          lensed: lensRes.lensed,
           destination,
           es_pruned: args.es_pruned,
           service: args.service,
@@ -1988,6 +2001,7 @@ export async function executeEstimateSavings(
           threshold_basis: args.target_percent !== undefined ? 'customer_supplied' : thresholdBasis,
         },
         source_disclosure: {
+          ...lensDisclosure(lensRes),
           bytes_source: 'tsdb',
           rate_source: result.rate_source === 'customer_supplied' ? 'customer_supplied' : 'list_price',
           ...(await labelForVendor(destination)),
@@ -2025,7 +2039,7 @@ export async function executeEstimateSavings(
         headline: 'estimate_savings refused: verify needs baseline_window + post_window.',
         status: 'error',
         decisions: { threshold_used: null, threshold_basis: 'default' },
-        source_disclosure: { bytes_source: 'tsdb', ...(await labelForVendor(destination)) },
+        source_disclosure: { ...lensDisclosure(lensRes), bytes_source: 'tsdb', ...(await labelForVendor(destination)) },
         scope: { window: 'unknown', window_basis: 'auto_default' },
         payload: {
           ok: false,
@@ -2044,6 +2058,7 @@ export async function executeEstimateSavings(
     }
     const result = await runEstimateVerify(
       {
+        lensed: lensRes.lensed,
         destination,
         es_pruned: args.es_pruned,
         service: args.service,
@@ -2091,6 +2106,7 @@ export async function executeEstimateSavings(
         },
       },
       source_disclosure: {
+        ...lensDisclosure(lensRes),
         bytes_source: 'tsdb',
         rate_source: verifyRateSource,
         ...(await labelForVendor(destination)),
@@ -2113,7 +2129,7 @@ export async function executeEstimateSavings(
         headline: `estimate_savings refused: ${action} is a no-op on ${noOpDest}. Use tier_down, sample, or drop instead.`,
         status: 'error',
         decisions: { threshold_used: null, threshold_basis: 'default' },
-        source_disclosure: { bytes_source: 'tsdb', ...(await labelForVendor(noOpDest)) },
+        source_disclosure: { ...lensDisclosure(lensRes), bytes_source: 'tsdb', ...(await labelForVendor(noOpDest)) },
         scope: { window: 'unknown', window_basis: 'auto_default' },
         payload: {
           ok: false,
@@ -2144,7 +2160,7 @@ export async function executeEstimateSavings(
         hint: msg,
       },
       telemetry,
-      source_disclosure: { bytes_source: 'tsdb' },
+      source_disclosure: { bytes_source: 'tsdb', ...lensDisclosure(lensRes) },
     });
   }
 }

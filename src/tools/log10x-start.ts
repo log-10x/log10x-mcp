@@ -25,6 +25,7 @@
  */
 
 import { z } from 'zod';
+import { resolveSiemLens, SIEM_LENS_ENUM, type SiemLensResolution } from '../lib/siem/lens.js';
 import { queryInstant } from '../lib/api.js';
 import { resolveRetriever } from '../lib/retriever-api.js';
 import { discoverAvailable } from '../lib/siem/index.js';
@@ -57,6 +58,9 @@ export const SessionStateSchema = z
 export const log10xStartSchema = {
   intent_hint: IntentHintSchema,
   session_state: SessionStateSchema,
+  siem_lens: z.enum(SIEM_LENS_ENUM).optional().describe(
+    'What-if destination lens: orient pricing/applicability for THIS destination while the pipeline keeps its actual one (the user\'s stack differs from the connected demo/env). Carry the same siem_lens onto cost_options / estimate_savings / top_patterns / savings calls that follow.'
+  ),
 };
 
 export interface CapabilitySummary {
@@ -116,6 +120,12 @@ export interface Log10xStartEnvelope {
   forbidden_next_actions: string[];
   /** Intent hint as resolved (`orient` when caller passed undefined). */
   intent_hint: 'cost' | 'forensic' | 'install' | 'orient';
+  /** Present when a what-if destination lens is in effect (siem_lens arg). */
+  siem_lens?: string;
+  /** Actual destination, canonical form, when a lens is in effect. */
+  siem_actual?: string | null;
+  /** How the effective destination was chosen, when a lens is in effect. */
+  siem_lens_basis?: 'requested' | 'detected' | 'none';
 }
 
 /** Pick the default env (the one resolveEnv would land on with no arg). */
@@ -379,6 +389,7 @@ function renderVerbatim(args: {
   menu: ActionMenuItem[];
   phases: JourneyPhase[];
   intent: 'cost' | 'forensic' | 'install' | 'orient';
+  lens?: SiemLensResolution;
 }): string {
   const tierLine = {
     dev: 'Dev CLI — local binary only. No pipeline infrastructure detected.',
@@ -404,12 +415,16 @@ function renderVerbatim(args: {
   const siemLine = args.siemDetected
     ? `SIEM credentials detected: \`${args.siemDetected}\`.`
     : 'No SIEM credentials detected — dependency_check will return paste-ready commands instead of executed scans.';
+  const lensLine = args.lens?.lensed && args.lens.display
+    ? `**Lens:** pricing presented for ${args.lens.display} (your stack); the connected pipeline's destination stays ${args.siemDetected ?? 'unknown'}. Volumes are real; per-action applicability for ${args.lens.display} is shown when you pick a cost mode.`
+    : null;
 
   return [
     `### Log10x orientation`,
     ``,
     `**Tier:** ${tierLine}`,
     `**${siemLine}**`,
+    ...(lensLine ? [``, lensLine] : []),
     ``,
     `**Journey:**`,
     phaseLines,
@@ -435,6 +450,7 @@ export async function executeLog10xStart(
   args: {
     intent_hint?: 'cost' | 'forensic' | 'install' | 'orient';
     session_state?: 'fresh' | 'midway' | 'returning';
+    siem_lens?: string;
   }
 ): Promise<StructuredOutput> {
   const intent = args.intent_hint ?? 'orient';
@@ -540,6 +556,7 @@ export async function executeLog10xStart(
 
   const menu = buildActionMenu(caps, tier);
   const phases = buildJourneyPhases(tier, caps);
+  const lensRes: SiemLensResolution = resolveSiemLens(args.siem_lens, siemDetected);
   const mustRenderVerbatim = renderVerbatim({
     tier,
     siemDetected,
@@ -547,6 +564,7 @@ export async function executeLog10xStart(
     menu,
     phases,
     intent,
+    lens: lensRes,
   });
 
   const mustAskUser: MustAskUser = {
@@ -567,9 +585,10 @@ export async function executeLog10xStart(
     must_ask_user: mustAskUser,
     forbidden_next_actions: forbiddenNextActions,
     intent_hint: intent,
+    ...(lensRes.lensed ? { siem_lens: lensRes.effective ?? undefined, siem_actual: lensRes.actual, siem_lens_basis: lensRes.basis } : {}),
   };
 
-  const headline = `Tier "${tier}". ${menu.filter((m) => m.applicable).length} of ${menu.length} action paths available. Awaiting user pick before any further tool call.`;
+  const headline = `${lensRes.lensed && lensRes.display ? `[lens: ${lensRes.display}] ` : ''}Tier "${tier}". ${menu.filter((m) => m.applicable).length} of ${menu.length} action paths available. Awaiting user pick before any further tool call.`;
 
   return buildEnvelope({
     tool: 'log10x_start',

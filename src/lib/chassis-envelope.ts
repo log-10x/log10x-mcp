@@ -305,6 +305,15 @@ export const SourceDisclosureSchema = z.object({
    * Identifies which Prometheus backend the label universe came from.
    */
   label_source: z.enum(['log10x_prom', 'customer_prom']).optional(),
+  /**
+   * SIEM lens (what-if pricing). `siem_actual` is the connected pipeline's
+   * destination; `siem_lens` is present ONLY when a caller asked the tool to
+   * price + gate for a different destination (real volumes, lens rate card).
+   * `siem_lens_basis` says how the effective destination was chosen.
+   */
+  siem_actual: z.string().optional(),
+  siem_lens: z.string().optional(),
+  siem_lens_basis: z.enum(['requested', 'detected', 'none']).optional(),
 });
 export type SourceDisclosure = z.infer<typeof SourceDisclosureSchema>;
 
